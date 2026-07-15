@@ -8,6 +8,7 @@ mod e5_wet_dry;
 mod e6_chunk_seam;
 mod e7_soak;
 mod e8_save_load;
+mod bench_scaling;
 mod helpers;
 
 pub use helpers::*;
