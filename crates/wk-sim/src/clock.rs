@@ -27,6 +27,11 @@ pub enum SubsystemId {
     /// Spawns/advances/rains from drifting clouds (the automatic weather
     /// layer, separate from the manual rain override).
     Weather = 10,
+    /// Angle-of-repose slumping: any granular top layer sitting on a
+    /// slope steeper than its material allows slides toward its lower
+    /// neighbour. Post-barrier direct-mutation pass, like PhaseChange
+    /// and LakeLevel.
+    Slumping = 11,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -36,7 +41,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 11] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 12] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -101,6 +106,14 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 11] = [
         id: SubsystemId::Weather,
         // Every tick too, same reasoning as the other precipitation/flow
         // subsystems — a periodic driver here would beat against RainInject.
+        period: 1,
+        phase: 0,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::Slumping,
+        // Every tick, but the transfer per tick is small (SLUMP_RELAXATION
+        // = 0.35 of the excess). A big cliff collapses over a few frames
+        // rather than instantly, which reads as a natural slide.
         period: 1,
         phase: 0,
     },

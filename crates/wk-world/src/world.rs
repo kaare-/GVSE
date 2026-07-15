@@ -246,6 +246,10 @@ pub struct ColumnView {
     /// Mass (kg) of the top Water layer, or 0 if the top isn't water.
     pub surface_water: i64,
     pub moisture: i64,
+    /// `moisture / moisture_cap` in [0, 1]. Used by the renderer to
+    /// tint waterlogged solid layers so a saturated hillside reads as
+    /// visibly wet.
+    pub saturation: f32,
     /// Mass (kg) of the top Ice layer, or 0 if the top isn't ice.
     pub ice: i64,
     /// Mass (kg) of the top Snow layer, or 0 if the top isn't snow.
@@ -351,6 +355,8 @@ impl World {
                         )
                     })
                     .collect();
+                let cap = col.moisture_cap().max(1) as f32;
+                let saturation = (col.moisture as f32 / cap).clamp(0.0, 1.0);
                 columns.push(ColumnView {
                     world_x: wx,
                     surface_y: col.surface_y,
@@ -358,6 +364,7 @@ impl World {
                     layers,
                     surface_water: col.top_water_mass(),
                     moisture: col.moisture,
+                    saturation,
                     ice: col.top_ice_mass(),
                     snow: col.top_snow_mass(),
                     sediment: col.sediment,
@@ -384,6 +391,7 @@ impl World {
                     layers: vec![],
                     surface_water: 0,
                     moisture: 0,
+                    saturation: 0.0,
                     ice: 0,
                     snow: 0,
                     sediment: SedimentLoad::default(),

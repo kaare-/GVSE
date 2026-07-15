@@ -28,23 +28,34 @@ const SEDIMENT_CAPACITY_COEFF: f32 = 0.02;
 const INFILTRATION_COEFF: f32 = 0.01;
 const EVAPORATION_COEFF: f32 = 0.035;
 const HUMIDITY: f32 = 0.4;
+/// Fraction of suspended sediment that settles out of the water column
+/// onto the bed each tick, regardless of flow speed. Continuous Stokes-
+/// like settling — without this term sediment carried by a permanently
+/// tilted river never actually deposits: capacity-based rules only fire
+/// when the flow stops entirely, which for a steady stream it never
+/// does. Real particles fall at their terminal velocity even in fast
+/// flow; fast flow just keeps re-eroding what fell. Rate is small
+/// enough that the sediment still visibly travels a fair distance
+/// downstream before it's fully out of the water.
+const SEDIMENT_SETTLE_FRACTION: f32 = 0.008;
 /// Groundwater moves far slower than surface water in reality (limited by
 /// how fast water can actually squeeze through pore space, not just
-/// gravity), so this is deliberately tiny compared to FLOW_RELAXATION.
-const GROUNDWATER_FLOW_COEFF: f32 = 0.004;
+/// gravity), but slower than 0.02 becomes imperceptible at play speed —
+/// waterlogged saturation should visibly spread between neighbouring
+/// columns within a handful of seconds, not minutes.
+const GROUNDWATER_FLOW_COEFF: f32 = 0.02;
+/// Fraction of the "just enough to bring the slope back to the angle of
+/// repose" transfer applied each tick when a granular top layer sits
+/// steeper than its material allows. Small enough that a large slump
+/// takes several ticks to fully unfold (avoiding the classic explicit-
+/// diffusion oscillation), large enough to visibly settle within a
+/// second or two at 1× play speed.
+const SLUMP_RELAXATION: f32 = 0.35;
 /// Cap on how much snow can pile up on a single column (~a few metres
 /// depth) — a safety net independent of the climate_elevation fix, since
 /// even without the feedback loop a permanently sub-freezing spot would
 /// otherwise accumulate snow forever under constant precipitation.
 const MAX_SNOW_MASS_KG: i64 = 6000;
-
-fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
-    if edge0 == edge1 {
-        return if x >= edge1 { 1.0 } else { 0.0 };
-    }
-    let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
-    t * t * (3.0 - 2.0 * t)
-}
 
 pub struct SimParams {
     pub rain_rate: f32,
@@ -52,50 +63,40 @@ pub struct SimParams {
     pub sea_level: f32,
 }
 
-/// Splits a potential precipitation `amount` falling on one column into a
-/// sea top-up, liquid rain, or snow component — shared by both the manual
-/// global rain toggle and cloud-driven weather so they behave identically
-/// at the coastline (smooth land/sea blend, no hard branch) and around the
-/// freeze point (snow instead of rain when cold).
+/// Splits a potential precipitation `amount` falling on one column into
+/// a liquid rain or snow component (by local temperature). No more
+/// "sea top-up" pump: the world is a closed rain ↔ evaporation loop
+/// now, and the ocean level maintains itself through that cycle just
+/// like every other water body. Ocean columns still receive rain when
+/// clouds pass over them; they just don't get a special hidden refill.
 fn split_precipitation(
-    surface_y: f32,
     sea: f32,
-    surface_water: i64,
     amount: f32,
     climate_elev: f32,
     tick: u64,
     climate: &wk_world::climate::ClimateSettings,
     existing_snow: i64,
-) -> (i64, i64, i64) {
-    // (sea_component, water_component, snow_component)
-    // Narrow band: this only needs to smooth away the single-column color/
-    // material flicker right at the shoreline (the original bug it fixed).
-    // A wide band means a large stretch of the still-mostly-submerged shelf
-    // partially "counts" as land for precipitation purposes, which was
-    // draining cloud moisture over open water long before a cloud ever
-    // reached real land.
-    let land_frac = smoothstep(-0.5, 0.5, surface_y - sea);
-    let sea_deficit = 120i64.saturating_sub(surface_water).max(0);
-    let sea_component = (sea_deficit as f32 * (1.0 - land_frac)).round() as i64;
-    // `amount` stays a float all the way through so a fractional rate (e.g.
-    // cloud_rain_rate = 1.5) doesn't get chopped to a whole number before
-    // land_frac scaling even gets a chance to apply — otherwise any rate
-    // below 2 effectively rounds to "0 or 1 kg, no in-between" everywhere.
-    let precip_component = (amount * land_frac).round() as i64;
+) -> (i64, i64) {
+    // (water_component, snow_component)
+    // `amount` stays a float all the way through so a fractional rate
+    // (e.g. cloud_rain_rate = 1.5) doesn't get chopped to a whole
+    // number before rounding into an i64 kg count.
+    let precip_component = amount.round() as i64;
     if precip_component <= 0 {
-        return (sea_component, 0, 0);
+        return (0, 0);
     }
-    // Uses climate_elevation (excludes any snow already piled up), not raw
-    // surface_y — otherwise snow raising the surface would make the column
-    // read as colder, causing still more snow: a runaway feedback loop.
+    // Uses climate_elevation (excludes any snow already piled up), not
+    // raw surface_y — otherwise snow raising the surface would make
+    // the column read as colder, causing still more snow: a runaway
+    // feedback loop.
     let temp = wk_world::climate::temperature_at(climate_elev, sea, tick, climate);
     if temp <= climate.freeze_point_c && existing_snow < MAX_SNOW_MASS_KG {
         // Capped so a permanently-frozen spot doesn't accumulate an
         // unbounded snow tower; beyond the cap it falls as rain/slush
         // runoff instead (a crude stand-in for avalanche transport).
-        (sea_component, 0, precip_component)
+        (0, precip_component)
     } else {
-        (sea_component, precip_component, 0)
+        (precip_component, 0)
     }
 }
 
@@ -113,24 +114,17 @@ pub fn run_rain_inject(
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for coord in coords {
         let sea = params.sea_level;
-        // Rain/sea top-up is an external forcing — it must reach every
-        // column including currently Dormant ones. Otherwise a fully dried
-        // out region can never receive rain again (nothing else would ever
+        // Rain is an external forcing — it must reach every column
+        // including currently Dormant ones. Otherwise a fully dried
+        // out region can never receive rain again (nothing else would
         // set it back to active), permanently deadlocking re-hydration.
         for i in 0..CHUNK_W {
-            let (surface_y, surface_water, climate_elev, existing_snow) = {
+            let (climate_elev, existing_snow) = {
                 let col = &world.chunks.get(&coord).unwrap().columns[i];
-                (
-                    col.surface_y,
-                    col.top_water_mass(),
-                    col.climate_elevation(),
-                    col.top_snow_mass(),
-                )
+                (col.climate_elevation(), col.top_snow_mass())
             };
-            let (sea_component, rain_component, snow_component) = split_precipitation(
-                surface_y,
+            let (rain_component, snow_component) = split_precipitation(
                 sea,
-                surface_water,
                 inject_per_col,
                 climate_elev,
                 tick,
@@ -138,10 +132,6 @@ pub fn run_rain_inject(
                 existing_snow,
             );
             let buf = scratch.buffer_mut(coord);
-            if sea_component > 0 {
-                buf.water_delta[i] += sea_component;
-                world.mass_audit.sea_inject_total += sea_component;
-            }
             if rain_component > 0 {
                 buf.water_delta[i] += rain_component;
                 world.mass_audit.rain_inject_total += rain_component;
@@ -233,20 +223,13 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
                 if world.clouds[cloud_idx].moisture <= 0.0 || !raining_now[cloud_idx] {
                     continue;
                 }
-                let (surface_y, surface_water, climate_elev, existing_snow) = {
+                let (climate_elev, existing_snow) = {
                     let col = &world.chunks.get(&coord).unwrap().columns[i];
-                    (
-                        col.surface_y,
-                        col.top_water_mass(),
-                        col.climate_elevation(),
-                        col.top_snow_mass(),
-                    )
+                    (col.climate_elevation(), col.top_snow_mass())
                 };
                 let amount = world.weather.cloud_rain_rate;
-                let (sea_component, rain_component, snow_component) = split_precipitation(
-                    surface_y,
+                let (rain_component, snow_component) = split_precipitation(
                     sea,
-                    surface_water,
                     amount,
                     climate_elev,
                     tick,
@@ -254,10 +237,6 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
                     existing_snow,
                 );
                 let buf = scratch.buffer_mut(coord);
-                if sea_component > 0 {
-                    buf.water_delta[i] += sea_component;
-                    world.mass_audit.sea_inject_total += sea_component;
-                }
                 if rain_component > 0 {
                     buf.water_delta[i] += rain_component;
                     world.mass_audit.rain_inject_total += rain_component;
@@ -316,27 +295,23 @@ pub fn run_surface_water(world: &World, scratch: &mut WorldTransferScratch) {
 
         for i in 0..CHUNK_W {
             let col = &chunk.columns[i];
-            // Only fluid materials flow laterally. Under the unified
-            // model this looks at the top layer material rather than a
-            // dedicated surface_water field — an ice or snow cap has
-            // top_water_mass == 0 by construction, so it correctly
-            // doesn't participate in flow.
-            let water_here = col.top_water_mass();
+            // Flow considers any Water in the fluid cap — even water
+            // sitting under a Snow or Ice cap can drain sideways, since
+            // those caps float on the water rather than sealing it in.
+            // Without this a snowfall on a pool would build an unbounded
+            // water tower: rain deposits Water on top, settle sinks it
+            // below the snow, and (under the old top-only rule) flow
+            // then couldn't touch it.
+            let Some((water_top_y, water_here)) = col.flowable_water() else {
+                continue;
+            };
             if col.activity == Activity::Dormant || water_here <= 0 {
                 continue;
             }
 
-            // Compare total water-surface head (ground + standing water), not
-            // just bare ground, so ponds level out across flat/low terrain
-            // instead of only ever moving when the ground itself slopes.
-            //
-            // Note: col.surface_y under the unified model already includes
-            // the standing water layer's own height, so we don't double
-            // count — head_here is just surface_y (the top of the water),
-            // and each neighbour's head is likewise its own surface_y.
-            let head_here = col.surface_y;
-            let head_left = chunk.surface_y_neighbor(i as i32 - 1);
-            let head_right = chunk.surface_y_neighbor(i as i32 + 1);
+            let head_here = water_top_y;
+            let head_left = chunk.water_top_neighbor(i as i32 - 1);
+            let head_right = chunk.water_top_neighbor(i as i32 + 1);
 
             let grad_left = head_here - head_left;
             let grad_right = head_here - head_right;
@@ -459,6 +434,21 @@ pub fn run_sediment(world: &World, scratch: &mut WorldTransferScratch, tick: u64
                 continue;
             }
 
+            // Continuous Stokes-like settling: some fraction of any
+            // suspended sediment falls onto the bed each tick, whether
+            // or not the flow is fast. This is what makes eroded sand
+            // actually accumulate as a deposit downstream instead of
+            // circulating in suspension forever on a permanently-tilted
+            // stream (fast flow will then re-erode most of it back into
+            // suspension, matching how a real river bed exchanges
+            // sediment continuously with its water column).
+            if col.sediment.total > 0 && col.top_water_mass() > 0 {
+                let settle = (col.sediment.total as f32 * SEDIMENT_SETTLE_FRACTION) as i64;
+                let settle = settle.max(1).min(col.sediment.total);
+                dep_req[i] += settle;
+                dep_mat[i] = col.sediment.dominant;
+            }
+
             let y_here = col.surface_y;
             let y_left = chunk.surface_y_neighbor(i as i32 - 1);
             let y_right = chunk.surface_y_neighbor(i as i32 + 1);
@@ -483,8 +473,25 @@ pub fn run_sediment(world: &World, scratch: &mut WorldTransferScratch, tick: u64
                 continue;
             }
 
-            let erosion_rate = water * flux_indicator * EROSION_FLUX_COEFF
-                / (props.erosion_resistance as f32).max(1.0);
+            // Waterlogged instability: if the erodible bed *is* the
+            // column's aquifer layer (top porous layer, the one
+            // accumulating pore-water in `col.moisture`), its effective
+            // cohesion collapses as saturation approaches 1. Physically
+            // this is the pore-pressure collapse behind a sand dam or a
+            // river bank slumping under a saturated shore — dry sand
+            // holds its angle of repose; saturated sand doesn't.
+            //
+            // At full saturation resistance drops to ~30% of dry.
+            let saturation = if col.top_porous_layer_index() == Some(bed_idx) {
+                let cap = col.moisture_cap().max(1) as f32;
+                (col.moisture as f32 / cap).clamp(0.0, 1.0)
+            } else {
+                0.0
+            };
+            let effective_resistance =
+                (props.erosion_resistance as f32) * (1.0 - saturation * 0.7);
+            let erosion_rate =
+                water * flux_indicator * EROSION_FLUX_COEFF / effective_resistance.max(1.0);
             let erode_mass = erosion_rate as i64;
             if erode_mass <= 0 {
                 continue;
@@ -804,13 +811,14 @@ pub fn run_lake_level(world: &mut World) {
         let chunk = &world.chunks[&coord];
         for local in 0..CHUNK_W {
             let col = &chunk.columns[local];
-            let water = col.top_water_mass();
-            // "Ground" here means the elevation of the bed under any
-            // standing water — the layer surface a lake would sit on
-            // if it were perfectly still. Because col.surface_y now
-            // *includes* water depth (water is just a layer), we back
-            // it out explicitly.
-            let bed_y = col.surface_y - col.mass_to_height_delta(MaterialId::Water, water);
+            // Consider *any* water in the fluid cap — including water
+            // that's sitting under a floating snow cap. Otherwise a
+            // half-snow-covered lake fails hydrostatic equalization on
+            // exactly the columns where the snow floated over, leaving
+            // an uneven water surface right where the snow line sits.
+            let (water_top_y, water) =
+                col.flowable_water().unwrap_or((col.surface_y, 0));
+            let bed_y = water_top_y - col.mass_to_height_delta(MaterialId::Water, water);
             cells.push(LakeCell {
                 coord,
                 local,
@@ -838,16 +846,18 @@ pub fn run_lake_level(world: &mut World) {
         i = end + 1;
     }
 
-    // Rewrite each cell's top-water mass to the newly computed value.
-    // We can't just set a scalar any more — instead, add or remove
-    // Water from the top of the layer stack until top_water_mass
-    // matches the target.
+    // Rewrite each cell's total-flowable-water mass to the newly
+    // computed value. We read `flowable_water` (not `top_water_mass`)
+    // so a snow-covered pool sees its actual water total, not the
+    // zero it would show if only the top layer counted — that
+    // mismatch would double the water on write-back.
     for cell in cells {
         if let Some(chunk) = world.chunks.get_mut(&cell.coord) {
             let col = &mut chunk.columns[cell.local];
-            let current = col.top_water_mass();
+            let current = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
             let delta = cell.water - current;
             col.adjust_top_water(delta, 0);
+            col.settle_by_density(0);
             col.recompute_surface_y(chunk.bedrock_y);
         }
     }
@@ -895,6 +905,195 @@ pub fn run_phase_change(world: &mut World, tick: u64) {
             if removed > 0 {
                 col.deposit_to_top(target, removed, tick);
                 col.activity = Activity::HydrologyActive;
+            }
+            // Density settle brings the fluid cap back into canonical
+            // order after a phase change (e.g. ice forming above water
+            // is denser than snow above it, so snow floats back up).
+            col.settle_by_density(tick);
+        }
+    }
+}
+
+/// Angle-of-repose slumping: loose granular material on a slope steeper
+/// than its material's stable angle slides toward the lower neighbour.
+///
+/// Post-barrier direct mutation, same shape as `run_phase_change` /
+/// `run_lake_level`, so it operates on already-committed layer state
+/// (no interference with the buffered water/sediment deltas). For each
+/// column pair, if the *solid* top surfaces differ by more than the
+/// top solid material's `repose_rise_m`, transfer part of the excess
+/// mass from the higher column's top solid layer to the lower one.
+///
+/// This is what turns a jagged terrain generation output — or a fresh
+/// sediment deposit dropped straight onto one column — into a smoothly
+/// graded slope over a handful of ticks, without any renderer-side
+/// smoothing hack.
+pub fn run_slumping(world: &mut World, tick: u64) {
+    // Two passes per invocation to accelerate convergence for wide
+    // repose fronts (excess piles up until it hits repose, then flows).
+    for _ in 0..2 {
+        slumping_pass(world, tick);
+    }
+}
+
+fn slumping_pass(world: &mut World, tick: u64) {
+    // Snapshot every column's top-solid state, INCLUDING columns whose
+    // top solid can't slump itself (Stone / Bedrock outcrops). Those
+    // still have to appear in the snapshot as valid *destinations* — a
+    // sand column right next to an exposed bedrock outcrop should be
+    // able to shed material onto the outcrop's shoulder, otherwise its
+    // sand just piles up against an invisible wall and the visible
+    // cliff never levels out.
+    #[derive(Clone, Copy)]
+    struct TopSolid {
+        coord: i32,
+        local: usize,
+        material: MaterialId,
+        thickness: i64,
+        // Elevation of the top of this solid layer (excludes fluid cap above).
+        top_y: f32,
+        repose_rise: f32,
+        // Kg per metre of layer height for this material — for
+        // converting height differences back into transferable mass.
+        // Zero for non-slumpable materials (they aren't sources).
+        mass_per_m: f32,
+        /// The top layer of the *entire* column, before skipping the
+        /// fluid cap — used at deposit-time to decide whether to melt
+        /// snow on contact with a water body.
+        column_top_material: MaterialId,
+    }
+
+    let mut snapshot: Vec<TopSolid> = Vec::new();
+    let coords: Vec<i32> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        let chunk = &world.chunks[&coord];
+        for local in 0..CHUNK_W {
+            let col = &chunk.columns[local];
+            let Some(idx) = (0..col.layer_count as usize).find(|&j| {
+                // Skip fluids (Water flows via surface flow, Ice is rigid).
+                // Include Snow — it's granular, has an angle of repose.
+                !matches!(col.layers[j].material, MaterialId::Water | MaterialId::Ice)
+            }) else {
+                continue;
+            };
+            let layer = col.layers[idx];
+            let props = MaterialRegistry::props(layer.material);
+            let density = props.density.max(1) as f32;
+            // Elevation of the top of this solid layer.
+            let mut y = col.surface_y;
+            for j in 0..idx {
+                y -= col.mass_to_height_delta(col.layers[j].material, col.layers[j].thickness);
+            }
+            snapshot.push(TopSolid {
+                coord,
+                local,
+                material: layer.material,
+                thickness: layer.thickness,
+                top_y: y,
+                repose_rise: props.repose_rise_m,
+                mass_per_m: density * wk_material::SAMPLE_WIDTH_M,
+                column_top_material: col.top_material(),
+            });
+        }
+    }
+
+    // Sort by (coord, local) so we can index by world_x quickly.
+    // World-x = coord * CHUNK_W + local. Use a BTreeMap keyed on that.
+    use std::collections::BTreeMap;
+    let mut by_wx: BTreeMap<i32, usize> = BTreeMap::new();
+    for (i, s) in snapshot.iter().enumerate() {
+        let wx = s.coord * CHUNK_W as i32 + s.local as i32;
+        by_wx.insert(wx, i);
+    }
+
+    // For each column, compute a signed transfer against left and right
+    // neighbours. Positive = mass leaving this column. Sources must
+    // themselves be slumpable material (finite repose_rise); destinations
+    // can be anything, including bedrock/stone outcrops that just
+    // happen to sit lower — sand piling against a rock wall should still
+    // shed material onto the shoulder of that wall.
+    let mut transfers: Vec<(i32, i32, MaterialId, i64, MaterialId)> = Vec::new(); // (from_wx, to_wx, source_material, mass, dest_column_top)
+    let wx_list: Vec<i32> = by_wx.keys().copied().collect();
+    for wx in wx_list {
+        let idx = by_wx[&wx];
+        let s = snapshot[idx];
+        if !s.repose_rise.is_finite() {
+            continue; // Immovable source (Stone / Bedrock / Ice).
+        }
+        for &neighbour_wx in &[wx - 1, wx + 1] {
+            let Some(&nidx) = by_wx.get(&neighbour_wx) else {
+                continue;
+            };
+            let n = snapshot[nidx];
+            let dy = s.top_y - n.top_y;
+            if dy <= s.repose_rise {
+                continue;
+            }
+            let excess = dy - s.repose_rise;
+            let height_to_move = 0.5 * excess * SLUMP_RELAXATION;
+            let mass_to_move = (height_to_move * s.mass_per_m) as i64;
+            let mass_to_move = mass_to_move.min(s.thickness / 2).max(0);
+            if mass_to_move > 0 {
+                transfers.push((wx, neighbour_wx, s.material, mass_to_move, n.column_top_material));
+            }
+        }
+    }
+
+    // Apply transfers. Mass conservation is critical here: whatever
+    // we actually manage to remove from the source is exactly what
+    // gets deposited on the destination.
+    //
+    // Snow sliding into a water body melts on contact — an avalanche
+    // reaching a lake doesn't leave a persistent floating slush ring,
+    // it just adds equivalent water volume. Deposit as Water instead
+    // of Snow whenever the destination column's *top layer* is Water.
+    for (from_wx, to_wx, source_material, mass, dest_top) in transfers {
+        let from_coord = World::chunk_coord_for_world_x(from_wx);
+        let from_local = World::local_x(from_wx);
+        let mut actual_take = 0i64;
+        if let Some(chunk) = world.chunks.get_mut(&from_coord) {
+            let col = &mut chunk.columns[from_local];
+            if let Some(j) = (0..col.layer_count as usize)
+                .find(|&j| col.layers[j].material == source_material)
+            {
+                let take = mass.min(col.layers[j].thickness);
+                if take > 0 {
+                    let dh = col.mass_to_height_delta(source_material, take);
+                    col.layers[j].thickness -= take;
+                    col.surface_y -= dh;
+                    col.activity = Activity::HydrologyActive;
+                    actual_take = take;
+                }
+            }
+        }
+        if actual_take <= 0 {
+            continue;
+        }
+        let deposit_material = if source_material == MaterialId::Snow
+            && dest_top == MaterialId::Water
+        {
+            // Snow sliding into open water melts on contact.
+            MaterialId::Water
+        } else {
+            source_material
+        };
+        if let Some(chunk) = world.chunks.get_mut(&World::chunk_coord_for_world_x(to_wx)) {
+            let local = World::local_x(to_wx);
+            let col = &mut chunk.columns[local];
+            col.deposit_to_top(deposit_material, actual_take, tick);
+        }
+    }
+
+    // Clean up: settle+clamp per touched column so any empty layer
+    // slots collapse, densities restack correctly, and surface_y
+    // stays consistent with total layer heights.
+    let touched_coords: Vec<i32> = world.chunks.keys().copied().collect();
+    for coord in touched_coords {
+        let bedrock_y = world.chunks[&coord].bedrock_y;
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            for col in &mut chunk.columns {
+                col.clamp_state();
+                col.recompute_surface_y(bedrock_y);
             }
         }
     }

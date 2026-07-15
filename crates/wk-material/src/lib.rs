@@ -2,11 +2,11 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const MATERIAL_COUNT: usize = 9;
+pub const MATERIAL_COUNT: usize = 11;
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
 pub const MAX_LAYERS: usize = 8;
 pub const CHUNK_W: usize = 64;
-pub const MAX_LOADED_CHUNKS: usize = 56;
+pub const MAX_LOADED_CHUNKS: usize = 96;
 pub const MAX_MARKERS: usize = 64;
 pub const FIXED_SCALE: i64 = 1000;
 pub const MERGE_GAP: u64 = 100;
@@ -26,6 +26,13 @@ pub enum MaterialId {
     #[default]
     Sand = 2,
     Clay = 3,
+    /// Reserved for a future ecology / biomass pass. Real topsoil is
+    /// sand + clay + decayed organic matter *held together by living
+    /// roots*; without an ecology sim to grow and maintain those roots,
+    /// generating a free-floating "organic" layer would be dishonest
+    /// (and would, correctly, wash off any slope in the first storm).
+    /// Kept in the enum for save-file compatibility with older worlds
+    /// that did generate it; terrain generation no longer emits it.
     Organic = 4,
     Water = 5,
     Air = 6,
@@ -33,17 +40,26 @@ pub enum MaterialId {
     /// Frozen water. Solid, low density, transforms back into `Water` above
     /// the freeze point (see `MaterialProps::phase_change`).
     Ice = 8,
+    /// Loose rock — cobbles and boulders, coarser than gravel. Harder to
+    /// erode than sand/gravel but still moves under strong flow;
+    /// characteristic mountain-slope talus / scree cover.
+    LooseRock = 9,
+    /// Coarse aggregate, between sand and loose rock in grain size.
+    /// Very permeable (water flows through easily); harder to erode than
+    /// sand but easier than clay. Beach cobbles, riverbed lag.
+    Gravel = 10,
 }
 
 impl MaterialId {
     /// Ground-forming solids (never fluid, never phase-changes at the
     /// world's normal temperature range).
-    pub const ALL_SOLIDS: [MaterialId; 5] = [
+    pub const ALL_SOLIDS: [MaterialId; 6] = [
         MaterialId::Bedrock,
         MaterialId::Stone,
+        MaterialId::LooseRock,
+        MaterialId::Gravel,
         MaterialId::Sand,
         MaterialId::Clay,
-        MaterialId::Organic,
     ];
 
     pub fn from_u8(v: u8) -> Option<Self> {
@@ -57,6 +73,8 @@ impl MaterialId {
             6 => Some(MaterialId::Air),
             7 => Some(MaterialId::Snow),
             8 => Some(MaterialId::Ice),
+            9 => Some(MaterialId::LooseRock),
+            10 => Some(MaterialId::Gravel),
             _ => None,
         }
     }
@@ -73,6 +91,8 @@ impl MaterialId {
             self,
             MaterialId::Bedrock
                 | MaterialId::Stone
+                | MaterialId::LooseRock
+                | MaterialId::Gravel
                 | MaterialId::Sand
                 | MaterialId::Clay
                 | MaterialId::Organic
@@ -129,6 +149,15 @@ pub struct MaterialProps {
     /// Used to give Water/Ice/Snow a see-through look uniformly with
     /// the rest of the layer stack (no more separate rendering pass).
     pub render_alpha: u8,
+    /// Angle of repose expressed as the maximum stable rise (metres)
+    /// between adjacent columns before the material slumps downhill.
+    /// A value of 0.15 with a 0.25 m column width means the top solid
+    /// surface can differ by at most 0.15 m before loose material
+    /// starts sliding — that's ≈31° from horizontal, right around
+    /// dry sand's real angle of repose.
+    ///
+    /// `f32::INFINITY` = never slumps (bedrock, effectively stone).
+    pub repose_rise_m: f32,
 }
 
 pub struct MaterialRegistry;
@@ -144,6 +173,7 @@ impl MaterialRegistry {
                 porosity: 0,
                 phase_change: None,
                 render_alpha: 255,
+                repose_rise_m: f32::INFINITY,
             },
             MaterialId::Stone => MaterialProps {
                 density: 2600,
@@ -153,15 +183,47 @@ impl MaterialRegistry {
                 porosity: 20,
                 phase_change: None,
                 render_alpha: 255,
+                // Effectively cliff-stable — bedded stone doesn't slump.
+                repose_rise_m: f32::INFINITY,
             },
             MaterialId::Sand => MaterialProps {
                 density: 1600,
-                permeability: 220,
+                // Sand is permeable in reality but the previous 220
+                // (out of 255) made a puddle of ~100 kg drain into the
+                // ground in ~100 ticks — visibly instant. Modest cut so
+                // pools linger for a few seconds and shallow dams have
+                // a chance to fill up before their body seeps away.
+                permeability: 160,
                 erosion_resistance: 30,
                 cohesion: 20,
                 porosity: 180,
                 phase_change: None,
                 render_alpha: 255,
+                // ~31° angle of repose over a 0.25 m column width.
+                repose_rise_m: 0.15,
+            },
+            MaterialId::LooseRock => MaterialProps {
+                density: 2500,
+                permeability: 40,
+                erosion_resistance: 120,
+                cohesion: 100,
+                porosity: 25,
+                phase_change: None,
+                render_alpha: 255,
+                // ~45° — cobbles interlock but a very steep talus
+                // slope still gives way under load.
+                repose_rise_m: 0.25,
+            },
+            MaterialId::Gravel => MaterialProps {
+                density: 2000,
+                permeability: 240,
+                erosion_resistance: 60,
+                cohesion: 40,
+                porosity: 120,
+                phase_change: None,
+                render_alpha: 255,
+                // ~40° — larger, more interlocking grains than sand.
+                repose_rise_m: 0.20,
             },
             MaterialId::Clay => MaterialProps {
                 density: 1900,
@@ -171,6 +233,9 @@ impl MaterialRegistry {
                 porosity: 60,
                 phase_change: None,
                 render_alpha: 255,
+                // Cohesive but slumps once saturated (which run_sediment
+                // already reflects via the wet-erosion multiplier).
+                repose_rise_m: 0.22,
             },
             MaterialId::Organic => MaterialProps {
                 density: 600,
@@ -180,6 +245,7 @@ impl MaterialRegistry {
                 porosity: 200,
                 phase_change: None,
                 render_alpha: 255,
+                repose_rise_m: 0.10,
             },
             MaterialId::Water => MaterialProps {
                 density: 1000,
@@ -196,6 +262,10 @@ impl MaterialRegistry {
                     above: None,
                 }),
                 render_alpha: 180,
+                // Fluids never "slump" in the granular sense —
+                // surface-water flow already handles their lateral
+                // spreading. Marked infinite so run_slumping ignores.
+                repose_rise_m: f32::INFINITY,
             },
             MaterialId::Air => MaterialProps {
                 density: 0,
@@ -205,12 +275,9 @@ impl MaterialRegistry {
                 porosity: 0,
                 phase_change: None,
                 render_alpha: 0,
+                repose_rise_m: f32::INFINITY,
             },
             MaterialId::Snow => MaterialProps {
-                // Snow with density 250 over a 0.25m sample width made
-                // even a modest mass balloon to tens of visible metres.
-                // Bumping to 900 puts snow closer to compacted pack and
-                // keeps a heavy fall as a believable half-metre cap.
                 density: 900,
                 permeability: 40,
                 erosion_resistance: 10,
@@ -222,6 +289,8 @@ impl MaterialRegistry {
                     above: Some(MaterialId::Water),
                 }),
                 render_alpha: 240,
+                // Snow slides easily on steeper slopes (avalanches).
+                repose_rise_m: 0.12,
             },
             MaterialId::Ice => MaterialProps {
                 density: 917,
@@ -235,6 +304,9 @@ impl MaterialRegistry {
                     above: Some(MaterialId::Water),
                 }),
                 render_alpha: 210,
+                // Ice creeps like a glacier over long time scales; on
+                // the sim's tick scale it's effectively rigid.
+                repose_rise_m: f32::INFINITY,
             },
         }
     }
@@ -246,8 +318,12 @@ impl MaterialRegistry {
 
     pub fn colour_rgb(material: MaterialId) -> [u8; 3] {
         match material {
-            MaterialId::Bedrock => [0x40, 0x40, 0x40],
+            MaterialId::Bedrock => [0x2E, 0x2E, 0x34],
             MaterialId::Stone => [0x80, 0x80, 0x80],
+            // Cobble grey with a warm tint — reads as darker than Stone.
+            MaterialId::LooseRock => [0x66, 0x62, 0x60],
+            // Mix of tan and grey (mixed-grain aggregate).
+            MaterialId::Gravel => [0xB4, 0xA4, 0x80],
             MaterialId::Sand => [0xE8, 0xD6, 0x6B],
             MaterialId::Clay => [0x80, 0x40, 0x00],
             MaterialId::Organic => [0x00, 0xAA, 0x00],

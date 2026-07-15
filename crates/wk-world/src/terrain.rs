@@ -111,33 +111,99 @@ pub fn fill_column_strata(
     col.activity = crate::column::Activity::HydrologyActive;
 }
 
-fn lerp3(a: (f32, f32, f32), b: (f32, f32, f32), t: f32) -> (f32, f32, f32) {
-    (lerp(a.0, b.0, t), lerp(a.1, b.1, t), lerp(a.2, b.2, t))
+/// Bulk-sediment budget for one column, split across the five stratigraphic
+/// materials the terrain generator can lay down. Values are in kg; the
+/// fill routine converts them to layer thicknesses through each
+/// material's density. See `sediment_composition` for the elevation-
+/// driven mix.
+#[derive(Clone, Copy)]
+struct SedimentMix {
+    sand: f32,
+    gravel: f32,
+    looserock: f32,
+    stone: f32,
+    clay: f32,
+}
+
+impl SedimentMix {
+    fn lerp(a: Self, b: Self, t: f32) -> Self {
+        Self {
+            sand: lerp(a.sand, b.sand, t),
+            gravel: lerp(a.gravel, b.gravel, t),
+            looserock: lerp(a.looserock, b.looserock, t),
+            stone: lerp(a.stone, b.stone, t),
+            clay: lerp(a.clay, b.clay, t),
+        }
+    }
 }
 
 /// Sediment composition as a *continuous* function of elevation relative to
-/// sea level. Every regime (abyss/shelf/land/mountain) blends smoothly into
-/// its neighbour via smoothstep, so noisy elevation near a boundary changes
-/// composition gradually — never flips a whole column's dominant material
-/// from one single-column step to the next.
-fn sediment_composition(surface_y: f32, sea_level: f32) -> (i64, i64, i64) {
+/// sea level. Every regime (abyss/shelf/coast/plains/mountain) blends
+/// smoothly into its neighbour via smoothstep, so noisy elevation near
+/// a boundary changes composition gradually — never flips a whole
+/// column's dominant material from one single-column step to the next.
+///
+/// Regimes:
+/// - abyss: mostly clay (fine sediment settles far offshore) + some sand
+/// - shelf: sand + stone with a light gravel mix
+/// - coast (low emergent): sand dominant, gravel present (beach cobbles)
+/// - plains: sand + stone with a bit of clay
+/// - mountain (>30m above sea): stone + LooseRock talus + coarse gravel
+fn sediment_composition(surface_y: f32, sea_level: f32) -> SedimentMix {
     let depth = sea_level - surface_y; // positive = underwater
+    let rel = surface_y - sea_level;
 
-    let abyss = (1800.0_f32, 0.0, 600.0);
-    let shelf = (3500.0_f32, 2500.0, 0.0);
-    let land = (4500.0_f32, 9000.0, 0.0);
-    let mountain = (2500.0_f32, 17_000.0, 0.0);
+    let abyss = SedimentMix {
+        sand: 1500.0,
+        gravel: 0.0,
+        looserock: 0.0,
+        stone: 0.0,
+        clay: 700.0,
+    };
+    let shelf = SedimentMix {
+        sand: 3200.0,
+        gravel: 400.0,
+        looserock: 0.0,
+        stone: 2500.0,
+        clay: 100.0,
+    };
+    let coast = SedimentMix {
+        sand: 4200.0,
+        gravel: 900.0,
+        looserock: 0.0,
+        stone: 6000.0,
+        clay: 200.0,
+    };
+    let plains = SedimentMix {
+        sand: 3800.0,
+        gravel: 500.0,
+        looserock: 0.0,
+        stone: 9000.0,
+        clay: 400.0,
+    };
+    let mountain = SedimentMix {
+        sand: 1200.0,
+        gravel: 1200.0,
+        looserock: 5000.0,
+        stone: 15000.0,
+        clay: 0.0,
+    };
 
+    // abyss ← shelf as depth shrinks
     let t_abyss = smoothstep(14.0, 22.0, depth);
-    let underwater = lerp3(shelf, abyss, t_abyss);
+    let underwater = SedimentMix::lerp(shelf, abyss, t_abyss);
 
-    let t_land = smoothstep(-2.0, 2.0, -depth);
-    let base = lerp3(underwater, land, t_land);
+    // underwater ← coast as we cross the shoreline
+    let t_coast = smoothstep(-2.0, 2.0, rel);
+    let low = SedimentMix::lerp(underwater, coast, t_coast);
 
-    let t_mountain = smoothstep(20.0, 34.0, surface_y - sea_level);
-    let final_mix = lerp3(base, mountain, t_mountain);
+    // coast ← plains as elevation climbs a bit
+    let t_plains = smoothstep(6.0, 18.0, rel);
+    let base = SedimentMix::lerp(low, plains, t_plains);
 
-    (final_mix.0 as i64, final_mix.1 as i64, final_mix.2 as i64)
+    // plains ← mountain at higher elevations
+    let t_mountain = smoothstep(30.0, 55.0, rel);
+    SedimentMix::lerp(base, mountain, t_mountain)
 }
 
 /// Bathymetry-aware fill: abyssal plain, shelf, or land cover.
@@ -153,36 +219,49 @@ pub fn fill_bathymetry_column(
     col.layer_count = 0;
     col.surface_y = bedrock_y;
 
-    let (sand_mass, stone_mass, clay_mass) = sediment_composition(surface_y, sea_level);
+    let mix = sediment_composition(surface_y, sea_level);
+    let sand_mass = mix.sand as i64;
+    let gravel_mass = mix.gravel as i64;
+    let looserock_mass = mix.looserock as i64;
+    let stone_mass = mix.stone as i64;
+    let clay_mass = mix.clay as i64;
 
-    let sand_h = mass_to_height_m(MaterialId::Sand, sand_mass);
-    let stone_h = mass_to_height_m(MaterialId::Stone, stone_mass);
-    let clay_h = mass_to_height_m(MaterialId::Clay, clay_mass);
-    let sediment_h = sand_h + stone_h + clay_h;
+    let sediment_h = mass_to_height_m(MaterialId::Sand, sand_mass)
+        + mass_to_height_m(MaterialId::Gravel, gravel_mass)
+        + mass_to_height_m(MaterialId::LooseRock, looserock_mass)
+        + mass_to_height_m(MaterialId::Stone, stone_mass)
+        + mass_to_height_m(MaterialId::Clay, clay_mass);
     let bedrock_h = (surface_y - bedrock_y - sediment_h).max(2.0);
 
+    // Deposit bottom-up. Density settling isn't strictly needed here
+    // since we already lay materials in a roughly correct order, but
+    // the clamp/settle at the end of the next simulation tick will
+    // sort out any minor inversions anyway.
     col.deposit_to_top(MaterialId::Bedrock, mass_for_height(MaterialId::Bedrock, bedrock_h), tick);
     if stone_mass > 0 {
         col.deposit_to_top(MaterialId::Stone, stone_mass, tick);
     }
+    if looserock_mass > 0 {
+        col.deposit_to_top(MaterialId::LooseRock, looserock_mass, tick);
+    }
     if clay_mass > 0 {
         col.deposit_to_top(MaterialId::Clay, clay_mass, tick);
+    }
+    if gravel_mass > 0 {
+        col.deposit_to_top(MaterialId::Gravel, gravel_mass, tick);
     }
     if sand_mass > 0 {
         col.deposit_to_top(MaterialId::Sand, sand_mass, tick);
     }
 
-    // Vegetation cover uses coherent low-frequency patchiness, scaled smoothly
-    // in by how far above sea level we are, rather than an independent
-    // per-column coin flip or a hard elevation cutoff.
-    let veg_t = smoothstep(0.0, 6.0, surface_y - sea_level);
-    if veg_t > 0.0 {
-        let xm = world_x as f32 * SAMPLE_WIDTH_M;
-        if cover_patchiness(seed, xm) > 0.05 {
-            let mass = (400.0 * veg_t) as i64;
-            col.deposit_to_top(MaterialId::Organic, mass, tick);
-        }
-    }
+    // Deliberately no vegetation cover / topsoil layer. Real topsoil is
+    // sand and clay mixed with organic matter and held together by
+    // roots; without an ecology sim to grow those roots, a pure
+    // "organic" layer would just be geology fiction and would (correctly)
+    // wash straight off any slope on the first heavy rain. Bare rock and
+    // loose sediment is what we can honestly generate for now.
+    let _ = seed;
+    let _ = world_x;
 
     col.recompute_surface_y(bedrock_y);
     col.activity = crate::column::Activity::HydrologyActive;
@@ -223,21 +302,15 @@ fn land_ripple(seed: u64, xm: f32) -> f32 {
     a + b + c
 }
 
-/// Coherent (multi-column) patchiness for surface cover, in roughly [-1, 1].
-/// Deliberately low frequency so vegetation/rock patches span tens of
-/// columns instead of flickering column-to-column like independent noise
-/// would (that was the cause of the single-column checkerboard artifact).
-fn cover_patchiness(seed: u64, xm: f32) -> f32 {
-    let phase = hash_f32(seed, 888, 51) * std::f32::consts::TAU;
-    let a = (xm * 0.018 + phase).sin();
-    let b = (xm * 0.037 + phase * 1.7).sin() * 0.5;
-    (a + b) / 1.5
-}
-
 /// Conventional margin profile: deep plain → slope → shelf → coast → plains → mountains.
 /// Profile spans ~500 m of world-x; repeat subtle variation for maps beyond that.
 pub fn continental_surface_y(seed: u64, world_x: i32, sea_level: f32) -> f32 {
     let xm = world_x as f32 * SAMPLE_WIDTH_M;
+    // Per-column noise dampened relative to earlier revisions — real
+    // adjacent-column height variance is a lot smaller than ±2 m, and
+    // strong independent-per-column jitter is what created isolated
+    // 1–2 m sand spikes that then survived generation because slumping
+    // hadn't yet caught up.
     let n = |salt: u64| (hash_f32(seed, world_x as i64, salt) - 0.5) * 2.0;
 
     // Macro zones (metres along the margin)
@@ -253,19 +326,19 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea_level: f32) -> f32 {
     let macro_x = xm;
 
     if macro_x < 100.0 {
-        abyss + n(30) * 1.5
+        abyss + n(30) * 0.6
     } else if macro_x < 180.0 {
         let t = smoothstep(100.0, 180.0, macro_x);
-        lerp(abyss, slope_end, t) + n(31)
+        lerp(abyss, slope_end, t) + n(31) * 0.4
     } else if macro_x < 260.0 {
         let t = smoothstep(180.0, 260.0, macro_x);
-        lerp(slope_end, shelf_end, t) + n(32) * 0.5
+        lerp(slope_end, shelf_end, t) + n(32) * 0.25
     } else if macro_x < 340.0 {
         let t = smoothstep(260.0, 340.0, macro_x);
-        lerp(shelf_end, coast_end, t) + n(33) * 1.2 + land_ripple(seed, xm) * 0.4
+        lerp(shelf_end, coast_end, t) + n(33) * 0.5 + land_ripple(seed, xm) * 0.4
     } else if macro_x < 420.0 {
         let t = smoothstep(340.0, 420.0, macro_x);
-        lerp(coast_end, plains_base, t) + n(35) * 1.5 + land_ripple(seed, xm)
+        lerp(coast_end, plains_base, t) + n(35) * 0.6 + land_ripple(seed, xm)
     } else {
         // Mountain cordillera: distinct peaks with genuine enclosed valleys
         // (basins) carved between them, not just gentler saddles. Each bump
@@ -279,20 +352,33 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea_level: f32) -> f32 {
             amp * (-(inland - center) * (inland - center) / (2.0 * width * width)).exp()
         };
 
-        let ridges = peak(40.0, 18.0, 42.0)
-            + peak(95.0, 20.0, 58.0)
-            + peak(155.0, 18.0, 48.0)
-            + peak(215.0, 20.0, 52.0);
+        // Extended range: 8 named peaks going progressively higher, with
+        // one dominant peak in the middle so there's a clear "highest"
+        // point to hike toward. Amplitudes are bigger than before so sand
+        // has genuine slopes to erode across.
+        let ridges = peak(40.0, 20.0, 55.0)
+            + peak(105.0, 22.0, 78.0)
+            + peak(175.0, 22.0, 65.0)
+            + peak(250.0, 26.0, 110.0)     // main summit
+            + peak(330.0, 22.0, 82.0)
+            + peak(405.0, 20.0, 60.0)
+            + peak(475.0, 24.0, 88.0)
+            + peak(555.0, 22.0, 70.0);
 
         // Basins sit between ridges and are wide/flat enough at the bottom
-        // to hold a real lake, not just a narrow notch.
-        let valleys = peak(67.0, 13.0, 34.0)
-            + peak(125.0, 13.0, 36.0)
-            + peak(185.0, 13.0, 32.0);
+        // to hold a real lake, not just a narrow notch. Slightly deeper
+        // valleys now so lakes have room to fill.
+        let valleys = peak(70.0, 14.0, 40.0)
+            + peak(140.0, 14.0, 42.0)
+            + peak(210.0, 14.0, 38.0)
+            + peak(285.0, 14.0, 50.0)
+            + peak(365.0, 14.0, 44.0)
+            + peak(440.0, 14.0, 38.0)
+            + peak(515.0, 14.0, 46.0);
 
         plains_base
             + ramp_in * (ridges - valleys)
-            + n(36) * 1.5
+            + n(36) * 0.7
             + land_ripple(seed, xm) * 1.2
     }
 }

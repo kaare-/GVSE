@@ -82,17 +82,16 @@ pub fn commit_chunk_buffer(
             col.sediment.add(inbox_sed.dominant, inbox_sed.total);
         }
 
-        // Deposition: sediment falls out and settles on the bed. Goes
-        // *underneath* any Water/Ice/Snow cap so the puddle above stays
-        // on top (physically it would just refill from surrounding
-        // water anyway); depositing on top would create the [Sand,
-        // Water, Sand, ...] sandwich stacks that inflate surface_y and
-        // trap water inside solid stratigraphy.
+        // Deposition: sediment falls out. Just place it on top — the
+        // density settle inside `clamp_state` at the end of this loop
+        // will sink dense grains (sand/clay/stone) through any lighter
+        // fluid cap (water/ice/snow) automatically, so no special-case
+        // "insert below fluid cap" is needed.
         if buf.deposit_request[i] > 0 {
             let deposit = buf.deposit_request[i].min(col.sediment.total);
             if deposit > 0 {
                 col.sediment.total -= deposit;
-                col.deposit_below_fluid_cap(buf.deposit_material[i], deposit, tick);
+                col.deposit_to_top(buf.deposit_material[i], deposit, tick);
             }
         }
 

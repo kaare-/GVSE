@@ -6,17 +6,27 @@ use crate::render::{self, SAVE_PATH};
 
 /// Columns scrolled per second while A/D is held.
 const SCROLL_SPEED_COLS_PER_SEC: f32 = 70.0;
+/// Screen pixels per second while W/S is held to pan the camera up/down.
+const CAMERA_Y_SPEED_PX_PER_SEC: f32 = 320.0;
 const MAX_TICKS_PER_FRAME: u64 = 60;
-/// Chunks to generate: 52 chunks × 64 cols = 3328 columns (~832 m) — wide
-/// enough for the full mountain range (multiple peaks + enclosed valleys).
-const MAP_CHUNK_MIN: i32 = -4;
-const MAP_CHUNK_MAX: i32 = 48;
+/// Chunks to generate: 88 chunks × 64 cols = 5632 columns (~1408 m) —
+/// wide enough for the full ocean → shelf → coastal → plains → extended
+/// mountain range with 8 named peaks and enclosed valleys.
+const MAP_CHUNK_MIN: i32 = -8;
+const MAP_CHUNK_MAX: i32 = 80;
 
 pub struct AppState {
     pub world: wk_world::world::World,
     pub sim: wk_sim::Simulation,
     pub viewport_x: i32,
     scroll_accum: f32,
+    /// Screen-pixel offset added to `sea_y` when rendering. Zero puts
+    /// the sea line at the default `SEA_SCREEN_FRAC` position. Positive
+    /// shifts the world downward on screen (i.e. the camera looks up
+    /// at higher elevations); negative shifts it upward (camera looks
+    /// down). Driven by W/S; deliberately manual so the view never
+    /// slides on its own when terrain grows or shrinks.
+    pub camera_y_offset: f32,
     pub paused: bool,
     pub speed: u32,
     pub overlay_mode: OverlayMode,
@@ -67,12 +77,15 @@ impl AppState {
             sim,
             viewport_x,
             scroll_accum: 0.0,
+            camera_y_offset: 0.0,
             paused: true,
             speed: 1,
             overlay_mode: OverlayMode::None,
             selected_column: None,
             tick_accum: 0.0,
-            status_msg: "Space run | A/D scroll | R rain | W weather | Tab settings".into(),
+            status_msg:
+                "Space run | A/D scroll | W/S pan | R rain | Y weather | F5/F9 save/load | Tab settings"
+                    .into(),
             show_settings: false,
             settings_day_minutes,
             settings_night_minutes,
@@ -174,11 +187,28 @@ impl AppState {
             self.scroll_accum -= whole as f32;
             self.clamp_viewport();
         }
+
+        // Vertical camera pan (W = look higher, S = look lower). Deliberately
+        // manual — nothing auto-scrolls when terrain grows, since the previous
+        // "surface-relative depth window" made the ground appear to swell
+        // upward whenever weather piled up.
+        let mut vdir = 0.0f32;
+        if is_key_down(KeyCode::W) {
+            vdir += 1.0;
+        }
+        if is_key_down(KeyCode::S) {
+            vdir -= 1.0;
+        }
+        if vdir != 0.0 {
+            let dt = get_frame_time();
+            self.camera_y_offset += vdir * CAMERA_Y_SPEED_PX_PER_SEC * dt;
+        }
+
         if is_key_pressed(KeyCode::R) {
             self.world.rain_enabled = !self.world.rain_enabled;
             self.status_msg = format!("Rain: {}", self.world.rain_enabled);
         }
-        if is_key_pressed(KeyCode::W) {
+        if is_key_pressed(KeyCode::Y) {
             self.world.weather.weather_enabled = !self.world.weather.weather_enabled;
             self.status_msg = format!("Weather: {}", self.world.weather.weather_enabled);
         }
@@ -210,7 +240,8 @@ impl AppState {
                 self.status_msg = format!("Marker at x={wx}");
             }
         }
-        if is_key_pressed(KeyCode::S) {
+        // Save/load moved off S/L now that S is a continuous camera-pan key.
+        if is_key_pressed(KeyCode::F5) {
             match std::fs::write(SAVE_PATH, save_simulation(&self.world, &self.sim)) {
                 Ok(()) => {
                     self.status_msg = format!("Saved tick {} → {SAVE_PATH}", self.sim.clock.tick);
@@ -218,7 +249,7 @@ impl AppState {
                 Err(e) => self.status_msg = format!("Save failed: {e}"),
             }
         }
-        if is_key_pressed(KeyCode::L) {
+        if is_key_pressed(KeyCode::F9) {
             match std::fs::read(SAVE_PATH) {
                 Ok(bytes) => match load_simulation(&bytes) {
                     Ok((world, sim)) => {
@@ -281,7 +312,7 @@ impl AppState {
                 });
                 ui.separator();
                 ui.tree_node(hash!(), "Weather (wind + clouds)", |ui| {
-                    ui.checkbox(hash!(), "Weather enabled (W)", &mut self.world.weather.weather_enabled);
+                    ui.checkbox(hash!(), "Weather enabled (Y)", &mut self.world.weather.weather_enabled);
                     ui.slider(
                         hash!(),
                         "Wind speed (col/tick)",

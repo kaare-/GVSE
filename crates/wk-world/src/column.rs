@@ -166,6 +166,89 @@ impl Column {
         }
     }
 
+    /// Water available for lateral flow: total kg of Water in the fluid
+    /// cap (any Water layer sitting above the first solid substrate),
+    /// plus the elevation of the top of that water body (excludes any
+    /// snow / ice floating above it). `None` if the column has no
+    /// water in its cap.
+    ///
+    /// This is what `run_surface_water` actually cares about: snow
+    /// floating on a pool doesn't stop the pool below from draining
+    /// sideways when a neighbouring column has a lower water surface.
+    /// The snow just settles onto whatever's left as the water leaves.
+    pub fn flowable_water(&self) -> Option<(f32, i64)> {
+        let mut y = self.surface_y;
+        let mut water_top_y: Option<f32> = None;
+        let mut total_water = 0i64;
+        for j in 0..self.layer_count as usize {
+            let m = self.layers[j].material;
+            let h = self.mass_to_height_delta(m, self.layers[j].thickness);
+            match m {
+                MaterialId::Water => {
+                    if water_top_y.is_none() {
+                        water_top_y = Some(y);
+                    }
+                    total_water += self.layers[j].thickness;
+                }
+                MaterialId::Snow | MaterialId::Ice => {
+                    // Cap material. Doesn't seal the water below —
+                    // water can still flow sideways out from under it.
+                    // The cap ends up sitting on whatever's exposed
+                    // once the water drains (density-settle sorts it).
+                }
+                _ => {
+                    // Hit solid substrate — stop looking.
+                    break;
+                }
+            }
+            y -= h;
+        }
+        water_top_y.map(|top| (top, total_water))
+    }
+
+    /// Remove up to `mass` kg from the *flowable* Water layer inside
+    /// the fluid cap, even if there's Snow/Ice sitting above it.
+    /// Returns actual mass removed.
+    pub fn take_water_from_cap(&mut self, mass: i64) -> i64 {
+        if mass <= 0 {
+            return 0;
+        }
+        // Find the topmost Water layer in the cap.
+        let mut idx = None;
+        for j in 0..self.layer_count as usize {
+            let m = self.layers[j].material;
+            match m {
+                MaterialId::Water => {
+                    idx = Some(j);
+                    break;
+                }
+                MaterialId::Snow | MaterialId::Ice => continue,
+                _ => break,
+            }
+        }
+        let Some(j) = idx else {
+            return 0;
+        };
+        let take = mass.min(self.layers[j].thickness);
+        if take <= 0 {
+            return 0;
+        }
+        self.activity = Activity::HydrologyActive;
+        let dh = self.mass_to_height_delta(MaterialId::Water, take);
+        self.layers[j].thickness -= take;
+        self.surface_y -= dh;
+        if self.layers[j].thickness <= 0 {
+            for i in j..(self.layer_count as usize).saturating_sub(1) {
+                self.layers[i] = self.layers[i + 1];
+            }
+            if self.layer_count > 0 {
+                self.layer_count -= 1;
+                self.layers[self.layer_count as usize] = Layer::default();
+            }
+        }
+        take
+    }
+
     /// Kg of Snow currently piled on top of the column (0 if the top
     /// layer is not Snow).
     pub fn top_snow_mass(&self) -> i64 {
@@ -253,83 +336,70 @@ impl Column {
         layer_bottom_y + saturation * layer_height_m
     }
 
-    /// Insert `mass` kg of `material` as a solid layer *underneath* any
-    /// Water / Ice / Snow cap sitting on top of this column. If there
-    /// is no such cap, this is equivalent to `deposit_to_top`.
+    /// Universal density settling: sort every layer above bedrock by
+    /// material density, lightest on top and heaviest at the bottom,
+    /// then merge same-material layers that end up adjacent.
     ///
-    /// Meant for sediment settling out of moving water: physically, sand
-    /// carried by a river drops onto the *riverbed* when the current
-    /// slows, not onto the water surface. Depositing on top was the
-    /// mechanism that caused water to end up buried inside the solid
-    /// stack as sediment layers sandwiched fresh puddles.
-    pub fn deposit_below_fluid_cap(
-        &mut self,
-        material: MaterialId,
-        mass: i64,
-        tick: u64,
-    ) {
-        if mass <= 0 {
-            return;
-        }
-        let insert_at = self.first_non_fluid_index();
-        if insert_at == 0 {
-            self.deposit_to_top(material, mass, tick);
-            return;
-        }
-        self.activity = Activity::HydrologyActive;
-
-        // Fast path: merge with the layer we'd be inserting above if
-        // it's already the same material.
-        if insert_at < self.layer_count as usize
-            && self.layers[insert_at].material == material
-        {
-            self.layers[insert_at].thickness += mass;
-            self.layers[insert_at].age_end = tick;
-            self.surface_y += self.mass_to_height_delta(material, mass);
+    /// This is the physical rule you'd expect from a stack of stuff
+    /// with mass: rocks sink through water, snow and ice float on top,
+    /// air-density organic litter ends up on top of everything. It
+    /// makes both the old "sediment must deposit below the fluid cap"
+    /// bookkeeping and the old "canonical Snow-Ice-Water fluid cap
+    /// order" fall out of a single rule instead of being separate
+    /// bespoke passes.
+    ///
+    /// Total mass is preserved by construction. `age_start` of a
+    /// merged layer is the minimum contributor's; `age_end` is `tick`.
+    /// n ≤ MAX_LAYERS = 8 so the O(n²) insertion sort is trivial.
+    pub fn settle_by_density(&mut self, tick: u64) {
+        let count = self.layer_count as usize;
+        if count <= 1 {
             return;
         }
 
-        if (self.layer_count as usize) >= MAX_LAYERS {
-            self.merge_layers(false, tick);
+        // Insertion sort ascending by density. Ascending because
+        // layers[0] is the top of the stack and we want the lightest
+        // material there (heaviest sinks to the bottom = highest index).
+        for i in 1..count {
+            let mut j = i;
+            while j > 0 {
+                let d_above = MaterialRegistry::props(self.layers[j - 1].material).density;
+                let d_here = MaterialRegistry::props(self.layers[j].material).density;
+                if d_above > d_here {
+                    self.layers.swap(j - 1, j);
+                    j -= 1;
+                } else {
+                    break;
+                }
+            }
         }
 
-        if (self.layer_count as usize) >= MAX_LAYERS {
-            if insert_at < self.layer_count as usize {
-                self.layers[insert_at].thickness += mass;
-                self.layers[insert_at].age_end = tick;
+        // Merge adjacent same-material layers, respecting the geologic
+        // MERGE_MAX_THICKNESS cap so we don't end up with a single
+        // absurdly thick layer that hides all history.
+        let mut write = 0usize;
+        for read in 0..count {
+            if write > 0 {
+                let a = self.layers[write - 1];
+                let b = self.layers[read];
+                if a.material == b.material
+                    && a.thickness + b.thickness <= wk_material::MERGE_MAX_THICKNESS
+                {
+                    self.layers[write - 1].thickness = a.thickness + b.thickness;
+                    self.layers[write - 1].age_start = a.age_start.min(b.age_start);
+                    self.layers[write - 1].age_end = a.age_end.max(b.age_end).max(tick);
+                    continue;
+                }
             }
-        } else {
-            // Shift layers from insert_at..layer_count down by one slot
-            // to make room, then place the new layer at insert_at (the
-            // *bottom* of the fluid cap, i.e. right on the bed).
-            for i in (insert_at + 1..=self.layer_count as usize).rev() {
-                self.layers[i] = self.layers[i - 1];
+            if read != write {
+                self.layers[write] = self.layers[read];
             }
-            self.layers[insert_at] = Layer {
-                material,
-                thickness: mass,
-                age_start: tick,
-                age_end: tick,
-            };
-            self.layer_count += 1;
+            write += 1;
         }
-        self.surface_y += self.mass_to_height_delta(material, mass);
-    }
-
-    /// Index of the first layer that is *not* a fluid/weather cap
-    /// (Water / Ice / Snow). Returns `layer_count` if every layer is
-    /// fluid (would be an unusual state — a column with nothing but a
-    /// puddle sitting on bare bedrock).
-    fn first_non_fluid_index(&self) -> usize {
-        for i in 0..self.layer_count as usize {
-            if !matches!(
-                self.layers[i].material,
-                MaterialId::Water | MaterialId::Ice | MaterialId::Snow
-            ) {
-                return i;
-            }
+        for i in write..count {
+            self.layers[i] = Layer::default();
         }
-        self.layer_count as usize
+        self.layer_count = write as u8;
     }
 
     pub fn deposit_to_top(&mut self, material: MaterialId, mass: i64, tick: u64) {
@@ -393,21 +463,18 @@ impl Column {
     }
 
     /// Adjust top-of-column water by `delta` kg. Positive: adds water
-    /// (creating or growing the top Water layer). Negative: removes from
-    /// the top Water layer (no-op if the top isn't water — mass has
-    /// nowhere to come from). Convenience for flow subsystems that
-    /// think in delta-terms.
+    /// on top (density-settle will drop it below any lighter fluid cap).
+    /// Negative: drains from the flowable Water layer in the fluid cap,
+    /// even if it's sitting under a snow / ice cap — that cap doesn't
+    /// seal the water body against lateral drainage in the flow model.
+    /// Returns the actual signed change applied.
     pub fn adjust_top_water(&mut self, delta: i64, tick: u64) -> i64 {
         if delta > 0 {
             self.deposit_to_top(MaterialId::Water, delta, tick);
             delta
         } else if delta < 0 {
-            if self.top_material() == MaterialId::Water {
-                let (removed, _) = self.take_from_top_layer(-delta);
-                -removed
-            } else {
-                0
-            }
+            let removed = self.take_water_from_cap(-delta);
+            -removed
         } else {
             0
         }
@@ -515,6 +582,12 @@ impl Column {
         if self.surface_y.is_nan() {
             self.surface_y = 0.0;
         }
+        // Let heavy things fall to the bottom and light things float
+        // to the top. Every layer above bedrock has a density and
+        // participates in this ordering, so rocks sink through water,
+        // ice/snow float, and old buried layers of the same material
+        // rejoin fresh ones — no special-case "fluid cap" logic.
+        self.settle_by_density(0);
     }
 
     /// Keep `surface_y` consistent with the summed layer column height.
@@ -609,43 +682,87 @@ mod tests {
     }
 
     #[test]
-    fn deposit_below_fluid_cap_inserts_under_water() {
+    fn settle_by_density_sinks_rock_through_water() {
+        // Someone drops rock onto standing water. Rock (2600 kg/m3)
+        // is heavier than water (1000), so it sinks through and ends
+        // up at the bottom of the stack.
         let mut col = Column::default();
         col.deposit_to_top(MaterialId::Sand, 1000, 0);
         col.deposit_to_top(MaterialId::Water, 250, 5);
-        // Now: [Water 250, Sand 1000]
-        col.deposit_below_fluid_cap(MaterialId::Clay, 200, 10);
-        // Expected: [Water 250, Clay 200, Sand 1000] — water stays on top
-        assert_eq!(col.layer_count, 3);
+        col.deposit_to_top(MaterialId::Stone, 200, 10);
+        // Before settle: Stone on top by insertion order.
+        assert_eq!(col.layers[0].material, MaterialId::Stone);
+
+        col.settle_by_density(20);
+
+        // After: heaviest at bottom, lightest on top.
         assert_eq!(col.layers[0].material, MaterialId::Water);
-        assert_eq!(col.layers[0].thickness, 250);
-        assert_eq!(col.layers[1].material, MaterialId::Clay);
-        assert_eq!(col.layers[1].thickness, 200);
-        assert_eq!(col.layers[2].material, MaterialId::Sand);
+        assert_eq!(col.layers[1].material, MaterialId::Sand);
+        assert_eq!(col.layers[2].material, MaterialId::Stone);
     }
 
     #[test]
-    fn deposit_below_fluid_cap_merges_with_bed() {
+    fn settle_by_density_snow_and_ice_float_on_water() {
         let mut col = Column::default();
         col.deposit_to_top(MaterialId::Sand, 1000, 0);
-        col.deposit_to_top(MaterialId::Water, 250, 5);
-        col.deposit_below_fluid_cap(MaterialId::Sand, 500, 10);
-        // Sand under water grows in-place, no new layer inserted.
-        assert_eq!(col.layer_count, 2);
-        assert_eq!(col.layers[0].material, MaterialId::Water);
-        assert_eq!(col.layers[1].material, MaterialId::Sand);
-        assert_eq!(col.layers[1].thickness, 1500);
+        // Deliberately place in the *wrong* order — settle should fix it.
+        col.deposit_to_top(MaterialId::Snow, 100, 1);
+        col.deposit_to_top(MaterialId::Water, 250, 2);
+        col.deposit_to_top(MaterialId::Ice, 50, 3);
+
+        col.settle_by_density(10);
+
+        // Densities: Snow 900 < Ice 917 < Water 1000 < Sand 1600.
+        assert_eq!(col.layers[0].material, MaterialId::Snow);
+        assert_eq!(col.layers[1].material, MaterialId::Ice);
+        assert_eq!(col.layers[2].material, MaterialId::Water);
+        assert_eq!(col.layers[3].material, MaterialId::Sand);
     }
 
     #[test]
-    fn deposit_below_fluid_cap_falls_through_without_cap() {
+    fn settle_by_density_unearths_buried_snow() {
+        // Screenshot regression: rain fell on snow, froze, more snow on
+        // top — the old snow was trapped beneath a rain-freeze-snow
+        // sandwich until settle_by_density brought all the snow back to
+        // the surface in one merged layer.
         let mut col = Column::default();
         col.deposit_to_top(MaterialId::Sand, 1000, 0);
-        // No water on top. Should behave like deposit_to_top.
-        col.deposit_below_fluid_cap(MaterialId::Clay, 200, 10);
-        assert_eq!(col.layer_count, 2);
-        assert_eq!(col.layers[0].material, MaterialId::Clay);
-        assert_eq!(col.layers[1].material, MaterialId::Sand);
+        col.deposit_to_top(MaterialId::Snow, 1386, 100);
+        col.deposit_to_top(MaterialId::Water, 27, 200);
+        col.deposit_to_top(MaterialId::Ice, 1, 300);
+        col.deposit_to_top(MaterialId::Snow, 35, 400);
+        assert_eq!(col.layer_count, 5);
+
+        col.settle_by_density(500);
+
+        assert_eq!(col.layer_count, 4);
+        assert_eq!(col.layers[0].material, MaterialId::Snow);
+        assert_eq!(col.layers[0].thickness, 35 + 1386);
+        assert_eq!(col.layers[1].material, MaterialId::Ice);
+        assert_eq!(col.layers[2].material, MaterialId::Water);
+        assert_eq!(col.layers[3].material, MaterialId::Sand);
+    }
+
+    #[test]
+    fn settle_by_density_preserves_mass() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        col.deposit_to_top(MaterialId::Water, 500, 1);
+        col.deposit_to_top(MaterialId::Snow, 200, 2);
+        col.deposit_to_top(MaterialId::Water, 100, 3);
+        let before: i64 = (0..col.layer_count as usize).map(|i| col.layers[i].thickness).sum();
+        col.settle_by_density(10);
+        let after: i64 = (0..col.layer_count as usize).map(|i| col.layers[i].thickness).sum();
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn settle_by_density_noop_on_single_layer() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        let before_count = col.layer_count;
+        col.settle_by_density(10);
+        assert_eq!(col.layer_count, before_count);
     }
 
     #[test]

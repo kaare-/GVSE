@@ -5,8 +5,8 @@ use crate::buffer::WorldTransferScratch;
 use crate::clock::{SimClock, SubsystemId, SUBSYSTEM_ORDER};
 use crate::subsystems::{
     run_activity, run_evaporation, run_groundwater_flow, run_infiltration, run_lake_level,
-    run_layer_merge, run_phase_change, run_rain_inject, run_sediment, run_surface_water,
-    run_weather, SimParams,
+    run_layer_merge, run_phase_change, run_rain_inject, run_sediment, run_slumping,
+    run_surface_water, run_weather, SimParams,
 };
 
 pub struct Simulation {
@@ -74,7 +74,9 @@ impl Simulation {
                 SubsystemId::Activity => {
                     run_activity(world);
                 }
-                SubsystemId::PhaseChange | SubsystemId::LakeLevel => {}
+                SubsystemId::PhaseChange
+                | SubsystemId::LakeLevel
+                | SubsystemId::Slumping => {}
             }
         }
 
@@ -93,6 +95,10 @@ impl Simulation {
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::LakeLevel)) {
             run_lake_level(world);
+            world.recompute_mass_audit();
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::Slumping)) {
+            run_slumping(world, tick);
             world.recompute_mass_audit();
         }
 

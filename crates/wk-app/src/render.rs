@@ -2,7 +2,7 @@ use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
 use wk_world::terrain::BEDROCK_FLOOR_M;
 use wk_world::column::Activity;
-use wk_world::{ColumnView, OverlayMode, RenderSnapshot};
+use wk_world::{OverlayMode, RenderSnapshot};
 
 /// Fixed side-view scale (Terraria / Rain World style — no zoom).
 pub const COL_W: f32 = 4.0;
@@ -15,8 +15,8 @@ pub fn viewport_column_count(screen_w: f32) -> usize {
     (screen_w / COL_W).ceil() as usize
 }
 
-pub fn world_y_to_screen(elev_m: f32, sea_level: f32, sh: f32) -> f32 {
-    let sea_y = sh * SEA_SCREEN_FRAC;
+pub fn world_y_to_screen(elev_m: f32, sea_level: f32, sh: f32, camera_y_offset: f32) -> f32 {
+    let sea_y = sh * SEA_SCREEN_FRAC + camera_y_offset;
     sea_y - (elev_m - sea_level) * PX_PER_M
 }
 
@@ -24,65 +24,55 @@ pub fn screen_x_to_world_x(mx: f32, viewport_x: i32) -> i32 {
     viewport_x + (mx / COL_W).floor() as i32
 }
 
-fn smoothed_surface_y(columns: &[ColumnView], index: usize) -> f32 {
-    const R: i32 = 3;
-    let mut sum = 0.0f32;
-    let mut wsum = 0.0f32;
-    for d in -R..=R {
-        let j = index as i32 + d;
-        if j < 0 || j as usize >= columns.len() {
-            continue;
-        }
-        let w = (R + 1 - d.abs()) as f32;
-        sum += columns[j as usize].surface_y * w;
-        wsum += w;
-    }
-    if wsum > 0.0 { sum / wsum } else { columns[index].surface_y }
-}
-
-/// How much true subsurface depth to actually draw before fading into a
-/// uniform "unknown depths" fill. Real bedrock can be 40+ metres thick
-/// (irrelevant to look at), so drawing it proportionally made columns look
-/// like solid grey towers with only a sliver of real colour on top. Instead
-/// we draw real layers (true proportional thickness = accurate strata) down
-/// to a fixed visible depth, then hand off to the shared depths colour.
-const VISIBLE_DEPTH_M: f32 = 16.0;
-
-fn depths_color() -> Color {
-    Color::from_rgba(28, 28, 34, 255)
-}
-
 /// Draws a column's actual layers, top to bottom, each sized by real
 /// mass. Under the unified material model this handles solids AND
 /// water/ice/snow uniformly: they're all layers, they all get sized by
 /// mass, and each material's `render_alpha` prop gives it its natural
 /// translucency without a special rendering pass.
+///
+/// No visible-depth cutoff: the earlier "detail band + uniform depths
+/// fill" pattern shifted its dark region upward as `surface_y` grew,
+/// which read as the bedrock rising. Everything is drawn at its real
+/// height now; a tall column that goes off the top of the screen is
+/// fine — the user can pan the camera vertically with W/S to see it.
 fn draw_terrain_column(
     x: f32,
     surface_px: f32,
     layers: &[(MaterialId, i64, u64, u64)],
     px_per_m: f32,
-    detail_limit_px: f32,
-    fill_to_px: f32,
-) -> f32 {
+    saturation: f32,
+) {
     let mut y = surface_px;
-    let mut drawn = 0.0f32;
     for &(mat, thickness, _, _) in layers {
-        if thickness <= 0 || drawn >= detail_limit_px {
+        if thickness <= 0 {
             continue;
         }
-        let full_h = mass_to_px(mat, thickness, px_per_m).max(0.6);
-        let h = full_h.min(detail_limit_px - drawn);
-        let [r, g, b] = MaterialRegistry::colour_rgb(mat);
+        let h = mass_to_px(mat, thickness, px_per_m).max(0.6);
+        let [mut r, mut g, mut b] = MaterialRegistry::colour_rgb(mat);
+        // Subtle waterlogged tint: solid granular layers get slightly
+        // darker and slightly bluer as the column's aquifer saturation
+        // approaches 1. Skips fluids (already have their own colour)
+        // and bedrock (impermeable, never actually wet inside).
+        if saturation > 0.05
+            && matches!(
+                mat,
+                MaterialId::Sand
+                    | MaterialId::Clay
+                    | MaterialId::Gravel
+                    | MaterialId::LooseRock
+                    | MaterialId::Stone
+                    | MaterialId::Organic
+            )
+        {
+            let t = (saturation * 0.35).min(0.35);
+            r = lerp_u8(r, 40, t);
+            g = lerp_u8(g, 55, t);
+            b = lerp_u8(b, 85, t);
+        }
         let a = MaterialRegistry::props(mat).render_alpha;
         draw_rectangle(x, y, COL_W, h, Color::from_rgba(r, g, b, a));
         y += h;
-        drawn += h;
     }
-    if y < fill_to_px {
-        draw_rectangle(x, y, COL_W, fill_to_px - y, depths_color());
-    }
-    surface_px
 }
 
 fn mass_to_px(material: MaterialId, mass: i64, px_per_m: f32) -> f32 {
@@ -203,16 +193,24 @@ fn draw_clouds(snap: &RenderSnapshot, sw: f32, sh: f32) {
     }
 }
 
-pub fn draw_frame(snap: &RenderSnapshot, selected: Option<i32>, status_line: &str) {
+pub fn draw_frame(
+    snap: &RenderSnapshot,
+    selected: Option<i32>,
+    camera_y_offset: f32,
+    status_line: &str,
+) {
     let sw = screen_width();
     let sh = screen_height();
-    let sea_y = world_y_to_screen(snap.sea_level, snap.sea_level, sh);
-    let bedrock_px = world_y_to_screen(BEDROCK_FLOOR_M, snap.sea_level, sh);
+    let sea_y = world_y_to_screen(snap.sea_level, snap.sea_level, sh, camera_y_offset);
+    let bedrock_px = world_y_to_screen(BEDROCK_FLOOR_M, snap.sea_level, sh, camera_y_offset);
 
-    // Sky
-    clear_background(Color::from_rgba(120, 180, 220, 255));
+    // Sky fills the entire background. Anything above the terrain
+    // (mountain top sticking up into open air, gap where a submerged
+    // column's water has evaporated below sea_level, etc.) reads as
+    // sky, not as a placeholder colour from an earlier version of the
+    // renderer that had a separate "under sea_y" band.
     let sky_color = sky_color_for(snap);
-    draw_rectangle(0.0, 0.0, sw, sea_y.max(0.0), sky_color);
+    clear_background(sky_color);
     draw_celestial_body(sw, sh, snap);
     draw_clouds(snap, sw, sh);
 
@@ -242,29 +240,24 @@ pub fn draw_frame(snap: &RenderSnapshot, selected: Option<i32>, status_line: &st
         }
 
         let x = i as f32 * COL_W;
-        let display_y = smoothed_surface_y(&snap.columns, i);
-        let surface_px = world_y_to_screen(display_y, snap.sea_level, sh);
-        let col_bedrock_px = world_y_to_screen(col.bedrock_y, snap.sea_level, sh);
-        let detail_limit_px =
-            (VISIBLE_DEPTH_M * PX_PER_M).min((col_bedrock_px - surface_px).max(2.0));
-        let fill_to_px = col_bedrock_px.max(sh);
+        // Draw layers at each column's *actual* surface — no smoothing
+        // across neighbours. Layer positions are absolute (relative to
+        // bedrock, which is fixed), so a melting snow cap doesn't drag
+        // the layers underneath around on screen just because its
+        // surface_y dropped this tick. Neighbours may honestly differ
+        // in height; that's what having a per-column simulation means.
+        let surface_px = world_y_to_screen(col.surface_y, snap.sea_level, sh, camera_y_offset);
+        let col_bedrock_px = world_y_to_screen(col.bedrock_y, snap.sea_level, sh, camera_y_offset);
 
-        let top = draw_terrain_column(
-            x,
-            surface_px,
-            &col.layers,
-            PX_PER_M,
-            detail_limit_px,
-            fill_to_px,
-        );
-        tops.push(Some(top));
+        draw_terrain_column(x, surface_px, &col.layers, PX_PER_M, col.saturation);
+        tops.push(Some(surface_px));
 
         if Some(col.world_x) == selected {
             draw_rectangle_lines(
                 x,
-                top,
+                surface_px,
                 COL_W,
-                fill_to_px - top,
+                (col_bedrock_px - surface_px).max(2.0),
                 1.5,
                 Color::from_rgba(255, 255, 100, 220),
             );
@@ -339,6 +332,8 @@ fn material_name(mat: MaterialId) -> &'static str {
     match mat {
         MaterialId::Bedrock => "bedrock",
         MaterialId::Stone => "stone",
+        MaterialId::LooseRock => "looserock",
+        MaterialId::Gravel => "gravel",
         MaterialId::Sand => "sand",
         MaterialId::Clay => "clay",
         MaterialId::Organic => "organic",
@@ -366,7 +361,12 @@ fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32) {
         format!("Column x={}", col.world_x),
         format!("surface_y={:.2} m  bedrock={:.0}m", col.surface_y, col.bedrock_y),
         format!("temp={:.1}C  biome={}", col.temperature_c, col.biome.name()),
-        format!("water={} kg  moisture={} kg", col.surface_water, col.moisture),
+        format!(
+            "water={} kg  moisture={} kg  sat={:.0}%",
+            col.surface_water,
+            col.moisture,
+            col.saturation * 100.0
+        ),
         format!("ice={} kg  snow={} kg", col.ice, col.snow),
         format!(
             "sediment={} kg ({})",

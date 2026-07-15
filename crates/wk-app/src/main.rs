@@ -28,7 +28,12 @@ async fn main() {
         app.update();
 
         let snap = app.snapshot();
-        render::draw_frame(&snap, app.selected_column, &app.status_msg);
+        render::draw_frame(
+            &snap,
+            app.selected_column,
+            app.camera_y_offset,
+            &app.status_msg,
+        );
         app.draw_settings_ui();
 
         next_frame().await;
