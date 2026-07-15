@@ -186,6 +186,31 @@ pub fn fill_bathymetry_column(
 
     col.recompute_surface_y(bedrock_y);
     col.activity = crate::column::Activity::HydrologyActive;
+
+    // Fill submerged columns with a Water layer up to sea level so the
+    // ocean is just the top of the layer stack, not a separate ad-hoc
+    // rendering pass or column-state flag. `deposit_to_top` handles the
+    // surface_y bookkeeping for us.
+    fill_up_to_sea_level(col, sea_level, tick);
+}
+
+/// If this column's natural terrain surface sits below sea level, tops
+/// it up with a `Water` layer of exactly the mass needed to reach sea
+/// level. No-op otherwise. Ocean, lakebed, and puddle all end up as
+/// the same "top layer is Water" state, which lets one rendering path
+/// and one flow path handle everything.
+pub fn fill_up_to_sea_level(col: &mut Column, sea_level: f32, tick: u64) {
+    let deficit_m = sea_level - col.surface_y;
+    if deficit_m <= 0.0 {
+        return;
+    }
+    let density = wk_material::MaterialRegistry::props(MaterialId::Water)
+        .density
+        .max(1) as f32;
+    let mass = (deficit_m * SAMPLE_WIDTH_M * density) as i64;
+    if mass > 0 {
+        col.deposit_to_top(MaterialId::Water, mass, tick);
+    }
 }
 
 /// Low-frequency rolling ripple layered onto emergent land so there are

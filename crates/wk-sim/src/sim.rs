@@ -4,9 +4,9 @@ use crate::barrier::barrier_commit;
 use crate::buffer::WorldTransferScratch;
 use crate::clock::{SimClock, SubsystemId, SUBSYSTEM_ORDER};
 use crate::subsystems::{
-    run_activity, run_evaporation, run_freeze_thaw, run_groundwater_flow, run_infiltration,
-    run_lake_level, run_layer_merge, run_rain_inject, run_sediment, run_snow_melt,
-    run_surface_water, run_weather, SimParams,
+    run_activity, run_evaporation, run_groundwater_flow, run_infiltration, run_lake_level,
+    run_layer_merge, run_phase_change, run_rain_inject, run_sediment, run_surface_water,
+    run_weather, SimParams,
 };
 
 pub struct Simulation {
@@ -39,6 +39,7 @@ impl Simulation {
     pub fn step(&mut self, world: &mut World) {
         self.sync_params(world);
         let tick = self.clock.tick;
+
 
         for &sub_id in &SUBSYSTEM_ORDER {
             let schedule = SimClock::schedule_for(sub_id);
@@ -73,26 +74,23 @@ impl Simulation {
                 SubsystemId::Activity => {
                     run_activity(world);
                 }
-                SubsystemId::SnowMelt => {
-                    run_snow_melt(world, tick);
-                }
-                SubsystemId::FreezeThaw => {
-                    run_freeze_thaw(world, tick);
-                }
-                SubsystemId::LakeLevel => {
-                    // Handled as a direct post-commit pass below, not via
-                    // the buffered-delta subsystem loop (it needs to see
-                    // final post-commit water values and mutates directly).
-                }
+                SubsystemId::PhaseChange | SubsystemId::LakeLevel => {}
             }
         }
 
         barrier_commit(world, &mut self.scratch, tick);
 
-        // Direct-mutation pass, not part of the buffered subsystem loop
-        // above: flattens connected water bodies to hydrostatic equilibrium
-        // instantly rather than waiting on slow neighbour-by-neighbour
-        // diffusion to eventually level a wide lake.
+        // Direct-mutation passes, NOT part of the buffered subsystem loop
+        // above. Running these before barrier_commit would let them
+        // change a column's top layer between the buffered subsystems
+        // that computed deltas against the old top and the commit that
+        // tries to apply those deltas — the deltas then silently no-op
+        // but their upstream bookkeeping (evap_out_total etc.) was
+        // already booked, leaking mass into the audit.
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::PhaseChange)) {
+            run_phase_change(world, tick);
+            world.recompute_mass_audit();
+        }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::LakeLevel)) {
             run_lake_level(world);
             world.recompute_mass_audit();

@@ -40,50 +40,6 @@ fn smoothed_surface_y(columns: &[ColumnView], index: usize) -> f32 {
     if wsum > 0.0 { sum / wsum } else { columns[index].surface_y }
 }
 
-fn puddle_depth_m(mass: i64) -> f32 {
-    if mass <= 0 {
-        return 0.0;
-    }
-    (mass as f32 / 1000.0) / SAMPLE_WIDTH_M
-}
-
-/// Elevation of the water surface sitting on a column, treating "genuinely
-/// underwater" columns and "emergent land with a puddle" columns the same
-/// way — both just have *some* water surface elevation. Submerged terrain
-/// always shows water up to sea level (the open ocean); land only shows
-/// water if it actually has any. Using one formula for both, instead of two
-/// separate rendering passes with different rules, is what makes the coast
-/// blend smoothly instead of having a seam exactly at sea level.
-fn water_top_elev(col: &ColumnView, sea_level: f32) -> f32 {
-    if col.surface_y < sea_level {
-        sea_level
-    } else {
-        col.surface_y + puddle_depth_m(col.surface_water)
-    }
-}
-
-/// Smoothed water-surface elevation so ponds (and the coastline) read as a
-/// continuous surface instead of jittering column-to-column.
-fn smoothed_water_top(columns: &[ColumnView], index: usize, sea_level: f32) -> f32 {
-    const R: i32 = 3;
-    let mut sum = 0.0f32;
-    let mut wsum = 0.0f32;
-    for d in -R..=R {
-        let j = index as i32 + d;
-        if j < 0 || j as usize >= columns.len() {
-            continue;
-        }
-        let w = (R + 1 - d.abs()) as f32;
-        sum += water_top_elev(&columns[j as usize], sea_level) * w;
-        wsum += w;
-    }
-    if wsum > 0.0 {
-        sum / wsum
-    } else {
-        water_top_elev(&columns[index], sea_level)
-    }
-}
-
 /// How much true subsurface depth to actually draw before fading into a
 /// uniform "unknown depths" fill. Real bedrock can be 40+ metres thick
 /// (irrelevant to look at), so drawing it proportionally made columns look
@@ -96,11 +52,11 @@ fn depths_color() -> Color {
     Color::from_rgba(28, 28, 34, 255)
 }
 
-/// Draws a column's actual layers, top to bottom, each sized by real mass —
-/// so composition changes from erosion/deposition show up faithfully and
-/// neighbouring columns only differ when the simulation actually differs.
-/// Real detail stops at `detail_limit_px`; everything from there down to
-/// `fill_to_px` becomes a uniform "depths" colour (never left blank).
+/// Draws a column's actual layers, top to bottom, each sized by real
+/// mass. Under the unified material model this handles solids AND
+/// water/ice/snow uniformly: they're all layers, they all get sized by
+/// mass, and each material's `render_alpha` prop gives it its natural
+/// translucency without a special rendering pass.
 fn draw_terrain_column(
     x: f32,
     surface_px: f32,
@@ -118,7 +74,8 @@ fn draw_terrain_column(
         let full_h = mass_to_px(mat, thickness, px_per_m).max(0.6);
         let h = full_h.min(detail_limit_px - drawn);
         let [r, g, b] = MaterialRegistry::colour_rgb(mat);
-        draw_rectangle(x, y, COL_W, h, Color::from_rgba(r, g, b, 255));
+        let a = MaterialRegistry::props(mat).render_alpha;
+        draw_rectangle(x, y, COL_W, h, Color::from_rgba(r, g, b, a));
         y += h;
         drawn += h;
     }
@@ -270,7 +227,13 @@ pub fn draw_frame(snap: &RenderSnapshot, selected: Option<i32>, status_line: &st
         );
     }
 
-    // --- Pass 1: solid terrain ---
+    // Unified terrain-and-water pass: every substance (sand, stone,
+    // organic, water, ice, snow) is a Layer in the column stack, and
+    // draw_terrain_column paints them all with their own colour and
+    // per-material alpha. No more separate "solid pass" + "water pass":
+    // the ocean is just Water layers filling submerged columns up to
+    // sea level, and a puddle is just a thin Water layer on top of
+    // whatever else is there.
     let mut tops: Vec<Option<f32>> = Vec::with_capacity(snap.columns.len());
     for (i, col) in snap.columns.iter().enumerate() {
         if col.layers.is_empty() {
@@ -282,10 +245,18 @@ pub fn draw_frame(snap: &RenderSnapshot, selected: Option<i32>, status_line: &st
         let display_y = smoothed_surface_y(&snap.columns, i);
         let surface_px = world_y_to_screen(display_y, snap.sea_level, sh);
         let col_bedrock_px = world_y_to_screen(col.bedrock_y, snap.sea_level, sh);
-        let detail_limit_px = (VISIBLE_DEPTH_M * PX_PER_M).min((col_bedrock_px - surface_px).max(2.0));
+        let detail_limit_px =
+            (VISIBLE_DEPTH_M * PX_PER_M).min((col_bedrock_px - surface_px).max(2.0));
         let fill_to_px = col_bedrock_px.max(sh);
 
-        let top = draw_terrain_column(x, surface_px, &col.layers, PX_PER_M, detail_limit_px, fill_to_px);
+        let top = draw_terrain_column(
+            x,
+            surface_px,
+            &col.layers,
+            PX_PER_M,
+            detail_limit_px,
+            fill_to_px,
+        );
         tops.push(Some(top));
 
         if Some(col.world_x) == selected {
@@ -298,34 +269,6 @@ pub fn draw_frame(snap: &RenderSnapshot, selected: Option<i32>, status_line: &st
                 Color::from_rgba(255, 255, 100, 220),
             );
         }
-    }
-
-    // --- Pass 2: water, unified for both open ocean and land puddles ---
-    // One formula (water_top_elev) and one smoothing pass for every column,
-    // so the coastline is just where the same curve happens to touch the
-    // ground — not a seam between two different rendering styles.
-    for (i, col) in snap.columns.iter().enumerate() {
-        let Some(top) = tops[i] else {
-            continue;
-        };
-        let x = i as f32 * COL_W;
-        let water_top = smoothed_water_top(&snap.columns, i, snap.sea_level);
-        let water_top_px = world_y_to_screen(water_top, snap.sea_level, sh);
-        if water_top_px >= top {
-            continue;
-        }
-        let h = top - water_top_px;
-        let real_depth = puddle_depth_m(col.surface_water).max(snap.sea_level - col.surface_y);
-        let alpha = (140.0 + (real_depth.min(20.0) / 20.0) * 100.0) as u8;
-        draw_rectangle(x, water_top_px, COL_W, h, Color::from_rgba(35, 100, 210, alpha));
-        draw_line(
-            x,
-            water_top_px,
-            x + COL_W,
-            water_top_px,
-            1.0,
-            Color::from_rgba(160, 205, 255, 150),
-        );
     }
 
     // Overlays
@@ -402,6 +345,7 @@ fn material_name(mat: MaterialId) -> &'static str {
         MaterialId::Water => "water",
         MaterialId::Air => "air",
         MaterialId::Snow => "snow",
+        MaterialId::Ice => "ice",
     }
 }
 
@@ -411,7 +355,7 @@ fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32) {
     };
 
     let panel_w = 280.0;
-    let panel_h = 220.0;
+    let panel_h = 240.0;
     let x0 = sw - panel_w - 8.0;
     let y0 = 8.0;
 
@@ -423,6 +367,7 @@ fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32) {
         format!("surface_y={:.2} m  bedrock={:.0}m", col.surface_y, col.bedrock_y),
         format!("temp={:.1}C  biome={}", col.temperature_c, col.biome.name()),
         format!("water={} kg  moisture={} kg", col.surface_water, col.moisture),
+        format!("ice={} kg  snow={} kg", col.ice, col.snow),
         format!(
             "sediment={} kg ({})",
             col.sediment.total,

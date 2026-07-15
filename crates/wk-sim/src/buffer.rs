@@ -7,7 +7,18 @@ use wk_world::column::SedimentLoad;
 pub struct CellTransferBuffer {
     pub water_delta: [i64; CHUNK_W],
     pub moisture_delta: [i64; CHUNK_W],
+    /// Net signed change (a subsystem removing mass this tick logs a
+    /// negative value here; incoming payloads with material identity
+    /// go through `sediment_inflow` instead so we don't lose track of
+    /// what the material actually is).
     pub sediment_delta: [i64; CHUNK_W],
+    /// Sediment arriving into this column *within the same chunk*
+    /// (cross-chunk transfer uses the `ChunkBoundaryOutbox` /
+    /// `ChunkInbox.sediment_in` pair). Each accumulator remembers
+    /// both the total incoming mass and the first material that
+    /// arrived, so a sand river doesn't accidentally get reclassified
+    /// as clay when it flows into a downstream column.
+    pub sediment_inflow: [SedimentLoad; CHUNK_W],
     pub erosion_request: [i64; CHUNK_W],
     pub deposit_request: [i64; CHUNK_W],
     pub deposit_material: [MaterialId; CHUNK_W],
@@ -23,6 +34,7 @@ impl Default for CellTransferBuffer {
             water_delta: [0; CHUNK_W],
             moisture_delta: [0; CHUNK_W],
             sediment_delta: [0; CHUNK_W],
+            sediment_inflow: [SedimentLoad::default(); CHUNK_W],
             erosion_request: [0; CHUNK_W],
             deposit_request: [0; CHUNK_W],
             deposit_material: [MaterialId::Sand; CHUNK_W],

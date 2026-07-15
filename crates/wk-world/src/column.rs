@@ -72,18 +72,31 @@ impl Default for Layer {
     }
 }
 
+/// One vertical column sitting on top of the chunk's bedrock line.
+///
+/// Every physical substance sits in `layers`: sand, clay, stone, organic
+/// but also water, ice, and snow — they're all just materials with
+/// different property rows. There are no more "special" per-column state
+/// buckets like `surface_water` or `ice`: standing water is simply a
+/// `Water` layer at the top of the stack, an ice cap is an `Ice` layer,
+/// snowfall is a `Snow` layer.
+///
+/// `moisture` (water occupying the pore space of the topmost porous solid
+/// layer) is the one remaining scalar side-channel. Conceptually it
+/// belongs to that layer, but tracking it per-layer would balloon the
+/// data model and complicate flow between layers — for phase 1 of the
+/// unification it stays as a column-level scalar, always associated
+/// with `top_porous_layer_index()`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Column {
     pub surface_y: f32,
     pub layers: [Layer; MAX_LAYERS],
     pub layer_count: u8,
-    pub surface_water: i64,
+    /// Water occupying the pore space of the topmost porous solid layer
+    /// (see `top_porous_layer_index`). Kept as a column-level scalar for
+    /// now; per-layer moisture would require restructuring the flow and
+    /// discharge logic more than the phase-1 refactor allows.
     pub moisture: i64,
-    /// Frozen surface water (kg) — tracked separately from `surface_water`
-    /// so it's automatically excluded from evaporation/infiltration/lateral
-    /// flow (they only ever look at `surface_water`); thaws back into it
-    /// when warm. See run_freeze_thaw.
-    pub ice: i64,
     pub sediment: SedimentLoad,
     pub residual: ResidualBucket,
     pub activity: Activity,
@@ -96,9 +109,7 @@ impl Default for Column {
             surface_y: 0.0,
             layers: [Layer::default(); MAX_LAYERS],
             layer_count: 0,
-            surface_water: 0,
             moisture: 0,
-            ice: 0,
             sediment: SedimentLoad::default(),
             residual: ResidualBucket::default(),
             activity: Activity::HydrologyActive,
@@ -128,15 +139,58 @@ impl Column {
             .sum()
     }
 
+    /// Index of the topmost layer with nonzero porosity (i.e. can hold
+    /// pore-water). Skips past Water/Ice/Snow caps to find the actual
+    /// substrate layer. `None` if no such layer exists (bare bedrock).
+    pub fn top_porous_layer_index(&self) -> Option<usize> {
+        for i in 0..self.layer_count as usize {
+            if MaterialRegistry::props(self.layers[i].material).porosity > 0 {
+                return Some(i);
+            }
+        }
+        None
+    }
+
+    pub fn top_porous_layer(&self) -> Option<&Layer> {
+        self.top_porous_layer_index().map(|i| &self.layers[i])
+    }
+
+    /// Kg of Water sitting on the very top of this column (standing water,
+    /// puddle depth or lake / ocean surface). Zero if the top layer is
+    /// anything else — a puddle under a snow cap doesn't count, and
+    /// ice-covered water is `top_ice_mass`, not `top_water_mass`.
+    pub fn top_water_mass(&self) -> i64 {
+        match self.top_layer() {
+            Some(l) if l.material == MaterialId::Water => l.thickness,
+            _ => 0,
+        }
+    }
+
+    /// Kg of Snow currently piled on top of the column (0 if the top
+    /// layer is not Snow).
+    pub fn top_snow_mass(&self) -> i64 {
+        match self.top_layer() {
+            Some(l) if l.material == MaterialId::Snow => l.thickness,
+            _ => 0,
+        }
+    }
+
+    /// Kg of Ice currently capping the column (0 if the top layer is not
+    /// Ice). "Ice under a light snow dusting" is not counted here — only
+    /// the true topmost layer.
+    pub fn top_ice_mass(&self) -> i64 {
+        match self.top_layer() {
+            Some(l) if l.material == MaterialId::Ice => l.thickness,
+            _ => 0,
+        }
+    }
+
     pub fn moisture_cap(&self) -> i64 {
-        let top = self.top_material();
-        let props = MaterialRegistry::props(top);
-        let layer_mass = self
-            .top_layer()
-            .map(|l| l.thickness)
-            .unwrap_or(0)
-            .max(1);
-        (layer_mass * props.porosity as i64) / 255
+        let Some(layer) = self.top_porous_layer() else {
+            return 0;
+        };
+        let props = MaterialRegistry::props(layer.material);
+        (layer.thickness * props.porosity as i64) / 255
     }
 
     pub fn mass_to_height_delta(&self, material: MaterialId, mass: i64) -> f32 {
@@ -146,38 +200,136 @@ impl Column {
         volume / area
     }
 
-    /// Elevation to use for temperature/climate purposes — deliberately
-    /// *excludes* any snow currently piled on top. Real climate depends on
-    /// a place's permanent geographic elevation, not today's snow depth;
-    /// using the literal (snow-inflated) surface_y would create a runaway
-    /// feedback loop: snow raises surface_y -> higher elevation reads
-    /// colder -> more snow falls -> raises surface_y further, forever.
+    /// Elevation to use for temperature/climate purposes. Under the
+    /// unified material model, snow and water are stratigraphic layers
+    /// with the correct density, so `surface_y` already reflects the
+    /// natural terrain height — no more "subtract snow layer height"
+    /// workaround was needed.
     pub fn climate_elevation(&self) -> f32 {
-        match self.top_layer() {
-            Some(top) if top.material == MaterialId::Snow => {
-                self.surface_y - self.mass_to_height_delta(MaterialId::Snow, top.thickness)
+        // Skip past any weather deposits (water/ice/snow) to expose the
+        // permanent geographic elevation. A puddle on top of a peak
+        // shouldn't make the peak read as warmer, and a thick snowpack
+        // shouldn't feed itself by reading colder as it grows.
+        let mut y = self.surface_y;
+        for i in 0..self.layer_count as usize {
+            let mat = self.layers[i].material;
+            if matches!(
+                mat,
+                MaterialId::Water | MaterialId::Ice | MaterialId::Snow
+            ) {
+                y -= self.mass_to_height_delta(mat, self.layers[i].thickness);
+            } else {
+                break;
             }
-            _ => self.surface_y,
         }
+        y
     }
 
-    /// Elevation of the groundwater table: the top layer's pore space fills
-    /// from the bottom of that layer upward as `moisture` approaches its
-    /// cap, reaching the ground surface exactly when fully saturated (at
-    /// which point any further water has nowhere to go but the surface —
-    /// see the discharge/spring handling in the barrier commit).
+    /// Elevation of the groundwater table: the topmost porous solid
+    /// layer's pore space fills from the bottom of that layer upward as
+    /// `moisture` approaches its cap, reaching the ground surface exactly
+    /// when fully saturated (any further inflow discharges as surface
+    /// water — see the discharge handling in barrier commit).
     pub fn water_table_y(&self) -> f32 {
-        let Some(top) = self.top_layer() else {
+        let Some(idx) = self.top_porous_layer_index() else {
             return self.surface_y;
         };
-        let layer_height_m = self.mass_to_height_delta(top.material, top.thickness);
+        // Elevation of the top of the porous layer = surface minus
+        // everything sitting above it in the stack (water/ice/snow caps).
+        let mut cap_height = 0.0f32;
+        for i in 0..idx {
+            cap_height +=
+                self.mass_to_height_delta(self.layers[i].material, self.layers[i].thickness);
+        }
+        let layer_top_y = self.surface_y - cap_height;
+        let layer = &self.layers[idx];
+        let layer_height_m = self.mass_to_height_delta(layer.material, layer.thickness);
         if layer_height_m <= 0.0 {
-            return self.surface_y;
+            return layer_top_y;
         }
         let cap = self.moisture_cap().max(1);
         let saturation = (self.moisture as f32 / cap as f32).clamp(0.0, 1.0);
-        let layer_bottom = self.surface_y - layer_height_m;
-        layer_bottom + saturation * layer_height_m
+        let layer_bottom_y = layer_top_y - layer_height_m;
+        layer_bottom_y + saturation * layer_height_m
+    }
+
+    /// Insert `mass` kg of `material` as a solid layer *underneath* any
+    /// Water / Ice / Snow cap sitting on top of this column. If there
+    /// is no such cap, this is equivalent to `deposit_to_top`.
+    ///
+    /// Meant for sediment settling out of moving water: physically, sand
+    /// carried by a river drops onto the *riverbed* when the current
+    /// slows, not onto the water surface. Depositing on top was the
+    /// mechanism that caused water to end up buried inside the solid
+    /// stack as sediment layers sandwiched fresh puddles.
+    pub fn deposit_below_fluid_cap(
+        &mut self,
+        material: MaterialId,
+        mass: i64,
+        tick: u64,
+    ) {
+        if mass <= 0 {
+            return;
+        }
+        let insert_at = self.first_non_fluid_index();
+        if insert_at == 0 {
+            self.deposit_to_top(material, mass, tick);
+            return;
+        }
+        self.activity = Activity::HydrologyActive;
+
+        // Fast path: merge with the layer we'd be inserting above if
+        // it's already the same material.
+        if insert_at < self.layer_count as usize
+            && self.layers[insert_at].material == material
+        {
+            self.layers[insert_at].thickness += mass;
+            self.layers[insert_at].age_end = tick;
+            self.surface_y += self.mass_to_height_delta(material, mass);
+            return;
+        }
+
+        if (self.layer_count as usize) >= MAX_LAYERS {
+            self.merge_layers(false, tick);
+        }
+
+        if (self.layer_count as usize) >= MAX_LAYERS {
+            if insert_at < self.layer_count as usize {
+                self.layers[insert_at].thickness += mass;
+                self.layers[insert_at].age_end = tick;
+            }
+        } else {
+            // Shift layers from insert_at..layer_count down by one slot
+            // to make room, then place the new layer at insert_at (the
+            // *bottom* of the fluid cap, i.e. right on the bed).
+            for i in (insert_at + 1..=self.layer_count as usize).rev() {
+                self.layers[i] = self.layers[i - 1];
+            }
+            self.layers[insert_at] = Layer {
+                material,
+                thickness: mass,
+                age_start: tick,
+                age_end: tick,
+            };
+            self.layer_count += 1;
+        }
+        self.surface_y += self.mass_to_height_delta(material, mass);
+    }
+
+    /// Index of the first layer that is *not* a fluid/weather cap
+    /// (Water / Ice / Snow). Returns `layer_count` if every layer is
+    /// fluid (would be an unusual state — a column with nothing but a
+    /// puddle sitting on bare bedrock).
+    fn first_non_fluid_index(&self) -> usize {
+        for i in 0..self.layer_count as usize {
+            if !matches!(
+                self.layers[i].material,
+                MaterialId::Water | MaterialId::Ice | MaterialId::Snow
+            ) {
+                return i;
+            }
+        }
+        self.layer_count as usize
     }
 
     pub fn deposit_to_top(&mut self, material: MaterialId, mass: i64, tick: u64) {
@@ -199,7 +351,6 @@ impl Column {
         }
 
         if (self.layer_count as usize) >= MAX_LAYERS {
-            // merge failed to free space; add to existing top
             if self.layer_count > 0 {
                 self.layers[0].thickness += mass;
                 self.layers[0].age_end = tick;
@@ -219,45 +370,96 @@ impl Column {
         self.surface_y += self.mass_to_height_delta(material, mass);
     }
 
-    pub fn erode_from_top(&mut self, mut mass: i64) -> (i64, MaterialId) {
+    /// Remove `mass` kg from whatever layer is currently on top,
+    /// regardless of erosion rules. Meant for fluid/deposit management
+    /// (draining water, evaporating a puddle, melting a snow cap) —
+    /// contrast with `erode_from_top`, which respects erosion resistance
+    /// and won't touch stone/bedrock. Returns actual mass removed and
+    /// which material it came from.
+    pub fn take_from_top_layer(&mut self, mass: i64) -> (i64, MaterialId) {
         if mass <= 0 || self.layer_count == 0 {
+            return (0, MaterialId::Air);
+        }
+        self.activity = Activity::HydrologyActive;
+        let mat = self.layers[0].material;
+        let take = mass.min(self.layers[0].thickness);
+        let dh = self.mass_to_height_delta(mat, take);
+        self.layers[0].thickness -= take;
+        self.surface_y -= dh;
+        if self.layers[0].thickness <= 0 {
+            self.pop_top_layer();
+        }
+        (take, mat)
+    }
+
+    /// Adjust top-of-column water by `delta` kg. Positive: adds water
+    /// (creating or growing the top Water layer). Negative: removes from
+    /// the top Water layer (no-op if the top isn't water — mass has
+    /// nowhere to come from). Convenience for flow subsystems that
+    /// think in delta-terms.
+    pub fn adjust_top_water(&mut self, delta: i64, tick: u64) -> i64 {
+        if delta > 0 {
+            self.deposit_to_top(MaterialId::Water, delta, tick);
+            delta
+        } else if delta < 0 {
+            if self.top_material() == MaterialId::Water {
+                let (removed, _) = self.take_from_top_layer(-delta);
+                -removed
+            } else {
+                0
+            }
+        } else {
+            0
+        }
+    }
+
+    /// Erode the topmost erodible-and-soft layer. Skips past cover
+    /// materials that shouldn't be picked up as sediment (water, ice,
+    /// snow) so a river can actually cut into the sand under a puddle.
+    /// Stops without eroding if the first erodible layer is hard enough
+    /// to be effectively bedrock-like (resistance ≥ 150).
+    pub fn erode_from_top(&mut self, mass: i64) -> (i64, MaterialId) {
+        if mass <= 0 {
+            return (0, MaterialId::Sand);
+        }
+        let mut idx = 0usize;
+        while idx < self.layer_count as usize {
+            let mat = self.layers[idx].material;
+            if mat.is_erodible() && MaterialRegistry::props(mat).erosion_resistance < 150 {
+                break;
+            }
+            // Only allow eroding under a Water cap. Ice/Snow/Stone above
+            // the target protect the layer below.
+            if mat != MaterialId::Water {
+                return (0, MaterialId::Sand);
+            }
+            idx += 1;
+        }
+        if idx >= self.layer_count as usize {
             return (0, MaterialId::Sand);
         }
         self.activity = Activity::HydrologyActive;
 
-        let mut removed = 0i64;
-        let mut material_out = MaterialId::Sand;
-
-        while mass > 0 && self.layer_count > 0 {
-            let material = self.layers[0].material;
-            if !material.is_erodible() {
-                break;
-            }
-            let resistance = MaterialRegistry::props(material).erosion_resistance;
-            if resistance >= 150 {
-                break;
-            }
-            let take = mass.min(self.layers[0].thickness);
-            let height_delta = self.mass_to_height_delta(material, take);
-            self.layers[0].thickness -= take;
-            self.surface_y -= height_delta;
-            removed += take;
-            mass -= take;
-            material_out = material;
-
-            if self.layers[0].thickness == 0 {
-                self.pop_top_layer();
-            }
+        let mat = self.layers[idx].material;
+        let take = mass.min(self.layers[idx].thickness);
+        let dh = self.mass_to_height_delta(mat, take);
+        self.layers[idx].thickness -= take;
+        self.surface_y -= dh;
+        if self.layers[idx].thickness <= 0 {
+            self.remove_layer_at(idx);
         }
-
-        (removed, material_out)
+        (take, mat)
     }
 
     fn pop_top_layer(&mut self) {
-        if self.layer_count == 0 {
+        self.remove_layer_at(0);
+    }
+
+    fn remove_layer_at(&mut self, idx: usize) {
+        if idx >= self.layer_count as usize {
             return;
         }
-        for i in 0..(self.layer_count as usize) - 1 {
+        for i in idx..(self.layer_count as usize) - 1 {
             self.layers[i] = self.layers[i + 1];
         }
         self.layer_count -= 1;
@@ -295,12 +497,15 @@ impl Column {
     }
 
     pub fn clamp_state(&mut self) {
-        self.surface_water = self.surface_water.max(0);
-        self.ice = self.ice.max(0);
         let cap = self.moisture_cap();
         if self.moisture > cap {
-            self.surface_water += self.moisture - cap;
+            // Discharge: pore space is full; overflow surfaces as
+            // standing water on top (a spring/seep). Kept here as well
+            // as in barrier commit so no code path ends up with
+            // moisture > cap silently held on the column.
+            let overflow = self.moisture - cap;
             self.moisture = cap;
+            self.deposit_to_top(MaterialId::Water, overflow, 0);
         }
         self.moisture = self.moisture.max(0);
         self.sediment.total = self.sediment.total.max(0);
@@ -372,5 +577,82 @@ mod tests {
         col.deposit_to_top(MaterialId::Clay, 100, 10);
         col.merge_layers(true, 100);
         assert_eq!(col.layer_count, 2);
+    }
+
+    #[test]
+    fn water_becomes_a_top_layer() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        col.deposit_to_top(MaterialId::Water, 250, 5);
+        assert_eq!(col.top_material(), MaterialId::Water);
+        assert_eq!(col.top_water_mass(), 250);
+        assert_eq!(col.layer_count, 2);
+    }
+
+    #[test]
+    fn erode_from_top_cuts_under_water_cap() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        col.deposit_to_top(MaterialId::Water, 500, 5);
+        let (removed, mat) = col.erode_from_top(100);
+        assert_eq!(removed, 100);
+        assert_eq!(mat, MaterialId::Sand);
+    }
+
+    #[test]
+    fn erode_from_top_stops_at_ice_cap() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        col.deposit_to_top(MaterialId::Ice, 500, 5);
+        let (removed, _) = col.erode_from_top(100);
+        assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn deposit_below_fluid_cap_inserts_under_water() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        col.deposit_to_top(MaterialId::Water, 250, 5);
+        // Now: [Water 250, Sand 1000]
+        col.deposit_below_fluid_cap(MaterialId::Clay, 200, 10);
+        // Expected: [Water 250, Clay 200, Sand 1000] — water stays on top
+        assert_eq!(col.layer_count, 3);
+        assert_eq!(col.layers[0].material, MaterialId::Water);
+        assert_eq!(col.layers[0].thickness, 250);
+        assert_eq!(col.layers[1].material, MaterialId::Clay);
+        assert_eq!(col.layers[1].thickness, 200);
+        assert_eq!(col.layers[2].material, MaterialId::Sand);
+    }
+
+    #[test]
+    fn deposit_below_fluid_cap_merges_with_bed() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        col.deposit_to_top(MaterialId::Water, 250, 5);
+        col.deposit_below_fluid_cap(MaterialId::Sand, 500, 10);
+        // Sand under water grows in-place, no new layer inserted.
+        assert_eq!(col.layer_count, 2);
+        assert_eq!(col.layers[0].material, MaterialId::Water);
+        assert_eq!(col.layers[1].material, MaterialId::Sand);
+        assert_eq!(col.layers[1].thickness, 1500);
+    }
+
+    #[test]
+    fn deposit_below_fluid_cap_falls_through_without_cap() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        // No water on top. Should behave like deposit_to_top.
+        col.deposit_below_fluid_cap(MaterialId::Clay, 200, 10);
+        assert_eq!(col.layer_count, 2);
+        assert_eq!(col.layers[0].material, MaterialId::Clay);
+        assert_eq!(col.layers[1].material, MaterialId::Sand);
+    }
+
+    #[test]
+    fn top_porous_skips_water_cap() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        col.deposit_to_top(MaterialId::Water, 250, 5);
+        assert_eq!(col.top_porous_layer().unwrap().material, MaterialId::Sand);
     }
 }

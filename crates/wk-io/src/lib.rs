@@ -46,14 +46,22 @@ pub struct ChunkSnapshot {
 pub struct ColumnSnapshot {
     pub surface_y: f32,
     pub layers: Vec<LayerSnapshot>,
-    pub surface_water: i64,
     pub moisture: i64,
     pub sediment: SedimentLoad,
     pub residual: ResidualBucket,
     pub activity: u8,
     pub marker: Option<u32>,
+    /// Legacy fields from before Water/Ice/Snow became first-class
+    /// stratigraphic materials. Preserved as `#[serde(default)]` so
+    /// older save files still deserialize; on `restore_world` they
+    /// get migrated into their equivalent top-of-stack layers so the
+    /// live column state stays consistent.
     #[serde(default)]
-    pub ice: i64,
+    pub legacy_surface_water: i64,
+    #[serde(default)]
+    pub legacy_ice: i64,
+    #[serde(default)]
+    pub legacy_snow: i64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -82,7 +90,6 @@ pub fn snapshot_world(world: &World, sim_tick: u64) -> SaveFileV1 {
                             age_end: col.layers[i].age_end,
                         })
                         .collect(),
-                    surface_water: col.surface_water,
                     moisture: col.moisture,
                     sediment: col.sediment,
                     residual: col.residual,
@@ -91,7 +98,9 @@ pub fn snapshot_world(world: &World, sim_tick: u64) -> SaveFileV1 {
                         Activity::HydrologyActive => 1,
                     },
                     marker: col.marker.map(|m| m.0),
-                    ice: col.ice,
+                    legacy_surface_water: 0,
+                    legacy_ice: 0,
+                    legacy_snow: 0,
                 })
                 .collect();
             (
@@ -147,9 +156,7 @@ pub fn restore_world(save: &SaveFileV1) -> (World, u64) {
         for (i, cs) in snap.columns.iter().enumerate().take(CHUNK_W) {
             let col = &mut chunk.columns[i];
             col.surface_y = cs.surface_y;
-            col.surface_water = cs.surface_water;
             col.moisture = cs.moisture;
-            col.ice = cs.ice;
             col.sediment = cs.sediment;
             col.residual = cs.residual;
             col.activity = if cs.activity == 0 {
@@ -167,6 +174,21 @@ pub fn restore_world(save: &SaveFileV1) -> (World, u64) {
                     age_end: ls.age_end,
                 };
             }
+            // Migrate any pre-unification scalars into equivalent top-of-
+            // stack layers so restored old saves land in the new state
+            // shape. Order matters: surface_water goes on last (ends up
+            // topmost) — same as a fresh-world puddle.
+            let now = save.sim_tick;
+            if cs.legacy_snow > 0 {
+                col.deposit_to_top(MaterialId::Snow, cs.legacy_snow, now);
+            }
+            if cs.legacy_ice > 0 {
+                col.deposit_to_top(MaterialId::Ice, cs.legacy_ice, now);
+            }
+            if cs.legacy_surface_water > 0 {
+                col.deposit_to_top(MaterialId::Water, cs.legacy_surface_water, now);
+            }
+            col.recompute_surface_y(snap.bedrock_y);
         }
         world.insert_chunk(chunk);
     }

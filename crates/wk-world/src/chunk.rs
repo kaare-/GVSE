@@ -1,4 +1,4 @@
-use wk_material::{CHUNK_W, MaterialId};
+use wk_material::CHUNK_W;
 
 use crate::column::{Activity, Column, SedimentLoad};
 
@@ -75,7 +75,7 @@ impl Chunk {
         } else if local_x >= CHUNK_W as i32 {
             self.halo_water[1]
         } else {
-            self.columns[local_x as usize].surface_water
+            self.columns[local_x as usize].top_water_mass()
         }
     }
 
@@ -98,7 +98,7 @@ impl Chunk {
             .map(|c| c.columns[CHUNK_W - 1].surface_y)
             .unwrap_or(self.columns[0].surface_y);
         self.halo_water[0] = left
-            .map(|c| c.columns[CHUNK_W - 1].surface_water)
+            .map(|c| c.columns[CHUNK_W - 1].top_water_mass())
             .unwrap_or(0);
         self.halo_water_table[0] = left
             .map(|c| c.columns[CHUNK_W - 1].water_table_y())
@@ -107,7 +107,7 @@ impl Chunk {
             .map(|c| c.columns[0].surface_y)
             .unwrap_or(self.columns[CHUNK_W - 1].surface_y);
         self.halo_water[1] = right
-            .map(|c| c.columns[0].surface_water)
+            .map(|c| c.columns[0].top_water_mass())
             .unwrap_or(0);
         self.halo_water_table[1] = right
             .map(|c| c.columns[0].water_table_y())
@@ -126,11 +126,4 @@ impl Chunk {
         }
     }
 
-    pub fn ensure_bedrock_floor(&mut self) {
-        for col in &mut self.columns {
-            if col.layer_count == 0 {
-                col.deposit_to_top(MaterialId::Bedrock, 100_000, 0);
-            }
-        }
-    }
 }

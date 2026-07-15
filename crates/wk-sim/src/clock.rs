@@ -19,15 +19,14 @@ pub enum SubsystemId {
     /// Slow lateral flow of underground moisture between neighbouring
     /// columns' water tables — a real (if simplified) groundwater layer.
     Groundwater = 8,
-    /// Melts a column's top Snow layer back into surface water once local
-    /// temperature rises above the freeze point.
-    SnowMelt = 9,
-    /// Freezes standing liquid water into inert ice when cold, thaws it
-    /// back when warm.
-    FreezeThaw = 10,
+    /// Temperature-driven material transitions: snow melts to water,
+    /// water freezes to ice, ice thaws back to water. Driven by each
+    /// material's own `phase_change` property row rather than three
+    /// separate hard-coded subsystems.
+    PhaseChange = 9,
     /// Spawns/advances/rains from drifting clouds (the automatic weather
     /// layer, separate from the manual rain override).
-    Weather = 11,
+    Weather = 10,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -37,7 +36,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 12] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 11] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -94,12 +93,7 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 12] = [
         phase: 0,
     },
     SubsystemSchedule {
-        id: SubsystemId::SnowMelt,
-        period: 1,
-        phase: 0,
-    },
-    SubsystemSchedule {
-        id: SubsystemId::FreezeThaw,
+        id: SubsystemId::PhaseChange,
         period: 1,
         phase: 0,
     },
@@ -112,8 +106,15 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 12] = [
     },
 ];
 
-/// Fixed execution order for subsystems within one tick.
-pub const SUBSYSTEM_ORDER: [SubsystemId; 11] = [
+/// Fixed execution order for subsystems within one tick. PhaseChange
+/// and LakeLevel are deliberately NOT here — they're direct-mutation
+/// passes that run *after* barrier_commit so they operate on already-
+/// committed column state. Running them here would let them modify a
+/// column's top layer between the buffered subsystems that computed
+/// deltas against the old top and barrier_commit that tries to apply
+/// those deltas (which then silently no-op, leaking mass into the
+/// bookkeeping equation).
+pub const SUBSYSTEM_ORDER: [SubsystemId; 9] = [
     SubsystemId::RainInject,
     SubsystemId::Weather,
     SubsystemId::SurfaceWater,
@@ -123,8 +124,6 @@ pub const SUBSYSTEM_ORDER: [SubsystemId; 11] = [
     SubsystemId::Evaporation,
     SubsystemId::LayerMerge,
     SubsystemId::Activity,
-    SubsystemId::SnowMelt,
-    SubsystemId::FreezeThaw,
 ];
 
 #[derive(Debug, Clone, Default)]

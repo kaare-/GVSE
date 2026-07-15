@@ -1,5 +1,5 @@
 use wk_material::{CHUNK_W, MaterialId, MaterialRegistry};
-use wk_world::column::Activity;
+use wk_world::column::{Activity, SedimentLoad};
 use wk_world::world::World;
 
 use crate::buffer::{ChunkBoundaryOutbox, WorldTransferScratch};
@@ -44,16 +44,6 @@ fn smoothstep(edge0: f32, edge1: f32, x: f32) -> f32 {
     }
     let t = ((x - edge0) / (edge1 - edge0)).clamp(0.0, 1.0);
     t * t * (3.0 - 2.0 * t)
-}
-
-/// Standing water depth (metres) for a given mass — used so flow gradients
-/// consider the actual water surface, not just bare ground elevation.
-fn water_depth_m(mass: i64) -> f32 {
-    if mass <= 0 {
-        return 0.0;
-    }
-    let density = MaterialRegistry::props(MaterialId::Water).density.max(1) as f32;
-    (mass as f32 / density) / wk_material::SAMPLE_WIDTH_M
 }
 
 pub struct SimParams {
@@ -132,13 +122,9 @@ pub fn run_rain_inject(
                 let col = &world.chunks.get(&coord).unwrap().columns[i];
                 (
                     col.surface_y,
-                    col.surface_water,
+                    col.top_water_mass(),
                     col.climate_elevation(),
-                    if col.top_material() == MaterialId::Snow {
-                        col.top_layer().map(|l| l.thickness).unwrap_or(0)
-                    } else {
-                        0
-                    },
+                    col.top_snow_mass(),
                 )
             };
             let (sea_component, rain_component, snow_component) = split_precipitation(
@@ -251,13 +237,9 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
                     let col = &world.chunks.get(&coord).unwrap().columns[i];
                     (
                         col.surface_y,
-                        col.surface_water,
+                        col.top_water_mass(),
                         col.climate_elevation(),
-                        if col.top_material() == MaterialId::Snow {
-                            col.top_layer().map(|l| l.thickness).unwrap_or(0)
-                        } else {
-                            0
-                        },
+                        col.top_snow_mass(),
                     )
                 };
                 let amount = world.weather.cloud_rain_rate;
@@ -311,40 +293,12 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
     });
 }
 
-/// Fraction of a snow layer's mass that melts per degree above freezing,
-/// per tick. Direct-mutation subsystem (like layer merge / activity) rather
-/// than buffer-based: melting only ever affects the column it happens in,
-/// no cross-column conflict to resolve.
-const SNOW_MELT_COEFF: f32 = 0.02;
-
-pub fn run_snow_melt(world: &mut World, tick: u64) {
-    let climate = world.climate.clone();
-    let sea_level = world.sea_level;
-    for chunk in world.chunks.values_mut() {
-        for col in &mut chunk.columns {
-            if col.top_material() != MaterialId::Snow {
-                continue;
-            }
-            let snow_mass = col.top_layer().map(|l| l.thickness).unwrap_or(0);
-            if snow_mass <= 0 {
-                continue;
-            }
-            let temp =
-                wk_world::climate::temperature_at(col.climate_elevation(), sea_level, tick, &climate);
-            let above_freeze = temp - climate.freeze_point_c;
-            if above_freeze <= 0.0 {
-                continue;
-            }
-            let melt = (snow_mass as f32 * SNOW_MELT_COEFF * above_freeze.min(10.0)) as i64;
-            let melt = melt.max(1).min(snow_mass);
-            let (removed, mat) = col.erode_from_top(melt);
-            if removed > 0 && mat == MaterialId::Snow {
-                col.surface_water += removed;
-                col.activity = Activity::HydrologyActive;
-            }
-        }
-    }
-}
+/// Fraction of the top phase-changing layer's mass that transitions per
+/// tick when the temperature crosses its threshold (scaled by how far
+/// past the threshold we are, capped at 10C to avoid runaway rates on
+/// extreme days). One number covers snow→water, water→ice, and ice→water
+/// because the physics is symmetric enough at this fidelity.
+const PHASE_CHANGE_COEFF: f32 = 0.03;
 
 pub fn run_surface_water(world: &World, scratch: &mut WorldTransferScratch) {
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
@@ -355,74 +309,132 @@ pub fn run_surface_water(world: &World, scratch: &mut WorldTransferScratch) {
         }
 
         let mut flux_record = [0i64; CHUNK_W];
-        let mut deltas = [(0i64, 0i64, 0i64); CHUNK_W]; // out_left, out_right, net
+        // (out_left, out_right, net_water,
+        //  sed_left, sed_right, sed_material)
+        let mut deltas =
+            [(0i64, 0i64, 0i64, 0i64, 0i64, MaterialId::Sand); CHUNK_W];
 
         for i in 0..CHUNK_W {
             let col = &chunk.columns[i];
-            if col.activity == Activity::Dormant || col.surface_water <= 0 {
+            // Only fluid materials flow laterally. Under the unified
+            // model this looks at the top layer material rather than a
+            // dedicated surface_water field — an ice or snow cap has
+            // top_water_mass == 0 by construction, so it correctly
+            // doesn't participate in flow.
+            let water_here = col.top_water_mass();
+            if col.activity == Activity::Dormant || water_here <= 0 {
                 continue;
             }
 
             // Compare total water-surface head (ground + standing water), not
             // just bare ground, so ponds level out across flat/low terrain
             // instead of only ever moving when the ground itself slopes.
-            let head_here = col.surface_y + water_depth_m(col.surface_water);
-            let head_left =
-                chunk.surface_y_neighbor(i as i32 - 1) + water_depth_m(chunk.water_neighbor(i as i32 - 1));
-            let head_right =
-                chunk.surface_y_neighbor(i as i32 + 1) + water_depth_m(chunk.water_neighbor(i as i32 + 1));
+            //
+            // Note: col.surface_y under the unified model already includes
+            // the standing water layer's own height, so we don't double
+            // count — head_here is just surface_y (the top of the water),
+            // and each neighbour's head is likewise its own surface_y.
+            let head_here = col.surface_y;
+            let head_left = chunk.surface_y_neighbor(i as i32 - 1);
+            let head_right = chunk.surface_y_neighbor(i as i32 + 1);
 
             let grad_left = head_here - head_left;
             let grad_right = head_here - head_right;
 
-            // Transfer only a damped fraction of the mass that would exactly
-            // equalize heads with this neighbour (never more) — this is
-            // unconditionally stable: it can approach equality but can't
-            // overshoot into oscillation the way a gradient-proportional
-            // flux with a high coefficient did before (that caused a
-            // checkerboard: alternating columns locking into two different
-            // stable water levels instead of leveling out).
             let mut out_left = 0i64;
             let mut out_right = 0i64;
 
             if grad_left > 0.0 {
                 let equalizing = grad_left * WATER_MASS_PER_METRE_DEPTH * 0.5;
-                out_left = ((equalizing * FLOW_RELAXATION) as i64).min(col.surface_water);
+                out_left = ((equalizing * FLOW_RELAXATION) as i64).min(water_here);
             }
             if grad_right > 0.0 {
-                let remaining = (col.surface_water - out_left).max(0);
+                let remaining = (water_here - out_left).max(0);
                 let equalizing = grad_right * WATER_MASS_PER_METRE_DEPTH * 0.5;
                 out_right = ((equalizing * FLOW_RELAXATION) as i64).min(remaining);
             }
 
-            deltas[i] = (out_left, out_right, -(out_left + out_right));
+            // Sediment travels with water proportionally. If half the
+            // column's water flows left, half its suspended sediment
+            // goes with it — that's how a river carries silt downstream
+            // rather than leaving it stranded at the erosion site.
+            let (sed_left, sed_right) = if col.sediment.total > 0 {
+                let sed = col.sediment.total;
+                let sl = (out_left as i128 * sed as i128 / water_here as i128) as i64;
+                let sr = (out_right as i128 * sed as i128 / water_here as i128) as i64;
+                // Never send more sediment than the column has.
+                let (sl, sr) = if sl + sr > sed {
+                    let total = sl + sr;
+                    let sl2 = (sl as i128 * sed as i128 / total as i128) as i64;
+                    let sr2 = sed - sl2;
+                    (sl2, sr2)
+                } else {
+                    (sl, sr)
+                };
+                (sl, sr)
+            } else {
+                (0, 0)
+            };
+
+            deltas[i] = (
+                out_left,
+                out_right,
+                -(out_left + out_right),
+                sed_left,
+                sed_right,
+                col.sediment.dominant,
+            );
             flux_record[i] = out_left + out_right;
         }
 
-        let mut left_outbox = 0i64;
-        let mut right_outbox = 0i64;
+        let mut left_water_outbox = 0i64;
+        let mut right_water_outbox = 0i64;
+        let mut left_sed_outbox = SedimentLoad::default();
+        let mut right_sed_outbox = SedimentLoad::default();
 
         for i in 0..CHUNK_W {
-            let (out_left, out_right, net) = deltas[i];
-            {
-                let buf = scratch.buffer_mut(coord);
-                buf.water_delta[i] += net;
+            let (out_left, out_right, net, sed_left, sed_right, sed_mat) = deltas[i];
+            let buf = scratch.buffer_mut(coord);
+            buf.water_delta[i] += net;
+            buf.sediment_delta[i] -= sed_left + sed_right;
 
-                if i == 0 {
-                    left_outbox += out_left;
-                } else {
-                    buf.water_delta[i - 1] += out_left;
+            if i == 0 {
+                left_water_outbox += out_left;
+                if sed_left > 0 {
+                    left_sed_outbox.add(sed_mat, sed_left);
                 }
+            } else {
+                buf.water_delta[i - 1] += out_left;
+                if sed_left > 0 {
+                    buf.sediment_inflow[i - 1].add(sed_mat, sed_left);
+                }
+            }
 
-                if i == CHUNK_W - 1 {
-                    right_outbox += out_right;
-                } else {
-                    buf.water_delta[i + 1] += out_right;
+            if i == CHUNK_W - 1 {
+                right_water_outbox += out_right;
+                if sed_right > 0 {
+                    right_sed_outbox.add(sed_mat, sed_right);
+                }
+            } else {
+                buf.water_delta[i + 1] += out_right;
+                if sed_right > 0 {
+                    buf.sediment_inflow[i + 1].add(sed_mat, sed_right);
                 }
             }
         }
-        scratch.outbox_mut(coord).left_water += left_outbox;
-        scratch.outbox_mut(coord).right_water += right_outbox;
+        let outbox = scratch.outbox_mut(coord);
+        outbox.left_water += left_water_outbox;
+        outbox.right_water += right_water_outbox;
+        if left_sed_outbox.total > 0 {
+            outbox
+                .left_sediment
+                .add(left_sed_outbox.dominant, left_sed_outbox.total);
+        }
+        if right_sed_outbox.total > 0 {
+            outbox
+                .right_sediment
+                .add(right_sed_outbox.dominant, right_sed_outbox.total);
+        }
         scratch.last_water_flux.insert(coord, flux_record);
     }
 }
@@ -453,13 +465,20 @@ pub fn run_sediment(world: &World, scratch: &mut WorldTransferScratch, tick: u64
             let flux_indicator =
                 ((y_here - y_left).max(0.0) + (y_here - y_right).max(0.0)).sqrt();
 
-            let material = col.top_material();
-            let props = MaterialRegistry::props(material);
-            if !material.is_erodible() || props.erosion_resistance >= 150 {
+            // Under the unified model the top layer might be Water
+            // (a river / pond). Erosion still targets the erodible bed
+            // *underneath* that water, so we look for the top erodible
+            // layer here rather than blindly taking `top_material`.
+            let Some(bed_idx) = (0..col.layer_count as usize).find(|&j| {
+                let m = col.layers[j].material;
+                m.is_erodible() && MaterialRegistry::props(m).erosion_resistance < 150
+            }) else {
                 continue;
-            }
+            };
+            let material = col.layers[bed_idx].material;
+            let props = MaterialRegistry::props(material);
 
-            let water = col.surface_water.max(0) as f32;
+            let water = col.top_water_mass().max(0) as f32;
             if water < 1.0 || flux_indicator < 0.01 {
                 continue;
             }
@@ -509,15 +528,24 @@ pub fn run_infiltration(world: &mut World, scratch: &mut WorldTransferScratch) {
         for i in 0..CHUNK_W {
             let (activity, available, moisture, cap, perm) = {
                 let col = &world.chunks.get(&coord).unwrap().columns[i];
+                // Permeability comes from the porous *substrate* that
+                // will absorb the water, not the material sitting on
+                // top (which is Water itself, permeability 0, which
+                // would incorrectly block all infiltration under a
+                // puddle).
+                let perm = col
+                    .top_porous_layer()
+                    .map(|l| MaterialRegistry::props(l.material).permeability as f32 / 255.0)
+                    .unwrap_or(0.0);
                 (
                     col.activity,
-                    col.surface_water,
+                    col.top_water_mass(),
                     col.moisture,
                     col.moisture_cap(),
-                    MaterialRegistry::props(col.top_material()).permeability as f32 / 255.0,
+                    perm,
                 )
             };
-            if activity == Activity::Dormant || available <= 0 {
+            if activity == Activity::Dormant || available <= 0 || perm <= 0.0 {
                 continue;
             }
             let rate = available as f32 * perm * INFILTRATION_COEFF;
@@ -535,14 +563,16 @@ pub fn run_infiltration(world: &mut World, scratch: &mut WorldTransferScratch) {
 }
 
 /// kg of moisture needed to raise this column's own water table by one
-/// metre — depends on the top layer's porosity and thickness, so it varies
-/// per column (sand holds water differently than clay or stone).
+/// metre — depends on the porous layer's porosity and thickness. Under
+/// the unified model this looks at the topmost *porous* layer, skipping
+/// any water/ice/snow cap above it, so a puddle-covered sand bed still
+/// has a well-defined aquifer capacity.
 fn aquifer_mass_per_metre(col: &wk_world::column::Column) -> f32 {
     let cap = col.moisture_cap().max(1) as f32;
-    let Some(top) = col.top_layer() else {
+    let Some(layer) = col.top_porous_layer() else {
         return f32::INFINITY;
     };
-    let layer_height_m = col.mass_to_height_delta(top.material, top.thickness);
+    let layer_height_m = col.mass_to_height_delta(layer.material, layer.thickness);
     if layer_height_m <= 0.0 {
         return f32::INFINITY;
     }
@@ -579,7 +609,10 @@ pub fn run_groundwater_flow(world: &World, scratch: &mut WorldTransferScratch) {
             let grad_left = head_here - head_left;
             let grad_right = head_here - head_right;
 
-            let perm = MaterialRegistry::props(col.top_material()).permeability as f32 / 255.0;
+            let perm = col
+                .top_porous_layer()
+                .map(|l| MaterialRegistry::props(l.material).permeability as f32 / 255.0)
+                .unwrap_or(0.0);
             let mass_per_metre = aquifer_mass_per_metre(col);
 
             let mut out_left = 0i64;
@@ -629,7 +662,7 @@ pub fn run_evaporation(world: &mut World, scratch: &mut WorldTransferScratch) {
         for i in 0..CHUNK_W {
             let (activity, surface_water, moisture) = {
                 let col = &world.chunks.get(&coord).unwrap().columns[i];
-                (col.activity, col.surface_water, col.moisture)
+                (col.activity, col.top_water_mass(), col.moisture)
             };
             if activity == Activity::Dormant {
                 continue;
@@ -771,11 +804,18 @@ pub fn run_lake_level(world: &mut World) {
         let chunk = &world.chunks[&coord];
         for local in 0..CHUNK_W {
             let col = &chunk.columns[local];
+            let water = col.top_water_mass();
+            // "Ground" here means the elevation of the bed under any
+            // standing water — the layer surface a lake would sit on
+            // if it were perfectly still. Because col.surface_y now
+            // *includes* water depth (water is just a layer), we back
+            // it out explicitly.
+            let bed_y = col.surface_y - col.mass_to_height_delta(MaterialId::Water, water);
             cells.push(LakeCell {
                 coord,
                 local,
-                ground: col.surface_y,
-                water: col.surface_water,
+                ground: bed_y,
+                water,
             });
         }
     }
@@ -798,47 +838,62 @@ pub fn run_lake_level(world: &mut World) {
         i = end + 1;
     }
 
+    // Rewrite each cell's top-water mass to the newly computed value.
+    // We can't just set a scalar any more — instead, add or remove
+    // Water from the top of the layer stack until top_water_mass
+    // matches the target.
     for cell in cells {
         if let Some(chunk) = world.chunks.get_mut(&cell.coord) {
-            chunk.columns[cell.local].surface_water = cell.water;
+            let col = &mut chunk.columns[cell.local];
+            let current = col.top_water_mass();
+            let delta = cell.water - current;
+            col.adjust_top_water(delta, 0);
+            col.recompute_surface_y(chunk.bedrock_y);
         }
     }
 }
 
-/// Fraction of remaining liquid water that freezes per tick when below the
-/// freeze point.
-const FREEZE_RATE_FRAC: f32 = 0.03;
-/// Fraction of ice that thaws per tick per degree above freezing.
-const THAW_RATE_FRAC: f32 = 0.03;
-
-/// Freezes standing liquid water into inert `ice` when cold, and thaws it
-/// back when warm. Direct-mutation subsystem: freezing/thawing only ever
-/// moves mass between two fields *within* the same column, no cross-column
-/// conflict to resolve. Because evaporation/infiltration/lateral flow only
-/// ever look at `surface_water`, frozen mass is automatically excluded from
-/// all of them for free — no separate guards needed elsewhere.
-pub fn run_freeze_thaw(world: &mut World, tick: u64) {
+/// Unified phase-change subsystem. Walks every column's top layer and,
+/// if that material has a `phase_change` property, converts a fraction
+/// of its mass into the target material based on temperature crossing
+/// the threshold. This one function replaces `run_snow_melt` and
+/// `run_freeze_thaw` — snow melting into water, water freezing into ice,
+/// and ice thawing back into water are all instances of the same rule
+/// driven by different property rows.
+///
+/// Direct-mutation subsystem: transitions only ever move mass within
+/// the same column, no cross-column conflict.
+pub fn run_phase_change(world: &mut World, tick: u64) {
     let climate = world.climate.clone();
     let sea_level = world.sea_level;
     for chunk in world.chunks.values_mut() {
         for col in &mut chunk.columns {
-            if col.surface_water <= 0 && col.ice <= 0 {
+            let Some(top) = col.top_layer() else { continue; };
+            let Some(pc) = MaterialRegistry::props(top.material).phase_change else {
+                continue;
+            };
+            let mass_here = top.thickness;
+            if mass_here <= 0 {
                 continue;
             }
-            let temp = wk_world::climate::temperature_at(col.climate_elevation(), sea_level, tick, &climate);
-            if temp <= climate.freeze_point_c {
-                if col.surface_water > 0 {
-                    let freeze = ((col.surface_water as f32) * FREEZE_RATE_FRAC) as i64;
-                    let freeze = freeze.max(1).min(col.surface_water);
-                    col.surface_water -= freeze;
-                    col.ice += freeze;
-                }
-            } else if col.ice > 0 {
-                let above_freeze = (temp - climate.freeze_point_c).min(10.0);
-                let thaw = ((col.ice as f32) * THAW_RATE_FRAC * above_freeze) as i64;
-                let thaw = thaw.max(1).min(col.ice);
-                col.ice -= thaw;
-                col.surface_water += thaw;
+            let temp = wk_world::climate::temperature_at(
+                col.climate_elevation(),
+                sea_level,
+                tick,
+                &climate,
+            );
+            let target = if temp > pc.threshold_c {
+                pc.above
+            } else {
+                pc.below
+            };
+            let Some(target) = target else { continue; };
+            let overshoot = (temp - pc.threshold_c).abs().min(10.0);
+            let convert = (mass_here as f32 * PHASE_CHANGE_COEFF * overshoot.max(1.0)) as i64;
+            let convert = convert.max(1).min(mass_here);
+            let (removed, _) = col.take_from_top_layer(convert);
+            if removed > 0 {
+                col.deposit_to_top(target, removed, tick);
                 col.activity = Activity::HydrologyActive;
             }
         }
@@ -857,7 +912,9 @@ pub fn run_activity(world: &mut World) {
     for chunk in world.chunks.values_mut() {
         for col in &mut chunk.columns {
             let cap = col.moisture_cap();
-            let active = col.surface_water > 0
+            let active = col.top_water_mass() > 0
+                || col.top_snow_mass() > 0
+                || col.top_ice_mass() > 0
                 || col.sediment.total > 0
                 || col.moisture > cap / 4;
             col.activity = if active {

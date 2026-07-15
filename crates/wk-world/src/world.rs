@@ -179,13 +179,15 @@ impl World {
 
         for chunk in self.chunks.values() {
             for col in &chunk.columns {
+                // Every physical substance lives in `layers` now
+                // (water/ice/snow included), so the audit is just a
+                // straight sum over layer masses plus the moisture
+                // side-channel and any sediment in suspension.
                 for i in 0..col.layer_count as usize {
                     let m = col.layers[i].material.index();
                     audit.by_material[m] += col.layers[i].thickness;
                 }
-                audit.by_material[MaterialId::Water.index()] += col.surface_water;
                 audit.by_material[MaterialId::Water.index()] += col.moisture;
-                audit.by_material[MaterialId::Water.index()] += col.ice;
                 if col.sediment.total > 0 {
                     audit.by_material[col.sediment.dominant.index()] += col.sediment.total;
                 }
@@ -232,15 +234,22 @@ impl World {
     }
 }
 
-/// Read-only view for rendering.
+/// Read-only view for rendering. Water/ice/snow are exposed here as
+/// convenience projections computed from the top of the layer stack;
+/// they don't live as separate fields on `Column` any more.
 #[derive(Debug, Clone)]
 pub struct ColumnView {
     pub world_x: i32,
     pub surface_y: f32,
     pub bedrock_y: f32,
     pub layers: Vec<(MaterialId, i64, u64, u64)>,
+    /// Mass (kg) of the top Water layer, or 0 if the top isn't water.
     pub surface_water: i64,
     pub moisture: i64,
+    /// Mass (kg) of the top Ice layer, or 0 if the top isn't ice.
+    pub ice: i64,
+    /// Mass (kg) of the top Snow layer, or 0 if the top isn't snow.
+    pub snow: i64,
     pub sediment: SedimentLoad,
     pub activity: Activity,
     pub water_flux: i64,
@@ -347,8 +356,10 @@ impl World {
                     surface_y: col.surface_y,
                     bedrock_y: chunk.bedrock_y,
                     layers,
-                    surface_water: col.surface_water,
+                    surface_water: col.top_water_mass(),
                     moisture: col.moisture,
+                    ice: col.top_ice_mass(),
+                    snow: col.top_snow_mass(),
                     sediment: col.sediment,
                     activity: col.activity,
                     water_flux: overlay
@@ -373,6 +384,8 @@ impl World {
                     layers: vec![],
                     surface_water: 0,
                     moisture: 0,
+                    ice: 0,
+                    snow: 0,
                     sediment: SedimentLoad::default(),
                     activity: Activity::Dormant,
                     water_flux: 0,

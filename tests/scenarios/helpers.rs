@@ -140,7 +140,7 @@ pub fn run_ticks(world: &mut World, sim: &mut Simulation, n: u64) -> std::time::
 pub fn assert_no_negative_masses(world: &World) {
     for chunk in world.chunks.values() {
         for col in &chunk.columns {
-            assert!(col.surface_water >= 0, "negative surface water");
+            assert!(col.top_water_mass() >= 0, "negative surface water");
             assert!(col.moisture >= 0, "negative moisture");
             assert!(col.sediment.total >= 0, "negative sediment");
             for i in 0..col.layer_count as usize {
@@ -155,7 +155,7 @@ pub fn total_water_mass(world: &World) -> i64 {
     let mut t = 0i64;
     for chunk in world.chunks.values() {
         for col in &chunk.columns {
-            t += col.surface_water + col.moisture;
+            t += col.top_water_mass() + col.moisture;
         }
     }
     t
@@ -168,7 +168,7 @@ pub fn manual_total(world: &World) -> i64 {
             for i in 0..col.layer_count as usize {
                 t += col.layers[i].thickness;
             }
-            t += col.surface_water + col.moisture + col.sediment.total;
+            t += col.moisture + col.sediment.total;
         }
     }
     t
