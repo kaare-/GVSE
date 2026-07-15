@@ -1,0 +1,16 @@
+[package]
+name = "wk-sim"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wk-material = { path = "../wk-material" }
+wk-world = { path = "../wk-world" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+wk-io = { path = "../wk-io" }
+
+[[test]]
+name = "scenarios"
+path = "../../tests/scenarios/mod.rs"

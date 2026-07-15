@@ -1,0 +1,11 @@
+/target/
+**/*.rs.bk
+*.pdb
+
+# Local save files
+world_save.bin
+
+# OS / editor
+.DS_Store
+.idea/
+.vscode/
