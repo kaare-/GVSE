@@ -6,6 +6,7 @@ use wk_material::{CHUNK_W, MaterialId, MAX_LOADED_CHUNKS, MAX_MARKERS, MATERIAL_
 use crate::chunk::Chunk;
 use crate::climate::{biome_for, temperature_at, Biome, ClimateSettings};
 use crate::column::{Activity, Column, MarkerId, ResidualBucket, SedimentLoad};
+use crate::fields::ThermalField;
 use crate::marker::Marker;
 use crate::weather::{Cloud, WeatherSettings};
 
@@ -45,6 +46,13 @@ pub struct World {
     pub weather: WeatherSettings,
     pub clouds: Vec<Cloud>,
     pub next_cloud_spawn_tick: u64,
+    /// When true, chunks carry a `ThermalField` and the thermal
+    /// subsystem / temperature accessors use it. Default false so
+    /// existing scenario tests stay on the climate-only path.
+    pub thermal_fields_enabled: bool,
+    /// Dirichlet temperature (°C) imposed on the bottom row of every
+    /// thermal field — a stand-in for Earth's geothermal heat.
+    pub geothermal_bottom_c: f32,
 }
 
 impl World {
@@ -106,11 +114,79 @@ impl World {
             weather: WeatherSettings::default(),
             clouds: Vec::new(),
             next_cloud_spawn_tick: 0,
+            thermal_fields_enabled: false,
+            geothermal_bottom_c: 55.0,
         }
     }
 
+    /// Climate-only temperature at an elevation (sky / free-air model).
+    /// Prefer [`Self::temperature_at_point`] when a column position is known
+    /// so an active thermal field can be sampled.
     pub fn temperature_at(&self, surface_y: f32, tick: u64) -> f32 {
         temperature_at(surface_y, self.sea_level, tick, &self.climate)
+    }
+
+    /// Temperature at a world point. Samples the chunk thermal field when
+    /// present; otherwise falls back to the climate function at `y_m`.
+    pub fn temperature_at_point(&self, world_x: i32, y_m: f32, tick: u64) -> f32 {
+        let coord = Self::chunk_coord_for_world_x(world_x);
+        if let Some(chunk) = self.chunks.get(&coord) {
+            if let Some(thermal) = &chunk.thermal {
+                let x_m = world_x as f32 * wk_material::SAMPLE_WIDTH_M;
+                return thermal.0.sample_bilinear(x_m, y_m);
+            }
+        }
+        temperature_at(y_m, self.sea_level, tick, &self.climate)
+    }
+
+    /// Allocate and initialise a thermal field on every loaded chunk
+    /// (no-op for chunks that already have one). Seeds each cell with a
+    /// linear geothermal→sky gradient so the first ticks aren't a cold
+    /// shock.
+    pub fn enable_thermal_fields(&mut self) {
+        self.thermal_fields_enabled = true;
+        let sea = self.sea_level;
+        let geo = self.geothermal_bottom_c;
+        let climate = self.climate.clone();
+        let coords: Vec<i32> = self.chunks.keys().copied().collect();
+        for coord in coords {
+            let Some(chunk) = self.chunks.get_mut(&coord) else {
+                continue;
+            };
+            if chunk.thermal.is_some() {
+                continue;
+            }
+            let mut field =
+                ThermalField::new_for_chunk(coord, chunk.bedrock_y, sea, climate.base_temp_c);
+            let w = field.0.width_cells as usize;
+            let h = field.0.height_cells as usize;
+            let origin_y = field.0.origin_y_m;
+            let extent = (h as f32) * field.0.cell_size_m;
+            let sky = temperature_at(sea, sea, 0, &climate);
+            for cy in 0..h {
+                for cx in 0..w {
+                    let (_, y) = field.0.cell_center(cx, cy);
+                    let t = if extent > 0.0 {
+                        geo + (sky - geo) * ((y - origin_y) / extent).clamp(0.0, 1.0)
+                    } else {
+                        sky
+                    };
+                    field.0.set_cell(cx, cy, t);
+                }
+            }
+            // Match halos to the seeded interior so the first stencil
+            // step doesn't see a zero-halo cold wall.
+            field.0.halo = wk_field::FieldHalo::zeros(field.0.width_cells, field.0.height_cells);
+            for cy in 0..h {
+                field.0.halo.left[cy] = field.0.cell_at(0, cy);
+                field.0.halo.right[cy] = field.0.cell_at(w - 1, cy);
+            }
+            for cx in 0..w {
+                field.0.halo.bottom[cx] = geo;
+                field.0.halo.top[cx] = sky;
+            }
+            chunk.thermal = Some(field);
+        }
     }
 
     pub fn biome_at(&self, surface_y: f32) -> Biome {
@@ -278,6 +354,9 @@ pub enum OverlayMode {
     Erosion,
     Activity,
     Conservation,
+    /// Colour-ramp of the thermal field sampled at each column's
+    /// climate elevation (cold blue → hot red).
+    TemperatureField,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -380,7 +459,11 @@ impl World {
                         .copied()
                         .unwrap_or(0),
                     residual: col.residual,
-                    temperature_c: self.temperature_at(col.climate_elevation(), tick),
+                    temperature_c: self.temperature_at_point(
+                        wx,
+                        col.climate_elevation(),
+                        tick,
+                    ),
                     biome: self.biome_at(col.climate_elevation()),
                 });
             } else {
@@ -399,7 +482,7 @@ impl World {
                     water_flux: 0,
                     erosion_flux: 0,
                     residual: ResidualBucket::default(),
-                    temperature_c: self.temperature_at(self.sea_level, tick),
+                    temperature_c: self.temperature_at_point(wx, self.sea_level, tick),
                     biome: Biome::Ocean,
                 });
             }

@@ -1,6 +1,6 @@
 //! Temperature-driven material transitions (snow/water/ice).
 
-use wk_material::MaterialRegistry;
+use wk_material::{MaterialRegistry, SAMPLE_WIDTH_M};
 use wk_world::column::Activity;
 use wk_world::world::World;
 
@@ -15,8 +15,11 @@ pub fn run_phase_change(world: &mut World, tick: u64) {
     let climate = world.climate.clone();
     let sea_level = world.sea_level;
     for chunk in world.chunks.values_mut() {
-        for col in &mut chunk.columns {
-            let Some(top) = col.top_layer() else { continue; };
+        let base = chunk.world_x_base();
+        for (i, col) in chunk.columns.iter_mut().enumerate() {
+            let Some(top) = col.top_layer() else {
+                continue;
+            };
             let Some(pc) = MaterialRegistry::props(top.material).phase_change else {
                 continue;
             };
@@ -24,18 +27,21 @@ pub fn run_phase_change(world: &mut World, tick: u64) {
             if mass_here <= 0 {
                 continue;
             }
-            let temp = wk_world::climate::temperature_at(
-                col.climate_elevation(),
-                sea_level,
-                tick,
-                &climate,
-            );
+            let elev = col.climate_elevation();
+            let temp = if let Some(thermal) = &chunk.thermal {
+                let x_m = (base + i as i32) as f32 * SAMPLE_WIDTH_M;
+                thermal.0.sample_bilinear(x_m, elev)
+            } else {
+                wk_world::climate::temperature_at(elev, sea_level, tick, &climate)
+            };
             let target = if temp > pc.threshold_c {
                 pc.above
             } else {
                 pc.below
             };
-            let Some(target) = target else { continue; };
+            let Some(target) = target else {
+                continue;
+            };
             let overshoot = (temp - pc.threshold_c).abs().min(10.0);
             let convert = (mass_here as f32 * PHASE_CHANGE_COEFF * overshoot.max(1.0)) as i64;
             let convert = convert.max(1).min(mass_here);

@@ -158,6 +158,11 @@ pub struct MaterialProps {
     ///
     /// `f32::INFINITY` = never slumps (bedrock, effectively stone).
     pub repose_rise_m: f32,
+    /// Thermal diffusivity in m²/s (game-tuned). Used by the thermal
+    /// field solver; values are larger than real-rock diffusivities so
+    /// heat redistributes on a playable timescale while remaining
+    /// stable at 0.5 m cells with a 10-tick field step.
+    pub thermal_diffusivity: f32,
 }
 
 pub struct MaterialRegistry;
@@ -174,6 +179,7 @@ impl MaterialRegistry {
                 phase_change: None,
                 render_alpha: 255,
                 repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.001,
             },
             MaterialId::Stone => MaterialProps {
                 density: 2600,
@@ -185,6 +191,7 @@ impl MaterialRegistry {
                 render_alpha: 255,
                 // Effectively cliff-stable — bedded stone doesn't slump.
                 repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0012,
             },
             MaterialId::Sand => MaterialProps {
                 density: 1600,
@@ -201,6 +208,7 @@ impl MaterialRegistry {
                 render_alpha: 255,
                 // ~31° angle of repose over a 0.25 m column width.
                 repose_rise_m: 0.15,
+                thermal_diffusivity: 0.0018,
             },
             MaterialId::LooseRock => MaterialProps {
                 density: 2500,
@@ -213,6 +221,7 @@ impl MaterialRegistry {
                 // ~45° — cobbles interlock but a very steep talus
                 // slope still gives way under load.
                 repose_rise_m: 0.25,
+                thermal_diffusivity: 0.0015,
             },
             MaterialId::Gravel => MaterialProps {
                 density: 2000,
@@ -224,6 +233,7 @@ impl MaterialRegistry {
                 render_alpha: 255,
                 // ~40° — larger, more interlocking grains than sand.
                 repose_rise_m: 0.20,
+                thermal_diffusivity: 0.0018,
             },
             MaterialId::Clay => MaterialProps {
                 density: 1900,
@@ -236,6 +246,7 @@ impl MaterialRegistry {
                 // Cohesive but slumps once saturated (which run_sediment
                 // already reflects via the wet-erosion multiplier).
                 repose_rise_m: 0.22,
+                thermal_diffusivity: 0.0012,
             },
             MaterialId::Organic => MaterialProps {
                 density: 600,
@@ -246,6 +257,7 @@ impl MaterialRegistry {
                 phase_change: None,
                 render_alpha: 255,
                 repose_rise_m: 0.10,
+                thermal_diffusivity: 0.002,
             },
             MaterialId::Water => MaterialProps {
                 density: 1000,
@@ -266,6 +278,7 @@ impl MaterialRegistry {
                 // surface-water flow already handles their lateral
                 // spreading. Marked infinite so run_slumping ignores.
                 repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0015,
             },
             MaterialId::Air => MaterialProps {
                 density: 0,
@@ -276,6 +289,7 @@ impl MaterialRegistry {
                 phase_change: None,
                 render_alpha: 0,
                 repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.004,
             },
             MaterialId::Snow => MaterialProps {
                 density: 900,
@@ -291,6 +305,7 @@ impl MaterialRegistry {
                 render_alpha: 240,
                 // Snow slides easily on steeper slopes (avalanches).
                 repose_rise_m: 0.12,
+                thermal_diffusivity: 0.001,
             },
             MaterialId::Ice => MaterialProps {
                 density: 917,
@@ -307,6 +322,7 @@ impl MaterialRegistry {
                 // Ice creeps like a glacier over long time scales; on
                 // the sim's tick scale it's effectively rigid.
                 repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.001,
             },
         }
     }

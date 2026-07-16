@@ -65,6 +65,10 @@ impl AppState {
         }
         world.wake_all();
         world.recompute_mass_audit();
+        // Stage 6.2: chunk thermal fields (geothermal bottom + sky top).
+        // Off by default in World::new so older scenario tests keep the
+        // climate-only temperature path; the live app always opts in.
+        world.enable_thermal_fields();
 
         let sim = wk_sim::Simulation::new(&world);
         let viewport_x = Self::initial_viewport_x(&world);
@@ -227,7 +231,8 @@ impl AppState {
                 OverlayMode::WaterFlux => OverlayMode::Erosion,
                 OverlayMode::Erosion => OverlayMode::Activity,
                 OverlayMode::Activity => OverlayMode::Conservation,
-                OverlayMode::Conservation => OverlayMode::None,
+                OverlayMode::Conservation => OverlayMode::TemperatureField,
+                OverlayMode::TemperatureField => OverlayMode::None,
             };
         }
         if is_key_pressed(KeyCode::M) {
