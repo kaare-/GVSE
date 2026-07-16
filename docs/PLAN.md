@@ -144,20 +144,37 @@ starting the ecology + creature layer work.
 
 ### Stage 6 — Field/heatmap layer
 
-*Doc: `VOXELS.md` §hybrid architecture*
+*Docs: `VOXELS.md` §hybrid architecture (rationale),
+`FIELDS.md` (concrete integration plan)*
 
-Introduce coarse-resolution scalar fields decoupled from the column
-grid, updated by stencil operations each tick. First field: air
-temperature (2D grid over the loaded active window at ~0.5 m
-resolution). Second: atmospheric humidity. Third: subsurface heat with
-geothermal boundary condition from world bottom. Existing subsystems
-that consume `HUMIDITY` and `temperature_at` migrate to sampling the
-fields instead. New subsystem `run_thermal_field` does 5-point
-Laplacian diffusion plus source terms per tick.
+Introduce coarse-resolution scalar and vector fields decoupled from
+the column grid, updated by stencil operations each tick. Deliberately
+additive: columns untouched, fields sit alongside. `FIELDS.md`
+describes the architecture — chunk-local `FieldPatch` with halos,
+one subsystem per field, source-buffer coupling, multi-rate schedule.
 
-Deliberately additive: the columns are untouched, the fields sit
-alongside. First test: `E16_geothermal_gradient_stable` verifies a
-100 m depth column reaches steady-state gradient without oscillation.
+Sub-stages:
+
+- **6.0** — Refactor `subsystems.rs` into `subsystems/*.rs`. Pure
+  refactor, no behaviour change. Must land first — it's what stops
+  the field additions from turning the sim crate into a mess.
+- **6.1** — Add `wk-field` crate (FieldPatch, halos, stencil ops,
+  solver skeletons) and `Option<Field>` slots on `Chunk`. Save/load
+  round-trips the `Option`s. No physics yet.
+- **6.2** — Thermal field. Geothermal boundary at bottom, sky-driven
+  boundary at top. `run_phase_change` migrates to sample the field.
+  Scenario `E20_geothermal_steady_state`.
+- **6.3** — Humidity field. Replaces `HUMIDITY = 0.4` constant.
+  `run_evaporation` reads humidity, writes source. Scenario
+  `E22_humidity_near_water_body`.
+- **6.4** — Pressure + wind fields. Wind derived from pressure
+  gradient. `run_weather` reads wind from the field. Scenario
+  `E23_convection_cell`.
+- **6.5** — Groundwater head field. `run_groundwater_flow` becomes a
+  Darcy diffusion pass on the field. Scenario
+  `E24_darcy_pressure_equilibration`.
+- **6.6** — Dissolved minerals field. Powers the karst subsystem in
+  stage 7.
 
 ### Stage 7 — Karst caves via void annotation
 

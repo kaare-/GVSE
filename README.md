@@ -74,6 +74,10 @@ live under [`docs/`](docs/README.md):
   fields for smooth physics, extended voids for cavities) reaches
   the ambition inside real-time budget and a full voxel rewrite is
   reserved as an option.
+- [`docs/FIELDS.md`](docs/FIELDS.md) — concrete integration plan for
+  the field layer: contract for field subsystems, `wk-field`
+  primitive crate, chunk-local field patches with halos, refactor
+  prep splitting `subsystems.rs`, migration inventory per sub-stage.
 - [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — measured baseline
   throughput, ordered list of concrete optimisations, target headroom
   before adding the ecology and creature layers.
