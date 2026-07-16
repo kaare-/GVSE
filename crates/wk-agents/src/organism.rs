@@ -26,11 +26,14 @@ use crate::{
 pub const MAX_ORGANISMS: usize = 512;
 
 /// Blueprint pixel → world units (fraction of a column). Creature size scales
-/// with painted modules — this is what the collision AABB uses.
-pub const MODULE_CELL_COLS: f32 = 0.35;
+/// with painted modules — collision AABB uses this (kept ≥ draw cell size).
+pub const MODULE_CELL_COLS: f32 = 0.45;
 
-/// Slop so settled bodies don't jitter on touching edges.
-const COLLISION_EPS: f32 = 0.02;
+/// Extra inflate on collision boxes so drawn pixels don't visually merge.
+const COLLISION_PAD: f32 = 0.06;
+
+/// Minimum horizontal separation push when two bodies fully coincide.
+const MIN_SEPARATION: f32 = 0.08;
 
 /// Energy gained per photosystem per tick at full noon light.
 pub const PHOTON_RATE: f32 = 1.8;
@@ -275,10 +278,14 @@ pub struct Aabb {
 
 impl Aabb {
     pub fn overlaps(self, other: Self) -> bool {
-        self.min_x < other.max_x - COLLISION_EPS
-            && self.max_x > other.min_x + COLLISION_EPS
-            && self.min_y < other.max_y - COLLISION_EPS
-            && self.max_y > other.min_y + COLLISION_EPS
+        self.min_x < other.max_x
+            && self.max_x > other.min_x
+            && self.min_y < other.max_y
+            && self.max_y > other.min_y
+    }
+
+    pub fn width(self) -> f32 {
+        (self.max_x - self.min_x).max(0.0)
     }
 
     pub fn center_x(self) -> f32 {
@@ -287,6 +294,15 @@ impl Aabb {
 
     pub fn center_y(self) -> f32 {
         (self.min_y + self.max_y) * 0.5
+    }
+
+    fn inflated(self, pad: f32) -> Self {
+        Self {
+            min_x: self.min_x - pad,
+            max_x: self.max_x + pad,
+            min_y: self.min_y - pad,
+            max_y: self.max_y + pad,
+        }
     }
 }
 
@@ -300,7 +316,8 @@ pub fn organism_aabb(pose: &Pose, blueprint: &Blueprint) -> Aabb {
             max_x: pose.x + half,
             min_y: pose.y - half,
             max_y: pose.y + half,
-        };
+        }
+        .inflated(COLLISION_PAD);
     }
     let min_mx = modules.iter().map(|m| m.x).min().unwrap_or(0);
     let max_mx = modules.iter().map(|m| m.x).max().unwrap_or(0);
@@ -324,6 +341,14 @@ pub fn organism_aabb(pose: &Pose, blueprint: &Blueprint) -> Aabb {
         min_y,
         max_y,
     }
+    .inflated(COLLISION_PAD)
+}
+
+/// Horizontal body width used when spacing clones apart.
+pub fn organism_width(blueprint: &Blueprint) -> f32 {
+    organism_aabb(&Pose { x: 0.0, y: 0.0 }, blueprint)
+        .width()
+        .max(MODULE_CELL_COLS)
 }
 
 fn collect_bodies(store: &AgentStore) -> Vec<(Entity, Aabb)> {
@@ -346,7 +371,29 @@ fn aabb_hits_any(bodies: &[(Entity, Aabb)], aabb: Aabb, ignore: Option<Entity>) 
     })
 }
 
-/// Search near `(x0, y0)` for a pose whose footprint clears existing bodies.
+/// Prefer the gene equilibrium depth (float line / sink depth) at column `x`.
+fn depth_for_pose(world: &World, blueprint: &Blueprint, x: f32, y_hint: f32) -> Option<f32> {
+    let wx = x.floor() as i32;
+    let col = world.column_at(wx)?;
+    if blueprint.is_rooted() && is_deep_water(col) {
+        return None;
+    }
+    if blueprint.is_plankton() {
+        if let Some((top, bed)) = water_band(col) {
+            let eq = equilibrium_y(top, bed, blueprint.genome.buoyancy_bias);
+            // Honour hint only as a secondary depth band (packing rows).
+            if (y_hint - eq).abs() < 0.05 {
+                return Some(eq);
+            }
+            return Some(y_hint.clamp(bed, top));
+        }
+        return Some(col.surface_y);
+    }
+    Some(col.surface_y)
+}
+
+/// Find a clear pose, scanning **outward horizontally** first (full map width)
+/// so clones spread along the water instead of packing into a lens.
 fn find_clear_pose(
     world: &World,
     bodies: &[(Entity, Aabb)],
@@ -357,51 +404,74 @@ fn find_clear_pose(
     let (lo, hi) = world.world_x_bounds()?;
     let lo_f = lo as f32;
     let hi_f = hi as f32 + 0.99;
+    let width = organism_width(blueprint);
+    let step = (width + COLLISION_PAD).max(MODULE_CELL_COLS);
 
-    // Prefer the requested point, then a small spiral in x/y so multiple
-    // small creatures can pack into one column at different depths.
-    let mut rad = 0.0f32;
-    while rad <= 6.0 {
-        let steps = if rad < 1e-6 { 1 } else { 12 };
-        for i in 0..steps {
-            let ang = std::f32::consts::TAU * (i as f32) / (steps as f32);
-            let x = (x0 + rad * ang.cos()).clamp(lo_f, hi_f);
-            let mut y = y0 + rad * ang.sin() * 0.5;
-            let wx = x.floor() as i32;
-            if let Some(col) = world.column_at(wx) {
-                if blueprint.is_rooted() && is_deep_water(col) {
-                    continue;
+    // Depth rows: primary equilibrium, then below/above if the float line is full.
+    let mut depth_rows = vec![y0];
+    if blueprint.is_plankton() {
+        if let Some(col) = world.column_at(x0.floor() as i32) {
+            if let Some((top, bed)) = water_band(col) {
+                let eq = equilibrium_y(top, bed, blueprint.genome.buoyancy_bias);
+                depth_rows = vec![eq];
+                let mut d = width;
+                while eq - d >= bed {
+                    depth_rows.push(eq - d);
+                    d += width;
                 }
-                if let Some((top, bed)) = water_band(col) {
-                    y = y.clamp(bed, top);
-                } else if blueprint.is_plankton() {
-                    y = col.surface_y;
-                } else {
-                    y = col.surface_y;
+                d = width;
+                while eq + d <= top {
+                    depth_rows.push(eq + d);
+                    d += width;
                 }
-            } else {
-                continue;
-            }
-            let pose = Pose { x, y };
-            let aabb = organism_aabb(&pose, blueprint);
-            if !aabb_hits_any(bodies, aabb, None) {
-                return Some((x, y));
             }
         }
-        rad += 0.25;
+    }
+
+    for &row_y in &depth_rows {
+        // k = 0, +1, -1, +2, -2, ... across the whole world.
+        let max_k = ((hi_f - lo_f) / step).ceil() as i32 + 1;
+        for k in 0..=max_k {
+            for sign in [1i32, -1] {
+                if k == 0 && sign < 0 {
+                    continue;
+                }
+                let x = (x0 + sign as f32 * k as f32 * step).clamp(lo_f, hi_f);
+                let Some(y) = depth_for_pose(world, blueprint, x, row_y) else {
+                    continue;
+                };
+                let pose = Pose { x, y };
+                let aabb = organism_aabb(&pose, blueprint);
+                if !aabb_hits_any(bodies, aabb, None) {
+                    return Some((x, y));
+                }
+                if k == 0 {
+                    break;
+                }
+            }
+        }
     }
     None
 }
 
-/// Push overlapping footprints apart (minimum-translation, deterministic).
+/// Push overlapping footprints apart. Prefer **horizontal** separation so
+/// buoyancy (same depth) doesn't re-form a vertical lens every tick.
 fn resolve_collisions(store: &mut AgentStore, world: &World) {
-    // A few iterations so chains of overlaps settle.
-    for _ in 0..4 {
+    let (lo, hi) = match world.world_x_bounds() {
+        Some(b) => b,
+        None => return,
+    };
+    let lo_f = lo as f32;
+    let hi_f = hi as f32 + 0.99;
+
+    for _ in 0..12 {
         let bodies = collect_bodies(store);
         if bodies.len() < 2 {
             return;
         }
-        let mut pushes: Vec<(Entity, f32, f32)> = Vec::new();
+        let mut dx = std::collections::HashMap::<u32, f32>::new();
+        let mut dy = std::collections::HashMap::<u32, f32>::new();
+        let mut any = false;
         for i in 0..bodies.len() {
             for j in (i + 1)..bodies.len() {
                 let (ea, a) = bodies[i];
@@ -409,46 +479,55 @@ fn resolve_collisions(store: &mut AgentStore, world: &World) {
                 if !a.overlaps(b) {
                     continue;
                 }
+                any = true;
                 let overlap_x = (a.max_x.min(b.max_x) - a.min_x.max(b.min_x)).max(0.0);
                 let overlap_y = (a.max_y.min(b.max_y) - a.min_y.max(b.min_y)).max(0.0);
                 if overlap_x <= 0.0 || overlap_y <= 0.0 {
                     continue;
                 }
-                // Separate on the smaller axis (classic AABB MTV).
-                if overlap_x <= overlap_y {
-                    let push = overlap_x * 0.5 + COLLISION_EPS;
-                    if a.center_x() <= b.center_x() {
-                        pushes.push((ea, -push, 0.0));
-                        pushes.push((eb, push, 0.0));
-                    } else {
-                        pushes.push((ea, push, 0.0));
-                        pushes.push((eb, -push, 0.0));
-                    }
+
+                // Side-view: always shove on X. Use at least MIN_SEPARATION so
+                // coincident clones don't stay stuck.
+                let push = (overlap_x * 0.5).max(MIN_SEPARATION) + COLLISION_PAD;
+                let (s_a, s_b) = if a.center_x() < b.center_x()
+                    || (a.center_x() == b.center_x() && ea.id() < eb.id())
+                {
+                    (-push, push)
                 } else {
-                    let push = overlap_y * 0.5 + COLLISION_EPS;
-                    if a.center_y() <= b.center_y() {
-                        pushes.push((ea, 0.0, -push));
-                        pushes.push((eb, 0.0, push));
+                    (push, -push)
+                };
+                *dx.entry(ea.id()).or_insert(0.0) += s_a;
+                *dx.entry(eb.id()).or_insert(0.0) += s_b;
+
+                // If both are pinned against the same world edge, fall back to Y.
+                let a_at_edge = a.center_x() <= lo_f + 0.1 || a.center_x() >= hi_f - 0.1;
+                let b_at_edge = b.center_x() <= lo_f + 0.1 || b.center_x() >= hi_f - 0.1;
+                if a_at_edge && b_at_edge && overlap_y > 0.0 {
+                    let y_push = overlap_y * 0.5 + COLLISION_PAD;
+                    let (ya, yb) = if a.center_y() <= b.center_y() {
+                        (-y_push, y_push)
                     } else {
-                        pushes.push((ea, 0.0, push));
-                        pushes.push((eb, 0.0, -push));
-                    }
+                        (y_push, -y_push)
+                    };
+                    *dy.entry(ea.id()).or_insert(0.0) += ya;
+                    *dy.entry(eb.id()).or_insert(0.0) += yb;
                 }
             }
         }
-        if pushes.is_empty() {
+        if !any {
             return;
         }
-        let (lo, hi) = match world.world_x_bounds() {
-            Some(b) => b,
-            None => return,
-        };
-        let lo_f = lo as f32;
-        let hi_f = hi as f32 + 0.99;
-        for (e, dx, dy) in pushes {
-            if let Ok(mut pose) = store.ecs.get::<&mut Pose>(e) {
-                pose.x = (pose.x + dx).clamp(lo_f, hi_f);
-                pose.y += dy;
+        for (e, aabb) in &bodies {
+            let id = e.id();
+            let px = dx.get(&id).copied().unwrap_or(0.0);
+            let py = dy.get(&id).copied().unwrap_or(0.0);
+            if px == 0.0 && py == 0.0 {
+                continue;
+            }
+            if let Ok(mut pose) = store.ecs.get::<&mut Pose>(*e) {
+                pose.x = (pose.x + px).clamp(lo_f, hi_f);
+                pose.y += py;
+                let _ = aabb;
             }
         }
     }
@@ -585,11 +664,12 @@ impl AgentStore {
                     let child_genome = mutate_organism(*genome, world.seed, tick, e.id());
                     let mut child_bp = body.blueprint.clone();
                     child_bp.genome = child_genome;
-                    // Nudge birth sideways; AABB search / collision finishes packing.
+                    // Start one body-width away; horizontal search spreads further.
+                    let w = organism_width(&child_bp);
                     let side = if (tick + e.id() as u64) % 2 == 0 {
-                        MODULE_CELL_COLS
+                        w
                     } else {
-                        -MODULE_CELL_COLS
+                        -w
                     };
                     births.push((pose.x + side, pose.y, child_bp, child_e, energy.max));
                 }
@@ -750,6 +830,51 @@ mod tests {
                     !bodies[i].1.overlaps(bodies[j].1),
                     "bodies {i} and {j} still overlap"
                 );
+            }
+        }
+    }
+
+    #[test]
+    fn clones_spread_horizontally_not_lens() {
+        let mut world = World::new(21);
+        world.sea_level = 10.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 5.0));
+        // Flood many columns so the float line is wide.
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.deposit_to_top(MaterialId::Water, 2_000, 0);
+            }
+        }
+        let mut store = AgentStore::new();
+        let bp = Blueprint::atom(Genome {
+            buoyancy_bias: 0.0,
+            ..Genome::default()
+        });
+        let origin = 32;
+        for _ in 0..24 {
+            assert!(
+                store
+                    .spawn_from_blueprint(&world, origin, bp.clone(), 50.0)
+                    .is_some(),
+                "spawn should find a clear slot along the water"
+            );
+        }
+        let mut xs: Vec<f32> = store
+            .ecs
+            .query::<(&Pose, &Organism)>()
+            .iter()
+            .map(|(_, (p, _))| p.x)
+            .collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let span = xs[xs.len() - 1] - xs[0];
+        assert!(
+            span > 8.0,
+            "expected clones to spread along X (span={span}), not pack into a lens"
+        );
+        let bodies = collect_bodies(&store);
+        for i in 0..bodies.len() {
+            for j in (i + 1)..bodies.len() {
+                assert!(!bodies[i].1.overlaps(bodies[j].1));
             }
         }
     }
