@@ -1,14 +1,38 @@
-//! ECS creature layer (stage 10).
+//! ECS creature layer (stages 10–11).
 //!
 //! Agents live in a [`hecs::World`] beside the column stack. They read
 //! world state and call [`wk_world::World`] APIs (`dig`, `eat_biomass`,
-//! `drink_water`). See `docs/AGENTS.md`.
+//! `drink_water`). Stage 11 adds reproduction with deterministic genome
+//! mutation and light environmental stress. See `docs/AGENTS.md` and
+//! `docs/EVOLUTION.md`.
 
 use hecs::{Entity, World as EcsWorld};
 use serde::{Deserialize, Serialize};
-use wk_material::CHUNK_W;
 use wk_world::column::Activity;
+use wk_world::terrain::hash_u64;
 use wk_world::world::World;
+
+/// Soft population ceiling — keeps soak / scenarios bounded.
+pub const MAX_AGENTS: usize = 64;
+
+/// Reproduce when current energy ≥ this fraction of max.
+pub const REPRO_ENERGY_FRAC: f32 = 0.82;
+
+/// Fraction of current energy transferred to the offspring.
+pub const REPRO_COST_FRAC: f32 = 0.45;
+
+/// Minimum ticks between reproduction attempts for one agent
+/// (phase-staggered by entity id).
+pub const REPRO_PERIOD: u64 = 90;
+
+/// Relative mutation amplitude per trait (± this fraction).
+pub const MUTATION_SIGMA: f32 = 0.12;
+
+/// Extra energy drain when the host column is dry.
+pub const DESICCATION_DRAIN: f32 = 0.15;
+
+/// Extra energy drain when host temperature is below freezing.
+pub const COLD_DRAIN: f32 = 0.25;
 
 /// Horizontal position in column units (fractional) and elevation (m).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
@@ -30,8 +54,8 @@ pub struct Energy {
     pub max: f32,
 }
 
-/// Genome trait vector — stage 10 stores it; stage 11 mutates it.
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+/// Genome trait vector — mutated on reproduction (stage 11).
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Genome {
     /// Columns stepped toward forage per agent tick (typical 0.2–1.0).
     pub move_speed: f32,
@@ -45,6 +69,8 @@ pub struct Genome {
     pub graze_efficiency: f32,
     /// Basal energy drain per agent tick.
     pub metabolism: f32,
+    /// 0..1 gate on reproduction attempts (0 disables fission).
+    pub repro_drive: f32,
 }
 
 impl Default for Genome {
@@ -56,7 +82,46 @@ impl Default for Genome {
             dig_drive: 0.15,
             graze_efficiency: 0.08,
             metabolism: 0.35,
+            repro_drive: 0.55,
         }
+    }
+}
+
+impl Genome {
+    /// Deterministic per-trait mutation of `parent`.
+    pub fn mutate(parent: Genome, world_seed: u64, tick: u64, parent_id: u32) -> Genome {
+        let mut g = parent;
+        let salt_base = tick
+            .wrapping_mul(0x9E37_79B9)
+            .wrapping_add(parent_id as u64);
+        let mut trait_i = 0u64;
+        let mut jitter = |value: f32, lo: f32, hi: f32| -> f32 {
+            trait_i += 1;
+            let h = hash_u64(world_seed, salt_base as i64, trait_i as i64, 0xE11);
+            // Map to [-1, 1].
+            let u = (h as f32 / u64::MAX as f32) * 2.0 - 1.0;
+            (value * (1.0 + u * MUTATION_SIGMA)).clamp(lo, hi)
+        };
+        g.move_speed = jitter(g.move_speed, 0.05, 1.5);
+        g.graze_rate = jitter(g.graze_rate, 5.0, 120.0);
+        g.drink_rate = jitter(g.drink_rate, 5.0, 100.0);
+        g.dig_drive = jitter(g.dig_drive, 0.0, 1.0);
+        g.graze_efficiency = jitter(g.graze_efficiency, 0.01, 0.25);
+        g.metabolism = jitter(g.metabolism, 0.05, 1.2);
+        g.repro_drive = jitter(g.repro_drive, 0.0, 1.0);
+        g
+    }
+
+    /// True if any trait differs beyond a tiny epsilon.
+    pub fn differs_from(self, other: Genome) -> bool {
+        const EPS: f32 = 1e-4;
+        (self.move_speed - other.move_speed).abs() > EPS
+            || (self.graze_rate - other.graze_rate).abs() > EPS
+            || (self.drink_rate - other.drink_rate).abs() > EPS
+            || (self.dig_drive - other.dig_drive).abs() > EPS
+            || (self.graze_efficiency - other.graze_efficiency).abs() > EPS
+            || (self.metabolism - other.metabolism).abs() > EPS
+            || (self.repro_drive - other.repro_drive).abs() > EPS
     }
 }
 
@@ -68,12 +133,15 @@ pub struct Grazer;
 #[derive(Default)]
 pub struct AgentStore {
     pub ecs: EcsWorld,
+    /// Cumulative successful births (stage 11 bookkeeping / tests).
+    pub births_total: u64,
 }
 
 impl AgentStore {
     pub fn new() -> Self {
         Self {
             ecs: EcsWorld::new(),
+            births_total: 0,
         }
     }
 
@@ -86,6 +154,8 @@ impl AgentStore {
     }
 
     /// Spawn a scripted grazer at column `world_x`, surface elevation.
+    /// `energy` is both the starting pool and the max (see
+    /// [`spawn_grazer_energy`] to set them separately).
     pub fn spawn_grazer(
         &mut self,
         world: &World,
@@ -93,23 +163,37 @@ impl AgentStore {
         genome: Genome,
         energy: f32,
     ) -> Option<Entity> {
+        let max_e = energy.max(1.0);
+        self.spawn_grazer_energy(world, world_x, genome, energy, max_e)
+    }
+
+    /// Spawn with explicit current / max energy.
+    pub fn spawn_grazer_energy(
+        &mut self,
+        world: &World,
+        world_x: i32,
+        genome: Genome,
+        energy: f32,
+        max_energy: f32,
+    ) -> Option<Entity> {
+        if self.grazer_count() >= MAX_AGENTS {
+            return None;
+        }
         let col = world.column_at(world_x)?;
         let y = col.surface_y;
-        let max_e = energy.max(1.0);
-        let e = self
-            .ecs
-            .spawn((
-                Pose {
-                    x: world_x as f32 + 0.5,
-                    y,
-                },
-                Energy {
-                    current: energy.clamp(0.0, max_e),
-                    max: max_e,
-                },
-                genome,
-                Grazer,
-            ));
+        let max_e = max_energy.max(1.0);
+        let e = self.ecs.spawn((
+            Pose {
+                x: world_x as f32 + 0.5,
+                y,
+            },
+            Energy {
+                current: energy.clamp(0.0, max_e),
+                max: max_e,
+            },
+            genome,
+            Grazer,
+        ));
         Some(e)
     }
 
@@ -140,13 +224,16 @@ impl AgentStore {
         }
     }
 
-    /// One scripted-grazer behaviour pass.
+    /// One scripted-grazer behaviour pass (forage, stress, reproduce).
     pub fn step_grazers(&mut self, world: &mut World, tick: u64) {
         self.wake_host_columns(world);
 
         let mut moves: Vec<(Entity, f32, f32)> = Vec::new();
         let mut digs: Vec<(Entity, i32, f32, i64)> = Vec::new();
         let mut deaths: Vec<Entity> = Vec::new();
+        // (x, y, genome, energy, max_energy)
+        let mut births: Vec<(f32, f32, Genome, f32, f32)> = Vec::new();
+        let population = self.grazer_count();
 
         for (e, (pose, energy, genome, _)) in self
             .ecs
@@ -214,10 +301,47 @@ impl AgentStore {
                 };
             }
 
-            energy.current -= genome.metabolism;
+            // Environmental stress (stage 11).
+            let mut drain = genome.metabolism;
+            let dry = world
+                .column_at(wx)
+                .map(|c| c.top_water_mass() <= 0 && c.moisture <= 0)
+                .unwrap_or(true);
+            if dry {
+                drain += DESICCATION_DRAIN;
+            }
+            let temp = world.temperature_at_point(wx, pose.y, tick);
+            if temp < 0.0 {
+                drain += COLD_DRAIN;
+            }
+            energy.current -= drain;
             if energy.current <= 0.0 {
                 deaths.push(e);
                 continue;
+            }
+
+            // Reproduction when well-fed, under the soft cap, and due.
+            let phase = e.id() as u64 % REPRO_PERIOD;
+            let repro_roll =
+                ((tick.wrapping_add(e.id() as u64).wrapping_mul(48271)) % 1000) as f32 / 1000.0;
+            if population + births.len() < MAX_AGENTS
+                && genome.repro_drive > 0.0
+                && tick % REPRO_PERIOD == phase
+                && repro_roll < genome.repro_drive
+                && energy.current >= energy.max * REPRO_ENERGY_FRAC
+            {
+                let child_e = energy.current * REPRO_COST_FRAC;
+                if child_e > 1.0 {
+                    energy.current -= child_e;
+                    let child_genome = Genome::mutate(*genome, world.seed, tick, e.id());
+                    let child_x = pose.x
+                        + if (tick + e.id() as u64) % 2 == 0 {
+                            0.35
+                        } else {
+                            -0.35
+                        };
+                    births.push((child_x, pose.y, child_genome, child_e, energy.max));
+                }
             }
 
             let mut new_x = pose.x + dx;
@@ -248,9 +372,40 @@ impl AgentStore {
         for e in deaths {
             let _ = self.ecs.despawn(e);
         }
+        for (x, y, genome, energy, max_e) in births {
+            if self.grazer_count() >= MAX_AGENTS {
+                break;
+            }
+            let mut child_x = x;
+            let child_wx = child_x.floor() as i32;
+            if world.column_at(child_wx).is_none() {
+                // Snap back onto a loaded column if the offset walked off-map.
+                if let Some((_, pose)) = self.ecs.query::<&Pose>().iter().next() {
+                    child_x = pose.x;
+                } else {
+                    continue;
+                }
+            }
+            let surface_y = world
+                .column_at(child_x.floor() as i32)
+                .map(|c| c.surface_y)
+                .unwrap_or(y);
+            self.ecs.spawn((
+                Pose {
+                    x: child_x,
+                    y: surface_y,
+                },
+                Energy {
+                    current: energy.clamp(0.0, max_e),
+                    max: max_e,
+                },
+                genome,
+                Grazer,
+            ));
+            self.births_total += 1;
+        }
 
         self.wake_host_columns(world);
-        let _ = CHUNK_W;
     }
 
     /// Alive grazer count (for tests / HUD).
@@ -266,5 +421,22 @@ impl AgentStore {
             .map(|(_, e)| e.current.max(0.0))
             .sum()
     }
-}
 
+    /// Collect all grazer genomes (deterministic entity iteration order).
+    pub fn genomes(&self) -> Vec<Genome> {
+        self.ecs
+            .query::<&Genome>()
+            .iter()
+            .map(|(_, g)| *g)
+            .collect()
+    }
+
+    /// Mean metabolism across living grazers (0 if empty).
+    pub fn mean_metabolism(&self) -> f32 {
+        let gs = self.genomes();
+        if gs.is_empty() {
+            return 0.0;
+        }
+        gs.iter().map(|g| g.metabolism).sum::<f32>() / gs.len() as f32
+    }
+}

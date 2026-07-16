@@ -390,12 +390,16 @@ pub fn draw_frame(
         };
         let x = i as f32 * COL_W;
         match snap.overlay.mode {
-            OverlayMode::WaterFlux if col.water_flux > 0 => {
-                let a = (col.water_flux.min(100) as f32 / 100.0 * 255.0) as u8;
-                draw_rectangle(x, top - 5.0, COL_W, 2.0, Color::from_rgba(0, 200, 255, a));
+            OverlayMode::WaterFlux => {
+                if col.water_flux > 0 {
+                    let a = (col.water_flux.min(100) as f32 / 100.0 * 255.0) as u8;
+                    draw_rectangle(x, top - 5.0, COL_W, 2.0, Color::from_rgba(0, 200, 255, a));
+                }
             }
-            OverlayMode::Erosion if col.erosion_flux > 0 => {
-                draw_rectangle(x, top, COL_W, 3.0, Color::from_rgba(255, 0, 0, 200));
+            OverlayMode::Erosion => {
+                if col.erosion_flux > 0 {
+                    draw_rectangle(x, top, COL_W, 3.0, Color::from_rgba(255, 0, 0, 200));
+                }
             }
             OverlayMode::Activity => {
                 let c = match col.activity {
