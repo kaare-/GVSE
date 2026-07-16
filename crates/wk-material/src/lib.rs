@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const MATERIAL_COUNT: usize = 11;
+pub const MATERIAL_COUNT: usize = 12;
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
 pub const MAX_LAYERS: usize = 8;
 pub const CHUNK_W: usize = 64;
@@ -48,14 +48,19 @@ pub enum MaterialId {
     /// Very permeable (water flows through easily); harder to erode than
     /// sand but easier than clay. Beach cobbles, riverbed lag.
     Gravel = 10,
+    /// Soluble carbonate rock. High permeability + non-zero solubility
+    /// drive karst cave formation (stage 7). Do not represent caves as
+    /// Air layers — voids are sparse column annotations (see `Void`).
+    Limestone = 11,
 }
 
 impl MaterialId {
     /// Ground-forming solids (never fluid, never phase-changes at the
     /// world's normal temperature range).
-    pub const ALL_SOLIDS: [MaterialId; 6] = [
+    pub const ALL_SOLIDS: [MaterialId; 7] = [
         MaterialId::Bedrock,
         MaterialId::Stone,
+        MaterialId::Limestone,
         MaterialId::LooseRock,
         MaterialId::Gravel,
         MaterialId::Sand,
@@ -75,6 +80,7 @@ impl MaterialId {
             8 => Some(MaterialId::Ice),
             9 => Some(MaterialId::LooseRock),
             10 => Some(MaterialId::Gravel),
+            11 => Some(MaterialId::Limestone),
             _ => None,
         }
     }
@@ -91,6 +97,7 @@ impl MaterialId {
             self,
             MaterialId::Bedrock
                 | MaterialId::Stone
+                | MaterialId::Limestone
                 | MaterialId::LooseRock
                 | MaterialId::Gravel
                 | MaterialId::Sand
@@ -163,10 +170,14 @@ pub struct MaterialProps {
     /// heat redistributes on a playable timescale while remaining
     /// stable at 0.5 m cells with a 10-tick field step.
     pub thermal_diffusivity: f32,
-    /// 0–255 mineral solubility in flowing water. 0 for all current
-    /// materials; Limestone (stage 7) will be non-zero. The dissolved
-    /// field (stage 6.6) reads this when building dissolution sources.
+    /// 0–255 mineral solubility in flowing water. Limestone is non-zero;
+    /// everything else is 0. Karst dissolution (`run_karst`) is driven by
+    /// lateral water flux through soluble layers, not moisture-in-place.
     pub solubility: u8,
+    /// Maximum horizontal void span (metres) this material can roof
+    /// before collapse. 0 = collapses immediately (sand/clay);
+    /// `f32::INFINITY` = never collapses as a roof (bedrock).
+    pub roof_span_max_m: f32,
 }
 
 pub struct MaterialRegistry;
@@ -185,6 +196,7 @@ impl MaterialRegistry {
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.001,
                 solubility: 0,
+                roof_span_max_m: f32::INFINITY,
             },
             MaterialId::Stone => MaterialProps {
                 density: 2600,
@@ -198,6 +210,7 @@ impl MaterialRegistry {
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.0012,
                 solubility: 0,
+                roof_span_max_m: 15.0,
             },
             MaterialId::Sand => MaterialProps {
                 density: 1600,
@@ -216,6 +229,7 @@ impl MaterialRegistry {
                 repose_rise_m: 0.15,
                 thermal_diffusivity: 0.0018,
                 solubility: 0,
+                roof_span_max_m: 0.0,
             },
             MaterialId::LooseRock => MaterialProps {
                 density: 2500,
@@ -230,6 +244,7 @@ impl MaterialRegistry {
                 repose_rise_m: 0.25,
                 thermal_diffusivity: 0.0015,
                 solubility: 0,
+                roof_span_max_m: 2.0,
             },
             MaterialId::Gravel => MaterialProps {
                 density: 2000,
@@ -243,6 +258,7 @@ impl MaterialRegistry {
                 repose_rise_m: 0.20,
                 thermal_diffusivity: 0.0018,
                 solubility: 0,
+                roof_span_max_m: 0.5,
             },
             MaterialId::Clay => MaterialProps {
                 density: 1900,
@@ -257,6 +273,7 @@ impl MaterialRegistry {
                 repose_rise_m: 0.22,
                 thermal_diffusivity: 0.0012,
                 solubility: 0,
+                roof_span_max_m: 0.0,
             },
             MaterialId::Organic => MaterialProps {
                 density: 600,
@@ -269,6 +286,7 @@ impl MaterialRegistry {
                 repose_rise_m: 0.10,
                 thermal_diffusivity: 0.002,
                 solubility: 0,
+                roof_span_max_m: 0.0,
             },
             MaterialId::Water => MaterialProps {
                 density: 1000,
@@ -291,6 +309,7 @@ impl MaterialRegistry {
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.0015,
                 solubility: 0,
+                roof_span_max_m: 0.0,
             },
             MaterialId::Air => MaterialProps {
                 density: 0,
@@ -303,6 +322,7 @@ impl MaterialRegistry {
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.004,
                 solubility: 0,
+                roof_span_max_m: 0.0,
             },
             MaterialId::Snow => MaterialProps {
                 density: 900,
@@ -320,6 +340,7 @@ impl MaterialRegistry {
                 repose_rise_m: 0.12,
                 thermal_diffusivity: 0.001,
                 solubility: 0,
+                roof_span_max_m: 0.0,
             },
             MaterialId::Ice => MaterialProps {
                 density: 917,
@@ -338,6 +359,22 @@ impl MaterialRegistry {
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.001,
                 solubility: 0,
+                roof_span_max_m: 0.0,
+            },
+            MaterialId::Limestone => MaterialProps {
+                density: 2500,
+                // Much higher than stone — water infiltrates and flows
+                // laterally through limestone, which is why karst forms.
+                permeability: 140,
+                erosion_resistance: 150,
+                cohesion: 180,
+                porosity: 40,
+                phase_change: None,
+                render_alpha: 255,
+                repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0011,
+                solubility: 40,
+                roof_span_max_m: 10.0,
             },
         }
     }
@@ -362,6 +399,8 @@ impl MaterialRegistry {
             MaterialId::Air => [0x87, 0xCE, 0xEB],
             MaterialId::Snow => [0xF6, 0xF8, 0xFF],
             MaterialId::Ice => [0xC7, 0xE0, 0xF2],
+            // Warm pale grey — distinct from cooler Stone.
+            MaterialId::Limestone => [0xC8, 0xC2, 0xB0],
         }
     }
 }

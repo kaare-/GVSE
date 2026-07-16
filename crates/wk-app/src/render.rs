@@ -37,41 +37,132 @@ pub fn screen_x_to_world_x(mx: f32, viewport_x: i32) -> i32 {
 /// fine — the user can pan the camera vertically with W/S to see it.
 fn draw_terrain_column(
     x: f32,
-    surface_px: f32,
+    surface_y: f32,
+    sea_level: f32,
+    sh: f32,
+    camera_y_offset: f32,
     layers: &[(MaterialId, i64, u64, u64)],
+    voids: &[(f32, f32, i64, u8)],
     px_per_m: f32,
     saturation: f32,
 ) {
-    let mut y = surface_px;
+    // Paint solid layers from the surface down, inserting void cutouts at
+    // their absolute elevations so caves read as dark bands (with pooled
+    // water when present).
+    let mut void_bands: Vec<(f32, f32, i64, u8)> = voids.to_vec();
+    void_bands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+
+    let mut y_m = surface_y;
+    let mut vi = 0usize;
     for &(mat, thickness, _, _) in layers {
         if thickness <= 0 {
             continue;
         }
-        let h = mass_to_px(mat, thickness, px_per_m).max(0.6);
-        let [mut r, mut g, mut b] = MaterialRegistry::colour_rgb(mat);
-        // Subtle waterlogged tint: solid granular layers get slightly
-        // darker and slightly bluer as the column's aquifer saturation
-        // approaches 1. Skips fluids (already have their own colour)
-        // and bedrock (impermeable, never actually wet inside).
-        if saturation > 0.05
-            && matches!(
-                mat,
-                MaterialId::Sand
-                    | MaterialId::Clay
-                    | MaterialId::Gravel
-                    | MaterialId::LooseRock
-                    | MaterialId::Stone
-                    | MaterialId::Organic
-            )
-        {
-            let t = (saturation * 0.35).min(0.35);
-            r = lerp_u8(r, 40, t);
-            g = lerp_u8(g, 55, t);
-            b = lerp_u8(b, 85, t);
+        let mut remaining_m = {
+            let density = MaterialRegistry::props(mat).density.max(1) as f32;
+            (thickness as f32 / density) / SAMPLE_WIDTH_M
+        };
+        while remaining_m > 1e-5 {
+            // If a void starts at/above current y, paint it first.
+            if vi < void_bands.len() {
+                let (vtop, vh, vwater, vlight) = void_bands[vi];
+                if vtop >= y_m - 1e-3 {
+                    let top_px = world_y_to_screen(vtop.min(y_m), sea_level, sh, camera_y_offset);
+                    let bot_y = (vtop - vh).min(y_m);
+                    let bot_px = world_y_to_screen(bot_y, sea_level, sh, camera_y_offset);
+                    let h = (bot_px - top_px).max(0.6);
+                    let dark = 18u8.saturating_add(vlight / 8);
+                    draw_rectangle(
+                        x,
+                        top_px,
+                        COL_W,
+                        h,
+                        Color::from_rgba(dark, dark, dark.saturating_add(8), 255),
+                    );
+                    if vwater > 0 {
+                        let fill_m = {
+                            let density =
+                                MaterialRegistry::props(MaterialId::Water).density.max(1) as f32;
+                            ((vwater as f32 / density) / SAMPLE_WIDTH_M).min(vh)
+                        };
+                        let water_top = bot_y + fill_m;
+                        let wt_px = world_y_to_screen(water_top, sea_level, sh, camera_y_offset);
+                        let wh = (bot_px - wt_px).max(0.5);
+                        draw_rectangle(
+                            x,
+                            wt_px,
+                            COL_W,
+                            wh,
+                            Color::from_rgba(0x23, 0x64, 0xD2, 180),
+                        );
+                    }
+                    y_m = bot_y;
+                    vi += 1;
+                    continue;
+                }
+            }
+            // Paint solid down to the next void top (or all remaining).
+            let next_void_top = void_bands.get(vi).map(|v| v.0);
+            let paint_m = match next_void_top {
+                Some(vt) if vt < y_m => (y_m - vt).min(remaining_m),
+                _ => remaining_m,
+            };
+            let top_px = world_y_to_screen(y_m, sea_level, sh, camera_y_offset);
+            let bot_y = y_m - paint_m;
+            let bot_px = world_y_to_screen(bot_y, sea_level, sh, camera_y_offset);
+            let h = (bot_px - top_px).max(0.6);
+            let [mut r, mut g, mut b] = MaterialRegistry::colour_rgb(mat);
+            if saturation > 0.05
+                && matches!(
+                    mat,
+                    MaterialId::Sand
+                        | MaterialId::Clay
+                        | MaterialId::Gravel
+                        | MaterialId::LooseRock
+                        | MaterialId::Stone
+                        | MaterialId::Limestone
+                        | MaterialId::Organic
+                )
+            {
+                let t = (saturation * 0.35).min(0.35);
+                r = lerp_u8(r, 40, t);
+                g = lerp_u8(g, 55, t);
+                b = lerp_u8(b, 85, t);
+            }
+            let a = MaterialRegistry::props(mat).render_alpha;
+            draw_rectangle(x, top_px, COL_W, h, Color::from_rgba(r, g, b, a));
+            y_m = bot_y;
+            remaining_m -= paint_m;
+            let _ = px_per_m;
         }
-        let a = MaterialRegistry::props(mat).render_alpha;
-        draw_rectangle(x, y, COL_W, h, Color::from_rgba(r, g, b, a));
-        y += h;
+    }
+    // Trailing voids below the solid stack.
+    while vi < void_bands.len() {
+        let (vtop, vh, vwater, vlight) = void_bands[vi];
+        let top_px = world_y_to_screen(vtop.min(y_m), sea_level, sh, camera_y_offset);
+        let bot_y = vtop - vh;
+        let bot_px = world_y_to_screen(bot_y, sea_level, sh, camera_y_offset);
+        let h = (bot_px - top_px).max(0.6);
+        let dark = 18u8.saturating_add(vlight / 8);
+        draw_rectangle(
+            x,
+            top_px,
+            COL_W,
+            h,
+            Color::from_rgba(dark, dark, dark.saturating_add(8), 255),
+        );
+        if vwater > 0 {
+            let fill_m = {
+                let density = MaterialRegistry::props(MaterialId::Water).density.max(1) as f32;
+                ((vwater as f32 / density) / SAMPLE_WIDTH_M).min(vh)
+            };
+            let water_top = bot_y + fill_m;
+            let wt_px = world_y_to_screen(water_top, sea_level, sh, camera_y_offset);
+            let wh = (bot_px - wt_px).max(0.5);
+            draw_rectangle(x, wt_px, COL_W, wh, Color::from_rgba(0x23, 0x64, 0xD2, 180));
+        }
+        y_m = bot_y;
+        vi += 1;
     }
 }
 
@@ -249,7 +340,17 @@ pub fn draw_frame(
         let surface_px = world_y_to_screen(col.surface_y, snap.sea_level, sh, camera_y_offset);
         let col_bedrock_px = world_y_to_screen(col.bedrock_y, snap.sea_level, sh, camera_y_offset);
 
-        draw_terrain_column(x, surface_px, &col.layers, PX_PER_M, col.saturation);
+        draw_terrain_column(
+            x,
+            col.surface_y,
+            snap.sea_level,
+            sh,
+            camera_y_offset,
+            &col.layers,
+            &col.voids,
+            PX_PER_M,
+            col.saturation,
+        );
         tops.push(Some(surface_px));
 
         if Some(col.world_x) == selected {
@@ -341,6 +442,7 @@ fn material_name(mat: MaterialId) -> &'static str {
     match mat {
         MaterialId::Bedrock => "bedrock",
         MaterialId::Stone => "stone",
+        MaterialId::Limestone => "limestone",
         MaterialId::LooseRock => "looserock",
         MaterialId::Gravel => "gravel",
         MaterialId::Sand => "sand",

@@ -1,4 +1,4 @@
-//! Headless scenario experiments E1–E8, E20+.
+//! Headless scenario experiments E1–E12, E20+.
 
 mod e1_rain_hill;
 mod e2_basin;
@@ -8,6 +8,10 @@ mod e5_wet_dry;
 mod e6_chunk_seam;
 mod e7_soak;
 mod e8_save_load;
+mod e9_karst_horizontal_passage;
+mod e10_sinkhole_captures_river;
+mod e11_cave_roof_collapses;
+mod e12_stalactite_forms;
 mod e20_geothermal_steady_state;
 mod e22_humidity_near_water_body;
 mod e23_convection_cell;

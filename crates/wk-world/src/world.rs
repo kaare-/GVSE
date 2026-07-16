@@ -26,6 +26,13 @@ pub struct MassAudit {
     /// `serde(default)` so schema-v2 saves without this field still load.
     #[serde(default)]
     pub dissolved_total: i64,
+    /// Cumulative kg dissolved out of solid rock (karst / solubility).
+    /// Bookkeeping counter — not part of `total_tracked`.
+    #[serde(default)]
+    pub dissolved_out_total: i64,
+    /// Cumulative kg reprecipitated from dissolved minerals (speleothems).
+    #[serde(default)]
+    pub dissolved_return_total: i64,
 }
 
 impl MassAudit {
@@ -576,6 +583,11 @@ impl World {
             sea_inject_total: self.mass_audit.sea_inject_total,
             rain_inject_total: self.mass_audit.rain_inject_total,
             boundary_out_total: self.mass_audit.boundary_out_total,
+            dissolved_out_total: self.mass_audit.dissolved_out_total,
+            dissolved_return_total: self.mass_audit.dissolved_return_total,
+            // Preserve parked dissolved mass when fields are off; overwritten
+            // below from the field integral when enabled.
+            dissolved_total: self.mass_audit.dissolved_total,
             tick: self.mass_audit.tick,
             ..Default::default()
         };
@@ -591,13 +603,20 @@ impl World {
                     audit.by_material[m] += col.layers[i].thickness;
                 }
                 audit.by_material[MaterialId::Water.index()] += col.moisture;
+                audit.by_material[MaterialId::Water.index()] += col.void_water_total();
                 if col.sediment.total > 0 {
                     audit.by_material[col.sediment.dominant.index()] += col.sediment.total;
                 }
             }
         }
         self.mass_audit.by_material = audit.by_material;
-        self.mass_audit.dissolved_total = self.dissolved_mass_kg();
+        self.mass_audit.dissolved_out_total = audit.dissolved_out_total;
+        self.mass_audit.dissolved_return_total = audit.dissolved_return_total;
+        if self.dissolved_fields_enabled {
+            self.mass_audit.dissolved_total = self.dissolved_mass_kg();
+        } else {
+            self.mass_audit.dissolved_total = audit.dissolved_total;
+        }
     }
 
     pub fn add_marker(&mut self, world_x: i32, label: String, tick: u64) -> Option<MarkerId> {
@@ -647,6 +666,8 @@ pub struct ColumnView {
     pub surface_y: f32,
     pub bedrock_y: f32,
     pub layers: Vec<(MaterialId, i64, u64, u64)>,
+    /// Sparse cavities for the renderer (ceiling, height, water, light).
+    pub voids: Vec<(f32, f32, i64, u8)>,
     /// Mass (kg) of the top Water layer, or 0 if the top isn't water.
     pub surface_water: i64,
     pub moisture: i64,
@@ -769,11 +790,17 @@ impl World {
                     .collect();
                 let cap = col.moisture_cap().max(1) as f32;
                 let saturation = (col.moisture as f32 / cap).clamp(0.0, 1.0);
+                let voids = col
+                    .voids
+                    .iter()
+                    .map(|v| (v.top_y, v.height_m, v.water_mass, v.light))
+                    .collect();
                 columns.push(ColumnView {
                     world_x: wx,
                     surface_y: col.surface_y,
                     bedrock_y: chunk.bedrock_y,
                     layers,
+                    voids,
                     surface_water: col.top_water_mass(),
                     moisture: col.moisture,
                     saturation,
@@ -806,6 +833,7 @@ impl World {
                     surface_y: self.sea_level,
                     bedrock_y: 0.0,
                     layers: vec![],
+                    voids: vec![],
                     surface_water: 0,
                     moisture: 0,
                     saturation: 0.0,
