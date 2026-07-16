@@ -21,6 +21,14 @@ use crate::{
 /// Soft cap for module organisms (separate from grazers).
 pub const MAX_ORGANISMS: usize = 512;
 
+/// Minimum empty columns between organism anchors (1 ⇒ anchors ≥ 2 apart).
+/// Keeps creatures from visually merging in the side view.
+pub const COLUMN_GAP: i32 = 1;
+
+/// Blueprint pixel → world-column fraction. Atom modules stay inside one column
+/// instead of spilling into the neighbour (old code used full columns per pixel).
+pub const MODULE_CELL_COLS: f32 = 0.35;
+
 /// Energy gained per photosystem per tick at full noon light.
 pub const PHOTON_RATE: f32 = 1.8;
 
@@ -151,6 +159,16 @@ fn occupied_columns(store: &AgentStore) -> std::collections::HashSet<i32> {
     set
 }
 
+/// True if `c` is far enough from every occupied anchor (`COLUMN_GAP`).
+fn column_clear(occupied: &std::collections::HashSet<i32>, c: i32) -> bool {
+    for d in -COLUMN_GAP..=COLUMN_GAP {
+        if occupied.contains(&(c + d)) {
+            return false;
+        }
+    }
+    true
+}
+
 /// Nearest free column to `prefer`, optionally requiring / forbidding deep water.
 fn find_free_column(
     world: &World,
@@ -168,7 +186,7 @@ fn find_free_column(
             if c < lo || c > hi {
                 continue;
             }
-            if occupied.contains(&c) {
+            if !column_clear(occupied, c) {
                 continue;
             }
             let Some(col) = world.column_at(c) else {
@@ -236,7 +254,7 @@ impl AgentStore {
             Some(false)
         };
 
-        let world_x = if occupied.contains(&world_x) {
+        let world_x = if !column_clear(&occupied, world_x) {
             find_free_column(world, world_x, &occupied, want_water)?
         } else if blueprint.is_rooted() {
             let col = world.column_at(world_x)?;
@@ -278,7 +296,7 @@ impl AgentStore {
         let phase = world.climate.phase_fraction(tick);
         let population = self.organism_count();
 
-        // --- Spatial exclusion: one organism per column -----------------
+        // --- Spatial exclusion: anchors keep COLUMN_GAP clearance --------
         {
             let mut rows: Vec<(Entity, i32, bool)> = self
                 .ecs
@@ -291,7 +309,8 @@ impl AgentStore {
             let mut claimed = std::collections::HashSet::new();
             let mut moves: Vec<(Entity, i32)> = Vec::new();
             for &(e, wx, plankton) in &rows {
-                if claimed.insert(wx) {
+                if column_clear(&claimed, wx) {
+                    claimed.insert(wx);
                     continue;
                 }
                 let want = if plankton {
@@ -302,7 +321,9 @@ impl AgentStore {
                 } else {
                     Some(false)
                 };
-                if let Some(free) = find_free_column(world, wx, &claimed, want) {
+                if let Some(free) = find_free_column(world, wx, &claimed, want)
+                    .or_else(|| find_free_column(world, wx, &claimed, None))
+                {
                     claimed.insert(free);
                     moves.push((e, free));
                 }
@@ -441,11 +462,18 @@ impl AgentStore {
             .query::<(&Pose, &ModuleBody, &Organism)>()
             .iter()
         {
-            for m in &body.blueprint.modules {
-                // Blueprint y: 0 = ground-relative; above-ground positive in editor.
-                // World: pose.y is surface; module local y lifts above surface.
-                let wx = pose.x + m.x as f32;
-                let wy = pose.y + m.y as f32 * 0.25; // 0.25 m per module cell
+            let modules = &body.blueprint.modules;
+            if modules.is_empty() {
+                continue;
+            }
+            let min_x = modules.iter().map(|m| m.x).min().unwrap_or(0);
+            let max_x = modules.iter().map(|m| m.x).max().unwrap_or(0);
+            let mid_x = (min_x as f32 + max_x as f32) * 0.5;
+            for m in modules {
+                // Keep the whole blueprint footprint inside the reserved column
+                // band — do not treat each paint pixel as a full world column.
+                let wx = pose.x + (m.x as f32 - mid_x) * MODULE_CELL_COLS;
+                let wy = pose.y + m.y as f32 * MODULE_CELL_COLS;
                 out.push((wx, wy, m.module.rgb()));
             }
         }
@@ -506,7 +534,27 @@ mod tests {
             .map(|(_, (p, _))| p.world_x())
             .collect();
         assert_eq!(cols.len(), 2);
-        assert_ne!(cols[0], cols[1]);
+        assert!((cols[0] - cols[1]).abs() > COLUMN_GAP);
+    }
+
+    #[test]
+    fn atom_draw_stays_in_one_column() {
+        let mut world = World::new(11);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        let mut store = AgentStore::new();
+        let bp = Blueprint::atom(Genome::default());
+        store
+            .spawn_from_blueprint(&world, 10, bp, 50.0)
+            .expect("spawn");
+        let quads = store.organism_draw_list();
+        assert_eq!(quads.len(), 2);
+        for &(wx, _, _) in &quads {
+            assert!(
+                (wx - 10.5).abs() < 0.5,
+                "module wx={wx} spilled outside host column 10"
+            );
+        }
     }
 
     #[test]

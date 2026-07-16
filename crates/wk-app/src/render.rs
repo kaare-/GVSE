@@ -310,13 +310,16 @@ pub fn draw_organisms(
 ) {
     let sh = screen_height();
     let sw = screen_width();
+    // Module quads are sub-column sized so neighbouring organisms don't paint
+    // over each other (full COL_W squares used to merge into one blob).
+    let cell = (COL_W * 0.4).max(3.0);
     for &(wx, wy, (r, g, b)) in modules {
         let sx = (wx - viewport_x as f32) * COL_W;
-        if sx < -COL_W || sx > sw {
+        if sx < -cell || sx > sw {
             continue;
         }
         let sy = world_y_to_screen(wy, sea_level, sh, camera_y_offset);
-        draw_rectangle(sx, sy - COL_W, COL_W.max(3.0), COL_W.max(3.0), Color::from_rgba(r, g, b, 255));
+        draw_rectangle(sx, sy - cell, cell, cell, Color::from_rgba(r, g, b, 255));
     }
 }
 
