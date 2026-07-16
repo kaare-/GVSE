@@ -1,6 +1,9 @@
 use wk_material::CHUNK_W;
 
 use crate::column::{Activity, Column, SedimentLoad};
+use crate::fields::{
+    DissolvedField, GroundwaterHeadField, HumidityField, PressureField, ThermalField, WindField,
+};
 
 #[derive(Debug, Clone)]
 pub struct ChunkInbox {
@@ -41,6 +44,15 @@ pub struct Chunk {
     /// across the chunk boundary.
     pub halo_water_top: [f32; 2],
     pub halo_water_table: [f32; 2],
+    /// Optional scalar/vector fields (stage 6). `None` means the field
+    /// is disabled for this chunk and subsystems fall back to the
+    /// pre-field behaviour (hardcoded humidity, climate temperature, …).
+    pub thermal: Option<ThermalField>,
+    pub humidity: Option<HumidityField>,
+    pub pressure: Option<PressureField>,
+    pub wind: Option<WindField>,
+    pub gw_head: Option<GroundwaterHeadField>,
+    pub dissolved: Option<DissolvedField>,
 }
 
 impl Chunk {
@@ -53,6 +65,12 @@ impl Chunk {
             halo_surface_y: [0.0, 0.0],
             halo_water_top: [0.0, 0.0],
             halo_water_table: [0.0, 0.0],
+            thermal: None,
+            humidity: None,
+            pressure: None,
+            wind: None,
+            gw_head: None,
+            dissolved: None,
         }
     }
 

@@ -478,6 +478,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "wk-field"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
 name = "wk-io"
 version = "0.1.0"
 dependencies = [
@@ -510,5 +517,6 @@ name = "wk-world"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "wk-field",
  "wk-material",
 ]

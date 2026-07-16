@@ -11,9 +11,10 @@ Can a simple side-view landscape accumulate readable geological history without 
 | Crate | Role |
 |-------|------|
 | `wk-material` | Material vocabulary and property tables |
-| `wk-world` | Columns, chunks, terrain generation, markers |
+| `wk-field` | Scalar/vector field patches, stencils, solvers (stage 6) |
+| `wk-world` | Columns, chunks, terrain generation, markers, field slots |
 | `wk-sim` | Multirate scheduler, transfer buffers, hydrology/erosion |
-| `wk-io` | Save/load v1 (postcard binary) |
+| `wk-io` | Save/load (postcard binary; schema v2 adds optional fields) |
 | `wk-app` | MS Paint debug renderer and interactive controls |
 
 ## Run

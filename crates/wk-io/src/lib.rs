@@ -1,16 +1,23 @@
-//! Save/load format v1.
+//! Save/load format.
+//!
+//! Schema v1: columns + climate + weather.
+//! Schema v2: optional per-chunk field patches (thermal, humidity, …).
+//! Older v1 bytes still load — new field slots use `#[serde(default)]`.
 
 use serde::{Deserialize, Serialize};
 use wk_material::CHUNK_W;
 use wk_sim::Simulation;
 use wk_world::climate::ClimateSettings;
 use wk_world::column::{Activity, ResidualBucket, SedimentLoad};
+use wk_world::fields::{
+    DissolvedField, GroundwaterHeadField, HumidityField, PressureField, ThermalField, WindField,
+};
 use wk_world::marker::Marker;
 use wk_world::weather::{Cloud, WeatherSettings};
 use wk_world::world::{MassAudit, World};
 use wk_world::Layer;
 
-pub const SCHEMA_VERSION: u32 = 1;
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SaveFileV1 {
@@ -40,6 +47,19 @@ pub struct ChunkSnapshot {
     pub coord: i32,
     pub bedrock_y: f32,
     pub columns: Vec<ColumnSnapshot>,
+    /// Stage 6 field patches. Absent in schema v1 saves → `None`.
+    #[serde(default)]
+    pub thermal: Option<ThermalField>,
+    #[serde(default)]
+    pub humidity: Option<HumidityField>,
+    #[serde(default)]
+    pub pressure: Option<PressureField>,
+    #[serde(default)]
+    pub wind: Option<WindField>,
+    #[serde(default)]
+    pub gw_head: Option<GroundwaterHeadField>,
+    #[serde(default)]
+    pub dissolved: Option<DissolvedField>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +129,12 @@ pub fn snapshot_world(world: &World, sim_tick: u64) -> SaveFileV1 {
                     coord,
                     bedrock_y: chunk.bedrock_y,
                     columns,
+                    thermal: chunk.thermal.clone(),
+                    humidity: chunk.humidity.clone(),
+                    pressure: chunk.pressure.clone(),
+                    wind: chunk.wind.clone(),
+                    gw_head: chunk.gw_head.clone(),
+                    dissolved: chunk.dissolved.clone(),
                 },
             )
         })
@@ -116,7 +142,7 @@ pub fn snapshot_world(world: &World, sim_tick: u64) -> SaveFileV1 {
 
     SaveFileV1 {
         schema_version: SCHEMA_VERSION,
-        build_id: *b"wk0.1.0\0",
+        build_id: *b"wk0.1.1\0",
         world_seed: world.seed,
         sim_tick,
         sea_level: world.sea_level,
@@ -190,6 +216,12 @@ pub fn restore_world(save: &SaveFileV1) -> (World, u64) {
             }
             col.recompute_surface_y(snap.bedrock_y);
         }
+        chunk.thermal = snap.thermal.clone();
+        chunk.humidity = snap.humidity.clone();
+        chunk.pressure = snap.pressure.clone();
+        chunk.wind = snap.wind.clone();
+        chunk.gw_head = snap.gw_head.clone();
+        chunk.dissolved = snap.dissolved.clone();
         world.insert_chunk(chunk);
     }
 
@@ -215,4 +247,41 @@ pub fn load_simulation(bytes: &[u8]) -> Result<(World, Simulation), postcard::Er
     let mut sim = Simulation::new(&world);
     sim.clock.tick = tick;
     Ok((world, sim))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wk_world::fields::ThermalField;
+    use wk_world::terrain::generate_flat_sand;
+
+    #[test]
+    fn field_slots_default_none_on_fresh_chunk() {
+        let chunk = wk_world::chunk::Chunk::new(0, 0.0);
+        assert!(chunk.thermal.is_none());
+        assert!(chunk.humidity.is_none());
+        assert!(chunk.pressure.is_none());
+        assert!(chunk.wind.is_none());
+        assert!(chunk.gw_head.is_none());
+        assert!(chunk.dissolved.is_none());
+    }
+
+    #[test]
+    fn thermal_field_round_trips_through_save() {
+        let mut world = World::new(42);
+        world.sea_level = 10.0;
+        let mut chunk = generate_flat_sand(0, 0.0, 20.0);
+        let mut thermal = ThermalField::new_for_chunk(0, chunk.bedrock_y, world.sea_level, 12.0);
+        thermal.0.set_cell(1, 2, 33.5);
+        chunk.thermal = Some(thermal);
+        world.insert_chunk(chunk);
+
+        let bytes = save_to_bytes(&world, 99);
+        let (world2, tick) = load_from_bytes(&bytes).expect("load");
+        assert_eq!(tick, 99);
+        let restored = world2.chunks.get(&0).unwrap();
+        let field = restored.thermal.as_ref().expect("thermal present");
+        assert!((field.0.cell_at(1, 2) - 33.5).abs() < 1e-4);
+        assert!(restored.humidity.is_none());
+    }
 }
