@@ -98,7 +98,25 @@ impl AgentStore {
         self.ecs.query::<&Organism>().iter().count()
     }
 
+    /// Elevation for a newly spawned / cloned organism.
+    /// Plankton (Atom without root/stem) sit in the lit water band near
+    /// `sea_level`; rooted blueprints sit on the column surface.
+    pub fn spawn_elevation(world: &World, world_x: i32, blueprint: &Blueprint) -> Option<f32> {
+        let col = world.column_at(world_x)?;
+        let submerged = col.surface_y <= world.sea_level;
+        if blueprint.is_plankton() || submerged {
+            // Float just under the free surface — algae lit-band default.
+            // Full buoyancy (Set C) will steer this later.
+            Some(world.sea_level - 0.35)
+        } else if blueprint.is_rooted() || !submerged {
+            Some(col.surface_y)
+        } else {
+            Some(world.sea_level - 0.35)
+        }
+    }
+
     /// Spawn a blueprint-backed organism at column `world_x`.
+    /// Plankton Atoms may spawn in ocean columns; rooted designs need land.
     pub fn spawn_from_blueprint(
         &mut self,
         world: &World,
@@ -116,7 +134,12 @@ impl AgentStore {
             return None;
         }
         let col = world.column_at(world_x)?;
-        let y = col.surface_y;
+        let submerged = col.surface_y <= world.sea_level;
+        if blueprint.is_rooted() && submerged {
+            // Land plants can't establish on open water (yet).
+            return None;
+        }
+        let y = Self::spawn_elevation(world, world_x, &blueprint)?;
         let max_e = energy.max(1.0).max(40.0);
         let e = self.ecs.spawn((
             Pose {
@@ -226,17 +249,15 @@ impl AgentStore {
                 );
                 child_wx = child_x.floor() as i32;
             }
-            let surface_y = world
-                .column_at(child_wx)
-                .map(|c| c.surface_y)
-                .unwrap_or(y);
             if world.column_at(child_wx).is_none() {
                 continue;
             }
+            // Keep plankton in the water column; rooted kids snap to surface.
+            let child_y = Self::spawn_elevation(world, child_wx, &blueprint).unwrap_or(y);
             self.ecs.spawn((
                 Pose {
                     x: child_x,
-                    y: surface_y,
+                    y: child_y,
                 },
                 Energy {
                     current: energy.clamp(0.0, max_e),

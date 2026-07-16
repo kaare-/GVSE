@@ -107,6 +107,22 @@ impl Blueprint {
         self.nucleus_count() >= 1 && self.photosystem_count() >= 1
     }
 
+    /// Set A "algae" — photo Atom with no root/stem. Spawns/floats in water.
+    pub fn is_plankton(&self) -> bool {
+        self.is_valid_atom()
+            && !self
+                .modules
+                .iter()
+                .any(|m| matches!(m.module, ModuleId::Root | ModuleId::Stem))
+    }
+
+    /// Land habit once roots or stems are present (Set D+).
+    pub fn is_rooted(&self) -> bool {
+        self.modules
+            .iter()
+            .any(|m| matches!(m.module, ModuleId::Root | ModuleId::Stem))
+    }
+
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
         postcard::to_allocvec(self).map_err(|e| e.to_string())
     }

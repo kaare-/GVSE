@@ -49,7 +49,8 @@ impl CreatureEditor {
             self.open = true;
             self.was_paused = currently_paused;
             self.spawn_picker = false;
-            self.status = "C close | LMB paint/erase | 1 nucleus 2 photo | S save | Enter spawn".into();
+            self.status =
+                "Atom = algae (spawns in ocean too) | 1 nucleus 2 photo | Enter spawn".into();
         }
     }
 
@@ -95,7 +96,11 @@ impl CreatureEditor {
         if is_key_pressed(KeyCode::Enter) {
             if self.blueprint.is_valid_atom() {
                 self.spawn_picker = true;
-                self.status = "Click a land column to spawn, Esc cancel".into();
+                self.status = if self.blueprint.is_plankton() {
+                    "Click ocean or land to spawn algae Atom — Esc cancel".into()
+                } else {
+                    "Click a land column to spawn, Esc cancel".into()
+                };
             } else {
                 self.status = "Need ≥1 nucleus and ≥1 photosystem".into();
             }

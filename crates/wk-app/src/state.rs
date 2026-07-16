@@ -214,33 +214,32 @@ impl AppState {
                     return;
                 }
                 let col = render::screen_x_to_world_x(mx, self.viewport_x);
-                if let Some(c) = self.world.column_at(col) {
-                    if c.surface_y > self.world.sea_level {
-                        let mut bp = self.editor.blueprint.clone();
-                        bp.name = self.editor.blueprint.name.clone();
-                        match self.sim.agents.spawn_from_blueprint(
-                            &self.world,
-                            col,
-                            bp,
-                            50.0,
-                        ) {
-                            Some(_) => {
-                                self.status_msg = format!(
-                                    "Spawned {} at x={col} (organisms={})",
-                                    self.editor.blueprint.name,
-                                    self.sim.agents.organism_count()
-                                );
-                                self.editor.spawn_picker = false;
-                                self.editor.open = false;
-                                self.paused = self.editor.was_paused;
-                            }
-                            None => {
-                                self.editor.status =
-                                    "Spawn failed (invalid atom or population cap)".into();
-                            }
+                if self.world.column_at(col).is_some() {
+                    let mut bp = self.editor.blueprint.clone();
+                    bp.name = self.editor.blueprint.name.clone();
+                    let plankton = bp.is_plankton();
+                    match self.sim.agents.spawn_from_blueprint(
+                        &self.world,
+                        col,
+                        bp,
+                        50.0,
+                    ) {
+                        Some(_) => {
+                            let where_ = if plankton { "water/lit band" } else { "land" };
+                            self.status_msg = format!(
+                                "Spawned {} on {where_} at x={col} (organisms={})",
+                                self.editor.blueprint.name,
+                                self.sim.agents.organism_count()
+                            );
+                            self.editor.spawn_picker = false;
+                            self.editor.open = false;
+                            self.paused = self.editor.was_paused;
                         }
-                    } else {
-                        self.editor.status = "Pick a land column (above sea level)".into();
+                        None => {
+                            self.editor.status =
+                                "Spawn failed (need nucleus+photo; rooted designs need land; or at cap)"
+                                    .into();
+                        }
                     }
                 }
             }
