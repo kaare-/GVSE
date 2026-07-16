@@ -591,6 +591,11 @@ fn draw_organism_inspector(info: &wk_sim::OrganismInspect, sw: f32, y0: f32) -> 
             "generation={}  clones={}",
             info.generation, info.clones_produced
         ),
+        format!(
+            "age={:.1}/{:.1} sim-days",
+            info.age_ticks as f32 / 79_200.0,
+            info.life_expectancy_ticks as f32 / 79_200.0
+        ),
         "--- genes ---".into(),
         format!(
             "metabolic_rate={:.2}  reproduce_at={:.2}",

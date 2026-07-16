@@ -84,7 +84,15 @@ pub struct Lineage {
     pub generation: u32,
     /// Successful offspring this organism has produced.
     pub clones_produced: u32,
+    /// Ticks since spawn (senescence clock).
+    pub age_ticks: u64,
 }
+
+/// Default climate day+night length (ticks) — used as one "sim day".
+const SIM_DAY_TICKS: f32 = 12.0 * 3_600.0 + 10.0 * 3_600.0; // 79_200
+
+/// Nominal adult life at a reference genome (~3 sim-days for default algae).
+const BASE_LIFE_SIM_DAYS: f32 = 3.0;
 
 /// Dead body: sinks to the water bed, then dissolves into `dead_biomass`.
 #[derive(Debug, Clone, Copy, Default)]
@@ -104,11 +112,42 @@ pub struct OrganismInspect {
     pub energy_max: f32,
     pub generation: u32,
     pub clones_produced: u32,
+    pub age_ticks: u64,
+    /// Gene-derived expected lifespan (ticks), with per-entity jitter applied.
+    pub life_expectancy_ticks: u64,
     pub genome: Genome,
     pub module_count: usize,
     pub photosystems: usize,
     pub is_plankton: bool,
     pub dead: bool,
+}
+
+/// Life expectancy from existing genes (no extra gene).
+///
+/// Tradeoffs (live-fast / die-young style):
+/// - higher `metabolic_rate` → shorter life
+/// - longer `active_window` → more wear
+/// - lower `reproduce_at` (earlier fission) → shorter life
+/// - higher `clone_fidelity` → slight upkeep tax on lifespan
+///
+/// Default genome lands near ~3 sim-days (one sim-day ≈ default 12h+10h cycle).
+pub fn life_expectancy_ticks(genome: &Genome) -> u64 {
+    let m = genome.metabolic_rate.clamp(0.05, 1.5);
+    let active = genome.active_window.clamp(0.1, 1.0);
+    let early_repro = (0.95 - genome.reproduce_at.clamp(0.3, 0.95)) / 0.65;
+    let fidelity = genome.clone_fidelity.clamp(0.0, 1.0);
+
+    // Pace ≈ 1.0 for the default Genome.
+    let pace = (m / 0.35) * (0.85 + 0.30 * active) * (1.0 + 0.20 * early_repro) * (1.0 + 0.10 * fidelity);
+    let ticks = BASE_LIFE_SIM_DAYS * SIM_DAY_TICKS / pace.max(0.25);
+    ticks.round().max(1_000.0) as u64
+}
+
+/// Per-individual limit: expectancy ± ~10% from entity id (avoids sync die-offs).
+pub fn life_limit_ticks(genome: &Genome, entity_id: u32) -> u64 {
+    let base = life_expectancy_ticks(genome);
+    let jitter = 90 + (entity_id % 21); // 90..110 %
+    (base.saturating_mul(jitter as u64) / 100).max(500)
 }
 
 /// Basal drain per tick. Scaled so a full tank outlasts a default night.
@@ -740,6 +779,8 @@ impl AgentStore {
             energy_max,
             generation: lineage.generation,
             clones_produced: lineage.clones_produced,
+            age_ticks: lineage.age_ticks,
+            life_expectancy_ticks: life_limit_ticks(&genome, entity.id()),
             genome,
             module_count: body.blueprint.modules.len(),
             photosystems: body.photosystem_count(),
@@ -778,7 +819,7 @@ impl AgentStore {
                 &mut Energy,
                 &Genome,
                 &ModuleBody,
-                &Lineage,
+                &mut Lineage,
                 &Organism,
             )>()
             .iter()
@@ -786,6 +827,13 @@ impl AgentStore {
             let wx = pose.world_x();
             let n_photo = body.photosystem_count().max(1) as f32;
             let active = circadian_active(genome, phase);
+
+            lineage.age_ticks = lineage.age_ticks.saturating_add(1);
+            let life_limit = life_limit_ticks(genome, e.id());
+            if lineage.age_ticks >= life_limit {
+                deaths.push((e, wx));
+                continue;
+            }
 
             if let Some(col) = world.column_at(wx) {
                 if body.blueprint.is_plankton() {
@@ -891,6 +939,7 @@ impl AgentStore {
                 Lineage {
                     generation: parent_gen.saturating_add(1),
                     clones_produced: 0,
+                    age_ticks: 0,
                 },
                 Organism,
             ));
@@ -1007,6 +1056,40 @@ mod tests {
             col.deposit_to_top(MaterialId::Water, 2_000, 0);
         }
         world
+    }
+
+    #[test]
+    fn faster_metabolism_shortens_life() {
+        let slow = Genome {
+            metabolic_rate: 0.2,
+            ..Genome::default()
+        };
+        let fast = Genome {
+            metabolic_rate: 1.0,
+            ..Genome::default()
+        };
+        assert!(life_expectancy_ticks(&fast) < life_expectancy_ticks(&slow));
+        let def = life_expectancy_ticks(&Genome::default());
+        // ~3 sim-days ballpark for default algae.
+        assert!(def > 150_000 && def < 400_000, "default life={def}");
+    }
+
+    #[test]
+    fn senescence_kills_and_leaves_corpse() {
+        let mut world = World::new(99);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(&world, 4, Blueprint::atom(Genome::default()), 50.0)
+            .expect("spawn");
+        {
+            let mut lin = store.ecs.get::<&mut Lineage>(e).unwrap();
+            lin.age_ticks = life_limit_ticks(&Genome::default(), e.id());
+        }
+        store.step_organisms(&mut world, 1);
+        assert_eq!(store.organism_count(), 0);
+        assert_eq!(store.corpse_count(), 1);
     }
 
     #[test]
