@@ -44,6 +44,9 @@ pub enum SubsystemId {
     PressureField = 14,
     /// Wind from −∇pressure (+ climate bias). Weather samples this.
     WindField = 15,
+    /// Groundwater hydraulic-head Darcy diffusion. Moisture transfers
+    /// still happen in `Groundwater`; this pass updates the head field.
+    GroundwaterHeadField = 16,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -53,7 +56,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 16] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 17] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -153,6 +156,11 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 16] = [
         // One tick after pressure so wind samples the committed field.
         period: 30,
         phase: 6,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::GroundwaterHeadField,
+        period: 30,
+        phase: 10,
     },
 ];
 

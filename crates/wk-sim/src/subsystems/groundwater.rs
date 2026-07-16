@@ -1,6 +1,10 @@
 //! Slow lateral groundwater flow between neighbouring water tables.
+//!
+//! When `gw_head_fields_enabled`, hydraulic-head gradients come from the
+//! Darcy-diffused groundwater head field (stage 6.5). Otherwise the
+//! pre-field column-neighbour water-table path is used unchanged.
 
-use wk_material::{CHUNK_W, MaterialRegistry};
+use wk_material::{CHUNK_W, MaterialRegistry, SAMPLE_WIDTH_M};
 use wk_world::column::Activity;
 use wk_world::world::World;
 
@@ -30,6 +34,46 @@ fn aquifer_mass_per_metre(col: &wk_world::column::Column) -> f32 {
     cap / layer_height_m
 }
 
+fn head_at_column(world: &World, coord: i32, local: usize) -> f32 {
+    let chunk = world.chunks.get(&coord).unwrap();
+    let col = &chunk.columns[local];
+    if world.gw_head_fields_enabled {
+        if let Some(gw) = &chunk.gw_head {
+            let x_m = (chunk.world_x_base() + local as i32) as f32 * SAMPLE_WIDTH_M;
+            // Sample mid-aquifer (halfway between bedrock and surface).
+            let y = 0.5 * (chunk.bedrock_y + col.surface_y);
+            return gw.0.sample_bilinear(x_m, y);
+        }
+    }
+    col.water_table_y()
+}
+
+fn head_neighbor(world: &World, coord: i32, local: i32) -> f32 {
+    let chunk = world.chunks.get(&coord).unwrap();
+    if local < 0 {
+        if world.gw_head_fields_enabled {
+            if let Some(left) = world.chunks.get(&(coord - 1)).and_then(|c| c.gw_head.as_ref()) {
+                let w = left.0.width_cells as usize;
+                let h = left.0.height_cells as usize;
+                let cy = h / 2;
+                return left.0.cell_at(w - 1, cy);
+            }
+        }
+        return chunk.water_table_neighbor(-1);
+    }
+    if local >= CHUNK_W as i32 {
+        if world.gw_head_fields_enabled {
+            if let Some(right) = world.chunks.get(&(coord + 1)).and_then(|c| c.gw_head.as_ref()) {
+                let h = right.0.height_cells as usize;
+                let cy = h / 2;
+                return right.0.cell_at(0, cy);
+            }
+        }
+        return chunk.water_table_neighbor(CHUNK_W as i32);
+    }
+    head_at_column(world, coord, local as usize)
+}
+
 /// Slow lateral groundwater flow between neighbouring columns' water tables.
 /// This is what lets a saturated aquifer act as a reservoir: water seeping
 /// underground from a wet area can migrate toward a drier one (or toward a
@@ -53,9 +97,9 @@ pub fn run_groundwater_flow(world: &World, scratch: &mut WorldTransferScratch) {
                 continue;
             }
 
-            let head_here = col.water_table_y();
-            let head_left = chunk.water_table_neighbor(i as i32 - 1);
-            let head_right = chunk.water_table_neighbor(i as i32 + 1);
+            let head_here = head_at_column(world, coord, i);
+            let head_left = head_neighbor(world, coord, i as i32 - 1);
+            let head_right = head_neighbor(world, coord, i as i32 + 1);
 
             let grad_left = head_here - head_left;
             let grad_right = head_here - head_right;

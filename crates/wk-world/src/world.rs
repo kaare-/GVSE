@@ -6,7 +6,9 @@ use wk_material::{CHUNK_W, MaterialId, MAX_LOADED_CHUNKS, MAX_MARKERS, MATERIAL_
 use crate::chunk::Chunk;
 use crate::climate::{biome_for, temperature_at, Biome, ClimateSettings};
 use crate::column::{Activity, Column, MarkerId, ResidualBucket, SedimentLoad};
-use crate::fields::{HumidityField, PressureField, ThermalField, WindField};
+use crate::fields::{
+    GroundwaterHeadField, HumidityField, PressureField, ThermalField, WindField,
+};
 use crate::marker::Marker;
 use crate::weather::{Cloud, WeatherSettings};
 
@@ -64,6 +66,9 @@ pub struct World {
     pub pressure_wind_fields_enabled: bool,
     /// Sky / free-air pressure (arbitrary game units; 1.0 = ambient).
     pub ambient_pressure: f32,
+    /// When true, chunks carry a groundwater head field and
+    /// `run_groundwater_flow` samples it for Darcy gradients.
+    pub gw_head_fields_enabled: bool,
 }
 
 impl World {
@@ -131,6 +136,7 @@ impl World {
             ambient_humidity: 0.4,
             pressure_wind_fields_enabled: false,
             ambient_pressure: 1.0,
+            gw_head_fields_enabled: false,
         }
     }
 
@@ -378,6 +384,63 @@ impl World {
         };
         let prev = source.cell_at(cx, cy);
         source.set_cell(cx, cy, prev + amount);
+    }
+
+    /// Hydraulic head (m) at a world point. Samples the groundwater head
+    /// field when present; otherwise returns the column water-table
+    /// elevation (Dupuit / unconfined approximation).
+    pub fn groundwater_head_at_point(&self, world_x: i32, y_m: f32) -> f32 {
+        let coord = Self::chunk_coord_for_world_x(world_x);
+        if let Some(chunk) = self.chunks.get(&coord) {
+            if let Some(gw) = &chunk.gw_head {
+                let x_m = world_x as f32 * wk_material::SAMPLE_WIDTH_M;
+                return gw.0.sample_bilinear(x_m, y_m);
+            }
+            let lx = Self::local_x(world_x);
+            return chunk.columns[lx].water_table_y();
+        }
+        self.sea_level
+    }
+
+    /// Allocate groundwater head fields on every loaded chunk, seeded
+    /// from each column's water-table elevation (constant with depth —
+    /// Dupuit approximation).
+    pub fn enable_groundwater_head_fields(&mut self) {
+        self.gw_head_fields_enabled = true;
+        let sea = self.sea_level;
+        let coords: Vec<i32> = self.chunks.keys().copied().collect();
+        for coord in coords {
+            let Some(chunk) = self.chunks.get_mut(&coord) else {
+                continue;
+            };
+            if chunk.gw_head.is_some() {
+                continue;
+            }
+            let mut field = GroundwaterHeadField::new_for_chunk(coord, chunk.bedrock_y, sea, sea);
+            let w = field.0.width_cells as usize;
+            let h = field.0.height_cells as usize;
+            let base = chunk.world_x_base();
+            for cy in 0..h {
+                for cx in 0..w {
+                    let (x_m, _) = field.0.cell_center(cx, cy);
+                    let local = ((x_m / wk_material::SAMPLE_WIDTH_M).floor() as i32 - base)
+                        .clamp(0, CHUNK_W as i32 - 1) as usize;
+                    let head = chunk.columns[local].water_table_y();
+                    field.0.set_cell(cx, cy, head);
+                }
+            }
+            field.0.halo =
+                wk_field::FieldHalo::zeros(field.0.width_cells, field.0.height_cells);
+            for cy in 0..h {
+                field.0.halo.left[cy] = field.0.cell_at(0, cy);
+                field.0.halo.right[cy] = field.0.cell_at(w - 1, cy);
+            }
+            for cx in 0..w {
+                field.0.halo.bottom[cx] = field.0.cell_at(cx, 0);
+                field.0.halo.top[cx] = field.0.cell_at(cx, h - 1);
+            }
+            chunk.gw_head = Some(field);
+        }
     }
 
     pub fn biome_at(&self, surface_y: f32) -> Biome {

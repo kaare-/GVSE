@@ -11,6 +11,7 @@ mod e8_save_load;
 mod e20_geothermal_steady_state;
 mod e22_humidity_near_water_body;
 mod e23_convection_cell;
+mod e24_darcy_pressure_equilibration;
 mod helpers;
 
 pub use helpers::*;

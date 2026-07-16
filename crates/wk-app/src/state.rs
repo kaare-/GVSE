@@ -71,6 +71,7 @@ impl AppState {
         world.enable_thermal_fields();
         world.enable_humidity_fields();
         world.enable_pressure_wind_fields();
+        world.enable_groundwater_head_fields();
 
         let sim = wk_sim::Simulation::new(&world);
         let viewport_x = Self::initial_viewport_x(&world);
