@@ -1,6 +1,6 @@
 # Agents: ECS creature layer
 
-*Stage 10 design record. Implemented alongside this document.*
+*Stages 10–11 design record. Implemented alongside this document.*
 
 ## Choice: `hecs`
 
@@ -15,7 +15,7 @@ field / ecology state and call world APIs (`dig`, `eat_biomass`,
 |-----------|------|
 | `Pose` | `x` (world column, fractional), `y` (elevation m) |
 | `Energy` | current / max; ≤0 → despawn |
-| `Genome` | trait vector (speed, graze rate, dig drive, …) — no mutation yet |
+| `Genome` | trait vector (speed, graze, dig, repro, …) |
 | `Grazer` | marker for the scripted forage behaviour |
 
 ## Scripted grazer (first creature)
@@ -27,17 +27,21 @@ Each agent tick:
 3. Drink if thirsty (surface water, else moisture)
 4. Optionally dig when energy is mid-low and `dig_drive` is high
 5. Step toward the neighbour column with more alive biomass
-6. Pay a basal energy cost; despawn if depleted
+6. Pay basal metabolism plus dry/cold stress; despawn if depleted
+7. If well-fed and `repro_drive` allows, fission with mutated genome
 
-No reproduction / mutation — that is stage 11.
+Reproduction and mutation details: `docs/EVOLUTION.md`.
 
 ## Mass
 
 Eating reduces `Ecology.alive_biomass` and books `biomass_eaten_total`
 (audit sink, paired with grow like decay). Creature body mass is not
-tracked in `total_tracked` for stage 10.
+tracked in `total_tracked`.
 
-## Scenario
+## Scenarios
 
 **E16** — grazer on a wet vegetated band reduces alive biomass and
-remains alive with positive energy for N ticks.
+remains alive with positive energy for N ticks (`repro_drive = 0`).
+
+**E17** — founder reproduces; population grows and offspring genomes
+differ from the parent (stage 11).
