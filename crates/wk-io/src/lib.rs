@@ -218,6 +218,11 @@ pub fn restore_world(save: &SaveFileV1) -> (World, u64) {
         }
         chunk.thermal = snap.thermal.clone();
         chunk.humidity = snap.humidity.clone();
+        // Source buffer is scratch — rebuild empty if the field is present.
+        chunk.humidity_source = snap
+            .humidity
+            .as_ref()
+            .map(|h| h.0.zeros_like());
         chunk.pressure = snap.pressure.clone();
         chunk.wind = snap.wind.clone();
         chunk.gw_head = snap.gw_head.clone();

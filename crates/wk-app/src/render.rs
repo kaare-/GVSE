@@ -295,6 +295,10 @@ pub fn draw_frame(
                 let c = temperature_overlay_color(col.temperature_c);
                 draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
             }
+            OverlayMode::HumidityField => {
+                let c = humidity_overlay_color(col.humidity_rh);
+                draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
+            }
             OverlayMode::None => {}
         }
     }
@@ -358,6 +362,15 @@ fn temperature_overlay_color(temp_c: f32) -> Color {
     Color::from_rgba(r, g, b, 220)
 }
 
+/// Map relative humidity → RGBA (dry brown → wet cyan).
+fn humidity_overlay_color(rh: f32) -> Color {
+    let t = rh.clamp(0.0, 1.0);
+    let r = ((1.0 - t) * 160.0) as u8;
+    let g = (120.0 + t * 100.0) as u8;
+    let b = (40.0 + t * 200.0) as u8;
+    Color::from_rgba(r, g, b, 220)
+}
+
 fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32) {
     let Some(col) = snap.columns.iter().find(|c| c.world_x == world_x) else {
         return;
@@ -374,7 +387,12 @@ fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32) {
     let mut lines = vec![
         format!("Column x={}", col.world_x),
         format!("surface_y={:.2} m  bedrock={:.0}m", col.surface_y, col.bedrock_y),
-        format!("temp={:.1}C  biome={}", col.temperature_c, col.biome.name()),
+        format!(
+            "temp={:.1}C  RH={:.0}%  biome={}",
+            col.temperature_c,
+            col.humidity_rh * 100.0,
+            col.biome.name()
+        ),
         format!(
             "water={} kg  moisture={} kg  sat={:.0}%",
             col.surface_water,

@@ -22,7 +22,7 @@ mod weather;
 
 pub use activity::run_activity;
 pub use evaporation::run_evaporation;
-pub use fields::run_thermal_field;
+pub use fields::{run_humidity_field, run_thermal_field};
 pub use groundwater::run_groundwater_flow;
 pub use halos::{exchange_outboxes, update_halos};
 pub use infiltration::run_infiltration;
