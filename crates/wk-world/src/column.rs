@@ -794,6 +794,7 @@ impl Column {
             v.top_y += half;
             v.height_m += dh;
             v.roof_material = roof_material;
+            v.origin = origin;
             return dh;
         }
         if self.voids.len() >= MAX_VOIDS {
@@ -811,6 +812,7 @@ impl Column {
             v.top_y += dh * 0.5;
             v.height_m += dh;
             v.roof_material = roof_material;
+            v.origin = origin;
             return dh;
         }
         let half = dh * 0.5;
