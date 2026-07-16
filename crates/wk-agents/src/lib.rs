@@ -14,7 +14,7 @@ pub mod organism;
 pub use blueprint::{Blueprint, PlacedModule, Wire, WireKind, BLUEPRINT_DIR};
 pub use module::{LaneId, ModuleId};
 pub use organism::{
-    Aabb, Lineage, ModuleBody, Organism, OrganismInspect, MAX_ORGANISMS, MODULE_CELL_COLS,
+    Aabb, Corpse, Lineage, ModuleBody, Organism, OrganismInspect, MAX_ORGANISMS, MODULE_CELL_COLS,
     PHOTON_RATE,
 };
 

@@ -35,17 +35,22 @@ const COLLISION_PAD: f32 = 0.06;
 /// Minimum horizontal separation push when two bodies fully coincide.
 const MIN_SEPARATION: f32 = 0.08;
 
-/// Energy gained per photosystem per tick at full noon light.
-pub const PHOTON_RATE: f32 = 1.8;
+/// Photosynthesis floor (energy/tick/photosystem at noon). Keeps short-day
+/// scenarios (E30) fertile without one-tick fill-ups.
+pub const PHOTON_RATE: f32 = 0.12;
 
-/// Baseline nucleus upkeep (added to metabolic_rate).
-pub const NUCLEUS_UPKEEP: f32 = 0.03;
+/// Full energy tank lasts this many dark ticks at `metabolic_rate = 1.0`
+/// (default night is 36 000 ticks — algae should outlast a normal night).
+pub const DARK_ENDURANCE_TICKS: f32 = 42_000.0;
 
-/// Upkeep per photosystem module.
-pub const PHOTOSYSTEM_UPKEEP: f32 = 0.03;
+/// Night / low-light upkeep multiplier (dormant respiration).
+const NIGHT_UPKEEP_MULT: f32 = 0.4;
 
-/// kg dumped into `dead_biomass` on organism death.
+/// kg dumped into `dead_biomass` when a corpse finishes sinking.
 pub const DEATH_LITTER_KG: i64 = 8;
+
+/// Ticks a corpse rests on the bed before dissolving into litter.
+pub const CORPSE_SETTLE_TICKS: u32 = 450;
 
 /// Floater depth below the live free-water surface (metres) when bias ≈ 0.
 pub const FLOAT_DEPTH_M: f32 = 1.0;
@@ -81,6 +86,13 @@ pub struct Lineage {
     pub clones_produced: u32,
 }
 
+/// Dead body: sinks to the water bed, then dissolves into `dead_biomass`.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Corpse {
+    pub ticks: u32,
+    pub settled_ticks: u32,
+}
+
 /// Snapshot for the click-to-inspect HUD.
 #[derive(Debug, Clone)]
 pub struct OrganismInspect {
@@ -96,6 +108,41 @@ pub struct OrganismInspect {
     pub module_count: usize,
     pub photosystems: usize,
     pub is_plankton: bool,
+    pub dead: bool,
+}
+
+/// Basal drain per tick. Scaled so a full tank outlasts a default night.
+pub fn organism_upkeep(genome: &Genome, energy_max: f32, l0: f32, n_photo: f32) -> f32 {
+    let m = genome.metabolic_rate.clamp(0.05, 1.5);
+    let modules = 1.0 + 0.25 * n_photo.max(1.0);
+    let day = (energy_max.max(1.0) / DARK_ENDURANCE_TICKS) * m * modules;
+    if l0 < 0.1 {
+        day * NIGHT_UPKEEP_MULT
+    } else {
+        day
+    }
+}
+
+/// Photosynthetic gain per tick (0 when dark).
+pub fn organism_photo_gain(energy_max: f32, l0: f32, n_photo: f32) -> f32 {
+    if l0 <= 0.01 {
+        return 0.0;
+    }
+    let n = n_photo.max(1.0);
+    // Long-day fill + short-day floor so blooms still work on E30 cycles.
+    let scaled = energy_max.max(1.0) / 10_000.0 * l0 * n;
+    let floor = PHOTON_RATE * l0 * n;
+    scaled.max(floor)
+}
+
+fn corpse_rgb((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
+    // Desaturated brown-grey — readable as dead tissue, not living chroma.
+    let luma = (r as u16 * 3 + g as u16 * 6 + b as u16) / 10;
+    (
+        ((luma + 40) / 2).min(120) as u8,
+        ((luma + 20) / 2).min(90) as u8,
+        (luma / 3).min(70) as u8,
+    )
 }
 
 /// Baked module body from a blueprint at spawn time.
@@ -560,8 +607,13 @@ fn resolve_collisions(store: &mut AgentStore, world: &World) {
 }
 
 impl AgentStore {
+    /// Living Set A organisms (excludes sinking corpses).
     pub fn organism_count(&self) -> usize {
         self.ecs.query::<&Organism>().iter().count()
+    }
+
+    pub fn corpse_count(&self) -> usize {
+        self.ecs.query::<&Corpse>().iter().count()
     }
 
     /// Elevation for a newly spawned / cloned organism.
@@ -627,31 +679,34 @@ impl AgentStore {
         Some(e)
     }
 
-    /// True if `entity` is still a living Set A organism.
+    /// True if `entity` still exists as a living organism or a corpse.
     pub fn organism_alive(&self, entity: Entity) -> bool {
-        self.ecs
-            .get::<&Organism>(entity)
-            .map(|_| true)
-            .unwrap_or(false)
+        self.ecs.get::<&Organism>(entity).is_ok() || self.ecs.get::<&Corpse>(entity).is_ok()
     }
 
-    /// Pick the smallest-footprint organism whose AABB contains `(wx, wy)`.
+    /// Pick the smallest-footprint living body or corpse at `(wx, wy)`.
     pub fn pick_organism_at(&self, wx: f32, wy: f32) -> Option<Entity> {
         let mut best: Option<(Entity, f32)> = None;
-        for (e, (pose, body, _)) in self
-            .ecs
-            .query::<(&Pose, &ModuleBody, &Organism)>()
-            .iter()
-        {
+        let mut consider = |e: Entity, pose: &Pose, body: &ModuleBody| {
             let aabb = organism_aabb(pose, &body.blueprint);
             if wx < aabb.min_x || wx > aabb.max_x || wy < aabb.min_y || wy > aabb.max_y {
-                continue;
+                return;
             }
             let area = aabb.width() * (aabb.max_y - aabb.min_y).max(0.01);
             match best {
                 Some((_, a)) if a <= area => {}
                 _ => best = Some((e, area)),
             }
+        };
+        for (e, (pose, body, _)) in self
+            .ecs
+            .query::<(&Pose, &ModuleBody, &Organism)>()
+            .iter()
+        {
+            consider(e, pose, body);
+        }
+        for (e, (pose, body, _)) in self.ecs.query::<(&Pose, &ModuleBody, &Corpse)>().iter() {
+            consider(e, pose, body);
         }
         best.map(|(e, _)| e)
     }
@@ -659,27 +714,41 @@ impl AgentStore {
     /// Live inspect snapshot, or `None` if the entity is gone.
     pub fn inspect_organism(&self, entity: Entity) -> Option<OrganismInspect> {
         let pose = *self.ecs.get::<&Pose>(entity).ok()?;
-        let energy = *self.ecs.get::<&Energy>(entity).ok()?;
-        let genome = *self.ecs.get::<&Genome>(entity).ok()?;
-        let lineage = *self.ecs.get::<&Lineage>(entity).ok()?;
         let body = self.ecs.get::<&ModuleBody>(entity).ok()?;
+        let genome = self
+            .ecs
+            .get::<&Genome>(entity)
+            .map(|g| *g)
+            .unwrap_or_else(|_| body.blueprint.genome);
+        let lineage = self
+            .ecs
+            .get::<&Lineage>(entity)
+            .map(|l| *l)
+            .unwrap_or_default();
+        let (energy, energy_max) = self
+            .ecs
+            .get::<&Energy>(entity)
+            .map(|e| (e.current, e.max))
+            .unwrap_or((0.0, 0.0));
+        let dead = self.ecs.get::<&Corpse>(entity).is_ok();
         Some(OrganismInspect {
             entity_id: entity.id(),
             name: body.blueprint.name.clone(),
             x: pose.x,
             y: pose.y,
-            energy: energy.current,
-            energy_max: energy.max,
+            energy,
+            energy_max,
             generation: lineage.generation,
             clones_produced: lineage.clones_produced,
             genome,
             module_count: body.blueprint.modules.len(),
             photosystems: body.photosystem_count(),
             is_plankton: body.blueprint.is_plankton(),
+            dead,
         })
     }
 
-    /// World-space AABB for highlighting a selected organism.
+    /// World-space AABB for highlighting a selected organism or corpse.
     pub fn organism_highlight_aabb(&self, entity: Entity) -> Option<Aabb> {
         let pose = *self.ecs.get::<&Pose>(entity).ok()?;
         let body = self.ecs.get::<&ModuleBody>(entity).ok()?;
@@ -728,12 +797,12 @@ impl AgentStore {
                 }
             }
 
-            if active && l0 > 0.01 {
-                let gain = PHOTON_RATE * l0 * n_photo;
+            if active {
+                let gain = organism_photo_gain(energy.max, l0, n_photo);
                 energy.current = (energy.current + gain).min(energy.max);
             }
 
-            let upkeep = genome.metabolic_rate + NUCLEUS_UPKEEP + PHOTOSYSTEM_UPKEEP * n_photo;
+            let upkeep = organism_upkeep(genome, energy.max, l0, n_photo);
             energy.current -= upkeep;
             if energy.current <= 0.0 {
                 deaths.push((e, wx));
@@ -775,14 +844,23 @@ impl AgentStore {
             }
         }
 
-        for (e, wx) in deaths {
-            if let Some(col) = world.column_at_mut(wx) {
-                col.ecology.dead_biomass =
-                    col.ecology.dead_biomass.saturating_add(DEATH_LITTER_KG);
+        // Energy death → corpse (keeps drawing, sinks), litter on dissolve.
+        for (e, _wx) in deaths {
+            let _ = self.ecs.remove_one::<Organism>(e);
+            let _ = self.ecs.insert_one(
+                e,
+                Corpse {
+                    ticks: 0,
+                    settled_ticks: 0,
+                },
+            );
+            if let Ok(mut buoy) = self.ecs.get::<&mut BuoyancyState>(e) {
+                // Dead tissue is heavy — start a downward drift.
+                buoy.vel_y = -0.15;
             }
-            world.mass_audit.biomass_grow_total =
-                world.mass_audit.biomass_grow_total.saturating_add(DEATH_LITTER_KG);
-            let _ = self.ecs.despawn(e);
+            if let Ok(mut energy) = self.ecs.get::<&mut Energy>(e) {
+                energy.current = 0.0;
+            }
         }
 
         for (x0, y0, blueprint, energy, max_e, parent, parent_gen) in births {
@@ -824,22 +902,68 @@ impl AgentStore {
 
         // After buoyancy + births: separate any overlapping footprints.
         resolve_collisions(self, world);
+        self.step_corpses(world);
 
         self.wake_host_columns(world);
     }
 
-    /// Collect drawable module quads for the renderer.
+    /// Sink corpses to the bed; dissolve into litter after settling.
+    fn step_corpses(&mut self, world: &mut World) {
+        let mut dissolve: Vec<(Entity, i32)> = Vec::new();
+        for (e, (pose, buoy, corpse, body)) in self
+            .ecs
+            .query::<(&mut Pose, &mut BuoyancyState, &mut Corpse, &ModuleBody)>()
+            .iter()
+        {
+            corpse.ticks = corpse.ticks.saturating_add(1);
+            let wx = pose.world_x();
+            let Some(col) = world.column_at(wx) else {
+                dissolve.push((e, wx));
+                continue;
+            };
+            // Heavy sinker — ignore living buoyancy gene.
+            if body.blueprint.is_plankton() || water_band(col).is_some() {
+                step_buoyancy(&mut pose.y, buoy, col, 1.0);
+                buoy.vel_y -= 0.04; // extra dead-weight pull
+            } else {
+                pose.y = col.surface_y;
+                buoy.vel_y = 0.0;
+            }
+
+            let on_bed = match water_band(col) {
+                Some((_top, bed)) => pose.y <= bed + 0.15,
+                None => true,
+            };
+            if on_bed {
+                buoy.vel_y = 0.0;
+                corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
+                if corpse.settled_ticks >= CORPSE_SETTLE_TICKS {
+                    dissolve.push((e, wx));
+                }
+            } else {
+                corpse.settled_ticks = 0;
+            }
+        }
+
+        for (e, wx) in dissolve {
+            if let Some(col) = world.column_at_mut(wx) {
+                col.ecology.dead_biomass =
+                    col.ecology.dead_biomass.saturating_add(DEATH_LITTER_KG);
+            }
+            world.mass_audit.biomass_grow_total =
+                world.mass_audit.biomass_grow_total.saturating_add(DEATH_LITTER_KG);
+            let _ = self.ecs.despawn(e);
+        }
+    }
+
+    /// Collect drawable module quads for the renderer (living + grey corpses).
     /// Returns (world_x_frac, world_y_m, module_rgb).
     pub fn organism_draw_list(&self) -> Vec<(f32, f32, (u8, u8, u8))> {
         let mut out = Vec::new();
-        for (_, (pose, body, _)) in self
-            .ecs
-            .query::<(&Pose, &ModuleBody, &Organism)>()
-            .iter()
-        {
+        let mut push_body = |pose: &Pose, body: &ModuleBody, dead: bool| {
             let modules = &body.blueprint.modules;
             if modules.is_empty() {
-                continue;
+                return;
             }
             let min_x = modules.iter().map(|m| m.x).min().unwrap_or(0);
             let max_x = modules.iter().map(|m| m.x).max().unwrap_or(0);
@@ -847,8 +971,23 @@ impl AgentStore {
             for m in modules {
                 let wx = pose.x + (m.x as f32 - mid_x) * MODULE_CELL_COLS;
                 let wy = pose.y + m.y as f32 * MODULE_CELL_COLS;
-                out.push((wx, wy, m.module.rgb()));
+                let rgb = if dead {
+                    corpse_rgb(m.module.rgb())
+                } else {
+                    m.module.rgb()
+                };
+                out.push((wx, wy, rgb));
             }
+        };
+        for (_, (pose, body, _)) in self
+            .ecs
+            .query::<(&Pose, &ModuleBody, &Organism)>()
+            .iter()
+        {
+            push_body(pose, body, false);
+        }
+        for (_, (pose, body, _)) in self.ecs.query::<(&Pose, &ModuleBody, &Corpse)>().iter() {
+            push_body(pose, body, true);
         }
         out
     }
@@ -868,6 +1007,63 @@ mod tests {
             col.deposit_to_top(MaterialId::Water, 2_000, 0);
         }
         world
+    }
+
+    #[test]
+    fn full_tank_outlasts_default_night() {
+        let g = Genome {
+            metabolic_rate: 0.35,
+            ..Genome::default()
+        };
+        let max = 50.0;
+        let mut e = max;
+        // Default climate night = 10h * 60 * 60 ticks.
+        for _ in 0..36_000 {
+            e -= organism_upkeep(&g, max, 0.0, 1.0);
+        }
+        assert!(
+            e > 5.0,
+            "algae should still have reserves after a night (left={e})"
+        );
+    }
+
+    #[test]
+    fn corpse_sinks_instead_of_vanishing() {
+        let mut world = world_with_water();
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(
+                &world,
+                8,
+                Blueprint::atom(Genome {
+                    buoyancy_bias: 0.0,
+                    ..Genome::default()
+                }),
+                50.0,
+            )
+            .expect("spawn");
+        let y0 = store.ecs.get::<&Pose>(e).unwrap().y;
+        // Force energy death on next step.
+        if let Ok(mut energy) = store.ecs.get::<&mut Energy>(e) {
+            energy.current = 0.0;
+        }
+        // Manually convert like step_organisms death path.
+        let _ = store.ecs.remove_one::<Organism>(e);
+        let _ = store.ecs.insert_one(
+            e,
+            Corpse {
+                ticks: 0,
+                settled_ticks: 0,
+            },
+        );
+        for _ in 0..40 {
+            store.step_corpses(&mut world);
+        }
+        assert!(store.ecs.get::<&Corpse>(e).is_ok(), "corpse should remain");
+        let y1 = store.ecs.get::<&Pose>(e).unwrap().y;
+        assert!(y1 < y0 - 0.2, "corpse should sink (y0={y0} y1={y1})");
+        assert_eq!(store.organism_count(), 0);
+        assert_eq!(store.corpse_count(), 1);
     }
 
     #[test]

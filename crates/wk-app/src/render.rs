@@ -573,14 +573,16 @@ fn humidity_overlay_color(rh: f32) -> Color {
 /// Creature inspect panel. Returns the Y just below the panel for stacking.
 fn draw_organism_inspector(info: &wk_sim::OrganismInspect, sw: f32, y0: f32) -> f32 {
     let panel_w = 300.0;
+    let habit = if info.dead {
+        "DEAD (sinking)"
+    } else if info.is_plankton {
+        "plankton"
+    } else {
+        "rooted"
+    };
     let lines = [
         format!("Creature #{}  {}", info.entity_id, info.name),
-        format!(
-            "{}  pos=({:.1}, {:.1}m)",
-            if info.is_plankton { "plankton" } else { "rooted" },
-            info.x,
-            info.y
-        ),
+        format!("{}  pos=({:.1}, {:.1}m)", habit, info.x, info.y),
         format!(
             "energy={:.1}/{:.0}  mods={} photo={}",
             info.energy, info.energy_max, info.module_count, info.photosystems
