@@ -154,21 +154,24 @@ impl AgentStore {
             .iter()
         {
             let wx = pose.world_x();
-            let hungry = energy.current < energy.max * 0.85;
-            let thirsty = energy.current < energy.max * 0.95;
+            // Grazers forage whenever they have headroom — drinking alone
+            // used to keep energy above a tight "hungry" band forever, so
+            // biomass was never taken.
+            let can_graze = energy.current < energy.max;
+            let thirsty = energy.current < energy.max * 0.9;
 
-            if thirsty {
-                let drank = world.drink_water(wx, genome.drink_rate as i64);
-                if drank > 0 {
-                    energy.current = (energy.current + drank as f32 * 0.01).min(energy.max);
-                }
-            }
-            if hungry {
+            if can_graze {
                 let eaten = world.eat_biomass(wx, genome.graze_rate as i64);
                 if eaten > 0 {
                     energy.current = (energy.current
                         + eaten as f32 * genome.graze_efficiency)
                         .min(energy.max);
+                }
+            }
+            if thirsty {
+                let drank = world.drink_water(wx, genome.drink_rate as i64);
+                if drank > 0 {
+                    energy.current = (energy.current + drank as f32 * 0.01).min(energy.max);
                 }
             }
 
@@ -217,8 +220,13 @@ impl AgentStore {
                 continue;
             }
 
-            let new_x = pose.x + dx;
-            let new_wx = new_x.floor() as i32;
+            let mut new_x = pose.x + dx;
+            let mut new_wx = new_x.floor() as i32;
+            // Stay inside loaded columns — wandering off-map starves agents.
+            if world.column_at(new_wx).is_none() {
+                new_x = pose.x;
+                new_wx = wx;
+            }
             let new_y = world
                 .column_at(new_wx)
                 .map(|c| c.surface_y)
@@ -259,3 +267,4 @@ impl AgentStore {
             .sum()
     }
 }
+

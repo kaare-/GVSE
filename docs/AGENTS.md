@@ -23,8 +23,8 @@ field / ecology state and call world APIs (`dig`, `eat_biomass`,
 Each agent tick:
 
 1. Keep host column hydrology-active (`agent_keep_awake`)
-2. Drink if thirsty (surface water, else moisture)
-3. Eat alive biomass if hungry
+2. Eat alive biomass when energy is below max (forage is the primary drive)
+3. Drink if thirsty (surface water, else moisture)
 4. Optionally dig when energy is mid-low and `dig_drive` is high
 5. Step toward the neighbour column with more alive biomass
 6. Pay a basal energy cost; despawn if depleted

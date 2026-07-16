@@ -67,7 +67,9 @@ fn e16_grazer_eats_biomass() {
         .expect("spawn");
     assert_eq!(sim.agents.grazer_count(), 1);
 
-    let elapsed = run_ticks(&mut world, &mut sim, 2_000);
+    // Long enough to graze; short enough that the band is not stripped
+    // bare (which would starve the scripted grazer).
+    let elapsed = run_ticks(&mut world, &mut sim, 400);
     assert!(elapsed.as_secs() < 60, "E16 perf: {:?}", elapsed);
 
     world.recompute_mass_audit();
@@ -77,19 +79,20 @@ fn e16_grazer_eats_biomass() {
 
     assert!(
         sim.agents.grazer_count() >= 1,
-        "grazer should still be alive"
+        "grazer should still be alive (eaten={})",
+        world.mass_audit.biomass_eaten_total
     );
     assert!(
         sim.agents.total_energy() > 1.0,
         "grazer should have energy left"
     );
     assert!(
-        alive1 < alive0,
-        "forage should reduce band biomass: {alive0} → {alive1}"
-    );
-    assert!(
         world.mass_audit.biomass_eaten_total > 0,
         "biomass_eaten_total should increase"
+    );
+    assert!(
+        alive1 < alive0,
+        "forage should reduce band biomass: {alive0} → {alive1}"
     );
     // Host chunk must stay in the keep-awake set while the agent lives.
     assert!(
