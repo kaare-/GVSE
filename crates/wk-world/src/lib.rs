@@ -3,6 +3,7 @@
 pub mod climate;
 pub mod column;
 pub mod chunk;
+pub mod dig;
 pub mod fields;
 pub mod marker;
 pub mod terrain;
@@ -12,6 +13,7 @@ pub mod world;
 pub use climate::*;
 pub use column::*;
 pub use chunk::*;
+pub use dig::*;
 pub use fields::*;
 pub use marker::*;
 pub use terrain::*;
