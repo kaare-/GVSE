@@ -69,7 +69,7 @@ new kernel genes append.
 |------|--------|------|-----|
 | `TempOptimum` | `f32` (°C) | Placeholder for chosen temperature. | Placeholder. |
 | `TempWidth` | `f32 ≥ 0` (°C) | Wide comfort band; upkeep tax on `TempTolerance`. | Narrow specialist; fragile off-optimum. |
-| `BuoyancyBias` | `f32` | Prefers surface. | Prefers deep. |
+| `BuoyancyBias` | `f32 in 0..1` | Sinks toward the water bed (less light). | Rides the free-water surface. Implemented for Set A plankton (not the constant `sea_level` line). |
 
 ### Chemistry (per sensor / emitter module)
 

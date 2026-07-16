@@ -446,7 +446,9 @@ pub fn draw_frame(
         }
     }
 
-    draw_line(0.0, sea_y, sw, sea_y, 1.0, Color::from_rgba(255, 255, 255, 90));
+    // No constant "ocean line" — free water surface is the column water
+    // top itself. Drawing sea_level as a horizon was leftover from an
+    // older constant-ocean model and made plankton look airborne.
 
     if snap.rain_enabled {
         draw_rain(sw, sh, sea_y);

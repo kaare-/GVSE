@@ -93,6 +93,10 @@ pub struct Genome {
     /// Fraction of the day the organism is active (0..1) (Set A).
     #[serde(default = "default_active_window")]
     pub active_window: f32,
+    /// 0 = float at free-water surface; 1 = sink toward the water bed.
+    /// Used by plankton Atoms each tick (not the constant sea_level line).
+    #[serde(default = "default_buoyancy_bias")]
+    pub buoyancy_bias: f32,
 }
 
 fn default_metabolic_rate() -> f32 {
@@ -110,6 +114,9 @@ fn default_circadian_phase() -> f32 {
 fn default_active_window() -> f32 {
     0.55
 }
+fn default_buoyancy_bias() -> f32 {
+    0.15 // slightly under the free surface by default
+}
 
 impl Default for Genome {
     fn default() -> Self {
@@ -125,6 +132,7 @@ impl Default for Genome {
             clone_fidelity: default_clone_fidelity(),
             circadian_phase: default_circadian_phase(),
             active_window: default_active_window(),
+            buoyancy_bias: default_buoyancy_bias(),
         }
     }
 }
@@ -155,6 +163,7 @@ impl Genome {
         g.clone_fidelity = jitter(g.clone_fidelity, 0.0, 1.0);
         g.circadian_phase = jitter(g.circadian_phase, 0.0, 1.0);
         g.active_window = jitter(g.active_window, 0.1, 1.0);
+        g.buoyancy_bias = jitter(g.buoyancy_bias, 0.0, 1.0);
         g
     }
 
@@ -172,6 +181,7 @@ impl Genome {
             || (self.clone_fidelity - other.clone_fidelity).abs() > EPS
             || (self.circadian_phase - other.circadian_phase).abs() > EPS
             || (self.active_window - other.active_window).abs() > EPS
+            || (self.buoyancy_bias - other.buoyancy_bias).abs() > EPS
     }
 }
 
