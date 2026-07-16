@@ -168,10 +168,10 @@ pub fn manual_total(world: &World) -> i64 {
             for i in 0..col.layer_count as usize {
                 t += col.layers[i].thickness;
             }
-            t += col.moisture + col.sediment.total;
+            t += col.moisture + col.sediment.total + col.void_water_total();
         }
     }
-    t
+    t + world.mass_audit.dissolved_total
 }
 
 pub fn debug_bookkeeping(world: &World, initial_total: i64, initial_audit: &wk_world::world::MassAudit) {

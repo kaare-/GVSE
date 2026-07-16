@@ -1,10 +1,57 @@
 use serde::{Deserialize, Serialize};
 use wk_material::{MaterialId, MaterialRegistry, MAX_LAYERS, SAMPLE_WIDTH_M};
 
+/// Soft cap on voids per column. Pathological caves can exceed this but
+/// most columns stay well below; keeps growth from runaway dissolution.
+pub const MAX_VOIDS: usize = 4;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Activity {
     Dormant,
     HydrologyActive,
+}
+
+/// How a void was created. Karst/burrow/collapse share the same geometry
+/// but ecology and dig rules may treat origins differently later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VoidOrigin {
+    #[default]
+    Karst,
+    Burrow,
+    Collapse,
+}
+
+/// Sparse cavity annotation on a column. Layers still hold all mass;
+/// voids describe where that mass isn't. Never represent caves as Air
+/// layers — density settling would float them to the top.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Void {
+    /// Absolute elevation of the ceiling (metres).
+    pub top_y: f32,
+    /// Ceiling − floor (metres).
+    pub height_m: f32,
+    /// Free water pooled inside the void (kg).
+    pub water_mass: i64,
+    /// Material of the layer immediately above (roof).
+    pub roof_material: MaterialId,
+    pub origin: VoidOrigin,
+    /// 0..255 connectivity to surface (light / ventilation proxy).
+    pub light: u8,
+}
+
+impl Void {
+    pub fn floor_y(self) -> f32 {
+        self.top_y - self.height_m
+    }
+
+    pub fn mid_y(self) -> f32 {
+        self.top_y - 0.5 * self.height_m
+    }
+
+    /// True when the void ceiling reaches (or breaches) the column surface.
+    pub fn open_to_surface(self, surface_y: f32) -> bool {
+        self.top_y >= surface_y - 0.05
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +148,10 @@ pub struct Column {
     pub residual: ResidualBucket,
     pub activity: Activity,
     pub marker: Option<MarkerId>,
+    /// Sparse cavities (karst / burrow / collapse). Empty for most columns.
+    /// `serde(default)` keeps older saves loadable.
+    #[serde(default)]
+    pub voids: Vec<Void>,
 }
 
 impl Default for Column {
@@ -114,6 +165,7 @@ impl Default for Column {
             residual: ResidualBucket::default(),
             activity: Activity::HydrologyActive,
             marker: None,
+            voids: Vec::new(),
         }
     }
 }
@@ -590,14 +642,161 @@ impl Column {
         self.settle_by_density(0);
     }
 
-    /// Keep `surface_y` consistent with the summed layer column height.
+    /// Keep `surface_y` consistent with layer heights plus void heights.
+    /// A column with 30 m of rock and a 4 m void has top at bedrock+34.
     pub fn recompute_surface_y(&mut self, bedrock_y: f32) {
-        let height: f32 = (0..self.layer_count as usize)
+        let solid: f32 = (0..self.layer_count as usize)
             .map(|i| {
                 self.mass_to_height_delta(self.layers[i].material, self.layers[i].thickness)
             })
             .sum();
-        self.surface_y = bedrock_y + height;
+        let voids: f32 = self.voids.iter().map(|v| v.height_m.max(0.0)).sum();
+        self.surface_y = bedrock_y + solid + voids;
+    }
+
+    pub fn void_height_total(&self) -> f32 {
+        self.voids.iter().map(|v| v.height_m.max(0.0)).sum()
+    }
+
+    pub fn void_water_total(&self) -> i64 {
+        self.voids.iter().map(|v| v.water_mass.max(0)).sum()
+    }
+
+    /// Absolute top/bottom elevations of layer `idx`, inserting existing
+    /// voids as gaps. Walks bottom-up from bedrock so void punch-outs
+    /// land at their absolute `top_y` / `floor_y`.
+    pub fn layer_y_range(&self, idx: usize, bedrock_y: f32) -> (f32, f32) {
+        if idx >= self.layer_count as usize {
+            return (bedrock_y, bedrock_y);
+        }
+        // Build solid segments bottom→top (highest layer index first).
+        let mut segments: Vec<(f32, f32, usize)> = Vec::new();
+        let mut y = bedrock_y;
+        let mut void_floors: Vec<(f32, f32)> = self
+            .voids
+            .iter()
+            .filter(|v| v.height_m > 0.0)
+            .map(|v| (v.floor_y(), v.top_y))
+            .collect();
+        void_floors.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut vi = 0usize;
+        for li in (0..self.layer_count as usize).rev() {
+            let h = self.mass_to_height_delta(self.layers[li].material, self.layers[li].thickness);
+            // Advance past any voids whose floor is at/below current y.
+            while vi < void_floors.len() && void_floors[vi].0 <= y + 1e-4 {
+                let (vf, vt) = void_floors[vi];
+                if vt > y {
+                    y = vt.max(y);
+                }
+                let _ = vf;
+                vi += 1;
+            }
+            let bot = y;
+            y += h;
+            segments.push((y, bot, li)); // top, bot, idx
+        }
+        for (top, bot, li) in segments {
+            if li == idx {
+                return (top, bot);
+            }
+        }
+        (bedrock_y, bedrock_y)
+    }
+
+    /// Grow an existing void near `mid_y` by `dh`, or spawn a new one.
+    /// Returns the height actually added.
+    pub fn grow_void_at(
+        &mut self,
+        mid_y: f32,
+        dh: f32,
+        roof_material: MaterialId,
+        origin: VoidOrigin,
+    ) -> f32 {
+        if dh <= 1e-6 {
+            return 0.0;
+        }
+        // Merge into nearest void whose mid is within 1.5 m.
+        let mut best: Option<usize> = None;
+        let mut best_d = f32::MAX;
+        for (i, v) in self.voids.iter().enumerate() {
+            let d = (v.mid_y() - mid_y).abs();
+            if d < 1.5 && d < best_d {
+                best = Some(i);
+                best_d = d;
+            }
+        }
+        if let Some(i) = best {
+            let v = &mut self.voids[i];
+            let half = dh * 0.5;
+            v.top_y += half;
+            v.height_m += dh;
+            v.roof_material = roof_material;
+            return dh;
+        }
+        if self.voids.len() >= MAX_VOIDS {
+            // Expand the closest void even if far — don't drop dissolution.
+            let mut best = 0usize;
+            let mut best_d = f32::MAX;
+            for (i, v) in self.voids.iter().enumerate() {
+                let d = (v.mid_y() - mid_y).abs();
+                if d < best_d {
+                    best = i;
+                    best_d = d;
+                }
+            }
+            let v = &mut self.voids[best];
+            v.top_y += dh * 0.5;
+            v.height_m += dh;
+            v.roof_material = roof_material;
+            return dh;
+        }
+        let half = dh * 0.5;
+        self.voids.push(Void {
+            top_y: mid_y + half,
+            height_m: dh,
+            water_mass: 0,
+            roof_material,
+            origin,
+            light: 0,
+        });
+        dh
+    }
+
+    /// Drain up to `mass` kg of top/flowable water into open voids.
+    /// Returns kg moved into voids.
+    pub fn drain_surface_water_into_voids(&mut self, mass: i64) -> i64 {
+        if mass <= 0 {
+            return 0;
+        }
+        let surface = self.surface_y;
+        let open: Vec<usize> = self
+            .voids
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.open_to_surface(surface) || v.light > 200)
+            .map(|(i, _)| i)
+            .collect();
+        if open.is_empty() {
+            return 0;
+        }
+        let mut remaining = mass;
+        let mut moved = 0i64;
+        let per = (remaining / open.len() as i64).max(1);
+        for &i in &open {
+            if remaining <= 0 {
+                break;
+            }
+            let take = self.take_water_from_cap(per.min(remaining));
+            if take <= 0 {
+                break;
+            }
+            self.voids[i].water_mass += take;
+            self.voids[i].light = self.voids[i].light.max(220);
+            remaining -= take;
+            moved += take;
+        }
+        moved
     }
 }
 

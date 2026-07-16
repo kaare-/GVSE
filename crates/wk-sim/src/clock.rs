@@ -48,8 +48,16 @@ pub enum SubsystemId {
     /// still happen in `Groundwater`; this pass updates the head field.
     GroundwaterHeadField = 16,
     /// Dissolved-mineral concentration (kg/m³). Diffuses in wet cells;
-    /// dissolution sources from `solubility` feed stage 7 karst.
+    /// karst injects dissolved mass into this field.
     DissolvedField = 17,
+    /// Flux-driven limestone dissolution + void growth.
+    Karst = 18,
+    /// Surface water capture into open voids + cave-river flow.
+    VoidWater = 19,
+    /// Roof collapse over voids wider than `roof_span_max_m`.
+    RoofCollapse = 20,
+    /// Speleothem reprecipitation (dissolved → Limestone inside voids).
+    Speleogenesis = 21,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -59,7 +67,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 18] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 22] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -169,6 +177,27 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 18] = [
         id: SubsystemId::DissolvedField,
         period: 6,
         phase: 2,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::Karst,
+        // Slow vs hydrology; caves develop over many ticks.
+        period: 6,
+        phase: 4,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::VoidWater,
+        period: 1,
+        phase: 0,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::RoofCollapse,
+        period: 10,
+        phase: 7,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::Speleogenesis,
+        period: 30,
+        phase: 15,
     },
 ];
 

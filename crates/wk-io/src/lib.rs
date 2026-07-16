@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use wk_material::CHUNK_W;
 use wk_sim::Simulation;
 use wk_world::climate::ClimateSettings;
-use wk_world::column::{Activity, ResidualBucket, SedimentLoad};
+use wk_world::column::{Activity, ResidualBucket, SedimentLoad, Void, VoidOrigin};
 use wk_world::fields::{
     DissolvedField, GroundwaterHeadField, HumidityField, PressureField, ThermalField, WindField,
 };
@@ -82,6 +82,19 @@ pub struct ColumnSnapshot {
     pub legacy_ice: i64,
     #[serde(default)]
     pub legacy_snow: i64,
+    /// Stage 7 karst voids. Absent in older saves → empty.
+    #[serde(default)]
+    pub voids: Vec<VoidSnapshot>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VoidSnapshot {
+    pub top_y: f32,
+    pub height_m: f32,
+    pub water_mass: i64,
+    pub roof_material: u8,
+    pub origin: u8,
+    pub light: u8,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -121,6 +134,22 @@ pub fn snapshot_world(world: &World, sim_tick: u64) -> SaveFileV1 {
                     legacy_surface_water: 0,
                     legacy_ice: 0,
                     legacy_snow: 0,
+                    voids: col
+                        .voids
+                        .iter()
+                        .map(|v| VoidSnapshot {
+                            top_y: v.top_y,
+                            height_m: v.height_m,
+                            water_mass: v.water_mass,
+                            roof_material: v.roof_material as u8,
+                            origin: match v.origin {
+                                VoidOrigin::Karst => 0,
+                                VoidOrigin::Burrow => 1,
+                                VoidOrigin::Collapse => 2,
+                            },
+                            light: v.light,
+                        })
+                        .collect(),
                 })
                 .collect();
             (
@@ -214,6 +243,23 @@ pub fn restore_world(save: &SaveFileV1) -> (World, u64) {
             if cs.legacy_surface_water > 0 {
                 col.deposit_to_top(MaterialId::Water, cs.legacy_surface_water, now);
             }
+            col.voids = cs
+                .voids
+                .iter()
+                .map(|v| Void {
+                    top_y: v.top_y,
+                    height_m: v.height_m,
+                    water_mass: v.water_mass,
+                    roof_material: MaterialId::from_u8(v.roof_material)
+                        .unwrap_or(MaterialId::Stone),
+                    origin: match v.origin {
+                        1 => VoidOrigin::Burrow,
+                        2 => VoidOrigin::Collapse,
+                        _ => VoidOrigin::Karst,
+                    },
+                    light: v.light,
+                })
+                .collect();
             col.recompute_surface_y(snap.bedrock_y);
         }
         chunk.thermal = snap.thermal.clone();

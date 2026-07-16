@@ -470,3 +470,29 @@ pub fn generate_flat_sand(coord: i32, bedrock_y: f32, surface_y: f32) -> Chunk {
     }
     chunk
 }
+
+/// Flat limestone bed under a thin sand cap — stage 7 karst scenarios.
+/// Stack (top→bottom after settle): Sand cap, Limestone body, Stone base.
+pub fn generate_limestone_bed(
+    coord: i32,
+    bedrock_y: f32,
+    stone_h: f32,
+    limestone_h: f32,
+    sand_h: f32,
+) -> Chunk {
+    let mut chunk = Chunk::new(coord, bedrock_y);
+    for col in &mut chunk.columns {
+        col.layer_count = 0;
+        col.surface_y = bedrock_y;
+        let stone_m = mass_for_height(MaterialId::Stone, stone_h);
+        let lime_m = mass_for_height(MaterialId::Limestone, limestone_h);
+        let sand_m = mass_for_height(MaterialId::Sand, sand_h);
+        // Deposit bottom-first via repeated top deposits + settle.
+        col.deposit_to_top(MaterialId::Stone, stone_m, 0);
+        col.deposit_to_top(MaterialId::Limestone, lime_m, 0);
+        col.deposit_to_top(MaterialId::Sand, sand_m, 0);
+        col.settle_by_density(0);
+        col.recompute_surface_y(bedrock_y);
+    }
+    chunk
+}
