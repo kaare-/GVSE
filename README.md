@@ -58,6 +58,9 @@ WK_SOAK_TICKS=1000000 cargo test -p wk-sim --test scenarios e7_
 Durable design records for planned extensions and known constraints
 live under [`docs/`](docs/README.md):
 
+- [`docs/PLAN.md`](docs/PLAN.md) — consolidated roadmap: stages 1–11
+  from current state through worldgen, streaming, performance, field
+  layer, karst caves, ecology, burrows, creatures, and evolution.
 - [`docs/WORLDGEN.md`](docs/WORLDGEN.md) — infinite left-right terrain
   via deterministic noise, chunk streaming (view / active / resident /
   evicted), initial hydrological state (water table, soil moisture,
@@ -66,6 +69,11 @@ live under [`docs/`](docs/README.md):
 - [`docs/UNDERGROUND.md`](docs/UNDERGROUND.md) — karst caves and
   burrows: void-annotation data model, soluble-material physics, roof
   collapse, cave ecology.
+- [`docs/VOXELS.md`](docs/VOXELS.md) — voxels vs columns vs fields;
+  why the hybrid (columns for material identity, coarser scalar/vector
+  fields for smooth physics, extended voids for cavities) reaches
+  the ambition inside real-time budget and a full voxel rewrite is
+  reserved as an option.
 - [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — measured baseline
   throughput, ordered list of concrete optimisations, target headroom
   before adding the ecology and creature layers.
