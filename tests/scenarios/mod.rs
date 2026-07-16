@@ -1,4 +1,4 @@
-//! Headless scenario experiments E1–E17, E20+.
+//! Headless scenario experiments E1–E17, E20+, E30+.
 
 mod e1_rain_hill;
 mod e2_basin;
@@ -18,6 +18,7 @@ mod e15_roots_reduce_erosion;
 mod e16_grazer_eats_biomass;
 mod e17_reproduction_mutates;
 mod e20_geothermal_steady_state;
+mod e30_atom_bloom;
 mod e22_humidity_near_water_body;
 mod e23_convection_cell;
 mod e24_darcy_pressure_equilibration;

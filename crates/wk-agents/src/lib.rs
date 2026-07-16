@@ -1,10 +1,19 @@
-//! ECS creature layer (stages 10–11).
+//! ECS creature layer (stages 10–11 + Organism Kernel Set A).
 //!
 //! Agents live in a [`hecs::World`] beside the column stack. They read
 //! world state and call [`wk_world::World`] APIs (`dig`, `eat_biomass`,
 //! `drink_water`). Stage 11 adds reproduction with deterministic genome
-//! mutation and light environmental stress. See `docs/AGENTS.md` and
-//! `docs/EVOLUTION.md`.
+//! mutation and light environmental stress. Set A adds blueprint-backed
+//! photo-organisms. See `docs/AGENTS.md`, `docs/EVOLUTION.md`, and
+//! `docs/organism/`.
+
+pub mod blueprint;
+pub mod module;
+pub mod organism;
+
+pub use blueprint::{Blueprint, PlacedModule, Wire, WireKind, BLUEPRINT_DIR};
+pub use module::{LaneId, ModuleId};
+pub use organism::{ModuleBody, Organism, MAX_ORGANISMS, PHOTON_RATE};
 
 use hecs::{Entity, World as EcsWorld};
 use serde::{Deserialize, Serialize};
@@ -54,7 +63,7 @@ pub struct Energy {
     pub max: f32,
 }
 
-/// Genome trait vector — mutated on reproduction (stage 11).
+/// Genome trait vector — mutated on reproduction (stage 11 / Set A).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Genome {
     /// Columns stepped toward forage per agent tick (typical 0.2–1.0).
@@ -67,10 +76,39 @@ pub struct Genome {
     pub dig_drive: f32,
     /// Energy gained per kg biomass eaten.
     pub graze_efficiency: f32,
-    /// Basal energy drain per agent tick.
-    pub metabolism: f32,
+    /// Basal energy drain per agent tick (renamed from `metabolism`).
+    #[serde(alias = "metabolism", default = "default_metabolic_rate")]
+    pub metabolic_rate: f32,
     /// 0..1 gate on reproduction attempts (0 disables fission).
     pub repro_drive: f32,
+    /// Energy fraction of max required to attempt fission (Set A).
+    #[serde(default = "default_reproduce_at")]
+    pub reproduce_at: f32,
+    /// 1 = exact clone; 0 = full mutation strength (Set A).
+    #[serde(default = "default_clone_fidelity")]
+    pub clone_fidelity: f32,
+    /// Preferred phase within the day cycle (0..1) (Set A).
+    #[serde(default = "default_circadian_phase")]
+    pub circadian_phase: f32,
+    /// Fraction of the day the organism is active (0..1) (Set A).
+    #[serde(default = "default_active_window")]
+    pub active_window: f32,
+}
+
+fn default_metabolic_rate() -> f32 {
+    0.35
+}
+fn default_reproduce_at() -> f32 {
+    0.7
+}
+fn default_clone_fidelity() -> f32 {
+    0.6
+}
+fn default_circadian_phase() -> f32 {
+    0.25
+}
+fn default_active_window() -> f32 {
+    0.55
 }
 
 impl Default for Genome {
@@ -81,8 +119,12 @@ impl Default for Genome {
             drink_rate: 30.0,
             dig_drive: 0.15,
             graze_efficiency: 0.08,
-            metabolism: 0.35,
+            metabolic_rate: default_metabolic_rate(),
             repro_drive: 0.55,
+            reproduce_at: default_reproduce_at(),
+            clone_fidelity: default_clone_fidelity(),
+            circadian_phase: default_circadian_phase(),
+            active_window: default_active_window(),
         }
     }
 }
@@ -107,8 +149,12 @@ impl Genome {
         g.drink_rate = jitter(g.drink_rate, 5.0, 100.0);
         g.dig_drive = jitter(g.dig_drive, 0.0, 1.0);
         g.graze_efficiency = jitter(g.graze_efficiency, 0.01, 0.25);
-        g.metabolism = jitter(g.metabolism, 0.05, 1.2);
+        g.metabolic_rate = jitter(g.metabolic_rate, 0.05, 1.2);
         g.repro_drive = jitter(g.repro_drive, 0.0, 1.0);
+        g.reproduce_at = jitter(g.reproduce_at, 0.3, 0.95);
+        g.clone_fidelity = jitter(g.clone_fidelity, 0.0, 1.0);
+        g.circadian_phase = jitter(g.circadian_phase, 0.0, 1.0);
+        g.active_window = jitter(g.active_window, 0.1, 1.0);
         g
     }
 
@@ -120,8 +166,12 @@ impl Genome {
             || (self.drink_rate - other.drink_rate).abs() > EPS
             || (self.dig_drive - other.dig_drive).abs() > EPS
             || (self.graze_efficiency - other.graze_efficiency).abs() > EPS
-            || (self.metabolism - other.metabolism).abs() > EPS
+            || (self.metabolic_rate - other.metabolic_rate).abs() > EPS
             || (self.repro_drive - other.repro_drive).abs() > EPS
+            || (self.reproduce_at - other.reproduce_at).abs() > EPS
+            || (self.clone_fidelity - other.clone_fidelity).abs() > EPS
+            || (self.circadian_phase - other.circadian_phase).abs() > EPS
+            || (self.active_window - other.active_window).abs() > EPS
     }
 }
 
@@ -302,7 +352,7 @@ impl AgentStore {
             }
 
             // Environmental stress (stage 11).
-            let mut drain = genome.metabolism;
+            let mut drain = genome.metabolic_rate;
             let dry = world
                 .column_at(wx)
                 .map(|c| c.top_water_mass() <= 0 && c.moisture <= 0)
@@ -437,6 +487,6 @@ impl AgentStore {
         if gs.is_empty() {
             return 0.0;
         }
-        gs.iter().map(|g| g.metabolism).sum::<f32>() / gs.len() as f32
+        gs.iter().map(|g| g.metabolic_rate).sum::<f32>() / gs.len() as f32
     }
 }

@@ -301,11 +301,31 @@ fn draw_clouds(snap: &RenderSnapshot, sw: f32, sh: f32) {
     }
 }
 
+/// Draw Set A organism modules as 1×1 pixels (world_x_frac, elev_m, rgb).
+pub fn draw_organisms(
+    modules: &[(f32, f32, (u8, u8, u8))],
+    viewport_x: i32,
+    sea_level: f32,
+    camera_y_offset: f32,
+) {
+    let sh = screen_height();
+    let sw = screen_width();
+    for &(wx, wy, (r, g, b)) in modules {
+        let sx = (wx - viewport_x as f32) * COL_W;
+        if sx < -COL_W || sx > sw {
+            continue;
+        }
+        let sy = world_y_to_screen(wy, sea_level, sh, camera_y_offset);
+        draw_rectangle(sx, sy - COL_W, COL_W.max(3.0), COL_W.max(3.0), Color::from_rgba(r, g, b, 255));
+    }
+}
+
 pub fn draw_frame(
     snap: &RenderSnapshot,
     selected: Option<i32>,
     camera_y_offset: f32,
     status_line: &str,
+    organism_modules: &[(f32, f32, (u8, u8, u8))],
 ) {
     let sw = screen_width();
     let sh = screen_height();
@@ -438,6 +458,13 @@ pub fn draw_frame(
             draw_rectangle(lx, 10.0, COL_W, 8.0, Color::from_rgba(255, 0, 255, 255));
         }
     }
+
+    draw_organisms(
+        organism_modules,
+        snap.viewport_x,
+        snap.sea_level,
+        camera_y_offset,
+    );
 
     let phase = snap.climate.phase_fraction(snap.tick);
     let clock_minutes = (phase * 24.0 * 60.0) as u32;

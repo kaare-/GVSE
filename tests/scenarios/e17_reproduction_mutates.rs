@@ -52,8 +52,9 @@ fn e17_reproduction_mutates() {
         drink_rate: 40.0,
         dig_drive: 0.0,
         graze_efficiency: 0.14,
-        metabolism: 0.12,
+        metabolic_rate: 0.12,
         repro_drive: 1.0, // always attempt when due / energetic
+        ..Genome::default()
     };
     let tracked0 = world.mass_audit.total_tracked();
     let audit0 = world.mass_audit.clone();

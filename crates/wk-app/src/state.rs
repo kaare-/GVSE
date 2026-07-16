@@ -2,6 +2,7 @@ use macroquad::prelude::*;
 use wk_io::{load_simulation, save_simulation};
 use wk_world::{OverlayMode, RenderSnapshot};
 
+use crate::editor::CreatureEditor;
 use crate::render::{self, SAVE_PATH};
 
 /// Columns scrolled per second while A/D is held.
@@ -40,6 +41,7 @@ pub struct AppState {
     settings_night_minutes: f32,
     settings_max_clouds: f32,
     settings_cloud_spawn_secs: f32,
+    pub editor: CreatureEditor,
 }
 
 impl AppState {
@@ -92,13 +94,14 @@ impl AppState {
             selected_column: None,
             tick_accum: 0.0,
             status_msg:
-                "Space run | A/D scroll | W/S pan | R rain | Y weather | F5/F9 save/load | Tab settings"
+                "Space run | A/D scroll | W/S pan | R rain | Y weather | C creature | F5/F9 save/load | Tab settings"
                     .into(),
             show_settings: false,
             settings_day_minutes,
             settings_night_minutes,
             settings_max_clouds,
             settings_cloud_spawn_secs,
+            editor: CreatureEditor::default(),
         }
     }
 
@@ -146,6 +149,11 @@ impl AppState {
     }
 
     pub fn update(&mut self) {
+        // Freeze the world while the creature editor is open.
+        if self.editor.open {
+            self.clamp_viewport();
+            return;
+        }
         if !self.paused {
             let dt = get_frame_time();
             self.tick_accum += dt * self.speed as f32 * 60.0;
@@ -160,6 +168,53 @@ impl AppState {
     }
 
     pub fn handle_input(&mut self) {
+        if is_key_pressed(KeyCode::C) {
+            let opening = !self.editor.open;
+            self.editor.toggle(self.paused);
+            if opening {
+                self.paused = true;
+                self.show_settings = false;
+            } else {
+                self.paused = self.editor.was_paused;
+            }
+        }
+        if self.editor.open {
+            let _ = self.editor.handle_input();
+            if self.editor.spawn_picker && is_mouse_button_pressed(MouseButton::Left) {
+                let (mx, _) = mouse_position();
+                let col = render::screen_x_to_world_x(mx, self.viewport_x);
+                if let Some(c) = self.world.column_at(col) {
+                    if c.surface_y > self.world.sea_level {
+                        let mut bp = self.editor.blueprint.clone();
+                        bp.name = self.editor.blueprint.name.clone();
+                        match self.sim.agents.spawn_from_blueprint(
+                            &self.world,
+                            col,
+                            bp,
+                            50.0,
+                        ) {
+                            Some(_) => {
+                                self.status_msg = format!(
+                                    "Spawned {} at x={col} (organisms={})",
+                                    self.editor.blueprint.name,
+                                    self.sim.agents.organism_count()
+                                );
+                                self.editor.spawn_picker = false;
+                                self.editor.open = false;
+                                self.paused = self.editor.was_paused;
+                            }
+                            None => {
+                                self.editor.status =
+                                    "Spawn failed (invalid atom or population cap)".into();
+                            }
+                        }
+                    } else {
+                        self.editor.status = "Pick a land column (above sea level)".into();
+                    }
+                }
+            }
+            return;
+        }
         if is_key_pressed(KeyCode::Space) {
             self.paused = !self.paused;
         }

@@ -15,4 +15,7 @@ pub use buffer::*;
 pub use clock::*;
 pub use residual::*;
 pub use sim::*;
-pub use wk_agents::{AgentStore, Energy, Genome, Grazer, Pose, MAX_AGENTS};
+pub use wk_agents::{
+    AgentStore, Blueprint, Energy, Genome, Grazer, LaneId, ModuleBody, ModuleId, Organism,
+    PlacedModule, Pose, Wire, WireKind, MAX_AGENTS, MAX_ORGANISMS,
+};

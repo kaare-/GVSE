@@ -514,6 +514,7 @@ name = "wk-agents"
 version = "0.1.0"
 dependencies = [
  "hecs",
+ "postcard",
  "serde",
  "wk-material",
  "wk-world",
