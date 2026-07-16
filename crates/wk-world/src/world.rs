@@ -42,6 +42,9 @@ pub struct MassAudit {
     /// Cumulative kg of biomass decayed back out of the tracked pool (sink).
     #[serde(default)]
     pub biomass_decay_total: i64,
+    /// Cumulative kg of alive biomass eaten by agents (stage 10 sink).
+    #[serde(default)]
+    pub biomass_eaten_total: i64,
 }
 
 impl MassAudit {
@@ -54,6 +57,7 @@ impl MassAudit {
             - self.evap_out_total
             - self.boundary_out_total
             - self.biomass_decay_total
+            - self.biomass_eaten_total
     }
 }
 
@@ -94,6 +98,10 @@ pub struct World {
     pub gw_head_fields_enabled: bool,
     /// When true, chunks carry a dissolved-mineral concentration field.
     pub dissolved_fields_enabled: bool,
+    /// World-x columns that currently host agents. `run_activity` keeps
+    /// these HydrologyActive so creature-bearing chunks don't go dormant.
+    /// Rebuilt each agent step; not part of the save schema.
+    pub agent_keep_awake: Vec<i32>,
 }
 
 impl World {
@@ -163,7 +171,57 @@ impl World {
             ambient_pressure: 1.0,
             gw_head_fields_enabled: false,
             dissolved_fields_enabled: false,
+            agent_keep_awake: Vec::new(),
         }
+    }
+
+    /// Remove up to `max_kg` of living plant mass from the column's ecology.
+    /// Returns kg actually eaten. Books `biomass_eaten_total`.
+    pub fn eat_biomass(&mut self, world_x: i32, max_kg: i64) -> i64 {
+        if max_kg <= 0 {
+            return 0;
+        }
+        let Some(col) = self.column_at_mut(world_x) else {
+            return 0;
+        };
+        let take = max_kg.min(col.ecology.alive_biomass).max(0);
+        if take <= 0 {
+            return 0;
+        }
+        col.ecology.alive_biomass -= take;
+        // Canopy tracks biomass downward a little.
+        let cover = ((col.ecology.alive_biomass as f32) / 800.0).clamp(0.0, 1.0);
+        col.ecology.leaf_area = col.ecology.leaf_area.min(cover + 0.05);
+        col.ecology.root_density = col.ecology.root_density.min(cover + 0.05);
+        col.activity = Activity::HydrologyActive;
+        self.mass_audit.biomass_eaten_total += take;
+        take
+    }
+
+    /// Drink up to `max_kg` of water: prefer standing / flowable water,
+    /// else pore moisture. Returns kg removed from the column.
+    pub fn drink_water(&mut self, world_x: i32, max_kg: i64) -> i64 {
+        if max_kg <= 0 {
+            return 0;
+        }
+        let Some(col) = self.column_at_mut(world_x) else {
+            return 0;
+        };
+        let mut remaining = max_kg;
+        let from_cap = col.take_water_from_cap(remaining);
+        remaining -= from_cap;
+        let mut from_moist = 0i64;
+        if remaining > 0 && col.moisture > 0 {
+            from_moist = remaining.min(col.moisture);
+            col.moisture -= from_moist;
+        }
+        let taken = from_cap + from_moist;
+        if taken > 0 {
+            col.activity = Activity::HydrologyActive;
+            // Water left the world into the creature — count like evap.
+            self.mass_audit.evap_out_total += taken;
+        }
+        taken
     }
 
     /// Climate-only temperature at an elevation (sky / free-air model).
@@ -600,6 +658,7 @@ impl World {
             dissolved_total: self.mass_audit.dissolved_total,
             biomass_grow_total: self.mass_audit.biomass_grow_total,
             biomass_decay_total: self.mass_audit.biomass_decay_total,
+            biomass_eaten_total: self.mass_audit.biomass_eaten_total,
             tick: self.mass_audit.tick,
             ..Default::default()
         };
@@ -628,6 +687,7 @@ impl World {
         self.mass_audit.dissolved_return_total = audit.dissolved_return_total;
         self.mass_audit.biomass_grow_total = audit.biomass_grow_total;
         self.mass_audit.biomass_decay_total = audit.biomass_decay_total;
+        self.mass_audit.biomass_eaten_total = audit.biomass_eaten_total;
         self.mass_audit.biomass_total = biomass;
         if self.dissolved_fields_enabled {
             self.mass_audit.dissolved_total = self.dissolved_mass_kg();

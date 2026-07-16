@@ -60,6 +60,8 @@ pub enum SubsystemId {
     Speleogenesis = 21,
     /// Per-column plant growth / death / nutrient recycle.
     Ecology = 22,
+    /// ECS creature behaviour (grazers).
+    Agents = 23,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -69,7 +71,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 23] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 24] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -206,6 +208,11 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 23] = [
         // Plants are slow vs hydrology; keep the tick budget light.
         period: 10,
         phase: 8,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::Agents,
+        period: 1,
+        phase: 0,
     },
 ];
 

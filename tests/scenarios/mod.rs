@@ -1,4 +1,4 @@
-//! Headless scenario experiments E1–E15, E20+ (E13 burrows).
+//! Headless scenario experiments E1–E16, E20+.
 
 mod e1_rain_hill;
 mod e2_basin;
@@ -15,6 +15,7 @@ mod e12_stalactite_forms;
 mod e13_burrow_produces_surface_tailings;
 mod e14_ecology_grows_when_wet;
 mod e15_roots_reduce_erosion;
+mod e16_grazer_eats_biomass;
 mod e20_geothermal_steady_state;
 mod e22_humidity_near_water_body;
 mod e23_convection_cell;

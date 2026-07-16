@@ -1,15 +1,16 @@
+use wk_agents::AgentStore;
 use wk_world::world::{OverlayData, World};
 
 use crate::barrier::barrier_commit;
 use crate::buffer::WorldTransferScratch;
 use crate::clock::{SimClock, SubsystemId, SUBSYSTEM_ORDER};
 use crate::subsystems::{
-    run_activity, run_dissolved_field, run_ecology, run_evaporation, run_groundwater_flow,
-    run_groundwater_head_field, run_humidity_field, run_infiltration, run_karst,
-    run_lake_level, run_layer_merge, run_phase_change, run_pressure_field, run_rain_inject,
-    run_roof_collapse, run_sediment, run_slumping, run_speleogenesis, run_surface_void_capture,
-    run_surface_water, run_thermal_field, run_void_water_flow, run_weather, run_wind_field,
-    SimParams,
+    run_activity, run_agents, run_dissolved_field, run_ecology, run_evaporation,
+    run_groundwater_flow, run_groundwater_head_field, run_humidity_field, run_infiltration,
+    run_karst, run_lake_level, run_layer_merge, run_phase_change, run_pressure_field,
+    run_rain_inject, run_roof_collapse, run_sediment, run_slumping, run_speleogenesis,
+    run_surface_void_capture, run_surface_water, run_thermal_field, run_void_water_flow,
+    run_weather, run_wind_field, SimParams,
 };
 
 pub struct Simulation {
@@ -17,6 +18,8 @@ pub struct Simulation {
     pub scratch: WorldTransferScratch,
     pub params: SimParams,
     pub last_overlay: OverlayData,
+    /// ECS creature store (stage 10). Empty until something spawns.
+    pub agents: AgentStore,
 }
 
 impl Simulation {
@@ -30,6 +33,7 @@ impl Simulation {
                 sea_level: world.sea_level,
             },
             last_overlay: OverlayData::default(),
+            agents: AgentStore::new(),
         }
     }
 
@@ -43,6 +47,10 @@ impl Simulation {
         self.sync_params(world);
         let tick = self.clock.tick;
 
+        // Ensure agent host columns stay eligible before activity runs.
+        if !self.agents.is_empty() {
+            self.agents.wake_host_columns(world);
+        }
 
         for &sub_id in &SUBSYSTEM_ORDER {
             let schedule = SimClock::schedule_for(sub_id);
@@ -90,7 +98,8 @@ impl Simulation {
                 | SubsystemId::VoidWater
                 | SubsystemId::RoofCollapse
                 | SubsystemId::Speleogenesis
-                | SubsystemId::Ecology => {}
+                | SubsystemId::Ecology
+                | SubsystemId::Agents => {}
             }
         }
 
@@ -143,6 +152,10 @@ impl Simulation {
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Ecology)) {
             run_ecology(world, tick);
+            world.recompute_mass_audit();
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::Agents)) {
+            run_agents(world, &mut self.agents, tick);
             world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::PhaseChange)) {

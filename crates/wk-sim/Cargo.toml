@@ -7,6 +7,7 @@ edition.workspace = true
 wk-material = { path = "../wk-material" }
 wk-world = { path = "../wk-world" }
 wk-field = { path = "../wk-field" }
+wk-agents = { path = "../wk-agents" }
 serde = { version = "1", features = ["derive"] }
 
 [dev-dependencies]

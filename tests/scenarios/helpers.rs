@@ -202,6 +202,7 @@ pub fn bookkeeping_check(world: &World, initial_total: i64, initial_audit: wk_wo
     let evap = world.mass_audit.evap_out_total - initial_audit.evap_out_total;
     let boundary = world.mass_audit.boundary_out_total - initial_audit.boundary_out_total;
     let decay = world.mass_audit.biomass_decay_total - initial_audit.biomass_decay_total;
-    let expected_delta = rain + sea + grow - evap - boundary - decay;
+    let eaten = world.mass_audit.biomass_eaten_total - initial_audit.biomass_eaten_total;
+    let expected_delta = rain + sea + grow - evap - boundary - decay - eaten;
     current - initial_total - expected_delta
 }
