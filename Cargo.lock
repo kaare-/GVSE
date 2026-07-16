@@ -507,6 +507,7 @@ name = "wk-sim"
 version = "0.1.0"
 dependencies = [
  "serde",
+ "wk-field",
  "wk-io",
  "wk-material",
  "wk-world",

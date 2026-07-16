@@ -6,7 +6,7 @@ use crate::clock::{SimClock, SubsystemId, SUBSYSTEM_ORDER};
 use crate::subsystems::{
     run_activity, run_evaporation, run_groundwater_flow, run_infiltration, run_lake_level,
     run_layer_merge, run_phase_change, run_rain_inject, run_sediment, run_slumping,
-    run_surface_water, run_weather, SimParams,
+    run_surface_water, run_thermal_field, run_weather, SimParams,
 };
 
 pub struct Simulation {
@@ -76,7 +76,8 @@ impl Simulation {
                 }
                 SubsystemId::PhaseChange
                 | SubsystemId::LakeLevel
-                | SubsystemId::Slumping => {}
+                | SubsystemId::Slumping
+                | SubsystemId::ThermalField => {}
             }
         }
 
@@ -89,6 +90,12 @@ impl Simulation {
         // tries to apply those deltas — the deltas then silently no-op
         // but their upstream bookkeeping (evap_out_total etc.) was
         // already booked, leaking mass into the audit.
+        //
+        // ThermalField writes only field state (not layers), but still
+        // runs here so PhaseChange samples the committed field.
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::ThermalField)) {
+            run_thermal_field(world, tick);
+        }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::PhaseChange)) {
             run_phase_change(world, tick);
             world.recompute_mass_audit();

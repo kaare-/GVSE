@@ -290,7 +290,12 @@ pub fn draw_frame(
                 let a = ((t % 256) as u8).max(64);
                 draw_rectangle(x, sh - 8.0, COL_W, 4.0, Color::from_rgba(a, 255 - a, 128, 200));
             }
-            _ => {}
+            OverlayMode::TemperatureField => {
+                // Cold blue → hot red across roughly 0–55 °C (sky→geothermal).
+                let c = temperature_overlay_color(col.temperature_c);
+                draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
+            }
+            OverlayMode::None => {}
         }
     }
 
@@ -342,6 +347,15 @@ fn material_name(mat: MaterialId) -> &'static str {
         MaterialId::Snow => "snow",
         MaterialId::Ice => "ice",
     }
+}
+
+/// Map °C → RGBA for the temperature overlay (cold blue → hot red).
+fn temperature_overlay_color(temp_c: f32) -> Color {
+    let t = ((temp_c - 0.0) / 55.0).clamp(0.0, 1.0);
+    let r = (t * 255.0) as u8;
+    let g = ((1.0 - (t - 0.5).abs() * 2.0).max(0.0) * 180.0) as u8;
+    let b = ((1.0 - t) * 255.0) as u8;
+    Color::from_rgba(r, g, b, 220)
 }
 
 fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32) {

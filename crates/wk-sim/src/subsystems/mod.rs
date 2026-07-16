@@ -6,6 +6,7 @@
 
 mod activity;
 mod evaporation;
+pub mod fields;
 mod groundwater;
 mod halos;
 mod infiltration;
@@ -21,6 +22,7 @@ mod weather;
 
 pub use activity::run_activity;
 pub use evaporation::run_evaporation;
+pub use fields::run_thermal_field;
 pub use groundwater::run_groundwater_flow;
 pub use halos::{exchange_outboxes, update_halos};
 pub use infiltration::run_infiltration;

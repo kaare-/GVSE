@@ -32,6 +32,10 @@ pub enum SubsystemId {
     /// neighbour. Post-barrier direct-mutation pass, like PhaseChange
     /// and LakeLevel.
     Slumping = 11,
+    /// Thermal field diffusion (geothermal bottom + sky top). Writes
+    /// only field state; runs after the material barrier so
+    /// phase_change can sample the committed field.
+    ThermalField = 12,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,7 +45,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 12] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 13] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -117,16 +121,19 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 12] = [
         period: 1,
         phase: 0,
     },
+    SubsystemSchedule {
+        id: SubsystemId::ThermalField,
+        // Every 10 ticks — heat diffusion is slow vs hydrology; period
+        // chosen against α·Δt/Δx² stability at 0.5 m cells.
+        period: 10,
+        phase: 0,
+    },
 ];
 
-/// Fixed execution order for subsystems within one tick. PhaseChange
-/// and LakeLevel are deliberately NOT here — they're direct-mutation
-/// passes that run *after* barrier_commit so they operate on already-
-/// committed column state. Running them here would let them modify a
-/// column's top layer between the buffered subsystems that computed
-/// deltas against the old top and barrier_commit that tries to apply
-/// those deltas (which then silently no-op, leaking mass into the
-/// bookkeeping equation).
+/// Fixed execution order for subsystems within one tick. PhaseChange,
+/// LakeLevel, Slumping, and ThermalField are deliberately NOT here —
+/// they're direct-mutation passes that run *after* barrier_commit so
+/// they operate on already-committed column (and field) state.
 pub const SUBSYSTEM_ORDER: [SubsystemId; 9] = [
     SubsystemId::RainInject,
     SubsystemId::Weather,
