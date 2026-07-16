@@ -182,11 +182,12 @@ pub fn temp_comfort_factor(temp_c: f32, genome: &Genome) -> f32 {
 }
 
 /// Dissolved-CO₂ half-saturation (relative units) for photo Michaelis curve.
-const CO2_HALF_SAT: f32 = 0.25;
+pub const CO2_HALF_SAT: f32 = 0.25;
 /// CO₂ drawn from the water column per unit photo gain.
-const CO2_PER_ENERGY: f32 = 0.002;
+/// Tuned so dense blooms measurably starve dissolved CO₂ against air↔water exchange.
+pub const CO2_PER_ENERGY: f32 = 0.014;
 /// O₂ emitted per unit photo gain.
-const O2_PER_ENERGY: f32 = 0.0015;
+pub const O2_PER_ENERGY: f32 = 0.009;
 fn corpse_rgb((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     // Desaturated brown-grey — readable as dead tissue, not living chroma.
     let luma = (r as u16 * 3 + g as u16 * 6 + b as u16) / 10;
@@ -1095,6 +1096,7 @@ impl AgentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wk_world::column::{EQUIL_WATER_CO2, EQUIL_WATER_O2};
     use wk_world::terrain::generate_flat_sand;
     use wk_world::world::World;
 
@@ -1159,6 +1161,146 @@ mod tests {
         store.step_organisms(&mut world, 1);
         assert_eq!(store.organism_count(), 0, "dry land should kill plankton");
         assert_eq!(store.corpse_count(), 1);
+    }
+
+    #[test]
+    fn plankton_dies_under_ice_cap() {
+        let mut world = World::new(102);
+        world.sea_level = 0.0;
+        world.climate.base_temp_c = 18.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        if let Some(col) = world.column_at_mut(4) {
+            col.deposit_to_top(MaterialId::Water, 2_000, 0);
+            col.deposit_to_top(MaterialId::Ice, 400, 1);
+            col.settle_by_density(2);
+            assert!(col.top_ice_mass() > 0, "ice must float as top cap");
+            assert!(water_band(col).is_some(), "water still under ice");
+        }
+        let mut store = AgentStore::new();
+        store
+            .spawn_from_blueprint(&world, 4, Blueprint::atom(Genome::default()), 50.0)
+            .expect("spawn");
+        store.step_organisms(&mut world, 1);
+        assert_eq!(store.organism_count(), 0, "ice should kill plankton");
+        assert_eq!(store.corpse_count(), 1);
+    }
+
+    #[test]
+    fn temp_comfort_blocks_cold_and_hot() {
+        let g = Genome {
+            temp_optimum: 18.0,
+            temp_width: 10.0,
+            ..Genome::default()
+        };
+        assert!(temp_comfort_factor(18.0, &g) > 0.95);
+        assert!(
+            temp_comfort_factor(-5.0, &g) < 0.35,
+            "cold should be below repro threshold"
+        );
+        assert!(
+            temp_comfort_factor(45.0, &g) < 0.35,
+            "hot should be below repro threshold"
+        );
+    }
+
+    #[test]
+    fn cold_climate_blocks_plankton_reproduction() {
+        let mut world = World::new(103);
+        world.sea_level = 0.0;
+        world.climate.base_temp_c = -8.0;
+        world.climate.day_night_amplitude_c = 0.0;
+        world.climate.lapse_rate_c_per_m = 0.0;
+        world.climate.day_length_ticks = 10_000;
+        world.climate.night_length_ticks = 1;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.deposit_to_top(MaterialId::Water, 2_000, 0);
+            }
+        }
+        let genome = Genome {
+            metabolic_rate: 0.1,
+            reproduce_at: 0.4,
+            temp_optimum: 18.0,
+            temp_width: 8.0,
+            active_window: 1.0,
+            circadian_phase: 0.0,
+            ..Genome::default()
+        };
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(&world, 8, Blueprint::atom(genome), 50.0)
+            .expect("spawn");
+        // Keep energy topped so only temperature can block fission.
+        for tick in 0..400 {
+            if let Ok(mut energy) = store.ecs.get::<&mut Energy>(e) {
+                energy.current = energy.max;
+            }
+            store.step_organisms(&mut world, tick);
+        }
+        assert_eq!(
+            store.births_total, 0,
+            "cold water must block fission (comfort < 0.35)"
+        );
+        assert_eq!(store.organism_count(), 1);
+    }
+
+    #[test]
+    fn photo_drawdown_lowers_dissolved_co2() {
+        let mut world = World::new(104);
+        world.sea_level = 0.0;
+        world.climate.base_temp_c = 18.0;
+        world.climate.day_night_amplitude_c = 0.0;
+        world.climate.lapse_rate_c_per_m = 0.0;
+        world.climate.day_length_ticks = 10_000;
+        world.climate.night_length_ticks = 1;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.deposit_to_top(MaterialId::Water, 2_000, 0);
+                col.ecology.water_co2 = EQUIL_WATER_CO2;
+                col.ecology.water_o2 = EQUIL_WATER_O2;
+            }
+        }
+        let co2_before: f32 = (0..64)
+            .map(|x| world.column_at(x).unwrap().ecology.water_co2)
+            .sum::<f32>()
+            / 64.0;
+
+        let genome = Genome {
+            metabolic_rate: 0.15,
+            reproduce_at: 0.99, // no fission — pure drawdown
+            temp_optimum: 18.0,
+            temp_width: 20.0,
+            active_window: 1.0,
+            circadian_phase: 0.0,
+            ..Genome::default()
+        };
+        let mut store = AgentStore::new();
+        for x in 2..62 {
+            let _ = store.spawn_from_blueprint(&world, x, Blueprint::atom(genome), 50.0);
+        }
+        let n = store.organism_count();
+        assert!(n >= 24, "need a dense patch for drawdown, got {n}");
+
+        // Daylight ticks only — no gas exchange here (AgentStore path).
+        for tick in 0..200 {
+            store.step_organisms(&mut world, tick);
+        }
+        let co2_min = (0..64)
+            .map(|x| world.column_at(x).unwrap().ecology.water_co2)
+            .fold(f32::INFINITY, f32::min);
+        let o2_max = (0..64)
+            .map(|x| world.column_at(x).unwrap().ecology.water_o2)
+            .fold(0.0f32, f32::max);
+        assert!(
+            co2_min < co2_before - 0.15,
+            "bloom should draw CO₂ hard in occupied columns (before={co2_before:.3} min={co2_min:.3})"
+        );
+        assert!(
+            o2_max > EQUIL_WATER_O2 + 0.08,
+            "photosynthesis should emit O₂ (o2_max={o2_max:.3})"
+        );
     }
 
     #[test]
