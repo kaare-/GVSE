@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/wk-material",
+    "crates/wk-field",
     "crates/wk-world",
     "crates/wk-sim",
     "crates/wk-io",
