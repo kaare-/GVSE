@@ -58,6 +58,8 @@ pub enum SubsystemId {
     RoofCollapse = 20,
     /// Speleothem reprecipitation (dissolved → Limestone inside voids).
     Speleogenesis = 21,
+    /// Per-column plant growth / death / nutrient recycle.
+    Ecology = 22,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -67,7 +69,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 22] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 23] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -198,6 +200,12 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 22] = [
         id: SubsystemId::Speleogenesis,
         period: 30,
         phase: 15,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::Ecology,
+        // Plants are slow vs hydrology; keep the tick budget light.
+        period: 10,
+        phase: 8,
     },
 ];
 

@@ -54,6 +54,64 @@ impl Void {
     }
 }
 
+/// Per-column plant / soil-biology state (stage 8). Not a stratigraphic
+/// layer — biomass must not participate in density settling.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Ecology {
+    /// Root binding of the topsoil, 0 = bare, 1 = dense mat.
+    pub root_density: f32,
+    /// Leaf-area index proxy, 0 = bare, 1 = full canopy.
+    pub leaf_area: f32,
+    /// Standing dead organic mass (kg).
+    pub dead_biomass: i64,
+    /// Living plant mass (kg).
+    pub alive_biomass: i64,
+    /// Plant-available nutrient fraction, 0..1.
+    pub nutrient: f32,
+}
+
+impl Default for Ecology {
+    fn default() -> Self {
+        Self {
+            root_density: 0.0,
+            leaf_area: 0.0,
+            dead_biomass: 0,
+            alive_biomass: 0,
+            nutrient: 0.0,
+        }
+    }
+}
+
+impl Ecology {
+    pub fn biomass_total(self) -> i64 {
+        self.alive_biomass.max(0) + self.dead_biomass.max(0)
+    }
+
+    /// Seed a sparse starter community from biome + relative elevation.
+    pub fn seed_from_biome(biome: crate::climate::Biome, rel_sea_m: f32) -> Self {
+        use crate::climate::Biome;
+        let (alive, nutrient, roots, leaves) = match biome {
+            Biome::Ocean | Biome::Shelf => (0, 0.0, 0.0, 0.0),
+            Biome::Coast => (40, 0.35, 0.15, 0.12),
+            Biome::Plains => (80, 0.45, 0.25, 0.22),
+            Biome::Mountain => {
+                if rel_sea_m > 55.0 {
+                    (10, 0.15, 0.05, 0.04)
+                } else {
+                    (30, 0.25, 0.10, 0.08)
+                }
+            }
+        };
+        Self {
+            root_density: roots,
+            leaf_area: leaves,
+            dead_biomass: 0,
+            alive_biomass: alive,
+            nutrient,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MarkerId(pub u32);
 
@@ -152,6 +210,9 @@ pub struct Column {
     /// `serde(default)` keeps older saves loadable.
     #[serde(default)]
     pub voids: Vec<Void>,
+    /// Plant / soil-biology bucket (stage 8). Default = barren.
+    #[serde(default)]
+    pub ecology: Ecology,
 }
 
 impl Default for Column {
@@ -166,6 +227,7 @@ impl Default for Column {
             activity: Activity::HydrologyActive,
             marker: None,
             voids: Vec::new(),
+            ecology: Ecology::default(),
         }
     }
 }

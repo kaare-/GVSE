@@ -21,7 +21,7 @@ pub fn run_evaporation(world: &mut World, scratch: &mut WorldTransferScratch) {
         // don't hold a mut borrow across both paths.
         let mut vapor: Vec<(i32, f32, f32)> = Vec::new();
         for i in 0..CHUNK_W {
-            let (activity, surface_water, moisture, surface_y, humidity) = {
+            let (activity, surface_water, moisture, surface_y, humidity, leaf) = {
                 let chunk = world.chunks.get(&coord).unwrap();
                 let col = &chunk.columns[i];
                 let wx = chunk.world_x_base() + i as i32;
@@ -37,16 +37,19 @@ pub fn run_evaporation(world: &mut World, scratch: &mut WorldTransferScratch) {
                     col.moisture,
                     col.surface_y,
                     humidity,
+                    col.ecology.leaf_area.clamp(0.0, 1.0),
                 )
             };
             if activity == Activity::Dormant {
                 continue;
             }
             let evap_factor = (1.0 - humidity).max(0.0);
+            // Leaf area adds evapotranspiration on top of bare-soil evap.
+            let et = 1.0 + 1.2 * leaf;
             let from_surface =
                 (surface_water as f32 * EVAPORATION_COEFF * evap_factor).max(0.0);
             let from_moisture =
-                (moisture as f32 * EVAPORATION_COEFF * 0.5 * evap_factor).max(0.0);
+                (moisture as f32 * EVAPORATION_COEFF * 0.5 * evap_factor * et).max(0.0);
 
             let col = world.chunks.get_mut(&coord).unwrap();
             let surf_transfer =

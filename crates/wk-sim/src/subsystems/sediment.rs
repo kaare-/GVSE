@@ -93,8 +93,11 @@ pub fn run_sediment(world: &World, scratch: &mut WorldTransferScratch, tick: u64
             } else {
                 0.0
             };
+            // Roots bind the topsoil — dense mats substantially cut
+            // erosion (stage 8 ecology feedback).
+            let root_bind = 1.0 + 2.5 * col.ecology.root_density.clamp(0.0, 1.0);
             let effective_resistance =
-                (props.erosion_resistance as f32) * (1.0 - saturation * 0.7);
+                (props.erosion_resistance as f32) * (1.0 - saturation * 0.7) * root_bind;
             let erosion_rate =
                 water * flux_indicator * EROSION_FLUX_COEFF / effective_resistance.max(1.0);
             let erode_mass = erosion_rate as i64;
