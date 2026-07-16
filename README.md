@@ -52,3 +52,20 @@ WK_SOAK_TICKS=1000000 cargo test -p wk-sim --test scenarios e7_
 - Chunk width = 64 samples (16 m)
 - Max 8 layers per column
 - Integer kg mass accounting
+
+## Design notes
+
+Durable design records for planned extensions and known constraints
+live under [`docs/`](docs/README.md):
+
+- [`docs/WORLDGEN.md`](docs/WORLDGEN.md) — infinite left-right terrain
+  via deterministic noise, chunk streaming (view / active / resident /
+  evicted), initial hydrological state (water table, soil moisture,
+  atmospheric humidity), boundary conditions preventing leakage at
+  the sim edge.
+- [`docs/UNDERGROUND.md`](docs/UNDERGROUND.md) — karst caves and
+  burrows: void-annotation data model, soluble-material physics, roof
+  collapse, cave ecology.
+- [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) — measured baseline
+  throughput, ordered list of concrete optimisations, target headroom
+  before adding the ecology and creature layers.
