@@ -94,7 +94,7 @@ impl AppState {
             selected_column: None,
             tick_accum: 0.0,
             status_msg:
-                "Space run | A/D scroll | W/S pan | R rain | Y weather | C creature | F5/F9 save/load | Tab settings"
+                "Space run | A/D scroll | W/S pan | R rain | Y weather | C/F2 creature | F5/F9 save/load | Tab settings"
                     .into(),
             show_settings: false,
             settings_day_minutes,
@@ -168,14 +168,17 @@ impl AppState {
     }
 
     pub fn handle_input(&mut self) {
-        if is_key_pressed(KeyCode::C) {
+        // Creature editor: C or F2 (F2 in case C is swallowed by the WM/IME).
+        if is_key_pressed(KeyCode::C) || is_key_pressed(KeyCode::F2) {
             let opening = !self.editor.open;
             self.editor.toggle(self.paused);
             if opening {
                 self.paused = true;
                 self.show_settings = false;
+                self.status_msg = "Creature editor OPEN — paint Atom, Enter to spawn, C/F2 close".into();
             } else {
                 self.paused = self.editor.was_paused;
+                self.status_msg = "Creature editor closed".into();
             }
         }
         if self.editor.open {

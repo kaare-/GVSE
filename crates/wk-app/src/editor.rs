@@ -149,12 +149,21 @@ impl CreatureEditor {
         }
         let sw = screen_width();
         let sh = screen_height();
-        draw_rectangle(0.0, 0.0, sw, sh, Color::from_rgba(10, 12, 18, 180));
+        // Heavy dim so the editor is unmistakable against the world view.
+        draw_rectangle(0.0, 0.0, sw, sh, Color::from_rgba(8, 10, 16, 210));
+        draw_text(
+            "CREATURE EDITOR  (C or F2 to close)",
+            40.0,
+            36.0,
+            28.0,
+            Color::from_rgba(255, 220, 80, 255),
+        );
 
         let (ox, oy) = CANVAS_ORIGIN;
         let cw = self.blueprint.canvas_w as f32 * CELL_PX;
         let ch = self.blueprint.canvas_h as f32 * CELL_PX;
-        draw_rectangle(ox - 4.0, oy - 4.0, cw + 8.0, ch + 8.0, Color::from_rgba(30, 34, 44, 240));
+        draw_rectangle(ox - 4.0, oy - 4.0, cw + 8.0, ch + 8.0, Color::from_rgba(30, 34, 44, 255));
+        draw_rectangle_lines(ox - 4.0, oy - 4.0, cw + 8.0, ch + 8.0, 2.0, Color::from_rgba(255, 220, 80, 255));
 
         // Grid + modules.
         for y in 0..self.blueprint.canvas_h {
