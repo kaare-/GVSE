@@ -169,6 +169,7 @@ pub fn manual_total(world: &World) -> i64 {
                 t += col.layers[i].thickness;
             }
             t += col.moisture + col.sediment.total + col.void_water_total();
+            t += col.ecology.biomass_total();
         }
     }
     t + world.mass_audit.dissolved_total
@@ -197,8 +198,10 @@ pub fn bookkeeping_check(world: &World, initial_total: i64, initial_audit: wk_wo
     let current = world.mass_audit.total_tracked();
     let rain = world.mass_audit.rain_inject_total - initial_audit.rain_inject_total;
     let sea = world.mass_audit.sea_inject_total - initial_audit.sea_inject_total;
+    let grow = world.mass_audit.biomass_grow_total - initial_audit.biomass_grow_total;
     let evap = world.mass_audit.evap_out_total - initial_audit.evap_out_total;
     let boundary = world.mass_audit.boundary_out_total - initial_audit.boundary_out_total;
-    let expected_delta = rain + sea - evap - boundary;
+    let decay = world.mass_audit.biomass_decay_total - initial_audit.biomass_decay_total;
+    let expected_delta = rain + sea + grow - evap - boundary - decay;
     current - initial_total - expected_delta
 }

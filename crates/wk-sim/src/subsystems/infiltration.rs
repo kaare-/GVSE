@@ -23,11 +23,14 @@ pub fn run_infiltration(world: &mut World, scratch: &mut WorldTransferScratch) {
                 // will absorb the water, not the material sitting on
                 // top (which is Water itself, permeability 0, which
                 // would incorrectly block all infiltration under a
-                // puddle).
-                let perm = col
+                // puddle). Root channels (stage 8) boost the effective
+                // rate without rewriting the material table.
+                let base_perm = col
                     .top_porous_layer()
                     .map(|l| MaterialRegistry::props(l.material).permeability as f32 / 255.0)
                     .unwrap_or(0.0);
+                let root = col.ecology.root_density.clamp(0.0, 1.0);
+                let perm = base_perm * (1.0 + 0.8 * root);
                 (
                     col.activity,
                     col.top_water_mass(),

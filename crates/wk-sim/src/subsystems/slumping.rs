@@ -61,6 +61,8 @@ fn slumping_pass(world: &mut World, tick: u64) {
         column_top_material: MaterialId,
     }
 
+    // Roots raise the effective angle of repose (stage 8).
+
     let mut snapshot: Vec<TopSolid> = Vec::new();
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for coord in coords {
@@ -82,13 +84,20 @@ fn slumping_pass(world: &mut World, tick: u64) {
             for j in 0..idx {
                 y -= col.mass_to_height_delta(col.layers[j].material, col.layers[j].thickness);
             }
+            // Roots bind slopes — denser mats tolerate a steeper rise.
+            let root = col.ecology.root_density.clamp(0.0, 1.0);
+            let repose = if props.repose_rise_m.is_finite() {
+                props.repose_rise_m * (1.0 + 3.0 * root)
+            } else {
+                props.repose_rise_m
+            };
             snapshot.push(TopSolid {
                 coord,
                 local,
                 material: layer.material,
                 thickness: layer.thickness,
                 top_y: y,
-                repose_rise: props.repose_rise_m,
+                repose_rise: repose,
                 mass_per_m: density * wk_material::SAMPLE_WIDTH_M,
                 column_top_material: col.top_material(),
             });

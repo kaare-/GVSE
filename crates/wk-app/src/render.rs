@@ -45,6 +45,7 @@ fn draw_terrain_column(
     voids: &[(f32, f32, i64, u8)],
     px_per_m: f32,
     saturation: f32,
+    leaf_area: f32,
 ) {
     // Paint solid layers from the surface down, inserting void cutouts at
     // their absolute elevations so caves read as dark bands (with pooled
@@ -128,6 +129,22 @@ fn draw_terrain_column(
                 r = lerp_u8(r, 40, t);
                 g = lerp_u8(g, 55, t);
                 b = lerp_u8(b, 85, t);
+            }
+            // Subtle vegetation wash on the exposed top solid.
+            if leaf_area > 0.05
+                && matches!(
+                    mat,
+                    MaterialId::Sand
+                        | MaterialId::Clay
+                        | MaterialId::Gravel
+                        | MaterialId::Organic
+                        | MaterialId::LooseRock
+                )
+            {
+                let t = (leaf_area * 0.45).min(0.45);
+                r = lerp_u8(r, 45, t);
+                g = lerp_u8(g, 120, t);
+                b = lerp_u8(b, 40, t);
             }
             let a = MaterialRegistry::props(mat).render_alpha;
             draw_rectangle(x, top_px, COL_W, h, Color::from_rgba(r, g, b, a));
@@ -350,6 +367,7 @@ pub fn draw_frame(
             &col.voids,
             PX_PER_M,
             col.saturation,
+            col.leaf_area,
         );
         tops.push(Some(surface_px));
 

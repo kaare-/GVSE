@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 use wk_material::CHUNK_W;
 use wk_sim::Simulation;
 use wk_world::climate::ClimateSettings;
-use wk_world::column::{Activity, ResidualBucket, SedimentLoad, Void, VoidOrigin};
+use wk_world::column::{Activity, Ecology, ResidualBucket, SedimentLoad, Void, VoidOrigin};
 use wk_world::fields::{
     DissolvedField, GroundwaterHeadField, HumidityField, PressureField, ThermalField, WindField,
 };
@@ -85,6 +85,18 @@ pub struct ColumnSnapshot {
     /// Stage 7 karst voids. Absent in older saves → empty.
     #[serde(default)]
     pub voids: Vec<VoidSnapshot>,
+    /// Stage 8 ecology bucket. Absent in older saves → barren.
+    #[serde(default)]
+    pub ecology: EcologySnapshot,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct EcologySnapshot {
+    pub root_density: f32,
+    pub leaf_area: f32,
+    pub dead_biomass: i64,
+    pub alive_biomass: i64,
+    pub nutrient: f32,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -150,6 +162,13 @@ pub fn snapshot_world(world: &World, sim_tick: u64) -> SaveFileV1 {
                             light: v.light,
                         })
                         .collect(),
+                    ecology: EcologySnapshot {
+                        root_density: col.ecology.root_density,
+                        leaf_area: col.ecology.leaf_area,
+                        dead_biomass: col.ecology.dead_biomass,
+                        alive_biomass: col.ecology.alive_biomass,
+                        nutrient: col.ecology.nutrient,
+                    },
                 })
                 .collect();
             (
@@ -260,6 +279,13 @@ pub fn restore_world(save: &SaveFileV1) -> (World, u64) {
                     light: v.light,
                 })
                 .collect();
+            col.ecology = Ecology {
+                root_density: cs.ecology.root_density,
+                leaf_area: cs.ecology.leaf_area,
+                dead_biomass: cs.ecology.dead_biomass,
+                alive_biomass: cs.ecology.alive_biomass,
+                nutrient: cs.ecology.nutrient,
+            };
             col.recompute_surface_y(snap.bedrock_y);
         }
         chunk.thermal = snap.thermal.clone();

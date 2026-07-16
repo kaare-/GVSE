@@ -33,17 +33,27 @@ pub struct MassAudit {
     /// Cumulative kg reprecipitated from dissolved minerals (speleothems).
     #[serde(default)]
     pub dissolved_return_total: i64,
+    /// Living + dead plant mass (kg) currently in per-column ecology buckets.
+    #[serde(default)]
+    pub biomass_total: i64,
+    /// Cumulative kg of biomass grown from atmosphere / soil (source).
+    #[serde(default)]
+    pub biomass_grow_total: i64,
+    /// Cumulative kg of biomass decayed back out of the tracked pool (sink).
+    #[serde(default)]
+    pub biomass_decay_total: i64,
 }
 
 impl MassAudit {
     pub fn total_tracked(&self) -> i64 {
-        self.by_material.iter().sum::<i64>() + self.dissolved_total
+        self.by_material.iter().sum::<i64>() + self.dissolved_total + self.biomass_total
     }
 
     pub fn bookkeeping_balance(&self) -> i64 {
-        self.rain_inject_total + self.sea_inject_total
+        self.rain_inject_total + self.sea_inject_total + self.biomass_grow_total
             - self.evap_out_total
             - self.boundary_out_total
+            - self.biomass_decay_total
     }
 }
 
@@ -588,10 +598,13 @@ impl World {
             // Preserve parked dissolved mass when fields are off; overwritten
             // below from the field integral when enabled.
             dissolved_total: self.mass_audit.dissolved_total,
+            biomass_grow_total: self.mass_audit.biomass_grow_total,
+            biomass_decay_total: self.mass_audit.biomass_decay_total,
             tick: self.mass_audit.tick,
             ..Default::default()
         };
 
+        let mut biomass = 0i64;
         for chunk in self.chunks.values() {
             for col in &chunk.columns {
                 // Every physical substance lives in `layers` now
@@ -607,11 +620,15 @@ impl World {
                 if col.sediment.total > 0 {
                     audit.by_material[col.sediment.dominant.index()] += col.sediment.total;
                 }
+                biomass += col.ecology.biomass_total();
             }
         }
         self.mass_audit.by_material = audit.by_material;
         self.mass_audit.dissolved_out_total = audit.dissolved_out_total;
         self.mass_audit.dissolved_return_total = audit.dissolved_return_total;
+        self.mass_audit.biomass_grow_total = audit.biomass_grow_total;
+        self.mass_audit.biomass_decay_total = audit.biomass_decay_total;
+        self.mass_audit.biomass_total = biomass;
         if self.dissolved_fields_enabled {
             self.mass_audit.dissolved_total = self.dissolved_mass_kg();
         } else {
@@ -668,6 +685,8 @@ pub struct ColumnView {
     pub layers: Vec<(MaterialId, i64, u64, u64)>,
     /// Sparse cavities for the renderer (ceiling, height, water, light).
     pub voids: Vec<(f32, f32, i64, u8)>,
+    /// Leaf-area proxy 0..1 for a subtle vegetation tint.
+    pub leaf_area: f32,
     /// Mass (kg) of the top Water layer, or 0 if the top isn't water.
     pub surface_water: i64,
     pub moisture: i64,
@@ -801,6 +820,7 @@ impl World {
                     bedrock_y: chunk.bedrock_y,
                     layers,
                     voids,
+                    leaf_area: col.ecology.leaf_area,
                     surface_water: col.top_water_mass(),
                     moisture: col.moisture,
                     saturation,
@@ -834,6 +854,7 @@ impl World {
                     bedrock_y: 0.0,
                     layers: vec![],
                     voids: vec![],
+                    leaf_area: 0.0,
                     surface_water: 0,
                     moisture: 0,
                     saturation: 0.0,

@@ -3,7 +3,8 @@
 use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M, CHUNK_W};
 
 use crate::chunk::Chunk;
-use crate::column::Column;
+use crate::climate::biome_for;
+use crate::column::{Column, Ecology};
 
 /// Deepest bedrock reference elevation (metres). Ocean floor sits above this.
 pub const BEDROCK_FLOOR_M: f32 = -45.0;
@@ -109,6 +110,14 @@ pub fn fill_column_strata(
     }
     col.recompute_surface_y(bedrock_y);
     col.activity = crate::column::Activity::HydrologyActive;
+}
+
+/// Seed stage-8 ecology from biome at the column's climate elevation.
+/// `sea_level` defaults to 0 when the caller doesn't care (flat test beds).
+pub fn seed_column_ecology(col: &mut Column, sea_level: f32) {
+    let biome = biome_for(col.climate_elevation(), sea_level);
+    let rel = col.climate_elevation() - sea_level;
+    col.ecology = Ecology::seed_from_biome(biome, rel);
 }
 
 /// Bulk-sediment budget for one column, split across the five stratigraphic
@@ -254,12 +263,8 @@ pub fn fill_bathymetry_column(
         col.deposit_to_top(MaterialId::Sand, sand_mass, tick);
     }
 
-    // Deliberately no vegetation cover / topsoil layer. Real topsoil is
-    // sand and clay mixed with organic matter and held together by
-    // roots; without an ecology sim to grow those roots, a pure
-    // "organic" layer would just be geology fiction and would (correctly)
-    // wash straight off any slope on the first heavy rain. Bare rock and
-    // loose sediment is what we can honestly generate for now.
+    // Vegetation is not an Organic stratigraphic layer (density settling
+    // would float it). Stage 8 seeds a per-column Ecology bucket instead.
     let _ = seed;
     let _ = world_x;
 
@@ -271,6 +276,7 @@ pub fn fill_bathymetry_column(
     // rendering pass or column-state flag. `deposit_to_top` handles the
     // surface_y bookkeeping for us.
     fill_up_to_sea_level(col, sea_level, tick);
+    seed_column_ecology(col, sea_level);
 }
 
 /// If this column's natural terrain surface sits below sea level, tops
@@ -428,6 +434,8 @@ pub fn generate_chunk_hill(coord: i32, seed: u64, center: i32, bedrock_y: f32) -
         let surface = gaussian_hill_surface(seed, wx, center, 30.0, bedrock_y + 5.0, 25.0);
         let col = &mut chunk.columns[i];
         fill_column_strata(col, surface, bedrock_y, 5000, 8000, 0);
+        // Scenario worlds usually use sea_level≈0; biome seed follows that.
+        seed_column_ecology(col, 0.0);
     }
     chunk
 }
@@ -441,6 +449,7 @@ pub fn generate_chunk_basin(coord: i32, seed: u64, center: i32, bedrock_y: f32) 
         let col = &mut chunk.columns[i];
         fill_column_strata(col, surface, bedrock_y, 1000, 5000, 0);
         col.deposit_to_top(MaterialId::Clay, 3000, 0);
+        seed_column_ecology(col, 0.0);
     }
     chunk
 }
@@ -459,6 +468,7 @@ pub fn generate_chunk_stratified_tilt(
             + (hash_f32(seed, wx as i64, 3) - 0.5) * 1.0;
         let col = &mut chunk.columns[i];
         fill_column_strata(col, surface, bedrock_y, 6000, 10000, 0);
+        seed_column_ecology(col, 0.0);
     }
     chunk
 }
@@ -467,6 +477,7 @@ pub fn generate_flat_sand(coord: i32, bedrock_y: f32, surface_y: f32) -> Chunk {
     let mut chunk = Chunk::new(coord, bedrock_y);
     for col in &mut chunk.columns {
         fill_column_strata(col, surface_y, bedrock_y, 8000, 5000, 0);
+        seed_column_ecology(col, 0.0);
     }
     chunk
 }
