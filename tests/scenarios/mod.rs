@@ -10,6 +10,7 @@ mod e7_soak;
 mod e8_save_load;
 mod e20_geothermal_steady_state;
 mod e22_humidity_near_water_body;
+mod e23_convection_cell;
 mod helpers;
 
 pub use helpers::*;
