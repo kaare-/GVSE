@@ -34,7 +34,7 @@ fn e12_stalactite_forms() {
     }
     if let Some(chunk) = world.chunks.get_mut(&0) {
         let bedrock = chunk.bedrock_y;
-        chunk.columns[(CHUNK_W / 2)].recompute_surface_y(bedrock);
+        chunk.columns[CHUNK_W / 2].recompute_surface_y(bedrock);
     }
 
     // Seed a concentrated dissolved plume at the void.

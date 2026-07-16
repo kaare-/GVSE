@@ -30,7 +30,9 @@ fn e10_sinkhole_captures_river() {
                 top_y: 0.0, // set after recompute
                 height_m: 2.0,
                 water_mass: 0,
-                roof_material: MaterialId::Sand,
+                // Stone roof so residual collapse logic won't treat a
+                // single-column mouth as an over-span sand roof.
+                roof_material: MaterialId::Stone,
                 origin: VoidOrigin::Collapse,
                 light: 255,
             });

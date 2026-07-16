@@ -8,14 +8,15 @@ use wk_material::{CHUNK_W, MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
 use wk_world::column::{Activity, VoidOrigin};
 use wk_world::world::World;
 
-/// Game-tuned: kg dissolved per (flux_kg × solubility_frac) per karst step.
-/// Large enough that E9 forms a passage in a few thousand ticks under a
-/// strong head gradient; still slow vs surface hydrology.
-const KARST_COEFF: f32 = 0.08;
+/// Game-tuned scale from flux proxy → kg dissolved per karst step.
+/// Tuned so a wet limestone bed under a modest head gradient opens a
+/// visible passage in a few thousand ticks.
+const KARST_COEFF: f32 = 12.0;
 
-/// Minimum void height spawn (metres). Below this, mass leaves as dissolved
-/// without opening a visible cavity yet.
-const VOID_SPAWN_THRESH_M: f32 = 0.05;
+/// Always-on wet-rock contribution (keeps dissolution alive after heads
+/// nearly equalize — real aquifers still have seepage). Multiplied by
+/// saturation × soluble-layer permeability.
+const KARST_SEEPAGE: f32 = 8.0;
 
 fn head_neighbor(world: &World, coord: i32, local: i32) -> f32 {
     let chunk = world.chunks.get(&coord).unwrap();
@@ -71,22 +72,24 @@ pub fn run_karst(world: &mut World, _tick: u64) {
                 let head_left = head_neighbor(world, coord, i as i32 - 1);
                 let head_right = head_neighbor(world, coord, i as i32 + 1);
                 let grad = (head_here - head_left).abs() + (head_here - head_right).abs();
-                if grad < 1e-4 {
-                    continue;
-                }
-                let flux = grad * col.moisture as f32 * 0.01;
-                if flux < 1.0 {
+                let cap = col.moisture_cap().max(1) as f32;
+                let sat = (col.moisture as f32 / cap).clamp(0.0, 1.0);
+                // Lateral flux proxy + residual seepage through wet rock.
+                let flux = grad * col.moisture as f32 * 0.05 + KARST_SEEPAGE * sat;
+                if flux < 0.5 {
                     continue;
                 }
 
                 for li in 0..col.layer_count as usize {
                     let layer = col.layers[li];
-                    let sol = MaterialRegistry::props(layer.material).solubility;
+                    let props = MaterialRegistry::props(layer.material);
+                    let sol = props.solubility;
                     if sol == 0 || layer.thickness <= 0 {
                         continue;
                     }
-                    let rate = flux * (sol as f32 / 255.0) * KARST_COEFF;
-                    let take = (rate.floor() as i64).max(0).min(layer.thickness);
+                    let perm = props.permeability as f32 / 255.0;
+                    let rate = flux * (sol as f32 / 255.0) * perm * KARST_COEFF;
+                    let take = (rate as i64).max(0).min(layer.thickness);
                     if take > 0 {
                         let (top, bot) = col.layer_y_range(li, chunk.bedrock_y);
                         let mid = 0.5 * (top + bot);
@@ -120,13 +123,11 @@ pub fn run_karst(world: &mut World, _tick: u64) {
                 let dh = col.mass_to_height_delta(mat, t);
                 col.layers[li].thickness -= t;
                 // Grow void by the height vacated so surface_y holds.
-                if dh >= VOID_SPAWN_THRESH_M * 0.1 {
-                    let roof = if li > 0 {
-                        col.layers[li - 1].material
-                    } else {
-                        mat
-                    };
-                    col.grow_void_at(mid_y, dh, roof, VoidOrigin::Karst);
+                // Roof is the soluble rock itself — caves form *inside*
+                // limestone; the sand/soil cap above is not the cave roof
+                // until the void breaches the top of the soluble bed.
+                if dh > 1e-5 {
+                    col.grow_void_at(mid_y, dh, mat, VoidOrigin::Karst);
                 }
                 // Drop empty layers.
                 if col.layers[li].thickness <= 0 {

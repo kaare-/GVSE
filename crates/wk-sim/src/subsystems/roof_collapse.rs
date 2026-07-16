@@ -27,6 +27,11 @@ pub fn run_roof_collapse(world: &mut World, tick: u64) {
                 if v.height_m <= 1e-4 {
                     continue;
                 }
+                // Surface-open sinkholes have already collapsed — don't
+                // keep eating them (and wiping void water storage).
+                if v.open_to_surface(col.surface_y) || v.light > 200 {
+                    continue;
+                }
                 entries.push((
                     coord * CHUNK_W as i32 + i as i32,
                     coord,
@@ -89,26 +94,66 @@ pub fn run_roof_collapse(world: &mut World, tick: u64) {
         if dh <= 1e-4 {
             continue;
         }
-        let mass = {
-            // LooseRock mass equivalent to the collapsed roof height.
-            let density = MaterialRegistry::props(MaterialId::LooseRock).density.max(1) as f32;
+        let roof_mat = v.roof_material;
+        let want = {
+            let density = MaterialRegistry::props(roof_mat).density.max(1) as f32;
             (dh * SAMPLE_WIDTH_M * density) as i64
         };
+        // Take mass from a roof-matching layer (fallback: any solid) so
+        // collapse doesn't mint mass out of thin air.
+        let mut taken = 0i64;
+        for li in 0..col.layer_count as usize {
+            if col.layers[li].material == roof_mat && col.layers[li].thickness > 0 {
+                let t = want.min(col.layers[li].thickness);
+                col.layers[li].thickness -= t;
+                taken = t;
+                if col.layers[li].thickness <= 0 {
+                    for j in li..(col.layer_count as usize).saturating_sub(1) {
+                        col.layers[j] = col.layers[j + 1];
+                    }
+                    if col.layer_count > 0 {
+                        col.layer_count -= 1;
+                    }
+                }
+                break;
+            }
+        }
+        if taken <= 0 {
+            for li in 0..col.layer_count as usize {
+                let m = col.layers[li].material;
+                if m.is_solid()
+                    && !matches!(m, MaterialId::Water | MaterialId::Ice | MaterialId::Snow)
+                    && col.layers[li].thickness > 0
+                {
+                    let t = want.min(col.layers[li].thickness);
+                    col.layers[li].thickness -= t;
+                    taken = t;
+                    if col.layers[li].thickness <= 0 {
+                        for j in li..(col.layer_count as usize).saturating_sub(1) {
+                            col.layers[j] = col.layers[j + 1];
+                        }
+                        if col.layer_count > 0 {
+                            col.layer_count -= 1;
+                        }
+                    }
+                    break;
+                }
+            }
+        }
         // Shrink void from the top (roof drops).
         col.voids[vi].top_y -= dh;
         col.voids[vi].height_m -= dh;
         col.voids[vi].origin = VoidOrigin::Collapse;
         if col.voids[vi].height_m < 0.02 {
-            // Void closes — dump any pooled water back to surface.
             let water = col.voids[vi].water_mass;
             col.voids.remove(vi);
             if water > 0 {
                 col.deposit_to_top(MaterialId::Water, water, tick);
             }
-        } else {
-            // Deposit collapsed debris onto the void floor by adding
-            // LooseRock into the solid stack (settling puts it below fluids).
-            col.deposit_to_top(MaterialId::LooseRock, mass.max(1), tick);
+        }
+        if taken > 0 {
+            // Debris falls as LooseRock into the solid stack.
+            col.deposit_to_top(MaterialId::LooseRock, taken, tick);
         }
         col.activity = Activity::HydrologyActive;
         col.recompute_surface_y(bedrock);

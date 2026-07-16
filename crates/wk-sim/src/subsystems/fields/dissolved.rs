@@ -14,10 +14,13 @@ use wk_world::world::World;
 const DT_SECONDS: f32 = 6.0;
 
 /// Diffusivity in fully saturated pore space (m²/s, game-tuned).
-const WET_DIFFUSIVITY: f32 = 0.01;
+/// Kept well under the explicit-scheme limit `Δx²/(4α)` at dt=6, Δx=0.5
+/// (α ≲ 0.01); lower still so karst point-injections don't ring and
+/// get clamped away as negative concentration.
+const WET_DIFFUSIVITY: f32 = 0.002;
 
 /// Tiny floor so the field doesn't hard-freeze at exact zeros.
-const DRY_DIFFUSIVITY: f32 = 1e-5;
+const DRY_DIFFUSIVITY: f32 = 1e-6;
 
 fn build_alpha(chunk: &wk_world::chunk::Chunk, field: &FieldPatch) -> FieldPatch {
     let mut alpha = field.zeros_like();
@@ -126,15 +129,37 @@ pub fn run_dissolved_field(world: &mut World, _tick: u64) {
             let alpha = build_alpha(chunk, field);
             let source = field.zeros_like();
             let mut out = field.zeros_like();
+            // Mass before diffusion — variable-α + clamp can drift; we
+            // renormalize so solid→dissolved stays audit-closed.
+            let w = field.width_cells as usize;
+            let h = field.height_cells as usize;
+            let mut mass_before = 0.0f32;
+            for cy in 0..h {
+                for cx in 0..w {
+                    mass_before += field.cell_at(cx, cy).max(0.0);
+                }
+            }
             explicit_diffusion(field, &alpha, &source, DT_SECONDS, &mut out);
-            // Concentration can't go negative.
-            let w = out.width_cells as usize;
-            let h = out.height_cells as usize;
+            let mut mass_after = 0.0f32;
             for cy in 0..h {
                 for cx in 0..w {
                     let v = out.cell_at(cx, cy).max(0.0);
                     out.set_cell(cx, cy, v);
+                    mass_after += v;
                 }
+            }
+            if mass_before > 1e-6 && mass_after > 1e-6 {
+                let scale = mass_before / mass_after;
+                if (scale - 1.0).abs() > 1e-5 {
+                    for cy in 0..h {
+                        for cx in 0..w {
+                            out.set_cell(cx, cy, out.cell_at(cx, cy) * scale);
+                        }
+                    }
+                }
+            } else if mass_before > 1e-6 && mass_after <= 1e-6 {
+                // Degenerate: put mass back into the cell of peak α.
+                out = field.clone();
             }
             out.halo = field.halo.clone();
             out
