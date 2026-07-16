@@ -1,6 +1,6 @@
 //! Automatic drifting-cloud weather layer.
 
-use wk_material::CHUNK_W;
+use wk_material::{CHUNK_W, SAMPLE_WIDTH_M};
 use wk_world::world::World;
 
 use crate::buffer::WorldTransferScratch;
@@ -9,13 +9,17 @@ use super::shared::split_precipitation;
 
 /// Spawns, advances, and rains from drifting clouds — the weather layer on
 /// top of the manual rain toggle. Clouds are not particles: each is just an
-/// x position, half-width, and remaining moisture, advected by a constant
-/// wind speed (columns/tick, sign = direction) and consumed as it rains.
+/// x position, half-width, and remaining moisture, advected by wind
+/// (columns/tick, sign = direction) and consumed as it rains.
+///
+/// When pressure/wind fields are enabled, each cloud samples horizontal
+/// wind at its position (sky band); otherwise it uses `climate.wind_speed`.
 pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: u64) {
     let Some((x_min, x_max)) = world.world_x_bounds() else {
         return;
     };
 
+    let climate_wind = world.climate.wind_speed;
     if world.weather.weather_enabled
         && world.clouds.len() < world.weather.max_clouds
         && tick >= world.next_cloud_spawn_tick
@@ -28,7 +32,7 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
         // (like tall mountains) — see rain_chance_per_tick for the other
         // half of that budget (making rain intermittent, not constant).
         let moisture = 6000.0 + wk_world::terrain::hash_f32(seed, tick as i64, 402) * 12000.0;
-        let spawn_x = if world.climate.wind_speed >= 0.0 {
+        let spawn_x = if climate_wind >= 0.0 {
             x_min as f32 - half_width
         } else {
             x_max as f32 + half_width
@@ -41,9 +45,27 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
         world.next_cloud_spawn_tick = tick + world.weather.cloud_spawn_interval_ticks;
     }
 
-    let wind = world.climate.wind_speed;
-    for cloud in &mut world.clouds {
-        cloud.x += wind;
+    let sea = world.sea_level;
+    let wind_cols: Vec<f32> = if world.pressure_wind_fields_enabled {
+        world
+            .clouds
+            .iter()
+            .map(|c| {
+                let wx = c.x.round() as i32;
+                let surface = world
+                    .column_at(wx)
+                    .map(|col| col.surface_y)
+                    .unwrap_or(sea);
+                let y = surface.max(sea) + 15.0;
+                let (vx_m_s, _) = world.wind_at_point(wx, y);
+                vx_m_s / SAMPLE_WIDTH_M
+            })
+            .collect()
+    } else {
+        vec![climate_wind; world.clouds.len()]
+    };
+    for (cloud, &w) in world.clouds.iter_mut().zip(wind_cols.iter()) {
+        cloud.x += w;
     }
 
     if world.weather.weather_enabled {

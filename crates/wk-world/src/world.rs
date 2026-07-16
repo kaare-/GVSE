@@ -6,7 +6,7 @@ use wk_material::{CHUNK_W, MaterialId, MAX_LOADED_CHUNKS, MAX_MARKERS, MATERIAL_
 use crate::chunk::Chunk;
 use crate::climate::{biome_for, temperature_at, Biome, ClimateSettings};
 use crate::column::{Activity, Column, MarkerId, ResidualBucket, SedimentLoad};
-use crate::fields::{HumidityField, ThermalField};
+use crate::fields::{HumidityField, PressureField, ThermalField, WindField};
 use crate::marker::Marker;
 use crate::weather::{Cloud, WeatherSettings};
 
@@ -59,6 +59,11 @@ pub struct World {
     /// Regional / sky relative humidity target (0..1) used as the top
     /// Dirichlet boundary of the humidity field.
     pub ambient_humidity: f32,
+    /// When true, chunks carry pressure + wind fields. Default false →
+    /// weather falls back to `climate.wind_speed`.
+    pub pressure_wind_fields_enabled: bool,
+    /// Sky / free-air pressure (arbitrary game units; 1.0 = ambient).
+    pub ambient_pressure: f32,
 }
 
 impl World {
@@ -124,6 +129,8 @@ impl World {
             geothermal_bottom_c: 55.0,
             humidity_fields_enabled: false,
             ambient_humidity: 0.4,
+            pressure_wind_fields_enabled: false,
+            ambient_pressure: 1.0,
         }
     }
 
@@ -247,6 +254,105 @@ impl World {
             let source = field.0.zeros_like();
             chunk.humidity = Some(field);
             chunk.humidity_source = Some(source);
+        }
+    }
+
+    /// Horizontal/vertical wind (m/s) at a world point. Samples the
+    /// chunk wind field when present; otherwise returns climate wind
+    /// as `(wind_speed · SAMPLE_WIDTH_M, 0)`.
+    pub fn wind_at_point(&self, world_x: i32, y_m: f32) -> (f32, f32) {
+        let coord = Self::chunk_coord_for_world_x(world_x);
+        if let Some(chunk) = self.chunks.get(&coord) {
+            if let Some(wind) = &chunk.wind {
+                let x_m = world_x as f32 * wk_material::SAMPLE_WIDTH_M;
+                let h = wind.vx.height_cells as usize;
+                let max_y = wind.vx.origin_y_m
+                    + (h.saturating_sub(1) as f32 - 0.5) * wind.vx.cell_size_m;
+                let y = y_m.min(max_y);
+                return (
+                    wind.vx.sample_bilinear(x_m, y),
+                    wind.vy.sample_bilinear(x_m, y),
+                );
+            }
+        }
+        (
+            self.climate.wind_speed * wk_material::SAMPLE_WIDTH_M,
+            0.0,
+        )
+    }
+
+    /// Allocate pressure + wind fields on every loaded chunk. Seeds
+    /// pressure with a mild hydrostatic gradient and wind from the
+    /// climate horizontal speed in air cells.
+    pub fn enable_pressure_wind_fields(&mut self) {
+        self.pressure_wind_fields_enabled = true;
+        let sea = self.sea_level;
+        let ambient = self.ambient_pressure;
+        let base_vx = self.climate.wind_speed * wk_material::SAMPLE_WIDTH_M;
+        let coords: Vec<i32> = self.chunks.keys().copied().collect();
+        for coord in coords {
+            let Some(chunk) = self.chunks.get_mut(&coord) else {
+                continue;
+            };
+            if chunk.pressure.is_some() {
+                continue;
+            }
+            let mut pressure = PressureField::new_for_chunk(coord, chunk.bedrock_y, sea, ambient);
+            let mut wind = WindField::new_for_chunk(coord, chunk.bedrock_y, sea);
+            let w = pressure.0.width_cells as usize;
+            let h = pressure.0.height_cells as usize;
+            let origin_y = pressure.0.origin_y_m;
+            let extent = (h as f32) * pressure.0.cell_size_m;
+            // Hydrostatic: slightly higher pressure deeper.
+            const HYDRO_DELTA: f32 = 0.15;
+            for cy in 0..h {
+                for cx in 0..w {
+                    let (_, y) = pressure.0.cell_center(cx, cy);
+                    let depth_frac = if extent > 0.0 {
+                        1.0 - ((y - origin_y) / extent).clamp(0.0, 1.0)
+                    } else {
+                        0.0
+                    };
+                    pressure.0.set_cell(cx, cy, ambient + HYDRO_DELTA * depth_frac);
+                    let local = ((pressure.0.cell_center(cx, cy).0
+                        / wk_material::SAMPLE_WIDTH_M)
+                        .floor() as i32
+                        - chunk.world_x_base())
+                    .clamp(0, wk_material::CHUNK_W as i32 - 1)
+                        as usize;
+                    let surface = chunk.columns[local].surface_y;
+                    if y >= surface {
+                        wind.vx.set_cell(cx, cy, base_vx);
+                    } else {
+                        wind.vx.set_cell(cx, cy, 0.0);
+                    }
+                    wind.vy.set_cell(cx, cy, 0.0);
+                }
+            }
+            pressure.0.halo =
+                wk_field::FieldHalo::zeros(pressure.0.width_cells, pressure.0.height_cells);
+            wind.vx.halo =
+                wk_field::FieldHalo::zeros(wind.vx.width_cells, wind.vx.height_cells);
+            wind.vy.halo =
+                wk_field::FieldHalo::zeros(wind.vy.width_cells, wind.vy.height_cells);
+            for cy in 0..h {
+                pressure.0.halo.left[cy] = pressure.0.cell_at(0, cy);
+                pressure.0.halo.right[cy] = pressure.0.cell_at(w - 1, cy);
+                wind.vx.halo.left[cy] = wind.vx.cell_at(0, cy);
+                wind.vx.halo.right[cy] = wind.vx.cell_at(w - 1, cy);
+                wind.vy.halo.left[cy] = 0.0;
+                wind.vy.halo.right[cy] = 0.0;
+            }
+            for cx in 0..w {
+                pressure.0.halo.bottom[cx] = ambient + HYDRO_DELTA;
+                pressure.0.halo.top[cx] = ambient;
+                wind.vx.halo.bottom[cx] = 0.0;
+                wind.vx.halo.top[cx] = base_vx;
+                wind.vy.halo.bottom[cx] = 0.0;
+                wind.vy.halo.top[cx] = 0.0;
+            }
+            chunk.pressure = Some(pressure);
+            chunk.wind = Some(wind);
         }
     }
 
