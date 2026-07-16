@@ -47,6 +47,9 @@ pub enum SubsystemId {
     /// Groundwater hydraulic-head Darcy diffusion. Moisture transfers
     /// still happen in `Groundwater`; this pass updates the head field.
     GroundwaterHeadField = 16,
+    /// Dissolved-mineral concentration (kg/m³). Diffuses in wet cells;
+    /// dissolution sources from `solubility` feed stage 7 karst.
+    DissolvedField = 17,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -56,7 +59,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 17] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 18] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -161,6 +164,11 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 17] = [
         id: SubsystemId::GroundwaterHeadField,
         period: 30,
         phase: 10,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::DissolvedField,
+        period: 6,
+        phase: 2,
     },
 ];
 

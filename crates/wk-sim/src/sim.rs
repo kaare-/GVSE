@@ -4,10 +4,11 @@ use crate::barrier::barrier_commit;
 use crate::buffer::WorldTransferScratch;
 use crate::clock::{SimClock, SubsystemId, SUBSYSTEM_ORDER};
 use crate::subsystems::{
-    run_activity, run_evaporation, run_groundwater_flow, run_groundwater_head_field,
-    run_humidity_field, run_infiltration, run_lake_level, run_layer_merge, run_phase_change,
-    run_pressure_field, run_rain_inject, run_sediment, run_slumping, run_surface_water,
-    run_thermal_field, run_weather, run_wind_field, SimParams,
+    run_activity, run_dissolved_field, run_evaporation, run_groundwater_flow,
+    run_groundwater_head_field, run_humidity_field, run_infiltration, run_lake_level,
+    run_layer_merge, run_phase_change, run_pressure_field, run_rain_inject, run_sediment,
+    run_slumping, run_surface_water, run_thermal_field, run_weather, run_wind_field,
+    SimParams,
 };
 
 pub struct Simulation {
@@ -82,7 +83,8 @@ impl Simulation {
                 | SubsystemId::HumidityField
                 | SubsystemId::PressureField
                 | SubsystemId::WindField
-                | SubsystemId::GroundwaterHeadField => {}
+                | SubsystemId::GroundwaterHeadField
+                | SubsystemId::DissolvedField => {}
             }
         }
 
@@ -112,6 +114,9 @@ impl Simulation {
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::GroundwaterHeadField)) {
             run_groundwater_head_field(world, tick);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::DissolvedField)) {
+            run_dissolved_field(world, tick);
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::PhaseChange)) {
             run_phase_change(world, tick);
