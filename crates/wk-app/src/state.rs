@@ -32,6 +32,8 @@ pub struct AppState {
     pub speed: u32,
     pub overlay_mode: OverlayMode,
     pub selected_column: Option<i32>,
+    /// Clicked Set A organism (cleared when it dies).
+    pub selected_organism: Option<wk_sim::Entity>,
     pub tick_accum: f32,
     pub status_msg: String,
     pub show_settings: bool,
@@ -92,9 +94,10 @@ impl AppState {
             speed: 1,
             overlay_mode: OverlayMode::None,
             selected_column: None,
+            selected_organism: None,
             tick_accum: 0.0,
             status_msg:
-                "Space run | A/D scroll | W/S pan | R rain | Y weather | C/F2 creature | F5/F9 save/load | Tab settings"
+                "Space run | click creature to inspect | A/D scroll | C/F2 creature | Tab settings"
                     .into(),
             show_settings: false,
             settings_day_minutes,
@@ -367,9 +370,39 @@ impl AppState {
             if render::creature_button_hit(mx, my, screen_width()) {
                 return;
             }
-            let col = render::screen_x_to_world_x(mx, self.viewport_x);
-            if self.world.column_at(col).is_some() {
-                self.selected_column = Some(col);
+            let wx = render::screen_x_to_world_x_frac(mx, self.viewport_x);
+            let wy = render::screen_y_to_world_y(
+                my,
+                self.world.sea_level,
+                screen_height(),
+                self.camera_y_offset,
+            );
+            if let Some(e) = self.sim.agents.pick_organism_at(wx, wy) {
+                self.selected_organism = Some(e);
+                self.selected_column = Some(wx.floor() as i32);
+                if let Some(info) = self.sim.agents.inspect_organism(e) {
+                    self.status_msg = format!(
+                        "Inspect #{} gen={} energy={:.0}/{:.0} clones={}",
+                        info.entity_id,
+                        info.generation,
+                        info.energy,
+                        info.energy_max,
+                        info.clones_produced
+                    );
+                }
+            } else {
+                self.selected_organism = None;
+                let col = render::screen_x_to_world_x(mx, self.viewport_x);
+                if self.world.column_at(col).is_some() {
+                    self.selected_column = Some(col);
+                }
+            }
+        }
+
+        // Drop selection if the creature died.
+        if let Some(e) = self.selected_organism {
+            if !self.sim.agents.organism_alive(e) {
+                self.selected_organism = None;
             }
         }
     }

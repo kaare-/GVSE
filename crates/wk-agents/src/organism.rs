@@ -72,6 +72,32 @@ pub struct BuoyancyState {
     pub last_water_top: Option<f32>,
 }
 
+/// Per-organism lineage bookkeeping (not a gene — not mutated).
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Lineage {
+    /// `0` = editor / scenario founder; each fission adds one.
+    pub generation: u32,
+    /// Successful offspring this organism has produced.
+    pub clones_produced: u32,
+}
+
+/// Snapshot for the click-to-inspect HUD.
+#[derive(Debug, Clone)]
+pub struct OrganismInspect {
+    pub entity_id: u32,
+    pub name: String,
+    pub x: f32,
+    pub y: f32,
+    pub energy: f32,
+    pub energy_max: f32,
+    pub generation: u32,
+    pub clones_produced: u32,
+    pub genome: Genome,
+    pub module_count: usize,
+    pub photosystems: usize,
+    pub is_plankton: bool,
+}
+
 /// Baked module body from a blueprint at spawn time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ModuleBody {
@@ -595,9 +621,69 @@ impl AgentStore {
             },
             blueprint.genome,
             ModuleBody { blueprint },
+            Lineage::default(),
             Organism,
         ));
         Some(e)
+    }
+
+    /// True if `entity` is still a living Set A organism.
+    pub fn organism_alive(&self, entity: Entity) -> bool {
+        self.ecs
+            .get::<&Organism>(entity)
+            .map(|_| true)
+            .unwrap_or(false)
+    }
+
+    /// Pick the smallest-footprint organism whose AABB contains `(wx, wy)`.
+    pub fn pick_organism_at(&self, wx: f32, wy: f32) -> Option<Entity> {
+        let mut best: Option<(Entity, f32)> = None;
+        for (e, (pose, body, _)) in self
+            .ecs
+            .query::<(&Pose, &ModuleBody, &Organism)>()
+            .iter()
+        {
+            let aabb = organism_aabb(pose, &body.blueprint);
+            if wx < aabb.min_x || wx > aabb.max_x || wy < aabb.min_y || wy > aabb.max_y {
+                continue;
+            }
+            let area = aabb.width() * (aabb.max_y - aabb.min_y).max(0.01);
+            match best {
+                Some((_, a)) if a <= area => {}
+                _ => best = Some((e, area)),
+            }
+        }
+        best.map(|(e, _)| e)
+    }
+
+    /// Live inspect snapshot, or `None` if the entity is gone.
+    pub fn inspect_organism(&self, entity: Entity) -> Option<OrganismInspect> {
+        let pose = *self.ecs.get::<&Pose>(entity).ok()?;
+        let energy = *self.ecs.get::<&Energy>(entity).ok()?;
+        let genome = *self.ecs.get::<&Genome>(entity).ok()?;
+        let lineage = *self.ecs.get::<&Lineage>(entity).ok()?;
+        let body = self.ecs.get::<&ModuleBody>(entity).ok()?;
+        Some(OrganismInspect {
+            entity_id: entity.id(),
+            name: body.blueprint.name.clone(),
+            x: pose.x,
+            y: pose.y,
+            energy: energy.current,
+            energy_max: energy.max,
+            generation: lineage.generation,
+            clones_produced: lineage.clones_produced,
+            genome,
+            module_count: body.blueprint.modules.len(),
+            photosystems: body.photosystem_count(),
+            is_plankton: body.blueprint.is_plankton(),
+        })
+    }
+
+    /// World-space AABB for highlighting a selected organism.
+    pub fn organism_highlight_aabb(&self, entity: Entity) -> Option<Aabb> {
+        let pose = *self.ecs.get::<&Pose>(entity).ok()?;
+        let body = self.ecs.get::<&ModuleBody>(entity).ok()?;
+        Some(organism_aabb(&pose, &body.blueprint))
     }
 
     /// Set A behaviour pass: light, buoyancy, AABB collision, reproduce, die.
@@ -612,9 +698,10 @@ impl AgentStore {
         let population = self.organism_count();
 
         let mut deaths: Vec<(Entity, i32)> = Vec::new();
-        let mut births: Vec<(f32, f32, Blueprint, f32, f32)> = Vec::new();
+        // x, y, blueprint, energy, max_e, parent, parent_generation
+        let mut births: Vec<(f32, f32, Blueprint, f32, f32, Entity, u32)> = Vec::new();
 
-        for (e, (pose, buoy, energy, genome, body, _)) in self
+        for (e, (pose, buoy, energy, genome, body, lineage, _)) in self
             .ecs
             .query::<(
                 &mut Pose,
@@ -622,6 +709,7 @@ impl AgentStore {
                 &mut Energy,
                 &Genome,
                 &ModuleBody,
+                &Lineage,
                 &Organism,
             )>()
             .iter()
@@ -664,14 +752,21 @@ impl AgentStore {
                     let child_genome = mutate_organism(*genome, world.seed, tick, e.id());
                     let mut child_bp = body.blueprint.clone();
                     child_bp.genome = child_genome;
-                    // Start one body-width away; horizontal search spreads further.
                     let w = organism_width(&child_bp);
                     let side = if (tick + e.id() as u64) % 2 == 0 {
                         w
                     } else {
                         -w
                     };
-                    births.push((pose.x + side, pose.y, child_bp, child_e, energy.max));
+                    births.push((
+                        pose.x + side,
+                        pose.y,
+                        child_bp,
+                        child_e,
+                        energy.max,
+                        e,
+                        lineage.generation,
+                    ));
                 }
             }
 
@@ -690,7 +785,7 @@ impl AgentStore {
             let _ = self.ecs.despawn(e);
         }
 
-        for (x0, y0, blueprint, energy, max_e) in births {
+        for (x0, y0, blueprint, energy, max_e, parent, parent_gen) in births {
             if self.organism_count() >= MAX_ORGANISMS {
                 break;
             }
@@ -715,8 +810,15 @@ impl AgentStore {
                 },
                 blueprint.genome,
                 ModuleBody { blueprint },
+                Lineage {
+                    generation: parent_gen.saturating_add(1),
+                    clones_produced: 0,
+                },
                 Organism,
             ));
+            if let Ok(mut lin) = self.ecs.get::<&mut Lineage>(parent) {
+                lin.clones_produced = lin.clones_produced.saturating_add(1);
+            }
             self.births_total += 1;
         }
 
@@ -766,6 +868,21 @@ mod tests {
             col.deposit_to_top(MaterialId::Water, 2_000, 0);
         }
         world
+    }
+
+    #[test]
+    fn founder_lineage_starts_at_zero() {
+        let mut world = World::new(3);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(&world, 2, Blueprint::atom(Genome::default()), 50.0)
+            .expect("spawn");
+        let info = store.inspect_organism(e).expect("inspect");
+        assert_eq!(info.generation, 0);
+        assert_eq!(info.clones_produced, 0);
+        assert!(info.energy > 0.0);
     }
 
     #[test]
