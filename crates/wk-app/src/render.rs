@@ -464,6 +464,14 @@ pub fn draw_frame(
                 let c = humidity_overlay_color(col.humidity_rh);
                 draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
             }
+            OverlayMode::Co2Field => {
+                let c = gas_overlay_color(col.co2, true);
+                draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
+            }
+            OverlayMode::O2Field => {
+                let c = gas_overlay_color(col.o2, false);
+                draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
+            }
             OverlayMode::None => {}
         }
     }
@@ -570,6 +578,26 @@ fn humidity_overlay_color(rh: f32) -> Color {
     Color::from_rgba(r, g, b, 220)
 }
 
+/// Gas heatmap: CO₂ low→brown high→green; O₂ low→purple high→cyan.
+fn gas_overlay_color(level: f32, co2: bool) -> Color {
+    let t = (level / 1.5).clamp(0.0, 1.0);
+    if co2 {
+        Color::from_rgba(
+            ((1.0 - t) * 140.0 + 40.0) as u8,
+            (60.0 + t * 160.0) as u8,
+            (40.0 + t * 40.0) as u8,
+            220,
+        )
+    } else {
+        Color::from_rgba(
+            ((1.0 - t) * 120.0) as u8,
+            (40.0 + t * 180.0) as u8,
+            (100.0 + t * 120.0) as u8,
+            220,
+        )
+    }
+}
+
 /// Creature inspect panel. Returns the Y just below the panel for stacking.
 fn draw_organism_inspector(info: &wk_sim::OrganismInspect, sw: f32, y0: f32) -> f32 {
     let panel_w = 300.0;
@@ -604,6 +632,10 @@ fn draw_organism_inspector(info: &wk_sim::OrganismInspect, sw: f32, y0: f32) -> 
         format!(
             "clone_fidelity={:.2}  buoyancy={:.2}",
             info.genome.clone_fidelity, info.genome.buoyancy_bias
+        ),
+        format!(
+            "temp_opt={:.0}C  temp_width={:.0}C",
+            info.genome.temp_optimum, info.genome.temp_width
         ),
         format!(
             "circadian={:.2}  active_window={:.2}",

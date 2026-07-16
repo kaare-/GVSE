@@ -36,6 +36,7 @@ fn e14_ecology_grows_when_wet() {
                 dead_biomass: 0,
                 alive_biomass: 100,
                 nutrient: 0.9,
+                ..Ecology::default()
             };
             let cap = col.moisture_cap().max(1);
             if (wet_lo..wet_hi).contains(&i) {

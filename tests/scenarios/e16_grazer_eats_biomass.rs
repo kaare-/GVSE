@@ -35,6 +35,7 @@ fn e16_grazer_eats_biomass() {
                     dead_biomass: 0,
                     alive_biomass: 2_000,
                     nutrient: 0.8,
+                    ..Ecology::default()
                 };
                 col.moisture = col.moisture_cap().max(1);
             } else {

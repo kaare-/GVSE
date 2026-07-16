@@ -174,6 +174,19 @@ pub fn organism_photo_gain(energy_max: f32, l0: f32, n_photo: f32) -> f32 {
     scaled.max(floor)
 }
 
+/// Unimodal comfort in `[0, 1]` around `temp_optimum` with half-width `temp_width`.
+pub fn temp_comfort_factor(temp_c: f32, genome: &Genome) -> f32 {
+    let width = genome.temp_width.max(1.0);
+    let x = (temp_c - genome.temp_optimum) / width;
+    (-(x * x)).exp().clamp(0.0, 1.0)
+}
+
+/// Dissolved-CO₂ half-saturation (relative units) for photo Michaelis curve.
+const CO2_HALF_SAT: f32 = 0.25;
+/// CO₂ drawn from the water column per unit photo gain.
+const CO2_PER_ENERGY: f32 = 0.002;
+/// O₂ emitted per unit photo gain.
+const O2_PER_ENERGY: f32 = 0.0015;
 fn corpse_rgb((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     // Desaturated brown-grey — readable as dead tissue, not living chroma.
     let luma = (r as u16 * 3 + g as u16 * 6 + b as u16) / 10;
@@ -376,6 +389,8 @@ pub fn mutate_organism(
     g.circadian_phase = jitter(g.circadian_phase, 0.0, 1.0);
     g.active_window = jitter(g.active_window, 0.1, 1.0);
     g.buoyancy_bias = jitter(g.buoyancy_bias, 0.0, 1.0);
+    g.temp_optimum = jitter(g.temp_optimum, -5.0, 40.0);
+    g.temp_width = jitter(g.temp_width, 4.0, 25.0);
     g
 }
 
@@ -835,8 +850,26 @@ impl AgentStore {
                 continue;
             }
 
+            let temp_c = world.temperature_at_point(wx, pose.y, tick);
+            let comfort = temp_comfort_factor(temp_c, genome);
+            let plankton = body.blueprint.is_plankton();
+
+            // Environment gates: water required, ice / freeze kills plankton.
+            let (in_water, iced, water_co2) = if let Some(col) = world.column_at(wx) {
+                let wet = water_band(col).is_some();
+                let ice = col.top_ice_mass() > 0;
+                (wet, ice, col.ecology.water_co2)
+            } else {
+                (false, false, 0.0)
+            };
+            // Plankton need free water; ice around them is lethal.
+            if plankton && (!in_water || iced) {
+                deaths.push((e, wx));
+                continue;
+            }
+
             if let Some(col) = world.column_at(wx) {
-                if body.blueprint.is_plankton() {
+                if plankton {
                     step_buoyancy(&mut pose.y, buoy, col, genome.buoyancy_bias);
                 } else {
                     pose.y = col.surface_y;
@@ -845,8 +878,22 @@ impl AgentStore {
                 }
             }
 
-            if active {
-                let gain = organism_photo_gain(energy.max, l0, n_photo);
+            if active && (!plankton || in_water) {
+                let mut gain = organism_photo_gain(energy.max, l0, n_photo) * comfort;
+                if plankton {
+                    // Michaelis–Menten on dissolved CO₂ — blooms can starve the water.
+                    let co2_factor = water_co2 / (water_co2 + CO2_HALF_SAT);
+                    gain *= co2_factor;
+                    if gain > 0.0 {
+                        if let Some(col) = world.column_at_mut(wx) {
+                            let take = (gain * CO2_PER_ENERGY).min(col.ecology.water_co2);
+                            col.ecology.water_co2 =
+                                (col.ecology.water_co2 - take).clamp(0.0, 3.0);
+                            col.ecology.water_o2 =
+                                (col.ecology.water_o2 + gain * O2_PER_ENERGY).clamp(0.0, 3.0);
+                        }
+                    }
+                }
                 energy.current = (energy.current + gain).min(energy.max);
             }
 
@@ -859,9 +906,12 @@ impl AgentStore {
 
             let phase_id = e.id() as u64 % REPRO_PERIOD;
             let threshold = genome.reproduce_at.clamp(0.2, 0.99);
+            // Cold / hot water: no full-throttle fission outside the comfort band.
+            let can_repro = comfort >= 0.35;
             if population + births.len() < MAX_ORGANISMS
                 && tick % REPRO_PERIOD == phase_id
                 && energy.current >= energy.max * threshold
+                && can_repro
             {
                 let child_e = energy.current * REPRO_COST_FRAC;
                 if child_e > 1.0 {
@@ -1079,6 +1129,9 @@ mod tests {
         let mut world = World::new(99);
         world.sea_level = 0.0;
         world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        if let Some(col) = world.column_at_mut(4) {
+            col.deposit_to_top(MaterialId::Water, 2_000, 0);
+        }
         let mut store = AgentStore::new();
         let e = store
             .spawn_from_blueprint(&world, 4, Blueprint::atom(Genome::default()), 50.0)
@@ -1089,6 +1142,22 @@ mod tests {
         }
         store.step_organisms(&mut world, 1);
         assert_eq!(store.organism_count(), 0);
+        assert_eq!(store.corpse_count(), 1);
+    }
+
+    #[test]
+    fn plankton_dies_without_water() {
+        let mut world = World::new(101);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        // Dry column — no standing water.
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(&world, 4, Blueprint::atom(Genome::default()), 50.0)
+            .expect("spawn");
+        assert!(store.ecs.get::<&Organism>(e).is_ok());
+        store.step_organisms(&mut world, 1);
+        assert_eq!(store.organism_count(), 0, "dry land should kill plankton");
         assert_eq!(store.corpse_count(), 1);
     }
 

@@ -97,6 +97,27 @@ pub struct EcologySnapshot {
     pub dead_biomass: i64,
     pub alive_biomass: i64,
     pub nutrient: f32,
+    #[serde(default = "default_snap_air_co2")]
+    pub air_co2: f32,
+    #[serde(default = "default_snap_air_o2")]
+    pub air_o2: f32,
+    #[serde(default = "default_snap_water_co2")]
+    pub water_co2: f32,
+    #[serde(default = "default_snap_water_o2")]
+    pub water_o2: f32,
+}
+
+fn default_snap_air_co2() -> f32 {
+    1.0
+}
+fn default_snap_air_o2() -> f32 {
+    1.0
+}
+fn default_snap_water_co2() -> f32 {
+    0.85
+}
+fn default_snap_water_o2() -> f32 {
+    0.90
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -168,6 +189,10 @@ pub fn snapshot_world(world: &World, sim_tick: u64) -> SaveFileV1 {
                         dead_biomass: col.ecology.dead_biomass,
                         alive_biomass: col.ecology.alive_biomass,
                         nutrient: col.ecology.nutrient,
+                        air_co2: col.ecology.air_co2,
+                        air_o2: col.ecology.air_o2,
+                        water_co2: col.ecology.water_co2,
+                        water_o2: col.ecology.water_o2,
                     },
                 })
                 .collect();
@@ -285,6 +310,10 @@ pub fn restore_world(save: &SaveFileV1) -> (World, u64) {
                 dead_biomass: cs.ecology.dead_biomass,
                 alive_biomass: cs.ecology.alive_biomass,
                 nutrient: cs.ecology.nutrient,
+                air_co2: cs.ecology.air_co2,
+                air_o2: cs.ecology.air_o2,
+                water_co2: cs.ecology.water_co2,
+                water_o2: cs.ecology.water_o2,
             };
             col.recompute_surface_y(snap.bedrock_y);
         }

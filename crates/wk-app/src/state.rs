@@ -325,7 +325,9 @@ impl AppState {
                 OverlayMode::Activity => OverlayMode::Conservation,
                 OverlayMode::Conservation => OverlayMode::TemperatureField,
                 OverlayMode::TemperatureField => OverlayMode::HumidityField,
-                OverlayMode::HumidityField => OverlayMode::None,
+                OverlayMode::HumidityField => OverlayMode::Co2Field,
+                OverlayMode::Co2Field => OverlayMode::O2Field,
+                OverlayMode::O2Field => OverlayMode::None,
             };
         }
         if is_key_pressed(KeyCode::M) {

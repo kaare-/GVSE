@@ -560,6 +560,7 @@ dependencies = [
 name = "wk-sim"
 version = "0.1.0"
 dependencies = [
+ "hecs",
  "serde",
  "wk-agents",
  "wk-field",

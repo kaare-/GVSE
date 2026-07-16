@@ -36,6 +36,7 @@ fn e17_reproduction_mutates() {
                     dead_biomass: 0,
                     alive_biomass: 4_000,
                     nutrient: 0.9,
+                    ..Ecology::default()
                 };
                 col.moisture = col.moisture_cap().max(1);
             } else {

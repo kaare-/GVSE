@@ -102,6 +102,12 @@ pub struct Genome {
     /// not a snap to a fixed ocean line.
     #[serde(default = "default_buoyancy_bias")]
     pub buoyancy_bias: f32,
+    /// Comfort temperature (°C) for photosynthesis / reproduction.
+    #[serde(default = "default_temp_optimum")]
+    pub temp_optimum: f32,
+    /// Half-width of the comfort band (°C). Outside → slow / no repro.
+    #[serde(default = "default_temp_width")]
+    pub temp_width: f32,
 }
 
 fn default_metabolic_rate() -> f32 {
@@ -122,6 +128,12 @@ fn default_active_window() -> f32 {
 fn default_buoyancy_bias() -> f32 {
     0.0 // floater: ~1 m under the live free-water surface
 }
+fn default_temp_optimum() -> f32 {
+    18.0
+}
+fn default_temp_width() -> f32 {
+    12.0
+}
 
 impl Default for Genome {
     fn default() -> Self {
@@ -138,6 +150,8 @@ impl Default for Genome {
             circadian_phase: default_circadian_phase(),
             active_window: default_active_window(),
             buoyancy_bias: default_buoyancy_bias(),
+            temp_optimum: default_temp_optimum(),
+            temp_width: default_temp_width(),
         }
     }
 }
@@ -169,6 +183,8 @@ impl Genome {
         g.circadian_phase = jitter(g.circadian_phase, 0.0, 1.0);
         g.active_window = jitter(g.active_window, 0.1, 1.0);
         g.buoyancy_bias = jitter(g.buoyancy_bias, 0.0, 1.0);
+        g.temp_optimum = jitter(g.temp_optimum, -5.0, 40.0);
+        g.temp_width = jitter(g.temp_width, 4.0, 25.0);
         g
     }
 
@@ -187,6 +203,8 @@ impl Genome {
             || (self.circadian_phase - other.circadian_phase).abs() > EPS
             || (self.active_window - other.active_window).abs() > EPS
             || (self.buoyancy_bias - other.buoyancy_bias).abs() > EPS
+            || (self.temp_optimum - other.temp_optimum).abs() > EPS
+            || (self.temp_width - other.temp_width).abs() > EPS
     }
 }
 

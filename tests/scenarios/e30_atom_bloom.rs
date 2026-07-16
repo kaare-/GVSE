@@ -1,9 +1,10 @@
 //! E30 — Atom bloom (Organism Kernel Set A).
 //!
-//! A Nucleus+Photosystem Atom on a lit band should grow population by day
-//! and thin at night; mass audit stays closed.
+//! A Nucleus+Photosystem Atom in lit free water should grow population by day
+//! and thin at night; mass audit stays closed. Plankton require water.
 
 use crate::helpers::*;
+use wk_material::MaterialId;
 use wk_sim::{Blueprint, Genome};
 use wk_world::terrain::generate_flat_sand;
 use wk_world::world::World;
@@ -21,6 +22,12 @@ fn e30_atom_bloom() {
     world.climate.lapse_rate_c_per_m = 0.0;
     world.climate.base_temp_c = 18.0;
     world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+    // Plankton need standing water — flood the test bed.
+    for x in 0..64 {
+        if let Some(col) = world.column_at_mut(x) {
+            col.deposit_to_top(MaterialId::Water, 2_000, 0);
+        }
+    }
     world.wake_all();
     world.recompute_mass_audit();
 
@@ -31,6 +38,8 @@ fn e30_atom_bloom() {
         circadian_phase: 0.25, // peak around mid-day in phase_fraction
         active_window: 0.7,
         repro_drive: 0.0, // grazers off
+        temp_optimum: 18.0,
+        temp_width: 20.0, // wide so short-cycle test isn't temp-starved
         ..Genome::default()
     };
     let bp = Blueprint::atom(genome);
@@ -73,7 +82,6 @@ fn e30_atom_bloom() {
         peak_day > 1,
         "day population should grow beyond founder (peak_day={peak_day})"
     );
-    // Night should not keep growing past day peak; prefer thinning signal.
     assert!(
         min_night <= peak_day,
         "night min {min_night} should not exceed day peak {peak_day}"
