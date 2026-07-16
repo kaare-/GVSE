@@ -93,8 +93,10 @@ pub struct Genome {
     /// Fraction of the day the organism is active (0..1) (Set A).
     #[serde(default = "default_active_window")]
     pub active_window: f32,
-    /// 0 = float at free-water surface; 1 = sink toward the water bed.
-    /// Used by plankton Atoms each tick (not the constant sea_level line).
+    /// Relative sink tendency for plankton (0..1).
+    /// `0` = buoyant floater (rides ~1 m under the live free-water surface);
+    /// `1` = heavy (settles on the water bed). Motion is weight vs buoyancy,
+    /// not a snap to a fixed ocean line.
     #[serde(default = "default_buoyancy_bias")]
     pub buoyancy_bias: f32,
 }
@@ -115,7 +117,7 @@ fn default_active_window() -> f32 {
     0.55
 }
 fn default_buoyancy_bias() -> f32 {
-    0.15 // slightly under the free surface by default
+    0.0 // floater: ~1 m under the live free-water surface
 }
 
 impl Default for Genome {

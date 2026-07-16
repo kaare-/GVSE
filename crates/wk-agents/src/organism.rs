@@ -1,10 +1,12 @@
 //! Set A organism behaviour (nucleus + photosystem).
 //! See `docs/organism/CORE_FEATURES.md` Set A.
 //!
-//! Plankton float in the column's **flowable water** band (not a constant
-//! `sea_level` line). Vertical preference is [`Genome::buoyancy_bias`]
-//! (0 = free surface, 1 = water bed). At most one organism occupies a
-//! given column at a time so blooms spread sideways instead of stacking.
+//! Plankton move under **weight vs buoyancy** inside each column's live
+//! [`Column::flowable_water`] band (not a constant `sea_level` line).
+//! [`Genome::buoyancy_bias`] `0` ≈ floater (~1 m under the free surface);
+//! `1` ≈ sinker (water bed). Rising water lifts bodies that are in the
+//! column; falling water leaves them to gravity/buoyancy. At most one
+//! organism per column (no stacking) — adjacent columns are allowed.
 
 use hecs::Entity;
 use serde::{Deserialize, Serialize};
@@ -21,12 +23,7 @@ use crate::{
 /// Soft cap for module organisms (separate from grazers).
 pub const MAX_ORGANISMS: usize = 512;
 
-/// Minimum empty columns between organism anchors (1 ⇒ anchors ≥ 2 apart).
-/// Keeps creatures from visually merging in the side view.
-pub const COLUMN_GAP: i32 = 1;
-
-/// Blueprint pixel → world-column fraction. Atom modules stay inside one column
-/// instead of spilling into the neighbour (old code used full columns per pixel).
+/// Blueprint pixel → world-column fraction. Atom modules stay inside one column.
 pub const MODULE_CELL_COLS: f32 = 0.35;
 
 /// Energy gained per photosystem per tick at full noon light.
@@ -41,12 +38,30 @@ pub const PHOTOSYSTEM_UPKEEP: f32 = 0.03;
 /// kg dumped into `dead_biomass` on organism death.
 pub const DEATH_LITTER_KG: i64 = 8;
 
-/// How fast plankton Y lerps toward the buoyancy target each tick.
-const BUOYANCY_LERP: f32 = 0.4;
+/// Floater depth below the live free-water surface (metres) when bias ≈ 0.
+pub const FLOAT_DEPTH_M: f32 = 1.0;
+
+/// Downward acceleration (world-Y decreases) when unsupported / denser than water.
+const GRAVITY: f32 = 0.12;
+/// Velocity damping while submerged.
+const WATER_DRAG: f32 = 0.22;
+/// Velocity damping in air.
+const AIR_DRAG: f32 = 0.03;
+/// Mild spring toward the gene equilibrium depth (keeps bias meaningful).
+const EQ_SPRING: f32 = 0.08;
 
 /// Marker: Set A (and later) module-pixel organism.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Organism;
+
+/// Vertical motion state for weight / buoyancy integration.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct BuoyancyState {
+    /// Vertical velocity (m/tick); positive = up.
+    pub vel_y: f32,
+    /// Previous free-water top, used to ride rising/falling water.
+    pub last_water_top: Option<f32>,
+}
 
 /// Baked module body from a blueprint at spawn time.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,7 +91,6 @@ pub fn water_band(col: &Column) -> Option<(f32, f32)> {
                 y -= h;
             }
             _ => {
-                // Top of first solid substrate = water bed.
                 return Some((top, y));
             }
         }
@@ -84,15 +98,110 @@ pub fn water_band(col: &Column) -> Option<(f32, f32)> {
     Some((top, y))
 }
 
-/// Target Y inside the water band. `bias` 0 = surface, 1 = bed.
-pub fn buoyancy_target_y(col: &Column, bias: f32) -> Option<f32> {
-    let (top, bed) = water_band(col)?;
-    let t = bias.clamp(0.0, 1.0);
-    Some(top + (bed - top) * t)
+/// Density relative to water: `0` bias → buoyant (0.55), `1` → heavy (1.45).
+pub fn relative_density(bias: f32) -> f32 {
+    0.55 + bias.clamp(0.0, 1.0) * 0.90
 }
 
-/// True when the column holds enough standing water that rooted plants
-/// cannot establish (open water / lake / sea column).
+/// Gene equilibrium depth: bias `0` → `top - FLOAT_DEPTH_M`, bias `1` → bed.
+pub fn equilibrium_y(top: f32, bed: f32, bias: f32) -> f32 {
+    let float_y = (top - FLOAT_DEPTH_M).clamp(bed, top);
+    let t = bias.clamp(0.0, 1.0);
+    float_y + (bed - float_y) * t
+}
+
+/// Spawn / query helper — equilibrium if water exists, else sediment surface.
+pub fn buoyancy_target_y(col: &Column, bias: f32) -> Option<f32> {
+    let (top, bed) = water_band(col)?;
+    Some(equilibrium_y(top, bed, bias))
+}
+
+/// Integrate one tick of weight vs buoyancy. Updates `y` and `state`.
+pub fn step_buoyancy(y: &mut f32, state: &mut BuoyancyState, col: &Column, bias: f32) {
+    let ground = {
+        // Sediment contact: top of first solid under any fluid cap, else surface.
+        water_band(col)
+            .map(|(_, bed)| bed)
+            .unwrap_or(col.surface_y)
+    };
+
+    if let Some((top, bed)) = water_band(col) {
+        // Ride the free surface when water rises/falls and we were in the column.
+        if let Some(prev_top) = state.last_water_top {
+            let delta = top - prev_top;
+            if delta.abs() > 1e-6 {
+                let was_in_column = *y <= prev_top + 0.25 && *y >= bed - 0.25;
+                if was_in_column {
+                    if delta > 0.0 {
+                        // Rising water lifts the body with the column.
+                        *y += delta;
+                    } else {
+                        // Falling free surface: floaters (light) follow it down;
+                        // heavy bodies keep their depth until buoyancy says otherwise.
+                        let dens = relative_density(bias);
+                        if dens < 1.0 {
+                            let float_y = equilibrium_y(prev_top, bed, 0.0);
+                            if (*y - float_y).abs() < FLOAT_DEPTH_M + 0.5 {
+                                *y = (*y + delta).max(bed);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        state.last_water_top = Some(top);
+
+        let dens = relative_density(bias);
+        let eq = equilibrium_y(top, bed, bias);
+
+        if *y > top {
+            // Air above the free surface — gravity wins.
+            state.vel_y -= GRAVITY;
+            state.vel_y *= 1.0 - AIR_DRAG;
+            *y += state.vel_y;
+            if *y < top {
+                // Splash: enter water, bleed downward speed.
+                state.vel_y *= 0.4;
+            }
+        } else {
+            // Submerged: buoyancy (− dens) vs weight, plus a mild pull to gene depth.
+            // dens < 1 ⇒ net upward accel; dens > 1 ⇒ net downward.
+            let accel = GRAVITY * (1.0 - dens) + (eq - *y) * EQ_SPRING;
+            state.vel_y += accel;
+            state.vel_y *= 1.0 - WATER_DRAG;
+            *y += state.vel_y;
+
+            if *y < bed {
+                *y = bed;
+                state.vel_y = state.vel_y.max(0.0);
+            }
+            // Don't let floaters launch far above the surface; park near float depth.
+            if dens < 1.0 && *y > top {
+                *y = top;
+                if state.vel_y > 0.0 {
+                    state.vel_y = 0.0;
+                }
+            }
+        }
+
+        // Soft settle near equilibrium when nearly still (stops endless bobbing).
+        if state.vel_y.abs() < 0.01 && (*y - eq).abs() < 0.05 {
+            *y = eq;
+            state.vel_y = 0.0;
+        }
+    } else {
+        state.last_water_top = None;
+        // Dry column — fall onto sediment.
+        state.vel_y -= GRAVITY;
+        state.vel_y *= 1.0 - AIR_DRAG;
+        *y += state.vel_y;
+        if *y <= ground {
+            *y = ground;
+            state.vel_y = 0.0;
+        }
+    }
+}
+
 fn is_deep_water(col: &Column) -> bool {
     match water_band(col) {
         Some((top, bed)) => (top - bed) > 0.5,
@@ -111,7 +220,6 @@ pub fn circadian_active(genome: &Genome, phase_fraction: f32) -> bool {
     if half <= 0.0 {
         return false;
     }
-    // Circular distance on [0,1).
     let mut d = (phase_fraction - genome.circadian_phase).abs();
     if d > 0.5 {
         d = 1.0 - d;
@@ -127,10 +235,9 @@ pub fn mutate_organism(
     parent_id: u32,
 ) -> Genome {
     let mut g = Genome::mutate(parent, world_seed, tick, parent_id);
-    // Extra jitter on Set A genes proportional to infidelity.
     let strength = (1.0 - parent.clone_fidelity).clamp(0.0, 1.0) * MUTATION_SIGMA;
     if strength <= 1e-6 {
-        return parent; // perfect clone
+        return parent;
     }
     let salt_base = tick
         .wrapping_mul(0xC0FF_EE11)
@@ -159,16 +266,6 @@ fn occupied_columns(store: &AgentStore) -> std::collections::HashSet<i32> {
     set
 }
 
-/// True if `c` is far enough from every occupied anchor (`COLUMN_GAP`).
-fn column_clear(occupied: &std::collections::HashSet<i32>, c: i32) -> bool {
-    for d in -COLUMN_GAP..=COLUMN_GAP {
-        if occupied.contains(&(c + d)) {
-            return false;
-        }
-    }
-    true
-}
-
 /// Nearest free column to `prefer`, optionally requiring / forbidding deep water.
 fn find_free_column(
     world: &World,
@@ -186,7 +283,7 @@ fn find_free_column(
             if c < lo || c > hi {
                 continue;
             }
-            if !column_clear(occupied, c) {
+            if occupied.contains(&c) {
                 continue;
             }
             let Some(col) = world.column_at(c) else {
@@ -209,8 +306,6 @@ impl AgentStore {
     }
 
     /// Elevation for a newly spawned / cloned organism.
-    /// Plankton ride the real free-water band (buoyancy gene); without
-    /// water they rest on the sediment surface. Rooted sit on land surface.
     pub fn spawn_elevation(world: &World, world_x: i32, blueprint: &Blueprint) -> Option<f32> {
         let col = world.column_at(world_x)?;
         if blueprint.is_plankton() {
@@ -223,9 +318,7 @@ impl AgentStore {
     }
 
     /// Spawn a blueprint-backed organism at column `world_x`.
-    /// Plankton may occupy any free column (preferring water when present);
-    /// rooted designs need a free non-deep-water column. Never stacks on
-    /// an already-occupied column.
+    /// Never stacks two organisms in the same column (adjacent columns OK).
     pub fn spawn_from_blueprint(
         &mut self,
         world: &World,
@@ -245,7 +338,6 @@ impl AgentStore {
 
         let occupied = occupied_columns(self);
         let want_water = if blueprint.is_plankton() {
-            // Prefer water if the click/parent column has it; else any free col.
             world
                 .column_at(world_x)
                 .and_then(|c| water_band(c))
@@ -254,7 +346,7 @@ impl AgentStore {
             Some(false)
         };
 
-        let world_x = if !column_clear(&occupied, world_x) {
+        let world_x = if occupied.contains(&world_x) {
             find_free_column(world, world_x, &occupied, want_water)?
         } else if blueprint.is_rooted() {
             let col = world.column_at(world_x)?;
@@ -269,10 +361,18 @@ impl AgentStore {
 
         let y = Self::spawn_elevation(world, world_x, &blueprint)?;
         let max_e = energy.max(1.0).max(40.0);
+        let last_water_top = world
+            .column_at(world_x)
+            .and_then(water_band)
+            .map(|(top, _)| top);
         let e = self.ecs.spawn((
             Pose {
                 x: world_x as f32 + 0.5,
                 y,
+            },
+            BuoyancyState {
+                vel_y: 0.0,
+                last_water_top,
             },
             Energy {
                 current: energy.clamp(0.0, max_e),
@@ -285,7 +385,7 @@ impl AgentStore {
         Some(e)
     }
 
-    /// Set A behaviour pass: harvest light, buoyancy, exclusion, reproduce, die.
+    /// Set A behaviour pass: harvest light, buoyancy physics, exclusion, reproduce, die.
     pub fn step_organisms(&mut self, world: &mut World, tick: u64) {
         if self.organism_count() == 0 {
             return;
@@ -296,7 +396,7 @@ impl AgentStore {
         let phase = world.climate.phase_fraction(tick);
         let population = self.organism_count();
 
-        // --- Spatial exclusion: anchors keep COLUMN_GAP clearance --------
+        // --- Spatial exclusion: one organism per column (adjacent OK) -----
         {
             let mut rows: Vec<(Entity, i32, bool)> = self
                 .ecs
@@ -309,8 +409,7 @@ impl AgentStore {
             let mut claimed = std::collections::HashSet::new();
             let mut moves: Vec<(Entity, i32)> = Vec::new();
             for &(e, wx, plankton) in &rows {
-                if column_clear(&claimed, wx) {
-                    claimed.insert(wx);
+                if claimed.insert(wx) {
                     continue;
                 }
                 let want = if plankton {
@@ -332,35 +431,41 @@ impl AgentStore {
                 if let Ok(mut pose) = self.ecs.get::<&mut Pose>(e) {
                     pose.x = new_wx as f32 + 0.5;
                 }
+                if let Ok(mut st) = self.ecs.get::<&mut BuoyancyState>(e) {
+                    st.last_water_top = world
+                        .column_at(new_wx)
+                        .and_then(water_band)
+                        .map(|(top, _)| top);
+                }
             }
         }
 
         let mut deaths: Vec<(Entity, i32)> = Vec::new();
         let mut births: Vec<(i32, Blueprint, f32, f32)> = Vec::new();
 
-        for (e, (pose, energy, genome, body, _)) in self
+        for (e, (pose, buoy, energy, genome, body, _)) in self
             .ecs
-            .query::<(&mut Pose, &mut Energy, &Genome, &ModuleBody, &Organism)>()
+            .query::<(
+                &mut Pose,
+                &mut BuoyancyState,
+                &mut Energy,
+                &Genome,
+                &ModuleBody,
+                &Organism,
+            )>()
             .iter()
         {
             let wx = pose.world_x();
             let n_photo = body.photosystem_count().max(1) as f32;
             let active = circadian_active(genome, phase);
 
-            // Buoyancy / grounding against the live water column.
             if let Some(col) = world.column_at(wx) {
                 if body.blueprint.is_plankton() {
-                    if let Some(target) = buoyancy_target_y(col, genome.buoyancy_bias) {
-                        pose.y += (target - pose.y) * BUOYANCY_LERP;
-                        if let Some((top, bed)) = water_band(col) {
-                            pose.y = pose.y.clamp(bed.min(top), bed.max(top));
-                        }
-                    } else {
-                        // Water gone — rest on sediment (no constant ocean line).
-                        pose.y = col.surface_y;
-                    }
+                    step_buoyancy(&mut pose.y, buoy, col, genome.buoyancy_bias);
                 } else {
                     pose.y = col.surface_y;
+                    buoy.vel_y = 0.0;
+                    buoy.last_water_top = None;
                 }
             }
 
@@ -398,8 +503,6 @@ impl AgentStore {
         }
 
         for (e, wx) in deaths {
-            // Creature body was outside total_tracked; entering as litter is a
-            // grow-side source (same bucket plants use when they create biomass).
             if let Some(col) = world.column_at_mut(wx) {
                 col.ecology.dead_biomass =
                     col.ecology.dead_biomass.saturating_add(DEATH_LITTER_KG);
@@ -422,7 +525,6 @@ impl AgentStore {
             } else {
                 Some(false)
             };
-            // Always take a free neighbour — never stack on the parent column.
             let Some(child_wx) = find_free_column(world, parent_wx, &occupied, want)
                 .or_else(|| find_free_column(world, parent_wx, &occupied, None))
             else {
@@ -434,10 +536,18 @@ impl AgentStore {
                     .map(|c| c.surface_y)
                     .unwrap_or(0.0)
             });
+            let last_water_top = world
+                .column_at(child_wx)
+                .and_then(water_band)
+                .map(|(top, _)| top);
             self.ecs.spawn((
                 Pose {
                     x: child_wx as f32 + 0.5,
                     y: child_y,
+                },
+                BuoyancyState {
+                    vel_y: 0.0,
+                    last_water_top,
                 },
                 Energy {
                     current: energy.clamp(0.0, max_e),
@@ -470,8 +580,6 @@ impl AgentStore {
             let max_x = modules.iter().map(|m| m.x).max().unwrap_or(0);
             let mid_x = (min_x as f32 + max_x as f32) * 0.5;
             for m in modules {
-                // Keep the whole blueprint footprint inside the reserved column
-                // band — do not treat each paint pixel as a full world column.
                 let wx = pose.x + (m.x as f32 - mid_x) * MODULE_CELL_COLS;
                 let wy = pose.y + m.y as f32 * MODULE_CELL_COLS;
                 out.push((wx, wy, m.module.rgb()));
@@ -491,7 +599,6 @@ mod tests {
         let mut world = World::new(42);
         world.sea_level = 10.0;
         world.insert_chunk(generate_flat_sand(0, 0.0, 5.0));
-        // Flood a mid column with standing water.
         if let Some(col) = world.column_at_mut(8) {
             col.deposit_to_top(MaterialId::Water, 2_000, 0);
         }
@@ -499,17 +606,17 @@ mod tests {
     }
 
     #[test]
-    fn buoyancy_zero_near_free_surface() {
+    fn floater_equilibrium_is_one_metre_under_surface() {
         let world = world_with_water();
         let col = world.column_at(8).unwrap();
         let (top, bed) = water_band(col).expect("water");
-        assert!(top > bed);
+        assert!(top - bed > FLOAT_DEPTH_M);
         let y = buoyancy_target_y(col, 0.0).unwrap();
-        assert!((y - top).abs() < 1e-3);
+        assert!((y - (top - FLOAT_DEPTH_M)).abs() < 1e-3);
     }
 
     #[test]
-    fn buoyancy_one_near_bed() {
+    fn sinker_equilibrium_is_bed() {
         let world = world_with_water();
         let col = world.column_at(8).unwrap();
         let (_top, bed) = water_band(col).expect("water");
@@ -518,23 +625,52 @@ mod tests {
     }
 
     #[test]
-    fn no_stacking_same_column() {
+    fn rising_water_lifts_floater() {
+        let mut world = world_with_water();
+        let col = world.column_at(8).unwrap();
+        let (top0, _) = water_band(col).unwrap();
+        let mut y = top0 - FLOAT_DEPTH_M;
+        let mut state = BuoyancyState {
+            vel_y: 0.0,
+            last_water_top: Some(top0),
+        };
+        // Add more water → free surface rises.
+        if let Some(c) = world.column_at_mut(8) {
+            c.deposit_to_top(MaterialId::Water, 1_500, 1);
+        }
+        let col = world.column_at(8).unwrap();
+        let (top1, _) = water_band(col).unwrap();
+        assert!(top1 > top0, "expected water top to rise");
+        step_buoyancy(&mut y, &mut state, col, 0.0);
+        assert!(
+            y > top0 - FLOAT_DEPTH_M + 0.1,
+            "floater should rise with water: y={y} old_float={} new_top={top1}",
+            top0 - FLOAT_DEPTH_M
+        );
+    }
+
+    #[test]
+    fn no_stacking_same_column_adjacent_ok() {
         let mut world = World::new(7);
         world.sea_level = 0.0;
         world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
         let mut store = AgentStore::new();
         let bp = Blueprint::atom(Genome::default());
         let a = store.spawn_from_blueprint(&world, 4, bp.clone(), 50.0);
-        let b = store.spawn_from_blueprint(&world, 4, bp, 50.0);
-        assert!(a.is_some() && b.is_some());
-        let cols: Vec<i32> = store
+        let b = store.spawn_from_blueprint(&world, 4, bp.clone(), 50.0);
+        let c = store.spawn_from_blueprint(&world, 5, bp, 50.0);
+        assert!(a.is_some() && b.is_some() && c.is_some());
+        let mut cols: Vec<i32> = store
             .ecs
             .query::<(&Pose, &Organism)>()
             .iter()
             .map(|(_, (p, _))| p.world_x())
             .collect();
-        assert_eq!(cols.len(), 2);
-        assert!((cols[0] - cols[1]).abs() > COLUMN_GAP);
+        cols.sort();
+        assert_eq!(cols.len(), 3);
+        // Second spawn at 4 must move; third at 5 can sit adjacent.
+        assert!(cols.windows(2).all(|w| w[0] != w[1]));
+        assert!(cols.contains(&5), "adjacent column 5 should be allowed");
     }
 
     #[test]
@@ -560,8 +696,6 @@ mod tests {
     #[test]
     fn spawn_ignores_constant_sea_level() {
         let mut world = World::new(9);
-        // Constant ocean line would put plankton at sea_level - 0.35 = 9.65,
-        // but the free water surface on this flooded column is much lower.
         world.sea_level = 10.0;
         world.insert_chunk(generate_flat_sand(0, 0.0, 2.0));
         if let Some(col) = world.column_at_mut(3) {
@@ -574,11 +708,7 @@ mod tests {
             ..Genome::default()
         });
         let y = AgentStore::spawn_elevation(&world, 3, &bp).unwrap();
-        assert!(
-            (y - top).abs() < 0.5,
-            "expected near free-water top {top}, got {y} (sea_level={})",
-            world.sea_level
-        );
+        assert!((y - (top - FLOAT_DEPTH_M)).abs() < 0.5);
         assert!((y - (world.sea_level - 0.35)).abs() > 1.0);
     }
 }
