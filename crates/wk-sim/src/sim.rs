@@ -4,9 +4,9 @@ use crate::barrier::barrier_commit;
 use crate::buffer::WorldTransferScratch;
 use crate::clock::{SimClock, SubsystemId, SUBSYSTEM_ORDER};
 use crate::subsystems::{
-    run_activity, run_evaporation, run_groundwater_flow, run_infiltration, run_lake_level,
-    run_layer_merge, run_phase_change, run_rain_inject, run_sediment, run_slumping,
-    run_surface_water, run_thermal_field, run_weather, SimParams,
+    run_activity, run_evaporation, run_groundwater_flow, run_humidity_field, run_infiltration,
+    run_lake_level, run_layer_merge, run_phase_change, run_rain_inject, run_sediment,
+    run_slumping, run_surface_water, run_thermal_field, run_weather, SimParams,
 };
 
 pub struct Simulation {
@@ -77,7 +77,8 @@ impl Simulation {
                 SubsystemId::PhaseChange
                 | SubsystemId::LakeLevel
                 | SubsystemId::Slumping
-                | SubsystemId::ThermalField => {}
+                | SubsystemId::ThermalField
+                | SubsystemId::HumidityField => {}
             }
         }
 
@@ -91,10 +92,13 @@ impl Simulation {
         // but their upstream bookkeeping (evap_out_total etc.) was
         // already booked, leaking mass into the audit.
         //
-        // ThermalField writes only field state (not layers), but still
-        // runs here so PhaseChange samples the committed field.
+        // Field passes write only field state (not layers), but still
+        // run here so material consumers sample committed fields.
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::ThermalField)) {
             run_thermal_field(world, tick);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::HumidityField)) {
+            run_humidity_field(world, tick);
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::PhaseChange)) {
             run_phase_change(world, tick);

@@ -6,7 +6,7 @@ use wk_material::{CHUNK_W, MaterialId, MAX_LOADED_CHUNKS, MAX_MARKERS, MATERIAL_
 use crate::chunk::Chunk;
 use crate::climate::{biome_for, temperature_at, Biome, ClimateSettings};
 use crate::column::{Activity, Column, MarkerId, ResidualBucket, SedimentLoad};
-use crate::fields::ThermalField;
+use crate::fields::{HumidityField, ThermalField};
 use crate::marker::Marker;
 use crate::weather::{Cloud, WeatherSettings};
 
@@ -53,6 +53,12 @@ pub struct World {
     /// Dirichlet temperature (°C) imposed on the bottom row of every
     /// thermal field — a stand-in for Earth's geothermal heat.
     pub geothermal_bottom_c: f32,
+    /// When true, chunks carry a `HumidityField` and evaporation
+    /// samples / sources it. Default false → hardcoded 0.4 RH.
+    pub humidity_fields_enabled: bool,
+    /// Regional / sky relative humidity target (0..1) used as the top
+    /// Dirichlet boundary of the humidity field.
+    pub ambient_humidity: f32,
 }
 
 impl World {
@@ -116,6 +122,8 @@ impl World {
             next_cloud_spawn_tick: 0,
             thermal_fields_enabled: false,
             geothermal_bottom_c: 55.0,
+            humidity_fields_enabled: false,
+            ambient_humidity: 0.4,
         }
     }
 
@@ -187,6 +195,83 @@ impl World {
             }
             chunk.thermal = Some(field);
         }
+    }
+
+    /// Relative humidity at a world point. Samples the chunk humidity
+    /// field when present; otherwise returns [`Self::ambient_humidity`].
+    ///
+    /// Samples are clamped below the top Dirichlet (sky) row so a
+    /// water column that has grown past the field's vertical extent
+    /// still reads the free-air cell rather than the forced sky BC.
+    pub fn humidity_at_point(&self, world_x: i32, y_m: f32) -> f32 {
+        let coord = Self::chunk_coord_for_world_x(world_x);
+        if let Some(chunk) = self.chunks.get(&coord) {
+            if let Some(humidity) = &chunk.humidity {
+                let x_m = world_x as f32 * wk_material::SAMPLE_WIDTH_M;
+                let h = humidity.0.height_cells as usize;
+                let max_y = humidity.0.origin_y_m
+                    + (h.saturating_sub(1) as f32 - 0.5) * humidity.0.cell_size_m;
+                let y = y_m.min(max_y);
+                return humidity.0.sample_bilinear(x_m, y).clamp(0.0, 1.0);
+            }
+        }
+        self.ambient_humidity
+    }
+
+    /// Allocate humidity fields (and zeroed source buffers) on every
+    /// loaded chunk. Seeds cells to `ambient_humidity`.
+    pub fn enable_humidity_fields(&mut self) {
+        self.humidity_fields_enabled = true;
+        let sea = self.sea_level;
+        let ambient = self.ambient_humidity.clamp(0.0, 1.0);
+        let coords: Vec<i32> = self.chunks.keys().copied().collect();
+        for coord in coords {
+            let Some(chunk) = self.chunks.get_mut(&coord) else {
+                continue;
+            };
+            if chunk.humidity.is_some() {
+                continue;
+            }
+            let mut field = HumidityField::new_for_chunk(coord, chunk.bedrock_y, sea, ambient);
+            let w = field.0.width_cells as usize;
+            let h = field.0.height_cells as usize;
+            field.0.halo = wk_field::FieldHalo::zeros(field.0.width_cells, field.0.height_cells);
+            for cy in 0..h {
+                field.0.halo.left[cy] = ambient;
+                field.0.halo.right[cy] = ambient;
+            }
+            for cx in 0..w {
+                field.0.halo.bottom[cx] = 0.0;
+                field.0.halo.top[cx] = ambient;
+            }
+            let source = field.0.zeros_like();
+            chunk.humidity = Some(field);
+            chunk.humidity_source = Some(source);
+        }
+    }
+
+    /// Add a relative-humidity source term (RH per second) at a world
+    /// point. No-op when humidity fields are disabled.
+    pub fn inject_humidity_source(&mut self, world_x: i32, y_m: f32, amount: f32) {
+        if !self.humidity_fields_enabled || amount == 0.0 {
+            return;
+        }
+        let coord = Self::chunk_coord_for_world_x(world_x);
+        let Some(chunk) = self.chunks.get_mut(&coord) else {
+            return;
+        };
+        let x_m = world_x as f32 * wk_material::SAMPLE_WIDTH_M;
+        let (cx, cy) = {
+            let Some(humidity) = &chunk.humidity else {
+                return;
+            };
+            humidity.0.world_to_cell(x_m, y_m)
+        };
+        let Some(source) = chunk.humidity_source.as_mut() else {
+            return;
+        };
+        let prev = source.cell_at(cx, cy);
+        source.set_cell(cx, cy, prev + amount);
     }
 
     pub fn biome_at(&self, surface_y: f32) -> Biome {
@@ -336,6 +421,8 @@ pub struct ColumnView {
     pub erosion_flux: i64,
     pub residual: ResidualBucket,
     pub temperature_c: f32,
+    /// Relative humidity at the column surface (0..1).
+    pub humidity_rh: f32,
     pub biome: Biome,
 }
 
@@ -357,6 +444,9 @@ pub enum OverlayMode {
     /// Colour-ramp of the thermal field sampled at each column's
     /// climate elevation (cold blue → hot red).
     TemperatureField,
+    /// Colour-ramp of relative humidity at the column surface
+    /// (dry brown → wet cyan).
+    HumidityField,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -464,6 +554,7 @@ impl World {
                         col.climate_elevation(),
                         tick,
                     ),
+                    humidity_rh: self.humidity_at_point(wx, col.surface_y),
                     biome: self.biome_at(col.climate_elevation()),
                 });
             } else {
@@ -483,6 +574,7 @@ impl World {
                     erosion_flux: 0,
                     residual: ResidualBucket::default(),
                     temperature_c: self.temperature_at_point(wx, self.sea_level, tick),
+                    humidity_rh: self.humidity_at_point(wx, self.sea_level),
                     biome: Biome::Ocean,
                 });
             }

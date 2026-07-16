@@ -1,4 +1,5 @@
 use wk_material::CHUNK_W;
+use wk_field::FieldPatch;
 
 use crate::column::{Activity, Column, SedimentLoad};
 use crate::fields::{
@@ -49,6 +50,10 @@ pub struct Chunk {
     /// pre-field behaviour (hardcoded humidity, climate temperature, …).
     pub thermal: Option<ThermalField>,
     pub humidity: Option<HumidityField>,
+    /// Per-tick RH source terms written by evaporation / open-water
+    /// emission. Same geometry as `humidity`; not persisted. Cleared
+    /// after each humidity field step.
+    pub humidity_source: Option<FieldPatch>,
     pub pressure: Option<PressureField>,
     pub wind: Option<WindField>,
     pub gw_head: Option<GroundwaterHeadField>,
@@ -67,6 +72,7 @@ impl Chunk {
             halo_water_table: [0.0, 0.0],
             thermal: None,
             humidity: None,
+            humidity_source: None,
             pressure: None,
             wind: None,
             gw_head: None,

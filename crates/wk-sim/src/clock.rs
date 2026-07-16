@@ -36,6 +36,10 @@ pub enum SubsystemId {
     /// only field state; runs after the material barrier so
     /// phase_change can sample the committed field.
     ThermalField = 12,
+    /// Atmospheric relative-humidity diffusion. Reads open-water /
+    /// evaporation source buffers; evaporation samples the field for
+    /// its rate. Post-barrier like ThermalField.
+    HumidityField = 13,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -45,7 +49,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 13] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 14] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -128,12 +132,20 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 13] = [
         period: 10,
         phase: 0,
     },
+    SubsystemSchedule {
+        id: SubsystemId::HumidityField,
+        // Same cadence as thermal, phase-staggered so the two field
+        // passes don't always fire on the same tick.
+        period: 10,
+        phase: 3,
+    },
 ];
 
 /// Fixed execution order for subsystems within one tick. PhaseChange,
-/// LakeLevel, Slumping, and ThermalField are deliberately NOT here —
-/// they're direct-mutation passes that run *after* barrier_commit so
-/// they operate on already-committed column (and field) state.
+/// LakeLevel, Slumping, ThermalField, and HumidityField are deliberately
+/// NOT here — they're direct-mutation passes that run *after*
+/// barrier_commit so they operate on already-committed column (and
+/// field) state.
 pub const SUBSYSTEM_ORDER: [SubsystemId; 9] = [
     SubsystemId::RainInject,
     SubsystemId::Weather,
