@@ -163,6 +163,10 @@ pub struct MaterialProps {
     /// heat redistributes on a playable timescale while remaining
     /// stable at 0.5 m cells with a 10-tick field step.
     pub thermal_diffusivity: f32,
+    /// 0–255 mineral solubility in flowing water. 0 for all current
+    /// materials; Limestone (stage 7) will be non-zero. The dissolved
+    /// field (stage 6.6) reads this when building dissolution sources.
+    pub solubility: u8,
 }
 
 pub struct MaterialRegistry;
@@ -180,6 +184,7 @@ impl MaterialRegistry {
                 render_alpha: 255,
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.001,
+                solubility: 0,
             },
             MaterialId::Stone => MaterialProps {
                 density: 2600,
@@ -192,6 +197,7 @@ impl MaterialRegistry {
                 // Effectively cliff-stable — bedded stone doesn't slump.
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.0012,
+                solubility: 0,
             },
             MaterialId::Sand => MaterialProps {
                 density: 1600,
@@ -209,6 +215,7 @@ impl MaterialRegistry {
                 // ~31° angle of repose over a 0.25 m column width.
                 repose_rise_m: 0.15,
                 thermal_diffusivity: 0.0018,
+                solubility: 0,
             },
             MaterialId::LooseRock => MaterialProps {
                 density: 2500,
@@ -222,6 +229,7 @@ impl MaterialRegistry {
                 // slope still gives way under load.
                 repose_rise_m: 0.25,
                 thermal_diffusivity: 0.0015,
+                solubility: 0,
             },
             MaterialId::Gravel => MaterialProps {
                 density: 2000,
@@ -234,6 +242,7 @@ impl MaterialRegistry {
                 // ~40° — larger, more interlocking grains than sand.
                 repose_rise_m: 0.20,
                 thermal_diffusivity: 0.0018,
+                solubility: 0,
             },
             MaterialId::Clay => MaterialProps {
                 density: 1900,
@@ -247,6 +256,7 @@ impl MaterialRegistry {
                 // already reflects via the wet-erosion multiplier).
                 repose_rise_m: 0.22,
                 thermal_diffusivity: 0.0012,
+                solubility: 0,
             },
             MaterialId::Organic => MaterialProps {
                 density: 600,
@@ -258,6 +268,7 @@ impl MaterialRegistry {
                 render_alpha: 255,
                 repose_rise_m: 0.10,
                 thermal_diffusivity: 0.002,
+                solubility: 0,
             },
             MaterialId::Water => MaterialProps {
                 density: 1000,
@@ -279,6 +290,7 @@ impl MaterialRegistry {
                 // spreading. Marked infinite so run_slumping ignores.
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.0015,
+                solubility: 0,
             },
             MaterialId::Air => MaterialProps {
                 density: 0,
@@ -290,6 +302,7 @@ impl MaterialRegistry {
                 render_alpha: 0,
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.004,
+                solubility: 0,
             },
             MaterialId::Snow => MaterialProps {
                 density: 900,
@@ -306,6 +319,7 @@ impl MaterialRegistry {
                 // Snow slides easily on steeper slopes (avalanches).
                 repose_rise_m: 0.12,
                 thermal_diffusivity: 0.001,
+                solubility: 0,
             },
             MaterialId::Ice => MaterialProps {
                 density: 917,
@@ -323,6 +337,7 @@ impl MaterialRegistry {
                 // the sim's tick scale it's effectively rigid.
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.001,
+                solubility: 0,
             },
         }
     }
