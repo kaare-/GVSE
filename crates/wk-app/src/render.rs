@@ -482,9 +482,27 @@ pub fn draw_frame(
     draw_rectangle(0.0, sh - 24.0, sw, 24.0, Color::from_rgba(0, 0, 0, 200));
     draw_text(&hud, 8.0, sh - 8.0, 16.0, WHITE);
 
+    // Clickable "CREATURES" button (top-right) — opens editor without needing C/F2.
+    let (bx, by, bw, bh) = creature_button_rect(sw);
+    draw_rectangle(bx, by, bw, bh, Color::from_rgba(40, 90, 50, 230));
+    draw_rectangle_lines(bx, by, bw, bh, 2.0, Color::from_rgba(255, 220, 80, 255));
+    draw_text("CREATURES", bx + 10.0, by + 22.0, 18.0, Color::from_rgba(255, 240, 160, 255));
+
     if let Some(wx) = selected {
         draw_inspector(snap, wx, sw);
     }
+}
+
+/// Top-right HUD button that opens the creature editor.
+pub fn creature_button_rect(sw: f32) -> (f32, f32, f32, f32) {
+    let bw = 130.0;
+    let bh = 32.0;
+    (sw - bw - 12.0, 10.0, bw, bh)
+}
+
+pub fn creature_button_hit(mx: f32, my: f32, sw: f32) -> bool {
+    let (bx, by, bw, bh) = creature_button_rect(sw);
+    mx >= bx && mx <= bx + bw && my >= by && my <= by + bh
 }
 
 fn material_name(mat: MaterialId) -> &'static str {

@@ -167,24 +167,52 @@ impl AppState {
         self.clamp_viewport();
     }
 
+    fn open_or_close_editor(&mut self) {
+        let opening = !self.editor.open;
+        self.editor.toggle(self.paused);
+        if opening {
+            self.paused = true;
+            self.show_settings = false;
+            self.status_msg =
+                "Creature editor OPEN — paint Atom, Enter to spawn, C/F2 or button to close"
+                    .into();
+        } else {
+            self.paused = self.editor.was_paused;
+            self.status_msg = "Creature editor closed".into();
+        }
+    }
+
     pub fn handle_input(&mut self) {
-        // Creature editor: C or F2 (F2 in case C is swallowed by the WM/IME).
-        if is_key_pressed(KeyCode::C) || is_key_pressed(KeyCode::F2) {
-            let opening = !self.editor.open;
-            self.editor.toggle(self.paused);
-            if opening {
-                self.paused = true;
-                self.show_settings = false;
-                self.status_msg = "Creature editor OPEN — paint Atom, Enter to spawn, C/F2 close".into();
-            } else {
-                self.paused = self.editor.was_paused;
-                self.status_msg = "Creature editor closed".into();
+        // Show last key on the HUD so we can tell if the window has focus.
+        if let Some(k) = get_last_key_pressed() {
+            if !self.editor.open {
+                self.status_msg = format!(
+                    "key {:?} | Space run | C/F2 or click CREATURES (top-right)",
+                    k
+                );
             }
+        }
+
+        // Creature editor: C, F2, or click the top-right CREATURES button.
+        let click_creatures = is_mouse_button_pressed(MouseButton::Left)
+            && {
+                let (mx, my) = mouse_position();
+                render::creature_button_hit(mx, my, screen_width())
+            };
+        if is_key_pressed(KeyCode::C)
+            || is_key_pressed(KeyCode::F2)
+            || (click_creatures && !self.editor.open)
+        {
+            self.open_or_close_editor();
         }
         if self.editor.open {
             let _ = self.editor.handle_input();
             if self.editor.spawn_picker && is_mouse_button_pressed(MouseButton::Left) {
-                let (mx, _) = mouse_position();
+                let (mx, my) = mouse_position();
+                // Ignore clicks on the CREATURES button while picking.
+                if render::creature_button_hit(mx, my, screen_width()) {
+                    return;
+                }
                 let col = render::screen_x_to_world_x(mx, self.viewport_x);
                 if let Some(c) = self.world.column_at(col) {
                     if c.surface_y > self.world.sea_level {
@@ -335,7 +363,11 @@ impl AppState {
         }
 
         if is_mouse_button_pressed(MouseButton::Left) {
-            let (mx, _) = mouse_position();
+            let (mx, my) = mouse_position();
+            // Don't select a column when clicking the CREATURES button.
+            if render::creature_button_hit(mx, my, screen_width()) {
+                return;
+            }
             let col = render::screen_x_to_world_x(mx, self.viewport_x);
             if self.world.column_at(col).is_some() {
                 self.selected_column = Some(col);
@@ -403,7 +435,15 @@ impl AppState {
                     ui.label(None, &format!("Active clouds: {}", self.world.clouds.len()));
                 });
                 ui.separator();
+                if ui.button(None, "Open creature editor") {
+                    // Close settings; editor opens next frame via flag.
+                    self.show_settings = false;
+                    if !self.editor.open {
+                        self.open_or_close_editor();
+                    }
+                }
                 ui.label(None, &format!("Sim tick: {}", self.sim.clock.tick));
+                ui.label(None, "Tip: click CREATURES (top-right) or press C / F2");
             });
 
         self.world.weather.max_clouds = self.settings_max_clouds.round().max(1.0) as usize;
