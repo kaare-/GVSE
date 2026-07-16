@@ -5,6 +5,7 @@
 //! former monolithic `subsystems.rs` was split.
 
 mod activity;
+mod agents;
 mod ecology;
 mod evaporation;
 pub mod fields;
@@ -26,6 +27,7 @@ mod void_water;
 mod weather;
 
 pub use activity::run_activity;
+pub use agents::run_agents;
 pub use ecology::run_ecology;
 pub use evaporation::run_evaporation;
 pub use fields::{

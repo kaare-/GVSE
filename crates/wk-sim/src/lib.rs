@@ -15,3 +15,4 @@ pub use buffer::*;
 pub use clock::*;
 pub use residual::*;
 pub use sim::*;
+pub use wk_agents::{AgentStore, Energy, Genome, Grazer, Pose};

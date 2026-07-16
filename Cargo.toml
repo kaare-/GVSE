@@ -4,6 +4,7 @@ members = [
     "crates/wk-material",
     "crates/wk-field",
     "crates/wk-world",
+    "crates/wk-agents",
     "crates/wk-sim",
     "crates/wk-io",
     "crates/wk-app",
