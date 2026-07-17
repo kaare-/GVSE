@@ -1,29 +1,100 @@
-# World generation, streaming, and initial hydrological state
+# World generation, topology, streaming, and initial hydrological state
 
-*Author: initial design proposal, mid-2026. Nothing in this document is
-implemented yet; this is the design record for a planned extension.*
+*Author: initial design proposal, mid-2026; topology + strata revision
+same season. Implementation status varies by section — treat unchecked
+stages as planned. Stratigraphic recipes live in [`STRATA.md`](STRATA.md).*
 
 ## Goals
 
-- The map stretches "infinitely" left and right. There is no static
-  world size the player can reach.
-- Terrain is regenerated identically from a seed at any position. A
-  chunk that has been forgotten and revisited must produce bit-for-bit
-  the same generation output.
-- Terrain generation produces a plausible initial hydrological state:
-  a water table, ground moisture above it, atmospheric humidity, and
-  spring/wetland features where the table meets the surface. New land
-  is not bone-dry — it starts at the hydrological steady state its
-  biome implies.
-- Water leaving the currently simulated region cannot vanish silently
-  and cannot pool up against an invisible wall. The boundary condition
-  must be either physically transparent (flow continues into a real
-  neighbour) or hydrologically absorbed (backlogged into a frozen
-  neighbour that will apply the accumulated inflow when it re-enters
-  the active window).
-- The simulation cost is bounded regardless of world size: only a
-  finite active window is ticking, everything beyond it is either
-  frozen or evicted.
+- The world is a **rich side-view planet cut**: readable facies and
+  strata ([`STRATA.md`](STRATA.md)), not a single scripted hill profile.
+- **Preferred topology (v1): a ring** — finite circumference, scroll
+  left far enough and you re-enter from the right. Conceptually a
+  circle; in data, a periodic 1-D chunk index.
+- **Optional topology (v2): infinite line** — deterministic noise at
+  all `world_x`, with chunk streaming so sim cost stays bounded.
+- Terrain at any coord is a pure function of `(seed, params, coord)`
+  until simulation mutates it. Regenerating an untouched chunk is
+  bit-identical.
+- Generation produces a plausible initial hydrological state (water
+  table, moisture, humidity hooks, springs/wetlands). New land is not
+  bone-dry.
+- Mass does not vanish at edges: on a ring there is no edge; in
+  infinite mode, frozen neighbours absorb backlog (see below).
+- Sim cost is bounded by the **active window** (ring may be fully
+  resident if circumference is small enough; infinite mode must stream).
+
+## Topology: ring vs infinite
+
+Both fit the existing `BTreeMap<i32, Chunk>` model. They differ in
+neighbour rules, camera scroll, and how elevation is authored.
+
+### A — Ring world (recommended first)
+
+A long line of `WORLD_CHUNKS` chunks whose ends are glued:
+
+```
+chunk_coord' = coord.rem_euclid(WORLD_CHUNKS)
+world_x'     = wrap_column(world_x, WORLD_CHUNKS * CHUNK_W)
+```
+
+**Why this fits GVSE**
+
+- One lap = one readable story (ocean, coast, range, rain shadow,
+  interior sea or second coast — see facies belts in `STRATA.md`).
+- No open-boundary mass leak; rivers and tides can circulate.
+- Save files are finite and complete; mass audit stays globally closed.
+- Artist control: seed picks a belt palette that closes on itself.
+- Camera: `viewport_x` wraps; render may draw a short duplicated seam
+  so the wrap is invisible.
+
+**Suggested default size**
+
+| | Chunks | Columns | Metres (0.25 m/col) |
+|--|--------|---------|---------------------|
+| Compact | 64 | 4096 | ~1.0 km |
+| Default | 96 | 6144 | ~1.5 km |
+| Grand | 160 | 10240 | ~2.6 km |
+
+Today's demo (~88 chunks / ~1.4 km) is already "compact ring" scale.
+Grand size may need `MAX_LOADED_CHUNKS` raised **or** the same
+view/active/resident streaming as infinite mode, with wrap neighbours.
+
+**Seam rules (non-negotiable)**
+
+1. Elevation, belt id, and bed thicknesses are **periodic** in x.
+2. Halo / outbox exchange: chunk `0` ↔ chunk `WORLD_CHUNKS - 1`.
+3. Weather wind and agent `world_x` wrap the same way.
+4. Tide / sea_level are global scalars (already); no special case.
+
+**Authoring the circle**
+
+Prefer an authored **ring spline** of belt anchors (arc-length
+positions on the circle) jittered by seed, over pure noise that might
+place two abyss belts adjacent and skip mountains. Noise still detail-
+sculpts inside each belt.
+
+### B — Infinite line (second)
+
+No circumference. Elevation from multi-scale noise (below). Streaming
+tiers (view / active / resident / evicted) keep RAM and tick cost flat.
+Boundaries use frozen backlog so rivers don't vanish.
+
+**When to choose infinite:** long exploratory sessions, "what's beyond
+the next ridge," stress tests of streaming. Harder mass-global stories
+(one ocean volume, planetary tide) because there is no whole planet.
+
+### Decision
+
+| Phase | Topology | Notes |
+|-------|----------|--------|
+| v1 | **Ring** | Full load or light streaming; facies + wrap; ship the circle |
+| v2 | Infinite optional | Reuse belt recipes; add streamer + backlog |
+| Debug | `LegacyContinental` | Keep today's fixed transect for scenarios |
+
+The rest of this document's noise, hydrology, and streaming sections
+support **both**; ring mode simply sets `topology = Ring { chunks: N }`
+and skips eviction until N exceeds the resident budget.
 
 ## Why columns, not voxels
 
@@ -93,11 +164,18 @@ What has to be built:
    flow into a frozen neighbour or reflects it against a physical
    wall.
 
-## Infinite terrain via multi-scale deterministic noise
+## Elevation: multi-scale deterministic noise
+
+*Used heavily by infinite mode; ring mode may use the same noise as
+detail inside belt envelopes, or an authored periodic spline for the
+macro shape (preferred for a curated lap).*
 
 Replace the fixed profile with a composition of value noise at three
 frequency bands. Each band is a smooth interpolation of the
 `hash_f32(seed, world_x / stride, salt)` primitive already available.
+On a ring, evaluate noise in **periodic domain** (e.g. map `world_x`
+to an angle, or use wrap-aware interpolation so bucket `0` blends with
+bucket `N-1`).
 
 **Band A — continental noise (very low frequency)**. Stride ≈ 4000 m,
 produces slow variation between continental interior and oceanic
@@ -408,16 +486,15 @@ This lets rule 2 work: the boundary is transparent to gross flow
 because the neighbour is already at the level the flow would push it
 to. Only physically meaningful excess crosses.
 
-### Rule 4 — Discharge at absolute world boundaries (there are none)
+### Rule 4 — World edge
 
-There is no absolute world boundary. If the sim ever needs to know
-"where does water end up if it keeps flowing right forever?" — the
-answer is: infinitely many chunks to the right, each one starting at
-the steady state, each one absorbing the diminishing excess. The mass
-audit gets `boundary_out_total = 0` in the ideal case; small residual
-transfers into freshly-generated chunks are booked to a new
-`soil_inject_total` bucket (see initial pore-water saturation above)
-so the invariant equation stays exact.
+- **Ring:** there is no edge. Outboxes at chunk `0` and `N-1` route to
+  each other; `boundary_out_total` stays 0 for topology reasons.
+- **Infinite:** there is no absolute end of the map either — only the
+  end of the *loaded* window. Excess flowing into never-seen land is
+  absorbed by newly generated steady-state chunks (or backlog). Ideal
+  `boundary_out_total = 0`; residuals book to `soil_inject_total` /
+  similar so the audit stays exact.
 
 ## Persistence
 
@@ -467,32 +544,34 @@ persistent open-world game works.
 
 Each stage lands as its own PR; each leaves the sim in a working state.
 
-1. **Multi-scale noise terrain generator.** Replace the fixed-profile
-   `continental_surface_y` with the three-band noise composition,
-   plus regional wetness field. Existing E-tests continue to pass;
-   add a new scenario that walks 400 chunks in either direction and
-   asserts variety of biomes. Fixed-profile can survive as a debug
-   `generate_chunk_demo_profile` for reproducing the current showcase.
+0. **`WorldGenParams` + topology flag.** `LegacyContinental` |
+   `RingFacies { chunks }` | `InfiniteNoise`. Wire wrap helpers
+   (`wrap_chunk`, `wrap_world_x`) used by halos, outboxes, camera,
+   agents, weather. Scenarios keep legacy.
 
-2. **Initial hydrological state pass.** Water table + capillary fringe
-   + soil moisture + atmospheric humidity at generation. New scenario:
-   `E14_generated_land_starts_at_steady_state` — verifies that a chunk
-   generated cold and simulated with rain-off drifts by less than a
-   small threshold over 10k ticks (i.e. it's really at steady state).
+1. **Facies belts + stratigraphic recipes** ([`STRATA.md`](STRATA.md)).
+   Replace elevation-only `sediment_composition` with belt recipes and
+   pinching packages. Ring spline places belts; x-ray view shows
+   continuous beds. Scenarios WG-S1…S5.
 
-3. **Chunk streamer with view/active/resident/evicted tiers.** In-
-   memory chunk-store for persistence. `AppState::new` no longer
-   pre-generates chunks; the streamer generates on demand.
-   Deterministic regeneration test: unload, regenerate, assert bit-
-   identical terrain output.
+2. **Ring app world.** Default play map is a ring (≈96 chunks).
+   Scroll wraps; seam has no `boundary_out`. Keep legacy transect
+   available as a debug generator.
 
-4. **Frozen-chunk backlog + absorbing boundary.** Rule 1 and rule 2.
-   New scenario: `E15_no_boundary_leak_across_freeze` — a river flowing
-   through the active edge into a frozen chunk, run for 10k ticks,
-   then thaw and verify mass conservation across the whole event.
+3. **Initial hydrological state pass.** Water table + capillary fringe
+   + soil moisture + humidity hooks at generation (much of the ocean
+   table seeding already landed in sim work — generalize by wetness).
 
-5. **Disk-backed chunk-store** (optional, later). Same interface as
-   phase 1 but persistent across runs.
+4. **Multi-scale noise elevation** (infinite + ring detail). Periodic
+   noise for ring; open noise for infinite. Wetness field as below.
+
+5. **Chunk streamer** (needed for grand rings and infinite). View /
+   active / resident / evicted + in-memory store.
+
+6. **Frozen-chunk backlog** for infinite / oversize rings. Scenario:
+   no leak across freeze/thaw.
+
+7. **Disk-backed chunk-store** (optional).
 
 ## Trade-offs explicitly accepted
 
