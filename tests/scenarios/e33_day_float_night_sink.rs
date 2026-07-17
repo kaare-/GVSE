@@ -18,8 +18,9 @@ fn deep_ocean(seed: u64) -> World {
     world.climate.night_length_ticks = 240;
     world.climate.day_night_amplitude_c = 4.0;
     world.climate.base_temp_c = 20.0;
+    // Bedrock deep, solid surface well below sea → ~50 m water column.
     for c in -1..=1 {
-        world.insert_chunk(generate_flat_sand(c, -80.0, 8.0));
+        world.insert_chunk(generate_flat_sand(c, -80.0, -40.0));
     }
     let sea = world.sea_level;
     for x in -64..128 {
@@ -27,7 +28,7 @@ fn deep_ocean(seed: u64) -> World {
             col.moisture = col.moisture_cap();
             let (eta, mass) = col.flowable_water().unwrap_or((col.surface_y, 0));
             let bed = eta - mass as f32 / 250.0;
-            let target = ((sea - bed).max(40.0) * 250.0) as i64;
+            let target = ((sea - bed).max(1.0) * 250.0) as i64;
             let need = target - mass;
             if need > 0 {
                 col.deposit_to_top(MaterialId::Water, need, 0);
