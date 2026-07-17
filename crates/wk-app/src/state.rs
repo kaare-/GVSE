@@ -9,7 +9,17 @@ use crate::render::{self, SAVE_PATH};
 const SCROLL_SPEED_COLS_PER_SEC: f32 = 70.0;
 /// Screen pixels per second while W/S is held to pan the camera up/down.
 const CAMERA_Y_SPEED_PX_PER_SEC: f32 = 320.0;
-const MAX_TICKS_PER_FRAME: u64 = 60;
+/// Ceiling on catch-up ticks per rendered frame. Kept low so a slow
+/// frame can't recruit dozens of extra sim ticks (positive-feedback
+/// death spiral: slow frame → big dt → more catch-up ticks → slower
+/// frame → even bigger dt → …). Better to let sim time drift a hair
+/// behind real time than freeze the app.
+const MAX_TICKS_PER_FRAME: u64 = 4;
+/// Frame-time clamp for sim scheduling. Real render dt can spike to
+/// hundreds of ms during hitches; treating that as “advance 30 ticks”
+/// makes the next frame ten times worse. Cap the sim clock's view of
+/// wall-clock progress so `tick_accum` can't runaway.
+const MAX_SIM_DT_SEC: f32 = 1.0 / 30.0;
 /// Default ring circumference (192 × 64 cols ≈ 3 km). Matches
 /// `WorldGenParams::default_ring`; `MAX_LOADED_CHUNKS` must be ≥ this.
 const RING_CHUNKS: u32 = 192;
@@ -173,13 +183,21 @@ impl AppState {
             return;
         }
         if !self.paused {
-            let dt = get_frame_time();
+            // Clamp frame dt for sim scheduling so a slow frame (or a
+            // pause/resume gap) doesn't request a burst of catch-up
+            // ticks that makes the next frame even slower.
+            let dt = get_frame_time().min(MAX_SIM_DT_SEC);
             self.tick_accum += dt * self.speed as f32 * 60.0;
             let mut n = 0u64;
             while self.tick_accum >= 1.0 && n < MAX_TICKS_PER_FRAME {
                 self.step_sim(1);
                 self.tick_accum -= 1.0;
                 n += 1;
+            }
+            // Any leftover accum from a hitch is thrown away — better
+            // than carrying it into a queued catch-up burst.
+            if n == MAX_TICKS_PER_FRAME {
+                self.tick_accum = 0.0;
             }
         }
         self.clamp_viewport();
