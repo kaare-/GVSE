@@ -19,6 +19,7 @@ mod e16_grazer_eats_biomass;
 mod e17_reproduction_mutates;
 mod e20_geothermal_steady_state;
 mod e30_atom_bloom;
+mod e31_messy_boom;
 mod e46_plankton_env;
 mod e47_ocean_water_budget;
 mod e48_gas_exchange;

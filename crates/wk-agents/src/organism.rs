@@ -86,6 +86,9 @@ pub struct Lineage {
     pub clones_produced: u32,
     /// Ticks since spawn (senescence clock).
     pub age_ticks: u64,
+    /// Scenario / editor founder tag. Copied to children on fission.
+    /// `0` = untagged; scenarios use non-zero ids to track competing lineages.
+    pub founder_id: u8,
 }
 
 /// Default climate day+night length (ticks) — used as one "sim day".
@@ -113,6 +116,8 @@ pub struct OrganismInspect {
     pub generation: u32,
     pub clones_produced: u32,
     pub age_ticks: u64,
+    /// Scenario founder tag (`0` = untagged).
+    pub founder_id: u8,
     /// Gene-derived expected lifespan (ticks), with per-entity jitter applied.
     pub life_expectancy_ticks: u64,
     pub genome: Genome,
@@ -734,6 +739,23 @@ impl AgentStore {
         Some(e)
     }
 
+    /// Tag a living organism as belonging to scenario founder `founder_id`.
+    /// Children inherit the tag on fission.
+    pub fn tag_founder(&mut self, entity: Entity, founder_id: u8) {
+        if let Ok(mut lin) = self.ecs.get::<&mut Lineage>(entity) {
+            lin.founder_id = founder_id;
+        }
+    }
+
+    /// Living organisms whose lineage carries `founder_id`.
+    pub fn count_living_by_founder(&self, founder_id: u8) -> usize {
+        self.ecs
+            .query::<(&Lineage, &Organism)>()
+            .iter()
+            .filter(|(_, (lin, _))| lin.founder_id == founder_id)
+            .count()
+    }
+
     /// True if `entity` still exists as a living organism or a corpse.
     pub fn organism_alive(&self, entity: Entity) -> bool {
         self.ecs.get::<&Organism>(entity).is_ok() || self.ecs.get::<&Corpse>(entity).is_ok()
@@ -796,6 +818,7 @@ impl AgentStore {
             generation: lineage.generation,
             clones_produced: lineage.clones_produced,
             age_ticks: lineage.age_ticks,
+            founder_id: lineage.founder_id,
             life_expectancy_ticks: life_limit_ticks(&genome, entity.id()),
             genome,
             module_count: body.blueprint.modules.len(),
@@ -824,8 +847,8 @@ impl AgentStore {
         let population = self.organism_count();
 
         let mut deaths: Vec<(Entity, i32)> = Vec::new();
-        // x, y, blueprint, energy, max_e, parent, parent_generation
-        let mut births: Vec<(f32, f32, Blueprint, f32, f32, Entity, u32)> = Vec::new();
+        // x, y, blueprint, energy, max_e, parent, parent_generation, founder_id
+        let mut births: Vec<(f32, f32, Blueprint, f32, f32, Entity, u32, u8)> = Vec::new();
 
         for (e, (pose, buoy, energy, genome, body, lineage, _)) in self
             .ecs
@@ -934,6 +957,7 @@ impl AgentStore {
                         energy.max,
                         e,
                         lineage.generation,
+                        lineage.founder_id,
                     ));
                 }
             }
@@ -962,7 +986,7 @@ impl AgentStore {
             }
         }
 
-        for (x0, y0, blueprint, energy, max_e, parent, parent_gen) in births {
+        for (x0, y0, blueprint, energy, max_e, parent, parent_gen, founder_id) in births {
             if self.organism_count() >= MAX_ORGANISMS {
                 break;
             }
@@ -991,6 +1015,7 @@ impl AgentStore {
                     generation: parent_gen.saturating_add(1),
                     clones_produced: 0,
                     age_ticks: 0,
+                    founder_id,
                 },
                 Organism,
             ));
@@ -1372,7 +1397,57 @@ mod tests {
         let info = store.inspect_organism(e).expect("inspect");
         assert_eq!(info.generation, 0);
         assert_eq!(info.clones_produced, 0);
+        assert_eq!(info.founder_id, 0);
         assert!(info.energy > 0.0);
+    }
+
+    #[test]
+    fn founder_tag_inherited_on_fission() {
+        let mut world = World::new(31);
+        world.sea_level = 0.0;
+        world.climate.day_length_ticks = 60;
+        world.climate.night_length_ticks = 60;
+        world.climate.day_night_amplitude_c = 0.0;
+        world.climate.lapse_rate_c_per_m = 0.0;
+        world.climate.base_temp_c = 18.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.deposit_to_top(MaterialId::Water, 2_000, 0);
+            }
+        }
+        let genome = Genome {
+            metabolic_rate: 0.15,
+            reproduce_at: 0.35,
+            clone_fidelity: 1.0,
+            circadian_phase: 0.25,
+            active_window: 0.9,
+            repro_drive: 0.0,
+            temp_optimum: 18.0,
+            temp_width: 25.0,
+            ..Genome::default()
+        };
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(&world, 8, Blueprint::atom(genome), 50.0)
+            .expect("spawn");
+        store.tag_founder(e, 7);
+        for tick in 0..800 {
+            store.step_organisms(&mut world, tick);
+            if store.count_living_by_founder(7) > 1 {
+                break;
+            }
+        }
+        assert!(
+            store.count_living_by_founder(7) > 1,
+            "expected tagged offspring, living={}",
+            store.count_living_by_founder(7)
+        );
+        assert_eq!(
+            store.organism_count(),
+            store.count_living_by_founder(7),
+            "all living organisms should carry founder tag"
+        );
     }
 
     #[test]
