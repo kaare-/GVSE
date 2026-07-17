@@ -21,18 +21,18 @@ use wk_world::world::World;
 use super::shared::WATER_MASS_PER_METRE_DEPTH;
 
 /// Game-scaled gravity for free-surface waves (m/s²).
-const WAVE_G: f32 = 0.04;
+const WAVE_G: f32 = 0.05;
 /// Wind stress coefficient: `du += WIND_STRESS * wind_x / (depth_eff + ε)`.
-const WIND_STRESS: f32 = 1.4;
+const WIND_STRESS: f32 = 1.2;
 /// Linear drag on surface velocity per wave step.
-const LINEAR_DRAG: f32 = 0.14;
+const LINEAR_DRAG: f32 = 0.18;
 /// Hard cap on |u| (m/s).
-const MAX_U: f32 = 0.06;
+const MAX_U: f32 = 0.04;
 /// Only the top of the water column participates in wave flux. Full-depth
 /// oceans (100–400 m) otherwise produce absurd η spikes.
 const WAVE_ACTIVE_DEPTH_M: f32 = 3.0;
 /// Clamp |η − still| after the step (metres of free-surface departure).
-const MAX_ETA_AMP_M: f32 = 0.55;
+const MAX_ETA_AMP_M: f32 = 0.30;
 /// Minimum depth (m) that carries momentum / wind stress.
 const MIN_WAVE_DEPTH_M: f32 = 0.08;
 /// Fraction of the tidal target depth applied per wave step.
@@ -43,10 +43,13 @@ const OCEAN_MEAN_DEPTH_M: f32 = 1.25;
 const MIN_WAVE_WATER_KG: i64 = 20;
 /// Max fraction of the *active-layer* mass that may leave in one flux.
 const MAX_FLUX_FRAC: i64 = 6;
-/// Conserving neighbour blend — only kills short teeth, not basin setup.
-const SURFACE_SMOOTH: f32 = 0.12;
-/// Only smooth neighbour pairs whose depth differ by less than this (m).
-const SMOOTH_MAX_JUMP_M: f32 = 0.35;
+/// Extremum-only smoothing strength: shaves the middle of a 3-cell
+/// local peak/trough per pass. Monotonic slopes (wind setup, seiche)
+/// are left alone entirely.
+const SURFACE_SMOOTH: f32 = 0.45;
+/// Skip smoothing when the tooth exceeds this height (larger fronts
+/// are intentional — basin edges, tide fronts).
+const SMOOTH_MAX_JUMP_M: f32 = 0.25;
 
 #[derive(Clone, Copy)]
 struct WaveCell {
@@ -187,34 +190,41 @@ pub fn run_surface_waves(world: &mut World, tick: u64) {
         mass_delta[i + 1] += flux;
     }
 
-    for i in 0..cells.len().saturating_sub(1) {
-        if cells[i + 1].world_x != cells[i].world_x + 1 {
+    // Extremum-only comb-tooth killer: only shave the middle of a 3-cell
+    // local peak or trough. Monotonic ramps (wind setup, tide fronts,
+    // seiche slopes) are left alone.
+    let mut adds: Vec<(usize, i64)> = Vec::new();
+    for i in 1..cells.len().saturating_sub(1) {
+        if cells[i].world_x != cells[i - 1].world_x + 1
+            || cells[i + 1].world_x != cells[i].world_x + 1
+        {
             continue;
         }
-        if !(cells[i].oceanic && cells[i + 1].oceanic) {
+        let ml = cells[i - 1].mass + mass_delta[i - 1];
+        let mm = cells[i].mass + mass_delta[i];
+        let mr = cells[i + 1].mass + mass_delta[i + 1];
+        let dl = ml as f32 / WATER_MASS_PER_METRE_DEPTH;
+        let dm = mm as f32 / WATER_MASS_PER_METRE_DEPTH;
+        let dr = mr as f32 / WATER_MASS_PER_METRE_DEPTH;
+        let mean_edge = 0.5 * (dl + dr);
+        let peak = (dm - mean_edge).abs();
+        let is_extremum = (dm > dl && dm > dr) || (dm < dl && dm < dr);
+        if !is_extremum || peak > SMOOTH_MAX_JUMP_M {
             continue;
         }
-        let mi = cells[i].mass + mass_delta[i];
-        let mj = cells[i + 1].mass + mass_delta[i + 1];
-        let di = mi as f32 / WATER_MASS_PER_METRE_DEPTH;
-        let dj = mj as f32 / WATER_MASS_PER_METRE_DEPTH;
-        // Skip large jumps — those are wind setup / seiche slopes.
-        if (di - dj).abs() > SMOOTH_MAX_JUMP_M {
-            continue;
-        }
-        let xfer = ((di - dj) * 0.5 * SURFACE_SMOOTH * WATER_MASS_PER_METRE_DEPTH).round() as i64;
+        let delta_m = (mean_edge - dm) * SURFACE_SMOOTH;
+        let xfer = (delta_m * WATER_MASS_PER_METRE_DEPTH).round() as i64;
         if xfer == 0 {
             continue;
         }
-        if xfer > 0 {
-            let take = xfer.min(mi.max(0) / 6);
-            mass_delta[i] -= take;
-            mass_delta[i + 1] += take;
-        } else {
-            let take = (-xfer).min(mj.max(0) / 6);
-            mass_delta[i + 1] -= take;
-            mass_delta[i] += take;
-        }
+        let half = xfer / 2;
+        let rem = xfer - half;
+        adds.push((i, xfer));
+        adds.push((i - 1, -half));
+        adds.push((i + 1, -rem));
+    }
+    for (idx, d) in adds {
+        mass_delta[idx] += d;
     }
 
     let tide = world.tide_eta_m(tick);
