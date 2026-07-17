@@ -64,6 +64,10 @@ pub enum SubsystemId {
     Agents = 23,
     /// Per-column air / dissolved CO₂ + O₂ mixing and exchange.
     Gas = 24,
+    /// Wind stress + gravity-wave momentum on the free surface, plus tide.
+    /// Post-barrier; runs before LakeLevel so deep water isn't flattened
+    /// back to a sheet every tick.
+    SurfaceWaves = 25,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -73,7 +77,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 25] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -86,12 +90,9 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 25] = [
     },
     SubsystemSchedule {
         id: SubsystemId::RainInject,
-        // Fires every tick (not every 6th) so rain is delivered smoothly
-        // instead of as a periodic lump — a discrete "dump" of mass every
-        // few ticks, combined with the also-periodic LakeLevel pass at a
-        // *different* period, was creating a beat-frequency interference
-        // pattern (their periods' LCM) that looked like waves periodically
-        // appearing and disappearing.
+        // Every tick so rain is smooth. (A past RainInject×LakeLevel period
+        // mismatch made beat-frequency "fake waves"; real free-surface
+        // motion now lives in SurfaceWaves.)
         period: 1,
         phase: 0,
     },
@@ -220,6 +221,12 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 25] = [
         id: SubsystemId::Gas,
         period: 4,
         phase: 1,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::SurfaceWaves,
+        // Every tick — free-surface momentum needs a steady integrate step.
+        period: 1,
+        phase: 0,
     },
 ];
 

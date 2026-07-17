@@ -23,6 +23,7 @@ mod e31_messy_boom;
 mod e46_plankton_env;
 mod e47_ocean_water_budget;
 mod e48_gas_exchange;
+mod e49_wind_tide_waves;
 mod e22_humidity_near_water_body;
 mod e23_convection_cell;
 mod e24_darcy_pressure_equilibration;

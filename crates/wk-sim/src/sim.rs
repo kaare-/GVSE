@@ -10,8 +10,8 @@ use crate::subsystems::{
     run_groundwater_flow, run_groundwater_head_field, run_humidity_field, run_infiltration,
     run_karst, run_lake_level, run_layer_merge, run_phase_change, run_pressure_field,
     run_rain_inject, run_roof_collapse, run_sediment, run_slumping, run_speleogenesis,
-    run_surface_void_capture, run_surface_water, run_thermal_field, run_void_water_flow,
-    run_weather, run_wind_field, SimParams,
+    run_surface_void_capture, run_surface_water, run_surface_waves, run_thermal_field,
+    run_void_water_flow, run_weather, run_wind_field, SimParams,
 };
 
 pub struct Simulation {
@@ -101,7 +101,8 @@ impl Simulation {
                 | SubsystemId::Speleogenesis
                 | SubsystemId::Ecology
                 | SubsystemId::Agents
-                | SubsystemId::Gas => {}
+                | SubsystemId::Gas
+                | SubsystemId::SurfaceWaves => {}
             }
         }
 
@@ -165,6 +166,10 @@ impl Simulation {
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::PhaseChange)) {
             run_phase_change(world, tick);
+            world.recompute_mass_audit();
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::SurfaceWaves)) {
+            run_surface_waves(world, tick);
             world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::LakeLevel)) {

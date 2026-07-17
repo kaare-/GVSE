@@ -24,6 +24,7 @@ mod shared;
 mod slumping;
 mod speleogenesis;
 mod surface_water;
+mod surface_waves;
 mod void_water;
 mod weather;
 
@@ -50,5 +51,6 @@ pub use shared::SimParams;
 pub use slumping::run_slumping;
 pub use speleogenesis::run_speleogenesis;
 pub use surface_water::run_surface_water;
+pub use surface_waves::run_surface_waves;
 pub use void_water::{run_surface_void_capture, run_void_water_flow};
 pub use weather::run_weather;
