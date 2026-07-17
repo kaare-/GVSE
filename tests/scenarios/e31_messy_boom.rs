@@ -133,7 +133,7 @@ fn e31_messy_boom() {
         "thrifty steady-state should beat messy (end thrifty={end_thrifty} messy={end_messy})"
     );
     assert!(
-        drift.abs() <= 120.0,
+        drift.abs() <= 120,
         "bookkeeping drift {drift}"
     );
 }

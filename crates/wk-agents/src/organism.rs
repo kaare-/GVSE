@@ -133,26 +133,46 @@ pub struct OrganismInspect {
 /// - higher `metabolic_rate` → shorter life
 /// - longer `active_window` → more wear
 /// - lower `reproduce_at` (earlier fission) → shorter life
-/// - higher `clone_fidelity` → slight upkeep tax on lifespan
+/// - lower `clone_fidelity` → shorter life (messy lineages burn out)
 ///
-/// Default genome lands near ~3 sim-days (one sim-day ≈ default 12h+10h cycle).
+/// Duration is measured in **climate cycles** (day+night). Default genome
+/// lands near [`BASE_LIFE_SIM_DAYS`] on the default 12h+10h calendar; short
+/// scenario cycles scale life down so senescence still fires in soak tests.
 pub fn life_expectancy_ticks(genome: &Genome) -> u64 {
+    life_expectancy_for_cycle(genome, SIM_DAY_TICKS as u64)
+}
+
+/// Life expectancy for a world whose day+night cycle is `cycle_ticks` long.
+pub fn life_expectancy_for_cycle(genome: &Genome, cycle_ticks: u64) -> u64 {
     let m = genome.metabolic_rate.clamp(0.05, 1.5);
     let active = genome.active_window.clamp(0.1, 1.0);
     let early_repro = (0.95 - genome.reproduce_at.clamp(0.3, 0.95)) / 0.65;
     let fidelity = genome.clone_fidelity.clamp(0.0, 1.0);
+    let cycle = cycle_ticks.max(1) as f32;
 
-    // Pace ≈ 1.0 for the default Genome.
-    let pace = (m / 0.35) * (0.85 + 0.30 * active) * (1.0 + 0.20 * early_repro) * (1.0 + 0.10 * fidelity);
-    let ticks = BASE_LIFE_SIM_DAYS * SIM_DAY_TICKS / pace.max(0.25);
-    ticks.round().max(1_000.0) as u64
+    // Wear relative to the default Genome so its pace stays ≈ 1.0.
+    let wear = (1.0 + 1.1 * early_repro) * (1.0 + 0.9 * (1.0 - fidelity));
+    const EARLY_REF: f32 = (0.95 - 0.7) / 0.65;
+    const FID_REF: f32 = 0.6;
+    let wear_ref = (1.0 + 1.1 * EARLY_REF) * (1.0 + 0.9 * (1.0 - FID_REF));
+    let pace = (m / 0.35) * (0.85 + 0.30 * active) * (wear / wear_ref);
+    let ticks = BASE_LIFE_SIM_DAYS * cycle / pace.max(0.25);
+    // Floor scales with cycle so short-day scenarios can still senesce.
+    let floor = (cycle * 0.35).clamp(40.0, 1_000.0);
+    ticks.round().max(floor) as u64
 }
 
 /// Per-individual limit: expectancy ± ~10% from entity id (avoids sync die-offs).
 pub fn life_limit_ticks(genome: &Genome, entity_id: u32) -> u64 {
-    let base = life_expectancy_ticks(genome);
+    life_limit_for_cycle(genome, entity_id, SIM_DAY_TICKS as u64)
+}
+
+/// Per-individual limit for a specific climate cycle length.
+pub fn life_limit_for_cycle(genome: &Genome, entity_id: u32, cycle_ticks: u64) -> u64 {
+    let base = life_expectancy_for_cycle(genome, cycle_ticks);
     let jitter = 90 + (entity_id % 21); // 90..110 %
-    (base.saturating_mul(jitter as u64) / 100).max(500)
+    let floor = (cycle_ticks.max(1) / 4).max(30);
+    (base.saturating_mul(jitter as u64) / 100).max(floor)
 }
 
 /// Basal drain per tick. Scaled so a full tank outlasts a default night.
@@ -844,6 +864,7 @@ impl AgentStore {
 
         let l0 = sky_light_l0(world.climate.day_night_factor(tick));
         let phase = world.climate.phase_fraction(tick);
+        let cycle_ticks = world.climate.cycle_length_ticks();
         let population = self.organism_count();
 
         let mut deaths: Vec<(Entity, i32)> = Vec::new();
@@ -868,7 +889,7 @@ impl AgentStore {
             let active = circadian_active(genome, phase);
 
             lineage.age_ticks = lineage.age_ticks.saturating_add(1);
-            let life_limit = life_limit_ticks(genome, e.id());
+            let life_limit = life_limit_for_cycle(genome, e.id(), cycle_ticks);
             if lineage.age_ticks >= life_limit {
                 deaths.push((e, wx));
                 continue;
@@ -937,9 +958,22 @@ impl AgentStore {
                 && energy.current >= energy.max * threshold
                 && can_repro
             {
-                let child_e = energy.current * REPRO_COST_FRAC;
+                // Low CloneFidelity → weaker kids, and density-dependent
+                // stillbirths (messy booms then fails to replace itself at cap).
+                let fidelity = genome.clone_fidelity.clamp(0.0, 1.0);
+                let density = (population as f32 / MAX_ORGANISMS as f32).clamp(0.0, 1.0);
+                let viability = (fidelity + (1.0 - density) * (1.0 - fidelity)).clamp(0.05, 1.0);
+                let viab_h = hash_u64(world.seed, tick as i64, e.id() as i64, 0xB100_D5);
+                let viable = (viab_h as f32 / u64::MAX as f32) < viability;
+                let child_frac = REPRO_COST_FRAC * (0.35 + 0.65 * fidelity);
+                let child_e = energy.current * child_frac;
                 if child_e > 1.0 {
+                    // Parent always pays the attempt; failed clones are the
+                    // messy cost of low fidelity under crowding.
                     energy.current -= child_e;
+                    if !viable {
+                        continue;
+                    }
                     let child_genome = mutate_organism(*genome, world.seed, tick, e.id());
                     let mut child_bp = body.blueprint.clone();
                     child_bp.genome = child_genome;
