@@ -298,6 +298,9 @@ impl Column {
     /// substrate layer. `None` if no such layer exists (bare bedrock).
     pub fn top_porous_layer_index(&self) -> Option<usize> {
         for i in 0..self.layer_count as usize {
+            if self.layers[i].thickness <= 0 {
+                continue;
+            }
             if MaterialRegistry::props(self.layers[i].material).porosity > 0 {
                 return Some(i);
             }
@@ -466,8 +469,13 @@ impl Column {
     /// layer's pore space fills from the bottom of that layer upward as
     /// `moisture` approaches its cap, reaching the ground surface exactly
     /// when fully saturated (any further inflow discharges as surface
-    /// water — see the discharge handling in barrier commit).
+    /// inflow discharges — see barrier commit).
     pub fn water_table_y(&self) -> f32 {
+        if let Some((water_top, mass)) = self.flowable_water() {
+            if mass > 0 {
+                return water_top;
+            }
+        }
         let Some(idx) = self.top_porous_layer_index() else {
             return self.surface_y;
         };

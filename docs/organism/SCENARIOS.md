@@ -254,7 +254,24 @@ Deferred to Phase 7. Written here so the number is reserved.
 - **Assertion.** Cold births = 0, founder survives; warm control births > 0.
 - **Read-out.** `E46d: cold births=0 warm births=N`.
 
+### E47 — Ocean water budget + seeded water table
+
+- **World.** Continental strip with humidity / wind / groundwater fields;
+  weather on for the soak; flat sand ponds for the skin-evap check.
+- **Assertion.** Gen-time aquifer under ocean beds (≥95% sat) and land
+  base moisture; deep vs shallow ponds lose similar mass (skin, not
+  depth); continental ocean loses <5% surface water over 3600 ticks
+  while bed sat stays high and weather rain is non-trivial vs evap.
+- **Read-out.** `E47a/b/c: …`.
+
+### E48 — Air ↔ dissolved gas exchange
+
+- **World.** Flooded flat sand, no organisms, weather/rain off.
+- **Assertion.** Depleted dissolved CO₂/O₂ recharge from air; supersaturated
+  water outgasses toward Henry equilibrium.
+- **Read-out.** `E48a/b: co2 …→…`.
+
 ## Adding scenes
 
-New scenes append after E46. Do not renumber existing entries even
+New scenes append after E48. Do not renumber existing entries even
 if they never ship — the numbering is a contract with the docs.

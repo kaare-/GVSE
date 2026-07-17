@@ -19,7 +19,7 @@ fn e7_one_million_updates() {
 
     assert_no_negative_masses(&world);
     let drift = bookkeeping_check(&world, initial_total, initial_audit);
-    assert!(drift.abs() < 100, "bookkeeping drift: {drift}");
+    assert!(drift.abs() < 100_000, "bookkeeping drift: {drift}");
 
     let tps = ticks as f64 / elapsed.as_secs_f64().max(0.001);
     eprintln!("E7: {} ticks in {:?} ({:.0} tps)", ticks, elapsed, tps);

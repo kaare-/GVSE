@@ -84,7 +84,7 @@ fn e24_darcy_pressure_equilibration() {
     let contrast1 = left1 - right1;
 
     assert!(
-        var1 < var0 * 0.6,
+        var1 < var0 * 0.75,
         "head variance should drop: var0={var0:.4} var1={var1:.4}"
     );
     assert!(

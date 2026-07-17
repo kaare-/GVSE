@@ -7,11 +7,31 @@ use wk_world::world::World;
 use crate::buffer::WorldTransferScratch;
 use crate::residual::ResidualAccumulator;
 
-// Slow enough that standing water lingers as a visible pool for a while
-// instead of soaking away within a few dozen ticks, but fast enough that a
-// basin collecting runoff from a whole mountainside still reaches a real
-// equilibrium below the surrounding peaks instead of climbing forever.
 const INFILTRATION_COEFF: f32 = 0.01;
+const HYDRAULIC_CONTACT_MIN_KG: i64 = 500;
+
+/// Post-slump / post-barrier: re-saturate beds under deep free water.
+/// Runs after slumping so empty-layer flushes cannot leave ocean beds dry
+/// for a full infiltration period.
+pub fn recharge_deep_water_tables(world: &mut World) {
+    let coords: Vec<i32> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        for i in 0..CHUNK_W {
+            let col = &mut world.chunks.get_mut(&coord).unwrap().columns[i];
+            let available = col.top_water_mass();
+            if available <= HYDRAULIC_CONTACT_MIN_KG {
+                continue;
+            }
+            let cap = col.moisture_cap();
+            let need = cap.saturating_sub(col.moisture);
+            if need == 0 || available <= need {
+                continue;
+            }
+            let took = col.take_water_from_cap(need);
+            col.moisture += took;
+        }
+    }
+}
 
 pub fn run_infiltration(world: &mut World, scratch: &mut WorldTransferScratch) {
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
@@ -19,12 +39,6 @@ pub fn run_infiltration(world: &mut World, scratch: &mut WorldTransferScratch) {
         for i in 0..CHUNK_W {
             let (activity, available, moisture, cap, perm) = {
                 let col = &world.chunks.get(&coord).unwrap().columns[i];
-                // Permeability comes from the porous *substrate* that
-                // will absorb the water, not the material sitting on
-                // top (which is Water itself, permeability 0, which
-                // would incorrectly block all infiltration under a
-                // puddle). Root channels (stage 8) boost the effective
-                // rate without rewriting the material table.
                 let base_perm = col
                     .top_porous_layer()
                     .map(|l| MaterialRegistry::props(l.material).permeability as f32 / 255.0)
@@ -42,15 +56,21 @@ pub fn run_infiltration(world: &mut World, scratch: &mut WorldTransferScratch) {
             if activity == Activity::Dormant || available <= 0 || perm <= 0.0 {
                 continue;
             }
+            let need = cap.saturating_sub(moisture);
+            if need == 0 {
+                continue;
+            }
+            if available > HYDRAULIC_CONTACT_MIN_KG && available > need {
+                scratch.buffer_mut(coord).infil_delta[i] += need;
+                continue;
+            }
             let rate = available as f32 * perm * INFILTRATION_COEFF;
             let col = world.chunks.get_mut(&coord).unwrap();
             let transfer =
                 ResidualAccumulator::drain(&mut col.columns[i].residual.infiltration, rate);
-            let actual = transfer.min(available).min(cap.saturating_sub(moisture));
+            let actual = transfer.min(available).min(need);
             if actual > 0 {
-                let buf = scratch.buffer_mut(coord);
-                buf.water_delta[i] -= actual;
-                buf.moisture_delta[i] += actual;
+                scratch.buffer_mut(coord).infil_delta[i] += actual;
             }
         }
     }

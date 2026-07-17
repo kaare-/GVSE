@@ -33,11 +33,35 @@ pub fn commit_chunk_buffer(
         // it as "mass left the world via the boundary". No layer-level
         // effect since there's no mass to remove.
         let requested_delta = buf.water_delta[i] + inbox_water;
-        let _ = col.adjust_top_water(requested_delta, tick);
+        let applied = col.adjust_top_water(requested_delta, tick);
+        if requested_delta < 0 {
+            let shortfall = (-requested_delta) - (-applied);
+            if shortfall > 0 {
+                // Outboxes/inboxes were exchanged optimistically. If this
+                // column couldn't fund its outflow, the receiver still got
+                // the water — minting mass. Prefer reversing sink bookings
+                // (boundary, then evap); residual becomes a synthetic source.
+                let mut left = shortfall;
+                let undo_b = left.min(audit.boundary_out_total.max(0));
+                audit.boundary_out_total -= undo_b;
+                left -= undo_b;
+                let undo_e = left.min(audit.evap_out_total.max(0));
+                audit.evap_out_total -= undo_e;
+                left -= undo_e;
+                audit.rain_inject_total += left;
+            }
+        }
+
+        let infil = buf.infil_delta[i].max(0);
+        let infil_applied = if infil > 0 {
+            col.take_water_from_cap(infil)
+        } else {
+            0
+        };
 
         // Moisture: pore-water in the topmost porous solid layer.
-        let moisture_new = col.moisture + buf.moisture_delta[i] + inbox_moisture;
-        let moisture_new = moisture_new.max(0);
+        let moisture_new =
+            (col.moisture + buf.moisture_delta[i] + inbox_moisture + infil_applied).max(0);
         let cap = col.moisture_cap();
         if moisture_new > cap {
             // Discharge: pore space is full. The overflow surfaces as
@@ -129,6 +153,7 @@ pub fn barrier_commit(world: &mut World, scratch: &mut WorldTransferScratch, tic
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wk_material::MaterialId;
     use wk_world::terrain::generate_flat_sand;
     use wk_world::world::World;
 
@@ -147,5 +172,36 @@ mod tests {
             100
         );
         assert_eq!(scratch.buffers.get(&0).unwrap().water_delta[0], 0);
+    }
+
+    #[test]
+    fn atomic_infil_conserves_water_plus_moisture() {
+        let mut world = World::new(1);
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for i in 0..64 {
+            if let Some(col) = world.column_at_mut(i) {
+                col.deposit_to_top(MaterialId::Water, 5_000, 0);
+                col.moisture = 0;
+            }
+        }
+        world.wake_all();
+        let before: i64 = (0..64)
+            .map(|i| {
+                let c = world.column_at(i).unwrap();
+                c.top_water_mass() + c.moisture
+            })
+            .sum();
+        let mut scratch = WorldTransferScratch::default();
+        for i in 0..64 {
+            scratch.buffer_mut(0).infil_delta[i] = 1_000;
+        }
+        barrier_commit(&mut world, &mut scratch, 1);
+        let after: i64 = (0..64)
+            .map(|i| {
+                let c = world.column_at(i).unwrap();
+                c.top_water_mass() + c.moisture
+            })
+            .sum();
+        assert_eq!(before, after, "infil must conserve water+moisture");
     }
 }

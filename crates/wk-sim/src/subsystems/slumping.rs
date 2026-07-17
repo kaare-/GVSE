@@ -158,6 +158,7 @@ fn slumping_pass(world: &mut World, tick: u64) {
         let from_coord = World::chunk_coord_for_world_x(from_wx);
         let from_local = World::local_x(from_wx);
         let mut actual_take = 0i64;
+        let mut moist_take = 0i64;
         if let Some(chunk) = world.chunks.get_mut(&from_coord) {
             let col = &mut chunk.columns[from_local];
             if let Some(j) = (0..col.layer_count as usize)
@@ -165,6 +166,13 @@ fn slumping_pass(world: &mut World, tick: u64) {
             {
                 let take = mass.min(col.layers[j].thickness);
                 if take > 0 {
+                    let thick_before = col.layers[j].thickness.max(1);
+                    if MaterialRegistry::props(source_material).porosity > 0 {
+                        moist_take = ((col.moisture as i128 * take as i128)
+                            / thick_before as i128) as i64;
+                        moist_take = moist_take.min(col.moisture).max(0);
+                        col.moisture -= moist_take;
+                    }
                     let dh = col.mass_to_height_delta(source_material, take);
                     col.layers[j].thickness -= take;
                     col.surface_y -= dh;
@@ -188,6 +196,9 @@ fn slumping_pass(world: &mut World, tick: u64) {
             let local = World::local_x(to_wx);
             let col = &mut chunk.columns[local];
             col.deposit_to_top(deposit_material, actual_take, tick);
+            if moist_take > 0 {
+                col.moisture += moist_take;
+            }
         }
     }
 

@@ -48,10 +48,12 @@ impl Default for WeatherSettings {
     fn default() -> Self {
         Self {
             weather_enabled: true,
-            cloud_spawn_interval_ticks: 3600,
-            cloud_rain_rate: 1.5,
-            max_clouds: 6,
-            rain_chance_per_tick: 0.015,
+            // Dense enough that a continental shelf sees regular cover
+            // and rain can offset open-water evaporative skin loss.
+            cloud_spawn_interval_ticks: 900,
+            cloud_rain_rate: 2.5,
+            max_clouds: 14,
+            rain_chance_per_tick: 0.04,
         }
     }
 }

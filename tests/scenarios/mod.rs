@@ -20,6 +20,8 @@ mod e17_reproduction_mutates;
 mod e20_geothermal_steady_state;
 mod e30_atom_bloom;
 mod e46_plankton_env;
+mod e47_ocean_water_budget;
+mod e48_gas_exchange;
 mod e22_humidity_near_water_body;
 mod e23_convection_cell;
 mod e24_darcy_pressure_equilibration;

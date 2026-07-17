@@ -38,7 +38,7 @@ pub use fields::{
 pub use gas::run_gas;
 pub use groundwater::run_groundwater_flow;
 pub use halos::{exchange_outboxes, update_halos};
-pub use infiltration::run_infiltration;
+pub use infiltration::{recharge_deep_water_tables, run_infiltration};
 pub use karst::run_karst;
 pub use lake_level::run_lake_level;
 pub use layer_merge::run_layer_merge;
