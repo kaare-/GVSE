@@ -154,6 +154,162 @@ fn diag_ocean_surface_spikes() {
 
 #[test]
 #[ignore]
+fn perf_profile_ring_app_world_with_creatures() {
+    use wk_sim::{Blueprint, Energy, Genome};
+    let mut world = app_like_world();
+    let mut sim = Simulation::new(&world);
+    // Warm the world; then spawn creatures spread around the ring.
+    for _ in 0..40 {
+        sim.step(&mut world);
+    }
+    let width = world.topology().width_columns().unwrap();
+    let step = (width / 520).max(1);
+    let mut spawned = 0;
+    let mut x = 0i32;
+    while spawned < 500 && x < width {
+        if sim
+            .agents
+            .spawn_from_blueprint(&world, x, Blueprint::atom(Genome::default()), 50.0)
+            .is_some()
+        {
+            spawned += 1;
+        }
+        x += step;
+    }
+    // Top all creatures up to max energy so they'll try to fission (stress
+    // test the birth / clear-pose / collision path).
+    for (_e, energy) in sim.agents.ecs.query_mut::<&mut Energy>() {
+        energy.current = energy.max;
+    }
+    let pop = sim.agents.organism_count();
+    let ticks = 200u64;
+    let start = std::time::Instant::now();
+    for _ in 0..ticks {
+        sim.step(&mut world);
+        // Keep the pop at ceiling by re-topping energy each tick.
+        for (_e, energy) in sim.agents.ecs.query_mut::<&mut Energy>() {
+            energy.current = energy.max;
+        }
+    }
+    let dt = start.elapsed();
+    eprintln!(
+        "CREATURES pop_before={pop} pop_after={} births={}: {ticks} ticks in {:?} ({:.2} ms/tick)",
+        sim.agents.organism_count(),
+        sim.agents.births_total,
+        dt,
+        dt.as_secs_f32() * 1000.0 / ticks as f32
+    );
+}
+
+#[test]
+#[ignore]
+fn perf_profile_creature_kernels() {
+    // Profile the individual creature hot paths at MAX_ORGANISMS.
+    use wk_sim::{Blueprint, Energy, Genome};
+    let mut world = app_like_world();
+    let mut sim = Simulation::new(&world);
+    for _ in 0..40 {
+        sim.step(&mut world);
+    }
+    let width = world.topology().width_columns().unwrap();
+    let step = (width / 520).max(1);
+    let mut x = 0i32;
+    while sim.agents.organism_count() < 500 && x < width {
+        let _ = sim.agents.spawn_from_blueprint(
+            &world,
+            x,
+            Blueprint::atom(Genome::default()),
+            50.0,
+        );
+        x += step;
+    }
+    for (_e, energy) in sim.agents.ecs.query_mut::<&mut Energy>() {
+        energy.current = energy.max;
+    }
+    let pop = sim.agents.organism_count();
+    eprintln!("--- creature kernels @ pop={pop} ---");
+
+    macro_rules! bench {
+        ($name:expr, $reps:expr, $body:block) => {{
+            let start = std::time::Instant::now();
+            for _ in 0..$reps {
+                $body
+            }
+            let dt = start.elapsed();
+            eprintln!(
+                "  {:<24} x{:>4} in {:?}  ({:.3} ms/call)",
+                $name,
+                $reps,
+                dt,
+                dt.as_secs_f32() * 1000.0 / $reps as f32
+            );
+        }};
+    }
+    // `run_agents` is the top-level pass (grazers + organisms + waking).
+    use wk_sim::subsystems::run_agents;
+    bench!("run_agents (full pass)", 100, {
+        run_agents(&mut world, &mut sim.agents, sim.clock.tick);
+        for (_e, energy) in sim.agents.ecs.query_mut::<&mut Energy>() {
+            energy.current = energy.max;
+        }
+    });
+    // Draw list / inspect API (called every render frame).
+    bench!("organism_draw_list", 200, {
+        let _ = sim.agents.organism_draw_list();
+    });
+
+    // Split out step_organisms specifically (grazers are 0 in this scenario).
+    bench!("step_organisms", 100, {
+        sim.agents.step_organisms(&mut world, sim.clock.tick);
+        for (_e, energy) in sim.agents.ecs.query_mut::<&mut Energy>() {
+            energy.current = energy.max;
+        }
+    });
+
+    // Now kill all creatures then respawn to force many births in one tick
+    // (the worst case — every fission attempt fires collect_bodies +
+    // find_clear_pose across a full-ring domain).
+    let entities: Vec<_> = sim
+        .agents
+        .ecs
+        .query::<&wk_sim::Organism>()
+        .iter()
+        .map(|(e, _)| e)
+        .collect();
+    for e in &entities {
+        let _ = sim.agents.ecs.despawn(*e);
+    }
+    // Spawn a handful of parents that will all try to birth this tick.
+    for x in (0..width).step_by((width / 40).max(1) as usize).take(40) {
+        let _ = sim.agents.spawn_from_blueprint(
+            &world,
+            x,
+            Blueprint::atom(Genome::default()),
+            50.0,
+        );
+    }
+    for (_e, energy) in sim.agents.ecs.query_mut::<&mut Energy>() {
+        energy.current = energy.max;
+    }
+    // Warm one tick, then bench a "birth flurry" tick.
+    let start = std::time::Instant::now();
+    for _ in 0..50 {
+        for (_e, energy) in sim.agents.ecs.query_mut::<&mut Energy>() {
+            energy.current = energy.max;
+        }
+        run_agents(&mut world, &mut sim.agents, sim.clock.tick);
+    }
+    let dt = start.elapsed();
+    eprintln!(
+        "  run_agents (50 flurry ticks, ~40 parents cloning): {:?} ({:.3} ms/call)",
+        dt,
+        dt.as_secs_f32() * 1000.0 / 50.0
+    );
+    eprintln!("  final pop={}", sim.agents.organism_count());
+}
+
+#[test]
+#[ignore]
 fn perf_profile_ring_app_world() {
     let mut world = app_like_world();
     let mut sim = Simulation::new(&world);
