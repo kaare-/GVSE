@@ -22,6 +22,12 @@ struct LakeCell {
 /// neighbour-by-neighbour diffusion for a *wide* lake, but changes smoothly
 /// enough tick-to-tick to not read as a glitch for small ponds.
 const LAKE_LEVEL_BLEND: f32 = 0.1;
+/// When free-surface waves are enabled, flatten much more gently so wind
+/// setup / seiches aren't erased every tick by the hydrostatic blender.
+const LAKE_LEVEL_BLEND_WITH_WAVES: f32 = 0.02;
+/// Mean water depth (m) above which a wet run is left to `run_surface_waves`
+/// instead of being force-flattened (oceans / deep lakes).
+const DEEP_WAVE_DEPTH_M: f32 = 1.0;
 /// Minimum standing water (kg, ~10cm depth on one column) to count as part
 /// of a "lake" for leveling purposes. Without this, a light rain sheen
 /// sitting on every column across the whole map — including hilltops with
@@ -69,7 +75,7 @@ fn solve_level(cells: &[LakeCell], total_mass: i64) -> f32 {
 /// Move each cell partway from its current value toward the level implied
 /// by `total_mass` (mass-conserving either way, since blending two
 /// distributions that both sum to `total_mass` still sums to `total_mass`).
-fn level_segment(cells: &mut [LakeCell]) {
+fn level_segment(cells: &mut [LakeCell], blend: f32) {
     let total_mass: i64 = cells.iter().map(|c| c.water).sum();
     if total_mass <= 0 {
         return;
@@ -83,7 +89,7 @@ fn level_segment(cells: &mut [LakeCell]) {
         let depth = (level - c.ground).max(0.0);
         let target_mass = (depth * WATER_MASS_PER_METRE_DEPTH) as i64;
         let blended =
-            (c.water as f32 + (target_mass - c.water) as f32 * LAKE_LEVEL_BLEND) as i64;
+            (c.water as f32 + (target_mass - c.water) as f32 * blend) as i64;
         let blended = blended.max(0);
         c.water = blended;
         assigned += blended;
@@ -111,6 +117,12 @@ pub fn run_lake_level(world: &mut World) {
     if coords.is_empty() {
         return;
     }
+    let blend = if world.surface_waves_enabled {
+        LAKE_LEVEL_BLEND_WITH_WAVES
+    } else {
+        LAKE_LEVEL_BLEND
+    };
+    let skip_deep = world.surface_waves_enabled;
 
     let mut cells: Vec<LakeCell> = Vec::with_capacity(coords.len() * CHUNK_W);
     for &coord in &coords {
@@ -147,7 +159,21 @@ pub fn run_lake_level(world: &mut World) {
             end += 1;
         }
         if end > start {
-            level_segment(&mut cells[start..=end]);
+            let segment = &mut cells[start..=end];
+            // Deep connected water is wave/tide territory — hydrostatic
+            // flattening there was the old "fake ripple" eraser.
+            if skip_deep {
+                let mean_depth = segment
+                    .iter()
+                    .map(|c| c.water as f32 / WATER_MASS_PER_METRE_DEPTH)
+                    .sum::<f32>()
+                    / segment.len() as f32;
+                if mean_depth >= DEEP_WAVE_DEPTH_M {
+                    i = end + 1;
+                    continue;
+                }
+            }
+            level_segment(segment, blend);
         }
         i = end + 1;
     }

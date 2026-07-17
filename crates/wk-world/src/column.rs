@@ -253,6 +253,11 @@ pub struct Column {
     /// Plant / soil-biology bucket (stage 8). Default = barren.
     #[serde(default)]
     pub ecology: Ecology,
+    /// Horizontal free-surface velocity (m/s) for wind/tide gravity waves.
+    /// Zero when dry. Not a gene — pure hydro state. `serde(default)` for
+    /// older saves.
+    #[serde(default)]
+    pub surface_u: f32,
 }
 
 impl Default for Column {
@@ -268,6 +273,7 @@ impl Default for Column {
             marker: None,
             voids: Vec::new(),
             ecology: Ecology::default(),
+            surface_u: 0.0,
         }
     }
 }

@@ -77,6 +77,10 @@ impl AppState {
         world.enable_pressure_wind_fields();
         world.enable_groundwater_head_fields();
         world.enable_dissolved_fields();
+        // Free-surface momentum: wind setup / seiches + a gentle tide.
+        // Lake-level still flattens shallow ponds but leaves deep water alone.
+        world.surface_waves_enabled = true;
+        world.tide_enabled = true;
 
         let sim = wk_sim::Simulation::new(&world);
         let viewport_x = Self::initial_viewport_x(&world);
@@ -467,6 +471,32 @@ impl AppState {
                         &mut self.settings_cloud_spawn_secs,
                     );
                     ui.label(None, &format!("Active clouds: {}", self.world.clouds.len()));
+                });
+                ui.separator();
+                ui.tree_node(hash!(), "Waves + tide", |ui| {
+                    ui.checkbox(
+                        hash!(),
+                        "Surface waves (wind + gravity)",
+                        &mut self.world.surface_waves_enabled,
+                    );
+                    ui.checkbox(hash!(), "Tide enabled", &mut self.world.tide_enabled);
+                    ui.slider(
+                        hash!(),
+                        "Tide amplitude (m)",
+                        0.0f32..2.0,
+                        &mut self.world.tide_amplitude_m,
+                    );
+                    let mut period_min =
+                        self.world.tide_period_ticks as f32 / 60.0;
+                    ui.slider(hash!(), "Tide period (sec)", 60.0f32..7200.0, &mut period_min);
+                    self.world.tide_period_ticks = period_min.max(60.0) as u64;
+                    ui.label(
+                        None,
+                        &format!(
+                            "Tide η now: {:+.2} m",
+                            self.world.tide_eta_m(self.sim.clock.tick)
+                        ),
+                    );
                 });
                 ui.separator();
                 if ui.button(None, "Open creature editor") {

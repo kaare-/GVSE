@@ -98,6 +98,17 @@ pub struct World {
     pub gw_head_fields_enabled: bool,
     /// When true, chunks carry a dissolved-mineral concentration field.
     pub dissolved_fields_enabled: bool,
+    /// When true, free-surface momentum + wind stress + tide run each tick
+    /// (`run_surface_waves`). Default false so older hydro scenarios stay
+    /// on pure lake-level / diffusion dynamics.
+    pub surface_waves_enabled: bool,
+    /// When true, ocean columns track a sinusoidal tide around `sea_level`.
+    /// Mass exchange books through `sea_inject_total`.
+    pub tide_enabled: bool,
+    /// Peak tidal free-surface offset (metres).
+    pub tide_amplitude_m: f32,
+    /// Tide period in ticks (one full rise+fall cycle).
+    pub tide_period_ticks: u64,
     /// World-x columns that currently host agents. `run_activity` keeps
     /// these HydrologyActive so creature-bearing chunks don't go dormant.
     /// Rebuilt each agent step; not part of the save schema.
@@ -171,8 +182,22 @@ impl World {
             ambient_pressure: 1.0,
             gw_head_fields_enabled: false,
             dissolved_fields_enabled: false,
+            surface_waves_enabled: false,
+            tide_enabled: false,
+            tide_amplitude_m: 0.45,
+            tide_period_ticks: 1_800,
             agent_keep_awake: Vec::new(),
         }
+    }
+
+    /// Instantaneous tidal free-surface offset (metres) at `tick`.
+    pub fn tide_eta_m(&self, tick: u64) -> f32 {
+        if !self.tide_enabled || self.tide_amplitude_m.abs() < 1e-6 {
+            return 0.0;
+        }
+        let period = self.tide_period_ticks.max(1) as f32;
+        let phase = std::f32::consts::TAU * (tick as f32) / period;
+        self.tide_amplitude_m * phase.sin()
     }
 
     /// Remove up to `max_kg` of living plant mass from the column's ecology.
