@@ -153,3 +153,35 @@ fn e50c_seam_materials_are_continuous() {
         "seam elevation jump too large ({da:.1} m) — belts not periodic"
     );
 }
+
+#[test]
+fn e50d_relief_has_deep_ocean_and_tall_peaks() {
+    let world = ring_world(5053, 64);
+    let width = world.topology().width_columns().unwrap();
+    let sea = world.sea_level;
+    let mut min_y = f32::MAX;
+    let mut max_y = f32::MIN;
+    for x in 0..width {
+        let y = world.column_at(x).unwrap().climate_elevation();
+        min_y = min_y.min(y);
+        max_y = max_y.max(y);
+    }
+    let ocean_depth = sea - min_y;
+    let peak_asl = max_y - sea;
+    let span = max_y - min_y;
+    eprintln!(
+        "E50d: min_y={min_y:.1} max_y={max_y:.1} ocean_depth={ocean_depth:.1} peak_asl={peak_asl:.1} span={span:.1}"
+    );
+    assert!(
+        ocean_depth > 200.0,
+        "abyssal floor should sit hundreds of metres below sea (depth={ocean_depth:.1})"
+    );
+    assert!(
+        peak_asl > 400.0,
+        "high range should reach hundreds of metres a.s.l. (peak={peak_asl:.1})"
+    );
+    assert!(
+        span > 600.0,
+        "ring relief should span hundreds of metres vertically (span={span:.1})"
+    );
+}

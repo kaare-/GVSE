@@ -53,11 +53,12 @@ world_x'     = wrap_column(world_x, WORLD_CHUNKS * CHUNK_W)
 | | Chunks | Columns | Metres (0.25 m/col) |
 |--|--------|---------|---------------------|
 | Compact | 64 | 4096 | ~1.0 km |
-| Default | 96 | 6144 | ~1.5 km |
-| Grand | 160 | 10240 | ~2.6 km |
+| Default | 192 | 12288 | ~3.1 km |
+| Grand | 256 | 16384 | ~4.1 km |
 
-Today's demo (~88 chunks / ~1.4 km) is already "compact ring" scale.
-Grand size may need `MAX_LOADED_CHUNKS` raised **or** the same
+The playable app default is the **192-chunk** ring with kilometre-scale
+peaks and ~400 m abyssal floors (pan with W/S). Full-ring residency needs
+`MAX_LOADED_CHUNKS ≥` circumference; larger maps need the same
 view/active/resident streaming as infinite mode, with wrap neighbours.
 
 **Seam rules (non-negotiable)**
@@ -554,9 +555,9 @@ Each stage lands as its own PR; each leaves the sim in a working state.
    pinching packages. Ring spline places belts; x-ray view shows
    continuous beds. Scenarios WG-S1…S5.
 
-2. **Ring app world.** Default play map is a ring (≈96 chunks).
-   Scroll wraps; seam has no `boundary_out`. Keep legacy transect
-   available as a debug generator.
+2. **Ring app world.** Default play map is a ring (≈192 chunks, dramatic
+   Y relief). Scroll wraps; seam has no `boundary_out`. Keep legacy
+   transect available as a debug generator.
 
 3. **Initial hydrological state pass.** Water table + capillary fringe
    + soil moisture + humidity hooks at generation (much of the ocean

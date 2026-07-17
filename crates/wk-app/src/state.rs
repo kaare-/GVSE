@@ -10,9 +10,9 @@ const SCROLL_SPEED_COLS_PER_SEC: f32 = 70.0;
 /// Screen pixels per second while W/S is held to pan the camera up/down.
 const CAMERA_Y_SPEED_PX_PER_SEC: f32 = 320.0;
 const MAX_TICKS_PER_FRAME: u64 = 60;
-/// Default ring circumference (96 × 64 cols ≈ 1.5 km). Matches
-/// `WorldGenParams::default_ring` and `MAX_LOADED_CHUNKS`.
-const RING_CHUNKS: u32 = 96;
+/// Default ring circumference (192 × 64 cols ≈ 3 km). Matches
+/// `WorldGenParams::default_ring`; `MAX_LOADED_CHUNKS` must be ≥ this.
+const RING_CHUNKS: u32 = 192;
 
 pub struct AppState {
     pub world: wk_world::world::World,

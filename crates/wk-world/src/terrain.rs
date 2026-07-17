@@ -7,7 +7,9 @@ use crate::climate::biome_for;
 use crate::column::{Column, Ecology};
 
 /// Deepest bedrock reference elevation (metres). Ocean floor sits above this.
-pub const BEDROCK_FLOOR_M: f32 = -45.0;
+/// Deep enough for abyssal plains hundreds of metres below sea level while
+/// still leaving headroom under kilometre-scale peaks.
+pub const BEDROCK_FLOOR_M: f32 = -900.0;
 
 pub fn hash_u64(seed: u64, x: i64, y: i64, salt: u64) -> u64 {
     let mut z = seed.wrapping_add(salt);
@@ -538,57 +540,59 @@ pub fn fill_facies_column(
 
     // Package thicknesses (metres of solid above basement fill).
     let (stone_m, mid_mat, mid_m, cover_mat, cover_m) = match belt {
-        FaciesBelt::Abyss => (2.0, MaterialId::Clay, 1.2 + n(11) * 0.4, MaterialId::Sand, 0.4),
+        FaciesBelt::Abyss => (6.0, MaterialId::Clay, 3.0 + n(11) * 1.0, MaterialId::Sand, 0.8),
         FaciesBelt::Slope => (
-            4.0,
+            12.0,
             MaterialId::LooseRock,
-            2.0 + n(12) * 0.8,
+            5.0 + n(12) * 1.5,
             MaterialId::Gravel,
-            1.0,
+            2.0,
         ),
         FaciesBelt::Shelf => (
-            3.0,
-            MaterialId::Limestone,
-            3.5 + n(13) * 0.6,
-            MaterialId::Sand,
-            1.2,
-        ),
-        FaciesBelt::Marsh => (2.5, MaterialId::Clay, 2.0 + n(14) * 0.5, MaterialId::Sand, 0.6),
-        FaciesBelt::Coast => (5.0, MaterialId::Sand, 0.0, MaterialId::Sand, 3.5 + n(15) * 0.8),
-        FaciesBelt::Plains => (
             8.0,
-            MaterialId::Clay,
-            1.0 + n(16) * 0.4,
+            MaterialId::Limestone,
+            8.0 + n(13) * 1.5,
             MaterialId::Sand,
-            2.5,
+            2.0,
+        ),
+        FaciesBelt::Marsh => (4.0, MaterialId::Clay, 3.5 + n(14) * 0.8, MaterialId::Sand, 1.0),
+        FaciesBelt::Coast => (8.0, MaterialId::Sand, 0.0, MaterialId::Sand, 5.0 + n(15) * 1.2),
+        FaciesBelt::Plains => (
+            14.0,
+            MaterialId::Clay,
+            2.5 + n(16) * 0.8,
+            MaterialId::Sand,
+            3.5,
         ),
         FaciesBelt::Foothills => (
-            10.0,
+            28.0,
             MaterialId::Gravel,
-            2.0 + n(17) * 0.7,
+            6.0 + n(17) * 2.0,
             MaterialId::LooseRock,
-            2.5,
+            4.0,
         ),
         FaciesBelt::HighRange => (
-            18.0,
+            // Tall peaks are mostly Bedrock fill; keep a thick stone sleeve
+            // so x-ray still reads as mountain rock, not a paper-thin crust.
+            80.0,
             MaterialId::Stone,
             0.0,
             MaterialId::LooseRock,
-            1.5 + n(18) * 1.0,
+            3.0 + n(18) * 2.0,
         ),
         FaciesBelt::RainShadow => (
-            7.0,
+            18.0,
             MaterialId::Sand,
-            1.5 + n(19) * 0.5,
+            4.0 + n(19) * 1.2,
             MaterialId::LooseRock,
-            1.2,
+            2.5,
         ),
         FaciesBelt::InteriorBasin => (
-            3.0,
+            8.0,
             MaterialId::Clay,
-            2.5 + n(20) * 0.6,
+            5.0 + n(20) * 1.2,
             MaterialId::Sand,
-            1.0,
+            2.0,
         ),
     };
 

@@ -63,10 +63,10 @@ impl Default for WorldGenParams {
 }
 
 impl WorldGenParams {
-    /// Default playable ring (~1.5 km at 0.25 m/col, 96 chunks).
+    /// Default playable ring (~3 km at 0.25 m/col, 192 chunks).
     pub fn default_ring() -> Self {
         Self {
-            topology: WorldTopology::Ring { chunks: 96 },
+            topology: WorldTopology::Ring { chunks: 192 },
             profile: WorldGenProfile::RingFacies,
         }
     }
@@ -169,7 +169,28 @@ pub fn facies_at(seed: u64, topology: WorldTopology, world_x: i32) -> FaciesBelt
     best
 }
 
+/// Periodic multi-scale height noise in metres (seam-safe via `frac`).
+fn periodic_relief(seed: u64, frac: f32, salt: u64) -> f32 {
+    let tau = std::f32::consts::TAU;
+    let phase = crate::terrain::hash_f32(seed, salt as i64, 1) * tau;
+    let a = (frac * tau * 2.0 + phase).sin();
+    let b = (frac * tau * 5.0 + phase * 1.3).sin();
+    let c = (frac * tau * 11.0 + phase * 0.7).sin();
+    let d = (frac * tau * 23.0 + phase * 2.1).sin();
+    a * 1.0 + b * 0.55 + c * 0.28 + d * 0.12
+}
+
+/// Narrow island / stack bump in `[0, 1]` centred at `center` frac.
+fn peak_bump(frac: f32, center: f32, width: f32) -> f32 {
+    let mut d = (frac - center).abs();
+    d = d.min(1.0 - d); // periodic distance on the ring
+    (-(d * d) / (2.0 * width * width)).exp()
+}
+
 /// Target solid surface elevation (before sea fill) for a facies belt.
+///
+/// Amplitudes are intentionally large: the camera pans vertically, so
+/// peaks of hundreds–thousands of metres and deep abyssal plains are fine.
 pub fn facies_surface_y(
     seed: u64,
     topology: WorldTopology,
@@ -179,29 +200,62 @@ pub fn facies_surface_y(
     let belt = facies_at(seed, topology, world_x);
     let n = |salt: u64| (crate::terrain::hash_f32(seed, world_x as i64, salt) - 0.5) * 2.0;
     let frac = ring_frac(topology, world_x);
-    // Periodic detail so the seam matches.
-    let ripple = (frac * std::f32::consts::TAU * 3.0).sin() * 1.2
-        + (frac * std::f32::consts::TAU * 7.0 + n(50) * 0.5).sin() * 0.6;
+    let relief = periodic_relief(seed, frac, 50);
+    let local = periodic_relief(seed, frac, 51) * 0.35 + n(52) * 0.15;
 
     let mut base = match belt {
-        FaciesBelt::Abyss => sea_level - 38.0 + n(30) * 0.8,
-        FaciesBelt::Slope => sea_level - 18.0 + n(31) * 1.5,
-        FaciesBelt::Shelf => sea_level - 3.5 + n(32) * 0.4,
-        FaciesBelt::Marsh => sea_level + 0.4 + n(33) * 0.3 + ripple * 0.2,
-        FaciesBelt::Coast => sea_level + 4.0 + n(34) * 0.8 + ripple * 0.5,
-        FaciesBelt::Plains => sea_level + 14.0 + n(35) * 1.2 + ripple,
-        FaciesBelt::Foothills => sea_level + 32.0 + n(36) * 3.0 + ripple * 1.5,
-        FaciesBelt::HighRange => {
-            // Peak centred in the high-range arc (~0.65), not near the seam.
-            let peak = ((frac - 0.65) * 28.0).abs();
-            sea_level + 55.0 + (1.0 - peak.min(1.0)) * 45.0 + n(37) * 4.0
+        FaciesBelt::Abyss => {
+            // Deep ocean floor: ~250–550 m below sea, rolling abyssal hills.
+            sea_level - 400.0 + relief * 80.0 + local * 40.0 + n(30) * 12.0
         }
-        FaciesBelt::RainShadow => sea_level + 22.0 + n(38) * 2.0 + ripple * 0.8,
-        FaciesBelt::InteriorBasin => sea_level + 2.0 + n(39) * 1.0 + ripple * 0.4,
+        FaciesBelt::Slope => {
+            // Steep continental slope — big drop from shelf to abyss.
+            sea_level - 120.0 + relief * 90.0 + local * 50.0 + n(31) * 20.0
+        }
+        FaciesBelt::Shelf => {
+            // Shallow shelf with occasional islands that breach sea level.
+            let island = peak_bump(frac, 0.19, 0.008) * 55.0
+                + peak_bump(frac, 0.21, 0.005) * 35.0;
+            sea_level - 18.0 + relief * 10.0 + local * 6.0 + island + n(32) * 3.0
+        }
+        FaciesBelt::Marsh => sea_level + 0.6 + relief * 2.0 + local * 1.5 + n(33) * 0.8,
+        FaciesBelt::Coast => {
+            // Beaches, dunes, rocky headlands.
+            let headland = peak_bump(frac, 0.33, 0.01) * 40.0;
+            sea_level + 6.0 + relief * 12.0 + local * 8.0 + headland + n(34) * 4.0
+        }
+        FaciesBelt::Plains => {
+            // Rolling plains cut by river valleys (negative bumps).
+            let valley = peak_bump(frac, 0.43, 0.012) * -35.0
+                + peak_bump(frac, 0.47, 0.01) * -22.0;
+            sea_level + 45.0 + relief * 35.0 + local * 18.0 + valley + n(35) * 8.0
+        }
+        FaciesBelt::Foothills => {
+            sea_level + 180.0 + relief * 120.0 + local * 60.0 + n(36) * 25.0
+        }
+        FaciesBelt::HighRange => {
+            // Cordillera: several named peaks, main summit ~1–2 km a.s.l.
+            let p1 = peak_bump(frac, 0.63, 0.014) * 900.0;
+            let p2 = peak_bump(frac, 0.66, 0.012) * 1400.0; // main
+            let p3 = peak_bump(frac, 0.69, 0.011) * 750.0;
+            let valley = peak_bump(frac, 0.645, 0.006) * -180.0
+                + peak_bump(frac, 0.675, 0.006) * -160.0;
+            sea_level + 220.0 + p1 + p2 + p3 + valley + relief * 80.0 + n(37) * 40.0
+        }
+        FaciesBelt::RainShadow => {
+            // High dry plateau dropping into canyons.
+            let canyon = peak_bump(frac, 0.77, 0.01) * -120.0;
+            sea_level + 160.0 + relief * 70.0 + local * 40.0 + canyon + n(38) * 20.0
+        }
+        FaciesBelt::InteriorBasin => {
+            // Endorheic lowland — can sit near or below sea level.
+            let playa = peak_bump(frac, 0.85, 0.02) * -40.0;
+            sea_level - 5.0 + relief * 25.0 + local * 12.0 + playa + n(39) * 8.0
+        }
     };
     // Soft blend toward abyss near the periodic seam (frac→0/1).
-    let seam = (frac.min(1.0 - frac) * 40.0).clamp(0.0, 1.0);
-    let abyss_ref = sea_level - 38.0;
+    let seam = (frac.min(1.0 - frac) * 25.0).clamp(0.0, 1.0);
+    let abyss_ref = sea_level - 400.0;
     if seam < 1.0 {
         base = abyss_ref + (base - abyss_ref) * seam;
     }
