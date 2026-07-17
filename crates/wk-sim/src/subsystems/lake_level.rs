@@ -22,12 +22,10 @@ struct LakeCell {
 /// neighbour-by-neighbour diffusion for a *wide* lake, but changes smoothly
 /// enough tick-to-tick to not read as a glitch for small ponds.
 const LAKE_LEVEL_BLEND: f32 = 0.1;
-/// When free-surface waves are enabled, flatten much more gently so wind
-/// setup / seiches aren't erased every tick by the hydrostatic blender.
-const LAKE_LEVEL_BLEND_WITH_WAVES: f32 = 0.02;
-/// Mean water depth (m) above which a wet run is left to `run_surface_waves`
-/// instead of being force-flattened (oceans / deep lakes).
-const DEEP_WAVE_DEPTH_M: f32 = 1.0;
+/// Wave-mode blend for oceans. `run_surface_waves` is tide-only now and
+/// doesn't fight this, so a mild blend keeps the sea properly flat
+/// while still letting the tide raise/lower it smoothly.
+const LAKE_LEVEL_BLEND_WITH_WAVES: f32 = 0.05;
 /// Minimum standing water (kg, ~10cm depth on one column) to count as part
 /// of a "lake" for leveling purposes. Without this, a light rain sheen
 /// sitting on every column across the whole map — including hilltops with
@@ -122,7 +120,6 @@ pub fn run_lake_level(world: &mut World) {
     } else {
         LAKE_LEVEL_BLEND
     };
-    let skip_deep = world.surface_waves_enabled;
 
     let mut cells: Vec<LakeCell> = Vec::with_capacity(coords.len() * CHUNK_W);
     for &coord in &coords {
@@ -160,19 +157,6 @@ pub fn run_lake_level(world: &mut World) {
         }
         if end > start {
             let segment = &mut cells[start..=end];
-            // Deep connected water is wave/tide territory — hydrostatic
-            // flattening there was the old "fake ripple" eraser.
-            if skip_deep {
-                let mean_depth = segment
-                    .iter()
-                    .map(|c| c.water as f32 / WATER_MASS_PER_METRE_DEPTH)
-                    .sum::<f32>()
-                    / segment.len() as f32;
-                if mean_depth >= DEEP_WAVE_DEPTH_M {
-                    i = end + 1;
-                    continue;
-                }
-            }
             level_segment(segment, blend);
         }
         i = end + 1;
