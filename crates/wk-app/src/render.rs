@@ -553,8 +553,11 @@ pub fn draw_frame(
     let clock_minutes = (phase * 24.0 * 60.0) as u32;
     let (clock_h, clock_m) = (clock_minutes / 60, clock_minutes % 60);
     let day_or_night = if snap.climate.is_daytime(snap.tick) { "day" } else { "night" };
+    // FPS: macroquad `get_fps()` samples the current draw rate; smooth with
+    // a rolling frame-time average so the number doesn't jitter each frame.
+    let fps = fps_smoothed();
     let hud = format!(
-        "tick={} sea={:.0}m x={}..{} | {clock_h:02}:{clock_m:02} ({day_or_night}) | clouds={} | {}",
+        "tick={} fps={fps:.0} sea={:.0}m x={}..{} | {clock_h:02}:{clock_m:02} ({day_or_night}) | clouds={} | {}",
         snap.tick,
         snap.sea_level,
         snap.viewport_x,
@@ -579,6 +582,22 @@ pub fn draw_frame(
     if let Some(wx) = selected {
         draw_inspector(snap, wx, sw, panel_top);
     }
+}
+
+/// Smoothed FPS estimate — an EMA of `get_frame_time()`. macroquad's
+/// `get_fps()` is fine but jitters by ±5 each frame; this reads steadier
+/// next to the tick counter.
+fn fps_smoothed() -> f32 {
+    thread_local! {
+        static AVG_DT: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0 / 60.0) };
+    }
+    let dt = get_frame_time().max(1e-4);
+    AVG_DT.with(|cell| {
+        let prev = cell.get();
+        let next = prev * 0.9 + dt * 0.1;
+        cell.set(next);
+        1.0 / next
+    })
 }
 
 /// Top-right HUD button that opens the creature editor.
