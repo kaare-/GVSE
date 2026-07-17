@@ -21,6 +21,10 @@ pub const DISSOLVED_CELL_M: f32 = 0.5;
 /// floor up through the terrain into open air.
 pub const FIELD_BELOW_BEDROCK_M: f32 = 5.0;
 pub const FIELD_ABOVE_SEA_M: f32 = 30.0;
+/// Cap how far below sea level field grids extend. Kilometre-deep
+/// bedrock floors (dramatic relief) must not allocate ~2000-cell-tall
+/// thermal/humidity patches per chunk — that made the live app crawl.
+pub const FIELD_MAX_DEPTH_BELOW_SEA_M: f32 = 100.0;
 
 /// Warm mixed layer thickness below the free surface / sea level (m).
 pub const MIXED_LAYER_M: f32 = 8.0;
@@ -95,10 +99,15 @@ pub fn chunk_width_cells(cell_m: f32) -> u16 {
     cells_for_extent(width_m, cell_m)
 }
 
-/// Vertical cells from `bedrock_y - FIELD_BELOW_BEDROCK_M` up to
-/// `sea_level + FIELD_ABOVE_SEA_M`.
+/// Vertical cells from a capped floor up to `sea_level + FIELD_ABOVE_SEA_M`.
+///
+/// Floor is `max(bedrock − slack, sea − FIELD_MAX_DEPTH_BELOW_SEA)`. Deep
+/// abyssal bedrock still gets a geothermal Dirichlet at the patch bottom;
+/// we just don't simulate the whole mantle column at 0.5 m resolution.
 pub fn vertical_cells(bedrock_y: f32, sea_level: f32, cell_m: f32) -> (u16, f32) {
-    let origin_y = bedrock_y - FIELD_BELOW_BEDROCK_M;
+    let rock_floor = bedrock_y - FIELD_BELOW_BEDROCK_M;
+    let cap_floor = sea_level - FIELD_MAX_DEPTH_BELOW_SEA_M;
+    let origin_y = rock_floor.max(cap_floor);
     let top_y = sea_level + FIELD_ABOVE_SEA_M;
     let extent = (top_y - origin_y).max(cell_m);
     (cells_for_extent(extent, cell_m), origin_y)
@@ -180,6 +189,29 @@ mod tests {
         assert!(f.0.height_cells > 1);
         assert!((f.0.origin_x_m - 0.0).abs() < 1e-5);
         assert!((f.0.origin_y_m - (-45.0 - FIELD_BELOW_BEDROCK_M)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn deep_bedrock_does_not_inflate_field_height() {
+        let (h_shallow, origin_s) = vertical_cells(-45.0, 12.0, THERMAL_CELL_M);
+        let (h_deep, origin_d) = vertical_cells(-900.0, 12.0, THERMAL_CELL_M);
+        let uncapped_h = {
+            let origin = -900.0 - FIELD_BELOW_BEDROCK_M;
+            let extent = (12.0 + FIELD_ABOVE_SEA_M) - origin;
+            cells_for_extent(extent, THERMAL_CELL_M)
+        };
+        assert!(
+            origin_d > -200.0,
+            "deep bedrock should clamp field floor (origin={origin_d})"
+        );
+        assert!(
+            h_deep < uncapped_h / 2,
+            "cap must cut deep grids (capped={h_deep} uncapped={uncapped_h})"
+        );
+        assert!(h_deep < 400, "capped thermal height, got {h_deep}");
+        // Shallow bedrock still uses the rock floor (above the sea-depth cap).
+        assert!((origin_s - (-45.0 - FIELD_BELOW_BEDROCK_M)).abs() < 1e-3);
+        assert!(h_shallow < h_deep || h_shallow + 5 >= h_deep);
     }
 
     #[test]

@@ -83,9 +83,13 @@ fn e33_day_float_night_sink() {
         }
         if tick % 120 == 0 {
             let sea = world.sea_level;
-            surface_t += world.temperature_at_point(32, sea - 1.0, tick);
-            deep_t += world.temperature_at_point(32, sea - 40.0, tick);
-            temp_n += 1;
+            let s = world.temperature_at_point(32, sea - 1.0, tick);
+            let d = world.temperature_at_point(32, sea - 40.0, tick);
+            if s.is_finite() && d.is_finite() && s < 80.0 && d < 80.0 {
+                surface_t += s;
+                deep_t += d;
+                temp_n += 1;
+            }
         }
     }
     let elapsed = start.elapsed();

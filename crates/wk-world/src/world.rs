@@ -295,6 +295,8 @@ impl World {
     }
 
     /// Vertical temperature samples from `y_top` down to `y_bot` (inclusive).
+    /// Depth and step are capped so the heatmap overlay stays cheap on
+    /// deep ocean viewports.
     pub fn sample_temp_column(
         &self,
         world_x: i32,
@@ -302,14 +304,15 @@ impl World {
         y_bot: f32,
         tick: u64,
     ) -> Vec<(f32, f32)> {
+        const MAX_DEPTH_M: f32 = 64.0;
+        const STEP_M: f32 = 2.0;
         let top = y_top.max(y_bot);
-        let bot = y_top.min(y_bot);
-        let step = crate::fields::THERMAL_CELL_M.max(1.0);
+        let bot = y_top.min(y_bot).max(top - MAX_DEPTH_M);
         let mut out = Vec::new();
         let mut y = top;
         while y > bot + 0.01 {
             out.push((y, self.temperature_at_point(world_x, y, tick)));
-            y -= step;
+            y -= STEP_M;
         }
         out.push((bot, self.temperature_at_point(world_x, bot, tick)));
         out

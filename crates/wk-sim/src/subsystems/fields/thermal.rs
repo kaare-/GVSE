@@ -9,8 +9,9 @@ use wk_world::fields::{
 };
 use wk_world::world::World;
 
-/// Game seconds advanced per thermal field step. Paired with the
-/// subsystem's schedule period (10 ticks) so one field step ≈ 10 ticks.
+/// Game seconds advanced per thermal field step. Kept at 10 s for
+/// explicit-diffusion CFL even though the schedule period is 20 ticks
+/// (heat just advances a bit slower in game time — fine for gameplay).
 const DT_SECONDS: f32 = 10.0;
 
 /// Diffusivity used for open air above the column surface.

@@ -152,16 +152,16 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::ThermalField,
-        // Every 10 ticks — heat diffusion is slow vs hydrology; period
-        // chosen against α·Δt/Δx² stability at 0.5 m cells.
-        period: 10,
+        // Every 20 ticks — heat is slow vs hydrology; deeper ring maps
+        // made period-10 over all chunks dominate the frame budget.
+        period: 20,
         phase: 0,
     },
     SubsystemSchedule {
         id: SubsystemId::HumidityField,
         // Same cadence as thermal, phase-staggered so the two field
         // passes don't always fire on the same tick.
-        period: 10,
+        period: 20,
         phase: 3,
     },
     SubsystemSchedule {
@@ -225,6 +225,7 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWaves,
         // Every tick — free-surface momentum needs a steady integrate step.
+        // Cost is O(wet columns); field grids (not waves) were the lag culprit.
         period: 1,
         phase: 0,
     },
