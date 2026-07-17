@@ -19,8 +19,16 @@ use super::shared::WATER_MASS_PER_METRE_DEPTH;
 /// coupling (unequal neighbours, ground slope) that a pure symmetric
 /// analysis doesn't capture exactly.
 const FLOW_RELAXATION: f32 = 0.97;
+/// When free-surface waves carry momentum, diffuse more gently so wind
+/// setup and seiches aren't erased by the hydrostatic hop each tick.
+const FLOW_RELAXATION_WITH_WAVES: f32 = 0.35;
 
 pub fn run_surface_water(world: &World, scratch: &mut WorldTransferScratch) {
+    let relax = if world.surface_waves_enabled {
+        FLOW_RELAXATION_WITH_WAVES
+    } else {
+        FLOW_RELAXATION
+    };
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for coord in coords {
         let chunk = world.chunks.get(&coord).unwrap();
@@ -62,12 +70,12 @@ pub fn run_surface_water(world: &World, scratch: &mut WorldTransferScratch) {
 
             if grad_left > 0.0 {
                 let equalizing = grad_left * WATER_MASS_PER_METRE_DEPTH * 0.5;
-                out_left = ((equalizing * FLOW_RELAXATION) as i64).min(water_here);
+                out_left = ((equalizing * relax) as i64).min(water_here);
             }
             if grad_right > 0.0 {
                 let remaining = (water_here - out_left).max(0);
                 let equalizing = grad_right * WATER_MASS_PER_METRE_DEPTH * 0.5;
-                out_right = ((equalizing * FLOW_RELAXATION) as i64).min(remaining);
+                out_right = ((equalizing * relax) as i64).min(remaining);
             }
 
             // Sediment travels with water proportionally. If half the
