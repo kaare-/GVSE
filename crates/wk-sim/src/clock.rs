@@ -132,8 +132,10 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::PhaseChange,
-        period: 1,
-        phase: 0,
+        // Freeze/melt is temperature-driven and slow; ring-wide pass
+        // every 4 ticks is plenty.
+        period: 4,
+        phase: 1,
     },
     SubsystemSchedule {
         id: SubsystemId::Weather,
@@ -144,10 +146,11 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::Slumping,
-        // Every tick, but the transfer per tick is small (SLUMP_RELAXATION
-        // = 0.35 of the excess). A big cliff collapses over a few frames
-        // rather than instantly, which reads as a natural slide.
-        period: 1,
+        // Every 4 ticks. Building the ring-wide top-solid snapshot cost
+        // ~5 ms even when nothing was above repose, so the outer cadence
+        // is what saves the frame; SLUMP_RELAXATION was already tuned so
+        // a big cliff collapses over several invocations, not one.
+        period: 4,
         phase: 0,
     },
     SubsystemSchedule {
@@ -182,7 +185,10 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::DissolvedField,
-        period: 6,
+        // Slow diffusion; every 30 ticks matches other big field grids.
+        // On a full ring most chunks hold zero dissolved mass anyway and
+        // are skipped by the quiescence check in `run_dissolved_field`.
+        period: 30,
         phase: 2,
     },
     SubsystemSchedule {

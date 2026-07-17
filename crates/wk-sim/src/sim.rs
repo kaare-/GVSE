@@ -136,54 +136,51 @@ impl Simulation {
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::DissolvedField)) {
             run_dissolved_field(world, tick);
         }
+        // Direct-mutation subsystems used to each call
+        // `recompute_mass_audit()`, which is a full ring walk
+        // (~1 ms × 9 calls = ~9 ms/tick on a 192-chunk ring). That's
+        // pure bookkeeping — a single refresh at the end of the tick
+        // is enough for the audit total.
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Karst)) {
             run_karst(world, tick);
-            world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::VoidWater)) {
             run_surface_void_capture(world);
             run_void_water_flow(world);
-            world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::RoofCollapse)) {
             run_roof_collapse(world, tick);
-            world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Speleogenesis)) {
             run_speleogenesis(world, tick);
-            world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Ecology)) {
             run_ecology(world, tick);
-            world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Gas)) {
             run_gas(world, tick);
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Agents)) {
             run_agents(world, &mut self.agents, tick);
-            world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::PhaseChange)) {
             run_phase_change(world, tick);
-            world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::SurfaceWaves)) {
-            // Waves book tide exchange on sea_inject_total; skip a full
-            // ring mass audit here — LakeLevel (below) refreshes when due.
             run_surface_waves(world, tick);
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::LakeLevel)) {
             run_lake_level(world);
-            world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Slumping)) {
             run_slumping(world, tick);
-            world.recompute_mass_audit();
         }
         // After slump reshuffles substrate, snap ocean/lake beds back to
         // saturation while the free surface can still afford it.
         recharge_deep_water_tables(world);
+        // One audit refresh per tick keeps HUD / test bookkeeping fresh
+        // without the ~9× per-tick full-ring walk the old shape had.
+        world.recompute_mass_audit();
 
         self.update_overlay(world);
         self.clock.advance();
