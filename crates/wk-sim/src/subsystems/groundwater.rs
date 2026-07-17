@@ -40,8 +40,10 @@ fn head_at_column(world: &World, coord: i32, local: usize) -> f32 {
     if world.gw_head_fields_enabled {
         if let Some(gw) = &chunk.gw_head {
             let x_m = (chunk.world_x_base() + local as i32) as f32 * SAMPLE_WIDTH_M;
-            // Sample mid-aquifer (halfway between bedrock and surface).
-            let y = 0.5 * (chunk.bedrock_y + col.surface_y);
+            // Sample mid-aquifer (bedrock → sediment bed), not mid-water
+            // column — ocean surface_y sits at sea level far above the bed.
+            let bed = col.climate_elevation();
+            let y = 0.5 * (chunk.bedrock_y + bed);
             return gw.0.sample_bilinear(x_m, y);
         }
     }
@@ -94,6 +96,15 @@ pub fn run_groundwater_flow(world: &World, scratch: &mut WorldTransferScratch) {
         for i in 0..CHUNK_W {
             let col = &chunk.columns[i];
             if col.activity == Activity::Dormant || col.moisture <= 0 {
+                continue;
+            }
+            // Free-surface water bodies already equalise hydrostatically.
+            // Pore-space lateral flow under them, driven by tiny surface
+            // ripples, ratchets aquifer mass into overflow faster than
+            // infiltration can return it — emptying the water table under
+            // oceans and flat ponds. Coastal land can still discharge
+            // *into* wet columns (receive path below).
+            if col.top_water_mass() > 0 {
                 continue;
             }
 

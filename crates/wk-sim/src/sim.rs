@@ -5,7 +5,8 @@ use crate::barrier::barrier_commit;
 use crate::buffer::WorldTransferScratch;
 use crate::clock::{SimClock, SubsystemId, SUBSYSTEM_ORDER};
 use crate::subsystems::{
-    run_activity, run_agents, run_dissolved_field, run_ecology, run_evaporation,
+    run_activity, run_agents, run_dissolved_field, run_ecology, run_evaporation, run_gas,
+    recharge_deep_water_tables,
     run_groundwater_flow, run_groundwater_head_field, run_humidity_field, run_infiltration,
     run_karst, run_lake_level, run_layer_merge, run_phase_change, run_pressure_field,
     run_rain_inject, run_roof_collapse, run_sediment, run_slumping, run_speleogenesis,
@@ -99,7 +100,8 @@ impl Simulation {
                 | SubsystemId::RoofCollapse
                 | SubsystemId::Speleogenesis
                 | SubsystemId::Ecology
-                | SubsystemId::Agents => {}
+                | SubsystemId::Agents
+                | SubsystemId::Gas => {}
             }
         }
 
@@ -154,6 +156,9 @@ impl Simulation {
             run_ecology(world, tick);
             world.recompute_mass_audit();
         }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::Gas)) {
+            run_gas(world, tick);
+        }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Agents)) {
             run_agents(world, &mut self.agents, tick);
             world.recompute_mass_audit();
@@ -170,6 +175,9 @@ impl Simulation {
             run_slumping(world, tick);
             world.recompute_mass_audit();
         }
+        // After slump reshuffles substrate, snap ocean/lake beds back to
+        // saturation while the free surface can still afford it.
+        recharge_deep_water_tables(world);
 
         self.update_overlay(world);
         self.clock.advance();

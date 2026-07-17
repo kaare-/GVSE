@@ -54,6 +54,13 @@ impl Void {
     }
 }
 
+/// Ambient atmospheric gas levels (relative units, ~1.0 = well-mixed air).
+pub const AMBIENT_AIR_CO2: f32 = 1.0;
+pub const AMBIENT_AIR_O2: f32 = 1.0;
+/// Henry-ish equilibrium dissolved levels under ambient air.
+pub const EQUIL_WATER_CO2: f32 = 0.85;
+pub const EQUIL_WATER_O2: f32 = 0.90;
+
 /// Per-column plant / soil-biology state (stage 8). Not a stratigraphic
 /// layer — biomass must not participate in density settling.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -68,6 +75,31 @@ pub struct Ecology {
     pub alive_biomass: i64,
     /// Plant-available nutrient fraction, 0..1.
     pub nutrient: f32,
+    /// Atmospheric CO₂ above the column (relative units).
+    #[serde(default = "default_air_co2")]
+    pub air_co2: f32,
+    /// Atmospheric O₂ above the column.
+    #[serde(default = "default_air_o2")]
+    pub air_o2: f32,
+    /// Dissolved CO₂ in standing / pore water (relative units).
+    #[serde(default = "default_water_co2")]
+    pub water_co2: f32,
+    /// Dissolved O₂ in standing / pore water.
+    #[serde(default = "default_water_o2")]
+    pub water_o2: f32,
+}
+
+fn default_air_co2() -> f32 {
+    AMBIENT_AIR_CO2
+}
+fn default_air_o2() -> f32 {
+    AMBIENT_AIR_O2
+}
+fn default_water_co2() -> f32 {
+    EQUIL_WATER_CO2
+}
+fn default_water_o2() -> f32 {
+    EQUIL_WATER_O2
 }
 
 impl Default for Ecology {
@@ -78,6 +110,10 @@ impl Default for Ecology {
             dead_biomass: 0,
             alive_biomass: 0,
             nutrient: 0.0,
+            air_co2: AMBIENT_AIR_CO2,
+            air_o2: AMBIENT_AIR_O2,
+            water_co2: EQUIL_WATER_CO2,
+            water_o2: EQUIL_WATER_O2,
         }
     }
 }
@@ -108,6 +144,10 @@ impl Ecology {
             dead_biomass: 0,
             alive_biomass: alive,
             nutrient,
+            air_co2: AMBIENT_AIR_CO2,
+            air_o2: AMBIENT_AIR_O2,
+            water_co2: EQUIL_WATER_CO2,
+            water_o2: EQUIL_WATER_O2,
         }
     }
 }
@@ -258,6 +298,9 @@ impl Column {
     /// substrate layer. `None` if no such layer exists (bare bedrock).
     pub fn top_porous_layer_index(&self) -> Option<usize> {
         for i in 0..self.layer_count as usize {
+            if self.layers[i].thickness <= 0 {
+                continue;
+            }
             if MaterialRegistry::props(self.layers[i].material).porosity > 0 {
                 return Some(i);
             }
@@ -426,8 +469,13 @@ impl Column {
     /// layer's pore space fills from the bottom of that layer upward as
     /// `moisture` approaches its cap, reaching the ground surface exactly
     /// when fully saturated (any further inflow discharges as surface
-    /// water — see the discharge handling in barrier commit).
+    /// inflow discharges — see barrier commit).
     pub fn water_table_y(&self) -> f32 {
+        if let Some((water_top, mass)) = self.flowable_water() {
+            if mass > 0 {
+                return water_top;
+            }
+        }
         let Some(idx) = self.top_porous_layer_index() else {
             return self.surface_y;
         };

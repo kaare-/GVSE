@@ -2,6 +2,7 @@ use macroquad::prelude::*;
 use wk_io::{load_simulation, save_simulation};
 use wk_world::{OverlayMode, RenderSnapshot};
 
+use crate::editor::CreatureEditor;
 use crate::render::{self, SAVE_PATH};
 
 /// Columns scrolled per second while A/D is held.
@@ -31,6 +32,8 @@ pub struct AppState {
     pub speed: u32,
     pub overlay_mode: OverlayMode,
     pub selected_column: Option<i32>,
+    /// Clicked Set A organism (cleared when it dies).
+    pub selected_organism: Option<wk_sim::Entity>,
     pub tick_accum: f32,
     pub status_msg: String,
     pub show_settings: bool,
@@ -40,6 +43,7 @@ pub struct AppState {
     settings_night_minutes: f32,
     settings_max_clouds: f32,
     settings_cloud_spawn_secs: f32,
+    pub editor: CreatureEditor,
 }
 
 impl AppState {
@@ -90,15 +94,17 @@ impl AppState {
             speed: 1,
             overlay_mode: OverlayMode::None,
             selected_column: None,
+            selected_organism: None,
             tick_accum: 0.0,
             status_msg:
-                "Space run | A/D scroll | W/S pan | R rain | Y weather | F5/F9 save/load | Tab settings"
+                "Space run | click creature to inspect | A/D scroll | C/F2 creature | Tab settings"
                     .into(),
             show_settings: false,
             settings_day_minutes,
             settings_night_minutes,
             settings_max_clouds,
             settings_cloud_spawn_secs,
+            editor: CreatureEditor::default(),
         }
     }
 
@@ -146,6 +152,11 @@ impl AppState {
     }
 
     pub fn update(&mut self) {
+        // Freeze the world while the creature editor is open.
+        if self.editor.open {
+            self.clamp_viewport();
+            return;
+        }
         if !self.paused {
             let dt = get_frame_time();
             self.tick_accum += dt * self.speed as f32 * 60.0;
@@ -159,7 +170,84 @@ impl AppState {
         self.clamp_viewport();
     }
 
+    fn open_or_close_editor(&mut self) {
+        let opening = !self.editor.open;
+        self.editor.toggle(self.paused);
+        if opening {
+            self.paused = true;
+            self.show_settings = false;
+            self.status_msg =
+                "Creature editor OPEN — paint Atom, Enter to spawn, C/F2 or button to close"
+                    .into();
+        } else {
+            self.paused = self.editor.was_paused;
+            self.status_msg = "Creature editor closed".into();
+        }
+    }
+
     pub fn handle_input(&mut self) {
+        // Show last key on the HUD so we can tell if the window has focus.
+        if let Some(k) = get_last_key_pressed() {
+            if !self.editor.open {
+                self.status_msg = format!(
+                    "key {:?} | Space run | C/F2 or click CREATURES (top-right)",
+                    k
+                );
+            }
+        }
+
+        // Creature editor: C, F2, or click the top-right CREATURES button.
+        let click_creatures = is_mouse_button_pressed(MouseButton::Left)
+            && {
+                let (mx, my) = mouse_position();
+                render::creature_button_hit(mx, my, screen_width())
+            };
+        if is_key_pressed(KeyCode::C)
+            || is_key_pressed(KeyCode::F2)
+            || (click_creatures && !self.editor.open)
+        {
+            self.open_or_close_editor();
+        }
+        if self.editor.open {
+            let _ = self.editor.handle_input();
+            if self.editor.spawn_picker && is_mouse_button_pressed(MouseButton::Left) {
+                let (mx, my) = mouse_position();
+                // Ignore clicks on the CREATURES button while picking.
+                if render::creature_button_hit(mx, my, screen_width()) {
+                    return;
+                }
+                let col = render::screen_x_to_world_x(mx, self.viewport_x);
+                if self.world.column_at(col).is_some() {
+                    let mut bp = self.editor.blueprint.clone();
+                    bp.name = self.editor.blueprint.name.clone();
+                    let plankton = bp.is_plankton();
+                    match self.sim.agents.spawn_from_blueprint(
+                        &self.world,
+                        col,
+                        bp,
+                        50.0,
+                    ) {
+                        Some(_) => {
+                            let where_ = if plankton { "water/lit band" } else { "land" };
+                            self.status_msg = format!(
+                                "Spawned {} on {where_} at x={col} (organisms={})",
+                                self.editor.blueprint.name,
+                                self.sim.agents.organism_count()
+                            );
+                            self.editor.spawn_picker = false;
+                            self.editor.open = false;
+                            self.paused = self.editor.was_paused;
+                        }
+                        None => {
+                            self.editor.status =
+                                "Spawn failed (need nucleus+photo; rooted designs need land; or at cap)"
+                                    .into();
+                        }
+                    }
+                }
+            }
+            return;
+        }
         if is_key_pressed(KeyCode::Space) {
             self.paused = !self.paused;
         }
@@ -237,7 +325,9 @@ impl AppState {
                 OverlayMode::Activity => OverlayMode::Conservation,
                 OverlayMode::Conservation => OverlayMode::TemperatureField,
                 OverlayMode::TemperatureField => OverlayMode::HumidityField,
-                OverlayMode::HumidityField => OverlayMode::None,
+                OverlayMode::HumidityField => OverlayMode::Co2Field,
+                OverlayMode::Co2Field => OverlayMode::O2Field,
+                OverlayMode::O2Field => OverlayMode::None,
             };
         }
         if is_key_pressed(KeyCode::M) {
@@ -277,10 +367,44 @@ impl AppState {
         }
 
         if is_mouse_button_pressed(MouseButton::Left) {
-            let (mx, _) = mouse_position();
-            let col = render::screen_x_to_world_x(mx, self.viewport_x);
-            if self.world.column_at(col).is_some() {
-                self.selected_column = Some(col);
+            let (mx, my) = mouse_position();
+            // Don't select a column when clicking the CREATURES button.
+            if render::creature_button_hit(mx, my, screen_width()) {
+                return;
+            }
+            let wx = render::screen_x_to_world_x_frac(mx, self.viewport_x);
+            let wy = render::screen_y_to_world_y(
+                my,
+                self.world.sea_level,
+                screen_height(),
+                self.camera_y_offset,
+            );
+            if let Some(e) = self.sim.agents.pick_organism_at(wx, wy) {
+                self.selected_organism = Some(e);
+                self.selected_column = Some(wx.floor() as i32);
+                if let Some(info) = self.sim.agents.inspect_organism(e) {
+                    self.status_msg = format!(
+                        "Inspect #{} gen={} energy={:.0}/{:.0} clones={}",
+                        info.entity_id,
+                        info.generation,
+                        info.energy,
+                        info.energy_max,
+                        info.clones_produced
+                    );
+                }
+            } else {
+                self.selected_organism = None;
+                let col = render::screen_x_to_world_x(mx, self.viewport_x);
+                if self.world.column_at(col).is_some() {
+                    self.selected_column = Some(col);
+                }
+            }
+        }
+
+        // Drop selection if the creature died.
+        if let Some(e) = self.selected_organism {
+            if !self.sim.agents.organism_alive(e) {
+                self.selected_organism = None;
             }
         }
     }
@@ -345,7 +469,15 @@ impl AppState {
                     ui.label(None, &format!("Active clouds: {}", self.world.clouds.len()));
                 });
                 ui.separator();
+                if ui.button(None, "Open creature editor") {
+                    // Close settings; editor opens next frame via flag.
+                    self.show_settings = false;
+                    if !self.editor.open {
+                        self.open_or_close_editor();
+                    }
+                }
                 ui.label(None, &format!("Sim tick: {}", self.sim.clock.tick));
+                ui.label(None, "Tip: click CREATURES (top-right) or press C / F2");
             });
 
         self.world.weather.max_clouds = self.settings_max_clouds.round().max(1.0) as usize;

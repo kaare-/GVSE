@@ -9,3 +9,6 @@ hecs = "=0.10.5"
 wk-material = { path = "../wk-material" }
 wk-world = { path = "../wk-world" }
 serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+
+[dev-dependencies]

@@ -276,6 +276,7 @@ pub fn fill_bathymetry_column(
     // rendering pass or column-state flag. `deposit_to_top` handles the
     // surface_y bookkeeping for us.
     fill_up_to_sea_level(col, sea_level, tick);
+    seed_column_water_table(col, sea_level);
     seed_column_ecology(col, sea_level);
 }
 
@@ -296,6 +297,48 @@ pub fn fill_up_to_sea_level(col: &mut Column, sea_level: f32, tick: u64) {
     if mass > 0 {
         col.deposit_to_top(MaterialId::Water, mass, tick);
     }
+}
+
+/// Seed pore moisture so the regional water table sits near `sea_level`
+/// from the first tick — ocean beds fully saturated, coastal land wet
+/// up to the table, high ground holding a modest base saturation.
+///
+/// Without this, continental gen left `moisture = 0` everywhere and the
+/// ocean spent the early sim soaking into dry sand (and looking empty
+/// underground on the water-table overlay).
+pub fn seed_column_water_table(col: &mut Column, sea_level: f32) {
+    let cap = col.moisture_cap();
+    if cap <= 0 {
+        return;
+    }
+    let bed = col.climate_elevation();
+    // Permanent standing water / submarine bed: saturated aquifer.
+    if bed < sea_level - 0.05 || (col.top_water_mass() > 0 && bed <= sea_level + 0.05) {
+        col.moisture = cap;
+        return;
+    }
+
+    let Some(idx) = col.top_porous_layer_index() else {
+        return;
+    };
+    let mut cap_height = 0.0f32;
+    for i in 0..idx {
+        cap_height +=
+            col.mass_to_height_delta(col.layers[i].material, col.layers[i].thickness);
+    }
+    let layer_top_y = col.surface_y - cap_height;
+    let layer = &col.layers[idx];
+    let layer_height_m = col.mass_to_height_delta(layer.material, layer.thickness);
+    if layer_height_m <= 1e-6 {
+        col.moisture = (cap as f32 * 0.1) as i64;
+        return;
+    }
+    let layer_bottom_y = layer_top_y - layer_height_m;
+    let target = sea_level.clamp(layer_bottom_y, layer_top_y);
+    let sat_from_table = ((target - layer_bottom_y) / layer_height_m).clamp(0.0, 1.0);
+    // Keep a little pore water even well above the regional table.
+    let sat = sat_from_table.max(0.10);
+    col.moisture = ((cap as f32) * sat).round() as i64;
 }
 
 /// Low-frequency rolling ripple layered onto emergent land so there are

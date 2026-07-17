@@ -766,6 +766,10 @@ pub struct ColumnView {
     pub temperature_c: f32,
     /// Relative humidity at the column surface (0..1).
     pub humidity_rh: f32,
+    /// Dissolved CO₂ in water when wet, else air CO₂ (relative units).
+    pub co2: f32,
+    /// Dissolved O₂ in water when wet, else air O₂ (relative units).
+    pub o2: f32,
     pub biome: Biome,
 }
 
@@ -790,6 +794,10 @@ pub enum OverlayMode {
     /// Colour-ramp of relative humidity at the column surface
     /// (dry brown → wet cyan).
     HumidityField,
+    /// Dissolved / air CO₂ (low brown → high green).
+    Co2Field,
+    /// Dissolved / air O₂ (low purple → high cyan).
+    O2Field,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -905,6 +913,16 @@ impl World {
                         tick,
                     ),
                     humidity_rh: self.humidity_at_point(wx, col.surface_y),
+                    co2: if col.top_water_mass() > 0 {
+                        col.ecology.water_co2
+                    } else {
+                        col.ecology.air_co2
+                    },
+                    o2: if col.top_water_mass() > 0 {
+                        col.ecology.water_o2
+                    } else {
+                        col.ecology.air_o2
+                    },
                     biome: self.biome_at(col.climate_elevation()),
                 });
             } else {
@@ -927,6 +945,8 @@ impl World {
                     residual: ResidualBucket::default(),
                     temperature_c: self.temperature_at_point(wx, self.sea_level, tick),
                     humidity_rh: self.humidity_at_point(wx, self.sea_level),
+                    co2: 1.0,
+                    o2: 1.0,
                     biome: Biome::Ocean,
                 });
             }

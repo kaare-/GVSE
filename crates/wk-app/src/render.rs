@@ -20,8 +20,17 @@ pub fn world_y_to_screen(elev_m: f32, sea_level: f32, sh: f32, camera_y_offset: 
     sea_y - (elev_m - sea_level) * PX_PER_M
 }
 
+pub fn screen_y_to_world_y(sy: f32, sea_level: f32, sh: f32, camera_y_offset: f32) -> f32 {
+    let sea_y = sh * SEA_SCREEN_FRAC + camera_y_offset;
+    sea_level + (sea_y - sy) / PX_PER_M
+}
+
 pub fn screen_x_to_world_x(mx: f32, viewport_x: i32) -> i32 {
     viewport_x + (mx / COL_W).floor() as i32
+}
+
+pub fn screen_x_to_world_x_frac(mx: f32, viewport_x: i32) -> f32 {
+    viewport_x as f32 + mx / COL_W
 }
 
 /// Draws a column's actual layers, top to bottom, each sized by real
@@ -301,11 +310,44 @@ fn draw_clouds(snap: &RenderSnapshot, sw: f32, sh: f32) {
     }
 }
 
+/// Draw Set A organism modules as 1×1 pixels (world_x_frac, elev_m, rgb).
+pub fn draw_organisms(
+    modules: &[(f32, f32, (u8, u8, u8))],
+    viewport_x: i32,
+    sea_level: f32,
+    camera_y_offset: f32,
+    highlight: Option<(f32, f32, f32, f32)>,
+) {
+    let sh = screen_height();
+    let sw = screen_width();
+    // Match wk_agents::MODULE_CELL_COLS so collision boxes cover the pixels.
+    let cell = (COL_W * 0.45).max(3.0);
+    for &(wx, wy, (r, g, b)) in modules {
+        let sx = (wx - viewport_x as f32) * COL_W;
+        if sx < -cell || sx > sw {
+            continue;
+        }
+        let sy = world_y_to_screen(wy, sea_level, sh, camera_y_offset);
+        draw_rectangle(sx, sy - cell, cell, cell, Color::from_rgba(r, g, b, 255));
+    }
+    if let Some((min_x, max_x, min_y, max_y)) = highlight {
+        let sx = (min_x - viewport_x as f32) * COL_W;
+        let sy_top = world_y_to_screen(max_y, sea_level, sh, camera_y_offset);
+        let sy_bot = world_y_to_screen(min_y, sea_level, sh, camera_y_offset);
+        let w = ((max_x - min_x) * COL_W).max(cell);
+        let h = (sy_bot - sy_top).max(cell);
+        draw_rectangle_lines(sx - 1.0, sy_top - 1.0, w + 2.0, h + 2.0, 2.0, YELLOW);
+    }
+}
+
 pub fn draw_frame(
     snap: &RenderSnapshot,
     selected: Option<i32>,
     camera_y_offset: f32,
     status_line: &str,
+    organism_modules: &[(f32, f32, (u8, u8, u8))],
+    organism_inspect: Option<&wk_sim::OrganismInspect>,
+    organism_highlight: Option<(f32, f32, f32, f32)>,
 ) {
     let sw = screen_width();
     let sh = screen_height();
@@ -422,11 +464,21 @@ pub fn draw_frame(
                 let c = humidity_overlay_color(col.humidity_rh);
                 draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
             }
+            OverlayMode::Co2Field => {
+                let c = gas_overlay_color(col.co2, true);
+                draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
+            }
+            OverlayMode::O2Field => {
+                let c = gas_overlay_color(col.o2, false);
+                draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
+            }
             OverlayMode::None => {}
         }
     }
 
-    draw_line(0.0, sea_y, sw, sea_y, 1.0, Color::from_rgba(255, 255, 255, 90));
+    // No constant "ocean line" — free water surface is the column water
+    // top itself. Drawing sea_level as a horizon was leftover from an
+    // older constant-ocean model and made plankton look airborne.
 
     if snap.rain_enabled {
         draw_rain(sw, sh, sea_y);
@@ -438,6 +490,14 @@ pub fn draw_frame(
             draw_rectangle(lx, 10.0, COL_W, 8.0, Color::from_rgba(255, 0, 255, 255));
         }
     }
+
+    draw_organisms(
+        organism_modules,
+        snap.viewport_x,
+        snap.sea_level,
+        camera_y_offset,
+        organism_highlight,
+    );
 
     let phase = snap.climate.phase_fraction(snap.tick);
     let clock_minutes = (phase * 24.0 * 60.0) as u32;
@@ -455,9 +515,32 @@ pub fn draw_frame(
     draw_rectangle(0.0, sh - 24.0, sw, 24.0, Color::from_rgba(0, 0, 0, 200));
     draw_text(&hud, 8.0, sh - 8.0, 16.0, WHITE);
 
-    if let Some(wx) = selected {
-        draw_inspector(snap, wx, sw);
+    // Clickable "CREATURES" button (top-right) — opens editor without needing C/F2.
+    let (bx, by, bw, bh) = creature_button_rect(sw);
+    draw_rectangle(bx, by, bw, bh, Color::from_rgba(40, 90, 50, 230));
+    draw_rectangle_lines(bx, by, bw, bh, 2.0, Color::from_rgba(255, 220, 80, 255));
+    draw_text("CREATURES", bx + 10.0, by + 22.0, 18.0, Color::from_rgba(255, 240, 160, 255));
+
+    // Organism inspect under the button; column inspect below that (or alone).
+    let mut panel_top = by + bh + 8.0;
+    if let Some(info) = organism_inspect {
+        panel_top = draw_organism_inspector(info, sw, panel_top);
     }
+    if let Some(wx) = selected {
+        draw_inspector(snap, wx, sw, panel_top);
+    }
+}
+
+/// Top-right HUD button that opens the creature editor.
+pub fn creature_button_rect(sw: f32) -> (f32, f32, f32, f32) {
+    let bw = 130.0;
+    let bh = 32.0;
+    (sw - bw - 12.0, 10.0, bw, bh)
+}
+
+pub fn creature_button_hit(mx: f32, my: f32, sw: f32) -> bool {
+    let (bx, by, bw, bh) = creature_button_rect(sw);
+    mx >= bx && mx <= bx + bw && my >= by && my <= by + bh
 }
 
 fn material_name(mat: MaterialId) -> &'static str {
@@ -495,7 +578,81 @@ fn humidity_overlay_color(rh: f32) -> Color {
     Color::from_rgba(r, g, b, 220)
 }
 
-fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32) {
+/// Gas heatmap: CO₂ low→brown high→green; O₂ low→purple high→cyan.
+fn gas_overlay_color(level: f32, co2: bool) -> Color {
+    let t = (level / 1.5).clamp(0.0, 1.0);
+    if co2 {
+        Color::from_rgba(
+            ((1.0 - t) * 140.0 + 40.0) as u8,
+            (60.0 + t * 160.0) as u8,
+            (40.0 + t * 40.0) as u8,
+            220,
+        )
+    } else {
+        Color::from_rgba(
+            ((1.0 - t) * 120.0) as u8,
+            (40.0 + t * 180.0) as u8,
+            (100.0 + t * 120.0) as u8,
+            220,
+        )
+    }
+}
+
+/// Creature inspect panel. Returns the Y just below the panel for stacking.
+fn draw_organism_inspector(info: &wk_sim::OrganismInspect, sw: f32, y0: f32) -> f32 {
+    let panel_w = 300.0;
+    let habit = if info.dead {
+        "DEAD (sinking)"
+    } else if info.is_plankton {
+        "plankton"
+    } else {
+        "rooted"
+    };
+    let lines = [
+        format!("Creature #{}  {}", info.entity_id, info.name),
+        format!("{}  pos=({:.1}, {:.1}m)", habit, info.x, info.y),
+        format!(
+            "energy={:.1}/{:.0}  mods={} photo={}",
+            info.energy, info.energy_max, info.module_count, info.photosystems
+        ),
+        format!(
+            "generation={}  clones={}",
+            info.generation, info.clones_produced
+        ),
+        format!(
+            "age={:.1}/{:.1} sim-days",
+            info.age_ticks as f32 / 79_200.0,
+            info.life_expectancy_ticks as f32 / 79_200.0
+        ),
+        "--- genes ---".into(),
+        format!(
+            "metabolic_rate={:.2}  reproduce_at={:.2}",
+            info.genome.metabolic_rate, info.genome.reproduce_at
+        ),
+        format!(
+            "clone_fidelity={:.2}  buoyancy={:.2}",
+            info.genome.clone_fidelity, info.genome.buoyancy_bias
+        ),
+        format!(
+            "temp_opt={:.0}C  temp_width={:.0}C",
+            info.genome.temp_optimum, info.genome.temp_width
+        ),
+        format!(
+            "circadian={:.2}  active_window={:.2}",
+            info.genome.circadian_phase, info.genome.active_window
+        ),
+    ];
+    let panel_h = 16.0 + lines.len() as f32 * 15.0 + 8.0;
+    let x0 = sw - panel_w - 8.0;
+    draw_rectangle(x0, y0, panel_w, panel_h, Color::from_rgba(10, 30, 20, 230));
+    draw_rectangle_lines(x0, y0, panel_w, panel_h, 1.5, Color::from_rgba(255, 220, 80, 255));
+    for (i, line) in lines.iter().enumerate() {
+        draw_text(line, x0 + 8.0, y0 + 16.0 + i as f32 * 15.0, 14.0, WHITE);
+    }
+    y0 + panel_h + 6.0
+}
+
+fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32, y0: f32) {
     let Some(col) = snap.columns.iter().find(|c| c.world_x == world_x) else {
         return;
     };
@@ -503,7 +660,6 @@ fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32) {
     let panel_w = 280.0;
     let panel_h = 240.0;
     let x0 = sw - panel_w - 8.0;
-    let y0 = 8.0;
 
     draw_rectangle(x0, y0, panel_w, panel_h, Color::from_rgba(0, 0, 0, 220));
     draw_rectangle_lines(x0, y0, panel_w, panel_h, 1.0, Color::from_rgba(200, 200, 200, 255));

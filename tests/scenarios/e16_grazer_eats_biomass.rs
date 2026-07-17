@@ -35,6 +35,7 @@ fn e16_grazer_eats_biomass() {
                     dead_biomass: 0,
                     alive_biomass: 2_000,
                     nutrient: 0.8,
+                    ..Ecology::default()
                 };
                 col.moisture = col.moisture_cap().max(1);
             } else {
@@ -60,8 +61,9 @@ fn e16_grazer_eats_biomass() {
         drink_rate: 40.0,
         dig_drive: 0.0, // keep the test on foraging
         graze_efficiency: 0.1,
-        metabolism: 0.2,
+        metabolic_rate: 0.2,
         repro_drive: 0.0, // stage 11 off — see E17
+        ..Genome::default()
     };
     sim.agents
         .spawn_grazer(&world, wx, genome, 50.0)

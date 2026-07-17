@@ -9,6 +9,7 @@ mod agents;
 mod ecology;
 mod evaporation;
 pub mod fields;
+mod gas;
 mod groundwater;
 mod halos;
 mod infiltration;
@@ -34,9 +35,10 @@ pub use fields::{
     run_dissolved_field, run_groundwater_head_field, run_humidity_field, run_pressure_field,
     run_thermal_field, run_wind_field,
 };
+pub use gas::run_gas;
 pub use groundwater::run_groundwater_flow;
 pub use halos::{exchange_outboxes, update_halos};
-pub use infiltration::run_infiltration;
+pub use infiltration::{recharge_deep_water_tables, run_infiltration};
 pub use karst::run_karst;
 pub use lake_level::run_lake_level;
 pub use layer_merge::run_layer_merge;

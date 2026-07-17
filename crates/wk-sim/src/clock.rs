@@ -62,6 +62,8 @@ pub enum SubsystemId {
     Ecology = 22,
     /// ECS creature behaviour (grazers).
     Agents = 23,
+    /// Per-column air / dissolved CO₂ + O₂ mixing and exchange.
+    Gas = 24,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -71,7 +73,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 24] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 25] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -213,6 +215,11 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 24] = [
         id: SubsystemId::Agents,
         period: 1,
         phase: 0,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::Gas,
+        period: 4,
+        phase: 1,
     },
 ];
 

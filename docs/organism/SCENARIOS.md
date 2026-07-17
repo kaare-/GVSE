@@ -224,7 +224,54 @@ test, it fills in the same four things:
 
 Deferred to Phase 7. Written here so the number is reserved.
 
+## Set A environment gates (implemented)
+
+### E46a — Dry land kills plankton
+
+- **World.** Dry flat sand, no standing water.
+- **Blueprint.** Atom.
+- **Assertion.** Organism count → 0 within a few ticks; corpse or litter left.
+- **Read-out.** `E46a: dry land → organism_count=0`.
+
+### E46b — Ice cap kills plankton
+
+- **World.** Water under an ice cap (`top_ice_mass > 0`).
+- **Blueprint.** Atom.
+- **Assertion.** One organism tick kills the plankton (AgentStore path; full sim would melt ice above 0°C).
+- **Read-out.** `E46b: ice cap → organism_count=0`.
+
+### E46c — Bloom draws down dissolved CO₂
+
+- **World.** Flooded flat sand, warm daylight, gas exchange on.
+- **Blueprint.** Dense Atom band, repro on.
+- **Assertion.** Mean dissolved CO₂ dips ≥ 0.10 below start; O₂ rises; mass non-negative.
+- **Read-out.** `E46c: co2 …→min…  o2 …→…  living=…`.
+
+### E46d — Cold blocks reproduction (unfrozen)
+
+- **World.** 3°C water (above freeze) vs 22°C control; narrow `TempWidth`.
+- **Blueprint.** Same Atom genome both worlds; energy topped each tick.
+- **Assertion.** Cold births = 0, founder survives; warm control births > 0.
+- **Read-out.** `E46d: cold births=0 warm births=N`.
+
+### E47 — Ocean water budget + seeded water table
+
+- **World.** Continental strip with humidity / wind / groundwater fields;
+  weather on for the soak; flat sand ponds for the skin-evap check.
+- **Assertion.** Gen-time aquifer under ocean beds (≥95% sat) and land
+  base moisture; deep vs shallow ponds lose similar mass (skin, not
+  depth); continental ocean loses <5% surface water over 3600 ticks
+  while bed sat stays high and weather rain is non-trivial vs evap.
+- **Read-out.** `E47a/b/c: …`.
+
+### E48 — Air ↔ dissolved gas exchange
+
+- **World.** Flooded flat sand, no organisms, weather/rain off.
+- **Assertion.** Depleted dissolved CO₂/O₂ recharge from air; supersaturated
+  water outgasses toward Henry equilibrium.
+- **Read-out.** `E48a/b: co2 …→…`.
+
 ## Adding scenes
 
-New scenes append after E45. Do not renumber existing entries even
+New scenes append after E48. Do not renumber existing entries even
 if they never ship — the numbering is a contract with the docs.

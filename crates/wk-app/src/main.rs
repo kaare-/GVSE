@@ -1,5 +1,6 @@
 //! World Kernel 0.1 — interactive debug application.
 
+mod editor;
 mod render;
 mod state;
 
@@ -28,13 +29,28 @@ async fn main() {
         app.update();
 
         let snap = app.snapshot();
+        let organisms = app.sim.agents.organism_draw_list();
+        let inspect = app
+            .selected_organism
+            .and_then(|e| app.sim.agents.inspect_organism(e));
+        let highlight = app
+            .selected_organism
+            .and_then(|e| app.sim.agents.organism_highlight_aabb(e))
+            .map(|a| (a.min_x, a.max_x, a.min_y, a.max_y));
         render::draw_frame(
             &snap,
             app.selected_column,
             app.camera_y_offset,
             &app.status_msg,
+            &organisms,
+            inspect.as_ref(),
+            highlight,
         );
-        app.draw_settings_ui();
+        if app.editor.open {
+            app.editor.draw();
+        } else {
+            app.draw_settings_ui();
+        }
 
         next_frame().await;
     }

@@ -31,7 +31,7 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
         // without running dry long before reaching terrain far inland
         // (like tall mountains) — see rain_chance_per_tick for the other
         // half of that budget (making rain intermittent, not constant).
-        let moisture = 6000.0 + wk_world::terrain::hash_f32(seed, tick as i64, 402) * 12000.0;
+        let moisture = 10_000.0 + wk_world::terrain::hash_f32(seed, tick as i64, 402) * 18_000.0;
         let spawn_x = if climate_wind >= 0.0 {
             x_min as f32 - half_width
         } else {

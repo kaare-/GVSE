@@ -46,6 +46,7 @@ fn e15_roots_reduce_erosion() {
             dead_biomass: 0,
             alive_biomass: 2_000,
             nutrient: 0.5,
+            ..Ecology::default()
         };
     }
     world.recompute_mass_audit();
