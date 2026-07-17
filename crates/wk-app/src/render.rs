@@ -348,7 +348,7 @@ pub fn draw_frame(
     organism_modules: &[(f32, f32, (u8, u8, u8))],
     organism_inspect: Option<&wk_sim::OrganismInspect>,
     organism_highlight: Option<(f32, f32, f32, f32)>,
-    /// Live water/air temperature at the inspected creature (°C), if any.
+    // Live water/air temperature at the inspected creature (°C), if any.
     organism_ambient_c: Option<f32>,
 ) {
     let sw = screen_width();
