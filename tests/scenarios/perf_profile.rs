@@ -283,4 +283,101 @@ fn perf_profile_subsystem_kernels() {
     bench!("recompute_mass_audit", 200, {
         world.recompute_mass_audit();
     });
+    // Buffered / every-tick systems (barrier_commit driven).
+    use wk_sim::subsystems::{
+        run_activity, run_evaporation, run_groundwater_flow, run_infiltration,
+        run_layer_merge, run_phase_change, run_rain_inject, run_sediment,
+        run_surface_water, run_weather, SimParams,
+    };
+    let params = SimParams {
+        rain_rate: world.rain_rate,
+        rain_enabled: world.rain_enabled,
+        sea_level: world.sea_level,
+    };
+    let mut scratch = wk_sim::WorldTransferScratch::default();
+    bench!("run_surface_water", 200, {
+        run_surface_water(&world, &mut scratch);
+    });
+    bench!("run_groundwater_flow", 200, {
+        run_groundwater_flow(&world, &mut scratch);
+    });
+    bench!("run_weather", 200, {
+        run_weather(&mut world, &mut scratch, 0);
+    });
+    bench!("run_rain_inject", 200, {
+        run_rain_inject(&mut world, &mut scratch, &params, 0);
+    });
+    bench!("run_evaporation", 200, {
+        run_evaporation(&mut world, &mut scratch);
+    });
+    bench!("run_infiltration", 200, {
+        run_infiltration(&mut world, &mut scratch);
+    });
+    bench!("run_sediment", 200, {
+        run_sediment(&world, &mut scratch, 0);
+    });
+    bench!("run_phase_change", 200, {
+        run_phase_change(&mut world, 0);
+    });
+    bench!("run_activity", 200, {
+        run_activity(&mut world);
+    });
+    bench!("run_layer_merge", 200, {
+        run_layer_merge(&mut world, 0);
+    });
+    // Barrier commit is called once per tick after buffered subsystems.
+    bench!("barrier_commit", 200, {
+        wk_sim::barrier_commit(&mut world, &mut scratch, 0);
+    });
+
+    // Also time the per-tick subsystems via full sim.step in a tight loop
+    // and compare against selectively disabling each.
+    fn reset() -> (World, Simulation) {
+        let mut w = app_like_world();
+        let s = Simulation::new(&w);
+        // Warm.
+        let _ = &mut w;
+        (w, s)
+    }
+    let mut sub_costs: Vec<(&'static str, f32)> = Vec::new();
+    // Baseline mean time per step.
+    let (mut w, mut s) = reset();
+    let start = Instant::now();
+    for _ in 0..200 {
+        s.step(&mut w);
+    }
+    let baseline_ms = start.elapsed().as_secs_f32() * 1000.0 / 200.0;
+    eprintln!("baseline step: {baseline_ms:.3} ms/tick");
+    macro_rules! bench_without {
+        ($name:expr, $($setup:tt)+) => {{
+            let (mut w, mut s) = reset();
+            $($setup)+;
+            let start = Instant::now();
+            for _ in 0..200 { s.step(&mut w); }
+            let dt = start.elapsed().as_secs_f32() * 1000.0 / 200.0;
+            let saved = baseline_ms - dt;
+            eprintln!("  without {:<22}: {dt:.3} ms/tick (saves {saved:.3})", $name);
+            sub_costs.push(($name, saved));
+        }};
+    }
+    bench_without!("all_fields", {
+        w.thermal_fields_enabled = false;
+        w.humidity_fields_enabled = false;
+        w.pressure_wind_fields_enabled = false;
+        w.gw_head_fields_enabled = false;
+        w.dissolved_fields_enabled = false;
+    });
+    bench_without!("waves+tide", {
+        w.surface_waves_enabled = false;
+        w.tide_enabled = false;
+    });
+    bench_without!("weather", w.weather.weather_enabled = false);
+    // Weather-off is the closest proxy we have without adding per-subsystem
+    // enable flags; the remaining tick cost is: RainInject, SurfaceWater,
+    // Sediment, Infiltration, Groundwater, Evaporation, LayerMerge,
+    // Activity, PhaseChange, LakeLevel, Slumping, Karst, VoidWater,
+    // RoofCollapse, Speleogenesis, Ecology, Gas, Agents, SurfaceWaves,
+    // barrier_commit, recompute_mass_audit. Kernel bench above breaks out
+    // the biggest chunks (thermal, slumping, lake_level, mass_audit).
+    let _ = sub_costs;
 }

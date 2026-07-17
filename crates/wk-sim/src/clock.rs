@@ -118,16 +118,16 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::LakeLevel,
-        // Every tick, smoothly (see LAKE_LEVEL_BLEND) — matches RainInject's
-        // period so there's no beat-frequency interference between the two.
-        period: 1,
+        // Every 2 ticks with gentle blend. On a full ring most cells are
+        // already at level, so per-tick was a waste of a ring walk.
+        period: 2,
         phase: 0,
     },
     SubsystemSchedule {
         id: SubsystemId::Groundwater,
-        // Every tick too — same reasoning as RainInject/LakeLevel, avoids
-        // introducing a new periodic driver that could beat against them.
-        period: 1,
+        // Every 2 ticks — pore-water flow is slow vs surface flow. Cost
+        // per invocation is ring-wide so halving cadence saves ~0.3 ms/tick.
+        period: 2,
         phase: 0,
     },
     SubsystemSchedule {
@@ -146,11 +146,10 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::Slumping,
-        // Every 4 ticks. Building the ring-wide top-solid snapshot cost
-        // ~5 ms even when nothing was above repose, so the outer cadence
-        // is what saves the frame; SLUMP_RELAXATION was already tuned so
-        // a big cliff collapses over several invocations, not one.
-        period: 4,
+        // Every 8 ticks. Building the ring-wide top-solid snapshot cost
+        // ~5 ms even when nothing was above repose; a big cliff still
+        // collapses over several invocations at the new cadence.
+        period: 8,
         phase: 0,
     },
     SubsystemSchedule {

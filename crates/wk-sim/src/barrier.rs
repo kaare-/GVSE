@@ -14,10 +14,28 @@ pub fn commit_chunk_buffer(
     audit: &mut wk_world::world::MassAudit,
 ) {
     for i in 0..CHUNK_W {
-        let col = &mut chunk.columns[i];
         let inbox_water = chunk.inbox.water_in[i];
         let inbox_sed = chunk.inbox.sediment_in[i];
         let inbox_moisture = chunk.inbox.moisture_in[i];
+        // Fast path: nothing to apply here. Skip the whole per-column
+        // apply/clamp/recompute chain — on a full 192-chunk ring most
+        // ocean columns have no delta any given tick, and clamp+recompute
+        // over all 12 288 columns per tick added ~2 ms to barrier_commit.
+        if inbox_water == 0
+            && inbox_sed.total == 0
+            && inbox_moisture == 0
+            && buf.water_delta[i] == 0
+            && buf.moisture_delta[i] == 0
+            && buf.infil_delta[i] <= 0
+            && buf.erosion_request[i] == 0
+            && buf.sediment_delta[i] == 0
+            && buf.sediment_inflow[i].total == 0
+            && buf.deposit_request[i] == 0
+            && buf.snow_request[i] == 0
+        {
+            continue;
+        }
+        let col = &mut chunk.columns[i];
 
         // Water delta: positive grows a Water layer on top; negative
         // drains water off the top Water layer, up to what's there.
@@ -134,18 +152,19 @@ pub fn commit_chunk_buffer(
 pub fn barrier_commit(world: &mut World, scratch: &mut WorldTransferScratch, tick: u64) {
     let boundary_out = crate::subsystems::exchange_outboxes(world, scratch);
 
-    let coords: Vec<i32> = world.chunks.keys().copied().collect();
-    for coord in coords {
-        if let Some(buf) = scratch.buffers.get(&coord).cloned() {
-            if let Some(chunk) = world.chunks.get_mut(&coord) {
-                commit_chunk_buffer(chunk, &buf, tick, &mut world.mass_audit);
-            }
+    // Borrow buffer immutably + chunk mutably in the same pass — no need
+    // to clone the ~4 kB `CellTransferBuffer` per chunk each tick.
+    let audit = &mut world.mass_audit;
+    for (coord, buf) in scratch.buffers.iter() {
+        if let Some(chunk) = world.chunks.get_mut(coord) {
+            commit_chunk_buffer(chunk, buf, tick, audit);
         }
     }
 
     world.mass_audit.boundary_out_total += boundary_out;
     world.mass_audit.tick = tick;
-    world.recompute_mass_audit();
+    // The sim step will run `recompute_mass_audit` once at end-of-tick;
+    // don't duplicate that here (was a hidden ~1 ms/tick full-ring walk).
     crate::subsystems::update_halos(world);
     scratch.clear();
 }
