@@ -959,8 +959,11 @@ impl AgentStore {
 
             let phase_id = e.id() as u64 % REPRO_PERIOD;
             let threshold = genome.reproduce_at.clamp(0.2, 0.99);
-            // Cold / hot water: no full-throttle fission outside the comfort band.
-            let can_repro = comfort >= 0.35;
+            // Cold / hot water: no fission outside the comfort band.
+            // Threshold is intentionally soft (was 0.35) so noon ocean under
+            // thermal fields doesn't sterilise a full-energy Atom while still
+            // blocking the E46d cold-but-unfrozen case.
+            let can_repro = comfort >= 0.20;
             if population + births.len() < MAX_ORGANISMS
                 && tick % REPRO_PERIOD == phase_id
                 && energy.current >= energy.max * threshold
@@ -1261,11 +1264,11 @@ mod tests {
         };
         assert!(temp_comfort_factor(18.0, &g) > 0.95);
         assert!(
-            temp_comfort_factor(-5.0, &g) < 0.35,
+            temp_comfort_factor(-5.0, &g) < 0.20,
             "cold should be below repro threshold"
         );
         assert!(
-            temp_comfort_factor(45.0, &g) < 0.35,
+            temp_comfort_factor(45.0, &g) < 0.20,
             "hot should be below repro threshold"
         );
     }
@@ -1307,7 +1310,7 @@ mod tests {
         }
         assert_eq!(
             store.births_total, 0,
-            "cold water must block fission (comfort < 0.35)"
+            "cold water must block fission (comfort < 0.20)"
         );
         assert_eq!(store.organism_count(), 1);
     }
@@ -1666,5 +1669,78 @@ mod tests {
         let y = AgentStore::spawn_elevation(&world, 3, &bp).unwrap();
         assert!((y - (top - FLOAT_DEPTH_M)).abs() < 0.5);
         assert!((y - (world.sea_level - 0.35)).abs() > 1.0);
+    }
+
+    #[test]
+    fn default_atom_reproduces_with_thermal_fields() {
+        // Shallow bedrock used to seed ~38 °C surface water (geo→sky
+        // anchored at the air top). That hard-gated fission while energy
+        // could still fill — the playtest "peak energy, never clones" bug.
+        let mut world = World::new(42);
+        world.sea_level = 12.0;
+        world.rain_enabled = false;
+        world.weather.weather_enabled = false;
+        for c in -1..=1 {
+            world.insert_chunk(generate_flat_sand(c, -20.0, 8.0));
+        }
+        let sea = world.sea_level;
+        for x in -64..128 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+                let (eta, mass) = col.flowable_water().unwrap_or((col.surface_y, 0));
+                let bed = eta - mass as f32 / 250.0;
+                let target = ((sea - bed).max(2.0) * 250.0) as i64;
+                let need = target - mass;
+                if need > 0 {
+                    col.deposit_to_top(MaterialId::Water, need, 0);
+                }
+            }
+        }
+        world.wake_all();
+        world.enable_thermal_fields();
+        world.recompute_mass_audit();
+
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(&world, 32, Blueprint::atom(Genome::default()), 50.0)
+            .expect("spawn");
+
+        let mut temps = Vec::new();
+        let mut blocked = 0u32;
+        let mut ok = 0u32;
+        for tick in 0..5_000u64 {
+            if tick % 200 == 0 {
+                if let Ok(pose) = store.ecs.get::<&Pose>(e) {
+                    let t = world.temperature_at_point(pose.x.floor() as i32, pose.y, tick);
+                    let c = temp_comfort_factor(t, &Genome::default());
+                    if c >= 0.20 {
+                        ok += 1;
+                    } else {
+                        blocked += 1;
+                    }
+                    if temps.len() < 12 {
+                        temps.push((tick, t, c));
+                    }
+                }
+            }
+            store.step_organisms(&mut world, tick);
+            for (_ent, energy) in store.ecs.query_mut::<&mut Energy>() {
+                energy.current = energy.max;
+            }
+        }
+        eprintln!("temps_sample={temps:?} comfort_ok={ok} blocked={blocked}");
+        eprintln!(
+            "births={} count={} clones={}",
+            store.births_total,
+            store.organism_count(),
+            store
+                .inspect_organism(e)
+                .map(|i| i.clones_produced)
+                .unwrap_or(0)
+        );
+        assert!(
+            store.births_total > 0,
+            "default Atom with peak energy should fission under app-like thermal ocean (comfort_ok={ok} blocked={blocked})"
+        );
     }
 }

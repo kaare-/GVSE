@@ -172,7 +172,7 @@ fn e46c_bloom_draws_down_dissolved_co2() {
 fn e46d_cold_blocks_reproduction() {
     // Stay above 0°C so phase_change doesn't ice the water (that would
     // kill plankton via the ice gate — a different test). 3°C + narrow
-    // comfort band is enough to block fission (comfort < 0.35).
+    // comfort band is enough to block fission (comfort < 0.20).
     let mut world = wet_flat_world(9049, 3.0);
     let genome = Genome {
         metabolic_rate: 0.1,

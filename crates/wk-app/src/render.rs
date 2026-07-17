@@ -348,6 +348,8 @@ pub fn draw_frame(
     organism_modules: &[(f32, f32, (u8, u8, u8))],
     organism_inspect: Option<&wk_sim::OrganismInspect>,
     organism_highlight: Option<(f32, f32, f32, f32)>,
+    /// Live water/air temperature at the inspected creature (°C), if any.
+    organism_ambient_c: Option<f32>,
 ) {
     let sw = screen_width();
     let sh = screen_height();
@@ -524,7 +526,7 @@ pub fn draw_frame(
     // Organism inspect under the button; column inspect below that (or alone).
     let mut panel_top = by + bh + 8.0;
     if let Some(info) = organism_inspect {
-        panel_top = draw_organism_inspector(info, sw, panel_top);
+        panel_top = draw_organism_inspector(info, organism_ambient_c, sw, panel_top);
     }
     if let Some(wx) = selected {
         draw_inspector(snap, wx, sw, panel_top);
@@ -599,7 +601,12 @@ fn gas_overlay_color(level: f32, co2: bool) -> Color {
 }
 
 /// Creature inspect panel. Returns the Y just below the panel for stacking.
-fn draw_organism_inspector(info: &wk_sim::OrganismInspect, sw: f32, y0: f32) -> f32 {
+fn draw_organism_inspector(
+    info: &wk_sim::OrganismInspect,
+    ambient_c: Option<f32>,
+    sw: f32,
+    y0: f32,
+) -> f32 {
     let panel_w = 300.0;
     let habit = if info.dead {
         "DEAD (sinking)"
@@ -607,6 +614,14 @@ fn draw_organism_inspector(info: &wk_sim::OrganismInspect, sw: f32, y0: f32) -> 
         "plankton"
     } else {
         "rooted"
+    };
+    let comfort_line = match ambient_c {
+        Some(t) => {
+            let c = wk_sim::temp_comfort_factor(t, &info.genome);
+            let gate = if c >= 0.20 { "can split" } else { "too hot/cold" };
+            format!("water={t:.1}C  comfort={c:.2}  ({gate})")
+        }
+        None => "water=?  comfort=?".into(),
     };
     let lines = [
         format!("Creature #{}  {}", info.entity_id, info.name),
@@ -619,6 +634,7 @@ fn draw_organism_inspector(info: &wk_sim::OrganismInspect, sw: f32, y0: f32) -> 
             "generation={}  clones={}",
             info.generation, info.clones_produced
         ),
+        comfort_line,
         format!(
             "age={:.1}/{:.1} sim-days",
             info.age_ticks as f32 / 79_200.0,

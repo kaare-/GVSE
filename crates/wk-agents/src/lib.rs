@@ -129,10 +129,16 @@ fn default_buoyancy_bias() -> f32 {
     0.0 // floater: ~1 m under the live free-water surface
 }
 fn default_temp_optimum() -> f32 {
-    18.0
+    // Temperate surface water — matches default climate noon ocean (~22–30 °C)
+    // better than a cool-temperate 18 °C centre that sat under the hard
+    // fission comfort gate once thermal fields were enabled in the app.
+    22.0
 }
 fn default_temp_width() -> f32 {
-    12.0
+    // Wide enough that a lone editor Atom can fission through a normal
+    // day/night swing; scenarios that need a razor edge set this explicitly
+    // (see E46d).
+    18.0
 }
 
 impl Default for Genome {

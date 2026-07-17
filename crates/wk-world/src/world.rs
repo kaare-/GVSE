@@ -295,9 +295,11 @@ impl World {
     }
 
     /// Allocate and initialise a thermal field on every loaded chunk
-    /// (no-op for chunks that already have one). Seeds each cell with a
-    /// linear geothermal→sky gradient so the first ticks aren't a cold
-    /// shock.
+    /// (no-op for chunks that already have one). Seeds geothermal→sky
+    /// with the **sky end anchored at sea level** (not the top of the
+    /// air domain) so the mixed surface layer starts near climate temp.
+    /// Anchoring at `sea + FIELD_ABOVE_SEA` left near-surface water
+    /// ~35–40 °C on shallow bedrock floors and sterilised default Atoms.
     pub fn enable_thermal_fields(&mut self) {
         self.thermal_fields_enabled = true;
         let sea = self.sea_level;
@@ -316,15 +318,15 @@ impl World {
             let w = field.0.width_cells as usize;
             let h = field.0.height_cells as usize;
             let origin_y = field.0.origin_y_m;
-            let extent = (h as f32) * field.0.cell_size_m;
             let sky = temperature_at(sea, sea, 0, &climate);
+            let rock_span = (sea - origin_y).max(1e-3);
             for cy in 0..h {
                 for cx in 0..w {
                     let (_, y) = field.0.cell_center(cx, cy);
-                    let t = if extent > 0.0 {
-                        geo + (sky - geo) * ((y - origin_y) / extent).clamp(0.0, 1.0)
-                    } else {
+                    let t = if y >= sea {
                         sky
+                    } else {
+                        geo + (sky - geo) * ((y - origin_y) / rock_span).clamp(0.0, 1.0)
                     };
                     field.0.set_cell(cx, cy, t);
                 }
