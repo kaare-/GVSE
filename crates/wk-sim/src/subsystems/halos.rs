@@ -8,8 +8,9 @@ use crate::buffer::{ChunkBoundaryOutbox, WorldTransferScratch};
 pub fn update_halos(world: &mut World) {
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for coord in coords {
-        let left = world.chunks.get(&(coord - 1)).cloned();
-        let right = world.chunks.get(&(coord + 1)).cloned();
+        let (left_c, right_c) = world.neighbor_chunks(coord);
+        let left = world.chunks.get(&left_c).cloned();
+        let right = world.chunks.get(&right_c).cloned();
         let chunk = world.chunks.get_mut(&coord).unwrap();
         chunk.update_halos_from_neighbors(left.as_ref(), right.as_ref());
     }
@@ -24,7 +25,8 @@ pub fn exchange_outboxes(world: &mut World, scratch: &WorldTransferScratch) -> i
         .collect();
 
     for (coord, outbox) in pairs {
-        if let Some(right) = world.chunks.get_mut(&(coord + 1)) {
+        let (left_c, right_c) = world.neighbor_chunks(coord);
+        if let Some(right) = world.chunks.get_mut(&right_c) {
             right.inbox.water_in[0] += outbox.right_water;
             right.inbox.moisture_in[0] += outbox.right_moisture;
             right.inbox.sediment_in[0].add(
@@ -35,7 +37,7 @@ pub fn exchange_outboxes(world: &mut World, scratch: &WorldTransferScratch) -> i
             boundary_out += outbox.right_water + outbox.right_sediment.total + outbox.right_moisture;
         }
 
-        if let Some(left) = world.chunks.get_mut(&(coord - 1)) {
+        if let Some(left) = world.chunks.get_mut(&left_c) {
             let last = CHUNK_W - 1;
             left.inbox.water_in[last] += outbox.left_water;
             left.inbox.moisture_in[last] += outbox.left_moisture;

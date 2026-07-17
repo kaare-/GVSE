@@ -7,7 +7,9 @@ use crate::climate::biome_for;
 use crate::column::{Column, Ecology};
 
 /// Deepest bedrock reference elevation (metres). Ocean floor sits above this.
-pub const BEDROCK_FLOOR_M: f32 = -45.0;
+/// Deep enough for abyssal plains hundreds of metres below sea level while
+/// still leaving headroom under kilometre-scale peaks.
+pub const BEDROCK_FLOOR_M: f32 = -900.0;
 
 pub fn hash_u64(seed: u64, x: i64, y: i64, salt: u64) -> u64 {
     let mut z = seed.wrapping_add(salt);
@@ -467,6 +469,167 @@ pub fn generate_chunk_continental(
         );
     }
     chunk
+}
+
+/// Ring facies chunk: periodic belts + stratigraphic recipes (`docs/STRATA.md`).
+pub fn generate_chunk_ring_facies(
+    coord: i32,
+    seed: u64,
+    bedrock_y: f32,
+    sea_level: f32,
+    topology: crate::worldgen::WorldTopology,
+) -> Chunk {
+    let coord = crate::worldgen::wrap_chunk_coord(topology, coord);
+    let mut chunk = Chunk::new(coord, bedrock_y);
+    let base = chunk.world_x_base();
+    for i in 0..CHUNK_W {
+        let wx = crate::worldgen::wrap_world_x(topology, base + i as i32);
+        let surface =
+            crate::worldgen::facies_surface_y(seed, topology, wx, sea_level);
+        fill_facies_column(
+            &mut chunk.columns[i],
+            surface,
+            bedrock_y,
+            sea_level,
+            seed,
+            topology,
+            wx,
+            0,
+        );
+    }
+    chunk
+}
+
+/// Dispatch chunk generation from [`crate::worldgen::WorldGenParams`].
+pub fn generate_chunk(
+    coord: i32,
+    seed: u64,
+    bedrock_y: f32,
+    sea_level: f32,
+    params: crate::worldgen::WorldGenParams,
+) -> Chunk {
+    match params.profile {
+        crate::worldgen::WorldGenProfile::LegacyContinental => {
+            generate_chunk_continental(coord, seed, bedrock_y, sea_level)
+        }
+        crate::worldgen::WorldGenProfile::RingFacies => {
+            generate_chunk_ring_facies(coord, seed, bedrock_y, sea_level, params.topology)
+        }
+    }
+}
+
+/// Facies-aware stack: named packages with limestone shelves, clay basins,
+/// and talus on high ground — still ≤7 solid layers before sea fill.
+pub fn fill_facies_column(
+    col: &mut Column,
+    surface_y: f32,
+    bedrock_y: f32,
+    sea_level: f32,
+    seed: u64,
+    topology: crate::worldgen::WorldTopology,
+    world_x: i32,
+    tick: u64,
+) {
+    use crate::worldgen::{facies_at, FaciesBelt};
+
+    col.layer_count = 0;
+    col.surface_y = bedrock_y;
+
+    let belt = facies_at(seed, topology, world_x);
+    let n = |salt: u64| hash_f32(seed, world_x as i64, salt);
+
+    // Package thicknesses (metres of solid above basement fill).
+    let (stone_m, mid_mat, mid_m, cover_mat, cover_m) = match belt {
+        FaciesBelt::Abyss => (6.0, MaterialId::Clay, 3.0 + n(11) * 1.0, MaterialId::Sand, 0.8),
+        FaciesBelt::Slope => (
+            12.0,
+            MaterialId::LooseRock,
+            5.0 + n(12) * 1.5,
+            MaterialId::Gravel,
+            2.0,
+        ),
+        FaciesBelt::Shelf => (
+            8.0,
+            MaterialId::Limestone,
+            8.0 + n(13) * 1.5,
+            MaterialId::Sand,
+            2.0,
+        ),
+        FaciesBelt::Marsh => (4.0, MaterialId::Clay, 3.5 + n(14) * 0.8, MaterialId::Sand, 1.0),
+        FaciesBelt::Coast => (8.0, MaterialId::Sand, 0.0, MaterialId::Sand, 5.0 + n(15) * 1.2),
+        FaciesBelt::Plains => (
+            14.0,
+            MaterialId::Clay,
+            2.5 + n(16) * 0.8,
+            MaterialId::Sand,
+            3.5,
+        ),
+        FaciesBelt::Foothills => (
+            28.0,
+            MaterialId::Gravel,
+            6.0 + n(17) * 2.0,
+            MaterialId::LooseRock,
+            4.0,
+        ),
+        FaciesBelt::HighRange => (
+            // Tall peaks are mostly Bedrock fill; keep a thick stone sleeve
+            // so x-ray still reads as mountain rock, not a paper-thin crust.
+            80.0,
+            MaterialId::Stone,
+            0.0,
+            MaterialId::LooseRock,
+            3.0 + n(18) * 2.0,
+        ),
+        FaciesBelt::RainShadow => (
+            18.0,
+            MaterialId::Sand,
+            4.0 + n(19) * 1.2,
+            MaterialId::LooseRock,
+            2.5,
+        ),
+        FaciesBelt::InteriorBasin => (
+            8.0,
+            MaterialId::Clay,
+            5.0 + n(20) * 1.2,
+            MaterialId::Sand,
+            2.0,
+        ),
+    };
+
+    let mut sediment_h = stone_m + mid_m + cover_m;
+    // Pinch mid package when very thin — frees a layer slot (unconformity cue).
+    let use_mid = mid_m > 0.35 && mid_mat != cover_mat;
+    if !use_mid {
+        sediment_h = stone_m + cover_m;
+    }
+    let bedrock_h = (surface_y - bedrock_y - sediment_h).max(2.0);
+
+    col.deposit_to_top(
+        MaterialId::Bedrock,
+        mass_for_height(MaterialId::Bedrock, bedrock_h),
+        tick,
+    );
+    if stone_m > 0.05 {
+        col.deposit_to_top(
+            MaterialId::Stone,
+            mass_for_height(MaterialId::Stone, stone_m),
+            tick,
+        );
+    }
+    if use_mid {
+        col.deposit_to_top(mid_mat, mass_for_height(mid_mat, mid_m), tick);
+    }
+    if cover_m > 0.05 {
+        col.deposit_to_top(cover_mat, mass_for_height(cover_mat, cover_m), tick);
+    }
+
+    col.recompute_surface_y(bedrock_y);
+    col.activity = crate::column::Activity::HydrologyActive;
+    fill_up_to_sea_level(col, sea_level, tick);
+    seed_column_water_table(col, sea_level);
+    // Wet belts get a slightly richer ecology seed via elevation proxy.
+    seed_column_ecology(col, sea_level);
+    let _ = topology;
 }
 
 pub fn generate_chunk_hill(coord: i32, seed: u64, center: i32, bedrock_y: f32) -> Chunk {

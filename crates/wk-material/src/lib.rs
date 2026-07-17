@@ -6,7 +6,8 @@ pub const MATERIAL_COUNT: usize = 12;
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
 pub const MAX_LAYERS: usize = 8;
 pub const CHUNK_W: usize = 64;
-pub const MAX_LOADED_CHUNKS: usize = 96;
+/// Raised for grand ring maps (~192–256 chunks). Streaming can lower this later.
+pub const MAX_LOADED_CHUNKS: usize = 256;
 pub const MAX_MARKERS: usize = 64;
 pub const FIXED_SCALE: i64 = 1000;
 pub const MERGE_GAP: u64 = 100;

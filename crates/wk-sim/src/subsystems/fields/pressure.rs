@@ -71,9 +71,10 @@ fn update_pressure_halos(world: &mut World) {
     let ambient = world.ambient_pressure;
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for &coord in &coords {
+        let (left_c, right_c) = world.neighbor_chunks(coord);
         let left_edge: Option<Vec<f32>> = world
             .chunks
-            .get(&(coord - 1))
+            .get(&left_c)
             .and_then(|c| c.pressure.as_ref())
             .map(|p| {
                 let w = p.0.width_cells as usize;
@@ -82,7 +83,7 @@ fn update_pressure_halos(world: &mut World) {
             });
         let right_edge: Option<Vec<f32>> = world
             .chunks
-            .get(&(coord + 1))
+            .get(&right_c)
             .and_then(|c| c.pressure.as_ref())
             .map(|p| {
                 let h = p.0.height_cells as usize;

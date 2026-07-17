@@ -21,9 +21,10 @@ fn update_wind_halos(world: &mut World) {
     let base_vx = world.climate.wind_speed * SAMPLE_WIDTH_M;
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for &coord in &coords {
+        let (left_c, right_c) = world.neighbor_chunks(coord);
         let left_vx: Option<Vec<f32>> = world
             .chunks
-            .get(&(coord - 1))
+            .get(&left_c)
             .and_then(|c| c.wind.as_ref())
             .map(|w| {
                 let width = w.vx.width_cells as usize;
@@ -32,7 +33,7 @@ fn update_wind_halos(world: &mut World) {
             });
         let left_vy: Option<Vec<f32>> = world
             .chunks
-            .get(&(coord - 1))
+            .get(&left_c)
             .and_then(|c| c.wind.as_ref())
             .map(|w| {
                 let width = w.vy.width_cells as usize;
@@ -41,7 +42,7 @@ fn update_wind_halos(world: &mut World) {
             });
         let right_vx: Option<Vec<f32>> = world
             .chunks
-            .get(&(coord + 1))
+            .get(&right_c)
             .and_then(|c| c.wind.as_ref())
             .map(|w| {
                 let h = w.vx.height_cells as usize;
@@ -49,7 +50,7 @@ fn update_wind_halos(world: &mut World) {
             });
         let right_vy: Option<Vec<f32>> = world
             .chunks
-            .get(&(coord + 1))
+            .get(&right_c)
             .and_then(|c| c.wind.as_ref())
             .map(|w| {
                 let h = w.vy.height_cells as usize;

@@ -678,7 +678,15 @@ fn resolve_collisions(store: &mut AgentStore, world: &World) {
                 continue;
             }
             if let Ok(mut pose) = store.ecs.get::<&mut Pose>(*e) {
-                pose.x = (pose.x + px).clamp(lo_f, hi_f);
+                let mut x = pose.x + px;
+                if world.topology().is_ring() {
+                    let wx = world.resolve_world_x(x.floor() as i32);
+                    let frac = x - x.floor();
+                    x = wx as f32 + frac;
+                } else {
+                    x = x.clamp(lo_f, hi_f);
+                }
+                pose.x = x;
                 pose.y += py;
                 let _ = aabb;
             }

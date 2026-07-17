@@ -6,7 +6,9 @@
 //! 1. Integrate horizontal velocity `Column::surface_u` from gravity
 //!    restoring force (`−g ∂η/∂x`), wind stress, and linear drag.
 //! 2. Advect water mass with that velocity (mass-conserving pairwise flux).
-//! 3. Optionally nudge deep ocean columns toward `sea_level + tide_eta`
+//! 3. Soften single-column "comb" teeth with a conserving neighbour blend
+//!    (longer, rounder undulations — closer to the old glitch-wave look).
+//! 4. Optionally nudge deep ocean columns toward `sea_level + tide_eta`
 //!    (external shelf exchange, booked on `sea_inject_total`).
 //!
 //! Lake-level equalization still runs afterward for *shallow* ponds, but
@@ -18,15 +20,15 @@ use wk_world::world::World;
 
 use super::shared::WATER_MASS_PER_METRE_DEPTH;
 
-/// Game-scaled gravity for free-surface waves (m/s²). Real 9.81 is unstable
-/// at dt≈1s and 0.25 m columns; this yields basin seiches on O(10²) ticks.
-const WAVE_G: f32 = 0.14;
+/// Game-scaled gravity for free-surface waves (m/s²). Kept modest so
+/// seiches are long-wavelength rather than 1-column spikes.
+const WAVE_G: f32 = 0.045;
 /// Wind stress coefficient: `du += WIND_STRESS * wind_x / (depth + ε)`.
-const WIND_STRESS: f32 = 2.8;
+const WIND_STRESS: f32 = 1.1;
 /// Linear drag on surface velocity per tick.
-const LINEAR_DRAG: f32 = 0.10;
+const LINEAR_DRAG: f32 = 0.16;
 /// Hard cap on |u| (m/s) — keeps CFL comfortable with SAMPLE_WIDTH_M.
-const MAX_U: f32 = 0.20;
+const MAX_U: f32 = 0.07;
 /// Minimum depth (m) that carries momentum / wind stress.
 const MIN_WAVE_DEPTH_M: f32 = 0.08;
 /// Fraction of the tidal target depth applied per tick (smooth, not a snap).
@@ -35,6 +37,10 @@ const TIDE_BLEND: f32 = 0.05;
 const OCEAN_MEAN_DEPTH_M: f32 = 1.25;
 /// Minimum flowable water (kg) to participate in the wave pass.
 const MIN_WAVE_WATER_KG: i64 = 20;
+/// Max fraction of a cell's mass that may leave in one pairwise flux.
+const MAX_FLUX_FRAC: i64 = 10;
+/// Conserving neighbour blend strength (kills comb teeth on deep water).
+const SURFACE_SMOOTH: f32 = 0.28;
 
 #[derive(Clone, Copy)]
 struct WaveCell {
@@ -115,8 +121,25 @@ pub fn run_surface_waves(world: &mut World, tick: u64) {
         // Only couple to contiguous wet neighbours (gap ⇒ reflecting wall).
         let left_ok = i > 0 && cells[i - 1].world_x + 1 == cell.world_x;
         let right_ok = i + 1 < cells.len() && cells[i + 1].world_x == cell.world_x + 1;
+        // Wider stencil when both sides exist: average near/far slopes so
+        // short comb teeth don't drive the restoring force as hard.
         let grad = match (left_ok, right_ok) {
-            (true, true) => (eta_r - eta_l) / (2.0 * dx),
+            (true, true) => {
+                let near = (eta_r - eta_l) / (2.0 * dx);
+                let far_l = if i > 1 && cells[i - 2].world_x + 2 == cell.world_x {
+                    cells[i - 2].eta
+                } else {
+                    eta_l
+                };
+                let far_r = if i + 2 < cells.len() && cells[i + 2].world_x == cell.world_x + 2
+                {
+                    cells[i + 2].eta
+                } else {
+                    eta_r
+                };
+                let wide = (far_r - far_l) / (4.0 * dx);
+                0.35 * near + 0.65 * wide
+            }
             (false, true) => (eta_r - cell.eta) / dx,
             (true, false) => (cell.eta - eta_l) / dx,
             (false, false) => 0.0,
@@ -139,13 +162,42 @@ pub fn run_surface_waves(world: &mut World, tick: u64) {
         let depth_face = 0.5 * (cells[i].depth_m + cells[i + 1].depth_m);
         let mut flux = (u_face * depth_face * WATER_MASS_PER_METRE_DEPTH).round() as i64;
         if flux > 0 {
-            flux = flux.min(cells[i].mass / 4).max(0);
+            flux = flux.min(cells[i].mass / MAX_FLUX_FRAC).max(0);
         } else if flux < 0 {
-            flux = (-flux).min(cells[i + 1].mass / 4).max(0);
+            flux = (-flux).min(cells[i + 1].mass / MAX_FLUX_FRAC).max(0);
             flux = -flux;
         }
         mass_delta[i] -= flux;
         mass_delta[i + 1] += flux;
+    }
+
+    // Conserving neighbour blend on oceanic columns — rounds standing
+    // waves into longer undulations instead of 1-pixel comb teeth.
+    for i in 0..cells.len().saturating_sub(1) {
+        if cells[i + 1].world_x != cells[i].world_x + 1 {
+            continue;
+        }
+        if !(cells[i].oceanic && cells[i + 1].oceanic) {
+            continue;
+        }
+        let mi = cells[i].mass + mass_delta[i];
+        let mj = cells[i + 1].mass + mass_delta[i + 1];
+        let di = mi as f32 / WATER_MASS_PER_METRE_DEPTH;
+        let dj = mj as f32 / WATER_MASS_PER_METRE_DEPTH;
+        let xfer = ((di - dj) * 0.5 * SURFACE_SMOOTH * WATER_MASS_PER_METRE_DEPTH).round() as i64;
+        if xfer == 0 {
+            continue;
+        }
+        // Move mass from the higher column toward the lower one.
+        if xfer > 0 {
+            let take = xfer.min(mi.max(0) / 4);
+            mass_delta[i] -= take;
+            mass_delta[i + 1] += take;
+        } else {
+            let take = (-xfer).min(mj.max(0) / 4);
+            mass_delta[i + 1] -= take;
+            mass_delta[i] += take;
+        }
     }
 
     // Tide: pull oceanic free surfaces toward sea_level + η_tide.

@@ -11,6 +11,9 @@ use crate::fields::{
 };
 use crate::marker::Marker;
 use crate::weather::{Cloud, WeatherSettings};
+use crate::worldgen::{
+    neighbor_chunk_coords, wrap_chunk_coord, wrap_world_x, WorldGenParams, WorldTopology,
+};
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct MassAudit {
@@ -109,6 +112,8 @@ pub struct World {
     pub tide_amplitude_m: f32,
     /// Tide period in ticks (one full rise+fall cycle).
     pub tide_period_ticks: u64,
+    /// Ring vs open strip + which terrain generator to use.
+    pub gen: WorldGenParams,
     /// World-x columns that currently host agents. `run_activity` keeps
     /// these HydrologyActive so creature-bearing chunks don't go dormant.
     /// Rebuilt each agent step; not part of the save schema.
@@ -136,7 +141,13 @@ impl World {
     }
 
     /// Inclusive world-x range covered by loaded chunks.
+    /// On a ring this is always `[0, width_columns - 1]` when fully loaded.
     pub fn world_x_bounds(&self) -> Option<(i32, i32)> {
+        if let Some(w) = self.gen.topology.width_columns() {
+            if !self.chunks.is_empty() {
+                return Some((0, w - 1));
+            }
+        }
         if self.chunks.is_empty() {
             return None;
         }
@@ -186,8 +197,22 @@ impl World {
             tide_enabled: false,
             tide_amplitude_m: 0.45,
             tide_period_ticks: 1_800,
+            gen: WorldGenParams::default(),
             agent_keep_awake: Vec::new(),
         }
+    }
+
+    pub fn topology(&self) -> WorldTopology {
+        self.gen.topology
+    }
+
+    /// Resolve world-x through ring wrap (identity on open maps).
+    pub fn resolve_world_x(&self, world_x: i32) -> i32 {
+        wrap_world_x(self.gen.topology, world_x)
+    }
+
+    pub fn resolve_chunk_coord(&self, coord: i32) -> i32 {
+        wrap_chunk_coord(self.gen.topology, coord)
     }
 
     /// Instantaneous tidal free-surface offset (metres) at `tick`.
@@ -653,21 +678,29 @@ impl World {
     }
 
     pub fn column_at_mut(&mut self, world_x: i32) -> Option<&mut Column> {
+        let world_x = self.resolve_world_x(world_x);
         let coord = Self::chunk_coord_for_world_x(world_x);
         let lx = Self::local_x(world_x);
         self.chunks.get_mut(&coord).map(|c| &mut c.columns[lx])
     }
 
     pub fn column_at(&self, world_x: i32) -> Option<&Column> {
+        let world_x = self.resolve_world_x(world_x);
         let coord = Self::chunk_coord_for_world_x(world_x);
         let lx = Self::local_x(world_x);
         self.chunks.get(&coord).map(|c| &c.columns[lx])
     }
 
     pub fn world_x_to_chunk_local(&self, world_x: i32) -> Option<(i32, usize)> {
+        let world_x = self.resolve_world_x(world_x);
         let coord = Self::chunk_coord_for_world_x(world_x);
         let lx = Self::local_x(world_x);
         self.chunks.get(&coord).map(|_| (coord, lx))
+    }
+
+    /// Left/right neighbour chunk coords (wrapped on a ring).
+    pub fn neighbor_chunks(&self, coord: i32) -> (i32, i32) {
+        neighbor_chunk_coords(self.gen.topology, coord)
     }
 
     pub fn recompute_mass_audit(&mut self) {
@@ -885,7 +918,7 @@ impl World {
             .unwrap_or((bedrock_floor, self.sea_level + 30.0));
         let mut columns = Vec::with_capacity(width);
         for i in 0..width {
-            let wx = viewport_x + i as i32;
+            let wx = self.resolve_world_x(viewport_x + i as i32);
             if let Some((coord, local)) = self.world_x_to_chunk_local(wx) {
                 let chunk = &self.chunks[&coord];
                 let col = &chunk.columns[local];
