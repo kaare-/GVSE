@@ -60,9 +60,10 @@ fn build_alpha(chunk: &wk_world::chunk::Chunk, field: &FieldPatch) -> FieldPatch
 fn update_dissolved_halos(world: &mut World) {
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for &coord in &coords {
+        let (left_c, right_c) = world.neighbor_chunks(coord);
         let left_edge: Option<Vec<f32>> = world
             .chunks
-            .get(&(coord - 1))
+            .get(&left_c)
             .and_then(|c| c.dissolved.as_ref())
             .map(|d| {
                 let w = d.0.width_cells as usize;
@@ -71,7 +72,7 @@ fn update_dissolved_halos(world: &mut World) {
             });
         let right_edge: Option<Vec<f32>> = world
             .chunks
-            .get(&(coord + 1))
+            .get(&right_c)
             .and_then(|c| c.dissolved.as_ref())
             .map(|d| {
                 let h = d.0.height_cells as usize;

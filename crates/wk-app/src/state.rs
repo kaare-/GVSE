@@ -10,11 +10,9 @@ const SCROLL_SPEED_COLS_PER_SEC: f32 = 70.0;
 /// Screen pixels per second while W/S is held to pan the camera up/down.
 const CAMERA_Y_SPEED_PX_PER_SEC: f32 = 320.0;
 const MAX_TICKS_PER_FRAME: u64 = 60;
-/// Chunks to generate: 88 chunks × 64 cols = 5632 columns (~1408 m) —
-/// wide enough for the full ocean → shelf → coastal → plains → extended
-/// mountain range with 8 named peaks and enclosed valleys.
-const MAP_CHUNK_MIN: i32 = -8;
-const MAP_CHUNK_MAX: i32 = 80;
+/// Default ring circumference (96 × 64 cols ≈ 1.5 km). Matches
+/// `WorldGenParams::default_ring` and `MAX_LOADED_CHUNKS`.
+const RING_CHUNKS: u32 = 96;
 
 pub struct AppState {
     pub world: wk_world::world::World,
@@ -57,13 +55,20 @@ impl AppState {
         // (RainInject now fires every tick instead of every 6th, so this is
         // ~1/6 of the old nominal value to deliver the same average total.)
         world.rain_rate = 1.0;
+        world.gen = wk_world::WorldGenParams {
+            topology: wk_world::WorldTopology::Ring {
+                chunks: RING_CHUNKS,
+            },
+            profile: wk_world::WorldGenProfile::RingFacies,
+        };
 
-        for c in MAP_CHUNK_MIN..MAP_CHUNK_MAX {
-            let chunk = wk_world::terrain::generate_chunk_continental(
+        for c in 0..RING_CHUNKS as i32 {
+            let chunk = wk_world::terrain::generate_chunk(
                 c,
                 world.seed,
                 wk_world::terrain::BEDROCK_FLOOR_M,
                 world.sea_level,
+                world.gen,
             );
             world.insert_chunk(chunk);
         }
@@ -133,6 +138,12 @@ impl AppState {
     }
 
     fn clamp_viewport(&mut self) {
+        if self.world.topology().is_ring() {
+            if let Some(w) = self.world.topology().width_columns() {
+                self.viewport_x = self.viewport_x.rem_euclid(w);
+            }
+            return;
+        }
         let (lo, hi) = self.scroll_bounds();
         self.viewport_x = self.viewport_x.clamp(lo, hi);
     }

@@ -32,7 +32,12 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
         // (like tall mountains) — see rain_chance_per_tick for the other
         // half of that budget (making rain intermittent, not constant).
         let moisture = 10_000.0 + wk_world::terrain::hash_f32(seed, tick as i64, 402) * 18_000.0;
-        let spawn_x = if climate_wind >= 0.0 {
+        let spawn_x = if world.topology().is_ring() {
+            // Spawn inside the ring; wrap handles circulation.
+            x_min as f32
+                + wk_world::terrain::hash_f32(seed, tick as i64, 403)
+                    * (x_max - x_min).max(1) as f32
+        } else if climate_wind >= 0.0 {
             x_min as f32 - half_width
         } else {
             x_max as f32 + half_width
@@ -46,6 +51,8 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
     }
 
     let sea = world.sea_level;
+    let ring = world.topology().is_ring();
+    let width_cols = world.topology().width_columns();
     let wind_cols: Vec<f32> = if world.pressure_wind_fields_enabled {
         world
             .clouds
@@ -66,6 +73,12 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
     };
     for (cloud, &w) in world.clouds.iter_mut().zip(wind_cols.iter()) {
         cloud.x += w;
+        if ring {
+            if let Some(wcols) = width_cols {
+                let w = wcols as f32;
+                cloud.x = cloud.x.rem_euclid(w);
+            }
+        }
     }
 
     if world.weather.weather_enabled {
@@ -145,11 +158,18 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
         }
     }
 
-    // Despawn clouds that are spent or have drifted well off the map.
+    // Despawn spent clouds; off-map cull only on open strips (rings wrap).
     let margin = 5.0;
+    let ring = world.topology().is_ring();
     world.clouds.retain(|c| {
-        c.moisture > 0.0
-            && c.x + c.half_width > x_min as f32 - margin
-            && c.x - c.half_width < x_max as f32 + margin
+        if c.moisture <= 0.0 {
+            return false;
+        }
+        if ring {
+            true
+        } else {
+            c.x + c.half_width > x_min as f32 - margin
+                && c.x - c.half_width < x_max as f32 + margin
+        }
     });
 }

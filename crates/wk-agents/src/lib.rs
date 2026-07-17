@@ -429,8 +429,12 @@ impl AgentStore {
 
             let mut new_x = pose.x + dx;
             let mut new_wx = new_x.floor() as i32;
-            // Stay inside loaded columns — wandering off-map starves agents.
-            if world.column_at(new_wx).is_none() {
+            // Ring worlds wrap; open maps bounce at unloaded edges.
+            if world.topology().is_ring() {
+                let frac = new_x - new_wx as f32;
+                new_wx = world.resolve_world_x(new_wx);
+                new_x = new_wx as f32 + frac;
+            } else if world.column_at(new_wx).is_none() {
                 new_x = pose.x;
                 new_wx = wx;
             }

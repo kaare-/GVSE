@@ -103,9 +103,10 @@ fn update_humidity_halos(world: &mut World) {
     let ambient = world.ambient_humidity.clamp(0.0, 1.0);
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for &coord in &coords {
+        let (left_c, right_c) = world.neighbor_chunks(coord);
         let left_edge: Option<Vec<f32>> = world
             .chunks
-            .get(&(coord - 1))
+            .get(&left_c)
             .and_then(|c| c.humidity.as_ref())
             .map(|h| {
                 let w = h.0.width_cells as usize;
@@ -114,7 +115,7 @@ fn update_humidity_halos(world: &mut World) {
             });
         let right_edge: Option<Vec<f32>> = world
             .chunks
-            .get(&(coord + 1))
+            .get(&right_c)
             .and_then(|c| c.humidity.as_ref())
             .map(|h| {
                 let ht = h.0.height_cells as usize;

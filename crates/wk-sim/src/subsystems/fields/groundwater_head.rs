@@ -72,9 +72,10 @@ pub fn sync_head_from_columns(world: &mut World) {
 fn update_gw_halos(world: &mut World) {
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for &coord in &coords {
+        let (left_c, right_c) = world.neighbor_chunks(coord);
         let left_edge: Option<Vec<f32>> = world
             .chunks
-            .get(&(coord - 1))
+            .get(&left_c)
             .and_then(|c| c.gw_head.as_ref())
             .map(|g| {
                 let w = g.0.width_cells as usize;
@@ -83,7 +84,7 @@ fn update_gw_halos(world: &mut World) {
             });
         let right_edge: Option<Vec<f32>> = world
             .chunks
-            .get(&(coord + 1))
+            .get(&right_c)
             .and_then(|c| c.gw_head.as_ref())
             .map(|g| {
                 let h = g.0.height_cells as usize;

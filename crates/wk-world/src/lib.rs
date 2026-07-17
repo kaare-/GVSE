@@ -9,6 +9,7 @@ pub mod marker;
 pub mod terrain;
 pub mod weather;
 pub mod world;
+pub mod worldgen;
 
 pub use climate::*;
 pub use column::*;
@@ -19,3 +20,4 @@ pub use marker::*;
 pub use terrain::*;
 pub use weather::*;
 pub use world::*;
+pub use worldgen::*;
