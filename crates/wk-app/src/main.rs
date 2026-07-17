@@ -33,6 +33,13 @@ async fn main() {
         let inspect = app
             .selected_organism
             .and_then(|e| app.sim.agents.inspect_organism(e));
+        let ambient_c = inspect.as_ref().map(|info| {
+            app.world.temperature_at_point(
+                info.x.floor() as i32,
+                info.y,
+                app.sim.clock.tick,
+            )
+        });
         let highlight = app
             .selected_organism
             .and_then(|e| app.sim.agents.organism_highlight_aabb(e))
@@ -45,6 +52,7 @@ async fn main() {
             &organisms,
             inspect.as_ref(),
             highlight,
+            ambient_c,
         );
         if app.editor.open {
             app.editor.draw();
