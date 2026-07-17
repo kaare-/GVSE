@@ -17,7 +17,7 @@ pub use residual::*;
 pub use sim::*;
 pub use hecs::Entity;
 pub use wk_agents::{
-    temp_comfort_factor, Aabb, AgentStore, Blueprint, Energy, Genome, Grazer, LaneId, Lineage,
-    ModuleBody, ModuleId, Organism, OrganismInspect, PlacedModule, Pose, Wire, WireKind, MAX_AGENTS,
-    MAX_ORGANISMS,
+    circadian_buoyancy_bias, temp_comfort_factor, Aabb, AgentStore, Blueprint, Energy, Genome,
+    Grazer, LaneId, Lineage, ModuleBody, ModuleId, Organism, OrganismInspect, PlacedModule, Pose,
+    Wire, WireKind, MAX_AGENTS, MAX_ORGANISMS,
 };

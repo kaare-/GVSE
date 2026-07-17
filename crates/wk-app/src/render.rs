@@ -458,9 +458,24 @@ pub fn draw_frame(
                 draw_rectangle(x, sh - 8.0, COL_W, 4.0, Color::from_rgba(a, 255 - a, 128, 200));
             }
             OverlayMode::TemperatureField => {
-                // Cold blue → hot red across roughly 0–55 °C (sky→geothermal).
-                let c = temperature_overlay_color(col.temperature_c);
-                draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
+                if col.temp_column.len() >= 2 {
+                    // Full-column heatmap: warm skin / cool deep reads as a
+                    // vertical gradient (not a single surface tick).
+                    for w in col.temp_column.windows(2) {
+                        let (y0, t0) = w[0];
+                        let (y1, _) = w[1];
+                        let p0 = world_y_to_screen(y0, snap.sea_level, sh, camera_y_offset);
+                        let p1 = world_y_to_screen(y1, snap.sea_level, sh, camera_y_offset);
+                        let hgt = (p1 - p0).abs().max(1.0);
+                        let y_pix = p0.min(p1);
+                        let mut c = temperature_overlay_color(t0);
+                        c.a = 0.55;
+                        draw_rectangle(x, y_pix, COL_W, hgt, c);
+                    }
+                } else {
+                    let c = temperature_overlay_color(col.temperature_c);
+                    draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
+                }
             }
             OverlayMode::HumidityField => {
                 let c = humidity_overlay_color(col.humidity_rh);

@@ -14,8 +14,8 @@ pub mod organism;
 pub use blueprint::{Blueprint, PlacedModule, Wire, WireKind, BLUEPRINT_DIR};
 pub use module::{LaneId, ModuleId};
 pub use organism::{
-    temp_comfort_factor, Aabb, Corpse, Lineage, ModuleBody, Organism, OrganismInspect,
-    MAX_ORGANISMS, MODULE_CELL_COLS, PHOTON_RATE, CO2_HALF_SAT, CO2_PER_ENERGY,
+    circadian_buoyancy_bias, temp_comfort_factor, Aabb, Corpse, Lineage, ModuleBody, Organism,
+    OrganismInspect, MAX_ORGANISMS, MODULE_CELL_COLS, PHOTON_RATE, CO2_HALF_SAT, CO2_PER_ENERGY,
 };
 
 use hecs::{Entity, World as EcsWorld};

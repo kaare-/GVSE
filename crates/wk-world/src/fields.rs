@@ -22,6 +22,47 @@ pub const DISSOLVED_CELL_M: f32 = 0.5;
 pub const FIELD_BELOW_BEDROCK_M: f32 = 5.0;
 pub const FIELD_ABOVE_SEA_M: f32 = 30.0;
 
+/// Warm mixed layer thickness below the free surface / sea level (m).
+pub const MIXED_LAYER_M: f32 = 8.0;
+/// Depth span of the thermocline beneath the mixed layer (m).
+pub const THERMOCLINE_M: f32 = 28.0;
+/// How much cooler (°C) deep water sits vs the warm surface skin.
+pub const DEEP_WATER_COOLING_C: f32 = 9.0;
+/// Peak solar heating (°C) added to the mixed layer at solar noon.
+pub const MIXED_LAYER_SOLAR_C: f32 = 3.5;
+
+/// Stratified water-column temperature profile for seeding / restoring.
+///
+/// - Air (`y ≥ sea`): `sky`
+/// - Mixed layer: warm skin (`sky + solar_heat_c`)
+/// - Thermocline: cools toward `sky + solar − DEEP_WATER_COOLING`
+/// - Below: blends toward geothermal at the field origin
+pub fn stratified_water_temp(
+    y_m: f32,
+    sea_level: f32,
+    origin_y_m: f32,
+    sky_c: f32,
+    geothermal_c: f32,
+    solar_heat_c: f32,
+) -> f32 {
+    if y_m >= sea_level {
+        return sky_c;
+    }
+    let surface = sky_c + solar_heat_c.max(0.0);
+    let deep_water = surface - DEEP_WATER_COOLING_C;
+    let depth = sea_level - y_m;
+    if depth <= MIXED_LAYER_M {
+        return surface;
+    }
+    if depth <= MIXED_LAYER_M + THERMOCLINE_M {
+        let u = ((depth - MIXED_LAYER_M) / THERMOCLINE_M).clamp(0.0, 1.0);
+        return surface + (deep_water - surface) * u;
+    }
+    let y_deep = sea_level - MIXED_LAYER_M - THERMOCLINE_M;
+    let span = (y_deep - origin_y_m).max(1e-3);
+    geothermal_c + (deep_water - geothermal_c) * ((y_m - origin_y_m) / span).clamp(0.0, 1.0)
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct ThermalField(pub FieldPatch);
 
@@ -139,6 +180,28 @@ mod tests {
         assert!(f.0.height_cells > 1);
         assert!((f.0.origin_x_m - 0.0).abs() < 1e-5);
         assert!((f.0.origin_y_m - (-45.0 - FIELD_BELOW_BEDROCK_M)).abs() < 1e-5);
+    }
+
+    #[test]
+    fn stratified_profile_has_warm_skin_and_cool_deep() {
+        let sea = 12.0;
+        let origin = -200.0;
+        let sky = 22.0;
+        let geo = 55.0;
+        let surface = stratified_water_temp(sea - 1.0, sea, origin, sky, geo, 3.0);
+        let mid = stratified_water_temp(sea - 20.0, sea, origin, sky, geo, 3.0);
+        let deep = stratified_water_temp(sea - 60.0, sea, origin, sky, geo, 3.0);
+        assert!(surface > sky, "mixed layer should be at least sky (+ solar)");
+        assert!(
+            mid < surface - 2.0,
+            "thermocline should cool vs skin (skin={surface:.1} mid={mid:.1})"
+        );
+        assert!(
+            deep < mid + 1.0,
+            "deep water should stay cool vs mid (mid={mid:.1} deep={deep:.1})"
+        );
+        let air = stratified_water_temp(sea + 5.0, sea, origin, sky, geo, 3.0);
+        assert!((air - sky).abs() < 1e-3);
     }
 
     #[test]

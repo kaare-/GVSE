@@ -1,8 +1,12 @@
-//! Thermal field: diffusion with geothermal bottom + sky top boundaries.
+//! Thermal field: diffusion with geothermal bottom + sky top boundaries,
+//! plus a restored warm mixed layer / cool thermocline in free water.
 
 use wk_field::{explicit_diffusion, FieldPatch};
 use wk_material::{MaterialId, MaterialRegistry, CHUNK_W, SAMPLE_WIDTH_M};
 use wk_world::column::Column;
+use wk_world::fields::{
+    stratified_water_temp, MIXED_LAYER_M, MIXED_LAYER_SOLAR_C, THERMOCLINE_M,
+};
 use wk_world::world::World;
 
 /// Game seconds advanced per thermal field step. Paired with the
@@ -11,6 +15,9 @@ const DT_SECONDS: f32 = 10.0;
 
 /// Diffusivity used for open air above the column surface.
 const AIR_DIFFUSIVITY: f32 = 0.004;
+
+/// Blend strength restoring the stratified water profile each step.
+const STRATIFY_BLEND: f32 = 0.06;
 
 /// Material occupying elevation `y_m` in a column (Air above the
 /// surface, Bedrock below the deepest layer).
@@ -108,7 +115,8 @@ fn update_thermal_halos(world: &mut World) {
 }
 
 /// Diffuse each chunk's thermal field, then re-impose Dirichlet
-/// boundaries: bottom = geothermal, top = sky temperature from climate.
+/// boundaries and gently restore the warm-skin / cool-deep profile in
+/// free water so solar heating + thermocline survive diffusion.
 pub fn run_thermal_field(world: &mut World, tick: u64) {
     if !world.thermal_fields_enabled {
         return;
@@ -118,6 +126,8 @@ pub fn run_thermal_field(world: &mut World, tick: u64) {
     let climate = world.climate.clone();
     let sea = world.sea_level;
     let geo = world.geothermal_bottom_c;
+    let day = climate.day_night_factor(tick).max(0.0);
+    let solar = MIXED_LAYER_SOLAR_C * day;
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
 
     for coord in coords {
@@ -133,6 +143,8 @@ pub fn run_thermal_field(world: &mut World, tick: u64) {
             let source = field.zeros_like();
             let w = field.width_cells as usize;
             let h = field.height_cells as usize;
+            let origin_y = field.origin_y_m;
+            let base_x = chunk.world_x_base();
 
             let mut field_with_bc = field.clone();
             let sky = wk_world::climate::temperature_at(sea, sea, tick, &climate);
@@ -154,6 +166,34 @@ pub fn run_thermal_field(world: &mut World, tick: u64) {
             }
             out.halo.left = field_with_bc.halo.left;
             out.halo.right = field_with_bc.halo.right;
+
+            // Restore stratification in the free-water column so the
+            // mixed layer stays warm (solar) and the thermocline cool.
+            let strat_bot = sea - MIXED_LAYER_M - THERMOCLINE_M;
+            for cx in 0..w {
+                let local = {
+                    let (x_m, _) = out.cell_center(cx, 0);
+                    ((x_m / SAMPLE_WIDTH_M).floor() as i32 - base_x)
+                        .clamp(0, CHUNK_W as i32 - 1) as usize
+                };
+                let col = &chunk.columns[local];
+                let water_top = col
+                    .flowable_water()
+                    .map(|(top, _)| top)
+                    .unwrap_or(col.surface_y);
+                for cy in 1..h.saturating_sub(1) {
+                    let (_, y) = out.cell_center(cx, cy);
+                    if y >= water_top || y < strat_bot.min(water_top) {
+                        continue;
+                    }
+                    if material_at_y(col, y) != MaterialId::Water {
+                        continue;
+                    }
+                    let target = stratified_water_temp(y, sea, origin_y, sky, geo, solar);
+                    let t = out.cell_at(cx, cy);
+                    out.set_cell(cx, cy, t * (1.0 - STRATIFY_BLEND) + target * STRATIFY_BLEND);
+                }
+            }
             out
         };
         if let Some(chunk) = world.chunks.get_mut(&coord) {

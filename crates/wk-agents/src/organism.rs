@@ -374,6 +374,23 @@ pub fn sky_light_l0(day_night_factor: f32) -> f32 {
     ((day_night_factor + 1.0) * 0.5).clamp(0.0, 1.0)
 }
 
+/// Circadian depth migration on top of [`Genome::buoyancy_bias`].
+///
+/// Active window (typically day for default phase): prefer the upper
+/// water column. Inactive (night): prefer deeper water. Gene still
+/// distinguishes floaters from mid-water / sinkers within each band.
+///
+/// Interim Set-A stand-in for the planned Set-C soma wiring of day/night
+/// → depth target (E33).
+pub fn circadian_buoyancy_bias(genome: &Genome, phase_fraction: f32) -> f32 {
+    let g = genome.buoyancy_bias.clamp(0.0, 1.0);
+    if circadian_active(genome, phase_fraction) {
+        g * 0.35
+    } else {
+        0.55 + g * 0.45
+    }
+}
+
 /// True if the organism's circadian window is open this tick.
 pub fn circadian_active(genome: &Genome, phase_fraction: f32) -> bool {
     let half = (genome.active_window * 0.5).clamp(0.0, 0.5);
@@ -923,7 +940,8 @@ impl AgentStore {
 
             if let Some(col) = world.column_at(wx) {
                 if plankton {
-                    step_buoyancy(&mut pose.y, buoy, col, genome.buoyancy_bias);
+                    let bias = circadian_buoyancy_bias(genome, phase);
+                    step_buoyancy(&mut pose.y, buoy, col, bias);
                 } else {
                     pose.y = col.surface_y;
                     buoy.vel_y = 0.0;
@@ -1253,6 +1271,21 @@ mod tests {
         store.step_organisms(&mut world, 1);
         assert_eq!(store.organism_count(), 0, "ice should kill plankton");
         assert_eq!(store.corpse_count(), 1);
+    }
+
+    #[test]
+    fn circadian_buoyancy_floats_by_day_sinks_by_night() {
+        let g = Genome {
+            buoyancy_bias: 0.0,
+            circadian_phase: 0.25,
+            active_window: 0.55,
+            ..Genome::default()
+        };
+        let day = circadian_buoyancy_bias(&g, 0.25);
+        let night = circadian_buoyancy_bias(&g, 0.75);
+        assert!(day < 0.2, "day bias should be near surface (got {day})");
+        assert!(night > 0.5, "night bias should be deeper (got {night})");
+        assert!(night > day + 0.3);
     }
 
     #[test]

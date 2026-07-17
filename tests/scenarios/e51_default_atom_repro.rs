@@ -79,8 +79,8 @@ fn e51a_default_atom_fissions_in_app_ocean() {
         "default Atom should fission with peak energy (max_temp={max_temp:.1} min_comfort={min_comfort:.3})"
     );
     assert!(
-        max_temp < 32.0,
-        "surface water should stay near climate, not geothermal (~35–40C); max_temp={max_temp:.1}"
+        max_temp < 36.0,
+        "surface water should stay near climate+solar, not geothermal (~40C+); max_temp={max_temp:.1}"
     );
     assert!(elapsed.as_secs() < 60, "E51a perf: {:?}", elapsed);
 }

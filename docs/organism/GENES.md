@@ -67,9 +67,9 @@ new kernel genes append.
 
 | Gene | Domain | High | Low |
 |------|--------|------|-----|
-| `TempOptimum` | `f32` (°C) | Comfort centre for photo / fission (default 18). | Same. |
-| `TempWidth` | `f32 ≥ 0` (°C) | Wide comfort; reproduces in more climates. | Narrow specialist; cold/hot throttles fission. |
-| `BuoyancyBias` | `f32 in 0..1` | Heavy: sinks toward the water bed. | Buoyant: rides ~1 m under the live free-water surface; rises/falls with water via weight vs buoyancy (not a constant `sea_level` snap). |
+| `TempOptimum` | `f32` (°C) | Comfort centre for photo / fission (default 22). | Same. |
+| `TempWidth` | `f32 ≥ 0` (°C) | Wide comfort; reproduces in more climates (default 18). | Narrow specialist; cold/hot throttles fission. |
+| `BuoyancyBias` | `f32 in 0..1` | Heavy: sinks toward the water bed. | Buoyant: rides ~1 m under the live free-water surface; rises/falls with water via weight vs buoyancy (not a constant `sea_level` snap). **Circadian:** active window pulls toward the float side; inactive (night) pulls deeper — day-float / night-sink (E33 interim, before Set C soma wiring). |
 
 ### Chemistry (per sensor / emitter module)
 
