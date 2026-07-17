@@ -202,6 +202,55 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8
 }
 
+/// Analytical travelling sine wave drawn on top of any column whose top
+/// layer is Water. Two harmonics with different wavelengths / speeds so
+/// the surface reads as slowly rolling swell rather than a single pure
+/// tone. Wind speed shifts the phase drift (waves roll downwind).
+fn draw_water_ripples(snap: &RenderSnapshot, sh: f32, camera_y_offset: f32) {
+    // Primary swell: long wavelength (~10 m), slow phase (~1 wavelength / 15 s at 60 tps).
+    const K1: f32 = 0.15;
+    const OMEGA1: f32 = 0.006;
+    const AMP1_M: f32 = 0.18;
+    // Secondary chop: shorter wavelength, opposite drift → gentle beat.
+    const K2: f32 = 0.42;
+    const OMEGA2: f32 = -0.011;
+    const AMP2_M: f32 = 0.08;
+
+    let wind_bias = snap.climate.wind_speed * 0.002;
+    let t = snap.tick as f32;
+    for (i, col) in snap.columns.iter().enumerate() {
+        if col.surface_water <= 0 {
+            continue;
+        }
+        let wx = col.world_x as f32;
+        let crest_m = AMP1_M * (K1 * wx + (OMEGA1 + wind_bias) * t).sin()
+            + AMP2_M * (K2 * wx + (OMEGA2 - wind_bias) * t).sin();
+        // Positive crest raises the surface on screen (world-y up).
+        let base_px = world_y_to_screen(col.surface_y, snap.sea_level, sh, camera_y_offset);
+        let crest_px = world_y_to_screen(
+            col.surface_y + crest_m,
+            snap.sea_level,
+            sh,
+            camera_y_offset,
+        );
+        let x = i as f32 * COL_W;
+        let (top, height) = if crest_px < base_px {
+            (crest_px, base_px - crest_px)
+        } else {
+            (base_px, (crest_px - base_px).max(0.5))
+        };
+        // Slight highlight for crests, slight shadow for troughs — gives
+        // the sine wave visible relief without changing physics.
+        let alpha = if crest_m >= 0.0 { 180 } else { 130 };
+        let colour = if crest_m >= 0.0 {
+            Color::from_rgba(0x4a, 0x8f, 0xF0, alpha)
+        } else {
+            Color::from_rgba(0x1a, 0x4b, 0xA0, alpha)
+        };
+        draw_rectangle(x, top, COL_W, height.max(0.75), colour);
+    }
+}
+
 /// Sky colour driven by the day/night cycle, with a warm twilight glow right
 /// at sunrise/sunset, dimmed further if it's currently raining.
 fn sky_color_for(snap: &RenderSnapshot) -> Color {
@@ -496,6 +545,12 @@ pub fn draw_frame(
     // No constant "ocean line" — free water surface is the column water
     // top itself. Drawing sea_level as a horizon was leftover from an
     // older constant-ocean model and made plankton look airborne.
+
+    // Cosmetic ocean ripples: analytical travelling sine wave drawn on
+    // top of every column whose top layer is Water. Physics-side waves
+    // are intentionally minimal (tide + slow wind drift only); this is
+    // what the eye actually reads as "the wave rolling across the sea".
+    draw_water_ripples(snap, sh, camera_y_offset);
 
     if snap.rain_enabled {
         draw_rain(sw, sh, sea_y);

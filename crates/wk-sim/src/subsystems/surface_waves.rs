@@ -21,18 +21,18 @@ use wk_world::world::World;
 use super::shared::WATER_MASS_PER_METRE_DEPTH;
 
 /// Game-scaled gravity for free-surface waves (m/s²).
-const WAVE_G: f32 = 0.05;
+const WAVE_G: f32 = 0.03;
 /// Wind stress coefficient: `du += WIND_STRESS * wind_x / (depth_eff + ε)`.
-const WIND_STRESS: f32 = 1.2;
+const WIND_STRESS: f32 = 1.1;
 /// Linear drag on surface velocity per wave step.
-const LINEAR_DRAG: f32 = 0.18;
+const LINEAR_DRAG: f32 = 0.25;
 /// Hard cap on |u| (m/s).
-const MAX_U: f32 = 0.04;
+const MAX_U: f32 = 0.025;
 /// Only the top of the water column participates in wave flux. Full-depth
 /// oceans (100–400 m) otherwise produce absurd η spikes.
 const WAVE_ACTIVE_DEPTH_M: f32 = 3.0;
 /// Clamp |η − still| after the step (metres of free-surface departure).
-const MAX_ETA_AMP_M: f32 = 0.30;
+const MAX_ETA_AMP_M: f32 = 0.18;
 /// Minimum depth (m) that carries momentum / wind stress.
 const MIN_WAVE_DEPTH_M: f32 = 0.08;
 /// Fraction of the tidal target depth applied per wave step.
@@ -46,7 +46,7 @@ const MAX_FLUX_FRAC: i64 = 6;
 /// Extremum-only smoothing strength: shaves the middle of a 3-cell
 /// local peak/trough per pass. Monotonic slopes (wind setup, seiche)
 /// are left alone entirely.
-const SURFACE_SMOOTH: f32 = 0.45;
+const SURFACE_SMOOTH: f32 = 0.6;
 /// Skip smoothing when the tooth exceeds this height (larger fronts
 /// are intentional — basin edges, tide fronts).
 const SMOOTH_MAX_JUMP_M: f32 = 0.25;
