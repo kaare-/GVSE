@@ -81,26 +81,40 @@ fn level_segment(cells: &mut [LakeCell], blend: f32) {
     let level = solve_level(cells, total_mass);
 
     let mut assigned = 0i64;
-    let mut deepest_idx = 0usize;
-    let mut deepest_val = i64::MIN;
-    for (idx, c) in cells.iter_mut().enumerate() {
+    for c in cells.iter_mut() {
         let depth = (level - c.ground).max(0.0);
         let target_mass = (depth * WATER_MASS_PER_METRE_DEPTH) as i64;
-        let blended =
-            (c.water as f32 + (target_mass - c.water) as f32 * blend) as i64;
+        let blended = (c.water as f32 + (target_mass - c.water) as f32 * blend) as i64;
         let blended = blended.max(0);
         c.water = blended;
         assigned += blended;
-        if blended > deepest_val {
-            deepest_val = blended;
-            deepest_idx = idx;
-        }
     }
-    // Rounding can leave a tiny drift; dump it on the deepest cell so total
-    // mass is preserved exactly.
-    let drift = total_mass - assigned;
-    if drift != 0 {
-        cells[deepest_idx].water = (cells[deepest_idx].water + drift).max(0);
+    // Rounding can leave a tiny drift. Spread it 1 kg at a time across the
+    // deepest cells so a full ring of ocean doesn't accumulate every tick's
+    // drift onto one particular column (the old "dump on deepest" version
+    // created a persistent spike where the drift pile grew every tick).
+    let mut drift = total_mass - assigned;
+    if drift == 0 {
+        return;
+    }
+    // Sort a copy of indices by water depth so we can walk the deepest cells.
+    // Small: only touch |drift| cells (drift is typically ≤ few kg on a ring).
+    let mut order: Vec<usize> = (0..cells.len()).collect();
+    order.sort_by(|&a, &b| cells[b].water.cmp(&cells[a].water));
+    let step: i64 = if drift > 0 { 1 } else { -1 };
+    let mut i = 0usize;
+    while drift != 0 && !order.is_empty() {
+        let idx = order[i % order.len()];
+        let next = cells[idx].water + step;
+        if next >= 0 {
+            cells[idx].water = next;
+            drift -= step;
+        }
+        i += 1;
+        if i > order.len() * 4 {
+            // Safety valve — should never trigger for realistic drifts.
+            break;
+        }
     }
 }
 

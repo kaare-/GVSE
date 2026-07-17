@@ -84,6 +84,58 @@ fn diag_ocean_surface_spikes() {
     }
     let with_voids = samples.iter().filter(|s| s.4).count();
     eprintln!("ocean cols={} with_voids={} max_neighbour_dev={:.3} m", samples.len(), with_voids, max_dev);
+    // Which layers are on top? Water spike columns might have Ice / Snow etc.
+    use std::collections::HashMap;
+    let mut top_layer_hist: HashMap<&'static str, u32> = HashMap::new();
+    let mut spike_cols: Vec<i32> = Vec::new();
+    for x in 0..width {
+        let Some(col) = world.column_at(x) else { continue };
+        let top = col.flowable_water().map(|(t, _)| t).unwrap_or(col.surface_y);
+        let bed_y = top - col.flowable_water().map(|(_, m)| m as f32 / 250.0).unwrap_or(0.0);
+        if bed_y >= world.sea_level - 0.25 {
+            continue;
+        }
+        if top > world.sea_level + 0.5 {
+            spike_cols.push(x);
+        }
+        let top_mat = if col.layer_count > 0 {
+            match col.layers[0].material {
+                wk_material::MaterialId::Water => "water",
+                wk_material::MaterialId::Ice => "ice",
+                wk_material::MaterialId::Snow => "snow",
+                wk_material::MaterialId::Sand => "sand",
+                _ => "other",
+            }
+        } else {
+            "empty"
+        };
+        *top_layer_hist.entry(top_mat).or_default() += 1;
+    }
+    eprintln!("top-layer histogram on ocean cells: {top_layer_hist:?}");
+    eprintln!("spike columns (top > sea+0.5): {} → {:?}", spike_cols.len(), &spike_cols[..spike_cols.len().min(30)]);
+    // Dump every column in a small stripe to see what breaks segments.
+    eprintln!("--- consecutive stripe ---");
+    for x in 2643..=2670 {
+        if let Some(col) = world.column_at(x) {
+            let (top, mass) = col
+                .flowable_water()
+                .unwrap_or((col.surface_y, 0));
+            let depth = mass as f32 / 250.0;
+            let bed = top - depth;
+            eprintln!(
+                "  x={x}  bed={bed:.2}  top={top:.2}  water_kg={mass}  surface_y={:.2}",
+                col.surface_y
+            );
+        }
+    }
+    if let Some(&x) = spike_cols.first() {
+        let col = world.column_at(x).unwrap();
+        eprintln!("--- spike column x={x} ---");
+        for i in 0..col.layer_count as usize {
+            eprintln!("  layer[{i}] {:?}  thickness={}kg", col.layers[i].material, col.layers[i].thickness);
+        }
+        eprintln!("  surface_y={:.3}  moisture={} sediment={}kg voids={}", col.surface_y, col.moisture, col.sediment.total, col.voids.len());
+    }
     for (x, a, b, d) in jumps.iter().take(20) {
         eprintln!("  jump at x={x}  prev={a:.2} → this={b:.2}  Δ={d:.3}");
     }

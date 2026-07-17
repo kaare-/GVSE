@@ -20,6 +20,7 @@ const SEDIMENT_CAPACITY_COEFF: f32 = 0.02;
 const SEDIMENT_SETTLE_FRACTION: f32 = 0.008;
 
 pub fn run_sediment(world: &World, scratch: &mut WorldTransferScratch, tick: u64) {
+    let sea_level = world.sea_level;
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for coord in coords {
         let chunk = world.chunks.get(&coord).unwrap();
@@ -36,6 +37,18 @@ pub fn run_sediment(world: &World, scratch: &mut WorldTransferScratch, tick: u64
         for i in 0..CHUNK_W {
             let col = &chunk.columns[i];
             if col.activity == Activity::Dormant {
+                continue;
+            }
+            // Submerged ocean bed: skip sediment settling AND erosion.
+            // Neighbour water-top wobbles give `flux_indicator > 0.01`
+            // which used to fire erosion here, and the mandatory
+            // `settle.max(1)` re-deposited that 1 kg every tick as a
+            // brand-new "sand" layer. The result was every ocean column
+            // rebuilding a 1-kg sand cap at ~60 Hz — visible as blinking
+            // moisture / surface_y / sand-age in the inspect panel and
+            // spiky ocean rendering. Real underwater sedimentation is
+            // slow enough that we can ignore it for game purposes.
+            if col.climate_elevation() < sea_level - 0.5 {
                 continue;
             }
 

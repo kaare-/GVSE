@@ -427,53 +427,35 @@ pub fn draw_frame(
         }
     }
 
-    // Flat ocean overlay. Snap the visible sea surface to
-    // `sea_level + tide` on every column whose *seabed* sits below
-    // sea, hiding tiny per-column mass wobbles (rain / rounding /
-    // void capture / partial LakeLevel convergence). Physics still
-    // tracks each column's actual water mass.
+    // Snap the visible sea surface to `sea_level + tide` on any column
+    // whose *seabed* sits below sea. Physics still tracks each column
+    // separately; this just replaces the potentially-wobbly per-column
+    // water top with the shared flat sea line for a clean horizon.
     let sea_top_m = snap.sea_level + snap.tide_eta_m;
     let sea_top_px = world_y_to_screen(sea_top_m, snap.sea_level, sh, camera_y_offset);
-    let sky = sky_color_for(snap);
     let water_density =
         MaterialRegistry::props(MaterialId::Water).density.max(1) as f32;
+    let water_alpha = MaterialRegistry::props(MaterialId::Water).render_alpha;
     for (i, col) in snap.columns.iter().enumerate() {
         if col.surface_water <= 0 {
             continue;
         }
         let water_h_m = (col.surface_water as f32 / water_density) / SAMPLE_WIDTH_M;
         let bed_y = col.surface_y - water_h_m;
-        // True ocean = seabed below sea. Everything else (headlands,
-        // hilltop puddles) keeps its physical layer render.
+        // True ocean = seabed below sea. Headlands / islands / coastal
+        // rock (seabed at or above sea) keep their physical render.
         if bed_y >= sea_top_m - 0.25 {
             continue;
         }
         let bed_px = world_y_to_screen(bed_y, snap.sea_level, sh, camera_y_offset);
         let x = i as f32 * COL_W;
-        // Hide any spike that pokes ABOVE the flat sea line: paint sky
-        // over the column from its rendered water top down to sea_top.
-        if col.surface_y > sea_top_m + 0.05 {
-            let spike_top_px =
-                world_y_to_screen(col.surface_y, snap.sea_level, sh, camera_y_offset);
-            if spike_top_px < sea_top_px - 0.5 {
-                draw_rectangle(
-                    x,
-                    spike_top_px,
-                    COL_W,
-                    sea_top_px - spike_top_px,
-                    sky,
-                );
-            }
-        }
-        // Paint the smooth sea from the flat sea line down to the seabed.
         if sea_top_px < bed_px {
-            let a = MaterialRegistry::props(MaterialId::Water).render_alpha;
             draw_rectangle(
                 x,
                 sea_top_px,
                 COL_W,
                 bed_px - sea_top_px,
-                Color::from_rgba(0x23, 0x64, 0xD2, a),
+                Color::from_rgba(0x23, 0x64, 0xD2, water_alpha),
             );
         }
     }
