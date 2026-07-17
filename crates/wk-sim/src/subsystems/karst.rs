@@ -51,6 +51,7 @@ fn inject_dissolved(world: &mut World, coord: i32, x_m: f32, y_m: f32, kg: i64) 
 /// and grow voids so caves open without putting Air into the layer stack.
 pub fn run_karst(world: &mut World, _tick: u64) {
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
+    let sea_level = world.sea_level;
     let mut dissolved_out = 0i64;
 
     for coord in coords {
@@ -66,6 +67,16 @@ pub fn run_karst(world: &mut World, _tick: u64) {
                 }
                 // Need moving pore water — dry rock doesn't karst.
                 if col.moisture <= 0 {
+                    continue;
+                }
+                // Karst is a terrestrial cave process. Under the ocean the
+                // surface_void_capture pass would then suck 35% of the sea
+                // into every fresh void per tick, faster than LakeLevel
+                // can refill — that's what made the ocean surface spike.
+                // Use the *solid* seabed elevation (climate_elevation, which
+                // strips water/ice/snow) — surface_y itself sits at sea
+                // level on any flooded column.
+                if col.climate_elevation() < sea_level - 0.25 {
                     continue;
                 }
                 let head_here = col.water_table_y();

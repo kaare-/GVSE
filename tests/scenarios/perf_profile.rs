@@ -44,6 +44,64 @@ fn time_ticks(sim: &mut Simulation, world: &mut World, n: u64) -> Duration {
 
 #[test]
 #[ignore]
+fn diag_ocean_surface_spikes() {
+    // Reproduce the app scenario and dump per-column surface_y / water_top
+    // around the ring so we can see which columns diverge from a smooth
+    // ocean surface.
+    let mut world = app_like_world();
+    let mut sim = Simulation::new(&world);
+    for _ in 0..800 {
+        sim.step(&mut world);
+    }
+    let width = world.topology().width_columns().unwrap();
+    let mut samples: Vec<(i32, f32, f32, i64, bool)> = Vec::new();
+    let mut max_dev = 0.0f32;
+    let mut prev_top: Option<f32> = None;
+    let mut jumps: Vec<(i32, f32, f32, f32)> = Vec::new();
+    for x in 0..width {
+        let Some(col) = world.column_at(x) else {
+            continue;
+        };
+        // Only look at columns whose water top is below sea (real ocean).
+        let top = col.flowable_water().map(|(t, _)| t).unwrap_or(f32::MIN);
+        if top > world.sea_level + 5.0 || top < world.sea_level - 5.0 {
+            continue;
+        }
+        let water_top = col
+            .flowable_water()
+            .map(|(t, _)| t)
+            .unwrap_or(col.surface_y);
+        let water_mass = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
+        samples.push((x, col.surface_y, water_top, water_mass, !col.voids.is_empty()));
+        if let Some(prev) = prev_top {
+            let d = (water_top - prev).abs();
+            if d > 0.5 {
+                jumps.push((x, prev, water_top, d));
+            }
+            max_dev = max_dev.max(d);
+        }
+        prev_top = Some(water_top);
+    }
+    let with_voids = samples.iter().filter(|s| s.4).count();
+    eprintln!("ocean cols={} with_voids={} max_neighbour_dev={:.3} m", samples.len(), with_voids, max_dev);
+    for (x, a, b, d) in jumps.iter().take(20) {
+        eprintln!("  jump at x={x}  prev={a:.2} → this={b:.2}  Δ={d:.3}");
+    }
+    if !samples.is_empty() {
+        // Print a sample stripe of consecutive columns.
+        let start = samples.len() / 2;
+        for s in samples.iter().skip(start).take(24) {
+            eprintln!(
+                "  x={}  surface_y={:.3}  water_top={:.3}  water_kg={}  voids={}",
+                s.0, s.1, s.2, s.3, s.4
+            );
+        }
+    }
+    eprintln!("sea_level={:.3}  tide_eta={:.3}", world.sea_level, world.tide_eta_m(sim.clock.tick));
+}
+
+#[test]
+#[ignore]
 fn perf_profile_ring_app_world() {
     let mut world = app_like_world();
     let mut sim = Simulation::new(&world);

@@ -893,6 +893,10 @@ pub struct RenderSnapshot {
     pub tick: u64,
     pub viewport_x: i32,
     pub sea_level: f32,
+    /// Instantaneous tidal free-surface offset for the render pass.
+    /// Renderers snap oceanic water tops to `sea_level + tide_eta_m` so
+    /// tiny per-column mass wobbles don't show as visible spikes.
+    pub tide_eta_m: f32,
     pub world_x_min: i32,
     pub world_x_max: i32,
     pub elev_min: f32,
@@ -1066,6 +1070,7 @@ impl World {
             tick,
             viewport_x,
             sea_level: self.sea_level,
+            tide_eta_m: self.tide_eta_m(tick),
             world_x_min,
             world_x_max,
             elev_min,
