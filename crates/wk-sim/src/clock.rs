@@ -224,8 +224,8 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::SurfaceWaves,
-        // Every tick — free-surface momentum needs a steady integrate step.
-        // Cost is O(wet columns); field grids (not waves) were the lag culprit.
+        // Every tick, but flux is active-layer capped and writeback skips
+        // density-settle — cheap enough for full-ring oceans.
         period: 1,
         phase: 0,
     },

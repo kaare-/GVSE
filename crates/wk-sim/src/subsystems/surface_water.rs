@@ -21,7 +21,10 @@ use super::shared::WATER_MASS_PER_METRE_DEPTH;
 const FLOW_RELAXATION: f32 = 0.97;
 /// When free-surface waves carry momentum, diffuse more gently so wind
 /// setup and seiches aren't erased by the hydrostatic hop each tick.
-const FLOW_RELAXATION_WITH_WAVES: f32 = 0.35;
+const FLOW_RELAXATION_WITH_WAVES: f32 = 0.08;
+/// Deep water is wave/tide territory — neighbour diffusion here fought
+/// the active-layer wave flux and flattened ocean setup every tick.
+const DEEP_WAVE_DEPTH_M: f32 = 1.0;
 
 pub fn run_surface_water(world: &World, scratch: &mut WorldTransferScratch) {
     let relax = if world.surface_waves_enabled {
@@ -29,6 +32,7 @@ pub fn run_surface_water(world: &World, scratch: &mut WorldTransferScratch) {
     } else {
         FLOW_RELAXATION
     };
+    let skip_deep = world.surface_waves_enabled;
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for coord in coords {
         let chunk = world.chunks.get(&coord).unwrap();
@@ -56,6 +60,12 @@ pub fn run_surface_water(world: &World, scratch: &mut WorldTransferScratch) {
             };
             if col.activity == Activity::Dormant || water_here <= 0 {
                 continue;
+            }
+            if skip_deep {
+                let depth = water_here as f32 / WATER_MASS_PER_METRE_DEPTH;
+                if depth >= DEEP_WAVE_DEPTH_M {
+                    continue;
+                }
             }
 
             let head_here = water_top_y;

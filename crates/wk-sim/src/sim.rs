@@ -169,8 +169,9 @@ impl Simulation {
             world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::SurfaceWaves)) {
+            // Waves book tide exchange on sea_inject_total; skip a full
+            // ring mass audit here — LakeLevel (below) refreshes when due.
             run_surface_waves(world, tick);
-            world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::LakeLevel)) {
             run_lake_level(world);

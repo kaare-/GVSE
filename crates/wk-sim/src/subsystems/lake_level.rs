@@ -183,13 +183,19 @@ pub fn run_lake_level(world: &mut World) {
     // so a snow-covered pool sees its actual water total, not the
     // zero it would show if only the top layer counted — that
     // mismatch would double the water on write-back.
+    //
+    // Only touch columns that actually moved — the old loop settled
+    // every loaded column every tick (including dry / deep-skipped),
+    // which dominated the frame on large rings.
     for cell in cells {
         if let Some(chunk) = world.chunks.get_mut(&cell.coord) {
             let col = &mut chunk.columns[cell.local];
             let current = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
             let delta = cell.water - current;
+            if delta == 0 {
+                continue;
+            }
             col.adjust_top_water(delta, 0);
-            col.settle_by_density(0);
             col.recompute_surface_y(chunk.bedrock_y);
         }
     }
