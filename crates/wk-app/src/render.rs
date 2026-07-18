@@ -454,6 +454,9 @@ pub fn draw_frame(
     // the ocean is just Water layers filling submerged columns up to
     // sea level, and a puddle is just a thin Water layer on top of
     // whatever else is there.
+    let water_density =
+        MaterialRegistry::props(MaterialId::Water).density.max(1) as f32;
+    let water_alpha = MaterialRegistry::props(MaterialId::Water).render_alpha;
     let mut tops: Vec<Option<f32>> = Vec::with_capacity(snap.columns.len());
     for (i, col) in snap.columns.iter().enumerate() {
         if col.layers.is_empty() {
@@ -486,11 +489,22 @@ pub fn draw_frame(
         tops.push(Some(surface_px));
 
         if Some(col.world_x) == selected {
+            // Ocean / shelf: stop the selection box at the seabed. Drawing
+            // down to planetary bedrock (-900 m) paints a tall hollow pipe
+            // through the water column that reads as a render glitch.
+            let bot_px = if col.surface_water > 0 {
+                let water_h_m =
+                    (col.surface_water as f32 / water_density) / SAMPLE_WIDTH_M;
+                let bed_y = col.surface_y - water_h_m;
+                world_y_to_screen(bed_y, snap.sea_level, sh, camera_y_offset)
+            } else {
+                col_bedrock_px
+            };
             draw_rectangle_lines(
                 x,
                 surface_px,
                 COL_W,
-                (col_bedrock_px - surface_px).max(2.0),
+                (bot_px - surface_px).max(2.0),
                 1.5,
                 Color::from_rgba(255, 255, 100, 220),
             );
@@ -503,9 +517,6 @@ pub fn draw_frame(
     // water top with the shared flat sea line for a clean horizon.
     let sea_top_m = snap.sea_level + snap.tide_eta_m;
     let sea_top_px = world_y_to_screen(sea_top_m, snap.sea_level, sh, camera_y_offset);
-    let water_density =
-        MaterialRegistry::props(MaterialId::Water).density.max(1) as f32;
-    let water_alpha = MaterialRegistry::props(MaterialId::Water).render_alpha;
     for (i, col) in snap.columns.iter().enumerate() {
         if col.surface_water <= 0 {
             continue;
