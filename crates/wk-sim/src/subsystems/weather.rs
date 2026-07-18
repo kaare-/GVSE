@@ -152,9 +152,9 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
                 if world.clouds[cloud_idx].moisture <= 0.0 || !clouds[cloud_idx].raining {
                     continue;
                 }
-                let (climate_elev, existing_snow) = {
+                let (climate_elev, existing_frozen) = {
                     let col = &world.chunks.get(&coord).unwrap().columns[i];
-                    (col.climate_elevation(), col.top_snow_mass())
+                    (col.climate_elevation(), col.frozen_surface_mass())
                 };
                 let amount = world.weather.cloud_rain_rate;
                 let (rain_component, snow_component) = split_precipitation(
@@ -163,7 +163,7 @@ pub fn run_weather(world: &mut World, scratch: &mut WorldTransferScratch, tick: 
                     climate_elev,
                     tick,
                     &climate,
-                    existing_snow,
+                    existing_frozen,
                 );
                 let buf = scratch.buffer_mut(coord);
                 if rain_component > 0 {

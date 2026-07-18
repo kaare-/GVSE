@@ -473,16 +473,35 @@ impl Column {
     }
 
     /// Elevation for near-surface ambient temperature (HUD, freeze/thaw,
-    /// ecology comfort). Uses the free surface when water or ice is on
-    /// top so deep ocean doesn't report geothermal heat from the bed;
-    /// snow-only / bare ground still use [`Self::climate_elevation`] so a
-    /// thickening snowpack doesn't self-feed via lapse rate.
-    pub fn ambient_elevation(&self) -> f32 {
-        if self.top_water_mass() > 0 || self.top_ice_mass() > 0 {
+    /// ecology comfort).
+    ///
+    /// - Deep ocean / submerged bed: sample near sea level (water skin),
+    ///   never the abyssal bed (geothermal clamp) and never an ice tower
+    ///   kilometres above the sea.
+    /// - Emergent land: a thin weather skin above the solid bed so snow/ice
+    ///   piles can't self-cool via lapse rate as they grow.
+    pub fn ambient_elevation(&self, sea_level: f32) -> f32 {
+        let bed = self.climate_elevation();
+        const SKIN_M: f32 = 8.0;
+        if bed < sea_level - 0.5 {
             self.surface_y
+                .clamp(sea_level - SKIN_M, sea_level + SKIN_M)
         } else {
-            self.climate_elevation()
+            self.surface_y.min(bed + SKIN_M)
         }
+    }
+
+    /// Snow + ice in the weather cap (top contiguous frozen layers).
+    pub fn frozen_surface_mass(&self) -> i64 {
+        let mut total = 0i64;
+        for i in 0..self.layer_count as usize {
+            match self.layers[i].material {
+                MaterialId::Snow | MaterialId::Ice => total += self.layers[i].thickness.max(0),
+                MaterialId::Water => break,
+                _ => break,
+            }
+        }
+        total
     }
 
     /// Elevation of the groundwater table: the topmost porous solid

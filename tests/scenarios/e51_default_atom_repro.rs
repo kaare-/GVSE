@@ -116,14 +116,14 @@ fn e51b_deep_ocean_ambient_not_geothermal() {
     let wx = 32;
     let col = world.column_at(wx).expect("column");
     let bed = col.climate_elevation();
-    let skin = col.ambient_elevation();
+    let skin = col.ambient_elevation(world.sea_level);
     assert!(
         bed < world.sea_level - 100.0,
         "expected abyssal bed below field floor, bed={bed:.1}"
     );
     assert!(
-        (skin - col.surface_y).abs() < 0.01,
-        "water column ambient should be the free surface"
+        (skin - world.sea_level).abs() <= 8.0,
+        "ocean ambient should sit near sea level, skin={skin:.1}"
     );
 
     let bed_t = world.temperature_at_point(wx, bed, 0);
@@ -138,4 +138,52 @@ fn e51b_deep_ocean_ambient_not_geothermal() {
         "free-surface ocean must not read geothermal, got {skin_t:.1}"
     );
     eprintln!("E51b: bed={bed:.1}m → {bed_t:.1}C; skin={skin:.1}m → {skin_t:.1}C");
+}
+
+#[test]
+fn e51c_ice_tower_is_capped() {
+    // Regression: snow was capped but melt→refreeze stacked unbounded ice
+    // (megametre "ice columns" on cold mountains). Phase-change must cull
+    // excess and refuse further water→ice once the frozen budget is full.
+    use wk_sim::subsystems::run_phase_change;
+
+    let mut world = World::new(9053);
+    world.sea_level = 12.0;
+    world.rain_enabled = false;
+    world.weather.weather_enabled = false;
+    world.climate.base_temp_c = -10.0;
+    world.climate.day_night_amplitude_c = 0.0;
+    world.insert_chunk(generate_flat_sand(0, 0.0, 40.0));
+    {
+        let col = world.column_at_mut(8).unwrap();
+        col.deposit_to_top(MaterialId::Ice, 50_000_000, 0);
+        col.recompute_surface_y(0.0);
+    }
+    world.wake_all();
+    assert!(
+        world.column_at(8).unwrap().frozen_surface_mass() > 10_000,
+        "precondition: oversized ice tower"
+    );
+
+    run_phase_change(&mut world, 0);
+    let col = world.column_at(8).unwrap();
+    let frozen = col.frozen_surface_mass();
+    assert!(
+        frozen <= 10_000,
+        "ice tower must cull down to frozen cap, got {frozen}"
+    );
+    assert!(
+        col.surface_y < 100.0,
+        "surface must leave megametre range, surface_y={:.1}",
+        col.surface_y
+    );
+    assert!(
+        col.top_water_mass() < 50_000,
+        "cull must not replace ice with an equal water tower"
+    );
+    eprintln!(
+        "E51c: frozen={frozen} surface_y={:.1} water={}",
+        col.surface_y,
+        col.top_water_mass()
+    );
 }

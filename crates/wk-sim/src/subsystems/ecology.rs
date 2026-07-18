@@ -70,7 +70,7 @@ pub fn run_ecology(world: &mut World, tick: u64) {
                     col.activity,
                     // Near-surface skin — not the solid bed (deep ocean
                     // beds clamp to geothermal on the thermal grid).
-                    col.ambient_elevation(),
+                    col.ambient_elevation(sea),
                     col.moisture,
                     col.moisture_cap(),
                     col.ecology,
