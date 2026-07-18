@@ -103,8 +103,8 @@ const SIM_DAY_TICKS: f32 = 12.0 * 3_600.0 + 10.0 * 3_600.0; // 79_200
 /// Nominal adult life at a reference genome (~3 sim-days for default algae).
 const BASE_LIFE_SIM_DAYS: f32 = 3.0;
 
-/// Dead body: sinks to the water bed, lingers, then becomes Organic sediment
-/// (plus a little ecology litter for nutrient recycle).
+/// Dead body: sinks to the water bed (or rests on dry land), lingers, then
+/// becomes Organic sediment (plus a little ecology litter for nutrient recycle).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Corpse {
     pub ticks: u32,
@@ -132,6 +132,8 @@ pub struct OrganismInspect {
     pub photosystems: usize,
     pub is_plankton: bool,
     pub dead: bool,
+    /// When dead: `(settled_ticks, CORPSE_SETTLE_TICKS)` while resting on bed/land.
+    pub corpse_settle: Option<(u32, u32)>,
 }
 
 /// Life expectancy from existing genes (no extra gene).
@@ -1020,7 +1022,10 @@ impl AgentStore {
             .get::<&Energy>(entity)
             .map(|e| (e.current, e.max))
             .unwrap_or((0.0, 0.0));
-        let dead = self.ecs.get::<&Corpse>(entity).is_ok();
+        let corpse_settle = self.ecs.get::<&Corpse>(entity).ok().map(|c| {
+            (c.settled_ticks, CORPSE_SETTLE_TICKS)
+        });
+        let dead = corpse_settle.is_some();
         Some(OrganismInspect {
             entity_id: entity.id(),
             name: body.blueprint.name.clone(),
@@ -1038,6 +1043,7 @@ impl AgentStore {
             photosystems: body.photosystem_count(),
             is_plankton: body.blueprint.is_plankton(),
             dead,
+            corpse_settle,
         })
     }
 
@@ -1283,9 +1289,9 @@ impl AgentStore {
         self.wake_host_columns(world);
     }
 
-    /// Sink corpses to the bed; after a long settle, deposit Organic sediment
-    /// (and a little ecology litter). Bodies stay visible for minutes so
-    /// blooms leave a carpet before becoming bed ooze.
+    /// Sink corpses to the bed (or rest on dry land); after a long settle,
+    /// deposit Organic sediment (and a little ecology litter). Bodies stay
+    /// visible for minutes so blooms leave a carpet before becoming ooze.
     fn step_corpses(&mut self, world: &mut World, tick: u64) {
         let mut dissolve: Vec<(Entity, i32, usize)> = Vec::new();
         for (e, (pose, buoy, corpse, body)) in self
@@ -1793,6 +1799,65 @@ mod tests {
         assert!(
             (0..col.layer_count as usize).any(|i| col.layers[i].material == MaterialId::Organic),
             "organic layer present in stack"
+        );
+    }
+
+    #[test]
+    fn corpse_on_dry_land_becomes_organic_sediment() {
+        let mut world = World::new(42);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        // Dry coast: no water layer.
+        assert!(
+            world
+                .column_at(8)
+                .map(|c| !c.layers[..c.layer_count as usize]
+                    .iter()
+                    .any(|l| l.material == MaterialId::Water))
+                .unwrap_or(false),
+            "fixture must be dry land"
+        );
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(&world, 8, Blueprint::atom(Genome::default()), 50.0)
+            .expect("spawn");
+        let _ = store.ecs.remove_one::<Organism>(e);
+        let _ = store.ecs.insert_one(
+            e,
+            Corpse {
+                ticks: 0,
+                settled_ticks: CORPSE_SETTLE_TICKS,
+            },
+        );
+        if let (Ok(mut pose), Some(col)) = (store.ecs.get::<&mut Pose>(e), world.column_at(8)) {
+            pose.y = col.surface_y;
+        }
+        let organic_before = world
+            .column_at(8)
+            .map(|c| {
+                (0..c.layer_count as usize)
+                    .filter(|&i| c.layers[i].material == MaterialId::Organic)
+                    .map(|i| c.layers[i].thickness)
+                    .sum::<i64>()
+            })
+            .unwrap_or(0);
+        store.step_corpses(&mut world, 77);
+        assert_eq!(store.corpse_count(), 0, "land corpse should dissolve");
+        let col = world.column_at(8).unwrap();
+        let organic_after: i64 = (0..col.layer_count as usize)
+            .filter(|&i| col.layers[i].material == MaterialId::Organic)
+            .map(|i| col.layers[i].thickness)
+            .sum();
+        let expected = DEATH_ORGANIC_KG_PER_MODULE * 2;
+        assert!(
+            organic_after >= organic_before + expected,
+            "land Organic ≥{expected}, before={organic_before} after={organic_after}"
+        );
+        // Lighter than sand → Organic sits as the top solid layer.
+        assert_eq!(
+            col.layers[0].material,
+            MaterialId::Organic,
+            "organic should cap the dry land stack"
         );
     }
 

@@ -755,12 +755,15 @@ fn draw_organism_inspector(
     y0: f32,
 ) -> f32 {
     let panel_w = 300.0;
-    let habit = if info.dead {
-        "DEAD (sinking)"
+    let habit = if let Some((settled, need)) = info.corpse_settle {
+        // Bodies stay visible until settle completes, then become Organic layers.
+        format!("DEAD settling {settled}/{need}")
+    } else if info.dead {
+        "DEAD".into()
     } else if info.is_plankton {
-        "plankton"
+        "plankton".into()
     } else {
-        "rooted"
+        "rooted".into()
     };
     let comfort_line = match ambient_c {
         Some(t) => {
@@ -772,7 +775,7 @@ fn draw_organism_inspector(
     };
     let lines = [
         format!("Creature #{}  {}", info.entity_id, info.name),
-        format!("{}  pos=({:.1}, {:.1}m)", habit, info.x, info.y),
+        format!("{habit}  pos=({:.1}, {:.1}m)", info.x, info.y),
         format!(
             "energy={:.1}/{:.0}  mods={} photo={}",
             info.energy, info.energy_max, info.module_count, info.photosystems
@@ -859,8 +862,9 @@ fn draw_inspector(
         col.saturation * 100.0
     ));
     lines.push(format!("ice={} kg  snow={} kg", col.ice, col.snow));
+    // Suspended transport load — distinct from stratigraphic Organic layers.
     lines.push(format!(
-        "sediment={} kg ({})",
+        "suspended={} kg ({})",
         col.sediment.total,
         material_name(col.sediment.dominant)
     ));
