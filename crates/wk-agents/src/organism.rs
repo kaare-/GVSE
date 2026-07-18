@@ -51,8 +51,11 @@ const NIGHT_UPKEEP_MULT: f32 = 0.4;
 pub const DEATH_LITTER_KG_PER_MODULE: i64 = 4;
 
 /// kg of [`MaterialId::Organic`] sediment deposited per module on dissolve.
-/// Dense enough (see material table) to sink under water and build bed ooze.
-pub const DEATH_ORGANIC_KG_PER_MODULE: i64 = 40;
+/// Kept small — living modules don't occupy stratigraphic volume, so large
+/// per-module ooze "inflated" columns into beaver-dam spikes on death.
+pub const DEATH_ORGANIC_KG_PER_MODULE: i64 = 10;
+/// Soft cap on Organic kg from a single corpse dissolve (~0.35 m pile).
+pub const DEATH_ORGANIC_KG_MAX: i64 = 80;
 
 /// Ticks a corpse rests on the bed before becoming sediment (~6–7 min at 60 Hz).
 /// Long enough that death blooms leave a visible carpet of bodies first.
@@ -843,6 +846,52 @@ fn rooted_occupied_columns(bodies: &[(Entity, Aabb, bool)]) -> std::collections:
         .filter(|(_, _, immobile)| *immobile)
         .map(|(_, aabb, _)| aabb.center_x().floor() as i32)
         .collect()
+}
+
+/// Move water displaced by under-lake sediment onto neighbouring columns.
+fn spill_displaced_water(world: &mut World, wx: i32, mut amount: i64, tick: u64) {
+    if amount <= 0 {
+        return;
+    }
+    let host_bed = world
+        .column_at(wx)
+        .map(|c| c.climate_elevation())
+        .unwrap_or(0.0);
+    // Prefer already-wet or lower-bed neighbours (lake / downhill).
+    let mut order: Vec<(i64, i32)> = Vec::new(); // score, x
+    for dist in 1..=4 {
+        for sign in [1i32, -1] {
+            let x = wx + sign * dist;
+            let Some(col) = world.column_at(x) else {
+                continue;
+            };
+            let wet = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
+            let bed = col.climate_elevation();
+            let score = wet.saturating_mul(2)
+                + ((host_bed - bed).max(0.0) * 100.0) as i64
+                - dist as i64;
+            order.push((score, x));
+        }
+    }
+    order.sort_by(|a, b| b.0.cmp(&a.0));
+    for (_, x) in order {
+        if amount <= 0 {
+            break;
+        }
+        if let Some(col) = world.column_at_mut(x) {
+            let put = amount;
+            col.adjust_top_water(put, tick);
+            col.settle_by_density(tick);
+            amount -= put;
+        }
+    }
+    // Leftover (no neighbours) — book as audit so we don't invent mass later.
+    if amount > 0 {
+        world.mass_audit.evap_out_total = world
+            .mass_audit
+            .evap_out_total
+            .saturating_add(amount);
+    }
 }
 
 /// Host columns a ramet may drink from: self + same-genet neighbours in range.
@@ -1958,17 +2007,26 @@ impl AgentStore {
 
         for (e, wx, n_modules) in dissolve {
             let n = n_modules.max(1) as i64;
-            let organic_kg = DEATH_ORGANIC_KG_PER_MODULE.saturating_mul(n);
+            let organic_kg = DEATH_ORGANIC_KG_PER_MODULE
+                .saturating_mul(n)
+                .min(DEATH_ORGANIC_KG_MAX);
             let litter_kg = DEATH_LITTER_KG_PER_MODULE.saturating_mul(n);
+            let mut displaced_water = 0i64;
             if let Some(col) = world.column_at_mut(wx) {
-                // Stratigraphic Organic — denser than water, sinks to the bed.
+                // Settled Organic under water displaces free-surface mass
+                // (avoids the beaver-dam water spike). Dry land still piles.
                 if organic_kg > 0 {
-                    col.deposit_to_top(MaterialId::Organic, organic_kg, tick);
-                    col.settle_by_density(tick);
+                    displaced_water =
+                        col.deposit_sediment_settled(MaterialId::Organic, organic_kg, tick);
                 }
                 col.ecology.dead_biomass =
                     col.ecology.dead_biomass.saturating_add(litter_kg);
                 col.activity = Activity::HydrologyActive;
+            }
+            // Spill displaced lake water into neighbouring wet/low columns
+            // so mass is conserved and the sill doesn't keep a spike.
+            if displaced_water > 0 {
+                spill_displaced_water(world, wx, displaced_water, tick);
             }
             // Creatures aren't in the mass audit; booking the deposit as
             // biomass growth keeps conservation bookkeeping balanced.
@@ -2410,6 +2468,53 @@ mod tests {
         assert!(
             (0..col.layer_count as usize).any(|i| col.layers[i].material == MaterialId::Organic),
             "organic layer present in stack"
+        );
+    }
+
+    #[test]
+    fn corpse_dissolve_under_water_does_not_spike_surface() {
+        let mut world = World::new(42);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        // Deep puddle on the host; wet neighbour receives displaced spill.
+        for x in [7, 8, 9] {
+            if let Some(col) = world.column_at_mut(x) {
+                col.deposit_to_top(MaterialId::Water, 3_000, 0);
+            }
+        }
+        let surface_before = world.column_at(8).unwrap().surface_y;
+        let mut store = AgentStore::new();
+        // Many-module floater → hits DEATH_ORGANIC_KG_MAX (~0.35 m bed rise).
+        let mut bp = Blueprint::atom(Genome::default());
+        for y in 1i16..=20 {
+            bp.modules.push(crate::blueprint::PlacedModule {
+                x: 0,
+                y,
+                lane: crate::module::LaneId::Mid,
+                module: crate::module::ModuleId::Photosystem,
+            });
+        }
+        let e = store
+            .spawn_from_blueprint(&world, 8, bp, 80.0)
+            .expect("spawn");
+        let _ = store.ecs.remove_one::<Organism>(e);
+        let _ = store.ecs.insert_one(
+            e,
+            Corpse {
+                ticks: 0,
+                settled_ticks: CORPSE_SETTLE_TICKS,
+            },
+        );
+        if let (Ok(mut pose), Some(col)) = (store.ecs.get::<&mut Pose>(e), world.column_at(8)) {
+            let (_top, bed) = water_band(col).unwrap();
+            pose.y = bed;
+        }
+        store.step_corpses(&mut world, 50);
+        assert_eq!(store.corpse_count(), 0);
+        let surface_after = world.column_at(8).unwrap().surface_y;
+        assert!(
+            (surface_after - surface_before).abs() < 0.15,
+            "corpse ooze must not spike the free surface (before={surface_before:.3} after={surface_after:.3})"
         );
     }
 

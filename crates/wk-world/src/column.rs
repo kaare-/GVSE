@@ -739,6 +739,55 @@ impl Column {
         self.surface_y += self.mass_to_height_delta(material, mass);
     }
 
+    /// Deposit solid sediment, density-settle it, and **displace** an equal
+    /// height of standing water so the free surface does not spike.
+    ///
+    /// Corpse ooze / organic dams used `deposit_to_top` + settle under a
+    /// lake: the bed rose and the water top rose with it (same water mass
+    /// on a taller stack) → vertical water spikes on the sill. Open water
+    /// should keep its top; the displaced kg is returned for the caller to
+    /// spill into neighbours.
+    ///
+    /// Returns displaced water mass in kg (0 on dry land).
+    pub fn deposit_sediment_settled(
+        &mut self,
+        material: MaterialId,
+        mass: i64,
+        tick: u64,
+    ) -> i64 {
+        if mass <= 0 || !material.is_solid() {
+            return 0;
+        }
+        let had_water = self.flowable_water().map(|(_, m)| m).unwrap_or(0);
+        let prev_surface = self.surface_y;
+        let h = self.mass_to_height_delta(material, mass);
+        self.deposit_to_top(material, mass, tick);
+        self.settle_by_density(tick);
+        if had_water <= 0 || h <= 0.0 {
+            return 0;
+        }
+        // Match sediment height with water mass so surface returns ~prev.
+        let water_density =
+            MaterialRegistry::props(MaterialId::Water).density.max(1) as f32;
+        let mut displace =
+            (h * SAMPLE_WIDTH_M * water_density).round() as i64;
+        displace = displace.min(had_water).max(0);
+        if displace <= 0 {
+            return 0;
+        }
+        let removed = -self.adjust_top_water(-displace, tick);
+        // Numerical drift: pin free surface if we still sit above the old top.
+        if self.surface_y > prev_surface + 1e-3 {
+            let extra_h = self.surface_y - prev_surface;
+            let extra = (extra_h * SAMPLE_WIDTH_M * water_density).round() as i64;
+            if extra > 0 {
+                let got = -self.adjust_top_water(-extra, tick);
+                return removed + got;
+            }
+        }
+        removed
+    }
+
     /// Remove `mass` kg from whatever layer is currently on top,
     /// regardless of erosion rules. Meant for fluid/deposit management
     /// (draining water, evaporating a puddle, melting a snow cap) —
@@ -1211,6 +1260,34 @@ mod tests {
         col.deposit_to_top(MaterialId::Ice, 500, 5);
         let (removed, _) = col.erode_from_top(100);
         assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn sediment_under_water_does_not_spike_surface() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 2_000, 0);
+        col.deposit_to_top(MaterialId::Water, 2_500, 1); // 10 m of water
+        let surface_before = col.surface_y;
+        let water_before = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
+        let displaced =
+            col.deposit_sediment_settled(MaterialId::Organic, 655, 2);
+        assert!(displaced > 0, "should displace standing water");
+        assert!(
+            (col.surface_y - surface_before).abs() < 0.05,
+            "free surface must not spike (before={surface_before:.3} after={:.3})",
+            col.surface_y
+        );
+        let water_after = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
+        assert_eq!(
+            water_before - water_after,
+            displaced,
+            "displaced kg must leave this column"
+        );
+        assert_eq!(col.layers[0].material, MaterialId::Water);
+        assert!(
+            (0..col.layer_count as usize).any(|i| col.layers[i].material == MaterialId::Organic),
+            "organic settled under water"
+        );
     }
 
     #[test]
