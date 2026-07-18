@@ -270,6 +270,19 @@ pub fn equilibrium_y(top: f32, bed: f32, bias: f32) -> f32 {
     float_y + (bed - float_y) * t
 }
 
+/// How far above `pose.y` the tallest blueprint module sits (world metres).
+///
+/// Editor y=0 is the ground/deep line; painting toward the top of the canvas
+/// stores larger `m.y`. For plankton we anchor that top at the float line so
+/// a creature drawn at the top of the editor doesn't spawn in the air.
+pub fn blueprint_body_top_offset(blueprint: &Blueprint) -> f32 {
+    if !blueprint.is_plankton() || blueprint.modules.is_empty() {
+        return 0.0;
+    }
+    let max_y = blueprint.modules.iter().map(|m| m.y).max().unwrap_or(0);
+    (max_y as f32) * MODULE_CELL_COLS
+}
+
 /// Spawn / query helper — equilibrium if water exists, else sediment surface.
 pub fn buoyancy_target_y(col: &Column, bias: f32) -> Option<f32> {
     let (top, bed) = water_band(col)?;
@@ -277,7 +290,18 @@ pub fn buoyancy_target_y(col: &Column, bias: f32) -> Option<f32> {
 }
 
 /// Integrate one tick of weight vs buoyancy. Updates `y` and `state`.
-pub fn step_buoyancy(y: &mut f32, state: &mut BuoyancyState, col: &Column, bias: f32) {
+///
+/// `body_top_offset` is the distance from `pose.y` to the creature's highest
+/// module (see [`blueprint_body_top_offset`]). Equilibrium tracks that top
+/// so tall editor paints stay submerged instead of floating in air.
+pub fn step_buoyancy(
+    y: &mut f32,
+    state: &mut BuoyancyState,
+    col: &Column,
+    bias: f32,
+    body_top_offset: f32,
+) {
+    let offset = body_top_offset.max(0.0);
     let ground = {
         // Sediment contact: top of first solid under any fluid cap, else surface.
         water_band(col)
@@ -290,7 +314,8 @@ pub fn step_buoyancy(y: &mut f32, state: &mut BuoyancyState, col: &Column, bias:
         if let Some(prev_top) = state.last_water_top {
             let delta = top - prev_top;
             if delta.abs() > 1e-6 {
-                let was_in_column = *y <= prev_top + 0.25 && *y >= bed - 0.25;
+                let body_top = *y + offset;
+                let was_in_column = body_top <= prev_top + 0.25 && *y >= bed - 0.25;
                 if was_in_column {
                     if delta > 0.0 {
                         // Rising water lifts the body with the column.
@@ -300,8 +325,8 @@ pub fn step_buoyancy(y: &mut f32, state: &mut BuoyancyState, col: &Column, bias:
                         // heavy bodies keep their depth until buoyancy says otherwise.
                         let dens = relative_density(bias);
                         if dens < 1.0 {
-                            let float_y = equilibrium_y(prev_top, bed, 0.0);
-                            if (*y - float_y).abs() < FLOAT_DEPTH_M + 0.5 {
+                            let float_pose = equilibrium_y(prev_top, bed, 0.0) - offset;
+                            if (*y - float_pose).abs() < FLOAT_DEPTH_M + 0.5 {
                                 *y = (*y + delta).max(bed);
                             }
                         }
@@ -312,14 +337,16 @@ pub fn step_buoyancy(y: &mut f32, state: &mut BuoyancyState, col: &Column, bias:
         state.last_water_top = Some(top);
 
         let dens = relative_density(bias);
-        let eq = equilibrium_y(top, bed, bias);
+        // Pose equilibrium: body top sits on the gene float/sink line.
+        let eq = equilibrium_y(top, bed, bias) - offset;
+        let body_top = *y + offset;
 
-        if *y > top {
+        if body_top > top {
             // Air above the free surface — gravity wins.
             state.vel_y -= GRAVITY;
             state.vel_y *= 1.0 - AIR_DRAG;
             *y += state.vel_y;
-            if *y < top {
+            if *y + offset < top {
                 // Splash: enter water, bleed downward speed.
                 state.vel_y *= 0.4;
             }
@@ -336,8 +363,8 @@ pub fn step_buoyancy(y: &mut f32, state: &mut BuoyancyState, col: &Column, bias:
                 state.vel_y = state.vel_y.max(0.0);
             }
             // Don't let floaters launch far above the surface; park near float depth.
-            if dens < 1.0 && *y > top {
-                *y = top;
+            if dens < 1.0 && *y + offset > top {
+                *y = top - offset;
                 if state.vel_y > 0.0 {
                     state.vel_y = 0.0;
                 }
@@ -644,6 +671,7 @@ fn aabb_hits_any(bodies: &[(Entity, Aabb)], aabb: Aabb, ignore: Option<Entity>) 
 }
 
 /// Prefer the gene equilibrium depth (float line / sink depth) at column `x`.
+/// Returns a **pose.y** (body top = pose + [`blueprint_body_top_offset`]).
 fn depth_for_pose(world: &World, blueprint: &Blueprint, x: f32, y_hint: f32) -> Option<f32> {
     let wx = x.floor() as i32;
     let col = world.column_at(wx)?;
@@ -651,15 +679,16 @@ fn depth_for_pose(world: &World, blueprint: &Blueprint, x: f32, y_hint: f32) -> 
         return None;
     }
     if blueprint.is_plankton() {
+        let offset = blueprint_body_top_offset(blueprint);
         if let Some((top, bed)) = water_band(col) {
-            let eq = equilibrium_y(top, bed, blueprint.genome.buoyancy_bias);
+            let eq_pose = equilibrium_y(top, bed, blueprint.genome.buoyancy_bias) - offset;
             // Honour hint only as a secondary depth band (packing rows).
-            if (y_hint - eq).abs() < 0.05 {
-                return Some(eq);
+            if (y_hint - eq_pose).abs() < 0.05 {
+                return Some(eq_pose);
             }
-            return Some(y_hint.clamp(bed, top));
+            return Some(y_hint.clamp(bed, (top - offset).max(bed)));
         }
-        return Some(col.surface_y);
+        return Some(col.surface_y - offset);
     }
     Some(col.surface_y)
 }
@@ -678,22 +707,23 @@ fn find_clear_pose(
     let hi_f = hi as f32 + 0.99;
     let width = organism_width(blueprint);
     let step = (width + COLLISION_PAD).max(MODULE_CELL_COLS);
+    let offset = blueprint_body_top_offset(blueprint);
 
-    // Depth rows: primary equilibrium, then below/above if the float line is full.
+    // Depth rows: primary equilibrium pose, then below/above if full.
     let mut depth_rows = vec![y0];
     if blueprint.is_plankton() {
         if let Some(col) = world.column_at(x0.floor() as i32) {
             if let Some((top, bed)) = water_band(col) {
-                let eq = equilibrium_y(top, bed, blueprint.genome.buoyancy_bias);
-                depth_rows = vec![eq];
+                let eq_pose = equilibrium_y(top, bed, blueprint.genome.buoyancy_bias) - offset;
+                depth_rows = vec![eq_pose];
                 let mut d = width;
-                while eq - d >= bed {
-                    depth_rows.push(eq - d);
+                while eq_pose - d >= bed {
+                    depth_rows.push(eq_pose - d);
                     d += width;
                 }
                 d = width;
-                while eq + d <= top {
-                    depth_rows.push(eq + d);
+                while eq_pose + d + offset <= top {
+                    depth_rows.push(eq_pose + d);
                     d += width;
                 }
             }
@@ -849,14 +879,17 @@ impl AgentStore {
         self.ecs.query::<&Corpse>().iter().count()
     }
 
-    /// Elevation for a newly spawned / cloned organism.
+    /// Elevation for a newly spawned / cloned organism (`pose.y`).
     pub fn spawn_elevation(world: &World, world_x: i32, blueprint: &Blueprint) -> Option<f32> {
         let col = world.column_at(world_x)?;
+        let offset = blueprint_body_top_offset(blueprint);
         if blueprint.is_plankton() {
-            if let Some(y) = buoyancy_target_y(col, blueprint.genome.buoyancy_bias) {
-                return Some(y);
+            if let Some(eq) = buoyancy_target_y(col, blueprint.genome.buoyancy_bias) {
+                // Anchor the tallest painted module at the float line so
+                // editor-top paints spawn in water, not in the air.
+                return Some(eq - offset);
             }
-            return Some(col.surface_y);
+            return Some(col.surface_y - offset);
         }
         Some(col.surface_y)
     }
@@ -1069,7 +1102,8 @@ impl AgentStore {
             if let Some(col) = world.column_at(wx) {
                 if plankton {
                     let bias = circadian_buoyancy_bias(genome, phase);
-                    step_buoyancy(&mut pose.y, buoy, col, bias);
+                    let offset = blueprint_body_top_offset(&body.blueprint);
+                    step_buoyancy(&mut pose.y, buoy, col, bias, offset);
                 } else {
                     pose.y = col.surface_y;
                     buoy.vel_y = 0.0;
@@ -1254,7 +1288,8 @@ impl AgentStore {
             };
             // Heavy sinker — ignore living buoyancy gene.
             if body.blueprint.is_plankton() || water_band(col).is_some() {
-                step_buoyancy(&mut pose.y, buoy, col, 1.0);
+                let offset = blueprint_body_top_offset(&body.blueprint);
+                step_buoyancy(&mut pose.y, buoy, col, 1.0, offset);
                 buoy.vel_y -= 0.04; // extra dead-weight pull
             } else {
                 pose.y = col.surface_y;
@@ -1707,11 +1742,40 @@ mod tests {
         let col = world.column_at(8).unwrap();
         let (top1, _) = water_band(col).unwrap();
         assert!(top1 > top0, "expected water top to rise");
-        step_buoyancy(&mut y, &mut state, col, 0.0);
+        step_buoyancy(&mut y, &mut state, col, 0.0, 0.0);
         assert!(
             y > top0 - FLOAT_DEPTH_M + 0.1,
             "floater should rise with water: y={y} old_float={} new_top={top1}",
             top0 - FLOAT_DEPTH_M
+        );
+    }
+
+    #[test]
+    fn tall_editor_paint_spawns_submerged() {
+        // Painting near the top of the 16-tall editor canvas used to put
+        // modules in the air because pose.y sat at the float line and
+        // m.y extended upward. Body-top anchoring keeps the crest wet.
+        let world = world_with_water();
+        let mut bp = Blueprint::atom(Genome::default());
+        bp.modules.push(crate::blueprint::PlacedModule {
+            x: 0,
+            y: 12,
+            lane: crate::LaneId::Mid,
+            module: crate::ModuleId::Photosystem,
+        });
+        let y = AgentStore::spawn_elevation(&world, 8, &bp).unwrap();
+        let col = world.column_at(8).unwrap();
+        let (top, _) = water_band(col).unwrap();
+        let offset = blueprint_body_top_offset(&bp);
+        assert!(offset > 5.0, "tall paint should produce a body offset");
+        let body_top = y + offset;
+        assert!(
+            body_top <= top + 0.05,
+            "body top must sit at/under the free surface (top={top:.2} body_top={body_top:.2})"
+        );
+        assert!(
+            (body_top - (top - FLOAT_DEPTH_M)).abs() < 0.2,
+            "body top should sit on the float line"
         );
     }
 

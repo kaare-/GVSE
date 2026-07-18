@@ -178,9 +178,24 @@ impl CreatureEditor {
                 draw_rectangle_lines(sx, sy, CELL_PX, CELL_PX, 1.0, Color::from_rgba(70, 70, 80, 255));
             }
         }
-        // Ground line at y=0.
+        // Ground / deep line at y=0 (bottom). For plankton, the canvas top
+        // is the water surface — spawn anchors the tallest module there.
         let ground_sy = oy + (self.blueprint.canvas_h - 1) as f32 * CELL_PX + CELL_PX;
         draw_line(ox, ground_sy, ox + cw, ground_sy, 2.0, Color::from_rgba(160, 120, 80, 255));
+        draw_text(
+            "bottom = ground/deep",
+            ox,
+            ground_sy + 14.0,
+            12.0,
+            Color::from_rgba(160, 120, 80, 200),
+        );
+        draw_text(
+            "top = surface/sky (algae stay in water)",
+            ox,
+            oy - 6.0,
+            12.0,
+            Color::from_rgba(120, 180, 220, 220),
+        );
 
         for m in &self.blueprint.modules {
             let sx = ox + m.x as f32 * CELL_PX;

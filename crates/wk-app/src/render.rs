@@ -418,6 +418,8 @@ pub fn draw_frame(
     organism_ambient_c: Option<f32>,
     // When false, hide the bottom status/info strip (toggle with F3).
     show_status_line: bool,
+    // Vertical temperature samples for the selected column `(y_m, °C)`.
+    selected_temp_profile: &[(f32, f32)],
 ) {
     let sw = screen_width();
     let sh = screen_height();
@@ -670,7 +672,7 @@ pub fn draw_frame(
         panel_top = draw_organism_inspector(info, organism_ambient_c, sw, panel_top);
     }
     if let Some(wx) = selected {
-        draw_inspector(snap, wx, sw, panel_top);
+        draw_inspector(snap, wx, sw, panel_top, selected_temp_profile);
     }
 }
 
@@ -813,13 +815,21 @@ fn draw_organism_inspector(
     y0 + panel_h + 6.0
 }
 
-fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32, y0: f32) {
+fn draw_inspector(
+    snap: &RenderSnapshot,
+    world_x: i32,
+    sw: f32,
+    y0: f32,
+    // Optional vertical temperature samples `(y_m, °C)` for this column.
+    temp_profile: &[(f32, f32)],
+) {
     let Some(col) = snap.columns.iter().find(|c| c.world_x == world_x) else {
         return;
     };
 
     let panel_w = 280.0;
-    let panel_h = 240.0;
+    let profile_lines = if temp_profile.is_empty() { 0 } else { 1 + temp_profile.len().min(5) };
+    let panel_h = 240.0 + profile_lines as f32 * 14.0;
     let x0 = sw - panel_w - 8.0;
 
     draw_rectangle(x0, y0, panel_w, panel_h, Color::from_rgba(0, 0, 0, 220));
@@ -829,26 +839,33 @@ fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32, y0: f32) {
         format!("Column x={}", col.world_x),
         format!("surface_y={:.2} m  bedrock={:.0}m", col.surface_y, col.bedrock_y),
         format!(
-            "temp={:.1}C  RH={:.0}%  biome={}",
+            "skin={:.1}C  RH={:.0}%  biome={}",
             col.temperature_c,
             col.humidity_rh * 100.0,
             col.biome.name()
         ),
-        format!(
-            "water={} kg  moisture={} kg  sat={:.0}%",
-            col.surface_water,
-            col.moisture,
-            col.saturation * 100.0
-        ),
-        format!("ice={} kg  snow={} kg", col.ice, col.snow),
-        format!(
-            "sediment={} kg ({})",
-            col.sediment.total,
-            material_name(col.sediment.dominant)
-        ),
-        format!("flux w={} erode={}", col.water_flux, col.erosion_flux),
-        "--- layers ---".to_string(),
     ];
+    if !temp_profile.is_empty() {
+        lines.push("--- temp vs depth ---".into());
+        for &(y_m, t_c) in temp_profile.iter().take(5) {
+            let depth = col.surface_y - y_m;
+            lines.push(format!("  y={y_m:.0}m (↓{depth:.0}m)  {t_c:.1}C"));
+        }
+    }
+    lines.push(format!(
+        "water={} kg  moisture={} kg  sat={:.0}%",
+        col.surface_water,
+        col.moisture,
+        col.saturation * 100.0
+    ));
+    lines.push(format!("ice={} kg  snow={} kg", col.ice, col.snow));
+    lines.push(format!(
+        "sediment={} kg ({})",
+        col.sediment.total,
+        material_name(col.sediment.dominant)
+    ));
+    lines.push(format!("flux w={} erode={}", col.water_flux, col.erosion_flux));
+    lines.push("--- layers ---".into());
 
     for (i, &(mat, thickness, age_start, age_end)) in col.layers.iter().enumerate().take(6) {
         lines.push(format!(
@@ -860,7 +877,8 @@ fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32, y0: f32) {
         ));
     }
 
-    for (i, line) in lines.iter().enumerate().take(12) {
+    let max_lines = 12 + profile_lines;
+    for (i, line) in lines.iter().enumerate().take(max_lines) {
         draw_text(line, x0 + 8.0, y0 + 16.0 + i as f32 * 14.0, 14.0, WHITE);
     }
 }
