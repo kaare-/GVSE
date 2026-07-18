@@ -19,8 +19,8 @@ pub use module::{LaneId, ModuleId};
 pub use organism::{
     blueprint_body_top_offset, blueprint_land_crown_y, circadian_buoyancy_bias, land_plant_pose_y,
     land_plant_pose_y_on, mutate_blueprint_morphology, temp_comfort_factor, Aabb, Corpse, Lineage,
-    ModuleBody, Organism, OrganismInspect, MAX_ORGANISMS, MODULE_CELL_COLS, PHOTON_RATE,
-    CO2_HALF_SAT, CO2_PER_ENERGY,
+    ModuleBody, Organism, OrganismHabit, OrganismInspect, PopCaps, MAX_ORGANISMS, MODULE_CELL_COLS,
+    PHOTON_RATE, CO2_HALF_SAT, CO2_PER_ENERGY,
 };
 pub use root::{
     column_is_plantable, column_is_plantable_for_reach, column_nutrient_factor, penetrate_cost,
@@ -305,11 +305,18 @@ impl Genome {
 pub struct Grazer;
 
 /// All agent entities for one simulation.
-#[derive(Default)]
 pub struct AgentStore {
     pub ecs: EcsWorld,
     /// Cumulative successful births (stage 11 bookkeeping / tests).
     pub births_total: u64,
+    /// Per-habit soft caps (algae / plant / fungus). Tunable at runtime.
+    pub pop_caps: PopCaps,
+}
+
+impl Default for AgentStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl AgentStore {
@@ -317,6 +324,7 @@ impl AgentStore {
         Self {
             ecs: EcsWorld::new(),
             births_total: 0,
+            pop_caps: PopCaps::default(),
         }
     }
 
