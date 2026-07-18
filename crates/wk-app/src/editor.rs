@@ -1,4 +1,4 @@
-//! MS-Paint creature editor tab (Organism Kernel Set A MVP).
+//! MS-Paint creature editor tab (Organism Kernel Set A / D / E MVP).
 //! Spec: `docs/organism/EDITOR.md`.
 
 use macroquad::prelude::*;
@@ -40,6 +40,28 @@ impl Default for CreatureEditor {
     }
 }
 
+fn brush_paintable(mid: ModuleId) -> bool {
+    mid.set_d_paintable() || mid.set_e_paintable()
+}
+
+fn blueprint_spawnable(bp: &Blueprint) -> bool {
+    bp.is_valid_atom() || bp.is_valid_fungus()
+}
+
+fn habit_label(bp: &Blueprint) -> &'static str {
+    if bp.is_fungus() {
+        "fungus"
+    } else if bp.is_rooted() {
+        "land plant"
+    } else if bp.is_plankton() {
+        "plankton"
+    } else if bp.is_valid_atom() {
+        "atom"
+    } else {
+        "incomplete"
+    }
+}
+
 impl CreatureEditor {
     pub fn toggle(&mut self, currently_paused: bool) {
         if self.open {
@@ -50,7 +72,7 @@ impl CreatureEditor {
             self.was_paused = currently_paused;
             self.spawn_picker = false;
             self.status =
-                "1 nucleus 2 photo 3 root 4 stem | Atom=algae, +root=plant | Enter spawn"
+                "1 nuc 2 photo 3 root 4 stem 5 digest 6 hypha | F=fungus template | Enter spawn"
                     .into();
         }
     }
@@ -74,6 +96,22 @@ impl CreatureEditor {
         if is_key_pressed(KeyCode::Key4) {
             self.brush = ModuleId::Stem;
             self.tool = EditorTool::Paint;
+        }
+        if is_key_pressed(KeyCode::Key5) {
+            self.brush = ModuleId::Digest;
+            self.tool = EditorTool::Paint;
+        }
+        if is_key_pressed(KeyCode::Key6) {
+            self.brush = ModuleId::Hypha;
+            self.tool = EditorTool::Paint;
+        }
+        // Quick litter-fungus starter (nucleus + digest + hypha thread).
+        if is_key_pressed(KeyCode::F) {
+            self.blueprint = Blueprint::minimal_fungus(self.blueprint.genome);
+            self.name_buf = self.blueprint.name.clone();
+            self.brush = ModuleId::Hypha;
+            self.tool = EditorTool::Paint;
+            self.status = "Loaded minimal fungus — paint hyphae, Enter to spawn on litter".into();
         }
         if is_key_pressed(KeyCode::E) {
             self.tool = EditorTool::Erase;
@@ -103,15 +141,18 @@ impl CreatureEditor {
             }
         }
         if is_key_pressed(KeyCode::Enter) {
-            if self.blueprint.is_valid_atom() {
+            if blueprint_spawnable(&self.blueprint) {
                 self.spawn_picker = true;
-                self.status = if self.blueprint.is_plankton() {
+                self.status = if self.blueprint.is_fungus() {
+                    "Click litter / Organic land to spawn fungus — Esc cancel".into()
+                } else if self.blueprint.is_plankton() {
                     "Click ocean or land to spawn algae Atom — Esc cancel".into()
                 } else {
                     "Click a land column to spawn, Esc cancel".into()
                 };
             } else {
-                self.status = "Need ≥1 nucleus and ≥1 photosystem".into();
+                self.status =
+                    "Need nucleus+photosystem (atom/plant) or nucleus+digest (fungus)".into();
             }
         }
         if is_key_pressed(KeyCode::Escape) && self.spawn_picker {
@@ -147,7 +188,7 @@ impl CreatureEditor {
         self.blueprint
             .modules
             .retain(|m| !(m.x == cx && m.y == cy && m.lane == LaneId::Mid));
-        if self.tool == EditorTool::Paint && self.brush.set_d_paintable() {
+        if self.tool == EditorTool::Paint && brush_paintable(self.brush) {
             self.blueprint.modules.push(PlacedModule {
                 x: cx,
                 y: cy,
@@ -215,23 +256,36 @@ impl CreatureEditor {
 
         // Side panel.
         let px = ox + cw + 24.0;
-        draw_text("Creature editor (Set D plants)", px, oy, 22.0, WHITE);
-        draw_text(&format!("Tool: {:?}  Brush: {}", self.tool, self.brush.name()), px, oy + 28.0, 16.0, LIGHTGRAY);
-        draw_text("1 Nucleus  2 Photo  3 Root  4 Stem  E erase", px, oy + 52.0, 14.0, GRAY);
-        draw_text("S save  L load first  Enter spawn", px, oy + 72.0, 14.0, GRAY);
-        let habit = if self.blueprint.is_rooted() {
-            "land plant"
-        } else if self.blueprint.is_plankton() {
-            "plankton"
-        } else {
-            "incomplete"
-        };
+        draw_text("Creature editor (plants + fungi)", px, oy, 22.0, WHITE);
+        draw_text(
+            &format!("Tool: {:?}  Brush: {}", self.tool, self.brush.name()),
+            px,
+            oy + 28.0,
+            16.0,
+            LIGHTGRAY,
+        );
+        draw_text(
+            "1 Nuc  2 Photo  3 Root  4 Stem  5 Digest  6 Hypha",
+            px,
+            oy + 52.0,
+            14.0,
+            GRAY,
+        );
+        draw_text(
+            "E erase  F fungus template  S save  L load  Enter spawn",
+            px,
+            oy + 72.0,
+            14.0,
+            GRAY,
+        );
+        let habit = habit_label(&self.blueprint);
+        let spawn_ok = blueprint_spawnable(&self.blueprint);
         draw_text(
             &format!(
-                "modules={}  {}  atom={}",
+                "modules={}  {}  spawn={}",
                 self.blueprint.modules.len(),
                 habit,
-                self.blueprint.is_valid_atom()
+                spawn_ok
             ),
             px,
             oy + 100.0,
@@ -240,12 +294,14 @@ impl CreatureEditor {
         );
         draw_text(&self.status, px, oy + 130.0, 14.0, YELLOW);
 
-        // Palette swatches.
+        // Palette swatches (Set D plants + Set E fungi).
         for (i, mid) in [
             ModuleId::Nucleus,
             ModuleId::Photosystem,
             ModuleId::Root,
             ModuleId::Stem,
+            ModuleId::Digest,
+            ModuleId::Hypha,
         ]
         .iter()
         .enumerate()
@@ -273,4 +329,26 @@ impl CreatureEditor {
 
 pub enum EditorAction {
     None,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wk_sim::Genome;
+
+    #[test]
+    fn fungus_blueprint_is_editor_spawnable() {
+        let bp = Blueprint::minimal_fungus(Genome::default());
+        assert!(blueprint_spawnable(&bp));
+        assert_eq!(habit_label(&bp), "fungus");
+        assert!(brush_paintable(ModuleId::Digest));
+        assert!(brush_paintable(ModuleId::Hypha));
+    }
+
+    #[test]
+    fn atom_still_spawnable() {
+        let bp = Blueprint::atom(Genome::default());
+        assert!(blueprint_spawnable(&bp));
+        assert_eq!(habit_label(&bp), "plankton");
+    }
 }
