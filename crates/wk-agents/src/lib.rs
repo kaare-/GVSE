@@ -11,6 +11,7 @@ pub mod blueprint;
 pub mod module;
 pub mod organism;
 pub mod root;
+pub mod shade;
 
 pub use blueprint::{Blueprint, PlacedModule, Wire, WireKind, BLUEPRINT_DIR};
 pub use module::{LaneId, ModuleId};
@@ -24,6 +25,7 @@ pub use root::{
     column_is_plantable, column_nutrient_factor, penetrate_cost, plant_is_anchored,
     DROUGHT_HIBERNATE_MAX_TICKS, ROOT_ELONGATE_BASE_COST,
 };
+pub use shade::{effective_photo_light, CanopyIndex, SHADE_RADIUS};
 
 use hecs::{Entity, World as EcsWorld};
 use serde::{Deserialize, Serialize};
@@ -127,6 +129,12 @@ pub struct Genome {
     /// Surplus allocation toward root elongation.
     #[serde(default = "default_alloc_root")]
     pub alloc_root: f32,
+    /// How hard Photosystems shade modules / neighbours below (0..1).
+    #[serde(default = "default_leaf_absorb")]
+    pub leaf_absorb: f32,
+    /// Dim-light harvest vs full-sun peak (0 = sun thug, 1 = understory).
+    #[serde(default = "default_shade_efficiency")]
+    pub shade_efficiency: f32,
 }
 
 fn default_metabolic_rate() -> f32 {
@@ -171,6 +179,14 @@ fn default_alloc_leaf() -> f32 {
 fn default_alloc_root() -> f32 {
     0.30
 }
+fn default_leaf_absorb() -> f32 {
+    // Mid absorber — carpet sprouts shade a little without blacking the floor.
+    0.45
+}
+fn default_shade_efficiency() -> f32 {
+    // Slight understory lean so short plants keep scraps under a taller neighbour.
+    0.40
+}
 
 impl Default for Genome {
     fn default() -> Self {
@@ -193,6 +209,8 @@ impl Default for Genome {
             alloc_stem: default_alloc_stem(),
             alloc_leaf: default_alloc_leaf(),
             alloc_root: default_alloc_root(),
+            leaf_absorb: default_leaf_absorb(),
+            shade_efficiency: default_shade_efficiency(),
         }
     }
 }
@@ -239,6 +257,8 @@ impl Genome {
         g.alloc_stem = jitter(g.alloc_stem, 0.0, 1.0);
         g.alloc_leaf = jitter(g.alloc_leaf, 0.0, 1.0);
         g.alloc_root = jitter(g.alloc_root, 0.0, 1.0);
+        g.leaf_absorb = jitter(g.leaf_absorb, 0.05, 1.0);
+        g.shade_efficiency = jitter(g.shade_efficiency, 0.0, 1.0);
         g
     }
 
@@ -263,6 +283,8 @@ impl Genome {
             || (self.alloc_stem - other.alloc_stem).abs() > EPS
             || (self.alloc_leaf - other.alloc_leaf).abs() > EPS
             || (self.alloc_root - other.alloc_root).abs() > EPS
+            || (self.leaf_absorb - other.leaf_absorb).abs() > EPS
+            || (self.shade_efficiency - other.shade_efficiency).abs() > EPS
     }
 }
 
