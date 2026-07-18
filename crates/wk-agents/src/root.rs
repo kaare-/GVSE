@@ -22,11 +22,23 @@ pub const ROOT_ELONGATE_BASE_COST: f32 = 2.4;
 /// kg of substrate converted per successful rock/sand bore.
 pub const ROOT_BORE_KG: i64 = 40;
 /// Energy gained per kg of moisture drunk by roots.
-pub const ROOT_WATER_ENERGY: f32 = 0.045;
+pub const ROOT_WATER_ENERGY: f32 = 0.035;
 /// Extra photo multiplier from rich organic substrate (on top of nutrient).
 pub const ORGANIC_SUBSTRATE_BONUS: f32 = 0.35;
-/// Drought drain per tick when rooted and moisture fraction is near zero.
-pub const ROOT_DROUGHT_DRAIN: f32 = 0.22;
+/// Soft stress drain while drying (moist below [`DROUGHT_STRESS_FRAC`]).
+/// Kept tiny — real survival uses hibernation, not a one-second kill.
+pub const ROOT_DROUGHT_STRESS_DRAIN: f32 = 0.003;
+/// Moisture fraction below which photo/growth slow and stress starts.
+pub const DROUGHT_STRESS_FRAC: f32 = 0.18;
+/// Moisture fraction that triggers drought dormancy (hibernate).
+pub const DROUGHT_DORMANT_FRAC: f32 = 0.06;
+/// Max consecutive dormant ticks before the plant dies (~2.5 min at 60 Hz).
+pub const DROUGHT_HIBERNATE_MAX_TICKS: u32 = 9_000;
+/// Upkeep multiplier while drought-dormant (respiration only).
+pub const DROUGHT_DORMANT_UPKEEP: f32 = 0.18;
+/// kg sipped per root module per tick when soil still has water.
+/// Deliberately small so a patch of plants can't empty a hill in seconds.
+pub const ROOT_SIP_KG_PER_ROOT: f32 = 0.05;
 /// How often (ticks) a plant may attempt elongation.
 pub const ROOT_GROW_PERIOD: u64 = 48;
 
@@ -95,7 +107,10 @@ pub fn adjacent_moisture_frac(world: &World, wx: i32) -> f32 {
     }
 }
 
-/// Drink from host + adjacent columns; returns kg taken.
+/// Gentle sip from host + adjacent columns; returns kg taken.
+///
+/// Caps per-column take so dense plant patches leave pore water in place
+/// (rain / infiltration can refill; plants should not flash-dry a hill).
 pub fn drink_adjacent(world: &mut World, wx: i32, budget_kg: i64) -> i64 {
     if budget_kg <= 0 {
         return 0;
@@ -114,11 +129,42 @@ pub fn drink_adjacent(world: &mut World, wx: i32, budget_kg: i64) -> i64 {
         if left <= 0 {
             break;
         }
-        let got = world.drink_water(x, left);
+        // Never drink a column below a small reserve — leaves drought buffer.
+        let reserve = world
+            .column_at(x)
+            .map(|c| (c.moisture_cap() / 12).max(2))
+            .unwrap_or(2);
+        let available = world
+            .column_at(x)
+            .map(|c| (c.moisture + c.top_water_mass()).saturating_sub(reserve))
+            .unwrap_or(0);
+        if available <= 0 {
+            continue;
+        }
+        let want = left.min(available).min(2); // ≤2 kg from any one column / tick
+        let got = world.drink_water(x, want);
         taken += got;
         left -= got;
     }
     taken
+}
+
+/// Drought band for a moisture fraction: hydrated / stressed / dormant.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DroughtBand {
+    Hydrated,
+    Stressed,
+    Dormant,
+}
+
+pub fn drought_band(moist_frac: f32) -> DroughtBand {
+    if moist_frac < DROUGHT_DORMANT_FRAC {
+        DroughtBand::Dormant
+    } else if moist_frac < DROUGHT_STRESS_FRAC {
+        DroughtBand::Stressed
+    } else {
+        DroughtBand::Hydrated
+    }
 }
 
 /// World Y of a module cell for a rooted plant (`pose.y` = ground).

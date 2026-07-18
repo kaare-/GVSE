@@ -70,9 +70,13 @@ const AIR_DRAG: f32 = 0.03;
 /// Mild spring toward the gene equilibrium depth (keeps bias meaningful).
 const EQ_SPRING: f32 = 0.08;
 
-/// Marker: Set A (and later) module-pixel organism.
+/// Marker: Set A / Set D module-pixel organism.
 #[derive(Debug, Clone, Copy, Default)]
-pub struct Organism;
+pub struct Organism {
+    /// Consecutive ticks in drought dormancy (land plants). Resets when
+    /// soil rewets; death after [`crate::root::DROUGHT_HIBERNATE_MAX_TICKS`].
+    pub drought_ticks: u32,
+}
 
 /// Vertical motion state for weight / buoyancy integration.
 #[derive(Debug, Clone, Copy, Default)]
@@ -134,6 +138,8 @@ pub struct OrganismInspect {
     pub stems: usize,
     pub is_plankton: bool,
     pub dead: bool,
+    /// Land-plant drought dormancy ticks (0 = hydrated / not dormant).
+    pub drought_ticks: u32,
     /// When dead: `(settled_ticks, CORPSE_SETTLE_TICKS)` while resting on bed/land.
     pub corpse_settle: Option<(u32, u32)>,
 }
@@ -989,7 +995,7 @@ impl AgentStore {
             blueprint.genome,
             ModuleBody { blueprint },
             Lineage::default(),
-            Organism,
+            Organism::default(),
         ));
         Some(e)
     }
@@ -1066,6 +1072,11 @@ impl AgentStore {
             (c.settled_ticks, CORPSE_SETTLE_TICKS)
         });
         let dead = corpse_settle.is_some();
+        let drought_ticks = self
+            .ecs
+            .get::<&Organism>(entity)
+            .map(|o| o.drought_ticks)
+            .unwrap_or(0);
         Some(OrganismInspect {
             entity_id: entity.id(),
             name: body.blueprint.name.clone(),
@@ -1085,6 +1096,7 @@ impl AgentStore {
             stems: body.blueprint.stem_count(),
             is_plankton: body.blueprint.is_plankton(),
             dead,
+            drought_ticks,
             corpse_settle,
         })
     }
@@ -1112,7 +1124,7 @@ impl AgentStore {
         // x, y, blueprint, energy, max_e, parent, parent_generation, founder_id
         let mut births: Vec<(f32, f32, Blueprint, f32, f32, Entity, u32, u8)> = Vec::new();
 
-        for (e, (pose, buoy, energy, genome, body, lineage, _)) in self
+        for (e, (pose, buoy, energy, genome, body, lineage, organism)) in self
             .ecs
             .query::<(
                 &mut Pose,
@@ -1121,7 +1133,7 @@ impl AgentStore {
                 &Genome,
                 &mut ModuleBody,
                 &mut Lineage,
-                &Organism,
+                &mut Organism,
             )>()
             .iter()
         {
@@ -1173,7 +1185,33 @@ impl AgentStore {
                 }
             }
 
-            if active && (!plankton || in_water) {
+            // Land-plant drought: sip gently when wet; hibernate when dry
+            // (reduced upkeep, no photo/growth) for a limited window.
+            let moist = if rooted {
+                crate::root::adjacent_moisture_frac(world, wx)
+            } else {
+                1.0
+            };
+            let drought = if rooted {
+                crate::root::drought_band(moist)
+            } else {
+                crate::root::DroughtBand::Hydrated
+            };
+            let dormant = matches!(drought, crate::root::DroughtBand::Dormant);
+            if rooted {
+                if dormant {
+                    organism.drought_ticks = organism.drought_ticks.saturating_add(1);
+                    if organism.drought_ticks >= crate::root::DROUGHT_HIBERNATE_MAX_TICKS {
+                        deaths.push((e, wx));
+                        continue;
+                    }
+                } else {
+                    organism.drought_ticks = 0;
+                }
+            }
+
+            let plant_active = active && !dormant;
+            if plant_active && (!plankton || in_water) {
                 let mut gain = organism_photo_gain(energy.max, l0, n_photo) * comfort;
                 if plankton {
                     // Michaelis–Menten on dissolved CO₂ — blooms can starve the water.
@@ -1191,28 +1229,35 @@ impl AgentStore {
                 } else if rooted {
                     // Land plants: photo gated by soil / dissolved nutrients.
                     gain *= nutrient.clamp(0.05, 1.6);
+                    if matches!(drought, crate::root::DroughtBand::Stressed) {
+                        gain *= 0.45; // stomata closing
+                    }
                 }
                 energy.current = (energy.current + gain).min(energy.max);
             }
 
-            // Roots drink moisture from host + adjacent columns.
-            if rooted && active {
-                let moist = crate::root::adjacent_moisture_frac(world, wx);
-                let budget = (1.5 + n_roots * 1.2).round() as i64;
+            // Roots sip moisture gently — never flash-dry the host column.
+            if rooted && plant_active && !matches!(drought, crate::root::DroughtBand::Dormant) {
+                let budget = (n_roots * crate::root::ROOT_SIP_KG_PER_ROOT)
+                    .ceil()
+                    .max(1.0) as i64;
                 let drunk = crate::root::drink_adjacent(world, wx, budget);
                 if drunk > 0 {
                     let sip = drunk as f32 * crate::root::ROOT_WATER_ENERGY * nutrient.max(0.2);
                     energy.current = (energy.current + sip).min(energy.max);
                 }
-                if moist < 0.08 {
-                    energy.current -= crate::root::ROOT_DROUGHT_DRAIN;
+                if matches!(drought, crate::root::DroughtBand::Stressed) {
+                    energy.current -= crate::root::ROOT_DROUGHT_STRESS_DRAIN;
                 }
             }
 
-            let upkeep = organism_upkeep(genome, energy.max, l0, n_photo);
+            let mut upkeep = organism_upkeep(genome, energy.max, l0, n_photo);
+            if dormant {
+                upkeep *= crate::root::DROUGHT_DORMANT_UPKEEP;
+            }
             // Root tissue has a small upkeep tax (deeper trees cost more).
-            let root_tax = if rooted {
-                0.02 * body.blueprint.root_count() as f32
+            let root_tax = if rooted && !dormant {
+                0.015 * body.blueprint.root_count() as f32
             } else {
                 0.0
             };
@@ -1222,8 +1267,11 @@ impl AgentStore {
                 continue;
             }
 
-            // Surplas → elongate roots / shoots (material-costed bore).
-            if rooted && active && tick % crate::root::ROOT_GROW_PERIOD == (e.id() as u64 % crate::root::ROOT_GROW_PERIOD)
+            // Surplus → elongate roots / shoots (material-costed bore).
+            if rooted
+                && plant_active
+                && tick % crate::root::ROOT_GROW_PERIOD
+                    == (e.id() as u64 % crate::root::ROOT_GROW_PERIOD)
             {
                 let (_, _, w_root) = genome.alloc_weights();
                 if w_root >= 0.2 {
@@ -1263,15 +1311,24 @@ impl AgentStore {
                 }
             }
 
-            // Coarse ecology feedback from live modules.
+            // Coarse ecology feedback — raise toward cover, don't stack every tick
+            // (stacking drove leaf_area→1 and flash-dried soil via ET).
             if rooted {
                 if let Some(col) = world.column_at_mut(wx) {
                     let roots = body.blueprint.root_count() as f32;
                     let leaves = body.photosystem_count() as f32;
-                    col.ecology.root_density =
-                        (col.ecology.root_density.max(0.05) + roots * 0.04).clamp(0.0, 1.0);
-                    col.ecology.leaf_area =
-                        (col.ecology.leaf_area.max(0.05) + leaves * 0.05).clamp(0.0, 1.0);
+                    let cover_r = (roots * 0.08).clamp(0.0, 1.0);
+                    let cover_l = if dormant {
+                        (leaves * 0.04).clamp(0.0, 0.35) // wilted canopy
+                    } else {
+                        (leaves * 0.12).clamp(0.0, 1.0)
+                    };
+                    col.ecology.root_density = col.ecology.root_density.max(cover_r);
+                    col.ecology.leaf_area = if dormant {
+                        col.ecology.leaf_area.min(cover_l.max(0.05))
+                    } else {
+                        col.ecology.leaf_area.max(cover_l)
+                    };
                 }
             }
 
@@ -1398,7 +1455,7 @@ impl AgentStore {
                     age_ticks: 0,
                     founder_id,
                 },
-                Organism,
+                Organism::default(),
             ));
             bodies.push((new_entity, new_aabb));
             if let Ok(mut lin) = self.ecs.get::<&mut Lineage>(parent) {
@@ -2074,7 +2131,7 @@ mod tests {
             "plant feet on ground y0={y0} surface={surface}"
         );
         let moist_before = world.column_at(2).unwrap().moisture;
-        for t in 0..120 {
+        for t in 0..400 {
             store.step_organisms(&mut world, t);
         }
         let moist_after = world.column_at(2).unwrap().moisture;
@@ -2082,9 +2139,53 @@ mod tests {
             moist_after < moist_before,
             "roots should drink host moisture ({moist_before} → {moist_after})"
         );
+        // Gentle sip — must not flash-dry the column in a few seconds.
+        assert!(
+            moist_after > moist_before / 4,
+            "sip too aggressive ({moist_before} → {moist_after})"
+        );
         let info = store.inspect_organism(e).expect("plant still alive");
         assert!(!info.is_plankton);
         assert!(info.roots >= 1);
+    }
+
+    #[test]
+    fn land_plant_hibernates_through_short_drought() {
+        let mut world = World::new(5);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        // Bone-dry soil.
+        if let Some(col) = world.column_at_mut(2) {
+            col.moisture = 0;
+            col.ecology.nutrient = 0.5;
+        }
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(
+                &world,
+                2,
+                Blueprint::minimal_plant(Genome::default()),
+                80.0,
+            )
+            .expect("spawn");
+        // Survive well past the old "seconds" kill window.
+        for t in 0..2_000 {
+            store.step_organisms(&mut world, t);
+        }
+        let info = store.inspect_organism(e).expect("should still be hibernating");
+        assert!(info.drought_ticks > 0, "should be in drought dormancy");
+        assert!(info.energy > 0.0);
+        // Eventually dies if drought never breaks.
+        if let Ok(mut org) = store.ecs.get::<&mut Organism>(e) {
+            org.drought_ticks = crate::root::DROUGHT_HIBERNATE_MAX_TICKS - 5;
+        }
+        for t in 2_000..2_020 {
+            store.step_organisms(&mut world, t);
+        }
+        assert!(
+            store.ecs.get::<&Organism>(e).is_err(),
+            "prolonged drought should end living Organism after hibernate max"
+        );
     }
 
     #[test]

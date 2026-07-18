@@ -762,6 +762,12 @@ fn draw_organism_inspector(
         "DEAD".into()
     } else if info.is_plankton {
         "plankton".into()
+    } else if info.drought_ticks > 0 {
+        format!(
+            "drought dormancy {}/{}",
+            info.drought_ticks,
+            wk_sim::DROUGHT_HIBERNATE_MAX_TICKS
+        )
     } else if info.roots > 0 || info.stems > 0 {
         "land plant".into()
     } else {
