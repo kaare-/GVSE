@@ -1506,8 +1506,8 @@ impl AgentStore {
                 && energy.current >= energy.max * threshold
                 && can_repro
             {
-                // Land plants: vegetative root sprout (pick site first so a
-                // failed site doesn't tax the parent). Plankton: fission.
+                // Land plants: vegetative sprout from a painted lateral
+                // runner tip (no site → keep elongating sideways). Plankton: fission.
                 let sprout_x = if rooted {
                     crate::root::pick_root_sprout_x(
                         world,
@@ -1601,7 +1601,12 @@ impl AgentStore {
                     == (e.id() as u64 % crate::root::ROOT_GROW_PERIOD)
             {
                 let (_, _, w_root) = genome.alloc_weights();
-                if w_root >= 0.2 {
+                // Shoot a horizontal runner before suckering — sprouts only
+                // emerge from painted lateral Root tips.
+                let need_runner = !crate::root::has_lateral_runner(pose.x, &body.blueprint)
+                    && body.blueprint.root_count()
+                        >= crate::root::LAND_SPROUT_MIN_ROOTS.saturating_sub(1);
+                if w_root >= 0.2 || need_runner {
                     let _ = crate::root::try_elongate_root(
                         &mut body.blueprint,
                         energy,
@@ -2646,14 +2651,23 @@ mod tests {
                     reproduce_at: 0.35,
                     clone_fidelity: 0.9,
                     metabolic_rate: 0.2,
-                    alloc_root: 0.7,
+                    alloc_root: 0.85,
+                    alloc_stem: 0.1,
+                    alloc_leaf: 0.05,
+                    root_depth_bias: 0.25, // sprawl rhizomes
+                    active_window: 0.85,
                     ..Genome::default()
                 }),
                 200.0,
             )
             .expect("parent");
         let x0 = store.ecs.get::<&Pose>(parent).unwrap().x;
-        for t in 0..12_000 {
+        // Grow a lateral runner, then sprout from its tip (no teleport).
+        for t in 0..20_000 {
+            if let Ok(mut e) = store.ecs.get::<&mut Energy>(parent) {
+                // Keep a working tank so runners can paint, then bank for sprout.
+                e.current = e.current.max(e.max * 0.55).min(e.max);
+            }
             store.step_organisms(&mut world, t);
             if store.organism_count() > 1 {
                 break;
@@ -2661,7 +2675,16 @@ mod tests {
         }
         assert!(
             store.organism_count() > 1,
-            "root sprout should produce an offspring"
+            "root sprout should emerge from a painted runner"
+        );
+        let parent_has_runner = store
+            .ecs
+            .get::<&ModuleBody>(parent)
+            .map(|b| crate::root::has_lateral_runner(x0, &b.blueprint))
+            .unwrap_or(false);
+        assert!(
+            parent_has_runner,
+            "parent should have shot a horizontal runner before suckering"
         );
         let mut xs: Vec<f32> = store
             .ecs

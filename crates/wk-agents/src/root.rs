@@ -339,39 +339,63 @@ pub fn column_can_host_sprout(world: &World, wx: i32) -> bool {
     moist >= ROOT_SPROUT_MIN_MOIST_FRAC || col.top_water_mass() > 0
 }
 
+/// World column occupied by a blueprint module at `pose_x`.
+pub fn root_module_world_x(pose_x: f32, blueprint: &Blueprint, module_x: i16) -> i32 {
+    let mid_x = blueprint_mid_x(blueprint);
+    (pose_x + (module_x as f32 - mid_x) * MODULE_CELL_COLS).floor() as i32
+}
+
+/// True when at least one Root pixel sits in a column other than the crown.
+pub fn has_lateral_runner(pose_x: f32, blueprint: &Blueprint) -> bool {
+    if !blueprint.is_rooted() {
+        return false;
+    }
+    let parent_wx = pose_x.floor() as i32;
+    blueprint
+        .modules
+        .iter()
+        .filter(|m| m.module == ModuleId::Root)
+        .any(|m| root_module_world_x(pose_x, blueprint, m.x) != parent_wx)
+}
+
 /// Pick a column for vegetative **root sprout** propagation.
 ///
-/// Prefers painted Root tips that already sit in a neighbouring column
-/// (runners). If roots are still under the crown only, allows a near
-/// sucker within [`ROOT_SPROUT_MAX_DIST`], biased by moisture.
+/// Only emerges from a **painted lateral runner** — a Root module that
+/// already reaches a neighbouring column. No teleport suckers: if the
+/// plant hasn't shot a horizontal root yet, returns `None` and the
+/// caller should keep elongating (see runner bias in
+/// [`try_elongate_root`]).
 ///
-/// Returns `None` when no eligible site exists (caller should skip the
-/// attempt without charging energy). Seeds / fruiting come later.
+/// Returns `None` when no eligible tip exists (caller skips without
+/// charging energy). Seeds / fruiting come later.
 pub fn pick_root_sprout_x(
     world: &World,
     pose_x: f32,
     pose_y: f32,
     blueprint: &Blueprint,
-    world_seed: u64,
-    tick: u64,
-    entity_id: u32,
+    _world_seed: u64,
+    _tick: u64,
+    _entity_id: u32,
 ) -> Option<f32> {
     if !blueprint.is_rooted() || blueprint.root_count() == 0 {
         return None;
     }
     let parent_wx = pose_x.floor() as i32;
-    let mid_x = blueprint_mid_x(blueprint);
+    let parent_bed = world
+        .column_at(parent_wx)
+        .map(|c| c.climate_elevation())
+        .unwrap_or(pose_y);
 
-    // 1) Painted lateral roots with solid purchase — farthest first.
-    let mut lateral: Vec<(i32, i32, f32)> = Vec::new(); // |dx|, wx, moist
+    // Painted lateral roots with solid purchase — farthest first.
+    let mut lateral: Vec<(i32, i32, f32, i16)> = Vec::new(); // |dx|, wx, moist, module_y
     for m in blueprint
         .modules
         .iter()
         .filter(|m| m.module == ModuleId::Root)
     {
-        let cell_wx = (pose_x + (m.x as f32 - mid_x) * MODULE_CELL_COLS).floor() as i32;
+        let cell_wx = root_module_world_x(pose_x, blueprint, m.x);
         let dx = (cell_wx - parent_wx).abs();
-        if dx < 1 {
+        if dx < 1 || dx > ROOT_SPROUT_MAX_DIST {
             continue;
         }
         let tip_y = module_world_y(pose_y, m.y);
@@ -383,58 +407,24 @@ pub fn pick_root_sprout_x(
         if !column_can_host_sprout(world, cell_wx) {
             continue;
         }
-        let moist = world
-            .column_at(cell_wx)
-            .map(|c| {
-                let cap = c.moisture_cap().max(1) as f32;
-                c.moisture.max(0) as f32 / cap
-            })
-            .unwrap_or(0.0);
-        lateral.push((dx, cell_wx, moist));
+        let Some(col) = world.column_at(cell_wx) else {
+            continue;
+        };
+        // Don't sprout up/down a cliff face from a runner tip.
+        if (col.climate_elevation() - parent_bed).abs() > 10.0 {
+            continue;
+        }
+        let cap = col.moisture_cap().max(1) as f32;
+        let moist = col.moisture.max(0) as f32 / cap;
+        // Prefer shallow runners (rhizomes) over deep laterals.
+        let shallow = (-m.y).min(6) as f32;
+        lateral.push((dx, cell_wx, moist + (6.0 - shallow) * 0.05, m.y));
     }
     lateral.sort_by(|a, b| {
         b.0.cmp(&a.0)
             .then(b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
     });
-    if let Some(&(_, wx, _)) = lateral.first() {
-        return Some(wx as f32 + 0.5);
-    }
-
-    // 2) Near-crown sucker — underground runner not yet painted as modules.
-    // Prefer gentler elevation steps so sprouts don't leap off cliff faces.
-    let parent_bed = world
-        .column_at(parent_wx)
-        .map(|c| c.climate_elevation())
-        .unwrap_or(pose_y);
-    let prefer_right = hash_u64(world_seed, tick as i64, entity_id as i64, 0x5352_4F54) & 1 == 0;
-    let mut best: Option<(f32, i32)> = None; // score, wx
-    for dist in 1..=ROOT_SPROUT_MAX_DIST {
-        for sign in [1i32, -1] {
-            let signed = if prefer_right { sign } else { -sign };
-            let wx = parent_wx + signed * dist;
-            if !column_can_host_sprout(world, wx) {
-                continue;
-            }
-            let Some(col) = world.column_at(wx) else {
-                continue;
-            };
-            let bed = col.climate_elevation();
-            let step = (bed - parent_bed).abs();
-            // Hard reject: sprout would sit on a pillar/cliff lip far above/below.
-            if step > 10.0 {
-                continue;
-            }
-            let cap = col.moisture_cap().max(1) as f32;
-            let moist = col.moisture.max(0) as f32 / cap;
-            // Wetter + nearer grade + slightly farther out.
-            let score = moist * 2.0 + dist as f32 * 0.15 - step * 0.35;
-            match best {
-                Some((s, _)) if s >= score => {}
-                _ => best = Some((score, wx)),
-            }
-        }
-    }
-    best.map(|(_, wx)| wx as f32 + 0.5)
+    lateral.first().map(|&(_, wx, _, _)| wx as f32 + 0.5)
 }
 
 /// Pick the deepest Root tip (most negative module y), or Nucleus if none.
@@ -494,6 +484,12 @@ pub fn try_elongate_root(
         blueprint.modules.iter().map(|m| (m.x, m.y)).collect();
     let tips = root_tips(blueprint);
     let depth_bias = genome.root_depth_bias.clamp(0.0, 1.0);
+    let parent_wx = pose_x.floor() as i32;
+    // No painted runner yet → shoot sideways (rhizome) before diving.
+    // Vegetative sprouts only fire from lateral tips.
+    let need_runner = !has_lateral_runner(pose_x, blueprint)
+        && blueprint.root_count() >= LAND_SPROUT_MIN_ROOTS.saturating_sub(1);
+    let banking_for_sprout = energy.current >= energy.max * LAND_SPROUT_ENERGY_FRAC * 0.85;
 
     // Candidate steps from each tip: down + diagonals + lateral.
     const DIRS: [(i16, i16); 5] = [(0, -1), (-1, -1), (1, -1), (-1, 0), (1, 0)];
@@ -503,19 +499,14 @@ pub fn try_elongate_root(
         for &(dx, dy) in &DIRS {
             let nx = tx + dx;
             let ny = ty + dy;
-            if ny > 2 || ny < -20 || nx.abs() > 10 {
+            // Wide enough that a shallow rhizome can cross ~ROOT_SPROUT_MAX_DIST columns.
+            if ny > 2 || ny < -20 || nx.abs() > 14 {
                 continue;
             }
             if occupied.contains(&(nx, ny)) {
                 continue;
             }
-            // World column for this tip cell.
-            let mid_x = {
-                let min_x = blueprint.modules.iter().map(|m| m.x).min().unwrap_or(0);
-                let max_x = blueprint.modules.iter().map(|m| m.x).max().unwrap_or(0);
-                (min_x as f32 + max_x as f32) * 0.5
-            };
-            let cell_wx = (pose_x + (nx as f32 - mid_x) * MODULE_CELL_COLS).floor() as i32;
+            let cell_wx = root_module_world_x(pose_x, blueprint, nx);
             let tip_y = module_world_y(pose_y, ny);
             let Some(col) = world.column_at(cell_wx) else {
                 continue;
@@ -549,11 +540,26 @@ pub fn try_elongate_root(
             let moist = ((col.moisture.max(0) as f32) / cap).clamp(0.0, 1.5);
             let down = if dy < 0 { 1.0 } else { 0.0 };
             let lateral = if dx != 0 && dy == 0 { 0.35 } else { 0.0 };
-            let score = moist
+            let enters_new_col = cell_wx != parent_wx;
+            let mut score = moist
                 + void_bonus
                 + depth_bias * down
                 + (1.0 - depth_bias) * lateral
                 - pen * 0.03;
+            if need_runner || banking_for_sprout {
+                // Rhizome urge: horizontal into a neighbour beats diving.
+                if dx != 0 && dy == 0 {
+                    score += 2.8;
+                } else if dx != 0 && dy < 0 {
+                    score += 1.1;
+                }
+                if enters_new_col {
+                    score += 1.6;
+                }
+                if need_runner && dy < 0 && dx == 0 {
+                    score -= 1.2;
+                }
+            }
             let better = best.map(|(s, ..)| score > s).unwrap_or(true);
             if better {
                 best = Some((score, nx, ny, cell_wx, cost));
@@ -736,24 +742,63 @@ mod tests {
         world
     }
 
+    /// Minimal plant plus a shallow rhizome into column `parent+1`.
+    fn plant_with_runner(pose_x: f32) -> Blueprint {
+        let mut bp = Blueprint::minimal_plant(Genome::default());
+        // MODULE_CELL_COLS=0.45 → module x≈+3 crosses into the next column.
+        let mid = blueprint_mid_x(&bp);
+        let target_x = ((pose_x.floor() + 1.0 + 0.5 - pose_x) / MODULE_CELL_COLS + mid).round() as i16;
+        bp.modules.push(PlacedModule {
+            x: target_x,
+            y: -1,
+            lane: LaneId::Mid,
+            module: ModuleId::Root,
+        });
+        bp.modules.push(PlacedModule {
+            x: target_x + 1,
+            y: -1,
+            lane: LaneId::Mid,
+            module: ModuleId::Root,
+        });
+        assert!(
+            has_lateral_runner(pose_x, &bp),
+            "fixture must paint a lateral runner"
+        );
+        bp
+    }
+
     #[test]
-    fn root_sprout_picks_nearby_moist_column() {
+    fn root_sprout_requires_painted_lateral_runner() {
         let mut world = dry_land();
-        // Saturate neighbours so suckers have somewhere to go.
         for x in 6..12 {
             if let Some(col) = world.column_at_mut(x) {
                 col.moisture = col.moisture_cap();
             }
         }
         let bp = Blueprint::minimal_plant(Genome::default());
+        assert!(
+            pick_root_sprout_x(&world, 8.5, 8.0, &bp, 1, 0, 7).is_none(),
+            "crown-only roots must not teleport a sucker"
+        );
+    }
+
+    #[test]
+    fn root_sprout_emerges_from_runner_tip() {
+        let mut world = dry_land();
+        for x in 6..12 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+            }
+        }
         let pose_x = 8.5;
         let pose_y = world.column_at(8).unwrap().surface_y;
+        let bp = plant_with_runner(pose_x);
         let site = pick_root_sprout_x(&world, pose_x, pose_y, &bp, 1, 0, 7)
-            .expect("sucker site");
+            .expect("sucker from runner tip");
         let dx = (site.floor() as i32 - 8).abs();
         assert!(
             (1..=ROOT_SPROUT_MAX_DIST).contains(&dx),
-            "sprout should emerge near parent (site={site}, dx={dx})"
+            "sprout should emerge at runner column (site={site}, dx={dx})"
         );
         assert!(column_can_host_sprout(&world, site.floor() as i32));
     }
@@ -772,11 +817,66 @@ mod tests {
                 col.deposit_to_top(MaterialId::Water, 20_000, 0);
             }
         }
-        let bp = Blueprint::minimal_plant(Genome::default());
+        let bp = plant_with_runner(8.5);
         let site = pick_root_sprout_x(&world, 8.5, 8.0, &bp, 2, 10, 3);
         assert!(
             site.is_none(),
             "no sprout into drowned neighbours (got {site:?})"
+        );
+    }
+
+    #[test]
+    fn elongate_shoots_runner_when_banking_for_sprout() {
+        let mut world = dry_land();
+        for x in 6..12 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+                col.ecology.nutrient = 0.7;
+                col.deposit_to_top(MaterialId::Organic, 500, 0);
+            }
+        }
+        let mut bp = Blueprint::minimal_plant(Genome {
+            alloc_root: 0.9,
+            alloc_stem: 0.05,
+            alloc_leaf: 0.05,
+            root_depth_bias: 0.2, // sprawl
+            ..Genome::default()
+        });
+        // Extra vertical roots so need_runner engages.
+        bp.modules.push(PlacedModule {
+            x: 0,
+            y: -2,
+            lane: LaneId::Mid,
+            module: ModuleId::Root,
+        });
+        let mut energy = Energy {
+            current: 120.0,
+            max: 120.0,
+        };
+        let genome = bp.genome;
+        let pose_x = 8.5;
+        let pose_y = land_plant_pose_y_for_test(world.column_at(8).unwrap().surface_y, &bp);
+        assert!(!has_lateral_runner(pose_x, &bp));
+        for t in 0..24u64 {
+            let _ = try_elongate_root(
+                &mut bp,
+                &mut energy,
+                &mut world,
+                pose_x,
+                pose_y,
+                &genome,
+                1,
+                t,
+                3,
+            );
+            energy.current = energy.max * 0.9;
+            if has_lateral_runner(pose_x, &bp) {
+                break;
+            }
+        }
+        assert!(
+            has_lateral_runner(pose_x, &bp),
+            "banking plant should shoot a horizontal runner before sprouting"
         );
     }
 
