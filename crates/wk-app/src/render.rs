@@ -600,6 +600,19 @@ pub fn draw_frame(
                 let c = humidity_overlay_color(col.humidity_rh);
                 draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
             }
+            OverlayMode::SoilMoisture => {
+                // Vertical band through the near-surface rooting zone so
+                // the water table reads as a heat map, not a surface tick.
+                let zone_top = col.surface_y;
+                let zone_bot = (col.surface_y - 3.0).max(col.bedrock_y);
+                let p0 = world_y_to_screen(zone_top, snap.sea_level, sh, camera_y_offset);
+                let p1 = world_y_to_screen(zone_bot, snap.sea_level, sh, camera_y_offset);
+                let hgt = (p1 - p0).abs().max(2.0);
+                let y_pix = p0.min(p1);
+                let mut c = soil_moisture_overlay_color(col.saturation);
+                c.a = 0.55;
+                draw_rectangle(x, y_pix, COL_W, hgt, c);
+            }
             OverlayMode::Co2Field => {
                 let c = gas_overlay_color(col.co2, true);
                 draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
@@ -727,6 +740,15 @@ fn humidity_overlay_color(rh: f32) -> Color {
     Color::from_rgba(r, g, b, 220)
 }
 
+/// Pore saturation → RGBA (dry amber → saturated steel-blue).
+fn soil_moisture_overlay_color(sat: f32) -> Color {
+    let t = sat.clamp(0.0, 1.0);
+    let r = ((1.0 - t) * 180.0 + 20.0) as u8;
+    let g = ((1.0 - t) * 140.0 + 60.0) as u8;
+    let b = (40.0 + t * 180.0) as u8;
+    Color::from_rgba(r, g, b, 220)
+}
+
 /// Gas heatmap: CO₂ low→brown high→green; O₂ low→purple high→cyan.
 fn gas_overlay_color(level: f32, co2: bool) -> Color {
     let t = (level / 1.5).clamp(0.0, 1.0);
@@ -762,9 +784,18 @@ fn draw_organism_inspector(
         "DEAD".into()
     } else if info.is_plankton {
         "plankton".into()
+    } else if info.drought_ticks > 0 {
+        format!(
+            "drought dormancy {}/{}",
+            info.drought_ticks,
+            wk_sim::DROUGHT_HIBERNATE_MAX_TICKS
+        )
+    } else if info.roots > 0 || info.stems > 0 {
+        "land plant".into()
     } else {
         "rooted".into()
     };
+    // Note: collision uses live root purchase (anchored vs fallen) separately.
     let comfort_line = match ambient_c {
         Some(t) => {
             let c = wk_sim::temp_comfort_factor(t, &info.genome);
@@ -779,6 +810,10 @@ fn draw_organism_inspector(
         format!(
             "energy={:.1}/{:.0}  mods={} photo={}",
             info.energy, info.energy_max, info.module_count, info.photosystems
+        ),
+        format!(
+            "roots={} stems={}  depth_bias={:.2}",
+            info.roots, info.stems, info.genome.root_depth_bias
         ),
         format!(
             "generation={}  clones={}",

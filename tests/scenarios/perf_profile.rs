@@ -469,6 +469,18 @@ fn perf_profile_subsystem_kernels() {
     bench!("run_infiltration", 200, {
         run_infiltration(&mut world, &mut scratch);
     });
+    use wk_sim::subsystems::{
+        run_surface_void_capture, run_void_moisture_seep, run_void_water_flow,
+    };
+    bench!("run_void_moisture_seep", 200, {
+        run_void_moisture_seep(&mut world);
+    });
+    bench!("run_void_water_flow", 200, {
+        run_void_water_flow(&mut world);
+    });
+    bench!("run_surface_void_capture", 200, {
+        run_surface_void_capture(&mut world);
+    });
     bench!("run_sediment", 200, {
         run_sediment(&world, &mut scratch, 0);
     });

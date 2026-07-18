@@ -50,7 +50,8 @@ impl CreatureEditor {
             self.was_paused = currently_paused;
             self.spawn_picker = false;
             self.status =
-                "Atom = algae (spawns in ocean too) | 1 nucleus 2 photo | Enter spawn".into();
+                "1 nucleus 2 photo 3 root 4 stem | Atom=algae, +root=plant | Enter spawn"
+                    .into();
         }
     }
 
@@ -64,6 +65,14 @@ impl CreatureEditor {
         }
         if is_key_pressed(KeyCode::Key2) {
             self.brush = ModuleId::Photosystem;
+            self.tool = EditorTool::Paint;
+        }
+        if is_key_pressed(KeyCode::Key3) {
+            self.brush = ModuleId::Root;
+            self.tool = EditorTool::Paint;
+        }
+        if is_key_pressed(KeyCode::Key4) {
+            self.brush = ModuleId::Stem;
             self.tool = EditorTool::Paint;
         }
         if is_key_pressed(KeyCode::E) {
@@ -138,7 +147,7 @@ impl CreatureEditor {
         self.blueprint
             .modules
             .retain(|m| !(m.x == cx && m.y == cy && m.lane == LaneId::Mid));
-        if self.tool == EditorTool::Paint && self.brush.set_a_paintable() {
+        if self.tool == EditorTool::Paint && self.brush.set_d_paintable() {
             self.blueprint.modules.push(PlacedModule {
                 x: cx,
                 y: cy,
@@ -206,14 +215,22 @@ impl CreatureEditor {
 
         // Side panel.
         let px = ox + cw + 24.0;
-        draw_text("Creature editor (Set A)", px, oy, 22.0, WHITE);
+        draw_text("Creature editor (Set D plants)", px, oy, 22.0, WHITE);
         draw_text(&format!("Tool: {:?}  Brush: {}", self.tool, self.brush.name()), px, oy + 28.0, 16.0, LIGHTGRAY);
-        draw_text("1 Nucleus  2 Photosystem  E erase  P paint", px, oy + 52.0, 14.0, GRAY);
+        draw_text("1 Nucleus  2 Photo  3 Root  4 Stem  E erase", px, oy + 52.0, 14.0, GRAY);
         draw_text("S save  L load first  Enter spawn", px, oy + 72.0, 14.0, GRAY);
+        let habit = if self.blueprint.is_rooted() {
+            "land plant"
+        } else if self.blueprint.is_plankton() {
+            "plankton"
+        } else {
+            "incomplete"
+        };
         draw_text(
             &format!(
-                "modules={}  valid_atom={}",
+                "modules={}  {}  atom={}",
                 self.blueprint.modules.len(),
+                habit,
                 self.blueprint.is_valid_atom()
             ),
             px,
@@ -224,7 +241,15 @@ impl CreatureEditor {
         draw_text(&self.status, px, oy + 130.0, 14.0, YELLOW);
 
         // Palette swatches.
-        for (i, mid) in [ModuleId::Nucleus, ModuleId::Photosystem].iter().enumerate() {
+        for (i, mid) in [
+            ModuleId::Nucleus,
+            ModuleId::Photosystem,
+            ModuleId::Root,
+            ModuleId::Stem,
+        ]
+        .iter()
+        .enumerate()
+        {
             let (r, g, b) = mid.rgb();
             let sx = px + i as f32 * 36.0;
             let sy = oy + 160.0;

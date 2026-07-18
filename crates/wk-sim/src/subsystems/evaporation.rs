@@ -11,6 +11,10 @@ const EVAPORATION_COEFF: f32 = 0.03;
 const FALLBACK_HUMIDITY: f32 = 0.4;
 const EVAP_VAPOR_PER_KG: f32 = 0.00005;
 const EVAP_SKIN_DEPTH_M: f32 = 0.08;
+/// Pore moisture is buffered soil water, not a free surface. Old
+/// `0.5 * et` emptied a plant-covered hill in ~1 s once the organic
+/// beach cap shrank `moisture_cap`. Keep canopy ET, but much slower.
+const PORE_EVAP_MULT: f32 = 0.04;
 
 fn evap_skin_kg() -> f32 {
     let density = MaterialRegistry::props(MaterialId::Water).density.max(1) as f32;
@@ -46,13 +50,14 @@ pub fn run_evaporation(world: &mut World, scratch: &mut WorldTransferScratch) {
                 continue;
             }
             let evap_factor = (1.0 - humidity).max(0.0);
-            let et = 1.0 + 1.2 * leaf;
+            // Mild canopy boost — not a 2× flash-dry multiplier.
+            let et = 1.0 + 0.35 * leaf;
             let exposed = (surface_water as f32).min(skin_kg);
             let from_surface = (exposed * EVAPORATION_COEFF * evap_factor).max(0.0);
             let from_moisture = if surface_water > 0 {
                 0.0
             } else {
-                (moisture as f32 * EVAPORATION_COEFF * 0.5 * evap_factor * et).max(0.0)
+                (moisture as f32 * EVAPORATION_COEFF * PORE_EVAP_MULT * evap_factor * et).max(0.0)
             };
 
             let col = world.chunks.get_mut(&coord).unwrap();

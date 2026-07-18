@@ -11,7 +11,7 @@ use crate::subsystems::{
     run_karst, run_lake_level, run_layer_merge, run_phase_change, run_pressure_field,
     run_rain_inject, run_roof_collapse, run_sediment, run_slumping, run_speleogenesis,
     run_surface_void_capture, run_surface_water, run_surface_waves, run_thermal_field,
-    run_void_water_flow, run_weather, run_wind_field, SimParams,
+    run_void_moisture_seep, run_void_water_flow, run_weather, run_wind_field, SimParams,
 };
 
 pub struct Simulation {
@@ -146,6 +146,7 @@ impl Simulation {
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::VoidWater)) {
             run_surface_void_capture(world);
+            run_void_moisture_seep(world);
             run_void_water_flow(world);
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::RoofCollapse)) {

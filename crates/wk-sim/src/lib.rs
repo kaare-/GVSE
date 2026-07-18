@@ -19,5 +19,5 @@ pub use hecs::Entity;
 pub use wk_agents::{
     circadian_buoyancy_bias, temp_comfort_factor, Aabb, AgentStore, Blueprint, Energy, Genome,
     Grazer, LaneId, Lineage, ModuleBody, ModuleId, Organism, OrganismInspect, PlacedModule, Pose,
-    Wire, WireKind, MAX_AGENTS, MAX_ORGANISMS,
+    Wire, WireKind, DROUGHT_HIBERNATE_MAX_TICKS, MAX_AGENTS, MAX_ORGANISMS,
 };

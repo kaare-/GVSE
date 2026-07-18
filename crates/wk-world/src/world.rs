@@ -887,9 +887,12 @@ pub enum OverlayMode {
     /// Vertical thermal heatmap (cold blue → hot red) through the
     /// water column / near-surface rock — shows warm skin vs cool deep.
     TemperatureField,
-    /// Colour-ramp of relative humidity at the column surface
-    /// (dry brown → wet cyan).
+    /// Colour-ramp of *atmospheric* relative humidity at the column
+    /// surface (dry brown → wet cyan). Not soil moisture.
     HumidityField,
+    /// Pore-water saturation heatmap (`moisture / moisture_cap`).
+    /// Dry amber → saturated blue — distinct from air humidity.
+    SoilMoisture,
     /// Dissolved / air CO₂ (low brown → high green).
     Co2Field,
     /// Dissolved / air O₂ (low purple → high cyan).
@@ -906,7 +909,8 @@ impl OverlayMode {
             OverlayMode::Activity => "activity",
             OverlayMode::Conservation => "conservation",
             OverlayMode::TemperatureField => "temperature",
-            OverlayMode::HumidityField => "humidity",
+            OverlayMode::HumidityField => "air humidity",
+            OverlayMode::SoilMoisture => "soil moisture",
             OverlayMode::Co2Field => "CO2",
             OverlayMode::O2Field => "O2",
         }
