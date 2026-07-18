@@ -625,6 +625,12 @@ impl Column {
     pub fn adjust_top_water(&mut self, delta: i64, tick: u64) -> i64 {
         if delta > 0 {
             self.deposit_to_top(MaterialId::Water, delta, tick);
+            // Sink deposited water under any lighter ice/snow cap
+            // immediately. Without this, a water sheen briefly sits on
+            // top of ice and the next phase-change tick freezes it —
+            // an ice pump that drains the lake into an ever-thicker
+            // ice tower during a hard freeze.
+            self.settle_by_density(tick);
             delta
         } else if delta < 0 {
             let removed = self.take_water_from_cap(-delta);
@@ -963,6 +969,23 @@ mod tests {
         assert_eq!(col.top_material(), MaterialId::Water);
         assert_eq!(col.top_water_mass(), 250);
         assert_eq!(col.layer_count, 2);
+    }
+
+    #[test]
+    fn adjust_top_water_settles_under_ice() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        col.deposit_to_top(MaterialId::Water, 500, 1);
+        col.deposit_to_top(MaterialId::Ice, 200, 2);
+        col.settle_by_density(2);
+        assert_eq!(col.top_material(), MaterialId::Ice);
+        let _ = col.adjust_top_water(100, 3);
+        assert_eq!(
+            col.top_material(),
+            MaterialId::Ice,
+            "fresh water must sink under the ice skin"
+        );
+        assert_eq!(col.flowable_water().map(|(_, m)| m), Some(600));
     }
 
     #[test]

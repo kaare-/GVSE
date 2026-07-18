@@ -674,8 +674,9 @@ fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32, y0: f32) {
             col.biome.name()
         ),
         format!(
-            "water={} kg  moisture={} kg  sat={:.0}%",
+            "water={} kg  (cap {})  moisture={} kg  sat={:.0}%",
             col.surface_water,
+            col.flowable_water,
             col.moisture,
             col.saturation * 100.0
         ),

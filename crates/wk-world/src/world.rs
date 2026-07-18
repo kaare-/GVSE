@@ -749,6 +749,11 @@ pub struct ColumnView {
     pub leaf_area: f32,
     /// Mass (kg) of the top Water layer, or 0 if the top isn't water.
     pub surface_water: i64,
+    /// Mass (kg) of flowable Water in the fluid cap (includes water
+    /// sitting under an ice/snow skin). Prefer this for HUD/debug when
+    /// the top layer is ice — `surface_water` is then zero even though
+    /// a lake still sits below.
+    pub flowable_water: i64,
     pub moisture: i64,
     /// `moisture / moisture_cap` in [0, 1]. Used by the renderer to
     /// tint waterlogged solid layers so a saturated hillside reads as
@@ -890,6 +895,7 @@ impl World {
                     voids,
                     leaf_area: col.ecology.leaf_area,
                     surface_water: col.top_water_mass(),
+                    flowable_water: col.flowable_water().map(|(_, m)| m).unwrap_or(0),
                     moisture: col.moisture,
                     saturation,
                     ice: col.top_ice_mass(),
@@ -913,12 +919,12 @@ impl World {
                         tick,
                     ),
                     humidity_rh: self.humidity_at_point(wx, col.surface_y),
-                    co2: if col.top_water_mass() > 0 {
+                    co2: if col.flowable_water().map(|(_, m)| m).unwrap_or(0) > 0 {
                         col.ecology.water_co2
                     } else {
                         col.ecology.air_co2
                     },
-                    o2: if col.top_water_mass() > 0 {
+                    o2: if col.flowable_water().map(|(_, m)| m).unwrap_or(0) > 0 {
                         col.ecology.water_o2
                     } else {
                         col.ecology.air_o2
@@ -934,6 +940,7 @@ impl World {
                     voids: vec![],
                     leaf_area: 0.0,
                     surface_water: 0,
+                    flowable_water: 0,
                     moisture: 0,
                     saturation: 0.0,
                     ice: 0,

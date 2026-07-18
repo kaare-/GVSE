@@ -19,6 +19,7 @@ mod e16_grazer_eats_biomass;
 mod e17_reproduction_mutates;
 mod e20_geothermal_steady_state;
 mod e30_atom_bloom;
+mod e31_cold_snap_water;
 mod e22_humidity_near_water_body;
 mod e23_convection_cell;
 mod e24_darcy_pressure_equilibration;

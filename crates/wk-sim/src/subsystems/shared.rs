@@ -12,6 +12,12 @@ pub const WATER_MASS_PER_METRE_DEPTH: f32 = 250.0;
 /// otherwise accumulate snow forever under constant precipitation.
 pub const MAX_SNOW_MASS_KG: i64 = 6000;
 
+/// Cap on Ice that may sit in one column's fluid cap (~10 m at 250 kg/m).
+/// Stops cold-snap ice towers from locking away the whole lake as solid
+/// ice and then dumping melt as a flash flood when the skin briefly
+/// warms.
+pub const MAX_FROZEN_SURFACE_MASS_KG: i64 = 2500;
+
 pub struct SimParams {
     pub rain_rate: f32,
     pub rain_enabled: bool,
