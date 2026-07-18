@@ -84,6 +84,9 @@ pub struct Organism {
     pub drought_ticks: u32,
     /// Fractional kg awaiting the next integer pore-water sip.
     pub sip_acc_kg: f32,
+    /// Spawn / founder tank size. Land roots scale [`Energy::max`] above
+    /// this as storage; photo, upkeep, and growth floors stay keyed here.
+    pub energy_base_max: f32,
 }
 
 /// Vertical motion state for weight / buoyancy integration.
@@ -1411,7 +1414,10 @@ impl AgentStore {
             blueprint.genome,
             ModuleBody { blueprint },
             Lineage::default(),
-            Organism::default(),
+            Organism {
+                energy_base_max: max_e,
+                ..Organism::default()
+            },
         ));
         Some(e)
     }
@@ -1678,6 +1684,20 @@ impl AgentStore {
             } else {
                 crate::root::DroughtBand::Hydrated
             };
+
+            // Roots bank surplus above the spawn tank (starch analogy).
+            // Photo / upkeep / growth floors stay on energy_base_max.
+            if organism.energy_base_max < 1.0 {
+                organism.energy_base_max = energy.max.max(1.0);
+            }
+            let tank_ref = organism.energy_base_max.max(1.0);
+            if rooted {
+                let cap = crate::root::energy_capacity(tank_ref, body.blueprint.root_count());
+                energy.max = cap;
+                if energy.current > cap {
+                    energy.current = cap;
+                }
+            }
             let fungus_dormant = fungus && crate::fungi::fungus_should_hibernate(world, wx);
             let dormant = matches!(drought, crate::root::DroughtBand::Dormant) || fungus_dormant;
             if rooted || fungus {
@@ -1740,7 +1760,7 @@ impl AgentStore {
                         }
                     }
                 }
-                let mut gain = organism_photo_gain(energy.max, photo_l0, n_photo) * comfort;
+                let mut gain = organism_photo_gain(tank_ref, photo_l0, n_photo) * comfort;
                 if plankton {
                     // Michaelis–Menten on dissolved CO₂ — blooms can starve the water.
                     let co2_factor = water_co2 / (water_co2 + CO2_HALF_SAT);
@@ -1799,11 +1819,11 @@ impl AgentStore {
             let mut upkeep = if fungus {
                 // Fungi don't photosynthesize — basal drain tracks metabolic_rate
                 // lightly, plus Digest/Hypha tissue tax.
-                let basal = (energy.max.max(1.0) / DARK_ENDURANCE_TICKS)
+                let basal = (tank_ref / DARK_ENDURANCE_TICKS)
                     * genome.metabolic_rate.clamp(0.05, 1.5);
                 basal + crate::fungi::fungus_upkeep(&body.blueprint, dormant)
             } else {
-                let mut u = organism_upkeep(genome, energy.max, l0, n_photo);
+                let mut u = organism_upkeep(genome, tank_ref, l0, n_photo);
                 if dormant {
                     u *= crate::root::DROUGHT_DORMANT_UPKEEP;
                 }
@@ -1887,7 +1907,7 @@ impl AgentStore {
             };
             if population + births.len() < MAX_ORGANISMS
                 && tick % repro_period == phase_id
-                && energy.current >= energy.max * threshold
+                && energy.current >= tank_ref * threshold
                 && can_repro
             {
                 // Land: runner sucker. Fungi: spore to nearby litter. Plankton: fission.
@@ -1924,8 +1944,10 @@ impl AgentStore {
                     let child_frac = REPRO_COST_FRAC * (0.35 + 0.65 * fidelity);
                     let mut child_e = energy.current * child_frac;
                     // Land / fungus parents keep a reserve after paying.
+                    // Land retain uses base tank so root-store surplus can fund
+                    // the sprout payment and still leave bore headroom.
                     if rooted || fungus {
-                        let retain = energy.max
+                        let retain = tank_ref
                             * if fungus {
                                 0.25
                             } else {
@@ -1972,7 +1994,7 @@ impl AgentStore {
                                 pose.y,
                                 child_bp,
                                 child_e,
-                                energy.max,
+                                tank_ref,
                                 e,
                                 lineage.generation,
                                 lineage.founder_id,
@@ -1986,7 +2008,7 @@ impl AgentStore {
             // Surplus above the *growth* floor → elongate. Sprout gate is
             // higher, so roots deepen while the tank banks toward a sucker.
             let growth_reserve = if rooted {
-                energy.max * crate::root::LAND_GROW_ENERGY_FRAC
+                crate::root::growth_energy_floor(tank_ref)
             } else {
                 0.0
             };
@@ -2003,9 +2025,11 @@ impl AgentStore {
                 let need_runner = !crate::root::has_lateral_runner(pose.x, &body.blueprint)
                     && body.blueprint.root_count()
                         >= crate::root::LAND_SPROUT_MIN_ROOTS.saturating_sub(1);
-                let roots_ample = crate::root::roots_past_soft_budget(&body.blueprint);
+                let roots_ample =
+                    crate::root::roots_past_soft_budget_for(&body.blueprint, drought);
                 // Prefer canopy once the soft root budget is met — otherwise
                 // high alloc_root genomes bore until night upkeep kills them.
+                // Drought lifts the budget so storage / deep water can pay.
                 let grow_roots = (w_root >= 0.2 || need_runner) && (!roots_ample || need_runner);
                 if grow_roots {
                     let _ = crate::root::try_elongate_root(
@@ -2015,6 +2039,7 @@ impl AgentStore {
                         pose.x,
                         pose.y,
                         genome,
+                        tank_ref,
                         world.seed,
                         tick,
                         e.id(),
@@ -2024,6 +2049,7 @@ impl AgentStore {
                         &mut body.blueprint,
                         energy,
                         genome,
+                        tank_ref,
                         world.seed,
                         tick,
                         e.id(),
@@ -2038,6 +2064,7 @@ impl AgentStore {
                         &mut body.blueprint,
                         energy,
                         genome,
+                        tank_ref,
                         world.seed,
                         tick,
                         e.id(),
@@ -2144,7 +2171,10 @@ impl AgentStore {
                     founder_id,
                     genet_id: child_genet,
                 },
-                Organism::default(),
+                Organism {
+                    energy_base_max: max_e,
+                    ..Organism::default()
+                },
             ));
             bodies.push((new_entity, new_aabb, immobile));
             if let Ok(mut lin) = self.ecs.get::<&mut Lineage>(parent) {
@@ -3964,6 +3994,69 @@ mod tests {
             info.energy > 1.0,
             "should keep reserves through the night (energy={})",
             info.energy
+        );
+    }
+
+    #[test]
+    fn land_plant_roots_expand_energy_storage() {
+        // Deep roots raise Energy.max (starch bank) without raising the
+        // spawn tank that keys photo / upkeep / growth floors.
+        let mut world = World::new(13);
+        world.sea_level = 0.0;
+        world.climate.base_temp_c = 22.0;
+        world.climate.lapse_rate_c_per_m = 0.0;
+        world.climate.day_night_amplitude_c = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+                col.ecology.nutrient = 0.9;
+                col.deposit_to_top(MaterialId::Organic, 900, 0);
+            }
+        }
+        let mut store = AgentStore::new();
+        let mut bp = Blueprint::minimal_plant(Genome {
+            metabolic_rate: 0.35,
+            alloc_root: 0.7,
+            ..Genome::default()
+        });
+        for i in 0..15i16 {
+            bp.modules.push(crate::blueprint::PlacedModule {
+                x: (i % 5) - 2,
+                y: -1 - (i / 5),
+                lane: crate::module::LaneId::Mid,
+                module: crate::module::ModuleId::Root,
+            });
+        }
+        let e = store
+            .spawn_from_blueprint(&world, 16, bp, 200.0)
+            .expect("plant");
+        let base = store.ecs.get::<&Organism>(e).unwrap().energy_base_max;
+        assert!((base - 200.0).abs() < 1e-3, "spawn tank is 200");
+        let roots = store.inspect_organism(e).unwrap().roots;
+        store.step_organisms(&mut world, 0);
+        let expect = crate::root::energy_capacity(base, roots);
+        {
+            let energy = store.ecs.get::<&Energy>(e).unwrap();
+            assert!(
+                (energy.max - expect).abs() < 1e-2,
+                "max should track root storage (max={} expect={expect} roots={roots})",
+                energy.max
+            );
+            assert!(
+                energy.max > base + 10.0,
+                "deep roots must expand capacity above spawn tank"
+            );
+        }
+        // Surplus can sit above the spawn tank — growth floor stays on base.
+        if let Ok(mut energy) = store.ecs.get::<&mut Energy>(e) {
+            energy.current = energy.max;
+        }
+        let floor = crate::root::growth_energy_floor(base);
+        let energy = store.ecs.get::<&Energy>(e).unwrap();
+        assert!(
+            energy.current > floor * 2.0,
+            "root bank should leave headroom above the base growth floor"
         );
     }
 

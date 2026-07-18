@@ -41,6 +41,12 @@ pub const ROOT_UPKEEP_PER_MODULE: f32 = 0.0001;
 /// still dig past this; full-tank "luxury" boring is not allowed.
 pub const LAND_ROOTS_PER_PHOTOSYSTEM: usize = 3;
 
+/// Fraction of spawn tank size unlocked as storage per Root module.
+/// Real-world analogy: roots bank starch / sugars — deeper systems hold more.
+pub const ROOT_STORE_FRAC: f32 = 0.04;
+/// Cap on capacity multiplier from roots (`base_max × this`).
+pub const ROOT_STORE_MAX_MULT: f32 = 2.0;
+
 /// Base energy to place one new Root pixel in soft Organic.
 pub const ROOT_ELONGATE_BASE_COST: f32 = 2.4;
 /// kg of substrate converted per successful rock/sand bore.
@@ -102,9 +108,43 @@ pub fn useful_root_budget(blueprint: &Blueprint) -> usize {
         .min(MAX_ROOT_MODULES)
 }
 
+/// Drought-aware soft budget. Stress lifts the cap so plants keep digging
+/// for deeper water and starch storage instead of switching to shoots.
+pub fn useful_root_budget_for(blueprint: &Blueprint, drought: DroughtBand) -> usize {
+    let base = useful_root_budget(blueprint);
+    match drought {
+        DroughtBand::Hydrated | DroughtBand::Dormant => base,
+        // Roughly half the remaining modules — storage + stone diving can pay.
+        DroughtBand::Stressed => {
+            let lift = (MAX_ROOT_MODULES.saturating_sub(base) + 1) / 2;
+            base.saturating_add(lift).min(MAX_ROOT_MODULES)
+        }
+    }
+}
+
 /// True when further root growth is optional (plant is already well rooted).
 pub fn roots_past_soft_budget(blueprint: &Blueprint) -> bool {
     blueprint.root_count() >= useful_root_budget(blueprint)
+}
+
+/// Soft-budget gate that respects drought-lifted root allowance.
+pub fn roots_past_soft_budget_for(blueprint: &Blueprint, drought: DroughtBand) -> bool {
+    blueprint.root_count() >= useful_root_budget_for(blueprint, drought)
+}
+
+/// Effective energy tank size from painted roots (starch / reserve analogy).
+///
+/// Photo, basal upkeep, and growth floors stay keyed to `base_max`; only
+/// storage clamp uses this larger capacity.
+pub fn energy_capacity(base_max: f32, n_roots: usize) -> f32 {
+    let base = base_max.max(1.0);
+    let mult = (1.0 + ROOT_STORE_FRAC * n_roots as f32).min(ROOT_STORE_MAX_MULT);
+    base * mult
+}
+
+/// Growth / sprout floor keyed to the spawn tank (not root-inflated max).
+pub fn growth_energy_floor(base_max: f32) -> f32 {
+    base_max.max(1.0) * LAND_GROW_ENERGY_FRAC
 }
 
 /// Energy multiplier to bore through `mat`. Higher = harder.
@@ -550,6 +590,9 @@ pub fn root_tips(blueprint: &Blueprint) -> Vec<(i16, i16)> {
 
 /// Try to elongate one Root pixel toward moisture / depth bias.
 ///
+/// `base_max` is the spawn tank size — growth floors and sprout banking
+/// use it so root storage capacity does not raise the spend gate.
+///
 /// Returns energy spent (0 if nothing grew). May call [`World::root_bore`].
 pub fn try_elongate_root(
     blueprint: &mut Blueprint,
@@ -558,6 +601,7 @@ pub fn try_elongate_root(
     pose_x: f32,
     pose_y: f32,
     genome: &Genome,
+    base_max: f32,
     world_seed: u64,
     tick: u64,
     entity_id: u32,
@@ -574,8 +618,10 @@ pub fn try_elongate_root(
     if w_root < 0.08 {
         return 0.0;
     }
+    let tank = base_max.max(1.0);
+    let grow_floor = growth_energy_floor(tank);
     // Grow while banking toward the sprout gate (see LAND_GROW_ENERGY_FRAC).
-    if energy.current < energy.max * LAND_GROW_ENERGY_FRAC {
+    if energy.current < grow_floor {
         return 0.0;
     }
 
@@ -588,9 +634,9 @@ pub fn try_elongate_root(
     // Vegetative sprouts only fire from lateral tips.
     let need_runner = !has_lateral_runner(pose_x, blueprint)
         && blueprint.root_count() >= LAND_SPROUT_MIN_ROOTS.saturating_sub(1);
-    let banking_for_sprout = energy.current >= energy.max * LAND_SPROUT_ENERGY_FRAC * 0.85;
+    let banking_for_sprout = energy.current >= tank * LAND_SPROUT_ENERGY_FRAC * 0.85;
     // Past the soft root:shoot budget, only grow roots when stressed for
-    // water, forcing a rhizome runner, or sitting on luxury surplus.
+    // water or forcing a rhizome runner.
     let host_moist = world
         .column_at(parent_wx)
         .map(|c| {
@@ -598,8 +644,9 @@ pub fn try_elongate_root(
             (c.moisture.max(0) as f32 / cap).clamp(0.0, 1.5)
         })
         .unwrap_or(0.0);
-    let thirsty = host_moist < DROUGHT_STRESS_FRAC;
-    if roots_past_soft_budget(blueprint) && !need_runner && !thirsty {
+    let drought = drought_band(host_moist);
+    let thirsty = matches!(drought, DroughtBand::Stressed);
+    if roots_past_soft_budget_for(blueprint, drought) && !need_runner && !thirsty {
         return 0.0;
     }
 
@@ -644,8 +691,7 @@ pub fn try_elongate_root(
                 (pen, 0.0)
             };
             let cost = ROOT_ELONGATE_BASE_COST * pen;
-            let floor = energy.max * LAND_GROW_ENERGY_FRAC;
-            if energy.current < cost + floor {
+            if energy.current < cost + grow_floor {
                 continue;
             }
             let cap = col.moisture_cap().max(1) as f32;
@@ -705,8 +751,7 @@ pub fn try_elongate_root(
     if in_void {
         // Cavities are free paths — no bore, cheap elongate.
         let cost = ROOT_ELONGATE_BASE_COST * ROOT_VOID_PENETRATE;
-        let floor = energy.max * LAND_GROW_ENERGY_FRAC;
-        if energy.current < cost + floor {
+        if energy.current < cost + grow_floor {
             return 0.0;
         }
         energy.current -= cost;
@@ -728,8 +773,7 @@ pub fn try_elongate_root(
         .unwrap_or(MaterialId::Sand);
     if let Some(pen) = penetrate_cost(mat) {
         let cost = ROOT_ELONGATE_BASE_COST * pen;
-        let floor = energy.max * LAND_GROW_ENERGY_FRAC;
-        if energy.current < cost + floor {
+        if energy.current < cost + grow_floor {
             return 0.0;
         }
         energy.current -= cost;
@@ -754,16 +798,19 @@ pub fn try_elongate_root(
 }
 
 /// Optional stem/leaf growth from surplus allocation (cheap vertical habit).
+///
+/// `base_max` keys the growth floor (same rule as [`try_elongate_root`]).
 pub fn try_grow_shoot(
     blueprint: &mut Blueprint,
     energy: &mut Energy,
     genome: &Genome,
+    base_max: f32,
     world_seed: u64,
     tick: u64,
     entity_id: u32,
 ) -> f32 {
     let (w_stem, w_leaf, _) = genome.alloc_weights();
-    if energy.current < energy.max * (LAND_GROW_ENERGY_FRAC + 0.08) {
+    if energy.current < base_max.max(1.0) * (LAND_GROW_ENERGY_FRAC + 0.08) {
         return 0.0;
     }
     let occupied: std::collections::HashSet<(i16, i16)> =
@@ -1027,6 +1074,7 @@ mod tests {
         let pose_x = 8.5;
         let pose_y = land_plant_pose_y_for_test(world.column_at(8).unwrap().surface_y, &bp);
         assert!(!has_lateral_runner(pose_x, &bp));
+        let base_max = energy.max;
         for t in 0..24u64 {
             let _ = try_elongate_root(
                 &mut bp,
@@ -1035,6 +1083,7 @@ mod tests {
                 pose_x,
                 pose_y,
                 &genome,
+                base_max,
                 1,
                 t,
                 3,
@@ -1074,6 +1123,7 @@ mod tests {
         };
         let genome = bp.genome;
         let pose_y = land_plant_pose_y_for_test(surface, &bp);
+        let base_max = energy.max;
         let spent = try_elongate_root(
             &mut bp,
             &mut energy,
@@ -1081,6 +1131,7 @@ mod tests {
             8.5,
             pose_y,
             &genome,
+            base_max,
             1,
             0,
             1,
@@ -1160,6 +1211,7 @@ mod tests {
             max: 100.0,
         };
         let pose_y = world.column_at(8).unwrap().surface_y;
+        let base_max = energy.max;
         let spent = try_elongate_root(
             &mut bp,
             &mut energy,
@@ -1167,6 +1219,7 @@ mod tests {
             8.5,
             pose_y,
             &genome,
+            base_max,
             11,
             100,
             3,
@@ -1174,6 +1227,36 @@ mod tests {
         assert!(spent > 0.0, "should spend energy driving a root");
         assert!(bp.root_count() > roots_before, "root pixel added");
         assert!(energy.current < 80.0);
+    }
+
+    #[test]
+    fn root_modules_expand_energy_capacity() {
+        let base = 200.0;
+        let with_one = energy_capacity(base, 1);
+        let with_many = energy_capacity(base, 20);
+        assert!(
+            (with_one - base * (1.0 + ROOT_STORE_FRAC)).abs() < 1e-4,
+            "one root unlocks ROOT_STORE_FRAC of base"
+        );
+        assert!(with_many > with_one);
+        assert!(
+            (energy_capacity(base, 100) - base * ROOT_STORE_MAX_MULT).abs() < 1e-4,
+            "capacity caps at ROOT_STORE_MAX_MULT × base"
+        );
+        // Photo/upkeep stay keyed to base — capacity alone is the root payoff.
+        assert_eq!(growth_energy_floor(base), base * LAND_GROW_ENERGY_FRAC);
+    }
+
+    #[test]
+    fn drought_lifts_soft_root_budget() {
+        let bp = Blueprint::minimal_plant(Genome::default());
+        let hydrated = useful_root_budget_for(&bp, DroughtBand::Hydrated);
+        let stressed = useful_root_budget_for(&bp, DroughtBand::Stressed);
+        assert!(
+            stressed > hydrated,
+            "stress should allow deeper boring (hydrated={hydrated} stressed={stressed})"
+        );
+        assert!(stressed <= MAX_ROOT_MODULES);
     }
 
     #[test]
