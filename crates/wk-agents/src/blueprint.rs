@@ -110,6 +110,20 @@ impl Blueprint {
             .count()
     }
 
+    pub fn digest_count(&self) -> usize {
+        self.modules
+            .iter()
+            .filter(|m| m.module == ModuleId::Digest)
+            .count()
+    }
+
+    pub fn hypha_count(&self) -> usize {
+        self.modules
+            .iter()
+            .filter(|m| m.module == ModuleId::Hypha)
+            .count()
+    }
+
     pub fn nucleus_count(&self) -> usize {
         self.modules
             .iter()
@@ -168,13 +182,63 @@ impl Blueprint {
         }
     }
 
+    /// Minimal litter fungus (E): nucleus + digest + a short hypha thread.
+    pub fn minimal_fungus(genome: Genome) -> Self {
+        Self {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![
+                PlacedModule {
+                    x: 0,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Nucleus,
+                },
+                PlacedModule {
+                    x: 1,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Digest,
+                },
+                PlacedModule {
+                    x: 2,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Hypha,
+                },
+                PlacedModule {
+                    x: 3,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Hypha,
+                },
+            ],
+            wires: Vec::new(),
+            genome,
+            name: "fungus".into(),
+            notes: "Set E litter fungus".into(),
+        }
+    }
+
     pub fn is_valid_atom(&self) -> bool {
         self.nucleus_count() >= 1 && self.photosystem_count() >= 1
     }
 
-    /// Set A "algae" — photo Atom with no root/stem. Spawns/floats in water.
+    /// Nucleus + Digest, no root/stem (detritus habit).
+    pub fn is_valid_fungus(&self) -> bool {
+        self.nucleus_count() >= 1
+            && self.digest_count() >= 1
+            && !self
+                .modules
+                .iter()
+                .any(|m| matches!(m.module, ModuleId::Root | ModuleId::Stem))
+    }
+
+    /// Set A "algae" — photo Atom with no root/stem/digest. Spawns in water.
     pub fn is_plankton(&self) -> bool {
         self.is_valid_atom()
+            && !self.is_fungus()
             && !self
                 .modules
                 .iter()
@@ -186,6 +250,11 @@ impl Blueprint {
         self.modules
             .iter()
             .any(|m| matches!(m.module, ModuleId::Root | ModuleId::Stem))
+    }
+
+    /// Detritus habit (Set E): Digest chassis on litter / Organic.
+    pub fn is_fungus(&self) -> bool {
+        self.is_valid_fungus()
     }
 
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {

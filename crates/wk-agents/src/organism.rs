@@ -537,6 +537,7 @@ pub fn mutate_organism(
     g.alloc_root = jitter(g.alloc_root, 0.0, 1.0);
     g.leaf_absorb = jitter(g.leaf_absorb, 0.05, 1.0);
     g.shade_efficiency = jitter(g.shade_efficiency, 0.0, 1.0);
+    g.digest_rate = jitter(g.digest_rate, 0.05, 2.0);
     g
 }
 
@@ -547,6 +548,90 @@ const MAX_PHOTOSYSTEM_MODULES: usize = 16;
 /// scaled by `(1 - clone_fidelity)`. Perfect fidelity → never; fidelity 0
 /// → this rate. Keeps green photosystems able to grow/shrink over gens.
 const MORPH_ERROR_BASE: f32 = 0.40;
+
+/// Clone-time fungus morphology: add/remove a Hypha pixel (never the last
+/// Digest, never the Nucleus). Scaled by `(1 - fidelity)`.
+pub fn mutate_blueprint_fungus_morphology(
+    mut bp: Blueprint,
+    parent_fidelity: f32,
+    world_seed: u64,
+    tick: u64,
+    parent_id: u32,
+) -> Blueprint {
+    let error_p = (1.0 - parent_fidelity.clamp(0.0, 1.0)) * MORPH_ERROR_BASE;
+    if error_p <= 1e-6 {
+        return bp;
+    }
+    let roll =
+        hash_u64(world_seed, tick as i64, parent_id as i64, 0xF401) as f32 / u64::MAX as f32;
+    if roll >= error_p {
+        return bp;
+    }
+    let occupied: std::collections::HashSet<(i16, i16)> =
+        bp.modules.iter().map(|m| (m.x, m.y)).collect();
+    let n_h = bp.hypha_count();
+    let can_add = n_h < crate::fungi::MAX_HYPHA_MODULES;
+    let can_remove = n_h > 0;
+    if !can_add && !can_remove {
+        return bp;
+    }
+    let prefer_add = hash_u64(world_seed, tick as i64, parent_id as i64, 0xF402) & 1 == 0;
+    let do_add = if can_add && can_remove {
+        prefer_add
+    } else {
+        can_add
+    };
+    if do_add {
+        const DIRS: [(i16, i16); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+        let mut candidates: Vec<(i16, i16)> = Vec::new();
+        for m in &bp.modules {
+            for &(dx, dy) in &DIRS {
+                let nx = m.x + dx;
+                let ny = m.y + dy;
+                if nx.abs() > 10 || ny.abs() > 6 {
+                    continue;
+                }
+                if !occupied.contains(&(nx, ny)) {
+                    candidates.push((nx, ny));
+                }
+            }
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        if candidates.is_empty() {
+            return bp;
+        }
+        let pick =
+            hash_u64(world_seed, tick as i64, parent_id as i64, 0xF403) as usize % candidates.len();
+        let (x, y) = candidates[pick];
+        let lane = bp
+            .modules
+            .first()
+            .map(|m| m.lane)
+            .unwrap_or(crate::LaneId::Mid);
+        bp.modules.push(crate::blueprint::PlacedModule {
+            x,
+            y,
+            lane,
+            module: crate::ModuleId::Hypha,
+        });
+    } else {
+        let idxs: Vec<usize> = bp
+            .modules
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.module == crate::ModuleId::Hypha)
+            .map(|(i, _)| i)
+            .collect();
+        if idxs.is_empty() {
+            return bp;
+        }
+        let pick =
+            hash_u64(world_seed, tick as i64, parent_id as i64, 0xF404) as usize % idxs.len();
+        bp.modules.remove(idxs[pick]);
+    }
+    bp
+}
 
 /// Clone-time morphology mutation: with probability scaled by
 /// `(1 - fidelity)`, either place a Photosystem on an empty 4-neighbour of
@@ -753,7 +838,7 @@ fn collect_bodies(store: &AgentStore, _world: &World) -> Vec<(Entity, Aabb, bool
             (
                 e,
                 organism_aabb(pose, &body.blueprint),
-                body.blueprint.is_rooted(),
+                body.blueprint.is_rooted() || body.blueprint.is_fungus(),
             )
         })
         .collect();
@@ -780,6 +865,17 @@ fn depth_for_pose(world: &World, blueprint: &Blueprint, x: f32, y_hint: f32) -> 
     if blueprint.is_rooted() {
         let reach = crate::root::root_reach_m(blueprint);
         if !crate::root::column_is_plantable_for_reach(world, wx, reach) {
+            return None;
+        }
+        return Some(land_plant_pose_y_on(col, blueprint));
+    }
+    if blueprint.is_fungus() {
+        // Sit on the solid bed / organic skin — not floating.
+        if !crate::root::column_is_plantable_for_reach(
+            world,
+            wx,
+            crate::root::SHALLOW_PLANT_WATER_M,
+        ) {
             return None;
         }
         return Some(land_plant_pose_y_on(col, blueprint));
@@ -1266,7 +1362,7 @@ impl AgentStore {
         if self.len() as usize >= MAX_AGENTS + MAX_ORGANISMS {
             return None;
         }
-        if !blueprint.is_valid_atom() {
+        if !blueprint.is_valid_atom() && !blueprint.is_valid_fungus() {
             return None;
         }
         if world.column_at(world_x).is_none() {
@@ -1276,10 +1372,14 @@ impl AgentStore {
         let y0 = Self::spawn_elevation(world, world_x, &blueprint)?;
         let x0 = world_x as f32 + 0.5;
         let bodies = collect_bodies(self, world);
-        let (x, y) = if blueprint.is_rooted() {
+        let (x, y) = if blueprint.is_rooted() || blueprint.is_fungus() {
             // Prefer the requested column if free; else search for a ledge.
             let mut occupied = rooted_occupied_columns(&bodies);
-            let reach = crate::root::root_reach_m(&blueprint);
+            let reach = if blueprint.is_rooted() {
+                crate::root::root_reach_m(&blueprint)
+            } else {
+                crate::root::SHALLOW_PLANT_WATER_M
+            };
             if !occupied.contains(&world_x)
                 && crate::root::column_is_plantable_for_reach(world, world_x, reach)
             {
@@ -1385,7 +1485,7 @@ impl AgentStore {
             .map(|e| (e.current, e.max))
             .unwrap_or((0.0, 0.0));
         let corpse_settle = self.ecs.get::<&Corpse>(entity).ok().map(|c| {
-            let land = body.blueprint.is_rooted();
+            let land = body.blueprint.is_rooted() || body.blueprint.is_fungus();
             let need = if land {
                 CORPSE_SETTLE_LAND_TICKS
             } else {
@@ -1531,6 +1631,7 @@ impl AgentStore {
             let comfort = temp_comfort_factor(temp_c, genome);
             let plankton = body.blueprint.is_plankton();
             let rooted = body.blueprint.is_rooted();
+            let fungus = body.blueprint.is_fungus();
 
             // Environment gates: water required, ice / freeze kills plankton.
             let (in_water, iced, water_co2, nutrient) = if let Some(col) = world.column_at(wx) {
@@ -1566,9 +1667,8 @@ impl AgentStore {
                 }
             }
 
-            // Land-plant drought: sip gently when wet; hibernate when dry
-            // (reduced upkeep, no photo/growth) for a limited window.
-            let moist = if rooted {
+            // Land-plant drought / fungus starve+dry: hibernate for a limited window.
+            let moist = if rooted || fungus {
                 crate::root::adjacent_moisture_frac(world, wx)
             } else {
                 1.0
@@ -1578,11 +1678,17 @@ impl AgentStore {
             } else {
                 crate::root::DroughtBand::Hydrated
             };
-            let dormant = matches!(drought, crate::root::DroughtBand::Dormant);
-            if rooted {
+            let fungus_dormant = fungus && crate::fungi::fungus_should_hibernate(world, wx);
+            let dormant = matches!(drought, crate::root::DroughtBand::Dormant) || fungus_dormant;
+            if rooted || fungus {
+                let hib_max = if fungus {
+                    crate::fungi::FUNGUS_HIBERNATE_MAX_TICKS
+                } else {
+                    crate::root::DROUGHT_HIBERNATE_MAX_TICKS
+                };
                 if dormant {
                     organism.drought_ticks = organism.drought_ticks.saturating_add(1);
-                    if organism.drought_ticks >= crate::root::DROUGHT_HIBERNATE_MAX_TICKS {
+                    if organism.drought_ticks >= hib_max {
                         deaths.push((e, wx));
                         continue;
                     }
@@ -1592,7 +1698,17 @@ impl AgentStore {
             }
 
             let plant_active = active && !dormant;
-            if plant_active && (!plankton || in_water) {
+
+            // Fungi: digest labile litter / Organic → energy + soil nutrient.
+            if fungus && !dormant {
+                let budget = crate::fungi::digest_budget_kg(genome, &body.blueprint);
+                let (_kg, gained, _nut) = crate::fungi::digest_labile(world, wx, budget);
+                if gained > 0.0 {
+                    energy.current = (energy.current + gained * comfort.max(0.2)).min(energy.max);
+                }
+            }
+
+            if plant_active && !fungus && (!plankton || in_water) {
                 // Land plants sample neighbour canopy shade; plankton keep sky L0
                 // (water depth / CO₂ already gate blooms).
                 let mut photo_l0 = if rooted {
@@ -1680,10 +1796,19 @@ impl AgentStore {
                 }
             }
 
-            let mut upkeep = organism_upkeep(genome, energy.max, l0, n_photo);
-            if dormant {
-                upkeep *= crate::root::DROUGHT_DORMANT_UPKEEP;
-            }
+            let mut upkeep = if fungus {
+                // Fungi don't photosynthesize — basal drain tracks metabolic_rate
+                // lightly, plus Digest/Hypha tissue tax.
+                let basal = (energy.max.max(1.0) / DARK_ENDURANCE_TICKS)
+                    * genome.metabolic_rate.clamp(0.05, 1.5);
+                basal + crate::fungi::fungus_upkeep(&body.blueprint, dormant)
+            } else {
+                let mut u = organism_upkeep(genome, energy.max, l0, n_photo);
+                if dormant {
+                    u *= crate::root::DROUGHT_DORMANT_UPKEEP;
+                }
+                u
+            };
             // Root tissue maintenance — must stay ≪ photo or deep-rooted
             // trees starve overnight on wet fertile ground (see ROOT_UPKEEP).
             // Scales down at night with basal respiration (woody roots don't
@@ -1695,6 +1820,9 @@ impl AgentStore {
             };
             if l0 < 0.1 {
                 root_tax *= NIGHT_UPKEEP_MULT;
+                if fungus {
+                    upkeep *= NIGHT_UPKEEP_MULT;
+                }
             }
             energy.current -= upkeep + root_tax;
             if energy.current <= 0.0 {
@@ -1723,16 +1851,22 @@ impl AgentStore {
                 }
             }
 
-            // Vegetative sprouts / fission BEFORE elongation so growth can't
-            // permanently spend the tank below the repro gate (coastal plains
-            // were sterile under the old order).
-            let repro_period = if rooted {
+            // Vegetative sprouts / fission / spores BEFORE elongation so growth
+            // can't permanently spend the tank below the repro gate.
+            let repro_period = if fungus {
+                crate::fungi::FUNGUS_SPORE_PERIOD
+            } else if rooted {
                 crate::root::LAND_SPROUT_PERIOD
             } else {
                 REPRO_PERIOD
             };
             let phase_id = e.id() as u64 % repro_period;
-            let threshold = if rooted {
+            let threshold = if fungus {
+                genome
+                    .reproduce_at
+                    .clamp(0.25, 0.95)
+                    .min(crate::fungi::FUNGUS_SPORE_ENERGY_FRAC)
+            } else if rooted {
                 genome
                     .reproduce_at
                     .clamp(0.25, 0.95)
@@ -1740,11 +1874,11 @@ impl AgentStore {
             } else {
                 genome.reproduce_at.clamp(0.2, 0.99)
             };
-            // Plankton: comfort + circadian (`plant_active`). Land suckers need
-            // a small root system first — and must stay inside the active
-            // window: ungated night sprouting burned a full tank by dawn
-            // (paid child_e every LAND_SPROUT_PERIOD with no photo refill).
-            let can_repro = if rooted {
+            // Plankton: comfort + circadian. Land suckers need roots first.
+            // Fungi: spore when active, fed, and not dormant.
+            let can_repro = if fungus {
+                !dormant && comfort >= 0.05
+            } else if rooted {
                 plant_active
                     && comfort >= 0.05
                     && body.blueprint.root_count() >= crate::root::LAND_SPROUT_MIN_ROOTS
@@ -1756,8 +1890,7 @@ impl AgentStore {
                 && energy.current >= energy.max * threshold
                 && can_repro
             {
-                // Land plants: vegetative sprout from a painted lateral
-                // runner tip (no site → keep elongating sideways). Plankton: fission.
+                // Land: runner sucker. Fungi: spore to nearby litter. Plankton: fission.
                 let sprout_x = if rooted {
                     crate::root::pick_root_sprout_x(
                         world,
@@ -1768,6 +1901,8 @@ impl AgentStore {
                         tick,
                         e.id(),
                     )
+                } else if fungus {
+                    crate::fungi::pick_spore_site(world, pose.x, world.seed, tick, e.id())
                 } else {
                     let w = organism_width(&body.blueprint);
                     let side = if (tick + e.id() as u64) % 2 == 0 {
@@ -1788,11 +1923,14 @@ impl AgentStore {
                     let viable = (viab_h as f32 / u64::MAX as f32) < viability;
                     let child_frac = REPRO_COST_FRAC * (0.35 + 0.65 * fidelity);
                     let mut child_e = energy.current * child_frac;
-                    // Land parents must keep a growth reserve after paying —
-                    // full REPRO_COST_FRAC from the sprout gate left them
-                    // starving under night upkeep.
-                    if rooted {
-                        let retain = energy.max * crate::root::LAND_GROW_ENERGY_FRAC;
+                    // Land / fungus parents keep a reserve after paying.
+                    if rooted || fungus {
+                        let retain = energy.max
+                            * if fungus {
+                                0.25
+                            } else {
+                                crate::root::LAND_GROW_ENERGY_FRAC
+                            };
                         if energy.current - child_e < retain {
                             child_e = (energy.current - retain).max(0.0);
                         }
@@ -1804,20 +1942,30 @@ impl AgentStore {
                         if viable {
                             let child_genome =
                                 mutate_organism(*genome, world.seed, tick, e.id());
-                            // Same clone pipeline for plants and algae: gene jitter
-                            // + morphology mut (add/remove Photosystem). Plants keep
-                            // sucker seating (runner tip) and rooted immobility; they
-                            // no longer reset to a fresh minimal_plant body.
-                            let mut child_bp = mutate_blueprint_morphology(
-                                body.blueprint.clone(),
-                                genome.clone_fidelity,
-                                world.seed,
-                                tick,
-                                e.id(),
-                            );
+                            // Same clone pipeline: gene jitter + morphology mut.
+                            // Fungi morph targets Hypha; plants/algae Photosystem.
+                            let mut child_bp = if fungus {
+                                mutate_blueprint_fungus_morphology(
+                                    body.blueprint.clone(),
+                                    genome.clone_fidelity,
+                                    world.seed,
+                                    tick,
+                                    e.id(),
+                                )
+                            } else {
+                                mutate_blueprint_morphology(
+                                    body.blueprint.clone(),
+                                    genome.clone_fidelity,
+                                    world.seed,
+                                    tick,
+                                    e.id(),
+                                )
+                            };
                             child_bp.genome = child_genome;
                             if rooted {
                                 child_bp.name = format!("{}-sprout", body.blueprint.name);
+                            } else if fungus {
+                                child_bp.name = format!("{}-spore", body.blueprint.name);
                             }
                             births.push((
                                 child_x0,
@@ -1943,7 +2091,7 @@ impl AgentStore {
             if self.organism_count() >= MAX_ORGANISMS {
                 break;
             }
-            let placed = if blueprint.is_rooted() {
+            let placed = if blueprint.is_rooted() || blueprint.is_fungus() {
                 find_land_sprout_pose(world, &occupied, &blueprint, x0)
             } else {
                 find_clear_pose_limited(world, &bodies, &blueprint, x0, y0, None)
@@ -1962,7 +2110,7 @@ impl AgentStore {
                 .map(|(top, _)| top);
             let new_pose = Pose { x, y };
             let new_aabb = organism_aabb(&new_pose, &blueprint);
-            let immobile = blueprint.is_rooted();
+            let immobile = blueprint.is_rooted() || blueprint.is_fungus();
             if immobile {
                 occupied.insert(x.floor() as i32);
             }
@@ -2067,7 +2215,8 @@ impl AgentStore {
             if on_bed {
                 buoy.vel_y = 0.0;
                 corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
-                let land_corpse = body.blueprint.is_rooted() && water_band(col).is_none();
+                let land_corpse = (body.blueprint.is_rooted() || body.blueprint.is_fungus())
+                    && water_band(col).is_none();
                 let settle_need = if land_corpse {
                     CORPSE_SETTLE_LAND_TICKS
                 } else {
@@ -3941,6 +4090,129 @@ mod tests {
         assert!(
             (4..=6).contains(&child_n),
             "sprout should clone parent morphology (±1 photo), got {child_n} from parent {parent_photos}"
+        );
+    }
+
+    #[test]
+    fn fungus_digests_litter_and_raises_nutrient() {
+        let mut world = World::new(9);
+        world.sea_level = 0.0;
+        world.climate.base_temp_c = 22.0;
+        world.climate.lapse_rate_c_per_m = 0.0;
+        world.climate.day_night_amplitude_c = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+                col.ecology.dead_biomass = 120;
+                col.ecology.nutrient = 0.1;
+                col.deposit_to_top(MaterialId::Organic, 800, 0);
+            }
+        }
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(
+                &world,
+                16,
+                Blueprint::minimal_fungus(Genome {
+                    digest_rate: 1.2,
+                    metabolic_rate: 0.15,
+                    reproduce_at: 0.99,
+                    ..Genome::default()
+                }),
+                80.0,
+            )
+            .expect("fungus");
+        let nut0 = world.column_at(16).unwrap().ecology.nutrient;
+        let litter0 = world.column_at(16).unwrap().ecology.dead_biomass;
+        let e0 = store.ecs.get::<&Energy>(e).unwrap().current;
+        for t in 0..400 {
+            store.step_organisms(&mut world, t);
+        }
+        let nut1 = world.column_at(16).unwrap().ecology.nutrient;
+        let litter1 = world.column_at(16).unwrap().ecology.dead_biomass;
+        let e1 = store.ecs.get::<&Energy>(e).unwrap().current;
+        assert!(litter1 < litter0, "should consume soft litter");
+        assert!(nut1 > nut0, "digest should mineralize nutrient");
+        assert!(e1 > e0 - 1.0, "fungus should gain or hold energy from digest");
+        assert!(store.ecs.get::<&Organism>(e).is_ok(), "should stay alive");
+    }
+
+    #[test]
+    fn fungus_hibernates_without_litter_then_dies() {
+        let mut world = World::new(9);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        // Bone-dry, no litter.
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(
+                &world,
+                8,
+                Blueprint::minimal_fungus(Genome::default()),
+                40.0,
+            )
+            .expect("fungus");
+        for t in 0..200 {
+            store.step_organisms(&mut world, t);
+        }
+        let ticks = store.inspect_organism(e).unwrap().drought_ticks;
+        assert!(ticks > 0, "should enter fungus dormancy");
+        if let Ok(mut org) = store.ecs.get::<&mut Organism>(e) {
+            org.drought_ticks = crate::fungi::FUNGUS_HIBERNATE_MAX_TICKS - 3;
+        }
+        for t in 200..210 {
+            store.step_organisms(&mut world, t);
+        }
+        assert!(
+            store.ecs.get::<&Organism>(e).is_err(),
+            "prolonged starve dormancy should kill"
+        );
+    }
+
+    #[test]
+    fn fungus_spores_onto_nearby_litter() {
+        let mut world = World::new(9);
+        world.sea_level = 0.0;
+        world.climate.base_temp_c = 22.0;
+        world.climate.lapse_rate_c_per_m = 0.0;
+        world.climate.day_night_amplitude_c = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+                col.ecology.dead_biomass = 200;
+                col.ecology.nutrient = 0.5;
+                col.deposit_to_top(MaterialId::Organic, 600, 0);
+            }
+        }
+        let mut store = AgentStore::new();
+        let parent = store
+            .spawn_from_blueprint(
+                &world,
+                16,
+                Blueprint::minimal_fungus(Genome {
+                    digest_rate: 1.0,
+                    metabolic_rate: 0.1,
+                    clone_fidelity: 0.8,
+                    reproduce_at: 0.4,
+                    ..Genome::default()
+                }),
+                200.0,
+            )
+            .expect("parent");
+        if let Ok(mut e) = store.ecs.get::<&mut Energy>(parent) {
+            e.current = e.max;
+        }
+        for t in 0..30_000 {
+            store.step_organisms(&mut world, t);
+            if store.organism_count() > 1 {
+                return;
+            }
+        }
+        panic!(
+            "expected spore burst on rich litter; living={}",
+            store.organism_count()
         );
     }
 

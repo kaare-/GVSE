@@ -8,6 +8,7 @@
 //! `docs/organism/`.
 
 pub mod blueprint;
+pub mod fungi;
 pub mod module;
 pub mod organism;
 pub mod root;
@@ -26,6 +27,7 @@ pub use root::{
     plant_is_anchored, root_reach_m, DROUGHT_HIBERNATE_MAX_TICKS, ROOT_ELONGATE_BASE_COST,
     SHALLOW_PLANT_WATER_M,
 };
+pub use fungi::{digest_labile, labile_food_kg, DIGEST_ENERGY_PER_KG, LABILE_ORGANIC_FRAC};
 pub use shade::{effective_photo_light, CanopyIndex, SHADE_RADIUS};
 
 use hecs::{Entity, World as EcsWorld};
@@ -136,6 +138,9 @@ pub struct Genome {
     /// Dim-light harvest vs full-sun peak (0 = sun thug, 1 = understory).
     #[serde(default = "default_shade_efficiency")]
     pub shade_efficiency: f32,
+    /// Litter digest speed for fungi (higher → boom/crash).
+    #[serde(default = "default_digest_rate")]
+    pub digest_rate: f32,
 }
 
 fn default_metabolic_rate() -> f32 {
@@ -188,6 +193,9 @@ fn default_shade_efficiency() -> f32 {
     // Slight understory lean so short plants keep scraps under a taller neighbour.
     0.40
 }
+fn default_digest_rate() -> f32 {
+    0.55
+}
 
 impl Default for Genome {
     fn default() -> Self {
@@ -212,6 +220,7 @@ impl Default for Genome {
             alloc_root: default_alloc_root(),
             leaf_absorb: default_leaf_absorb(),
             shade_efficiency: default_shade_efficiency(),
+            digest_rate: default_digest_rate(),
         }
     }
 }
@@ -260,6 +269,7 @@ impl Genome {
         g.alloc_root = jitter(g.alloc_root, 0.0, 1.0);
         g.leaf_absorb = jitter(g.leaf_absorb, 0.05, 1.0);
         g.shade_efficiency = jitter(g.shade_efficiency, 0.0, 1.0);
+        g.digest_rate = jitter(g.digest_rate, 0.05, 2.0);
         g
     }
 
@@ -286,6 +296,7 @@ impl Genome {
             || (self.alloc_root - other.alloc_root).abs() > EPS
             || (self.leaf_absorb - other.leaf_absorb).abs() > EPS
             || (self.shade_efficiency - other.shade_efficiency).abs() > EPS
+            || (self.digest_rate - other.digest_rate).abs() > EPS
     }
 }
 

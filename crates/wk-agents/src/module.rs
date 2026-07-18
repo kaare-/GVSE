@@ -55,6 +55,14 @@ impl ModuleId {
         )
     }
 
+    /// Set E litter-fungus modules (Digest / Hypha).
+    pub fn set_e_paintable(self) -> bool {
+        matches!(
+            self,
+            ModuleId::Nucleus | ModuleId::Digest | ModuleId::Hypha
+        )
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             ModuleId::Nucleus => "Nucleus",
