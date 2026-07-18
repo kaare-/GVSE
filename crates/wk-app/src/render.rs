@@ -202,6 +202,34 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8
 }
 
+/// Target sky-grey from weather, then ease toward it over ~1.5s so rain
+/// bursts don't strobe the whole background on/off each tick.
+fn sky_rain_darken(snap: &RenderSnapshot) -> f32 {
+    let target = if snap.rain_enabled {
+        0.55
+    } else if snap.clouds.is_empty() {
+        0.0
+    } else {
+        // Soft fraction of raining cover — one distant burst shouldn't slam
+        // the whole sky; several fronts can still grey it out.
+        let raining = snap.clouds.iter().filter(|c| c.raining).count() as f32;
+        let frac = (raining / snap.clouds.len() as f32).clamp(0.0, 1.0);
+        (frac.sqrt() * 0.32).min(0.32)
+    };
+    thread_local! {
+        static SMOOTH: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+    }
+    let dt = get_frame_time().clamp(1.0 / 240.0, 0.1);
+    // Time constant ~1.5s — fronts fade in/out instead of blinking.
+    let alpha = 1.0 - (-dt / 1.5).exp();
+    SMOOTH.with(|cell| {
+        let prev = cell.get();
+        let next = prev + (target - prev) * alpha;
+        cell.set(next);
+        next
+    })
+}
+
 /// Sky colour driven by the day/night cycle, with a warm twilight glow right
 /// at sunrise/sunset, dimmed further if it's currently raining.
 fn sky_color_for(snap: &RenderSnapshot) -> Color {
@@ -225,15 +253,8 @@ fn sky_color_for(snap: &RenderSnapshot) -> Color {
         lerp_u8(base.2, twilight.2, twilight_amt),
     );
 
-    let weather_rain = snap.clouds.iter().any(|c| c.raining);
-    let rain_amt = if snap.rain_enabled {
-        0.65
-    } else if weather_rain {
-        0.35
-    } else {
-        0.0
-    };
-    if rain_amt > 0.0 {
+    let rain_amt = sky_rain_darken(snap);
+    if rain_amt > 0.002 {
         Color::from_rgba(
             lerp_u8(blended.0, 90, rain_amt),
             lerp_u8(blended.1, 100, rain_amt),
