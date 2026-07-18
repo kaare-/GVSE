@@ -19,9 +19,11 @@ pub const MAX_STEM_MODULES: usize = 12;
 
 /// Max columns a root sucker may emerge from the parent crown.
 /// Seeds / wind dispersal come later — vegetative spread stays local.
-pub const ROOT_SPROUT_MAX_DIST: i32 = 4;
+pub const ROOT_SPROUT_MAX_DIST: i32 = 6;
 /// Pore saturation floor for a sprout site (avoid bone-dry rock).
-pub const ROOT_SPROUT_MIN_MOIST_FRAC: f32 = 0.08;
+pub const ROOT_SPROUT_MIN_MOIST_FRAC: f32 = 0.02;
+/// Neighbour wall height (m) that makes a notch unplantable (embedded look).
+pub const PLANTABLE_WALL_DROP_M: f32 = 6.0;
 
 /// Base energy to place one new Root pixel in soft Organic.
 pub const ROOT_ELONGATE_BASE_COST: f32 = 2.4;
@@ -59,6 +61,12 @@ pub const ROOT_SIP_KG_PER_ROOT: f32 = 0.0004;
 pub const ROOT_SIP_MAX_KG_PER_TICK: i64 = 1;
 /// How often (ticks) a plant may attempt elongation.
 pub const ROOT_GROW_PERIOD: u64 = 48;
+/// Soft cap on the energy fraction needed to fire a vegetative root sprout.
+/// Plankton keep the genome `reproduce_at` default (0.7); land suckers would
+/// never bank that high on sand plains while elongation spends every surplus.
+pub const LAND_SPROUT_ENERGY_FRAC: f32 = 0.52;
+/// Phase period for land vegetative sprouts (shorter than plankton fission).
+pub const LAND_SPROUT_PERIOD: u64 = 48;
 
 /// Energy multiplier to bore through `mat`. Higher = harder.
 pub fn penetrate_cost(mat: MaterialId) -> Option<f32> {
@@ -272,8 +280,8 @@ fn blueprint_mid_x(blueprint: &Blueprint) -> f32 {
     (min_x as f32 + max_x as f32) * 0.5
 }
 
-/// True when a land plant can emerge here (emergent bed, some pore water).
-pub fn column_can_host_sprout(world: &World, wx: i32) -> bool {
+/// Solid ledge suitable for a land plant (not deep water, not a cliff notch).
+pub fn column_is_plantable(world: &World, wx: i32) -> bool {
     let Some(col) = world.column_at(wx) else {
         return false;
     };
@@ -286,6 +294,36 @@ pub fn column_can_host_sprout(world: &World, wx: i32) -> bool {
             }
         }
     }
+    let bed = col.climate_elevation();
+    if !solid_purchase_at(world, wx, bed - 0.15)
+        && !solid_purchase_at(world, wx, bed - 0.35)
+    {
+        return false;
+    }
+    // Both neighbours much higher → recess in a cliff face (plants look
+    // buried in the wall). Peaks / one-sided drops stay allowed.
+    let left = world
+        .column_at(wx - 1)
+        .map(|c| c.climate_elevation());
+    let right = world
+        .column_at(wx + 1)
+        .map(|c| c.climate_elevation());
+    if let (Some(l), Some(r)) = (left, right) {
+        if l > bed + PLANTABLE_WALL_DROP_M && r > bed + PLANTABLE_WALL_DROP_M {
+            return false;
+        }
+    }
+    true
+}
+
+/// True when a land sprout can emerge here (plantable + some pore water).
+pub fn column_can_host_sprout(world: &World, wx: i32) -> bool {
+    if !column_is_plantable(world, wx) {
+        return false;
+    }
+    let Some(col) = world.column_at(wx) else {
+        return false;
+    };
     let cap = col.moisture_cap();
     if cap <= 0 {
         return false;
@@ -356,6 +394,11 @@ pub fn pick_root_sprout_x(
     }
 
     // 2) Near-crown sucker — underground runner not yet painted as modules.
+    // Prefer gentler elevation steps so sprouts don't leap off cliff faces.
+    let parent_bed = world
+        .column_at(parent_wx)
+        .map(|c| c.climate_elevation())
+        .unwrap_or(pose_y);
     let prefer_right = hash_u64(world_seed, tick as i64, entity_id as i64, 0x5352_4F54) & 1 == 0;
     let mut best: Option<(f32, i32)> = None; // score, wx
     for dist in 1..=ROOT_SPROUT_MAX_DIST {
@@ -365,15 +408,19 @@ pub fn pick_root_sprout_x(
             if !column_can_host_sprout(world, wx) {
                 continue;
             }
-            let moist = world
-                .column_at(wx)
-                .map(|c| {
-                    let cap = c.moisture_cap().max(1) as f32;
-                    c.moisture.max(0) as f32 / cap
-                })
-                .unwrap_or(0.0);
-            // Prefer wetter sites a bit farther out (colonise, don't pile).
-            let score = moist * 2.0 + dist as f32 * 0.15;
+            let Some(col) = world.column_at(wx) else {
+                continue;
+            };
+            let bed = col.climate_elevation();
+            let step = (bed - parent_bed).abs();
+            // Hard reject: sprout would sit on a pillar/cliff lip far above/below.
+            if step > 10.0 {
+                continue;
+            }
+            let cap = col.moisture_cap().max(1) as f32;
+            let moist = col.moisture.max(0) as f32 / cap;
+            // Wetter + nearer grade + slightly farther out.
+            let score = moist * 2.0 + dist as f32 * 0.15 - step * 0.35;
             match best {
                 Some((s, _)) if s >= score => {}
                 _ => best = Some((score, wx)),
@@ -431,8 +478,9 @@ pub fn try_elongate_root(
     if w_root < 0.08 {
         return 0.0;
     }
-    // Need surplus — don't elongate while hungry.
-    if energy.current < energy.max * 0.45 {
+    // Need surplus above the vegetative sprout reserve — elongating at
+    // 0.45 kept coastal plains permanently below the sprout gate.
+    if energy.current < energy.max * LAND_SPROUT_ENERGY_FRAC {
         return 0.0;
     }
 
@@ -487,7 +535,8 @@ pub fn try_elongate_root(
                 (pen, 0.0)
             };
             let cost = ROOT_ELONGATE_BASE_COST * pen;
-            if energy.current < cost + 1.0 {
+            let floor = energy.max * LAND_SPROUT_ENERGY_FRAC;
+            if energy.current < cost + floor {
                 continue;
             }
             let cap = col.moisture_cap().max(1) as f32;
@@ -532,7 +581,8 @@ pub fn try_elongate_root(
     if in_void {
         // Cavities are free paths — no bore, cheap elongate.
         let cost = ROOT_ELONGATE_BASE_COST * ROOT_VOID_PENETRATE;
-        if energy.current < cost {
+        let floor = energy.max * LAND_SPROUT_ENERGY_FRAC;
+        if energy.current < cost + floor {
             return 0.0;
         }
         energy.current -= cost;
@@ -554,7 +604,8 @@ pub fn try_elongate_root(
         .unwrap_or(MaterialId::Sand);
     if let Some(pen) = penetrate_cost(mat) {
         let cost = ROOT_ELONGATE_BASE_COST * pen;
-        if energy.current < cost {
+        let floor = energy.max * LAND_SPROUT_ENERGY_FRAC;
+        if energy.current < cost + floor {
             return 0.0;
         }
         energy.current -= cost;

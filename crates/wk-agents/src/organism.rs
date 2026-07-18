@@ -666,6 +666,9 @@ impl Aabb {
 }
 
 /// World-space AABB for a posed blueprint. Size grows with painted modules.
+///
+/// Land plants occupy **one column** of X so neighbours on cliffs don't
+/// block each other (wide AABBs were preventing root sprouts entirely).
 pub fn organism_aabb(pose: &Pose, blueprint: &Blueprint) -> Aabb {
     let modules = &blueprint.modules;
     if modules.is_empty() {
@@ -682,17 +685,29 @@ pub fn organism_aabb(pose: &Pose, blueprint: &Blueprint) -> Aabb {
     let max_mx = modules.iter().map(|m| m.x).max().unwrap_or(0);
     let mid_x = (min_mx as f32 + max_mx as f32) * 0.5;
     let half = MODULE_CELL_COLS * 0.5;
-    let mut min_x = f32::INFINITY;
-    let mut max_x = f32::NEG_INFINITY;
     let mut min_y = f32::INFINITY;
     let mut max_y = f32::NEG_INFINITY;
     for m in modules {
-        let cx = pose.x + (m.x as f32 - mid_x) * MODULE_CELL_COLS;
         let cy = pose.y + m.y as f32 * MODULE_CELL_COLS;
-        min_x = min_x.min(cx - half);
-        max_x = max_x.max(cx + half);
         min_y = min_y.min(cy - half);
         max_y = max_y.max(cy + half);
+    }
+    if blueprint.is_rooted() {
+        let col0 = pose.x.floor();
+        return Aabb {
+            min_x: col0 + 0.02,
+            max_x: col0 + 0.98,
+            min_y,
+            max_y,
+        }
+        .inflated(COLLISION_PAD * 0.25);
+    }
+    let mut min_x = f32::INFINITY;
+    let mut max_x = f32::NEG_INFINITY;
+    for m in modules {
+        let cx = pose.x + (m.x as f32 - mid_x) * MODULE_CELL_COLS;
+        min_x = min_x.min(cx - half);
+        max_x = max_x.max(cx + half);
     }
     Aabb {
         min_x,
@@ -750,8 +765,11 @@ fn aabb_hits_any(bodies: &[(Entity, Aabb, bool)], aabb: Aabb, ignore: Option<Ent
 fn depth_for_pose(world: &World, blueprint: &Blueprint, x: f32, y_hint: f32) -> Option<f32> {
     let wx = x.floor() as i32;
     let col = world.column_at(wx)?;
-    if blueprint.is_rooted() && is_deep_water(col) {
-        return None;
+    if blueprint.is_rooted() {
+        if !crate::root::column_is_plantable(world, wx) {
+            return None;
+        }
+        return Some(land_plant_pose_y_on(col, blueprint));
     }
     if blueprint.is_plankton() {
         let offset = blueprint_body_top_offset(blueprint);
@@ -768,6 +786,56 @@ fn depth_for_pose(world: &World, blueprint: &Blueprint, x: f32, y_hint: f32) -> 
         return Some(col.surface_y - offset);
     }
     Some(land_plant_pose_y_on(col, blueprint))
+}
+
+/// Seat a root sprout on `prefer_x` (from [`pick_root_sprout_x`]) or a
+/// close rescue column. Does **not** walk another full sprout radius —
+/// that stacked with the picker and teleported kids off cliffs.
+fn find_land_sprout_pose(
+    world: &World,
+    occupied: &std::collections::HashSet<i32>,
+    blueprint: &Blueprint,
+    prefer_x: f32,
+) -> Option<(f32, f32)> {
+    let prefer_wx = prefer_x.floor() as i32;
+    let prefer_bed = world
+        .column_at(prefer_wx)
+        .map(|c| c.climate_elevation())
+        .unwrap_or(0.0);
+    let try_col = |wx: i32| -> Option<(f32, f32)> {
+        if occupied.contains(&wx) {
+            return None;
+        }
+        if !crate::root::column_can_host_sprout(world, wx) {
+            return None;
+        }
+        let col = world.column_at(wx)?;
+        let bed = col.climate_elevation();
+        if (bed - prefer_bed).abs() > 10.0 {
+            return None;
+        }
+        Some((wx as f32 + 0.5, land_plant_pose_y_on(col, blueprint)))
+    };
+    if let Some(p) = try_col(prefer_wx) {
+        return Some(p);
+    }
+    // Rescue within ±2 columns of the preferred seat.
+    for dist in 1..=2 {
+        for sign in [1i32, -1] {
+            if let Some(p) = try_col(prefer_wx + sign * dist) {
+                return Some(p);
+            }
+        }
+    }
+    None
+}
+
+fn rooted_occupied_columns(bodies: &[(Entity, Aabb, bool)]) -> std::collections::HashSet<i32> {
+    bodies
+        .iter()
+        .filter(|(_, _, immobile)| *immobile)
+        .map(|(_, aabb, _)| aabb.center_x().floor() as i32)
+        .collect()
 }
 
 /// Find a clear pose, scanning **outward horizontally** first.
@@ -1026,6 +1094,7 @@ impl AgentStore {
         }
         // Land plant: nucleus (crown) on the solid bed — never on the
         // free-water top (flood waves must not stretch rooted plants).
+        let _ = world_x;
         Some(land_plant_pose_y_on(col, blueprint))
     }
 
@@ -1054,7 +1123,18 @@ impl AgentStore {
         let y0 = Self::spawn_elevation(world, world_x, &blueprint)?;
         let x0 = world_x as f32 + 0.5;
         let bodies = collect_bodies(self, world);
-        let (x, y) = find_clear_pose(world, &bodies, &blueprint, x0, y0)?;
+        let (x, y) = if blueprint.is_rooted() {
+            // Prefer the requested column if free; else search for a ledge.
+            let mut occupied = rooted_occupied_columns(&bodies);
+            if !occupied.contains(&world_x) && crate::root::column_is_plantable(world, world_x) {
+                (x0, y0)
+            } else {
+                occupied.insert(world_x);
+                find_land_sprout_pose(world, &occupied, &blueprint, x0)?
+            }
+        } else {
+            find_clear_pose(world, &bodies, &blueprint, x0, y0)?
+        };
 
         let max_e = energy.max(1.0).max(40.0);
         let host_x = x.floor() as i32;
@@ -1259,6 +1339,9 @@ impl AgentStore {
                     let offset = blueprint_body_top_offset(&body.blueprint);
                     step_buoyancy(&mut pose.y, buoy, col, bias, offset);
                 } else {
+                    // Pin to column centre + solid bed so cliff neighbours
+                    // never leave the crown floating or buried mid-face.
+                    pose.x = wx as f32 + 0.5;
                     pose.y = land_plant_pose_y_on(col, &body.blueprint);
                     buoy.vel_y = 0.0;
                     buoy.last_water_top = None;
@@ -1358,9 +1441,138 @@ impl AgentStore {
                 continue;
             }
 
-            // Surplus → elongate roots / shoots (material-costed bore).
+            // Coarse ecology feedback — raise toward cover, don't stack every tick
+            // (stacking drove leaf_area→1 and flash-dried soil via ET).
+            if rooted {
+                if let Some(col) = world.column_at_mut(wx) {
+                    let roots = body.blueprint.root_count() as f32;
+                    let leaves = body.photosystem_count() as f32;
+                    let cover_r = (roots * 0.08).clamp(0.0, 1.0);
+                    let cover_l = if dormant {
+                        (leaves * 0.04).clamp(0.0, 0.35) // wilted canopy
+                    } else {
+                        (leaves * 0.12).clamp(0.0, 1.0)
+                    };
+                    col.ecology.root_density = col.ecology.root_density.max(cover_r);
+                    col.ecology.leaf_area = if dormant {
+                        col.ecology.leaf_area.min(cover_l.max(0.05))
+                    } else {
+                        col.ecology.leaf_area.max(cover_l)
+                    };
+                }
+            }
+
+            // Vegetative sprouts / fission BEFORE elongation so growth can't
+            // permanently spend the tank below the repro gate (coastal plains
+            // were sterile under the old order).
+            let repro_period = if rooted {
+                crate::root::LAND_SPROUT_PERIOD
+            } else {
+                REPRO_PERIOD
+            };
+            let phase_id = e.id() as u64 % repro_period;
+            let threshold = if rooted {
+                genome
+                    .reproduce_at
+                    .clamp(0.25, 0.95)
+                    .min(crate::root::LAND_SPROUT_ENERGY_FRAC)
+            } else {
+                genome.reproduce_at.clamp(0.2, 0.99)
+            };
+            // Plankton: comfort + circadian. Land suckers only need hydrated
+            // roots — night / off-window shouldn't sterilise a full plain.
+            let can_repro = if rooted {
+                comfort >= 0.05 && !dormant && n_roots > 0.0
+            } else {
+                comfort >= 0.20
+            };
+            if population + births.len() < MAX_ORGANISMS
+                && tick % repro_period == phase_id
+                && energy.current >= energy.max * threshold
+                && can_repro
+            {
+                // Land plants: vegetative root sprout (pick site first so a
+                // failed site doesn't tax the parent). Plankton: fission.
+                let sprout_x = if rooted {
+                    crate::root::pick_root_sprout_x(
+                        world,
+                        pose.x,
+                        pose.y,
+                        &body.blueprint,
+                        world.seed,
+                        tick,
+                        e.id(),
+                    )
+                } else {
+                    let w = organism_width(&body.blueprint);
+                    let side = if (tick + e.id() as u64) % 2 == 0 {
+                        w
+                    } else {
+                        -w
+                    };
+                    Some(pose.x + side)
+                };
+                if let Some(child_x0) = sprout_x {
+                    // Low CloneFidelity → weaker kids, and density-dependent
+                    // stillbirths (messy booms then fails to replace itself at cap).
+                    let fidelity = genome.clone_fidelity.clamp(0.0, 1.0);
+                    let density = (population as f32 / MAX_ORGANISMS as f32).clamp(0.0, 1.0);
+                    let viability =
+                        (fidelity + (1.0 - density) * (1.0 - fidelity)).clamp(0.05, 1.0);
+                    let viab_h = hash_u64(world.seed, tick as i64, e.id() as i64, 0xB100_D5);
+                    let viable = (viab_h as f32 / u64::MAX as f32) < viability;
+                    let child_frac = REPRO_COST_FRAC * (0.35 + 0.65 * fidelity);
+                    let child_e = energy.current * child_frac;
+                    if child_e > 1.0 {
+                        // Parent always pays the attempt; failed clones are the
+                        // messy cost of low fidelity under crowding.
+                        energy.current -= child_e;
+                        if viable {
+                            let child_genome =
+                                mutate_organism(*genome, world.seed, tick, e.id());
+                            // Land plants send up a small sucker shoot (minimal plant)
+                            // that then elongates — not a full adult clone teleport.
+                            let child_bp = if rooted {
+                                let mut bp = Blueprint::minimal_plant(child_genome);
+                                bp.name = format!("{}-sprout", body.blueprint.name);
+                                bp
+                            } else {
+                                let mut bp = mutate_blueprint_morphology(
+                                    body.blueprint.clone(),
+                                    genome.clone_fidelity,
+                                    world.seed,
+                                    tick,
+                                    e.id(),
+                                );
+                                bp.genome = child_genome;
+                                bp
+                            };
+                            births.push((
+                                child_x0,
+                                pose.y,
+                                child_bp,
+                                child_e,
+                                energy.max,
+                                e,
+                                lineage.generation,
+                                lineage.founder_id,
+                            ));
+                        }
+                    }
+                }
+            }
+
+            // Surplus above the sprout reserve → elongate roots / shoots.
+            // Keep a tank buffer so sand/rock bores can't spend past the gate.
+            let growth_reserve = if rooted {
+                energy.max * threshold
+            } else {
+                0.0
+            };
+            let bore_headroom = crate::root::ROOT_ELONGATE_BASE_COST * 2.0;
             if rooted
                 && plant_active
+                && energy.current >= growth_reserve + bore_headroom
                 && tick % crate::root::ROOT_GROW_PERIOD
                     == (e.id() as u64 % crate::root::ROOT_GROW_PERIOD)
             {
@@ -1388,8 +1600,9 @@ impl AgentStore {
                     );
                 }
                 // Occasional opposite allocation so plants aren't pure roots.
-                if tick % (crate::root::ROOT_GROW_PERIOD * 3)
-                    == (e.id() as u64 % (crate::root::ROOT_GROW_PERIOD * 3))
+                if energy.current >= growth_reserve + bore_headroom
+                    && tick % (crate::root::ROOT_GROW_PERIOD * 3)
+                        == (e.id() as u64 % (crate::root::ROOT_GROW_PERIOD * 3))
                 {
                     let _ = crate::root::try_grow_shoot(
                         &mut body.blueprint,
@@ -1399,103 +1612,6 @@ impl AgentStore {
                         tick,
                         e.id(),
                     );
-                }
-            }
-
-            // Coarse ecology feedback — raise toward cover, don't stack every tick
-            // (stacking drove leaf_area→1 and flash-dried soil via ET).
-            if rooted {
-                if let Some(col) = world.column_at_mut(wx) {
-                    let roots = body.blueprint.root_count() as f32;
-                    let leaves = body.photosystem_count() as f32;
-                    let cover_r = (roots * 0.08).clamp(0.0, 1.0);
-                    let cover_l = if dormant {
-                        (leaves * 0.04).clamp(0.0, 0.35) // wilted canopy
-                    } else {
-                        (leaves * 0.12).clamp(0.0, 1.0)
-                    };
-                    col.ecology.root_density = col.ecology.root_density.max(cover_r);
-                    col.ecology.leaf_area = if dormant {
-                        col.ecology.leaf_area.min(cover_l.max(0.05))
-                    } else {
-                        col.ecology.leaf_area.max(cover_l)
-                    };
-                }
-            }
-
-            let phase_id = e.id() as u64 % REPRO_PERIOD;
-            let threshold = genome.reproduce_at.clamp(0.2, 0.99);
-            // Cold / hot: no reproduce outside the comfort band.
-            // Threshold is intentionally soft (was 0.35) so noon ocean under
-            // thermal fields doesn't sterilise a full-energy Atom while still
-            // blocking the E46d cold-but-unfrozen case.
-            let can_repro = comfort >= 0.20
-                && (!rooted || (plant_active && !dormant && n_roots > 0.0));
-            if population + births.len() < MAX_ORGANISMS
-                && tick % REPRO_PERIOD == phase_id
-                && energy.current >= energy.max * threshold
-                && can_repro
-            {
-                // Land plants: vegetative root sprout (pick site first so a
-                // failed site doesn't tax the parent). Plankton: fission.
-                let sprout_x = if rooted {
-                    crate::root::pick_root_sprout_x(
-                        world,
-                        pose.x,
-                        pose.y,
-                        &body.blueprint,
-                        world.seed,
-                        tick,
-                        e.id(),
-                    )
-                } else {
-                    let w = organism_width(&body.blueprint);
-                    let side = if (tick + e.id() as u64) % 2 == 0 {
-                        w
-                    } else {
-                        -w
-                    };
-                    Some(pose.x + side)
-                };
-                let Some(child_x0) = sprout_x else {
-                    continue;
-                };
-
-                // Low CloneFidelity → weaker kids, and density-dependent
-                // stillbirths (messy booms then fails to replace itself at cap).
-                let fidelity = genome.clone_fidelity.clamp(0.0, 1.0);
-                let density = (population as f32 / MAX_ORGANISMS as f32).clamp(0.0, 1.0);
-                let viability = (fidelity + (1.0 - density) * (1.0 - fidelity)).clamp(0.05, 1.0);
-                let viab_h = hash_u64(world.seed, tick as i64, e.id() as i64, 0xB100_D5);
-                let viable = (viab_h as f32 / u64::MAX as f32) < viability;
-                let child_frac = REPRO_COST_FRAC * (0.35 + 0.65 * fidelity);
-                let child_e = energy.current * child_frac;
-                if child_e > 1.0 {
-                    // Parent always pays the attempt; failed clones are the
-                    // messy cost of low fidelity under crowding.
-                    energy.current -= child_e;
-                    if !viable {
-                        continue;
-                    }
-                    let child_genome = mutate_organism(*genome, world.seed, tick, e.id());
-                    let mut child_bp = mutate_blueprint_morphology(
-                        body.blueprint.clone(),
-                        genome.clone_fidelity,
-                        world.seed,
-                        tick,
-                        e.id(),
-                    );
-                    child_bp.genome = child_genome;
-                    births.push((
-                        child_x0,
-                        pose.y,
-                        child_bp,
-                        child_e,
-                        energy.max,
-                        e,
-                        lineage.generation,
-                        lineage.founder_id,
-                    ));
                 }
             }
 
@@ -1534,20 +1650,21 @@ impl AgentStore {
         } else {
             Vec::new()
         };
+        let mut occupied = rooted_occupied_columns(&bodies);
         for (x0, y0, blueprint, energy, max_e, parent, parent_gen, founder_id) in births {
             if self.organism_count() >= MAX_ORGANISMS {
                 break;
             }
-            // Root sprouts stay near the parent root system; plankton may
-            // search the whole water body for a clear float slot.
-            let max_steps = if blueprint.is_rooted() {
-                Some(crate::root::ROOT_SPROUT_MAX_DIST)
+            let placed = if blueprint.is_rooted() {
+                find_land_sprout_pose(world, &occupied, &blueprint, x0)
             } else {
-                None
+                find_clear_pose_limited(world, &bodies, &blueprint, x0, y0, None)
             };
-            let Some((x, y)) =
-                find_clear_pose_limited(world, &bodies, &blueprint, x0, y0, max_steps)
-            else {
+            let Some((x, y)) = placed else {
+                // Failed seat — refund the parent so cliffs don't drain trees.
+                if let Ok(mut e) = self.ecs.get::<&mut Energy>(parent) {
+                    e.current = (e.current + energy).min(e.max);
+                }
                 continue;
             };
             let host_x = x.floor() as i32;
@@ -1558,6 +1675,9 @@ impl AgentStore {
             let new_pose = Pose { x, y };
             let new_aabb = organism_aabb(&new_pose, &blueprint);
             let immobile = blueprint.is_rooted();
+            if immobile {
+                occupied.insert(x.floor() as i32);
+            }
             let new_entity = self.ecs.spawn((
                 new_pose,
                 BuoyancyState {
@@ -1691,8 +1811,15 @@ impl AgentStore {
             let min_x = modules.iter().map(|m| m.x).min().unwrap_or(0);
             let max_x = modules.iter().map(|m| m.x).max().unwrap_or(0);
             let mid_x = (min_x as f32 + max_x as f32) * 0.5;
+            let host = pose.x.floor() + 0.5;
+            let rooted = body.blueprint.is_rooted();
             for m in modules {
-                let wx = pose.x + (m.x as f32 - mid_x) * MODULE_CELL_COLS;
+                let mut wx = pose.x + (m.x as f32 - mid_x) * MODULE_CELL_COLS;
+                // Keep land-plant pixels inside the host column so cliff
+                // faces don't show stems floating in open air beside the wall.
+                if rooted {
+                    wx = wx.clamp(host - 0.45, host + 0.45);
+                }
                 let wy = pose.y + m.y as f32 * MODULE_CELL_COLS;
                 let rgb = if dead {
                     corpse_rgb(m.module.rgb())
@@ -2273,6 +2400,30 @@ mod tests {
     }
 
     #[test]
+    fn land_sprout_skips_cliff_notch_columns() {
+        let mut world = World::new(21);
+        world.sea_level = 0.0;
+        // Build a U-notch: high | low | high — low column is unplantable.
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+            }
+        }
+        // Raise neighbours of column 10 into walls.
+        for x in [9, 11] {
+            if let Some(col) = world.column_at_mut(x) {
+                col.deposit_to_top(MaterialId::Stone, 80_000, 0);
+            }
+        }
+        assert!(
+            !crate::root::column_is_plantable(&world, 10),
+            "notch between tall walls must be unplantable"
+        );
+        assert!(crate::root::column_is_plantable(&world, 8));
+    }
+
+    #[test]
     fn flood_wave_does_not_stretch_land_plant() {
         let mut world = World::new(17);
         world.sea_level = 0.0;
@@ -2372,11 +2523,7 @@ mod tests {
             )
             .expect("parent");
         let x0 = store.ecs.get::<&Pose>(parent).unwrap().x;
-        // Keep the tank topped so repro can fire.
         for t in 0..4_000 {
-            if let Ok(mut e) = store.ecs.get::<&mut Energy>(parent) {
-                e.current = e.max;
-            }
             store.step_organisms(&mut world, t);
             if store.organism_count() > 1 {
                 break;
@@ -2921,6 +3068,62 @@ mod tests {
         assert!(
             store.births_total > 0,
             "default Atom with peak energy should fission under app-like thermal ocean (comfort_ok={ok} blocked={blocked})"
+        );
+    }
+
+    #[test]
+    fn coastal_plain_plant_sprouts_from_half_tank() {
+        // Fertile wet flat — the "best coastal plain" case. Default genome,
+        // no force-fed energy: elongation must not sterilise vegetative spread.
+        let mut world = World::new(13);
+        world.sea_level = 0.0;
+        world.climate.base_temp_c = 22.0;
+        world.climate.lapse_rate_c_per_m = 0.0;
+        world.climate.day_night_amplitude_c = 4.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+                col.ecology.nutrient = 0.85;
+                // Thin organic topsoil (coastal plain, not bare dune).
+                col.deposit_to_top(MaterialId::Organic, 800, 0);
+            }
+        }
+        let mut store = AgentStore::new();
+        let parent = store
+            .spawn_from_blueprint(
+                &world,
+                16,
+                Blueprint::minimal_plant(Genome {
+                    clone_fidelity: 0.85,
+                    ..Genome::default()
+                }),
+                200.0,
+            )
+            .expect("parent");
+        if let Ok(mut e) = store.ecs.get::<&mut Energy>(parent) {
+            e.current = e.max * 0.45;
+        }
+        let x0 = store.ecs.get::<&Pose>(parent).unwrap().x;
+        for t in 0..40_000 {
+            store.step_organisms(&mut world, t);
+            if store.organism_count() > 1 {
+                let max_dx = store
+                    .ecs
+                    .query::<(&Pose, &Organism)>()
+                    .iter()
+                    .map(|(_, (p, _))| (p.x - x0).abs())
+                    .fold(0.0f32, f32::max);
+                assert!(
+                    max_dx <= crate::root::ROOT_SPROUT_MAX_DIST as f32 + 1.5,
+                    "coastal sprouts must stay local (max_dx={max_dx})"
+                );
+                return;
+            }
+        }
+        panic!(
+            "expected root sprout on wet coastal plain; living={}",
+            store.organism_count()
         );
     }
 }
