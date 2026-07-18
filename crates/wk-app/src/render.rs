@@ -773,6 +773,7 @@ fn draw_organism_inspector(
     } else {
         "rooted".into()
     };
+    // Note: collision uses live root purchase (anchored vs fallen) separately.
     let comfort_line = match ambient_c {
         Some(t) => {
             let c = wk_sim::temp_comfort_factor(t, &info.genome);

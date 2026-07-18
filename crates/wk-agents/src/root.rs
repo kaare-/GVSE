@@ -172,6 +172,70 @@ pub fn module_world_y(pose_y: f32, module_y: i16) -> f32 {
     pose_y + module_y as f32 * MODULE_CELL_COLS
 }
 
+fn elevation_in_void(col: &wk_world::column::Column, y: f32) -> bool {
+    col.voids.iter().any(|v| {
+        v.height_m > 1e-4 && y <= v.top_y + 1e-3 && y >= v.floor_y() - 1e-3
+    })
+}
+
+fn solid_purchase_at(world: &World, wx: i32, y: f32) -> bool {
+    let Some(col) = world.column_at(wx) else {
+        return false;
+    };
+    // Explicit void cavity — root hanging in open air / collapsed soil.
+    if elevation_in_void(col, y) {
+        return false;
+    }
+    world
+        .material_at(wx, y)
+        .map(|mat| {
+            mat.is_solid()
+                && !matches!(
+                    mat,
+                    MaterialId::Ice | MaterialId::Snow | MaterialId::Water
+                )
+        })
+        .unwrap_or(false)
+}
+
+/// True when at least one Root tip still has solid purchase.
+///
+/// Anchored plants are immobile under collision. If the soil around the
+/// roots collapses (void / no solid at tip depth), this returns false and
+/// the plant can topple / be shoved.
+pub fn plant_is_anchored(world: &World, pose_x: f32, pose_y: f32, blueprint: &Blueprint) -> bool {
+    if !blueprint.is_rooted() {
+        return false;
+    }
+    let roots: Vec<&PlacedModule> = blueprint
+        .modules
+        .iter()
+        .filter(|m| m.module == ModuleId::Root)
+        .collect();
+    if roots.is_empty() {
+        // Stem-only habit: weak surface contact counts as anchored.
+        let wx = pose_x.floor() as i32;
+        return solid_purchase_at(world, wx, pose_y - 0.1);
+    }
+    let min_x = blueprint.modules.iter().map(|m| m.x).min().unwrap_or(0);
+    let max_x = blueprint.modules.iter().map(|m| m.x).max().unwrap_or(0);
+    let mid_x = (min_x as f32 + max_x as f32) * 0.5;
+    let mut purchase = 0usize;
+    for m in &roots {
+        let cell_wx = (pose_x + (m.x as f32 - mid_x) * MODULE_CELL_COLS).floor() as i32;
+        let tip_y = module_world_y(pose_y, m.y);
+        // Sample tip and a hair below — root must bite solid, not hang in a void.
+        if solid_purchase_at(world, cell_wx, tip_y)
+            || solid_purchase_at(world, cell_wx, tip_y - 0.05)
+        {
+            purchase += 1;
+        }
+    }
+    // Need a real foothold — a single clinging tip is enough to stay put;
+    // zero purchase → free to fall / be pushed.
+    purchase >= 1
+}
+
 /// Pick the deepest Root tip (most negative module y), or Nucleus if none.
 pub fn root_tips(blueprint: &Blueprint) -> Vec<(i16, i16)> {
     let roots: Vec<(i16, i16)> = blueprint

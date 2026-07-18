@@ -699,8 +699,11 @@ pub fn organism_width(blueprint: &Blueprint) -> f32 {
         .max(MODULE_CELL_COLS)
 }
 
-/// Living body footprint: `(entity, aabb, is_rooted)`.
-fn collect_bodies(store: &AgentStore) -> Vec<(Entity, Aabb, bool)> {
+/// Living body footprint: `(entity, aabb, anchored)`.
+///
+/// `anchored` = has root purchase in solid ground (immobile). Rooted plants
+/// that lost their substrate are **not** anchored and can topple / move.
+fn collect_bodies(store: &AgentStore, world: &World) -> Vec<(Entity, Aabb, bool)> {
     // Keep ordering deterministic (by entity id) — resolve_collisions
     // uses it for stable tie-break when two AABBs share a center-x.
     let mut out: Vec<(Entity, Aabb, bool)> = store
@@ -711,7 +714,7 @@ fn collect_bodies(store: &AgentStore) -> Vec<(Entity, Aabb, bool)> {
             (
                 e,
                 organism_aabb(pose, &body.blueprint),
-                body.blueprint.is_rooted(),
+                crate::root::plant_is_anchored(world, pose.x, pose.y, &body.blueprint),
             )
         })
         .collect();
@@ -740,13 +743,17 @@ fn depth_for_pose(world: &World, blueprint: &Blueprint, x: f32, y_hint: f32) -> 
     }
     if blueprint.is_plankton() {
         let offset = blueprint_body_top_offset(blueprint);
-        let (top, bed) = water_band(col)?;
-        let eq_pose = equilibrium_y(top, bed, blueprint.genome.buoyancy_bias) - offset;
-        // Honour hint only as a secondary depth band (packing rows).
-        if (y_hint - eq_pose).abs() < 0.05 {
-            return Some(eq_pose);
+        if let Some((top, bed)) = water_band(col) {
+            let eq_pose = equilibrium_y(top, bed, blueprint.genome.buoyancy_bias) - offset;
+            // Honour hint only as a secondary depth band (packing rows).
+            if (y_hint - eq_pose).abs() < 0.05 {
+                return Some(eq_pose);
+            }
+            return Some(y_hint.clamp(bed, (top - offset).max(bed)));
         }
-        return Some(y_hint.clamp(bed, (top - offset).max(bed)));
+        // Dry column: only used for an explicit editor drop (clone search
+        // skips dry land when k > 0 — see find_clear_pose).
+        return Some(col.surface_y - offset);
     }
     Some(land_plant_pose_y(col.surface_y, blueprint))
 }
@@ -786,8 +793,8 @@ fn find_clear_pose(
                     d += width;
                 }
             } else {
-                // Parent is already high-and-dry — still only search wet columns.
-                depth_rows.clear();
+                // Dry column: keep `y0` so an explicit editor drop still works.
+                // Outward clone search (k>0) skips further dry columns below.
             }
         }
     }
@@ -801,9 +808,9 @@ fn find_clear_pose(
                     continue;
                 }
                 let x = (x0 + sign as f32 * k as f32 * step).clamp(lo_f, hi_f);
-                // Algae clones must stay in free water — dry-land packing was
-                // shoving beach trees sideways via collision.
-                if plankton {
+                // Algae clones must not spread onto dry beach (k>0). An
+                // explicit editor drop at k==0 on land is still allowed.
+                if plankton && k > 0 {
                     let wx = x.floor() as i32;
                     if world.column_at(wx).and_then(water_band).is_none() {
                         continue;
@@ -829,9 +836,12 @@ fn find_clear_pose(
 /// Push overlapping footprints apart. Prefer **horizontal** separation so
 /// buoyancy (same depth) doesn't re-form a vertical lens every tick.
 ///
-/// **Rooted plants are immobile.** Anything with `Root`/`Stem` never receives
-/// a collision displacement — algae / floaters bounce off; two trees that
-/// overlap simply share the column (spawn already tries to avoid that).
+/// Push overlapping footprints apart. Prefer **horizontal** separation so
+/// buoyancy (same depth) doesn't re-form a vertical lens every tick.
+///
+/// **Anchored** plants (roots with solid purchase) are immobile — algae
+/// bounce off. If soil collapses and roots lose purchase, the plant is
+/// mobile again and can topple / be shoved.
 ///
 /// Broad-phase: sort by AABB `min_x`, then compare only bodies whose
 /// x-extents overlap. Reduces the O(N²) pair scan to O(N + K) where K
@@ -848,7 +858,7 @@ fn resolve_collisions(store: &mut AgentStore, world: &World) {
     let mut dx = Vec::<(u32, f32)>::new();
     let mut dy = Vec::<(u32, f32)>::new();
     for _ in 0..12 {
-        let mut bodies = collect_bodies(store);
+        let mut bodies = collect_bodies(store, world);
         if bodies.len() < 2 {
             return;
         }
@@ -861,9 +871,9 @@ fn resolve_collisions(store: &mut AgentStore, world: &World) {
         dy.clear();
         let mut any = false;
         for i in 0..bodies.len() {
-            let (ea, a, a_rooted) = bodies[i];
+            let (ea, a, a_anchored) = bodies[i];
             for j in (i + 1)..bodies.len() {
-                let (eb, b, b_rooted) = bodies[j];
+                let (eb, b, b_anchored) = bodies[j];
                 // Sweep termination: once the next body's min_x is
                 // past this one's max_x, no further pair can overlap.
                 if b.min_x >= a.max_x {
@@ -872,8 +882,8 @@ fn resolve_collisions(store: &mut AgentStore, world: &World) {
                 if !a.overlaps(b) {
                     continue;
                 }
-                // Two rooted plants: both anchors — no shove.
-                if a_rooted && b_rooted {
+                // Two anchored plants: both fixed — no shove.
+                if a_anchored && b_anchored {
                     continue;
                 }
                 any = true;
@@ -883,12 +893,12 @@ fn resolve_collisions(store: &mut AgentStore, world: &World) {
                     continue;
                 }
 
-                // Side-view: shove on X. Rooted body never moves; the mobile
-                // partner takes the full separation.
+                // Side-view: shove on X. Anchored body never moves; the
+                // mobile partner (floater or unanchored/fallen plant) yields.
                 let push = (overlap_x * 0.5).max(MIN_SEPARATION) + COLLISION_PAD;
                 let a_left = a.center_x() < b.center_x()
                     || (a.center_x() == b.center_x() && ea.id() < eb.id());
-                let (s_a, s_b) = match (a_rooted, b_rooted) {
+                let (s_a, s_b) = match (a_anchored, b_anchored) {
                     (true, false) => {
                         let dir = if a_left { push * 2.0 } else { -push * 2.0 };
                         (0.0, dir)
@@ -913,10 +923,10 @@ fn resolve_collisions(store: &mut AgentStore, world: &World) {
                     dx.push((eb.id(), s_b));
                 }
 
-                // Edge fallback Y — floaters only.
+                // Edge fallback Y — mobile bodies only.
                 let a_at_edge = a.center_x() <= lo_f + 0.1 || a.center_x() >= hi_f - 0.1;
                 let b_at_edge = b.center_x() <= lo_f + 0.1 || b.center_x() >= hi_f - 0.1;
-                if a_at_edge && b_at_edge && overlap_y > 0.0 && !a_rooted && !b_rooted {
+                if a_at_edge && b_at_edge && overlap_y > 0.0 && !a_anchored && !b_anchored {
                     let y_push = overlap_y * 0.5 + COLLISION_PAD;
                     let (ya, yb) = if a.center_y() <= b.center_y() {
                         (-y_push, y_push)
@@ -934,9 +944,9 @@ fn resolve_collisions(store: &mut AgentStore, world: &World) {
         // Sum per-entity pushes (short vecs — no HashMap overhead).
         dx.sort_by_key(|&(id, _)| id);
         dy.sort_by_key(|&(id, _)| id);
-        for (e, aabb, rooted) in &bodies {
-            // Hard rule: rooted plants never move from collision.
-            if *rooted {
+        for (e, aabb, anchored) in &bodies {
+            // Hard rule: only unanchored bodies move from collision.
+            if *anchored {
                 continue;
             }
             let id = e.id();
@@ -1019,7 +1029,7 @@ impl AgentStore {
 
         let y0 = Self::spawn_elevation(world, world_x, &blueprint)?;
         let x0 = world_x as f32 + 0.5;
-        let bodies = collect_bodies(self);
+        let bodies = collect_bodies(self, world);
         let (x, y) = find_clear_pose(world, &bodies, &blueprint, x0, y0)?;
 
         let max_e = energy.max(1.0).max(40.0);
@@ -1465,7 +1475,7 @@ impl AgentStore {
         // Collect once, extend as we spawn — the old code re-queried every
         // living organism through hecs per birth (O(N²) at MAX_ORGANISMS).
         let mut bodies = if !births.is_empty() {
-            collect_bodies(self)
+            collect_bodies(self, world)
         } else {
             Vec::new()
         };
@@ -1483,7 +1493,8 @@ impl AgentStore {
                 .map(|(top, _)| top);
             let new_pose = Pose { x, y };
             let new_aabb = organism_aabb(&new_pose, &blueprint);
-            let rooted = blueprint.is_rooted();
+            let anchored =
+                crate::root::plant_is_anchored(world, new_pose.x, new_pose.y, &blueprint);
             let new_entity = self.ecs.spawn((
                 new_pose,
                 BuoyancyState {
@@ -1504,7 +1515,7 @@ impl AgentStore {
                 },
                 Organism::default(),
             ));
-            bodies.push((new_entity, new_aabb, rooted));
+            bodies.push((new_entity, new_aabb, anchored));
             if let Ok(mut lin) = self.ecs.get::<&mut Lineage>(parent) {
                 lin.clones_produced = lin.clones_produced.saturating_add(1);
             }
@@ -2430,7 +2441,7 @@ mod tests {
         assert!(store.spawn_from_blueprint(&world, 4, bp.clone(), 50.0).is_some());
         assert!(store.spawn_from_blueprint(&world, 4, bp.clone(), 50.0).is_some());
         assert!(store.spawn_from_blueprint(&world, 4, bp, 50.0).is_some());
-        let bodies = collect_bodies(&store);
+        let bodies = collect_bodies(&store, &world);
         assert_eq!(bodies.len(), 3);
         for i in 0..bodies.len() {
             for j in (i + 1)..bodies.len() {
@@ -2479,12 +2490,62 @@ mod tests {
             span > 8.0,
             "expected clones to spread along X (span={span}), not pack into a lens"
         );
-        let bodies = collect_bodies(&store);
+        let bodies = collect_bodies(&store, &world);
         for i in 0..bodies.len() {
             for j in (i + 1)..bodies.len() {
                 assert!(!bodies[i].1.overlaps(bodies[j].1));
             }
         }
+    }
+
+    #[test]
+    fn unanchored_plant_can_be_pushed_after_soil_collapse() {
+        use wk_world::column::VoidOrigin;
+        let mut world = World::new(9);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        if let Some(col) = world.column_at_mut(4) {
+            col.deposit_to_top(MaterialId::Water, 2_000, 0);
+        }
+        let mut store = AgentStore::new();
+        let plant = store
+            .spawn_from_blueprint(
+                &world,
+                8,
+                Blueprint::minimal_plant(Genome::default()),
+                80.0,
+            )
+            .expect("plant");
+        let pose = *store.ecs.get::<&Pose>(plant).unwrap();
+        let bp = store.ecs.get::<&ModuleBody>(plant).unwrap().blueprint.clone();
+        assert!(
+            crate::root::plant_is_anchored(&world, pose.x, pose.y, &bp),
+            "fresh plant should be anchored"
+        );
+        // Collapse a cavity through the root tip (soil falls away).
+        let tip_y = pose.y - MODULE_CELL_COLS; // root at blueprint y=-1
+        let wx = pose.world_x();
+        if let Some(col) = world.column_at_mut(wx) {
+            col.grow_void_at(tip_y, 4.0, MaterialId::Sand, VoidOrigin::Collapse);
+        }
+        assert!(
+            !crate::root::plant_is_anchored(&world, pose.x, pose.y, &bp),
+            "collapsed soil should unanchor the plant"
+        );
+        let x_before = pose.x;
+        let algae = store
+            .spawn_from_blueprint(&world, 4, Blueprint::atom(Genome::default()), 50.0)
+            .expect("algae");
+        if let Ok(mut ap) = store.ecs.get::<&mut Pose>(algae) {
+            ap.x = x_before;
+            ap.y = pose.y;
+        }
+        resolve_collisions(&mut store, &world);
+        let x_after = store.ecs.get::<&Pose>(plant).unwrap().x;
+        assert!(
+            (x_after - x_before).abs() > 0.01,
+            "unanchored plant should move when shoved (before={x_before} after={x_after})"
+        );
     }
 
     #[test]
