@@ -16,8 +16,9 @@ pub use blueprint::{Blueprint, PlacedModule, Wire, WireKind, BLUEPRINT_DIR};
 pub use module::{LaneId, ModuleId};
 pub use organism::{
     blueprint_body_top_offset, blueprint_land_crown_y, circadian_buoyancy_bias, land_plant_pose_y,
-    mutate_blueprint_morphology, temp_comfort_factor, Aabb, Corpse, Lineage, ModuleBody, Organism,
-    OrganismInspect, MAX_ORGANISMS, MODULE_CELL_COLS, PHOTON_RATE, CO2_HALF_SAT, CO2_PER_ENERGY,
+    land_plant_pose_y_on, mutate_blueprint_morphology, temp_comfort_factor, Aabb, Corpse, Lineage,
+    ModuleBody, Organism, OrganismInspect, MAX_ORGANISMS, MODULE_CELL_COLS, PHOTON_RATE,
+    CO2_HALF_SAT, CO2_PER_ENERGY,
 };
 pub use root::{
     column_nutrient_factor, penetrate_cost, plant_is_anchored, DROUGHT_HIBERNATE_MAX_TICKS,

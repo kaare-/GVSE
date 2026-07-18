@@ -329,9 +329,18 @@ pub fn blueprint_land_crown_y(blueprint: &Blueprint) -> i16 {
     blueprint.modules.iter().map(|m| m.y).min().unwrap_or(0)
 }
 
-/// `pose.y` so the land-plant crown sits on `surface_y`.
-pub fn land_plant_pose_y(surface_y: f32, blueprint: &Blueprint) -> f32 {
-    surface_y - blueprint_land_crown_y(blueprint) as f32 * MODULE_CELL_COLS
+/// `pose.y` so the land-plant crown sits on the **solid bed**.
+///
+/// Pass [`Column::climate_elevation`], not [`Column::surface_y`]: flood
+/// waves raise `surface_y` and would otherwise stretch/lift the whole
+/// plant (roots and all) as if the water were pulling it out.
+pub fn land_plant_pose_y(bed_y: f32, blueprint: &Blueprint) -> f32 {
+    bed_y - blueprint_land_crown_y(blueprint) as f32 * MODULE_CELL_COLS
+}
+
+/// Crown on the column's solid bed (skips water / ice / snow caps).
+pub fn land_plant_pose_y_on(col: &Column, blueprint: &Blueprint) -> f32 {
+    land_plant_pose_y(col.climate_elevation(), blueprint)
 }
 
 /// Spawn / query helper — equilibrium if water exists, else sediment surface.
@@ -758,7 +767,7 @@ fn depth_for_pose(world: &World, blueprint: &Blueprint, x: f32, y_hint: f32) -> 
         // skips dry land when k > 0 — see find_clear_pose).
         return Some(col.surface_y - offset);
     }
-    Some(land_plant_pose_y(col.surface_y, blueprint))
+    Some(land_plant_pose_y_on(col, blueprint))
 }
 
 /// Find a clear pose, scanning **outward horizontally** first.
@@ -1015,9 +1024,9 @@ impl AgentStore {
             }
             return Some(col.surface_y - offset);
         }
-        // Land plant: nucleus (crown) on the surface — not pose at surface
-        // with mid-canvas module Y still added (that floated the whole body).
-        Some(land_plant_pose_y(col.surface_y, blueprint))
+        // Land plant: nucleus (crown) on the solid bed — never on the
+        // free-water top (flood waves must not stretch rooted plants).
+        Some(land_plant_pose_y_on(col, blueprint))
     }
 
     /// Spawn a blueprint-backed organism near column `world_x`.
@@ -1250,7 +1259,7 @@ impl AgentStore {
                     let offset = blueprint_body_top_offset(&body.blueprint);
                     step_buoyancy(&mut pose.y, buoy, col, bias, offset);
                 } else {
-                    pose.y = land_plant_pose_y(col.surface_y, &body.blueprint);
+                    pose.y = land_plant_pose_y_on(col, &body.blueprint);
                     buoy.vel_y = 0.0;
                     buoy.last_water_top = None;
                 }
@@ -1620,8 +1629,8 @@ impl AgentStore {
                     }
                 }
             } else {
-                // Dry land: crown on the ground (same anchor as living plants).
-                pose.y = land_plant_pose_y(col.surface_y, &body.blueprint);
+                // Dry land: crown on the solid bed (same anchor as living plants).
+                pose.y = land_plant_pose_y_on(col, &body.blueprint);
                 buoy.vel_y = 0.0;
             }
 
@@ -2237,10 +2246,10 @@ mod tests {
             .spawn_from_blueprint(&world, 2, bp, 80.0)
             .expect("spawn plant");
         let y0 = store.ecs.get::<&Pose>(e).unwrap().y;
-        let surface = world.column_at(2).unwrap().surface_y;
+        let bed = world.column_at(2).unwrap().climate_elevation();
         assert!(
-            (y0 - surface).abs() < 0.05,
-            "plant feet on ground y0={y0} surface={surface}"
+            (y0 - bed).abs() < 0.05,
+            "plant crown on solid bed y0={y0} bed={bed}"
         );
         let moist_before = world.column_at(2).unwrap().moisture;
         // Fractional sip needs ~1/ROOT_SIP ticks to take 1 kg; run long enough
@@ -2261,6 +2270,41 @@ mod tests {
         let info = store.inspect_organism(e).expect("plant still alive");
         assert!(!info.is_plankton);
         assert!(info.roots >= 1);
+    }
+
+    #[test]
+    fn flood_wave_does_not_stretch_land_plant() {
+        let mut world = World::new(17);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(
+                &world,
+                10,
+                Blueprint::minimal_plant(Genome::default()),
+                80.0,
+            )
+            .expect("plant");
+        let y_before = store.ecs.get::<&Pose>(e).unwrap().y;
+        let bed_before = world.column_at(10).unwrap().climate_elevation();
+        // Flood wave — raises surface_y a lot, bed unchanged.
+        if let Some(col) = world.column_at_mut(10) {
+            col.deposit_to_top(MaterialId::Water, 8_000, 0);
+        }
+        let surface_after = world.column_at(10).unwrap().surface_y;
+        assert!(
+            surface_after > bed_before + 1.0,
+            "flood should lift free surface"
+        );
+        for t in 0..5 {
+            store.step_organisms(&mut world, t);
+        }
+        let y_after = store.ecs.get::<&Pose>(e).unwrap().y;
+        assert!(
+            (y_after - y_before).abs() < 0.05,
+            "rooted plant must stay on the bed through a flood wave (before={y_before} after={y_after} surface={surface_after})"
+        );
     }
 
     #[test]
