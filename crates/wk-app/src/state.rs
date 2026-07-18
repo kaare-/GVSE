@@ -53,6 +53,10 @@ pub struct AppState {
     settings_night_minutes: f32,
     settings_max_clouds: f32,
     settings_cloud_spawn_secs: f32,
+    /// Per-habit pop caps (sliders need `&mut f32`).
+    settings_cap_algae: f32,
+    settings_cap_plant: f32,
+    settings_cap_fungus: f32,
     pub editor: CreatureEditor,
 }
 
@@ -105,6 +109,7 @@ impl AppState {
         let settings_night_minutes = world.climate.night_length_ticks as f32 / 60.0 / 60.0;
         let settings_max_clouds = world.weather.max_clouds as f32;
         let settings_cloud_spawn_secs = world.weather.cloud_spawn_interval_ticks as f32 / 60.0;
+        let defaults = wk_sim::PopCaps::default();
         Self {
             world,
             sim,
@@ -126,6 +131,9 @@ impl AppState {
             settings_night_minutes,
             settings_max_clouds,
             settings_cloud_spawn_secs,
+            settings_cap_algae: defaults.algae as f32,
+            settings_cap_plant: defaults.plant as f32,
+            settings_cap_fungus: defaults.fungus as f32,
             editor: CreatureEditor::default(),
         }
     }
@@ -448,9 +456,65 @@ impl AppState {
         use macroquad::hash;
         use macroquad::ui::{root_ui, widgets};
 
-        widgets::Window::new(hash!(), vec2(20.0, 20.0), vec2(360.0, 480.0))
+        let (n_algae, n_plant, n_fungus) = self.sim.agents.count_by_habit();
+        let max_org = wk_sim::MAX_ORGANISMS as f32;
+        widgets::Window::new(hash!(), vec2(20.0, 20.0), vec2(380.0, 560.0))
             .label("Settings (Tab to close)")
             .ui(&mut root_ui(), |ui| {
+                ui.tree_node(hash!(), "Population caps", |ui| {
+                    ui.label(
+                        None,
+                        "Split soft caps by habit so blooms / forests / fungi can be tuned apart.",
+                    );
+                    ui.slider(
+                        hash!(),
+                        "Algae (atom / plankton)",
+                        0.0f32..max_org,
+                        &mut self.settings_cap_algae,
+                    );
+                    ui.label(
+                        None,
+                        &format!(
+                            "  living {n_algae} / {}",
+                            self.settings_cap_algae.round() as usize
+                        ),
+                    );
+                    ui.slider(
+                        hash!(),
+                        "Plants (roots / stems)",
+                        0.0f32..max_org,
+                        &mut self.settings_cap_plant,
+                    );
+                    ui.label(
+                        None,
+                        &format!(
+                            "  living {n_plant} / {}",
+                            self.settings_cap_plant.round() as usize
+                        ),
+                    );
+                    ui.slider(
+                        hash!(),
+                        "Fungi (digest / hypha)",
+                        0.0f32..max_org,
+                        &mut self.settings_cap_fungus,
+                    );
+                    ui.label(
+                        None,
+                        &format!(
+                            "  living {n_fungus} / {}",
+                            self.settings_cap_fungus.round() as usize
+                        ),
+                    );
+                    ui.label(
+                        None,
+                        &format!(
+                            "Total living {} · hard ceiling {}",
+                            n_algae + n_plant + n_fungus,
+                            wk_sim::MAX_ORGANISMS
+                        ),
+                    );
+                });
+                ui.separator();
                 ui.tree_node(hash!(), "Day / night / temperature", |ui| {
                     ui.slider(hash!(), "Day length (min)", 0.5f32..60.0, &mut self.settings_day_minutes);
                     ui.slider(hash!(), "Night length (min)", 0.5f32..60.0, &mut self.settings_night_minutes);
@@ -544,5 +608,11 @@ impl AppState {
             (self.settings_day_minutes.max(0.1) * 60.0 * 60.0) as u64;
         self.world.climate.night_length_ticks =
             (self.settings_night_minutes.max(0.1) * 60.0 * 60.0) as u64;
+
+        self.sim.agents.pop_caps = wk_sim::PopCaps {
+            algae: self.settings_cap_algae.round().clamp(0.0, max_org) as usize,
+            plant: self.settings_cap_plant.round().clamp(0.0, max_org) as usize,
+            fungus: self.settings_cap_fungus.round().clamp(0.0, max_org) as usize,
+        };
     }
 }
