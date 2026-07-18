@@ -46,11 +46,17 @@ pub const DARK_ENDURANCE_TICKS: f32 = 42_000.0;
 /// Night / low-light upkeep multiplier (dormant respiration).
 const NIGHT_UPKEEP_MULT: f32 = 0.4;
 
-/// kg dumped into `dead_biomass` when a corpse finishes sinking.
-pub const DEATH_LITTER_KG: i64 = 8;
+/// kg of ecology litter (`dead_biomass`) per module when a corpse dissolves.
+/// Small — nutrients recycle; the bulk of the body becomes Organic sediment.
+pub const DEATH_LITTER_KG_PER_MODULE: i64 = 4;
 
-/// Ticks a corpse rests on the bed before dissolving into litter.
-pub const CORPSE_SETTLE_TICKS: u32 = 450;
+/// kg of [`MaterialId::Organic`] sediment deposited per module on dissolve.
+/// Dense enough (see material table) to sink under water and build bed ooze.
+pub const DEATH_ORGANIC_KG_PER_MODULE: i64 = 40;
+
+/// Ticks a corpse rests on the bed before becoming sediment (~6–7 min at 60 Hz).
+/// Long enough that death blooms leave a visible carpet of bodies first.
+pub const CORPSE_SETTLE_TICKS: u32 = 24_000;
 
 /// Floater depth below the live free-water surface (metres) when bias ≈ 0.
 pub const FLOAT_DEPTH_M: f32 = 1.0;
@@ -97,7 +103,8 @@ const SIM_DAY_TICKS: f32 = 12.0 * 3_600.0 + 10.0 * 3_600.0; // 79_200
 /// Nominal adult life at a reference genome (~3 sim-days for default algae).
 const BASE_LIFE_SIM_DAYS: f32 = 3.0;
 
-/// Dead body: sinks to the water bed, then dissolves into `dead_biomass`.
+/// Dead body: sinks to the water bed, lingers, then becomes Organic sediment
+/// (plus a little ecology litter for nutrient recycle).
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Corpse {
     pub ticks: u32,
@@ -1267,14 +1274,16 @@ impl AgentStore {
 
         // After buoyancy + births: separate any overlapping footprints.
         resolve_collisions(self, world);
-        self.step_corpses(world);
+        self.step_corpses(world, tick);
 
         self.wake_host_columns(world);
     }
 
-    /// Sink corpses to the bed; dissolve into litter after settling.
-    fn step_corpses(&mut self, world: &mut World) {
-        let mut dissolve: Vec<(Entity, i32)> = Vec::new();
+    /// Sink corpses to the bed; after a long settle, deposit Organic sediment
+    /// (and a little ecology litter). Bodies stay visible for minutes so
+    /// blooms leave a carpet before becoming bed ooze.
+    fn step_corpses(&mut self, world: &mut World, tick: u64) {
+        let mut dissolve: Vec<(Entity, i32, usize)> = Vec::new();
         for (e, (pose, buoy, corpse, body)) in self
             .ecs
             .query::<(&mut Pose, &mut BuoyancyState, &mut Corpse, &ModuleBody)>()
@@ -1282,8 +1291,9 @@ impl AgentStore {
         {
             corpse.ticks = corpse.ticks.saturating_add(1);
             let wx = pose.world_x();
+            let n_modules = body.blueprint.modules.len().max(1);
             let Some(col) = world.column_at(wx) else {
-                dissolve.push((e, wx));
+                dissolve.push((e, wx, n_modules));
                 continue;
             };
             // Heavy sinker — ignore living buoyancy gene.
@@ -1304,20 +1314,33 @@ impl AgentStore {
                 buoy.vel_y = 0.0;
                 corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
                 if corpse.settled_ticks >= CORPSE_SETTLE_TICKS {
-                    dissolve.push((e, wx));
+                    dissolve.push((e, wx, n_modules));
                 }
             } else {
                 corpse.settled_ticks = 0;
             }
         }
 
-        for (e, wx) in dissolve {
+        for (e, wx, n_modules) in dissolve {
+            let n = n_modules.max(1) as i64;
+            let organic_kg = DEATH_ORGANIC_KG_PER_MODULE.saturating_mul(n);
+            let litter_kg = DEATH_LITTER_KG_PER_MODULE.saturating_mul(n);
             if let Some(col) = world.column_at_mut(wx) {
+                // Stratigraphic Organic — denser than water, sinks to the bed.
+                if organic_kg > 0 {
+                    col.deposit_to_top(MaterialId::Organic, organic_kg, tick);
+                    col.settle_by_density(tick);
+                }
                 col.ecology.dead_biomass =
-                    col.ecology.dead_biomass.saturating_add(DEATH_LITTER_KG);
+                    col.ecology.dead_biomass.saturating_add(litter_kg);
+                col.activity = Activity::HydrologyActive;
             }
-            world.mass_audit.biomass_grow_total =
-                world.mass_audit.biomass_grow_total.saturating_add(DEATH_LITTER_KG);
+            // Creatures aren't in the mass audit; booking the deposit as
+            // biomass growth keeps conservation bookkeeping balanced.
+            world.mass_audit.biomass_grow_total = world
+                .mass_audit
+                .biomass_grow_total
+                .saturating_add(organic_kg.saturating_add(litter_kg));
             let _ = self.ecs.despawn(e);
         }
     }
@@ -1632,13 +1655,68 @@ mod tests {
             },
         );
         for _ in 0..40 {
-            store.step_corpses(&mut world);
+            store.step_corpses(&mut world, 0);
         }
         assert!(store.ecs.get::<&Corpse>(e).is_ok(), "corpse should remain");
         let y1 = store.ecs.get::<&Pose>(e).unwrap().y;
         assert!(y1 < y0 - 0.2, "corpse should sink (y0={y0} y1={y1})");
         assert_eq!(store.organism_count(), 0);
         assert_eq!(store.corpse_count(), 1);
+    }
+
+    #[test]
+    fn corpse_becomes_organic_sediment_after_settle() {
+        let mut world = world_with_water();
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(&world, 8, Blueprint::atom(Genome::default()), 50.0)
+            .expect("spawn");
+        let _ = store.ecs.remove_one::<Organism>(e);
+        let _ = store.ecs.insert_one(
+            e,
+            Corpse {
+                ticks: 0,
+                settled_ticks: CORPSE_SETTLE_TICKS, // already rested
+            },
+        );
+        // Park on the bed so dissolve fires this tick.
+        if let (Ok(mut pose), Some(col)) = (store.ecs.get::<&mut Pose>(e), world.column_at(8)) {
+            let (_top, bed) = water_band(col).unwrap();
+            pose.y = bed;
+        }
+        let organic_before = world
+            .column_at(8)
+            .map(|c| {
+                (0..c.layer_count as usize)
+                    .filter(|&i| c.layers[i].material == MaterialId::Organic)
+                    .map(|i| c.layers[i].thickness)
+                    .sum::<i64>()
+            })
+            .unwrap_or(0);
+        store.step_corpses(&mut world, 99);
+        assert_eq!(store.corpse_count(), 0, "corpse should have dissolved");
+        let organic_after = world
+            .column_at(8)
+            .map(|c| {
+                (0..c.layer_count as usize)
+                    .filter(|&i| c.layers[i].material == MaterialId::Organic)
+                    .map(|i| c.layers[i].thickness)
+                    .sum::<i64>()
+            })
+            .unwrap_or(0);
+        let expected = DEATH_ORGANIC_KG_PER_MODULE * 2; // Atom = nucleus + photosystem
+        assert!(
+            organic_after >= organic_before + expected,
+            "expected Organic sediment ≥{expected}, before={organic_before} after={organic_after}"
+        );
+        // Organic must sit under water (denser waterlogged detritus).
+        let col = world.column_at(8).unwrap();
+        let top = col.layers[0].material;
+        assert_eq!(top, MaterialId::Water, "water should remain on top");
+        assert!(
+            (0..col.layer_count as usize).any(|i| col.layers[i].material == MaterialId::Organic),
+            "organic layer present in stack"
+        );
     }
 
     #[test]
