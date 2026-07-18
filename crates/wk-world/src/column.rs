@@ -446,11 +446,12 @@ impl Column {
         volume / area
     }
 
-    /// Elevation to use for temperature/climate purposes. Under the
-    /// unified material model, snow and water are stratigraphic layers
-    /// with the correct density, so `surface_y` already reflects the
-    /// natural terrain height — no more "subtract snow layer height"
-    /// workaround was needed.
+    /// Solid-bed / geographic elevation (skips water, ice, snow caps).
+    ///
+    /// Used for biome classification, bathymetry, and landform logic — not
+    /// for ambient air/water-skin temperature. Deep-ocean beds sit far below
+    /// the capped thermal field; sampling temperature there clamps to the
+    /// geothermal Dirichlet (~55 °C) and reads as "boiling ocean".
     pub fn climate_elevation(&self) -> f32 {
         // Skip past any weather deposits (water/ice/snow) to expose the
         // permanent geographic elevation. A puddle on top of a peak
@@ -469,6 +470,19 @@ impl Column {
             }
         }
         y
+    }
+
+    /// Elevation for near-surface ambient temperature (HUD, freeze/thaw,
+    /// ecology comfort). Uses the free surface when water or ice is on
+    /// top so deep ocean doesn't report geothermal heat from the bed;
+    /// snow-only / bare ground still use [`Self::climate_elevation`] so a
+    /// thickening snowpack doesn't self-feed via lapse rate.
+    pub fn ambient_elevation(&self) -> f32 {
+        if self.top_water_mass() > 0 || self.top_ice_mass() > 0 {
+            self.surface_y
+        } else {
+            self.climate_elevation()
+        }
     }
 
     /// Elevation of the groundwater table: the topmost porous solid

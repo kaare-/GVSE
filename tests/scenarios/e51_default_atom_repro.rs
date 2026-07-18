@@ -84,3 +84,58 @@ fn e51a_default_atom_fissions_in_app_ocean() {
     );
     assert!(elapsed.as_secs() < 60, "E51a perf: {:?}", elapsed);
 }
+
+#[test]
+fn e51b_deep_ocean_ambient_not_geothermal() {
+    // Abyssal sand bed under a full ocean column: solid bed sits below the
+    // thermal field floor (sea − 100 m). Sampling climate_elevation there
+    // clamps to the geothermal Dirichlet (55°C) — the "boiling next to
+    // ice" HUD bug. Ambient must use the free surface instead.
+    let mut world = World::new(9052);
+    world.sea_level = 12.0;
+    world.rain_enabled = false;
+    world.weather.weather_enabled = false;
+    world.geothermal_bottom_c = 55.0;
+    world.climate.base_temp_c = 0.0;
+    world.climate.day_night_amplitude_c = 0.0;
+    let bed_y = -200.0;
+    for c in -1..=1 {
+        world.insert_chunk(generate_flat_sand(c, -900.0, bed_y));
+    }
+    let sea = world.sea_level;
+    for x in -64..128 {
+        if let Some(col) = world.column_at_mut(x) {
+            col.moisture = col.moisture_cap();
+            let need = ((sea - bed_y).max(1.0) * 250.0) as i64;
+            col.deposit_to_top(MaterialId::Water, need, 0);
+        }
+    }
+    world.wake_all();
+    world.enable_thermal_fields();
+
+    let wx = 32;
+    let col = world.column_at(wx).expect("column");
+    let bed = col.climate_elevation();
+    let skin = col.ambient_elevation();
+    assert!(
+        bed < world.sea_level - 100.0,
+        "expected abyssal bed below field floor, bed={bed:.1}"
+    );
+    assert!(
+        (skin - col.surface_y).abs() < 0.01,
+        "water column ambient should be the free surface"
+    );
+
+    let bed_t = world.temperature_at_point(wx, bed, 0);
+    let skin_t = world.temperature_at_point(wx, skin, 0);
+
+    assert!(
+        (bed_t - world.geothermal_bottom_c).abs() < 5.0,
+        "bed sample should hit geothermal clamp, got {bed_t:.1}"
+    );
+    assert!(
+        skin_t < 30.0,
+        "free-surface ocean must not read geothermal, got {skin_t:.1}"
+    );
+    eprintln!("E51b: bed={bed:.1}m → {bed_t:.1}C; skin={skin:.1}m → {skin_t:.1}C");
+}

@@ -27,7 +27,11 @@ pub fn run_phase_change(world: &mut World, tick: u64) {
             if mass_here <= 0 {
                 continue;
             }
-            let elev = col.climate_elevation();
+            // Sample the free surface / ice skin — not the solid bed.
+            // Deep-ocean climate_elevation sits below the thermal-field
+            // floor and would clamp to geothermal (~55°C), so water never
+            // froze next to an iced shelf column that read as cold.
+            let elev = col.ambient_elevation();
             let temp = if let Some(thermal) = &chunk.thermal {
                 let x_m = (base + i as i32) as f32 * SAMPLE_WIDTH_M;
                 thermal.0.sample_bilinear(x_m, elev)

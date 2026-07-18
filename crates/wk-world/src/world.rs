@@ -968,7 +968,7 @@ impl World {
                     .collect();
                 let temperature_c = self.temperature_at_point(
                     wx,
-                    col.climate_elevation(),
+                    col.ambient_elevation(),
                     tick,
                 );
                 let temp_column = if overlay.mode == OverlayMode::TemperatureField {

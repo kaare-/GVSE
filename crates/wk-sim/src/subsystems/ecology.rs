@@ -68,7 +68,9 @@ pub fn run_ecology(world: &mut World, tick: u64) {
                 let col = &chunk.columns[i];
                 (
                     col.activity,
-                    col.climate_elevation(),
+                    // Near-surface skin — not the solid bed (deep ocean
+                    // beds clamp to geothermal on the thermal grid).
+                    col.ambient_elevation(),
                     col.moisture,
                     col.moisture_cap(),
                     col.ecology,
