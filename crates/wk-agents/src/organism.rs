@@ -130,6 +130,8 @@ pub struct OrganismInspect {
     pub genome: Genome,
     pub module_count: usize,
     pub photosystems: usize,
+    pub roots: usize,
+    pub stems: usize,
     pub is_plankton: bool,
     pub dead: bool,
     /// When dead: `(settled_ticks, CORPSE_SETTLE_TICKS)` while resting on bed/land.
@@ -470,6 +472,10 @@ pub fn mutate_organism(
     g.buoyancy_bias = jitter(g.buoyancy_bias, 0.0, 1.0);
     g.temp_optimum = jitter(g.temp_optimum, -5.0, 40.0);
     g.temp_width = jitter(g.temp_width, 4.0, 25.0);
+    g.root_depth_bias = jitter(g.root_depth_bias, 0.0, 1.0);
+    g.alloc_stem = jitter(g.alloc_stem, 0.0, 1.0);
+    g.alloc_leaf = jitter(g.alloc_leaf, 0.0, 1.0);
+    g.alloc_root = jitter(g.alloc_root, 0.0, 1.0);
     g
 }
 
@@ -1041,6 +1047,8 @@ impl AgentStore {
             genome,
             module_count: body.blueprint.modules.len(),
             photosystems: body.photosystem_count(),
+            roots: body.blueprint.root_count(),
+            stems: body.blueprint.stem_count(),
             is_plankton: body.blueprint.is_plankton(),
             dead,
             corpse_settle,
@@ -1077,7 +1085,7 @@ impl AgentStore {
                 &mut BuoyancyState,
                 &mut Energy,
                 &Genome,
-                &ModuleBody,
+                &mut ModuleBody,
                 &mut Lineage,
                 &Organism,
             )>()
@@ -1085,6 +1093,7 @@ impl AgentStore {
         {
             let wx = pose.world_x();
             let n_photo = body.photosystem_count().max(1) as f32;
+            let n_roots = body.blueprint.root_count().max(1) as f32;
             let active = circadian_active(genome, phase);
 
             lineage.age_ticks = lineage.age_ticks.saturating_add(1);
@@ -1097,14 +1106,20 @@ impl AgentStore {
             let temp_c = world.temperature_at_point(wx, pose.y, tick);
             let comfort = temp_comfort_factor(temp_c, genome);
             let plankton = body.blueprint.is_plankton();
+            let rooted = body.blueprint.is_rooted();
 
             // Environment gates: water required, ice / freeze kills plankton.
-            let (in_water, iced, water_co2) = if let Some(col) = world.column_at(wx) {
+            let (in_water, iced, water_co2, nutrient) = if let Some(col) = world.column_at(wx) {
                 let wet = water_band(col).is_some();
                 let ice = col.top_ice_mass() > 0;
-                (wet, ice, col.ecology.water_co2)
+                (
+                    wet,
+                    ice,
+                    col.ecology.water_co2,
+                    crate::root::column_nutrient_factor(col),
+                )
             } else {
-                (false, false, 0.0)
+                (false, false, 0.0, 0.2)
             };
             // Plankton need free water; ice around them is lethal.
             if plankton && (!in_water || iced) {
@@ -1139,15 +1154,91 @@ impl AgentStore {
                                 (col.ecology.water_o2 + gain * O2_PER_ENERGY).clamp(0.0, 3.0);
                         }
                     }
+                } else if rooted {
+                    // Land plants: photo gated by soil / dissolved nutrients.
+                    gain *= nutrient.clamp(0.05, 1.6);
                 }
                 energy.current = (energy.current + gain).min(energy.max);
             }
 
+            // Roots drink moisture from host + adjacent columns.
+            if rooted && active {
+                let moist = crate::root::adjacent_moisture_frac(world, wx);
+                let budget = (1.5 + n_roots * 1.2).round() as i64;
+                let drunk = crate::root::drink_adjacent(world, wx, budget);
+                if drunk > 0 {
+                    let sip = drunk as f32 * crate::root::ROOT_WATER_ENERGY * nutrient.max(0.2);
+                    energy.current = (energy.current + sip).min(energy.max);
+                }
+                if moist < 0.08 {
+                    energy.current -= crate::root::ROOT_DROUGHT_DRAIN;
+                }
+            }
+
             let upkeep = organism_upkeep(genome, energy.max, l0, n_photo);
-            energy.current -= upkeep;
+            // Root tissue has a small upkeep tax (deeper trees cost more).
+            let root_tax = if rooted {
+                0.02 * body.blueprint.root_count() as f32
+            } else {
+                0.0
+            };
+            energy.current -= upkeep + root_tax;
             if energy.current <= 0.0 {
                 deaths.push((e, wx));
                 continue;
+            }
+
+            // Surplas → elongate roots / shoots (material-costed bore).
+            if rooted && active && tick % crate::root::ROOT_GROW_PERIOD == (e.id() as u64 % crate::root::ROOT_GROW_PERIOD)
+            {
+                let (_, _, w_root) = genome.alloc_weights();
+                if w_root >= 0.2 {
+                    let _ = crate::root::try_elongate_root(
+                        &mut body.blueprint,
+                        energy,
+                        world,
+                        pose.x,
+                        pose.y,
+                        genome,
+                        world.seed,
+                        tick,
+                        e.id(),
+                    );
+                } else {
+                    let _ = crate::root::try_grow_shoot(
+                        &mut body.blueprint,
+                        energy,
+                        genome,
+                        world.seed,
+                        tick,
+                        e.id(),
+                    );
+                }
+                // Occasional opposite allocation so plants aren't pure roots.
+                if tick % (crate::root::ROOT_GROW_PERIOD * 3)
+                    == (e.id() as u64 % (crate::root::ROOT_GROW_PERIOD * 3))
+                {
+                    let _ = crate::root::try_grow_shoot(
+                        &mut body.blueprint,
+                        energy,
+                        genome,
+                        world.seed,
+                        tick,
+                        e.id(),
+                    );
+                }
+            }
+
+            // Coarse ecology feedback from live modules.
+            if rooted {
+                if let Some(col) = world.column_at_mut(wx) {
+                    let roots = body.blueprint.root_count() as f32;
+                    let leaves = body.photosystem_count() as f32;
+                    col.ecology.root_density =
+                        (col.ecology.root_density.max(0.05) + roots * 0.04).clamp(0.0, 1.0);
+                    col.ecology.leaf_area =
+                        (col.ecology.leaf_area.max(0.05) + leaves * 0.05).clamp(0.0, 1.0);
+                }
             }
 
             let phase_id = e.id() as u64 % REPRO_PERIOD;
@@ -1859,6 +1950,47 @@ mod tests {
             MaterialId::Organic,
             "organic should cap the dry land stack"
         );
+    }
+
+    #[test]
+    fn land_plant_spawns_on_surface_and_drinks_moisture() {
+        let mut world = World::new(3);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        if let Some(col) = world.column_at_mut(2) {
+            col.moisture = 800;
+            col.ecology.nutrient = 0.6;
+            col.deposit_to_top(MaterialId::Organic, 300, 0);
+        }
+        let mut store = AgentStore::new();
+        let bp = Blueprint::minimal_plant(Genome {
+            alloc_root: 0.7,
+            root_depth_bias: 0.8,
+            ..Genome::default()
+        });
+        assert!(bp.is_rooted());
+        assert!(!bp.is_plankton());
+        let e = store
+            .spawn_from_blueprint(&world, 2, bp, 80.0)
+            .expect("spawn plant");
+        let y0 = store.ecs.get::<&Pose>(e).unwrap().y;
+        let surface = world.column_at(2).unwrap().surface_y;
+        assert!(
+            (y0 - surface).abs() < 0.05,
+            "plant feet on ground y0={y0} surface={surface}"
+        );
+        let moist_before = world.column_at(2).unwrap().moisture;
+        for t in 0..120 {
+            store.step_organisms(&mut world, t);
+        }
+        let moist_after = world.column_at(2).unwrap().moisture;
+        assert!(
+            moist_after < moist_before,
+            "roots should drink host moisture ({moist_before} → {moist_after})"
+        );
+        let info = store.inspect_organism(e).expect("plant still alive");
+        assert!(!info.is_plankton);
+        assert!(info.roots >= 1);
     }
 
     #[test]

@@ -47,6 +47,14 @@ impl ModuleId {
         matches!(self, ModuleId::Nucleus | ModuleId::Photosystem)
     }
 
+    /// Set A + land-plant modules (Root / Stem).
+    pub fn set_d_paintable(self) -> bool {
+        matches!(
+            self,
+            ModuleId::Nucleus | ModuleId::Photosystem | ModuleId::Root | ModuleId::Stem
+        )
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             ModuleId::Nucleus => "Nucleus",

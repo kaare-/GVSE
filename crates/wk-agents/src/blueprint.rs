@@ -96,11 +96,76 @@ impl Blueprint {
             .count()
     }
 
+    pub fn root_count(&self) -> usize {
+        self.modules
+            .iter()
+            .filter(|m| m.module == ModuleId::Root)
+            .count()
+    }
+
+    pub fn stem_count(&self) -> usize {
+        self.modules
+            .iter()
+            .filter(|m| m.module == ModuleId::Stem)
+            .count()
+    }
+
     pub fn nucleus_count(&self) -> usize {
         self.modules
             .iter()
             .filter(|m| m.module == ModuleId::Nucleus)
             .count()
+    }
+
+    /// Minimal land plant (C): leaf + stem + nucleus crown + root anchor.
+    pub fn minimal_plant(genome: Genome) -> Self {
+        Self {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![
+                PlacedModule {
+                    x: 0,
+                    y: 3,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                },
+                PlacedModule {
+                    x: 1,
+                    y: 3,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                },
+                PlacedModule {
+                    x: 0,
+                    y: 2,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Stem,
+                },
+                PlacedModule {
+                    x: 0,
+                    y: 1,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Stem,
+                },
+                PlacedModule {
+                    x: 0,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Nucleus,
+                },
+                PlacedModule {
+                    x: 0,
+                    y: -1,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Root,
+                },
+            ],
+            wires: Vec::new(),
+            genome,
+            name: "plant".into(),
+            notes: "Set D minimal land plant".into(),
+        }
     }
 
     pub fn is_valid_atom(&self) -> bool {

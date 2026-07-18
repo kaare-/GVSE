@@ -762,6 +762,8 @@ fn draw_organism_inspector(
         "DEAD".into()
     } else if info.is_plankton {
         "plankton".into()
+    } else if info.roots > 0 || info.stems > 0 {
+        "land plant".into()
     } else {
         "rooted".into()
     };
@@ -779,6 +781,10 @@ fn draw_organism_inspector(
         format!(
             "energy={:.1}/{:.0}  mods={} photo={}",
             info.energy, info.energy_max, info.module_count, info.photosystems
+        ),
+        format!(
+            "roots={} stems={}  depth_bias={:.2}",
+            info.roots, info.stems, info.genome.root_depth_bias
         ),
         format!(
             "generation={}  clones={}",

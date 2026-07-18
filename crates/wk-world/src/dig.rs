@@ -1,13 +1,16 @@
-//! Burrow dig API (stage 9).
+//! Burrow dig API (stage 9) + root bore (Set D).
 //!
 //! Creatures (and tests) call [`World::dig`] to remove substrate mass,
 //! open or extend a `Void { origin: Burrow }`, and dump tailings on the
 //! surface. Spans wider than the roof material's `roof_span_max_m`
 //! collapse into an open trench.
+//!
+//! Living roots call [`World::root_bore`] to convert solid substrate into
+//! [`MaterialId::Organic`] in place (ghost-root prep for later fungi).
 
-use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
+use wk_material::{MaterialId, MaterialRegistry, MAX_LAYERS, SAMPLE_WIDTH_M};
 
-use crate::column::{Activity, VoidOrigin};
+use crate::column::{Activity, Layer, VoidOrigin};
 use crate::world::World;
 
 /// Outcome of a single [`World::dig`] call.
@@ -44,6 +47,41 @@ fn is_diggable(mat: MaterialId) -> bool {
             MaterialId::Bedrock | MaterialId::Water | MaterialId::Ice | MaterialId::Snow | MaterialId::Air
         )
         && MaterialRegistry::props(mat).erosion_resistance < u32::MAX
+}
+
+/// Energy multiplier to drive a root tip through `mat` (higher = harder).
+/// `None` = refuse (bedrock / fluids).
+pub fn root_penetrate_cost(mat: MaterialId) -> Option<f32> {
+    match mat {
+        MaterialId::Organic => Some(0.7),
+        MaterialId::Sand | MaterialId::Clay => Some(1.8),
+        MaterialId::Gravel => Some(2.6),
+        MaterialId::LooseRock | MaterialId::Limestone => Some(6.5),
+        MaterialId::Stone => Some(12.0),
+        MaterialId::Bedrock
+        | MaterialId::Water
+        | MaterialId::Ice
+        | MaterialId::Snow
+        | MaterialId::Air => None,
+    }
+}
+
+/// Outcome of a single [`World::root_bore`] call.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct RootBoreResult {
+    pub converted_kg: i64,
+    pub from_material: MaterialId,
+    pub refused: bool,
+}
+
+impl RootBoreResult {
+    fn refused() -> Self {
+        Self {
+            converted_kg: 0,
+            from_material: MaterialId::Sand,
+            refused: true,
+        }
+    }
 }
 
 /// Horizontal span (metres) of contiguous columns that have a void whose
@@ -226,6 +264,146 @@ impl World {
         }
         opened
     }
+
+    /// Solid material at absolute elevation `target_y`, if any.
+    pub fn material_at(&self, world_x: i32, target_y: f32) -> Option<MaterialId> {
+        let coord = Self::chunk_coord_for_world_x(world_x);
+        let bedrock = self.chunks.get(&coord)?.bedrock_y;
+        let col = self.column_at(world_x)?;
+        for li in 0..col.layer_count as usize {
+            let mat = col.layers[li].material;
+            if !mat.is_solid() {
+                continue;
+            }
+            let (top, bot) = col.layer_y_range(li, bedrock);
+            if target_y <= top + 1e-3 && target_y >= bot - 1e-3 {
+                return Some(mat);
+            }
+        }
+        None
+    }
+
+    /// Convert up to `volume_kg` of diggable solid at `target_y` into
+    /// [`MaterialId::Organic`] in place. No void, no surface dump — live
+    /// root tissue occupies the bore (fungi later open the cavity).
+    pub fn root_bore(&mut self, world_x: i32, target_y: f32, volume_kg: i64, tick: u64) -> RootBoreResult {
+        if volume_kg <= 0 {
+            return RootBoreResult::refused();
+        }
+        let coord = Self::chunk_coord_for_world_x(world_x);
+        let local = Self::local_x(world_x);
+        let bedrock = match self.chunks.get(&coord) {
+            Some(c) => c.bedrock_y,
+            None => return RootBoreResult::refused(),
+        };
+
+        let (layer_idx, material, take) = {
+            let Some(col) = self.column_at(world_x) else {
+                return RootBoreResult::refused();
+            };
+            let mut found = None;
+            for li in 0..col.layer_count as usize {
+                let mat = col.layers[li].material;
+                if !is_diggable(mat) || mat == MaterialId::Organic {
+                    // Already organic — nothing to convert; treat as free path.
+                    if mat == MaterialId::Organic {
+                        let (top, bot) = col.layer_y_range(li, bedrock);
+                        if target_y <= top + 1e-3 && target_y >= bot - 1e-3 {
+                            return RootBoreResult {
+                                converted_kg: 0,
+                                from_material: MaterialId::Organic,
+                                refused: false,
+                            };
+                        }
+                    }
+                    continue;
+                }
+                let (top, bot) = col.layer_y_range(li, bedrock);
+                if target_y <= top + 1e-3 && target_y >= bot - 1e-3 {
+                    let take = volume_kg.min(col.layers[li].thickness);
+                    if take > 0 {
+                        found = Some((li, mat, take));
+                    }
+                    break;
+                }
+            }
+            match found {
+                Some(v) => v,
+                None => return RootBoreResult::refused(),
+            }
+        };
+
+        let Some(chunk) = self.chunks.get_mut(&coord) else {
+            return RootBoreResult::refused();
+        };
+        let col = &mut chunk.columns[local];
+        if layer_idx >= col.layer_count as usize
+            || col.layers[layer_idx].material != material
+        {
+            return RootBoreResult::refused();
+        }
+        let take = take.min(col.layers[layer_idx].thickness);
+        if take <= 0 {
+            return RootBoreResult::refused();
+        }
+
+        // Peel mass from the host solid.
+        col.layers[layer_idx].thickness -= take;
+        col.layers[layer_idx].age_end = tick;
+        if col.layers[layer_idx].thickness <= 0 {
+            for j in layer_idx..(col.layer_count as usize).saturating_sub(1) {
+                col.layers[j] = col.layers[j + 1];
+            }
+            if col.layer_count > 0 {
+                col.layer_count -= 1;
+            }
+        }
+
+        // Insert / merge Organic at the same stratigraphic index.
+        let insert_at = layer_idx.min(col.layer_count as usize);
+        if insert_at < col.layer_count as usize
+            && col.layers[insert_at].material == MaterialId::Organic
+        {
+            col.layers[insert_at].thickness += take;
+            col.layers[insert_at].age_end = tick;
+        } else if insert_at > 0
+            && col.layers[insert_at - 1].material == MaterialId::Organic
+        {
+            col.layers[insert_at - 1].thickness += take;
+            col.layers[insert_at - 1].age_end = tick;
+        } else if (col.layer_count as usize) < MAX_LAYERS {
+            for i in (insert_at..col.layer_count as usize).rev() {
+                col.layers[i + 1] = col.layers[i];
+            }
+            col.layers[insert_at] = Layer {
+                material: MaterialId::Organic,
+                thickness: take,
+                age_start: tick,
+                age_end: tick,
+            };
+            col.layer_count += 1;
+        } else {
+            // Stack full — fold into the nearest organic or top solid.
+            if let Some(oi) = (0..col.layer_count as usize)
+                .find(|&i| col.layers[i].material == MaterialId::Organic)
+            {
+                col.layers[oi].thickness += take;
+                col.layers[oi].age_end = tick;
+            } else if col.layer_count > 0 {
+                col.layers[0].thickness += take;
+                col.layers[0].age_end = tick;
+            }
+        }
+
+        col.activity = Activity::HydrologyActive;
+        col.recompute_surface_y(bedrock);
+        // Mass conserved (solid → organic); no audit delta.
+        RootBoreResult {
+            converted_kg: take,
+            from_material: material,
+            refused: false,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -257,5 +435,45 @@ mod tests {
             .sum();
         assert_eq!(before_layers, after_layers);
         assert!(!col.voids.is_empty() || res.collapsed_to_trench);
+    }
+
+    #[test]
+    fn root_bore_converts_sand_to_organic_in_place() {
+        let mut world = World::new(7);
+        world.insert_chunk(generate_flat_sand(0, 0.0, 10.0));
+        let wx = 4;
+        let y = world.column_at(wx).unwrap().surface_y - 0.5;
+        let sand_before: i64 = {
+            let c = world.column_at(wx).unwrap();
+            (0..c.layer_count as usize)
+                .filter(|&i| c.layers[i].material == MaterialId::Sand)
+                .map(|i| c.layers[i].thickness)
+                .sum()
+        };
+        let res = world.root_bore(wx, y, 200, 10);
+        assert!(!res.refused, "bore should succeed");
+        assert_eq!(res.converted_kg, 200);
+        assert_eq!(res.from_material, MaterialId::Sand);
+        let col = world.column_at(wx).unwrap();
+        let organic: i64 = (0..col.layer_count as usize)
+            .filter(|&i| col.layers[i].material == MaterialId::Organic)
+            .map(|i| col.layers[i].thickness)
+            .sum();
+        let sand_after: i64 = (0..col.layer_count as usize)
+            .filter(|&i| col.layers[i].material == MaterialId::Sand)
+            .map(|i| col.layers[i].thickness)
+            .sum();
+        assert!(organic >= 200, "organic={organic}");
+        assert_eq!(sand_before - sand_after, 200);
+        assert!(col.voids.is_empty(), "live root bore must not open a void");
+    }
+
+    #[test]
+    fn stone_costs_more_to_penetrate_than_organic() {
+        let o = root_penetrate_cost(MaterialId::Organic).unwrap();
+        let s = root_penetrate_cost(MaterialId::Sand).unwrap();
+        let st = root_penetrate_cost(MaterialId::Stone).unwrap();
+        assert!(o < s && s < st);
+        assert!(root_penetrate_cost(MaterialId::Bedrock).is_none());
     }
 }

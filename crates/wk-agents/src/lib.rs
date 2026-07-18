@@ -10,6 +10,7 @@
 pub mod blueprint;
 pub mod module;
 pub mod organism;
+pub mod root;
 
 pub use blueprint::{Blueprint, PlacedModule, Wire, WireKind, BLUEPRINT_DIR};
 pub use module::{LaneId, ModuleId};
@@ -18,6 +19,7 @@ pub use organism::{
     temp_comfort_factor, Aabb, Corpse, Lineage, ModuleBody, Organism, OrganismInspect,
     MAX_ORGANISMS, MODULE_CELL_COLS, PHOTON_RATE, CO2_HALF_SAT, CO2_PER_ENERGY,
 };
+pub use root::{column_nutrient_factor, penetrate_cost, ROOT_ELONGATE_BASE_COST};
 
 use hecs::{Entity, World as EcsWorld};
 use serde::{Deserialize, Serialize};
@@ -109,6 +111,18 @@ pub struct Genome {
     /// Half-width of the comfort band (°C). Outside → slow / no repro.
     #[serde(default = "default_temp_width")]
     pub temp_width: f32,
+    /// Deep-dive bias for root elongation (0 = shallow sprawl, 1 = dive).
+    #[serde(default = "default_root_depth_bias")]
+    pub root_depth_bias: f32,
+    /// Surplus allocation toward stem growth (normalized with leaf/root).
+    #[serde(default = "default_alloc_stem")]
+    pub alloc_stem: f32,
+    /// Surplus allocation toward leaf (Photosystem) growth.
+    #[serde(default = "default_alloc_leaf")]
+    pub alloc_leaf: f32,
+    /// Surplus allocation toward root elongation.
+    #[serde(default = "default_alloc_root")]
+    pub alloc_root: f32,
 }
 
 fn default_metabolic_rate() -> f32 {
@@ -141,6 +155,18 @@ fn default_temp_width() -> f32 {
     // (see E46d).
     18.0
 }
+fn default_root_depth_bias() -> f32 {
+    0.55
+}
+fn default_alloc_stem() -> f32 {
+    0.25
+}
+fn default_alloc_leaf() -> f32 {
+    0.45
+}
+fn default_alloc_root() -> f32 {
+    0.30
+}
 
 impl Default for Genome {
     fn default() -> Self {
@@ -159,11 +185,24 @@ impl Default for Genome {
             buoyancy_bias: default_buoyancy_bias(),
             temp_optimum: default_temp_optimum(),
             temp_width: default_temp_width(),
+            root_depth_bias: default_root_depth_bias(),
+            alloc_stem: default_alloc_stem(),
+            alloc_leaf: default_alloc_leaf(),
+            alloc_root: default_alloc_root(),
         }
     }
 }
 
 impl Genome {
+    /// Normalized `(stem, leaf, root)` surplus weights (sum to 1).
+    pub fn alloc_weights(self) -> (f32, f32, f32) {
+        let s = self.alloc_stem.max(0.0);
+        let l = self.alloc_leaf.max(0.0);
+        let r = self.alloc_root.max(0.0);
+        let sum = (s + l + r).max(1e-6);
+        (s / sum, l / sum, r / sum)
+    }
+
     /// Deterministic per-trait mutation of `parent`.
     pub fn mutate(parent: Genome, world_seed: u64, tick: u64, parent_id: u32) -> Genome {
         let mut g = parent;
@@ -192,6 +231,10 @@ impl Genome {
         g.buoyancy_bias = jitter(g.buoyancy_bias, 0.0, 1.0);
         g.temp_optimum = jitter(g.temp_optimum, -5.0, 40.0);
         g.temp_width = jitter(g.temp_width, 4.0, 25.0);
+        g.root_depth_bias = jitter(g.root_depth_bias, 0.0, 1.0);
+        g.alloc_stem = jitter(g.alloc_stem, 0.0, 1.0);
+        g.alloc_leaf = jitter(g.alloc_leaf, 0.0, 1.0);
+        g.alloc_root = jitter(g.alloc_root, 0.0, 1.0);
         g
     }
 
@@ -212,6 +255,10 @@ impl Genome {
             || (self.buoyancy_bias - other.buoyancy_bias).abs() > EPS
             || (self.temp_optimum - other.temp_optimum).abs() > EPS
             || (self.temp_width - other.temp_width).abs() > EPS
+            || (self.root_depth_bias - other.root_depth_bias).abs() > EPS
+            || (self.alloc_stem - other.alloc_stem).abs() > EPS
+            || (self.alloc_leaf - other.alloc_leaf).abs() > EPS
+            || (self.alloc_root - other.alloc_root).abs() > EPS
     }
 }
 
