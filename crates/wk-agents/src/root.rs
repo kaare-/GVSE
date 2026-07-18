@@ -29,6 +29,12 @@ pub const ROOT_ELONGATE_BASE_COST: f32 = 2.4;
 pub const ROOT_BORE_KG: i64 = 40;
 /// Energy gained per kg of moisture drunk by roots.
 pub const ROOT_WATER_ENERGY: f32 = 0.035;
+/// Penetrate multiplier inside an open cavity (easy path, no bore).
+pub const ROOT_VOID_PENETRATE: f32 = 0.18;
+/// Score bonus for stepping into any cavity.
+pub const ROOT_VOID_SCORE_BONUS: f32 = 2.4;
+/// Extra score when the cavity already holds free water.
+pub const ROOT_WET_VOID_SCORE_BONUS: f32 = 1.6;
 /// Extra photo multiplier from rich organic substrate (on top of nutrient).
 pub const ORGANIC_SUBSTRATE_BONUS: f32 = 0.35;
 /// Soft stress drain while drying (moist below [`DROUGHT_STRESS_FRAC`]).
@@ -460,15 +466,25 @@ pub fn try_elongate_root(
             let Some(col) = world.column_at(cell_wx) else {
                 continue;
             };
-            let mat = world
-                .material_at(cell_wx, tip_y)
-                .or_else(|| {
-                    // Just below surface when tip is near ground.
-                    world.material_at(cell_wx, col.surface_y - 0.15)
-                })
-                .unwrap_or(MaterialId::Sand);
-            let Some(pen) = penetrate_cost(mat) else {
-                continue;
+            let in_void = elevation_in_void(col, tip_y);
+            let (pen, void_bonus) = if in_void {
+                let wet = col
+                    .void_index_at(tip_y)
+                    .map(|i| col.voids[i].fill_frac())
+                    .unwrap_or(0.0);
+                (
+                    ROOT_VOID_PENETRATE,
+                    ROOT_VOID_SCORE_BONUS + ROOT_WET_VOID_SCORE_BONUS * wet,
+                )
+            } else {
+                let mat = world
+                    .material_at(cell_wx, tip_y)
+                    .or_else(|| world.material_at(cell_wx, col.surface_y - 0.15))
+                    .unwrap_or(MaterialId::Sand);
+                let Some(pen) = penetrate_cost(mat) else {
+                    continue;
+                };
+                (pen, 0.0)
             };
             let cost = ROOT_ELONGATE_BASE_COST * pen;
             if energy.current < cost + 1.0 {
@@ -478,7 +494,11 @@ pub fn try_elongate_root(
             let moist = ((col.moisture.max(0) as f32) / cap).clamp(0.0, 1.5);
             let down = if dy < 0 { 1.0 } else { 0.0 };
             let lateral = if dx != 0 && dy == 0 { 0.35 } else { 0.0 };
-            let score = moist + depth_bias * down + (1.0 - depth_bias) * lateral - pen * 0.03;
+            let score = moist
+                + void_bonus
+                + depth_bias * down
+                + (1.0 - depth_bias) * lateral
+                - pen * 0.03;
             let better = best.map(|(s, ..)| score > s).unwrap_or(true);
             if better {
                 best = Some((score, nx, ny, cell_wx, cost));
@@ -505,6 +525,30 @@ pub fn try_elongate_root(
     };
 
     let tip_y = module_world_y(pose_y, ny);
+    let in_void = world
+        .column_at(cell_wx)
+        .map(|c| elevation_in_void(c, tip_y))
+        .unwrap_or(false);
+    if in_void {
+        // Cavities are free paths — no bore, cheap elongate.
+        let cost = ROOT_ELONGATE_BASE_COST * ROOT_VOID_PENETRATE;
+        if energy.current < cost {
+            return 0.0;
+        }
+        energy.current -= cost;
+        let lane = blueprint
+            .modules
+            .first()
+            .map(|m| m.lane)
+            .unwrap_or(LaneId::Mid);
+        blueprint.modules.push(PlacedModule {
+            x: nx,
+            y: ny,
+            lane,
+            module: ModuleId::Root,
+        });
+        return cost;
+    }
     let mat = world
         .material_at(cell_wx, tip_y)
         .unwrap_or(MaterialId::Sand);
@@ -677,6 +721,63 @@ mod tests {
             site.is_none(),
             "no sprout into drowned neighbours (got {site:?})"
         );
+    }
+
+    #[test]
+    fn roots_prefer_elongating_into_cavities() {
+        use wk_world::column::VoidOrigin;
+        let mut world = dry_land();
+        let surface = world.column_at(8).unwrap().surface_y;
+        // Cavity just below the crown so the first down-step enters it.
+        if let Some(col) = world.column_at_mut(8) {
+            col.moisture = col.moisture_cap();
+            col.grow_void_at(surface - 0.7, 1.2, MaterialId::Sand, VoidOrigin::Karst);
+            col.voids[0].water_mass = col.voids[0].capacity_kg() / 2;
+        }
+        let mut bp = Blueprint::minimal_plant(Genome {
+            alloc_root: 0.9,
+            alloc_stem: 0.05,
+            alloc_leaf: 0.05,
+            root_depth_bias: 0.9,
+            ..Genome::default()
+        });
+        let mut energy = Energy {
+            current: 80.0,
+            max: 80.0,
+        };
+        let genome = bp.genome;
+        let pose_y = land_plant_pose_y_for_test(surface, &bp);
+        let spent = try_elongate_root(
+            &mut bp,
+            &mut energy,
+            &mut world,
+            8.5,
+            pose_y,
+            &genome,
+            1,
+            0,
+            1,
+        );
+        assert!(spent > 0.0, "should elongate");
+        let new_root = bp
+            .modules
+            .iter()
+            .filter(|m| m.module == ModuleId::Root)
+            .min_by_key(|m| m.y)
+            .expect("root tip");
+        let tip_y = module_world_y(pose_y, new_root.y);
+        let in_void = world
+            .column_at(8)
+            .map(|c| elevation_in_void(c, tip_y))
+            .unwrap_or(false);
+        assert!(
+            in_void,
+            "new tip should enter the cavity (tip_y={tip_y}, surface={surface})"
+        );
+    }
+
+    fn land_plant_pose_y_for_test(surface: f32, bp: &Blueprint) -> f32 {
+        crate::organism::land_plant_pose_y(surface, bp)
     }
 
     #[test]

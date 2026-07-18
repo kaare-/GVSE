@@ -5,6 +5,10 @@ use wk_material::{MaterialId, MaterialRegistry, MAX_LAYERS, SAMPLE_WIDTH_M};
 /// most columns stay well below; keeps growth from runaway dissolution.
 pub const MAX_VOIDS: usize = 4;
 
+/// kg of free water per metre of void / column depth — must match
+/// `wk_sim::subsystems::shared::WATER_MASS_PER_METRE_DEPTH`.
+pub const VOID_WATER_KG_PER_M: f32 = 250.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Activity {
     Dormant,
@@ -51,6 +55,26 @@ impl Void {
     /// True when the void ceiling reaches (or breaches) the column surface.
     pub fn open_to_surface(self, surface_y: f32) -> bool {
         self.top_y >= surface_y - 0.05
+    }
+
+    /// Geometric free-water capacity (kg) for this cavity.
+    pub fn capacity_kg(self) -> i64 {
+        (self.height_m.max(0.0) * VOID_WATER_KG_PER_M).round() as i64
+    }
+
+    pub fn free_capacity_kg(self) -> i64 {
+        (self.capacity_kg() - self.water_mass.max(0)).max(0)
+    }
+
+    /// Fill fraction of geometric capacity, 0..1.
+    pub fn fill_frac(self) -> f32 {
+        let cap = self.capacity_kg().max(1) as f32;
+        (self.water_mass.max(0) as f32 / cap).clamp(0.0, 1.0)
+    }
+
+    /// True when elevation `y` lies inside this cavity.
+    pub fn contains_y(self, y: f32) -> bool {
+        y <= self.top_y + 1e-3 && y >= self.floor_y() - 1e-3 && self.height_m > 1e-4
     }
 }
 
@@ -1012,7 +1036,11 @@ impl Column {
             if remaining <= 0 {
                 break;
             }
-            let take = self.take_water_from_cap(per.min(remaining));
+            let free = self.voids[i].free_capacity_kg();
+            if free <= 0 {
+                continue;
+            }
+            let take = self.take_water_from_cap(per.min(remaining).min(free));
             if take <= 0 {
                 break;
             }
@@ -1020,6 +1048,86 @@ impl Column {
             self.voids[i].light = self.voids[i].light.max(220);
             remaining -= take;
             moved += take;
+        }
+        moved
+    }
+
+    /// First void index containing elevation `y`, if any.
+    pub fn void_index_at(&self, y: f32) -> Option<usize> {
+        self.voids.iter().position(|v| v.contains_y(y))
+    }
+
+    /// Move up to `mass` kg of already-accounted water into voids with
+    /// free capacity (no moisture/surface bookkeeping). Used for pore
+    /// overflow that would otherwise spring to the surface.
+    pub fn fill_voids_from_mass(&mut self, mass: i64) -> i64 {
+        if mass <= 0 || self.voids.is_empty() {
+            return 0;
+        }
+        let mut remaining = mass;
+        let mut moved = 0i64;
+        for v in &mut self.voids {
+            if remaining <= 0 {
+                break;
+            }
+            let free = v.free_capacity_kg();
+            if free <= 0 {
+                continue;
+            }
+            let take = remaining.min(free);
+            v.water_mass += take;
+            remaining -= take;
+            moved += take;
+        }
+        moved
+    }
+
+    /// Seep pore moisture into buried cavities when the water table
+    /// intersects them (or when the column is already quite wet).
+    /// Mass-conserving: `moisture` decreases, `void.water_mass` rises.
+    pub fn seep_moisture_into_voids(&mut self, max_kg: i64) -> i64 {
+        if max_kg <= 0 || self.voids.is_empty() {
+            return 0;
+        }
+        let cap = self.moisture_cap();
+        if cap <= 0 {
+            return 0;
+        }
+        // Leave a pore reserve so we don't empty the aquifer into one cave.
+        let reserve = ((cap as f32) * 0.20).round() as i64;
+        let available = self.moisture.saturating_sub(reserve.max(0));
+        if available <= 0 {
+            return 0;
+        }
+        let table = self.water_table_y();
+        let sat = (self.moisture as f32 / cap as f32).clamp(0.0, 1.0);
+        let mut remaining = max_kg.min(available);
+        let mut moved = 0i64;
+        for v in &mut self.voids {
+            if remaining <= 0 {
+                break;
+            }
+            if v.height_m <= 1e-4 {
+                continue;
+            }
+            // Table reaches into the cavity, or soils are wet enough for
+            // capillary drip into the roof crack.
+            let intersects = table > v.floor_y() + 0.05;
+            if !intersects && sat < 0.30 {
+                continue;
+            }
+            let free = v.free_capacity_kg();
+            if free <= 0 {
+                continue;
+            }
+            let take = remaining.min(free);
+            v.water_mass += take;
+            remaining -= take;
+            moved += take;
+        }
+        if moved > 0 {
+            self.moisture = (self.moisture - moved).max(0);
+            self.activity = Activity::HydrologyActive;
         }
         moved
     }
