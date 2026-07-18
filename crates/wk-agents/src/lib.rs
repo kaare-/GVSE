@@ -22,8 +22,9 @@ pub use organism::{
     CO2_HALF_SAT, CO2_PER_ENERGY,
 };
 pub use root::{
-    column_is_plantable, column_nutrient_factor, penetrate_cost, plant_is_anchored,
-    DROUGHT_HIBERNATE_MAX_TICKS, ROOT_ELONGATE_BASE_COST,
+    column_is_plantable, column_is_plantable_for_reach, column_nutrient_factor, penetrate_cost,
+    plant_is_anchored, root_reach_m, DROUGHT_HIBERNATE_MAX_TICKS, ROOT_ELONGATE_BASE_COST,
+    SHALLOW_PLANT_WATER_M,
 };
 pub use shade::{effective_photo_light, CanopyIndex, SHADE_RADIUS};
 

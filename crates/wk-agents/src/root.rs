@@ -24,6 +24,10 @@ pub const ROOT_SPROUT_MAX_DIST: i32 = 6;
 pub const ROOT_SPROUT_MIN_MOIST_FRAC: f32 = 0.02;
 /// Neighbour wall height (m) that makes a notch unplantable (embedded look).
 pub const PLANTABLE_WALL_DROP_M: f32 = 6.0;
+/// Standing water shallower than this is always plantable (wade / mudflat).
+pub const SHALLOW_PLANT_WATER_M: f32 = 0.5;
+/// Hard cap — ocean trenches stay unplantable even with absurd root paint.
+pub const MAX_PLANT_WATER_M: f32 = 8.0;
 
 /// Per-root energy drain / tick. Must stay tiny vs photo (~0.15/tick):
 /// the old `0.015` bankrupted any tree with ≥3 roots over a default night
@@ -170,13 +174,14 @@ pub fn adjacent_moisture_frac(world: &World, wx: i32) -> f32 {
 
 /// Gentle sip of **pore moisture** from host + adjacent columns.
 ///
-/// Does not touch standing lake/sea water (`drink_water` would vacuum a
-/// free surface). Leaves ~40% of pore capacity so recharge wins.
+/// Prefers pore water (leaves ~40% capacity so recharge wins). If the
+/// budget is still open, takes a tiny standing-water sip — reed / mangrove
+/// payoff when roots reach a wet column without flash-draining lakes.
 pub fn drink_adjacent(world: &mut World, wx: i32, budget_kg: i64) -> i64 {
     drink_from_hosts(world, &[wx], budget_kg)
 }
 
-/// Sip pore moisture from a set of host columns (each ±1 neighbour).
+/// Sip pore moisture (then a trickle of standing water) from host columns.
 ///
 /// Used by genet-sharing ramets so a dry sucker can drink through a
 /// wetter sibling's rhizome patch. Same reserve rules as [`drink_adjacent`].
@@ -196,7 +201,7 @@ pub fn drink_from_hosts(world: &mut World, hosts: &[i32], budget_kg: i64) -> i64
         }
     }
     order.sort_by_key(|&x| world.column_at(x).map(|c| -c.moisture).unwrap_or(0));
-    for x in order {
+    for &x in &order {
         if left <= 0 {
             break;
         }
@@ -226,6 +231,28 @@ pub fn drink_from_hosts(world: &mut World, hosts: &[i32], budget_kg: i64) -> i64
         }
         taken += got;
         left -= got;
+    }
+    // Standing-water trickle when pore is dry — long-root / reed payoff.
+    // Cap 1 kg and require a real free-surface puddle (not a sheen).
+    if left > 0 {
+        for &x in &order {
+            if left <= 0 {
+                break;
+            }
+            let wet = world
+                .column_at(x)
+                .and_then(|c| c.flowable_water())
+                .map(|(_, m)| m)
+                .unwrap_or(0);
+            if wet < 50 {
+                continue;
+            }
+            let got = world.drink_water(x, left.min(1));
+            if got > 0 {
+                taken += got;
+                left -= got;
+            }
+        }
     }
     taken
 }
@@ -324,16 +351,45 @@ fn blueprint_mid_x(blueprint: &Blueprint) -> f32 {
     (min_x as f32 + max_x as f32) * 0.5
 }
 
-/// Solid ledge suitable for a land plant (not deep water, not a cliff notch).
+/// How deep below the crown the deepest Root tip reaches (metres).
+///
+/// Used as the standing-water depth a plant (or its sucker) can colonise —
+/// long roots unlock deeper shallows / reed beds.
+pub fn root_reach_m(blueprint: &Blueprint) -> f32 {
+    if !blueprint.is_rooted() {
+        return 0.0;
+    }
+    let crown = crate::organism::blueprint_land_crown_y(blueprint);
+    let deepest = blueprint
+        .modules
+        .iter()
+        .filter(|m| m.module == ModuleId::Root)
+        .map(|m| m.y)
+        .min()
+        .unwrap_or(crown);
+    let cells = (crown as i32 - deepest as i32).max(0) as f32;
+    // At least one cell of bite so minimal plants clear the shallow band.
+    (cells.max(1.0) * MODULE_CELL_COLS).clamp(SHALLOW_PLANT_WATER_M, MAX_PLANT_WATER_M)
+}
+
+/// Solid ledge suitable for a rooted plant (not a cliff notch).
+///
+/// Standing water deeper than [`SHALLOW_PLANT_WATER_M`] is still allowed
+/// when `root_reach_m` can span the water column (reed / mangrove habit).
 pub fn column_is_plantable(world: &World, wx: i32) -> bool {
+    column_is_plantable_for_reach(world, wx, SHALLOW_PLANT_WATER_M)
+}
+
+/// Like [`column_is_plantable`], but allow water up to `root_reach_m`.
+pub fn column_is_plantable_for_reach(world: &World, wx: i32, root_reach_m: f32) -> bool {
     let Some(col) = world.column_at(wx) else {
         return false;
     };
-    // Drown risk: more than ~0.5 m of standing water.
+    let allow_depth = root_reach_m.clamp(SHALLOW_PLANT_WATER_M, MAX_PLANT_WATER_M);
     if let Some((_, mass)) = col.flowable_water() {
         if mass > 0 {
             let depth = col.mass_to_height_delta(MaterialId::Water, mass);
-            if depth > 0.5 {
+            if depth > allow_depth {
                 return false;
             }
         }
@@ -360,9 +416,14 @@ pub fn column_is_plantable(world: &World, wx: i32) -> bool {
     true
 }
 
-/// True when a land sprout can emerge here (plantable + some pore water).
+/// True when a sucker can emerge here (plantable for `root_reach_m` + moisture).
 pub fn column_can_host_sprout(world: &World, wx: i32) -> bool {
-    if !column_is_plantable(world, wx) {
+    column_can_host_sprout_for_reach(world, wx, SHALLOW_PLANT_WATER_M)
+}
+
+/// Like [`column_can_host_sprout`], with an explicit root-reach water budget.
+pub fn column_can_host_sprout_for_reach(world: &World, wx: i32, root_reach_m: f32) -> bool {
+    if !column_is_plantable_for_reach(world, wx, root_reach_m) {
         return false;
     }
     let Some(col) = world.column_at(wx) else {
@@ -441,7 +502,8 @@ pub fn pick_root_sprout_x(
         {
             continue;
         }
-        if !column_can_host_sprout(world, cell_wx) {
+        let reach = root_reach_m(blueprint);
+        if !column_can_host_sprout_for_reach(world, cell_wx, reach) {
             continue;
         }
         let Some(col) = world.column_at(cell_wx) else {
@@ -854,14 +916,14 @@ mod tests {
     }
 
     #[test]
-    fn root_sprout_skips_deep_water() {
+    fn root_sprout_skips_unreachable_deep_water() {
         let mut world = dry_land();
         for x in 6..12 {
             if let Some(col) = world.column_at_mut(x) {
                 col.moisture = col.moisture_cap();
             }
         }
-        // Flood every neighbour — only parent column dry-ish.
+        // Ocean-scale flood — beyond any root reach.
         for x in [6, 7, 9, 10, 11, 12] {
             if let Some(col) = world.column_at_mut(x) {
                 col.deposit_to_top(MaterialId::Water, 20_000, 0);
@@ -873,6 +935,64 @@ mod tests {
             site.is_none(),
             "no sprout into drowned neighbours (got {site:?})"
         );
+    }
+
+    #[test]
+    fn long_roots_can_plant_in_shallow_water() {
+        let mut world = dry_land();
+        // ~1.2 m of water (mass/250) — above the 0.5 m wade band, within
+        // a deep-rooted plant's reach.
+        if let Some(col) = world.column_at_mut(10) {
+            col.moisture = col.moisture_cap();
+            col.deposit_to_top(MaterialId::Water, 300, 0);
+            let depth = col.mass_to_height_delta(
+                MaterialId::Water,
+                col.flowable_water().map(|(_, m)| m).unwrap_or(0),
+            );
+            assert!(depth > SHALLOW_PLANT_WATER_M);
+            assert!(depth < 2.0);
+        }
+        let mut deep = Blueprint::minimal_plant(Genome::default());
+        for y in -6i16..=-2 {
+            deep.modules.push(PlacedModule {
+                x: 0,
+                y,
+                lane: LaneId::Mid,
+                module: ModuleId::Root,
+            });
+        }
+        let reach = root_reach_m(&deep);
+        assert!(reach > SHALLOW_PLANT_WATER_M);
+        assert!(
+            column_is_plantable_for_reach(&world, 10, reach),
+            "deep roots should colonise shallow water (reach={reach})"
+        );
+        assert!(
+            !column_is_plantable(&world, 10),
+            "default shallow gate still rejects without reach"
+        );
+    }
+
+    #[test]
+    fn roots_sip_standing_water_when_pore_is_dry() {
+        let mut world = dry_land();
+        if let Some(col) = world.column_at_mut(8) {
+            col.moisture = 0;
+            col.deposit_to_top(MaterialId::Water, 800, 0);
+        }
+        let water_before = world
+            .column_at(8)
+            .and_then(|c| c.flowable_water())
+            .map(|(_, m)| m)
+            .unwrap_or(0);
+        let drunk = drink_from_hosts(&mut world, &[8], 1);
+        assert_eq!(drunk, 1, "should sip standing water");
+        let water_after = world
+            .column_at(8)
+            .and_then(|c| c.flowable_water())
+            .map(|(_, m)| m)
+            .unwrap_or(0);
+        assert_eq!(water_before - water_after, 1);
     }
 
     #[test]
