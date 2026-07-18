@@ -412,69 +412,30 @@ pub fn root_reach_m(blueprint: &Blueprint) -> f32 {
     (cells.max(1.0) * MODULE_CELL_COLS).clamp(SHALLOW_PLANT_WATER_M, MAX_PLANT_WATER_M)
 }
 
-/// Solid ledge suitable for a rooted plant (not a cliff notch).
+/// Column exists and can seat a creature (editor spawn / sucker / spore).
 ///
-/// Standing water deeper than [`SHALLOW_PLANT_WATER_M`] is still allowed
-/// when `root_reach_m` can span the water column (reed / mangrove habit).
+/// Placement is intentionally permissive: deep water, cliff notches, thin
+/// roofs over water-filled cavities, and dry rock all allow a drop. Wrong
+/// niches simply fail to thrive (drought dormancy, unanchored roots, etc.).
 pub fn column_is_plantable(world: &World, wx: i32) -> bool {
     column_is_plantable_for_reach(world, wx, SHALLOW_PLANT_WATER_M)
 }
 
-/// Like [`column_is_plantable`], but allow water up to `root_reach_m`.
-pub fn column_is_plantable_for_reach(world: &World, wx: i32, root_reach_m: f32) -> bool {
-    let Some(col) = world.column_at(wx) else {
-        return false;
-    };
-    let allow_depth = root_reach_m.clamp(SHALLOW_PLANT_WATER_M, MAX_PLANT_WATER_M);
-    if let Some((_, mass)) = col.flowable_water() {
-        if mass > 0 {
-            let depth = col.mass_to_height_delta(MaterialId::Water, mass);
-            if depth > allow_depth {
-                return false;
-            }
-        }
-    }
-    let bed = col.climate_elevation();
-    if !solid_purchase_at(world, wx, bed - 0.15)
-        && !solid_purchase_at(world, wx, bed - 0.35)
-    {
-        return false;
-    }
-    // Both neighbours much higher → recess in a cliff face (plants look
-    // buried in the wall). Peaks / one-sided drops stay allowed.
-    let left = world
-        .column_at(wx - 1)
-        .map(|c| c.climate_elevation());
-    let right = world
-        .column_at(wx + 1)
-        .map(|c| c.climate_elevation());
-    if let (Some(l), Some(r)) = (left, right) {
-        if l > bed + PLANTABLE_WALL_DROP_M && r > bed + PLANTABLE_WALL_DROP_M {
-            return false;
-        }
-    }
-    true
+/// Placement seat check. `root_reach_m` is retained for API compatibility
+/// with reed-depth scoring callers; it no longer hard-gates placement.
+pub fn column_is_plantable_for_reach(world: &World, wx: i32, _root_reach_m: f32) -> bool {
+    world.column_at(wx).is_some()
 }
 
-/// True when a sucker can emerge here (plantable for `root_reach_m` + moisture).
+/// True when a sucker / spore may land here.
 pub fn column_can_host_sprout(world: &World, wx: i32) -> bool {
     column_can_host_sprout_for_reach(world, wx, SHALLOW_PLANT_WATER_M)
 }
 
-/// Like [`column_can_host_sprout`], with an explicit root-reach water budget.
+/// Landing seat for vegetative sprouts. Same permissive rule as plantable —
+/// moisture / water depth only affect thriving after the kid exists.
 pub fn column_can_host_sprout_for_reach(world: &World, wx: i32, root_reach_m: f32) -> bool {
-    if !column_is_plantable_for_reach(world, wx, root_reach_m) {
-        return false;
-    }
-    let Some(col) = world.column_at(wx) else {
-        return false;
-    };
-    let cap = col.moisture_cap();
-    if cap <= 0 {
-        return false;
-    }
-    let moist = col.moisture.max(0) as f32 / cap as f32;
-    moist >= ROOT_SPROUT_MIN_MOIST_FRAC || col.top_water_mass() > 0
+    column_is_plantable_for_reach(world, wx, root_reach_m)
 }
 
 /// World column occupied by a blueprint module at `pose_x`.
@@ -524,8 +485,10 @@ pub fn pick_root_sprout_x(
         .map(|c| c.climate_elevation())
         .unwrap_or(pose_y);
 
-    // Painted lateral roots with solid purchase — farthest first.
-    let mut lateral: Vec<(i32, i32, f32, i16)> = Vec::new(); // |dx|, wx, moist, module_y
+    // Painted lateral roots — farthest first. Tip purchase / host moisture
+    // are soft preferences (score), not hard gates: a runner over a
+    // water-filled cavity must still be allowed to sucker.
+    let mut lateral: Vec<(i32, i32, f32, i16)> = Vec::new(); // |dx|, wx, score, module_y
     for m in blueprint
         .modules
         .iter()
@@ -534,12 +497,6 @@ pub fn pick_root_sprout_x(
         let cell_wx = root_module_world_x(pose_x, blueprint, m.x);
         let dx = (cell_wx - parent_wx).abs();
         if dx < 1 || dx > ROOT_SPROUT_MAX_DIST {
-            continue;
-        }
-        let tip_y = module_world_y(pose_y, m.y);
-        if !solid_purchase_at(world, cell_wx, tip_y)
-            && !solid_purchase_at(world, cell_wx, tip_y - 0.05)
-        {
             continue;
         }
         let reach = root_reach_m(blueprint);
@@ -553,11 +510,19 @@ pub fn pick_root_sprout_x(
         if (col.climate_elevation() - parent_bed).abs() > 10.0 {
             continue;
         }
+        let tip_y = module_world_y(pose_y, m.y);
+        let purchase = solid_purchase_at(world, cell_wx, tip_y)
+            || solid_purchase_at(world, cell_wx, tip_y - 0.05);
         let cap = col.moisture_cap().max(1) as f32;
         let moist = col.moisture.max(0) as f32 / cap;
-        // Prefer shallow runners (rhizomes) over deep laterals.
+        // Prefer shallow runners (rhizomes) over deep laterals; purchased
+        // tips still win the score but bare tips over cavities remain eligible.
         let shallow = (-m.y).min(6) as f32;
-        lateral.push((dx, cell_wx, moist + (6.0 - shallow) * 0.05, m.y));
+        let mut score = moist + (6.0 - shallow) * 0.05;
+        if purchase {
+            score += 0.5;
+        }
+        lateral.push((dx, cell_wx, score, m.y));
     }
     lateral.sort_by(|a, b| {
         b.0.cmp(&a.0)
@@ -963,14 +928,14 @@ mod tests {
     }
 
     #[test]
-    fn root_sprout_skips_unreachable_deep_water() {
+    fn root_sprout_allows_deep_water_neighbours() {
         let mut world = dry_land();
         for x in 6..12 {
             if let Some(col) = world.column_at_mut(x) {
                 col.moisture = col.moisture_cap();
             }
         }
-        // Ocean-scale flood — beyond any root reach.
+        // Ocean-scale flood — placement is allowed; the kid just won't thrive.
         for x in [6, 7, 9, 10, 11, 12] {
             if let Some(col) = world.column_at_mut(x) {
                 col.deposit_to_top(MaterialId::Water, 20_000, 0);
@@ -979,16 +944,15 @@ mod tests {
         let bp = plant_with_runner(8.5);
         let site = pick_root_sprout_x(&world, 8.5, 8.0, &bp, 2, 10, 3);
         assert!(
-            site.is_none(),
-            "no sprout into drowned neighbours (got {site:?})"
+            site.is_some(),
+            "deep water must not hard-block suckers (got {site:?})"
         );
     }
 
     #[test]
     fn long_roots_can_plant_in_shallow_water() {
         let mut world = dry_land();
-        // ~1.2 m of water (mass/250) — above the 0.5 m wade band, within
-        // a deep-rooted plant's reach.
+        // ~1.2 m of water (mass/250) — above the 0.5 m wade band.
         if let Some(col) = world.column_at_mut(10) {
             col.moisture = col.moisture_cap();
             col.deposit_to_top(MaterialId::Water, 300, 0);
@@ -1012,11 +976,44 @@ mod tests {
         assert!(reach > SHALLOW_PLANT_WATER_M);
         assert!(
             column_is_plantable_for_reach(&world, 10, reach),
-            "deep roots should colonise shallow water (reach={reach})"
+            "placement allowed in shallow water (reach={reach})"
         );
         assert!(
-            !column_is_plantable(&world, 10),
-            "default shallow gate still rejects without reach"
+            column_is_plantable(&world, 10),
+            "placement is permissive regardless of root reach"
+        );
+    }
+
+    #[test]
+    fn cavity_with_water_still_hosts_surface_plant() {
+        use wk_world::column::VoidOrigin;
+        let mut world = dry_land();
+        let surface = world.column_at(8).unwrap().surface_y;
+        if let Some(col) = world.column_at_mut(8) {
+            col.moisture = col.moisture_cap();
+            // Thin roof: cavity just under the bed, half-filled with water.
+            col.grow_void_at(surface - 0.8, 1.5, MaterialId::Sand, VoidOrigin::Karst);
+            col.voids[0].water_mass = col.voids[0].capacity_kg() / 2;
+        }
+        assert!(
+            column_is_plantable(&world, 8),
+            "water-filled cavity under a roof must not block surface placement"
+        );
+        assert!(
+            column_can_host_sprout(&world, 8),
+            "suckers may emerge onto a cavity-roof column"
+        );
+        let mut store = crate::AgentStore::new();
+        assert!(
+            store
+                .spawn_from_blueprint(
+                    &world,
+                    8,
+                    Blueprint::minimal_plant(Genome::default()),
+                    80.0,
+                )
+                .is_some(),
+            "editor spawn on cavity roof must succeed"
         );
     }
 

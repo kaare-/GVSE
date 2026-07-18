@@ -937,22 +937,9 @@ fn aabb_hits_any(bodies: &[(Entity, Aabb, bool)], aabb: Aabb, ignore: Option<Ent
 fn depth_for_pose(world: &World, blueprint: &Blueprint, x: f32, y_hint: f32) -> Option<f32> {
     let wx = x.floor() as i32;
     let col = world.column_at(wx)?;
-    if blueprint.is_rooted() {
-        let reach = crate::root::root_reach_m(blueprint);
-        if !crate::root::column_is_plantable_for_reach(world, wx, reach) {
-            return None;
-        }
-        return Some(land_plant_pose_y_on(col, blueprint));
-    }
-    if blueprint.is_fungus() {
-        // Sit on the solid bed / organic skin — not floating.
-        if !crate::root::column_is_plantable_for_reach(
-            world,
-            wx,
-            crate::root::SHALLOW_PLANT_WATER_M,
-        ) {
-            return None;
-        }
+    if blueprint.is_rooted() || blueprint.is_fungus() {
+        // Seat on the solid bed / organic skin. No plantable gate — wrong
+        // niches (deep water, cavity roofs) are allowed and simply struggle.
         return Some(land_plant_pose_y_on(col, blueprint));
     }
     if blueprint.is_plankton() {
@@ -1487,16 +1474,11 @@ impl AgentStore {
         let x0 = world_x as f32 + 0.5;
         let bodies = collect_bodies(self, world);
         let (x, y) = if blueprint.is_rooted() || blueprint.is_fungus() {
-            // Prefer the requested column if free; else search for a ledge.
+            // Prefer the clicked / requested column if free; else a nearby
+            // rescue seat. Plantable gates no longer block editor drops —
+            // cavity roofs, deep water, and dry rock are all allowed.
             let mut occupied = rooted_occupied_columns(&bodies);
-            let reach = if blueprint.is_rooted() {
-                crate::root::root_reach_m(&blueprint)
-            } else {
-                crate::root::SHALLOW_PLANT_WATER_M
-            };
-            if !occupied.contains(&world_x)
-                && crate::root::column_is_plantable_for_reach(world, world_x, reach)
-            {
+            if !occupied.contains(&world_x) {
                 (x0, y0)
             } else {
                 occupied.insert(world_x);
@@ -3077,27 +3059,34 @@ mod tests {
     }
 
     #[test]
-    fn land_sprout_skips_cliff_notch_columns() {
+    fn land_plant_can_spawn_in_cliff_notch() {
         let mut world = World::new(21);
         world.sea_level = 0.0;
-        // Build a U-notch: high | low | high — low column is unplantable.
+        // U-notch: high | low | high — placement is allowed (won't thrive well).
         world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
         for x in 0..64 {
             if let Some(col) = world.column_at_mut(x) {
                 col.moisture = col.moisture_cap();
             }
         }
-        // Raise neighbours of column 10 into walls.
         for x in [9, 11] {
             if let Some(col) = world.column_at_mut(x) {
                 col.deposit_to_top(MaterialId::Stone, 80_000, 0);
             }
         }
+        assert!(crate::root::column_is_plantable(&world, 10));
+        let mut store = AgentStore::new();
         assert!(
-            !crate::root::column_is_plantable(&world, 10),
-            "notch between tall walls must be unplantable"
+            store
+                .spawn_from_blueprint(
+                    &world,
+                    10,
+                    Blueprint::minimal_plant(Genome::default()),
+                    80.0,
+                )
+                .is_some(),
+            "cliff notch must not hard-block editor / sucker placement"
         );
-        assert!(crate::root::column_is_plantable(&world, 8));
     }
 
     #[test]
