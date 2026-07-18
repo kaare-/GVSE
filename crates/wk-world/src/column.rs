@@ -446,11 +446,12 @@ impl Column {
         volume / area
     }
 
-    /// Elevation to use for temperature/climate purposes. Under the
-    /// unified material model, snow and water are stratigraphic layers
-    /// with the correct density, so `surface_y` already reflects the
-    /// natural terrain height — no more "subtract snow layer height"
-    /// workaround was needed.
+    /// Solid-bed / geographic elevation (skips water, ice, snow caps).
+    ///
+    /// Used for biome classification, bathymetry, and landform logic — not
+    /// for ambient air/water-skin temperature. Deep-ocean beds sit far below
+    /// the capped thermal field; sampling temperature there clamps to the
+    /// geothermal Dirichlet (~55 °C) and reads as "boiling ocean".
     pub fn climate_elevation(&self) -> f32 {
         // Skip past any weather deposits (water/ice/snow) to expose the
         // permanent geographic elevation. A puddle on top of a peak
@@ -469,6 +470,37 @@ impl Column {
             }
         }
         y
+    }
+
+    /// Elevation for near-surface ambient temperature (HUD, freeze/thaw,
+    /// ecology comfort).
+    ///
+    /// - Submerged bed (ocean / shelf): always sample at sea level so
+    ///   free-surface wobbles and abyssal beds don't move the thermometer
+    ///   (deep beds clamp to the geothermal Dirichlet ~55 °C).
+    /// - Emergent land: a thin weather skin above the solid bed so snow/ice
+    ///   piles can't self-cool via lapse rate as they grow.
+    pub fn ambient_elevation(&self, sea_level: f32) -> f32 {
+        let bed = self.climate_elevation();
+        const SKIN_M: f32 = 8.0;
+        if bed < sea_level - 0.5 {
+            sea_level
+        } else {
+            self.surface_y.min(bed + SKIN_M)
+        }
+    }
+
+    /// Snow + ice in the weather cap (top contiguous frozen layers).
+    pub fn frozen_surface_mass(&self) -> i64 {
+        let mut total = 0i64;
+        for i in 0..self.layer_count as usize {
+            match self.layers[i].material {
+                MaterialId::Snow | MaterialId::Ice => total += self.layers[i].thickness.max(0),
+                MaterialId::Water => break,
+                _ => break,
+            }
+        }
+        total
     }
 
     /// Elevation of the groundwater table: the topmost porous solid

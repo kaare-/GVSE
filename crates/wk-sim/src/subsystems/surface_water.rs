@@ -19,9 +19,11 @@ use super::shared::WATER_MASS_PER_METRE_DEPTH;
 /// coupling (unequal neighbours, ground slope) that a pure symmetric
 /// analysis doesn't capture exactly.
 const FLOW_RELAXATION: f32 = 0.97;
-/// When free-surface waves carry momentum, diffuse more gently so wind
-/// setup and seiches aren't erased by the hydrostatic hop each tick.
-const FLOW_RELAXATION_WITH_WAVES: f32 = 0.35;
+/// Surface-waves mode is tide-only now (no momentum seiche to protect),
+/// so keep lateral equalization almost as strong as the non-wave path.
+/// The old 0.08 value left shelf-edge spikes that the tide re-poked every
+/// tick — "standing waves" that faded then came back.
+const FLOW_RELAXATION_WITH_WAVES: f32 = 0.85;
 
 pub fn run_surface_water(world: &World, scratch: &mut WorldTransferScratch) {
     let relax = if world.surface_waves_enabled {
@@ -57,6 +59,10 @@ pub fn run_surface_water(world: &World, scratch: &mut WorldTransferScratch) {
             if col.activity == Activity::Dormant || water_here <= 0 {
                 continue;
             }
+            // NOTE: no more `skip_deep` bailout. Every wet column
+            // diffuses at `relax` (0.08 in wave mode, 0.97 otherwise).
+            // The whole-column skip was the bug that let tall pools
+            // sit on a single column as an isolated spike.
 
             let head_here = water_top_y;
             let head_left = chunk.water_top_neighbor(i as i32 - 1);

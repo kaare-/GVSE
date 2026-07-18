@@ -288,18 +288,56 @@ impl World {
         if let Some(chunk) = self.chunks.get(&coord) {
             if let Some(thermal) = &chunk.thermal {
                 let x_m = world_x as f32 * wk_material::SAMPLE_WIDTH_M;
-                return thermal.0.sample_bilinear(x_m, y_m);
+                // Keep near-surface samples off the geothermal Dirichlet
+                // row (cy == 0). Out-of-range y clamps to the edge cell,
+                // which made deep-ocean ambient read as exactly 55 °C.
+                let cell = thermal.0.cell_size_m.max(1e-3);
+                let y_lo = thermal.0.origin_y_m + cell * 1.5;
+                let y_hi = thermal.0.origin_y_m
+                    + cell * (thermal.0.height_cells as f32 - 1.5);
+                let y_sample = y_m.clamp(y_lo, y_hi.max(y_lo));
+                let t = thermal.0.sample_bilinear(x_m, y_sample);
+                // Final guard: a "skin" sample must never report the
+                // geothermal floor value (field bug / bad clamp).
+                if y_m > self.sea_level - 40.0
+                    && (t - self.geothermal_bottom_c).abs() < 2.0
+                {
+                    return temperature_at(y_m.max(self.sea_level), self.sea_level, tick, &self.climate);
+                }
+                return t;
             }
         }
         temperature_at(y_m, self.sea_level, tick, &self.climate)
     }
 
+    /// Vertical temperature samples from `y_top` down to `y_bot` (inclusive).
+    /// Depth and step are capped so the heatmap overlay stays cheap on
+    /// deep ocean viewports.
+    pub fn sample_temp_column(
+        &self,
+        world_x: i32,
+        y_top: f32,
+        y_bot: f32,
+        tick: u64,
+    ) -> Vec<(f32, f32)> {
+        const MAX_DEPTH_M: f32 = 64.0;
+        const STEP_M: f32 = 2.0;
+        let top = y_top.max(y_bot);
+        let bot = y_top.min(y_bot).max(top - MAX_DEPTH_M);
+        let mut out = Vec::new();
+        let mut y = top;
+        while y > bot + 0.01 {
+            out.push((y, self.temperature_at_point(world_x, y, tick)));
+            y -= STEP_M;
+        }
+        out.push((bot, self.temperature_at_point(world_x, bot, tick)));
+        out
+    }
+
     /// Allocate and initialise a thermal field on every loaded chunk
-    /// (no-op for chunks that already have one). Seeds geothermal→sky
-    /// with the **sky end anchored at sea level** (not the top of the
-    /// air domain) so the mixed surface layer starts near climate temp.
-    /// Anchoring at `sea + FIELD_ABOVE_SEA` left near-surface water
-    /// ~35–40 °C on shallow bedrock floors and sterilised default Atoms.
+    /// (no-op for chunks that already have one). Seeds a stratified
+    /// water column (warm mixed layer → cool thermocline → geothermal
+    /// at depth) with air at sky temperature.
     pub fn enable_thermal_fields(&mut self) {
         self.thermal_fields_enabled = true;
         let sea = self.sea_level;
@@ -319,15 +357,10 @@ impl World {
             let h = field.0.height_cells as usize;
             let origin_y = field.0.origin_y_m;
             let sky = temperature_at(sea, sea, 0, &climate);
-            let rock_span = (sea - origin_y).max(1e-3);
             for cy in 0..h {
                 for cx in 0..w {
                     let (_, y) = field.0.cell_center(cx, cy);
-                    let t = if y >= sea {
-                        sky
-                    } else {
-                        geo + (sky - geo) * ((y - origin_y) / rock_span).clamp(0.0, 1.0)
-                    };
+                    let t = crate::fields::stratified_water_temp(y, sea, origin_y, sky, geo, 0.0);
                     field.0.set_cell(cx, cy, t);
                 }
             }
@@ -824,6 +857,9 @@ pub struct ColumnView {
     pub erosion_flux: i64,
     pub residual: ResidualBucket,
     pub temperature_c: f32,
+    /// Vertical temperature samples `(y_m, °C)` for the heatmap overlay.
+    /// Empty unless [`OverlayMode::TemperatureField`] is active.
+    pub temp_column: Vec<(f32, f32)>,
     /// Relative humidity at the column surface (0..1).
     pub humidity_rh: f32,
     /// Dissolved CO₂ in water when wet, else air CO₂ (relative units).
@@ -848,8 +884,8 @@ pub enum OverlayMode {
     Erosion,
     Activity,
     Conservation,
-    /// Colour-ramp of the thermal field sampled at each column's
-    /// climate elevation (cold blue → hot red).
+    /// Vertical thermal heatmap (cold blue → hot red) through the
+    /// water column / near-surface rock — shows warm skin vs cool deep.
     TemperatureField,
     /// Colour-ramp of relative humidity at the column surface
     /// (dry brown → wet cyan).
@@ -858,6 +894,23 @@ pub enum OverlayMode {
     Co2Field,
     /// Dissolved / air O₂ (low purple → high cyan).
     O2Field,
+}
+
+impl OverlayMode {
+    /// Short label for the bottom HUD (empty when no overlay).
+    pub fn hud_label(self) -> &'static str {
+        match self {
+            OverlayMode::None => "",
+            OverlayMode::WaterFlux => "water flux",
+            OverlayMode::Erosion => "erosion",
+            OverlayMode::Activity => "activity",
+            OverlayMode::Conservation => "conservation",
+            OverlayMode::TemperatureField => "temperature",
+            OverlayMode::HumidityField => "humidity",
+            OverlayMode::Co2Field => "CO2",
+            OverlayMode::O2Field => "O2",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
@@ -873,6 +926,10 @@ pub struct RenderSnapshot {
     pub tick: u64,
     pub viewport_x: i32,
     pub sea_level: f32,
+    /// Instantaneous tidal free-surface offset for the render pass.
+    /// Renderers snap oceanic water tops to `sea_level + tide_eta_m` so
+    /// tiny per-column mass wobbles don't show as visible spikes.
+    pub tide_eta_m: f32,
     pub world_x_min: i32,
     pub world_x_max: i32,
     pub elev_min: f32,
@@ -942,6 +999,27 @@ impl World {
                     .iter()
                     .map(|v| (v.top_y, v.height_m, v.water_mass, v.light))
                     .collect();
+                let temperature_c = self.temperature_at_point(
+                    wx,
+                    col.ambient_elevation(self.sea_level),
+                    tick,
+                );
+                let temp_column = if overlay.mode == OverlayMode::TemperatureField {
+                    let (y_top, y_bot) = match col.flowable_water() {
+                        Some((top, mass)) => {
+                            let depth = mass as f32 / 250.0;
+                            let bed = (top - depth).max(chunk.bedrock_y);
+                            (top.max(self.sea_level), bed)
+                        }
+                        None => (
+                            col.surface_y.max(self.sea_level),
+                            (col.surface_y - 20.0).max(chunk.bedrock_y),
+                        ),
+                    };
+                    self.sample_temp_column(wx, y_top, y_bot, tick)
+                } else {
+                    Vec::new()
+                };
                 columns.push(ColumnView {
                     world_x: wx,
                     surface_y: col.surface_y,
@@ -967,11 +1045,8 @@ impl World {
                         .copied()
                         .unwrap_or(0),
                     residual: col.residual,
-                    temperature_c: self.temperature_at_point(
-                        wx,
-                        col.climate_elevation(),
-                        tick,
-                    ),
+                    temperature_c,
+                    temp_column,
                     humidity_rh: self.humidity_at_point(wx, col.surface_y),
                     co2: if col.top_water_mass() > 0 {
                         col.ecology.water_co2
@@ -1004,6 +1079,7 @@ impl World {
                     erosion_flux: 0,
                     residual: ResidualBucket::default(),
                     temperature_c: self.temperature_at_point(wx, self.sea_level, tick),
+                    temp_column: Vec::new(),
                     humidity_rh: self.humidity_at_point(wx, self.sea_level),
                     co2: 1.0,
                     o2: 1.0,
@@ -1027,6 +1103,7 @@ impl World {
             tick,
             viewport_x,
             sea_level: self.sea_level,
+            tide_eta_m: self.tide_eta_m(tick),
             world_x_min,
             world_x_max,
             elev_min,

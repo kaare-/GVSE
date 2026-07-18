@@ -111,6 +111,28 @@ fn update_dissolved_halos(world: &mut World) {
     }
 }
 
+/// A chunk is worth diffusing only if it holds any measurable dissolved mass.
+/// On a huge ring, most chunks stay at exactly zero for the whole session
+/// (nothing has been injected there yet), and diffusing them was ~9 ms/tick.
+const CHUNK_ACTIVE_THRESHOLD: f32 = 1e-6;
+
+fn chunk_has_dissolved(chunk: &wk_world::chunk::Chunk) -> bool {
+    let Some(dissolved) = &chunk.dissolved else {
+        return false;
+    };
+    let field = &dissolved.0;
+    let w = field.width_cells as usize;
+    let h = field.height_cells as usize;
+    for cy in 0..h {
+        for cx in 0..w {
+            if field.cell_at(cx, cy) > CHUNK_ACTIVE_THRESHOLD {
+                return true;
+            }
+        }
+    }
+    false
+}
+
 pub fn run_dissolved_field(world: &mut World, _tick: u64) {
     if !world.dissolved_fields_enabled {
         return;
@@ -126,12 +148,28 @@ pub fn run_dissolved_field(world: &mut World, _tick: u64) {
             let Some(dissolved) = &chunk.dissolved else {
                 continue;
             };
+            // Skip idle chunks: no dissolved mass here AND no dissolved
+            // mass in either wrap neighbour, so diffusion would be a no-op.
+            if !chunk_has_dissolved(chunk) {
+                let (l, r) = world.neighbor_chunks(coord);
+                let l_active = world
+                    .chunks
+                    .get(&l)
+                    .map(|c| chunk_has_dissolved(c))
+                    .unwrap_or(false);
+                let r_active = world
+                    .chunks
+                    .get(&r)
+                    .map(|c| chunk_has_dissolved(c))
+                    .unwrap_or(false);
+                if !l_active && !r_active {
+                    continue;
+                }
+            }
             let field = &dissolved.0;
             let alpha = build_alpha(chunk, field);
             let source = field.zeros_like();
             let mut out = field.zeros_like();
-            // Mass before diffusion — variable-α + clamp can drift; we
-            // renormalize so solid→dissolved stays audit-closed.
             let w = field.width_cells as usize;
             let h = field.height_cells as usize;
             let mut mass_before = 0.0f32;
@@ -159,7 +197,6 @@ pub fn run_dissolved_field(world: &mut World, _tick: u64) {
                     }
                 }
             } else if mass_before > 1e-6 && mass_after <= 1e-6 {
-                // Degenerate: put mass back into the cell of peak α.
                 out = field.clone();
             }
             out.halo = field.halo.clone();

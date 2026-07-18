@@ -85,13 +85,15 @@ test, it fills in the same four things:
 
 ### E33 — Day float / night sink
 
-- **World.** Deep water chunk with light column enabled and thermal
-  field enabled.
-- **Blueprint.** Water Atom + `Buoyancy` + a soma wiring day / night
-  phase to `depth_target`. Control lineage lacks the soma wiring.
-- **Assertion.** Wired lineage tracks the lit band by day and sinks
-  at night; control lineage held at fixed depth loses mass.
-- **Read-out.** `E33: wired energy_max={}, control energy_max={}`.
+- **World.** Deep flooded columns with thermal fields enabled
+  (warm mixed layer + cool thermocline).
+- **Blueprint (Set A interim).** Default Atom; `BuoyancyBias` +
+  circadian window modulate effective depth (no soma wiring yet).
+- **Assertion.** Mean elevation is higher by day than by night
+  (≥ 2 m); surface mixed layer stays warmer than deep water.
+- **Read-out.** `E33: day_y=… night_y=… skin=…C deep=…C`.
+- **Later (Set C).** Replace interim gene mapping with soma wiring
+  day/night → `depth_target`; control lineage at fixed depth loses mass.
 
 ### E34 — Heat edge
 

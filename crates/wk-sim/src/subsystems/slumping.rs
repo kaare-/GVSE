@@ -29,12 +29,16 @@ const SLUMP_RELAXATION: f32 = 0.35;
 pub fn run_slumping(world: &mut World, tick: u64) {
     // Two passes per invocation to accelerate convergence for wide
     // repose fronts (excess piles up until it hits repose, then flows).
+    // Both passes early-exit if no column is above repose.
     for _ in 0..2 {
-        slumping_pass(world, tick);
+        if !slumping_pass(world, tick) {
+            break;
+        }
     }
 }
 
-fn slumping_pass(world: &mut World, tick: u64) {
+/// Returns `true` if any transfer happened (caller may run another pass).
+fn slumping_pass(world: &mut World, tick: u64) -> bool {
     // Snapshot every column's top-solid state, INCLUDING columns whose
     // top solid can't slump itself (Stone / Bedrock outcrops). Those
     // still have to appear in the snapshot as valid *destinations* — a
@@ -121,6 +125,7 @@ fn slumping_pass(world: &mut World, tick: u64) {
     // shed material onto the shoulder of that wall.
     let mut transfers: Vec<(i32, i32, MaterialId, i64, MaterialId)> = Vec::new(); // (from_wx, to_wx, source_material, mass, dest_column_top)
     let wx_list: Vec<i32> = by_wx.keys().copied().collect();
+    let mut has_slope = false;
     for wx in wx_list {
         let idx = by_wx[&wx];
         let s = snapshot[idx];
@@ -136,6 +141,7 @@ fn slumping_pass(world: &mut World, tick: u64) {
             if dy <= s.repose_rise {
                 continue;
             }
+            has_slope = true;
             let excess = dy - s.repose_rise;
             let height_to_move = 0.5 * excess * SLUMP_RELAXATION;
             let mass_to_move = (height_to_move * s.mass_per_m) as i64;
@@ -144,6 +150,10 @@ fn slumping_pass(world: &mut World, tick: u64) {
                 transfers.push((wx, neighbour_wx, s.material, mass_to_move, n.column_top_material));
             }
         }
+    }
+    if !has_slope {
+        // Whole ring is at repose — skip the O(all-columns) clamp too.
+        return false;
     }
 
     // Apply transfers. Mass conservation is critical here: whatever
@@ -154,9 +164,15 @@ fn slumping_pass(world: &mut World, tick: u64) {
     // reaching a lake doesn't leave a persistent floating slush ring,
     // it just adds equivalent water volume. Deposit as Water instead
     // of Snow whenever the destination column's *top layer* is Water.
+    let mut touched: std::collections::HashSet<(i32, usize)> = std::collections::HashSet::new();
     for (from_wx, to_wx, source_material, mass, dest_top) in transfers {
         let from_coord = World::chunk_coord_for_world_x(from_wx);
         let from_local = World::local_x(from_wx);
+        touched.insert((from_coord, from_local));
+        touched.insert((
+            World::chunk_coord_for_world_x(to_wx),
+            World::local_x(to_wx),
+        ));
         let mut actual_take = 0i64;
         let mut moist_take = 0i64;
         if let Some(chunk) = world.chunks.get_mut(&from_coord) {
@@ -202,17 +218,16 @@ fn slumping_pass(world: &mut World, tick: u64) {
         }
     }
 
-    // Clean up: settle+clamp per touched column so any empty layer
-    // slots collapse, densities restack correctly, and surface_y
-    // stays consistent with total layer heights.
-    let touched_coords: Vec<i32> = world.chunks.keys().copied().collect();
-    for coord in touched_coords {
-        let bedrock_y = world.chunks[&coord].bedrock_y;
-        if let Some(chunk) = world.chunks.get_mut(&coord) {
-            for col in &mut chunk.columns {
-                col.clamp_state();
-                col.recompute_surface_y(bedrock_y);
-            }
-        }
+    // Clean up only the columns that actually saw a transfer, not the
+    // whole ring — that whole-ring clamp was ~5 ms/tick on 192-chunk maps.
+    for (coord, local) in touched {
+        let Some(chunk) = world.chunks.get_mut(&coord) else {
+            continue;
+        };
+        let bedrock_y = chunk.bedrock_y;
+        let col = &mut chunk.columns[local];
+        col.clamp_state();
+        col.recompute_surface_y(bedrock_y);
     }
+    true
 }

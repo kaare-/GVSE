@@ -6,11 +6,10 @@ use wk_world::climate::ClimateSettings;
 /// kg/m^3 * SAMPLE_WIDTH_M 0.25 m cross-section).
 pub const WATER_MASS_PER_METRE_DEPTH: f32 = 250.0;
 
-/// Cap on how much snow can pile up on a single column (~a few metres
-/// depth) — a safety net independent of the climate_elevation fix, since
-/// even without the feedback loop a permanently sub-freezing spot would
-/// otherwise accumulate snow forever under constant precipitation.
-pub const MAX_SNOW_MASS_KG: i64 = 6000;
+/// Cap on snow+ice in the weather cap of one column. Snow alone used to
+/// be capped, but melt→refreeze (and snow landing on ice) converted that
+/// budget into unbounded ice towers — mountains grew to megametres.
+pub const MAX_FROZEN_SURFACE_MASS_KG: i64 = 10_000;
 
 pub struct SimParams {
     pub rain_rate: f32,
@@ -30,7 +29,7 @@ pub fn split_precipitation(
     climate_elev: f32,
     tick: u64,
     climate: &ClimateSettings,
-    existing_snow: i64,
+    existing_frozen: i64,
 ) -> (i64, i64) {
     // (water_component, snow_component)
     // `amount` stays a float all the way through so a fractional rate
@@ -40,14 +39,14 @@ pub fn split_precipitation(
     if precip_component <= 0 {
         return (0, 0);
     }
-    // Uses climate_elevation (excludes any snow already piled up), not
+    // Uses climate_elevation (excludes any snow/ice already piled up), not
     // raw surface_y — otherwise snow raising the surface would make
     // the column read as colder, causing still more snow: a runaway
     // feedback loop.
     let temp = wk_world::climate::temperature_at(climate_elev, sea, tick, climate);
-    if temp <= climate.freeze_point_c && existing_snow < MAX_SNOW_MASS_KG {
+    if temp <= climate.freeze_point_c && existing_frozen < MAX_FROZEN_SURFACE_MASS_KG {
         // Capped so a permanently-frozen spot doesn't accumulate an
-        // unbounded snow tower; beyond the cap it falls as rain/slush
+        // unbounded ice/snow tower; beyond the cap it falls as rain/slush
         // runoff instead (a crude stand-in for avalanche transport).
         (0, precip_component)
     } else {

@@ -13,7 +13,8 @@ use wk_field::{explicit_diffusion, FieldPatch};
 use wk_material::{CHUNK_W, SAMPLE_WIDTH_M};
 use wk_world::world::World;
 
-/// Game seconds advanced per humidity field step (matches period 10).
+/// Game seconds advanced per humidity field step. Same 10 s dt as
+/// thermal for CFL; schedule period may be longer.
 const DT_SECONDS: f32 = 10.0;
 
 /// Diffusivity of water vapour in open air (game-tuned, m²/s).

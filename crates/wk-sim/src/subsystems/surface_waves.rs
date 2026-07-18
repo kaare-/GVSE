@@ -1,257 +1,106 @@
-//! Wind- and tide-driven free-surface dynamics.
+//! Ocean surface dynamics — **tide only**.
 //!
-//! Replaces the old "fake waves" artifact (RainInject × LakeLevel beat
-//! frequencies) with a 1-D shallow-water step on standing water:
+//! Earlier iterations ran a 1-D shallow-water momentum step per tick.
+//! Every version we tuned still built 2-cell zig-zag comb teeth on the
+//! free surface (a well-known checkerboard mode of that scheme). We
+//! give up on physical wave propagation and keep the one thing this
+//! subsystem needs to do for gameplay:
 //!
-//! 1. Integrate horizontal velocity `Column::surface_u` from gravity
-//!    restoring force (`−g ∂η/∂x`), wind stress, and linear drag.
-//! 2. Advect water mass with that velocity (mass-conserving pairwise flux).
-//! 3. Soften single-column "comb" teeth with a conserving neighbour blend
-//!    (longer, rounder undulations — closer to the old glitch-wave look).
-//! 4. Optionally nudge deep ocean columns toward `sea_level + tide_eta`
-//!    (external shelf exchange, booked on `sea_inject_total`).
+//! - **Tide** raises/lowers oceanic columns as a whole. Booked on
+//!   `sea_inject_total` (E49b).
 //!
-//! Lake-level equalization still runs afterward for *shallow* ponds, but
-//! is gated off deep wave-bearing water so it doesn't erase setup/seiche.
+//! Wind setup, surface diffusion and any other flow live entirely in
+//! `run_lake_level` / `run_surface_water`. Deep oceans are now leveled
+//! by `run_lake_level` too, so the surface reads as a proper flat sea
+//! (± a slow tide) instead of a spiky wave grid.
 
-use wk_material::{CHUNK_W, SAMPLE_WIDTH_M};
+use wk_material::CHUNK_W;
 use wk_world::column::Activity;
 use wk_world::world::World;
 
 use super::shared::WATER_MASS_PER_METRE_DEPTH;
 
-/// Game-scaled gravity for free-surface waves (m/s²). Kept modest so
-/// seiches are long-wavelength rather than 1-column spikes.
-const WAVE_G: f32 = 0.045;
-/// Wind stress coefficient: `du += WIND_STRESS * wind_x / (depth + ε)`.
-const WIND_STRESS: f32 = 1.1;
-/// Linear drag on surface velocity per tick.
-const LINEAR_DRAG: f32 = 0.16;
-/// Hard cap on |u| (m/s) — keeps CFL comfortable with SAMPLE_WIDTH_M.
-const MAX_U: f32 = 0.07;
-/// Minimum depth (m) that carries momentum / wind stress.
-const MIN_WAVE_DEPTH_M: f32 = 0.08;
-/// Fraction of the tidal target depth applied per tick (smooth, not a snap).
-const TIDE_BLEND: f32 = 0.05;
-/// Mean depth (m) above which a wet run is "oceanic" for tide forcing.
+/// Fraction of the tidal target depth applied per tick.
+const TIDE_BLEND: f32 = 0.04;
+/// Minimum flowable water (kg) to participate.
+const MIN_WATER_KG: i64 = 20;
+/// Minimum depth (m) that participates.
+const MIN_DEPTH_M: f32 = 0.08;
+/// Mean depth (m) above which a wet column counts as oceanic for tide.
 const OCEAN_MEAN_DEPTH_M: f32 = 1.25;
-/// Minimum flowable water (kg) to participate in the wave pass.
-const MIN_WAVE_WATER_KG: i64 = 20;
-/// Max fraction of a cell's mass that may leave in one pairwise flux.
-const MAX_FLUX_FRAC: i64 = 10;
-/// Conserving neighbour blend strength (kills comb teeth on deep water).
-const SURFACE_SMOOTH: f32 = 0.28;
 
-#[derive(Clone, Copy)]
-struct WaveCell {
-    coord: i32,
-    local: usize,
-    world_x: i32,
-    bed_y: f32,
-    eta: f32,
-    depth_m: f32,
-    mass: i64,
-    u: f32,
-    oceanic: bool,
-}
+pub fn run_surface_waves(world: &mut World, tick: u64) {
+    if !world.surface_waves_enabled || !world.tide_enabled {
+        // No physics-side wave motion. Any residual `surface_u` is stale;
+        // zero it so future saves don't carry non-zero velocities around.
+        if !world.surface_waves_enabled {
+            for chunk in world.chunks.values_mut() {
+                for col in chunk.columns.iter_mut() {
+                    if col.surface_u != 0.0 {
+                        col.surface_u = 0.0;
+                    }
+                }
+            }
+        }
+        return;
+    }
 
-fn collect_cells(world: &World) -> Vec<WaveCell> {
-    let mut cells = Vec::new();
+    let tide = world.tide_eta_m(tick);
+    let sea = world.sea_level;
+    let still = sea + tide;
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
+    let mut water_before = 0i64;
+    let mut deltas: Vec<(i32, usize, i64)> = Vec::new();
+
     for coord in coords {
-        let Some(chunk) = world.chunks.get(&coord) else {
-            continue;
-        };
-        let base = chunk.world_x_base();
+        let chunk = world.chunks.get(&coord).unwrap();
+        let base_x = chunk.world_x_base();
         for local in 0..CHUNK_W {
             let col = &chunk.columns[local];
             let Some((eta, mass)) = col.flowable_water() else {
                 continue;
             };
-            if mass < MIN_WAVE_WATER_KG {
+            if mass < MIN_WATER_KG {
                 continue;
             }
             let depth_m = mass as f32 / WATER_MASS_PER_METRE_DEPTH;
-            if depth_m < MIN_WAVE_DEPTH_M {
+            if depth_m < MIN_DEPTH_M {
                 continue;
             }
             let bed_y = eta - depth_m;
-            cells.push(WaveCell {
-                coord,
-                local,
-                world_x: base + local as i32,
-                bed_y,
-                eta,
-                depth_m,
-                mass,
-                u: col.surface_u,
-                oceanic: bed_y < world.sea_level - 0.25 && depth_m >= OCEAN_MEAN_DEPTH_M * 0.5,
-            });
-        }
-    }
-    cells.sort_by_key(|c| c.world_x);
-    cells
-}
-
-/// Integrate velocity, advect mass, apply tide. No-op when disabled.
-pub fn run_surface_waves(world: &mut World, tick: u64) {
-    if !world.surface_waves_enabled {
-        return;
-    }
-
-    let cells = collect_cells(world);
-    if cells.is_empty() {
-        return;
-    }
-
-    let dx = SAMPLE_WIDTH_M.max(1e-3);
-    let mut u_new = vec![0.0f32; cells.len()];
-
-    for (i, cell) in cells.iter().enumerate() {
-        let eta_l = if i > 0 {
-            cells[i - 1].eta
-        } else {
-            cell.eta
-        };
-        let eta_r = if i + 1 < cells.len() {
-            cells[i + 1].eta
-        } else {
-            cell.eta
-        };
-        // Only couple to contiguous wet neighbours (gap ⇒ reflecting wall).
-        let left_ok = i > 0 && cells[i - 1].world_x + 1 == cell.world_x;
-        let right_ok = i + 1 < cells.len() && cells[i + 1].world_x == cell.world_x + 1;
-        // Wider stencil when both sides exist: average near/far slopes so
-        // short comb teeth don't drive the restoring force as hard.
-        let grad = match (left_ok, right_ok) {
-            (true, true) => {
-                let near = (eta_r - eta_l) / (2.0 * dx);
-                let far_l = if i > 1 && cells[i - 2].world_x + 2 == cell.world_x {
-                    cells[i - 2].eta
-                } else {
-                    eta_l
-                };
-                let far_r = if i + 2 < cells.len() && cells[i + 2].world_x == cell.world_x + 2
-                {
-                    cells[i + 2].eta
-                } else {
-                    eta_r
-                };
-                let wide = (far_r - far_l) / (4.0 * dx);
-                0.35 * near + 0.65 * wide
-            }
-            (false, true) => (eta_r - cell.eta) / dx,
-            (true, false) => (cell.eta - eta_l) / dx,
-            (false, false) => 0.0,
-        };
-
-        let (wind_x, _) = world.wind_at_point(cell.world_x, cell.eta);
-        let wind_accel = WIND_STRESS * wind_x / (cell.depth_m + 0.5);
-        let mut u = cell.u - WAVE_G * grad + wind_accel;
-        u *= 1.0 - LINEAR_DRAG;
-        u_new[i] = u.clamp(-MAX_U, MAX_U);
-    }
-
-    // Pairwise mass fluxes from face velocities (conserving).
-    let mut mass_delta = vec![0i64; cells.len()];
-    for i in 0..cells.len().saturating_sub(1) {
-        if cells[i + 1].world_x != cells[i].world_x + 1 {
-            continue;
-        }
-        let u_face = 0.5 * (u_new[i] + u_new[i + 1]);
-        let depth_face = 0.5 * (cells[i].depth_m + cells[i + 1].depth_m);
-        let mut flux = (u_face * depth_face * WATER_MASS_PER_METRE_DEPTH).round() as i64;
-        if flux > 0 {
-            flux = flux.min(cells[i].mass / MAX_FLUX_FRAC).max(0);
-        } else if flux < 0 {
-            flux = (-flux).min(cells[i + 1].mass / MAX_FLUX_FRAC).max(0);
-            flux = -flux;
-        }
-        mass_delta[i] -= flux;
-        mass_delta[i + 1] += flux;
-    }
-
-    // Conserving neighbour blend on oceanic columns — rounds standing
-    // waves into longer undulations instead of 1-pixel comb teeth.
-    for i in 0..cells.len().saturating_sub(1) {
-        if cells[i + 1].world_x != cells[i].world_x + 1 {
-            continue;
-        }
-        if !(cells[i].oceanic && cells[i + 1].oceanic) {
-            continue;
-        }
-        let mi = cells[i].mass + mass_delta[i];
-        let mj = cells[i + 1].mass + mass_delta[i + 1];
-        let di = mi as f32 / WATER_MASS_PER_METRE_DEPTH;
-        let dj = mj as f32 / WATER_MASS_PER_METRE_DEPTH;
-        let xfer = ((di - dj) * 0.5 * SURFACE_SMOOTH * WATER_MASS_PER_METRE_DEPTH).round() as i64;
-        if xfer == 0 {
-            continue;
-        }
-        // Move mass from the higher column toward the lower one.
-        if xfer > 0 {
-            let take = xfer.min(mi.max(0) / 4);
-            mass_delta[i] -= take;
-            mass_delta[i + 1] += take;
-        } else {
-            let take = (-xfer).min(mj.max(0) / 4);
-            mass_delta[i + 1] -= take;
-            mass_delta[i] += take;
-        }
-    }
-
-    // Tide: pull oceanic free surfaces toward sea_level + η_tide.
-    let tide = world.tide_eta_m(tick);
-    let sea = world.sea_level;
-    if world.tide_enabled {
-        let target_eta = sea + tide;
-        for (i, cell) in cells.iter().enumerate() {
-            if !cell.oceanic {
+            // True ocean: bed submerged and deep enough for a tide signal.
+            let oceanic = bed_y < sea - 0.25 && depth_m >= OCEAN_MEAN_DEPTH_M * 0.5;
+            if !oceanic {
                 continue;
             }
-            let target_depth = (target_eta - cell.bed_y).max(MIN_WAVE_DEPTH_M);
+            water_before += mass;
+            let target_depth = (still - bed_y).max(MIN_DEPTH_M);
             let target_mass = (target_depth * WATER_MASS_PER_METRE_DEPTH) as i64;
-            let step = ((target_mass - (cell.mass + mass_delta[i])) as f32 * TIDE_BLEND) as i64;
-            mass_delta[i] += step;
+            let step = ((target_mass - mass) as f32 * TIDE_BLEND) as i64;
+            if step != 0 {
+                deltas.push((coord, local, step));
+            }
+            let _ = base_x;
         }
     }
 
-    let water_before: i64 = cells.iter().map(|c| c.mass).sum();
-
-    // Write back velocity + mass.
-    for (i, cell) in cells.iter().enumerate() {
-        let Some(chunk) = world.chunks.get_mut(&cell.coord) else {
+    let mut water_after = water_before;
+    for (coord, local, delta) in deltas {
+        let Some(chunk) = world.chunks.get_mut(&coord) else {
             continue;
         };
-        let col = &mut chunk.columns[cell.local];
-        col.surface_u = u_new[i];
-        let delta = mass_delta[i];
-        if delta != 0 {
-            col.adjust_top_water(delta, 0);
-            col.settle_by_density(0);
-            col.recompute_surface_y(chunk.bedrock_y);
-            col.activity = Activity::HydrologyActive;
-        }
-        // Dry-out clears momentum.
-        if col.flowable_water().map(|(_, m)| m).unwrap_or(0) < MIN_WAVE_WATER_KG {
-            col.surface_u = 0.0;
-        }
+        let bedrock = chunk.bedrock_y;
+        let col = &mut chunk.columns[local];
+        let before = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
+        col.adjust_top_water(delta, 0);
+        col.recompute_surface_y(bedrock);
+        col.activity = Activity::HydrologyActive;
+        let after = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
+        water_after = water_after - before + after;
+        col.surface_u = 0.0;
     }
-
-    // Wave fluxes conserve; any net change is tidal shelf exchange.
-    if world.tide_enabled {
-        let mut water_after = 0i64;
-        for cell in &cells {
-            if let Some(chunk) = world.chunks.get(&cell.coord) {
-                water_after += chunk.columns[cell.local]
-                    .flowable_water()
-                    .map(|(_, m)| m)
-                    .unwrap_or(0);
-            }
-        }
-        let net = water_after - water_before;
-        if net != 0 {
-            world.mass_audit.sea_inject_total += net;
-        }
+    let net = water_after - water_before;
+    if net != 0 {
+        world.mass_audit.sea_inject_total += net;
     }
 }

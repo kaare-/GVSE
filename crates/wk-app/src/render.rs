@@ -202,6 +202,34 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8
 }
 
+/// Target sky-grey from weather, then ease toward it over ~1.5s so rain
+/// bursts don't strobe the whole background on/off each tick.
+fn sky_rain_darken(snap: &RenderSnapshot) -> f32 {
+    let target = if snap.rain_enabled {
+        0.55
+    } else if snap.clouds.is_empty() {
+        0.0
+    } else {
+        // Soft fraction of raining cover — one distant burst shouldn't slam
+        // the whole sky; several fronts can still grey it out.
+        let raining = snap.clouds.iter().filter(|c| c.raining).count() as f32;
+        let frac = (raining / snap.clouds.len() as f32).clamp(0.0, 1.0);
+        (frac.sqrt() * 0.32).min(0.32)
+    };
+    thread_local! {
+        static SMOOTH: std::cell::Cell<f32> = const { std::cell::Cell::new(0.0) };
+    }
+    let dt = get_frame_time().clamp(1.0 / 240.0, 0.1);
+    // Time constant ~1.5s — fronts fade in/out instead of blinking.
+    let alpha = 1.0 - (-dt / 1.5).exp();
+    SMOOTH.with(|cell| {
+        let prev = cell.get();
+        let next = prev + (target - prev) * alpha;
+        cell.set(next);
+        next
+    })
+}
+
 /// Sky colour driven by the day/night cycle, with a warm twilight glow right
 /// at sunrise/sunset, dimmed further if it's currently raining.
 fn sky_color_for(snap: &RenderSnapshot) -> Color {
@@ -225,11 +253,12 @@ fn sky_color_for(snap: &RenderSnapshot) -> Color {
         lerp_u8(base.2, twilight.2, twilight_amt),
     );
 
-    if snap.rain_enabled {
+    let rain_amt = sky_rain_darken(snap);
+    if rain_amt > 0.002 {
         Color::from_rgba(
-            lerp_u8(blended.0, 90, 0.65),
-            lerp_u8(blended.1, 100, 0.65),
-            lerp_u8(blended.2, 120, 0.65),
+            lerp_u8(blended.0, 90, rain_amt),
+            lerp_u8(blended.1, 100, rain_amt),
+            lerp_u8(blended.2, 120, rain_amt),
             255,
         )
     } else {
@@ -259,14 +288,25 @@ fn draw_celestial_body(sw: f32, sh: f32, snap: &RenderSnapshot) {
 const RAIN_STREAKS: usize = 90;
 
 /// Animated diagonal rain streaks above the water line, looping via get_time().
-fn draw_rain(sw: f32, sh: f32, sea_y: f32) {
+/// When `x0`/`x1` are set, streaks are clipped to that screen band (weather
+/// under a precipitating cloud); otherwise they span the full viewport
+/// (manual global rain toggle).
+fn draw_rain(sw: f32, sh: f32, sea_y: f32, x0: Option<f32>, x1: Option<f32>) {
     let t = get_time() as f32;
     let bottom = sea_y.min(sh);
     let drop_len = 14.0;
     let fall_speed = 620.0; // px/sec
-    for i in 0..RAIN_STREAKS {
+    let left = x0.unwrap_or(-20.0);
+    let right = x1.unwrap_or(sw + 20.0);
+    let band = (right - left).max(1.0);
+    let n = if x0.is_some() {
+        ((band / sw) * RAIN_STREAKS as f32).ceil().max(8.0) as usize
+    } else {
+        RAIN_STREAKS
+    };
+    for i in 0..n {
         let seed = i as f32;
-        let x = ((seed * 92.371) % (sw + 40.0)) - 20.0;
+        let x = left + ((seed * 92.371) % band);
         let phase = (seed * 0.6180339) % 1.0;
         let cycle = bottom + drop_len;
         let y = ((t * fall_speed + phase * cycle) % cycle) - drop_len;
@@ -284,6 +324,27 @@ fn draw_rain(sw: f32, sh: f32, sea_y: f32) {
     }
 }
 
+/// Rain streaks under each precipitating weather cloud (and full-frame when
+/// the manual R toggle is on).
+fn draw_precipitation(snap: &RenderSnapshot, sw: f32, sh: f32, sea_y: f32) {
+    if snap.rain_enabled {
+        draw_rain(sw, sh, sea_y, None, None);
+    }
+    for cloud in &snap.clouds {
+        if !cloud.raining {
+            continue;
+        }
+        let cx = (cloud.x - snap.viewport_x as f32) * COL_W;
+        let half = cloud.half_width * COL_W;
+        let x0 = cx - half;
+        let x1 = cx + half;
+        if x1 < 0.0 || x0 > sw {
+            continue;
+        }
+        draw_rain(sw, sh, sea_y, Some(x0.max(-20.0)), Some(x1.min(sw + 20.0)));
+    }
+}
+
 /// Simplified drifting cloud shapes (a small cluster of overlapping soft
 /// ellipses, not particles) — opacity signals how much rain potential is
 /// left, so a cloud visibly looks "spent" right before it disappears.
@@ -295,9 +356,14 @@ fn draw_clouds(snap: &RenderSnapshot, sw: f32, sh: f32) {
         }
         let cy = sh * 0.14;
         let w = cloud.half_width * COL_W;
-        let moisture_frac = (cloud.moisture / 1300.0).clamp(0.15, 1.0);
+        let moisture_frac = (cloud.moisture / 40_000.0).clamp(0.15, 1.0);
         let alpha = (90.0 + moisture_frac * 120.0) as u8;
-        let base = Color::from_rgba(235, 238, 245, alpha);
+        // Raining clouds read denser / cooler so fronts are obvious.
+        let base = if cloud.raining {
+            Color::from_rgba(170, 180, 200, alpha.saturating_add(40).min(230))
+        } else {
+            Color::from_rgba(235, 238, 245, alpha)
+        };
         for (dx, dy, scale) in [
             (0.0f32, 0.0f32, 1.0f32),
             (-0.5, 0.15, 0.7),
@@ -350,6 +416,10 @@ pub fn draw_frame(
     organism_highlight: Option<(f32, f32, f32, f32)>,
     // Live water/air temperature at the inspected creature (°C), if any.
     organism_ambient_c: Option<f32>,
+    // When false, hide the bottom status/info strip (toggle with F3).
+    show_status_line: bool,
+    // Vertical temperature samples for the selected column `(y_m, °C)`.
+    selected_temp_profile: &[(f32, f32)],
 ) {
     let sw = screen_width();
     let sh = screen_height();
@@ -427,6 +497,55 @@ pub fn draw_frame(
         }
     }
 
+    // Snap the visible sea surface to `sea_level + tide` on any column
+    // whose *seabed* sits below sea. Physics still tracks each column
+    // separately; this just replaces the potentially-wobbly per-column
+    // water top with the shared flat sea line for a clean horizon.
+    let sea_top_m = snap.sea_level + snap.tide_eta_m;
+    let sea_top_px = world_y_to_screen(sea_top_m, snap.sea_level, sh, camera_y_offset);
+    let water_density =
+        MaterialRegistry::props(MaterialId::Water).density.max(1) as f32;
+    let water_alpha = MaterialRegistry::props(MaterialId::Water).render_alpha;
+    for (i, col) in snap.columns.iter().enumerate() {
+        if col.surface_water <= 0 {
+            continue;
+        }
+        let water_h_m = (col.surface_water as f32 / water_density) / SAMPLE_WIDTH_M;
+        let bed_y = col.surface_y - water_h_m;
+        // True ocean = seabed below sea. Headlands / islands / coastal
+        // rock (seabed at or above sea) keep their physical render.
+        if bed_y >= sea_top_m - 0.25 {
+            continue;
+        }
+        let x = i as f32 * COL_W;
+        // Erase physical water spikes above the flat sea line (drawn with
+        // the column layers earlier) so tide/leveling wobbles don't show
+        // as standing teeth at the shelf edge.
+        if col.surface_y > sea_top_m + 0.05 {
+            let spike_top_px =
+                world_y_to_screen(col.surface_y, snap.sea_level, sh, camera_y_offset);
+            if spike_top_px < sea_top_px {
+                draw_rectangle(
+                    x,
+                    spike_top_px,
+                    COL_W,
+                    (sea_top_px - spike_top_px).max(1.0),
+                    sky_color,
+                );
+            }
+        }
+        let bed_px = world_y_to_screen(bed_y, snap.sea_level, sh, camera_y_offset);
+        if sea_top_px < bed_px {
+            draw_rectangle(
+                x,
+                sea_top_px,
+                COL_W,
+                bed_px - sea_top_px,
+                Color::from_rgba(0x23, 0x64, 0xD2, water_alpha),
+            );
+        }
+    }
+
     // Overlays
     for (i, col) in snap.columns.iter().enumerate() {
         let Some(top) = tops[i] else {
@@ -458,9 +577,24 @@ pub fn draw_frame(
                 draw_rectangle(x, sh - 8.0, COL_W, 4.0, Color::from_rgba(a, 255 - a, 128, 200));
             }
             OverlayMode::TemperatureField => {
-                // Cold blue → hot red across roughly 0–55 °C (sky→geothermal).
-                let c = temperature_overlay_color(col.temperature_c);
-                draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
+                if col.temp_column.len() >= 2 {
+                    // Full-column heatmap: warm skin / cool deep reads as a
+                    // vertical gradient (not a single surface tick).
+                    for w in col.temp_column.windows(2) {
+                        let (y0, t0) = w[0];
+                        let (y1, _) = w[1];
+                        let p0 = world_y_to_screen(y0, snap.sea_level, sh, camera_y_offset);
+                        let p1 = world_y_to_screen(y1, snap.sea_level, sh, camera_y_offset);
+                        let hgt = (p1 - p0).abs().max(1.0);
+                        let y_pix = p0.min(p1);
+                        let mut c = temperature_overlay_color(t0);
+                        c.a = 0.55;
+                        draw_rectangle(x, y_pix, COL_W, hgt, c);
+                    }
+                } else {
+                    let c = temperature_overlay_color(col.temperature_c);
+                    draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
+                }
             }
             OverlayMode::HumidityField => {
                 let c = humidity_overlay_color(col.humidity_rh);
@@ -482,9 +616,7 @@ pub fn draw_frame(
     // top itself. Drawing sea_level as a horizon was leftover from an
     // older constant-ocean model and made plankton look airborne.
 
-    if snap.rain_enabled {
-        draw_rain(sw, sh, sea_y);
-    }
+    draw_precipitation(snap, sw, sh, sea_y);
 
     for m in &snap.markers {
         let lx = (m.world_x - snap.viewport_x) as f32 * COL_W;
@@ -501,48 +633,63 @@ pub fn draw_frame(
         organism_highlight,
     );
 
-    let phase = snap.climate.phase_fraction(snap.tick);
-    let clock_minutes = (phase * 24.0 * 60.0) as u32;
-    let (clock_h, clock_m) = (clock_minutes / 60, clock_minutes % 60);
-    let day_or_night = if snap.climate.is_daytime(snap.tick) { "day" } else { "night" };
-    let hud = format!(
-        "tick={} sea={:.0}m x={}..{} | {clock_h:02}:{clock_m:02} ({day_or_night}) | clouds={} | {}",
-        snap.tick,
-        snap.sea_level,
-        snap.viewport_x,
-        snap.viewport_x + snap.columns.len() as i32,
-        snap.clouds.len(),
-        status_line
-    );
-    draw_rectangle(0.0, sh - 24.0, sw, 24.0, Color::from_rgba(0, 0, 0, 200));
-    draw_text(&hud, 8.0, sh - 8.0, 16.0, WHITE);
+    if show_status_line {
+        let phase = snap.climate.phase_fraction(snap.tick);
+        let clock_minutes = (phase * 24.0 * 60.0) as u32;
+        let (clock_h, clock_m) = (clock_minutes / 60, clock_minutes % 60);
+        let day_or_night = if snap.climate.is_daytime(snap.tick) {
+            "day"
+        } else {
+            "night"
+        };
+        // FPS: macroquad `get_fps()` samples the current draw rate; smooth with
+        // a rolling frame-time average so the number doesn't jitter each frame.
+        let fps = fps_smoothed();
+        let raining = snap.clouds.iter().filter(|c| c.raining).count();
+        let overlay = snap.overlay.mode.hud_label();
+        let overlay_bit = if overlay.is_empty() {
+            String::new()
+        } else {
+            format!(" | overlay={overlay}")
+        };
+        let hud = format!(
+            "tick={} fps={fps:.0} sea={:.0}m x={}..{} | {clock_h:02}:{clock_m:02} ({day_or_night}) | clouds={} (rain {}){overlay_bit} | {}",
+            snap.tick,
+            snap.sea_level,
+            snap.viewport_x,
+            snap.viewport_x + snap.columns.len() as i32,
+            snap.clouds.len(),
+            raining,
+            status_line
+        );
+        draw_rectangle(0.0, sh - 24.0, sw, 24.0, Color::from_rgba(0, 0, 0, 200));
+        draw_text(&hud, 8.0, sh - 8.0, 16.0, WHITE);
+    }
 
-    // Clickable "CREATURES" button (top-right) — opens editor without needing C/F2.
-    let (bx, by, bw, bh) = creature_button_rect(sw);
-    draw_rectangle(bx, by, bw, bh, Color::from_rgba(40, 90, 50, 230));
-    draw_rectangle_lines(bx, by, bw, bh, 2.0, Color::from_rgba(255, 220, 80, 255));
-    draw_text("CREATURES", bx + 10.0, by + 22.0, 18.0, Color::from_rgba(255, 240, 160, 255));
-
-    // Organism inspect under the button; column inspect below that (or alone).
-    let mut panel_top = by + bh + 8.0;
+    // Organism inspect (top-right); column inspect below that (or alone).
+    let mut panel_top = 10.0;
     if let Some(info) = organism_inspect {
         panel_top = draw_organism_inspector(info, organism_ambient_c, sw, panel_top);
     }
     if let Some(wx) = selected {
-        draw_inspector(snap, wx, sw, panel_top);
+        draw_inspector(snap, wx, sw, panel_top, selected_temp_profile);
     }
 }
 
-/// Top-right HUD button that opens the creature editor.
-pub fn creature_button_rect(sw: f32) -> (f32, f32, f32, f32) {
-    let bw = 130.0;
-    let bh = 32.0;
-    (sw - bw - 12.0, 10.0, bw, bh)
-}
-
-pub fn creature_button_hit(mx: f32, my: f32, sw: f32) -> bool {
-    let (bx, by, bw, bh) = creature_button_rect(sw);
-    mx >= bx && mx <= bx + bw && my >= by && my <= by + bh
+/// Smoothed FPS estimate — an EMA of `get_frame_time()`. macroquad's
+/// `get_fps()` is fine but jitters by ±5 each frame; this reads steadier
+/// next to the tick counter.
+fn fps_smoothed() -> f32 {
+    thread_local! {
+        static AVG_DT: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0 / 60.0) };
+    }
+    let dt = get_frame_time().max(1e-4);
+    AVG_DT.with(|cell| {
+        let prev = cell.get();
+        let next = prev * 0.9 + dt * 0.1;
+        cell.set(next);
+        1.0 / next
+    })
 }
 
 fn material_name(mat: MaterialId) -> &'static str {
@@ -608,12 +755,15 @@ fn draw_organism_inspector(
     y0: f32,
 ) -> f32 {
     let panel_w = 300.0;
-    let habit = if info.dead {
-        "DEAD (sinking)"
+    let habit = if let Some((settled, need)) = info.corpse_settle {
+        // Bodies stay visible until settle completes, then become Organic layers.
+        format!("DEAD settling {settled}/{need}")
+    } else if info.dead {
+        "DEAD".into()
     } else if info.is_plankton {
-        "plankton"
+        "plankton".into()
     } else {
-        "rooted"
+        "rooted".into()
     };
     let comfort_line = match ambient_c {
         Some(t) => {
@@ -625,7 +775,7 @@ fn draw_organism_inspector(
     };
     let lines = [
         format!("Creature #{}  {}", info.entity_id, info.name),
-        format!("{}  pos=({:.1}, {:.1}m)", habit, info.x, info.y),
+        format!("{habit}  pos=({:.1}, {:.1}m)", info.x, info.y),
         format!(
             "energy={:.1}/{:.0}  mods={} photo={}",
             info.energy, info.energy_max, info.module_count, info.photosystems
@@ -668,13 +818,21 @@ fn draw_organism_inspector(
     y0 + panel_h + 6.0
 }
 
-fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32, y0: f32) {
+fn draw_inspector(
+    snap: &RenderSnapshot,
+    world_x: i32,
+    sw: f32,
+    y0: f32,
+    // Optional vertical temperature samples `(y_m, °C)` for this column.
+    temp_profile: &[(f32, f32)],
+) {
     let Some(col) = snap.columns.iter().find(|c| c.world_x == world_x) else {
         return;
     };
 
     let panel_w = 280.0;
-    let panel_h = 240.0;
+    let profile_lines = if temp_profile.is_empty() { 0 } else { 1 + temp_profile.len().min(5) };
+    let panel_h = 240.0 + profile_lines as f32 * 14.0;
     let x0 = sw - panel_w - 8.0;
 
     draw_rectangle(x0, y0, panel_w, panel_h, Color::from_rgba(0, 0, 0, 220));
@@ -684,26 +842,34 @@ fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32, y0: f32) {
         format!("Column x={}", col.world_x),
         format!("surface_y={:.2} m  bedrock={:.0}m", col.surface_y, col.bedrock_y),
         format!(
-            "temp={:.1}C  RH={:.0}%  biome={}",
+            "skin={:.1}C  RH={:.0}%  biome={}",
             col.temperature_c,
             col.humidity_rh * 100.0,
             col.biome.name()
         ),
-        format!(
-            "water={} kg  moisture={} kg  sat={:.0}%",
-            col.surface_water,
-            col.moisture,
-            col.saturation * 100.0
-        ),
-        format!("ice={} kg  snow={} kg", col.ice, col.snow),
-        format!(
-            "sediment={} kg ({})",
-            col.sediment.total,
-            material_name(col.sediment.dominant)
-        ),
-        format!("flux w={} erode={}", col.water_flux, col.erosion_flux),
-        "--- layers ---".to_string(),
     ];
+    if !temp_profile.is_empty() {
+        lines.push("--- temp vs depth ---".into());
+        for &(y_m, t_c) in temp_profile.iter().take(5) {
+            let depth = col.surface_y - y_m;
+            lines.push(format!("  y={y_m:.0}m (↓{depth:.0}m)  {t_c:.1}C"));
+        }
+    }
+    lines.push(format!(
+        "water={} kg  moisture={} kg  sat={:.0}%",
+        col.surface_water,
+        col.moisture,
+        col.saturation * 100.0
+    ));
+    lines.push(format!("ice={} kg  snow={} kg", col.ice, col.snow));
+    // Suspended transport load — distinct from stratigraphic Organic layers.
+    lines.push(format!(
+        "suspended={} kg ({})",
+        col.sediment.total,
+        material_name(col.sediment.dominant)
+    ));
+    lines.push(format!("flux w={} erode={}", col.water_flux, col.erosion_flux));
+    lines.push("--- layers ---".into());
 
     for (i, &(mat, thickness, age_start, age_end)) in col.layers.iter().enumerate().take(6) {
         lines.push(format!(
@@ -715,7 +881,8 @@ fn draw_inspector(snap: &RenderSnapshot, world_x: i32, sw: f32, y0: f32) {
         ));
     }
 
-    for (i, line) in lines.iter().enumerate().take(12) {
+    let max_lines = 12 + profile_lines;
+    for (i, line) in lines.iter().enumerate().take(max_lines) {
         draw_text(line, x0 + 8.0, y0 + 16.0 + i as f32 * 14.0, 14.0, WHITE);
     }
 }

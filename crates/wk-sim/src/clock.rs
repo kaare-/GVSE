@@ -118,22 +118,24 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::LakeLevel,
-        // Every tick, smoothly (see LAKE_LEVEL_BLEND) — matches RainInject's
-        // period so there's no beat-frequency interference between the two.
-        period: 1,
+        // Every 2 ticks with gentle blend. On a full ring most cells are
+        // already at level, so per-tick was a waste of a ring walk.
+        period: 2,
         phase: 0,
     },
     SubsystemSchedule {
         id: SubsystemId::Groundwater,
-        // Every tick too — same reasoning as RainInject/LakeLevel, avoids
-        // introducing a new periodic driver that could beat against them.
-        period: 1,
+        // Every 2 ticks — pore-water flow is slow vs surface flow. Cost
+        // per invocation is ring-wide so halving cadence saves ~0.3 ms/tick.
+        period: 2,
         phase: 0,
     },
     SubsystemSchedule {
         id: SubsystemId::PhaseChange,
-        period: 1,
-        phase: 0,
+        // Freeze/melt is temperature-driven and slow; ring-wide pass
+        // every 4 ticks is plenty.
+        period: 4,
+        phase: 1,
     },
     SubsystemSchedule {
         id: SubsystemId::Weather,
@@ -144,24 +146,24 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::Slumping,
-        // Every tick, but the transfer per tick is small (SLUMP_RELAXATION
-        // = 0.35 of the excess). A big cliff collapses over a few frames
-        // rather than instantly, which reads as a natural slide.
-        period: 1,
+        // Every 8 ticks. Building the ring-wide top-solid snapshot cost
+        // ~5 ms even when nothing was above repose; a big cliff still
+        // collapses over several invocations at the new cadence.
+        period: 8,
         phase: 0,
     },
     SubsystemSchedule {
         id: SubsystemId::ThermalField,
-        // Every 10 ticks — heat diffusion is slow vs hydrology; period
-        // chosen against α·Δt/Δx² stability at 0.5 m cells.
-        period: 10,
+        // Every 20 ticks — heat is slow vs hydrology; deeper ring maps
+        // made period-10 over all chunks dominate the frame budget.
+        period: 20,
         phase: 0,
     },
     SubsystemSchedule {
         id: SubsystemId::HumidityField,
         // Same cadence as thermal, phase-staggered so the two field
         // passes don't always fire on the same tick.
-        period: 10,
+        period: 20,
         phase: 3,
     },
     SubsystemSchedule {
@@ -182,7 +184,10 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::DissolvedField,
-        period: 6,
+        // Slow diffusion; every 30 ticks matches other big field grids.
+        // On a full ring most chunks hold zero dissolved mass anyway and
+        // are skipped by the quiescence check in `run_dissolved_field`.
+        period: 30,
         phase: 2,
     },
     SubsystemSchedule {
@@ -224,7 +229,8 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::SurfaceWaves,
-        // Every tick — free-surface momentum needs a steady integrate step.
+        // Every tick, but flux is active-layer capped and writeback skips
+        // density-settle — cheap enough for full-ring oceans.
         period: 1,
         phase: 0,
     },

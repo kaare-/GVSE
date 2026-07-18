@@ -26,9 +26,9 @@ pub fn run_rain_inject(
         // out region can never receive rain again (nothing else would
         // set it back to active), permanently deadlocking re-hydration.
         for i in 0..CHUNK_W {
-            let (climate_elev, existing_snow) = {
+            let (climate_elev, existing_frozen) = {
                 let col = &world.chunks.get(&coord).unwrap().columns[i];
-                (col.climate_elevation(), col.top_snow_mass())
+                (col.climate_elevation(), col.frozen_surface_mass())
             };
             let (rain_component, snow_component) = split_precipitation(
                 sea,
@@ -36,7 +36,7 @@ pub fn run_rain_inject(
                 climate_elev,
                 tick,
                 &climate,
-                existing_snow,
+                existing_frozen,
             );
             let buf = scratch.buffer_mut(coord);
             if rain_component > 0 {

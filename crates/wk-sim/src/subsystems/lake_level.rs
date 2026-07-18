@@ -22,12 +22,10 @@ struct LakeCell {
 /// neighbour-by-neighbour diffusion for a *wide* lake, but changes smoothly
 /// enough tick-to-tick to not read as a glitch for small ponds.
 const LAKE_LEVEL_BLEND: f32 = 0.1;
-/// When free-surface waves are enabled, flatten much more gently so wind
-/// setup / seiches aren't erased every tick by the hydrostatic blender.
-const LAKE_LEVEL_BLEND_WITH_WAVES: f32 = 0.02;
-/// Mean water depth (m) above which a wet run is left to `run_surface_waves`
-/// instead of being force-flattened (oceans / deep lakes).
-const DEEP_WAVE_DEPTH_M: f32 = 1.0;
+/// Wave-mode blend for oceans. Tide-only waves don't need a tiny blend;
+/// a stronger pull keeps shelf-edge columns from oscillating as the tide
+/// injects and lake-level slowly corrects.
+const LAKE_LEVEL_BLEND_WITH_WAVES: f32 = 0.18;
 /// Minimum standing water (kg, ~10cm depth on one column) to count as part
 /// of a "lake" for leveling purposes. Without this, a light rain sheen
 /// sitting on every column across the whole map — including hilltops with
@@ -83,26 +81,40 @@ fn level_segment(cells: &mut [LakeCell], blend: f32) {
     let level = solve_level(cells, total_mass);
 
     let mut assigned = 0i64;
-    let mut deepest_idx = 0usize;
-    let mut deepest_val = i64::MIN;
-    for (idx, c) in cells.iter_mut().enumerate() {
+    for c in cells.iter_mut() {
         let depth = (level - c.ground).max(0.0);
         let target_mass = (depth * WATER_MASS_PER_METRE_DEPTH) as i64;
-        let blended =
-            (c.water as f32 + (target_mass - c.water) as f32 * blend) as i64;
+        let blended = (c.water as f32 + (target_mass - c.water) as f32 * blend) as i64;
         let blended = blended.max(0);
         c.water = blended;
         assigned += blended;
-        if blended > deepest_val {
-            deepest_val = blended;
-            deepest_idx = idx;
-        }
     }
-    // Rounding can leave a tiny drift; dump it on the deepest cell so total
-    // mass is preserved exactly.
-    let drift = total_mass - assigned;
-    if drift != 0 {
-        cells[deepest_idx].water = (cells[deepest_idx].water + drift).max(0);
+    // Rounding can leave a tiny drift. Spread it 1 kg at a time across the
+    // deepest cells so a full ring of ocean doesn't accumulate every tick's
+    // drift onto one particular column (the old "dump on deepest" version
+    // created a persistent spike where the drift pile grew every tick).
+    let mut drift = total_mass - assigned;
+    if drift == 0 {
+        return;
+    }
+    // Sort a copy of indices by water depth so we can walk the deepest cells.
+    // Small: only touch |drift| cells (drift is typically ≤ few kg on a ring).
+    let mut order: Vec<usize> = (0..cells.len()).collect();
+    order.sort_by(|&a, &b| cells[b].water.cmp(&cells[a].water));
+    let step: i64 = if drift > 0 { 1 } else { -1 };
+    let mut i = 0usize;
+    while drift != 0 && !order.is_empty() {
+        let idx = order[i % order.len()];
+        let next = cells[idx].water + step;
+        if next >= 0 {
+            cells[idx].water = next;
+            drift -= step;
+        }
+        i += 1;
+        if i > order.len() * 4 {
+            // Safety valve — should never trigger for realistic drifts.
+            break;
+        }
     }
 }
 
@@ -122,7 +134,6 @@ pub fn run_lake_level(world: &mut World) {
     } else {
         LAKE_LEVEL_BLEND
     };
-    let skip_deep = world.surface_waves_enabled;
 
     let mut cells: Vec<LakeCell> = Vec::with_capacity(coords.len() * CHUNK_W);
     for &coord in &coords {
@@ -160,19 +171,6 @@ pub fn run_lake_level(world: &mut World) {
         }
         if end > start {
             let segment = &mut cells[start..=end];
-            // Deep connected water is wave/tide territory — hydrostatic
-            // flattening there was the old "fake ripple" eraser.
-            if skip_deep {
-                let mean_depth = segment
-                    .iter()
-                    .map(|c| c.water as f32 / WATER_MASS_PER_METRE_DEPTH)
-                    .sum::<f32>()
-                    / segment.len() as f32;
-                if mean_depth >= DEEP_WAVE_DEPTH_M {
-                    i = end + 1;
-                    continue;
-                }
-            }
             level_segment(segment, blend);
         }
         i = end + 1;
@@ -183,13 +181,19 @@ pub fn run_lake_level(world: &mut World) {
     // so a snow-covered pool sees its actual water total, not the
     // zero it would show if only the top layer counted — that
     // mismatch would double the water on write-back.
+    //
+    // Only touch columns that actually moved — the old loop settled
+    // every loaded column every tick (including dry / deep-skipped),
+    // which dominated the frame on large rings.
     for cell in cells {
         if let Some(chunk) = world.chunks.get_mut(&cell.coord) {
             let col = &mut chunk.columns[cell.local];
             let current = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
             let delta = cell.water - current;
+            if delta == 0 {
+                continue;
+            }
             col.adjust_top_water(delta, 0);
-            col.settle_by_density(0);
             col.recompute_surface_y(chunk.bedrock_y);
         }
     }

@@ -27,13 +27,10 @@ pub enum MaterialId {
     #[default]
     Sand = 2,
     Clay = 3,
-    /// Reserved for a future ecology / biomass pass. Real topsoil is
-    /// sand + clay + decayed organic matter *held together by living
-    /// roots*; without an ecology sim to grow and maintain those roots,
-    /// generating a free-floating "organic" layer would be dishonest
-    /// (and would, correctly, wash off any slope in the first storm).
-    /// Kept in the enum for save-file compatibility with older worlds
-    /// that did generate it; terrain generation no longer emits it.
+    /// Waterlogged organic detritus / sapropel. Denser than water so
+    /// dissolved creature corpses sink and build bed sediment. Terrain
+    /// generation does not emit it as a free dry layer (that would wash
+    /// off slopes); organism death is the live source.
     Organic = 4,
     Water = 5,
     Air = 6,
@@ -277,10 +274,12 @@ impl MaterialRegistry {
                 roof_span_max_m: 0.0,
             },
             MaterialId::Organic => MaterialProps {
-                density: 600,
+                // > water so corpse ooze settles on the bed instead of
+                // floating as a dry litter cap (the old density-600 behaviour).
+                density: 1150,
                 permeability: 120,
-                erosion_resistance: 60,
-                cohesion: 100,
+                erosion_resistance: 40,
+                cohesion: 80,
                 porosity: 200,
                 phase_change: None,
                 render_alpha: 255,
@@ -395,7 +394,8 @@ impl MaterialRegistry {
             MaterialId::Gravel => [0xB4, 0xA4, 0x80],
             MaterialId::Sand => [0xE8, 0xD6, 0x6B],
             MaterialId::Clay => [0x80, 0x40, 0x00],
-            MaterialId::Organic => [0x00, 0xAA, 0x00],
+            // Dark olive mud — reads as bed ooze, not living green.
+            MaterialId::Organic => [0x3A, 0x4A, 0x28],
             MaterialId::Water => [0x23, 0x64, 0xD2],
             MaterialId::Air => [0x87, 0xCE, 0xEB],
             MaterialId::Snow => [0xF6, 0xF8, 0xFF],
