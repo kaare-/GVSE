@@ -281,7 +281,7 @@ impl AppState {
                         }
                         None => {
                             self.editor.status =
-                                "Spawn failed (atom/plant/fungus rules; land for rooted/fungus; or at cap)"
+                                "Spawn failed (invalid blueprint, column occupied/missing, or pop cap)"
                                     .into();
                         }
                     }
