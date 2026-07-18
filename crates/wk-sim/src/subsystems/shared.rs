@@ -39,14 +39,14 @@ pub fn split_precipitation(
     if precip_component <= 0 {
         return (0, 0);
     }
-    // Uses climate_elevation (excludes any snow/ice already piled up), not
+    // Uses climate_elevation (excludes any snow already piled up), not
     // raw surface_y — otherwise snow raising the surface would make
     // the column read as colder, causing still more snow: a runaway
     // feedback loop.
     let temp = wk_world::climate::temperature_at(climate_elev, sea, tick, climate);
     if temp <= climate.freeze_point_c && existing_frozen < MAX_FROZEN_SURFACE_MASS_KG {
         // Capped so a permanently-frozen spot doesn't accumulate an
-        // unbounded ice/snow tower; beyond the cap it falls as rain/slush
+        // unbounded snow/ice tower; beyond the cap it falls as rain/slush
         // runoff instead (a crude stand-in for avalanche transport).
         (0, precip_component)
     } else {
