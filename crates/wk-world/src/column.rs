@@ -431,12 +431,53 @@ impl Column {
         }
     }
 
+    /// Pore-water capacity of the near-surface rooting zone (metres of
+    /// porous solid below any weather cap).
+    ///
+    /// Previously this was only the single top porous layer. A thin
+    /// `Organic` beach skin then shrank the whole column's moisture
+    /// budget to a few hundred kg, so plant ET flash-dried hills the
+    /// moment rain stopped. Roots drink from a deeper soil profile.
+    pub const MOISTURE_ROOTING_ZONE_M: f32 = 3.0;
+
     pub fn moisture_cap(&self) -> i64 {
-        let Some(layer) = self.top_porous_layer() else {
-            return 0;
-        };
-        let props = MaterialRegistry::props(layer.material);
-        (layer.thickness * props.porosity as i64) / 255
+        let mut depth_m = 0.0f32;
+        let mut cap = 0i64;
+        for i in 0..self.layer_count as usize {
+            let layer = &self.layers[i];
+            if layer.thickness <= 0 {
+                continue;
+            }
+            let mat = layer.material;
+            // Skip weather / fluid cap — moisture lives in solid pores.
+            if matches!(
+                mat,
+                MaterialId::Water | MaterialId::Ice | MaterialId::Snow | MaterialId::Air
+            ) {
+                continue;
+            }
+            let porosity = MaterialRegistry::props(mat).porosity;
+            if porosity == 0 {
+                // Competent impermeable rock — rooting zone ends.
+                break;
+            }
+            let h = self.mass_to_height_delta(mat, layer.thickness);
+            if h <= 1e-9 {
+                continue;
+            }
+            let remain = (Self::MOISTURE_ROOTING_ZONE_M - depth_m).max(0.0);
+            if remain <= 0.0 {
+                break;
+            }
+            let use_h = h.min(remain);
+            let mass = ((layer.thickness as f32) * (use_h / h)).round() as i64;
+            cap = cap.saturating_add((mass.saturating_mul(porosity as i64)) / 255);
+            depth_m += use_h;
+            if depth_m >= Self::MOISTURE_ROOTING_ZONE_M - 1e-4 {
+                break;
+            }
+        }
+        cap
     }
 
     pub fn mass_to_height_delta(&self, material: MaterialId, mass: i64) -> f32 {
@@ -1120,5 +1161,26 @@ mod tests {
         col.deposit_to_top(MaterialId::Sand, 1000, 0);
         col.deposit_to_top(MaterialId::Water, 250, 5);
         assert_eq!(col.top_porous_layer().unwrap().material, MaterialId::Sand);
+    }
+
+    #[test]
+    fn thin_organic_skin_does_not_shrink_moisture_cap() {
+        let mut sand_only = Column::default();
+        sand_only.deposit_to_top(MaterialId::Sand, 8_000, 0);
+        let sand_cap = sand_only.moisture_cap();
+
+        let mut with_skin = Column::default();
+        with_skin.deposit_to_top(MaterialId::Sand, 8_000, 0);
+        with_skin.deposit_to_top(MaterialId::Organic, 400, 1); // thin beach litter
+        let skin_cap = with_skin.moisture_cap();
+
+        // Top-layer-only cap for 400 kg organic ≈ 313 kg. Rooting zone must
+        // still see the sand body underneath.
+        let organic_only = (400i64 * 200) / 255;
+        assert!(sand_cap > organic_only * 2, "sand rooting zone > organic skin");
+        assert!(
+            skin_cap > organic_only * 2,
+            "organic skin must not flash-dry the column (sand={sand_cap} skin={skin_cap} organic_only={organic_only})"
+        );
     }
 }
