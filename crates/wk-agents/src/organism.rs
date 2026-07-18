@@ -294,6 +294,38 @@ pub fn blueprint_body_top_offset(blueprint: &Blueprint) -> f32 {
     (max_y as f32) * MODULE_CELL_COLS
 }
 
+/// Blueprint Y of the land-plant ground crown (nucleus, else highest Root).
+///
+/// Editor y=0 is the ground line, but players often paint mid-canvas. We
+/// treat the nucleus (root crown) as the surface contact so stems rise
+/// above ground and roots with lower y dig below — matching the build.
+pub fn blueprint_land_crown_y(blueprint: &Blueprint) -> i16 {
+    if let Some(y) = blueprint
+        .modules
+        .iter()
+        .filter(|m| m.module == crate::ModuleId::Nucleus)
+        .map(|m| m.y)
+        .min()
+    {
+        return y;
+    }
+    if let Some(y) = blueprint
+        .modules
+        .iter()
+        .filter(|m| m.module == crate::ModuleId::Root)
+        .map(|m| m.y)
+        .max()
+    {
+        return y;
+    }
+    blueprint.modules.iter().map(|m| m.y).min().unwrap_or(0)
+}
+
+/// `pose.y` so the land-plant crown sits on `surface_y`.
+pub fn land_plant_pose_y(surface_y: f32, blueprint: &Blueprint) -> f32 {
+    surface_y - blueprint_land_crown_y(blueprint) as f32 * MODULE_CELL_COLS
+}
+
 /// Spawn / query helper — equilibrium if water exists, else sediment surface.
 pub fn buoyancy_target_y(col: &Column, bias: f32) -> Option<f32> {
     let (top, bed) = water_band(col)?;
@@ -705,7 +737,7 @@ fn depth_for_pose(world: &World, blueprint: &Blueprint, x: f32, y_hint: f32) -> 
         }
         return Some(col.surface_y - offset);
     }
-    Some(col.surface_y)
+    Some(land_plant_pose_y(col.surface_y, blueprint))
 }
 
 /// Find a clear pose, scanning **outward horizontally** first (full map width)
@@ -906,7 +938,9 @@ impl AgentStore {
             }
             return Some(col.surface_y - offset);
         }
-        Some(col.surface_y)
+        // Land plant: nucleus (crown) on the surface — not pose at surface
+        // with mid-canvas module Y still added (that floated the whole body).
+        Some(land_plant_pose_y(col.surface_y, blueprint))
     }
 
     /// Spawn a blueprint-backed organism near column `world_x`.
@@ -1133,7 +1167,7 @@ impl AgentStore {
                     let offset = blueprint_body_top_offset(&body.blueprint);
                     step_buoyancy(&mut pose.y, buoy, col, bias, offset);
                 } else {
-                    pose.y = col.surface_y;
+                    pose.y = land_plant_pose_y(col.surface_y, &body.blueprint);
                     buoy.vel_y = 0.0;
                     buoy.last_water_top = None;
                 }
@@ -1417,8 +1451,8 @@ impl AgentStore {
                     }
                 }
             } else {
-                // Dry land: feet (y=0) on the ground.
-                pose.y = col.surface_y;
+                // Dry land: crown on the ground (same anchor as living plants).
+                pose.y = land_plant_pose_y(col.surface_y, &body.blueprint);
                 buoy.vel_y = 0.0;
             }
 
@@ -1949,6 +1983,66 @@ mod tests {
             col.layers[0].material,
             MaterialId::Organic,
             "organic should cap the dry land stack"
+        );
+    }
+
+    #[test]
+    fn mid_canvas_plant_spawns_with_crown_on_ground() {
+        // Same shape as a typical editor paint: plant drawn mid-grid, not on y=0.
+        let mut world = World::new(3);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 10.0));
+        let mut bp = Blueprint::empty("hover");
+        bp.modules = vec![
+            crate::blueprint::PlacedModule {
+                x: 0,
+                y: 6,
+                lane: crate::LaneId::Mid,
+                module: crate::ModuleId::Photosystem,
+            },
+            crate::blueprint::PlacedModule {
+                x: 1,
+                y: 6,
+                lane: crate::LaneId::Mid,
+                module: crate::ModuleId::Photosystem,
+            },
+            crate::blueprint::PlacedModule {
+                x: 0,
+                y: 5,
+                lane: crate::LaneId::Mid,
+                module: crate::ModuleId::Stem,
+            },
+            crate::blueprint::PlacedModule {
+                x: 0,
+                y: 4,
+                lane: crate::LaneId::Mid,
+                module: crate::ModuleId::Nucleus,
+            },
+            crate::blueprint::PlacedModule {
+                x: 0,
+                y: 3,
+                lane: crate::LaneId::Mid,
+                module: crate::ModuleId::Root,
+            },
+        ];
+        bp.genome = Genome::default();
+        let surface = world.column_at(4).unwrap().surface_y;
+        let pose_y = AgentStore::spawn_elevation(&world, 4, &bp).unwrap();
+        // Nucleus at blueprint y=4 must sit on the surface.
+        let nucleus_wy = pose_y + 4.0 * MODULE_CELL_COLS;
+        assert!(
+            (nucleus_wy - surface).abs() < 0.02,
+            "nucleus should be on ground (wy={nucleus_wy} surface={surface} pose={pose_y})"
+        );
+        let root_wy = pose_y + 3.0 * MODULE_CELL_COLS;
+        assert!(
+            root_wy < surface - 0.1,
+            "root should be below ground (root={root_wy} surface={surface})"
+        );
+        let leaf_wy = pose_y + 6.0 * MODULE_CELL_COLS;
+        assert!(
+            leaf_wy > surface + 0.5,
+            "leaves should be above ground (leaf={leaf_wy} surface={surface})"
         );
     }
 
