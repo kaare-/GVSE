@@ -248,7 +248,13 @@ impl AppState {
                 if self.world.column_at(col).is_some() {
                     let mut bp = self.editor.blueprint.clone();
                     bp.name = self.editor.blueprint.name.clone();
-                    let plankton = bp.is_plankton();
+                    let where_ = if bp.is_fungus() {
+                        "litter/land"
+                    } else if bp.is_plankton() {
+                        "water/lit band"
+                    } else {
+                        "land"
+                    };
                     match self.sim.agents.spawn_from_blueprint(
                         &self.world,
                         col,
@@ -256,7 +262,6 @@ impl AppState {
                         50.0,
                     ) {
                         Some(_) => {
-                            let where_ = if plankton { "water/lit band" } else { "land" };
                             self.status_msg = format!(
                                 "Spawned {} on {where_} at x={col} (organisms={})",
                                 self.editor.blueprint.name,
@@ -268,7 +273,7 @@ impl AppState {
                         }
                         None => {
                             self.editor.status =
-                                "Spawn failed (need nucleus+photo; rooted designs need land; or at cap)"
+                                "Spawn failed (atom/plant/fungus rules; land for rooted/fungus; or at cap)"
                                     .into();
                         }
                     }
