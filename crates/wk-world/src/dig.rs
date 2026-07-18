@@ -50,7 +50,10 @@ fn is_diggable(mat: MaterialId) -> bool {
 }
 
 /// Energy multiplier to drive a root tip through `mat` (higher = harder).
-/// `None` = refuse (bedrock / fluids).
+///
+/// `None` = refuse. **Bedrock is a hard floor** — roots never enter it.
+/// Diggable depth comes from a thick Stone sleeve in worldgen, not from
+/// softening basement rock.
 pub fn root_penetrate_cost(mat: MaterialId) -> Option<f32> {
     match mat {
         MaterialId::Organic => Some(0.7),
@@ -435,6 +438,12 @@ mod tests {
             .sum();
         assert_eq!(before_layers, after_layers);
         assert!(!col.voids.is_empty() || res.collapsed_to_trench);
+    }
+
+    #[test]
+    fn bedrock_refuses_root_penetrate() {
+        assert!(root_penetrate_cost(MaterialId::Bedrock).is_none());
+        assert!(root_penetrate_cost(MaterialId::Stone).is_some());
     }
 
     #[test]
