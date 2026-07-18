@@ -1,7 +1,7 @@
 //! Cave-river flow, surface capture into open voids, and pore seepage
 //! into buried cavities.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 
 use wk_material::CHUNK_W;
 use wk_world::column::Activity;
@@ -56,6 +56,9 @@ pub fn run_void_moisture_seep(world: &mut World) {
         let Some(chunk) = world.chunks.get_mut(&coord) else {
             continue;
         };
+        if !chunk.columns.iter().any(|c| !c.voids.is_empty()) {
+            continue;
+        }
         for i in 0..CHUNK_W {
             let col = &mut chunk.columns[i];
             if col.voids.is_empty() || col.moisture <= 0 {
@@ -77,7 +80,8 @@ pub fn run_void_moisture_seep(world: &mut World) {
 }
 
 /// Lateral head-gradient flow between overlapping voids in neighbouring
-/// columns. Sparse — cost scales with void count, not column count.
+/// columns. Sparse — cost scales with void count × avg voids/column, not
+/// void-count² (cliff worldgen can seed thousands of dry cavities).
 ///
 /// Dry voids are included as receivers so a wet cave can fill an empty
 /// neighbour over time (previously only wet↔wet pairs were considered).
@@ -95,29 +99,59 @@ pub fn run_void_water_flow(world: &mut World) {
         world_x: i32,
     }
 
-    let mut snaps: Vec<Snap> = Vec::new();
+    // Only wet voids and dry neighbours of wet voids participate. Bare cliff
+    // cavities (thousands after worldgen) stay out of the matcher until
+    // pore seepage or capture puts water in them.
+    let mut wet_x: HashSet<i32> = HashSet::new();
     for (&coord, chunk) in &world.chunks {
         for i in 0..CHUNK_W {
             let col = &chunk.columns[i];
-            for (vi, v) in col.voids.iter().enumerate() {
-                if v.height_m <= 1e-4 {
-                    continue;
-                }
-                let fill_m = (v.water_mass.max(0) as f32 / WATER_MASS_PER_METRE_DEPTH)
-                    .min(v.height_m);
-                snaps.push(Snap {
-                    coord,
-                    local: i,
-                    void_idx: vi,
-                    head: v.floor_y() + fill_m,
-                    mass: v.water_mass.max(0),
-                    free: v.free_capacity_kg(),
-                    top: v.top_y,
-                    bot: v.floor_y(),
-                    world_x: coord * CHUNK_W as i32 + i as i32,
-                });
+            if col.voids.iter().any(|v| v.water_mass > 0 && v.height_m > 1e-4) {
+                wet_x.insert(coord * CHUNK_W as i32 + i as i32);
             }
         }
+    }
+
+    let mut snaps: Vec<Snap> = Vec::new();
+    if !wet_x.is_empty() {
+        for (&coord, chunk) in &world.chunks {
+            for i in 0..CHUNK_W {
+                let col = &chunk.columns[i];
+                if col.voids.is_empty() {
+                    continue;
+                }
+                let wx = coord * CHUNK_W as i32 + i as i32;
+                let near_wet =
+                    wet_x.contains(&wx) || wet_x.contains(&(wx - 1)) || wet_x.contains(&(wx + 1));
+                if !near_wet {
+                    continue;
+                }
+                for (vi, v) in col.voids.iter().enumerate() {
+                    if v.height_m <= 1e-4 {
+                        continue;
+                    }
+                    let fill_m = (v.water_mass.max(0) as f32 / WATER_MASS_PER_METRE_DEPTH)
+                        .min(v.height_m);
+                    snaps.push(Snap {
+                        coord,
+                        local: i,
+                        void_idx: vi,
+                        head: v.floor_y() + fill_m,
+                        mass: v.water_mass.max(0),
+                        free: v.free_capacity_kg(),
+                        top: v.top_y,
+                        bot: v.floor_y(),
+                        world_x: wx,
+                    });
+                }
+            }
+        }
+    }
+
+    // Index by column so wet→right-neighbour pairs are O(active voids).
+    let mut by_x: BTreeMap<i32, Vec<usize>> = BTreeMap::new();
+    for (idx, s) in snaps.iter().enumerate() {
+        by_x.entry(s.world_x).or_default().push(idx);
     }
 
     // Deltas keyed by (coord, local, void_idx).
@@ -127,10 +161,11 @@ pub fn run_void_water_flow(world: &mut World) {
         if a.mass <= 0 {
             continue;
         }
-        for b in &snaps {
-            if b.world_x != a.world_x + 1 {
-                continue;
-            }
+        let Some(right) = by_x.get(&(a.world_x + 1)) else {
+            continue;
+        };
+        for &bi in right {
+            let b = &snaps[bi];
             if !voids_overlap(a.top, a.bot, b.top, b.bot) {
                 continue;
             }

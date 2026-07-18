@@ -52,18 +52,27 @@ fn head_at_column(world: &World, coord: i32, local: usize) -> f32 {
 
 /// True when the neighbour is emergent dry land that still has pore
 /// capacity — the receive side of lake/sea fringe seepage.
-fn neighbor_wants_pore_water(world: &World, coord: i32, local: i32) -> bool {
+///
+/// `local` is the neighbour index in this chunk's space (may be −1 / CHUNK_W).
+fn neighbor_wants_pore_water(
+    world: &World,
+    coord: i32,
+    chunk: &wk_world::chunk::Chunk,
+    local: i32,
+) -> bool {
+    if local >= 0 && local < CHUNK_W as i32 {
+        let col = &chunk.columns[local as usize];
+        return col.top_water_mass() <= 0 && col.moisture < col.moisture_cap();
+    }
     let (n_coord, n_local) = if local < 0 {
         (coord - 1, (CHUNK_W as i32 + local) as usize)
-    } else if local >= CHUNK_W as i32 {
-        (coord + 1, (local - CHUNK_W as i32) as usize)
     } else {
-        (coord, local as usize)
+        (coord + 1, (local - CHUNK_W as i32) as usize)
     };
-    let Some(chunk) = world.chunks.get(&n_coord) else {
+    let Some(nchunk) = world.chunks.get(&n_coord) else {
         return false;
     };
-    let col = &chunk.columns[n_local];
+    let col = &nchunk.columns[n_local];
     col.top_water_mass() <= 0 && col.moisture < col.moisture_cap()
 }
 
@@ -119,7 +128,27 @@ pub fn run_groundwater_flow(world: &World, scratch: &mut WorldTransferScratch) {
             // drive pore flow *between* two wet columns (that ratcheted
             // aquifer mass into overflow). But a wet column *may* seep
             // toward a dry shore neighbour so lake/sea fringes fill.
+            //
+            // Critical: skip the head/neighbor work for open-water cells
+            // with no shore neighbour — otherwise the whole ocean re-enters
+            // this loop every Groundwater tick (~3× cost regression).
             let free_here = col.top_water_mass() > 0;
+            let (allow_left, allow_right) = if free_here {
+                // Deep ocean / shelf cells never touch dry land — skip before
+                // neighbour lookups. Coastal strip + inland lakes still run.
+                let bed = col.climate_elevation();
+                if bed + 2.0 < world.sea_level {
+                    continue;
+                }
+                let left = neighbor_wants_pore_water(world, coord, chunk, i as i32 - 1);
+                let right = neighbor_wants_pore_water(world, coord, chunk, i as i32 + 1);
+                if !left && !right {
+                    continue;
+                }
+                (left, right)
+            } else {
+                (true, true)
+            };
 
             let head_here = head_at_column(world, coord, i);
             let head_left = head_neighbor(world, coord, i as i32 - 1);
@@ -137,14 +166,11 @@ pub fn run_groundwater_flow(world: &World, scratch: &mut WorldTransferScratch) {
             let mut out_left = 0i64;
             let mut out_right = 0i64;
 
-            let left_is_shore = neighbor_wants_pore_water(world, coord, i as i32 - 1);
-            let right_is_shore = neighbor_wants_pore_water(world, coord, i as i32 + 1);
-
-            if grad_left > 0.0 && mass_per_metre.is_finite() && (!free_here || left_is_shore) {
+            if allow_left && grad_left > 0.0 && mass_per_metre.is_finite() {
                 let transfer = grad_left * mass_per_metre * GROUNDWATER_FLOW_COEFF * perm;
                 out_left = (transfer as i64).min(col.moisture);
             }
-            if grad_right > 0.0 && mass_per_metre.is_finite() && (!free_here || right_is_shore) {
+            if allow_right && grad_right > 0.0 && mass_per_metre.is_finite() {
                 let remaining = (col.moisture - out_left).max(0);
                 let transfer = grad_right * mass_per_metre * GROUNDWATER_FLOW_COEFF * perm;
                 out_right = (transfer as i64).min(remaining);

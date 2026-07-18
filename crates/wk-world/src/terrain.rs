@@ -535,16 +535,19 @@ pub fn seed_rock_face_cavities(chunk: &mut Chunk, seed: u64, sea_level: f32) {
         let left = if i > 0 { elevs[i - 1] } else { e };
         let right = if i + 1 < CHUNK_W { elevs[i + 1] } else { e };
         let drop = (e - left).abs().max((e - right).abs());
-        let steep = drop > 2.2;
-        let high = e > sea_level + 22.0;
+        let steep = drop > 2.8;
+        let high = e > sea_level + 28.0;
         let wx = base + i as i32;
         let roll = hash_f32(seed, wx as i64, 0xC4BE_u64);
+        // Sparse — thousands of dry cavities made every-tick void flow dominate
+        // the frame when the matcher was still O(n²). Keep mouths readable
+        // without carpeting the ring.
         let chance = if steep {
-            0.62
-        } else if high && drop > 0.9 {
-            0.22
+            0.28
+        } else if high && drop > 1.4 {
+            0.10
         } else if high {
-            0.06
+            0.03
         } else {
             0.0
         };
@@ -851,25 +854,32 @@ mod tests {
     #[test]
     fn steep_faces_seed_cavities() {
         // Artificial cliff: left low, right high within one chunk.
-        let mut chunk = Chunk::new(0, 0.0);
-        for i in 0..CHUNK_W {
-            let surface = if i < CHUNK_W / 2 { 8.0 } else { 40.0 };
-            fill_bathymetry_column(
-                &mut chunk.columns[i],
-                surface,
-                0.0,
-                0.0,
-                42,
-                i as i32,
-                0,
-            );
+        // Seeding is sparse/stochastic — try a few seeds so the test isn't
+        // brittle against the tuned chance.
+        let mut found = false;
+        for seed in [42u64, 7, 99, 1234, 99991, 0xC4BE] {
+            let mut chunk = Chunk::new(0, 0.0);
+            for i in 0..CHUNK_W {
+                let surface = if i < CHUNK_W / 2 { 8.0 } else { 40.0 };
+                fill_bathymetry_column(
+                    &mut chunk.columns[i],
+                    surface,
+                    0.0,
+                    0.0,
+                    seed,
+                    i as i32,
+                    0,
+                );
+            }
+            let before: usize = chunk.columns.iter().map(|c| c.voids.len()).sum();
+            seed_rock_face_cavities(&mut chunk, seed, 0.0);
+            let after: usize = chunk.columns.iter().map(|c| c.voids.len()).sum();
+            if after > before {
+                found = true;
+                break;
+            }
         }
-        let before: usize = chunk.columns.iter().map(|c| c.voids.len()).sum();
-        seed_rock_face_cavities(&mut chunk, 42, 0.0);
-        let after: usize = chunk.columns.iter().map(|c| c.voids.len()).sum();
-        assert!(
-            after > before,
-            "cliff contact should punch rock-face cavities (before={before} after={after})"
-        );
+        assert!(found, "cliff contact should punch rock-face cavities for some seed");
     }
 }
+

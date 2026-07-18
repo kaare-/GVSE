@@ -200,7 +200,9 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::VoidWater,
-        period: 1,
+        // Every 2 ticks — cave fill/flow is slow vs surface hydrology, and
+        // cliff worldgen can leave thousands of dry cavities in the ring.
+        period: 2,
         phase: 0,
     },
     SubsystemSchedule {
