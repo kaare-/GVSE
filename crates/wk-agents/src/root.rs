@@ -67,6 +67,13 @@ pub const ROOT_GROW_PERIOD: u64 = 48;
 pub const LAND_SPROUT_ENERGY_FRAC: f32 = 0.52;
 /// Phase period for land vegetative sprouts (shorter than plankton fission).
 pub const LAND_SPROUT_PERIOD: u64 = 48;
+/// Energy fraction above which roots/shoots may elongate. Must stay **below**
+/// [`LAND_SPROUT_ENERGY_FRAC`] so plants grow tissue while banking for a
+/// sucker — tying both gates to 0.52 left forests as 1-pixel stubs.
+pub const LAND_GROW_ENERGY_FRAC: f32 = 0.30;
+/// Painted Root modules required before a vegetative sprout may fire.
+/// Minimal plants start with 1; they must dig a little first.
+pub const LAND_SPROUT_MIN_ROOTS: usize = 3;
 
 /// Energy multiplier to bore through `mat`. Higher = harder.
 pub fn penetrate_cost(mat: MaterialId) -> Option<f32> {
@@ -478,9 +485,8 @@ pub fn try_elongate_root(
     if w_root < 0.08 {
         return 0.0;
     }
-    // Need surplus above the vegetative sprout reserve — elongating at
-    // 0.45 kept coastal plains permanently below the sprout gate.
-    if energy.current < energy.max * LAND_SPROUT_ENERGY_FRAC {
+    // Grow while banking toward the sprout gate (see LAND_GROW_ENERGY_FRAC).
+    if energy.current < energy.max * LAND_GROW_ENERGY_FRAC {
         return 0.0;
     }
 
@@ -535,7 +541,7 @@ pub fn try_elongate_root(
                 (pen, 0.0)
             };
             let cost = ROOT_ELONGATE_BASE_COST * pen;
-            let floor = energy.max * LAND_SPROUT_ENERGY_FRAC;
+            let floor = energy.max * LAND_GROW_ENERGY_FRAC;
             if energy.current < cost + floor {
                 continue;
             }
@@ -581,7 +587,7 @@ pub fn try_elongate_root(
     if in_void {
         // Cavities are free paths — no bore, cheap elongate.
         let cost = ROOT_ELONGATE_BASE_COST * ROOT_VOID_PENETRATE;
-        let floor = energy.max * LAND_SPROUT_ENERGY_FRAC;
+        let floor = energy.max * LAND_GROW_ENERGY_FRAC;
         if energy.current < cost + floor {
             return 0.0;
         }
@@ -604,7 +610,7 @@ pub fn try_elongate_root(
         .unwrap_or(MaterialId::Sand);
     if let Some(pen) = penetrate_cost(mat) {
         let cost = ROOT_ELONGATE_BASE_COST * pen;
-        let floor = energy.max * LAND_SPROUT_ENERGY_FRAC;
+        let floor = energy.max * LAND_GROW_ENERGY_FRAC;
         if energy.current < cost + floor {
             return 0.0;
         }
@@ -639,7 +645,7 @@ pub fn try_grow_shoot(
     entity_id: u32,
 ) -> f32 {
     let (w_stem, w_leaf, _) = genome.alloc_weights();
-    if energy.current < energy.max * 0.55 {
+    if energy.current < energy.max * (LAND_GROW_ENERGY_FRAC + 0.08) {
         return 0.0;
     }
     let occupied: std::collections::HashSet<(i16, i16)> =
