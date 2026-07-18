@@ -17,6 +17,12 @@ pub const MAX_ROOT_MODULES: usize = 24;
 /// Soft cap on olive Stem pixels.
 pub const MAX_STEM_MODULES: usize = 12;
 
+/// Max columns a root sucker may emerge from the parent crown.
+/// Seeds / wind dispersal come later — vegetative spread stays local.
+pub const ROOT_SPROUT_MAX_DIST: i32 = 4;
+/// Pore saturation floor for a sprout site (avoid bone-dry rock).
+pub const ROOT_SPROUT_MIN_MOIST_FRAC: f32 = 0.08;
+
 /// Base energy to place one new Root pixel in soft Organic.
 pub const ROOT_ELONGATE_BASE_COST: f32 = 2.4;
 /// kg of substrate converted per successful rock/sand bore.
@@ -251,6 +257,124 @@ pub fn plant_is_anchored(world: &World, pose_x: f32, pose_y: f32, blueprint: &Bl
     // Need a real foothold — a single clinging tip is enough to stay put;
     // zero purchase → free to fall / be pushed.
     purchase >= 1
+}
+
+/// World-X of the blueprint's horizontal mid (crown column).
+fn blueprint_mid_x(blueprint: &Blueprint) -> f32 {
+    let min_x = blueprint.modules.iter().map(|m| m.x).min().unwrap_or(0);
+    let max_x = blueprint.modules.iter().map(|m| m.x).max().unwrap_or(0);
+    (min_x as f32 + max_x as f32) * 0.5
+}
+
+/// True when a land plant can emerge here (emergent bed, some pore water).
+pub fn column_can_host_sprout(world: &World, wx: i32) -> bool {
+    let Some(col) = world.column_at(wx) else {
+        return false;
+    };
+    // Drown risk: more than ~0.5 m of standing water.
+    if let Some((_, mass)) = col.flowable_water() {
+        if mass > 0 {
+            let depth = col.mass_to_height_delta(MaterialId::Water, mass);
+            if depth > 0.5 {
+                return false;
+            }
+        }
+    }
+    let cap = col.moisture_cap();
+    if cap <= 0 {
+        return false;
+    }
+    let moist = col.moisture.max(0) as f32 / cap as f32;
+    moist >= ROOT_SPROUT_MIN_MOIST_FRAC || col.top_water_mass() > 0
+}
+
+/// Pick a column for vegetative **root sprout** propagation.
+///
+/// Prefers painted Root tips that already sit in a neighbouring column
+/// (runners). If roots are still under the crown only, allows a near
+/// sucker within [`ROOT_SPROUT_MAX_DIST`], biased by moisture.
+///
+/// Returns `None` when no eligible site exists (caller should skip the
+/// attempt without charging energy). Seeds / fruiting come later.
+pub fn pick_root_sprout_x(
+    world: &World,
+    pose_x: f32,
+    pose_y: f32,
+    blueprint: &Blueprint,
+    world_seed: u64,
+    tick: u64,
+    entity_id: u32,
+) -> Option<f32> {
+    if !blueprint.is_rooted() || blueprint.root_count() == 0 {
+        return None;
+    }
+    let parent_wx = pose_x.floor() as i32;
+    let mid_x = blueprint_mid_x(blueprint);
+
+    // 1) Painted lateral roots with solid purchase — farthest first.
+    let mut lateral: Vec<(i32, i32, f32)> = Vec::new(); // |dx|, wx, moist
+    for m in blueprint
+        .modules
+        .iter()
+        .filter(|m| m.module == ModuleId::Root)
+    {
+        let cell_wx = (pose_x + (m.x as f32 - mid_x) * MODULE_CELL_COLS).floor() as i32;
+        let dx = (cell_wx - parent_wx).abs();
+        if dx < 1 {
+            continue;
+        }
+        let tip_y = module_world_y(pose_y, m.y);
+        if !solid_purchase_at(world, cell_wx, tip_y)
+            && !solid_purchase_at(world, cell_wx, tip_y - 0.05)
+        {
+            continue;
+        }
+        if !column_can_host_sprout(world, cell_wx) {
+            continue;
+        }
+        let moist = world
+            .column_at(cell_wx)
+            .map(|c| {
+                let cap = c.moisture_cap().max(1) as f32;
+                c.moisture.max(0) as f32 / cap
+            })
+            .unwrap_or(0.0);
+        lateral.push((dx, cell_wx, moist));
+    }
+    lateral.sort_by(|a, b| {
+        b.0.cmp(&a.0)
+            .then(b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal))
+    });
+    if let Some(&(_, wx, _)) = lateral.first() {
+        return Some(wx as f32 + 0.5);
+    }
+
+    // 2) Near-crown sucker — underground runner not yet painted as modules.
+    let prefer_right = hash_u64(world_seed, tick as i64, entity_id as i64, 0x5352_4F54) & 1 == 0;
+    let mut best: Option<(f32, i32)> = None; // score, wx
+    for dist in 1..=ROOT_SPROUT_MAX_DIST {
+        for sign in [1i32, -1] {
+            let signed = if prefer_right { sign } else { -sign };
+            let wx = parent_wx + signed * dist;
+            if !column_can_host_sprout(world, wx) {
+                continue;
+            }
+            let moist = world
+                .column_at(wx)
+                .map(|c| {
+                    let cap = c.moisture_cap().max(1) as f32;
+                    c.moisture.max(0) as f32 / cap
+                })
+                .unwrap_or(0.0);
+            // Prefer wetter sites a bit farther out (colonise, don't pile).
+            let score = moist * 2.0 + dist as f32 * 0.15;
+            match best {
+                Some((s, _)) if s >= score => {}
+                _ => best = Some((score, wx)),
+            }
+        }
+    }
+    best.map(|(_, wx)| wx as f32 + 0.5)
 }
 
 /// Pick the deepest Root tip (most negative module y), or Nucleus if none.
@@ -509,6 +633,50 @@ mod tests {
             col.ecology.nutrient = 0.5;
         }
         world
+    }
+
+    #[test]
+    fn root_sprout_picks_nearby_moist_column() {
+        let mut world = dry_land();
+        // Saturate neighbours so suckers have somewhere to go.
+        for x in 6..12 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+            }
+        }
+        let bp = Blueprint::minimal_plant(Genome::default());
+        let pose_x = 8.5;
+        let pose_y = world.column_at(8).unwrap().surface_y;
+        let site = pick_root_sprout_x(&world, pose_x, pose_y, &bp, 1, 0, 7)
+            .expect("sucker site");
+        let dx = (site.floor() as i32 - 8).abs();
+        assert!(
+            (1..=ROOT_SPROUT_MAX_DIST).contains(&dx),
+            "sprout should emerge near parent (site={site}, dx={dx})"
+        );
+        assert!(column_can_host_sprout(&world, site.floor() as i32));
+    }
+
+    #[test]
+    fn root_sprout_skips_deep_water() {
+        let mut world = dry_land();
+        for x in 6..12 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+            }
+        }
+        // Flood every neighbour — only parent column dry-ish.
+        for x in [6, 7, 9, 10, 11, 12] {
+            if let Some(col) = world.column_at_mut(x) {
+                col.deposit_to_top(MaterialId::Water, 20_000, 0);
+            }
+        }
+        let bp = Blueprint::minimal_plant(Genome::default());
+        let site = pick_root_sprout_x(&world, 8.5, 8.0, &bp, 2, 10, 3);
+        assert!(
+            site.is_none(),
+            "no sprout into drowned neighbours (got {site:?})"
+        );
     }
 
     #[test]

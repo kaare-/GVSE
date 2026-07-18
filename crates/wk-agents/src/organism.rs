@@ -761,14 +761,28 @@ fn depth_for_pose(world: &World, blueprint: &Blueprint, x: f32, y_hint: f32) -> 
     Some(land_plant_pose_y(col.surface_y, blueprint))
 }
 
-/// Find a clear pose, scanning **outward horizontally** first (full map width)
-/// so clones spread along the water instead of packing into a lens.
+/// Find a clear pose, scanning **outward horizontally** first.
+///
+/// `max_steps` limits how far the search walks (`None` = whole map —
+/// used by plankton clones). Root sprouts pass a small radius so
+/// suckers stay near the parent root system.
 fn find_clear_pose(
     world: &World,
     bodies: &[(Entity, Aabb, bool)],
     blueprint: &Blueprint,
     x0: f32,
     y0: f32,
+) -> Option<(f32, f32)> {
+    find_clear_pose_limited(world, bodies, blueprint, x0, y0, None)
+}
+
+fn find_clear_pose_limited(
+    world: &World,
+    bodies: &[(Entity, Aabb, bool)],
+    blueprint: &Blueprint,
+    x0: f32,
+    y0: f32,
+    max_steps: Option<i32>,
 ) -> Option<(f32, f32)> {
     let (lo, hi) = world.world_x_bounds()?;
     let lo_f = lo as f32;
@@ -803,8 +817,9 @@ fn find_clear_pose(
     }
 
     for &row_y in &depth_rows {
-        // k = 0, +1, -1, +2, -2, ... across the whole world.
-        let max_k = ((hi_f - lo_f) / step).ceil() as i32 + 1;
+        // k = 0, +1, -1, +2, -2, ...
+        let full_k = ((hi_f - lo_f) / step).ceil() as i32 + 1;
+        let max_k = max_steps.unwrap_or(full_k).clamp(0, full_k);
         for k in 0..=max_k {
             for sign in [1i32, -1] {
                 if k == 0 && sign < 0 {
@@ -1401,16 +1416,42 @@ impl AgentStore {
 
             let phase_id = e.id() as u64 % REPRO_PERIOD;
             let threshold = genome.reproduce_at.clamp(0.2, 0.99);
-            // Cold / hot water: no fission outside the comfort band.
+            // Cold / hot: no reproduce outside the comfort band.
             // Threshold is intentionally soft (was 0.35) so noon ocean under
             // thermal fields doesn't sterilise a full-energy Atom while still
             // blocking the E46d cold-but-unfrozen case.
-            let can_repro = comfort >= 0.20;
+            let can_repro = comfort >= 0.20
+                && (!rooted || (plant_active && !dormant && n_roots > 0.0));
             if population + births.len() < MAX_ORGANISMS
                 && tick % REPRO_PERIOD == phase_id
                 && energy.current >= energy.max * threshold
                 && can_repro
             {
+                // Land plants: vegetative root sprout (pick site first so a
+                // failed site doesn't tax the parent). Plankton: fission.
+                let sprout_x = if rooted {
+                    crate::root::pick_root_sprout_x(
+                        world,
+                        pose.x,
+                        pose.y,
+                        &body.blueprint,
+                        world.seed,
+                        tick,
+                        e.id(),
+                    )
+                } else {
+                    let w = organism_width(&body.blueprint);
+                    let side = if (tick + e.id() as u64) % 2 == 0 {
+                        w
+                    } else {
+                        -w
+                    };
+                    Some(pose.x + side)
+                };
+                let Some(child_x0) = sprout_x else {
+                    continue;
+                };
+
                 // Low CloneFidelity → weaker kids, and density-dependent
                 // stillbirths (messy booms then fails to replace itself at cap).
                 let fidelity = genome.clone_fidelity.clamp(0.0, 1.0);
@@ -1436,14 +1477,8 @@ impl AgentStore {
                         e.id(),
                     );
                     child_bp.genome = child_genome;
-                    let w = organism_width(&child_bp);
-                    let side = if (tick + e.id() as u64) % 2 == 0 {
-                        w
-                    } else {
-                        -w
-                    };
                     births.push((
-                        pose.x + side,
+                        child_x0,
                         pose.y,
                         child_bp,
                         child_e,
@@ -1494,7 +1529,16 @@ impl AgentStore {
             if self.organism_count() >= MAX_ORGANISMS {
                 break;
             }
-            let Some((x, y)) = find_clear_pose(world, &bodies, &blueprint, x0, y0) else {
+            // Root sprouts stay near the parent root system; plankton may
+            // search the whole water body for a clear float slot.
+            let max_steps = if blueprint.is_rooted() {
+                Some(crate::root::ROOT_SPROUT_MAX_DIST)
+            } else {
+                None
+            };
+            let Some((x, y)) =
+                find_clear_pose_limited(world, &bodies, &blueprint, x0, y0, max_steps)
+            else {
                 continue;
             };
             let host_x = x.floor() as i32;
@@ -2255,6 +2299,63 @@ mod tests {
         assert!(
             store.ecs.get::<&Organism>(e).is_err(),
             "prolonged drought should end living Organism after hibernate max"
+        );
+    }
+
+    #[test]
+    fn land_plant_propagates_by_root_sprout() {
+        let mut world = World::new(13);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+                col.ecology.nutrient = 0.7;
+            }
+        }
+        let mut store = AgentStore::new();
+        let parent = store
+            .spawn_from_blueprint(
+                &world,
+                16,
+                Blueprint::minimal_plant(Genome {
+                    reproduce_at: 0.35,
+                    clone_fidelity: 0.9,
+                    metabolic_rate: 0.2,
+                    ..Genome::default()
+                }),
+                200.0,
+            )
+            .expect("parent");
+        let x0 = store.ecs.get::<&Pose>(parent).unwrap().x;
+        // Keep the tank topped so repro can fire.
+        for t in 0..4_000 {
+            if let Ok(mut e) = store.ecs.get::<&mut Energy>(parent) {
+                e.current = e.max;
+            }
+            store.step_organisms(&mut world, t);
+            if store.organism_count() > 1 {
+                break;
+            }
+        }
+        assert!(
+            store.organism_count() > 1,
+            "root sprout should produce an offspring"
+        );
+        let mut xs: Vec<f32> = store
+            .ecs
+            .query::<(&Pose, &Organism)>()
+            .iter()
+            .map(|(_, (p, _))| p.x)
+            .collect();
+        xs.sort_by(|a, b| a.partial_cmp(b).unwrap());
+        let max_dx = xs
+            .iter()
+            .map(|x| (x - x0).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            max_dx <= crate::root::ROOT_SPROUT_MAX_DIST as f32 + 1.5,
+            "sprouts must stay near the parent root system (max_dx={max_dx})"
         );
     }
 
