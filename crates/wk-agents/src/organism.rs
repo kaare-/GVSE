@@ -1618,12 +1618,18 @@ impl AgentStore {
             if dormant {
                 upkeep *= crate::root::DROUGHT_DORMANT_UPKEEP;
             }
-            // Root tissue has a small upkeep tax (deeper trees cost more).
-            let root_tax = if rooted && !dormant {
-                0.015 * body.blueprint.root_count() as f32
+            // Root tissue maintenance — must stay ≪ photo or deep-rooted
+            // trees starve overnight on wet fertile ground (see ROOT_UPKEEP).
+            // Scales down at night with basal respiration (woody roots don't
+            // burn day-rate sugar in the dark).
+            let mut root_tax = if rooted && !dormant {
+                crate::root::ROOT_UPKEEP_PER_MODULE * body.blueprint.root_count() as f32
             } else {
                 0.0
             };
+            if l0 < 0.1 {
+                root_tax *= NIGHT_UPKEEP_MULT;
+            }
             energy.current -= upkeep + root_tax;
             if energy.current <= 0.0 {
                 deaths.push((e, wx));
@@ -1668,14 +1674,16 @@ impl AgentStore {
             } else {
                 genome.reproduce_at.clamp(0.2, 0.99)
             };
-            // Plankton: comfort + circadian. Land suckers need a small root
-            // system first (else every joule becomes a 1-pixel stump clone).
+            // Plankton: comfort + circadian (`plant_active`). Land suckers need
+            // a small root system first — and must stay inside the active
+            // window: ungated night sprouting burned a full tank by dawn
+            // (paid child_e every LAND_SPROUT_PERIOD with no photo refill).
             let can_repro = if rooted {
-                comfort >= 0.05
-                    && !dormant
+                plant_active
+                    && comfort >= 0.05
                     && body.blueprint.root_count() >= crate::root::LAND_SPROUT_MIN_ROOTS
             } else {
-                comfort >= 0.20
+                plant_active && comfort >= 0.20
             };
             if population + births.len() < MAX_ORGANISMS
                 && tick % repro_period == phase_id
@@ -1783,7 +1791,11 @@ impl AgentStore {
                 let need_runner = !crate::root::has_lateral_runner(pose.x, &body.blueprint)
                     && body.blueprint.root_count()
                         >= crate::root::LAND_SPROUT_MIN_ROOTS.saturating_sub(1);
-                if w_root >= 0.2 || need_runner {
+                let roots_ample = crate::root::roots_past_soft_budget(&body.blueprint);
+                // Prefer canopy once the soft root budget is met — otherwise
+                // high alloc_root genomes bore until night upkeep kills them.
+                let grow_roots = (w_root >= 0.2 || need_runner) && (!roots_ample || need_runner);
+                if grow_roots {
                     let _ = crate::root::try_elongate_root(
                         &mut body.blueprint,
                         energy,
@@ -3679,6 +3691,124 @@ mod tests {
         panic!(
             "expected root sprout on wet coastal plain; living={}",
             store.organism_count()
+        );
+    }
+
+    #[test]
+    fn deep_rooted_plant_survives_default_night() {
+        // Regresses the 0.015/root/tick tax: 24 roots × night emptied a
+        // full 200 tank before dawn even on wet fertile ground.
+        let mut world = World::new(13);
+        world.sea_level = 0.0;
+        world.climate.base_temp_c = 22.0;
+        world.climate.lapse_rate_c_per_m = 0.0;
+        world.climate.day_night_amplitude_c = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+                col.ecology.nutrient = 0.9;
+                col.deposit_to_top(MaterialId::Organic, 900, 0);
+            }
+        }
+        let mut store = AgentStore::new();
+        let mut bp = Blueprint::minimal_plant(Genome {
+            metabolic_rate: 0.35,
+            alloc_root: 0.7,
+            ..Genome::default()
+        });
+        // Pre-paint a heavy root system (soft budget normally prevents this).
+        for i in 0..20i16 {
+            bp.modules.push(crate::blueprint::PlacedModule {
+                x: (i % 5) - 2,
+                y: -1 - (i / 5),
+                lane: crate::module::LaneId::Mid,
+                module: crate::module::ModuleId::Root,
+            });
+        }
+        let e = store
+            .spawn_from_blueprint(&world, 16, bp, 200.0)
+            .expect("plant");
+        assert!(
+            store.inspect_organism(e).unwrap().roots >= 20,
+            "fixture needs a deep root system"
+        );
+        if let Ok(mut energy) = store.ecs.get::<&mut Energy>(e) {
+            energy.current = energy.max;
+        }
+        // Skip the day; run the whole default night (10 h).
+        let night0 = world.climate.day_length_ticks;
+        let night1 = night0 + world.climate.night_length_ticks;
+        for t in night0..night1 {
+            store.step_organisms(&mut world, t);
+        }
+        assert!(
+            store.ecs.get::<&Organism>(e).is_ok(),
+            "deep-rooted plant must survive one night on a full tank"
+        );
+        let info = store.inspect_organism(e).unwrap();
+        assert!(
+            info.energy > 1.0,
+            "should keep reserves through the night (energy={})",
+            info.energy
+        );
+    }
+
+    #[test]
+    fn hydrated_plant_stops_rooting_past_soft_budget() {
+        let mut world = World::new(13);
+        world.sea_level = 0.0;
+        world.climate.base_temp_c = 22.0;
+        world.climate.lapse_rate_c_per_m = 0.0;
+        world.climate.day_night_amplitude_c = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+                col.ecology.nutrient = 0.9;
+                col.deposit_to_top(MaterialId::Organic, 900, 0);
+            }
+        }
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(
+                &world,
+                16,
+                Blueprint::minimal_plant(Genome {
+                    metabolic_rate: 0.25,
+                    alloc_root: 0.9,
+                    alloc_stem: 0.05,
+                    alloc_leaf: 0.05,
+                    root_depth_bias: 0.9,
+                    reproduce_at: 0.99,
+                    clone_fidelity: 0.05, // almost never viable sprouts
+                    ..Genome::default()
+                }),
+                200.0,
+            )
+            .expect("plant");
+        for t in 0..20_000 {
+            if let Some(col) = world.column_at_mut(16) {
+                col.moisture = col.moisture_cap();
+            }
+            // Keep the tank high so only the soft budget (not energy) gates roots.
+            if let Ok(mut energy) = store.ecs.get::<&mut Energy>(e) {
+                energy.current = energy.max * 0.85;
+            }
+            store.step_organisms(&mut world, t);
+        }
+        let info = store.inspect_organism(e).expect("alive");
+        let budget = crate::root::useful_root_budget(
+            &store.ecs.get::<&ModuleBody>(e).unwrap().blueprint,
+        );
+        assert!(
+            info.roots <= budget + 6,
+            "hydrated plant should stop near soft budget (roots={} budget={budget}; +6 allows one rhizome runner)",
+            info.roots
+        );
+        assert!(
+            info.roots >= crate::root::LAND_SPROUT_MIN_ROOTS,
+            "should still reach sprout-ready roots"
         );
     }
 

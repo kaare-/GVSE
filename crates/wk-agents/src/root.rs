@@ -25,6 +25,18 @@ pub const ROOT_SPROUT_MIN_MOIST_FRAC: f32 = 0.02;
 /// Neighbour wall height (m) that makes a notch unplantable (embedded look).
 pub const PLANTABLE_WALL_DROP_M: f32 = 6.0;
 
+/// Per-root energy drain / tick. Must stay tiny vs photo (~0.15/tick):
+/// the old `0.015` bankrupted any tree with ≥3 roots over a default night
+/// (10 h × 0.045 ≈ 1620 energy on a 200 tank) even on wet fertile coast.
+/// Sized so a maxed root system (~24) still outlasts a default night on a
+/// full tank; night multiplies this by the same factor as basal upkeep.
+pub const ROOT_UPKEEP_PER_MODULE: f32 = 0.0001;
+/// Extra Root modules allowed per photosystem beyond the sprout minimum.
+/// Past this soft budget, hydrated plants invest in shoots instead of
+/// boring more sand (avoids root-only death spirals). Thirsty plants may
+/// still dig past this; full-tank "luxury" boring is not allowed.
+pub const LAND_ROOTS_PER_PHOTOSYSTEM: usize = 3;
+
 /// Base energy to place one new Root pixel in soft Organic.
 pub const ROOT_ELONGATE_BASE_COST: f32 = 2.4;
 /// kg of substrate converted per successful rock/sand bore.
@@ -78,6 +90,18 @@ pub const LAND_GROW_ENERGY_FRAC: f32 = 0.30;
 /// Painted Root modules required before a vegetative sprout may fire.
 /// Minimal plants start with 1; they must dig a little first.
 pub const LAND_SPROUT_MIN_ROOTS: usize = 3;
+
+/// Soft useful-root budget: sprout minimum + leaf-driven extras.
+pub fn useful_root_budget(blueprint: &Blueprint) -> usize {
+    LAND_SPROUT_MIN_ROOTS
+        .saturating_add(blueprint.photosystem_count().saturating_mul(LAND_ROOTS_PER_PHOTOSYSTEM))
+        .min(MAX_ROOT_MODULES)
+}
+
+/// True when further root growth is optional (plant is already well rooted).
+pub fn roots_past_soft_budget(blueprint: &Blueprint) -> bool {
+    blueprint.root_count() >= useful_root_budget(blueprint)
+}
 
 /// Energy multiplier to bore through `mat`. Higher = harder.
 pub fn penetrate_cost(mat: MaterialId) -> Option<f32> {
@@ -503,6 +527,19 @@ pub fn try_elongate_root(
     let need_runner = !has_lateral_runner(pose_x, blueprint)
         && blueprint.root_count() >= LAND_SPROUT_MIN_ROOTS.saturating_sub(1);
     let banking_for_sprout = energy.current >= energy.max * LAND_SPROUT_ENERGY_FRAC * 0.85;
+    // Past the soft root:shoot budget, only grow roots when stressed for
+    // water, forcing a rhizome runner, or sitting on luxury surplus.
+    let host_moist = world
+        .column_at(parent_wx)
+        .map(|c| {
+            let cap = c.moisture_cap().max(1) as f32;
+            (c.moisture.max(0) as f32 / cap).clamp(0.0, 1.5)
+        })
+        .unwrap_or(0.0);
+    let thirsty = host_moist < DROUGHT_STRESS_FRAC;
+    if roots_past_soft_budget(blueprint) && !need_runner && !thirsty {
+        return 0.0;
+    }
 
     // Candidate steps from each tip: down + diagonals + lateral.
     const DIRS: [(i16, i16); 5] = [(0, -1), (-1, -1), (1, -1), (-1, 0), (1, 0)];
