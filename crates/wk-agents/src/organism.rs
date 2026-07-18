@@ -535,6 +535,8 @@ pub fn mutate_organism(
     g.alloc_stem = jitter(g.alloc_stem, 0.0, 1.0);
     g.alloc_leaf = jitter(g.alloc_leaf, 0.0, 1.0);
     g.alloc_root = jitter(g.alloc_root, 0.0, 1.0);
+    g.leaf_absorb = jitter(g.leaf_absorb, 0.05, 1.0);
+    g.shade_efficiency = jitter(g.shade_efficiency, 0.0, 1.0);
     g
 }
 
@@ -776,7 +778,8 @@ fn depth_for_pose(world: &World, blueprint: &Blueprint, x: f32, y_hint: f32) -> 
     let wx = x.floor() as i32;
     let col = world.column_at(wx)?;
     if blueprint.is_rooted() {
-        if !crate::root::column_is_plantable(world, wx) {
+        let reach = crate::root::root_reach_m(blueprint);
+        if !crate::root::column_is_plantable_for_reach(world, wx, reach) {
             return None;
         }
         return Some(land_plant_pose_y_on(col, blueprint));
@@ -812,11 +815,12 @@ fn find_land_sprout_pose(
         .column_at(prefer_wx)
         .map(|c| c.climate_elevation())
         .unwrap_or(0.0);
+    let reach = crate::root::root_reach_m(blueprint);
     let try_col = |wx: i32| -> Option<(f32, f32)> {
         if occupied.contains(&wx) {
             return None;
         }
-        if !crate::root::column_can_host_sprout(world, wx) {
+        if !crate::root::column_can_host_sprout_for_reach(world, wx, reach) {
             return None;
         }
         let col = world.column_at(wx)?;
@@ -1275,7 +1279,10 @@ impl AgentStore {
         let (x, y) = if blueprint.is_rooted() {
             // Prefer the requested column if free; else search for a ledge.
             let mut occupied = rooted_occupied_columns(&bodies);
-            if !occupied.contains(&world_x) && crate::root::column_is_plantable(world, world_x) {
+            let reach = crate::root::root_reach_m(&blueprint);
+            if !occupied.contains(&world_x)
+                && crate::root::column_is_plantable_for_reach(world, world_x, reach)
+            {
                 (x0, y0)
             } else {
                 occupied.insert(world_x);
@@ -1463,6 +1470,34 @@ impl AgentStore {
         // Soft energy equalize from last tick's tanks (conserves total energy).
         equalize_genet_energy(self, &genet_members);
 
+        // Sparse canopy index for cheap neighbour shade (O(plants), not O(world)).
+        let mut canopy = crate::shade::CanopyIndex::default();
+        for (e, (pose, body, genome, _)) in self
+            .ecs
+            .query::<(&Pose, &ModuleBody, &Genome, &Organism)>()
+            .iter()
+        {
+            if !body.blueprint.is_rooted() {
+                continue;
+            }
+            let n_photo = body.photosystem_count();
+            if n_photo == 0 {
+                continue;
+            }
+            let n_stem = body.blueprint.stem_count();
+            let top = crate::shade::canopy_top_y(pose.y, &body.blueprint);
+            let absorb =
+                crate::shade::cast_strength(n_photo, n_stem, genome.leaf_absorb);
+            crate::shade::record_canopy(
+                &mut canopy,
+                pose.world_x(),
+                top,
+                absorb,
+                n_photo,
+                e.id(),
+            );
+        }
+
         let mut deaths: Vec<(Entity, i32)> = Vec::new();
         // x, y, blueprint, energy, max_e, parent, parent_generation, founder_id, genet_id
         let mut births: Vec<(f32, f32, Blueprint, f32, f32, Entity, u32, u8, u32)> = Vec::new();
@@ -1558,7 +1593,38 @@ impl AgentStore {
 
             let plant_active = active && !dormant;
             if plant_active && (!plankton || in_water) {
-                let mut gain = organism_photo_gain(energy.max, l0, n_photo) * comfort;
+                // Land plants sample neighbour canopy shade; plankton keep sky L0
+                // (water depth / CO₂ already gate blooms).
+                let mut photo_l0 = if rooted {
+                    let sample_y = crate::shade::canopy_top_y(pose.y, &body.blueprint);
+                    crate::shade::effective_photo_light(
+                        &canopy,
+                        wx,
+                        sample_y,
+                        l0,
+                        e.id(),
+                        n_photo as usize,
+                        genome,
+                    )
+                } else {
+                    l0
+                };
+                // Submerged canopy: water above the leaf crown dims photo —
+                // reed payoff is grow stems above the free surface while roots
+                // drink the wet column.
+                if rooted {
+                    if let Some(col) = world.column_at(wx) {
+                        if let Some((wtop, _)) = water_band(col) {
+                            let leaf_top =
+                                crate::shade::canopy_top_y(pose.y, &body.blueprint);
+                            if wtop > leaf_top + 0.05 {
+                                let cover_m = (wtop - leaf_top).clamp(0.0, 4.0);
+                                photo_l0 *= (1.0 - 0.22 * cover_m).clamp(0.12, 1.0);
+                            }
+                        }
+                    }
+                }
+                let mut gain = organism_photo_gain(energy.max, photo_l0, n_photo) * comfort;
                 if plankton {
                     // Michaelis–Menten on dissolved CO₂ — blooms can starve the water.
                     let co2_factor = water_co2 / (water_co2 + CO2_HALF_SAT);
@@ -1738,23 +1804,21 @@ impl AgentStore {
                         if viable {
                             let child_genome =
                                 mutate_organism(*genome, world.seed, tick, e.id());
-                            // Land plants send up a small sucker shoot (minimal plant)
-                            // that then elongates — not a full adult clone teleport.
-                            let child_bp = if rooted {
-                                let mut bp = Blueprint::minimal_plant(child_genome);
-                                bp.name = format!("{}-sprout", body.blueprint.name);
-                                bp
-                            } else {
-                                let mut bp = mutate_blueprint_morphology(
-                                    body.blueprint.clone(),
-                                    genome.clone_fidelity,
-                                    world.seed,
-                                    tick,
-                                    e.id(),
-                                );
-                                bp.genome = child_genome;
-                                bp
-                            };
+                            // Same clone pipeline for plants and algae: gene jitter
+                            // + morphology mut (add/remove Photosystem). Plants keep
+                            // sucker seating (runner tip) and rooted immobility; they
+                            // no longer reset to a fresh minimal_plant body.
+                            let mut child_bp = mutate_blueprint_morphology(
+                                body.blueprint.clone(),
+                                genome.clone_fidelity,
+                                world.seed,
+                                tick,
+                                e.id(),
+                            );
+                            child_bp.genome = child_genome;
+                            if rooted {
+                                child_bp.name = format!("{}-sprout", body.blueprint.name);
+                            }
                             births.push((
                                 child_x0,
                                 pose.y,
@@ -3809,6 +3873,179 @@ mod tests {
         assert!(
             info.roots >= crate::root::LAND_SPROUT_MIN_ROOTS,
             "should still reach sprout-ready roots"
+        );
+    }
+
+    #[test]
+    fn plant_sprout_uses_morphology_mutation_like_algae() {
+        // Child body is a mutated clone of the parent — not a fresh minimal_plant.
+        let mut world = World::new(13);
+        world.sea_level = 0.0;
+        world.climate.base_temp_c = 22.0;
+        world.climate.lapse_rate_c_per_m = 0.0;
+        world.climate.day_night_amplitude_c = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+                col.ecology.nutrient = 0.9;
+                col.deposit_to_top(MaterialId::Organic, 700, 0);
+            }
+        }
+        let mut parent_bp = Blueprint::minimal_plant(Genome {
+            clone_fidelity: 0.0, // always morph-error when rolled
+            metabolic_rate: 0.15,
+            alloc_root: 0.7,
+            reproduce_at: 0.4,
+            ..Genome::default()
+        });
+        // Extra photosystems so remove-or-add is visible; paint a runner tip.
+        for y in 4i16..=6 {
+            parent_bp.modules.push(crate::blueprint::PlacedModule {
+                x: 0,
+                y,
+                lane: crate::module::LaneId::Mid,
+                module: crate::module::ModuleId::Photosystem,
+            });
+        }
+        parent_bp.modules.push(crate::blueprint::PlacedModule {
+            x: 4, // ~1.8 m → neighbour column
+            y: -1,
+            lane: crate::module::LaneId::Mid,
+            module: crate::module::ModuleId::Root,
+        });
+        let parent_photos = parent_bp.photosystem_count();
+        let mut store = AgentStore::new();
+        let parent = store
+            .spawn_from_blueprint(&world, 16, parent_bp, 200.0)
+            .expect("parent");
+        if let Ok(mut e) = store.ecs.get::<&mut Energy>(parent) {
+            e.current = e.max;
+        }
+        let mut child_photos = None;
+        for t in 0..20_000 {
+            store.step_organisms(&mut world, t);
+            if store.organism_count() > 1 {
+                child_photos = store
+                    .ecs
+                    .query::<(&ModuleBody, &Organism)>()
+                    .iter()
+                    .filter(|(e, _)| *e != parent)
+                    .map(|(_, (b, _))| b.photosystem_count())
+                    .next();
+                break;
+            }
+        }
+        let child_n = child_photos.expect("expected a sprout child");
+        // Parent starts with 5 photosystems; morph mut ±1. minimal_plant is 2.
+        assert!(
+            (4..=6).contains(&child_n),
+            "sprout should clone parent morphology (±1 photo), got {child_n} from parent {parent_photos}"
+        );
+    }
+
+    #[test]
+    fn taller_neighbour_shades_short_plant_photo() {
+        // End-to-end: canopy built from spawned bodies → effective_photo_light
+        // for a short plant drops when a tall high-absorb neighbour is present.
+        let mut world = World::new(13);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+            }
+        }
+
+        let short_g = Genome {
+            leaf_absorb: 0.3,
+            shade_efficiency: 0.15,
+            ..Genome::default()
+        };
+        let tall_g = Genome {
+            leaf_absorb: 0.95,
+            shade_efficiency: 0.05,
+            ..Genome::default()
+        };
+        let short_bp = Blueprint::minimal_plant(short_g);
+        let mut tall_bp = Blueprint::minimal_plant(tall_g);
+        for y in 4i16..=10 {
+            tall_bp.modules.push(crate::blueprint::PlacedModule {
+                x: 0,
+                y,
+                lane: crate::module::LaneId::Mid,
+                module: if y == 10 {
+                    crate::module::ModuleId::Photosystem
+                } else {
+                    crate::module::ModuleId::Stem
+                },
+            });
+        }
+
+        let mut store = AgentStore::new();
+        let short = store
+            .spawn_from_blueprint(&world, 20, short_bp, 80.0)
+            .expect("short");
+        let tall = store
+            .spawn_from_blueprint(&world, 21, tall_bp, 200.0)
+            .expect("tall");
+
+        let mut canopy = crate::shade::CanopyIndex::default();
+        for (e, (pose, body, genome, _)) in store
+            .ecs
+            .query::<(&Pose, &ModuleBody, &Genome, &Organism)>()
+            .iter()
+        {
+            let n_photo = body.photosystem_count();
+            let absorb = crate::shade::cast_strength(
+                n_photo,
+                body.blueprint.stem_count(),
+                genome.leaf_absorb,
+            );
+            crate::shade::record_canopy(
+                &mut canopy,
+                pose.world_x(),
+                crate::shade::canopy_top_y(pose.y, &body.blueprint),
+                absorb,
+                n_photo,
+                e.id(),
+            );
+        }
+
+        let short_pose = *store.ecs.get::<&Pose>(short).unwrap();
+        let short_body = store.ecs.get::<&ModuleBody>(short).unwrap();
+        let short_genome = *store.ecs.get::<&Genome>(short).unwrap();
+        let sample_y = crate::shade::canopy_top_y(short_pose.y, &short_body.blueprint);
+        let shaded = crate::shade::effective_photo_light(
+            &canopy,
+            short_pose.world_x(),
+            sample_y,
+            1.0,
+            short.id(),
+            short_body.photosystem_count(),
+            &short_genome,
+        );
+        // Control: same short plant, empty canopy.
+        let open = crate::shade::effective_photo_light(
+            &crate::shade::CanopyIndex::default(),
+            short_pose.world_x(),
+            sample_y,
+            1.0,
+            short.id(),
+            short_body.photosystem_count(),
+            &short_genome,
+        );
+        let tall_top = crate::shade::canopy_top_y(
+            store.ecs.get::<&Pose>(tall).unwrap().y,
+            &store.ecs.get::<&ModuleBody>(tall).unwrap().blueprint,
+        );
+        assert!(
+            tall_top > sample_y + 0.5,
+            "fixture: tall canopy must clear short (tall={tall_top:.2} short={sample_y:.2})"
+        );
+        assert!(
+            shaded < open - 0.12,
+            "tall neighbour must cut effective light (open={open:.3} shaded={shaded:.3})"
         );
     }
 
