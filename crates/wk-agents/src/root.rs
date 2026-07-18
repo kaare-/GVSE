@@ -2,7 +2,7 @@
 //! and substrate bore into Organic. Spec: `docs/organism/PLANTS.md`.
 
 use wk_material::MaterialId;
-use wk_world::column::Column;
+use wk_world::column::{Activity, Column};
 use wk_world::dig::root_penetrate_cost;
 use wk_world::terrain::hash_u64;
 use wk_world::world::World;
@@ -36,9 +36,15 @@ pub const DROUGHT_DORMANT_FRAC: f32 = 0.06;
 pub const DROUGHT_HIBERNATE_MAX_TICKS: u32 = 9_000;
 /// Upkeep multiplier while drought-dormant (respiration only).
 pub const DROUGHT_DORMANT_UPKEEP: f32 = 0.18;
-/// kg sipped per root module per tick when soil still has water.
-/// Deliberately small so a patch of plants can't empty a hill in seconds.
-pub const ROOT_SIP_KG_PER_ROOT: f32 = 0.05;
+/// Fractional kg accumulated per root module per tick. Integer drinks
+/// only fire once the organism accumulator reaches 1 kg — the old
+/// `.ceil().max(1)` path took ≥1 kg every tick and flash-dried hills.
+///
+/// ~0.0004 × 5 roots ≈ 1 kg every ~500 ticks (orders of magnitude
+/// slower than shore recharge / rain soak).
+pub const ROOT_SIP_KG_PER_ROOT: f32 = 0.0004;
+/// Hard cap on pore water removed in one drink event.
+pub const ROOT_SIP_MAX_KG_PER_TICK: i64 = 1;
 /// How often (ticks) a plant may attempt elongation.
 pub const ROOT_GROW_PERIOD: u64 = 48;
 
@@ -107,42 +113,53 @@ pub fn adjacent_moisture_frac(world: &World, wx: i32) -> f32 {
     }
 }
 
-/// Gentle sip from host + adjacent columns; returns kg taken.
+/// Gentle sip of **pore moisture** from host + adjacent columns.
 ///
-/// Caps per-column take so dense plant patches leave pore water in place
-/// (rain / infiltration can refill; plants should not flash-dry a hill).
+/// Does not touch standing lake/sea water (`drink_water` would vacuum a
+/// free surface). Leaves ~40% of pore capacity so recharge wins.
 pub fn drink_adjacent(world: &mut World, wx: i32, budget_kg: i64) -> i64 {
     if budget_kg <= 0 {
         return 0;
     }
-    let mut left = budget_kg;
+    let mut left = budget_kg.min(ROOT_SIP_MAX_KG_PER_TICK);
     let mut taken = 0i64;
-    // Prefer host, then wetter neighbour.
+    // Prefer host, then wetter neighbour (pore water only).
     let mut order = [wx, wx - 1, wx + 1];
     order[1..].sort_by_key(|&x| {
         world
             .column_at(x)
-            .map(|c| -(c.moisture + c.top_water_mass()))
+            .map(|c| -c.moisture)
             .unwrap_or(0)
     });
     for x in order {
         if left <= 0 {
             break;
         }
-        // Never drink a column below a small reserve — leaves drought buffer.
-        let reserve = world
-            .column_at(x)
-            .map(|c| (c.moisture_cap() / 12).max(2))
-            .unwrap_or(2);
-        let available = world
-            .column_at(x)
-            .map(|c| (c.moisture + c.top_water_mass()).saturating_sub(reserve))
-            .unwrap_or(0);
+        let available = match world.column_at(x) {
+            Some(col) => {
+                let reserve = ((col.moisture_cap() as f32) * 0.40).round() as i64;
+                col.moisture.saturating_sub(reserve.max(2))
+            }
+            None => continue,
+        };
         if available <= 0 {
             continue;
         }
-        let want = left.min(available).min(2); // ≤2 kg from any one column / tick
-        let got = world.drink_water(x, want);
+        let want = left.min(available).min(1);
+        let got = if let Some(col) = world.column_at_mut(x) {
+            let got = want.min(col.moisture);
+            col.moisture -= got;
+            if got > 0 {
+                col.activity = Activity::HydrologyActive;
+            }
+            got
+        } else {
+            0
+        };
+        if got > 0 {
+            // Water left into the plant — same audit bucket as evap/drink.
+            world.mass_audit.evap_out_total += got;
+        }
         taken += got;
         left -= got;
     }
@@ -492,6 +509,22 @@ mod tests {
             col.ecology.nutrient = 0.5;
         }
         world
+    }
+
+    #[test]
+    fn drink_leaves_pore_reserve() {
+        let mut world = dry_land();
+        let cap = world.column_at(8).unwrap().moisture_cap();
+        if let Some(col) = world.column_at_mut(8) {
+            col.moisture = cap; // fully saturated
+        }
+        // Even with a huge budget, only 1 kg leaves and ≥40% stays.
+        let taken = drink_adjacent(&mut world, 8, 10_000);
+        assert_eq!(taken, 1);
+        let moist = world.column_at(8).unwrap().moisture;
+        let floor = ((cap as f32) * 0.40).round() as i64;
+        assert!(moist >= floor, "reserve violated: moist={moist} floor={floor}");
+        assert_eq!(moist, cap - 1);
     }
 
     #[test]

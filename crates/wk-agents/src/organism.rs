@@ -76,6 +76,8 @@ pub struct Organism {
     /// Consecutive ticks in drought dormancy (land plants). Resets when
     /// soil rewets; death after [`crate::root::DROUGHT_HIBERNATE_MAX_TICKS`].
     pub drought_ticks: u32,
+    /// Fractional kg awaiting the next integer pore-water sip.
+    pub sip_acc_kg: f32,
 }
 
 /// Vertical motion state for weight / buoyancy integration.
@@ -699,11 +701,12 @@ pub fn organism_width(blueprint: &Blueprint) -> f32 {
         .max(MODULE_CELL_COLS)
 }
 
-/// Living body footprint: `(entity, aabb, anchored)`.
+/// Living body footprint: `(entity, aabb, immobile)`.
 ///
-/// `anchored` = has root purchase in solid ground (immobile). Rooted plants
-/// that lost their substrate are **not** anchored and can topple / move.
-fn collect_bodies(store: &AgentStore, world: &World) -> Vec<(Entity, Aabb, bool)> {
+/// Land plants (`is_rooted`) are always immobile under collision — trees
+/// must not shove each other sideways into neighbouring soil columns.
+/// Algae / plankton remain mobile.
+fn collect_bodies(store: &AgentStore, _world: &World) -> Vec<(Entity, Aabb, bool)> {
     // Keep ordering deterministic (by entity id) — resolve_collisions
     // uses it for stable tie-break when two AABBs share a center-x.
     let mut out: Vec<(Entity, Aabb, bool)> = store
@@ -714,7 +717,7 @@ fn collect_bodies(store: &AgentStore, world: &World) -> Vec<(Entity, Aabb, bool)
             (
                 e,
                 organism_aabb(pose, &body.blueprint),
-                crate::root::plant_is_anchored(world, pose.x, pose.y, &body.blueprint),
+                body.blueprint.is_rooted(),
             )
         })
         .collect();
@@ -836,12 +839,9 @@ fn find_clear_pose(
 /// Push overlapping footprints apart. Prefer **horizontal** separation so
 /// buoyancy (same depth) doesn't re-form a vertical lens every tick.
 ///
-/// Push overlapping footprints apart. Prefer **horizontal** separation so
-/// buoyancy (same depth) doesn't re-form a vertical lens every tick.
-///
-/// **Anchored** plants (roots with solid purchase) are immobile — algae
-/// bounce off. If soil collapses and roots lose purchase, the plant is
-/// mobile again and can topple / be shoved.
+/// **Rooted land plants are immobile** — algae bounce off; trees never
+/// shove each other into neighbouring soil. Two overlapping plants stay
+/// put (clone search should avoid packing them).
 ///
 /// Broad-phase: sort by AABB `min_x`, then compare only bodies whose
 /// x-extents overlap. Reduces the O(N²) pair scan to O(N + K) where K
@@ -882,7 +882,7 @@ fn resolve_collisions(store: &mut AgentStore, world: &World) {
                 if !a.overlaps(b) {
                     continue;
                 }
-                // Two anchored plants: both fixed — no shove.
+                // Two land plants: both fixed — never sideways-bury each other.
                 if a_anchored && b_anchored {
                     continue;
                 }
@@ -893,8 +893,8 @@ fn resolve_collisions(store: &mut AgentStore, world: &World) {
                     continue;
                 }
 
-                // Side-view: shove on X. Anchored body never moves; the
-                // mobile partner (floater or unanchored/fallen plant) yields.
+                // Side-view: shove on X. Rooted body never moves; only the
+                // mobile partner (plankton) yields.
                 let push = (overlap_x * 0.5).max(MIN_SEPARATION) + COLLISION_PAD;
                 let a_left = a.center_x() < b.center_x()
                     || (a.center_x() == b.center_x() && ea.id() < eb.id());
@@ -1195,7 +1195,7 @@ impl AgentStore {
         {
             let wx = pose.world_x();
             let n_photo = body.photosystem_count().max(1) as f32;
-            let n_roots = body.blueprint.root_count().max(1) as f32;
+            let n_roots = body.blueprint.root_count() as f32;
             let active = circadian_active(genome, phase);
 
             lineage.age_ticks = lineage.age_ticks.saturating_add(1);
@@ -1292,15 +1292,26 @@ impl AgentStore {
                 energy.current = (energy.current + gain).min(energy.max);
             }
 
-            // Roots sip moisture gently — never flash-dry the host column.
-            if rooted && plant_active && !matches!(drought, crate::root::DroughtBand::Dormant) {
-                let budget = (n_roots * crate::root::ROOT_SIP_KG_PER_ROOT)
-                    .ceil()
-                    .max(1.0) as i64;
-                let drunk = crate::root::drink_adjacent(world, wx, budget);
-                if drunk > 0 {
-                    let sip = drunk as f32 * crate::root::ROOT_WATER_ENERGY * nutrient.max(0.2);
-                    energy.current = (energy.current + sip).min(energy.max);
+            // Roots sip moisture gently — accumulate fractional kg so we
+            // never ceil to 1 kg/tick (that flash-dried hills in seconds).
+            if rooted
+                && plant_active
+                && n_roots > 0.0
+                && !matches!(drought, crate::root::DroughtBand::Dormant)
+            {
+                organism.sip_acc_kg = (organism.sip_acc_kg
+                    + n_roots * crate::root::ROOT_SIP_KG_PER_ROOT)
+                    .min(2.0);
+                let budget = organism.sip_acc_kg.floor() as i64;
+                if budget >= 1 {
+                    let want = budget.min(crate::root::ROOT_SIP_MAX_KG_PER_TICK);
+                    let drunk = crate::root::drink_adjacent(world, wx, want);
+                    organism.sip_acc_kg = (organism.sip_acc_kg - drunk as f32).max(0.0);
+                    if drunk > 0 {
+                        let sip =
+                            drunk as f32 * crate::root::ROOT_WATER_ENERGY * nutrient.max(0.2);
+                        energy.current = (energy.current + sip).min(energy.max);
+                    }
                 }
                 if matches!(drought, crate::root::DroughtBand::Stressed) {
                     energy.current -= crate::root::ROOT_DROUGHT_STRESS_DRAIN;
@@ -1493,8 +1504,7 @@ impl AgentStore {
                 .map(|(top, _)| top);
             let new_pose = Pose { x, y };
             let new_aabb = organism_aabb(&new_pose, &blueprint);
-            let anchored =
-                crate::root::plant_is_anchored(world, new_pose.x, new_pose.y, &blueprint);
+            let immobile = blueprint.is_rooted();
             let new_entity = self.ecs.spawn((
                 new_pose,
                 BuoyancyState {
@@ -1515,7 +1525,7 @@ impl AgentStore {
                 },
                 Organism::default(),
             ));
-            bodies.push((new_entity, new_aabb, anchored));
+            bodies.push((new_entity, new_aabb, immobile));
             if let Ok(mut lin) = self.ecs.get::<&mut Lineage>(parent) {
                 lin.clones_produced = lin.clones_produced.saturating_add(1);
             }
@@ -2189,7 +2199,9 @@ mod tests {
             "plant feet on ground y0={y0} surface={surface}"
         );
         let moist_before = world.column_at(2).unwrap().moisture;
-        for t in 0..400 {
+        // Fractional sip needs ~1/ROOT_SIP ticks to take 1 kg; run long enough
+        // to observe a drink without emptying the column.
+        for t in 0..8_000 {
             store.step_organisms(&mut world, t);
         }
         let moist_after = world.column_at(2).unwrap().moisture;
@@ -2197,9 +2209,9 @@ mod tests {
             moist_after < moist_before,
             "roots should drink host moisture ({moist_before} → {moist_after})"
         );
-        // Gentle sip — must not flash-dry the column in a few seconds.
+        // Must leave the bulk of the aquifer — recharge should win.
         assert!(
-            moist_after > moist_before / 4,
+            moist_after > moist_before * 3 / 4,
             "sip too aggressive ({moist_before} → {moist_after})"
         );
         let info = store.inspect_organism(e).expect("plant still alive");
@@ -2499,7 +2511,50 @@ mod tests {
     }
 
     #[test]
-    fn unanchored_plant_can_be_pushed_after_soil_collapse() {
+    fn rooted_plants_do_not_shove_each_other() {
+        let mut world = World::new(9);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        let mut store = AgentStore::new();
+        let a = store
+            .spawn_from_blueprint(
+                &world,
+                8,
+                Blueprint::minimal_plant(Genome::default()),
+                80.0,
+            )
+            .expect("plant a");
+        let b = store
+            .spawn_from_blueprint(
+                &world,
+                10,
+                Blueprint::minimal_plant(Genome::default()),
+                80.0,
+            )
+            .expect("plant b");
+        // Force overlap — trees must stay put, not bury sideways.
+        let xa = store.ecs.get::<&Pose>(a).unwrap().x;
+        let ya = store.ecs.get::<&Pose>(a).unwrap().y;
+        if let Ok(mut pb) = store.ecs.get::<&mut Pose>(b) {
+            pb.x = xa;
+            pb.y = ya;
+        }
+        let xb_before = store.ecs.get::<&Pose>(b).unwrap().x;
+        resolve_collisions(&mut store, &world);
+        let xa_after = store.ecs.get::<&Pose>(a).unwrap().x;
+        let xb_after = store.ecs.get::<&Pose>(b).unwrap().x;
+        assert!(
+            (xa_after - xa).abs() < 1e-4,
+            "plant A must not move"
+        );
+        assert!(
+            (xb_after - xb_before).abs() < 1e-4,
+            "plant B must not move (before={xb_before} after={xb_after})"
+        );
+    }
+
+    #[test]
+    fn collapsed_soil_unanchors_purchase_but_plant_stays_put() {
         use wk_world::column::VoidOrigin;
         let mut world = World::new(9);
         world.sea_level = 0.0;
@@ -2520,9 +2575,8 @@ mod tests {
         let bp = store.ecs.get::<&ModuleBody>(plant).unwrap().blueprint.clone();
         assert!(
             crate::root::plant_is_anchored(&world, pose.x, pose.y, &bp),
-            "fresh plant should be anchored"
+            "fresh plant should have root purchase"
         );
-        // Collapse a cavity through the root tip (soil falls away).
         let tip_y = pose.y - MODULE_CELL_COLS; // root at blueprint y=-1
         let wx = pose.world_x();
         if let Some(col) = world.column_at_mut(wx) {
@@ -2530,7 +2584,7 @@ mod tests {
         }
         assert!(
             !crate::root::plant_is_anchored(&world, pose.x, pose.y, &bp),
-            "collapsed soil should unanchor the plant"
+            "collapsed soil should lose root purchase"
         );
         let x_before = pose.x;
         let algae = store
@@ -2543,8 +2597,8 @@ mod tests {
         resolve_collisions(&mut store, &world);
         let x_after = store.ecs.get::<&Pose>(plant).unwrap().x;
         assert!(
-            (x_after - x_before).abs() > 0.01,
-            "unanchored plant should move when shoved (before={x_before} after={x_after})"
+            (x_after - x_before).abs() < 1e-4,
+            "rooted plant stays immobile even without purchase (before={x_before} after={x_after})"
         );
     }
 
