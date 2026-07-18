@@ -216,7 +216,21 @@ pub fn facies_surface_y(
             // Shallow shelf with occasional islands that breach sea level.
             let island = peak_bump(frac, 0.19, 0.008) * 55.0
                 + peak_bump(frac, 0.21, 0.005) * 35.0;
-            sea_level - 18.0 + relief * 10.0 + local * 6.0 + island + n(32) * 3.0
+            // High-frequency terms used to be independent per column
+            // (`n * 3` + `local * 6`) and cut single-column trenches the
+            // flat-sea overlay hides at the free surface but still show as
+            // limestone notches / taller "pipe" water bands (x≈2655).
+            // 3-tap smooth the HF so shelf beds stay continuous.
+            let hf = |wx: i32| {
+                let f = ring_frac(topology, wx);
+                let n_col = (crate::terrain::hash_f32(seed, wx as i64, 32) - 0.5) * 2.0;
+                let local_col = periodic_relief(seed, f, 51) * 0.35
+                    + (crate::terrain::hash_f32(seed, wx as i64, 52) - 0.5) * 2.0 * 0.15;
+                local_col * 2.0 + n_col * 0.35
+            };
+            let smooth_hf =
+                (hf(world_x - 1) + hf(world_x) + hf(world_x + 1)) / 3.0;
+            sea_level - 18.0 + relief * 10.0 + island + smooth_hf
         }
         FaciesBelt::Marsh => sea_level + 0.6 + relief * 2.0 + local * 1.5 + n(33) * 0.8,
         FaciesBelt::Coast => {
@@ -315,5 +329,38 @@ mod tests {
         let a = facies_at(42, t, 0);
         let mid = facies_at(42, t, 8 * CHUNK_W as i32);
         assert_ne!(a, mid);
+    }
+
+    #[test]
+    fn shelf_bathymetry_has_no_single_column_trenches() {
+        // Regresses the ±3 m per-column shelf hash that cut limestone
+        // notches under the flat-sea overlay (visible around x≈2655).
+        let t = WorldTopology::Ring { chunks: 192 };
+        let sea = 12.0f32;
+        let mut max_jump = 0.0f32;
+        let mut prev: Option<f32> = None;
+        let width = 192 * CHUNK_W as i32;
+        for x in 0..width {
+            if facies_at(42, t, x) != FaciesBelt::Shelf {
+                prev = None;
+                continue;
+            }
+            let y = facies_surface_y(42, t, x, sea);
+            if let Some(p) = prev {
+                max_jump = max_jump.max((y - p).abs());
+            }
+            prev = Some(y);
+        }
+        assert!(
+            max_jump < 2.0,
+            "shelf neighbour jump {max_jump:.2} m too large (single-column trench)"
+        );
+        // Spot-check the old glitch stripe: no multi-metre bed cliff.
+        let y0 = facies_surface_y(42, t, 2655, sea);
+        let y1 = facies_surface_y(42, t, 2656, sea);
+        assert!(
+            (y0 - y1).abs() < 2.0,
+            "x=2655/2656 bed jump too large ({y0:.2} → {y1:.2})"
+        );
     }
 }
