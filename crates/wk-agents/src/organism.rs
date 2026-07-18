@@ -1222,6 +1222,10 @@ impl AgentStore {
             if let Ok(mut energy) = self.ecs.get::<&mut Energy>(e) {
                 energy.current = 0.0;
             }
+            // Switch from float-line (top) anchoring to bed (bottom) anchoring
+            // without teleporting the crest: living pose was `float - extent`,
+            // so the feet are already at `pose.y`; corpse buoyancy uses
+            // extent=0 and sinks those feet down to the bed.
         }
 
         // Collect once, extend as we spawn — the old code re-queried every
@@ -1296,18 +1300,39 @@ impl AgentStore {
                 dissolve.push((e, wx, n_modules));
                 continue;
             };
-            // Heavy sinker — ignore living buoyancy gene.
+            // Dead bodies are bottom-anchored (editor y=0 on the bed), unlike
+            // living floaters whose tallest module sits on the float line.
+            // Passing the float offset here used to park pose at `bed - extent`
+            // or leave the crest sticking into the air in shallow water.
+            let extent = blueprint_body_top_offset(&body.blueprint);
             if body.blueprint.is_plankton() || water_band(col).is_some() {
-                let offset = blueprint_body_top_offset(&body.blueprint);
-                step_buoyancy(&mut pose.y, buoy, col, 1.0, offset);
+                step_buoyancy(&mut pose.y, buoy, col, 1.0, 0.0);
                 buoy.vel_y -= 0.04; // extra dead-weight pull
+                if let Some((top, bed)) = water_band(col) {
+                    // Keep the crest at/under the free surface when the body
+                    // is taller than the water column (bottom may sit a bit
+                    // into the bed — better than a tower in the sky).
+                    if pose.y + extent > top {
+                        pose.y = (top - extent).min(bed);
+                    }
+                    if pose.y < bed - extent {
+                        pose.y = bed - extent;
+                    }
+                }
             } else {
+                // Dry land: feet (y=0) on the ground.
                 pose.y = col.surface_y;
                 buoy.vel_y = 0.0;
             }
 
             let on_bed = match water_band(col) {
-                Some((_top, bed)) => pose.y <= bed + 0.15,
+                Some((top, bed)) => {
+                    let deep = pose.y <= bed + 0.15;
+                    // Shallow: already as low as crest-at-surface allows.
+                    let shallow = extent > (top - bed) - 0.2
+                        && pose.y <= (top - extent) + 0.15;
+                    deep || shallow
+                }
                 None => true,
             };
             if on_bed {
@@ -1662,6 +1687,58 @@ mod tests {
         assert!(y1 < y0 - 0.2, "corpse should sink (y0={y0} y1={y1})");
         assert_eq!(store.organism_count(), 0);
         assert_eq!(store.corpse_count(), 1);
+    }
+
+    #[test]
+    fn tall_corpse_crest_stays_out_of_the_air() {
+        // Living floaters top-anchor; corpses must bottom-anchor + clamp so a
+        // body taller than the water column doesn't stick into the sky.
+        let mut world = World::new(404);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        // Shallow puddle — deeper than FLOAT_DEPTH but shallower than a
+        // y=12 editor paint (~5.4 m).
+        if let Some(col) = world.column_at_mut(8) {
+            col.deposit_to_top(MaterialId::Water, 600, 0); // ~2.4 m
+        }
+        let mut bp = Blueprint::atom(Genome::default());
+        bp.modules.push(crate::blueprint::PlacedModule {
+            x: 0,
+            y: 12,
+            lane: crate::LaneId::Mid,
+            module: crate::ModuleId::Photosystem,
+        });
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(&world, 8, bp, 50.0)
+            .expect("spawn");
+        let extent = {
+            let body = store.ecs.get::<&ModuleBody>(e).unwrap();
+            blueprint_body_top_offset(&body.blueprint)
+        };
+        let _ = store.ecs.remove_one::<Organism>(e);
+        let _ = store.ecs.insert_one(
+            e,
+            Corpse {
+                ticks: 0,
+                settled_ticks: 0,
+            },
+        );
+        for _ in 0..80 {
+            store.step_corpses(&mut world, 0);
+        }
+        let pose_y = store.ecs.get::<&Pose>(e).unwrap().y;
+        let col = world.column_at(8).unwrap();
+        let (top, bed) = water_band(col).unwrap();
+        let crest = pose_y + extent;
+        assert!(
+            crest <= top + 0.2,
+            "corpse crest must not float in air (crest={crest:.2} top={top:.2} pose={pose_y:.2} bed={bed:.2} extent={extent:.2})"
+        );
+        assert!(
+            store.ecs.get::<&Corpse>(e).is_ok(),
+            "corpse should still be settling"
+        );
     }
 
     #[test]
