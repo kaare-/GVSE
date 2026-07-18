@@ -67,6 +67,10 @@ pub const ROOT_GROW_PERIOD: u64 = 48;
 pub const LAND_SPROUT_ENERGY_FRAC: f32 = 0.52;
 /// Phase period for land vegetative sprouts (shorter than plankton fission).
 pub const LAND_SPROUT_PERIOD: u64 = 48;
+/// Max column distance for genet moisture/energy sharing along a rhizome.
+pub const GENET_SHARE_MAX_DIST: i32 = 8;
+/// Fraction of the energy-fraction gap closed toward the genet mean / tick.
+pub const GENET_ENERGY_EQUALIZE: f32 = 0.20;
 /// Energy fraction above which roots/shoots may elongate. Must stay **below**
 /// [`LAND_SPROUT_ENERGY_FRAC`] so plants grow tissue while banking for a
 /// sucker — tying both gates to 0.52 left forests as 1-pixel stubs.
@@ -145,19 +149,29 @@ pub fn adjacent_moisture_frac(world: &World, wx: i32) -> f32 {
 /// Does not touch standing lake/sea water (`drink_water` would vacuum a
 /// free surface). Leaves ~40% of pore capacity so recharge wins.
 pub fn drink_adjacent(world: &mut World, wx: i32, budget_kg: i64) -> i64 {
-    if budget_kg <= 0 {
+    drink_from_hosts(world, &[wx], budget_kg)
+}
+
+/// Sip pore moisture from a set of host columns (each ±1 neighbour).
+///
+/// Used by genet-sharing ramets so a dry sucker can drink through a
+/// wetter sibling's rhizome patch. Same reserve rules as [`drink_adjacent`].
+pub fn drink_from_hosts(world: &mut World, hosts: &[i32], budget_kg: i64) -> i64 {
+    if budget_kg <= 0 || hosts.is_empty() {
         return 0;
     }
     let mut left = budget_kg.min(ROOT_SIP_MAX_KG_PER_TICK);
     let mut taken = 0i64;
-    // Prefer host, then wetter neighbour (pore water only).
-    let mut order = [wx, wx - 1, wx + 1];
-    order[1..].sort_by_key(|&x| {
-        world
-            .column_at(x)
-            .map(|c| -c.moisture)
-            .unwrap_or(0)
-    });
+    let mut order: Vec<i32> = Vec::with_capacity(hosts.len() * 3);
+    for &h in hosts {
+        for dx in [-1, 0, 1] {
+            let x = h + dx;
+            if !order.contains(&x) {
+                order.push(x);
+            }
+        }
+    }
+    order.sort_by_key(|&x| world.column_at(x).map(|c| -c.moisture).unwrap_or(0));
     for x in order {
         if left <= 0 {
             break;
@@ -184,7 +198,6 @@ pub fn drink_adjacent(world: &mut World, wx: i32, budget_kg: i64) -> i64 {
             0
         };
         if got > 0 {
-            // Water left into the plant — same audit bucket as evap/drink.
             world.mass_audit.evap_out_total += got;
         }
         taken += got;

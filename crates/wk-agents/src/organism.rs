@@ -104,6 +104,10 @@ pub struct Lineage {
     /// Scenario / editor founder tag. Copied to children on fission.
     /// `0` = untagged; scenarios use non-zero ids to track competing lineages.
     pub founder_id: u8,
+    /// Rhizome colony id. Land sprouts inherit the parent's id; ramets
+    /// within range share moisture sips and equalize energy.
+    /// `0` = unassigned / plankton (no sharing).
+    pub genet_id: u32,
 }
 
 /// Default climate day+night length (ticks) — used as one "sim day".
@@ -841,6 +845,99 @@ fn rooted_occupied_columns(bodies: &[(Entity, Aabb, bool)]) -> std::collections:
         .collect()
 }
 
+/// Host columns a ramet may drink from: self + same-genet neighbours in range.
+fn genet_drink_hosts(
+    wx: i32,
+    genet_id: u32,
+    genet_members: &std::collections::HashMap<u32, Vec<(Entity, i32)>>,
+) -> Vec<i32> {
+    let mut hosts = vec![wx];
+    if genet_id == 0 {
+        return hosts;
+    }
+    let Some(members) = genet_members.get(&genet_id) else {
+        return hosts;
+    };
+    for &(_, x) in members {
+        if (x - wx).abs() <= crate::root::GENET_SHARE_MAX_DIST && !hosts.contains(&x) {
+            hosts.push(x);
+        }
+    }
+    hosts
+}
+
+/// Soft-equalize energy fractions within each connected genet component.
+/// Conserves total energy: targets are `mean_frac * max` per ramet.
+fn equalize_genet_energy(
+    store: &mut AgentStore,
+    genet_members: &std::collections::HashMap<u32, Vec<(Entity, i32)>>,
+) {
+    let rate = crate::root::GENET_ENERGY_EQUALIZE.clamp(0.0, 1.0);
+    if rate <= 0.0 {
+        return;
+    }
+    for members in genet_members.values() {
+        if members.len() < 2 {
+            continue;
+        }
+        // Union-find by column proximity (rhizome reach).
+        let n = members.len();
+        let mut parent: Vec<usize> = (0..n).collect();
+        fn find(p: &mut [usize], i: usize) -> usize {
+            let mut i = i;
+            while p[i] != i {
+                p[i] = p[p[i]];
+                i = p[i];
+            }
+            i
+        }
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if (members[i].1 - members[j].1).abs() <= crate::root::GENET_SHARE_MAX_DIST {
+                    let a = find(&mut parent, i);
+                    let b = find(&mut parent, j);
+                    if a != b {
+                        parent[b] = a;
+                    }
+                }
+            }
+        }
+        let mut comps: std::collections::HashMap<usize, Vec<Entity>> =
+            std::collections::HashMap::new();
+        for i in 0..n {
+            let r = find(&mut parent, i);
+            comps.entry(r).or_default().push(members[i].0);
+        }
+        for ents in comps.values() {
+            if ents.len() < 2 {
+                continue;
+            }
+            let mut total = 0.0f32;
+            let mut sum_max = 0.0f32;
+            let mut snap: Vec<(Entity, f32, f32)> = Vec::with_capacity(ents.len());
+            for &e in ents {
+                let Ok(energy) = store.ecs.get::<&Energy>(e) else {
+                    continue;
+                };
+                total += energy.current;
+                sum_max += energy.max.max(1.0);
+                snap.push((e, energy.current, energy.max.max(1.0)));
+            }
+            if snap.len() < 2 || sum_max <= 0.0 {
+                continue;
+            }
+            let mean_frac = (total / sum_max).clamp(0.0, 1.0);
+            for (e, cur, max_e) in snap {
+                let target = mean_frac * max_e;
+                let next = cur + (target - cur) * rate;
+                if let Ok(mut energy) = store.ecs.get::<&mut Energy>(e) {
+                    energy.current = next.clamp(0.0, energy.max);
+                }
+            }
+        }
+    }
+}
+
 /// Find a clear pose, scanning **outward horizontally** first.
 ///
 /// `max_steps` limits how far the search walks (`None` = whole map —
@@ -1289,9 +1386,37 @@ impl AgentStore {
         let cycle_ticks = world.climate.cycle_length_ticks();
         let population = self.organism_count();
 
+        // Land plants join a genet (rhizome colony) and share along it.
+        for (e, (body, lineage)) in self
+            .ecs
+            .query::<(&ModuleBody, &mut Lineage)>()
+            .iter()
+        {
+            if body.blueprint.is_rooted() && lineage.genet_id == 0 {
+                lineage.genet_id = e.id().saturating_add(1);
+            }
+        }
+        // genet_id → (entity, host column) for living rooted ramets.
+        let mut genet_members: std::collections::HashMap<u32, Vec<(Entity, i32)>> =
+            std::collections::HashMap::new();
+        for (e, (pose, body, lineage, _)) in self
+            .ecs
+            .query::<(&Pose, &ModuleBody, &Lineage, &Organism)>()
+            .iter()
+        {
+            if body.blueprint.is_rooted() && lineage.genet_id != 0 {
+                genet_members
+                    .entry(lineage.genet_id)
+                    .or_default()
+                    .push((e, pose.world_x()));
+            }
+        }
+        // Soft energy equalize from last tick's tanks (conserves total energy).
+        equalize_genet_energy(self, &genet_members);
+
         let mut deaths: Vec<(Entity, i32)> = Vec::new();
-        // x, y, blueprint, energy, max_e, parent, parent_generation, founder_id
-        let mut births: Vec<(f32, f32, Blueprint, f32, f32, Entity, u32, u8)> = Vec::new();
+        // x, y, blueprint, energy, max_e, parent, parent_generation, founder_id, genet_id
+        let mut births: Vec<(f32, f32, Blueprint, f32, f32, Entity, u32, u8, u32)> = Vec::new();
 
         for (e, (pose, buoy, energy, genome, body, lineage, organism)) in self
             .ecs
@@ -1414,6 +1539,7 @@ impl AgentStore {
 
             // Roots sip moisture gently — accumulate fractional kg so we
             // never ceil to 1 kg/tick (that flash-dried hills in seconds).
+            // Genet ramets may sip through siblings' columns (rhizome pipe).
             if rooted
                 && plant_active
                 && n_roots > 0.0
@@ -1425,7 +1551,8 @@ impl AgentStore {
                 let budget = organism.sip_acc_kg.floor() as i64;
                 if budget >= 1 {
                     let want = budget.min(crate::root::ROOT_SIP_MAX_KG_PER_TICK);
-                    let drunk = crate::root::drink_adjacent(world, wx, want);
+                    let hosts = genet_drink_hosts(wx, lineage.genet_id, &genet_members);
+                    let drunk = crate::root::drink_from_hosts(world, &hosts, want);
                     organism.sip_acc_kg = (organism.sip_acc_kg - drunk as f32).max(0.0);
                     if drunk > 0 {
                         let sip =
@@ -1580,6 +1707,7 @@ impl AgentStore {
                                 e,
                                 lineage.generation,
                                 lineage.founder_id,
+                                lineage.genet_id,
                             ));
                         }
                     }
@@ -1685,7 +1813,8 @@ impl AgentStore {
             Vec::new()
         };
         let mut occupied = rooted_occupied_columns(&bodies);
-        for (x0, y0, blueprint, energy, max_e, parent, parent_gen, founder_id) in births {
+        for (x0, y0, blueprint, energy, max_e, parent, parent_gen, founder_id, genet_id) in births
+        {
             if self.organism_count() >= MAX_ORGANISMS {
                 break;
             }
@@ -1712,6 +1841,17 @@ impl AgentStore {
             if immobile {
                 occupied.insert(x.floor() as i32);
             }
+            // Land sprouts inherit the parent's genet; assign a fresh id if
+            // the parent somehow lacked one (shouldn't happen after ensure).
+            let child_genet = if blueprint.is_rooted() {
+                if genet_id != 0 {
+                    genet_id
+                } else {
+                    parent.id().saturating_add(1)
+                }
+            } else {
+                0
+            };
             let new_entity = self.ecs.spawn((
                 new_pose,
                 BuoyancyState {
@@ -1729,6 +1869,7 @@ impl AgentStore {
                     clones_produced: 0,
                     age_ticks: 0,
                     founder_id,
+                    genet_id: child_genet,
                 },
                 Organism::default(),
             ));
@@ -2596,6 +2737,158 @@ mod tests {
         assert!(
             roots1 >= crate::root::LAND_SPROUT_MIN_ROOTS,
             "should reach sprout-ready root count (got {roots1})"
+        );
+    }
+
+    #[test]
+    fn rhizome_sprout_inherits_genet_and_shares_energy() {
+        let mut world = World::new(13);
+        world.sea_level = 0.0;
+        world.climate.base_temp_c = 22.0;
+        world.climate.lapse_rate_c_per_m = 0.0;
+        world.climate.day_night_amplitude_c = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+                col.ecology.nutrient = 0.8;
+                col.deposit_to_top(MaterialId::Organic, 600, 0);
+            }
+        }
+        let mut store = AgentStore::new();
+        let parent = store
+            .spawn_from_blueprint(
+                &world,
+                16,
+                Blueprint::minimal_plant(Genome {
+                    reproduce_at: 0.99,
+                    metabolic_rate: 0.15,
+                    active_window: 0.9,
+                    ..Genome::default()
+                }),
+                200.0,
+            )
+            .expect("parent");
+        // Assign genet + spawn a sibling ramet by hand (same genet, nearby).
+        store.step_organisms(&mut world, 0); // ensure genet_id
+        let genet = store
+            .ecs
+            .get::<&Lineage>(parent)
+            .map(|l| l.genet_id)
+            .unwrap_or(0);
+        assert!(genet != 0, "rooted plant must join a genet");
+        let child = store
+            .spawn_from_blueprint(
+                &world,
+                18,
+                Blueprint::minimal_plant(Genome {
+                    reproduce_at: 0.99,
+                    metabolic_rate: 0.15,
+                    ..Genome::default()
+                }),
+                200.0,
+            )
+            .expect("child");
+        store.step_organisms(&mut world, 1);
+        // Force same genet (spawn assigns its own).
+        if let Ok(mut lin) = store.ecs.get::<&mut Lineage>(child) {
+            lin.genet_id = genet;
+        }
+        if let Ok(mut e) = store.ecs.get::<&mut Energy>(parent) {
+            e.current = e.max * 0.90;
+        }
+        if let Ok(mut e) = store.ecs.get::<&mut Energy>(child) {
+            e.current = e.max * 0.20;
+        }
+        let before_p = store.ecs.get::<&Energy>(parent).unwrap().current;
+        let before_c = store.ecs.get::<&Energy>(child).unwrap().current;
+        store.step_organisms(&mut world, 2); // equalize at start
+        let after_p = store.ecs.get::<&Energy>(parent).unwrap().current;
+        let after_c = store.ecs.get::<&Energy>(child).unwrap().current;
+        assert!(
+            after_p < before_p && after_c > before_c,
+            "genet should move energy parent→child (p {before_p:.1}→{after_p:.1}, c {before_c:.1}→{after_c:.1})"
+        );
+        let total_before = before_p + before_c;
+        let total_after = after_p + after_c;
+        assert!(
+            (total_before - total_after).abs() < 1.0,
+            "equalize must conserve energy (before={total_before} after={total_after})"
+        );
+    }
+
+    #[test]
+    fn genet_ramet_drinks_through_sibling_column() {
+        let mut world = World::new(13);
+        world.sea_level = 0.0;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        // Parent column wet; child column bone-dry.
+        for x in 0..64 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = 0;
+                col.ecology.nutrient = 0.6;
+            }
+        }
+        for x in 15..=17 {
+            if let Some(col) = world.column_at_mut(x) {
+                col.moisture = col.moisture_cap();
+            }
+        }
+        let mut store = AgentStore::new();
+        let parent = store
+            .spawn_from_blueprint(
+                &world,
+                16,
+                Blueprint::minimal_plant(Genome {
+                    circadian_phase: 0.25,
+                    active_window: 1.0,
+                    metabolic_rate: 0.1,
+                    reproduce_at: 0.99,
+                    ..Genome::default()
+                }),
+                100.0,
+            )
+            .expect("parent");
+        let child = store
+            .spawn_from_blueprint(
+                &world,
+                20,
+                Blueprint::minimal_plant(Genome {
+                    circadian_phase: 0.25,
+                    active_window: 1.0,
+                    metabolic_rate: 0.1,
+                    reproduce_at: 0.99,
+                    ..Genome::default()
+                }),
+                100.0,
+            )
+            .expect("child");
+        store.step_organisms(&mut world, 0);
+        let genet = store.ecs.get::<&Lineage>(parent).unwrap().genet_id;
+        if let Ok(mut lin) = store.ecs.get::<&mut Lineage>(child) {
+            lin.genet_id = genet;
+        }
+        // Force a drink attempt on the dry child via shared hosts.
+        if let Ok(mut org) = store.ecs.get::<&mut Organism>(child) {
+            org.sip_acc_kg = 1.5;
+        }
+        if let Ok(mut e) = store.ecs.get::<&mut Energy>(child) {
+            e.current = 40.0;
+        }
+        let moist_parent_before = world.column_at(16).unwrap().moisture;
+        let e_before = store.ecs.get::<&Energy>(child).unwrap().current;
+        // Noon-ish tick so circadian is active (phase 0.25 window full).
+        let noon = world.climate.day_length_ticks / 4;
+        store.step_organisms(&mut world, noon);
+        let moist_parent_after = world.column_at(16).unwrap().moisture;
+        let e_after = store
+            .ecs
+            .get::<&Energy>(child)
+            .map(|e| e.current)
+            .unwrap_or(0.0);
+        assert!(
+            moist_parent_after < moist_parent_before || e_after > e_before,
+            "dry ramet should pull moisture/energy via wet sibling (moist {moist_parent_before}→{moist_parent_after}, e {e_before}→{e_after})"
         );
     }
 
