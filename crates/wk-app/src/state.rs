@@ -44,6 +44,8 @@ pub struct AppState {
     pub selected_organism: Option<wk_sim::Entity>,
     pub tick_accum: f32,
     pub status_msg: String,
+    /// Bottom info strip (tick / fps / clouds / last key). Toggle with F3.
+    pub show_status_line: bool,
     pub show_settings: bool,
     /// Scratch UI-bound copies (macroquad sliders need `&mut f32`, and
     /// day/night length is more natural to edit in minutes than raw ticks).
@@ -116,8 +118,9 @@ impl AppState {
             selected_organism: None,
             tick_accum: 0.0,
             status_msg:
-                "Space run | click creature to inspect | A/D scroll | C/F2 creature | Tab settings"
+                "Space run | click creature to inspect | A/D scroll | C/F2 creature | F3 HUD | Tab settings"
                     .into(),
+            show_status_line: true,
             show_settings: false,
             settings_day_minutes,
             settings_night_minutes,
@@ -210,7 +213,7 @@ impl AppState {
             self.paused = true;
             self.show_settings = false;
             self.status_msg =
-                "Creature editor OPEN — paint Atom, Enter to spawn, C/F2 or button to close"
+                "Creature editor OPEN — paint Atom, Enter to spawn, C/F2 to close"
                     .into();
         } else {
             self.paused = self.editor.was_paused;
@@ -223,32 +226,24 @@ impl AppState {
         if let Some(k) = get_last_key_pressed() {
             if !self.editor.open {
                 self.status_msg = format!(
-                    "key {:?} | Space run | C/F2 or click CREATURES (top-right)",
+                    "key {:?} | Space run | C/F2 creature | F3 HUD | Tab settings",
                     k
                 );
             }
         }
 
-        // Creature editor: C, F2, or click the top-right CREATURES button.
-        let click_creatures = is_mouse_button_pressed(MouseButton::Left)
-            && {
-                let (mx, my) = mouse_position();
-                render::creature_button_hit(mx, my, screen_width())
-            };
-        if is_key_pressed(KeyCode::C)
-            || is_key_pressed(KeyCode::F2)
-            || (click_creatures && !self.editor.open)
-        {
+        // Creature editor: C or F2.
+        if is_key_pressed(KeyCode::C) || is_key_pressed(KeyCode::F2) {
             self.open_or_close_editor();
+        }
+        if is_key_pressed(KeyCode::F3) {
+            self.show_status_line = !self.show_status_line;
+            self.status_msg = format!("Status line: {}", self.show_status_line);
         }
         if self.editor.open {
             let _ = self.editor.handle_input();
             if self.editor.spawn_picker && is_mouse_button_pressed(MouseButton::Left) {
-                let (mx, my) = mouse_position();
-                // Ignore clicks on the CREATURES button while picking.
-                if render::creature_button_hit(mx, my, screen_width()) {
-                    return;
-                }
+                let (mx, _my) = mouse_position();
                 let col = render::screen_x_to_world_x(mx, self.viewport_x);
                 if self.world.column_at(col).is_some() {
                     let mut bp = self.editor.blueprint.clone();
@@ -401,10 +396,6 @@ impl AppState {
 
         if is_mouse_button_pressed(MouseButton::Left) {
             let (mx, my) = mouse_position();
-            // Don't select a column when clicking the CREATURES button.
-            if render::creature_button_hit(mx, my, screen_width()) {
-                return;
-            }
             let wx = render::screen_x_to_world_x_frac(mx, self.viewport_x);
             let wy = render::screen_y_to_world_y(
                 my,
@@ -492,7 +483,7 @@ impl AppState {
                         0.0f32..10.0,
                         &mut self.world.weather.cloud_rain_rate,
                     );
-                    ui.slider(hash!(), "Max clouds", 1.0f32..20.0, &mut self.settings_max_clouds);
+                    ui.slider(hash!(), "Max clouds", 1.0f32..40.0, &mut self.settings_max_clouds);
                     ui.slider(
                         hash!(),
                         "Cloud spawn interval (sec)",
@@ -536,7 +527,7 @@ impl AppState {
                     }
                 }
                 ui.label(None, &format!("Sim tick: {}", self.sim.clock.tick));
-                ui.label(None, "Tip: click CREATURES (top-right) or press C / F2");
+                ui.label(None, "Tip: C / F2 creature editor · F3 status line");
             });
 
         self.world.weather.max_clouds = self.settings_max_clouds.round().max(1.0) as usize;

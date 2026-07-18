@@ -53,6 +53,7 @@ async fn main() {
             inspect.as_ref(),
             highlight,
             ambient_c,
+            app.show_status_line,
         );
         if app.editor.open {
             app.editor.draw();

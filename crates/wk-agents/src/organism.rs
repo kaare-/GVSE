@@ -437,6 +437,104 @@ pub fn mutate_organism(
     g
 }
 
+/// Soft cap so messy clone lineages don't paint an unbounded blob.
+const MAX_PHOTOSYSTEM_MODULES: usize = 16;
+
+/// Base chance of a morphology clone-error (add/remove a Photosystem),
+/// scaled by `(1 - clone_fidelity)`. Perfect fidelity → never; fidelity 0
+/// → this rate. Keeps green photosystems able to grow/shrink over gens.
+const MORPH_ERROR_BASE: f32 = 0.40;
+
+/// Clone-time morphology mutation: with probability scaled by
+/// `(1 - fidelity)`, either place a Photosystem on an empty 4-neighbour of
+/// an existing module, or delete one Photosystem (never the last one, never
+/// the Nucleus). Lets algae visibly grow or shed green units across gens.
+pub fn mutate_blueprint_morphology(
+    mut bp: Blueprint,
+    parent_fidelity: f32,
+    world_seed: u64,
+    tick: u64,
+    parent_id: u32,
+) -> Blueprint {
+    let error_p = (1.0 - parent_fidelity.clamp(0.0, 1.0)) * MORPH_ERROR_BASE;
+    if error_p <= 1e-6 {
+        return bp;
+    }
+    let roll =
+        hash_u64(world_seed, tick as i64, parent_id as i64, 0x4D01) as f32 / u64::MAX as f32;
+    if roll >= error_p {
+        return bp;
+    }
+
+    let occupied: std::collections::HashSet<(i16, i16)> =
+        bp.modules.iter().map(|m| (m.x, m.y)).collect();
+    let n_photo = bp.photosystem_count();
+    let can_add = n_photo < MAX_PHOTOSYSTEM_MODULES;
+    let can_remove = n_photo > 1;
+    if !can_add && !can_remove {
+        return bp;
+    }
+
+    let prefer_add = hash_u64(world_seed, tick as i64, parent_id as i64, 0x4D02) & 1 == 0;
+    let do_add = if can_add && can_remove {
+        prefer_add
+    } else {
+        can_add
+    };
+
+    if do_add {
+        // Candidate empty cells adjacent to any existing module.
+        const DIRS: [(i16, i16); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+        let mut candidates: Vec<(i16, i16)> = Vec::new();
+        for m in &bp.modules {
+            for &(dx, dy) in &DIRS {
+                let nx = m.x + dx;
+                let ny = m.y + dy;
+                if nx.abs() > 8 || ny.abs() > 8 {
+                    continue;
+                }
+                if !occupied.contains(&(nx, ny)) {
+                    candidates.push((nx, ny));
+                }
+            }
+        }
+        candidates.sort_unstable();
+        candidates.dedup();
+        if candidates.is_empty() {
+            return bp;
+        }
+        let pick =
+            hash_u64(world_seed, tick as i64, parent_id as i64, 0x4D03) as usize % candidates.len();
+        let (x, y) = candidates[pick];
+        let lane = bp
+            .modules
+            .first()
+            .map(|m| m.lane)
+            .unwrap_or(crate::LaneId::Mid);
+        bp.modules.push(crate::blueprint::PlacedModule {
+            x,
+            y,
+            lane,
+            module: crate::ModuleId::Photosystem,
+        });
+    } else {
+        let photo_idxs: Vec<usize> = bp
+            .modules
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| m.module == crate::ModuleId::Photosystem)
+            .map(|(i, _)| i)
+            .collect();
+        if photo_idxs.len() <= 1 {
+            return bp;
+        }
+        let pick =
+            hash_u64(world_seed, tick as i64, parent_id as i64, 0x4D04) as usize % photo_idxs.len();
+        bp.modules.remove(photo_idxs[pick]);
+    }
+    bp
+}
+
 /// Axis-aligned body bounds in world space (from blueprint modules).
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Aabb {
@@ -1034,7 +1132,13 @@ impl AgentStore {
                         continue;
                     }
                     let child_genome = mutate_organism(*genome, world.seed, tick, e.id());
-                    let mut child_bp = body.blueprint.clone();
+                    let mut child_bp = mutate_blueprint_morphology(
+                        body.blueprint.clone(),
+                        genome.clone_fidelity,
+                        world.seed,
+                        tick,
+                        e.id(),
+                    );
                     child_bp.genome = child_genome;
                     let w = organism_width(&child_bp);
                     let side = if (tick + e.id() as u64) % 2 == 0 {
@@ -1702,6 +1806,45 @@ mod tests {
             (b.max_x - b.min_x) > (a.max_x - a.min_x) + 0.1,
             "wider paint must widen collision box"
         );
+    }
+
+    #[test]
+    fn morphology_clone_error_can_add_or_remove_photosystem() {
+        let atom = Blueprint::atom(Genome::default());
+        let n0 = atom.photosystem_count();
+        assert_eq!(n0, 1);
+        // Perfect fidelity → never mutate morphology.
+        let same = mutate_blueprint_morphology(atom.clone(), 1.0, 99, 1, 7);
+        assert_eq!(same.photosystem_count(), n0);
+        // Messy fidelity: scan ticks until we see both an add and a remove
+        // (or at least one change). Deterministic hash so this is stable.
+        let mut saw_add = false;
+        let mut saw_remove = false;
+        for tick in 0..400u64 {
+            let mut parent = atom.clone();
+            // Seed a second photosystem so remove is possible.
+            parent.modules.push(crate::blueprint::PlacedModule {
+                x: 0,
+                y: 1,
+                lane: crate::LaneId::Mid,
+                module: crate::ModuleId::Photosystem,
+            });
+            let child = mutate_blueprint_morphology(parent, 0.0, 42, tick, 3);
+            let n = child.photosystem_count();
+            assert!(n >= 1, "must keep at least one photosystem");
+            assert!(child.nucleus_count() >= 1, "must keep nucleus");
+            if n > 2 {
+                saw_add = true;
+            }
+            if n < 2 {
+                saw_remove = true;
+            }
+            if saw_add && saw_remove {
+                break;
+            }
+        }
+        assert!(saw_add, "expected at least one adjacent photosystem add");
+        assert!(saw_remove, "expected at least one photosystem remove");
     }
 
     #[test]
