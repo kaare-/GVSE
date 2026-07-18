@@ -353,7 +353,8 @@ impl AppState {
                 OverlayMode::Activity => OverlayMode::Conservation,
                 OverlayMode::Conservation => OverlayMode::TemperatureField,
                 OverlayMode::TemperatureField => OverlayMode::HumidityField,
-                OverlayMode::HumidityField => OverlayMode::Co2Field,
+                OverlayMode::HumidityField => OverlayMode::SoilMoisture,
+                OverlayMode::SoilMoisture => OverlayMode::Co2Field,
                 OverlayMode::Co2Field => OverlayMode::O2Field,
                 OverlayMode::O2Field => OverlayMode::None,
             };

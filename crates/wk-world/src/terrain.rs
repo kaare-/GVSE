@@ -309,38 +309,7 @@ pub fn fill_up_to_sea_level(col: &mut Column, sea_level: f32, tick: u64) {
 /// ocean spent the early sim soaking into dry sand (and looking empty
 /// underground on the water-table overlay).
 pub fn seed_column_water_table(col: &mut Column, sea_level: f32) {
-    let cap = col.moisture_cap();
-    if cap <= 0 {
-        return;
-    }
-    let bed = col.climate_elevation();
-    // Permanent standing water / submarine bed: saturated aquifer.
-    if bed < sea_level - 0.05 || (col.top_water_mass() > 0 && bed <= sea_level + 0.05) {
-        col.moisture = cap;
-        return;
-    }
-
-    let Some(idx) = col.top_porous_layer_index() else {
-        return;
-    };
-    let mut cap_height = 0.0f32;
-    for i in 0..idx {
-        cap_height +=
-            col.mass_to_height_delta(col.layers[i].material, col.layers[i].thickness);
-    }
-    let layer_top_y = col.surface_y - cap_height;
-    let layer = &col.layers[idx];
-    let layer_height_m = col.mass_to_height_delta(layer.material, layer.thickness);
-    if layer_height_m <= 1e-6 {
-        col.moisture = (cap as f32 * 0.1) as i64;
-        return;
-    }
-    let layer_bottom_y = layer_top_y - layer_height_m;
-    let target = sea_level.clamp(layer_bottom_y, layer_top_y);
-    let sat_from_table = ((target - layer_bottom_y) / layer_height_m).clamp(0.0, 1.0);
-    // Keep a little pore water even well above the regional table.
-    let sat = sat_from_table.max(0.10);
-    col.moisture = ((cap as f32) * sat).round() as i64;
+    col.moisture = col.target_moisture_for_table(sea_level);
 }
 
 /// Low-frequency rolling ripple layered onto emergent land so there are

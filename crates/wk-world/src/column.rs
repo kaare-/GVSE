@@ -544,6 +544,40 @@ impl Column {
         total
     }
 
+    /// Target pore-water mass for a regional water table at `table_y`
+    /// (usually sea level). Ocean / submerged beds → full saturation;
+    /// coastal land fills the aquifer up to the table; high ground keeps
+    /// a modest base so the table doesn't start bone-dry.
+    pub fn target_moisture_for_table(&self, table_y: f32) -> i64 {
+        let cap = self.moisture_cap();
+        if cap <= 0 {
+            return 0;
+        }
+        let bed = self.climate_elevation();
+        if bed < table_y - 0.05 || (self.top_water_mass() > 0 && bed <= table_y + 0.05) {
+            return cap;
+        }
+        let Some(idx) = self.top_porous_layer_index() else {
+            return 0;
+        };
+        let mut cap_height = 0.0f32;
+        for i in 0..idx {
+            cap_height +=
+                self.mass_to_height_delta(self.layers[i].material, self.layers[i].thickness);
+        }
+        let layer_top_y = self.surface_y - cap_height;
+        let layer = &self.layers[idx];
+        let layer_height_m = self.mass_to_height_delta(layer.material, layer.thickness);
+        if layer_height_m <= 1e-6 {
+            return ((cap as f32) * 0.1).round() as i64;
+        }
+        let layer_bottom_y = layer_top_y - layer_height_m;
+        let target = table_y.clamp(layer_bottom_y, layer_top_y);
+        let sat_from_table = ((target - layer_bottom_y) / layer_height_m).clamp(0.0, 1.0);
+        let sat = sat_from_table.max(0.10);
+        ((cap as f32) * sat).round() as i64
+    }
+
     /// Elevation of the groundwater table: the topmost porous solid
     /// layer's pore space fills from the bottom of that layer upward as
     /// `moisture` approaches its cap, reaching the ground surface exactly

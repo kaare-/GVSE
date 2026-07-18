@@ -600,6 +600,19 @@ pub fn draw_frame(
                 let c = humidity_overlay_color(col.humidity_rh);
                 draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
             }
+            OverlayMode::SoilMoisture => {
+                // Vertical band through the near-surface rooting zone so
+                // the water table reads as a heat map, not a surface tick.
+                let zone_top = col.surface_y;
+                let zone_bot = (col.surface_y - 3.0).max(col.bedrock_y);
+                let p0 = world_y_to_screen(zone_top, snap.sea_level, sh, camera_y_offset);
+                let p1 = world_y_to_screen(zone_bot, snap.sea_level, sh, camera_y_offset);
+                let hgt = (p1 - p0).abs().max(2.0);
+                let y_pix = p0.min(p1);
+                let mut c = soil_moisture_overlay_color(col.saturation);
+                c.a = 0.55;
+                draw_rectangle(x, y_pix, COL_W, hgt, c);
+            }
             OverlayMode::Co2Field => {
                 let c = gas_overlay_color(col.co2, true);
                 draw_rectangle(x, top - 6.0, COL_W, 5.0, c);
@@ -724,6 +737,15 @@ fn humidity_overlay_color(rh: f32) -> Color {
     let r = ((1.0 - t) * 160.0) as u8;
     let g = (120.0 + t * 100.0) as u8;
     let b = (40.0 + t * 200.0) as u8;
+    Color::from_rgba(r, g, b, 220)
+}
+
+/// Pore saturation → RGBA (dry amber → saturated steel-blue).
+fn soil_moisture_overlay_color(sat: f32) -> Color {
+    let t = sat.clamp(0.0, 1.0);
+    let r = ((1.0 - t) * 180.0 + 20.0) as u8;
+    let g = ((1.0 - t) * 140.0 + 60.0) as u8;
+    let b = (40.0 + t * 180.0) as u8;
     Color::from_rgba(r, g, b, 220)
 }
 

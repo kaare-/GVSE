@@ -98,7 +98,9 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     },
     SubsystemSchedule {
         id: SubsystemId::Infiltration,
-        period: 60,
+        // Was 60 — surface runoff emptied puddles before soak. Every 5
+        // ticks with a higher coeff lets rain actually wet the soil.
+        period: 5,
         phase: 0,
     },
     SubsystemSchedule {

@@ -50,6 +50,23 @@ fn head_at_column(world: &World, coord: i32, local: usize) -> f32 {
     col.water_table_y()
 }
 
+/// True when the neighbour is emergent dry land that still has pore
+/// capacity — the receive side of lake/sea fringe seepage.
+fn neighbor_wants_pore_water(world: &World, coord: i32, local: i32) -> bool {
+    let (n_coord, n_local) = if local < 0 {
+        (coord - 1, (CHUNK_W as i32 + local) as usize)
+    } else if local >= CHUNK_W as i32 {
+        (coord + 1, (local - CHUNK_W as i32) as usize)
+    } else {
+        (coord, local as usize)
+    };
+    let Some(chunk) = world.chunks.get(&n_coord) else {
+        return false;
+    };
+    let col = &chunk.columns[n_local];
+    col.top_water_mass() <= 0 && col.moisture < col.moisture_cap()
+}
+
 fn head_neighbor(world: &World, coord: i32, local: i32) -> f32 {
     let chunk = world.chunks.get(&coord).unwrap();
     if local < 0 {
@@ -98,15 +115,11 @@ pub fn run_groundwater_flow(world: &World, scratch: &mut WorldTransferScratch) {
             if col.activity == Activity::Dormant || col.moisture <= 0 {
                 continue;
             }
-            // Free-surface water bodies already equalise hydrostatically.
-            // Pore-space lateral flow under them, driven by tiny surface
-            // ripples, ratchets aquifer mass into overflow faster than
-            // infiltration can return it — emptying the water table under
-            // oceans and flat ponds. Coastal land can still discharge
-            // *into* wet columns (receive path below).
-            if col.top_water_mass() > 0 {
-                continue;
-            }
+            // Free-surface water bodies equalise hydrostatically — do not
+            // drive pore flow *between* two wet columns (that ratcheted
+            // aquifer mass into overflow). But a wet column *may* seep
+            // toward a dry shore neighbour so lake/sea fringes fill.
+            let free_here = col.top_water_mass() > 0;
 
             let head_here = head_at_column(world, coord, i);
             let head_left = head_neighbor(world, coord, i as i32 - 1);
@@ -124,11 +137,14 @@ pub fn run_groundwater_flow(world: &World, scratch: &mut WorldTransferScratch) {
             let mut out_left = 0i64;
             let mut out_right = 0i64;
 
-            if grad_left > 0.0 && mass_per_metre.is_finite() {
+            let left_is_shore = neighbor_wants_pore_water(world, coord, i as i32 - 1);
+            let right_is_shore = neighbor_wants_pore_water(world, coord, i as i32 + 1);
+
+            if grad_left > 0.0 && mass_per_metre.is_finite() && (!free_here || left_is_shore) {
                 let transfer = grad_left * mass_per_metre * GROUNDWATER_FLOW_COEFF * perm;
                 out_left = (transfer as i64).min(col.moisture);
             }
-            if grad_right > 0.0 && mass_per_metre.is_finite() {
+            if grad_right > 0.0 && mass_per_metre.is_finite() && (!free_here || right_is_shore) {
                 let remaining = (col.moisture - out_left).max(0);
                 let transfer = grad_right * mass_per_metre * GROUNDWATER_FLOW_COEFF * perm;
                 out_right = (transfer as i64).min(remaining);
