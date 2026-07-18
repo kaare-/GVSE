@@ -124,6 +124,12 @@ target = argmax over neighbours n of:
   gates penetrate cost. Loose fill is cheap, competent rock is
   expensive; **ghost roots** (prior root cavities) are effectively
   free.
+- **Energy storage** — painted Root modules raise `Energy.max` above the
+  spawn tank (`energy_base_max × (1 + ROOT_STORE_FRAC · n_roots)`,
+  capped at 2×). Photo, basal upkeep, and growth floors stay keyed to
+  the spawn tank; only the clamp / bank grows. Drought lifts the soft
+  root:shoot budget so storage and deeper boring can pay when the
+  surface dries.
 
 Groundwater head field (already implemented in
 [`crates/wk-field`](../../crates/wk-field)) provides the deeper
