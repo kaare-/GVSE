@@ -19,11 +19,11 @@ use super::shared::WATER_MASS_PER_METRE_DEPTH;
 /// coupling (unequal neighbours, ground slope) that a pure symmetric
 /// analysis doesn't capture exactly.
 const FLOW_RELAXATION: f32 = 0.97;
-/// When waves carry momentum, diffuse gently so wind setup / seiches
-/// aren't erased. Still runs on every wet column (including tall land
-/// pools) — the old `skip_deep` bail was the bug that let deep
-/// puddles sit on a single column as an isolated spike.
-const FLOW_RELAXATION_WITH_WAVES: f32 = 0.08;
+/// Surface-waves mode is tide-only now (no momentum seiche to protect),
+/// so keep lateral equalization almost as strong as the non-wave path.
+/// The old 0.08 value left shelf-edge spikes that the tide re-poked every
+/// tick — "standing waves" that faded then came back.
+const FLOW_RELAXATION_WITH_WAVES: f32 = 0.85;
 
 pub fn run_surface_water(world: &World, scratch: &mut WorldTransferScratch) {
     let relax = if world.surface_waves_enabled {

@@ -122,8 +122,8 @@ fn e51b_deep_ocean_ambient_not_geothermal() {
         "expected abyssal bed below field floor, bed={bed:.1}"
     );
     assert!(
-        (skin - world.sea_level).abs() <= 8.0,
-        "ocean ambient should sit near sea level, skin={skin:.1}"
+        (skin - world.sea_level).abs() < 0.01,
+        "ocean ambient should be exactly sea level, skin={skin:.1}"
     );
 
     let bed_t = world.temperature_at_point(wx, bed, 0);

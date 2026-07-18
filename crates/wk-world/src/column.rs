@@ -475,17 +475,16 @@ impl Column {
     /// Elevation for near-surface ambient temperature (HUD, freeze/thaw,
     /// ecology comfort).
     ///
-    /// - Deep ocean / submerged bed: sample near sea level (water skin),
-    ///   never the abyssal bed (geothermal clamp) and never an ice tower
-    ///   kilometres above the sea.
+    /// - Submerged bed (ocean / shelf): always sample at sea level so
+    ///   free-surface wobbles and abyssal beds don't move the thermometer
+    ///   (deep beds clamp to the geothermal Dirichlet ~55 °C).
     /// - Emergent land: a thin weather skin above the solid bed so snow/ice
     ///   piles can't self-cool via lapse rate as they grow.
     pub fn ambient_elevation(&self, sea_level: f32) -> f32 {
         let bed = self.climate_elevation();
         const SKIN_M: f32 = 8.0;
         if bed < sea_level - 0.5 {
-            self.surface_y
-                .clamp(sea_level - SKIN_M, sea_level + SKIN_M)
+            sea_level
         } else {
             self.surface_y.min(bed + SKIN_M)
         }

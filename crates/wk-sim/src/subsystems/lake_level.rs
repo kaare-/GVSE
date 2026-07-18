@@ -22,10 +22,10 @@ struct LakeCell {
 /// neighbour-by-neighbour diffusion for a *wide* lake, but changes smoothly
 /// enough tick-to-tick to not read as a glitch for small ponds.
 const LAKE_LEVEL_BLEND: f32 = 0.1;
-/// Wave-mode blend for oceans. `run_surface_waves` is tide-only now and
-/// doesn't fight this, so a mild blend keeps the sea properly flat
-/// while still letting the tide raise/lower it smoothly.
-const LAKE_LEVEL_BLEND_WITH_WAVES: f32 = 0.05;
+/// Wave-mode blend for oceans. Tide-only waves don't need a tiny blend;
+/// a stronger pull keeps shelf-edge columns from oscillating as the tide
+/// injects and lake-level slowly corrects.
+const LAKE_LEVEL_BLEND_WITH_WAVES: f32 = 0.18;
 /// Minimum standing water (kg, ~10cm depth on one column) to count as part
 /// of a "lake" for leveling purposes. Without this, a light rain sheen
 /// sitting on every column across the whole map — including hilltops with

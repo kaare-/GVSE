@@ -515,8 +515,24 @@ pub fn draw_frame(
         if bed_y >= sea_top_m - 0.25 {
             continue;
         }
-        let bed_px = world_y_to_screen(bed_y, snap.sea_level, sh, camera_y_offset);
         let x = i as f32 * COL_W;
+        // Erase physical water spikes above the flat sea line (drawn with
+        // the column layers earlier) so tide/leveling wobbles don't show
+        // as standing teeth at the shelf edge.
+        if col.surface_y > sea_top_m + 0.05 {
+            let spike_top_px =
+                world_y_to_screen(col.surface_y, snap.sea_level, sh, camera_y_offset);
+            if spike_top_px < sea_top_px {
+                draw_rectangle(
+                    x,
+                    spike_top_px,
+                    COL_W,
+                    (sea_top_px - spike_top_px).max(1.0),
+                    sky_color,
+                );
+            }
+        }
+        let bed_px = world_y_to_screen(bed_y, snap.sea_level, sh, camera_y_offset);
         if sea_top_px < bed_px {
             draw_rectangle(
                 x,
@@ -628,8 +644,14 @@ pub fn draw_frame(
         // a rolling frame-time average so the number doesn't jitter each frame.
         let fps = fps_smoothed();
         let raining = snap.clouds.iter().filter(|c| c.raining).count();
+        let overlay = snap.overlay.mode.hud_label();
+        let overlay_bit = if overlay.is_empty() {
+            String::new()
+        } else {
+            format!(" | overlay={overlay}")
+        };
         let hud = format!(
-            "tick={} fps={fps:.0} sea={:.0}m x={}..{} | {clock_h:02}:{clock_m:02} ({day_or_night}) | clouds={} (rain {}) | {}",
+            "tick={} fps={fps:.0} sea={:.0}m x={}..{} | {clock_h:02}:{clock_m:02} ({day_or_night}) | clouds={} (rain {}){overlay_bit} | {}",
             snap.tick,
             snap.sea_level,
             snap.viewport_x,

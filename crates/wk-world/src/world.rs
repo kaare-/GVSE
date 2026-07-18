@@ -288,7 +288,23 @@ impl World {
         if let Some(chunk) = self.chunks.get(&coord) {
             if let Some(thermal) = &chunk.thermal {
                 let x_m = world_x as f32 * wk_material::SAMPLE_WIDTH_M;
-                return thermal.0.sample_bilinear(x_m, y_m);
+                // Keep near-surface samples off the geothermal Dirichlet
+                // row (cy == 0). Out-of-range y clamps to the edge cell,
+                // which made deep-ocean ambient read as exactly 55 °C.
+                let cell = thermal.0.cell_size_m.max(1e-3);
+                let y_lo = thermal.0.origin_y_m + cell * 1.5;
+                let y_hi = thermal.0.origin_y_m
+                    + cell * (thermal.0.height_cells as f32 - 1.5);
+                let y_sample = y_m.clamp(y_lo, y_hi.max(y_lo));
+                let t = thermal.0.sample_bilinear(x_m, y_sample);
+                // Final guard: a "skin" sample must never report the
+                // geothermal floor value (field bug / bad clamp).
+                if y_m > self.sea_level - 40.0
+                    && (t - self.geothermal_bottom_c).abs() < 2.0
+                {
+                    return temperature_at(y_m.max(self.sea_level), self.sea_level, tick, &self.climate);
+                }
+                return t;
             }
         }
         temperature_at(y_m, self.sea_level, tick, &self.climate)
@@ -878,6 +894,23 @@ pub enum OverlayMode {
     Co2Field,
     /// Dissolved / air O₂ (low purple → high cyan).
     O2Field,
+}
+
+impl OverlayMode {
+    /// Short label for the bottom HUD (empty when no overlay).
+    pub fn hud_label(self) -> &'static str {
+        match self {
+            OverlayMode::None => "",
+            OverlayMode::WaterFlux => "water flux",
+            OverlayMode::Erosion => "erosion",
+            OverlayMode::Activity => "activity",
+            OverlayMode::Conservation => "conservation",
+            OverlayMode::TemperatureField => "temperature",
+            OverlayMode::HumidityField => "humidity",
+            OverlayMode::Co2Field => "CO2",
+            OverlayMode::O2Field => "O2",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
