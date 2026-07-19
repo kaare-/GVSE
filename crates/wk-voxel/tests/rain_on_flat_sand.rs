@@ -10,7 +10,7 @@
 //! puddle spread and evaporation.
 
 use wk_material::MaterialId;
-use wk_voxel::{apply_gravity_fall, tick, water_capacity, Cell, World};
+use wk_voxel::{apply_gravity_fall, is_grain, tick, water_capacity, Cell, World};
 
 #[test]
 fn rain_row_saturates_sand_over_one_tick() {
@@ -84,6 +84,87 @@ fn lone_droplet_falls_over_many_gravity_passes() {
     apply_gravity_fall(&mut w);
     assert!(w.get_cell(x, 1).unwrap().sat.is_full());
     assert!(w.get_cell(x, 0).unwrap().sat.is_empty());
+}
+
+#[test]
+fn sand_settles_below_water_in_a_bucket() {
+    // Bucket: bedrock floor at y=0, stone walls at x=10 and x=25 for
+    // rows y=1..=15. Fill the column x=11..=24 with water rows 1..8
+    // and drop a row of sand grains at y=10 above the water surface.
+    //
+    // Sand should sink through the water, water rises above it, and
+    // the final resting state has sand at the bottom of the bucket
+    // and water floating on top. Total sat is conserved.
+    let mut w = World::new(2025);
+    // Floor.
+    for x in 0..64 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Walls.
+    for y in 1..=15 {
+        w.set_cell(10, y, Cell::solid(MaterialId::Stone));
+        w.set_cell(25, y, Cell::solid(MaterialId::Stone));
+    }
+    // Water inside the bucket, rows 1..=8.
+    for x in 11..=24 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    // Sand grains at row 10, above the water surface.
+    for x in 11..=24 {
+        w.set_cell(x, 10, Cell::solid(MaterialId::Sand));
+    }
+    // Baseline totals.
+    let start_water: i32 = (11..=24)
+        .flat_map(|x: i32| (0..=15).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+        .sum();
+    let start_grains: i32 = (11..=24)
+        .flat_map(|x: i32| (0..=15).map(move |y| (x, y)))
+        .filter(|(x, y)| {
+            w.get_cell(*x, *y)
+                .map(|c| is_grain(c.material))
+                .unwrap_or(false)
+        })
+        .count() as i32;
+    assert!(start_water > 0);
+    assert_eq!(start_grains, 14);
+
+    // Enough ticks for the whole scene to settle. Sand needs ~10
+    // ticks to fall + a few more for water to redistribute.
+    for _ in 0..80 {
+        tick(&mut w);
+    }
+
+    // Mass conservation.
+    let end_water: i32 = (0..64)
+        .flat_map(|x: i32| (0..=15).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+        .sum();
+    let end_grains: i32 = (0..64)
+        .flat_map(|x: i32| (0..=15).map(move |y| (x, y)))
+        .filter(|(x, y)| {
+            w.get_cell(*x, *y)
+                .map(|c| is_grain(c.material))
+                .unwrap_or(false)
+        })
+        .count() as i32;
+    assert_eq!(end_water, start_water, "water sat conserved");
+    assert_eq!(end_grains, start_grains, "grain count conserved");
+
+    // Sand should be at the bottom of the bucket now.
+    let bottom_row_grains: i32 = (11..=24)
+        .filter(|&x| {
+            w.get_cell(x, 1)
+                .map(|c| c.material == MaterialId::Sand)
+                .unwrap_or(false)
+        })
+        .count() as i32;
+    assert!(
+        bottom_row_grains >= 10,
+        "expected ~14 sand grains at the bottom row after settling, got {bottom_row_grains}"
+    );
 }
 
 #[test]

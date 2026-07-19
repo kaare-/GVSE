@@ -120,6 +120,20 @@ impl Cell {
     }
 }
 
+/// True for granular materials that fall under gravity through less
+/// dense cells (Air, water-filled Air). Currently: Sand, Gravel, Clay,
+/// LooseRock. Bedrock and Stone are competent rock and stay put;
+/// Organic / Water / Air / Snow / Ice don't fall as grains here.
+///
+/// The set is intentionally coarse in v1 — density-ordered stacking
+/// between multiple grain species is a follow-up rule.
+pub fn is_grain(material: MaterialId) -> bool {
+    matches!(
+        material,
+        MaterialId::Sand | MaterialId::Gravel | MaterialId::Clay | MaterialId::LooseRock
+    )
+}
+
 /// Per-cell water-holding capacity as a `u8` on the same 0..255 scale
 /// as [`Sat`]. Air cells are treated as fully waterable (255); porous
 /// solids clamp to their [`wk_material::MaterialProps::porosity`];
@@ -181,5 +195,29 @@ mod tests {
         let w = Cell::water();
         assert_eq!(w.material, MaterialId::Air);
         assert!(w.sat.is_full());
+    }
+
+    #[test]
+    fn grain_set_covers_granular_materials() {
+        for m in [
+            MaterialId::Sand,
+            MaterialId::Gravel,
+            MaterialId::Clay,
+            MaterialId::LooseRock,
+        ] {
+            assert!(is_grain(m), "{m:?} should be granular");
+        }
+        for m in [
+            MaterialId::Bedrock,
+            MaterialId::Stone,
+            MaterialId::Limestone,
+            MaterialId::Organic,
+            MaterialId::Water,
+            MaterialId::Air,
+            MaterialId::Ice,
+            MaterialId::Snow,
+        ] {
+            assert!(!is_grain(m), "{m:?} must not be classified as a grain");
+        }
     }
 }
