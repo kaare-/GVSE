@@ -15,12 +15,12 @@
 //! - `Space` — pause / resume physics ticks
 //! - `R` — regenerate the world with a new seed
 //! - `W` — toggle background rain (climatic, always-on cloud row)
-//! - `V` — toggle condensation rain (feedback from humidity heatmap)
+//! - `C` — toggle condensation rain (feedback from humidity heatmap)
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle humidity overlay
-//! - `C` / `F2` — creature editor (Set A MS-Paint, like column-GVSE)
+//! - `F2` — creature editor (Set A MS-Paint; `C` stays condensation here)
 //! - click — block / organism inspector
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
@@ -139,7 +139,9 @@ async fn main() {
                 break;
             }
         }
-        if is_key_pressed(KeyCode::C) || is_key_pressed(KeyCode::F2) {
+        // Editor is F2 only — `C` is condensation in the voxel demo
+        // (column-GVSE can use C/F2 because it has no condensation toggle).
+        if is_key_pressed(KeyCode::F2) {
             let opening = !editor.open;
             editor.toggle(paused);
             if opening {
@@ -168,6 +170,9 @@ async fn main() {
             if is_key_pressed(KeyCode::W) {
                 rain_on = !rain_on;
             }
+            if is_key_pressed(KeyCode::C) {
+                cond_rain_on = !cond_rain_on;
+            }
             if is_key_pressed(KeyCode::E) {
                 evap_on = !evap_on;
             }
@@ -179,11 +184,6 @@ async fn main() {
             }
             if is_key_pressed(KeyCode::O) {
                 organisms_on = !organisms_on;
-            }
-            // Condensation was on `C`; creature editor takes that key
-            // (column-GVSE parity). `V` = vapor → rain.
-            if is_key_pressed(KeyCode::V) {
-                cond_rain_on = !cond_rain_on;
             }
             let pan = 200.0 * get_frame_time();
             if is_key_down(KeyCode::Left) {
@@ -421,7 +421,7 @@ async fn main() {
 
         // HUD.
         let hud = format!(
-            "tick={} seed={} rain={} cond={} evap={} karst={} org={} atoms={} hum={} humidity={:.0} {}  |  Space|R|W/V/E/K/O|H|C/F2 editor|click inspect|Esc",
+            "tick={} seed={} rain={} cond={} evap={} karst={} org={} atoms={} hum={} humidity={:.0} {}  |  Space|R|W/C/E/K/O|H|F2 editor|click inspect|Esc",
             scene.world.tick,
             scene.params.seed,
             if rain_on { "on" } else { "off" },

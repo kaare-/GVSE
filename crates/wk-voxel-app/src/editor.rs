@@ -155,7 +155,7 @@ impl CreatureEditor {
         if self.spawn_picker {
             draw_rectangle(0.0, 0.0, sw, 36.0, Color::from_rgba(8, 10, 16, 200));
             draw_text(
-                "SPAWN MODE — click a wet cell  |  Esc cancel  |  C/F2 close editor",
+                "SPAWN MODE — click a wet cell  |  Esc cancel  |  F2 close editor",
                 16.0,
                 24.0,
                 20.0,
@@ -165,7 +165,7 @@ impl CreatureEditor {
         }
         draw_rectangle(0.0, 0.0, sw, sh, Color::from_rgba(8, 10, 16, 210));
         draw_text(
-            "CREATURE EDITOR  (C or F2 to close)",
+            "CREATURE EDITOR  (F2 to close)",
             40.0,
             36.0,
             28.0,
