@@ -1,5 +1,8 @@
 //! Scalar/vector field primitives for the World Kernel.
 //!
+//! Column-based GVSE. MUST NOT import from wk-voxel. See
+//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
+//!
 //! Fields are chunk-local patches with edge halos. Subsystems compose
 //! stencil ops and solvers from this crate; they should not re-implement
 //! index arithmetic inline.

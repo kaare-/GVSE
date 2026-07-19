@@ -1,4 +1,7 @@
 //! World Kernel 0.1 — interactive debug application.
+//!
+//! Column-based GVSE. MUST NOT import from wk-voxel. See
+//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 
 mod editor;
 mod render;

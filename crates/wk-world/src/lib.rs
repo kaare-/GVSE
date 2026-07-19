@@ -1,4 +1,7 @@
 //! World spatial model: columns, chunks, terrain generation, markers.
+//!
+//! Column-based GVSE. MUST NOT import from wk-voxel. See
+//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 
 pub mod climate;
 pub mod column;

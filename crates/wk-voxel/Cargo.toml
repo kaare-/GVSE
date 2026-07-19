@@ -1,0 +1,17 @@
+[package]
+name = "wk-voxel"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ISOLATION GUARDRAIL
+# ------------------------------------------------------------------
+# wk-voxel is a greenfield 2D cellular-automata sim. It shares ONLY
+# `wk-material` with column-based GVSE (material IDs + property tables
+# are pure data). It MUST NOT depend on wk-world, wk-field, wk-agents,
+# wk-sim, wk-io, or wk-app. See docs/VOXEL_MIGRATION.md § Isolation
+# Guardrails.
+
+[dependencies]
+wk-material = { path = "../wk-material" }
+serde = { version = "1", features = ["derive"] }

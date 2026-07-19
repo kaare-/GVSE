@@ -1,5 +1,8 @@
 //! Save/load format.
 //!
+//! Column-based GVSE. MUST NOT import from wk-voxel. See
+//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
+//!
 //! Schema v1: columns + climate + weather.
 //! Schema v2: optional per-chunk field patches (thermal, humidity, …).
 //! Older v1 bytes still load — new field slots use `#[serde(default)]`.
