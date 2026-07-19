@@ -22,9 +22,9 @@ pub use grid::World;
 pub use heatmap::Heatmap;
 pub use humidity::Humidity;
 pub use rules::{
-    apply_evaporation, apply_evaporation_into_humidity, apply_grain_fall, apply_gravity_fall,
-    apply_karst_dissolution, apply_lateral_spill, apply_rain, tick, EvapConfig, KarstConfig,
-    RainConfig,
+    apply_condensation_rain, apply_evaporation, apply_evaporation_into_humidity, apply_grain_fall,
+    apply_gravity_fall, apply_karst_dissolution, apply_lateral_spill, apply_rain, tick,
+    CondensationConfig, EvapConfig, KarstConfig, RainConfig,
 };
 pub use worldgen::is_karst_zone_x;
 pub use worldgen::{continental_surface_y, stamp_world, WorldgenParams};

@@ -422,6 +422,127 @@ fn apply_evap_deltas(
     }
 }
 
+/// Condensation-rain parameters for [`apply_condensation_rain`].
+///
+/// The "cloud row" `top_y` is where droplets appear when a humidity
+/// tile is wet enough to precipitate. Rain empties a bounded mass
+/// from the tile, and the droplet's sat is proportional to the mass
+/// removed (clamped by [`u8::MAX`]).
+#[derive(Debug, Clone, Copy)]
+pub struct CondensationConfig {
+    /// World-y row where droplets condense.
+    pub top_y: i32,
+    /// A tile only rains when its humidity mass is at or above this.
+    /// Prevents faint air moisture from immediately raining back.
+    pub min_mass_to_rain: f32,
+    /// Chance-per-tick that a *saturated* tile rains at all. Actual
+    /// per-tick probability scales linearly from 0 at `min_mass_to_rain`
+    /// up to `max_prob_per_tick` at `full_mass`.
+    pub max_prob_per_tick: f32,
+    /// Humidity mass at which precipitation rate hits its cap.
+    pub full_mass: f32,
+    /// Mass removed from a tile per rain event.
+    pub mass_per_droplet: f32,
+    /// Salt mixed into the per-tile tick hash.
+    pub seed_salt: u64,
+}
+
+impl Default for CondensationConfig {
+    fn default() -> Self {
+        Self {
+            top_y: 0,
+            min_mass_to_rain: 64.0,
+            max_prob_per_tick: 0.4,
+            full_mass: 512.0,
+            mass_per_droplet: 96.0,
+            seed_salt: 0xC10D_BA5E,
+        }
+    }
+}
+
+/// Precipitation feedback: humidity tiles that hold enough
+/// atmospheric water probabilistically drop droplets back into the
+/// cell grid, draining the tile as they do.
+///
+/// Rain lands at the tile's centre column, in the cell at
+/// `cfg.top_y` — provided that cell is currently `Air`. Sat and
+/// tile mass are both bounded so the pass can't create or lose
+/// mass beyond what's actually available.
+///
+/// Deterministic given `(world.seed, tile_coord, world.tick,
+/// cfg.seed_salt)`.
+pub fn apply_condensation_rain(
+    world: &mut World,
+    humidity: &mut crate::humidity::Humidity,
+    cfg: &CondensationConfig,
+) {
+    if cfg.min_mass_to_rain >= cfg.full_mass || cfg.max_prob_per_tick <= 0.0 {
+        return;
+    }
+    let seed = world.seed.0;
+    let tick_no = world.tick;
+    let tile_cols = humidity.tile_cols;
+    // Snapshot tile keys so we can mutate humidity as we go.
+    let tiles: Vec<(i32, i32)> = humidity.cells.keys().copied().collect();
+    for (hx, hy) in tiles {
+        let mass = humidity.at_tile(hx, hy);
+        if mass < cfg.min_mass_to_rain {
+            continue;
+        }
+        // Linear scale from 0 at min_mass to max at full_mass.
+        let t = ((mass - cfg.min_mass_to_rain)
+            / (cfg.full_mass - cfg.min_mass_to_rain))
+            .clamp(0.0, 1.0);
+        let effective_prob = cfg.max_prob_per_tick * t;
+        // Hash uses tile coord + tick + salt for per-tile determinism.
+        let roll = hash_prob(
+            seed,
+            hx.wrapping_mul(73_856_093).wrapping_add(hy),
+            tick_no,
+            cfg.seed_salt,
+        );
+        if roll >= effective_prob {
+            continue;
+        }
+        // Rain point: centre column of the tile, at cfg.top_y.
+        let centre_gx = hx * tile_cols + tile_cols / 2;
+        let Some(cell) = world.get_cell(centre_gx, cfg.top_y) else {
+            continue;
+        };
+        if cell.material != MaterialId::Air {
+            continue;
+        }
+        // Move mass_per_droplet from humidity into the cell — bounded
+        // by both what humidity actually holds and the cell's
+        // remaining sat headroom, so the transfer is mass-conservative.
+        let take_mass = cfg.mass_per_droplet.min(mass);
+        let cell_free = u8::MAX as f32 - cell.sat.0 as f32;
+        let transfer = take_mass.min(cell_free).max(0.0);
+        if transfer <= 0.0 {
+            continue;
+        }
+        let transfer_u = transfer.round() as i32;
+        if transfer_u <= 0 {
+            continue;
+        }
+        let new_sat = (cell.sat.0 as i32 + transfer_u).clamp(0, u8::MAX as i32) as u8;
+        world.set_cell(
+            centre_gx,
+            cfg.top_y,
+            Cell {
+                sat: Sat(new_sat),
+                ..cell
+            },
+        );
+        // Drain the humidity tile by the exact mass that landed.
+        let entry = humidity.cells.entry((hx, hy)).or_insert(0.0);
+        *entry -= transfer_u as f32;
+        if *entry < 1e-6 {
+            humidity.cells.remove(&(hx, hy));
+        }
+    }
+}
+
 /// Karst dissolution parameters for [`apply_karst_dissolution`].
 #[derive(Debug, Clone, Copy)]
 pub struct KarstConfig {
@@ -1299,6 +1420,139 @@ mod tests {
             w.tick = w.tick.wrapping_add(1);
         }
         assert_eq!(w.get_cell(5, 5).unwrap().material, MaterialId::Stone);
+    }
+
+    // ------------ condensation rain ------------
+
+    fn setup_cloud_world() -> (World, crate::humidity::Humidity) {
+        let mut w = World::new(21);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let h = crate::humidity::Humidity::new(4);
+        (w, h)
+    }
+
+    #[test]
+    fn condensation_never_rains_from_a_dry_tile() {
+        let (mut w, mut h) = setup_cloud_world();
+        // No humidity anywhere. Rain must not appear.
+        let cfg = CondensationConfig {
+            top_y: 30,
+            ..CondensationConfig::default()
+        };
+        for _ in 0..20 {
+            apply_condensation_rain(&mut w, &mut h, &cfg);
+            w.tick = w.tick.wrapping_add(1);
+        }
+        for x in 0..CHUNK_CELLS_W as i32 {
+            assert_eq!(w.get_cell(x, 30).unwrap().sat.0, 0);
+        }
+    }
+
+    #[test]
+    fn condensation_rains_when_tile_is_wet() {
+        let (mut w, mut h) = setup_cloud_world();
+        // Deposit lots of humidity at tile (0, 7) so it's saturated.
+        // Tile (0, 7) covers gx=[0..4), gy=[28..32). Cloud row at gy=30.
+        h.add(1, 30, 1000.0);
+        let cfg = CondensationConfig {
+            top_y: 30,
+            max_prob_per_tick: 1.0, // guaranteed to rain
+            ..CondensationConfig::default()
+        };
+        apply_condensation_rain(&mut w, &mut h, &cfg);
+        // Rain lands at the tile centre: gx = hx*tile_cols + tile_cols/2
+        // = 0*4 + 2 = 2.
+        let landed = w.get_cell(2, 30).unwrap();
+        assert!(
+            landed.sat.0 > 0,
+            "cloud with 1000 mass should have rained (got sat={})",
+            landed.sat.0
+        );
+    }
+
+    #[test]
+    fn condensation_is_mass_conservative() {
+        let (mut w, mut h) = setup_cloud_world();
+        // Spread humidity across a few tiles.
+        h.add(1, 30, 400.0);
+        h.add(6, 30, 300.0);
+        h.add(11, 30, 250.0);
+        let total_before = h.total_mass();
+        // Sum sat on the cloud row before.
+        let world_sat_before: i64 = (0..CHUNK_CELLS_W as i32)
+            .map(|x| w.get_cell(x, 30).unwrap().sat.0 as i64)
+            .sum();
+
+        let cfg = CondensationConfig {
+            top_y: 30,
+            max_prob_per_tick: 1.0,
+            ..CondensationConfig::default()
+        };
+        for _ in 0..5 {
+            apply_condensation_rain(&mut w, &mut h, &cfg);
+            w.tick = w.tick.wrapping_add(1);
+        }
+
+        let total_after = h.total_mass();
+        let world_sat_after: i64 = (0..CHUNK_CELLS_W as i32)
+            .map(|x| w.get_cell(x, 30).unwrap().sat.0 as i64)
+            .sum();
+        let humidity_lost = total_before - total_after;
+        let world_gained = (world_sat_after - world_sat_before) as f32;
+        assert!(
+            (humidity_lost - world_gained).abs() < 1.5,
+            "humidity_lost={humidity_lost}, world_gained={world_gained} — mass must balance"
+        );
+    }
+
+    #[test]
+    fn condensation_is_deterministic_for_seed_and_tick() {
+        let (mut w1, mut h1) = setup_cloud_world();
+        let (mut w2, mut h2) = setup_cloud_world();
+        for tile in [(1, 30), (6, 30), (11, 30)] {
+            h1.add(tile.0, tile.1, 400.0);
+            h2.add(tile.0, tile.1, 400.0);
+        }
+        let cfg = CondensationConfig {
+            top_y: 30,
+            max_prob_per_tick: 0.7,
+            seed_salt: 12345,
+            ..CondensationConfig::default()
+        };
+        for _ in 0..10 {
+            apply_condensation_rain(&mut w1, &mut h1, &cfg);
+            apply_condensation_rain(&mut w2, &mut h2, &cfg);
+            w1.tick = w1.tick.wrapping_add(1);
+            w2.tick = w2.tick.wrapping_add(1);
+        }
+        for x in 0..CHUNK_CELLS_W as i32 {
+            assert_eq!(
+                w1.get_cell(x, 30).map(|c| c.sat.0),
+                w2.get_cell(x, 30).map(|c| c.sat.0),
+                "world state must be deterministic at x={x}"
+            );
+        }
+        assert_eq!(h1.total_mass(), h2.total_mass());
+    }
+
+    #[test]
+    fn condensation_skips_non_air_landing_cell() {
+        let (mut w, mut h) = setup_cloud_world();
+        h.add(1, 30, 1000.0);
+        // Put Stone at the tile's centre landing spot.
+        w.set_cell(2, 30, Cell::solid(MaterialId::Stone));
+        let mass_before = h.total_mass();
+        let cfg = CondensationConfig {
+            top_y: 30,
+            max_prob_per_tick: 1.0,
+            ..CondensationConfig::default()
+        };
+        apply_condensation_rain(&mut w, &mut h, &cfg);
+        // Stone stays, no sat added; humidity untouched because
+        // rain refused.
+        assert_eq!(w.get_cell(2, 30).unwrap().material, MaterialId::Stone);
+        assert_eq!(w.get_cell(2, 30).unwrap().sat.0, 0);
+        assert_eq!(h.total_mass(), mass_before);
     }
 
     #[test]

@@ -14,7 +14,8 @@
 //! Hotkeys:
 //! - `Space` — pause / resume physics ticks
 //! - `R` — regenerate the world with a new seed
-//! - `W` — toggle rain
+//! - `W` — toggle background rain (climatic, always-on cloud row)
+//! - `C` — toggle condensation rain (feedback from humidity heatmap)
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
 //! - `H` — toggle humidity overlay
@@ -27,8 +28,8 @@ mod scene;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_evaporation_into_humidity, apply_karst_dissolution, apply_rain, tick, EvapConfig,
-    KarstConfig, RainConfig, WorldgenParams,
+    apply_condensation_rain, apply_evaporation_into_humidity, apply_karst_dissolution, apply_rain,
+    tick, CondensationConfig, EvapConfig, KarstConfig, RainConfig, WorldgenParams,
 };
 
 use crate::palette::cell_color;
@@ -54,6 +55,7 @@ async fn main() {
     let mut scene = Scene::new(params);
     let mut paused = false;
     let mut rain_on = true;
+    let mut cond_rain_on = true;
     let mut evap_on = true;
     let mut karst_on = true;
     let mut humidity_overlay = false;
@@ -74,6 +76,12 @@ async fn main() {
     };
     let evap_cfg = EvapConfig::default();
     let karst_cfg = KarstConfig::default();
+    // Condensation rains one row *below* the cloud line so the droplet
+    // has a bit of air to fall through, which reads visually.
+    let cond_cfg = CondensationConfig {
+        top_y: scene.params.sky_ceiling_y - 3,
+        ..CondensationConfig::default()
+    };
 
     loop {
         // Input.
@@ -102,6 +110,9 @@ async fn main() {
         if is_key_pressed(KeyCode::H) {
             humidity_overlay = !humidity_overlay;
         }
+        if is_key_pressed(KeyCode::C) {
+            cond_rain_on = !cond_rain_on;
+        }
         let pan = 200.0 * get_frame_time();
         if is_key_down(KeyCode::Left) {
             cam_x -= pan;
@@ -127,6 +138,11 @@ async fn main() {
                     &mut scene.humidity,
                     &evap_cfg,
                 );
+            }
+            if cond_rain_on {
+                // Condensation rain runs AFTER evap so the humidity
+                // it draws from is the tick's latest snapshot.
+                apply_condensation_rain(&mut scene.world, &mut scene.humidity, &cond_cfg);
             }
             if karst_on {
                 apply_karst_dissolution(&mut scene.world, &karst_cfg);
@@ -205,10 +221,11 @@ async fn main() {
 
         // HUD.
         let hud = format!(
-            "tick={} seed={} rain={} evap={} karst={} humidity_mass={:.0} {}  |  Space pause | R reroll | W rain | E evap | K karst | H overlay | arrows pan | Esc quit",
+            "tick={} seed={} rain={} cond={} evap={} karst={} humidity_mass={:.0} {}  |  Space pause | R reroll | W rain | C cond | E evap | K karst | H overlay | arrows pan | Esc quit",
             scene.world.tick,
             scene.params.seed,
             if rain_on { "on" } else { "off" },
+            if cond_rain_on { "on" } else { "off" },
             if evap_on { "on" } else { "off" },
             if karst_on { "on" } else { "off" },
             scene.humidity.total_mass(),
