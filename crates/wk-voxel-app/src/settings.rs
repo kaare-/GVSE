@@ -128,7 +128,7 @@ impl SimSettings {
         let mut tall_above = self.oro.tall_above_sea as f32;
         let mut reset_materials = false;
 
-        widgets::Window::new(hash!(), vec2(16.0, 16.0), vec2(420.0, 640.0))
+        widgets::Window::new(hash!(), vec2(16.0, 16.0), vec2(560.0, 700.0))
             .label("Settings (Tab to close)")
             .ui(&mut *root_ui(), |ui| {
                 ui.tree_node(hash!(), "Day / night / temperature", |ui| {
