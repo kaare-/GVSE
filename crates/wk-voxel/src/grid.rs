@@ -32,6 +32,10 @@ pub struct World {
     /// counters are kept for RNG salting; this one drives rule
     /// scheduling.
     pub tick: u64,
+    /// When `Some(w)`, world-x is toroidal with period `w`:
+    /// `get_cell` / `set_cell` map every `gx` into `[0, w)`.
+    /// Used by ring worldgen so the left edge joins the right.
+    pub wrap_width: Option<i32>,
 }
 
 impl World {
@@ -40,6 +44,15 @@ impl World {
             seed: WorldSeed(seed),
             chunks: HashMap::new(),
             tick: 0,
+            wrap_width: None,
+        }
+    }
+
+    /// Map a world-x into the stored range when wrap is enabled.
+    pub fn wrap_x(&self, gx: i32) -> i32 {
+        match self.wrap_width {
+            Some(w) if w > 0 => gx.rem_euclid(w),
+            _ => gx,
         }
     }
 
@@ -56,6 +69,7 @@ impl World {
     }
 
     pub fn get_cell(&self, gx: i32, gy: i32) -> Option<Cell> {
+        let gx = self.wrap_x(gx);
         let (coord, lx, ly) = Self::split(gx, gy);
         self.chunks.get(&coord).map(|c| c.get(lx, ly))
     }
@@ -64,6 +78,7 @@ impl World {
     /// chunk if needed. Marks the chunk's dirty rectangle so rules
     /// re-scan on the next tick.
     pub fn set_cell(&mut self, gx: i32, gy: i32, cell: Cell) {
+        let gx = self.wrap_x(gx);
         let (coord, lx, ly) = Self::split(gx, gy);
         let chunk = self.chunks.entry(coord).or_insert_with(|| Chunk::new(coord));
         chunk.set(lx, ly, cell);

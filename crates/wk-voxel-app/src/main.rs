@@ -19,7 +19,7 @@
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
 //! - `H` — toggle humidity overlay
-//! - `Left` / `Right` — pan the camera horizontally
+//! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
 //! - `Esc` — quit
 
@@ -127,6 +127,12 @@ async fn main() {
         if is_key_down(KeyCode::Down) {
             cam_y += pan;
         }
+        // Ring camera: keep pan offset inside one world width so the
+        // seam is just "further left / right" rather than empty space.
+        let world_w_px_for_wrap = scene.params.width_cols as f32 * PX_PER_CELL;
+        if scene.params.wrap_x && world_w_px_for_wrap > 0.0 {
+            cam_x = cam_x.rem_euclid(world_w_px_for_wrap);
+        }
 
         // Physics.
         if !paused {
@@ -172,26 +178,32 @@ async fn main() {
         // Screen +y is down. World +y is up. Flip when placing rows.
         let origin_y = (sh + world_h_px) * 0.5 + cam_y;
 
-        for x in 0..scene.params.width_cols {
-            let sx = origin_x + x as f32 * cell_px;
-            if sx + cell_px < 0.0 || sx > sw {
-                continue;
-            }
-            for y in scene.params.bedrock_floor_y..scene.params.sky_ceiling_y {
-                let sy = origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
-                if sy + cell_px < 0.0 || sy > sh {
+        // Draw the ring once, plus ±1 world-width copies so the seam
+        // never shows a gap while panning.
+        let x_copies: &[i32] = if scene.params.wrap_x { &[-1, 0, 1] } else { &[0] };
+        for &x_copy in x_copies {
+            let x_shift = x_copy * scene.params.width_cols;
+            for x in 0..scene.params.width_cols {
+                let sx = origin_x + (x + x_shift) as f32 * cell_px;
+                if sx + cell_px < 0.0 || sx > sw {
                     continue;
                 }
-                let Some(cell) = scene.world.get_cell(x, y) else {
-                    continue;
-                };
-                let [r, g, b] = cell_color(cell);
-                // Skip sky-blue empty air — background already
-                // paints that colour, so this cuts draw calls hard.
-                if cell.material == wk_material::MaterialId::Air && cell.sat.is_empty() {
-                    continue;
+                for y in scene.params.bedrock_floor_y..scene.params.sky_ceiling_y {
+                    let sy = origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
+                    if sy + cell_px < 0.0 || sy > sh {
+                        continue;
+                    }
+                    let Some(cell) = scene.world.get_cell(x, y) else {
+                        continue;
+                    };
+                    let [r, g, b] = cell_color(cell);
+                    // Skip sky-blue empty air — background already
+                    // paints that colour, so this cuts draw calls hard.
+                    if cell.material == wk_material::MaterialId::Air && cell.sat.is_empty() {
+                        continue;
+                    }
+                    draw_rectangle(sx, sy - cell_px, cell_px, cell_px, Color::from_rgba(r, g, b, 255));
                 }
-                draw_rectangle(sx, sy - cell_px, cell_px, cell_px, Color::from_rgba(r, g, b, 255));
             }
         }
 
@@ -205,22 +217,25 @@ async fn main() {
                 // of the tile) then to screen coord.
                 let base_gx = hx * scene.humidity.tile_cols;
                 let base_gy = hy * scene.humidity.tile_cols;
-                let sx = origin_x + base_gx as f32 * cell_px;
-                let sy = origin_y
-                    - (base_gy - scene.params.bedrock_floor_y + scene.humidity.tile_cols) as f32
-                        * cell_px;
-                if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
-                    continue;
+                for &x_copy in x_copies {
+                    let sx = origin_x + (base_gx + x_copy * scene.params.width_cols) as f32 * cell_px;
+                    let sy = origin_y
+                        - (base_gy - scene.params.bedrock_floor_y + scene.humidity.tile_cols)
+                            as f32
+                            * cell_px;
+                    if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
+                        continue;
+                    }
+                    // Normalise mass → alpha. A full-tile ceiling of
+                    // ~4×4×255 = 4080 sat-units would be "saturated
+                    // cloud".
+                    let norm = (mass / 4080.0).clamp(0.0, 1.0);
+                    let alpha = (norm * 180.0) as u8;
+                    if alpha == 0 {
+                        continue;
+                    }
+                    draw_rectangle(sx, sy, tile_px, tile_px, Color::from_rgba(160, 200, 240, alpha));
                 }
-                // Normalise mass → alpha. A full-tile ceiling of
-                // ~4×4×255 = 4080 sat-units would be "saturated
-                // cloud".
-                let norm = (mass / 4080.0).clamp(0.0, 1.0);
-                let alpha = (norm * 180.0) as u8;
-                if alpha == 0 {
-                    continue;
-                }
-                draw_rectangle(sx, sy, tile_px, tile_px, Color::from_rgba(160, 200, 240, alpha));
             }
         }
 

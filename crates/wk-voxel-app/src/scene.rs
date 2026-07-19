@@ -22,13 +22,15 @@ impl Scene {
         stamp_world(&mut world, &params);
         // Clamp atmospheric mass to the stamped cell rectangle so
         // diffusion can't grow an unbounded sparse haze off-map.
-        let humidity = Humidity::with_world_bounds(
+        // Ring worlds also wrap humidity in x so the atmosphere joins.
+        let mut humidity = Humidity::with_world_bounds(
             HUMIDITY_TILE_COLS,
             0,
             params.bedrock_floor_y,
             params.width_cols,
             params.sky_ceiling_y,
         );
+        humidity.wrap_x = params.wrap_x;
         Self {
             world,
             params,

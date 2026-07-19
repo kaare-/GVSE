@@ -275,7 +275,8 @@ Initial overlays we plan to introduce, in rough order:
    tick; **diffusion runs on a schedule** (`humidity_diffuse_due`,
    period 20 / phase 3 — same cadence as column-GVSE
    `HumidityField`). The map is **clamped** to the stamped world
-   tile bounds (Neumann edges) so sparse keys cannot grow off-map.
+   tile bounds; ring worlds also set `wrap_x` so the atmosphere
+   joins at the seam.
 4. **Wind.** Vector `(vx, vy)` per tile. Drives cloud advection and
    surface stress.
 5. **Sediment concentration.** Per cell. Only needed once we do
