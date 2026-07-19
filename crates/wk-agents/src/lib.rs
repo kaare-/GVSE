@@ -1,5 +1,8 @@
 //! ECS creature layer (stages 10–11 + Organism Kernel Set A).
 //!
+//! Column-based GVSE. MUST NOT import from wk-voxel. See
+//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
+//!
 //! Agents live in a [`hecs::World`] beside the column stack. They read
 //! world state and call [`wk_world::World`] APIs (`dig`, `eat_biomass`,
 //! `drink_water`). Stage 11 adds reproduction with deterministic genome

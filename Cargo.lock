@@ -570,6 +570,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "wk-voxel"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "wk-material",
+]
+
+[[package]]
 name = "wk-world"
 version = "0.1.0"
 dependencies = [

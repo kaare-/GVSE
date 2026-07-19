@@ -8,6 +8,9 @@ members = [
     "crates/wk-sim",
     "crates/wk-io",
     "crates/wk-app",
+    # Greenfield 2D cellular-automata sim, isolated from the column
+    # stack above. See docs/VOXEL_MIGRATION.md.
+    "crates/wk-voxel",
 ]
 
 [workspace.package]

@@ -1,4 +1,7 @@
 //! Simulation kernel: clock, transfer buffers, subsystems, barrier commit.
+//!
+//! Column-based GVSE. MUST NOT import from wk-voxel. See
+//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 
 pub mod audit;
 pub mod barrier;
