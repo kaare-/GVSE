@@ -29,7 +29,8 @@ mod scene;
 use macroquad::prelude::*;
 use wk_voxel::{
     apply_condensation_rain, apply_evaporation_into_humidity, apply_karst_dissolution, apply_rain,
-    tick, CondensationConfig, EvapConfig, KarstConfig, RainConfig, WorldgenParams,
+    humidity_diffuse_due, tick, CondensationConfig, EvapConfig, KarstConfig, RainConfig,
+    WorldgenParams,
 };
 
 use crate::palette::cell_color;
@@ -148,8 +149,12 @@ async fn main() {
                 apply_karst_dissolution(&mut scene.world, &karst_cfg);
             }
             tick(&mut scene.world);
-            // Diffuse humidity every tick — cheap, sparse.
-            scene.humidity.diffuse(humidity_diffusion_alpha);
+            // Atmospheric diffusion is periodic (column-GVSE
+            // HumidityField cadence: every 20 ticks). Evap still
+            // deposits every tick; only the spread step is throttled.
+            if humidity_diffuse_due(scene.world.tick) {
+                scene.humidity.diffuse(humidity_diffusion_alpha);
+            }
         }
 
         // Render.

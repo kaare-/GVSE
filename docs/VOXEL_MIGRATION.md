@@ -270,8 +270,12 @@ Initial overlays we plan to introduce, in rough order:
    separate heatmap needed. Listed for completeness.
 2. **Temperature.** °C per tile, coarse (`cells_per_side = 4`).
    Drives phase change and ecology comfort.
-3. **Humidity.** Relative humidity per tile. Evaporation source /
-   sink term.
+3. **Humidity.** Atmospheric water mass per tile (sparse
+   `Humidity` map, `tile_cols = 4`). Evaporation deposits every
+   tick; **diffusion runs on a schedule** (`humidity_diffuse_due`,
+   period 20 / phase 3 — same cadence as column-GVSE
+   `HumidityField`). The map is **clamped** to the stamped world
+   tile bounds (Neumann edges) so sparse keys cannot grow off-map.
 4. **Wind.** Vector `(vx, vy)` per tile. Drives cloud advection and
    surface stress.
 5. **Sediment concentration.** Per cell. Only needed once we do

@@ -20,7 +20,9 @@ pub use cell::{is_grain, water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use grid::World;
 pub use heatmap::Heatmap;
-pub use humidity::Humidity;
+pub use humidity::{
+    humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,
+};
 pub use rules::{
     apply_condensation_rain, apply_evaporation, apply_evaporation_into_humidity, apply_grain_fall,
     apply_gravity_fall, apply_karst_dissolution, apply_lateral_spill, apply_rain, tick,

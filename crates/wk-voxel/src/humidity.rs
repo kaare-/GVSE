@@ -16,10 +16,66 @@
 //! filter; combined with symmetric application that's the standard
 //! isotropic diffusion stencil in a form that trivially conserves
 //! mass across a snapshot pass.
+//!
+//! Callers should set [`Humidity::bounds`] to the stamped world so
+//! diffusion cannot grow an unbounded sparse haze outside the map.
+//! Diffusion itself is also meant to run on a schedule (see
+//! [`humidity_diffuse_due`]) — matching column-GVSE's `HumidityField`
+//! period — not every physics tick.
 
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+
+/// Inclusive tile-coordinate rectangle.
+///
+/// When set on a [`Humidity`], diffusion uses a Neumann (no-flux)
+/// boundary: mass never leaves the box, and no sparse keys are
+/// created outside it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TileBounds {
+    pub hx_min: i32,
+    pub hx_max: i32,
+    pub hy_min: i32,
+    pub hy_max: i32,
+}
+
+impl TileBounds {
+    /// Tile box covering world cells `[x0, x1) × [y0, y1)`.
+    pub fn from_world_cells(tile_cols: i32, x0: i32, y0: i32, x1: i32, y1: i32) -> Self {
+        let tc = tile_cols.max(1);
+        let x_lo = x0.min(x1 - 1);
+        let x_hi = (x1 - 1).max(x0);
+        let y_lo = y0.min(y1 - 1);
+        let y_hi = (y1 - 1).max(y0);
+        Self {
+            hx_min: x_lo.div_euclid(tc),
+            hx_max: x_hi.div_euclid(tc),
+            hy_min: y_lo.div_euclid(tc),
+            hy_max: y_hi.div_euclid(tc),
+        }
+    }
+
+    pub fn contains(self, hx: i32, hy: i32) -> bool {
+        hx >= self.hx_min && hx <= self.hx_max && hy >= self.hy_min && hy <= self.hy_max
+    }
+
+    pub fn tile_capacity(self) -> usize {
+        let w = (self.hx_max - self.hx_min + 1).max(0) as usize;
+        let h = (self.hy_max - self.hy_min + 1).max(0) as usize;
+        w.saturating_mul(h)
+    }
+}
+
+/// Cadence for atmospheric diffusion — same numbers as column-GVSE
+/// `SubsystemId::HumidityField` (`period: 20`, `phase: 3`).
+pub const HUMIDITY_DIFFUSE_PERIOD: u64 = 20;
+pub const HUMIDITY_DIFFUSE_PHASE: u64 = 3;
+
+/// True on ticks when humidity diffusion should run.
+pub fn humidity_diffuse_due(tick: u64) -> bool {
+    tick % HUMIDITY_DIFFUSE_PERIOD == HUMIDITY_DIFFUSE_PHASE
+}
 
 /// A sparse 2D heatmap keyed by tile coordinates. Each tile covers
 /// `tile_cols` × `tile_cols` world cells. Missing keys are implicit
@@ -32,6 +88,10 @@ pub struct Humidity {
     /// on 0..255) but stored as `f32` so diffusion can accumulate
     /// fractional deltas without quantisation error.
     pub cells: HashMap<(i32, i32), f32>,
+    /// Optional hard clamp on tile keys. `None` leaves diffusion
+    /// unbounded (unit-test convenience only — production worlds
+    /// should always set this).
+    pub bounds: Option<TileBounds>,
 }
 
 impl Humidity {
@@ -39,7 +99,16 @@ impl Humidity {
         Self {
             tile_cols: tile_cols.max(1),
             cells: HashMap::new(),
+            bounds: None,
         }
+    }
+
+    /// Convenience: humidity map pre-clamped to a stamped world's
+    /// cell rectangle `[x0, x1) × [y0, y1)`.
+    pub fn with_world_bounds(tile_cols: i32, x0: i32, y0: i32, x1: i32, y1: i32) -> Self {
+        let mut h = Self::new(tile_cols);
+        h.bounds = Some(TileBounds::from_world_cells(h.tile_cols, x0, y0, x1, y1));
+        h
     }
 
     /// Tile coord for a world cell.
@@ -47,12 +116,22 @@ impl Humidity {
         (gx.div_euclid(self.tile_cols), gy.div_euclid(self.tile_cols))
     }
 
+    fn accepts(&self, hx: i32, hy: i32) -> bool {
+        self.bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
+    }
+
     /// Deposit `mass` at world cell `(gx, gy)`.
+    ///
+    /// Deposits outside [`Self::bounds`] are dropped (the cell grid
+    /// should not evaporate outside the stamped world).
     pub fn add(&mut self, gx: i32, gy: i32, mass: f32) {
         if mass == 0.0 {
             return;
         }
         let key = self.tile_of(gx, gy);
+        if !self.accepts(key.0, key.1) {
+            return;
+        }
         *self.cells.entry(key).or_insert(0.0) += mass;
     }
 
@@ -73,6 +152,14 @@ impl Humidity {
         self.cells.values().copied().sum()
     }
 
+    /// Drop any sparse keys outside [`Self::bounds`].
+    pub fn clamp_to_bounds(&mut self) {
+        let Some(b) = self.bounds else {
+            return;
+        };
+        self.cells.retain(|&(hx, hy), _| b.contains(hx, hy));
+    }
+
     /// Explicit 4-neighbour diffusion step.
     ///
     /// `alpha` is the fraction of each pairwise head difference
@@ -81,6 +168,9 @@ impl Humidity {
     /// Compute-then-apply from a snapshot so the result is
     /// independent of iteration order; pruning removes near-zero
     /// tiles so the sparse map doesn't grow without bound.
+    ///
+    /// When [`Self::bounds`] is set, out-of-box neighbours are treated
+    /// as no-flux walls (pair skipped) so mass stays inside the world.
     pub fn diffuse(&mut self, alpha: f32) {
         let alpha = alpha.clamp(0.0, 0.25);
         if alpha == 0.0 || self.cells.is_empty() {
@@ -97,11 +187,12 @@ impl Humidity {
         // pairs so every undirected pair is visited exactly once.
         let mut sources: Vec<(i32, i32)> = Vec::with_capacity(snap.len() * 5);
         for &(hx, hy) in snap.keys() {
-            sources.push((hx, hy));
-            sources.push((hx + 1, hy));
-            sources.push((hx - 1, hy));
-            sources.push((hx, hy + 1));
-            sources.push((hx, hy - 1));
+            for (dx, dy) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
+                let k = (hx + dx, hy + dy);
+                if self.accepts(k.0, k.1) {
+                    sources.push(k);
+                }
+            }
         }
         sources.sort_unstable();
         sources.dedup();
@@ -111,6 +202,10 @@ impl Humidity {
             let val = *snap.get(&(hx, hy)).unwrap_or(&0.0);
             for &(dx, dy) in &[(1, 0), (0, 1)] {
                 let n_key = (hx + dx, hy + dy);
+                if !self.accepts(n_key.0, n_key.1) {
+                    // Neumann edge: no exchange with the outside.
+                    continue;
+                }
                 let n_val = *snap.get(&n_key).unwrap_or(&0.0);
                 let flow = (val - n_val) * alpha;
                 if flow.abs() < 1e-9 {
@@ -121,9 +216,15 @@ impl Humidity {
             }
         }
         for (k, d) in deltas {
+            if !self.accepts(k.0, k.1) {
+                continue;
+            }
             *self.cells.entry(k).or_insert(0.0) += d;
         }
-        self.cells.retain(|_, v| v.abs() > 1e-6);
+        let bounds = self.bounds;
+        self.cells.retain(|&(hx, hy), v| {
+            v.abs() > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
+        });
     }
 }
 
@@ -204,5 +305,64 @@ mod tests {
         let mut h = Humidity::new(4);
         h.add(0, 0, 0.0);
         assert!(h.cells.is_empty());
+    }
+
+    #[test]
+    fn bounds_block_out_of_world_deposits() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 16, 16);
+        h.add(2, 2, 10.0);
+        h.add(100, 100, 50.0); // outside
+        assert_eq!(h.total_mass(), 10.0);
+        assert_eq!(h.cells.len(), 1);
+    }
+
+    #[test]
+    fn diffuse_with_bounds_stays_inside_and_conserves() {
+        let mut h = Humidity::with_world_bounds(1, 0, 0, 4, 4);
+        // Capacity = 4×4 = 16 tiles.
+        h.add(1, 1, 100.0);
+        let before = h.total_mass();
+        for _ in 0..80 {
+            h.diffuse(0.25);
+        }
+        let after = h.total_mass();
+        assert!(
+            (before - after).abs() < 1e-3,
+            "bounded diffusion must conserve: before={before}, after={after}"
+        );
+        assert!(
+            h.cells.len() <= h.bounds.unwrap().tile_capacity(),
+            "tile count {} exceeded capacity",
+            h.cells.len()
+        );
+        for &(hx, hy) in h.cells.keys() {
+            assert!(h.bounds.unwrap().contains(hx, hy), "oob tile ({hx},{hy})");
+        }
+        // Edge mass should remain (Neumann) — centre spike spreads but
+        // does not vanish out the sides.
+        assert!(after > 99.0);
+    }
+
+    #[test]
+    fn diffuse_does_not_create_keys_outside_bounds() {
+        let mut h = Humidity::with_world_bounds(1, 0, 0, 2, 2);
+        h.add(0, 0, 100.0);
+        h.diffuse(0.25);
+        for &(hx, hy) in h.cells.keys() {
+            assert!(
+                (0..=1).contains(&hx) && (0..=1).contains(&hy),
+                "created oob key ({hx},{hy})"
+            );
+        }
+    }
+
+    #[test]
+    fn humidity_diffuse_due_matches_column_schedule() {
+        assert!(!humidity_diffuse_due(0));
+        assert!(!humidity_diffuse_due(1));
+        assert!(humidity_diffuse_due(3));
+        assert!(!humidity_diffuse_due(4));
+        assert!(humidity_diffuse_due(23));
+        assert!(humidity_diffuse_due(43));
     }
 }
