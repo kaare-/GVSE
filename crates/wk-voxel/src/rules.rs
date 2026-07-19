@@ -390,6 +390,106 @@ pub fn apply_evaporation(world: &mut World, cfg: &EvapConfig) {
     }
 }
 
+/// Karst dissolution parameters for [`apply_karst_dissolution`].
+#[derive(Debug, Clone, Copy)]
+pub struct KarstConfig {
+    /// Base probability per tick that a Limestone cell dissolves
+    /// *per* wet neighbour it has. Effective probability is
+    /// `min(1, prob_per_wet_neighbour × wet_count)`.
+    pub prob_per_wet_neighbour: f32,
+    /// A neighbouring Air cell counts as "wet" once its sat is at
+    /// or above this threshold. Prevents faint rain droplets from
+    /// dissolving whole cliffs.
+    pub min_wet_neighbour_sat: u8,
+    /// Salt mixed into the per-cell tick hash so callers can run
+    /// different karst regimes side-by-side.
+    pub seed_salt: u64,
+}
+
+impl Default for KarstConfig {
+    fn default() -> Self {
+        // Tuned so a limestone body under constant water exposure
+        // dissolves visibly over a few thousand ticks — game-scale,
+        // not real karst-formation-scale.
+        Self {
+            prob_per_wet_neighbour: 0.001,
+            min_wet_neighbour_sat: 200,
+            seed_salt: 0xCAFE_D155_01F0_D000_u64,
+        }
+    }
+}
+
+/// Karst dissolution: Limestone cells with wet Air neighbours
+/// probabilistically dissolve into Air, freeing their pore
+/// saturation into the new Air cell.
+///
+/// Deterministic given `(world.seed, gx, gy, world.tick,
+/// cfg.seed_salt)`.
+///
+/// Compute-then-apply so the sweep order doesn't affect the outcome.
+pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
+    let mut converts: Vec<(i32, i32, Cell)> = Vec::new();
+    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    let seed = world.seed.0;
+    let tick_no = world.tick;
+
+    for coord in coords {
+        for y in 0..CHUNK_CELLS_H {
+            let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in 0..CHUNK_CELLS_W {
+                let gx = coord.cx * CHUNK_CELLS_W as i32 + x as i32;
+                let Some(cur) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if cur.material != MaterialId::Limestone {
+                    continue;
+                }
+                // Count wet Air neighbours (4-connected).
+                let mut wet = 0u32;
+                for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+                    if let Some(n) = world.get_cell(gx + dx, gy + dy) {
+                        if n.material == MaterialId::Air && n.sat.0 >= cfg.min_wet_neighbour_sat {
+                            wet += 1;
+                        }
+                    }
+                }
+                if wet == 0 {
+                    continue;
+                }
+                let effective_prob =
+                    (cfg.prob_per_wet_neighbour * wet as f32).clamp(0.0, 1.0);
+                // Bake gy into the hash so cells at different y
+                // levels get independent rolls even though tick is
+                // shared.
+                let roll = hash_prob(
+                    seed,
+                    gx.wrapping_mul(73_856_093).wrapping_add(gy),
+                    tick_no,
+                    cfg.seed_salt,
+                );
+                if roll >= effective_prob {
+                    continue;
+                }
+                // Dissolve — keep whatever pore water this cell held.
+                converts.push((
+                    gx,
+                    gy,
+                    Cell {
+                        material: MaterialId::Air,
+                        sat: cur.sat,
+                        flags: cur.flags,
+                        _pad: cur._pad,
+                    },
+                ));
+            }
+        }
+    }
+    for (gx, gy, cell) in converts {
+        world.set_cell(gx, gy, cell);
+    }
+}
+
 /// Advance the sim by one tick.
 ///
 /// Runs the sub-passes in a fixed order:
@@ -1000,6 +1100,138 @@ mod tests {
         let cfg = EvapConfig::default();
         apply_evaporation(&mut w, &cfg);
         assert_eq!(w.get_cell(4, 5).unwrap().sat.0, 0);
+    }
+
+    // ------------ karst dissolution ------------
+
+    fn setup_limestone_world() -> World {
+        // Chunk (0, 0). Solid Limestone at y=1..=10, Bedrock at y=0,
+        // Air above.
+        let mut w = World::new(999);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..CHUNK_CELLS_W as i32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Limestone));
+            }
+        }
+        w
+    }
+
+    #[test]
+    fn dry_limestone_never_dissolves() {
+        let mut w = setup_limestone_world();
+        // No wet neighbours anywhere — just dry Air above.
+        let cfg = KarstConfig {
+            prob_per_wet_neighbour: 1.0,
+            min_wet_neighbour_sat: 200,
+            seed_salt: 1,
+        };
+        for _ in 0..50 {
+            apply_karst_dissolution(&mut w, &cfg);
+            w.tick = w.tick.wrapping_add(1);
+        }
+        // No cell converted.
+        for x in 0..(CHUNK_CELLS_W as i32) {
+            for y in 1..=10 {
+                assert_eq!(
+                    w.get_cell(x, y).unwrap().material,
+                    MaterialId::Limestone,
+                    "dry limestone at ({x},{y}) must not dissolve"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn wet_limestone_eventually_dissolves() {
+        let mut w = setup_limestone_world();
+        // Put water full on top of a specific limestone cell.
+        w.set_cell(10, 11, Cell::water());
+        let cfg = KarstConfig {
+            prob_per_wet_neighbour: 1.0,
+            min_wet_neighbour_sat: 200,
+            seed_salt: 42,
+        };
+        // With prob 1.0 the top-most limestone under the puddle
+        // should convert on the first tick.
+        apply_karst_dissolution(&mut w, &cfg);
+        let after = w.get_cell(10, 10).unwrap();
+        assert_eq!(after.material, MaterialId::Air, "wet limestone must dissolve");
+    }
+
+    #[test]
+    fn karst_is_deterministic_for_seed_and_tick() {
+        let mut a = setup_limestone_world();
+        let mut b = setup_limestone_world();
+        // Same puddle placement on both.
+        for x in 5..=15 {
+            a.set_cell(x, 11, Cell::water());
+            b.set_cell(x, 11, Cell::water());
+        }
+        let cfg = KarstConfig {
+            prob_per_wet_neighbour: 0.5,
+            min_wet_neighbour_sat: 200,
+            seed_salt: 7,
+        };
+        for _ in 0..10 {
+            apply_karst_dissolution(&mut a, &cfg);
+            apply_karst_dissolution(&mut b, &cfg);
+            a.tick = a.tick.wrapping_add(1);
+            b.tick = b.tick.wrapping_add(1);
+        }
+        for x in 0..(CHUNK_CELLS_W as i32) {
+            for y in 1..=10 {
+                assert_eq!(
+                    a.get_cell(x, y).map(|c| c.material),
+                    b.get_cell(x, y).map(|c| c.material),
+                    "seed-determinism failed at ({x},{y})"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn karst_ignores_non_limestone_solids() {
+        // Stone cell adjacent to water — should never dissolve.
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(5, 5, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 6, Cell::water());
+        let cfg = KarstConfig {
+            prob_per_wet_neighbour: 1.0,
+            min_wet_neighbour_sat: 200,
+            seed_salt: 3,
+        };
+        for _ in 0..20 {
+            apply_karst_dissolution(&mut w, &cfg);
+            w.tick = w.tick.wrapping_add(1);
+        }
+        assert_eq!(w.get_cell(5, 5).unwrap().material, MaterialId::Stone);
+    }
+
+    #[test]
+    fn karst_low_sat_neighbour_does_not_dissolve() {
+        // Air cell above limestone has sat below threshold → no
+        // dissolution.
+        let mut w = setup_limestone_world();
+        let mut wet_ish = Cell::air();
+        wet_ish.sat = Sat(50); // below threshold 200
+        w.set_cell(10, 11, wet_ish);
+        let cfg = KarstConfig {
+            prob_per_wet_neighbour: 1.0,
+            min_wet_neighbour_sat: 200,
+            seed_salt: 4,
+        };
+        for _ in 0..10 {
+            apply_karst_dissolution(&mut w, &cfg);
+            w.tick = w.tick.wrapping_add(1);
+        }
+        assert_eq!(
+            w.get_cell(10, 10).unwrap().material,
+            MaterialId::Limestone,
+            "damp-but-not-wet neighbour must not dissolve karst"
+        );
     }
 
     #[test]
