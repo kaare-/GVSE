@@ -105,4 +105,81 @@ impl Cell {
             _pad: 0,
         }
     }
+
+    /// Convenience: an Air cell already fully saturated with water.
+    /// Rules treat this the same as any other cell with `sat == FULL`
+    /// — "fully waterlogged air" is our stand-in for a free-water
+    /// cell (a lake surface, a raindrop, the interior of a pool).
+    pub fn water() -> Self {
+        Self {
+            material: MaterialId::Air,
+            sat: Sat::FULL,
+            flags: CellFlags::empty(),
+            _pad: 0,
+        }
+    }
+}
+
+/// Per-cell water-holding capacity as a `u8` on the same 0..255 scale
+/// as [`Sat`]. Air cells are treated as fully waterable (255); porous
+/// solids clamp to their [`wk_material::MaterialProps::porosity`];
+/// impermeable solids return 0.
+///
+/// `wk-material`'s `porosity` field is defined against the *solid*
+/// column model (fraction of the layer mass that can hold pore water)
+/// so Air itself is listed there as `porosity = 0`. In the voxel
+/// world an Air cell is empty *space* — the whole cell can turn into
+/// water — so we shim it here rather than editing shared props.
+pub fn water_capacity(material: MaterialId) -> u8 {
+    use wk_material::MaterialRegistry;
+    match material {
+        // Free-air cells hold a full unit of water. Any Air cell with
+        // `sat = FULL` reads as "this cell is water" in every rule.
+        MaterialId::Air => u8::MAX,
+        // Snow / Ice / Water materials are treated as impermeable in
+        // v1 rules: water doesn't pool inside a snow cell, and a
+        // liquid Water cell is redundant with Air+sat=FULL.
+        MaterialId::Water | MaterialId::Ice | MaterialId::Snow => 0,
+        // Rock and dirt: capacity = material porosity (0..255).
+        _ => MaterialRegistry::props(material).porosity,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn air_holds_full_water() {
+        assert_eq!(water_capacity(MaterialId::Air), u8::MAX);
+    }
+
+    #[test]
+    fn bedrock_holds_none() {
+        assert_eq!(water_capacity(MaterialId::Bedrock), 0);
+    }
+
+    #[test]
+    fn sand_uses_porosity() {
+        // Sand porosity is 180 in wk-material's registry today; the
+        // exact value is a data question, we just check the shim
+        // routes through the registry rather than shortcutting.
+        assert_eq!(
+            water_capacity(MaterialId::Sand),
+            wk_material::MaterialRegistry::props(MaterialId::Sand).porosity
+        );
+    }
+
+    #[test]
+    fn ice_and_snow_treated_impermeable_here() {
+        assert_eq!(water_capacity(MaterialId::Ice), 0);
+        assert_eq!(water_capacity(MaterialId::Snow), 0);
+    }
+
+    #[test]
+    fn cell_water_helper_is_saturated_air() {
+        let w = Cell::water();
+        assert_eq!(w.material, MaterialId::Air);
+        assert!(w.sat.is_full());
+    }
 }
