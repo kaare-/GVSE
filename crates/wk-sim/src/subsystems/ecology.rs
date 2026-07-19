@@ -36,15 +36,10 @@ fn light_factor(col: &wk_world::column::Column, sea_level: f32) -> f32 {
     if col.climate_elevation() < sea_level - 0.5 {
         return 0.05; // submerged
     }
-    let mut light = 1.0f32;
-    if col.top_snow_mass() > 0 {
-        light *= 0.35;
-    }
-    if col.top_ice_mass() > 0 {
-        light *= 0.25;
-    }
-    // Deep standing water shades the bed.
-    if col.top_water_mass() > 2_000 {
+    let mut light = col.cover_light_factor();
+    // Deep standing water shades the bed (snow/ice already handled above).
+    let water = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
+    if water > 2_000 {
         light *= 0.4;
     }
     light.clamp(0.0, 1.0)

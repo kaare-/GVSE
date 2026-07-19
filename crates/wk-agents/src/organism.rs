@@ -1735,18 +1735,21 @@ impl AgentStore {
             let fungus = body.blueprint.is_fungus();
 
             // Environment gates: water required, ice / freeze kills plankton.
-            let (in_water, iced, water_co2, nutrient) = if let Some(col) = world.column_at(wx) {
-                let wet = water_band(col).is_some();
-                let ice = col.top_ice_mass() > 0;
-                (
-                    wet,
-                    ice,
-                    col.ecology.water_co2,
-                    crate::root::column_nutrient_factor(col),
-                )
-            } else {
-                (false, false, 0.0, 0.2)
-            };
+            // Snow/ice cover dims light for everyone (cover_light_factor).
+            let (in_water, iced, water_co2, nutrient, cover) =
+                if let Some(col) = world.column_at(wx) {
+                    let wet = water_band(col).is_some();
+                    let ice = col.top_ice_mass() > 0;
+                    (
+                        wet,
+                        ice,
+                        col.ecology.water_co2,
+                        crate::root::column_nutrient_factor(col),
+                        col.cover_light_factor(),
+                    )
+                } else {
+                    (false, false, 0.0, 0.2, 1.0)
+                };
             // Plankton need free water; ice around them is lethal.
             if plankton && (!in_water || iced) {
                 deaths.push((e, wx));
@@ -1855,6 +1858,8 @@ impl AgentStore {
                         }
                     }
                 }
+                // Snow/ice pack Beer-Lambert attenuation (after shade / water).
+                photo_l0 *= cover;
                 let mut gain = organism_photo_gain(tank_ref, photo_l0, n_photo) * comfort;
                 if plankton {
                     // Michaelis–Menten on dissolved CO₂ — blooms can starve the water.
@@ -1918,7 +1923,8 @@ impl AgentStore {
                     * genome.metabolic_rate.clamp(0.05, 1.5);
                 basal + crate::fungi::fungus_upkeep(&body.blueprint, dormant)
             } else {
-                let mut u = organism_upkeep(genome, tank_ref, l0, n_photo);
+                // Buried under snow is dark — attenuate light for upkeep too.
+                let mut u = organism_upkeep(genome, tank_ref, l0 * cover, n_photo);
                 if dormant {
                     u *= crate::root::DROUGHT_DORMANT_UPKEEP;
                 }
@@ -2458,6 +2464,8 @@ impl AgentStore {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blueprint::PlacedModule;
+    use crate::module::{LaneId, ModuleId};
     use wk_world::column::{EQUIL_WATER_CO2, EQUIL_WATER_O2};
     use wk_world::terrain::generate_flat_sand;
     use wk_world::world::World;
@@ -4431,6 +4439,58 @@ mod tests {
         panic!(
             "expected spore burst on rich litter; living={}",
             store.organism_count()
+        );
+    }
+
+    #[test]
+    fn deep_snow_blocks_photosynthesis() {
+        let mut world = World::new(202);
+        world.sea_level = 0.0;
+        world.climate.day_night_amplitude_c = 0.0;
+        world.climate.base_temp_c = 18.0;
+        // Noon: force day factor via tick in first half of day.
+        world.climate.day_length_ticks = 1_000;
+        world.climate.night_length_ticks = 1_000;
+        world.insert_chunk(generate_flat_sand(0, 0.0, 8.0));
+        // Rooted land plant under a deep snowpack.
+        let mut bp = Blueprint::atom(Genome {
+            circadian_phase: 0.25,
+            active_window: 1.0,
+            metabolic_rate: 0.2,
+            ..Genome::default()
+        });
+        bp.modules.push(PlacedModule {
+            x: 0,
+            y: -1,
+            lane: LaneId::Back,
+            module: ModuleId::Root,
+        });
+        {
+            let col = world.column_at_mut(4).unwrap();
+            col.moisture = col.moisture_cap();
+            col.ecology.nutrient = 0.8;
+            col.deposit_to_top(MaterialId::Snow, 8_000, 0);
+            col.clamp_state();
+        }
+        assert!(
+            world.column_at(4).unwrap().cover_light_factor() < 0.02,
+            "8t snow should be near-dark"
+        );
+
+        let mut store = AgentStore::new();
+        let e = store
+            .spawn_from_blueprint(&world, 4, bp, 50.0)
+            .expect("spawn");
+        if let Ok(mut energy) = store.ecs.get::<&mut Energy>(e) {
+            energy.current = 40.0;
+        }
+        let before = store.ecs.get::<&Energy>(e).unwrap().current;
+        // Mid-day tick.
+        store.step_organisms(&mut world, 500);
+        let after = store.ecs.get::<&Energy>(e).unwrap().current;
+        assert!(
+            after <= before,
+            "buried plant must not gain energy under deep snow (before={before} after={after})"
         );
     }
 

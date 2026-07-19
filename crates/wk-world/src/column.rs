@@ -537,6 +537,36 @@ impl Column {
         y
     }
 
+    /// Hydraulic head for a dry neighbour: the solid bed under any
+    /// snow/ice/water cap. Using raw `surface_y` here makes a snow bank
+    /// look like a tall dam, so adjacent lake water never spills and
+    /// freezes into a vertical wall along the snow line.
+    pub fn hydraulic_bed_y(&self) -> f32 {
+        self.climate_elevation()
+    }
+
+    /// 0..1 sky transmittance through snow/ice sitting in the fluid cap.
+    /// Deep snowpacks go effectively dark — plants and photosystems under
+    /// metres of snow should not keep photosynthesising at full rate.
+    pub fn cover_light_factor(&self) -> f32 {
+        let mut snow = 0i64;
+        let mut ice = 0i64;
+        for j in 0..self.layer_count as usize {
+            match self.layers[j].material {
+                MaterialId::Snow => snow += self.layers[j].thickness,
+                MaterialId::Ice => ice += self.layers[j].thickness,
+                MaterialId::Water => {}
+                _ => break,
+            }
+        }
+        // ~250 kg ≈ 1 m of water-equivalent depth on a column.
+        const KG_PER_M: f32 = 250.0;
+        let snow_m = snow as f32 / KG_PER_M;
+        let ice_m = ice as f32 / KG_PER_M;
+        let t = (-1.5 * snow_m).exp() * (-1.0 * ice_m).exp();
+        t.clamp(0.0, 1.0)
+    }
+
     /// Elevation for near-surface ambient temperature (HUD, freeze/thaw,
     /// ecology comfort).
     ///
@@ -1423,6 +1453,19 @@ mod tests {
         assert!(
             skin_cap > organic_only * 2,
             "organic skin must not flash-dry the column (sand={sand_cap} skin={skin_cap} organic_only={organic_only})"
+        );
+    }
+
+    #[test]
+    fn cover_light_factor_dims_under_deep_snow() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        assert!((col.cover_light_factor() - 1.0).abs() < 1e-5);
+        col.deposit_to_top(MaterialId::Snow, 8_000, 1);
+        assert!(
+            col.cover_light_factor() < 0.02,
+            "deep snow should block nearly all light, got {}",
+            col.cover_light_factor()
         );
     }
 }
