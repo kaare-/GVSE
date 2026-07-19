@@ -12,7 +12,9 @@ use std::collections::HashMap;
 
 use wk_material::MaterialId;
 
-use crate::active::{clear_all_dirty, plan_active, ActiveChunk};
+use crate::active::{
+    clear_all_dirty, partition_checkerboard, plan_active, ActiveChunk,
+};
 use crate::cell::{is_grain, water_capacity, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
@@ -105,32 +107,36 @@ fn is_porous_solid(material: MaterialId) -> bool {
 
 /// Bottom-up single-step gravity fall for water saturation.
 ///
-/// For every cell that holds any water (`sat > 0`), try to move as
-/// much of it as possible into the cell directly below, up to that
-/// cell's water capacity. Behaviour:
+/// Each cell **pulls** water from the cell directly above into its
+/// own free capacity. Behaviour:
 ///
 /// - Traversal is **bottom-up** within each chunk (`y = 0 → H-1`),
 ///   matching Petri Purho's Noita rule: a column of water on solid
-///   ground stays put (each cell's below neighbour is already full or
-///   impermeable), while a lone droplet migrates down exactly one
-///   cell per invocation (each cell's below neighbour was empty and
-///   is now wet, but its own iteration already passed).
-/// - **Cross-chunk**: when the below cell falls in another chunk, we
-///   dispatch through [`World::get_cell`] / [`World::set_cell`] so
-///   the neighbouring chunk materialises lazily.
-/// - **Missing chunk**: below cell in a never-loaded chunk is treated
-///   as impermeable (no fall). Follow-up worldgen rules can decide
-///   whether to spawn a below-world chunk on demand.
+///   ground stays put (each cell is already full or impermeable),
+///   while a lone droplet migrates down exactly one cell per
+///   invocation (the destination pulls, then its own turn as a
+///   source has already passed).
+/// - **Pull (not push)** so checkerboard sub-passes stay one-step
+///   across chunk seams: the lower chunk owns the write into the
+///   destination and drains the upper neighbour, which is always a
+///   different colour and therefore not concurrent.
+/// - **Cross-chunk**: dispatch through [`World::get_cell`] /
+///   [`World::set_cell`]. Missing above/below chunks yield no move.
 ///
 /// This is intentionally the simplest possible fall model — one cell
 /// per invocation, no lateral spread, no density swap. Free-fall
 /// acceleration and the density-swap rule are follow-up PRs.
 pub fn apply_gravity_fall(world: &mut World) {
     let regions = regions_for_standalone(world);
-    apply_gravity_fall_regions(world, &regions);
+    for pass in partition_checkerboard(&regions) {
+        apply_gravity_fall_regions(world, &pass);
+    }
 }
 
 /// Gravity fall restricted to a pre-planned active set (see [`plan_active`]).
+///
+/// One checkerboard colour at a time — callers that already hold a
+/// full plan should wrap with [`partition_checkerboard`].
 pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
     if active.is_empty() {
         return;
@@ -151,41 +157,41 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 let Some(cur) = world.get_cell(gx, gy) else {
                     continue;
                 };
-                if cur.sat.is_empty() {
+                let cap = water_capacity(cur.material);
+                if cap == 0 {
                     continue;
                 }
-                if water_capacity(cur.material) == 0 {
+                let free = cap.saturating_sub(cur.sat.0);
+                if free == 0 {
                     continue;
                 }
-                let Some(below) = world.get_cell(gx, gy - 1) else {
+                let Some(above) = world.get_cell(gx, gy + 1) else {
                     continue;
                 };
-                let cap_below = water_capacity(below.material);
-                if cap_below == 0 {
+                if above.sat.is_empty() {
                     continue;
                 }
-                let free_below = cap_below.saturating_sub(below.sat.0);
-                if free_below == 0 {
+                if water_capacity(above.material) == 0 {
                     continue;
                 }
-                let move_amt = cur.sat.0.min(free_below);
+                let move_amt = above.sat.0.min(free);
                 if move_amt == 0 {
                     continue;
                 }
                 world.set_cell(
                     gx,
-                    gy,
+                    gy + 1,
                     Cell {
-                        sat: Sat(cur.sat.0 - move_amt),
-                        ..cur
+                        sat: Sat(above.sat.0 - move_amt),
+                        ..above
                     },
                 );
                 world.set_cell(
                     gx,
-                    gy - 1,
+                    gy,
                     Cell {
-                        sat: Sat(below.sat.0 + move_amt),
-                        ..below
+                        sat: Sat(cur.sat.0 + move_amt),
+                        ..cur
                     },
                 );
             }
@@ -211,11 +217,40 @@ pub fn apply_lateral_spill(world: &mut World) {
 }
 
 /// Lateral spill restricted to a pre-planned active set.
+///
+/// Scans checkerboard colours separately (future parallel seams) but
+/// **applies once** from a shared snapshot so a cross-chunk edge is
+/// not re-equalised by the neighbouring colour in the same rule.
 pub fn apply_lateral_spill_regions(world: &mut World, active: &[ActiveChunk]) {
     if active.is_empty() {
         return;
     }
     let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
+    for pass in partition_checkerboard(active) {
+        accumulate_lateral_spill_deltas(world, &pass, &mut deltas);
+    }
+    for ((gx, gy), delta) in deltas {
+        let Some(cell) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        let cap = water_capacity(cell.material) as i32;
+        let new_sat = (cell.sat.0 as i32 + delta).clamp(0, cap);
+        world.set_cell(
+            gx,
+            gy,
+            Cell {
+                sat: Sat(new_sat as u8),
+                ..cell
+            },
+        );
+    }
+}
+
+fn accumulate_lateral_spill_deltas(
+    world: &World,
+    active: &[ActiveChunk],
+    deltas: &mut HashMap<(i32, i32), i32>,
+) {
     let mut regions: Vec<ActiveChunk> = active.to_vec();
     regions.sort_by(|a, b| {
         a.coord
@@ -257,22 +292,6 @@ pub fn apply_lateral_spill_regions(world: &mut World, active: &[ActiveChunk]) {
             }
         }
     }
-
-    for ((gx, gy), delta) in deltas {
-        let Some(cell) = world.get_cell(gx, gy) else {
-            continue;
-        };
-        let cap = water_capacity(cell.material) as i32;
-        let new_sat = (cell.sat.0 as i32 + delta).clamp(0, cap);
-        world.set_cell(
-            gx,
-            gy,
-            Cell {
-                sat: Sat(new_sat as u8),
-                ..cell
-            },
-        );
-    }
 }
 
 /// Permeability-limited soak: water moves from wet cells into
@@ -291,10 +310,66 @@ pub fn apply_seepage(world: &mut World) {
 }
 
 /// Seepage restricted to a pre-planned active set.
+///
+/// Checkerboard scan + single apply (same snapshot rule as spill).
 pub fn apply_seepage_regions(world: &mut World, active: &[ActiveChunk]) {
     if active.is_empty() {
         return;
     }
+    // (from, to, amt) with amt > 0.
+    let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
+    for pass in partition_checkerboard(active) {
+        accumulate_seepage_xfers(world, &pass, &mut xfers);
+    }
+
+    // Apply in a stable order. Each transfer re-reads live sat so a
+    // source drained by an earlier xfer simply sends less — every
+    // individual move conserves mass exactly.
+    xfers.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    for (from, to, amt) in xfers {
+        let Some(src) = world.get_cell(from.0, from.1) else {
+            continue;
+        };
+        let Some(dst) = world.get_cell(to.0, to.1) else {
+            continue;
+        };
+        let cap_dst = water_capacity(dst.material) as i32;
+        if cap_dst == 0 {
+            continue;
+        }
+        let free = cap_dst - dst.sat.0 as i32;
+        let amt = amt.min(src.sat.0 as i32).min(free.max(0));
+        if amt <= 0 {
+            continue;
+        }
+        world.set_cell(
+            from.0,
+            from.1,
+            Cell {
+                sat: Sat(src.sat.0 - amt as u8),
+                ..src
+            },
+        );
+        world.set_cell(
+            to.0,
+            to.1,
+            Cell {
+                sat: Sat(dst.sat.0 + amt as u8),
+                ..dst
+            },
+        );
+    }
+}
+
+fn accumulate_seepage_xfers(
+    world: &World,
+    active: &[ActiveChunk],
+    xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
+) {
     let mut regions: Vec<ActiveChunk> = active.to_vec();
     regions.sort_by(|a, b| {
         a.coord
@@ -302,9 +377,6 @@ pub fn apply_seepage_regions(world: &mut World, active: &[ActiveChunk]) {
             .cmp(&b.coord.cy)
             .then(a.coord.cx.cmp(&b.coord.cx))
     });
-
-    // (from, to, amt) with amt > 0.
-    let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     const OFFSETS: [(i32, i32); 2] = [(1, 0), (0, 1)];
 
     for ac in &regions {
@@ -362,63 +434,17 @@ pub fn apply_seepage_regions(world: &mut World, active: &[ActiveChunk]) {
             }
         }
     }
-
-    // Apply in a stable order. Each transfer re-reads live sat so a
-    // source drained by an earlier xfer simply sends less — every
-    // individual move conserves mass exactly.
-    xfers.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then(a.1.cmp(&b.1))
-            .then(a.2.cmp(&b.2))
-    });
-    for (from, to, amt) in xfers {
-        let Some(src) = world.get_cell(from.0, from.1) else {
-            continue;
-        };
-        let Some(dst) = world.get_cell(to.0, to.1) else {
-            continue;
-        };
-        let cap_dst = water_capacity(dst.material) as i32;
-        if cap_dst == 0 {
-            continue;
-        }
-        let free = cap_dst - dst.sat.0 as i32;
-        let amt = amt.min(src.sat.0 as i32).min(free.max(0));
-        if amt <= 0 {
-            continue;
-        }
-        world.set_cell(
-            from.0,
-            from.1,
-            Cell {
-                sat: Sat(src.sat.0 - amt as u8),
-                ..src
-            },
-        );
-        world.set_cell(
-            to.0,
-            to.1,
-            Cell {
-                sat: Sat(dst.sat.0 + amt as u8),
-                ..dst
-            },
-        );
-    }
 }
 
 /// One-cell-per-pass grain fall.
 ///
-/// For every cell whose material is granular ([`is_grain`]) and whose
-/// direct below neighbour is `Air`, swap the two `Cell`s. Whatever
-/// water saturation the Air cell had comes up into the newly-emptied
-/// upper cell, so a grain sinking through water displaces exactly the
-/// water it walks through — mass is conserved and the water column
-/// doesn't teleport.
+/// Each `Air` cell **pulls** a granular neighbour from directly above
+/// (swap). Whatever water saturation the Air cell had rises into the
+/// vacated upper cell, so a grain sinking through water displaces
+/// exactly the water it walks through — mass is conserved.
 ///
-/// Traversal is the same bottom-up sweep as [`apply_gravity_fall`],
-/// with chunks ordered by ascending `cy` first so cross-chunk falls
-/// land on already-processed cells and don't drop multiple rows per
-/// pass.
+/// Pull + bottom-up + checkerboard matches [`apply_gravity_fall`]:
+/// one cell per invocation, including across chunk seams.
 ///
 /// V1 kept simple: grains fall through Air *any* saturation and stop
 /// on anything else. Density-ordered stacking between grain species
@@ -426,7 +452,9 @@ pub fn apply_seepage_regions(world: &mut World, active: &[ActiveChunk]) {
 /// dense fluids are follow-up rules.
 pub fn apply_grain_fall(world: &mut World) {
     let regions = regions_for_standalone(world);
-    apply_grain_fall_regions(world, &regions);
+    for pass in partition_checkerboard(&regions) {
+        apply_grain_fall_regions(world, &pass);
+    }
 }
 
 /// Grain fall restricted to a pre-planned active set.
@@ -449,17 +477,17 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 let Some(cur) = world.get_cell(gx, gy) else {
                     continue;
                 };
-                if !is_grain(cur.material) {
+                if cur.material != MaterialId::Air {
                     continue;
                 }
-                let Some(below) = world.get_cell(gx, gy - 1) else {
+                let Some(above) = world.get_cell(gx, gy + 1) else {
                     continue;
                 };
-                if below.material != MaterialId::Air {
+                if !is_grain(above.material) {
                     continue;
                 }
-                world.set_cell(gx, gy, below);
-                world.set_cell(gx, gy - 1, cur);
+                world.set_cell(gx, gy, above);
+                world.set_cell(gx, gy + 1, cur);
             }
         }
     }
@@ -906,13 +934,23 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
 /// wake), then [`clear_all_dirty`]. Rule writes rebuild dirty for
 /// the *next* tick. A fully settled world plans nothing and the
 /// physics passes early-out.
+///
+/// **Checkerboard.** Gravity and grain run four serial sub-passes
+/// (EE → OE → EO → OO). Spill and seepage scan the same partition
+/// but apply from one snapshot so edges are not re-solved mid-rule.
+/// Serial today; the partition is what multithreading will own later.
 pub fn tick(world: &mut World) {
     let active = plan_active(world);
     clear_all_dirty(world);
-    apply_gravity_fall_regions(world, &active);
+    let passes = partition_checkerboard(&active);
+    for pass in &passes {
+        apply_gravity_fall_regions(world, pass);
+    }
     apply_lateral_spill_regions(world, &active);
     apply_seepage_regions(world, &active);
-    apply_grain_fall_regions(world, &active);
+    for pass in &passes {
+        apply_grain_fall_regions(world, pass);
+    }
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {
         chunk.tick = chunk.tick.wrapping_add(1);
@@ -1045,6 +1083,24 @@ mod tests {
 
         assert!(w.get_cell(7, 64).unwrap().sat.is_empty());
         assert!(w.get_cell(7, 63).unwrap().sat.is_full());
+    }
+
+    #[test]
+    fn droplet_falls_one_step_across_even_to_odd_seam() {
+        // Even-cy above odd-cy (cy=2 → cy=1): pull + checkerboard must
+        // still move exactly one cell, not double-step.
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        w.ensure_chunk(ChunkCoord::new(0, 2));
+        let seam = 2 * CHUNK_CELLS_H as i32; // 128
+        w.set_cell(7, seam, Cell::water());
+        apply_gravity_fall(&mut w);
+        assert!(w.get_cell(7, seam).unwrap().sat.is_empty());
+        assert!(w.get_cell(7, seam - 1).unwrap().sat.is_full());
+        assert!(
+            w.get_cell(7, seam - 2).unwrap().sat.is_empty(),
+            "must not fall two cells in one checkerboard rule"
+        );
     }
 
     #[test]

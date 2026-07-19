@@ -17,7 +17,9 @@ pub mod humidity;
 pub mod rules;
 pub mod worldgen;
 
-pub use active::{clear_all_dirty, plan_active, ActiveChunk};
+pub use active::{
+    checkerboard_phase, clear_all_dirty, partition_checkerboard, plan_active, ActiveChunk,
+};
 pub use cell::{is_grain, water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use grid::World;
