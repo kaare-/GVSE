@@ -622,11 +622,17 @@ pub fn apply_evaporation_into_humidity(
     apply_evap_deltas(world, deltas, Some(humidity));
 }
 
-fn collect_evap_deltas(world: &World, cfg: &EvapConfig) -> HashMap<(i32, i32), i32> {
+fn collect_evap_deltas(world: &mut World, cfg: &EvapConfig) -> HashMap<(i32, i32), i32> {
     let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
-    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    let mut coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_wet_air)
+        .map(|(&coord, _)| coord)
+        .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     for coord in coords {
+        let mut still_wet = false;
         for y in 0..CHUNK_CELLS_H {
             let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in 0..CHUNK_CELLS_W {
@@ -637,6 +643,7 @@ fn collect_evap_deltas(world: &World, cfg: &EvapConfig) -> HashMap<(i32, i32), i
                 if cur.material != MaterialId::Air || cur.sat.is_empty() {
                     continue;
                 }
+                still_wet = true;
                 let sky_above = match world.get_cell(gx, gy + 1) {
                     None => true, // above chunk absent → open sky
                     Some(above) => {
@@ -647,6 +654,11 @@ fn collect_evap_deltas(world: &World, cfg: &EvapConfig) -> HashMap<(i32, i32), i
                     continue;
                 }
                 *deltas.entry((gx, gy)).or_insert(0) -= cfg.rate_per_tick as i32;
+            }
+        }
+        if !still_wet {
+            if let Some(chunk) = world.chunks.get_mut(&coord) {
+                chunk.has_wet_air = false;
             }
         }
     }
@@ -839,14 +851,24 @@ impl Default for KarstConfig {
 /// cfg.seed_salt)`.
 ///
 /// Compute-then-apply so the sweep order doesn't affect the outcome.
+///
+/// Chunks without [`Chunk::has_limestone`] are skipped; the flag is
+/// sticky on write and cleared here when a scan finds no limestone
+/// left (empty sky / pure-stone slabs stay cheap).
 pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
     let mut converts: Vec<(i32, i32, Cell)> = Vec::new();
-    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    let mut coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_limestone)
+        .map(|(&coord, _)| coord)
+        .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     let seed = world.seed.0;
     let tick_no = world.tick;
 
     for coord in coords {
+        let mut still_lime = false;
         for y in 0..CHUNK_CELLS_H {
             let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in 0..CHUNK_CELLS_W {
@@ -857,6 +879,7 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
                 if cur.material != MaterialId::Limestone {
                     continue;
                 }
+                still_lime = true;
                 // Count wet Air neighbours (4-connected).
                 let mut wet = 0u32;
                 for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
@@ -894,6 +917,11 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
                         _pad: cur._pad,
                     },
                 ));
+            }
+        }
+        if !still_lime {
+            if let Some(chunk) = world.chunks.get_mut(&coord) {
+                chunk.has_limestone = false;
             }
         }
     }
@@ -1990,6 +2018,45 @@ mod tests {
             .filter(|&x| w.get_cell(x, 4).map(|c| c.sat.0 > 0).unwrap_or(false))
             .count() as i32;
         assert!(landed_row_wet >= 3, "landed row should have spread wet cells");
+    }
+
+    #[test]
+    fn quiescent_lake_still_evaporates() {
+        // Dirty-rect physics can go idle while a lake remains. Evap
+        // must keep bleeding surface water via the wet-air occupancy
+        // flag — not only when the chunk is dirty.
+        let mut w = setup_column_world();
+        w.set_cell(4, 1, Cell::water());
+        clear_all_dirty(&mut w);
+        assert!(plan_active(&w).is_empty());
+        assert!(w.chunks[&ChunkCoord::new(0, 0)].has_wet_air);
+
+        let mut h = crate::humidity::Humidity::new(4);
+        let cfg = EvapConfig {
+            rate_per_tick: 5,
+            dry_above_max: 200,
+        };
+        apply_evaporation_into_humidity(&mut w, &mut h, &cfg);
+        assert!(
+            w.get_cell(4, 1).unwrap().sat.0 < u8::MAX,
+            "surface water must evaporate even when physics is quiescent"
+        );
+        assert!(h.total_mass() > 0.0);
+    }
+
+    #[test]
+    fn karst_skips_chunks_without_limestone_flag() {
+        let mut w = setup_column_world();
+        // Wet air only — no limestone. Flag stays false; pass is a no-op.
+        w.set_cell(4, 2, Cell::water());
+        assert!(!w.chunks[&ChunkCoord::new(0, 0)].has_limestone);
+        let cfg = KarstConfig {
+            prob_per_wet_neighbour: 1.0,
+            min_wet_neighbour_sat: 1,
+            seed_salt: 1,
+        };
+        apply_karst_dissolution(&mut w, &cfg);
+        assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Air);
     }
 
     #[test]
