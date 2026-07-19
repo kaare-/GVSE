@@ -1,6 +1,6 @@
 //! Hydrostatic lake-level equalization across connected wet segments.
 
-use wk_material::{CHUNK_W, MaterialId};
+use wk_material::CHUNK_W;
 use wk_world::world::World;
 
 use super::shared::WATER_MASS_PER_METRE_DEPTH;
@@ -179,16 +179,11 @@ pub fn run_lake_level(world: &mut World) {
         let chunk = &world.chunks[&coord];
         for local in 0..CHUNK_W {
             let col = &chunk.columns[local];
-            // Consider *any* water in the fluid cap — including water
-            // that's sitting under a floating snow cap. Dry columns use
-            // the solid bed (not snow-top surface_y) so a snow bank does
-            // not inflate the "ground" and block flooding.
-            let bed_y = if let Some((water_top_y, water)) = col.flowable_water() {
-                water_top_y - col.mass_to_height_delta(MaterialId::Water, water)
-            } else {
-                col.hydraulic_bed_y()
-            };
+            // Solid bed under weather fluids *and* cavities. Deriving bed
+            // from flowable water_top - mass used to inherit void inflation
+            // in surface_y, which notched the ocean at karst mouths.
             let water = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
+            let bed_y = col.solid_bed_y();
             let world_x = chunk.world_x_base() + local as i32;
             cells.push(LakeCell {
                 coord,

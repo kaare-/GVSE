@@ -73,10 +73,10 @@ pub fn run_karst(world: &mut World, _tick: u64) {
                 // surface_void_capture pass would then suck 35% of the sea
                 // into every fresh void per tick, faster than LakeLevel
                 // can refill — that's what made the ocean surface spike.
-                // Use the *solid* seabed elevation (climate_elevation, which
-                // strips water/ice/snow) — surface_y itself sits at sea
-                // level on any flooded column.
-                if col.climate_elevation() < sea_level - 0.25 {
+                // Use solid_bed_y (strips fluids *and* cavity height) —
+                // climate_elevation still includes voids, so a submerged
+                // limestone shelf with sea-cliff mouths looked emergent.
+                if col.solid_bed_y() < sea_level - 0.25 {
                     continue;
                 }
                 let head_here = col.water_table_y();

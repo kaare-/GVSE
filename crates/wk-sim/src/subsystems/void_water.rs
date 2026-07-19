@@ -26,7 +26,14 @@ fn voids_overlap(a_top: f32, a_bot: f32, b_top: f32, b_bot: f32) -> bool {
 }
 
 /// Drain surface / flowable water into voids that breach the surface.
+///
+/// Columns whose *solid* bed sits under the sea are skipped. Lit sea-cliff
+/// mouths / karst chambers used to swallow ~35% of the ocean column every
+/// tick (light-latch `>200`), faster than lake-level could refill — that
+/// punched a persistent notch in the free surface (vertical "water edge")
+/// and left algae riding the oscillating refill as a sine curve.
 pub fn run_surface_void_capture(world: &mut World) {
+    let sea = world.sea_level;
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for coord in coords {
         let Some(chunk) = world.chunks.get_mut(&coord) else {
@@ -34,6 +41,10 @@ pub fn run_surface_void_capture(world: &mut World) {
         };
         for i in 0..CHUNK_W {
             let col = &mut chunk.columns[i];
+            // Solid bed, not climate_elevation (which still counts voids).
+            if col.solid_bed_y() < sea - 0.25 {
+                continue;
+            }
             let available = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
             if available <= 0 {
                 continue;

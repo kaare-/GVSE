@@ -364,33 +364,28 @@ impl Column {
     /// sideways when a neighbouring column has a lower water surface.
     /// The snow just settles onto whatever's left as the water leaves.
     pub fn flowable_water(&self) -> Option<(f32, i64)> {
-        let mut y = self.surface_y;
-        let mut water_top_y: Option<f32> = None;
         let mut total_water = 0i64;
         for j in 0..self.layer_count as usize {
             let m = self.layers[j].material;
-            let h = self.mass_to_height_delta(m, self.layers[j].thickness);
             match m {
-                MaterialId::Water => {
-                    if water_top_y.is_none() {
-                        water_top_y = Some(y);
-                    }
-                    total_water += self.layers[j].thickness;
-                }
+                MaterialId::Water => total_water += self.layers[j].thickness,
                 MaterialId::Snow | MaterialId::Ice => {
                     // Cap material. Doesn't seal the water below —
                     // water can still flow sideways out from under it.
-                    // The cap ends up sitting on whatever's exposed
-                    // once the water drains (density-settle sorts it).
                 }
-                _ => {
-                    // Hit solid substrate — stop looking.
-                    break;
-                }
+                _ => break,
             }
-            y -= h;
         }
-        water_top_y.map(|top| (top, total_water))
+        if total_water <= 0 {
+            return None;
+        }
+        // Free-surface elevation rests on the solid bed — not on
+        // `surface_y`, which still adds cavity height. Counting voids as
+        // "ground" made shoreline karst mouths sit metres above their
+        // neighbours, so lake-level drained those columns and algae rode
+        // a notched / wavy free surface into the air.
+        let h = self.mass_to_height_delta(MaterialId::Water, total_water);
+        Some((self.solid_bed_y() + h, total_water))
     }
 
     /// Remove up to `mass` kg from the *flowable* Water layer inside
@@ -543,6 +538,14 @@ impl Column {
     /// freezes into a vertical wall along the snow line.
     pub fn hydraulic_bed_y(&self) -> f32 {
         self.climate_elevation()
+    }
+
+    /// Elevation of the solid rock/soil surface, excluding weather fluids
+    /// *and* cavity height. `climate_elevation` still includes voids
+    /// (they inflate `surface_y`), which made submerged limestone with
+    /// sea-cliff mouths look "emergent" for karst / void-capture gates.
+    pub fn solid_bed_y(&self) -> f32 {
+        self.climate_elevation() - self.void_height_total()
     }
 
     /// 0..1 sky transmittance through snow/ice sitting in the fluid cap.
@@ -1099,16 +1102,25 @@ impl Column {
 
     /// Drain up to `mass` kg of top/flowable water into open voids.
     /// Returns kg moved into voids.
+    ///
+    /// Eligibility: geometrically open to the *solid* ground surface, or a
+    /// lit land sinkhole (`light > 200`). Openness is judged against the
+    /// solid bed (not the free-water top) so a pond on a sinkhole still
+    /// drains. Callers that must protect the ocean should gate with
+    /// [`Self::solid_bed_y`] vs sea level before calling.
     pub fn drain_surface_water_into_voids(&mut self, mass: i64) -> i64 {
         if mass <= 0 {
             return 0;
         }
-        let surface = self.surface_y;
+        // Judge openness against the solid/cavity stack top (climate
+        // elevation strips standing water). Using free-water `surface_y`
+        // would make every pond seal its own sinkhole mouth.
+        let ground = self.climate_elevation();
         let open: Vec<usize> = self
             .voids
             .iter()
             .enumerate()
-            .filter(|(_, v)| v.open_to_surface(surface) || v.light > 200)
+            .filter(|(_, v)| v.open_to_surface(ground) || v.light > 200)
             .map(|(i, _)| i)
             .collect();
         if open.is_empty() {
@@ -1130,7 +1142,8 @@ impl Column {
                 break;
             }
             self.voids[i].water_mass += take;
-            self.voids[i].light = self.voids[i].light.max(220);
+            // Do not bump light here — that latched every capture into a
+            // permanent surface sink even after the mouth flooded/roofed.
             remaining -= take;
             moved += take;
         }
