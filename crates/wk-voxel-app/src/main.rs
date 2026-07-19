@@ -16,6 +16,7 @@
 //! - `R` — regenerate the world with a new seed
 //! - `W` — toggle rain
 //! - `E` — toggle evaporation
+//! - `K` — toggle karst dissolution
 //! - `Left` / `Right` — pan the camera horizontally
 //! - `Up` / `Down` — pan vertically
 //! - `Esc` — quit
@@ -24,7 +25,10 @@ mod palette;
 mod scene;
 
 use macroquad::prelude::*;
-use wk_voxel::{apply_evaporation, apply_rain, tick, EvapConfig, RainConfig, WorldgenParams};
+use wk_voxel::{
+    apply_evaporation, apply_karst_dissolution, apply_rain, tick, EvapConfig, KarstConfig,
+    RainConfig, WorldgenParams,
+};
 
 use crate::palette::cell_color;
 use crate::scene::Scene;
@@ -50,6 +54,7 @@ async fn main() {
     let mut paused = false;
     let mut rain_on = true;
     let mut evap_on = true;
+    let mut karst_on = true;
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
 
@@ -62,6 +67,7 @@ async fn main() {
         seed_salt: 0xC10D_5EED,
     };
     let evap_cfg = EvapConfig::default();
+    let karst_cfg = KarstConfig::default();
 
     loop {
         // Input.
@@ -84,6 +90,9 @@ async fn main() {
         if is_key_pressed(KeyCode::E) {
             evap_on = !evap_on;
         }
+        if is_key_pressed(KeyCode::K) {
+            karst_on = !karst_on;
+        }
         let pan = 200.0 * get_frame_time();
         if is_key_down(KeyCode::Left) {
             cam_x -= pan;
@@ -105,6 +114,9 @@ async fn main() {
             }
             if evap_on {
                 apply_evaporation(&mut scene.world, &evap_cfg);
+            }
+            if karst_on {
+                apply_karst_dissolution(&mut scene.world, &karst_cfg);
             }
             tick(&mut scene.world);
         }
@@ -149,11 +161,12 @@ async fn main() {
 
         // HUD.
         let hud = format!(
-            "tick={} seed={} rain={} evap={} {}  |  Space pause | R reroll | W rain | E evap | arrows pan | Esc quit",
+            "tick={} seed={} rain={} evap={} karst={} {}  |  Space pause | R reroll | W rain | E evap | K karst | arrows pan | Esc quit",
             scene.world.tick,
             scene.params.seed,
             if rain_on { "on" } else { "off" },
             if evap_on { "on" } else { "off" },
+            if karst_on { "on" } else { "off" },
             if paused { "[paused]" } else { "" }
         );
         draw_rectangle(0.0, sh - 24.0, sw, 24.0, Color::from_rgba(0, 0, 0, 200));

@@ -41,6 +41,11 @@ pub struct WorldgenParams {
     pub stone_thickness: i32,
     /// Thickness of the sand cap on top of stone / limestone.
     pub sand_cap_thickness: i32,
+    /// When true, the "stone" body of columns in the shelf+coast
+    /// zone is stamped as [`MaterialId::Limestone`] instead of
+    /// [`MaterialId::Stone`]. Gives the karst dissolution rule
+    /// something to eat through.
+    pub limestone_in_shelf_and_coast: bool,
 }
 
 impl Default for WorldgenParams {
@@ -54,8 +59,18 @@ impl Default for WorldgenParams {
             bedrock_thickness: 3,
             stone_thickness: 8,
             sand_cap_thickness: 2,
+            limestone_in_shelf_and_coast: true,
         }
     }
+}
+
+/// True if `world_x` falls in the karst-friendly stretch of the
+/// continental profile — same shelf → coast x-range used by
+/// [`continental_surface_y`].
+pub fn is_karst_zone_x(world_x: i32) -> bool {
+    let x = world_x as f32;
+    // Matches shelf_end → coast_end in `continental_surface_y`.
+    (180.0..=340.0).contains(&x)
 }
 
 /// Cheap deterministic 32-bit hash → f32 in `[0, 1)`.
@@ -149,12 +164,19 @@ pub fn stamp_world(world: &mut World, p: &WorldgenParams) {
     for x in 0..p.width_cols {
         let surface_y = continental_surface_y(p.seed, x, p.sea_level_y);
         let stone_top = surface_y - p.sand_cap_thickness;
+        // Zone-based stone material substitution. Shelf + coast get
+        // Limestone — the karst dissolution rule eats through it.
+        let stone_material = if p.limestone_in_shelf_and_coast && is_karst_zone_x(x) {
+            MaterialId::Limestone
+        } else {
+            MaterialId::Stone
+        };
 
         for y in p.bedrock_floor_y..p.sky_ceiling_y {
             let cell = if y < bedrock_top {
                 Cell::solid(MaterialId::Bedrock)
             } else if y <= stone_top {
-                Cell::solid(MaterialId::Stone)
+                Cell::solid(stone_material)
             } else if y <= surface_y {
                 // Sand cap. Dry at generation — infiltration wets it later.
                 Cell::solid(MaterialId::Sand)
@@ -188,6 +210,7 @@ mod tests {
             bedrock_thickness: 3,
             stone_thickness: 8,
             sand_cap_thickness: 2,
+            limestone_in_shelf_and_coast: true,
         }
     }
 
@@ -302,6 +325,60 @@ mod tests {
         let right = w.get_cell(CHUNK_CELLS_W as i32, 0).unwrap();
         assert_eq!(left.material, MaterialId::Bedrock);
         assert_eq!(right.material, MaterialId::Bedrock);
+    }
+
+    #[test]
+    fn shelf_stamps_limestone_when_enabled() {
+        let mut w = World::new(7);
+        let p = small_params();
+        stamp_world(&mut w, &p);
+        // A column in the shelf zone (x ≈ 220) should have Limestone
+        // in its stone body, and a column well past the shelf (x=500,
+        // inland plains) should have Stone.
+        let shelf_x = 220;
+        let inland_x = 500;
+        let surface_shelf = continental_surface_y(p.seed, shelf_x, p.sea_level_y);
+        let surface_inland = continental_surface_y(p.seed, inland_x, p.sea_level_y);
+        let just_above_bedrock = p.bedrock_floor_y + p.bedrock_thickness + 1;
+        // Only inspect a row that lies inside the stone body of both
+        // columns (below the sand cap).
+        let inspect_y = just_above_bedrock
+            .min(surface_shelf - p.sand_cap_thickness)
+            .min(surface_inland - p.sand_cap_thickness);
+        assert!(inspect_y >= just_above_bedrock);
+        assert_eq!(
+            w.get_cell(shelf_x, inspect_y).unwrap().material,
+            MaterialId::Limestone,
+            "shelf column at y={inspect_y} should be Limestone"
+        );
+        assert_eq!(
+            w.get_cell(inland_x, inspect_y).unwrap().material,
+            MaterialId::Stone,
+            "inland column at y={inspect_y} should be plain Stone"
+        );
+    }
+
+    #[test]
+    fn limestone_toggle_off_gives_all_stone() {
+        let mut w = World::new(8);
+        let p = WorldgenParams {
+            limestone_in_shelf_and_coast: false,
+            ..small_params()
+        };
+        stamp_world(&mut w, &p);
+        // Every non-Bedrock cell that isn't Sand should be Stone.
+        for x in 0..p.width_cols {
+            for y in (p.bedrock_floor_y + p.bedrock_thickness)..p.sky_ceiling_y {
+                let Some(c) = w.get_cell(x, y) else {
+                    continue;
+                };
+                assert_ne!(
+                    c.material,
+                    MaterialId::Limestone,
+                    "no Limestone should appear with the toggle off ({x},{y})"
+                );
+            }
+        }
     }
 
     #[test]
