@@ -20,6 +20,7 @@
 //! - `K` — toggle karst dissolution
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle humidity overlay
+//! - `F1` — toggle the bottom tool / hotkey line
 //! - `F2` — creature editor (Set A MS-Paint; `C` stays condensation here)
 //! - click — block / organism inspector
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
@@ -56,10 +57,33 @@ fn window_conf() -> Conf {
 /// Cell size in on-screen pixels. Independent of world coordinates —
 /// change this to zoom.
 const PX_PER_CELL: f32 = 3.0;
-/// HUD strip height. Vertical camera clamp pins the bedrock floor to
-/// the top of this bar so the sky-blue clear colour never shows
-/// under the world.
-const HUD_H: f32 = 24.0;
+/// Info strip height (tick / fps / toggles). Tool line adds another
+/// band when `F1` shows hotkeys.
+const INFO_H: f32 = 24.0;
+const TOOL_H: f32 = 20.0;
+
+fn hud_height(show_tool_line: bool) -> f32 {
+    if show_tool_line {
+        INFO_H + TOOL_H
+    } else {
+        INFO_H
+    }
+}
+
+/// Smoothed FPS — EMA of `get_frame_time()` (steadier than raw
+/// `get_fps()`, same approach as column-GVSE).
+fn fps_smoothed() -> f32 {
+    thread_local! {
+        static AVG_DT: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0 / 60.0) };
+    }
+    let dt = get_frame_time().max(1e-4);
+    AVG_DT.with(|cell| {
+        let prev = cell.get();
+        let next = prev * 0.9 + dt * 0.1;
+        cell.set(next);
+        1.0 / next
+    })
+}
 
 /// Cyan overlay alpha for a humidity tile, given the map's current
 /// peak mass. Always ≥ 48 when `mass > 0` so thin diffused haze stays
@@ -96,6 +120,7 @@ async fn main() {
     let mut karst_on = true;
     let mut organisms_on = true;
     let mut humidity_overlay = false;
+    let mut show_tool_line = true;
     let mut editor = CreatureEditor::default();
     let mut inspect: Option<(i32, i32)> = None;
     // Fraction of pairwise humidity difference transferred per tick.
@@ -138,6 +163,9 @@ async fn main() {
             } else {
                 break;
             }
+        }
+        if is_key_pressed(KeyCode::F1) {
+            show_tool_line = !show_tool_line;
         }
         // Editor is F2 only — `C` is condensation in the voxel demo
         // (column-GVSE can use C/F2 because it has no condensation toggle).
@@ -246,6 +274,7 @@ async fn main() {
         let sw = screen_width();
         let sh = screen_height();
         let cell_px = PX_PER_CELL;
+        let hud_h = hud_height(show_tool_line);
         // Convert screen space to world cell range, centred on the
         // world extent minus the camera offset.
         let world_w_px = scene.params.width_cols as f32 * cell_px;
@@ -259,7 +288,7 @@ async fn main() {
         // Nudge the top clamp 3px past the window edge so a thin
         // clear-colour strip can't peek above the rain band.
         const TOP_OVERSCAN_PX: f32 = 3.0;
-        let cam_y_min = (sh - HUD_H) - (sh + world_h_px) * 0.5;
+        let cam_y_min = (sh - hud_h) - (sh + world_h_px) * 0.5;
         let cam_y_max = world_h_px - (sh + world_h_px) * 0.5 - TOP_OVERSCAN_PX;
         cam_y = cam_y.clamp(cam_y_min, cam_y_max.max(cam_y_min));
 
@@ -419,9 +448,10 @@ async fn main() {
         // Creature editor overlay (paint UI, or spawn banner).
         editor.draw();
 
-        // HUD.
-        let hud = format!(
-            "tick={} seed={} rain={} cond={} evap={} karst={} org={} atoms={} hum={} humidity={:.0} {}  |  Space|R|W/C/E/K/O|H|F2 editor|click inspect|Esc",
+        // HUD: info line always; tool / hotkey line toggled with F1.
+        let info = format!(
+            "fps={:.0}  tick={} seed={} rain={} cond={} evap={} karst={} org={} atoms={} hum={} humidity={:.0} {}",
+            fps_smoothed(),
             scene.world.tick,
             scene.params.seed,
             if rain_on { "on" } else { "off" },
@@ -434,8 +464,17 @@ async fn main() {
             scene.humidity.total_mass(),
             if sim_paused { "[paused]" } else { "" }
         );
-        draw_rectangle(0.0, sh - HUD_H, sw, HUD_H, Color::from_rgba(0, 0, 0, 200));
-        draw_text(&hud, 8.0, sh - 8.0, 16.0, WHITE);
+        draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
+        if show_tool_line {
+            draw_text(
+                "Space|R|W/C/E/K/O|H overlay|F1 tools|F2 editor|click inspect|Esc",
+                8.0,
+                sh - INFO_H - 4.0,
+                14.0,
+                LIGHTGRAY,
+            );
+        }
+        draw_text(&info, 8.0, sh - 8.0, 16.0, WHITE);
 
         next_frame().await;
     }
