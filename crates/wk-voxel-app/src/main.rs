@@ -185,7 +185,16 @@ fn draw_clouds(
         return;
     }
     let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-    for p in &clouds.parcels {
+    // Low parcels first so ridge-top clouds paint over them.
+    let mut order: Vec<usize> = (0..clouds.parcels.len()).collect();
+    order.sort_by(|&a, &b| {
+        clouds.parcels[a]
+            .fy
+            .partial_cmp(&clouds.parcels[b].fy)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for &idx in &order {
+        let p = &clouds.parcels[idx];
         let wet = p.wetness();
         let shade = (235.0 - wet * 140.0) as u8;
         let alpha = (120.0 + wet * 100.0) as u8;
@@ -198,7 +207,6 @@ fn draw_clouds(
             }
             draw_cartoon_cloud(sx, sy, r, shade, alpha);
             if p.raining {
-                // A few soft streaks — not a full sheet (old rain wash).
                 let streak = Color::from_rgba(190, 210, 230, 55);
                 for i in 0..5 {
                     let ox = sx - r * 0.5 + (i as f32) * (r * 0.25);
