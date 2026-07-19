@@ -54,6 +54,30 @@ const PX_PER_CELL: f32 = 3.0;
 /// under the world.
 const HUD_H: f32 = 24.0;
 
+/// Cyan overlay alpha for a humidity tile, given the map's current
+/// peak mass. Always ≥ 48 when `mass > 0` so thin diffused haze stays
+/// visible (an absolute 4×4×255 scale used to paint `alpha == 0`).
+fn humidity_overlay_alpha(mass: f32, max_mass: f32) -> u8 {
+    if mass <= 0.0 {
+        return 0;
+    }
+    let norm = (mass / max_mass.max(1.0)).clamp(0.0, 1.0);
+    (48.0 + norm * 152.0) as u8
+}
+
+#[cfg(test)]
+mod overlay_tests {
+    use super::humidity_overlay_alpha;
+
+    #[test]
+    fn faint_tiles_still_get_visible_alpha() {
+        // Old scale: (20/4080)*180 → 0. New scale floors at 48.
+        assert!(humidity_overlay_alpha(20.0, 100.0) >= 48);
+        assert_eq!(humidity_overlay_alpha(100.0, 100.0), 200);
+        assert_eq!(humidity_overlay_alpha(0.0, 100.0), 0);
+    }
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let params = WorldgenParams::default();
@@ -230,9 +254,23 @@ async fn main() {
         // Humidity overlay: paint each tile as a translucent cyan
         // rect scaled to atmospheric mass. Rendered *after* the cells
         // so it sits on top; ignored when the toggle is off.
+        //
+        // Alpha is relative to the current max tile mass (not a fixed
+        // 4×4×255 ceiling). Diffusion spreads mass thin; the old
+        // absolute scale made almost every tile `alpha == 0`.
         if humidity_overlay {
             let tile_px = scene.humidity.tile_cols as f32 * cell_px;
+            let max_mass = scene
+                .humidity
+                .cells
+                .values()
+                .copied()
+                .fold(0.0f32, f32::max)
+                .max(1.0);
             for (&(hx, hy), &mass) in &scene.humidity.cells {
+                if mass <= 0.0 {
+                    continue;
+                }
                 // Convert tile coord to world cell coord (lower-left
                 // of the tile) then to screen coord.
                 let base_gx = hx * scene.humidity.tile_cols;
@@ -246,14 +284,7 @@ async fn main() {
                     if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
                         continue;
                     }
-                    // Normalise mass → alpha. A full-tile ceiling of
-                    // ~4×4×255 = 4080 sat-units would be "saturated
-                    // cloud".
-                    let norm = (mass / 4080.0).clamp(0.0, 1.0);
-                    let alpha = (norm * 180.0) as u8;
-                    if alpha == 0 {
-                        continue;
-                    }
+                    let alpha = humidity_overlay_alpha(mass, max_mass);
                     draw_rectangle(sx, sy, tile_px, tile_px, Color::from_rgba(160, 200, 240, alpha));
                 }
             }
@@ -261,13 +292,14 @@ async fn main() {
 
         // HUD.
         let hud = format!(
-            "tick={} seed={} rain={} cond={} evap={} karst={} humidity_mass={:.0} {}  |  Space pause | R reroll | W rain | C cond | E evap | K karst | H overlay | arrows pan | Esc quit",
+            "tick={} seed={} rain={} cond={} evap={} karst={} hum={} humidity_mass={:.0} {}  |  Space pause | R reroll | W rain | C cond | E evap | K karst | H overlay | arrows pan | Esc quit",
             scene.world.tick,
             scene.params.seed,
             if rain_on { "on" } else { "off" },
             if cond_rain_on { "on" } else { "off" },
             if evap_on { "on" } else { "off" },
             if karst_on { "on" } else { "off" },
+            if humidity_overlay { "on" } else { "off" },
             scene.humidity.total_mass(),
             if paused { "[paused]" } else { "" }
         );
