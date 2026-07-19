@@ -103,6 +103,14 @@ pub fn draw_block_inspector(
             atom.photosystem_count(),
             atom.cooldown
         ));
+        lines.push(format!(
+            "buoyancy={:.2}  vel_y={:.2}  fy={:.1}",
+            atom.buoyancy_bias, atom.vel_y, atom.fy
+        ));
+        lines.push(format!(
+            "clone_fid={:.2}  circadian={:.2}/{:.2}",
+            atom.clone_fidelity, atom.circadian_phase, atom.active_window
+        ));
     }
 
     let panel_w = 280.0;
