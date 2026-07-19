@@ -3,7 +3,9 @@
 //! Isolation: only wk-voxel + wk-material dependencies. No column
 //! stack imports.
 
-use wk_voxel::{stamp_world, Humidity, OrganismStore, Temperature, Wind, World, WorldgenParams};
+use wk_voxel::{
+    stamp_world, CloudStore, Humidity, OrganismStore, Temperature, Wind, World, WorldgenParams,
+};
 
 /// Humidity / wind / temp tile side (world cells per sample).
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -15,6 +17,7 @@ pub struct Scene {
     pub params: WorldgenParams,
     pub humidity: Humidity,
     pub wind: Wind,
+    pub clouds: CloudStore,
     pub temperature: Temperature,
     pub organisms: OrganismStore,
 }
@@ -55,6 +58,7 @@ impl Scene {
             params.sea_level_y,
             params.wrap_x,
         );
+        let clouds = CloudStore::new();
         // Empty organism store — place Atoms via the F2 creature editor
         // (Enter, then click a wet cell). No auto-seeded demo life.
         let organisms = OrganismStore::new();
@@ -63,6 +67,7 @@ impl Scene {
             params,
             humidity,
             wind,
+            clouds,
             temperature,
             organisms,
         }

@@ -13,6 +13,7 @@ pub mod blueprint;
 pub mod cell;
 pub mod chunk;
 pub mod climate;
+pub mod clouds;
 pub mod grid;
 pub mod heatmap;
 pub mod humidity;
@@ -34,6 +35,7 @@ pub use climate::{
     celestial_local, celestial_screen_pos, day_factor, day_night_factor, is_daytime, phase_fraction,
     sky_rgb, sky_rgb_at_height, DEMO_DAY_TICKS,
 };
+pub use clouds::{CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS};
 pub use grid::World;
 pub use organism::{Atom, BodyModule, ModuleId, OrganismStore, MAX_ATOMS};
 pub use heatmap::Heatmap;

@@ -20,7 +20,7 @@
 //! - `K` — toggle karst dissolution
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle cyan humidity debug overlay
-//! - `N` — toggle cloud drawing (dark = wetter; wind-advected)
+//! - `N` — toggle cloud drawing (coagulated parcels; darker = wetter)
 //! - `T` — toggle temperature heatmap overlay
 //! - `F1` — toggle the bottom tool / hotkey line
 //! - `F2` — creature editor (Set A MS-Paint; `C` stays condensation here)
@@ -165,103 +165,46 @@ fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
     Color::from_rgba(r, g, b, 120)
 }
 
-/// Large cartoon clouds from humidity — not a per-tile dot field.
-///
-/// Picks a handful of sky-band peaks, spaces them out, and draws soft
-/// multi-lobe blobs. Darker / denser = wetter.
+/// Cartoon clouds from coagulated [`wk_voxel::CloudStore`] parcels.
+/// Darker / denser = wetter; raining parcels get a streak veil.
 fn draw_clouds(
-    humidity: &wk_voxel::Humidity,
+    clouds: &wk_voxel::CloudStore,
     origin_x: f32,
     origin_y: f32,
     cell_px: f32,
     bedrock_floor_y: i32,
-    sea_level_y: i32,
-    sky_ceiling_y: i32,
     width_cols: i32,
     wrap_x: bool,
     sw: f32,
     sh: f32,
 ) {
-    if humidity.cells.is_empty() {
+    if clouds.is_empty() {
         return;
     }
-    let tile_cols = humidity.tile_cols.max(1);
-    let tile_px = tile_cols as f32 * cell_px;
-    let max_mass = humidity
-        .cells
-        .values()
-        .copied()
-        .fold(0.0f32, f32::max)
-        .max(1.0);
-    // Ignore thin haze; only the wetter patches become visible clouds.
-    let mass_floor = (max_mass * 0.18).max(12.0);
-    let scroll = humidity.advect_rx * tile_px;
-
-    // Sky band only — clouds live in the air, not as a full-map overlay.
-    let sky_hy_min = (sea_level_y + 4).div_euclid(tile_cols);
-    let sky_hy_max = (sky_ceiling_y - 1).div_euclid(tile_cols);
-
-    let mut candidates: Vec<(i32, i32, f32)> = humidity
-        .cells
-        .iter()
-        .filter_map(|(&(hx, hy), &mass)| {
-            if mass < mass_floor || hy < sky_hy_min || hy > sky_hy_max {
-                return None;
-            }
-            Some((hx, hy, mass))
-        })
-        .collect();
-    if candidates.is_empty() {
-        return;
-    }
-    candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
-
-    // Greedy spacing so we get a few big cartoon clouds, not a grid.
-    const MAX_CLOUDS: usize = 14;
-    const MIN_SEP_TILES: i32 = 5;
-    let mut placed: Vec<(i32, i32, f32)> = Vec::new();
-    for (hx, hy, mass) in candidates {
-        let too_close = placed.iter().any(|&(px, py, _)| {
-            let dx = (hx - px).abs();
-            let dx = if wrap_x {
-                let w = (width_cols + tile_cols - 1) / tile_cols;
-                dx.min((w - dx).abs())
-            } else {
-                dx
-            };
-            dx < MIN_SEP_TILES && (hy - py).abs() < MIN_SEP_TILES
-        });
-        if too_close {
-            continue;
-        }
-        placed.push((hx, hy, mass));
-        if placed.len() >= MAX_CLOUDS {
-            break;
-        }
-    }
-
     let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-    for &(hx, hy, mass) in &placed {
-        let norm = (mass / max_mass).clamp(0.0, 1.0);
-        // Soft cartoon greys — pale when thin, storm-dark when wet.
-        let shade = (235.0 - norm * 130.0) as u8;
-        let alpha = (110.0 + norm * 100.0) as u8;
-        let base_gx = hx * tile_cols;
-        let base_gy = hy * tile_cols;
-        // Big lobes: several tiles across.
-        let r = tile_px * (2.2 + 1.6 * norm);
+    for p in &clouds.parcels {
+        let wet = p.wetness();
+        let shade = (235.0 - wet * 140.0) as u8;
+        let alpha = (120.0 + wet * 100.0) as u8;
+        let r = p.radius() * cell_px;
         for &x_copy in x_copies {
-            let sx = origin_x
-                + (base_gx + x_copy * width_cols) as f32 * cell_px
-                + scroll
-                + tile_px * 0.5;
-            let sy = origin_y
-                - (base_gy - bedrock_floor_y + tile_cols) as f32 * cell_px
-                + tile_px * 0.35;
+            let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px;
+            let sy = origin_y - (p.fy - bedrock_floor_y as f32) * cell_px;
             if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
                 continue;
             }
             draw_cartoon_cloud(sx, sy, r, shade, alpha);
+            if p.raining {
+                // Soft rain sheet under the cloud.
+                let sheet_h = r * 2.2;
+                draw_rectangle(
+                    sx - r * 0.7,
+                    sy,
+                    r * 1.4,
+                    sheet_h,
+                    Color::from_rgba(140, 170, 200, 45),
+                );
+            }
         }
     }
 }
@@ -447,12 +390,28 @@ async fn main() {
                     &evap_cfg,
                 );
             }
-            // Wind advects cloud / humidity mass before rain so
-            // orographic dumps see the latest plume position.
+            // Vapor drifts with the wind, then coagulates into cloud
+            // parcels that rain hard when heavy enough.
             scene
                 .humidity
                 .advect(scene.wind.climate_vx, scene.wind.climate_vy);
+            let tick_no = scene.world.tick;
+            scene.clouds.step(
+                &mut scene.world,
+                &mut scene.humidity,
+                &scene.wind,
+                scene.params.sea_level_y,
+                scene.params.sky_ceiling_y,
+                tick_no,
+            );
+            // Light drizzle from leftover vapor (clouds do the downpours).
             if cond_rain_on {
+                let drizzle = CondensationConfig {
+                    min_mass_to_rain: 220.0,
+                    max_prob_per_tick: 0.12,
+                    mass_per_droplet: 48.0,
+                    ..cond_cfg
+                };
                 let oro = OrographicConfig {
                     seed: scene.params.seed,
                     width_cols: scene.params.width_cols,
@@ -463,7 +422,7 @@ async fn main() {
                 apply_condensation_rain_with_orographic(
                     &mut scene.world,
                     &mut scene.humidity,
-                    &cond_cfg,
+                    &drizzle,
                     Some(&oro),
                 );
             }
@@ -590,17 +549,14 @@ async fn main() {
             }
         }
 
-        // Clouds: humidity mass drawn as dark puffs (darker = wetter),
-        // scrolled by wind advection residual.
+        // Coagulated cloud parcels (cartoon blobs; rain veil when dumping).
         if clouds_on {
             draw_clouds(
-                &scene.humidity,
+                &scene.clouds,
                 origin_x,
                 origin_y,
                 cell_px,
                 scene.params.bedrock_floor_y,
-                scene.params.sea_level_y,
-                scene.params.sky_ceiling_y,
                 scene.params.width_cols,
                 scene.params.wrap_x,
                 sw,
@@ -719,19 +675,17 @@ async fn main() {
             "night"
         };
         let info = format!(
-            "fps={:.0}  tick={} {} T̄={:.1}C rain={} cond={} evap={} clouds={} temp={} hum={} wind={:.2} humidity={:.0} atoms={} {}",
+            "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} atoms={} {}",
             fps_smoothed(),
             scene.world.tick,
             tod,
             scene.temperature.mean(),
             if rain_on { "on" } else { "off" },
-            if cond_rain_on { "on" } else { "off" },
             if evap_on { "on" } else { "off" },
-            if clouds_on { "on" } else { "off" },
-            if temp_overlay { "on" } else { "off" },
-            if humidity_overlay { "on" } else { "off" },
-            scene.wind.climate_vx,
+            scene.clouds.len(),
+            scene.clouds.total_mass(),
             scene.humidity.total_mass(),
+            scene.wind.climate_vx,
             scene.organisms.len(),
             if sim_paused { "[paused]" } else { "" }
         );
