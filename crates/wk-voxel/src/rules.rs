@@ -731,6 +731,40 @@ impl Default for CondensationConfig {
     }
 }
 
+/// Orographic rain boost — moist air dumps when climbing tall land.
+#[derive(Debug, Clone, Copy)]
+pub struct OrographicConfig {
+    pub seed: u64,
+    pub width_cols: i32,
+    pub sea_level_y: i32,
+    /// Surface must sit at least this many cells above sea to count
+    /// as "tall" for forced release.
+    pub tall_above_sea: i32,
+    /// Ascent (cells) that reaches full probability multiplier.
+    pub ascent_scale: f32,
+    /// Max multiplier on rain probability when climbing hard.
+    pub max_prob_mult: f32,
+    /// Extra mass drained per event on a strong orographic hit.
+    pub mass_mult: f32,
+    /// Prevailing wind sign (+1 = +x) for upwind surface sampling.
+    pub wind_sign: i32,
+}
+
+impl Default for OrographicConfig {
+    fn default() -> Self {
+        Self {
+            seed: 0,
+            width_cols: 256,
+            sea_level_y: 0,
+            tall_above_sea: 22,
+            ascent_scale: 35.0,
+            max_prob_mult: 3.0,
+            mass_mult: 1.6,
+            wind_sign: 1,
+        }
+    }
+}
+
 /// Precipitation feedback: humidity tiles that hold enough
 /// atmospheric water probabilistically drop droplets back into the
 /// cell grid, draining the tile as they do.
@@ -747,6 +781,17 @@ pub fn apply_condensation_rain(
     humidity: &mut crate::humidity::Humidity,
     cfg: &CondensationConfig,
 ) {
+    apply_condensation_rain_with_orographic(world, humidity, cfg, None);
+}
+
+/// Like [`apply_condensation_rain`], but moist tiles over tall /
+/// upslope terrain rain more readily (orographic dump).
+pub fn apply_condensation_rain_with_orographic(
+    world: &mut World,
+    humidity: &mut crate::humidity::Humidity,
+    cfg: &CondensationConfig,
+    oro: Option<&OrographicConfig>,
+) {
     if cfg.min_mass_to_rain >= cfg.full_mass || cfg.max_prob_per_tick <= 0.0 {
         return;
     }
@@ -757,14 +802,16 @@ pub fn apply_condensation_rain(
     let tiles: Vec<(i32, i32)> = humidity.cells.keys().copied().collect();
     for (hx, hy) in tiles {
         let mass = humidity.at_tile(hx, hy);
-        if mass < cfg.min_mass_to_rain {
+        let (prob_mult, mass_mult, min_mass) = match oro {
+            Some(o) => orographic_factors(o, hx, tile_cols, cfg.min_mass_to_rain),
+            None => (1.0, 1.0, cfg.min_mass_to_rain),
+        };
+        if mass < min_mass {
             continue;
         }
         // Linear scale from 0 at min_mass to max at full_mass.
-        let t = ((mass - cfg.min_mass_to_rain)
-            / (cfg.full_mass - cfg.min_mass_to_rain))
-            .clamp(0.0, 1.0);
-        let effective_prob = cfg.max_prob_per_tick * t;
+        let t = ((mass - min_mass) / (cfg.full_mass - min_mass)).clamp(0.0, 1.0);
+        let effective_prob = (cfg.max_prob_per_tick * t * prob_mult).clamp(0.0, 0.95);
         // Hash uses tile coord + tick + salt for per-tile determinism.
         let roll = hash_prob(
             seed,
@@ -786,7 +833,7 @@ pub fn apply_condensation_rain(
         // Move mass_per_droplet from humidity into the cell — bounded
         // by both what humidity actually holds and the cell's
         // remaining sat headroom, so the transfer is mass-conservative.
-        let take_mass = cfg.mass_per_droplet.min(mass);
+        let take_mass = (cfg.mass_per_droplet * mass_mult).min(mass);
         let cell_free = u8::MAX as f32 - cell.sat.0 as f32;
         let transfer = take_mass.min(cell_free).max(0.0);
         if transfer <= 0.0 {
@@ -812,6 +859,36 @@ pub fn apply_condensation_rain(
             humidity.cells.remove(&(hx, hy));
         }
     }
+}
+
+fn orographic_factors(
+    oro: &OrographicConfig,
+    hx: i32,
+    tile_cols: i32,
+    base_min_mass: f32,
+) -> (f32, f32, f32) {
+    use crate::worldgen::continental_surface_y;
+    let tc = tile_cols.max(1);
+    let gx = hx * tc + tc / 2;
+    let sign = if oro.wind_sign >= 0 { 1 } else { -1 };
+    let gx_up = gx - sign * tc;
+    let s_here = continental_surface_y(oro.seed, gx, oro.sea_level_y, oro.width_cols);
+    let s_up = continental_surface_y(oro.seed, gx_up, oro.sea_level_y, oro.width_cols);
+    let ascent = (s_here - s_up) as f32;
+    let tall = s_here >= oro.sea_level_y + oro.tall_above_sea;
+    if !tall && ascent <= 2.0 {
+        return (1.0, 1.0, base_min_mass);
+    }
+    let climb = (ascent / oro.ascent_scale.max(1.0)).clamp(0.0, 1.0);
+    // Tall peaks dump readily even without a steep local climb —
+    // moist air that makes it inland tends to rain out over high land.
+    let tall_f = if tall { 0.65 } else { 0.0 };
+    let strength = (climb * 0.7 + tall_f).clamp(0.0, 1.0);
+    let prob_mult = 1.0 + strength * (oro.max_prob_mult - 1.0);
+    let mass_mult = 1.0 + strength * (oro.mass_mult - 1.0);
+    // Tall / climbing air rains from thinner clouds too.
+    let min_mass = base_min_mass * (1.0 - 0.55 * strength);
+    (prob_mult, mass_mult, min_mass)
 }
 
 /// Karst dissolution parameters for [`apply_karst_dissolution`].
@@ -1941,6 +2018,79 @@ mod tests {
         assert_eq!(w.get_cell(2, 30).unwrap().material, MaterialId::Stone);
         assert_eq!(w.get_cell(2, 30).unwrap().sat.0, 0);
         assert_eq!(h.total_mass(), mass_before);
+    }
+
+    #[test]
+    fn orographic_boost_rains_thinner_clouds_over_tall_land() {
+        use crate::worldgen::WorldgenParams;
+        let p = WorldgenParams::default();
+        // Find a tile whose centre is well above sea (mountain belt).
+        let mut tall_hx = None;
+        let tc = 4;
+        for hx in 0..(p.width_cols / tc) {
+            let gx = hx * tc + tc / 2;
+            let s = crate::worldgen::continental_surface_y(
+                p.seed,
+                gx,
+                p.sea_level_y,
+                p.width_cols,
+            );
+            if s >= p.sea_level_y + 22 {
+                tall_hx = Some(hx);
+                break;
+            }
+        }
+        let tall_hx = tall_hx.expect("worldgen should have tall land");
+        let centre_gx = tall_hx * tc + tc / 2;
+        let mut w = World::new(p.seed);
+        // Ensure chunk covering the mountain column.
+        let cc = ChunkCoord::new(
+            centre_gx.div_euclid(CHUNK_CELLS_W as i32),
+            40_i32.div_euclid(CHUNK_CELLS_H as i32),
+        );
+        w.ensure_chunk(cc);
+        w.set_cell(centre_gx, 40, Cell::air());
+        let mut h = crate::humidity::Humidity::new(tc);
+        // Thin cloud — below default min_mass_to_rain (64) but above
+        // orographic-reduced threshold on tall peaks.
+        h.add(centre_gx, 40, 50.0);
+        let cfg = CondensationConfig {
+            top_y: 40,
+            min_mass_to_rain: 64.0,
+            max_prob_per_tick: 1.0,
+            full_mass: 120.0,
+            mass_per_droplet: 24.0,
+            ..CondensationConfig::default()
+        };
+        let oro = OrographicConfig {
+            seed: p.seed,
+            width_cols: p.width_cols,
+            sea_level_y: p.sea_level_y,
+            tall_above_sea: 22,
+            wind_sign: 1,
+            ..OrographicConfig::default()
+        };
+        let before = h.total_mass();
+        // Without oro: should not rain (mass 50 < 64).
+        for _ in 0..40 {
+            apply_condensation_rain(&mut w, &mut h, &cfg);
+            w.tick = w.tick.wrapping_add(1);
+        }
+        assert_eq!(h.total_mass(), before, "thin cloud should not rain flat");
+        // With oro over tall land: should dump within a few dozen ticks.
+        for _ in 0..40 {
+            apply_condensation_rain_with_orographic(&mut w, &mut h, &cfg, Some(&oro));
+            w.tick = w.tick.wrapping_add(1);
+            if h.total_mass() < before {
+                break;
+            }
+        }
+        assert!(
+            h.total_mass() < before,
+            "orographic rain should drain thin mountain clouds (mass {} → {})",
+            before,
+            h.total_mass()
+        );
     }
 
     #[test]

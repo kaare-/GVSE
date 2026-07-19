@@ -18,6 +18,7 @@ pub mod humidity;
 pub mod organism;
 pub mod parallel;
 pub mod rules;
+pub mod wind;
 pub mod worldgen;
 
 pub use active::{
@@ -34,9 +35,11 @@ pub use humidity::{
     humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,
 };
 pub use rules::{
-    apply_condensation_rain, apply_evaporation, apply_evaporation_into_humidity, apply_grain_fall,
-    apply_gravity_fall, apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_seepage,
-    hydraulic_head, tick, CondensationConfig, EvapConfig, KarstConfig, RainConfig,
+    apply_condensation_rain, apply_condensation_rain_with_orographic, apply_evaporation,
+    apply_evaporation_into_humidity, apply_grain_fall, apply_gravity_fall, apply_karst_dissolution,
+    apply_lateral_spill, apply_rain, apply_seepage, hydraulic_head, tick, CondensationConfig,
+    EvapConfig, KarstConfig, OrographicConfig, RainConfig,
 };
+pub use wind::Wind;
 pub use worldgen::is_karst_zone_x;
 pub use worldgen::{continental_surface_y, stamp_world, WorldgenParams};

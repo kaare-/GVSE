@@ -3,17 +3,18 @@
 //! Isolation: only wk-voxel + wk-material dependencies. No column
 //! stack imports.
 
-use wk_voxel::{stamp_world, Humidity, OrganismStore, World, WorldgenParams};
+use wk_voxel::{stamp_world, Humidity, OrganismStore, Wind, World, WorldgenParams};
 
-/// Humidity tile side (world cells per humidity sample). Coarse
-/// enough that a fair map fits comfortably in memory, fine enough
-/// that "rain-soaked plains" and "dry mountains" read differently.
+/// Humidity / wind tile side (world cells per sample).
 const HUMIDITY_TILE_COLS: i32 = 4;
+/// Prevailing wind — tiles per tick (slow crawl, readable as clouds).
+const CLIMATE_WIND_VX: f32 = 0.08;
 
 pub struct Scene {
     pub world: World,
     pub params: WorldgenParams,
     pub humidity: Humidity,
+    pub wind: Wind,
     pub organisms: OrganismStore,
 }
 
@@ -32,6 +33,16 @@ impl Scene {
             params.sky_ceiling_y,
         );
         humidity.wrap_x = params.wrap_x;
+        let wind = Wind::climate(
+            HUMIDITY_TILE_COLS,
+            CLIMATE_WIND_VX,
+            params.seed,
+            params.width_cols,
+            params.sea_level_y,
+            params.bedrock_floor_y,
+            params.sky_ceiling_y,
+            params.wrap_x,
+        );
         // Empty organism store — place Atoms via the F2 creature editor
         // (Enter, then click a wet cell). No auto-seeded demo life.
         let organisms = OrganismStore::new();
@@ -39,6 +50,7 @@ impl Scene {
             world,
             params,
             humidity,
+            wind,
             organisms,
         }
     }
@@ -86,5 +98,10 @@ mod tests {
         let tiles_h = (cells_h + HUMIDITY_TILE_COLS - 1) / HUMIDITY_TILE_COLS;
         assert_eq!(b.tile_capacity(), (tiles_w * tiles_h) as usize);
     }
-}
 
+    #[test]
+    fn scene_has_prevailing_wind() {
+        let s = Scene::new(WorldgenParams::default());
+        assert!(s.wind.climate_vx > 0.0);
+    }
+}

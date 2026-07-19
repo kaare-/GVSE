@@ -95,6 +95,12 @@ pub struct Humidity {
     /// When true (and [`Self::bounds`] is set), horizontal diffusion
     /// wraps at `hx_min`/`hx_max` so the atmosphere joins on a ring.
     pub wrap_x: bool,
+    /// Sub-tile advection residual (shared climate wind). Used so
+    /// clouds crawl smoothly instead of jumping whole tiles.
+    #[serde(default)]
+    pub advect_rx: f32,
+    #[serde(default)]
+    pub advect_ry: f32,
 }
 
 impl Humidity {
@@ -104,6 +110,8 @@ impl Humidity {
             cells: HashMap::new(),
             bounds: None,
             wrap_x: false,
+            advect_rx: 0.0,
+            advect_ry: 0.0,
         }
     }
 
@@ -270,6 +278,52 @@ impl Humidity {
             v.abs() > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
         });
     }
+
+    /// Advect atmospheric mass by a uniform climate wind `(vx, vy)`
+    /// in tiles/tick. Fractional remainders accumulate in
+    /// [`Self::advect_rx`] / [`Self::advect_ry`] so motion stays smooth.
+    ///
+    /// Mass-conserving: every gram lands on an accepted tile (vertical
+    /// edges are Neumann — mass that would leave sticks at the rim).
+    pub fn advect(&mut self, vx: f32, vy: f32) {
+        if self.cells.is_empty() || (vx == 0.0 && vy == 0.0) {
+            return;
+        }
+        self.advect_rx += vx;
+        self.advect_ry += vy;
+        let dx = self.advect_rx.trunc() as i32;
+        let dy = self.advect_ry.trunc() as i32;
+        self.advect_rx -= dx as f32;
+        self.advect_ry -= dy as f32;
+        if dx == 0 && dy == 0 {
+            return;
+        }
+        let snap = self.cells.clone();
+        self.cells.clear();
+        for ((hx, hy), mass) in snap {
+            if mass.abs() < 1e-9 {
+                continue;
+            }
+            let nhx = match self.wrap_hx(hx + dx) {
+                Some(x) => x,
+                None => hx, // shouldn't happen with wrap helper
+            };
+            let mut nhy = hy + dy;
+            if !self.accepts(nhx, nhy) {
+                // Vertical Neumann wall — keep y, still take wrapped x.
+                nhy = hy;
+                if !self.accepts(nhx, nhy) {
+                    *self.cells.entry((hx, hy)).or_insert(0.0) += mass;
+                    continue;
+                }
+            }
+            *self.cells.entry((nhx, nhy)).or_insert(0.0) += mass;
+        }
+        let bounds = self.bounds;
+        self.cells.retain(|&(hx, hy), v| {
+            v.abs() > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
+        });
+    }
 }
 
 #[cfg(test)]
@@ -282,6 +336,25 @@ mod tests {
         h.add(0, 0, 10.0);
         h.add(1, 3, 5.0); // same tile as (0,0)
         assert_eq!(h.at_cell(2, 2), 15.0);
+    }
+
+    #[test]
+    fn advect_moves_mass_and_conserves() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        h.wrap_x = true;
+        h.add(8, 8, 100.0);
+        let before = h.total_mass();
+        // Force a whole-tile step.
+        h.advect_rx = 0.0;
+        h.advect(1.0, 0.0);
+        assert!((h.total_mass() - before).abs() < 1e-4);
+        assert!(h.at_tile(3, 2) > 0.0 || h.at_tile(2, 2) > 0.0);
+        // Original tile centre was (8,8) → tile (2,2); +1 hx → (3,2).
+        assert!(
+            h.at_tile(3, 2) > 50.0,
+            "mass should have shifted +1 tile in x, got {}",
+            h.at_tile(3, 2)
+        );
     }
 
     #[test]
