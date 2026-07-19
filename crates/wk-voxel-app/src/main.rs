@@ -49,6 +49,10 @@ fn window_conf() -> Conf {
 /// Cell size in on-screen pixels. Independent of world coordinates —
 /// change this to zoom.
 const PX_PER_CELL: f32 = 3.0;
+/// HUD strip height. Vertical camera clamp pins the bedrock floor to
+/// the top of this bar so the sky-blue clear colour never shows
+/// under the world.
+const HUD_H: f32 = 24.0;
 
 #[macroquad::main(window_conf)]
 async fn main() {
@@ -174,6 +178,15 @@ async fn main() {
         let world_w_px = scene.params.width_cols as f32 * cell_px;
         let world_h_px = (scene.params.sky_ceiling_y - scene.params.bedrock_floor_y) as f32
             * cell_px;
+        // Vertical lock: bedrock bottom sits on the HUD. `cam_y_min`
+        // stops the sky-blue clear colour showing under the floor;
+        // `cam_y_max` stops panning past the sky ceiling.
+        // origin_y = (sh + world_h_px)/2 + cam_y  is the screen-y of
+        // the bottom edge of the bedrock row.
+        let cam_y_min = (sh - HUD_H) - (sh + world_h_px) * 0.5;
+        let cam_y_max = world_h_px - (sh + world_h_px) * 0.5; // sky top at y=0
+        cam_y = cam_y.clamp(cam_y_min, cam_y_max.max(cam_y_min));
+
         let origin_x = (sw - world_w_px) * 0.5 - cam_x;
         // Screen +y is down. World +y is up. Flip when placing rows.
         let origin_y = (sh + world_h_px) * 0.5 + cam_y;
@@ -251,7 +264,7 @@ async fn main() {
             scene.humidity.total_mass(),
             if paused { "[paused]" } else { "" }
         );
-        draw_rectangle(0.0, sh - 24.0, sw, 24.0, Color::from_rgba(0, 0, 0, 200));
+        draw_rectangle(0.0, sh - HUD_H, sw, HUD_H, Color::from_rgba(0, 0, 0, 200));
         draw_text(&hud, 8.0, sh - 8.0, 16.0, WHITE);
 
         next_frame().await;
