@@ -167,10 +167,11 @@ Voxel intent:
   "Plant grows on a wet substrate" becomes: at the top-of-solid
   cell, if the cell is Organic/Clay/Sand and the moisture heatmap
   sample says saturation > threshold, spawn biomass.
-- Biomass mass tracked as a separate `Heatmap<f32>` overlay (per
-  cell or per 4-cell tile — undecided).
-- Nutrient, water/air CO₂/O₂ are additional heatmaps.
-- **Deferred** until the fluid core works.
+- **Visible life = Set A module pixels** (`organism.rs`): Nucleus
+  `#000000` + Photosystem `#2ECC40`, same as column-GVSE / 
+  `docs/organism/`. Not a green terrain biomass wash — column
+  `Ecology.alive_biomass` is a hidden substrate scalar there too.
+- Nutrient / CO₂ heatmaps and land-plant Set D still deferred.
 
 ### 3.5 [AGENTS.md](AGENTS.md)
 
@@ -505,11 +506,10 @@ Follow-ups, each its own PR:
 
 Items 1–8 (through karst + seepage/head-spill), dirty-rect
 active-chunk planning, four-pass checkerboard, **rayon
-parallelism within each colour**, and **chunk occupancy skips** for
-evap (`has_wet_air`) / karst (`has_limestone`) are landed in
-`wk-voxel`. Gravity/grain use bottom-up **pull** so cross-chunk
-seams stay one-step under the partition. Remaining focus is
-ecology + agents.
+parallelism within each colour**, **chunk occupancy skips** for
+evap / karst, and **Set A Atoms** (`OrganismStore` — isolated, no
+`wk-agents` import) are landed in `wk-voxel`. Remaining focus is
+Set D land plants, shade, and richer organism behaviour.
 
 Each PR keeps the isolation contract and passes headless tests
 before touching rendering.

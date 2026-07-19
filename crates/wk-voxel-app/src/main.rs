@@ -18,10 +18,14 @@
 //! - `C` — toggle condensation rain (feedback from humidity heatmap)
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
+//! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle humidity overlay
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
 //! - `Esc` — quit
+//!
+//! Visible life is Set A module pixels (black Nucleus + green
+//! Photosystem), matching column-GVSE — not a terrain biomass wash.
 
 mod palette;
 mod scene;
@@ -87,6 +91,7 @@ async fn main() {
     let mut cond_rain_on = true;
     let mut evap_on = true;
     let mut karst_on = true;
+    let mut organisms_on = true;
     let mut humidity_overlay = false;
     // Fraction of pairwise humidity difference transferred per tick.
     // 0.15 gives a visible "clouds spread as they drift" feel
@@ -143,6 +148,9 @@ async fn main() {
         if is_key_pressed(KeyCode::H) {
             humidity_overlay = !humidity_overlay;
         }
+        if is_key_pressed(KeyCode::O) {
+            organisms_on = !organisms_on;
+        }
         if is_key_pressed(KeyCode::C) {
             cond_rain_on = !cond_rain_on;
         }
@@ -192,6 +200,10 @@ async fn main() {
             // deposits every tick; only the spread step is throttled.
             if humidity_diffuse_due(scene.world.tick) {
                 scene.humidity.diffuse(humidity_diffusion_alpha);
+            }
+            if organisms_on {
+                let tick_no = scene.world.tick;
+                scene.organisms.step(&mut scene.world, tick_no);
             }
         }
 
@@ -290,15 +302,36 @@ async fn main() {
             }
         }
 
+        // Set A organisms: 1×1 module pixels (Nucleus black, Photosystem
+        // green) — same palette as column-GVSE, always drawn when present.
+        for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list() {
+            for &x_copy in x_copies {
+                let sx = origin_x + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
+                let sy = origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;
+                if sx + cell_px < 0.0 || sx > sw || sy < 0.0 || sy - cell_px > sh {
+                    continue;
+                }
+                draw_rectangle(
+                    sx,
+                    sy - cell_px,
+                    cell_px,
+                    cell_px,
+                    Color::from_rgba(r, g, b, 255),
+                );
+            }
+        }
+
         // HUD.
         let hud = format!(
-            "tick={} seed={} rain={} cond={} evap={} karst={} hum={} humidity_mass={:.0} {}  |  Space pause | R reroll | W rain | C cond | E evap | K karst | H overlay | arrows pan | Esc quit",
+            "tick={} seed={} rain={} cond={} evap={} karst={} org={} atoms={} hum={} humidity={:.0} {}  |  Space|R|W/C/E/K/O|H overlay|arrows|Esc",
             scene.world.tick,
             scene.params.seed,
             if rain_on { "on" } else { "off" },
             if cond_rain_on { "on" } else { "off" },
             if evap_on { "on" } else { "off" },
             if karst_on { "on" } else { "off" },
+            if organisms_on { "on" } else { "off" },
+            scene.organisms.len(),
             if humidity_overlay { "on" } else { "off" },
             scene.humidity.total_mass(),
             if paused { "[paused]" } else { "" }
