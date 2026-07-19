@@ -20,14 +20,11 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::cell::Cell;
+use crate::climate::{day_factor, phase_fraction, DEMO_DAY_TICKS};
 use crate::grid::World;
 
 /// Soft cap — blooms should stay readable at 1×.
 pub const MAX_ATOMS: usize = 256;
-
-/// Demo day length in ticks (shorter than column-GVSE so day/night
-/// bloom is visible in a short play session).
-pub const DEMO_DAY_TICKS: u64 = 1_200;
 
 /// Energy gained per photosystem per tick at full noon light.
 const PHOTON_RATE: f32 = 0.35;
@@ -334,17 +331,6 @@ impl OrganismStore {
         self.atoms.extend(births);
         resolve_contacts(world, &mut self.atoms);
     }
-}
-
-/// 1 at noon, ~0.08 at night — readable bloom / thin cycle.
-pub fn day_factor(tick: u64) -> f32 {
-    let t = phase_fraction(tick);
-    let angle = t * std::f32::consts::TAU;
-    (angle.cos() * 0.5 + 0.5).clamp(0.08, 1.0)
-}
-
-fn phase_fraction(tick: u64) -> f32 {
-    (tick % DEMO_DAY_TICKS) as f32 / DEMO_DAY_TICKS as f32
 }
 
 /// Relative density: bias 0 → buoyant (0.55), bias 1 → heavy (1.45).

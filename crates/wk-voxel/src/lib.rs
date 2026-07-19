@@ -12,12 +12,14 @@ pub mod active;
 pub mod blueprint;
 pub mod cell;
 pub mod chunk;
+pub mod climate;
 pub mod grid;
 pub mod heatmap;
 pub mod humidity;
 pub mod organism;
 pub mod parallel;
 pub mod rules;
+pub mod temperature;
 pub mod wind;
 pub mod worldgen;
 
@@ -28,8 +30,12 @@ pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{is_grain, water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use blueprint::{Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR};
+pub use climate::{
+    celestial_local, celestial_screen_pos, day_factor, day_night_factor, is_daytime, phase_fraction,
+    sky_rgb, sky_rgb_at_height, DEMO_DAY_TICKS,
+};
 pub use grid::World;
-pub use organism::{day_factor, Atom, BodyModule, ModuleId, OrganismStore, DEMO_DAY_TICKS, MAX_ATOMS};
+pub use organism::{Atom, BodyModule, ModuleId, OrganismStore, MAX_ATOMS};
 pub use heatmap::Heatmap;
 pub use humidity::{
     humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,
@@ -40,6 +46,7 @@ pub use rules::{
     apply_lateral_spill, apply_rain, apply_seepage, hydraulic_head, tick, CondensationConfig,
     EvapConfig, KarstConfig, OrographicConfig, RainConfig,
 };
+pub use temperature::{temperature_step_due, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE};
 pub use wind::Wind;
 pub use worldgen::is_karst_zone_x;
 pub use worldgen::{continental_surface_y, stamp_world, WorldgenParams};

@@ -3,7 +3,7 @@
 
 use macroquad::prelude::*;
 use wk_material::MaterialId;
-use wk_voxel::{Atom, Cell, Humidity};
+use wk_voxel::{Atom, Cell, Humidity, Temperature};
 
 fn material_name(mat: MaterialId) -> &'static str {
     match mat {
@@ -60,10 +60,12 @@ pub fn draw_block_inspector(
     gy: i32,
     cell: Option<Cell>,
     humidity: &Humidity,
+    temperature: &Temperature,
     organism: Option<(usize, &Atom)>,
     sw: f32,
 ) {
     let hum = humidity.at_cell(gx, gy);
+    let temp_c = temperature.at_cell(gx, gy);
     let (hx, hy) = humidity.tile_of(gx, gy);
     let mut lines = vec![format!("Block ({gx}, {gy})")];
     match cell {
@@ -86,7 +88,7 @@ pub fn draw_block_inspector(
         }
         None => lines.push("cell: (empty / unstamped)".into()),
     }
-    lines.push(format!("humidity={hum:.1}  tile=({hx},{hy})"));
+    lines.push(format!("temp={temp_c:.1}C  humidity={hum:.1}  tile=({hx},{hy})"));
 
     if let Some((id, atom)) = organism {
         lines.push("--- organism ---".into());

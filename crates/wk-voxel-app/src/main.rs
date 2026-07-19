@@ -21,12 +21,16 @@
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle cyan humidity debug overlay
 //! - `N` — toggle cloud drawing (dark = wetter; wind-advected)
+//! - `T` — toggle temperature heatmap overlay
 //! - `F1` — toggle the bottom tool / hotkey line
 //! - `F2` — creature editor (Set A MS-Paint; `C` stays condensation here)
 //! - click — block / organism inspector
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
 //! - `Esc` — quit (or cancel spawn / close editor)
+//!
+//! Sky follows the shared climate clock (sun by day, moon by night).
+//! Temperature tiles warm with sun, cool at night, and shade under clouds.
 
 mod editor;
 mod inspector;
@@ -36,8 +40,9 @@ mod scene;
 use macroquad::prelude::*;
 use wk_voxel::{
     apply_condensation_rain_with_orographic, apply_evaporation_into_humidity,
-    apply_karst_dissolution, apply_rain, humidity_diffuse_due, tick, CondensationConfig, EvapConfig,
-    KarstConfig, OrographicConfig, RainConfig, WorldgenParams,
+    apply_karst_dissolution, apply_rain, celestial_screen_pos, day_night_factor, humidity_diffuse_due,
+    is_daytime, sky_rgb, sky_rgb_at_height, temperature_step_due, tick, CondensationConfig,
+    EvapConfig, KarstConfig, OrographicConfig, RainConfig, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -95,6 +100,69 @@ fn humidity_overlay_alpha(mass: f32, max_mass: f32) -> u8 {
     }
     let norm = (mass / max_mass.max(1.0)).clamp(0.0, 1.0);
     (48.0 + norm * 152.0) as u8
+}
+
+/// Day/night sky gradient + sun or moon arc.
+fn draw_sky(tick: u64, sw: f32, sh: f32) {
+    let dn = day_night_factor(tick);
+    const BANDS: i32 = 28;
+    for i in 0..BANDS {
+        let y0 = sh * (i as f32) / BANDS as f32;
+        let h = y0 + sh / BANDS as f32;
+        let height_01 = (i as f32 + 0.5) / BANDS as f32;
+        let [r, g, b] = sky_rgb_at_height(dn, height_01);
+        draw_rectangle(
+            0.0,
+            y0,
+            sw,
+            h - y0 + 1.0,
+            Color::from_rgba(r, g, b, 255),
+        );
+    }
+    let (cx, cy) = celestial_screen_pos(tick, sw, sh);
+    if is_daytime(tick) {
+        draw_circle(cx, cy, 22.0, Color::from_rgba(255, 200, 70, 60));
+        draw_circle(cx, cy, 16.0, Color::from_rgba(255, 220, 90, 255));
+        draw_circle(cx, cy, 10.0, Color::from_rgba(255, 245, 180, 255));
+    } else {
+        let [sr, sg, sb] = sky_rgb(dn);
+        draw_circle(cx, cy, 14.0, Color::from_rgba(230, 235, 245, 255));
+        // Crescent bite using local sky colour.
+        draw_circle(
+            cx + 5.0,
+            cy - 2.0,
+            12.0,
+            Color::from_rgba(sr, sg, sb, 255),
+        );
+    }
+}
+
+fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
+    let u = ((temp_c - t_min) / (t_max - t_min).max(0.5)).clamp(0.0, 1.0);
+    // Cold blue → mild cyan → warm yellow → hot red.
+    let (r, g, b) = if u < 0.33 {
+        let t = u / 0.33;
+        (
+            (20.0 + t * 40.0) as u8,
+            (80.0 + t * 120.0) as u8,
+            (200.0 - t * 40.0) as u8,
+        )
+    } else if u < 0.66 {
+        let t = (u - 0.33) / 0.33;
+        (
+            (60.0 + t * 180.0) as u8,
+            (200.0 - t * 40.0) as u8,
+            (160.0 - t * 140.0) as u8,
+        )
+    } else {
+        let t = (u - 0.66) / 0.34;
+        (
+            (240.0 - t * 20.0) as u8,
+            (160.0 - t * 140.0) as u8,
+            (20.0 + t * 20.0) as u8,
+        )
+    };
+    Color::from_rgba(r, g, b, 120)
 }
 
 /// Dark cloud puffs — darker / denser when the tile holds more water.
@@ -179,6 +247,7 @@ async fn main() {
     let mut organisms_on = true;
     let mut humidity_overlay = false;
     let mut clouds_on = true;
+    let mut temp_overlay = false;
     let mut show_tool_line = true;
     let mut editor = CreatureEditor::default();
     let mut inspect: Option<(i32, i32)> = None;
@@ -272,6 +341,9 @@ async fn main() {
             if is_key_pressed(KeyCode::N) {
                 clouds_on = !clouds_on;
             }
+            if is_key_pressed(KeyCode::T) {
+                temp_overlay = !temp_overlay;
+            }
             if is_key_pressed(KeyCode::O) {
                 organisms_on = !organisms_on;
             }
@@ -339,6 +411,10 @@ async fn main() {
             if humidity_diffuse_due(scene.world.tick) {
                 scene.humidity.diffuse(humidity_diffusion_alpha);
             }
+            if temperature_step_due(scene.world.tick) {
+                let tick_no = scene.world.tick;
+                scene.temperature.step(&scene.humidity, tick_no);
+            }
             if organisms_on {
                 let tick_no = scene.world.tick;
                 scene.organisms.step(&mut scene.world, tick_no);
@@ -346,10 +422,9 @@ async fn main() {
         }
 
         // Render.
-        clear_background(Color::from_rgba(0x87, 0xCE, 0xEB, 255));
-
         let sw = screen_width();
         let sh = screen_height();
+        draw_sky(scene.world.tick, sw, sh);
         let cell_px = PX_PER_CELL;
         let hud_h = hud_height(show_tool_line);
         // Convert screen space to world cell range, centred on the
@@ -497,6 +572,35 @@ async fn main() {
             }
         }
 
+        // Temperature heatmap overlay (blue cold → red hot).
+        if temp_overlay {
+            let tile_px = scene.temperature.tile_cols as f32 * cell_px;
+            let (t_min, t_max) = scene
+                .temperature
+                .cells
+                .values()
+                .copied()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+            let t_min = t_min.min(8.0);
+            let t_max = t_max.max(t_min + 4.0).max(28.0);
+            for (&(hx, hy), &temp_c) in &scene.temperature.cells {
+                let base_gx = hx * scene.temperature.tile_cols;
+                let base_gy = hy * scene.temperature.tile_cols;
+                for &x_copy in x_copies {
+                    let sx =
+                        origin_x + (base_gx + x_copy * scene.params.width_cols) as f32 * cell_px;
+                    let sy = origin_y
+                        - (base_gy - scene.params.bedrock_floor_y + scene.temperature.tile_cols)
+                            as f32
+                            * cell_px;
+                    if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
+                        continue;
+                    }
+                    draw_rectangle(sx, sy, tile_px, tile_px, temp_overlay_color(temp_c, t_min, t_max));
+                }
+            }
+        }
+
         // Set A organisms: 1×1 module pixels (Nucleus black, Photosystem
         // green) — same palette as column-GVSE, always drawn when present.
         for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list() {
@@ -534,34 +638,39 @@ async fn main() {
                 .organisms
                 .pick_at(gx, gy)
                 .map(|id| (id, &scene.organisms.atoms[id]));
-            draw_block_inspector(gx, gy, cell, &scene.humidity, org, sw);
+            draw_block_inspector(gx, gy, cell, &scene.humidity, &scene.temperature, org, sw);
         }
 
         // Creature editor overlay (paint UI, or spawn banner).
         editor.draw();
 
         // HUD: info line always; tool / hotkey line toggled with F1.
+        let tod = if is_daytime(scene.world.tick) {
+            "day"
+        } else {
+            "night"
+        };
         let info = format!(
-            "fps={:.0}  tick={} seed={} rain={} cond={} evap={} karst={} org={} atoms={} clouds={} hum={} wind={:.2} humidity={:.0} {}",
+            "fps={:.0}  tick={} {} T̄={:.1}C rain={} cond={} evap={} clouds={} temp={} hum={} wind={:.2} humidity={:.0} atoms={} {}",
             fps_smoothed(),
             scene.world.tick,
-            scene.params.seed,
+            tod,
+            scene.temperature.mean(),
             if rain_on { "on" } else { "off" },
             if cond_rain_on { "on" } else { "off" },
             if evap_on { "on" } else { "off" },
-            if karst_on { "on" } else { "off" },
-            if organisms_on { "on" } else { "off" },
-            scene.organisms.len(),
             if clouds_on { "on" } else { "off" },
+            if temp_overlay { "on" } else { "off" },
             if humidity_overlay { "on" } else { "off" },
             scene.wind.climate_vx,
             scene.humidity.total_mass(),
+            scene.organisms.len(),
             if sim_paused { "[paused]" } else { "" }
         );
         draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
         if show_tool_line {
             draw_text(
-                "Space|R|W/C/E/K/O|N clouds|H hum|F1 tools|F2 editor|click inspect|Esc",
+                "Space|R|W/C/E/K/O|N clouds|T temp|H hum|F1 tools|F2 editor|click|Esc",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,
