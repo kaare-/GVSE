@@ -28,7 +28,6 @@ fn e11_cave_roof_collapses() {
             col.voids.push(Void {
                 top_y: mid + h0 * 0.5,
                 height_m: h0,
-                water_mass: 0,
                 roof_material: MaterialId::Sand,
                 origin: VoidOrigin::Karst,
                 light: 0,

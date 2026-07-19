@@ -985,9 +985,8 @@ mod tests {
         let surface = world.column_at(8).unwrap().surface_y;
         if let Some(col) = world.column_at_mut(8) {
             col.moisture = col.moisture_cap();
-            // Thin roof: cavity just under the bed, half-filled with water.
+            // Thin roof: dry cavity just under the bed.
             col.grow_void_at(surface - 0.8, 1.5, MaterialId::Sand, VoidOrigin::Karst);
-            col.voids[0].water_mass = col.voids[0].capacity_kg() / 2;
         }
         assert!(
             column_is_plantable(&world, 8),
@@ -1099,7 +1098,6 @@ mod tests {
         if let Some(col) = world.column_at_mut(8) {
             col.moisture = col.moisture_cap();
             col.grow_void_at(surface - 0.7, 1.2, MaterialId::Sand, VoidOrigin::Karst);
-            col.voids[0].water_mass = col.voids[0].capacity_kg() / 2;
         }
         let mut bp = Blueprint::minimal_plant(Genome {
             alloc_root: 0.9,
