@@ -20,5 +20,4 @@ pub use wk_agents::{
     circadian_buoyancy_bias, temp_comfort_factor, Aabb, AgentStore, Blueprint, Energy, Genome,
     Grazer, LaneId, Lineage, ModuleBody, ModuleId, Organism, OrganismHabit, OrganismInspect,
     PlacedModule, PopCaps, Pose, Wire, WireKind, DROUGHT_HIBERNATE_MAX_TICKS, MAX_AGENTS,
-    MAX_ORGANISMS,
 };
