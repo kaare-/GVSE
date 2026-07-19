@@ -15,7 +15,7 @@ const INFILTRATION_COEFF: f32 = 0.12;
 
 /// Standing water above this instantly fills the remaining pore deficit
 /// (hydraulic contact). Was 500 kg — shallow rain films never qualified.
-const HYDRAULIC_CONTACT_MIN_KG: i64 = 80;
+pub const HYDRAULIC_CONTACT_MIN_KG: i64 = 80;
 
 /// Shore / lake fringe: dry land next to free water aims for this
 /// saturation. One tree cannot empty a lake fringe in a few ticks.
@@ -32,23 +32,32 @@ pub fn recharge_deep_water_tables(world: &mut World) {
     let sea = world.sea_level;
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
 
-    // Pass 1 — own free water → own pores (ocean beds, lake bottoms, puddles).
+    // Pass 1 — own free water → own pores.
+    //
+    // Only *submerged* beds get the instant "top up pores to full" snap:
+    // a lake or ocean column is hydraulically clamped to the aquifer
+    // beneath it, so any tick where moisture < cap must equalize.
+    // On emergent land a rain puddle is *not* clamped to the aquifer —
+    // it's just wet material sitting on top waiting for [`run_infiltration`]
+    // to slowly draw it in. Aggressively draining every kg of top water
+    // into moisture on emergent columns was the reason light rain
+    // never rendered as standing water: it was siphoned into pore
+    // space on the same tick it landed.
     for &coord in &coords {
         for i in 0..CHUNK_W {
             let col = &mut world.chunks.get_mut(&coord).unwrap().columns[i];
-            let target = col
-                .target_moisture_for_table(sea)
-                .max(if col.top_water_mass() > 0 {
-                    col.moisture_cap()
-                } else {
-                    0
-                });
-            let need = target.saturating_sub(col.moisture);
-            if need == 0 {
-                continue;
-            }
             let available = col.top_water_mass();
             if available <= 0 {
+                continue;
+            }
+            if col.solid_bed_y() >= sea - 0.05 {
+                continue;
+            }
+            let target = col
+                .target_moisture_for_table(sea)
+                .max(col.moisture_cap());
+            let need = target.saturating_sub(col.moisture);
+            if need <= 0 {
                 continue;
             }
             let took = col.take_water_from_cap(need.min(available));
