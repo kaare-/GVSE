@@ -15,18 +15,19 @@
 //! - `Space` — pause / resume physics ticks
 //! - `R` — regenerate the world with a new seed
 //! - `W` — toggle background rain (climatic, always-on cloud row)
-//! - `C` — toggle condensation rain (feedback from humidity heatmap)
+//! - `V` — toggle condensation rain (feedback from humidity heatmap)
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle humidity overlay
+//! - `C` / `F2` — creature editor (Set A MS-Paint, like column-GVSE)
+//! - click — block / organism inspector
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
-//! - `Esc` — quit
-//!
-//! Visible life is Set A module pixels (black Nucleus + green
-//! Photosystem), matching column-GVSE — not a terrain biomass wash.
+//! - `Esc` — quit (or cancel spawn / close editor)
 
+mod editor;
+mod inspector;
 mod palette;
 mod scene;
 
@@ -37,6 +38,8 @@ use wk_voxel::{
     WorldgenParams,
 };
 
+use crate::editor::CreatureEditor;
+use crate::inspector::{draw_block_inspector, draw_selection_outline, screen_to_world};
 use crate::palette::cell_color;
 use crate::scene::Scene;
 
@@ -93,6 +96,8 @@ async fn main() {
     let mut karst_on = true;
     let mut organisms_on = true;
     let mut humidity_overlay = false;
+    let mut editor = CreatureEditor::default();
+    let mut inspect: Option<(i32, i32)> = None;
     // Fraction of pairwise humidity difference transferred per tick.
     // 0.15 gives a visible "clouds spread as they drift" feel
     // without going near the 0.25 stability cap.
@@ -121,51 +126,78 @@ async fn main() {
     let karst_cfg = KarstConfig::default();
 
     loop {
-        // Input.
+        // Esc: spawn cancel → close editor → quit.
         if is_key_pressed(KeyCode::Escape) {
-            break;
+            if editor.open && editor.spawn_picker {
+                editor.spawn_picker = false;
+                editor.status = "Spawn cancelled".into();
+            } else if editor.open {
+                editor.open = false;
+                editor.spawn_picker = false;
+                paused = editor.was_paused;
+            } else {
+                break;
+            }
         }
-        if is_key_pressed(KeyCode::Space) {
-            paused = !paused;
+        if is_key_pressed(KeyCode::C) || is_key_pressed(KeyCode::F2) {
+            let opening = !editor.open;
+            editor.toggle(paused);
+            if opening {
+                paused = true;
+            } else {
+                paused = editor.was_paused;
+            }
         }
-        if is_key_pressed(KeyCode::R) {
-            let new_seed = scene.params.seed.wrapping_add(1);
-            scene = Scene::new(WorldgenParams {
-                seed: new_seed,
-                ..scene.params
-            });
-            (rain_cfg, cond_cfg) = cloud_cfg(&scene.params);
+        if editor.open {
+            editor.handle_input();
         }
-        if is_key_pressed(KeyCode::W) {
-            rain_on = !rain_on;
-        }
-        if is_key_pressed(KeyCode::E) {
-            evap_on = !evap_on;
-        }
-        if is_key_pressed(KeyCode::K) {
-            karst_on = !karst_on;
-        }
-        if is_key_pressed(KeyCode::H) {
-            humidity_overlay = !humidity_overlay;
-        }
-        if is_key_pressed(KeyCode::O) {
-            organisms_on = !organisms_on;
-        }
-        if is_key_pressed(KeyCode::C) {
-            cond_rain_on = !cond_rain_on;
-        }
-        let pan = 200.0 * get_frame_time();
-        if is_key_down(KeyCode::Left) {
-            cam_x -= pan;
-        }
-        if is_key_down(KeyCode::Right) {
-            cam_x += pan;
-        }
-        if is_key_down(KeyCode::Up) {
-            cam_y -= pan;
-        }
-        if is_key_down(KeyCode::Down) {
-            cam_y += pan;
+
+        if !editor.open || editor.spawn_picker {
+            if is_key_pressed(KeyCode::Space) {
+                paused = !paused;
+            }
+            if is_key_pressed(KeyCode::R) {
+                let new_seed = scene.params.seed.wrapping_add(1);
+                scene = Scene::new(WorldgenParams {
+                    seed: new_seed,
+                    ..scene.params
+                });
+                (rain_cfg, cond_cfg) = cloud_cfg(&scene.params);
+                inspect = None;
+            }
+            if is_key_pressed(KeyCode::W) {
+                rain_on = !rain_on;
+            }
+            if is_key_pressed(KeyCode::E) {
+                evap_on = !evap_on;
+            }
+            if is_key_pressed(KeyCode::K) {
+                karst_on = !karst_on;
+            }
+            if is_key_pressed(KeyCode::H) {
+                humidity_overlay = !humidity_overlay;
+            }
+            if is_key_pressed(KeyCode::O) {
+                organisms_on = !organisms_on;
+            }
+            // Condensation was on `C`; creature editor takes that key
+            // (column-GVSE parity). `V` = vapor → rain.
+            if is_key_pressed(KeyCode::V) {
+                cond_rain_on = !cond_rain_on;
+            }
+            let pan = 200.0 * get_frame_time();
+            if is_key_down(KeyCode::Left) {
+                cam_x -= pan;
+            }
+            if is_key_down(KeyCode::Right) {
+                cam_x += pan;
+            }
+            if is_key_down(KeyCode::Up) {
+                cam_y -= pan;
+            }
+            if is_key_down(KeyCode::Down) {
+                cam_y += pan;
+            }
         }
         // Ring camera: keep pan offset inside one world width so the
         // seam is just "further left / right" rather than empty space.
@@ -174,8 +206,9 @@ async fn main() {
             cam_x = cam_x.rem_euclid(world_w_px_for_wrap);
         }
 
-        // Physics.
-        if !paused {
+        // Physics (frozen while the paint editor is open, not spawn).
+        let sim_paused = paused || (editor.open && !editor.spawn_picker);
+        if !sim_paused {
             if rain_on {
                 apply_rain(&mut scene.world, &rain_cfg);
             }
@@ -233,6 +266,47 @@ async fn main() {
         let origin_x = (sw - world_w_px) * 0.5 - cam_x;
         // Screen +y is down. World +y is up. Flip when placing rows.
         let origin_y = (sh + world_h_px) * 0.5 + cam_y;
+
+        // World clicks: spawn picker, or block inspector.
+        if is_mouse_button_pressed(MouseButton::Left)
+            && (!editor.open || editor.spawn_picker)
+        {
+            let (mx, my) = mouse_position();
+            if let Some((gx, gy)) = screen_to_world(
+                mx,
+                my,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.width_cols,
+                scene.params.bedrock_floor_y,
+                scene.params.sky_ceiling_y,
+                scene.params.wrap_x,
+            ) {
+                if editor.spawn_picker {
+                    let body = editor.blueprint.modules_relative_to_nucleus();
+                    if scene
+                        .organisms
+                        .spawn_blueprint(&scene.world, gx, gy, body, 40.0)
+                    {
+                        editor.status = format!(
+                            "Spawned {} at ({gx},{gy})  atoms={}",
+                            editor.blueprint.name,
+                            scene.organisms.len()
+                        );
+                        editor.spawn_picker = false;
+                        editor.open = false;
+                        paused = editor.was_paused;
+                        inspect = Some((gx, gy));
+                    } else {
+                        editor.status =
+                            "Spawn failed — need a wet Air cell nearby (or pop cap)".into();
+                    }
+                } else {
+                    inspect = Some((gx, gy));
+                }
+            }
+        }
 
         // Draw the ring once, plus ±1 world-width copies so the seam
         // never shows a gap while panning.
@@ -321,9 +395,33 @@ async fn main() {
             }
         }
 
+        if let Some((gx, gy)) = inspect {
+            draw_selection_outline(
+                gx,
+                gy,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.width_cols,
+                scene.params.wrap_x,
+                sw,
+                sh,
+            );
+            let cell = scene.world.get_cell(gx, gy);
+            let org = scene
+                .organisms
+                .pick_at(gx, gy)
+                .map(|id| (id, &scene.organisms.atoms[id]));
+            draw_block_inspector(gx, gy, cell, &scene.humidity, org, sw);
+        }
+
+        // Creature editor overlay (paint UI, or spawn banner).
+        editor.draw();
+
         // HUD.
         let hud = format!(
-            "tick={} seed={} rain={} cond={} evap={} karst={} org={} atoms={} hum={} humidity={:.0} {}  |  Space|R|W/C/E/K/O|H overlay|arrows|Esc",
+            "tick={} seed={} rain={} cond={} evap={} karst={} org={} atoms={} hum={} humidity={:.0} {}  |  Space|R|W/V/E/K/O|H|C/F2 editor|click inspect|Esc",
             scene.world.tick,
             scene.params.seed,
             if rain_on { "on" } else { "off" },
@@ -334,7 +432,7 @@ async fn main() {
             scene.organisms.len(),
             if humidity_overlay { "on" } else { "off" },
             scene.humidity.total_mass(),
-            if paused { "[paused]" } else { "" }
+            if sim_paused { "[paused]" } else { "" }
         );
         draw_rectangle(0.0, sh - HUD_H, sw, HUD_H, Color::from_rgba(0, 0, 0, 200));
         draw_text(&hud, 8.0, sh - 8.0, 16.0, WHITE);

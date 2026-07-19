@@ -53,33 +53,23 @@ impl ModuleId {
             ModuleId::Photosystem => (0x2E, 0xCC, 0x40),
         }
     }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            ModuleId::Nucleus => "Nucleus",
+            ModuleId::Photosystem => "Photosystem",
+        }
+    }
 }
 
-/// One painted module relative to the organism pose (cell units).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct PlacedModule {
-    pub dx: i16,
-    pub dy: i16,
-    pub module: ModuleId,
+/// Body module as offset from the nucleus anchor.
+pub type BodyModule = (i16, i16, ModuleId);
+
+fn default_atom_body() -> Vec<BodyModule> {
+    vec![(0, 0, ModuleId::Nucleus), (1, 0, ModuleId::Photosystem)]
 }
 
-/// Canonical Atom blueprint: black nucleus + green photosystem.
-pub fn atom_modules() -> [PlacedModule; 2] {
-    [
-        PlacedModule {
-            dx: 0,
-            dy: 0,
-            module: ModuleId::Nucleus,
-        },
-        PlacedModule {
-            dx: 1,
-            dy: 0,
-            module: ModuleId::Photosystem,
-        },
-    ]
-}
-
-/// One living Set A Atom in world cell space.
+/// One living Set A organism in world cell space.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Atom {
     /// Anchor cell (nucleus position).
@@ -89,6 +79,8 @@ pub struct Atom {
     pub energy_max: f32,
     pub age_ticks: u64,
     pub cooldown: u64,
+    /// Modules relative to `(gx, gy)`.
+    pub body: Vec<BodyModule>,
 }
 
 impl Atom {
@@ -100,7 +92,29 @@ impl Atom {
             energy_max,
             age_ticks: 0,
             cooldown: REPRO_PERIOD / 2,
+            body: default_atom_body(),
         }
+    }
+
+    pub fn from_body(gx: i32, gy: i32, energy_max: f32, body: Vec<BodyModule>) -> Self {
+        let mut a = Self::new(gx, gy, energy_max);
+        if !body.is_empty() {
+            a.body = body;
+        }
+        a
+    }
+
+    pub fn photosystem_count(&self) -> usize {
+        self.body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .count()
+    }
+
+    pub fn occupies(&self, wx: i32, wy: i32) -> bool {
+        self.body
+            .iter()
+            .any(|(dx, dy, _)| self.gx + *dx as i32 == wx && self.gy + *dy as i32 == wy)
     }
 }
 
@@ -154,15 +168,42 @@ impl OrganismStore {
     pub fn draw_list(&self) -> Vec<(i32, i32, (u8, u8, u8))> {
         let mut out = Vec::with_capacity(self.atoms.len() * 2);
         for atom in &self.atoms {
-            for m in atom_modules() {
-                out.push((
-                    atom.gx + m.dx as i32,
-                    atom.gy + m.dy as i32,
-                    m.module.rgb(),
-                ));
+            for &(dx, dy, mid) in &atom.body {
+                out.push((atom.gx + dx as i32, atom.gy + dy as i32, mid.rgb()));
             }
         }
         out
+    }
+
+    /// Spawn a painted blueprint with nucleus at `(gx, gy)`.
+    /// Prefers a wet cell at/near the click; returns false if none.
+    pub fn spawn_blueprint(
+        &mut self,
+        world: &World,
+        gx: i32,
+        gy: i32,
+        body: Vec<BodyModule>,
+        energy_max: f32,
+    ) -> bool {
+        if self.atoms.len() >= MAX_ATOMS || body.is_empty() {
+            return false;
+        }
+        let gx = world.wrap_x(gx);
+        let gy = if is_wet_air(world, gx, gy) {
+            gy
+        } else if let Some(slot) = find_wet_near(world, gx, gy) {
+            slot
+        } else {
+            return false;
+        };
+        self.atoms
+            .push(Atom::from_body(gx, gy, energy_max, body));
+        true
+    }
+
+    /// First organism occupying world cell `(gx, gy)`.
+    pub fn pick_at(&self, gx: i32, gy: i32) -> Option<usize> {
+        self.atoms.iter().position(|a| a.occupies(gx, gy))
     }
 
     /// One Set A step: light harvest, upkeep, drift, fission, death.
@@ -196,9 +237,11 @@ impl OrganismStore {
                 continue;
             }
 
+            let n_photo = atom.photosystem_count().max(1) as f32;
+            let n_mod = atom.body.len().max(1) as f32;
             let light = column_light(world, atom.gx, atom.gy) * day;
-            let harvest = PHOTON_RATE * light;
-            let upkeep = UPKEEP_PER_MODULE * 2.0 * (0.45 + 0.55 * day);
+            let harvest = PHOTON_RATE * light * n_photo;
+            let upkeep = UPKEEP_PER_MODULE * n_mod * (0.45 + 0.55 * day);
             atom.energy = (atom.energy + harvest - upkeep).clamp(0.0, atom.energy_max);
             if atom.energy <= 0.0 {
                 deaths.push(i);
@@ -217,6 +260,9 @@ impl OrganismStore {
                 atom.cooldown = REPRO_PERIOD;
                 if let Some(child) = try_fission(world, atom, cost * 0.5) {
                     births.push(child);
+                } else {
+                    // Refund if no room to place a child.
+                    atom.energy += cost;
                 }
             }
         }
@@ -334,14 +380,25 @@ fn try_fission(world: &World, parent: &Atom, child_energy: f32) -> Option<Atom> 
     for (dx, dy) in [(2, 0), (-2, 0), (0, 1), (0, -1), (3, 0), (-1, 0)] {
         let nx = world.wrap_x(parent.gx + dx);
         let ny = parent.gy + dy;
-        let Some(c) = world.get_cell(nx, ny) else {
-            continue;
-        };
-        if c.material == MaterialId::Air && !c.sat.is_empty() {
-            let mut child = Atom::new(nx, ny, parent.energy_max);
+        if is_wet_air(world, nx, ny) {
+            let mut child =
+                Atom::from_body(nx, ny, parent.energy_max, parent.body.clone());
             child.energy = child_energy.clamp(1.0, parent.energy_max);
             child.cooldown = REPRO_PERIOD;
             return Some(child);
+        }
+    }
+    None
+}
+
+fn find_wet_near(world: &World, gx: i32, gy: i32) -> Option<i32> {
+    if is_wet_air(world, gx, gy) {
+        return Some(gy);
+    }
+    for dy in [-1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -8, 8] {
+        let ny = gy + dy;
+        if is_wet_air(world, gx, ny) {
+            return Some(ny);
         }
     }
     None
@@ -413,8 +470,8 @@ mod tests {
         store.atoms.push(Atom::new(4, 5, 50.0));
         let list = store.draw_list();
         assert_eq!(list.len(), 2);
-        assert_eq!(list[0], (4, 5, (0, 0, 0)));
-        assert_eq!(list[1], (5, 5, (0x2E, 0xCC, 0x40)));
+        assert!(list.contains(&(4, 5, (0, 0, 0))));
+        assert!(list.contains(&(5, 5, (0x2E, 0xCC, 0x40))));
     }
 
     #[test]
