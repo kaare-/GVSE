@@ -165,14 +165,18 @@ fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
     Color::from_rgba(r, g, b, 120)
 }
 
-/// Dark cloud puffs — darker / denser when the tile holds more water.
-/// Sub-tile `scroll` (from advection residual) keeps motion smooth.
+/// Large cartoon clouds from humidity — not a per-tile dot field.
+///
+/// Picks a handful of sky-band peaks, spaces them out, and draws soft
+/// multi-lobe blobs. Darker / denser = wetter.
 fn draw_clouds(
     humidity: &wk_voxel::Humidity,
     origin_x: f32,
     origin_y: f32,
     cell_px: f32,
     bedrock_floor_y: i32,
+    sea_level_y: i32,
+    sky_ceiling_y: i32,
     width_cols: i32,
     wrap_x: bool,
     sw: f32,
@@ -181,7 +185,7 @@ fn draw_clouds(
     if humidity.cells.is_empty() {
         return;
     }
-    let tile_cols = humidity.tile_cols;
+    let tile_cols = humidity.tile_cols.max(1);
     let tile_px = tile_cols as f32 * cell_px;
     let max_mass = humidity
         .cells
@@ -189,20 +193,63 @@ fn draw_clouds(
         .copied()
         .fold(0.0f32, f32::max)
         .max(1.0);
+    // Ignore thin haze; only the wetter patches become visible clouds.
+    let mass_floor = (max_mass * 0.18).max(12.0);
     let scroll = humidity.advect_rx * tile_px;
-    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
 
-    for (&(hx, hy), &mass) in &humidity.cells {
-        if mass <= 0.0 {
+    // Sky band only — clouds live in the air, not as a full-map overlay.
+    let sky_hy_min = (sea_level_y + 4).div_euclid(tile_cols);
+    let sky_hy_max = (sky_ceiling_y - 1).div_euclid(tile_cols);
+
+    let mut candidates: Vec<(i32, i32, f32)> = humidity
+        .cells
+        .iter()
+        .filter_map(|(&(hx, hy), &mass)| {
+            if mass < mass_floor || hy < sky_hy_min || hy > sky_hy_max {
+                return None;
+            }
+            Some((hx, hy, mass))
+        })
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    candidates.sort_by(|a, b| b.2.partial_cmp(&a.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    // Greedy spacing so we get a few big cartoon clouds, not a grid.
+    const MAX_CLOUDS: usize = 14;
+    const MIN_SEP_TILES: i32 = 5;
+    let mut placed: Vec<(i32, i32, f32)> = Vec::new();
+    for (hx, hy, mass) in candidates {
+        let too_close = placed.iter().any(|&(px, py, _)| {
+            let dx = (hx - px).abs();
+            let dx = if wrap_x {
+                let w = (width_cols + tile_cols - 1) / tile_cols;
+                dx.min((w - dx).abs())
+            } else {
+                dx
+            };
+            dx < MIN_SEP_TILES && (hy - py).abs() < MIN_SEP_TILES
+        });
+        if too_close {
             continue;
         }
+        placed.push((hx, hy, mass));
+        if placed.len() >= MAX_CLOUDS {
+            break;
+        }
+    }
+
+    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
+    for &(hx, hy, mass) in &placed {
         let norm = (mass / max_mass).clamp(0.0, 1.0);
-        // Darker grey as water content rises.
-        let shade = (210.0 - norm * 160.0) as u8;
-        let alpha = (55.0 + norm * 170.0) as u8;
+        // Soft cartoon greys — pale when thin, storm-dark when wet.
+        let shade = (235.0 - norm * 130.0) as u8;
+        let alpha = (110.0 + norm * 100.0) as u8;
         let base_gx = hx * tile_cols;
         let base_gy = hy * tile_cols;
-        let r = tile_px * (0.45 + 0.35 * norm);
+        // Big lobes: several tiles across.
+        let r = tile_px * (2.2 + 1.6 * norm);
         for &x_copy in x_copies {
             let sx = origin_x
                 + (base_gx + x_copy * width_cols) as f32 * cell_px
@@ -210,16 +257,35 @@ fn draw_clouds(
                 + tile_px * 0.5;
             let sy = origin_y
                 - (base_gy - bedrock_floor_y + tile_cols) as f32 * cell_px
-                + tile_px * 0.5;
-            if sx + r < 0.0 || sx - r > sw || sy + r < 0.0 || sy - r > sh {
+                + tile_px * 0.35;
+            if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
                 continue;
             }
-            let c = Color::from_rgba(shade, shade, shade.saturating_add(8), alpha);
-            draw_circle(sx, sy, r, c);
-            draw_circle(sx - r * 0.45, sy + r * 0.1, r * 0.7, c);
-            draw_circle(sx + r * 0.4, sy + r * 0.05, r * 0.65, c);
+            draw_cartoon_cloud(sx, sy, r, shade, alpha);
         }
     }
+}
+
+/// Classic multi-bump cartoon cloud (body + side puffs + top lobes).
+fn draw_cartoon_cloud(cx: f32, cy: f32, r: f32, shade: u8, alpha: u8) {
+    let body = Color::from_rgba(shade, shade, shade.saturating_add(6), alpha);
+    let hilite = Color::from_rgba(
+        shade.saturating_add(25),
+        shade.saturating_add(25),
+        shade.saturating_add(30),
+        (alpha as f32 * 0.55) as u8,
+    );
+    // Flat-ish underside body.
+    draw_circle(cx, cy, r * 0.95, body);
+    draw_circle(cx - r * 0.75, cy + r * 0.1, r * 0.72, body);
+    draw_circle(cx + r * 0.80, cy + r * 0.08, r * 0.70, body);
+    // Upper bumps.
+    draw_circle(cx - r * 0.35, cy - r * 0.45, r * 0.62, body);
+    draw_circle(cx + r * 0.30, cy - r * 0.55, r * 0.68, body);
+    draw_circle(cx + r * 0.85, cy - r * 0.25, r * 0.55, body);
+    draw_circle(cx - r * 0.90, cy - r * 0.15, r * 0.50, body);
+    // Soft highlight on the sun-facing top.
+    draw_circle(cx + r * 0.15, cy - r * 0.50, r * 0.35, hilite);
 }
 
 #[cfg(test)]
@@ -533,6 +599,8 @@ async fn main() {
                 origin_y,
                 cell_px,
                 scene.params.bedrock_floor_y,
+                scene.params.sea_level_y,
+                scene.params.sky_ceiling_y,
                 scene.params.width_cols,
                 scene.params.wrap_x,
                 sw,
