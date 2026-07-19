@@ -41,9 +41,6 @@ pub enum SubsystemId {
     PressureField = 14,
     /// Wind from −∇pressure (+ climate bias). Weather samples this.
     WindField = 15,
-    /// Dissolved-mineral concentration (kg/m³). Diffuses in wet cells;
-    /// karst injects dissolved mass into this field.
-    DissolvedField = 17,
     /// Flux-driven limestone dissolution + void growth.
     Karst = 18,
     /// Roof collapse over voids wider than `roof_span_max_m`.
@@ -69,7 +66,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 23] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 22] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -163,14 +160,6 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 23] = [
         // One tick after pressure so wind samples the committed field.
         period: 30,
         phase: 6,
-    },
-    SubsystemSchedule {
-        id: SubsystemId::DissolvedField,
-        // Slow diffusion; every 30 ticks matches other big field grids.
-        // On a full ring most chunks hold zero dissolved mass anyway and
-        // are skipped by the quiescence check in `run_dissolved_field`.
-        period: 30,
-        phase: 2,
     },
     SubsystemSchedule {
         id: SubsystemId::Karst,

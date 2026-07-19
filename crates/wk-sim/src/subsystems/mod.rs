@@ -31,7 +31,7 @@ pub use agents::run_agents;
 pub use ecology::run_ecology;
 pub use evaporation::run_evaporation;
 pub use fields::{
-    run_dissolved_field, run_humidity_field, run_pressure_field, run_thermal_field, run_wind_field,
+    run_humidity_field, run_pressure_field, run_thermal_field, run_wind_field,
 };
 pub use gas::run_gas;
 pub use halos::{exchange_outboxes, update_halos};

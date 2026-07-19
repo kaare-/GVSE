@@ -6,9 +6,7 @@ use wk_material::{CHUNK_W, MaterialId, MAX_LOADED_CHUNKS, MAX_MARKERS, MATERIAL_
 use crate::chunk::Chunk;
 use crate::climate::{biome_for, temperature_at, Biome, ClimateSettings};
 use crate::column::{Activity, Column, MarkerId, ResidualBucket, SedimentLoad};
-use crate::fields::{
-    DissolvedField, HumidityField, PressureField, ThermalField, WindField,
-};
+use crate::fields::{HumidityField, PressureField, ThermalField, WindField};
 use crate::marker::Marker;
 use crate::weather::{Cloud, WeatherSettings};
 use crate::worldgen::{
@@ -23,14 +21,13 @@ pub struct MassAudit {
     pub rain_inject_total: i64,
     pub boundary_out_total: i64,
     pub tick: u64,
-    /// Dissolved mineral mass (kg) currently in `DissolvedField` patches.
-    /// Solid→dissolved moves mass out of `by_material` into this bucket;
-    /// the combined total stays in the audit invariant. Trailing +
-    /// `serde(default)` so schema-v2 saves without this field still load.
-    #[serde(default)]
-    pub dissolved_total: i64,
     /// Cumulative kg dissolved out of solid rock (karst / solubility).
     /// Bookkeeping counter — not part of `total_tracked`.
+    ///
+    /// The old `dissolved_total` field-integral bucket is gone; solute
+    /// no longer lives in a spatial grid. Speleogenesis draws from the
+    /// difference `dissolved_out_total - dissolved_return_total` as an
+    /// implicit "in transit" bank.
     #[serde(default)]
     pub dissolved_out_total: i64,
     /// Cumulative kg reprecipitated from dissolved minerals (speleothems).
@@ -52,7 +49,7 @@ pub struct MassAudit {
 
 impl MassAudit {
     pub fn total_tracked(&self) -> i64 {
-        self.by_material.iter().sum::<i64>() + self.dissolved_total + self.biomass_total
+        self.by_material.iter().sum::<i64>() + self.dissolved_bank() + self.biomass_total
     }
 
     pub fn bookkeeping_balance(&self) -> i64 {
@@ -61,6 +58,13 @@ impl MassAudit {
             - self.boundary_out_total
             - self.biomass_decay_total
             - self.biomass_eaten_total
+    }
+
+    /// Kg dissolved out of solid rock and not yet reprecipitated.
+    /// Represents the implicit solute bank that speleogenesis draws
+    /// from. Always non-negative by construction.
+    pub fn dissolved_bank(&self) -> i64 {
+        (self.dissolved_out_total - self.dissolved_return_total).max(0)
     }
 }
 
@@ -96,8 +100,6 @@ pub struct World {
     pub pressure_wind_fields_enabled: bool,
     /// Sky / free-air pressure (arbitrary game units; 1.0 = ambient).
     pub ambient_pressure: f32,
-    /// When true, chunks carry a dissolved-mineral concentration field.
-    pub dissolved_fields_enabled: bool,
     /// When true, free-surface momentum + wind stress + tide run each tick
     /// (`run_surface_waves`). Default false so older hydro scenarios stay
     /// on pure lake-level / diffusion dynamics.
@@ -188,7 +190,6 @@ impl World {
             ambient_humidity: 0.4,
             pressure_wind_fields_enabled: false,
             ambient_pressure: 1.0,
-            dissolved_fields_enabled: false,
             surface_waves_enabled: false,
             tide_enabled: false,
             tide_amplitude_m: 0.45,
@@ -563,70 +564,6 @@ impl World {
         self.sea_level
     }
 
-    /// Cell volume (m³) for a dissolved-field cell — side-view cell of
-    /// side `cell_size_m` with unit depth into the screen.
-    pub fn dissolved_cell_volume_m3(cell_size_m: f32) -> f32 {
-        cell_size_m * cell_size_m
-    }
-
-    /// Integrate dissolved concentration fields to total mineral mass (kg).
-    pub fn dissolved_mass_kg(&self) -> i64 {
-        let mut total = 0.0f64;
-        for chunk in self.chunks.values() {
-            let Some(d) = &chunk.dissolved else {
-                continue;
-            };
-            let vol = Self::dissolved_cell_volume_m3(d.0.cell_size_m) as f64;
-            for &c in &d.0.cells {
-                total += c.max(0.0) as f64 * vol;
-            }
-        }
-        total.round() as i64
-    }
-
-    /// Allocate zeroed dissolved-concentration fields on every loaded chunk.
-    pub fn enable_dissolved_fields(&mut self) {
-        self.dissolved_fields_enabled = true;
-        let sea = self.sea_level;
-        let coords: Vec<i32> = self.chunks.keys().copied().collect();
-        for coord in coords {
-            let Some(chunk) = self.chunks.get_mut(&coord) else {
-                continue;
-            };
-            if chunk.dissolved.is_some() {
-                continue;
-            }
-            chunk.dissolved = Some(DissolvedField::new_for_chunk(
-                coord,
-                chunk.bedrock_y,
-                sea,
-            ));
-        }
-        self.mass_audit.dissolved_total = self.dissolved_mass_kg();
-    }
-
-    /// Inject `mass_kg` of dissolved mineral at a world point (spreads into
-    /// one cell as concentration). Used by tests today; karst dissolution
-    /// (stage 7) will write through the same path / source buffer.
-    pub fn inject_dissolved_mass(&mut self, world_x: i32, y_m: f32, mass_kg: f32) {
-        if !self.dissolved_fields_enabled || mass_kg <= 0.0 {
-            return;
-        }
-        let coord = Self::chunk_coord_for_world_x(world_x);
-        let Some(chunk) = self.chunks.get_mut(&coord) else {
-            return;
-        };
-        let Some(dissolved) = chunk.dissolved.as_mut() else {
-            return;
-        };
-        let x_m = world_x as f32 * wk_material::SAMPLE_WIDTH_M;
-        let (cx, cy) = dissolved.0.world_to_cell(x_m, y_m);
-        let vol = Self::dissolved_cell_volume_m3(dissolved.0.cell_size_m).max(1e-6);
-        let prev = dissolved.0.cell_at(cx, cy);
-        dissolved.0.set_cell(cx, cy, prev + mass_kg / vol);
-        self.mass_audit.dissolved_total = self.dissolved_mass_kg();
-    }
-
     pub fn biome_at(&self, surface_y: f32) -> Biome {
         biome_for(surface_y, self.sea_level)
     }
@@ -697,9 +634,6 @@ impl World {
             boundary_out_total: self.mass_audit.boundary_out_total,
             dissolved_out_total: self.mass_audit.dissolved_out_total,
             dissolved_return_total: self.mass_audit.dissolved_return_total,
-            // Preserve parked dissolved mass when fields are off; overwritten
-            // below from the field integral when enabled.
-            dissolved_total: self.mass_audit.dissolved_total,
             biomass_grow_total: self.mass_audit.biomass_grow_total,
             biomass_decay_total: self.mass_audit.biomass_decay_total,
             biomass_eaten_total: self.mass_audit.biomass_eaten_total,
@@ -732,11 +666,6 @@ impl World {
         self.mass_audit.biomass_decay_total = audit.biomass_decay_total;
         self.mass_audit.biomass_eaten_total = audit.biomass_eaten_total;
         self.mass_audit.biomass_total = biomass;
-        if self.dissolved_fields_enabled {
-            self.mass_audit.dissolved_total = self.dissolved_mass_kg();
-        } else {
-            self.mass_audit.dissolved_total = audit.dissolved_total;
-        }
     }
 
     pub fn add_marker(&mut self, world_x: i32, label: String, tick: u64) -> Option<MarkerId> {

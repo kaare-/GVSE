@@ -2,9 +2,7 @@ use wk_material::CHUNK_W;
 use wk_field::FieldPatch;
 
 use crate::column::{Activity, Column, SedimentLoad};
-use crate::fields::{
-    DissolvedField, HumidityField, PressureField, ThermalField, WindField,
-};
+use crate::fields::{HumidityField, PressureField, ThermalField, WindField};
 
 #[derive(Debug, Clone)]
 pub struct ChunkInbox {
@@ -55,7 +53,6 @@ pub struct Chunk {
     pub humidity_source: Option<FieldPatch>,
     pub pressure: Option<PressureField>,
     pub wind: Option<WindField>,
-    pub dissolved: Option<DissolvedField>,
 }
 
 impl Chunk {
@@ -73,7 +70,6 @@ impl Chunk {
             humidity_source: None,
             pressure: None,
             wind: None,
-            dissolved: None,
         }
     }
 

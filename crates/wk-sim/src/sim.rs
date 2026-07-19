@@ -5,11 +5,11 @@ use crate::barrier::barrier_commit;
 use crate::buffer::WorldTransferScratch;
 use crate::clock::{SimClock, SubsystemId, SUBSYSTEM_ORDER};
 use crate::subsystems::{
-    run_activity, run_agents, run_dissolved_field, run_ecology, run_evaporation, run_gas,
-    run_humidity_field, run_infiltration, run_karst, run_lake_level, run_layer_merge,
-    run_phase_change, run_pressure_field, run_rain_inject, run_roof_collapse, run_sediment,
-    run_slumping, run_speleogenesis, run_surface_water, run_surface_waves, run_thermal_field,
-    run_weather, run_wind_field, SimParams,
+    run_activity, run_agents, run_ecology, run_evaporation, run_gas, run_humidity_field,
+    run_infiltration, run_karst, run_lake_level, run_layer_merge, run_phase_change,
+    run_pressure_field, run_rain_inject, run_roof_collapse, run_sediment, run_slumping,
+    run_speleogenesis, run_surface_water, run_surface_waves, run_thermal_field, run_weather,
+    run_wind_field, SimParams,
 };
 
 pub struct Simulation {
@@ -88,7 +88,6 @@ impl Simulation {
                 | SubsystemId::HumidityField
                 | SubsystemId::PressureField
                 | SubsystemId::WindField
-                | SubsystemId::DissolvedField
                 | SubsystemId::Karst
                 | SubsystemId::RoofCollapse
                 | SubsystemId::Speleogenesis
@@ -122,9 +121,6 @@ impl Simulation {
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::WindField)) {
             run_wind_field(world, tick);
-        }
-        if self.clock.is_due(SimClock::schedule_for(SubsystemId::DissolvedField)) {
-            run_dissolved_field(world, tick);
         }
         // Direct-mutation subsystems used to each call
         // `recompute_mass_audit()`, which is a full ring walk

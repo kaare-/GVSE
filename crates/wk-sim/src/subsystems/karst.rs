@@ -3,8 +3,13 @@
 //! Dissolution is driven by **lateral water flux** through soluble layers
 //! (not moisture-in-place). That concentrates cave growth along the water
 //! table and yields coherent horizontal passages across columns.
+//!
+//! The old dissolved-mineral spatial field is gone. Removed rock mass
+//! is booked to `MassAudit::dissolved_out_total` and later drawn back
+//! into limestone by `run_speleogenesis` from the same counter, so the
+//! solid → dissolved → solid loop still closes without a per-cell grid.
 
-use wk_material::{CHUNK_W, MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
+use wk_material::{CHUNK_W, MaterialId, MaterialRegistry};
 use wk_world::column::{Activity, VoidOrigin};
 use wk_world::world::World;
 
@@ -27,24 +32,6 @@ fn head_neighbor(world: &World, coord: i32, local: i32) -> f32 {
         return chunk.water_table_neighbor(CHUNK_W as i32);
     }
     chunk.columns[local as usize].water_table_y()
-}
-
-fn inject_dissolved(world: &mut World, coord: i32, x_m: f32, y_m: f32, kg: i64) {
-    if kg <= 0 {
-        return;
-    }
-    let Some(chunk) = world.chunks.get_mut(&coord) else {
-        return;
-    };
-    let Some(dissolved) = chunk.dissolved.as_mut() else {
-        // No field — mass still left solid form; stay in dissolved_total
-        // via a synthetic bump when fields are off (audit path).
-        return;
-    };
-    let (cx, cy) = dissolved.0.world_to_cell(x_m, y_m);
-    let vol = World::dissolved_cell_volume_m3(dissolved.0.cell_size_m).max(1e-6);
-    let prev = dissolved.0.cell_at(cx, cy);
-    dissolved.0.set_cell(cx, cy, prev + kg as f32 / vol);
 }
 
 /// Post-barrier direct mutation: dissolve soluble rock under lateral flux
@@ -71,9 +58,6 @@ pub fn run_karst(world: &mut World, _tick: u64) {
                 }
                 // Karst is a terrestrial cave process. Submerged shelf
                 // beds skip so we don't dissolve rock into the ocean.
-                // `climate_elevation` = top of column material stripped
-                // of the fluid cap, which for a flooded shelf sits
-                // below sea level.
                 if col.climate_elevation() < sea_level - 0.25 {
                     continue;
                 }
@@ -111,8 +95,6 @@ pub fn run_karst(world: &mut World, _tick: u64) {
 
         for (i, li, take, mid_y, mat) in actions {
             let bedrock = world.chunks.get(&coord).map(|c| c.bedrock_y).unwrap_or(0.0);
-            let base = world.chunks.get(&coord).map(|c| c.world_x_base()).unwrap_or(0);
-            let x_m = (base + i as i32) as f32 * SAMPLE_WIDTH_M;
 
             let removed = {
                 let Some(chunk) = world.chunks.get_mut(&coord) else {
@@ -153,7 +135,6 @@ pub fn run_karst(world: &mut World, _tick: u64) {
                 t
             };
             if removed > 0 {
-                inject_dissolved(world, coord, x_m, mid_y, removed);
                 dissolved_out += removed;
             }
         }
@@ -161,12 +142,5 @@ pub fn run_karst(world: &mut World, _tick: u64) {
 
     if dissolved_out > 0 {
         world.mass_audit.dissolved_out_total += dissolved_out;
-        if world.dissolved_fields_enabled {
-            world.mass_audit.dissolved_total = world.dissolved_mass_kg();
-        } else {
-            // Without a field, dissolved mass still left solid form —
-            // park it in dissolved_total so total_tracked stays closed.
-            world.mass_audit.dissolved_total += dissolved_out;
-        }
     }
 }

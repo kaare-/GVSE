@@ -14,7 +14,6 @@ pub const THERMAL_CELL_M: f32 = 0.5;
 pub const HUMIDITY_CELL_M: f32 = 2.0;
 pub const PRESSURE_CELL_M: f32 = 2.0;
 pub const WIND_CELL_M: f32 = 2.0;
-pub const DISSOLVED_CELL_M: f32 = 0.5;
 
 /// Vertical extent covered by fields: from a few metres below bedrock
 /// floor up through the terrain into open air.
@@ -81,8 +80,6 @@ pub struct WindField {
     pub vy: FieldPatch,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct DissolvedField(pub FieldPatch);
 
 /// Geometry helper: how many cells of size `cell_m` span `extent_m`.
 pub fn cells_for_extent(extent_m: f32, cell_m: f32) -> u16 {
@@ -149,16 +146,6 @@ impl WindField {
             vx: FieldPatch::new(w, h, cell, origin_x, origin_y, 0.0),
             vy: FieldPatch::new(w, h, cell, origin_x, origin_y, 0.0),
         }
-    }
-}
-
-impl DissolvedField {
-    pub fn new_for_chunk(coord: i32, bedrock_y: f32, sea_level: f32) -> Self {
-        let cell = DISSOLVED_CELL_M;
-        let w = chunk_width_cells(cell);
-        let (h, origin_y) = vertical_cells(bedrock_y, sea_level, cell);
-        let origin_x = coord as f32 * wk_material::CHUNK_W as f32 * wk_material::SAMPLE_WIDTH_M;
-        Self(FieldPatch::new(w, h, cell, origin_x, origin_y, 0.0))
     }
 }
 
