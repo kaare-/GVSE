@@ -57,8 +57,6 @@ pub const ROOT_WATER_ENERGY: f32 = 0.035;
 pub const ROOT_VOID_PENETRATE: f32 = 0.18;
 /// Score bonus for stepping into any cavity.
 pub const ROOT_VOID_SCORE_BONUS: f32 = 2.4;
-/// Extra score when the cavity already holds free water.
-pub const ROOT_WET_VOID_SCORE_BONUS: f32 = 1.6;
 /// Extra photo multiplier from rich organic substrate (on top of nutrient).
 pub const ORGANIC_SUBSTRATE_BONUS: f32 = 0.35;
 /// Soft stress drain while drying (moist below [`DROUGHT_STRESS_FRAC`]).
@@ -637,14 +635,10 @@ pub fn try_elongate_root(
             };
             let in_void = elevation_in_void(col, tip_y);
             let (pen, void_bonus) = if in_void {
-                let wet = col
-                    .void_index_at(tip_y)
-                    .map(|i| col.voids[i].fill_frac())
-                    .unwrap_or(0.0);
-                (
-                    ROOT_VOID_PENETRATE,
-                    ROOT_VOID_SCORE_BONUS + ROOT_WET_VOID_SCORE_BONUS * wet,
-                )
+                // Voids are dry air pockets in this build — the "wet
+                // void" bonus that once scaled with pooled water no
+                // longer applies.
+                (ROOT_VOID_PENETRATE, ROOT_VOID_SCORE_BONUS)
             } else {
                 let mat = world
                     .material_at(cell_wx, tip_y)
@@ -991,9 +985,8 @@ mod tests {
         let surface = world.column_at(8).unwrap().surface_y;
         if let Some(col) = world.column_at_mut(8) {
             col.moisture = col.moisture_cap();
-            // Thin roof: cavity just under the bed, half-filled with water.
+            // Thin roof: dry cavity just under the bed.
             col.grow_void_at(surface - 0.8, 1.5, MaterialId::Sand, VoidOrigin::Karst);
-            col.voids[0].water_mass = col.voids[0].capacity_kg() / 2;
         }
         assert!(
             column_is_plantable(&world, 8),
@@ -1105,7 +1098,6 @@ mod tests {
         if let Some(col) = world.column_at_mut(8) {
             col.moisture = col.moisture_cap();
             col.grow_void_at(surface - 0.7, 1.2, MaterialId::Sand, VoidOrigin::Karst);
-            col.voids[0].water_mass = col.voids[0].capacity_kg() / 2;
         }
         let mut bp = Blueprint::minimal_plant(Genome {
             alloc_root: 0.9,

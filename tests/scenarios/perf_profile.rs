@@ -27,8 +27,6 @@ fn app_like_world() -> World {
     world.enable_thermal_fields();
     world.enable_humidity_fields();
     world.enable_pressure_wind_fields();
-    world.enable_groundwater_head_fields();
-    world.enable_dissolved_fields();
     world.surface_waves_enabled = true;
     world.tide_enabled = true;
     world
@@ -352,12 +350,6 @@ fn perf_profile_disable_each() {
     measure_without("pressure/wind", |w| {
         w.pressure_wind_fields_enabled = false;
     });
-    measure_without("groundwater_head", |w| {
-        w.gw_head_fields_enabled = false;
-    });
-    measure_without("dissolved", |w| {
-        w.dissolved_fields_enabled = false;
-    });
     measure_without("weather", |w| {
         w.weather.weather_enabled = false;
     });
@@ -365,15 +357,11 @@ fn perf_profile_disable_each() {
         w.thermal_fields_enabled = false;
         w.humidity_fields_enabled = false;
         w.pressure_wind_fields_enabled = false;
-        w.gw_head_fields_enabled = false;
-        w.dissolved_fields_enabled = false;
     });
     measure_without("all_fields+waves", |w| {
         w.thermal_fields_enabled = false;
         w.humidity_fields_enabled = false;
         w.pressure_wind_fields_enabled = false;
-        w.gw_head_fields_enabled = false;
-        w.dissolved_fields_enabled = false;
         w.surface_waves_enabled = false;
         w.tide_enabled = false;
     });
@@ -384,8 +372,8 @@ fn perf_profile_disable_each() {
 fn perf_profile_subsystem_kernels() {
     // Time individual subsystem kernels directly for 200 invocations each.
     use wk_sim::subsystems::{
-        run_dissolved_field, run_groundwater_head_field, run_humidity_field, run_lake_level,
-        run_pressure_field, run_slumping, run_surface_waves, run_thermal_field, run_wind_field,
+        run_humidity_field, run_lake_level, run_pressure_field, run_slumping, run_surface_waves,
+        run_thermal_field, run_wind_field,
     };
     let mut world = app_like_world();
     let mut sim = Simulation::new(&world);
@@ -421,12 +409,6 @@ fn perf_profile_subsystem_kernels() {
     bench!("run_wind_field", 50, {
         run_wind_field(&mut world, 0);
     });
-    bench!("run_groundwater_head_field", 50, {
-        run_groundwater_head_field(&mut world, 0);
-    });
-    bench!("run_dissolved_field", 50, {
-        run_dissolved_field(&mut world, 0);
-    });
     bench!("run_surface_waves", 200, {
         run_surface_waves(&mut world, 0);
     });
@@ -441,9 +423,8 @@ fn perf_profile_subsystem_kernels() {
     });
     // Buffered / every-tick systems (barrier_commit driven).
     use wk_sim::subsystems::{
-        run_activity, run_evaporation, run_groundwater_flow, run_infiltration,
-        run_layer_merge, run_phase_change, run_rain_inject, run_sediment,
-        run_surface_water, run_weather, SimParams,
+        run_activity, run_evaporation, run_infiltration, run_layer_merge, run_phase_change,
+        run_rain_inject, run_sediment, run_surface_water, run_weather, SimParams,
     };
     let params = SimParams {
         rain_rate: world.rain_rate,
@@ -453,9 +434,6 @@ fn perf_profile_subsystem_kernels() {
     let mut scratch = wk_sim::WorldTransferScratch::default();
     bench!("run_surface_water", 200, {
         run_surface_water(&world, &mut scratch);
-    });
-    bench!("run_groundwater_flow", 200, {
-        run_groundwater_flow(&world, &mut scratch);
     });
     bench!("run_weather", 200, {
         run_weather(&mut world, &mut scratch, 0);
@@ -468,18 +446,6 @@ fn perf_profile_subsystem_kernels() {
     });
     bench!("run_infiltration", 200, {
         run_infiltration(&mut world, &mut scratch);
-    });
-    use wk_sim::subsystems::{
-        run_surface_void_capture, run_void_moisture_seep, run_void_water_flow,
-    };
-    bench!("run_void_moisture_seep", 200, {
-        run_void_moisture_seep(&mut world);
-    });
-    bench!("run_void_water_flow", 200, {
-        run_void_water_flow(&mut world);
-    });
-    bench!("run_surface_void_capture", 200, {
-        run_surface_void_capture(&mut world);
     });
     bench!("run_sediment", 200, {
         run_sediment(&world, &mut scratch, 0);
@@ -532,8 +498,6 @@ fn perf_profile_subsystem_kernels() {
         w.thermal_fields_enabled = false;
         w.humidity_fields_enabled = false;
         w.pressure_wind_fields_enabled = false;
-        w.gw_head_fields_enabled = false;
-        w.dissolved_fields_enabled = false;
     });
     bench_without!("waves+tide", {
         w.surface_waves_enabled = false;
@@ -542,10 +506,10 @@ fn perf_profile_subsystem_kernels() {
     bench_without!("weather", w.weather.weather_enabled = false);
     // Weather-off is the closest proxy we have without adding per-subsystem
     // enable flags; the remaining tick cost is: RainInject, SurfaceWater,
-    // Sediment, Infiltration, Groundwater, Evaporation, LayerMerge,
-    // Activity, PhaseChange, LakeLevel, Slumping, Karst, VoidWater,
-    // RoofCollapse, Speleogenesis, Ecology, Gas, Agents, SurfaceWaves,
-    // barrier_commit, recompute_mass_audit. Kernel bench above breaks out
-    // the biggest chunks (thermal, slumping, lake_level, mass_audit).
+    // Sediment, Infiltration, Evaporation, LayerMerge, Activity,
+    // PhaseChange, LakeLevel, Slumping, Karst, RoofCollapse,
+    // Speleogenesis, Ecology, Gas, Agents, SurfaceWaves, barrier_commit,
+    // recompute_mass_audit. Kernel bench above breaks out the biggest
+    // chunks (thermal, slumping, lake_level, mass_audit).
     let _ = sub_costs;
 }

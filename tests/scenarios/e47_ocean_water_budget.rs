@@ -79,7 +79,6 @@ fn setup_continental_strip(seed: u64, chunk_lo: i32, chunk_hi: i32) -> World {
     world.recompute_mass_audit();
     world.enable_humidity_fields();
     world.enable_pressure_wind_fields();
-    world.enable_groundwater_head_fields();
     world
 }
 

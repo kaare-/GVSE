@@ -82,15 +82,13 @@ pub fn commit_chunk_buffer(
             (col.moisture + buf.moisture_delta[i] + inbox_moisture + infil_applied).max(0);
         let cap = col.moisture_cap();
         if moisture_new > cap {
-            // Discharge: pore space is full. Prefer filling any cavities
-            // in the column first; only the remainder springs to the
-            // surface as standing water.
+            // Discharge: pore space is full. Overflow springs to the
+            // surface as standing water. Voids are dry air pockets in
+            // this build — no pore-to-void seepage path.
             let overflow = moisture_new - cap;
             col.moisture = cap;
-            let into_voids = col.fill_voids_from_mass(overflow);
-            let rest = overflow - into_voids;
-            if rest > 0 {
-                col.deposit_to_top(MaterialId::Water, rest, tick);
+            if overflow > 0 {
+                col.deposit_to_top(MaterialId::Water, overflow, tick);
             }
         } else {
             col.moisture = moisture_new;

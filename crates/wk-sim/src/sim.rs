@@ -5,13 +5,11 @@ use crate::barrier::barrier_commit;
 use crate::buffer::WorldTransferScratch;
 use crate::clock::{SimClock, SubsystemId, SUBSYSTEM_ORDER};
 use crate::subsystems::{
-    run_activity, run_agents, run_dissolved_field, run_ecology, run_evaporation, run_gas,
-    recharge_deep_water_tables,
-    run_groundwater_flow, run_groundwater_head_field, run_humidity_field, run_infiltration,
-    run_karst, run_lake_level, run_layer_merge, run_phase_change, run_pressure_field,
-    run_rain_inject, run_roof_collapse, run_sediment, run_slumping, run_speleogenesis,
-    run_surface_void_capture, run_surface_water, run_surface_waves, run_thermal_field,
-    run_void_moisture_seep, run_void_water_flow, run_weather, run_wind_field, SimParams,
+    run_activity, run_agents, run_ecology, run_evaporation, run_gas, run_humidity_field,
+    run_infiltration, run_karst, run_lake_level, run_layer_merge, run_phase_change,
+    run_pressure_field, run_rain_inject, run_roof_collapse, run_sediment, run_slumping,
+    run_speleogenesis, run_surface_water, run_surface_waves, run_thermal_field, run_weather,
+    run_wind_field, SimParams,
 };
 
 pub struct Simulation {
@@ -74,9 +72,6 @@ impl Simulation {
                 SubsystemId::Infiltration => {
                     run_infiltration(world, &mut self.scratch);
                 }
-                SubsystemId::Groundwater => {
-                    run_groundwater_flow(world, &mut self.scratch);
-                }
                 SubsystemId::Evaporation => {
                     run_evaporation(world, &mut self.scratch);
                 }
@@ -93,10 +88,7 @@ impl Simulation {
                 | SubsystemId::HumidityField
                 | SubsystemId::PressureField
                 | SubsystemId::WindField
-                | SubsystemId::GroundwaterHeadField
-                | SubsystemId::DissolvedField
                 | SubsystemId::Karst
-                | SubsystemId::VoidWater
                 | SubsystemId::RoofCollapse
                 | SubsystemId::Speleogenesis
                 | SubsystemId::Ecology
@@ -130,12 +122,6 @@ impl Simulation {
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::WindField)) {
             run_wind_field(world, tick);
         }
-        if self.clock.is_due(SimClock::schedule_for(SubsystemId::GroundwaterHeadField)) {
-            run_groundwater_head_field(world, tick);
-        }
-        if self.clock.is_due(SimClock::schedule_for(SubsystemId::DissolvedField)) {
-            run_dissolved_field(world, tick);
-        }
         // Direct-mutation subsystems used to each call
         // `recompute_mass_audit()`, which is a full ring walk
         // (~1 ms × 9 calls = ~9 ms/tick on a 192-chunk ring). That's
@@ -143,11 +129,6 @@ impl Simulation {
         // is enough for the audit total.
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Karst)) {
             run_karst(world, tick);
-        }
-        if self.clock.is_due(SimClock::schedule_for(SubsystemId::VoidWater)) {
-            run_surface_void_capture(world);
-            run_void_moisture_seep(world);
-            run_void_water_flow(world);
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::RoofCollapse)) {
             run_roof_collapse(world, tick);
@@ -176,9 +157,6 @@ impl Simulation {
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Slumping)) {
             run_slumping(world, tick);
         }
-        // After slump reshuffles substrate, snap ocean/lake beds back to
-        // saturation while the free surface can still afford it.
-        recharge_deep_water_tables(world);
         // One audit refresh per tick keeps HUD / test bookkeeping fresh
         // without the ~9× per-tick full-ring walk the old shape had.
         world.recompute_mass_audit();

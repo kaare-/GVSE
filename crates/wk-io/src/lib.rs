@@ -10,7 +10,7 @@ use wk_sim::Simulation;
 use wk_world::climate::ClimateSettings;
 use wk_world::column::{Activity, Ecology, ResidualBucket, SedimentLoad, Void, VoidOrigin};
 use wk_world::fields::{
-    DissolvedField, GroundwaterHeadField, HumidityField, PressureField, ThermalField, WindField,
+    HumidityField, PressureField, ThermalField, WindField,
 };
 use wk_world::marker::Marker;
 use wk_world::weather::{Cloud, WeatherSettings};
@@ -56,10 +56,6 @@ pub struct ChunkSnapshot {
     pub pressure: Option<PressureField>,
     #[serde(default)]
     pub wind: Option<WindField>,
-    #[serde(default)]
-    pub gw_head: Option<GroundwaterHeadField>,
-    #[serde(default)]
-    pub dissolved: Option<DissolvedField>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -124,6 +120,9 @@ fn default_snap_water_o2() -> f32 {
 pub struct VoidSnapshot {
     pub top_y: f32,
     pub height_m: f32,
+    /// Legacy field from the void-water build. Ignored on load; always
+    /// serialized as 0 on save. Kept for old-save compatibility.
+    #[serde(default)]
     pub water_mass: i64,
     pub roof_material: u8,
     pub origin: u8,
@@ -173,7 +172,7 @@ pub fn snapshot_world(world: &World, sim_tick: u64) -> SaveFileV1 {
                         .map(|v| VoidSnapshot {
                             top_y: v.top_y,
                             height_m: v.height_m,
-                            water_mass: v.water_mass,
+                            water_mass: 0,
                             roof_material: v.roof_material as u8,
                             origin: match v.origin {
                                 VoidOrigin::Karst => 0,
@@ -206,8 +205,6 @@ pub fn snapshot_world(world: &World, sim_tick: u64) -> SaveFileV1 {
                     humidity: chunk.humidity.clone(),
                     pressure: chunk.pressure.clone(),
                     wind: chunk.wind.clone(),
-                    gw_head: chunk.gw_head.clone(),
-                    dissolved: chunk.dissolved.clone(),
                 },
             )
         })
@@ -293,7 +290,6 @@ pub fn restore_world(save: &SaveFileV1) -> (World, u64) {
                 .map(|v| Void {
                     top_y: v.top_y,
                     height_m: v.height_m,
-                    water_mass: v.water_mass,
                     roof_material: MaterialId::from_u8(v.roof_material)
                         .unwrap_or(MaterialId::Stone),
                     origin: match v.origin {
@@ -304,6 +300,7 @@ pub fn restore_world(save: &SaveFileV1) -> (World, u64) {
                     light: v.light,
                 })
                 .collect();
+            let _ = cs; // legacy void.water_mass is intentionally dropped
             col.ecology = Ecology {
                 root_density: cs.ecology.root_density,
                 leaf_area: cs.ecology.leaf_area,
@@ -326,8 +323,6 @@ pub fn restore_world(save: &SaveFileV1) -> (World, u64) {
             .map(|h| h.0.zeros_like());
         chunk.pressure = snap.pressure.clone();
         chunk.wind = snap.wind.clone();
-        chunk.gw_head = snap.gw_head.clone();
-        chunk.dissolved = snap.dissolved.clone();
         world.insert_chunk(chunk);
     }
 
@@ -368,8 +363,6 @@ mod tests {
         assert!(chunk.humidity.is_none());
         assert!(chunk.pressure.is_none());
         assert!(chunk.wind.is_none());
-        assert!(chunk.gw_head.is_none());
-        assert!(chunk.dissolved.is_none());
     }
 
     #[test]

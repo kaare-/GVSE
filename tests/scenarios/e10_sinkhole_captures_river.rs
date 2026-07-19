@@ -1,7 +1,10 @@
-//! E10 — sinkhole captures surface water (stage 7).
+//! E10 — a river runs *over* a surface-breaching sinkhole.
 //!
-//! An open void at the surface must swallow standing water from the
-//! column into void storage instead of leaving it entirely on top.
+//! Void-water capture was removed in the water prune (voids are dry
+//! air pockets in this build). What we still want to guarantee: an
+//! open sinkhole doesn't create a bookkeeping hole — surface water
+//! stays on top and flows sideways under normal `SurfaceWater`/
+//! `LakeLevel` rules, and no mass appears/disappears at the mouth.
 
 use crate::helpers::*;
 use wk_material::{CHUNK_W, MaterialId};
@@ -10,7 +13,7 @@ use wk_world::terrain::generate_flat_sand;
 use wk_world::world::World;
 
 #[test]
-fn e10_sinkhole_captures_river() {
+fn e10_river_runs_past_dry_sinkhole() {
     let mut world = World::new(9010);
     world.sea_level = 0.0;
     world.rain_enabled = false;
@@ -20,18 +23,13 @@ fn e10_sinkhole_captures_river() {
 
     let mid = (CHUNK_W / 2) as i32;
     // Open a surface-breaching void (sinkhole) in the middle columns.
-    // After recompute, pin the void ceiling to the new surface so it
-    // reads as open (`open_to_surface`).
     if let Some(chunk) = world.chunks.get_mut(&0) {
         let bedrock = chunk.bedrock_y;
         for i in (mid - 2) as usize..=(mid + 2) as usize {
             let col = &mut chunk.columns[i];
             col.voids.push(Void {
-                top_y: 0.0, // set after recompute
+                top_y: 0.0,
                 height_m: 2.0,
-                water_mass: 0,
-                // Stone roof so residual collapse logic won't treat a
-                // single-column mouth as an over-span sand roof.
                 roof_material: MaterialId::Stone,
                 origin: VoidOrigin::Collapse,
                 light: 255,
@@ -50,38 +48,21 @@ fn e10_sinkhole_captures_river() {
         }
     }
     world.recompute_mass_audit();
+    let audit0 = world.mass_audit.clone();
+    let initial_total = world.mass_audit.total_tracked();
     let surface0: i64 = (mid - 2..=mid + 2)
         .filter_map(|wx| world.column_at(wx).map(|c| c.top_water_mass()))
         .sum();
-    let void0: i64 = (mid - 2..=mid + 2)
-        .filter_map(|wx| world.column_at(wx).map(|c| c.void_water_total()))
-        .sum();
     assert!(surface0 > 10_000, "expected a surface pond, got {surface0}");
-    assert_eq!(void0, 0);
 
     let mut sim = wk_sim::Simulation::new(&world);
-    let elapsed = run_ticks(&mut world, &mut sim, 200);
-    assert!(elapsed.as_secs() < 30, "E10 perf: {:?}", elapsed);
+    let _ = run_ticks(&mut world, &mut sim, 200);
 
-    let surface1: i64 = (mid - 2..=mid + 2)
-        .filter_map(|wx| world.column_at(wx).map(|c| c.top_water_mass()))
-        .sum();
-    let void1: i64 = (mid - 2..=mid + 2)
-        .filter_map(|wx| world.column_at(wx).map(|c| c.void_water_total()))
-        .sum();
-
+    // Mass conservation: the sinkhole must not eat water into nowhere.
+    let drift = bookkeeping_check(&world, initial_total, audit0);
     assert!(
-        void1 > 1_000,
-        "sinkhole should capture water into voids: void={void1}"
-    );
-    assert!(
-        surface1 < surface0,
-        "surface water should drop as it drains in: {surface0} → {surface1}"
+        drift.abs() < 200,
+        "mass audit drift with dry sinkhole: {drift}"
     );
     assert_no_negative_masses(&world);
-
-    eprintln!(
-        "E10: surface {surface0}→{surface1} void {void0}→{void1} in {:?}",
-        elapsed
-    );
 }

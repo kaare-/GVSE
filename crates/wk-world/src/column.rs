@@ -5,10 +5,6 @@ use wk_material::{MaterialId, MaterialRegistry, MAX_LAYERS, SAMPLE_WIDTH_M};
 /// most columns stay well below; keeps growth from runaway dissolution.
 pub const MAX_VOIDS: usize = 4;
 
-/// kg of free water per metre of void / column depth — must match
-/// `wk_sim::subsystems::shared::WATER_MASS_PER_METRE_DEPTH`.
-pub const VOID_WATER_KG_PER_M: f32 = 250.0;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Activity {
     Dormant,
@@ -28,14 +24,18 @@ pub enum VoidOrigin {
 /// Sparse cavity annotation on a column. Layers still hold all mass;
 /// voids describe where that mass isn't. Never represent caves as Air
 /// layers — density settling would float them to the top.
+///
+/// Voids are always dry air pockets in this build. Free water lives in
+/// the layer stack (Water/Ice/Snow) and pore water lives in
+/// [`Column::moisture`]; the "water inside a cave" bucket that used to
+/// hang off `Void::water_mass` proved unworkable (see
+/// `docs/VOXEL_MIGRATION.md` for the post-mortem).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct Void {
     /// Absolute elevation of the ceiling (metres).
     pub top_y: f32,
     /// Ceiling − floor (metres).
     pub height_m: f32,
-    /// Free water pooled inside the void (kg).
-    pub water_mass: i64,
     /// Material of the layer immediately above (roof).
     pub roof_material: MaterialId,
     pub origin: VoidOrigin,
@@ -55,21 +55,6 @@ impl Void {
     /// True when the void ceiling reaches (or breaches) the column surface.
     pub fn open_to_surface(self, surface_y: f32) -> bool {
         self.top_y >= surface_y - 0.05
-    }
-
-    /// Geometric free-water capacity (kg) for this cavity.
-    pub fn capacity_kg(self) -> i64 {
-        (self.height_m.max(0.0) * VOID_WATER_KG_PER_M).round() as i64
-    }
-
-    pub fn free_capacity_kg(self) -> i64 {
-        (self.capacity_kg() - self.water_mass.max(0)).max(0)
-    }
-
-    /// Fill fraction of geometric capacity, 0..1.
-    pub fn fill_frac(self) -> f32 {
-        let cap = self.capacity_kg().max(1) as f32;
-        (self.water_mass.max(0) as f32 / cap).clamp(0.0, 1.0)
     }
 
     /// True when elevation `y` lies inside this cavity.
@@ -379,13 +364,13 @@ impl Column {
         if total_water <= 0 {
             return None;
         }
-        // Free-surface elevation rests on the solid bed — not on
-        // `surface_y`, which still adds cavity height. Counting voids as
-        // "ground" made shoreline karst mouths sit metres above their
-        // neighbours, so lake-level drained those columns and algae rode
-        // a notched / wavy free surface into the air.
+        // Free-surface elevation sits on top of the column material
+        // (solid + any buried void air pockets), stripped of the
+        // fluid cap. `climate_elevation()` already does that walk, so
+        // `climate_elevation() + water_h` is exactly the top of the
+        // water body — the same y the renderer paints it at.
         let h = self.mass_to_height_delta(MaterialId::Water, total_water);
-        Some((self.solid_bed_y() + h, total_water))
+        Some((self.climate_elevation() + h, total_water))
     }
 
     /// Remove up to `mass` kg from the *flowable* Water layer inside
@@ -530,23 +515,6 @@ impl Column {
             }
         }
         y
-    }
-
-    /// Hydraulic head for a dry neighbour: the solid rock/soil bed under
-    /// any snow/ice/water cap *and* cavity height. Using void-inflated
-    /// `climate_elevation` here made dry karst mouths look like tall dams
-    /// (and disagreed with [`Self::flowable_water`]'s solid-bed free
-    /// surface). Using raw `surface_y` made snow banks into dams.
-    pub fn hydraulic_bed_y(&self) -> f32 {
-        self.solid_bed_y()
-    }
-
-    /// Elevation of the solid rock/soil surface, excluding weather fluids
-    /// *and* cavity height. `climate_elevation` still includes voids
-    /// (they inflate `surface_y`), which made submerged limestone with
-    /// sea-cliff mouths look "emergent" for karst / void-capture gates.
-    pub fn solid_bed_y(&self) -> f32 {
-        self.climate_elevation() - self.void_height_total()
     }
 
     /// 0..1 sky transmittance through snow/ice sitting in the fluid cap.
@@ -994,10 +962,6 @@ impl Column {
         self.voids.iter().map(|v| v.height_m.max(0.0)).sum()
     }
 
-    pub fn void_water_total(&self) -> i64 {
-        self.voids.iter().map(|v| v.water_mass.max(0)).sum()
-    }
-
     /// Absolute top/bottom elevations of layer `idx`, inserting existing
     /// voids as gaps. Walks bottom-up from bedrock so void punch-outs
     /// land at their absolute `top_y` / `floor_y`.
@@ -1093,7 +1057,6 @@ impl Column {
         self.voids.push(Void {
             top_y: mid_y + half,
             height_m: dh,
-            water_mass: 0,
             roof_material,
             origin,
             light: 0,
@@ -1101,133 +1064,9 @@ impl Column {
         dh
     }
 
-    /// Drain up to `mass` kg of top/flowable water into open voids.
-    /// Returns kg moved into voids.
-    ///
-    /// Only geometrically open mouths (`open_to_surface` vs the solid
-    /// ground under any pond) capture. The old `light > 200` latch let
-    /// worldgen sea-cliff / karst alcoves keep swallowing water forever
-    /// — including after they flooded — which pumped the shoreline.
-    /// Callers that must protect the coast should also gate with
-    /// [`Self::solid_bed_y`] vs sea level before calling.
-    pub fn drain_surface_water_into_voids(&mut self, mass: i64) -> i64 {
-        if mass <= 0 {
-            return 0;
-        }
-        // Judge openness against the solid/cavity stack top (climate
-        // elevation strips standing water). Using free-water `surface_y`
-        // would make every pond seal its own sinkhole mouth.
-        let ground = self.climate_elevation();
-        let open: Vec<usize> = self
-            .voids
-            .iter()
-            .enumerate()
-            .filter(|(_, v)| v.open_to_surface(ground))
-            .map(|(i, _)| i)
-            .collect();
-        if open.is_empty() {
-            return 0;
-        }
-        let mut remaining = mass;
-        let mut moved = 0i64;
-        let per = (remaining / open.len() as i64).max(1);
-        for &i in &open {
-            if remaining <= 0 {
-                break;
-            }
-            let free = self.voids[i].free_capacity_kg();
-            if free <= 0 {
-                continue;
-            }
-            let take = self.take_water_from_cap(per.min(remaining).min(free));
-            if take <= 0 {
-                break;
-            }
-            self.voids[i].water_mass += take;
-            remaining -= take;
-            moved += take;
-        }
-        moved
-    }
-
     /// First void index containing elevation `y`, if any.
     pub fn void_index_at(&self, y: f32) -> Option<usize> {
         self.voids.iter().position(|v| v.contains_y(y))
-    }
-
-    /// Move up to `mass` kg of already-accounted water into voids with
-    /// free capacity (no moisture/surface bookkeeping). Used for pore
-    /// overflow that would otherwise spring to the surface.
-    pub fn fill_voids_from_mass(&mut self, mass: i64) -> i64 {
-        if mass <= 0 || self.voids.is_empty() {
-            return 0;
-        }
-        let mut remaining = mass;
-        let mut moved = 0i64;
-        for v in &mut self.voids {
-            if remaining <= 0 {
-                break;
-            }
-            let free = v.free_capacity_kg();
-            if free <= 0 {
-                continue;
-            }
-            let take = remaining.min(free);
-            v.water_mass += take;
-            remaining -= take;
-            moved += take;
-        }
-        moved
-    }
-
-    /// Seep pore moisture into buried cavities when the water table
-    /// intersects them (or when the column is already quite wet).
-    /// Mass-conserving: `moisture` decreases, `void.water_mass` rises.
-    pub fn seep_moisture_into_voids(&mut self, max_kg: i64) -> i64 {
-        if max_kg <= 0 || self.voids.is_empty() {
-            return 0;
-        }
-        let cap = self.moisture_cap();
-        if cap <= 0 {
-            return 0;
-        }
-        // Leave a pore reserve so we don't empty the aquifer into one cave.
-        let reserve = ((cap as f32) * 0.20).round() as i64;
-        let available = self.moisture.saturating_sub(reserve.max(0));
-        if available <= 0 {
-            return 0;
-        }
-        let table = self.water_table_y();
-        let sat = (self.moisture as f32 / cap as f32).clamp(0.0, 1.0);
-        let mut remaining = max_kg.min(available);
-        let mut moved = 0i64;
-        for v in &mut self.voids {
-            if remaining <= 0 {
-                break;
-            }
-            if v.height_m <= 1e-4 {
-                continue;
-            }
-            // Table reaches into the cavity, or soils are wet enough for
-            // capillary drip into the roof crack.
-            let intersects = table > v.floor_y() + 0.05;
-            if !intersects && sat < 0.30 {
-                continue;
-            }
-            let free = v.free_capacity_kg();
-            if free <= 0 {
-                continue;
-            }
-            let take = remaining.min(free);
-            v.water_mass += take;
-            remaining -= take;
-            moved += take;
-        }
-        if moved > 0 {
-            self.moisture = (self.moisture - moved).max(0);
-            self.activity = Activity::HydrologyActive;
-        }
-        moved
     }
 }
 
@@ -1497,32 +1336,35 @@ mod tests {
             "top={top} surface_y={}",
             col.surface_y
         );
-        assert!((col.solid_bed_y() + h - top).abs() < 1e-3);
+        // Water sits at `climate_elevation + water_h`, which is the top
+        // of the column when no ice / snow sits above the water.
+        assert!((col.climate_elevation() + h - top).abs() < 1e-3);
     }
 
     #[test]
-    fn flowable_top_with_void_diverges_from_surface_y() {
+    fn flowable_top_with_buried_void_stays_at_column_top() {
+        // Buried voids inflate `surface_y` (column extent includes the
+        // cavity air), but the puddle still sits on top of the material
+        // stack — not somewhere inside the sand at solid-mass elevation.
         let mut col = Column::default();
         col.deposit_to_top(MaterialId::Sand, 50_000, 0);
         let bed_before = col.surface_y;
         col.voids.push(Void {
-            top_y: bed_before,
+            top_y: bed_before - 5.0,
             height_m: 10.0,
-            water_mass: 0,
             roof_material: MaterialId::Sand,
             origin: VoidOrigin::Karst,
             light: 0,
         });
         col.recompute_surface_y(0.0);
         col.deposit_to_top(MaterialId::Water, 857, 1);
-        let h = col.mass_to_height_delta(MaterialId::Water, 857);
         let (top, _) = col.flowable_water().unwrap();
-        let gap = col.surface_y - top;
         assert!(
-            (gap - 10.0).abs() < 0.05,
-            "expected ~10m gap from voids, got gap={gap} surface={} top={top} solid_bed={} h={h}",
+            (top - col.surface_y).abs() < 1e-3,
+            "free surface should sit at surface_y (top of column material); \
+             top={top} surface_y={} climate_elev={}",
             col.surface_y,
-            col.solid_bed_y(),
+            col.climate_elevation()
         );
     }
 }
