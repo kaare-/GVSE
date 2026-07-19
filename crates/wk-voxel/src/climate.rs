@@ -60,19 +60,25 @@ pub fn celestial_screen_pos(tick: u64, sw: f32, sh: f32) -> (f32, f32) {
 }
 
 /// Sky RGB for a day/night factor in `[-1, 1]`.
+///
+/// Midday is clear sky-blue; night is a deep navy (not a leftover day
+/// wash). Short twilight through warm dusk.
 pub fn sky_rgb(day_night: f32) -> [u8; 3] {
     let day = [0x87u8, 0xCE, 0xEB];
     let dusk = [0xC4u8, 0x6A, 0x3A];
-    let night = [0x0Bu8, 0x10, 0x28];
+    let night_edge = [0x1Au8, 0x22, 0x44];
+    let night = [0x06u8, 0x08, 0x18];
     let t = day_night.clamp(-1.0, 1.0);
-    if t >= 0.25 {
-        day
-    } else if t >= -0.25 {
-        let u = (t + 0.25) / 0.5;
+    if t >= 0.2 {
+        let u = ((t - 0.2) / 0.8).clamp(0.0, 1.0);
+        lerp_rgb(dusk, day, 0.35 + 0.65 * u)
+    } else if t >= -0.15 {
+        let u = ((t + 0.15) / 0.35).clamp(0.0, 1.0);
         lerp_rgb(dusk, day, u)
     } else {
-        let u = ((t + 1.0) / 0.75).clamp(0.0, 1.0);
-        lerp_rgb(night, dusk, u)
+        // Night: go dark quickly — don't linger on dusk orange.
+        let u = ((-t - 0.15) / 0.85).clamp(0.0, 1.0);
+        lerp_rgb(night_edge, night, u)
     }
 }
 
@@ -81,9 +87,9 @@ pub fn sky_rgb_at_height(day_night: f32, height_01: f32) -> [u8; 3] {
     let base = sky_rgb(day_night);
     let h = height_01.clamp(0.0, 1.0);
     let zenith_darken = if day_night >= 0.0 {
-        1.0 - 0.10 * (1.0 - h)
+        1.0 - 0.08 * (1.0 - h)
     } else {
-        1.0 - 0.40 * (1.0 - h)
+        1.0 - 0.22 * (1.0 - h)
     };
     [
         (base[0] as f32 * zenith_darken) as u8,
@@ -117,10 +123,18 @@ mod tests {
 
     #[test]
     fn celestial_local_covers_arc() {
-        // Dawn ≈ phase 0.75 → local ~0; noon phase 0 → local ~0.5.
         let dawn = celestial_local((DEMO_DAY_TICKS as f32 * 0.75) as u64);
         let noon = celestial_local(0);
         assert!(dawn < 0.1, "dawn={dawn}");
         assert!((noon - 0.5).abs() < 0.05, "noon local={noon}");
+    }
+
+    #[test]
+    fn midnight_sky_is_darker_than_noon() {
+        let day = sky_rgb(1.0);
+        let night = sky_rgb(-1.0);
+        let day_luma = day[0] as u32 + day[1] as u32 + day[2] as u32;
+        let night_luma = night[0] as u32 + night[1] as u32 + night[2] as u32;
+        assert!(night_luma < day_luma / 2, "day={day:?} night={night:?}");
     }
 }

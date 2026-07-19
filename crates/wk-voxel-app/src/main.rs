@@ -19,7 +19,7 @@
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
 //! - `O` — toggle Set A organisms (Atom step)
-//! - `H` — toggle cyan humidity debug overlay
+//! - `H` — toggle soft white humidity haze (vapor hint; clouds carry the look)
 //! - `N` — toggle cloud drawing (coagulated parcels; darker = wetter)
 //! - `T` — toggle temperature heatmap overlay
 //! - `F1` — toggle the bottom tool / hotkey line
@@ -91,15 +91,18 @@ fn fps_smoothed() -> f32 {
     })
 }
 
-/// Cyan overlay alpha for a humidity tile, given the map's current
-/// peak mass. Always ≥ 48 when `mass > 0` so thin diffused haze stays
-/// visible (an absolute 4×4×255 scale used to paint `alpha == 0`).
-fn humidity_overlay_alpha(mass: f32, max_mass: f32) -> u8 {
+/// Soft white vapor haze alpha — quiet on purpose so cartoon clouds
+/// stay the main atmospheric read.
+fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
     if mass <= 0.0 {
         return 0;
     }
     let norm = (mass / max_mass.max(1.0)).clamp(0.0, 1.0);
-    (48.0 + norm * 152.0) as u8
+    // Floor so thin air isn't a speckled field; cap so it never washes out.
+    if norm < 0.12 {
+        return 0;
+    }
+    (18.0 + norm * 42.0) as u8
 }
 
 /// Day/night sky gradient + sun or moon arc.
@@ -195,15 +198,12 @@ fn draw_clouds(
             }
             draw_cartoon_cloud(sx, sy, r, shade, alpha);
             if p.raining {
-                // Soft rain sheet under the cloud.
-                let sheet_h = r * 2.2;
-                draw_rectangle(
-                    sx - r * 0.7,
-                    sy,
-                    r * 1.4,
-                    sheet_h,
-                    Color::from_rgba(140, 170, 200, 45),
-                );
+                // A few soft streaks — not a full sheet (old rain wash).
+                let streak = Color::from_rgba(190, 210, 230, 55);
+                for i in 0..5 {
+                    let ox = sx - r * 0.5 + (i as f32) * (r * 0.25);
+                    draw_rectangle(ox, sy + r * 0.2, 2.0, r * 1.4, streak);
+                }
             }
         }
     }
@@ -233,14 +233,14 @@ fn draw_cartoon_cloud(cx: f32, cy: f32, r: f32, shade: u8, alpha: u8) {
 
 #[cfg(test)]
 mod overlay_tests {
-    use super::humidity_overlay_alpha;
+    use super::humidity_haze_alpha;
 
     #[test]
-    fn faint_tiles_still_get_visible_alpha() {
-        // Old scale: (20/4080)*180 → 0. New scale floors at 48.
-        assert!(humidity_overlay_alpha(20.0, 100.0) >= 48);
-        assert_eq!(humidity_overlay_alpha(100.0, 100.0), 200);
-        assert_eq!(humidity_overlay_alpha(0.0, 100.0), 0);
+    fn haze_ignores_thin_vapor_and_stays_soft() {
+        assert_eq!(humidity_haze_alpha(0.0, 100.0), 0);
+        assert_eq!(humidity_haze_alpha(5.0, 100.0), 0); // below 12% floor
+        assert!(humidity_haze_alpha(50.0, 100.0) >= 18);
+        assert!(humidity_haze_alpha(100.0, 100.0) <= 70);
     }
 }
 
@@ -249,7 +249,10 @@ async fn main() {
     let params = WorldgenParams::default();
     let mut scene = Scene::new(params);
     let mut paused = false;
-    let mut rain_on = true;
+    // Climatic drizzle is physics-only by default — sky pixels hide thin
+    // wet Air so the old rain-streak look doesn't paint over the sky.
+    // Clouds do the visible weather.
+    let mut rain_on = false;
     let mut cond_rain_on = true;
     let mut evap_on = true;
     let mut karst_on = true;
@@ -538,18 +541,59 @@ async fn main() {
                     let Some(cell) = scene.world.get_cell(x, y) else {
                         continue;
                     };
-                    let [r, g, b] = cell_color(cell);
-                    // Skip sky-blue empty air — background already
-                    // paints that colour, so this cuts draw calls hard.
-                    if cell.material == wk_material::MaterialId::Air && cell.sat.is_empty() {
-                        continue;
+                    // Let the day/night sky show through: skip empty Air
+                    // and thin sky drizzle (old rain-streak look). Pooled
+                    // water (near-full sat) and everything below sea still
+                    // draws normally.
+                    if cell.material == wk_material::MaterialId::Air {
+                        let sky_drizzle = y > scene.params.sea_level_y && cell.sat.0 < 240;
+                        if cell.sat.is_empty() || sky_drizzle {
+                            continue;
+                        }
                     }
+                    let [r, g, b] = cell_color(cell);
                     draw_rectangle(sx, sy - cell_px, cell_px, cell_px, Color::from_rgba(r, g, b, 255));
                 }
             }
         }
 
-        // Coagulated cloud parcels (cartoon blobs; rain veil when dumping).
+        // Soft white vapor haze (optional) — clouds remain the main read.
+        if humidity_overlay {
+            let tile_px = scene.humidity.tile_cols as f32 * cell_px;
+            let max_mass = scene
+                .humidity
+                .cells
+                .values()
+                .copied()
+                .fold(0.0f32, f32::max)
+                .max(1.0);
+            let sky_hy_min = (scene.params.sea_level_y + 4).div_euclid(scene.humidity.tile_cols);
+            for (&(hx, hy), &mass) in &scene.humidity.cells {
+                if mass <= 0.0 || hy < sky_hy_min {
+                    continue;
+                }
+                let alpha = humidity_haze_alpha(mass, max_mass);
+                if alpha == 0 {
+                    continue;
+                }
+                let base_gx = hx * scene.humidity.tile_cols;
+                let base_gy = hy * scene.humidity.tile_cols;
+                for &x_copy in x_copies {
+                    let sx = origin_x
+                        + (base_gx + x_copy * scene.params.width_cols) as f32 * cell_px;
+                    let sy = origin_y
+                        - (base_gy - scene.params.bedrock_floor_y + scene.humidity.tile_cols)
+                            as f32
+                            * cell_px;
+                    if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
+                        continue;
+                    }
+                    draw_rectangle(sx, sy, tile_px, tile_px, Color::from_rgba(255, 255, 255, alpha));
+                }
+            }
+        }
+
+        // Coagulated cloud parcels — the atmospheric story.
         if clouds_on {
             draw_clouds(
                 &scene.clouds,
@@ -562,38 +606,6 @@ async fn main() {
                 sw,
                 sh,
             );
-        }
-
-        // Optional cyan humidity debug overlay (tile rects).
-        if humidity_overlay {
-            let tile_px = scene.humidity.tile_cols as f32 * cell_px;
-            let max_mass = scene
-                .humidity
-                .cells
-                .values()
-                .copied()
-                .fold(0.0f32, f32::max)
-                .max(1.0);
-            for (&(hx, hy), &mass) in &scene.humidity.cells {
-                if mass <= 0.0 {
-                    continue;
-                }
-                let base_gx = hx * scene.humidity.tile_cols;
-                let base_gy = hy * scene.humidity.tile_cols;
-                for &x_copy in x_copies {
-                    let sx = origin_x + (base_gx + x_copy * scene.params.width_cols) as f32 * cell_px
-                        + scene.humidity.advect_rx * tile_px;
-                    let sy = origin_y
-                        - (base_gy - scene.params.bedrock_floor_y + scene.humidity.tile_cols)
-                            as f32
-                            * cell_px;
-                    if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
-                        continue;
-                    }
-                    let alpha = humidity_overlay_alpha(mass, max_mass);
-                    draw_rectangle(sx, sy, tile_px, tile_px, Color::from_rgba(160, 200, 240, alpha));
-                }
-            }
         }
 
         // Temperature heatmap overlay (blue cold → red hot).
@@ -692,7 +704,7 @@ async fn main() {
         draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
         if show_tool_line {
             draw_text(
-                "Space|R|W/C/E/K/O|N clouds|T temp|H hum|F1 tools|F2 editor|click|Esc",
+                "Space|R|W rain|C drizzle|E/K/O|N clouds|T temp|H haze|F1|F2 editor|Esc",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,
