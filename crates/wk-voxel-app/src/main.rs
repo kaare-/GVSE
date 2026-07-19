@@ -185,6 +185,7 @@ fn draw_clouds(
     wrap_x: bool,
     sw: f32,
     sh: f32,
+    downpour_mass: f32,
 ) {
     if clouds.is_empty() {
         return;
@@ -200,9 +201,10 @@ fn draw_clouds(
     });
     for &idx in &order {
         let p = &clouds.parcels[idx];
-        let wet = p.wetness();
-        let shade = (235.0 - wet * 140.0) as u8;
-        let alpha = (120.0 + wet * 100.0) as u8;
+        let wet = p.wetness_with(downpour_mass);
+        // Narrow shade/alpha ranges so vapor mass changes don't pulse.
+        let shade = (228.0 - wet * 95.0) as u8;
+        let alpha = (145.0 + wet * 55.0) as u8;
         let r = p.radius() * cell_px;
         let surface = continental_surface_y(seed, p.fx.round() as i32, sea_level_y, width_cols);
         let ground_sy =
@@ -213,7 +215,7 @@ fn draw_clouds(
             if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
                 continue;
             }
-            draw_cartoon_cloud(sx, sy, r, shade, alpha);
+            draw_cartoon_cloud(sx, sy, r, shade, alpha, p.shape_seed, p.deform);
             if p.raining {
                 draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh);
             }
@@ -261,8 +263,16 @@ fn draw_falling_rain(
     }
 }
 
-/// Classic multi-bump cartoon cloud (body + side puffs + top lobes).
-fn draw_cartoon_cloud(cx: f32, cy: f32, r: f32, shade: u8, alpha: u8) {
+/// Multi-bump cartoon cloud with per-parcel silhouette + soft ridge squash.
+fn draw_cartoon_cloud(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    shade: u8,
+    alpha: u8,
+    shape_seed: u32,
+    deform: f32,
+) {
     let body = Color::from_rgba(shade, shade, shade.saturating_add(6), alpha);
     let hilite = Color::from_rgba(
         shade.saturating_add(25),
@@ -270,17 +280,46 @@ fn draw_cartoon_cloud(cx: f32, cy: f32, r: f32, shade: u8, alpha: u8) {
         shade.saturating_add(30),
         (alpha as f32 * 0.55) as u8,
     );
-    // Flat-ish underside body.
-    draw_circle(cx, cy, r * 0.95, body);
-    draw_circle(cx - r * 0.75, cy + r * 0.1, r * 0.72, body);
-    draw_circle(cx + r * 0.80, cy + r * 0.08, r * 0.70, body);
-    // Upper bumps.
-    draw_circle(cx - r * 0.35, cy - r * 0.45, r * 0.62, body);
-    draw_circle(cx + r * 0.30, cy - r * 0.55, r * 0.68, body);
-    draw_circle(cx + r * 0.85, cy - r * 0.25, r * 0.55, body);
-    draw_circle(cx - r * 0.90, cy - r * 0.15, r * 0.50, body);
+    let d = deform.clamp(0.0, 1.0);
+    // Soft deform: widen and flatten when scraping a ridge.
+    let sx = 1.0 + d * 0.22;
+    let sy = 1.0 - d * 0.28;
+    let s = |n: u32| ((shape_seed.wrapping_mul(0x9E37_79B9).wrapping_add(n * 0x85EB_CA6B)) >> 8) as f32
+        / 16_777_216.0;
+    let jx = |n: u32| (s(n) - 0.5) * 0.28;
+    let jy = |n: u32| (s(n.wrapping_add(17)) - 0.5) * 0.22;
+    let jr = |n: u32| 0.88 + s(n.wrapping_add(31)) * 0.28;
+    let puff = |ox: f32, oy: f32, rr: f32, n: u32| {
+        draw_circle(
+            cx + (ox + jx(n)) * r * sx,
+            cy + (oy + jy(n)) * r * sy,
+            rr * jr(n) * r * ((sx + sy) * 0.5),
+            body,
+        );
+    };
+    // Body + side puffs (layout varies with seed).
+    puff(0.0, 0.02, 0.95, 1);
+    puff(-0.72, 0.08, 0.70, 2);
+    puff(0.78, 0.06, 0.68, 3);
+    // Upper lobes — count/bias from seed so silhouettes differ.
+    puff(-0.32 + jx(4) * 0.4, -0.42, 0.60, 4);
+    puff(0.28 + jx(5) * 0.4, -0.52, 0.66, 5);
+    if shape_seed & 1 == 0 {
+        puff(0.82, -0.22, 0.52, 6);
+    }
+    if shape_seed & 2 == 0 {
+        puff(-0.88, -0.12, 0.48, 7);
+    }
+    if shape_seed % 5 < 3 {
+        puff(jx(8) * 0.5, -0.68, 0.42, 8);
+    }
     // Soft highlight on the sun-facing top.
-    draw_circle(cx + r * 0.15, cy - r * 0.50, r * 0.35, hilite);
+    draw_circle(
+        cx + (0.12 + jx(9) * 0.3) * r * sx,
+        cy + (-0.48 + jy(9) * 0.2) * r * sy,
+        r * 0.32 * jr(9),
+        hilite,
+    );
 }
 
 #[cfg(test)]
@@ -646,6 +685,7 @@ async fn main() {
                 scene.params.wrap_x,
                 sw,
                 sh,
+                settings.cloud.downpour_mass,
             );
         }
 

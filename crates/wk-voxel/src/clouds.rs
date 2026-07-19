@@ -50,9 +50,9 @@ impl Default for CloudConfig {
             downpour_mass: DOWNPOUR_MASS,
             downpour_drain: 28.0,
             downpour_stop_frac: 0.40,
-            cloud_alt_above_sea: 32,
+            cloud_alt_above_sea: 40,
             coag_min_above_sea: 18,
-            ridge_clearance: 5.0,
+            ridge_clearance: 12.0,
             parcel_wind_scale: 0.28,
             buoyant_rise: 0.08,
         }
@@ -70,12 +70,32 @@ pub struct CloudParcel {
     /// True this tick after gently colliding with a ridge / peak.
     #[serde(default)]
     pub on_ridge: bool,
+    /// Stable shape RNG seed (set at spawn; survives merges via keep-left).
+    #[serde(default)]
+    pub shape_seed: u32,
+    /// Cruise altitude after orographic lift — parcels keep this path
+    /// instead of dropping straight back to the free-air deck.
+    #[serde(default)]
+    pub cruise_fy: f32,
+    /// EMA of mass for drawing so size/shade don't pulse every tick.
+    #[serde(default)]
+    pub vis_mass: f32,
+    /// 0..1 how hard the parcel is currently pressing a ridge (draw squash).
+    #[serde(default)]
+    pub deform: f32,
 }
 
 impl CloudParcel {
-    /// Visual / rain footprint radius in world cells.
+    /// Visual / rain footprint radius in world cells (uses smoothed mass).
     pub fn radius(&self) -> f32 {
-        (6.0 + (self.mass / 40.0).sqrt() * 3.5).clamp(6.0, 22.0)
+        let m = if self.vis_mass > 1.0 {
+            self.vis_mass
+        } else {
+            self.mass
+        };
+        // Mostly stable size; mass only nudges gently.
+        let base = 8.0 + ((self.shape_seed % 7) as f32) * 0.55;
+        (base + (m / 90.0).sqrt() * 2.2).clamp(7.0, 20.0)
     }
 
     /// 0..1 wetness for drawing (relative to downpour threshold).
@@ -84,7 +104,22 @@ impl CloudParcel {
     }
 
     pub fn wetness_with(&self, downpour_mass: f32) -> f32 {
-        (self.mass / downpour_mass.max(1.0)).clamp(0.0, 1.5) / 1.5
+        let m = if self.vis_mass > 1.0 {
+            self.vis_mass
+        } else {
+            self.mass
+        };
+        (m / downpour_mass.max(1.0)).clamp(0.0, 1.5) / 1.5
+    }
+
+    /// Smooth visual mass toward physics mass (call once per tick).
+    pub fn smooth_visuals(&mut self) {
+        if self.vis_mass <= 0.0 {
+            self.vis_mass = self.mass;
+        } else {
+            self.vis_mass = self.vis_mass * 0.94 + self.mass * 0.06;
+        }
+        self.deform *= 0.85;
     }
 }
 
@@ -133,6 +168,9 @@ impl CloudStore {
         self.advect_and_collide(wind, sea_level_y, sky_ceiling_y, cfg);
         self.merge(cfg);
         self.downpour(world, wind, tick, cfg);
+        for p in &mut self.parcels {
+            p.smooth_visuals();
+        }
         self.parcels.retain(|p| p.mass > 1.0);
     }
 
@@ -171,13 +209,20 @@ impl CloudStore {
             let idx = match idx {
                 Some(i) => i,
                 None if self.parcels.len() < cfg.max_parcels.max(1) => {
+                    let seed = parcel_shape_seed(cx, cy);
+                    // Spread spawn altitudes so the sky isn't one flat deck.
+                    let elev_jitter = ((seed >> 8) & 31) as f32 - 8.0; // -8..+23
+                    let fy = (cy as f32).max(preferred_alt) + elev_jitter;
                     self.parcels.push(CloudParcel {
                         fx: cx as f32,
-                        // Spawn at the risen vapor altitude, not the sea film.
-                        fy: (cy as f32).max(preferred_alt),
+                        fy,
                         mass: 0.0,
                         raining: false,
                         on_ridge: false,
+                        shape_seed: seed,
+                        cruise_fy: fy,
+                        vis_mass: 0.0,
+                        deform: 0.0,
                     });
                     self.parcels.len() - 1
                 }
@@ -192,12 +237,13 @@ impl CloudStore {
             }
             let p = &mut self.parcels[idx];
             p.mass += take;
-            // Do NOT pull parcels horizontally toward vapor sources —
-            // that made dark clouds zip both ways while light ones
-            // drifted against the wind. Wind handles x; only ease y up.
-            let target_y = (cy as f32).max(preferred_alt * 0.85);
-            if target_y + 1.0 >= p.fy {
-                p.fy = p.fy * 0.98 + target_y * 0.02;
+            // Do NOT pull parcels horizontally toward vapor sources.
+            // Only ease y up toward vapor when below the parcel's cruise.
+            let target_y = (cy as f32)
+                .max(preferred_alt * 0.85)
+                .max(p.cruise_fy * 0.9);
+            if target_y + 1.0 >= p.fy && p.fy + 2.0 < p.cruise_fy.max(target_y) {
+                p.fy = p.fy * 0.985 + target_y * 0.015;
             }
             let _ = wind;
         }
@@ -219,7 +265,7 @@ impl CloudStore {
     }
 
     /// Wind drift, then soft collision with the land surface so clouds
-    /// crest peaks instead of clipping through — without parking on them.
+    /// crest peaks, keep the new altitude, and continue downwind.
     fn advect_and_collide(
         &mut self,
         wind: &Wind,
@@ -233,8 +279,12 @@ impl CloudStore {
         let y_hi = (sky_ceiling_y - 3) as f32;
         let width = wind.width_cols.max(1) as f32;
         let wind_sign = if wind.climate_vx >= 0.0 { 1.0 } else { -1.0 };
+        let deck = preferred_deck(sea_level_y, sky_ceiling_y, cfg);
         for p in &mut self.parcels {
             p.on_ridge = false;
+            if p.cruise_fy <= 0.0 {
+                p.cruise_fy = p.fy.max(deck);
+            }
             let hx = (p.fx / tc).floor() as i32;
             let vy = wind.vy_at(hx, 0) * tc * cfg.parcel_wind_scale;
             p.fx += vx;
@@ -245,36 +295,46 @@ impl CloudStore {
                 p.fx = p.fx.clamp(0.0, width - 1.0);
             }
 
-            // Sample surface under the parcel centre only — wide radius
-            // samples made big clouds "catch" on peaks and stick.
             let r = p.radius();
-            let floor = surface_y(wind, p.fx);
+            // Soft sample under centre + leading edge (windward).
+            let sample_x = p.fx + wind_sign * r * 0.35;
+            let floor = surface_y(wind, p.fx).max(surface_y(wind, sample_x));
             let land = floor > sea_level_y as f32 + 1.0;
             let min_fy = if land {
-                floor + cfg.ridge_clearance + (r * 0.08).min(2.5)
+                floor + cfg.ridge_clearance + (r * 0.12).min(3.5)
             } else {
-                y_lo.max(sea_level_y as f32 + cfg.cloud_alt_above_sea as f32 * 0.55)
+                y_lo.max(sea_level_y as f32 + cfg.cloud_alt_above_sea as f32 * 0.45)
             };
+
             if p.fy < min_fy {
                 let lift = min_fy - p.fy;
-                p.fy = min_fy;
+                // Soft deform: ease up instead of hard snapping.
+                let blend = (0.25 + lift * 0.04).clamp(0.18, 0.55);
+                p.fy = p.fy * (1.0 - blend) + min_fy * blend;
+                p.deform = (p.deform + lift * 0.08).clamp(0.0, 1.0);
                 if land {
                     p.on_ridge = true;
-                    // Nudge along the wind so parcels slip over crests
-                    // instead of hovering / raining themselves out.
-                    p.fx += wind_sign * (0.12 + lift * 0.02).min(0.45);
+                    // Keep the higher path after the crest.
+                    p.cruise_fy = p.cruise_fy.max(min_fy);
+                    p.fx += wind_sign * (0.15 + lift * 0.025).min(0.55);
                     if wind.wrap_x {
                         p.fx = p.fx.rem_euclid(width);
                     }
                 }
             }
-            // Prefer free-air deck: ease parcels that were lifted by a
-            // peak back toward preferred altitude once past the crest.
-            let deck = preferred_deck(sea_level_y, sky_ceiling_y, cfg);
-            if land && !p.on_ridge && p.fy > deck + 8.0 {
-                p.fy = p.fy * 0.97 + deck * 0.03;
+
+            // Hold cruise altitude (slow ease up if below; never yank down
+            // to the free-air deck after a ridge lift).
+            if p.fy + 0.5 < p.cruise_fy {
+                p.fy = p.fy * 0.96 + p.cruise_fy * 0.04;
             }
+            // Over open ocean only, very slowly forget extreme cruise.
+            if !land && p.cruise_fy > deck + 6.0 {
+                p.cruise_fy = p.cruise_fy * 0.9985 + deck * 0.0015;
+            }
+
             p.fy = p.fy.clamp(y_lo.min(min_fy), y_hi);
+            p.cruise_fy = p.cruise_fy.clamp(y_lo, y_hi);
         }
     }
 
@@ -293,9 +353,18 @@ impl CloudStore {
                         a.fx = (a.fx * a.mass + other.fx * other.mass) / total;
                         a.fy = (a.fy * a.mass + other.fy * other.mass) / total;
                     }
+                    let other_mass = other.mass;
+                    let keep_other_shape = other_mass > a.mass;
                     a.mass = total;
+                    a.vis_mass = (a.vis_mass + other.vis_mass) * 0.5;
                     a.raining = a.raining || other.raining;
                     a.on_ridge = a.on_ridge || other.on_ridge;
+                    a.cruise_fy = a.cruise_fy.max(other.cruise_fy);
+                    a.deform = a.deform.max(other.deform);
+                    // Keep the heavier parcel's silhouette.
+                    if keep_other_shape {
+                        a.shape_seed = other.shape_seed;
+                    }
                 } else {
                     j += 1;
                 }
@@ -365,6 +434,15 @@ fn preferred_deck(sea_level_y: i32, sky_ceiling_y: i32, cfg: &CloudConfig) -> f3
     (sea_level_y + cfg.cloud_alt_above_sea)
         .min(sky_ceiling_y - 4)
         .max(sea_level_y + cfg.coag_min_above_sea) as f32
+}
+
+fn parcel_shape_seed(cx: i32, cy: i32) -> u32 {
+    let mut h = (cx as u32).wrapping_mul(0x9E37_79B9)
+        ^ (cy as u32).wrapping_mul(0x85EB_CA6B);
+    h ^= h >> 16;
+    h = h.wrapping_mul(0xC2B2_AE3D);
+    h ^= h >> 13;
+    h
 }
 
 fn orographic_boost(wind: &Wind, fx: f32) -> f32 {
@@ -474,21 +552,34 @@ mod tests {
         let peak_x = peak_x.expect("need a mountain column");
         let surface = continental_surface_y(p.seed, peak_x, p.sea_level_y, p.width_cols) as f32;
         let mut clouds = CloudStore::new();
+        let cfg = CloudConfig::default();
         clouds.parcels.push(CloudParcel {
             fx: peak_x as f32,
             fy: surface - 5.0, // intentionally inside the mountain
             mass: 80.0,
             raining: false,
             on_ridge: false,
+            shape_seed: 1,
+            cruise_fy: surface - 5.0,
+            vis_mass: 80.0,
+            deform: 0.0,
         });
-        clouds.advect_and_collide(&wind, p.sea_level_y, p.sky_ceiling_y, &CloudConfig::default());
+        // Soft blend needs a few ticks to clear the ridge floor.
+        for _ in 0..8 {
+            clouds.advect_and_collide(&wind, p.sea_level_y, p.sky_ceiling_y, &cfg);
+        }
         let c = &clouds.parcels[0];
-        assert!(c.on_ridge, "should register ridge contact");
+        let min_clear = surface + cfg.ridge_clearance * 0.5;
         assert!(
-            c.fy > surface,
-            "cloud fy={} must sit above surface {}",
+            c.fy > min_clear,
+            "cloud fy={} must sit above surface+clearance {}",
             c.fy,
-            surface
+            min_clear
+        );
+        assert!(
+            c.cruise_fy >= min_clear,
+            "cruise altitude should stick after ridge lift (cruise={})",
+            c.cruise_fy
         );
     }
 
@@ -520,6 +611,10 @@ mod tests {
             mass: DOWNPOUR_MASS * 1.5,
             raining: false,
             on_ridge: false,
+            shape_seed: 2,
+            cruise_fy: top as f32,
+            vis_mass: DOWNPOUR_MASS * 1.5,
+            deform: 0.0,
         });
         let mass_before = clouds.total_mass();
         clouds.downpour(&mut world, &wind, 0, &CloudConfig::default());
@@ -540,12 +635,17 @@ mod tests {
         let wind = wind_for(&p);
         let mut clouds = CloudStore::new();
         let cfg = CloudConfig::default();
+        let fy = (p.sea_level_y + cfg.cloud_alt_above_sea) as f32;
         clouds.parcels.push(CloudParcel {
             fx: 50.0,
-            fy: (p.sea_level_y + cfg.cloud_alt_above_sea) as f32,
+            fy,
             mass: 40.0,
             raining: false,
             on_ridge: false,
+            shape_seed: 3,
+            cruise_fy: fy,
+            vis_mass: 40.0,
+            deform: 0.0,
         });
         let x0 = clouds.parcels[0].fx;
         for _ in 0..80 {

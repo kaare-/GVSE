@@ -191,13 +191,13 @@ impl SimSettings {
                         0.05..1.5,
                         &mut self.cloud.parcel_wind_scale,
                     );
-                    labeled_slider(ui, hash!(), "Cloud alt above sea", 8.0..80.0, &mut cloud_alt);
-                    labeled_slider(ui, hash!(), "Coag min above sea", 4.0..60.0, &mut coag_min_alt);
+                    labeled_slider(ui, hash!(), "Cloud alt above sea", 8.0..160.0, &mut cloud_alt);
+                    labeled_slider(ui, hash!(), "Coag min above sea", 4.0..120.0, &mut coag_min_alt);
                     labeled_slider(
                         ui,
                         hash!(),
                         "Ridge clearance",
-                        0.0..20.0,
+                        0.0..36.0,
                         &mut self.cloud.ridge_clearance,
                     );
                 });
@@ -302,8 +302,9 @@ impl SimSettings {
         self.climate.day_ticks = day_ticks.round().clamp(30.0, 20_000.0) as u64;
         self.climate.night_ticks = night_ticks.round().clamp(30.0, 20_000.0) as u64;
         self.cloud.max_parcels = max_parcels.round().clamp(1.0, 96.0) as usize;
-        self.cloud.cloud_alt_above_sea = cloud_alt.round().clamp(4.0, 120.0) as i32;
-        self.cloud.coag_min_above_sea = coag_min_alt.round().clamp(2.0, 100.0) as i32;
+        self.cloud.cloud_alt_above_sea = cloud_alt.round().clamp(4.0, 200.0) as i32;
+        self.cloud.coag_min_above_sea = coag_min_alt.round().clamp(2.0, 160.0) as i32;
+        self.cloud.ridge_clearance = self.cloud.ridge_clearance.clamp(0.0, 48.0);
         self.oro.tall_above_sea = tall_above.round().clamp(2.0, 100.0) as i32;
         self.cloud.downpour_stop_frac = self.cloud.downpour_stop_frac.clamp(0.05, 0.95);
     }
