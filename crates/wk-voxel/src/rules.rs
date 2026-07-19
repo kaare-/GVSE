@@ -247,46 +247,73 @@ pub fn apply_lateral_spill_regions(world: &mut World, active: &[ActiveChunk]) {
     }
 }
 
-/// Move wet Air sitting on solid diagonally downhill into open Air.
-/// Keeps rain from coating mountain faces as permanent blue wedges.
+/// Move wet Air sitting on solid (or stacked on a full column) diagonally
+/// downhill into open Air. Keeps rain from coating mountain faces as
+/// permanent blue wedges.
 pub fn apply_downslope_runoff(world: &mut World) {
     let regions = regions_for_standalone(world);
     apply_downslope_runoff_regions(world, &regions);
 }
 
 /// Downslope runoff restricted to a pre-planned active set.
+///
+/// Transfers are planned from a snapshot, then applied with live
+/// capacity checks (same pattern as seepage) so two films draining into
+/// one cell cannot destroy mass via clamp.
 pub fn apply_downslope_runoff_regions(world: &mut World, active: &[ActiveChunk]) {
     if active.is_empty() {
         return;
     }
-    let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     for pass in partition_checkerboard(active) {
-        accumulate_downslope_deltas(world, &pass, &mut deltas);
+        accumulate_downslope_xfers(world, &pass, &mut xfers);
     }
-    for ((gx, gy), delta) in deltas {
-        let Some(cell) = world.get_cell(gx, gy) else {
+    xfers.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    for (from, to, amt) in xfers {
+        let Some(src) = world.get_cell(from.0, from.1) else {
             continue;
         };
-        let cap = water_capacity(cell.material) as i32;
-        let new_sat = (cell.sat.0 as i32 + delta).clamp(0, cap);
+        let Some(dst) = world.get_cell(to.0, to.1) else {
+            continue;
+        };
+        if src.material != MaterialId::Air || dst.material != MaterialId::Air {
+            continue;
+        }
+        let free = u8::MAX as i32 - dst.sat.0 as i32;
+        let amt = amt.min(src.sat.0 as i32).min(free.max(0));
+        if amt <= 0 {
+            continue;
+        }
         world.set_cell(
-            gx,
-            gy,
+            from.0,
+            from.1,
             Cell {
-                sat: Sat(new_sat as u8),
-                ..cell
+                sat: Sat(src.sat.0 - amt as u8),
+                ..src
+            },
+        );
+        world.set_cell(
+            to.0,
+            to.1,
+            Cell {
+                sat: Sat(dst.sat.0 + amt as u8),
+                ..dst
             },
         );
     }
 }
 
-fn accumulate_downslope_deltas(
+fn accumulate_downslope_xfers(
     world: &World,
     active: &[ActiveChunk],
-    deltas: &mut HashMap<(i32, i32), i32>,
+    xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) {
     let local = map_regions_parallel(active, |ac| {
-        let mut local: HashMap<(i32, i32), i32> = HashMap::new();
+        let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {
@@ -297,14 +324,18 @@ fn accumulate_downslope_deltas(
                 if cur.material != MaterialId::Air || cur.sat.is_empty() {
                     continue;
                 }
-                // Only films resting on solid run off (not free-fall rain).
+                // Surface films on solid, and stacked water on a near-full
+                // column, can shear diagonally downhill. Mid-air rain
+                // (dry Air below) keeps falling via gravity instead.
                 let Some(below) = world.get_cell(gx, gy - 1) else {
                     continue;
                 };
-                if below.material == MaterialId::Air {
+                let on_solid = below.material != MaterialId::Air;
+                let on_pool = below.material == MaterialId::Air && below.sat.0 >= 200;
+                if !on_solid && !on_pool {
                     continue;
                 }
-                // Prefer the steeper / emptier diagonal-down neighbour.
+                // Prefer the emptier diagonal-down neighbour.
                 let mut best: Option<(i32, i32, u8)> = None;
                 for dx in [-1_i32, 1] {
                     let nx = world.wrap_x(gx + dx);
@@ -330,25 +361,19 @@ fn accumulate_downslope_deltas(
                 let Some((nx, ny, free)) = best else {
                     continue;
                 };
-                let amt = (cur.sat.0.min(free)).min(96) as i32;
+                // Drain as much as fits — viscous 96-cap made hill films
+                // crawl like syrup. Live apply clamps if two sources race.
+                let amt = cur.sat.0.min(free) as i32;
                 if amt <= 0 {
                     continue;
                 }
-                // Skip if another write already drained this source heavily.
-                let already = *local.get(&(gx, gy)).unwrap_or(&0);
-                if already < 0 {
-                    continue;
-                }
-                *local.entry((gx, gy)).or_insert(0) -= amt;
-                *local.entry((nx, ny)).or_insert(0) += amt;
+                local.push(((gx, gy), (nx, ny), amt));
             }
         }
         local
     });
-    for map in local {
-        for (k, v) in map {
-            *deltas.entry(k).or_insert(0) += v;
-        }
+    for mut v in local {
+        xfers.append(&mut v);
     }
 }
 
@@ -1185,31 +1210,33 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
     }
 }
 
+/// How many gravity→spill→runoff cycles run inside one [`tick`].
+///
+/// A single pass makes water crawl (~1 cell / tick). Several substeps
+/// with re-planned dirty halos let ponds level and hill films drain
+/// at a more liquid pace without changing the per-pass rules.
+const FLOW_SUBSTEPS: usize = 4;
+
 /// Advance the sim by one tick.
 ///
 /// Runs the sub-passes in a fixed order:
 ///
-/// 1. Gravity fall — every wet cell tries to move one cell downward.
-/// 2. Lateral spill — horizontally-adjacent Air cells equalise heads.
-/// 3. Seepage — water soaks into / through porous solids by head,
+/// 1. **Flow substeps** (×[`FLOW_SUBSTEPS`]): gravity fall, lateral
+///    spill, downslope runoff. Each substep re-plans from dirty so
+///    water can advance several cells per tick.
+/// 2. Seepage — water soaks into / through porous solids by head,
 ///    rate-limited by permeability.
-/// 4. Grain fall — granular materials sink into the Air cell below.
-///
-/// Gravity + spill + seepage first means water settles and soaks
-/// before grains drop through it; each tick the grain then takes
-/// one step down (possibly through freshly-settled water) and the
-/// next tick's water pass repacks around the new grain position.
+/// 3. Grain fall — granular materials sink into the Air cell below.
 ///
 /// Rain and evaporation are **opt-in**: callers wire
 /// [`apply_rain`] and [`apply_evaporation`] into their per-frame
 /// loop themselves. Scenario tests pass `tick(world)` alone and
 /// stay deterministic without weather.
 ///
-/// **Dirty / active chunks.** At the start of the tick we
-/// [`plan_active`] from each chunk's dirty rect (halo + neighbour
-/// wake), then [`clear_all_dirty`]. Rule writes rebuild dirty for
-/// the *next* tick. A fully settled world plans nothing and the
-/// physics passes early-out.
+/// **Dirty / active chunks.** Each flow substep [`plan_active`]s from
+/// dirty rects (halo + neighbour wake), then [`clear_all_dirty`].
+/// Writes rebuild dirty for the next substep / tick. A fully settled
+/// world plans nothing and the physics passes early-out.
 ///
 /// **Checkerboard.** Gravity and grain run four colour sub-passes
 /// (EE → OE → EO → OO); within a colour, regions run on rayon when
@@ -1217,18 +1244,30 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
 /// per colour) but apply from one snapshot so edges are not re-solved
 /// mid-rule.
 pub fn tick(world: &mut World) {
+    for _ in 0..FLOW_SUBSTEPS {
+        let active = plan_active(world);
+        clear_all_dirty(world);
+        if active.is_empty() {
+            break;
+        }
+        let passes = partition_checkerboard(&active);
+        for pass in &passes {
+            apply_gravity_fall_regions(world, pass);
+        }
+        apply_lateral_spill_regions(world, &active);
+        apply_downslope_runoff_regions(world, &active);
+    }
+
     let active = plan_active(world);
     clear_all_dirty(world);
-    let passes = partition_checkerboard(&active);
-    for pass in &passes {
-        apply_gravity_fall_regions(world, pass);
+    if !active.is_empty() {
+        apply_seepage_regions(world, &active);
+        let passes = partition_checkerboard(&active);
+        for pass in &passes {
+            apply_grain_fall_regions(world, pass);
+        }
     }
-    apply_lateral_spill_regions(world, &active);
-    apply_downslope_runoff_regions(world, &active);
-    apply_seepage_regions(world, &active);
-    for pass in &passes {
-        apply_grain_fall_regions(world, pass);
-    }
+
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {
         chunk.tick = chunk.tick.wrapping_add(1);
@@ -1882,6 +1921,51 @@ mod tests {
         );
     }
 
+    #[test]
+    fn tick_drains_hill_mound_instead_of_stalling() {
+        // A thick rain mound on a step should run off within a few ticks
+        // (flow substeps + full downslope drain), not sit as a gel blob.
+        let mut w = World::new(11);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for x in 0..8 {
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+            w.set_cell(x, 2, Cell::solid(MaterialId::Stone));
+        }
+        for x in 8..16 {
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+        }
+        // Mound on the high step.
+        for y in 3..=6 {
+            for x in 3..6 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        let mass_high = |w: &World| -> i32 {
+            (3..6)
+                .flat_map(|x| (3..=6).map(move |y| (x, y)))
+                .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+                .sum()
+        };
+        let before = mass_high(&w);
+        assert!(before > 1000);
+        for _ in 0..12 {
+            tick(&mut w);
+        }
+        let after = mass_high(&w);
+        assert!(
+            after < before / 2,
+            "mound should mostly leave the high step (before={before} after={after})"
+        );
+        let low: i32 = (8..16)
+            .flat_map(|x| (1..=5).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+            .sum();
+        assert!(low > 200, "water should pool on the lower step (got {low})");
+    }
+
     // ------------ evaporation ------------
 
     #[test]
@@ -2391,17 +2475,27 @@ mod tests {
             plan_active(&w).is_empty(),
             "settled world must plan no active chunks"
         );
-        let sat_before = w.get_cell(4, 1).unwrap().sat.0;
-        assert!(sat_before > 0, "droplet should rest in the shaft");
+        // Find where the droplet rested (flow substeps can leave a
+        // thin film split across a couple of floor cells).
+        let mut rested = None;
+        for y in 1..8 {
+            if let Some(c) = w.get_cell(4, y) {
+                if c.sat.0 > 0 {
+                    rested = Some((4, y, c.sat.0));
+                    break;
+                }
+            }
+        }
+        let (rx, ry, sat_before) = rested.expect("droplet should rest in the shaft");
         tick(&mut w);
-        assert_eq!(w.get_cell(4, 1).unwrap().sat.0, sat_before);
+        assert_eq!(w.get_cell(rx, ry).unwrap().sat.0, sat_before);
         assert!(plan_active(&w).is_empty());
     }
 
     #[test]
     fn tick_runs_gravity_then_spill_and_conserves_mass() {
-        // Full tick pass: droplet falls one row, then spreads
-        // sideways to its Air neighbours. Total sat is unchanged.
+        // Full tick pass: flow substeps drop the droplet several rows
+        // and spread it sideways. Total sat is unchanged.
         let mut w = setup_column_world();
         w.set_cell(30, 5, Cell::water());
         let start_mass = 255i64;
@@ -2413,15 +2507,18 @@ mod tests {
             .sum();
         assert_eq!(after_mass, start_mass, "tick must conserve total sat");
 
-        // The droplet should no longer be at (30, 5) — it fell to
-        // (30, 4) and then spread across (29, 4)..(31, 4).
+        // With FLOW_SUBSTEPS gravity passes, the droplet leaves y=5.
         assert!(w.get_cell(30, 5).unwrap().sat.is_empty());
-        // At least the centre-column landing cell + its two
-        // neighbours in the next row down should have some water.
-        let landed_row_wet: i32 = (28..=32)
-            .filter(|&x| w.get_cell(x, 4).map(|c| c.sat.0 > 0).unwrap_or(false))
+        // Some water should exist on the floor or just above it, spread
+        // across neighbouring columns.
+        let wet_near_floor: i32 = (28..=32)
+            .flat_map(|x| (1..=4).map(move |y| (x, y)))
+            .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.sat.0 > 0).unwrap_or(false))
             .count() as i32;
-        assert!(landed_row_wet >= 3, "landed row should have spread wet cells");
+        assert!(
+            wet_near_floor >= 3,
+            "droplet should fall and spread (wet cells={wet_near_floor})"
+        );
     }
 
     #[test]
