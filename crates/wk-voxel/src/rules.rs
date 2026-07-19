@@ -347,6 +347,23 @@ impl Default for EvapConfig {
 ///
 /// Compute-then-apply so evap is order-independent.
 pub fn apply_evaporation(world: &mut World, cfg: &EvapConfig) {
+    let deltas = collect_evap_deltas(world, cfg);
+    apply_evap_deltas(world, deltas, None);
+}
+
+/// Mass-conservative variant of [`apply_evaporation`]. Instead of
+/// deleting sat, the removed mass is deposited into the supplied
+/// [`crate::humidity::Humidity`] heatmap at the cell's tile.
+pub fn apply_evaporation_into_humidity(
+    world: &mut World,
+    humidity: &mut crate::humidity::Humidity,
+    cfg: &EvapConfig,
+) {
+    let deltas = collect_evap_deltas(world, cfg);
+    apply_evap_deltas(world, deltas, Some(humidity));
+}
+
+fn collect_evap_deltas(world: &World, cfg: &EvapConfig) -> HashMap<(i32, i32), i32> {
     let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
     let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
@@ -374,11 +391,26 @@ pub fn apply_evaporation(world: &mut World, cfg: &EvapConfig) {
             }
         }
     }
+    deltas
+}
+
+fn apply_evap_deltas(
+    world: &mut World,
+    deltas: HashMap<(i32, i32), i32>,
+    mut humidity: Option<&mut crate::humidity::Humidity>,
+) {
     for ((gx, gy), delta) in deltas {
         let Some(cell) = world.get_cell(gx, gy) else {
             continue;
         };
-        let new_sat = (cell.sat.0 as i32 + delta).clamp(0, water_capacity(cell.material) as i32);
+        let cap = water_capacity(cell.material) as i32;
+        let new_sat = (cell.sat.0 as i32 + delta).clamp(0, cap);
+        let actually_removed = cell.sat.0 as i32 - new_sat;
+        if actually_removed > 0 {
+            if let Some(h) = humidity.as_deref_mut() {
+                h.add(gx, gy, actually_removed as f32);
+            }
+        }
         world.set_cell(
             gx,
             gy,
@@ -1100,6 +1132,65 @@ mod tests {
         let cfg = EvapConfig::default();
         apply_evaporation(&mut w, &cfg);
         assert_eq!(w.get_cell(4, 5).unwrap().sat.0, 0);
+    }
+
+    #[test]
+    fn evap_into_humidity_conserves_mass() {
+        // Sat leaving cells lands as humidity mass. Sum should stay
+        // constant across a single evap pass.
+        use crate::humidity::Humidity;
+        let mut w = setup_column_world();
+        for y in 1..=5 {
+            w.set_cell(4, y, Cell::water());
+        }
+        let mut h = Humidity::new(4);
+        let cfg = EvapConfig {
+            rate_per_tick: 3,
+            dry_above_max: 200,
+        };
+        let cell_sat_before: i64 = (1..=5)
+            .map(|y| w.get_cell(4, y).unwrap().sat.0 as i64)
+            .sum();
+        let hum_before = h.total_mass();
+
+        apply_evaporation_into_humidity(&mut w, &mut h, &cfg);
+
+        let cell_sat_after: i64 = (1..=5)
+            .map(|y| w.get_cell(4, y).unwrap().sat.0 as i64)
+            .sum();
+        let hum_after = h.total_mass();
+        assert!(cell_sat_after < cell_sat_before, "some water must have left");
+        let removed = (cell_sat_before - cell_sat_after) as f32;
+        let gained = hum_after - hum_before;
+        assert!(
+            (removed - gained).abs() < 1e-3,
+            "removed sat ({removed}) should equal humidity gain ({gained})"
+        );
+    }
+
+    #[test]
+    fn evap_into_humidity_matches_bare_evap_cell_state() {
+        // The cell-side effect must be identical to `apply_evaporation`
+        // — humidity routing is purely an additive record of the
+        // removed mass, not a different eligibility rule.
+        use crate::humidity::Humidity;
+        let mut w_bare = setup_column_world();
+        let mut w_hum = setup_column_world();
+        for y in 1..=5 {
+            w_bare.set_cell(4, y, Cell::water());
+            w_hum.set_cell(4, y, Cell::water());
+        }
+        let mut h = Humidity::new(4);
+        let cfg = EvapConfig::default();
+        apply_evaporation(&mut w_bare, &cfg);
+        apply_evaporation_into_humidity(&mut w_hum, &mut h, &cfg);
+        for y in 1..=5 {
+            assert_eq!(
+                w_bare.get_cell(4, y).map(|c| c.sat.0),
+                w_hum.get_cell(4, y).map(|c| c.sat.0),
+                "cell y={y} should evaporate identically"
+            );
+        }
     }
 
     // ------------ karst dissolution ------------
