@@ -297,16 +297,17 @@ The full rule pass will look like this (deferred implementation):
 2. **Four-pass checkerboard.** Divide the ring of active chunks
    into four passes: even-cx even-cy, odd-cx even-cy, even-cx
    odd-cy, odd-cx odd-cy. Each pass can run in parallel because
-   each cell is only reachable from one chunk in the pass
-   (Purho, Noita, 2019). Not doing multithreading in v1 — we'll
-   run the passes serially first and prove correctness.
-3. **Within a chunk, bottom-up.** For rules where gravity moves a
-   cell downward, we walk `y = 0 → CHUNK_CELLS_H`. Otherwise a
-   falling cell moves through the whole column in one tick.
+   adjacent chunks never share a colour (Purho, Noita, 2019).
+   Serial today (`partition_checkerboard`); multithreading later.
+   Spill/seepage scan by colour but apply once from a snapshot so
+   a seam edge is not re-equalised mid-rule.
+3. **Within a chunk, bottom-up pull.** Gravity and grain walk
+   `y = 0 → CHUNK_CELLS_H` and **pull** from the cell above into
+   the current cell. Pull keeps cross-chunk seams one-step under
+   checkerboard (the lower chunk owns the destination write).
 4. **Rules per cell (in order):**
-   a. Gravity fall. If cell holds `sat > 0` and the cell below has
-      free capacity `> ε`, move `sat` down proportional to the
-      capacity gap.
+   a. Gravity fall. Destination cell pulls `sat` from above up to
+      its free capacity.
    b. Lateral spill. If cell surface elevation
       `= gy + sat / capacity_of_cell` exceeds a neighbour's, push
       water across proportional to head difference.
@@ -501,9 +502,11 @@ Follow-ups, each its own PR:
 9. Multithreading via the checkerboard partition.
 10. Ecology + agents port.
 
-Items 1–8 (through karst + seepage/head-spill) plus dirty-rect
-active-chunk planning are landed in `wk-voxel`. Remaining focus is
-checkerboard threading, then ecology.
+Items 1–8 (through karst + seepage/head-spill), dirty-rect
+active-chunk planning, and **serial** four-pass checkerboard are
+landed in `wk-voxel`. Gravity/grain use bottom-up **pull** so
+cross-chunk seams stay one-step under the partition. Remaining
+focus is multithreaded checkerboard, then ecology.
 
 Each PR keeps the isolation contract and passes headless tests
 before touching rendering.

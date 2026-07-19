@@ -230,6 +230,43 @@ pub fn clear_all_dirty(world: &mut World) {
     }
 }
 
+/// Checkerboard colour of a chunk: `0=EE, 1=OE, 2=EO, 3=OO`
+/// (`E` = even, `O` = odd; first letter is `cx`, second is `cy`).
+///
+/// Adjacent chunks (orthogonal) always differ in colour, so a serial
+/// four-pass sweep — and later a parallel one — never updates two
+/// neighbouring chunks in the same sub-pass (Purho / Noita, GDC 2019).
+#[inline]
+pub fn checkerboard_phase(coord: ChunkCoord) -> u8 {
+    let px = coord.cx.rem_euclid(2) as u8;
+    let py = coord.cy.rem_euclid(2) as u8;
+    px + 2 * py
+}
+
+/// Split an active plan into the four checkerboard sub-passes.
+///
+/// Pass order is fixed: even-cx/even-cy → odd-cx/even-cy →
+/// even-cx/odd-cy → odd-cx/odd-cy. Within each pass, chunks stay
+/// sorted by ascending `(cy, cx)` so bottom-up pull rules meet
+/// lower rows first.
+pub fn partition_checkerboard(active: &[ActiveChunk]) -> [Vec<ActiveChunk>; 4] {
+    let mut passes: [Vec<ActiveChunk>; 4] =
+        [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+    for ac in active {
+        let phase = checkerboard_phase(ac.coord) as usize;
+        passes[phase].push(*ac);
+    }
+    for pass in &mut passes {
+        pass.sort_by(|a, b| {
+            a.coord
+                .cy
+                .cmp(&b.coord.cy)
+                .then(a.coord.cx.cmp(&b.coord.cx))
+        });
+    }
+    passes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -286,5 +323,52 @@ mod tests {
             plan.iter().any(|a| a.coord == ChunkCoord::new(1, 0)),
             "cx=0 left edge should wake cx=1 under wrap"
         );
+    }
+
+    #[test]
+    fn checkerboard_phase_matches_parity() {
+        assert_eq!(checkerboard_phase(ChunkCoord::new(0, 0)), 0);
+        assert_eq!(checkerboard_phase(ChunkCoord::new(1, 0)), 1);
+        assert_eq!(checkerboard_phase(ChunkCoord::new(0, 1)), 2);
+        assert_eq!(checkerboard_phase(ChunkCoord::new(1, 1)), 3);
+        assert_eq!(checkerboard_phase(ChunkCoord::new(-1, 0)), 1);
+        assert_eq!(checkerboard_phase(ChunkCoord::new(0, -1)), 2);
+    }
+
+    #[test]
+    fn partition_covers_all_and_neighbours_differ() {
+        let active: Vec<ActiveChunk> = [
+            ChunkCoord::new(0, 0),
+            ChunkCoord::new(1, 0),
+            ChunkCoord::new(0, 1),
+            ChunkCoord::new(1, 1),
+            ChunkCoord::new(2, 0),
+        ]
+        .into_iter()
+        .map(|coord| ActiveChunk {
+            coord,
+            rect: Rect::full(),
+        })
+        .collect();
+        let passes = partition_checkerboard(&active);
+        let total: usize = passes.iter().map(|p| p.len()).sum();
+        assert_eq!(total, active.len());
+        for pass in &passes {
+            for a in pass {
+                for b in pass {
+                    if a.coord == b.coord {
+                        continue;
+                    }
+                    let dx = (a.coord.cx - b.coord.cx).abs();
+                    let dy = (a.coord.cy - b.coord.cy).abs();
+                    assert!(
+                        !(dx + dy == 1),
+                        "orthogonal neighbours must not share a pass: {:?} vs {:?}",
+                        a.coord,
+                        b.coord
+                    );
+                }
+            }
+        }
     }
 }
