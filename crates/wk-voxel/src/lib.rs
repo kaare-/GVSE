@@ -11,10 +11,10 @@
 pub mod active;
 pub mod cell;
 pub mod chunk;
-pub mod ecology;
 pub mod grid;
 pub mod heatmap;
 pub mod humidity;
+pub mod organism;
 pub mod parallel;
 pub mod rules;
 pub mod worldgen;
@@ -25,8 +25,11 @@ pub use active::{
 pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{is_grain, water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
-pub use ecology::{apply_ecology, Biomass, EcologyConfig};
 pub use grid::World;
+pub use organism::{
+    atom_modules, day_factor, Atom, ModuleId, OrganismStore, PlacedModule, DEMO_DAY_TICKS,
+    MAX_ATOMS,
+};
 pub use heatmap::Heatmap;
 pub use humidity::{
     humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,
