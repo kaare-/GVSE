@@ -10,7 +10,7 @@ use wk_sim::Simulation;
 use wk_world::climate::ClimateSettings;
 use wk_world::column::{Activity, Ecology, ResidualBucket, SedimentLoad, Void, VoidOrigin};
 use wk_world::fields::{
-    DissolvedField, GroundwaterHeadField, HumidityField, PressureField, ThermalField, WindField,
+    DissolvedField, HumidityField, PressureField, ThermalField, WindField,
 };
 use wk_world::marker::Marker;
 use wk_world::weather::{Cloud, WeatherSettings};
@@ -56,8 +56,6 @@ pub struct ChunkSnapshot {
     pub pressure: Option<PressureField>,
     #[serde(default)]
     pub wind: Option<WindField>,
-    #[serde(default)]
-    pub gw_head: Option<GroundwaterHeadField>,
     #[serde(default)]
     pub dissolved: Option<DissolvedField>,
 }
@@ -209,7 +207,6 @@ pub fn snapshot_world(world: &World, sim_tick: u64) -> SaveFileV1 {
                     humidity: chunk.humidity.clone(),
                     pressure: chunk.pressure.clone(),
                     wind: chunk.wind.clone(),
-                    gw_head: chunk.gw_head.clone(),
                     dissolved: chunk.dissolved.clone(),
                 },
             )
@@ -329,7 +326,6 @@ pub fn restore_world(save: &SaveFileV1) -> (World, u64) {
             .map(|h| h.0.zeros_like());
         chunk.pressure = snap.pressure.clone();
         chunk.wind = snap.wind.clone();
-        chunk.gw_head = snap.gw_head.clone();
         chunk.dissolved = snap.dissolved.clone();
         world.insert_chunk(chunk);
     }
@@ -371,7 +367,6 @@ mod tests {
         assert!(chunk.humidity.is_none());
         assert!(chunk.pressure.is_none());
         assert!(chunk.wind.is_none());
-        assert!(chunk.gw_head.is_none());
         assert!(chunk.dissolved.is_none());
     }
 

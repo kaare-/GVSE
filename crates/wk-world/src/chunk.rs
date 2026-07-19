@@ -3,7 +3,7 @@ use wk_field::FieldPatch;
 
 use crate::column::{Activity, Column, SedimentLoad};
 use crate::fields::{
-    DissolvedField, GroundwaterHeadField, HumidityField, PressureField, ThermalField, WindField,
+    DissolvedField, HumidityField, PressureField, ThermalField, WindField,
 };
 
 #[derive(Debug, Clone)]
@@ -55,7 +55,6 @@ pub struct Chunk {
     pub humidity_source: Option<FieldPatch>,
     pub pressure: Option<PressureField>,
     pub wind: Option<WindField>,
-    pub gw_head: Option<GroundwaterHeadField>,
     pub dissolved: Option<DissolvedField>,
 }
 
@@ -74,7 +73,6 @@ impl Chunk {
             humidity_source: None,
             pressure: None,
             wind: None,
-            gw_head: None,
             dissolved: None,
         }
     }

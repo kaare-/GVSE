@@ -14,7 +14,6 @@ pub const THERMAL_CELL_M: f32 = 0.5;
 pub const HUMIDITY_CELL_M: f32 = 2.0;
 pub const PRESSURE_CELL_M: f32 = 2.0;
 pub const WIND_CELL_M: f32 = 2.0;
-pub const GROUNDWATER_HEAD_CELL_M: f32 = 1.0;
 pub const DISSOLVED_CELL_M: f32 = 0.5;
 
 /// Vertical extent covered by fields: from a few metres below bedrock
@@ -81,9 +80,6 @@ pub struct WindField {
     pub vx: FieldPatch,
     pub vy: FieldPatch,
 }
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-pub struct GroundwaterHeadField(pub FieldPatch);
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct DissolvedField(pub FieldPatch);
@@ -153,16 +149,6 @@ impl WindField {
             vx: FieldPatch::new(w, h, cell, origin_x, origin_y, 0.0),
             vy: FieldPatch::new(w, h, cell, origin_x, origin_y, 0.0),
         }
-    }
-}
-
-impl GroundwaterHeadField {
-    pub fn new_for_chunk(coord: i32, bedrock_y: f32, sea_level: f32, fill_m: f32) -> Self {
-        let cell = GROUNDWATER_HEAD_CELL_M;
-        let w = chunk_width_cells(cell);
-        let (h, origin_y) = vertical_cells(bedrock_y, sea_level, cell);
-        let origin_x = coord as f32 * wk_material::CHUNK_W as f32 * wk_material::SAMPLE_WIDTH_M;
-        Self(FieldPatch::new(w, h, cell, origin_x, origin_y, fill_m))
     }
 }
 

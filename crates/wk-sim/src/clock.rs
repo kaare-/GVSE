@@ -16,9 +16,6 @@ pub enum SubsystemId {
     /// wins the race against lateral leveling (a slow, column-by-column
     /// spreading process) long before the lake can go flat on its own.
     LakeLevel = 7,
-    /// Slow lateral flow of underground moisture between neighbouring
-    /// columns' water tables — a real (if simplified) groundwater layer.
-    Groundwater = 8,
     /// Temperature-driven material transitions: snow melts to water,
     /// water freezes to ice, ice thaws back to water. Driven by each
     /// material's own `phase_change` property row rather than three
@@ -44,9 +41,6 @@ pub enum SubsystemId {
     PressureField = 14,
     /// Wind from −∇pressure (+ climate bias). Weather samples this.
     WindField = 15,
-    /// Groundwater hydraulic-head Darcy diffusion. Moisture transfers
-    /// still happen in `Groundwater`; this pass updates the head field.
-    GroundwaterHeadField = 16,
     /// Dissolved-mineral concentration (kg/m³). Diffuses in wet cells;
     /// karst injects dissolved mass into this field.
     DissolvedField = 17,
@@ -75,7 +69,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 25] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 23] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -120,13 +114,6 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 25] = [
         id: SubsystemId::LakeLevel,
         // Every 2 ticks with gentle blend. On a full ring most cells are
         // already at level, so per-tick was a waste of a ring walk.
-        period: 2,
-        phase: 0,
-    },
-    SubsystemSchedule {
-        id: SubsystemId::Groundwater,
-        // Every 2 ticks — pore-water flow is slow vs surface flow. Cost
-        // per invocation is ring-wide so halving cadence saves ~0.3 ms/tick.
         period: 2,
         phase: 0,
     },
@@ -176,11 +163,6 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 25] = [
         // One tick after pressure so wind samples the committed field.
         period: 30,
         phase: 6,
-    },
-    SubsystemSchedule {
-        id: SubsystemId::GroundwaterHeadField,
-        period: 30,
-        phase: 10,
     },
     SubsystemSchedule {
         id: SubsystemId::DissolvedField,
@@ -235,13 +217,12 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 25] = [
 /// LakeLevel, Slumping, and the field passes are deliberately NOT here
 /// — they're direct-mutation passes that run *after* barrier_commit so
 /// they operate on already-committed column (and field) state.
-pub const SUBSYSTEM_ORDER: [SubsystemId; 9] = [
+pub const SUBSYSTEM_ORDER: [SubsystemId; 8] = [
     SubsystemId::RainInject,
     SubsystemId::Weather,
     SubsystemId::SurfaceWater,
     SubsystemId::Sediment,
     SubsystemId::Infiltration,
-    SubsystemId::Groundwater,
     SubsystemId::Evaporation,
     SubsystemId::LayerMerge,
     SubsystemId::Activity,

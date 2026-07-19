@@ -96,7 +96,6 @@ impl AppState {
         world.enable_thermal_fields();
         world.enable_humidity_fields();
         world.enable_pressure_wind_fields();
-        world.enable_groundwater_head_fields();
         world.enable_dissolved_fields();
         // Free-surface momentum: wind setup / seiches + a gentle tide.
         // Lake-level still flattens shallow ponds but leaves deep water alone.
