@@ -15,8 +15,9 @@
 //! - `Space` — pause / resume physics ticks
 //! - `R` — regenerate the world with a new seed
 //! - `W` — toggle rain
-//! - `E` — toggle evaporation
+//! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
+//! - `H` — toggle humidity overlay
 //! - `Left` / `Right` — pan the camera horizontally
 //! - `Up` / `Down` — pan vertically
 //! - `Esc` — quit
@@ -26,8 +27,8 @@ mod scene;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_evaporation, apply_karst_dissolution, apply_rain, tick, EvapConfig, KarstConfig,
-    RainConfig, WorldgenParams,
+    apply_evaporation_into_humidity, apply_karst_dissolution, apply_rain, tick, EvapConfig,
+    KarstConfig, RainConfig, WorldgenParams,
 };
 
 use crate::palette::cell_color;
@@ -55,6 +56,11 @@ async fn main() {
     let mut rain_on = true;
     let mut evap_on = true;
     let mut karst_on = true;
+    let mut humidity_overlay = false;
+    // Fraction of pairwise humidity difference transferred per tick.
+    // 0.15 gives a visible "clouds spread as they drift" feel
+    // without going near the 0.25 stability cap.
+    let humidity_diffusion_alpha: f32 = 0.15;
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
 
@@ -93,6 +99,9 @@ async fn main() {
         if is_key_pressed(KeyCode::K) {
             karst_on = !karst_on;
         }
+        if is_key_pressed(KeyCode::H) {
+            humidity_overlay = !humidity_overlay;
+        }
         let pan = 200.0 * get_frame_time();
         if is_key_down(KeyCode::Left) {
             cam_x -= pan;
@@ -113,12 +122,18 @@ async fn main() {
                 apply_rain(&mut scene.world, &rain_cfg);
             }
             if evap_on {
-                apply_evaporation(&mut scene.world, &evap_cfg);
+                apply_evaporation_into_humidity(
+                    &mut scene.world,
+                    &mut scene.humidity,
+                    &evap_cfg,
+                );
             }
             if karst_on {
                 apply_karst_dissolution(&mut scene.world, &karst_cfg);
             }
             tick(&mut scene.world);
+            // Diffuse humidity every tick — cheap, sparse.
+            scene.humidity.diffuse(humidity_diffusion_alpha);
         }
 
         // Render.
@@ -159,14 +174,44 @@ async fn main() {
             }
         }
 
+        // Humidity overlay: paint each tile as a translucent cyan
+        // rect scaled to atmospheric mass. Rendered *after* the cells
+        // so it sits on top; ignored when the toggle is off.
+        if humidity_overlay {
+            let tile_px = scene.humidity.tile_cols as f32 * cell_px;
+            for (&(hx, hy), &mass) in &scene.humidity.cells {
+                // Convert tile coord to world cell coord (lower-left
+                // of the tile) then to screen coord.
+                let base_gx = hx * scene.humidity.tile_cols;
+                let base_gy = hy * scene.humidity.tile_cols;
+                let sx = origin_x + base_gx as f32 * cell_px;
+                let sy = origin_y
+                    - (base_gy - scene.params.bedrock_floor_y + scene.humidity.tile_cols) as f32
+                        * cell_px;
+                if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
+                    continue;
+                }
+                // Normalise mass → alpha. A full-tile ceiling of
+                // ~4×4×255 = 4080 sat-units would be "saturated
+                // cloud".
+                let norm = (mass / 4080.0).clamp(0.0, 1.0);
+                let alpha = (norm * 180.0) as u8;
+                if alpha == 0 {
+                    continue;
+                }
+                draw_rectangle(sx, sy, tile_px, tile_px, Color::from_rgba(160, 200, 240, alpha));
+            }
+        }
+
         // HUD.
         let hud = format!(
-            "tick={} seed={} rain={} evap={} karst={} {}  |  Space pause | R reroll | W rain | E evap | K karst | arrows pan | Esc quit",
+            "tick={} seed={} rain={} evap={} karst={} humidity_mass={:.0} {}  |  Space pause | R reroll | W rain | E evap | K karst | H overlay | arrows pan | Esc quit",
             scene.world.tick,
             scene.params.seed,
             if rain_on { "on" } else { "off" },
             if evap_on { "on" } else { "off" },
             if karst_on { "on" } else { "off" },
+            scene.humidity.total_mass(),
             if paused { "[paused]" } else { "" }
         );
         draw_rectangle(0.0, sh - 24.0, sw, 24.0, Color::from_rgba(0, 0, 0, 200));

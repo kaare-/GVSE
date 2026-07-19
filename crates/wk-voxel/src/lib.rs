@@ -12,6 +12,7 @@ pub mod cell;
 pub mod chunk;
 pub mod grid;
 pub mod heatmap;
+pub mod humidity;
 pub mod rules;
 pub mod worldgen;
 
@@ -19,9 +20,11 @@ pub use cell::{is_grain, water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use grid::World;
 pub use heatmap::Heatmap;
+pub use humidity::Humidity;
 pub use rules::{
-    apply_evaporation, apply_grain_fall, apply_gravity_fall, apply_karst_dissolution,
-    apply_lateral_spill, apply_rain, tick, EvapConfig, KarstConfig, RainConfig,
+    apply_evaporation, apply_evaporation_into_humidity, apply_grain_fall, apply_gravity_fall,
+    apply_karst_dissolution, apply_lateral_spill, apply_rain, tick, EvapConfig, KarstConfig,
+    RainConfig,
 };
 pub use worldgen::is_karst_zone_x;
 pub use worldgen::{continental_surface_y, stamp_world, WorldgenParams};
