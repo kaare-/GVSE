@@ -27,13 +27,16 @@ fn voids_overlap(a_top: f32, a_bot: f32, b_top: f32, b_bot: f32) -> bool {
 
 /// Drain surface / flowable water into voids that breach the surface.
 ///
-/// Columns whose *solid* bed sits under the sea are skipped. Lit sea-cliff
-/// mouths / karst chambers used to swallow ~35% of the ocean column every
-/// tick (light-latch `>200`), faster than lake-level could refill — that
-/// punched a persistent notch in the free surface (vertical "water edge")
-/// and left algae riding the oscillating refill as a sine curve.
+/// Coastal / oceanic columns are skipped. Lit sea-cliff and karst mouths
+/// used to swallow ~35% of standing water every tick (via a `light > 200`
+/// latch), then lake-level / tide refilled — a persistent pump that cut a
+/// vertical notch in the free surface and launched algae along the
+/// oscillating refill.
 pub fn run_surface_void_capture(world: &mut World) {
     let sea = world.sea_level;
+    // High-tide + buffer: mouths on the splash zone still saw capture under
+    // the old "solid_bed < sea" gate and kept pumping with each swell.
+    let coastal_limit = sea + world.tide_amplitude_m.abs() + 2.0;
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for coord in coords {
         let Some(chunk) = world.chunks.get_mut(&coord) else {
@@ -41,13 +44,19 @@ pub fn run_surface_void_capture(world: &mut World) {
         };
         for i in 0..CHUNK_W {
             let col = &mut chunk.columns[i];
-            // Solid bed, not climate_elevation (which still counts voids).
-            if col.solid_bed_y() < sea - 0.25 {
+            if col.solid_bed_y() < coastal_limit {
                 continue;
             }
             let available = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
             if available <= 0 {
                 continue;
+            }
+            // Already inundated near sea level — this is coastal flooding,
+            // not a land sinkhole drinking a rain pond.
+            if let Some((wtop, _)) = col.flowable_water() {
+                if available >= 25 && wtop >= sea - 0.5 {
+                    continue;
+                }
             }
             let want = ((available as f32) * SURFACE_CAPTURE_FRAC) as i64;
             let moved = col.drain_surface_water_into_voids(want);

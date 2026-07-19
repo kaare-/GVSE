@@ -131,6 +131,75 @@ fn e53_shore_void_full_sim_keeps_flat_sea() {
 }
 
 #[test]
+fn e53_splash_zone_mouth_does_not_pump() {
+    // Mouth on the limestone just *above* mean sea — the previous gate
+    // (solid_bed < sea) still allowed capture here, so tide/lake refill
+    // pumped forever at the wet/dry contact.
+    let mut world = World::new(9055);
+    world.sea_level = 12.0;
+    world.tide_enabled = true;
+    world.tide_amplitude_m = 0.45;
+    world.rain_enabled = false;
+    world.weather.weather_enabled = false;
+    // Bed at 12.5 m — above mean sea, inside the splash buffer.
+    world.insert_chunk(generate_flat_sand(0, -900.0, 12.5));
+    world.wake_all();
+
+    let mouth = 24i32;
+    {
+        let chunk = world.chunks.get_mut(&0).unwrap();
+        let bedrock = chunk.bedrock_y;
+        for col in &mut chunk.columns {
+            col.moisture = col.moisture_cap();
+            let bed = col.solid_bed_y();
+            let need = ((world.sea_level + 0.5 - bed).max(0.3) * 250.0) as i64;
+            if need > 0 {
+                col.deposit_to_top(MaterialId::Water, need, 0);
+            }
+            col.clamp_state();
+            col.recompute_surface_y(bedrock);
+        }
+        let col = &mut chunk.columns[mouth as usize];
+        let ground = col.climate_elevation();
+        col.voids.push(Void {
+            top_y: ground, // geometrically open
+            height_m: 2.5,
+            water_mass: 0,
+            roof_material: MaterialId::Limestone,
+            origin: VoidOrigin::Collapse,
+            light: 235,
+        });
+        col.recompute_surface_y(bedrock);
+    }
+
+    let mass0 = world
+        .column_at(mouth)
+        .unwrap()
+        .flowable_water()
+        .map(|(_, m)| m)
+        .unwrap_or(0);
+    assert!(mass0 > 50, "precondition: wet splash column, got {mass0}");
+
+    for _ in 0..80 {
+        run_surface_void_capture(&mut world);
+        run_void_water_flow(&mut world);
+        run_lake_level(&mut world);
+    }
+
+    let col = world.column_at(mouth).unwrap();
+    assert_eq!(
+        col.void_water_total(),
+        0,
+        "splash-zone mouth must not capture (pump)"
+    );
+    let mass1 = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
+    assert!(
+        mass1 as f32 > mass0 as f32 * 0.7,
+        "splash column drained by mouth pump: {mass0} → {mass1}"
+    );
+}
+
+#[test]
 fn e53_land_sinkhole_still_captures() {
     // Regression guard: ocean gate must not disable terrestrial E10 capture.
     let mut world = World::new(9054);

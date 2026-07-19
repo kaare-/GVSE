@@ -1103,10 +1103,11 @@ impl Column {
     /// Drain up to `mass` kg of top/flowable water into open voids.
     /// Returns kg moved into voids.
     ///
-    /// Eligibility: geometrically open to the *solid* ground surface, or a
-    /// lit land sinkhole (`light > 200`). Openness is judged against the
-    /// solid bed (not the free-water top) so a pond on a sinkhole still
-    /// drains. Callers that must protect the ocean should gate with
+    /// Only geometrically open mouths (`open_to_surface` vs the solid
+    /// ground under any pond) capture. The old `light > 200` latch let
+    /// worldgen sea-cliff / karst alcoves keep swallowing water forever
+    /// — including after they flooded — which pumped the shoreline.
+    /// Callers that must protect the coast should also gate with
     /// [`Self::solid_bed_y`] vs sea level before calling.
     pub fn drain_surface_water_into_voids(&mut self, mass: i64) -> i64 {
         if mass <= 0 {
@@ -1120,7 +1121,7 @@ impl Column {
             .voids
             .iter()
             .enumerate()
-            .filter(|(_, v)| v.open_to_surface(ground) || v.light > 200)
+            .filter(|(_, v)| v.open_to_surface(ground))
             .map(|(i, _)| i)
             .collect();
         if open.is_empty() {
@@ -1142,8 +1143,6 @@ impl Column {
                 break;
             }
             self.voids[i].water_mass += take;
-            // Do not bump light here — that latched every capture into a
-            // permanent surface sink even after the mouth flooded/roofed.
             remaining -= take;
             moved += take;
         }
