@@ -14,8 +14,8 @@ pub mod grid;
 pub mod heatmap;
 pub mod rules;
 
-pub use cell::{Cell, Sat, CellFlags};
-pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_W, CHUNK_CELLS_H};
+pub use cell::{water_capacity, Cell, CellFlags, Sat};
+pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use grid::World;
 pub use heatmap::Heatmap;
-pub use rules::tick;
+pub use rules::{apply_gravity_fall, tick};
