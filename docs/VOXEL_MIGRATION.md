@@ -106,14 +106,14 @@ top.
 
 Voxel intent:
 
-- **Ring topology.** Chunks wrap on the horizontal axis. `wk-voxel`'s
-  `World::split` already uses `div_euclid` / `rem_euclid` so
-  negative x coordinates wrap through the origin cleanly; wrapping
-  is enforced at the sim-level tick, not per lookup.
-- **Continental profile.** `continental_surface_y` becomes a
-  worldgen pass that stamps materials into cells: bedrock rows,
-  stone/limestone/clay strata by depth-below-surface, sand cap on
-  top, water cells above submerged beds.
+- **Ring topology.** `World::wrap_width` maps every world-x into
+  `[0, width)` so physics and the demo camera join left↔right.
+  Humidity sets `wrap_x` to match. The stamped profile puts deep
+  ocean on both edges so the seam is seamless.
+- **Continental profile.** Ring-fraction `continental_surface_y`:
+  thick bedrock floor barrier, stratified stone / limestone / clay /
+  gravel / loose-rock body, sand cap, water above submerged beds,
+  extra sky headroom.
 - **Chunk generation.** Analogous to `generate_chunk_continental` in
   `crates/wk-world/src/terrain.rs`. One cellular chunk = 64×64
   cells. Generation is deterministic on `(seed, cx, cy)`.
@@ -275,7 +275,8 @@ Initial overlays we plan to introduce, in rough order:
    tick; **diffusion runs on a schedule** (`humidity_diffuse_due`,
    period 20 / phase 3 — same cadence as column-GVSE
    `HumidityField`). The map is **clamped** to the stamped world
-   tile bounds (Neumann edges) so sparse keys cannot grow off-map.
+   tile bounds; ring worlds also set `wrap_x` so the atmosphere
+   joins at the seam.
 4. **Wind.** Vector `(vx, vy)` per tile. Drives cloud advection and
    surface stress.
 5. **Sediment concentration.** Per cell. Only needed once we do

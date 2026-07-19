@@ -127,13 +127,19 @@ pub fn apply_lateral_spill(world: &mut World) {
             let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in 0..CHUNK_CELLS_W {
                 let gx = coord.cx * CHUNK_CELLS_W as i32 + x as i32;
-                let Some(left) = world.get_cell(gx, gy) else {
+                let left_x = world.wrap_x(gx);
+                let right_x = world.wrap_x(gx + 1);
+                // Degenerate (width ≤ 1) or duplicate under wrap.
+                if left_x == right_x {
+                    continue;
+                }
+                let Some(left) = world.get_cell(left_x, gy) else {
                     continue;
                 };
                 if left.material != MaterialId::Air {
                     continue;
                 }
-                let Some(right) = world.get_cell(gx + 1, gy) else {
+                let Some(right) = world.get_cell(right_x, gy) else {
                     continue;
                 };
                 if right.material != MaterialId::Air {
@@ -151,8 +157,10 @@ pub fn apply_lateral_spill(world: &mut World) {
                 if move_amt == 0 {
                     continue;
                 }
-                *deltas.entry((gx, gy)).or_insert(0) -= move_amt;
-                *deltas.entry((gx + 1, gy)).or_insert(0) += move_amt;
+                // Key by wrapped coords so the ring seam (width-1 ↔ 0)
+                // doesn't double-apply under two aliases.
+                *deltas.entry((left_x, gy)).or_insert(0) -= move_amt;
+                *deltas.entry((right_x, gy)).or_insert(0) += move_amt;
             }
         }
     }

@@ -29,9 +29,9 @@ use serde::{Deserialize, Serialize};
 
 /// Inclusive tile-coordinate rectangle.
 ///
-/// When set on a [`Humidity`], diffusion uses a Neumann (no-flux)
-/// boundary: mass never leaves the box, and no sparse keys are
-/// created outside it.
+/// When set on a [`Humidity`], diffusion stays inside the box.
+/// Vertical edges are Neumann (no-flux). Horizontal edges wrap when
+/// [`Humidity::wrap_x`] is set (ring worlds).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TileBounds {
     pub hx_min: i32,
@@ -92,6 +92,9 @@ pub struct Humidity {
     /// unbounded (unit-test convenience only — production worlds
     /// should always set this).
     pub bounds: Option<TileBounds>,
+    /// When true (and [`Self::bounds`] is set), horizontal diffusion
+    /// wraps at `hx_min`/`hx_max` so the atmosphere joins on a ring.
+    pub wrap_x: bool,
 }
 
 impl Humidity {
@@ -100,6 +103,7 @@ impl Humidity {
             tile_cols: tile_cols.max(1),
             cells: HashMap::new(),
             bounds: None,
+            wrap_x: false,
         }
     }
 
@@ -118,6 +122,27 @@ impl Humidity {
 
     fn accepts(&self, hx: i32, hy: i32) -> bool {
         self.bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
+    }
+
+    /// Neighbour tile in +x / −x, wrapping horizontally on ring maps.
+    fn wrap_hx(&self, hx: i32) -> Option<i32> {
+        match self.bounds {
+            Some(b) if self.wrap_x => {
+                let w = b.hx_max - b.hx_min + 1;
+                if w <= 0 {
+                    return None;
+                }
+                Some(b.hx_min + (hx - b.hx_min).rem_euclid(w))
+            }
+            Some(b) => {
+                if hx >= b.hx_min && hx <= b.hx_max {
+                    Some(hx)
+                } else {
+                    None
+                }
+            }
+            None => Some(hx),
+        }
     }
 
     /// Deposit `mass` at world cell `(gx, gy)`.
@@ -169,8 +194,9 @@ impl Humidity {
     /// independent of iteration order; pruning removes near-zero
     /// tiles so the sparse map doesn't grow without bound.
     ///
-    /// When [`Self::bounds`] is set, out-of-box neighbours are treated
-    /// as no-flux walls (pair skipped) so mass stays inside the world.
+    /// When [`Self::bounds`] is set without [`Self::wrap_x`], horizontal
+    /// out-of-box neighbours are Neumann walls. With `wrap_x`, the left
+    /// and right tile edges join (ring atmosphere).
     pub fn diffuse(&mut self, alpha: f32) {
         let alpha = alpha.clamp(0.0, 0.25);
         if alpha == 0.0 || self.cells.is_empty() {
@@ -187,11 +213,22 @@ impl Humidity {
         // pairs so every undirected pair is visited exactly once.
         let mut sources: Vec<(i32, i32)> = Vec::with_capacity(snap.len() * 5);
         for &(hx, hy) in snap.keys() {
-            for (dx, dy) in [(0, 0), (1, 0), (-1, 0), (0, 1), (0, -1)] {
-                let k = (hx + dx, hy + dy);
-                if self.accepts(k.0, k.1) {
-                    sources.push(k);
+            sources.push((hx, hy));
+            if let Some(nx) = self.wrap_hx(hx + 1) {
+                if self.accepts(nx, hy) {
+                    sources.push((nx, hy));
                 }
+            }
+            if let Some(nx) = self.wrap_hx(hx - 1) {
+                if self.accepts(nx, hy) {
+                    sources.push((nx, hy));
+                }
+            }
+            if self.accepts(hx, hy + 1) {
+                sources.push((hx, hy + 1));
+            }
+            if self.accepts(hx, hy - 1) {
+                sources.push((hx, hy - 1));
             }
         }
         sources.sort_unstable();
@@ -200,19 +237,26 @@ impl Humidity {
         let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
         for &(hx, hy) in &sources {
             let val = *snap.get(&(hx, hy)).unwrap_or(&0.0);
-            for &(dx, dy) in &[(1, 0), (0, 1)] {
-                let n_key = (hx + dx, hy + dy);
-                if !self.accepts(n_key.0, n_key.1) {
-                    // Neumann edge: no exchange with the outside.
-                    continue;
+            // +x neighbour (possibly wrapped).
+            if let Some(nx) = self.wrap_hx(hx + 1) {
+                if self.accepts(nx, hy) && nx != hx {
+                    let n_val = *snap.get(&(nx, hy)).unwrap_or(&0.0);
+                    let flow = (val - n_val) * alpha;
+                    if flow.abs() >= 1e-9 {
+                        *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
+                        *deltas.entry((nx, hy)).or_insert(0.0) += flow;
+                    }
                 }
+            }
+            // +y neighbour (never wraps).
+            let n_key = (hx, hy + 1);
+            if self.accepts(n_key.0, n_key.1) {
                 let n_val = *snap.get(&n_key).unwrap_or(&0.0);
                 let flow = (val - n_val) * alpha;
-                if flow.abs() < 1e-9 {
-                    continue;
+                if flow.abs() >= 1e-9 {
+                    *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
+                    *deltas.entry(n_key).or_insert(0.0) += flow;
                 }
-                *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
-                *deltas.entry(n_key).or_insert(0.0) += flow;
             }
         }
         for (k, d) in deltas {
@@ -364,5 +408,21 @@ mod tests {
         assert!(!humidity_diffuse_due(4));
         assert!(humidity_diffuse_due(23));
         assert!(humidity_diffuse_due(43));
+    }
+
+    #[test]
+    fn diffuse_wraps_horizontally_on_ring() {
+        let mut h = Humidity::with_world_bounds(1, 0, 0, 4, 2);
+        h.wrap_x = true;
+        // Spike on the rightmost tile; after one pass some mass must
+        // appear on the leftmost tile (the ring neighbour).
+        h.add(3, 0, 100.0);
+        let before = h.total_mass();
+        h.diffuse(0.25);
+        assert!((h.total_mass() - before).abs() < 1e-3);
+        assert!(
+            h.at_tile(0, 0) > 0.0,
+            "mass should wrap from hx=3 to hx=0"
+        );
     }
 }

@@ -1,0 +1,282 @@
+//! Headless perf profile for the wk-voxel demo stack.
+//!
+//! Ignored by default. Run on a laptop before threading work:
+//!
+//! ```text
+//! cargo test -p wk-voxel --test perf_profile --release -- --ignored --nocapture
+//! ```
+//!
+//! Prints ms/tick for the full app-like stack and a per-pass breakdown.
+//! Humidity diffusion is **clamped** to the world and only runs on the
+//! column-GVSE cadence (`humidity_diffuse_due`) — matching `wk-voxel-app`.
+
+use std::time::{Duration, Instant};
+
+use wk_voxel::{
+    apply_condensation_rain, apply_evaporation_into_humidity, apply_grain_fall,
+    apply_gravity_fall, apply_karst_dissolution, apply_lateral_spill, apply_rain,
+    humidity_diffuse_due, stamp_world, CondensationConfig, EvapConfig, Humidity, KarstConfig,
+    RainConfig, World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W,
+};
+
+const HUMIDITY_TILE_COLS: i32 = 4;
+const HUMIDITY_DIFFUSION_ALPHA: f32 = 0.15;
+const WARMUP_TICKS: u64 = 40;
+const MEASURE_TICKS: u64 = 200;
+
+struct PassAccum {
+    rain: Duration,
+    evap: Duration,
+    condensation: Duration,
+    karst: Duration,
+    gravity: Duration,
+    spill: Duration,
+    grain: Duration,
+    humidity_diffuse: Duration,
+    humidity_diffuse_calls: u64,
+    finish: Duration,
+}
+
+impl PassAccum {
+    fn zero() -> Self {
+        Self {
+            rain: Duration::ZERO,
+            evap: Duration::ZERO,
+            condensation: Duration::ZERO,
+            karst: Duration::ZERO,
+            gravity: Duration::ZERO,
+            spill: Duration::ZERO,
+            grain: Duration::ZERO,
+            humidity_diffuse: Duration::ZERO,
+            humidity_diffuse_calls: 0,
+            finish: Duration::ZERO,
+        }
+    }
+
+    fn total(&self) -> Duration {
+        self.rain
+            + self.evap
+            + self.condensation
+            + self.karst
+            + self.gravity
+            + self.spill
+            + self.grain
+            + self.humidity_diffuse
+            + self.finish
+    }
+}
+
+fn demo_params() -> WorldgenParams {
+    WorldgenParams::default()
+}
+
+/// Roughly 2× the demo footprint in each axis (32×6 chunks vs 16×3).
+fn stress_params() -> WorldgenParams {
+    WorldgenParams {
+        width_cols: (CHUNK_CELLS_W as i32) * 32,
+        sky_ceiling_y: (CHUNK_CELLS_H as i32) * 6,
+        ..WorldgenParams::default()
+    }
+}
+
+fn stamp_scene(params: WorldgenParams) -> (World, Humidity, WorldgenParams) {
+    let mut world = World::new(params.seed);
+    stamp_world(&mut world, &params);
+    let mut humidity = Humidity::with_world_bounds(
+        HUMIDITY_TILE_COLS,
+        0,
+        params.bedrock_floor_y,
+        params.width_cols,
+        params.sky_ceiling_y,
+    );
+    humidity.wrap_x = params.wrap_x;
+    (world, humidity, params)
+}
+
+fn configs(params: &WorldgenParams) -> (RainConfig, EvapConfig, CondensationConfig, KarstConfig) {
+    let rain = RainConfig {
+        top_y: params.sky_ceiling_y - 2,
+        x_range: (0, params.width_cols - 1),
+        prob_per_col_per_tick: 0.02,
+        droplet_sat: 64,
+        seed_salt: 0xC10D_5EED,
+    };
+    let evap = EvapConfig::default();
+    let cond = CondensationConfig {
+        top_y: params.sky_ceiling_y - 3,
+        ..CondensationConfig::default()
+    };
+    let karst = KarstConfig::default();
+    (rain, evap, cond, karst)
+}
+
+fn finish_tick(world: &mut World) {
+    world.tick = world.tick.wrapping_add(1);
+    for chunk in world.chunks.values_mut() {
+        chunk.tick = chunk.tick.wrapping_add(1);
+        chunk.clear_dirty();
+    }
+}
+
+fn cell_count(params: &WorldgenParams) -> i64 {
+    let h = (params.sky_ceiling_y - params.bedrock_floor_y) as i64;
+    params.width_cols as i64 * h
+}
+
+fn ms_per(d: Duration, n: u64) -> f32 {
+    if n == 0 {
+        return 0.0;
+    }
+    d.as_secs_f32() * 1000.0 / n as f32
+}
+
+fn profile_label(label: &str, params: &WorldgenParams, chunks: usize) {
+    eprintln!(
+        "=== {label} ===  seed={:#x}  {}×{} cells (~{})  chunks={}  wrap={}  warm={} measure={}",
+        params.seed,
+        params.width_cols,
+        params.sky_ceiling_y - params.bedrock_floor_y,
+        cell_count(params),
+        chunks,
+        params.wrap_x,
+        WARMUP_TICKS,
+        MEASURE_TICKS
+    );
+}
+
+fn one_stack_tick(
+    world: &mut World,
+    humidity: &mut Humidity,
+    rain: &RainConfig,
+    evap: &EvapConfig,
+    cond: &CondensationConfig,
+    karst: &KarstConfig,
+    accum: Option<&mut PassAccum>,
+) {
+    match accum {
+        None => {
+            apply_rain(world, rain);
+            apply_evaporation_into_humidity(world, humidity, evap);
+            apply_condensation_rain(world, humidity, cond);
+            apply_karst_dissolution(world, karst);
+            apply_gravity_fall(world);
+            apply_lateral_spill(world);
+            apply_grain_fall(world);
+            finish_tick(world);
+            if humidity_diffuse_due(world.tick) {
+                humidity.diffuse(HUMIDITY_DIFFUSION_ALPHA);
+            }
+        }
+        Some(a) => {
+            let t0 = Instant::now();
+            apply_rain(world, rain);
+            a.rain += t0.elapsed();
+
+            let t0 = Instant::now();
+            apply_evaporation_into_humidity(world, humidity, evap);
+            a.evap += t0.elapsed();
+
+            let t0 = Instant::now();
+            apply_condensation_rain(world, humidity, cond);
+            a.condensation += t0.elapsed();
+
+            let t0 = Instant::now();
+            apply_karst_dissolution(world, karst);
+            a.karst += t0.elapsed();
+
+            let t0 = Instant::now();
+            apply_gravity_fall(world);
+            a.gravity += t0.elapsed();
+
+            let t0 = Instant::now();
+            apply_lateral_spill(world);
+            a.spill += t0.elapsed();
+
+            let t0 = Instant::now();
+            apply_grain_fall(world);
+            a.grain += t0.elapsed();
+
+            let t0 = Instant::now();
+            finish_tick(world);
+            a.finish += t0.elapsed();
+
+            if humidity_diffuse_due(world.tick) {
+                let t0 = Instant::now();
+                humidity.diffuse(HUMIDITY_DIFFUSION_ALPHA);
+                a.humidity_diffuse += t0.elapsed();
+                a.humidity_diffuse_calls += 1;
+            }
+        }
+    }
+}
+
+fn run_profile(label: &str, params: WorldgenParams) {
+    let (mut world, mut humidity, params) = stamp_scene(params);
+    let (rain, evap, cond, karst) = configs(&params);
+    let chunks = world.chunks.len();
+    profile_label(label, &params, chunks);
+
+    for _ in 0..WARMUP_TICKS {
+        one_stack_tick(
+            &mut world,
+            &mut humidity,
+            &rain,
+            &evap,
+            &cond,
+            &karst,
+            None,
+        );
+    }
+
+    let mut accum = PassAccum::zero();
+    let wall = Instant::now();
+    for _ in 0..MEASURE_TICKS {
+        one_stack_tick(
+            &mut world,
+            &mut humidity,
+            &rain,
+            &evap,
+            &cond,
+            &karst,
+            Some(&mut accum),
+        );
+    }
+    let wall = wall.elapsed();
+
+    let n = MEASURE_TICKS;
+    let cap = humidity
+        .bounds
+        .map(|b| b.tile_capacity())
+        .unwrap_or(0);
+    eprintln!("  wall                 {:>8.3} ms/tick  (total {:?})", ms_per(wall, n), wall);
+    eprintln!("  sum(passes)          {:>8.3} ms/tick", ms_per(accum.total(), n));
+    eprintln!("  ------------------------------------------------------------");
+    eprintln!("  rain                 {:>8.3} ms/tick", ms_per(accum.rain, n));
+    eprintln!("  evap→humidity        {:>8.3} ms/tick", ms_per(accum.evap, n));
+    eprintln!("  condensation         {:>8.3} ms/tick", ms_per(accum.condensation, n));
+    eprintln!("  karst                {:>8.3} ms/tick", ms_per(accum.karst, n));
+    eprintln!("  gravity_fall         {:>8.3} ms/tick", ms_per(accum.gravity, n));
+    eprintln!("  lateral_spill        {:>8.3} ms/tick", ms_per(accum.spill, n));
+    eprintln!("  grain_fall           {:>8.3} ms/tick", ms_per(accum.grain, n));
+    eprintln!(
+        "  humidity.diffuse     {:>8.3} ms/tick amortized  ({:.3} ms/call × {} calls)",
+        ms_per(accum.humidity_diffuse, n),
+        ms_per(accum.humidity_diffuse, accum.humidity_diffuse_calls.max(1)),
+        accum.humidity_diffuse_calls
+    );
+    eprintln!("  finish (dirty clear) {:>8.3} ms/tick", ms_per(accum.finish, n));
+    eprintln!(
+        "  humidity tiles={}/{}  humidity_mass={:.1}",
+        humidity.cells.len(),
+        cap,
+        humidity.total_mass()
+    );
+    eprintln!();
+}
+
+#[test]
+#[ignore]
+fn perf_profile_demo_and_stress() {
+    run_profile("demo (WorldgenParams::default)", demo_params());
+    run_profile("stress (32×6 chunks)", stress_params());
+}
