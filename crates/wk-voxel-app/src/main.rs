@@ -71,22 +71,25 @@ async fn main() {
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
 
-    // Rain cloud spans the full width just under the sky ceiling.
-    let rain_cfg = RainConfig {
-        top_y: scene.params.sky_ceiling_y - 2,
-        x_range: (0, scene.params.width_cols - 1),
-        prob_per_col_per_tick: 0.02,
-        droplet_sat: 64,
-        seed_salt: 0xC10D_5EED,
+    // Cloud row near the sky ceiling — high enough that the rain
+    // curtain doesn't sit on top of the mountains as a hard slab.
+    let cloud_cfg = |params: &WorldgenParams| {
+        let rain = RainConfig {
+            top_y: params.sky_ceiling_y - 2,
+            x_range: (0, params.width_cols - 1),
+            prob_per_col_per_tick: 0.02,
+            droplet_sat: 64,
+            seed_salt: 0xC10D_5EED,
+        };
+        let cond = CondensationConfig {
+            top_y: params.sky_ceiling_y - 3,
+            ..CondensationConfig::default()
+        };
+        (rain, cond)
     };
+    let (mut rain_cfg, mut cond_cfg) = cloud_cfg(&scene.params);
     let evap_cfg = EvapConfig::default();
     let karst_cfg = KarstConfig::default();
-    // Condensation rains one row *below* the cloud line so the droplet
-    // has a bit of air to fall through, which reads visually.
-    let cond_cfg = CondensationConfig {
-        top_y: scene.params.sky_ceiling_y - 3,
-        ..CondensationConfig::default()
-    };
 
     loop {
         // Input.
@@ -102,6 +105,7 @@ async fn main() {
                 seed: new_seed,
                 ..scene.params
             });
+            (rain_cfg, cond_cfg) = cloud_cfg(&scene.params);
         }
         if is_key_pressed(KeyCode::W) {
             rain_on = !rain_on;

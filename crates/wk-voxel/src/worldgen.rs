@@ -62,8 +62,9 @@ impl Default for WorldgenParams {
             width_cols: (CHUNK_CELLS_W as i32) * 16,
             bedrock_floor_y: 0,
             sea_level_y: 48,
-            // Extra sky headroom above the mountains.
-            sky_ceiling_y: (CHUNK_CELLS_H as i32) * 3,
+            // Tall sky so the rain / condensation cloud sits well
+            // above the terrain instead of reading as a low slab.
+            sky_ceiling_y: (CHUNK_CELLS_H as i32) * 4,
             // Solid floor barrier — thick enough to read as "the
             // bottom of the world" in the demo.
             bedrock_thickness: 8,
