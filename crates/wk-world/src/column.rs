@@ -532,12 +532,13 @@ impl Column {
         y
     }
 
-    /// Hydraulic head for a dry neighbour: the solid bed under any
-    /// snow/ice/water cap. Using raw `surface_y` here makes a snow bank
-    /// look like a tall dam, so adjacent lake water never spills and
-    /// freezes into a vertical wall along the snow line.
+    /// Hydraulic head for a dry neighbour: the solid rock/soil bed under
+    /// any snow/ice/water cap *and* cavity height. Using void-inflated
+    /// `climate_elevation` here made dry karst mouths look like tall dams
+    /// (and disagreed with [`Self::flowable_water`]'s solid-bed free
+    /// surface). Using raw `surface_y` made snow banks into dams.
     pub fn hydraulic_bed_y(&self) -> f32 {
-        self.climate_elevation()
+        self.solid_bed_y()
     }
 
     /// Elevation of the solid rock/soil surface, excluding weather fluids
@@ -1478,6 +1479,50 @@ mod tests {
             col.cover_light_factor() < 0.02,
             "deep snow should block nearly all light, got {}",
             col.cover_light_factor()
+        );
+    }
+
+    #[test]
+    fn land_puddle_height_matches_render_math() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 50_000, 0); // tall sand
+        col.deposit_to_top(MaterialId::Water, 857, 1);
+        let h = col.mass_to_height_delta(MaterialId::Water, 857);
+        assert!((h - 3.428).abs() < 0.01, "h={h}");
+        let (top, mass) = col.flowable_water().unwrap();
+        assert_eq!(mass, 857);
+        // void-free: free surface must match surface_y
+        assert!(
+            (top - col.surface_y).abs() < 1e-3,
+            "top={top} surface_y={}",
+            col.surface_y
+        );
+        assert!((col.solid_bed_y() + h - top).abs() < 1e-3);
+    }
+
+    #[test]
+    fn flowable_top_with_void_diverges_from_surface_y() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 50_000, 0);
+        let bed_before = col.surface_y;
+        col.voids.push(Void {
+            top_y: bed_before,
+            height_m: 10.0,
+            water_mass: 0,
+            roof_material: MaterialId::Sand,
+            origin: VoidOrigin::Karst,
+            light: 0,
+        });
+        col.recompute_surface_y(0.0);
+        col.deposit_to_top(MaterialId::Water, 857, 1);
+        let h = col.mass_to_height_delta(MaterialId::Water, 857);
+        let (top, _) = col.flowable_water().unwrap();
+        let gap = col.surface_y - top;
+        assert!(
+            (gap - 10.0).abs() < 0.05,
+            "expected ~10m gap from voids, got gap={gap} surface={} top={top} solid_bed={} h={h}",
+            col.surface_y,
+            col.solid_bed_y(),
         );
     }
 }
