@@ -18,4 +18,4 @@ pub use cell::{water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use grid::World;
 pub use heatmap::Heatmap;
-pub use rules::{apply_gravity_fall, tick};
+pub use rules::{apply_gravity_fall, apply_lateral_spill, tick};
