@@ -26,7 +26,15 @@ fn voids_overlap(a_top: f32, a_bot: f32, b_top: f32, b_bot: f32) -> bool {
 }
 
 /// Drain surface / flowable water into voids that breach the surface.
+///
+/// Coastal / oceanic columns are skipped via `solid_bed_y < coastal_limit`
+/// (mean sea + tide amplitude + 2 m splash buffer). Lit sea-cliff mouths
+/// used to swallow ~35% of standing water every tick, then lake-level /
+/// tide refilled — a persistent pump that notched the free surface.
 pub fn run_surface_void_capture(world: &mut World) {
+    // High-tide + buffer: mouths on the splash zone still saw capture under
+    // a bare "solid_bed < sea" gate and kept pumping with each swell.
+    let coastal_limit = world.sea_level + world.tide_amplitude_m.abs() + 2.0;
     let coords: Vec<i32> = world.chunks.keys().copied().collect();
     for coord in coords {
         let Some(chunk) = world.chunks.get_mut(&coord) else {
@@ -34,6 +42,9 @@ pub fn run_surface_void_capture(world: &mut World) {
         };
         for i in 0..CHUNK_W {
             let col = &mut chunk.columns[i];
+            if col.solid_bed_y() < coastal_limit {
+                continue;
+            }
             let available = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
             if available <= 0 {
                 continue;

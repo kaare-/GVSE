@@ -56,9 +56,11 @@ fn draw_terrain_column(
     saturation: f32,
     leaf_area: f32,
 ) {
-    // Paint solid layers from the surface down, inserting void cutouts at
-    // their absolute elevations so caves read as dark bands (with pooled
-    // water when present).
+    // Paint layers from the surface down. Void cutouts apply to *solids*
+    // only — never to the weather fluid cap (Water/Ice/Snow). Open mouths
+    // / karst growth can leave `void.top_y >= surface_y`; cutting those
+    // voids in first hid the Water layer underground while the inspector
+    // still listed it as layer [0] (land puddles looked dry).
     let mut void_bands: Vec<(f32, f32, i64, u8)> = voids.to_vec();
     void_bands.sort_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
 
@@ -68,13 +70,18 @@ fn draw_terrain_column(
         if thickness <= 0 {
             continue;
         }
+        let is_fluid = matches!(
+            mat,
+            MaterialId::Water | MaterialId::Ice | MaterialId::Snow
+        );
         let mut remaining_m = {
             let density = MaterialRegistry::props(mat).density.max(1) as f32;
             (thickness as f32 / density) / SAMPLE_WIDTH_M
         };
         while remaining_m > 1e-5 {
-            // If a void starts at/above current y, paint it first.
-            if vi < void_bands.len() {
+            // If a void starts at/above current y, paint it first — but
+            // only once we're into the solid stack.
+            if !is_fluid && vi < void_bands.len() {
                 let (vtop, vh, vwater, vlight) = void_bands[vi];
                 if vtop >= y_m - 1e-3 {
                     let top_px = world_y_to_screen(vtop.min(y_m), sea_level, sh, camera_y_offset);
@@ -111,8 +118,13 @@ fn draw_terrain_column(
                     continue;
                 }
             }
-            // Paint solid down to the next void top (or all remaining).
-            let next_void_top = void_bands.get(vi).map(|v| v.0);
+            // Paint down to the next void top (solids) or all remaining
+            // (fluids ignore voids so the free surface stays visible).
+            let next_void_top = if is_fluid {
+                None
+            } else {
+                void_bands.get(vi).map(|v| v.0)
+            };
             let paint_m = match next_void_top {
                 Some(vt) if vt < y_m => (y_m - vt).min(remaining_m),
                 _ => remaining_m,
@@ -495,7 +507,8 @@ pub fn draw_frame(
             let bot_px = if col.surface_water > 0 {
                 let water_h_m =
                     (col.surface_water as f32 / water_density) / SAMPLE_WIDTH_M;
-                let bed_y = col.surface_y - water_h_m;
+                let void_h_m: f32 = col.voids.iter().map(|(_, h, _, _)| h.max(0.0)).sum();
+                let bed_y = col.surface_y - water_h_m - void_h_m;
                 world_y_to_screen(bed_y, snap.sea_level, sh, camera_y_offset)
             } else {
                 col_bedrock_px
@@ -522,9 +535,15 @@ pub fn draw_frame(
             continue;
         }
         let water_h_m = (col.surface_water as f32 / water_density) / SAMPLE_WIDTH_M;
-        let bed_y = col.surface_y - water_h_m;
-        // True ocean = seabed below sea. Headlands / islands / coastal
-        // rock (seabed at or above sea) keep their physical render.
+        // Seabed for the flat-ocean gate must match hydrology's solid bed:
+        // `surface_y - water` still includes cavity height, so karst mouths
+        // looked like headlands and skipped the overlay (spiky land water
+        // over a submerged bed). Subtract void heights to get solid_bed.
+        let void_h_m: f32 = col.voids.iter().map(|(_, h, _, _)| h.max(0.0)).sum();
+        let bed_y = col.surface_y - water_h_m - void_h_m;
+        // True ocean = solid seabed below sea. Headlands / islands /
+        // hilltop puddles (solid bed at or above sea) keep their physical
+        // layer render — including land ponds over open voids.
         if bed_y >= sea_top_m - 0.25 {
             continue;
         }

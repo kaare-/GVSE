@@ -364,33 +364,28 @@ impl Column {
     /// sideways when a neighbouring column has a lower water surface.
     /// The snow just settles onto whatever's left as the water leaves.
     pub fn flowable_water(&self) -> Option<(f32, i64)> {
-        let mut y = self.surface_y;
-        let mut water_top_y: Option<f32> = None;
         let mut total_water = 0i64;
         for j in 0..self.layer_count as usize {
             let m = self.layers[j].material;
-            let h = self.mass_to_height_delta(m, self.layers[j].thickness);
             match m {
-                MaterialId::Water => {
-                    if water_top_y.is_none() {
-                        water_top_y = Some(y);
-                    }
-                    total_water += self.layers[j].thickness;
-                }
+                MaterialId::Water => total_water += self.layers[j].thickness,
                 MaterialId::Snow | MaterialId::Ice => {
                     // Cap material. Doesn't seal the water below —
                     // water can still flow sideways out from under it.
-                    // The cap ends up sitting on whatever's exposed
-                    // once the water drains (density-settle sorts it).
                 }
-                _ => {
-                    // Hit solid substrate — stop looking.
-                    break;
-                }
+                _ => break,
             }
-            y -= h;
         }
-        water_top_y.map(|top| (top, total_water))
+        if total_water <= 0 {
+            return None;
+        }
+        // Free-surface elevation rests on the solid bed — not on
+        // `surface_y`, which still adds cavity height. Counting voids as
+        // "ground" made shoreline karst mouths sit metres above their
+        // neighbours, so lake-level drained those columns and algae rode
+        // a notched / wavy free surface into the air.
+        let h = self.mass_to_height_delta(MaterialId::Water, total_water);
+        Some((self.solid_bed_y() + h, total_water))
     }
 
     /// Remove up to `mass` kg from the *flowable* Water layer inside
@@ -537,12 +532,21 @@ impl Column {
         y
     }
 
-    /// Hydraulic head for a dry neighbour: the solid bed under any
-    /// snow/ice/water cap. Using raw `surface_y` here makes a snow bank
-    /// look like a tall dam, so adjacent lake water never spills and
-    /// freezes into a vertical wall along the snow line.
+    /// Hydraulic head for a dry neighbour: the solid rock/soil bed under
+    /// any snow/ice/water cap *and* cavity height. Using void-inflated
+    /// `climate_elevation` here made dry karst mouths look like tall dams
+    /// (and disagreed with [`Self::flowable_water`]'s solid-bed free
+    /// surface). Using raw `surface_y` made snow banks into dams.
     pub fn hydraulic_bed_y(&self) -> f32 {
-        self.climate_elevation()
+        self.solid_bed_y()
+    }
+
+    /// Elevation of the solid rock/soil surface, excluding weather fluids
+    /// *and* cavity height. `climate_elevation` still includes voids
+    /// (they inflate `surface_y`), which made submerged limestone with
+    /// sea-cliff mouths look "emergent" for karst / void-capture gates.
+    pub fn solid_bed_y(&self) -> f32 {
+        self.climate_elevation() - self.void_height_total()
     }
 
     /// 0..1 sky transmittance through snow/ice sitting in the fluid cap.
@@ -1099,16 +1103,26 @@ impl Column {
 
     /// Drain up to `mass` kg of top/flowable water into open voids.
     /// Returns kg moved into voids.
+    ///
+    /// Only geometrically open mouths (`open_to_surface` vs the solid
+    /// ground under any pond) capture. The old `light > 200` latch let
+    /// worldgen sea-cliff / karst alcoves keep swallowing water forever
+    /// — including after they flooded — which pumped the shoreline.
+    /// Callers that must protect the coast should also gate with
+    /// [`Self::solid_bed_y`] vs sea level before calling.
     pub fn drain_surface_water_into_voids(&mut self, mass: i64) -> i64 {
         if mass <= 0 {
             return 0;
         }
-        let surface = self.surface_y;
+        // Judge openness against the solid/cavity stack top (climate
+        // elevation strips standing water). Using free-water `surface_y`
+        // would make every pond seal its own sinkhole mouth.
+        let ground = self.climate_elevation();
         let open: Vec<usize> = self
             .voids
             .iter()
             .enumerate()
-            .filter(|(_, v)| v.open_to_surface(surface) || v.light > 200)
+            .filter(|(_, v)| v.open_to_surface(ground))
             .map(|(i, _)| i)
             .collect();
         if open.is_empty() {
@@ -1130,7 +1144,6 @@ impl Column {
                 break;
             }
             self.voids[i].water_mass += take;
-            self.voids[i].light = self.voids[i].light.max(220);
             remaining -= take;
             moved += take;
         }
@@ -1466,6 +1479,50 @@ mod tests {
             col.cover_light_factor() < 0.02,
             "deep snow should block nearly all light, got {}",
             col.cover_light_factor()
+        );
+    }
+
+    #[test]
+    fn land_puddle_height_matches_render_math() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 50_000, 0); // tall sand
+        col.deposit_to_top(MaterialId::Water, 857, 1);
+        let h = col.mass_to_height_delta(MaterialId::Water, 857);
+        assert!((h - 3.428).abs() < 0.01, "h={h}");
+        let (top, mass) = col.flowable_water().unwrap();
+        assert_eq!(mass, 857);
+        // void-free: free surface must match surface_y
+        assert!(
+            (top - col.surface_y).abs() < 1e-3,
+            "top={top} surface_y={}",
+            col.surface_y
+        );
+        assert!((col.solid_bed_y() + h - top).abs() < 1e-3);
+    }
+
+    #[test]
+    fn flowable_top_with_void_diverges_from_surface_y() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 50_000, 0);
+        let bed_before = col.surface_y;
+        col.voids.push(Void {
+            top_y: bed_before,
+            height_m: 10.0,
+            water_mass: 0,
+            roof_material: MaterialId::Sand,
+            origin: VoidOrigin::Karst,
+            light: 0,
+        });
+        col.recompute_surface_y(0.0);
+        col.deposit_to_top(MaterialId::Water, 857, 1);
+        let h = col.mass_to_height_delta(MaterialId::Water, 857);
+        let (top, _) = col.flowable_water().unwrap();
+        let gap = col.surface_y - top;
+        assert!(
+            (gap - 10.0).abs() < 0.05,
+            "expected ~10m gap from voids, got gap={gap} surface={} top={top} solid_bed={} h={h}",
+            col.surface_y,
+            col.solid_bed_y(),
         );
     }
 }

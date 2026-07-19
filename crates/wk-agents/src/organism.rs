@@ -346,20 +346,11 @@ pub fn water_band(col: &Column) -> Option<(f32, f32)> {
     if mass <= 0 {
         return None;
     }
-    let mut y = col.surface_y;
-    for j in 0..col.layer_count as usize {
-        let m = col.layers[j].material;
-        let h = col.mass_to_height_delta(m, col.layers[j].thickness);
-        match m {
-            MaterialId::Water | MaterialId::Snow | MaterialId::Ice => {
-                y -= h;
-            }
-            _ => {
-                return Some((top, y));
-            }
-        }
-    }
-    Some((top, y))
+    // Bed is solid_bed under the flowable water column — *not* a
+    // `surface_y` walk, which still counts cavity height and inverted
+    // the band (top < bed) after `flowable_water` moved onto solid_bed.
+    let bed = top - col.mass_to_height_delta(MaterialId::Water, mass);
+    Some((top, bed.min(top)))
 }
 
 /// Density relative to water: `0` bias → buoyant (0.55), `1` → heavy (1.45).
