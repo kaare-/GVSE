@@ -24,10 +24,11 @@
 //! - `T` — toggle temperature heatmap overlay
 //! - `F1` — toggle the bottom tool / hotkey line
 //! - `F2` — creature editor (Set A MS-Paint; `C` stays condensation here)
+//! - `Tab` — live settings (materials, wind, clouds, day/night, temp, …)
 //! - click — block / organism inspector
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
-//! - `Esc` — quit (or cancel spawn / close editor)
+//! - `Esc` — quit (or cancel spawn / close editor / close settings)
 //!
 //! Sky follows the shared climate clock (sun by day, moon by night).
 //! Temperature tiles warm with sun, cool at night, and shade under clouds.
@@ -36,20 +37,21 @@ mod editor;
 mod inspector;
 mod palette;
 mod scene;
+mod settings;
 
 use macroquad::prelude::*;
 use wk_voxel::{
     apply_condensation_rain_with_orographic, apply_evaporation_into_humidity,
-    apply_karst_dissolution, apply_rain, celestial_screen_pos, continental_surface_y,
-    day_night_factor, humidity_diffuse_due, is_daytime, is_standing_water, sky_rgb,
-    sky_rgb_at_height, temperature_step_due, tick, CondensationConfig, EvapConfig, KarstConfig,
-    OrographicConfig, RainConfig, WorldgenParams,
+    apply_karst_dissolution, apply_rain, celestial_screen_pos_cfg, continental_surface_y,
+    day_night_factor_cfg, humidity_diffuse_due, is_daytime_cfg, is_standing_water, sky_rgb,
+    sky_rgb_at_height, temperature_step_due, tick, ClimateConfig, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
 use crate::inspector::{draw_block_inspector, draw_selection_outline, screen_to_world};
 use crate::palette::cell_color;
 use crate::scene::Scene;
+use crate::settings::SimSettings;
 
 fn window_conf() -> Conf {
     Conf {
@@ -107,8 +109,8 @@ fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
 }
 
 /// Day/night sky gradient + sun or moon arc.
-fn draw_sky(tick: u64, sw: f32, sh: f32) {
-    let dn = day_night_factor(tick);
+fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
+    let dn = day_night_factor_cfg(tick, climate);
     const BANDS: i32 = 28;
     for i in 0..BANDS {
         let y0 = sh * (i as f32) / BANDS as f32;
@@ -123,8 +125,8 @@ fn draw_sky(tick: u64, sw: f32, sh: f32) {
             Color::from_rgba(r, g, b, 255),
         );
     }
-    let (cx, cy) = celestial_screen_pos(tick, sw, sh);
-    if is_daytime(tick) {
+    let (cx, cy) = celestial_screen_pos_cfg(tick, sw, sh, climate);
+    if is_daytime_cfg(tick, climate) {
         draw_circle(cx, cy, 22.0, Color::from_rgba(255, 200, 70, 60));
         draw_circle(cx, cy, 16.0, Color::from_rgba(255, 220, 90, 255));
         draw_circle(cx, cy, 10.0, Color::from_rgba(255, 245, 180, 255));
@@ -298,6 +300,8 @@ mod overlay_tests {
 async fn main() {
     let params = WorldgenParams::default();
     let mut scene = Scene::new(params);
+    let mut settings = SimSettings::new(&scene.params);
+    settings.apply_material_overrides();
     let mut paused = false;
     // Climatic drizzle is physics-only by default — sky pixels hide thin
     // wet Air so the old rain-streak look doesn't paint over the sky.
@@ -313,41 +317,11 @@ async fn main() {
     let mut show_tool_line = true;
     let mut editor = CreatureEditor::default();
     let mut inspect: Option<(i32, i32)> = None;
-    // Fraction of pairwise humidity difference transferred per tick.
-    // 0.15 gives a visible "clouds spread as they drift" feel
-    // without going near the 0.25 stability cap.
-    let humidity_diffusion_alpha: f32 = 0.15;
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
 
-    // Cloud row at the topmost stamped cell so no empty air (sky-blue
-    // clear colour) peeks above the rain band.
-    let cloud_cfg = |params: &WorldgenParams| {
-        let rain = RainConfig {
-            top_y: params.sky_ceiling_y - 1,
-            x_range: (0, params.width_cols - 1),
-            prob_per_col_per_tick: 0.02,
-            droplet_sat: 64,
-            seed_salt: 0xC10D_5EED,
-        };
-        let cond = CondensationConfig {
-            top_y: params.sky_ceiling_y - 2,
-            ..CondensationConfig::default()
-        };
-        (rain, cond)
-    };
-    let (mut rain_cfg, mut cond_cfg) = cloud_cfg(&scene.params);
-    // Evaporate every few ticks so ocean/land films aren't vacuumed
-    // into humidity faster than storms can return water.
-    let evap_cfg = EvapConfig {
-        rate_per_tick: 1,
-        dry_above_max: 200,
-        period_ticks: 5,
-    };
-    let karst_cfg = KarstConfig::default();
-
     loop {
-        // Esc: spawn cancel → close editor → quit.
+        // Esc: spawn cancel → close editor → close settings → quit.
         if is_key_pressed(KeyCode::Escape) {
             if editor.open && editor.spawn_picker {
                 editor.spawn_picker = false;
@@ -356,6 +330,8 @@ async fn main() {
                 editor.open = false;
                 editor.spawn_picker = false;
                 paused = editor.was_paused;
+            } else if settings.open {
+                settings.open = false;
             } else {
                 break;
             }
@@ -363,12 +339,16 @@ async fn main() {
         if is_key_pressed(KeyCode::F1) {
             show_tool_line = !show_tool_line;
         }
+        if is_key_pressed(KeyCode::Tab) && !editor.open {
+            settings.open = !settings.open;
+        }
         // Editor is F2 only — `C` is condensation in the voxel demo
         // (column-GVSE can use C/F2 because it has no condensation toggle).
         if is_key_pressed(KeyCode::F2) {
             let opening = !editor.open;
             editor.toggle(paused);
             if opening {
+                settings.open = false;
                 paused = true;
             } else {
                 paused = editor.was_paused;
@@ -378,7 +358,7 @@ async fn main() {
             editor.handle_input();
         }
 
-        if !editor.open || editor.spawn_picker {
+        if (!editor.open || editor.spawn_picker) && !settings.open {
             if is_key_pressed(KeyCode::Space) {
                 paused = !paused;
             }
@@ -388,7 +368,7 @@ async fn main() {
                     seed: new_seed,
                     ..scene.params
                 });
-                (rain_cfg, cond_cfg) = cloud_cfg(&scene.params);
+                settings.on_world_reseed(&scene.params);
                 inspect = None;
             }
             if is_key_pressed(KeyCode::W) {
@@ -436,17 +416,26 @@ async fn main() {
             cam_x = cam_x.rem_euclid(world_w_px_for_wrap);
         }
 
+        // Sync live settings into scene subsystems.
+        scene.wind.climate_vx = settings.wind_vx;
+        scene.temperature.config = settings.temp;
+        scene.temperature.climate = settings.climate;
+        settings.oro.seed = scene.params.seed;
+        settings.oro.width_cols = scene.params.width_cols;
+        settings.oro.sea_level_y = scene.params.sea_level_y;
+        settings.oro.wind_sign = if settings.wind_vx >= 0.0 { 1 } else { -1 };
+
         // Physics (frozen while the paint editor is open, not spawn).
         let sim_paused = paused || (editor.open && !editor.spawn_picker);
         if !sim_paused {
             if rain_on {
-                apply_rain(&mut scene.world, &rain_cfg);
+                apply_rain(&mut scene.world, &settings.rain);
             }
             if evap_on {
                 apply_evaporation_into_humidity(
                     &mut scene.world,
                     &mut scene.humidity,
-                    &evap_cfg,
+                    &settings.evap,
                 );
             }
             // Vapor drifts with the wind, then coagulates into cloud
@@ -462,38 +451,28 @@ async fn main() {
                 scene.params.sea_level_y,
                 scene.params.sky_ceiling_y,
                 tick_no,
+                &settings.cloud,
             );
             // Light drizzle from leftover vapor (clouds do the downpours).
             if cond_rain_on {
-                let drizzle = CondensationConfig {
-                    min_mass_to_rain: 140.0,
-                    max_prob_per_tick: 0.10,
-                    mass_per_droplet: 40.0,
-                    ..cond_cfg
-                };
-                let oro = OrographicConfig {
-                    seed: scene.params.seed,
-                    width_cols: scene.params.width_cols,
-                    sea_level_y: scene.params.sea_level_y,
-                    wind_sign: if scene.wind.climate_vx >= 0.0 { 1 } else { -1 },
-                    ..OrographicConfig::default()
-                };
                 apply_condensation_rain_with_orographic(
                     &mut scene.world,
                     &mut scene.humidity,
-                    &drizzle,
-                    Some(&oro),
+                    &settings.cond,
+                    Some(&settings.oro),
                 );
             }
             if karst_on {
-                apply_karst_dissolution(&mut scene.world, &karst_cfg);
+                apply_karst_dissolution(&mut scene.world, &settings.karst);
             }
             tick(&mut scene.world);
             // Atmospheric diffusion is periodic (column-GVSE
             // HumidityField cadence: every 20 ticks). Evap still
             // deposits every tick; only the spread step is throttled.
             if humidity_diffuse_due(scene.world.tick) {
-                scene.humidity.diffuse(humidity_diffusion_alpha);
+                scene
+                    .humidity
+                    .diffuse(settings.humidity_diffusion_alpha);
             }
             if temperature_step_due(scene.world.tick) {
                 let tick_no = scene.world.tick;
@@ -501,14 +480,16 @@ async fn main() {
             }
             if organisms_on {
                 let tick_no = scene.world.tick;
-                scene.organisms.step(&mut scene.world, tick_no);
+                scene
+                    .organisms
+                    .step_with_climate(&mut scene.world, tick_no, &settings.climate);
             }
         }
 
         // Render.
         let sw = screen_width();
         let sh = screen_height();
-        draw_sky(scene.world.tick, sw, sh);
+        draw_sky(scene.world.tick, sw, sh, &settings.climate);
         let cell_px = PX_PER_CELL;
         let hud_h = hud_height(show_tool_line);
         // Convert screen space to world cell range, centred on the
@@ -739,9 +720,10 @@ async fn main() {
 
         // Creature editor overlay (paint UI, or spawn banner).
         editor.draw();
+        settings.draw();
 
         // HUD: info line always; tool / hotkey line toggled with F1.
-        let tod = if is_daytime(scene.world.tick) {
+        let tod = if is_daytime_cfg(scene.world.tick, &settings.climate) {
             "day"
         } else {
             "night"
@@ -764,7 +746,7 @@ async fn main() {
         draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
         if show_tool_line {
             draw_text(
-                "Space|R|W rain|C drizzle|E/K/O|N clouds|T temp|H haze|F1|F2 editor|Esc",
+                "Tab settings|Space|R|W rain|C drizzle|E/K/O|N clouds|T temp|H haze|F1|F2|Esc",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

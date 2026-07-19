@@ -180,8 +180,64 @@ pub struct MaterialProps {
 
 pub struct MaterialRegistry;
 
+/// Runtime overrides for hydrology tuning (permeability / porosity).
+/// Cleared via [`MaterialRegistry::clear_hydro_overrides`].
+#[derive(Debug, Clone, Copy, Default)]
+struct HydroOverride {
+    permeability: Option<u8>,
+    porosity: Option<u8>,
+}
+
+fn hydro_overrides() -> &'static std::sync::RwLock<[HydroOverride; 12]> {
+    use std::sync::{OnceLock, RwLock};
+    static CELL: OnceLock<RwLock<[HydroOverride; 12]>> = OnceLock::new();
+    CELL.get_or_init(|| RwLock::new([HydroOverride::default(); 12]))
+}
+
 impl MaterialRegistry {
+    /// Effective props = base table + optional hydrology overrides.
     pub fn props(material: MaterialId) -> MaterialProps {
+        let mut p = Self::base_props(material);
+        let i = material as usize;
+        if let Ok(guard) = hydro_overrides().read() {
+            if let Some(o) = guard.get(i) {
+                if let Some(v) = o.permeability {
+                    p.permeability = v;
+                }
+                if let Some(v) = o.porosity {
+                    p.porosity = v;
+                }
+            }
+        }
+        p
+    }
+
+    /// Override permeability (0–255). Used by the voxel settings menu.
+    pub fn set_permeability_override(material: MaterialId, value: u8) {
+        if let Ok(mut guard) = hydro_overrides().write() {
+            if let Some(slot) = guard.get_mut(material as usize) {
+                slot.permeability = Some(value);
+            }
+        }
+    }
+
+    /// Override porosity / water capacity for solids (0–255).
+    pub fn set_porosity_override(material: MaterialId, value: u8) {
+        if let Ok(mut guard) = hydro_overrides().write() {
+            if let Some(slot) = guard.get_mut(material as usize) {
+                slot.porosity = Some(value);
+            }
+        }
+    }
+
+    pub fn clear_hydro_overrides() {
+        if let Ok(mut guard) = hydro_overrides().write() {
+            *guard = [HydroOverride::default(); 12];
+        }
+    }
+
+    /// Compile-time material table (ignores runtime overrides).
+    pub fn base_props(material: MaterialId) -> MaterialProps {
         match material {
             MaterialId::Bedrock => MaterialProps {
                 density: 2700,

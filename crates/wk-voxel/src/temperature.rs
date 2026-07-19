@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
-use crate::climate::day_night_factor;
+use crate::climate::{day_night_factor_cfg, ClimateConfig};
 use crate::humidity::{Humidity, TileBounds};
 use crate::worldgen::continental_surface_y;
 
@@ -25,17 +25,39 @@ pub fn temperature_step_due(tick: u64) -> bool {
     tick % TEMP_STEP_PERIOD == TEMP_STEP_PHASE
 }
 
-const BASE_TEMP_C: f32 = 18.0;
-const SEA_BIAS_C: f32 = -2.0;
-const LAND_DAY_BUMP_C: f32 = 1.5;
-const LAPSE_C: f32 = 0.08;
-const DAY_AMP_C: f32 = 6.0;
-const SOLAR_HEAT_C: f32 = 0.40;
-const NIGHT_COOL_C: f32 = 0.30;
-const CLOUD_SHADE: f32 = 0.55;
-const HUM_SHADE_REF: f32 = 80.0;
-const SKY_RELAX: f32 = 0.10;
-const DIFFUSE_ALPHA: f32 = 0.12;
+/// Live-tunable temperature / solar knobs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct TempConfig {
+    pub base_temp_c: f32,
+    pub sea_bias_c: f32,
+    pub land_day_bump_c: f32,
+    pub lapse_c: f32,
+    pub day_amp_c: f32,
+    pub solar_heat_c: f32,
+    pub night_cool_c: f32,
+    pub cloud_shade: f32,
+    pub hum_shade_ref: f32,
+    pub sky_relax: f32,
+    pub diffuse_alpha: f32,
+}
+
+impl Default for TempConfig {
+    fn default() -> Self {
+        Self {
+            base_temp_c: 18.0,
+            sea_bias_c: -2.0,
+            land_day_bump_c: 1.5,
+            lapse_c: 0.08,
+            day_amp_c: 6.0,
+            solar_heat_c: 0.40,
+            night_cool_c: 0.30,
+            cloud_shade: 0.55,
+            hum_shade_ref: 80.0,
+            sky_relax: 0.10,
+            diffuse_alpha: 0.12,
+        }
+    }
+}
 
 /// Sparse (but usually dense-filled) temperature field in °C.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +69,10 @@ pub struct Temperature {
     pub seed: u64,
     pub width_cols: i32,
     pub sea_level_y: i32,
+    #[serde(default)]
+    pub config: TempConfig,
+    #[serde(default)]
+    pub climate: ClimateConfig,
 }
 
 impl Temperature {
@@ -70,6 +96,8 @@ impl Temperature {
             seed,
             width_cols: width_cols.max(1),
             sea_level_y,
+            config: TempConfig::default(),
+            climate: ClimateConfig::default(),
         };
         t.fill_initial(0);
         t
@@ -104,7 +132,10 @@ impl Temperature {
     }
 
     pub fn at_tile(&self, hx: i32, hy: i32) -> f32 {
-        *self.cells.get(&(hx, hy)).unwrap_or(&BASE_TEMP_C)
+        *self
+            .cells
+            .get(&(hx, hy))
+            .unwrap_or(&self.config.base_temp_c)
     }
 
     pub fn at_cell(&self, gx: i32, gy: i32) -> f32 {
@@ -114,7 +145,7 @@ impl Temperature {
 
     pub fn mean(&self) -> f32 {
         if self.cells.is_empty() {
-            return BASE_TEMP_C;
+            return self.config.base_temp_c;
         }
         self.cells.values().sum::<f32>() / self.cells.len() as f32
     }
@@ -150,11 +181,13 @@ impl Temperature {
     /// Target skin temperature for a tile at climate phase `tick`.
     pub fn skin_temp(&self, hx: i32, hy: i32, tick: u64) -> f32 {
         let _ = hy;
-        let dn = day_night_factor(tick);
+        let cfg = &self.config;
+        let dn = day_night_factor_cfg(tick, &self.climate);
         let land = self.land_factor(hx);
         let elev = self.elev_cells(hx);
-        let sea_land = SEA_BIAS_C * (1.0 - land) + LAND_DAY_BUMP_C * land * dn.max(0.0);
-        BASE_TEMP_C + sea_land - LAPSE_C * elev + DAY_AMP_C * dn
+        let sea_land =
+            cfg.sea_bias_c * (1.0 - land) + cfg.land_day_bump_c * land * dn.max(0.0);
+        cfg.base_temp_c + sea_land - cfg.lapse_c * elev + cfg.day_amp_c * dn
     }
 
     /// One climate-driven temperature step + light diffusion.
@@ -162,19 +195,20 @@ impl Temperature {
         if self.cells.is_empty() {
             self.fill_initial(tick);
         }
-        let dn = day_night_factor(tick);
+        let dn = day_night_factor_cfg(tick, &self.climate);
+        let cfg = self.config;
         let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
         for (hx, hy) in keys {
-            let shade = (humidity.at_tile(hx, hy) / HUM_SHADE_REF).clamp(0.0, 1.0);
-            let solar = SOLAR_HEAT_C * dn.max(0.0) * (1.0 - CLOUD_SHADE * shade);
-            let cool = NIGHT_COOL_C * (-dn).max(0.0);
+            let shade = (humidity.at_tile(hx, hy) / cfg.hum_shade_ref.max(1.0)).clamp(0.0, 1.0);
+            let solar = cfg.solar_heat_c * dn.max(0.0) * (1.0 - cfg.cloud_shade * shade);
+            let cool = cfg.night_cool_c * (-dn).max(0.0);
             let skin = self.skin_temp(hx, hy, tick);
             let t = self.at_tile(hx, hy);
             let mut next = t + solar - cool;
-            next = next + (skin - next) * SKY_RELAX;
+            next = next + (skin - next) * cfg.sky_relax;
             self.cells.insert((hx, hy), next);
         }
-        self.diffuse(DIFFUSE_ALPHA);
+        self.diffuse(cfg.diffuse_alpha);
     }
 
     /// Pairwise temperature diffusion (does not prune tiles — cold air
@@ -189,11 +223,12 @@ impl Temperature {
         sources.sort_unstable();
         sources.dedup();
         let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        let base = self.config.base_temp_c;
         for &(hx, hy) in &sources {
-            let val = *snap.get(&(hx, hy)).unwrap_or(&BASE_TEMP_C);
+            let val = *snap.get(&(hx, hy)).unwrap_or(&base);
             if let Some(nx) = self.wrap_hx(hx + 1) {
                 if self.accepts(nx, hy) && nx != hx {
-                    let n_val = *snap.get(&(nx, hy)).unwrap_or(&BASE_TEMP_C);
+                    let n_val = *snap.get(&(nx, hy)).unwrap_or(&base);
                     let flow = (val - n_val) * alpha;
                     if flow.abs() >= 1e-9 {
                         *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
@@ -203,7 +238,7 @@ impl Temperature {
             }
             let n_key = (hx, hy + 1);
             if self.accepts(n_key.0, n_key.1) {
-                let n_val = *snap.get(&n_key).unwrap_or(&BASE_TEMP_C);
+                let n_val = *snap.get(&n_key).unwrap_or(&base);
                 let flow = (val - n_val) * alpha;
                 if flow.abs() >= 1e-9 {
                     *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
@@ -213,7 +248,7 @@ impl Temperature {
         }
         for (k, d) in deltas {
             if self.accepts(k.0, k.1) {
-                *self.cells.entry(k).or_insert(BASE_TEMP_C) += d;
+                *self.cells.entry(k).or_insert(base) += d;
             }
         }
     }
@@ -274,7 +309,9 @@ mod tests {
         if let Some(b) = h_cloud.bounds {
             for hy in b.hy_min..=b.hy_max {
                 for hx in b.hx_min..=b.hx_max {
-                    h_cloud.cells.insert((hx, hy), HUM_SHADE_REF * 2.0);
+                    h_cloud
+                        .cells
+                        .insert((hx, hy), TempConfig::default().hum_shade_ref * 2.0);
                 }
             }
         }

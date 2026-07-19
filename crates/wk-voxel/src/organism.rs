@@ -20,7 +20,7 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::cell::Cell;
-use crate::climate::{day_factor, phase_fraction, DEMO_DAY_TICKS};
+use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::grid::World;
 
 /// Soft cap — blooms should stay readable at 1×.
@@ -256,11 +256,15 @@ impl OrganismStore {
     /// One Set A step: buoyancy, light harvest, upkeep, fission, death,
     /// then a light contact bounce.
     pub fn step(&mut self, world: &mut World, tick: u64) {
+        self.step_with_climate(world, tick, &ClimateConfig::default());
+    }
+
+    pub fn step_with_climate(&mut self, world: &mut World, tick: u64, climate: &ClimateConfig) {
         if self.atoms.is_empty() {
             return;
         }
-        let day = day_factor(tick);
-        let phase = phase_fraction(tick);
+        let day = day_factor_cfg(tick, climate);
+        let phase = phase_fraction_cfg(tick, climate);
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let pop = self.atoms.len();

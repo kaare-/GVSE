@@ -32,10 +32,11 @@ pub use cell::{is_grain, water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use blueprint::{Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR};
 pub use climate::{
-    celestial_local, celestial_screen_pos, day_factor, day_night_factor, is_daytime, phase_fraction,
-    sky_rgb, sky_rgb_at_height, DEMO_DAY_TICKS,
+    celestial_local, celestial_local_cfg, celestial_screen_pos, celestial_screen_pos_cfg, day_factor,
+    day_factor_cfg, day_night_factor, day_night_factor_cfg, is_daytime, is_daytime_cfg, phase_fraction,
+    phase_fraction_cfg, sky_rgb, sky_rgb_at_height, ClimateConfig, DEMO_DAY_TICKS,
 };
-pub use clouds::{CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS};
+pub use clouds::{CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS};
 pub use grid::World;
 pub use organism::{Atom, BodyModule, ModuleId, OrganismStore, MAX_ATOMS};
 pub use heatmap::Heatmap;
@@ -49,7 +50,9 @@ pub use rules::{
     hydraulic_head, is_standing_water, tick, CondensationConfig, EvapConfig, KarstConfig,
     OrographicConfig, RainConfig,
 };
-pub use temperature::{temperature_step_due, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE};
+pub use temperature::{
+    temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,
+};
 pub use wind::Wind;
 pub use worldgen::is_karst_zone_x;
 pub use worldgen::{continental_surface_y, stamp_world, WorldgenParams};

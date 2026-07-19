@@ -14,35 +14,50 @@ use crate::rules::deposit_water_on_surface;
 use crate::wind::Wind;
 use crate::worldgen::continental_surface_y;
 
-/// Soft cap so cartoon skies stay readable.
+/// Soft cap so cartoon skies stay readable (default for [`CloudConfig`]).
 pub const MAX_CLOUD_PARCELS: usize = 36;
-
-/// Humidity mass a risen tile needs before it can seed / feed a cloud.
-const COAG_MIN_HUM: f32 = 36.0;
-/// Fraction of a tile's humidity sucked into a nearby parcel each step.
-/// Kept low so dark nimbus swell over many ticks, not one frame.
-const COAG_RATE: f32 = 0.04;
-/// Max humidity mass transferred into one parcel per tick.
-const COAG_MAX_TAKE: f32 = 14.0;
-/// Spawn a new parcel when no neighbour is within this many cells.
-const SPAWN_RADIUS: f32 = 22.0;
-/// Merge parcels closer than this (world cells).
-const MERGE_DIST: f32 = 12.0;
-/// Mass at which a parcel starts dumping rain (lower on ridges).
+/// Default mass at which a parcel starts dumping rain.
 pub const DOWNPOUR_MASS: f32 = 200.0;
-/// Mass drained per downpour tick (split across columns under the cloud).
-const DOWNPOUR_DRAIN: f32 = 28.0;
-/// Stop dumping once mass falls below this fraction of the threshold.
-const DOWNPOUR_STOP_FRAC: f32 = 0.40;
-/// Preferred free-air cloud altitude above sea (cells).
-const CLOUD_ALT_ABOVE_SEA: i32 = 32;
-/// Vapor must rise at least this far above sea before coagulating.
-const COAG_MIN_ABOVE_SEA: i32 = 18;
-/// Clearance of cloud centre above solid surface.
-const RIDGE_CLEARANCE: f32 = 5.0;
-/// Parcel horizontal wind scale (climate_vx is tiles/tick; × tile_cols
-/// would be full cell speed — we crawl much slower for readability).
-const PARCEL_WIND_SCALE: f32 = 0.28;
+
+/// Live-tunable cloud / coagulation / downpour knobs.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct CloudConfig {
+    pub max_parcels: usize,
+    pub coag_min_hum: f32,
+    pub coag_rate: f32,
+    pub coag_max_take: f32,
+    pub spawn_radius: f32,
+    pub merge_dist: f32,
+    pub downpour_mass: f32,
+    pub downpour_drain: f32,
+    pub downpour_stop_frac: f32,
+    pub cloud_alt_above_sea: i32,
+    pub coag_min_above_sea: i32,
+    pub ridge_clearance: f32,
+    pub parcel_wind_scale: f32,
+    pub buoyant_rise: f32,
+}
+
+impl Default for CloudConfig {
+    fn default() -> Self {
+        Self {
+            max_parcels: MAX_CLOUD_PARCELS,
+            coag_min_hum: 36.0,
+            coag_rate: 0.04,
+            coag_max_take: 14.0,
+            spawn_radius: 22.0,
+            merge_dist: 12.0,
+            downpour_mass: DOWNPOUR_MASS,
+            downpour_drain: 28.0,
+            downpour_stop_frac: 0.40,
+            cloud_alt_above_sea: 32,
+            coag_min_above_sea: 18,
+            ridge_clearance: 5.0,
+            parcel_wind_scale: 0.28,
+            buoyant_rise: 0.08,
+        }
+    }
+}
 
 /// One wind-blown cloud blob in continuous world space.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -65,7 +80,11 @@ impl CloudParcel {
 
     /// 0..1 wetness for drawing (relative to downpour threshold).
     pub fn wetness(&self) -> f32 {
-        (self.mass / DOWNPOUR_MASS).clamp(0.0, 1.5) / 1.5
+        self.wetness_with(DOWNPOUR_MASS)
+    }
+
+    pub fn wetness_with(&self, downpour_mass: f32) -> f32 {
+        (self.mass / downpour_mass.max(1.0)).clamp(0.0, 1.5) / 1.5
     }
 }
 
@@ -103,16 +122,17 @@ impl CloudStore {
         sea_level_y: i32,
         sky_ceiling_y: i32,
         tick: u64,
+        cfg: &CloudConfig,
     ) {
         // Let ocean vapor climb into the cloud deck before clumping.
         let tc = humidity.tile_cols.max(1);
-        let deck_hy = (sea_level_y + CLOUD_ALT_ABOVE_SEA).div_euclid(tc);
-        humidity.buoyant_rise(0.08, deck_hy);
+        let deck_hy = (sea_level_y + cfg.cloud_alt_above_sea).div_euclid(tc);
+        humidity.buoyant_rise(cfg.buoyant_rise, deck_hy);
 
-        self.coagulate(humidity, wind, sea_level_y, sky_ceiling_y);
-        self.advect_and_collide(wind, sea_level_y, sky_ceiling_y);
-        self.merge();
-        self.downpour(world, wind, tick);
+        self.coagulate(humidity, wind, sea_level_y, sky_ceiling_y, cfg);
+        self.advect_and_collide(wind, sea_level_y, sky_ceiling_y, cfg);
+        self.merge(cfg);
+        self.downpour(world, wind, tick, cfg);
         self.parcels.retain(|p| p.mass > 1.0);
     }
 
@@ -123,33 +143,34 @@ impl CloudStore {
         wind: &Wind,
         sea_level_y: i32,
         sky_ceiling_y: i32,
+        cfg: &CloudConfig,
     ) {
         let tc = humidity.tile_cols.max(1);
-        let sky_hy_min = (sea_level_y + COAG_MIN_ABOVE_SEA).div_euclid(tc);
+        let sky_hy_min = (sea_level_y + cfg.coag_min_above_sea).div_euclid(tc);
         let sky_hy_max = (sky_ceiling_y - 2).div_euclid(tc);
-        let preferred_alt = (sea_level_y + CLOUD_ALT_ABOVE_SEA)
+        let preferred_alt = (sea_level_y + cfg.cloud_alt_above_sea)
             .min(sky_ceiling_y - 4)
-            .max(sea_level_y + COAG_MIN_ABOVE_SEA) as f32;
+            .max(sea_level_y + cfg.coag_min_above_sea) as f32;
         let keys: Vec<(i32, i32)> = humidity.cells.keys().copied().collect();
         for (hx, hy) in keys {
             if hy < sky_hy_min || hy > sky_hy_max {
                 continue;
             }
             let mass = humidity.at_tile(hx, hy);
-            if mass < COAG_MIN_HUM {
+            if mass < cfg.coag_min_hum {
                 continue;
             }
             let cx = hx * tc + tc / 2;
             let cy = hy * tc + tc / 2;
-            let take = (mass * COAG_RATE).min(COAG_MAX_TAKE).min(mass);
+            let take = (mass * cfg.coag_rate).min(cfg.coag_max_take).min(mass);
             if take <= 0.0 {
                 continue;
             }
 
-            let idx = self.nearest_parcel(cx as f32, cy as f32, SPAWN_RADIUS);
+            let idx = self.nearest_parcel(cx as f32, cy as f32, cfg.spawn_radius);
             let idx = match idx {
                 Some(i) => i,
-                None if self.parcels.len() < MAX_CLOUD_PARCELS => {
+                None if self.parcels.len() < cfg.max_parcels.max(1) => {
                     self.parcels.push(CloudParcel {
                         fx: cx as f32,
                         // Spawn at the risen vapor altitude, not the sea film.
@@ -199,17 +220,23 @@ impl CloudStore {
 
     /// Wind drift, then soft collision with the land surface so clouds
     /// crest peaks instead of clipping through — without parking on them.
-    fn advect_and_collide(&mut self, wind: &Wind, sea_level_y: i32, sky_ceiling_y: i32) {
+    fn advect_and_collide(
+        &mut self,
+        wind: &Wind,
+        sea_level_y: i32,
+        sky_ceiling_y: i32,
+        cfg: &CloudConfig,
+    ) {
         let tc = wind.tile_cols.max(1) as f32;
-        let vx = wind.climate_vx * tc * PARCEL_WIND_SCALE;
-        let y_lo = (sea_level_y + COAG_MIN_ABOVE_SEA) as f32;
+        let vx = wind.climate_vx * tc * cfg.parcel_wind_scale;
+        let y_lo = (sea_level_y + cfg.coag_min_above_sea) as f32;
         let y_hi = (sky_ceiling_y - 3) as f32;
         let width = wind.width_cols.max(1) as f32;
         let wind_sign = if wind.climate_vx >= 0.0 { 1.0 } else { -1.0 };
         for p in &mut self.parcels {
             p.on_ridge = false;
             let hx = (p.fx / tc).floor() as i32;
-            let vy = wind.vy_at(hx, 0) * tc * PARCEL_WIND_SCALE;
+            let vy = wind.vy_at(hx, 0) * tc * cfg.parcel_wind_scale;
             p.fx += vx;
             p.fy += vy * 0.35;
             if wind.wrap_x {
@@ -224,9 +251,9 @@ impl CloudStore {
             let floor = surface_y(wind, p.fx);
             let land = floor > sea_level_y as f32 + 1.0;
             let min_fy = if land {
-                floor + RIDGE_CLEARANCE + (r * 0.08).min(2.5)
+                floor + cfg.ridge_clearance + (r * 0.08).min(2.5)
             } else {
-                y_lo.max(sea_level_y as f32 + CLOUD_ALT_ABOVE_SEA as f32 * 0.55)
+                y_lo.max(sea_level_y as f32 + cfg.cloud_alt_above_sea as f32 * 0.55)
             };
             if p.fy < min_fy {
                 let lift = min_fy - p.fy;
@@ -243,22 +270,22 @@ impl CloudStore {
             }
             // Prefer free-air deck: ease parcels that were lifted by a
             // peak back toward preferred altitude once past the crest.
-            if land && !p.on_ridge && p.fy > preferred_deck(sea_level_y, sky_ceiling_y) + 8.0 {
-                let deck = preferred_deck(sea_level_y, sky_ceiling_y);
+            let deck = preferred_deck(sea_level_y, sky_ceiling_y, cfg);
+            if land && !p.on_ridge && p.fy > deck + 8.0 {
                 p.fy = p.fy * 0.97 + deck * 0.03;
             }
             p.fy = p.fy.clamp(y_lo.min(min_fy), y_hi);
         }
     }
 
-    fn merge(&mut self) {
+    fn merge(&mut self, cfg: &CloudConfig) {
         let mut i = 0;
         while i < self.parcels.len() {
             let mut j = i + 1;
             while j < self.parcels.len() {
                 let dx = self.parcels[i].fx - self.parcels[j].fx;
                 let dy = self.parcels[i].fy - self.parcels[j].fy;
-                if (dx * dx + dy * dy).sqrt() < MERGE_DIST {
+                if (dx * dx + dy * dy).sqrt() < cfg.merge_dist {
                     let other = self.parcels.swap_remove(j);
                     let a = &mut self.parcels[i];
                     let total = a.mass + other.mass;
@@ -278,14 +305,14 @@ impl CloudStore {
     }
 
     /// Heavy parcels dump sat into Air cells beneath them.
-    fn downpour(&mut self, world: &mut World, wind: &Wind, tick: u64) {
+    fn downpour(&mut self, world: &mut World, wind: &Wind, tick: u64, cfg: &CloudConfig) {
         for p in &mut self.parcels {
             let mut oro = orographic_boost(wind, p.fx);
             if p.on_ridge {
                 // Gentle orographic nudge — not a dump-to-death on peaks.
                 oro = (oro + 0.25).min(1.6);
             }
-            let trigger = DOWNPOUR_MASS / oro;
+            let trigger = cfg.downpour_mass / oro;
             if !p.raining {
                 if p.mass >= trigger {
                     p.raining = true;
@@ -293,12 +320,12 @@ impl CloudStore {
                     continue;
                 }
             }
-            if p.mass < DOWNPOUR_MASS * DOWNPOUR_STOP_FRAC {
+            if p.mass < cfg.downpour_mass * cfg.downpour_stop_frac {
                 p.raining = false;
                 continue;
             }
 
-            let drain = (DOWNPOUR_DRAIN * oro).min(p.mass);
+            let drain = (cfg.downpour_drain * oro).min(p.mass);
             let radius = p.radius();
             let cols = ((radius * 1.25) as i32).clamp(2, 10);
             let mut remaining = drain;
@@ -334,10 +361,10 @@ fn surface_y(wind: &Wind, fx: f32) -> f32 {
     ) as f32
 }
 
-fn preferred_deck(sea_level_y: i32, sky_ceiling_y: i32) -> f32 {
-    (sea_level_y + CLOUD_ALT_ABOVE_SEA)
+fn preferred_deck(sea_level_y: i32, sky_ceiling_y: i32, cfg: &CloudConfig) -> f32 {
+    (sea_level_y + cfg.cloud_alt_above_sea)
         .min(sky_ceiling_y - 4)
-        .max(sea_level_y + COAG_MIN_ABOVE_SEA) as f32
+        .max(sea_level_y + cfg.coag_min_above_sea) as f32
 }
 
 fn orographic_boost(wind: &Wind, fx: f32) -> f32 {
@@ -405,6 +432,7 @@ mod tests {
         let hum_before = h.total_mass();
         let mut clouds = CloudStore::new();
         let mut world = World::new(p.seed);
+        let cfg = CloudConfig::default();
         for t in 0..200 {
             clouds.step(
                 &mut world,
@@ -413,6 +441,7 @@ mod tests {
                 p.sea_level_y,
                 p.sky_ceiling_y,
                 t,
+                &cfg,
             );
         }
         assert!(!clouds.is_empty(), "should form at least one parcel");
@@ -421,7 +450,7 @@ mod tests {
         // Parcels should sit well above the sea film.
         for pcloud in &clouds.parcels {
             assert!(
-                pcloud.fy > p.sea_level_y as f32 + COAG_MIN_ABOVE_SEA as f32 * 0.5,
+                pcloud.fy > p.sea_level_y as f32 + cfg.coag_min_above_sea as f32 * 0.5,
                 "cloud fy={} too low (sea={})",
                 pcloud.fy,
                 p.sea_level_y
@@ -452,7 +481,7 @@ mod tests {
             raining: false,
             on_ridge: false,
         });
-        clouds.advect_and_collide(&wind, p.sea_level_y, p.sky_ceiling_y);
+        clouds.advect_and_collide(&wind, p.sea_level_y, p.sky_ceiling_y, &CloudConfig::default());
         let c = &clouds.parcels[0];
         assert!(c.on_ridge, "should register ridge contact");
         assert!(
@@ -493,7 +522,7 @@ mod tests {
             on_ridge: false,
         });
         let mass_before = clouds.total_mass();
-        clouds.downpour(&mut world, &wind, 0);
+        clouds.downpour(&mut world, &wind, 0, &CloudConfig::default());
         assert!(clouds.total_mass() < mass_before);
         // Rain should land just above the stone floor, not hang at cloud height.
         let landed = world.get_cell(gx, floor + 1).map(|c| c.sat.0).unwrap_or(0);
@@ -510,16 +539,17 @@ mod tests {
         let p = WorldgenParams::default();
         let wind = wind_for(&p);
         let mut clouds = CloudStore::new();
+        let cfg = CloudConfig::default();
         clouds.parcels.push(CloudParcel {
             fx: 50.0,
-            fy: (p.sea_level_y + CLOUD_ALT_ABOVE_SEA) as f32,
+            fy: (p.sea_level_y + cfg.cloud_alt_above_sea) as f32,
             mass: 40.0,
             raining: false,
             on_ridge: false,
         });
         let x0 = clouds.parcels[0].fx;
         for _ in 0..80 {
-            clouds.advect_and_collide(&wind, p.sea_level_y, p.sky_ceiling_y);
+            clouds.advect_and_collide(&wind, p.sea_level_y, p.sky_ceiling_y, &cfg);
         }
         assert!(
             clouds.parcels[0].fx > x0,
