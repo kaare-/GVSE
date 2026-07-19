@@ -12,9 +12,31 @@ use std::collections::HashMap;
 
 use wk_material::MaterialId;
 
+use crate::active::{clear_all_dirty, plan_active, ActiveChunk};
 use crate::cell::{is_grain, water_capacity, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
+
+/// Resolve the scan plan for a standalone rule call. Uses current
+/// dirty rects; if nothing is dirty, falls back to a full-world scan
+/// so unit tests that forget an intermediate dirty still work when
+/// the chunk exists. Prefer [`tick`], which plans once and clears.
+fn regions_for_standalone(world: &World) -> Vec<ActiveChunk> {
+    let planned = plan_active(world);
+    if !planned.is_empty() {
+        return planned;
+    }
+    // Full scan fallback — only loaded chunks.
+    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    coords
+        .into_iter()
+        .map(|coord| ActiveChunk {
+            coord,
+            rect: crate::chunk::Rect::full(),
+        })
+        .collect()
+}
 
 /// Free-surface / pore hydraulic head in cell units:
 /// `y + sat / capacity`. Adjacent cells equalise toward matching heads.
@@ -104,32 +126,34 @@ fn is_porous_solid(material: MaterialId) -> bool {
 /// per invocation, no lateral spread, no density swap. Free-fall
 /// acceleration and the density-swap rule are follow-up PRs.
 pub fn apply_gravity_fall(world: &mut World) {
-    // Chunks are iterated bottom-up (`cy` ascending). Combined with
-    // the bottom-up sweep inside each chunk this means every cell is
-    // visited from world-bottom to world-top exactly once per pass —
-    // water that crosses into a lower chunk from above lands on a
-    // cell that has already been processed and therefore rests for
-    // the remainder of this tick, giving the expected one-cell-per-
-    // tick fall speed across chunk seams.
-    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
-    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
-    for coord in coords {
-        for y in 0..CHUNK_CELLS_H {
-            let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
-            for x in 0..CHUNK_CELLS_W {
-                let gx = coord.cx * CHUNK_CELLS_W as i32 + x as i32;
+    let regions = regions_for_standalone(world);
+    apply_gravity_fall_regions(world, &regions);
+}
+
+/// Gravity fall restricted to a pre-planned active set (see [`plan_active`]).
+pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
+    if active.is_empty() {
+        return;
+    }
+    // Bottom-up within each chunk; chunks ordered by ascending `cy`.
+    let mut regions: Vec<ActiveChunk> = active.to_vec();
+    regions.sort_by(|a, b| {
+        a.coord
+            .cy
+            .cmp(&b.coord.cy)
+            .then(a.coord.cx.cmp(&b.coord.cx))
+    });
+    for ac in regions {
+        for y in ac.rect.y0..=ac.rect.y1 {
+            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let gx = ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32;
                 let Some(cur) = world.get_cell(gx, gy) else {
                     continue;
                 };
                 if cur.sat.is_empty() {
                     continue;
                 }
-                // Water can't leave a Water/Ice/Snow *material* cell in
-                // this v1 rule — those materials are impermeable to the
-                // gravity pass. `water_capacity` returns 0 for them, but
-                // that's about the *receiving* end. The source-side
-                // guard would let the fall rule empty a lake by moving
-                // its sat down forever; we don't want that.
                 if water_capacity(cur.material) == 0 {
                     continue;
                 }
@@ -148,16 +172,22 @@ pub fn apply_gravity_fall(world: &mut World) {
                 if move_amt == 0 {
                     continue;
                 }
-                let new_cur = Cell {
-                    sat: Sat(cur.sat.0 - move_amt),
-                    ..cur
-                };
-                let new_below = Cell {
-                    sat: Sat(below.sat.0 + move_amt),
-                    ..below
-                };
-                world.set_cell(gx, gy, new_cur);
-                world.set_cell(gx, gy - 1, new_below);
+                world.set_cell(
+                    gx,
+                    gy,
+                    Cell {
+                        sat: Sat(cur.sat.0 - move_amt),
+                        ..cur
+                    },
+                );
+                world.set_cell(
+                    gx,
+                    gy - 1,
+                    Cell {
+                        sat: Sat(below.sat.0 + move_amt),
+                        ..below
+                    },
+                );
             }
         }
     }
@@ -176,18 +206,30 @@ pub fn apply_gravity_fall(world: &mut World) {
 /// One pass moves ~1 cell per tick along a chain. Standing water on
 /// a flat bed settles over ~N ticks for a puddle N cells wide.
 pub fn apply_lateral_spill(world: &mut World) {
-    let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
+    let regions = regions_for_standalone(world);
+    apply_lateral_spill_regions(world, &regions);
+}
 
-    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
-    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
-    for coord in coords {
-        for y in 0..CHUNK_CELLS_H {
-            let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
-            for x in 0..CHUNK_CELLS_W {
-                let gx = coord.cx * CHUNK_CELLS_W as i32 + x as i32;
+/// Lateral spill restricted to a pre-planned active set.
+pub fn apply_lateral_spill_regions(world: &mut World, active: &[ActiveChunk]) {
+    if active.is_empty() {
+        return;
+    }
+    let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut regions: Vec<ActiveChunk> = active.to_vec();
+    regions.sort_by(|a, b| {
+        a.coord
+            .cy
+            .cmp(&b.coord.cy)
+            .then(a.coord.cx.cmp(&b.coord.cx))
+    });
+    for ac in regions {
+        for y in ac.rect.y0..=ac.rect.y1 {
+            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let gx = ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32;
                 let left_x = world.wrap_x(gx);
                 let right_x = world.wrap_x(gx + 1);
-                // Degenerate (width ≤ 1) or duplicate under wrap.
                 if left_x == right_x {
                     continue;
                 }
@@ -205,17 +247,11 @@ pub fn apply_lateral_spill(world: &mut World) {
                 }
                 let cap = water_capacity(MaterialId::Air);
                 let move_amt = sat_move_to_equalize_heads(
-                    left.sat.0,
-                    cap,
-                    gy,
-                    right.sat.0,
-                    cap,
-                    gy,
+                    left.sat.0, cap, gy, right.sat.0, cap, gy,
                 );
                 if move_amt == 0 {
                     continue;
                 }
-                // Positive move_amt = left → right.
                 *deltas.entry((left_x, gy)).or_insert(0) -= move_amt;
                 *deltas.entry((right_x, gy)).or_insert(0) += move_amt;
             }
@@ -250,18 +286,32 @@ pub fn apply_lateral_spill(world: &mut World) {
 /// Transfers are planned from a snapshot, then applied in a stable
 /// order with live capacity checks so mass is conserved exactly.
 pub fn apply_seepage(world: &mut World) {
-    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
-    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    let regions = regions_for_standalone(world);
+    apply_seepage_regions(world, &regions);
+}
+
+/// Seepage restricted to a pre-planned active set.
+pub fn apply_seepage_regions(world: &mut World, active: &[ActiveChunk]) {
+    if active.is_empty() {
+        return;
+    }
+    let mut regions: Vec<ActiveChunk> = active.to_vec();
+    regions.sort_by(|a, b| {
+        a.coord
+            .cy
+            .cmp(&b.coord.cy)
+            .then(a.coord.cx.cmp(&b.coord.cx))
+    });
 
     // (from, to, amt) with amt > 0.
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     const OFFSETS: [(i32, i32); 2] = [(1, 0), (0, 1)];
 
-    for coord in &coords {
-        for y in 0..CHUNK_CELLS_H {
-            let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
-            for x in 0..CHUNK_CELLS_W {
-                let gx = world.wrap_x(coord.cx * CHUNK_CELLS_W as i32 + x as i32);
+    for ac in &regions {
+        for y in ac.rect.y0..=ac.rect.y1 {
+            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
                 let Some(a) = world.get_cell(gx, gy) else {
                     continue;
                 };
@@ -375,13 +425,27 @@ pub fn apply_seepage(world: &mut World) {
 /// (heavy sinks under light) and buoyancy interactions with less-
 /// dense fluids are follow-up rules.
 pub fn apply_grain_fall(world: &mut World) {
-    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
-    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
-    for coord in coords {
-        for y in 0..CHUNK_CELLS_H {
-            let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
-            for x in 0..CHUNK_CELLS_W {
-                let gx = coord.cx * CHUNK_CELLS_W as i32 + x as i32;
+    let regions = regions_for_standalone(world);
+    apply_grain_fall_regions(world, &regions);
+}
+
+/// Grain fall restricted to a pre-planned active set.
+pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
+    if active.is_empty() {
+        return;
+    }
+    let mut regions: Vec<ActiveChunk> = active.to_vec();
+    regions.sort_by(|a, b| {
+        a.coord
+            .cy
+            .cmp(&b.coord.cy)
+            .then(a.coord.cx.cmp(&b.coord.cx))
+    });
+    for ac in regions {
+        for y in ac.rect.y0..=ac.rect.y1 {
+            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let gx = ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32;
                 let Some(cur) = world.get_cell(gx, gy) else {
                     continue;
                 };
@@ -394,11 +458,6 @@ pub fn apply_grain_fall(world: &mut World) {
                 if below.material != MaterialId::Air {
                     continue;
                 }
-                // Full-cell swap: grain moves down, air cell (with
-                // whatever sat it held) rises. This is the density-
-                // swap step from classic falling-sand simulations,
-                // and it's the mechanism by which a dropped sand
-                // grain sinks through a pond.
                 world.set_cell(gx, gy, below);
                 world.set_cell(gx, gy - 1, cur);
             }
@@ -841,19 +900,22 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
 /// [`apply_rain`] and [`apply_evaporation`] into their per-frame
 /// loop themselves. Scenario tests pass `tick(world)` alone and
 /// stay deterministic without weather.
+///
+/// **Dirty / active chunks.** At the start of the tick we
+/// [`plan_active`] from each chunk's dirty rect (halo + neighbour
+/// wake), then [`clear_all_dirty`]. Rule writes rebuild dirty for
+/// the *next* tick. A fully settled world plans nothing and the
+/// physics passes early-out.
 pub fn tick(world: &mut World) {
-    apply_gravity_fall(world);
-    apply_lateral_spill(world);
-    apply_seepage(world);
-    apply_grain_fall(world);
+    let active = plan_active(world);
+    clear_all_dirty(world);
+    apply_gravity_fall_regions(world, &active);
+    apply_lateral_spill_regions(world, &active);
+    apply_seepage_regions(world, &active);
+    apply_grain_fall_regions(world, &active);
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {
         chunk.tick = chunk.tick.wrapping_add(1);
-        // Clearing the dirty rectangle *after* rules run means the
-        // next tick starts from a clean baseline; any cell writes
-        // during the rule pass have already extended the rect for
-        // this tick and will do so again on the next.
-        chunk.clear_dirty();
     }
 }
 
@@ -1825,6 +1887,31 @@ mod tests {
             MaterialId::Limestone,
             "damp-but-not-wet neighbour must not dissolve karst"
         );
+    }
+
+    #[test]
+    fn settled_column_goes_quiescent() {
+        // Droplet falls into a one-cell bedrock trough (walls block
+        // lateral spill). Once it rests, the dirty plan empties and
+        // physics early-outs.
+        let mut w = setup_column_world();
+        w.set_cell(3, 1, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(5, 1, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(4, 8, Cell::water());
+        for _ in 0..20 {
+            tick(&mut w);
+        }
+        // Consume any residual dirty from the last write.
+        tick(&mut w);
+        assert!(
+            plan_active(&w).is_empty(),
+            "settled world must plan no active chunks"
+        );
+        let sat_before = w.get_cell(4, 1).unwrap().sat.0;
+        assert!(sat_before > 0, "droplet should rest in the trough");
+        tick(&mut w);
+        assert_eq!(w.get_cell(4, 1).unwrap().sat.0, sat_before);
+        assert!(plan_active(&w).is_empty());
     }
 
     #[test]

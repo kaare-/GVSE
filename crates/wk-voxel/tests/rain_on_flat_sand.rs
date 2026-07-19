@@ -43,10 +43,11 @@ fn rain_row_saturates_sand_over_one_tick() {
         assert_eq!(above.material, MaterialId::Air);
     }
 
-    // Dirty rectangles clear after the tick.
+    // Dirty tracks this tick's writes so the *next* tick can plan an
+    // active region (cleared at the start of that tick, not the end).
     let (coord, _, _) = World::split(4, 1);
     let chunk = w.chunks.get(&coord).unwrap();
-    assert!(chunk.dirty.is_none());
+    assert!(chunk.dirty.is_some(), "settling writes should dirty the chunk");
     assert_eq!(w.tick, 1);
 
     // A second tick doesn't change anything — sand is at capacity,
