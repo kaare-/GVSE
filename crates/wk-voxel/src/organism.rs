@@ -188,12 +188,10 @@ impl OrganismStore {
                 continue;
             }
 
-            // Must sit in free water (Air with sat) — dry land / rock kills.
-            let Some(here) = world.get_cell(atom.gx, atom.gy) else {
-                deaths.push(i);
-                continue;
-            };
-            if here.material != MaterialId::Air || here.sat.is_empty() {
+            // Stay in the wet column. The free-surface film often
+            // drains under spill/seepage — snap back into water instead
+            // of dying on a one-cell tide line.
+            if !ensure_in_water(world, atom) {
                 deaths.push(i);
                 continue;
             }
@@ -207,7 +205,7 @@ impl OrganismStore {
                 continue;
             }
 
-            // Mild vertical drift toward higher light / stay wet.
+            // Mild vertical drift inside the wet band only.
             drift_atom(world, atom);
 
             if atom.cooldown == 0
@@ -268,44 +266,66 @@ fn column_light(world: &World, gx: i32, gy: i32) -> f32 {
     light
 }
 
+fn is_wet_air(world: &World, gx: i32, gy: i32) -> bool {
+    match world.get_cell(gx, gy) {
+        Some(c) => c.material == MaterialId::Air && !c.sat.is_empty(),
+        None => false,
+    }
+}
+
 fn find_wet_slot(world: &World, gx: i32, y0: i32, y1: i32) -> Option<i32> {
-    // Prefer a wet Air cell just below the free surface.
+    // Top of the wet column, then step down a few cells so we don't
+    // sit on the free-surface film that spill/seepage drains first.
+    let mut surface = None;
     let mut y = y1 - 1;
     while y >= y0 {
-        if let Some(c) = world.get_cell(gx, y) {
-            if c.material == MaterialId::Air && !c.sat.is_empty() {
-                // Ensure there's air or open sky above (not solid lid).
-                let open = match world.get_cell(gx, y + 1) {
-                    None => true,
-                    Some(a) => a.material == MaterialId::Air,
-                };
-                if open {
-                    return Some(y);
-                }
-            }
+        if is_wet_air(world, gx, y) {
+            surface = Some(y);
+            break;
         }
         y -= 1;
     }
-    None
+    let top = surface?;
+    const DEPTH: i32 = 3;
+    for d in (0..=DEPTH).rev() {
+        let gy = top - d;
+        if gy >= y0 && is_wet_air(world, gx, gy) {
+            return Some(gy);
+        }
+    }
+    Some(top)
+}
+
+/// If the atom's cell dried, move to a nearby wet Air cell. Returns
+/// false only when no water remains in the local column.
+fn ensure_in_water(world: &World, atom: &mut Atom) -> bool {
+    if is_wet_air(world, atom.gx, atom.gy) {
+        return true;
+    }
+    for dy in [-1, 1, -2, 2, -3, 3, -4, 4] {
+        let ny = atom.gy + dy;
+        if is_wet_air(world, atom.gx, ny) {
+            atom.gy = ny;
+            return true;
+        }
+    }
+    false
 }
 
 fn drift_atom(world: &World, atom: &mut Atom) {
-    // Prefer staying in wet Air; bias one cell up if lit wet above,
-    // else down if current is drying.
-    let up = world.get_cell(atom.gx, atom.gy + 1);
-    if let Some(c) = up {
-        if c.material == MaterialId::Air && !c.sat.is_empty() {
-            atom.gy += 1;
+    // Bias one cell toward brighter wet neighbour; never leave water.
+    let up = atom.gy + 1;
+    let down = atom.gy - 1;
+    if is_wet_air(world, atom.gx, up) {
+        let light_up = column_light(world, atom.gx, up);
+        let light_here = column_light(world, atom.gx, atom.gy);
+        if light_up >= light_here {
+            atom.gy = up;
             return;
         }
     }
-    let here = world.get_cell(atom.gx, atom.gy);
-    if here.map(|c| c.sat.0 < 40).unwrap_or(true) {
-        if let Some(c) = world.get_cell(atom.gx, atom.gy - 1) {
-            if c.material == MaterialId::Air && !c.sat.is_empty() {
-                atom.gy -= 1;
-            }
-        }
+    if !is_wet_air(world, atom.gx, atom.gy) && is_wet_air(world, atom.gx, down) {
+        atom.gy = down;
     }
 }
 
@@ -328,14 +348,24 @@ fn try_fission(world: &World, parent: &Atom, child_energy: f32) -> Option<Atom> 
 }
 
 fn deposit_organic(world: &mut World, gx: i32, gy: i32) {
-    let Some(c) = world.get_cell(gx, gy) else {
-        return;
-    };
-    if c.material != MaterialId::Air {
-        return;
+    // Drop residue on the first solid below — never replace a water
+    // cell with Organic (that was deleting the whole plankton band).
+    let mut y = gy;
+    for _ in 0..64 {
+        match world.get_cell(gx, y) {
+            Some(c) if c.material != MaterialId::Air => {
+                // Speck in the Air cell just above the bed, if empty.
+                if let Some(above) = world.get_cell(gx, y + 1) {
+                    if above.material == MaterialId::Air && above.sat.is_empty() {
+                        world.set_cell(gx, y + 1, Cell::solid(MaterialId::Organic));
+                    }
+                }
+                return;
+            }
+            None => return,
+            Some(_) => y -= 1,
+        }
     }
-    // Tiny Organic speck — visible death residue, not a biomass wash.
-    world.set_cell(gx, gy, Cell::solid(MaterialId::Organic));
 }
 
 const ATOM_SEED_SALT: u64 = 0xA701_5EED;
@@ -410,9 +440,12 @@ mod tests {
     }
 
     #[test]
-    fn dry_land_kills_atom() {
-        let mut w = wet_column();
-        w.set_cell(4, 6, Cell::air()); // dry
+    fn dry_column_with_no_water_kills_atom() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for y in 0..12 {
+            w.set_cell(4, y, Cell::air()); // fully dry column
+        }
         let mut store = OrganismStore::new();
         store.atoms.push(Atom::new(4, 6, 50.0));
         store.step(&mut w, 0);
@@ -420,18 +453,54 @@ mod tests {
     }
 
     #[test]
-    fn death_can_deposit_organic() {
+    fn death_can_deposit_organic_above_bed() {
         let mut w = wet_column();
+        // Dry air pocket just above bedrock so residue has a place.
+        w.set_cell(4, 1, Cell::air());
         let mut store = OrganismStore::new();
         let mut a = Atom::new(4, 6, 10.0);
-        a.energy = 0.01;
         a.age_ticks = LIFE_TICKS; // force age death
         store.atoms.push(a);
         store.step(&mut w, 0);
         assert!(store.is_empty());
         assert_eq!(
+            w.get_cell(4, 1).map(|c| c.material),
+            Some(MaterialId::Organic),
+            "corpse residue should sit on the bed, not replace water"
+        );
+        // Water column where the atom lived stays wet Air.
+        assert_eq!(
             w.get_cell(4, 6).map(|c| c.material),
-            Some(MaterialId::Organic)
+            Some(MaterialId::Air)
+        );
+    }
+
+    #[test]
+    fn demo_atoms_survive_physics_ticks() {
+        use crate::worldgen::{stamp_world, WorldgenParams};
+        let params = WorldgenParams::default();
+        let mut world = World::new(params.seed);
+        stamp_world(&mut world, &params);
+        let mut store = OrganismStore::new();
+        store.seed_coastal_atoms(
+            &world,
+            params.seed,
+            0,
+            params.width_cols,
+            params.bedrock_floor_y,
+            params.sky_ceiling_y,
+            4,
+            40.0,
+        );
+        let n0 = store.len();
+        assert!(n0 > 0);
+        for t in 0..180u64 {
+            store.step(&mut world, t);
+            crate::rules::tick(&mut world);
+        }
+        assert!(
+            store.len() > 0,
+            "Atoms must survive free-surface spill; started with {n0}"
         );
     }
 

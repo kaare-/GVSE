@@ -42,7 +42,7 @@ impl Scene {
             params.width_cols,
             params.bedrock_floor_y,
             params.sky_ceiling_y,
-            8,
+            4, // denser so Atoms are easy to spot in the ocean band
             40.0,
         );
         Self {
@@ -97,3 +97,4 @@ mod tests {
         assert_eq!(b.tile_capacity(), (tiles_w * tiles_h) as usize);
     }
 }
+
