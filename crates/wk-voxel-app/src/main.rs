@@ -621,7 +621,12 @@ async fn main() {
                     // puddles). Mid-air sat stays invisible — falling rain
                     // is the cosmetic streak under raining clouds.
                     if cell.material == wk_material::MaterialId::Air {
-                        if cell.sat.is_empty() {
+                        // Thin free-surface film: don't paint day-sky blue
+                        // over the real night/day gradient (that was the
+                        // white lip on every water terrace). Let the sky
+                        // already drawn behind show through.
+                        const SURFACE_DRAW_MIN_SAT: u8 = 200;
+                        if cell.sat.0 < SURFACE_DRAW_MIN_SAT {
                             continue;
                         }
                         let below_sea = y <= scene.params.sea_level_y;
