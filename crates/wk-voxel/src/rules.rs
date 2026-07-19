@@ -247,6 +247,111 @@ pub fn apply_lateral_spill_regions(world: &mut World, active: &[ActiveChunk]) {
     }
 }
 
+/// Move wet Air sitting on solid diagonally downhill into open Air.
+/// Keeps rain from coating mountain faces as permanent blue wedges.
+pub fn apply_downslope_runoff(world: &mut World) {
+    let regions = regions_for_standalone(world);
+    apply_downslope_runoff_regions(world, &regions);
+}
+
+/// Downslope runoff restricted to a pre-planned active set.
+pub fn apply_downslope_runoff_regions(world: &mut World, active: &[ActiveChunk]) {
+    if active.is_empty() {
+        return;
+    }
+    let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
+    for pass in partition_checkerboard(active) {
+        accumulate_downslope_deltas(world, &pass, &mut deltas);
+    }
+    for ((gx, gy), delta) in deltas {
+        let Some(cell) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        let cap = water_capacity(cell.material) as i32;
+        let new_sat = (cell.sat.0 as i32 + delta).clamp(0, cap);
+        world.set_cell(
+            gx,
+            gy,
+            Cell {
+                sat: Sat(new_sat as u8),
+                ..cell
+            },
+        );
+    }
+}
+
+fn accumulate_downslope_deltas(
+    world: &World,
+    active: &[ActiveChunk],
+    deltas: &mut HashMap<(i32, i32), i32>,
+) {
+    let local = map_regions_parallel(active, |ac| {
+        let mut local: HashMap<(i32, i32), i32> = HashMap::new();
+        for y in ac.rect.y0..=ac.rect.y1 {
+            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
+                let Some(cur) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if cur.material != MaterialId::Air || cur.sat.is_empty() {
+                    continue;
+                }
+                // Only films resting on solid run off (not free-fall rain).
+                let Some(below) = world.get_cell(gx, gy - 1) else {
+                    continue;
+                };
+                if below.material == MaterialId::Air {
+                    continue;
+                }
+                // Prefer the steeper / emptier diagonal-down neighbour.
+                let mut best: Option<(i32, i32, u8)> = None;
+                for dx in [-1_i32, 1] {
+                    let nx = world.wrap_x(gx + dx);
+                    let ny = gy - 1;
+                    let Some(dst) = world.get_cell(nx, ny) else {
+                        continue;
+                    };
+                    if dst.material != MaterialId::Air {
+                        continue;
+                    }
+                    let free = u8::MAX.saturating_sub(dst.sat.0);
+                    if free == 0 {
+                        continue;
+                    }
+                    let better = match best {
+                        None => true,
+                        Some((_, _, best_free)) => free > best_free,
+                    };
+                    if better {
+                        best = Some((nx, ny, free));
+                    }
+                }
+                let Some((nx, ny, free)) = best else {
+                    continue;
+                };
+                let amt = (cur.sat.0.min(free)).min(96) as i32;
+                if amt <= 0 {
+                    continue;
+                }
+                // Skip if another write already drained this source heavily.
+                let already = *local.get(&(gx, gy)).unwrap_or(&0);
+                if already < 0 {
+                    continue;
+                }
+                *local.entry((gx, gy)).or_insert(0) -= amt;
+                *local.entry((nx, ny)).or_insert(0) += amt;
+            }
+        }
+        local
+    });
+    for map in local {
+        for (k, v) in map {
+            *deltas.entry(k).or_insert(0) += v;
+        }
+    }
+}
+
 fn accumulate_lateral_spill_deltas(
     world: &World,
     active: &[ActiveChunk],
@@ -531,18 +636,17 @@ fn hash_prob(seed: u64, gx: i32, tick_no: u64, salt: u64) -> f32 {
     (h as u32 as f32) / (u32::MAX as f32 + 1.0)
 }
 
-/// Inject water into the sky row of `world` under a stochastic per-
-/// column rule.
+/// Inject climatic rain that **lands on the ground / ocean surface**
+/// under each column (cosmetic sky streaks are drawn separately).
 ///
 /// For each column `gx ∈ cfg.x_range`, roll a deterministic
 /// pseudo-random probability seeded by `(world.seed, gx, world.tick,
 /// cfg.seed_salt)`. When the roll passes `cfg.prob_per_col_per_tick`,
-/// add `cfg.droplet_sat` to the cell at `(gx, cfg.top_y)` — provided
-/// that cell is `Air`. Sat is saturated at `u8::MAX`.
+/// deposit `cfg.droplet_sat` via [`deposit_water_on_surface`] scanning
+/// down from `cfg.top_y`.
 ///
 /// Determinism: same world.seed + same tick + same config = same
-/// droplet placements. That's what makes rain reproducible in
-/// scenario tests.
+/// droplet placements.
 pub fn apply_rain(world: &mut World, cfg: &RainConfig) {
     let (x0, x1) = cfg.x_range;
     if x0 > x1 {
@@ -555,22 +659,95 @@ pub fn apply_rain(world: &mut World, cfg: &RainConfig) {
         if roll >= cfg.prob_per_col_per_tick {
             continue;
         }
-        let Some(cell) = world.get_cell(gx, cfg.top_y) else {
+        let _ = deposit_water_on_surface(world, gx, cfg.top_y, cfg.droplet_sat as f32);
+    }
+}
+
+/// True when wet Air is a standing pool / ocean film / land puddle
+/// (rests on solid or on near-full water below) — not a mid-air droplet.
+pub fn is_standing_water(world: &World, gx: i32, gy: i32) -> bool {
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return false;
+    };
+    if cell.material != MaterialId::Air || cell.sat.is_empty() {
+        return false;
+    }
+    match world.get_cell(gx, gy - 1) {
+        Some(below) if below.material != MaterialId::Air => true,
+        Some(below) => below.sat.0 >= 200,
+        None => false,
+    }
+}
+
+/// Deposit atmospheric water onto the free-air surface under `start_y`.
+///
+/// Lands just above solid ground or standing water. Deepens existing
+/// water columns, but will **not** grow a one-cell film on bare rock
+/// into a tall slope wedge (returns 0 when that film is already full
+/// so runoff can clear the hillside first).
+pub fn deposit_water_on_surface(world: &mut World, gx: i32, start_y: i32, budget: f32) -> f32 {
+    if budget <= 0.0 {
+        return 0.0;
+    }
+    let jx = world.wrap_x(gx);
+    let mut y = start_y;
+    let mut last_free_air_y: Option<i32> = None;
+    for _ in 0..128 {
+        let Some(cell) = world.get_cell(jx, y) else {
+            y -= 1;
             continue;
         };
         if cell.material != MaterialId::Air {
-            continue;
+            // Terrain — fill the open air we just left (directly above).
+            // Do not spawn water above a solid pillar into empty sky.
+            if let Some(ay) = last_free_air_y {
+                if ay == y + 1 {
+                    if let Some(ac) = world.get_cell(jx, ay) {
+                        return fill_air_sat(world, jx, ay, ac, budget);
+                    }
+                }
+            }
+            return 0.0;
         }
-        let new_sat = cell.sat.0.saturating_add(cfg.droplet_sat);
-        world.set_cell(
-            gx,
-            cfg.top_y,
-            Cell {
-                sat: Sat(new_sat),
-                ..cell
-            },
-        );
+        if cell.sat.is_full() {
+            // Existing water column (wet over wet) may deepen upward.
+            // A full film sitting on bare rock must not stack into a wedge.
+            let below_is_water = matches!(
+                world.get_cell(jx, y - 1),
+                Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
+            );
+            if below_is_water {
+                if let Some(ay) = last_free_air_y {
+                    if let Some(ac) = world.get_cell(jx, ay) {
+                        return fill_air_sat(world, jx, ay, ac, budget);
+                    }
+                }
+            }
+            return 0.0;
+        }
+        last_free_air_y = Some(y);
+        y -= 1;
     }
+    0.0
+}
+
+fn fill_air_sat(world: &mut World, gx: i32, gy: i32, cell: Cell, budget: f32) -> f32 {
+    let free = u8::MAX as f32 - cell.sat.0 as f32;
+    let transfer = budget.min(free).max(0.0);
+    let u = transfer.round() as i32;
+    if u <= 0 {
+        return 0.0;
+    }
+    let new_sat = (cell.sat.0 as i32 + u).clamp(0, u8::MAX as i32) as u8;
+    world.set_cell(
+        gx,
+        gy,
+        Cell {
+            sat: Sat(new_sat),
+            ..cell
+        },
+    );
+    u as f32
 }
 
 /// Surface-evaporation parameters for [`apply_evaporation`].
@@ -831,39 +1008,19 @@ pub fn apply_condensation_rain_with_orographic(
         if roll >= effective_prob {
             continue;
         }
-        // Rain point: centre column of the tile, at cfg.top_y.
+        // Rain lands on the ground / ocean under the tile centre.
         let centre_gx = hx * tile_cols + tile_cols / 2;
-        let Some(cell) = world.get_cell(centre_gx, cfg.top_y) else {
-            continue;
-        };
-        if cell.material != MaterialId::Air {
-            continue;
-        }
-        // Move mass_per_droplet from humidity into the cell — bounded
-        // by both what humidity actually holds and the cell's
-        // remaining sat headroom, so the transfer is mass-conservative.
         let take_mass = (cfg.mass_per_droplet * mass_mult).min(mass);
-        let cell_free = u8::MAX as f32 - cell.sat.0 as f32;
-        let transfer = take_mass.min(cell_free).max(0.0);
-        if transfer <= 0.0 {
+        if take_mass <= 0.0 {
             continue;
         }
-        let transfer_u = transfer.round() as i32;
-        if transfer_u <= 0 {
+        let landed = deposit_water_on_surface(world, centre_gx, cfg.top_y, take_mass);
+        if landed <= 0.0 {
             continue;
         }
-        let new_sat = (cell.sat.0 as i32 + transfer_u).clamp(0, u8::MAX as i32) as u8;
-        world.set_cell(
-            centre_gx,
-            cfg.top_y,
-            Cell {
-                sat: Sat(new_sat),
-                ..cell
-            },
-        );
         // Drain the humidity tile by the exact mass that landed.
         let entry = humidity.cells.entry((hx, hy)).or_insert(0.0);
-        *entry -= transfer_u as f32;
+        *entry -= landed;
         if *entry < 1e-6 {
             humidity.cells.remove(&(hx, hy));
         }
@@ -1055,6 +1212,7 @@ pub fn tick(world: &mut World) {
         apply_gravity_fall_regions(world, pass);
     }
     apply_lateral_spill_regions(world, &active);
+    apply_downslope_runoff_regions(world, &active);
     apply_seepage_regions(world, &active);
     for pass in &passes {
         apply_grain_fall_regions(world, pass);
@@ -1594,12 +1752,14 @@ mod tests {
     // ------------ rain ------------
 
     fn setup_sky_row(y: i32) -> World {
-        // Chunk (0, 0) with a full row of Air at `y`. Air is the
-        // default cell, so we don't need to write anything — just
-        // instantiate the chunk.
+        // Chunk with bedrock floor so climatic rain lands on the surface
+        // (y=1), scanning down from the sky row.
         let mut w = World::new(11);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         assert!((0..CHUNK_CELLS_H as i32).contains(&y));
+        for x in 0..CHUNK_CELLS_W as i32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
         w
     }
 
@@ -1618,8 +1778,8 @@ mod tests {
         apply_rain(&mut b, &cfg);
         for x in 0..64 {
             assert_eq!(
-                a.get_cell(x, 30).map(|c| c.sat.0),
-                b.get_cell(x, 30).map(|c| c.sat.0),
+                a.get_cell(x, 1).map(|c| c.sat.0),
+                b.get_cell(x, 1).map(|c| c.sat.0),
                 "identical worlds must produce identical rain (x={x})"
             );
         }
@@ -1637,9 +1797,11 @@ mod tests {
         };
         apply_rain(&mut w, &cfg);
         for x in 0..64 {
-            let sat = w.get_cell(x, 30).unwrap().sat.0;
+            let sat = w.get_cell(x, 1).unwrap().sat.0;
+            let sky = w.get_cell(x, 30).unwrap().sat.0;
+            assert_eq!(sky, 0, "rain must not hang in the sky at x={x}");
             if (5..=20).contains(&x) {
-                assert!(sat > 0, "x={x} in range should have rain");
+                assert!(sat > 0, "x={x} in range should have rain on the ground");
             } else {
                 assert_eq!(sat, 0, "x={x} outside range should stay dry");
             }
@@ -1649,7 +1811,7 @@ mod tests {
     #[test]
     fn rain_droplet_saturates_at_full() {
         let mut w = setup_sky_row(30);
-        w.set_cell(3, 30, Cell::water()); // already full
+        w.set_cell(3, 1, Cell::water()); // surface already full
         let cfg = RainConfig {
             top_y: 30,
             x_range: (3, 3),
@@ -1658,15 +1820,18 @@ mod tests {
             seed_salt: 2,
         };
         apply_rain(&mut w, &cfg);
-        // Sat is clamped at u8::MAX — no overflow past FULL.
-        assert_eq!(w.get_cell(3, 30).unwrap().sat.0, u8::MAX);
+        // Full film on bare rock does not stack into a wedge.
+        assert_eq!(w.get_cell(3, 1).unwrap().sat.0, u8::MAX);
+        assert_eq!(w.get_cell(3, 2).unwrap().sat.0, 0);
     }
 
     #[test]
     fn rain_skips_non_air_cells() {
         let mut w = setup_sky_row(30);
-        // A stone cell at (10, 30) should not receive rain.
-        w.set_cell(10, 30, Cell::solid(MaterialId::Stone));
+        // Buried column of stone — no free air above a solid landing.
+        for y in 1..=30 {
+            w.set_cell(10, y, Cell::solid(MaterialId::Stone));
+        }
         let cfg = RainConfig {
             top_y: 30,
             x_range: (10, 10),
@@ -1675,8 +1840,34 @@ mod tests {
             seed_salt: 3,
         };
         apply_rain(&mut w, &cfg);
-        assert_eq!(w.get_cell(10, 30).unwrap().sat.0, 0);
         assert_eq!(w.get_cell(10, 30).unwrap().material, MaterialId::Stone);
+        assert_eq!(w.get_cell(10, 30).unwrap().sat.0, 0);
+    }
+
+    #[test]
+    fn downslope_runoff_drains_hill_film() {
+        let mut w = World::new(7);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Step: solid at (4,2) and (5,1); film on the higher step.
+        // Block the left diagonal so runoff must go right/down.
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        w.set_cell(3, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(3, 2, Cell::solid(MaterialId::Stone));
+        w.set_cell(4, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(4, 2, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(4, 3, Cell::water());
+        apply_downslope_runoff(&mut w);
+        assert!(
+            w.get_cell(4, 3).unwrap().sat.0 < u8::MAX,
+            "hill film should drain"
+        );
+        assert!(
+            w.get_cell(5, 2).unwrap().sat.0 > 0,
+            "water should move diagonally downhill"
+        );
     }
 
     // ------------ evaporation ------------
@@ -1918,8 +2109,17 @@ mod tests {
     fn setup_cloud_world() -> (World, crate::humidity::Humidity) {
         let mut w = World::new(21);
         w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..CHUNK_CELLS_W as i32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
         let h = crate::humidity::Humidity::new(4);
         (w, h)
+    }
+
+    fn ground_sat_sum(w: &World) -> i64 {
+        (0..CHUNK_CELLS_W as i32)
+            .map(|x| w.get_cell(x, 1).map(|c| c.sat.0 as i64).unwrap_or(0))
+            .sum()
     }
 
     #[test]
@@ -1935,6 +2135,7 @@ mod tests {
             w.tick = w.tick.wrapping_add(1);
         }
         for x in 0..CHUNK_CELLS_W as i32 {
+            assert_eq!(w.get_cell(x, 1).unwrap().sat.0, 0);
             assert_eq!(w.get_cell(x, 30).unwrap().sat.0, 0);
         }
     }
@@ -1942,8 +2143,7 @@ mod tests {
     #[test]
     fn condensation_rains_when_tile_is_wet() {
         let (mut w, mut h) = setup_cloud_world();
-        // Deposit lots of humidity at tile (0, 7) so it's saturated.
-        // Tile (0, 7) covers gx=[0..4), gy=[28..32). Cloud row at gy=30.
+        // Humidity over tile covering gx centre 2; rain lands on ground.
         h.add(1, 30, 1000.0);
         let cfg = CondensationConfig {
             top_y: 30,
@@ -1951,14 +2151,13 @@ mod tests {
             ..CondensationConfig::default()
         };
         apply_condensation_rain(&mut w, &mut h, &cfg);
-        // Rain lands at the tile centre: gx = hx*tile_cols + tile_cols/2
-        // = 0*4 + 2 = 2.
-        let landed = w.get_cell(2, 30).unwrap();
+        let landed = w.get_cell(2, 1).unwrap();
         assert!(
             landed.sat.0 > 0,
-            "cloud with 1000 mass should have rained (got sat={})",
+            "cloud with 1000 mass should have rained on the ground (got sat={})",
             landed.sat.0
         );
+        assert_eq!(w.get_cell(2, 30).unwrap().sat.0, 0, "sky row stays dry");
     }
 
     #[test]
@@ -1969,10 +2168,7 @@ mod tests {
         h.add(6, 30, 300.0);
         h.add(11, 30, 250.0);
         let total_before = h.total_mass();
-        // Sum sat on the cloud row before.
-        let world_sat_before: i64 = (0..CHUNK_CELLS_W as i32)
-            .map(|x| w.get_cell(x, 30).unwrap().sat.0 as i64)
-            .sum();
+        let world_sat_before = ground_sat_sum(&w);
 
         let cfg = CondensationConfig {
             top_y: 30,
@@ -1985,9 +2181,7 @@ mod tests {
         }
 
         let total_after = h.total_mass();
-        let world_sat_after: i64 = (0..CHUNK_CELLS_W as i32)
-            .map(|x| w.get_cell(x, 30).unwrap().sat.0 as i64)
-            .sum();
+        let world_sat_after = ground_sat_sum(&w);
         let humidity_lost = total_before - total_after;
         let world_gained = (world_sat_after - world_sat_before) as f32;
         assert!(
@@ -2018,8 +2212,8 @@ mod tests {
         }
         for x in 0..CHUNK_CELLS_W as i32 {
             assert_eq!(
-                w1.get_cell(x, 30).map(|c| c.sat.0),
-                w2.get_cell(x, 30).map(|c| c.sat.0),
+                w1.get_cell(x, 1).map(|c| c.sat.0),
+                w2.get_cell(x, 1).map(|c| c.sat.0),
                 "world state must be deterministic at x={x}"
             );
         }
@@ -2030,8 +2224,10 @@ mod tests {
     fn condensation_skips_non_air_landing_cell() {
         let (mut w, mut h) = setup_cloud_world();
         h.add(1, 30, 1000.0);
-        // Put Stone at the tile's centre landing spot.
-        w.set_cell(2, 30, Cell::solid(MaterialId::Stone));
+        // Solid column — nowhere for surface rain to land.
+        for y in 1..=30 {
+            w.set_cell(2, y, Cell::solid(MaterialId::Stone));
+        }
         let mass_before = h.total_mass();
         let cfg = CondensationConfig {
             top_y: 30,
@@ -2039,10 +2235,7 @@ mod tests {
             ..CondensationConfig::default()
         };
         apply_condensation_rain(&mut w, &mut h, &cfg);
-        // Stone stays, no sat added; humidity untouched because
-        // rain refused.
         assert_eq!(w.get_cell(2, 30).unwrap().material, MaterialId::Stone);
-        assert_eq!(w.get_cell(2, 30).unwrap().sat.0, 0);
         assert_eq!(h.total_mass(), mass_before);
     }
 
@@ -2067,21 +2260,41 @@ mod tests {
             }
         }
         let tall_hx = tall_hx.expect("worldgen should have tall land");
+        // Landing column is the tile centre (matches condensation deposit).
         let centre_gx = tall_hx * tc + tc / 2;
-        let mut w = World::new(p.seed);
-        // Ensure chunk covering the mountain column.
-        let cc = ChunkCoord::new(
-            centre_gx.div_euclid(CHUNK_CELLS_W as i32),
-            40_i32.div_euclid(CHUNK_CELLS_H as i32),
+        let surface = crate::worldgen::continental_surface_y(
+            p.seed,
+            centre_gx,
+            p.sea_level_y,
+            p.width_cols,
         );
-        w.ensure_chunk(cc);
-        w.set_cell(centre_gx, 40, Cell::air());
+        let mut w = World::new(p.seed);
+        // Terrain under the mountain column so rain can land.
+        for y in [surface, surface + 1, 40] {
+            w.ensure_chunk(ChunkCoord::new(
+                centre_gx.div_euclid(CHUNK_CELLS_W as i32),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        w.set_cell(centre_gx, surface, Cell::solid(MaterialId::Stone));
+        for y in (surface + 1)..=40 {
+            w.set_cell(centre_gx, y, Cell::air());
+        }
+        let sky = surface + 12;
+        for y in (surface + 1)..=sky {
+            w.ensure_chunk(ChunkCoord::new(
+                centre_gx.div_euclid(CHUNK_CELLS_W as i32),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+            w.set_cell(centre_gx, y, Cell::air());
+        }
         let mut h = crate::humidity::Humidity::new(tc);
         // Thin cloud — below default min_mass_to_rain (64) but above
         // orographic-reduced threshold on tall peaks.
-        h.add(centre_gx, 40, 50.0);
+        // Add at tile centre so humidity key matches landing column.
+        h.add(centre_gx, sky, 50.0);
         let cfg = CondensationConfig {
-            top_y: 40,
+            top_y: sky,
             min_mass_to_rain: 64.0,
             max_prob_per_tick: 1.0,
             full_mass: 120.0,

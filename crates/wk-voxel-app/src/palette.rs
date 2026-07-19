@@ -21,6 +21,13 @@ pub fn cell_color(cell: Cell) -> [u8; 3] {
     let t = cell.sat.as_f32();
     if cell.material == MaterialId::Air {
         let water = MaterialRegistry::colour_rgb(MaterialId::Water);
+        // Standing pools should read as real water, not washed sky-blue
+        // dashes. Snap the blend once a cell is mostly full.
+        let t = if t >= 0.55 {
+            (0.55 + (t - 0.55) * 1.8).clamp(0.75, 1.0)
+        } else {
+            t * 0.85
+        };
         [
             lerp_u8(base[0], water[0], t),
             lerp_u8(base[1], water[1], t),

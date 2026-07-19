@@ -9,9 +9,10 @@
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
-use crate::cell::{Cell, Sat};
+use crate::cell::Cell;
 use crate::grid::World;
 use crate::humidity::Humidity;
+use crate::rules::deposit_water_on_surface;
 use crate::wind::Wind;
 use crate::worldgen::continental_surface_y;
 
@@ -340,69 +341,8 @@ fn deposit_rain_column(
     tick: u64,
     salt: i32,
 ) -> f32 {
-    if budget <= 0.0 {
-        return 0.0;
-    }
     let jx = world.wrap_x(gx + ((tick as i32 + salt * 3) % 3) - 1);
-    // Walk down from the cloud and land on the free-air cell just
-    // above terrain or standing water — not hang as mid-sky sat.
-    let mut y = start_y;
-    let mut last_free_air_y: Option<i32> = None;
-    for _ in 0..128 {
-        let Some(cell) = world.get_cell(jx, y) else {
-            y -= 1;
-            continue;
-        };
-        if cell.material != MaterialId::Air {
-            if let Some(ay) = last_free_air_y {
-                if let Some(ac) = world.get_cell(jx, ay) {
-                    return fill_sat(world, jx, ay, ac, budget);
-                }
-            }
-            if let Some(above) = world.get_cell(jx, y + 1) {
-                if above.material == MaterialId::Air {
-                    return fill_sat(world, jx, y + 1, above, budget);
-                }
-            }
-            return 0.0;
-        }
-        if cell.sat.is_full() {
-            // Ocean / lake surface — rain onto the air just above it.
-            if let Some(ay) = last_free_air_y {
-                if let Some(ac) = world.get_cell(jx, ay) {
-                    return fill_sat(world, jx, ay, ac, budget);
-                }
-            }
-            return 0.0;
-        }
-        last_free_air_y = Some(y);
-        y -= 1;
-    }
-    if let Some(ay) = last_free_air_y {
-        if let Some(ac) = world.get_cell(jx, ay) {
-            return fill_sat(world, jx, ay, ac, budget);
-        }
-    }
-    0.0
-}
-
-fn fill_sat(world: &mut World, gx: i32, gy: i32, cell: Cell, budget: f32) -> f32 {
-    let free = u8::MAX as f32 - cell.sat.0 as f32;
-    let transfer = budget.min(free).max(0.0);
-    let u = transfer.round() as i32;
-    if u <= 0 {
-        return 0.0;
-    }
-    let new_sat = (cell.sat.0 as i32 + u).clamp(0, u8::MAX as i32) as u8;
-    world.set_cell(
-        gx,
-        gy,
-        Cell {
-            sat: Sat(new_sat),
-            ..cell
-        },
-    );
-    u as f32
+    deposit_water_on_surface(world, jx, start_y, budget)
 }
 
 #[cfg(test)]

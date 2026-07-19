@@ -41,9 +41,9 @@ use macroquad::prelude::*;
 use wk_voxel::{
     apply_condensation_rain_with_orographic, apply_evaporation_into_humidity,
     apply_karst_dissolution, apply_rain, celestial_screen_pos, continental_surface_y,
-    day_night_factor, humidity_diffuse_due, is_daytime, sky_rgb, sky_rgb_at_height,
-    temperature_step_due, tick, CondensationConfig, EvapConfig, KarstConfig, OrographicConfig,
-    RainConfig, WorldgenParams,
+    day_night_factor, humidity_diffuse_due, is_daytime, is_standing_water, sky_rgb,
+    sky_rgb_at_height, temperature_step_due, tick, CondensationConfig, EvapConfig, KarstConfig,
+    OrographicConfig, RainConfig, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -591,13 +591,15 @@ async fn main() {
                     let Some(cell) = scene.world.get_cell(x, y) else {
                         continue;
                     };
-                    // Let the day/night sky show through: skip empty Air
-                    // and very thin films. Downpour now lands on the
-                    // ground, so modest puddles (sat ≥ ~160) stay visible
-                    // without painting mid-sky rain streaks.
+                    // Only draw standing water (pools / ocean film / land
+                    // puddles). Mid-air sat stays invisible — falling rain
+                    // is the cosmetic streak under raining clouds.
                     if cell.material == wk_material::MaterialId::Air {
-                        let too_thin = y > scene.params.sea_level_y && cell.sat.0 < 160;
-                        if cell.sat.is_empty() || too_thin {
+                        if cell.sat.is_empty() {
+                            continue;
+                        }
+                        let below_sea = y <= scene.params.sea_level_y;
+                        if !below_sea && !is_standing_water(&scene.world, x, y) {
                             continue;
                         }
                     }
