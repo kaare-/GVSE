@@ -19,7 +19,8 @@
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
 //! - `O` — toggle Set A organisms (Atom step)
-//! - `H` — toggle humidity overlay
+//! - `H` — toggle cyan humidity debug overlay
+//! - `N` — toggle cloud drawing (dark = wetter; wind-advected)
 //! - `F1` — toggle the bottom tool / hotkey line
 //! - `F2` — creature editor (Set A MS-Paint; `C` stays condensation here)
 //! - click — block / organism inspector
@@ -34,9 +35,9 @@ mod scene;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_condensation_rain, apply_evaporation_into_humidity, apply_karst_dissolution, apply_rain,
-    humidity_diffuse_due, tick, CondensationConfig, EvapConfig, KarstConfig, RainConfig,
-    WorldgenParams,
+    apply_condensation_rain_with_orographic, apply_evaporation_into_humidity,
+    apply_karst_dissolution, apply_rain, humidity_diffuse_due, tick, CondensationConfig, EvapConfig,
+    KarstConfig, OrographicConfig, RainConfig, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -96,6 +97,63 @@ fn humidity_overlay_alpha(mass: f32, max_mass: f32) -> u8 {
     (48.0 + norm * 152.0) as u8
 }
 
+/// Dark cloud puffs — darker / denser when the tile holds more water.
+/// Sub-tile `scroll` (from advection residual) keeps motion smooth.
+fn draw_clouds(
+    humidity: &wk_voxel::Humidity,
+    origin_x: f32,
+    origin_y: f32,
+    cell_px: f32,
+    bedrock_floor_y: i32,
+    width_cols: i32,
+    wrap_x: bool,
+    sw: f32,
+    sh: f32,
+) {
+    if humidity.cells.is_empty() {
+        return;
+    }
+    let tile_cols = humidity.tile_cols;
+    let tile_px = tile_cols as f32 * cell_px;
+    let max_mass = humidity
+        .cells
+        .values()
+        .copied()
+        .fold(0.0f32, f32::max)
+        .max(1.0);
+    let scroll = humidity.advect_rx * tile_px;
+    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
+
+    for (&(hx, hy), &mass) in &humidity.cells {
+        if mass <= 0.0 {
+            continue;
+        }
+        let norm = (mass / max_mass).clamp(0.0, 1.0);
+        // Darker grey as water content rises.
+        let shade = (210.0 - norm * 160.0) as u8;
+        let alpha = (55.0 + norm * 170.0) as u8;
+        let base_gx = hx * tile_cols;
+        let base_gy = hy * tile_cols;
+        let r = tile_px * (0.45 + 0.35 * norm);
+        for &x_copy in x_copies {
+            let sx = origin_x
+                + (base_gx + x_copy * width_cols) as f32 * cell_px
+                + scroll
+                + tile_px * 0.5;
+            let sy = origin_y
+                - (base_gy - bedrock_floor_y + tile_cols) as f32 * cell_px
+                + tile_px * 0.5;
+            if sx + r < 0.0 || sx - r > sw || sy + r < 0.0 || sy - r > sh {
+                continue;
+            }
+            let c = Color::from_rgba(shade, shade, shade.saturating_add(8), alpha);
+            draw_circle(sx, sy, r, c);
+            draw_circle(sx - r * 0.45, sy + r * 0.1, r * 0.7, c);
+            draw_circle(sx + r * 0.4, sy + r * 0.05, r * 0.65, c);
+        }
+    }
+}
+
 #[cfg(test)]
 mod overlay_tests {
     use super::humidity_overlay_alpha;
@@ -120,6 +178,7 @@ async fn main() {
     let mut karst_on = true;
     let mut organisms_on = true;
     let mut humidity_overlay = false;
+    let mut clouds_on = true;
     let mut show_tool_line = true;
     let mut editor = CreatureEditor::default();
     let mut inspect: Option<(i32, i32)> = None;
@@ -210,6 +269,9 @@ async fn main() {
             if is_key_pressed(KeyCode::H) {
                 humidity_overlay = !humidity_overlay;
             }
+            if is_key_pressed(KeyCode::N) {
+                clouds_on = !clouds_on;
+            }
             if is_key_pressed(KeyCode::O) {
                 organisms_on = !organisms_on;
             }
@@ -247,10 +309,25 @@ async fn main() {
                     &evap_cfg,
                 );
             }
+            // Wind advects cloud / humidity mass before rain so
+            // orographic dumps see the latest plume position.
+            scene
+                .humidity
+                .advect(scene.wind.climate_vx, scene.wind.climate_vy);
             if cond_rain_on {
-                // Condensation rain runs AFTER evap so the humidity
-                // it draws from is the tick's latest snapshot.
-                apply_condensation_rain(&mut scene.world, &mut scene.humidity, &cond_cfg);
+                let oro = OrographicConfig {
+                    seed: scene.params.seed,
+                    width_cols: scene.params.width_cols,
+                    sea_level_y: scene.params.sea_level_y,
+                    wind_sign: if scene.wind.climate_vx >= 0.0 { 1 } else { -1 },
+                    ..OrographicConfig::default()
+                };
+                apply_condensation_rain_with_orographic(
+                    &mut scene.world,
+                    &mut scene.humidity,
+                    &cond_cfg,
+                    Some(&oro),
+                );
             }
             if karst_on {
                 apply_karst_dissolution(&mut scene.world, &karst_cfg);
@@ -372,13 +449,23 @@ async fn main() {
             }
         }
 
-        // Humidity overlay: paint each tile as a translucent cyan
-        // rect scaled to atmospheric mass. Rendered *after* the cells
-        // so it sits on top; ignored when the toggle is off.
-        //
-        // Alpha is relative to the current max tile mass (not a fixed
-        // 4×4×255 ceiling). Diffusion spreads mass thin; the old
-        // absolute scale made almost every tile `alpha == 0`.
+        // Clouds: humidity mass drawn as dark puffs (darker = wetter),
+        // scrolled by wind advection residual.
+        if clouds_on {
+            draw_clouds(
+                &scene.humidity,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.width_cols,
+                scene.params.wrap_x,
+                sw,
+                sh,
+            );
+        }
+
+        // Optional cyan humidity debug overlay (tile rects).
         if humidity_overlay {
             let tile_px = scene.humidity.tile_cols as f32 * cell_px;
             let max_mass = scene
@@ -392,12 +479,11 @@ async fn main() {
                 if mass <= 0.0 {
                     continue;
                 }
-                // Convert tile coord to world cell coord (lower-left
-                // of the tile) then to screen coord.
                 let base_gx = hx * scene.humidity.tile_cols;
                 let base_gy = hy * scene.humidity.tile_cols;
                 for &x_copy in x_copies {
-                    let sx = origin_x + (base_gx + x_copy * scene.params.width_cols) as f32 * cell_px;
+                    let sx = origin_x + (base_gx + x_copy * scene.params.width_cols) as f32 * cell_px
+                        + scene.humidity.advect_rx * tile_px;
                     let sy = origin_y
                         - (base_gy - scene.params.bedrock_floor_y + scene.humidity.tile_cols)
                             as f32
@@ -456,7 +542,7 @@ async fn main() {
 
         // HUD: info line always; tool / hotkey line toggled with F1.
         let info = format!(
-            "fps={:.0}  tick={} seed={} rain={} cond={} evap={} karst={} org={} atoms={} hum={} humidity={:.0} {}",
+            "fps={:.0}  tick={} seed={} rain={} cond={} evap={} karst={} org={} atoms={} clouds={} hum={} wind={:.2} humidity={:.0} {}",
             fps_smoothed(),
             scene.world.tick,
             scene.params.seed,
@@ -466,14 +552,16 @@ async fn main() {
             if karst_on { "on" } else { "off" },
             if organisms_on { "on" } else { "off" },
             scene.organisms.len(),
+            if clouds_on { "on" } else { "off" },
             if humidity_overlay { "on" } else { "off" },
+            scene.wind.climate_vx,
             scene.humidity.total_mass(),
             if sim_paused { "[paused]" } else { "" }
         );
         draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
         if show_tool_line {
             draw_text(
-                "Space|R|W/C/E/K/O|H overlay|F1 tools|F2 editor|click inspect|Esc",
+                "Space|R|W/C/E/K/O|N clouds|H hum|F1 tools|F2 editor|click inspect|Esc",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,
