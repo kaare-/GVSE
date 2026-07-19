@@ -9,6 +9,7 @@
 //! (material IDs + property tables — pure data with no coupling).
 
 pub mod active;
+pub mod blueprint;
 pub mod cell;
 pub mod chunk;
 pub mod grid;
@@ -25,11 +26,9 @@ pub use active::{
 pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{is_grain, water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
+pub use blueprint::{Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR};
 pub use grid::World;
-pub use organism::{
-    atom_modules, day_factor, Atom, ModuleId, OrganismStore, PlacedModule, DEMO_DAY_TICKS,
-    MAX_ATOMS,
-};
+pub use organism::{day_factor, Atom, BodyModule, ModuleId, OrganismStore, DEMO_DAY_TICKS, MAX_ATOMS};
 pub use heatmap::Heatmap;
 pub use humidity::{
     humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,

@@ -16,3 +16,4 @@ license.workspace = true
 wk-material = { path = "../wk-material" }
 serde = { version = "1", features = ["derive"] }
 rayon = "1.10"
+postcard = { version = "1", features = ["alloc"] }

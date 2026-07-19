@@ -624,6 +624,7 @@ dependencies = [
 name = "wk-voxel"
 version = "0.1.0"
 dependencies = [
+ "postcard",
  "rayon",
  "serde",
  "wk-material",

@@ -32,19 +32,9 @@ impl Scene {
             params.sky_ceiling_y,
         );
         humidity.wrap_x = params.wrap_x;
-        let mut organisms = OrganismStore::new();
-        // Seed Set A Atoms into coastal / ocean wet cells — the
-        // visible life layer (black + green pixels), not a biomass wash.
-        organisms.seed_coastal_atoms(
-            &world,
-            params.seed,
-            0,
-            params.width_cols,
-            params.bedrock_floor_y,
-            params.sky_ceiling_y,
-            4, // denser so Atoms are easy to spot in the ocean band
-            40.0,
-        );
+        // Empty organism store — place Atoms via the F2 creature editor
+        // (Enter, then click a wet cell). No auto-seeded demo life.
+        let organisms = OrganismStore::new();
         Self {
             world,
             params,
@@ -75,11 +65,11 @@ mod tests {
     }
 
     #[test]
-    fn scene_seeds_set_a_atoms_in_water() {
+    fn scene_starts_with_no_organisms() {
         let s = Scene::new(WorldgenParams::default());
         assert!(
-            !s.organisms.is_empty(),
-            "demo scene should seed coastal Atoms"
+            s.organisms.is_empty(),
+            "demo scene should not auto-seed Atoms — spawn via F2 editor"
         );
     }
 
