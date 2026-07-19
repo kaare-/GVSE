@@ -337,7 +337,13 @@ async fn main() {
         (rain, cond)
     };
     let (mut rain_cfg, mut cond_cfg) = cloud_cfg(&scene.params);
-    let evap_cfg = EvapConfig::default();
+    // Evaporate every few ticks so ocean/land films aren't vacuumed
+    // into humidity faster than storms can return water.
+    let evap_cfg = EvapConfig {
+        rate_per_tick: 1,
+        dry_above_max: 200,
+        period_ticks: 5,
+    };
     let karst_cfg = KarstConfig::default();
 
     loop {
@@ -460,9 +466,9 @@ async fn main() {
             // Light drizzle from leftover vapor (clouds do the downpours).
             if cond_rain_on {
                 let drizzle = CondensationConfig {
-                    min_mass_to_rain: 96.0,
-                    max_prob_per_tick: 0.18,
-                    mass_per_droplet: 64.0,
+                    min_mass_to_rain: 140.0,
+                    max_prob_per_tick: 0.10,
+                    mass_per_droplet: 40.0,
                     ..cond_cfg
                 };
                 let oro = OrographicConfig {

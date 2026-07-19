@@ -753,12 +753,15 @@ fn fill_air_sat(world: &mut World, gx: i32, gy: i32, cell: Cell, budget: f32) ->
 /// Surface-evaporation parameters for [`apply_evaporation`].
 #[derive(Debug, Clone, Copy)]
 pub struct EvapConfig {
-    /// Sat removed per tick from each qualifying cell.
+    /// Sat removed per qualifying tick from each surface cell.
     pub rate_per_tick: u8,
     /// A cell only evaporates when the cell above it is `Air` with
     /// `sat ≤ dry_above_max`. That keeps sub-surface lake cells from
     /// evaporating — only the top exposed water layer loses mass.
     pub dry_above_max: u8,
+    /// Only run on ticks where `world.tick % period_ticks == 0`.
+    /// Higher values slow the water→humidity pump so basins linger.
+    pub period_ticks: u64,
 }
 
 impl Default for EvapConfig {
@@ -766,6 +769,7 @@ impl Default for EvapConfig {
         Self {
             rate_per_tick: 1,
             dry_above_max: 200,
+            period_ticks: 1,
         }
     }
 }
@@ -782,6 +786,10 @@ impl Default for EvapConfig {
 ///
 /// Compute-then-apply so evap is order-independent.
 pub fn apply_evaporation(world: &mut World, cfg: &EvapConfig) {
+    let period = cfg.period_ticks.max(1);
+    if world.tick % period != 0 {
+        return;
+    }
     let deltas = collect_evap_deltas(world, cfg);
     apply_evap_deltas(world, deltas, None);
 }
@@ -794,6 +802,10 @@ pub fn apply_evaporation_into_humidity(
     humidity: &mut crate::humidity::Humidity,
     cfg: &EvapConfig,
 ) {
+    let period = cfg.period_ticks.max(1);
+    if world.tick % period != 0 {
+        return;
+    }
     let deltas = collect_evap_deltas(world, cfg);
     apply_evap_deltas(world, deltas, Some(humidity));
 }
@@ -1904,9 +1916,11 @@ mod tests {
         let cfg = EvapConfig {
             rate_per_tick: 5,
             dry_above_max: 200,
+            period_ticks: 1,
         };
         for _ in 0..10 {
             apply_evaporation(&mut w, &cfg);
+            w.tick = w.tick.wrapping_add(1);
         }
         assert_eq!(w.get_cell(4, 1).unwrap().sat.0, 0);
     }
@@ -1950,6 +1964,7 @@ mod tests {
         let cfg = EvapConfig {
             rate_per_tick: 3,
             dry_above_max: 200,
+            period_ticks: 1,
         };
         let cell_sat_before: i64 = (1..=5)
             .map(|y| w.get_cell(4, y).unwrap().sat.0 as i64)
@@ -2424,6 +2439,7 @@ mod tests {
         let cfg = EvapConfig {
             rate_per_tick: 5,
             dry_above_max: 200,
+            period_ticks: 1,
         };
         apply_evaporation_into_humidity(&mut w, &mut h, &cfg);
         assert!(

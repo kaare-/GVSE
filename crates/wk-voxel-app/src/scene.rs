@@ -9,8 +9,9 @@ use wk_voxel::{
 
 /// Humidity / wind / temp tile side (world cells per sample).
 const HUMIDITY_TILE_COLS: i32 = 4;
-/// Prevailing wind — tiles per tick (slow crawl, readable as clouds).
-const CLIMATE_WIND_VX: f32 = 0.08;
+/// Prevailing wind — tiles per tick. Parcels use a fraction of this
+/// so the sky crawls left→right instead of streaking.
+const CLIMATE_WIND_VX: f32 = 0.05;
 
 pub struct Scene {
     pub world: World,
