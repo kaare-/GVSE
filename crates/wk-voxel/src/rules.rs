@@ -16,6 +16,71 @@ use crate::cell::{is_grain, water_capacity, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
+/// Free-surface / pore hydraulic head in cell units:
+/// `y + sat / capacity`. Adjacent cells equalise toward matching heads.
+pub fn hydraulic_head(gy: i32, sat: Sat, capacity: u8) -> f32 {
+    if capacity == 0 {
+        return gy as f32;
+    }
+    gy as f32 + (sat.0 as f32) / (capacity as f32)
+}
+
+/// Saturation to move from A → B (positive) or B → A (negative) so the
+/// pair's heads meet in the middle. Clamped to available sat / free
+/// capacity. Both capacities must be > 0.
+fn sat_move_to_equalize_heads(
+    sat_a: u8,
+    cap_a: u8,
+    gy_a: i32,
+    sat_b: u8,
+    cap_b: u8,
+    gy_b: i32,
+) -> i32 {
+    if cap_a == 0 || cap_b == 0 {
+        return 0;
+    }
+    let ca = cap_a as f32;
+    let cb = cap_b as f32;
+    let dh = hydraulic_head(gy_a, Sat(sat_a), cap_a) - hydraulic_head(gy_b, Sat(sat_b), cap_b);
+    if dh.abs() < 1e-6 {
+        return 0;
+    }
+    // Full pairwise equalisation: m · (1/ca + 1/cb) = dh.
+    // Truncate toward zero so 127.5 → 127 (matches integer half-gap
+    // for equal-cap Air and avoids creating a sat unit when two
+    // neighbours both drain one cell).
+    let m_f = dh * ca * cb / (ca + cb);
+    let m = if m_f >= 0.0 {
+        m_f.floor() as i32
+    } else {
+        m_f.ceil() as i32
+    };
+    if m > 0 {
+        let free_b = cap_b as i32 - sat_b as i32;
+        m.min(sat_a as i32).min(free_b.max(0))
+    } else {
+        let free_a = cap_a as i32 - sat_a as i32;
+        let mag = (-m).min(sat_b as i32).min(free_a.max(0));
+        -mag
+    }
+}
+
+/// Max sat transferred through a porous solid per seepage step,
+/// scaled by [`wk_material::MaterialProps::permeability`].
+fn seepage_rate(material: MaterialId) -> i32 {
+    use wk_material::MaterialRegistry;
+    let p = MaterialRegistry::props(material).permeability;
+    if p == 0 {
+        return 0;
+    }
+    // Cap at 32 sat-units/tick at permeability 255 (gravel-ish).
+    ((p as i32 * 32) / 255).max(1)
+}
+
+fn is_porous_solid(material: MaterialId) -> bool {
+    material != MaterialId::Air && water_capacity(material) > 0
+}
+
 /// Bottom-up single-step gravity fall for water saturation.
 ///
 /// For every cell that holds any water (`sat > 0`), try to move as
@@ -98,25 +163,18 @@ pub fn apply_gravity_fall(world: &mut World) {
     }
 }
 
-/// Pairwise horizontal water spreading between adjacent `Air` cells.
+/// Pairwise free-surface spill between adjacent `Air` cells.
 ///
-/// Each pair `(gx, gy)` ↔ `(gx+1, gy)` transfers **half the
-/// difference** in saturation from the higher-sat cell to the lower.
-/// Two properties matter:
+/// Each pair `(gx, gy)` ↔ `(gx+1, gy)` equalises
+/// [`hydraulic_head`] — for two Air cells (equal capacity) that is
+/// exactly the classic "move half the sat difference" virtual-pipes
+/// step. Heads make the rule ready for mixed capacities / slopes.
 ///
-/// - **Compute-then-apply.** Every pair reads the *pre-pass* state,
-///   accumulates a signed delta per cell, and the deltas are applied
-///   once at the end. That way the result is independent of iteration
-///   order and pairs never double-count.
-/// - **Air-Air only in v1.** Cross-material flow (Air → porous solid,
-///   solid → solid Darcy) is a follow-up. Today the rule handles the
-///   pure "puddle spreads across a bowl" and "lake surface levels
-///   itself out" cases.
+/// - **Compute-then-apply** so the result is order-independent.
+/// - **Air–Air only.** Soak into porous solids is [`apply_seepage`].
 ///
-/// One pass moves ~1 cell per tick along a chain of cells (the
-/// virtual-pipes propagation speed limit). Standing water on a flat
-/// bed with no forcing settles to a flat surface over ~N ticks for a
-/// puddle N cells wide.
+/// One pass moves ~1 cell per tick along a chain. Standing water on
+/// a flat bed settles over ~N ticks for a puddle N cells wide.
 pub fn apply_lateral_spill(world: &mut World) {
     let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
 
@@ -145,20 +203,19 @@ pub fn apply_lateral_spill(world: &mut World) {
                 if right.material != MaterialId::Air {
                     continue;
                 }
-                let l = left.sat.0 as i32;
-                let r = right.sat.0 as i32;
-                if l == r {
-                    continue;
-                }
-                // Half the difference — the classic virtual-pipes
-                // symmetric filter. Positive means "move right",
-                // negative means "move left".
-                let move_amt = (l - r) / 2;
+                let cap = water_capacity(MaterialId::Air);
+                let move_amt = sat_move_to_equalize_heads(
+                    left.sat.0,
+                    cap,
+                    gy,
+                    right.sat.0,
+                    cap,
+                    gy,
+                );
                 if move_amt == 0 {
                     continue;
                 }
-                // Key by wrapped coords so the ring seam (width-1 ↔ 0)
-                // doesn't double-apply under two aliases.
+                // Positive move_amt = left → right.
                 *deltas.entry((left_x, gy)).or_insert(0) -= move_amt;
                 *deltas.entry((right_x, gy)).or_insert(0) += move_amt;
             }
@@ -170,9 +227,6 @@ pub fn apply_lateral_spill(world: &mut World) {
             continue;
         };
         let cap = water_capacity(cell.material) as i32;
-        // Applied deltas from Air-Air pairs never cross zero or cap
-        // for a *single* cell (each pair contributes at most half the
-        // gap), but multiple neighbours can add up. Clamp defensively.
         let new_sat = (cell.sat.0 as i32 + delta).clamp(0, cap);
         world.set_cell(
             gx,
@@ -180,6 +234,123 @@ pub fn apply_lateral_spill(world: &mut World) {
             Cell {
                 sat: Sat(new_sat as u8),
                 ..cell
+            },
+        );
+    }
+}
+
+/// Permeability-limited soak: water moves from wet cells into
+/// adjacent porous solids (and between porous solids) down the
+/// hydraulic-head gradient.
+///
+/// This is what makes a puddle wet the sand beach instead of only
+/// skating across Air. Rate is capped by the solid's permeability
+/// so gravel drinks fast and clay / stone drink slowly.
+///
+/// Transfers are planned from a snapshot, then applied in a stable
+/// order with live capacity checks so mass is conserved exactly.
+pub fn apply_seepage(world: &mut World) {
+    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+
+    // (from, to, amt) with amt > 0.
+    let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
+    const OFFSETS: [(i32, i32); 2] = [(1, 0), (0, 1)];
+
+    for coord in &coords {
+        for y in 0..CHUNK_CELLS_H {
+            let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in 0..CHUNK_CELLS_W {
+                let gx = world.wrap_x(coord.cx * CHUNK_CELLS_W as i32 + x as i32);
+                let Some(a) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                let cap_a = water_capacity(a.material);
+                if cap_a == 0 {
+                    continue;
+                }
+                for (dx, dy) in OFFSETS {
+                    let nx = world.wrap_x(gx + dx);
+                    let ny = gy + dy;
+                    if dx != 0 && nx == gx {
+                        continue;
+                    }
+                    let Some(b) = world.get_cell(nx, ny) else {
+                        continue;
+                    };
+                    let cap_b = water_capacity(b.material);
+                    if cap_b == 0 {
+                        continue;
+                    }
+                    let a_solid = is_porous_solid(a.material);
+                    let b_solid = is_porous_solid(b.material);
+                    if !a_solid && !b_solid {
+                        continue;
+                    }
+                    let move_amt = sat_move_to_equalize_heads(
+                        a.sat.0, cap_a, gy, b.sat.0, cap_b, ny,
+                    );
+                    if move_amt == 0 {
+                        continue;
+                    }
+                    let rate = if a_solid && b_solid {
+                        seepage_rate(a.material).min(seepage_rate(b.material))
+                    } else if a_solid {
+                        seepage_rate(a.material)
+                    } else {
+                        seepage_rate(b.material)
+                    };
+                    if rate <= 0 {
+                        continue;
+                    }
+                    if move_amt > 0 {
+                        xfers.push(((gx, gy), (nx, ny), move_amt.min(rate)));
+                    } else {
+                        xfers.push(((nx, ny), (gx, gy), (-move_amt).min(rate)));
+                    }
+                }
+            }
+        }
+    }
+
+    // Apply in a stable order. Each transfer re-reads live sat so a
+    // source drained by an earlier xfer simply sends less — every
+    // individual move conserves mass exactly.
+    xfers.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(a.1.cmp(&b.1))
+            .then(a.2.cmp(&b.2))
+    });
+    for (from, to, amt) in xfers {
+        let Some(src) = world.get_cell(from.0, from.1) else {
+            continue;
+        };
+        let Some(dst) = world.get_cell(to.0, to.1) else {
+            continue;
+        };
+        let cap_dst = water_capacity(dst.material) as i32;
+        if cap_dst == 0 {
+            continue;
+        }
+        let free = cap_dst - dst.sat.0 as i32;
+        let amt = amt.min(src.sat.0 as i32).min(free.max(0));
+        if amt <= 0 {
+            continue;
+        }
+        world.set_cell(
+            from.0,
+            from.1,
+            Cell {
+                sat: Sat(src.sat.0 - amt as u8),
+                ..src
+            },
+        );
+        world.set_cell(
+            to.0,
+            to.1,
+            Cell {
+                sat: Sat(dst.sat.0 + amt as u8),
+                ..dst
             },
         );
     }
@@ -656,14 +827,15 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
 /// Runs the sub-passes in a fixed order:
 ///
 /// 1. Gravity fall — every wet cell tries to move one cell downward.
-/// 2. Lateral spill — pairs of horizontally-adjacent Air cells
-///    equalise.
-/// 3. Grain fall — granular materials sink into the Air cell below.
+/// 2. Lateral spill — horizontally-adjacent Air cells equalise heads.
+/// 3. Seepage — water soaks into / through porous solids by head,
+///    rate-limited by permeability.
+/// 4. Grain fall — granular materials sink into the Air cell below.
 ///
-/// Gravity + spill first means water settles onto the current
-/// terrain before grains drop through it; each tick the grain then
-/// takes one step down (possibly through freshly-settled water) and
-/// the next tick's water pass repacks around the new grain position.
+/// Gravity + spill + seepage first means water settles and soaks
+/// before grains drop through it; each tick the grain then takes
+/// one step down (possibly through freshly-settled water) and the
+/// next tick's water pass repacks around the new grain position.
 ///
 /// Rain and evaporation are **opt-in**: callers wire
 /// [`apply_rain`] and [`apply_evaporation`] into their per-frame
@@ -672,6 +844,7 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
 pub fn tick(world: &mut World) {
     apply_gravity_fall(world);
     apply_lateral_spill(world);
+    apply_seepage(world);
     apply_grain_fall(world);
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {
@@ -846,10 +1019,11 @@ mod tests {
 
     #[test]
     fn spill_equalizes_isolated_pair() {
-        // Put stone walls on the outside so the water cell only has
-        // one Air neighbour — this isolates a single pair.
+        // Bedrock walls (cap 0) so the water cell only has one Air
+        // neighbour — isolates a single pair. Stone is porous and
+        // would participate in seepage, not in spill.
         let mut w = setup_air_row(64);
-        w.set_cell(9, 5, Cell::solid(MaterialId::Stone));
+        w.set_cell(9, 5, Cell::solid(MaterialId::Bedrock));
         w.set_cell(10, 5, Cell::water());
         // (11, 5) starts as default Air with sat 0.
         let start_mass = w.get_cell(10, 5).unwrap().sat.0 as i32;
@@ -858,7 +1032,7 @@ mod tests {
 
         let l = w.get_cell(10, 5).unwrap().sat.0 as i32;
         let r = w.get_cell(11, 5).unwrap().sat.0 as i32;
-        // Half the difference moved: 255/2 = 127.
+        // Head equalisation on equal-cap Air ≡ half the sat gap.
         assert_eq!(l, 255 - 127);
         assert_eq!(r, 127);
         assert_eq!(l + r, start_mass, "mass conserved");
@@ -900,18 +1074,12 @@ mod tests {
     #[test]
     fn spill_stops_at_a_solid_wall() {
         let mut w = setup_air_row(64);
-        // Put a Stone cell at (5, 5); water at (4, 5). Water must not
-        // cross a non-Air cell.
-        w.set_cell(5, 5, Cell::solid(MaterialId::Stone));
+        // Impermeable Bedrock wall — spill is Air–Air only.
+        w.set_cell(5, 5, Cell::solid(MaterialId::Bedrock));
         w.set_cell(4, 5, Cell::water());
         apply_lateral_spill(&mut w);
-        // (5, 5) is Stone — spill rule skips non-Air pairs entirely.
-        // Water is still bound to (4, 5) and can only travel via
-        // (3, 5), which had sat=0 originally, so half went left.
-        assert_eq!(w.get_cell(5, 5).unwrap().material, MaterialId::Stone);
-        // No sat leaked into the Stone cell.
+        assert_eq!(w.get_cell(5, 5).unwrap().material, MaterialId::Bedrock);
         assert_eq!(w.get_cell(5, 5).unwrap().sat.0, 0);
-        // Half the original water is now at (3, 5).
         assert_eq!(w.get_cell(3, 5).unwrap().sat.0, 127);
         assert_eq!(w.get_cell(4, 5).unwrap().sat.0, 255 - 127);
     }
@@ -959,6 +1127,78 @@ mod tests {
         }
     }
 
+    // ------------ seepage ------------
+
+    #[test]
+    fn seepage_wets_adjacent_sand_from_air_water() {
+        let mut w = World::new(42);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        // Dry sand beside a full water cell.
+        w.set_cell(3, 1, Cell::water());
+        w.set_cell(4, 1, Cell::solid(MaterialId::Sand));
+        let before = w.get_cell(3, 1).unwrap().sat.0 as i32
+            + w.get_cell(4, 1).unwrap().sat.0 as i32;
+        apply_seepage(&mut w);
+        let sand = w.get_cell(4, 1).unwrap();
+        let air = w.get_cell(3, 1).unwrap();
+        assert!(sand.sat.0 > 0, "sand should take on pore water");
+        assert!(air.sat.0 < 255, "air should lose sat to the sand");
+        assert_eq!(
+            air.sat.0 as i32 + sand.sat.0 as i32,
+            before,
+            "mass conserved"
+        );
+        // Rate-limited: one tick can't dump the whole lake into sand.
+        let rate = seepage_rate(MaterialId::Sand);
+        assert!(sand.sat.0 as i32 <= rate);
+    }
+
+    #[test]
+    fn seepage_skips_impermeable_bedrock() {
+        let mut w = World::new(43);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 1, Cell::water());
+        w.set_cell(3, 1, Cell::solid(MaterialId::Bedrock));
+        apply_seepage(&mut w);
+        assert_eq!(w.get_cell(2, 1).unwrap().sat.0, 255);
+        assert_eq!(w.get_cell(3, 1).unwrap().sat.0, 0);
+    }
+
+    #[test]
+    fn seepage_prefers_lower_head() {
+        // Two sand cells on bedrock: left full pores, right dry.
+        let mut w = World::new(44);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            for y in 0..4 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        let cap = water_capacity(MaterialId::Sand);
+        w.set_cell(5, 2, Cell {
+            material: MaterialId::Sand,
+            sat: Sat(cap),
+            ..Cell::default()
+        });
+        w.set_cell(6, 2, Cell::solid(MaterialId::Sand));
+        apply_seepage(&mut w);
+        let l = w.get_cell(5, 2).unwrap().sat.0;
+        let r = w.get_cell(6, 2).unwrap().sat.0;
+        assert!(r > 0);
+        assert!(l < cap);
+        assert_eq!(l as i32 + r as i32, cap as i32);
+    }
+
+    #[test]
+    fn hydraulic_head_ranks_full_air_above_dry_sand() {
+        let ha = hydraulic_head(10, Sat::FULL, water_capacity(MaterialId::Air));
+        let hs = hydraulic_head(10, Sat::EMPTY, water_capacity(MaterialId::Sand));
+        assert!(ha > hs);
+    }
+
     #[test]
     fn spill_crosses_chunk_boundary() {
         // Full water cell at gx=63 in chunk (0, 0); empty air at
@@ -970,7 +1210,7 @@ mod tests {
         for x in 0..128 {
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
         }
-        w.set_cell(62, 5, Cell::solid(MaterialId::Stone));
+        w.set_cell(62, 5, Cell::solid(MaterialId::Bedrock));
         w.set_cell(63, 5, Cell::water());
         apply_lateral_spill(&mut w);
         assert_eq!(w.get_cell(63, 5).unwrap().sat.0, 255 - 127);

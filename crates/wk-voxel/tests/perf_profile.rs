@@ -14,7 +14,7 @@ use std::time::{Duration, Instant};
 
 use wk_voxel::{
     apply_condensation_rain, apply_evaporation_into_humidity, apply_grain_fall,
-    apply_gravity_fall, apply_karst_dissolution, apply_lateral_spill, apply_rain,
+    apply_gravity_fall, apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_seepage,
     humidity_diffuse_due, stamp_world, CondensationConfig, EvapConfig, Humidity, KarstConfig,
     RainConfig, World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W,
 };
@@ -31,6 +31,7 @@ struct PassAccum {
     karst: Duration,
     gravity: Duration,
     spill: Duration,
+    seepage: Duration,
     grain: Duration,
     humidity_diffuse: Duration,
     humidity_diffuse_calls: u64,
@@ -46,6 +47,7 @@ impl PassAccum {
             karst: Duration::ZERO,
             gravity: Duration::ZERO,
             spill: Duration::ZERO,
+            seepage: Duration::ZERO,
             grain: Duration::ZERO,
             humidity_diffuse: Duration::ZERO,
             humidity_diffuse_calls: 0,
@@ -60,6 +62,7 @@ impl PassAccum {
             + self.karst
             + self.gravity
             + self.spill
+            + self.seepage
             + self.grain
             + self.humidity_diffuse
             + self.finish
@@ -95,7 +98,7 @@ fn stamp_scene(params: WorldgenParams) -> (World, Humidity, WorldgenParams) {
 
 fn configs(params: &WorldgenParams) -> (RainConfig, EvapConfig, CondensationConfig, KarstConfig) {
     let rain = RainConfig {
-        top_y: params.sky_ceiling_y - 2,
+        top_y: params.sky_ceiling_y - 1,
         x_range: (0, params.width_cols - 1),
         prob_per_col_per_tick: 0.02,
         droplet_sat: 64,
@@ -103,7 +106,7 @@ fn configs(params: &WorldgenParams) -> (RainConfig, EvapConfig, CondensationConf
     };
     let evap = EvapConfig::default();
     let cond = CondensationConfig {
-        top_y: params.sky_ceiling_y - 3,
+        top_y: params.sky_ceiling_y - 2,
         ..CondensationConfig::default()
     };
     let karst = KarstConfig::default();
@@ -161,6 +164,7 @@ fn one_stack_tick(
             apply_karst_dissolution(world, karst);
             apply_gravity_fall(world);
             apply_lateral_spill(world);
+            apply_seepage(world);
             apply_grain_fall(world);
             finish_tick(world);
             if humidity_diffuse_due(world.tick) {
@@ -191,6 +195,10 @@ fn one_stack_tick(
             let t0 = Instant::now();
             apply_lateral_spill(world);
             a.spill += t0.elapsed();
+
+            let t0 = Instant::now();
+            apply_seepage(world);
+            a.seepage += t0.elapsed();
 
             let t0 = Instant::now();
             apply_grain_fall(world);
@@ -257,6 +265,7 @@ fn run_profile(label: &str, params: WorldgenParams) {
     eprintln!("  karst                {:>8.3} ms/tick", ms_per(accum.karst, n));
     eprintln!("  gravity_fall         {:>8.3} ms/tick", ms_per(accum.gravity, n));
     eprintln!("  lateral_spill        {:>8.3} ms/tick", ms_per(accum.spill, n));
+    eprintln!("  seepage              {:>8.3} ms/tick", ms_per(accum.seepage, n));
     eprintln!("  grain_fall           {:>8.3} ms/tick", ms_per(accum.grain, n));
     eprintln!(
         "  humidity.diffuse     {:>8.3} ms/tick amortized  ({:.3} ms/call × {} calls)",

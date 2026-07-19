@@ -492,14 +492,18 @@ Follow-ups, each its own PR:
    cells).
 2. Lateral spill rule (virtual pipes head equalisation).
 3. Density swap (sand falls through water).
-4. Porosity absorb (water enters porous solid up to saturation
-   cap).
+4. Porosity absorb / seepage (water enters porous solid up to
+   saturation cap; permeability-limited) + head-based spill.
 5. Worldgen (stamp continental profile into cells).
 6. Rendering (macroquad-based, matches column-GVSE's palette).
 7. Rain / evaporation sources.
 8. Karst dissolution (limestone → air).
 9. Multithreading via the checkerboard partition.
 10. Ecology + agents port.
+
+Items 1–8 (through karst + seepage/head-spill) are landed in the
+`wk-voxel` crate; remaining focus is dirty-rect quiescence,
+checkerboard threading, then ecology.
 
 Each PR keeps the isolation contract and passes headless tests
 before touching rendering.
