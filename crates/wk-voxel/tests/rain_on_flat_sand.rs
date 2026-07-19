@@ -10,7 +10,7 @@
 //! puddle spread and evaporation.
 
 use wk_material::MaterialId;
-use wk_voxel::{tick, water_capacity, Cell, Sat, World};
+use wk_voxel::{apply_gravity_fall, tick, water_capacity, Cell, World};
 
 #[test]
 fn rain_row_saturates_sand_over_one_tick() {
@@ -60,33 +60,67 @@ fn rain_row_saturates_sand_over_one_tick() {
 }
 
 #[test]
-fn lone_droplet_falls_over_many_ticks() {
+fn lone_droplet_falls_over_many_gravity_passes() {
+    // Gravity-only, so we can assert exact per-pass positions of a
+    // single droplet without lateral spill smearing it out.
     let mut w = World::new(4321);
-    // Bedrock floor at y=0; a lone droplet at y=8; everything else Air.
     for x in 0..64 {
         w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
     }
     let x = 32;
     w.set_cell(x, 8, Cell::water());
 
-    // After each tick the droplet should be one row lower until it
-    // rests on top of the bedrock at y=1.
     for expected_y in (1..=7).rev() {
-        tick(&mut w);
-        let expected = expected_y;
+        apply_gravity_fall(&mut w);
         assert!(
-            w.get_cell(x, expected).unwrap().sat.is_full(),
-            "droplet should be at y={expected} after {} ticks (tick={})",
+            w.get_cell(x, expected_y).unwrap().sat.is_full(),
+            "droplet should be at y={expected_y} after {} passes",
             8 - expected_y,
-            w.tick
         );
-        // Old cell must have emptied.
-        assert!(w.get_cell(x, expected + 1).unwrap().sat.is_empty());
+        assert!(w.get_cell(x, expected_y + 1).unwrap().sat.is_empty());
     }
 
-    // One more tick: bedrock is impermeable, droplet stays.
-    tick(&mut w);
+    // One more pass: bedrock is impermeable, droplet stays.
+    apply_gravity_fall(&mut w);
     assert!(w.get_cell(x, 1).unwrap().sat.is_full());
-    // No leak into bedrock.
     assert!(w.get_cell(x, 0).unwrap().sat.is_empty());
+}
+
+#[test]
+fn droplet_falls_then_spreads_over_many_ticks() {
+    // Full tick pass drives both gravity + lateral spill. A droplet
+    // dropped over a flat sand bed should end up as a spread-out
+    // shallow puddle rather than a single tall column.
+    let mut w = World::new(9999);
+    for x in 0..64 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(32, 10, Cell::water());
+    let start_mass: i32 = 255;
+
+    // Enough ticks for the droplet to land (10 fall steps) plus
+    // several ticks to spread laterally.
+    for _ in 0..30 {
+        tick(&mut w);
+    }
+
+    // Mass conservation across the whole chunk.
+    let mass: i32 = (0..64i32)
+        .flat_map(|x| (0..64i32).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+        .sum();
+    assert_eq!(
+        mass, start_mass,
+        "total sat conserved across gravity + spill"
+    );
+
+    // The droplet must have both fallen and spread — assert a
+    // widened wet footprint on the bedrock-adjacent row.
+    let wet_cols_at_bottom: i32 = (0..64i32)
+        .filter(|&x| w.get_cell(x, 1).map(|c| c.sat.0 > 0).unwrap_or(false))
+        .count() as i32;
+    assert!(
+        wet_cols_at_bottom >= 3,
+        "expected the puddle to spread across several cells, got {wet_cols_at_bottom}"
+    );
 }
