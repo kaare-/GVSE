@@ -187,8 +187,11 @@ async fn main() {
         // `cam_y_max` stops panning past the sky ceiling.
         // origin_y = (sh + world_h_px)/2 + cam_y  is the screen-y of
         // the bottom edge of the bedrock row.
+        // Nudge the top clamp 3px past the window edge so a thin
+        // clear-colour strip can't peek above the rain band.
+        const TOP_OVERSCAN_PX: f32 = 3.0;
         let cam_y_min = (sh - HUD_H) - (sh + world_h_px) * 0.5;
-        let cam_y_max = world_h_px - (sh + world_h_px) * 0.5; // sky top at y=0
+        let cam_y_max = world_h_px - (sh + world_h_px) * 0.5 - TOP_OVERSCAN_PX;
         cam_y = cam_y.clamp(cam_y_min, cam_y_max.max(cam_y_min));
 
         let origin_x = (sw - world_w_px) * 0.5 - cam_x;
