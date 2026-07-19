@@ -504,10 +504,12 @@ Follow-ups, each its own PR:
 10. Ecology + agents port.
 
 Items 1–8 (through karst + seepage/head-spill), dirty-rect
-active-chunk planning, four-pass checkerboard, and **rayon
-parallelism within each colour** are landed in `wk-voxel`.
-Gravity/grain use bottom-up **pull** so cross-chunk seams stay
-one-step under the partition. Remaining focus is ecology + agents.
+active-chunk planning, four-pass checkerboard, **rayon
+parallelism within each colour**, and **chunk occupancy skips** for
+evap (`has_wet_air`) / karst (`has_limestone`) are landed in
+`wk-voxel`. Gravity/grain use bottom-up **pull** so cross-chunk
+seams stay one-step under the partition. Remaining focus is
+ecology + agents.
 
 Each PR keeps the isolation contract and passes headless tests
 before touching rendering.

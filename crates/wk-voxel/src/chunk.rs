@@ -9,6 +9,7 @@
 //! rectangle cheap.
 
 use serde::{Deserialize, Serialize};
+use wk_material::MaterialId;
 
 use crate::cell::Cell;
 
@@ -81,6 +82,17 @@ pub struct Chunk {
     pub dirty: Option<Rect>,
     /// Local tick counter (wraps freely — used for RNG salting only).
     pub tick: u64,
+    /// Sticky occupancy: at least one `Air` cell with `sat > 0` was
+    /// written since the flag was last cleared. Evaporation uses this
+    /// to skip empty sky chunks while still visiting quiescent lakes
+    /// (which dirty-rects alone would miss).
+    #[serde(default)]
+    pub has_wet_air: bool,
+    /// Sticky occupancy: at least one `Limestone` cell was written
+    /// since the flag was last cleared. Karst skips chunks that never
+    /// held limestone.
+    #[serde(default)]
+    pub has_limestone: bool,
 }
 
 impl Chunk {
@@ -90,6 +102,8 @@ impl Chunk {
             cells: vec![Cell::default(); CHUNK_CELLS],
             dirty: None,
             tick: 0,
+            has_wet_air: false,
+            has_limestone: false,
         }
     }
 
@@ -104,7 +118,8 @@ impl Chunk {
     }
 
     /// Write a cell and mark the chunk's dirty rectangle so the next
-    /// tick knows which region to re-scan.
+    /// tick knows which region to re-scan. Also raises occupancy
+    /// flags (cleared only by the passes that scan for absence).
     pub fn set(&mut self, x: usize, y: usize, cell: Cell) {
         self.cells[Self::idx(x, y)] = cell;
         let xu = x as u8;
@@ -119,6 +134,12 @@ impl Chunk {
                     y1: yu,
                 });
             }
+        }
+        if cell.material == MaterialId::Air && !cell.sat.is_empty() {
+            self.has_wet_air = true;
+        }
+        if cell.material == MaterialId::Limestone {
+            self.has_limestone = true;
         }
     }
 
@@ -161,5 +182,19 @@ mod tests {
         let r = Rect::full();
         assert!(r.contains(0, 0));
         assert!(r.contains((CHUNK_CELLS_W - 1) as u8, (CHUNK_CELLS_H - 1) as u8));
+    }
+
+    #[test]
+    fn set_raises_occupancy_flags() {
+        let mut c = Chunk::new(ChunkCoord::new(0, 0));
+        assert!(!c.has_wet_air);
+        assert!(!c.has_limestone);
+        c.set(1, 1, Cell::water());
+        assert!(c.has_wet_air);
+        c.set(2, 2, Cell::solid(MaterialId::Limestone));
+        assert!(c.has_limestone);
+        // Dry air / stone do not clear sticky flags.
+        c.set(1, 1, Cell::air());
+        assert!(c.has_wet_air);
     }
 }
