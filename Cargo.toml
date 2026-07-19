@@ -11,6 +11,10 @@ members = [
     # Greenfield 2D cellular-automata sim, isolated from the column
     # stack above. See docs/VOXEL_MIGRATION.md.
     "crates/wk-voxel",
+    # Demo / renderer binary for wk-voxel. Depends on wk-voxel +
+    # wk-material only; NEVER on wk-world / wk-sim / wk-agents /
+    # wk-app / wk-io / wk-field.
+    "crates/wk-voxel-app",
 ]
 
 [workspace.package]
