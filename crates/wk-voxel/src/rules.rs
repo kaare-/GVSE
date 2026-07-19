@@ -12,7 +12,7 @@ use std::collections::HashMap;
 
 use wk_material::MaterialId;
 
-use crate::cell::{water_capacity, Cell, Sat};
+use crate::cell::{is_grain, water_capacity, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
@@ -177,21 +177,75 @@ pub fn apply_lateral_spill(world: &mut World) {
     }
 }
 
+/// One-cell-per-pass grain fall.
+///
+/// For every cell whose material is granular ([`is_grain`]) and whose
+/// direct below neighbour is `Air`, swap the two `Cell`s. Whatever
+/// water saturation the Air cell had comes up into the newly-emptied
+/// upper cell, so a grain sinking through water displaces exactly the
+/// water it walks through — mass is conserved and the water column
+/// doesn't teleport.
+///
+/// Traversal is the same bottom-up sweep as [`apply_gravity_fall`],
+/// with chunks ordered by ascending `cy` first so cross-chunk falls
+/// land on already-processed cells and don't drop multiple rows per
+/// pass.
+///
+/// V1 kept simple: grains fall through Air *any* saturation and stop
+/// on anything else. Density-ordered stacking between grain species
+/// (heavy sinks under light) and buoyancy interactions with less-
+/// dense fluids are follow-up rules.
+pub fn apply_grain_fall(world: &mut World) {
+    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    for coord in coords {
+        for y in 0..CHUNK_CELLS_H {
+            let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in 0..CHUNK_CELLS_W {
+                let gx = coord.cx * CHUNK_CELLS_W as i32 + x as i32;
+                let Some(cur) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if !is_grain(cur.material) {
+                    continue;
+                }
+                let Some(below) = world.get_cell(gx, gy - 1) else {
+                    continue;
+                };
+                if below.material != MaterialId::Air {
+                    continue;
+                }
+                // Full-cell swap: grain moves down, air cell (with
+                // whatever sat it held) rises. This is the density-
+                // swap step from classic falling-sand simulations,
+                // and it's the mechanism by which a dropped sand
+                // grain sinks through a pond.
+                world.set_cell(gx, gy, below);
+                world.set_cell(gx, gy - 1, cur);
+            }
+        }
+    }
+}
+
 /// Advance the sim by one tick.
 ///
-/// Runs the fluid sub-passes in a fixed order:
+/// Runs the sub-passes in a fixed order:
 ///
 /// 1. Gravity fall — every wet cell tries to move one cell downward.
 /// 2. Lateral spill — pairs of horizontally-adjacent Air cells
-///    equalize.
+///    equalise.
+/// 3. Grain fall — granular materials sink into the Air cell below.
 ///
-/// Together those two rules cover the "falling sand → puddle
-/// spreads" behaviour. Future rules (density swap, porosity absorb
-/// refinements, evaporation) will slot in ahead of the dirty-rect
-/// clear once they land.
+/// Gravity + spill first means water settles onto the current
+/// terrain before grains drop through it; each tick the grain then
+/// takes one step down (possibly through freshly-settled water) and
+/// the next tick's water pass repacks around the new grain position.
+/// Future rules (porosity absorb refinements, evaporation) will slot
+/// in ahead of the dirty-rect clear once they land.
 pub fn tick(world: &mut World) {
     apply_gravity_fall(world);
     apply_lateral_spill(world);
+    apply_grain_fall(world);
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {
         chunk.tick = chunk.tick.wrapping_add(1);
@@ -523,6 +577,125 @@ mod tests {
         apply_gravity_fall(&mut w);
         assert!(w.get_cell(6, 1).unwrap().sat.is_full());
         assert!(w.get_cell(6, 0).unwrap().sat.is_empty()); // bedrock sat stays 0
+    }
+
+    // ------------ grain fall ------------
+
+    #[test]
+    fn grain_falls_through_empty_air() {
+        let mut w = setup_column_world();
+        // Sand at y=5, everything below is empty Air, bedrock at y=0.
+        w.set_cell(4, 5, Cell::solid(MaterialId::Sand));
+        apply_grain_fall(&mut w);
+        assert_eq!(
+            w.get_cell(4, 4).map(|c| c.material),
+            Some(MaterialId::Sand)
+        );
+        assert_eq!(
+            w.get_cell(4, 5).map(|c| c.material),
+            Some(MaterialId::Air)
+        );
+    }
+
+    #[test]
+    fn grain_stops_on_competent_rock() {
+        let mut w = setup_column_world();
+        w.set_cell(4, 2, Cell::solid(MaterialId::Stone));
+        w.set_cell(4, 3, Cell::solid(MaterialId::Sand));
+        apply_grain_fall(&mut w);
+        // Below Stone is not Air → no swap.
+        assert_eq!(w.get_cell(4, 3).unwrap().material, MaterialId::Sand);
+        assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Stone);
+    }
+
+    #[test]
+    fn grain_stops_on_another_grain() {
+        let mut w = setup_column_world();
+        w.set_cell(4, 1, Cell::solid(MaterialId::Sand));
+        w.set_cell(4, 2, Cell::solid(MaterialId::Gravel));
+        apply_grain_fall(&mut w);
+        // y=1 is Sand (not Air); Gravel at y=2 has nowhere to swap.
+        // Sand at y=1 has bedrock at y=0 (not Air), also stays.
+        assert_eq!(w.get_cell(4, 1).unwrap().material, MaterialId::Sand);
+        assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Gravel);
+    }
+
+    #[test]
+    fn grain_sinks_through_water_swap_conserves_mass() {
+        // Water column at y=1..=4 (all Air with sat=full); sand at
+        // y=5. After one grain pass, sand moves to y=4 and the water
+        // that was at y=4 rises into y=5.
+        let mut w = setup_column_world();
+        for y in 1..=4 {
+            w.set_cell(4, y, Cell::water());
+        }
+        w.set_cell(4, 5, Cell::solid(MaterialId::Sand));
+        let start_water: i32 = (1..=5)
+            .map(|y| w.get_cell(4, y).unwrap().sat.0 as i32)
+            .sum();
+
+        apply_grain_fall(&mut w);
+
+        let end_water: i32 = (1..=5)
+            .map(|y| w.get_cell(4, y).unwrap().sat.0 as i32)
+            .sum();
+        assert_eq!(end_water, start_water, "water sat is conserved by swap");
+        assert_eq!(w.get_cell(4, 4).unwrap().material, MaterialId::Sand);
+        // Sand carries its own sat (0) up... wait, the Air cell's
+        // water rises. The newly-vacated cell at y=5 receives the
+        // sat that was in the old below-cell (y=4 water full).
+        assert_eq!(w.get_cell(4, 5).unwrap().material, MaterialId::Air);
+        assert!(w.get_cell(4, 5).unwrap().sat.is_full());
+    }
+
+    #[test]
+    fn grain_falls_across_chunk_boundary() {
+        // Sand at gy=64 (chunk (0,1) local (7,0)); Air at gy=63
+        // (chunk (0,0) local (7,63)). Sand should end at gy=63.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        w.set_cell(7, 64, Cell::solid(MaterialId::Sand));
+        assert_eq!(
+            w.get_cell(7, 64).unwrap().material,
+            MaterialId::Sand
+        );
+        apply_grain_fall(&mut w);
+        assert_eq!(
+            w.get_cell(7, 63).unwrap().material,
+            MaterialId::Sand,
+            "grain should have crossed the seam"
+        );
+        assert_eq!(
+            w.get_cell(7, 64).unwrap().material,
+            MaterialId::Air,
+            "vacated cell above must be Air"
+        );
+    }
+
+    #[test]
+    fn grain_falls_one_cell_per_pass_through_empty_column() {
+        // Multi-pass check that grain fall obeys the 1 cell / pass rule.
+        let mut w = setup_column_world();
+        w.set_cell(20, 10, Cell::solid(MaterialId::Sand));
+        for expected in (1..=9).rev() {
+            apply_grain_fall(&mut w);
+            assert_eq!(
+                w.get_cell(20, expected).map(|c| c.material),
+                Some(MaterialId::Sand),
+                "grain should be at y={expected}"
+            );
+            assert_eq!(
+                w.get_cell(20, expected + 1).map(|c| c.material),
+                Some(MaterialId::Air)
+            );
+        }
+        // One more pass: bedrock below at y=0, no swap.
+        apply_grain_fall(&mut w);
+        assert_eq!(
+            w.get_cell(20, 1).unwrap().material,
+            MaterialId::Sand
+        );
     }
 
     #[test]
