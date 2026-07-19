@@ -18,6 +18,7 @@ use crate::active::{
 use crate::cell::{is_grain, water_capacity, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
+use crate::parallel::{self, for_each_region_parallel, map_regions_parallel};
 
 /// Resolve the scan plan for a standalone rule call. Uses current
 /// dirty rects; if nothing is dirty, falls back to a full-world scan
@@ -136,25 +137,17 @@ pub fn apply_gravity_fall(world: &mut World) {
 /// Gravity fall restricted to a pre-planned active set (see [`plan_active`]).
 ///
 /// One checkerboard colour at a time — callers that already hold a
-/// full plan should wrap with [`partition_checkerboard`].
+/// full plan should wrap with [`partition_checkerboard`]. Regions in
+/// the same colour run on rayon when [`parallel::parallel_enabled`].
 pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
-    if active.is_empty() {
-        return;
-    }
-    // Bottom-up within each chunk; chunks ordered by ascending `cy`.
-    let mut regions: Vec<ActiveChunk> = active.to_vec();
-    regions.sort_by(|a, b| {
-        a.coord
-            .cy
-            .cmp(&b.coord.cy)
-            .then(a.coord.cx.cmp(&b.coord.cx))
-    });
-    for ac in regions {
+    for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {
                 let gx = ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32;
-                let Some(cur) = world.get_cell(gx, gy) else {
+                // SAFETY: ptrs cover this region's pull write-set; see
+                // [`crate::parallel`].
+                let Some(cur) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy) }) else {
                     continue;
                 };
                 let cap = water_capacity(cur.material);
@@ -165,7 +158,9 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 if free == 0 {
                     continue;
                 }
-                let Some(above) = world.get_cell(gx, gy + 1) else {
+                let Some(above) =
+                    (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy + 1) })
+                else {
                     continue;
                 };
                 if above.sat.is_empty() {
@@ -178,25 +173,31 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 if move_amt == 0 {
                     continue;
                 }
-                world.set_cell(
-                    gx,
-                    gy + 1,
-                    Cell {
-                        sat: Sat(above.sat.0 - move_amt),
-                        ..above
-                    },
-                );
-                world.set_cell(
-                    gx,
-                    gy,
-                    Cell {
-                        sat: Sat(cur.sat.0 + move_amt),
-                        ..cur
-                    },
-                );
+                unsafe {
+                    parallel::set_cell(
+                        ptrs,
+                        wrap_width,
+                        gx,
+                        gy + 1,
+                        Cell {
+                            sat: Sat(above.sat.0 - move_amt),
+                            ..above
+                        },
+                    );
+                    parallel::set_cell(
+                        ptrs,
+                        wrap_width,
+                        gx,
+                        gy,
+                        Cell {
+                            sat: Sat(cur.sat.0 + move_amt),
+                            ..cur
+                        },
+                    );
+                }
             }
         }
-    }
+    });
 }
 
 /// Pairwise free-surface spill between adjacent `Air` cells.
@@ -218,9 +219,9 @@ pub fn apply_lateral_spill(world: &mut World) {
 
 /// Lateral spill restricted to a pre-planned active set.
 ///
-/// Scans checkerboard colours separately (future parallel seams) but
-/// **applies once** from a shared snapshot so a cross-chunk edge is
-/// not re-equalised by the neighbouring colour in the same rule.
+/// Scans checkerboard colours (rayon within a colour) but **applies
+/// once** from a shared snapshot so a cross-chunk edge is not
+/// re-equalised by the neighbouring colour in the same rule.
 pub fn apply_lateral_spill_regions(world: &mut World, active: &[ActiveChunk]) {
     if active.is_empty() {
         return;
@@ -251,14 +252,8 @@ fn accumulate_lateral_spill_deltas(
     active: &[ActiveChunk],
     deltas: &mut HashMap<(i32, i32), i32>,
 ) {
-    let mut regions: Vec<ActiveChunk> = active.to_vec();
-    regions.sort_by(|a, b| {
-        a.coord
-            .cy
-            .cmp(&b.coord.cy)
-            .then(a.coord.cx.cmp(&b.coord.cx))
-    });
-    for ac in regions {
+    let local = map_regions_parallel(active, |ac| {
+        let mut local: HashMap<(i32, i32), i32> = HashMap::new();
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {
@@ -287,9 +282,15 @@ fn accumulate_lateral_spill_deltas(
                 if move_amt == 0 {
                     continue;
                 }
-                *deltas.entry((left_x, gy)).or_insert(0) -= move_amt;
-                *deltas.entry((right_x, gy)).or_insert(0) += move_amt;
+                *local.entry((left_x, gy)).or_insert(0) -= move_amt;
+                *local.entry((right_x, gy)).or_insert(0) += move_amt;
             }
+        }
+        local
+    });
+    for map in local {
+        for (k, v) in map {
+            *deltas.entry(k).or_insert(0) += v;
         }
     }
 }
@@ -370,16 +371,9 @@ fn accumulate_seepage_xfers(
     active: &[ActiveChunk],
     xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) {
-    let mut regions: Vec<ActiveChunk> = active.to_vec();
-    regions.sort_by(|a, b| {
-        a.coord
-            .cy
-            .cmp(&b.coord.cy)
-            .then(a.coord.cx.cmp(&b.coord.cx))
-    });
     const OFFSETS: [(i32, i32); 2] = [(1, 0), (0, 1)];
-
-    for ac in &regions {
+    let local = map_regions_parallel(active, |ac| {
+        let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {
@@ -426,13 +420,17 @@ fn accumulate_seepage_xfers(
                         continue;
                     }
                     if move_amt > 0 {
-                        xfers.push(((gx, gy), (nx, ny), move_amt.min(rate)));
+                        local.push(((gx, gy), (nx, ny), move_amt.min(rate)));
                     } else {
-                        xfers.push(((nx, ny), (gx, gy), (-move_amt).min(rate)));
+                        local.push(((nx, ny), (gx, gy), (-move_amt).min(rate)));
                     }
                 }
             }
         }
+        local
+    });
+    for mut v in local {
+        xfers.append(&mut v);
     }
 }
 
@@ -459,38 +457,33 @@ pub fn apply_grain_fall(world: &mut World) {
 
 /// Grain fall restricted to a pre-planned active set.
 pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
-    if active.is_empty() {
-        return;
-    }
-    let mut regions: Vec<ActiveChunk> = active.to_vec();
-    regions.sort_by(|a, b| {
-        a.coord
-            .cy
-            .cmp(&b.coord.cy)
-            .then(a.coord.cx.cmp(&b.coord.cx))
-    });
-    for ac in regions {
+    for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {
                 let gx = ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32;
-                let Some(cur) = world.get_cell(gx, gy) else {
+                // SAFETY: see [`crate::parallel`].
+                let Some(cur) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy) }) else {
                     continue;
                 };
                 if cur.material != MaterialId::Air {
                     continue;
                 }
-                let Some(above) = world.get_cell(gx, gy + 1) else {
+                let Some(above) =
+                    (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy + 1) })
+                else {
                     continue;
                 };
                 if !is_grain(above.material) {
                     continue;
                 }
-                world.set_cell(gx, gy, above);
-                world.set_cell(gx, gy + 1, cur);
+                unsafe {
+                    parallel::set_cell(ptrs, wrap_width, gx, gy, above);
+                    parallel::set_cell(ptrs, wrap_width, gx, gy + 1, cur);
+                }
             }
         }
-    }
+    });
 }
 
 /// Rain source parameters for [`apply_rain`].
@@ -935,10 +928,11 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
 /// the *next* tick. A fully settled world plans nothing and the
 /// physics passes early-out.
 ///
-/// **Checkerboard.** Gravity and grain run four serial sub-passes
-/// (EE → OE → EO → OO). Spill and seepage scan the same partition
-/// but apply from one snapshot so edges are not re-solved mid-rule.
-/// Serial today; the partition is what multithreading will own later.
+/// **Checkerboard.** Gravity and grain run four colour sub-passes
+/// (EE → OE → EO → OO); within a colour, regions run on rayon when
+/// enabled. Spill and seepage scan the same partition (also parallel
+/// per colour) but apply from one snapshot so edges are not re-solved
+/// mid-rule.
 pub fn tick(world: &mut World) {
     let active = plan_active(world);
     clear_all_dirty(world);
@@ -1996,5 +1990,54 @@ mod tests {
             .filter(|&x| w.get_cell(x, 4).map(|c| c.sat.0 > 0).unwrap_or(false))
             .count() as i32;
         assert!(landed_row_wet >= 3, "landed row should have spread wet cells");
+    }
+
+    #[test]
+    fn parallel_tick_matches_serial_on_multi_chunk_fixture() {
+        // Two-by-two chunk slab with water + sand so gravity, spill,
+        // seepage, and grain all fire across several colours.
+        fn build() -> World {
+            let mut w = World::new(42);
+            for cx in 0..2 {
+                for cy in 0..2 {
+                    w.ensure_chunk(ChunkCoord::new(cx, cy));
+                }
+            }
+            for x in 0..128 {
+                w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            }
+            w.set_cell(10, 40, Cell::water());
+            w.set_cell(70, 90, Cell::water());
+            w.set_cell(20, 50, Cell::solid(MaterialId::Sand));
+            w.set_cell(90, 100, Cell::solid(MaterialId::Sand));
+            w.set_cell(11, 1, Cell::solid(MaterialId::Sand));
+            w
+        }
+
+        crate::parallel::set_parallel_enabled(false);
+        let mut serial = build();
+        for _ in 0..30 {
+            tick(&mut serial);
+        }
+
+        crate::parallel::set_parallel_enabled(true);
+        let mut parallel = build();
+        for _ in 0..30 {
+            tick(&mut parallel);
+        }
+
+        for cx in 0..2 {
+            for cy in 0..2 {
+                let coord = ChunkCoord::new(cx, cy);
+                let a = serial.chunks.get(&coord).expect("serial chunk");
+                let b = parallel.chunks.get(&coord).expect("parallel chunk");
+                assert_eq!(
+                    a.cells, b.cells,
+                    "parallel tick diverged from serial at {coord:?}"
+                );
+            }
+        }
+        // Leave the process default (parallel on) for later tests.
+        crate::parallel::set_parallel_enabled(true);
     }
 }

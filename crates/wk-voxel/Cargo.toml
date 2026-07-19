@@ -15,3 +15,4 @@ license.workspace = true
 [dependencies]
 wk-material = { path = "../wk-material" }
 serde = { version = "1", features = ["derive"] }
+rayon = "1.10"

@@ -14,12 +14,14 @@ pub mod chunk;
 pub mod grid;
 pub mod heatmap;
 pub mod humidity;
+pub mod parallel;
 pub mod rules;
 pub mod worldgen;
 
 pub use active::{
     checkerboard_phase, clear_all_dirty, partition_checkerboard, plan_active, ActiveChunk,
 };
+pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{is_grain, water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use grid::World;

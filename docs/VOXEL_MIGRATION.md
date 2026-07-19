@@ -296,11 +296,12 @@ The full rule pass will look like this (deferred implementation):
    boundary participates in the tick. Others are quiescent.
 2. **Four-pass checkerboard.** Divide the ring of active chunks
    into four passes: even-cx even-cy, odd-cx even-cy, even-cx
-   odd-cy, odd-cx odd-cy. Each pass can run in parallel because
-   adjacent chunks never share a colour (Purho, Noita, 2019).
-   Serial today (`partition_checkerboard`); multithreading later.
-   Spill/seepage scan by colour but apply once from a snapshot so
-   a seam edge is not re-equalised mid-rule.
+   odd-cy, odd-cx odd-cy. Adjacent chunks never share a colour
+   (Purho, Noita, 2019). Within a colour, gravity/grain (and
+   spill/seepage scans) run on **rayon** via disjoint chunk
+   pointers (`crates/wk-voxel/src/parallel.rs`). Toggle with
+   `set_parallel_enabled`. Spill/seepage still apply once from a
+   snapshot so a seam edge is not re-equalised mid-rule.
 3. **Within a chunk, bottom-up pull.** Gravity and grain walk
    `y = 0 → CHUNK_CELLS_H` and **pull** from the cell above into
    the current cell. Pull keeps cross-chunk seams one-step under
@@ -503,10 +504,10 @@ Follow-ups, each its own PR:
 10. Ecology + agents port.
 
 Items 1–8 (through karst + seepage/head-spill), dirty-rect
-active-chunk planning, and **serial** four-pass checkerboard are
-landed in `wk-voxel`. Gravity/grain use bottom-up **pull** so
-cross-chunk seams stay one-step under the partition. Remaining
-focus is multithreaded checkerboard, then ecology.
+active-chunk planning, four-pass checkerboard, and **rayon
+parallelism within each colour** are landed in `wk-voxel`.
+Gravity/grain use bottom-up **pull** so cross-chunk seams stay
+one-step under the partition. Remaining focus is ecology + agents.
 
 Each PR keeps the isolation contract and passes headless tests
 before touching rendering.
