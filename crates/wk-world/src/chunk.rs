@@ -99,8 +99,9 @@ impl Chunk {
     }
 
     /// Elevation of the top of the flowable-water column at the given
-    /// local index (or halo). If the column has no water in its cap,
-    /// falls back to its bare `surface_y`.
+    /// local index (or halo). Dry neighbours fall back to the solid bed
+    /// (`hydraulic_bed_y`), not `surface_y` — a snow bank must not act
+    /// as a dam that freezes the shoreline into a vertical water wall.
     pub fn water_top_neighbor(&self, local_x: i32) -> f32 {
         if local_x < 0 {
             self.halo_water_top[0]
@@ -108,7 +109,9 @@ impl Chunk {
             self.halo_water_top[1]
         } else {
             let col = &self.columns[local_x as usize];
-            col.flowable_water().map(|(top, _)| top).unwrap_or(col.surface_y)
+            col.flowable_water()
+                .map(|(top, _)| top)
+                .unwrap_or_else(|| col.hydraulic_bed_y())
         }
     }
 
@@ -128,7 +131,9 @@ impl Chunk {
         right: Option<&Chunk>,
     ) {
         let water_top_of = |col: &Column| {
-            col.flowable_water().map(|(top, _)| top).unwrap_or(col.surface_y)
+            col.flowable_water()
+                .map(|(top, _)| top)
+                .unwrap_or_else(|| col.hydraulic_bed_y())
         };
         self.halo_surface_y[0] = left
             .map(|c| c.columns[CHUNK_W - 1].surface_y)

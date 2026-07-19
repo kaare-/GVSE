@@ -11,6 +11,7 @@ pub fn run_activity(world: &mut World) {
             let wx = base + i as i32;
             let cap = col.moisture_cap();
             let active = col.top_water_mass() > 0
+                || col.flowable_water().map(|(_, m)| m).unwrap_or(0) > 0
                 || col.top_snow_mass() > 0
                 || col.top_ice_mass() > 0
                 || col.sediment.total > 0
