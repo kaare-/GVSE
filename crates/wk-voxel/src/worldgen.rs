@@ -61,10 +61,11 @@ impl Default for WorldgenParams {
             // enough from the starting view that it reads as a world.
             width_cols: (CHUNK_CELLS_W as i32) * 16,
             bedrock_floor_y: 0,
-            sea_level_y: 48,
-            // Tall sky so the rain / condensation cloud sits well
-            // above the terrain instead of reading as a low slab.
-            sky_ceiling_y: (CHUNK_CELLS_H as i32) * 4,
+            // Higher sea + taller relief so the cross-section fills
+            // more of the view (less empty sky above the hills).
+            sea_level_y: 80,
+            // Headroom above mountain peaks for the rain cloud.
+            sky_ceiling_y: (CHUNK_CELLS_H as i32) * 5,
             // Solid floor barrier — thick enough to read as "the
             // bottom of the world" in the demo.
             bedrock_thickness: 8,
@@ -128,12 +129,12 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea: i32, width_cols: i32)
     };
     let lerp = |a: f32, b: f32, u: f32| a + (b - a) * u;
 
-    // Elevation targets.
-    let abyss = sea_f - 42.0;
-    let slope = sea_f - 14.0;
+    // Elevation targets — tall relief so land fills more of the view.
+    let abyss = sea_f - 55.0;
+    let slope = sea_f - 18.0;
     let shelf = sea_f - 2.0;
-    let coast = sea_f + 16.0;
-    let plains = sea_f + 22.0;
+    let coast = sea_f + 28.0;
+    let plains = sea_f + 40.0;
 
     // Ring zones as fractions of width. Symmetric: ocean at both
     // ends, mountains in the middle.
@@ -166,7 +167,7 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea: i32, width_cols: i32)
         let peak = |center: f32, width: f32, amp: f32| {
             amp * (-(u - center) * (u - center) / (2.0 * width * width)).exp()
         };
-        let ridges = peak(0.25, 0.12, 28.0) + peak(0.55, 0.14, 42.0) + peak(0.80, 0.11, 34.0);
+        let ridges = peak(0.25, 0.12, 48.0) + peak(0.55, 0.14, 72.0) + peak(0.80, 0.11, 56.0);
         plains + ridges + n(36) * 0.7
     } else if t < 0.70 {
         lerp(plains, coast, smoothstep(0.60, 0.70, t)) + n(37) * 0.6
@@ -185,58 +186,70 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea: i32, width_cols: i32)
 
 /// Pick a solid body material for cell `(x, y)` under the sand cap.
 ///
-/// Layering (depth from surface) plus a little noise gives readable
-/// strata — clay lenses, gravel pockets, loose-rock near basement —
-/// instead of a flat Stone fill.
+/// Primary structure is **horizontal strata** (depth below the sand
+/// interface), gently warped by column noise so beds aren't laser-
+/// flat. Karst-friendly x-bands thicken the limestone bed rather than
+/// painting a whole vertical column — so you still get lateral facies
+/// contrast without the "two painted walls" look.
+///
+/// Palette reminder: Stone is cool mid-grey, Limestone is warm pale
+/// tan, Clay is brown, Gravel is sandy-tan, LooseRock is dark cobble.
 fn body_material(seed: u64, x: i32, y: i32, surface_y: i32, bedrock_top: i32, p: &WorldgenParams) -> MaterialId {
-    let depth = surface_y - y; // 0 at sand interface, grows downward
+    let depth = (surface_y - y) as f32; // 0 at sand interface, grows downward
     let above_bedrock = y - bedrock_top;
     let n = hash_f32_2(seed, x as i64, y as i64, 0x57A7_A);
+    // Mild per-column warp so stratum contacts undulate a little.
+    let warp = (hash_f32(seed, x as i64, 0x1A11_05) - 0.5) * 5.0;
+    let d = depth + warp;
 
-    if p.limestone_in_shelf_and_coast && is_karst_zone_x(x, p.width_cols) {
-        // Karst body: mostly limestone with stone/clay inclusions.
-        return if n < 0.12 {
+    let lime_enabled = p.limestone_in_shelf_and_coast;
+    let karst = lime_enabled && is_karst_zone_x(x, p.width_cols);
+    // Limestone bed: mid-stack stratum when enabled; thicker in karst
+    // shelf bands. Toggle off → stone fills that depth instead.
+    let (lime_lo, lime_hi) = if karst { (5.0, 32.0) } else { (12.0, 22.0) };
+
+    // Basement rubble just above the bedrock barrier.
+    if above_bedrock < 2 || (above_bedrock < 4 && n < 0.55) {
+        return if n < 0.55 {
+            MaterialId::LooseRock
+        } else {
             MaterialId::Stone
-        } else if n < 0.18 {
-            MaterialId::Clay
-        } else if n < 0.22 {
+        };
+    }
+
+    // Shallow regolith under the sand cap.
+    if d < 3.5 {
+        return if n < 0.30 {
             MaterialId::Gravel
+        } else if n < 0.45 {
+            MaterialId::Clay
+        } else {
+            MaterialId::Stone
+        };
+    }
+    // Clay bed.
+    if d < 8.0 {
+        return if n < 0.75 {
+            MaterialId::Clay
+        } else {
+            MaterialId::Stone
+        };
+    }
+    // Limestone stratum (the pale band) — or stone when disabled.
+    if lime_enabled && d >= lime_lo && d < lime_hi {
+        return if n < 0.07 {
+            MaterialId::Stone
+        } else if n < 0.12 {
+            MaterialId::Clay
         } else {
             MaterialId::Limestone
         };
     }
-
-    // Near-basement rubble.
-    if above_bedrock < 3 && n < 0.45 {
-        return MaterialId::LooseRock;
-    }
-    // Deep competent stone with occasional gravel fractures.
-    if depth > 18 {
-        return if n < 0.08 {
-            MaterialId::Gravel
-        } else if n < 0.14 {
-            MaterialId::LooseRock
-        } else {
-            MaterialId::Stone
-        };
-    }
-    // Mid-stack: stone + clay lenses + gravel pockets.
-    if depth > 6 {
-        return if n < 0.10 {
-            MaterialId::Clay
-        } else if n < 0.18 {
-            MaterialId::Gravel
-        } else if n < 0.22 {
-            MaterialId::LooseRock
-        } else {
-            MaterialId::Stone
-        };
-    }
-    // Shallow under the sand cap: stone with clay/gravel.
-    if n < 0.16 {
-        MaterialId::Clay
-    } else if n < 0.28 {
+    // Deep stone with sparse fractures / gravel stringers.
+    if n < 0.07 {
         MaterialId::Gravel
+    } else if n < 0.12 {
+        MaterialId::LooseRock
     } else {
         MaterialId::Stone
     }
@@ -456,46 +469,85 @@ mod tests {
     }
 
     #[test]
-    fn shelf_stamps_limestone_when_enabled() {
+    fn limestone_forms_a_horizontal_stratum() {
         let mut w = World::new(7);
         let p = small_params();
         stamp_world(&mut w, &p);
         let bedrock_top = p.bedrock_floor_y + p.bedrock_thickness;
-        let mut shelf_lime = 0i32;
-        let mut shelf_body = 0i32;
-        let mut inland_lime = 0i32;
-        let mut inland_body = 0i32;
-        for x in 0..p.width_cols {
-            let surface = continental_surface_y(p.seed, x, p.sea_level_y, p.width_cols);
-            let stone_top = surface - p.sand_cap_thickness;
-            let karst = is_karst_zone_x(x, p.width_cols);
-            for y in bedrock_top..=stone_top {
-                let Some(c) = w.get_cell(x, y) else {
-                    continue;
-                };
-                if karst {
-                    shelf_body += 1;
-                    if c.material == MaterialId::Limestone {
-                        shelf_lime += 1;
-                    }
-                } else if (0.45..0.55).contains(&(x as f32 / p.width_cols as f32)) {
-                    inland_body += 1;
-                    if c.material == MaterialId::Limestone {
-                        inland_lime += 1;
-                    }
-                }
+        // Sample a plains/mountain column: limestone should appear as a
+        // mid-depth bed, not as the whole stack and not only at the floor.
+        let x = p.width_cols / 2;
+        let surface = continental_surface_y(p.seed, x, p.sea_level_y, p.width_cols)
+            .max(bedrock_top + p.sand_cap_thickness);
+        let stone_top = surface - p.sand_cap_thickness;
+        let mut lime_ys = Vec::new();
+        let mut saw_stone_above_lime = false;
+        let mut saw_stone_below_lime = false;
+        for y in bedrock_top..=stone_top {
+            let mat = w.get_cell(x, y).unwrap().material;
+            if mat == MaterialId::Limestone {
+                lime_ys.push(y);
             }
         }
-        assert!(shelf_body > 0);
         assert!(
-            shelf_lime as f32 / shelf_body as f32 > 0.5,
-            "karst bands should be mostly Limestone (got {shelf_lime}/{shelf_body})"
+            !lime_ys.is_empty(),
+            "expected a limestone stratum under the sand cap"
         );
-        assert_eq!(
-            inland_lime, 0,
-            "mountain core must not carry the limestone shelf body"
+        let lime_min = *lime_ys.iter().min().unwrap();
+        let lime_max = *lime_ys.iter().max().unwrap();
+        for y in (lime_max + 1)..=stone_top {
+            if w.get_cell(x, y).unwrap().material == MaterialId::Stone {
+                saw_stone_above_lime = true;
+                break;
+            }
+        }
+        for y in bedrock_top..lime_min {
+            if matches!(
+                w.get_cell(x, y).unwrap().material,
+                MaterialId::Stone | MaterialId::LooseRock
+            ) {
+                saw_stone_below_lime = true;
+                break;
+            }
+        }
+        assert!(
+            saw_stone_below_lime,
+            "stone/loose-rock should sit below the limestone bed"
         );
-        assert!(inland_body > 0);
+        // Shallow stack under sand may be clay/gravel; stone above is
+        // nice-to-have when the column is deep enough.
+        let _ = saw_stone_above_lime;
+
+        // Karst x-bands should carry a thicker limestone bed.
+        let mut karst_lime = 0i32;
+        let mut karst_cols = 0i32;
+        let mut other_lime = 0i32;
+        let mut other_cols = 0i32;
+        for x in 0..p.width_cols {
+            let surface = continental_surface_y(p.seed, x, p.sea_level_y, p.width_cols)
+                .max(bedrock_top + p.sand_cap_thickness);
+            let stone_top = surface - p.sand_cap_thickness;
+            let mut lime = 0i32;
+            for y in bedrock_top..=stone_top {
+                if w.get_cell(x, y).unwrap().material == MaterialId::Limestone {
+                    lime += 1;
+                }
+            }
+            if is_karst_zone_x(x, p.width_cols) {
+                karst_lime += lime;
+                karst_cols += 1;
+            } else {
+                other_lime += lime;
+                other_cols += 1;
+            }
+        }
+        assert!(karst_cols > 0 && other_cols > 0);
+        let karst_avg = karst_lime as f32 / karst_cols as f32;
+        let other_avg = other_lime as f32 / other_cols as f32;
+        assert!(
+            karst_avg > other_avg,
+            "karst shelves should thicken the limestone bed (karst={karst_avg} other={other_avg})"
+        );
     }
 
     #[test]

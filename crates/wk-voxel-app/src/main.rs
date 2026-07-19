@@ -71,18 +71,18 @@ async fn main() {
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
 
-    // Cloud row near the sky ceiling — high enough that the rain
-    // curtain doesn't sit on top of the mountains as a hard slab.
+    // Cloud row at the topmost stamped cell so no empty air (sky-blue
+    // clear colour) peeks above the rain band.
     let cloud_cfg = |params: &WorldgenParams| {
         let rain = RainConfig {
-            top_y: params.sky_ceiling_y - 2,
+            top_y: params.sky_ceiling_y - 1,
             x_range: (0, params.width_cols - 1),
             prob_per_col_per_tick: 0.02,
             droplet_sat: 64,
             seed_salt: 0xC10D_5EED,
         };
         let cond = CondensationConfig {
-            top_y: params.sky_ceiling_y - 3,
+            top_y: params.sky_ceiling_y - 2,
             ..CondensationConfig::default()
         };
         (rain, cond)
