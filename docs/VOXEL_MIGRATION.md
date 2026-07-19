@@ -501,8 +501,8 @@ Follow-ups, each its own PR:
 9. Multithreading via the checkerboard partition.
 10. Ecology + agents port.
 
-Items 1–8 (through karst + seepage/head-spill) are landed in the
-`wk-voxel` crate; remaining focus is dirty-rect quiescence,
+Items 1–8 (through karst + seepage/head-spill) plus dirty-rect
+active-chunk planning are landed in `wk-voxel`. Remaining focus is
 checkerboard threading, then ecology.
 
 Each PR keeps the isolation contract and passes headless tests

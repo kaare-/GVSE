@@ -8,6 +8,7 @@
 //! The only crate shared with the column-based stack is [`wk_material`]
 //! (material IDs + property tables — pure data with no coupling).
 
+pub mod active;
 pub mod cell;
 pub mod chunk;
 pub mod grid;
@@ -16,6 +17,7 @@ pub mod humidity;
 pub mod rules;
 pub mod worldgen;
 
+pub use active::{clear_all_dirty, plan_active, ActiveChunk};
 pub use cell::{is_grain, water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use grid::World;

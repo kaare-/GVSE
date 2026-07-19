@@ -13,9 +13,8 @@
 use std::time::{Duration, Instant};
 
 use wk_voxel::{
-    apply_condensation_rain, apply_evaporation_into_humidity, apply_grain_fall,
-    apply_gravity_fall, apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_seepage,
-    humidity_diffuse_due, stamp_world, CondensationConfig, EvapConfig, Humidity, KarstConfig,
+    apply_condensation_rain, apply_evaporation_into_humidity, apply_karst_dissolution, apply_rain,
+    humidity_diffuse_due, stamp_world, tick, CondensationConfig, EvapConfig, Humidity, KarstConfig,
     RainConfig, World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W,
 };
 
@@ -29,13 +28,10 @@ struct PassAccum {
     evap: Duration,
     condensation: Duration,
     karst: Duration,
-    gravity: Duration,
-    spill: Duration,
-    seepage: Duration,
-    grain: Duration,
+    /// gravity + spill + seepage + grain via [`tick`] (dirty-active plan).
+    physics_tick: Duration,
     humidity_diffuse: Duration,
     humidity_diffuse_calls: u64,
-    finish: Duration,
 }
 
 impl PassAccum {
@@ -45,13 +41,9 @@ impl PassAccum {
             evap: Duration::ZERO,
             condensation: Duration::ZERO,
             karst: Duration::ZERO,
-            gravity: Duration::ZERO,
-            spill: Duration::ZERO,
-            seepage: Duration::ZERO,
-            grain: Duration::ZERO,
+            physics_tick: Duration::ZERO,
             humidity_diffuse: Duration::ZERO,
             humidity_diffuse_calls: 0,
-            finish: Duration::ZERO,
         }
     }
 
@@ -60,12 +52,8 @@ impl PassAccum {
             + self.evap
             + self.condensation
             + self.karst
-            + self.gravity
-            + self.spill
-            + self.seepage
-            + self.grain
+            + self.physics_tick
             + self.humidity_diffuse
-            + self.finish
     }
 }
 
@@ -113,14 +101,6 @@ fn configs(params: &WorldgenParams) -> (RainConfig, EvapConfig, CondensationConf
     (rain, evap, cond, karst)
 }
 
-fn finish_tick(world: &mut World) {
-    world.tick = world.tick.wrapping_add(1);
-    for chunk in world.chunks.values_mut() {
-        chunk.tick = chunk.tick.wrapping_add(1);
-        chunk.clear_dirty();
-    }
-}
-
 fn cell_count(params: &WorldgenParams) -> i64 {
     let h = (params.sky_ceiling_y - params.bedrock_floor_y) as i64;
     params.width_cols as i64 * h
@@ -162,11 +142,7 @@ fn one_stack_tick(
             apply_evaporation_into_humidity(world, humidity, evap);
             apply_condensation_rain(world, humidity, cond);
             apply_karst_dissolution(world, karst);
-            apply_gravity_fall(world);
-            apply_lateral_spill(world);
-            apply_seepage(world);
-            apply_grain_fall(world);
-            finish_tick(world);
+            tick(world);
             if humidity_diffuse_due(world.tick) {
                 humidity.diffuse(HUMIDITY_DIFFUSION_ALPHA);
             }
@@ -189,24 +165,8 @@ fn one_stack_tick(
             a.karst += t0.elapsed();
 
             let t0 = Instant::now();
-            apply_gravity_fall(world);
-            a.gravity += t0.elapsed();
-
-            let t0 = Instant::now();
-            apply_lateral_spill(world);
-            a.spill += t0.elapsed();
-
-            let t0 = Instant::now();
-            apply_seepage(world);
-            a.seepage += t0.elapsed();
-
-            let t0 = Instant::now();
-            apply_grain_fall(world);
-            a.grain += t0.elapsed();
-
-            let t0 = Instant::now();
-            finish_tick(world);
-            a.finish += t0.elapsed();
+            tick(world);
+            a.physics_tick += t0.elapsed();
 
             if humidity_diffuse_due(world.tick) {
                 let t0 = Instant::now();
@@ -263,17 +223,16 @@ fn run_profile(label: &str, params: WorldgenParams) {
     eprintln!("  evap→humidity        {:>8.3} ms/tick", ms_per(accum.evap, n));
     eprintln!("  condensation         {:>8.3} ms/tick", ms_per(accum.condensation, n));
     eprintln!("  karst                {:>8.3} ms/tick", ms_per(accum.karst, n));
-    eprintln!("  gravity_fall         {:>8.3} ms/tick", ms_per(accum.gravity, n));
-    eprintln!("  lateral_spill        {:>8.3} ms/tick", ms_per(accum.spill, n));
-    eprintln!("  seepage              {:>8.3} ms/tick", ms_per(accum.seepage, n));
-    eprintln!("  grain_fall           {:>8.3} ms/tick", ms_per(accum.grain, n));
+    eprintln!(
+        "  physics tick         {:>8.3} ms/tick  (plan_active + gravity/spill/seepage/grain)",
+        ms_per(accum.physics_tick, n)
+    );
     eprintln!(
         "  humidity.diffuse     {:>8.3} ms/tick amortized  ({:.3} ms/call × {} calls)",
         ms_per(accum.humidity_diffuse, n),
         ms_per(accum.humidity_diffuse, accum.humidity_diffuse_calls.max(1)),
         accum.humidity_diffuse_calls
     );
-    eprintln!("  finish (dirty clear) {:>8.3} ms/tick", ms_per(accum.finish, n));
     eprintln!(
         "  humidity tiles={}/{}  humidity_mass={:.1}",
         humidity.cells.len(),
