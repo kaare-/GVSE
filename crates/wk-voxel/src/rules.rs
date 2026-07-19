@@ -1891,12 +1891,14 @@ mod tests {
 
     #[test]
     fn settled_column_goes_quiescent() {
-        // Droplet falls into a one-cell bedrock trough (walls block
-        // lateral spill). Once it rests, the dirty plan empties and
-        // physics early-outs.
+        // Droplet falls down a one-cell-wide bedrock shaft so lateral
+        // spill can't keep the row alive forever. Once it rests, the
+        // dirty plan empties and physics early-outs.
         let mut w = setup_column_world();
-        w.set_cell(3, 1, Cell::solid(MaterialId::Bedrock));
-        w.set_cell(5, 1, Cell::solid(MaterialId::Bedrock));
+        for y in 1..16 {
+            w.set_cell(3, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(5, y, Cell::solid(MaterialId::Bedrock));
+        }
         w.set_cell(4, 8, Cell::water());
         for _ in 0..20 {
             tick(&mut w);
@@ -1908,7 +1910,7 @@ mod tests {
             "settled world must plan no active chunks"
         );
         let sat_before = w.get_cell(4, 1).unwrap().sat.0;
-        assert!(sat_before > 0, "droplet should rest in the trough");
+        assert!(sat_before > 0, "droplet should rest in the shaft");
         tick(&mut w);
         assert_eq!(w.get_cell(4, 1).unwrap().sat.0, sat_before);
         assert!(plan_active(&w).is_empty());
