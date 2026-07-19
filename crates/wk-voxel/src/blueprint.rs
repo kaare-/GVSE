@@ -34,12 +34,27 @@ pub struct PlacedModule {
     pub module: ModuleId,
 }
 
-/// Stub genome so postcard layout stays compatible with column files.
-#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+/// Slim live genes for Set A (postcard may grow; unknown fields ignored
+/// on older files via defaults).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Genome {
     pub metabolic_rate: f32,
     pub reproduce_at: f32,
     pub clone_fidelity: f32,
+    /// 0 = floater, 1 = sinker — mutated on fission.
+    #[serde(default)]
+    pub buoyancy_bias: f32,
+}
+
+impl Default for Genome {
+    fn default() -> Self {
+        Self {
+            metabolic_rate: 1.0,
+            reproduce_at: 0.85,
+            clone_fidelity: 0.9,
+            buoyancy_bias: 0.0,
+        }
+    }
 }
 
 /// Voxel-local Set A blueprint. Same *idea* as column `.gvsecrt`, but

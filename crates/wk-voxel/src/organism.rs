@@ -9,6 +9,11 @@
 //! contract holds. Life is the drawing: two 1×1 modules, not a green
 //! biomass wash over the terrain.
 //!
+//! Buoyancy is a slim port of column plankton physics: weight vs
+//! float bias, circadian day-float / night-sink, fission jitter on
+//! `buoyancy_bias`, and a light contact bounce so blooms don't stack
+//! into one glued surface film.
+//!
 //! Palette hex is frozen (`docs/organism/PALETTE.md`).
 
 use serde::{Deserialize, Serialize};
@@ -36,6 +41,18 @@ const REPRODUCE_AT: f32 = 0.85;
 const REPRO_PERIOD: u64 = 40;
 /// Age soft-cap (ticks).
 const LIFE_TICKS: u64 = DEMO_DAY_TICKS * 4;
+
+/// Floater equilibrium depth below the free surface (cells).
+const FLOAT_DEPTH: f32 = 1.5;
+/// Column buoyancy constants (cell units / tick).
+const GRAVITY: f32 = 0.08;
+const WATER_DRAG: f32 = 0.25;
+const AIR_DRAG: f32 = 0.05;
+const EQ_SPRING: f32 = 0.12;
+/// Gene jitter scale on fission — matches column `MUTATION_SIGMA`.
+const MUTATION_SIGMA: f32 = 0.12;
+/// Soft contact impulse when two Atoms share a cell.
+const CONTACT_BOUNCE: f32 = 0.12;
 
 /// Set A module IDs — values match `wk_agents::ModuleId` / PALETTE.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -75,10 +92,21 @@ pub struct Atom {
     /// Anchor cell (nucleus position).
     pub gx: i32,
     pub gy: i32,
+    /// Continuous vertical pose (synced into `gy` each tick).
+    pub fy: f32,
+    pub vel_y: f32,
     pub energy: f32,
     pub energy_max: f32,
     pub age_ticks: u64,
     pub cooldown: u64,
+    /// 0 = floater, 1 = sinker (column `Genome::buoyancy_bias`).
+    pub buoyancy_bias: f32,
+    /// High → children stay close to parent genes.
+    pub clone_fidelity: f32,
+    pub circadian_phase: f32,
+    pub active_window: f32,
+    /// Free-surface cell y last tick (ride rising / falling water).
+    pub last_water_top: Option<i32>,
     /// Modules relative to `(gx, gy)`.
     pub body: Vec<BodyModule>,
 }
@@ -88,10 +116,17 @@ impl Atom {
         Self {
             gx,
             gy,
+            fy: gy as f32,
+            vel_y: 0.0,
             energy: energy_max * 0.6,
             energy_max,
             age_ticks: 0,
             cooldown: REPRO_PERIOD / 2,
+            buoyancy_bias: 0.0,
+            clone_fidelity: 0.9,
+            circadian_phase: 0.25,
+            active_window: 0.55,
+            last_water_top: None,
             body: default_atom_body(),
         }
     }
@@ -115,6 +150,14 @@ impl Atom {
         self.body
             .iter()
             .any(|(dx, dy, _)| self.gx + *dx as i32 == wx && self.gy + *dy as i32 == wy)
+    }
+
+    fn body_top_offset(&self) -> f32 {
+        self.body
+            .iter()
+            .map(|(_, dy, _)| *dy as f32)
+            .fold(0.0f32, f32::max)
+            .max(0.0)
     }
 }
 
@@ -184,6 +227,8 @@ impl OrganismStore {
         gy: i32,
         body: Vec<BodyModule>,
         energy_max: f32,
+        buoyancy_bias: f32,
+        clone_fidelity: f32,
     ) -> bool {
         if self.atoms.len() >= MAX_ATOMS || body.is_empty() {
             return false;
@@ -196,8 +241,13 @@ impl OrganismStore {
         } else {
             return false;
         };
-        self.atoms
-            .push(Atom::from_body(gx, gy, energy_max, body));
+        let mut atom = Atom::from_body(gx, gy, energy_max, body);
+        atom.buoyancy_bias = buoyancy_bias.clamp(0.0, 1.0);
+        atom.clone_fidelity = clone_fidelity.clamp(0.05, 1.0);
+        if let Some((top, _)) = wet_band(world, gx, gy) {
+            atom.last_water_top = Some(top);
+        }
+        self.atoms.push(atom);
         true
     }
 
@@ -206,16 +256,14 @@ impl OrganismStore {
         self.atoms.iter().position(|a| a.occupies(gx, gy))
     }
 
-    /// One Set A step: light harvest, upkeep, drift, fission, death.
-    ///
-    /// Death deposits a small [`MaterialId::Organic`] speck at the
-    /// nucleus cell when that cell is Air (otherwise the body simply
-    /// vanishes — no column ecology litter bucket here).
+    /// One Set A step: buoyancy, light harvest, upkeep, fission, death,
+    /// then a light contact bounce.
     pub fn step(&mut self, world: &mut World, tick: u64) {
         if self.atoms.is_empty() {
             return;
         }
         let day = day_factor(tick);
+        let phase = phase_fraction(tick);
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let pop = self.atoms.len();
@@ -229,12 +277,22 @@ impl OrganismStore {
                 continue;
             }
 
-            // Stay in the wet column. The free-surface film often
-            // drains under spill/seepage — snap back into water instead
-            // of dying on a one-cell tide line.
-            if !ensure_in_water(world, atom) {
-                deaths.push(i);
-                continue;
+            // Drought gate: must still have a wet band nearby.
+            if wet_band(world, atom.gx, atom.gy).is_none() {
+                if !ensure_in_water(world, atom) {
+                    deaths.push(i);
+                    continue;
+                }
+            }
+
+            let bias = circadian_buoyancy_bias(atom, phase);
+            step_buoyancy(world, atom, bias);
+
+            if !is_wet_air(world, atom.gx, atom.gy) {
+                if !ensure_in_water(world, atom) {
+                    deaths.push(i);
+                    continue;
+                }
             }
 
             let n_photo = atom.photosystem_count().max(1) as f32;
@@ -248,9 +306,6 @@ impl OrganismStore {
                 continue;
             }
 
-            // Mild vertical drift inside the wet band only.
-            drift_atom(world, atom);
-
             if atom.cooldown == 0
                 && atom.energy >= atom.energy_max * REPRODUCE_AT
                 && pop + births.len() < MAX_ATOMS
@@ -258,16 +313,14 @@ impl OrganismStore {
                 let cost = atom.energy_max * REPRO_COST_FRAC;
                 atom.energy -= cost;
                 atom.cooldown = REPRO_PERIOD;
-                if let Some(child) = try_fission(world, atom, cost * 0.5) {
+                if let Some(child) = try_fission(world, atom, cost * 0.5, tick) {
                     births.push(child);
                 } else {
-                    // Refund if no room to place a child.
                     atom.energy += cost;
                 }
             }
         }
 
-        // Apply deaths high-to-low index; deposit Organic speck.
         deaths.sort_unstable();
         deaths.dedup();
         for &i in deaths.iter().rev() {
@@ -279,19 +332,212 @@ impl OrganismStore {
             }
         }
         self.atoms.extend(births);
+        resolve_contacts(world, &mut self.atoms);
     }
 }
 
 /// 1 at noon, ~0.08 at night — readable bloom / thin cycle.
 pub fn day_factor(tick: u64) -> f32 {
-    let t = (tick % DEMO_DAY_TICKS) as f32 / DEMO_DAY_TICKS as f32;
+    let t = phase_fraction(tick);
     let angle = t * std::f32::consts::TAU;
-    // Raised cosine: day half bright, night dim but not zero.
     (angle.cos() * 0.5 + 0.5).clamp(0.08, 1.0)
 }
 
+fn phase_fraction(tick: u64) -> f32 {
+    (tick % DEMO_DAY_TICKS) as f32 / DEMO_DAY_TICKS as f32
+}
+
+/// Relative density: bias 0 → buoyant (0.55), bias 1 → heavy (1.45).
+fn relative_density(bias: f32) -> f32 {
+    0.55 + bias.clamp(0.0, 1.0) * 0.90
+}
+
+/// Day / active window → float side; night → deeper (column E33 style).
+fn circadian_buoyancy_bias(atom: &Atom, phase: f32) -> f32 {
+    let bias = atom.buoyancy_bias.clamp(0.0, 1.0);
+    if circadian_active(atom.circadian_phase, atom.active_window, phase) {
+        bias * 0.35
+    } else {
+        0.55 + bias * 0.45
+    }
+}
+
+fn circadian_active(circadian_phase: f32, active_window: f32, phase: f32) -> bool {
+    let window = active_window.clamp(0.05, 1.0);
+    let mut d = (phase - circadian_phase).abs();
+    if d > 0.5 {
+        d = 1.0 - d;
+    }
+    d <= window * 0.5
+}
+
+fn equilibrium_y(top: i32, bed: i32, bias: f32) -> f32 {
+    let top_f = top as f32;
+    let bed_f = bed as f32;
+    let float_y = (top_f - FLOAT_DEPTH).clamp(bed_f, top_f);
+    float_y + (bed_f - float_y) * bias.clamp(0.0, 1.0)
+}
+
+/// Contiguous wet-Air band containing `hint_y` (or nearest wet cell).
+fn wet_band(world: &World, gx: i32, hint_y: i32) -> Option<(i32, i32)> {
+    let start = if is_wet_air(world, gx, hint_y) {
+        hint_y
+    } else {
+        find_wet_near(world, gx, hint_y)?
+    };
+    let mut top = start;
+    while is_wet_air(world, gx, top + 1) {
+        top += 1;
+        if top - start > 256 {
+            break;
+        }
+    }
+    let mut bed = start;
+    while is_wet_air(world, gx, bed - 1) {
+        bed -= 1;
+        if start - bed > 256 {
+            break;
+        }
+    }
+    Some((top, bed))
+}
+
+fn step_buoyancy(world: &World, atom: &mut Atom, bias: f32) {
+    let Some((top, bed)) = wet_band(world, atom.gx, atom.gy) else {
+        atom.last_water_top = None;
+        return;
+    };
+    let dens = relative_density(bias);
+    let offset = atom.body_top_offset();
+    let eq = equilibrium_y(top, bed, bias) - offset;
+
+    // Ride free-surface change (rising tide lifts floaters with it).
+    if let Some(prev) = atom.last_water_top {
+        let delta = (top - prev) as f32;
+        if delta != 0.0 {
+            let body_top = atom.fy + offset;
+            let was_in = body_top <= prev as f32 + 0.5 && atom.fy >= bed as f32 - 0.5;
+            if was_in {
+                if delta > 0.0 {
+                    atom.fy += delta;
+                } else if dens < 1.0 {
+                    // Falling surface: floaters follow down a little.
+                    let near_float = (atom.fy - (prev as f32 - FLOAT_DEPTH)).abs() < 2.0;
+                    if near_float {
+                        atom.fy = (atom.fy + delta).max(bed as f32);
+                    }
+                }
+            }
+        }
+    }
+    atom.last_water_top = Some(top);
+
+    let body_top = atom.fy + offset;
+    if body_top > top as f32 + 0.05 {
+        // In air — fall back in.
+        atom.vel_y -= GRAVITY;
+        atom.vel_y *= 1.0 - AIR_DRAG;
+        atom.fy += atom.vel_y;
+        if atom.fy + offset <= top as f32 {
+            atom.vel_y *= 0.4; // splash damping
+        }
+    } else {
+        let accel = GRAVITY * (1.0 - dens) + (eq - atom.fy) * EQ_SPRING;
+        atom.vel_y += accel;
+        atom.vel_y *= 1.0 - WATER_DRAG;
+        atom.fy += atom.vel_y;
+        if atom.fy < bed as f32 {
+            atom.fy = bed as f32;
+            atom.vel_y = atom.vel_y.max(0.0);
+        }
+        if dens < 1.0 && atom.fy + offset > top as f32 {
+            atom.fy = top as f32 - offset;
+            atom.vel_y = atom.vel_y.min(0.0);
+        }
+    }
+
+    // Soft settle near equilibrium so floaters don't jitter.
+    if atom.vel_y.abs() < 0.02 && (atom.fy - eq).abs() < 0.08 {
+        atom.fy = eq;
+        atom.vel_y = 0.0;
+    }
+
+    atom.fy = atom.fy.clamp(bed as f32, top as f32);
+    atom.gy = atom.fy.round() as i32;
+    // Keep nucleus on a wet cell after rounding.
+    if !is_wet_air(world, atom.gx, atom.gy) {
+        atom.gy = atom.gy.clamp(bed, top);
+        if !is_wet_air(world, atom.gx, atom.gy) {
+            atom.gy = ((eq).round() as i32).clamp(bed, top);
+        }
+        atom.fy = atom.gy as f32;
+    }
+}
+
+/// Prefer a one-cell horizontal shove; tiny vertical bounce if stuck.
+fn resolve_contacts(world: &World, atoms: &mut [Atom]) {
+    let n = atoms.len();
+    if n < 2 {
+        return;
+    }
+    for _ in 0..4 {
+        for i in 0..n {
+            for j in (i + 1)..n {
+                if !bodies_overlap(&atoms[i], &atoms[j]) {
+                    continue;
+                }
+                let dir = if atoms[j].gx >= atoms[i].gx { 1 } else { -1 };
+                let try_x = world.wrap_x(atoms[j].gx + dir);
+                if is_wet_air(world, try_x, atoms[j].gy)
+                    && !occupied_by_other(atoms, j, try_x, atoms[j].gy)
+                {
+                    atoms[j].gx = try_x;
+                    continue;
+                }
+                let try_x2 = world.wrap_x(atoms[i].gx - dir);
+                if is_wet_air(world, try_x2, atoms[i].gy)
+                    && !occupied_by_other(atoms, i, try_x2, atoms[i].gy)
+                {
+                    atoms[i].gx = try_x2;
+                    continue;
+                }
+                // Tiny buoyancy bounce so stacked floaters separate in y.
+                atoms[i].vel_y -= CONTACT_BOUNCE;
+                atoms[j].vel_y += CONTACT_BOUNCE;
+                atoms[i].fy -= CONTACT_BOUNCE * 0.5;
+                atoms[j].fy += CONTACT_BOUNCE * 0.5;
+                if let Some((top, bed)) = wet_band(world, atoms[i].gx, atoms[i].gy) {
+                    atoms[i].fy = atoms[i].fy.clamp(bed as f32, top as f32);
+                    atoms[i].gy = atoms[i].fy.round() as i32;
+                }
+                if let Some((top, bed)) = wet_band(world, atoms[j].gx, atoms[j].gy) {
+                    atoms[j].fy = atoms[j].fy.clamp(bed as f32, top as f32);
+                    atoms[j].gy = atoms[j].fy.round() as i32;
+                }
+            }
+        }
+    }
+}
+
+fn bodies_overlap(a: &Atom, b: &Atom) -> bool {
+    for &(dx, dy, _) in &a.body {
+        let ax = a.gx + dx as i32;
+        let ay = a.gy + dy as i32;
+        if b.occupies(ax, ay) {
+            return true;
+        }
+    }
+    false
+}
+
+fn occupied_by_other(atoms: &[Atom], self_i: usize, gx: i32, gy: i32) -> bool {
+    atoms
+        .iter()
+        .enumerate()
+        .any(|(k, a)| k != self_i && a.occupies(gx, gy))
+}
+
 fn column_light(world: &World, gx: i32, gy: i32) -> f32 {
-    // Walk up; each wet/air cell transmits, solids block.
     let mut light = 1.0f32;
     let mut y = gy + 1;
     let mut steps = 0;
@@ -299,12 +545,11 @@ fn column_light(world: &World, gx: i32, gy: i32) -> f32 {
         match world.get_cell(gx, y) {
             None => return light,
             Some(c) if c.material == MaterialId::Air => {
-                // Turbid water attenuates a little.
                 if !c.sat.is_empty() {
                     light *= 0.97;
                 }
             }
-            Some(_) => return light * 0.15, // buried / under rock
+            Some(_) => return light * 0.15,
         }
         y += 1;
         steps += 1;
@@ -320,8 +565,6 @@ fn is_wet_air(world: &World, gx: i32, gy: i32) -> bool {
 }
 
 fn find_wet_slot(world: &World, gx: i32, y0: i32, y1: i32) -> Option<i32> {
-    // Top of the wet column, then step down a few cells so we don't
-    // sit on the free-surface film that spill/seepage drains first.
     let mut surface = None;
     let mut y = y1 - 1;
     while y >= y0 {
@@ -332,51 +575,32 @@ fn find_wet_slot(world: &World, gx: i32, y0: i32, y1: i32) -> Option<i32> {
         y -= 1;
     }
     let top = surface?;
-    const DEPTH: i32 = 3;
-    for d in (0..=DEPTH).rev() {
-        let gy = top - d;
-        if gy >= y0 && is_wet_air(world, gx, gy) {
-            return Some(gy);
+    // Seed at floater equilibrium depth, not the draining film.
+    let target = top - FLOAT_DEPTH.round() as i32;
+    for d in 0..=4 {
+        for gy in [target - d, target + d] {
+            if gy >= y0 && gy <= top && is_wet_air(world, gx, gy) {
+                return Some(gy);
+            }
         }
     }
     Some(top)
 }
 
-/// If the atom's cell dried, move to a nearby wet Air cell. Returns
-/// false only when no water remains in the local column.
 fn ensure_in_water(world: &World, atom: &mut Atom) -> bool {
     if is_wet_air(world, atom.gx, atom.gy) {
         return true;
     }
-    for dy in [-1, 1, -2, 2, -3, 3, -4, 4] {
-        let ny = atom.gy + dy;
-        if is_wet_air(world, atom.gx, ny) {
-            atom.gy = ny;
-            return true;
-        }
+    if let Some(ny) = find_wet_near(world, atom.gx, atom.gy) {
+        atom.gy = ny;
+        atom.fy = ny as f32;
+        atom.vel_y = 0.0;
+        return true;
     }
     false
 }
 
-fn drift_atom(world: &World, atom: &mut Atom) {
-    // Bias one cell toward brighter wet neighbour; never leave water.
-    let up = atom.gy + 1;
-    let down = atom.gy - 1;
-    if is_wet_air(world, atom.gx, up) {
-        let light_up = column_light(world, atom.gx, up);
-        let light_here = column_light(world, atom.gx, atom.gy);
-        if light_up >= light_here {
-            atom.gy = up;
-            return;
-        }
-    }
-    if !is_wet_air(world, atom.gx, atom.gy) && is_wet_air(world, atom.gx, down) {
-        atom.gy = down;
-    }
-}
-
-fn try_fission(world: &World, parent: &Atom, child_energy: f32) -> Option<Atom> {
-    // Place offspring on a free wet neighbour.
+fn try_fission(world: &World, parent: &Atom, child_energy: f32, tick: u64) -> Option<Atom> {
     for (dx, dy) in [(2, 0), (-2, 0), (0, 1), (0, -1), (3, 0), (-1, 0)] {
         let nx = world.wrap_x(parent.gx + dx);
         let ny = parent.gy + dy;
@@ -385,6 +609,17 @@ fn try_fission(world: &World, parent: &Atom, child_energy: f32) -> Option<Atom> 
                 Atom::from_body(nx, ny, parent.energy_max, parent.body.clone());
             child.energy = child_energy.clamp(1.0, parent.energy_max);
             child.cooldown = REPRO_PERIOD;
+            child.circadian_phase = parent.circadian_phase;
+            child.active_window = parent.active_window;
+            child.last_water_top = parent.last_water_top;
+            // Mutate buoyancy (and fidelity a little) on clone.
+            let strength = (1.0 - parent.clone_fidelity.clamp(0.0, 1.0)) * MUTATION_SIGMA;
+            let j_b = hash_signed(tick, parent.gx as u64, parent.gy as u64, 0xB0A7);
+            let j_f = hash_signed(tick, parent.gx as u64, parent.age_ticks, 0xF1DE);
+            child.buoyancy_bias =
+                (parent.buoyancy_bias + j_b * strength * 2.0).clamp(0.0, 1.0);
+            child.clone_fidelity =
+                (parent.clone_fidelity + j_f * strength).clamp(0.05, 1.0);
             return Some(child);
         }
     }
@@ -405,13 +640,10 @@ fn find_wet_near(world: &World, gx: i32, gy: i32) -> Option<i32> {
 }
 
 fn deposit_organic(world: &mut World, gx: i32, gy: i32) {
-    // Drop residue on the first solid below — never replace a water
-    // cell with Organic (that was deleting the whole plankton band).
     let mut y = gy;
     for _ in 0..64 {
         match world.get_cell(gx, y) {
             Some(c) if c.material != MaterialId::Air => {
-                // Speck in the Air cell just above the bed, if empty.
                 if let Some(above) = world.get_cell(gx, y + 1) {
                     if above.material == MaterialId::Air && above.sat.is_empty() {
                         world.set_cell(gx, y + 1, Cell::solid(MaterialId::Organic));
@@ -440,6 +672,13 @@ fn hash_u64(seed: u64, a: u64, salt: u64) -> u64 {
     x
 }
 
+/// Deterministic signed noise in [-1, 1].
+fn hash_signed(a: u64, b: u64, c: u64, salt: u64) -> f32 {
+    let h = hash_u64(a ^ b, c, salt);
+    let u = (h >> 40) as f32 / ((1u64 << 24) as f32);
+    u * 2.0 - 1.0
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -456,7 +695,6 @@ mod tests {
                 water.sat = Sat(255);
                 w.set_cell(x, y, water);
             }
-            // Open air above.
             for y in 8..12 {
                 w.set_cell(x, y, Cell::air());
             }
@@ -475,21 +713,83 @@ mod tests {
     }
 
     #[test]
+    fn floater_settles_below_free_surface() {
+        let mut w = wet_column();
+        let mut store = OrganismStore::new();
+        // Start glued to the surface film (y=7 is top wet).
+        store.atoms.push(Atom::new(4, 7, 50.0));
+        for t in 0..40 {
+            store.step(&mut w, t);
+        }
+        let a = &store.atoms[0];
+        assert!(
+            a.gy < 7,
+            "floater should leave the surface film, gy={}",
+            a.gy
+        );
+        assert!(a.gy >= 1, "still in the wet column");
+    }
+
+    #[test]
+    fn sinker_goes_deeper_than_floater() {
+        let mut w = wet_column();
+        let mut store = OrganismStore::new();
+        let mut floater = Atom::new(4, 7, 50.0);
+        floater.buoyancy_bias = 0.0;
+        let mut sinker = Atom::new(8, 7, 50.0);
+        sinker.buoyancy_bias = 1.0;
+        store.atoms.push(floater);
+        store.atoms.push(sinker);
+        // Night phase → sinkers even deeper; use inactive phase.
+        for t in 600..680 {
+            store.step(&mut w, t);
+        }
+        assert!(
+            store.atoms[1].gy < store.atoms[0].gy,
+            "sinker gy={} should be below floater gy={}",
+            store.atoms[1].gy,
+            store.atoms[0].gy
+        );
+    }
+
+    #[test]
+    fn fission_can_jitter_buoyancy_bias() {
+        let mut w = wet_column();
+        let mut store = OrganismStore::new();
+        let mut parent = Atom::new(4, 5, 40.0);
+        parent.energy = 40.0;
+        parent.cooldown = 0;
+        parent.clone_fidelity = 0.2; // strong mutation
+        parent.buoyancy_bias = 0.5;
+        store.atoms.push(parent);
+        for t in 0..120 {
+            store.step(&mut w, t);
+            if store.len() >= 2 {
+                break;
+            }
+        }
+        assert!(store.len() >= 2, "expected a child");
+        let child_bias = store.atoms[1].buoyancy_bias;
+        // With low fidelity, bias should usually move — allow equal
+        // only if hash happened to be ~0 (rare); check genes copied path.
+        assert!((0.0..=1.0).contains(&child_bias));
+        assert!(
+            (child_bias - 0.5).abs() > 1e-6 || store.atoms[1].clone_fidelity != 0.2,
+            "fission should jitter buoyancy or fidelity"
+        );
+    }
+
+    #[test]
     fn atoms_harvest_and_can_fission_in_lit_water() {
         let mut w = wet_column();
         let mut store = OrganismStore::new();
         store.atoms.push(Atom::new(4, 6, 20.0));
         store.atoms[0].energy = 20.0;
         store.atoms[0].cooldown = 0;
-        // Noon-ish ticks.
         for t in 0..80 {
             store.step(&mut w, t);
         }
-        assert!(
-            store.len() >= 1,
-            "founder should survive in lit water"
-        );
-        // With full tank + repro, expect at least one child eventually.
+        assert!(!store.is_empty(), "founder should survive in lit water");
         assert!(
             store.len() >= 2 || store.atoms[0].energy < 20.0,
             "should spend energy on life / fission"
@@ -501,7 +801,7 @@ mod tests {
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         for y in 0..12 {
-            w.set_cell(4, y, Cell::air()); // fully dry column
+            w.set_cell(4, y, Cell::air());
         }
         let mut store = OrganismStore::new();
         store.atoms.push(Atom::new(4, 6, 50.0));
@@ -512,11 +812,10 @@ mod tests {
     #[test]
     fn death_can_deposit_organic_above_bed() {
         let mut w = wet_column();
-        // Dry air pocket just above bedrock so residue has a place.
         w.set_cell(4, 1, Cell::air());
         let mut store = OrganismStore::new();
         let mut a = Atom::new(4, 6, 10.0);
-        a.age_ticks = LIFE_TICKS; // force age death
+        a.age_ticks = LIFE_TICKS;
         store.atoms.push(a);
         store.step(&mut w, 0);
         assert!(store.is_empty());
@@ -525,7 +824,6 @@ mod tests {
             Some(MaterialId::Organic),
             "corpse residue should sit on the bed, not replace water"
         );
-        // Water column where the atom lived stays wet Air.
         assert_eq!(
             w.get_cell(4, 6).map(|c| c.material),
             Some(MaterialId::Air)
@@ -556,7 +854,7 @@ mod tests {
             crate::rules::tick(&mut world);
         }
         assert!(
-            store.len() > 0,
+            !store.is_empty(),
             "Atoms must survive free-surface spill; started with {n0}"
         );
     }
@@ -572,5 +870,20 @@ mod tests {
             assert_eq!(c.material, MaterialId::Air);
             assert!(!c.sat.is_empty());
         }
+    }
+
+    #[test]
+    fn contact_nudge_separates_stacked_atoms() {
+        let mut w = wet_column();
+        let mut store = OrganismStore::new();
+        store.atoms.push(Atom::new(4, 5, 50.0));
+        store.atoms.push(Atom::new(4, 5, 50.0)); // same cell
+        store.step(&mut w, 0);
+        let same = store.atoms[0].gx == store.atoms[1].gx
+            && store.atoms[0].gy == store.atoms[1].gy;
+        assert!(
+            !same || (store.atoms[0].vel_y - store.atoms[1].vel_y).abs() > 0.01,
+            "contact should shove apart in x or bounce in y"
+        );
     }
 }
