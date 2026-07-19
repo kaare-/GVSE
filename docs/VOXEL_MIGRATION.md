@@ -499,7 +499,27 @@ Follow-ups, each its own PR:
 Each PR keeps the isolation contract and passes headless tests
 before touching rendering.
 
-## 12. What could still go wrong
+## 12. Perf profile (before multithreading)
+
+Before the four-pass checkerboard / threading work, take a baseline
+on the machine that will run the demo:
+
+```text
+cargo test -p wk-voxel --test perf_profile --release -- --ignored --nocapture
+```
+
+The harness stamps a continental world, warms 40 ticks, then times
+200 ticks of the same stack order as `wk-voxel-app` (rain →
+evap→humidity → condensation → karst → gravity → lateral spill →
+grain fall → dirty clear → humidity.diffuse). It prints ms/tick for
+the wall clock and each pass, for both the demo default size
+(~8×2 chunks) and a 16×4-chunk stress size.
+
+Paste the laptop numbers into the multithreading PR so we know
+whether the serial stack is already under budget or which pass
+to parallelise first.
+
+## 13. What could still go wrong
 
 Honest concerns kept close so we don't discover them at commit
 time:
