@@ -14,6 +14,8 @@
 //! Hotkeys:
 //! - `Space` — pause / resume physics ticks
 //! - `R` — regenerate the world with a new seed
+//! - `W` — toggle rain
+//! - `E` — toggle evaporation
 //! - `Left` / `Right` — pan the camera horizontally
 //! - `Up` / `Down` — pan vertically
 //! - `Esc` — quit
@@ -22,7 +24,7 @@ mod palette;
 mod scene;
 
 use macroquad::prelude::*;
-use wk_voxel::{tick, WorldgenParams};
+use wk_voxel::{apply_evaporation, apply_rain, tick, EvapConfig, RainConfig, WorldgenParams};
 
 use crate::palette::cell_color;
 use crate::scene::Scene;
@@ -46,8 +48,20 @@ async fn main() {
     let params = WorldgenParams::default();
     let mut scene = Scene::new(params);
     let mut paused = false;
+    let mut rain_on = true;
+    let mut evap_on = true;
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
+
+    // Rain cloud spans the full width just under the sky ceiling.
+    let rain_cfg = RainConfig {
+        top_y: scene.params.sky_ceiling_y - 2,
+        x_range: (0, scene.params.width_cols - 1),
+        prob_per_col_per_tick: 0.02,
+        droplet_sat: 64,
+        seed_salt: 0xC10D_5EED,
+    };
+    let evap_cfg = EvapConfig::default();
 
     loop {
         // Input.
@@ -63,6 +77,12 @@ async fn main() {
                 seed: new_seed,
                 ..scene.params
             });
+        }
+        if is_key_pressed(KeyCode::W) {
+            rain_on = !rain_on;
+        }
+        if is_key_pressed(KeyCode::E) {
+            evap_on = !evap_on;
         }
         let pan = 200.0 * get_frame_time();
         if is_key_down(KeyCode::Left) {
@@ -80,6 +100,12 @@ async fn main() {
 
         // Physics.
         if !paused {
+            if rain_on {
+                apply_rain(&mut scene.world, &rain_cfg);
+            }
+            if evap_on {
+                apply_evaporation(&mut scene.world, &evap_cfg);
+            }
             tick(&mut scene.world);
         }
 
@@ -123,9 +149,11 @@ async fn main() {
 
         // HUD.
         let hud = format!(
-            "tick={} seed={} {}  |  Space pause | R reroll | arrows pan | Esc quit",
+            "tick={} seed={} rain={} evap={} {}  |  Space pause | R reroll | W rain | E evap | arrows pan | Esc quit",
             scene.world.tick,
             scene.params.seed,
+            if rain_on { "on" } else { "off" },
+            if evap_on { "on" } else { "off" },
             if paused { "[paused]" } else { "" }
         );
         draw_rectangle(0.0, sh - 24.0, sw, 24.0, Color::from_rgba(0, 0, 0, 200));

@@ -227,6 +227,169 @@ pub fn apply_grain_fall(world: &mut World) {
     }
 }
 
+/// Rain source parameters for [`apply_rain`].
+#[derive(Debug, Clone, Copy)]
+pub struct RainConfig {
+    /// World-y row where droplets appear.
+    pub top_y: i32,
+    /// Inclusive `(x0, x1)` world-x range over which rain can fall.
+    pub x_range: (i32, i32),
+    /// Chance per column per tick of receiving a droplet.
+    pub prob_per_col_per_tick: f32,
+    /// Sat delta added per droplet (clamped so a cell can't exceed
+    /// `u8::MAX`).
+    pub droplet_sat: u8,
+    /// Salt mixed into the per-column tick hash so callers can run
+    /// multiple independent rain streams (mist vs storm) without
+    /// them colliding.
+    pub seed_salt: u64,
+}
+
+impl Default for RainConfig {
+    fn default() -> Self {
+        Self {
+            top_y: 0,
+            x_range: (0, 0),
+            prob_per_col_per_tick: 0.02,
+            droplet_sat: 64,
+            seed_salt: 0xC10D,
+        }
+    }
+}
+
+/// Cheap deterministic 32-bit hash → f32 in `[0, 1)` — same mixer
+/// used by [`crate::worldgen::continental_surface_y`].
+fn hash_prob(seed: u64, gx: i32, tick_no: u64, salt: u64) -> f32 {
+    let mut h = seed
+        .wrapping_add(salt.wrapping_mul(0x9E37_79B9_7F4A_7C15))
+        .wrapping_add(tick_no.wrapping_mul(0xBF58_476D_1CE4_E5B9))
+        .wrapping_add(gx as u64);
+    h ^= h.wrapping_shr(30);
+    h = h.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    h ^= h.wrapping_shr(27);
+    h = h.wrapping_mul(0x94D0_49BB_1331_11EB);
+    h ^= h.wrapping_shr(31);
+    (h as u32 as f32) / (u32::MAX as f32 + 1.0)
+}
+
+/// Inject water into the sky row of `world` under a stochastic per-
+/// column rule.
+///
+/// For each column `gx ∈ cfg.x_range`, roll a deterministic
+/// pseudo-random probability seeded by `(world.seed, gx, world.tick,
+/// cfg.seed_salt)`. When the roll passes `cfg.prob_per_col_per_tick`,
+/// add `cfg.droplet_sat` to the cell at `(gx, cfg.top_y)` — provided
+/// that cell is `Air`. Sat is saturated at `u8::MAX`.
+///
+/// Determinism: same world.seed + same tick + same config = same
+/// droplet placements. That's what makes rain reproducible in
+/// scenario tests.
+pub fn apply_rain(world: &mut World, cfg: &RainConfig) {
+    let (x0, x1) = cfg.x_range;
+    if x0 > x1 {
+        return;
+    }
+    let seed = world.seed.0;
+    let tick_no = world.tick;
+    for gx in x0..=x1 {
+        let roll = hash_prob(seed, gx, tick_no, cfg.seed_salt);
+        if roll >= cfg.prob_per_col_per_tick {
+            continue;
+        }
+        let Some(cell) = world.get_cell(gx, cfg.top_y) else {
+            continue;
+        };
+        if cell.material != MaterialId::Air {
+            continue;
+        }
+        let new_sat = cell.sat.0.saturating_add(cfg.droplet_sat);
+        world.set_cell(
+            gx,
+            cfg.top_y,
+            Cell {
+                sat: Sat(new_sat),
+                ..cell
+            },
+        );
+    }
+}
+
+/// Surface-evaporation parameters for [`apply_evaporation`].
+#[derive(Debug, Clone, Copy)]
+pub struct EvapConfig {
+    /// Sat removed per tick from each qualifying cell.
+    pub rate_per_tick: u8,
+    /// A cell only evaporates when the cell above it is `Air` with
+    /// `sat ≤ dry_above_max`. That keeps sub-surface lake cells from
+    /// evaporating — only the top exposed water layer loses mass.
+    pub dry_above_max: u8,
+}
+
+impl Default for EvapConfig {
+    fn default() -> Self {
+        Self {
+            rate_per_tick: 1,
+            dry_above_max: 200,
+        }
+    }
+}
+
+/// Bleed sat out of surface water cells.
+///
+/// A cell qualifies when:
+/// - It's `Air` with `sat > 0`.
+/// - The cell directly above is `Air` with `sat ≤ cfg.dry_above_max`
+///   OR the above chunk isn't loaded (open sky).
+///
+/// Water leaves the world here — this is a boundary loss, not a
+/// conservative transfer. When we add a humidity heatmap in a follow-
+/// up PR the same helper will route the mass through it instead.
+///
+/// Compute-then-apply so evap is order-independent.
+pub fn apply_evaporation(world: &mut World, cfg: &EvapConfig) {
+    let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    for coord in coords {
+        for y in 0..CHUNK_CELLS_H {
+            let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in 0..CHUNK_CELLS_W {
+                let gx = coord.cx * CHUNK_CELLS_W as i32 + x as i32;
+                let Some(cur) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if cur.material != MaterialId::Air || cur.sat.is_empty() {
+                    continue;
+                }
+                let sky_above = match world.get_cell(gx, gy + 1) {
+                    None => true, // above chunk absent → open sky
+                    Some(above) => {
+                        above.material == MaterialId::Air && above.sat.0 <= cfg.dry_above_max
+                    }
+                };
+                if !sky_above {
+                    continue;
+                }
+                *deltas.entry((gx, gy)).or_insert(0) -= cfg.rate_per_tick as i32;
+            }
+        }
+    }
+    for ((gx, gy), delta) in deltas {
+        let Some(cell) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        let new_sat = (cell.sat.0 as i32 + delta).clamp(0, water_capacity(cell.material) as i32);
+        world.set_cell(
+            gx,
+            gy,
+            Cell {
+                sat: Sat(new_sat as u8),
+                ..cell
+            },
+        );
+    }
+}
+
 /// Advance the sim by one tick.
 ///
 /// Runs the sub-passes in a fixed order:
@@ -240,8 +403,11 @@ pub fn apply_grain_fall(world: &mut World) {
 /// terrain before grains drop through it; each tick the grain then
 /// takes one step down (possibly through freshly-settled water) and
 /// the next tick's water pass repacks around the new grain position.
-/// Future rules (porosity absorb refinements, evaporation) will slot
-/// in ahead of the dirty-rect clear once they land.
+///
+/// Rain and evaporation are **opt-in**: callers wire
+/// [`apply_rain`] and [`apply_evaporation`] into their per-frame
+/// loop themselves. Scenario tests pass `tick(world)` alone and
+/// stay deterministic without weather.
 pub fn tick(world: &mut World) {
     apply_gravity_fall(world);
     apply_lateral_spill(world);
@@ -696,6 +862,144 @@ mod tests {
             w.get_cell(20, 1).unwrap().material,
             MaterialId::Sand
         );
+    }
+
+    // ------------ rain ------------
+
+    fn setup_sky_row(y: i32) -> World {
+        // Chunk (0, 0) with a full row of Air at `y`. Air is the
+        // default cell, so we don't need to write anything — just
+        // instantiate the chunk.
+        let mut w = World::new(11);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        assert!((0..CHUNK_CELLS_H as i32).contains(&y));
+        w
+    }
+
+    #[test]
+    fn rain_is_deterministic_for_seed_and_tick() {
+        let mut a = setup_sky_row(30);
+        let mut b = setup_sky_row(30);
+        let cfg = RainConfig {
+            top_y: 30,
+            x_range: (0, 63),
+            prob_per_col_per_tick: 0.5,
+            droplet_sat: 32,
+            seed_salt: 0xF00,
+        };
+        apply_rain(&mut a, &cfg);
+        apply_rain(&mut b, &cfg);
+        for x in 0..64 {
+            assert_eq!(
+                a.get_cell(x, 30).map(|c| c.sat.0),
+                b.get_cell(x, 30).map(|c| c.sat.0),
+                "identical worlds must produce identical rain (x={x})"
+            );
+        }
+    }
+
+    #[test]
+    fn rain_respects_x_range() {
+        let mut w = setup_sky_row(30);
+        let cfg = RainConfig {
+            top_y: 30,
+            x_range: (5, 20),
+            prob_per_col_per_tick: 1.0, // always
+            droplet_sat: 40,
+            seed_salt: 1,
+        };
+        apply_rain(&mut w, &cfg);
+        for x in 0..64 {
+            let sat = w.get_cell(x, 30).unwrap().sat.0;
+            if (5..=20).contains(&x) {
+                assert!(sat > 0, "x={x} in range should have rain");
+            } else {
+                assert_eq!(sat, 0, "x={x} outside range should stay dry");
+            }
+        }
+    }
+
+    #[test]
+    fn rain_droplet_saturates_at_full() {
+        let mut w = setup_sky_row(30);
+        w.set_cell(3, 30, Cell::water()); // already full
+        let cfg = RainConfig {
+            top_y: 30,
+            x_range: (3, 3),
+            prob_per_col_per_tick: 1.0,
+            droplet_sat: 40,
+            seed_salt: 2,
+        };
+        apply_rain(&mut w, &cfg);
+        // Sat is clamped at u8::MAX — no overflow past FULL.
+        assert_eq!(w.get_cell(3, 30).unwrap().sat.0, u8::MAX);
+    }
+
+    #[test]
+    fn rain_skips_non_air_cells() {
+        let mut w = setup_sky_row(30);
+        // A stone cell at (10, 30) should not receive rain.
+        w.set_cell(10, 30, Cell::solid(MaterialId::Stone));
+        let cfg = RainConfig {
+            top_y: 30,
+            x_range: (10, 10),
+            prob_per_col_per_tick: 1.0,
+            droplet_sat: 40,
+            seed_salt: 3,
+        };
+        apply_rain(&mut w, &cfg);
+        assert_eq!(w.get_cell(10, 30).unwrap().sat.0, 0);
+        assert_eq!(w.get_cell(10, 30).unwrap().material, MaterialId::Stone);
+    }
+
+    // ------------ evaporation ------------
+
+    #[test]
+    fn evap_removes_from_surface_water_only() {
+        // Water column at gy=1..=5, dry air above. Only the topmost
+        // wet cell (gy=5) has dry Air above and should lose sat.
+        let mut w = setup_column_world();
+        for y in 1..=5 {
+            w.set_cell(4, y, Cell::water());
+        }
+        let cfg = EvapConfig::default();
+        apply_evaporation(&mut w, &cfg);
+        for y in 1..=4 {
+            assert!(
+                w.get_cell(4, y).unwrap().sat.is_full(),
+                "sub-surface cell y={y} should not evaporate"
+            );
+        }
+        // Top wet cell lost a tiny bit.
+        let top = w.get_cell(4, 5).unwrap().sat.0;
+        assert!(top < u8::MAX);
+        assert!(top >= u8::MAX - cfg.rate_per_tick);
+    }
+
+    #[test]
+    fn evap_drains_a_droplet_to_zero_over_time() {
+        // Small saturation should tick down to zero over many passes.
+        let mut w = setup_column_world();
+        let mut c = Cell::air();
+        c.sat = Sat(20);
+        w.set_cell(4, 5, c);
+        let cfg = EvapConfig {
+            rate_per_tick: 5,
+            dry_above_max: 200,
+        };
+        for _ in 0..10 {
+            apply_evaporation(&mut w, &cfg);
+        }
+        assert_eq!(w.get_cell(4, 5).unwrap().sat.0, 0);
+    }
+
+    #[test]
+    fn evap_leaves_dry_cells_alone() {
+        let mut w = setup_column_world();
+        // Air at y=5 with sat=0. No writes should occur.
+        let cfg = EvapConfig::default();
+        apply_evaporation(&mut w, &cfg);
+        assert_eq!(w.get_cell(4, 5).unwrap().sat.0, 0);
     }
 
     #[test]

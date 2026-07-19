@@ -19,5 +19,8 @@ pub use cell::{is_grain, water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use grid::World;
 pub use heatmap::Heatmap;
-pub use rules::{apply_grain_fall, apply_gravity_fall, apply_lateral_spill, tick};
+pub use rules::{
+    apply_evaporation, apply_grain_fall, apply_gravity_fall, apply_lateral_spill, apply_rain,
+    tick, EvapConfig, RainConfig,
+};
 pub use worldgen::{continental_surface_y, stamp_world, WorldgenParams};
