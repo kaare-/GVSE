@@ -29,6 +29,7 @@ mod e50_ring_facies;
 mod e51_default_atom_repro;
 mod e52_cold_snap_water;
 mod e53_shore_void_drain;
+mod e54_rain_puddles;
 mod perf_profile;
 mod e22_humidity_near_water_body;
 mod e23_convection_cell;

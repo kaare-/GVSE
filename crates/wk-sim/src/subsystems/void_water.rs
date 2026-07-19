@@ -7,13 +7,30 @@ use wk_material::CHUNK_W;
 use wk_world::column::Activity;
 use wk_world::world::World;
 
+use super::infiltration::HYDRAULIC_CONTACT_MIN_KG;
 use super::shared::WATER_MASS_PER_METRE_DEPTH;
 
 /// Fraction of head-equalizing transfer applied between overlapping voids.
-const VOID_FLOW_RELAXATION: f32 = 0.5;
+///
+/// Was 0.5 — a 50% snap between two overlapping voids per tick pumped
+/// surface water through the karst network toward the sea faster than
+/// lake-level could refill, and left an internal "river" of blue voids
+/// running horizontally through every limestone hill.
+const VOID_FLOW_RELAXATION: f32 = 0.18;
 
-/// Fraction of surface water drained into an open void per tick.
-const SURFACE_CAPTURE_FRAC: f32 = 0.35;
+/// Fraction of a hilltop puddle drained into open voids per capture tick.
+///
+/// Was 0.35 (roughly 20% of the puddle per second at the current VoidWater
+/// period). Rain landing on karst was swallowed underground before it ever
+/// rendered on the surface — the exact symptom in the "hilltop karst
+/// pumping" screenshot.
+const SURFACE_CAPTURE_FRAC: f32 = 0.05;
+
+/// Hard cap on kg of surface water a single column may leak into voids
+/// per capture tick. Together with [`SURFACE_CAPTURE_FRAC`] this keeps
+/// a big pond from vanishing in one tick just because the column happens
+/// to sit over a large open cavity.
+const SURFACE_CAPTURE_MAX_KG: i64 = 60;
 
 /// Max pore kg that may seep into cavities per column per tick.
 /// Slow enough that a cave fills over seconds of rain, not instantly.
@@ -28,9 +45,11 @@ fn voids_overlap(a_top: f32, a_bot: f32, b_top: f32, b_bot: f32) -> bool {
 /// Drain surface / flowable water into voids that breach the surface.
 ///
 /// Coastal / oceanic columns are skipped via `solid_bed_y < coastal_limit`
-/// (mean sea + tide amplitude + 2 m splash buffer). Lit sea-cliff mouths
-/// used to swallow ~35% of standing water every tick, then lake-level /
-/// tide refilled — a persistent pump that notched the free surface.
+/// (mean sea + tide amplitude + 2 m splash buffer). On land the transfer
+/// only kicks in for real puddles — a rain film below the hydraulic
+/// contact threshold is left to normal infiltration and evaporation, or
+/// the karst network becomes an invisible drain that empties every
+/// hilltop puddle before it renders.
 pub fn run_surface_void_capture(world: &mut World) {
     // High-tide + buffer: mouths on the splash zone still saw capture under
     // a bare "solid_bed < sea" gate and kept pumping with each swell.
@@ -46,10 +65,17 @@ pub fn run_surface_void_capture(world: &mut World) {
                 continue;
             }
             let available = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
-            if available <= 0 {
+            // Standing puddle floor — trace rain sheens vanish through
+            // infiltration/evap, not by draining through a karst mouth.
+            if available < HYDRAULIC_CONTACT_MIN_KG {
                 continue;
             }
-            let want = ((available as f32) * SURFACE_CAPTURE_FRAC) as i64;
+            let want = (((available as f32) * SURFACE_CAPTURE_FRAC) as i64)
+                .min(SURFACE_CAPTURE_MAX_KG)
+                .min(available);
+            if want <= 0 {
+                continue;
+            }
             let moved = col.drain_surface_water_into_voids(want);
             if moved > 0 {
                 col.activity = Activity::HydrologyActive;
