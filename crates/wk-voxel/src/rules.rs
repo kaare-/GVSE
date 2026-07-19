@@ -593,16 +593,15 @@ impl Default for EvapConfig {
     }
 }
 
-/// Bleed sat out of surface water cells.
+/// Bleed sat out of **standing** surface water (ocean film, puddles).
 ///
 /// A cell qualifies when:
 /// - It's `Air` with `sat > 0`.
 /// - The cell directly above is `Air` with `sat ≤ cfg.dry_above_max`
 ///   OR the above chunk isn't loaded (open sky).
-///
-/// Water leaves the world here — this is a boundary loss, not a
-/// conservative transfer. When we add a humidity heatmap in a follow-
-/// up PR the same helper will route the mass through it instead.
+/// - It rests on solid ground **or** on wetter standing water below
+///   (so mid-air rain / falling droplets are not re-evaporated before
+///   they can reach the ground).
 ///
 /// Compute-then-apply so evap is order-independent.
 pub fn apply_evaporation(world: &mut World, cfg: &EvapConfig) {
@@ -620,6 +619,16 @@ pub fn apply_evaporation_into_humidity(
 ) {
     let deltas = collect_evap_deltas(world, cfg);
     apply_evap_deltas(world, deltas, Some(humidity));
+}
+
+/// True when wet Air is a free surface of a pool / ocean / land film,
+/// not a suspended rain droplet with empty sky below it.
+fn rests_on_evap_surface(world: &World, gx: i32, gy: i32, cfg: &EvapConfig) -> bool {
+    match world.get_cell(gx, gy - 1) {
+        None => false,
+        Some(below) if below.material != MaterialId::Air => true,
+        Some(below) => below.sat.0 > cfg.dry_above_max,
+    }
 }
 
 fn collect_evap_deltas(world: &mut World, cfg: &EvapConfig) -> HashMap<(i32, i32), i32> {
@@ -650,7 +659,7 @@ fn collect_evap_deltas(world: &mut World, cfg: &EvapConfig) -> HashMap<(i32, i32
                         above.material == MaterialId::Air && above.sat.0 <= cfg.dry_above_max
                     }
                 };
-                if !sky_above {
+                if !sky_above || !rests_on_evap_surface(world, gx, gy, cfg) {
                     continue;
                 }
                 *deltas.entry((gx, gy)).or_insert(0) -= cfg.rate_per_tick as i32;
@@ -1696,11 +1705,11 @@ mod tests {
 
     #[test]
     fn evap_drains_a_droplet_to_zero_over_time() {
-        // Small saturation should tick down to zero over many passes.
+        // Surface film on bedrock should tick down to zero over many passes.
         let mut w = setup_column_world();
         let mut c = Cell::air();
         c.sat = Sat(20);
-        w.set_cell(4, 5, c);
+        w.set_cell(4, 1, c);
         let cfg = EvapConfig {
             rate_per_tick: 5,
             dry_above_max: 200,
@@ -1708,7 +1717,24 @@ mod tests {
         for _ in 0..10 {
             apply_evaporation(&mut w, &cfg);
         }
-        assert_eq!(w.get_cell(4, 5).unwrap().sat.0, 0);
+        assert_eq!(w.get_cell(4, 1).unwrap().sat.0, 0);
+    }
+
+    #[test]
+    fn evap_skips_airborne_rain_droplets() {
+        // Wet Air with empty sky below is falling rain — must not
+        // re-evaporate before gravity can land it.
+        let mut w = setup_column_world();
+        let mut c = Cell::air();
+        c.sat = Sat(80);
+        w.set_cell(4, 10, c);
+        let cfg = EvapConfig::default();
+        apply_evaporation(&mut w, &cfg);
+        assert_eq!(
+            w.get_cell(4, 10).unwrap().sat.0,
+            80,
+            "airborne rain must survive evaporation"
+        );
     }
 
     #[test]

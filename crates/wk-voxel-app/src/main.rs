@@ -40,9 +40,10 @@ mod scene;
 use macroquad::prelude::*;
 use wk_voxel::{
     apply_condensation_rain_with_orographic, apply_evaporation_into_humidity,
-    apply_karst_dissolution, apply_rain, celestial_screen_pos, day_night_factor, humidity_diffuse_due,
-    is_daytime, sky_rgb, sky_rgb_at_height, temperature_step_due, tick, CondensationConfig,
-    EvapConfig, KarstConfig, OrographicConfig, RainConfig, WorldgenParams,
+    apply_karst_dissolution, apply_rain, celestial_screen_pos, continental_surface_y,
+    day_night_factor, humidity_diffuse_due, is_daytime, sky_rgb, sky_rgb_at_height,
+    temperature_step_due, tick, CondensationConfig, EvapConfig, KarstConfig, OrographicConfig,
+    RainConfig, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -169,13 +170,15 @@ fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
 }
 
 /// Cartoon clouds from coagulated [`wk_voxel::CloudStore`] parcels.
-/// Darker / denser = wetter; raining parcels get a streak veil.
+/// Darker / denser = wetter; raining parcels get falling drops beneath.
 fn draw_clouds(
     clouds: &wk_voxel::CloudStore,
     origin_x: f32,
     origin_y: f32,
     cell_px: f32,
     bedrock_floor_y: i32,
+    sea_level_y: i32,
+    seed: u64,
     width_cols: i32,
     wrap_x: bool,
     sw: f32,
@@ -199,6 +202,9 @@ fn draw_clouds(
         let shade = (235.0 - wet * 140.0) as u8;
         let alpha = (120.0 + wet * 100.0) as u8;
         let r = p.radius() * cell_px;
+        let surface = continental_surface_y(seed, p.fx.round() as i32, sea_level_y, width_cols);
+        let ground_sy =
+            origin_y - (surface as f32 - bedrock_floor_y as f32) * cell_px;
         for &x_copy in x_copies {
             let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px;
             let sy = origin_y - (p.fy - bedrock_floor_y as f32) * cell_px;
@@ -207,13 +213,49 @@ fn draw_clouds(
             }
             draw_cartoon_cloud(sx, sy, r, shade, alpha);
             if p.raining {
-                let streak = Color::from_rgba(190, 210, 230, 55);
-                for i in 0..5 {
-                    let ox = sx - r * 0.5 + (i as f32) * (r * 0.25);
-                    draw_rectangle(ox, sy + r * 0.2, 2.0, r * 1.4, streak);
-                }
+                draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh);
             }
         }
+    }
+}
+
+/// Cosmetic falling drops under a raining parcel (physics is separate).
+fn draw_falling_rain(
+    sx: f32,
+    sy: f32,
+    r: f32,
+    ground_sy: f32,
+    wetness: f32,
+    sw: f32,
+    sh: f32,
+) {
+    let t = get_time() as f32;
+    let top = sy + r * 0.35;
+    let bottom = ground_sy.clamp(top + 12.0, sh - 4.0);
+    let left = (sx - r * 0.85).max(-12.0);
+    let right = (sx + r * 0.85).min(sw + 12.0);
+    let band = (right - left).max(1.0);
+    let n = ((band / 7.0) * (0.7 + wetness)).ceil().clamp(10.0, 48.0) as usize;
+    let drop_len = 10.0 + wetness * 6.0;
+    let fall_speed = 380.0 + wetness * 160.0;
+    let cycle = (bottom - top + drop_len).max(drop_len + 1.0);
+    for i in 0..n {
+        let seed = i as f32;
+        let x = left + ((seed * 97.371) % band);
+        let phase = (seed * 0.6180339) % 1.0;
+        let y = top + ((t * fall_speed + phase * cycle) % cycle) - drop_len;
+        if y + drop_len < top || y > bottom {
+            continue;
+        }
+        let alpha = (100.0 + wetness * 50.0) as u8;
+        draw_line(
+            x,
+            y,
+            x - 2.5,
+            y + drop_len,
+            1.15,
+            Color::from_rgba(195, 215, 240, alpha),
+        );
     }
 }
 
@@ -418,9 +460,9 @@ async fn main() {
             // Light drizzle from leftover vapor (clouds do the downpours).
             if cond_rain_on {
                 let drizzle = CondensationConfig {
-                    min_mass_to_rain: 220.0,
-                    max_prob_per_tick: 0.12,
-                    mass_per_droplet: 48.0,
+                    min_mass_to_rain: 96.0,
+                    max_prob_per_tick: 0.18,
+                    mass_per_droplet: 64.0,
                     ..cond_cfg
                 };
                 let oro = OrographicConfig {
@@ -550,12 +592,12 @@ async fn main() {
                         continue;
                     };
                     // Let the day/night sky show through: skip empty Air
-                    // and thin sky drizzle (old rain-streak look). Pooled
-                    // water (near-full sat) and everything below sea still
-                    // draws normally.
+                    // and very thin films. Downpour now lands on the
+                    // ground, so modest puddles (sat ≥ ~160) stay visible
+                    // without painting mid-sky rain streaks.
                     if cell.material == wk_material::MaterialId::Air {
-                        let sky_drizzle = y > scene.params.sea_level_y && cell.sat.0 < 240;
-                        if cell.sat.is_empty() || sky_drizzle {
+                        let too_thin = y > scene.params.sea_level_y && cell.sat.0 < 160;
+                        if cell.sat.is_empty() || too_thin {
                             continue;
                         }
                     }
@@ -609,6 +651,8 @@ async fn main() {
                 origin_y,
                 cell_px,
                 scene.params.bedrock_floor_y,
+                scene.params.sea_level_y,
+                scene.params.seed,
                 scene.params.width_cols,
                 scene.params.wrap_x,
                 sw,

@@ -29,11 +29,11 @@ const SPAWN_RADIUS: f32 = 18.0;
 /// Merge parcels closer than this (world cells).
 const MERGE_DIST: f32 = 10.0;
 /// Mass at which a parcel starts dumping rain (lower on ridges).
-pub const DOWNPOUR_MASS: f32 = 160.0;
+pub const DOWNPOUR_MASS: f32 = 120.0;
 /// Mass drained per downpour tick (split across columns under the cloud).
-const DOWNPOUR_DRAIN: f32 = 55.0;
+const DOWNPOUR_DRAIN: f32 = 72.0;
 /// Stop dumping once mass falls below this fraction of the threshold.
-const DOWNPOUR_STOP_FRAC: f32 = 0.35;
+const DOWNPOUR_STOP_FRAC: f32 = 0.30;
 /// Preferred free-air cloud altitude above sea (cells).
 const CLOUD_ALT_ABOVE_SEA: i32 = 32;
 /// Vapor must rise at least this far above sea before coagulating.
@@ -285,7 +285,8 @@ impl CloudStore {
 
             let drain = (DOWNPOUR_DRAIN * oro).min(p.mass);
             let radius = p.radius();
-            let cols = ((radius * 1.6) as i32).clamp(3, 16);
+            // Fewer columns → deeper puddles under the storm track.
+            let cols = ((radius * 1.25) as i32).clamp(2, 10);
             let mut remaining = drain;
             for k in 0..cols {
                 if remaining <= 0.0 {
@@ -343,13 +344,21 @@ fn deposit_rain_column(
         return 0.0;
     }
     let jx = world.wrap_x(gx + ((tick as i32 + salt * 3) % 3) - 1);
+    // Walk down from the cloud and land on the free-air cell just
+    // above terrain or standing water — not hang as mid-sky sat.
     let mut y = start_y;
-    for _ in 0..48 {
+    let mut last_free_air_y: Option<i32> = None;
+    for _ in 0..128 {
         let Some(cell) = world.get_cell(jx, y) else {
             y -= 1;
             continue;
         };
         if cell.material != MaterialId::Air {
+            if let Some(ay) = last_free_air_y {
+                if let Some(ac) = world.get_cell(jx, ay) {
+                    return fill_sat(world, jx, ay, ac, budget);
+                }
+            }
             if let Some(above) = world.get_cell(jx, y + 1) {
                 if above.material == MaterialId::Air {
                     return fill_sat(world, jx, y + 1, above, budget);
@@ -357,10 +366,22 @@ fn deposit_rain_column(
             }
             return 0.0;
         }
-        if !cell.sat.is_full() {
-            return fill_sat(world, jx, y, cell, budget);
+        if cell.sat.is_full() {
+            // Ocean / lake surface — rain onto the air just above it.
+            if let Some(ay) = last_free_air_y {
+                if let Some(ac) = world.get_cell(jx, ay) {
+                    return fill_sat(world, jx, ay, ac, budget);
+                }
+            }
+            return 0.0;
         }
+        last_free_air_y = Some(y);
         y -= 1;
+    }
+    if let Some(ay) = last_free_air_y {
+        if let Some(ac) = world.get_cell(jx, ay) {
+            return fill_sat(world, jx, ay, ac, budget);
+        }
     }
     0.0
 }
@@ -488,13 +509,17 @@ mod tests {
         let mut world = World::new(p.seed);
         let gx: i32 = 20;
         let top: i32 = 40;
-        let cc = ChunkCoord::new(
-            gx.div_euclid(CHUNK_CELLS_W as i32),
-            top.div_euclid(CHUNK_CELLS_H as i32),
-        );
-        world.ensure_chunk(cc);
+        let floor: i32 = 5;
+        // Ensure chunks covering cloud → ground.
+        for y in [floor, top] {
+            world.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(CHUNK_CELLS_W as i32),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
         for x in (gx - 3)..=(gx + 3) {
-            for y in 0..=top {
+            world.set_cell(x, floor, Cell::solid(MaterialId::Stone));
+            for y in (floor + 1)..=top {
                 world.set_cell(x, y, Cell::air());
             }
         }
@@ -509,15 +534,14 @@ mod tests {
         let mass_before = clouds.total_mass();
         clouds.downpour(&mut world, &wind, 0);
         assert!(clouds.total_mass() < mass_before);
-        let mut sat = 0i32;
-        for x in (gx - 3)..=(gx + 3) {
-            for y in 0..=top {
-                if let Some(c) = world.get_cell(x, y) {
-                    sat += c.sat.0 as i32;
-                }
-            }
-        }
-        assert!(sat > 0);
+        // Rain should land just above the stone floor, not hang at cloud height.
+        let landed = world.get_cell(gx, floor + 1).map(|c| c.sat.0).unwrap_or(0);
+        assert!(
+            landed > 0,
+            "downpour should deposit on the ground (got sat={landed})"
+        );
+        let high = world.get_cell(gx, top).map(|c| c.sat.0).unwrap_or(0);
+        assert_eq!(high, 0, "rain must not hang in the sky at cloud height");
     }
 
     #[test]
