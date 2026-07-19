@@ -127,13 +127,18 @@ impl SimSettings {
         let mut coag_min_alt = self.cloud.coag_min_above_sea as f32;
         let mut tall_above = self.oro.tall_above_sea as f32;
         let mut reset_materials = false;
+        let mut min_sat = self.karst.min_wet_neighbour_sat as f32;
 
-        widgets::Window::new(hash!(), vec2(16.0, 16.0), vec2(560.0, 700.0))
+        // Wide enough for value + track; labels sit on their own line
+        // so they never clip against the window edge.
+        let win_w = screen_width().min(720.0).max(520.0);
+        let win_h = screen_height().min(780.0).max(560.0);
+        widgets::Window::new(hash!(), vec2(12.0, 12.0), vec2(win_w, win_h))
             .label("Settings (Tab to close)")
             .ui(&mut *root_ui(), |ui| {
                 ui.tree_node(hash!(), "Day / night / temperature", |ui| {
-                    ui.slider(hash!(), "Day length (ticks)", 60.0..6_000.0, &mut day_ticks);
-                    ui.slider(hash!(), "Night length (ticks)", 60.0..6_000.0, &mut night_ticks);
+                    labeled_slider(ui, hash!(), "Day length (ticks)", 60.0..6_000.0, &mut day_ticks);
+                    labeled_slider(ui, hash!(), "Night length (ticks)", 60.0..6_000.0, &mut night_ticks);
                     ui.label(
                         None,
                         &format!(
@@ -141,25 +146,27 @@ impl SimSettings {
                             (day_ticks + night_ticks) / 60.0
                         ),
                     );
-                    ui.slider(hash!(), "Base temp (C)", -20.0..40.0, &mut self.temp.base_temp_c);
-                    ui.slider(hash!(), "Day/night swing (C)", 0.0..20.0, &mut self.temp.day_amp_c);
-                    ui.slider(hash!(), "Lapse (C / cell elev)", 0.0..0.4, &mut self.temp.lapse_c);
-                    ui.slider(hash!(), "Solar heat / step", 0.0..1.5, &mut self.temp.solar_heat_c);
-                    ui.slider(hash!(), "Night cool / step", 0.0..1.5, &mut self.temp.night_cool_c);
-                    ui.slider(hash!(), "Cloud shade", 0.0..1.0, &mut self.temp.cloud_shade);
-                    ui.slider(hash!(), "Sea bias (C)", -10.0..5.0, &mut self.temp.sea_bias_c);
+                    labeled_slider(ui, hash!(), "Base temp (C)", -20.0..40.0, &mut self.temp.base_temp_c);
+                    labeled_slider(ui, hash!(), "Day/night swing (C)", 0.0..20.0, &mut self.temp.day_amp_c);
+                    labeled_slider(ui, hash!(), "Lapse (C per cell elev)", 0.0..0.4, &mut self.temp.lapse_c);
+                    labeled_slider(ui, hash!(), "Solar heat / step", 0.0..1.5, &mut self.temp.solar_heat_c);
+                    labeled_slider(ui, hash!(), "Night cool / step", 0.0..1.5, &mut self.temp.night_cool_c);
+                    labeled_slider(ui, hash!(), "Cloud shade", 0.0..1.0, &mut self.temp.cloud_shade);
+                    labeled_slider(ui, hash!(), "Sea bias (C)", -10.0..5.0, &mut self.temp.sea_bias_c);
                 });
                 ui.separator();
 
                 ui.tree_node(hash!(), "Wind + humidity", |ui| {
-                    ui.slider(hash!(), "Wind (tiles/tick)", -0.5..0.5, &mut self.wind_vx);
-                    ui.slider(
+                    labeled_slider(ui, hash!(), "Wind (tiles/tick)", -0.5..0.5, &mut self.wind_vx);
+                    labeled_slider(
+                        ui,
                         hash!(),
                         "Humidity diffuse alpha",
                         0.0..0.25,
                         &mut self.humidity_diffusion_alpha,
                     );
-                    ui.slider(
+                    labeled_slider(
+                        ui,
                         hash!(),
                         "Buoyant rise / tick",
                         0.0..0.4,
@@ -169,23 +176,25 @@ impl SimSettings {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Clouds", |ui| {
-                    ui.slider(hash!(), "Max parcels", 1.0..64.0, &mut max_parcels);
-                    ui.slider(hash!(), "Coag min humidity", 1.0..120.0, &mut self.cloud.coag_min_hum);
-                    ui.slider(hash!(), "Coag rate", 0.005..0.25, &mut self.cloud.coag_rate);
-                    ui.slider(hash!(), "Coag max take", 1.0..80.0, &mut self.cloud.coag_max_take);
-                    ui.slider(hash!(), "Spawn radius", 4.0..48.0, &mut self.cloud.spawn_radius);
-                    ui.slider(hash!(), "Merge distance", 2.0..30.0, &mut self.cloud.merge_dist);
-                    ui.slider(hash!(), "Downpour mass", 40.0..500.0, &mut self.cloud.downpour_mass);
-                    ui.slider(hash!(), "Downpour drain", 4.0..120.0, &mut self.cloud.downpour_drain);
-                    ui.slider(
+                    labeled_slider(ui, hash!(), "Max parcels", 1.0..64.0, &mut max_parcels);
+                    labeled_slider(ui, hash!(), "Coag min humidity", 1.0..120.0, &mut self.cloud.coag_min_hum);
+                    labeled_slider(ui, hash!(), "Coag rate", 0.005..0.25, &mut self.cloud.coag_rate);
+                    labeled_slider(ui, hash!(), "Coag max take", 1.0..80.0, &mut self.cloud.coag_max_take);
+                    labeled_slider(ui, hash!(), "Spawn radius", 4.0..48.0, &mut self.cloud.spawn_radius);
+                    labeled_slider(ui, hash!(), "Merge distance", 2.0..30.0, &mut self.cloud.merge_dist);
+                    labeled_slider(ui, hash!(), "Downpour mass", 40.0..500.0, &mut self.cloud.downpour_mass);
+                    labeled_slider(ui, hash!(), "Downpour drain", 4.0..120.0, &mut self.cloud.downpour_drain);
+                    labeled_slider(
+                        ui,
                         hash!(),
                         "Parcel wind scale",
                         0.05..1.5,
                         &mut self.cloud.parcel_wind_scale,
                     );
-                    ui.slider(hash!(), "Cloud alt above sea", 8.0..80.0, &mut cloud_alt);
-                    ui.slider(hash!(), "Coag min above sea", 4.0..60.0, &mut coag_min_alt);
-                    ui.slider(
+                    labeled_slider(ui, hash!(), "Cloud alt above sea", 8.0..80.0, &mut cloud_alt);
+                    labeled_slider(ui, hash!(), "Coag min above sea", 4.0..60.0, &mut coag_min_alt);
+                    labeled_slider(
+                        ui,
                         hash!(),
                         "Ridge clearance",
                         0.0..20.0,
@@ -195,36 +204,41 @@ impl SimSettings {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Rain / drizzle / evap", |ui| {
-                    ui.slider(
+                    labeled_slider(
+                        ui,
                         hash!(),
                         "Climatic rain prob",
                         0.0..0.2,
                         &mut self.rain.prob_per_col_per_tick,
                     );
-                    ui.slider(hash!(), "Climatic droplet sat", 1.0..255.0, &mut droplet);
-                    ui.slider(
+                    labeled_slider(ui, hash!(), "Climatic droplet sat", 1.0..255.0, &mut droplet);
+                    labeled_slider(
+                        ui,
                         hash!(),
                         "Drizzle min mass",
                         10.0..400.0,
                         &mut self.cond.min_mass_to_rain,
                     );
-                    ui.slider(
+                    labeled_slider(
+                        ui,
                         hash!(),
                         "Drizzle max prob",
                         0.0..1.0,
                         &mut self.cond.max_prob_per_tick,
                     );
-                    ui.slider(
+                    labeled_slider(
+                        ui,
                         hash!(),
                         "Drizzle mass / drop",
                         4.0..200.0,
                         &mut self.cond.mass_per_droplet,
                     );
-                    ui.slider(hash!(), "Evap rate / pulse", 0.0..8.0, &mut evap_rate);
-                    ui.slider(hash!(), "Evap period (ticks)", 1.0..30.0, &mut evap_period);
-                    ui.slider(hash!(), "Evap dry-above max", 0.0..255.0, &mut dry_above);
-                    ui.slider(hash!(), "Oro tall above sea", 4.0..60.0, &mut tall_above);
-                    ui.slider(
+                    labeled_slider(ui, hash!(), "Evap rate / pulse", 0.0..8.0, &mut evap_rate);
+                    labeled_slider(ui, hash!(), "Evap period (ticks)", 1.0..30.0, &mut evap_period);
+                    labeled_slider(ui, hash!(), "Evap dry-above max", 0.0..255.0, &mut dry_above);
+                    labeled_slider(ui, hash!(), "Oro tall above sea", 4.0..60.0, &mut tall_above);
+                    labeled_slider(
+                        ui,
                         hash!(),
                         "Oro ascent scale",
                         4.0..80.0,
@@ -238,13 +252,15 @@ impl SimSettings {
                     for id in MaterialId::ALL_SOLIDS {
                         let i = id as usize;
                         let name = material_short_name(id);
-                        ui.slider(
+                        labeled_slider(
+                            ui,
                             hash!(name, "perm"),
                             &format!("{name} permeability"),
                             0.0..255.0,
                             &mut self.mat_perm[i],
                         );
-                        ui.slider(
+                        labeled_slider(
+                            ui,
                             hash!(name, "poro"),
                             &format!("{name} porosity"),
                             0.0..255.0,
@@ -258,19 +274,20 @@ impl SimSettings {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Karst", |ui| {
-                    ui.slider(
+                    labeled_slider(
+                        ui,
                         hash!(),
-                        "Dissolve prob / wet nbr",
+                        "Dissolve prob / wet neighbour",
                         0.0..0.05,
                         &mut self.karst.prob_per_wet_neighbour,
                     );
-                    let mut min_sat = self.karst.min_wet_neighbour_sat as f32;
-                    ui.slider(hash!(), "Min wet neighbour sat", 1.0..255.0, &mut min_sat);
-                    self.karst.min_wet_neighbour_sat = min_sat.round().clamp(1.0, 255.0) as u8;
+                    labeled_slider(ui, hash!(), "Min wet neighbour sat", 1.0..255.0, &mut min_sat);
                 });
                 ui.separator();
                 ui.label(None, "Tip: Tab closes · F2 creature editor · F1 tools");
             });
+
+        self.karst.min_wet_neighbour_sat = min_sat.round().clamp(1.0, 255.0) as u8;
 
         if reset_materials {
             self.reset_materials_to_defaults();
@@ -304,4 +321,18 @@ fn material_short_name(id: MaterialId) -> &'static str {
         MaterialId::Limestone => "Limestone",
         _ => "?",
     }
+}
+
+/// Full label on its own line; slider uses a blank label so text never
+/// clips against the window's right edge (macroquad packs label after
+/// the track).
+fn labeled_slider(
+    ui: &mut macroquad::ui::Ui,
+    id: macroquad::ui::Id,
+    label: &str,
+    range: std::ops::Range<f32>,
+    value: &mut f32,
+) {
+    ui.label(None, label);
+    ui.slider(id, "", range, value);
 }
