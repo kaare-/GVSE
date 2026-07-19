@@ -27,6 +27,7 @@ mod e48_gas_exchange;
 mod e49_wind_tide_waves;
 mod e50_ring_facies;
 mod e51_default_atom_repro;
+mod e52_cold_snap_water;
 mod perf_profile;
 mod e22_humidity_near_water_body;
 mod e23_convection_cell;

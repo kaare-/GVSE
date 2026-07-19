@@ -902,8 +902,9 @@ fn draw_inspector(
         }
     }
     lines.push(format!(
-        "water={} kg  moisture={} kg  sat={:.0}%",
+        "water={} kg  (cap {})  moisture={} kg  sat={:.0}%",
         col.surface_water,
+        col.flowable_water,
         col.moisture,
         col.saturation * 100.0
     ));
