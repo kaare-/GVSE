@@ -1,6 +1,7 @@
 //! Headless perf profile for the wk-voxel demo stack.
 //!
-//! Ignored by default. Run on a laptop before threading work:
+//! Ignored by default. Run on a laptop to compare before/after
+//! checkerboard rayon work:
 //!
 //! ```text
 //! cargo test -p wk-voxel --test perf_profile --release -- --ignored --nocapture
