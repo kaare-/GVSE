@@ -25,8 +25,8 @@ pub use humidity::{
 };
 pub use rules::{
     apply_condensation_rain, apply_evaporation, apply_evaporation_into_humidity, apply_grain_fall,
-    apply_gravity_fall, apply_karst_dissolution, apply_lateral_spill, apply_rain, tick,
-    CondensationConfig, EvapConfig, KarstConfig, RainConfig,
+    apply_gravity_fall, apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_seepage,
+    hydraulic_head, tick, CondensationConfig, EvapConfig, KarstConfig, RainConfig,
 };
 pub use worldgen::is_karst_zone_x;
 pub use worldgen::{continental_surface_y, stamp_world, WorldgenParams};
