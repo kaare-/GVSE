@@ -32,7 +32,7 @@ impl Default for CreatureEditor {
             blueprint: Blueprint::atom(),
             tool: EditorTool::Paint,
             brush: ModuleId::Photosystem,
-            status: "Paint Atom (black nucleus + green photosystem), Enter to spawn".into(),
+            status: "Paint Atom, then Enter + click a wet cell to spawn".into(),
             spawn_picker: false,
             was_paused: true,
             name_buf: "atom".into(),
@@ -49,7 +49,9 @@ impl CreatureEditor {
             self.open = true;
             self.was_paused = currently_paused;
             self.spawn_picker = false;
-            self.status = "1 Nucleus  2 Photosystem  | E erase  S save  L load  Enter spawn".into();
+            self.status =
+                "1 Nucleus  2 Photosystem  | E erase  S/L  | Enter then click wet cell to spawn"
+                    .into();
         }
     }
 
@@ -100,7 +102,8 @@ impl CreatureEditor {
         if is_key_pressed(KeyCode::Enter) {
             if self.blueprint.is_valid_atom() {
                 self.spawn_picker = true;
-                self.status = "SPAWN — click a wet cell in the world (Esc cancel)".into();
+                self.status =
+                    "SPAWN — click a wet cell in the world to place (Esc cancel)".into();
             } else {
                 self.status = "Need at least one Nucleus + one Photosystem".into();
             }
@@ -155,7 +158,7 @@ impl CreatureEditor {
         if self.spawn_picker {
             draw_rectangle(0.0, 0.0, sw, 36.0, Color::from_rgba(8, 10, 16, 200));
             draw_text(
-                "SPAWN MODE — click a wet cell  |  Esc cancel  |  F2 close editor",
+                "SPAWN MODE — Enter accepted; now click a wet cell to place  |  Esc cancel  |  F2 close",
                 16.0,
                 24.0,
                 20.0,
@@ -236,7 +239,7 @@ impl CreatureEditor {
             GRAY,
         );
         draw_text(
-            "S save  L load  Enter spawn into world",
+            "S save  L load  |  Enter, then click a wet cell to spawn",
             px,
             oy + 72.0,
             14.0,
