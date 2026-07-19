@@ -457,19 +457,20 @@ impl AppState {
         use macroquad::ui::{root_ui, widgets};
 
         let (n_algae, n_plant, n_fungus) = self.sim.agents.count_by_habit();
-        let max_org = wk_sim::MAX_ORGANISMS as f32;
+        // UI slider range only — not an ECS hard ceiling. Soft PopCaps gate spawn/repro.
+        const POP_CAP_SLIDER_MAX: f32 = 4096.0;
         widgets::Window::new(hash!(), vec2(20.0, 20.0), vec2(380.0, 560.0))
             .label("Settings (Tab to close)")
             .ui(&mut root_ui(), |ui| {
                 ui.tree_node(hash!(), "Population caps", |ui| {
                     ui.label(
                         None,
-                        "Split soft caps by habit so blooms / forests / fungi can be tuned apart.",
+                        "Soft caps by habit — blooms / forests / fungi tuned apart (no global hard ceiling).",
                     );
                     ui.slider(
                         hash!(),
                         "Algae (atom / plankton)",
-                        0.0f32..max_org,
+                        0.0f32..POP_CAP_SLIDER_MAX,
                         &mut self.settings_cap_algae,
                     );
                     ui.label(
@@ -482,7 +483,7 @@ impl AppState {
                     ui.slider(
                         hash!(),
                         "Plants (roots / stems)",
-                        0.0f32..max_org,
+                        0.0f32..POP_CAP_SLIDER_MAX,
                         &mut self.settings_cap_plant,
                     );
                     ui.label(
@@ -495,7 +496,7 @@ impl AppState {
                     ui.slider(
                         hash!(),
                         "Fungi (digest / hypha)",
-                        0.0f32..max_org,
+                        0.0f32..POP_CAP_SLIDER_MAX,
                         &mut self.settings_cap_fungus,
                     );
                     ui.label(
@@ -508,9 +509,11 @@ impl AppState {
                     ui.label(
                         None,
                         &format!(
-                            "Total living {} · hard ceiling {}",
+                            "Total living {} · soft budget {}",
                             n_algae + n_plant + n_fungus,
-                            wk_sim::MAX_ORGANISMS
+                            self.settings_cap_algae.round() as usize
+                                + self.settings_cap_plant.round() as usize
+                                + self.settings_cap_fungus.round() as usize
                         ),
                     );
                 });
@@ -610,9 +613,9 @@ impl AppState {
             (self.settings_night_minutes.max(0.1) * 60.0 * 60.0) as u64;
 
         self.sim.agents.pop_caps = wk_sim::PopCaps {
-            algae: self.settings_cap_algae.round().clamp(0.0, max_org) as usize,
-            plant: self.settings_cap_plant.round().clamp(0.0, max_org) as usize,
-            fungus: self.settings_cap_fungus.round().clamp(0.0, max_org) as usize,
+            algae: self.settings_cap_algae.round().clamp(0.0, POP_CAP_SLIDER_MAX) as usize,
+            plant: self.settings_cap_plant.round().clamp(0.0, POP_CAP_SLIDER_MAX) as usize,
+            fungus: self.settings_cap_fungus.round().clamp(0.0, POP_CAP_SLIDER_MAX) as usize,
         };
     }
 }

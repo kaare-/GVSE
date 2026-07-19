@@ -204,7 +204,7 @@ fn perf_profile_ring_app_world_with_creatures() {
 #[test]
 #[ignore]
 fn perf_profile_creature_kernels() {
-    // Profile the individual creature hot paths at MAX_ORGANISMS.
+    // Profile the individual creature hot paths at a dense population.
     use wk_sim::{Blueprint, Energy, Genome};
     let mut world = app_like_world();
     let mut sim = Simulation::new(&world);

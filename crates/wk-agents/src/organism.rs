@@ -19,12 +19,8 @@ use wk_world::world::World;
 
 use crate::blueprint::Blueprint;
 use crate::{
-    AgentStore, Energy, Genome, Pose, MAX_AGENTS, MUTATION_SIGMA, REPRO_COST_FRAC, REPRO_PERIOD,
+    AgentStore, Energy, Genome, Pose, MUTATION_SIGMA, REPRO_COST_FRAC, REPRO_PERIOD,
 };
-
-/// Soft cap for module organisms (separate from grazers).
-/// Absolute ECS ceiling — per-habit [`PopCaps`] must stay at or below this.
-pub const MAX_ORGANISMS: usize = 512;
 
 /// Habit bucket for population budgets (algae / rooted / hypha).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,8 +55,9 @@ impl OrganismHabit {
 
 /// Tunable per-habit population ceilings (settings UI / scenarios).
 ///
-/// Defaults split [`MAX_ORGANISMS`] so algae blooms, forests, and litter
-/// fungi don't starve each other of the same global slot.
+/// Soft caps only — there is no separate global organism hard ceiling.
+/// Defaults keep algae blooms, forests, and litter fungi from starving
+/// each other of the same budget.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct PopCaps {
     pub algae: usize,
@@ -85,15 +82,10 @@ impl PopCaps {
             OrganismHabit::Plant => self.plant,
             OrganismHabit::Fungus => self.fungus,
         }
-        .min(MAX_ORGANISMS)
     }
 
-    pub fn clamp_each(self) -> Self {
-        Self {
-            algae: self.algae.min(MAX_ORGANISMS),
-            plant: self.plant.min(MAX_ORGANISMS),
-            fungus: self.fungus.min(MAX_ORGANISMS),
-        }
+    pub fn total(self) -> usize {
+        self.algae.saturating_add(self.plant).saturating_add(self.fungus)
     }
 }
 
@@ -1399,22 +1391,16 @@ impl AgentStore {
 
     /// True if another organism of this habit may spawn / birth.
     ///
-    /// `pending` counts same-tick deferred births already queued (and, for
-    /// the global ceiling, all deferred births).
-    pub fn habit_has_room(
-        &self,
-        habit: OrganismHabit,
-        pending_same_habit: usize,
-        pending_total: usize,
-    ) -> bool {
+    /// `pending_same_habit` counts same-tick deferred births already queued
+    /// for this habit. Soft [`PopCaps`] are the only population gate.
+    pub fn habit_has_room(&self, habit: OrganismHabit, pending_same_habit: usize) -> bool {
         let (algae, plant, fungus) = self.count_by_habit();
         let n = match habit {
             OrganismHabit::Algae => algae,
             OrganismHabit::Plant => plant,
             OrganismHabit::Fungus => fungus,
         };
-        let cap = self.pop_caps.for_habit(habit);
-        n + pending_same_habit < cap && self.organism_count() + pending_total < MAX_ORGANISMS
+        n + pending_same_habit < self.pop_caps.for_habit(habit)
     }
 
     /// Elevation for a newly spawned / cloned organism (`pose.y`).
@@ -1444,17 +1430,11 @@ impl AgentStore {
         blueprint: Blueprint,
         energy: f32,
     ) -> Option<Entity> {
-        if self.organism_count() >= MAX_ORGANISMS {
-            return None;
-        }
-        if self.len() as usize >= MAX_AGENTS + MAX_ORGANISMS {
-            return None;
-        }
         if !blueprint.is_valid_atom() && !blueprint.is_valid_fungus() {
             return None;
         }
         let habit = OrganismHabit::from_blueprint(&blueprint);
-        if !self.habit_has_room(habit, 0, 0) {
+        if !self.habit_has_room(habit, 0) {
             return None;
         }
         if world.column_at(world_x).is_none() {
@@ -1630,7 +1610,6 @@ impl AgentStore {
         let l0 = sky_light_l0(world.climate.day_night_factor(tick));
         let phase = world.climate.phase_fraction(tick);
         let cycle_ticks = world.climate.cycle_length_ticks();
-        let population = self.organism_count();
 
         // Land plants join a genet (rhizome colony) and share along it.
         for (e, (body, lineage)) in self
@@ -2008,8 +1987,7 @@ impl AgentStore {
                 OrganismHabit::Fungus => n_fungus0,
             };
             let habit_cap = pop_caps.for_habit(parent_habit);
-            let habit_room = habit_n0 + pending_same < habit_cap
-                && population + births.len() < MAX_ORGANISMS;
+            let habit_room = habit_n0 + pending_same < habit_cap;
             if habit_room
                 && tick % repro_period == phase_id
                 && energy.current >= tank_ref * threshold
@@ -2214,7 +2192,7 @@ impl AgentStore {
         }
 
         // Collect once, extend as we spawn — the old code re-queried every
-        // living organism through hecs per birth (O(N²) at MAX_ORGANISMS).
+        // living organism through hecs per birth (O(N²) at high pop).
         let mut bodies = if !births.is_empty() {
             collect_bodies(self, world)
         } else {
@@ -2223,11 +2201,8 @@ impl AgentStore {
         let mut occupied = rooted_occupied_columns(&bodies);
         for (x0, y0, blueprint, energy, max_e, parent, parent_gen, founder_id, genet_id) in births
         {
-            if self.organism_count() >= MAX_ORGANISMS {
-                break;
-            }
             let habit = OrganismHabit::from_blueprint(&blueprint);
-            if !self.habit_has_room(habit, 0, 0) {
+            if !self.habit_has_room(habit, 0) {
                 if let Ok(mut e) = self.ecs.get::<&mut Energy>(parent) {
                     e.current = (e.current + energy).min(e.max);
                 }
@@ -4591,6 +4566,24 @@ mod tests {
     }
 
     #[test]
+    fn pop_caps_have_no_global_hard_ceiling() {
+        let caps = PopCaps {
+            algae: 1_000,
+            plant: 800,
+            fungus: 400,
+        };
+        assert_eq!(caps.for_habit(OrganismHabit::Algae), 1_000);
+        assert_eq!(caps.for_habit(OrganismHabit::Plant), 800);
+        assert_eq!(caps.for_habit(OrganismHabit::Fungus), 400);
+        assert_eq!(caps.total(), 2_200);
+        let mut store = AgentStore::new();
+        store.pop_caps = caps;
+        // Habit room is independent of any former 512 global slot budget.
+        assert!(store.habit_has_room(OrganismHabit::Algae, 999));
+        assert!(!store.habit_has_room(OrganismHabit::Algae, 1_000));
+    }
+
+    #[test]
     fn habit_pop_caps_isolate_algae_from_plants() {
         let mut world = World::new(13);
         world.sea_level = 0.0;
@@ -4644,9 +4637,9 @@ mod tests {
         );
         let (a, p, f) = store.count_by_habit();
         assert_eq!((a, p, f), (1, 1, 0));
-        assert!(!store.habit_has_room(OrganismHabit::Fungus, 0, 0));
-        assert!(!store.habit_has_room(OrganismHabit::Plant, 0, 0));
-        assert!(store.habit_has_room(OrganismHabit::Algae, 0, 0));
+        assert!(!store.habit_has_room(OrganismHabit::Fungus, 0));
+        assert!(!store.habit_has_room(OrganismHabit::Plant, 0));
+        assert!(store.habit_has_room(OrganismHabit::Algae, 0));
     }
 
 }
