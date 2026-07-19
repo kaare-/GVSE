@@ -69,14 +69,12 @@ pub fn run_karst(world: &mut World, _tick: u64) {
                 if col.moisture <= 0 {
                     continue;
                 }
-                // Karst is a terrestrial cave process. Under the ocean the
-                // surface_void_capture pass would then suck 35% of the sea
-                // into every fresh void per tick, faster than LakeLevel
-                // can refill — that's what made the ocean surface spike.
-                // Use solid_bed_y (strips fluids *and* cavity height) —
-                // climate_elevation still includes voids, so a submerged
-                // limestone shelf with sea-cliff mouths looked emergent.
-                if col.solid_bed_y() < sea_level - 0.25 {
+                // Karst is a terrestrial cave process. Submerged shelf
+                // beds skip so we don't dissolve rock into the ocean.
+                // `climate_elevation` = top of column material stripped
+                // of the fluid cap, which for a flooded shelf sits
+                // below sea level.
+                if col.climate_elevation() < sea_level - 0.25 {
                     continue;
                 }
                 let head_here = col.water_table_y();

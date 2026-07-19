@@ -179,11 +179,13 @@ pub fn run_lake_level(world: &mut World) {
         let chunk = &world.chunks[&coord];
         for local in 0..CHUNK_W {
             let col = &chunk.columns[local];
-            // Solid bed under weather fluids *and* cavities. Deriving bed
-            // from flowable water_top - mass used to inherit void inflation
-            // in surface_y, which notched the ocean at karst mouths.
+            // Ground for level solving is the top of the column
+            // material (solid + buried voids) minus the fluid cap.
+            // Uses `climate_elevation` so wet and dry neighbours are
+            // measured against the same reference — the `flowable_water`
+            // free-surface formula is `climate_elevation + water_h`.
             let water = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
-            let bed_y = col.solid_bed_y();
+            let bed_y = col.climate_elevation();
             let world_x = chunk.world_x_base() + local as i32;
             cells.push(LakeCell {
                 coord,

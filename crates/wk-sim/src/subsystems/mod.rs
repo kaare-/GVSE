@@ -25,7 +25,6 @@ mod slumping;
 mod speleogenesis;
 mod surface_water;
 mod surface_waves;
-mod void_water;
 mod weather;
 
 pub use activity::run_activity;
@@ -39,7 +38,7 @@ pub use fields::{
 pub use gas::run_gas;
 pub use groundwater::run_groundwater_flow;
 pub use halos::{exchange_outboxes, update_halos};
-pub use infiltration::{recharge_deep_water_tables, run_infiltration};
+pub use infiltration::run_infiltration;
 pub use karst::run_karst;
 pub use lake_level::run_lake_level;
 pub use layer_merge::run_layer_merge;
@@ -52,5 +51,4 @@ pub use slumping::run_slumping;
 pub use speleogenesis::run_speleogenesis;
 pub use surface_water::run_surface_water;
 pub use surface_waves::run_surface_waves;
-pub use void_water::{run_surface_void_capture, run_void_moisture_seep, run_void_water_flow};
 pub use weather::run_weather;

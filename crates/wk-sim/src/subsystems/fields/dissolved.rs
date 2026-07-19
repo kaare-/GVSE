@@ -36,12 +36,10 @@ fn build_alpha(chunk: &wk_world::chunk::Chunk, field: &FieldPatch) -> FieldPatch
             let wet = if y_m >= col.surface_y {
                 // Free air / above surface: only wet if standing water
                 // reaches this elevation (approximate with top water).
-                col.top_water_mass() > 0 || col.void_water_total() > 0
+                col.top_water_mass() > 0
             } else {
                 let cap = col.moisture_cap().max(1) as f32;
-                (col.moisture as f32 / cap) > 0.05
-                    || col.top_water_mass() > 0
-                    || col.void_water_total() > 0
+                (col.moisture as f32 / cap) > 0.05 || col.top_water_mass() > 0
             };
             alpha.set_cell(
                 cx,

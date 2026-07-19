@@ -768,7 +768,6 @@ impl World {
                     audit.by_material[m] += col.layers[i].thickness;
                 }
                 audit.by_material[MaterialId::Water.index()] += col.moisture;
-                audit.by_material[MaterialId::Water.index()] += col.void_water_total();
                 if col.sediment.total > 0 {
                     audit.by_material[col.sediment.dominant.index()] += col.sediment.total;
                 }
@@ -1003,10 +1002,12 @@ impl World {
                     .collect();
                 let cap = col.moisture_cap().max(1) as f32;
                 let saturation = (col.moisture as f32 / cap).clamp(0.0, 1.0);
+                // Voids in this build are always dry; the 3rd tuple slot
+                // is left as 0 to preserve the render/inspector ABI.
                 let voids = col
                     .voids
                     .iter()
-                    .map(|v| (v.top_y, v.height_m, v.water_mass, v.light))
+                    .map(|v| (v.top_y, v.height_m, 0i64, v.light))
                     .collect();
                 let temperature_c = self.temperature_at_point(
                     wx,

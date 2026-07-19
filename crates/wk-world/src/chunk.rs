@@ -31,7 +31,7 @@ impl ChunkInbox {
     }
 }
 
-#[derive(Debug, Clone)]
+    #[derive(Debug, Clone)]
 pub struct Chunk {
     pub coord: i32,
     pub columns: [Column; CHUNK_W],
@@ -39,9 +39,9 @@ pub struct Chunk {
     pub inbox: ChunkInbox,
     pub halo_surface_y: [f32; 2],
     /// Elevation of the flowable-water surface at each cross-chunk
-    /// neighbour. Dry neighbours use the solid bed (`hydraulic_bed_y`),
-    /// not snow-top `surface_y` — so a snow bank cannot act as a dam
-    /// that freezes the shoreline into a vertical water wall.
+    /// neighbour. Dry neighbours fall back to `climate_elevation` (top
+    /// of the column material stripped of the fluid cap) so wet↔dry
+    /// gradients agree with `Column::flowable_water`.
     pub halo_water_top: [f32; 2],
     pub halo_water_table: [f32; 2],
     /// Optional scalar/vector fields (stage 6). `None` means the field
@@ -98,9 +98,11 @@ impl Chunk {
     }
 
     /// Elevation of the top of the flowable-water column at the given
-    /// local index (or halo). Dry neighbours fall back to the solid bed
-    /// (`hydraulic_bed_y`), not `surface_y` — a snow bank must not act
-    /// as a dam that freezes the shoreline into a vertical water wall.
+    /// local index (or halo). Dry neighbours fall back to
+    /// [`Column::climate_elevation`] — the top of the column material
+    /// stripped of the fluid cap. That's exactly where a hypothetical
+    /// puddle would sit, so wet↔dry gradients stay consistent with
+    /// [`Column::flowable_water`]'s free surface.
     pub fn water_top_neighbor(&self, local_x: i32) -> f32 {
         if local_x < 0 {
             self.halo_water_top[0]
@@ -110,7 +112,7 @@ impl Chunk {
             let col = &self.columns[local_x as usize];
             col.flowable_water()
                 .map(|(top, _)| top)
-                .unwrap_or_else(|| col.hydraulic_bed_y())
+                .unwrap_or_else(|| col.climate_elevation())
         }
     }
 
@@ -132,7 +134,7 @@ impl Chunk {
         let water_top_of = |col: &Column| {
             col.flowable_water()
                 .map(|(top, _)| top)
-                .unwrap_or_else(|| col.hydraulic_bed_y())
+                .unwrap_or_else(|| col.climate_elevation())
         };
         self.halo_surface_y[0] = left
             .map(|c| c.columns[CHUNK_W - 1].surface_y)

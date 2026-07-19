@@ -52,8 +52,6 @@ pub enum SubsystemId {
     DissolvedField = 17,
     /// Flux-driven limestone dissolution + void growth.
     Karst = 18,
-    /// Surface water capture into open voids + cave-river flow.
-    VoidWater = 19,
     /// Roof collapse over voids wider than `roof_span_max_m`.
     RoofCollapse = 20,
     /// Speleothem reprecipitation (dissolved → Limestone inside voids).
@@ -77,7 +75,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 25] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -197,13 +195,6 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
         // Slow vs hydrology; caves develop over many ticks.
         period: 6,
         phase: 4,
-    },
-    SubsystemSchedule {
-        id: SubsystemId::VoidWater,
-        // Every 2 ticks — cave fill/flow is slow vs surface hydrology, and
-        // cliff worldgen can leave thousands of dry cavities in the ring.
-        period: 2,
-        phase: 0,
     },
     SubsystemSchedule {
         id: SubsystemId::RoofCollapse,

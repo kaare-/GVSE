@@ -6,12 +6,11 @@ use crate::buffer::WorldTransferScratch;
 use crate::clock::{SimClock, SubsystemId, SUBSYSTEM_ORDER};
 use crate::subsystems::{
     run_activity, run_agents, run_dissolved_field, run_ecology, run_evaporation, run_gas,
-    recharge_deep_water_tables,
     run_groundwater_flow, run_groundwater_head_field, run_humidity_field, run_infiltration,
     run_karst, run_lake_level, run_layer_merge, run_phase_change, run_pressure_field,
     run_rain_inject, run_roof_collapse, run_sediment, run_slumping, run_speleogenesis,
-    run_surface_void_capture, run_surface_water, run_surface_waves, run_thermal_field,
-    run_void_moisture_seep, run_void_water_flow, run_weather, run_wind_field, SimParams,
+    run_surface_water, run_surface_waves, run_thermal_field, run_weather, run_wind_field,
+    SimParams,
 };
 
 pub struct Simulation {
@@ -96,7 +95,6 @@ impl Simulation {
                 | SubsystemId::GroundwaterHeadField
                 | SubsystemId::DissolvedField
                 | SubsystemId::Karst
-                | SubsystemId::VoidWater
                 | SubsystemId::RoofCollapse
                 | SubsystemId::Speleogenesis
                 | SubsystemId::Ecology
@@ -144,11 +142,6 @@ impl Simulation {
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Karst)) {
             run_karst(world, tick);
         }
-        if self.clock.is_due(SimClock::schedule_for(SubsystemId::VoidWater)) {
-            run_surface_void_capture(world);
-            run_void_moisture_seep(world);
-            run_void_water_flow(world);
-        }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::RoofCollapse)) {
             run_roof_collapse(world, tick);
         }
@@ -176,9 +169,6 @@ impl Simulation {
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Slumping)) {
             run_slumping(world, tick);
         }
-        // After slump reshuffles substrate, snap ocean/lake beds back to
-        // saturation while the free surface can still afford it.
-        recharge_deep_water_tables(world);
         // One audit refresh per tick keeps HUD / test bookkeeping fresh
         // without the ~9× per-tick full-ring walk the old shape had.
         world.recompute_mass_audit();

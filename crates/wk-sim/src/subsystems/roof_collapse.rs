@@ -145,11 +145,10 @@ pub fn run_roof_collapse(world: &mut World, tick: u64) {
         col.voids[vi].height_m -= dh;
         col.voids[vi].origin = VoidOrigin::Collapse;
         if col.voids[vi].height_m < 0.02 {
-            let water = col.voids[vi].water_mass;
+            // Voids are dry air pockets in this build — nothing to
+            // spill back onto the surface when a fully collapsed cavity
+            // is removed.
             col.voids.remove(vi);
-            if water > 0 {
-                col.deposit_to_top(MaterialId::Water, water, tick);
-            }
         }
         if taken > 0 {
             // Debris falls as LooseRock into the solid stack.

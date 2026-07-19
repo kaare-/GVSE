@@ -36,9 +36,9 @@ pub fn run_speleogenesis(world: &mut World, tick: u64) {
                     if v.height_m <= 0.05 {
                         continue;
                     }
-                    // Prefer damp voids (water present) or ventilated ones
-                    // (evaporation-driven precipitation).
-                    if v.water_mass <= 0 && v.light < 20 {
+                    // Voids are dry in this build — precipitation only
+                    // happens in ventilated cavities (evaporation-driven).
+                    if v.light < 20 {
                         continue;
                     }
                     let x_m = (base + i as i32) as f32 * SAMPLE_WIDTH_M;
