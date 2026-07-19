@@ -18,7 +18,9 @@
 //! - `C` — toggle condensation rain (feedback from humidity heatmap)
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
+//! - `G` — toggle coarse ecology (biomass grow/decay)
 //! - `H` — toggle humidity overlay
+//! - `B` — toggle biomass overlay
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
 //! - `Esc` — quit
@@ -28,9 +30,9 @@ mod scene;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_condensation_rain, apply_evaporation_into_humidity, apply_karst_dissolution, apply_rain,
-    humidity_diffuse_due, tick, CondensationConfig, EvapConfig, KarstConfig, RainConfig,
-    WorldgenParams,
+    apply_condensation_rain, apply_ecology, apply_evaporation_into_humidity,
+    apply_karst_dissolution, apply_rain, humidity_diffuse_due, tick, CondensationConfig,
+    EcologyConfig, EvapConfig, KarstConfig, RainConfig, WorldgenParams,
 };
 
 use crate::palette::cell_color;
@@ -87,11 +89,14 @@ async fn main() {
     let mut cond_rain_on = true;
     let mut evap_on = true;
     let mut karst_on = true;
+    let mut ecology_on = true;
     let mut humidity_overlay = false;
+    let mut biomass_overlay = false;
     // Fraction of pairwise humidity difference transferred per tick.
     // 0.15 gives a visible "clouds spread as they drift" feel
     // without going near the 0.25 stability cap.
     let humidity_diffusion_alpha: f32 = 0.15;
+    let ecology_cfg = EcologyConfig::default();
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
 
@@ -143,6 +148,12 @@ async fn main() {
         if is_key_pressed(KeyCode::H) {
             humidity_overlay = !humidity_overlay;
         }
+        if is_key_pressed(KeyCode::B) {
+            biomass_overlay = !biomass_overlay;
+        }
+        if is_key_pressed(KeyCode::G) {
+            ecology_on = !ecology_on;
+        }
         if is_key_pressed(KeyCode::C) {
             cond_rain_on = !cond_rain_on;
         }
@@ -192,6 +203,17 @@ async fn main() {
             // deposits every tick; only the spread step is throttled.
             if humidity_diffuse_due(scene.world.tick) {
                 scene.humidity.diffuse(humidity_diffusion_alpha);
+            }
+            if ecology_on {
+                apply_ecology(
+                    &scene.world,
+                    &mut scene.biomass,
+                    &ecology_cfg,
+                    0,
+                    scene.params.width_cols,
+                    scene.params.bedrock_floor_y,
+                    scene.params.sky_ceiling_y,
+                );
             }
         }
 
@@ -290,17 +312,51 @@ async fn main() {
             }
         }
 
+        // Biomass overlay: green tint on rooted surface cells.
+        if biomass_overlay {
+            let max_mass = scene
+                .biomass
+                .cells
+                .values()
+                .copied()
+                .fold(0.0f32, f32::max)
+                .max(1.0);
+            for (&(gx, gy), &mass) in &scene.biomass.cells {
+                if mass <= 0.0 {
+                    continue;
+                }
+                let alpha = humidity_overlay_alpha(mass, max_mass);
+                for &x_copy in x_copies {
+                    let sx = origin_x + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
+                    let sy = origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw || sy < 0.0 || sy - cell_px > sh {
+                        continue;
+                    }
+                    draw_rectangle(
+                        sx,
+                        sy - cell_px,
+                        cell_px,
+                        cell_px,
+                        Color::from_rgba(60, 180, 80, alpha),
+                    );
+                }
+            }
+        }
+
         // HUD.
         let hud = format!(
-            "tick={} seed={} rain={} cond={} evap={} karst={} hum={} humidity_mass={:.0} {}  |  Space pause | R reroll | W rain | C cond | E evap | K karst | H overlay | arrows pan | Esc quit",
+            "tick={} seed={} rain={} cond={} evap={} karst={} eco={} hum={} bio={} humidity={:.0} biomass={:.0} {}  |  Space|R|W/C/E/K/G|H/B overlay|arrows|Esc",
             scene.world.tick,
             scene.params.seed,
             if rain_on { "on" } else { "off" },
             if cond_rain_on { "on" } else { "off" },
             if evap_on { "on" } else { "off" },
             if karst_on { "on" } else { "off" },
+            if ecology_on { "on" } else { "off" },
             if humidity_overlay { "on" } else { "off" },
+            if biomass_overlay { "on" } else { "off" },
             scene.humidity.total_mass(),
+            scene.biomass.total_mass(),
             if paused { "[paused]" } else { "" }
         );
         draw_rectangle(0.0, sh - HUD_H, sw, HUD_H, Color::from_rgba(0, 0, 0, 200));

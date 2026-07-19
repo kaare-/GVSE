@@ -11,6 +11,7 @@
 pub mod active;
 pub mod cell;
 pub mod chunk;
+pub mod ecology;
 pub mod grid;
 pub mod heatmap;
 pub mod humidity;
@@ -24,6 +25,7 @@ pub use active::{
 pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{is_grain, water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
+pub use ecology::{apply_ecology, Biomass, EcologyConfig};
 pub use grid::World;
 pub use heatmap::Heatmap;
 pub use humidity::{

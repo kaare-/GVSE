@@ -3,7 +3,7 @@
 //! Isolation: only wk-voxel + wk-material dependencies. No column
 //! stack imports.
 
-use wk_voxel::{stamp_world, Humidity, World, WorldgenParams};
+use wk_voxel::{stamp_world, Biomass, Humidity, World, WorldgenParams};
 
 /// Humidity tile side (world cells per humidity sample). Coarse
 /// enough that a fair map fits comfortably in memory, fine enough
@@ -14,6 +14,7 @@ pub struct Scene {
     pub world: World,
     pub params: WorldgenParams,
     pub humidity: Humidity,
+    pub biomass: Biomass,
 }
 
 impl Scene {
@@ -35,6 +36,7 @@ impl Scene {
             world,
             params,
             humidity,
+            biomass: Biomass::new(),
         }
     }
 }
@@ -59,6 +61,7 @@ mod tests {
     fn scene_starts_with_empty_humidity() {
         let s = Scene::new(WorldgenParams::default());
         assert_eq!(s.humidity.total_mass(), 0.0);
+        assert_eq!(s.biomass.total_mass(), 0.0);
     }
 
     #[test]
