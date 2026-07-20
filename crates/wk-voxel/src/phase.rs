@@ -17,7 +17,9 @@
 //! Cold ice lids **thicken downward** one cell per tick (wet Air under
 //! Ice/Snow) so lakes do not stay liquid under a 1-px skin, and peak
 //! "ice castles" of trapped water freeze through instead of sitting at
-//! −20 °C forever. Full per-cell thermal fields come later.
+//! −20 °C forever. The lagged thermal field (`Temperature::step` with
+//! material heat capacity) softens climate snaps; organics will read
+//! the same field.
 //!
 //! Snow on cold ground is a **solid pack** on top of the material — it
 //! does not soak pores. Avalanche / scour physics come later.
@@ -56,6 +58,26 @@ pub struct PhaseConfig {
     /// replace an ice tower with a water tower). Beyond the cap, cold
     /// precip is held (not dumped as pore-soaking rain).
     pub max_ice_cells_per_column: u8,
+    /// Lateral search radius (columns) when seating new snow. Prefers
+    /// thinner packs so peaks don't monopolize every flake.
+    pub snow_spread_radius: i32,
+    /// Soft blanket depth: new snow prefers columns with Ice+Snow at or
+    /// below this before stacking taller spikes.
+    pub snow_blanket_depth: u8,
+    /// Master switch for the whole phase pass (`I` in the demo).
+    pub enabled: bool,
+    /// Convert standing water → Ice when cold.
+    pub enable_freeze: bool,
+    /// Melt exposed Ice/Snow when warm.
+    pub enable_thaw: bool,
+    /// Water-on-ice melt and snow-on-water slush.
+    pub enable_slush: bool,
+    /// Break Ice/Snow that has dry air underneath.
+    pub enable_break_unsupported: bool,
+    /// Cull Ice+Snow stacks taller than [`Self::max_ice_cells_per_column`].
+    pub enable_cull: bool,
+    /// Cold precip settles as Snow (when off, cold columns get liquid rain).
+    pub enable_snow_precip: bool,
     /// Only run when `world.tick % period_ticks == 0`.
     pub period_ticks: u64,
 }
@@ -71,6 +93,15 @@ impl Default for PhaseConfig {
             max_break_cells_per_column_per_tick: 2,
             min_budget_to_snow: 32.0,
             max_ice_cells_per_column: 12,
+            snow_spread_radius: 6,
+            snow_blanket_depth: 2,
+            enabled: true,
+            enable_freeze: true,
+            enable_thaw: true,
+            enable_slush: true,
+            enable_break_unsupported: true,
+            enable_cull: true,
+            enable_snow_precip: true,
             period_ticks: 1,
         }
     }
@@ -78,17 +109,30 @@ impl Default for PhaseConfig {
 
 /// Full phase pass: cull → break unsupported → water-on-ice / slush → thaw → freeze.
 pub fn apply_phase(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
+    if !cfg.enabled {
+        return;
+    }
     let period = cfg.period_ticks.max(1);
     if world.tick % period != 0 {
         return;
     }
     let columns = column_xs(world);
     for gx in columns {
-        cull_frozen_column(world, gx, cfg.max_ice_cells_per_column);
-        break_unsupported_frozen(world, gx, cfg);
-        water_on_ice_and_slush(world, gx, temp, cfg);
-        thaw_column(world, gx, temp, cfg);
-        freeze_column_surface(world, gx, temp, cfg);
+        if cfg.enable_cull {
+            cull_frozen_column(world, gx, cfg.max_ice_cells_per_column);
+        }
+        if cfg.enable_break_unsupported {
+            break_unsupported_frozen(world, gx, cfg);
+        }
+        if cfg.enable_slush {
+            water_on_ice_and_slush(world, gx, temp, cfg);
+        }
+        if cfg.enable_thaw {
+            thaw_column(world, gx, temp, cfg);
+        }
+        if cfg.enable_freeze {
+            freeze_column_surface(world, gx, temp, cfg);
+        }
     }
 }
 
@@ -216,17 +260,62 @@ pub fn deposit_precip_on_surface(
     };
     let sample_y = ground_sample_y(world, gx);
     let t_c = temp.at_cell(gx, sample_y);
-    if t_c > phase.freeze_point_c {
+    // Snow precip off → liquid even when cold (useful for A/B in settings).
+    if t_c > phase.freeze_point_c || !phase.enable_snow_precip {
         return deposit_water_on_surface(world, gx, start_y, budget);
     }
     // Cold path: solid snow pack only — never liquid permeation.
     if budget < phase.min_budget_to_snow {
         return 0.0;
     }
-    if frozen_count_in_column(world, gx) >= phase.max_ice_cells_per_column as usize {
-        return 0.0;
+    deposit_snow_spread(world, gx, start_y, temp, phase).unwrap_or(0.0)
+}
+
+/// Seat snow on the aim column or a colder neighbour with a thinner pack
+/// so cover spreads across the landscape instead of peak spikes.
+fn deposit_snow_spread(
+    world: &mut World,
+    gx: i32,
+    start_y: i32,
+    temp: &Temperature,
+    phase: &PhaseConfig,
+) -> Option<f32> {
+    let radius = phase.snow_spread_radius.max(0);
+    let blanket = phase.snow_blanket_depth as usize;
+    let hard = phase.max_ice_cells_per_column as usize;
+    let mut candidates: Vec<(i32, usize, i32)> = Vec::with_capacity((radius * 2 + 1) as usize);
+    for dx in -radius..=radius {
+        let cx = world.wrap_x(gx + dx);
+        let sample_y = ground_sample_y(world, cx);
+        if temp.at_cell(cx, sample_y) > phase.freeze_point_c {
+            continue;
+        }
+        let pack = frozen_count_in_column(world, cx);
+        if pack >= hard {
+            continue;
+        }
+        candidates.push((cx, pack, dx.abs()));
     }
-    deposit_snow_on_surface(world, gx, start_y).unwrap_or(0.0)
+    if candidates.is_empty() {
+        return None;
+    }
+    // Thinnest pack first, then closest to the aim column.
+    candidates.sort_by_key(|&(_, pack, dist)| (pack, dist));
+    for &(cx, pack, _) in &candidates {
+        if pack > blanket {
+            continue;
+        }
+        if let Some(consumed) = deposit_snow_on_surface(world, cx, start_y) {
+            return Some(consumed);
+        }
+    }
+    // Neighbours already blanketed — allow slow stack growth.
+    for &(cx, _, _) in &candidates {
+        if let Some(consumed) = deposit_snow_on_surface(world, cx, start_y) {
+            return Some(consumed);
+        }
+    }
+    None
 }
 
 fn rests_on_solid_or_pack(world: &World, gx: i32, gy: i32) -> bool {
@@ -870,6 +959,41 @@ mod tests {
             w.get_cell(2, 1).unwrap().sat.0,
             0,
             "peak sand must stay dry — no pore soak under a full snow pack"
+        );
+    }
+
+    #[test]
+    fn snow_prefers_bare_neighbour_over_tall_peak_pack() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Peak spike at x=3, bare sand at x=1 and x=5 within spread radius.
+        for x in 1..=5 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+        }
+        for y in 2..=6 {
+            w.set_cell(3, y, Cell::solid(MaterialId::Snow));
+        }
+        let temp = cold_temp(16, 16, -10.0);
+        let cfg = PhaseConfig {
+            snow_spread_radius: 3,
+            snow_blanket_depth: 2,
+            ..PhaseConfig::default()
+        };
+        let landed = deposit_precip_on_surface(&mut w, 3, 20, 64.0, Some(&temp), Some(&cfg));
+        assert!(landed > 0.0);
+        assert_eq!(
+            frozen_count_in_column(&w, 3),
+            5,
+            "peak pack must not grow while bare neighbours exist"
+        );
+        let left = w.get_cell(1, 2).map(|c| c.material) == Some(MaterialId::Snow);
+        let right = w.get_cell(5, 2).map(|c| c.material) == Some(MaterialId::Snow);
+        let mid_l = w.get_cell(2, 2).map(|c| c.material) == Some(MaterialId::Snow);
+        let mid_r = w.get_cell(4, 2).map(|c| c.material) == Some(MaterialId::Snow);
+        assert!(
+            left || right || mid_l || mid_r,
+            "snow must seat on a thinner neighbour column"
         );
     }
 

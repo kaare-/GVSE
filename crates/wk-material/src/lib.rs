@@ -127,6 +127,14 @@ impl MaterialId {
 /// `temp <= threshold_c`, converts into `below` (if Some). This is what
 /// unifies "snow melts into water", "water freezes into ice", "ice thaws
 /// into water" — one mechanism, three different property rows.
+fn default_heat_capacity() -> f32 {
+    1.0
+}
+
+fn default_albedo() -> f32 {
+    0.25
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct PhaseChange {
     pub threshold_c: f32,
@@ -168,6 +176,14 @@ pub struct MaterialProps {
     /// heat redistributes on a playable timescale while remaining
     /// stable at 0.5 m cells with a 10-tick field step.
     pub thermal_diffusivity: f32,
+    /// Relative volumetric heat capacity (rock ≈ 1). Water and organics
+    /// are high so landscape / ponds lag climate snaps; air is low.
+    /// Voxel `Temperature` uses this for thermal inertia (not every tick).
+    #[serde(default = "default_heat_capacity")]
+    pub heat_capacity: f32,
+    /// Broadband surface albedo 0..1. Snow/ice reflect solar; water is dark.
+    #[serde(default = "default_albedo")]
+    pub albedo: f32,
     /// 0–255 mineral solubility in flowing water. Limestone is non-zero;
     /// everything else is 0. Karst dissolution (`run_karst`) is driven by
     /// lateral water flux through soluble layers, not moisture-in-place.
@@ -249,6 +265,8 @@ impl MaterialRegistry {
                 render_alpha: 255,
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.001,
+                heat_capacity: 7.0,
+                albedo: 0.2,
                 solubility: 0,
                 roof_span_max_m: f32::INFINITY,
             },
@@ -263,6 +281,8 @@ impl MaterialRegistry {
                 // Effectively cliff-stable — bedded stone doesn't slump.
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.0012,
+                heat_capacity: 5.5,
+                albedo: 0.25,
                 solubility: 0,
                 roof_span_max_m: 15.0,
             },
@@ -282,6 +302,8 @@ impl MaterialRegistry {
                 // ~31° angle of repose over a 0.25 m column width.
                 repose_rise_m: 0.15,
                 thermal_diffusivity: 0.0018,
+                heat_capacity: 2.2,
+                albedo: 0.35,
                 solubility: 0,
                 roof_span_max_m: 0.0,
             },
@@ -297,6 +319,8 @@ impl MaterialRegistry {
                 // slope still gives way under load.
                 repose_rise_m: 0.25,
                 thermal_diffusivity: 0.0015,
+                heat_capacity: 3.0,
+                albedo: 0.3,
                 solubility: 0,
                 roof_span_max_m: 2.0,
             },
@@ -311,6 +335,8 @@ impl MaterialRegistry {
                 // ~40° — larger, more interlocking grains than sand.
                 repose_rise_m: 0.20,
                 thermal_diffusivity: 0.0018,
+                heat_capacity: 2.5,
+                albedo: 0.3,
                 solubility: 0,
                 roof_span_max_m: 0.5,
             },
@@ -326,6 +352,8 @@ impl MaterialRegistry {
                 // already reflects via the wet-erosion multiplier).
                 repose_rise_m: 0.22,
                 thermal_diffusivity: 0.0012,
+                heat_capacity: 3.5,
+                albedo: 0.22,
                 solubility: 0,
                 roof_span_max_m: 0.0,
             },
@@ -341,6 +369,8 @@ impl MaterialRegistry {
                 render_alpha: 255,
                 repose_rise_m: 0.10,
                 thermal_diffusivity: 0.002,
+                heat_capacity: 3.5,
+                albedo: 0.18,
                 solubility: 0,
                 roof_span_max_m: 0.0,
             },
@@ -364,6 +394,8 @@ impl MaterialRegistry {
                 // spreading. Marked infinite so run_slumping ignores.
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.0015,
+                heat_capacity: 10.0,
+                albedo: 0.08,
                 solubility: 0,
                 roof_span_max_m: 0.0,
             },
@@ -377,6 +409,8 @@ impl MaterialRegistry {
                 render_alpha: 0,
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.004,
+                heat_capacity: 0.25,
+                albedo: 0.0,
                 solubility: 0,
                 roof_span_max_m: 0.0,
             },
@@ -395,6 +429,8 @@ impl MaterialRegistry {
                 // Snow slides easily on steeper slopes (avalanches).
                 repose_rise_m: 0.12,
                 thermal_diffusivity: 0.001,
+                heat_capacity: 2.0,
+                albedo: 0.75,
                 solubility: 0,
                 roof_span_max_m: 0.0,
             },
@@ -414,6 +450,8 @@ impl MaterialRegistry {
                 // the sim's tick scale it's effectively rigid.
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.001,
+                heat_capacity: 5.0,
+                albedo: 0.55,
                 solubility: 0,
                 roof_span_max_m: 0.0,
             },
@@ -429,6 +467,8 @@ impl MaterialRegistry {
                 render_alpha: 255,
                 repose_rise_m: f32::INFINITY,
                 thermal_diffusivity: 0.0011,
+                heat_capacity: 5.0,
+                albedo: 0.28,
                 solubility: 40,
                 roof_span_max_m: 10.0,
             },

@@ -155,7 +155,67 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Night cool / step", 0.0..1.5, &mut self.temp.night_cool_c);
                     labeled_slider(ui, hash!(), "Cloud shade", 0.0..1.0, &mut self.temp.cloud_shade);
                     labeled_slider(ui, hash!(), "Sea bias (C)", -10.0..5.0, &mut self.temp.sea_bias_c);
-                    ui.label(None, "Phase (I): freeze / thaw / settle water under ice.");
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Sky relax / step",
+                        0.0..0.5,
+                        &mut self.temp.sky_relax,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Inertia scale",
+                        0.0..4.0,
+                        &mut self.temp.inertia_scale,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Water stack capacity bonus",
+                        0.0..4.0,
+                        &mut self.temp.water_stack_cap,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Geothermal surface (C)",
+                        -5.0..25.0,
+                        &mut self.temp.geothermal_surface_c,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Geothermal gradient (C/cell)",
+                        0.0..1.0,
+                        &mut self.temp.geothermal_gradient_c_per_cell,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Geothermal flux / step",
+                        0.0..0.3,
+                        &mut self.temp.geothermal_flux_c,
+                    );
+                });
+                ui.separator();
+
+                ui.tree_node(hash!(), "Ice / snow / slush", |ui| {
+                    ui.checkbox(hash!(), "Phase enabled (I)", &mut self.phase.enabled);
+                    ui.checkbox(hash!(), "Freeze standing water", &mut self.phase.enable_freeze);
+                    ui.checkbox(hash!(), "Thaw ice / snow", &mut self.phase.enable_thaw);
+                    ui.checkbox(hash!(), "Slush (water↔snow/ice)", &mut self.phase.enable_slush);
+                    ui.checkbox(
+                        hash!(),
+                        "Break unsupported ice",
+                        &mut self.phase.enable_break_unsupported,
+                    );
+                    ui.checkbox(hash!(), "Cull tall ice/snow stacks", &mut self.phase.enable_cull);
+                    ui.checkbox(
+                        hash!(),
+                        "Snow precip (else rain when cold)",
+                        &mut self.phase.enable_snow_precip,
+                    );
                     labeled_slider(
                         ui,
                         hash!(),
@@ -165,14 +225,74 @@ impl SimSettings {
                     );
                     let mut min_freeze = self.phase.min_sat_to_freeze as f32;
                     let mut max_ice = self.phase.max_ice_cells_per_column as f32;
+                    let mut max_freeze = self.phase.max_freeze_cells_per_column_per_tick as f32;
                     let mut max_thaw = self.phase.max_thaw_cells_per_column_per_tick as f32;
+                    let mut max_slush = self.phase.max_slush_cells_per_column_per_tick as f32;
+                    let mut max_break = self.phase.max_break_cells_per_column_per_tick as f32;
+                    let mut spread = self.phase.snow_spread_radius as f32;
+                    let mut blanket = self.phase.snow_blanket_depth as f32;
+                    let mut period = self.phase.period_ticks as f32;
                     labeled_slider(ui, hash!(), "Min sat to freeze", 1.0..255.0, &mut min_freeze);
-                    labeled_slider(ui, hash!(), "Max ice cells / column", 1.0..32.0, &mut max_ice);
-                    labeled_slider(ui, hash!(), "Max thaw cells / col / tick", 1.0..8.0, &mut max_thaw);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Max ice+snow cells / column",
+                        1.0..48.0,
+                        &mut max_ice,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Freeze cells / col / tick",
+                        1.0..8.0,
+                        &mut max_freeze,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Thaw cells / col / tick",
+                        1.0..8.0,
+                        &mut max_thaw,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Slush cells / col / tick",
+                        1.0..8.0,
+                        &mut max_slush,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Break cells / col / tick",
+                        1.0..8.0,
+                        &mut max_break,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Min precip budget to snow",
+                        1.0..255.0,
+                        &mut self.phase.min_budget_to_snow,
+                    );
+                    labeled_slider(ui, hash!(), "Snow spread radius (cols)", 0.0..24.0, &mut spread);
+                    labeled_slider(ui, hash!(), "Snow blanket prefer depth", 0.0..12.0, &mut blanket);
+                    labeled_slider(ui, hash!(), "Phase period (ticks)", 1.0..60.0, &mut period);
                     self.phase.min_sat_to_freeze = min_freeze.round().clamp(1.0, 255.0) as u8;
-                    self.phase.max_ice_cells_per_column = max_ice.round().clamp(1.0, 32.0) as u8;
+                    self.phase.max_ice_cells_per_column = max_ice.round().clamp(1.0, 64.0) as u8;
+                    self.phase.max_freeze_cells_per_column_per_tick =
+                        max_freeze.round().clamp(1.0, 16.0) as u8;
                     self.phase.max_thaw_cells_per_column_per_tick =
-                        max_thaw.round().clamp(1.0, 8.0) as u8;
+                        max_thaw.round().clamp(1.0, 16.0) as u8;
+                    self.phase.max_slush_cells_per_column_per_tick =
+                        max_slush.round().clamp(1.0, 16.0) as u8;
+                    self.phase.max_break_cells_per_column_per_tick =
+                        max_break.round().clamp(1.0, 16.0) as u8;
+                    self.phase.snow_spread_radius = spread.round().clamp(0.0, 48.0) as i32;
+                    self.phase.snow_blanket_depth = blanket.round().clamp(0.0, 32.0) as u8;
+                    self.phase.period_ticks = period.round().clamp(1.0, 120.0) as u64;
+                    self.phase.min_budget_to_snow =
+                        self.phase.min_budget_to_snow.clamp(1.0, 255.0);
                 });
                 ui.separator();
 

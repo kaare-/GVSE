@@ -435,14 +435,22 @@ impl CloudStore {
 
             let drain = (cfg.downpour_drain * oro).min(p.mass);
             let radius = p.radius();
-            let cols = ((radius * 1.25) as i32).clamp(2, 10);
+            // Wider footprint when snowing so flakes seed slopes, not only
+            // the ridge column under the parcel centre.
+            let snowing = temp.is_some() && phase.is_some();
+            let cols = if snowing {
+                ((radius * 2.2) as i32).clamp(4, 18)
+            } else {
+                ((radius * 1.25) as i32).clamp(2, 10)
+            };
             let mut remaining = drain;
             // Fractional column shares are << one Snow cell (255). Cold
-            // peaks must retry a full cell from parcel mass — never soak.
+            // columns retry a full cell from parcel mass — never soak.
             let snow_cell = phase
                 .map(|ph| ph.min_budget_to_snow.max(u8::MAX as f32))
                 .unwrap_or(0.0);
             let mut snow_cells_this_tick = 0u8;
+            let snow_cell_cap = if snowing { 5 } else { 2 };
             for k in 0..cols {
                 if remaining <= 0.0 || p.mass <= 0.0 {
                     break;
@@ -452,7 +460,8 @@ impl CloudStore {
                 } else {
                     k as f32 / (cols - 1) as f32 * 2.0 - 1.0
                 };
-                let gx = world.wrap_x((p.fx + t * radius * 0.85).round() as i32);
+                let span = if snowing { radius * 1.35 } else { radius * 0.85 };
+                let gx = world.wrap_x((p.fx + t * span).round() as i32);
                 let share = (drain / cols as f32) * (1.15 - 0.3 * t.abs());
                 let mut dropped = deposit_rain_column(
                     world,
@@ -466,7 +475,7 @@ impl CloudStore {
                 );
                 if dropped <= 0.0
                     && snow_cell > 0.0
-                    && snow_cells_this_tick < 2
+                    && snow_cells_this_tick < snow_cell_cap
                     && p.mass >= snow_cell
                 {
                     dropped = deposit_rain_column(
@@ -508,24 +517,27 @@ fn surface_y(wind: &Wind, fx: f32) -> f32 {
     ) as f32
 }
 
-/// Rock surface vs occupied column top (ice / snow / standing water).
-/// Clouds and precip visuals use this so they clear lake lids and peak ice.
+/// Occupied column top (rock / ice / snow / standing water) for cloud
+/// collision and precip drawing — top-down so streaks stop on the true
+/// surface instead of punching through slopes.
 pub fn cloud_floor_y(world: &World, wind: &Wind, fx: f32) -> f32 {
     let rock = surface_y(wind, fx);
     let gx = world.wrap_x(fx.round() as i32);
     let rock_i = rock as i32;
-    let mut top = rock_i;
-    // Scan up through continuous stack; stop at the first empty Air gap.
-    let scan_hi = rock_i + 48;
-    for y in (rock_i + 1)..=scan_hi {
+    let y_hi = rock_i + 64;
+    let y_lo = rock_i - 12;
+    for y in (y_lo..=y_hi).rev() {
         match world.get_cell(gx, y) {
-            Some(c) if c.material != MaterialId::Air => top = y,
-            Some(c) if !c.sat.is_empty() => top = y,
-            Some(_) => break,
-            None => break,
+            Some(c) if c.material != MaterialId::Air => {
+                return (y as f32).max(rock);
+            }
+            Some(c) if !c.sat.is_empty() => {
+                return (y as f32).max(rock);
+            }
+            _ => {}
         }
     }
-    (top as f32).max(rock)
+    rock
 }
 
 fn preferred_deck(sea_level_y: i32, sky_ceiling_y: i32, cfg: &CloudConfig) -> f32 {

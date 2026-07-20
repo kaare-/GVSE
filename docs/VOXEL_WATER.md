@@ -95,12 +95,16 @@ Demo toggle: **`I`**.
 
 Pass order per column: **cull → break unsupported → water-on-ice/slush → thaw → freeze**.
 
-- Uses the existing coarse `Temperature` field (not a per-cell heat sim).
+- Uses the coarse **thermal field** (`Temperature`, 4×4 tiles, step every
+  20 ticks). **Air** tracks climate day/night; **surface** water/rock use
+  high heat capacity (lakes barely cool over a night); **buried** bedrock
+  ignores night air, eases toward a geothermal profile, and slowly leaks
+  heat upward by diffusion. Snow albedo still shades solar.
 - **Freeze:** standing free-surface wet Air (`sat ≥ min_sat_to_freeze`) when
   `temp ≤ freeze_point_c` → whole `Ice` cell (lake skin). **Cold lids then
   thicken downward** one cell / tick into wet Air under Ice/Snow so deep
   ponds and peak “ice castles” freeze through instead of sitting liquid at
-  −20 °C under a 1-px skin. Full per-cell heat capacity / albedo is later.
+  −20 °C under a 1-px skin.
 - **Thaw:** top-of-stack Ice/Snow when `temp > freeze_point_c` → `Air+FULL`.
 - **Rain on ice:** stays as a water film on top (no density-swap under the
   sheet — that lofted ice into the rain). Melts the ice when warm, or when
@@ -117,6 +121,10 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   films become Snow). **Never** falls back to liquid on cold columns —
   that used to soak mountain-top sand pores when the pack hit the cap or
   cloud shares were fractional. Short budget / full cap → hold mass (`0`).
+- **Snow spread:** new flakes search ±`snow_spread_radius` columns and
+  prefer packs ≤ `snow_blanket_depth` so cover blankets cold slopes
+  before growing peak spikes. Cloud downpour uses a wider footprint when
+  cold. Later: real drift / avalanche physics.
 - **Snow pack (now):** static solid lid. No pore soak, no grain fall.
   Later: avalanche / settle physics, and ice/snow scour of sand & loose rock.
 - **Slush:** Snow on water — warm melts snow; cold freezes the water film
