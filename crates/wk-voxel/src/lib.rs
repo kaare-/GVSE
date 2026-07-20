@@ -19,6 +19,7 @@ pub mod heatmap;
 pub mod humidity;
 pub mod organism;
 pub mod parallel;
+pub mod phase;
 pub mod rules;
 pub mod temperature;
 pub mod wind;
@@ -43,6 +44,7 @@ pub use heatmap::Heatmap;
 pub use humidity::{
     humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,
 };
+pub use phase::{apply_freeze, PhaseConfig};
 pub use rules::{
     apply_condensation_rain, apply_condensation_rain_with_orographic, apply_evaporation,
     apply_evaporation_into_humidity, apply_grain_fall, apply_gravity_fall,

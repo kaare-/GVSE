@@ -7,7 +7,7 @@ use macroquad::ui::{hash, root_ui, widgets};
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
     ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, KarstConfig, OrographicConfig,
-    RainConfig, TempConfig, WorldgenParams,
+    PhaseConfig, RainConfig, TempConfig, WorldgenParams,
 };
 
 /// All live-tunable knobs for the voxel demo.
@@ -22,6 +22,7 @@ pub struct SimSettings {
     pub cloud: CloudConfig,
     pub climate: ClimateConfig,
     pub temp: TempConfig,
+    pub phase: PhaseConfig,
     pub wind_vx: f32,
     pub humidity_diffusion_alpha: f32,
     /// Scratch f32s for material sliders (synced → MaterialRegistry overrides).
@@ -75,6 +76,7 @@ impl SimSettings {
             cloud: CloudConfig::default(),
             climate: ClimateConfig::default(),
             temp: TempConfig::default(),
+            phase: PhaseConfig::default(),
             wind_vx: 0.05,
             humidity_diffusion_alpha: 0.15,
             mat_perm,
@@ -153,6 +155,20 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Night cool / step", 0.0..1.5, &mut self.temp.night_cool_c);
                     labeled_slider(ui, hash!(), "Cloud shade", 0.0..1.0, &mut self.temp.cloud_shade);
                     labeled_slider(ui, hash!(), "Sea bias (C)", -10.0..5.0, &mut self.temp.sea_bias_c);
+                    ui.label(None, "Freeze (I): standing water → ice at/below freeze point.");
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Freeze point (C)",
+                        -10.0..5.0,
+                        &mut self.phase.freeze_point_c,
+                    );
+                    let mut min_freeze = self.phase.min_sat_to_freeze as f32;
+                    let mut max_ice = self.phase.max_ice_cells_per_column as f32;
+                    labeled_slider(ui, hash!(), "Min sat to freeze", 1.0..255.0, &mut min_freeze);
+                    labeled_slider(ui, hash!(), "Max ice cells / column", 1.0..32.0, &mut max_ice);
+                    self.phase.min_sat_to_freeze = min_freeze.round().clamp(1.0, 255.0) as u8;
+                    self.phase.max_ice_cells_per_column = max_ice.round().clamp(1.0, 32.0) as u8;
                 });
                 ui.separator();
 

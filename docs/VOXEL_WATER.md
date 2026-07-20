@@ -88,6 +88,20 @@ Tab → **Material permeability / porosity** overrides these at runtime (`Materi
 - `stamped_lake_bed_pores_wet_under_water`
 - Shore / cascade suite (`impermeable_shore_*`, `continuous_rain_on_*`)
 
+## Ice / freeze (milestone 1)
+
+Module: `wk-voxel::phase` (`apply_freeze`). Demo toggle: **`I`**.
+
+- Uses the existing coarse `Temperature` field (not a per-cell heat sim).
+- Freezes **standing free-surface** wet Air (`sat ≥ min_sat_to_freeze`) when
+  `temp ≤ freeze_point_c` into a whole `Ice` cell (sat cleared).
+- **1 cell / column / tick** — no flash-freeze of deep lakes.
+- **Max Ice+Snow cells / column** — excess culled to empty Air (not melted).
+- Refuses water-on-ice (column ice-pump). Thaw, sheet thickening, snow, and
+  slush are follow-ups.
+
+Cold snap in the demo: Tab → lower **Base temp** below 0°C (and/or freeze point).
+
 ## Related docs
 
 - [`VOXEL_MIGRATION.md`](VOXEL_MIGRATION.md) — isolation, dirty rects, historical spill vocabulary
