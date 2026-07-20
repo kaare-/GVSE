@@ -382,7 +382,7 @@ fn accumulate_water_flow_xfers(
                             }
                         }
                         if equalise.is_none()
-                            && (mid.sat.0 as i32) + 4 < (cur.sat.0 as i32)
+                            && (mid.sat.0 as i32) < (cur.sat.0 as i32)
                         {
                             equalise = Some((
                                 nx,
@@ -413,42 +413,54 @@ fn accumulate_water_flow_xfers(
                 }
 
                 // --- Priority 3: throughflow through saturated porous ---
-                let Some(below1) = world.get_cell(gx, gy - 1) else {
-                    continue;
-                };
-                if !is_porous_solid(below1.material) {
-                    continue;
-                }
-                let cap1 = water_capacity(below1.material);
-                if below1.sat.0 < cap1 {
-                    continue; // seepage / gravity handles unsaturated
-                }
-                let mut ty = gy - 2;
-                let mut rate = seepage_rate(below1.material);
-                let mut target: Option<i32> = None;
-                for _ in 0..2 {
-                    let Some(nb) = world.get_cell(gx, ty) else {
+                // Try straight down AND diagonal-down: on a monotonic
+                // sand slope, straight-down is always sand-saturated with
+                // no Air below within the column, but the diagonal
+                // opens into the next lower shelf.
+                let mut placed_throughflow = false;
+                for dx in [0_i32, -1, 1] {
+                    if placed_throughflow {
                         break;
+                    }
+                    let nx = world.wrap_x(gx + dx);
+                    let Some(below1) = world.get_cell(nx, gy - 1) else {
+                        continue;
                     };
-                    if nb.material == MaterialId::Air {
-                        if u8::MAX.saturating_sub(nb.sat.0) > 0 {
-                            target = Some(ty);
+                    if !is_porous_solid(below1.material) {
+                        continue;
+                    }
+                    let cap1 = water_capacity(below1.material);
+                    if below1.sat.0 < cap1 {
+                        continue; // seepage / gravity handles unsaturated
+                    }
+                    let mut ty = gy - 2;
+                    let mut rate = seepage_rate(below1.material);
+                    let mut target: Option<i32> = None;
+                    for _ in 0..3 {
+                        let Some(nb) = world.get_cell(nx, ty) else {
+                            break;
+                        };
+                        if nb.material == MaterialId::Air {
+                            if u8::MAX.saturating_sub(nb.sat.0) > 0 {
+                                target = Some(ty);
+                            }
+                            break;
                         }
-                        break;
+                        if !is_porous_solid(nb.material) {
+                            break;
+                        }
+                        let cap = water_capacity(nb.material);
+                        if nb.sat.0 < cap {
+                            break;
+                        }
+                        rate = rate.min(seepage_rate(nb.material));
+                        ty -= 1;
                     }
-                    if !is_porous_solid(nb.material) {
-                        break;
+                    if let Some(ny) = target {
+                        let amt = rate.min(remaining).max(1);
+                        local.push(((gx, gy), (nx, ny), amt));
+                        placed_throughflow = true;
                     }
-                    let cap = water_capacity(nb.material);
-                    if nb.sat.0 < cap {
-                        break;
-                    }
-                    rate = rate.min(seepage_rate(nb.material));
-                    ty -= 1;
-                }
-                if let Some(ny) = target {
-                    let amt = rate.min(remaining).max(1);
-                    local.push(((gx, gy), (gx, ny), amt));
                 }
             }
         }
@@ -2143,6 +2155,72 @@ mod tests {
     // full tick; any new write (rain, cloud downpour, editor spawn)
     // rebuilds the dirty rect and re-wakes flow. The artificial
     // clear-then-idle case is intentionally not supported.
+
+    #[test]
+    fn beach_slope_rain_does_not_perch_on_shelves() {
+        // A monotonic sand slope descending to open Air on the left.
+        // Rain deposits water at every column. Every wet cell has sand
+        // below and diagonal-down sand — old flow trapped water as
+        // staircase perched pools. Diagonal throughflow lets it seep
+        // down the slope until it reaches open Air / ocean.
+        let mut w = World::new(31);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..30 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        // Slope rises 1 cell per column from x=8..=22 (crest at 22, y=15).
+        // Left of x=8 is open Air over bedrock (the "sea").
+        for x in 8..=22 {
+            let top = x - 7; // 1..=15
+            for y in 1..=top {
+                w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+            }
+        }
+        for x in 23..30 {
+            for y in 1..=15 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+            }
+        }
+        // Saturate all sand so throughflow is the only drain path.
+        let cap_sand = crate::cell::water_capacity(MaterialId::Sand);
+        for x in 8..30 {
+            for y in 1..=15 {
+                if let Some(c) = w.get_cell(x, y) {
+                    if c.material == MaterialId::Sand {
+                        w.set_cell(x, y, Cell { sat: Sat(cap_sand), ..c });
+                    }
+                }
+            }
+        }
+        // Rain deposit: full sat on every shelf surface cell along the slope.
+        for x in 8..=22 {
+            let top = x - 7;
+            w.set_cell(x, top + 1, Cell::water());
+        }
+        for _ in 0..80 {
+            tick(&mut w);
+        }
+        // Water on the slope should be nearly gone.
+        let mut perched = 0;
+        for x in 8..=22 {
+            for y in 1..=15 {
+                let Some(c) = w.get_cell(x, y) else { continue };
+                if c.material == MaterialId::Air && c.sat.0 >= 128 {
+                    perched += 1;
+                }
+            }
+        }
+        // Sea pool at x=0..=7, y=1..=3 should have caught the drained mass.
+        let sea: i32 = (0..=7)
+            .flat_map(|x| (1..=3).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+            .sum();
+        assert!(
+            perched <= 3,
+            "slope should drain (perched={perched}, sea_sat={sea})"
+        );
+        assert!(sea > 500, "sea should catch drainage (sea_sat={sea})");
+    }
 
     #[test]
     fn tick_drains_hill_mound_instead_of_stalling() {
