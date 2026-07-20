@@ -484,7 +484,7 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Min wet neighbour sat", 1.0..255.0, &mut min_sat);
                 });
                 ui.separator();
-                ui.label(None, "Tip: Tab closes · F2 creature editor · F1 tools");
+                ui.label(None, "Tip: Tab closes · F2 creature editor · F1 hide HUD");
             });
 
         self.karst.min_wet_neighbour_sat = min_sat.round().clamp(1.0, 255.0) as u8;
