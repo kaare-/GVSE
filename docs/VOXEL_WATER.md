@@ -125,15 +125,15 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   high heat capacity (lakes barely cool over a night); **buried** bedrock
   ignores night air, eases toward a geothermal profile, and slowly leaks
   heat upward by diffusion. Snow albedo still shades solar.
-- **Freeze:** standing free-surface wet Air (`sat ≥ min_sat_to_freeze`) when
-  `temp ≤ freeze_point_c` → whole `Ice` cell (lake skin). **Cold lids then
-  thicken downward** one cell / tick into wet Air under Ice/Snow so deep
-  ponds and peak “ice castles” freeze through instead of sitting liquid at
-  −20 °C under a 1-px skin.
+- **Freeze:** standing free-surface wet Air (`sat ≥ min_sat_to_freeze`,
+  default **255** / full cell) when `temp ≤ freeze_point_c` → whole `Ice`
+  cell (lake skin). Partial films must not freeze — thaw always yields a
+  full water cell, so freezing mist would mint mass. **Cold lids then
+  thicken downward** one cell / tick into **full** wet Air under Ice/Snow.
 - **Thaw:** top-of-stack Ice/Snow when `temp > freeze_point_c` → `Air+FULL`.
 - **Rain on ice:** stays as a water film on top (no density-swap under the
-  sheet — that lofted ice into the rain). Melts the ice when warm, or when
-  a full water cell has ponded (enough rain).
+  sheet — that lofted ice into the rain). Melts the ice when **warm** only
+  (cold ponded rain no longer melts sheets — that churned ice towers).
 - **Ice lid × evaporation:** intentional. Evap only runs on wet Air with
   **Air** above it (`dry_above_max`). An Ice/Snow sheet blocks that, so a
   capped lake loses far less mass and the humidity pump dries out — a

@@ -1065,7 +1065,8 @@ fn apply_repose_pass(
 /// Underwater, sliding into empty / film Air used to leave that pale
 /// low-sat cell on the slope face for a frame (sky / film flash) until
 /// flow refilled it. Dense grains collapse those bubbles: soak seat sat
-/// into pores and fill the vacated cell with standing water.
+/// into pores and **steal** standing water from a neighbour into the
+/// vacated cell — never mint a fresh full water cell.
 fn write_repose_swap(
     ptrs: &parallel::ChunkPtrMap,
     wrap_width: Option<i32>,
@@ -1085,16 +1086,64 @@ fn write_repose_swap(
         let into_pore = dest.sat.0.min(room);
         let mut placed = src;
         placed.sat = Sat(src.sat.0.saturating_add(into_pore));
-        unsafe {
-            parallel::set_cell(ptrs, wrap_width, dest_x, dest_y, placed);
-            parallel::set_cell(ptrs, wrap_width, src_x, src_y, Cell::water());
+        if let Some(fill) =
+            steal_standing_water_neighbor(ptrs, wrap_width, src_x, src_y, dest_x, dest_y)
+        {
+            unsafe {
+                parallel::set_cell(ptrs, wrap_width, dest_x, dest_y, placed);
+                parallel::set_cell(ptrs, wrap_width, src_x, src_y, fill);
+            }
+            return;
         }
-        return;
+        // No neighbour water to steal — keep the bubble (swap) rather than mint.
     }
     unsafe {
         parallel::set_cell(ptrs, wrap_width, dest_x, dest_y, src);
         parallel::set_cell(ptrs, wrap_width, src_x, src_y, dest);
     }
+}
+
+/// Move standing water from an adjacent Air cell into a fill cell.
+/// Prefer full cells; leaves the donor empty. Skips `dest` (the seat).
+fn steal_standing_water_neighbor(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    src_x: i32,
+    src_y: i32,
+    dest_x: i32,
+    dest_y: i32,
+) -> Option<Cell> {
+    let mut best: Option<(i32, i32, u8)> = None;
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, 1), (1, 1)] {
+        let nx = src_x + dx;
+        let ny = src_y + dy;
+        if nx == dest_x && ny == dest_y {
+            continue;
+        }
+        let Some(n) = (unsafe { parallel::get_cell(ptrs, wrap_width, nx, ny) }) else {
+            continue;
+        };
+        if n.material != MaterialId::Air || n.sat.0 < 200 {
+            continue;
+        }
+        let better = match best {
+            None => true,
+            Some((_, _, sat)) => n.sat.0 > sat,
+        };
+        if better {
+            best = Some((nx, ny, n.sat.0));
+        }
+    }
+    let (nx, ny, sat) = best?;
+    unsafe {
+        parallel::set_cell(ptrs, wrap_width, nx, ny, Cell::air());
+    }
+    Some(Cell {
+        material: MaterialId::Air,
+        sat: Sat(sat),
+        flags: CellFlags::empty(),
+        _pad: 0,
+    })
 }
 
 fn air_has_standing_water_neighbor(
@@ -2945,6 +2994,11 @@ mod tests {
         w.set_cell(5, 2, Cell::solid(MaterialId::Sand));
         // Empty bubble seat diagonal-down from the sand.
         w.set_cell(4, 1, Cell::air());
+        let sat_before: u32 = (0..16)
+            .flat_map(|x| (0..8).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y))
+            .map(|c| c.sat.0 as u32)
+            .sum();
         apply_grain_repose(&mut w);
         assert_eq!(
             w.get_cell(4, 1).unwrap().material,
@@ -2957,6 +3011,15 @@ mod tests {
             vacated.sat.0 >= 200,
             "vacated underwater cell must be standing water, not dry/film air (sat={})",
             vacated.sat.0
+        );
+        let sat_after: u32 = (0..16)
+            .flat_map(|x| (0..8).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y))
+            .map(|c| c.sat.0 as u32)
+            .sum();
+        assert_eq!(
+            sat_after, sat_before,
+            "underwater repose must steal neighbour water, not mint sat"
         );
     }
 

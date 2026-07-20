@@ -247,7 +247,13 @@ impl SimSettings {
                     let mut spread = self.phase.snow_spread_radius as f32;
                     let mut blanket = self.phase.snow_blanket_depth as f32;
                     let mut period = self.phase.period_ticks as f32;
-                    labeled_slider(ui, hash!(), "Min sat to freeze", 1.0..255.0, &mut min_freeze);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Min sat to freeze (255=full only)",
+                        1.0..255.0,
+                        &mut min_freeze,
+                    );
                     labeled_slider(
                         ui,
                         hash!(),
