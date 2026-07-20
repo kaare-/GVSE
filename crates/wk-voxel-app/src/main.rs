@@ -23,10 +23,10 @@
 //! - `N` — toggle cloud drawing (coagulated parcels; darker = wetter)
 //! - `T` — toggle temperature heatmap overlay
 //! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
-//! - `F1` — toggle the bottom tool / hotkey line
+//! - `F1` — toggle HUD chrome (bottom info/tools + block inspector)
 //! - `F2` — creature editor (Set A MS-Paint; `C` stays condensation here)
 //! - `Tab` — live settings (materials, wind, clouds, day/night, temp, …)
-//! - click — block / organism inspector
+//! - click — block / organism inspector (hidden while F1 HUD is off)
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
 //! - `Esc` — quit (or cancel spawn / close editor / close settings)
@@ -69,15 +69,15 @@ fn window_conf() -> Conf {
 /// change this to zoom.
 const PX_PER_CELL: f32 = 3.0;
 /// Info strip height (tick / fps / toggles). Tool line adds another
-/// band when `F1` shows hotkeys.
+/// band. Both are omitted when `F1` hides HUD chrome.
 const INFO_H: f32 = 24.0;
 const TOOL_H: f32 = 20.0;
 
-fn hud_height(show_tool_line: bool) -> f32 {
-    if show_tool_line {
+fn hud_height(show_hud: bool) -> f32 {
+    if show_hud {
         INFO_H + TOOL_H
     } else {
-        INFO_H
+        0.0
     }
 }
 
@@ -407,7 +407,7 @@ async fn main() {
     let mut humidity_overlay = false;
     let mut clouds_on = true;
     let mut temp_overlay = false;
-    let mut show_tool_line = true;
+    let mut show_hud = true;
     let mut editor = CreatureEditor::default();
     let mut inspect: Option<(i32, i32)> = None;
     let mut cam_x = 0.0f32;
@@ -430,7 +430,7 @@ async fn main() {
             }
         }
         if is_key_pressed(KeyCode::F1) {
-            show_tool_line = !show_tool_line;
+            show_hud = !show_hud;
         }
         if is_key_pressed(KeyCode::Tab) && !editor.open {
             settings.open = !settings.open;
@@ -614,7 +614,7 @@ async fn main() {
         let sh = screen_height();
         draw_sky(scene.world.tick, sw, sh, &settings.climate);
         let cell_px = PX_PER_CELL;
-        let hud_h = hud_height(show_tool_line);
+        let hud_h = hud_height(show_hud);
         // Convert screen space to world cell range, centred on the
         // world extent minus the camera offset.
         let world_w_px = scene.params.width_cols as f32 * cell_px;
@@ -834,54 +834,56 @@ async fn main() {
         }
 
         if let Some((gx, gy)) = inspect {
-            draw_selection_outline(
-                gx,
-                gy,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.width_cols,
-                scene.params.wrap_x,
-                sw,
-                sh,
-            );
-            let cell = scene.world.get_cell(gx, gy);
-            let org = scene
-                .organisms
-                .pick_at(gx, gy)
-                .map(|id| (id, &scene.organisms.atoms[id]));
-            draw_block_inspector(gx, gy, cell, &scene.humidity, &scene.temperature, org, sw);
+            if show_hud {
+                draw_selection_outline(
+                    gx,
+                    gy,
+                    origin_x,
+                    origin_y,
+                    cell_px,
+                    scene.params.bedrock_floor_y,
+                    scene.params.width_cols,
+                    scene.params.wrap_x,
+                    sw,
+                    sh,
+                );
+                let cell = scene.world.get_cell(gx, gy);
+                let org = scene
+                    .organisms
+                    .pick_at(gx, gy)
+                    .map(|id| (id, &scene.organisms.atoms[id]));
+                draw_block_inspector(gx, gy, cell, &scene.humidity, &scene.temperature, org, sw);
+            }
         }
 
         // Creature editor overlay (paint UI, or spawn banner).
         editor.draw();
         settings.draw();
 
-        // HUD: info line always; tool / hotkey line toggled with F1.
-        let tod = if is_daytime_cfg(scene.world.tick, &settings.climate) {
-            "day"
-        } else {
-            "night"
-        };
-        let info = format!(
-            "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} atoms={} {}",
-            fps_smoothed(),
-            scene.world.tick,
-            tod,
-            scene.temperature.mean(),
-            if rain_on { "on" } else { "off" },
-            if evap_on { "on" } else { "off" },
-            if settings.phase.enabled { "on" } else { "off" },
-            scene.clouds.len(),
-            scene.clouds.total_mass(),
-            scene.humidity.total_mass(),
-            scene.wind.climate_vx,
-            scene.organisms.len(),
-            if sim_paused { "[paused]" } else { "" }
-        );
-        draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
-        if show_tool_line {
+        // HUD chrome (info + hotkeys + inspector) toggled with F1.
+        if show_hud {
+            let tod = if is_daytime_cfg(scene.world.tick, &settings.climate) {
+                "day"
+            } else {
+                "night"
+            };
+            let info = format!(
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} atoms={} {}",
+                fps_smoothed(),
+                scene.world.tick,
+                tod,
+                scene.temperature.mean(),
+                if rain_on { "on" } else { "off" },
+                if evap_on { "on" } else { "off" },
+                if settings.phase.enabled { "on" } else { "off" },
+                scene.clouds.len(),
+                scene.clouds.total_mass(),
+                scene.humidity.total_mass(),
+                scene.wind.climate_vx,
+                scene.organisms.len(),
+                if sim_paused { "[paused]" } else { "" }
+            );
+            draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
                 "Tab settings|Space|R|W rain|C drizzle|E/K/O|I phase|N clouds|T temp|H haze|F1|F2|Esc",
                 8.0,
@@ -889,8 +891,8 @@ async fn main() {
                 14.0,
                 LIGHTGRAY,
             );
+            draw_text(&info, 8.0, sh - 8.0, 16.0, WHITE);
         }
-        draw_text(&info, 8.0, sh - 8.0, 16.0, WHITE);
 
         next_frame().await;
     }
