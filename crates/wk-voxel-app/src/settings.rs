@@ -246,6 +246,8 @@ impl SimSettings {
                     let mut carry = self.phase.ice_carry_thickness as f32;
                     let mut spread = self.phase.snow_spread_radius as f32;
                     let mut blanket = self.phase.snow_blanket_depth as f32;
+                    let mut frost_depth = self.phase.frost_coat_depth as f32;
+                    let mut frost_spread = self.phase.frost_spread_radius as f32;
                     let mut period = self.phase.period_ticks as f32;
                     labeled_slider(
                         ui,
@@ -312,6 +314,20 @@ impl SimSettings {
                     );
                     labeled_slider(ui, hash!(), "Snow spread radius (cols)", 0.0..24.0, &mut spread);
                     labeled_slider(ui, hash!(), "Snow blanket prefer depth", 0.0..12.0, &mut blanket);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Frost coat depth (cells)",
+                        1.0..4.0,
+                        &mut frost_depth,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Frost spread radius (cols)",
+                        0.0..12.0,
+                        &mut frost_spread,
+                    );
                     labeled_slider(ui, hash!(), "Phase period (ticks)", 1.0..60.0, &mut period);
                     self.phase.min_sat_to_freeze = min_freeze.round().clamp(1.0, 255.0) as u8;
                     self.phase.max_ice_cells_per_column = max_ice.round().clamp(1.0, 64.0) as u8;
@@ -328,6 +344,8 @@ impl SimSettings {
                     self.phase.ice_carry_thickness = carry.round().clamp(1.0, 16.0) as u8;
                     self.phase.snow_spread_radius = spread.round().clamp(0.0, 48.0) as i32;
                     self.phase.snow_blanket_depth = blanket.round().clamp(0.0, 32.0) as u8;
+                    self.phase.frost_coat_depth = frost_depth.round().clamp(1.0, 8.0) as u8;
+                    self.phase.frost_spread_radius = frost_spread.round().clamp(0.0, 24.0) as i32;
                     self.phase.period_ticks = period.round().clamp(1.0, 120.0) as u64;
                     self.phase.min_budget_to_snow =
                         self.phase.min_budget_to_snow.clamp(1.0, 255.0);
@@ -400,6 +418,52 @@ impl SimSettings {
                         0.0..36.0,
                         &mut self.cloud.ridge_clearance,
                     );
+                    let mut snow_cells = self.cloud.snow_cells_per_tick as f32;
+                    let mut rain_cells = self.cloud.rain_cells_per_tick as f32;
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Snow footprint × radius",
+                        0.5..4.0,
+                        &mut self.cloud.snow_footprint_mult,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Rain footprint × radius",
+                        0.5..3.0,
+                        &mut self.cloud.rain_footprint_mult,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Snow landing span × radius",
+                        0.2..3.0,
+                        &mut self.cloud.snow_span_mult,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Rain landing span × radius",
+                        0.2..2.0,
+                        &mut self.cloud.rain_span_mult,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Snow cells / parcel / tick",
+                        1.0..12.0,
+                        &mut snow_cells,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Rain cell retries / parcel / tick",
+                        1.0..8.0,
+                        &mut rain_cells,
+                    );
+                    self.cloud.snow_cells_per_tick = snow_cells.round().clamp(1.0, 24.0) as u8;
+                    self.cloud.rain_cells_per_tick = rain_cells.round().clamp(1.0, 16.0) as u8;
                 });
                 ui.separator();
 
@@ -507,6 +571,10 @@ impl SimSettings {
         self.cloud.ridge_clearance = self.cloud.ridge_clearance.clamp(0.0, 48.0);
         self.oro.tall_above_sea = tall_above.round().clamp(2.0, 100.0) as i32;
         self.cloud.downpour_stop_frac = self.cloud.downpour_stop_frac.clamp(0.05, 0.95);
+        self.cloud.snow_footprint_mult = self.cloud.snow_footprint_mult.clamp(0.1, 6.0);
+        self.cloud.rain_footprint_mult = self.cloud.rain_footprint_mult.clamp(0.1, 4.0);
+        self.cloud.snow_span_mult = self.cloud.snow_span_mult.clamp(0.05, 4.0);
+        self.cloud.rain_span_mult = self.cloud.rain_span_mult.clamp(0.05, 3.0);
     }
 }
 

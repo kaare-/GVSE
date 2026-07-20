@@ -38,6 +38,44 @@ pub struct CloudConfig {
     pub ridge_clearance: f32,
     pub parcel_wind_scale: f32,
     pub buoyant_rise: f32,
+    /// Column fan width as a multiple of parcel radius when snowing.
+    /// Default `2.2` (wider blanket than rain).
+    #[serde(default = "default_snow_footprint_mult")]
+    pub snow_footprint_mult: f32,
+    /// Column fan width multiplier for liquid rain. Default `1.25`.
+    #[serde(default = "default_rain_footprint_mult")]
+    pub rain_footprint_mult: f32,
+    /// Landing span multiplier (× parcel radius) when snowing. Default `1.35`.
+    #[serde(default = "default_snow_span_mult")]
+    pub snow_span_mult: f32,
+    /// Landing span multiplier for liquid rain. Default `0.85`.
+    #[serde(default = "default_rain_span_mult")]
+    pub rain_span_mult: f32,
+    /// Max full Snow cells seated per parcel per tick (retry path).
+    #[serde(default = "default_snow_cells_per_tick")]
+    pub snow_cells_per_tick: u8,
+    /// Max full-cell precip retries per parcel per tick when raining liquid.
+    #[serde(default = "default_rain_cells_per_tick")]
+    pub rain_cells_per_tick: u8,
+}
+
+fn default_snow_footprint_mult() -> f32 {
+    2.2
+}
+fn default_rain_footprint_mult() -> f32 {
+    1.25
+}
+fn default_snow_span_mult() -> f32 {
+    1.35
+}
+fn default_rain_span_mult() -> f32 {
+    0.85
+}
+fn default_snow_cells_per_tick() -> u8 {
+    5
+}
+fn default_rain_cells_per_tick() -> u8 {
+    2
 }
 
 impl Default for CloudConfig {
@@ -57,6 +95,12 @@ impl Default for CloudConfig {
             ridge_clearance: 12.0,
             parcel_wind_scale: 0.28,
             buoyant_rise: 0.08,
+            snow_footprint_mult: default_snow_footprint_mult(),
+            rain_footprint_mult: default_rain_footprint_mult(),
+            snow_span_mult: default_snow_span_mult(),
+            rain_span_mult: default_rain_span_mult(),
+            snow_cells_per_tick: default_snow_cells_per_tick(),
+            rain_cells_per_tick: default_rain_cells_per_tick(),
         }
     }
 }
@@ -446,9 +490,9 @@ impl CloudStore {
                 _ => false,
             };
             let cols = if snowing {
-                ((radius * 2.2) as i32).clamp(4, 18)
+                ((radius * cfg.snow_footprint_mult.max(0.1)) as i32).clamp(4, 18)
             } else {
-                ((radius * 1.25) as i32).clamp(2, 10)
+                ((radius * cfg.rain_footprint_mult.max(0.1)) as i32).clamp(2, 10)
             };
             let mut remaining = drain;
             // Fractional column shares are << one Snow cell (255). Cold
@@ -457,7 +501,11 @@ impl CloudStore {
                 .map(|ph| ph.min_budget_to_snow.max(u8::MAX as f32))
                 .unwrap_or(0.0);
             let mut snow_cells_this_tick = 0u8;
-            let snow_cell_cap = if snowing { 5 } else { 2 };
+            let snow_cell_cap = if snowing {
+                cfg.snow_cells_per_tick.max(1)
+            } else {
+                cfg.rain_cells_per_tick.max(1)
+            };
             for k in 0..cols {
                 if remaining <= 0.0 || p.mass <= 0.0 {
                     break;
@@ -467,7 +515,11 @@ impl CloudStore {
                 } else {
                     k as f32 / (cols - 1) as f32 * 2.0 - 1.0
                 };
-                let span = if snowing { radius * 1.35 } else { radius * 0.85 };
+                let span = if snowing {
+                    radius * cfg.snow_span_mult.max(0.05)
+                } else {
+                    radius * cfg.rain_span_mult.max(0.05)
+                };
                 let gx = world.wrap_x((p.fx + t * span).round() as i32);
                 let share = (drain / cols as f32) * (1.15 - 0.3 * t.abs());
                 let mut dropped = deposit_rain_column(
