@@ -50,8 +50,8 @@ pub use humidity::{
     humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,
 };
 pub use phase::{
-    apply_freeze, apply_phase, deposit_precip_on_surface, ice_lid_thickness,
-    precip_forms_snow_at_air, PhaseConfig,
+    apply_freeze, apply_phase, deposit_condensate_on_surface, deposit_precip_on_surface,
+    ice_lid_thickness, precip_forms_snow_at_air, PhaseConfig,
 };
 pub use rules::{
     apply_cold_avalanche, apply_condensation_rain, apply_condensation_rain_phased,

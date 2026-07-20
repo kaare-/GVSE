@@ -556,7 +556,8 @@ async fn main() {
                 Some(&scene.temperature),
                 Some(&settings.phase),
             );
-            // Light drizzle from leftover vapor (clouds do the downpours).
+            // Leftover vapor: liquid drizzle when warm, thin ice frost
+            // when cold. Snow packs still come from clouds (flakes).
             if cond_rain_on {
                 apply_condensation_rain_phased(
                     &mut scene.world,

@@ -2026,7 +2026,12 @@ pub fn apply_condensation_rain_with_orographic(
     apply_condensation_rain_phased(world, humidity, cfg, oro, None, None);
 }
 
-/// Condensation precip with optional snow phase (cold tiles).
+/// Condensation drizzle from leftover humidity.
+///
+/// Warm air → liquid film. Cold air on cold ground → a **thin Ice glaze**
+/// (frost / rime), not `Snow` packs and never taller than
+/// [`crate::phase::PhaseConfig::frost_coat_depth`]. Cloud flakes still own
+/// real snow accumulation.
 pub fn apply_condensation_rain_phased(
     world: &mut World,
     humidity: &mut crate::humidity::Humidity,
@@ -2065,23 +2070,17 @@ pub fn apply_condensation_rain_phased(
         if roll >= effective_prob {
             continue;
         }
-        // Rain lands on the ground / ocean under the tile centre.
+        // Rain / frost lands on the ground / ocean under the tile centre.
         let centre_gx = hx * tile_cols + tile_cols / 2;
         let take_mass = (cfg.mass_per_droplet * mass_mult).min(mass);
         if take_mass <= 0.0 {
             continue;
         }
-        // Cold snow wants a full cell (255); offer at least that when the
-        // tile can pay so mountain drizzle becomes pack, not pore water.
-        let offer = match (temp, phase) {
-            (Some(_), Some(ph)) => take_mass.max(ph.min_budget_to_snow).min(mass),
-            _ => take_mass,
-        };
-        let landed = crate::phase::deposit_precip_on_surface(
+        let landed = crate::phase::deposit_condensate_on_surface(
             world,
             centre_gx,
             cfg.top_y,
-            offer,
+            take_mass,
             temp,
             phase,
         );
@@ -4383,6 +4382,59 @@ mod tests {
             landed.sat.0
         );
         assert_eq!(w.get_cell(2, 30).unwrap().sat.0, 0, "sky row stays dry");
+    }
+
+    #[test]
+    fn condensation_frosts_thin_ice_not_snow_towers_when_cold() {
+        // Cold humidity drizzle may glaze rock with frost, but must not
+        // mint Snow stacks or grow ice pillars under clear sky.
+        let (mut w, mut h) = setup_cloud_world();
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        h.add(1, 30, 2000.0);
+        let mut temp = crate::temperature::Temperature::with_world_bounds(
+            4, 0, 0, 64, 64, 1, 64, 32, false,
+        );
+        temp.config.base_temp_c = -12.0;
+        for v in temp.cells.values_mut() {
+            *v = -12.0;
+        }
+        let cfg = CondensationConfig {
+            top_y: 30,
+            max_prob_per_tick: 1.0,
+            mass_per_droplet: 255.0,
+            ..CondensationConfig::default()
+        };
+        let phase = crate::phase::PhaseConfig::default();
+        for _ in 0..8 {
+            apply_condensation_rain_phased(
+                &mut w,
+                &mut h,
+                &cfg,
+                None,
+                Some(&temp),
+                Some(&phase),
+            );
+            w.tick = w.tick.wrapping_add(1);
+        }
+        for y in 1..16 {
+            assert_ne!(
+                w.get_cell(2, y).map(|c| c.material),
+                Some(MaterialId::Snow),
+                "condensation must not place snow at y={y}"
+            );
+        }
+        assert_eq!(
+            w.get_cell(2, 2).map(|c| c.material),
+            Some(MaterialId::Ice),
+            "cold condensate should leave a thin ice glaze on ground"
+        );
+        for y in 3..16 {
+            assert_ne!(
+                w.get_cell(2, y).map(|c| c.material),
+                Some(MaterialId::Ice),
+                "frost must stay a thin coat — no ice tower at y={y}"
+            );
+        }
     }
 
     #[test]
