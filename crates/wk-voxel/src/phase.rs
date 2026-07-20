@@ -64,6 +64,20 @@ pub struct PhaseConfig {
     /// Soft blanket depth: new snow prefers columns with Ice+Snow at or
     /// below this before stacking taller spikes.
     pub snow_blanket_depth: u8,
+    /// Master switch for the whole phase pass (`I` in the demo).
+    pub enabled: bool,
+    /// Convert standing water → Ice when cold.
+    pub enable_freeze: bool,
+    /// Melt exposed Ice/Snow when warm.
+    pub enable_thaw: bool,
+    /// Water-on-ice melt and snow-on-water slush.
+    pub enable_slush: bool,
+    /// Break Ice/Snow that has dry air underneath.
+    pub enable_break_unsupported: bool,
+    /// Cull Ice+Snow stacks taller than [`Self::max_ice_cells_per_column`].
+    pub enable_cull: bool,
+    /// Cold precip settles as Snow (when off, cold columns get liquid rain).
+    pub enable_snow_precip: bool,
     /// Only run when `world.tick % period_ticks == 0`.
     pub period_ticks: u64,
 }
@@ -81,6 +95,13 @@ impl Default for PhaseConfig {
             max_ice_cells_per_column: 12,
             snow_spread_radius: 6,
             snow_blanket_depth: 2,
+            enabled: true,
+            enable_freeze: true,
+            enable_thaw: true,
+            enable_slush: true,
+            enable_break_unsupported: true,
+            enable_cull: true,
+            enable_snow_precip: true,
             period_ticks: 1,
         }
     }
@@ -88,17 +109,30 @@ impl Default for PhaseConfig {
 
 /// Full phase pass: cull → break unsupported → water-on-ice / slush → thaw → freeze.
 pub fn apply_phase(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
+    if !cfg.enabled {
+        return;
+    }
     let period = cfg.period_ticks.max(1);
     if world.tick % period != 0 {
         return;
     }
     let columns = column_xs(world);
     for gx in columns {
-        cull_frozen_column(world, gx, cfg.max_ice_cells_per_column);
-        break_unsupported_frozen(world, gx, cfg);
-        water_on_ice_and_slush(world, gx, temp, cfg);
-        thaw_column(world, gx, temp, cfg);
-        freeze_column_surface(world, gx, temp, cfg);
+        if cfg.enable_cull {
+            cull_frozen_column(world, gx, cfg.max_ice_cells_per_column);
+        }
+        if cfg.enable_break_unsupported {
+            break_unsupported_frozen(world, gx, cfg);
+        }
+        if cfg.enable_slush {
+            water_on_ice_and_slush(world, gx, temp, cfg);
+        }
+        if cfg.enable_thaw {
+            thaw_column(world, gx, temp, cfg);
+        }
+        if cfg.enable_freeze {
+            freeze_column_surface(world, gx, temp, cfg);
+        }
     }
 }
 
@@ -226,7 +260,8 @@ pub fn deposit_precip_on_surface(
     };
     let sample_y = ground_sample_y(world, gx);
     let t_c = temp.at_cell(gx, sample_y);
-    if t_c > phase.freeze_point_c {
+    // Snow precip off → liquid even when cold (useful for A/B in settings).
+    if t_c > phase.freeze_point_c || !phase.enable_snow_precip {
         return deposit_water_on_surface(world, gx, start_y, budget);
     }
     // Cold path: solid snow pack only — never liquid permeation.

@@ -22,7 +22,7 @@
 //! - `H` — toggle soft white humidity haze (vapor hint; clouds carry the look)
 //! - `N` — toggle cloud drawing (coagulated parcels; darker = wetter)
 //! - `T` — toggle temperature heatmap overlay
-//! - `I` — toggle phase change (freeze / thaw / settle under ice)
+//! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
 //! - `F1` — toggle the bottom tool / hotkey line
 //! - `F2` — creature editor (Set A MS-Paint; `C` stays condensation here)
 //! - `Tab` — live settings (materials, wind, clouds, day/night, temp, …)
@@ -401,7 +401,6 @@ async fn main() {
     let mut cond_rain_on = true;
     let mut evap_on = true;
     let mut karst_on = true;
-    let mut freeze_on = true;
     let mut organisms_on = true;
     let mut humidity_overlay = false;
     let mut clouds_on = true;
@@ -485,7 +484,7 @@ async fn main() {
                 temp_overlay = !temp_overlay;
             }
             if is_key_pressed(KeyCode::I) {
-                freeze_on = !freeze_on;
+                settings.phase.enabled = !settings.phase.enabled;
             }
             if is_key_pressed(KeyCode::O) {
                 organisms_on = !organisms_on;
@@ -586,9 +585,8 @@ async fn main() {
             }
             // Phase after the temp step so a Tab cold/warm snap applies
             // the same frame (column order: thermal → phase change).
-            if freeze_on {
-                apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
-            }
+            // Master enable lives on PhaseConfig (I / Tab settings).
+            apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
             if organisms_on {
                 let tick_no = scene.world.tick;
                 scene
@@ -860,7 +858,7 @@ async fn main() {
             scene.temperature.mean(),
             if rain_on { "on" } else { "off" },
             if evap_on { "on" } else { "off" },
-            if freeze_on { "on" } else { "off" },
+            if settings.phase.enabled { "on" } else { "off" },
             scene.clouds.len(),
             scene.clouds.total_mass(),
             scene.humidity.total_mass(),
