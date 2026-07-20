@@ -1004,10 +1004,9 @@ fn apply_repose_pass(
                     if !diag_drop_exceeds(ptrs, wrap_width, gx, sy, max_step) {
                         continue;
                     }
-                    unsafe {
-                        parallel::set_cell(ptrs, wrap_width, gx, gy, src);
-                        parallel::set_cell(ptrs, wrap_width, sx, sy, dest);
-                    }
+                    write_repose_swap(
+                        ptrs, wrap_width, gx, gy, dest, sx, sy, src,
+                    );
                     moved = true;
                     break;
                 }
@@ -1051,15 +1050,68 @@ fn apply_repose_pass(
                         None => continue,
                         _ => {}
                     }
-                    unsafe {
-                        parallel::set_cell(ptrs, wrap_width, gx, gy, src);
-                        parallel::set_cell(ptrs, wrap_width, sx, sy, dest);
-                    }
+                    write_repose_swap(
+                        ptrs, wrap_width, gx, gy, dest, sx, sy, src,
+                    );
                     break;
                 }
             }
         }
     });
+}
+
+/// Swap grain into a diagonal/lateral Air seat.
+///
+/// Underwater, sliding into empty / film Air used to leave that pale
+/// low-sat cell on the slope face for a frame (sky / film flash) until
+/// flow refilled it. Dense grains collapse those bubbles: soak seat sat
+/// into pores and fill the vacated cell with standing water.
+fn write_repose_swap(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    dest_x: i32,
+    dest_y: i32,
+    dest: Cell,
+    src_x: i32,
+    src_y: i32,
+    src: Cell,
+) {
+    let submerged = dest.sat.0 >= 200
+        || air_has_standing_water_neighbor(ptrs, wrap_width, dest_x, dest_y)
+        || air_has_standing_water_neighbor(ptrs, wrap_width, src_x, src_y);
+    if is_grain(src.material) && submerged && dest.sat.0 < 200 {
+        let cap = water_capacity(src.material);
+        let room = cap.saturating_sub(src.sat.0);
+        let into_pore = dest.sat.0.min(room);
+        let mut placed = src;
+        placed.sat = Sat(src.sat.0.saturating_add(into_pore));
+        unsafe {
+            parallel::set_cell(ptrs, wrap_width, dest_x, dest_y, placed);
+            parallel::set_cell(ptrs, wrap_width, src_x, src_y, Cell::water());
+        }
+        return;
+    }
+    unsafe {
+        parallel::set_cell(ptrs, wrap_width, dest_x, dest_y, src);
+        parallel::set_cell(ptrs, wrap_width, src_x, src_y, dest);
+    }
+}
+
+fn air_has_standing_water_neighbor(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+        let Some(n) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx + dx, gy + dy) }) else {
+            continue;
+        };
+        if n.material == MaterialId::Air && n.sat.0 >= 200 {
+            return true;
+        }
+    }
+    false
 }
 
 fn grain_is_wet(src: Cell, below_src: Option<Cell>) -> bool {
@@ -1276,6 +1328,11 @@ pub fn apply_flow_erosion(world: &mut World, cfg: &GrainConfig) {
             },
         );
         applied = applied.wrapping_add(1);
+    }
+    // Erosion runs after `tick`'s gravity pass in the demo — pull water
+    // into any empty scour holes so they don't flash dry Air for a frame.
+    if applied > 0 {
+        apply_gravity_fall(world);
     }
 }
 
@@ -2872,6 +2929,35 @@ mod tests {
         let left = w.get_cell(4, 1).map(|c| c.material) == Some(MaterialId::Sand);
         let right = w.get_cell(6, 1).map(|c| c.material) == Some(MaterialId::Sand);
         assert!(left || right, "sand slides into a diagonal-down seat");
+    }
+
+    #[test]
+    fn underwater_sand_repose_does_not_leave_dry_air() {
+        // Sand on an underwater ledge slides into an empty pocket beside
+        // standing water. Vacated cell must become water (not sky-flash Air).
+        let mut w = setup_column_world();
+        for x in 3..=7 {
+            for y in 1..=3 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 2, Cell::solid(MaterialId::Sand));
+        // Empty bubble seat diagonal-down from the sand.
+        w.set_cell(4, 1, Cell::air());
+        apply_grain_repose(&mut w);
+        assert_eq!(
+            w.get_cell(4, 1).unwrap().material,
+            MaterialId::Sand,
+            "sand should occupy the underwater seat"
+        );
+        let vacated = w.get_cell(5, 2).unwrap();
+        assert_eq!(vacated.material, MaterialId::Air);
+        assert!(
+            vacated.sat.0 >= 200,
+            "vacated underwater cell must be standing water, not dry/film air (sat={})",
+            vacated.sat.0
+        );
     }
 
     #[test]
