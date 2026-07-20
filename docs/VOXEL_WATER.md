@@ -54,9 +54,9 @@ This is what wets a dry beach **sideways** from a puddle, and slowly equalises p
 
 ### Grain fall + repose
 
-- **Fall:** Sand / Gravel / Clay / LooseRock sink through Air (any sat). Snow falls through *empty* Air only (floats on water).
+- **Fall:** Sand / Gravel / Clay / LooseRock sink through Air (any sat). **Snow and Ice** fall through *empty* Air only (float on water) so unsupported pack does not hang mid-air.
 - **Repose** (`apply_grain_repose`): supported grains slide diagonally into Air when the drop exceeds `floor(repose_rise_m / SAMPLE_WIDTH_m)`. Sand≈0 (no 1-cell cliffs), LooseRock≥1 (short stairs). Wet grains loosen one step. Snow avalanches on land, not into standing water.
-- Ice stays rigid (phase break / thaw only) — not a repose grain and not flow-erodible.
+- Ice is not a repose grain and not flow-erodible; hillside glaze can still peel in the cold-avalanche pass.
 
 ### Flow erosion + deposition (`apply_flow_erosion`)
 
@@ -138,8 +138,9 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   **Air** above it (`dry_above_max`). An Ice/Snow sheet blocks that, so a
   capped lake loses far less mass and the humidity pump dries out — a
   useful cold-climate feedback even before a full thermal field.
-- **Unsupported ice:** Ice/Snow with dry air below breaks into water so
-  trapped surface water can rejoin the basin.
+- **Unsupported ice/snow:** empty Air below → **fall** as solids in
+  `apply_grain_fall` (float on water). Phase break only melts packs on
+  non-supporting haze, not empty gaps.
 - **Snow precip:** rain / drizzle / cloud downpour call
   `deposit_precip_on_surface`. Cold **ground** sample (skips snow/ice pack
   height) → one solid `Snow` cell on top of rock/sand/pack (wet surface
@@ -150,8 +151,8 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   prefer packs ≤ `snow_blanket_depth` so cover blankets cold slopes
   before growing peak spikes. Cloud downpour uses a wider footprint when
   cold. Later: real drift / avalanche physics.
-- **Snow pack (now):** static solid lid. No pore soak, no grain fall.
-  Later: avalanche / settle physics, and ice/snow scour of sand & loose rock.
+- **Snow pack:** solid lid, no pore soak. Falls through empty Air; cold
+  avalanche can spill onto lake ice (see Grain / cold avalanche sections).
 - **Slush:** Snow on water — warm melts snow; cold freezes the water film
   under snow into ice (snow-on-ice pack).
 - Rate limits: freeze / thaw / slush / break per column per tick.

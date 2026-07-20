@@ -209,7 +209,7 @@ impl SimSettings {
                     ui.checkbox(hash!(), "Slush (water↔snow/ice)", &mut self.phase.enable_slush);
                     ui.checkbox(
                         hash!(),
-                        "Break unsupported ice",
+                        "Break ice on haze (empty gaps fall)",
                         &mut self.phase.enable_break_unsupported,
                     );
                     ui.checkbox(

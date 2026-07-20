@@ -122,13 +122,17 @@ impl Cell {
 
 /// True for dense granular materials that fall under gravity through
 /// Air (including water-filled Air). Sand / Gravel / Clay / LooseRock.
-/// Snow is [`is_repose_grain`] but floats on water (see grain fall).
-/// Ice stays rigid (phase break/thaw only).
+/// Snow / Ice use [`falls_through_empty_air`] instead (float on water).
 pub fn is_grain(material: MaterialId) -> bool {
     matches!(
         material,
         MaterialId::Sand | MaterialId::Gravel | MaterialId::Clay | MaterialId::LooseRock
     )
+}
+
+/// Soft frozen pack: falls through *empty* Air, floats on standing water.
+pub fn falls_through_empty_air(material: MaterialId) -> bool {
+    matches!(material, MaterialId::Snow | MaterialId::Ice)
 }
 
 /// Materials that participate in angle-of-repose diagonal slides.
@@ -234,6 +238,8 @@ mod tests {
         }
         assert!(is_repose_grain(MaterialId::Snow));
         assert!(!is_grain(MaterialId::Snow), "snow floats — not a dense grain");
+        assert!(falls_through_empty_air(MaterialId::Snow));
+        assert!(falls_through_empty_air(MaterialId::Ice));
         for m in [
             MaterialId::Bedrock,
             MaterialId::Stone,
@@ -246,6 +252,7 @@ mod tests {
             assert!(!is_grain(m), "{m:?} must not be classified as a grain");
             assert!(!is_repose_grain(m), "{m:?} must not repose");
         }
+        assert!(!falls_through_empty_air(MaterialId::Sand));
     }
 
     #[test]

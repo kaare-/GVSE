@@ -30,8 +30,8 @@ pub use active::{
 };
 pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{
-    grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain, water_capacity, Cell,
-    CellFlags, Sat,
+    falls_through_empty_air, grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain,
+    water_capacity, Cell, CellFlags, Sat,
 };
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use blueprint::{Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR};

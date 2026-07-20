@@ -11,8 +11,8 @@
 //! Rain stays **on top of** ice as a water film (it does not density-swap
 //! under the sheet — that lofted ice into the rain column). Water on ice
 //! melts the sheet when warm or when a full cell of rain has ponded.
-//! Ice with dry air below is **unsupported** and breaks into water so
-//! trapped surface water can rejoin the basin.
+//! Ice/Snow with dry air below **fall** as solids ([`crate::rules::apply_grain_fall`]);
+//! the unsupported break pass no longer turns empty-air gaps into water.
 //!
 //! Cold ice lids **thicken downward** one cell per tick (wet Air under
 //! Ice/Snow) so lakes do not stay liquid under a 1-px skin, and peak
@@ -74,7 +74,8 @@ pub struct PhaseConfig {
     pub enable_thaw: bool,
     /// Water-on-ice melt and snow-on-water slush.
     pub enable_slush: bool,
-    /// Break Ice/Snow that has dry air underneath.
+    /// Legacy: break Ice/Snow over non-empty but non-supporting Air
+    /// (haze). Empty-air gaps are handled by frozen fall in `tick`.
     pub enable_break_unsupported: bool,
     /// Break thin lake ice that is carrying grain / snow / ice debris.
     /// Thick lids ([`Self::ice_carry_thickness`]) hold the load.
@@ -459,8 +460,12 @@ fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &
 }
 
 /// Ice/Snow must rest on solid, standing water, or more frozen pack.
-/// Dry air under a sheet (basin dropped out) → break into water so any
-/// film trapped above can equalize with the basin through gravity/flow.
+///
+/// **Empty Air below** is owned by [`crate::rules::apply_grain_fall`]
+/// (the pack drops as ice/snow). This pass only converts packs sitting
+/// on non-supporting haze (Air with some sat but below
+/// [`PhaseConfig::min_sat_to_freeze`]) into water — rare, kept as a
+/// safety valve when fall will not enter a misty gap.
 fn break_unsupported_frozen(world: &mut World, gx: i32, cfg: &PhaseConfig) {
     let Some((y0, y1)) = y_bounds(world) else {
         return;
@@ -478,6 +483,13 @@ fn break_unsupported_frozen(world: &mut World, gx: i32, cfg: &PhaseConfig) {
             continue;
         }
         if frozen_is_supported(world, gx, y, cfg) {
+            continue;
+        }
+        // Empty gap → fall in tick, do not melt into water mid-air.
+        if matches!(
+            world.get_cell(gx, y - 1),
+            Some(b) if b.material == MaterialId::Air && b.sat.is_empty()
+        ) {
             continue;
         }
         world.set_cell(gx, y, Cell::water());
@@ -932,22 +944,26 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_ice_breaks_when_water_under_drops() {
+    fn unsupported_ice_over_empty_air_is_not_melted_by_phase() {
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(1, 0, Cell::solid(MaterialId::Bedrock));
-        // Gap: dry air under ice (basin dropped).
+        // Gap: dry air under ice (basin dropped) — fall owns this, not break.
         w.set_cell(1, 1, Cell::air());
         w.set_cell(1, 2, Cell::solid(MaterialId::Ice));
         w.set_cell(1, 3, Cell::water()); // trapped above
         let temp = cold_temp(16, 16, -5.0);
-        apply_phase(&mut w, &temp, &PhaseConfig::default());
+        let cfg = PhaseConfig {
+            enable_freeze: false,
+            enable_slush: false,
+            ..PhaseConfig::default()
+        };
+        apply_phase(&mut w, &temp, &cfg);
         assert_eq!(
             w.get_cell(1, 2).unwrap().material,
-            MaterialId::Air,
-            "unsupported ice must break into water"
+            MaterialId::Ice,
+            "phase must not melt ice hanging over empty air (fall drops it)"
         );
-        assert!(w.get_cell(1, 2).unwrap().sat.is_full());
     }
 
     #[test]
