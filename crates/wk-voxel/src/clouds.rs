@@ -437,8 +437,14 @@ impl CloudStore {
             let radius = p.radius();
             let cols = ((radius * 1.25) as i32).clamp(2, 10);
             let mut remaining = drain;
+            // Fractional column shares are << one Snow cell (255). Cold
+            // peaks must retry a full cell from parcel mass — never soak.
+            let snow_cell = phase
+                .map(|ph| ph.min_budget_to_snow.max(u8::MAX as f32))
+                .unwrap_or(0.0);
+            let mut snow_cells_this_tick = 0u8;
             for k in 0..cols {
-                if remaining <= 0.0 {
+                if remaining <= 0.0 || p.mass <= 0.0 {
                     break;
                 }
                 let t = if cols == 1 {
@@ -448,10 +454,42 @@ impl CloudStore {
                 };
                 let gx = world.wrap_x((p.fx + t * radius * 0.85).round() as i32);
                 let share = (drain / cols as f32) * (1.15 - 0.3 * t.abs());
-                let dropped =
-                    deposit_rain_column(world, gx, p.fy.round() as i32, share, tick, k, temp, phase);
-                remaining -= dropped;
-                p.mass -= dropped;
+                let mut dropped = deposit_rain_column(
+                    world,
+                    gx,
+                    p.fy.round() as i32,
+                    share.min(remaining),
+                    tick,
+                    k,
+                    temp,
+                    phase,
+                );
+                if dropped <= 0.0
+                    && snow_cell > 0.0
+                    && snow_cells_this_tick < 2
+                    && p.mass >= snow_cell
+                {
+                    dropped = deposit_rain_column(
+                        world,
+                        gx,
+                        p.fy.round() as i32,
+                        snow_cell,
+                        tick,
+                        k,
+                        temp,
+                        phase,
+                    );
+                    if dropped > 0.0 {
+                        snow_cells_this_tick = snow_cells_this_tick.saturating_add(1);
+                    }
+                }
+                let pay = dropped.min(p.mass);
+                if pay <= 0.0 {
+                    continue;
+                }
+                p.mass -= pay;
+                // Snow-cell retries may exceed this tick's drain slice.
+                remaining = (remaining - pay.min(remaining)).max(0.0);
             }
             if p.mass < 1.0 {
                 p.mass = 0.0;

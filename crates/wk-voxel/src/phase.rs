@@ -18,6 +18,9 @@
 //! Ice/Snow) so lakes do not stay liquid under a 1-px skin, and peak
 //! "ice castles" of trapped water freeze through instead of sitting at
 //! −20 °C forever. Full per-cell thermal fields come later.
+//!
+//! Snow on cold ground is a **solid pack** on top of the material — it
+//! does not soak pores. Avalanche / scour physics come later.
 
 use wk_material::MaterialId;
 
@@ -45,11 +48,13 @@ pub struct PhaseConfig {
     /// Max unsupported Ice/Snow cells that may break **per column per tick**.
     pub max_break_cells_per_column_per_tick: u8,
     /// Minimum precip budget (sat units) to place one Snow cell.
+    /// Cold columns never convert a shortfall into liquid rain (that
+    /// soaked mountain-top sand); the caller keeps the mass instead.
     pub min_budget_to_snow: f32,
     /// Hard cap on Ice+Snow cells stacked in one column. Excess at the
     /// top is culled to empty Air (removed, not melted — melting would
     /// replace an ice tower with a water tower). Beyond the cap, cold
-    /// precip falls as rain/slush runoff instead of more snow.
+    /// precip is held (not dumped as pore-soaking rain).
     pub max_ice_cells_per_column: u8,
     /// Only run when `world.tick % period_ticks == 0`.
     pub period_ticks: u64,
@@ -189,9 +194,13 @@ fn ground_sample_y(world: &World, gx: i32) -> i32 {
     y0
 }
 
-/// Deposit precip as **snow** when the ground sample is cold and the
-/// column frozen budget has room; otherwise as liquid via
-/// [`deposit_water_on_surface`]. Returns mass/sat units consumed.
+/// Deposit precip as **snow** when the ground sample is cold; otherwise
+/// as liquid via [`deposit_water_on_surface`]. Returns mass/sat units
+/// consumed.
+///
+/// **Cold columns never soak.** Short budget, full frozen cap, or no
+/// seat → `0` (caller keeps the mass). Peak sand stays dry under snow
+/// pack; we do not fall back to pore-wetting rain.
 ///
 /// When `temp` / `phase` are `None`, always rains (test / warm paths).
 pub fn deposit_precip_on_surface(
@@ -205,65 +214,70 @@ pub fn deposit_precip_on_surface(
     let (Some(temp), Some(phase)) = (temp, phase) else {
         return deposit_water_on_surface(world, gx, start_y, budget);
     };
-    if budget < phase.min_budget_to_snow {
-        return deposit_water_on_surface(world, gx, start_y, budget);
-    }
     let sample_y = ground_sample_y(world, gx);
     let t_c = temp.at_cell(gx, sample_y);
     if t_c > phase.freeze_point_c {
         return deposit_water_on_surface(world, gx, start_y, budget);
     }
-    if frozen_count_in_column(world, gx) >= phase.max_ice_cells_per_column as usize {
-        // Cap full — fall as rain/slush runoff, not another snow cell.
-        return deposit_water_on_surface(world, gx, start_y, budget);
+    // Cold path: solid snow pack only — never liquid permeation.
+    if budget < phase.min_budget_to_snow {
+        return 0.0;
     }
-    match deposit_snow_on_surface(world, gx, start_y) {
-        Some(consumed) => consumed,
-        None => deposit_water_on_surface(world, gx, start_y, budget),
+    if frozen_count_in_column(world, gx) >= phase.max_ice_cells_per_column as usize {
+        return 0.0;
+    }
+    deposit_snow_on_surface(world, gx, start_y).unwrap_or(0.0)
+}
+
+fn rests_on_solid_or_pack(world: &World, gx: i32, gy: i32) -> bool {
+    match world.get_cell(gx, gy - 1) {
+        Some(below) if below.material != MaterialId::Air => true,
+        Some(below) if is_frozen_solid(below.material) => true,
+        _ => false,
     }
 }
 
 /// Place one Snow cell on the free surface under `start_y`.
 /// Returns sat-equivalent mass consumed (`255`) or `None` if no seat.
+///
+/// Snow is a solid lid on rock / sand / pack. A wet Air film on solid
+/// ground becomes Snow (it is not pushed into pores). Deep water gets
+/// snow seated in the empty Air above the free surface.
 fn deposit_snow_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f32> {
     let jx = world.wrap_x(gx);
     let mut y = start_y;
-    let mut last_free_air_y: Option<i32> = None;
-    for _ in 0..128 {
+    let mut last_empty_air_y: Option<i32> = None;
+    for _ in 0..256 {
         let Some(cell) = world.get_cell(jx, y) else {
             y -= 1;
             continue;
         };
         if cell.material != MaterialId::Air {
-            // Solid (rock / ice / snow) — snow lands in open air above.
-            if let Some(ay) = last_free_air_y {
-                if ay == y + 1 {
-                    let ac = world.get_cell(jx, ay)?;
-                    if ac.material == MaterialId::Air && ac.sat.is_empty() {
-                        world.set_cell(jx, ay, snow_cell());
-                        return Some(u8::MAX as f32);
-                    }
+            // Solid / pack — seat in the Air cell directly above (film ok).
+            if let Some(above) = world.get_cell(jx, y + 1) {
+                if above.material == MaterialId::Air {
+                    world.set_cell(jx, y + 1, snow_cell());
+                    return Some(u8::MAX as f32);
                 }
             }
             return None;
         }
         if !cell.sat.is_empty() {
-            // Hit a water surface — snow seats in the free air above it
-            // (settle will float snow on water next phase pass).
-            if let Some(ay) = last_free_air_y {
+            // Puddle on solid / pack → become snow pack (no soak).
+            if rests_on_solid_or_pack(world, jx, y) {
+                world.set_cell(jx, y, snow_cell());
+                return Some(u8::MAX as f32);
+            }
+            // Standing water body — seat snow in empty air above.
+            if let Some(ay) = last_empty_air_y {
                 if ay == y + 1 {
-                    let ac = world.get_cell(jx, ay)?;
-                    if ac.material == MaterialId::Air && ac.sat.is_empty() {
-                        world.set_cell(jx, ay, snow_cell());
-                        return Some(u8::MAX as f32);
-                    }
+                    world.set_cell(jx, ay, snow_cell());
+                    return Some(u8::MAX as f32);
                 }
             }
-            // Water is the top free cell itself — can't place snow here
-            // without burying sat; let caller fall back to rain.
             return None;
         }
-        last_free_air_y = Some(y);
+        last_empty_air_y = Some(y);
         y -= 1;
     }
     None
@@ -831,11 +845,12 @@ mod tests {
     }
 
     #[test]
-    fn frozen_budget_full_falls_as_rain_not_more_snow() {
+    fn frozen_budget_full_holds_precip_does_not_soak() {
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
-        for y in 1..=4 {
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        for y in 2..=5 {
             w.set_cell(2, y, Cell::solid(MaterialId::Snow));
         }
         let temp = cold_temp(16, 16, -10.0);
@@ -843,14 +858,66 @@ mod tests {
             max_ice_cells_per_column: 4,
             ..PhaseConfig::default()
         };
-        let before = frozen_count_in_column(&w, 2);
-        assert_eq!(before, 4);
-        let _ = deposit_precip_on_surface(&mut w, 2, 20, 80.0, Some(&temp), Some(&cfg));
+        assert_eq!(frozen_count_in_column(&w, 2), 4);
+        let landed = deposit_precip_on_surface(&mut w, 2, 20, 80.0, Some(&temp), Some(&cfg));
+        assert_eq!(landed, 0.0, "cold cap-full must hold precip, not dump rain");
         assert_eq!(
             frozen_count_in_column(&w, 2),
             4,
             "must not grow snow past the column budget"
         );
+        assert_eq!(
+            w.get_cell(2, 1).unwrap().sat.0,
+            0,
+            "peak sand must stay dry — no pore soak under a full snow pack"
+        );
+    }
+
+    #[test]
+    fn cold_snow_settles_on_sand_without_wetting_pores() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        let temp = cold_temp(16, 16, -12.0);
+        let cfg = PhaseConfig::default();
+        let landed = deposit_precip_on_surface(&mut w, 2, 12, 64.0, Some(&temp), Some(&cfg));
+        assert!(landed > 0.0);
+        assert_eq!(
+            w.get_cell(2, 2).unwrap().material,
+            MaterialId::Snow,
+            "cold precip must settle as Snow on sand"
+        );
+        assert_eq!(
+            w.get_cell(2, 1).unwrap().sat.0,
+            0,
+            "snow must not permeate into sand pores"
+        );
+        assert_eq!(w.get_cell(2, 1).unwrap().material, MaterialId::Sand);
+    }
+
+    #[test]
+    fn cold_snow_replaces_wet_film_on_sand() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        w.set_cell(
+            2,
+            2,
+            Cell {
+                material: MaterialId::Air,
+                sat: Sat(80),
+                flags: Default::default(),
+                _pad: 0,
+            },
+        );
+        let temp = cold_temp(16, 16, -12.0);
+        let landed =
+            deposit_precip_on_surface(&mut w, 2, 12, 64.0, Some(&temp), Some(&PhaseConfig::default()));
+        assert!(landed > 0.0);
+        assert_eq!(w.get_cell(2, 2).unwrap().material, MaterialId::Snow);
+        assert_eq!(w.get_cell(2, 1).unwrap().sat.0, 0);
     }
 
     #[test]

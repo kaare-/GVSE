@@ -1372,20 +1372,26 @@ pub fn apply_condensation_rain_phased(
         if take_mass <= 0.0 {
             continue;
         }
+        // Cold snow wants a full cell (255); offer at least that when the
+        // tile can pay so mountain drizzle becomes pack, not pore water.
+        let offer = match (temp, phase) {
+            (Some(_), Some(ph)) => take_mass.max(ph.min_budget_to_snow).min(mass),
+            _ => take_mass,
+        };
         let landed = crate::phase::deposit_precip_on_surface(
             world,
             centre_gx,
             cfg.top_y,
-            take_mass,
+            offer,
             temp,
             phase,
         );
         if landed <= 0.0 {
             continue;
         }
-        // Drain the humidity tile by the exact mass that landed.
+        // Drain the humidity tile by the mass that landed (clamp to tile).
         let entry = humidity.cells.entry((hx, hy)).or_insert(0.0);
-        *entry -= landed;
+        *entry -= landed.min(*entry);
         if *entry < 1e-6 {
             humidity.cells.remove(&(hx, hy));
         }

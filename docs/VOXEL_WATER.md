@@ -113,8 +113,12 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   trapped surface water can rejoin the basin.
 - **Snow precip:** rain / drizzle / cloud downpour call
   `deposit_precip_on_surface`. Cold **ground** sample (skips snow/ice pack
-  height) + frozen budget room → one `Snow` cell; else liquid. Budget full
-  → rain/slush runoff (no unbounded towers).
+  height) → one solid `Snow` cell on top of rock/sand/pack (wet surface
+  films become Snow). **Never** falls back to liquid on cold columns —
+  that used to soak mountain-top sand pores when the pack hit the cap or
+  cloud shares were fractional. Short budget / full cap → hold mass (`0`).
+- **Snow pack (now):** static solid lid. No pore soak, no grain fall.
+  Later: avalanche / settle physics, and ice/snow scour of sand & loose rock.
 - **Slush:** Snow on water — warm melts snow; cold freezes the water film
   under snow into ice (snow-on-ice pack).
 - Rate limits: freeze / thaw / slush / break per column per tick.
