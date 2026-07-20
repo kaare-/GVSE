@@ -22,6 +22,7 @@ use crate::cell::{
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::{self, for_each_region_parallel, map_regions_parallel};
+use crate::temperature::Temperature;
 
 /// Resolve the scan plan for a standalone rule call. Uses current
 /// dirty rects; if nothing is dirty, falls back to a full-world scan
@@ -907,8 +908,30 @@ pub fn apply_grain_repose(world: &mut World) {
 
 /// Repose slide restricted to a pre-planned active set.
 pub fn apply_grain_repose_regions(world: &mut World, active: &[ActiveChunk]) {
+    apply_repose_pass(world, active, None, f32::INFINITY);
+}
+
+/// Cold snap avalanche: wet sand loosens, snow/hillside ice spill onto
+/// lake ice (including a wet film on the lid). Open water is still
+/// refused for snow/ice. Call from the demo after `Temperature::step`
+/// and before [`crate::phase::apply_phase`] so thin lids can then break
+/// under the new load.
+pub fn apply_cold_avalanche(world: &mut World, temp: &Temperature, freeze_point_c: f32) {
+    let regions = regions_for_standalone(world);
+    for pass in partition_checkerboard(&regions) {
+        apply_repose_pass(world, &pass, Some(temp), freeze_point_c);
+    }
+}
+
+fn apply_repose_pass(
+    world: &mut World,
+    active: &[ActiveChunk],
+    temp: Option<&Temperature>,
+    freeze_point_c: f32,
+) {
     let seed = world.seed.0;
     let tick_no = world.tick;
+    let cold_mode = temp.is_some();
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
@@ -921,9 +944,13 @@ pub fn apply_grain_repose_regions(world: &mut World, active: &[ActiveChunk]) {
                 if dest.material != MaterialId::Air {
                     continue;
                 }
-                // Prefer a side from a stable hash so left/right don't flicker.
+                let below_dest =
+                    unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy - 1) };
                 let prefer_pos = hash_prob(seed, gx, tick_no, 0x5A17_D1EEu64) >= 0.5;
                 let order: [i32; 2] = if prefer_pos { [1, -1] } else { [-1, 1] };
+
+                // Diagonal-down pull (standard repose / cold avalanche).
+                let mut moved = false;
                 for &from_dx in &order {
                     let sx = gx + from_dx;
                     let sy = gy + 1;
@@ -932,27 +959,94 @@ pub fn apply_grain_repose_regions(world: &mut World, active: &[ActiveChunk]) {
                     else {
                         continue;
                     };
-                    if !is_repose_grain(src.material) {
-                        continue;
-                    }
-                    // Snow must not avalanche into standing water seats.
-                    if src.material == MaterialId::Snow && !dest.sat.is_empty() {
-                        continue;
-                    }
-                    // Must be supported (vertical fall owns freefall).
                     let below_src =
                         unsafe { parallel::get_cell(ptrs, wrap_width, sx, sy - 1) };
+                    if !avalanche_source_ok(src.material, below_src, cold_mode) {
+                        continue;
+                    }
                     match below_src {
                         Some(b) if b.material == MaterialId::Air => continue,
                         None => continue,
                         _ => {}
                     }
-                    let mut max_step = grain_max_stable_step(src.material);
-                    if grain_is_wet(src, below_src) {
+                    if !avalanche_seat_ok(src.material, dest, below_dest) {
+                        continue;
+                    }
+                    let cold = temp
+                        .map(|t| t.at_cell(sx, sy) <= freeze_point_c)
+                        .unwrap_or(false);
+                    if cold_mode {
+                        // Ambient [`apply_grain_repose`] already ran in tick.
+                        // This pass only adds cold wet-sand, snow→ice, and
+                        // hillside ice motion.
+                        let allowed = match src.material {
+                            MaterialId::Snow => true,
+                            MaterialId::Ice => cold,
+                            m if is_grain(m) => cold,
+                            _ => false,
+                        };
+                        if !allowed {
+                            continue;
+                        }
+                    }
+                    let wet = grain_is_wet(src, below_src);
+                    let mut max_step = if src.material == MaterialId::Ice {
+                        0 // hillside glaze — no 1-cell cliff
+                    } else {
+                        grain_max_stable_step(src.material)
+                    };
+                    if wet {
                         max_step = max_step.saturating_sub(1);
                     }
                     if !diag_drop_exceeds(ptrs, wrap_width, gx, sy, max_step) {
                         continue;
+                    }
+                    unsafe {
+                        parallel::set_cell(ptrs, wrap_width, gx, gy, src);
+                        parallel::set_cell(ptrs, wrap_width, sx, sy, dest);
+                    }
+                    moved = true;
+                    break;
+                }
+                if moved || !cold_mode {
+                    continue;
+                }
+                // Same-Y smear: cold wet sand (or snow) onto an ice lid seat.
+                if !seat_on_ice(below_dest) {
+                    continue;
+                }
+                for &from_dx in &order {
+                    let sx = gx + from_dx;
+                    let sy = gy;
+                    let Some(src) =
+                        (unsafe { parallel::get_cell(ptrs, wrap_width, sx, sy) })
+                    else {
+                        continue;
+                    };
+                    let below_src =
+                        unsafe { parallel::get_cell(ptrs, wrap_width, sx, sy - 1) };
+                    let cold = temp
+                        .map(|t| t.at_cell(sx, sy) <= freeze_point_c)
+                        .unwrap_or(false);
+                    if !cold {
+                        continue;
+                    }
+                    let wet = grain_is_wet(src, below_src);
+                    let can_smear = (is_grain(src.material) && wet)
+                        || src.material == MaterialId::Snow
+                        || (src.material == MaterialId::Ice
+                            && hillside_ice_support(below_src));
+                    if !can_smear {
+                        continue;
+                    }
+                    if !avalanche_seat_ok(src.material, dest, below_dest) {
+                        continue;
+                    }
+                    // Must be supported at source (not freefall).
+                    match below_src {
+                        Some(b) if b.material == MaterialId::Air => continue,
+                        None => continue,
+                        _ => {}
                     }
                     unsafe {
                         parallel::set_cell(ptrs, wrap_width, gx, gy, src);
@@ -973,6 +1067,41 @@ fn grain_is_wet(src: Cell, below_src: Option<Cell>) -> bool {
         below_src,
         Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
     )
+}
+
+fn seat_on_ice(below_dest: Option<Cell>) -> bool {
+    matches!(below_dest, Some(b) if b.material == MaterialId::Ice)
+}
+
+/// Snow/ice may sit on empty Air or on a wet film that rests on Ice.
+/// Dense grains may enter any Air seat (they sink through water).
+fn avalanche_seat_ok(src: MaterialId, dest: Cell, below_dest: Option<Cell>) -> bool {
+    if dest.sat.is_empty() {
+        return true;
+    }
+    if is_grain(src) {
+        return true;
+    }
+    // Snow / hillside ice: spill onto lake ice, not into open water.
+    seat_on_ice(below_dest)
+}
+
+fn hillside_ice_support(below_src: Option<Cell>) -> bool {
+    // Floating lake lids rest on wet Air or more Ice — not avalanche sources.
+    // Glaze on rock / sand / snow can peel off in a cold snap.
+    match below_src {
+        Some(b) if b.material == MaterialId::Air => false,
+        Some(b) if b.material == MaterialId::Ice => false,
+        Some(_) => true,
+        None => false,
+    }
+}
+
+fn avalanche_source_ok(mat: MaterialId, below_src: Option<Cell>, cold_mode: bool) -> bool {
+    if is_repose_grain(mat) {
+        return true;
+    }
+    cold_mode && mat == MaterialId::Ice && hillside_ice_support(below_src)
 }
 
 /// Tunables for flow bedload / bank erosion + deposition.
@@ -2752,6 +2881,89 @@ mod tests {
             MaterialId::Snow,
             "snow must not slide into standing water"
         );
+    }
+
+    fn cold_field(temp_c: f32) -> crate::temperature::Temperature {
+        let mut t = crate::temperature::Temperature::with_world_bounds(
+            4, 0, 0, 64, 64, 1, 64, 32, false,
+        );
+        t.config.base_temp_c = temp_c;
+        for v in t.cells.values_mut() {
+            *v = temp_c;
+        }
+        t
+    }
+
+    #[test]
+    fn cold_snow_spills_onto_wet_film_on_ice() {
+        let mut w = setup_column_world();
+        // Lake ice under a thin wet film; snow on the shore. Wall the
+        // open side so snow cannot diagonal-escape into empty Air.
+        w.set_cell(4, 1, Cell::solid(MaterialId::Ice));
+        w.set_cell(4, 2, Cell::water()); // wet film on ice
+        w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 2, Cell::solid(MaterialId::Snow));
+        w.set_cell(6, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(6, 2, Cell::solid(MaterialId::Stone));
+        let temp = cold_field(-6.0);
+        apply_cold_avalanche(&mut w, &temp, 0.0);
+        assert_eq!(
+            w.get_cell(4, 2).unwrap().material,
+            MaterialId::Snow,
+            "cold avalanche may seat snow on a wet film over ice"
+        );
+        assert_eq!(w.get_cell(5, 2).unwrap().material, MaterialId::Air);
+    }
+
+    #[test]
+    fn cold_snow_still_refuses_open_water() {
+        let mut w = setup_column_world();
+        // Water on both diagonal seats — no empty-Air escape.
+        w.set_cell(4, 1, Cell::water());
+        w.set_cell(6, 1, Cell::water());
+        w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 2, Cell::solid(MaterialId::Snow));
+        let temp = cold_field(-8.0);
+        apply_cold_avalanche(&mut w, &temp, 0.0);
+        assert_eq!(
+            w.get_cell(5, 2).unwrap().material,
+            MaterialId::Snow,
+            "open water (no ice) must still refuse snow"
+        );
+    }
+
+    #[test]
+    fn cold_wet_sand_smears_onto_ice_lid() {
+        let mut w = setup_column_world();
+        // Ice ledge; wet sand beside the empty seat above it. Wall +x.
+        w.set_cell(4, 1, Cell::solid(MaterialId::Ice));
+        w.set_cell(4, 2, Cell::air());
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(80);
+        w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 2, sand);
+        w.set_cell(6, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(6, 2, Cell::solid(MaterialId::Stone));
+        let temp = cold_field(-4.0);
+        apply_cold_avalanche(&mut w, &temp, 0.0);
+        assert_eq!(
+            w.get_cell(4, 2).unwrap().material,
+            MaterialId::Sand,
+            "cold wet sand should smear onto the ice lid"
+        );
+    }
+
+    #[test]
+    fn hillside_ice_slides_in_cold_avalanche() {
+        let mut w = setup_column_world();
+        w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 2, Cell::solid(MaterialId::Ice)); // glaze on rock
+        let temp = cold_field(-10.0);
+        apply_cold_avalanche(&mut w, &temp, 0.0);
+        assert_eq!(w.get_cell(5, 2).unwrap().material, MaterialId::Air);
+        let left = w.get_cell(4, 1).map(|c| c.material) == Some(MaterialId::Ice);
+        let right = w.get_cell(6, 1).map(|c| c.material) == Some(MaterialId::Ice);
+        assert!(left || right, "hillside ice peels into a diagonal seat");
     }
 
     #[test]
