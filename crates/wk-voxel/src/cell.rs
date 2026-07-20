@@ -120,18 +120,42 @@ impl Cell {
     }
 }
 
-/// True for granular materials that fall under gravity through less
-/// dense cells (Air, water-filled Air). Currently: Sand, Gravel, Clay,
-/// LooseRock. Bedrock and Stone are competent rock and stay put;
-/// Organic / Water / Air / Snow / Ice don't fall as grains here.
-///
-/// The set is intentionally coarse in v1 — density-ordered stacking
-/// between multiple grain species is a follow-up rule.
+/// True for dense granular materials that fall under gravity through
+/// Air (including water-filled Air). Sand / Gravel / Clay / LooseRock.
+/// Snow is [`is_repose_grain`] but floats on water (see grain fall).
+/// Ice stays rigid (phase break/thaw only).
 pub fn is_grain(material: MaterialId) -> bool {
     matches!(
         material,
         MaterialId::Sand | MaterialId::Gravel | MaterialId::Clay | MaterialId::LooseRock
     )
+}
+
+/// Materials that participate in angle-of-repose diagonal slides.
+/// Includes [`is_grain`] plus Snow (avalanche / soft pack).
+pub fn is_repose_grain(material: MaterialId) -> bool {
+    is_grain(material) || material == MaterialId::Snow
+}
+
+/// Dense grains soft enough for flow bedload / bank undercut.
+/// Matches the column sim's `erosion_resistance < 150` cut (excludes
+/// Stone / Limestone / Ice). Snow uses repose + phase, not bedload.
+pub fn is_flow_erodible(material: MaterialId) -> bool {
+    use wk_material::MaterialRegistry;
+    is_grain(material) && MaterialRegistry::erosion_rank(material) < 150
+}
+
+/// Max stable height step (cells) between adjacent columns before a
+/// grain slides diagonally. From `repose_rise_m / SAMPLE_WIDTH_M`:
+/// Sand≈0 (won't hold a 1-cell cliff), LooseRock≈1 (holds 45° stairs),
+/// Ice/Stone → effectively infinite (not grains).
+pub fn grain_max_stable_step(material: MaterialId) -> i32 {
+    use wk_material::{MaterialRegistry, SAMPLE_WIDTH_M};
+    let rise = MaterialRegistry::props(material).repose_rise_m;
+    if !rise.is_finite() || rise >= 1.0e6 {
+        return i32::MAX / 4;
+    }
+    (rise / SAMPLE_WIDTH_M).floor().max(0.0) as i32
 }
 
 /// Per-cell water-holding capacity as a `u8` on the same 0..255 scale
@@ -206,7 +230,10 @@ mod tests {
             MaterialId::LooseRock,
         ] {
             assert!(is_grain(m), "{m:?} should be granular");
+            assert!(is_repose_grain(m), "{m:?} should repose");
         }
+        assert!(is_repose_grain(MaterialId::Snow));
+        assert!(!is_grain(MaterialId::Snow), "snow floats — not a dense grain");
         for m in [
             MaterialId::Bedrock,
             MaterialId::Stone,
@@ -215,9 +242,31 @@ mod tests {
             MaterialId::Water,
             MaterialId::Air,
             MaterialId::Ice,
-            MaterialId::Snow,
         ] {
             assert!(!is_grain(m), "{m:?} must not be classified as a grain");
+            assert!(!is_repose_grain(m), "{m:?} must not repose");
         }
+    }
+
+    #[test]
+    fn sand_repose_step_stricter_than_loose_rock() {
+        assert_eq!(grain_max_stable_step(MaterialId::Sand), 0);
+        assert!(grain_max_stable_step(MaterialId::LooseRock) >= 1);
+        assert!(
+            grain_max_stable_step(MaterialId::Sand)
+                < grain_max_stable_step(MaterialId::LooseRock)
+        );
+    }
+
+    #[test]
+    fn flow_erodible_covers_soft_grains_not_ice() {
+        assert!(is_flow_erodible(MaterialId::Sand));
+        assert!(is_flow_erodible(MaterialId::Gravel));
+        assert!(is_flow_erodible(MaterialId::Clay));
+        assert!(is_flow_erodible(MaterialId::LooseRock));
+        assert!(!is_flow_erodible(MaterialId::Ice));
+        assert!(!is_flow_erodible(MaterialId::Snow));
+        assert!(!is_flow_erodible(MaterialId::Stone));
+        assert!(!is_flow_erodible(MaterialId::Bedrock));
     }
 }

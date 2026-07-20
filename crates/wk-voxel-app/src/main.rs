@@ -42,10 +42,11 @@ mod settings;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_condensation_rain_phased, apply_evaporation_into_humidity, apply_phase,
-    apply_karst_dissolution, apply_rain_with_temp, celestial_screen_pos_cfg, cloud_floor_y,
-    day_night_factor_cfg, humidity_diffuse_due, is_daytime_cfg, is_standing_water, sky_rgb,
-    sky_rgb_at_height, temperature_step_due, tick, ClimateConfig, Wind, World, WorldgenParams,
+    apply_condensation_rain_phased, apply_evaporation_into_humidity, apply_flow_erosion,
+    apply_karst_dissolution, apply_phase, apply_rain_with_temp, celestial_screen_pos_cfg,
+    cloud_floor_y, day_night_factor_cfg, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
+    sky_rgb, sky_rgb_at_height, temperature_step_due, tick, ClimateConfig, Wind, World,
+    WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -569,6 +570,8 @@ async fn main() {
                 apply_karst_dissolution(&mut scene.world, &settings.karst);
             }
             tick(&mut scene.world);
+            // Bedload / bank transport after water has moved this tick.
+            apply_flow_erosion(&mut scene.world, &settings.grain);
             // Atmospheric diffusion is periodic (column-GVSE
             // HumidityField cadence: every 20 ticks). Evap still
             // deposits every tick; only the spread step is throttled.

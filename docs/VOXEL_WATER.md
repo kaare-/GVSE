@@ -15,7 +15,8 @@ Demo / draw: `wk-voxel-app`.
 Each `tick`:
 
 1. **Flow substeps** (×12): `plan_active` → clear dirty → **gravity fall** → **`apply_water_flow`**
-2. Once: `plan_active` → **`apply_seepage`** → grain fall
+2. Once: `plan_active` → **`apply_seepage`** → grain fall → **grain repose**
+3. Opt-in (demo): **`apply_flow_erosion`** — cascade/head-drop water scours erodible beds/banks and deposits downhill
 
 Dirty rectangles + a 1-cell halo drive the active set. Writes rebuild dirty for the next substep.
 
@@ -50,6 +51,22 @@ Head-driven, permeability-capped soak on **cardinal** edges (`+x`, `+y` owned on
 Rate: `((permeability * 32) / 255).max(1)` when permeability &gt; 0, else 0.
 
 This is what wets a dry beach **sideways** from a puddle, and slowly equalises pore sat between sand and clay/stone. Vertical fill under a lake is dominated by **gravity**, not seepage.
+
+### Grain fall + repose
+
+- **Fall:** Sand / Gravel / Clay / LooseRock sink through Air (any sat). Snow falls through *empty* Air only (floats on water).
+- **Repose** (`apply_grain_repose`): supported grains slide diagonally into Air when the drop exceeds `floor(repose_rise_m / SAMPLE_WIDTH_m)`. Sand≈0 (no 1-cell cliffs), LooseRock≥1 (short stairs). Wet grains loosen one step. Snow avalanches on land, not into standing water.
+- Ice stays rigid (phase break / thaw only) — not a repose grain and not flow-erodible.
+
+### Flow erosion + deposition (`apply_flow_erosion`)
+
+Opt-in (wired in `wk-voxel-app` after `tick`, Tab → Grain / sediment):
+
+- Only cells with **flow bias** (cascade lip or clear head drop to a neighbor). Still lakes do not scour.
+- Targets [`is_flow_erodible`] materials: Sand / Gravel / Clay / LooseRock (`erosion_resistance < 150`). Not Ice / Stone / Snow.
+- **Bed scour** under standing water → vacated cell becomes **empty Air** (gravity pulls the column down — no minted water); **bank undercut** → Air (pore sat released).
+- Picked grain deposits on a solid-supported Air seat; any free water already in that seat soaks into the grain's pores or is pushed upward — deposit must not delete lake sat.
+- Rate scales with `1 - resistance/180` and `GrainConfig.erosion_rate`; wet grains (pore sat) erode faster.
 
 ## Material hydrology (defaults)
 
@@ -87,6 +104,7 @@ Tab → **Material permeability / porosity** overrides these at runtime (`Materi
 - `deep_stone_stack_keeps_wetting_after_surface_quiesces`
 - `stamped_lake_bed_pores_wet_under_water`
 - Shore / cascade suite (`impermeable_shore_*`, `continuous_rain_on_*`)
+- Grain repose: `sand_cliff_slides_diagonally`, `loose_rock_holds_single_step`, `snow_avalanches_off_cliff_but_not_into_water`, `sand_pile_flattens_over_ticks`
 
 ## Ice / snow / phase (milestones 1–3)
 
