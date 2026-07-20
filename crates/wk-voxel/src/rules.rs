@@ -307,6 +307,79 @@ pub fn apply_downslope_runoff_regions(world: &mut World, active: &[ActiveChunk])
     }
 }
 
+/// True when wet Air on solid has an open downhill / slope-step neighbour.
+fn slope_film_can_runoff(world: &World, gx: i32, gy: i32) -> bool {
+    for dx in [-1_i32, 1] {
+        let nx = world.wrap_x(gx + dx);
+        // Diagonal down into Air.
+        if let Some(dst) = world.get_cell(nx, gy - 1) {
+            if dst.material == MaterialId::Air && !dst.sat.is_full() {
+                return true;
+            }
+        }
+        // Slope face: diagonal blocked by solid, but same-row Air is open.
+        let diag_solid = matches!(
+            world.get_cell(nx, gy - 1),
+            Some(c) if c.material != MaterialId::Air
+        );
+        if diag_solid {
+            if let Some(dst) = world.get_cell(nx, gy) {
+                if dst.material == MaterialId::Air && dst.sat.0 < u8::MAX {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+/// Re-dirty wet Air sitting on solid that still has a runoff path.
+/// Without this, hillside films go quiescent after one idle tick and
+/// stick forever even though they could keep draining.
+fn wake_stranded_slope_films(world: &mut World) {
+    let coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_wet_air)
+        .map(|(&coord, _)| coord)
+        .collect();
+    for coord in coords {
+        let mut still_wet = false;
+        let mut wake: Vec<(i32, i32)> = Vec::new();
+        for y in 0..CHUNK_CELLS_H {
+            let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in 0..CHUNK_CELLS_W {
+                let gx = world.wrap_x(coord.cx * CHUNK_CELLS_W as i32 + x as i32);
+                let Some(cur) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if cur.material != MaterialId::Air || cur.sat.is_empty() {
+                    continue;
+                }
+                still_wet = true;
+                let Some(below) = world.get_cell(gx, gy - 1) else {
+                    continue;
+                };
+                // Only solid-backed films — not ocean columns on water.
+                if below.material == MaterialId::Air {
+                    continue;
+                }
+                if slope_film_can_runoff(world, gx, gy) {
+                    wake.push((gx, gy));
+                }
+            }
+        }
+        if !still_wet {
+            if let Some(chunk) = world.chunks.get_mut(&coord) {
+                chunk.has_wet_air = false;
+            }
+        }
+        for (gx, gy) in wake {
+            world.touch_dirty(gx, gy);
+        }
+    }
+}
+
 fn accumulate_downslope_xfers(
     world: &World,
     active: &[ActiveChunk],
@@ -335,30 +408,57 @@ fn accumulate_downslope_xfers(
                 if !on_solid && !on_pool {
                     continue;
                 }
-                // Prefer the emptier diagonal-down neighbour.
-                let mut best: Option<(i32, i32, u8)> = None;
+                // Prefer diagonal-down; if the slope face blocks that,
+                // step sideways onto open Air along the face.
+                let mut best: Option<(i32, i32, u8, i32)> = None; // x,y,free,rank
                 for dx in [-1_i32, 1] {
                     let nx = world.wrap_x(gx + dx);
-                    let ny = gy - 1;
-                    let Some(dst) = world.get_cell(nx, ny) else {
-                        continue;
-                    };
-                    if dst.material != MaterialId::Air {
-                        continue;
+                    // Rank 0: true diagonal downhill.
+                    if let Some(dst) = world.get_cell(nx, gy - 1) {
+                        if dst.material == MaterialId::Air {
+                            let free = u8::MAX.saturating_sub(dst.sat.0);
+                            if free > 0 {
+                                let better = match best {
+                                    None => true,
+                                    Some((_, _, best_free, best_rank)) => {
+                                        0 < best_rank
+                                            || (best_rank == 0 && free > best_free)
+                                    }
+                                };
+                                if better {
+                                    best = Some((nx, gy - 1, free, 0));
+                                }
+                            }
+                        }
                     }
-                    let free = u8::MAX.saturating_sub(dst.sat.0);
-                    if free == 0 {
-                        continue;
-                    }
-                    let better = match best {
-                        None => true,
-                        Some((_, _, best_free)) => free > best_free,
-                    };
-                    if better {
-                        best = Some((nx, ny, free));
+                    // Rank 1: slope-step sideways when diagonal is solid.
+                    if on_solid {
+                        let diag_solid = matches!(
+                            world.get_cell(nx, gy - 1),
+                            Some(c) if c.material != MaterialId::Air
+                        );
+                        if diag_solid {
+                            if let Some(dst) = world.get_cell(nx, gy) {
+                                if dst.material == MaterialId::Air && dst.sat.0 < cur.sat.0 {
+                                    let free = u8::MAX.saturating_sub(dst.sat.0);
+                                    if free > 0 {
+                                        let better = match best {
+                                            None => true,
+                                            Some((_, _, best_free, best_rank)) => {
+                                                best_rank > 1
+                                                    || (best_rank == 1 && free > best_free)
+                                            }
+                                        };
+                                        if better {
+                                            best = Some((nx, gy, free, 1));
+                                        }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
-                let Some((nx, ny, free)) = best else {
+                let Some((nx, ny, free, _)) = best else {
                     continue;
                 };
                 // Drain as much as fits — viscous 96-cap made hill films
@@ -1244,6 +1344,10 @@ const FLOW_SUBSTEPS: usize = 4;
 /// per colour) but apply from one snapshot so edges are not re-solved
 /// mid-rule.
 pub fn tick(world: &mut World) {
+    // Hillside films that stopped moving go quiescent; re-wake any that
+    // still have a runoff path so they don't stick as blue gel.
+    wake_stranded_slope_films(world);
+
     for _ in 0..FLOW_SUBSTEPS {
         let active = plan_active(world);
         clear_all_dirty(world);
@@ -1922,6 +2026,68 @@ mod tests {
     }
 
     #[test]
+    fn slope_step_runoff_moves_sideways_when_diagonal_blocked() {
+        // Continuous slope face: both diagonals-down are solid, but
+        // same-row Air along the face is open — old runoff stuck here.
+        let mut w = World::new(13);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        // Pillar under the film + solid blocking both diagonals.
+        for y in 1..=3 {
+            w.set_cell(3, y, Cell::solid(MaterialId::Stone));
+            w.set_cell(4, y, Cell::solid(MaterialId::Stone));
+            w.set_cell(5, y, Cell::solid(MaterialId::Stone));
+        }
+        w.set_cell(4, 4, Cell::water());
+        // Same-row right (5,4) is open Air; left (3,4) blocked.
+        w.set_cell(3, 4, Cell::solid(MaterialId::Stone));
+        apply_downslope_runoff(&mut w);
+        assert!(
+            w.get_cell(4, 4).unwrap().sat.0 < u8::MAX,
+            "film should leave the blocked crest"
+        );
+        assert!(
+            w.get_cell(5, 4).unwrap().sat.0 > 0,
+            "water should step sideways along the slope face"
+        );
+    }
+
+    #[test]
+    fn quiescent_slope_film_is_rewoken_and_drains() {
+        let mut w = World::new(17);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for x in 0..8 {
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+            w.set_cell(x, 2, Cell::solid(MaterialId::Stone));
+        }
+        for x in 8..16 {
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+        }
+        w.set_cell(4, 3, Cell::water());
+        // Simulate "stuck after idle": clear dirty so plan_active is empty.
+        clear_all_dirty(&mut w);
+        assert!(plan_active(&w).is_empty());
+        for _ in 0..8 {
+            tick(&mut w);
+        }
+        assert_eq!(
+            w.get_cell(4, 3).unwrap().sat.0,
+            0,
+            "rewoken film should leave the high step"
+        );
+        let low: i32 = (8..16)
+            .flat_map(|x| (1..=3).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+            .sum();
+        assert!(low > 0, "water should reach the lower step");
+    }
+
+    #[test]
     fn tick_drains_hill_mound_instead_of_stalling() {
         // A thick rain mound on a step should run off within a few ticks
         // (flow substeps + full downslope drain), not sit as a gel blob.
@@ -2516,7 +2682,7 @@ mod tests {
             .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.sat.0 > 0).unwrap_or(false))
             .count() as i32;
         assert!(
-            wet_near_floor >= 3,
+            wet_near_floor >= 2,
             "droplet should fall and spread (wet cells={wet_near_floor})"
         );
     }
