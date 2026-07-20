@@ -95,12 +95,16 @@ Demo toggle: **`I`**.
 
 Pass order per column: **cull → break unsupported → water-on-ice/slush → thaw → freeze**.
 
-- Uses the existing coarse `Temperature` field (not a per-cell heat sim).
+- Uses the coarse **thermal field** (`Temperature`, 4×4 tiles, step every
+  20 ticks — not every physics tick). Climate sets a skin target; surface
+  **heat capacity** / **albedo** from `wk-material` (water high, snow
+  reflective, organics warm-buffered) lag snaps so lakes and peaks don’t
+  flash-freeze when Tab moves base temp.
 - **Freeze:** standing free-surface wet Air (`sat ≥ min_sat_to_freeze`) when
   `temp ≤ freeze_point_c` → whole `Ice` cell (lake skin). **Cold lids then
   thicken downward** one cell / tick into wet Air under Ice/Snow so deep
   ponds and peak “ice castles” freeze through instead of sitting liquid at
-  −20 °C under a 1-px skin. Full per-cell heat capacity / albedo is later.
+  −20 °C under a 1-px skin.
 - **Thaw:** top-of-stack Ice/Snow when `temp > freeze_point_c` → `Air+FULL`.
 - **Rain on ice:** stays as a water film on top (no density-swap under the
   sheet — that lofted ice into the rain). Melts the ice when warm, or when

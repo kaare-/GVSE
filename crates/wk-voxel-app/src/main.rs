@@ -574,7 +574,9 @@ async fn main() {
             }
             if temperature_step_due(scene.world.tick) {
                 let tick_no = scene.world.tick;
-                scene.temperature.step(&scene.humidity, tick_no);
+                scene
+                    .temperature
+                    .step(Some(&scene.world), &scene.humidity, tick_no);
             }
             // Phase after the temp step so a Tab cold/warm snap applies
             // the same frame (column order: thermal → phase change).

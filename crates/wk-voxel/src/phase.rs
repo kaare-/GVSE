@@ -17,7 +17,9 @@
 //! Cold ice lids **thicken downward** one cell per tick (wet Air under
 //! Ice/Snow) so lakes do not stay liquid under a 1-px skin, and peak
 //! "ice castles" of trapped water freeze through instead of sitting at
-//! −20 °C forever. Full per-cell thermal fields come later.
+//! −20 °C forever. The lagged thermal field (`Temperature::step` with
+//! material heat capacity) softens climate snaps; organics will read
+//! the same field.
 //!
 //! Snow on cold ground is a **solid pack** on top of the material — it
 //! does not soak pores. Avalanche / scour physics come later.
