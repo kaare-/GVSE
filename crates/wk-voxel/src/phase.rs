@@ -53,9 +53,10 @@ pub struct PhaseConfig {
     pub max_slush_cells_per_column_per_tick: u8,
     /// Max unsupported Ice/Snow cells that may break **per column per tick**.
     pub max_break_cells_per_column_per_tick: u8,
-    /// Minimum precip budget (sat units) to place one Snow cell.
-    /// Cold columns never convert a shortfall into liquid rain (that
-    /// soaked mountain-top sand); the caller keeps the mass instead.
+    /// Minimum precip budget (sat units) to place one Snow / frost Ice
+    /// cell. Must be a **full cell** (`255`): thaw / slush / break always
+    /// yield `Air+FULL`, so seating a solid from a 40–64 droplet minted
+    /// ~200 sat into the basin on melt. Shortfall → hold (`0`).
     pub min_budget_to_snow: f32,
     /// Hard cap on Ice+Snow cells stacked in one column. Excess at the
     /// top is culled to empty Air (removed, not melted — melting would
@@ -110,7 +111,7 @@ impl Default for PhaseConfig {
             max_thaw_cells_per_column_per_tick: 1,
             max_slush_cells_per_column_per_tick: 1,
             max_break_cells_per_column_per_tick: 2,
-            min_budget_to_snow: 32.0,
+            min_budget_to_snow: 255.0,
             max_ice_cells_per_column: 12,
             snow_spread_radius: 6,
             snow_blanket_depth: 2,
@@ -304,8 +305,9 @@ pub fn deposit_precip_on_surface(
     if ground_t > phase.freeze_point_c {
         return deposit_water_on_surface(world, gx, start_y, budget);
     }
-    // Cold air + cold ground: solid snow pack only.
-    if budget < phase.min_budget_to_snow {
+    // Cold air + cold ground: solid snow pack only — full cell or hold.
+    let need = phase.min_budget_to_snow.max(u8::MAX as f32);
+    if budget < need {
         return 0.0;
     }
     deposit_snow_spread(world, gx, start_y, temp, phase).unwrap_or(0.0)
@@ -338,14 +340,13 @@ pub fn deposit_condensate_on_surface(
     if air_t > phase.freeze_point_c || ground_t > phase.freeze_point_c {
         return deposit_water_on_surface(world, gx, start_y, budget);
     }
-    // Cold frost glaze — need enough mass for one solid cell seat.
-    if budget < phase.min_budget_to_snow {
+    // Cold frost glaze — one full Ice cell, paid in full (thaw → FULL).
+    let need = phase.min_budget_to_snow.max(u8::MAX as f32);
+    if budget < need {
         return 0.0;
     }
     match deposit_frost_coat(world, gx, start_y, temp, phase) {
-        // Drain only what the humidity event offered (ice cell is the
-        // solid seat; don't invent a full 255 drain from a 96 droplet).
-        Some(_) => budget.min(u8::MAX as f32),
+        Some(consumed) => consumed,
         None => 0.0,
     }
 }
@@ -1213,9 +1214,27 @@ mod tests {
         w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
         let temp = cold_temp(16, 16, -6.0);
         let cfg = PhaseConfig::default();
-        let landed = deposit_precip_on_surface(&mut w, 2, 10, 64.0, Some(&temp), Some(&cfg));
+        let landed = deposit_precip_on_surface(&mut w, 2, 10, 255.0, Some(&temp), Some(&cfg));
         assert!(landed > 0.0);
         assert_eq!(w.get_cell(2, 2).unwrap().material, MaterialId::Snow);
+    }
+
+    #[test]
+    fn underpaid_cold_precip_does_not_mint_snow_cell() {
+        // Climatic droplet_sat=64 used to seat Snow then thaw to FULL (+191).
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        let temp = cold_temp(16, 16, -10.0);
+        let cfg = PhaseConfig::default();
+        let landed = deposit_precip_on_surface(&mut w, 2, 10, 64.0, Some(&temp), Some(&cfg));
+        assert_eq!(landed, 0.0, "must hold — not seat underpaid Snow");
+        assert_ne!(
+            w.get_cell(2, 2).map(|c| c.material),
+            Some(MaterialId::Snow)
+        );
+        assert_eq!(w.get_cell(2, 2).map(|c| c.sat.0), Some(0));
     }
 
     #[test]
@@ -1327,7 +1346,7 @@ mod tests {
             snow_blanket_depth: 2,
             ..PhaseConfig::default()
         };
-        let landed = deposit_precip_on_surface(&mut w, 3, 20, 64.0, Some(&temp), Some(&cfg));
+        let landed = deposit_precip_on_surface(&mut w, 3, 20, 255.0, Some(&temp), Some(&cfg));
         assert!(landed > 0.0);
         assert_eq!(
             frozen_count_in_column(&w, 3),
@@ -1352,9 +1371,12 @@ mod tests {
         w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
         let temp = cold_temp(16, 16, -10.0);
         let cfg = PhaseConfig::default();
-        let first =
+        let underpay =
             deposit_condensate_on_surface(&mut w, 2, 12, 96.0, Some(&temp), Some(&cfg));
-        assert!(first > 0.0);
+        assert_eq!(underpay, 0.0, "underpaid frost must not mint Ice");
+        let first =
+            deposit_condensate_on_surface(&mut w, 2, 12, 255.0, Some(&temp), Some(&cfg));
+        assert_eq!(first, 255.0);
         assert_eq!(w.get_cell(2, 2).unwrap().material, MaterialId::Ice);
         assert_ne!(w.get_cell(2, 2).unwrap().material, MaterialId::Snow);
         let second =
@@ -1368,6 +1390,31 @@ mod tests {
                 "no frost tower at y={y}"
             );
         }
+    }
+
+    #[test]
+    fn frost_thaw_roundtrip_does_not_mint_water() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        let cold = cold_temp(16, 16, -10.0);
+        let warm = cold_temp(16, 16, 8.0);
+        let cfg = PhaseConfig::default();
+        let paid =
+            deposit_condensate_on_surface(&mut w, 2, 12, 255.0, Some(&cold), Some(&cfg));
+        assert_eq!(paid, 255.0);
+        apply_phase(&mut w, &warm, &cfg);
+        assert_eq!(
+            w.get_cell(2, 2).unwrap().material,
+            MaterialId::Air,
+            "frost must thaw to water"
+        );
+        assert_eq!(
+            w.get_cell(2, 2).unwrap().sat.0,
+            u8::MAX,
+            "thaw yields one full cell — equal to the frost payment"
+        );
     }
 
     #[test]
@@ -1402,7 +1449,7 @@ mod tests {
         w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
         let temp = cold_temp(16, 16, -12.0);
         let cfg = PhaseConfig::default();
-        let landed = deposit_precip_on_surface(&mut w, 2, 12, 64.0, Some(&temp), Some(&cfg));
+        let landed = deposit_precip_on_surface(&mut w, 2, 12, 255.0, Some(&temp), Some(&cfg));
         assert!(landed > 0.0);
         assert_eq!(
             w.get_cell(2, 2).unwrap().material,
@@ -1434,8 +1481,14 @@ mod tests {
             },
         );
         let temp = cold_temp(16, 16, -12.0);
-        let landed =
-            deposit_precip_on_surface(&mut w, 2, 12, 64.0, Some(&temp), Some(&PhaseConfig::default()));
+        let landed = deposit_precip_on_surface(
+            &mut w,
+            2,
+            12,
+            255.0,
+            Some(&temp),
+            Some(&PhaseConfig::default()),
+        );
         assert!(landed > 0.0);
         assert_eq!(w.get_cell(2, 2).unwrap().material, MaterialId::Snow);
         assert_eq!(w.get_cell(2, 1).unwrap().sat.0, 0);

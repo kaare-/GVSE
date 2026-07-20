@@ -2076,7 +2076,7 @@ pub fn apply_condensation_rain_phased(
         if take_mass <= 0.0 {
             continue;
         }
-        let landed = crate::phase::deposit_condensate_on_surface(
+        let mut landed = crate::phase::deposit_condensate_on_surface(
             world,
             centre_gx,
             cfg.top_y,
@@ -2084,6 +2084,18 @@ pub fn apply_condensation_rain_phased(
             temp,
             phase,
         );
+        // Cold frost needs a full cell (255). Small drizzle budgets refuse;
+        // retry once from the tile so rime can still form without underpaying.
+        if landed <= 0.0 && mass >= u8::MAX as f32 {
+            landed = crate::phase::deposit_condensate_on_surface(
+                world,
+                centre_gx,
+                cfg.top_y,
+                u8::MAX as f32,
+                temp,
+                phase,
+            );
+        }
         if landed <= 0.0 {
             continue;
         }
@@ -4391,6 +4403,7 @@ mod tests {
         let (mut w, mut h) = setup_cloud_world();
         w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
         h.add(1, 30, 2000.0);
+        let hum_before = h.total_mass();
         let mut temp = crate::temperature::Temperature::with_world_bounds(
             4, 0, 0, 64, 64, 1, 64, 32, false,
         );
@@ -4398,10 +4411,12 @@ mod tests {
         for v in temp.cells.values_mut() {
             *v = -12.0;
         }
+        // Demo uses small drizzle droplets; frost still pays a full cell
+        // via the humidity-tile retry when mass ≥ 255.
         let cfg = CondensationConfig {
             top_y: 30,
             max_prob_per_tick: 1.0,
-            mass_per_droplet: 255.0,
+            mass_per_droplet: 40.0,
             ..CondensationConfig::default()
         };
         let phase = crate::phase::PhaseConfig::default();
@@ -4435,6 +4450,16 @@ mod tests {
                 "frost must stay a thin coat — no ice tower at y={y}"
             );
         }
+        let drained = hum_before - h.total_mass();
+        // Lateral frost coat may seat several columns; each seat costs 255.
+        assert!(
+            drained >= 255.0 - 1e-3,
+            "frost must drain at least one full cell (got {drained})"
+        );
+        assert!(
+            (drained / 255.0 - (drained / 255.0).round()).abs() < 1e-3,
+            "frost drains must be whole cells (got {drained})"
+        );
     }
 
     #[test]

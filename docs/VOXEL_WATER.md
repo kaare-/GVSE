@@ -146,10 +146,16 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   cloud height) chooses flake vs drop. Snow that hits **warm ground**
   melts to liquid; cold air + cold ground → solid `Snow` pack (never
   pore-soaks). Warm air always rains (ponds may freeze later via phase).
-  Short budget / full blanket on the snow path → hold mass (`0`).
+  Solid seats cost a **full cell** (`min_budget_to_snow` default 255) —
+  thaw always yields `Air+FULL`, so a 64-sat droplet must not mint a
+  Snow cell. Short budget / full blanket → hold mass (`0`).
 - **Condensation drizzle (`C`):** warm → liquid film; cold air on cold
-  ground → thin `Ice` frost / rime (≤ `frost_coat_depth`, default 1).
-  Never places `Snow` packs or ice towers — clouds own real snow.
+  ground → thin `Ice` frost / rime (≤ `frost_coat_depth`, default 1),
+  also paid as a full cell from the humidity tile. Never places `Snow`
+  packs or ice towers — clouds own real snow.
+- **Climatic rain (`W`):** open faucet (no humidity drain). Prefer clouds
+  + condensation for closed-loop mass; with `rain=on` lakes can still
+  rise slowly by design.
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
   the blanket. Cloud downpour uses a wider footprint when snowing.
