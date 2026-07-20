@@ -72,6 +72,10 @@ pub struct PhaseConfig {
     /// Max Ice+Snow from **condensation frost** (rime / glaze) on a
     /// column. Real frost is a thin coat — not snow towers. Default `1`.
     pub frost_coat_depth: u8,
+    /// Lateral search radius (columns) when seating condensation frost.
+    /// Independent of [`Self::snow_spread_radius`] so rime can stay local
+    /// while cloud snow blankets widely. Default `3`.
+    pub frost_spread_radius: i32,
     /// Master switch for the whole phase pass (`I` in the demo).
     pub enabled: bool,
     /// Convert standing water → Ice when cold.
@@ -116,6 +120,7 @@ impl Default for PhaseConfig {
             snow_spread_radius: 6,
             snow_blanket_depth: 2,
             frost_coat_depth: 1,
+            frost_spread_radius: 3,
             enabled: true,
             enable_freeze: true,
             enable_thaw: true,
@@ -361,8 +366,7 @@ fn deposit_frost_coat(
     phase: &PhaseConfig,
 ) -> Option<f32> {
     let max_coat = phase.frost_coat_depth.max(1) as usize;
-    // Small lateral search — frost coats slopes, it doesn't plume.
-    let radius = phase.snow_spread_radius.min(3).max(0);
+    let radius = phase.frost_spread_radius.max(0);
     let mut candidates: Vec<(i32, usize, i32)> = Vec::with_capacity((radius * 2 + 1) as usize);
     for dx in -radius..=radius {
         let cx = world.wrap_x(gx + dx);

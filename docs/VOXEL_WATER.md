@@ -150,9 +150,13 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   thaw always yields `Air+FULL`, so a 64-sat droplet must not mint a
   Snow cell. Short budget / full blanket → hold mass (`0`).
 - **Condensation drizzle (`C`):** warm → liquid film; cold air on cold
-  ground → thin `Ice` frost / rime (≤ `frost_coat_depth`, default 1),
-  also paid as a full cell from the humidity tile. Never places `Snow`
-  packs or ice towers — clouds own real snow.
+  ground → thin `Ice` frost / rime (≤ `frost_coat_depth`, default 1;
+  lateral `frost_spread_radius`, default 3), also paid as a full cell
+  from the humidity tile. Never places `Snow` packs or ice towers —
+  clouds own real snow. Tab exposes both frost knobs.
+- **Cloud snow footprint (Tab → Clouds):** `snow_footprint_mult` /
+  `snow_span_mult` widen the column fan vs rain; `snow_cells_per_tick`
+  caps full-cell snow seats per parcel per tick.
 - **Climatic rain (`W`):** open faucet (no humidity drain). Prefer clouds
   + condensation for closed-loop mass; with `rain=on` lakes can still
   rise slowly by design.
