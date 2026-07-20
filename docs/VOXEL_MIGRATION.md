@@ -270,10 +270,10 @@ Initial overlays we plan to introduce, in rough order:
 1. **Moisture / saturation.** Really the cell's own `sat`; no
    separate heatmap needed. Listed for completeness.
 2. **Temperature (thermal field).** °C per tile, coarse (`cells_per_side = 4`),
-   stepped on a ~20-tick cadence. Climate skin is the forcing; material
-   `heat_capacity` / `albedo` (and standing-water stack depth) supply
-   inertia so landscape and water hold heat/cold for phase change and
-   future organics — not a full volumetric solver yet.
+   stepped on a ~20-tick cadence. Layered: air ↔ climate skin; surface
+   water/rock with high `heat_capacity` / `albedo`; buried rock on a
+   geothermal gradient with a slow upward heat leak. Enough inertia for
+   phase change and future organics — not a full volumetric solver yet.
 3. **Humidity.** Atmospheric water mass per tile (sparse
    `Humidity` map, `tile_cols = 4`). Evaporation deposits every
    tick; **diffusion runs on a schedule** (`humidity_diffuse_due`,

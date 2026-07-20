@@ -3,12 +3,16 @@
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
 //! Coarse **thermal field** (°C) on the same 4×4 tile grid as humidity /
-//! wind. Climate sets a skin target; landscape and water supply
-//! **heat capacity** and **albedo** so ponds and peaks lag snaps instead
-//! of freezing/thawing the instant Tab moves base temp.
+//! wind.
 //!
-//! Cadence matches humidity diffuse ([`TEMP_STEP_PERIOD`] = 20) — not
-//! every physics tick. Organics can later read the same lagged field.
+//! - **Air** tiles track the climate skin (day/night, clouds).
+//! - **Surface** (rock / sand / lakes / snow) has high heat capacity and
+//!   only weakly couples to the skin — water and rock do not slam from
+//!   +20 °C to −10 °C in one night.
+//! - **Buried** rock ignores solar/night air; it relaxes toward a
+//!   geothermal profile and slowly leaks heat upward by diffusion.
+//!
+//! Cadence: [`TEMP_STEP_PERIOD`] = 20 — not every physics tick.
 
 use std::collections::HashMap;
 
@@ -30,7 +34,7 @@ pub fn temperature_step_due(tick: u64) -> bool {
     tick % TEMP_STEP_PERIOD == TEMP_STEP_PHASE
 }
 
-/// Live-tunable temperature / solar / inertia knobs.
+/// Live-tunable temperature / solar / inertia / geothermal knobs.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct TempConfig {
     pub base_temp_c: f32,
@@ -45,16 +49,24 @@ pub struct TempConfig {
     /// Base relax rate toward climate skin (air-like surfaces).
     pub sky_relax: f32,
     pub diffuse_alpha: f32,
-    /// Scales material [`MaterialProps::heat_capacity`] into inertia:
+    /// Scales material heat capacity into surface inertia:
     /// `relax = sky_relax / (1 + capacity * inertia_scale)`.
     pub inertia_scale: f32,
-    /// Floor / ceiling on per-tile relax so deep water still moves,
-    /// and bare air doesn't stick.
     pub min_relax: f32,
     pub max_relax: f32,
-    /// Extra capacity per standing-water / ice cell in the surface stack
-    /// (lakes hold more heat than a 1-cell film).
+    /// Extra capacity per standing-water / ice cell in the surface stack.
     pub water_stack_cap: f32,
+    /// Night radiative cool multiplier on surface water (<< rock/air).
+    pub water_night_cool_scale: f32,
+    /// Deep-rock geothermal target at the surface interface (°C).
+    pub geothermal_surface_c: f32,
+    /// Extra °C per cell of depth below the free surface.
+    pub geothermal_gradient_c_per_cell: f32,
+    /// Relax rate of buried tiles toward the geothermal profile.
+    pub geothermal_relax: f32,
+    /// Constant heat added each thermal step to the deepest buried band
+    /// (slow upward leak once diffusion carries it).
+    pub geothermal_flux_c: f32,
 }
 
 impl Default for TempConfig {
@@ -69,14 +81,26 @@ impl Default for TempConfig {
             night_cool_c: 0.30,
             cloud_shade: 0.55,
             hum_shade_ref: 80.0,
-            sky_relax: 0.10,
-            diffuse_alpha: 0.12,
-            inertia_scale: 0.55,
-            min_relax: 0.012,
-            max_relax: 0.22,
-            water_stack_cap: 0.35,
+            sky_relax: 0.12,
+            diffuse_alpha: 0.10,
+            inertia_scale: 1.6,
+            min_relax: 0.003,
+            max_relax: 0.28,
+            water_stack_cap: 1.4,
+            water_night_cool_scale: 0.15,
+            geothermal_surface_c: 10.0,
+            geothermal_gradient_c_per_cell: 0.35,
+            geothermal_relax: 0.018,
+            geothermal_flux_c: 0.04,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum TileLayer {
+    Air,
+    Surface { watery: bool },
+    Buried { depth_cells: f32 },
 }
 
 /// Sparse (but usually dense-filled) temperature field in °C.
@@ -170,35 +194,51 @@ impl Temperature {
         self.cells.values().sum::<f32>() / self.cells.len() as f32
     }
 
-    /// Fill every in-bounds tile from climate skin at `tick`.
+    /// Geothermal target (°C) at `depth_cells` below the free surface.
+    pub fn geothermal_at_depth(&self, depth_cells: f32) -> f32 {
+        let cfg = &self.config;
+        cfg.geothermal_surface_c + cfg.geothermal_gradient_c_per_cell * depth_cells.max(0.0)
+    }
+
+    /// Fill tiles: air/surface from climate skin; buried from geothermal.
     pub fn fill_initial(&mut self, tick: u64) {
         let Some(b) = self.bounds else {
             return;
         };
         self.cells.clear();
+        let tc = self.tile_cols.max(1);
         for hy in b.hy_min..=b.hy_max {
             for hx in b.hx_min..=b.hx_max {
-                self.cells.insert((hx, hy), self.skin_temp(hx, hy, tick));
+                let surf = self.column_surface_y_estimate(hx);
+                let mid = hy * tc + tc / 2;
+                let depth = (surf - mid) as f32;
+                let t0 = if depth > tc as f32 {
+                    self.geothermal_at_depth(depth)
+                } else {
+                    self.skin_temp(hx, hy, tick)
+                };
+                self.cells.insert((hx, hy), t0);
             }
         }
     }
 
-    fn land_factor(&self, hx: i32) -> f32 {
+    fn column_surface_y_estimate(&self, hx: i32) -> i32 {
         let tc = self.tile_cols.max(1);
         let gx = hx * tc + tc / 2;
-        let s = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
+        continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols)
+    }
+
+    fn land_factor(&self, hx: i32) -> f32 {
+        let s = self.column_surface_y_estimate(hx);
         let d = (s - self.sea_level_y) as f32;
         ((d + 2.0) / 4.0).clamp(0.0, 1.0)
     }
 
     fn elev_cells(&self, hx: i32) -> f32 {
-        let tc = self.tile_cols.max(1);
-        let gx = hx * tc + tc / 2;
-        let s = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
-        (s - self.sea_level_y).max(0) as f32
+        (self.column_surface_y_estimate(hx) - self.sea_level_y).max(0) as f32
     }
 
-    /// Target skin temperature for a tile at climate phase `tick`.
+    /// Target skin temperature for air / surface coupling at `tick`.
     pub fn skin_temp(&self, hx: i32, hy: i32, tick: u64) -> f32 {
         let _ = hy;
         let cfg = &self.config;
@@ -210,10 +250,9 @@ impl Temperature {
         cfg.base_temp_c + sea_land - cfg.lapse_c * elev + cfg.day_amp_c * dn
     }
 
-    /// Climate-driven thermal step with material inertia + light diffusion.
+    /// One thermal step: layered forcing + inertia + diffusion.
     ///
-    /// `world` supplies surface heat capacity / albedo (water, ice, sand…).
-    /// Pass `None` only in unit tests that exercise the air-like path.
+    /// `world` supplies surface materials. Pass `None` only for air-only tests.
     pub fn step(&mut self, world: Option<&World>, humidity: &Humidity, tick: u64) {
         if self.cells.is_empty() {
             self.fill_initial(tick);
@@ -221,27 +260,68 @@ impl Temperature {
         let dn = day_night_factor_cfg(tick, &self.climate);
         let cfg = self.config;
         let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
+        // Lowest world-y tile band (= deepest underground).
+        let mut deepest_hy = i32::MAX;
+        for &(_, hy) in &keys {
+            deepest_hy = deepest_hy.min(hy);
+        }
         for (hx, hy) in keys {
-            let (cap, albedo) = tile_thermal_props(self, world, hx, hy);
-            let shade = (humidity.at_tile(hx, hy) / cfg.hum_shade_ref.max(1.0)).clamp(0.0, 1.0);
-            let solar = cfg.solar_heat_c
-                * dn.max(0.0)
-                * (1.0 - cfg.cloud_shade * shade)
-                * (1.0 - albedo.clamp(0.0, 0.95));
-            let cool = cfg.night_cool_c * (-dn).max(0.0);
-            let skin = self.skin_temp(hx, hy, tick);
+            let props = tile_thermal_props(self, world, hx, hy);
             let t = self.at_tile(hx, hy);
-            let relax = (cfg.sky_relax / (1.0 + cap.max(0.05) * cfg.inertia_scale))
-                .clamp(cfg.min_relax, cfg.max_relax);
-            let mut next = t + solar - cool;
-            next = next + (skin - next) * relax;
+            let next = match props.layer {
+                TileLayer::Air => {
+                    let shade =
+                        (humidity.at_tile(hx, hy) / cfg.hum_shade_ref.max(1.0)).clamp(0.0, 1.0);
+                    let solar = cfg.solar_heat_c
+                        * dn.max(0.0)
+                        * (1.0 - cfg.cloud_shade * shade);
+                    let cool = cfg.night_cool_c * (-dn).max(0.0);
+                    let skin = self.skin_temp(hx, hy, tick);
+                    let relax = cfg.sky_relax.clamp(cfg.min_relax, cfg.max_relax);
+                    let n = t + solar - cool;
+                    n + (skin - n) * relax
+                }
+                TileLayer::Surface { watery } => {
+                    let shade =
+                        (humidity.at_tile(hx, hy) / cfg.hum_shade_ref.max(1.0)).clamp(0.0, 1.0);
+                    let solar = cfg.solar_heat_c
+                        * dn.max(0.0)
+                        * (1.0 - cfg.cloud_shade * shade)
+                        * (1.0 - props.albedo.clamp(0.0, 0.95));
+                    let cool_scale = if watery {
+                        cfg.water_night_cool_scale
+                    } else {
+                        1.0
+                    };
+                    let cool = cfg.night_cool_c * (-dn).max(0.0) * cool_scale;
+                    let skin = self.skin_temp(hx, hy, tick);
+                    let relax = (cfg.sky_relax
+                        / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale))
+                        .clamp(cfg.min_relax, cfg.max_relax);
+                    let n = t + solar - cool;
+                    n + (skin - n) * relax
+                }
+                TileLayer::Buried { depth_cells } => {
+                    // No solar / night air. Hold heat; ease toward geothermal.
+                    let geo = self.geothermal_at_depth(depth_cells);
+                    let relax = (cfg.geothermal_relax
+                        / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale * 0.35))
+                        .clamp(0.001, 0.08);
+                    let mut n = t + (geo - t) * relax;
+                    // Deepest band gets a small constant flux (mantle leak).
+                    if hy <= deepest_hy + 1 {
+                        n += cfg.geothermal_flux_c;
+                    }
+                    n
+                }
+            };
             self.cells.insert((hx, hy), next);
         }
         self.diffuse(cfg.diffuse_alpha);
     }
 
-    /// Pairwise temperature diffusion (does not prune tiles — cold air
-    /// is still a real temperature).
+    /// Pairwise temperature diffusion. Vertical mix is gentle so night air
+    /// cannot drain lakes, but warm bedrock still leaks heat upward.
     pub fn diffuse(&mut self, alpha: f32) {
         let alpha = alpha.clamp(0.0, 0.25);
         if alpha == 0.0 || self.cells.is_empty() {
@@ -265,12 +345,11 @@ impl Temperature {
                     }
                 }
             }
-            // Vertical mix is gentler so fast air tiles don't instantly
-            // drain heat out of high-capacity surface / lake tiles.
             let n_key = (hx, hy + 1);
             if self.accepts(n_key.0, n_key.1) {
                 let n_val = *snap.get(&n_key).unwrap_or(&base);
-                let flow = (val - n_val) * alpha * 0.45;
+                // Mild vertical conductivity — geothermal path upward.
+                let flow = (val - n_val) * alpha * 0.35;
                 if flow.abs() >= 1e-9 {
                     *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
                     *deltas.entry(n_key).or_insert(0.0) += flow;
@@ -285,20 +364,28 @@ impl Temperature {
     }
 }
 
-/// Heat capacity + albedo for a temperature tile from voxel columns in
-/// the tile (averaged — a 4-wide tile may mix shore and pond).
+struct TileThermal {
+    layer: TileLayer,
+    capacity: f32,
+    albedo: f32,
+}
+
 fn tile_thermal_props(
     temp: &Temperature,
     world: Option<&World>,
     hx: i32,
     hy: i32,
-) -> (f32, f32) {
+) -> TileThermal {
     let air = MaterialRegistry::props(MaterialId::Air);
-    let Some(world) = world else {
-        return (air.heat_capacity, air.albedo);
-    };
     let tc = temp.tile_cols.max(1);
     let tile_mid_y = hy * tc + tc / 2;
+    let Some(world) = world else {
+        return TileThermal {
+            layer: TileLayer::Air,
+            capacity: air.heat_capacity,
+            albedo: air.albedo,
+        };
+    };
     let (y_lo, y_hi) = match temp.bounds {
         Some(b) => (b.hy_min * tc - 2, b.hy_max * tc + tc + 2),
         None => {
@@ -310,37 +397,58 @@ fn tile_thermal_props(
     let mut cap_sum = 0.0;
     let mut alb_sum = 0.0;
     let mut surf_sum = 0.0;
+    let mut water_cols = 0.0;
     let mut n = 0.0;
     for lx in 0..tc {
         let gx = world.wrap_x(hx * tc + lx);
         let rock = continental_surface_y(temp.seed, gx, temp.sea_level_y, temp.width_cols);
-        let (surf_y, cap, albedo) =
+        let (surf_y, cap, albedo, watery) =
             column_surface_thermal(world, gx, y_lo, y_hi, rock, &temp.config);
         cap_sum += cap;
         alb_sum += albedo;
         surf_sum += surf_y as f32;
+        if watery {
+            water_cols += 1.0;
+        }
         n += 1.0;
     }
     if n < 1.0 {
-        return (air.heat_capacity, air.albedo);
+        return TileThermal {
+            layer: TileLayer::Air,
+            capacity: air.heat_capacity,
+            albedo: air.albedo,
+        };
     }
     let surf_y = (surf_sum / n).round() as i32;
     let cap = cap_sum / n;
     let albedo = alb_sum / n;
-    // Free-air tiles above the column top track climate quickly.
+    let watery = water_cols / n >= 0.5;
+
     if tile_mid_y > surf_y + tc {
-        return (air.heat_capacity, air.albedo);
+        return TileThermal {
+            layer: TileLayer::Air,
+            capacity: air.heat_capacity,
+            albedo: air.albedo,
+        };
     }
-    // Buried rock tiles: solid capacity, no solar albedo.
     if tile_mid_y + tc < surf_y {
-        let stone = MaterialRegistry::props(MaterialId::Stone);
-        return (stone.heat_capacity * 1.15, 0.0);
+        let bedrock = MaterialRegistry::props(MaterialId::Bedrock);
+        let depth = (surf_y - tile_mid_y) as f32;
+        return TileThermal {
+            layer: TileLayer::Buried { depth_cells: depth },
+            capacity: bedrock.heat_capacity * 1.25,
+            albedo: 0.0,
+        };
     }
-    (cap, albedo)
+    TileThermal {
+        layer: TileLayer::Surface { watery },
+        capacity: cap,
+        albedo,
+    }
 }
 
 /// Scan a column for the surface stack: pack / water / ground.
-/// Returns `(surface_y, heat_capacity, albedo)`.
+/// Returns `(surface_y, heat_capacity, albedo, is_watery)`.
 fn column_surface_thermal(
     world: &World,
     gx: i32,
@@ -348,11 +456,10 @@ fn column_surface_thermal(
     y_hi: i32,
     fallback_y: i32,
     cfg: &TempConfig,
-) -> (i32, f32, f32) {
+) -> (i32, f32, f32, bool) {
     let gx = world.wrap_x(gx);
     let mut top_y = fallback_y;
     let mut top_cell: Option<Cell> = None;
-    // Top-down: first solid / wet / frozen cell is the free surface.
     for y in (y_lo..=y_hi).rev() {
         let Some(cell) = world.get_cell(gx, y) else {
             continue;
@@ -374,7 +481,7 @@ fn column_surface_thermal(
         if wet_air || cell.material == MaterialId::Water || frozen {
             water_like += 1;
         } else {
-            break; // ground or empty under the stack
+            break;
         }
     }
     let cell = top_cell.unwrap_or(Cell::solid(MaterialId::Stone));
@@ -386,7 +493,9 @@ fn column_surface_thermal(
     let props = MaterialRegistry::props(mat);
     let stack = (water_like.saturating_sub(1) as f32).max(0.0);
     let cap = props.heat_capacity + stack * cfg.water_stack_cap;
-    (top_y, cap, props.albedo)
+    let watery = water_like > 0
+        || matches!(mat, MaterialId::Water | MaterialId::Ice);
+    (top_y, cap, props.albedo, watery)
 }
 
 #[cfg(test)]
@@ -425,7 +534,6 @@ mod tests {
     fn noon_mean_warmer_than_midnight_after_steps() {
         let (mut day, h) = demo_temp();
         let (mut night, _) = demo_temp();
-        // tick 0 = noon, DEMO_DAY_TICKS/2 = midnight.
         for _ in 0..8 {
             day.step(None, &h, 0);
             night.step(None, &h, DEMO_DAY_TICKS / 2);
@@ -442,7 +550,6 @@ mod tests {
     fn clouds_shade_daytime_heating() {
         let (mut clear, h_clear) = demo_temp();
         let (mut cloudy, mut h_cloud) = demo_temp();
-        // Saturate one map with cloud mass.
         if let Some(b) = h_cloud.bounds {
             for hy in b.hy_min..=b.hy_max {
                 for hx in b.hx_min..=b.hx_max {
@@ -453,7 +560,7 @@ mod tests {
             }
         }
         for _ in 0..6 {
-            clear.step(None, &h_clear, 0); // noon
+            clear.step(None, &h_clear, 0);
             cloudy.step(None, &h_cloud, 0);
         }
         assert!(
@@ -471,7 +578,6 @@ mod tests {
         assert!(temperature_step_due(20));
     }
 
-    /// Fill every column of a 4-wide temperature tile so averages see it.
     fn fill_tile_surface(w: &mut World, tile_x0: i32, y_ground: i32, mat: MaterialId, water_h: i32) {
         for x in tile_x0..tile_x0 + 4 {
             for y in (y_ground - 1)..=(y_ground + water_h + 1) {
@@ -491,12 +597,28 @@ mod tests {
         }
     }
 
+    fn fill_buried_rock(w: &mut World, tile_x0: i32, y_ground: i32, depth: i32) {
+        for x in tile_x0..tile_x0 + 4 {
+            for y in (y_ground - depth)..=(y_ground + 1) {
+                w.ensure_chunk(ChunkCoord::new(
+                    x.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
+                    y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+                ));
+            }
+            for y in (y_ground - depth)..y_ground {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+            w.set_cell(x, y_ground, Cell::solid(MaterialId::Stone));
+            w.set_cell(x, y_ground + 1, Cell::solid(MaterialId::Sand));
+        }
+    }
+
     #[test]
     fn water_column_lags_cold_snap_more_than_dry_sand() {
         let p = WorldgenParams::default();
         let sea = p.sea_level_y;
-        let pond_x0: i32 = 4; // tile hx=1
-        let dry_x0: i32 = 20; // tile hx=5
+        let pond_x0: i32 = 4;
+        let dry_x0: i32 = 20;
         let mut world = World::new(7);
         fill_tile_surface(&mut world, pond_x0, sea, MaterialId::Water, 5);
         fill_tile_surface(&mut world, dry_x0, sea, MaterialId::Sand, 0);
@@ -515,7 +637,7 @@ mod tests {
             *v = 12.0;
         }
         t.config.base_temp_c = -15.0;
-        t.config.diffuse_alpha = 0.0; // isolate inertia from neighbour mixing
+        t.config.diffuse_alpha = 0.0;
         let h = Humidity::with_world_bounds(
             4,
             0,
@@ -533,8 +655,85 @@ mod tests {
             "pond {pond_t:.1}C should stay warmer than dry sand {dry_t:.1}C after a cold snap"
         );
         assert!(
-            pond_t > -10.0,
-            "deep water must not slam to skin in a few thermal steps (got {pond_t:.1})"
+            pond_t > 5.0,
+            "lake must hold heat through a short cold snap (got {pond_t:.1})"
+        );
+    }
+
+    #[test]
+    fn buried_bedrock_ignores_night_air_snap() {
+        let p = WorldgenParams::default();
+        let sea = p.sea_level_y;
+        let x0: i32 = 8;
+        let mut world = World::new(3);
+        fill_buried_rock(&mut world, x0, sea, 24);
+        let mut t = Temperature::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            32,
+            p.sky_ceiling_y,
+            1,
+            32,
+            sea,
+            false,
+        );
+        for v in t.cells.values_mut() {
+            *v = 20.0;
+        }
+        t.config.base_temp_c = -20.0;
+        t.config.diffuse_alpha = 0.0;
+        let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y);
+        // One climate "night" worth of thermal steps.
+        for i in 0..8 {
+            t.step(Some(&world), &h, DEMO_DAY_TICKS / 2 + i * TEMP_STEP_PERIOD);
+        }
+        let deep_y = sea - 16;
+        let deep_t = t.at_cell(x0 + 1, deep_y);
+        let air_y = sea + 20;
+        let air_t = t.at_cell(x0 + 1, air_y);
+        assert!(
+            deep_t > 12.0,
+            "buried bedrock must not drop with night air (deep={deep_t:.1})"
+        );
+        assert!(
+            deep_t > air_t + 15.0,
+            "deep {deep_t:.1} should stay far warmer than air {air_t:.1}"
+        );
+    }
+
+    #[test]
+    fn geothermal_warms_cold_deep_rock_over_time() {
+        let p = WorldgenParams::default();
+        let sea = p.sea_level_y;
+        let x0: i32 = 8;
+        let mut world = World::new(3);
+        fill_buried_rock(&mut world, x0, sea, 24);
+        let mut t = Temperature::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            32,
+            p.sky_ceiling_y,
+            1,
+            32,
+            sea,
+            false,
+        );
+        for v in t.cells.values_mut() {
+            *v = 0.0;
+        }
+        t.config.diffuse_alpha = 0.0;
+        let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y);
+        let deep_y = sea - 16;
+        let before = t.at_cell(x0 + 1, deep_y);
+        for i in 0..30 {
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD);
+        }
+        let after = t.at_cell(x0 + 1, deep_y);
+        assert!(
+            after > before + 1.0,
+            "geothermal should warm deep rock ({before:.1} → {after:.1})"
         );
     }
 
@@ -542,7 +741,7 @@ mod tests {
     fn snow_albedo_slows_daytime_warming_vs_bare_rock() {
         let p = WorldgenParams::default();
         let sea = p.sea_level_y;
-        let x0: i32 = 8; // tile hx=2
+        let x0: i32 = 8;
         let mut snow_w = World::new(3);
         let mut rock_w = World::new(3);
         fill_tile_surface(&mut snow_w, x0, sea, MaterialId::Snow, 0);
@@ -557,10 +756,15 @@ mod tests {
         for v in t_snow.cells.values_mut().chain(t_rock.cells.values_mut()) {
             *v = 0.0;
         }
-        t_snow.config.base_temp_c = 8.0;
-        t_rock.config.base_temp_c = 8.0;
-        t_snow.config.diffuse_alpha = 0.0;
-        t_rock.config.diffuse_alpha = 0.0;
+        // Isolate albedo: no skin pull, no day-amp drift — only solar.
+        for t in [&mut t_snow, &mut t_rock] {
+            t.config.base_temp_c = 0.0;
+            t.config.day_amp_c = 0.0;
+            t.config.sky_relax = 0.0;
+            t.config.min_relax = 0.0;
+            t.config.diffuse_alpha = 0.0;
+            t.config.solar_heat_c = 0.5;
+        }
         let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y);
         for i in 0..6 {
             t_snow.step(Some(&snow_w), &h, i * TEMP_STEP_PERIOD);
@@ -569,7 +773,7 @@ mod tests {
         let ts = t_snow.at_cell(x0 + 1, sea + 1);
         let tr = t_rock.at_cell(x0 + 1, sea + 1);
         assert!(
-            tr > ts + 0.2,
+            tr > ts + 0.4,
             "bare rock {tr:.2} should warm faster than snow pack {ts:.2} under sun"
         );
     }

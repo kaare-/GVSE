@@ -96,10 +96,10 @@ Demo toggle: **`I`**.
 Pass order per column: **cull → break unsupported → water-on-ice/slush → thaw → freeze**.
 
 - Uses the coarse **thermal field** (`Temperature`, 4×4 tiles, step every
-  20 ticks — not every physics tick). Climate sets a skin target; surface
-  **heat capacity** / **albedo** from `wk-material` (water high, snow
-  reflective, organics warm-buffered) lag snaps so lakes and peaks don’t
-  flash-freeze when Tab moves base temp.
+  20 ticks). **Air** tracks climate day/night; **surface** water/rock use
+  high heat capacity (lakes barely cool over a night); **buried** bedrock
+  ignores night air, eases toward a geothermal profile, and slowly leaks
+  heat upward by diffusion. Snow albedo still shades solar.
 - **Freeze:** standing free-surface wet Air (`sat ≥ min_sat_to_freeze`) when
   `temp ≤ freeze_point_c` → whole `Ice` cell (lake skin). **Cold lids then
   thicken downward** one cell / tick into wet Air under Ice/Snow so deep
