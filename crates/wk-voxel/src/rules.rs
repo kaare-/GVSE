@@ -16,8 +16,8 @@ use crate::active::{
     clear_all_dirty, partition_checkerboard, plan_active, ActiveChunk,
 };
 use crate::cell::{
-    grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain, water_capacity, Cell,
-    CellFlags, Sat,
+    falls_through_empty_air, grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain,
+    water_capacity, Cell, CellFlags, Sat,
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
@@ -846,10 +846,9 @@ fn accumulate_seepage_xfers(
 /// Pull + bottom-up + checkerboard matches [`apply_gravity_fall`]:
 /// one cell per invocation, including across chunk seams.
 ///
-/// V1 kept simple: grains fall through Air *any* saturation and stop
-/// on anything else. Density-ordered stacking between grain species
-/// (heavy sinks under light) and buoyancy interactions with less-
-/// dense fluids are follow-up rules.
+/// V1 kept simple: dense grains fall through Air *any* saturation;
+/// Snow/Ice fall through *empty* Air only (float on water). Density-
+/// ordered stacking between grain species is a follow-up.
 pub fn apply_grain_fall(world: &mut World) {
     let regions = regions_for_standalone(world);
     for pass in partition_checkerboard(&regions) {
@@ -876,12 +875,16 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 else {
                     continue;
                 };
-                if !is_grain(above.material) {
-                    // Soft snow falls through *empty* air only — it floats
-                    // on standing water so shore slush can still form.
-                    if above.material != MaterialId::Snow || !cur.sat.is_empty() {
+                if is_grain(above.material) {
+                    // Dense grains sink through any Air sat.
+                } else if falls_through_empty_air(above.material) {
+                    // Snow / Ice hang-fix: drop through empty Air, float
+                    // on standing water so lake lids and shore slush stay.
+                    if !cur.sat.is_empty() {
                         continue;
                     }
+                } else {
+                    continue;
                 }
                 unsafe {
                     parallel::set_cell(ptrs, wrap_width, gx, gy, above);
@@ -2704,6 +2707,36 @@ mod tests {
     }
 
     // ------------ grain fall ------------
+
+    #[test]
+    fn ice_falls_through_empty_air_but_floats_on_water() {
+        let mut w = setup_column_world();
+        w.set_cell(3, 4, Cell::solid(MaterialId::Ice));
+        apply_grain_fall(&mut w);
+        assert_eq!(w.get_cell(3, 3).unwrap().material, MaterialId::Ice);
+        assert_eq!(w.get_cell(3, 4).unwrap().material, MaterialId::Air);
+
+        // Float on standing water — lake lids must not sink.
+        let mut w2 = setup_column_world();
+        w2.set_cell(3, 1, Cell::water());
+        w2.set_cell(3, 2, Cell::solid(MaterialId::Ice));
+        apply_grain_fall(&mut w2);
+        assert_eq!(w2.get_cell(3, 2).unwrap().material, MaterialId::Ice);
+        assert_eq!(w2.get_cell(3, 1).unwrap().material, MaterialId::Air);
+        assert!(w2.get_cell(3, 1).unwrap().sat.is_full());
+    }
+
+    #[test]
+    fn hanging_snow_and_ice_settle_onto_bedrock() {
+        let mut w = setup_column_world();
+        w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+        w.set_cell(3, 6, Cell::solid(MaterialId::Ice));
+        for _ in 0..10 {
+            apply_grain_fall(&mut w);
+        }
+        assert_eq!(w.get_cell(2, 1).unwrap().material, MaterialId::Snow);
+        assert_eq!(w.get_cell(3, 1).unwrap().material, MaterialId::Ice);
+    }
 
     #[test]
     fn grain_falls_through_empty_air() {
