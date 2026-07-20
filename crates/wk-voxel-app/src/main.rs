@@ -625,11 +625,17 @@ async fn main() {
                         // over the real night/day gradient (that was the
                         // white lip on every water terrace). Let the sky
                         // already drawn behind show through.
-                        const SURFACE_DRAW_MIN_SAT: u8 = 200;
-                        if cell.sat.0 < SURFACE_DRAW_MIN_SAT {
+                        //
+                        // Below sea level: any wet Air is ocean, draw at
+                        // low threshold so leveling cells stay visible.
+                        // Above sea: only draw when the surface film is
+                        // near-full to avoid painting light-blue haze
+                        // across the beach as rain films spread.
+                        let below_sea = y <= scene.params.sea_level_y;
+                        let min_sat: u8 = if below_sea { 64 } else { 200 };
+                        if cell.sat.0 < min_sat {
                             continue;
                         }
-                        let below_sea = y <= scene.params.sea_level_y;
                         if !below_sea && !is_standing_water(&scene.world, x, y) {
                             continue;
                         }

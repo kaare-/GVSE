@@ -436,7 +436,10 @@ fn accumulate_water_flow_xfers(
                     let mut ty = gy - 2;
                     let mut rate = seepage_rate(below1.material);
                     let mut target: Option<i32> = None;
-                    for _ in 0..3 {
+                    // Deep scan: shore sand columns can be 15+ cells thick
+                    // above the ocean floor. Water needs to reach the Air
+                    // on the far side of the whole ridge.
+                    for _ in 0..24 {
                         let Some(nb) = world.get_cell(nx, ty) else {
                             break;
                         };
