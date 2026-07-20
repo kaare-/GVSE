@@ -1386,8 +1386,10 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
 /// How many gravity→surface-flow cycles run inside one [`tick`].
 ///
 /// Several substeps with re-planned dirty halos let ponds level and
-/// hill water drain at a liquid pace.
-const FLOW_SUBSTEPS: usize = 4;
+/// hill water drain at a liquid pace. On flat shelves where cascade
+/// edges are 5-10 cells away, half-gap propagates at ~1 cell/substep,
+/// so we need enough substeps to keep up with steady rain.
+const FLOW_SUBSTEPS: usize = 12;
 
 /// Advance the sim by one tick.
 ///
@@ -2303,6 +2305,244 @@ mod tests {
         assert!(
             landed_right + landed_left >= 150,
             "water should cascade off the shelf edge (right={landed_right} left={landed_left})"
+        );
+    }
+
+    #[test]
+    fn rain_on_descending_shore_cascades_into_ocean_pool() {
+        // Mimics the visible image: shore descends left, ocean at bottom
+        // left. Rain drops water at shelf-top cells. Water must cascade
+        // diagonally down the shore into the ocean pool in a few ticks —
+        // not accumulate as terraced puddles.
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        for x in 0..100 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        // Slope: shore top rises from y=1 at x=5 to y=15 at x=20 (rise=1/col).
+        for x in 5..=20 {
+            let top = x - 4; // 1..=16
+            for y in 1..=top {
+                w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+            }
+        }
+        // High plateau for x=21..40 (top=17).
+        for x in 21..40 {
+            for y in 1..=17 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+            }
+        }
+        // Ocean pool below sea level at x=0..4 (deep).
+        for x in 0..5 {
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        // Rain falls at three shelf-top cells along the slope.
+        w.set_cell(10, 7, Cell::water());   // shelf top at x=10 is y=6
+        w.set_cell(15, 12, Cell::water());  // shelf top at x=15 is y=11
+        w.set_cell(20, 17, Cell::water());  // shelf top at x=20 is y=16
+
+        // Run enough ticks for cascade to reach ocean.
+        for _ in 0..30 {
+            tick(&mut w);
+        }
+
+        // No water should remain on the sand shelves at the deposit
+        // heights (perched pool test).
+        let perched_10 = w.get_cell(10, 7).unwrap().sat.0;
+        let perched_15 = w.get_cell(15, 12).unwrap().sat.0;
+        let perched_20 = w.get_cell(20, 17).unwrap().sat.0;
+        assert!(
+            perched_10 < 32 && perched_15 < 32 && perched_20 < 32,
+            "shelf cells should drain (got {perched_10}, {perched_15}, {perched_20})"
+        );
+
+        // Ocean gained some, sand absorbed some (seepage), and total
+        // mass is conserved.
+        let mut total = 0i64;
+        for x in 0..40 {
+            for y in 0..30 {
+                if let Some(c) = w.get_cell(x, y) {
+                    total += c.sat.0 as i64;
+                }
+            }
+        }
+        // Baseline sand had 0 sat; ocean had 5*5*255=6375; rain added 3*255=765.
+        // Sand can absorb up to 15*15*180 ≈ 40k, so mass may sit in sand.
+        assert!(total >= 6375 + 765 - 50, "mass roughly conserved (total={total})");
+    }
+
+    #[test]
+    fn continuous_rain_on_flat_shelf_drains_via_cascade_edge() {
+        // Flat sand shelf 8 cells wide. Left of shelf is a cliff (Air).
+        // Right of shelf is inland (more sand higher).
+        // Rain sat=8 falls on every shelf cell every tick.
+        // With cascade at the left edge, water shouldn't stack up.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..40 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        // Cliff: at x=0..=9 shore top is Y=1 (Air above). At x=10..=17
+        // shore top is y=10 (flat shelf 8 cells wide). At x=18+ higher.
+        for x in 10..=17 {
+            for y in 1..=10 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+            }
+        }
+        for x in 18..30 {
+            for y in 1..=15 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+            }
+        }
+
+        // Track max sat seen on the shelf over 40 ticks of rain.
+        let mut max_shelf_sat: u8 = 0;
+        for _t in 0..40 {
+            // Rain deposit: 8 sat on each shelf cell (10..=17) at y=11.
+            for x in 10..=17 {
+                let cell = w.get_cell(x, 11).unwrap();
+                if cell.material == MaterialId::Air {
+                    let new_sat = (cell.sat.0 as i32 + 8).min(255) as u8;
+                    w.set_cell(x, 11, Cell { sat: Sat(new_sat), ..cell });
+                }
+            }
+            tick(&mut w);
+            for x in 10..=17 {
+                let c = w.get_cell(x, 11).unwrap();
+                if c.sat.0 > max_shelf_sat {
+                    max_shelf_sat = c.sat.0;
+                }
+            }
+        }
+        // At steady state, water on the shelf should be low because
+        // cascade at x=10 dumps it off the cliff on each substep.
+        assert!(
+            max_shelf_sat < 200,
+            "shelf water should drain via cascade edge (max seen: {max_shelf_sat})"
+        );
+    }
+
+    #[test]
+    fn continuous_rain_on_stepped_shore_does_not_pool_on_shelves() {
+        // Realistic shore: descending in 2-cell-wide steps (like a
+        // staircase). Rain falls on every shelf. Water must cascade
+        // down step by step, not accumulate as terrace pools.
+        //
+        // Terrain (top view of tops):
+        //   x=  8 9 10 11 12 13 14 15 16 17
+        //   top y=1 1  3  3  5  5  7  7  9  9
+        //
+        // Ocean at x < 8. Each shelf is 2 cells wide, drop of 2y.
+        let mut w = World::new(6);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..30 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        let tops = [(8, 1), (9, 1), (10, 3), (11, 3), (12, 5), (13, 5), (14, 7), (15, 7), (16, 9), (17, 9)];
+        for &(x, top) in &tops {
+            for y in 1..=top {
+                w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+            }
+        }
+        // Ocean pool at x=0..=7, up to y=1.
+        for x in 0..=7 {
+            w.set_cell(x, 1, Cell::water());
+        }
+
+        let mut max_shelf: u8 = 0;
+        for _t in 0..40 {
+            // Rain 6 sat per tick on each shelf-top-air cell.
+            for &(x, top) in &tops {
+                let y = top + 1;
+                let cell = w.get_cell(x, y).unwrap();
+                if cell.material == MaterialId::Air {
+                    let new_sat = (cell.sat.0 as i32 + 6).min(255) as u8;
+                    w.set_cell(x, y, Cell { sat: Sat(new_sat), ..cell });
+                }
+            }
+            tick(&mut w);
+            for &(x, top) in &tops {
+                let y = top + 1;
+                let c = w.get_cell(x, y).unwrap();
+                if c.sat.0 > max_shelf {
+                    max_shelf = c.sat.0;
+                }
+            }
+        }
+        // Steady-state shelf sat should stay low.
+        assert!(
+            max_shelf < 128,
+            "stepped-shore shelves should keep draining (max shelf sat: {max_shelf})"
+        );
+    }
+
+    #[test]
+    fn impermeable_shore_cascades_off_within_seconds() {
+        // Simulates user's setup: sand set to impermeable (no seepage
+        // or throughflow). Uses Bedrock terrain to model this without
+        // touching global overrides (which race with other tests).
+        //
+        // Shore descends left, has a 6-cell flat plateau at top, then
+        // rises again. Rain hits every cell along the shore surface.
+        let mut w = World::new(9);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..60 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for x in 8..=13 {
+            for y in 1..=(x - 7) {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 14..=19 {
+            for y in 1..=6 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        for x in 20..=25 {
+            let top = 6 + (x - 19);
+            for y in 1..=top {
+                w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+            }
+        }
+        let surface_cells: Vec<(i32, i32)> = (8..=25)
+            .map(|x| {
+                let mut top_y = 0;
+                for y in 1..30 {
+                    if let Some(c) = w.get_cell(x, y) {
+                        if c.material == MaterialId::Bedrock {
+                            top_y = y;
+                        }
+                    }
+                }
+                (x, top_y + 1)
+            })
+            .collect();
+
+        let mut max_plateau: u8 = 0;
+        for _t in 0..60 {
+            for &(x, y) in &surface_cells {
+                let cell = w.get_cell(x, y).unwrap();
+                if cell.material == MaterialId::Air {
+                    let new_sat = (cell.sat.0 as i32 + 5).min(255) as u8;
+                    w.set_cell(x, y, Cell { sat: Sat(new_sat), ..cell });
+                }
+            }
+            tick(&mut w);
+            // Only assert plateau cells drain. Beach edge pools by design.
+            for x in 14..=19 {
+                let c = w.get_cell(x, 7).unwrap();
+                if c.sat.0 > max_plateau {
+                    max_plateau = c.sat.0;
+                }
+            }
+        }
+        assert!(
+            max_plateau < 128,
+            "impermeable plateau must keep draining (max sat: {max_plateau})"
         );
     }
 
