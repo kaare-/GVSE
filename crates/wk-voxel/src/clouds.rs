@@ -4,13 +4,15 @@
 //!
 //! Discrete cloud parcels: humidity rises, then coagulates into blobs;
 //! wind carries them; they ride above the terrain (no clipping through
-//! mountains) and dump rain sooner when scraping ridges.
+//! mountains or ice/water columns) and dump rain sooner when scraping ridges.
 
 use serde::{Deserialize, Serialize};
+use wk_material::MaterialId;
 
 use crate::grid::World;
 use crate::humidity::Humidity;
-use crate::rules::deposit_water_on_surface;
+use crate::phase::{deposit_precip_on_surface, PhaseConfig};
+use crate::temperature::Temperature;
 use crate::wind::Wind;
 use crate::worldgen::continental_surface_y;
 
@@ -159,15 +161,42 @@ impl CloudStore {
         tick: u64,
         cfg: &CloudConfig,
     ) {
+        self.step_with_precip(
+            world,
+            humidity,
+            wind,
+            sea_level_y,
+            sky_ceiling_y,
+            tick,
+            cfg,
+            None,
+            None,
+        );
+    }
+
+    /// Like [`Self::step`], but cold columns receive **snow** when
+    /// `temp` / `phase` are provided.
+    pub fn step_with_precip(
+        &mut self,
+        world: &mut World,
+        humidity: &mut Humidity,
+        wind: &Wind,
+        sea_level_y: i32,
+        sky_ceiling_y: i32,
+        tick: u64,
+        cfg: &CloudConfig,
+        temp: Option<&Temperature>,
+        phase: Option<&PhaseConfig>,
+    ) {
         // Let ocean vapor climb into the cloud deck before clumping.
         let tc = humidity.tile_cols.max(1);
         let deck_hy = (sea_level_y + cfg.cloud_alt_above_sea).div_euclid(tc);
         humidity.buoyant_rise(cfg.buoyant_rise, deck_hy);
 
         self.coagulate(humidity, wind, sea_level_y, sky_ceiling_y, cfg);
-        self.advect_and_collide(wind, sea_level_y, sky_ceiling_y, cfg);
+        self.advect_and_collide(world, wind, sea_level_y, sky_ceiling_y, cfg);
         self.merge(cfg);
-        self.downpour(world, wind, tick, cfg);
+        self.downpour(world, wind, tick, cfg, temp, phase);
         for p in &mut self.parcels {
             p.smooth_visuals();
         }
@@ -264,10 +293,11 @@ impl CloudStore {
         best
     }
 
-    /// Wind drift, then soft collision with the land surface so clouds
-    /// crest peaks, keep the new altitude, and continue downwind.
+    /// Wind drift, then soft collision with the land / ice / water column
+    /// top so clouds crest peaks and ride above lake lids (not through them).
     fn advect_and_collide(
         &mut self,
+        world: &World,
         wind: &Wind,
         sea_level_y: i32,
         sky_ceiling_y: i32,
@@ -298,7 +328,8 @@ impl CloudStore {
             let r = p.radius();
             // Soft sample under centre + leading edge (windward).
             let sample_x = p.fx + wind_sign * r * 0.35;
-            let floor = surface_y(wind, p.fx).max(surface_y(wind, sample_x));
+            let floor = cloud_floor_y(world, wind, p.fx)
+                .max(cloud_floor_y(world, wind, sample_x));
             let land = floor > sea_level_y as f32 + 1.0;
             let min_fy = if land {
                 floor + cfg.ridge_clearance + (r * 0.12).min(3.5)
@@ -374,7 +405,15 @@ impl CloudStore {
     }
 
     /// Heavy parcels dump sat into Air cells beneath them.
-    fn downpour(&mut self, world: &mut World, wind: &Wind, tick: u64, cfg: &CloudConfig) {
+    fn downpour(
+        &mut self,
+        world: &mut World,
+        wind: &Wind,
+        tick: u64,
+        cfg: &CloudConfig,
+        temp: Option<&Temperature>,
+        phase: Option<&PhaseConfig>,
+    ) {
         for p in &mut self.parcels {
             let mut oro = orographic_boost(wind, p.fx);
             if p.on_ridge {
@@ -398,8 +437,14 @@ impl CloudStore {
             let radius = p.radius();
             let cols = ((radius * 1.25) as i32).clamp(2, 10);
             let mut remaining = drain;
+            // Fractional column shares are << one Snow cell (255). Cold
+            // peaks must retry a full cell from parcel mass — never soak.
+            let snow_cell = phase
+                .map(|ph| ph.min_budget_to_snow.max(u8::MAX as f32))
+                .unwrap_or(0.0);
+            let mut snow_cells_this_tick = 0u8;
             for k in 0..cols {
-                if remaining <= 0.0 {
+                if remaining <= 0.0 || p.mass <= 0.0 {
                     break;
                 }
                 let t = if cols == 1 {
@@ -409,9 +454,42 @@ impl CloudStore {
                 };
                 let gx = world.wrap_x((p.fx + t * radius * 0.85).round() as i32);
                 let share = (drain / cols as f32) * (1.15 - 0.3 * t.abs());
-                let dropped = deposit_rain_column(world, gx, p.fy.round() as i32, share, tick, k);
-                remaining -= dropped;
-                p.mass -= dropped;
+                let mut dropped = deposit_rain_column(
+                    world,
+                    gx,
+                    p.fy.round() as i32,
+                    share.min(remaining),
+                    tick,
+                    k,
+                    temp,
+                    phase,
+                );
+                if dropped <= 0.0
+                    && snow_cell > 0.0
+                    && snow_cells_this_tick < 2
+                    && p.mass >= snow_cell
+                {
+                    dropped = deposit_rain_column(
+                        world,
+                        gx,
+                        p.fy.round() as i32,
+                        snow_cell,
+                        tick,
+                        k,
+                        temp,
+                        phase,
+                    );
+                    if dropped > 0.0 {
+                        snow_cells_this_tick = snow_cells_this_tick.saturating_add(1);
+                    }
+                }
+                let pay = dropped.min(p.mass);
+                if pay <= 0.0 {
+                    continue;
+                }
+                p.mass -= pay;
+                // Snow-cell retries may exceed this tick's drain slice.
+                remaining = (remaining - pay.min(remaining)).max(0.0);
             }
             if p.mass < 1.0 {
                 p.mass = 0.0;
@@ -428,6 +506,26 @@ fn surface_y(wind: &Wind, fx: f32) -> f32 {
         wind.sea_level_y,
         wind.width_cols,
     ) as f32
+}
+
+/// Rock surface vs occupied column top (ice / snow / standing water).
+/// Clouds and precip visuals use this so they clear lake lids and peak ice.
+pub fn cloud_floor_y(world: &World, wind: &Wind, fx: f32) -> f32 {
+    let rock = surface_y(wind, fx);
+    let gx = world.wrap_x(fx.round() as i32);
+    let rock_i = rock as i32;
+    let mut top = rock_i;
+    // Scan up through continuous stack; stop at the first empty Air gap.
+    let scan_hi = rock_i + 48;
+    for y in (rock_i + 1)..=scan_hi {
+        match world.get_cell(gx, y) {
+            Some(c) if c.material != MaterialId::Air => top = y,
+            Some(c) if !c.sat.is_empty() => top = y,
+            Some(_) => break,
+            None => break,
+        }
+    }
+    (top as f32).max(rock)
 }
 
 fn preferred_deck(sea_level_y: i32, sky_ceiling_y: i32, cfg: &CloudConfig) -> f32 {
@@ -464,9 +562,11 @@ fn deposit_rain_column(
     budget: f32,
     tick: u64,
     salt: i32,
+    temp: Option<&Temperature>,
+    phase: Option<&PhaseConfig>,
 ) -> f32 {
     let jx = world.wrap_x(gx + ((tick as i32 + salt * 3) % 3) - 1);
-    deposit_water_on_surface(world, jx, start_y, budget)
+    deposit_precip_on_surface(world, jx, start_y, budget, temp, phase)
 }
 
 #[cfg(test)]
@@ -537,6 +637,31 @@ mod tests {
     }
 
     #[test]
+    fn ice_lid_raises_cloud_floor_above_rock() {
+        let p = WorldgenParams::default();
+        let wind = wind_for(&p);
+        let mut world = World::new(p.seed);
+        let gx = 20i32;
+        let rock = continental_surface_y(p.seed, gx, p.sea_level_y, p.width_cols);
+        let ice_top = rock + 8;
+        for y in [rock, ice_top] {
+            world.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(CHUNK_CELLS_W as i32),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        for y in (rock + 1)..ice_top {
+            world.set_cell(gx, y, Cell::water());
+        }
+        world.set_cell(gx, ice_top, Cell::solid(MaterialId::Ice));
+        let floor = cloud_floor_y(&world, &wind, gx as f32);
+        assert!(
+            floor >= ice_top as f32,
+            "cloud floor {floor} must clear ice lid at {ice_top} (rock was {rock})"
+        );
+    }
+
+    #[test]
     fn ridge_collision_lifts_parcel_above_surface() {
         let p = WorldgenParams::default();
         let wind = wind_for(&p);
@@ -565,8 +690,9 @@ mod tests {
             deform: 0.0,
         });
         // Soft blend needs a few ticks to clear the ridge floor.
+        let world = World::new(p.seed);
         for _ in 0..8 {
-            clouds.advect_and_collide(&wind, p.sea_level_y, p.sky_ceiling_y, &cfg);
+            clouds.advect_and_collide(&world, &wind, p.sea_level_y, p.sky_ceiling_y, &cfg);
         }
         let c = &clouds.parcels[0];
         let min_clear = surface + cfg.ridge_clearance * 0.5;
@@ -617,7 +743,7 @@ mod tests {
             deform: 0.0,
         });
         let mass_before = clouds.total_mass();
-        clouds.downpour(&mut world, &wind, 0, &CloudConfig::default());
+        clouds.downpour(&mut world, &wind, 0, &CloudConfig::default(), None, None);
         assert!(clouds.total_mass() < mass_before);
         // Rain should land just above the stone floor, not hang at cloud height.
         let landed = world.get_cell(gx, floor + 1).map(|c| c.sat.0).unwrap_or(0);
@@ -648,8 +774,9 @@ mod tests {
             deform: 0.0,
         });
         let x0 = clouds.parcels[0].fx;
+        let world = World::new(p.seed);
         for _ in 0..80 {
-            clouds.advect_and_collide(&wind, p.sea_level_y, p.sky_ceiling_y, &cfg);
+            clouds.advect_and_collide(&world, &wind, p.sea_level_y, p.sky_ceiling_y, &cfg);
         }
         assert!(
             clouds.parcels[0].fx > x0,

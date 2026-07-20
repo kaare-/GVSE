@@ -88,6 +88,45 @@ Tab → **Material permeability / porosity** overrides these at runtime (`Materi
 - `stamped_lake_bed_pores_wet_under_water`
 - Shore / cascade suite (`impermeable_shore_*`, `continuous_rain_on_*`)
 
+## Ice / snow / phase (milestones 1–3)
+
+Module: `wk-voxel::phase` (`apply_phase`, `deposit_precip_on_surface`).
+Demo toggle: **`I`**.
+
+Pass order per column: **cull → break unsupported → water-on-ice/slush → thaw → freeze**.
+
+- Uses the existing coarse `Temperature` field (not a per-cell heat sim).
+- **Freeze:** standing free-surface wet Air (`sat ≥ min_sat_to_freeze`) when
+  `temp ≤ freeze_point_c` → whole `Ice` cell (lake skin). **Cold lids then
+  thicken downward** one cell / tick into wet Air under Ice/Snow so deep
+  ponds and peak “ice castles” freeze through instead of sitting liquid at
+  −20 °C under a 1-px skin. Full per-cell heat capacity / albedo is later.
+- **Thaw:** top-of-stack Ice/Snow when `temp > freeze_point_c` → `Air+FULL`.
+- **Rain on ice:** stays as a water film on top (no density-swap under the
+  sheet — that lofted ice into the rain). Melts the ice when warm, or when
+  a full water cell has ponded (enough rain).
+- **Ice lid × evaporation:** intentional. Evap only runs on wet Air with
+  **Air** above it (`dry_above_max`). An Ice/Snow sheet blocks that, so a
+  capped lake loses far less mass and the humidity pump dries out — a
+  useful cold-climate feedback even before a full thermal field.
+- **Unsupported ice:** Ice/Snow with dry air below breaks into water so
+  trapped surface water can rejoin the basin.
+- **Snow precip:** rain / drizzle / cloud downpour call
+  `deposit_precip_on_surface`. Cold **ground** sample (skips snow/ice pack
+  height) → one solid `Snow` cell on top of rock/sand/pack (wet surface
+  films become Snow). **Never** falls back to liquid on cold columns —
+  that used to soak mountain-top sand pores when the pack hit the cap or
+  cloud shares were fractional. Short budget / full cap → hold mass (`0`).
+- **Snow pack (now):** static solid lid. No pore soak, no grain fall.
+  Later: avalanche / settle physics, and ice/snow scour of sand & loose rock.
+- **Slush:** Snow on water — warm melts snow; cold freezes the water film
+  under snow into ice (snow-on-ice pack).
+- Rate limits: freeze / thaw / slush / break per column per tick.
+- **Max Ice+Snow cells / column** — excess culled to empty Air (not melted).
+
+Cold snap: Tab → Base temp below 0°C (with rain/clouds on). Warm snap: raise
+base temp above freeze point.
+
 ## Related docs
 
 - [`VOXEL_MIGRATION.md`](VOXEL_MIGRATION.md) — isolation, dirty rects, historical spill vocabulary

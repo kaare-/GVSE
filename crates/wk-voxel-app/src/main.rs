@@ -22,6 +22,7 @@
 //! - `H` — toggle soft white humidity haze (vapor hint; clouds carry the look)
 //! - `N` — toggle cloud drawing (coagulated parcels; darker = wetter)
 //! - `T` — toggle temperature heatmap overlay
+//! - `I` — toggle phase change (freeze / thaw / settle under ice)
 //! - `F1` — toggle the bottom tool / hotkey line
 //! - `F2` — creature editor (Set A MS-Paint; `C` stays condensation here)
 //! - `Tab` — live settings (materials, wind, clouds, day/night, temp, …)
@@ -41,10 +42,10 @@ mod settings;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_condensation_rain_with_orographic, apply_evaporation_into_humidity,
-    apply_karst_dissolution, apply_rain, celestial_screen_pos_cfg, continental_surface_y,
+    apply_condensation_rain_phased, apply_evaporation_into_humidity, apply_phase,
+    apply_karst_dissolution, apply_rain_with_temp, celestial_screen_pos_cfg, cloud_floor_y,
     day_night_factor_cfg, humidity_diffuse_due, is_daytime_cfg, is_standing_water, sky_rgb,
-    sky_rgb_at_height, temperature_step_due, tick, ClimateConfig, WorldgenParams,
+    sky_rgb_at_height, temperature_step_due, tick, ClimateConfig, Wind, World, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -175,17 +176,18 @@ fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
 /// Darker / denser = wetter; raining parcels get falling drops beneath.
 fn draw_clouds(
     clouds: &wk_voxel::CloudStore,
+    world: &World,
+    wind: &Wind,
     origin_x: f32,
     origin_y: f32,
     cell_px: f32,
     bedrock_floor_y: i32,
-    sea_level_y: i32,
-    seed: u64,
-    width_cols: i32,
     wrap_x: bool,
+    width_cols: i32,
     sw: f32,
     sh: f32,
     downpour_mass: f32,
+    snowing: impl Fn(f32) -> bool,
 ) {
     if clouds.is_empty() {
         return;
@@ -206,9 +208,9 @@ fn draw_clouds(
         let shade = (228.0 - wet * 95.0) as u8;
         let alpha = (145.0 + wet * 55.0) as u8;
         let r = p.radius() * cell_px;
-        let surface = continental_surface_y(seed, p.fx.round() as i32, sea_level_y, width_cols);
-        let ground_sy =
-            origin_y - (surface as f32 - bedrock_floor_y as f32) * cell_px;
+        let floor = cloud_floor_y(world, wind, p.fx);
+        let ground_sy = origin_y - (floor - bedrock_floor_y as f32) * cell_px;
+        let as_snow = snowing(p.fx);
         for &x_copy in x_copies {
             let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px;
             let sy = origin_y - (p.fy - bedrock_floor_y as f32) * cell_px;
@@ -217,7 +219,11 @@ fn draw_clouds(
             }
             draw_cartoon_cloud(sx, sy, r, shade, alpha, p.shape_seed, p.deform);
             if p.raining {
-                draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh);
+                if as_snow {
+                    draw_falling_snow(sx, sy, r, ground_sy, wet, sw, sh);
+                } else {
+                    draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh);
+                }
             }
         }
     }
@@ -260,6 +266,46 @@ fn draw_falling_rain(
             1.15,
             Color::from_rgba(195, 215, 240, alpha),
         );
+    }
+}
+
+/// Soft flakes when the column is at/below freeze — pairs with snow precip.
+fn draw_falling_snow(
+    sx: f32,
+    sy: f32,
+    r: f32,
+    ground_sy: f32,
+    wetness: f32,
+    sw: f32,
+    sh: f32,
+) {
+    let t = get_time() as f32;
+    let top = sy + r * 0.35;
+    let bottom = ground_sy.clamp(top + 12.0, sh - 4.0);
+    let left = (sx - r * 0.9).max(-12.0);
+    let right = (sx + r * 0.9).min(sw + 12.0);
+    let band = (right - left).max(1.0);
+    let n = ((band / 9.0) * (0.65 + wetness * 0.85))
+        .ceil()
+        .clamp(8.0, 40.0) as usize;
+    let flake = 2.2 + wetness * 1.4;
+    let fall_speed = 95.0 + wetness * 55.0;
+    let cycle = (bottom - top + flake * 4.0).max(flake * 4.0 + 1.0);
+    for i in 0..n {
+        let seed = i as f32;
+        let drift = ((t * 18.0 + seed * 11.3).sin()) * 6.0;
+        let x = left + ((seed * 97.371) % band) + drift;
+        let phase = (seed * 0.6180339) % 1.0;
+        let y = top + ((t * fall_speed + phase * cycle) % cycle) - flake;
+        if y + flake < top || y > bottom {
+            continue;
+        }
+        let alpha = (130.0 + wetness * 60.0) as u8;
+        let c = Color::from_rgba(235, 242, 255, alpha);
+        // Tiny plus / diamond flake.
+        draw_line(x - flake, y, x + flake, y, 1.1, c);
+        draw_line(x, y - flake, x, y + flake, 1.1, c);
+        draw_line(x - flake * 0.7, y - flake * 0.7, x + flake * 0.7, y + flake * 0.7, 0.9, c);
     }
 }
 
@@ -349,6 +395,7 @@ async fn main() {
     let mut cond_rain_on = true;
     let mut evap_on = true;
     let mut karst_on = true;
+    let mut freeze_on = true;
     let mut organisms_on = true;
     let mut humidity_overlay = false;
     let mut clouds_on = true;
@@ -431,6 +478,9 @@ async fn main() {
             if is_key_pressed(KeyCode::T) {
                 temp_overlay = !temp_overlay;
             }
+            if is_key_pressed(KeyCode::I) {
+                freeze_on = !freeze_on;
+            }
             if is_key_pressed(KeyCode::O) {
                 organisms_on = !organisms_on;
             }
@@ -468,7 +518,12 @@ async fn main() {
         let sim_paused = paused || (editor.open && !editor.spawn_picker);
         if !sim_paused {
             if rain_on {
-                apply_rain(&mut scene.world, &settings.rain);
+                apply_rain_with_temp(
+                    &mut scene.world,
+                    &settings.rain,
+                    Some(&scene.temperature),
+                    Some(&settings.phase),
+                );
             }
             if evap_on {
                 apply_evaporation_into_humidity(
@@ -483,7 +538,7 @@ async fn main() {
                 .humidity
                 .advect(scene.wind.climate_vx, scene.wind.climate_vy);
             let tick_no = scene.world.tick;
-            scene.clouds.step(
+            scene.clouds.step_with_precip(
                 &mut scene.world,
                 &mut scene.humidity,
                 &scene.wind,
@@ -491,14 +546,18 @@ async fn main() {
                 scene.params.sky_ceiling_y,
                 tick_no,
                 &settings.cloud,
+                Some(&scene.temperature),
+                Some(&settings.phase),
             );
             // Light drizzle from leftover vapor (clouds do the downpours).
             if cond_rain_on {
-                apply_condensation_rain_with_orographic(
+                apply_condensation_rain_phased(
                     &mut scene.world,
                     &mut scene.humidity,
                     &settings.cond,
                     Some(&settings.oro),
+                    Some(&scene.temperature),
+                    Some(&settings.phase),
                 );
             }
             if karst_on {
@@ -516,6 +575,11 @@ async fn main() {
             if temperature_step_due(scene.world.tick) {
                 let tick_no = scene.world.tick;
                 scene.temperature.step(&scene.humidity, tick_no);
+            }
+            // Phase after the temp step so a Tab cold/warm snap applies
+            // the same frame (column order: thermal → phase change).
+            if freeze_on {
+                apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
             }
             if organisms_on {
                 let tick_no = scene.world.tick;
@@ -678,19 +742,26 @@ async fn main() {
 
         // Coagulated cloud parcels — the atmospheric story.
         if clouds_on {
+            let freeze_c = settings.phase.freeze_point_c;
+            let temp = &scene.temperature;
             draw_clouds(
                 &scene.clouds,
+                &scene.world,
+                &scene.wind,
                 origin_x,
                 origin_y,
                 cell_px,
                 scene.params.bedrock_floor_y,
-                scene.params.sea_level_y,
-                scene.params.seed,
-                scene.params.width_cols,
                 scene.params.wrap_x,
+                scene.params.width_cols,
                 sw,
                 sh,
                 settings.cloud.downpour_mass,
+                |fx| {
+                    let gx = scene.world.wrap_x(fx.round() as i32);
+                    let gy = cloud_floor_y(&scene.world, &scene.wind, fx).round() as i32;
+                    temp.at_cell(gx, gy) <= freeze_c
+                },
             );
         }
 
@@ -774,13 +845,14 @@ async fn main() {
             "night"
         };
         let info = format!(
-            "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} atoms={} {}",
+            "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} atoms={} {}",
             fps_smoothed(),
             scene.world.tick,
             tod,
             scene.temperature.mean(),
             if rain_on { "on" } else { "off" },
             if evap_on { "on" } else { "off" },
+            if freeze_on { "on" } else { "off" },
             scene.clouds.len(),
             scene.clouds.total_mass(),
             scene.humidity.total_mass(),
@@ -791,7 +863,7 @@ async fn main() {
         draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
         if show_tool_line {
             draw_text(
-                "Tab settings|Space|R|W rain|C drizzle|E/K/O|N clouds|T temp|H haze|F1|F2|Esc",
+                "Tab settings|Space|R|W rain|C drizzle|E/K/O|I phase|N clouds|T temp|H haze|F1|F2|Esc",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,
