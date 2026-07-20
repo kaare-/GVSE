@@ -10,7 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::grid::World;
 use crate::humidity::Humidity;
-use crate::rules::deposit_water_on_surface;
+use crate::phase::{deposit_precip_on_surface, PhaseConfig};
+use crate::temperature::Temperature;
 use crate::wind::Wind;
 use crate::worldgen::continental_surface_y;
 
@@ -159,6 +160,33 @@ impl CloudStore {
         tick: u64,
         cfg: &CloudConfig,
     ) {
+        self.step_with_precip(
+            world,
+            humidity,
+            wind,
+            sea_level_y,
+            sky_ceiling_y,
+            tick,
+            cfg,
+            None,
+            None,
+        );
+    }
+
+    /// Like [`Self::step`], but cold columns receive **snow** when
+    /// `temp` / `phase` are provided.
+    pub fn step_with_precip(
+        &mut self,
+        world: &mut World,
+        humidity: &mut Humidity,
+        wind: &Wind,
+        sea_level_y: i32,
+        sky_ceiling_y: i32,
+        tick: u64,
+        cfg: &CloudConfig,
+        temp: Option<&Temperature>,
+        phase: Option<&PhaseConfig>,
+    ) {
         // Let ocean vapor climb into the cloud deck before clumping.
         let tc = humidity.tile_cols.max(1);
         let deck_hy = (sea_level_y + cfg.cloud_alt_above_sea).div_euclid(tc);
@@ -167,7 +195,7 @@ impl CloudStore {
         self.coagulate(humidity, wind, sea_level_y, sky_ceiling_y, cfg);
         self.advect_and_collide(wind, sea_level_y, sky_ceiling_y, cfg);
         self.merge(cfg);
-        self.downpour(world, wind, tick, cfg);
+        self.downpour(world, wind, tick, cfg, temp, phase);
         for p in &mut self.parcels {
             p.smooth_visuals();
         }
@@ -374,7 +402,15 @@ impl CloudStore {
     }
 
     /// Heavy parcels dump sat into Air cells beneath them.
-    fn downpour(&mut self, world: &mut World, wind: &Wind, tick: u64, cfg: &CloudConfig) {
+    fn downpour(
+        &mut self,
+        world: &mut World,
+        wind: &Wind,
+        tick: u64,
+        cfg: &CloudConfig,
+        temp: Option<&Temperature>,
+        phase: Option<&PhaseConfig>,
+    ) {
         for p in &mut self.parcels {
             let mut oro = orographic_boost(wind, p.fx);
             if p.on_ridge {
@@ -409,7 +445,8 @@ impl CloudStore {
                 };
                 let gx = world.wrap_x((p.fx + t * radius * 0.85).round() as i32);
                 let share = (drain / cols as f32) * (1.15 - 0.3 * t.abs());
-                let dropped = deposit_rain_column(world, gx, p.fy.round() as i32, share, tick, k);
+                let dropped =
+                    deposit_rain_column(world, gx, p.fy.round() as i32, share, tick, k, temp, phase);
                 remaining -= dropped;
                 p.mass -= dropped;
             }
@@ -464,9 +501,11 @@ fn deposit_rain_column(
     budget: f32,
     tick: u64,
     salt: i32,
+    temp: Option<&Temperature>,
+    phase: Option<&PhaseConfig>,
 ) -> f32 {
     let jx = world.wrap_x(gx + ((tick as i32 + salt * 3) % 3) - 1);
-    deposit_water_on_surface(world, jx, start_y, budget)
+    deposit_precip_on_surface(world, jx, start_y, budget, temp, phase)
 }
 
 #[cfg(test)]
@@ -617,7 +656,7 @@ mod tests {
             deform: 0.0,
         });
         let mass_before = clouds.total_mass();
-        clouds.downpour(&mut world, &wind, 0, &CloudConfig::default());
+        clouds.downpour(&mut world, &wind, 0, &CloudConfig::default(), None, None);
         assert!(clouds.total_mass() < mass_before);
         // Rain should land just above the stone floor, not hang at cloud height.
         let landed = world.get_cell(gx, floor + 1).map(|c| c.sat.0).unwrap_or(0);

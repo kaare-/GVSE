@@ -88,11 +88,12 @@ Tab → **Material permeability / porosity** overrides these at runtime (`Materi
 - `stamped_lake_bed_pores_wet_under_water`
 - Shore / cascade suite (`impermeable_shore_*`, `continuous_rain_on_*`)
 
-## Ice / phase (milestones 1–2)
+## Ice / snow / phase (milestones 1–3)
 
-Module: `wk-voxel::phase` (`apply_phase`). Demo toggle: **`I`**.
+Module: `wk-voxel::phase` (`apply_phase`, `deposit_precip_on_surface`).
+Demo toggle: **`I`**.
 
-Pass order per column: **cull → settle → thaw → freeze**.
+Pass order per column: **cull → settle → slush → thaw → freeze**.
 
 - Uses the existing coarse `Temperature` field (not a per-cell heat sim).
 - **Freeze:** standing free-surface wet Air (`sat ≥ min_sat_to_freeze`) when
@@ -100,12 +101,17 @@ Pass order per column: **cull → settle → thaw → freeze**.
 - **Thaw:** top-of-stack Ice/Snow when `temp > freeze_point_c` → `Air+FULL`.
 - **Settle:** wet Air above Ice/Snow swaps so liquid sinks and ice floats
   (blocks the column ice-pump / tower from rain-on-ice).
-- Rate limits: 1 freeze and 1 thaw per column per tick by default.
+- **Snow precip:** rain / drizzle / cloud downpour call
+  `deposit_precip_on_surface`. Cold **ground** sample (skips snow/ice pack
+  height) + frozen budget room → one `Snow` cell; else liquid. Budget full
+  → rain/slush runoff (no unbounded towers).
+- **Slush:** Snow on water — warm melts snow to water; cold freezes the
+  water film under snow into ice (snow-on-ice pack).
+- Rate limits: 1 freeze / thaw / slush per column per tick by default.
 - **Max Ice+Snow cells / column** — excess culled to empty Air (not melted).
 
-Cold snap: Tab → Base temp below 0°C. Warm snap: raise base temp above freeze point.
-
-Next: snow precip / slush (snow on water cools / melts with hard caps).
+Cold snap: Tab → Base temp below 0°C (with rain/clouds on). Warm snap: raise
+base temp above freeze point.
 
 ## Related docs
 

@@ -42,8 +42,9 @@ mod settings;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_condensation_rain_with_orographic, apply_evaporation_into_humidity, apply_phase,
-    apply_karst_dissolution, apply_rain, celestial_screen_pos_cfg, continental_surface_y,
+    apply_condensation_rain_phased, apply_evaporation_into_humidity, apply_phase,
+    apply_karst_dissolution, apply_rain_with_temp, celestial_screen_pos_cfg,
+    continental_surface_y,
     day_night_factor_cfg, humidity_diffuse_due, is_daytime_cfg, is_standing_water, sky_rgb,
     sky_rgb_at_height, temperature_step_due, tick, ClimateConfig, WorldgenParams,
 };
@@ -473,7 +474,12 @@ async fn main() {
         let sim_paused = paused || (editor.open && !editor.spawn_picker);
         if !sim_paused {
             if rain_on {
-                apply_rain(&mut scene.world, &settings.rain);
+                apply_rain_with_temp(
+                    &mut scene.world,
+                    &settings.rain,
+                    Some(&scene.temperature),
+                    Some(&settings.phase),
+                );
             }
             if evap_on {
                 apply_evaporation_into_humidity(
@@ -488,7 +494,7 @@ async fn main() {
                 .humidity
                 .advect(scene.wind.climate_vx, scene.wind.climate_vy);
             let tick_no = scene.world.tick;
-            scene.clouds.step(
+            scene.clouds.step_with_precip(
                 &mut scene.world,
                 &mut scene.humidity,
                 &scene.wind,
@@ -496,14 +502,18 @@ async fn main() {
                 scene.params.sky_ceiling_y,
                 tick_no,
                 &settings.cloud,
+                Some(&scene.temperature),
+                Some(&settings.phase),
             );
             // Light drizzle from leftover vapor (clouds do the downpours).
             if cond_rain_on {
-                apply_condensation_rain_with_orographic(
+                apply_condensation_rain_phased(
                     &mut scene.world,
                     &mut scene.humidity,
                     &settings.cond,
                     Some(&settings.oro),
+                    Some(&scene.temperature),
+                    Some(&settings.phase),
                 );
             }
             if karst_on {

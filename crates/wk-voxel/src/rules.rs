@@ -941,6 +941,17 @@ fn hash_prob(seed: u64, gx: i32, tick_no: u64, salt: u64) -> f32 {
 /// Determinism: same world.seed + same tick + same config = same
 /// droplet placements.
 pub fn apply_rain(world: &mut World, cfg: &RainConfig) {
+    apply_rain_with_temp(world, cfg, None, None);
+}
+
+/// Climatic rain that becomes **snow** when `temp` is at/below freezing
+/// and the column frozen budget has room (see [`crate::phase::deposit_precip_on_surface`]).
+pub fn apply_rain_with_temp(
+    world: &mut World,
+    cfg: &RainConfig,
+    temp: Option<&crate::temperature::Temperature>,
+    phase: Option<&crate::phase::PhaseConfig>,
+) {
     let (x0, x1) = cfg.x_range;
     if x0 > x1 {
         return;
@@ -952,7 +963,14 @@ pub fn apply_rain(world: &mut World, cfg: &RainConfig) {
         if roll >= cfg.prob_per_col_per_tick {
             continue;
         }
-        let _ = deposit_water_on_surface(world, gx, cfg.top_y, cfg.droplet_sat as f32);
+        let _ = crate::phase::deposit_precip_on_surface(
+            world,
+            gx,
+            cfg.top_y,
+            cfg.droplet_sat as f32,
+            temp,
+            phase,
+        );
     }
 }
 
@@ -1306,6 +1324,18 @@ pub fn apply_condensation_rain_with_orographic(
     cfg: &CondensationConfig,
     oro: Option<&OrographicConfig>,
 ) {
+    apply_condensation_rain_phased(world, humidity, cfg, oro, None, None);
+}
+
+/// Condensation precip with optional snow phase (cold tiles).
+pub fn apply_condensation_rain_phased(
+    world: &mut World,
+    humidity: &mut crate::humidity::Humidity,
+    cfg: &CondensationConfig,
+    oro: Option<&OrographicConfig>,
+    temp: Option<&crate::temperature::Temperature>,
+    phase: Option<&crate::phase::PhaseConfig>,
+) {
     if cfg.min_mass_to_rain >= cfg.full_mass || cfg.max_prob_per_tick <= 0.0 {
         return;
     }
@@ -1342,7 +1372,14 @@ pub fn apply_condensation_rain_with_orographic(
         if take_mass <= 0.0 {
             continue;
         }
-        let landed = deposit_water_on_surface(world, centre_gx, cfg.top_y, take_mass);
+        let landed = crate::phase::deposit_precip_on_surface(
+            world,
+            centre_gx,
+            cfg.top_y,
+            take_mass,
+            temp,
+            phase,
+        );
         if landed <= 0.0 {
             continue;
         }
