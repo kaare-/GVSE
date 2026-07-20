@@ -3,18 +3,23 @@
 //! Isolation: only wk-voxel + wk-material dependencies. No column
 //! stack imports.
 
-use wk_voxel::{stamp_world, Humidity, OrganismStore, Wind, World, WorldgenParams};
+use wk_voxel::{
+    stamp_world, CloudStore, Humidity, OrganismStore, Temperature, Wind, World, WorldgenParams,
+};
 
-/// Humidity / wind tile side (world cells per sample).
+/// Humidity / wind / temp tile side (world cells per sample).
 const HUMIDITY_TILE_COLS: i32 = 4;
-/// Prevailing wind — tiles per tick (slow crawl, readable as clouds).
-const CLIMATE_WIND_VX: f32 = 0.08;
+/// Prevailing wind — tiles per tick. Parcels use a fraction of this
+/// so the sky crawls left→right instead of streaking.
+const CLIMATE_WIND_VX: f32 = 0.05;
 
 pub struct Scene {
     pub world: World,
     pub params: WorldgenParams,
     pub humidity: Humidity,
     pub wind: Wind,
+    pub clouds: CloudStore,
+    pub temperature: Temperature,
     pub organisms: OrganismStore,
 }
 
@@ -43,6 +48,18 @@ impl Scene {
             params.sky_ceiling_y,
             params.wrap_x,
         );
+        let temperature = Temperature::with_world_bounds(
+            HUMIDITY_TILE_COLS,
+            0,
+            params.bedrock_floor_y,
+            params.width_cols,
+            params.sky_ceiling_y,
+            params.seed,
+            params.width_cols,
+            params.sea_level_y,
+            params.wrap_x,
+        );
+        let clouds = CloudStore::new();
         // Empty organism store — place Atoms via the F2 creature editor
         // (Enter, then click a wet cell). No auto-seeded demo life.
         let organisms = OrganismStore::new();
@@ -51,6 +68,8 @@ impl Scene {
             params,
             humidity,
             wind,
+            clouds,
+            temperature,
             organisms,
         }
     }
@@ -100,8 +119,9 @@ mod tests {
     }
 
     #[test]
-    fn scene_has_prevailing_wind() {
+    fn scene_has_prevailing_wind_and_temperature() {
         let s = Scene::new(WorldgenParams::default());
         assert!(s.wind.climate_vx > 0.0);
+        assert!(!s.temperature.cells.is_empty());
     }
 }

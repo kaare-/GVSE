@@ -12,12 +12,15 @@ pub mod active;
 pub mod blueprint;
 pub mod cell;
 pub mod chunk;
+pub mod climate;
+pub mod clouds;
 pub mod grid;
 pub mod heatmap;
 pub mod humidity;
 pub mod organism;
 pub mod parallel;
 pub mod rules;
+pub mod temperature;
 pub mod wind;
 pub mod worldgen;
 
@@ -28,17 +31,27 @@ pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{is_grain, water_capacity, Cell, CellFlags, Sat};
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use blueprint::{Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR};
+pub use climate::{
+    celestial_local, celestial_local_cfg, celestial_screen_pos, celestial_screen_pos_cfg, day_factor,
+    day_factor_cfg, day_night_factor, day_night_factor_cfg, is_daytime, is_daytime_cfg, phase_fraction,
+    phase_fraction_cfg, sky_rgb, sky_rgb_at_height, ClimateConfig, DEMO_DAY_TICKS,
+};
+pub use clouds::{CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS};
 pub use grid::World;
-pub use organism::{day_factor, Atom, BodyModule, ModuleId, OrganismStore, DEMO_DAY_TICKS, MAX_ATOMS};
+pub use organism::{Atom, BodyModule, ModuleId, OrganismStore, MAX_ATOMS};
 pub use heatmap::Heatmap;
 pub use humidity::{
     humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,
 };
 pub use rules::{
     apply_condensation_rain, apply_condensation_rain_with_orographic, apply_evaporation,
-    apply_evaporation_into_humidity, apply_grain_fall, apply_gravity_fall, apply_karst_dissolution,
-    apply_lateral_spill, apply_rain, apply_seepage, hydraulic_head, tick, CondensationConfig,
+    apply_evaporation_into_humidity, apply_grain_fall, apply_gravity_fall,
+    apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_seepage, apply_water_flow,
+    deposit_water_on_surface, hydraulic_head, is_standing_water, tick, CondensationConfig,
     EvapConfig, KarstConfig, OrographicConfig, RainConfig,
+};
+pub use temperature::{
+    temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,
 };
 pub use wind::Wind;
 pub use worldgen::is_karst_zone_x;

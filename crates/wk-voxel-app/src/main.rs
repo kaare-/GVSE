@@ -19,31 +19,39 @@
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
 //! - `O` — toggle Set A organisms (Atom step)
-//! - `H` — toggle cyan humidity debug overlay
-//! - `N` — toggle cloud drawing (dark = wetter; wind-advected)
+//! - `H` — toggle soft white humidity haze (vapor hint; clouds carry the look)
+//! - `N` — toggle cloud drawing (coagulated parcels; darker = wetter)
+//! - `T` — toggle temperature heatmap overlay
 //! - `F1` — toggle the bottom tool / hotkey line
 //! - `F2` — creature editor (Set A MS-Paint; `C` stays condensation here)
+//! - `Tab` — live settings (materials, wind, clouds, day/night, temp, …)
 //! - click — block / organism inspector
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
-//! - `Esc` — quit (or cancel spawn / close editor)
+//! - `Esc` — quit (or cancel spawn / close editor / close settings)
+//!
+//! Sky follows the shared climate clock (sun by day, moon by night).
+//! Temperature tiles warm with sun, cool at night, and shade under clouds.
 
 mod editor;
 mod inspector;
 mod palette;
 mod scene;
+mod settings;
 
 use macroquad::prelude::*;
 use wk_voxel::{
     apply_condensation_rain_with_orographic, apply_evaporation_into_humidity,
-    apply_karst_dissolution, apply_rain, humidity_diffuse_due, tick, CondensationConfig, EvapConfig,
-    KarstConfig, OrographicConfig, RainConfig, WorldgenParams,
+    apply_karst_dissolution, apply_rain, celestial_screen_pos_cfg, continental_surface_y,
+    day_night_factor_cfg, humidity_diffuse_due, is_daytime_cfg, is_standing_water, sky_rgb,
+    sky_rgb_at_height, temperature_step_due, tick, ClimateConfig, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
 use crate::inspector::{draw_block_inspector, draw_selection_outline, screen_to_world};
 use crate::palette::cell_color;
 use crate::scene::Scene;
+use crate::settings::SimSettings;
 
 fn window_conf() -> Conf {
     Conf {
@@ -86,84 +94,244 @@ fn fps_smoothed() -> f32 {
     })
 }
 
-/// Cyan overlay alpha for a humidity tile, given the map's current
-/// peak mass. Always ≥ 48 when `mass > 0` so thin diffused haze stays
-/// visible (an absolute 4×4×255 scale used to paint `alpha == 0`).
-fn humidity_overlay_alpha(mass: f32, max_mass: f32) -> u8 {
+/// Soft white vapor haze alpha — quiet on purpose so cartoon clouds
+/// stay the main atmospheric read.
+fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
     if mass <= 0.0 {
         return 0;
     }
     let norm = (mass / max_mass.max(1.0)).clamp(0.0, 1.0);
-    (48.0 + norm * 152.0) as u8
+    // Floor so thin air isn't a speckled field; cap so it never washes out.
+    if norm < 0.12 {
+        return 0;
+    }
+    (18.0 + norm * 42.0) as u8
 }
 
-/// Dark cloud puffs — darker / denser when the tile holds more water.
-/// Sub-tile `scroll` (from advection residual) keeps motion smooth.
+/// Day/night sky gradient + sun or moon arc.
+fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
+    let dn = day_night_factor_cfg(tick, climate);
+    const BANDS: i32 = 28;
+    for i in 0..BANDS {
+        let y0 = sh * (i as f32) / BANDS as f32;
+        let h = y0 + sh / BANDS as f32;
+        let height_01 = (i as f32 + 0.5) / BANDS as f32;
+        let [r, g, b] = sky_rgb_at_height(dn, height_01);
+        draw_rectangle(
+            0.0,
+            y0,
+            sw,
+            h - y0 + 1.0,
+            Color::from_rgba(r, g, b, 255),
+        );
+    }
+    let (cx, cy) = celestial_screen_pos_cfg(tick, sw, sh, climate);
+    if is_daytime_cfg(tick, climate) {
+        draw_circle(cx, cy, 22.0, Color::from_rgba(255, 200, 70, 60));
+        draw_circle(cx, cy, 16.0, Color::from_rgba(255, 220, 90, 255));
+        draw_circle(cx, cy, 10.0, Color::from_rgba(255, 245, 180, 255));
+    } else {
+        let [sr, sg, sb] = sky_rgb(dn);
+        draw_circle(cx, cy, 14.0, Color::from_rgba(230, 235, 245, 255));
+        // Crescent bite using local sky colour.
+        draw_circle(
+            cx + 5.0,
+            cy - 2.0,
+            12.0,
+            Color::from_rgba(sr, sg, sb, 255),
+        );
+    }
+}
+
+fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
+    let u = ((temp_c - t_min) / (t_max - t_min).max(0.5)).clamp(0.0, 1.0);
+    // Cold blue → mild cyan → warm yellow → hot red.
+    let (r, g, b) = if u < 0.33 {
+        let t = u / 0.33;
+        (
+            (20.0 + t * 40.0) as u8,
+            (80.0 + t * 120.0) as u8,
+            (200.0 - t * 40.0) as u8,
+        )
+    } else if u < 0.66 {
+        let t = (u - 0.33) / 0.33;
+        (
+            (60.0 + t * 180.0) as u8,
+            (200.0 - t * 40.0) as u8,
+            (160.0 - t * 140.0) as u8,
+        )
+    } else {
+        let t = (u - 0.66) / 0.34;
+        (
+            (240.0 - t * 20.0) as u8,
+            (160.0 - t * 140.0) as u8,
+            (20.0 + t * 20.0) as u8,
+        )
+    };
+    Color::from_rgba(r, g, b, 120)
+}
+
+/// Cartoon clouds from coagulated [`wk_voxel::CloudStore`] parcels.
+/// Darker / denser = wetter; raining parcels get falling drops beneath.
 fn draw_clouds(
-    humidity: &wk_voxel::Humidity,
+    clouds: &wk_voxel::CloudStore,
     origin_x: f32,
     origin_y: f32,
     cell_px: f32,
     bedrock_floor_y: i32,
+    sea_level_y: i32,
+    seed: u64,
     width_cols: i32,
     wrap_x: bool,
     sw: f32,
     sh: f32,
+    downpour_mass: f32,
 ) {
-    if humidity.cells.is_empty() {
+    if clouds.is_empty() {
         return;
     }
-    let tile_cols = humidity.tile_cols;
-    let tile_px = tile_cols as f32 * cell_px;
-    let max_mass = humidity
-        .cells
-        .values()
-        .copied()
-        .fold(0.0f32, f32::max)
-        .max(1.0);
-    let scroll = humidity.advect_rx * tile_px;
     let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-
-    for (&(hx, hy), &mass) in &humidity.cells {
-        if mass <= 0.0 {
-            continue;
-        }
-        let norm = (mass / max_mass).clamp(0.0, 1.0);
-        // Darker grey as water content rises.
-        let shade = (210.0 - norm * 160.0) as u8;
-        let alpha = (55.0 + norm * 170.0) as u8;
-        let base_gx = hx * tile_cols;
-        let base_gy = hy * tile_cols;
-        let r = tile_px * (0.45 + 0.35 * norm);
+    // Low parcels first so ridge-top clouds paint over them.
+    let mut order: Vec<usize> = (0..clouds.parcels.len()).collect();
+    order.sort_by(|&a, &b| {
+        clouds.parcels[a]
+            .fy
+            .partial_cmp(&clouds.parcels[b].fy)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    for &idx in &order {
+        let p = &clouds.parcels[idx];
+        let wet = p.wetness_with(downpour_mass);
+        // Narrow shade/alpha ranges so vapor mass changes don't pulse.
+        let shade = (228.0 - wet * 95.0) as u8;
+        let alpha = (145.0 + wet * 55.0) as u8;
+        let r = p.radius() * cell_px;
+        let surface = continental_surface_y(seed, p.fx.round() as i32, sea_level_y, width_cols);
+        let ground_sy =
+            origin_y - (surface as f32 - bedrock_floor_y as f32) * cell_px;
         for &x_copy in x_copies {
-            let sx = origin_x
-                + (base_gx + x_copy * width_cols) as f32 * cell_px
-                + scroll
-                + tile_px * 0.5;
-            let sy = origin_y
-                - (base_gy - bedrock_floor_y + tile_cols) as f32 * cell_px
-                + tile_px * 0.5;
-            if sx + r < 0.0 || sx - r > sw || sy + r < 0.0 || sy - r > sh {
+            let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px;
+            let sy = origin_y - (p.fy - bedrock_floor_y as f32) * cell_px;
+            if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
                 continue;
             }
-            let c = Color::from_rgba(shade, shade, shade.saturating_add(8), alpha);
-            draw_circle(sx, sy, r, c);
-            draw_circle(sx - r * 0.45, sy + r * 0.1, r * 0.7, c);
-            draw_circle(sx + r * 0.4, sy + r * 0.05, r * 0.65, c);
+            draw_cartoon_cloud(sx, sy, r, shade, alpha, p.shape_seed, p.deform);
+            if p.raining {
+                draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh);
+            }
         }
     }
 }
 
+/// Cosmetic falling drops under a raining parcel (physics is separate).
+fn draw_falling_rain(
+    sx: f32,
+    sy: f32,
+    r: f32,
+    ground_sy: f32,
+    wetness: f32,
+    sw: f32,
+    sh: f32,
+) {
+    let t = get_time() as f32;
+    let top = sy + r * 0.35;
+    let bottom = ground_sy.clamp(top + 12.0, sh - 4.0);
+    let left = (sx - r * 0.85).max(-12.0);
+    let right = (sx + r * 0.85).min(sw + 12.0);
+    let band = (right - left).max(1.0);
+    let n = ((band / 7.0) * (0.7 + wetness)).ceil().clamp(10.0, 48.0) as usize;
+    let drop_len = 10.0 + wetness * 6.0;
+    let fall_speed = 380.0 + wetness * 160.0;
+    let cycle = (bottom - top + drop_len).max(drop_len + 1.0);
+    for i in 0..n {
+        let seed = i as f32;
+        let x = left + ((seed * 97.371) % band);
+        let phase = (seed * 0.6180339) % 1.0;
+        let y = top + ((t * fall_speed + phase * cycle) % cycle) - drop_len;
+        if y + drop_len < top || y > bottom {
+            continue;
+        }
+        let alpha = (100.0 + wetness * 50.0) as u8;
+        draw_line(
+            x,
+            y,
+            x - 2.5,
+            y + drop_len,
+            1.15,
+            Color::from_rgba(195, 215, 240, alpha),
+        );
+    }
+}
+
+/// Multi-bump cartoon cloud with per-parcel silhouette + soft ridge squash.
+fn draw_cartoon_cloud(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    shade: u8,
+    alpha: u8,
+    shape_seed: u32,
+    deform: f32,
+) {
+    let body = Color::from_rgba(shade, shade, shade.saturating_add(6), alpha);
+    let hilite = Color::from_rgba(
+        shade.saturating_add(25),
+        shade.saturating_add(25),
+        shade.saturating_add(30),
+        (alpha as f32 * 0.55) as u8,
+    );
+    let d = deform.clamp(0.0, 1.0);
+    // Soft deform: widen and flatten when scraping a ridge.
+    let sx = 1.0 + d * 0.22;
+    let sy = 1.0 - d * 0.28;
+    let s = |n: u32| ((shape_seed.wrapping_mul(0x9E37_79B9).wrapping_add(n * 0x85EB_CA6B)) >> 8) as f32
+        / 16_777_216.0;
+    let jx = |n: u32| (s(n) - 0.5) * 0.28;
+    let jy = |n: u32| (s(n.wrapping_add(17)) - 0.5) * 0.22;
+    let jr = |n: u32| 0.88 + s(n.wrapping_add(31)) * 0.28;
+    let puff = |ox: f32, oy: f32, rr: f32, n: u32| {
+        draw_circle(
+            cx + (ox + jx(n)) * r * sx,
+            cy + (oy + jy(n)) * r * sy,
+            rr * jr(n) * r * ((sx + sy) * 0.5),
+            body,
+        );
+    };
+    // Body + side puffs (layout varies with seed).
+    puff(0.0, 0.02, 0.95, 1);
+    puff(-0.72, 0.08, 0.70, 2);
+    puff(0.78, 0.06, 0.68, 3);
+    // Upper lobes — count/bias from seed so silhouettes differ.
+    puff(-0.32 + jx(4) * 0.4, -0.42, 0.60, 4);
+    puff(0.28 + jx(5) * 0.4, -0.52, 0.66, 5);
+    if shape_seed & 1 == 0 {
+        puff(0.82, -0.22, 0.52, 6);
+    }
+    if shape_seed & 2 == 0 {
+        puff(-0.88, -0.12, 0.48, 7);
+    }
+    if shape_seed % 5 < 3 {
+        puff(jx(8) * 0.5, -0.68, 0.42, 8);
+    }
+    // Soft highlight on the sun-facing top.
+    draw_circle(
+        cx + (0.12 + jx(9) * 0.3) * r * sx,
+        cy + (-0.48 + jy(9) * 0.2) * r * sy,
+        r * 0.32 * jr(9),
+        hilite,
+    );
+}
+
 #[cfg(test)]
 mod overlay_tests {
-    use super::humidity_overlay_alpha;
+    use super::humidity_haze_alpha;
 
     #[test]
-    fn faint_tiles_still_get_visible_alpha() {
-        // Old scale: (20/4080)*180 → 0. New scale floors at 48.
-        assert!(humidity_overlay_alpha(20.0, 100.0) >= 48);
-        assert_eq!(humidity_overlay_alpha(100.0, 100.0), 200);
-        assert_eq!(humidity_overlay_alpha(0.0, 100.0), 0);
+    fn haze_ignores_thin_vapor_and_stays_soft() {
+        assert_eq!(humidity_haze_alpha(0.0, 100.0), 0);
+        assert_eq!(humidity_haze_alpha(5.0, 100.0), 0); // below 12% floor
+        assert!(humidity_haze_alpha(50.0, 100.0) >= 18);
+        assert!(humidity_haze_alpha(100.0, 100.0) <= 70);
     }
 }
 
@@ -171,46 +339,28 @@ mod overlay_tests {
 async fn main() {
     let params = WorldgenParams::default();
     let mut scene = Scene::new(params);
+    let mut settings = SimSettings::new(&scene.params);
+    settings.apply_material_overrides();
     let mut paused = false;
-    let mut rain_on = true;
+    // Climatic drizzle is physics-only by default — sky pixels hide thin
+    // wet Air so the old rain-streak look doesn't paint over the sky.
+    // Clouds do the visible weather.
+    let mut rain_on = false;
     let mut cond_rain_on = true;
     let mut evap_on = true;
     let mut karst_on = true;
     let mut organisms_on = true;
     let mut humidity_overlay = false;
     let mut clouds_on = true;
+    let mut temp_overlay = false;
     let mut show_tool_line = true;
     let mut editor = CreatureEditor::default();
     let mut inspect: Option<(i32, i32)> = None;
-    // Fraction of pairwise humidity difference transferred per tick.
-    // 0.15 gives a visible "clouds spread as they drift" feel
-    // without going near the 0.25 stability cap.
-    let humidity_diffusion_alpha: f32 = 0.15;
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
 
-    // Cloud row at the topmost stamped cell so no empty air (sky-blue
-    // clear colour) peeks above the rain band.
-    let cloud_cfg = |params: &WorldgenParams| {
-        let rain = RainConfig {
-            top_y: params.sky_ceiling_y - 1,
-            x_range: (0, params.width_cols - 1),
-            prob_per_col_per_tick: 0.02,
-            droplet_sat: 64,
-            seed_salt: 0xC10D_5EED,
-        };
-        let cond = CondensationConfig {
-            top_y: params.sky_ceiling_y - 2,
-            ..CondensationConfig::default()
-        };
-        (rain, cond)
-    };
-    let (mut rain_cfg, mut cond_cfg) = cloud_cfg(&scene.params);
-    let evap_cfg = EvapConfig::default();
-    let karst_cfg = KarstConfig::default();
-
     loop {
-        // Esc: spawn cancel → close editor → quit.
+        // Esc: spawn cancel → close editor → close settings → quit.
         if is_key_pressed(KeyCode::Escape) {
             if editor.open && editor.spawn_picker {
                 editor.spawn_picker = false;
@@ -219,6 +369,8 @@ async fn main() {
                 editor.open = false;
                 editor.spawn_picker = false;
                 paused = editor.was_paused;
+            } else if settings.open {
+                settings.open = false;
             } else {
                 break;
             }
@@ -226,12 +378,16 @@ async fn main() {
         if is_key_pressed(KeyCode::F1) {
             show_tool_line = !show_tool_line;
         }
+        if is_key_pressed(KeyCode::Tab) && !editor.open {
+            settings.open = !settings.open;
+        }
         // Editor is F2 only — `C` is condensation in the voxel demo
         // (column-GVSE can use C/F2 because it has no condensation toggle).
         if is_key_pressed(KeyCode::F2) {
             let opening = !editor.open;
             editor.toggle(paused);
             if opening {
+                settings.open = false;
                 paused = true;
             } else {
                 paused = editor.was_paused;
@@ -241,7 +397,7 @@ async fn main() {
             editor.handle_input();
         }
 
-        if !editor.open || editor.spawn_picker {
+        if (!editor.open || editor.spawn_picker) && !settings.open {
             if is_key_pressed(KeyCode::Space) {
                 paused = !paused;
             }
@@ -251,7 +407,7 @@ async fn main() {
                     seed: new_seed,
                     ..scene.params
                 });
-                (rain_cfg, cond_cfg) = cloud_cfg(&scene.params);
+                settings.on_world_reseed(&scene.params);
                 inspect = None;
             }
             if is_key_pressed(KeyCode::W) {
@@ -271,6 +427,9 @@ async fn main() {
             }
             if is_key_pressed(KeyCode::N) {
                 clouds_on = !clouds_on;
+            }
+            if is_key_pressed(KeyCode::T) {
+                temp_overlay = !temp_overlay;
             }
             if is_key_pressed(KeyCode::O) {
                 organisms_on = !organisms_on;
@@ -296,60 +455,80 @@ async fn main() {
             cam_x = cam_x.rem_euclid(world_w_px_for_wrap);
         }
 
+        // Sync live settings into scene subsystems.
+        scene.wind.climate_vx = settings.wind_vx;
+        scene.temperature.config = settings.temp;
+        scene.temperature.climate = settings.climate;
+        settings.oro.seed = scene.params.seed;
+        settings.oro.width_cols = scene.params.width_cols;
+        settings.oro.sea_level_y = scene.params.sea_level_y;
+        settings.oro.wind_sign = if settings.wind_vx >= 0.0 { 1 } else { -1 };
+
         // Physics (frozen while the paint editor is open, not spawn).
         let sim_paused = paused || (editor.open && !editor.spawn_picker);
         if !sim_paused {
             if rain_on {
-                apply_rain(&mut scene.world, &rain_cfg);
+                apply_rain(&mut scene.world, &settings.rain);
             }
             if evap_on {
                 apply_evaporation_into_humidity(
                     &mut scene.world,
                     &mut scene.humidity,
-                    &evap_cfg,
+                    &settings.evap,
                 );
             }
-            // Wind advects cloud / humidity mass before rain so
-            // orographic dumps see the latest plume position.
+            // Vapor drifts with the wind, then coagulates into cloud
+            // parcels that rain hard when heavy enough.
             scene
                 .humidity
                 .advect(scene.wind.climate_vx, scene.wind.climate_vy);
+            let tick_no = scene.world.tick;
+            scene.clouds.step(
+                &mut scene.world,
+                &mut scene.humidity,
+                &scene.wind,
+                scene.params.sea_level_y,
+                scene.params.sky_ceiling_y,
+                tick_no,
+                &settings.cloud,
+            );
+            // Light drizzle from leftover vapor (clouds do the downpours).
             if cond_rain_on {
-                let oro = OrographicConfig {
-                    seed: scene.params.seed,
-                    width_cols: scene.params.width_cols,
-                    sea_level_y: scene.params.sea_level_y,
-                    wind_sign: if scene.wind.climate_vx >= 0.0 { 1 } else { -1 },
-                    ..OrographicConfig::default()
-                };
                 apply_condensation_rain_with_orographic(
                     &mut scene.world,
                     &mut scene.humidity,
-                    &cond_cfg,
-                    Some(&oro),
+                    &settings.cond,
+                    Some(&settings.oro),
                 );
             }
             if karst_on {
-                apply_karst_dissolution(&mut scene.world, &karst_cfg);
+                apply_karst_dissolution(&mut scene.world, &settings.karst);
             }
             tick(&mut scene.world);
             // Atmospheric diffusion is periodic (column-GVSE
             // HumidityField cadence: every 20 ticks). Evap still
             // deposits every tick; only the spread step is throttled.
             if humidity_diffuse_due(scene.world.tick) {
-                scene.humidity.diffuse(humidity_diffusion_alpha);
+                scene
+                    .humidity
+                    .diffuse(settings.humidity_diffusion_alpha);
+            }
+            if temperature_step_due(scene.world.tick) {
+                let tick_no = scene.world.tick;
+                scene.temperature.step(&scene.humidity, tick_no);
             }
             if organisms_on {
                 let tick_no = scene.world.tick;
-                scene.organisms.step(&mut scene.world, tick_no);
+                scene
+                    .organisms
+                    .step_with_climate(&mut scene.world, tick_no, &settings.climate);
             }
         }
 
         // Render.
-        clear_background(Color::from_rgba(0x87, 0xCE, 0xEB, 255));
-
         let sw = screen_width();
         let sh = screen_height();
+        draw_sky(scene.world.tick, sw, sh, &settings.climate);
         let cell_px = PX_PER_CELL;
         let hud_h = hud_height(show_tool_line);
         // Convert screen space to world cell range, centred on the
@@ -438,34 +617,30 @@ async fn main() {
                     let Some(cell) = scene.world.get_cell(x, y) else {
                         continue;
                     };
-                    let [r, g, b] = cell_color(cell);
-                    // Skip sky-blue empty air — background already
-                    // paints that colour, so this cuts draw calls hard.
-                    if cell.material == wk_material::MaterialId::Air && cell.sat.is_empty() {
-                        continue;
+                    // Only draw standing water (pools / ocean film / land
+                    // puddles). Mid-air sat stays invisible — falling rain
+                    // is the cosmetic streak under raining clouds.
+                    if cell.material == wk_material::MaterialId::Air {
+                        // Any non-zero fill (even 1/255) must paint — the
+                        // palette maps that to a faint blue-white film so
+                        // trickle / leveling cells stay visible. Mid-air
+                        // sat stays invisible; falling rain is the
+                        // cosmetic streak under raining clouds.
+                        if cell.sat.is_empty() {
+                            continue;
+                        }
+                        let below_sea = y <= scene.params.sea_level_y;
+                        if !below_sea && !is_standing_water(&scene.world, x, y) {
+                            continue;
+                        }
                     }
+                    let [r, g, b] = cell_color(cell);
                     draw_rectangle(sx, sy - cell_px, cell_px, cell_px, Color::from_rgba(r, g, b, 255));
                 }
             }
         }
 
-        // Clouds: humidity mass drawn as dark puffs (darker = wetter),
-        // scrolled by wind advection residual.
-        if clouds_on {
-            draw_clouds(
-                &scene.humidity,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.width_cols,
-                scene.params.wrap_x,
-                sw,
-                sh,
-            );
-        }
-
-        // Optional cyan humidity debug overlay (tile rects).
+        // Soft white vapor haze (optional) — clouds remain the main read.
         if humidity_overlay {
             let tile_px = scene.humidity.tile_cols as f32 * cell_px;
             let max_mass = scene
@@ -475,15 +650,20 @@ async fn main() {
                 .copied()
                 .fold(0.0f32, f32::max)
                 .max(1.0);
+            let sky_hy_min = (scene.params.sea_level_y + 4).div_euclid(scene.humidity.tile_cols);
             for (&(hx, hy), &mass) in &scene.humidity.cells {
-                if mass <= 0.0 {
+                if mass <= 0.0 || hy < sky_hy_min {
+                    continue;
+                }
+                let alpha = humidity_haze_alpha(mass, max_mass);
+                if alpha == 0 {
                     continue;
                 }
                 let base_gx = hx * scene.humidity.tile_cols;
                 let base_gy = hy * scene.humidity.tile_cols;
                 for &x_copy in x_copies {
-                    let sx = origin_x + (base_gx + x_copy * scene.params.width_cols) as f32 * cell_px
-                        + scene.humidity.advect_rx * tile_px;
+                    let sx = origin_x
+                        + (base_gx + x_copy * scene.params.width_cols) as f32 * cell_px;
                     let sy = origin_y
                         - (base_gy - scene.params.bedrock_floor_y + scene.humidity.tile_cols)
                             as f32
@@ -491,8 +671,54 @@ async fn main() {
                     if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
                         continue;
                     }
-                    let alpha = humidity_overlay_alpha(mass, max_mass);
-                    draw_rectangle(sx, sy, tile_px, tile_px, Color::from_rgba(160, 200, 240, alpha));
+                    draw_rectangle(sx, sy, tile_px, tile_px, Color::from_rgba(255, 255, 255, alpha));
+                }
+            }
+        }
+
+        // Coagulated cloud parcels — the atmospheric story.
+        if clouds_on {
+            draw_clouds(
+                &scene.clouds,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.sea_level_y,
+                scene.params.seed,
+                scene.params.width_cols,
+                scene.params.wrap_x,
+                sw,
+                sh,
+                settings.cloud.downpour_mass,
+            );
+        }
+
+        // Temperature heatmap overlay (blue cold → red hot).
+        if temp_overlay {
+            let tile_px = scene.temperature.tile_cols as f32 * cell_px;
+            let (t_min, t_max) = scene
+                .temperature
+                .cells
+                .values()
+                .copied()
+                .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
+            let t_min = t_min.min(8.0);
+            let t_max = t_max.max(t_min + 4.0).max(28.0);
+            for (&(hx, hy), &temp_c) in &scene.temperature.cells {
+                let base_gx = hx * scene.temperature.tile_cols;
+                let base_gy = hy * scene.temperature.tile_cols;
+                for &x_copy in x_copies {
+                    let sx =
+                        origin_x + (base_gx + x_copy * scene.params.width_cols) as f32 * cell_px;
+                    let sy = origin_y
+                        - (base_gy - scene.params.bedrock_floor_y + scene.temperature.tile_cols)
+                            as f32
+                            * cell_px;
+                    if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
+                        continue;
+                    }
+                    draw_rectangle(sx, sy, tile_px, tile_px, temp_overlay_color(temp_c, t_min, t_max));
                 }
             }
         }
@@ -534,34 +760,38 @@ async fn main() {
                 .organisms
                 .pick_at(gx, gy)
                 .map(|id| (id, &scene.organisms.atoms[id]));
-            draw_block_inspector(gx, gy, cell, &scene.humidity, org, sw);
+            draw_block_inspector(gx, gy, cell, &scene.humidity, &scene.temperature, org, sw);
         }
 
         // Creature editor overlay (paint UI, or spawn banner).
         editor.draw();
+        settings.draw();
 
         // HUD: info line always; tool / hotkey line toggled with F1.
+        let tod = if is_daytime_cfg(scene.world.tick, &settings.climate) {
+            "day"
+        } else {
+            "night"
+        };
         let info = format!(
-            "fps={:.0}  tick={} seed={} rain={} cond={} evap={} karst={} org={} atoms={} clouds={} hum={} wind={:.2} humidity={:.0} {}",
+            "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} atoms={} {}",
             fps_smoothed(),
             scene.world.tick,
-            scene.params.seed,
+            tod,
+            scene.temperature.mean(),
             if rain_on { "on" } else { "off" },
-            if cond_rain_on { "on" } else { "off" },
             if evap_on { "on" } else { "off" },
-            if karst_on { "on" } else { "off" },
-            if organisms_on { "on" } else { "off" },
-            scene.organisms.len(),
-            if clouds_on { "on" } else { "off" },
-            if humidity_overlay { "on" } else { "off" },
-            scene.wind.climate_vx,
+            scene.clouds.len(),
+            scene.clouds.total_mass(),
             scene.humidity.total_mass(),
+            scene.wind.climate_vx,
+            scene.organisms.len(),
             if sim_paused { "[paused]" } else { "" }
         );
         draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
         if show_tool_line {
             draw_text(
-                "Space|R|W/C/E/K/O|N clouds|H hum|F1 tools|F2 editor|click inspect|Esc",
+                "Tab settings|Space|R|W rain|C drizzle|E/K/O|N clouds|T temp|H haze|F1|F2|Esc",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

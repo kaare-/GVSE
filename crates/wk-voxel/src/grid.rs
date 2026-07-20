@@ -84,6 +84,15 @@ impl World {
         chunk.set(lx, ly, cell);
     }
 
+    /// Dirty a cell without rewriting it (wake quiescent physics).
+    pub fn touch_dirty(&mut self, gx: i32, gy: i32) {
+        let gx = self.wrap_x(gx);
+        let (coord, lx, ly) = Self::split(gx, gy);
+        if let Some(chunk) = self.chunks.get_mut(&coord) {
+            chunk.touch_dirty(lx, ly);
+        }
+    }
+
     pub fn ensure_chunk(&mut self, coord: ChunkCoord) -> &mut Chunk {
         self.chunks.entry(coord).or_insert_with(|| Chunk::new(coord))
     }

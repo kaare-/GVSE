@@ -279,6 +279,43 @@ impl Humidity {
         });
     }
 
+    /// Buoyant lift: a fraction of each tile's mass moves one tile up,
+    /// so vapor from ocean evaporation rises before it can coagulate
+    /// into clouds. Mass-conserving; stops at `max_hy` (cloud deck).
+    pub fn buoyant_rise(&mut self, fraction: f32, max_hy: i32) {
+        let fraction = fraction.clamp(0.0, 0.45);
+        if fraction == 0.0 || self.cells.is_empty() {
+            return;
+        }
+        let snap = self.cells.clone();
+        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        for (&(hx, hy), &mass) in &snap {
+            if mass <= 0.0 || hy >= max_hy {
+                continue;
+            }
+            let dest = hy + 1;
+            if !self.accepts(hx, dest) {
+                continue;
+            }
+            let lift = mass * fraction;
+            if lift < 1e-6 {
+                continue;
+            }
+            *deltas.entry((hx, hy)).or_insert(0.0) -= lift;
+            *deltas.entry((hx, dest)).or_insert(0.0) += lift;
+        }
+        for (k, d) in deltas {
+            if !self.accepts(k.0, k.1) {
+                continue;
+            }
+            *self.cells.entry(k).or_insert(0.0) += d;
+        }
+        let bounds = self.bounds;
+        self.cells.retain(|&(hx, hy), v| {
+            *v > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
+        });
+    }
+
     /// Advect atmospheric mass by a uniform climate wind `(vx, vy)`
     /// in tiles/tick. Fractional remainders accumulate in
     /// [`Self::advect_rx`] / [`Self::advect_ry`] so motion stays smooth.

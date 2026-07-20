@@ -6,6 +6,7 @@ notes intended to survive re-reads of the codebase.
 
 | Doc | Subject |
 |-----|---------|
+| [`VOXEL_WATER.md`](VOXEL_WATER.md) | Working voxel water CA: gravity, surface flow, seepage, material capacities. |
 | [`WORLDGEN.md`](WORLDGEN.md) | World topology (ring vs infinite), elevation, streaming, hydro init, wrap rules. |
 | [`STRATA.md`](STRATA.md) | Artistic stratigraphic model: facies belts, 8-layer recipes, pinch-outs. |
 | [`AGENTS.md`](AGENTS.md) | Creature / agent layer. |

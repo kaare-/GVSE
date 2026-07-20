@@ -148,6 +148,24 @@ impl Chunk {
     pub fn clear_dirty(&mut self) {
         self.dirty = None;
     }
+
+    /// Mark a local cell dirty without changing its contents.
+    /// Used to re-wake stranded slope films that went quiescent.
+    pub fn touch_dirty(&mut self, x: usize, y: usize) {
+        let xu = x as u8;
+        let yu = y as u8;
+        match &mut self.dirty {
+            Some(r) => r.expand_to_include(xu, yu),
+            None => {
+                self.dirty = Some(Rect {
+                    x0: xu,
+                    y0: yu,
+                    x1: xu,
+                    y1: yu,
+                });
+            }
+        }
+    }
 }
 
 #[cfg(test)]
