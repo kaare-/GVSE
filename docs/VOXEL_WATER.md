@@ -147,8 +147,9 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   melts to liquid; cold air + cold ground → solid `Snow` pack (never
   pore-soaks). Warm air always rains (ponds may freeze later via phase).
   Short budget / full blanket on the snow path → hold mass (`0`).
-- **Condensation drizzle (`C`):** liquid only — leftover humidity must not
-  mint invisible snow towers when the sky air is cold. Clouds own snow.
+- **Condensation drizzle (`C`):** warm → liquid film; cold air on cold
+  ground → thin `Ice` frost / rime (≤ `frost_coat_depth`, default 1).
+  Never places `Snow` packs or ice towers — clouds own real snow.
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
   the blanket. Cloud downpour uses a wider footprint when snowing.

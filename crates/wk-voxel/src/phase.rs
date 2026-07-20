@@ -68,6 +68,9 @@ pub struct PhaseConfig {
     /// Soft blanket depth: new snow prefers columns with Ice+Snow at or
     /// below this before stacking taller spikes.
     pub snow_blanket_depth: u8,
+    /// Max Ice+Snow from **condensation frost** (rime / glaze) on a
+    /// column. Real frost is a thin coat — not snow towers. Default `1`.
+    pub frost_coat_depth: u8,
     /// Master switch for the whole phase pass (`I` in the demo).
     pub enabled: bool,
     /// Convert standing water → Ice when cold.
@@ -111,6 +114,7 @@ impl Default for PhaseConfig {
             max_ice_cells_per_column: 12,
             snow_spread_radius: 6,
             snow_blanket_depth: 2,
+            frost_coat_depth: 1,
             enabled: true,
             enable_freeze: true,
             enable_thaw: true,
@@ -307,6 +311,82 @@ pub fn deposit_precip_on_surface(
     deposit_snow_spread(world, gx, start_y, temp, phase).unwrap_or(0.0)
 }
 
+/// Condensation drizzle deposit: liquid rain when warm; a **thin Ice
+/// glaze** (frost / rime) when cold air hits cold ground.
+///
+/// Unlike cloud snow, this never places `Snow` and never stacks past
+/// [`PhaseConfig::frost_coat_depth`] (default one cell). Once the coat
+/// is on, further vapor is held in the humidity tile.
+pub fn deposit_condensate_on_surface(
+    world: &mut World,
+    gx: i32,
+    start_y: i32,
+    budget: f32,
+    temp: Option<&Temperature>,
+    phase: Option<&PhaseConfig>,
+) -> f32 {
+    let (Some(temp), Some(phase)) = (temp, phase) else {
+        return deposit_water_on_surface(world, gx, start_y, budget);
+    };
+    if budget <= 0.0 {
+        return 0.0;
+    }
+    let air_t = temp.at_cell(gx, start_y);
+    let ground_y = ground_sample_y(world, gx);
+    let ground_t = temp.at_cell(gx, ground_y);
+    // Warm air or warm ground → liquid (phase may freeze ponds later).
+    if air_t > phase.freeze_point_c || ground_t > phase.freeze_point_c {
+        return deposit_water_on_surface(world, gx, start_y, budget);
+    }
+    // Cold frost glaze — need enough mass for one solid cell seat.
+    if budget < phase.min_budget_to_snow {
+        return 0.0;
+    }
+    match deposit_frost_coat(world, gx, start_y, temp, phase) {
+        // Drain only what the humidity event offered (ice cell is the
+        // solid seat; don't invent a full 255 drain from a 96 droplet).
+        Some(_) => budget.min(u8::MAX as f32),
+        None => 0.0,
+    }
+}
+
+/// Seat a thin Ice glaze on bare cold ground. Prefers neighbours that
+/// still lack a coat so hills get a sheet, not a spike under the tile.
+fn deposit_frost_coat(
+    world: &mut World,
+    gx: i32,
+    start_y: i32,
+    temp: &Temperature,
+    phase: &PhaseConfig,
+) -> Option<f32> {
+    let max_coat = phase.frost_coat_depth.max(1) as usize;
+    // Small lateral search — frost coats slopes, it doesn't plume.
+    let radius = phase.snow_spread_radius.min(3).max(0);
+    let mut candidates: Vec<(i32, usize, i32)> = Vec::with_capacity((radius * 2 + 1) as usize);
+    for dx in -radius..=radius {
+        let cx = world.wrap_x(gx + dx);
+        let sample_y = ground_sample_y(world, cx);
+        if temp.at_cell(cx, sample_y) > phase.freeze_point_c {
+            continue;
+        }
+        let pack = frozen_count_in_column(world, cx);
+        if pack >= max_coat {
+            continue;
+        }
+        candidates.push((cx, pack, dx.abs()));
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    candidates.sort_by_key(|&(_, pack, dist)| (pack, dist));
+    for &(cx, _, _) in &candidates {
+        if let Some(consumed) = deposit_ice_on_surface(world, cx, start_y) {
+            return Some(consumed);
+        }
+    }
+    None
+}
+
 /// True when precip from air height `air_y` should draw/fall as snow
 /// (cold air and snow precip enabled). Contact melt is a deposit-time
 /// concern — visuals use air only so streaks match the cloud.
@@ -377,6 +457,20 @@ fn rests_on_solid_or_pack(world: &World, gx: i32, gy: i32) -> bool {
 /// ground becomes Snow (it is not pushed into pores). Deep water gets
 /// snow seated in the empty Air above the free surface.
 fn deposit_snow_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f32> {
+    deposit_frozen_lid_on_surface(world, gx, start_y, snow_cell())
+}
+
+/// Place one Ice cell as a surface glaze (condensation frost / rime).
+fn deposit_ice_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f32> {
+    deposit_frozen_lid_on_surface(world, gx, start_y, ice_cell())
+}
+
+fn deposit_frozen_lid_on_surface(
+    world: &mut World,
+    gx: i32,
+    start_y: i32,
+    lid: Cell,
+) -> Option<f32> {
     let jx = world.wrap_x(gx);
     let mut y = start_y;
     let mut last_empty_air_y: Option<i32> = None;
@@ -389,22 +483,22 @@ fn deposit_snow_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f
             // Solid / pack — seat in the Air cell directly above (film ok).
             if let Some(above) = world.get_cell(jx, y + 1) {
                 if above.material == MaterialId::Air {
-                    world.set_cell(jx, y + 1, snow_cell());
+                    world.set_cell(jx, y + 1, lid);
                     return Some(u8::MAX as f32);
                 }
             }
             return None;
         }
         if !cell.sat.is_empty() {
-            // Puddle on solid / pack → become snow pack (no soak).
+            // Puddle on solid / pack → become frozen lid (no soak).
             if rests_on_solid_or_pack(world, jx, y) {
-                world.set_cell(jx, y, snow_cell());
+                world.set_cell(jx, y, lid);
                 return Some(u8::MAX as f32);
             }
-            // Standing water body — seat snow in empty air above.
+            // Standing water body — seat lid in empty air above.
             if let Some(ay) = last_empty_air_y {
                 if ay == y + 1 {
-                    world.set_cell(jx, ay, snow_cell());
+                    world.set_cell(jx, ay, lid);
                     return Some(u8::MAX as f32);
                 }
             }
@@ -1248,6 +1342,32 @@ mod tests {
             left || right || mid_l || mid_r,
             "snow must seat on a thinner neighbour column"
         );
+    }
+
+    #[test]
+    fn condensate_frosts_one_ice_cell_then_holds() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        let temp = cold_temp(16, 16, -10.0);
+        let cfg = PhaseConfig::default();
+        let first =
+            deposit_condensate_on_surface(&mut w, 2, 12, 96.0, Some(&temp), Some(&cfg));
+        assert!(first > 0.0);
+        assert_eq!(w.get_cell(2, 2).unwrap().material, MaterialId::Ice);
+        assert_ne!(w.get_cell(2, 2).unwrap().material, MaterialId::Snow);
+        let second =
+            deposit_condensate_on_surface(&mut w, 2, 12, 255.0, Some(&temp), Some(&cfg));
+        assert_eq!(second, 0.0, "further condensate must not thicken frost");
+        assert_eq!(frozen_count_in_column(&w, 2), 1);
+        for y in 3..10 {
+            assert_ne!(
+                w.get_cell(2, y).map(|c| c.material),
+                Some(MaterialId::Ice),
+                "no frost tower at y={y}"
+            );
+        }
     }
 
     #[test]
