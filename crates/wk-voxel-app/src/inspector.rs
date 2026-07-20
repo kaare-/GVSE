@@ -2,8 +2,8 @@
 //! Isolation: wk-voxel + wk-material only (no column-stack imports).
 
 use macroquad::prelude::*;
-use wk_material::MaterialId;
-use wk_voxel::{Atom, Cell, Humidity, Temperature};
+use wk_material::{MaterialId, MaterialRegistry};
+use wk_voxel::{water_capacity, Atom, Cell, Humidity, Temperature};
 
 fn material_name(mat: MaterialId) -> &'static str {
     match mat {
@@ -78,11 +78,20 @@ pub fn draw_block_inspector(
                 material_name(c.material)
             };
             lines.push(format!("material={kind}"));
+            // Pore fill is relative to material capacity (porosity for
+            // solids, 255 for Air) — not always /255. Stone at sat=20
+            // with porosity 20 is fully saturated, not "8% wet".
+            let cap = water_capacity(c.material);
+            let pct = if cap > 0 {
+                (c.sat.0 as f32 / cap as f32) * 100.0
+            } else {
+                0.0
+            };
+            lines.push(format!("sat={}/{cap} ({pct:.0}% of capacity)", c.sat.0));
+            let props = MaterialRegistry::props(c.material);
             lines.push(format!(
-                "sat={}/{} ({:.0}%)",
-                c.sat.0,
-                u8::MAX,
-                c.sat.as_f32() * 100.0
+                "porosity={}  permeability={}",
+                props.porosity, props.permeability
             ));
             lines.push(format!("flags=0x{:02X}", c.flags.0));
         }

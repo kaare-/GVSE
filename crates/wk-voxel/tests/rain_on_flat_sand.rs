@@ -6,8 +6,8 @@
 //!   - The water row above holds the remainder.
 //!   - Dirty rectangles clear after each tick.
 //!
-//! Once lateral spill lands (follow-up PR), we'll extend this to
-//! puddle spread and evaporation.
+//! Surface flow / seepage behaviour is covered in `rules.rs` unit
+//! tests and documented in `docs/VOXEL_WATER.md`.
 
 use wk_material::MaterialId;
 use wk_voxel::{apply_gravity_fall, is_grain, tick, water_capacity, Cell, World};

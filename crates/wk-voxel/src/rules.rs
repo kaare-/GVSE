@@ -611,9 +611,9 @@ fn accumulate_water_flow_xfers(
 
 /// Same-row Air–Air head equalisation only.
 ///
-/// Kept for classic half-gap spill tests. Runtime [`tick`] uses
-/// [`apply_water_flow`], which prioritises diagonal-down and
-/// multi-cell horizontal cascade so slopes actually drain.
+/// **Test helper** — not called by [`tick`]. Production surface flow is
+/// [`apply_water_flow`] (diagonal-down, cascade, same-Y equalise,
+/// throughflow). See `docs/VOXEL_WATER.md`.
 pub fn apply_lateral_spill(world: &mut World) {
     let regions = regions_for_standalone(world);
     apply_lateral_spill_regions(world, &regions);
@@ -1628,6 +1628,91 @@ mod tests {
                 "y={y} lost water"
             );
         }
+    }
+
+    #[test]
+    fn lake_bed_sand_wets_clay_and_stone_below_via_tick() {
+        // Lake water on sand over clay over stone. Downward pore soak
+        // must reach every porous layer (gravity + seepage), not stop
+        // at the sand cap.
+        let mut w = World::new(9);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Contain laterally so free water can't run off the column.
+        for x in 3..=5 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..=6 {
+            w.set_cell(3, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(5, y, Cell::solid(MaterialId::Bedrock));
+        }
+        w.set_cell(4, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(4, 2, Cell::solid(MaterialId::Clay));
+        w.set_cell(4, 3, Cell::solid(MaterialId::Sand));
+        w.set_cell(4, 4, Cell::water());
+        w.set_cell(4, 5, Cell::water());
+
+        for _ in 0..30 {
+            tick(&mut w);
+        }
+
+        let sand = w.get_cell(4, 3).unwrap();
+        let clay = w.get_cell(4, 2).unwrap();
+        let stone = w.get_cell(4, 1).unwrap();
+        let sand_cap = water_capacity(MaterialId::Sand);
+        let clay_cap = water_capacity(MaterialId::Clay);
+        let stone_cap = water_capacity(MaterialId::Stone);
+        assert_eq!(sand.sat.0, sand_cap, "sand should saturate");
+        assert_eq!(clay.sat.0, clay_cap, "clay under sand must saturate");
+        assert_eq!(stone.sat.0, stone_cap, "stone under clay must saturate");
+    }
+
+    #[test]
+    fn deep_stone_stack_keeps_wetting_after_surface_quiesces() {
+        // Reproduce the lake-bed report: sand saturates quickly, then
+        // deeper porous stone must keep taking water over many ticks
+        // even after the free-surface looks settled.
+        let mut w = World::new(9);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..=5 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..=20 {
+            w.set_cell(3, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(5, y, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..=16 {
+            w.set_cell(4, y, Cell::solid(MaterialId::Stone));
+        }
+        w.set_cell(4, 17, Cell::solid(MaterialId::Sand));
+        w.set_cell(4, 18, Cell::solid(MaterialId::Sand));
+        // Deep lake column above the bed.
+        for y in 19..=22 {
+            w.set_cell(4, y, Cell::water());
+        }
+
+        // After a few ticks the sand cap is wet; the deep stone must
+        // not be left dry because dirty planning went quiet.
+        for _ in 0..8 {
+            tick(&mut w);
+        }
+        let sand = w.get_cell(4, 18).unwrap().sat.0;
+        let sand_cap = water_capacity(MaterialId::Sand);
+        assert_eq!(sand, sand_cap, "sand cap should be saturated early");
+
+        for _ in 0..40 {
+            tick(&mut w);
+        }
+        let stone_cap = water_capacity(MaterialId::Stone);
+        let deep = w.get_cell(4, 1).unwrap().sat.0;
+        let mid = w.get_cell(4, 8).unwrap().sat.0;
+        assert_eq!(
+            mid, stone_cap,
+            "mid-stack stone should saturate (mid={mid})"
+        );
+        assert_eq!(
+            deep, stone_cap,
+            "deep stone under the lake bed should saturate (deep={deep})"
+        );
     }
 
     #[test]

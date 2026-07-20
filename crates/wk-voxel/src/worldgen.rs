@@ -325,6 +325,67 @@ mod tests {
     }
 
     #[test]
+    fn stamped_lake_bed_pores_wet_under_water() {
+        use crate::cell::water_capacity;
+        use crate::rules::tick;
+        use wk_material::MaterialId;
+
+        let mut w = World::new(1);
+        let p = WorldgenParams {
+            width_cols: CHUNK_CELLS_W as i32 * 4,
+            sky_ceiling_y: CHUNK_CELLS_H as i32 * 2,
+            ..small_params()
+        };
+        stamp_world(&mut w, &p);
+
+        // Find an ocean column: water directly above sand.
+        let mut col = None;
+        for x in 0..p.width_cols {
+            let surf = continental_surface_y(p.seed, x, p.sea_level_y, p.width_cols)
+                .max(p.bedrock_floor_y + p.bedrock_thickness + p.sand_cap_thickness);
+            if surf >= p.sea_level_y {
+                continue; // land
+            }
+            let above = w.get_cell(x, surf + 1).unwrap();
+            let bed = w.get_cell(x, surf).unwrap();
+            if above.material == MaterialId::Air
+                && above.sat.is_full()
+                && bed.material == MaterialId::Sand
+            {
+                col = Some((x, surf));
+                break;
+            }
+        }
+        let (x, surf) = col.expect("ocean sand column");
+
+        for _ in 0..80 {
+            tick(&mut w);
+        }
+
+        let sand = w.get_cell(x, surf).unwrap();
+        assert_eq!(sand.material, MaterialId::Sand);
+        assert_eq!(
+            sand.sat.0,
+            water_capacity(MaterialId::Sand),
+            "lake-bed sand must saturate"
+        );
+        // Body cell just under the sand cap.
+        let under = w.get_cell(x, surf - p.sand_cap_thickness).unwrap();
+        assert!(
+            under.material != MaterialId::Bedrock,
+            "expected porous body under sand, got {:?}",
+            under.material
+        );
+        let cap = water_capacity(under.material);
+        assert!(cap > 0, "under-sand material should be porous: {:?}", under.material);
+        assert_eq!(
+            under.sat.0, cap,
+            "porous {:?} under lake sand must reach capacity (sat={})",
+            under.material, under.sat.0
+        );
+    }
+
+    #[test]
     fn stamps_bedrock_barrier_at_floor() {
         let mut w = World::new(1);
         let p = small_params();
