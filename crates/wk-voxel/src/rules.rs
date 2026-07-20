@@ -15,7 +15,10 @@ use wk_material::MaterialId;
 use crate::active::{
     clear_all_dirty, partition_checkerboard, plan_active, ActiveChunk,
 };
-use crate::cell::{is_grain, water_capacity, Cell, Sat};
+use crate::cell::{
+    grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain, water_capacity, Cell,
+    CellFlags, Sat,
+};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::{self, for_each_region_parallel, map_regions_parallel};
@@ -873,7 +876,11 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     continue;
                 };
                 if !is_grain(above.material) {
-                    continue;
+                    // Soft snow falls through *empty* air only — it floats
+                    // on standing water so shore slush can still form.
+                    if above.material != MaterialId::Snow || !cur.sat.is_empty() {
+                        continue;
+                    }
                 }
                 unsafe {
                     parallel::set_cell(ptrs, wrap_width, gx, gy, above);
@@ -882,6 +889,411 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
             }
         }
     });
+}
+
+/// Angle-of-repose slide: supported grains move diagonally down into Air
+/// when the local step is steeper than [`grain_max_stable_step`].
+///
+/// Sand (`max_step = 0`) won't hold a 1-cell cliff — piles flatten.
+/// LooseRock (`max_step ≥ 1`) can hold short stairs. Wet grains
+/// (pore sat or standing water below) loosen by one step. One move per
+/// cell per pass; run after [`apply_grain_fall`].
+pub fn apply_grain_repose(world: &mut World) {
+    let regions = regions_for_standalone(world);
+    for pass in partition_checkerboard(&regions) {
+        apply_grain_repose_regions(world, &pass);
+    }
+}
+
+/// Repose slide restricted to a pre-planned active set.
+pub fn apply_grain_repose_regions(world: &mut World, active: &[ActiveChunk]) {
+    let seed = world.seed.0;
+    let tick_no = world.tick;
+    for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
+        for y in ac.rect.y0..=ac.rect.y1 {
+            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let gx = ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32;
+                // SAFETY: see [`crate::parallel`].
+                let Some(dest) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy) }) else {
+                    continue;
+                };
+                if dest.material != MaterialId::Air {
+                    continue;
+                }
+                // Prefer a side from a stable hash so left/right don't flicker.
+                let prefer_pos = hash_prob(seed, gx, tick_no, 0x5A17_D1EEu64) >= 0.5;
+                let order: [i32; 2] = if prefer_pos { [1, -1] } else { [-1, 1] };
+                for &from_dx in &order {
+                    let sx = gx + from_dx;
+                    let sy = gy + 1;
+                    let Some(src) =
+                        (unsafe { parallel::get_cell(ptrs, wrap_width, sx, sy) })
+                    else {
+                        continue;
+                    };
+                    if !is_repose_grain(src.material) {
+                        continue;
+                    }
+                    // Snow must not avalanche into standing water seats.
+                    if src.material == MaterialId::Snow && !dest.sat.is_empty() {
+                        continue;
+                    }
+                    // Must be supported (vertical fall owns freefall).
+                    let below_src =
+                        unsafe { parallel::get_cell(ptrs, wrap_width, sx, sy - 1) };
+                    match below_src {
+                        Some(b) if b.material == MaterialId::Air => continue,
+                        None => continue,
+                        _ => {}
+                    }
+                    let mut max_step = grain_max_stable_step(src.material);
+                    if grain_is_wet(src, below_src) {
+                        max_step = max_step.saturating_sub(1);
+                    }
+                    if !diag_drop_exceeds(ptrs, wrap_width, gx, sy, max_step) {
+                        continue;
+                    }
+                    unsafe {
+                        parallel::set_cell(ptrs, wrap_width, gx, gy, src);
+                        parallel::set_cell(ptrs, wrap_width, sx, sy, dest);
+                    }
+                    break;
+                }
+            }
+        }
+    });
+}
+
+fn grain_is_wet(src: Cell, below_src: Option<Cell>) -> bool {
+    if src.sat.0 >= 40 {
+        return true;
+    }
+    matches!(
+        below_src,
+        Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
+    )
+}
+
+/// Tunables for flow bedload / bank erosion + deposition.
+///
+/// Angle-of-repose slides always run inside [`tick`]; this config only
+/// gates the water-driven transport pass ([`apply_flow_erosion`]).
+#[derive(Debug, Clone)]
+pub struct GrainConfig {
+    /// When false, [`apply_flow_erosion`] is a no-op.
+    pub enabled: bool,
+    /// Scales material susceptibility (`1 - resistance/180`). Default
+    /// ~0.14 — sand banks under cascade move over tens of ticks; still
+    /// lakes (no flow bias) do not erode.
+    pub erosion_rate: f32,
+    /// Standing water below this sat does not drive erosion.
+    pub min_flow_sat: u8,
+    /// Cap on erosion events applied per call (0 = unlimited).
+    pub max_events_per_tick: u32,
+    pub seed_salt: u64,
+}
+
+impl Default for GrainConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            erosion_rate: 0.14,
+            min_flow_sat: 180,
+            max_events_per_tick: 96,
+            seed_salt: 0xE70D_E5ED_u64,
+        }
+    }
+}
+
+/// Flow erosion + immediate downhill deposition for erodible grains.
+///
+/// Standing water with a cascade / head-drop neighbor undercuts the bed
+/// or bank and places the grain on a lower solid-supported Air seat.
+/// Still pools (no flow bias) are skipped so lakes don't chew their
+/// floors. Ice is never targeted ([`is_flow_erodible`]).
+///
+/// Compute-then-apply; deterministic given `(seed, tick, cfg.seed_salt)`.
+pub fn apply_flow_erosion(world: &mut World, cfg: &GrainConfig) {
+    if !cfg.enabled || cfg.erosion_rate <= 0.0 {
+        return;
+    }
+
+    let seed = world.seed.0;
+    let tick_no = world.tick;
+    let mut events: Vec<ErosionEvent> = Vec::new();
+    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+
+    for coord in coords {
+        for y in 0..CHUNK_CELLS_H {
+            let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in 0..CHUNK_CELLS_W {
+                let gx = coord.cx * CHUNK_CELLS_W as i32 + x as i32;
+                let Some(water) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if water.material != MaterialId::Air || water.sat.0 < cfg.min_flow_sat {
+                    continue;
+                }
+                // Must be standing (or a deep water column cell).
+                let standing = match world.get_cell(gx, gy - 1) {
+                    Some(b) if b.material != MaterialId::Air => true,
+                    Some(b) => b.sat.0 >= 200,
+                    None => false,
+                };
+                if !standing {
+                    continue;
+                }
+                let Some(flow_dx) = flow_bias(world, gx, gy, water.sat) else {
+                    continue;
+                };
+
+                // Bed scour under this water cell.
+                if let Some(bed) = world.get_cell(gx, gy - 1) {
+                    if is_flow_erodible(bed.material) {
+                        maybe_queue_erosion(
+                            world,
+                            cfg,
+                            seed,
+                            tick_no,
+                            gx,
+                            gy - 1,
+                            bed,
+                            flow_dx,
+                            true,
+                            &mut events,
+                        );
+                    }
+                }
+                // Bank undercut at the water surface.
+                for bank_dx in [-1_i32, 1] {
+                    let bx = gx + bank_dx;
+                    let Some(bank) = world.get_cell(bx, gy) else {
+                        continue;
+                    };
+                    if !is_flow_erodible(bank.material) {
+                        continue;
+                    }
+                    maybe_queue_erosion(
+                        world,
+                        cfg,
+                        seed,
+                        tick_no,
+                        bx,
+                        gy,
+                        bank,
+                        flow_dx,
+                        false,
+                        &mut events,
+                    );
+                }
+            }
+        }
+    }
+
+    events.sort_by(|a, b| {
+        a.erode_y
+            .cmp(&b.erode_y)
+            .then(a.erode_x.cmp(&b.erode_x))
+            .then(a.deposit_x.cmp(&b.deposit_x))
+    });
+    let mut used_erode = std::collections::HashSet::new();
+    let mut used_deposit = std::collections::HashSet::new();
+    let mut applied = 0u32;
+    for ev in events {
+        if cfg.max_events_per_tick > 0 && applied >= cfg.max_events_per_tick {
+            break;
+        }
+        let ek = (ev.erode_x, ev.erode_y);
+        let dk = (ev.deposit_x, ev.deposit_y);
+        if !used_erode.insert(ek) || !used_deposit.insert(dk) {
+            continue;
+        }
+        let Some(cur) = world.get_cell(ev.erode_x, ev.erode_y) else {
+            continue;
+        };
+        if cur.material != ev.grain.material {
+            continue;
+        }
+        let Some(dest) = world.get_cell(ev.deposit_x, ev.deposit_y) else {
+            continue;
+        };
+        if dest.material != MaterialId::Air {
+            continue;
+        }
+        // Deposit grain (keep its pore sat); vacated bed becomes water
+        // (scour) or empty Air that releases pore water (bank).
+        world.set_cell(ev.deposit_x, ev.deposit_y, ev.grain);
+        let vacated = if ev.bed_scour {
+            Cell::water()
+        } else {
+            Cell {
+                material: MaterialId::Air,
+                sat: ev.grain.sat,
+                flags: CellFlags::empty(),
+                _pad: 0,
+            }
+        };
+        world.set_cell(ev.erode_x, ev.erode_y, vacated);
+        applied = applied.wrapping_add(1);
+    }
+}
+
+struct ErosionEvent {
+    erode_x: i32,
+    erode_y: i32,
+    deposit_x: i32,
+    deposit_y: i32,
+    grain: Cell,
+    bed_scour: bool,
+}
+
+fn maybe_queue_erosion(
+    world: &World,
+    cfg: &GrainConfig,
+    seed: u64,
+    tick_no: u64,
+    ex: i32,
+    ey: i32,
+    grain: Cell,
+    flow_dx: i32,
+    bed_scour: bool,
+    out: &mut Vec<ErosionEvent>,
+) {
+    use wk_material::MaterialRegistry;
+    let resistance = MaterialRegistry::erosion_rank(grain.material) as f32;
+    let mut sus = (1.0 - (resistance / 180.0).clamp(0.0, 0.95)).max(0.02);
+    if grain.sat.0 >= 40 {
+        sus *= 1.4; // wet grains loosen (column sim saturation collapse)
+    }
+    let p = (sus * cfg.erosion_rate).clamp(0.0, 1.0);
+    let roll = hash_prob(
+        seed,
+        ex.wrapping_mul(73_856_093).wrapping_add(ey),
+        tick_no,
+        cfg.seed_salt
+            .wrapping_add(if bed_scour { 1 } else { 2 })
+            .wrapping_add((flow_dx as u64) << 3),
+    );
+    if roll >= p {
+        return;
+    }
+    let Some((dx, dy)) = find_deposit_seat(world, ex, ey, flow_dx) else {
+        return;
+    };
+    out.push(ErosionEvent {
+        erode_x: ex,
+        erode_y: ey,
+        deposit_x: dx,
+        deposit_y: dy,
+        grain,
+        bed_scour,
+    });
+}
+
+/// Direction water wants to leave this cell, if any. `None` = still pool.
+fn flow_bias(world: &World, gx: i32, gy: i32, sat: Sat) -> Option<i32> {
+    let mut best_dx = 0i32;
+    let mut best_score = 0.0f32;
+    for dx in [-1_i32, 1] {
+        let Some(n) = world.get_cell(gx + dx, gy) else {
+            continue;
+        };
+        if n.material != MaterialId::Air {
+            continue;
+        }
+        let mut score = 0.0f32;
+        if n.sat.0.saturating_add(32) < sat.0 {
+            score += 0.5;
+        }
+        match world.get_cell(gx + dx, gy - 1) {
+            Some(b) if b.material == MaterialId::Air => score += 1.0, // cascade lip
+            Some(b) if b.material != MaterialId::Air => {
+                // Lower neighbor column surface (thin-sheet downhill).
+                if n.sat.is_empty() {
+                    score += 0.35;
+                }
+            }
+            _ => {}
+        }
+        if score > best_score {
+            best_score = score;
+            best_dx = dx;
+        }
+    }
+    if best_score >= 0.5 {
+        Some(best_dx)
+    } else {
+        None
+    }
+}
+
+/// Solid-supported Air seat for a picked-up grain.
+///
+/// Prefers downhill (`dy > 0`), but also accepts same-Y beach / cascade-lip
+/// seats so bedload can leave a flat shelf onto the next column.
+fn find_deposit_seat(world: &World, from_x: i32, from_y: i32, prefer_dx: i32) -> Option<(i32, i32)> {
+    let dxs = [
+        prefer_dx,
+        prefer_dx.saturating_mul(2),
+        -prefer_dx,
+        0,
+        prefer_dx.saturating_mul(3),
+        -prefer_dx.saturating_mul(2),
+    ];
+    for dy in 0..=6 {
+        for &dx in &dxs {
+            if dy == 0 && dx == 0 {
+                continue;
+            }
+            let tx = from_x + dx;
+            let ty = from_y - dy;
+            if tx == from_x && ty == from_y {
+                continue;
+            }
+            let Some(c) = world.get_cell(tx, ty) else {
+                continue;
+            };
+            if c.material != MaterialId::Air {
+                continue;
+            }
+            let Some(below) = world.get_cell(tx, ty - 1) else {
+                continue;
+            };
+            if below.material == MaterialId::Air {
+                continue;
+            }
+            return Some((tx, ty));
+        }
+    }
+    None
+}
+
+/// True when the destination column has more than `max_step` empty Air
+/// cells stacked downward from `from_y - 1` (the diagonal seat).
+fn diag_drop_exceeds(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    dest_gx: i32,
+    from_y: i32,
+    max_step: i32,
+) -> bool {
+    let mut drop = 0i32;
+    for dy in 1..=(max_step + 2) {
+        let y = from_y - dy;
+        let Some(c) = (unsafe { parallel::get_cell(ptrs, wrap_width, dest_gx, y) }) else {
+            break;
+        };
+        if c.material != MaterialId::Air {
+            break;
+        }
+        drop += 1;
+        if drop > max_step {
+            return true;
+        }
+    }
+    drop > max_step
 }
 
 /// Rain source parameters for [`apply_rain`].
@@ -1563,11 +1975,11 @@ const FLOW_SUBSTEPS: usize = 12;
 /// 2. Seepage — water soaks into / through porous solids by head,
 ///    rate-limited by permeability.
 /// 3. Grain fall — granular materials sink into the Air cell below.
+/// 4. Grain repose — diagonal slides when steeper than material repose.
 ///
-/// Rain and evaporation are **opt-in**: callers wire
-/// [`apply_rain`] and [`apply_evaporation`] into their per-frame
-/// loop themselves. Scenario tests pass `tick(world)` alone and
-/// stay deterministic without weather.
+/// Rain, evaporation, and [`apply_flow_erosion`] are **opt-in**: callers
+/// wire them into their per-frame loop. Scenario tests pass `tick(world)`
+/// alone and stay deterministic without weather / sediment.
 ///
 /// **Dirty / active chunks.** Each flow substep [`plan_active`]s from
 /// dirty rects (halo + neighbour wake), then [`clear_all_dirty`].
@@ -1603,6 +2015,15 @@ pub fn tick(world: &mut World) {
         let passes = partition_checkerboard(&active);
         for pass in &passes {
             apply_grain_fall_regions(world, pass);
+        }
+        // Repose reads dirty written by grain fall; re-plan so new Air
+        // seats from the fall pass can receive diagonal slides.
+        let repose_active = plan_active(world);
+        if !repose_active.is_empty() {
+            let repose_passes = partition_checkerboard(&repose_active);
+            for pass in &repose_passes {
+                apply_grain_repose_regions(world, pass);
+            }
         }
     }
 
@@ -2221,6 +2642,184 @@ mod tests {
             w.get_cell(20, 1).unwrap().material,
             MaterialId::Sand
         );
+    }
+
+    // ------------ grain repose ------------
+
+    #[test]
+    fn sand_cliff_slides_diagonally() {
+        let mut w = setup_column_world();
+        // Pillar on bedrock: top sand has empty diagonal-down seats.
+        w.set_cell(5, 1, Cell::solid(MaterialId::Sand));
+        w.set_cell(5, 2, Cell::solid(MaterialId::Sand));
+        apply_grain_repose(&mut w);
+        assert_eq!(
+            w.get_cell(5, 2).unwrap().material,
+            MaterialId::Air,
+            "sand must not hold a 1-cell cliff"
+        );
+        let left = w.get_cell(4, 1).map(|c| c.material) == Some(MaterialId::Sand);
+        let right = w.get_cell(6, 1).map(|c| c.material) == Some(MaterialId::Sand);
+        assert!(left || right, "sand slides into a diagonal-down seat");
+    }
+
+    #[test]
+    fn loose_rock_holds_single_step() {
+        let mut w = setup_column_world();
+        // Neighbor floor at same height → drop of 1; LooseRock max_step≥1 holds.
+        w.set_cell(4, 1, Cell::solid(MaterialId::LooseRock));
+        w.set_cell(5, 1, Cell::solid(MaterialId::LooseRock));
+        w.set_cell(5, 2, Cell::solid(MaterialId::LooseRock));
+        // Empty diagonal seat would be (4,1) or (6,1); (4,1) is occupied.
+        // Open (6,1): drop from y=2 is 1 Air cell onto bedrock — not > 1.
+        apply_grain_repose(&mut w);
+        assert_eq!(
+            w.get_cell(5, 2).unwrap().material,
+            MaterialId::LooseRock,
+            "loose rock can hold a short stair (repose step ≥ 1)"
+        );
+    }
+
+    #[test]
+    fn snow_avalanches_off_cliff_but_not_into_water() {
+        let mut w = setup_column_world();
+        w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 2, Cell::solid(MaterialId::Snow));
+        apply_grain_repose(&mut w);
+        assert_eq!(w.get_cell(5, 2).unwrap().material, MaterialId::Air);
+        let left = w.get_cell(4, 1).map(|c| c.material) == Some(MaterialId::Snow);
+        let right = w.get_cell(6, 1).map(|c| c.material) == Some(MaterialId::Snow);
+        assert!(left || right, "snow avalanches into empty diagonal-down air");
+
+        // Snow next to a water seat must stay (float / slush).
+        let mut w2 = setup_column_world();
+        w2.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+        w2.set_cell(5, 2, Cell::solid(MaterialId::Snow));
+        w2.set_cell(4, 1, Cell::water());
+        w2.set_cell(6, 1, Cell::water());
+        apply_grain_repose(&mut w2);
+        assert_eq!(
+            w2.get_cell(5, 2).unwrap().material,
+            MaterialId::Snow,
+            "snow must not slide into standing water"
+        );
+    }
+
+    #[test]
+    fn sand_pile_flattens_over_ticks() {
+        let mut w = setup_column_world();
+        // Steep sand column on bedrock.
+        for y in 1..=6 {
+            w.set_cell(8, y, Cell::solid(MaterialId::Sand));
+        }
+        for _ in 0..40 {
+            apply_grain_fall(&mut w);
+            apply_grain_repose(&mut w);
+        }
+        let mut max_h = 0;
+        for x in 5..12 {
+            for y in (1..=8).rev() {
+                if w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand) {
+                    max_h = max_h.max(y);
+                    break;
+                }
+            }
+        }
+        assert!(
+            max_h <= 3,
+            "sand tower should flatten under repose (max_h={max_h})"
+        );
+    }
+
+    // ------------ flow erosion ------------
+
+    fn cascade_shelf_world(bed: MaterialId) -> World {
+        // Sand/gravel shelf (x=3..6 at y=1) with water on top and a
+        // cascade lip into empty Air at x=7 — classic bedload setup.
+        let mut w = setup_column_world();
+        for x in 3..=6 {
+            w.set_cell(x, 1, Cell::solid(bed));
+            w.set_cell(x, 2, Cell::water());
+        }
+        // Lip: empty column at x=7 so water has cascade bias +x.
+        w.set_cell(7, 1, Cell::air());
+        w.set_cell(7, 2, Cell::air());
+        w
+    }
+
+    #[test]
+    fn flowing_water_scours_sand_bed_downhill() {
+        let mut w = cascade_shelf_world(MaterialId::Sand);
+        let cfg = GrainConfig {
+            erosion_rate: 1.0, // force picks under flow bias
+            max_events_per_tick: 32,
+            ..GrainConfig::default()
+        };
+        let sand_before = (3..=8)
+            .filter(|&x| w.get_cell(x, 1).map(|c| c.material) == Some(MaterialId::Sand))
+            .count();
+        for t in 0..30 {
+            w.tick = t;
+            apply_flow_erosion(&mut w, &cfg);
+            apply_grain_fall(&mut w);
+            apply_grain_repose(&mut w);
+        }
+        let sand_at_lip = w.get_cell(7, 1).map(|c| c.material) == Some(MaterialId::Sand)
+            || w.get_cell(8, 1).map(|c| c.material) == Some(MaterialId::Sand);
+        let bed_hole = (3..=6).any(|x| {
+            w.get_cell(x, 1).map(|c| c.material) != Some(MaterialId::Sand)
+        });
+        assert!(
+            sand_at_lip || bed_hole,
+            "cascade should move sand off the shelf (before={sand_before}, lip={sand_at_lip}, hole={bed_hole})"
+        );
+    }
+
+    #[test]
+    fn still_lake_does_not_erode_sand_bed() {
+        let mut w = setup_column_world();
+        // Closed basin: sand floor, water, stone walls — no cascade.
+        for x in 4..=8 {
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+            w.set_cell(x, 2, Cell::water());
+        }
+        w.set_cell(3, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(3, 2, Cell::solid(MaterialId::Stone));
+        w.set_cell(9, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(9, 2, Cell::solid(MaterialId::Stone));
+        let cfg = GrainConfig {
+            erosion_rate: 1.0,
+            ..GrainConfig::default()
+        };
+        for t in 0..40 {
+            w.tick = t;
+            apply_flow_erosion(&mut w, &cfg);
+        }
+        for x in 4..=8 {
+            assert_eq!(
+                w.get_cell(x, 1).unwrap().material,
+                MaterialId::Sand,
+                "still lake must not scour bed at x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn ice_bank_is_not_flow_eroded() {
+        let mut w = cascade_shelf_world(MaterialId::Ice);
+        // Put ice as the bank next to cascading water.
+        w.set_cell(6, 2, Cell::solid(MaterialId::Ice));
+        w.set_cell(6, 1, Cell::solid(MaterialId::Ice));
+        let cfg = GrainConfig {
+            erosion_rate: 1.0,
+            ..GrainConfig::default()
+        };
+        for t in 0..20 {
+            w.tick = t;
+            apply_flow_erosion(&mut w, &cfg);
+        }
+        assert_eq!(w.get_cell(6, 2).unwrap().material, MaterialId::Ice);
+        assert_eq!(w.get_cell(6, 1).unwrap().material, MaterialId::Ice);
     }
 
     // ------------ rain ------------

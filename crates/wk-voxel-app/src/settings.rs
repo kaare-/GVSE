@@ -6,8 +6,8 @@ use macroquad::prelude::*;
 use macroquad::ui::{hash, root_ui, widgets};
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
-    ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, KarstConfig, OrographicConfig,
-    PhaseConfig, RainConfig, TempConfig, WorldgenParams,
+    ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, GrainConfig, KarstConfig,
+    OrographicConfig, PhaseConfig, RainConfig, TempConfig, WorldgenParams,
 };
 
 /// All live-tunable knobs for the voxel demo.
@@ -23,6 +23,7 @@ pub struct SimSettings {
     pub climate: ClimateConfig,
     pub temp: TempConfig,
     pub phase: PhaseConfig,
+    pub grain: GrainConfig,
     pub wind_vx: f32,
     pub humidity_diffusion_alpha: f32,
     /// Scratch f32s for material sliders (synced → MaterialRegistry overrides).
@@ -77,6 +78,7 @@ impl SimSettings {
             climate: ClimateConfig::default(),
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
+            grain: GrainConfig::default(),
             wind_vx: 0.05,
             humidity_diffusion_alpha: 0.15,
             mat_perm,
@@ -293,6 +295,28 @@ impl SimSettings {
                     self.phase.period_ticks = period.round().clamp(1.0, 120.0) as u64;
                     self.phase.min_budget_to_snow =
                         self.phase.min_budget_to_snow.clamp(1.0, 255.0);
+                });
+                ui.separator();
+
+                ui.tree_node(hash!(), "Grain / sediment", |ui| {
+                    ui.label(
+                        None,
+                        "Repose (sand piles) always runs in tick. Flow erosion is opt-in.",
+                    );
+                    ui.checkbox(hash!(), "Flow erosion + deposit", &mut self.grain.enabled);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Erosion rate",
+                        0.0..1.0,
+                        &mut self.grain.erosion_rate,
+                    );
+                    let mut min_sat = self.grain.min_flow_sat as f32;
+                    let mut max_ev = self.grain.max_events_per_tick as f32;
+                    labeled_slider(ui, hash!(), "Min flow sat", 1.0..255.0, &mut min_sat);
+                    labeled_slider(ui, hash!(), "Max events / tick", 0.0..256.0, &mut max_ev);
+                    self.grain.min_flow_sat = min_sat.round().clamp(1.0, 255.0) as u8;
+                    self.grain.max_events_per_tick = max_ev.round().clamp(0.0, 512.0) as u32;
                 });
                 ui.separator();
 
