@@ -2,9 +2,9 @@
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
-//! Set A creature blueprints (MS-Paint drawings) for `wk-voxel-app`.
-//! Same `.gvsecrt` postcard shape as column-GVSE so files can be shared
-//! later; genome/wires are stored but unused in the voxel Set A step.
+//! Creature blueprints (MS-Paint drawings) for `wk-voxel-app`.
+//! Set A Atom + minimal Set D plant. Same `.gvsecrt` postcard shape as
+//! column-GVSE so files can be shared later.
 
 use std::path::{Path, PathBuf};
 
@@ -96,6 +96,57 @@ impl Blueprint {
         }
     }
 
+    /// Minimal land plant C (`docs/organism/PLANTS.md`): root crown,
+    /// two stem, two leaves.
+    pub fn minimal_plant() -> Self {
+        Self {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![
+                PlacedModule {
+                    x: 8,
+                    y: 4,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Root,
+                },
+                PlacedModule {
+                    x: 8,
+                    y: 5,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Nucleus,
+                },
+                PlacedModule {
+                    x: 8,
+                    y: 6,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Stem,
+                },
+                PlacedModule {
+                    x: 8,
+                    y: 7,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Stem,
+                },
+                PlacedModule {
+                    x: 8,
+                    y: 8,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                },
+                PlacedModule {
+                    x: 9,
+                    y: 8,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                },
+            ],
+            genome: Genome::default(),
+            name: "plant".into(),
+            notes: "Set D minimal land plant".into(),
+        }
+    }
+
     pub fn nucleus_count(&self) -> usize {
         self.modules
             .iter()
@@ -110,8 +161,27 @@ impl Blueprint {
             .count()
     }
 
+    pub fn root_count(&self) -> usize {
+        self.modules
+            .iter()
+            .filter(|m| m.module == ModuleId::Root)
+            .count()
+    }
+
     pub fn is_valid_atom(&self) -> bool {
-        self.nucleus_count() >= 1 && self.photosystem_count() >= 1
+        self.nucleus_count() >= 1
+            && self.photosystem_count() >= 1
+            && self.root_count() == 0
+    }
+
+    pub fn is_valid_plant(&self) -> bool {
+        self.nucleus_count() >= 1
+            && self.photosystem_count() >= 1
+            && self.root_count() >= 1
+    }
+
+    pub fn is_valid_creature(&self) -> bool {
+        self.is_valid_atom() || self.is_valid_plant()
     }
 
     /// Anchor = first Nucleus (canvas coords).
@@ -196,5 +266,16 @@ mod tests {
         let rel = bp.modules_relative_to_nucleus();
         assert!(rel.contains(&(0, 0, ModuleId::Nucleus)));
         assert!(rel.contains(&(1, 0, ModuleId::Photosystem)));
+    }
+
+    #[test]
+    fn minimal_plant_is_valid_and_anchors_root_below_crown() {
+        let bp = Blueprint::minimal_plant();
+        assert!(bp.is_valid_plant());
+        assert!(!bp.is_valid_atom());
+        let rel = bp.modules_relative_to_nucleus();
+        assert!(rel.contains(&(0, 0, ModuleId::Nucleus)));
+        assert!(rel.iter().any(|&(dx, dy, m)| m == ModuleId::Root && dy < 0 && dx == 0));
+        assert!(rel.iter().any(|&(_, dy, m)| m == ModuleId::Stem && dy > 0));
     }
 }

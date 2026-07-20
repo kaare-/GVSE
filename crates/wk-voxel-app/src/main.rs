@@ -24,7 +24,7 @@
 //! - `T` — toggle temperature heatmap overlay
 //! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
 //! - `F1` — toggle HUD chrome (bottom info/tools + block inspector)
-//! - `F2` — creature editor (Set A MS-Paint; `C` stays condensation here)
+//! - `F2` — creature editor (Atom / plant MS-Paint; `C` stays condensation)
 //! - `Tab` — live settings (materials, wind, clouds, day/night, temp, …)
 //! - click — block / organism inspector (hidden while F1 HUD is off)
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
@@ -674,8 +674,11 @@ async fn main() {
                         paused = editor.was_paused;
                         inspect = Some((gx, gy));
                     } else {
-                        editor.status =
-                            "Spawn failed — need a wet Air cell nearby (or pop cap)".into();
+                        editor.status = if editor.blueprint.is_valid_plant() {
+                            "Spawn failed — need Air above porous soil (or pop cap)".into()
+                        } else {
+                            "Spawn failed — need a wet Air cell nearby (or pop cap)".into()
+                        };
                     }
                 } else {
                     inspect = Some((gx, gy));

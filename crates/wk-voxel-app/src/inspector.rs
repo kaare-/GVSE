@@ -1,9 +1,9 @@
-//! Click-to-inspect panel for world cells and Set A organisms.
+//! Click-to-inspect panel for world cells and organisms.
 //! Isolation: wk-voxel + wk-material only (no column-stack imports).
 
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
-use wk_voxel::{water_capacity, Atom, Cell, Humidity, Temperature};
+use wk_voxel::{is_land_plant, water_capacity, Atom, Cell, Humidity, Temperature};
 
 fn material_name(mat: MaterialId) -> &'static str {
     match mat {
@@ -101,7 +101,8 @@ pub fn draw_block_inspector(
 
     if let Some((id, atom)) = organism {
         lines.push("--- organism ---".into());
-        lines.push(format!("Atom #{id}  anchor=({}, {})", atom.gx, atom.gy));
+        let kind = if is_land_plant(atom) { "Plant" } else { "Atom" };
+        lines.push(format!("{kind} #{id}  anchor=({}, {})", atom.gx, atom.gy));
         lines.push(format!(
             "energy={:.1}/{:.0}  age={}  mods={}",
             atom.energy,
@@ -114,10 +115,14 @@ pub fn draw_block_inspector(
             atom.photosystem_count(),
             atom.cooldown
         ));
-        lines.push(format!(
-            "buoyancy={:.2}  vel_y={:.2}  fy={:.1}",
-            atom.buoyancy_bias, atom.vel_y, atom.fy
-        ));
+        if is_land_plant(atom) {
+            lines.push("habit=land (fixed crown, root drink)".into());
+        } else {
+            lines.push(format!(
+                "buoyancy={:.2}  vel_y={:.2}  fy={:.1}",
+                atom.buoyancy_bias, atom.vel_y, atom.fy
+            ));
+        }
         lines.push(format!(
             "clone_fid={:.2}  circadian={:.2}/{:.2}",
             atom.clone_fidelity, atom.circadian_phase, atom.active_window

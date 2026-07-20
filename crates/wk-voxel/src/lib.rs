@@ -20,6 +20,7 @@ pub mod humidity;
 pub mod organism;
 pub mod parallel;
 pub mod phase;
+pub mod plant;
 pub mod rules;
 pub mod temperature;
 pub mod wind;
@@ -45,6 +46,7 @@ pub use clouds::{
 };
 pub use grid::World;
 pub use organism::{Atom, BodyModule, ModuleId, OrganismStore, MAX_ATOMS};
+pub use plant::{find_plant_slot, is_land_plant};
 pub use heatmap::Heatmap;
 pub use humidity::{
     humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,

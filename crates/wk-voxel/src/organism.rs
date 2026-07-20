@@ -2,17 +2,17 @@
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
-//! Set A organisms — Nucleus + Photosystem pixel blobs.
+//! Set A plankton + minimal Set D land plants — module pixel blobs.
 //!
 //! Mirrors the column-GVSE organism kernel (see `docs/organism/` and
 //! `wk-agents`), but lives entirely inside `wk-voxel` so the isolation
-//! contract holds. Life is the drawing: two 1×1 modules, not a green
+//! contract holds. Life is the drawing: 1×1 modules, not a green
 //! biomass wash over the terrain.
 //!
-//! Buoyancy is a slim port of column plankton physics: weight vs
-//! float bias, circadian day-float / night-sink, fission jitter on
-//! `buoyancy_bias`, and a light contact bounce so blooms don't stack
-//! into one glued surface film.
+//! **Set A (Atom):** Nucleus + Photosystem in wet Air; buoyancy,
+//! circadian day-float / night-sink, fission.
+//! **Set D (minimal plant):** Root + Stem + Photosystem on land; fixed
+//! crown, drinks pore `sat` ([`crate::plant`]). No canopy shade yet.
 //!
 //! Palette hex is frozen (`docs/organism/PALETTE.md`).
 
@@ -22,6 +22,10 @@ use wk_material::MaterialId;
 use crate::cell::Cell;
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::grid::World;
+use crate::plant::{
+    drink_roots, find_plant_slot, is_anchored, is_land_plant, pin_plant_pose, root_moisture_frac,
+    DROUGHT_STRESS_DRAIN, DROUGHT_STRESS_FRAC,
+};
 
 /// Soft cap — blooms should stay readable at 1×.
 pub const MAX_ATOMS: usize = 256;
@@ -51,12 +55,16 @@ const MUTATION_SIGMA: f32 = 0.12;
 /// Soft contact impulse when two Atoms share a cell.
 const CONTACT_BOUNCE: f32 = 0.12;
 
-/// Set A module IDs — values match `wk_agents::ModuleId` / PALETTE.md.
+/// Module IDs — values match `wk_agents::ModuleId` / PALETTE.md.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ModuleId {
     Nucleus = 0x00,
     Photosystem = 0x01,
+    /// Sienna — land plant anchor / moisture drink (Set D).
+    Root = 0x0D,
+    /// Olive — upright stack holding leaves (Set D).
+    Stem = 0x0E,
 }
 
 impl ModuleId {
@@ -65,6 +73,8 @@ impl ModuleId {
         match self {
             ModuleId::Nucleus => (0x00, 0x00, 0x00),
             ModuleId::Photosystem => (0x2E, 0xCC, 0x40),
+            ModuleId::Root => (0x7A, 0x4B, 0x2A),
+            ModuleId::Stem => (0x55, 0x6B, 0x2F),
         }
     }
 
@@ -72,6 +82,8 @@ impl ModuleId {
         match self {
             ModuleId::Nucleus => "Nucleus",
             ModuleId::Photosystem => "Photosystem",
+            ModuleId::Root => "Root",
+            ModuleId::Stem => "Stem",
         }
     }
 }
@@ -216,7 +228,7 @@ impl OrganismStore {
     }
 
     /// Spawn a painted blueprint with nucleus at `(gx, gy)`.
-    /// Prefers a wet cell at/near the click; returns false if none.
+    /// Atoms need wet Air; land plants need Air above porous solid.
     pub fn spawn_blueprint(
         &mut self,
         world: &World,
@@ -231,7 +243,13 @@ impl OrganismStore {
             return false;
         }
         let gx = world.wrap_x(gx);
-        let gy = if is_wet_air(world, gx, gy) {
+        let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
+        let gy = if plant {
+            let Some(slot) = find_plant_slot(world, gx, gy) else {
+                return false;
+            };
+            slot
+        } else if is_wet_air(world, gx, gy) {
             gy
         } else if let Some(slot) = find_wet_near(world, gx, gy) {
             slot
@@ -241,7 +259,12 @@ impl OrganismStore {
         let mut atom = Atom::from_body(gx, gy, energy_max, body);
         atom.buoyancy_bias = buoyancy_bias.clamp(0.0, 1.0);
         atom.clone_fidelity = clone_fidelity.clamp(0.05, 1.0);
-        if let Some((top, _)) = wet_band(world, gx, gy) {
+        if plant {
+            pin_plant_pose(&mut atom);
+            if !is_anchored(world, &atom) {
+                return false;
+            }
+        } else if let Some((top, _)) = wet_band(world, gx, gy) {
             atom.last_water_top = Some(top);
         }
         self.atoms.push(atom);
@@ -253,8 +276,8 @@ impl OrganismStore {
         self.atoms.iter().position(|a| a.occupies(gx, gy))
     }
 
-    /// One Set A step: buoyancy, light harvest, upkeep, fission, death,
-    /// then a light contact bounce.
+    /// One organism step: plankton buoyancy / plant drink, light,
+    /// upkeep, fission (Atoms only), death, then plankton contact bounce.
     pub fn step(&mut self, world: &mut World, tick: u64) {
         self.step_with_climate(world, tick, &ClimateConfig::default());
     }
@@ -278,7 +301,14 @@ impl OrganismStore {
                 continue;
             }
 
-            // Drought gate: must still have a wet band nearby.
+            if is_land_plant(atom) {
+                if !step_land_plant(world, atom, day) {
+                    deaths.push(i);
+                }
+                continue;
+            }
+
+            // Plankton drought gate: must still have a wet band nearby.
             if wet_band(world, atom.gx, atom.gy).is_none() {
                 if !ensure_in_water(world, atom) {
                     deaths.push(i);
@@ -335,6 +365,40 @@ impl OrganismStore {
         self.atoms.extend(births);
         resolve_contacts(world, &mut self.atoms);
     }
+}
+
+/// Land plant tick. Returns `false` when the plant should die.
+fn step_land_plant(world: &mut World, atom: &mut Atom, day: f32) -> bool {
+    pin_plant_pose(atom);
+    if !is_anchored(world, atom) {
+        return false;
+    }
+    let moist = root_moisture_frac(world, atom);
+    let (drink_e, _) = drink_roots(world, atom);
+    let n_photo = atom.photosystem_count().max(1) as f32;
+    let n_mod = atom.body.len().max(1) as f32;
+    // Sample light at the topmost photosystem (or crown).
+    let leaf_y = atom
+        .body
+        .iter()
+        .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+        .map(|(_, dy, _)| atom.gy + *dy as i32)
+        .max()
+        .unwrap_or(atom.gy);
+    let light = column_light(world, atom.gx, leaf_y) * day;
+    let drought = moist < DROUGHT_STRESS_FRAC;
+    let photo_scale = if drought { 0.25 } else { 1.0 };
+    let harvest = PHOTON_RATE * light * n_photo * photo_scale;
+    let upkeep = UPKEEP_PER_MODULE * n_mod * (0.45 + 0.55 * day);
+    let stress = if moist <= 0.0 {
+        DROUGHT_STRESS_DRAIN
+    } else if drought {
+        DROUGHT_STRESS_DRAIN * 0.35
+    } else {
+        0.0
+    };
+    atom.energy = (atom.energy + harvest + drink_e - upkeep - stress).clamp(0.0, atom.energy_max);
+    atom.energy > 0.0
 }
 
 /// Relative density: bias 0 → buoyant (0.55), bias 1 → heavy (1.45).
@@ -473,6 +537,10 @@ fn resolve_contacts(world: &World, atoms: &mut [Atom]) {
     for _ in 0..4 {
         for i in 0..n {
             for j in (i + 1)..n {
+                // Land plants stay pinned — only plankton shove apart.
+                if is_land_plant(&atoms[i]) || is_land_plant(&atoms[j]) {
+                    continue;
+                }
                 if !bodies_overlap(&atoms[i], &atoms[j]) {
                     continue;
                 }
@@ -875,5 +943,98 @@ mod tests {
             !same || (store.atoms[0].vel_y - store.atoms[1].vel_y).abs() > 0.01,
             "contact should shove apart in x or bounce in y"
         );
+    }
+
+    fn moist_sand_plot() -> World {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(120);
+            w.set_cell(x, 1, sand);
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        w
+    }
+
+    fn minimal_plant_body() -> Vec<BodyModule> {
+        crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus()
+    }
+
+    #[test]
+    fn plant_spawns_on_moist_sand_and_stays_put() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            0.0,
+            0.9,
+        ));
+        assert!(is_land_plant(&store.atoms[0]));
+        let gx = store.atoms[0].gx;
+        let gy = store.atoms[0].gy;
+        for t in 0..30 {
+            store.step(&mut w, t);
+        }
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.atoms[0].gx, gx);
+        assert_eq!(store.atoms[0].gy, gy, "plant crown must stay pinned");
+    }
+
+    #[test]
+    fn plant_dies_on_bone_dry_bedrock_plot() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+            for y in 2..8 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut store = OrganismStore::new();
+        // Force-place on bedrock (not plantable via spawn helper).
+        let mut plant = Atom::from_body(4, 2, 20.0, minimal_plant_body());
+        plant.energy = 2.0;
+        store.atoms.push(plant);
+        for t in 0..80 {
+            store.step(&mut w, t);
+            if store.is_empty() {
+                break;
+            }
+        }
+        assert!(
+            store.is_empty(),
+            "unanchored / undrinkable plant should die"
+        );
+    }
+
+    #[test]
+    fn plant_drinks_pore_water_over_time() {
+        let mut w = moist_sand_plot();
+        let sat0 = w.get_cell(4, 1).unwrap().sat.0;
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            0.0,
+            0.9,
+        ));
+        for t in 0..40 {
+            store.step(&mut w, t);
+        }
+        let sat1 = w.get_cell(4, 1).unwrap().sat.0;
+        assert!(sat1 < sat0, "roots should sip pore sat ({sat1} < {sat0})");
+        assert!(!store.is_empty());
     }
 }
