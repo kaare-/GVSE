@@ -64,8 +64,8 @@ Opt-in (wired in `wk-voxel-app` after `tick`, Tab → Grain / sediment):
 
 - Only cells with **flow bias** (cascade lip or clear head drop to a neighbor). Still lakes do not scour.
 - Targets [`is_flow_erodible`] materials: Sand / Gravel / Clay / LooseRock (`erosion_resistance < 150`). Not Ice / Stone / Snow.
-- **Bed scour** under standing water → vacated cell becomes water (channel deepens); **bank undercut** → Air (pore sat released).
-- Picked grain deposits on the nearest lower solid-supported Air seat in the flow direction (bedload).
+- **Bed scour** under standing water → vacated cell becomes **empty Air** (gravity pulls the column down — no minted water); **bank undercut** → Air (pore sat released).
+- Picked grain deposits on a solid-supported Air seat; any free water already in that seat soaks into the grain's pores or is pushed upward — deposit must not delete lake sat.
 - Rate scales with `1 - resistance/180` and `GrainConfig.erosion_rate`; wet grains (pore sat) erode faster.
 
 ## Material hydrology (defaults)

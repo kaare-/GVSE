@@ -1122,22 +1122,72 @@ pub fn apply_flow_erosion(world: &mut World, cfg: &GrainConfig) {
         if dest.material != MaterialId::Air {
             continue;
         }
-        // Deposit grain (keep its pore sat); vacated bed becomes water
-        // (scour) or empty Air that releases pore water (bank).
-        world.set_cell(ev.deposit_x, ev.deposit_y, ev.grain);
-        let vacated = if ev.bed_scour {
-            Cell::water()
-        } else {
+        // Deposit must not destroy free water in the seat: soak what
+        // fits into the grain's pore capacity, push the rest upward
+        // through the Air column, and park any remainder in the vacated
+        // cell. Bed scour leaves empty Air (gravity pulls the column
+        // down) — never mint a fresh Cell::water().
+        let (placed, mut leftover) =
+            absorb_free_water_into_grain(ev.grain, dest.sat);
+        world.set_cell(ev.deposit_x, ev.deposit_y, placed);
+        leftover = push_sat_upward(world, ev.deposit_x, ev.deposit_y + 1, leftover);
+        // Vacated hole is empty Air, plus any free water that could not
+        // be displaced upward. Pore water rides with the grain (placed).
+        world.set_cell(
+            ev.erode_x,
+            ev.erode_y,
             Cell {
                 material: MaterialId::Air,
-                sat: ev.grain.sat,
+                sat: leftover,
                 flags: CellFlags::empty(),
                 _pad: 0,
-            }
-        };
-        world.set_cell(ev.erode_x, ev.erode_y, vacated);
+            },
+        );
         applied = applied.wrapping_add(1);
     }
+}
+
+/// Soak free-water `sat` into a moving grain's pores; return `(placed, leftover)`.
+fn absorb_free_water_into_grain(grain: Cell, free: Sat) -> (Cell, Sat) {
+    let cap = water_capacity(grain.material);
+    let room = cap.saturating_sub(grain.sat.0);
+    let into_pore = free.0.min(room);
+    let mut placed = grain;
+    placed.sat = Sat(grain.sat.0.saturating_add(into_pore));
+    (placed, Sat(free.0.saturating_sub(into_pore)))
+}
+
+/// Push free-water sat upward through a stack of Air cells. Returns any
+/// remainder that could not fit (caller parks it elsewhere).
+fn push_sat_upward(world: &mut World, gx: i32, start_y: i32, mut sat: Sat) -> Sat {
+    if sat.is_empty() {
+        return sat;
+    }
+    let mut y = start_y;
+    for _ in 0..32 {
+        if sat.is_empty() {
+            break;
+        }
+        let Some(cell) = world.get_cell(gx, y) else {
+            break;
+        };
+        if cell.material != MaterialId::Air {
+            break;
+        }
+        let room = u8::MAX.saturating_sub(cell.sat.0);
+        let add = sat.0.min(room);
+        if add > 0 {
+            let mut next = cell;
+            next.sat = Sat(cell.sat.0.saturating_add(add));
+            world.set_cell(gx, y, next);
+            sat = Sat(sat.0.saturating_sub(add));
+        }
+        if sat.is_empty() {
+            break;
+        }
+        y += 1;
+    }
+    sat
 }
 
 struct ErosionEvent {
@@ -1146,7 +1196,6 @@ struct ErosionEvent {
     deposit_x: i32,
     deposit_y: i32,
     grain: Cell,
-    bed_scour: bool,
 }
 
 fn maybe_queue_erosion(
@@ -1182,13 +1231,13 @@ fn maybe_queue_erosion(
     let Some((dx, dy)) = find_deposit_seat(world, ex, ey, flow_dx) else {
         return;
     };
+    let _ = bed_scour; // only affects the roll salt above
     out.push(ErosionEvent {
         erode_x: ex,
         erode_y: ey,
         deposit_x: dx,
         deposit_y: dy,
         grain,
-        bed_scour,
     });
 }
 
@@ -2820,6 +2869,42 @@ mod tests {
         }
         assert_eq!(w.get_cell(6, 2).unwrap().material, MaterialId::Ice);
         assert_eq!(w.get_cell(6, 1).unwrap().material, MaterialId::Ice);
+    }
+
+    #[test]
+    fn flow_erosion_conserves_free_water_sat() {
+        // Underwater deposit used to overwrite Air+sat with dry sand and
+        // mint Cell::water() at the scour hole — net lake water vanished.
+        let mut w = cascade_shelf_world(MaterialId::Sand);
+        // Deepen the water column so a deposit seat can be wet Air.
+        for x in 3..=6 {
+            w.set_cell(x, 3, Cell::water());
+        }
+        let sat_before: u32 = (0..16)
+            .flat_map(|x| (0..16).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y))
+            .map(|c| c.sat.0 as u32)
+            .sum();
+        let cfg = GrainConfig {
+            erosion_rate: 1.0,
+            max_events_per_tick: 32,
+            ..GrainConfig::default()
+        };
+        for t in 0..40 {
+            w.tick = t;
+            apply_flow_erosion(&mut w, &cfg);
+            apply_grain_fall(&mut w);
+            apply_gravity_fall(&mut w);
+        }
+        let sat_after: u32 = (0..16)
+            .flat_map(|x| (0..16).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y))
+            .map(|c| c.sat.0 as u32)
+            .sum();
+        assert_eq!(
+            sat_after, sat_before,
+            "erosion/deposit must conserve free+pore water sat (before={sat_before} after={sat_after})"
+        );
     }
 
     // ------------ rain ------------
