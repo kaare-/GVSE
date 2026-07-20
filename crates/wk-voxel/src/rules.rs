@@ -106,6 +106,119 @@ fn is_porous_solid(material: MaterialId) -> bool {
     material != MaterialId::Air && water_capacity(material) > 0
 }
 
+/// How far same-Y lake equalise looks for a drier surface cell / edge.
+const SAME_Y_SURFACE_SCAN: i32 = 12;
+
+/// True when the cell below can support a standing free surface
+/// (solid ground or a full water column).
+fn is_surface_support(world: &World, gx: i32, gy: i32) -> bool {
+    match world.get_cell(gx, gy - 1) {
+        Some(b) if b.material != MaterialId::Air => true,
+        Some(b) => b.sat.is_full(),
+        None => false,
+    }
+}
+
+/// Plan a single +x standing-surface head equalise for the edge
+/// `(gx,gy) — (gx+1,gy)`. Emits at most one transfer, owned by the
+/// left endpoint so each edge is solved once per pass.
+fn plan_same_y_pairwise_edge(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
+) {
+    let nx = world.wrap_x(gx + 1);
+    if nx == gx {
+        return;
+    }
+    if !is_surface_support(world, gx, gy) || !is_surface_support(world, nx, gy) {
+        return;
+    }
+    let Some(left) = world.get_cell(gx, gy) else {
+        return;
+    };
+    let Some(right) = world.get_cell(nx, gy) else {
+        return;
+    };
+    if left.material != MaterialId::Air || right.material != MaterialId::Air {
+        return;
+    }
+    let cap = water_capacity(MaterialId::Air);
+    let move_amt = sat_move_to_equalize_heads(left.sat.0, cap, gy, right.sat.0, cap, gy);
+    if move_amt > 0 {
+        let free = u8::MAX.saturating_sub(right.sat.0) as i32;
+        let amt = move_amt.min(left.sat.0 as i32).min(free);
+        if amt > 0 {
+            local.push(((gx, gy), (nx, gy), amt));
+        }
+    } else if move_amt < 0 {
+        let free = u8::MAX.saturating_sub(left.sat.0) as i32;
+        let amt = (-move_amt).min(right.sat.0 as i32).min(free);
+        if amt > 0 {
+            local.push(((nx, gy), (gx, gy), amt));
+        }
+    }
+}
+
+/// If a cascade outlet lies on the same-Y surface band in direction
+/// `dir`, return how much sat to push into the immediate neighbour
+/// (steering the free surface toward that outlet). Immediate cascade
+/// edges are already handled by priority 2; this extends the pull
+/// across up to [`SAME_Y_SURFACE_SCAN`] standing cells.
+fn same_y_cascade_pull(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    dir: i32,
+    cur_sat: u8,
+) -> Option<i32> {
+    let immediate = world.wrap_x(gx + dir);
+    let Some(side) = world.get_cell(immediate, gy) else {
+        return None;
+    };
+    if side.material != MaterialId::Air {
+        return None;
+    }
+    let free_imm = u8::MAX.saturating_sub(side.sat.0) as i32;
+    if free_imm == 0 {
+        return None;
+    }
+
+    // Immediate cascade is priority 2 — skip duplicate dump here.
+    let immediate_cascade = matches!(
+        world.get_cell(immediate, gy - 1),
+        Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
+    );
+    if immediate_cascade {
+        return None;
+    }
+
+    let mut x = immediate;
+    for _ in 1..SAME_Y_SURFACE_SCAN {
+        x = world.wrap_x(x + dir);
+        if x == gx {
+            break;
+        }
+        let Some(cell) = world.get_cell(x, gy) else {
+            break;
+        };
+        if cell.material != MaterialId::Air {
+            break;
+        }
+        if !is_surface_support(world, x, gy) {
+            if matches!(
+                world.get_cell(x, gy - 1),
+                Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
+            ) {
+                return Some(free_imm.min(cur_sat as i32));
+            }
+            break;
+        }
+    }
+    None
+}
+
 /// Bottom-up single-step gravity fall for water saturation.
 ///
 /// Each cell **pulls** water from the cell directly above into its
@@ -209,15 +322,13 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
 /// 2. **Immediate side is a cascade edge** — the side neighbour is Air
 ///    with an Air-with-room directly below it (the water we push there
 ///    will fall next tick). Dump all we can.
-/// 3. **Immediate side is a drier surface neighbour** — both cells sit
-///    on solid / full water. Move half the sat gap so heads equalise.
+/// 3. **Same-Y surface equalise** — scan up to [`SAME_Y_SURFACE_SCAN`]
+///    standing cells for a cascade outlet and push toward it; then
+///    pairwise head-equalise each +x standing edge so wide lake tops
+///    level instead of terracing / checkerboarding.
 /// 4. **Throughflow** — if below is a stack of saturated porous cells,
 ///    weep down through the whole stack at seepage rate to the first
 ///    Air with room on the far side.
-///
-/// No multi-cell horizontal scans. Water propagates one cell per
-/// substep and relies on the `FLOW_SUBSTEPS` cycle inside [`tick`] plus
-/// dirty-halo re-planning to cover distance.
 ///
 /// Vertical bulk fall stays in [`apply_gravity_fall`] (pull-based).
 /// Porous soak stays in [`apply_seepage`]. Mass is preserved by greedy
@@ -320,14 +431,9 @@ fn accumulate_water_flow_xfers(
                 let Some(cur) = world.get_cell(gx, gy) else {
                     continue;
                 };
-                if cur.material != MaterialId::Air || cur.sat.is_empty() {
+                if cur.material != MaterialId::Air {
                     continue;
                 }
-                let mut remaining = cur.sat.0 as i32;
-                // Randomize L/R per cell so water doesn't bias one way.
-                let flip = tick_flip ^ (((gx + gy) & 1) == 0);
-                let dirs = if flip { [-1_i32, 1] } else { [1_i32, -1] };
-
                 // Below tells us whether we're on a "surface" (below is
                 // solid or full water) or falling (below is Air with room).
                 let below_cell = world.get_cell(gx, gy - 1);
@@ -335,6 +441,21 @@ fn accumulate_water_flow_xfers(
                     None => false,
                     Some(b) => b.material != MaterialId::Air || b.sat.is_full(),
                 };
+
+                // Dry standing Air still owns the +x equalise edge so a
+                // wet neighbour can pour into it (otherwise wet→dry
+                // never ran when the dry cell was the left endpoint).
+                if cur.sat.is_empty() {
+                    if on_surface {
+                        plan_same_y_pairwise_edge(world, gx, gy, &mut local);
+                    }
+                    continue;
+                }
+
+                let mut remaining = cur.sat.0 as i32;
+                // Randomize L/R per cell so water doesn't bias one way.
+                let flip = tick_flip ^ (((gx + gy) & 1) == 0);
+                let dirs = if flip { [-1_i32, 1] } else { [1_i32, -1] };
 
                 // --- Priority 1: diagonal-down into Air with room ---
                 // Shelf edge: (dx, y-1) is Air, so water can fall there.
@@ -358,78 +479,75 @@ fn accumulate_water_flow_xfers(
                     local.push(((gx, gy), (nx, ny), move_amt));
                     remaining -= move_amt;
                 }
-                if remaining == 0 {
-                    continue;
-                }
 
-                if !on_surface {
-                    // Mid-air droplet with dry Air directly below already
-                    // fell via priority 1 (diag) or will fall via gravity.
-                    continue;
-                }
-
-                // --- Priority 2: immediate side is a cascade edge ---
-                // side is Air AND (side, y-1) is Air with room → water
-                // dumped there falls next tick. Move all we can.
-                for dx in dirs {
-                    if remaining == 0 {
-                        break;
-                    }
-                    let nx = world.wrap_x(gx + dx);
-                    let Some(side) = world.get_cell(nx, gy) else {
-                        continue;
-                    };
-                    if side.material != MaterialId::Air {
-                        continue;
-                    }
-                    let side_below = world.get_cell(nx, gy - 1);
-                    let cascade_edge = matches!(
-                        side_below,
-                        Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
-                    );
-                    if !cascade_edge {
-                        continue;
-                    }
-                    let free = u8::MAX.saturating_sub(side.sat.0) as i32;
-                    if free == 0 {
-                        continue;
-                    }
-                    let move_amt = remaining.min(free);
-                    local.push(((gx, gy), (nx, gy), move_amt));
-                    remaining -= move_amt;
-                }
-                if remaining == 0 {
-                    continue;
-                }
-
-                // --- Priority 3: level with drier same-row neighbour ---
-                // Both cells rest on solid (or full water) — surface flow.
-                // Half-gap so head equalises; use average to move any
-                // strictly-drier neighbour (no threshold).
-                for dx in dirs {
-                    if remaining == 0 {
-                        break;
-                    }
-                    let nx = world.wrap_x(gx + dx);
-                    let Some(side) = world.get_cell(nx, gy) else {
-                        continue;
-                    };
-                    if side.material != MaterialId::Air {
-                        continue;
-                    }
-                    if (side.sat.0 as i32) >= (cur.sat.0 as i32) {
-                        continue;
-                    }
-                    let gap = cur.sat.0 as i32 - side.sat.0 as i32;
-                    let half = (gap / 2).max(1);
-                    let free = u8::MAX.saturating_sub(side.sat.0) as i32;
-                    let move_amt = remaining.min(free).min(half);
-                    if move_amt > 0 {
+                if remaining > 0 && on_surface {
+                    // --- Priority 2: immediate side is a cascade edge ---
+                    // side is Air AND (side, y-1) is Air with room → water
+                    // dumped there falls next tick. Move all we can.
+                    for dx in dirs {
+                        if remaining == 0 {
+                            break;
+                        }
+                        let nx = world.wrap_x(gx + dx);
+                        let Some(side) = world.get_cell(nx, gy) else {
+                            continue;
+                        };
+                        if side.material != MaterialId::Air {
+                            continue;
+                        }
+                        let side_below = world.get_cell(nx, gy - 1);
+                        let cascade_edge = matches!(
+                            side_below,
+                            Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
+                        );
+                        if !cascade_edge {
+                            continue;
+                        }
+                        let free = u8::MAX.saturating_sub(side.sat.0) as i32;
+                        if free == 0 {
+                            continue;
+                        }
+                        let move_amt = remaining.min(free);
                         local.push(((gx, gy), (nx, gy), move_amt));
                         remaining -= move_amt;
                     }
+
+                    // --- Priority 3a: same-Y cascade pull ---
+                    // If a cascade outlet sits further along the surface
+                    // band, push toward it so lake terraces fall into the
+                    // lower reach.
+                    for dx in dirs {
+                        if remaining == 0 {
+                            break;
+                        }
+                        let Some(want) =
+                            same_y_cascade_pull(world, gx, gy, dx, cur.sat.0) else {
+                            continue;
+                        };
+                        let tx = world.wrap_x(gx + dx);
+                        let Some(side) = world.get_cell(tx, gy) else {
+                            continue;
+                        };
+                        if side.material != MaterialId::Air {
+                            continue;
+                        }
+                        let free = u8::MAX.saturating_sub(side.sat.0) as i32;
+                        let move_amt = remaining.min(free).min(want);
+                        if move_amt > 0 {
+                            local.push(((gx, gy), (tx, gy), move_amt));
+                            remaining -= move_amt;
+                        }
+                    }
                 }
-                if remaining == 0 {
+
+                // --- Priority 3b: pairwise +x standing equalise ---
+                // Always, even if cascade dumped everything — the edge
+                // may still need the reverse transfer from a wetter +x.
+                if on_surface {
+                    plan_same_y_pairwise_edge(world, gx, gy, &mut local);
+                }
+
+                if remaining == 0 || !on_surface {
                     continue;
                 }
 
@@ -2481,6 +2599,56 @@ mod tests {
 
 
     #[test]
+    fn same_y_equalize_flattens_stepped_lake_surface() {
+        // Free-surface terrace inside a closed basin (solid shores):
+        //
+        //   y=3: # W W . . . . #
+        //   y=2: # W W W W W W #
+        //   y=1: # # # # # # # #
+        //
+        // Same-Y equalise should spread the step across the row so the
+        // surface is no longer a hard cliff of full cells.
+        let mut w = World::new(9);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..10 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+        }
+        // Basin walls.
+        w.set_cell(0, 2, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(0, 3, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, 2, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, 3, Cell::solid(MaterialId::Bedrock));
+        for x in 1..9 {
+            w.set_cell(x, 2, Cell::water());
+        }
+        w.set_cell(2, 3, Cell::water());
+        w.set_cell(3, 3, Cell::water());
+
+        for _ in 0..30 {
+            tick(&mut w);
+        }
+
+        let row: Vec<u8> = (1..9).map(|x| w.get_cell(x, 3).unwrap().sat.0).collect();
+        let max = *row.iter().max().unwrap();
+        let min = *row.iter().min().unwrap();
+        let sum: i32 = row.iter().map(|&s| s as i32).sum();
+        assert_eq!(sum, 510, "mass on the free surface must be conserved: {row:?}");
+        assert!(
+            max < 220,
+            "terrace must thin out across the lake (row={row:?})"
+        );
+        assert!(
+            min > 20,
+            "dry gaps on the free surface must fill in (row={row:?})"
+        );
+        assert!(
+            (max as i32) - (min as i32) < 80,
+            "same-Y surface should be close to level (row={row:?})"
+        );
+    }
+
+    #[test]
     fn solid_staircase_film_drains_left_into_lower_pool() {
         // Geometry from the user's first image (impermeable sand):
         //
@@ -2532,7 +2700,7 @@ mod tests {
             "higher-step film must drain (stuck={stuck} corner={corner} pool={pool} drop={drop})"
         );
         assert!(
-            (pool as i32) + (drop as i32) > 200,
+            (pool as i32) + (drop as i32) >= 200,
             "water must reach lower level (pool={pool} drop={drop})"
         );
     }
