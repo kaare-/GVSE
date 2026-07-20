@@ -49,9 +49,11 @@ pub use heatmap::Heatmap;
 pub use humidity::{
     humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,
 };
-pub use phase::{apply_freeze, apply_phase, deposit_precip_on_surface, PhaseConfig};
+pub use phase::{
+    apply_freeze, apply_phase, deposit_precip_on_surface, ice_lid_thickness, PhaseConfig,
+};
 pub use rules::{
-    apply_condensation_rain, apply_condensation_rain_phased,
+    apply_cold_avalanche, apply_condensation_rain, apply_condensation_rain_phased,
     apply_condensation_rain_with_orographic, apply_evaporation, apply_evaporation_into_humidity,
     apply_flow_erosion, apply_grain_fall, apply_grain_repose, apply_gravity_fall,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,

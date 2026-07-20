@@ -212,6 +212,16 @@ impl SimSettings {
                         "Break unsupported ice",
                         &mut self.phase.enable_break_unsupported,
                     );
+                    ui.checkbox(
+                        hash!(),
+                        "Cold avalanche (wet sand/snow→ice)",
+                        &mut self.phase.enable_cold_avalanche,
+                    );
+                    ui.checkbox(
+                        hash!(),
+                        "Break thin ice under debris",
+                        &mut self.phase.enable_ice_load_break,
+                    );
                     ui.checkbox(hash!(), "Cull tall ice/snow stacks", &mut self.phase.enable_cull);
                     ui.checkbox(
                         hash!(),
@@ -231,6 +241,9 @@ impl SimSettings {
                     let mut max_thaw = self.phase.max_thaw_cells_per_column_per_tick as f32;
                     let mut max_slush = self.phase.max_slush_cells_per_column_per_tick as f32;
                     let mut max_break = self.phase.max_break_cells_per_column_per_tick as f32;
+                    let mut max_load_break =
+                        self.phase.max_load_break_cells_per_column_per_tick as f32;
+                    let mut carry = self.phase.ice_carry_thickness as f32;
                     let mut spread = self.phase.snow_spread_radius as f32;
                     let mut blanket = self.phase.snow_blanket_depth as f32;
                     let mut period = self.phase.period_ticks as f32;
@@ -273,6 +286,20 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
+                        "Load-break cells / col / tick",
+                        1.0..8.0,
+                        &mut max_load_break,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Ice thickness to carry debris",
+                        1.0..8.0,
+                        &mut carry,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
                         "Min precip budget to snow",
                         1.0..255.0,
                         &mut self.phase.min_budget_to_snow,
@@ -290,6 +317,9 @@ impl SimSettings {
                         max_slush.round().clamp(1.0, 16.0) as u8;
                     self.phase.max_break_cells_per_column_per_tick =
                         max_break.round().clamp(1.0, 16.0) as u8;
+                    self.phase.max_load_break_cells_per_column_per_tick =
+                        max_load_break.round().clamp(1.0, 16.0) as u8;
+                    self.phase.ice_carry_thickness = carry.round().clamp(1.0, 16.0) as u8;
                     self.phase.snow_spread_radius = spread.round().clamp(0.0, 48.0) as i32;
                     self.phase.snow_blanket_depth = blanket.round().clamp(0.0, 32.0) as u8;
                     self.phase.period_ticks = period.round().clamp(1.0, 120.0) as u64;

@@ -68,6 +68,13 @@ Opt-in (wired in `wk-voxel-app` after `tick`, Tab → Grain / sediment):
 - Picked grain deposits on a solid-supported Air seat; any free water already in that seat soaks into the grain's pores or is pushed upward — deposit must not delete lake sat.
 - Rate scales with `1 - resistance/180` and `GrainConfig.erosion_rate`; wet grains (pore sat) erode faster.
 
+### Cold avalanche + ice load
+
+Demo order after `tick`: thermal step → **`apply_cold_avalanche`** → **`apply_phase`**.
+
+- **Cold avalanche** (Tab → Ice / snow / slush): at/under `freeze_point_c`, wet sand loosens and can smear onto an ice lid; snow may seat on a wet film **over ice** (still refuses open water); hillside ice glaze (on rock/sand, not floating lids) can peel into a diagonal seat.
+- **Ice load break**: if Ice has grain or snow directly above and contiguous lid thickness `< ice_carry_thickness` (default 2), the contact ice becomes water. Thicker lids carry the debris. Hillside ice that lands on a lid merges into the sheet (does not count as overburden).
+
 ## Material hydrology (defaults)
 
 | Material | porosity (capacity) | permeability | seepage rate / pass |

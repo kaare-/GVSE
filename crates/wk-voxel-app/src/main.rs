@@ -42,11 +42,11 @@ mod settings;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_condensation_rain_phased, apply_evaporation_into_humidity, apply_flow_erosion,
-    apply_karst_dissolution, apply_phase, apply_rain_with_temp, celestial_screen_pos_cfg,
-    cloud_floor_y, day_night_factor_cfg, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    sky_rgb, sky_rgb_at_height, temperature_step_due, tick, ClimateConfig, Wind, World,
-    WorldgenParams,
+    apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
+    apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
+    celestial_screen_pos_cfg, cloud_floor_y, day_night_factor_cfg, humidity_diffuse_due,
+    is_daytime_cfg, is_standing_water, sky_rgb, sky_rgb_at_height, temperature_step_due, tick,
+    ClimateConfig, Wind, World, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -585,6 +585,15 @@ async fn main() {
                 scene
                     .temperature
                     .step(Some(&scene.world), &scene.humidity, tick_no);
+            }
+            // Cold wet-sand / snow / hillside ice spill onto lake ice
+            // after the thermal step, then phase may break thin lids.
+            if settings.phase.enabled && settings.phase.enable_cold_avalanche {
+                apply_cold_avalanche(
+                    &mut scene.world,
+                    &scene.temperature,
+                    settings.phase.freeze_point_c,
+                );
             }
             // Phase after the temp step so a Tab cold/warm snap applies
             // the same frame (column order: thermal → phase change).

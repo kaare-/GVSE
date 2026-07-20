@@ -22,11 +22,13 @@
 //! the same field.
 //!
 //! Snow on cold ground is a **solid pack** on top of the material — it
-//! does not soak pores. Avalanche / scour physics come later.
+//! does not soak pores. Cold wet-sand / snow avalanches live in
+//! [`crate::rules::apply_cold_avalanche`]; thin lake ice that cannot
+//! carry the debris breaks here ([`PhaseConfig::enable_ice_load_break`]).
 
 use wk_material::MaterialId;
 
-use crate::cell::{Cell, Sat};
+use crate::cell::{is_grain, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::rules::{deposit_water_on_surface, is_standing_water};
@@ -74,6 +76,17 @@ pub struct PhaseConfig {
     pub enable_slush: bool,
     /// Break Ice/Snow that has dry air underneath.
     pub enable_break_unsupported: bool,
+    /// Break thin lake ice that is carrying grain / snow / ice debris.
+    /// Thick lids ([`Self::ice_carry_thickness`]) hold the load.
+    pub enable_ice_load_break: bool,
+    /// Contiguous Ice cells needed to carry overburden. Default 2 —
+    /// a one-cell skin fails under sand/snow; a thickened lid holds.
+    pub ice_carry_thickness: u8,
+    /// Max ice cells broken under debris load **per column per tick**.
+    pub max_load_break_cells_per_column_per_tick: u8,
+    /// Cold wet-sand / hillside-ice / snow spill onto ice (app wires
+    /// [`crate::rules::apply_cold_avalanche`] when this is on).
+    pub enable_cold_avalanche: bool,
     /// Cull Ice+Snow stacks taller than [`Self::max_ice_cells_per_column`].
     pub enable_cull: bool,
     /// Cold precip settles as Snow (when off, cold columns get liquid rain).
@@ -100,6 +113,10 @@ impl Default for PhaseConfig {
             enable_thaw: true,
             enable_slush: true,
             enable_break_unsupported: true,
+            enable_ice_load_break: true,
+            ice_carry_thickness: 2,
+            max_load_break_cells_per_column_per_tick: 2,
+            enable_cold_avalanche: true,
             enable_cull: true,
             enable_snow_precip: true,
             period_ticks: 1,
@@ -107,7 +124,8 @@ impl Default for PhaseConfig {
     }
 }
 
-/// Full phase pass: cull → break unsupported → water-on-ice / slush → thaw → freeze.
+/// Full phase pass: cull → break unsupported → break overloaded thin ice →
+/// water-on-ice / slush → thaw → freeze.
 pub fn apply_phase(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
     if !cfg.enabled {
         return;
@@ -123,6 +141,9 @@ pub fn apply_phase(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
         }
         if cfg.enable_break_unsupported {
             break_unsupported_frozen(world, gx, cfg);
+        }
+        if cfg.enable_ice_load_break {
+            break_overloaded_ice(world, gx, cfg);
         }
         if cfg.enable_slush {
             water_on_ice_and_slush(world, gx, temp, cfg);
@@ -471,6 +492,68 @@ fn frozen_is_supported(world: &World, gx: i32, gy: i32, cfg: &PhaseConfig) -> bo
         Some(below) if below.material != MaterialId::Air => true,
         Some(below) if below.sat.0 >= cfg.min_sat_to_freeze => true,
         _ => false,
+    }
+}
+
+/// Contiguous `Ice` cells from `gy` downward. 0 if `gy` is not Ice.
+pub fn ice_lid_thickness(world: &World, gx: i32, gy: i32) -> u8 {
+    let mut n = 0u8;
+    let mut y = gy;
+    loop {
+        match world.get_cell(gx, y) {
+            Some(c) if c.material == MaterialId::Ice => {
+                n = n.saturating_add(1);
+                y -= 1;
+            }
+            _ => break,
+        }
+    }
+    n
+}
+
+fn is_debris_load(material: MaterialId) -> bool {
+    // Grain packs and snow blankets. Ice-on-ice is the lid itself
+    // (or glaze that merged into it) — counting it as load would make
+    // every multi-cell sheet break from the bottom up.
+    is_grain(material) || material == MaterialId::Snow
+}
+
+/// Thin ice under grain / snow / ice debris fails; thick lids carry it.
+///
+/// Runs after unsupported-break so floating skins are already gone.
+/// Top-down so the contact cell under the load opens first and the
+/// debris can fall into the basin on the next gravity pass.
+fn break_overloaded_ice(world: &mut World, gx: i32, cfg: &PhaseConfig) {
+    let Some((y0, y1)) = y_bounds(world) else {
+        return;
+    };
+    let carry = cfg.ice_carry_thickness.max(1);
+    let mut left = cfg.max_load_break_cells_per_column_per_tick.max(1) as i32;
+    for y in (y0..=y1).rev() {
+        if left <= 0 {
+            break;
+        }
+        let Some(cell) = world.get_cell(gx, y) else {
+            continue;
+        };
+        if cell.material != MaterialId::Ice {
+            continue;
+        }
+        let Some(above) = world.get_cell(gx, y + 1) else {
+            continue;
+        };
+        if !is_debris_load(above.material) {
+            continue;
+        }
+        // Only the top contact of a lid: debris directly above, or ice
+        // debris that is not itself part of a deeper continuous lid
+        // stack we're measuring from this cell.
+        let thick = ice_lid_thickness(world, gx, y);
+        if thick >= carry {
+            continue;
+        }
+        world.set_cell(gx, y, Cell::water());
+        left -= 1;
     }
 }
 
@@ -865,6 +948,59 @@ mod tests {
             "unsupported ice must break into water"
         );
         assert!(w.get_cell(1, 2).unwrap().sat.is_full());
+    }
+
+    #[test]
+    fn thin_ice_breaks_under_sand_load() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::water());
+        w.set_cell(2, 2, Cell::solid(MaterialId::Ice)); // 1-cell skin
+        w.set_cell(2, 3, Cell::solid(MaterialId::Sand));
+        assert_eq!(ice_lid_thickness(&w, 2, 2), 1);
+        let temp = cold_temp(16, 16, -8.0);
+        let cfg = PhaseConfig {
+            enable_freeze: false, // don't re-freeze the break
+            enable_thaw: false,
+            enable_slush: false,
+            ..PhaseConfig::default()
+        };
+        apply_phase(&mut w, &temp, &cfg);
+        assert_eq!(
+            w.get_cell(2, 2).unwrap().material,
+            MaterialId::Air,
+            "1-cell ice skin must fail under sand"
+        );
+        assert!(w.get_cell(2, 2).unwrap().sat.is_full());
+    }
+
+    #[test]
+    fn thick_ice_carries_sand_load() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::water());
+        w.set_cell(2, 2, Cell::solid(MaterialId::Ice));
+        w.set_cell(2, 3, Cell::solid(MaterialId::Ice)); // 2-cell lid
+        w.set_cell(2, 4, Cell::solid(MaterialId::Sand));
+        assert_eq!(ice_lid_thickness(&w, 2, 3), 2);
+        let temp = cold_temp(16, 16, -8.0);
+        let cfg = PhaseConfig {
+            enable_freeze: false,
+            enable_thaw: false,
+            enable_slush: false,
+            ice_carry_thickness: 2,
+            ..PhaseConfig::default()
+        };
+        apply_phase(&mut w, &temp, &cfg);
+        assert_eq!(w.get_cell(2, 3).unwrap().material, MaterialId::Ice);
+        assert_eq!(w.get_cell(2, 2).unwrap().material, MaterialId::Ice);
+        assert_eq!(
+            w.get_cell(2, 4).unwrap().material,
+            MaterialId::Sand,
+            "debris stays on a thick lid"
+        );
     }
 
     #[test]
