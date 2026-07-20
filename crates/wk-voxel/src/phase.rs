@@ -260,13 +260,17 @@ fn ground_sample_y(world: &World, gx: i32) -> i32 {
     y0
 }
 
-/// Deposit precip as **snow** when the ground sample is cold; otherwise
-/// as liquid via [`deposit_water_on_surface`]. Returns mass/sat units
-/// consumed.
+/// Deposit precip using **air temperature at `start_y`** (cloud / sky
+/// origin) to choose flake vs drop, then **ground contact** to melt:
 ///
-/// **Cold columns never soak.** Short budget, full frozen cap, or no
-/// seat → `0` (caller keeps the mass). Peak sand stays dry under snow
-/// pack; we do not fall back to pore-wetting rain.
+/// | air ≤ freeze | ground ≤ freeze | result |
+/// |-------------:|----------------:|--------|
+/// | yes | yes | snow pack |
+/// | yes | no | melts → liquid |
+/// | no | either | liquid (phase may freeze ponds later) |
+///
+/// **Cold-air snow that survives never soaks** pores: short budget, full
+/// frozen cap, or no seat → `0` (caller keeps the mass).
 ///
 /// When `temp` / `phase` are `None`, always rains (test / warm paths).
 pub fn deposit_precip_on_surface(
@@ -280,17 +284,37 @@ pub fn deposit_precip_on_surface(
     let (Some(temp), Some(phase)) = (temp, phase) else {
         return deposit_water_on_surface(world, gx, start_y, budget);
     };
-    let sample_y = ground_sample_y(world, gx);
-    let t_c = temp.at_cell(gx, sample_y);
-    // Snow precip off → liquid even when cold (useful for A/B in settings).
-    if t_c > phase.freeze_point_c || !phase.enable_snow_precip {
+    if !phase.enable_snow_precip {
         return deposit_water_on_surface(world, gx, start_y, budget);
     }
-    // Cold path: solid snow pack only — never liquid permeation.
+    // Form phase from air at the precip origin (cloud / sky), not ground.
+    let air_t = temp.at_cell(gx, start_y);
+    if air_t > phase.freeze_point_c {
+        return deposit_water_on_surface(world, gx, start_y, budget);
+    }
+    // Snow aloft — melt on warm ground contact.
+    let ground_y = ground_sample_y(world, gx);
+    let ground_t = temp.at_cell(gx, ground_y);
+    if ground_t > phase.freeze_point_c {
+        return deposit_water_on_surface(world, gx, start_y, budget);
+    }
+    // Cold air + cold ground: solid snow pack only.
     if budget < phase.min_budget_to_snow {
         return 0.0;
     }
     deposit_snow_spread(world, gx, start_y, temp, phase).unwrap_or(0.0)
+}
+
+/// True when precip from air height `air_y` should draw/fall as snow
+/// (cold air and snow precip enabled). Contact melt is a deposit-time
+/// concern — visuals use air only so streaks match the cloud.
+pub fn precip_forms_snow_at_air(
+    temp: &Temperature,
+    gx: i32,
+    air_y: i32,
+    phase: &PhaseConfig,
+) -> bool {
+    phase.enable_snow_precip && temp.at_cell(gx, air_y) <= phase.freeze_point_c
 }
 
 /// Seat snow on the aim column or a colder neighbour with a thinner pack
@@ -1083,6 +1107,54 @@ mod tests {
         assert!(landed > 0.0);
         assert_eq!(w.get_cell(2, 2).unwrap().material, MaterialId::Air);
         assert!(w.get_cell(2, 2).unwrap().sat.0 >= 64);
+    }
+
+    fn set_cell_temp(t: &mut Temperature, gx: i32, gy: i32, c: f32) {
+        let (hx, hy) = t.tile_of(gx, gy);
+        t.cells.insert((hx, hy), c);
+    }
+
+    #[test]
+    fn cold_air_snow_melts_on_warm_ground() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        // Cold aloft (start_y=10), warm surface.
+        let mut temp = cold_temp(16, 16, -8.0);
+        set_cell_temp(&mut temp, 2, 1, 6.0);
+        let cfg = PhaseConfig::default();
+        assert!(precip_forms_snow_at_air(&temp, 2, 10, &cfg));
+        let landed = deposit_precip_on_surface(&mut w, 2, 10, 64.0, Some(&temp), Some(&cfg));
+        assert!(landed > 0.0);
+        assert_eq!(
+            w.get_cell(2, 2).unwrap().material,
+            MaterialId::Air,
+            "snow must melt to liquid on warm ground"
+        );
+        assert!(w.get_cell(2, 2).unwrap().sat.0 >= 64);
+    }
+
+    #[test]
+    fn warm_air_rains_even_on_cold_ground() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(2, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        // Warm cloud air, cold surface — rain, not snowflakes from a warm sky.
+        let mut temp = cold_temp(16, 16, 8.0);
+        set_cell_temp(&mut temp, 2, 1, -6.0);
+        let cfg = PhaseConfig::default();
+        assert!(!precip_forms_snow_at_air(&temp, 2, 10, &cfg));
+        let landed = deposit_precip_on_surface(&mut w, 2, 10, 64.0, Some(&temp), Some(&cfg));
+        assert!(landed > 0.0);
+        assert_eq!(w.get_cell(2, 2).unwrap().material, MaterialId::Air);
+        assert!(w.get_cell(2, 2).unwrap().sat.0 >= 64);
+        assert_ne!(
+            w.get_cell(2, 2).unwrap().material,
+            MaterialId::Snow,
+            "warm-air precip must not become snow just because ground is cold"
+        );
     }
 
     #[test]

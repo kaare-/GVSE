@@ -435,9 +435,16 @@ impl CloudStore {
 
             let drain = (cfg.downpour_drain * oro).min(p.mass);
             let radius = p.radius();
-            // Wider footprint when snowing so flakes seed slopes, not only
-            // the ridge column under the parcel centre.
-            let snowing = temp.is_some() && phase.is_some();
+            // Wider footprint when the *air at the parcel* is cold enough
+            // to form snow (ground melt is decided per landing column).
+            let air_y = p.fy.round() as i32;
+            let snowing = match (temp, phase) {
+                (Some(t), Some(ph)) => {
+                    let gx = world.wrap_x(p.fx.round() as i32);
+                    crate::phase::precip_forms_snow_at_air(t, gx, air_y, ph)
+                }
+                _ => false,
+            };
             let cols = if snowing {
                 ((radius * 2.2) as i32).clamp(4, 18)
             } else {

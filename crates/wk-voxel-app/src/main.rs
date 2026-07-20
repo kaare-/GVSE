@@ -45,8 +45,8 @@ use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, day_night_factor_cfg, humidity_diffuse_due,
-    is_daytime_cfg, is_standing_water, sky_rgb, sky_rgb_at_height, temperature_step_due, tick,
-    ClimateConfig, Wind, World, WorldgenParams,
+    is_daytime_cfg, is_standing_water, precip_forms_snow_at_air, sky_rgb, sky_rgb_at_height,
+    temperature_step_due, tick, ClimateConfig, Wind, World, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -188,7 +188,7 @@ fn draw_clouds(
     sw: f32,
     sh: f32,
     downpour_mass: f32,
-    snowing: impl Fn(f32) -> bool,
+    snowing: impl Fn(f32, f32) -> bool,
 ) {
     if clouds.is_empty() {
         return;
@@ -217,7 +217,8 @@ fn draw_clouds(
             .map(|t| cloud_floor_y(world, wind, p.fx + t * r_cells))
             .fold(f32::NEG_INFINITY, f32::max);
         let ground_sy = origin_y - (floor - bedrock_floor_y as f32) * cell_px;
-        let as_snow = snowing(p.fx);
+        // Flake vs streak from air temp at the parcel, not the ground.
+        let as_snow = snowing(p.fx, p.fy);
         for &x_copy in x_copies {
             let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px;
             let sy = origin_y - (p.fy - bedrock_floor_y as f32) * cell_px;
@@ -760,7 +761,7 @@ async fn main() {
 
         // Coagulated cloud parcels — the atmospheric story.
         if clouds_on {
-            let freeze_c = settings.phase.freeze_point_c;
+            let phase = &settings.phase;
             let temp = &scene.temperature;
             draw_clouds(
                 &scene.clouds,
@@ -775,10 +776,10 @@ async fn main() {
                 sw,
                 sh,
                 settings.cloud.downpour_mass,
-                |fx| {
+                |fx, fy| {
                     let gx = scene.world.wrap_x(fx.round() as i32);
-                    let gy = cloud_floor_y(&scene.world, &scene.wind, fx).round() as i32;
-                    temp.at_cell(gx, gy) <= freeze_c
+                    let air_y = fy.round() as i32;
+                    precip_forms_snow_at_air(temp, gx, air_y, phase)
                 },
             );
         }

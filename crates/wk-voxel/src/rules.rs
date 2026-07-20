@@ -1594,8 +1594,8 @@ pub fn apply_rain(world: &mut World, cfg: &RainConfig) {
     apply_rain_with_temp(world, cfg, None, None);
 }
 
-/// Climatic rain that becomes **snow** when `temp` is at/below freezing
-/// and the column frozen budget has room (see [`crate::phase::deposit_precip_on_surface`]).
+/// Climatic precip: snow when **air** at [`RainConfig::top_y`] is cold
+/// (melts on warm ground — see [`crate::phase::deposit_precip_on_surface`]).
 pub fn apply_rain_with_temp(
     world: &mut World,
     cfg: &RainConfig,
