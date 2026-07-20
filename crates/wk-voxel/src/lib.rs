@@ -46,9 +46,9 @@ pub use humidity::{
 pub use rules::{
     apply_air_surface_flow, apply_condensation_rain, apply_condensation_rain_with_orographic,
     apply_evaporation, apply_evaporation_into_humidity, apply_grain_fall, apply_gravity_fall,
-    apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_seepage, deposit_water_on_surface,
-    hydraulic_head, is_standing_water, tick, CondensationConfig, EvapConfig, KarstConfig,
-    OrographicConfig, RainConfig,
+    apply_karst_dissolution, apply_lateral_spill, apply_pressure_throughflow, apply_rain,
+    apply_seepage, deposit_water_on_surface, hydraulic_head, is_standing_water, tick,
+    CondensationConfig, EvapConfig, KarstConfig, OrographicConfig, RainConfig,
 };
 pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,

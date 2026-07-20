@@ -230,19 +230,29 @@ pub fn apply_air_surface_flow_regions(world: &mut World, active: &[ActiveChunk])
         return;
     }
 
-    // Scale total outflow per source so we never plan more than sat.
-    let mut out_sum: HashMap<(i32, i32), i32> = HashMap::new();
-    for (from, _, amt) in &xfers {
-        *out_sum.entry(*from).or_insert(0) += *amt;
+    // Greedy per-source distribution: xfers can total more than a cell
+    // has (three diagonals each proposing 1 unit for a sat=1 droplet).
+    // Give sat to the largest requested xfer first, drop the rest to 0,
+    // and never plan more than the source holds.
+    let mut by_source: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
+    for (i, (from, _, _)) in xfers.iter().enumerate() {
+        by_source.entry(*from).or_default().push(i);
     }
-    for (from, _, amt) in &mut xfers {
+    for (from, mut ixs) in by_source {
         let Some(src) = world.get_cell(from.0, from.1) else {
-            *amt = 0;
             continue;
         };
-        let total = *out_sum.get(from).unwrap_or(&0);
-        if total > src.sat.0 as i32 && total > 0 {
-            *amt = ((*amt as i64 * src.sat.0 as i64) / total as i64) as i32;
+        let mut budget = src.sat.0 as i32;
+        ixs.sort_by(|&a, &b| xfers[b].2.cmp(&xfers[a].2)); // large amt first
+        for i in ixs {
+            let want = xfers[i].2;
+            if budget <= 0 || want <= 0 {
+                xfers[i].2 = 0;
+                continue;
+            }
+            let give = want.min(budget);
+            xfers[i].2 = give;
+            budget -= give;
         }
     }
 
@@ -322,9 +332,23 @@ fn accumulate_air_surface_xfers(
                     if a.sat.is_empty() && b.sat.is_empty() {
                         continue;
                     }
-                    let move_amt = sat_move_to_equalize_heads(
+                    let mut move_amt = sat_move_to_equalize_heads(
                         a.sat.0, cap, gy, b.sat.0, cap, ny,
                     );
+                    // Free-surface trickle: if floor discarded 0.5 units of
+                    // real head gradient (sat=1 next to dry Air), still
+                    // move one unit so single droplets don't stick forever.
+                    // The outflow-scaling apply step keeps mass conserved.
+                    if move_amt == 0 {
+                        let ha = gy as f32 + a.sat.0 as f32 / cap as f32;
+                        let hb = ny as f32 + b.sat.0 as f32 / cap as f32;
+                        let dh = ha - hb;
+                        if dh > 1.0 / 512.0 && a.sat.0 > 0 && b.sat.0 < u8::MAX {
+                            move_amt = 1;
+                        } else if dh < -1.0 / 512.0 && b.sat.0 > 0 && a.sat.0 < u8::MAX {
+                            move_amt = -1;
+                        }
+                    }
                     if move_amt > 0 {
                         local.push(((gx, gy), (nx, ny), move_amt));
                     } else if move_amt < 0 {
@@ -348,6 +372,128 @@ fn accumulate_air_surface_xfers(
 pub fn apply_lateral_spill(world: &mut World) {
     let regions = regions_for_standalone(world);
     apply_lateral_spill_regions(world, &regions);
+}
+
+/// Water pressed on **saturated** porous solid weeps through it into
+/// the first Air cell on the other side. Real terrain is not a plastic
+/// bag: a puddle above full sand slowly drains to the layer beneath
+/// (or off a cliff edge inside the rock). Without this, single wet
+/// pixels sit on ridge crests forever because gravity/seepage both
+/// stop at the porosity cap.
+///
+/// The porous column is untouched (its sat stays at capacity — the
+/// water just passes through). Rate is capped by permeability, which
+/// makes impermeable rock (bedrock, cap 0) an absolute barrier.
+pub fn apply_pressure_throughflow(world: &mut World) {
+    let regions = regions_for_standalone(world);
+    apply_pressure_throughflow_regions(world, &regions);
+}
+
+/// Pressure throughflow restricted to a pre-planned active set.
+pub fn apply_pressure_throughflow_regions(world: &mut World, active: &[ActiveChunk]) {
+    if active.is_empty() {
+        return;
+    }
+    let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
+    for pass in partition_checkerboard(active) {
+        accumulate_throughflow_xfers(world, &pass, &mut xfers);
+    }
+    xfers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    for (from, to, amt) in xfers {
+        let Some(src) = world.get_cell(from.0, from.1) else {
+            continue;
+        };
+        let Some(dst) = world.get_cell(to.0, to.1) else {
+            continue;
+        };
+        if src.material != MaterialId::Air || dst.material != MaterialId::Air {
+            continue;
+        }
+        let free = u8::MAX as i32 - dst.sat.0 as i32;
+        let amt = amt.min(src.sat.0 as i32).min(free.max(0));
+        if amt <= 0 {
+            continue;
+        }
+        world.set_cell(
+            from.0,
+            from.1,
+            Cell {
+                sat: Sat(src.sat.0 - amt as u8),
+                ..src
+            },
+        );
+        world.set_cell(
+            to.0,
+            to.1,
+            Cell {
+                sat: Sat(dst.sat.0 + amt as u8),
+                ..dst
+            },
+        );
+    }
+}
+
+fn accumulate_throughflow_xfers(
+    world: &World,
+    active: &[ActiveChunk],
+    xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
+) {
+    let local = map_regions_parallel(active, |ac| {
+        let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
+        for y in ac.rect.y0..=ac.rect.y1 {
+            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
+                let Some(cur) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if cur.material != MaterialId::Air || cur.sat.is_empty() {
+                    continue;
+                }
+                // Trickle down through 1..=3 stacked porous saturated cells
+                // to the first Air cell with free capacity.
+                let mut rate: i32 = i32::MAX;
+                let mut ny = gy - 1;
+                let mut found: Option<i32> = None;
+                for _ in 0..3 {
+                    let Some(nb) = world.get_cell(gx, ny) else {
+                        break;
+                    };
+                    if nb.material == MaterialId::Air {
+                        if u8::MAX.saturating_sub(nb.sat.0) > 0 {
+                            found = Some(ny);
+                        }
+                        break;
+                    }
+                    if !is_porous_solid(nb.material) {
+                        break;
+                    }
+                    let cap = water_capacity(nb.material);
+                    if nb.sat.0 < cap {
+                        break; // gravity/seepage will fill this first
+                    }
+                    let r = seepage_rate(nb.material);
+                    if r == 0 {
+                        break;
+                    }
+                    rate = rate.min(r);
+                    ny -= 1;
+                }
+                let Some(ty) = found else {
+                    continue;
+                };
+                let amt = rate.min(cur.sat.0 as i32).max(1);
+                if amt <= 0 {
+                    continue;
+                }
+                local.push(((gx, gy), (gx, ty), amt));
+            }
+        }
+        local
+    });
+    for mut v in local {
+        xfers.append(&mut v);
+    }
 }
 
 /// Lateral spill restricted to a pre-planned active set.
@@ -875,7 +1021,14 @@ fn collect_evap_deltas(world: &mut World, cfg: &EvapConfig) -> HashMap<(i32, i32
                 if !sky_above || !rests_on_evap_surface(world, gx, gy, cfg) {
                     continue;
                 }
-                *deltas.entry((gx, gy)).or_insert(0) -= cfg.rate_per_tick as i32;
+                let mut rate = cfg.rate_per_tick as i32;
+                // Orphaned crest film: no Air neighbour anywhere on the
+                // surface (same-y or diagonal-down) → evaporate hard so
+                // a single ridge pixel doesn't linger for hours.
+                if is_orphan_surface_film(world, gx, gy) {
+                    rate = (rate * 8).max(4);
+                }
+                *deltas.entry((gx, gy)).or_insert(0) -= rate;
             }
         }
         if !still_wet {
@@ -885,6 +1038,22 @@ fn collect_evap_deltas(world: &mut World, cfg: &EvapConfig) -> HashMap<(i32, i32
         }
     }
     deltas
+}
+
+/// True when a wet Air cell on solid has no Air neighbour on any of the
+/// six surface directions — nothing lateral flow can couple it to.
+fn is_orphan_surface_film(world: &World, gx: i32, gy: i32) -> bool {
+    for (dx, dy) in [(-1_i32, 0), (1, 0), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        if matches!(
+            world.get_cell(nx, ny),
+            Some(c) if c.material == MaterialId::Air
+        ) {
+            return false;
+        }
+    }
+    true
 }
 
 fn apply_evap_deltas(
@@ -1266,6 +1435,7 @@ pub fn tick(world: &mut World) {
             apply_gravity_fall_regions(world, pass);
         }
         apply_air_surface_flow_regions(world, &active);
+        apply_pressure_throughflow_regions(world, &active);
         active = Vec::new(); // force re-plan next substep
     }
 
@@ -2134,6 +2304,78 @@ mod tests {
             .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
             .sum();
         assert!(low > 200, "water should pool on the lower step (got {low})");
+    }
+
+    #[test]
+    fn lone_ridge_pixel_drains_via_throughflow_or_evap() {
+        // A single wet Air on a sand crest with sand on both flanks
+        // (no Air neighbours). Historic sticky-water case: gravity +
+        // seepage stopped at sand porosity, leaving the pixel forever.
+        let mut w = World::new(13);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        // Sand pyramid, crest at (6, 3).
+        for x in 3..10 {
+            for y in 1..=3 {
+                if (x as i32 - 6).abs() <= (3 - y) {
+                    w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+                }
+            }
+        }
+        // Saturate the pyramid sand fully so gravity + seepage would stop.
+        let cap_sand = crate::cell::water_capacity(MaterialId::Sand);
+        for x in 3..10 {
+            for y in 1..=3 {
+                if let Some(c) = w.get_cell(x, y) {
+                    if c.material == MaterialId::Sand {
+                        w.set_cell(x, y, Cell {
+                            sat: Sat(cap_sand),
+                            ..c
+                        });
+                    }
+                }
+            }
+        }
+        w.set_cell(6, 4, Cell::water()); // lone wet Air on crest
+        let cfg = EvapConfig {
+            rate_per_tick: 1,
+            dry_above_max: 200,
+            period_ticks: 1,
+        };
+        for _ in 0..200 {
+            tick(&mut w);
+            apply_evaporation(&mut w, &cfg);
+        }
+        let stuck = w.get_cell(6, 4).unwrap().sat.0;
+        assert!(
+            stuck < 8,
+            "lone ridge pixel should drain (throughflow + orphan evap), got sat={stuck}"
+        );
+    }
+
+    #[test]
+    fn surface_flow_moves_single_sat_droplet_off_ridge() {
+        // Force-1 trickle: sat=1 with drier Air neighbours must move —
+        // the head equalizer's floor truncated 0.5 to zero and left
+        // droplets stuck. Prefer downhill; mass is preserved.
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        let mut c = Cell::air();
+        c.sat = Sat(1);
+        w.set_cell(4, 3, c);
+        apply_air_surface_flow(&mut w);
+        let src = w.get_cell(4, 3).unwrap().sat.0 as i32;
+        let mass: i32 = (0..8)
+            .flat_map(|x| (1..=4).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+            .sum();
+        assert_eq!(src, 0, "lone droplet must leave the source cell");
+        assert_eq!(mass, 1, "mass must be preserved (got {mass})");
     }
 
     // ------------ evaporation ------------
