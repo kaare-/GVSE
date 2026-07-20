@@ -43,10 +43,9 @@ mod settings;
 use macroquad::prelude::*;
 use wk_voxel::{
     apply_condensation_rain_phased, apply_evaporation_into_humidity, apply_phase,
-    apply_karst_dissolution, apply_rain_with_temp, celestial_screen_pos_cfg,
-    continental_surface_y,
+    apply_karst_dissolution, apply_rain_with_temp, celestial_screen_pos_cfg, cloud_floor_y,
     day_night_factor_cfg, humidity_diffuse_due, is_daytime_cfg, is_standing_water, sky_rgb,
-    sky_rgb_at_height, temperature_step_due, tick, ClimateConfig, WorldgenParams,
+    sky_rgb_at_height, temperature_step_due, tick, ClimateConfig, Wind, World, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -177,17 +176,18 @@ fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
 /// Darker / denser = wetter; raining parcels get falling drops beneath.
 fn draw_clouds(
     clouds: &wk_voxel::CloudStore,
+    world: &World,
+    wind: &Wind,
     origin_x: f32,
     origin_y: f32,
     cell_px: f32,
     bedrock_floor_y: i32,
-    sea_level_y: i32,
-    seed: u64,
-    width_cols: i32,
     wrap_x: bool,
+    width_cols: i32,
     sw: f32,
     sh: f32,
     downpour_mass: f32,
+    snowing: impl Fn(f32) -> bool,
 ) {
     if clouds.is_empty() {
         return;
@@ -208,9 +208,9 @@ fn draw_clouds(
         let shade = (228.0 - wet * 95.0) as u8;
         let alpha = (145.0 + wet * 55.0) as u8;
         let r = p.radius() * cell_px;
-        let surface = continental_surface_y(seed, p.fx.round() as i32, sea_level_y, width_cols);
-        let ground_sy =
-            origin_y - (surface as f32 - bedrock_floor_y as f32) * cell_px;
+        let floor = cloud_floor_y(world, wind, p.fx);
+        let ground_sy = origin_y - (floor - bedrock_floor_y as f32) * cell_px;
+        let as_snow = snowing(p.fx);
         for &x_copy in x_copies {
             let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px;
             let sy = origin_y - (p.fy - bedrock_floor_y as f32) * cell_px;
@@ -219,7 +219,11 @@ fn draw_clouds(
             }
             draw_cartoon_cloud(sx, sy, r, shade, alpha, p.shape_seed, p.deform);
             if p.raining {
-                draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh);
+                if as_snow {
+                    draw_falling_snow(sx, sy, r, ground_sy, wet, sw, sh);
+                } else {
+                    draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh);
+                }
             }
         }
     }
@@ -262,6 +266,46 @@ fn draw_falling_rain(
             1.15,
             Color::from_rgba(195, 215, 240, alpha),
         );
+    }
+}
+
+/// Soft flakes when the column is at/below freeze — pairs with snow precip.
+fn draw_falling_snow(
+    sx: f32,
+    sy: f32,
+    r: f32,
+    ground_sy: f32,
+    wetness: f32,
+    sw: f32,
+    sh: f32,
+) {
+    let t = get_time() as f32;
+    let top = sy + r * 0.35;
+    let bottom = ground_sy.clamp(top + 12.0, sh - 4.0);
+    let left = (sx - r * 0.9).max(-12.0);
+    let right = (sx + r * 0.9).min(sw + 12.0);
+    let band = (right - left).max(1.0);
+    let n = ((band / 9.0) * (0.65 + wetness * 0.85))
+        .ceil()
+        .clamp(8.0, 40.0) as usize;
+    let flake = 2.2 + wetness * 1.4;
+    let fall_speed = 95.0 + wetness * 55.0;
+    let cycle = (bottom - top + flake * 4.0).max(flake * 4.0 + 1.0);
+    for i in 0..n {
+        let seed = i as f32;
+        let drift = ((t * 18.0 + seed * 11.3).sin()) * 6.0;
+        let x = left + ((seed * 97.371) % band) + drift;
+        let phase = (seed * 0.6180339) % 1.0;
+        let y = top + ((t * fall_speed + phase * cycle) % cycle) - flake;
+        if y + flake < top || y > bottom {
+            continue;
+        }
+        let alpha = (130.0 + wetness * 60.0) as u8;
+        let c = Color::from_rgba(235, 242, 255, alpha);
+        // Tiny plus / diamond flake.
+        draw_line(x - flake, y, x + flake, y, 1.1, c);
+        draw_line(x, y - flake, x, y + flake, 1.1, c);
+        draw_line(x - flake * 0.7, y - flake * 0.7, x + flake * 0.7, y + flake * 0.7, 0.9, c);
     }
 }
 
@@ -698,19 +742,26 @@ async fn main() {
 
         // Coagulated cloud parcels — the atmospheric story.
         if clouds_on {
+            let freeze_c = settings.phase.freeze_point_c;
+            let temp = &scene.temperature;
             draw_clouds(
                 &scene.clouds,
+                &scene.world,
+                &scene.wind,
                 origin_x,
                 origin_y,
                 cell_px,
                 scene.params.bedrock_floor_y,
-                scene.params.sea_level_y,
-                scene.params.seed,
-                scene.params.width_cols,
                 scene.params.wrap_x,
+                scene.params.width_cols,
                 sw,
                 sh,
                 settings.cloud.downpour_mass,
+                |fx| {
+                    let gx = scene.world.wrap_x(fx.round() as i32);
+                    let gy = cloud_floor_y(&scene.world, &scene.wind, fx).round() as i32;
+                    temp.at_cell(gx, gy) <= freeze_c
+                },
             );
         }
 

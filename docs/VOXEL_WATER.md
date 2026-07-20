@@ -97,12 +97,18 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
 
 - Uses the existing coarse `Temperature` field (not a per-cell heat sim).
 - **Freeze:** standing free-surface wet Air (`sat ≥ min_sat_to_freeze`) when
-  `temp ≤ freeze_point_c` → whole `Ice` cell.
+  `temp ≤ freeze_point_c` → whole `Ice` cell (lake skin). **Cold lids then
+  thicken downward** one cell / tick into wet Air under Ice/Snow so deep
+  ponds and peak “ice castles” freeze through instead of sitting liquid at
+  −20 °C under a 1-px skin. Full per-cell heat capacity / albedo is later.
 - **Thaw:** top-of-stack Ice/Snow when `temp > freeze_point_c` → `Air+FULL`.
 - **Rain on ice:** stays as a water film on top (no density-swap under the
   sheet — that lofted ice into the rain). Melts the ice when warm, or when
-  a full water cell has ponded (enough rain). Full per-cell heat/albedo
-  equalization is a later thermal-field slice.
+  a full water cell has ponded (enough rain).
+- **Ice lid × evaporation:** intentional. Evap only runs on wet Air with
+  **Air** above it (`dry_above_max`). An Ice/Snow sheet blocks that, so a
+  capped lake loses far less mass and the humidity pump dries out — a
+  useful cold-climate feedback even before a full thermal field.
 - **Unsupported ice:** Ice/Snow with dry air below breaks into water so
   trapped surface water can rejoin the basin.
 - **Snow precip:** rain / drizzle / cloud downpour call

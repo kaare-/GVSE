@@ -4,9 +4,10 @@
 //!
 //! Discrete cloud parcels: humidity rises, then coagulates into blobs;
 //! wind carries them; they ride above the terrain (no clipping through
-//! mountains) and dump rain sooner when scraping ridges.
+//! mountains or ice/water columns) and dump rain sooner when scraping ridges.
 
 use serde::{Deserialize, Serialize};
+use wk_material::MaterialId;
 
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -193,7 +194,7 @@ impl CloudStore {
         humidity.buoyant_rise(cfg.buoyant_rise, deck_hy);
 
         self.coagulate(humidity, wind, sea_level_y, sky_ceiling_y, cfg);
-        self.advect_and_collide(wind, sea_level_y, sky_ceiling_y, cfg);
+        self.advect_and_collide(world, wind, sea_level_y, sky_ceiling_y, cfg);
         self.merge(cfg);
         self.downpour(world, wind, tick, cfg, temp, phase);
         for p in &mut self.parcels {
@@ -292,10 +293,11 @@ impl CloudStore {
         best
     }
 
-    /// Wind drift, then soft collision with the land surface so clouds
-    /// crest peaks, keep the new altitude, and continue downwind.
+    /// Wind drift, then soft collision with the land / ice / water column
+    /// top so clouds crest peaks and ride above lake lids (not through them).
     fn advect_and_collide(
         &mut self,
+        world: &World,
         wind: &Wind,
         sea_level_y: i32,
         sky_ceiling_y: i32,
@@ -326,7 +328,8 @@ impl CloudStore {
             let r = p.radius();
             // Soft sample under centre + leading edge (windward).
             let sample_x = p.fx + wind_sign * r * 0.35;
-            let floor = surface_y(wind, p.fx).max(surface_y(wind, sample_x));
+            let floor = cloud_floor_y(world, wind, p.fx)
+                .max(cloud_floor_y(world, wind, sample_x));
             let land = floor > sea_level_y as f32 + 1.0;
             let min_fy = if land {
                 floor + cfg.ridge_clearance + (r * 0.12).min(3.5)
@@ -467,6 +470,26 @@ fn surface_y(wind: &Wind, fx: f32) -> f32 {
     ) as f32
 }
 
+/// Rock surface vs occupied column top (ice / snow / standing water).
+/// Clouds and precip visuals use this so they clear lake lids and peak ice.
+pub fn cloud_floor_y(world: &World, wind: &Wind, fx: f32) -> f32 {
+    let rock = surface_y(wind, fx);
+    let gx = world.wrap_x(fx.round() as i32);
+    let rock_i = rock as i32;
+    let mut top = rock_i;
+    // Scan up through continuous stack; stop at the first empty Air gap.
+    let scan_hi = rock_i + 48;
+    for y in (rock_i + 1)..=scan_hi {
+        match world.get_cell(gx, y) {
+            Some(c) if c.material != MaterialId::Air => top = y,
+            Some(c) if !c.sat.is_empty() => top = y,
+            Some(_) => break,
+            None => break,
+        }
+    }
+    (top as f32).max(rock)
+}
+
 fn preferred_deck(sea_level_y: i32, sky_ceiling_y: i32, cfg: &CloudConfig) -> f32 {
     (sea_level_y + cfg.cloud_alt_above_sea)
         .min(sky_ceiling_y - 4)
@@ -576,6 +599,31 @@ mod tests {
     }
 
     #[test]
+    fn ice_lid_raises_cloud_floor_above_rock() {
+        let p = WorldgenParams::default();
+        let wind = wind_for(&p);
+        let mut world = World::new(p.seed);
+        let gx = 20i32;
+        let rock = continental_surface_y(p.seed, gx, p.sea_level_y, p.width_cols);
+        let ice_top = rock + 8;
+        for y in [rock, ice_top] {
+            world.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(CHUNK_CELLS_W as i32),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        for y in (rock + 1)..ice_top {
+            world.set_cell(gx, y, Cell::water());
+        }
+        world.set_cell(gx, ice_top, Cell::solid(MaterialId::Ice));
+        let floor = cloud_floor_y(&world, &wind, gx as f32);
+        assert!(
+            floor >= ice_top as f32,
+            "cloud floor {floor} must clear ice lid at {ice_top} (rock was {rock})"
+        );
+    }
+
+    #[test]
     fn ridge_collision_lifts_parcel_above_surface() {
         let p = WorldgenParams::default();
         let wind = wind_for(&p);
@@ -604,8 +652,9 @@ mod tests {
             deform: 0.0,
         });
         // Soft blend needs a few ticks to clear the ridge floor.
+        let world = World::new(p.seed);
         for _ in 0..8 {
-            clouds.advect_and_collide(&wind, p.sea_level_y, p.sky_ceiling_y, &cfg);
+            clouds.advect_and_collide(&world, &wind, p.sea_level_y, p.sky_ceiling_y, &cfg);
         }
         let c = &clouds.parcels[0];
         let min_clear = surface + cfg.ridge_clearance * 0.5;
@@ -687,8 +736,9 @@ mod tests {
             deform: 0.0,
         });
         let x0 = clouds.parcels[0].fx;
+        let world = World::new(p.seed);
         for _ in 0..80 {
-            clouds.advect_and_collide(&wind, p.sea_level_y, p.sky_ceiling_y, &cfg);
+            clouds.advect_and_collide(&world, &wind, p.sea_level_y, p.sky_ceiling_y, &cfg);
         }
         assert!(
             clouds.parcels[0].fx > x0,

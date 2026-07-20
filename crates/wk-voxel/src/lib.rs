@@ -37,7 +37,9 @@ pub use climate::{
     day_factor_cfg, day_night_factor, day_night_factor_cfg, is_daytime, is_daytime_cfg, phase_fraction,
     phase_fraction_cfg, sky_rgb, sky_rgb_at_height, ClimateConfig, DEMO_DAY_TICKS,
 };
-pub use clouds::{CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS};
+pub use clouds::{
+    cloud_floor_y, CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS,
+};
 pub use grid::World;
 pub use organism::{Atom, BodyModule, ModuleId, OrganismStore, MAX_ATOMS};
 pub use heatmap::Heatmap;

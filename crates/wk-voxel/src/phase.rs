@@ -13,6 +13,11 @@
 //! melts the sheet when warm or when a full cell of rain has ponded.
 //! Ice with dry air below is **unsupported** and breaks into water so
 //! trapped surface water can rejoin the basin.
+//!
+//! Cold ice lids **thicken downward** one cell per tick (wet Air under
+//! Ice/Snow) so lakes do not stay liquid under a 1-px skin, and peak
+//! "ice castles" of trapped water freeze through instead of sitting at
+//! −20 °C forever. Full per-cell thermal fields come later.
 
 use wk_material::MaterialId;
 
@@ -412,20 +417,14 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
         return;
     };
     let budget = cfg.max_ice_cells_per_column as usize;
-    let mut frozen_count = 0usize;
-    for y in y0..=y1 {
-        if let Some(cell) = world.get_cell(gx, y) {
-            if is_frozen_solid(cell.material) {
-                frozen_count += 1;
-            }
-        }
-    }
+    let mut frozen_count = frozen_count_in_column(world, gx);
     if frozen_count >= budget {
         return;
     }
 
     let mut freezes_left = cfg.max_freeze_cells_per_column_per_tick.max(1) as i32;
-    // Top-down: freeze the free surface first (classic lake skin).
+    // Top-down: (1) thicken under an existing lid, else (2) freeze the
+    // open-sky free surface (classic lake skin). One cell / tick budget.
     for y in (y0..=y1).rev() {
         if freezes_left <= 0 || frozen_count >= budget {
             break;
@@ -436,11 +435,11 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
         if cell.material != MaterialId::Air || cell.sat.0 < cfg.min_sat_to_freeze {
             continue;
         }
-        if !is_standing_water(world, gx, y) || !open_sky_above(world, gx, y) {
-            continue;
-        }
-        // Refuse water-on-ice even after settle missed a cell this tick.
-        if below_is_frozen(world, gx, y) {
+        let under_lid = above_is_frozen(world, gx, y);
+        let open_surface = is_standing_water(world, gx, y)
+            && open_sky_above(world, gx, y)
+            && !below_is_frozen(world, gx, y);
+        if !under_lid && !open_surface {
             continue;
         }
         let t_c = temp.at_cell(gx, y);
@@ -451,6 +450,13 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
         freezes_left -= 1;
         frozen_count += 1;
     }
+}
+
+fn above_is_frozen(world: &World, gx: i32, gy: i32) -> bool {
+    matches!(
+        world.get_cell(gx, gy + 1),
+        Some(a) if is_frozen_solid(a.material)
+    )
 }
 
 /// Melt exposed Ice/Snow into `Air + FULL` water when warm.
@@ -569,21 +575,24 @@ mod tests {
     }
 
     #[test]
-    fn ice_skin_does_not_keep_freezing_water_under_it() {
+    fn ice_thickens_one_cell_per_tick_under_lid() {
         let mut w = pond_world();
         let temp = cold_temp(16, 16, -10.0);
         let cfg = PhaseConfig::default();
         apply_phase(&mut w, &temp, &cfg);
         assert_eq!(w.get_cell(3, 3).unwrap().material, MaterialId::Ice);
-        assert!(w.get_cell(3, 2).unwrap().sat.is_full());
+        assert!(
+            w.get_cell(3, 2).unwrap().sat.is_full(),
+            "first tick is skin only — deep water stays liquid"
+        );
+        assert_eq!(w.get_cell(3, 2).unwrap().material, MaterialId::Air);
         w.tick = 1;
         apply_phase(&mut w, &temp, &cfg);
         assert_eq!(
             w.get_cell(3, 2).unwrap().material,
-            MaterialId::Air,
-            "water under ice must not flash-freeze into a solid column"
+            MaterialId::Ice,
+            "cold lid must thicken downward into the pond"
         );
-        assert!(w.get_cell(3, 2).unwrap().sat.is_full());
     }
 
     #[test]
@@ -777,16 +786,21 @@ mod tests {
             w.tick = tick;
             apply_phase(&mut w, &temp, &PhaseConfig::default());
         }
-        let mut ice = 0;
-        for y in 0..8 {
-            if w.get_cell(1, y).map(|c| c.material == MaterialId::Ice) == Some(true) {
-                ice += 1;
-            }
-        }
-        assert!(
-            ice <= 1,
-            "thin rain on ice must not grow an ice tower (ice={ice})"
+        // Lid may thicken downward into the pond — that is intended.
+        // Thin rain on top must stay a film (no upward ice tower).
+        assert_eq!(
+            w.get_cell(1, 3).unwrap().material,
+            MaterialId::Air,
+            "thin rain on ice must not freeze into an upward tower"
         );
+        assert!(w.get_cell(1, 3).unwrap().sat.0 > 0);
+        for y in 4..8 {
+            assert_ne!(
+                w.get_cell(1, y).map(|c| c.material),
+                Some(MaterialId::Ice),
+                "ice must not grow above the rain film at y={y}"
+            );
+        }
     }
 
     #[test]
