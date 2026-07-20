@@ -142,11 +142,11 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   `apply_grain_fall` (float on water). Phase break only melts packs on
   non-supporting haze, not empty gaps.
 - **Snow precip:** rain / drizzle / cloud downpour call
-  `deposit_precip_on_surface`. Cold **ground** sample (skips snow/ice pack
-  height) → one solid `Snow` cell on top of rock/sand/pack (wet surface
-  films become Snow). **Never** falls back to liquid on cold columns —
-  that used to soak mountain-top sand pores when the pack hit the cap or
-  cloud shares were fractional. Short budget / full cap → hold mass (`0`).
+  `deposit_precip_on_surface`. **Air temp at precip origin** (`start_y` /
+  cloud height) chooses flake vs drop. Snow that hits **warm ground**
+  melts to liquid; cold air + cold ground → solid `Snow` pack (never
+  pore-soaks). Warm air always rains (ponds may freeze later via phase).
+  Short budget / full cap on the snow path → hold mass (`0`).
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   prefer packs ≤ `snow_blanket_depth` so cover blankets cold slopes
   before growing peak spikes. Cloud downpour uses a wider footprint when

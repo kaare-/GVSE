@@ -225,7 +225,7 @@ impl SimSettings {
                     ui.checkbox(hash!(), "Cull tall ice/snow stacks", &mut self.phase.enable_cull);
                     ui.checkbox(
                         hash!(),
-                        "Snow precip (else rain when cold)",
+                        "Snow precip (air cold; melts on warm ground)",
                         &mut self.phase.enable_snow_precip,
                     );
                     labeled_slider(
