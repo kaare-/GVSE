@@ -200,33 +200,32 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
     });
 }
 
-/// Priority-based surface water flow (Noita / Sandspiel style).
+/// Immediate-neighbour priority water flow.
 ///
-/// A wet `Air` cell shoves its water to the best target in this order:
+/// For each wet `Air` cell (compute-then-apply so the pass is
+/// order-independent), pick the best target in this order:
 ///
 /// 1. **Diagonal-down Air with room** — dump as much sat as fits.
-/// 2. **Multi-cell horizontal reach** — look up to `SPREAD_REACH` cells
-///    sideways for an Air column whose diagonal-down is open (cascade
-///    around a small ridge) or same-row is drier than us; shove enough
-///    to level heads.
-/// 3. **Throughflow** — if resting on a stack of saturated porous, weep
-///    at the porous permeability rate into the first Air cell below.
+/// 2. **Immediate side is a cascade edge** — the side neighbour is Air
+///    with an Air-with-room directly below it (the water we push there
+///    will fall next tick). Dump all we can.
+/// 3. **Immediate side is a drier surface neighbour** — both cells sit
+///    on solid / full water. Move half the sat gap so heads equalise.
+/// 4. **Throughflow** — if below is a stack of saturated porous cells,
+///    weep down through the whole stack at seepage rate to the first
+///    Air with room on the far side.
 ///
-/// This is the CA "shove" model (Noita / Sandspiel). Head equalization
-/// converged geometrically slowly; direct priority moves let a full
-/// water cell dump 255 sat into a downhill Air in one pass and cascade
-/// off shelves within a few ticks.
+/// No multi-cell horizontal scans. Water propagates one cell per
+/// substep and relies on the `FLOW_SUBSTEPS` cycle inside [`tick`] plus
+/// dirty-halo re-planning to cover distance.
 ///
-/// Vertical bulk fall is still [`apply_gravity_fall`] (pull-based).
+/// Vertical bulk fall stays in [`apply_gravity_fall`] (pull-based).
 /// Porous soak stays in [`apply_seepage`]. Mass is preserved by greedy
 /// per-source distribution when multiple targets contend for one cell.
 pub fn apply_water_flow(world: &mut World) {
     let regions = regions_for_standalone(world);
     apply_water_flow_regions(world, &regions);
 }
-
-/// How many cells sideways a wet cell can scan to find a cascade path.
-const SPREAD_REACH: i32 = 6;
 
 /// Priority water flow restricted to a pre-planned active set.
 pub fn apply_water_flow_regions(world: &mut World, active: &[ActiveChunk]) {
@@ -237,6 +236,7 @@ pub fn apply_water_flow_regions(world: &mut World, active: &[ActiveChunk]) {
     for pass in partition_checkerboard(active) {
         accumulate_water_flow_xfers(world, &pass, &mut xfers);
     }
+
     if xfers.is_empty() {
         return;
     }
@@ -328,7 +328,16 @@ fn accumulate_water_flow_xfers(
                 let flip = tick_flip ^ (((gx + gy) & 1) == 0);
                 let dirs = if flip { [-1_i32, 1] } else { [1_i32, -1] };
 
+                // Below tells us whether we're on a "surface" (below is
+                // solid or full water) or falling (below is Air with room).
+                let below_cell = world.get_cell(gx, gy - 1);
+                let on_surface = match below_cell {
+                    None => false,
+                    Some(b) => b.material != MaterialId::Air || b.sat.is_full(),
+                };
+
                 // --- Priority 1: diagonal-down into Air with room ---
+                // Shelf edge: (dx, y-1) is Air, so water can fall there.
                 for dx in dirs {
                     if remaining == 0 {
                         break;
@@ -353,58 +362,70 @@ fn accumulate_water_flow_xfers(
                     continue;
                 }
 
-                // --- Priority 2: multi-cell horizontal reach ---
-                // Look up to SPREAD_REACH sideways. Cascade first
-                // (diag-down open at that column) beats same-row drier.
+                if !on_surface {
+                    // Mid-air droplet with dry Air directly below already
+                    // fell via priority 1 (diag) or will fall via gravity.
+                    continue;
+                }
+
+                // --- Priority 2: immediate side is a cascade edge ---
+                // side is Air AND (side, y-1) is Air with room → water
+                // dumped there falls next tick. Move all we can.
                 for dx in dirs {
                     if remaining == 0 {
                         break;
                     }
-                    let mut cascade: Option<(i32, i32, i32)> = None;
-                    let mut equalise: Option<(i32, i32, i32)> = None;
-                    for k in 1..=SPREAD_REACH {
-                        let nx = world.wrap_x(gx + dx * k);
-                        let Some(mid) = world.get_cell(nx, gy) else {
-                            break;
-                        };
-                        if mid.material != MaterialId::Air {
-                            break;
-                        }
-                        // Cascade: this column has an open diag-down.
-                        if let Some(below) = world.get_cell(nx, gy - 1) {
-                            if below.material == MaterialId::Air && below.sat.0 < u8::MAX {
-                                cascade = Some((
-                                    nx,
-                                    gy - 1,
-                                    u8::MAX.saturating_sub(below.sat.0) as i32,
-                                ));
-                                break;
-                            }
-                        }
-                        if equalise.is_none()
-                            && (mid.sat.0 as i32) < (cur.sat.0 as i32)
-                        {
-                            equalise = Some((
-                                nx,
-                                gy,
-                                u8::MAX.saturating_sub(mid.sat.0) as i32,
-                            ));
-                        }
-                    }
-                    let target = cascade.or(equalise);
-                    let Some((nx, ny, free)) = target else {
+                    let nx = world.wrap_x(gx + dx);
+                    let Some(side) = world.get_cell(nx, gy) else {
                         continue;
                     };
-                    let move_amt = if ny < gy {
-                        remaining.min(free) // full cascade
-                    } else {
-                        let src_h = cur.sat.0 as i32;
-                        let dst_h = world.get_cell(nx, ny).map(|c| c.sat.0 as i32).unwrap_or(0);
-                        let half = (src_h - dst_h).max(0) / 2;
-                        remaining.min(free).min(half.max(1))
+                    if side.material != MaterialId::Air {
+                        continue;
+                    }
+                    let side_below = world.get_cell(nx, gy - 1);
+                    let cascade_edge = matches!(
+                        side_below,
+                        Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
+                    );
+                    if !cascade_edge {
+                        continue;
+                    }
+                    let free = u8::MAX.saturating_sub(side.sat.0) as i32;
+                    if free == 0 {
+                        continue;
+                    }
+                    let move_amt = remaining.min(free);
+                    local.push(((gx, gy), (nx, gy), move_amt));
+                    remaining -= move_amt;
+                }
+                if remaining == 0 {
+                    continue;
+                }
+
+                // --- Priority 3: level with drier same-row neighbour ---
+                // Both cells rest on solid (or full water) — surface flow.
+                // Half-gap so head equalises; use average to move any
+                // strictly-drier neighbour (no threshold).
+                for dx in dirs {
+                    if remaining == 0 {
+                        break;
+                    }
+                    let nx = world.wrap_x(gx + dx);
+                    let Some(side) = world.get_cell(nx, gy) else {
+                        continue;
                     };
+                    if side.material != MaterialId::Air {
+                        continue;
+                    }
+                    if (side.sat.0 as i32) >= (cur.sat.0 as i32) {
+                        continue;
+                    }
+                    let gap = cur.sat.0 as i32 - side.sat.0 as i32;
+                    let half = (gap / 2).max(1);
+                    let free = u8::MAX.saturating_sub(side.sat.0) as i32;
+                    let move_amt = remaining.min(free).min(half);
                     if move_amt > 0 {
-                        local.push(((gx, gy), (nx, ny), move_amt));
+                        local.push(((gx, gy), (nx, gy), move_amt));
                         remaining -= move_amt;
                     }
                 }
@@ -412,14 +433,13 @@ fn accumulate_water_flow_xfers(
                     continue;
                 }
 
-                // --- Priority 3: throughflow through saturated porous ---
-                // Try straight down AND diagonal-down: on a monotonic
-                // sand slope, straight-down is always sand-saturated with
-                // no Air below within the column, but the diagonal
-                // opens into the next lower shelf.
-                let mut placed_throughflow = false;
+                // --- Priority 4: throughflow through saturated porous ---
+                // Real physics: water pressed on saturated soil flows
+                // through it at seepage rate (Darcy), reaching the far
+                // side. Try straight down and diagonal-down columns.
+                let mut placed = false;
                 for dx in [0_i32, -1, 1] {
-                    if placed_throughflow {
+                    if placed {
                         break;
                     }
                     let nx = world.wrap_x(gx + dx);
@@ -431,14 +451,11 @@ fn accumulate_water_flow_xfers(
                     }
                     let cap1 = water_capacity(below1.material);
                     if below1.sat.0 < cap1 {
-                        continue; // seepage / gravity handles unsaturated
+                        continue; // gravity + seepage handle unsaturated
                     }
                     let mut ty = gy - 2;
                     let mut rate = seepage_rate(below1.material);
                     let mut target: Option<i32> = None;
-                    // Deep scan: shore sand columns can be 15+ cells thick
-                    // above the ocean floor. Water needs to reach the Air
-                    // on the far side of the whole ridge.
                     for _ in 0..24 {
                         let Some(nb) = world.get_cell(nx, ty) else {
                             break;
@@ -462,7 +479,7 @@ fn accumulate_water_flow_xfers(
                     if let Some(ny) = target {
                         let amt = rate.min(remaining).max(1);
                         local.push(((gx, gy), (nx, ny), amt));
-                        placed_throughflow = true;
+                        placed = true;
                     }
                 }
             }
@@ -1413,8 +1430,11 @@ pub fn tick(world: &mut World) {
         apply_water_flow_regions(world, &active);
     }
 
+    // Seepage + grain fall read the same dirty halo the substep loop
+    // built. Do NOT clear dirty here: if these passes don't write
+    // (e.g. no porous solids, no grains), we still need next tick to
+    // re-process the cells the substeps just modified.
     let active = plan_active(world);
-    clear_all_dirty(world);
     if !active.is_empty() {
         apply_seepage_regions(world, &active);
         let passes = partition_checkerboard(&active);
@@ -2223,6 +2243,67 @@ mod tests {
             "slope should drain (perched={perched}, sea_sat={sea})"
         );
         assert!(sea > 500, "sea should catch drainage (sea_sat={sea})");
+    }
+
+    #[test]
+    fn user_scenario_water_equilibrates_across_flat_shelf_and_cascades() {
+        // The user's mental model:
+        // - Rain drops water on an Air cell above an impermeable block.
+        // - Immediate neighbours also sit above impermeable → water
+        //   spreads (averaged) across them.
+        // - One neighbour is an "air-above-air" cascade edge → water
+        //   there falls, opening space for more sideways flow.
+        //
+        // World layout (y-up):
+        //   x:  8 9 10 11 12 13
+        //   y=51 . . .  .  .  .   (Air, dry)
+        //   y=50 . . W  .  .  .   (Air; W = rain drop)
+        //   y=49 # # #  #  .  .   (Bedrock shelf ending at 11; 12+ is Air)
+        //   y=48 . . .  .  .  .   (Air below the shelf edge)
+        //   y=0  # # #  #  #  #   (Bedrock floor)
+        let mut w = World::new(2);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for x in 8..=11 {
+            w.set_cell(x, 49, Cell::solid(MaterialId::Bedrock));
+        }
+        // Rain drop at (10, 50).
+        w.set_cell(10, 50, Cell::water());
+
+        // One tick's water flow should already start cascading right
+        // (x=11,50 has Air below at y=49? no, x=11,49 is bedrock. So
+        // cascade edge is at x=12,50 whose below x=12,49 is Air).
+        // Water at x=10,50 first goes right one cell per substep, then
+        // falls off the shelf.
+        for _ in 0..20 {
+            tick(&mut w);
+        }
+
+        // No water should have climbed left onto more bedrock shelf.
+        assert!(
+            w.get_cell(10, 50).unwrap().sat.0 < 8,
+            "source cell must nearly empty (got sat={})",
+            w.get_cell(10, 50).unwrap().sat.0
+        );
+        // Water should have cascaded off the shelf. Some sits on the
+        // shelf (equilibrated across x=6..12), some falls into the
+        // right chasm at x=12+. Whichever way it goes, it must not
+        // climb inland uphill (there's no uphill to climb here — just
+        // the flat bedrock shelf x=8..=11 and the left/right chasms).
+        let landed_right: i32 = (12..32)
+            .flat_map(|x| (0..=48).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+            .sum();
+        let landed_left: i32 = (0..8)
+            .flat_map(|x| (0..=48).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+            .sum();
+        assert!(
+            landed_right + landed_left >= 150,
+            "water should cascade off the shelf edge (right={landed_right} left={landed_left})"
+        );
     }
 
     #[test]
