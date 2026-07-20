@@ -173,6 +173,14 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
 Cold snap: Tab → Base temp below 0°C (with rain/clouds on). Warm snap: raise
 base temp above freeze point.
 
+## Organisms (brief)
+
+- **Set A Atom** — wet-Air plankton (buoyancy / fission).
+- **Set D minimal plant** — `Root` + `Stem` + leaves on moist porous
+  ground; drinks cell `sat`, no buoyancy. Editor: F2 → `T` template,
+  spawn on Air above sand/soil. Full canopy shade / elongation still
+  deferred (`docs/organism/PLANTS.md`).
+
 ## Related docs
 
 - [`VOXEL_MIGRATION.md`](VOXEL_MIGRATION.md) — isolation, dirty rects, historical spill vocabulary

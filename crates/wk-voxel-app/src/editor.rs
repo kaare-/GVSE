@@ -1,6 +1,6 @@
-//! MS-Paint Set A creature editor for wk-voxel-app.
-//! Mirrors the column `wk-app` editor (docs/organism/EDITOR.md), but
-//! only Nucleus + Photosystem — no wk-agents / wk-app imports.
+//! MS-Paint creature editor for wk-voxel-app.
+//! Mirrors the column `wk-app` editor (docs/organism/EDITOR.md):
+//! Set A Atom + minimal Set D plant — no wk-agents / wk-app imports.
 
 use macroquad::prelude::*;
 use wk_voxel::{Blueprint, LaneId, ModuleId, PlacedModule};
@@ -32,7 +32,7 @@ impl Default for CreatureEditor {
             blueprint: Blueprint::atom(),
             tool: EditorTool::Paint,
             brush: ModuleId::Photosystem,
-            status: "Paint Atom, then Enter + click a wet cell to spawn".into(),
+            status: "Paint Atom or Plant, then Enter + click to spawn".into(),
             spawn_picker: false,
             was_paused: true,
             name_buf: "atom".into(),
@@ -50,7 +50,7 @@ impl CreatureEditor {
             self.was_paused = currently_paused;
             self.spawn_picker = false;
             self.status =
-                "1 Nucleus  2 Photosystem  | E erase  S/L  | Enter then click wet cell to spawn"
+                "1-4 modules | A Atom  T Plant | Enter then click wet (Atom) or moist land (Plant)"
                     .into();
         }
     }
@@ -67,6 +67,14 @@ impl CreatureEditor {
             self.brush = ModuleId::Photosystem;
             self.tool = EditorTool::Paint;
         }
+        if is_key_pressed(KeyCode::Key3) {
+            self.brush = ModuleId::Root;
+            self.tool = EditorTool::Paint;
+        }
+        if is_key_pressed(KeyCode::Key4) {
+            self.brush = ModuleId::Stem;
+            self.tool = EditorTool::Paint;
+        }
         if is_key_pressed(KeyCode::E) {
             self.tool = EditorTool::Erase;
         }
@@ -76,7 +84,12 @@ impl CreatureEditor {
         if is_key_pressed(KeyCode::A) {
             self.blueprint = Blueprint::atom();
             self.name_buf = "atom".into();
-            self.status = "Reset to Atom template".into();
+            self.status = "Reset to Atom template (spawn on wet Air)".into();
+        }
+        if is_key_pressed(KeyCode::T) {
+            self.blueprint = Blueprint::minimal_plant();
+            self.name_buf = "plant".into();
+            self.status = "Minimal plant template (spawn on moist sand/soil)".into();
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
             self.blueprint.name = self.name_buf.clone();
@@ -100,12 +113,17 @@ impl CreatureEditor {
             }
         }
         if is_key_pressed(KeyCode::Enter) {
-            if self.blueprint.is_valid_atom() {
+            if self.blueprint.is_valid_creature() {
                 self.spawn_picker = true;
-                self.status =
-                    "SPAWN — click a wet cell in the world to place (Esc cancel)".into();
+                let hint = if self.blueprint.is_valid_plant() {
+                    "moist land (Air above porous solid)"
+                } else {
+                    "a wet Air cell"
+                };
+                self.status = format!("SPAWN — click {hint} (Esc cancel)");
             } else {
-                self.status = "Need at least one Nucleus + one Photosystem".into();
+                self.status =
+                    "Need Nucleus + Photosystem (Atom) or + Root (Plant)".into();
             }
         }
         if is_key_pressed(KeyCode::Escape) && self.spawn_picker {
@@ -154,16 +172,14 @@ impl CreatureEditor {
         }
         let sw = screen_width();
         let sh = screen_height();
-        // Spawn picker needs the world visible for a 2D wet-cell click.
         if self.spawn_picker {
             draw_rectangle(0.0, 0.0, sw, 36.0, Color::from_rgba(8, 10, 16, 200));
-            draw_text(
-                "SPAWN MODE — Enter accepted; now click a wet cell to place  |  Esc cancel  |  F2 close",
-                16.0,
-                24.0,
-                20.0,
-                GREEN,
-            );
+            let msg = if self.blueprint.is_valid_plant() {
+                "SPAWN MODE — click moist land (sand/soil under Air)  |  Esc cancel  |  F2 close"
+            } else {
+                "SPAWN MODE — click a wet cell to place  |  Esc cancel  |  F2 close"
+            };
+            draw_text(msg, 16.0, 24.0, 20.0, GREEN);
             return;
         }
         draw_rectangle(0.0, 0.0, sw, sh, Color::from_rgba(8, 10, 16, 210));
@@ -223,7 +239,14 @@ impl CreatureEditor {
         }
 
         let px = ox + cw + 24.0;
-        draw_text("Set A Atom editor", px, oy, 22.0, WHITE);
+        let kind = if self.blueprint.is_valid_plant() {
+            "Set D plant"
+        } else if self.blueprint.is_valid_atom() {
+            "Set A Atom"
+        } else {
+            "incomplete"
+        };
+        draw_text(&format!("Creature editor ({kind})"), px, oy, 22.0, WHITE);
         draw_text(
             &format!("Tool: {:?}  Brush: {}", self.tool, self.brush.name()),
             px,
@@ -232,14 +255,14 @@ impl CreatureEditor {
             LIGHTGRAY,
         );
         draw_text(
-            "1 Nucleus  2 Photosystem  | E erase  P paint  A reset Atom",
+            "1 Nucleus  2 Photosystem  3 Root  4 Stem  | E erase  P paint",
             px,
             oy + 52.0,
             14.0,
             GRAY,
         );
         draw_text(
-            "S save  L load  |  Enter, then click a wet cell to spawn",
+            "A Atom template  T Plant template  | S save  L load  | Enter spawn",
             px,
             oy + 72.0,
             14.0,
@@ -249,7 +272,7 @@ impl CreatureEditor {
             &format!(
                 "modules={}  valid={}  name={}",
                 self.blueprint.modules.len(),
-                self.blueprint.is_valid_atom(),
+                self.blueprint.is_valid_creature(),
                 self.name_buf
             ),
             px,
@@ -259,9 +282,14 @@ impl CreatureEditor {
         );
         draw_text(&self.status, px, oy + 130.0, 14.0, YELLOW);
 
-        for (i, mid) in [ModuleId::Nucleus, ModuleId::Photosystem]
-            .iter()
-            .enumerate()
+        for (i, mid) in [
+            ModuleId::Nucleus,
+            ModuleId::Photosystem,
+            ModuleId::Root,
+            ModuleId::Stem,
+        ]
+        .iter()
+        .enumerate()
         {
             let (r, g, b) = mid.rgb();
             let sx = px + i as f32 * 36.0;
