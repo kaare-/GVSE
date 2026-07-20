@@ -357,12 +357,8 @@ fn deposit_snow_spread(
             return Some(consumed);
         }
     }
-    // Neighbours already blanketed — allow slow stack growth.
-    for &(cx, _, _) in &candidates {
-        if let Some(consumed) = deposit_snow_on_surface(world, cx, start_y) {
-            return Some(consumed);
-        }
-    }
+    // Hold mass once the soft blanket is full — do not grow 1-wide
+    // spikes up to `max_ice_cells_per_column` away from the storm.
     None
 }
 
@@ -1252,6 +1248,30 @@ mod tests {
             left || right || mid_l || mid_r,
             "snow must seat on a thinner neighbour column"
         );
+    }
+
+    #[test]
+    fn snow_holds_when_soft_blanket_is_full() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 1..=3 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+            w.set_cell(x, 2, Cell::solid(MaterialId::Snow));
+            w.set_cell(x, 3, Cell::solid(MaterialId::Snow));
+            w.set_cell(x, 4, Cell::solid(MaterialId::Snow)); // pack = 3 > blanket 2
+        }
+        let temp = cold_temp(16, 16, -10.0);
+        let cfg = PhaseConfig {
+            snow_spread_radius: 2,
+            snow_blanket_depth: 2,
+            ..PhaseConfig::default()
+        };
+        let before: usize = (1..=3).map(|x| frozen_count_in_column(&w, x)).sum();
+        let landed = deposit_precip_on_surface(&mut w, 2, 20, 255.0, Some(&temp), Some(&cfg));
+        assert_eq!(landed, 0.0, "must hold snow once the soft blanket is full");
+        let after: usize = (1..=3).map(|x| frozen_count_in_column(&w, x)).sum();
+        assert_eq!(after, before, "must not grow spikes past snow_blanket_depth");
     }
 
     #[test]

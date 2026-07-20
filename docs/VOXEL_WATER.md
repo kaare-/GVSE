@@ -141,16 +141,17 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
 - **Unsupported ice/snow:** empty Air below → **fall** as solids in
   `apply_grain_fall` (float on water). Phase break only melts packs on
   non-supporting haze, not empty gaps.
-- **Snow precip:** rain / drizzle / cloud downpour call
+- **Snow precip:** cloud downpour and climatic rain call
   `deposit_precip_on_surface`. **Air temp at precip origin** (`start_y` /
   cloud height) chooses flake vs drop. Snow that hits **warm ground**
   melts to liquid; cold air + cold ground → solid `Snow` pack (never
   pore-soaks). Warm air always rains (ponds may freeze later via phase).
-  Short budget / full cap on the snow path → hold mass (`0`).
+  Short budget / full blanket on the snow path → hold mass (`0`).
+- **Condensation drizzle (`C`):** liquid only — leftover humidity must not
+  mint invisible snow towers when the sky air is cold. Clouds own snow.
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
-  prefer packs ≤ `snow_blanket_depth` so cover blankets cold slopes
-  before growing peak spikes. Cloud downpour uses a wider footprint when
-  cold. Later: real drift / avalanche physics.
+  only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
+  the blanket. Cloud downpour uses a wider footprint when snowing.
 - **Snow pack:** solid lid, no pore soak. Falls through empty Air; cold
   avalanche can spill onto lake ice (see Grain / cold avalanche sections).
 - **Slush:** Snow on water — warm melts snow; cold freezes the water film

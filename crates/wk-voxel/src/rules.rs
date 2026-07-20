@@ -2026,7 +2026,13 @@ pub fn apply_condensation_rain_with_orographic(
     apply_condensation_rain_phased(world, humidity, cfg, oro, None, None);
 }
 
-/// Condensation precip with optional snow phase (cold tiles).
+/// Condensation drizzle — **liquid only**.
+///
+/// Snow packs belong to cloud / climatic precip (visible flakes). Cold
+/// sky air used to turn every humidity drizzle into invisible snow
+/// towers across the map; leftover vapor now always rains as water
+/// (phase freeze can still ice ponds). `temp` / `phase` are accepted for
+/// call-site compatibility but ignored for deposit phase.
 pub fn apply_condensation_rain_phased(
     world: &mut World,
     humidity: &mut crate::humidity::Humidity,
@@ -2035,6 +2041,7 @@ pub fn apply_condensation_rain_phased(
     temp: Option<&crate::temperature::Temperature>,
     phase: Option<&crate::phase::PhaseConfig>,
 ) {
+    let _ = (temp, phase);
     if cfg.min_mass_to_rain >= cfg.full_mass || cfg.max_prob_per_tick <= 0.0 {
         return;
     }
@@ -2071,20 +2078,7 @@ pub fn apply_condensation_rain_phased(
         if take_mass <= 0.0 {
             continue;
         }
-        // Cold snow wants a full cell (255); offer at least that when the
-        // tile can pay so mountain drizzle becomes pack, not pore water.
-        let offer = match (temp, phase) {
-            (Some(_), Some(ph)) => take_mass.max(ph.min_budget_to_snow).min(mass),
-            _ => take_mass,
-        };
-        let landed = crate::phase::deposit_precip_on_surface(
-            world,
-            centre_gx,
-            cfg.top_y,
-            offer,
-            temp,
-            phase,
-        );
+        let landed = deposit_water_on_surface(world, centre_gx, cfg.top_y, take_mass);
         if landed <= 0.0 {
             continue;
         }
@@ -4383,6 +4377,51 @@ mod tests {
             landed.sat.0
         );
         assert_eq!(w.get_cell(2, 30).unwrap().sat.0, 0, "sky row stays dry");
+    }
+
+    #[test]
+    fn condensation_stays_liquid_even_when_sky_is_cold() {
+        // Invisible humidity drizzle used to mint snow packs with no flakes.
+        let (mut w, mut h) = setup_cloud_world();
+        w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
+        h.add(1, 30, 2000.0);
+        let mut temp = crate::temperature::Temperature::with_world_bounds(
+            4, 0, 0, 64, 64, 1, 64, 32, false,
+        );
+        temp.config.base_temp_c = -12.0;
+        for v in temp.cells.values_mut() {
+            *v = -12.0;
+        }
+        let cfg = CondensationConfig {
+            top_y: 30,
+            max_prob_per_tick: 1.0,
+            mass_per_droplet: 255.0,
+            ..CondensationConfig::default()
+        };
+        let phase = crate::phase::PhaseConfig::default();
+        for _ in 0..5 {
+            apply_condensation_rain_phased(
+                &mut w,
+                &mut h,
+                &cfg,
+                None,
+                Some(&temp),
+                Some(&phase),
+            );
+            w.tick = w.tick.wrapping_add(1);
+        }
+        for y in 1..16 {
+            assert_ne!(
+                w.get_cell(2, y).map(|c| c.material),
+                Some(MaterialId::Snow),
+                "condensation must not place snow at y={y}"
+            );
+        }
+        assert!(
+            w.get_cell(2, 2).map(|c| c.sat.0).unwrap_or(0) > 0
+                || w.get_cell(2, 1).map(|c| c.sat.0).unwrap_or(0) > 0,
+            "cold drizzle should still land as liquid"
+        );
     }
 
     #[test]
