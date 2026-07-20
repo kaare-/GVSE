@@ -155,7 +155,7 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Night cool / step", 0.0..1.5, &mut self.temp.night_cool_c);
                     labeled_slider(ui, hash!(), "Cloud shade", 0.0..1.0, &mut self.temp.cloud_shade);
                     labeled_slider(ui, hash!(), "Sea bias (C)", -10.0..5.0, &mut self.temp.sea_bias_c);
-                    ui.label(None, "Freeze (I): standing water → ice at/below freeze point.");
+                    ui.label(None, "Phase (I): freeze / thaw / settle water under ice.");
                     labeled_slider(
                         ui,
                         hash!(),
@@ -165,10 +165,14 @@ impl SimSettings {
                     );
                     let mut min_freeze = self.phase.min_sat_to_freeze as f32;
                     let mut max_ice = self.phase.max_ice_cells_per_column as f32;
+                    let mut max_thaw = self.phase.max_thaw_cells_per_column_per_tick as f32;
                     labeled_slider(ui, hash!(), "Min sat to freeze", 1.0..255.0, &mut min_freeze);
                     labeled_slider(ui, hash!(), "Max ice cells / column", 1.0..32.0, &mut max_ice);
+                    labeled_slider(ui, hash!(), "Max thaw cells / col / tick", 1.0..8.0, &mut max_thaw);
                     self.phase.min_sat_to_freeze = min_freeze.round().clamp(1.0, 255.0) as u8;
                     self.phase.max_ice_cells_per_column = max_ice.round().clamp(1.0, 32.0) as u8;
+                    self.phase.max_thaw_cells_per_column_per_tick =
+                        max_thaw.round().clamp(1.0, 8.0) as u8;
                 });
                 ui.separator();
 

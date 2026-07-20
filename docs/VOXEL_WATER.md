@@ -88,19 +88,24 @@ Tab → **Material permeability / porosity** overrides these at runtime (`Materi
 - `stamped_lake_bed_pores_wet_under_water`
 - Shore / cascade suite (`impermeable_shore_*`, `continuous_rain_on_*`)
 
-## Ice / freeze (milestone 1)
+## Ice / phase (milestones 1–2)
 
-Module: `wk-voxel::phase` (`apply_freeze`). Demo toggle: **`I`**.
+Module: `wk-voxel::phase` (`apply_phase`). Demo toggle: **`I`**.
+
+Pass order per column: **cull → settle → thaw → freeze**.
 
 - Uses the existing coarse `Temperature` field (not a per-cell heat sim).
-- Freezes **standing free-surface** wet Air (`sat ≥ min_sat_to_freeze`) when
-  `temp ≤ freeze_point_c` into a whole `Ice` cell (sat cleared).
-- **1 cell / column / tick** — no flash-freeze of deep lakes.
+- **Freeze:** standing free-surface wet Air (`sat ≥ min_sat_to_freeze`) when
+  `temp ≤ freeze_point_c` → whole `Ice` cell.
+- **Thaw:** top-of-stack Ice/Snow when `temp > freeze_point_c` → `Air+FULL`.
+- **Settle:** wet Air above Ice/Snow swaps so liquid sinks and ice floats
+  (blocks the column ice-pump / tower from rain-on-ice).
+- Rate limits: 1 freeze and 1 thaw per column per tick by default.
 - **Max Ice+Snow cells / column** — excess culled to empty Air (not melted).
-- Refuses water-on-ice (column ice-pump). Thaw, sheet thickening, snow, and
-  slush are follow-ups.
 
-Cold snap in the demo: Tab → lower **Base temp** below 0°C (and/or freeze point).
+Cold snap: Tab → Base temp below 0°C. Warm snap: raise base temp above freeze point.
+
+Next: snow precip / slush (snow on water cools / melts with hard caps).
 
 ## Related docs
 
