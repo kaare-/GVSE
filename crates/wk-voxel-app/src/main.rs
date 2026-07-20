@@ -621,21 +621,15 @@ async fn main() {
                     // puddles). Mid-air sat stays invisible — falling rain
                     // is the cosmetic streak under raining clouds.
                     if cell.material == wk_material::MaterialId::Air {
-                        // Thin free-surface film: don't paint day-sky blue
-                        // over the real night/day gradient (that was the
-                        // white lip on every water terrace). Let the sky
-                        // already drawn behind show through.
-                        //
-                        // Below sea level: any wet Air is ocean, draw at
-                        // low threshold so leveling cells stay visible.
-                        // Above sea: only draw when the surface film is
-                        // near-full to avoid painting light-blue haze
-                        // across the beach as rain films spread.
-                        let below_sea = y <= scene.params.sea_level_y;
-                        let min_sat: u8 = if below_sea { 64 } else { 200 };
-                        if cell.sat.0 < min_sat {
+                        // Any non-zero fill (even 1/255) must paint — the
+                        // palette maps that to a faint blue-white film so
+                        // trickle / leveling cells stay visible. Mid-air
+                        // sat stays invisible; falling rain is the
+                        // cosmetic streak under raining clouds.
+                        if cell.sat.is_empty() {
                             continue;
                         }
+                        let below_sea = y <= scene.params.sea_level_y;
                         if !below_sea && !is_standing_water(&scene.world, x, y) {
                             continue;
                         }

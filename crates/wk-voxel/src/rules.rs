@@ -2479,6 +2479,64 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn solid_staircase_film_drains_left_into_lower_pool() {
+        // Geometry from the user's first image (impermeable sand):
+        //
+        //   y=3:  .  .  .  w  .     <- thin film on higher step (THE STUCK PIXEL)
+        //   y=2:  d  P  P  #  .     <- drop | pool2(2) | pool3(3)? wait
+        //
+        // Simpler staircase matching the description:
+        //   y=3: . . . W .
+        //   y=2: D # P P #
+        //   y=1: # # # # #
+        //   y=0: ###########
+        //
+        // W at (3,3) on sand (3,2). Diagonal-down left is sand (2,2).
+        // Same-row left (2,3) is Air above sand (2,2) — corner cell.
+        // From (2,3), diagonal-down left (1,2) is pool Air P.
+        // Drop D at (0,2) is lower basin.
+        //
+        // Expected: W → (2,3) → dump into P → eventually into D.
+        // Must NOT sit for 100 ticks.
+        let mut w = World::new(11);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+        }
+        // Sand step face + upper terrace.
+        w.set_cell(2, 2, Cell::solid(MaterialId::Bedrock)); // step face
+        w.set_cell(3, 2, Cell::solid(MaterialId::Bedrock)); // under W
+        w.set_cell(4, 2, Cell::solid(MaterialId::Bedrock));
+        // Lower terrace floor under pool/drop.
+        w.set_cell(0, 1, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(1, 1, Cell::solid(MaterialId::Bedrock));
+        // (1,2) and (0,2) are Air — the lower pool/drop level.
+        // Seed a little water in the pool so it's "occupied" like the image.
+        w.set_cell(1, 2, Cell { material: MaterialId::Air, sat: Sat(200), flags: Default::default(), _pad: 0 });
+        // The stuck higher film.
+        w.set_cell(3, 3, Cell::water());
+
+        for _ in 0..30 {
+            tick(&mut w);
+        }
+
+        let stuck = w.get_cell(3, 3).unwrap().sat.0;
+        let corner = w.get_cell(2, 3).unwrap().sat.0;
+        let pool = w.get_cell(1, 2).unwrap().sat.0;
+        let drop = w.get_cell(0, 2).unwrap().sat.0;
+        assert!(
+            stuck < 8,
+            "higher-step film must drain (stuck={stuck} corner={corner} pool={pool} drop={drop})"
+        );
+        assert!(
+            (pool as i32) + (drop as i32) > 200,
+            "water must reach lower level (pool={pool} drop={drop})"
+        );
+    }
+
     #[test]
     fn impermeable_shore_cascades_off_within_seconds() {
         // Simulates user's setup: sand set to impermeable (no seepage
