@@ -41,7 +41,9 @@ pub struct PhaseConfig {
     /// Ice/Snow thaw when warmer than this.
     pub freeze_point_c: f32,
     /// Minimum Air sat before a free-surface cell may become Ice.
-    /// Ignores mist / 1-sat films so we don't flash-freeze haze.
+    /// Must be a (near-)full cell: thaw always yields `Air+FULL`, so
+    /// freezing partial sat would mint water on the next thaw.
+    /// Default `255` — only standing water / full under-lid cells freeze.
     pub min_sat_to_freeze: u8,
     /// Max free-surface cells converted to Ice **per column per tick**.
     pub max_freeze_cells_per_column_per_tick: u8,
@@ -100,7 +102,7 @@ impl Default for PhaseConfig {
     fn default() -> Self {
         Self {
             freeze_point_c: 0.0,
-            min_sat_to_freeze: 64,
+            min_sat_to_freeze: 255,
             max_freeze_cells_per_column_per_tick: 1,
             max_thaw_cells_per_column_per_tick: 1,
             max_slush_cells_per_column_per_tick: 1,
@@ -421,9 +423,9 @@ fn deposit_snow_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f
 /// Water film on Ice/Snow, and Snow sitting on water.
 ///
 /// - **Water on ice/snow:** stays on top (no density swap under the sheet).
-///   Melts the frozen cell when warm, or when a full water cell has ponded
-///   from heavy rain ("enough rain" without a full thermal field).
-/// - **Snow on water:** warm → melt snow; cold → freeze the water film
+///   Melts the frozen cell when **warm** only — cold ponded rain must not
+///   melt ice (that churned melt→refreeze towers).
+/// - **Snow on water:** warm → melt snow; cold → freeze **full** water
 ///   under the snow into ice (snow-on-ice pack).
 fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &PhaseConfig) {
     let Some((y0, y1)) = y_bounds(world) else {
@@ -442,13 +444,13 @@ fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &
             continue;
         };
 
-        // Water film directly above ice → melt the sheet from above.
-        // (Snow is handled separately so snow-on-water slush still runs.)
+        // Water film directly above ice → melt the sheet from above when
+        // warm. Cold full rain must NOT melt ice (that churned melt→freeze
+        // towers and looked like minted ice pillars).
         if cell.material == MaterialId::Ice {
             if let Some(above) = world.get_cell(gx, y + 1) {
                 if is_wet_air(above) {
-                    let enough_rain = above.sat.is_full();
-                    if warm || enough_rain {
+                    if warm {
                         world.set_cell(gx, y, Cell::water());
                         left -= 1;
                     }
@@ -463,9 +465,9 @@ fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &
                 continue;
             };
             if !is_wet_air(below) {
-                // Water film on snow — melt snow from above when warm / full.
+                // Water film on snow — melt snow from above when warm only.
                 if let Some(above) = world.get_cell(gx, y + 1) {
-                    if is_wet_air(above) && (warm || above.sat.is_full()) {
+                    if is_wet_air(above) && warm {
                         world.set_cell(gx, y, Cell::water());
                         left -= 1;
                     }
@@ -476,6 +478,7 @@ fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &
                 world.set_cell(gx, y, Cell::water());
                 left -= 1;
             } else if below.sat.0 >= cfg.min_sat_to_freeze {
+                // Full water under snow → ice (conversion, not mint).
                 world.set_cell(gx, y - 1, ice_cell());
                 left -= 1;
             }
@@ -927,7 +930,7 @@ mod tests {
     }
 
     #[test]
-    fn full_water_on_ice_melts_even_when_cold() {
+    fn full_water_on_ice_does_not_melt_when_cold() {
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(1, 0, Cell::solid(MaterialId::Bedrock));
@@ -938,10 +941,40 @@ mod tests {
         apply_phase(&mut w, &temp, &PhaseConfig::default());
         assert_eq!(
             w.get_cell(1, 2).unwrap().material,
-            MaterialId::Air,
-            "enough rain on ice must melt the sheet"
+            MaterialId::Ice,
+            "cold rain on ice must stay a film — not melt→refreeze churn"
         );
-        assert!(w.get_cell(1, 2).unwrap().sat.is_full());
+        assert_eq!(w.get_cell(1, 3).unwrap().material, MaterialId::Air);
+        assert!(w.get_cell(1, 3).unwrap().sat.is_full());
+    }
+
+    #[test]
+    fn partial_sat_does_not_freeze_then_thaw_into_extra_water() {
+        // Freeze of sat=100 then thaw to FULL would mint ~155 sat.
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(1, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(
+            1,
+            1,
+            Cell {
+                material: MaterialId::Air,
+                sat: Sat(100),
+                flags: Default::default(),
+                _pad: 0,
+            },
+        );
+        // Open-sky standing film on bedrock.
+        let temp = cold_temp(16, 16, -10.0);
+        let cfg = PhaseConfig::default();
+        assert_eq!(cfg.min_sat_to_freeze, 255);
+        apply_phase(&mut w, &temp, &cfg);
+        assert_eq!(
+            w.get_cell(1, 1).unwrap().material,
+            MaterialId::Air,
+            "partial sat must not become ice (thaw would mint a full cell)"
+        );
+        assert_eq!(w.get_cell(1, 1).unwrap().sat.0, 100);
     }
 
     #[test]
