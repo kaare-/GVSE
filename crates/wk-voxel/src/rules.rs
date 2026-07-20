@@ -200,40 +200,49 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
     });
 }
 
-/// Free-surface water flow between `Air` cells by hydraulic head.
+/// Priority-based surface water flow (Noita / Sandspiel style).
 ///
-/// Equalises [`hydraulic_head`] across **horizontal and diagonal**
-/// Air–Air neighbours (virtual-pipes / Lisyarus). This is the real
-/// level-seeking fluid step — not a same-row spill plus hillside
-/// heuristics. Vertical bulk transport stays in [`apply_gravity_fall`]
-/// so rain still drops one cell per gravity pass; diagonals here let
-/// water leave slopes and find a flat free surface.
+/// A wet `Air` cell shoves its water to the best target in this order:
 ///
-/// Outflows from a cell are scaled so they never exceed its sat
-/// (mass-conserving multi-neighbour step). Porous soak remains
-/// [`apply_seepage`].
-pub fn apply_air_surface_flow(world: &mut World) {
+/// 1. **Diagonal-down Air with room** — dump as much sat as fits.
+/// 2. **Multi-cell horizontal reach** — look up to `SPREAD_REACH` cells
+///    sideways for an Air column whose diagonal-down is open (cascade
+///    around a small ridge) or same-row is drier than us; shove enough
+///    to level heads.
+/// 3. **Throughflow** — if resting on a stack of saturated porous, weep
+///    at the porous permeability rate into the first Air cell below.
+///
+/// This is the CA "shove" model (Noita / Sandspiel). Head equalization
+/// converged geometrically slowly; direct priority moves let a full
+/// water cell dump 255 sat into a downhill Air in one pass and cascade
+/// off shelves within a few ticks.
+///
+/// Vertical bulk fall is still [`apply_gravity_fall`] (pull-based).
+/// Porous soak stays in [`apply_seepage`]. Mass is preserved by greedy
+/// per-source distribution when multiple targets contend for one cell.
+pub fn apply_water_flow(world: &mut World) {
     let regions = regions_for_standalone(world);
-    apply_air_surface_flow_regions(world, &regions);
+    apply_water_flow_regions(world, &regions);
 }
 
-/// Free-surface head flow restricted to a pre-planned active set.
-pub fn apply_air_surface_flow_regions(world: &mut World, active: &[ActiveChunk]) {
+/// How many cells sideways a wet cell can scan to find a cascade path.
+const SPREAD_REACH: i32 = 6;
+
+/// Priority water flow restricted to a pre-planned active set.
+pub fn apply_water_flow_regions(world: &mut World, active: &[ActiveChunk]) {
     if active.is_empty() {
         return;
     }
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     for pass in partition_checkerboard(active) {
-        accumulate_air_surface_xfers(world, &pass, &mut xfers);
+        accumulate_water_flow_xfers(world, &pass, &mut xfers);
     }
     if xfers.is_empty() {
         return;
     }
 
-    // Greedy per-source distribution: xfers can total more than a cell
-    // has (three diagonals each proposing 1 unit for a sat=1 droplet).
-    // Give sat to the largest requested xfer first, drop the rest to 0,
-    // and never plan more than the source holds.
+    // Greedy per-source distribution so total planned outflow never
+    // exceeds a cell's sat (mass conservation with multiple targets).
     let mut by_source: HashMap<(i32, i32), Vec<usize>> = HashMap::new();
     for (i, (from, _, _)) in xfers.iter().enumerate() {
         by_source.entry(*from).or_default().push(i);
@@ -243,7 +252,9 @@ pub fn apply_air_surface_flow_regions(world: &mut World, active: &[ActiveChunk])
             continue;
         };
         let mut budget = src.sat.0 as i32;
-        ixs.sort_by(|&a, &b| xfers[b].2.cmp(&xfers[a].2)); // large amt first
+        // Priority order was already baked in by push order; sort stable
+        // by original index so priority 1 (diag-down) wins the budget.
+        ixs.sort();
         for i in ixs {
             let want = xfers[i].2;
             if budget <= 0 || want <= 0 {
@@ -256,7 +267,7 @@ pub fn apply_air_surface_flow_regions(world: &mut World, active: &[ActiveChunk])
         }
     }
 
-    xfers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
+    xfers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
     for (from, to, amt) in xfers {
         if amt <= 0 {
             continue;
@@ -294,150 +305,12 @@ pub fn apply_air_surface_flow_regions(world: &mut World, active: &[ActiveChunk])
     }
 }
 
-/// Undirected Air–Air edges scanned once per pair: right, right-down,
-/// right-up. Head equalisation moves sat downhill / toward emptier cells.
-fn accumulate_air_surface_xfers(
+fn accumulate_water_flow_xfers(
     world: &World,
     active: &[ActiveChunk],
     xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) {
-    // Include diagonals so hillside films couple to lower rows.
-    const OFFSETS: [(i32, i32); 3] = [(1, 0), (1, -1), (1, 1)];
-    let local = map_regions_parallel(active, |ac| {
-        let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
-        for y in ac.rect.y0..=ac.rect.y1 {
-            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
-            for x in ac.rect.x0..=ac.rect.x1 {
-                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
-                let Some(a) = world.get_cell(gx, gy) else {
-                    continue;
-                };
-                if a.material != MaterialId::Air {
-                    continue;
-                }
-                let cap = water_capacity(MaterialId::Air);
-                for (dx, dy) in OFFSETS {
-                    let nx = world.wrap_x(gx + dx);
-                    let ny = gy + dy;
-                    if dx != 0 && nx == gx {
-                        continue;
-                    }
-                    let Some(b) = world.get_cell(nx, ny) else {
-                        continue;
-                    };
-                    if b.material != MaterialId::Air {
-                        continue;
-                    }
-                    // Skip dry–dry pairs.
-                    if a.sat.is_empty() && b.sat.is_empty() {
-                        continue;
-                    }
-                    let mut move_amt = sat_move_to_equalize_heads(
-                        a.sat.0, cap, gy, b.sat.0, cap, ny,
-                    );
-                    // Free-surface trickle: if floor discarded 0.5 units of
-                    // real head gradient (sat=1 next to dry Air), still
-                    // move one unit so single droplets don't stick forever.
-                    // The outflow-scaling apply step keeps mass conserved.
-                    if move_amt == 0 {
-                        let ha = gy as f32 + a.sat.0 as f32 / cap as f32;
-                        let hb = ny as f32 + b.sat.0 as f32 / cap as f32;
-                        let dh = ha - hb;
-                        if dh > 1.0 / 512.0 && a.sat.0 > 0 && b.sat.0 < u8::MAX {
-                            move_amt = 1;
-                        } else if dh < -1.0 / 512.0 && b.sat.0 > 0 && a.sat.0 < u8::MAX {
-                            move_amt = -1;
-                        }
-                    }
-                    if move_amt > 0 {
-                        local.push(((gx, gy), (nx, ny), move_amt));
-                    } else if move_amt < 0 {
-                        local.push(((nx, ny), (gx, gy), -move_amt));
-                    }
-                }
-            }
-        }
-        local
-    });
-    for mut v in local {
-        xfers.append(&mut v);
-    }
-}
-
-/// Same-row Air–Air head equalisation only.
-///
-/// Kept for unit tests of the classic half-gap spill. Runtime [`tick`]
-/// uses [`apply_air_surface_flow`], which also couples diagonals so
-/// water levels on slopes instead of sticking.
-pub fn apply_lateral_spill(world: &mut World) {
-    let regions = regions_for_standalone(world);
-    apply_lateral_spill_regions(world, &regions);
-}
-
-/// Water pressed on **saturated** porous solid weeps through it into
-/// the first Air cell on the other side. Real terrain is not a plastic
-/// bag: a puddle above full sand slowly drains to the layer beneath
-/// (or off a cliff edge inside the rock). Without this, single wet
-/// pixels sit on ridge crests forever because gravity/seepage both
-/// stop at the porosity cap.
-///
-/// The porous column is untouched (its sat stays at capacity — the
-/// water just passes through). Rate is capped by permeability, which
-/// makes impermeable rock (bedrock, cap 0) an absolute barrier.
-pub fn apply_pressure_throughflow(world: &mut World) {
-    let regions = regions_for_standalone(world);
-    apply_pressure_throughflow_regions(world, &regions);
-}
-
-/// Pressure throughflow restricted to a pre-planned active set.
-pub fn apply_pressure_throughflow_regions(world: &mut World, active: &[ActiveChunk]) {
-    if active.is_empty() {
-        return;
-    }
-    let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
-    for pass in partition_checkerboard(active) {
-        accumulate_throughflow_xfers(world, &pass, &mut xfers);
-    }
-    xfers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)).then(a.2.cmp(&b.2)));
-    for (from, to, amt) in xfers {
-        let Some(src) = world.get_cell(from.0, from.1) else {
-            continue;
-        };
-        let Some(dst) = world.get_cell(to.0, to.1) else {
-            continue;
-        };
-        if src.material != MaterialId::Air || dst.material != MaterialId::Air {
-            continue;
-        }
-        let free = u8::MAX as i32 - dst.sat.0 as i32;
-        let amt = amt.min(src.sat.0 as i32).min(free.max(0));
-        if amt <= 0 {
-            continue;
-        }
-        world.set_cell(
-            from.0,
-            from.1,
-            Cell {
-                sat: Sat(src.sat.0 - amt as u8),
-                ..src
-            },
-        );
-        world.set_cell(
-            to.0,
-            to.1,
-            Cell {
-                sat: Sat(dst.sat.0 + amt as u8),
-                ..dst
-            },
-        );
-    }
-}
-
-fn accumulate_throughflow_xfers(
-    world: &World,
-    active: &[ActiveChunk],
-    xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
-) {
+    let tick_flip = (world.tick & 1) == 0;
     let local = map_regions_parallel(active, |ac| {
         let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
         for y in ac.rect.y0..=ac.rect.y1 {
@@ -450,18 +323,116 @@ fn accumulate_throughflow_xfers(
                 if cur.material != MaterialId::Air || cur.sat.is_empty() {
                     continue;
                 }
-                // Trickle down through 1..=3 stacked porous saturated cells
-                // to the first Air cell with free capacity.
-                let mut rate: i32 = i32::MAX;
-                let mut ny = gy - 1;
-                let mut found: Option<i32> = None;
-                for _ in 0..3 {
-                    let Some(nb) = world.get_cell(gx, ny) else {
+                let mut remaining = cur.sat.0 as i32;
+                // Randomize L/R per cell so water doesn't bias one way.
+                let flip = tick_flip ^ (((gx + gy) & 1) == 0);
+                let dirs = if flip { [-1_i32, 1] } else { [1_i32, -1] };
+
+                // --- Priority 1: diagonal-down into Air with room ---
+                for dx in dirs {
+                    if remaining == 0 {
+                        break;
+                    }
+                    let nx = world.wrap_x(gx + dx);
+                    let ny = gy - 1;
+                    let Some(dst) = world.get_cell(nx, ny) else {
+                        continue;
+                    };
+                    if dst.material != MaterialId::Air {
+                        continue;
+                    }
+                    let free = u8::MAX.saturating_sub(dst.sat.0) as i32;
+                    if free == 0 {
+                        continue;
+                    }
+                    let move_amt = remaining.min(free);
+                    local.push(((gx, gy), (nx, ny), move_amt));
+                    remaining -= move_amt;
+                }
+                if remaining == 0 {
+                    continue;
+                }
+
+                // --- Priority 2: multi-cell horizontal reach ---
+                // Look up to SPREAD_REACH sideways. Cascade first
+                // (diag-down open at that column) beats same-row drier.
+                for dx in dirs {
+                    if remaining == 0 {
+                        break;
+                    }
+                    let mut cascade: Option<(i32, i32, i32)> = None;
+                    let mut equalise: Option<(i32, i32, i32)> = None;
+                    for k in 1..=SPREAD_REACH {
+                        let nx = world.wrap_x(gx + dx * k);
+                        let Some(mid) = world.get_cell(nx, gy) else {
+                            break;
+                        };
+                        if mid.material != MaterialId::Air {
+                            break;
+                        }
+                        // Cascade: this column has an open diag-down.
+                        if let Some(below) = world.get_cell(nx, gy - 1) {
+                            if below.material == MaterialId::Air && below.sat.0 < u8::MAX {
+                                cascade = Some((
+                                    nx,
+                                    gy - 1,
+                                    u8::MAX.saturating_sub(below.sat.0) as i32,
+                                ));
+                                break;
+                            }
+                        }
+                        if equalise.is_none()
+                            && (mid.sat.0 as i32) + 4 < (cur.sat.0 as i32)
+                        {
+                            equalise = Some((
+                                nx,
+                                gy,
+                                u8::MAX.saturating_sub(mid.sat.0) as i32,
+                            ));
+                        }
+                    }
+                    let target = cascade.or(equalise);
+                    let Some((nx, ny, free)) = target else {
+                        continue;
+                    };
+                    let move_amt = if ny < gy {
+                        remaining.min(free) // full cascade
+                    } else {
+                        let src_h = cur.sat.0 as i32;
+                        let dst_h = world.get_cell(nx, ny).map(|c| c.sat.0 as i32).unwrap_or(0);
+                        let half = (src_h - dst_h).max(0) / 2;
+                        remaining.min(free).min(half.max(1))
+                    };
+                    if move_amt > 0 {
+                        local.push(((gx, gy), (nx, ny), move_amt));
+                        remaining -= move_amt;
+                    }
+                }
+                if remaining == 0 {
+                    continue;
+                }
+
+                // --- Priority 3: throughflow through saturated porous ---
+                let Some(below1) = world.get_cell(gx, gy - 1) else {
+                    continue;
+                };
+                if !is_porous_solid(below1.material) {
+                    continue;
+                }
+                let cap1 = water_capacity(below1.material);
+                if below1.sat.0 < cap1 {
+                    continue; // seepage / gravity handles unsaturated
+                }
+                let mut ty = gy - 2;
+                let mut rate = seepage_rate(below1.material);
+                let mut target: Option<i32> = None;
+                for _ in 0..2 {
+                    let Some(nb) = world.get_cell(gx, ty) else {
                         break;
                     };
                     if nb.material == MaterialId::Air {
                         if u8::MAX.saturating_sub(nb.sat.0) > 0 {
-                            found = Some(ny);
+                            target = Some(ty);
                         }
                         break;
                     }
@@ -470,23 +441,15 @@ fn accumulate_throughflow_xfers(
                     }
                     let cap = water_capacity(nb.material);
                     if nb.sat.0 < cap {
-                        break; // gravity/seepage will fill this first
-                    }
-                    let r = seepage_rate(nb.material);
-                    if r == 0 {
                         break;
                     }
-                    rate = rate.min(r);
-                    ny -= 1;
+                    rate = rate.min(seepage_rate(nb.material));
+                    ty -= 1;
                 }
-                let Some(ty) = found else {
-                    continue;
-                };
-                let amt = rate.min(cur.sat.0 as i32).max(1);
-                if amt <= 0 {
-                    continue;
+                if let Some(ny) = target {
+                    let amt = rate.min(remaining).max(1);
+                    local.push(((gx, gy), (gx, ny), amt));
                 }
-                local.push(((gx, gy), (gx, ty), amt));
             }
         }
         local
@@ -494,6 +457,16 @@ fn accumulate_throughflow_xfers(
     for mut v in local {
         xfers.append(&mut v);
     }
+}
+
+/// Same-row Air–Air head equalisation only.
+///
+/// Kept for classic half-gap spill tests. Runtime [`tick`] uses
+/// [`apply_water_flow`], which prioritises diagonal-down and
+/// multi-cell horizontal cascade so slopes actually drain.
+pub fn apply_lateral_spill(world: &mut World) {
+    let regions = regions_for_standalone(world);
+    apply_lateral_spill_regions(world, &regions);
 }
 
 /// Lateral spill restricted to a pre-planned active set.
@@ -1412,20 +1385,8 @@ const FLOW_SUBSTEPS: usize = 4;
 /// parallel per colour) but apply from one snapshot so edges are not
 /// re-solved mid-rule.
 pub fn tick(world: &mut World) {
-    // If nothing is dirty, still remount free-surface films whose head
-    // is unbalanced (e.g. water left on a step after the dirty rect
-    // went idle). Only runs when the world is quiescent so busy oceans
-    // don't pay a full wet-chunk scan every frame.
-    let mut active = plan_active(world);
-    if active.is_empty() {
-        remount_unbalanced_surface_water(world);
-        active = plan_active(world);
-    }
-
     for _ in 0..FLOW_SUBSTEPS {
-        if active.is_empty() {
-            active = plan_active(world);
-        }
+        let active = plan_active(world);
         clear_all_dirty(world);
         if active.is_empty() {
             break;
@@ -1434,9 +1395,7 @@ pub fn tick(world: &mut World) {
         for pass in &passes {
             apply_gravity_fall_regions(world, pass);
         }
-        apply_air_surface_flow_regions(world, &active);
-        apply_pressure_throughflow_regions(world, &active);
-        active = Vec::new(); // force re-plan next substep
+        apply_water_flow_regions(world, &active);
     }
 
     let active = plan_active(world);
@@ -1452,61 +1411,6 @@ pub fn tick(world: &mut World) {
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {
         chunk.tick = chunk.tick.wrapping_add(1);
-    }
-}
-
-/// When physics went idle, dirty any solid-backed free-surface film that
-/// still has a head gradient into neighbouring Air — so slopes finish
-/// draining instead of freezing mid-wedge.
-fn remount_unbalanced_surface_water(world: &mut World) {
-    let cap = water_capacity(MaterialId::Air);
-    let coords: Vec<ChunkCoord> = world
-        .chunks
-        .iter()
-        .filter(|(_, c)| c.has_wet_air)
-        .map(|(&coord, _)| coord)
-        .collect();
-    for coord in coords {
-        for y in 0..CHUNK_CELLS_H {
-            let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
-            for x in 0..CHUNK_CELLS_W {
-                let gx = world.wrap_x(coord.cx * CHUNK_CELLS_W as i32 + x as i32);
-                let Some(cur) = world.get_cell(gx, gy) else {
-                    continue;
-                };
-                if cur.material != MaterialId::Air || cur.sat.is_empty() {
-                    continue;
-                }
-                let Some(below) = world.get_cell(gx, gy - 1) else {
-                    continue;
-                };
-                if below.material == MaterialId::Air {
-                    continue;
-                }
-                // Free surface only.
-                let buried = matches!(
-                    world.get_cell(gx, gy + 1),
-                    Some(a) if !(a.material == MaterialId::Air && a.sat.0 < 200)
-                );
-                if buried {
-                    continue;
-                }
-                for (dx, dy) in [(-1_i32, 0), (1, 0), (-1, -1), (1, -1), (-1, 1), (1, 1)] {
-                    let nx = world.wrap_x(gx + dx);
-                    let ny = gy + dy;
-                    let Some(nb) = world.get_cell(nx, ny) else {
-                        continue;
-                    };
-                    if nb.material != MaterialId::Air {
-                        continue;
-                    }
-                    if sat_move_to_equalize_heads(cur.sat.0, cap, gy, nb.sat.0, cap, ny) != 0 {
-                        world.touch_dirty(gx, gy);
-                        break;
-                    }
-                }
-            }
-        }
     }
 }
 
@@ -2144,7 +2048,7 @@ mod tests {
         w.set_cell(4, 2, Cell::solid(MaterialId::Stone));
         w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
         w.set_cell(4, 3, Cell::water());
-        apply_air_surface_flow(&mut w);
+        apply_water_flow(&mut w);
         assert!(
             w.get_cell(4, 3).unwrap().sat.0 < u8::MAX,
             "hill film should drain by head"
@@ -2232,37 +2136,13 @@ mod tests {
         assert_eq!(inland_high, 0, "no water above the inland sand terrace");
     }
 
-    #[test]
-    fn quiescent_unbalanced_film_remounts_and_drains() {
-        let mut w = World::new(17);
-        w.ensure_chunk(ChunkCoord::new(0, 0));
-        for x in 0..16 {
-            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
-        }
-        for x in 0..8 {
-            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
-            w.set_cell(x, 2, Cell::solid(MaterialId::Stone));
-        }
-        for x in 8..16 {
-            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
-        }
-        w.set_cell(4, 3, Cell::water());
-        clear_all_dirty(&mut w);
-        assert!(plan_active(&w).is_empty());
-        for _ in 0..24 {
-            tick(&mut w);
-        }
-        assert!(
-            w.get_cell(4, 3).unwrap().sat.0 < 8,
-            "unbalanced film should remount and leave the high step (sat={})",
-            w.get_cell(4, 3).unwrap().sat.0
-        );
-        let low: i32 = (8..16)
-            .flat_map(|x| (1..=3).map(move |y| (x, y)))
-            .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
-            .sum();
-        assert!(low > 0, "water should reach the lower step");
-    }
+    // NOTE: A previous test forced physics into a quiescent state via
+    // `clear_all_dirty` and expected water to still drain. That was
+    // testing the retired `remount_unbalanced_surface_water` bandaid.
+    // In practice, physics only quiesces when no cell has moved for a
+    // full tick; any new write (rain, cloud downpour, editor spawn)
+    // rebuilds the dirty rect and re-wakes flow. The artificial
+    // clear-then-idle case is intentionally not supported.
 
     #[test]
     fn tick_drains_hill_mound_instead_of_stalling() {
@@ -2368,7 +2248,7 @@ mod tests {
         let mut c = Cell::air();
         c.sat = Sat(1);
         w.set_cell(4, 3, c);
-        apply_air_surface_flow(&mut w);
+        apply_water_flow(&mut w);
         let src = w.get_cell(4, 3).unwrap().sat.0 as i32;
         let mass: i32 = (0..8)
             .flat_map(|x| (1..=4).map(move |y| (x, y)))
