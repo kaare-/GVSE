@@ -208,7 +208,13 @@ fn draw_clouds(
         let shade = (228.0 - wet * 95.0) as u8;
         let alpha = (145.0 + wet * 55.0) as u8;
         let r = p.radius() * cell_px;
-        let floor = cloud_floor_y(world, wind, p.fx);
+        // Highest floor under the silhouette so streaks don't punch
+        // through a slope when the parcel centre sits over a valley.
+        let r_cells = p.radius();
+        let floor = [-0.85_f32, -0.4, 0.0, 0.4, 0.85]
+            .iter()
+            .map(|t| cloud_floor_y(world, wind, p.fx + t * r_cells))
+            .fold(f32::NEG_INFINITY, f32::max);
         let ground_sy = origin_y - (floor - bedrock_floor_y as f32) * cell_px;
         let as_snow = snowing(p.fx);
         for &x_copy in x_copies {

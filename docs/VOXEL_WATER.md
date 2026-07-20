@@ -121,6 +121,10 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   films become Snow). **Never** falls back to liquid on cold columns —
   that used to soak mountain-top sand pores when the pack hit the cap or
   cloud shares were fractional. Short budget / full cap → hold mass (`0`).
+- **Snow spread:** new flakes search ±`snow_spread_radius` columns and
+  prefer packs ≤ `snow_blanket_depth` so cover blankets cold slopes
+  before growing peak spikes. Cloud downpour uses a wider footprint when
+  cold. Later: real drift / avalanche physics.
 - **Snow pack (now):** static solid lid. No pore soak, no grain fall.
   Later: avalanche / settle physics, and ice/snow scour of sand & loose rock.
 - **Slush:** Snow on water — warm melts snow; cold freezes the water film
