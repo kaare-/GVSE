@@ -1255,7 +1255,14 @@ pub fn apply_flow_erosion(world: &mut World, cfg: &GrainConfig) {
     let seed = world.seed.0;
     let tick_no = world.tick;
     let mut events: Vec<ErosionEvent> = Vec::new();
-    let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    // Skip dry chunks — same sticky flag evaporation uses. Still pools
+    // without flow bias remain no-ops inside the scan.
+    let mut coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_wet_air)
+        .map(|(&coord, _)| coord)
+        .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
 
     for coord in coords {
@@ -2261,6 +2268,23 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
 /// edges are 5-10 cells away, half-gap propagates at ~1 cell/substep,
 /// so we need enough substeps to keep up with steady rain.
 pub const FLOW_SUBSTEPS: usize = 12;
+/// Minimum flow substeps before a quiet dirty halo may early-out.
+pub const FLOW_SUBSTEPS_MIN: usize = 6;
+/// If the planned dirty area (cells) drops to this or below after
+/// [`FLOW_SUBSTEPS_MIN`], stop the flow loop early — settled films
+/// don't need the full ×12. Busy rain / cascades stay at max.
+pub const FLOW_QUIET_AREA: usize = 512;
+
+fn active_cell_area(active: &[crate::active::ActiveChunk]) -> usize {
+    active
+        .iter()
+        .map(|a| {
+            let w = (a.rect.x1 as usize).saturating_sub(a.rect.x0 as usize) + 1;
+            let h = (a.rect.y1 as usize).saturating_sub(a.rect.y0 as usize) + 1;
+            w.saturating_mul(h)
+        })
+        .sum()
+}
 
 /// Advance the sim by one tick.
 ///
@@ -2290,7 +2314,7 @@ pub const FLOW_SUBSTEPS: usize = 12;
 /// parallel per colour) but apply from one snapshot so edges are not
 /// re-solved mid-rule.
 pub fn tick(world: &mut World) {
-    for _ in 0..FLOW_SUBSTEPS {
+    for step in 0..FLOW_SUBSTEPS {
         let active = plan_active(world);
         clear_all_dirty(world);
         if active.is_empty() {
@@ -2301,6 +2325,14 @@ pub fn tick(world: &mut World) {
             apply_gravity_fall_regions(world, pass);
         }
         apply_water_flow_regions(world, &active);
+        // Quiet early-out: after the minimum passes, peek at dirty
+        // written by this substep — a tiny halo means water settled.
+        if step + 1 >= FLOW_SUBSTEPS_MIN {
+            let next = plan_active(world);
+            if next.is_empty() || active_cell_area(&next) <= FLOW_QUIET_AREA {
+                break;
+            }
+        }
     }
 
     // Seepage + grain fall read the same dirty halo the substep loop

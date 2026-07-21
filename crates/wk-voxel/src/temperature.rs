@@ -29,6 +29,10 @@ use crate::worldgen::continental_surface_y;
 /// phase 0 so the two don't always land on the same tick.
 pub const TEMP_STEP_PERIOD: u64 = 20;
 pub const TEMP_STEP_PHASE: u64 = 0;
+/// Rebuild cached per-tile surface props every N temperature steps.
+/// World scans dominate `step`; stale props for a few steps are fine
+/// (materials change slowly vs the thermal field).
+pub const TEMP_PROPS_REFRESH_STEPS: u32 = 4;
 
 pub fn temperature_step_due(tick: u64) -> bool {
     tick % TEMP_STEP_PERIOD == TEMP_STEP_PHASE
@@ -103,6 +107,23 @@ enum TileLayer {
     Buried { depth_cells: f32 },
 }
 
+#[derive(Debug, Clone, Copy)]
+struct TileThermal {
+    layer: TileLayer,
+    capacity: f32,
+    albedo: f32,
+}
+
+impl Default for TileThermal {
+    fn default() -> Self {
+        Self {
+            layer: TileLayer::Air,
+            capacity: 1.0,
+            albedo: 0.0,
+        }
+    }
+}
+
 /// Sparse (but usually dense-filled) temperature field in °C.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Temperature {
@@ -117,6 +138,12 @@ pub struct Temperature {
     pub config: TempConfig,
     #[serde(default)]
     pub climate: ClimateConfig,
+    /// Cached [`tile_thermal_props`] results — rebuilt every
+    /// [`TEMP_PROPS_REFRESH_STEPS`] steps (not serialized).
+    #[serde(skip)]
+    props_cache: HashMap<(i32, i32), TileThermal>,
+    #[serde(skip)]
+    props_cache_age: u32,
 }
 
 impl Temperature {
@@ -142,6 +169,8 @@ impl Temperature {
             sea_level_y,
             config: TempConfig::default(),
             climate: ClimateConfig::default(),
+            props_cache: HashMap::new(),
+            props_cache_age: TEMP_PROPS_REFRESH_STEPS,
         };
         t.fill_initial(0);
         t
@@ -206,6 +235,8 @@ impl Temperature {
             return;
         };
         self.cells.clear();
+        self.props_cache.clear();
+        self.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
         let tc = self.tile_cols.max(1);
         for hy in b.hy_min..=b.hy_max {
             for hx in b.hx_min..=b.hx_max {
@@ -220,6 +251,16 @@ impl Temperature {
                 self.cells.insert((hx, hy), t0);
             }
         }
+    }
+
+    fn refresh_props_cache(&mut self, world: Option<&World>, keys: &[(i32, i32)]) {
+        self.props_cache.clear();
+        self.props_cache.reserve(keys.len());
+        for &(hx, hy) in keys {
+            let props = tile_thermal_props(self, world, hx, hy);
+            self.props_cache.insert((hx, hy), props);
+        }
+        self.props_cache_age = 0;
     }
 
     fn column_surface_y_estimate(&self, hx: i32) -> i32 {
@@ -265,8 +306,18 @@ impl Temperature {
         for &(_, hy) in &keys {
             deepest_hy = deepest_hy.min(hy);
         }
+        if self.props_cache_age >= TEMP_PROPS_REFRESH_STEPS
+            || self.props_cache.len() != keys.len()
+        {
+            self.refresh_props_cache(world, &keys);
+        }
+        self.props_cache_age = self.props_cache_age.saturating_add(1);
         for (hx, hy) in keys {
-            let props = tile_thermal_props(self, world, hx, hy);
+            let props = self
+                .props_cache
+                .get(&(hx, hy))
+                .copied()
+                .unwrap_or_else(|| tile_thermal_props(self, world, hx, hy));
             let t = self.at_tile(hx, hy);
             let next = match props.layer {
                 TileLayer::Air => {
@@ -362,12 +413,6 @@ impl Temperature {
             }
         }
     }
-}
-
-struct TileThermal {
-    layer: TileLayer,
-    capacity: f32,
-    albedo: f32,
 }
 
 fn tile_thermal_props(

@@ -22,7 +22,7 @@ use wk_voxel::{
     stamp_world, temperature_step_due, tick, Blueprint, ClimateConfig, CloudConfig, CloudStore,
     CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity, KarstConfig, OrganismStore,
     OrographicConfig, PhaseConfig, RainConfig, Temperature, Wind, World, WorldgenParams,
-    CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_SUBSTEPS,
+    CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -437,7 +437,7 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
 
 /// Timed mirror of [`tick`] — keep in sync with `rules::tick`.
 fn timed_physics_tick(world: &mut World, a: &mut PhysicsAccum) {
-    for _ in 0..FLOW_SUBSTEPS {
+    for step in 0..FLOW_SUBSTEPS {
         let t0 = Instant::now();
         let active = plan_active(world);
         clear_all_dirty(world);
@@ -457,6 +457,21 @@ fn timed_physics_tick(world: &mut World, a: &mut PhysicsAccum) {
         let t0 = Instant::now();
         apply_water_flow_regions(world, &active);
         a.water_flow += t0.elapsed();
+
+        if step + 1 >= FLOW_SUBSTEPS_MIN {
+            let next = plan_active(world);
+            let area: usize = next
+                .iter()
+                .map(|ac| {
+                    let w = (ac.rect.x1 as usize).saturating_sub(ac.rect.x0 as usize) + 1;
+                    let h = (ac.rect.y1 as usize).saturating_sub(ac.rect.y0 as usize) + 1;
+                    w.saturating_mul(h)
+                })
+                .sum();
+            if next.is_empty() || area <= FLOW_QUIET_AREA {
+                break;
+            }
+        }
     }
 
     let t0 = Instant::now();
