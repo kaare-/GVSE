@@ -24,9 +24,9 @@ use crate::cell::Cell;
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::grid::World;
 use crate::plant::{
-    apply_genome, drink_roots, find_plant_slot, is_anchored, is_land_plant, pin_plant_pose,
-    root_moisture_frac, try_grow_plant, try_vegetative_sprout, DROUGHT_STRESS_DRAIN,
-    DROUGHT_STRESS_FRAC,
+    apply_genome, drink_roots, drought_band, find_plant_slot, is_anchored, is_land_plant,
+    pin_plant_pose, root_moisture_frac, sync_root_storage, try_grow_plant, try_vegetative_sprout,
+    DroughtBand, DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN,
 };
 use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
 
@@ -108,9 +108,17 @@ pub struct Atom {
     pub fy: f32,
     pub vel_y: f32,
     pub energy: f32,
+    /// Current tank clamp (plants: may inflate from root starch storage).
     pub energy_max: f32,
+    /// Spawn-tank size — photo / upkeep / growth floors key off this.
+    /// Plants sync `energy_max` above this via root count (D4).
+    #[serde(default)]
+    pub energy_base_max: f32,
     pub age_ticks: u64,
     pub cooldown: u64,
+    /// Consecutive ticks in drought dormancy (land plants). Resets when moist.
+    #[serde(default)]
+    pub drought_ticks: u32,
     /// 0 = floater, 1 = sinker (column `Genome::buoyancy_bias`).
     pub buoyancy_bias: f32,
     /// High → children stay close to parent genes.
@@ -129,6 +137,7 @@ pub struct Atom {
 impl Atom {
     pub fn new(gx: i32, gy: i32, energy_max: f32) -> Self {
         let genome = Genome::default();
+        let energy_max = energy_max.max(1.0);
         Self {
             gx,
             gy,
@@ -136,8 +145,10 @@ impl Atom {
             vel_y: 0.0,
             energy: energy_max * 0.6,
             energy_max,
+            energy_base_max: energy_max,
             age_ticks: 0,
             cooldown: REPRO_PERIOD / 2,
+            drought_ticks: 0,
             buoyancy_bias: genome.buoyancy_bias,
             clone_fidelity: genome.clone_fidelity,
             circadian_phase: 0.25,
@@ -385,6 +396,7 @@ enum PlantStep {
 }
 
 /// Land plant tick: drink, shade photo, grow, maybe vegetative sprout.
+/// D4: root starch tank + drought bands (stress / hibernate).
 fn step_land_plant(
     world: &mut World,
     atom: &mut Atom,
@@ -398,10 +410,35 @@ fn step_land_plant(
     if !is_anchored(world, atom) {
         return PlantStep::Dead;
     }
+    // Roots bank surplus above the spawn tank (starch analogy).
+    sync_root_storage(atom);
     let moist = root_moisture_frac(world, atom);
-    let (drink_e, _) = drink_roots(world, atom);
+    let drought = drought_band(moist);
+    let dormant = matches!(drought, DroughtBand::Dormant);
+    if dormant {
+        atom.drought_ticks = atom.drought_ticks.saturating_add(1);
+        if atom.drought_ticks >= DROUGHT_HIBERNATE_MAX_TICKS {
+            return PlantStep::Dead;
+        }
+    } else {
+        atom.drought_ticks = 0;
+    }
+
     let n_photo = atom.photosystem_count();
     let n_mod = atom.body.len().max(1) as f32;
+    let mut upkeep = UPKEEP_PER_MODULE * n_mod * (0.45 + 0.55 * day);
+
+    if dormant {
+        upkeep *= DROUGHT_DORMANT_UPKEEP;
+        atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);
+        return if atom.energy <= 0.0 {
+            PlantStep::Dead
+        } else {
+            PlantStep::Alive
+        };
+    }
+
+    let (drink_e, _) = drink_roots(world, atom);
     // Sky column light × day, then neighbour canopy + gene remap (D2).
     let sample_y = canopy_top_y(atom);
     let sky = column_light(world, atom.gx, sample_y) * day;
@@ -414,16 +451,15 @@ fn step_land_plant(
         n_photo,
         &atom.genome,
     );
-    let drought = moist < DROUGHT_STRESS_FRAC;
-    let photo_scale = if drought { 0.25 } else { 1.0 };
+    let photo_scale = match drought {
+        DroughtBand::Hydrated => 1.0,
+        DroughtBand::Stressed => 0.35,
+        DroughtBand::Dormant => 0.0,
+    };
     let harvest = PHOTON_RATE * light * n_photo.max(1) as f32 * photo_scale;
-    let upkeep = UPKEEP_PER_MODULE * n_mod * (0.45 + 0.55 * day);
-    let stress = if moist <= 0.0 {
-        DROUGHT_STRESS_DRAIN
-    } else if drought {
-        DROUGHT_STRESS_DRAIN * 0.35
-    } else {
-        0.0
+    let stress = match drought {
+        DroughtBand::Stressed => DROUGHT_STRESS_DRAIN,
+        DroughtBand::Hydrated | DroughtBand::Dormant => 0.0,
     };
     atom.energy = (atom.energy + harvest + drink_e - upkeep - stress).clamp(0.0, atom.energy_max);
     if atom.energy <= 0.0 {
@@ -431,6 +467,7 @@ fn step_land_plant(
     }
     // Surplus → tissue (root / stem / leaf) from allocation genes.
     let _ = try_grow_plant(world, atom, tick);
+    sync_root_storage(atom);
     if let Some(child) = try_vegetative_sprout(world, atom, tick, entity_id, pop_room) {
         return PlantStep::Sprout(child);
     }
@@ -1028,7 +1065,7 @@ mod tests {
     }
 
     #[test]
-    fn plant_dies_on_bone_dry_bedrock_plot() {
+    fn plant_hibernates_on_bone_dry_bedrock_then_dies() {
         let mut w = World::new(3);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         for x in 0..8 {
@@ -1040,18 +1077,26 @@ mod tests {
         }
         let mut store = OrganismStore::new();
         // Force-place on bedrock (not plantable via spawn helper).
-        let mut plant = Atom::from_body(4, 2, 20.0, minimal_plant_body());
-        plant.energy = 2.0;
+        let mut plant = Atom::from_body(4, 2, 40.0, minimal_plant_body());
+        plant.energy = 30.0;
         store.atoms.push(plant);
-        for t in 0..80 {
+        for t in 0..200 {
             store.step(&mut w, t);
-            if store.is_empty() {
-                break;
-            }
+        }
+        assert!(!store.is_empty(), "short drought should hibernate, not kill");
+        assert!(
+            store.atoms[0].drought_ticks > 0,
+            "should accumulate drought dormancy ticks"
+        );
+        assert!(store.atoms[0].energy > 0.0);
+        // Prolonged drought ends the plant after hibernate max.
+        store.atoms[0].drought_ticks = crate::plant::DROUGHT_HIBERNATE_MAX_TICKS - 3;
+        for t in 200..220 {
+            store.step(&mut w, t);
         }
         assert!(
             store.is_empty(),
-            "unanchored / undrinkable plant should die"
+            "prolonged drought should kill after hibernate max"
         );
     }
 
@@ -1194,6 +1239,95 @@ mod tests {
         let cols: std::collections::HashSet<i32> =
             store.atoms.iter().map(|a| a.gx).collect();
         assert!(cols.len() >= 2, "sprout should emerge on a neighbour column");
+    }
+
+    #[test]
+    fn rooted_plant_gains_energy_capacity_from_roots() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            50.0,
+            Genome::default(),
+        ));
+        let a = &mut store.atoms[0];
+        assert!((a.energy_base_max - 50.0).abs() < 1e-3);
+        let cap0 = a.energy_max;
+        // Paint extra roots → starch tank grows on next sync / step.
+        a.body.push((0, -2, ModuleId::Root));
+        a.body.push((0, -3, ModuleId::Root));
+        a.body.push((1, -1, ModuleId::Root));
+        a.body.push((-1, -1, ModuleId::Root));
+        crate::plant::sync_root_storage(a);
+        let cap1 = a.energy_max;
+        assert!(
+            cap1 > cap0,
+            "more roots should raise energy_max (was {cap0}, now {cap1})"
+        );
+        assert!(
+            (cap1 - crate::plant::energy_capacity(50.0, crate::plant::root_count(a))).abs() < 1e-3
+        );
+        // Growth floor still keys off spawn tank, not inflated max.
+        assert!(
+            (crate::plant::tank_ref(a) - 50.0).abs() < 1e-3,
+            "tank_ref must stay on energy_base_max"
+        );
+    }
+
+    #[test]
+    fn hydrated_plant_stops_rooting_past_soft_budget() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        assert!(store.spawn_blueprint(&w, 4, 2, minimal_plant_body(), 80.0, g));
+        // Minimal plant: 1 photo → budget = 3 + 3 = 6 roots.
+        let a = &mut store.atoms[0];
+        let budget = crate::plant::useful_root_budget(a);
+        while crate::plant::root_count(a) < budget {
+            a.body.push((crate::plant::root_count(a) as i16, -1, ModuleId::Root));
+        }
+        a.energy = 80.0;
+        let roots0 = crate::plant::root_count(a);
+        assert!(crate::plant::roots_past_soft_budget_for(a, DroughtBand::Hydrated));
+        for t in 0..200 {
+            store.step(&mut w, t);
+            if let Some(p) = store.atoms.first_mut() {
+                p.energy = p.energy.max(70.0);
+            }
+        }
+        assert!(!store.is_empty());
+        let roots1 = crate::plant::root_count(&store.atoms[0]);
+        assert!(
+            roots1 <= roots0 + 1,
+            "hydrated plant past soft budget should not keep boring (had {roots0}, now {roots1})"
+        );
+    }
+
+    #[test]
+    fn drought_stress_lifts_soft_root_budget() {
+        let mut store = OrganismStore::new();
+        let mut w = moist_sand_plot();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        let a = &store.atoms[0];
+        let hydrated = crate::plant::useful_root_budget_for(a, DroughtBand::Hydrated);
+        let stressed = crate::plant::useful_root_budget_for(a, DroughtBand::Stressed);
+        assert!(
+            stressed > hydrated,
+            "stress should allow deeper boring (hydrated={hydrated} stressed={stressed})"
+        );
     }
 
     #[test]
