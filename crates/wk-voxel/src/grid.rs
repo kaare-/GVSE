@@ -36,6 +36,10 @@ pub struct World {
     /// `get_cell` / `set_cell` map every `gx` into `[0, w)`.
     /// Used by ring worldgen so the left edge joins the right.
     pub wrap_width: Option<i32>,
+    /// Soft labile litter (Set E) keyed by wrapped world-x column.
+    /// Death deposits units here; fungi digest them before Organic cells.
+    #[serde(default)]
+    pub soft_litter: HashMap<i32, u16>,
 }
 
 impl World {
@@ -45,6 +49,7 @@ impl World {
             chunks: HashMap::new(),
             tick: 0,
             wrap_width: None,
+            soft_litter: HashMap::new(),
         }
     }
 

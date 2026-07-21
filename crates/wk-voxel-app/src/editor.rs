@@ -1,6 +1,6 @@
 //! MS-Paint creature editor for wk-voxel-app.
 //! Mirrors the column `wk-app` editor (docs/organism/EDITOR.md):
-//! Set A Atom + minimal Set D plant — no wk-agents / wk-app imports.
+//! Set A Atom + Set D plant + Set E fungus — no wk-agents / wk-app imports.
 
 use macroquad::prelude::*;
 use wk_voxel::{Blueprint, LaneId, ModuleId, PlacedModule};
@@ -32,7 +32,7 @@ impl Default for CreatureEditor {
             blueprint: Blueprint::atom(),
             tool: EditorTool::Paint,
             brush: ModuleId::Photosystem,
-            status: "Paint Atom or Plant, then Enter + click to spawn".into(),
+            status: "Paint Atom / Plant / Fungus, then Enter + click to spawn".into(),
             spawn_picker: false,
             was_paused: true,
             name_buf: "atom".into(),
@@ -50,7 +50,7 @@ impl CreatureEditor {
             self.was_paused = currently_paused;
             self.spawn_picker = false;
             self.status =
-                "1-4 modules | A Atom  T Plant | Enter then click wet (Atom) or moist land (Plant)"
+                "1-6 modules | A Atom  T Plant  F Fungus | Enter then click spawn site"
                     .into();
         }
     }
@@ -75,6 +75,14 @@ impl CreatureEditor {
             self.brush = ModuleId::Stem;
             self.tool = EditorTool::Paint;
         }
+        if is_key_pressed(KeyCode::Key5) {
+            self.brush = ModuleId::Digest;
+            self.tool = EditorTool::Paint;
+        }
+        if is_key_pressed(KeyCode::Key6) {
+            self.brush = ModuleId::Hypha;
+            self.tool = EditorTool::Paint;
+        }
         if is_key_pressed(KeyCode::E) {
             self.tool = EditorTool::Erase;
         }
@@ -90,6 +98,11 @@ impl CreatureEditor {
             self.blueprint = Blueprint::minimal_plant();
             self.name_buf = "plant".into();
             self.status = "Minimal plant template (spawn on moist sand/soil)".into();
+        }
+        if is_key_pressed(KeyCode::F) {
+            self.blueprint = Blueprint::minimal_fungus();
+            self.name_buf = "fungus".into();
+            self.status = "Minimal fungus template (spawn on moist land + litter)".into();
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
             self.blueprint.name = self.name_buf.clone();
@@ -115,7 +128,8 @@ impl CreatureEditor {
         if is_key_pressed(KeyCode::Enter) {
             if self.blueprint.is_valid_creature() {
                 self.spawn_picker = true;
-                let hint = if self.blueprint.is_valid_plant() {
+                let hint = if self.blueprint.is_valid_plant() || self.blueprint.is_valid_fungus()
+                {
                     "moist land (Air above porous solid)"
                 } else {
                     "a wet Air cell"
@@ -123,7 +137,7 @@ impl CreatureEditor {
                 self.status = format!("SPAWN — click {hint} (Esc cancel)");
             } else {
                 self.status =
-                    "Need Nucleus + Photosystem (Atom) or + Root (Plant)".into();
+                    "Need Nucleus+Photo (Atom), +Root (Plant), or Digest (Fungus)".into();
             }
         }
         if is_key_pressed(KeyCode::Escape) && self.spawn_picker {
@@ -174,7 +188,7 @@ impl CreatureEditor {
         let sh = screen_height();
         if self.spawn_picker {
             draw_rectangle(0.0, 0.0, sw, 36.0, Color::from_rgba(8, 10, 16, 200));
-            let msg = if self.blueprint.is_valid_plant() {
+            let msg = if self.blueprint.is_valid_plant() || self.blueprint.is_valid_fungus() {
                 "SPAWN MODE — click moist land (sand/soil under Air)  |  Esc cancel  |  F2 close"
             } else {
                 "SPAWN MODE — click a wet cell to place  |  Esc cancel  |  F2 close"
@@ -239,7 +253,9 @@ impl CreatureEditor {
         }
 
         let px = ox + cw + 24.0;
-        let kind = if self.blueprint.is_valid_plant() {
+        let kind = if self.blueprint.is_valid_fungus() {
+            "Set E fungus"
+        } else if self.blueprint.is_valid_plant() {
             "Set D plant"
         } else if self.blueprint.is_valid_atom() {
             "Set A Atom"
@@ -255,14 +271,14 @@ impl CreatureEditor {
             LIGHTGRAY,
         );
         draw_text(
-            "1 Nucleus  2 Photosystem  3 Root  4 Stem  | E erase  P paint",
+            "1 Nucleus  2 Photo  3 Root  4 Stem  5 Digest  6 Hypha  | E erase  P paint",
             px,
             oy + 52.0,
             14.0,
             GRAY,
         );
         draw_text(
-            "A Atom template  T Plant template  | S save  L load  | Enter spawn",
+            "A Atom  T Plant  F Fungus  | S save  L load  | Enter spawn",
             px,
             oy + 72.0,
             14.0,
@@ -287,6 +303,8 @@ impl CreatureEditor {
             ModuleId::Photosystem,
             ModuleId::Root,
             ModuleId::Stem,
+            ModuleId::Digest,
+            ModuleId::Hypha,
         ]
         .iter()
         .enumerate()

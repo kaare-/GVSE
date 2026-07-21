@@ -20,9 +20,12 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::blueprint::Genome;
-use crate::cell::Cell;
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::grid::World;
+use crate::fungi::{
+    deposit_death_litter, digest_budget_units, digest_labile, fungus_should_hibernate,
+    fungus_upkeep, is_fungus, is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
+};
 use crate::plant::{
     apply_genome, drink_roots, drought_band, find_plant_slot, is_anchored, is_land_plant,
     pin_plant_pose, root_moisture_frac, sync_root_storage, try_grow_plant, try_vegetative_sprout,
@@ -64,6 +67,10 @@ const CONTACT_BOUNCE: f32 = 0.12;
 pub enum ModuleId {
     Nucleus = 0x00,
     Photosystem = 0x01,
+    /// Brown-red — convert litter / Organic → energy (Set E).
+    Digest = 0x0A,
+    /// Cream — hypha thread extending digest reach (Set E).
+    Hypha = 0x0B,
     /// Sienna — land plant anchor / moisture drink (Set D).
     Root = 0x0D,
     /// Olive — upright stack holding leaves (Set D).
@@ -76,6 +83,8 @@ impl ModuleId {
         match self {
             ModuleId::Nucleus => (0x00, 0x00, 0x00),
             ModuleId::Photosystem => (0x2E, 0xCC, 0x40),
+            ModuleId::Digest => (0x8B, 0x2E, 0x2E),
+            ModuleId::Hypha => (0xF1, 0xE6, 0xC4),
             ModuleId::Root => (0x7A, 0x4B, 0x2A),
             ModuleId::Stem => (0x55, 0x6B, 0x2F),
         }
@@ -85,6 +94,8 @@ impl ModuleId {
         match self {
             ModuleId::Nucleus => "Nucleus",
             ModuleId::Photosystem => "Photosystem",
+            ModuleId::Digest => "Digest",
+            ModuleId::Hypha => "Hypha",
             ModuleId::Root => "Root",
             ModuleId::Stem => "Stem",
         }
@@ -262,7 +273,8 @@ impl OrganismStore {
         }
         let gx = world.wrap_x(gx);
         let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
-        let gy = if plant {
+        let fungus = body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant;
+        let gy = if plant || fungus {
             let Some(slot) = find_plant_slot(world, gx, gy) else {
                 return false;
             };
@@ -279,6 +291,11 @@ impl OrganismStore {
         if plant {
             pin_plant_pose(&mut atom);
             if !is_anchored(world, &atom) {
+                return false;
+            }
+        } else if fungus {
+            pin_plant_pose(&mut atom);
+            if !is_fungus_seated(world, &atom) {
                 return false;
             }
         } else if let Some((top, _)) = wet_band(world, gx, gy) {
@@ -323,6 +340,16 @@ impl OrganismStore {
             if is_land_plant(atom) {
                 let room = pop + births.len() < MAX_ATOMS;
                 match step_land_plant(world, atom, day, tick, &canopy, i as u32, room) {
+                    PlantStep::Dead => deaths.push(i),
+                    PlantStep::Alive => {}
+                    PlantStep::Sprout(child) => births.push(child),
+                }
+                continue;
+            }
+
+            if is_fungus(atom) {
+                let room = pop + births.len() < MAX_ATOMS;
+                match step_fungus(world, atom, day, tick, i as u32, room) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive => {}
                     PlantStep::Sprout(child) => births.push(child),
@@ -378,7 +405,7 @@ impl OrganismStore {
         deaths.dedup();
         for &i in deaths.iter().rev() {
             if let Some(dead) = self.atoms.get(i).cloned() {
-                deposit_organic(world, dead.gx, dead.gy);
+                deposit_death_litter(world, dead.gx, dead.gy, dead.body.len());
             }
             if i < self.atoms.len() {
                 self.atoms.swap_remove(i);
@@ -470,6 +497,51 @@ fn step_land_plant(
     sync_root_storage(atom);
     if let Some(child) = try_vegetative_sprout(world, atom, tick, entity_id, pop_room) {
         return PlantStep::Sprout(child);
+    }
+    PlantStep::Alive
+}
+
+/// Litter fungus tick: digest soft litter / Organic, hibernate, spore.
+fn step_fungus(
+    world: &mut World,
+    atom: &mut Atom,
+    day: f32,
+    tick: u64,
+    entity_id: u32,
+    pop_room: bool,
+) -> PlantStep {
+    pin_plant_pose(atom);
+    if !is_fungus_seated(world, atom) {
+        return PlantStep::Dead;
+    }
+    let dormant = fungus_should_hibernate(world, atom);
+    if dormant {
+        atom.drought_ticks = atom.drought_ticks.saturating_add(1);
+        if atom.drought_ticks >= FUNGUS_HIBERNATE_MAX_TICKS {
+            return PlantStep::Dead;
+        }
+    } else {
+        atom.drought_ticks = 0;
+    }
+
+    let mut upkeep = fungus_upkeep(atom, dormant);
+    // Light basal tax so empty chassis still burns sugar.
+    upkeep += UPKEEP_PER_MODULE * 0.35 * (0.45 + 0.55 * day);
+
+    if !dormant {
+        let want = digest_budget_units(&atom.genome, atom);
+        let (_taken, gained) = digest_labile(world, atom.gx, atom.gy, want);
+        atom.energy = (atom.energy + gained).min(atom.energy_max);
+    }
+
+    atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);
+    if atom.energy <= 0.0 {
+        return PlantStep::Dead;
+    }
+    if !dormant {
+        if let Some(child) = try_spore(world, atom, tick, entity_id, pop_room) {
+            return PlantStep::Sprout(child);
+        }
     }
     PlantStep::Alive
 }
@@ -610,8 +682,12 @@ fn resolve_contacts(world: &World, atoms: &mut [Atom]) {
     for _ in 0..4 {
         for i in 0..n {
             for j in (i + 1)..n {
-                // Land plants stay pinned — only plankton shove apart.
-                if is_land_plant(&atoms[i]) || is_land_plant(&atoms[j]) {
+                // Land plants / fungi stay pinned — only plankton shove apart.
+                if is_land_plant(&atoms[i])
+                    || is_land_plant(&atoms[j])
+                    || is_fungus(&atoms[i])
+                    || is_fungus(&atoms[j])
+                {
                     continue;
                 }
                 if !bodies_overlap(&atoms[i], &atoms[j]) {
@@ -773,24 +849,6 @@ fn find_wet_near(world: &World, gx: i32, gy: i32) -> Option<i32> {
     None
 }
 
-fn deposit_organic(world: &mut World, gx: i32, gy: i32) {
-    let mut y = gy;
-    for _ in 0..64 {
-        match world.get_cell(gx, y) {
-            Some(c) if c.material != MaterialId::Air => {
-                if let Some(above) = world.get_cell(gx, y + 1) {
-                    if above.material == MaterialId::Air && above.sat.is_empty() {
-                        world.set_cell(gx, y + 1, Cell::solid(MaterialId::Organic));
-                    }
-                }
-                return;
-            }
-            None => return,
-            Some(_) => y -= 1,
-        }
-    }
-}
-
 const ATOM_SEED_SALT: u64 = 0xA701_5EED;
 
 fn hash_u64(seed: u64, a: u64, salt: u64) -> u64 {
@@ -817,7 +875,7 @@ fn hash_signed(a: u64, b: u64, c: u64, salt: u64) -> f32 {
 mod tests {
     use super::*;
     use crate::blueprint::Genome;
-    use crate::cell::Sat;
+    use crate::cell::{Cell, Sat};
     use crate::chunk::ChunkCoord;
 
     fn wet_column() -> World {
@@ -962,6 +1020,70 @@ mod tests {
         assert_eq!(
             w.get_cell(4, 6).map(|c| c.material),
             Some(MaterialId::Air)
+        );
+        assert!(
+            crate::fungi::soft_litter_at(&w, 4) > 0,
+            "death should also bank soft litter for fungi"
+        );
+    }
+
+    #[test]
+    fn fungus_digests_soft_litter_over_time() {
+        let mut w = moist_sand_plot();
+        crate::fungi::add_soft_litter(&mut w, 4, 80);
+        // Neighbour litter so a spore has somewhere to go later.
+        crate::fungi::add_soft_litter(&mut w, 5, 40);
+        crate::fungi::add_soft_litter(&mut w, 3, 40);
+        let mut store = OrganismStore::new();
+        let mut g = Genome::default();
+        g.digest_rate = 1.2;
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
+            40.0,
+            g,
+        ));
+        let litter0 = crate::fungi::soft_litter_at(&w, 4);
+        store.atoms[0].energy = 20.0;
+        for t in 0..120 {
+            store.step(&mut w, t);
+        }
+        assert!(!store.is_empty());
+        let litter1 = crate::fungi::soft_litter_at(&w, 4);
+        assert!(
+            litter1 < litter0,
+            "fungus should digest soft litter ({litter1} < {litter0})"
+        );
+        assert!(store.atoms[0].energy > 0.0);
+    }
+
+    #[test]
+    fn fungus_hibernates_without_litter_then_dies() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
+            40.0,
+            Genome::default(),
+        ));
+        store.atoms[0].energy = 30.0;
+        for t in 0..200 {
+            store.step(&mut w, t);
+        }
+        assert!(!store.is_empty(), "short starve should hibernate");
+        assert!(store.atoms[0].drought_ticks > 0);
+        store.atoms[0].drought_ticks = crate::fungi::FUNGUS_HIBERNATE_MAX_TICKS - 3;
+        for t in 200..220 {
+            store.step(&mut w, t);
+        }
+        assert!(
+            store.is_empty(),
+            "prolonged starve should kill after hibernate max"
         );
     }
 
@@ -1312,7 +1434,7 @@ mod tests {
     #[test]
     fn drought_stress_lifts_soft_root_budget() {
         let mut store = OrganismStore::new();
-        let mut w = moist_sand_plot();
+        let w = moist_sand_plot();
         assert!(store.spawn_blueprint(
             &w,
             4,
