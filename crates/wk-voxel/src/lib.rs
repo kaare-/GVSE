@@ -65,10 +65,12 @@ pub use phase::{
 pub use rules::{
     apply_cold_avalanche, apply_condensation_rain, apply_condensation_rain_phased,
     apply_condensation_rain_with_orographic, apply_evaporation, apply_evaporation_into_humidity,
-    apply_flow_erosion, apply_grain_fall, apply_grain_repose, apply_gravity_fall,
+    apply_flow_erosion, apply_grain_fall, apply_grain_fall_regions, apply_grain_repose,
+    apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
-    apply_seepage, apply_water_flow, deposit_water_on_surface, hydraulic_head, is_standing_water,
-    tick, CondensationConfig, EvapConfig, GrainConfig, KarstConfig, OrographicConfig, RainConfig,
+    apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
+    deposit_water_on_surface, hydraulic_head, is_standing_water, tick, CondensationConfig,
+    EvapConfig, GrainConfig, KarstConfig, OrographicConfig, RainConfig, FLOW_SUBSTEPS,
 };
 pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,

@@ -2260,7 +2260,7 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
 /// hill water drain at a liquid pace. On flat shelves where cascade
 /// edges are 5-10 cells away, half-gap propagates at ~1 cell/substep,
 /// so we need enough substeps to keep up with steady rain.
-const FLOW_SUBSTEPS: usize = 12;
+pub const FLOW_SUBSTEPS: usize = 12;
 
 /// Advance the sim by one tick.
 ///
