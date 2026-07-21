@@ -2,9 +2,10 @@
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
-//! Minimal Set D land plant (docs/organism/PLANTS.md § C + D1 growth):
+//! Minimal Set D land plant (docs/organism/PLANTS.md § C + D1–D4):
 //! Root + Stem + Photosystem on a fixed crown. Drinks pore `sat`,
 //! elongates by `StemVsLeafVsRoot` / `RootDepthBias`. Shade race = D2.
+//! Vegetative sprouts = D3. Root starch tank + drought hibernate = D4.
 
 use std::collections::HashSet;
 
@@ -19,17 +20,30 @@ use crate::organism::{Atom, BodyModule, ModuleId};
 pub const ROOT_WATER_ENERGY: f32 = 0.04;
 /// Max sat removed per Root module per tick.
 pub const ROOT_SIP_SAT: u8 = 1;
-/// Soft stress drain when roots find no pore water.
-pub const DROUGHT_STRESS_DRAIN: f32 = 0.06;
-/// Pore fill fraction below which photo/growth feel dry.
+/// Soft stress drain while drying (Stressed band). Hibernate handles
+/// the bone-dry case — keep this tiny so short droughts are survivable.
+pub const DROUGHT_STRESS_DRAIN: f32 = 0.008;
+/// Pore fill fraction below which photo slows and stress starts.
 pub const DROUGHT_STRESS_FRAC: f32 = 0.08;
+/// Pore fill fraction that triggers drought dormancy (hibernate).
+pub const DROUGHT_DORMANT_FRAC: f32 = 0.02;
+/// Max consecutive dormant ticks before the plant dies (~2.5 min @ 60 Hz).
+pub const DROUGHT_HIBERNATE_MAX_TICKS: u32 = 9_000;
+/// Upkeep multiplier while drought-dormant (respiration only).
+pub const DROUGHT_DORMANT_UPKEEP: f32 = 0.18;
 
 /// Soft caps so 1× bodies stay readable.
 pub const MAX_ROOT_MODULES: usize = 16;
 pub const MAX_STEM_MODULES: usize = 10;
 pub const MAX_PHOTO_MODULES: usize = 12;
+/// Extra Root modules allowed per photosystem beyond the sprout minimum.
+pub const LAND_ROOTS_PER_PHOTOSYSTEM: usize = 3;
+/// Fraction of spawn tank unlocked as storage per Root module.
+pub const ROOT_STORE_FRAC: f32 = 0.04;
+/// Cap on capacity multiplier from roots (`base_max × this`).
+pub const ROOT_STORE_MAX_MULT: f32 = 2.0;
 
-/// Energy fraction of tank required before tissue growth.
+/// Energy fraction of spawn tank required before tissue growth.
 pub const LAND_GROW_ENERGY_FRAC: f32 = 0.30;
 /// Ticks between growth attempts.
 pub const LAND_GROW_PERIOD: u64 = 48;
@@ -37,7 +51,7 @@ pub const LAND_GROW_PERIOD: u64 = 48;
 pub const ROOT_ELONGATE_BASE_COST: f32 = 2.4;
 /// Energy to place one Stem / Photosystem pixel.
 pub const SHOOT_GROW_COST: f32 = 1.6;
-/// Energy fraction of tank to fire a vegetative sprout.
+/// Energy fraction of spawn tank to fire a vegetative sprout.
 pub const LAND_SPROUT_ENERGY_FRAC: f32 = 0.52;
 /// Ticks between sprout attempts.
 pub const LAND_SPROUT_PERIOD: u64 = 48;
@@ -45,8 +59,81 @@ pub const LAND_SPROUT_PERIOD: u64 = 48;
 pub const LAND_SPROUT_MIN_ROOTS: usize = 3;
 /// Max columns a rhizome sprout may emerge from the crown.
 pub const ROOT_SPROUT_MAX_DIST: i32 = 6;
-/// Fraction of tank spent to sprout (child gets half).
+/// Fraction of spawn tank spent to sprout (child gets half).
 pub const LAND_SPROUT_COST_FRAC: f32 = 0.45;
+
+/// Moisture band driving photo / growth / hibernate gates.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DroughtBand {
+    Hydrated,
+    Stressed,
+    Dormant,
+}
+
+pub fn drought_band(moist_frac: f32) -> DroughtBand {
+    if moist_frac < DROUGHT_DORMANT_FRAC {
+        DroughtBand::Dormant
+    } else if moist_frac < DROUGHT_STRESS_FRAC {
+        DroughtBand::Stressed
+    } else {
+        DroughtBand::Hydrated
+    }
+}
+
+/// Soft useful-root budget: sprout minimum + leaf-driven extras.
+pub fn useful_root_budget(atom: &Atom) -> usize {
+    LAND_SPROUT_MIN_ROOTS
+        .saturating_add(atom.photosystem_count().saturating_mul(LAND_ROOTS_PER_PHOTOSYSTEM))
+        .min(MAX_ROOT_MODULES)
+}
+
+/// Drought-aware soft budget — stress lifts the cap so plants keep digging.
+pub fn useful_root_budget_for(atom: &Atom, drought: DroughtBand) -> usize {
+    let base = useful_root_budget(atom);
+    match drought {
+        DroughtBand::Hydrated | DroughtBand::Dormant => base,
+        DroughtBand::Stressed => {
+            let lift = (MAX_ROOT_MODULES.saturating_sub(base) + 1) / 2;
+            base.saturating_add(lift).min(MAX_ROOT_MODULES)
+        }
+    }
+}
+
+pub fn roots_past_soft_budget_for(atom: &Atom, drought: DroughtBand) -> bool {
+    root_count(atom) >= useful_root_budget_for(atom, drought)
+}
+
+/// Effective energy tank from painted roots (starch / reserve analogy).
+///
+/// Photo, basal upkeep, and growth floors stay keyed to `base_max`; only
+/// the storage clamp uses this larger capacity.
+pub fn energy_capacity(base_max: f32, n_roots: usize) -> f32 {
+    let base = base_max.max(1.0);
+    let mult = (1.0 + ROOT_STORE_FRAC * n_roots as f32).min(ROOT_STORE_MAX_MULT);
+    base * mult
+}
+
+/// Spawn-tank reference used for growth / sprout floors (not root-inflated).
+pub fn tank_ref(atom: &Atom) -> f32 {
+    let base = if atom.energy_base_max >= 1.0 {
+        atom.energy_base_max
+    } else {
+        atom.energy_max
+    };
+    base.max(1.0)
+}
+
+/// Sync `energy_max` from root count; clamp current energy into the tank.
+pub fn sync_root_storage(atom: &mut Atom) {
+    if atom.energy_base_max < 1.0 {
+        atom.energy_base_max = atom.energy_max.max(1.0);
+    }
+    let cap = energy_capacity(atom.energy_base_max, root_count(atom));
+    atom.energy_max = cap;
+    if atom.energy > cap {
+        atom.energy = cap;
+    }
+}
 
 /// True when the body includes a Root (land habit).
 pub fn is_land_plant(atom: &Atom) -> bool {
@@ -224,9 +311,21 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
     if w_root < 0.08 {
         return 0.0;
     }
-    let tank = atom.energy_max.max(1.0);
+    let tank = tank_ref(atom);
     let grow_floor = tank * LAND_GROW_ENERGY_FRAC;
     if atom.energy < grow_floor {
+        return 0.0;
+    }
+
+    let host_moist = root_moisture_frac(world, atom);
+    let drought = drought_band(host_moist);
+    let thirsty = matches!(drought, DroughtBand::Stressed);
+    // Urge a lateral runner before sprouting (column rhizome bias).
+    let need_runner = !has_lateral_runner(atom)
+        && n_roots >= LAND_SPROUT_MIN_ROOTS.saturating_sub(1);
+    // Past the soft root:shoot budget, only grow roots when thirsty or
+    // forcing a rhizome runner.
+    if roots_past_soft_budget_for(atom, drought) && !need_runner && !thirsty {
         return 0.0;
     }
 
@@ -244,9 +343,6 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
     };
 
     let depth_bias = atom.genome.root_depth_bias.clamp(0.0, 1.0);
-    // Urge a lateral runner before sprouting (column rhizome bias).
-    let need_runner = !has_lateral_runner(atom)
-        && n_roots >= LAND_SPROUT_MIN_ROOTS.saturating_sub(1);
     let banking_for_sprout = atom.energy >= tank * LAND_SPROUT_ENERGY_FRAC * 0.85;
     const DIRS: [(i16, i16); 5] = [(0, -1), (-1, -1), (1, -1), (-1, 0), (1, 0)];
     let mut best: Option<(f32, i16, i16, f32)> = None; // score, dx, dy, cost
@@ -316,7 +412,7 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
 /// Stem upward or leaf place from surplus allocation.
 pub fn try_grow_shoot(atom: &mut Atom, tick: u64) -> f32 {
     let (w_stem, w_leaf, _) = atom.genome.alloc_weights();
-    let tank = atom.energy_max.max(1.0);
+    let tank = tank_ref(atom);
     if atom.energy < tank * (LAND_GROW_ENERGY_FRAC + 0.08) {
         return 0.0;
     }
@@ -456,7 +552,7 @@ pub fn try_vegetative_sprout(
     if root_count(atom) < LAND_SPROUT_MIN_ROOTS {
         return None;
     }
-    let tank = atom.energy_max.max(1.0);
+    let tank = tank_ref(atom);
     if atom.energy < tank * LAND_SPROUT_ENERGY_FRAC {
         return None;
     }
@@ -471,9 +567,10 @@ pub fn try_vegetative_sprout(
 
     let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
     let child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
-    let mut child = Atom::from_body(wx, gy, atom.energy_max, body);
+    // Child inherits spawn-tank size, not the parent's root-inflated max.
+    let mut child = Atom::from_body(wx, gy, tank, body);
     apply_genome(&mut child, child_genome);
-    child.energy = (cost * 0.5).clamp(1.0, atom.energy_max);
+    child.energy = (cost * 0.5).clamp(1.0, child.energy_max);
     child.cooldown = LAND_SPROUT_PERIOD;
     pin_plant_pose(&mut child);
     if !is_anchored(world, &child) {

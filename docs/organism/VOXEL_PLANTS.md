@@ -45,18 +45,18 @@ Falsifiers: root grows into wetter sand; stem-heavy alloc grows taller.
 Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 `LIGHT.md`); plant photo uses `effective_photo_light`. E36/E37 spirit.
 
-### D3 — Vegetative sprout *(this PR)*
+### D3 — Vegetative sprout *(landed)*
 
 - Lateral rhizome tip → child plant on moist neighbour
 - `Genome::mutate` with `clone_fidelity`
 - Soft pop cap shared with Atoms
 - Root elongation biases sideways when banking for a sprout
 
-### D4 — Drought banking
+### D4 — Drought banking *(this PR)*
 
-- Root count raises `energy_max` (storage), not photo floor
-- Soft root:shoot budget; drought lifts root allowance
-- Optional hibernate band (slow upkeep, no growth)
+- Root count raises `energy_max` (starch storage); photo / growth floors stay on `energy_base_max`
+- Soft root:shoot budget; stressed moisture lifts root allowance
+- Hibernate band (`DROUGHT_DORMANT_FRAC`): slow upkeep, no photo/drink/growth; die after max dormant ticks
 
 ### E — Litter, epiphytes, topple *(later)*
 
