@@ -35,7 +35,7 @@ Features:
 
 Falsifiers: root grows into wetter sand; stem-heavy alloc grows taller.
 
-### D2 — Shade (canopy race) *(this PR)*
+### D2 — Shade (canopy race) *(landed)*
 
 | Gene | Role |
 |------|------|
@@ -45,11 +45,12 @@ Falsifiers: root grows into wetter sand; stem-heavy alloc grows taller.
 Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 `LIGHT.md`); plant photo uses `effective_photo_light`. E36/E37 spirit.
 
-### D3 — Vegetative sprout
+### D3 — Vegetative sprout *(this PR)*
 
 - Lateral rhizome tip → child plant on moist neighbour
-- Genome mutate with `clone_fidelity`
+- `Genome::mutate` with `clone_fidelity`
 - Soft pop cap shared with Atoms
+- Root elongation biases sideways when banking for a sprout
 
 ### D4 — Drought banking
 
