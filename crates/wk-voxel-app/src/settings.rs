@@ -6,9 +6,54 @@ use macroquad::prelude::*;
 use macroquad::ui::{hash, root_ui, widgets};
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
-    ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, GrainConfig, KarstConfig,
+    ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, Genome, GrainConfig, KarstConfig,
     OrographicConfig, PhaseConfig, RainConfig, TempConfig, WorldgenParams,
 };
+
+/// Default plant / fungus gene knobs applied on spawn (and optionally to living plants).
+#[derive(Debug, Clone)]
+pub struct PlantGeneSettings {
+    pub alloc_stem: f32,
+    pub alloc_leaf: f32,
+    pub alloc_root: f32,
+    pub root_depth_bias: f32,
+    pub leaf_absorb: f32,
+    pub shade_efficiency: f32,
+    pub digest_rate: f32,
+    pub clone_fidelity: f32,
+}
+
+impl Default for PlantGeneSettings {
+    fn default() -> Self {
+        let g = Genome::default();
+        Self {
+            alloc_stem: g.alloc_stem,
+            alloc_leaf: g.alloc_leaf,
+            alloc_root: g.alloc_root,
+            root_depth_bias: g.root_depth_bias,
+            leaf_absorb: g.leaf_absorb,
+            shade_efficiency: g.shade_efficiency,
+            digest_rate: g.digest_rate,
+            clone_fidelity: g.clone_fidelity,
+        }
+    }
+}
+
+impl PlantGeneSettings {
+    pub fn to_genome(&self) -> Genome {
+        Genome {
+            alloc_stem: self.alloc_stem.clamp(0.0, 1.0),
+            alloc_leaf: self.alloc_leaf.clamp(0.0, 1.0),
+            alloc_root: self.alloc_root.clamp(0.0, 1.0),
+            root_depth_bias: self.root_depth_bias.clamp(0.0, 1.0),
+            leaf_absorb: self.leaf_absorb.clamp(0.05, 1.0),
+            shade_efficiency: self.shade_efficiency.clamp(0.0, 1.0),
+            digest_rate: self.digest_rate.clamp(0.05, 2.0),
+            clone_fidelity: self.clone_fidelity.clamp(0.05, 1.0),
+            ..Genome::default()
+        }
+    }
+}
 
 /// All live-tunable knobs for the voxel demo.
 #[derive(Debug, Clone)]
@@ -29,6 +74,10 @@ pub struct SimSettings {
     /// Scratch f32s for material sliders (synced → MaterialRegistry overrides).
     pub mat_perm: [f32; 12],
     pub mat_poro: [f32; 12],
+    /// Plant / fungus gene defaults (Tab → Plants).
+    pub plant_genes: PlantGeneSettings,
+    /// Set by UI when user clicks "Apply genes to living plants".
+    pub apply_genes_to_living: bool,
 }
 
 impl SimSettings {
@@ -83,6 +132,8 @@ impl SimSettings {
             humidity_diffusion_alpha: 0.15,
             mat_perm,
             mat_poro,
+            plant_genes: PlantGeneSettings::default(),
+            apply_genes_to_living: false,
         }
     }
 
@@ -546,6 +597,73 @@ impl SimSettings {
                         &mut self.karst.prob_per_wet_neighbour,
                     );
                     labeled_slider(ui, hash!(), "Min wet neighbour sat", 1.0..255.0, &mut min_sat);
+                });
+                ui.separator();
+
+                ui.tree_node(hash!(), "Plants / fungi genes", |ui| {
+                    ui.label(None, "Defaults for F2 spawn · optional apply to living.");
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Alloc stem",
+                        0.0..1.0,
+                        &mut self.plant_genes.alloc_stem,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Alloc leaf",
+                        0.0..1.0,
+                        &mut self.plant_genes.alloc_leaf,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Alloc root",
+                        0.0..1.0,
+                        &mut self.plant_genes.alloc_root,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Root depth bias (0=shallow 1=dive)",
+                        0.0..1.0,
+                        &mut self.plant_genes.root_depth_bias,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Leaf absorb (shade cast)",
+                        0.05..1.0,
+                        &mut self.plant_genes.leaf_absorb,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Shade efficiency (dim light)",
+                        0.0..1.0,
+                        &mut self.plant_genes.shade_efficiency,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Digest rate (fungi)",
+                        0.05..2.0,
+                        &mut self.plant_genes.digest_rate,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Clone fidelity",
+                        0.05..1.0,
+                        &mut self.plant_genes.clone_fidelity,
+                    );
+                    if ui.button(None, "Apply genes to living plants/fungi") {
+                        self.apply_genes_to_living = true;
+                    }
+                    if ui.button(None, "Reset plant genes to defaults") {
+                        self.plant_genes = PlantGeneSettings::default();
+                    }
                 });
                 ui.separator();
                 ui.label(None, "Tip: Tab closes · F2 creature editor · F1 hide HUD");

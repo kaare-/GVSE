@@ -17,20 +17,28 @@ use crate::grid::World;
 use crate::organism::{Atom, BodyModule, ModuleId};
 
 /// Energy from one sat unit drunk by roots.
-pub const ROOT_WATER_ENERGY: f32 = 0.04;
-/// Max sat removed per Root module per tick.
-pub const ROOT_SIP_SAT: u8 = 1;
+pub const ROOT_WATER_ENERGY: f32 = 0.08;
+/// Fractional sip progress per Root module per tick. Integer sat only
+/// leaves the cell when the accumulator crosses 1 — stops roots from
+/// flash-drying hills (column `ROOT_SIP_KG_PER_ROOT` spirit).
+pub const ROOT_SIP_FRAC_PER_ROOT: f32 = 0.025;
+/// Hard cap on sat units removed in one drink event.
+pub const ROOT_SIP_MAX_SAT: u8 = 1;
 /// Soft stress drain while drying (Stressed band). Hibernate handles
 /// the bone-dry case — keep this tiny so short droughts are survivable.
-pub const DROUGHT_STRESS_DRAIN: f32 = 0.008;
+pub const DROUGHT_STRESS_DRAIN: f32 = 0.003;
 /// Pore fill fraction below which photo slows and stress starts.
-pub const DROUGHT_STRESS_FRAC: f32 = 0.08;
+pub const DROUGHT_STRESS_FRAC: f32 = 0.06;
 /// Pore fill fraction that triggers drought dormancy (hibernate).
-pub const DROUGHT_DORMANT_FRAC: f32 = 0.02;
+pub const DROUGHT_DORMANT_FRAC: f32 = 0.015;
 /// Max consecutive dormant ticks before the plant dies (~2.5 min @ 60 Hz).
 pub const DROUGHT_HIBERNATE_MAX_TICKS: u32 = 9_000;
 /// Upkeep multiplier while drought-dormant (respiration only).
-pub const DROUGHT_DORMANT_UPKEEP: f32 = 0.18;
+pub const DROUGHT_DORMANT_UPKEEP: f32 = 0.12;
+/// Land-plant basal upkeep vs plankton (woody roots respire less).
+pub const PLANT_UPKEEP_MULT: f32 = 0.35;
+/// Extra score weight so roots prefer wetter substrate cells.
+pub const ROOT_MOISTURE_AFFINITY: f32 = 2.8;
 
 /// Soft caps so 1× bodies stay readable.
 pub const MAX_ROOT_MODULES: usize = 16;
@@ -209,31 +217,51 @@ fn solid_purchase(world: &World, gx: i32, gy: i32) -> bool {
 }
 
 /// Pull a little pore water from solids under roots → energy.
-/// Returns (energy gained, sat removed).
-pub fn drink_roots(world: &mut World, atom: &Atom) -> (f32, u32) {
+///
+/// Only removes sat from **porous solids** (never free Air water).
+/// Removed sat should be returned to atmospheric humidity by the caller
+/// so plants don't destroy water mass.
+///
+/// Returns (energy gained, sat removed, preferred (gx,gy) for humidity deposit).
+pub fn drink_roots(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32)) {
+    let n_roots = root_count(atom).max(1) as f32;
+    atom.sip_acc = (atom.sip_acc + n_roots * ROOT_SIP_FRAC_PER_ROOT).min(2.0);
+    let budget = atom.sip_acc.floor() as u8;
+    if budget == 0 {
+        return (0.0, 0, (atom.gx, atom.gy));
+    }
+    let want = budget.min(ROOT_SIP_MAX_SAT);
     let mut energy = 0.0f32;
-    let mut taken = 0u32;
+    let mut taken = 0u8;
+    let mut deposit_at = (atom.gx, atom.gy);
     for &(dx, dy, mid) in &atom.body {
-        if mid != ModuleId::Root {
+        if mid != ModuleId::Root || taken >= want {
             continue;
         }
         let wx = world.wrap_x(atom.gx + dx as i32);
         let wy = atom.gy + dy as i32;
-        if let Some(n) = sip_porous(world, wx, wy) {
+        if let Some(n) = sip_porous(world, wx, wy, want - taken) {
             energy += ROOT_WATER_ENERGY * n as f32;
-            taken += n as u32;
+            taken += n;
+            deposit_at = (wx, wy);
             continue;
         }
-        if let Some(n) = sip_porous(world, wx, wy - 1) {
+        if let Some(n) = sip_porous(world, wx, wy - 1, want - taken) {
             energy += ROOT_WATER_ENERGY * n as f32;
-            taken += n as u32;
+            taken += n;
+            deposit_at = (wx, wy - 1);
         }
     }
-    (energy, taken)
+    atom.sip_acc = (atom.sip_acc - taken as f32).max(0.0);
+    (energy, taken as u32, deposit_at)
 }
 
-fn sip_porous(world: &mut World, gx: i32, gy: i32) -> Option<u8> {
+fn sip_porous(world: &mut World, gx: i32, gy: i32, want: u8) -> Option<u8> {
+    if want == 0 {
+        return None;
+    }
     let cell = world.get_cell(gx, gy)?;
+    // Never drink free water / wet Air — only pore sat in solids.
     if cell.material == MaterialId::Air {
         return None;
     }
@@ -241,11 +269,46 @@ fn sip_porous(world: &mut World, gx: i32, gy: i32) -> Option<u8> {
     if cap == 0 || cell.sat.0 == 0 {
         return None;
     }
-    let take = ROOT_SIP_SAT.min(cell.sat.0);
+    let take = want.min(cell.sat.0).min(ROOT_SIP_MAX_SAT);
     let mut next = cell;
     next.sat.0 = cell.sat.0 - take;
     world.set_cell(gx, gy, next);
     Some(take)
+}
+
+/// Paint Root modules into `MaterialId::Organic` in place (preserve pore sat).
+/// Returns how many cells were converted. Used when a land plant dies so the
+/// root stencil stays in the ground as dead organic matter.
+pub fn leave_dead_roots_in_place(world: &mut World, atom: &Atom) -> u32 {
+    use crate::cell::Cell;
+    let mut painted = 0u32;
+    for &(dx, dy, mid) in &atom.body {
+        if mid != ModuleId::Root {
+            continue;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        let Some(c) = world.get_cell(wx, wy) else {
+            continue;
+        };
+        match c.material {
+            MaterialId::Bedrock | MaterialId::Ice | MaterialId::Snow | MaterialId::Water => {}
+            MaterialId::Air if !c.sat.is_empty() => {
+                // Don't plug free water with Organic.
+            }
+            MaterialId::Organic => {
+                painted += 1; // already organic residue
+            }
+            _ => {
+                let mut org = Cell::solid(MaterialId::Organic);
+                let cap = water_capacity(MaterialId::Organic);
+                org.sat.0 = if cap > 0 { c.sat.0.min(cap) } else { 0 };
+                world.set_cell(wx, wy, org);
+                painted += 1;
+            }
+        }
+    }
+    painted
 }
 
 /// Nucleus y for a plant: Air cell directly above a porous solid near `gy`.
@@ -374,11 +437,21 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
             if atom.energy < cost + grow_floor * 0.5 {
                 continue;
             }
+            // Moisture tropism: sample the step cell and one deeper.
             let moist = cell_moisture_frac(world, wx, wy)
-                .max(cell_moisture_frac(world, wx, wy - 1));
+                .max(cell_moisture_frac(world, wx, wy - 1))
+                .max(cell_moisture_frac(world, wx, wy - 2) * 0.85);
             let down = if dy < 0 { 1.0 } else { 0.0 };
             let lateral = if dx != 0 && dy == 0 { 0.35 } else { 0.0 };
-            let mut score = moist + depth_bias * down + (1.0 - depth_bias) * lateral - pen * 0.03;
+            let mut score = moist * ROOT_MOISTURE_AFFINITY
+                + depth_bias * down
+                + (1.0 - depth_bias) * lateral
+                - pen * 0.03;
+            // Extra nudge into clearly wetter cells than the tip's host.
+            let tip_moist = cell_moisture_frac(world, world.wrap_x(atom.gx + tx as i32), atom.gy + ty as i32);
+            if moist > tip_moist + 0.05 {
+                score += (moist - tip_moist) * 1.6;
+            }
             // Rhizome urge when banking / missing a runner — but scale by
             // (1 − depth_bias) so deep divers still elongate downward.
             if need_runner || banking_for_sprout {

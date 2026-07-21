@@ -71,11 +71,18 @@ Features:
 - Starve / dry hibernate (mirror plant drought); spore burst to neighbour litter
 - Editor: `F` fungus template, brushes `5` Digest / `6` Hypha
 
-### E1b — Lingering corpses → Organic *(this PR)*
+### E1b — Lingering corpses → Organic *(landed)*
 
 - Death keeps a grey corpse drawable (land pinned / plankton sinks)
-- After settle ticks, body footprint becomes `MaterialId::Organic` + soft litter
+- Land plants: root stencil becomes Organic in the ground immediately (sat preserved)
+- After settle ticks, remaining body → Organic + soft litter
 - Fungi feed on that residue (not on instant despawn)
+
+### Plant tune *(this PR)*
+
+- Root drink only touches pore sat (never free Air water); slow sip + return to humidity
+- Stronger moisture tropism for root elongation
+- Softer upkeep / longer plant life; Tab → Plants/fungi gene knobs
 
 ### E2 — Epiphytes + topple *(later)*
 
