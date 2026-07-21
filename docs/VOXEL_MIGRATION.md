@@ -511,10 +511,10 @@ Items 1–8 (through karst + seepage/head-spill), dirty-rect
 active-chunk planning, four-pass checkerboard, **rayon
 parallelism within each colour**, **chunk occupancy skips** for
 evap / karst, and **Set A Atoms** (`OrganismStore` — isolated, no
-`wk-agents` import) are landed in `wk-voxel`, plus a **minimal Set D
-plant** (`Root`/`Stem`, pore-sat drink, fixed crown — see `plant.rs`).
-Remaining focus is canopy shade, elongation / allocation genes, and
-richer organism behaviour.
+`wk-agents` import) are landed in `wk-voxel`, plus **Set D plants**
+(`Root`/`Stem`, pore-sat drink, fixed crown, D1 elongation / allocation
+genes — see `plant.rs` and `docs/organism/VOXEL_PLANTS.md`). Remaining
+focus is canopy shade (D2), vegetative sprouts (D3), and Set E.
 
 Each PR keeps the isolation contract and passes headless tests
 before touching rendering.

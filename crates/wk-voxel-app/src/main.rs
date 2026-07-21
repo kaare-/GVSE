@@ -655,15 +655,7 @@ async fn main() {
                 if editor.spawn_picker {
                     let body = editor.blueprint.modules_relative_to_nucleus();
                     let g = editor.blueprint.genome;
-                    if scene.organisms.spawn_blueprint(
-                        &scene.world,
-                        gx,
-                        gy,
-                        body,
-                        40.0,
-                        g.buoyancy_bias,
-                        g.clone_fidelity,
-                    ) {
+                    if scene.organisms.spawn_blueprint(&scene.world, gx, gy, body, 40.0, g) {
                         editor.status = format!(
                             "Spawned {} at ({gx},{gy})  atoms={}",
                             editor.blueprint.name,

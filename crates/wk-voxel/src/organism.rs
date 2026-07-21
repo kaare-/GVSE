@@ -19,12 +19,13 @@
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
+use crate::blueprint::Genome;
 use crate::cell::Cell;
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::grid::World;
 use crate::plant::{
-    drink_roots, find_plant_slot, is_anchored, is_land_plant, pin_plant_pose, root_moisture_frac,
-    DROUGHT_STRESS_DRAIN, DROUGHT_STRESS_FRAC,
+    apply_genome, drink_roots, find_plant_slot, is_anchored, is_land_plant, pin_plant_pose,
+    root_moisture_frac, try_grow_plant, DROUGHT_STRESS_DRAIN, DROUGHT_STRESS_FRAC,
 };
 
 /// Soft cap — blooms should stay readable at 1×.
@@ -95,7 +96,7 @@ fn default_atom_body() -> Vec<BodyModule> {
     vec![(0, 0, ModuleId::Nucleus), (1, 0, ModuleId::Photosystem)]
 }
 
-/// One living Set A organism in world cell space.
+/// One living organism in world cell space (Atom or land plant).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Atom {
     /// Anchor cell (nucleus position).
@@ -118,10 +119,14 @@ pub struct Atom {
     pub last_water_top: Option<i32>,
     /// Modules relative to `(gx, gy)`.
     pub body: Vec<BodyModule>,
+    /// Live genes (allocation, depth bias, shade knobs, …).
+    #[serde(default)]
+    pub genome: Genome,
 }
 
 impl Atom {
     pub fn new(gx: i32, gy: i32, energy_max: f32) -> Self {
+        let genome = Genome::default();
         Self {
             gx,
             gy,
@@ -131,12 +136,13 @@ impl Atom {
             energy_max,
             age_ticks: 0,
             cooldown: REPRO_PERIOD / 2,
-            buoyancy_bias: 0.0,
-            clone_fidelity: 0.9,
+            buoyancy_bias: genome.buoyancy_bias,
+            clone_fidelity: genome.clone_fidelity,
             circadian_phase: 0.25,
             active_window: 0.55,
             last_water_top: None,
             body: default_atom_body(),
+            genome,
         }
     }
 
@@ -236,8 +242,7 @@ impl OrganismStore {
         gy: i32,
         body: Vec<BodyModule>,
         energy_max: f32,
-        buoyancy_bias: f32,
-        clone_fidelity: f32,
+        genome: Genome,
     ) -> bool {
         if self.atoms.len() >= MAX_ATOMS || body.is_empty() {
             return false;
@@ -257,8 +262,7 @@ impl OrganismStore {
             return false;
         };
         let mut atom = Atom::from_body(gx, gy, energy_max, body);
-        atom.buoyancy_bias = buoyancy_bias.clamp(0.0, 1.0);
-        atom.clone_fidelity = clone_fidelity.clamp(0.05, 1.0);
+        apply_genome(&mut atom, genome);
         if plant {
             pin_plant_pose(&mut atom);
             if !is_anchored(world, &atom) {
@@ -302,7 +306,7 @@ impl OrganismStore {
             }
 
             if is_land_plant(atom) {
-                if !step_land_plant(world, atom, day) {
+                if !step_land_plant(world, atom, day, tick) {
                     deaths.push(i);
                 }
                 continue;
@@ -368,7 +372,7 @@ impl OrganismStore {
 }
 
 /// Land plant tick. Returns `false` when the plant should die.
-fn step_land_plant(world: &mut World, atom: &mut Atom, day: f32) -> bool {
+fn step_land_plant(world: &mut World, atom: &mut Atom, day: f32, tick: u64) -> bool {
     pin_plant_pose(atom);
     if !is_anchored(world, atom) {
         return false;
@@ -398,6 +402,11 @@ fn step_land_plant(world: &mut World, atom: &mut Atom, day: f32) -> bool {
         0.0
     };
     atom.energy = (atom.energy + harvest + drink_e - upkeep - stress).clamp(0.0, atom.energy_max);
+    if atom.energy <= 0.0 {
+        return false;
+    }
+    // Surplus → tissue (root / stem / leaf) from allocation genes.
+    let _ = try_grow_plant(world, atom, tick);
     atom.energy > 0.0
 }
 
@@ -678,6 +687,9 @@ fn try_fission(world: &World, parent: &Atom, child_energy: f32, tick: u64) -> Op
                 (parent.buoyancy_bias + j_b * strength * 2.0).clamp(0.0, 1.0);
             child.clone_fidelity =
                 (parent.clone_fidelity + j_f * strength).clamp(0.05, 1.0);
+            child.genome = parent.genome;
+            child.genome.buoyancy_bias = child.buoyancy_bias;
+            child.genome.clone_fidelity = child.clone_fidelity;
             return Some(child);
         }
     }
@@ -740,6 +752,7 @@ fn hash_signed(a: u64, b: u64, c: u64, salt: u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blueprint::Genome;
     use crate::cell::Sat;
     use crate::chunk::ChunkCoord;
 
@@ -974,8 +987,7 @@ mod tests {
             2,
             minimal_plant_body(),
             40.0,
-            0.0,
-            0.9,
+            Genome::default(),
         ));
         assert!(is_land_plant(&store.atoms[0]));
         let gx = store.atoms[0].gx;
@@ -1027,8 +1039,7 @@ mod tests {
             2,
             minimal_plant_body(),
             40.0,
-            0.0,
-            0.9,
+            Genome::default(),
         ));
         for t in 0..40 {
             store.step(&mut w, t);
@@ -1036,5 +1047,86 @@ mod tests {
         let sat1 = w.get_cell(4, 1).unwrap().sat.0;
         assert!(sat1 < sat0, "roots should sip pore sat ({sat1} < {sat0})");
         assert!(!store.is_empty());
+    }
+
+    fn deep_moist_sand() -> World {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                let mut sand = Cell::solid(MaterialId::Sand);
+                // Wetter at depth so RootDepthBias dive pays.
+                sand.sat = Sat(40 + y as u8 * 30);
+                w.set_cell(x, y, sand);
+            }
+            for y in 6..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        w
+    }
+
+    #[test]
+    fn root_heavy_plant_elongates_downward() {
+        let mut w = deep_moist_sand();
+        let mut store = OrganismStore::new();
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.95;
+        assert!(store.spawn_blueprint(&w, 4, 6, minimal_plant_body(), 80.0, g));
+        let roots0 = crate::plant::root_count(&store.atoms[0]);
+        store.atoms[0].energy = 80.0;
+        for t in 0..400 {
+            store.step(&mut w, t);
+            if store.is_empty() {
+                break;
+            }
+            // Keep tank topped so growth isn't starved by night.
+            if let Some(a) = store.atoms.first_mut() {
+                a.energy = a.energy.max(50.0);
+            }
+        }
+        assert!(!store.is_empty());
+        let roots1 = crate::plant::root_count(&store.atoms[0]);
+        assert!(
+            roots1 > roots0,
+            "root-heavy alloc should elongate (had {roots0}, now {roots1})"
+        );
+        let min_dy = store.atoms[0]
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Root)
+            .map(|(_, dy, _)| *dy)
+            .min()
+            .unwrap();
+        assert!(min_dy < -1, "new roots should dive below the crown root");
+    }
+
+    #[test]
+    fn stem_heavy_plant_grows_upward() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let mut g = Genome::default();
+        g.alloc_stem = 1.0;
+        g.alloc_leaf = 0.05;
+        g.alloc_root = 0.05;
+        assert!(store.spawn_blueprint(&w, 4, 2, minimal_plant_body(), 80.0, g));
+        let stem0 = crate::plant::stem_count(&store.atoms[0]);
+        store.atoms[0].energy = 80.0;
+        for t in 0..400 {
+            store.step(&mut w, t);
+            if let Some(a) = store.atoms.first_mut() {
+                a.energy = a.energy.max(50.0);
+            }
+        }
+        assert!(!store.is_empty());
+        let stem1 = crate::plant::stem_count(&store.atoms[0]);
+        assert!(
+            stem1 > stem0,
+            "stem-heavy alloc should stack olive (had {stem0}, now {stem1})"
+        );
     }
 }
