@@ -4,8 +4,8 @@
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
-    is_fungus, is_land_plant, soft_litter_at, water_capacity, Atom, Cell, Humidity, Temperature,
-    World,
+    is_fungus, is_land_plant, soft_litter_at, water_capacity, Atom, Cell, Corpse, Humidity,
+    Temperature, World, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS,
 };
 
 fn material_name(mat: MaterialId) -> &'static str {
@@ -66,6 +66,7 @@ pub fn draw_block_inspector(
     temperature: &Temperature,
     world: &World,
     organism: Option<(usize, &Atom)>,
+    corpse: Option<(usize, &Corpse)>,
     sw: f32,
 ) {
     let hum = humidity.at_cell(gx, gy);
@@ -178,6 +179,22 @@ pub fn draw_block_inspector(
             "clone_fid={:.2}  circadian={:.2}/{:.2}",
             atom.clone_fidelity, atom.circadian_phase, atom.active_window
         ));
+    } else if let Some((id, corpse)) = corpse {
+        lines.push("--- corpse ---".into());
+        let habit = if corpse.land { "land" } else { "plankton" };
+        lines.push(format!("Corpse #{id}  habit={habit}  anchor=({}, {})", corpse.gx, corpse.gy));
+        lines.push(format!(
+            "ticks={}  settled={}/{}  mods={}",
+            corpse.ticks,
+            corpse.settled_ticks,
+            if corpse.land {
+                CORPSE_SETTLE_LAND_TICKS
+            } else {
+                CORPSE_SETTLE_WATER_TICKS
+            },
+            corpse.body.len()
+        ));
+        lines.push("dissolves → Organic + soft litter".into());
     }
 
     let panel_w = 280.0;

@@ -58,7 +58,7 @@ Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 - Soft root:shoot budget; stressed moisture lifts root allowance
 - Hibernate band (`DROUGHT_DORMANT_FRAC`): slow upkeep, no photo/drink/growth; die after max dormant ticks
 
-### E1 — Litter + fungi *(this PR)*
+### E1 — Litter + fungi *(landed)*
 
 | Gene | Role |
 |------|------|
@@ -66,10 +66,16 @@ Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 
 Features:
 
-- Soft litter field (`World::soft_litter`) + Organic cell residue on death
+- Soft litter field (`World::soft_litter`)
 - `Digest` / `Hypha` modules; digest soft litter first, then peel Organic → Air
 - Starve / dry hibernate (mirror plant drought); spore burst to neighbour litter
 - Editor: `F` fungus template, brushes `5` Digest / `6` Hypha
+
+### E1b — Lingering corpses → Organic *(this PR)*
+
+- Death keeps a grey corpse drawable (land pinned / plankton sinks)
+- After settle ticks, body footprint becomes `MaterialId::Organic` + soft litter
+- Fungi feed on that residue (not on instant despawn)
 
 ### E2 — Epiphytes + topple *(later)*
 

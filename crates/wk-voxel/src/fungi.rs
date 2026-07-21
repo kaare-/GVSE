@@ -324,13 +324,58 @@ pub fn try_spore(
     Some(child)
 }
 
-/// Deposit soft litter (+ Organic cell) when an organism dies.
+/// Soft litter + one Organic on the bed (fallback when no body cells paint).
 pub fn deposit_death_litter(world: &mut World, gx: i32, gy: i32, n_modules: usize) {
     let units = (DEATH_LITTER_PER_MODULE as usize)
         .saturating_mul(n_modules.max(1))
         .min(DEATH_LITTER_MAX as usize) as u16;
     add_soft_litter(world, gx, units);
     deposit_organic_cell(world, gx, gy);
+}
+
+/// Dissolve a lingering corpse into Organic matter + soft litter.
+///
+/// Body footprint: dry Air and non-bedrock solids become `MaterialId::Organic`
+/// in place (ghost-root / standing-dead → soil). Wet Air (free water) is left
+/// alone so lakes aren't plugged; if nothing painted, fall back to a bed pile.
+pub fn dissolve_corpse_to_organic(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    body: &[(i16, i16, ModuleId)],
+) {
+    let n_modules = body.len().max(1);
+    let units = (DEATH_LITTER_PER_MODULE as usize)
+        .saturating_mul(n_modules)
+        .min(DEATH_LITTER_MAX as usize) as u16;
+    add_soft_litter(world, gx, units);
+
+    let mut painted = 0u32;
+    for &(dx, dy, _) in body {
+        let wx = world.wrap_x(gx + dx as i32);
+        let wy = gy + dy as i32;
+        let Some(c) = world.get_cell(wx, wy) else {
+            continue;
+        };
+        match c.material {
+            MaterialId::Air if c.sat.is_empty() => {
+                world.set_cell(wx, wy, Cell::solid(MaterialId::Organic));
+                painted += 1;
+            }
+            MaterialId::Air => {
+                // Free water — leave the lake; litter already banked.
+            }
+            MaterialId::Bedrock | MaterialId::Ice | MaterialId::Snow | MaterialId::Water => {}
+            _ => {
+                // Sand / stone / clay / Organic under roots → Organic residue.
+                world.set_cell(wx, wy, Cell::solid(MaterialId::Organic));
+                painted += 1;
+            }
+        }
+    }
+    if painted == 0 {
+        deposit_organic_cell(world, gx, gy);
+    }
 }
 
 fn deposit_organic_cell(world: &mut World, gx: i32, gy: i32) {

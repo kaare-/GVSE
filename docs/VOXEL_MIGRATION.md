@@ -512,9 +512,10 @@ active-chunk planning, four-pass checkerboard, **rayon
 parallelism within each colour**, **chunk occupancy skips** for
 evap / karst, and **Set A Atoms** (`OrganismStore` — isolated, no
 `wk-agents` import) are landed in `wk-voxel`, plus **Set D plants**
-(D1–D4 plants + E1 litter/fungi — see `plant.rs`, `fungi.rs`,
-`shade.rs`, and `docs/organism/VOXEL_PLANTS.md`). Remaining organism
-focus is Set E2 (epiphytes / topple).
+(D1–D4 plants + E1 litter/fungi + lingering corpses → Organic — see
+`plant.rs`, `fungi.rs`, `organism.rs`, and
+`docs/organism/VOXEL_PLANTS.md`). Remaining organism focus is Set E2
+(epiphytes / topple).
 
 Each PR keeps the isolation contract and passes headless tests
 before touching rendering.
