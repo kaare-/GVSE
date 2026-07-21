@@ -1755,24 +1755,20 @@ mod tests {
     }
 
     #[test]
-    fn root_elongation_skips_rock_beside_dead_root_residue() {
+    fn root_elongation_allows_cell_beside_organic_compost() {
         let mut w = deep_moist_sand();
-        // Stone the tip could enter, with dead-root Organic hugging it.
-        w.set_cell(5, 4, Cell::solid(MaterialId::Stone));
-        w.set_cell(6, 4, Cell::solid(MaterialId::Organic));
-        // Seal every other penetrate-able step so only the forbidden hug remains.
-        w.set_cell(4, 3, Cell::solid(MaterialId::Bedrock));
-        w.set_cell(3, 3, Cell::solid(MaterialId::Bedrock));
-        w.set_cell(5, 3, Cell::solid(MaterialId::Bedrock));
-        w.set_cell(3, 4, Cell::solid(MaterialId::Bedrock));
+        // Seal the dive so the only open step is lateral Sand next to
+        // Organic compost (transformed dead root).
+        w.set_cell(4, 4, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 5, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(6, 5, Cell::solid(MaterialId::Organic));
         let mut g = Genome::default();
         g.alloc_root = 1.0;
         g.alloc_stem = 0.05;
         g.alloc_leaf = 0.05;
-        g.root_depth_bias = 0.5;
+        g.root_depth_bias = 0.1; // prefer the lateral runner
         let body = vec![
             (0, -1, ModuleId::Root),
-            (0, -2, ModuleId::Root),
             (0, 0, ModuleId::Nucleus),
             (0, 1, ModuleId::Stem),
             (0, 2, ModuleId::Photosystem),
@@ -1781,11 +1777,16 @@ mod tests {
         atom.genome = g;
         atom.energy = 80.0;
         let spent = crate::plant::try_elongate_root(&w, &mut atom);
-        assert_eq!(
-            spent, 0.0,
-            "must not elongate into rock hugging dead Organic residue"
+        assert!(
+            spent > 0.0,
+            "Organic compost is transformed dead root — OK to sit beside"
         );
-        assert_eq!(crate::plant::root_count(&atom), 2);
+        assert!(
+            atom.body
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Root && (x, y) == (1, -1)),
+            "should step into Sand beside Organic compost"
+        );
     }
 
     #[test]

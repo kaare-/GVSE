@@ -532,9 +532,8 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
                 + depth_bias * down
                 + (1.0 - depth_bias) * lateral
                 - pen * 0.03;
-            // Stepping *into* Organic compost is fine; Sand/Clay beside a
-            // dead channel still counts as hugging residue.
-            let into_compost = cell.material == MaterialId::Organic;
+            // Organic is transformed dead-root compost — fine to sit beside
+            // or step into (score bonus below). Live roots stay exclusive.
             match cell.material {
                 MaterialId::Organic => score += ROOT_ORGANIC_AFFINITY,
                 MaterialId::Sand => score += ROOT_SAND_AFFINITY,
@@ -579,30 +578,6 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
                 !extending_out
             });
             if same_row_crowd {
-                continue;
-            }
-            // Can't place next to a *dead* root (Organic residue), unless
-            // this step is into compost — growing through Organic is
-            // allowed; hugging a dead channel from Sand/Clay/Stone is not.
-            let mut beside_dead = false;
-            for ox in -1i32..=1 {
-                for oy in -1i32..=1 {
-                    if ox == 0 && oy == 0 {
-                        continue;
-                    }
-                    if matches!(
-                        world.get_cell(wx + ox, wy + oy),
-                        Some(n) if n.material == MaterialId::Organic
-                    ) {
-                        beside_dead = true;
-                        break;
-                    }
-                }
-                if beside_dead {
-                    break;
-                }
-            }
-            if beside_dead && !into_compost {
                 continue;
             }
             // One live thread per column — no lateral into an occupied lane.
