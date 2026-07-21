@@ -449,6 +449,8 @@ fn accumulate_water_flow_xfers(
                 // Dry standing Air still owns the +x equalise edge so a
                 // wet neighbour can pour into it (otherwise wet→dry
                 // never ran when the dry cell was the left endpoint).
+                // Keep this — skipping dry cells regressed shelf cascade
+                // / hill-drain feel in the water suite.
                 if cur.sat.is_empty() {
                     if on_surface {
                         plan_same_y_pairwise_edge(world, gx, gy, &mut local);
@@ -2275,6 +2277,32 @@ pub const FLOW_SUBSTEPS_MIN: usize = 6;
 /// don't need the full ×12. Busy rain / cascades stay at max.
 pub const FLOW_QUIET_AREA: usize = 512;
 
+/// Live-tunable physics trade-offs (Tab → Performance). Defaults keep
+/// the full water-feel path; opt-ins trade some leveling speed for ms.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerfConfig {
+    /// Run surface water flow only on odd substeps (gravity still every
+    /// substep). Default **off** — same feel as the tuned ×12 path.
+    pub flow_every_other_substep: bool,
+    /// After [`FLOW_SUBSTEPS_MIN`], stop when the dirty halo is tiny.
+    pub flow_quiet_early_out: bool,
+    /// Rayon checkerboard parallelism for gravity / grain / flow scan.
+    pub parallel_physics: bool,
+}
+
+impl Default for PerfConfig {
+    fn default() -> Self {
+        Self {
+            flow_every_other_substep: false,
+            // Off by default — early-out can stall hill drains / shelf
+            // cascades when the dirty halo shrinks mid-leveling. Opt in
+            // via Tab → Performance after eyeballing water feel.
+            flow_quiet_early_out: false,
+            parallel_physics: true,
+        }
+    }
+}
+
 fn active_cell_area(active: &[crate::active::ActiveChunk]) -> usize {
     active
         .iter()
@@ -2314,6 +2342,12 @@ fn active_cell_area(active: &[crate::active::ActiveChunk]) -> usize {
 /// parallel per colour) but apply from one snapshot so edges are not
 /// re-solved mid-rule.
 pub fn tick(world: &mut World) {
+    tick_with_perf(world, &PerfConfig::default());
+}
+
+/// [`tick`] with live [`PerfConfig`] knobs (demo Tab → Performance).
+pub fn tick_with_perf(world: &mut World, perf: &PerfConfig) {
+    crate::parallel::set_parallel_enabled(perf.parallel_physics);
     for step in 0..FLOW_SUBSTEPS {
         let active = plan_active(world);
         clear_all_dirty(world);
@@ -2324,10 +2358,15 @@ pub fn tick(world: &mut World) {
         for pass in &passes {
             apply_gravity_fall_regions(world, pass);
         }
-        apply_water_flow_regions(world, &active);
+        // Odd-substep flow: gravity still runs every pass; surface
+        // leveling runs half as often when opted in.
+        let run_flow = !perf.flow_every_other_substep || (step % 2 == 1);
+        if run_flow {
+            apply_water_flow_regions(world, &active);
+        }
         // Quiet early-out: after the minimum passes, peek at dirty
         // written by this substep — a tiny halo means water settled.
-        if step + 1 >= FLOW_SUBSTEPS_MIN {
+        if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_MIN {
             let next = plan_active(world);
             if next.is_empty() || active_cell_area(&next) <= FLOW_QUIET_AREA {
                 break;

@@ -25,7 +25,7 @@
 //! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
 //! - `F1` — toggle HUD chrome (bottom info/tools + block inspector)
 //! - `F2` — creature editor (Atom / plant MS-Paint; `C` stays condensation)
-//! - `Tab` — live settings (materials, wind, clouds, day/night, temp, …)
+//! - `Tab` — live settings (materials, wind, clouds, day/night, Performance, …)
 //! - click — block / organism inspector (hidden while F1 HUD is off)
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
@@ -46,7 +46,7 @@ use wk_voxel::{
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, day_night_factor_cfg, humidity_diffuse_due,
     is_daytime_cfg, is_standing_water, precip_forms_snow_at_air, sky_rgb, sky_rgb_at_height,
-    temperature_step_due, tick, ClimateConfig, Wind, World, WorldgenParams,
+    temperature_step_due, tick_with_perf, ClimateConfig, Wind, World, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -584,7 +584,7 @@ async fn main() {
             if karst_on {
                 apply_karst_dissolution(&mut scene.world, &settings.karst);
             }
-            tick(&mut scene.world);
+            tick_with_perf(&mut scene.world, &settings.perf);
             // Bedload / bank transport after water has moved this tick.
             apply_flow_erosion(&mut scene.world, &settings.grain);
             // Atmospheric diffusion is periodic (column-GVSE

@@ -69,9 +69,9 @@ pub use rules::{
     apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
     apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
-    deposit_water_on_surface, hydraulic_head, is_standing_water, tick, CondensationConfig,
-    EvapConfig, GrainConfig, KarstConfig, OrographicConfig, RainConfig, FLOW_QUIET_AREA,
-    FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
+    deposit_water_on_surface, hydraulic_head, is_standing_water, tick, tick_with_perf,
+    CondensationConfig, EvapConfig, GrainConfig, KarstConfig, OrographicConfig, PerfConfig,
+    RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
 };
 pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,
