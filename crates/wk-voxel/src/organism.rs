@@ -1826,10 +1826,10 @@ mod tests {
         let mut w = moist_sand_plot();
         let mut store = OrganismStore::new();
         let mut g = Genome::default();
-        // Default alloc_stem is 0.25 — sync_alloc_to_body clamps it when
-        // no Stem is painted (editor spawn path).
-        crate::plant::sync_alloc_to_body(&mut g, &root_nucleus_leaf_body());
-        assert!(g.alloc_stem <= 0.05);
+        // Even max alloc_stem cannot invent olive — must paint Stem.
+        g.alloc_stem = 1.0;
+        g.alloc_leaf = 0.5;
+        g.alloc_root = 0.05;
         assert!(store.spawn_blueprint(&w, 4, 2, root_nucleus_leaf_body(), 80.0, g));
         store.atoms[0].energy = 80.0;
         for t in 0..400 {
@@ -1844,6 +1844,43 @@ mod tests {
             0,
             "Root+Nucleus+Leaf chassis must not grow olive stems"
         );
+    }
+
+    #[test]
+    fn stemless_parent_sprouts_stemless_child() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let mut g = Genome::default();
+        g.clone_fidelity = 0.5;
+        g.alloc_root = 0.8;
+        g.alloc_stem = 1.0; // would invent under the old threshold
+        g.alloc_leaf = 0.2;
+        assert!(store.spawn_blueprint(&w, 4, 2, root_nucleus_leaf_body(), 60.0, g));
+        let a = &mut store.atoms[0];
+        a.body.push((-1, -1, ModuleId::Root));
+        a.body.push((-2, -1, ModuleId::Root));
+        a.body.push((1, -1, ModuleId::Root));
+        a.energy = 60.0;
+        a.cooldown = 0;
+        let n0 = store.len();
+        for t in 0..200u64 {
+            store.step(&mut w, t);
+            if store.len() > n0 {
+                break;
+            }
+            if let Some(p) = store.atoms.first_mut() {
+                p.energy = p.energy.max(55.0);
+                p.cooldown = 0;
+            }
+        }
+        assert!(store.len() > n0, "stemless parent should still rhizome-sprout");
+        for child in store.atoms.iter().skip(1) {
+            assert_eq!(
+                crate::plant::stem_count(child),
+                0,
+                "stemless habit must pass to vegetative sprouts"
+            );
+        }
     }
 
     #[test]

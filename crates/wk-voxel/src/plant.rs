@@ -44,8 +44,8 @@ pub const ROOT_CROWN_BLOB_PENALTY: f32 = 1.8;
 /// Score bonus for stepping *into* Organic / Sand beds.
 pub const ROOT_ORGANIC_AFFINITY: f32 = 0.85;
 pub const ROOT_SAND_AFFINITY: f32 = 0.45;
-/// Alloc stem must clear this to invent the *first* Stem pixel when the
-/// body has none (leaf-only chassis stay leafless trunks).
+/// Former invent threshold — kept as docs/history. Trunks are never
+/// invented from a stemless body anymore; olive only elongates.
 pub const STEM_INVENT_MIN_ALLOC: f32 = 0.18;
 
 /// Soft caps so 1× bodies stay readable.
@@ -491,7 +491,8 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
 
     let depth_bias = atom.genome.root_depth_bias.clamp(0.0, 1.0);
     let banking_for_sprout = atom.energy >= tank * LAND_SPROUT_ENERGY_FRAC * 0.85;
-    const DIRS: [(i16, i16); 5] = [(0, -1), (-1, -1), (1, -1), (-1, 0), (1, 0)];
+    // Cardinal only — diagonal steps packed crown mats beside live roots.
+    const DIRS: [(i16, i16); 3] = [(0, -1), (-1, 0), (1, 0)];
     let mut best: Option<(f32, i16, i16, f32)> = None; // score, dx, dy, cost
 
     for &(tx, ty) in &tips {
@@ -531,11 +532,9 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
                 + depth_bias * down
                 + (1.0 - depth_bias) * lateral
                 - pen * 0.03;
-            // Stepping *into* Organic / Sand is fine (soil beds).
-            let soil_bed = matches!(
-                cell.material,
-                MaterialId::Organic | MaterialId::Sand | MaterialId::Clay
-            );
+            // Stepping *into* Organic compost is fine; Sand/Clay beside a
+            // dead channel still counts as hugging residue.
+            let into_compost = cell.material == MaterialId::Organic;
             match cell.material {
                 MaterialId::Organic => score += ROOT_ORGANIC_AFFINITY,
                 MaterialId::Sand => score += ROOT_SAND_AFFINITY,
@@ -551,19 +550,40 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
                 score += (moist - tip_moist) * 1.6;
             }
             // Can't place next to another *alive* root (parent tip OK).
+            // Vertical dive may skim diagonally past a same-row runner so
+            // a rhizome doesn't permanently block the crown column.
             let beside_live = atom.body.iter().any(|&(rx, ry, m)| {
-                m == ModuleId::Root
-                    && (rx, ry) != (tx, ty)
-                    && (rx - nx).abs() <= 1
-                    && (ry - ny).abs() <= 1
+                if m != ModuleId::Root || (rx, ry) == (tx, ty) {
+                    return false;
+                }
+                if (rx - nx).abs() > 1 || (ry - ny).abs() > 1 {
+                    return false;
+                }
+                let skim_runner = dx == 0 && dy < 0 && ry == ty && rx != tx;
+                !skim_runner
             });
             if beside_live {
                 continue;
             }
+            // Same-row roots need a gap column (no 3-wide crown fan).
+            // Rhizome may extend one cardinal step farther from x=0.
+            let same_row_crowd = atom.body.iter().any(|&(rx, ry, m)| {
+                if m != ModuleId::Root || ry != ny || (rx, ry) == (tx, ty) {
+                    return false;
+                }
+                if (rx - nx).abs() > 2 {
+                    return false;
+                }
+                let extending_out =
+                    dy == 0 && (nx - tx).abs() == 1 && rx.abs() < nx.abs();
+                !extending_out
+            });
+            if same_row_crowd {
+                continue;
+            }
             // Can't place next to a *dead* root (Organic residue), unless
-            // this step is into a soil bed (Organic/Sand/Clay) — growing
-            // through compost is allowed; hugging a dead channel in rock
-            // is not.
+            // this step is into compost — growing through Organic is
+            // allowed; hugging a dead channel from Sand/Clay/Stone is not.
             let mut beside_dead = false;
             for ox in -1i32..=1 {
                 for oy in -1i32..=1 {
@@ -582,7 +602,7 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
                     break;
                 }
             }
-            if beside_dead && !soil_bed {
+            if beside_dead && !into_compost {
                 continue;
             }
             // One live thread per column — no lateral into an occupied lane.
@@ -641,7 +661,7 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
 /// Structure rules (stricter than free collage):
 /// - Stem stacks only on Stem / Nucleus / Root — never on a leaf.
 /// - Leaves attach to the highest Stem (or Nucleus if leafless chassis).
-/// - Inventing the first Stem requires meaningful `alloc_stem`.
+/// - Stemless bodies stay stemless: olive only elongates painted Stem.
 pub fn try_grow_shoot(atom: &mut Atom, tick: u64) -> f32 {
     let (w_stem, w_leaf, _) = atom.genome.alloc_weights();
     let tank = tank_ref(atom);
@@ -660,8 +680,8 @@ pub fn try_grow_shoot(atom: &mut Atom, tick: u64) -> f32 {
         return 0.0;
     }
 
-    let can_invent_stem = n_stem > 0 || w_stem >= STEM_INVENT_MIN_ALLOC;
-    let can_grow_stem = n_stem < MAX_STEM_MODULES && w_stem >= 0.08 && can_invent_stem;
+    // Hard lock: no painted Stem ⇒ no trunk, regardless of alloc_stem.
+    let can_grow_stem = n_stem > 0 && n_stem < MAX_STEM_MODULES && w_stem >= 0.08;
 
     let place_leaf = |atom: &mut Atom, occupied: &HashSet<(i16, i16)>| -> bool {
         if n_photo >= MAX_PHOTO_MODULES {
@@ -717,8 +737,7 @@ pub fn try_grow_shoot(atom: &mut Atom, tick: u64) -> f32 {
         if !can_grow_stem {
             return false;
         }
-        // Elongate the tallest stem with clear air above; invent on the
-        // nucleus only when the body has no olive yet.
+        // Elongate the tallest painted stem with clear air above.
         let mut anchors: Vec<(i16, i16)> = atom
             .body
             .iter()
@@ -726,15 +745,6 @@ pub fn try_grow_shoot(atom: &mut Atom, tick: u64) -> f32 {
             .map(|&(x, y, _)| (x, y))
             .collect();
         anchors.sort_by_key(|&(_, y)| std::cmp::Reverse(y));
-        if anchors.is_empty() {
-            if let Some(&(x, y, _)) = atom
-                .body
-                .iter()
-                .find(|(_, _, m)| *m == ModuleId::Nucleus)
-            {
-                anchors.push((x, y));
-            }
-        }
         for (ax, ay) in anchors {
             let nx = ax;
             let ny = ay + 1;
@@ -776,7 +786,7 @@ pub fn try_grow_shoot(atom: &mut Atom, tick: u64) -> f32 {
 
 /// Bias genome allocation toward tissues that are already painted.
 /// A Root+Nucleus+Photosystem chassis won't invent a trunk from the
-/// default `alloc_stem = 0.25`.
+/// default `alloc_stem = 0.25` (shoot growth also hard-locks stemless).
 pub fn sync_alloc_to_body(genome: &mut Genome, body: &[BodyModule]) {
     let has_stem = body.iter().any(|(_, _, m)| *m == ModuleId::Stem);
     let has_root = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
@@ -789,6 +799,19 @@ pub fn sync_alloc_to_body(genome: &mut Genome, body: &[BodyModule]) {
     }
     if !has_leaf {
         genome.alloc_leaf = genome.alloc_leaf.min(0.05);
+    }
+}
+
+/// Child body for vegetative sprout — inherits stemless vs stemmed habit.
+pub fn sprout_body(parent: &Atom) -> Vec<BodyModule> {
+    if stem_count(parent) > 0 {
+        crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus()
+    } else {
+        vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Photosystem),
+        ]
     }
 }
 
@@ -860,7 +883,8 @@ pub fn pick_sprout_column(world: &World, atom: &Atom) -> Option<i32> {
 /// Vegetative sucker: child plant on moist land at a lateral runner tip.
 ///
 /// Requires painted lateral root, enough roots, energy, and cooldown.
-/// Child body is a fresh minimal plant; genome is mutated from parent.
+/// Child chassis follows the parent (stemless stays stemless); genome is
+/// mutated then re-synced so alloc can't reintroduce a trunk.
 pub fn try_vegetative_sprout(
     world: &World,
     atom: &mut Atom,
@@ -887,8 +911,9 @@ pub fn try_vegetative_sprout(
     atom.energy -= cost;
     atom.cooldown = LAND_SPROUT_PERIOD;
 
-    let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
-    let child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
+    let body = sprout_body(atom);
+    let mut child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
+    sync_alloc_to_body(&mut child_genome, &body);
     // Child inherits spawn-tank size, not the parent's root-inflated max.
     let mut child = Atom::from_body(wx, gy, tank, body);
     apply_genome(&mut child, child_genome);
