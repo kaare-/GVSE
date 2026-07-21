@@ -351,6 +351,9 @@ impl OrganismStore {
 
     /// Spawn a painted blueprint with nucleus at `(gx, gy)`.
     /// Atoms need wet Air; land plants need Air above porous solid.
+    ///
+    /// Habitat-aware seating for sim / tests. Editor free placement uses
+    /// [`Self::spawn_blueprint_free`].
     pub fn spawn_blueprint(
         &mut self,
         world: &World,
@@ -395,6 +398,40 @@ impl OrganismStore {
             if !is_fungus_seated(world, &atom) {
                 return false;
             }
+        } else if let Some((top, _)) = wet_band(world, gx, gy) {
+            atom.last_water_top = Some(top);
+        }
+        self.atoms.push(atom);
+        true
+    }
+
+    /// Editor spawn: any module mix, any Air cell near the click.
+    ///
+    /// No wet-Air / porous-soil / seat checks — creatures may starve or
+    /// float; that is intentional sandbox behaviour.
+    pub fn spawn_blueprint_free(
+        &mut self,
+        world: &World,
+        gx: i32,
+        gy: i32,
+        body: Vec<BodyModule>,
+        energy_max: f32,
+        genome: Genome,
+    ) -> bool {
+        if self.atoms.len() >= MAX_ATOMS || body.is_empty() {
+            return false;
+        }
+        if !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+            return false;
+        }
+        let gx = world.wrap_x(gx);
+        let Some(gy) = find_air_near(world, gx, gy) else {
+            return false;
+        };
+        let mut atom = Atom::from_body(gx, gy, energy_max, body);
+        apply_genome(&mut atom, genome);
+        if is_land_plant(&atom) || is_fungus(&atom) {
+            pin_plant_pose(&mut atom);
         } else if let Some((top, _)) = wet_band(world, gx, gy) {
             atom.last_water_top = Some(top);
         }
@@ -1076,6 +1113,33 @@ fn find_wet_near(world: &World, gx: i32, gy: i32) -> Option<i32> {
     None
 }
 
+fn is_air(world: &World, gx: i32, gy: i32) -> bool {
+    matches!(
+        world.get_cell(gx, gy),
+        Some(c) if c.material == MaterialId::Air
+    )
+}
+
+/// Prefer the clicked Air cell; otherwise nearest Air in the column.
+fn find_air_near(world: &World, gx: i32, gy: i32) -> Option<i32> {
+    let gx = world.wrap_x(gx);
+    if is_air(world, gx, gy) {
+        return Some(gy);
+    }
+    for dy in [1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 8, -8, 12, -12, 16, -16] {
+        let ny = gy + dy;
+        if is_air(world, gx, ny) {
+            return Some(ny);
+        }
+    }
+    for y in (gy - 48..=gy + 48).rev() {
+        if is_air(world, gx, y) {
+            return Some(y);
+        }
+    }
+    None
+}
+
 const ATOM_SEED_SALT: u64 = 0xA701_5EED;
 
 fn hash_u64(seed: u64, a: u64, salt: u64) -> u64 {
@@ -1401,6 +1465,50 @@ mod tests {
             ),
             "fungus should place on Air above any solid"
         );
+    }
+
+    #[test]
+    fn editor_free_spawn_places_atom_on_dry_air() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+            for y in 2..8 {
+                w.set_cell(x, y, Cell::air()); // dry — habitat Atom spawn would fail
+            }
+        }
+        let mut store = OrganismStore::new();
+        let body = crate::blueprint::Blueprint::atom().modules_relative_to_nucleus();
+        assert!(
+            !store.spawn_blueprint(&w, 4, 3, body.clone(), 40.0, Genome::default()),
+            "habitat spawn still requires wet Air"
+        );
+        assert!(
+            store.spawn_blueprint_free(&w, 4, 3, body, 40.0, Genome::default()),
+            "editor free spawn may place Atom on dry Air"
+        );
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.atoms[0].gx, 4);
+        assert_eq!(store.atoms[0].gy, 3);
+    }
+
+    #[test]
+    fn editor_free_spawn_allows_odd_module_mix() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        // Root + Digest is neither a valid plant nor fungus habit.
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (0, 1, ModuleId::Photosystem),
+        ];
+        assert!(
+            store.spawn_blueprint_free(&w, 4, 2, body, 40.0, Genome::default()),
+            "sandbox should accept any nucleus-bearing mix"
+        );
+        assert_eq!(store.len(), 1);
     }
 
     #[test]
