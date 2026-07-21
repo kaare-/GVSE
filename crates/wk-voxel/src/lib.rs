@@ -14,6 +14,7 @@ pub mod cell;
 pub mod chunk;
 pub mod climate;
 pub mod clouds;
+pub mod fungi;
 pub mod grid;
 pub mod heatmap;
 pub mod humidity;
@@ -45,6 +46,7 @@ pub use climate::{
 pub use clouds::{
     cloud_floor_y, CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS,
 };
+pub use fungi::{is_fungus, soft_litter_at, add_soft_litter};
 pub use grid::World;
 pub use organism::{Atom, BodyModule, ModuleId, OrganismStore, MAX_ATOMS};
 pub use plant::{find_plant_slot, is_land_plant};

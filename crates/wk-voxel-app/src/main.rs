@@ -666,7 +666,9 @@ async fn main() {
                         paused = editor.was_paused;
                         inspect = Some((gx, gy));
                     } else {
-                        editor.status = if editor.blueprint.is_valid_plant() {
+                        editor.status = if editor.blueprint.is_valid_plant()
+                            || editor.blueprint.is_valid_fungus()
+                        {
                             "Spawn failed — need Air above porous soil (or pop cap)".into()
                         } else {
                             "Spawn failed — need a wet Air cell nearby (or pop cap)".into()
@@ -847,7 +849,16 @@ async fn main() {
                     .organisms
                     .pick_at(gx, gy)
                     .map(|id| (id, &scene.organisms.atoms[id]));
-                draw_block_inspector(gx, gy, cell, &scene.humidity, &scene.temperature, org, sw);
+                draw_block_inspector(
+                    gx,
+                    gy,
+                    cell,
+                    &scene.humidity,
+                    &scene.temperature,
+                    &scene.world,
+                    org,
+                    sw,
+                );
             }
         }
 

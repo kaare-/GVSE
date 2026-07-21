@@ -60,6 +60,9 @@ pub struct Genome {
     /// Dim-light harvest lean (D2).
     #[serde(default = "default_shade_efficiency")]
     pub shade_efficiency: f32,
+    /// Litter digest rate (Set E fungi).
+    #[serde(default = "default_digest_rate")]
+    pub digest_rate: f32,
 }
 
 fn default_root_depth_bias() -> f32 {
@@ -80,6 +83,9 @@ fn default_leaf_absorb() -> f32 {
 fn default_shade_efficiency() -> f32 {
     0.40
 }
+fn default_digest_rate() -> f32 {
+    0.8
+}
 
 impl Default for Genome {
     fn default() -> Self {
@@ -94,6 +100,7 @@ impl Default for Genome {
             alloc_root: default_alloc_root(),
             leaf_absorb: default_leaf_absorb(),
             shade_efficiency: default_shade_efficiency(),
+            digest_rate: default_digest_rate(),
         }
     }
 }
@@ -136,6 +143,7 @@ impl Genome {
         g.alloc_root = jitter(g.alloc_root, 0.0, 1.0);
         g.leaf_absorb = jitter(g.leaf_absorb, 0.05, 1.0);
         g.shade_efficiency = jitter(g.shade_efficiency, 0.0, 1.0);
+        g.digest_rate = jitter(g.digest_rate, 0.05, 2.0);
         g
     }
 }
@@ -243,6 +251,47 @@ impl Blueprint {
         }
     }
 
+    /// Minimal litter fungus (E): nucleus + digest + a short hypha thread.
+    pub fn minimal_fungus() -> Self {
+        Self {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![
+                PlacedModule {
+                    x: 0,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Nucleus,
+                },
+                PlacedModule {
+                    x: 1,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Digest,
+                },
+                PlacedModule {
+                    x: 2,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Hypha,
+                },
+                PlacedModule {
+                    x: 3,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Hypha,
+                },
+            ],
+            genome: Genome {
+                digest_rate: 1.0,
+                ..Genome::default()
+            },
+            name: "fungus".into(),
+            notes: "Set E litter fungus".into(),
+        }
+    }
+
     pub fn nucleus_count(&self) -> usize {
         self.modules
             .iter()
@@ -264,10 +313,18 @@ impl Blueprint {
             .count()
     }
 
+    pub fn digest_count(&self) -> usize {
+        self.modules
+            .iter()
+            .filter(|m| m.module == ModuleId::Digest)
+            .count()
+    }
+
     pub fn is_valid_atom(&self) -> bool {
         self.nucleus_count() >= 1
             && self.photosystem_count() >= 1
             && self.root_count() == 0
+            && self.digest_count() == 0
     }
 
     pub fn is_valid_plant(&self) -> bool {
@@ -276,8 +333,18 @@ impl Blueprint {
             && self.root_count() >= 1
     }
 
+    /// Nucleus + Digest, no root/stem (detritus habit).
+    pub fn is_valid_fungus(&self) -> bool {
+        self.nucleus_count() >= 1
+            && self.digest_count() >= 1
+            && !self
+                .modules
+                .iter()
+                .any(|m| matches!(m.module, ModuleId::Root | ModuleId::Stem))
+    }
+
     pub fn is_valid_creature(&self) -> bool {
-        self.is_valid_atom() || self.is_valid_plant()
+        self.is_valid_atom() || self.is_valid_plant() || self.is_valid_fungus()
     }
 
     /// Anchor = first Nucleus (canvas coords).
@@ -375,6 +442,15 @@ mod tests {
             .iter()
             .any(|&(dx, dy, m)| m == ModuleId::Root && dy < 0 && dx == 0));
         assert!(rel.iter().any(|&(_, dy, m)| m == ModuleId::Stem && dy > 0));
+    }
+
+    #[test]
+    fn minimal_fungus_is_valid_detritus_habit() {
+        let bp = Blueprint::minimal_fungus();
+        assert!(bp.is_valid_fungus());
+        assert!(!bp.is_valid_atom());
+        assert!(!bp.is_valid_plant());
+        assert!(bp.digest_count() >= 1);
     }
 
     #[test]

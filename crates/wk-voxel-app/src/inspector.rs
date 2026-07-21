@@ -3,7 +3,10 @@
 
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
-use wk_voxel::{is_land_plant, water_capacity, Atom, Cell, Humidity, Temperature};
+use wk_voxel::{
+    is_fungus, is_land_plant, soft_litter_at, water_capacity, Atom, Cell, Humidity, Temperature,
+    World,
+};
 
 fn material_name(mat: MaterialId) -> &'static str {
     match mat {
@@ -61,6 +64,7 @@ pub fn draw_block_inspector(
     cell: Option<Cell>,
     humidity: &Humidity,
     temperature: &Temperature,
+    world: &World,
     organism: Option<(usize, &Atom)>,
     sw: f32,
 ) {
@@ -98,10 +102,20 @@ pub fn draw_block_inspector(
         None => lines.push("cell: (empty / unstamped)".into()),
     }
     lines.push(format!("temp={temp_c:.1}C  humidity={hum:.1}  tile=({hx},{hy})"));
+    let litter = soft_litter_at(world, gx);
+    if litter > 0 {
+        lines.push(format!("soft_litter={litter}"));
+    }
 
     if let Some((id, atom)) = organism {
         lines.push("--- organism ---".into());
-        let kind = if is_land_plant(atom) { "Plant" } else { "Atom" };
+        let kind = if is_fungus(atom) {
+            "Fungus"
+        } else if is_land_plant(atom) {
+            "Plant"
+        } else {
+            "Atom"
+        };
         lines.push(format!("{kind} #{id}  anchor=({}, {})", atom.gx, atom.gy));
         lines.push(format!(
             "energy={:.1}/{:.0}  age={}  mods={}",
@@ -115,7 +129,24 @@ pub fn draw_block_inspector(
             atom.photosystem_count(),
             atom.cooldown
         ));
-        if is_land_plant(atom) {
+        if is_fungus(atom) {
+            lines.push("habit=fungus (digest litter / Organic)".into());
+            lines.push(format!(
+                "digest_rate={:.2}  drought_ticks={}",
+                atom.genome.digest_rate, atom.drought_ticks
+            ));
+            let digests = atom
+                .body
+                .iter()
+                .filter(|(_, _, m)| *m == wk_voxel::ModuleId::Digest)
+                .count();
+            let hyphae = atom
+                .body
+                .iter()
+                .filter(|(_, _, m)| *m == wk_voxel::ModuleId::Hypha)
+                .count();
+            lines.push(format!("digest={digests}  hypha={hyphae}"));
+        } else if is_land_plant(atom) {
             let (s, l, r) = atom.genome.alloc_weights();
             lines.push("habit=land (fixed crown, root drink)".into());
             lines.push(format!(
