@@ -116,7 +116,23 @@ pub fn draw_block_inspector(
             atom.cooldown
         ));
         if is_land_plant(atom) {
+            let (s, l, r) = atom.genome.alloc_weights();
             lines.push("habit=land (fixed crown, root drink)".into());
+            lines.push(format!(
+                "alloc S/L/R={s:.2}/{l:.2}/{r:.2}  depth={:.2}",
+                atom.genome.root_depth_bias
+            ));
+            let roots = atom
+                .body
+                .iter()
+                .filter(|(_, _, m)| *m == wk_voxel::ModuleId::Root)
+                .count();
+            let stems = atom
+                .body
+                .iter()
+                .filter(|(_, _, m)| *m == wk_voxel::ModuleId::Stem)
+                .count();
+            lines.push(format!("roots={roots}  stems={stems}"));
         } else {
             lines.push(format!(
                 "buoyancy={:.2}  vel_y={:.2}  fy={:.1}",

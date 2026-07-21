@@ -34,8 +34,8 @@ pub struct PlacedModule {
     pub module: ModuleId,
 }
 
-/// Slim live genes for Set A (postcard may grow; unknown fields ignored
-/// on older files via defaults).
+/// Live genes for Atom + land plant (Set D). Older postcard files get
+/// plant fields via `#[serde(default)]`.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Genome {
     pub metabolic_rate: f32,
@@ -44,6 +44,41 @@ pub struct Genome {
     /// 0 = floater, 1 = sinker — mutated on fission.
     #[serde(default)]
     pub buoyancy_bias: f32,
+    /// Deep-dive bias for root elongation (0 = shallow, 1 = dive).
+    #[serde(default = "default_root_depth_bias")]
+    pub root_depth_bias: f32,
+    /// Surplus allocation toward stem / leaf / root (normalized at use).
+    #[serde(default = "default_alloc_stem")]
+    pub alloc_stem: f32,
+    #[serde(default = "default_alloc_leaf")]
+    pub alloc_leaf: f32,
+    #[serde(default = "default_alloc_root")]
+    pub alloc_root: f32,
+    /// How hard Photosystems shade below (D2 — stored, unused in D1).
+    #[serde(default = "default_leaf_absorb")]
+    pub leaf_absorb: f32,
+    /// Dim-light harvest lean (D2 — stored, unused in D1).
+    #[serde(default = "default_shade_efficiency")]
+    pub shade_efficiency: f32,
+}
+
+fn default_root_depth_bias() -> f32 {
+    0.55
+}
+fn default_alloc_stem() -> f32 {
+    0.25
+}
+fn default_alloc_leaf() -> f32 {
+    0.45
+}
+fn default_alloc_root() -> f32 {
+    0.30
+}
+fn default_leaf_absorb() -> f32 {
+    0.45
+}
+fn default_shade_efficiency() -> f32 {
+    0.40
 }
 
 impl Default for Genome {
@@ -53,12 +88,28 @@ impl Default for Genome {
             reproduce_at: 0.85,
             clone_fidelity: 0.9,
             buoyancy_bias: 0.0,
+            root_depth_bias: default_root_depth_bias(),
+            alloc_stem: default_alloc_stem(),
+            alloc_leaf: default_alloc_leaf(),
+            alloc_root: default_alloc_root(),
+            leaf_absorb: default_leaf_absorb(),
+            shade_efficiency: default_shade_efficiency(),
         }
     }
 }
 
-/// Voxel-local Set A blueprint. Same *idea* as column `.gvsecrt`, but
-/// a slim schema (no wires / full Genome) so we stay isolated.
+impl Genome {
+    /// Normalized `(stem, leaf, root)` surplus weights (sum to 1).
+    pub fn alloc_weights(self) -> (f32, f32, f32) {
+        let s = self.alloc_stem.max(0.0);
+        let l = self.alloc_leaf.max(0.0);
+        let r = self.alloc_root.max(0.0);
+        let sum = (s + l + r).max(1e-6);
+        (s / sum, l / sum, r / sum)
+    }
+}
+
+/// Voxel-local creature blueprint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Blueprint {
     pub schema_version: u16,
@@ -275,7 +326,22 @@ mod tests {
         assert!(!bp.is_valid_atom());
         let rel = bp.modules_relative_to_nucleus();
         assert!(rel.contains(&(0, 0, ModuleId::Nucleus)));
-        assert!(rel.iter().any(|&(dx, dy, m)| m == ModuleId::Root && dy < 0 && dx == 0));
+        assert!(rel
+            .iter()
+            .any(|&(dx, dy, m)| m == ModuleId::Root && dy < 0 && dx == 0));
         assert!(rel.iter().any(|&(_, dy, m)| m == ModuleId::Stem && dy > 0));
+    }
+
+    #[test]
+    fn alloc_weights_normalize() {
+        let g = Genome {
+            alloc_stem: 1.0,
+            alloc_leaf: 1.0,
+            alloc_root: 2.0,
+            ..Genome::default()
+        };
+        let (s, l, r) = g.alloc_weights();
+        assert!((s + l + r - 1.0).abs() < 1e-5);
+        assert!((r - 0.5).abs() < 1e-5);
     }
 }
