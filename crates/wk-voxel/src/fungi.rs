@@ -343,9 +343,11 @@ pub fn deposit_death_litter(world: &mut World, gx: i32, gy: i32, n_modules: usiz
 
 /// Dissolve a lingering corpse into Organic matter + soft litter.
 ///
-/// Body footprint: dry Air and non-bedrock solids become `MaterialId::Organic`
-/// in place (ghost-root / standing-dead → soil). Wet Air (free water) is left
-/// alone so lakes aren't plugged; if nothing painted, fall back to a bed pile.
+/// Shoot modules (Stem / Nucleus / Photosystem) never become mid-air Organic
+/// pillars — water and snow must pass dead trunks; compost belongs on the
+/// bed (fallback pile) or in soil already painted by dead roots. Digest /
+/// Hypha / Root footprints still convert solids (and dry Air for detritus).
+/// Wet Air (free water) is left alone so lakes aren't plugged.
 pub fn dissolve_corpse_to_organic(
     world: &mut World,
     gx: i32,
@@ -359,7 +361,14 @@ pub fn dissolve_corpse_to_organic(
     add_soft_litter(world, gx, units);
 
     let mut painted = 0u32;
-    for &(dx, dy, _) in body {
+    for &(dx, dy, mid) in body {
+        // Grey trunks / crowns / leaves: litter only — do not dam flow.
+        if matches!(
+            mid,
+            ModuleId::Stem | ModuleId::Nucleus | ModuleId::Photosystem
+        ) {
+            continue;
+        }
         let wx = world.wrap_x(gx + dx as i32);
         let wy = gy + dy as i32;
         let Some(c) = world.get_cell(wx, wy) else {

@@ -631,13 +631,79 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
     cost
 }
 
+/// World cells occupied by live or grey-corpse Stem (trunk) modules.
+pub fn collect_trunk_world_cells<'a, I, J>(atoms: I, corpses: J) -> HashSet<(i32, i32)>
+where
+    I: IntoIterator<Item = &'a Atom>,
+    J: IntoIterator<Item = &'a crate::organism::Corpse>,
+{
+    let mut out = HashSet::new();
+    for a in atoms {
+        for &(dx, dy, m) in &a.body {
+            if m == ModuleId::Stem {
+                out.insert((a.gx + dx as i32, a.gy + dy as i32));
+            }
+        }
+    }
+    for c in corpses {
+        for &(dx, dy, m) in &c.body {
+            if m == ModuleId::Stem {
+                out.insert((c.gx + dx as i32, c.gy + dy as i32));
+            }
+        }
+    }
+    out
+}
+
+/// True when a new Stem at body `(nx,ny)` keeps a gap from foreign trunks.
+/// Own same-column olive (vertical stack) is allowed; Moore neighbours that
+/// are other live/dead stems are not. Leaves are unrestricted.
+pub fn stem_spacing_ok(atom: &Atom, nx: i16, ny: i16, trunks: &HashSet<(i32, i32)>) -> bool {
+    let wx = atom.gx + nx as i32;
+    let wy = atom.gy + ny as i32;
+    if trunks.contains(&(wx, wy)) {
+        let own_here = atom
+            .body
+            .iter()
+            .any(|&(bx, by, m)| m == ModuleId::Stem && bx == nx && by == ny);
+        if !own_here {
+            return false;
+        }
+    }
+    for ox in -1i32..=1 {
+        for oy in -1i32..=1 {
+            if ox == 0 && oy == 0 {
+                continue;
+            }
+            let tx = wx + ox;
+            let ty = wy + oy;
+            if !trunks.contains(&(tx, ty)) {
+                continue;
+            }
+            // Vertical stack on this plant's own column — OK.
+            let own_same_col = atom.body.iter().any(|&(bx, by, m)| {
+                m == ModuleId::Stem
+                    && bx == nx
+                    && atom.gx + bx as i32 == tx
+                    && atom.gy + by as i32 == ty
+            });
+            if own_same_col {
+                continue;
+            }
+            return false;
+        }
+    }
+    true
+}
+
 /// Stem upward or leaf place from surplus allocation.
 ///
 /// Structure rules (stricter than free collage):
 /// - Stem stacks only on Stem / Nucleus / Root — never on a leaf.
 /// - Leaves attach to the highest Stem (or Nucleus if leafless chassis).
 /// - Stemless bodies stay stemless: olive only elongates painted Stem.
-pub fn try_grow_shoot(atom: &mut Atom, tick: u64) -> f32 {
+/// - New Stem needs a Moore gap from other live/dead trunks (leaves may touch).
+pub fn try_grow_shoot(atom: &mut Atom, tick: u64, trunks: &HashSet<(i32, i32)>) -> f32 {
     let (w_stem, w_leaf, _) = atom.genome.alloc_weights();
     let tank = tank_ref(atom);
     if atom.energy < tank * (LAND_GROW_ENERGY_FRAC + 0.08) {
@@ -681,6 +747,7 @@ pub fn try_grow_shoot(atom: &mut Atom, tick: u64) -> f32 {
         // Keep the olive tip clear whenever a trunk exists — stacking a
         // leaf on `(0,+1)` produced leaf→stem→leaf towers and blocked
         // further stem growth. Stemless chassis may still put a leaf up.
+        // Leaves may sit next to other leaves — no spacing tax.
         let dirs: &[(i16, i16)] = if n_stem > 0 {
             &[(1, 0), (-1, 0), (1, 1), (-1, 1)]
         } else {
@@ -732,6 +799,9 @@ pub fn try_grow_shoot(atom: &mut Atom, tick: u64) -> f32 {
                 .iter()
                 .any(|&(x, y, m)| m == ModuleId::Photosystem && x == nx && y == ay)
             {
+                continue;
+            }
+            if !stem_spacing_ok(atom, nx, ny, trunks) {
                 continue;
             }
             atom.energy -= cost;
@@ -791,7 +861,12 @@ pub fn sprout_body(parent: &Atom) -> Vec<BodyModule> {
 }
 
 /// One growth pulse: root and/or shoot from allocation weights.
-pub fn try_grow_plant(world: &World, atom: &mut Atom, tick: u64) -> f32 {
+pub fn try_grow_plant(
+    world: &World,
+    atom: &mut Atom,
+    tick: u64,
+    trunks: &HashSet<(i32, i32)>,
+) -> f32 {
     if atom.age_ticks % LAND_GROW_PERIOD != 0 {
         return 0.0;
     }
@@ -803,10 +878,10 @@ pub fn try_grow_plant(world: &World, atom: &mut Atom, tick: u64) -> f32 {
     if try_root_first {
         spent += try_elongate_root(world, atom);
         if spent <= 0.0 {
-            spent += try_grow_shoot(atom, tick);
+            spent += try_grow_shoot(atom, tick, trunks);
         }
     } else {
-        spent += try_grow_shoot(atom, tick);
+        spent += try_grow_shoot(atom, tick, trunks);
         if spent <= 0.0 {
             spent += try_elongate_root(world, atom);
         }
