@@ -849,6 +849,10 @@ async fn main() {
                     .organisms
                     .pick_at(gx, gy)
                     .map(|id| (id, &scene.organisms.atoms[id]));
+                let corpse = scene
+                    .organisms
+                    .pick_corpse_at(gx, gy)
+                    .map(|id| (id, &scene.organisms.corpses[id]));
                 draw_block_inspector(
                     gx,
                     gy,
@@ -857,6 +861,7 @@ async fn main() {
                     &scene.temperature,
                     &scene.world,
                     org,
+                    corpse,
                     sw,
                 );
             }

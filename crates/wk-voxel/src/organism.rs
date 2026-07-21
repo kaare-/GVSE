@@ -23,7 +23,7 @@ use crate::blueprint::Genome;
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::grid::World;
 use crate::fungi::{
-    deposit_death_litter, digest_budget_units, digest_labile, fungus_should_hibernate,
+    digest_budget_units, digest_labile, dissolve_corpse_to_organic, fungus_should_hibernate,
     fungus_upkeep, is_fungus, is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::plant::{
@@ -35,6 +35,8 @@ use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, Cano
 
 /// Soft cap — blooms should stay readable at 1×.
 pub const MAX_ATOMS: usize = 256;
+/// Soft cap on lingering corpses (same order as living pop).
+pub const MAX_CORPSES: usize = 256;
 
 /// Energy gained per photosystem per tick at full noon light.
 const PHOTON_RATE: f32 = 0.35;
@@ -48,6 +50,11 @@ const REPRODUCE_AT: f32 = 0.85;
 const REPRO_PERIOD: u64 = 40;
 /// Age soft-cap (ticks).
 const LIFE_TICKS: u64 = DEMO_DAY_TICKS * 4;
+
+/// Land / fungus corpses rest this long before becoming Organic (~0.75 demo day).
+pub const CORPSE_SETTLE_LAND_TICKS: u32 = 900;
+/// Plankton corpses linger longer so bloom deaths leave a visible carpet.
+pub const CORPSE_SETTLE_WATER_TICKS: u32 = 2_400;
 
 /// Floater equilibrium depth below the free surface (cells).
 const FLOAT_DEPTH: f32 = 1.5;
@@ -200,10 +207,63 @@ impl Atom {
     }
 }
 
+/// Dead body: keeps drawing (grey), sinks / rests, then becomes Organic.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct Corpse {
+    pub gx: i32,
+    pub gy: i32,
+    pub fy: f32,
+    pub vel_y: f32,
+    pub body: Vec<BodyModule>,
+    pub ticks: u32,
+    pub settled_ticks: u32,
+    /// Plant or fungus — pinned on land; plankton sinks in water.
+    pub land: bool,
+    pub last_water_top: Option<i32>,
+}
+
+impl Corpse {
+    pub fn from_atom(atom: &Atom) -> Self {
+        Self {
+            gx: atom.gx,
+            gy: atom.gy,
+            fy: atom.fy,
+            vel_y: if is_land_plant(atom) || is_fungus(atom) {
+                0.0
+            } else {
+                -0.15
+            },
+            body: atom.body.clone(),
+            ticks: 0,
+            settled_ticks: 0,
+            land: is_land_plant(atom) || is_fungus(atom),
+            last_water_top: atom.last_water_top,
+        }
+    }
+
+    pub fn occupies(&self, wx: i32, wy: i32) -> bool {
+        self.body
+            .iter()
+            .any(|(dx, dy, _)| self.gx + *dx as i32 == wx && self.gy + *dy as i32 == wy)
+    }
+}
+
+/// Desaturated brown-grey — readable as dead tissue (column `corpse_rgb`).
+pub fn corpse_rgb((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
+    let luma = (r as u16 * 3 + g as u16 * 6 + b as u16) / 10;
+    (
+        ((luma + 40) / 2).min(120) as u8,
+        ((luma + 20) / 2).min(90) as u8,
+        (luma / 3).min(70) as u8,
+    )
+}
+
 /// Population of Set A Atoms (no `hecs` — keep the crate tiny).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct OrganismStore {
     pub atoms: Vec<Atom>,
+    #[serde(default)]
+    pub corpses: Vec<Corpse>,
 }
 
 impl OrganismStore {
@@ -217,6 +277,10 @@ impl OrganismStore {
 
     pub fn is_empty(&self) -> bool {
         self.atoms.is_empty()
+    }
+
+    pub fn corpse_count(&self) -> usize {
+        self.corpses.len()
     }
 
     /// Seed Atoms into wet Air cells near the free surface of each
@@ -246,12 +310,21 @@ impl OrganismStore {
         }
     }
 
-    /// Draw list: world cell + frozen module RGB.
+    /// Draw list: world cell + frozen module RGB (living + grey corpses).
     pub fn draw_list(&self) -> Vec<(i32, i32, (u8, u8, u8))> {
-        let mut out = Vec::with_capacity(self.atoms.len() * 2);
+        let mut out = Vec::with_capacity((self.atoms.len() + self.corpses.len()) * 2);
         for atom in &self.atoms {
             for &(dx, dy, mid) in &atom.body {
                 out.push((atom.gx + dx as i32, atom.gy + dy as i32, mid.rgb()));
+            }
+        }
+        for corpse in &self.corpses {
+            for &(dx, dy, mid) in &corpse.body {
+                out.push((
+                    corpse.gx + dx as i32,
+                    corpse.gy + dy as i32,
+                    corpse_rgb(mid.rgb()),
+                ));
             }
         }
         out
@@ -305,19 +378,24 @@ impl OrganismStore {
         true
     }
 
-    /// First organism occupying world cell `(gx, gy)`.
+    /// First living organism occupying world cell `(gx, gy)`.
     pub fn pick_at(&self, gx: i32, gy: i32) -> Option<usize> {
         self.atoms.iter().position(|a| a.occupies(gx, gy))
     }
 
+    /// First corpse occupying world cell `(gx, gy)`.
+    pub fn pick_corpse_at(&self, gx: i32, gy: i32) -> Option<usize> {
+        self.corpses.iter().position(|c| c.occupies(gx, gy))
+    }
+
     /// One organism step: plankton buoyancy / plant drink, light,
-    /// upkeep, fission (Atoms only), death, then plankton contact bounce.
+    /// upkeep, fission (Atoms only), death → corpse, corpse settle → Organic.
     pub fn step(&mut self, world: &mut World, tick: u64) {
         self.step_with_climate(world, tick, &ClimateConfig::default());
     }
 
     pub fn step_with_climate(&mut self, world: &mut World, tick: u64, climate: &ClimateConfig) {
-        if self.atoms.is_empty() {
+        if self.atoms.is_empty() && self.corpses.is_empty() {
             return;
         }
         let day = day_factor_cfg(tick, climate);
@@ -405,7 +483,7 @@ impl OrganismStore {
         deaths.dedup();
         for &i in deaths.iter().rev() {
             if let Some(dead) = self.atoms.get(i).cloned() {
-                deposit_death_litter(world, dead.gx, dead.gy, dead.body.len());
+                self.push_corpse(world, Corpse::from_atom(&dead));
             }
             if i < self.atoms.len() {
                 self.atoms.swap_remove(i);
@@ -413,7 +491,89 @@ impl OrganismStore {
         }
         self.atoms.extend(births);
         resolve_contacts(world, &mut self.atoms);
+        self.step_corpses(world);
     }
+
+    fn push_corpse(&mut self, world: &mut World, corpse: Corpse) {
+        if self.corpses.len() >= MAX_CORPSES {
+            // Cap pressure: dissolve oldest immediately into Organic.
+            if let Some(old) = self.corpses.first().cloned() {
+                dissolve_corpse_to_organic(world, old.gx, old.gy, &old.body);
+            }
+            self.corpses.remove(0);
+        }
+        self.corpses.push(corpse);
+    }
+
+    /// Sink / pin corpses; after settle, paint Organic + soft litter.
+    fn step_corpses(&mut self, world: &mut World) {
+        let mut dissolve: Vec<usize> = Vec::new();
+        for (i, corpse) in self.corpses.iter_mut().enumerate() {
+            corpse.ticks = corpse.ticks.saturating_add(1);
+            if corpse.land {
+                pin_corpse_land(corpse);
+                corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
+                if corpse.settled_ticks >= CORPSE_SETTLE_LAND_TICKS {
+                    dissolve.push(i);
+                }
+                continue;
+            }
+
+            // Plankton corpse: heavy sink toward the wet-band bed.
+            step_corpse_buoyancy(world, corpse);
+            let on_bed = match wet_band(world, corpse.gx, corpse.gy) {
+                Some((_top, bed)) => corpse.gy <= bed + 1,
+                None => true, // stranded — count as settled
+            };
+            if on_bed {
+                corpse.vel_y = 0.0;
+                corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
+                if corpse.settled_ticks >= CORPSE_SETTLE_WATER_TICKS {
+                    dissolve.push(i);
+                }
+            } else {
+                corpse.settled_ticks = 0;
+            }
+        }
+
+        dissolve.sort_unstable();
+        dissolve.dedup();
+        for &i in dissolve.iter().rev() {
+            if let Some(c) = self.corpses.get(i).cloned() {
+                dissolve_corpse_to_organic(world, c.gx, c.gy, &c.body);
+            }
+            if i < self.corpses.len() {
+                self.corpses.swap_remove(i);
+            }
+        }
+    }
+}
+
+fn pin_corpse_land(corpse: &mut Corpse) {
+    corpse.fy = corpse.gy as f32;
+    corpse.vel_y = 0.0;
+    corpse.last_water_top = None;
+}
+
+fn step_corpse_buoyancy(world: &World, corpse: &mut Corpse) {
+    let Some((top, bed)) = wet_band(world, corpse.gx, corpse.gy) else {
+        // Dry out — rest where we are.
+        corpse.vel_y = 0.0;
+        return;
+    };
+    // Heavy: sink with extra pull (column corpse path).
+    corpse.vel_y -= GRAVITY + 0.04;
+    corpse.vel_y *= 1.0 - WATER_DRAG;
+    corpse.fy += corpse.vel_y;
+    if corpse.fy < bed as f32 {
+        corpse.fy = bed as f32;
+        corpse.vel_y = 0.0;
+    }
+    if corpse.fy > top as f32 {
+        corpse.fy = top as f32;
+    }
+    corpse.gy = corpse.fy.round() as i32;
+    corpse.last_water_top = Some(top);
 }
 
 enum PlantStep {
@@ -1000,10 +1160,11 @@ mod tests {
         store.atoms.push(Atom::new(4, 6, 50.0));
         store.step(&mut w, 0);
         assert!(store.is_empty());
+        assert_eq!(store.corpse_count(), 1, "stranded plankton becomes a corpse");
     }
 
     #[test]
-    fn death_can_deposit_organic_above_bed() {
+    fn death_leaves_grey_corpse_then_organic() {
         let mut w = wet_column();
         w.set_cell(4, 1, Cell::air());
         let mut store = OrganismStore::new();
@@ -1011,20 +1172,80 @@ mod tests {
         a.age_ticks = LIFE_TICKS;
         store.atoms.push(a);
         store.step(&mut w, 0);
-        assert!(store.is_empty());
-        assert_eq!(
-            w.get_cell(4, 1).map(|c| c.material),
-            Some(MaterialId::Organic),
-            "corpse residue should sit on the bed, not replace water"
+        assert!(store.is_empty(), "living pop should be gone");
+        assert_eq!(store.corpse_count(), 1, "death should leave a lingering corpse");
+        assert!(
+            crate::fungi::soft_litter_at(&w, 4) == 0,
+            "litter waits until dissolve, not instant death"
         );
-        assert_eq!(
-            w.get_cell(4, 6).map(|c| c.material),
-            Some(MaterialId::Air)
-        );
+        // Grey corpse still drawable.
+        let draw = store.draw_list();
+        assert!(!draw.is_empty());
+        let (_, _, rgb) = draw[0];
+        assert!(rgb.0 <= 120 && rgb.2 <= 70, "corpse should be desaturated brown-grey");
+
+        // Fast-forward settle.
+        store.corpses[0].settled_ticks = CORPSE_SETTLE_WATER_TICKS - 1;
+        // Pin on bed so settle counts.
+        store.corpses[0].gy = 1;
+        store.corpses[0].fy = 1.0;
+        store.step(&mut w, 1);
+        assert_eq!(store.corpse_count(), 0, "settled corpse should dissolve");
         assert!(
             crate::fungi::soft_litter_at(&w, 4) > 0,
-            "death should also bank soft litter for fungi"
+            "dissolve should bank soft litter for fungi"
         );
+        // Body modules that sat in dry Air become Organic (nucleus+photo at bed).
+        let organic_cells = (0..10)
+            .filter(|&y| {
+                matches!(
+                    w.get_cell(4, y).map(|c| c.material),
+                    Some(MaterialId::Organic)
+                )
+            })
+            .count();
+        assert!(
+            organic_cells >= 1,
+            "dissolve should leave MaterialId::Organic in the world"
+        );
+    }
+
+    #[test]
+    fn land_plant_corpse_stays_put_then_becomes_organic() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        // Kill via energy.
+        store.atoms[0].energy = 0.0;
+        // Force death path: energy death happens inside step_land_plant when <= 0
+        // after metabolism — zero energy at start of step still runs drink/photo.
+        // Age-kill is cleaner.
+        store.atoms[0].age_ticks = LIFE_TICKS;
+        store.atoms[0].energy = 40.0;
+        store.step(&mut w, 0);
+        assert!(store.is_empty());
+        assert_eq!(store.corpse_count(), 1);
+        assert!(store.corpses[0].land);
+        let gx = store.corpses[0].gx;
+        let gy = store.corpses[0].gy;
+        store.corpses[0].settled_ticks = CORPSE_SETTLE_LAND_TICKS;
+        store.step(&mut w, 1);
+        assert_eq!(store.corpse_count(), 0);
+        assert!(crate::fungi::soft_litter_at(&w, gx) > 0);
+        let organic = (gy - 2..=gy + 4).any(|y| {
+            matches!(
+                w.get_cell(gx, y).map(|c| c.material),
+                Some(MaterialId::Organic)
+            )
+        });
+        assert!(organic, "plant corpse should paint Organic into its footprint");
     }
 
     #[test]
@@ -1081,9 +1302,11 @@ mod tests {
         for t in 200..220 {
             store.step(&mut w, t);
         }
-        assert!(
-            store.is_empty(),
-            "prolonged starve should kill after hibernate max"
+        assert!(store.is_empty());
+        assert_eq!(
+            store.corpse_count(),
+            1,
+            "prolonged starve should leave a corpse after hibernate max"
         );
     }
 
@@ -1216,9 +1439,11 @@ mod tests {
         for t in 200..220 {
             store.step(&mut w, t);
         }
-        assert!(
-            store.is_empty(),
-            "prolonged drought should kill after hibernate max"
+        assert!(store.is_empty());
+        assert_eq!(
+            store.corpse_count(),
+            1,
+            "prolonged drought should leave a corpse after hibernate max"
         );
     }
 

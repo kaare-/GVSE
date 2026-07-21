@@ -48,7 +48,10 @@ pub use clouds::{
 };
 pub use fungi::{is_fungus, soft_litter_at, add_soft_litter};
 pub use grid::World;
-pub use organism::{Atom, BodyModule, ModuleId, OrganismStore, MAX_ATOMS};
+pub use organism::{
+    Atom, BodyModule, Corpse, ModuleId, OrganismStore, CORPSE_SETTLE_LAND_TICKS,
+    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
+};
 pub use plant::{find_plant_slot, is_land_plant};
 pub use shade::{build_canopy_index, effective_photo_light, CanopyIndex};
 pub use heatmap::Heatmap;
