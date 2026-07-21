@@ -39,11 +39,11 @@ pub const DROUGHT_DORMANT_UPKEEP: f32 = 0.12;
 pub const PLANT_UPKEEP_MULT: f32 = 0.35;
 /// Extra score weight so roots prefer wetter substrate cells.
 pub const ROOT_MOISTURE_AFFINITY: f32 = 2.8;
-/// Penalty per already-painted Root in the Moore neighbourhood of a
-/// candidate cell — keeps under-crown growth as threads, not blobs.
-pub const ROOT_CROWD_PENALTY: f32 = 0.95;
 /// Soft local density: roots packed near the crown pay this extra.
-pub const ROOT_CROWN_BLOB_PENALTY: f32 = 1.4;
+pub const ROOT_CROWN_BLOB_PENALTY: f32 = 1.8;
+/// Score bonus for stepping *into* Organic / Sand beds.
+pub const ROOT_ORGANIC_AFFINITY: f32 = 0.85;
+pub const ROOT_SAND_AFFINITY: f32 = 0.45;
 /// Alloc stem must clear this to invent the *first* Stem pixel when the
 /// body has none (leaf-only chassis stay leafless trunks).
 pub const STEM_INVENT_MIN_ALLOC: f32 = 0.18;
@@ -531,6 +531,16 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
                 + depth_bias * down
                 + (1.0 - depth_bias) * lateral
                 - pen * 0.03;
+            // Stepping *into* Organic / Sand is fine (soil beds).
+            let soil_bed = matches!(
+                cell.material,
+                MaterialId::Organic | MaterialId::Sand | MaterialId::Clay
+            );
+            match cell.material {
+                MaterialId::Organic => score += ROOT_ORGANIC_AFFINITY,
+                MaterialId::Sand => score += ROOT_SAND_AFFINITY,
+                _ => {}
+            }
             // Extra nudge into clearly wetter cells than the tip's host.
             let tip_moist = cell_moisture_frac(
                 world,
@@ -540,15 +550,51 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
             if moist > tip_moist + 0.05 {
                 score += (moist - tip_moist) * 1.6;
             }
-            // Discrete threads: avoid packing next to many existing roots.
-            let crowd = atom
-                .body
-                .iter()
-                .filter(|&&(rx, ry, m)| {
-                    m == ModuleId::Root && (rx - nx).abs() <= 1 && (ry - ny).abs() <= 1
-                })
-                .count();
-            score -= crowd as f32 * ROOT_CROWD_PENALTY;
+            // Can't place next to another *alive* root (parent tip OK).
+            let beside_live = atom.body.iter().any(|&(rx, ry, m)| {
+                m == ModuleId::Root
+                    && (rx, ry) != (tx, ty)
+                    && (rx - nx).abs() <= 1
+                    && (ry - ny).abs() <= 1
+            });
+            if beside_live {
+                continue;
+            }
+            // Can't place next to a *dead* root (Organic residue), unless
+            // this step is into a soil bed (Organic/Sand/Clay) — growing
+            // through compost is allowed; hugging a dead channel in rock
+            // is not.
+            let mut beside_dead = false;
+            for ox in -1i32..=1 {
+                for oy in -1i32..=1 {
+                    if ox == 0 && oy == 0 {
+                        continue;
+                    }
+                    if matches!(
+                        world.get_cell(wx + ox, wy + oy),
+                        Some(n) if n.material == MaterialId::Organic
+                    ) {
+                        beside_dead = true;
+                        break;
+                    }
+                }
+                if beside_dead {
+                    break;
+                }
+            }
+            if beside_dead && !soil_bed {
+                continue;
+            }
+            // One live thread per column — no lateral into an occupied lane.
+            if dx != 0 {
+                let col_taken = atom
+                    .body
+                    .iter()
+                    .any(|&(rx, _, m)| m == ModuleId::Root && rx == nx);
+                if col_taken {
+                    continue;
+                }
+            }
             // Under-crown blob tax — prefer diving past the shallow mass.
             if ny >= -3 && nx.abs() <= 2 {
                 let shallow = atom

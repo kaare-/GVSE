@@ -1706,6 +1706,89 @@ mod tests {
     }
 
     #[test]
+    fn root_elongation_refuses_cell_beside_other_live_root() {
+        let w = deep_moist_sand();
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.95;
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 6, 80.0, body);
+        atom.genome = g;
+        atom.energy = 80.0;
+        let spent = crate::plant::try_elongate_root(&w, &mut atom);
+        assert!(spent > 0.0, "vertical dive past the tip should still be legal");
+        let added = atom
+            .body
+            .iter()
+            .find(|&&(x, y, m)| {
+                m == ModuleId::Root && !matches!((x, y), (0, -1) | (0, -2))
+            })
+            .map(|&(x, y, _)| (x, y))
+            .expect("should add one root");
+        // Forbidden blob fills: cells Moore-adjacent to *both* existing roots.
+        assert!(
+            !matches!(added, (1, -2) | (-1, -2) | (1, -1) | (-1, -1)),
+            "must not pack beside the live stack, got {added:?}"
+        );
+        let live_neighbors = atom
+            .body
+            .iter()
+            .filter(|&&(rx, ry, m)| {
+                m == ModuleId::Root
+                    && (rx, ry) != added
+                    && (rx - added.0).abs() <= 1
+                    && (ry - added.1).abs() <= 1
+            })
+            .count();
+        assert_eq!(
+            live_neighbors, 1,
+            "new root may touch only its parent tip, got {live_neighbors} neighbors at {added:?}"
+        );
+    }
+
+    #[test]
+    fn root_elongation_skips_rock_beside_dead_root_residue() {
+        let mut w = deep_moist_sand();
+        // Stone the tip could enter, with dead-root Organic hugging it.
+        w.set_cell(5, 4, Cell::solid(MaterialId::Stone));
+        w.set_cell(6, 4, Cell::solid(MaterialId::Organic));
+        // Seal every other penetrate-able step so only the forbidden hug remains.
+        w.set_cell(4, 3, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 3, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(5, 3, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 4, Cell::solid(MaterialId::Bedrock));
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.5;
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 6, 80.0, body);
+        atom.genome = g;
+        atom.energy = 80.0;
+        let spent = crate::plant::try_elongate_root(&w, &mut atom);
+        assert_eq!(
+            spent, 0.0,
+            "must not elongate into rock hugging dead Organic residue"
+        );
+        assert_eq!(crate::plant::root_count(&atom), 2);
+    }
+
+    #[test]
     fn stem_heavy_plant_grows_upward() {
         let mut w = moist_sand_plot();
         let mut store = OrganismStore::new();
