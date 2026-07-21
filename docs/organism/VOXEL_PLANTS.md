@@ -17,7 +17,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 
 ## Roadmap
 
-### D1 — Growth & allocation genes *(this PR)*
+### D1 — Growth & allocation genes *(landed)*
 
 Genes on `Genome` (mutated later on sprouts):
 
@@ -35,15 +35,15 @@ Features:
 
 Falsifiers: root grows into wetter sand; stem-heavy alloc grows taller.
 
-### D2 — Shade (canopy race)
+### D2 — Shade (canopy race) *(this PR)*
 
 | Gene | Role |
 |------|------|
-| `leaf_absorb` | How hard greens shade below |
+| `leaf_absorb` | How hard greens shade neighbours / self-stack |
 | `shade_efficiency` | Dim-light harvest vs sun peak |
 
-Features: per-column top-down module shade scan (`LIGHT.md`); photo
-uses remaining light. Scenarios E36 / E37 spirit.
+Features: sparse canopy index + neighbour cast (`shade.rs`, lite
+`LIGHT.md`); plant photo uses `effective_photo_light`. E36/E37 spirit.
 
 ### D3 — Vegetative sprout
 

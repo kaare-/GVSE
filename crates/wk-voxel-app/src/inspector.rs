@@ -122,6 +122,10 @@ pub fn draw_block_inspector(
                 "alloc S/L/R={s:.2}/{l:.2}/{r:.2}  depth={:.2}",
                 atom.genome.root_depth_bias
             ));
+            lines.push(format!(
+                "leaf_abs={:.2}  shade_eff={:.2}",
+                atom.genome.leaf_absorb, atom.genome.shade_efficiency
+            ));
             let roots = atom
                 .body
                 .iter()
