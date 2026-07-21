@@ -283,17 +283,20 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
             let down = if dy < 0 { 1.0 } else { 0.0 };
             let lateral = if dx != 0 && dy == 0 { 0.35 } else { 0.0 };
             let mut score = moist + depth_bias * down + (1.0 - depth_bias) * lateral - pen * 0.03;
+            // Rhizome urge when banking / missing a runner — but scale by
+            // (1 − depth_bias) so deep divers still elongate downward.
             if need_runner || banking_for_sprout {
+                let rhizome = (1.0 - depth_bias).max(0.12);
                 if dx != 0 && dy == 0 {
-                    score += 2.8;
+                    score += 2.8 * rhizome;
                 } else if dx != 0 && dy < 0 {
-                    score += 1.1;
+                    score += 1.1 * rhizome;
                 }
                 if nx != 0 {
-                    score += 1.2;
+                    score += 1.2 * rhizome;
                 }
                 if need_runner && dy < 0 && dx == 0 {
-                    score -= 1.2;
+                    score -= 1.2 * rhizome;
                 }
             }
             if best.map(|(s, ..)| score > s).unwrap_or(true) {
