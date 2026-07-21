@@ -27,6 +27,7 @@ use crate::plant::{
     apply_genome, drink_roots, find_plant_slot, is_anchored, is_land_plant, pin_plant_pose,
     root_moisture_frac, try_grow_plant, DROUGHT_STRESS_DRAIN, DROUGHT_STRESS_FRAC,
 };
+use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
 
 /// Soft cap — blooms should stay readable at 1×.
 pub const MAX_ATOMS: usize = 256;
@@ -292,6 +293,8 @@ impl OrganismStore {
         }
         let day = day_factor_cfg(tick, climate);
         let phase = phase_fraction_cfg(tick, climate);
+        // Build canopy once / tick so taller neighbours shade short plants.
+        let canopy = build_canopy_index(&self.atoms);
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let pop = self.atoms.len();
@@ -306,7 +309,7 @@ impl OrganismStore {
             }
 
             if is_land_plant(atom) {
-                if !step_land_plant(world, atom, day, tick) {
+                if !step_land_plant(world, atom, day, tick, &canopy, i as u32) {
                     deaths.push(i);
                 }
                 continue;
@@ -372,27 +375,37 @@ impl OrganismStore {
 }
 
 /// Land plant tick. Returns `false` when the plant should die.
-fn step_land_plant(world: &mut World, atom: &mut Atom, day: f32, tick: u64) -> bool {
+fn step_land_plant(
+    world: &mut World,
+    atom: &mut Atom,
+    day: f32,
+    tick: u64,
+    canopy: &CanopyIndex,
+    entity_id: u32,
+) -> bool {
     pin_plant_pose(atom);
     if !is_anchored(world, atom) {
         return false;
     }
     let moist = root_moisture_frac(world, atom);
     let (drink_e, _) = drink_roots(world, atom);
-    let n_photo = atom.photosystem_count().max(1) as f32;
+    let n_photo = atom.photosystem_count();
     let n_mod = atom.body.len().max(1) as f32;
-    // Sample light at the topmost photosystem (or crown).
-    let leaf_y = atom
-        .body
-        .iter()
-        .filter(|(_, _, m)| *m == ModuleId::Photosystem)
-        .map(|(_, dy, _)| atom.gy + *dy as i32)
-        .max()
-        .unwrap_or(atom.gy);
-    let light = column_light(world, atom.gx, leaf_y) * day;
+    // Sky column light × day, then neighbour canopy + gene remap (D2).
+    let sample_y = canopy_top_y(atom);
+    let sky = column_light(world, atom.gx, sample_y) * day;
+    let light = effective_photo_light(
+        canopy,
+        atom.gx,
+        sample_y,
+        sky,
+        entity_id,
+        n_photo,
+        &atom.genome,
+    );
     let drought = moist < DROUGHT_STRESS_FRAC;
     let photo_scale = if drought { 0.25 } else { 1.0 };
-    let harvest = PHOTON_RATE * light * n_photo * photo_scale;
+    let harvest = PHOTON_RATE * light * n_photo.max(1) as f32 * photo_scale;
     let upkeep = UPKEEP_PER_MODULE * n_mod * (0.45 + 0.55 * day);
     let stress = if moist <= 0.0 {
         DROUGHT_STRESS_DRAIN
@@ -1127,6 +1140,56 @@ mod tests {
         assert!(
             stem1 > stem0,
             "stem-heavy alloc should stack olive (had {stem0}, now {stem1})"
+        );
+    }
+
+    #[test]
+    fn tall_neighbour_shades_short_plant_energy() {
+        let mut w = moist_sand_plot();
+        // Short alone vs short next to a tall canopy thug.
+        let mut short_g = Genome::default();
+        short_g.leaf_absorb = 0.25;
+        short_g.shade_efficiency = 0.2;
+        short_g.alloc_stem = 0.1;
+        short_g.alloc_leaf = 0.1;
+        short_g.alloc_root = 0.8;
+
+        let mut tall_g = Genome::default();
+        tall_g.leaf_absorb = 0.95;
+        tall_g.shade_efficiency = 0.05;
+        tall_g.alloc_stem = 0.1;
+        tall_g.alloc_leaf = 0.1;
+        tall_g.alloc_root = 0.8;
+
+        let short_body = minimal_plant_body();
+        let mut tall_body = minimal_plant_body();
+        // Extra stem + leaf so canopy clears the short neighbour.
+        tall_body.push((0, 3, ModuleId::Stem));
+        tall_body.push((0, 4, ModuleId::Stem));
+        tall_body.push((0, 5, ModuleId::Stem));
+        tall_body.push((0, 6, ModuleId::Photosystem));
+
+        let mut alone = OrganismStore::new();
+        assert!(alone.spawn_blueprint(&w, 3, 2, short_body.clone(), 40.0, short_g));
+        alone.atoms[0].energy = 20.0;
+
+        let mut shaded = OrganismStore::new();
+        assert!(shaded.spawn_blueprint(&w, 3, 2, short_body, 40.0, short_g));
+        assert!(shaded.spawn_blueprint(&w, 4, 2, tall_body, 40.0, tall_g));
+        shaded.atoms[0].energy = 20.0;
+        shaded.atoms[1].energy = 20.0;
+
+        // Noon-ish ticks so day factor is high.
+        for t in 0..60u64 {
+            alone.step(&mut w, t);
+            shaded.step(&mut w, t);
+        }
+        assert!(!alone.is_empty() && !shaded.is_empty());
+        let e_alone = alone.atoms[0].energy;
+        let e_shaded = shaded.atoms[0].energy;
+        assert!(
+            e_shaded < e_alone,
+            "shaded short plant should harvest less (shaded={e_shaded}, alone={e_alone})"
         );
     }
 }
