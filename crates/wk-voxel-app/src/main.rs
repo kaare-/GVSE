@@ -680,6 +680,9 @@ async fn main() {
                         let mut g = settings.plant_genes.to_genome();
                         // Keep buoyancy from blueprint (plants ignore it).
                         g.buoyancy_bias = editor.blueprint.genome.buoyancy_bias;
+                        // Don't invent tissues the painted body never had
+                        // (e.g. Root+Nucleus+Leaf chassis → no surprise trunk).
+                        wk_voxel::sync_alloc_to_body(&mut g, &body);
                         g
                     } else {
                         editor.blueprint.genome

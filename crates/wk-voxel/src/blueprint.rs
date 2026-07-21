@@ -232,15 +232,17 @@ impl Blueprint {
                     lane: LaneId::Mid,
                     module: ModuleId::Stem,
                 },
+                // Leaves sit beside the upper stem so the tip column stays
+                // free for olive elongation (no leaf→stem→leaf tower).
                 PlacedModule {
-                    x: 8,
-                    y: 8,
+                    x: 7,
+                    y: 7,
                     lane: LaneId::Mid,
                     module: ModuleId::Photosystem,
                 },
                 PlacedModule {
                     x: 9,
-                    y: 8,
+                    y: 7,
                     lane: LaneId::Mid,
                     module: ModuleId::Photosystem,
                 },

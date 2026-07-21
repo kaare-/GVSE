@@ -1095,6 +1095,7 @@ mod tests {
     use crate::blueprint::Genome;
     use crate::cell::{Cell, Sat};
     use crate::chunk::ChunkCoord;
+    use crate::plant::LAND_GROW_PERIOD;
 
     fn wet_column() -> World {
         let mut w = World::new(7);
@@ -1644,6 +1645,73 @@ mod tests {
         );
     }
 
+    fn root_nucleus_leaf_body() -> Vec<BodyModule> {
+        vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Photosystem),
+        ]
+    }
+
+    #[test]
+    fn stemless_chassis_does_not_invent_trunk() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let mut g = Genome::default();
+        // Default alloc_stem is 0.25 — sync_alloc_to_body clamps it when
+        // no Stem is painted (editor spawn path).
+        crate::plant::sync_alloc_to_body(&mut g, &root_nucleus_leaf_body());
+        assert!(g.alloc_stem <= 0.05);
+        assert!(store.spawn_blueprint(&w, 4, 2, root_nucleus_leaf_body(), 80.0, g));
+        store.atoms[0].energy = 80.0;
+        for t in 0..400 {
+            store.step(&mut w, t);
+            if let Some(a) = store.atoms.first_mut() {
+                a.energy = a.energy.max(50.0);
+            }
+        }
+        assert!(!store.is_empty());
+        assert_eq!(
+            crate::plant::stem_count(&store.atoms[0]),
+            0,
+            "Root+Nucleus+Leaf chassis must not grow olive stems"
+        );
+    }
+
+    #[test]
+    fn stem_does_not_stack_on_photosystem() {
+        // Proper chassis: root / nucleus / stem, leaf to the side.
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (1, 1, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 2, 80.0, body);
+        atom.genome.alloc_stem = 1.0;
+        atom.genome.alloc_leaf = 0.5;
+        atom.genome.alloc_root = 0.05;
+        atom.energy = 80.0;
+        for t in 0..30u64 {
+            atom.age_ticks = t * LAND_GROW_PERIOD;
+            let _ = crate::plant::try_grow_shoot(&mut atom, t);
+        }
+        let stem_on_leaf = atom.body.iter().any(|&(x, y, m)| {
+            m == ModuleId::Stem
+                && atom.body.iter().any(|&(lx, ly, lm)| {
+                    lm == ModuleId::Photosystem && lx == x && ly == y - 1
+                })
+        });
+        assert!(
+            !stem_on_leaf,
+            "stem must not grow directly on top of a leaf"
+        );
+        assert!(
+            crate::plant::stem_count(&atom) > 1,
+            "stem-heavy shoot should still elongate the trunk"
+        );
+    }
+
     #[test]
     fn plant_with_lateral_runner_can_sprout_child() {
         let mut w = moist_sand_plot();
@@ -1685,7 +1753,7 @@ mod tests {
 
     #[test]
     fn rooted_plant_gains_energy_capacity_from_roots() {
-        let mut w = moist_sand_plot();
+        let w = moist_sand_plot();
         let mut store = OrganismStore::new();
         assert!(store.spawn_blueprint(
             &w,
