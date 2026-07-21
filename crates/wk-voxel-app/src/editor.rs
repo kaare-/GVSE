@@ -102,7 +102,8 @@ impl CreatureEditor {
         if is_key_pressed(KeyCode::F) {
             self.blueprint = Blueprint::minimal_fungus();
             self.name_buf = "fungus".into();
-            self.status = "Minimal fungus template (spawn on moist land + litter)".into();
+            self.status =
+                "Minimal fungus template (spawn on Organic / wet sand / any solid)".into();
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
             self.blueprint.name = self.name_buf.clone();
@@ -128,8 +129,9 @@ impl CreatureEditor {
         if is_key_pressed(KeyCode::Enter) {
             if self.blueprint.is_valid_creature() {
                 self.spawn_picker = true;
-                let hint = if self.blueprint.is_valid_plant() || self.blueprint.is_valid_fungus()
-                {
+                let hint = if self.blueprint.is_valid_fungus() {
+                    "land (Organic / wet sand preferred; any solid OK)"
+                } else if self.blueprint.is_valid_plant() {
                     "moist land (Air above porous solid)"
                 } else {
                     "a wet Air cell"
@@ -188,7 +190,9 @@ impl CreatureEditor {
         let sh = screen_height();
         if self.spawn_picker {
             draw_rectangle(0.0, 0.0, sw, 36.0, Color::from_rgba(8, 10, 16, 200));
-            let msg = if self.blueprint.is_valid_plant() || self.blueprint.is_valid_fungus() {
+            let msg = if self.blueprint.is_valid_fungus() {
+                "SPAWN MODE — click land (Organic / wet sand / any solid)  |  Esc cancel  |  F2 close"
+            } else if self.blueprint.is_valid_plant() {
                 "SPAWN MODE — click moist land (sand/soil under Air)  |  Esc cancel  |  F2 close"
             } else {
                 "SPAWN MODE — click a wet cell to place  |  Esc cancel  |  F2 close"

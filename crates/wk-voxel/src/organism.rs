@@ -28,8 +28,9 @@ use crate::fungi::{
 use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::plant::{
-    apply_genome, drink_roots, drought_band, find_plant_slot, is_anchored, is_land_plant,
-    leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac, sync_root_storage,
+    apply_genome, drink_roots, drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot,
+    is_anchored, is_land_plant, leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac,
+    sync_root_storage,
     try_grow_plant, try_vegetative_sprout, DroughtBand, DROUGHT_DORMANT_UPKEEP,
     DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
 };
@@ -233,13 +234,15 @@ pub struct Corpse {
 impl Corpse {
     pub fn from_atom(atom: &Atom) -> Self {
         let land = is_land_plant(atom) || is_fungus(atom);
-        // Roots are already painted into Organic on death — drop them from
-        // the lingering above-ground corpse so only stem/leaf/crown remain.
+        // Roots → Organic in soil; leaves → falling Organic litter.
+        // Lingering grey corpse keeps stem / nucleus / crown only.
         let body = if is_land_plant(atom) {
             atom.body
                 .iter()
                 .copied()
-                .filter(|(_, _, m)| *m != ModuleId::Root)
+                .filter(|(_, _, m)| {
+                    *m != ModuleId::Root && *m != ModuleId::Photosystem
+                })
                 .collect()
         } else {
             atom.body.clone()
@@ -363,8 +366,13 @@ impl OrganismStore {
         let gx = world.wrap_x(gx);
         let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
         let fungus = body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant;
-        let gy = if plant || fungus {
+        let gy = if plant {
             let Some(slot) = find_plant_slot(world, gx, gy) else {
+                return false;
+            };
+            slot
+        } else if fungus {
+            let Some(slot) = find_fungus_slot(world, gx, gy) else {
                 return false;
             };
             slot
@@ -517,10 +525,11 @@ impl OrganismStore {
         deaths.dedup();
         for &i in deaths.iter().rev() {
             if let Some(dead) = self.atoms.get(i).cloned() {
-                // Land plants: root stencil → Organic in the ground immediately,
-                // then the above-ground body lingers as a grey corpse.
+                // Land plants: roots stay as Organic in soil; leaves drop
+                // as falling Organic; stems linger grey until dissolve.
                 if is_land_plant(&dead) {
                     let _ = leave_dead_roots_in_place(world, &dead);
+                    let _ = drop_dead_leaves(world, &dead);
                 }
                 self.push_corpse(world, Corpse::from_atom(&dead));
             }
@@ -1315,6 +1324,82 @@ mod tests {
             w.get_cell(root_cell.0, root_cell.1).unwrap().sat.0,
             sat_before.min(crate::cell::water_capacity(MaterialId::Organic)),
             "Organic conversion must not destroy pore sat"
+        );
+    }
+
+    #[test]
+    fn land_plant_death_drops_leaves_keeps_stem_corpse() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        let leaf_cells: Vec<(i32, i32)> = store.atoms[0]
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|&(dx, dy, _)| {
+                (
+                    store.atoms[0].gx + dx as i32,
+                    store.atoms[0].gy + dy as i32,
+                )
+            })
+            .collect();
+        assert!(!leaf_cells.is_empty());
+        store.atoms[0].age_ticks = super::PLANT_LIFE_TICKS;
+        store.atoms[0].energy = 40.0;
+        store.step(&mut w, 0);
+        assert_eq!(store.corpse_count(), 1);
+        assert!(
+            store.corpses[0]
+                .body
+                .iter()
+                .all(|(_, _, m)| *m != ModuleId::Photosystem),
+            "leaves leave the grey corpse"
+        );
+        assert!(
+            store.corpses[0]
+                .body
+                .iter()
+                .any(|(_, _, m)| *m == ModuleId::Stem),
+            "stems linger on the corpse until dissolve"
+        );
+        for &(lx, ly) in &leaf_cells {
+            assert_eq!(
+                w.get_cell(lx, ly).map(|c| c.material),
+                Some(MaterialId::Organic),
+                "leaf cell ({lx},{ly}) should be falling Organic litter"
+            );
+        }
+    }
+
+    #[test]
+    fn fungus_spawns_on_bare_stone() {
+        let mut w = World::new(9);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+            for y in 2..8 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut store = OrganismStore::new();
+        assert!(
+            store.spawn_blueprint(
+                &w,
+                4,
+                2,
+                crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
+                40.0,
+                Genome::default(),
+            ),
+            "fungus should place on Air above any solid"
         );
     }
 

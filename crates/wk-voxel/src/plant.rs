@@ -319,6 +319,28 @@ pub fn leave_dead_roots_in_place(world: &mut World, atom: &Atom) -> u32 {
     painted
 }
 
+/// Drop Photosystem modules as falling Organic litter (dry Air only).
+/// Leaves peel off the corpse immediately; stems linger grey until dissolve.
+pub fn drop_dead_leaves(world: &mut World, atom: &Atom) -> u32 {
+    use crate::cell::Cell;
+    let mut painted = 0u32;
+    for &(dx, dy, mid) in &atom.body {
+        if mid != ModuleId::Photosystem {
+            continue;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        let Some(c) = world.get_cell(wx, wy) else {
+            continue;
+        };
+        if c.material == MaterialId::Air && c.sat.is_empty() {
+            world.set_cell(wx, wy, Cell::solid(MaterialId::Organic));
+            painted += 1;
+        }
+    }
+    painted
+}
+
 /// Nucleus y for a plant: Air cell directly above a porous solid near `gy`.
 pub fn find_plant_slot(world: &World, gx: i32, gy: i32) -> Option<i32> {
     let gx = world.wrap_x(gx);
@@ -336,6 +358,31 @@ pub fn find_plant_slot(world: &World, gx: i32, gy: i32) -> Option<i32> {
     None
 }
 
+/// Fungus seat: Air above any solid. Prefers Organic / wet Sand, but
+/// will land on bare rock too (may starve later — that's fine).
+pub fn find_fungus_slot(world: &World, gx: i32, gy: i32) -> Option<i32> {
+    let gx = world.wrap_x(gx);
+    let mut best: Option<(i32, i32)> = None; // score, y
+    let consider = |world: &World, y: i32, best: &mut Option<(i32, i32)>| {
+        if !fungus_crown(world, gx, y) {
+            return;
+        }
+        let score = fungus_seat_score(world, gx, y);
+        if best.map(|(s, _)| score > s).unwrap_or(true) {
+            *best = Some((score, y));
+        }
+    };
+    for dy in [0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6, 8, -8] {
+        consider(world, gy + dy, &mut best);
+    }
+    if best.is_none() {
+        for y in (gy - 32..=gy + 32).rev() {
+            consider(world, y, &mut best);
+        }
+    }
+    best.map(|(_, y)| y)
+}
+
 fn plantable_crown(world: &World, gx: i32, nucleus_y: i32) -> bool {
     let Some(air) = world.get_cell(gx, nucleus_y) else {
         return false;
@@ -350,6 +397,35 @@ fn plantable_crown(world: &World, gx: i32, nucleus_y: i32) -> bool {
         return false;
     }
     water_capacity(below.material) > 0
+}
+
+fn fungus_crown(world: &World, gx: i32, nucleus_y: i32) -> bool {
+    let Some(air) = world.get_cell(gx, nucleus_y) else {
+        return false;
+    };
+    if air.material != MaterialId::Air {
+        return false;
+    }
+    matches!(
+        world.get_cell(gx, nucleus_y - 1),
+        Some(c) if c.material != MaterialId::Air
+    )
+}
+
+fn fungus_seat_score(world: &World, gx: i32, nucleus_y: i32) -> i32 {
+    let Some(below) = world.get_cell(gx, nucleus_y - 1) else {
+        return 0;
+    };
+    match below.material {
+        MaterialId::Organic => 100,
+        MaterialId::Sand => {
+            let cap = water_capacity(MaterialId::Sand).max(1);
+            40 + (below.sat.0 as i32 * 40) / cap as i32
+        }
+        MaterialId::Clay => 30,
+        _ if water_capacity(below.material) > 0 => 10,
+        _ => 1, // bare rock / ice-adjacent solids — allowed but poor
+    }
 }
 
 /// Pin continuous pose to the integer crown (no buoyancy).

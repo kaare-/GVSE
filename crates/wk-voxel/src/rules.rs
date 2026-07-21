@@ -849,8 +849,8 @@ fn accumulate_seepage_xfers(
 /// one cell per invocation, including across chunk seams.
 ///
 /// V1 kept simple: dense grains fall through Air *any* saturation;
-/// Snow/Ice fall through *empty* Air only (float on water). Density-
-/// ordered stacking between grain species is a follow-up.
+/// Snow/Ice/Organic fall through *empty* Air only (float on water).
+/// Density-ordered stacking between grain species is a follow-up.
 pub fn apply_grain_fall(world: &mut World) {
     let regions = regions_for_standalone(world);
     for pass in partition_checkerboard(&regions) {
@@ -880,8 +880,8 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 if is_grain(above.material) {
                     // Dense grains sink through any Air sat.
                 } else if falls_through_empty_air(above.material) {
-                    // Snow / Ice hang-fix: drop through empty Air, float
-                    // on standing water so lake lids and shore slush stay.
+                    // Snow / Ice / Organic: drop through empty Air, float
+                    // on standing water (lids, shore slush, leaf litter).
                     if !cur.sat.is_empty() {
                         continue;
                     }

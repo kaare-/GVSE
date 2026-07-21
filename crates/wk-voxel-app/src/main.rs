@@ -698,9 +698,9 @@ async fn main() {
                         paused = editor.was_paused;
                         inspect = Some((gx, gy));
                     } else {
-                        editor.status = if editor.blueprint.is_valid_plant()
-                            || editor.blueprint.is_valid_fungus()
-                        {
+                        editor.status = if editor.blueprint.is_valid_fungus() {
+                            "Spawn failed — need Air above a solid (or pop cap)".into()
+                        } else if editor.blueprint.is_valid_plant() {
                             "Spawn failed — need Air above porous soil (or pop cap)".into()
                         } else {
                             "Spawn failed — need a wet Air cell nearby (or pop cap)".into()

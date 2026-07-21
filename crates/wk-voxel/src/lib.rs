@@ -52,7 +52,7 @@ pub use organism::{
     Atom, BodyModule, Corpse, ModuleId, OrganismStore, CORPSE_SETTLE_LAND_TICKS,
     CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
 };
-pub use plant::{find_plant_slot, is_land_plant, sync_alloc_to_body};
+pub use plant::{find_fungus_slot, find_plant_slot, is_land_plant, sync_alloc_to_body};
 pub use shade::{build_canopy_index, effective_photo_light, CanopyIndex};
 pub use heatmap::Heatmap;
 pub use humidity::{
