@@ -54,10 +54,10 @@ pub struct Genome {
     pub alloc_leaf: f32,
     #[serde(default = "default_alloc_root")]
     pub alloc_root: f32,
-    /// How hard Photosystems shade below (D2 — stored, unused in D1).
+    /// How hard Photosystems shade neighbours / self-stack (D2).
     #[serde(default = "default_leaf_absorb")]
     pub leaf_absorb: f32,
-    /// Dim-light harvest lean (D2 — stored, unused in D1).
+    /// Dim-light harvest lean (D2).
     #[serde(default = "default_shade_efficiency")]
     pub shade_efficiency: f32,
 }
@@ -98,6 +98,9 @@ impl Default for Genome {
     }
 }
 
+/// Mutation strength scale (column `MUTATION_SIGMA`).
+const MUTATION_SIGMA: f32 = 0.12;
+
 impl Genome {
     /// Normalized `(stem, leaf, root)` surplus weights (sum to 1).
     pub fn alloc_weights(self) -> (f32, f32, f32) {
@@ -107,6 +110,48 @@ impl Genome {
         let sum = (s + l + r).max(1e-6);
         (s / sum, l / sum, r / sum)
     }
+
+    /// Deterministic per-trait mutation. High `clone_fidelity` → small jitter.
+    pub fn mutate(parent: Genome, world_seed: u64, tick: u64, parent_id: u32) -> Genome {
+        let mut g = parent;
+        let fidelity = parent.clone_fidelity.clamp(0.0, 1.0);
+        let strength = (1.0 - fidelity) * MUTATION_SIGMA;
+        let salt_base = tick
+            .wrapping_mul(0x9E37_79B9)
+            .wrapping_add(parent_id as u64);
+        let mut trait_i = 0u64;
+        let mut jitter = |value: f32, lo: f32, hi: f32| -> f32 {
+            trait_i += 1;
+            let h = hash_u64(world_seed, salt_base, trait_i, 0xE11);
+            let u = (h as f32 / u64::MAX as f32) * 2.0 - 1.0;
+            (value + u * strength * (hi - lo).max(0.1)).clamp(lo, hi)
+        };
+        g.metabolic_rate = jitter(g.metabolic_rate, 0.2, 2.0);
+        g.reproduce_at = jitter(g.reproduce_at, 0.3, 0.95);
+        g.clone_fidelity = jitter(g.clone_fidelity, 0.05, 1.0);
+        g.buoyancy_bias = jitter(g.buoyancy_bias, 0.0, 1.0);
+        g.root_depth_bias = jitter(g.root_depth_bias, 0.0, 1.0);
+        g.alloc_stem = jitter(g.alloc_stem, 0.0, 1.0);
+        g.alloc_leaf = jitter(g.alloc_leaf, 0.0, 1.0);
+        g.alloc_root = jitter(g.alloc_root, 0.0, 1.0);
+        g.leaf_absorb = jitter(g.leaf_absorb, 0.05, 1.0);
+        g.shade_efficiency = jitter(g.shade_efficiency, 0.0, 1.0);
+        g
+    }
+}
+
+fn hash_u64(seed: u64, a: u64, b: u64, salt: u64) -> u64 {
+    let mut x = seed
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(a)
+        .wrapping_add(b)
+        .wrapping_add(salt);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^= x >> 31;
+    x
 }
 
 /// Voxel-local creature blueprint.
@@ -343,5 +388,22 @@ mod tests {
         let (s, l, r) = g.alloc_weights();
         assert!((s + l + r - 1.0).abs() < 1e-5);
         assert!((r - 0.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn mutate_jitters_with_low_fidelity() {
+        let mut parent = Genome::default();
+        parent.clone_fidelity = 0.1;
+        parent.alloc_root = 0.5;
+        parent.leaf_absorb = 0.5;
+        let child = Genome::mutate(parent, 42, 100, 7);
+        // With low fidelity, at least one plant gene should usually move.
+        assert!(
+            (child.alloc_root - parent.alloc_root).abs() > 1e-6
+                || (child.leaf_absorb - parent.leaf_absorb).abs() > 1e-6
+                || (child.root_depth_bias - parent.root_depth_bias).abs() > 1e-6
+                || (child.alloc_stem - parent.alloc_stem).abs() > 1e-6,
+            "low-fidelity mutate should jitter plant genes"
+        );
     }
 }

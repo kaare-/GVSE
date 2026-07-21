@@ -37,6 +37,16 @@ pub const LAND_GROW_PERIOD: u64 = 48;
 pub const ROOT_ELONGATE_BASE_COST: f32 = 2.4;
 /// Energy to place one Stem / Photosystem pixel.
 pub const SHOOT_GROW_COST: f32 = 1.6;
+/// Energy fraction of tank to fire a vegetative sprout.
+pub const LAND_SPROUT_ENERGY_FRAC: f32 = 0.52;
+/// Ticks between sprout attempts.
+pub const LAND_SPROUT_PERIOD: u64 = 48;
+/// Painted Root modules required before a sprout may fire.
+pub const LAND_SPROUT_MIN_ROOTS: usize = 3;
+/// Max columns a rhizome sprout may emerge from the crown.
+pub const ROOT_SPROUT_MAX_DIST: i32 = 6;
+/// Fraction of tank spent to sprout (child gets half).
+pub const LAND_SPROUT_COST_FRAC: f32 = 0.45;
 
 /// True when the body includes a Root (land habit).
 pub fn is_land_plant(atom: &Atom) -> bool {
@@ -234,6 +244,10 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
     };
 
     let depth_bias = atom.genome.root_depth_bias.clamp(0.0, 1.0);
+    // Urge a lateral runner before sprouting (column rhizome bias).
+    let need_runner = !has_lateral_runner(atom)
+        && n_roots >= LAND_SPROUT_MIN_ROOTS.saturating_sub(1);
+    let banking_for_sprout = atom.energy >= tank * LAND_SPROUT_ENERGY_FRAC * 0.85;
     const DIRS: [(i16, i16); 5] = [(0, -1), (-1, -1), (1, -1), (-1, 0), (1, 0)];
     let mut best: Option<(f32, i16, i16, f32)> = None; // score, dx, dy, cost
 
@@ -268,7 +282,20 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
                 .max(cell_moisture_frac(world, wx, wy - 1));
             let down = if dy < 0 { 1.0 } else { 0.0 };
             let lateral = if dx != 0 && dy == 0 { 0.35 } else { 0.0 };
-            let score = moist + depth_bias * down + (1.0 - depth_bias) * lateral - pen * 0.03;
+            let mut score = moist + depth_bias * down + (1.0 - depth_bias) * lateral - pen * 0.03;
+            if need_runner || banking_for_sprout {
+                if dx != 0 && dy == 0 {
+                    score += 2.8;
+                } else if dx != 0 && dy < 0 {
+                    score += 1.1;
+                }
+                if nx != 0 {
+                    score += 1.2;
+                }
+                if need_runner && dy < 0 && dx == 0 {
+                    score -= 1.2;
+                }
+            }
             if best.map(|(s, ..)| score > s).unwrap_or(true) {
                 best = Some((score, nx, ny, cost));
             }
@@ -366,6 +393,93 @@ pub fn try_grow_plant(world: &World, atom: &mut Atom, tick: u64) -> f32 {
         }
     }
     spent
+}
+
+/// True when at least one Root sits in a column other than the crown.
+pub fn has_lateral_runner(atom: &Atom) -> bool {
+    atom.body
+        .iter()
+        .any(|&(dx, _, m)| m == ModuleId::Root && dx != 0)
+}
+
+/// Pick a world column for vegetative sprout from a lateral runner tip.
+pub fn pick_sprout_column(world: &World, atom: &Atom) -> Option<i32> {
+    if !has_lateral_runner(atom) || root_count(atom) < LAND_SPROUT_MIN_ROOTS {
+        return None;
+    }
+    let mut best: Option<(i32, f32)> = None; // |dx|, score
+    let mut best_wx = atom.gx;
+    for &(dx, dy, mid) in &atom.body {
+        if mid != ModuleId::Root || dx == 0 {
+            continue;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let dist = dx.abs() as i32;
+        if dist < 1 || dist > ROOT_SPROUT_MAX_DIST {
+            continue;
+        }
+        // Need a plantable crown near the tip column.
+        let tip_y = atom.gy + dy as i32;
+        let Some(slot) = find_plant_slot(world, wx, tip_y.max(atom.gy)) else {
+            continue;
+        };
+        let moist = cell_moisture_frac(world, wx, slot - 1);
+        if moist < 0.02 {
+            continue;
+        }
+        let score = moist + dist as f32 * 0.05;
+        if best.map(|(d, s)| dist > d || (dist == d && score > s)).unwrap_or(true) {
+            best = Some((dist, score));
+            best_wx = wx;
+        }
+    }
+    best.map(|_| best_wx)
+}
+
+/// Vegetative sucker: child plant on moist land at a lateral runner tip.
+///
+/// Requires painted lateral root, enough roots, energy, and cooldown.
+/// Child body is a fresh minimal plant; genome is mutated from parent.
+pub fn try_vegetative_sprout(
+    world: &World,
+    atom: &mut Atom,
+    tick: u64,
+    entity_id: u32,
+    pop_room: bool,
+) -> Option<Atom> {
+    if !pop_room || atom.cooldown > 0 {
+        return None;
+    }
+    if root_count(atom) < LAND_SPROUT_MIN_ROOTS {
+        return None;
+    }
+    let tank = atom.energy_max.max(1.0);
+    if atom.energy < tank * LAND_SPROUT_ENERGY_FRAC {
+        return None;
+    }
+    let wx = pick_sprout_column(world, atom)?;
+    let gy = find_plant_slot(world, wx, atom.gy)?;
+    let cost = tank * LAND_SPROUT_COST_FRAC;
+    if atom.energy < cost {
+        return None;
+    }
+    atom.energy -= cost;
+    atom.cooldown = LAND_SPROUT_PERIOD;
+
+    let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+    let child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
+    let mut child = Atom::from_body(wx, gy, atom.energy_max, body);
+    apply_genome(&mut child, child_genome);
+    child.energy = (cost * 0.5).clamp(1.0, atom.energy_max);
+    child.cooldown = LAND_SPROUT_PERIOD;
+    pin_plant_pose(&mut child);
+    if !is_anchored(world, &child) {
+        // Refund — site looked plantable but crown didn't seat.
+        atom.energy = (atom.energy + cost).min(atom.energy_max);
+        atom.cooldown = 0;
+        return None;
+    }
+    Some(child)
 }
 
 fn hash01(a: u64, b: u64, c: u64, salt: u64) -> f32 {

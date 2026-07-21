@@ -512,9 +512,9 @@ active-chunk planning, four-pass checkerboard, **rayon
 parallelism within each colour**, **chunk occupancy skips** for
 evap / karst, and **Set A Atoms** (`OrganismStore` — isolated, no
 `wk-agents` import) are landed in `wk-voxel`, plus **Set D plants**
-(D1 growth + D2 canopy shade — see `plant.rs`, `shade.rs`, and
-`docs/organism/VOXEL_PLANTS.md`). Remaining focus is vegetative sprouts
-(D3), drought banking (D4), and Set E.
+(D1–D3: growth, canopy shade, vegetative sprouts — see `plant.rs`,
+`shade.rs`, and `docs/organism/VOXEL_PLANTS.md`). Remaining focus is
+drought banking (D4) and Set E.
 
 Each PR keeps the isolation contract and passes headless tests
 before touching rendering.

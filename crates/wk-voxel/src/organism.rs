@@ -25,7 +25,8 @@ use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY
 use crate::grid::World;
 use crate::plant::{
     apply_genome, drink_roots, find_plant_slot, is_anchored, is_land_plant, pin_plant_pose,
-    root_moisture_frac, try_grow_plant, DROUGHT_STRESS_DRAIN, DROUGHT_STRESS_FRAC,
+    root_moisture_frac, try_grow_plant, try_vegetative_sprout, DROUGHT_STRESS_DRAIN,
+    DROUGHT_STRESS_FRAC,
 };
 use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
 
@@ -309,8 +310,11 @@ impl OrganismStore {
             }
 
             if is_land_plant(atom) {
-                if !step_land_plant(world, atom, day, tick, &canopy, i as u32) {
-                    deaths.push(i);
+                let room = pop + births.len() < MAX_ATOMS;
+                match step_land_plant(world, atom, day, tick, &canopy, i as u32, room) {
+                    PlantStep::Dead => deaths.push(i),
+                    PlantStep::Alive => {}
+                    PlantStep::Sprout(child) => births.push(child),
                 }
                 continue;
             }
@@ -374,7 +378,13 @@ impl OrganismStore {
     }
 }
 
-/// Land plant tick. Returns `false` when the plant should die.
+enum PlantStep {
+    Dead,
+    Alive,
+    Sprout(Atom),
+}
+
+/// Land plant tick: drink, shade photo, grow, maybe vegetative sprout.
 fn step_land_plant(
     world: &mut World,
     atom: &mut Atom,
@@ -382,10 +392,11 @@ fn step_land_plant(
     tick: u64,
     canopy: &CanopyIndex,
     entity_id: u32,
-) -> bool {
+    pop_room: bool,
+) -> PlantStep {
     pin_plant_pose(atom);
     if !is_anchored(world, atom) {
-        return false;
+        return PlantStep::Dead;
     }
     let moist = root_moisture_frac(world, atom);
     let (drink_e, _) = drink_roots(world, atom);
@@ -416,11 +427,14 @@ fn step_land_plant(
     };
     atom.energy = (atom.energy + harvest + drink_e - upkeep - stress).clamp(0.0, atom.energy_max);
     if atom.energy <= 0.0 {
-        return false;
+        return PlantStep::Dead;
     }
     // Surplus → tissue (root / stem / leaf) from allocation genes.
     let _ = try_grow_plant(world, atom, tick);
-    atom.energy > 0.0
+    if let Some(child) = try_vegetative_sprout(world, atom, tick, entity_id, pop_room) {
+        return PlantStep::Sprout(child);
+    }
+    PlantStep::Alive
 }
 
 /// Relative density: bias 0 → buoyant (0.55), bias 1 → heavy (1.45).
@@ -1141,6 +1155,45 @@ mod tests {
             stem1 > stem0,
             "stem-heavy alloc should stack olive (had {stem0}, now {stem1})"
         );
+    }
+
+    #[test]
+    fn plant_with_lateral_runner_can_sprout_child() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let mut g = Genome::default();
+        g.clone_fidelity = 0.5;
+        g.alloc_root = 0.8;
+        g.alloc_stem = 0.1;
+        g.alloc_leaf = 0.1;
+        assert!(store.spawn_blueprint(&w, 4, 2, minimal_plant_body(), 60.0, g));
+        // Paint a lateral rhizome + extra roots so sprout gate opens.
+        let a = &mut store.atoms[0];
+        a.body.push((-1, -1, ModuleId::Root));
+        a.body.push((-2, -1, ModuleId::Root));
+        a.body.push((1, -1, ModuleId::Root));
+        a.energy = 60.0;
+        a.cooldown = 0;
+        let n0 = store.len();
+        for t in 0..200u64 {
+            store.step(&mut w, t);
+            if store.len() > n0 {
+                break;
+            }
+            if let Some(p) = store.atoms.first_mut() {
+                p.energy = p.energy.max(55.0);
+                p.cooldown = 0;
+            }
+        }
+        assert!(
+            store.len() > n0,
+            "lateral runner + energy should fire a vegetative sprout"
+        );
+        assert!(store.atoms.iter().all(is_land_plant));
+        // Child should sit on a different column.
+        let cols: std::collections::HashSet<i32> =
+            store.atoms.iter().map(|a| a.gx).collect();
+        assert!(cols.len() >= 2, "sprout should emerge on a neighbour column");
     }
 
     #[test]
