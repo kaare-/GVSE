@@ -7,7 +7,7 @@ use macroquad::ui::{hash, root_ui, widgets};
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
     ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, Genome, GrainConfig, KarstConfig,
-    OrographicConfig, PhaseConfig, RainConfig, TempConfig, WorldgenParams,
+    OrographicConfig, PerfConfig, PhaseConfig, RainConfig, TempConfig, WorldgenParams,
 };
 
 /// Default plant / fungus gene knobs applied on spawn (and optionally to living plants).
@@ -69,6 +69,8 @@ pub struct SimSettings {
     pub temp: TempConfig,
     pub phase: PhaseConfig,
     pub grain: GrainConfig,
+    /// Physics trade-offs (Tab → Performance). Defaults preserve water feel.
+    pub perf: PerfConfig,
     pub wind_vx: f32,
     pub humidity_diffusion_alpha: f32,
     /// Scratch f32s for material sliders (synced → MaterialRegistry overrides).
@@ -128,6 +130,7 @@ impl SimSettings {
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
             grain: GrainConfig::default(),
+            perf: PerfConfig::default(),
             wind_vx: 0.05,
             humidity_diffusion_alpha: 0.15,
             mat_perm,
@@ -400,6 +403,37 @@ impl SimSettings {
                     self.phase.period_ticks = period.round().clamp(1.0, 120.0) as u64;
                     self.phase.min_budget_to_snow =
                         self.phase.min_budget_to_snow.clamp(1.0, 255.0);
+                });
+                ui.separator();
+
+                ui.tree_node(hash!(), "Performance", |ui| {
+                    ui.label(
+                        None,
+                        "Defaults = full water feel. Toggle to A/B cost vs cascade/leveling.",
+                    );
+                    ui.checkbox(
+                        hash!(),
+                        "Flow every other substep (gravity still ×12)",
+                        &mut self.perf.flow_every_other_substep,
+                    );
+                    ui.label(
+                        None,
+                        "  Off = tuned feel. On ≈ half surface-flow work — watch shores.",
+                    );
+                    ui.checkbox(
+                        hash!(),
+                        "Quiet flow early-out (tiny dirty halo)",
+                        &mut self.perf.flow_quiet_early_out,
+                    );
+                    ui.label(
+                        None,
+                        "  Can stall hill drains / shelf cascades — compare carefully.",
+                    );
+                    ui.checkbox(
+                        hash!(),
+                        "Parallel physics (rayon checkerboard)",
+                        &mut self.perf.parallel_physics,
+                    );
                 });
                 ui.separator();
 

@@ -19,10 +19,11 @@ use wk_voxel::{
     apply_gravity_fall_regions, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     apply_seepage_regions, apply_water_flow_regions, clear_all_dirty, find_plant_slot,
     humidity_diffuse_due, partition_checkerboard, plan_active, set_parallel_enabled,
-    stamp_world, temperature_step_due, tick, Blueprint, ClimateConfig, CloudConfig, CloudStore,
-    CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity, KarstConfig, OrganismStore,
-    OrographicConfig, PhaseConfig, RainConfig, Temperature, Wind, World, WorldgenParams,
-    CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_SUBSTEPS,
+    stamp_world, temperature_step_due, tick_with_perf, Blueprint, ClimateConfig, CloudConfig,
+    CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity, KarstConfig,
+    OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, RainConfig, Temperature, Wind,
+    World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_QUIET_AREA, FLOW_SUBSTEPS,
+    FLOW_SUBSTEPS_MIN,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -97,6 +98,8 @@ struct PhysicsAccum {
     grain_fall: Duration,
     grain_repose: Duration,
     substeps_ran: u64,
+    active_regions: u64,
+    active_area: u64,
 }
 
 impl PhysicsAccum {
@@ -109,6 +112,8 @@ impl PhysicsAccum {
             grain_fall: Duration::ZERO,
             grain_repose: Duration::ZERO,
             substeps_ran: 0,
+            active_regions: 0,
+            active_area: 0,
         }
     }
 
@@ -120,6 +125,17 @@ impl PhysicsAccum {
             + self.grain_fall
             + self.grain_repose
     }
+}
+
+fn region_area(active: &[wk_voxel::ActiveChunk]) -> usize {
+    active
+        .iter()
+        .map(|ac| {
+            let w = (ac.rect.x1 as usize).saturating_sub(ac.rect.x0 as usize) + 1;
+            let h = (ac.rect.y1 as usize).saturating_sub(ac.rect.y0 as usize) + 1;
+            w.saturating_mul(h)
+        })
+        .sum()
 }
 
 struct Scene {
@@ -139,6 +155,7 @@ struct Scene {
     oro: OrographicConfig,
     phase: PhaseConfig,
     climate: ClimateConfig,
+    perf: PerfConfig,
 }
 
 fn demo_params() -> WorldgenParams {
@@ -215,6 +232,7 @@ fn stamp_scene(params: WorldgenParams) -> Scene {
         oro,
         phase: PhaseConfig::default(),
         climate: ClimateConfig::default(),
+        perf: PerfConfig::default(),
     }
 }
 
@@ -306,7 +324,7 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
                 Some(&scene.phase),
             );
             apply_karst_dissolution(&mut scene.world, &scene.karst);
-            tick(&mut scene.world);
+            tick_with_perf(&mut scene.world, &scene.perf);
             apply_flow_erosion(&mut scene.world, &scene.grain);
             if humidity_diffuse_due(scene.world.tick) {
                 scene.humidity.diffuse(HUMIDITY_DIFFUSION_ALPHA);
@@ -385,7 +403,7 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
             a.karst += t0.elapsed();
 
             let t0 = Instant::now();
-            tick(&mut scene.world);
+            tick_with_perf(&mut scene.world, &scene.perf);
             a.physics_tick += t0.elapsed();
 
             let t0 = Instant::now();
@@ -435,9 +453,10 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
     }
 }
 
-/// Timed mirror of [`tick`] — keep in sync with `rules::tick`.
-fn timed_physics_tick(world: &mut World, a: &mut PhysicsAccum) {
-    for _ in 0..FLOW_SUBSTEPS {
+/// Timed mirror of [`tick_with_perf`] — keep in sync with `rules`.
+fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum) {
+    set_parallel_enabled(perf.parallel_physics);
+    for step in 0..FLOW_SUBSTEPS {
         let t0 = Instant::now();
         let active = plan_active(world);
         clear_all_dirty(world);
@@ -446,6 +465,8 @@ fn timed_physics_tick(world: &mut World, a: &mut PhysicsAccum) {
             break;
         }
         a.substeps_ran += 1;
+        a.active_regions += active.len() as u64;
+        a.active_area += region_area(&active) as u64;
 
         let passes = partition_checkerboard(&active);
         let t0 = Instant::now();
@@ -454,9 +475,20 @@ fn timed_physics_tick(world: &mut World, a: &mut PhysicsAccum) {
         }
         a.gravity += t0.elapsed();
 
-        let t0 = Instant::now();
-        apply_water_flow_regions(world, &active);
-        a.water_flow += t0.elapsed();
+        let run_flow = !perf.flow_every_other_substep || (step % 2 == 1);
+        if run_flow {
+            let t0 = Instant::now();
+            apply_water_flow_regions(world, &active);
+            a.water_flow += t0.elapsed();
+        }
+
+        if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_MIN {
+            let next = plan_active(world);
+            let area = region_area(&next);
+            if next.is_empty() || area <= FLOW_QUIET_AREA {
+                break;
+            }
+        }
     }
 
     let t0 = Instant::now();
@@ -575,6 +607,13 @@ fn print_physics_table(phys: &PhysicsAccum, n: u64) {
         ms_per(phys.total(), n),
         phys.substeps_ran as f32 / n as f32
     );
+    if phys.substeps_ran > 0 {
+        eprintln!(
+            "  active plan          {:>8.1} regions/substep   {:>8.0} cells/substep",
+            phys.active_regions as f32 / phys.substeps_ran as f32,
+            phys.active_area as f32 / phys.substeps_ran as f32
+        );
+    }
 }
 
 fn run_profile(label: &str, params: WorldgenParams, with_plants: bool) {
@@ -607,7 +646,7 @@ fn run_profile(label: &str, params: WorldgenParams, with_plants: bool) {
             Some(&scene.temperature),
             Some(&scene.phase),
         );
-        timed_physics_tick(&mut scene.world, &mut phys);
+        timed_physics_tick(&mut scene.world, &scene.perf, &mut phys);
     }
     print_physics_table(&phys, PHYSICS_BREAKDOWN_TICKS);
 
@@ -626,11 +665,28 @@ fn run_profile(label: &str, params: WorldgenParams, with_plants: bool) {
     eprintln!();
 }
 
-fn run_parallel_ab(params: WorldgenParams) {
-    eprintln!("=== rayon A/B (demo stack, no plants) ===");
-    for (label, on) in [("parallel ON", true), ("parallel OFF", false)] {
-        set_parallel_enabled(on);
+fn run_perf_knob_ab(params: WorldgenParams) {
+    eprintln!("=== PerfConfig A/B (demo stack, no plants) ===");
+    let variants: [(&str, PerfConfig); 3] = [
+        ("defaults (full flow)", PerfConfig::default()),
+        (
+            "every-other flow",
+            PerfConfig {
+                flow_every_other_substep: true,
+                ..PerfConfig::default()
+            },
+        ),
+        (
+            "parallel OFF",
+            PerfConfig {
+                parallel_physics: false,
+                ..PerfConfig::default()
+            },
+        ),
+    ];
+    for (label, perf) in variants {
         let mut scene = stamp_scene(params);
+        scene.perf = perf;
         for _ in 0..WARMUP_TICKS {
             one_stack_tick(&mut scene, None);
         }
@@ -641,7 +697,7 @@ fn run_parallel_ab(params: WorldgenParams) {
         }
         let wall = wall.elapsed();
         eprintln!(
-            "  {label:14}  wall {:>7.3} ms/tick   physics {:>7.3} ms/tick",
+            "  {label:22}  wall {:>7.3} ms/tick   physics {:>7.3} ms/tick",
             ms_per(wall, MEASURE_TICKS),
             ms_per(accum.physics_tick, MEASURE_TICKS)
         );
@@ -660,6 +716,6 @@ fn perf_profile_demo_and_stress() {
         demo_params(),
         true,
     );
-    run_parallel_ab(demo_params());
+    run_perf_knob_ab(demo_params());
     run_profile("stress (32×6 chunks)", stress_params(), false);
 }

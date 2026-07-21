@@ -120,8 +120,15 @@ impl Chunk {
     /// Write a cell and mark the chunk's dirty rectangle so the next
     /// tick knows which region to re-scan. Also raises occupancy
     /// flags (cleared only by the passes that scan for absence).
+    ///
+    /// No-op when the stored cell already equals `cell` — avoids
+    /// inflating dirty rects on redundant writes.
     pub fn set(&mut self, x: usize, y: usize, cell: Cell) {
-        self.cells[Self::idx(x, y)] = cell;
+        let idx = Self::idx(x, y);
+        if self.cells[idx] == cell {
+            return;
+        }
+        self.cells[idx] = cell;
         let xu = x as u8;
         let yu = y as u8;
         match &mut self.dirty {
@@ -214,5 +221,14 @@ mod tests {
         // Dry air / stone do not clear sticky flags.
         c.set(1, 1, Cell::air());
         assert!(c.has_wet_air);
+    }
+
+    #[test]
+    fn set_same_cell_does_not_dirty() {
+        let mut c = Chunk::new(ChunkCoord::new(0, 0));
+        c.set(3, 4, Cell::water());
+        c.clear_dirty();
+        c.set(3, 4, Cell::water());
+        assert!(c.dirty.is_none(), "identical rewrite must not wake physics");
     }
 }

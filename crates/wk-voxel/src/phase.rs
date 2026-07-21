@@ -103,6 +103,8 @@ pub struct PhaseConfig {
     /// Cold precip settles as Snow (when off, cold columns get liquid rain).
     pub enable_snow_precip: bool,
     /// Only run when `world.tick % period_ticks == 0`.
+    /// Default `4` — ice still tracks weather, without a full-world
+    /// column walk every physics tick.
     pub period_ticks: u64,
 }
 
@@ -132,7 +134,7 @@ impl Default for PhaseConfig {
             enable_cold_avalanche: true,
             enable_cull: true,
             enable_snow_precip: true,
-            period_ticks: 1,
+            period_ticks: 4,
         }
     }
 }
@@ -149,6 +151,9 @@ pub fn apply_phase(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
     }
     let columns = column_xs(world);
     for gx in columns {
+        if !column_may_phase(world, gx, temp, cfg) {
+            continue;
+        }
         if cfg.enable_cull {
             cull_frozen_column(world, gx, cfg.max_ice_cells_per_column);
         }
@@ -168,6 +173,52 @@ pub fn apply_phase(world: &mut World, temp: &Temperature, cfg: &PhaseConfig) {
             freeze_column_surface(world, gx, temp, cfg);
         }
     }
+}
+
+/// Cheap column gate: skip warm dry columns with no ice/snow near the
+/// free surface. Cold wet columns and any frozen band still run.
+fn column_may_phase(world: &World, gx: i32, temp: &Temperature, cfg: &PhaseConfig) -> bool {
+    let Some((y0, y1)) = y_bounds(world) else {
+        return false;
+    };
+    // Drop through empty sky to the first non-empty cell, then peek a
+    // short band — avoids full-height walks on tropical daytime land.
+    const BAND: i32 = 12;
+    for y in (y0..=y1).rev() {
+        let Some(cell) = world.get_cell(gx, y) else {
+            continue;
+        };
+        if cell.material == MaterialId::Air && cell.sat.is_empty() {
+            continue;
+        }
+        let mut has_frozen = is_frozen_solid(cell.material);
+        let mut has_freezable = cell.material == MaterialId::Air
+            && cell.sat.0 >= cfg.min_sat_to_freeze;
+        let band_lo = (y - BAND + 1).max(y0);
+        for yy in band_lo..y {
+            let Some(c) = world.get_cell(gx, yy) else {
+                continue;
+            };
+            if is_frozen_solid(c.material) {
+                has_frozen = true;
+            }
+            if c.material == MaterialId::Air && c.sat.0 >= cfg.min_sat_to_freeze {
+                has_freezable = true;
+            }
+            if has_frozen && has_freezable {
+                break;
+            }
+        }
+        if has_frozen {
+            return true;
+        }
+        if !has_freezable {
+            return false;
+        }
+        let t_c = temp.at_cell(gx, y);
+        return t_c <= cfg.freeze_point_c + 1.5;
+    }
+    false
 }
 
 /// Alias for [`apply_phase`] (milestone-1 name kept for call sites).
@@ -898,7 +949,11 @@ mod tests {
     fn ice_thickens_one_cell_per_tick_under_lid() {
         let mut w = pond_world();
         let temp = cold_temp(16, 16, -10.0);
-        let cfg = PhaseConfig::default();
+        // Force every-tick cadence so the thickening step is visible.
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
         apply_phase(&mut w, &temp, &cfg);
         assert_eq!(w.get_cell(3, 3).unwrap().material, MaterialId::Ice);
         assert!(
@@ -983,13 +1038,17 @@ mod tests {
         w.set_cell(1, 1, Cell::solid(MaterialId::Ice));
         w.set_cell(1, 2, Cell::solid(MaterialId::Ice));
         let temp = cold_temp(16, 16, 8.0);
-        apply_phase(&mut w, &temp, &PhaseConfig::default());
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        apply_phase(&mut w, &temp, &cfg);
         // Top melts first; buried ice waits.
         assert_eq!(w.get_cell(1, 2).unwrap().material, MaterialId::Air);
         assert!(w.get_cell(1, 2).unwrap().sat.is_full());
         assert_eq!(w.get_cell(1, 1).unwrap().material, MaterialId::Ice);
         w.tick = 1;
-        apply_phase(&mut w, &temp, &PhaseConfig::default());
+        apply_phase(&mut w, &temp, &cfg);
         assert_eq!(w.get_cell(1, 1).unwrap().material, MaterialId::Air);
         assert!(w.get_cell(1, 1).unwrap().sat.is_full());
     }
