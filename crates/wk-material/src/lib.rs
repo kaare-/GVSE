@@ -489,7 +489,9 @@ impl MaterialRegistry {
             // Mix of tan and grey (mixed-grain aggregate).
             MaterialId::Gravel => [0xB4, 0xA4, 0x80],
             MaterialId::Sand => [0xE8, 0xD6, 0x6B],
-            MaterialId::Clay => [0x80, 0x40, 0x00],
+            // Cool dusty tan — far from living Root sienna `#7A4B2A`
+            // (was `#804000`, which read as the same brown underground).
+            MaterialId::Clay => [0xB8, 0xA4, 0x90],
             // Dark olive mud — reads as bed ooze, not living green.
             MaterialId::Organic => [0x3A, 0x4A, 0x28],
             MaterialId::Water => [0x23, 0x64, 0xD2],

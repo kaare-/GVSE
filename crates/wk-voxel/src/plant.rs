@@ -17,20 +17,36 @@ use crate::grid::World;
 use crate::organism::{Atom, BodyModule, ModuleId};
 
 /// Energy from one sat unit drunk by roots.
-pub const ROOT_WATER_ENERGY: f32 = 0.04;
-/// Max sat removed per Root module per tick.
-pub const ROOT_SIP_SAT: u8 = 1;
+pub const ROOT_WATER_ENERGY: f32 = 0.08;
+/// Fractional sip progress per Root module per tick. Integer sat only
+/// leaves the cell when the accumulator crosses 1 — stops roots from
+/// flash-drying hills (column `ROOT_SIP_KG_PER_ROOT` spirit).
+pub const ROOT_SIP_FRAC_PER_ROOT: f32 = 0.025;
+/// Hard cap on sat units removed in one drink event.
+pub const ROOT_SIP_MAX_SAT: u8 = 1;
 /// Soft stress drain while drying (Stressed band). Hibernate handles
 /// the bone-dry case — keep this tiny so short droughts are survivable.
-pub const DROUGHT_STRESS_DRAIN: f32 = 0.008;
+pub const DROUGHT_STRESS_DRAIN: f32 = 0.003;
 /// Pore fill fraction below which photo slows and stress starts.
-pub const DROUGHT_STRESS_FRAC: f32 = 0.08;
+pub const DROUGHT_STRESS_FRAC: f32 = 0.06;
 /// Pore fill fraction that triggers drought dormancy (hibernate).
-pub const DROUGHT_DORMANT_FRAC: f32 = 0.02;
+pub const DROUGHT_DORMANT_FRAC: f32 = 0.015;
 /// Max consecutive dormant ticks before the plant dies (~2.5 min @ 60 Hz).
 pub const DROUGHT_HIBERNATE_MAX_TICKS: u32 = 9_000;
 /// Upkeep multiplier while drought-dormant (respiration only).
-pub const DROUGHT_DORMANT_UPKEEP: f32 = 0.18;
+pub const DROUGHT_DORMANT_UPKEEP: f32 = 0.12;
+/// Land-plant basal upkeep vs plankton (woody roots respire less).
+pub const PLANT_UPKEEP_MULT: f32 = 0.35;
+/// Extra score weight so roots prefer wetter substrate cells.
+pub const ROOT_MOISTURE_AFFINITY: f32 = 2.8;
+/// Penalty per already-painted Root in the Moore neighbourhood of a
+/// candidate cell — keeps under-crown growth as threads, not blobs.
+pub const ROOT_CROWD_PENALTY: f32 = 0.95;
+/// Soft local density: roots packed near the crown pay this extra.
+pub const ROOT_CROWN_BLOB_PENALTY: f32 = 1.4;
+/// Alloc stem must clear this to invent the *first* Stem pixel when the
+/// body has none (leaf-only chassis stay leafless trunks).
+pub const STEM_INVENT_MIN_ALLOC: f32 = 0.18;
 
 /// Soft caps so 1× bodies stay readable.
 pub const MAX_ROOT_MODULES: usize = 16;
@@ -209,31 +225,51 @@ fn solid_purchase(world: &World, gx: i32, gy: i32) -> bool {
 }
 
 /// Pull a little pore water from solids under roots → energy.
-/// Returns (energy gained, sat removed).
-pub fn drink_roots(world: &mut World, atom: &Atom) -> (f32, u32) {
+///
+/// Only removes sat from **porous solids** (never free Air water).
+/// Removed sat should be returned to atmospheric humidity by the caller
+/// so plants don't destroy water mass.
+///
+/// Returns (energy gained, sat removed, preferred (gx,gy) for humidity deposit).
+pub fn drink_roots(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32)) {
+    let n_roots = root_count(atom).max(1) as f32;
+    atom.sip_acc = (atom.sip_acc + n_roots * ROOT_SIP_FRAC_PER_ROOT).min(2.0);
+    let budget = atom.sip_acc.floor() as u8;
+    if budget == 0 {
+        return (0.0, 0, (atom.gx, atom.gy));
+    }
+    let want = budget.min(ROOT_SIP_MAX_SAT);
     let mut energy = 0.0f32;
-    let mut taken = 0u32;
+    let mut taken = 0u8;
+    let mut deposit_at = (atom.gx, atom.gy);
     for &(dx, dy, mid) in &atom.body {
-        if mid != ModuleId::Root {
+        if mid != ModuleId::Root || taken >= want {
             continue;
         }
         let wx = world.wrap_x(atom.gx + dx as i32);
         let wy = atom.gy + dy as i32;
-        if let Some(n) = sip_porous(world, wx, wy) {
+        if let Some(n) = sip_porous(world, wx, wy, want - taken) {
             energy += ROOT_WATER_ENERGY * n as f32;
-            taken += n as u32;
+            taken += n;
+            deposit_at = (wx, wy);
             continue;
         }
-        if let Some(n) = sip_porous(world, wx, wy - 1) {
+        if let Some(n) = sip_porous(world, wx, wy - 1, want - taken) {
             energy += ROOT_WATER_ENERGY * n as f32;
-            taken += n as u32;
+            taken += n;
+            deposit_at = (wx, wy - 1);
         }
     }
-    (energy, taken)
+    atom.sip_acc = (atom.sip_acc - taken as f32).max(0.0);
+    (energy, taken as u32, deposit_at)
 }
 
-fn sip_porous(world: &mut World, gx: i32, gy: i32) -> Option<u8> {
+fn sip_porous(world: &mut World, gx: i32, gy: i32, want: u8) -> Option<u8> {
+    if want == 0 {
+        return None;
+    }
     let cell = world.get_cell(gx, gy)?;
+    // Never drink free water / wet Air — only pore sat in solids.
     if cell.material == MaterialId::Air {
         return None;
     }
@@ -241,11 +277,46 @@ fn sip_porous(world: &mut World, gx: i32, gy: i32) -> Option<u8> {
     if cap == 0 || cell.sat.0 == 0 {
         return None;
     }
-    let take = ROOT_SIP_SAT.min(cell.sat.0);
+    let take = want.min(cell.sat.0).min(ROOT_SIP_MAX_SAT);
     let mut next = cell;
     next.sat.0 = cell.sat.0 - take;
     world.set_cell(gx, gy, next);
     Some(take)
+}
+
+/// Paint Root modules into `MaterialId::Organic` in place (preserve pore sat).
+/// Returns how many cells were converted. Used when a land plant dies so the
+/// root stencil stays in the ground as dead organic matter.
+pub fn leave_dead_roots_in_place(world: &mut World, atom: &Atom) -> u32 {
+    use crate::cell::Cell;
+    let mut painted = 0u32;
+    for &(dx, dy, mid) in &atom.body {
+        if mid != ModuleId::Root {
+            continue;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        let Some(c) = world.get_cell(wx, wy) else {
+            continue;
+        };
+        match c.material {
+            MaterialId::Bedrock | MaterialId::Ice | MaterialId::Snow | MaterialId::Water => {}
+            MaterialId::Air if !c.sat.is_empty() => {
+                // Don't plug free water with Organic.
+            }
+            MaterialId::Organic => {
+                painted += 1; // already organic residue
+            }
+            _ => {
+                let mut org = Cell::solid(MaterialId::Organic);
+                let cap = water_capacity(MaterialId::Organic);
+                org.sat.0 = if cap > 0 { c.sat.0.min(cap) } else { 0 };
+                world.set_cell(wx, wy, org);
+                painted += 1;
+            }
+        }
+    }
+    painted
 }
 
 /// Nucleus y for a plant: Air cell directly above a porous solid near `gy`.
@@ -374,11 +445,45 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
             if atom.energy < cost + grow_floor * 0.5 {
                 continue;
             }
+            // Moisture tropism: sample the step cell and one deeper.
             let moist = cell_moisture_frac(world, wx, wy)
-                .max(cell_moisture_frac(world, wx, wy - 1));
+                .max(cell_moisture_frac(world, wx, wy - 1))
+                .max(cell_moisture_frac(world, wx, wy - 2) * 0.85);
             let down = if dy < 0 { 1.0 } else { 0.0 };
             let lateral = if dx != 0 && dy == 0 { 0.35 } else { 0.0 };
-            let mut score = moist + depth_bias * down + (1.0 - depth_bias) * lateral - pen * 0.03;
+            let mut score = moist * ROOT_MOISTURE_AFFINITY
+                + depth_bias * down
+                + (1.0 - depth_bias) * lateral
+                - pen * 0.03;
+            // Extra nudge into clearly wetter cells than the tip's host.
+            let tip_moist = cell_moisture_frac(
+                world,
+                world.wrap_x(atom.gx + tx as i32),
+                atom.gy + ty as i32,
+            );
+            if moist > tip_moist + 0.05 {
+                score += (moist - tip_moist) * 1.6;
+            }
+            // Discrete threads: avoid packing next to many existing roots.
+            let crowd = atom
+                .body
+                .iter()
+                .filter(|&&(rx, ry, m)| {
+                    m == ModuleId::Root && (rx - nx).abs() <= 1 && (ry - ny).abs() <= 1
+                })
+                .count();
+            score -= crowd as f32 * ROOT_CROWD_PENALTY;
+            // Under-crown blob tax — prefer diving past the shallow mass.
+            if ny >= -3 && nx.abs() <= 2 {
+                let shallow = atom
+                    .body
+                    .iter()
+                    .filter(|&&(rx, ry, m)| m == ModuleId::Root && ry >= -3 && rx.abs() <= 2)
+                    .count();
+                if shallow >= 3 {
+                    score -= ROOT_CROWN_BLOB_PENALTY * (shallow as f32 - 2.0);
+                }
+            }
             // Rhizome urge when banking / missing a runner — but scale by
             // (1 − depth_bias) so deep divers still elongate downward.
             if need_runner || banking_for_sprout {
@@ -410,6 +515,11 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
 }
 
 /// Stem upward or leaf place from surplus allocation.
+///
+/// Structure rules (stricter than free collage):
+/// - Stem stacks only on Stem / Nucleus / Root — never on a leaf.
+/// - Leaves attach to the highest Stem (or Nucleus if leafless chassis).
+/// - Inventing the first Stem requires meaningful `alloc_stem`.
 pub fn try_grow_shoot(atom: &mut Atom, tick: u64) -> f32 {
     let (w_stem, w_leaf, _) = atom.genome.alloc_weights();
     let tank = tank_ref(atom);
@@ -421,53 +531,143 @@ pub fn try_grow_shoot(atom: &mut Atom, tick: u64) -> f32 {
     let n_photo = atom.photosystem_count();
 
     let roll = hash01(tick, atom.gx as u64, atom.age_ticks, 0x5707);
-    let prefer_leaf = roll < w_leaf / (w_stem + w_leaf).max(1e-6);
+    let shoot_sum = (w_stem + w_leaf).max(1e-6);
+    let prefer_leaf = roll < w_leaf / shoot_sum;
     let cost = SHOOT_GROW_COST;
     if atom.energy < cost + 1.0 {
         return 0.0;
     }
 
-    if prefer_leaf && n_photo < MAX_PHOTO_MODULES {
-        let top = atom
-            .body
-            .iter()
-            .max_by_key(|(_, y, _)| *y)
-            .map(|&(x, y, _)| (x, y));
-        if let Some((tx, ty)) = top {
-            for &(dx, dy) in &[(0i16, 1), (1, 1), (-1, 1), (1, 0), (-1, 0)] {
-                let nx = tx + dx;
-                let ny = ty + dy;
-                if ny > 16 || occupied.contains(&(nx, ny)) {
-                    continue;
-                }
-                atom.energy -= cost;
-                atom.body.push((nx, ny, ModuleId::Photosystem));
-                return cost;
-            }
+    let can_invent_stem = n_stem > 0 || w_stem >= STEM_INVENT_MIN_ALLOC;
+    let can_grow_stem = n_stem < MAX_STEM_MODULES && w_stem >= 0.08 && can_invent_stem;
+
+    let place_leaf = |atom: &mut Atom, occupied: &HashSet<(i16, i16)>| -> bool {
+        if n_photo >= MAX_PHOTO_MODULES {
+            return false;
         }
-    } else if n_stem < MAX_STEM_MODULES && w_stem >= 0.08 {
+        // Attach beside the tallest stem (or nucleus if leafless chassis).
         let anchor = atom
             .body
             .iter()
-            .filter(|(_, _, m)| {
-                matches!(
-                    *m,
-                    ModuleId::Stem | ModuleId::Nucleus | ModuleId::Root | ModuleId::Photosystem
-                )
-            })
+            .filter(|(_, _, m)| *m == ModuleId::Stem)
             .max_by_key(|(_, y, _)| *y)
-            .map(|&(x, y, _)| (x, y));
-        if let Some((ax, ay)) = anchor {
+            .map(|&(x, y, _)| (x, y))
+            .or_else(|| {
+                atom.body
+                    .iter()
+                    .find(|(_, _, m)| *m == ModuleId::Nucleus)
+                    .map(|&(x, y, _)| (x, y))
+            });
+        let Some((tx, ty)) = anchor else {
+            return false;
+        };
+        // Keep the olive tip clear whenever a trunk exists — stacking a
+        // leaf on `(0,+1)` produced leaf→stem→leaf towers and blocked
+        // further stem growth. Stemless chassis may still put a leaf up.
+        let dirs: &[(i16, i16)] = if n_stem > 0 {
+            &[(1, 0), (-1, 0), (1, 1), (-1, 1)]
+        } else {
+            &[(1, 0), (-1, 0), (0, 1), (1, 1), (-1, 1)]
+        };
+        for &(dx, dy) in dirs {
+            let nx = tx + dx;
+            let ny = ty + dy;
+            if ny > 16 || occupied.contains(&(nx, ny)) {
+                continue;
+            }
+            // Never plant a leaf directly above another leaf.
+            if dy == 1
+                && atom
+                    .body
+                    .iter()
+                    .any(|&(x, y, m)| m == ModuleId::Photosystem && x == nx && y == ny - 1)
+            {
+                continue;
+            }
+            atom.energy -= cost;
+            atom.body.push((nx, ny, ModuleId::Photosystem));
+            return true;
+        }
+        false
+    };
+
+    let place_stem = |atom: &mut Atom, occupied: &HashSet<(i16, i16)>| -> bool {
+        if !can_grow_stem {
+            return false;
+        }
+        // Elongate the tallest stem with clear air above; invent on the
+        // nucleus only when the body has no olive yet.
+        let mut anchors: Vec<(i16, i16)> = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Stem)
+            .map(|&(x, y, _)| (x, y))
+            .collect();
+        anchors.sort_by_key(|&(_, y)| std::cmp::Reverse(y));
+        if anchors.is_empty() {
+            if let Some(&(x, y, _)) = atom
+                .body
+                .iter()
+                .find(|(_, _, m)| *m == ModuleId::Nucleus)
+            {
+                anchors.push((x, y));
+            }
+        }
+        for (ax, ay) in anchors {
             let nx = ax;
             let ny = ay + 1;
-            if ny <= 16 && !occupied.contains(&(nx, ny)) {
-                atom.energy -= cost;
-                atom.body.push((nx, ny, ModuleId::Stem));
-                return cost;
+            if ny > 16 || occupied.contains(&(nx, ny)) {
+                continue;
             }
+            // Hard rule: stem never sits on a photosystem cell.
+            if atom
+                .body
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Photosystem && x == nx && y == ay)
+            {
+                continue;
+            }
+            atom.energy -= cost;
+            atom.body.push((nx, ny, ModuleId::Stem));
+            return true;
+        }
+        false
+    };
+
+    if prefer_leaf {
+        if place_leaf(atom, &occupied) {
+            return cost;
+        }
+        if place_stem(atom, &occupied) {
+            return cost;
+        }
+    } else {
+        if place_stem(atom, &occupied) {
+            return cost;
+        }
+        if place_leaf(atom, &occupied) {
+            return cost;
         }
     }
     0.0
+}
+
+/// Bias genome allocation toward tissues that are already painted.
+/// A Root+Nucleus+Photosystem chassis won't invent a trunk from the
+/// default `alloc_stem = 0.25`.
+pub fn sync_alloc_to_body(genome: &mut Genome, body: &[BodyModule]) {
+    let has_stem = body.iter().any(|(_, _, m)| *m == ModuleId::Stem);
+    let has_root = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
+    let has_leaf = body.iter().any(|(_, _, m)| *m == ModuleId::Photosystem);
+    if !has_stem {
+        genome.alloc_stem = genome.alloc_stem.min(0.05);
+    }
+    if !has_root {
+        genome.alloc_root = genome.alloc_root.min(0.05);
+    }
+    if !has_leaf {
+        genome.alloc_leaf = genome.alloc_leaf.min(0.05);
+    }
 }
 
 /// One growth pulse: root and/or shoot from allocation weights.

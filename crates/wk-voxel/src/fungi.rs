@@ -367,8 +367,12 @@ pub fn dissolve_corpse_to_organic(
             }
             MaterialId::Bedrock | MaterialId::Ice | MaterialId::Snow | MaterialId::Water => {}
             _ => {
-                // Sand / stone / clay / Organic under roots → Organic residue.
-                world.set_cell(wx, wy, Cell::solid(MaterialId::Organic));
+                // Sand / stone / clay / Organic → Organic residue.
+                // Preserve pore sat so dissolve doesn't destroy water mass.
+                let mut org = Cell::solid(MaterialId::Organic);
+                let cap = water_capacity(MaterialId::Organic);
+                org.sat.0 = if cap > 0 { c.sat.0.min(cap) } else { 0 };
+                world.set_cell(wx, wy, org);
                 painted += 1;
             }
         }

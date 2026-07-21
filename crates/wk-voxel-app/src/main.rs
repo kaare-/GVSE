@@ -521,6 +521,19 @@ async fn main() {
         settings.oro.sea_level_y = scene.params.sea_level_y;
         settings.oro.wind_sign = if settings.wind_vx >= 0.0 { 1 } else { -1 };
 
+        if settings.apply_genes_to_living {
+            settings.apply_genes_to_living = false;
+            let g = settings.plant_genes.to_genome();
+            for atom in &mut scene.organisms.atoms {
+                if wk_voxel::is_land_plant(atom) || wk_voxel::is_fungus(atom) {
+                    let mut next = g;
+                    next.buoyancy_bias = atom.genome.buoyancy_bias;
+                    atom.genome = next;
+                    atom.clone_fidelity = atom.genome.clone_fidelity;
+                }
+            }
+        }
+
         // Physics (frozen while the paint editor is open, not spawn).
         let sim_paused = paused || (editor.open && !editor.spawn_picker);
         if !sim_paused {
@@ -605,7 +618,12 @@ async fn main() {
                 let tick_no = scene.world.tick;
                 scene
                     .organisms
-                    .step_with_climate(&mut scene.world, tick_no, &settings.climate);
+                    .step_with_climate(
+                        &mut scene.world,
+                        tick_no,
+                        &settings.climate,
+                        Some(&mut scene.humidity),
+                    );
             }
         }
 
@@ -654,7 +672,21 @@ async fn main() {
             ) {
                 if editor.spawn_picker {
                     let body = editor.blueprint.modules_relative_to_nucleus();
-                    let g = editor.blueprint.genome;
+                    // Tab plant-gene knobs override blueprint genome on spawn
+                    // for plants/fungi; Atoms keep the painted blueprint genes.
+                    let g = if editor.blueprint.is_valid_plant()
+                        || editor.blueprint.is_valid_fungus()
+                    {
+                        let mut g = settings.plant_genes.to_genome();
+                        // Keep buoyancy from blueprint (plants ignore it).
+                        g.buoyancy_bias = editor.blueprint.genome.buoyancy_bias;
+                        // Don't invent tissues the painted body never had
+                        // (e.g. Root+Nucleus+Leaf chassis → no surprise trunk).
+                        wk_voxel::sync_alloc_to_body(&mut g, &body);
+                        g
+                    } else {
+                        editor.blueprint.genome
+                    };
                     if scene.organisms.spawn_blueprint(&scene.world, gx, gy, body, 40.0, g) {
                         editor.status = format!(
                             "Spawned {} at ({gx},{gy})  atoms={}",

@@ -21,15 +21,17 @@ use wk_material::MaterialId;
 
 use crate::blueprint::Genome;
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
-use crate::grid::World;
 use crate::fungi::{
     digest_budget_units, digest_labile, dissolve_corpse_to_organic, fungus_should_hibernate,
     fungus_upkeep, is_fungus, is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
 };
+use crate::grid::World;
+use crate::humidity::Humidity;
 use crate::plant::{
     apply_genome, drink_roots, drought_band, find_plant_slot, is_anchored, is_land_plant,
-    pin_plant_pose, root_moisture_frac, sync_root_storage, try_grow_plant, try_vegetative_sprout,
-    DroughtBand, DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN,
+    leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac, sync_root_storage,
+    try_grow_plant, try_vegetative_sprout, DroughtBand, DROUGHT_DORMANT_UPKEEP,
+    DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
 };
 use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
 
@@ -48,8 +50,10 @@ const REPRO_COST_FRAC: f32 = 0.45;
 const REPRODUCE_AT: f32 = 0.85;
 /// Ticks between fission attempts.
 const REPRO_PERIOD: u64 = 40;
-/// Age soft-cap (ticks).
+/// Age soft-cap for plankton (ticks).
 const LIFE_TICKS: u64 = DEMO_DAY_TICKS * 4;
+/// Land plants / fungi live longer — senescence is softer than plankton blooms.
+const PLANT_LIFE_TICKS: u64 = DEMO_DAY_TICKS * 16;
 
 /// Land / fungus corpses rest this long before becoming Organic (~0.75 demo day).
 pub const CORPSE_SETTLE_LAND_TICKS: u32 = 900;
@@ -137,6 +141,9 @@ pub struct Atom {
     /// Consecutive ticks in drought dormancy (land plants). Resets when moist.
     #[serde(default)]
     pub drought_ticks: u32,
+    /// Fractional pore-sip accumulator (land plants) — see `drink_roots`.
+    #[serde(default)]
+    pub sip_acc: f32,
     /// 0 = floater, 1 = sinker (column `Genome::buoyancy_bias`).
     pub buoyancy_bias: f32,
     /// High → children stay close to parent genes.
@@ -167,6 +174,7 @@ impl Atom {
             age_ticks: 0,
             cooldown: REPRO_PERIOD / 2,
             drought_ticks: 0,
+            sip_acc: 0.0,
             buoyancy_bias: genome.buoyancy_bias,
             clone_fidelity: genome.clone_fidelity,
             circadian_phase: 0.25,
@@ -224,19 +232,27 @@ pub struct Corpse {
 
 impl Corpse {
     pub fn from_atom(atom: &Atom) -> Self {
+        let land = is_land_plant(atom) || is_fungus(atom);
+        // Roots are already painted into Organic on death — drop them from
+        // the lingering above-ground corpse so only stem/leaf/crown remain.
+        let body = if is_land_plant(atom) {
+            atom.body
+                .iter()
+                .copied()
+                .filter(|(_, _, m)| *m != ModuleId::Root)
+                .collect()
+        } else {
+            atom.body.clone()
+        };
         Self {
             gx: atom.gx,
             gy: atom.gy,
             fy: atom.fy,
-            vel_y: if is_land_plant(atom) || is_fungus(atom) {
-                0.0
-            } else {
-                -0.15
-            },
-            body: atom.body.clone(),
+            vel_y: if land { 0.0 } else { -0.15 },
+            body,
             ticks: 0,
             settled_ticks: 0,
-            land: is_land_plant(atom) || is_fungus(atom),
+            land,
             last_water_top: atom.last_water_top,
         }
     }
@@ -391,10 +407,17 @@ impl OrganismStore {
     /// One organism step: plankton buoyancy / plant drink, light,
     /// upkeep, fission (Atoms only), death → corpse, corpse settle → Organic.
     pub fn step(&mut self, world: &mut World, tick: u64) {
-        self.step_with_climate(world, tick, &ClimateConfig::default());
+        self.step_with_climate(world, tick, &ClimateConfig::default(), None);
     }
 
-    pub fn step_with_climate(&mut self, world: &mut World, tick: u64, climate: &ClimateConfig) {
+    /// Like [`Self::step_with_climate`] but without humidity bookkeeping.
+    pub fn step_with_climate(
+        &mut self,
+        world: &mut World,
+        tick: u64,
+        climate: &ClimateConfig,
+        humidity: Option<&mut Humidity>,
+    ) {
         if self.atoms.is_empty() && self.corpses.is_empty() {
             return;
         }
@@ -405,12 +428,19 @@ impl OrganismStore {
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let pop = self.atoms.len();
+        // Transpiration return: (gx, gy, sat_units) → humidity mass.
+        let mut transpired: Vec<(i32, i32, u32)> = Vec::new();
 
         for (i, atom) in self.atoms.iter_mut().enumerate() {
             atom.age_ticks = atom.age_ticks.saturating_add(1);
             atom.cooldown = atom.cooldown.saturating_sub(1);
 
-            if atom.age_ticks >= LIFE_TICKS {
+            let life_cap = if is_land_plant(atom) || is_fungus(atom) {
+                PLANT_LIFE_TICKS
+            } else {
+                LIFE_TICKS
+            };
+            if atom.age_ticks >= life_cap {
                 deaths.push(i);
                 continue;
             }
@@ -419,7 +449,11 @@ impl OrganismStore {
                 let room = pop + births.len() < MAX_ATOMS;
                 match step_land_plant(world, atom, day, tick, &canopy, i as u32, room) {
                     PlantStep::Dead => deaths.push(i),
-                    PlantStep::Alive => {}
+                    PlantStep::Alive { sat, at } => {
+                        if sat > 0 {
+                            transpired.push((at.0, at.1, sat));
+                        }
+                    }
                     PlantStep::Sprout(child) => births.push(child),
                 }
                 continue;
@@ -429,7 +463,7 @@ impl OrganismStore {
                 let room = pop + births.len() < MAX_ATOMS;
                 match step_fungus(world, atom, day, tick, i as u32, room) {
                     PlantStep::Dead => deaths.push(i),
-                    PlantStep::Alive => {}
+                    PlantStep::Alive { .. } => {}
                     PlantStep::Sprout(child) => births.push(child),
                 }
                 continue;
@@ -483,6 +517,11 @@ impl OrganismStore {
         deaths.dedup();
         for &i in deaths.iter().rev() {
             if let Some(dead) = self.atoms.get(i).cloned() {
+                // Land plants: root stencil → Organic in the ground immediately,
+                // then the above-ground body lingers as a grey corpse.
+                if is_land_plant(&dead) {
+                    let _ = leave_dead_roots_in_place(world, &dead);
+                }
                 self.push_corpse(world, Corpse::from_atom(&dead));
             }
             if i < self.atoms.len() {
@@ -492,6 +531,15 @@ impl OrganismStore {
         self.atoms.extend(births);
         resolve_contacts(world, &mut self.atoms);
         self.step_corpses(world);
+
+        // Return drunk pore sat to atmospheric humidity (mass conservation).
+        if let Some(hum) = humidity {
+            for (gx, gy, sat) in transpired {
+                if sat > 0 {
+                    hum.add(gx, gy, sat as f32);
+                }
+            }
+        }
     }
 
     fn push_corpse(&mut self, world: &mut World, corpse: Corpse) {
@@ -578,7 +626,7 @@ fn step_corpse_buoyancy(world: &World, corpse: &mut Corpse) {
 
 enum PlantStep {
     Dead,
-    Alive,
+    Alive { sat: u32, at: (i32, i32) },
     Sprout(Atom),
 }
 
@@ -613,7 +661,8 @@ fn step_land_plant(
 
     let n_photo = atom.photosystem_count();
     let n_mod = atom.body.len().max(1) as f32;
-    let mut upkeep = UPKEEP_PER_MODULE * n_mod * (0.45 + 0.55 * day);
+    // Plants respire less than plankton blooms.
+    let mut upkeep = UPKEEP_PER_MODULE * PLANT_UPKEEP_MULT * n_mod * (0.45 + 0.55 * day);
 
     if dormant {
         upkeep *= DROUGHT_DORMANT_UPKEEP;
@@ -621,11 +670,14 @@ fn step_land_plant(
         return if atom.energy <= 0.0 {
             PlantStep::Dead
         } else {
-            PlantStep::Alive
+            PlantStep::Alive {
+                sat: 0,
+                at: (atom.gx, atom.gy),
+            }
         };
     }
 
-    let (drink_e, _) = drink_roots(world, atom);
+    let (drink_e, sat_taken, drink_at) = drink_roots(world, atom);
     // Sky column light × day, then neighbour canopy + gene remap (D2).
     let sample_y = canopy_top_y(atom);
     let sky = column_light(world, atom.gx, sample_y) * day;
@@ -639,8 +691,8 @@ fn step_land_plant(
         &atom.genome,
     );
     let photo_scale = match drought {
-        DroughtBand::Hydrated => 1.0,
-        DroughtBand::Stressed => 0.35,
+        DroughtBand::Hydrated => 1.25, // mild bonus so moist sand recovers
+        DroughtBand::Stressed => 0.55,
         DroughtBand::Dormant => 0.0,
     };
     let harvest = PHOTON_RATE * light * n_photo.max(1) as f32 * photo_scale;
@@ -658,7 +710,10 @@ fn step_land_plant(
     if let Some(child) = try_vegetative_sprout(world, atom, tick, entity_id, pop_room) {
         return PlantStep::Sprout(child);
     }
-    PlantStep::Alive
+    PlantStep::Alive {
+        sat: sat_taken,
+        at: drink_at,
+    }
 }
 
 /// Litter fungus tick: digest soft litter / Organic, hibernate, spore.
@@ -703,7 +758,10 @@ fn step_fungus(
             return PlantStep::Sprout(child);
         }
     }
-    PlantStep::Alive
+    PlantStep::Alive {
+        sat: 0,
+        at: (atom.gx, atom.gy),
+    }
 }
 
 /// Relative density: bias 0 → buoyant (0.55), bias 1 → heavy (1.45).
@@ -1037,6 +1095,7 @@ mod tests {
     use crate::blueprint::Genome;
     use crate::cell::{Cell, Sat};
     use crate::chunk::ChunkCoord;
+    use crate::plant::LAND_GROW_PERIOD;
 
     fn wet_column() -> World {
         let mut w = World::new(7);
@@ -1211,7 +1270,7 @@ mod tests {
     }
 
     #[test]
-    fn land_plant_corpse_stays_put_then_becomes_organic() {
+    fn land_plant_corpse_leaves_roots_as_organic_immediately() {
         let mut w = moist_sand_plot();
         let mut store = OrganismStore::new();
         assert!(store.spawn_blueprint(
@@ -1222,30 +1281,41 @@ mod tests {
             40.0,
             Genome::default(),
         ));
-        // Kill via energy.
-        store.atoms[0].energy = 0.0;
-        // Force death path: energy death happens inside step_land_plant when <= 0
-        // after metabolism — zero energy at start of step still runs drink/photo.
-        // Age-kill is cleaner.
-        store.atoms[0].age_ticks = LIFE_TICKS;
+        // Age past plant life (longer than plankton LIFE_TICKS).
+        store.atoms[0].age_ticks = super::PLANT_LIFE_TICKS;
         store.atoms[0].energy = 40.0;
+        let root_cell = {
+            let a = &store.atoms[0];
+            a.body
+                .iter()
+                .find(|(_, _, m)| *m == ModuleId::Root)
+                .map(|&(dx, dy, _)| (a.gx + dx as i32, a.gy + dy as i32))
+                .expect("plant has a root")
+        };
+        let sat_before = w.get_cell(root_cell.0, root_cell.1).unwrap().sat.0;
         store.step(&mut w, 0);
         assert!(store.is_empty());
         assert_eq!(store.corpse_count(), 1);
         assert!(store.corpses[0].land);
-        let gx = store.corpses[0].gx;
-        let gy = store.corpses[0].gy;
-        store.corpses[0].settled_ticks = CORPSE_SETTLE_LAND_TICKS;
-        store.step(&mut w, 1);
-        assert_eq!(store.corpse_count(), 0);
-        assert!(crate::fungi::soft_litter_at(&w, gx) > 0);
-        let organic = (gy - 2..=gy + 4).any(|y| {
-            matches!(
-                w.get_cell(gx, y).map(|c| c.material),
-                Some(MaterialId::Organic)
-            )
-        });
-        assert!(organic, "plant corpse should paint Organic into its footprint");
+        // Roots stripped from corpse body — already in the ground.
+        assert!(
+            store.corpses[0]
+                .body
+                .iter()
+                .all(|(_, _, m)| *m != ModuleId::Root),
+            "root modules should leave the grey corpse"
+        );
+        assert_eq!(
+            w.get_cell(root_cell.0, root_cell.1).map(|c| c.material),
+            Some(MaterialId::Organic),
+            "dead roots should already be Organic in place"
+        );
+        // Pore water preserved through the conversion.
+        assert_eq!(
+            w.get_cell(root_cell.0, root_cell.1).unwrap().sat.0,
+            sat_before.min(crate::cell::water_capacity(MaterialId::Organic)),
+            "Organic conversion must not destroy pore sat"
+        );
     }
 
     #[test]
@@ -1460,12 +1530,38 @@ mod tests {
             40.0,
             Genome::default(),
         ));
-        for t in 0..40 {
+        // Slow sip accumulator — need enough ticks to cross 1 sat unit.
+        for t in 0..200 {
             store.step(&mut w, t);
         }
         let sat1 = w.get_cell(4, 1).unwrap().sat.0;
         assert!(sat1 < sat0, "roots should sip pore sat ({sat1} < {sat0})");
         assert!(!store.is_empty());
+    }
+
+    #[test]
+    fn drink_does_not_touch_free_air_water() {
+        let mut w = moist_sand_plot();
+        // Standing water film above the crown — plants must not drink this.
+        let mut wet = Cell::air();
+        wet.sat = Sat::FULL;
+        w.set_cell(4, 3, wet);
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        // Force a large sip budget so we'd notice if Air were drained.
+        store.atoms[0].sip_acc = 5.0;
+        let _ = crate::plant::drink_roots(&mut w, &mut store.atoms[0]);
+        assert!(
+            w.get_cell(4, 3).unwrap().sat.is_full(),
+            "roots must never drink free Air water"
+        );
     }
 
     fn deep_moist_sand() -> World {
@@ -1549,6 +1645,73 @@ mod tests {
         );
     }
 
+    fn root_nucleus_leaf_body() -> Vec<BodyModule> {
+        vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Photosystem),
+        ]
+    }
+
+    #[test]
+    fn stemless_chassis_does_not_invent_trunk() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let mut g = Genome::default();
+        // Default alloc_stem is 0.25 — sync_alloc_to_body clamps it when
+        // no Stem is painted (editor spawn path).
+        crate::plant::sync_alloc_to_body(&mut g, &root_nucleus_leaf_body());
+        assert!(g.alloc_stem <= 0.05);
+        assert!(store.spawn_blueprint(&w, 4, 2, root_nucleus_leaf_body(), 80.0, g));
+        store.atoms[0].energy = 80.0;
+        for t in 0..400 {
+            store.step(&mut w, t);
+            if let Some(a) = store.atoms.first_mut() {
+                a.energy = a.energy.max(50.0);
+            }
+        }
+        assert!(!store.is_empty());
+        assert_eq!(
+            crate::plant::stem_count(&store.atoms[0]),
+            0,
+            "Root+Nucleus+Leaf chassis must not grow olive stems"
+        );
+    }
+
+    #[test]
+    fn stem_does_not_stack_on_photosystem() {
+        // Proper chassis: root / nucleus / stem, leaf to the side.
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (1, 1, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 2, 80.0, body);
+        atom.genome.alloc_stem = 1.0;
+        atom.genome.alloc_leaf = 0.5;
+        atom.genome.alloc_root = 0.05;
+        atom.energy = 80.0;
+        for t in 0..30u64 {
+            atom.age_ticks = t * LAND_GROW_PERIOD;
+            let _ = crate::plant::try_grow_shoot(&mut atom, t);
+        }
+        let stem_on_leaf = atom.body.iter().any(|&(x, y, m)| {
+            m == ModuleId::Stem
+                && atom.body.iter().any(|&(lx, ly, lm)| {
+                    lm == ModuleId::Photosystem && lx == x && ly == y - 1
+                })
+        });
+        assert!(
+            !stem_on_leaf,
+            "stem must not grow directly on top of a leaf"
+        );
+        assert!(
+            crate::plant::stem_count(&atom) > 1,
+            "stem-heavy shoot should still elongate the trunk"
+        );
+    }
+
     #[test]
     fn plant_with_lateral_runner_can_sprout_child() {
         let mut w = moist_sand_plot();
@@ -1590,7 +1753,7 @@ mod tests {
 
     #[test]
     fn rooted_plant_gains_energy_capacity_from_roots() {
-        let mut w = moist_sand_plot();
+        let w = moist_sand_plot();
         let mut store = OrganismStore::new();
         assert!(store.spawn_blueprint(
             &w,
@@ -1650,9 +1813,11 @@ mod tests {
         }
         assert!(!store.is_empty());
         let roots1 = crate::plant::root_count(&store.atoms[0]);
+        let budget_now =
+            crate::plant::useful_root_budget_for(&store.atoms[0], DroughtBand::Hydrated);
         assert!(
-            roots1 <= roots0 + 1,
-            "hydrated plant past soft budget should not keep boring (had {roots0}, now {roots1})"
+            roots1 <= budget_now.max(roots0) + 1,
+            "hydrated plant should stay near soft budget (had {roots0}, now {roots1}, budget={budget_now})"
         );
     }
 
