@@ -28,11 +28,11 @@ use crate::fungi::{
 use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::plant::{
-    apply_genome, collect_trunk_world_cells, drink_roots, drought_band, drop_dead_leaves,
-    find_fungus_slot, find_plant_slot, is_anchored, is_land_plant, leave_dead_roots_in_place,
-    pin_plant_pose, root_moisture_frac, sync_root_storage, try_grow_plant, try_vegetative_sprout,
-    DroughtBand, DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN,
-    PLANT_UPKEEP_MULT,
+    apply_genome, collect_live_root_world_cells, collect_trunk_world_cells, drink_roots,
+    drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, is_anchored, is_land_plant,
+    leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac, sync_root_storage,
+    try_grow_plant, try_vegetative_sprout, DroughtBand, DROUGHT_DORMANT_UPKEEP,
+    DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
 };
 use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
 
@@ -472,6 +472,8 @@ impl OrganismStore {
         let canopy = build_canopy_index(&self.atoms);
         // Live + grey-corpse Stem cells — shoot growth keeps a trunk gap.
         let trunks = collect_trunk_world_cells(&self.atoms, &self.corpses);
+        // All living Root cells — spacing applies across plants.
+        let live_roots = collect_live_root_world_cells(&self.atoms);
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let pop = self.atoms.len();
@@ -494,8 +496,17 @@ impl OrganismStore {
 
             if is_land_plant(atom) {
                 let room = pop + births.len() < MAX_ATOMS;
-                match step_land_plant(world, atom, day, tick, &canopy, &trunks, i as u32, room)
-                {
+                match step_land_plant(
+                    world,
+                    atom,
+                    day,
+                    tick,
+                    &canopy,
+                    &trunks,
+                    &live_roots,
+                    i as u32,
+                    room,
+                ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
                         if sat > 0 {
@@ -688,6 +699,7 @@ fn step_land_plant(
     tick: u64,
     canopy: &CanopyIndex,
     trunks: &std::collections::HashSet<(i32, i32)>,
+    live_roots: &std::collections::HashSet<(i32, i32)>,
     entity_id: u32,
     pop_room: bool,
 ) -> PlantStep {
@@ -755,7 +767,7 @@ fn step_land_plant(
         return PlantStep::Dead;
     }
     // Surplus → tissue (root / stem / leaf) from allocation genes.
-    let _ = try_grow_plant(world, atom, tick, trunks);
+    let _ = try_grow_plant(world, atom, tick, trunks, live_roots);
     sync_root_storage(atom);
     if let Some(child) = try_vegetative_sprout(world, atom, tick, entity_id, pop_room) {
         return PlantStep::Sprout(child);
@@ -1883,7 +1895,8 @@ mod tests {
         let mut atom = Atom::from_body(4, 6, 80.0, body);
         atom.genome = g;
         atom.energy = 80.0;
-        let spent = crate::plant::try_elongate_root(&w, &mut atom);
+        let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
         assert!(spent > 0.0, "vertical dive past the tip should still be legal");
         let added = atom
             .body
@@ -1915,6 +1928,113 @@ mod tests {
     }
 
     #[test]
+    fn root_elongation_refuses_cell_beside_other_plant_root() {
+        let mut w = deep_moist_sand();
+        // Seal every step except the one hugging the foreign root.
+        w.set_cell(4, 3, Cell::solid(MaterialId::Bedrock)); // (0,-3)
+        w.set_cell(3, 3, Cell::solid(MaterialId::Bedrock)); // (-1,-3)
+        w.set_cell(3, 4, Cell::solid(MaterialId::Bedrock)); // (-1,-2)
+        w.set_cell(5, 3, Cell::solid(MaterialId::Bedrock)); // (1,-3)
+        w.set_cell(3, 5, Cell::solid(MaterialId::Bedrock)); // (-1,-1)
+        w.set_cell(5, 5, Cell::solid(MaterialId::Bedrock)); // (1,-1)
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.5;
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 6, 80.0, body);
+        atom.genome = g;
+        atom.energy = 80.0;
+        // Only open sand left beside tip is (1,-2)=(5,4); foreign root at (5,3).
+        let mut roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        roots.insert((5, 3));
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        assert_eq!(spent, 0.0, "must not elongate beside another plant's live root");
+        assert_eq!(crate::plant::root_count(&atom), 2);
+    }
+
+    #[test]
+    fn root_growth_prefers_branch_over_deep_pipe() {
+        let w = deep_moist_sand();
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.45; // balanced — should fork, not only drill
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, -3, ModuleId::Root),
+            (0, -4, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 6, 80.0, body);
+        atom.genome = g;
+        atom.energy = 80.0;
+        let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        assert!(spent > 0.0, "pipe tip should still be able to fork");
+        let added = atom
+            .body
+            .iter()
+            .find(|&&(x, y, m)| {
+                m == ModuleId::Root && !matches!((x, y), (0, -1) | (0, -2) | (0, -3) | (0, -4))
+            })
+            .map(|&(x, y, _)| (x, y))
+            .expect("should add a root");
+        assert_ne!(
+            added.0, 0,
+            "after a deep pipe, next step should branch sideways, got {added:?}"
+        );
+    }
+
+    #[test]
+    fn root_can_bud_sideways_from_mid_pipe() {
+        let mut w = deep_moist_sand();
+        // Block further vertical under the tip so growth must bud sideways.
+        w.set_cell(4, 2, Cell::solid(MaterialId::Bedrock)); // (0,-4)
+        w.set_cell(3, 2, Cell::solid(MaterialId::Bedrock)); // (-1,-4)
+        w.set_cell(5, 2, Cell::solid(MaterialId::Bedrock)); // (1,-4)
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.2;
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, -3, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 6, 80.0, body);
+        atom.genome = g;
+        atom.energy = 80.0;
+        let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        assert!(spent > 0.0, "mid-pipe site should be able to bud");
+        let added = atom
+            .body
+            .iter()
+            .find(|&&(x, y, m)| {
+                m == ModuleId::Root && !matches!((x, y), (0, -1) | (0, -2) | (0, -3))
+            })
+            .map(|&(x, y, _)| (x, y))
+            .expect("should add a lateral bud");
+        assert_ne!(added.0, 0, "bud should leave the pipe column, got {added:?}");
+    }
+
+    #[test]
     fn root_elongation_allows_cell_beside_organic_compost() {
         let mut w = deep_moist_sand();
         // Seal the dive so the only open step is lateral Sand next to
@@ -1936,7 +2056,8 @@ mod tests {
         let mut atom = Atom::from_body(4, 6, 80.0, body);
         atom.genome = g;
         atom.energy = 80.0;
-        let spent = crate::plant::try_elongate_root(&w, &mut atom);
+        let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
         assert!(
             spent > 0.0,
             "Organic compost is transformed dead root — OK to sit beside"

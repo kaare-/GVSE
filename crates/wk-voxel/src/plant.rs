@@ -41,6 +41,10 @@ pub const PLANT_UPKEEP_MULT: f32 = 0.35;
 pub const ROOT_MOISTURE_AFFINITY: f32 = 2.8;
 /// Soft local density: roots packed near the crown pay this extra.
 pub const ROOT_CROWN_BLOB_PENALTY: f32 = 1.8;
+/// Penalty per extra cell when elongating a same-column pipe (≥3 deep).
+pub const ROOT_PIPE_TAX: f32 = 1.35;
+/// Score bonus for forking off a tip that already has depth.
+pub const ROOT_BRANCH_BONUS: f32 = 1.55;
 /// Score bonus for stepping *into* Organic / Sand beds.
 pub const ROOT_ORGANIC_AFFINITY: f32 = 0.85;
 pub const ROOT_SAND_AFFINITY: f32 = 0.45;
@@ -447,9 +451,61 @@ fn penetrate_cost(mat: MaterialId) -> Option<f32> {
     }
 }
 
+/// World cells occupied by living Root modules (all plants).
+pub fn collect_live_root_world_cells<'a, I>(atoms: I) -> HashSet<(i32, i32)>
+where
+    I: IntoIterator<Item = &'a Atom>,
+{
+    let mut out = HashSet::new();
+    for a in atoms {
+        for &(dx, dy, m) in &a.body {
+            if m == ModuleId::Root {
+                out.insert((a.gx + dx as i32, a.gy + dy as i32));
+            }
+        }
+    }
+    out
+}
+
+fn own_root_at(atom: &Atom, wx: i32, wy: i32) -> bool {
+    atom.body.iter().any(|&(bx, by, m)| {
+        m == ModuleId::Root && atom.gx + bx as i32 == wx && atom.gy + by as i32 == wy
+    })
+}
+
+/// True when `(wx,wy)` is Moore-adjacent to a *foreign* live root.
+pub fn beside_foreign_live_root(
+    atom: &Atom,
+    wx: i32,
+    wy: i32,
+    live_roots: &HashSet<(i32, i32)>,
+) -> bool {
+    for ox in -1i32..=1 {
+        for oy in -1i32..=1 {
+            let tx = wx + ox;
+            let ty = wy + oy;
+            if !live_roots.contains(&(tx, ty)) {
+                continue;
+            }
+            if own_root_at(atom, tx, ty) {
+                continue;
+            }
+            return true;
+        }
+    }
+    false
+}
+
 /// Try to add one Root pixel toward moisture / depth bias.
 /// Returns energy spent (0 if nothing grew).
-pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
+///
+/// `live_roots` is every living Root world cell (all plants) so spacing
+/// applies across neighbours, not just within one body.
+pub fn try_elongate_root(
+    world: &World,
+    atom: &mut Atom,
+    live_roots: &HashSet<(i32, i32)>,
+) -> f32 {
     let n_roots = root_count(atom);
     if n_roots >= MAX_ROOT_MODULES {
         return 0.0;
@@ -477,28 +533,43 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
     }
 
     let occupied: HashSet<(i16, i16)> = atom.body.iter().map(|&(x, y, _)| (x, y)).collect();
-    let tips: Vec<(i16, i16)> = atom
+    // Every Root cell is a growth site — buds can form mid-pipe, not only
+    // at the deepest head.
+    let sites: Vec<(i16, i16)> = atom
         .body
         .iter()
         .filter(|(_, _, m)| *m == ModuleId::Root)
         .map(|&(x, y, _)| (x, y))
         .collect();
-    let tips = if tips.is_empty() {
+    let sites = if sites.is_empty() {
         vec![(0, -1)]
     } else {
-        tips
+        sites
     };
 
     let depth_bias = atom.genome.root_depth_bias.clamp(0.0, 1.0);
     let banking_for_sprout = atom.energy >= tank * LAND_SPROUT_ENERGY_FRAC * 0.85;
-    // Cardinal only — diagonal steps packed crown mats beside live roots.
-    const DIRS: [(i16, i16); 3] = [(0, -1), (-1, 0), (1, 0)];
+    // Cardinal + diagonal-down forks — branchy fans, not only a pipe.
+    const DIRS: [(i16, i16); 5] = [(0, -1), (-1, -1), (1, -1), (-1, 0), (1, 0)];
     let mut best: Option<(f32, i16, i16, f32)> = None; // score, dx, dy, cost
 
-    for &(tx, ty) in &tips {
+    for &(sx, sy) in &sites {
+        let site_col_depth = atom
+            .body
+            .iter()
+            .filter(|&&(rx, _, m)| m == ModuleId::Root && rx == sx)
+            .count();
+        // Mid-pipe if this site has own roots both above and below.
+        let has_above = atom.body.iter().any(|&(rx, ry, m)| {
+            m == ModuleId::Root && rx == sx && ry > sy
+        });
+        let has_below = atom.body.iter().any(|&(rx, ry, m)| {
+            m == ModuleId::Root && rx == sx && ry < sy
+        });
+        let mid_pipe = has_above && has_below;
         for &(dx, dy) in &DIRS {
-            let nx = tx + dx;
-            let ny = ty + dy;
+            let nx = sx + dx;
+            let ny = sy + dy;
             if ny > 1 || ny < -18 || nx.abs() > 10 {
                 continue;
             }
@@ -527,10 +598,11 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
                 .max(cell_moisture_frac(world, wx, wy - 1))
                 .max(cell_moisture_frac(world, wx, wy - 2) * 0.85);
             let down = if dy < 0 { 1.0 } else { 0.0 };
-            let lateral = if dx != 0 && dy == 0 { 0.35 } else { 0.0 };
+            let lateral = if dx != 0 && dy == 0 { 0.55 } else { 0.0 };
+            let diag = if dx != 0 && dy < 0 { 0.70 } else { 0.0 };
             let mut score = moist * ROOT_MOISTURE_AFFINITY
                 + depth_bias * down
-                + (1.0 - depth_bias) * lateral
+                + (1.0 - depth_bias) * (lateral + diag)
                 - pen * 0.03;
             // Organic is transformed dead-root compost — fine to sit beside
             // or step into (score bonus below). Live roots stay exclusive.
@@ -539,55 +611,81 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
                 MaterialId::Sand => score += ROOT_SAND_AFFINITY,
                 _ => {}
             }
-            // Extra nudge into clearly wetter cells than the tip's host.
-            let tip_moist = cell_moisture_frac(
+            // Extra nudge into clearly wetter cells than the site's host.
+            let site_moist = cell_moisture_frac(
                 world,
-                world.wrap_x(atom.gx + tx as i32),
-                atom.gy + ty as i32,
+                world.wrap_x(atom.gx + sx as i32),
+                atom.gy + sy as i32,
             );
-            if moist > tip_moist + 0.05 {
-                score += (moist - tip_moist) * 1.6;
+            if moist > site_moist + 0.05 {
+                score += (moist - site_moist) * 1.6;
             }
-            // Can't place next to another *alive* root (parent tip OK).
-            // Vertical dive may skim diagonally past a same-row runner so
-            // a rhizome doesn't permanently block the crown column.
+            // Can't place next to another *alive* root on this plant.
+            // Origin site OK. Mid-pipe lateral/diagonal buds may ignore the
+            // same-column stack they're sprouting from (otherwise Moore
+            // neighbours above/below forbid every side shoot). Crown tips
+            // still respect full spacing so we don't fan into a mat.
             let beside_live = atom.body.iter().any(|&(rx, ry, m)| {
-                if m != ModuleId::Root || (rx, ry) == (tx, ty) {
+                if m != ModuleId::Root || (rx, ry) == (sx, sy) {
                     return false;
                 }
                 if (rx - nx).abs() > 1 || (ry - ny).abs() > 1 {
                     return false;
                 }
-                let skim_runner = dx == 0 && dy < 0 && ry == ty && rx != tx;
+                if mid_pipe && dx != 0 && rx == sx {
+                    return false;
+                }
+                // Vertical dive may skim diagonally past a same-row runner.
+                let skim_runner = dx == 0 && dy < 0 && ry == sy && rx != sx;
                 !skim_runner
             });
             if beside_live {
                 continue;
             }
+            // Same rule vs *other plants'* live roots (no skim / column pass).
+            if beside_foreign_live_root(atom, wx, wy, live_roots) {
+                continue;
+            }
             // Same-row roots need a gap column (no 3-wide crown fan).
             // Rhizome may extend one cardinal step farther from x=0.
             let same_row_crowd = atom.body.iter().any(|&(rx, ry, m)| {
-                if m != ModuleId::Root || ry != ny || (rx, ry) == (tx, ty) {
+                if m != ModuleId::Root || ry != ny || (rx, ry) == (sx, sy) {
                     return false;
                 }
                 if (rx - nx).abs() > 2 {
                     return false;
                 }
                 let extending_out =
-                    dy == 0 && (nx - tx).abs() == 1 && rx.abs() < nx.abs();
+                    dy == 0 && (nx - sx).abs() == 1 && rx.abs() < nx.abs();
                 !extending_out
             });
             if same_row_crowd {
                 continue;
             }
-            // One live thread per column — no lateral into an occupied lane.
-            if dx != 0 {
-                let col_taken = atom
-                    .body
-                    .iter()
-                    .any(|&(rx, _, m)| m == ModuleId::Root && rx == nx);
-                if col_taken {
-                    continue;
+            // One live thread per column (own or foreign) — no packing lanes.
+            let col_taken_own = atom
+                .body
+                .iter()
+                .any(|&(rx, _, m)| m == ModuleId::Root && rx == nx);
+            let col_taken_foreign = live_roots
+                .iter()
+                .any(|&(rx, ry)| rx == wx && !own_root_at(atom, rx, ry));
+            if dx != 0 && (col_taken_own || col_taken_foreign) {
+                continue;
+            }
+            if dy < 0 && col_taken_foreign {
+                // Don't dive into a column another plant already owns.
+                continue;
+            }
+            // Pipe tax — a long same-column stack should fork, not drill.
+            if dx == 0 && dy < 0 && site_col_depth >= 3 {
+                score -= ROOT_PIPE_TAX * (site_col_depth as f32 - 2.0);
+            }
+            // Branch urge from deep columns; extra for mid-pipe buds.
+            if site_col_depth >= 2 && dx != 0 {
+                score += ROOT_BRANCH_BONUS * (0.55 + 0.45 * (1.0 - depth_bias));
+                if mid_pipe {
+                    score += ROOT_BRANCH_BONUS * 0.45;
                 }
             }
             // Under-crown blob tax — prefer diving past the shallow mass.
@@ -608,7 +706,7 @@ pub fn try_elongate_root(world: &World, atom: &mut Atom) -> f32 {
                 if dx != 0 && dy == 0 {
                     score += 2.8 * rhizome;
                 } else if dx != 0 && dy < 0 {
-                    score += 1.1 * rhizome;
+                    score += 1.6 * rhizome;
                 }
                 if nx != 0 {
                     score += 1.2 * rhizome;
@@ -866,6 +964,7 @@ pub fn try_grow_plant(
     atom: &mut Atom,
     tick: u64,
     trunks: &HashSet<(i32, i32)>,
+    live_roots: &HashSet<(i32, i32)>,
 ) -> f32 {
     if atom.age_ticks % LAND_GROW_PERIOD != 0 {
         return 0.0;
@@ -876,14 +975,14 @@ pub fn try_grow_plant(
     // Weighted pick: try preferred tissue first, then the other.
     let try_root_first = roll < w_root || (w_root >= w_stem && w_root >= w_leaf);
     if try_root_first {
-        spent += try_elongate_root(world, atom);
+        spent += try_elongate_root(world, atom, live_roots);
         if spent <= 0.0 {
             spent += try_grow_shoot(atom, tick, trunks);
         }
     } else {
         spent += try_grow_shoot(atom, tick, trunks);
         if spent <= 0.0 {
-            spent += try_elongate_root(world, atom);
+            spent += try_elongate_root(world, atom, live_roots);
         }
     }
     spent
