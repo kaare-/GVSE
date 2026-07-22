@@ -23,6 +23,7 @@ pub mod parallel;
 pub mod phase;
 pub mod plant;
 pub mod rules;
+pub mod save;
 pub mod shade;
 pub mod temperature;
 pub mod wind;
@@ -77,5 +78,6 @@ pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,
 };
 pub use wind::Wind;
+pub use save::{SimSnapshot, SIM_SAVE_DIR, SIM_SAVE_EXT, SIM_SCHEMA_VERSION};
 pub use worldgen::is_karst_zone_x;
 pub use worldgen::{continental_surface_y, stamp_world, WorldgenParams};

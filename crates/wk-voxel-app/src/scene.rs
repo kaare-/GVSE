@@ -4,7 +4,8 @@
 //! stack imports.
 
 use wk_voxel::{
-    stamp_world, CloudStore, Humidity, OrganismStore, Temperature, Wind, World, WorldgenParams,
+    stamp_world, CloudStore, Humidity, OrganismStore, SimSnapshot, Temperature, Wind, World,
+    WorldgenParams,
 };
 
 /// Humidity / wind / temp tile side (world cells per sample).
@@ -71,6 +72,30 @@ impl Scene {
             clouds,
             temperature,
             organisms,
+        }
+    }
+
+    pub fn to_snapshot(&self) -> SimSnapshot {
+        SimSnapshot::new(
+            self.params,
+            self.world.clone(),
+            self.humidity.clone(),
+            self.wind.clone(),
+            self.temperature.clone(),
+            self.clouds.clone(),
+            self.organisms.clone(),
+        )
+    }
+
+    pub fn from_snapshot(snap: SimSnapshot) -> Self {
+        Self {
+            world: snap.world,
+            params: snap.params,
+            humidity: snap.humidity,
+            wind: snap.wind,
+            clouds: snap.clouds,
+            temperature: snap.temperature,
+            organisms: snap.organisms,
         }
     }
 }

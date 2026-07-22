@@ -16,6 +16,7 @@
 //! the *implementation* here is independent — this file MUST NOT
 //! reach into `wk_world`.
 
+use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::cell::Cell;
@@ -30,7 +31,7 @@ use crate::grid::World;
 /// - y range: `bedrock_floor_y .. sky_ceiling_y`.
 /// - `sea_level_y`: cells at or below this elevation that aren't
 ///   solid material get filled with water (Air cells with full sat).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct WorldgenParams {
     pub seed: u64,
     pub width_cols: i32,

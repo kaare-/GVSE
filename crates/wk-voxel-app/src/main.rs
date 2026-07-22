@@ -25,7 +25,9 @@
 //! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
 //! - `F1` — toggle HUD chrome (bottom info/tools + block inspector)
 //! - `F2` — creature editor (Atom / plant MS-Paint; `C` stays condensation)
-//! - `Tab` — live settings (materials, wind, clouds, day/night, Performance, …)
+//! - `F3` — terrain editor (paint / erase block types; world stays visible)
+//! - `F5` / `F9` — save / load simulation (`saves/*.gvsesim`)
+//! - `Tab` — live settings (world size, materials, wind, clouds, …)
 //! - click — block / organism inspector (hidden while F1 HUD is off)
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
@@ -39,6 +41,7 @@ mod inspector;
 mod palette;
 mod scene;
 mod settings;
+mod terrain;
 
 use macroquad::prelude::*;
 use wk_voxel::{
@@ -46,7 +49,8 @@ use wk_voxel::{
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, day_night_factor_cfg, humidity_diffuse_due,
     is_daytime_cfg, is_standing_water, precip_forms_snow_at_air, sky_rgb, sky_rgb_at_height,
-    temperature_step_due, tick_with_perf, ClimateConfig, Wind, World, WorldgenParams,
+    temperature_step_due, tick_with_perf, ClimateConfig, SimSnapshot, Wind, World,
+    WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -54,6 +58,7 @@ use crate::inspector::{draw_block_inspector, draw_selection_outline, screen_to_w
 use crate::palette::cell_color;
 use crate::scene::Scene;
 use crate::settings::SimSettings;
+use crate::terrain::{TerrainEditor, TerrainTool};
 
 fn window_conf() -> Conf {
     Conf {
@@ -409,12 +414,13 @@ async fn main() {
     let mut temp_overlay = false;
     let mut show_hud = true;
     let mut editor = CreatureEditor::default();
+    let mut terrain = TerrainEditor::default();
     let mut inspect: Option<(i32, i32)> = None;
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
 
     loop {
-        // Esc: spawn cancel → close editor → close settings → quit.
+        // Esc: spawn cancel → close editors → close settings → quit.
         if is_key_pressed(KeyCode::Escape) {
             if editor.open && editor.spawn_picker {
                 editor.spawn_picker = false;
@@ -423,6 +429,9 @@ async fn main() {
                 editor.open = false;
                 editor.spawn_picker = false;
                 paused = editor.was_paused;
+            } else if terrain.open {
+                terrain.open = false;
+                paused = terrain.was_paused;
             } else if settings.open {
                 settings.open = false;
             } else {
@@ -432,7 +441,7 @@ async fn main() {
         if is_key_pressed(KeyCode::F1) {
             show_hud = !show_hud;
         }
-        if is_key_pressed(KeyCode::Tab) && !editor.open {
+        if is_key_pressed(KeyCode::Tab) && !editor.open && !terrain.open {
             settings.open = !settings.open;
         }
         // Editor is F2 only — `C` is condensation in the voxel demo
@@ -442,16 +451,95 @@ async fn main() {
             editor.toggle(paused);
             if opening {
                 settings.open = false;
+                terrain.open = false;
                 paused = true;
             } else {
                 paused = editor.was_paused;
             }
         }
+        if is_key_pressed(KeyCode::F3) {
+            let opening = !terrain.open;
+            terrain.toggle(paused);
+            if opening {
+                settings.open = false;
+                editor.open = false;
+                editor.spawn_picker = false;
+                paused = true;
+            } else {
+                paused = terrain.was_paused;
+            }
+        }
         if editor.open {
             editor.handle_input();
         }
+        if terrain.open {
+            terrain.handle_input();
+        }
 
-        if (!editor.open || editor.spawn_picker) && !settings.open {
+        // Save / load simulation (F5 / F9, or S / L while terrain open).
+        let want_save = is_key_pressed(KeyCode::F5) || terrain.request_save;
+        let want_load = is_key_pressed(KeyCode::F9) || terrain.request_load;
+        terrain.request_save = false;
+        terrain.request_load = false;
+        if want_save {
+            match scene.to_snapshot().save_to_disk(&terrain.save_name) {
+                Ok(p) => {
+                    let msg = format!("Saved {}", p.display());
+                    terrain.status = msg.clone();
+                    eprintln!("[wk-voxel-app] {msg}");
+                }
+                Err(e) => {
+                    terrain.status = format!("Save failed: {e}");
+                    eprintln!("[wk-voxel-app] save failed: {e}");
+                }
+            }
+        }
+        if want_load {
+            let path = SimSnapshot::list_disk()
+                .into_iter()
+                .find(|p| {
+                    p.file_stem()
+                        .and_then(|s| s.to_str())
+                        .map(|s| s == terrain.save_name)
+                        .unwrap_or(false)
+                })
+                .or_else(|| SimSnapshot::list_disk().into_iter().next());
+            match path {
+                Some(path) => match SimSnapshot::load_from_disk(&path) {
+                    Ok(snap) => {
+                        scene = Scene::from_snapshot(snap);
+                        settings.on_world_reseed(&scene.params);
+                        inspect = None;
+                        let msg = format!("Loaded {}", path.display());
+                        terrain.status = msg.clone();
+                        eprintln!("[wk-voxel-app] {msg}");
+                    }
+                    Err(e) => {
+                        terrain.status = format!("Load failed: {e}");
+                        eprintln!("[wk-voxel-app] load failed: {e}");
+                    }
+                },
+                None => {
+                    terrain.status = "No saves/*.gvsesim yet — press F5 or S".into();
+                }
+            }
+        }
+
+        if settings.request_regen {
+            settings.request_regen = false;
+            let params = settings.draft_world_params(&scene.params);
+            scene = Scene::new(params);
+            settings.on_world_reseed(&scene.params);
+            inspect = None;
+            terrain.status = format!(
+                "Regenerated {}×{} (sea={})",
+                scene.params.width_cols,
+                scene.params.sky_ceiling_y,
+                scene.params.sea_level_y
+            );
+        }
+
+        if (!editor.open || editor.spawn_picker) && !settings.open && !terrain.open {
             if is_key_pressed(KeyCode::Space) {
                 paused = !paused;
             }
@@ -491,6 +579,9 @@ async fn main() {
             if is_key_pressed(KeyCode::O) {
                 organisms_on = !organisms_on;
             }
+        }
+        // Pan works while the terrain editor is open so you can paint elsewhere.
+        if (!editor.open || editor.spawn_picker) && !settings.open {
             let pan = 200.0 * get_frame_time();
             if is_key_down(KeyCode::Left) {
                 cam_x -= pan;
@@ -534,8 +625,8 @@ async fn main() {
             }
         }
 
-        // Physics (frozen while the paint editor is open, not spawn).
-        let sim_paused = paused || (editor.open && !editor.spawn_picker);
+        // Physics (frozen while paint editors are open; spawn picker runs).
+        let sim_paused = paused || (editor.open && !editor.spawn_picker) || terrain.open;
         if !sim_paused {
             if rain_on {
                 apply_rain_with_temp(
@@ -654,11 +745,37 @@ async fn main() {
         // Screen +y is down. World +y is up. Flip when placing rows.
         let origin_y = (sh + world_h_px) * 0.5 + cam_y;
 
-        // World clicks: spawn picker, or block inspector.
-        if is_mouse_button_pressed(MouseButton::Left)
+        // World clicks: terrain paint, spawn picker, or block inspector.
+        let (mx, my) = mouse_position();
+        if terrain.open && !terrain.hits_panel(mx, my) {
+            let paint = is_mouse_button_down(MouseButton::Left);
+            let erase = is_mouse_button_down(MouseButton::Right);
+            if paint || erase {
+                if let Some((gx, gy)) = screen_to_world(
+                    mx,
+                    my,
+                    origin_x,
+                    origin_y,
+                    cell_px,
+                    scene.params.width_cols,
+                    scene.params.bedrock_floor_y,
+                    scene.params.sky_ceiling_y,
+                    scene.params.wrap_x,
+                ) {
+                    let prev_tool = terrain.tool;
+                    if erase {
+                        terrain.tool = TerrainTool::Erase;
+                    }
+                    terrain.apply_at(&mut scene.world, gx, gy);
+                    terrain.tool = prev_tool;
+                    inspect = Some((gx, gy));
+                }
+            }
+        } else if is_mouse_button_pressed(MouseButton::Left)
             && (!editor.open || editor.spawn_picker)
+            && !terrain.open
+            && !settings.open
         {
-            let (mx, my) = mouse_position();
             if let Some((gx, gy)) = screen_to_world(
                 mx,
                 my,
@@ -902,8 +1019,9 @@ async fn main() {
             }
         }
 
-        // Creature editor overlay (paint UI, or spawn banner).
+        // Creature / terrain editor overlays (paint UI, or spawn banner).
         editor.draw();
+        terrain.draw();
         settings.draw();
 
         // HUD chrome (info + hotkeys + inspector) toggled with F1.
@@ -931,7 +1049,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab settings|Space|R|W rain|C drizzle|E/K/O|I phase|N clouds|T temp|H haze|F1|F2|Esc",
+                "Tab|Space|R|W/C/E/K/O|I|N/T/H|F1 HUD|F2 creat|F3 terra|F5/F9 save|Esc",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,
