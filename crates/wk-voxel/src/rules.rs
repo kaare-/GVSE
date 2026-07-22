@@ -170,6 +170,10 @@ fn plan_same_y_pairwise_edge(
 /// (steering the free surface toward that outlet). Immediate cascade
 /// edges are already handled by priority 2; this extends the pull
 /// across up to [`SAME_Y_SURFACE_SCAN`] standing cells.
+///
+/// Pull only the head excess over the neighbour (half the delta) —
+/// dumping *all* remaining sat fought pairwise equalize and piled
+/// 1–2 cell shore spikes forever on otherwise flat lakes.
 fn same_y_cascade_pull(
     world: &World,
     gx: i32,
@@ -188,6 +192,12 @@ fn same_y_cascade_pull(
     if free_imm == 0 {
         return None;
     }
+    // Already flat with the neighbour — leave equalize alone.
+    let head = cur_sat.saturating_sub(side.sat.0);
+    if head <= 1 {
+        return None;
+    }
+    let pull = ((head / 2) as i32).max(1);
 
     // Immediate cascade is priority 2 — skip duplicate dump here.
     let immediate_cascade = matches!(
@@ -215,7 +225,7 @@ fn same_y_cascade_pull(
                 world.get_cell(x, gy - 1),
                 Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
             ) {
-                return Some(free_imm.min(cur_sat as i32));
+                return Some(free_imm.min(pull).min(cur_sat as i32));
             }
             break;
         }
@@ -1182,16 +1192,16 @@ fn seat_on_ice(below_dest: Option<Cell>) -> bool {
 }
 
 /// Snow/ice may sit on empty Air or on a wet film that rests on Ice.
-/// Dense grains may enter empty / film Air seats (and sink through water
-/// via [`apply_grain_fall`]) but must **not** repose-slide into standing
-/// water — that swam sand forever along submerged slopes.
+/// Dense grains may only repose into **dry** Air. Wet film and standing
+/// water seats are fall-only — sliding into film + stealing lake water
+/// was the shoreline sand fleck cycle (bright grains forever).
 fn avalanche_seat_ok(src: MaterialId, dest: Cell, below_dest: Option<Cell>) -> bool {
     if dest.sat.is_empty() {
         return true;
     }
     if is_grain(src) {
-        // Film OK (collapse bubbles); lake body (≥200) is fall-only.
-        return dest.sat.0 < 200;
+        // Any non-zero sat (film or lake) — sink via grain-fall only.
+        return false;
     }
     // Snow / hillside ice: spill onto lake ice, not into open water.
     seat_on_ice(below_dest)
@@ -1509,7 +1519,12 @@ fn flow_bias(world: &World, gx: i32, gy: i32, sat: Sat) -> Option<i32> {
             score += 0.5;
         }
         match world.get_cell(gx + dx, gy - 1) {
-            Some(b) if b.material == MaterialId::Air => score += 1.0, // cascade lip
+            // Real cascade lip: side column has room below (not a full
+            // water column). Treating sat-full Air as a lip made every
+            // deep lake cell scour its bed forever.
+            Some(b) if b.material == MaterialId::Air && !b.sat.is_full() => {
+                score += 1.0;
+            }
             Some(b) if b.material != MaterialId::Air => {
                 // Lower neighbor column surface (thin-sheet downhill).
                 if n.sat.is_empty() {
@@ -1571,10 +1586,10 @@ fn find_deposit_seat(world: &World, from_x: i32, from_y: i32, prefer_dx: i32) ->
     None
 }
 
-/// True when the destination column has more than `max_step` empty/film
+/// True when the destination column has more than `max_step` empty
 /// Air cells stacked downward from `from_y - 1` (the diagonal seat).
-/// Standing water does not count as a cliff — grains sink through it via
-/// fall, not repose.
+/// Any wet Air (film or standing) is support — grains do not treat the
+/// waterline as a dry cliff to avalanche into.
 fn diag_drop_exceeds(
     ptrs: &parallel::ChunkPtrMap,
     wrap_width: Option<i32>,
@@ -1591,8 +1606,8 @@ fn diag_drop_exceeds(
         if c.material != MaterialId::Air {
             break;
         }
-        // Lake / standing water is support for repose cliff measure.
-        if c.sat.0 >= 200 {
+        // Wet Air (film or lake) supports repose — fall handles sinking.
+        if !c.sat.is_empty() {
             break;
         }
         drop += 1;
@@ -3139,6 +3154,32 @@ mod tests {
     }
 
     #[test]
+    fn repose_does_not_slide_sand_into_wet_film() {
+        // Shoreline film (sat 1..199) was the remaining fleck cycle: sand
+        // slid in, stole lake water, flow refilled film, repeat.
+        let mut w = setup_column_world();
+        for x in 3..=7 {
+            for y in 1..=3 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 2, Cell::solid(MaterialId::Sand));
+        let mut film = Cell::air();
+        film.sat = Sat(80);
+        w.set_cell(4, 1, film);
+        w.set_cell(6, 1, film);
+        apply_grain_repose(&mut w);
+        assert_eq!(
+            w.get_cell(5, 2).unwrap().material,
+            MaterialId::Sand,
+            "sand must not avalanche into waterline film"
+        );
+        assert_ne!(w.get_cell(4, 1).unwrap().material, MaterialId::Sand);
+        assert_ne!(w.get_cell(6, 1).unwrap().material, MaterialId::Sand);
+    }
+
+    #[test]
     fn underwater_sand_mound_reaches_quiescence() {
         // Submerged sand mound under a water column should stop rearranging.
         let mut w = setup_column_world();
@@ -3424,6 +3465,97 @@ mod tests {
                 "still lake must not scour bed at x={x}"
             );
         }
+    }
+
+    #[test]
+    fn deep_still_shore_does_not_erode_sand_bed() {
+        // Sand shelf into deep still water (both columns full). Previously
+        // `flow_bias` treated sat-full Air below a neighbour as a cascade
+        // lip and scoured forever. Wall the open sides so only the
+        // deep-water interface remains.
+        let mut w = setup_column_world();
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..=3 {
+            w.set_cell(1, y, Cell::solid(MaterialId::Stone));
+            w.set_cell(11, y, Cell::solid(MaterialId::Stone));
+        }
+        for x in 2..=5 {
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+            w.set_cell(x, 2, Cell::water());
+            w.set_cell(x, 3, Cell::water());
+        }
+        for x in 6..=10 {
+            for y in 1..=3 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        let cfg = GrainConfig {
+            erosion_rate: 1.0,
+            max_events_per_tick: 32,
+            ..GrainConfig::default()
+        };
+        for t in 0..50 {
+            w.tick = t;
+            apply_flow_erosion(&mut w, &cfg);
+        }
+        for x in 2..=5 {
+            assert_eq!(
+                w.get_cell(x, 1).unwrap().material,
+                MaterialId::Sand,
+                "deep still shore must not scour sand at x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn flat_lake_near_cascade_lip_settles_surface() {
+        // Upper lake drains into a catch basin. Once the basin fills,
+        // the free surface must stop thrashing (old cascade-pull dumped
+        // all sat and fought equalize → endless 1-cell spikes).
+        let mut w = setup_column_world();
+        for x in 0..14 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+        }
+        for x in 1..=10 {
+            w.set_cell(x, 2, Cell::water());
+            w.set_cell(x, 3, Cell::water());
+        }
+        w.set_cell(0, 2, Cell::solid(MaterialId::Stone));
+        w.set_cell(0, 3, Cell::solid(MaterialId::Stone));
+        // Catch column: room at y=3 over a filling y=2 cell.
+        w.set_cell(11, 2, Cell::air());
+        w.set_cell(11, 3, Cell::air());
+        w.set_cell(12, 2, Cell::solid(MaterialId::Stone));
+        w.set_cell(12, 3, Cell::solid(MaterialId::Stone));
+
+        for _ in 0..120 {
+            tick(&mut w);
+        }
+        // Catch should be full (or nearly) — no ongoing drain.
+        let catch = w.get_cell(11, 2).unwrap().sat.0;
+        assert!(
+            catch >= 200,
+            "catch basin should fill so the lake can quiesce (sat={catch})"
+        );
+        let fingerprint = |w: &World| -> Vec<u8> {
+            (1..=11)
+                .flat_map(|x| {
+                    (2..=3).map(move |y| w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0))
+                })
+                .collect()
+        };
+        let a = fingerprint(&w);
+        for _ in 0..30 {
+            tick(&mut w);
+        }
+        let b = fingerprint(&w);
+        assert_eq!(
+            a, b,
+            "lake surface must stop rearranging after the catch fills"
+        );
     }
 
     #[test]
