@@ -8,6 +8,7 @@ use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
     ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, Genome, GrainConfig, KarstConfig,
     OrographicConfig, PerfConfig, PhaseConfig, RainConfig, TempConfig, WorldgenParams,
+    CHUNK_CELLS_W,
 };
 
 /// Default plant / fungus gene knobs applied on spawn (and optionally to living plants).
@@ -80,6 +81,12 @@ pub struct SimSettings {
     pub plant_genes: PlantGeneSettings,
     /// Set by UI when user clicks "Apply genes to living plants".
     pub apply_genes_to_living: bool,
+    /// Draft world size (chunks wide) — applied on Regenerate.
+    pub world_width_chunks: f32,
+    pub world_sea_level: f32,
+    pub world_sky_ceiling: f32,
+    /// Set by UI when user clicks "Regenerate world with size".
+    pub request_regen: bool,
 }
 
 impl SimSettings {
@@ -137,6 +144,10 @@ impl SimSettings {
             mat_poro,
             plant_genes: PlantGeneSettings::default(),
             apply_genes_to_living: false,
+            world_width_chunks: (params.width_cols as f32 / CHUNK_CELLS_W as f32).max(1.0),
+            world_sea_level: params.sea_level_y as f32,
+            world_sky_ceiling: params.sky_ceiling_y as f32,
+            request_regen: false,
         }
     }
 
@@ -147,6 +158,24 @@ impl SimSettings {
         self.oro.seed = params.seed;
         self.oro.width_cols = params.width_cols;
         self.oro.sea_level_y = params.sea_level_y;
+        self.world_width_chunks = (params.width_cols as f32 / CHUNK_CELLS_W as f32).max(1.0);
+        self.world_sea_level = params.sea_level_y as f32;
+        self.world_sky_ceiling = params.sky_ceiling_y as f32;
+    }
+
+    /// Build worldgen params from the World size draft sliders.
+    pub fn draft_world_params(&self, base: &WorldgenParams) -> WorldgenParams {
+        let chunks = self.world_width_chunks.round().clamp(2.0, 64.0) as i32;
+        WorldgenParams {
+            width_cols: chunks * CHUNK_CELLS_W as i32,
+            sea_level_y: self.world_sea_level.round().clamp(8.0, 400.0) as i32,
+            sky_ceiling_y: self
+                .world_sky_ceiling
+                .round()
+                .clamp(32.0, 640.0)
+                .max(self.world_sea_level.round() + 16.0) as i32,
+            ..*base
+        }
     }
 
     /// Push material slider values into the shared registry overrides.
@@ -194,6 +223,46 @@ impl SimSettings {
         widgets::Window::new(hash!(), vec2(12.0, 12.0), vec2(win_w, win_h))
             .label("Settings (Tab to close)")
             .ui(&mut *root_ui(), |ui| {
+                ui.tree_node(hash!(), "World size", |ui| {
+                    ui.label(
+                        None,
+                        "Draft size — click Regenerate to rebuild (keeps seed).",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Width (chunks of 64 cells)",
+                        2.0..48.0,
+                        &mut self.world_width_chunks,
+                    );
+                    ui.label(
+                        None,
+                        &format!(
+                            "  → {} cells wide",
+                            self.world_width_chunks.round().clamp(2.0, 64.0) as i32
+                                * CHUNK_CELLS_W as i32
+                        ),
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Sea level (y)",
+                        8.0..240.0,
+                        &mut self.world_sea_level,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Sky ceiling (y)",
+                        64.0..480.0,
+                        &mut self.world_sky_ceiling,
+                    );
+                    if ui.button(None, "Regenerate world with size") {
+                        self.request_regen = true;
+                    }
+                });
+                ui.separator();
+
                 ui.tree_node(hash!(), "Day / night / temperature", |ui| {
                     labeled_slider(ui, hash!(), "Day length (ticks)", 60.0..6_000.0, &mut day_ticks);
                     labeled_slider(ui, hash!(), "Night length (ticks)", 60.0..6_000.0, &mut night_ticks);
@@ -700,7 +769,10 @@ impl SimSettings {
                     }
                 });
                 ui.separator();
-                ui.label(None, "Tip: Tab closes · F2 creature editor · F1 hide HUD");
+                ui.label(
+                    None,
+                    "Tip: Tab closes · F2 creatures · F3 terrain · F5/F9 save/load · F1 HUD",
+                );
             });
 
         self.karst.min_wet_neighbour_sat = min_sat.round().clamp(1.0, 255.0) as u8;
