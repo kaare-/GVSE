@@ -43,6 +43,13 @@ pub const ROOT_MOISTURE_AFFINITY: f32 = 2.8;
 pub const ROOT_CROWN_BLOB_PENALTY: f32 = 1.8;
 /// Penalty per extra cell when elongating a same-column pipe (≥3 deep).
 pub const ROOT_PIPE_TAX: f32 = 1.35;
+/// Score penalty per Chebyshev step from the crown (applies to every
+/// direction — long diagonal tendrils pay the same as vertical pipes).
+pub const ROOT_TRANSPORT_TAX: f32 = 0.70;
+/// Extra energy multiplier per transport hop beyond the first
+/// (`cost *= 1 + frac * (path_len - 1)`). Makes long single roots
+/// expensive to extend so mid-pipe branches win on energy too.
+pub const ROOT_TRANSPORT_COST_FRAC: f32 = 0.12;
 /// Score bonus for forking off a tip that already has depth.
 pub const ROOT_BRANCH_BONUS: f32 = 1.55;
 /// Score bonus for stepping *into* Organic / Sand beds.
@@ -497,6 +504,42 @@ pub fn beside_foreign_live_root(
 }
 
 /// Try to add one Root pixel toward moisture / depth bias.
+/// Shallowest own Root near the stem (crown proxy for transport length).
+fn root_crown(atom: &Atom) -> (i16, i16) {
+    atom.body
+        .iter()
+        .filter(|(_, _, m)| *m == ModuleId::Root)
+        .max_by_key(|(x, y, _)| (*y, -x.abs()))
+        .map(|&(x, y, _)| (x, y))
+        .unwrap_or((0, -1))
+}
+
+/// Chebyshev steps between two body-local cells.
+fn chebyshev(a: (i16, i16), b: (i16, i16)) -> i16 {
+    (a.0 - b.0).abs().max((a.1 - b.1).abs())
+}
+
+/// Transport hops from crown to a candidate cell (≥ 1).
+pub fn root_transport_hops(atom: &Atom, nx: i16, ny: i16) -> i16 {
+    chebyshev(root_crown(atom), (nx, ny)).max(1)
+}
+
+/// Direction preference — mutually exclusive so diagonal-down does not
+/// get a full "down" credit *plus* a sprawl credit (that made every
+/// tendril prefer stairs forever).
+fn root_dir_preference(dx: i16, dy: i16, depth_bias: f32) -> f32 {
+    if dx != 0 && dy < 0 {
+        // Diagonal: blend dive + sprawl; never sum both at full weight.
+        depth_bias * 0.55 + (1.0 - depth_bias) * 0.40
+    } else if dy < 0 {
+        depth_bias
+    } else if dx != 0 {
+        (1.0 - depth_bias) * 0.70
+    } else {
+        0.0
+    }
+}
+
 /// Returns energy spent (0 if nothing grew).
 ///
 /// `live_roots` is every living Root world cell (all plants) so spacing
@@ -589,7 +632,12 @@ pub fn try_elongate_root(
                 // lateral air — skip (roots stay in ground)
                 continue;
             }
-            let cost = ROOT_ELONGATE_BASE_COST * pen;
+            // Transport length from crown — long single tendrils pay more
+            // score *and* energy than short mid-pipe branches.
+            let hops = root_transport_hops(atom, nx, ny) as f32;
+            let cost = ROOT_ELONGATE_BASE_COST
+                * pen
+                * (1.0 + ROOT_TRANSPORT_COST_FRAC * (hops - 1.0).max(0.0));
             if atom.energy < cost + grow_floor * 0.5 {
                 continue;
             }
@@ -597,13 +645,10 @@ pub fn try_elongate_root(
             let moist = cell_moisture_frac(world, wx, wy)
                 .max(cell_moisture_frac(world, wx, wy - 1))
                 .max(cell_moisture_frac(world, wx, wy - 2) * 0.85);
-            let down = if dy < 0 { 1.0 } else { 0.0 };
-            let lateral = if dx != 0 && dy == 0 { 0.55 } else { 0.0 };
-            let diag = if dx != 0 && dy < 0 { 0.70 } else { 0.0 };
             let mut score = moist * ROOT_MOISTURE_AFFINITY
-                + depth_bias * down
-                + (1.0 - depth_bias) * (lateral + diag)
-                - pen * 0.03;
+                + root_dir_preference(dx, dy, depth_bias)
+                - pen * 0.03
+                - ROOT_TRANSPORT_TAX * hops;
             // Organic is transformed dead-root compost — fine to sit beside
             // or step into (score bonus below). Live roots stay exclusive.
             match cell.material {
