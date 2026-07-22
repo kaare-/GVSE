@@ -2035,6 +2035,127 @@ mod tests {
     }
 
     #[test]
+    fn root_transport_prefers_short_branch_over_long_tendril() {
+        // Vertical pipe + long diagonal tendril. Transport tax should make
+        // a mid-pipe bud beat extending the tendril tip another step.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=10 {
+                let mut sand = Cell::solid(MaterialId::Sand);
+                sand.sat = Sat(120); // uniform — no deep-moisture lure
+                w.set_cell(x, y, sand);
+            }
+            for y in 11..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.55;
+        // Two photosystems → soft root budget 9, room for one more grow.
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, -3, ModuleId::Root),
+            (1, -4, ModuleId::Root),
+            (2, -5, ModuleId::Root),
+            (3, -6, ModuleId::Root),
+            (4, -7, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+            (1, 2, ModuleId::Photosystem),
+        ];
+        // Nucleus at y=12 so roots sit in sand (y=11..5).
+        let mut atom = Atom::from_body(4, 12, 80.0, body);
+        atom.genome = g;
+        atom.energy = 80.0;
+        let tip_hops = crate::plant::root_transport_hops(&atom, 5, -8);
+        let bud_hops = crate::plant::root_transport_hops(&atom, -1, -2);
+        assert!(
+            tip_hops > bud_hops + 2,
+            "tendril tip should be much farther from crown ({tip_hops} vs {bud_hops})"
+        );
+        let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        assert!(spent > 0.0, "should still grow somewhere");
+        let prior = [
+            (0, -1),
+            (0, -2),
+            (0, -3),
+            (1, -4),
+            (2, -5),
+            (3, -6),
+            (4, -7),
+        ];
+        let added = atom
+            .body
+            .iter()
+            .find(|&&(x, y, m)| m == ModuleId::Root && !prior.contains(&(x, y)))
+            .map(|&(x, y, _)| (x, y))
+            .expect("should add a root");
+        let added_hops = crate::plant::root_transport_hops(&atom, added.0, added.1);
+        assert!(
+            added_hops <= 4,
+            "transport cost should pick a short branch near the crown, got {added:?} hops={added_hops}"
+        );
+        assert_ne!(
+            added,
+            (5, -8),
+            "must not extend the long diagonal tendril tip"
+        );
+    }
+
+    #[test]
+    fn root_dir_preference_does_not_always_pick_diagonal() {
+        // Short plant, uniform moisture: high depth bias should dive
+        // cardinal down — not get forced onto a diagonal stair by the
+        // old double-counted dir score. Keep energy below sprout-banking
+        // so rhizome urge doesn't yank sideways.
+        let mut w = deep_moist_sand();
+        for x in 0..12 {
+            for y in 1..=5 {
+                let mut sand = Cell::solid(MaterialId::Sand);
+                sand.sat = Sat(100);
+                w.set_cell(x, y, sand);
+            }
+        }
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.85;
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 6, 80.0, body);
+        atom.genome = g;
+        // Above grow floor (0.30·tank) but below sprout-banking (~0.44·tank).
+        atom.energy = 32.0;
+        let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        assert!(spent > 0.0);
+        let added = atom
+            .body
+            .iter()
+            .find(|&&(x, y, m)| m == ModuleId::Root && (x, y) != (0, -1))
+            .map(|&(x, y, _)| (x, y))
+            .expect("added root");
+        assert_eq!(
+            added,
+            (0, -2),
+            "high depth bias should dive cardinal, not diagonal; got {added:?}"
+        );
+    }
+
+    #[test]
     fn root_elongation_allows_cell_beside_organic_compost() {
         let mut w = deep_moist_sand();
         // Seal the dive so the only open step is lateral Sand next to
