@@ -130,9 +130,14 @@ pub fn is_grain(material: MaterialId) -> bool {
     )
 }
 
-/// Soft frozen pack: falls through *empty* Air, floats on standing water.
+/// Soft pack / litter: falls through *empty* Air, floats on standing water.
+/// Organic is included so dead leaves and dissolved stems drop to the bed
+/// without soaking into lakes.
 pub fn falls_through_empty_air(material: MaterialId) -> bool {
-    matches!(material, MaterialId::Snow | MaterialId::Ice)
+    matches!(
+        material,
+        MaterialId::Snow | MaterialId::Ice | MaterialId::Organic
+    )
 }
 
 /// Materials that participate in angle-of-repose diagonal slides.
@@ -252,6 +257,10 @@ mod tests {
             assert!(!is_grain(m), "{m:?} must not be classified as a grain");
             assert!(!is_repose_grain(m), "{m:?} must not repose");
         }
+        assert!(
+            falls_through_empty_air(MaterialId::Organic),
+            "Organic litter must fall through empty Air"
+        );
         assert!(!falls_through_empty_air(MaterialId::Sand));
     }
 

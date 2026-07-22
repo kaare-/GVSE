@@ -512,6 +512,11 @@ fn rests_on_solid_or_pack(world: &World, gx: i32, gy: i32) -> bool {
 /// Snow is a solid lid on rock / sand / pack. A wet Air film on solid
 /// ground becomes Snow (it is not pushed into pores). Deep water gets
 /// snow seated in the empty Air above the free surface.
+///
+/// Plant shoot modules (Stem / Nucleus / leaf) are draw overlays — they do
+/// not lift this seat, so snow piles on the ground, not on the canopy.
+/// Soft blanket depth caps column spikes. Leaf frost tint is a future
+/// overlay animation, not world Snow on Photosystem cells.
 fn deposit_snow_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f32> {
     deposit_frozen_lid_on_surface(world, gx, start_y, snow_cell())
 }

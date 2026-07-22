@@ -849,8 +849,8 @@ fn accumulate_seepage_xfers(
 /// one cell per invocation, including across chunk seams.
 ///
 /// V1 kept simple: dense grains fall through Air *any* saturation;
-/// Snow/Ice fall through *empty* Air only (float on water). Density-
-/// ordered stacking between grain species is a follow-up.
+/// Snow/Ice/Organic fall through *empty* Air only (float on water).
+/// Density-ordered stacking between grain species is a follow-up.
 pub fn apply_grain_fall(world: &mut World) {
     let regions = regions_for_standalone(world);
     for pass in partition_checkerboard(&regions) {
@@ -880,8 +880,8 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 if is_grain(above.material) {
                     // Dense grains sink through any Air sat.
                 } else if falls_through_empty_air(above.material) {
-                    // Snow / Ice hang-fix: drop through empty Air, float
-                    // on standing water so lake lids and shore slush stay.
+                    // Snow / Ice / Organic: drop through empty Air, float
+                    // on standing water (lids, shore slush, leaf litter).
                     if !cur.sat.is_empty() {
                         continue;
                     }
@@ -1106,7 +1106,9 @@ fn write_repose_swap(
 }
 
 /// Move standing water from an adjacent Air cell into a fill cell.
-/// Prefer full cells; leaves the donor empty. Skips `dest` (the seat).
+/// Prefer an upward donor first so dry bubbles rise into open water
+/// instead of sliding sideways along a sand face (perpetual cycling).
+/// Then prefer fuller cells. Leaves the donor empty. Skips `dest`.
 fn steal_standing_water_neighbor(
     ptrs: &parallel::ChunkPtrMap,
     wrap_width: Option<i32>,
@@ -1115,8 +1117,10 @@ fn steal_standing_water_neighbor(
     dest_x: i32,
     dest_y: i32,
 ) -> Option<Cell> {
-    let mut best: Option<(i32, i32, u8)> = None;
-    for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, 1), (1, 1)] {
+    // Rank: upward first, then fuller sat, then closer to vertical.
+    let mut chosen: Option<(i32, i32, u8)> = None;
+    let mut best_key: Option<(i32, u8, i32)> = None;
+    for (dx, dy) in [(0, 1), (-1, 1), (1, 1), (-1, 0), (1, 0), (0, -1)] {
         let nx = src_x + dx;
         let ny = src_y + dy;
         if nx == dest_x && ny == dest_y {
@@ -1128,15 +1132,13 @@ fn steal_standing_water_neighbor(
         if n.material != MaterialId::Air || n.sat.0 < 200 {
             continue;
         }
-        let better = match best {
-            None => true,
-            Some((_, _, sat)) => n.sat.0 > sat,
-        };
-        if better {
-            best = Some((nx, ny, n.sat.0));
+        let key = (if dy > 0 { 0 } else { 1 }, u8::MAX - n.sat.0, dy.abs());
+        if best_key.map(|b| key < b).unwrap_or(true) {
+            best_key = Some(key);
+            chosen = Some((nx, ny, n.sat.0));
         }
     }
-    let (nx, ny, sat) = best?;
+    let (nx, ny, sat) = chosen?;
     unsafe {
         parallel::set_cell(ptrs, wrap_width, nx, ny, Cell::air());
     }
@@ -1180,13 +1182,16 @@ fn seat_on_ice(below_dest: Option<Cell>) -> bool {
 }
 
 /// Snow/ice may sit on empty Air or on a wet film that rests on Ice.
-/// Dense grains may enter any Air seat (they sink through water).
+/// Dense grains may enter empty / film Air seats (and sink through water
+/// via [`apply_grain_fall`]) but must **not** repose-slide into standing
+/// water — that swam sand forever along submerged slopes.
 fn avalanche_seat_ok(src: MaterialId, dest: Cell, below_dest: Option<Cell>) -> bool {
     if dest.sat.is_empty() {
         return true;
     }
     if is_grain(src) {
-        return true;
+        // Film OK (collapse bubbles); lake body (≥200) is fall-only.
+        return dest.sat.0 < 200;
     }
     // Snow / hillside ice: spill onto lake ice, not into open water.
     seat_on_ice(below_dest)
@@ -1566,8 +1571,10 @@ fn find_deposit_seat(world: &World, from_x: i32, from_y: i32, prefer_dx: i32) ->
     None
 }
 
-/// True when the destination column has more than `max_step` empty Air
-/// cells stacked downward from `from_y - 1` (the diagonal seat).
+/// True when the destination column has more than `max_step` empty/film
+/// Air cells stacked downward from `from_y - 1` (the diagonal seat).
+/// Standing water does not count as a cliff — grains sink through it via
+/// fall, not repose.
 fn diag_drop_exceeds(
     ptrs: &parallel::ChunkPtrMap,
     wrap_width: Option<i32>,
@@ -1582,6 +1589,10 @@ fn diag_drop_exceeds(
             break;
         };
         if c.material != MaterialId::Air {
+            break;
+        }
+        // Lake / standing water is support for repose cliff measure.
+        if c.sat.0 >= 200 {
             break;
         }
         drop += 1;
@@ -3103,6 +3114,92 @@ mod tests {
             sat_after, sat_before,
             "underwater repose must steal neighbour water, not mint sat"
         );
+    }
+
+    #[test]
+    fn repose_does_not_slide_sand_into_standing_water() {
+        // Supported sand with only full-water diagonal seats must stay put.
+        // Vertical sink through water is grain-fall's job, not repose.
+        let mut w = setup_column_world();
+        for x in 3..=7 {
+            for y in 1..=4 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(5, 2, Cell::solid(MaterialId::Sand));
+        apply_grain_repose(&mut w);
+        assert_eq!(
+            w.get_cell(5, 2).unwrap().material,
+            MaterialId::Sand,
+            "sand must not swim sideways into the lake via repose"
+        );
+        assert_ne!(w.get_cell(4, 1).unwrap().material, MaterialId::Sand);
+        assert_ne!(w.get_cell(6, 1).unwrap().material, MaterialId::Sand);
+    }
+
+    #[test]
+    fn underwater_sand_mound_reaches_quiescence() {
+        // Submerged sand mound under a water column should stop rearranging.
+        let mut w = setup_column_world();
+        for x in 2..=10 {
+            for y in 1..=6 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        // Small mound on bedrock.
+        for x in 4..=7 {
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+        }
+        w.set_cell(5, 2, Cell::solid(MaterialId::Sand));
+        w.set_cell(6, 2, Cell::solid(MaterialId::Sand));
+        w.set_cell(5, 3, Cell::solid(MaterialId::Sand));
+        let fingerprint = |w: &World| -> Vec<(i32, i32)> {
+            let mut cells = Vec::new();
+            for x in 0..16 {
+                for y in 0..10 {
+                    if w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand) {
+                        cells.push((x, y));
+                    }
+                }
+            }
+            cells
+        };
+        // Settle for a while, then assert two windows match.
+        for _ in 0..40 {
+            apply_grain_fall(&mut w);
+            apply_grain_repose(&mut w);
+            apply_gravity_fall(&mut w);
+        }
+        let a = fingerprint(&w);
+        for _ in 0..20 {
+            apply_grain_fall(&mut w);
+            apply_grain_repose(&mut w);
+            apply_gravity_fall(&mut w);
+        }
+        let b = fingerprint(&w);
+        assert_eq!(
+            a, b,
+            "underwater sand mound must reach a resting configuration"
+        );
+        // No dry Air bubbles trapped beside sand below the water surface.
+        for x in 2..=10 {
+            for y in 1..=5 {
+                let Some(c) = w.get_cell(x, y) else { continue };
+                if c.material != MaterialId::Air {
+                    continue;
+                }
+                let next_to_sand = [(-1, 0), (1, 0), (0, -1), (0, 1)].iter().any(|&(dx, dy)| {
+                    w.get_cell(x + dx, y + dy).map(|n| n.material) == Some(MaterialId::Sand)
+                });
+                if next_to_sand {
+                    assert!(
+                        c.sat.0 >= 200,
+                        "dry/film bubble at ({x},{y}) next to sand — cycling residue"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

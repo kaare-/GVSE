@@ -672,22 +672,30 @@ async fn main() {
             ) {
                 if editor.spawn_picker {
                     let body = editor.blueprint.modules_relative_to_nucleus();
-                    // Tab plant-gene knobs override blueprint genome on spawn
-                    // for plants/fungi; Atoms keep the painted blueprint genes.
-                    let g = if editor.blueprint.is_valid_plant()
-                        || editor.blueprint.is_valid_fungus()
-                    {
+                    // Tab plant-gene knobs apply when the body has land/fungus
+                    // tissues; pure plankton keeps painted blueprint genes.
+                    let has_land_tissue = body.iter().any(|(_, _, m)| {
+                        matches!(
+                            m,
+                            wk_voxel::ModuleId::Root
+                                | wk_voxel::ModuleId::Stem
+                                | wk_voxel::ModuleId::Digest
+                                | wk_voxel::ModuleId::Hypha
+                        )
+                    });
+                    let g = if has_land_tissue {
                         let mut g = settings.plant_genes.to_genome();
-                        // Keep buoyancy from blueprint (plants ignore it).
                         g.buoyancy_bias = editor.blueprint.genome.buoyancy_bias;
-                        // Don't invent tissues the painted body never had
-                        // (e.g. Root+Nucleus+Leaf chassis → no surprise trunk).
+                        // Don't invent tissues the painted body never had.
                         wk_voxel::sync_alloc_to_body(&mut g, &body);
                         g
                     } else {
                         editor.blueprint.genome
                     };
-                    if scene.organisms.spawn_blueprint(&scene.world, gx, gy, body, 40.0, g) {
+                    if scene
+                        .organisms
+                        .spawn_blueprint_free(&scene.world, gx, gy, body, 40.0, g)
+                    {
                         editor.status = format!(
                             "Spawned {} at ({gx},{gy})  atoms={}",
                             editor.blueprint.name,
@@ -698,13 +706,8 @@ async fn main() {
                         paused = editor.was_paused;
                         inspect = Some((gx, gy));
                     } else {
-                        editor.status = if editor.blueprint.is_valid_plant()
-                            || editor.blueprint.is_valid_fungus()
-                        {
-                            "Spawn failed — need Air above porous soil (or pop cap)".into()
-                        } else {
-                            "Spawn failed — need a wet Air cell nearby (or pop cap)".into()
-                        };
+                        editor.status =
+                            "Spawn failed — need an Air cell near the click (or pop cap)".into();
                     }
                 } else {
                     inspect = Some((gx, gy));

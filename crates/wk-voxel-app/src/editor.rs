@@ -102,7 +102,8 @@ impl CreatureEditor {
         if is_key_pressed(KeyCode::F) {
             self.blueprint = Blueprint::minimal_fungus();
             self.name_buf = "fungus".into();
-            self.status = "Minimal fungus template (spawn on moist land + litter)".into();
+            self.status =
+                "Minimal fungus template (spawn on Organic / wet sand / any solid)".into();
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
             self.blueprint.name = self.name_buf.clone();
@@ -126,18 +127,12 @@ impl CreatureEditor {
             }
         }
         if is_key_pressed(KeyCode::Enter) {
-            if self.blueprint.is_valid_creature() {
+            if self.blueprint.can_editor_spawn() {
                 self.spawn_picker = true;
-                let hint = if self.blueprint.is_valid_plant() || self.blueprint.is_valid_fungus()
-                {
-                    "moist land (Air above porous solid)"
-                } else {
-                    "a wet Air cell"
-                };
-                self.status = format!("SPAWN — click {hint} (Esc cancel)");
-            } else {
                 self.status =
-                    "Need Nucleus+Photo (Atom), +Root (Plant), or Digest (Fungus)".into();
+                    "SPAWN — click any Air cell (Esc cancel); odd mixes may not thrive".into();
+            } else {
+                self.status = "Need at least one Nucleus on the canvas".into();
             }
         }
         if is_key_pressed(KeyCode::Escape) && self.spawn_picker {
@@ -188,11 +183,8 @@ impl CreatureEditor {
         let sh = screen_height();
         if self.spawn_picker {
             draw_rectangle(0.0, 0.0, sw, 36.0, Color::from_rgba(8, 10, 16, 200));
-            let msg = if self.blueprint.is_valid_plant() || self.blueprint.is_valid_fungus() {
-                "SPAWN MODE — click moist land (sand/soil under Air)  |  Esc cancel  |  F2 close"
-            } else {
-                "SPAWN MODE — click a wet cell to place  |  Esc cancel  |  F2 close"
-            };
+            let msg =
+                "SPAWN MODE — click any Air cell  |  Esc cancel  |  F2 close";
             draw_text(msg, 16.0, 24.0, 20.0, GREEN);
             return;
         }

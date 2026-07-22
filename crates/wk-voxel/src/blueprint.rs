@@ -349,6 +349,12 @@ impl Blueprint {
         self.is_valid_atom() || self.is_valid_plant() || self.is_valid_fungus()
     }
 
+    /// Editor spawn gate: any painted body with a Nucleus (habit rules are
+    /// for thriving, not for placement).
+    pub fn can_editor_spawn(&self) -> bool {
+        self.nucleus_count() >= 1 && !self.modules.is_empty()
+    }
+
     /// Anchor = first Nucleus (canvas coords).
     pub fn nucleus_origin(&self) -> Option<(i16, i16)> {
         self.modules
@@ -453,6 +459,18 @@ mod tests {
         assert!(!bp.is_valid_atom());
         assert!(!bp.is_valid_plant());
         assert!(bp.digest_count() >= 1);
+    }
+
+    #[test]
+    fn editor_spawn_allows_any_nucleus_body() {
+        let mut bp = Blueprint::atom();
+        assert!(bp.can_editor_spawn());
+        // Nucleus-only (no photo) is not a classified habit, still spawnable.
+        bp.modules.retain(|m| m.module == ModuleId::Nucleus);
+        assert!(!bp.is_valid_creature());
+        assert!(bp.can_editor_spawn());
+        bp.modules.clear();
+        assert!(!bp.can_editor_spawn());
     }
 
     #[test]

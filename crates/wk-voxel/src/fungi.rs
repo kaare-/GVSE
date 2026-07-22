@@ -11,7 +11,7 @@ use crate::blueprint::Genome;
 use crate::cell::{water_capacity, Cell};
 use crate::grid::World;
 use crate::organism::{Atom, ModuleId};
-use crate::plant::{apply_genome, find_plant_slot, pin_plant_pose};
+use crate::plant::{apply_genome, find_fungus_slot, pin_plant_pose};
 
 /// Soft litter units treated as fully labile food (per column).
 /// Stratigraphic Organic cells contribute this many labile units each.
@@ -179,7 +179,8 @@ fn find_organic_xy(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
 }
 
 /// Remove up to `want` labile units; returns (units_taken, energy).
-/// Prefers soft litter, then peels Organic cells → Air (lite cavity).
+/// Prefers soft litter, then converts Organic cells → Sand (loose soil),
+/// preserving pore sat so digests don't flash-dry the bed.
 pub fn digest_labile(world: &mut World, gx: i32, gy: i32, want: u16) -> (u16, f32) {
     if want == 0 {
         return (0, 0.0);
@@ -203,7 +204,14 @@ pub fn digest_labile(world: &mut World, gx: i32, gy: i32, want: u16) -> (u16, f3
         let Some((ox, oy)) = find_organic_xy(world, gx, gy) else {
             break;
         };
-        world.set_cell(ox, oy, Cell::air());
+        let sat = world
+            .get_cell(ox, oy)
+            .map(|c| c.sat.0)
+            .unwrap_or(0);
+        let mut soil = Cell::solid(MaterialId::Sand);
+        let cap = water_capacity(MaterialId::Sand);
+        soil.sat.0 = if cap > 0 { sat.min(cap) } else { 0 };
+        world.set_cell(ox, oy, soil);
         let spend = (LABILE_ORGANIC_UNITS.ceil() as u16).max(1).min(left);
         taken = taken.saturating_add(spend);
         left = left.saturating_sub(spend);
@@ -249,7 +257,7 @@ pub fn pick_spore_site(world: &World, atom: &Atom, tick: u64, id: u32) -> Option
     for dist in 1..=FUNGUS_SPORE_MAX_DIST {
         for sign in [1i32, -1] {
             let wx = world.wrap_x(wx0 + sign * dist);
-            let Some(gy) = find_plant_slot(world, wx, atom.gy) else {
+            let Some(gy) = find_fungus_slot(world, wx, atom.gy) else {
                 continue;
             };
             let food = labile_food_units(world, wx, gy);
@@ -265,12 +273,12 @@ pub fn pick_spore_site(world: &World, atom: &Atom, tick: u64, id: u32) -> Option
     if let Some((_, wx)) = best {
         return Some(wx);
     }
-    // Fallback: any plantable neighbour (spore bank).
+    // Fallback: any solid seat nearby (spore bank).
     let flip = hash_u64(world.seed.0, tick, id as u64, 0xF5C0) & 1;
     let dir = if flip == 0 { 1 } else { -1 };
     for dist in 1..=FUNGUS_SPORE_MAX_DIST {
         let wx = world.wrap_x(wx0 + dir * dist);
-        if find_plant_slot(world, wx, atom.gy).is_some() {
+        if find_fungus_slot(world, wx, atom.gy).is_some() {
             return Some(wx);
         }
     }
@@ -301,7 +309,7 @@ pub fn try_spore(
         return None;
     }
     let wx = pick_spore_site(world, atom, tick, entity_id)?;
-    let gy = find_plant_slot(world, wx, atom.gy)?;
+    let gy = find_fungus_slot(world, wx, atom.gy)?;
     let cost = tank * 0.40;
     if atom.energy < cost {
         return None;
@@ -335,9 +343,11 @@ pub fn deposit_death_litter(world: &mut World, gx: i32, gy: i32, n_modules: usiz
 
 /// Dissolve a lingering corpse into Organic matter + soft litter.
 ///
-/// Body footprint: dry Air and non-bedrock solids become `MaterialId::Organic`
-/// in place (ghost-root / standing-dead → soil). Wet Air (free water) is left
-/// alone so lakes aren't plugged; if nothing painted, fall back to a bed pile.
+/// Shoot modules (Stem / Nucleus / Photosystem) never become mid-air Organic
+/// pillars — water and snow must pass dead trunks; compost belongs on the
+/// bed (fallback pile) or in soil already painted by dead roots. Digest /
+/// Hypha / Root footprints still convert solids (and dry Air for detritus).
+/// Wet Air (free water) is left alone so lakes aren't plugged.
 pub fn dissolve_corpse_to_organic(
     world: &mut World,
     gx: i32,
@@ -351,7 +361,14 @@ pub fn dissolve_corpse_to_organic(
     add_soft_litter(world, gx, units);
 
     let mut painted = 0u32;
-    for &(dx, dy, _) in body {
+    for &(dx, dy, mid) in body {
+        // Grey trunks / crowns / leaves: litter only — do not dam flow.
+        if matches!(
+            mid,
+            ModuleId::Stem | ModuleId::Nucleus | ModuleId::Photosystem
+        ) {
+            continue;
+        }
         let wx = world.wrap_x(gx + dx as i32);
         let wy = gy + dy as i32;
         let Some(c) = world.get_cell(wx, wy) else {
@@ -451,6 +468,38 @@ mod tests {
         assert_eq!(
             w.get_cell(4, 2).map(|c| c.material),
             Some(MaterialId::Organic)
+        );
+    }
+
+    #[test]
+    fn digest_converts_organic_to_sand_soil() {
+        let mut w = litter_plot();
+        // Enough Organic mass that DIGEST_TICK_FRAC yields ≥1 unit.
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(100);
+            w.set_cell(4, y, org);
+        }
+        let (taken, energy) = digest_labile(&mut w, 4, 3, 4);
+        assert!(taken > 0 && energy > 0.0);
+        let soils = (1..=3)
+            .filter(|&y| {
+                w.get_cell(4, y)
+                    .map(|c| c.material == MaterialId::Sand)
+                    .unwrap_or(false)
+            })
+            .count();
+        assert!(soils >= 1, "at least one Organic cell should become Sand");
+        let soil = (1..=3)
+            .find_map(|y| {
+                w.get_cell(4, y)
+                    .filter(|c| c.material == MaterialId::Sand)
+            })
+            .unwrap();
+        assert_eq!(
+            soil.sat.0,
+            100.min(water_capacity(MaterialId::Sand)),
+            "pore sat must survive the conversion"
         );
     }
 

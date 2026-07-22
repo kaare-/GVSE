@@ -28,7 +28,8 @@ use crate::fungi::{
 use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::plant::{
-    apply_genome, drink_roots, drought_band, find_plant_slot, is_anchored, is_land_plant,
+    apply_genome, collect_live_root_world_cells, collect_trunk_world_cells, drink_roots,
+    drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, is_anchored, is_land_plant,
     leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac, sync_root_storage,
     try_grow_plant, try_vegetative_sprout, DroughtBand, DROUGHT_DORMANT_UPKEEP,
     DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
@@ -233,13 +234,15 @@ pub struct Corpse {
 impl Corpse {
     pub fn from_atom(atom: &Atom) -> Self {
         let land = is_land_plant(atom) || is_fungus(atom);
-        // Roots are already painted into Organic on death — drop them from
-        // the lingering above-ground corpse so only stem/leaf/crown remain.
+        // Roots → Organic in soil; leaves → falling Organic litter.
+        // Lingering grey corpse keeps stem / nucleus / crown only.
         let body = if is_land_plant(atom) {
             atom.body
                 .iter()
                 .copied()
-                .filter(|(_, _, m)| *m != ModuleId::Root)
+                .filter(|(_, _, m)| {
+                    *m != ModuleId::Root && *m != ModuleId::Photosystem
+                })
                 .collect()
         } else {
             atom.body.clone()
@@ -348,6 +351,9 @@ impl OrganismStore {
 
     /// Spawn a painted blueprint with nucleus at `(gx, gy)`.
     /// Atoms need wet Air; land plants need Air above porous solid.
+    ///
+    /// Habitat-aware seating for sim / tests. Editor free placement uses
+    /// [`Self::spawn_blueprint_free`].
     pub fn spawn_blueprint(
         &mut self,
         world: &World,
@@ -363,8 +369,13 @@ impl OrganismStore {
         let gx = world.wrap_x(gx);
         let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
         let fungus = body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant;
-        let gy = if plant || fungus {
+        let gy = if plant {
             let Some(slot) = find_plant_slot(world, gx, gy) else {
+                return false;
+            };
+            slot
+        } else if fungus {
+            let Some(slot) = find_fungus_slot(world, gx, gy) else {
                 return false;
             };
             slot
@@ -387,6 +398,40 @@ impl OrganismStore {
             if !is_fungus_seated(world, &atom) {
                 return false;
             }
+        } else if let Some((top, _)) = wet_band(world, gx, gy) {
+            atom.last_water_top = Some(top);
+        }
+        self.atoms.push(atom);
+        true
+    }
+
+    /// Editor spawn: any module mix, any Air cell near the click.
+    ///
+    /// No wet-Air / porous-soil / seat checks — creatures may starve or
+    /// float; that is intentional sandbox behaviour.
+    pub fn spawn_blueprint_free(
+        &mut self,
+        world: &World,
+        gx: i32,
+        gy: i32,
+        body: Vec<BodyModule>,
+        energy_max: f32,
+        genome: Genome,
+    ) -> bool {
+        if self.atoms.len() >= MAX_ATOMS || body.is_empty() {
+            return false;
+        }
+        if !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+            return false;
+        }
+        let gx = world.wrap_x(gx);
+        let Some(gy) = find_air_near(world, gx, gy) else {
+            return false;
+        };
+        let mut atom = Atom::from_body(gx, gy, energy_max, body);
+        apply_genome(&mut atom, genome);
+        if is_land_plant(&atom) || is_fungus(&atom) {
+            pin_plant_pose(&mut atom);
         } else if let Some((top, _)) = wet_band(world, gx, gy) {
             atom.last_water_top = Some(top);
         }
@@ -425,6 +470,10 @@ impl OrganismStore {
         let phase = phase_fraction_cfg(tick, climate);
         // Build canopy once / tick so taller neighbours shade short plants.
         let canopy = build_canopy_index(&self.atoms);
+        // Live + grey-corpse Stem cells — shoot growth keeps a trunk gap.
+        let trunks = collect_trunk_world_cells(&self.atoms, &self.corpses);
+        // All living Root cells — spacing applies across plants.
+        let live_roots = collect_live_root_world_cells(&self.atoms);
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let pop = self.atoms.len();
@@ -447,7 +496,17 @@ impl OrganismStore {
 
             if is_land_plant(atom) {
                 let room = pop + births.len() < MAX_ATOMS;
-                match step_land_plant(world, atom, day, tick, &canopy, i as u32, room) {
+                match step_land_plant(
+                    world,
+                    atom,
+                    day,
+                    tick,
+                    &canopy,
+                    &trunks,
+                    &live_roots,
+                    i as u32,
+                    room,
+                ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
                         if sat > 0 {
@@ -517,10 +576,11 @@ impl OrganismStore {
         deaths.dedup();
         for &i in deaths.iter().rev() {
             if let Some(dead) = self.atoms.get(i).cloned() {
-                // Land plants: root stencil → Organic in the ground immediately,
-                // then the above-ground body lingers as a grey corpse.
+                // Land plants: roots stay as Organic in soil; leaves drop
+                // as falling Organic; stems linger grey until dissolve.
                 if is_land_plant(&dead) {
                     let _ = leave_dead_roots_in_place(world, &dead);
+                    let _ = drop_dead_leaves(world, &dead);
                 }
                 self.push_corpse(world, Corpse::from_atom(&dead));
             }
@@ -638,6 +698,8 @@ fn step_land_plant(
     day: f32,
     tick: u64,
     canopy: &CanopyIndex,
+    trunks: &std::collections::HashSet<(i32, i32)>,
+    live_roots: &std::collections::HashSet<(i32, i32)>,
     entity_id: u32,
     pop_room: bool,
 ) -> PlantStep {
@@ -705,7 +767,7 @@ fn step_land_plant(
         return PlantStep::Dead;
     }
     // Surplus → tissue (root / stem / leaf) from allocation genes.
-    let _ = try_grow_plant(world, atom, tick);
+    let _ = try_grow_plant(world, atom, tick, trunks, live_roots);
     sync_root_storage(atom);
     if let Some(child) = try_vegetative_sprout(world, atom, tick, entity_id, pop_room) {
         return PlantStep::Sprout(child);
@@ -1067,6 +1129,33 @@ fn find_wet_near(world: &World, gx: i32, gy: i32) -> Option<i32> {
     None
 }
 
+fn is_air(world: &World, gx: i32, gy: i32) -> bool {
+    matches!(
+        world.get_cell(gx, gy),
+        Some(c) if c.material == MaterialId::Air
+    )
+}
+
+/// Prefer the clicked Air cell; otherwise nearest Air in the column.
+fn find_air_near(world: &World, gx: i32, gy: i32) -> Option<i32> {
+    let gx = world.wrap_x(gx);
+    if is_air(world, gx, gy) {
+        return Some(gy);
+    }
+    for dy in [1, -1, 2, -2, 3, -3, 4, -4, 5, -5, 8, -8, 12, -12, 16, -16] {
+        let ny = gy + dy;
+        if is_air(world, gx, ny) {
+            return Some(ny);
+        }
+    }
+    for y in (gy - 48..=gy + 48).rev() {
+        if is_air(world, gx, y) {
+            return Some(y);
+        }
+    }
+    None
+}
+
 const ATOM_SEED_SALT: u64 = 0xA701_5EED;
 
 fn hash_u64(seed: u64, a: u64, salt: u64) -> u64 {
@@ -1316,6 +1405,174 @@ mod tests {
             sat_before.min(crate::cell::water_capacity(MaterialId::Organic)),
             "Organic conversion must not destroy pore sat"
         );
+    }
+
+    #[test]
+    fn land_plant_death_drops_leaves_keeps_stem_corpse() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        let leaf_cells: Vec<(i32, i32)> = store.atoms[0]
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|&(dx, dy, _)| {
+                (
+                    store.atoms[0].gx + dx as i32,
+                    store.atoms[0].gy + dy as i32,
+                )
+            })
+            .collect();
+        assert!(!leaf_cells.is_empty());
+        store.atoms[0].age_ticks = super::PLANT_LIFE_TICKS;
+        store.atoms[0].energy = 40.0;
+        store.step(&mut w, 0);
+        assert_eq!(store.corpse_count(), 1);
+        assert!(
+            store.corpses[0]
+                .body
+                .iter()
+                .all(|(_, _, m)| *m != ModuleId::Photosystem),
+            "leaves leave the grey corpse"
+        );
+        assert!(
+            store.corpses[0]
+                .body
+                .iter()
+                .any(|(_, _, m)| *m == ModuleId::Stem),
+            "stems linger on the corpse until dissolve"
+        );
+        for &(lx, ly) in &leaf_cells {
+            assert_eq!(
+                w.get_cell(lx, ly).map(|c| c.material),
+                Some(MaterialId::Organic),
+                "leaf cell ({lx},{ly}) should be falling Organic litter"
+            );
+        }
+    }
+
+    #[test]
+    fn dissolve_does_not_erect_organic_stem_pillars() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        let stem_cells: Vec<(i32, i32)> = store.atoms[0]
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Stem)
+            .map(|&(dx, dy, _)| {
+                (
+                    store.atoms[0].gx + dx as i32,
+                    store.atoms[0].gy + dy as i32,
+                )
+            })
+            .collect();
+        assert!(!stem_cells.is_empty());
+        store.atoms[0].age_ticks = super::PLANT_LIFE_TICKS;
+        store.atoms[0].energy = 40.0;
+        store.step(&mut w, 0);
+        assert_eq!(store.corpse_count(), 1);
+        store.corpses[0].settled_ticks = CORPSE_SETTLE_LAND_TICKS;
+        store.step(&mut w, 1);
+        assert_eq!(store.corpse_count(), 0);
+        for &(sx, sy) in &stem_cells {
+            assert_eq!(
+                w.get_cell(sx, sy).map(|c| c.material),
+                Some(MaterialId::Air),
+                "dead trunk at ({sx},{sy}) must not become Organic (water/snow pass)"
+            );
+        }
+        // Compost still lands on the bed via fallback / dead roots.
+        let bed_organic = (0..6).any(|y| {
+            matches!(
+                w.get_cell(4, y).map(|c| c.material),
+                Some(MaterialId::Organic)
+            )
+        });
+        assert!(bed_organic, "dissolve should still leave bed Organic / root residue");
+    }
+
+    #[test]
+    fn fungus_spawns_on_bare_stone() {
+        let mut w = World::new(9);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+            for y in 2..8 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut store = OrganismStore::new();
+        assert!(
+            store.spawn_blueprint(
+                &w,
+                4,
+                2,
+                crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
+                40.0,
+                Genome::default(),
+            ),
+            "fungus should place on Air above any solid"
+        );
+    }
+
+    #[test]
+    fn editor_free_spawn_places_atom_on_dry_air() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+            for y in 2..8 {
+                w.set_cell(x, y, Cell::air()); // dry — habitat Atom spawn would fail
+            }
+        }
+        let mut store = OrganismStore::new();
+        let body = crate::blueprint::Blueprint::atom().modules_relative_to_nucleus();
+        assert!(
+            !store.spawn_blueprint(&w, 4, 3, body.clone(), 40.0, Genome::default()),
+            "habitat spawn still requires wet Air"
+        );
+        assert!(
+            store.spawn_blueprint_free(&w, 4, 3, body, 40.0, Genome::default()),
+            "editor free spawn may place Atom on dry Air"
+        );
+        assert_eq!(store.len(), 1);
+        assert_eq!(store.atoms[0].gx, 4);
+        assert_eq!(store.atoms[0].gy, 3);
+    }
+
+    #[test]
+    fn editor_free_spawn_allows_odd_module_mix() {
+        let w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        // Root + Digest is neither a valid plant nor fungus habit.
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (0, 1, ModuleId::Photosystem),
+        ];
+        assert!(
+            store.spawn_blueprint_free(&w, 4, 2, body, 40.0, Genome::default()),
+            "sandbox should accept any nucleus-bearing mix"
+        );
+        assert_eq!(store.len(), 1);
     }
 
     #[test]
@@ -1621,6 +1878,199 @@ mod tests {
     }
 
     #[test]
+    fn root_elongation_refuses_cell_beside_other_live_root() {
+        let w = deep_moist_sand();
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.95;
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 6, 80.0, body);
+        atom.genome = g;
+        atom.energy = 80.0;
+        let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        assert!(spent > 0.0, "vertical dive past the tip should still be legal");
+        let added = atom
+            .body
+            .iter()
+            .find(|&&(x, y, m)| {
+                m == ModuleId::Root && !matches!((x, y), (0, -1) | (0, -2))
+            })
+            .map(|&(x, y, _)| (x, y))
+            .expect("should add one root");
+        // Forbidden blob fills: cells Moore-adjacent to *both* existing roots.
+        assert!(
+            !matches!(added, (1, -2) | (-1, -2) | (1, -1) | (-1, -1)),
+            "must not pack beside the live stack, got {added:?}"
+        );
+        let live_neighbors = atom
+            .body
+            .iter()
+            .filter(|&&(rx, ry, m)| {
+                m == ModuleId::Root
+                    && (rx, ry) != added
+                    && (rx - added.0).abs() <= 1
+                    && (ry - added.1).abs() <= 1
+            })
+            .count();
+        assert_eq!(
+            live_neighbors, 1,
+            "new root may touch only its parent tip, got {live_neighbors} neighbors at {added:?}"
+        );
+    }
+
+    #[test]
+    fn root_elongation_refuses_cell_beside_other_plant_root() {
+        let mut w = deep_moist_sand();
+        // Seal every step except the one hugging the foreign root.
+        w.set_cell(4, 3, Cell::solid(MaterialId::Bedrock)); // (0,-3)
+        w.set_cell(3, 3, Cell::solid(MaterialId::Bedrock)); // (-1,-3)
+        w.set_cell(3, 4, Cell::solid(MaterialId::Bedrock)); // (-1,-2)
+        w.set_cell(5, 3, Cell::solid(MaterialId::Bedrock)); // (1,-3)
+        w.set_cell(3, 5, Cell::solid(MaterialId::Bedrock)); // (-1,-1)
+        w.set_cell(5, 5, Cell::solid(MaterialId::Bedrock)); // (1,-1)
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.5;
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 6, 80.0, body);
+        atom.genome = g;
+        atom.energy = 80.0;
+        // Only open sand left beside tip is (1,-2)=(5,4); foreign root at (5,3).
+        let mut roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        roots.insert((5, 3));
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        assert_eq!(spent, 0.0, "must not elongate beside another plant's live root");
+        assert_eq!(crate::plant::root_count(&atom), 2);
+    }
+
+    #[test]
+    fn root_growth_prefers_branch_over_deep_pipe() {
+        let w = deep_moist_sand();
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.45; // balanced — should fork, not only drill
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, -3, ModuleId::Root),
+            (0, -4, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 6, 80.0, body);
+        atom.genome = g;
+        atom.energy = 80.0;
+        let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        assert!(spent > 0.0, "pipe tip should still be able to fork");
+        let added = atom
+            .body
+            .iter()
+            .find(|&&(x, y, m)| {
+                m == ModuleId::Root && !matches!((x, y), (0, -1) | (0, -2) | (0, -3) | (0, -4))
+            })
+            .map(|&(x, y, _)| (x, y))
+            .expect("should add a root");
+        assert_ne!(
+            added.0, 0,
+            "after a deep pipe, next step should branch sideways, got {added:?}"
+        );
+    }
+
+    #[test]
+    fn root_can_bud_sideways_from_mid_pipe() {
+        let mut w = deep_moist_sand();
+        // Block further vertical under the tip so growth must bud sideways.
+        w.set_cell(4, 2, Cell::solid(MaterialId::Bedrock)); // (0,-4)
+        w.set_cell(3, 2, Cell::solid(MaterialId::Bedrock)); // (-1,-4)
+        w.set_cell(5, 2, Cell::solid(MaterialId::Bedrock)); // (1,-4)
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.2;
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, -3, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 6, 80.0, body);
+        atom.genome = g;
+        atom.energy = 80.0;
+        let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        assert!(spent > 0.0, "mid-pipe site should be able to bud");
+        let added = atom
+            .body
+            .iter()
+            .find(|&&(x, y, m)| {
+                m == ModuleId::Root && !matches!((x, y), (0, -1) | (0, -2) | (0, -3))
+            })
+            .map(|&(x, y, _)| (x, y))
+            .expect("should add a lateral bud");
+        assert_ne!(added.0, 0, "bud should leave the pipe column, got {added:?}");
+    }
+
+    #[test]
+    fn root_elongation_allows_cell_beside_organic_compost() {
+        let mut w = deep_moist_sand();
+        // Seal the dive so the only open step is lateral Sand next to
+        // Organic compost (transformed dead root).
+        w.set_cell(4, 4, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 5, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(6, 5, Cell::solid(MaterialId::Organic));
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.1; // prefer the lateral runner
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 6, 80.0, body);
+        atom.genome = g;
+        atom.energy = 80.0;
+        let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        assert!(
+            spent > 0.0,
+            "Organic compost is transformed dead root — OK to sit beside"
+        );
+        assert!(
+            atom.body
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Root && (x, y) == (1, -1)),
+            "should step into Sand beside Organic compost"
+        );
+    }
+
+    #[test]
     fn stem_heavy_plant_grows_upward() {
         let mut w = moist_sand_plot();
         let mut store = OrganismStore::new();
@@ -1645,6 +2095,70 @@ mod tests {
         );
     }
 
+    #[test]
+    fn stem_growth_keeps_gap_from_neighbour_trunk() {
+        let mut atom = Atom::from_body(
+            4,
+            2,
+            80.0,
+            vec![
+                (0, -1, ModuleId::Root),
+                (0, 0, ModuleId::Nucleus),
+                (0, 1, ModuleId::Stem),
+            ],
+        );
+        atom.genome.alloc_stem = 1.0;
+        atom.genome.alloc_leaf = 0.05;
+        atom.genome.alloc_root = 0.05;
+        atom.energy = 80.0;
+        // Foreign live trunk one cell beside the tip column.
+        // Tip is at (0,1) → candidate (0,2) world (4,4). Neighbour (5,4) is Moore.
+        let mut trunks = std::collections::HashSet::new();
+        trunks.insert((5, 4));
+        assert!(
+            !crate::plant::stem_spacing_ok(&atom, 0, 2, &trunks),
+            "must not elongate into a cell beside another trunk"
+        );
+        let empty = std::collections::HashSet::new();
+        assert!(
+            crate::plant::stem_spacing_ok(&atom, 0, 2, &empty),
+            "solo trunk may elongate upward"
+        );
+        // Growth may still place a leaf, but must not add Stem beside the gap.
+        atom.age_ticks = LAND_GROW_PERIOD;
+        let _ = crate::plant::try_grow_shoot(&mut atom, 1, &trunks);
+        assert_eq!(crate::plant::stem_count(&atom), 1);
+    }
+
+    #[test]
+    fn leaves_may_touch_each_other() {
+        let empty = std::collections::HashSet::new();
+        let mut atom = Atom::from_body(
+            4,
+            2,
+            80.0,
+            vec![
+                (0, -1, ModuleId::Root),
+                (0, 0, ModuleId::Nucleus),
+                (0, 1, ModuleId::Stem),
+                (1, 1, ModuleId::Photosystem),
+            ],
+        );
+        atom.genome.alloc_stem = 0.05;
+        atom.genome.alloc_leaf = 1.0;
+        atom.genome.alloc_root = 0.05;
+        atom.energy = 80.0;
+        let n0 = atom.photosystem_count();
+        for t in 0..40u64 {
+            atom.age_ticks = t * LAND_GROW_PERIOD;
+            let _ = crate::plant::try_grow_shoot(&mut atom, t, &empty);
+        }
+        assert!(
+            atom.photosystem_count() > n0,
+            "leaf-heavy shoot should add leaves even when they touch"
+        );
+    }
+
     fn root_nucleus_leaf_body() -> Vec<BodyModule> {
         vec![
             (0, -1, ModuleId::Root),
@@ -1658,10 +2172,10 @@ mod tests {
         let mut w = moist_sand_plot();
         let mut store = OrganismStore::new();
         let mut g = Genome::default();
-        // Default alloc_stem is 0.25 — sync_alloc_to_body clamps it when
-        // no Stem is painted (editor spawn path).
-        crate::plant::sync_alloc_to_body(&mut g, &root_nucleus_leaf_body());
-        assert!(g.alloc_stem <= 0.05);
+        // Even max alloc_stem cannot invent olive — must paint Stem.
+        g.alloc_stem = 1.0;
+        g.alloc_leaf = 0.5;
+        g.alloc_root = 0.05;
         assert!(store.spawn_blueprint(&w, 4, 2, root_nucleus_leaf_body(), 80.0, g));
         store.atoms[0].energy = 80.0;
         for t in 0..400 {
@@ -1679,6 +2193,43 @@ mod tests {
     }
 
     #[test]
+    fn stemless_parent_sprouts_stemless_child() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let mut g = Genome::default();
+        g.clone_fidelity = 0.5;
+        g.alloc_root = 0.8;
+        g.alloc_stem = 1.0; // would invent under the old threshold
+        g.alloc_leaf = 0.2;
+        assert!(store.spawn_blueprint(&w, 4, 2, root_nucleus_leaf_body(), 60.0, g));
+        let a = &mut store.atoms[0];
+        a.body.push((-1, -1, ModuleId::Root));
+        a.body.push((-2, -1, ModuleId::Root));
+        a.body.push((1, -1, ModuleId::Root));
+        a.energy = 60.0;
+        a.cooldown = 0;
+        let n0 = store.len();
+        for t in 0..200u64 {
+            store.step(&mut w, t);
+            if store.len() > n0 {
+                break;
+            }
+            if let Some(p) = store.atoms.first_mut() {
+                p.energy = p.energy.max(55.0);
+                p.cooldown = 0;
+            }
+        }
+        assert!(store.len() > n0, "stemless parent should still rhizome-sprout");
+        for child in store.atoms.iter().skip(1) {
+            assert_eq!(
+                crate::plant::stem_count(child),
+                0,
+                "stemless habit must pass to vegetative sprouts"
+            );
+        }
+    }
+
+    #[test]
     fn stem_does_not_stack_on_photosystem() {
         // Proper chassis: root / nucleus / stem, leaf to the side.
         let body = vec![
@@ -1692,9 +2243,10 @@ mod tests {
         atom.genome.alloc_leaf = 0.5;
         atom.genome.alloc_root = 0.05;
         atom.energy = 80.0;
+        let empty = std::collections::HashSet::new();
         for t in 0..30u64 {
             atom.age_ticks = t * LAND_GROW_PERIOD;
-            let _ = crate::plant::try_grow_shoot(&mut atom, t);
+            let _ = crate::plant::try_grow_shoot(&mut atom, t, &empty);
         }
         let stem_on_leaf = atom.body.iter().any(|&(x, y, m)| {
             m == ModuleId::Stem
