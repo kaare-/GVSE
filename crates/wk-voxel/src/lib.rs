@@ -16,6 +16,7 @@ pub mod climate;
 pub mod clouds;
 pub mod failure;
 pub mod fungi;
+pub mod geotech_map;
 pub mod grid;
 pub mod heatmap;
 pub mod humidity;
@@ -54,6 +55,10 @@ pub use failure::{
     roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
 };
 pub use fungi::{is_fungus, soft_litter_at, add_soft_litter};
+pub use geotech_map::{
+    geotech_map_due, wet_air_column_beside, FaceStress, GeotechMap, GEOTECH_MAP_PERIOD,
+    GEOTECH_MAP_PHASE,
+};
 pub use grid::World;
 pub use organism::{
     Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,

@@ -4,8 +4,8 @@
 //! stack imports.
 
 use wk_voxel::{
-    stamp_world, CloudStore, Humidity, OrganismStore, SimSnapshot, Temperature, Wind, World,
-    WorldgenParams,
+    stamp_world, CloudStore, GeotechMap, Humidity, OrganismStore, SimSnapshot, Temperature, Wind,
+    World, WorldgenParams,
 };
 
 /// Humidity / wind / temp tile side (world cells per sample).
@@ -22,6 +22,8 @@ pub struct Scene {
     pub clouds: CloudStore,
     pub temperature: Temperature,
     pub organisms: OrganismStore,
+    /// Slow derived shear/wet/hydro face map (not saved — rebuilds).
+    pub geotech: GeotechMap,
 }
 
 impl Scene {
@@ -64,6 +66,8 @@ impl Scene {
         // Empty organism store — place Atoms via the F2 creature editor
         // (Enter, then click a wet cell). No auto-seeded demo life.
         let organisms = OrganismStore::new();
+        let mut geotech = GeotechMap::new();
+        geotech.rebuild(&world);
         Self {
             world,
             params,
@@ -72,6 +76,7 @@ impl Scene {
             clouds,
             temperature,
             organisms,
+            geotech,
         }
     }
 
@@ -88,6 +93,8 @@ impl Scene {
     }
 
     pub fn from_snapshot(snap: SimSnapshot) -> Self {
+        let mut geotech = GeotechMap::new();
+        geotech.rebuild(&snap.world);
         Self {
             world: snap.world,
             params: snap.params,
@@ -96,6 +103,7 @@ impl Scene {
             clouds: snap.clouds,
             temperature: snap.temperature,
             organisms: snap.organisms,
+            geotech,
         }
     }
 }
