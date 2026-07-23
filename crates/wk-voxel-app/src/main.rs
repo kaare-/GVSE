@@ -634,6 +634,7 @@ async fn main() {
                     &settings.rain,
                     Some(&scene.temperature),
                     Some(&settings.phase),
+                    Some(&mut scene.humidity),
                 );
             }
             if evap_on {
@@ -1031,13 +1032,20 @@ async fn main() {
             } else {
                 "night"
             };
+            let rain_tag = if !rain_on {
+                "off"
+            } else if settings.rain.closed_loop {
+                "on/closed"
+            } else {
+                "on/MINT"
+            };
             let info = format!(
                 "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} atoms={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
                 scene.temperature.mean(),
-                if rain_on { "on" } else { "off" },
+                rain_tag,
                 if evap_on { "on" } else { "off" },
                 if settings.phase.enabled { "on" } else { "off" },
                 scene.clouds.len(),

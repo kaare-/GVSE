@@ -157,9 +157,12 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
 - **Cloud snow footprint (Tab → Clouds):** `snow_footprint_mult` /
   `snow_span_mult` widen the column fan vs rain; `snow_cells_per_tick`
   caps full-cell snow seats per parcel per tick.
-- **Climatic rain (`W`):** open faucet (no humidity drain). Prefer clouds
-  + condensation for closed-loop mass; with `rain=on` lakes can still
-  rise slowly by design.
+- **Climatic rain (`W`):** **closed-loop by default** — deposits only what
+  humidity can pay, and refuses columns already flooded above
+  `sea_level + max_flood_above_sea`. Tab can reopen the legacy open
+  faucet (`closed_loop` off) for experiments; prefer clouds +
+  condensation for weather. Atmosphere also has soft caps
+  (`Humidity::MAX_MASS_PER_TILE`, `CloudConfig::max_total_mass`).
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
   the blanket. Cloud downpour uses a wider footprint when snowing.

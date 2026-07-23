@@ -1634,6 +1634,15 @@ pub struct RainConfig {
     /// multiple independent rain streams (mist vs storm) without
     /// them colliding.
     pub seed_salt: u64,
+    /// When true (default), climatic rain drains humidity and cannot
+    /// mint water. Pass a humidity map into [`apply_rain_with_temp`].
+    pub closed_loop: bool,
+    /// Sea level used with [`Self::max_flood_above_sea`] to refuse
+    /// deepening an already-flooded column.
+    pub sea_level_y: i32,
+    /// Refuse climatic deposit when the free-water surface is more
+    /// than this many cells above sea level (0 = no flood guard).
+    pub max_flood_above_sea: i32,
 }
 
 impl Default for RainConfig {
@@ -1644,6 +1653,9 @@ impl Default for RainConfig {
             prob_per_col_per_tick: 0.02,
             droplet_sat: 64,
             seed_salt: 0xC10D,
+            closed_loop: true,
+            sea_level_y: 0,
+            max_flood_above_sea: 12,
         }
     }
 }
@@ -1666,28 +1678,35 @@ fn hash_prob(seed: u64, gx: i32, tick_no: u64, salt: u64) -> f32 {
 /// Inject climatic rain that **lands on the ground / ocean surface**
 /// under each column (cosmetic sky streaks are drawn separately).
 ///
-/// For each column `gx ∈ cfg.x_range`, roll a deterministic
-/// pseudo-random probability seeded by `(world.seed, gx, world.tick,
-/// cfg.seed_salt)`. When the roll passes `cfg.prob_per_col_per_tick`,
-/// deposit `cfg.droplet_sat` via [`deposit_water_on_surface`] scanning
-/// down from `cfg.top_y`.
+/// Closed-loop by default ([`RainConfig::closed_loop`]): deposits only
+/// what humidity can pay, so overnight `W` cannot mint a flood. Pass
+/// `humidity = None` with `closed_loop = false` for the legacy open
+/// faucet (unit tests).
 ///
 /// Determinism: same world.seed + same tick + same config = same
 /// droplet placements.
 pub fn apply_rain(world: &mut World, cfg: &RainConfig) {
-    apply_rain_with_temp(world, cfg, None, None);
+    apply_rain_with_temp(world, cfg, None, None, None);
 }
 
 /// Climatic precip: snow when **air** at [`RainConfig::top_y`] is cold
 /// (melts on warm ground — see [`crate::phase::deposit_precip_on_surface`]).
+///
+/// When `cfg.closed_loop` and `humidity` is provided, each droplet
+/// drains atmospheric mass equal to what actually landed.
 pub fn apply_rain_with_temp(
     world: &mut World,
     cfg: &RainConfig,
     temp: Option<&crate::temperature::Temperature>,
     phase: Option<&crate::phase::PhaseConfig>,
+    mut humidity: Option<&mut crate::humidity::Humidity>,
 ) {
     let (x0, x1) = cfg.x_range;
     if x0 > x1 {
+        return;
+    }
+    if cfg.closed_loop && humidity.is_none() {
+        // Closed loop with no atmosphere handle — refuse to mint.
         return;
     }
     let seed = world.seed.0;
@@ -1697,15 +1716,69 @@ pub fn apply_rain_with_temp(
         if roll >= cfg.prob_per_col_per_tick {
             continue;
         }
-        let _ = crate::phase::deposit_precip_on_surface(
+        if cfg.max_flood_above_sea > 0
+            && column_flooded_above_sea(world, gx, cfg.top_y, cfg.sea_level_y, cfg.max_flood_above_sea)
+        {
+            continue;
+        }
+        let want = cfg.droplet_sat as f32;
+        let budget = if cfg.closed_loop {
+            let Some(h) = humidity.as_deref() else {
+                continue;
+            };
+            let avail = h.peek_near(gx, cfg.top_y);
+            if avail < 1.0 {
+                continue;
+            }
+            want.min(avail)
+        } else {
+            want
+        };
+        let landed = crate::phase::deposit_precip_on_surface(
             world,
             gx,
             cfg.top_y,
-            cfg.droplet_sat as f32,
+            budget,
             temp,
             phase,
         );
+        if landed > 0.0 {
+            if let Some(h) = humidity.as_deref_mut() {
+                let _ = h.take_near(gx, cfg.top_y, landed);
+            }
+        }
     }
+}
+
+/// True when standing water already reaches more than `margin` cells
+/// above sea level in this column (flood guard for climatic rain).
+fn column_flooded_above_sea(
+    world: &World,
+    gx: i32,
+    top_y: i32,
+    sea_level_y: i32,
+    margin: i32,
+) -> bool {
+    let limit = sea_level_y + margin;
+    let jx = world.wrap_x(gx);
+    let mut y = top_y;
+    for _ in 0..160 {
+        let Some(cell) = world.get_cell(jx, y) else {
+            y -= 1;
+            continue;
+        };
+        if cell.material != MaterialId::Air {
+            return false;
+        }
+        if cell.sat.0 >= 200 && is_standing_water(world, jx, y) {
+            return y > limit;
+        }
+        y -= 1;
+        if y < sea_level_y - 4 {
+            return false;
+        }
+    }
+    false
 }
 
 /// True when wet Air is a standing pool / ocean film / land puddle
@@ -1941,13 +2014,21 @@ fn apply_evap_deltas(
             continue;
         };
         let cap = water_capacity(cell.material) as i32;
-        let new_sat = (cell.sat.0 as i32 + delta).clamp(0, cap);
-        let actually_removed = cell.sat.0 as i32 - new_sat;
-        if actually_removed > 0 {
-            if let Some(h) = humidity.as_deref_mut() {
-                h.add(gx, gy, actually_removed as f32);
-            }
+        let want_new = (cell.sat.0 as i32 + delta).clamp(0, cap);
+        let want_removed = cell.sat.0 as i32 - want_new;
+        if want_removed <= 0 {
+            continue;
         }
+        // Only lift what the atmosphere can still hold (per-tile cap).
+        let accepted = if let Some(h) = humidity.as_deref_mut() {
+            h.try_add(gx, gy, want_removed as f32).round() as i32
+        } else {
+            want_removed
+        };
+        if accepted <= 0 {
+            continue;
+        }
+        let new_sat = (cell.sat.0 as i32 - accepted).clamp(0, cap);
         world.set_cell(
             gx,
             gy,
@@ -3636,6 +3717,8 @@ mod tests {
             prob_per_col_per_tick: 0.5,
             droplet_sat: 32,
             seed_salt: 0xF00,
+            closed_loop: false, // unit fixture: open faucet
+            ..RainConfig::default()
         };
         apply_rain(&mut a, &cfg);
         apply_rain(&mut b, &cfg);
@@ -3657,6 +3740,8 @@ mod tests {
             prob_per_col_per_tick: 1.0, // always
             droplet_sat: 40,
             seed_salt: 1,
+            closed_loop: false,
+            ..RainConfig::default()
         };
         apply_rain(&mut w, &cfg);
         for x in 0..64 {
@@ -3681,6 +3766,8 @@ mod tests {
             prob_per_col_per_tick: 1.0,
             droplet_sat: 40,
             seed_salt: 2,
+            closed_loop: false,
+            ..RainConfig::default()
         };
         apply_rain(&mut w, &cfg);
         // Full film on bare rock does not stack into a wedge.
@@ -3701,10 +3788,91 @@ mod tests {
             prob_per_col_per_tick: 1.0,
             droplet_sat: 40,
             seed_salt: 3,
+            closed_loop: false,
+            ..RainConfig::default()
         };
         apply_rain(&mut w, &cfg);
         assert_eq!(w.get_cell(10, 30).unwrap().material, MaterialId::Stone);
         assert_eq!(w.get_cell(10, 30).unwrap().sat.0, 0);
+    }
+
+    #[test]
+    fn closed_loop_rain_drains_humidity_and_does_not_mint() {
+        let mut w = setup_sky_row(30);
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 32);
+        // One column of vapor paying for the droplet.
+        h.add(7, 30, 80.0);
+        let hum_before = h.total_mass();
+        let ground_before = w.get_cell(7, 1).unwrap().sat.0 as f32;
+        let cfg = RainConfig {
+            top_y: 30,
+            x_range: (7, 7),
+            prob_per_col_per_tick: 1.0,
+            droplet_sat: 40,
+            seed_salt: 9,
+            closed_loop: true,
+            sea_level_y: 1,
+            max_flood_above_sea: 12,
+            ..RainConfig::default()
+        };
+        apply_rain_with_temp(&mut w, &cfg, None, None, Some(&mut h));
+        let ground_after = w.get_cell(7, 1).unwrap().sat.0 as f32;
+        let landed = ground_after - ground_before;
+        assert!(landed > 0.0, "closed-loop rain should land when humidity pays");
+        let drained = hum_before - h.total_mass();
+        assert!(
+            (drained - landed).abs() < 1.5,
+            "humidity drain must match landed mass (landed={landed}, drained={drained})"
+        );
+    }
+
+    #[test]
+    fn closed_loop_rain_without_humidity_mints_nothing() {
+        let mut w = setup_sky_row(30);
+        let cfg = RainConfig {
+            top_y: 30,
+            x_range: (0, 63),
+            prob_per_col_per_tick: 1.0,
+            droplet_sat: 64,
+            seed_salt: 11,
+            closed_loop: true,
+            ..RainConfig::default()
+        };
+        apply_rain(&mut w, &cfg);
+        for x in 0..64 {
+            assert_eq!(
+                w.get_cell(x, 1).unwrap().sat.0,
+                0,
+                "closed loop with no atmosphere must not mint at x={x}"
+            );
+        }
+    }
+
+    #[test]
+    fn flood_guard_blocks_climatic_rain_on_tall_water() {
+        let mut w = setup_sky_row(30);
+        // Stack standing water well above sea level.
+        for y in 1..=20 {
+            w.set_cell(4, y, Cell::water());
+        }
+        let mut h = crate::humidity::Humidity::with_world_bounds(4, 0, 0, 64, 32);
+        h.add(4, 30, 500.0);
+        let cfg = RainConfig {
+            top_y: 30,
+            x_range: (4, 4),
+            prob_per_col_per_tick: 1.0,
+            droplet_sat: 64,
+            seed_salt: 13,
+            closed_loop: true,
+            sea_level_y: 4,
+            max_flood_above_sea: 8, // surface at y=20 >> 4+8
+            ..RainConfig::default()
+        };
+        let before = w.get_cell(4, 21).map(|c| c.sat.0).unwrap_or(0);
+        apply_rain_with_temp(&mut w, &cfg, None, None, Some(&mut h));
+        let after = w.get_cell(4, 21).map(|c| c.sat.0).unwrap_or(0);
+        assert_eq!(before, after, "flood guard must refuse further deepening");
+        assert_eq!(h.total_mass(), 500.0, "guard should not drain humidity");
     }
 
     #[test]

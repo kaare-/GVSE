@@ -208,6 +208,10 @@ fn stamp_scene(params: WorldgenParams) -> Scene {
         prob_per_col_per_tick: 0.02,
         droplet_sat: 64,
         seed_salt: 0xC10D_5EED,
+        // Open faucet keeps flow busy for timing; demo uses closed_loop.
+        closed_loop: false,
+        sea_level_y: params.sea_level_y,
+        ..RainConfig::default()
     };
     let mut oro = OrographicConfig::default();
     oro.width_cols = params.width_cols;
@@ -299,6 +303,7 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
                 &scene.rain,
                 Some(&scene.temperature),
                 Some(&scene.phase),
+                Some(&mut scene.humidity),
             );
             apply_evaporation_into_humidity(&mut scene.world, &mut scene.humidity, &scene.evap);
             scene
@@ -360,6 +365,7 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
                 &scene.rain,
                 Some(&scene.temperature),
                 Some(&scene.phase),
+                Some(&mut scene.humidity),
             );
             a.rain += t0.elapsed();
 
@@ -645,6 +651,7 @@ fn run_profile(label: &str, params: WorldgenParams, with_plants: bool) {
             &scene.rain,
             Some(&scene.temperature),
             Some(&scene.phase),
+            Some(&mut scene.humidity),
         );
         timed_physics_tick(&mut scene.world, &scene.perf, &mut phys);
     }

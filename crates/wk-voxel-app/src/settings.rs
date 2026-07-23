@@ -97,6 +97,9 @@ impl SimSettings {
             prob_per_col_per_tick: 0.02,
             droplet_sat: 64,
             seed_salt: 0xC10D_5EED,
+            closed_loop: true,
+            sea_level_y: params.sea_level_y,
+            max_flood_above_sea: 12,
         };
         let mut cond = CondensationConfig {
             top_y: params.sky_ceiling_y - 2,
@@ -154,6 +157,7 @@ impl SimSettings {
     pub fn on_world_reseed(&mut self, params: &WorldgenParams) {
         self.rain.top_y = params.sky_ceiling_y - 1;
         self.rain.x_range = (0, params.width_cols - 1);
+        self.rain.sea_level_y = params.sea_level_y;
         self.cond.top_y = params.sky_ceiling_y - 2;
         self.oro.seed = params.seed;
         self.oro.width_cols = params.width_cols;
@@ -622,6 +626,20 @@ impl SimSettings {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Rain / drizzle / evap", |ui| {
+                    ui.checkbox(
+                        hash!(),
+                        "Climatic rain closed-loop (drain humidity; no mint)",
+                        &mut self.rain.closed_loop,
+                    );
+                    let mut flood = self.rain.max_flood_above_sea as f32;
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Flood guard (cells above sea; 0=off)",
+                        0.0..48.0,
+                        &mut flood,
+                    );
+                    self.rain.max_flood_above_sea = flood.round().clamp(0.0, 64.0) as i32;
                     labeled_slider(
                         ui,
                         hash!(),
