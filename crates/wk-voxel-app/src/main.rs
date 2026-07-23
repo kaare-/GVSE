@@ -509,6 +509,8 @@ async fn main() {
                     Ok(snap) => {
                         scene = Scene::from_snapshot(snap);
                         settings.on_world_reseed(&scene.params);
+                        settings.max_atoms = scene.organisms.max_atoms as f32;
+                        settings.max_corpses = scene.organisms.max_corpses as f32;
                         inspect = None;
                         let msg = format!("Loaded {}", path.display());
                         terrain.status = msg.clone();
@@ -607,6 +609,7 @@ async fn main() {
         scene.wind.climate_vx = settings.wind_vx;
         scene.temperature.config = settings.temp;
         scene.temperature.climate = settings.climate;
+        settings.apply_pop_caps(&mut scene.organisms);
         settings.oro.seed = scene.params.seed;
         settings.oro.width_cols = scene.params.width_cols;
         settings.oro.sea_level_y = scene.params.sea_level_y;
@@ -1052,7 +1055,11 @@ async fn main() {
                 scene.clouds.total_mass(),
                 scene.humidity.total_mass(),
                 scene.wind.climate_vx,
-                scene.organisms.len(),
+                format!(
+                    "{}/{}",
+                    scene.organisms.len(),
+                    scene.organisms.atom_cap()
+                ),
                 if sim_paused { "[paused]" } else { "" }
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));

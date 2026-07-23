@@ -8,7 +8,7 @@ use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
     ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, Genome, GrainConfig, KarstConfig,
     OrographicConfig, PerfConfig, PhaseConfig, RainConfig, TempConfig, WorldgenParams,
-    CHUNK_CELLS_W,
+    CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES,
 };
 
 /// Default plant / fungus gene knobs applied on spawn (and optionally to living plants).
@@ -81,6 +81,10 @@ pub struct SimSettings {
     pub plant_genes: PlantGeneSettings,
     /// Set by UI when user clicks "Apply genes to living plants".
     pub apply_genes_to_living: bool,
+    /// Living creature hard cap (Tab → Creatures). Synced onto OrganismStore.
+    pub max_atoms: f32,
+    /// Lingering corpse hard cap.
+    pub max_corpses: f32,
     /// Draft world size (chunks wide) — applied on Regenerate.
     pub world_width_chunks: f32,
     pub world_sea_level: f32,
@@ -147,6 +151,8 @@ impl SimSettings {
             mat_poro,
             plant_genes: PlantGeneSettings::default(),
             apply_genes_to_living: false,
+            max_atoms: MAX_ATOMS as f32,
+            max_corpses: MAX_CORPSES as f32,
             world_width_chunks: (params.width_cols as f32 / CHUNK_CELLS_W as f32).max(1.0),
             world_sea_level: params.sea_level_y as f32,
             world_sky_ceiling: params.sky_ceiling_y as f32,
@@ -721,6 +727,36 @@ impl SimSettings {
                 });
                 ui.separator();
 
+                ui.tree_node(hash!(), "Creatures / population caps", |ui| {
+                    ui.label(
+                        None,
+                        "Hard ceilings on living creatures and lingering corpses.",
+                    );
+                    ui.label(
+                        None,
+                        "Lowering a cap does not cull existing — it only blocks new spawns.",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Max living creatures (atoms)",
+                        8.0..2048.0,
+                        &mut self.max_atoms,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Max corpses",
+                        8.0..2048.0,
+                        &mut self.max_corpses,
+                    );
+                    if ui.button(None, "Reset pop caps to defaults (256)") {
+                        self.max_atoms = MAX_ATOMS as f32;
+                        self.max_corpses = MAX_CORPSES as f32;
+                    }
+                });
+                ui.separator();
+
                 ui.tree_node(hash!(), "Plants / fungi genes", |ui| {
                     ui.label(None, "Defaults for F2 spawn · optional apply to living.");
                     labeled_slider(
@@ -817,6 +853,14 @@ impl SimSettings {
         self.cloud.rain_footprint_mult = self.cloud.rain_footprint_mult.clamp(0.1, 4.0);
         self.cloud.snow_span_mult = self.cloud.snow_span_mult.clamp(0.05, 4.0);
         self.cloud.rain_span_mult = self.cloud.rain_span_mult.clamp(0.05, 3.0);
+        self.max_atoms = self.max_atoms.round().clamp(1.0, 4096.0);
+        self.max_corpses = self.max_corpses.round().clamp(1.0, 4096.0);
+    }
+
+    /// Push population ceilings onto the live organism store.
+    pub fn apply_pop_caps(&self, organisms: &mut wk_voxel::OrganismStore) {
+        organisms.max_atoms = self.max_atoms.round().clamp(1.0, 4096.0) as usize;
+        organisms.max_corpses = self.max_corpses.round().clamp(1.0, 4096.0) as usize;
     }
 }
 
