@@ -31,7 +31,7 @@
 //! - click — block / organism inspector (hidden while F1 HUD is off)
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
-//! - `Esc` — quit (or cancel spawn / close editor / close settings)
+//! - `Esc` — close overlays, or quit confirm (save / discard / cancel)
 //!
 //! Sky follows the shared climate clock (sun by day, moon by night).
 //! Temperature tiles warm with sun, cool at night, and shade under clouds.
@@ -39,6 +39,7 @@
 mod editor;
 mod inspector;
 mod palette;
+mod quit;
 mod scene;
 mod settings;
 mod terrain;
@@ -56,6 +57,7 @@ use wk_voxel::{
 use crate::editor::CreatureEditor;
 use crate::inspector::{draw_block_inspector, draw_selection_outline, screen_to_world};
 use crate::palette::cell_color;
+use crate::quit::{QuitChoice, QuitDialog};
 use crate::scene::Scene;
 use crate::settings::SimSettings;
 use crate::terrain::{TerrainEditor, TerrainTool};
@@ -415,13 +417,44 @@ async fn main() {
     let mut show_hud = true;
     let mut editor = CreatureEditor::default();
     let mut terrain = TerrainEditor::default();
+    let mut quit_dialog = QuitDialog::default();
     let mut inspect: Option<(i32, i32)> = None;
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
+    let mut should_quit = false;
 
     loop {
-        // Esc: spawn cancel → close editors → close settings → quit.
-        if is_key_pressed(KeyCode::Escape) {
+        if should_quit {
+            break;
+        }
+
+        // Quit dialog takes Esc / Y / Q / N before other Esc handlers.
+        if quit_dialog.open {
+            match quit_dialog.handle_input() {
+                Some(QuitChoice::Cancel) => {
+                    quit_dialog.close();
+                }
+                Some(QuitChoice::QuitWithoutSave) => {
+                    should_quit = true;
+                    continue;
+                }
+                Some(QuitChoice::SaveAndQuit) => {
+                    match scene.to_snapshot().save_to_disk(&terrain.save_name) {
+                        Ok(p) => {
+                            eprintln!("[wk-voxel-app] saved {} — quitting", p.display());
+                            should_quit = true;
+                            continue;
+                        }
+                        Err(e) => {
+                            quit_dialog.status = format!("Save failed: {e}  (fix again or Quit)");
+                            eprintln!("[wk-voxel-app] quit-save failed: {e}");
+                        }
+                    }
+                }
+                None => {}
+            }
+        } else if is_key_pressed(KeyCode::Escape) {
+            // Esc: spawn cancel → close editors → close settings → quit confirm.
             if editor.open && editor.spawn_picker {
                 editor.spawn_picker = false;
                 editor.status = "Spawn cancelled".into();
@@ -435,18 +468,18 @@ async fn main() {
             } else if settings.open {
                 settings.open = false;
             } else {
-                break;
+                quit_dialog.open_with_slot(&terrain.save_name);
             }
         }
-        if is_key_pressed(KeyCode::F1) {
+        if !quit_dialog.open && is_key_pressed(KeyCode::F1) {
             show_hud = !show_hud;
         }
-        if is_key_pressed(KeyCode::Tab) && !editor.open && !terrain.open {
+        if !quit_dialog.open && is_key_pressed(KeyCode::Tab) && !editor.open && !terrain.open {
             settings.open = !settings.open;
         }
         // Editor is F2 only — `C` is condensation in the voxel demo
         // (column-GVSE can use C/F2 because it has no condensation toggle).
-        if is_key_pressed(KeyCode::F2) {
+        if !quit_dialog.open && is_key_pressed(KeyCode::F2) {
             let opening = !editor.open;
             editor.toggle(paused);
             if opening {
@@ -457,7 +490,7 @@ async fn main() {
                 paused = editor.was_paused;
             }
         }
-        if is_key_pressed(KeyCode::F3) {
+        if !quit_dialog.open && is_key_pressed(KeyCode::F3) {
             let opening = !terrain.open;
             terrain.toggle(paused);
             if opening {
@@ -469,16 +502,18 @@ async fn main() {
                 paused = terrain.was_paused;
             }
         }
-        if editor.open {
+        if !quit_dialog.open && editor.open {
             editor.handle_input();
         }
-        if terrain.open {
+        if !quit_dialog.open && terrain.open {
             terrain.handle_input();
         }
 
         // Save / load simulation (F5 / F9, or S / L while terrain open).
-        let want_save = is_key_pressed(KeyCode::F5) || terrain.request_save;
-        let want_load = is_key_pressed(KeyCode::F9) || terrain.request_load;
+        let want_save =
+            !quit_dialog.open && (is_key_pressed(KeyCode::F5) || terrain.request_save);
+        let want_load =
+            !quit_dialog.open && (is_key_pressed(KeyCode::F9) || terrain.request_load);
         terrain.request_save = false;
         terrain.request_load = false;
         if want_save {
@@ -628,8 +663,9 @@ async fn main() {
             }
         }
 
-        // Physics (frozen while paint editors are open; spawn picker runs).
-        let sim_paused = paused || (editor.open && !editor.spawn_picker) || terrain.open;
+        // Physics (frozen while paint editors / quit dialog are open).
+        let sim_paused =
+            paused || (editor.open && !editor.spawn_picker) || terrain.open || quit_dialog.open;
         if !sim_paused {
             if rain_on {
                 apply_rain_with_temp(
@@ -751,7 +787,11 @@ async fn main() {
 
         // World clicks: terrain paint, spawn picker, or block inspector.
         let (mx, my) = mouse_position();
-        if terrain.open && !terrain.hits_panel(mx, my) && !terrain.blocks_world_paint() {
+        if !quit_dialog.open
+            && terrain.open
+            && !terrain.hits_panel(mx, my)
+            && !terrain.blocks_world_paint()
+        {
             let paint = is_mouse_button_down(MouseButton::Left);
             let erase = is_mouse_button_down(MouseButton::Right);
             if paint || erase {
@@ -775,7 +815,8 @@ async fn main() {
                     inspect = Some((gx, gy));
                 }
             }
-        } else if is_mouse_button_pressed(MouseButton::Left)
+        } else if !quit_dialog.open
+            && is_mouse_button_pressed(MouseButton::Left)
             && (!editor.open || editor.spawn_picker)
             && !terrain.open
             && !settings.open
@@ -1045,9 +1086,10 @@ async fn main() {
         editor.draw();
         terrain.draw();
         settings.draw();
+        quit_dialog.draw();
 
         // HUD chrome (info + hotkeys + inspector) toggled with F1.
-        if show_hud {
+        if show_hud && !quit_dialog.open {
             let tod = if is_daytime_cfg(scene.world.tick, &settings.climate) {
                 "day"
             } else {
@@ -1079,7 +1121,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/H|F1 HUD|F2 creat|F3 terra|F5/F9 save|Esc",
+                "Tab|Space|R|W/C/E/K/O|I|N/T/H|F1 HUD|F2 creat|F3 terra|F5/F9 save|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,
