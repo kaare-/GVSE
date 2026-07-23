@@ -22,6 +22,7 @@
 //! - `H` — toggle soft white humidity haze (vapor hint; clouds carry the look)
 //! - `N` — toggle cloud drawing (coagulated parcels; darker = wetter)
 //! - `T` — toggle temperature heatmap overlay
+//! - `G` — cycle geotech overlay (shear → σᵥ → wet → off)
 //! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
 //! - `F1` — toggle HUD chrome (bottom info/tools + block inspector)
 //! - `F2` — creature editor (Atom / plant MS-Paint; `C` stays condensation)
@@ -48,10 +49,10 @@ use macroquad::prelude::*;
 use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    celestial_screen_pos_cfg, cloud_floor_y, day_night_factor_cfg, humidity_diffuse_due,
-    is_daytime_cfg, is_standing_water, precip_forms_snow_at_air, sky_rgb, sky_rgb_at_height,
-    temperature_step_due, tick_with_perf, ClimateConfig, SimSnapshot, Wind, World,
-    WorldgenParams,
+    celestial_screen_pos_cfg, cloud_floor_y, day_night_factor_cfg, geotech_map_due,
+    humidity_diffuse_due, is_daytime_cfg, is_standing_water, precip_forms_snow_at_air, sky_rgb,
+    sky_rgb_at_height, temperature_step_due, tick_with_configs_and_geotech, ClimateConfig,
+    GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -150,6 +151,20 @@ fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
             Color::from_rgba(sr, sg, sb, 255),
         );
     }
+}
+
+/// Cool cyan → hot amber for geotech shear score on face cells.
+fn geotech_overlay_color(score: f32, s_max: f32) -> Color {
+    let t = if s_max > 0.0 {
+        (score / s_max).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let r = (40.0 + t * 215.0) as u8;
+    let g = (180.0 - t * 100.0) as u8;
+    let b = (220.0 - t * 200.0) as u8;
+    let a = (90.0 + t * 130.0) as u8;
+    Color::from_rgba(r, g, b, a)
 }
 
 fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
@@ -414,6 +429,7 @@ async fn main() {
     let mut humidity_overlay = false;
     let mut clouds_on = true;
     let mut temp_overlay = false;
+    let mut geotech_mode = GeotechOverlayMode::Off;
     let mut show_hud = true;
     let mut editor = CreatureEditor::default();
     let mut terrain = TerrainEditor::default();
@@ -609,6 +625,9 @@ async fn main() {
             if is_key_pressed(KeyCode::T) {
                 temp_overlay = !temp_overlay;
             }
+            if is_key_pressed(KeyCode::G) {
+                geotech_mode = geotech_mode.next();
+            }
             if is_key_pressed(KeyCode::I) {
                 settings.phase.enabled = !settings.phase.enabled;
             }
@@ -714,9 +733,24 @@ async fn main() {
             if karst_on {
                 apply_karst_dissolution(&mut scene.world, &settings.karst);
             }
-            tick_with_perf(&mut scene.world, &settings.perf);
+            // Period-20 stress map: refresh before failure (S3 gate), then
+            // again after CA so the HUD matches post-tick geometry.
+            let geotech_due = geotech_map_due(scene.world.tick);
+            if geotech_due {
+                scene.geotech.rebuild_smart(&scene.world);
+            }
+            tick_with_configs_and_geotech(
+                &mut scene.world,
+                &settings.perf,
+                &settings.failure,
+                Some(&scene.geotech),
+            );
             // Bedload / bank transport after water has moved this tick.
             apply_flow_erosion(&mut scene.world, &settings.grain);
+            if geotech_due {
+                // Post-CA dirty halo → incremental column update (S5).
+                scene.geotech.rebuild_smart(&scene.world);
+            }
             // Atmospheric diffusion is periodic (column-GVSE
             // HumidityField cadence: every 20 ticks). Evap still
             // deposits every tick; only the spread step is throttled.
@@ -1025,6 +1059,80 @@ async fn main() {
             }
         }
 
+        // Geotech overlay: G cycles shear → σᵥ → wet → off.
+        if geotech_mode != GeotechOverlayMode::Off {
+            match geotech_mode {
+                GeotechOverlayMode::Shear | GeotechOverlayMode::Wetness => {
+                    let s_max = match geotech_mode {
+                        GeotechOverlayMode::Shear => scene
+                            .geotech
+                            .faces
+                            .values()
+                            .map(|f| f.shear_score)
+                            .fold(0.0f32, f32::max)
+                            .max(2.0),
+                        _ => 1.0,
+                    };
+                    for (&(gx, gy), stress) in &scene.geotech.faces {
+                        let value = match geotech_mode {
+                            GeotechOverlayMode::Shear => stress.shear_score,
+                            GeotechOverlayMode::Wetness => stress.wetness.max(
+                                stress.hydro_load as f32 / 32.0,
+                            ),
+                            _ => 0.0,
+                        };
+                        for &x_copy in x_copies {
+                            let sx = origin_x
+                                + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
+                            let sy = origin_y
+                                - (gy - scene.params.bedrock_floor_y + 1) as f32 * cell_px;
+                            if sx + cell_px < 0.0 || sx > sw || sy + cell_px < 0.0 || sy > sh {
+                                continue;
+                            }
+                            draw_rectangle(
+                                sx,
+                                sy,
+                                cell_px,
+                                cell_px,
+                                geotech_overlay_color(value, s_max),
+                            );
+                        }
+                    }
+                }
+                GeotechOverlayMode::Overburden => {
+                    let s_max = scene
+                        .geotech
+                        .overburden
+                        .values()
+                        .copied()
+                        .fold(0.0f32, f32::max)
+                        .max(4.0);
+                    for (&(gx, gy), &sigma) in &scene.geotech.overburden {
+                        if sigma <= 0.05 {
+                            continue;
+                        }
+                        for &x_copy in x_copies {
+                            let sx = origin_x
+                                + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
+                            let sy = origin_y
+                                - (gy - scene.params.bedrock_floor_y + 1) as f32 * cell_px;
+                            if sx + cell_px < 0.0 || sx > sw || sy + cell_px < 0.0 || sy > sh {
+                                continue;
+                            }
+                            draw_rectangle(
+                                sx,
+                                sy,
+                                cell_px,
+                                cell_px,
+                                geotech_overlay_color(sigma, s_max),
+                            );
+                        }
+                    }
+                }
+                GeotechOverlayMode::Off => {}
+            }
+        }
+
         // Set A organisms: 1×1 module pixels (Nucleus black, Photosystem
         // green) — same palette as column-GVSE, always drawn when present.
         for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list() {
@@ -1073,6 +1181,7 @@ async fn main() {
                     cell,
                     &scene.humidity,
                     &scene.temperature,
+                    &scene.geotech,
                     &scene.world,
                     org,
                     corpse,
@@ -1120,7 +1229,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/H|F1 HUD|F2 creat|F3 terra|F5/F9 save|Esc quit",
+                "Tab|Space|R|W/C/E/K/O|I|N/T/H/G|F1 HUD|F2 creat|F3 terra|F5/F9 save|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,
