@@ -157,15 +157,74 @@ impl Humidity {
     ///
     /// Deposits outside [`Self::bounds`] are dropped (the cell grid
     /// should not evaporate outside the stamped world).
+    /// Soft per-tile ceiling so evaporation cannot stockpile unboundedly
+    /// when rain / coagulation cannot keep up (overnight flood safety).
+    pub const MAX_MASS_PER_TILE: f32 = 2_500.0;
+
     pub fn add(&mut self, gx: i32, gy: i32, mass: f32) {
-        if mass == 0.0 {
-            return;
+        let _ = self.try_add(gx, gy, mass);
+    }
+
+    /// Add mass; returns how much was actually accepted under the
+    /// per-tile cap ([`Self::MAX_MASS_PER_TILE`]).
+    pub fn try_add(&mut self, gx: i32, gy: i32, mass: f32) -> f32 {
+        if mass <= 0.0 {
+            return 0.0;
         }
         let key = self.tile_of(gx, gy);
         if !self.accepts(key.0, key.1) {
-            return;
+            return 0.0;
         }
-        *self.cells.entry(key).or_insert(0.0) += mass;
+        let entry = self.cells.entry(key).or_insert(0.0);
+        let room = (Self::MAX_MASS_PER_TILE - *entry).max(0.0);
+        let take = mass.min(room);
+        *entry += take;
+        take
+    }
+
+    /// Remove up to `mass` from the tile covering `(gx, gy)`. Returns
+    /// how much was actually removed.
+    pub fn take(&mut self, gx: i32, gy: i32, mass: f32) -> f32 {
+        if mass <= 0.0 {
+            return 0.0;
+        }
+        let key = self.tile_of(gx, gy);
+        let Some(entry) = self.cells.get_mut(&key) else {
+            return 0.0;
+        };
+        let take = mass.min(*entry);
+        *entry -= take;
+        if *entry < 1e-3 {
+            self.cells.remove(&key);
+        }
+        take
+    }
+
+    /// Pull vapor from a short vertical stack of tiles near `(gx, gy)`.
+    pub fn take_near(&mut self, gx: i32, gy: i32, mass: f32) -> f32 {
+        if mass <= 0.0 {
+            return 0.0;
+        }
+        let mut need = mass;
+        let mut got = 0.0;
+        for dy in [0, -4, -8, 4, -12, 8, -16] {
+            if need <= 1e-3 {
+                break;
+            }
+            let took = self.take(gx, gy + dy, need);
+            got += took;
+            need -= took;
+        }
+        got
+    }
+
+    /// Peek available vapor near `(gx, gy)` without removing it.
+    pub fn peek_near(&self, gx: i32, gy: i32) -> f32 {
+        let mut total = 0.0;
+        for dy in [0, -4, -8, 4, -12, 8, -16] {
+            total += self.at_cell(gx, gy + dy);
+        }
+        total
     }
 
     /// Humidity mass at world cell `(gx, gy)`. Missing tile → 0.

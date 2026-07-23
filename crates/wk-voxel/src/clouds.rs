@@ -20,11 +20,21 @@ use crate::worldgen::continental_surface_y;
 pub const MAX_CLOUD_PARCELS: usize = 36;
 /// Default mass at which a parcel starts dumping rain.
 pub const DOWNPOUR_MASS: f32 = 200.0;
+/// Default ceiling on summed parcel mass (overnight flood safety).
+pub const MAX_CLOUD_TOTAL_MASS: f32 = 80_000.0;
+/// Soft per-parcel ceiling so one blob cannot absorb the whole sky.
+pub const MAX_CLOUD_PARCEL_MASS: f32 = 8_000.0;
 
 /// Live-tunable cloud / coagulation / downpour knobs.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct CloudConfig {
     pub max_parcels: usize,
+    /// Refuse further coagulation once `total_mass` reaches this.
+    #[serde(default = "default_max_total_mass")]
+    pub max_total_mass: f32,
+    /// Soft ceiling on a single parcel's mass.
+    #[serde(default = "default_max_parcel_mass")]
+    pub max_parcel_mass: f32,
     pub coag_min_hum: f32,
     pub coag_rate: f32,
     pub coag_max_take: f32,
@@ -59,6 +69,12 @@ pub struct CloudConfig {
     pub rain_cells_per_tick: u8,
 }
 
+fn default_max_total_mass() -> f32 {
+    MAX_CLOUD_TOTAL_MASS
+}
+fn default_max_parcel_mass() -> f32 {
+    MAX_CLOUD_PARCEL_MASS
+}
 fn default_snow_footprint_mult() -> f32 {
     2.2
 }
@@ -82,6 +98,8 @@ impl Default for CloudConfig {
     fn default() -> Self {
         Self {
             max_parcels: MAX_CLOUD_PARCELS,
+            max_total_mass: default_max_total_mass(),
+            max_parcel_mass: default_max_parcel_mass(),
             coag_min_hum: 36.0,
             coag_rate: 0.04,
             coag_max_take: 14.0,
@@ -262,10 +280,18 @@ impl CloudStore {
         let preferred_alt = (sea_level_y + cfg.cloud_alt_above_sea)
             .min(sky_ceiling_y - 4)
             .max(sea_level_y + cfg.coag_min_above_sea) as f32;
+        let max_total = cfg.max_total_mass.max(0.0);
+        let max_parcel = cfg.max_parcel_mass.max(cfg.downpour_mass);
+        if max_total > 0.0 && self.total_mass() >= max_total {
+            return;
+        }
         let keys: Vec<(i32, i32)> = humidity.cells.keys().copied().collect();
         for (hx, hy) in keys {
             if hy < sky_hy_min || hy > sky_hy_max {
                 continue;
+            }
+            if max_total > 0.0 && self.total_mass() >= max_total {
+                break;
             }
             let mass = humidity.at_tile(hx, hy);
             if mass < cfg.coag_min_hum {
@@ -273,7 +299,7 @@ impl CloudStore {
             }
             let cx = hx * tc + tc / 2;
             let cy = hy * tc + tc / 2;
-            let take = (mass * cfg.coag_rate).min(cfg.coag_max_take).min(mass);
+            let mut take = (mass * cfg.coag_rate).min(cfg.coag_max_take).min(mass);
             if take <= 0.0 {
                 continue;
             }
@@ -301,6 +327,17 @@ impl CloudStore {
                 }
                 None => continue,
             };
+
+            let room_parcel = (max_parcel - self.parcels[idx].mass).max(0.0);
+            let room_total = if max_total > 0.0 {
+                (max_total - self.total_mass()).max(0.0)
+            } else {
+                take
+            };
+            take = take.min(room_parcel).min(room_total);
+            if take <= 0.0 {
+                continue;
+            }
 
             if let Some(entry) = humidity.cells.get_mut(&(hx, hy)) {
                 *entry -= take;
