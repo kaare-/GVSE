@@ -748,7 +748,7 @@ async fn main() {
 
         // World clicks: terrain paint, spawn picker, or block inspector.
         let (mx, my) = mouse_position();
-        if terrain.open && !terrain.hits_panel(mx, my) {
+        if terrain.open && !terrain.hits_panel(mx, my) && !terrain.blocks_world_paint() {
             let paint = is_mouse_button_down(MouseButton::Left);
             let erase = is_mouse_button_down(MouseButton::Right);
             if paint || erase {

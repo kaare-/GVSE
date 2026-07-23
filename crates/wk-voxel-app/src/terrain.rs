@@ -14,6 +14,8 @@ const PANEL_W: f32 = 300.0;
 const PANEL_PAD: f32 = 12.0;
 const SWATCH: f32 = 28.0;
 const SWATCH_GAP: f32 = 6.0;
+/// Max brush radius in cells (diameter = 2·r+1).
+pub const MAX_BRUSH_RADIUS: i32 = 16;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerrainTool {
@@ -133,6 +135,8 @@ pub struct TerrainEditor {
     /// Set by UI / hotkeys; main loop consumes.
     pub request_save: bool,
     pub request_load: bool,
+    /// True while dragging the brush-size slider.
+    dragging_size: bool,
 }
 
 impl Default for TerrainEditor {
@@ -147,6 +151,7 @@ impl Default for TerrainEditor {
             save_name: "world".into(),
             request_save: false,
             request_load: false,
+            dragging_size: false,
         }
     }
 }
@@ -155,16 +160,54 @@ impl TerrainEditor {
     pub fn toggle(&mut self, currently_paused: bool) {
         if self.open {
             self.open = false;
+            self.dragging_size = false;
         } else {
             self.open = true;
             self.was_paused = currently_paused;
-            self.status = "Paint world · 0–9 brushes · E erase · S/L save/load".into();
+            self.status = "Paint world · size slider · 0–9 brushes · S/L save".into();
         }
+    }
+
+    /// Brush diameter in cells (`2·radius + 1`).
+    pub fn brush_diameter(&self) -> i32 {
+        self.radius.max(0) * 2 + 1
     }
 
     /// True if screen point lies over the left tool panel.
     pub fn hits_panel(&self, mx: f32, my: f32) -> bool {
         self.open && mx < PANEL_W && my < screen_height()
+    }
+
+    /// True while dragging the size slider (don't paint the world).
+    pub fn blocks_world_paint(&self) -> bool {
+        self.dragging_size
+    }
+
+    fn size_slider_rect() -> (f32, f32, f32, f32) {
+        // x, y, w, h of the interactive track.
+        let x = PANEL_PAD + 36.0;
+        let y = 118.0;
+        let w = PANEL_W - PANEL_PAD * 2.0 - 72.0;
+        let h = 22.0;
+        (x, y, w, h)
+    }
+
+    fn size_minus_rect() -> (f32, f32, f32, f32) {
+        (PANEL_PAD, 112.0, 28.0, 28.0)
+    }
+
+    fn size_plus_rect() -> (f32, f32, f32, f32) {
+        (PANEL_W - PANEL_PAD - 28.0, 112.0, 28.0, 28.0)
+    }
+
+    fn hit_rect(mx: f32, my: f32, r: (f32, f32, f32, f32)) -> bool {
+        mx >= r.0 && mx < r.0 + r.2 && my >= r.1 && my < r.1 + r.3
+    }
+
+    fn set_radius_from_slider_x(&mut self, mx: f32) {
+        let (x, _, w, _) = Self::size_slider_rect();
+        let t = ((mx - x) / w).clamp(0.0, 1.0);
+        self.radius = (t * MAX_BRUSH_RADIUS as f32).round() as i32;
     }
 
     pub fn handle_input(&mut self) {
@@ -222,9 +265,16 @@ impl TerrainEditor {
             }
         }
         if is_key_pressed(KeyCode::Equal) || is_key_pressed(KeyCode::KpAdd) {
-            self.radius = (self.radius + 1).min(6);
+            self.radius = (self.radius + 1).min(MAX_BRUSH_RADIUS);
         }
         if is_key_pressed(KeyCode::Minus) || is_key_pressed(KeyCode::KpSubtract) {
+            self.radius = (self.radius - 1).max(0);
+        }
+        // Bracket keys also nudge size (common in paint apps).
+        if is_key_pressed(KeyCode::RightBracket) {
+            self.radius = (self.radius + 1).min(MAX_BRUSH_RADIUS);
+        }
+        if is_key_pressed(KeyCode::LeftBracket) {
             self.radius = (self.radius - 1).max(0);
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
@@ -234,10 +284,16 @@ impl TerrainEditor {
             self.request_load = true;
         }
 
-        // Click swatches in the panel.
+        let (mx, my) = mouse_position();
         if is_mouse_button_pressed(MouseButton::Left) {
-            let (mx, my) = mouse_position();
-            if let Some(b) = self.swatch_at(mx, my) {
+            if Self::hit_rect(mx, my, Self::size_minus_rect()) {
+                self.radius = (self.radius - 1).max(0);
+            } else if Self::hit_rect(mx, my, Self::size_plus_rect()) {
+                self.radius = (self.radius + 1).min(MAX_BRUSH_RADIUS);
+            } else if Self::hit_rect(mx, my, Self::size_slider_rect()) {
+                self.dragging_size = true;
+                self.set_radius_from_slider_x(mx);
+            } else if let Some(b) = self.swatch_at(mx, my) {
                 self.brush = b;
                 self.tool = if b == TerrainBrush::Erase {
                     TerrainTool::Erase
@@ -246,10 +302,18 @@ impl TerrainEditor {
                 };
             }
         }
+        if self.dragging_size {
+            if is_mouse_button_down(MouseButton::Left) {
+                self.set_radius_from_slider_x(mx);
+            } else {
+                self.dragging_size = false;
+            }
+        }
     }
 
     fn swatch_origin() -> (f32, f32) {
-        (PANEL_PAD, 110.0)
+        // Below the brush-size slider + preview.
+        (PANEL_PAD, 168.0)
     }
 
     fn swatch_at(&self, mx: f32, my: f32) -> Option<TerrainBrush> {
@@ -275,7 +339,7 @@ impl TerrainEditor {
             TerrainTool::Erase => Cell::air(),
             TerrainTool::Paint => self.brush.to_cell(),
         };
-        let r = self.radius.max(0);
+        let r = self.radius.clamp(0, MAX_BRUSH_RADIUS);
         for dy in -r..=r {
             for dx in -r..=r {
                 if dx * dx + dy * dy > r * r {
@@ -320,13 +384,78 @@ impl TerrainEditor {
         );
         draw_text(
             &format!(
-                "Radius {}  (+/-)  ·  LMB paint  RMB erase",
-                self.radius
+                "Paint size: {}×{} cells  ([ ] or +/-)",
+                self.brush_diameter(),
+                self.brush_diameter()
             ),
             PANEL_PAD,
-            92.0,
+            94.0,
             13.0,
             LIGHTGRAY,
+        );
+
+        // − / slider / +
+        let minus = Self::size_minus_rect();
+        let plus = Self::size_plus_rect();
+        let (sx, sy, sw, sh_track) = Self::size_slider_rect();
+        draw_rectangle(
+            minus.0,
+            minus.1,
+            minus.2,
+            minus.3,
+            Color::from_rgba(40, 48, 64, 255),
+        );
+        draw_text("−", minus.0 + 8.0, minus.1 + 20.0, 22.0, WHITE);
+        draw_rectangle(
+            plus.0,
+            plus.1,
+            plus.2,
+            plus.3,
+            Color::from_rgba(40, 48, 64, 255),
+        );
+        draw_text("+", plus.0 + 7.0, plus.1 + 20.0, 22.0, WHITE);
+
+        draw_rectangle(
+            sx,
+            sy + sh_track * 0.35,
+            sw,
+            sh_track * 0.30,
+            Color::from_rgba(50, 58, 74, 255),
+        );
+        let t = self.radius as f32 / MAX_BRUSH_RADIUS as f32;
+        let thumb_x = sx + t * sw;
+        draw_circle(
+            thumb_x,
+            sy + sh_track * 0.5,
+            9.0,
+            Color::from_rgba(160, 210, 255, 255),
+        );
+        // Filled portion of the track.
+        draw_rectangle(
+            sx,
+            sy + sh_track * 0.35,
+            (thumb_x - sx).max(0.0),
+            sh_track * 0.30,
+            Color::from_rgba(90, 140, 200, 200),
+        );
+
+        // Tiny brush preview (disk).
+        let prev_cx = PANEL_W * 0.5;
+        let prev_cy = 152.0;
+        let prev_r = (2.0 + self.radius as f32 * 1.1).min(14.0);
+        let [pr, pg, pb] = self.brush.swatch_rgb();
+        draw_circle(
+            prev_cx,
+            prev_cy,
+            prev_r,
+            Color::from_rgba(pr, pg, pb, 220),
+        );
+        draw_circle_lines(
+            prev_cx,
+            prev_cy,
+            prev_r,
+            1.0,
+            Color::from_rgba(255, 255, 255, 180),
         );
 
         let (ox, oy) = Self::swatch_origin();
@@ -352,24 +481,35 @@ impl TerrainEditor {
                 x + SWATCH + 6.0,
                 y + SWATCH * 0.7,
                 13.0,
-                if *brush == self.brush { WHITE } else { LIGHTGRAY },
+                if *brush == self.brush {
+                    WHITE
+                } else {
+                    LIGHTGRAY
+                },
             );
         }
 
         let foot_y = oy + 6.0 * (SWATCH + SWATCH_GAP + 16.0) + 12.0;
-        draw_text("S save  L load  → saves/*.gvsesim", PANEL_PAD, foot_y, 13.0, GRAY);
+        draw_text(
+            "LMB paint  RMB erase  ·  drag size slider",
+            PANEL_PAD,
+            foot_y,
+            13.0,
+            GRAY,
+        );
+        draw_text("S save  L load  → saves/*.gvsesim", PANEL_PAD, foot_y + 18.0, 13.0, GRAY);
         draw_text(
             &format!("slot: {}", self.save_name),
             PANEL_PAD,
-            foot_y + 20.0,
+            foot_y + 38.0,
             13.0,
             LIGHTGRAY,
         );
-        draw_text(&self.status, PANEL_PAD, foot_y + 44.0, 13.0, YELLOW);
+        draw_text(&self.status, PANEL_PAD, foot_y + 60.0, 13.0, YELLOW);
         draw_text(
             "Also: Tab → World size · F5/F9 save/load",
             PANEL_PAD,
-            foot_y + 68.0,
+            foot_y + 84.0,
             12.0,
             GRAY,
         );
@@ -413,6 +553,41 @@ mod tests {
         assert_eq!(
             w.get_cell(11, 10).map(|c| c.material),
             Some(MaterialId::Sand)
+        );
+    }
+
+    #[test]
+    fn brush_diameter_matches_radius() {
+        let mut ed = TerrainEditor::default();
+        assert_eq!(ed.brush_diameter(), 1);
+        ed.radius = 3;
+        assert_eq!(ed.brush_diameter(), 7);
+        ed.radius = MAX_BRUSH_RADIUS;
+        assert_eq!(ed.brush_diameter(), MAX_BRUSH_RADIUS * 2 + 1);
+    }
+
+    #[test]
+    fn large_brush_fills_disk() {
+        let mut w = World::new(1);
+        let ed = TerrainEditor {
+            brush: TerrainBrush::Clay,
+            tool: TerrainTool::Paint,
+            radius: 4,
+            ..TerrainEditor::default()
+        };
+        ed.apply_at(&mut w, 20, 20);
+        assert_eq!(
+            w.get_cell(20, 20).map(|c| c.material),
+            Some(MaterialId::Clay)
+        );
+        assert_eq!(
+            w.get_cell(24, 20).map(|c| c.material),
+            Some(MaterialId::Clay)
+        );
+        // Corner of bounding box is outside the disk.
+        assert_ne!(
+            w.get_cell(24, 24).map(|c| c.material),
+            Some(MaterialId::Clay)
         );
     }
 }
