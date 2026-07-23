@@ -29,9 +29,9 @@ use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::plant::{
     apply_genome, collect_live_root_world_cells, collect_trunk_world_cells, drink_roots,
-    drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, is_anchored, is_land_plant,
-    leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac, sync_root_storage,
-    try_grow_plant, try_vegetative_sprout, DroughtBand, DROUGHT_DORMANT_UPKEEP,
+    drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, find_surface_air_slot,
+    is_anchored, is_land_plant, leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac,
+    sync_root_storage, try_grow_plant, try_vegetative_sprout, DroughtBand, DROUGHT_DORMANT_UPKEEP,
     DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
 };
 use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
@@ -451,10 +451,11 @@ impl OrganismStore {
         true
     }
 
-    /// Editor spawn: any module mix, any Air cell near the click.
+    /// Editor spawn: any module mix near the click.
     ///
-    /// No wet-Air / porous-soil / seat checks — creatures may starve or
-    /// float; that is intentional sandbox behaviour.
+    /// Land plants / fungi snap to an Air-above-solid crown under the
+    /// column (so canopy clicks don't hang a Root in mid-air). Plankton
+    /// still only need Air. Thriving remains the creature's problem.
     ///
     /// Counts **entities** (one plant = one slot), not body pixels.
     pub fn spawn_blueprint_free(
@@ -473,8 +474,19 @@ impl OrganismStore {
             return Err(SpawnFail::InvalidBody);
         }
         let gx = world.wrap_x(gx);
-        let Some(gy) = find_air_near(world, gx, gy) else {
-            return Err(SpawnFail::NoAir);
+        let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
+        let fungus = body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant;
+        let gy = if plant {
+            find_surface_air_slot(world, gx, gy)
+                .or_else(|| find_air_near(world, gx, gy))
+                .ok_or(SpawnFail::NoAir)?
+        } else if fungus {
+            find_fungus_slot(world, gx, gy)
+                .or_else(|| find_surface_air_slot(world, gx, gy))
+                .or_else(|| find_air_near(world, gx, gy))
+                .ok_or(SpawnFail::NoAir)?
+        } else {
+            find_air_near(world, gx, gy).ok_or(SpawnFail::NoAir)?
         };
         let mut atom = Atom::from_body(gx, gy, energy_max, body);
         apply_genome(&mut atom, genome);
@@ -753,8 +765,14 @@ fn step_land_plant(
     pop_room: bool,
 ) -> PlantStep {
     pin_plant_pose(atom);
+    // Free-spawn / canopy clicks can leave a plant briefly unanchored.
+    // Snap down to a surface crown instead of culling — sandbox drops
+    // should starve slowly (drought), not vanish on the next tick.
     if !is_anchored(world, atom) {
-        return PlantStep::Dead;
+        if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
+            atom.gy = slot;
+            pin_plant_pose(atom);
+        }
     }
     // Roots bank surplus above the spawn tank (starch analogy).
     sync_root_storage(atom);
@@ -837,8 +855,14 @@ fn step_fungus(
     pop_room: bool,
 ) -> PlantStep {
     pin_plant_pose(atom);
+    // Same sandbox rule as plants: snap to a solid crown, don't cull.
     if !is_fungus_seated(world, atom) {
-        return PlantStep::Dead;
+        if let Some(slot) = find_fungus_slot(world, atom.gx, atom.gy)
+            .or_else(|| find_surface_air_slot(world, atom.gx, atom.gy))
+        {
+            atom.gy = slot;
+            pin_plant_pose(atom);
+        }
     }
     let dormant = fungus_should_hibernate(world, atom);
     if dormant {
@@ -1629,6 +1653,53 @@ mod tests {
         assert_eq!(store.len(), 1);
         assert_eq!(store.atoms[0].gx, 4);
         assert_eq!(store.atoms[0].gy, 3);
+    }
+
+    #[test]
+    fn editor_free_spawn_many_plants_survives_steps() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let body = minimal_plant_body();
+        // Place five plants across the plot — entity pop must not stop at 2.
+        for (i, x) in [2, 4, 6, 8, 10].into_iter().enumerate() {
+            assert!(
+                store
+                    .spawn_blueprint_free(&w, x, 2, body.clone(), 40.0, Genome::default())
+                    .is_ok(),
+                "plant {} should free-spawn",
+                i + 1
+            );
+        }
+        assert_eq!(store.len(), 5);
+        for t in 0..90 {
+            store.step(&mut w, t);
+        }
+        assert_eq!(
+            store.len(),
+            5,
+            "free-spawned plants must not vanish after a few ticks"
+        );
+    }
+
+    #[test]
+    fn editor_free_spawn_plant_snaps_down_from_canopy_click() {
+        let mut w = moist_sand_plot();
+        // Tall empty air column — click high like on a neighbour's leaves.
+        for y in 2..20 {
+            w.set_cell(5, y, Cell::air());
+        }
+        let mut store = OrganismStore::new();
+        assert!(store
+            .spawn_blueprint_free(&w, 5, 18, minimal_plant_body(), 40.0, Genome::default())
+            .is_ok());
+        assert_eq!(store.len(), 1);
+        assert_eq!(
+            store.atoms[0].gy, 2,
+            "plant must seat on Air above sand, not hang at canopy y=18"
+        );
+        assert!(is_anchored(&w, &store.atoms[0]));
+        store.step(&mut w, 1);
+        assert_eq!(store.len(), 1, "seated plant must survive the next tick");
     }
 
     #[test]

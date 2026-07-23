@@ -369,6 +369,43 @@ pub fn find_plant_slot(world: &World, gx: i32, gy: i32) -> Option<i32> {
     None
 }
 
+/// Editor / rescue seat: Air directly above any solid near `gy`.
+///
+/// Prefers porous plantable crowns, then bare rock / ice. Used so F2
+/// free-spawn snaps down from canopy clicks instead of hanging a Root
+/// in mid-air (which used to die on the next tick via [`is_anchored`]).
+pub fn find_surface_air_slot(world: &World, gx: i32, gy: i32) -> Option<i32> {
+    find_plant_slot(world, gx, gy).or_else(|| {
+        let gx = world.wrap_x(gx);
+        for dy in [0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6, 8, -8, 12, -12, 16, -16] {
+            let y = gy + dy;
+            if air_above_solid(world, gx, y) {
+                return Some(y);
+            }
+        }
+        // Prefer the lowest surface under the click (drop from canopy).
+        for y in (gy - 64..=gy + 8).rev() {
+            if air_above_solid(world, gx, y) {
+                return Some(y);
+            }
+        }
+        None
+    })
+}
+
+fn air_above_solid(world: &World, gx: i32, nucleus_y: i32) -> bool {
+    let Some(air) = world.get_cell(gx, nucleus_y) else {
+        return false;
+    };
+    if air.material != MaterialId::Air {
+        return false;
+    }
+    matches!(
+        world.get_cell(gx, nucleus_y - 1),
+        Some(c) if c.material != MaterialId::Air
+    )
+}
+
 /// Fungus seat: Air above any solid. Prefers Organic / wet Sand, but
 /// will land on bare rock too (may starve later — that's fine).
 pub fn find_fungus_slot(world: &World, gx: i32, gy: i32) -> Option<i32> {
