@@ -36,10 +36,17 @@ use crate::plant::{
 };
 use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
 
-/// Soft cap — blooms should stay readable at 1×.
+/// Default living-creature ceiling (Tab → Creatures can raise/lower).
 pub const MAX_ATOMS: usize = 256;
-/// Soft cap on lingering corpses (same order as living pop).
+/// Default lingering-corpse ceiling (same order as living pop).
 pub const MAX_CORPSES: usize = 256;
+
+fn default_max_atoms() -> usize {
+    MAX_ATOMS
+}
+fn default_max_corpses() -> usize {
+    MAX_CORPSES
+}
 
 /// Energy gained per photosystem per tick at full noon light.
 const PHOTON_RATE: f32 = 0.35;
@@ -278,11 +285,28 @@ pub fn corpse_rgb((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
 }
 
 /// Population of Set A Atoms (no `hecs` — keep the crate tiny).
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrganismStore {
     pub atoms: Vec<Atom>,
     #[serde(default)]
     pub corpses: Vec<Corpse>,
+    /// Hard ceiling on living creatures (spawn / fission / sprout).
+    #[serde(default = "default_max_atoms")]
+    pub max_atoms: usize,
+    /// Hard ceiling on lingering corpses before oldest are dropped.
+    #[serde(default = "default_max_corpses")]
+    pub max_corpses: usize,
+}
+
+impl Default for OrganismStore {
+    fn default() -> Self {
+        Self {
+            atoms: Vec::new(),
+            corpses: Vec::new(),
+            max_atoms: MAX_ATOMS,
+            max_corpses: MAX_CORPSES,
+        }
+    }
 }
 
 impl OrganismStore {
@@ -300,6 +324,16 @@ impl OrganismStore {
 
     pub fn corpse_count(&self) -> usize {
         self.corpses.len()
+    }
+
+    /// Living pop ceiling (at least 1 so a lone spawn can land).
+    pub fn atom_cap(&self) -> usize {
+        self.max_atoms.max(1)
+    }
+
+    /// Corpse list ceiling (at least 1).
+    pub fn corpse_cap(&self) -> usize {
+        self.max_corpses.max(1)
     }
 
     /// Seed Atoms into wet Air cells near the free surface of each
@@ -321,7 +355,7 @@ impl OrganismStore {
             let gx_w = world.wrap_x(gx);
             if let Some(gy) = find_wet_slot(world, gx_w, y0, y1) {
                 let h = hash_u64(seed, gx_w as u64, ATOM_SEED_SALT);
-                if h % 3 == 0 && self.atoms.len() < MAX_ATOMS {
+                if h % 3 == 0 && self.atoms.len() < self.atom_cap() {
                     self.atoms.push(Atom::new(gx_w, gy, energy_max));
                 }
             }
@@ -363,7 +397,7 @@ impl OrganismStore {
         energy_max: f32,
         genome: Genome,
     ) -> bool {
-        if self.atoms.len() >= MAX_ATOMS || body.is_empty() {
+        if self.atoms.len() >= self.atom_cap() || body.is_empty() {
             return false;
         }
         let gx = world.wrap_x(gx);
@@ -418,7 +452,7 @@ impl OrganismStore {
         energy_max: f32,
         genome: Genome,
     ) -> bool {
-        if self.atoms.len() >= MAX_ATOMS || body.is_empty() {
+        if self.atoms.len() >= self.atom_cap() || body.is_empty() {
             return false;
         }
         if !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
@@ -477,6 +511,7 @@ impl OrganismStore {
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let pop = self.atoms.len();
+        let atom_cap = self.atom_cap();
         // Transpiration return: (gx, gy, sat_units) → humidity mass.
         let mut transpired: Vec<(i32, i32, u32)> = Vec::new();
 
@@ -495,7 +530,7 @@ impl OrganismStore {
             }
 
             if is_land_plant(atom) {
-                let room = pop + births.len() < MAX_ATOMS;
+                let room = pop + births.len() < atom_cap;
                 match step_land_plant(
                     world,
                     atom,
@@ -519,7 +554,7 @@ impl OrganismStore {
             }
 
             if is_fungus(atom) {
-                let room = pop + births.len() < MAX_ATOMS;
+                let room = pop + births.len() < atom_cap;
                 match step_fungus(world, atom, day, tick, i as u32, room) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
@@ -559,7 +594,7 @@ impl OrganismStore {
 
             if atom.cooldown == 0
                 && atom.energy >= atom.energy_max * REPRODUCE_AT
-                && pop + births.len() < MAX_ATOMS
+                && pop + births.len() < atom_cap
             {
                 let cost = atom.energy_max * REPRO_COST_FRAC;
                 atom.energy -= cost;
@@ -603,7 +638,7 @@ impl OrganismStore {
     }
 
     fn push_corpse(&mut self, world: &mut World, corpse: Corpse) {
-        if self.corpses.len() >= MAX_CORPSES {
+        if self.corpses.len() >= self.corpse_cap() {
             // Cap pressure: dissolve oldest immediately into Organic.
             if let Some(old) = self.corpses.first().cloned() {
                 dissolve_corpse_to_organic(world, old.gx, old.gy, &old.body);
@@ -1529,6 +1564,26 @@ mod tests {
             ),
             "fungus should place on Air above any solid"
         );
+    }
+
+    #[test]
+    fn pop_cap_blocks_editor_spawn() {
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut store = OrganismStore::new();
+        store.max_atoms = 1;
+        let body = crate::blueprint::Blueprint::atom().modules_relative_to_nucleus();
+        assert!(store.spawn_blueprint_free(&w, 2, 3, body.clone(), 40.0, Genome::default()));
+        assert!(
+            !store.spawn_blueprint_free(&w, 4, 3, body, 40.0, Genome::default()),
+            "second spawn must fail at max_atoms=1"
+        );
+        assert_eq!(store.len(), 1);
     }
 
     #[test]
