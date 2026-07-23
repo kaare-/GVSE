@@ -13,6 +13,7 @@ use std::collections::HashMap;
 
 use wk_material::{MaterialId, MaterialRegistry};
 
+use crate::active::{plan_active, ActiveChunk};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::failure::{face_shear_demand, pore_wetness};
 use crate::grid::World;
@@ -29,6 +30,8 @@ pub const HYDRO_SCORE_WEIGHT: f32 = 2.0;
 pub const HYDRO_MIN_SAT: u8 = 200;
 /// Max cells to walk upward when summing overburden.
 pub const OVERBURDEN_MAX_UP: i32 = 96;
+/// Force a full-world sweep every N smart rebuilds (S5).
+pub const GEOTECH_FULL_EVERY: u32 = 8;
 
 /// True when this tick should rebuild the geotech map.
 pub fn geotech_map_due(tick: u64) -> bool {
@@ -103,6 +106,10 @@ pub struct GeotechMap {
     pub overburden: HashMap<(i32, i32), f32>,
     /// Tick of last successful rebuild (`u64::MAX` = never).
     pub last_rebuild_tick: u64,
+    /// Smart rebuilds since the last full sweep.
+    pub rebuilds_since_full: u32,
+    /// Last rebuild used the dirty-column path (S5).
+    pub last_was_incremental: bool,
 }
 
 impl GeotechMap {
@@ -111,6 +118,8 @@ impl GeotechMap {
             faces: HashMap::new(),
             overburden: HashMap::new(),
             last_rebuild_tick: u64::MAX,
+            rebuilds_since_full: 0,
+            last_was_incremental: false,
         }
     }
 
@@ -126,6 +135,8 @@ impl GeotechMap {
         self.faces.clear();
         self.overburden.clear();
         self.last_rebuild_tick = u64::MAX;
+        self.rebuilds_since_full = 0;
+        self.last_was_incremental = false;
     }
 
     /// Full loaded-chunk sweep. Replaces previous contents.
@@ -138,48 +149,199 @@ impl GeotechMap {
         // Column σᵥ: walk each world-x top→bottom once per loaded chunk band.
         rebuild_overburden(world, &coords, &mut self.overburden);
 
-        for coord in coords {
-            for ly in 0..CHUNK_CELLS_H {
-                let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
-                if gy <= 0 {
-                    continue;
-                }
-                for lx in 0..CHUNK_CELLS_W {
-                    let gx = world.wrap_x(coord.cx * CHUNK_CELLS_W as i32 + lx as i32);
-                    let Some(cell) = world.get_cell(gx, gy) else {
-                        continue;
-                    };
-                    if cell.material == MaterialId::Air {
-                        continue;
-                    }
-                    if matches!(
-                        cell.material,
-                        MaterialId::Water | MaterialId::Snow | MaterialId::Ice
-                    ) {
-                        continue;
-                    }
-                    let demand = face_shear_demand(world, gx, gy);
-                    if demand < 1 {
-                        continue;
-                    }
-                    let hydro = wet_air_column_beside(world, gx, gy);
-                    let wet = pore_wetness(cell);
-                    let sigma = self.overburden_at(gx, gy);
-                    let stress = FaceStress::from_parts(demand, hydro, wet, sigma);
-                    self.faces.insert((gx, gy), stress);
-                }
-            }
+        for coord in &coords {
+            rescan_faces_in_chunk(world, *coord, None, &self.overburden, &mut self.faces);
         }
         self.last_rebuild_tick = world.tick;
+        self.rebuilds_since_full = 0;
+        self.last_was_incremental = false;
     }
 
-    /// Rebuild when the period/phase gate says so.
+    /// S5: prefer dirty-column update; fall back to full sweep periodically
+    /// or when the map is empty / world is fully quiet after edits.
+    pub fn rebuild_smart(&mut self, world: &World) {
+        let active = plan_active(world);
+        let force_full = self.faces.is_empty()
+            || self.rebuilds_since_full + 1 >= GEOTECH_FULL_EVERY;
+        if force_full {
+            self.rebuild(world);
+            return;
+        }
+        if active.is_empty() {
+            // Nothing changed since last CA — keep map, mark due satisfied.
+            self.last_rebuild_tick = world.tick;
+            self.last_was_incremental = true;
+            self.rebuilds_since_full = self.rebuilds_since_full.saturating_add(1);
+            return;
+        }
+        self.rebuild_active(world, &active);
+    }
+
+    /// Rebuild only columns touched by `active` (inflated ±1 in x).
+    pub fn rebuild_active(&mut self, world: &World, active: &[ActiveChunk]) {
+        let mut columns: Vec<i32> = Vec::new();
+        let mut y_lo = i32::MAX;
+        let mut y_hi = i32::MIN;
+        for ac in active {
+            let base_x = ac.coord.cx * CHUNK_CELLS_W as i32;
+            let base_y = ac.coord.cy * CHUNK_CELLS_H as i32;
+            let x0 = world.wrap_x(base_x + ac.rect.x0 as i32 - 1);
+            let x1 = world.wrap_x(base_x + ac.rect.x1 as i32 + 1);
+            // Collect inclusive x range (handle wrap by scanning rect locals).
+            for lx in ac.rect.x0.saturating_sub(1)..=(ac.rect.x1 + 1).min((CHUNK_CELLS_W - 1) as u8)
+            {
+                columns.push(world.wrap_x(base_x + lx as i32));
+            }
+            let _ = (x0, x1);
+            y_lo = y_lo.min(base_y + ac.rect.y0 as i32 - 1);
+            y_hi = y_hi.max(base_y + ac.rect.y1 as i32 + 1);
+        }
+        columns.sort_unstable();
+        columns.dedup();
+        y_lo = y_lo.max(0);
+        if y_hi < y_lo {
+            y_hi = y_lo;
+        }
+
+        for &gx in &columns {
+            // Drop stale entries for this column.
+            self.overburden.retain(|&(x, _), _| x != gx);
+            self.faces.retain(|&(x, _), _| x != gx);
+            rebuild_overburden_column(world, gx, &mut self.overburden);
+            rescan_faces_column(world, gx, y_lo, y_hi, &self.overburden, &mut self.faces);
+        }
+
+        self.last_rebuild_tick = world.tick;
+        self.rebuilds_since_full = self.rebuilds_since_full.saturating_add(1);
+        self.last_was_incremental = true;
+    }
+
+    /// Rebuild when the period/phase gate says so (smart path).
     pub fn rebuild_if_due(&mut self, world: &World) -> bool {
         if !geotech_map_due(world.tick) {
             return false;
         }
-        self.rebuild(world);
+        self.rebuild_smart(world);
         true
+    }
+}
+
+fn rescan_faces_in_chunk(
+    world: &World,
+    coord: crate::chunk::ChunkCoord,
+    y_clamp: Option<(i32, i32)>,
+    overburden: &HashMap<(i32, i32), f32>,
+    faces: &mut HashMap<(i32, i32), FaceStress>,
+) {
+    for ly in 0..CHUNK_CELLS_H {
+        let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
+        if gy <= 0 {
+            continue;
+        }
+        if let Some((lo, hi)) = y_clamp {
+            if gy < lo || gy > hi {
+                continue;
+            }
+        }
+        for lx in 0..CHUNK_CELLS_W {
+            let gx = world.wrap_x(coord.cx * CHUNK_CELLS_W as i32 + lx as i32);
+            maybe_insert_face(world, gx, gy, overburden, faces);
+        }
+    }
+}
+
+fn rescan_faces_column(
+    world: &World,
+    gx: i32,
+    y_lo: i32,
+    y_hi: i32,
+    overburden: &HashMap<(i32, i32), f32>,
+    faces: &mut HashMap<(i32, i32), FaceStress>,
+) {
+    // Scan a generous band — hydro faces need neighbours; overburden
+    // already covers the full column.
+    let y0 = y_lo.saturating_sub(2).max(1);
+    let y1 = y_hi + HYDRO_LOAD_CAP;
+    for gy in y0..=y1 {
+        maybe_insert_face(world, gx, gy, overburden, faces);
+    }
+}
+
+fn maybe_insert_face(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    overburden: &HashMap<(i32, i32), f32>,
+    faces: &mut HashMap<(i32, i32), FaceStress>,
+) {
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return;
+    };
+    if cell.material == MaterialId::Air {
+        return;
+    }
+    if matches!(
+        cell.material,
+        MaterialId::Water | MaterialId::Snow | MaterialId::Ice
+    ) {
+        return;
+    }
+    let demand = face_shear_demand(world, gx, gy);
+    if demand < 1 {
+        return;
+    }
+    let hydro = wet_air_column_beside(world, gx, gy);
+    let wet = pore_wetness(cell);
+    let sigma = overburden.get(&(gx, gy)).copied().unwrap_or(0.0);
+    faces.insert(
+        (gx, gy),
+        FaceStress::from_parts(demand, hydro, wet, sigma),
+    );
+}
+
+fn rebuild_overburden_column(world: &World, gx: i32, out: &mut HashMap<(i32, i32), f32>) {
+    let gx = world.wrap_x(gx);
+    // Determine y span from loaded chunks covering this x.
+    let mut y_lo = i32::MAX;
+    let mut y_hi = i32::MIN;
+    for coord in world.chunks.keys() {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let x1 = x0 + CHUNK_CELLS_W as i32 - 1;
+        // Wrap-aware: crude check — if gx falls in this chunk's x band.
+        let mut hit = false;
+        for x in x0..=x1 {
+            if world.wrap_x(x) == gx {
+                hit = true;
+                break;
+            }
+        }
+        if !hit {
+            continue;
+        }
+        let cy0 = coord.cy * CHUNK_CELLS_H as i32;
+        let cy1 = cy0 + CHUNK_CELLS_H as i32 - 1;
+        y_lo = y_lo.min(cy0);
+        y_hi = y_hi.max(cy1);
+    }
+    if y_lo == i32::MAX {
+        return;
+    }
+    let mut above = 0.0f32;
+    let mut gy = y_hi;
+    while gy >= y_lo && gy >= 0 {
+        match world.get_cell(gx, gy) {
+            Some(c) if c.material != MaterialId::Air => {
+                out.insert((gx, gy), above);
+                above += MaterialRegistry::props(c.material).density as f32 / 1000.0;
+            }
+            Some(c) => {
+                if c.sat.0 > 0 {
+                    above += (c.sat.0 as f32 / 255.0) * 1.0;
+                }
+            }
+            None => {}
+        }
+        gy -= 1;
     }
 }
 
@@ -474,5 +636,51 @@ mod tests {
             assert!((va.shear_score - vb.shear_score).abs() < 1e-5);
             assert!((va.overburden - vb.overburden).abs() < 1e-4);
         }
+    }
+
+    #[test]
+    fn rebuild_smart_incremental_updates_dirty_column_hydro() {
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 8);
+        for y in 1..=6 {
+            w.set_cell(3, y, Cell::solid(MaterialId::Stone));
+            w.set_cell(4, y, Cell::air());
+        }
+        let mut map = GeotechMap::new();
+        map.rebuild(&w);
+        assert_eq!(map.at_cell(3, 3).unwrap().hydro_load, 0);
+
+        // Fill the reservoir — dirties those cells.
+        for y in 1..=6 {
+            w.set_cell(4, y, wet_air());
+        }
+        map.rebuild_smart(&w);
+        assert!(
+            map.last_was_incremental,
+            "dirty halo should take the incremental path"
+        );
+        let face = map.at_cell(3, 3).expect("face");
+        assert!(
+            face.hydro_load >= 4,
+            "incremental rebuild must see wet column (hydro={})",
+            face.hydro_load
+        );
+    }
+
+    #[test]
+    fn rebuild_smart_skips_when_world_quiet() {
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 4);
+        w.set_cell(2, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(3, 1, Cell::air());
+        let mut map = GeotechMap::new();
+        map.rebuild(&w);
+        let faces_before = map.faces.len();
+        crate::active::clear_all_dirty(&mut w);
+        map.rebuild_smart(&w);
+        assert!(map.last_was_incremental);
+        assert_eq!(map.faces.len(), faces_before);
     }
 }

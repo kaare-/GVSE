@@ -2544,9 +2544,11 @@ pub fn tick_with_configs_and_geotech(
         for pass in &passes {
             apply_gravity_fall_regions(world, pass);
         }
-        // Odd-substep flow: gravity still runs every pass; surface
-        // leveling runs half as often when opted in.
-        let run_flow = !perf.flow_every_other_substep || (step % 2 == 1);
+        // Every-other flow: gravity still runs every pass; surface
+        // leveling runs on even substeps when opted in. (Must include
+        // step 0 — odd-only skipped flow after clear_all_dirty, then
+        // step 1 saw an empty plan and broke before any leveling.)
+        let run_flow = !perf.flow_every_other_substep || (step % 2 == 0);
         if run_flow {
             apply_water_flow_regions(world, &active);
         }
@@ -4521,6 +4523,54 @@ mod tests {
         assert!(
             (max as i32) - (min as i32) < 80,
             "same-Y surface should be close to level (row={row:?})"
+        );
+    }
+
+    #[test]
+    fn flow_every_other_substep_does_not_stall_packed_surface_equalize() {
+        // Packed free-surface terrace — gravity is a no-op, so the old
+        // odd-only every-other path cleared dirty on step 0, skipped
+        // flow, then broke on empty plan at step 1. Even-step flow fixes it.
+        let mut w = World::new(9);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..10 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+        }
+        w.set_cell(0, 2, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(0, 3, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, 2, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, 3, Cell::solid(MaterialId::Bedrock));
+        for x in 1..9 {
+            w.set_cell(x, 2, Cell::water());
+        }
+        w.set_cell(2, 3, Cell::water());
+        w.set_cell(3, 3, Cell::water());
+
+        let perf = PerfConfig {
+            flow_every_other_substep: true,
+            parallel_physics: false,
+            ..PerfConfig::default()
+        };
+        let fail = crate::failure::FailureConfig {
+            enable_roof_collapse: false,
+            enable_shear_weaken: false,
+            enable_compaction: false,
+            ..crate::failure::FailureConfig::default()
+        };
+        for _ in 0..60 {
+            tick_with_configs(&mut w, &perf, &fail);
+        }
+        let row: Vec<u8> = (1..9).map(|x| w.get_cell(x, 3).unwrap().sat.0).collect();
+        let max = *row.iter().max().unwrap();
+        let wet_cols = row.iter().filter(|&&s| s > 20).count();
+        assert!(
+            max < 240,
+            "every-other must thin the packed terrace, not stall at FULL (row={row:?})"
+        );
+        assert!(
+            wet_cols >= 4,
+            "every-other must spread surface water across the basin (row={row:?})"
         );
     }
 

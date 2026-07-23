@@ -737,7 +737,7 @@ async fn main() {
             // again after CA so the HUD matches post-tick geometry.
             let geotech_due = geotech_map_due(scene.world.tick);
             if geotech_due {
-                scene.geotech.rebuild(&scene.world);
+                scene.geotech.rebuild_smart(&scene.world);
             }
             tick_with_configs_and_geotech(
                 &mut scene.world,
@@ -748,7 +748,8 @@ async fn main() {
             // Bedload / bank transport after water has moved this tick.
             apply_flow_erosion(&mut scene.world, &settings.grain);
             if geotech_due {
-                scene.geotech.rebuild(&scene.world);
+                // Post-CA dirty halo → incremental column update (S5).
+                scene.geotech.rebuild_smart(&scene.world);
             }
             // Atmospheric diffusion is periodic (column-GVSE
             // HumidityField cadence: every 20 ticks). Evap still

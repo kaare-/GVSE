@@ -105,15 +105,16 @@ the hovered solid if present in the map.
 | **S2** | ✅ Overburden σᵥ channel + `G` cycles shear / σᵥ / wet |
 | **S3** | ✅ F2b gates on map shear score (thin wet dams) |
 | **S4** | ✅ F3 compaction gates on σᵥ map |
-| **S5** | Perf: dirty-tile rebuild; optional rayon sweep |
+| **S5** | ✅ Dirty-column `rebuild_smart` (+ periodic full sweep) |
 
-### Backlog (investigation — not this PR)
+### Backlog / follow-ups
 
 | Item | Note |
 |------|------|
-| Waterline not equalising | Tall wet column vs low basin — flow/head, not geotech |
+| Waterline not equalising | ✅ Diagnosed: `flow_every_other_substep` odd-only stalled packed surfaces — fixed to even-step flow. Impermeable dams below crest correctly hold. |
 | Thin dam intuition | ✅ S1 lights on `G`; S3 map-gated shear can break it |
 | Full Mohr–Coulomb | Out of scope |
+| Rayon geotech sweep | Optional later if full rebuilds show up in profiles |
 
 ## Config
 
