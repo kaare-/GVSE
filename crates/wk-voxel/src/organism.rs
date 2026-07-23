@@ -31,8 +31,8 @@ use crate::plant::{
     apply_genome, collect_live_root_world_cells, collect_trunk_world_cells, drink_roots,
     drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, find_surface_air_slot,
     is_anchored, is_land_plant, leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac,
-    sync_root_storage, try_grow_plant, try_vegetative_sprout, DroughtBand, DROUGHT_DORMANT_UPKEEP,
-    DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
+    sync_root_storage, try_grow_plant, try_vegetative_sprout, DroughtBand, PlantGrowthCaps,
+    DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
 };
 use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
 
@@ -308,6 +308,9 @@ pub struct OrganismStore {
     /// Hard ceiling on lingering corpses before oldest are dropped.
     #[serde(default = "default_max_corpses")]
     pub max_corpses: usize,
+    /// Per-plant Root / Stem / Photosystem pixel ceilings.
+    #[serde(default)]
+    pub growth_caps: PlantGrowthCaps,
 }
 
 impl Default for OrganismStore {
@@ -317,6 +320,7 @@ impl Default for OrganismStore {
             corpses: Vec::new(),
             max_atoms: MAX_ATOMS,
             max_corpses: MAX_CORPSES,
+            growth_caps: PlantGrowthCaps::default(),
         }
     }
 }
@@ -538,6 +542,7 @@ impl OrganismStore {
         let mut deaths: Vec<usize> = Vec::new();
         let pop = self.atoms.len();
         let atom_cap = self.atom_cap();
+        let growth_caps = self.growth_caps.clamp();
         // Transpiration return: (gx, gy, sat_units) → humidity mass.
         let mut transpired: Vec<(i32, i32, u32)> = Vec::new();
 
@@ -567,6 +572,7 @@ impl OrganismStore {
                     &live_roots,
                     i as u32,
                     room,
+                    &growth_caps,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -763,6 +769,7 @@ fn step_land_plant(
     live_roots: &std::collections::HashSet<(i32, i32)>,
     entity_id: u32,
     pop_room: bool,
+    growth_caps: &PlantGrowthCaps,
 ) -> PlantStep {
     pin_plant_pose(atom);
     // Free-spawn / canopy clicks can leave a plant briefly unanchored.
@@ -834,7 +841,7 @@ fn step_land_plant(
         return PlantStep::Dead;
     }
     // Surplus → tissue (root / stem / leaf) from allocation genes.
-    let _ = try_grow_plant(world, atom, tick, trunks, live_roots);
+    let _ = try_grow_plant(world, atom, tick, trunks, live_roots, growth_caps);
     sync_root_storage(atom);
     if let Some(child) = try_vegetative_sprout(world, atom, tick, entity_id, pop_room) {
         return PlantStep::Sprout(child);
@@ -1628,6 +1635,25 @@ mod tests {
     }
 
     #[test]
+    fn growth_caps_block_root_elongation() {
+        let w = moist_sand_plot();
+        let mut atom = Atom::from_body(4, 2, 80.0, minimal_plant_body());
+        atom.genome.alloc_root = 1.0;
+        atom.genome.alloc_stem = 0.0;
+        atom.genome.alloc_leaf = 0.0;
+        atom.energy = 80.0;
+        let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
+        let tight = PlantGrowthCaps {
+            max_roots: 1,
+            max_stems: 10,
+            max_photos: 12,
+        };
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &tight);
+        assert_eq!(spent, 0.0, "max_roots=1 must refuse further elongation");
+        assert_eq!(crate::plant::root_count(&atom), 1);
+    }
+
+    #[test]
     fn editor_free_spawn_places_atom_on_dry_air() {
         let mut w = World::new(5);
         w.ensure_chunk(ChunkCoord::new(0, 0));
@@ -2043,7 +2069,7 @@ mod tests {
         atom.genome = g;
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert!(spent > 0.0, "vertical dive past the tip should still be legal");
         let added = atom
             .body
@@ -2102,7 +2128,7 @@ mod tests {
         // Only open sand left beside tip is (1,-2)=(5,4); foreign root at (5,3).
         let mut roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
         roots.insert((5, 3));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert_eq!(spent, 0.0, "must not elongate beside another plant's live root");
         assert_eq!(crate::plant::root_count(&atom), 2);
     }
@@ -2128,7 +2154,7 @@ mod tests {
         atom.genome = g;
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert!(spent > 0.0, "pipe tip should still be able to fork");
         let added = atom
             .body
@@ -2168,7 +2194,7 @@ mod tests {
         atom.genome = g;
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert!(spent > 0.0, "mid-pipe site should be able to bud");
         let added = atom
             .body
@@ -2228,7 +2254,7 @@ mod tests {
             "tendril tip should be much farther from crown ({tip_hops} vs {bud_hops})"
         );
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert!(spent > 0.0, "should still grow somewhere");
         let prior = [
             (0, -1),
@@ -2287,7 +2313,7 @@ mod tests {
         // Above grow floor (0.30·tank) but below sprout-banking (~0.44·tank).
         atom.energy = 32.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert!(spent > 0.0);
         let added = atom
             .body
@@ -2325,7 +2351,7 @@ mod tests {
         atom.genome = g;
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots);
+        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert!(
             spent > 0.0,
             "Organic compost is transformed dead root — OK to sit beside"
@@ -2394,7 +2420,7 @@ mod tests {
         );
         // Growth may still place a leaf, but must not add Stem beside the gap.
         atom.age_ticks = LAND_GROW_PERIOD;
-        let _ = crate::plant::try_grow_shoot(&mut atom, 1, &trunks);
+        let _ = crate::plant::try_grow_shoot(&mut atom, 1, &trunks, &crate::plant::PlantGrowthCaps::default());
         assert_eq!(crate::plant::stem_count(&atom), 1);
     }
 
@@ -2419,7 +2445,7 @@ mod tests {
         let n0 = atom.photosystem_count();
         for t in 0..40u64 {
             atom.age_ticks = t * LAND_GROW_PERIOD;
-            let _ = crate::plant::try_grow_shoot(&mut atom, t, &empty);
+            let _ = crate::plant::try_grow_shoot(&mut atom, t, &empty, &crate::plant::PlantGrowthCaps::default());
         }
         assert!(
             atom.photosystem_count() > n0,
@@ -2514,7 +2540,7 @@ mod tests {
         let empty = std::collections::HashSet::new();
         for t in 0..30u64 {
             atom.age_ticks = t * LAND_GROW_PERIOD;
-            let _ = crate::plant::try_grow_shoot(&mut atom, t, &empty);
+            let _ = crate::plant::try_grow_shoot(&mut atom, t, &empty, &crate::plant::PlantGrowthCaps::default());
         }
         let stem_on_leaf = atom.body.iter().any(|&(x, y, m)| {
             m == ModuleId::Stem
@@ -2618,13 +2644,13 @@ mod tests {
         assert!(store.spawn_blueprint(&w, 4, 2, minimal_plant_body(), 80.0, g));
         // Minimal plant: 1 photo → budget = 3 + 3 = 6 roots.
         let a = &mut store.atoms[0];
-        let budget = crate::plant::useful_root_budget(a);
+        let budget = crate::plant::useful_root_budget(a, &crate::plant::PlantGrowthCaps::default());
         while crate::plant::root_count(a) < budget {
             a.body.push((crate::plant::root_count(a) as i16, -1, ModuleId::Root));
         }
         a.energy = 80.0;
         let roots0 = crate::plant::root_count(a);
-        assert!(crate::plant::roots_past_soft_budget_for(a, DroughtBand::Hydrated));
+        assert!(crate::plant::roots_past_soft_budget_for(a, DroughtBand::Hydrated, &crate::plant::PlantGrowthCaps::default()));
         for t in 0..200 {
             store.step(&mut w, t);
             if let Some(p) = store.atoms.first_mut() {
@@ -2634,7 +2660,7 @@ mod tests {
         assert!(!store.is_empty());
         let roots1 = crate::plant::root_count(&store.atoms[0]);
         let budget_now =
-            crate::plant::useful_root_budget_for(&store.atoms[0], DroughtBand::Hydrated);
+            crate::plant::useful_root_budget_for(&store.atoms[0], DroughtBand::Hydrated, &crate::plant::PlantGrowthCaps::default());
         assert!(
             roots1 <= budget_now.max(roots0) + 1,
             "hydrated plant should stay near soft budget (had {roots0}, now {roots1}, budget={budget_now})"
@@ -2654,8 +2680,8 @@ mod tests {
             Genome::default(),
         ));
         let a = &store.atoms[0];
-        let hydrated = crate::plant::useful_root_budget_for(a, DroughtBand::Hydrated);
-        let stressed = crate::plant::useful_root_budget_for(a, DroughtBand::Stressed);
+        let hydrated = crate::plant::useful_root_budget_for(a, DroughtBand::Hydrated, &crate::plant::PlantGrowthCaps::default());
+        let stressed = crate::plant::useful_root_budget_for(a, DroughtBand::Stressed, &crate::plant::PlantGrowthCaps::default());
         assert!(
             stressed > hydrated,
             "stress should allow deeper boring (hydrated={hydrated} stressed={stressed})"

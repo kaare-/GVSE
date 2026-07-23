@@ -544,8 +544,7 @@ async fn main() {
                     Ok(snap) => {
                         scene = Scene::from_snapshot(snap);
                         settings.on_world_reseed(&scene.params);
-                        settings.max_atoms = scene.organisms.max_atoms as f32;
-                        settings.max_corpses = scene.organisms.max_corpses as f32;
+                        settings.sync_caps_from_organisms(&scene.organisms);
                         inspect = None;
                         let msg = format!("Loaded {}", path.display());
                         terrain.status = msg.clone();

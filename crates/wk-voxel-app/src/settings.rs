@@ -7,8 +7,9 @@ use macroquad::ui::{hash, root_ui, widgets};
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
     ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, Genome, GrainConfig, KarstConfig,
-    OrographicConfig, PerfConfig, PhaseConfig, RainConfig, TempConfig, WorldgenParams,
-    CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES,
+    OrographicConfig, PerfConfig, PhaseConfig, PlantGrowthCaps, RainConfig, TempConfig,
+    WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
+    MAX_STEM_MODULES,
 };
 
 /// Default plant / fungus gene knobs applied on spawn (and optionally to living plants).
@@ -85,6 +86,10 @@ pub struct SimSettings {
     pub max_atoms: f32,
     /// Lingering corpse hard cap.
     pub max_corpses: f32,
+    /// Per-plant Root / Stem / Photosystem pixel ceilings.
+    pub max_roots: f32,
+    pub max_stems: f32,
+    pub max_photos: f32,
     /// Draft world size (chunks wide) — applied on Regenerate.
     pub world_width_chunks: f32,
     pub world_sea_level: f32,
@@ -153,6 +158,9 @@ impl SimSettings {
             apply_genes_to_living: false,
             max_atoms: MAX_ATOMS as f32,
             max_corpses: MAX_CORPSES as f32,
+            max_roots: MAX_ROOT_MODULES as f32,
+            max_stems: MAX_STEM_MODULES as f32,
+            max_photos: MAX_PHOTO_MODULES as f32,
             world_width_chunks: (params.width_cols as f32 / CHUNK_CELLS_W as f32).max(1.0),
             world_sea_level: params.sea_level_y as f32,
             world_sky_ceiling: params.sky_ceiling_y as f32,
@@ -734,7 +742,7 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "Per-plant tissue limits are separate (≤16 roots, ≤10 stems, ≤12 leaves).",
+                        "Tissue growth ceilings are under Plant growth caps.",
                     );
                     ui.label(
                         None,
@@ -757,6 +765,44 @@ impl SimSettings {
                     if ui.button(None, "Reset pop caps to defaults (256)") {
                         self.max_atoms = MAX_ATOMS as f32;
                         self.max_corpses = MAX_CORPSES as f32;
+                    }
+                });
+                ui.separator();
+
+                ui.tree_node(hash!(), "Plant growth caps", |ui| {
+                    ui.label(
+                        None,
+                        "Per-plant tissue pixel ceilings (not entity pop).",
+                    );
+                    ui.label(
+                        None,
+                        "Raising these lets individuals grow denser; lowering only blocks new pixels.",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        &format!("Max roots / plant (default {MAX_ROOT_MODULES})"),
+                        1.0..128.0,
+                        &mut self.max_roots,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        &format!("Max stems / plant (default {MAX_STEM_MODULES})"),
+                        0.0..128.0,
+                        &mut self.max_stems,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        &format!("Max leaves / plant (default {MAX_PHOTO_MODULES})"),
+                        1.0..128.0,
+                        &mut self.max_photos,
+                    );
+                    if ui.button(None, "Reset growth caps to defaults") {
+                        self.max_roots = MAX_ROOT_MODULES as f32;
+                        self.max_stems = MAX_STEM_MODULES as f32;
+                        self.max_photos = MAX_PHOTO_MODULES as f32;
                     }
                 });
                 ui.separator();
@@ -859,12 +905,30 @@ impl SimSettings {
         self.cloud.rain_span_mult = self.cloud.rain_span_mult.clamp(0.05, 3.0);
         self.max_atoms = self.max_atoms.round().clamp(1.0, 4096.0);
         self.max_corpses = self.max_corpses.round().clamp(1.0, 4096.0);
+        self.max_roots = self.max_roots.round().clamp(1.0, 256.0);
+        self.max_stems = self.max_stems.round().clamp(0.0, 256.0);
+        self.max_photos = self.max_photos.round().clamp(1.0, 256.0);
     }
 
     /// Push population ceilings onto the live organism store.
     pub fn apply_pop_caps(&self, organisms: &mut wk_voxel::OrganismStore) {
         organisms.max_atoms = self.max_atoms.round().clamp(1.0, 4096.0) as usize;
         organisms.max_corpses = self.max_corpses.round().clamp(1.0, 4096.0) as usize;
+        organisms.growth_caps = PlantGrowthCaps {
+            max_roots: self.max_roots.round().clamp(1.0, 256.0) as usize,
+            max_stems: self.max_stems.round().clamp(0.0, 256.0) as usize,
+            max_photos: self.max_photos.round().clamp(1.0, 256.0) as usize,
+        }
+        .clamp();
+    }
+
+    /// Pull growth + pop caps from a loaded organism store into the UI.
+    pub fn sync_caps_from_organisms(&mut self, organisms: &wk_voxel::OrganismStore) {
+        self.max_atoms = organisms.max_atoms as f32;
+        self.max_corpses = organisms.max_corpses as f32;
+        self.max_roots = organisms.growth_caps.max_roots as f32;
+        self.max_stems = organisms.growth_caps.max_stems as f32;
+        self.max_photos = organisms.growth_caps.max_photos as f32;
     }
 }
 
