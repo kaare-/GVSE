@@ -327,7 +327,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
     });
 }
 
-/// Immediate-neighbour priority water flow.
+/// Priority water flow.
 ///
 /// For each wet `Air` cell (compute-then-apply so the pass is
 /// order-independent), pick the best target in this order:
@@ -341,8 +341,8 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
 ///    pairwise head-equalise each +x standing edge so wide lake tops
 ///    level instead of terracing / checkerboarding.
 /// 4. **Throughflow** — if below is a stack of saturated porous cells,
-///    weep down through the whole stack at seepage rate to the first
-///    Air with room on the far side.
+///    weep at seepage rate to the nearest opening: a **side Air face**
+///    (cliff / spring) or Air below the stack.
 ///
 /// Vertical bulk fall stays in [`apply_gravity_fall`] (pull-based).
 /// Porous soak stays in [`apply_seepage`]. Mass is preserved by greedy
@@ -569,8 +569,9 @@ fn accumulate_water_flow_xfers(
 
                 // --- Priority 4: throughflow through saturated porous ---
                 // Real physics: water pressed on saturated soil flows
-                // through it at seepage rate (Darcy), reaching the far
-                // side. Try straight down and diagonal-down columns.
+                // through it at seepage rate (Darcy). Exit at the first
+                // opening: a side Air face (cliff / spring) or Air below
+                // the stack — not only the bottom.
                 let mut placed = false;
                 for dx in [0_i32, -1, 1] {
                     if placed {
@@ -587,16 +588,22 @@ fn accumulate_water_flow_xfers(
                     if below1.sat.0 < cap1 {
                         continue; // gravity + seepage handle unsaturated
                     }
-                    let mut ty = gy - 2;
                     let mut rate = seepage_rate(below1.material);
-                    let mut target: Option<i32> = None;
+                    // Prefer the shallowest exit so mid-cliff springs beat
+                    // a deep toe drain when both are open.
+                    let mut best: Option<(i32, i32, i32)> = None; // depth, tx, ty
+                    let mut depth = 1i32;
+                    let mut ty = gy - 1;
                     for _ in 0..24 {
                         let Some(nb) = world.get_cell(nx, ty) else {
                             break;
                         };
                         if nb.material == MaterialId::Air {
                             if u8::MAX.saturating_sub(nb.sat.0) > 0 {
-                                target = Some(ty);
+                                let cand = (depth, nx, ty);
+                                if best.map(|b| cand < b).unwrap_or(true) {
+                                    best = Some(cand);
+                                }
                             }
                             break;
                         }
@@ -608,11 +615,32 @@ fn accumulate_water_flow_xfers(
                             break;
                         }
                         rate = rate.min(seepage_rate(nb.material));
+                        // Side springs: open Air beside this saturated cell.
+                        for sdx in [-1_i32, 1] {
+                            let sx = world.wrap_x(nx + sdx);
+                            if sx == nx {
+                                continue;
+                            }
+                            let Some(side) = world.get_cell(sx, ty) else {
+                                continue;
+                            };
+                            if side.material != MaterialId::Air {
+                                continue;
+                            }
+                            if u8::MAX.saturating_sub(side.sat.0) == 0 {
+                                continue;
+                            }
+                            let cand = (depth, sx, ty);
+                            if best.map(|b| cand < b).unwrap_or(true) {
+                                best = Some(cand);
+                            }
+                        }
+                        depth += 1;
                         ty -= 1;
                     }
-                    if let Some(ny) = target {
+                    if let Some((_d, tx, ty)) = best {
                         let amt = rate.min(remaining).max(1);
-                        local.push(((gx, gy), (nx, ny), amt));
+                        local.push(((gx, gy), (tx, ty), amt));
                         placed = true;
                     }
                 }
@@ -829,6 +857,19 @@ fn accumulate_seepage_xfers(
                         seepage_rate(a.material)
                     } else {
                         seepage_rate(b.material)
+                    };
+                    // Fully saturated faces weep faster into open Air
+                    // (cliff springs) — still permeability-capped, but
+                    // not stuck at 1 sat/tick for tight stone.
+                    let rate = {
+                        let a_full = a_solid && a.sat.0 >= cap_a;
+                        let b_full = b_solid && b.sat.0 >= cap_b;
+                        let into_air = (a_full && !b_solid) || (b_full && !a_solid);
+                        if into_air {
+                            (rate * 3).clamp(1, 16)
+                        } else {
+                            rate
+                        }
                     };
                     if rate <= 0 {
                         continue;
@@ -2945,6 +2986,98 @@ mod tests {
         assert!(r > 0);
         assert!(l < cap);
         assert_eq!(l as i32 + r as i32, cap as i32);
+    }
+
+
+    #[test]
+    fn saturated_stone_weeps_into_side_air() {
+        // Cliff face: full stone column beside open Air.
+        let mut w = World::new(45);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        let cap = water_capacity(MaterialId::Stone);
+        for y in 1..=4 {
+            w.set_cell(
+                3,
+                y,
+                Cell {
+                    material: MaterialId::Stone,
+                    sat: Sat(cap),
+                    ..Cell::default()
+                },
+            );
+            w.set_cell(4, y, Cell::air()); // open cliff face
+        }
+        let stone_before: i32 = (1..=4)
+            .map(|y| w.get_cell(3, y).unwrap().sat.0 as i32)
+            .sum();
+        for _ in 0..30 {
+            apply_seepage(&mut w);
+            apply_gravity_fall(&mut w);
+        }
+        let stone_after: i32 = (1..=4)
+            .map(|y| w.get_cell(3, y).unwrap().sat.0 as i32)
+            .sum();
+        assert!(
+            stone_after < stone_before,
+            "stone pores must weep into the cliff (before={stone_before} after={stone_after})"
+        );
+    }
+
+    #[test]
+    fn throughflow_exits_side_face_before_deep_toe() {
+        // Terrace pool over saturated stone with an open cliff mid-face.
+        // Pressed surface water should spring out the side, not only the toe.
+        let mut w = World::new(46);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..10 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        let cap = water_capacity(MaterialId::Stone);
+        // Saturated stone pillar at x=3, y=1..4; cliff Air at x=4, y=2..4.
+        // y=1 stays stone beside bedrock so the only mid opening is the side.
+        for y in 1..=4 {
+            w.set_cell(
+                3,
+                y,
+                Cell {
+                    material: MaterialId::Stone,
+                    sat: Sat(cap),
+                    ..Cell::default()
+                },
+            );
+        }
+        // Seal the toe: stone continues under the cliff so bottom exit
+        // is blocked; only side Air at (4,3) is open.
+        w.set_cell(
+            4,
+            1,
+            Cell {
+                material: MaterialId::Stone,
+                sat: Sat(cap),
+                ..Cell::default()
+            },
+        );
+        w.set_cell(4, 2, Cell::air());
+        w.set_cell(4, 3, Cell::air());
+        w.set_cell(4, 4, Cell::air());
+        // Surface pool pressing on the pillar.
+        w.set_cell(3, 5, Cell::water());
+        let side_before = w.get_cell(4, 3).unwrap().sat.0
+            + w.get_cell(4, 2).unwrap().sat.0
+            + w.get_cell(4, 4).unwrap().sat.0;
+        apply_water_flow(&mut w);
+        let side_after = w.get_cell(4, 3).unwrap().sat.0
+            + w.get_cell(4, 2).unwrap().sat.0
+            + w.get_cell(4, 4).unwrap().sat.0;
+        assert!(
+            side_after > side_before,
+            "throughflow must vent into the cliff face (before={side_before} after={side_after})"
+        );
+        // Pool should have lost some sat to the spring.
+        assert!(w.get_cell(3, 5).unwrap().sat.0 < 255);
     }
 
     #[test]
