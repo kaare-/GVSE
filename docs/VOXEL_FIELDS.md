@@ -176,16 +176,13 @@ cells ──derive──► σᵥ, wetness/u, slope demand
 - Cadence: failure pass **once per tick** (or every N), after CA
   water + grain, not inside flow ×12.
 
-#### Suggested slices
+#### Implementation plan
 
-1. **Roof span check** — port `roof_span_max_m` spirit to voxel Air
-   cavities (karst / dig / overhang). Pure compression, high readable
-   payoff, no new field required at first.
-2. **Wet cohesion** — scale grain repose / bank loosen by pore fill ×
-   `cohesion` (shear).
-3. **Overburden compact** — Clay/Organic under tall stacks squeeze
-   sat upward (compress + water conserve).
-4. Only then a stored σᵥ heatmap if HUD / organisms need it.
+Concrete phases, APIs, tick placement, and tests:
+[`VOXEL_FAILURE.md`](VOXEL_FAILURE.md).
+
+Short order: roof collapse → wet cohesion shear → compaction →
+optional σᵥ / wetness overlays.
 
 #### Non-goals
 
