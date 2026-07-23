@@ -179,10 +179,11 @@ cells ──derive──► σᵥ, wetness/u, slope demand
 #### Implementation plan
 
 Concrete phases, APIs, tick placement, and tests:
-[`VOXEL_FAILURE.md`](VOXEL_FAILURE.md).
+[`VOXEL_FAILURE.md`](VOXEL_FAILURE.md). Slow stress maps:
+[`VOXEL_GEOTECH_MAP.md`](VOXEL_GEOTECH_MAP.md).
 
-Short order: roof collapse → wet cohesion shear → compaction →
-optional σᵥ / wetness overlays.
+Short order: roof collapse → wet cohesion shear → geotech map (`G`) →
+compaction → map-gated thin-dam shear.
 
 #### Non-goals
 

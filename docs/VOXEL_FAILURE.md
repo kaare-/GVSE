@@ -196,23 +196,23 @@ For Clay / Organic (optional wet Sand) with ≥ H cells of solid above
 
 ### Acceptance (F3)
 
-- Deep wet fills under hills slowly bleed water upward/out without
-  deleting rock.
+- ✅ Deep wet Clay under high σᵥ exudes sat upward (water conserved).
+- ✅ Shallow / Bedrock never compact. Off by default (Tab → Geotech).
 
 ---
 
 ## Phase F4 — Derived overlays (optional HUD / modulators)
 
-Only after F1–F2 feel good:
+Concrete plan + S1 implementation: [`VOXEL_GEOTECH_MAP.md`](VOXEL_GEOTECH_MAP.md).
 
 | Overlay | Source | Use |
 |---------|--------|-----|
-| Wetness | `sat/capacity` tile avg | Already planned in VOXEL_FIELDS §1; feeds F2 c′ |
-| Overburden σᵥ | Σ density above | HUD; gate F3; later F2b |
-| Shear demand | local relief | HUD debug |
+| Wetness | `sat/capacity` on faces | Map channel; feeds F2 c′ |
+| Overburden σᵥ | Σ density above | HUD; gate F3 (S2) |
+| Shear demand | face relief + hydro column | HUD `G`; F2b gate (S3) |
 
-Rebuild on cadence (period 20) like Temperature. Key bind optional
-(`G` geotech overlay).
+Rebuild on cadence (period 20) like Temperature. Key `G` toggles
+geotech overlay.
 
 ---
 
@@ -260,7 +260,7 @@ fields. If we add a `CellFlags::COMPACTED` bit, document in
 | **F2a** | ✅ Wet cohesion scales grain repose loosen (`wet_repose_loosens`) |
 | **F2b** | ✅ Competent-face → LooseRock (`apply_shear_weaken`, Tab toggle) |
 | **F3** | Deep Clay/Organic sat squeeze |
-| **F4** | Optional wetness/σᵥ debug overlay |
+| **F4 / S1–S4** | `GeotechMap` + map-gated F2b + F3 compaction ([VOXEL_GEOTECH_MAP.md](VOXEL_GEOTECH_MAP.md)) |
 
 ## Done when
 

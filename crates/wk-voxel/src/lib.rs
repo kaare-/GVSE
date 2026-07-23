@@ -16,6 +16,7 @@ pub mod climate;
 pub mod clouds;
 pub mod failure;
 pub mod fungi;
+pub mod geotech_map;
 pub mod grid;
 pub mod heatmap;
 pub mod humidity;
@@ -49,11 +50,17 @@ pub use clouds::{
     cloud_floor_y, CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS,
 };
 pub use failure::{
-    apply_failure, apply_roof_collapse, apply_shear_weaken, effective_cohesion,
-    face_shear_demand, pore_wetness, roof_collapse_debris, roof_span_cells,
+    apply_compaction, apply_failure, apply_roof_collapse, apply_shear_weaken, compaction_load_ok,
+    effective_cohesion, face_shear_demand, pore_wetness, roof_collapse_debris, roof_span_cells,
     roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
+    COMPACTION_SIGMA_MIN,
 };
 pub use fungi::{is_fungus, soft_litter_at, add_soft_litter};
+pub use geotech_map::{
+    face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
+    wet_air_column_beside, FaceStress, GeotechMap, GeotechOverlayMode, GEOTECH_MAP_PERIOD,
+    GEOTECH_MAP_PHASE,
+};
 pub use grid::World;
 pub use organism::{
     Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,
@@ -80,6 +87,7 @@ pub use rules::{
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
     apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
     deposit_water_on_surface, hydraulic_head, is_standing_water, tick, tick_with_configs,
+    tick_with_configs_and_geotech,
     tick_with_perf, CondensationConfig, EvapConfig, GrainConfig, KarstConfig, OrographicConfig,
     PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
 };
