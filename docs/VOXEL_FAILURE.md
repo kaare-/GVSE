@@ -196,8 +196,8 @@ For Clay / Organic (optional wet Sand) with ≥ H cells of solid above
 
 ### Acceptance (F3)
 
-- Deep wet fills under hills slowly bleed water upward/out without
-  deleting rock.
+- ✅ Deep wet Clay under high σᵥ exudes sat upward (water conserved).
+- ✅ Shallow / Bedrock never compact. Off by default (Tab → Geotech).
 
 ---
 
@@ -260,8 +260,7 @@ fields. If we add a `CellFlags::COMPACTED` bit, document in
 | **F2a** | ✅ Wet cohesion scales grain repose loosen (`wet_repose_loosens`) |
 | **F2b** | ✅ Competent-face → LooseRock (`apply_shear_weaken`, Tab toggle) |
 | **F3** | Deep Clay/Organic sat squeeze |
-| **F4 / S1–S3** | `GeotechMap` + `G` modes + map-gated F2b ([VOXEL_GEOTECH_MAP.md](VOXEL_GEOTECH_MAP.md)) |
-| **S4** | F3 compaction gates on σᵥ map |
+| **F4 / S1–S4** | `GeotechMap` + map-gated F2b + F3 compaction ([VOXEL_GEOTECH_MAP.md](VOXEL_GEOTECH_MAP.md)) |
 
 ## Done when
 

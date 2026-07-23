@@ -104,7 +104,7 @@ the hovered solid if present in the map.
 | **S1** | ✅ `GeotechMap` rebuild (shear + wetness + hydro) + `G` overlay + tests |
 | **S2** | ✅ Overburden σᵥ channel + `G` cycles shear / σᵥ / wet |
 | **S3** | ✅ F2b gates on map shear score (thin wet dams) |
-| **S4** | F3 compaction gates on σᵥ map |
+| **S4** | ✅ F3 compaction gates on σᵥ map |
 | **S5** | Perf: dirty-tile rebuild; optional rayon sweep |
 
 ### Backlog (investigation — not this PR)

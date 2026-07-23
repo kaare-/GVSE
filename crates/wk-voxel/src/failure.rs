@@ -10,13 +10,28 @@
 //! F2 — wet cohesion shear: grains loosen more when wet+low-c′ (F2a in
 //! repose); competent rock faces can convert to [`MaterialId::LooseRock`]
 //! when wet and steep (F2b).
+//!
+//! F3 — overburden compaction: deep wet Clay/Organic exude pore water
+//! upward when σᵥ (or solid-cell count) exceeds a threshold.
 
 use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
 
 use crate::active::ActiveChunk;
-use crate::cell::{falls_through_empty_air, is_grain, water_capacity, Cell, Sat};
+use crate::cell::{falls_through_empty_air, is_grain, water_capacity, Cell, CellFlags, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
+
+/// Minimum relative σᵥ (density-sum/1000) to compact soft sediment.
+/// ≈ 8 cells of mid-density rock (~2.0 each).
+pub const COMPACTION_SIGMA_MIN: f32 = 16.0;
+/// Fallback when no geotech map: solid cells stacked above.
+pub const COMPACTION_MIN_CELLS_ABOVE: i32 = 8;
+/// Sat units squeezed upward per compaction pulse.
+pub const COMPACTION_PULSE_SAT: u8 = 8;
+/// Minimum pore sat before a cell will compact.
+pub const COMPACTION_MIN_SAT: u8 = 12;
+/// Max upward search for an unsaturated receiver.
+pub const COMPACTION_EXUDE_REACH: i32 = 24;
 
 /// Wetness multiplier on cohesion: `c_eff = c * (1 - k_wet * wet)`.
 pub const SHEAR_K_WET: f32 = 0.70;
@@ -34,17 +49,20 @@ pub struct FailureConfig {
     pub enable_roof_collapse: bool,
     /// F2b — wet competent rock faces → LooseRock.
     pub enable_shear_weaken: bool,
-    /// F3 — overburden compaction (not yet implemented).
+    /// F3 — overburden compaction (Clay/Organic pore squeeze).
     pub enable_compaction: bool,
     /// Max roof cells converted / dropped per tick.
     pub max_roof_events: u32,
     /// Max rock-face shear converts per tick.
     pub max_shear_events: u32,
+    /// Max compaction exudation pulses per tick.
+    pub max_compaction_events: u32,
     /// Per-candidate success chance in parts-per-thousand (0..=1000).
     /// Keeps mountains from melting in one tick.
     pub shear_chance_per_mille: u32,
     /// When true and a [`crate::geotech_map::GeotechMap`] is supplied,
-    /// F2b gates on map `shear_score` + hydro wetting (S3).
+    /// F2b gates on map `shear_score` + hydro wetting (S3);
+    /// F3 gates on map σᵥ (S4).
     pub use_geotech_map: bool,
 }
 
@@ -57,6 +75,7 @@ impl Default for FailureConfig {
             enable_compaction: false,
             max_roof_events: 32,
             max_shear_events: 16,
+            max_compaction_events: 16,
             shear_chance_per_mille: 250,
             use_geotech_map: true,
         }
@@ -608,7 +627,201 @@ fn shear_one_face(
     true
 }
 
-/// Run enabled failure passes (F1 roof, F2b shear; F3 stub).
+/// Soft sediments that can compact under overburden.
+fn is_compactable(material: MaterialId) -> bool {
+    matches!(
+        material,
+        MaterialId::Clay | MaterialId::Organic | MaterialId::Sand
+    )
+}
+
+/// Sand only compacts when already quite wet; Clay/Organic always eligible.
+fn compactable_sat_ok(material: MaterialId, sat: u8) -> bool {
+    if sat < COMPACTION_MIN_SAT {
+        return false;
+    }
+    if material == MaterialId::Sand {
+        let cap = water_capacity(MaterialId::Sand);
+        return cap > 0 && (sat as f32 / cap as f32) >= 0.5;
+    }
+    true
+}
+
+fn solid_cells_above(world: &World, gx: i32, gy: i32, max_up: i32) -> i32 {
+    let gx = world.wrap_x(gx);
+    let mut n = 0i32;
+    for dy in 1..=max_up {
+        match world.get_cell(gx, gy + dy) {
+            Some(c) if c.material != MaterialId::Air => n += 1,
+            Some(_) => {}
+            None => break,
+        }
+    }
+    n
+}
+
+/// True when overburden is high enough to compact.
+pub fn compaction_load_ok(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    use_map: bool,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) -> bool {
+    if use_map {
+        if let Some(m) = geotech {
+            return m.overburden_at(gx, gy) >= COMPACTION_SIGMA_MIN;
+        }
+    }
+    solid_cells_above(world, gx, gy, 32) >= COMPACTION_MIN_CELLS_ABOVE
+}
+
+/// Nearest upward cell that can accept more pore / free water.
+fn find_exude_target(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
+    let gx = world.wrap_x(gx);
+    for dy in 1..=COMPACTION_EXUDE_REACH {
+        let ty = gy + dy;
+        let Some(c) = world.get_cell(gx, ty) else {
+            break;
+        };
+        let cap = water_capacity(c.material);
+        if cap == 0 {
+            // Impermeable solid blocks the path (Bedrock / Ice).
+            if c.material != MaterialId::Air {
+                break;
+            }
+            continue;
+        }
+        if c.sat.0 < cap {
+            return Some((gx, ty));
+        }
+    }
+    None
+}
+
+/// F3: squeeze pore water upward from deep soft sediment under load.
+pub fn apply_compaction(
+    world: &mut World,
+    cfg: &FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) {
+    if !cfg.enable_compaction || cfg.max_compaction_events == 0 {
+        return;
+    }
+    let regions = regions_for_failure(world);
+    apply_compaction_regions(world, &regions, cfg, geotech);
+}
+
+/// Compaction restricted to a pre-planned active set.
+pub fn apply_compaction_regions(
+    world: &mut World,
+    active: &[ActiveChunk],
+    cfg: &FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) {
+    if !cfg.enable_compaction || cfg.max_compaction_events == 0 || active.is_empty() {
+        return;
+    }
+    let use_map = cfg.use_geotech_map && geotech.is_some();
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    for ac in active {
+        for y in ac.rect.y0..=ac.rect.y1 {
+            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            if gy <= 0 {
+                continue;
+            }
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
+                let Some(cell) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if !is_compactable(cell.material) {
+                    continue;
+                }
+                if !compactable_sat_ok(cell.material, cell.sat.0) {
+                    continue;
+                }
+                if !compaction_load_ok(world, gx, gy, use_map, geotech) {
+                    continue;
+                }
+                if find_exude_target(world, gx, gy).is_none() {
+                    continue;
+                }
+                candidates.push((gy, gx));
+            }
+        }
+    }
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let mut applied = 0u32;
+    for (gy, gx) in candidates {
+        if applied >= cfg.max_compaction_events {
+            break;
+        }
+        if compact_one(world, gx, gy, use_map, geotech) {
+            applied += 1;
+        }
+    }
+}
+
+fn compact_one(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    use_map: bool,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) -> bool {
+    let gx = world.wrap_x(gx);
+    let Some(src) = world.get_cell(gx, gy) else {
+        return false;
+    };
+    if !is_compactable(src.material)
+        || !compactable_sat_ok(src.material, src.sat.0)
+        || !compaction_load_ok(world, gx, gy, use_map, geotech)
+    {
+        return false;
+    }
+    let Some((tx, ty)) = find_exude_target(world, gx, gy) else {
+        return false;
+    };
+    let Some(dst) = world.get_cell(tx, ty) else {
+        return false;
+    };
+    let cap = water_capacity(dst.material);
+    let free = cap.saturating_sub(dst.sat.0);
+    if free == 0 {
+        return false;
+    }
+    let move_amt = COMPACTION_PULSE_SAT.min(src.sat.0).min(free);
+    if move_amt == 0 {
+        return false;
+    }
+    // Mark compacted for inspectors / future cool-down; v1 re-pulses
+    // next tick while sat and load remain (capped by max_events).
+    let mut src_flags = src.flags;
+    src_flags.set(CellFlags::COMPACTED);
+    world.set_cell(
+        gx,
+        gy,
+        Cell {
+            sat: Sat(src.sat.0 - move_amt),
+            flags: src_flags,
+            ..src
+        },
+    );
+    world.set_cell(
+        tx,
+        ty,
+        Cell {
+            sat: Sat(dst.sat.0 + move_amt),
+            ..dst
+        },
+    );
+    true
+}
+
+/// Run enabled failure passes (F1 roof, F2b shear, F3 compaction).
 pub fn apply_failure(
     world: &mut World,
     cfg: &FailureConfig,
@@ -619,6 +832,9 @@ pub fn apply_failure(
     }
     if cfg.enable_shear_weaken {
         apply_shear_weaken(world, cfg, geotech);
+    }
+    if cfg.enable_compaction {
+        apply_compaction(world, cfg, geotech);
     }
 }
 
@@ -1098,5 +1314,123 @@ mod tests {
         let after = count_loose(&w);
         assert_eq!(after, 10, "five ticks × 2 events → 10 LooseRock");
         assert!(after < n_lips as usize, "wall must not vanish in one go");
+    }
+
+    fn total_sat_in_column(w: &World, x: i32, y0: i32, y1: i32) -> u32 {
+        let mut s = 0u32;
+        for y in y0..=y1 {
+            if let Some(c) = w.get_cell(x, y) {
+                s += c.sat.0 as u32;
+            }
+        }
+        s
+    }
+
+    #[test]
+    fn deep_wet_clay_exudes_sat_upward() {
+        use crate::geotech_map::GeotechMap;
+
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 4);
+        // Deep wet clay, then 10 stone overburden, air above.
+        let mut clay = Cell::solid(MaterialId::Clay);
+        clay.sat = Sat(water_capacity(MaterialId::Clay));
+        w.set_cell(2, 1, clay);
+        for y in 2..=11 {
+            w.set_cell(2, y, Cell::solid(MaterialId::Stone));
+        }
+        w.set_cell(2, 12, Cell::air());
+
+        let mut map = GeotechMap::new();
+        map.rebuild(&w);
+        assert!(
+            map.overburden_at(2, 1) >= COMPACTION_SIGMA_MIN,
+            "sigma={}",
+            map.overburden_at(2, 1)
+        );
+
+        let before = total_sat_in_column(&w, 2, 1, 12);
+        let cfg = FailureConfig {
+            enable_compaction: true,
+            enable_roof_collapse: false,
+            enable_shear_weaken: false,
+            use_geotech_map: true,
+            max_compaction_events: 4,
+            ..FailureConfig::default()
+        };
+        apply_compaction(&mut w, &cfg, Some(&map));
+        let after = total_sat_in_column(&w, 2, 1, 12);
+        assert_eq!(before, after, "compaction conserves water");
+        assert!(
+            w.get_cell(2, 1).unwrap().sat.0 < clay.sat.0,
+            "deep clay must lose sat"
+        );
+        // Exude into stone pores or air above.
+        let moved_up = (2..=12).any(|y| {
+            w.get_cell(2, y).map(|c| c.sat.0 > 0).unwrap_or(false) && y > 1
+        });
+        assert!(moved_up, "sat must appear above the clay");
+    }
+
+    #[test]
+    fn shallow_clay_does_not_compact() {
+        use crate::geotech_map::GeotechMap;
+
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 4);
+        let mut clay = Cell::solid(MaterialId::Clay);
+        clay.sat = Sat(water_capacity(MaterialId::Clay));
+        w.set_cell(2, 1, clay);
+        w.set_cell(2, 2, Cell::solid(MaterialId::Stone)); // only 1 above
+        w.set_cell(2, 3, Cell::air());
+
+        let mut map = GeotechMap::new();
+        map.rebuild(&w);
+        assert!(map.overburden_at(2, 1) < COMPACTION_SIGMA_MIN);
+
+        let cfg = FailureConfig {
+            enable_compaction: true,
+            enable_roof_collapse: false,
+            use_geotech_map: true,
+            ..FailureConfig::default()
+        };
+        let sat_before = w.get_cell(2, 1).unwrap().sat.0;
+        apply_compaction(&mut w, &cfg, Some(&map));
+        assert_eq!(
+            w.get_cell(2, 1).unwrap().sat.0,
+            sat_before,
+            "shallow clay must not compact"
+        );
+    }
+
+    #[test]
+    fn bedrock_never_compacts() {
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Tall wet "bedrock" stack — not compactable.
+        for y in 0..=12 {
+            let mut b = Cell::solid(MaterialId::Bedrock);
+            b.sat = Sat(0);
+            w.set_cell(2, y, b);
+        }
+        // Put wet clay that IS under load but ensure bedrock cells stay dry.
+        let cfg = FailureConfig {
+            enable_compaction: true,
+            enable_roof_collapse: false,
+            use_geotech_map: false,
+            max_compaction_events: 32,
+            ..FailureConfig::default()
+        };
+        apply_compaction(&mut w, &cfg, None);
+        for y in 0..=12 {
+            assert_eq!(
+                w.get_cell(2, y).unwrap().material,
+                MaterialId::Bedrock,
+                "bedrock must remain"
+            );
+            assert_eq!(w.get_cell(2, y).unwrap().sat.0, 0);
+        }
     }
 }
