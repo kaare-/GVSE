@@ -184,7 +184,7 @@ impl CreatureEditor {
         if self.spawn_picker {
             draw_rectangle(0.0, 0.0, sw, 36.0, Color::from_rgba(8, 10, 16, 200));
             let msg =
-                "SPAWN MODE — click any Air cell  |  Esc cancel  |  F2 close";
+                "SPAWN MODE — click ground/Air (plants snap to surface)  |  Esc cancel  |  F2 close";
             draw_text(msg, 16.0, 24.0, 20.0, GREEN);
             return;
         }
