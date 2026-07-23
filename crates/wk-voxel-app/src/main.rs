@@ -813,22 +813,40 @@ async fn main() {
                     } else {
                         editor.blueprint.genome
                     };
-                    if scene
-                        .organisms
-                        .spawn_blueprint_free(&scene.world, gx, gy, body, 40.0, g)
-                    {
-                        editor.status = format!(
-                            "Spawned {} at ({gx},{gy})  atoms={}",
-                            editor.blueprint.name,
-                            scene.organisms.len()
-                        );
-                        editor.spawn_picker = false;
-                        editor.open = false;
-                        paused = editor.was_paused;
-                        inspect = Some((gx, gy));
-                    } else {
-                        editor.status =
-                            "Spawn failed — need an Air cell near the click (or pop cap)".into();
+                    match scene.organisms.spawn_blueprint_free(
+                        &scene.world,
+                        gx,
+                        gy,
+                        body,
+                        40.0,
+                        g,
+                    ) {
+                        Ok(()) => {
+                            editor.status = format!(
+                                "Spawned {} at ({gx},{gy})  creatures={}/{} (entities, not pixels)",
+                                editor.blueprint.name,
+                                scene.organisms.len(),
+                                scene.organisms.atom_cap()
+                            );
+                            editor.spawn_picker = false;
+                            editor.open = false;
+                            paused = editor.was_paused;
+                            inspect = Some((gx, gy));
+                        }
+                        Err(wk_voxel::SpawnFail::PopCap) => {
+                            editor.status = format!(
+                                "Pop cap full — {}/{} living creatures (each plant counts as 1)",
+                                scene.organisms.len(),
+                                scene.organisms.atom_cap()
+                            );
+                        }
+                        Err(wk_voxel::SpawnFail::NoAir) => {
+                            editor.status =
+                                "Spawn failed — need an Air cell near the click".into();
+                        }
+                        Err(wk_voxel::SpawnFail::InvalidBody) => {
+                            editor.status = "Spawn failed — need a Nucleus on the canvas".into();
+                        }
                     }
                 } else {
                     inspect = Some((gx, gy));
@@ -1043,7 +1061,7 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} atoms={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
@@ -1055,11 +1073,8 @@ async fn main() {
                 scene.clouds.total_mass(),
                 scene.humidity.total_mass(),
                 scene.wind.climate_vx,
-                format!(
-                    "{}/{}",
-                    scene.organisms.len(),
-                    scene.organisms.atom_cap()
-                ),
+                scene.organisms.len(),
+                scene.organisms.atom_cap(),
                 if sim_paused { "[paused]" } else { "" }
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));

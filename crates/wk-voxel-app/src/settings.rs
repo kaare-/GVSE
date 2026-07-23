@@ -730,7 +730,11 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Creatures / population caps", |ui| {
                     ui.label(
                         None,
-                        "Hard ceilings on living creatures and lingering corpses.",
+                        "Entity caps — one plant/fungus/Atom = 1, not body pixels.",
+                    );
+                    ui.label(
+                        None,
+                        "Per-plant tissue limits are separate (≤16 roots, ≤10 stems, ≤12 leaves).",
                     );
                     ui.label(
                         None,
@@ -739,14 +743,14 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Max living creatures (atoms)",
+                        "Max living creatures (entities)",
                         8.0..2048.0,
                         &mut self.max_atoms,
                     );
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Max corpses",
+                        "Max corpses (entities)",
                         8.0..2048.0,
                         &mut self.max_corpses,
                     );

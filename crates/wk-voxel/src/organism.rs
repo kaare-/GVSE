@@ -36,7 +36,8 @@ use crate::plant::{
 };
 use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
 
-/// Default living-creature ceiling (Tab → Creatures can raise/lower).
+/// Default **entity** ceiling (Tab → Creatures can raise/lower).
+/// One Atom / plant / fungus = 1, not body pixels (roots, leaves, …).
 pub const MAX_ATOMS: usize = 256;
 /// Default lingering-corpse ceiling (same order as living pop).
 pub const MAX_CORPSES: usize = 256;
@@ -46,6 +47,17 @@ fn default_max_atoms() -> usize {
 }
 fn default_max_corpses() -> usize {
     MAX_CORPSES
+}
+
+/// Why [`OrganismStore::spawn_blueprint_free`] refused a placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SpawnFail {
+    /// Living entity count already at [`OrganismStore::max_atoms`].
+    PopCap,
+    /// Blueprint empty or missing a Nucleus.
+    InvalidBody,
+    /// No Air cell near the click.
+    NoAir,
 }
 
 /// Energy gained per photosystem per tick at full noon light.
@@ -443,6 +455,8 @@ impl OrganismStore {
     ///
     /// No wet-Air / porous-soil / seat checks — creatures may starve or
     /// float; that is intentional sandbox behaviour.
+    ///
+    /// Counts **entities** (one plant = one slot), not body pixels.
     pub fn spawn_blueprint_free(
         &mut self,
         world: &World,
@@ -451,16 +465,16 @@ impl OrganismStore {
         body: Vec<BodyModule>,
         energy_max: f32,
         genome: Genome,
-    ) -> bool {
-        if self.atoms.len() >= self.atom_cap() || body.is_empty() {
-            return false;
+    ) -> Result<(), SpawnFail> {
+        if self.atoms.len() >= self.atom_cap() {
+            return Err(SpawnFail::PopCap);
         }
-        if !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
-            return false;
+        if body.is_empty() || !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+            return Err(SpawnFail::InvalidBody);
         }
         let gx = world.wrap_x(gx);
         let Some(gy) = find_air_near(world, gx, gy) else {
-            return false;
+            return Err(SpawnFail::NoAir);
         };
         let mut atom = Atom::from_body(gx, gy, energy_max, body);
         apply_genome(&mut atom, genome);
@@ -470,7 +484,7 @@ impl OrganismStore {
             atom.last_water_top = Some(top);
         }
         self.atoms.push(atom);
-        true
+        Ok(())
     }
 
     /// First living organism occupying world cell `(gx, gy)`.
@@ -1578,9 +1592,12 @@ mod tests {
         let mut store = OrganismStore::new();
         store.max_atoms = 1;
         let body = crate::blueprint::Blueprint::atom().modules_relative_to_nucleus();
-        assert!(store.spawn_blueprint_free(&w, 2, 3, body.clone(), 40.0, Genome::default()));
-        assert!(
-            !store.spawn_blueprint_free(&w, 4, 3, body, 40.0, Genome::default()),
+        assert!(store
+            .spawn_blueprint_free(&w, 2, 3, body.clone(), 40.0, Genome::default())
+            .is_ok());
+        assert_eq!(
+            store.spawn_blueprint_free(&w, 4, 3, body, 40.0, Genome::default()),
+            Err(SpawnFail::PopCap),
             "second spawn must fail at max_atoms=1"
         );
         assert_eq!(store.len(), 1);
@@ -1604,7 +1621,9 @@ mod tests {
             "habitat spawn still requires wet Air"
         );
         assert!(
-            store.spawn_blueprint_free(&w, 4, 3, body, 40.0, Genome::default()),
+            store
+                .spawn_blueprint_free(&w, 4, 3, body, 40.0, Genome::default())
+                .is_ok(),
             "editor free spawn may place Atom on dry Air"
         );
         assert_eq!(store.len(), 1);
@@ -1624,7 +1643,9 @@ mod tests {
             (0, 1, ModuleId::Photosystem),
         ];
         assert!(
-            store.spawn_blueprint_free(&w, 4, 2, body, 40.0, Genome::default()),
+            store
+                .spawn_blueprint_free(&w, 4, 2, body, 40.0, Genome::default())
+                .is_ok(),
             "sandbox should accept any nucleus-bearing mix"
         );
         assert_eq!(store.len(), 1);
