@@ -77,6 +77,12 @@ pub struct SimSettings {
     pub failure: FailureConfig,
     /// Scratch f32 for max roof events slider.
     pub max_roof_events: f32,
+    /// Scratch f32 for max shear events slider.
+    pub max_shear_events: f32,
+    /// Scratch f32 for max compaction events slider.
+    pub max_compaction_events: f32,
+    /// Scratch f32 for shear chance (percent UI → per-mille).
+    pub shear_chance_pct: f32,
     pub wind_vx: f32,
     pub humidity_diffusion_alpha: f32,
     /// Scratch f32s for material sliders (synced → MaterialRegistry overrides).
@@ -156,6 +162,9 @@ impl SimSettings {
             perf: PerfConfig::default(),
             failure: FailureConfig::default(),
             max_roof_events: FailureConfig::default().max_roof_events as f32,
+            max_shear_events: FailureConfig::default().max_shear_events as f32,
+            max_compaction_events: FailureConfig::default().max_compaction_events as f32,
+            shear_chance_pct: FailureConfig::default().shear_chance_per_mille as f32 / 10.0,
             wind_vx: 0.05,
             humidity_diffusion_alpha: 0.15,
             mat_perm,
@@ -553,7 +562,51 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "Shear weaken / compaction: planned (VOXEL_FAILURE F2–F3).",
+                        "Shear: wet low-c′ grains loosen in repose; rock faces → LooseRock.",
+                    );
+                    ui.checkbox(
+                        hash!(),
+                        "Shear weaken (rock faces)",
+                        &mut self.failure.enable_shear_weaken,
+                    );
+                    ui.checkbox(
+                        hash!(),
+                        "Use geotech map for shear (S3)",
+                        &mut self.failure.use_geotech_map,
+                    );
+                    ui.label(
+                        None,
+                        "Map gate: tall wet columns can break thin dams (G cycles overlays).",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Max shear events / tick",
+                        1.0..64.0,
+                        &mut self.max_shear_events,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Shear chance %",
+                        1.0..100.0,
+                        &mut self.shear_chance_pct,
+                    );
+                    ui.checkbox(
+                        hash!(),
+                        "Compaction (deep Clay/Organic)",
+                        &mut self.failure.enable_compaction,
+                    );
+                    ui.label(
+                        None,
+                        "Under high σᵥ, wet soft sediment squeezes pore water upward.",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Max compaction events / tick",
+                        1.0..64.0,
+                        &mut self.max_compaction_events,
                     );
                 });
                 ui.separator();
@@ -944,6 +997,12 @@ impl SimSettings {
         self.max_photos = self.max_photos.round().clamp(1.0, 256.0);
         self.max_roof_events = self.max_roof_events.round().clamp(1.0, 256.0);
         self.failure.max_roof_events = self.max_roof_events as u32;
+        self.max_shear_events = self.max_shear_events.round().clamp(1.0, 128.0);
+        self.failure.max_shear_events = self.max_shear_events as u32;
+        self.max_compaction_events = self.max_compaction_events.round().clamp(1.0, 128.0);
+        self.failure.max_compaction_events = self.max_compaction_events as u32;
+        self.shear_chance_pct = self.shear_chance_pct.round().clamp(1.0, 100.0);
+        self.failure.shear_chance_per_mille = (self.shear_chance_pct * 10.0) as u32;
     }
 
     /// Push population ceilings onto the live organism store.

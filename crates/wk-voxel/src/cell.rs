@@ -51,6 +51,9 @@ impl CellFlags {
     /// Reserved for the eventual "cell is currently ticking" bit used
     /// by rule ordering.
     pub const ACTIVE_HINT: CellFlags = CellFlags(0b0000_0001);
+    /// Soft sediment already pulsed a compaction exudation this cycle.
+    /// Cleared when pore sat rises again (re-wetting).
+    pub const COMPACTED: CellFlags = CellFlags(0b0000_0010);
 
     pub const fn empty() -> Self {
         Self(0)
