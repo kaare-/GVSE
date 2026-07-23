@@ -99,11 +99,99 @@ heatmap for fungi / root foraging / HUD.
 - **Risk:** low for hydro. Keep column soft_litter as source of truth
   or migrate carefully with save schema.
 
-### 6. Stress / compaction (later)
+### 6. Shear and compressive failure (geotech CA)
 
-Overburden from `density` + stack height; `cohesion` resists. Could
-gate cave collapse / soft sediment compaction. Weakest fit until we
-have a failure CA worth driving.
+We already have **ingredients**, not a failure model:
+
+| Prop / rule | Mode it hints at | Today |
+|-------------|------------------|--------|
+| `repose_rise_m` + grain repose | **Shear** (angle of repose) | Landed for grains / snow / Organic |
+| `cohesion` | Shear resistance (wet/dry) | Prop exists; unused in voxel |
+| `density` + column height | **Compression** (overburden σᵥ) | Density used for grain settle only |
+| `roof_span_max_m` | Compression / beam fail of roofs | Column burrows; **not** in voxel CA |
+| Ice load break | Compression under debris | Thin ice lids only |
+| Pore wetness / head | Both (effective stress) | CA `sat` + seepage; no σ′ field |
+
+Treat the two modes separately — they look different in a side-view CA.
+
+#### Compressive failure (crush / roof / compaction)
+
+Trigger when **vertical effective stress** exceeds capacity:
+
+```
+σᵥ ≈ Σ (density × g × cell_height) above the cell
+σ′ = σᵥ − u          (u from pore pressure / wetness)
+fail if σ′ > f(cohesion, material class)
+```
+
+Outcomes (pick per material, keep mass local):
+
+- **Roof collapse** — unsupported Air span under solid wider than
+  `roof_span_max_m` → drop roof cells (→ LooseRock / Sand / Organic
+  fill), open trench/doline (column burrow spirit).
+- **Compaction** — soft sediment (Clay / Organic / wet Sand) under
+  overburden: reduce porosity slightly or convert toward denser
+  facies; squeeze pore `sat` upward/out (must conserve water).
+- **Crush** — rare for Bedrock/Stone; mostly ice lids + later cave
+  ceilings.
+
+Derived overlay: coarse **overburden / σᵥ** heatmap (rebuild from
+cells). Do **not** store a second mass — only gate the CA.
+
+#### Shear failure (slide / slump / topple)
+
+Trigger when **slope demand** exceeds strength:
+
+```
+demand ≈ local relief / run  (or unresolved repose debt)
+strength ≈ tan(φ) + c'       (φ from repose_rise_m; c' from cohesion)
+c' drops when wet / high pore pressure
+fail if demand > strength
+```
+
+Outcomes:
+
+- **Repose slide** — already: diagonal grain moves into Air.
+- **Cohesive block fail** — Stone / Clay / Organic cliffs that repose
+  alone will not touch: when shear demand is high, convert a face
+  cell to LooseRock / Sand (or drop a 2×2 block) so repose can finish.
+- **Lateral spread** — saturated terrace toes: high u + low c′ →
+  boost spring weep + loosen bank grains (ties to side-seep work).
+
+Derived overlay: coarse **slope / shear-demand** heatmap, or just
+compute on the active dirty halo when checking faces.
+
+#### How fields fit (same rule as water)
+
+```
+cells ──derive──► σᵥ, wetness/u, slope demand
+                      │
+                      ▼
+              fail? → CA writes (drop, loosen, compact)
+```
+
+- Overlays **modulate**; cells still move the mass.
+- Wetness / pore-pressure (candidates 1 and 4) feed **effective
+  stress** and wet cohesion loss — that is the main field coupling.
+- Cadence: failure pass **once per tick** (or every N), after CA
+  water + grain, not inside flow ×12.
+
+#### Suggested slices
+
+1. **Roof span check** — port `roof_span_max_m` spirit to voxel Air
+   cavities (karst / dig / overhang). Pure compression, high readable
+   payoff, no new field required at first.
+2. **Wet cohesion** — scale grain repose / bank loosen by pore fill ×
+   `cohesion` (shear).
+3. **Overburden compact** — Clay/Organic under tall stacks squeeze
+   sat upward (compress + water conserve).
+4. Only then a stored σᵥ heatmap if HUD / organisms need it.
+
+#### Non-goals
+
+- Full FEM / continuum plasticity
+- Inventing water from compaction without pushing `sat` into neighbours
+- Making Bedrock shear-fail in normal play
 
 ### 7. Air pressure (research)
 
@@ -139,7 +227,11 @@ cells (material, sat) ──derive──► wetness / head overlays
 
 1. **Wetness heatmap** — derive, overlay key, optional plant bias.  
 2. **Thermal diffusivity** — material-weighted `Temperature::step`.  
-3. **Dissolved + solubility** — only after wetness/thermal feel solid.
+3. **Roof-span compressive collapse** — voxel cavities use
+   `roof_span_max_m` (readable caves / overhangs).  
+4. **Wet cohesion shear** — pore fill weakens banks / cliffs via
+   `cohesion` before a full stress field.  
+5. **Dissolved + solubility** — after wetness/thermal feel solid.
 
 ## Non-goals
 
