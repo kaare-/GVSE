@@ -50,7 +50,7 @@ pub use clouds::{
 pub use fungi::{is_fungus, soft_litter_at, add_soft_litter};
 pub use grid::World;
 pub use organism::{
-    Atom, BodyModule, Corpse, ModuleId, OrganismStore, CORPSE_SETTLE_LAND_TICKS,
+    Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,
     CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
 };
 pub use plant::{find_fungus_slot, find_plant_slot, is_land_plant, sync_alloc_to_body};
