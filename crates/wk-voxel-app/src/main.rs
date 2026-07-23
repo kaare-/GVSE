@@ -50,7 +50,7 @@ use wk_voxel::{
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, day_night_factor_cfg, humidity_diffuse_due,
     is_daytime_cfg, is_standing_water, precip_forms_snow_at_air, sky_rgb, sky_rgb_at_height,
-    temperature_step_due, tick_with_perf, ClimateConfig, SimSnapshot, Wind, World,
+    temperature_step_due, tick_with_configs, ClimateConfig, SimSnapshot, Wind, World,
     WorldgenParams,
 };
 
@@ -714,7 +714,7 @@ async fn main() {
             if karst_on {
                 apply_karst_dissolution(&mut scene.world, &settings.karst);
             }
-            tick_with_perf(&mut scene.world, &settings.perf);
+            tick_with_configs(&mut scene.world, &settings.perf, &settings.failure);
             // Bedload / bank transport after water has moved this tick.
             apply_flow_erosion(&mut scene.world, &settings.grain);
             // Atmospheric diffusion is periodic (column-GVSE

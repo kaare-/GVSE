@@ -2494,7 +2494,18 @@ pub fn tick(world: &mut World) {
 }
 
 /// [`tick`] with live [`PerfConfig`] knobs (demo Tab → Performance).
+///
+/// Uses default [`crate::failure::FailureConfig`] (roof collapse on).
 pub fn tick_with_perf(world: &mut World, perf: &PerfConfig) {
+    tick_with_configs(world, perf, &crate::failure::FailureConfig::default());
+}
+
+/// [`tick`] with performance + geotech failure knobs.
+pub fn tick_with_configs(
+    world: &mut World,
+    perf: &PerfConfig,
+    failure: &crate::failure::FailureConfig,
+) {
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
     for step in 0..FLOW_SUBSTEPS {
         let active = plan_active(world);
@@ -2543,6 +2554,9 @@ pub fn tick_with_perf(world: &mut World, perf: &PerfConfig) {
             }
         }
     }
+
+    // Geotech: roof / overhang collapse after grain has seated.
+    crate::failure::apply_failure(world, failure);
 
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {

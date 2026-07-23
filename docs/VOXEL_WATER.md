@@ -15,7 +15,7 @@ Demo / draw: `wk-voxel-app`.
 Each `tick`:
 
 1. **Flow substeps** (×12): `plan_active` → clear dirty → **gravity fall** → **`apply_water_flow`**
-2. Once: `plan_active` → **`apply_seepage`** → grain fall → **grain repose**
+2. Once: `plan_active` → **`apply_seepage`** → grain fall → **grain repose** → **`apply_roof_collapse`** (geotech F1; Tab → Geotech)
 3. Opt-in (demo): **`apply_flow_erosion`** — cascade/head-drop water scours erodible beds/banks and deposits downhill
 
 Dirty rectangles + a 1-cell halo drive the active set. Writes rebuild dirty for the next substep.

@@ -255,8 +255,7 @@ fields. If we add a `CellFlags::COMPACTED` bit, document in
 
 | PR | Deliverable |
 |----|-------------|
-| **F1a** | `FailureConfig` + `roof_span_*` helpers + unit tests (no tick wire) |
-| **F1b** | `apply_roof_collapse` in `tick_with_perf` + demo toggle |
+| **F1** | ✅ `FailureConfig` + `apply_roof_collapse` in tick + Tab → Geotech |
 | **F2a** | Wet cohesion influences grain repose loosen |
 | **F2b** | Competent-face → LooseRock under wet steep gate |
 | **F3** | Deep Clay/Organic sat squeeze |
