@@ -13,7 +13,7 @@
 
 use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
 
-use crate::active::{plan_active, ActiveChunk};
+use crate::active::ActiveChunk;
 use crate::cell::{falls_through_empty_air, is_grain, water_capacity, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
@@ -260,11 +260,10 @@ fn is_roof_candidate(material: MaterialId) -> bool {
     material != MaterialId::Air && roof_span_limit_cells(material) < i32::MAX
 }
 
-fn regions_for_roof(world: &World) -> Vec<ActiveChunk> {
-    let planned = plan_active(world);
-    if !planned.is_empty() {
-        return planned;
-    }
+/// Failure scans every loaded chunk. Dirty halos from flow/seepage are
+/// often tiny and miss static wet cliff faces / roofs that still need
+/// geotech evaluation — event caps keep the write set bounded.
+fn regions_for_failure(world: &World) -> Vec<ActiveChunk> {
     let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
@@ -285,7 +284,7 @@ pub fn apply_roof_collapse(world: &mut World, cfg: &FailureConfig) {
     if !cfg.enable_roof_collapse || cfg.max_roof_events == 0 {
         return;
     }
-    let regions = regions_for_roof(world);
+    let regions = regions_for_failure(world);
     apply_roof_collapse_regions(world, &regions, cfg);
 }
 
@@ -477,7 +476,7 @@ pub fn apply_shear_weaken(world: &mut World, cfg: &FailureConfig) {
     if !cfg.enable_shear_weaken || cfg.max_shear_events == 0 {
         return;
     }
-    let regions = regions_for_roof(world);
+    let regions = regions_for_failure(world);
     apply_shear_weaken_regions(world, &regions, cfg);
 }
 
@@ -951,5 +950,70 @@ mod tests {
             })
             .count();
         assert_eq!(converted, 3, "must respect max_shear_events");
+    }
+
+    #[test]
+    fn f2_tick_soak_shear_is_progressive_not_instant() {
+        // Full tick path: chance 100% so the event cap alone paces retreat.
+        // Bedrock pedestals keep water in the Stone lip (no seepage drain)
+        // and avoid lower-face candidates stealing the event budget.
+        let mut w = World::new(42);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 60);
+        let n_lips = 12;
+        for i in 0..n_lips {
+            let x = 2 + i * 3;
+            w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 2, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 3, wet_solid(MaterialId::Stone));
+            w.set_cell(x + 1, 1, Cell::air());
+            w.set_cell(x + 1, 2, Cell::air());
+            w.set_cell(x + 1, 3, Cell::air());
+        }
+        let fail = FailureConfig {
+            enable_shear_weaken: true,
+            enable_roof_collapse: false,
+            shear_chance_per_mille: 1000,
+            max_shear_events: 2,
+            ..FailureConfig::default()
+        };
+        let perf = PerfConfig {
+            parallel_physics: false,
+            ..PerfConfig::default()
+        };
+
+        let count_loose = |w: &World| -> usize {
+            (0..n_lips)
+                .filter(|&i| {
+                    let x = 2 + i * 3;
+                    w.get_cell(x, 3).unwrap().material == MaterialId::LooseRock
+                })
+                .count()
+        };
+
+        tick_with_configs(&mut w, &perf, &fail);
+        assert_eq!(count_loose(&w), 2, "tick 1: two lips via cap");
+
+        for i in 0..n_lips {
+            let x = 2 + i * 3;
+            if w.get_cell(x, 3).unwrap().material == MaterialId::Stone {
+                w.set_cell(x, 3, wet_solid(MaterialId::Stone));
+            }
+        }
+        tick_with_configs(&mut w, &perf, &fail);
+        assert_eq!(count_loose(&w), 4, "tick 2: progressive +2");
+
+        for _ in 0..3 {
+            for i in 0..n_lips {
+                let x = 2 + i * 3;
+                if w.get_cell(x, 3).unwrap().material == MaterialId::Stone {
+                    w.set_cell(x, 3, wet_solid(MaterialId::Stone));
+                }
+            }
+            tick_with_configs(&mut w, &perf, &fail);
+        }
+        let after = count_loose(&w);
+        assert_eq!(after, 10, "five ticks × 2 events → 10 LooseRock");
+        assert!(after < n_lips as usize, "wall must not vanish in one go");
     }
 }
