@@ -141,9 +141,11 @@ pub fn falls_through_empty_air(material: MaterialId) -> bool {
 }
 
 /// Materials that participate in angle-of-repose diagonal slides.
-/// Includes [`is_grain`] plus Snow (avalanche / soft pack).
+/// Includes [`is_grain`] plus Snow and Organic litter (leaf piles
+/// should sprawl, not stack into 1-cell towers).
 pub fn is_repose_grain(material: MaterialId) -> bool {
-    is_grain(material) || material == MaterialId::Snow
+    is_grain(material)
+        || matches!(material, MaterialId::Snow | MaterialId::Organic)
 }
 
 /// Dense grains soft enough for flow bedload / bank undercut.
@@ -245,11 +247,22 @@ mod tests {
         assert!(!is_grain(MaterialId::Snow), "snow floats — not a dense grain");
         assert!(falls_through_empty_air(MaterialId::Snow));
         assert!(falls_through_empty_air(MaterialId::Ice));
+        assert!(
+            is_repose_grain(MaterialId::Organic),
+            "Organic litter should sprawl sideways"
+        );
+        assert!(
+            !is_grain(MaterialId::Organic),
+            "Organic floats on water — not a dense grain"
+        );
+        assert!(
+            falls_through_empty_air(MaterialId::Organic),
+            "Organic litter must fall through empty Air"
+        );
         for m in [
             MaterialId::Bedrock,
             MaterialId::Stone,
             MaterialId::Limestone,
-            MaterialId::Organic,
             MaterialId::Water,
             MaterialId::Air,
             MaterialId::Ice,
@@ -257,10 +270,6 @@ mod tests {
             assert!(!is_grain(m), "{m:?} must not be classified as a grain");
             assert!(!is_repose_grain(m), "{m:?} must not repose");
         }
-        assert!(
-            falls_through_empty_air(MaterialId::Organic),
-            "Organic litter must fall through empty Air"
-        );
         assert!(!falls_through_empty_air(MaterialId::Sand));
     }
 

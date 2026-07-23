@@ -55,8 +55,8 @@ This is what wets a dry beach **sideways** from a puddle, equalises pore sat bet
 
 ### Grain fall + repose
 
-- **Fall:** Sand / Gravel / Clay / LooseRock sink through Air (any sat). **Snow and Ice** fall through *empty* Air only (float on water) so unsupported pack does not hang mid-air.
-- **Repose** (`apply_grain_repose`): supported grains slide diagonally into Air when the drop exceeds `floor(repose_rise_m / SAMPLE_WIDTH_m)`. Sand≈0 (no 1-cell cliffs), LooseRock≥1 (short stairs). Wet grains loosen one step. Snow avalanches on land, not into standing water. Underwater, dense grains collapsing into empty/film seats fill the vacated cell with standing water (no sky-flash bubble on the slope face).
+- **Fall:** Sand / Gravel / Clay / LooseRock sink through Air (any sat). **Snow, Ice, and Organic** fall through *empty* Air only (float on water) so unsupported pack / leaf litter does not hang mid-air.
+- **Repose** (`apply_grain_repose`): supported grains slide diagonally into Air when the drop exceeds `floor(repose_rise_m / SAMPLE_WIDTH_m)`. Sand≈0 (no 1-cell cliffs), Organic litter≈0 (sprawls instead of towers), LooseRock≥1 (short stairs). Wet grains loosen one step. Snow avalanches on land, not into standing water. Underwater, dense grains collapsing into empty/film seats fill the vacated cell with standing water (no sky-flash bubble on the slope face).
 - Ice is not a repose grain and not flow-erodible; hillside glaze can still peel in the cold-avalanche pass.
 
 ### Flow erosion + deposition (`apply_flow_erosion`)
