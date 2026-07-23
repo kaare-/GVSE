@@ -6,8 +6,8 @@ use macroquad::prelude::*;
 use macroquad::ui::{hash, root_ui, widgets};
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
-    ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, Genome, GrainConfig, KarstConfig,
-    OrographicConfig, PerfConfig, PhaseConfig, PlantGrowthCaps, RainConfig, TempConfig,
+    ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, FailureConfig, Genome, GrainConfig,
+    KarstConfig, OrographicConfig, PerfConfig, PhaseConfig, PlantGrowthCaps, RainConfig, TempConfig,
     WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
     MAX_STEM_MODULES,
 };
@@ -73,6 +73,10 @@ pub struct SimSettings {
     pub grain: GrainConfig,
     /// Physics trade-offs (Tab → Performance). Defaults preserve water feel.
     pub perf: PerfConfig,
+    /// Geotech failure (Tab → Geotech). Roof collapse on by default.
+    pub failure: FailureConfig,
+    /// Scratch f32 for max roof events slider.
+    pub max_roof_events: f32,
     pub wind_vx: f32,
     pub humidity_diffusion_alpha: f32,
     /// Scratch f32s for material sliders (synced → MaterialRegistry overrides).
@@ -150,6 +154,8 @@ impl SimSettings {
             phase: PhaseConfig::default(),
             grain: GrainConfig::default(),
             perf: PerfConfig::default(),
+            failure: FailureConfig::default(),
+            max_roof_events: FailureConfig::default().max_roof_events as f32,
             wind_vx: 0.05,
             humidity_diffusion_alpha: 0.15,
             mat_perm,
@@ -520,6 +526,34 @@ impl SimSettings {
                         hash!(),
                         "Parallel physics (rayon checkerboard)",
                         &mut self.perf.parallel_physics,
+                    );
+                });
+                ui.separator();
+
+                ui.tree_node(hash!(), "Geotech / failure", |ui| {
+                    ui.label(
+                        None,
+                        "Roof collapse: ceilings over Air wider than roof_span_max_m drop.",
+                    );
+                    ui.label(
+                        None,
+                        "Sand/clay never roof; stone holds short spans; bedrock never falls.",
+                    );
+                    ui.checkbox(
+                        hash!(),
+                        "Roof / overhang collapse",
+                        &mut self.failure.enable_roof_collapse,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Max roof events / tick",
+                        1.0..128.0,
+                        &mut self.max_roof_events,
+                    );
+                    ui.label(
+                        None,
+                        "Shear weaken / compaction: planned (VOXEL_FAILURE F2–F3).",
                     );
                 });
                 ui.separator();
@@ -908,6 +942,8 @@ impl SimSettings {
         self.max_roots = self.max_roots.round().clamp(1.0, 256.0);
         self.max_stems = self.max_stems.round().clamp(0.0, 256.0);
         self.max_photos = self.max_photos.round().clamp(1.0, 256.0);
+        self.max_roof_events = self.max_roof_events.round().clamp(1.0, 256.0);
+        self.failure.max_roof_events = self.max_roof_events as u32;
     }
 
     /// Push population ceilings onto the live organism store.
