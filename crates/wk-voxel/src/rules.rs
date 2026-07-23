@@ -2522,6 +2522,17 @@ pub fn tick_with_configs(
     perf: &PerfConfig,
     failure: &crate::failure::FailureConfig,
 ) {
+    tick_with_configs_and_geotech(world, perf, failure, None);
+}
+
+/// [`tick_with_configs`] plus optional [`crate::geotech_map::GeotechMap`]
+/// for map-gated F2b shear (S3).
+pub fn tick_with_configs_and_geotech(
+    world: &mut World,
+    perf: &PerfConfig,
+    failure: &crate::failure::FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) {
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
     for step in 0..FLOW_SUBSTEPS {
         let active = plan_active(world);
@@ -2572,7 +2583,7 @@ pub fn tick_with_configs(
     }
 
     // Geotech: roof / overhang collapse after grain has seated.
-    crate::failure::apply_failure(world, failure);
+    crate::failure::apply_failure(world, failure, geotech);
 
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {

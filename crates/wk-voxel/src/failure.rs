@@ -43,6 +43,9 @@ pub struct FailureConfig {
     /// Per-candidate success chance in parts-per-thousand (0..=1000).
     /// Keeps mountains from melting in one tick.
     pub shear_chance_per_mille: u32,
+    /// When true and a [`crate::geotech_map::GeotechMap`] is supplied,
+    /// F2b gates on map `shear_score` + hydro wetting (S3).
+    pub use_geotech_map: bool,
 }
 
 impl Default for FailureConfig {
@@ -55,6 +58,7 @@ impl Default for FailureConfig {
             max_roof_events: 32,
             max_shear_events: 16,
             shear_chance_per_mille: 250,
+            use_geotech_map: true,
         }
     }
 }
@@ -472,12 +476,19 @@ fn shear_hash_ok(seed: u64, tick_no: u64, gx: i32, gy: i32, per_mille: u32) -> b
 ///
 /// Compute-then-apply. Event count capped by [`FailureConfig::max_shear_events`].
 /// Gated by [`FailureConfig::enable_shear_weaken`] (off by default).
-pub fn apply_shear_weaken(world: &mut World, cfg: &FailureConfig) {
+///
+/// When `cfg.use_geotech_map` and `geotech` is present, failure uses
+/// map `shear_score` + hydro wetting (docs/VOXEL_GEOTECH_MAP.md S3).
+pub fn apply_shear_weaken(
+    world: &mut World,
+    cfg: &FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) {
     if !cfg.enable_shear_weaken || cfg.max_shear_events == 0 {
         return;
     }
     let regions = regions_for_failure(world);
-    apply_shear_weaken_regions(world, &regions, cfg);
+    apply_shear_weaken_regions(world, &regions, cfg, geotech);
 }
 
 /// Shear weaken restricted to a pre-planned active set.
@@ -485,11 +496,13 @@ pub fn apply_shear_weaken_regions(
     world: &mut World,
     active: &[ActiveChunk],
     cfg: &FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
 ) {
     if !cfg.enable_shear_weaken || cfg.max_shear_events == 0 || active.is_empty() {
         return;
     }
 
+    let use_map = cfg.use_geotech_map && geotech.is_some();
     let seed = world.seed.0;
     let tick_no = world.tick;
     // (gy, gx) for determinism.
@@ -508,16 +521,7 @@ pub fn apply_shear_weaken_regions(
                 if !is_shear_competent(cell.material) {
                     continue;
                 }
-                let demand = face_shear_demand(world, gx, gy);
-                if demand < 1 {
-                    continue;
-                }
-                let wet = pore_wetness(cell);
-                if wet <= 0.0 {
-                    continue;
-                }
-                let c_eff = effective_cohesion(cell.material, wet);
-                if c_eff >= shear_c_threshold(demand) {
+                if !face_fails_shear(world, gx, gy, cell, use_map, geotech) {
                     continue;
                 }
                 if !shear_hash_ok(seed, tick_no, gx, gy, cfg.shear_chance_per_mille) {
@@ -536,13 +540,53 @@ pub fn apply_shear_weaken_regions(
         if applied >= cfg.max_shear_events {
             break;
         }
-        if shear_one_face(world, gx, gy) {
+        if shear_one_face(world, gx, gy, use_map, geotech) {
             applied += 1;
         }
     }
 }
 
-fn shear_one_face(world: &mut World, gx: i32, gy: i32) -> bool {
+/// True when this competent face should convert under current rules.
+fn face_fails_shear(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    cell: Cell,
+    use_map: bool,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) -> bool {
+    use crate::geotech_map::{face_strength_wetness, shear_score_c_threshold};
+
+    if use_map {
+        if let Some(face) = geotech.and_then(|m| m.at_cell(gx, gy)) {
+            let wet = face_strength_wetness(pore_wetness(cell), face.hydro_load);
+            if wet <= 0.0 {
+                return false;
+            }
+            let c_eff = effective_cohesion(cell.material, wet);
+            return c_eff < shear_score_c_threshold(face.shear_score);
+        }
+    }
+    // Legacy live geometry path (no map / face not in sparse set).
+    let demand = face_shear_demand(world, gx, gy);
+    if demand < 1 {
+        return false;
+    }
+    let wet = pore_wetness(cell);
+    if wet <= 0.0 {
+        return false;
+    }
+    let c_eff = effective_cohesion(cell.material, wet);
+    c_eff < shear_c_threshold(demand)
+}
+
+fn shear_one_face(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    use_map: bool,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) -> bool {
     let gx = world.wrap_x(gx);
     let Some(cell) = world.get_cell(gx, gy) else {
         return false;
@@ -550,13 +594,7 @@ fn shear_one_face(world: &mut World, gx: i32, gy: i32) -> bool {
     if !is_shear_competent(cell.material) {
         return false;
     }
-    let demand = face_shear_demand(world, gx, gy);
-    if demand < 1 {
-        return false;
-    }
-    let wet = pore_wetness(cell);
-    let c_eff = effective_cohesion(cell.material, wet);
-    if c_eff >= shear_c_threshold(demand) {
+    if !face_fails_shear(world, gx, gy, cell, use_map, geotech) {
         return false;
     }
     let debris_mat = shear_weaken_debris(cell.material);
@@ -571,12 +609,16 @@ fn shear_one_face(world: &mut World, gx: i32, gy: i32) -> bool {
 }
 
 /// Run enabled failure passes (F1 roof, F2b shear; F3 stub).
-pub fn apply_failure(world: &mut World, cfg: &FailureConfig) {
+pub fn apply_failure(
+    world: &mut World,
+    cfg: &FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) {
     if cfg.enable_roof_collapse {
         apply_roof_collapse(world, cfg);
     }
     if cfg.enable_shear_weaken {
-        apply_shear_weaken(world, cfg);
+        apply_shear_weaken(world, cfg, geotech);
     }
 }
 
@@ -870,7 +912,7 @@ mod tests {
             ..FailureConfig::default()
         };
         for _ in 0..40 {
-            apply_shear_weaken(&mut w, &cfg);
+            apply_shear_weaken(&mut w, &cfg, None);
             w.tick = w.tick.wrapping_add(1);
         }
         for y in 1..=4 {
@@ -910,7 +952,7 @@ mod tests {
         };
         let mut loosened = false;
         for _ in 0..8 {
-            apply_shear_weaken(&mut w, &cfg);
+            apply_shear_weaken(&mut w, &cfg, None);
             w.tick = w.tick.wrapping_add(1);
             if w.get_cell(3, 3).unwrap().material == MaterialId::LooseRock {
                 loosened = true;
@@ -942,7 +984,7 @@ mod tests {
             enable_roof_collapse: false,
             ..FailureConfig::default()
         };
-        apply_shear_weaken(&mut w, &cfg);
+        apply_shear_weaken(&mut w, &cfg, None);
         let converted = (0..12)
             .filter(|&i| {
                 let x = 2 + i * 3;
@@ -950,6 +992,47 @@ mod tests {
             })
             .count();
         assert_eq!(converted, 3, "must respect max_shear_events");
+    }
+
+    #[test]
+    fn s3_map_gated_wet_dam_can_loosen() {
+        use crate::geotech_map::GeotechMap;
+
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 6);
+        // 1-wide stone dam, tall wet reservoir (pores dry — hydro wetting).
+        for y in 1..=20 {
+            w.set_cell(2, y, Cell::solid(MaterialId::Stone));
+            let mut water = Cell::air();
+            water.sat = Sat(255);
+            w.set_cell(3, y, water);
+        }
+        let mut map = GeotechMap::new();
+        map.rebuild(&w);
+        let cfg = FailureConfig {
+            enable_shear_weaken: true,
+            use_geotech_map: true,
+            shear_chance_per_mille: 1000,
+            max_shear_events: 8,
+            enable_roof_collapse: false,
+            ..FailureConfig::default()
+        };
+        // Legacy path (no map) must NOT break dry-pore stone.
+        apply_shear_weaken(&mut w, &cfg, None);
+        assert!(
+            (1..=20).all(|y| w.get_cell(2, y).unwrap().material == MaterialId::Stone),
+            "without map, dry-pore dam holds"
+        );
+        // Map path: hydro score + wetting proxy → LooseRock (lowest y first).
+        apply_shear_weaken(&mut w, &cfg, Some(&map));
+        let loosened = (1..=20)
+            .filter(|&y| w.get_cell(2, y).unwrap().material == MaterialId::LooseRock)
+            .count();
+        assert!(
+            loosened > 0,
+            "map-gated hydro dam must shear at least one face"
+        );
     }
 
     #[test]

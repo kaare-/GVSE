@@ -566,6 +566,15 @@ impl SimSettings {
                         "Shear weaken (rock faces)",
                         &mut self.failure.enable_shear_weaken,
                     );
+                    ui.checkbox(
+                        hash!(),
+                        "Use geotech map for shear (S3)",
+                        &mut self.failure.use_geotech_map,
+                    );
+                    ui.label(
+                        None,
+                        "Map gate: tall wet columns can break thin dams (G cycles overlays).",
+                    );
                     labeled_slider(
                         ui,
                         hash!(),
@@ -582,7 +591,7 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "Compaction: planned (VOXEL_FAILURE F3).",
+                        "Compaction: planned (VOXEL_FAILURE F3 / S4).",
                     );
                 });
                 ui.separator();

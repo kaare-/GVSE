@@ -4,9 +4,10 @@
 //!
 //! Slow derived geotech stress map (docs/VOXEL_GEOTECH_MAP.md).
 //!
-//! Sweeps solid↔Air contacts on a period-20 cadence. Stores sparse
-//! per-face stress for HUD (`G`) and later F2/F3 modulators. Does
-//! **not** write cells — overlays only.
+//! Sweeps solid↔Air contacts and column overburden on a period-20
+//! cadence. Stores sparse per-face stress + per-solid σᵥ for HUD
+//! (`G` cycles shear / overburden / wetness) and F2/F3 modulators.
+//! Does **not** write cells — overlays only.
 
 use std::collections::HashMap;
 
@@ -26,10 +27,42 @@ pub const HYDRO_LOAD_CAP: i32 = 32;
 pub const HYDRO_SCORE_WEIGHT: f32 = 2.0;
 /// Air sat at/above this counts as standing water for hydro load.
 pub const HYDRO_MIN_SAT: u8 = 200;
+/// Max cells to walk upward when summing overburden.
+pub const OVERBURDEN_MAX_UP: i32 = 96;
 
 /// True when this tick should rebuild the geotech map.
 pub fn geotech_map_due(tick: u64) -> bool {
     tick % GEOTECH_MAP_PERIOD == GEOTECH_MAP_PHASE
+}
+
+/// Which channel `G` is visualising in the demo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum GeotechOverlayMode {
+    #[default]
+    Off,
+    Shear,
+    Overburden,
+    Wetness,
+}
+
+impl GeotechOverlayMode {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Shear,
+            Self::Shear => Self::Overburden,
+            Self::Overburden => Self::Wetness,
+            Self::Wetness => Self::Off,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Shear => "shear",
+            Self::Overburden => "sigma_v",
+            Self::Wetness => "wet",
+        }
+    }
 }
 
 /// Per-face derived stress at a solid cell with an open Air contact.
@@ -41,14 +74,14 @@ pub struct FaceStress {
     pub hydro_load: u16,
     /// Pore wetness 0..1.
     pub wetness: f32,
-    /// Combined score: `demand + weight * hydro/cap` (HUD + later CA).
+    /// Combined score: `demand + weight * hydro/cap` (HUD + F2b).
     pub shear_score: f32,
-    /// Relative overburden (Σ density above / 1000). Filled in S2; 0 in S1.
+    /// Relative overburden (Σ density above / 1000), including wet Air.
     pub overburden: f32,
 }
 
 impl FaceStress {
-    pub fn from_parts(demand: i32, hydro_load: u16, wetness: f32) -> Self {
+    pub fn from_parts(demand: i32, hydro_load: u16, wetness: f32, overburden: f32) -> Self {
         let hydro = (hydro_load as f32 / HYDRO_LOAD_CAP as f32).clamp(0.0, 1.0);
         let shear_score = demand as f32 + HYDRO_SCORE_WEIGHT * hydro;
         Self {
@@ -56,16 +89,18 @@ impl FaceStress {
             hydro_load,
             wetness,
             shear_score,
-            overburden: 0.0,
+            overburden,
         }
     }
 }
 
-/// Sparse geotech overlay — only solid cells with open faces.
+/// Sparse geotech overlay.
 #[derive(Debug, Clone, Default)]
 pub struct GeotechMap {
-    /// `(gx, gy) → stress` for face cells.
+    /// `(gx, gy) → stress` for solid cells with open faces.
     pub faces: HashMap<(i32, i32), FaceStress>,
+    /// `(gx, gy) → relative σᵥ` for every solid (F3 / HUD).
+    pub overburden: HashMap<(i32, i32), f32>,
     /// Tick of last successful rebuild (`u64::MAX` = never).
     pub last_rebuild_tick: u64,
 }
@@ -74,6 +109,7 @@ impl GeotechMap {
     pub fn new() -> Self {
         Self {
             faces: HashMap::new(),
+            overburden: HashMap::new(),
             last_rebuild_tick: u64::MAX,
         }
     }
@@ -82,16 +118,25 @@ impl GeotechMap {
         self.faces.get(&(gx, gy)).copied()
     }
 
+    pub fn overburden_at(&self, gx: i32, gy: i32) -> f32 {
+        self.overburden.get(&(gx, gy)).copied().unwrap_or(0.0)
+    }
+
     pub fn clear(&mut self) {
         self.faces.clear();
+        self.overburden.clear();
         self.last_rebuild_tick = u64::MAX;
     }
 
-    /// Full loaded-chunk contact sweep. Replaces previous contents.
+    /// Full loaded-chunk sweep. Replaces previous contents.
     pub fn rebuild(&mut self, world: &World) {
         self.faces.clear();
+        self.overburden.clear();
         let mut coords: Vec<_> = world.chunks.keys().copied().collect();
         coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+
+        // Column σᵥ: walk each world-x top→bottom once per loaded chunk band.
+        rebuild_overburden(world, &coords, &mut self.overburden);
 
         for coord in coords {
             for ly in 0..CHUNK_CELLS_H {
@@ -107,7 +152,6 @@ impl GeotechMap {
                     if cell.material == MaterialId::Air {
                         continue;
                     }
-                    // Skip fluids / non-structural cards.
                     if matches!(
                         cell.material,
                         MaterialId::Water | MaterialId::Snow | MaterialId::Ice
@@ -120,7 +164,8 @@ impl GeotechMap {
                     }
                     let hydro = wet_air_column_beside(world, gx, gy);
                     let wet = pore_wetness(cell);
-                    let stress = FaceStress::from_parts(demand, hydro, wet);
+                    let sigma = self.overburden_at(gx, gy);
+                    let stress = FaceStress::from_parts(demand, hydro, wet, sigma);
                     self.faces.insert((gx, gy), stress);
                 }
             }
@@ -138,11 +183,51 @@ impl GeotechMap {
     }
 }
 
-/// Max contiguous wet-Air column height adjacent to a solid face.
+fn rebuild_overburden(
+    world: &World,
+    coords: &[crate::chunk::ChunkCoord],
+    out: &mut HashMap<(i32, i32), f32>,
+) {
+    // Collect unique cx values, then for each column walk top→bottom.
+    let mut cxs: Vec<i32> = coords.iter().map(|c| c.cx).collect();
+    cxs.sort_unstable();
+    cxs.dedup();
+    let mut cys: Vec<i32> = coords.iter().map(|c| c.cy).collect();
+    cys.sort_unstable();
+    cys.dedup();
+    let y_lo = cys.first().copied().unwrap_or(0) * CHUNK_CELLS_H as i32;
+    let y_hi = (cys.last().copied().unwrap_or(0) + 1) * CHUNK_CELLS_H as i32 - 1;
+
+    for cx in cxs {
+        for lx in 0..CHUNK_CELLS_W {
+            let gx = world.wrap_x(cx * CHUNK_CELLS_W as i32 + lx as i32);
+            let mut above = 0.0f32;
+            let mut gy = y_hi;
+            while gy >= y_lo && gy >= 0 {
+                match world.get_cell(gx, gy) {
+                    Some(c) if c.material != MaterialId::Air => {
+                        out.insert((gx, gy), above);
+                        above += MaterialRegistry::props(c.material).density as f32 / 1000.0;
+                    }
+                    Some(c) => {
+                        // Wet Air contributes water load (density 1000).
+                        if c.sat.0 > 0 {
+                            above += (c.sat.0 as f32 / 255.0) * 1.0;
+                        }
+                    }
+                    None => {}
+                }
+                gy -= 1;
+            }
+        }
+    }
+}
+
+/// Contiguous wet-Air column height beside a solid face (full stack).
 ///
-/// Checks ±x neighbours: if the neighbour is wet Air, walks upward
-/// counting cells with `sat ≥ HYDRO_MIN_SAT`. Returns the max of the
-/// two sides, capped at [`HYDRO_LOAD_CAP`].
+/// From a wet-Air neighbour, walks **down and up** so mid-wall cells
+/// see the whole reservoir height (hydrostatic proxy), not only water
+/// above them.
 pub fn wet_air_column_beside(world: &World, gx: i32, gy: i32) -> u16 {
     let mut best = 0u16;
     for &dx in &[-1i32, 1] {
@@ -153,9 +238,20 @@ pub fn wet_air_column_beside(world: &World, gx: i32, gy: i32) -> u16 {
         if side.material != MaterialId::Air || side.sat.0 < HYDRO_MIN_SAT {
             continue;
         }
-        // Count this cell, then walk up.
         let mut h = 1i32;
-        let mut y = gy + 1;
+        // Down.
+        let mut y = gy - 1;
+        while h < HYDRO_LOAD_CAP {
+            match world.get_cell(nx, y) {
+                Some(c) if c.material == MaterialId::Air && c.sat.0 >= HYDRO_MIN_SAT => {
+                    h += 1;
+                    y -= 1;
+                }
+                _ => break,
+            }
+        }
+        // Up.
+        y = gy + 1;
         while h < HYDRO_LOAD_CAP {
             match world.get_cell(nx, y) {
                 Some(c) if c.material == MaterialId::Air && c.sat.0 >= HYDRO_MIN_SAT => {
@@ -171,21 +267,45 @@ pub fn wet_air_column_beside(world: &World, gx: i32, gy: i32) -> u16 {
 }
 
 /// Relative overburden: sum of solid densities above `(gx, gy)` / 1000.
-/// Exposed for S2; unused in S1 rebuild.
-#[allow(dead_code)]
 pub fn relative_overburden(world: &World, gx: i32, gy: i32, max_up: i32) -> f32 {
     let gx = world.wrap_x(gx);
-    let mut sum = 0u64;
+    let mut sum = 0.0f32;
     for dy in 1..=max_up {
         match world.get_cell(gx, gy + dy) {
             Some(c) if c.material != MaterialId::Air => {
-                sum += MaterialRegistry::props(c.material).density as u64;
+                sum += MaterialRegistry::props(c.material).density as f32 / 1000.0;
+            }
+            Some(c) if c.sat.0 > 0 => {
+                sum += c.sat.0 as f32 / 255.0;
             }
             Some(_) => {}
             None => break,
         }
     }
-    (sum as f32) / 1000.0
+    sum
+}
+
+/// Map shear_score → cohesion threshold for F2b (S3).
+///
+/// Higher score (steep + tall hydro) needs less effective cohesion to fail.
+pub fn shear_score_c_threshold(score: f32) -> f32 {
+    // score 1 → 40 (old demand-1); score 2 → 100 (old demand-2);
+    // score 3+ → 160 (thin wet dams / tall reservoirs).
+    if score < 1.5 {
+        40.0
+    } else if score < 2.5 {
+        100.0
+    } else {
+        160.0
+    }
+}
+
+/// Effective wetness for strength: pore fill, or hydro wetting proxy.
+pub fn face_strength_wetness(pore: f32, hydro_load: u16) -> f32 {
+    let hydro_frac = (hydro_load as f32 / HYDRO_LOAD_CAP as f32).clamp(0.0, 1.0);
+    // Standing water beside the face counts as partial wetting even if
+    // pores are still dry (seepage lag).
+    pore.max(hydro_frac * 0.65)
 }
 
 #[cfg(test)]
@@ -193,6 +313,7 @@ mod tests {
     use super::*;
     use crate::cell::{Cell, Sat};
     use crate::chunk::ChunkCoord;
+    use crate::failure::effective_cohesion;
 
     fn bed(w: &mut World, x0: i32, x1: i32) {
         for x in x0..=x1 {
@@ -214,11 +335,19 @@ mod tests {
     }
 
     #[test]
-    fn dry_buried_stone_absent() {
+    fn overlay_mode_cycles() {
+        assert_eq!(GeotechOverlayMode::Off.next(), GeotechOverlayMode::Shear);
+        assert_eq!(
+            GeotechOverlayMode::Wetness.next(),
+            GeotechOverlayMode::Off
+        );
+    }
+
+    #[test]
+    fn dry_buried_stone_absent_from_faces_but_has_overburden() {
         let mut w = World::new(1);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         bed(&mut w, 0, 8);
-        // Buried: stone with stone neighbours, no Air face.
         w.set_cell(3, 1, Cell::solid(MaterialId::Stone));
         w.set_cell(2, 1, Cell::solid(MaterialId::Stone));
         w.set_cell(4, 1, Cell::solid(MaterialId::Stone));
@@ -226,6 +355,8 @@ mod tests {
         let mut map = GeotechMap::new();
         map.rebuild(&w);
         assert!(map.at_cell(3, 1).is_none());
+        // Cap stone has Air above → overburden ~0; buried has load.
+        assert!(map.overburden_at(3, 1) > map.overburden_at(3, 2));
     }
 
     #[test]
@@ -277,6 +408,51 @@ mod tests {
     }
 
     #[test]
+    fn deep_stack_has_higher_overburden_than_surface() {
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 4);
+        for y in 1..=6 {
+            w.set_cell(2, y, Cell::solid(MaterialId::Stone));
+            w.set_cell(3, y, Cell::air()); // give a face so we can read FaceStress too
+        }
+        let mut map = GeotechMap::new();
+        map.rebuild(&w);
+        let deep = map.overburden_at(2, 1);
+        let mid = map.overburden_at(2, 3);
+        let top = map.overburden_at(2, 6);
+        assert!(top < 0.1, "surface overburden should be ~0, got {top}");
+        assert!(deep > mid && mid > top, "deep={deep} mid={mid} top={top}");
+        let face = map.at_cell(2, 1).expect("face");
+        assert!((face.overburden - deep).abs() < 1e-4);
+    }
+
+    #[test]
+    fn wet_dam_score_exceeds_stone_strength_threshold() {
+        // Tall wet column beside a 1-wide stone wall → score ≥ 2.5 → thresh 160.
+        // Dry stone c_eff=200 still holds; hydro wetting proxy drops c_eff.
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 6);
+        for y in 1..=20 {
+            w.set_cell(2, y, Cell::solid(MaterialId::Stone));
+            w.set_cell(3, y, wet_air());
+        }
+        let mut map = GeotechMap::new();
+        map.rebuild(&w);
+        let face = map.at_cell(2, 10).expect("dam face");
+        assert!(face.shear_score >= 2.5, "score={}", face.shear_score);
+        let thresh = shear_score_c_threshold(face.shear_score);
+        assert!(thresh >= 160.0);
+        let wet = face_strength_wetness(face.wetness, face.hydro_load);
+        let c_eff = effective_cohesion(MaterialId::Stone, wet);
+        assert!(
+            c_eff < thresh,
+            "hydro-wetted stone dam should be below score threshold (c_eff={c_eff} thresh={thresh})"
+        );
+    }
+
+    #[test]
     fn rebuild_is_deterministic() {
         let mut w = World::new(7);
         w.ensure_chunk(ChunkCoord::new(0, 0));
@@ -290,11 +466,13 @@ mod tests {
         a.rebuild(&w);
         b.rebuild(&w);
         assert_eq!(a.faces.len(), b.faces.len());
+        assert_eq!(a.overburden.len(), b.overburden.len());
         for (k, va) in &a.faces {
             let vb = b.faces.get(k).unwrap();
             assert_eq!(va.demand, vb.demand);
             assert_eq!(va.hydro_load, vb.hydro_load);
             assert!((va.shear_score - vb.shear_score).abs() < 1e-5);
+            assert!((va.overburden - vb.overburden).abs() < 1e-4);
         }
     }
 }

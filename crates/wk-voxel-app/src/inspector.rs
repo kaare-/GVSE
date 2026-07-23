@@ -106,12 +106,18 @@ pub fn draw_block_inspector(
     lines.push(format!("temp={temp_c:.1}C  humidity={hum:.1}  tile=({hx},{hy})"));
     if let Some(g) = geotech.at_cell(gx, gy) {
         lines.push(format!(
-            "geotech demand={} hydro={} wet={:.0}% score={:.2}",
+            "geotech demand={} hydro={} wet={:.0}% score={:.2} σv={:.1}",
             g.demand,
             g.hydro_load,
             g.wetness * 100.0,
-            g.shear_score
+            g.shear_score,
+            g.overburden
         ));
+    } else {
+        let sigma = geotech.overburden_at(gx, gy);
+        if sigma > 0.0 {
+            lines.push(format!("geotech σv={sigma:.1} (buried)"));
+        }
     }
     let litter = soft_litter_at(world, gx);
     if litter > 0 {

@@ -102,8 +102,8 @@ the hovered solid if present in the map.
 |-------|-------------|
 | **S0** | ✅ This plan + index in `docs/README.md` / failure F4 pointer |
 | **S1** | ✅ `GeotechMap` rebuild (shear + wetness + hydro) + `G` overlay + tests |
-| **S2** | Overburden σᵥ channel + HUD mode |
-| **S3** | F2b reads map score (`score` vs `c_eff`) instead of raw demand alone — thin wet dams can fail |
+| **S2** | ✅ Overburden σᵥ channel + `G` cycles shear / σᵥ / wet |
+| **S3** | ✅ F2b gates on map shear score (thin wet dams) |
 | **S4** | F3 compaction gates on σᵥ map |
 | **S5** | Perf: dirty-tile rebuild; optional rayon sweep |
 
@@ -112,7 +112,7 @@ the hovered solid if present in the map.
 | Item | Note |
 |------|------|
 | Waterline not equalising | Tall wet column vs low basin — flow/head, not geotech |
-| Thin dam intuition | S1 lights it on `G`; S3 makes it fail under hydro score |
+| Thin dam intuition | ✅ S1 lights on `G`; S3 map-gated shear can break it |
 | Full Mohr–Coulomb | Out of scope |
 
 ## Config
