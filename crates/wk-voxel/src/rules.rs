@@ -3303,6 +3303,23 @@ mod tests {
     }
 
     #[test]
+    fn organic_litter_slides_diagonally() {
+        // Dead-leaf towers used to fall straight down only — no repose.
+        let mut w = setup_column_world();
+        w.set_cell(5, 1, Cell::solid(MaterialId::Organic));
+        w.set_cell(5, 2, Cell::solid(MaterialId::Organic));
+        apply_grain_repose(&mut w);
+        assert_eq!(
+            w.get_cell(5, 2).unwrap().material,
+            MaterialId::Air,
+            "Organic must not stack as a 1-cell cliff"
+        );
+        let left = w.get_cell(4, 1).map(|c| c.material) == Some(MaterialId::Organic);
+        let right = w.get_cell(6, 1).map(|c| c.material) == Some(MaterialId::Organic);
+        assert!(left || right, "Organic litter should sprawl diagonally");
+    }
+
+    #[test]
     fn underwater_sand_repose_does_not_leave_dry_air() {
         // Sand on an underwater ledge slides into an empty pocket beside
         // standing water. Vacated cell must become water (not sky-flash Air).
