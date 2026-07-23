@@ -34,7 +34,7 @@ Per wet Air cell (compute-then-apply, mass-conserving):
 3. **Same-Y surface equalise**
    - Scan up to 12 standing cells for a cascade outlet; push toward it.
    - Pairwise head-equalise each `+x` standing edge (avoids checkerboard terraces on wide lakes).
-4. **Throughflow** — weep through a saturated porous stack (≤24 deep) at seepage rate into Air beyond.
+4. **Throughflow** — weep through a saturated porous stack (≤24 deep) at seepage rate into the **nearest opening**: a side Air face (cliff / spring) or Air below the stack.
 
 `apply_lateral_spill` remains as a narrower Air–Air half-gap helper for unit tests; **`tick` does not call it**.
 
@@ -49,8 +49,9 @@ Head-driven, permeability-capped soak on **cardinal** edges (`+x`, `+y` owned on
 | Air ↔ Air | no (surface flow owns that) |
 
 Rate: `((permeability * 32) / 255).max(1)` when permeability &gt; 0, else 0.
+Fully saturated solid→Air faces get a ×3 spring boost (capped at 16) so cliff pores weep visibly.
 
-This is what wets a dry beach **sideways** from a puddle, and slowly equalises pore sat between sand and clay/stone. Vertical fill under a lake is dominated by **gravity**, not seepage.
+This is what wets a dry beach **sideways** from a puddle, equalises pore sat between sand and clay/stone, and lets saturated hillsides drip into open Air. Vertical fill under a lake is dominated by **gravity**, not seepage.
 
 ### Grain fall + repose
 
