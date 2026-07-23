@@ -49,8 +49,9 @@ pub use clouds::{
     cloud_floor_y, CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS,
 };
 pub use failure::{
-    apply_failure, apply_roof_collapse, roof_collapse_debris, roof_span_cells,
-    roof_span_limit_cells, FailureConfig,
+    apply_failure, apply_roof_collapse, apply_shear_weaken, effective_cohesion,
+    face_shear_demand, pore_wetness, roof_collapse_debris, roof_span_cells,
+    roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
 };
 pub use fungi::{is_fungus, soft_litter_at, add_soft_litter};
 pub use grid::World;
