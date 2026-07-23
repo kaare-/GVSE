@@ -260,8 +260,8 @@ fields. If we add a `CellFlags::COMPACTED` bit, document in
 | **F2a** | ✅ Wet cohesion scales grain repose loosen (`wet_repose_loosens`) |
 | **F2b** | ✅ Competent-face → LooseRock (`apply_shear_weaken`, Tab toggle) |
 | **F3** | Deep Clay/Organic sat squeeze |
-| **F4 / S1** | `GeotechMap` contact sweep + `G` overlay ([VOXEL_GEOTECH_MAP.md](VOXEL_GEOTECH_MAP.md)) |
-| **S3** | F2b gates on map shear score (thin wet dams) |
+| **F4 / S1–S3** | `GeotechMap` + `G` modes + map-gated F2b ([VOXEL_GEOTECH_MAP.md](VOXEL_GEOTECH_MAP.md)) |
+| **S4** | F3 compaction gates on σᵥ map |
 
 ## Done when
 
