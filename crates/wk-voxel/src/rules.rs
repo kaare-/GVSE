@@ -1045,13 +1045,29 @@ fn apply_repose_pass(
                             continue;
                         }
                     }
-                    let wet = grain_is_wet(src, below_src);
                     let mut max_step = if src.material == MaterialId::Ice {
                         0 // hillside glaze — no 1-cell cliff
                     } else {
                         grain_max_stable_step(src.material)
                     };
-                    if wet {
+                    // F2a: wet loosen scaled by cohesion — low-c′ grains
+                    // always lose a step; high-c′ clay needs near-saturation.
+                    // Wetness is sat/capacity so low-porosity LooseRock can
+                    // soften when soaked (absolute sat>=40 never fires there).
+                    let pore = crate::failure::pore_wetness(src);
+                    let standing_wet = matches!(
+                        below_src,
+                        Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
+                    );
+                    let wet_frac = if standing_wet {
+                        1.0
+                    } else {
+                        pore
+                    };
+                    let meaningfully_wet = standing_wet || pore >= 0.2 || src.sat.0 >= 40;
+                    if meaningfully_wet
+                        && crate::failure::wet_repose_loosens(src.material, wet_frac)
+                    {
                         max_step = max_step.saturating_sub(1);
                     }
                     if !diag_drop_exceeds(ptrs, wrap_width, gx, sy, max_step) {

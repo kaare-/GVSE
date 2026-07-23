@@ -164,8 +164,9 @@ side Air):
 
 ### Acceptance (F2)
 
-- Terrace toes and wet clay banks look softer after rain.
-- Dry inland Stone cliffs stay scenic unless undercut + wet.
+- ✅ Terrace toes / wet low-c′ banks loosen via F2a repose scaling.
+- ✅ Dry inland Stone cliffs stay scenic; wet demand-2 lips can F2b → LooseRock.
+- Rock-face shear is **off by default** (Tab → Geotech); chance + event cap tune melt rate.
 
 ---
 
@@ -256,8 +257,8 @@ fields. If we add a `CellFlags::COMPACTED` bit, document in
 | PR | Deliverable |
 |----|-------------|
 | **F1** | ✅ `FailureConfig` + `apply_roof_collapse` in tick + Tab → Geotech |
-| **F2a** | Wet cohesion influences grain repose loosen |
-| **F2b** | Competent-face → LooseRock under wet steep gate |
+| **F2a** | ✅ Wet cohesion scales grain repose loosen (`wet_repose_loosens`) |
+| **F2b** | ✅ Competent-face → LooseRock (`apply_shear_weaken`, Tab toggle) |
 | **F3** | Deep Clay/Organic sat squeeze |
 | **F4** | Optional wetness/σᵥ debug overlay |
 
