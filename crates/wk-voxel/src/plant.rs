@@ -9,6 +9,7 @@
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::blueprint::Genome;
@@ -59,12 +60,46 @@ pub const ROOT_SAND_AFFINITY: f32 = 0.45;
 /// invented from a stemless body anymore; olive only elongates.
 pub const STEM_INVENT_MIN_ALLOC: f32 = 0.18;
 
-/// Soft caps so 1× bodies stay readable.
+/// Soft caps so 1× bodies stay readable (defaults for [`PlantGrowthCaps`]).
 pub const MAX_ROOT_MODULES: usize = 16;
 pub const MAX_STEM_MODULES: usize = 10;
 pub const MAX_PHOTO_MODULES: usize = 12;
 /// Extra Root modules allowed per photosystem beyond the sprout minimum.
 pub const LAND_ROOTS_PER_PHOTOSYSTEM: usize = 3;
+
+/// Per-plant tissue ceilings (Tab → Plant growth caps).
+///
+/// One living plant may still only count as **one** entity toward the
+/// pop cap; these limit how many Root / Stem / Photosystem pixels that
+/// body may grow.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PlantGrowthCaps {
+    pub max_roots: usize,
+    pub max_stems: usize,
+    pub max_photos: usize,
+}
+
+impl Default for PlantGrowthCaps {
+    fn default() -> Self {
+        Self {
+            max_roots: MAX_ROOT_MODULES,
+            max_stems: MAX_STEM_MODULES,
+            max_photos: MAX_PHOTO_MODULES,
+        }
+    }
+}
+
+impl PlantGrowthCaps {
+    /// Clamp to sane slider bounds (at least one root + leaf so a plant
+    /// can still seat and photosynthesize).
+    pub fn clamp(self) -> Self {
+        Self {
+            max_roots: self.max_roots.clamp(1, 256),
+            max_stems: self.max_stems.clamp(0, 256),
+            max_photos: self.max_photos.clamp(1, 256),
+        }
+    }
+}
 /// Fraction of spawn tank unlocked as storage per Root module.
 pub const ROOT_STORE_FRAC: f32 = 0.04;
 /// Cap on capacity multiplier from roots (`base_max × this`).
@@ -108,26 +143,31 @@ pub fn drought_band(moist_frac: f32) -> DroughtBand {
 }
 
 /// Soft useful-root budget: sprout minimum + leaf-driven extras.
-pub fn useful_root_budget(atom: &Atom) -> usize {
+pub fn useful_root_budget(atom: &Atom, caps: &PlantGrowthCaps) -> usize {
     LAND_SPROUT_MIN_ROOTS
         .saturating_add(atom.photosystem_count().saturating_mul(LAND_ROOTS_PER_PHOTOSYSTEM))
-        .min(MAX_ROOT_MODULES)
+        .min(caps.max_roots.max(1))
 }
 
 /// Drought-aware soft budget — stress lifts the cap so plants keep digging.
-pub fn useful_root_budget_for(atom: &Atom, drought: DroughtBand) -> usize {
-    let base = useful_root_budget(atom);
+pub fn useful_root_budget_for(atom: &Atom, drought: DroughtBand, caps: &PlantGrowthCaps) -> usize {
+    let base = useful_root_budget(atom, caps);
+    let hard = caps.max_roots.max(1);
     match drought {
         DroughtBand::Hydrated | DroughtBand::Dormant => base,
         DroughtBand::Stressed => {
-            let lift = (MAX_ROOT_MODULES.saturating_sub(base) + 1) / 2;
-            base.saturating_add(lift).min(MAX_ROOT_MODULES)
+            let lift = (hard.saturating_sub(base) + 1) / 2;
+            base.saturating_add(lift).min(hard)
         }
     }
 }
 
-pub fn roots_past_soft_budget_for(atom: &Atom, drought: DroughtBand) -> bool {
-    root_count(atom) >= useful_root_budget_for(atom, drought)
+pub fn roots_past_soft_budget_for(
+    atom: &Atom,
+    drought: DroughtBand,
+    caps: &PlantGrowthCaps,
+) -> bool {
+    root_count(atom) >= useful_root_budget_for(atom, drought, caps)
 }
 
 /// Effective energy tank from painted roots (starch / reserve analogy).
@@ -585,9 +625,10 @@ pub fn try_elongate_root(
     world: &World,
     atom: &mut Atom,
     live_roots: &HashSet<(i32, i32)>,
+    caps: &PlantGrowthCaps,
 ) -> f32 {
     let n_roots = root_count(atom);
-    if n_roots >= MAX_ROOT_MODULES {
+    if n_roots >= caps.max_roots.max(1) {
         return 0.0;
     }
     let (_, _, w_root) = atom.genome.alloc_weights();
@@ -608,7 +649,7 @@ pub fn try_elongate_root(
         && n_roots >= LAND_SPROUT_MIN_ROOTS.saturating_sub(1);
     // Past the soft root:shoot budget, only grow roots when thirsty or
     // forcing a rhizome runner.
-    if roots_past_soft_budget_for(atom, drought) && !need_runner && !thirsty {
+    if roots_past_soft_budget_for(atom, drought, caps) && !need_runner && !thirsty {
         return 0.0;
     }
 
@@ -883,7 +924,12 @@ pub fn stem_spacing_ok(atom: &Atom, nx: i16, ny: i16, trunks: &HashSet<(i32, i32
 /// - Leaves attach to the highest Stem (or Nucleus if leafless chassis).
 /// - Stemless bodies stay stemless: olive only elongates painted Stem.
 /// - New Stem needs a Moore gap from other live/dead trunks (leaves may touch).
-pub fn try_grow_shoot(atom: &mut Atom, tick: u64, trunks: &HashSet<(i32, i32)>) -> f32 {
+pub fn try_grow_shoot(
+    atom: &mut Atom,
+    tick: u64,
+    trunks: &HashSet<(i32, i32)>,
+    caps: &PlantGrowthCaps,
+) -> f32 {
     let (w_stem, w_leaf, _) = atom.genome.alloc_weights();
     let tank = tank_ref(atom);
     if atom.energy < tank * (LAND_GROW_ENERGY_FRAC + 0.08) {
@@ -902,10 +948,10 @@ pub fn try_grow_shoot(atom: &mut Atom, tick: u64, trunks: &HashSet<(i32, i32)>) 
     }
 
     // Hard lock: no painted Stem ⇒ no trunk, regardless of alloc_stem.
-    let can_grow_stem = n_stem > 0 && n_stem < MAX_STEM_MODULES && w_stem >= 0.08;
+    let can_grow_stem = n_stem > 0 && n_stem < caps.max_stems && w_stem >= 0.08;
 
     let place_leaf = |atom: &mut Atom, occupied: &HashSet<(i16, i16)>| -> bool {
-        if n_photo >= MAX_PHOTO_MODULES {
+        if n_photo >= caps.max_photos.max(1) {
             return false;
         }
         // Attach beside the tallest stem (or nucleus if leafless chassis).
@@ -1047,6 +1093,7 @@ pub fn try_grow_plant(
     tick: u64,
     trunks: &HashSet<(i32, i32)>,
     live_roots: &HashSet<(i32, i32)>,
+    caps: &PlantGrowthCaps,
 ) -> f32 {
     if atom.age_ticks % LAND_GROW_PERIOD != 0 {
         return 0.0;
@@ -1057,14 +1104,14 @@ pub fn try_grow_plant(
     // Weighted pick: try preferred tissue first, then the other.
     let try_root_first = roll < w_root || (w_root >= w_stem && w_root >= w_leaf);
     if try_root_first {
-        spent += try_elongate_root(world, atom, live_roots);
+        spent += try_elongate_root(world, atom, live_roots, caps);
         if spent <= 0.0 {
-            spent += try_grow_shoot(atom, tick, trunks);
+            spent += try_grow_shoot(atom, tick, trunks, caps);
         }
     } else {
-        spent += try_grow_shoot(atom, tick, trunks);
+        spent += try_grow_shoot(atom, tick, trunks, caps);
         if spent <= 0.0 {
-            spent += try_elongate_root(world, atom, live_roots);
+            spent += try_elongate_root(world, atom, live_roots, caps);
         }
     }
     spent

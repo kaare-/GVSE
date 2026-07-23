@@ -55,6 +55,7 @@ pub use organism::{
 };
 pub use plant::{
     find_fungus_slot, find_plant_slot, find_surface_air_slot, is_land_plant, sync_alloc_to_body,
+    PlantGrowthCaps, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use shade::{build_canopy_index, effective_photo_light, CanopyIndex};
 pub use heatmap::Heatmap;
