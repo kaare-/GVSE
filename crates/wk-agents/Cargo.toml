@@ -1,0 +1,14 @@
+[package]
+name = "wk-agents"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# 0.11 needs a newer rustc than 1.83 for `query_disjoint_mut::<_>()`.
+hecs = "=0.10.5"
+wk-material = { path = "../wk-material" }
+wk-world = { path = "../wk-world" }
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+
+[dev-dependencies]

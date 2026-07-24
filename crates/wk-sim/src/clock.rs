@@ -32,6 +32,42 @@ pub enum SubsystemId {
     /// neighbour. Post-barrier direct-mutation pass, like PhaseChange
     /// and LakeLevel.
     Slumping = 11,
+    /// Thermal field diffusion (geothermal bottom + sky top). Writes
+    /// only field state; runs after the material barrier so
+    /// phase_change can sample the committed field.
+    ThermalField = 12,
+    /// Atmospheric relative-humidity diffusion. Reads open-water /
+    /// evaporation source buffers; evaporation samples the field for
+    /// its rate. Post-barrier like ThermalField.
+    HumidityField = 13,
+    /// Hydrostatic + buoyancy pressure field. Feeds WindField.
+    PressureField = 14,
+    /// Wind from −∇pressure (+ climate bias). Weather samples this.
+    WindField = 15,
+    /// Groundwater hydraulic-head Darcy diffusion. Moisture transfers
+    /// still happen in `Groundwater`; this pass updates the head field.
+    GroundwaterHeadField = 16,
+    /// Dissolved-mineral concentration (kg/m³). Diffuses in wet cells;
+    /// karst injects dissolved mass into this field.
+    DissolvedField = 17,
+    /// Flux-driven limestone dissolution + void growth.
+    Karst = 18,
+    /// Surface water capture into open voids + cave-river flow.
+    VoidWater = 19,
+    /// Roof collapse over voids wider than `roof_span_max_m`.
+    RoofCollapse = 20,
+    /// Speleothem reprecipitation (dissolved → Limestone inside voids).
+    Speleogenesis = 21,
+    /// Per-column plant growth / death / nutrient recycle.
+    Ecology = 22,
+    /// ECS creature behaviour (grazers).
+    Agents = 23,
+    /// Per-column air / dissolved CO₂ + O₂ mixing and exchange.
+    Gas = 24,
+    /// Wind stress + gravity-wave momentum on the free surface, plus tide.
+    /// Post-barrier; runs before LakeLevel so deep water isn't flattened
+    /// back to a sheet every tick.
+    SurfaceWaves = 25,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -41,7 +77,7 @@ pub struct SubsystemSchedule {
     pub phase: u32,
 }
 
-pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 12] = [
+pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 26] = [
     SubsystemSchedule {
         id: SubsystemId::SurfaceWater,
         period: 1,
@@ -54,18 +90,17 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 12] = [
     },
     SubsystemSchedule {
         id: SubsystemId::RainInject,
-        // Fires every tick (not every 6th) so rain is delivered smoothly
-        // instead of as a periodic lump — a discrete "dump" of mass every
-        // few ticks, combined with the also-periodic LakeLevel pass at a
-        // *different* period, was creating a beat-frequency interference
-        // pattern (their periods' LCM) that looked like waves periodically
-        // appearing and disappearing.
+        // Every tick so rain is smooth. (A past RainInject×LakeLevel period
+        // mismatch made beat-frequency "fake waves"; real free-surface
+        // motion now lives in SurfaceWaves.)
         period: 1,
         phase: 0,
     },
     SubsystemSchedule {
         id: SubsystemId::Infiltration,
-        period: 60,
+        // Was 60 — surface runoff emptied puddles before soak. Every 5
+        // ticks with a higher coeff lets rain actually wet the soil.
+        period: 5,
         phase: 0,
     },
     SubsystemSchedule {
@@ -85,22 +120,24 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 12] = [
     },
     SubsystemSchedule {
         id: SubsystemId::LakeLevel,
-        // Every tick, smoothly (see LAKE_LEVEL_BLEND) — matches RainInject's
-        // period so there's no beat-frequency interference between the two.
-        period: 1,
+        // Every 2 ticks with gentle blend. On a full ring most cells are
+        // already at level, so per-tick was a waste of a ring walk.
+        period: 2,
         phase: 0,
     },
     SubsystemSchedule {
         id: SubsystemId::Groundwater,
-        // Every tick too — same reasoning as RainInject/LakeLevel, avoids
-        // introducing a new periodic driver that could beat against them.
-        period: 1,
+        // Every 2 ticks — pore-water flow is slow vs surface flow. Cost
+        // per invocation is ring-wide so halving cadence saves ~0.3 ms/tick.
+        period: 2,
         phase: 0,
     },
     SubsystemSchedule {
         id: SubsystemId::PhaseChange,
-        period: 1,
-        phase: 0,
+        // Freeze/melt is temperature-driven and slow; ring-wide pass
+        // every 4 ticks is plenty.
+        period: 4,
+        phase: 1,
     },
     SubsystemSchedule {
         id: SubsystemId::Weather,
@@ -111,22 +148,102 @@ pub const SUBSYSTEM_SCHEDULES: [SubsystemSchedule; 12] = [
     },
     SubsystemSchedule {
         id: SubsystemId::Slumping,
-        // Every tick, but the transfer per tick is small (SLUMP_RELAXATION
-        // = 0.35 of the excess). A big cliff collapses over a few frames
-        // rather than instantly, which reads as a natural slide.
+        // Every 8 ticks. Building the ring-wide top-solid snapshot cost
+        // ~5 ms even when nothing was above repose; a big cliff still
+        // collapses over several invocations at the new cadence.
+        period: 8,
+        phase: 0,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::ThermalField,
+        // Every 20 ticks — heat is slow vs hydrology; deeper ring maps
+        // made period-10 over all chunks dominate the frame budget.
+        period: 20,
+        phase: 0,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::HumidityField,
+        // Same cadence as thermal, phase-staggered so the two field
+        // passes don't always fire on the same tick.
+        period: 20,
+        phase: 3,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::PressureField,
+        period: 30,
+        phase: 5,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::WindField,
+        // One tick after pressure so wind samples the committed field.
+        period: 30,
+        phase: 6,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::GroundwaterHeadField,
+        period: 30,
+        phase: 10,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::DissolvedField,
+        // Slow diffusion; every 30 ticks matches other big field grids.
+        // On a full ring most chunks hold zero dissolved mass anyway and
+        // are skipped by the quiescence check in `run_dissolved_field`.
+        period: 30,
+        phase: 2,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::Karst,
+        // Slow vs hydrology; caves develop over many ticks.
+        period: 6,
+        phase: 4,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::VoidWater,
+        // Every 2 ticks — cave fill/flow is slow vs surface hydrology, and
+        // cliff worldgen can leave thousands of dry cavities in the ring.
+        period: 2,
+        phase: 0,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::RoofCollapse,
+        period: 10,
+        phase: 7,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::Speleogenesis,
+        period: 30,
+        phase: 15,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::Ecology,
+        // Plants are slow vs hydrology; keep the tick budget light.
+        period: 10,
+        phase: 8,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::Agents,
+        period: 1,
+        phase: 0,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::Gas,
+        period: 4,
+        phase: 1,
+    },
+    SubsystemSchedule {
+        id: SubsystemId::SurfaceWaves,
+        // Every tick, but flux is active-layer capped and writeback skips
+        // density-settle — cheap enough for full-ring oceans.
         period: 1,
         phase: 0,
     },
 ];
 
-/// Fixed execution order for subsystems within one tick. PhaseChange
-/// and LakeLevel are deliberately NOT here — they're direct-mutation
-/// passes that run *after* barrier_commit so they operate on already-
-/// committed column state. Running them here would let them modify a
-/// column's top layer between the buffered subsystems that computed
-/// deltas against the old top and barrier_commit that tries to apply
-/// those deltas (which then silently no-op, leaking mass into the
-/// bookkeeping equation).
+/// Fixed execution order for subsystems within one tick. PhaseChange,
+/// LakeLevel, Slumping, and the field passes are deliberately NOT here
+/// — they're direct-mutation passes that run *after* barrier_commit so
+/// they operate on already-committed column (and field) state.
 pub const SUBSYSTEM_ORDER: [SubsystemId; 9] = [
     SubsystemId::RainInject,
     SubsystemId::Weather,

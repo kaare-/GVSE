@@ -2,11 +2,12 @@
 
 use serde::{Deserialize, Serialize};
 
-pub const MATERIAL_COUNT: usize = 11;
+pub const MATERIAL_COUNT: usize = 12;
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
 pub const MAX_LAYERS: usize = 8;
 pub const CHUNK_W: usize = 64;
-pub const MAX_LOADED_CHUNKS: usize = 96;
+/// Raised for grand ring maps (~192–256 chunks). Streaming can lower this later.
+pub const MAX_LOADED_CHUNKS: usize = 256;
 pub const MAX_MARKERS: usize = 64;
 pub const FIXED_SCALE: i64 = 1000;
 pub const MERGE_GAP: u64 = 100;
@@ -26,13 +27,10 @@ pub enum MaterialId {
     #[default]
     Sand = 2,
     Clay = 3,
-    /// Reserved for a future ecology / biomass pass. Real topsoil is
-    /// sand + clay + decayed organic matter *held together by living
-    /// roots*; without an ecology sim to grow and maintain those roots,
-    /// generating a free-floating "organic" layer would be dishonest
-    /// (and would, correctly, wash off any slope in the first storm).
-    /// Kept in the enum for save-file compatibility with older worlds
-    /// that did generate it; terrain generation no longer emits it.
+    /// Waterlogged organic detritus / sapropel. Denser than water so
+    /// dissolved creature corpses sink and build bed sediment. Terrain
+    /// generation does not emit it as a free dry layer (that would wash
+    /// off slopes); organism death is the live source.
     Organic = 4,
     Water = 5,
     Air = 6,
@@ -48,14 +46,19 @@ pub enum MaterialId {
     /// Very permeable (water flows through easily); harder to erode than
     /// sand but easier than clay. Beach cobbles, riverbed lag.
     Gravel = 10,
+    /// Soluble carbonate rock. High permeability + non-zero solubility
+    /// drive karst cave formation (stage 7). Do not represent caves as
+    /// Air layers — voids are sparse column annotations (see `Void`).
+    Limestone = 11,
 }
 
 impl MaterialId {
     /// Ground-forming solids (never fluid, never phase-changes at the
     /// world's normal temperature range).
-    pub const ALL_SOLIDS: [MaterialId; 6] = [
+    pub const ALL_SOLIDS: [MaterialId; 7] = [
         MaterialId::Bedrock,
         MaterialId::Stone,
+        MaterialId::Limestone,
         MaterialId::LooseRock,
         MaterialId::Gravel,
         MaterialId::Sand,
@@ -75,6 +78,7 @@ impl MaterialId {
             8 => Some(MaterialId::Ice),
             9 => Some(MaterialId::LooseRock),
             10 => Some(MaterialId::Gravel),
+            11 => Some(MaterialId::Limestone),
             _ => None,
         }
     }
@@ -91,6 +95,7 @@ impl MaterialId {
             self,
             MaterialId::Bedrock
                 | MaterialId::Stone
+                | MaterialId::Limestone
                 | MaterialId::LooseRock
                 | MaterialId::Gravel
                 | MaterialId::Sand
@@ -122,6 +127,14 @@ impl MaterialId {
 /// `temp <= threshold_c`, converts into `below` (if Some). This is what
 /// unifies "snow melts into water", "water freezes into ice", "ice thaws
 /// into water" — one mechanism, three different property rows.
+fn default_heat_capacity() -> f32 {
+    1.0
+}
+
+fn default_albedo() -> f32 {
+    0.25
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct PhaseChange {
     pub threshold_c: f32,
@@ -158,12 +171,89 @@ pub struct MaterialProps {
     ///
     /// `f32::INFINITY` = never slumps (bedrock, effectively stone).
     pub repose_rise_m: f32,
+    /// Thermal diffusivity in m²/s (game-tuned). Used by the thermal
+    /// field solver; values are larger than real-rock diffusivities so
+    /// heat redistributes on a playable timescale while remaining
+    /// stable at 0.5 m cells with a 10-tick field step.
+    pub thermal_diffusivity: f32,
+    /// Relative volumetric heat capacity (rock ≈ 1). Water and organics
+    /// are high so landscape / ponds lag climate snaps; air is low.
+    /// Voxel `Temperature` uses this for thermal inertia (not every tick).
+    #[serde(default = "default_heat_capacity")]
+    pub heat_capacity: f32,
+    /// Broadband surface albedo 0..1. Snow/ice reflect solar; water is dark.
+    #[serde(default = "default_albedo")]
+    pub albedo: f32,
+    /// 0–255 mineral solubility in flowing water. Limestone is non-zero;
+    /// everything else is 0. Karst dissolution (`run_karst`) is driven by
+    /// lateral water flux through soluble layers, not moisture-in-place.
+    pub solubility: u8,
+    /// Maximum horizontal void span (metres) this material can roof
+    /// before collapse. 0 = collapses immediately (sand/clay);
+    /// `f32::INFINITY` = never collapses as a roof (bedrock).
+    pub roof_span_max_m: f32,
 }
 
 pub struct MaterialRegistry;
 
+/// Runtime overrides for hydrology tuning (permeability / porosity).
+/// Cleared via [`MaterialRegistry::clear_hydro_overrides`].
+#[derive(Debug, Clone, Copy, Default)]
+struct HydroOverride {
+    permeability: Option<u8>,
+    porosity: Option<u8>,
+}
+
+fn hydro_overrides() -> &'static std::sync::RwLock<[HydroOverride; 12]> {
+    use std::sync::{OnceLock, RwLock};
+    static CELL: OnceLock<RwLock<[HydroOverride; 12]>> = OnceLock::new();
+    CELL.get_or_init(|| RwLock::new([HydroOverride::default(); 12]))
+}
+
 impl MaterialRegistry {
+    /// Effective props = base table + optional hydrology overrides.
     pub fn props(material: MaterialId) -> MaterialProps {
+        let mut p = Self::base_props(material);
+        let i = material as usize;
+        if let Ok(guard) = hydro_overrides().read() {
+            if let Some(o) = guard.get(i) {
+                if let Some(v) = o.permeability {
+                    p.permeability = v;
+                }
+                if let Some(v) = o.porosity {
+                    p.porosity = v;
+                }
+            }
+        }
+        p
+    }
+
+    /// Override permeability (0–255). Used by the voxel settings menu.
+    pub fn set_permeability_override(material: MaterialId, value: u8) {
+        if let Ok(mut guard) = hydro_overrides().write() {
+            if let Some(slot) = guard.get_mut(material as usize) {
+                slot.permeability = Some(value);
+            }
+        }
+    }
+
+    /// Override porosity / water capacity for solids (0–255).
+    pub fn set_porosity_override(material: MaterialId, value: u8) {
+        if let Ok(mut guard) = hydro_overrides().write() {
+            if let Some(slot) = guard.get_mut(material as usize) {
+                slot.porosity = Some(value);
+            }
+        }
+    }
+
+    pub fn clear_hydro_overrides() {
+        if let Ok(mut guard) = hydro_overrides().write() {
+            *guard = [HydroOverride::default(); 12];
+        }
+    }
+
+    /// Compile-time material table (ignores runtime overrides).
+    pub fn base_props(material: MaterialId) -> MaterialProps {
         match material {
             MaterialId::Bedrock => MaterialProps {
                 density: 2700,
@@ -174,6 +264,11 @@ impl MaterialRegistry {
                 phase_change: None,
                 render_alpha: 255,
                 repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.001,
+                heat_capacity: 7.0,
+                albedo: 0.2,
+                solubility: 0,
+                roof_span_max_m: f32::INFINITY,
             },
             MaterialId::Stone => MaterialProps {
                 density: 2600,
@@ -185,6 +280,11 @@ impl MaterialRegistry {
                 render_alpha: 255,
                 // Effectively cliff-stable — bedded stone doesn't slump.
                 repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0012,
+                heat_capacity: 5.5,
+                albedo: 0.25,
+                solubility: 0,
+                roof_span_max_m: 15.0,
             },
             MaterialId::Sand => MaterialProps {
                 density: 1600,
@@ -201,6 +301,11 @@ impl MaterialRegistry {
                 render_alpha: 255,
                 // ~31° angle of repose over a 0.25 m column width.
                 repose_rise_m: 0.15,
+                thermal_diffusivity: 0.0018,
+                heat_capacity: 2.2,
+                albedo: 0.35,
+                solubility: 0,
+                roof_span_max_m: 0.0,
             },
             MaterialId::LooseRock => MaterialProps {
                 density: 2500,
@@ -213,6 +318,11 @@ impl MaterialRegistry {
                 // ~45° — cobbles interlock but a very steep talus
                 // slope still gives way under load.
                 repose_rise_m: 0.25,
+                thermal_diffusivity: 0.0015,
+                heat_capacity: 3.0,
+                albedo: 0.3,
+                solubility: 0,
+                roof_span_max_m: 2.0,
             },
             MaterialId::Gravel => MaterialProps {
                 density: 2000,
@@ -224,6 +334,11 @@ impl MaterialRegistry {
                 render_alpha: 255,
                 // ~40° — larger, more interlocking grains than sand.
                 repose_rise_m: 0.20,
+                thermal_diffusivity: 0.0018,
+                heat_capacity: 2.5,
+                albedo: 0.3,
+                solubility: 0,
+                roof_span_max_m: 0.5,
             },
             MaterialId::Clay => MaterialProps {
                 density: 1900,
@@ -236,16 +351,28 @@ impl MaterialRegistry {
                 // Cohesive but slumps once saturated (which run_sediment
                 // already reflects via the wet-erosion multiplier).
                 repose_rise_m: 0.22,
+                thermal_diffusivity: 0.0012,
+                heat_capacity: 3.5,
+                albedo: 0.22,
+                solubility: 0,
+                roof_span_max_m: 0.0,
             },
             MaterialId::Organic => MaterialProps {
-                density: 600,
+                // > water so corpse ooze settles on the bed instead of
+                // floating as a dry litter cap (the old density-600 behaviour).
+                density: 1150,
                 permeability: 120,
-                erosion_resistance: 60,
-                cohesion: 100,
+                erosion_resistance: 40,
+                cohesion: 80,
                 porosity: 200,
                 phase_change: None,
                 render_alpha: 255,
                 repose_rise_m: 0.10,
+                thermal_diffusivity: 0.002,
+                heat_capacity: 3.5,
+                albedo: 0.18,
+                solubility: 0,
+                roof_span_max_m: 0.0,
             },
             MaterialId::Water => MaterialProps {
                 density: 1000,
@@ -266,6 +393,11 @@ impl MaterialRegistry {
                 // surface-water flow already handles their lateral
                 // spreading. Marked infinite so run_slumping ignores.
                 repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0015,
+                heat_capacity: 10.0,
+                albedo: 0.08,
+                solubility: 0,
+                roof_span_max_m: 0.0,
             },
             MaterialId::Air => MaterialProps {
                 density: 0,
@@ -276,6 +408,11 @@ impl MaterialRegistry {
                 phase_change: None,
                 render_alpha: 0,
                 repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.004,
+                heat_capacity: 0.25,
+                albedo: 0.0,
+                solubility: 0,
+                roof_span_max_m: 0.0,
             },
             MaterialId::Snow => MaterialProps {
                 density: 900,
@@ -291,6 +428,11 @@ impl MaterialRegistry {
                 render_alpha: 240,
                 // Snow slides easily on steeper slopes (avalanches).
                 repose_rise_m: 0.12,
+                thermal_diffusivity: 0.001,
+                heat_capacity: 2.0,
+                albedo: 0.75,
+                solubility: 0,
+                roof_span_max_m: 0.0,
             },
             MaterialId::Ice => MaterialProps {
                 density: 917,
@@ -307,6 +449,28 @@ impl MaterialRegistry {
                 // Ice creeps like a glacier over long time scales; on
                 // the sim's tick scale it's effectively rigid.
                 repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.001,
+                heat_capacity: 5.0,
+                albedo: 0.55,
+                solubility: 0,
+                roof_span_max_m: 0.0,
+            },
+            MaterialId::Limestone => MaterialProps {
+                density: 2500,
+                // Much higher than stone — water infiltrates and flows
+                // laterally through limestone, which is why karst forms.
+                permeability: 140,
+                erosion_resistance: 150,
+                cohesion: 180,
+                porosity: 40,
+                phase_change: None,
+                render_alpha: 255,
+                repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0011,
+                heat_capacity: 5.0,
+                albedo: 0.28,
+                solubility: 40,
+                roof_span_max_m: 10.0,
             },
         }
     }
@@ -325,12 +489,17 @@ impl MaterialRegistry {
             // Mix of tan and grey (mixed-grain aggregate).
             MaterialId::Gravel => [0xB4, 0xA4, 0x80],
             MaterialId::Sand => [0xE8, 0xD6, 0x6B],
-            MaterialId::Clay => [0x80, 0x40, 0x00],
-            MaterialId::Organic => [0x00, 0xAA, 0x00],
+            // Cool dusty tan — far from living Root sienna `#7A4B2A`
+            // (was `#804000`, which read as the same brown underground).
+            MaterialId::Clay => [0xB8, 0xA4, 0x90],
+            // Dark olive mud — reads as bed ooze, not living green.
+            MaterialId::Organic => [0x3A, 0x4A, 0x28],
             MaterialId::Water => [0x23, 0x64, 0xD2],
             MaterialId::Air => [0x87, 0xCE, 0xEB],
             MaterialId::Snow => [0xF6, 0xF8, 0xFF],
             MaterialId::Ice => [0xC7, 0xE0, 0xF2],
+            // Warm pale grey — distinct from cooler Stone.
+            MaterialId::Limestone => [0xC8, 0xC2, 0xB0],
         }
     }
 }

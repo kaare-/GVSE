@@ -3,10 +3,13 @@
 use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M, CHUNK_W};
 
 use crate::chunk::Chunk;
-use crate::column::Column;
+use crate::climate::biome_for;
+use crate::column::{Column, Ecology, VoidOrigin};
 
 /// Deepest bedrock reference elevation (metres). Ocean floor sits above this.
-pub const BEDROCK_FLOOR_M: f32 = -45.0;
+/// Deep enough for abyssal plains hundreds of metres below sea level while
+/// still leaving headroom under kilometre-scale peaks.
+pub const BEDROCK_FLOOR_M: f32 = -900.0;
 
 pub fn hash_u64(seed: u64, x: i64, y: i64, salt: u64) -> u64 {
     let mut z = seed.wrapping_add(salt);
@@ -111,6 +114,14 @@ pub fn fill_column_strata(
     col.activity = crate::column::Activity::HydrologyActive;
 }
 
+/// Seed stage-8 ecology from biome at the column's climate elevation.
+/// `sea_level` defaults to 0 when the caller doesn't care (flat test beds).
+pub fn seed_column_ecology(col: &mut Column, sea_level: f32) {
+    let biome = biome_for(col.climate_elevation(), sea_level);
+    let rel = col.climate_elevation() - sea_level;
+    col.ecology = Ecology::seed_from_biome(biome, rel);
+}
+
 /// Bulk-sediment budget for one column, split across the five stratigraphic
 /// materials the terrain generator can lay down. Values are in kg; the
 /// fill routine converts them to layer thicknesses through each
@@ -171,21 +182,25 @@ fn sediment_composition(surface_y: f32, sea_level: f32) -> SedimentMix {
         sand: 4200.0,
         gravel: 900.0,
         looserock: 0.0,
-        stone: 6000.0,
+        // Thick diggable stone under beaches — roots stop at Bedrock, not
+        // a paper-thin rock crust.
+        stone: 12_000.0,
         clay: 200.0,
     };
     let plains = SedimentMix {
         sand: 3800.0,
         gravel: 500.0,
         looserock: 0.0,
-        stone: 9000.0,
+        stone: 18_000.0,
         clay: 400.0,
     };
     let mountain = SedimentMix {
         sand: 1200.0,
         gravel: 1200.0,
         looserock: 5000.0,
-        stone: 15000.0,
+        // Wide Stone sleeve so cliffs / peaks read as rock (and host
+        // cavities) instead of near-surface Bedrock.
+        stone: 40_000.0,
         clay: 0.0,
     };
 
@@ -223,8 +238,24 @@ pub fn fill_bathymetry_column(
     let sand_mass = mix.sand as i64;
     let gravel_mass = mix.gravel as i64;
     let looserock_mass = mix.looserock as i64;
-    let stone_mass = mix.stone as i64;
     let clay_mass = mix.clay as i64;
+    // Emergent land: enforce a minimum diggable Stone sleeve so Bedrock
+    // (impenetrable to roots) stays well below the rooting / cliff band.
+    let mut stone_mass = mix.stone as i64;
+    let rel = surface_y - sea_level;
+    if rel > 0.5 {
+        let min_stone_m = if rel > 40.0 {
+            48.0
+        } else if rel > 18.0 {
+            28.0
+        } else {
+            14.0
+        };
+        let have = mass_to_height_m(MaterialId::Stone, stone_mass);
+        if have < min_stone_m {
+            stone_mass = mass_for_height(MaterialId::Stone, min_stone_m);
+        }
+    }
 
     let sediment_h = mass_to_height_m(MaterialId::Sand, sand_mass)
         + mass_to_height_m(MaterialId::Gravel, gravel_mass)
@@ -254,12 +285,8 @@ pub fn fill_bathymetry_column(
         col.deposit_to_top(MaterialId::Sand, sand_mass, tick);
     }
 
-    // Deliberately no vegetation cover / topsoil layer. Real topsoil is
-    // sand and clay mixed with organic matter and held together by
-    // roots; without an ecology sim to grow those roots, a pure
-    // "organic" layer would just be geology fiction and would (correctly)
-    // wash straight off any slope on the first heavy rain. Bare rock and
-    // loose sediment is what we can honestly generate for now.
+    // Vegetation is not an Organic stratigraphic layer (density settling
+    // would float it). Stage 8 seeds a per-column Ecology bucket instead.
     let _ = seed;
     let _ = world_x;
 
@@ -271,6 +298,8 @@ pub fn fill_bathymetry_column(
     // rendering pass or column-state flag. `deposit_to_top` handles the
     // surface_y bookkeeping for us.
     fill_up_to_sea_level(col, sea_level, tick);
+    seed_column_water_table(col, sea_level);
+    seed_column_ecology(col, sea_level);
 }
 
 /// If this column's natural terrain surface sits below sea level, tops
@@ -290,6 +319,17 @@ pub fn fill_up_to_sea_level(col: &mut Column, sea_level: f32, tick: u64) {
     if mass > 0 {
         col.deposit_to_top(MaterialId::Water, mass, tick);
     }
+}
+
+/// Seed pore moisture so the regional water table sits near `sea_level`
+/// from the first tick — ocean beds fully saturated, coastal land wet
+/// up to the table, high ground holding a modest base saturation.
+///
+/// Without this, continental gen left `moisture = 0` everywhere and the
+/// ocean spent the early sim soaking into dry sand (and looking empty
+/// underground on the water-table overlay).
+pub fn seed_column_water_table(col: &mut Column, sea_level: f32) {
+    col.moisture = col.target_moisture_for_table(sea_level);
 }
 
 /// Low-frequency rolling ripple layered onto emergent land so there are
@@ -417,7 +457,294 @@ pub fn generate_chunk_continental(
             0,
         );
     }
+    seed_rock_face_cavities(&mut chunk, seed, sea_level);
     chunk
+}
+
+/// Remove diggable rock mass matching `height_m`, then open a void of the
+/// same height so `surface_y` stays stable (solids↓ + voids↑ cancel).
+fn punch_worldgen_cavity(
+    col: &mut Column,
+    mid_y: f32,
+    height_m: f32,
+    bedrock_y: f32,
+    origin: VoidOrigin,
+    light: u8,
+) {
+    if height_m <= 0.15 {
+        return;
+    }
+    let mut need = mass_for_height(MaterialId::Stone, height_m);
+    for i in 0..col.layer_count as usize {
+        if need <= 0 {
+            break;
+        }
+        let mat = col.layers[i].material;
+        if !matches!(
+            mat,
+            MaterialId::Stone
+                | MaterialId::Limestone
+                | MaterialId::LooseRock
+                | MaterialId::Gravel
+        ) {
+            continue;
+        }
+        let take = need.min(col.layers[i].thickness.max(0));
+        col.layers[i].thickness -= take;
+        need -= take;
+    }
+    // Drop emptied layers (keep stack compact for MAX_LAYERS headroom).
+    let mut write = 0usize;
+    let count = col.layer_count as usize;
+    for read in 0..count {
+        if col.layers[read].thickness > 0 {
+            if write != read {
+                col.layers[write] = col.layers[read];
+            }
+            write += 1;
+        }
+    }
+    col.layer_count = write as u8;
+
+    col.grow_void_at(mid_y, height_m, MaterialId::Stone, origin);
+    if let Some(v) = col.voids.last_mut() {
+        v.light = light;
+    }
+    col.recompute_surface_y(bedrock_y);
+}
+
+/// Seed alcoves / buried caves on steep rock faces and high relief.
+///
+/// Roots cannot enter Bedrock — cavities live in the widened Stone sleeve
+/// so cliff faces read as hollowed rock, not bare basement.
+pub fn seed_rock_face_cavities(chunk: &mut Chunk, seed: u64, sea_level: f32) {
+    let base = chunk.world_x_base();
+    let bedrock_y = chunk.bedrock_y;
+    let elevs: Vec<f32> = chunk
+        .columns
+        .iter()
+        .map(|c| c.climate_elevation())
+        .collect();
+
+    for i in 0..CHUNK_W {
+        let e = elevs[i];
+        // Allow sea-cliff mouths a little below sea level (wave-cut notches).
+        if e < sea_level - 6.0 {
+            continue;
+        }
+        let left = if i > 0 { elevs[i - 1] } else { e };
+        let right = if i + 1 < CHUNK_W { elevs[i + 1] } else { e };
+        let drop = (e - left).abs().max((e - right).abs());
+        let steep = drop > 2.8;
+        let high = e > sea_level + 28.0;
+        let wx = base + i as i32;
+        let roll = hash_f32(seed, wx as i64, 0xC4BE_u64);
+        // Sparse — thousands of dry cavities made every-tick void flow dominate
+        // the frame when the matcher was still O(n²). Keep mouths readable
+        // without carpeting the ring.
+        let chance = if steep {
+            0.28
+        } else if high && drop > 1.4 {
+            0.10
+        } else if high {
+            0.03
+        } else {
+            0.0
+        };
+        if roll > chance {
+            continue;
+        }
+
+        let h = 1.1 + hash_f32(seed, wx as i64, 0xC4B1) * 3.8;
+        // Low roll on a steep face → open alcove (cave mouth); else buried.
+        let open_mouth = steep && roll < chance * 0.45;
+        let depth = if open_mouth {
+            h * 0.35
+        } else {
+            2.0 + hash_f32(seed, wx as i64, 0xC4B2) * 9.0
+        };
+        let mid = e - depth;
+        // Don't punch into the deep Bedrock floor.
+        if mid - h * 0.5 < bedrock_y + 4.0 {
+            continue;
+        }
+        let light = if open_mouth { 235 } else { 35 + (roll * 80.0) as u8 };
+        let origin = if open_mouth {
+            VoidOrigin::Collapse
+        } else {
+            VoidOrigin::Karst
+        };
+        punch_worldgen_cavity(
+            &mut chunk.columns[i],
+            mid,
+            h,
+            bedrock_y,
+            origin,
+            light,
+        );
+    }
+}
+
+/// Ring facies chunk: periodic belts + stratigraphic recipes (`docs/STRATA.md`).
+pub fn generate_chunk_ring_facies(
+    coord: i32,
+    seed: u64,
+    bedrock_y: f32,
+    sea_level: f32,
+    topology: crate::worldgen::WorldTopology,
+) -> Chunk {
+    let coord = crate::worldgen::wrap_chunk_coord(topology, coord);
+    let mut chunk = Chunk::new(coord, bedrock_y);
+    let base = chunk.world_x_base();
+    for i in 0..CHUNK_W {
+        let wx = crate::worldgen::wrap_world_x(topology, base + i as i32);
+        let surface =
+            crate::worldgen::facies_surface_y(seed, topology, wx, sea_level);
+        fill_facies_column(
+            &mut chunk.columns[i],
+            surface,
+            bedrock_y,
+            sea_level,
+            seed,
+            topology,
+            wx,
+            0,
+        );
+    }
+    seed_rock_face_cavities(&mut chunk, seed, sea_level);
+    chunk
+}
+
+/// Dispatch chunk generation from [`crate::worldgen::WorldGenParams`].
+pub fn generate_chunk(
+    coord: i32,
+    seed: u64,
+    bedrock_y: f32,
+    sea_level: f32,
+    params: crate::worldgen::WorldGenParams,
+) -> Chunk {
+    match params.profile {
+        crate::worldgen::WorldGenProfile::LegacyContinental => {
+            generate_chunk_continental(coord, seed, bedrock_y, sea_level)
+        }
+        crate::worldgen::WorldGenProfile::RingFacies => {
+            generate_chunk_ring_facies(coord, seed, bedrock_y, sea_level, params.topology)
+        }
+    }
+}
+
+/// Facies-aware stack: named packages with limestone shelves, clay basins,
+/// and talus on high ground — still ≤7 solid layers before sea fill.
+pub fn fill_facies_column(
+    col: &mut Column,
+    surface_y: f32,
+    bedrock_y: f32,
+    sea_level: f32,
+    seed: u64,
+    topology: crate::worldgen::WorldTopology,
+    world_x: i32,
+    tick: u64,
+) {
+    use crate::worldgen::{facies_at, FaciesBelt};
+
+    col.layer_count = 0;
+    col.surface_y = bedrock_y;
+
+    let belt = facies_at(seed, topology, world_x);
+    let n = |salt: u64| hash_f32(seed, world_x as i64, salt);
+
+    // Package thicknesses (metres of solid above basement fill).
+    let (stone_m, mid_mat, mid_m, cover_mat, cover_m) = match belt {
+        FaciesBelt::Abyss => (6.0, MaterialId::Clay, 3.0 + n(11) * 1.0, MaterialId::Sand, 0.8),
+        FaciesBelt::Slope => (
+            12.0,
+            MaterialId::LooseRock,
+            5.0 + n(12) * 1.5,
+            MaterialId::Gravel,
+            2.0,
+        ),
+        FaciesBelt::Shelf => (
+            8.0,
+            MaterialId::Limestone,
+            8.0 + n(13) * 1.5,
+            MaterialId::Sand,
+            2.0,
+        ),
+        FaciesBelt::Marsh => (4.0, MaterialId::Clay, 3.5 + n(14) * 0.8, MaterialId::Sand, 1.0),
+        FaciesBelt::Coast => (14.0, MaterialId::Sand, 0.0, MaterialId::Sand, 5.0 + n(15) * 1.2),
+        FaciesBelt::Plains => (
+            22.0,
+            MaterialId::Clay,
+            2.5 + n(16) * 0.8,
+            MaterialId::Sand,
+            3.5,
+        ),
+        FaciesBelt::Foothills => (
+            42.0,
+            MaterialId::Gravel,
+            6.0 + n(17) * 2.0,
+            MaterialId::LooseRock,
+            4.0,
+        ),
+        FaciesBelt::HighRange => (
+            // Tall peaks: thick diggable Stone so roots / cliff cavities
+            // have room — Bedrock stays the deep impenetrable floor.
+            110.0,
+            MaterialId::Stone,
+            0.0,
+            MaterialId::LooseRock,
+            3.0 + n(18) * 2.0,
+        ),
+        FaciesBelt::RainShadow => (
+            28.0,
+            MaterialId::Sand,
+            4.0 + n(19) * 1.2,
+            MaterialId::LooseRock,
+            2.5,
+        ),
+        FaciesBelt::InteriorBasin => (
+            8.0,
+            MaterialId::Clay,
+            5.0 + n(20) * 1.2,
+            MaterialId::Sand,
+            2.0,
+        ),
+    };
+
+    let mut sediment_h = stone_m + mid_m + cover_m;
+    // Pinch mid package when very thin — frees a layer slot (unconformity cue).
+    let use_mid = mid_m > 0.35 && mid_mat != cover_mat;
+    if !use_mid {
+        sediment_h = stone_m + cover_m;
+    }
+    let bedrock_h = (surface_y - bedrock_y - sediment_h).max(2.0);
+
+    col.deposit_to_top(
+        MaterialId::Bedrock,
+        mass_for_height(MaterialId::Bedrock, bedrock_h),
+        tick,
+    );
+    if stone_m > 0.05 {
+        col.deposit_to_top(
+            MaterialId::Stone,
+            mass_for_height(MaterialId::Stone, stone_m),
+            tick,
+        );
+    }
+    if use_mid {
+        col.deposit_to_top(mid_mat, mass_for_height(mid_mat, mid_m), tick);
+    }
+    if cover_m > 0.05 {
+        col.deposit_to_top(cover_mat, mass_for_height(cover_mat, cover_m), tick);
+    }
+
+    col.recompute_surface_y(bedrock_y);
+    col.activity = crate::column::Activity::HydrologyActive;
+    fill_up_to_sea_level(col, sea_level, tick);
+    seed_column_water_table(col, sea_level);
+    // Wet belts get a slightly richer ecology seed via elevation proxy.
+    seed_column_ecology(col, sea_level);
+    let _ = topology;
 }
 
 pub fn generate_chunk_hill(coord: i32, seed: u64, center: i32, bedrock_y: f32) -> Chunk {
@@ -428,6 +755,8 @@ pub fn generate_chunk_hill(coord: i32, seed: u64, center: i32, bedrock_y: f32) -
         let surface = gaussian_hill_surface(seed, wx, center, 30.0, bedrock_y + 5.0, 25.0);
         let col = &mut chunk.columns[i];
         fill_column_strata(col, surface, bedrock_y, 5000, 8000, 0);
+        // Scenario worlds usually use sea_level≈0; biome seed follows that.
+        seed_column_ecology(col, 0.0);
     }
     chunk
 }
@@ -441,6 +770,7 @@ pub fn generate_chunk_basin(coord: i32, seed: u64, center: i32, bedrock_y: f32) 
         let col = &mut chunk.columns[i];
         fill_column_strata(col, surface, bedrock_y, 1000, 5000, 0);
         col.deposit_to_top(MaterialId::Clay, 3000, 0);
+        seed_column_ecology(col, 0.0);
     }
     chunk
 }
@@ -459,6 +789,7 @@ pub fn generate_chunk_stratified_tilt(
             + (hash_f32(seed, wx as i64, 3) - 0.5) * 1.0;
         let col = &mut chunk.columns[i];
         fill_column_strata(col, surface, bedrock_y, 6000, 10000, 0);
+        seed_column_ecology(col, 0.0);
     }
     chunk
 }
@@ -467,6 +798,88 @@ pub fn generate_flat_sand(coord: i32, bedrock_y: f32, surface_y: f32) -> Chunk {
     let mut chunk = Chunk::new(coord, bedrock_y);
     for col in &mut chunk.columns {
         fill_column_strata(col, surface_y, bedrock_y, 8000, 5000, 0);
+        seed_column_ecology(col, 0.0);
     }
     chunk
 }
+
+/// Flat limestone bed under a thin sand cap — stage 7 karst scenarios.
+/// Stack (top→bottom after settle): Sand cap, Limestone body, Stone base.
+pub fn generate_limestone_bed(
+    coord: i32,
+    bedrock_y: f32,
+    stone_h: f32,
+    limestone_h: f32,
+    sand_h: f32,
+) -> Chunk {
+    let mut chunk = Chunk::new(coord, bedrock_y);
+    for col in &mut chunk.columns {
+        col.layer_count = 0;
+        col.surface_y = bedrock_y;
+        let stone_m = mass_for_height(MaterialId::Stone, stone_h);
+        let lime_m = mass_for_height(MaterialId::Limestone, limestone_h);
+        let sand_m = mass_for_height(MaterialId::Sand, sand_h);
+        // Deposit bottom-first via repeated top deposits + settle.
+        col.deposit_to_top(MaterialId::Stone, stone_m, 0);
+        col.deposit_to_top(MaterialId::Limestone, lime_m, 0);
+        col.deposit_to_top(MaterialId::Sand, sand_m, 0);
+        col.settle_by_density(0);
+        col.recompute_surface_y(bedrock_y);
+    }
+    chunk
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn stone_height_m(col: &Column) -> f32 {
+        (0..col.layer_count as usize)
+            .filter(|&i| col.layers[i].material == MaterialId::Stone)
+            .map(|i| mass_to_height_m(MaterialId::Stone, col.layers[i].thickness))
+            .sum()
+    }
+
+    #[test]
+    fn emergent_land_has_thick_stone_sleeve() {
+        let mut col = Column::default();
+        fill_bathymetry_column(&mut col, 40.0, BEDROCK_FLOOR_M, 0.0, 1, 100, 0);
+        let stone_h = stone_height_m(&col);
+        assert!(
+            stone_h >= 28.0,
+            "mountainous land needs diggable stone ≥28 m (got {stone_h})"
+        );
+    }
+
+    #[test]
+    fn steep_faces_seed_cavities() {
+        // Artificial cliff: left low, right high within one chunk.
+        // Seeding is sparse/stochastic — try a few seeds so the test isn't
+        // brittle against the tuned chance.
+        let mut found = false;
+        for seed in [42u64, 7, 99, 1234, 99991, 0xC4BE] {
+            let mut chunk = Chunk::new(0, 0.0);
+            for i in 0..CHUNK_W {
+                let surface = if i < CHUNK_W / 2 { 8.0 } else { 40.0 };
+                fill_bathymetry_column(
+                    &mut chunk.columns[i],
+                    surface,
+                    0.0,
+                    0.0,
+                    seed,
+                    i as i32,
+                    0,
+                );
+            }
+            let before: usize = chunk.columns.iter().map(|c| c.voids.len()).sum();
+            seed_rock_face_cavities(&mut chunk, seed, 0.0);
+            let after: usize = chunk.columns.iter().map(|c| c.voids.len()).sum();
+            if after > before {
+                found = true;
+                break;
+            }
+        }
+        assert!(found, "cliff contact should punch rock-face cavities for some seed");
+    }
+}
+

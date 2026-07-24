@@ -7,6 +7,8 @@ use wk_world::column::SedimentLoad;
 pub struct CellTransferBuffer {
     pub water_delta: [i64; CHUNK_W],
     pub moisture_delta: [i64; CHUNK_W],
+    /// Atomic water→moisture (infiltration).
+    pub infil_delta: [i64; CHUNK_W],
     /// Net signed change (a subsystem removing mass this tick logs a
     /// negative value here; incoming payloads with material identity
     /// go through `sediment_inflow` instead so we don't lose track of
@@ -33,6 +35,7 @@ impl Default for CellTransferBuffer {
         Self {
             water_delta: [0; CHUNK_W],
             moisture_delta: [0; CHUNK_W],
+            infil_delta: [0; CHUNK_W],
             sediment_delta: [0; CHUNK_W],
             sediment_inflow: [SedimentLoad::default(); CHUNK_W],
             erosion_request: [0; CHUNK_W],

@@ -1,0 +1,245 @@
+//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
+//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
+//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
+//!
+//! Parallel helpers for one checkerboard colour pass.
+//!
+//! Within a single colour, orthogonal neighbours never co-occur, and
+//! gravity/grain **pull** only writes the active chunk plus (at most)
+//! the `cy + 1` neighbour. Those write sets are disjoint across the
+//! pass, so we can hand each [`ActiveChunk`] to a rayon task.
+//!
+//! Concurrent `HashMap` mutation is still UB, so tasks touch chunks
+//! only through raw pointers gathered **before** the parallel region
+//! (same idea as `slice::split_at_mut`).
+
+use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+use rayon::prelude::*;
+
+use crate::active::ActiveChunk;
+use crate::cell::Cell;
+use crate::chunk::{Chunk, ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::grid::World;
+
+/// Global switch — default on. Tests that need a pure serial path
+/// call [`set_parallel_enabled`]`(false)`.
+static PARALLEL_ENABLED: AtomicBool = AtomicBool::new(true);
+
+/// Enable or disable rayon checkerboard work (process-wide).
+pub fn set_parallel_enabled(on: bool) {
+    PARALLEL_ENABLED.store(on, Ordering::Relaxed);
+}
+
+pub fn parallel_enabled() -> bool {
+    PARALLEL_ENABLED.load(Ordering::Relaxed)
+}
+
+/// Minimum regions in one colour before we bother with rayon.
+const PARALLEL_MIN_REGIONS: usize = 2;
+
+pub(crate) fn should_parallelize(active: &[ActiveChunk]) -> bool {
+    parallel_enabled() && active.len() >= PARALLEL_MIN_REGIONS
+}
+
+/// Raw chunk pointers for one parallel colour pass.
+///
+/// # Safety contract
+/// - Built from unique coords; HashMap is not resized while alive.
+/// - Only `Chunk` payloads are mutated; distinct coords do not alias.
+/// - Caller only shares this across rayon tasks for one checkerboard
+///   colour (disjoint pull write-sets — see module docs).
+pub(crate) struct ChunkPtrMap {
+    map: HashMap<ChunkCoord, *mut Chunk>,
+}
+
+// SAFETY: checkerboard + pull write-set disjointness (module docs).
+unsafe impl Send for ChunkPtrMap {}
+unsafe impl Sync for ChunkPtrMap {}
+
+impl ChunkPtrMap {
+    pub(crate) fn get(&self, coord: &ChunkCoord) -> Option<*mut Chunk> {
+        self.map.get(coord).copied()
+    }
+}
+
+/// Gather `*mut Chunk` for every coordinate that a pull-pass may write.
+pub(crate) fn chunk_ptrs_mut(world: &mut World, coords: &[ChunkCoord]) -> ChunkPtrMap {
+    let map = &mut world.chunks as *mut HashMap<ChunkCoord, Chunk>;
+    let mut out = HashMap::with_capacity(coords.len());
+    for &coord in coords {
+        // Sequential get_mut: each &mut is turned into a raw pointer
+        // and dropped before the next borrow.
+        let ptr = unsafe {
+            match (*map).get_mut(&coord) {
+                Some(chunk) => chunk as *mut Chunk,
+                None => continue,
+            }
+        };
+        out.insert(coord, ptr);
+    }
+    ChunkPtrMap { map: out }
+}
+
+/// Coords an active pull-region may write: itself and `cy + 1` (drain).
+pub(crate) fn pull_write_coords(active: &[ActiveChunk]) -> Vec<ChunkCoord> {
+    let mut coords = Vec::with_capacity(active.len() * 2);
+    for ac in active {
+        coords.push(ac.coord);
+        coords.push(ChunkCoord::new(ac.coord.cx, ac.coord.cy + 1));
+    }
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    coords.dedup();
+    coords
+}
+
+fn wrap_x(wrap_width: Option<i32>, gx: i32) -> i32 {
+    match wrap_width {
+        Some(w) if w > 0 => gx.rem_euclid(w),
+        _ => gx,
+    }
+}
+
+fn split(gx: i32, gy: i32) -> (ChunkCoord, usize, usize) {
+    let w = CHUNK_CELLS_W as i32;
+    let h = CHUNK_CELLS_H as i32;
+    let cx = gx.div_euclid(w);
+    let cy = gy.div_euclid(h);
+    let lx = gx.rem_euclid(w) as usize;
+    let ly = gy.rem_euclid(h) as usize;
+    (ChunkCoord::new(cx, cy), lx, ly)
+}
+
+pub(crate) unsafe fn get_cell(
+    ptrs: &ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> Option<Cell> {
+    let gx = wrap_x(wrap_width, gx);
+    let (coord, lx, ly) = split(gx, gy);
+    let ptr = ptrs.get(&coord)?;
+    Some(unsafe { (*ptr).get(lx, ly) })
+}
+
+pub(crate) unsafe fn set_cell(
+    ptrs: &ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+    cell: Cell,
+) {
+    let gx = wrap_x(wrap_width, gx);
+    let (coord, lx, ly) = split(gx, gy);
+    let Some(ptr) = ptrs.get(&coord) else {
+        return;
+    };
+    unsafe {
+        (*ptr).set(lx, ly, cell);
+    }
+}
+
+/// Run `body` on each active region, in parallel when enabled.
+pub(crate) fn for_each_region_parallel(
+    world: &mut World,
+    active: &[ActiveChunk],
+    body: impl Fn(&ChunkPtrMap, Option<i32>, &ActiveChunk) + Sync,
+) {
+    if active.is_empty() {
+        return;
+    }
+    let wrap_width = world.wrap_width;
+    let coords = pull_write_coords(active);
+    let ptrs = chunk_ptrs_mut(world, &coords);
+    if should_parallelize(active) {
+        active.par_iter().for_each(|ac| body(&ptrs, wrap_width, ac));
+    } else {
+        for ac in active {
+            body(&ptrs, wrap_width, ac);
+        }
+    }
+}
+
+/// Parallel spill/seepage scans: each region produces a local result,
+/// then results are concatenated in stable `(cy, cx)` region order.
+pub(crate) fn map_regions_parallel<T, F>(active: &[ActiveChunk], f: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(&ActiveChunk) -> T + Sync,
+{
+    if active.is_empty() {
+        return Vec::new();
+    }
+    let mut regions: Vec<&ActiveChunk> = active.iter().collect();
+    regions.sort_by(|a, b| {
+        a.coord
+            .cy
+            .cmp(&b.coord.cy)
+            .then(a.coord.cx.cmp(&b.coord.cx))
+    });
+    if should_parallelize(active) {
+        regions.par_iter().map(|ac| f(ac)).collect()
+    } else {
+        regions.iter().map(|ac| f(ac)).collect()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::active::{checkerboard_phase, partition_checkerboard};
+    use crate::chunk::Rect;
+
+    #[test]
+    fn pull_write_coords_include_above_neighbour() {
+        let active = [ActiveChunk {
+            coord: ChunkCoord::new(0, 0),
+            rect: Rect::full(),
+        }];
+        let coords = pull_write_coords(&active);
+        assert!(coords.contains(&ChunkCoord::new(0, 0)));
+        assert!(coords.contains(&ChunkCoord::new(0, 1)));
+    }
+
+    #[test]
+    fn same_colour_pull_write_sets_are_disjoint() {
+        let active: Vec<ActiveChunk> = [
+            ChunkCoord::new(0, 0),
+            ChunkCoord::new(2, 0),
+            ChunkCoord::new(0, 2),
+            ChunkCoord::new(2, 2),
+            ChunkCoord::new(1, 1),
+        ]
+        .into_iter()
+        .map(|coord| ActiveChunk {
+            coord,
+            rect: Rect::full(),
+        })
+        .collect();
+        let passes = partition_checkerboard(&active);
+        for pass in &passes {
+            if pass.len() < 2 {
+                continue;
+            }
+            // Per-region write sets (own + cy+1) must not overlap.
+            let mut claimed: HashMap<ChunkCoord, ChunkCoord> = HashMap::new();
+            for ac in pass {
+                for c in [
+                    ac.coord,
+                    ChunkCoord::new(ac.coord.cx, ac.coord.cy + 1),
+                ] {
+                    if let Some(prev) = claimed.insert(c, ac.coord) {
+                        panic!(
+                            "colour {} write-set overlap on {:?}: {:?} vs {:?}",
+                            checkerboard_phase(ac.coord),
+                            c,
+                            prev,
+                            ac.coord
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

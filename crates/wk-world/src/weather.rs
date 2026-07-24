@@ -17,6 +17,13 @@ pub struct Cloud {
     /// Remaining rain potential; depletes while actively raining, despawns
     /// at zero.
     pub moisture: f32,
+    /// True while this cloud is in an active precipitation burst.
+    /// Drives both hydrology and the rain-streak animation.
+    #[serde(default)]
+    pub raining: bool,
+    /// Ticks left in the current rain burst (`0` when idle).
+    #[serde(default)]
+    pub rain_ticks_left: u16,
 }
 
 impl Cloud {
@@ -33,25 +40,39 @@ pub struct WeatherSettings {
     pub cloud_spawn_interval_ticks: u64,
     pub cloud_rain_rate: f32,
     pub max_clouds: usize,
-    /// Probability, per tick, that a given cloud is actively precipitating
-    /// (rather than just drifting). A cloud that rained continuously every
-    /// tick it had any land underneath would exhaust its whole moisture
-    /// budget within a few dozen ticks — nowhere near enough real distance,
-    /// at a believable drift speed, to ever reach terrain far from the
-    /// coast. Intermittent rain spreads a fixed moisture budget over a much
-    /// longer stretch of travel, and matches "sometimes rains" rather than
-    /// a constant drizzle under every cloud.
+    /// Probability, per tick, that an idle cloud *starts* a rain burst.
+    /// Bursts then rain continuously for `rain_burst_*` ticks so weather
+    /// systems read as fronts rather than single-tick sprinkles.
     pub rain_chance_per_tick: f32,
+    /// Minimum length of a precipitation burst (ticks).
+    #[serde(default = "default_rain_burst_min")]
+    pub rain_burst_ticks_min: u16,
+    /// Maximum length of a precipitation burst (ticks).
+    #[serde(default = "default_rain_burst_max")]
+    pub rain_burst_ticks_max: u16,
+}
+
+fn default_rain_burst_min() -> u16 {
+    50
+}
+fn default_rain_burst_max() -> u16 {
+    140
 }
 
 impl Default for WeatherSettings {
     fn default() -> Self {
         Self {
             weather_enabled: true,
-            cloud_spawn_interval_ticks: 3600,
-            cloud_rain_rate: 1.5,
-            max_clouds: 6,
-            rain_chance_per_tick: 0.015,
+            // Dense enough that a continental shelf sees regular cover
+            // and rain can offset open-water evaporative skin loss.
+            cloud_spawn_interval_ticks: 280,
+            cloud_rain_rate: 2.5,
+            max_clouds: 28,
+            // ~1% / tick to start a burst → frequent weather fronts without
+            // every cloud raining at once.
+            rain_chance_per_tick: 0.012,
+            rain_burst_ticks_min: default_rain_burst_min(),
+            rain_burst_ticks_max: default_rain_burst_max(),
         }
     }
 }

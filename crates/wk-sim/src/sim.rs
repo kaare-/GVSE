@@ -1,12 +1,17 @@
+use wk_agents::AgentStore;
 use wk_world::world::{OverlayData, World};
 
 use crate::barrier::barrier_commit;
 use crate::buffer::WorldTransferScratch;
 use crate::clock::{SimClock, SubsystemId, SUBSYSTEM_ORDER};
 use crate::subsystems::{
-    run_activity, run_evaporation, run_groundwater_flow, run_infiltration, run_lake_level,
-    run_layer_merge, run_phase_change, run_rain_inject, run_sediment, run_slumping,
-    run_surface_water, run_weather, SimParams,
+    run_activity, run_agents, run_dissolved_field, run_ecology, run_evaporation, run_gas,
+    recharge_deep_water_tables,
+    run_groundwater_flow, run_groundwater_head_field, run_humidity_field, run_infiltration,
+    run_karst, run_lake_level, run_layer_merge, run_phase_change, run_pressure_field,
+    run_rain_inject, run_roof_collapse, run_sediment, run_slumping, run_speleogenesis,
+    run_surface_void_capture, run_surface_water, run_surface_waves, run_thermal_field,
+    run_void_moisture_seep, run_void_water_flow, run_weather, run_wind_field, SimParams,
 };
 
 pub struct Simulation {
@@ -14,6 +19,8 @@ pub struct Simulation {
     pub scratch: WorldTransferScratch,
     pub params: SimParams,
     pub last_overlay: OverlayData,
+    /// ECS creature store (stage 10). Empty until something spawns.
+    pub agents: AgentStore,
 }
 
 impl Simulation {
@@ -27,6 +34,7 @@ impl Simulation {
                 sea_level: world.sea_level,
             },
             last_overlay: OverlayData::default(),
+            agents: AgentStore::new(),
         }
     }
 
@@ -40,6 +48,10 @@ impl Simulation {
         self.sync_params(world);
         let tick = self.clock.tick;
 
+        // Ensure agent host columns stay eligible before activity runs.
+        if !self.agents.is_empty() {
+            self.agents.wake_host_columns(world);
+        }
 
         for &sub_id in &SUBSYSTEM_ORDER {
             let schedule = SimClock::schedule_for(sub_id);
@@ -76,7 +88,21 @@ impl Simulation {
                 }
                 SubsystemId::PhaseChange
                 | SubsystemId::LakeLevel
-                | SubsystemId::Slumping => {}
+                | SubsystemId::Slumping
+                | SubsystemId::ThermalField
+                | SubsystemId::HumidityField
+                | SubsystemId::PressureField
+                | SubsystemId::WindField
+                | SubsystemId::GroundwaterHeadField
+                | SubsystemId::DissolvedField
+                | SubsystemId::Karst
+                | SubsystemId::VoidWater
+                | SubsystemId::RoofCollapse
+                | SubsystemId::Speleogenesis
+                | SubsystemId::Ecology
+                | SubsystemId::Agents
+                | SubsystemId::Gas
+                | SubsystemId::SurfaceWaves => {}
             }
         }
 
@@ -89,18 +115,73 @@ impl Simulation {
         // tries to apply those deltas — the deltas then silently no-op
         // but their upstream bookkeeping (evap_out_total etc.) was
         // already booked, leaking mass into the audit.
+        //
+        // Field passes write only field state (not layers), but still
+        // run here so material consumers sample committed fields.
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::ThermalField)) {
+            run_thermal_field(world, tick);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::HumidityField)) {
+            run_humidity_field(world, tick);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::PressureField)) {
+            run_pressure_field(world, tick);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::WindField)) {
+            run_wind_field(world, tick);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::GroundwaterHeadField)) {
+            run_groundwater_head_field(world, tick);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::DissolvedField)) {
+            run_dissolved_field(world, tick);
+        }
+        // Direct-mutation subsystems used to each call
+        // `recompute_mass_audit()`, which is a full ring walk
+        // (~1 ms × 9 calls = ~9 ms/tick on a 192-chunk ring). That's
+        // pure bookkeeping — a single refresh at the end of the tick
+        // is enough for the audit total.
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::Karst)) {
+            run_karst(world, tick);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::VoidWater)) {
+            run_surface_void_capture(world);
+            run_void_moisture_seep(world);
+            run_void_water_flow(world);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::RoofCollapse)) {
+            run_roof_collapse(world, tick);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::Speleogenesis)) {
+            run_speleogenesis(world, tick);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::Ecology)) {
+            run_ecology(world, tick);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::Gas)) {
+            run_gas(world, tick);
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::Agents)) {
+            run_agents(world, &mut self.agents, tick);
+        }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::PhaseChange)) {
             run_phase_change(world, tick);
-            world.recompute_mass_audit();
+        }
+        if self.clock.is_due(SimClock::schedule_for(SubsystemId::SurfaceWaves)) {
+            run_surface_waves(world, tick);
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::LakeLevel)) {
             run_lake_level(world);
-            world.recompute_mass_audit();
         }
         if self.clock.is_due(SimClock::schedule_for(SubsystemId::Slumping)) {
             run_slumping(world, tick);
-            world.recompute_mass_audit();
         }
+        // After slump reshuffles substrate, snap ocean/lake beds back to
+        // saturation while the free surface can still afford it.
+        recharge_deep_water_tables(world);
+        // One audit refresh per tick keeps HUD / test bookkeeping fresh
+        // without the ~9× per-tick full-ring walk the old shape had.
+        world.recompute_mass_audit();
 
         self.update_overlay(world);
         self.clock.advance();

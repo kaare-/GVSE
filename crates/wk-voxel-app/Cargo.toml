@@ -1,0 +1,22 @@
+[package]
+name = "wk-voxel-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ISOLATION GUARDRAIL
+# ------------------------------------------------------------------
+# wk-voxel-app is the greenfield renderer / demo binary for wk-voxel.
+# It depends on wk-voxel + wk-material only. It MUST NOT depend on
+# wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
+# docs/VOXEL_MIGRATION.md § Isolation Guardrails.
+
+[dependencies]
+wk-voxel = { path = "../wk-voxel" }
+wk-material = { path = "../wk-material" }
+# Pinned to match wk-app until we're ready to upgrade both together.
+macroquad = "=0.4.14"
+
+[[bin]]
+name = "wk-voxel-app"
+path = "src/main.rs"

@@ -1,10 +1,179 @@
 use serde::{Deserialize, Serialize};
 use wk_material::{MaterialId, MaterialRegistry, MAX_LAYERS, SAMPLE_WIDTH_M};
 
+/// Soft cap on voids per column. Pathological caves can exceed this but
+/// most columns stay well below; keeps growth from runaway dissolution.
+pub const MAX_VOIDS: usize = 4;
+
+/// kg of free water per metre of void / column depth — must match
+/// `wk_sim::subsystems::shared::WATER_MASS_PER_METRE_DEPTH`.
+pub const VOID_WATER_KG_PER_M: f32 = 250.0;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Activity {
     Dormant,
     HydrologyActive,
+}
+
+/// How a void was created. Karst/burrow/collapse share the same geometry
+/// but ecology and dig rules may treat origins differently later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub enum VoidOrigin {
+    #[default]
+    Karst,
+    Burrow,
+    Collapse,
+}
+
+/// Sparse cavity annotation on a column. Layers still hold all mass;
+/// voids describe where that mass isn't. Never represent caves as Air
+/// layers — density settling would float them to the top.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Void {
+    /// Absolute elevation of the ceiling (metres).
+    pub top_y: f32,
+    /// Ceiling − floor (metres).
+    pub height_m: f32,
+    /// Free water pooled inside the void (kg).
+    pub water_mass: i64,
+    /// Material of the layer immediately above (roof).
+    pub roof_material: MaterialId,
+    pub origin: VoidOrigin,
+    /// 0..255 connectivity to surface (light / ventilation proxy).
+    pub light: u8,
+}
+
+impl Void {
+    pub fn floor_y(self) -> f32 {
+        self.top_y - self.height_m
+    }
+
+    pub fn mid_y(self) -> f32 {
+        self.top_y - 0.5 * self.height_m
+    }
+
+    /// True when the void ceiling reaches (or breaches) the column surface.
+    pub fn open_to_surface(self, surface_y: f32) -> bool {
+        self.top_y >= surface_y - 0.05
+    }
+
+    /// Geometric free-water capacity (kg) for this cavity.
+    pub fn capacity_kg(self) -> i64 {
+        (self.height_m.max(0.0) * VOID_WATER_KG_PER_M).round() as i64
+    }
+
+    pub fn free_capacity_kg(self) -> i64 {
+        (self.capacity_kg() - self.water_mass.max(0)).max(0)
+    }
+
+    /// Fill fraction of geometric capacity, 0..1.
+    pub fn fill_frac(self) -> f32 {
+        let cap = self.capacity_kg().max(1) as f32;
+        (self.water_mass.max(0) as f32 / cap).clamp(0.0, 1.0)
+    }
+
+    /// True when elevation `y` lies inside this cavity.
+    pub fn contains_y(self, y: f32) -> bool {
+        y <= self.top_y + 1e-3 && y >= self.floor_y() - 1e-3 && self.height_m > 1e-4
+    }
+}
+
+/// Ambient atmospheric gas levels (relative units, ~1.0 = well-mixed air).
+pub const AMBIENT_AIR_CO2: f32 = 1.0;
+pub const AMBIENT_AIR_O2: f32 = 1.0;
+/// Henry-ish equilibrium dissolved levels under ambient air.
+pub const EQUIL_WATER_CO2: f32 = 0.85;
+pub const EQUIL_WATER_O2: f32 = 0.90;
+
+/// Per-column plant / soil-biology state (stage 8). Not a stratigraphic
+/// layer — biomass must not participate in density settling.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct Ecology {
+    /// Root binding of the topsoil, 0 = bare, 1 = dense mat.
+    pub root_density: f32,
+    /// Leaf-area index proxy, 0 = bare, 1 = full canopy.
+    pub leaf_area: f32,
+    /// Standing dead organic mass (kg).
+    pub dead_biomass: i64,
+    /// Living plant mass (kg).
+    pub alive_biomass: i64,
+    /// Plant-available nutrient fraction, 0..1.
+    pub nutrient: f32,
+    /// Atmospheric CO₂ above the column (relative units).
+    #[serde(default = "default_air_co2")]
+    pub air_co2: f32,
+    /// Atmospheric O₂ above the column.
+    #[serde(default = "default_air_o2")]
+    pub air_o2: f32,
+    /// Dissolved CO₂ in standing / pore water (relative units).
+    #[serde(default = "default_water_co2")]
+    pub water_co2: f32,
+    /// Dissolved O₂ in standing / pore water.
+    #[serde(default = "default_water_o2")]
+    pub water_o2: f32,
+}
+
+fn default_air_co2() -> f32 {
+    AMBIENT_AIR_CO2
+}
+fn default_air_o2() -> f32 {
+    AMBIENT_AIR_O2
+}
+fn default_water_co2() -> f32 {
+    EQUIL_WATER_CO2
+}
+fn default_water_o2() -> f32 {
+    EQUIL_WATER_O2
+}
+
+impl Default for Ecology {
+    fn default() -> Self {
+        Self {
+            root_density: 0.0,
+            leaf_area: 0.0,
+            dead_biomass: 0,
+            alive_biomass: 0,
+            nutrient: 0.0,
+            air_co2: AMBIENT_AIR_CO2,
+            air_o2: AMBIENT_AIR_O2,
+            water_co2: EQUIL_WATER_CO2,
+            water_o2: EQUIL_WATER_O2,
+        }
+    }
+}
+
+impl Ecology {
+    pub fn biomass_total(self) -> i64 {
+        self.alive_biomass.max(0) + self.dead_biomass.max(0)
+    }
+
+    /// Seed a sparse starter community from biome + relative elevation.
+    pub fn seed_from_biome(biome: crate::climate::Biome, rel_sea_m: f32) -> Self {
+        use crate::climate::Biome;
+        let (alive, nutrient, roots, leaves) = match biome {
+            Biome::Ocean | Biome::Shelf => (0, 0.0, 0.0, 0.0),
+            Biome::Coast => (40, 0.35, 0.15, 0.12),
+            Biome::Plains => (80, 0.45, 0.25, 0.22),
+            Biome::Mountain => {
+                if rel_sea_m > 55.0 {
+                    (10, 0.15, 0.05, 0.04)
+                } else {
+                    (30, 0.25, 0.10, 0.08)
+                }
+            }
+        };
+        Self {
+            root_density: roots,
+            leaf_area: leaves,
+            dead_biomass: 0,
+            alive_biomass: alive,
+            nutrient,
+            air_co2: AMBIENT_AIR_CO2,
+            air_o2: AMBIENT_AIR_O2,
+            water_co2: EQUIL_WATER_CO2,
+            water_o2: EQUIL_WATER_O2,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -101,6 +270,18 @@ pub struct Column {
     pub residual: ResidualBucket,
     pub activity: Activity,
     pub marker: Option<MarkerId>,
+    /// Sparse cavities (karst / burrow / collapse). Empty for most columns.
+    /// `serde(default)` keeps older saves loadable.
+    #[serde(default)]
+    pub voids: Vec<Void>,
+    /// Plant / soil-biology bucket (stage 8). Default = barren.
+    #[serde(default)]
+    pub ecology: Ecology,
+    /// Horizontal free-surface velocity (m/s) for wind/tide gravity waves.
+    /// Zero when dry. Not a gene — pure hydro state. `serde(default)` for
+    /// older saves.
+    #[serde(default)]
+    pub surface_u: f32,
 }
 
 impl Default for Column {
@@ -114,6 +295,9 @@ impl Default for Column {
             residual: ResidualBucket::default(),
             activity: Activity::HydrologyActive,
             marker: None,
+            voids: Vec::new(),
+            ecology: Ecology::default(),
+            surface_u: 0.0,
         }
     }
 }
@@ -144,6 +328,9 @@ impl Column {
     /// substrate layer. `None` if no such layer exists (bare bedrock).
     pub fn top_porous_layer_index(&self) -> Option<usize> {
         for i in 0..self.layer_count as usize {
+            if self.layers[i].thickness <= 0 {
+                continue;
+            }
             if MaterialRegistry::props(self.layers[i].material).porosity > 0 {
                 return Some(i);
             }
@@ -177,33 +364,28 @@ impl Column {
     /// sideways when a neighbouring column has a lower water surface.
     /// The snow just settles onto whatever's left as the water leaves.
     pub fn flowable_water(&self) -> Option<(f32, i64)> {
-        let mut y = self.surface_y;
-        let mut water_top_y: Option<f32> = None;
         let mut total_water = 0i64;
         for j in 0..self.layer_count as usize {
             let m = self.layers[j].material;
-            let h = self.mass_to_height_delta(m, self.layers[j].thickness);
             match m {
-                MaterialId::Water => {
-                    if water_top_y.is_none() {
-                        water_top_y = Some(y);
-                    }
-                    total_water += self.layers[j].thickness;
-                }
+                MaterialId::Water => total_water += self.layers[j].thickness,
                 MaterialId::Snow | MaterialId::Ice => {
                     // Cap material. Doesn't seal the water below —
                     // water can still flow sideways out from under it.
-                    // The cap ends up sitting on whatever's exposed
-                    // once the water drains (density-settle sorts it).
                 }
-                _ => {
-                    // Hit solid substrate — stop looking.
-                    break;
-                }
+                _ => break,
             }
-            y -= h;
         }
-        water_top_y.map(|top| (top, total_water))
+        if total_water <= 0 {
+            return None;
+        }
+        // Free-surface elevation rests on the solid bed — not on
+        // `surface_y`, which still adds cavity height. Counting voids as
+        // "ground" made shoreline karst mouths sit metres above their
+        // neighbours, so lake-level drained those columns and algae rode
+        // a notched / wavy free surface into the air.
+        let h = self.mass_to_height_delta(MaterialId::Water, total_water);
+        Some((self.solid_bed_y() + h, total_water))
     }
 
     /// Remove up to `mass` kg from the *flowable* Water layer inside
@@ -268,12 +450,53 @@ impl Column {
         }
     }
 
+    /// Pore-water capacity of the near-surface rooting zone (metres of
+    /// porous solid below any weather cap).
+    ///
+    /// Previously this was only the single top porous layer. A thin
+    /// `Organic` beach skin then shrank the whole column's moisture
+    /// budget to a few hundred kg, so plant ET flash-dried hills the
+    /// moment rain stopped. Roots drink from a deeper soil profile.
+    pub const MOISTURE_ROOTING_ZONE_M: f32 = 3.0;
+
     pub fn moisture_cap(&self) -> i64 {
-        let Some(layer) = self.top_porous_layer() else {
-            return 0;
-        };
-        let props = MaterialRegistry::props(layer.material);
-        (layer.thickness * props.porosity as i64) / 255
+        let mut depth_m = 0.0f32;
+        let mut cap = 0i64;
+        for i in 0..self.layer_count as usize {
+            let layer = &self.layers[i];
+            if layer.thickness <= 0 {
+                continue;
+            }
+            let mat = layer.material;
+            // Skip weather / fluid cap — moisture lives in solid pores.
+            if matches!(
+                mat,
+                MaterialId::Water | MaterialId::Ice | MaterialId::Snow | MaterialId::Air
+            ) {
+                continue;
+            }
+            let porosity = MaterialRegistry::props(mat).porosity;
+            if porosity == 0 {
+                // Competent impermeable rock — rooting zone ends.
+                break;
+            }
+            let h = self.mass_to_height_delta(mat, layer.thickness);
+            if h <= 1e-9 {
+                continue;
+            }
+            let remain = (Self::MOISTURE_ROOTING_ZONE_M - depth_m).max(0.0);
+            if remain <= 0.0 {
+                break;
+            }
+            let use_h = h.min(remain);
+            let mass = ((layer.thickness as f32) * (use_h / h)).round() as i64;
+            cap = cap.saturating_add((mass.saturating_mul(porosity as i64)) / 255);
+            depth_m += use_h;
+            if depth_m >= Self::MOISTURE_ROOTING_ZONE_M - 1e-4 {
+                break;
+            }
+        }
+        cap
     }
 
     pub fn mass_to_height_delta(&self, material: MaterialId, mass: i64) -> f32 {
@@ -283,11 +506,12 @@ impl Column {
         volume / area
     }
 
-    /// Elevation to use for temperature/climate purposes. Under the
-    /// unified material model, snow and water are stratigraphic layers
-    /// with the correct density, so `surface_y` already reflects the
-    /// natural terrain height — no more "subtract snow layer height"
-    /// workaround was needed.
+    /// Solid-bed / geographic elevation (skips water, ice, snow caps).
+    ///
+    /// Used for biome classification, bathymetry, and landform logic — not
+    /// for ambient air/water-skin temperature. Deep-ocean beds sit far below
+    /// the capped thermal field; sampling temperature there clamps to the
+    /// geothermal Dirichlet (~55 °C) and reads as "boiling ocean".
     pub fn climate_elevation(&self) -> f32 {
         // Skip past any weather deposits (water/ice/snow) to expose the
         // permanent geographic elevation. A puddle on top of a peak
@@ -308,12 +532,121 @@ impl Column {
         y
     }
 
+    /// Hydraulic head for a dry neighbour: the solid rock/soil bed under
+    /// any snow/ice/water cap *and* cavity height. Using void-inflated
+    /// `climate_elevation` here made dry karst mouths look like tall dams
+    /// (and disagreed with [`Self::flowable_water`]'s solid-bed free
+    /// surface). Using raw `surface_y` made snow banks into dams.
+    pub fn hydraulic_bed_y(&self) -> f32 {
+        self.solid_bed_y()
+    }
+
+    /// Elevation of the solid rock/soil surface, excluding weather fluids
+    /// *and* cavity height. `climate_elevation` still includes voids
+    /// (they inflate `surface_y`), which made submerged limestone with
+    /// sea-cliff mouths look "emergent" for karst / void-capture gates.
+    pub fn solid_bed_y(&self) -> f32 {
+        self.climate_elevation() - self.void_height_total()
+    }
+
+    /// 0..1 sky transmittance through snow/ice sitting in the fluid cap.
+    /// Deep snowpacks go effectively dark — plants and photosystems under
+    /// metres of snow should not keep photosynthesising at full rate.
+    pub fn cover_light_factor(&self) -> f32 {
+        let mut snow = 0i64;
+        let mut ice = 0i64;
+        for j in 0..self.layer_count as usize {
+            match self.layers[j].material {
+                MaterialId::Snow => snow += self.layers[j].thickness,
+                MaterialId::Ice => ice += self.layers[j].thickness,
+                MaterialId::Water => {}
+                _ => break,
+            }
+        }
+        // ~250 kg ≈ 1 m of water-equivalent depth on a column.
+        const KG_PER_M: f32 = 250.0;
+        let snow_m = snow as f32 / KG_PER_M;
+        let ice_m = ice as f32 / KG_PER_M;
+        let t = (-1.5 * snow_m).exp() * (-1.0 * ice_m).exp();
+        t.clamp(0.0, 1.0)
+    }
+
+    /// Elevation for near-surface ambient temperature (HUD, freeze/thaw,
+    /// ecology comfort).
+    ///
+    /// - Submerged bed (ocean / shelf): always sample at sea level so
+    ///   free-surface wobbles and abyssal beds don't move the thermometer
+    ///   (deep beds clamp to the geothermal Dirichlet ~55 °C).
+    /// - Emergent land: a thin weather skin above the solid bed so snow/ice
+    ///   piles can't self-cool via lapse rate as they grow.
+    pub fn ambient_elevation(&self, sea_level: f32) -> f32 {
+        let bed = self.climate_elevation();
+        const SKIN_M: f32 = 8.0;
+        if bed < sea_level - 0.5 {
+            sea_level
+        } else {
+            self.surface_y.min(bed + SKIN_M)
+        }
+    }
+
+    /// Snow + ice in the weather cap (top contiguous frozen layers).
+    pub fn frozen_surface_mass(&self) -> i64 {
+        let mut total = 0i64;
+        for i in 0..self.layer_count as usize {
+            match self.layers[i].material {
+                MaterialId::Snow | MaterialId::Ice => total += self.layers[i].thickness.max(0),
+                MaterialId::Water => break,
+                _ => break,
+            }
+        }
+        total
+    }
+
+    /// Target pore-water mass for a regional water table at `table_y`
+    /// (usually sea level). Ocean / submerged beds → full saturation;
+    /// coastal land fills the aquifer up to the table; high ground keeps
+    /// a modest base so the table doesn't start bone-dry.
+    pub fn target_moisture_for_table(&self, table_y: f32) -> i64 {
+        let cap = self.moisture_cap();
+        if cap <= 0 {
+            return 0;
+        }
+        let bed = self.climate_elevation();
+        if bed < table_y - 0.05 || (self.top_water_mass() > 0 && bed <= table_y + 0.05) {
+            return cap;
+        }
+        let Some(idx) = self.top_porous_layer_index() else {
+            return 0;
+        };
+        let mut cap_height = 0.0f32;
+        for i in 0..idx {
+            cap_height +=
+                self.mass_to_height_delta(self.layers[i].material, self.layers[i].thickness);
+        }
+        let layer_top_y = self.surface_y - cap_height;
+        let layer = &self.layers[idx];
+        let layer_height_m = self.mass_to_height_delta(layer.material, layer.thickness);
+        if layer_height_m <= 1e-6 {
+            return ((cap as f32) * 0.1).round() as i64;
+        }
+        let layer_bottom_y = layer_top_y - layer_height_m;
+        let target = table_y.clamp(layer_bottom_y, layer_top_y);
+        let sat_from_table = ((target - layer_bottom_y) / layer_height_m).clamp(0.0, 1.0);
+        let sat = sat_from_table.max(0.10);
+        ((cap as f32) * sat).round() as i64
+    }
+
     /// Elevation of the groundwater table: the topmost porous solid
     /// layer's pore space fills from the bottom of that layer upward as
     /// `moisture` approaches its cap, reaching the ground surface exactly
     /// when fully saturated (any further inflow discharges as surface
-    /// water — see the discharge handling in barrier commit).
+    /// inflow discharges — see barrier commit).
     pub fn water_table_y(&self) -> f32 {
+        if let Some((water_top, mass)) = self.flowable_water() {
+            if mass > 0 {
+                return water_top;
+            }
+        }
         let Some(idx) = self.top_porous_layer_index() else {
             return self.surface_y;
         };
@@ -440,6 +773,55 @@ impl Column {
         self.surface_y += self.mass_to_height_delta(material, mass);
     }
 
+    /// Deposit solid sediment, density-settle it, and **displace** an equal
+    /// height of standing water so the free surface does not spike.
+    ///
+    /// Corpse ooze / organic dams used `deposit_to_top` + settle under a
+    /// lake: the bed rose and the water top rose with it (same water mass
+    /// on a taller stack) → vertical water spikes on the sill. Open water
+    /// should keep its top; the displaced kg is returned for the caller to
+    /// spill into neighbours.
+    ///
+    /// Returns displaced water mass in kg (0 on dry land).
+    pub fn deposit_sediment_settled(
+        &mut self,
+        material: MaterialId,
+        mass: i64,
+        tick: u64,
+    ) -> i64 {
+        if mass <= 0 || !material.is_solid() {
+            return 0;
+        }
+        let had_water = self.flowable_water().map(|(_, m)| m).unwrap_or(0);
+        let prev_surface = self.surface_y;
+        let h = self.mass_to_height_delta(material, mass);
+        self.deposit_to_top(material, mass, tick);
+        self.settle_by_density(tick);
+        if had_water <= 0 || h <= 0.0 {
+            return 0;
+        }
+        // Match sediment height with water mass so surface returns ~prev.
+        let water_density =
+            MaterialRegistry::props(MaterialId::Water).density.max(1) as f32;
+        let mut displace =
+            (h * SAMPLE_WIDTH_M * water_density).round() as i64;
+        displace = displace.min(had_water).max(0);
+        if displace <= 0 {
+            return 0;
+        }
+        let removed = -self.adjust_top_water(-displace, tick);
+        // Numerical drift: pin free surface if we still sit above the old top.
+        if self.surface_y > prev_surface + 1e-3 {
+            let extra_h = self.surface_y - prev_surface;
+            let extra = (extra_h * SAMPLE_WIDTH_M * water_density).round() as i64;
+            if extra > 0 {
+                let got = -self.adjust_top_water(-extra, tick);
+                return removed + got;
+            }
+        }
+        removed
+    }
+
     /// Remove `mass` kg from whatever layer is currently on top,
     /// regardless of erosion rules. Meant for fluid/deposit management
     /// (draining water, evaporating a puddle, melting a snow cap) —
@@ -471,6 +853,12 @@ impl Column {
     pub fn adjust_top_water(&mut self, delta: i64, tick: u64) -> i64 {
         if delta > 0 {
             self.deposit_to_top(MaterialId::Water, delta, tick);
+            // Sink deposited water under any lighter ice/snow cap
+            // immediately. Without this, a water sheen briefly sits on
+            // top of ice and the next phase-change tick freezes it —
+            // an ice pump that drains the lake into an ever-thicker
+            // ice tower during a hard freeze.
+            self.settle_by_density(tick);
             delta
         } else if delta < 0 {
             let removed = self.take_water_from_cap(-delta);
@@ -590,14 +978,256 @@ impl Column {
         self.settle_by_density(0);
     }
 
-    /// Keep `surface_y` consistent with the summed layer column height.
+    /// Keep `surface_y` consistent with layer heights plus void heights.
+    /// A column with 30 m of rock and a 4 m void has top at bedrock+34.
     pub fn recompute_surface_y(&mut self, bedrock_y: f32) {
-        let height: f32 = (0..self.layer_count as usize)
+        let solid: f32 = (0..self.layer_count as usize)
             .map(|i| {
                 self.mass_to_height_delta(self.layers[i].material, self.layers[i].thickness)
             })
             .sum();
-        self.surface_y = bedrock_y + height;
+        let voids: f32 = self.voids.iter().map(|v| v.height_m.max(0.0)).sum();
+        self.surface_y = bedrock_y + solid + voids;
+    }
+
+    pub fn void_height_total(&self) -> f32 {
+        self.voids.iter().map(|v| v.height_m.max(0.0)).sum()
+    }
+
+    pub fn void_water_total(&self) -> i64 {
+        self.voids.iter().map(|v| v.water_mass.max(0)).sum()
+    }
+
+    /// Absolute top/bottom elevations of layer `idx`, inserting existing
+    /// voids as gaps. Walks bottom-up from bedrock so void punch-outs
+    /// land at their absolute `top_y` / `floor_y`.
+    pub fn layer_y_range(&self, idx: usize, bedrock_y: f32) -> (f32, f32) {
+        if idx >= self.layer_count as usize {
+            return (bedrock_y, bedrock_y);
+        }
+        // Build solid segments bottom→top (highest layer index first).
+        let mut segments: Vec<(f32, f32, usize)> = Vec::new();
+        let mut y = bedrock_y;
+        let mut void_floors: Vec<(f32, f32)> = self
+            .voids
+            .iter()
+            .filter(|v| v.height_m > 0.0)
+            .map(|v| (v.floor_y(), v.top_y))
+            .collect();
+        void_floors.sort_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal));
+
+        let mut vi = 0usize;
+        for li in (0..self.layer_count as usize).rev() {
+            let h = self.mass_to_height_delta(self.layers[li].material, self.layers[li].thickness);
+            // Advance past any voids whose floor is at/below current y.
+            while vi < void_floors.len() && void_floors[vi].0 <= y + 1e-4 {
+                let (vf, vt) = void_floors[vi];
+                if vt > y {
+                    y = vt.max(y);
+                }
+                let _ = vf;
+                vi += 1;
+            }
+            let bot = y;
+            y += h;
+            segments.push((y, bot, li)); // top, bot, idx
+        }
+        for (top, bot, li) in segments {
+            if li == idx {
+                return (top, bot);
+            }
+        }
+        (bedrock_y, bedrock_y)
+    }
+
+    /// Grow an existing void near `mid_y` by `dh`, or spawn a new one.
+    /// Returns the height actually added.
+    pub fn grow_void_at(
+        &mut self,
+        mid_y: f32,
+        dh: f32,
+        roof_material: MaterialId,
+        origin: VoidOrigin,
+    ) -> f32 {
+        if dh <= 1e-6 {
+            return 0.0;
+        }
+        // Merge into nearest void whose mid is within 1.5 m.
+        let mut best: Option<usize> = None;
+        let mut best_d = f32::MAX;
+        for (i, v) in self.voids.iter().enumerate() {
+            let d = (v.mid_y() - mid_y).abs();
+            if d < 1.5 && d < best_d {
+                best = Some(i);
+                best_d = d;
+            }
+        }
+        if let Some(i) = best {
+            let v = &mut self.voids[i];
+            let half = dh * 0.5;
+            v.top_y += half;
+            v.height_m += dh;
+            v.roof_material = roof_material;
+            v.origin = origin;
+            return dh;
+        }
+        if self.voids.len() >= MAX_VOIDS {
+            // Expand the closest void even if far — don't drop dissolution.
+            let mut best = 0usize;
+            let mut best_d = f32::MAX;
+            for (i, v) in self.voids.iter().enumerate() {
+                let d = (v.mid_y() - mid_y).abs();
+                if d < best_d {
+                    best = i;
+                    best_d = d;
+                }
+            }
+            let v = &mut self.voids[best];
+            v.top_y += dh * 0.5;
+            v.height_m += dh;
+            v.roof_material = roof_material;
+            v.origin = origin;
+            return dh;
+        }
+        let half = dh * 0.5;
+        self.voids.push(Void {
+            top_y: mid_y + half,
+            height_m: dh,
+            water_mass: 0,
+            roof_material,
+            origin,
+            light: 0,
+        });
+        dh
+    }
+
+    /// Drain up to `mass` kg of top/flowable water into open voids.
+    /// Returns kg moved into voids.
+    ///
+    /// Only geometrically open mouths (`open_to_surface` vs the solid
+    /// ground under any pond) capture. The old `light > 200` latch let
+    /// worldgen sea-cliff / karst alcoves keep swallowing water forever
+    /// — including after they flooded — which pumped the shoreline.
+    /// Callers that must protect the coast should also gate with
+    /// [`Self::solid_bed_y`] vs sea level before calling.
+    pub fn drain_surface_water_into_voids(&mut self, mass: i64) -> i64 {
+        if mass <= 0 {
+            return 0;
+        }
+        // Judge openness against the solid/cavity stack top (climate
+        // elevation strips standing water). Using free-water `surface_y`
+        // would make every pond seal its own sinkhole mouth.
+        let ground = self.climate_elevation();
+        let open: Vec<usize> = self
+            .voids
+            .iter()
+            .enumerate()
+            .filter(|(_, v)| v.open_to_surface(ground))
+            .map(|(i, _)| i)
+            .collect();
+        if open.is_empty() {
+            return 0;
+        }
+        let mut remaining = mass;
+        let mut moved = 0i64;
+        let per = (remaining / open.len() as i64).max(1);
+        for &i in &open {
+            if remaining <= 0 {
+                break;
+            }
+            let free = self.voids[i].free_capacity_kg();
+            if free <= 0 {
+                continue;
+            }
+            let take = self.take_water_from_cap(per.min(remaining).min(free));
+            if take <= 0 {
+                break;
+            }
+            self.voids[i].water_mass += take;
+            remaining -= take;
+            moved += take;
+        }
+        moved
+    }
+
+    /// First void index containing elevation `y`, if any.
+    pub fn void_index_at(&self, y: f32) -> Option<usize> {
+        self.voids.iter().position(|v| v.contains_y(y))
+    }
+
+    /// Move up to `mass` kg of already-accounted water into voids with
+    /// free capacity (no moisture/surface bookkeeping). Used for pore
+    /// overflow that would otherwise spring to the surface.
+    pub fn fill_voids_from_mass(&mut self, mass: i64) -> i64 {
+        if mass <= 0 || self.voids.is_empty() {
+            return 0;
+        }
+        let mut remaining = mass;
+        let mut moved = 0i64;
+        for v in &mut self.voids {
+            if remaining <= 0 {
+                break;
+            }
+            let free = v.free_capacity_kg();
+            if free <= 0 {
+                continue;
+            }
+            let take = remaining.min(free);
+            v.water_mass += take;
+            remaining -= take;
+            moved += take;
+        }
+        moved
+    }
+
+    /// Seep pore moisture into buried cavities when the water table
+    /// intersects them (or when the column is already quite wet).
+    /// Mass-conserving: `moisture` decreases, `void.water_mass` rises.
+    pub fn seep_moisture_into_voids(&mut self, max_kg: i64) -> i64 {
+        if max_kg <= 0 || self.voids.is_empty() {
+            return 0;
+        }
+        let cap = self.moisture_cap();
+        if cap <= 0 {
+            return 0;
+        }
+        // Leave a pore reserve so we don't empty the aquifer into one cave.
+        let reserve = ((cap as f32) * 0.20).round() as i64;
+        let available = self.moisture.saturating_sub(reserve.max(0));
+        if available <= 0 {
+            return 0;
+        }
+        let table = self.water_table_y();
+        let sat = (self.moisture as f32 / cap as f32).clamp(0.0, 1.0);
+        let mut remaining = max_kg.min(available);
+        let mut moved = 0i64;
+        for v in &mut self.voids {
+            if remaining <= 0 {
+                break;
+            }
+            if v.height_m <= 1e-4 {
+                continue;
+            }
+            // Table reaches into the cavity, or soils are wet enough for
+            // capillary drip into the roof crack.
+            let intersects = table > v.floor_y() + 0.05;
+            if !intersects && sat < 0.30 {
+                continue;
+            }
+            let free = v.free_capacity_kg();
+            if free <= 0 {
+                continue;
+            }
+            let take = remaining.min(free);
+            v.water_mass += take;
+            remaining -= take;
+            moved += take;
+        }
+        if moved > 0 {
+            self.moisture = (self.moisture - moved).max(0);
+            self.activity = Activity::HydrologyActive;
+        }
+        moved
     }
 }
 
@@ -663,6 +1293,23 @@ mod tests {
     }
 
     #[test]
+    fn adjust_top_water_settles_under_ice() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        col.deposit_to_top(MaterialId::Water, 500, 1);
+        col.deposit_to_top(MaterialId::Ice, 200, 2);
+        col.settle_by_density(2);
+        assert_eq!(col.top_material(), MaterialId::Ice);
+        let _ = col.adjust_top_water(100, 3);
+        assert_eq!(
+            col.top_material(),
+            MaterialId::Ice,
+            "fresh water must sink under the ice skin"
+        );
+        assert_eq!(col.flowable_water().map(|(_, m)| m), Some(600));
+    }
+
+    #[test]
     fn erode_from_top_cuts_under_water_cap() {
         let mut col = Column::default();
         col.deposit_to_top(MaterialId::Sand, 1000, 0);
@@ -679,6 +1326,34 @@ mod tests {
         col.deposit_to_top(MaterialId::Ice, 500, 5);
         let (removed, _) = col.erode_from_top(100);
         assert_eq!(removed, 0);
+    }
+
+    #[test]
+    fn sediment_under_water_does_not_spike_surface() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 2_000, 0);
+        col.deposit_to_top(MaterialId::Water, 2_500, 1); // 10 m of water
+        let surface_before = col.surface_y;
+        let water_before = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
+        let displaced =
+            col.deposit_sediment_settled(MaterialId::Organic, 655, 2);
+        assert!(displaced > 0, "should displace standing water");
+        assert!(
+            (col.surface_y - surface_before).abs() < 0.05,
+            "free surface must not spike (before={surface_before:.3} after={:.3})",
+            col.surface_y
+        );
+        let water_after = col.flowable_water().map(|(_, m)| m).unwrap_or(0);
+        assert_eq!(
+            water_before - water_after,
+            displaced,
+            "displaced kg must leave this column"
+        );
+        assert_eq!(col.layers[0].material, MaterialId::Water);
+        assert!(
+            (0..col.layer_count as usize).any(|i| col.layers[i].material == MaterialId::Organic),
+            "organic settled under water"
+        );
     }
 
     #[test]
@@ -771,5 +1446,83 @@ mod tests {
         col.deposit_to_top(MaterialId::Sand, 1000, 0);
         col.deposit_to_top(MaterialId::Water, 250, 5);
         assert_eq!(col.top_porous_layer().unwrap().material, MaterialId::Sand);
+    }
+
+    #[test]
+    fn thin_organic_skin_does_not_shrink_moisture_cap() {
+        let mut sand_only = Column::default();
+        sand_only.deposit_to_top(MaterialId::Sand, 8_000, 0);
+        let sand_cap = sand_only.moisture_cap();
+
+        let mut with_skin = Column::default();
+        with_skin.deposit_to_top(MaterialId::Sand, 8_000, 0);
+        with_skin.deposit_to_top(MaterialId::Organic, 400, 1); // thin beach litter
+        let skin_cap = with_skin.moisture_cap();
+
+        // Top-layer-only cap for 400 kg organic ≈ 313 kg. Rooting zone must
+        // still see the sand body underneath.
+        let organic_only = (400i64 * 200) / 255;
+        assert!(sand_cap > organic_only * 2, "sand rooting zone > organic skin");
+        assert!(
+            skin_cap > organic_only * 2,
+            "organic skin must not flash-dry the column (sand={sand_cap} skin={skin_cap} organic_only={organic_only})"
+        );
+    }
+
+    #[test]
+    fn cover_light_factor_dims_under_deep_snow() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 1000, 0);
+        assert!((col.cover_light_factor() - 1.0).abs() < 1e-5);
+        col.deposit_to_top(MaterialId::Snow, 8_000, 1);
+        assert!(
+            col.cover_light_factor() < 0.02,
+            "deep snow should block nearly all light, got {}",
+            col.cover_light_factor()
+        );
+    }
+
+    #[test]
+    fn land_puddle_height_matches_render_math() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 50_000, 0); // tall sand
+        col.deposit_to_top(MaterialId::Water, 857, 1);
+        let h = col.mass_to_height_delta(MaterialId::Water, 857);
+        assert!((h - 3.428).abs() < 0.01, "h={h}");
+        let (top, mass) = col.flowable_water().unwrap();
+        assert_eq!(mass, 857);
+        // void-free: free surface must match surface_y
+        assert!(
+            (top - col.surface_y).abs() < 1e-3,
+            "top={top} surface_y={}",
+            col.surface_y
+        );
+        assert!((col.solid_bed_y() + h - top).abs() < 1e-3);
+    }
+
+    #[test]
+    fn flowable_top_with_void_diverges_from_surface_y() {
+        let mut col = Column::default();
+        col.deposit_to_top(MaterialId::Sand, 50_000, 0);
+        let bed_before = col.surface_y;
+        col.voids.push(Void {
+            top_y: bed_before,
+            height_m: 10.0,
+            water_mass: 0,
+            roof_material: MaterialId::Sand,
+            origin: VoidOrigin::Karst,
+            light: 0,
+        });
+        col.recompute_surface_y(0.0);
+        col.deposit_to_top(MaterialId::Water, 857, 1);
+        let h = col.mass_to_height_delta(MaterialId::Water, 857);
+        let (top, _) = col.flowable_water().unwrap();
+        let gap = col.surface_y - top;
+        assert!(
+            (gap - 10.0).abs() < 0.05,
+            "expected ~10m gap from voids, got gap={gap} surface={} top={top} solid_bed={} h={h}",
+            col.surface_y,
+            col.solid_bed_y(),
+        );
     }
 }

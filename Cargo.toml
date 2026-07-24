@@ -2,10 +2,19 @@
 resolver = "2"
 members = [
     "crates/wk-material",
+    "crates/wk-field",
     "crates/wk-world",
+    "crates/wk-agents",
     "crates/wk-sim",
     "crates/wk-io",
     "crates/wk-app",
+    # Greenfield 2D cellular-automata sim, isolated from the column
+    # stack above. See docs/VOXEL_MIGRATION.md.
+    "crates/wk-voxel",
+    # Demo / renderer binary for wk-voxel. Depends on wk-voxel +
+    # wk-material only; NEVER on wk-world / wk-sim / wk-agents /
+    # wk-app / wk-io / wk-field.
+    "crates/wk-voxel-app",
 ]
 
 [workspace.package]

@@ -2,18 +2,27 @@ use macroquad::prelude::*;
 use wk_io::{load_simulation, save_simulation};
 use wk_world::{OverlayMode, RenderSnapshot};
 
+use crate::editor::CreatureEditor;
 use crate::render::{self, SAVE_PATH};
 
 /// Columns scrolled per second while A/D is held.
 const SCROLL_SPEED_COLS_PER_SEC: f32 = 70.0;
 /// Screen pixels per second while W/S is held to pan the camera up/down.
 const CAMERA_Y_SPEED_PX_PER_SEC: f32 = 320.0;
-const MAX_TICKS_PER_FRAME: u64 = 60;
-/// Chunks to generate: 88 chunks × 64 cols = 5632 columns (~1408 m) —
-/// wide enough for the full ocean → shelf → coastal → plains → extended
-/// mountain range with 8 named peaks and enclosed valleys.
-const MAP_CHUNK_MIN: i32 = -8;
-const MAP_CHUNK_MAX: i32 = 80;
+/// Ceiling on catch-up ticks per rendered frame. Kept low so a slow
+/// frame can't recruit dozens of extra sim ticks (positive-feedback
+/// death spiral: slow frame → big dt → more catch-up ticks → slower
+/// frame → even bigger dt → …). Better to let sim time drift a hair
+/// behind real time than freeze the app.
+const MAX_TICKS_PER_FRAME: u64 = 4;
+/// Frame-time clamp for sim scheduling. Real render dt can spike to
+/// hundreds of ms during hitches; treating that as “advance 30 ticks”
+/// makes the next frame ten times worse. Cap the sim clock's view of
+/// wall-clock progress so `tick_accum` can't runaway.
+const MAX_SIM_DT_SEC: f32 = 1.0 / 30.0;
+/// Default ring circumference (192 × 64 cols ≈ 3 km). Matches
+/// `WorldGenParams::default_ring`; `MAX_LOADED_CHUNKS` must be ≥ this.
+const RING_CHUNKS: u32 = 192;
 
 pub struct AppState {
     pub world: wk_world::world::World,
@@ -31,8 +40,12 @@ pub struct AppState {
     pub speed: u32,
     pub overlay_mode: OverlayMode,
     pub selected_column: Option<i32>,
+    /// Clicked Set A organism (cleared when it dies).
+    pub selected_organism: Option<wk_sim::Entity>,
     pub tick_accum: f32,
     pub status_msg: String,
+    /// Bottom info strip (tick / fps / clouds / last key). Toggle with F3.
+    pub show_status_line: bool,
     pub show_settings: bool,
     /// Scratch UI-bound copies (macroquad sliders need `&mut f32`, and
     /// day/night length is more natural to edit in minutes than raw ticks).
@@ -40,6 +53,11 @@ pub struct AppState {
     settings_night_minutes: f32,
     settings_max_clouds: f32,
     settings_cloud_spawn_secs: f32,
+    /// Per-habit pop caps (sliders need `&mut f32`).
+    settings_cap_algae: f32,
+    settings_cap_plant: f32,
+    settings_cap_fungus: f32,
+    pub editor: CreatureEditor,
 }
 
 impl AppState {
@@ -53,18 +71,37 @@ impl AppState {
         // (RainInject now fires every tick instead of every 6th, so this is
         // ~1/6 of the old nominal value to deliver the same average total.)
         world.rain_rate = 1.0;
+        world.gen = wk_world::WorldGenParams {
+            topology: wk_world::WorldTopology::Ring {
+                chunks: RING_CHUNKS,
+            },
+            profile: wk_world::WorldGenProfile::RingFacies,
+        };
 
-        for c in MAP_CHUNK_MIN..MAP_CHUNK_MAX {
-            let chunk = wk_world::terrain::generate_chunk_continental(
+        for c in 0..RING_CHUNKS as i32 {
+            let chunk = wk_world::terrain::generate_chunk(
                 c,
                 world.seed,
                 wk_world::terrain::BEDROCK_FLOOR_M,
                 world.sea_level,
+                world.gen,
             );
             world.insert_chunk(chunk);
         }
         world.wake_all();
         world.recompute_mass_audit();
+        // Stage 6.2 / 6.3: chunk thermal + humidity fields.
+        // Off by default in World::new so older scenario tests keep the
+        // climate-only / constant-RH paths; the live app always opts in.
+        world.enable_thermal_fields();
+        world.enable_humidity_fields();
+        world.enable_pressure_wind_fields();
+        world.enable_groundwater_head_fields();
+        world.enable_dissolved_fields();
+        // Free-surface momentum: wind setup / seiches + a gentle tide.
+        // Lake-level still flattens shallow ponds but leaves deep water alone.
+        world.surface_waves_enabled = true;
+        world.tide_enabled = true;
 
         let sim = wk_sim::Simulation::new(&world);
         let viewport_x = Self::initial_viewport_x(&world);
@@ -72,6 +109,7 @@ impl AppState {
         let settings_night_minutes = world.climate.night_length_ticks as f32 / 60.0 / 60.0;
         let settings_max_clouds = world.weather.max_clouds as f32;
         let settings_cloud_spawn_secs = world.weather.cloud_spawn_interval_ticks as f32 / 60.0;
+        let defaults = wk_sim::PopCaps::default();
         Self {
             world,
             sim,
@@ -82,15 +120,21 @@ impl AppState {
             speed: 1,
             overlay_mode: OverlayMode::None,
             selected_column: None,
+            selected_organism: None,
             tick_accum: 0.0,
             status_msg:
-                "Space run | A/D scroll | W/S pan | R rain | Y weather | F5/F9 save/load | Tab settings"
+                "Space run | click creature to inspect | A/D scroll | C/F2 creature | F3 HUD | Tab settings"
                     .into(),
+            show_status_line: true,
             show_settings: false,
             settings_day_minutes,
             settings_night_minutes,
             settings_max_clouds,
             settings_cloud_spawn_secs,
+            settings_cap_algae: defaults.algae as f32,
+            settings_cap_plant: defaults.plant as f32,
+            settings_cap_fungus: defaults.fungus as f32,
+            editor: CreatureEditor::default(),
         }
     }
 
@@ -115,6 +159,12 @@ impl AppState {
     }
 
     fn clamp_viewport(&mut self) {
+        if self.world.topology().is_ring() {
+            if let Some(w) = self.world.topology().width_columns() {
+                self.viewport_x = self.viewport_x.rem_euclid(w);
+            }
+            return;
+        }
         let (lo, hi) = self.scroll_bounds();
         self.viewport_x = self.viewport_x.clamp(lo, hi);
     }
@@ -138,8 +188,16 @@ impl AppState {
     }
 
     pub fn update(&mut self) {
+        // Freeze the world while the creature editor is open.
+        if self.editor.open {
+            self.clamp_viewport();
+            return;
+        }
         if !self.paused {
-            let dt = get_frame_time();
+            // Clamp frame dt for sim scheduling so a slow frame (or a
+            // pause/resume gap) doesn't request a burst of catch-up
+            // ticks that makes the next frame even slower.
+            let dt = get_frame_time().min(MAX_SIM_DT_SEC);
             self.tick_accum += dt * self.speed as f32 * 60.0;
             let mut n = 0u64;
             while self.tick_accum >= 1.0 && n < MAX_TICKS_PER_FRAME {
@@ -147,11 +205,90 @@ impl AppState {
                 self.tick_accum -= 1.0;
                 n += 1;
             }
+            // Any leftover accum from a hitch is thrown away — better
+            // than carrying it into a queued catch-up burst.
+            if n == MAX_TICKS_PER_FRAME {
+                self.tick_accum = 0.0;
+            }
         }
         self.clamp_viewport();
     }
 
+    fn open_or_close_editor(&mut self) {
+        let opening = !self.editor.open;
+        self.editor.toggle(self.paused);
+        if opening {
+            self.paused = true;
+            self.show_settings = false;
+            self.status_msg =
+                "Creature editor OPEN — paint Atom, Enter to spawn, C/F2 to close"
+                    .into();
+        } else {
+            self.paused = self.editor.was_paused;
+            self.status_msg = "Creature editor closed".into();
+        }
+    }
+
     pub fn handle_input(&mut self) {
+        // Show last key on the HUD so we can tell if the window has focus.
+        if let Some(k) = get_last_key_pressed() {
+            if !self.editor.open {
+                self.status_msg = format!(
+                    "key {:?} | Space run | C/F2 creature | F3 HUD | Tab settings",
+                    k
+                );
+            }
+        }
+
+        // Creature editor: C or F2.
+        if is_key_pressed(KeyCode::C) || is_key_pressed(KeyCode::F2) {
+            self.open_or_close_editor();
+        }
+        if is_key_pressed(KeyCode::F3) {
+            self.show_status_line = !self.show_status_line;
+            self.status_msg = format!("Status line: {}", self.show_status_line);
+        }
+        if self.editor.open {
+            let _ = self.editor.handle_input();
+            if self.editor.spawn_picker && is_mouse_button_pressed(MouseButton::Left) {
+                let (mx, _my) = mouse_position();
+                let col = render::screen_x_to_world_x(mx, self.viewport_x);
+                if self.world.column_at(col).is_some() {
+                    let mut bp = self.editor.blueprint.clone();
+                    bp.name = self.editor.blueprint.name.clone();
+                    let where_ = if bp.is_fungus() {
+                        "litter/land"
+                    } else if bp.is_plankton() {
+                        "water/lit band"
+                    } else {
+                        "land"
+                    };
+                    match self.sim.agents.spawn_from_blueprint(
+                        &self.world,
+                        col,
+                        bp,
+                        50.0,
+                    ) {
+                        Some(_) => {
+                            self.status_msg = format!(
+                                "Spawned {} on {where_} at x={col} (organisms={})",
+                                self.editor.blueprint.name,
+                                self.sim.agents.organism_count()
+                            );
+                            self.editor.spawn_picker = false;
+                            self.editor.open = false;
+                            self.paused = self.editor.was_paused;
+                        }
+                        None => {
+                            self.editor.status =
+                                "Spawn failed (invalid blueprint, column occupied/missing, or pop cap)"
+                                    .into();
+                        }
+                    }
+                }
+            }
+            return;
+        }
         if is_key_pressed(KeyCode::Space) {
             self.paused = !self.paused;
         }
@@ -227,7 +364,12 @@ impl AppState {
                 OverlayMode::WaterFlux => OverlayMode::Erosion,
                 OverlayMode::Erosion => OverlayMode::Activity,
                 OverlayMode::Activity => OverlayMode::Conservation,
-                OverlayMode::Conservation => OverlayMode::None,
+                OverlayMode::Conservation => OverlayMode::TemperatureField,
+                OverlayMode::TemperatureField => OverlayMode::HumidityField,
+                OverlayMode::HumidityField => OverlayMode::SoilMoisture,
+                OverlayMode::SoilMoisture => OverlayMode::Co2Field,
+                OverlayMode::Co2Field => OverlayMode::O2Field,
+                OverlayMode::O2Field => OverlayMode::None,
             };
         }
         if is_key_pressed(KeyCode::M) {
@@ -267,10 +409,40 @@ impl AppState {
         }
 
         if is_mouse_button_pressed(MouseButton::Left) {
-            let (mx, _) = mouse_position();
-            let col = render::screen_x_to_world_x(mx, self.viewport_x);
-            if self.world.column_at(col).is_some() {
-                self.selected_column = Some(col);
+            let (mx, my) = mouse_position();
+            let wx = render::screen_x_to_world_x_frac(mx, self.viewport_x);
+            let wy = render::screen_y_to_world_y(
+                my,
+                self.world.sea_level,
+                screen_height(),
+                self.camera_y_offset,
+            );
+            if let Some(e) = self.sim.agents.pick_organism_at(wx, wy) {
+                self.selected_organism = Some(e);
+                self.selected_column = Some(wx.floor() as i32);
+                if let Some(info) = self.sim.agents.inspect_organism(e) {
+                    self.status_msg = format!(
+                        "Inspect #{} gen={} energy={:.0}/{:.0} clones={}",
+                        info.entity_id,
+                        info.generation,
+                        info.energy,
+                        info.energy_max,
+                        info.clones_produced
+                    );
+                }
+            } else {
+                self.selected_organism = None;
+                let col = render::screen_x_to_world_x(mx, self.viewport_x);
+                if self.world.column_at(col).is_some() {
+                    self.selected_column = Some(col);
+                }
+            }
+        }
+
+        // Drop selection if the creature died.
+        if let Some(e) = self.selected_organism {
+            if !self.sim.agents.organism_alive(e) {
+                self.selected_organism = None;
             }
         }
     }
@@ -284,9 +456,65 @@ impl AppState {
         use macroquad::hash;
         use macroquad::ui::{root_ui, widgets};
 
-        widgets::Window::new(hash!(), vec2(20.0, 20.0), vec2(360.0, 480.0))
+        let (n_algae, n_plant, n_fungus) = self.sim.agents.count_by_habit();
+        let max_org = wk_sim::MAX_ORGANISMS as f32;
+        widgets::Window::new(hash!(), vec2(20.0, 20.0), vec2(380.0, 560.0))
             .label("Settings (Tab to close)")
             .ui(&mut root_ui(), |ui| {
+                ui.tree_node(hash!(), "Population caps", |ui| {
+                    ui.label(
+                        None,
+                        "Split soft caps by habit so blooms / forests / fungi can be tuned apart.",
+                    );
+                    ui.slider(
+                        hash!(),
+                        "Algae (atom / plankton)",
+                        0.0f32..max_org,
+                        &mut self.settings_cap_algae,
+                    );
+                    ui.label(
+                        None,
+                        &format!(
+                            "  living {n_algae} / {}",
+                            self.settings_cap_algae.round() as usize
+                        ),
+                    );
+                    ui.slider(
+                        hash!(),
+                        "Plants (roots / stems)",
+                        0.0f32..max_org,
+                        &mut self.settings_cap_plant,
+                    );
+                    ui.label(
+                        None,
+                        &format!(
+                            "  living {n_plant} / {}",
+                            self.settings_cap_plant.round() as usize
+                        ),
+                    );
+                    ui.slider(
+                        hash!(),
+                        "Fungi (digest / hypha)",
+                        0.0f32..max_org,
+                        &mut self.settings_cap_fungus,
+                    );
+                    ui.label(
+                        None,
+                        &format!(
+                            "  living {n_fungus} / {}",
+                            self.settings_cap_fungus.round() as usize
+                        ),
+                    );
+                    ui.label(
+                        None,
+                        &format!(
+                            "Total living {} · hard ceiling {}",
+                            n_algae + n_plant + n_fungus,
+                            wk_sim::MAX_ORGANISMS
+                        ),
+                    );
+                });
+                ui.separator();
                 ui.tree_node(hash!(), "Day / night / temperature", |ui| {
                     ui.slider(hash!(), "Day length (min)", 0.5f32..60.0, &mut self.settings_day_minutes);
                     ui.slider(hash!(), "Night length (min)", 0.5f32..60.0, &mut self.settings_night_minutes);
@@ -325,7 +553,7 @@ impl AppState {
                         0.0f32..10.0,
                         &mut self.world.weather.cloud_rain_rate,
                     );
-                    ui.slider(hash!(), "Max clouds", 1.0f32..20.0, &mut self.settings_max_clouds);
+                    ui.slider(hash!(), "Max clouds", 1.0f32..40.0, &mut self.settings_max_clouds);
                     ui.slider(
                         hash!(),
                         "Cloud spawn interval (sec)",
@@ -335,7 +563,41 @@ impl AppState {
                     ui.label(None, &format!("Active clouds: {}", self.world.clouds.len()));
                 });
                 ui.separator();
+                ui.tree_node(hash!(), "Waves + tide", |ui| {
+                    ui.checkbox(
+                        hash!(),
+                        "Surface waves (wind + gravity)",
+                        &mut self.world.surface_waves_enabled,
+                    );
+                    ui.checkbox(hash!(), "Tide enabled", &mut self.world.tide_enabled);
+                    ui.slider(
+                        hash!(),
+                        "Tide amplitude (m)",
+                        0.0f32..2.0,
+                        &mut self.world.tide_amplitude_m,
+                    );
+                    let mut period_min =
+                        self.world.tide_period_ticks as f32 / 60.0;
+                    ui.slider(hash!(), "Tide period (sec)", 60.0f32..7200.0, &mut period_min);
+                    self.world.tide_period_ticks = period_min.max(60.0) as u64;
+                    ui.label(
+                        None,
+                        &format!(
+                            "Tide η now: {:+.2} m",
+                            self.world.tide_eta_m(self.sim.clock.tick)
+                        ),
+                    );
+                });
+                ui.separator();
+                if ui.button(None, "Open creature editor") {
+                    // Close settings; editor opens next frame via flag.
+                    self.show_settings = false;
+                    if !self.editor.open {
+                        self.open_or_close_editor();
+                    }
+                }
                 ui.label(None, &format!("Sim tick: {}", self.sim.clock.tick));
+                ui.label(None, "Tip: C / F2 creature editor · F3 status line");
             });
 
         self.world.weather.max_clouds = self.settings_max_clouds.round().max(1.0) as usize;
@@ -346,5 +608,11 @@ impl AppState {
             (self.settings_day_minutes.max(0.1) * 60.0 * 60.0) as u64;
         self.world.climate.night_length_ticks =
             (self.settings_night_minutes.max(0.1) * 60.0 * 60.0) as u64;
+
+        self.sim.agents.pop_caps = wk_sim::PopCaps {
+            algae: self.settings_cap_algae.round().clamp(0.0, max_org) as usize,
+            plant: self.settings_cap_plant.round().clamp(0.0, max_org) as usize,
+            fungus: self.settings_cap_fungus.round().clamp(0.0, max_org) as usize,
+        };
     }
 }
