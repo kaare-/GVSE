@@ -20,4 +20,9 @@ notes intended to survive re-reads of the codebase.
 | [`EVOLUTION.md`](EVOLUTION.md) | Reproduction and mutation loop. |
 | [`organism/`](organism/) | Organism Kernel freeze docs. |
 
-Read order for world shape: `WORLDGEN.md` → `STRATA.md`.
+Read order for the **active voxel stack:** `VOXEL_WATER.md` →
+`VOXEL_FAILURE.md` / `VOXEL_GEOTECH_MAP.md` → `VOXEL_FIELDS.md`.
+World shape: `WORLDGEN.md` → `STRATA.md`.
+
+The column stack docs below remain historical context; product work
+is on `wk-voxel`.

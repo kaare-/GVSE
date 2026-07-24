@@ -1,33 +1,27 @@
 # Voxel migration — design notes for `wk-voxel`
 
-Working design document for a greenfield 2D cellular-automata sim
-living in `crates/wk-voxel/` alongside column-based GVSE. This
-document is the **intent map** the plan referred to: it transcribes
-what each subsystem in the current column stack is trying to model,
-in voxel-cellular terms, so we know what to build when we get to it.
+Working design document for the 2D cellular-automata sim in
+`crates/wk-voxel/`. **Status (2026-07):** the voxel stack has
+**superseded** the column stack as the active product path; `main`
+tracks `wk-voxel` / `wk-voxel-app`. Column crates remain in-tree as
+legacy reference only.
 
-Nothing in this document is a promise to *ship* every feature. The
-priority order is: get the fluid core working, then move outward.
+This document is still the **intent map**: what each column subsystem
+was trying to model, transcribed into voxel-cellular terms.
 
 ## 1. Purpose and context
 
-Column-based GVSE keeps producing water bugs. Each patch of the water
-system exposes another (see the thread of screenshots and the
-"honest evaluation" in the water-prune PR). The failure pattern is
-architectural, not a series of unrelated bugs: column geometry can't
-express caves or free fluid volumes without proliferating buckets
-(top water layer, `moisture` scalar, `void.water_mass`, sediment
-carrier, dissolved field, humidity field, cloud mass), and every
-subsystem picks a different reference elevation.
+Column-based GVSE kept producing water bugs. Each patch of the water
+system exposed another. The failure pattern was architectural, not a
+series of unrelated bugs: column geometry can't express caves or free
+fluid volumes without proliferating buckets (top water layer,
+`moisture` scalar, `void.water_mass`, sediment carrier, dissolved
+field, humidity field, cloud mass), and every subsystem picked a
+different reference elevation.
 
-The user's proposed model — 2D block map for everything, with
-overlaid scalar heatmaps — is a much better fit for a 2D side-view
-sim. `wk-voxel` is the greenfield attempt.
-
-We do this **in parallel** with the existing column stack. Both live
-in the same workspace; both build; neither imports the other. When
-the voxel sim is far enough along to run the app, we swap `wk-app`
-over. Until then, column GVSE keeps running.
+The voxel model — 2D block map for everything, with overlaid scalar
+heatmaps — fits a 2D side-view sim. `wk-voxel` was the greenfield
+attempt; it is now the default.
 
 ## 2. Isolation Guardrails
 
