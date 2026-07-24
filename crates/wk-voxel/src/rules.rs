@@ -120,6 +120,11 @@ const CONFINED_HEAD_RATE: i32 = 32;
 /// Cap BFS size when walking a pressure-connected wet-Air body.
 const CONFINED_HEAD_BFS_LIMIT: usize = 8192;
 
+/// How often a quiet world re-scans confined head across loaded chunks.
+/// Far-reservoir pipes can quiesce locally before equalising; this wakes
+/// them without paying a full scan every tick.
+const CONFINED_HEAD_WAKE_EVERY: u64 = 8;
+
 /// True when the cell below can support a standing free surface
 /// (solid ground or a full water column).
 fn is_surface_support(world: &World, gx: i32, gy: i32) -> bool {
@@ -373,7 +378,26 @@ pub fn apply_water_flow_regions(world: &mut World, active: &[ActiveChunk]) {
     // pipes / communicating vessels). Planned after surface flow so
     // cascade / same-Y keep source-budget priority on shared cells.
     accumulate_confined_upward_xfers(world, active, &mut xfers);
+    commit_air_sat_xfers(world, &mut xfers);
+}
 
+/// Confined-head pass over standalone regions (full loaded chunks when
+/// nothing is dirty). Used to wake far-reservoir pipes that went locally
+/// quiet before equalising.
+fn apply_confined_upward_regions(world: &mut World, active: &[ActiveChunk]) {
+    if active.is_empty() {
+        return;
+    }
+    let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
+    accumulate_confined_upward_xfers(world, active, &mut xfers);
+    commit_air_sat_xfers(world, &mut xfers);
+}
+
+/// Greedy per-source Air↔Air sat commits (mass-conserving).
+fn commit_air_sat_xfers(
+    world: &mut World,
+    xfers: &mut [((i32, i32), (i32, i32), i32)],
+) {
     if xfers.is_empty() {
         return;
     }
@@ -405,7 +429,7 @@ pub fn apply_water_flow_regions(world: &mut World, active: &[ActiveChunk]) {
     }
 
     xfers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
-    for (from, to, amt) in xfers {
+    for (from, to, amt) in xfers.iter().copied() {
         if amt <= 0 {
             continue;
         }
@@ -469,9 +493,84 @@ struct PressureBody {
     donor: (i32, i32),
 }
 
+fn consider_pressure_donor(
+    x: i32,
+    y: i32,
+    sat: Sat,
+    cap: u8,
+    best_head: &mut f32,
+    best_donor: &mut (i32, i32),
+) {
+    let h = hydraulic_head(y, sat, cap);
+    if h > *best_head {
+        *best_head = h;
+        *best_donor = (x, y);
+    }
+}
+
+/// Walk up a contiguous full-wet Air column from `(x,y)`, mark visited,
+/// enqueue lateral neighbours, and record the free-surface donor at the
+/// top. Avoids flood-filling an entire deep ocean just to learn the
+/// surface head of a column we already touched.
+fn climb_full_air_column(
+    world: &World,
+    x: i32,
+    y_start: i32,
+    cap: u8,
+    queue: &mut VecDeque<(i32, i32)>,
+    visited: &mut HashSet<(i32, i32)>,
+    best_head: &mut f32,
+    best_donor: &mut (i32, i32),
+) {
+    let mut y = y_start;
+    loop {
+        let Some(c) = world.get_cell(x, y) else {
+            break;
+        };
+        if c.material != MaterialId::Air || !c.sat.is_full() {
+            break;
+        }
+        if !visited.insert((x, y)) {
+            break;
+        }
+        // Lateral pressure links at this depth.
+        for dx in [-1_i32, 1] {
+            let nx = world.wrap_x(x + dx);
+            if let Some(n) = world.get_cell(nx, y) {
+                if n.material == MaterialId::Air && n.sat.is_full() {
+                    if !visited.contains(&(nx, y)) {
+                        queue.push_back((nx, y));
+                    }
+                } else if n.material == MaterialId::Air && n.sat.0 > 0 {
+                    consider_pressure_donor(nx, y, n.sat, cap, best_head, best_donor);
+                }
+            }
+        }
+        if is_air_free_surface(world, x, y) {
+            consider_pressure_donor(x, y, c.sat, cap, best_head, best_donor);
+        }
+        match world.get_cell(x, y + 1) {
+            Some(above)
+                if above.material == MaterialId::Air && above.sat.is_full() =>
+            {
+                y += 1;
+            }
+            Some(above) if above.material == MaterialId::Air && above.sat.0 > 0 => {
+                consider_pressure_donor(x, y + 1, above.sat, cap, best_head, best_donor);
+                break;
+            }
+            _ => break,
+        }
+    }
+}
+
 /// Pressure-connected body through **full** wet Air, starting at a full
 /// seed. Free-surface head is the max `hydraulic_head` among full cells
 /// that have room above and among adjacent partial wet-Air cells.
+///
+/// Deep oceans are handled by climbing each touched column to its free
+/// surface instead of visiting every submerged cell; once a free surface
+/// higher than the seed column is found we stop (enough to drive a rise).
 fn pressure_body_from_full(
     world: &World,
     seed_x: i32,
@@ -487,10 +586,14 @@ fn pressure_body_from_full(
     }
 
     let cap = water_capacity(MaterialId::Air);
+    let head_eps = 1.0 / (cap as f32);
+    // Require a free surface at least one full cell above the seed
+    // before early-out. The shaft's own rising film sits just above the
+    // seed and must not stop the search before we reach the reservoir.
+    let early_exit_head = (seed_y + 2) as f32;
     let mut queue = VecDeque::new();
     let mut visited: HashSet<(i32, i32)> = HashSet::new();
     queue.push_back((seed_x, seed_y));
-    visited.insert((seed_x, seed_y));
 
     let mut best_donor = (seed_x, seed_y);
     let mut best_head = hydraulic_head(seed_y, seed.sat, cap);
@@ -499,37 +602,41 @@ fn pressure_body_from_full(
         if visited.len() > CONFINED_HEAD_BFS_LIMIT {
             break;
         }
-        if is_air_free_surface(world, x, y) {
-            if let Some(c) = world.get_cell(x, y) {
-                let h = hydraulic_head(y, c.sat, cap);
-                if h > best_head {
-                    best_head = h;
-                    best_donor = (x, y);
+        if visited.contains(&(x, y)) {
+            continue;
+        }
+        let Some(c) = world.get_cell(x, y) else {
+            continue;
+        };
+        if c.material != MaterialId::Air || !c.sat.is_full() {
+            continue;
+        }
+        // Climb this column for its free-surface head, then continue
+        // laterally via the climb's enqueued neighbours + downward link.
+        climb_full_air_column(
+            world,
+            x,
+            y,
+            cap,
+            &mut queue,
+            &mut visited,
+            &mut best_head,
+            &mut best_donor,
+        );
+        // Downward continuity (pipe floors / deeper basins).
+        if let Some(below) = world.get_cell(x, y - 1) {
+            if below.material == MaterialId::Air && below.sat.is_full() {
+                if !visited.contains(&(x, y - 1)) {
+                    queue.push_back((x, y - 1));
                 }
+            } else if below.material == MaterialId::Air && below.sat.0 > 0 {
+                consider_pressure_donor(x, y - 1, below.sat, cap, &mut best_head, &mut best_donor);
             }
         }
-        for (dx, dy) in [(-1_i32, 0), (1, 0), (0, -1), (0, 1)] {
-            let nx = world.wrap_x(x + dx);
-            let ny = y + dy;
-            let Some(n) = world.get_cell(nx, ny) else {
-                continue;
-            };
-            if n.material != MaterialId::Air {
-                continue;
-            }
-            if n.sat.is_full() {
-                if visited.insert((nx, ny)) {
-                    queue.push_back((nx, ny));
-                }
-            } else if n.sat.0 > 0 {
-                // Partial free surface touching the full body — donor
-                // candidate only; do not walk through films.
-                let h = hydraulic_head(ny, n.sat, cap);
-                if h > best_head {
-                    best_head = h;
-                    best_donor = (nx, ny);
-                }
-            }
+        // Reservoir / far free surface found — stop before flood-filling
+        // the ocean. (Local shaft film is below early_exit_head.)
+        if best_head > early_exit_head + head_eps {
+            break;
         }
     }
 
@@ -537,9 +644,11 @@ fn pressure_body_from_full(
         max_head: best_head,
         donor: best_donor,
     };
-    for key in visited {
-        cache.insert(key, body);
+    for key in &visited {
+        cache.insert(*key, body);
     }
+    // Seed may equal best when the climb marked it; always cache seed.
+    cache.insert((seed_x, seed_y), body);
     Some(body)
 }
 
@@ -2745,6 +2854,14 @@ pub fn tick_with_configs_and_geotech(
         }
     }
 
+    // Communicating vessels: a filled pipe can go locally quiet while
+    // the reservoir head is still higher. Periodic full-chunk confined
+    // scan wakes that case (column-climb keeps it cheap on oceans).
+    if world.tick % CONFINED_HEAD_WAKE_EVERY == 0 {
+        let regions = regions_for_standalone(world);
+        apply_confined_upward_regions(world, &regions);
+    }
+
     // Seepage + grain fall read the same dirty halo the substep loop
     // built. Do NOT clear dirty here: if these passes don't write
     // (e.g. no porous solids, no grains), we still need next tick to
@@ -4729,6 +4846,58 @@ mod tests {
         assert!(
             w.get_cell(10, 9).map(|c| c.sat.0).unwrap_or(0) < 32,
             "shaft must not fountain above reservoir head"
+        );
+    }
+
+    #[test]
+    fn confined_head_equalizes_across_large_deep_ocean() {
+        // Naive flood-fill of a deep ocean exceeds CONFINED_HEAD_BFS_LIMIT
+        // before reaching the free surface; column-climb must still find
+        // the head so a far shaft equalises.
+        // Ocean: x=0..199, water y=1..40 (surface at 40). Pipe at y=1
+        // from x=200..210 into a walled shaft at x=210.
+        let mut w = World::new(79);
+        for cx in 0..4 {
+            w.ensure_chunk(ChunkCoord::new(cx, 0));
+        }
+        let ocean_w = 200;
+        let surface = 40;
+        for x in 0..=212 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for x in 0..ocean_w {
+            for y in 1..=surface {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        // Bedrock hillside / pipe lining (walls include y=1 so the
+        // elbow cannot laterally spill into open Air).
+        for y in 1..=surface + 2 {
+            w.set_cell(209, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(211, y, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 2..=surface + 2 {
+            w.set_cell(ocean_w, y, Cell::solid(MaterialId::Bedrock));
+        }
+        w.set_cell(208, 2, Cell::solid(MaterialId::Bedrock));
+        // Horizontal pipe full under the hillside; shaft empty above elbow.
+        for x in ocean_w..=210 {
+            w.set_cell(x, 1, Cell::water());
+        }
+        // Throat through the left shaft wall at pipe level.
+        w.set_cell(209, 1, Cell::water());
+
+        for _ in 0..500 {
+            tick(&mut w);
+        }
+
+        let shaft_top = (1..=surface + 1)
+            .rev()
+            .find(|&y| w.get_cell(210, y).map(|c| c.sat.0 > 0).unwrap_or(false))
+            .expect("shaft should hold water");
+        assert!(
+            shaft_top >= surface - 3,
+            "large-ocean confined head must reach near sea level (top={shaft_top}, sea={surface})"
         );
     }
 
