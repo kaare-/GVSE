@@ -35,7 +35,7 @@ Per wet Air cell (compute-then-apply, mass-conserving):
    - Scan up to 12 standing cells for a cascade outlet; push toward it.
    - Pairwise head-equalise each `+x` standing edge (avoids checkerboard terraces on wide lakes).
 4. **Throughflow** — weep through a saturated porous stack (≤24 deep) at seepage rate into the **nearest opening**: a side Air face (cliff / spring) or Air below the stack.
-5. **Confined upward head** — In a **walled** column (non-Air on both sides), Air-with-room sitting on a **full** wet-Air cell pulls from the connected free-surface donor when that body's max `hydraulic_head` exceeds the receiver. Pressure walks through full wet Air only (bedrock pipes / communicating vessels). Mass leaves the high reservoir surface so the pipe stays full and gravity cannot undo the rise. Open lake surfaces stay with same-Y equalise. Rate-capped; will not fountain above the component free surface. Deep oceans use **column climb** (read the free surface of each touched column) plus a periodic quiet-world wake so far reservoirs are not lost to a cell-visit cap.
+5. **Confined upward head** — Air-with-room sitting on a **full** wet-Air cell pulls from the connected free-surface donor when that body's max `hydraulic_head` exceeds the receiver. Pressure walks through full wet Air only (bedrock pipes / communicating vessels). Mass leaves the high reservoir surface so the pipe stays full and gravity cannot undo the rise. A **higher-row** donor always qualifies (1-wide or 2-wide shafts); same-row finish still requires a fully walled column. Open lakes stay with same-Y equalise. Deep oceans use **column climb** plus a periodic **full-chunk** wake (not the dirty halo — ocean evaporation must not starve a quiet shaft).
 
 `apply_lateral_spill` remains as a narrower Air–Air half-gap helper for unit tests; **`tick` does not call it**.
 
@@ -109,6 +109,8 @@ Tab → **Material permeability / porosity** overrides these at runtime (`Materi
 
 - `same_y_equalize_flattens_stepped_lake_surface`
 - `communicating_vessels_bedrock_l_pipe_equalizes`
+- `confined_head_rises_in_two_wide_shaft`
+- `confined_head_wake_scans_despite_unrelated_dirty`
 - `confined_head_equalizes_across_large_deep_ocean`
 - `closed_basin_lake_does_not_fountain_upward`
 - `solid_staircase_film_drains_left_into_lower_pool`

@@ -33,7 +33,13 @@ fn regions_for_standalone(world: &World) -> Vec<ActiveChunk> {
     if !planned.is_empty() {
         return planned;
     }
-    // Full scan fallback — only loaded chunks.
+    regions_all_loaded(world)
+}
+
+/// Every loaded chunk at full rect — ignores dirty halos.
+/// Used by confined-head wake so ocean evaporation cannot starve a
+/// quiet pipe shaft of scans.
+fn regions_all_loaded(world: &World) -> Vec<ActiveChunk> {
     let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
@@ -477,14 +483,25 @@ fn is_air_free_surface(world: &World, gx: i32, gy: i32) -> bool {
 }
 
 /// True when both horizontal neighbours are non-Air (or world edge).
-/// Open lake free surfaces stay with same-Y equalise; only walled
-/// shafts / pipes use confined upward head.
 fn is_walled_column(world: &World, gx: i32, gy: i32) -> bool {
     let wall = |x: i32| match world.get_cell(world.wrap_x(x), gy) {
         None => true,
         Some(c) => c.material != MaterialId::Air,
     };
     wall(gx - 1) && wall(gx + 1)
+}
+
+/// Whether a rising cell may pull from a connected free-surface donor.
+///
+/// - Donor at a **higher row**: always allow (1-wide or 2-wide shafts /
+///   ocean head). Open lakes almost always donate on the same row, so
+///   they stay with same-Y equalise.
+/// - Same-row finish: require a fully walled 1-wide column.
+fn allows_confined_rise(world: &World, gx: i32, gy: i32, donor_y: i32) -> bool {
+    if donor_y > gy {
+        return true;
+    }
+    is_walled_column(world, gx, gy)
 }
 
 #[derive(Clone, Copy)]
@@ -676,11 +693,6 @@ fn accumulate_confined_upward_xfers(
                 if dst.material != MaterialId::Air || dst.sat.is_full() {
                     continue;
                 }
-                // Lakes level laterally via same-Y; confined head is for
-                // walled columns (bedrock pipes / shafts) only.
-                if !is_walled_column(world, gx, gy) {
-                    continue;
-                }
                 let Some(below) = world.get_cell(gx, gy - 1) else {
                     continue;
                 };
@@ -700,6 +712,11 @@ fn accumulate_confined_upward_xfers(
                 }
                 let (dx, dy) = body.donor;
                 if dx == gx && dy == gy {
+                    continue;
+                }
+                // Same-Y open lakes → same-Y equalise; higher donor row
+                // (ocean / far reservoir) may rise even in a 2-wide shaft.
+                if !allows_confined_rise(world, gx, gy, dy) {
                     continue;
                 }
                 let Some(donor) = world.get_cell(dx, dy) else {
@@ -2856,9 +2873,11 @@ pub fn tick_with_configs_and_geotech(
 
     // Communicating vessels: a filled pipe can go locally quiet while
     // the reservoir head is still higher. Periodic full-chunk confined
-    // scan wakes that case (column-climb keeps it cheap on oceans).
+    // scan wakes that case. Must NOT use dirty-halo planning — with
+    // evap on, the ocean surface stays dirty forever and would starve
+    // a quiet shaft of scans.
     if world.tick % CONFINED_HEAD_WAKE_EVERY == 0 {
-        let regions = regions_for_standalone(world);
+        let regions = regions_all_loaded(world);
         apply_confined_upward_regions(world, &regions);
     }
 
@@ -4850,6 +4869,98 @@ mod tests {
     }
 
     #[test]
+    fn confined_head_rises_in_two_wide_shaft() {
+        // 2-wide bedrock shaft: neither column has solid on *both* sides,
+        // so a both-walls gate would skip forever. Higher-row ocean donor
+        // must still lift the column.
+        let mut w = World::new(80);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..18 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..=10 {
+            w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(12, y, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 2..=10 {
+            w.set_cell(7, y, Cell::solid(MaterialId::Bedrock));
+        }
+        w.set_cell(8, 2, Cell::solid(MaterialId::Bedrock));
+        for x in 1..=6 {
+            for y in 1..=8 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        for x in 7..=11 {
+            w.set_cell(x, 1, Cell::water());
+        }
+
+        for _ in 0..400 {
+            tick(&mut w);
+        }
+
+        let top_a = (1..=10)
+            .rev()
+            .find(|&y| w.get_cell(10, y).map(|c| c.sat.0 > 0).unwrap_or(false));
+        let top_b = (1..=10)
+            .rev()
+            .find(|&y| w.get_cell(11, y).map(|c| c.sat.0 > 0).unwrap_or(false));
+        let top = top_a.max(top_b).expect("2-wide shaft should hold water");
+        // Mass spreads into two shaft columns, so equilibrium sits a bit
+        // below the original reservoir free surface.
+        assert!(
+            top >= 5,
+            "2-wide shaft should equalise toward reservoir (top={top})"
+        );
+    }
+
+    #[test]
+    fn confined_head_wake_scans_despite_unrelated_dirty() {
+        // Evap keeps ocean-surface cells dirty. The wake must still scan
+        // loaded chunks (not the dirty halo), or a quiet pipe stalls.
+        let mut w = World::new(81);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..=10 {
+            w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(11, y, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 2..=10 {
+            w.set_cell(7, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+        }
+        w.set_cell(8, 2, Cell::solid(MaterialId::Bedrock));
+        for x in 1..=6 {
+            for y in 1..=8 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        for x in 7..=10 {
+            w.set_cell(x, 1, Cell::water());
+        }
+
+        clear_all_dirty(&mut w);
+        // Only a reservoir-surface cell is dirty (evap stand-in).
+        w.touch_dirty(3, 8);
+        w.tick = 8; // wake fires inside tick
+        for _ in 0..60 {
+            tick(&mut w);
+        }
+
+        let shaft_top = (1..=10)
+            .rev()
+            .find(|&y| w.get_cell(10, y).map(|c| c.sat.0 > 0).unwrap_or(false))
+            .expect("shaft should rise via full-chunk wake");
+        assert!(
+            shaft_top >= 7,
+            "wake must equalise despite unrelated dirty halo (top={shaft_top})"
+        );
+    }
+
+    #[test]
     fn confined_head_equalizes_across_large_deep_ocean() {
         // Naive flood-fill of a deep ocean exceeds CONFINED_HEAD_BFS_LIMIT
         // before reaching the free surface; column-climb must still find
@@ -4967,11 +5078,7 @@ mod tests {
             tick(&mut w);
         }
 
-        let row3: Vec<u8> = (1..9).map(|x| w.get_cell(x, 3).unwrap().sat.0).collect();
-        let row4: Vec<u8> = (1..9).map(|x| w.get_cell(x, 4).unwrap().sat.0).collect();
-        let row2: Vec<u8> = (1..9).map(|x| w.get_cell(x, 2).unwrap().sat.0).collect();
-        eprintln!("y2={row2:?} y3={row3:?} y4={row4:?}");
-        let row: Vec<u8> = row3;
+        let row: Vec<u8> = (1..9).map(|x| w.get_cell(x, 3).unwrap().sat.0).collect();
         let max = *row.iter().max().unwrap();
         let min = *row.iter().min().unwrap();
         let sum: i32 = row.iter().map(|&s| s as i32).sum();
