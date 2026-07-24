@@ -200,11 +200,10 @@ fn draw_starfield(tick: u64, sw: f32, sh: f32, alpha: f32) {
     }
 }
 
-/// Moon with a real terminator (not a sky-coloured bite).
+/// Simple two-circle moon: bright disk + dark shadow disk.
 ///
-/// `phase` 0 = new → 0.5 = full → 1 = new. Lit side uses an orthographic
-/// sphere lit from the sun direction; the dark limb keeps a faint
-/// earthshine so the full disk never flashes a bright halo ring.
+/// `phase` 0 = new → 0.5 = full → 1 = new. No raster/grid — just clean
+/// circles so crescents and gibbous read without banding.
 fn draw_moon(
     cx: f32,
     cy: f32,
@@ -216,130 +215,31 @@ fn draw_moon(
     _tint: f32,
 ) {
     let r = r.max(4.0);
-    // Lit-side glow only — alpha follows illumination so a crescent
-    // does not outline a full bright ring.
-    let glow_a = (18.0 + 55.0 * illum * illum) as u8;
-    if glow_a > 4 {
-        let pa = phase * std::f32::consts::TAU;
-        let gx = cx + pa.sin() * r * 0.15;
-        draw_circle(gx, cy, r * (1.15 + 0.25 * illum), Color::from_rgba(190, 205, 230, glow_a));
+    let lit = Color::from_rgba(232, 236, 245, 255);
+    let shade = Color::from_rgba(42, 46, 62, 255);
+
+    // Soft bloom only when mostly full (avoids a ring around crescents).
+    if illum > 0.55 {
+        let a = ((illum - 0.55) / 0.45 * 40.0) as u8;
+        draw_circle(cx, cy, r * 1.35, Color::from_rgba(200, 210, 230, a));
     }
 
-    // Unlit disk (mare grey) + earthshine.
-    let earthshine = (22.0 + 18.0 * (1.0 - illum)) as u8;
-    draw_circle(
-        cx,
-        cy,
-        r,
-        Color::from_rgba(48, 52, 68, 255),
-    );
-    draw_circle(
-        cx,
-        cy,
-        r * 0.97,
-        Color::from_rgba(62, 68, 88, earthshine.saturating_add(40)),
-    );
-
-    if illum < 0.02 {
-        return; // new moon — dark disk only
+    if illum < 0.03 {
+        // New moon — faint earthshine disk only.
+        draw_circle(cx, cy, r, Color::from_rgba(42, 46, 62, 180));
+        return;
     }
 
-    // Sun direction on the unit sphere (phase 0 = behind, 0.5 = face-on).
-    let pa = phase * std::f32::consts::TAU;
-    let lx = pa.sin();
-    let lz = -pa.cos();
+    // Bright body, then a same-radius shadow disk that slides across.
+    // illum 0 → shadow centred (new); illum 1 → shadow parked 2r off (full).
+    draw_circle(cx, cy, r, lit);
+    // Two soft mare spots (under the shadow so they only show when lit).
+    draw_circle(cx - r * 0.22, cy - r * 0.12, r * 0.22, Color::from_rgba(200, 205, 220, 70));
+    draw_circle(cx + r * 0.28, cy + r * 0.18, r * 0.14, Color::from_rgba(195, 200, 215, 55));
 
-    // Column raster of the lit limb.
-    let cols = ((r * 2.4).ceil() as i32).clamp(12, 64);
-    let col_w = (2.0 * r) / cols as f32;
-    for i in 0..cols {
-        let x_off = -r + (i as f32 + 0.5) * col_w;
-        let chord_sq = r * r - x_off * x_off;
-        if chord_sq <= 0.0 {
-            continue;
-        }
-        let half = chord_sq.sqrt();
-        let nx = x_off / r;
-        // Sample a few y rows so the terminator is smooth, not a slab.
-        let rows = ((half * 2.2).ceil() as i32).clamp(4, 48);
-        let row_h = (2.0 * half) / rows as f32;
-        for j in 0..rows {
-            let y_off = -half + (j as f32 + 0.5) * row_h;
-            let ny = y_off / r;
-            let nz_sq = 1.0 - nx * nx - ny * ny;
-            if nz_sq <= 0.0 {
-                continue;
-            }
-            let nz = nz_sq.sqrt();
-            let ndotl = nx * lx + nz * lz;
-            if ndotl <= 0.02 {
-                continue;
-            }
-            // Soft terminator + slight limb darkening.
-            let shade = (ndotl.clamp(0.0, 1.0).powf(0.65) * (0.75 + 0.25 * nz)).clamp(0.0, 1.0);
-            let lit_r = (210.0 + 35.0 * shade) as u8;
-            let lit_g = (214.0 + 30.0 * shade) as u8;
-            let lit_b = (222.0 + 25.0 * shade) as u8;
-            let a = (200.0 + 55.0 * shade) as u8;
-            draw_rectangle(
-                cx + x_off - col_w * 0.55,
-                cy + y_off - row_h * 0.55,
-                col_w * 1.15,
-                row_h * 1.15,
-                Color::from_rgba(lit_r, lit_g, lit_b, a),
-            );
-        }
-    }
-
-    // Soft rim highlight on the bright limb.
-    if illum > 0.15 {
-        let rim_x = cx + lx.signum() * r * 0.55;
-        draw_circle(
-            rim_x,
-            cy - r * 0.08,
-            r * 0.22,
-            Color::from_rgba(245, 248, 255, (28.0 + 40.0 * illum) as u8),
-        );
-    }
-
-    // A few fixed “craters” clipped to the lit face.
-    draw_moon_craters(cx, cy, r, lx, lz, illum);
-}
-
-fn draw_moon_craters(cx: f32, cy: f32, r: f32, lx: f32, lz: f32, illum: f32) {
-    // (nx, ny, radius_frac) in unit-disk space — stable features.
-    const CRATERS: &[(f32, f32, f32)] = &[
-        (-0.25, -0.15, 0.18),
-        (0.30, 0.20, 0.12),
-        (0.05, -0.40, 0.10),
-        (-0.45, 0.25, 0.09),
-        (0.40, -0.30, 0.08),
-        (-0.10, 0.35, 0.11),
-    ];
-    let a = (50.0 + 70.0 * illum) as u8;
-    for &(nx, ny, rf) in CRATERS {
-        let nz_sq = 1.0 - nx * nx - ny * ny;
-        if nz_sq <= 0.0 {
-            continue;
-        }
-        let nz = nz_sq.sqrt();
-        if nx * lx + nz * lz <= 0.08 {
-            continue; // on the dark limb
-        }
-        let cr = r * rf;
-        draw_circle(
-            cx + nx * r,
-            cy + ny * r,
-            cr,
-            Color::from_rgba(150, 155, 175, a / 2),
-        );
-        draw_circle(
-            cx + nx * r - cr * 0.15,
-            cy + ny * r - cr * 0.15,
-            cr * 0.55,
-            Color::from_rgba(120, 125, 145, a / 3),
-        );
-    }
+    let sign = if phase <= 0.5 { -1.0 } else { 1.0 };
+    let offset = sign * illum * 2.0 * r;
+    draw_circle(cx + offset, cy, r, shade);
 }
 
 /// Cool cyan → hot amber for geotech shear score on face cells.
