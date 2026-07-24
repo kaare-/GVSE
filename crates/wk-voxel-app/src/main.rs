@@ -50,8 +50,10 @@ use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, day_night_factor_cfg, geotech_map_due,
-    humidity_diffuse_due, is_daytime_cfg, is_standing_water, precip_forms_snow_at_air, sky_rgb,
-    sky_rgb_at_height, temperature_step_due, tick_with_configs_and_geotech, ClimateConfig,
+    humidity_diffuse_due, is_daytime_cfg, is_standing_water, lunar_fraction_cfg,
+    moon_apparent_scale, moon_illumination, precip_forms_snow_at_air, season_fraction_cfg,
+    season_name, sky_rgb_at_height_cfg, sky_rgb_cfg, sun_apparent_scale,
+    temperature_step_due, tick_with_configs_and_geotech, ClimateConfig,
     GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
 
@@ -118,15 +120,18 @@ fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
     (18.0 + norm * 42.0) as u8
 }
 
-/// Day/night sky gradient + sun or moon arc.
+/// Day/night sky gradient + seasonal wash, stars, sun/moon with
+/// distance-driven size and lunar phase.
 fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
     let dn = day_night_factor_cfg(tick, climate);
-    const BANDS: i32 = 28;
+    let season = season_fraction_cfg(tick, climate);
+    let tint = climate.season_sky_tint;
+    const BANDS: i32 = 36;
     for i in 0..BANDS {
         let y0 = sh * (i as f32) / BANDS as f32;
         let h = y0 + sh / BANDS as f32;
         let height_01 = (i as f32 + 0.5) / BANDS as f32;
-        let [r, g, b] = sky_rgb_at_height(dn, height_01);
+        let [r, g, b] = sky_rgb_at_height_cfg(dn, height_01, season, tint);
         draw_rectangle(
             0.0,
             y0,
@@ -135,20 +140,105 @@ fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
             Color::from_rgba(r, g, b, 255),
         );
     }
+
+    // Soft horizon haze strip (dusk/dawn + mild daytime).
+    if dn > -0.55 {
+        let glow = if dn >= 0.0 {
+            0.12 + 0.10 * (1.0 - dn)
+        } else {
+            0.22 * (1.0 + dn / 0.55)
+        };
+        let haze_h = sh * (0.10 + 0.06 * glow);
+        let [hr, hg, hb] = sky_rgb_cfg(dn.max(-0.1), season, tint);
+        draw_rectangle(
+            0.0,
+            sh - haze_h,
+            sw,
+            haze_h,
+            Color::from_rgba(hr, hg, hb, (40.0 + 90.0 * glow) as u8),
+        );
+    }
+
+    // Starfield — fades in as night deepens.
+    let star_alpha = climate.star_strength.clamp(0.0, 1.0) * ((-dn).clamp(0.0, 1.0)).powf(1.4);
+    if star_alpha > 0.04 {
+        draw_starfield(tick, sw, sh, star_alpha);
+    }
+
     let (cx, cy) = celestial_screen_pos_cfg(tick, sw, sh, climate);
     if is_daytime_cfg(tick, climate) {
-        draw_circle(cx, cy, 22.0, Color::from_rgba(255, 200, 70, 60));
-        draw_circle(cx, cy, 16.0, Color::from_rgba(255, 220, 90, 255));
-        draw_circle(cx, cy, 10.0, Color::from_rgba(255, 245, 180, 255));
+        let scale = sun_apparent_scale(tick, climate);
+        let r = climate.sun_base_radius * scale;
+        draw_circle(cx, cy, r * 1.55, Color::from_rgba(255, 200, 70, 50));
+        draw_circle(cx, cy, r * 1.15, Color::from_rgba(255, 210, 80, 90));
+        draw_circle(cx, cy, r, Color::from_rgba(255, 220, 90, 255));
+        draw_circle(cx, cy, r * 0.62, Color::from_rgba(255, 245, 180, 255));
     } else {
-        let [sr, sg, sb] = sky_rgb(dn);
-        draw_circle(cx, cy, 14.0, Color::from_rgba(230, 235, 245, 255));
-        // Crescent bite using local sky colour.
+        let scale = moon_apparent_scale(tick, climate);
+        let r = climate.moon_base_radius * scale;
+        let illum = moon_illumination(tick, climate);
+        let phase = lunar_fraction_cfg(tick, climate);
+        draw_moon(cx, cy, r, phase, illum, dn, season, tint);
+    }
+}
+
+fn draw_starfield(tick: u64, sw: f32, sh: f32, alpha: f32) {
+    // Deterministic pseudo-random stars; slow drift with the night.
+    let drift = (tick as f32 * 0.002) % sw;
+    let mut s: u32 = 0xC0FF_EE42;
+    for _ in 0..90 {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let x = ((s >> 8) as f32 / u32::MAX as f32) * sw + drift;
+        let x = if x >= sw { x - sw } else { x };
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let y = ((s >> 8) as f32 / u32::MAX as f32) * sh * 0.72;
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let bright = 0.45 + 0.55 * (((s >> 16) & 0xFFFF) as f32 / 65535.0);
+        let a = (alpha * bright * 255.0) as u8;
+        let rad = if s & 7 == 0 { 1.6 } else { 1.0 };
+        draw_circle(x, y, rad, Color::from_rgba(220, 230, 255, a));
+    }
+}
+
+/// Moon disk with phase shading. `phase` 0=new → 0.5=full → 1=new;
+/// waxing lights the right side, waning the left.
+fn draw_moon(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    phase: f32,
+    illum: f32,
+    dn: f32,
+    season: f32,
+    tint: f32,
+) {
+    let [sr, sg, sb] = sky_rgb_cfg(dn, season, tint);
+    // Soft glow scales with illumination (full moon haze).
+    let glow_a = (30.0 + 50.0 * illum) as u8;
+    draw_circle(cx, cy, r * 1.45, Color::from_rgba(200, 210, 230, glow_a));
+    // Body
+    draw_circle(cx, cy, r, Color::from_rgba(230, 235, 245, 255));
+    // Phase: approximate with an offset sky-coloured disk.
+    // angle: 0 new, 0.5 full. Offset direction flips at full.
+    let waxing = phase < 0.5;
+    let cover = (1.0 - illum).clamp(0.0, 1.0);
+    if cover > 0.02 {
+        let bite_r = r * (0.92 + 0.08 * cover);
+        let offset = r * (0.35 + 0.95 * cover) * if waxing { 1.0 } else { -1.0 };
         draw_circle(
-            cx + 5.0,
-            cy - 2.0,
-            12.0,
+            cx + offset,
+            cy - r * 0.05,
+            bite_r,
             Color::from_rgba(sr, sg, sb, 255),
+        );
+    }
+    // Near-new: dim the remaining sliver so it does not read as full.
+    if illum < 0.12 {
+        draw_circle(
+            cx,
+            cy,
+            r * 1.02,
+            Color::from_rgba(sr, sg, sb, ((1.0 - illum / 0.12) * 200.0) as u8),
         );
     }
 }
@@ -1193,7 +1283,7 @@ async fn main() {
         // Creature / terrain editor overlays (paint UI, or spawn banner).
         editor.draw();
         terrain.draw();
-        settings.draw();
+        settings.draw(scene.world.tick);
         quit_dialog.draw();
 
         // HUD chrome (info + hotkeys + inspector) toggled with F1.
@@ -1203,6 +1293,7 @@ async fn main() {
             } else {
                 "night"
             };
+            let season = season_name(season_fraction_cfg(scene.world.tick, &settings.climate));
             let rain_tag = if !rain_on {
                 "off"
             } else if settings.rain.closed_loop {
@@ -1211,10 +1302,11 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} {}",
+                "fps={:.0}  tick={} {} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
+                season,
                 scene.temperature.mean(),
                 rain_tag,
                 if evap_on { "on" } else { "off" },

@@ -230,7 +230,7 @@ impl SimSettings {
         }
     }
 
-    pub fn draw(&mut self) {
+    pub fn draw(&mut self, world_tick: u64) {
         if !self.open {
             return;
         }
@@ -242,6 +242,8 @@ impl SimSettings {
         let mut droplet = self.rain.droplet_sat as f32;
         let mut day_ticks = self.climate.day_ticks as f32;
         let mut night_ticks = self.climate.night_ticks as f32;
+        let mut season_ticks = self.climate.season_ticks as f32;
+        let mut lunar_ticks = self.climate.lunar_ticks as f32;
         let mut max_parcels = self.cloud.max_parcels as f32;
         let mut cloud_alt = self.cloud.cloud_alt_above_sea as f32;
         let mut coag_min_alt = self.cloud.coag_min_above_sea as f32;
@@ -296,13 +298,113 @@ impl SimSettings {
                 });
                 ui.separator();
 
+                ui.tree_node(hash!(), "Season / sun / moon", |ui| {
+                    use wk_voxel::{
+                        moon_apparent_scale, moon_illumination, season_fraction_cfg, season_name,
+                        sun_apparent_scale,
+                    };
+                    let season = season_fraction_cfg(world_tick, &self.climate);
+                    ui.label(
+                        None,
+                        &format!(
+                            "  {} · moon illum {:.0}% · sun×{:.2} moon×{:.2}",
+                            season_name(season),
+                            moon_illumination(world_tick, &self.climate) * 100.0,
+                            sun_apparent_scale(world_tick, &self.climate),
+                            moon_apparent_scale(world_tick, &self.climate),
+                        ),
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Season scrub (0 winter … 0.5 summer)",
+                        0.0..1.0,
+                        &mut self.climate.season_offset,
+                    );
+                    ui.checkbox(hash!(), "Lock season", &mut self.climate.season_lock);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Year length (ticks)",
+                        1_200.0..200_000.0,
+                        &mut season_ticks,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Season day-length swing",
+                        0.0..0.55,
+                        &mut self.climate.season_day_length_amp,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Season sky tint",
+                        0.0..1.0,
+                        &mut self.climate.season_sky_tint,
+                    );
+                    ui.separator();
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Moon phase scrub (0 new … 0.5 full)",
+                        0.0..1.0,
+                        &mut self.climate.lunar_offset,
+                    );
+                    ui.checkbox(hash!(), "Lock moon phase", &mut self.climate.lunar_lock);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Lunar month (ticks)",
+                        300.0..40_000.0,
+                        &mut lunar_ticks,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Moon size wobble (distance)",
+                        0.0..0.7,
+                        &mut self.climate.moon_distance_amp,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Moon base radius (px)",
+                        6.0..36.0,
+                        &mut self.climate.moon_base_radius,
+                    );
+                    ui.separator();
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Sun size wobble (distance)",
+                        0.0..0.5,
+                        &mut self.climate.sun_distance_amp,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Sun base radius (px)",
+                        8.0..40.0,
+                        &mut self.climate.sun_base_radius,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Starfield strength",
+                        0.0..1.0,
+                        &mut self.climate.star_strength,
+                    );
+                });
+                ui.separator();
+
                 ui.tree_node(hash!(), "Day / night / temperature", |ui| {
                     labeled_slider(ui, hash!(), "Day length (ticks)", 60.0..6_000.0, &mut day_ticks);
                     labeled_slider(ui, hash!(), "Night length (ticks)", 60.0..6_000.0, &mut night_ticks);
                     ui.label(
                         None,
                         &format!(
-                            "  cycle ≈ {:.1}s at 60 tick/s",
+                            "  cycle ≈ {:.1}s at 60 tick/s (equinox baseline)",
                             (day_ticks + night_ticks) / 60.0
                         ),
                     );
@@ -980,6 +1082,18 @@ impl SimSettings {
         self.rain.droplet_sat = droplet.round().clamp(1.0, 255.0) as u8;
         self.climate.day_ticks = day_ticks.round().clamp(30.0, 20_000.0) as u64;
         self.climate.night_ticks = night_ticks.round().clamp(30.0, 20_000.0) as u64;
+        self.climate.season_ticks = season_ticks.round().clamp(600.0, 500_000.0) as u64;
+        self.climate.lunar_ticks = lunar_ticks.round().clamp(120.0, 100_000.0) as u64;
+        self.climate.season_offset = self.climate.season_offset.rem_euclid(1.0);
+        self.climate.lunar_offset = self.climate.lunar_offset.rem_euclid(1.0);
+        self.climate.season_day_length_amp =
+            self.climate.season_day_length_amp.clamp(0.0, 0.6);
+        self.climate.season_sky_tint = self.climate.season_sky_tint.clamp(0.0, 1.0);
+        self.climate.moon_distance_amp = self.climate.moon_distance_amp.clamp(0.0, 0.8);
+        self.climate.sun_distance_amp = self.climate.sun_distance_amp.clamp(0.0, 0.6);
+        self.climate.moon_base_radius = self.climate.moon_base_radius.clamp(4.0, 48.0);
+        self.climate.sun_base_radius = self.climate.sun_base_radius.clamp(6.0, 48.0);
+        self.climate.star_strength = self.climate.star_strength.clamp(0.0, 1.0);
         self.cloud.max_parcels = max_parcels.round().clamp(1.0, 96.0) as usize;
         self.cloud.cloud_alt_above_sea = cloud_alt.round().clamp(4.0, 200.0) as i32;
         self.cloud.coag_min_above_sea = coag_min_alt.round().clamp(2.0, 160.0) as i32;
