@@ -35,6 +35,7 @@ Per wet Air cell (compute-then-apply, mass-conserving):
    - Scan up to 12 standing cells for a cascade outlet; push toward it.
    - Pairwise head-equalise each `+x` standing edge (avoids checkerboard terraces on wide lakes).
 4. **Throughflow** — weep through a saturated porous stack (≤24 deep) at seepage rate into the **nearest opening**: a side Air face (cliff / spring) or Air below the stack.
+5. **Confined upward head** — In a **walled** column (non-Air on both sides), Air-with-room sitting on a **full** wet-Air cell pulls from the connected free-surface donor when that body's max `hydraulic_head` exceeds the receiver. Pressure walks through full wet Air only (bedrock pipes / communicating vessels). Mass leaves the high reservoir surface so the pipe stays full and gravity cannot undo the rise. Open lake surfaces stay with same-Y equalise. Rate-capped; will not fountain above the component free surface.
 
 `apply_lateral_spill` remains as a narrower Air–Air half-gap helper for unit tests; **`tick` does not call it**.
 
@@ -107,6 +108,8 @@ Tab → **Material permeability / porosity** overrides these at runtime (`Materi
 ## Tests to keep green
 
 - `same_y_equalize_flattens_stepped_lake_surface`
+- `communicating_vessels_bedrock_l_pipe_equalizes`
+- `closed_basin_lake_does_not_fountain_upward`
 - `solid_staircase_film_drains_left_into_lower_pool`
 - `lake_bed_sand_wets_clay_and_stone_below_via_tick`
 - `deep_stone_stack_keeps_wetting_after_surface_quiesces`

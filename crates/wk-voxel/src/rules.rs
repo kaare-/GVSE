@@ -8,7 +8,7 @@
 //! start of the pass and write cells via [`World::set_cell`] so
 //! chunk dirty rectangles stay coherent for whatever runs next.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use wk_material::MaterialId;
 
@@ -112,6 +112,13 @@ fn is_porous_solid(material: MaterialId) -> bool {
 
 /// How far same-Y lake equalise looks for a drier surface cell / edge.
 const SAME_Y_SURFACE_SCAN: i32 = 12;
+
+/// Max sat moved per confined free-surface → rising-column transfer.
+/// Communicating vessels (bedrock pipes) equalise through this path.
+const CONFINED_HEAD_RATE: i32 = 32;
+
+/// Cap BFS size when walking a pressure-connected wet-Air body.
+const CONFINED_HEAD_BFS_LIMIT: usize = 8192;
 
 /// True when the cell below can support a standing free surface
 /// (solid ground or a full water column).
@@ -361,6 +368,11 @@ pub fn apply_water_flow_regions(world: &mut World, active: &[ActiveChunk]) {
     for pass in partition_checkerboard(active) {
         accumulate_water_flow_xfers(world, &pass, &mut xfers);
     }
+    // Confined upward equalisation: pull from the connected free-surface
+    // donor into Air-with-room that sits on a full wet column (bedrock
+    // pipes / communicating vessels). Planned after surface flow so
+    // cascade / same-Y keep source-budget priority on shared cells.
+    accumulate_confined_upward_xfers(world, active, &mut xfers);
 
     if xfers.is_empty() {
         return;
@@ -427,6 +439,177 @@ pub fn apply_water_flow_regions(world: &mut World, active: &[ActiveChunk]) {
                 ..dst
             },
         );
+    }
+}
+
+/// True when wet Air at `(gx,gy)` has room (or solid/sky) above — a
+/// free-surface candidate for confined-head donation.
+fn is_air_free_surface(world: &World, gx: i32, gy: i32) -> bool {
+    match world.get_cell(gx, gy + 1) {
+        None => true,
+        Some(a) if a.material != MaterialId::Air => true,
+        Some(a) => !a.sat.is_full(),
+    }
+}
+
+/// True when both horizontal neighbours are non-Air (or world edge).
+/// Open lake free surfaces stay with same-Y equalise; only walled
+/// shafts / pipes use confined upward head.
+fn is_walled_column(world: &World, gx: i32, gy: i32) -> bool {
+    let wall = |x: i32| match world.get_cell(world.wrap_x(x), gy) {
+        None => true,
+        Some(c) => c.material != MaterialId::Air,
+    };
+    wall(gx - 1) && wall(gx + 1)
+}
+
+#[derive(Clone, Copy)]
+struct PressureBody {
+    max_head: f32,
+    donor: (i32, i32),
+}
+
+/// Pressure-connected body through **full** wet Air, starting at a full
+/// seed. Free-surface head is the max `hydraulic_head` among full cells
+/// that have room above and among adjacent partial wet-Air cells.
+fn pressure_body_from_full(
+    world: &World,
+    seed_x: i32,
+    seed_y: i32,
+    cache: &mut HashMap<(i32, i32), PressureBody>,
+) -> Option<PressureBody> {
+    if let Some(&body) = cache.get(&(seed_x, seed_y)) {
+        return Some(body);
+    }
+    let seed = world.get_cell(seed_x, seed_y)?;
+    if seed.material != MaterialId::Air || !seed.sat.is_full() {
+        return None;
+    }
+
+    let cap = water_capacity(MaterialId::Air);
+    let mut queue = VecDeque::new();
+    let mut visited: HashSet<(i32, i32)> = HashSet::new();
+    queue.push_back((seed_x, seed_y));
+    visited.insert((seed_x, seed_y));
+
+    let mut best_donor = (seed_x, seed_y);
+    let mut best_head = hydraulic_head(seed_y, seed.sat, cap);
+
+    while let Some((x, y)) = queue.pop_front() {
+        if visited.len() > CONFINED_HEAD_BFS_LIMIT {
+            break;
+        }
+        if is_air_free_surface(world, x, y) {
+            if let Some(c) = world.get_cell(x, y) {
+                let h = hydraulic_head(y, c.sat, cap);
+                if h > best_head {
+                    best_head = h;
+                    best_donor = (x, y);
+                }
+            }
+        }
+        for (dx, dy) in [(-1_i32, 0), (1, 0), (0, -1), (0, 1)] {
+            let nx = world.wrap_x(x + dx);
+            let ny = y + dy;
+            let Some(n) = world.get_cell(nx, ny) else {
+                continue;
+            };
+            if n.material != MaterialId::Air {
+                continue;
+            }
+            if n.sat.is_full() {
+                if visited.insert((nx, ny)) {
+                    queue.push_back((nx, ny));
+                }
+            } else if n.sat.0 > 0 {
+                // Partial free surface touching the full body — donor
+                // candidate only; do not walk through films.
+                let h = hydraulic_head(ny, n.sat, cap);
+                if h > best_head {
+                    best_head = h;
+                    best_donor = (nx, ny);
+                }
+            }
+        }
+    }
+
+    let body = PressureBody {
+        max_head: best_head,
+        donor: best_donor,
+    };
+    for key in visited {
+        cache.insert(key, body);
+    }
+    Some(body)
+}
+
+/// Plan transfers from a connected free-surface donor into Air cells
+/// that sit on a full wet column and still have room (rising pipe /
+/// shaft surfaces). Mass leaves the high reservoir surface so the
+/// confined column stays full — gravity cannot undo the rise.
+fn accumulate_confined_upward_xfers(
+    world: &World,
+    active: &[ActiveChunk],
+    xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
+) {
+    let mut cache: HashMap<(i32, i32), PressureBody> = HashMap::new();
+    let cap = water_capacity(MaterialId::Air);
+    let head_eps = 1.0 / (cap as f32);
+
+    for ac in active {
+        for y in ac.rect.y0..=ac.rect.y1 {
+            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
+                let Some(dst) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if dst.material != MaterialId::Air || dst.sat.is_full() {
+                    continue;
+                }
+                // Lakes level laterally via same-Y; confined head is for
+                // walled columns (bedrock pipes / shafts) only.
+                if !is_walled_column(world, gx, gy) {
+                    continue;
+                }
+                let Some(below) = world.get_cell(gx, gy - 1) else {
+                    continue;
+                };
+                // Rising column: must sit on a full wet-Air cell that
+                // can transmit confined pressure.
+                if below.material != MaterialId::Air || !below.sat.is_full() {
+                    continue;
+                }
+                let Some(body) =
+                    pressure_body_from_full(world, gx, gy - 1, &mut cache)
+                else {
+                    continue;
+                };
+                let dst_head = hydraulic_head(gy, dst.sat, cap);
+                if body.max_head <= dst_head + head_eps {
+                    continue;
+                }
+                let (dx, dy) = body.donor;
+                if dx == gx && dy == gy {
+                    continue;
+                }
+                let Some(donor) = world.get_cell(dx, dy) else {
+                    continue;
+                };
+                if donor.material != MaterialId::Air || donor.sat.0 == 0 {
+                    continue;
+                }
+                let free = cap as i32 - dst.sat.0 as i32;
+                let dh_sat = ((body.max_head - dst_head) * cap as f32).floor() as i32;
+                let amt = CONFINED_HEAD_RATE
+                    .min(free)
+                    .min(donor.sat.0 as i32)
+                    .min(dh_sat.max(1));
+                if amt > 0 {
+                    xfers.push(((dx, dy), (gx, gy), amt));
+                }
+            }
+        }
     }
 }
 
@@ -657,7 +840,7 @@ fn accumulate_water_flow_xfers(
 ///
 /// **Test helper** — not called by [`tick`]. Production surface flow is
 /// [`apply_water_flow`] (diagonal-down, cascade, same-Y equalise,
-/// throughflow). See `docs/VOXEL_WATER.md`.
+/// throughflow, confined upward head). See `docs/VOXEL_WATER.md`.
 pub fn apply_lateral_spill(world: &mut World) {
     let regions = regions_for_standalone(world);
     apply_lateral_spill_regions(world, &regions);
@@ -4477,6 +4660,114 @@ mod tests {
 
 
     #[test]
+    fn communicating_vessels_bedrock_l_pipe_equalizes() {
+        // Reservoir on the left, bedrock L-pipe into a vertical shaft.
+        // Confined head must raise the shaft free surface to match the
+        // reservoir — the bug that left pipes stuck after thousands of
+        // ticks when only down/cascade/same-Y flow existed.
+        //
+        //   y=8: # W W W W W # # # . #
+        //   y=2: # W W W W W # # # . #
+        //   y=1: # W W W W W W W W W #
+        //   y=0: #####################
+        //                    ^pipe^ ^shaft x=10
+        let mut w = World::new(77);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        // Side walls (y=1 up) and pipe / shaft lining (y=2 up so y=1
+        // stays open for the horizontal run under the left shaft wall).
+        for y in 1..=10 {
+            w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(11, y, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 2..=10 {
+            w.set_cell(7, y, Cell::solid(MaterialId::Bedrock)); // separator
+            w.set_cell(9, y, Cell::solid(MaterialId::Bedrock)); // shaft left
+        }
+        // Cap over the horizontal run only (not the shaft at x=10).
+        w.set_cell(8, 2, Cell::solid(MaterialId::Bedrock));
+        // Reservoir column water up to y=8.
+        for x in 1..=6 {
+            for y in 1..=8 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        // Horizontal pipe full; shaft starts empty above the elbow.
+        for x in 7..=10 {
+            w.set_cell(x, 1, Cell::water());
+        }
+
+        let mass_before: i64 = (0..16)
+            .flat_map(|x| (0..12).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y))
+            .map(|c| c.sat.0 as i64)
+            .sum();
+
+        for _ in 0..400 {
+            tick(&mut w);
+        }
+
+        let mass_after: i64 = (0..16)
+            .flat_map(|x| (0..12).map(move |y| (x, y)))
+            .filter_map(|(x, y)| w.get_cell(x, y))
+            .map(|c| c.sat.0 as i64)
+            .sum();
+        assert_eq!(mass_before, mass_after, "confined head must conserve mass");
+
+        // Shaft column at x=10 should have risen near the reservoir head.
+        let shaft_top = (1..=10)
+            .rev()
+            .find(|&y| w.get_cell(10, y).map(|c| c.sat.0 > 0).unwrap_or(false))
+            .expect("shaft should hold water");
+        assert!(
+            shaft_top >= 7,
+            "shaft free surface should approach reservoir level (top={shaft_top})"
+        );
+        // Must not fountain above the equalised head (~7–8).
+        assert!(
+            w.get_cell(10, 9).map(|c| c.sat.0).unwrap_or(0) < 32,
+            "shaft must not fountain above reservoir head"
+        );
+    }
+
+    #[test]
+    fn closed_basin_lake_does_not_fountain_upward() {
+        // Still lake in a bedrock cup — confined head must not loft
+        // water into empty sky above the free surface.
+        let mut w = World::new(78);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..10 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 2..=6 {
+            w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+        }
+        for x in 1..9 {
+            for y in 2..=4 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+
+        for _ in 0..80 {
+            tick(&mut w);
+        }
+
+        for x in 1..9 {
+            let sky = w.get_cell(x, 5).unwrap().sat.0;
+            assert_eq!(sky, 0, "lake must not fountain into y=5 at x={x}");
+            let high = w.get_cell(x, 6).unwrap().sat.0;
+            assert_eq!(high, 0, "lake must not fountain into y=6 at x={x}");
+        }
+        // Surface row still holds the original free-surface mass.
+        let surface: i32 = (1..9).map(|x| w.get_cell(x, 4).unwrap().sat.0 as i32).sum();
+        assert_eq!(surface, 8 * 255, "closed basin surface mass stayed put");
+    }
+
+    #[test]
     fn same_y_equalize_flattens_stepped_lake_surface() {
         // Free-surface terrace inside a closed basin (solid shores):
         //
@@ -4507,7 +4798,11 @@ mod tests {
             tick(&mut w);
         }
 
-        let row: Vec<u8> = (1..9).map(|x| w.get_cell(x, 3).unwrap().sat.0).collect();
+        let row3: Vec<u8> = (1..9).map(|x| w.get_cell(x, 3).unwrap().sat.0).collect();
+        let row4: Vec<u8> = (1..9).map(|x| w.get_cell(x, 4).unwrap().sat.0).collect();
+        let row2: Vec<u8> = (1..9).map(|x| w.get_cell(x, 2).unwrap().sat.0).collect();
+        eprintln!("y2={row2:?} y3={row3:?} y4={row4:?}");
+        let row: Vec<u8> = row3;
         let max = *row.iter().max().unwrap();
         let min = *row.iter().min().unwrap();
         let sum: i32 = row.iter().map(|&s| s as i32).sum();
