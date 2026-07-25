@@ -640,6 +640,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "wk-voxel-studio"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "wk-material",
+ "wk-voxel",
+]
+
+[[package]]
+name = "wk-voxel-studio-app"
+version = "0.1.0"
+dependencies = [
+ "macroquad",
+ "wk-material",
+ "wk-voxel",
+ "wk-voxel-studio",
+]
+
+[[package]]
 name = "wk-world"
 version = "0.1.0"
 dependencies = [
