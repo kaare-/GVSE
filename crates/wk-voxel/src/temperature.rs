@@ -16,6 +16,7 @@
 
 use std::collections::HashMap;
 
+use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use wk_material::{MaterialId, MaterialRegistry};
 
@@ -23,6 +24,7 @@ use crate::cell::Cell;
 use crate::climate::{day_night_factor_cfg, ClimateConfig};
 use crate::grid::World;
 use crate::humidity::{Humidity, TileBounds};
+use crate::parallel::parallel_enabled;
 use crate::worldgen::continental_surface_y;
 
 /// Cadence for temperature steps — same period as humidity diffuse,
@@ -30,9 +32,9 @@ use crate::worldgen::continental_surface_y;
 pub const TEMP_STEP_PERIOD: u64 = 20;
 pub const TEMP_STEP_PHASE: u64 = 0;
 /// Rebuild cached per-tile surface props every N temperature steps.
-/// World scans dominate `step`; stale props for a few steps are fine
-/// (materials change slowly vs the thermal field).
-pub const TEMP_PROPS_REFRESH_STEPS: u32 = 4;
+/// World scans dominate `step` near the surface; stale props for a few
+/// steps are fine (materials change slowly vs the thermal field).
+pub const TEMP_PROPS_REFRESH_STEPS: u32 = 8;
 
 pub fn temperature_step_due(tick: u64) -> bool {
     tick % TEMP_STEP_PERIOD == TEMP_STEP_PHASE
@@ -256,9 +258,20 @@ impl Temperature {
     fn refresh_props_cache(&mut self, world: Option<&World>, keys: &[(i32, i32)]) {
         self.props_cache.clear();
         self.props_cache.reserve(keys.len());
-        for &(hx, hy) in keys {
-            let props = tile_thermal_props(self, world, hx, hy);
-            self.props_cache.insert((hx, hy), props);
+        // Column scans dominate refresh; tile props are independent.
+        if parallel_enabled() && keys.len() >= 8 {
+            let props: Vec<((i32, i32), TileThermal)> = keys
+                .par_iter()
+                .map(|&(hx, hy)| ((hx, hy), tile_thermal_props(self, world, hx, hy)))
+                .collect();
+            for (k, v) in props {
+                self.props_cache.insert(k, v);
+            }
+        } else {
+            for &(hx, hy) in keys {
+                let props = tile_thermal_props(self, world, hx, hy);
+                self.props_cache.insert((hx, hy), props);
+            }
         }
         self.props_cache_age = 0;
     }
@@ -492,8 +505,18 @@ fn tile_thermal_props(
     }
 }
 
+#[inline]
+fn cell_occupies_column(cell: &Cell) -> bool {
+    let wet_air = cell.material == MaterialId::Air && !cell.sat.is_empty();
+    cell.material != MaterialId::Air || wet_air
+}
+
 /// Scan a column for the surface stack: pack / water / ground.
 /// Returns `(surface_y, heat_capacity, albedo, is_watery)`.
+///
+/// Starts near the worldgen surface estimate so tall sky / deep bedrock
+/// columns avoid a full-height walk; expands to `[y_lo, y_hi]` when the
+/// live column disagrees (hand-stamped tests, tall edits).
 fn column_surface_thermal(
     world: &World,
     gx: i32,
@@ -505,12 +528,24 @@ fn column_surface_thermal(
     let gx = world.wrap_x(gx);
     let mut top_y = fallback_y;
     let mut top_cell: Option<Cell> = None;
-    for y in (y_lo..=y_hi).rev() {
+    // Prefer a band around the estimate; only climb into empty sky when
+    // something solid actually sits above that band.
+    let probe_top = y_hi.min(fallback_y.saturating_add(64)).max(y_lo);
+    let mut search_hi = probe_top;
+    for y in probe_top.saturating_add(1)..=y_hi {
         let Some(cell) = world.get_cell(gx, y) else {
             continue;
         };
-        let wet_air = cell.material == MaterialId::Air && !cell.sat.is_empty();
-        if cell.material != MaterialId::Air || wet_air {
+        if cell_occupies_column(&cell) {
+            search_hi = y_hi;
+            break;
+        }
+    }
+    for y in (y_lo..=search_hi).rev() {
+        let Some(cell) = world.get_cell(gx, y) else {
+            continue;
+        };
+        if cell_occupies_column(&cell) {
             top_y = y;
             top_cell = Some(cell);
             break;

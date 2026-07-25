@@ -13,17 +13,18 @@
 
 use std::time::{Duration, Instant};
 
+use wk_material::MaterialId;
 use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
-    apply_flow_erosion, apply_grain_fall_regions, apply_grain_repose_regions,
+    apply_failure, apply_flow_erosion, apply_grain_fall_regions, apply_grain_repose_regions,
     apply_gravity_fall_regions, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     apply_seepage_regions, apply_water_flow_regions, clear_all_dirty, find_plant_slot,
     humidity_diffuse_due, partition_checkerboard, plan_active, set_parallel_enabled,
-    stamp_world, temperature_step_due, tick_with_perf, Blueprint, ClimateConfig, CloudConfig,
-    CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity, KarstConfig,
-    OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, RainConfig, Temperature, Wind,
-    World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_QUIET_AREA, FLOW_SUBSTEPS,
-    FLOW_SUBSTEPS_MIN,
+    stamp_world, temperature_step_due, tick_with_perf, Blueprint, Cell, ClimateConfig,
+    CloudConfig, CloudStore, CondensationConfig, EvapConfig, FailureConfig, Genome, GrainConfig,
+    Humidity, KarstConfig, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, RainConfig,
+    Temperature, Wind, World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_QUIET_AREA,
+    FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN, MAX_ATOMS,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -33,6 +34,10 @@ const WARMUP_TICKS: u64 = 40;
 const MEASURE_TICKS: u64 = 200;
 const PHYSICS_BREAKDOWN_TICKS: u64 = 80;
 const PLANT_COUNT: usize = 48;
+/// Busy-play plant target (store cap raised to fit).
+const BUSY_PLANT_COUNT: usize = 180;
+/// Terrain dig/place columns touched per tick (editor-like dirty churn).
+const TERRAIN_EDIT_COLS: i32 = 24;
 
 struct PassAccum {
     rain: Duration,
@@ -97,6 +102,7 @@ struct PhysicsAccum {
     seepage: Duration,
     grain_fall: Duration,
     grain_repose: Duration,
+    failure: Duration,
     substeps_ran: u64,
     active_regions: u64,
     active_area: u64,
@@ -111,6 +117,7 @@ impl PhysicsAccum {
             seepage: Duration::ZERO,
             grain_fall: Duration::ZERO,
             grain_repose: Duration::ZERO,
+            failure: Duration::ZERO,
             substeps_ran: 0,
             active_regions: 0,
             active_area: 0,
@@ -124,6 +131,7 @@ impl PhysicsAccum {
             + self.seepage
             + self.grain_fall
             + self.grain_repose
+            + self.failure
     }
 }
 
@@ -165,6 +173,15 @@ fn demo_params() -> WorldgenParams {
 fn stress_params() -> WorldgenParams {
     WorldgenParams {
         width_cols: (CHUNK_CELLS_W as i32) * 32,
+        sky_ceiling_y: (CHUNK_CELLS_H as i32) * 6,
+        ..WorldgenParams::default()
+    }
+}
+
+/// Larger than Tab's common "wide" draft — 48×6 chunks (~1.2M cells).
+fn busy_params() -> WorldgenParams {
+    WorldgenParams {
+        width_cols: (CHUNK_CELLS_W as i32) * 48,
         sky_ceiling_y: (CHUNK_CELLS_H as i32) * 6,
         ..WorldgenParams::default()
     }
@@ -241,6 +258,9 @@ fn stamp_scene(params: WorldgenParams) -> Scene {
 }
 
 fn seed_plants(scene: &mut Scene, count: usize) {
+    if count > scene.organisms.max_atoms {
+        scene.organisms.max_atoms = count.max(MAX_ATOMS);
+    }
     let body = Blueprint::minimal_plant().modules_relative_to_nucleus();
     let mut g = Genome::default();
     wk_voxel::sync_alloc_to_body(&mut g, &body);
@@ -265,7 +285,29 @@ fn seed_plants(scene: &mut Scene, count: usize) {
             placed += 1;
         }
     }
-    eprintln!("  seeded {placed}/{count} land plants");
+    eprintln!("  seeded {placed}/{count} land plants (cap={})", scene.organisms.max_atoms);
+}
+
+/// Mimic F3 terrain editing: dig a moving strip of hillside and refill
+/// with sand so dirty rects stay hot across many chunks.
+fn terrain_edit_churn(world: &mut World, params: &WorldgenParams, tick: u64) {
+    let w = params.width_cols;
+    let base = ((tick as i32 * 3) % w.max(1)).rem_euclid(w.max(1));
+    let y0 = params.sea_level_y + 4;
+    for i in 0..TERRAIN_EDIT_COLS {
+        let gx = (base + i * 5).rem_euclid(w.max(1));
+        // Dig a short chimney, then dump sand so grain/repose stay busy.
+        for dy in 0..6 {
+            let gy = y0 + dy;
+            if let Some(c) = world.get_cell(gx, gy) {
+                if c.material != MaterialId::Air && c.material != MaterialId::Bedrock {
+                    world.set_cell(gx, gy, Cell::air());
+                }
+            }
+        }
+        world.set_cell(gx, y0, Cell::solid(MaterialId::Sand));
+        world.set_cell(gx, y0 + 1, Cell::solid(MaterialId::Sand));
+    }
 }
 
 fn cell_count(params: &WorldgenParams) -> i64 {
@@ -294,8 +336,11 @@ fn profile_label(label: &str, params: &WorldgenParams, chunks: usize) {
     );
 }
 
-fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
+fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>, terrain_edits: bool) {
     let tick_no = scene.world.tick;
+    if terrain_edits {
+        terrain_edit_churn(&mut scene.world, &scene.params, tick_no);
+    }
     match accum {
         None => {
             apply_rain_with_temp(
@@ -481,7 +526,8 @@ fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum
         }
         a.gravity += t0.elapsed();
 
-        let run_flow = !perf.flow_every_other_substep || (step % 2 == 1);
+        // Match production: even substeps when every-other is on.
+        let run_flow = !perf.flow_every_other_substep || (step % 2 == 0);
         if run_flow {
             let t0 = Instant::now();
             apply_water_flow_regions(world, &active);
@@ -524,6 +570,10 @@ fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum
             a.grain_repose += t0.elapsed();
         }
     }
+
+    let t0 = Instant::now();
+    apply_failure(world, &FailureConfig::default(), None);
+    a.failure += t0.elapsed();
 
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {
@@ -609,6 +659,10 @@ fn print_physics_table(phys: &PhysicsAccum, n: u64) {
         ms_per(phys.grain_repose, n)
     );
     eprintln!(
+        "  failure (geotech)    {:>8.3} ms/tick",
+        ms_per(phys.failure, n)
+    );
+    eprintln!(
         "  sum(physics)         {:>8.3} ms/tick  (avg {:.2} flow substeps/tick)",
         ms_per(phys.total(), n),
         phys.substeps_ran as f32 / n as f32
@@ -622,30 +676,48 @@ fn print_physics_table(phys: &PhysicsAccum, n: u64) {
     }
 }
 
-fn run_profile(label: &str, params: WorldgenParams, with_plants: bool) {
+fn run_profile(
+    label: &str,
+    params: WorldgenParams,
+    plant_count: Option<usize>,
+    terrain_edits: bool,
+) {
     let mut scene = stamp_scene(params);
-    if with_plants {
-        seed_plants(&mut scene, PLANT_COUNT);
+    if let Some(n) = plant_count {
+        seed_plants(&mut scene, n);
     }
     let chunks = scene.world.chunks.len();
     profile_label(label, &scene.params, chunks);
+    if terrain_edits {
+        eprintln!("  terrain-edit churn: {TERRAIN_EDIT_COLS} cols/tick");
+    }
 
     for _ in 0..WARMUP_TICKS {
-        one_stack_tick(&mut scene, None);
+        one_stack_tick(&mut scene, None, terrain_edits);
     }
 
     let mut accum = PassAccum::zero();
     let wall = Instant::now();
     for _ in 0..MEASURE_TICKS {
-        one_stack_tick(&mut scene, Some(&mut accum));
+        one_stack_tick(&mut scene, Some(&mut accum), terrain_edits);
     }
     let wall = wall.elapsed();
     print_pass_table(&accum, MEASURE_TICKS, wall);
+    let budget_24hz = 1000.0 / 24.0;
+    eprintln!(
+        "  vs 24Hz budget       {:>8.1} ms/tick  ({:.0}% of frame)",
+        budget_24hz,
+        ms_per(wall, MEASURE_TICKS) / budget_24hz * 100.0
+    );
 
     // Fresh physics breakdown on the already-warmed world (rain keeps
     // water active so flow stays representative).
     let mut phys = PhysicsAccum::zero();
     for _ in 0..PHYSICS_BREAKDOWN_TICKS {
+        if terrain_edits {
+            let tick = scene.world.tick;
+            terrain_edit_churn(&mut scene.world, &scene.params, tick);
+        }
         apply_rain_with_temp(
             &mut scene.world,
             &scene.rain,
@@ -695,12 +767,12 @@ fn run_perf_knob_ab(params: WorldgenParams) {
         let mut scene = stamp_scene(params);
         scene.perf = perf;
         for _ in 0..WARMUP_TICKS {
-            one_stack_tick(&mut scene, None);
+            one_stack_tick(&mut scene, None, false);
         }
         let mut accum = PassAccum::zero();
         let wall = Instant::now();
         for _ in 0..MEASURE_TICKS {
-            one_stack_tick(&mut scene, Some(&mut accum));
+            one_stack_tick(&mut scene, Some(&mut accum), false);
         }
         let wall = wall.elapsed();
         eprintln!(
@@ -717,12 +789,19 @@ fn run_perf_knob_ab(params: WorldgenParams) {
 #[ignore]
 fn perf_profile_demo_and_stress() {
     set_parallel_enabled(true);
-    run_profile("demo (WorldgenParams::default)", demo_params(), false);
     run_profile(
-        "demo + 48 plants",
+        "demo (WorldgenParams::default)",
         demo_params(),
+        None,
+        false,
+    );
+    run_profile("demo + 48 plants", demo_params(), Some(PLANT_COUNT), false);
+    run_perf_knob_ab(demo_params());
+    run_profile("stress (32×6 chunks)", stress_params(), None, false);
+    run_profile(
+        "busy play (48×6 chunks + plants + terrain edits)",
+        busy_params(),
+        Some(BUSY_PLANT_COUNT),
         true,
     );
-    run_perf_knob_ab(demo_params());
-    run_profile("stress (32×6 chunks)", stress_params(), false);
 }
