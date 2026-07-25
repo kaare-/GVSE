@@ -83,6 +83,12 @@ const PX_PER_CELL: f32 = 3.0;
 const INFO_H: f32 = 24.0;
 const TOOL_H: f32 = 20.0;
 
+/// Cap catch-up ticks per rendered frame — same spirit as column-GVSE
+/// `MAX_TICKS_PER_FRAME` (avoid hitch → more ticks → worse hitch).
+const MAX_TICKS_PER_FRAME: u32 = 2;
+/// Frame-time clamp for the sim clock (ignore multi-hundred-ms spikes).
+const MAX_SIM_DT_SEC: f32 = 1.0 / 20.0;
+
 fn hud_height(show_hud: bool) -> f32 {
     if show_hud {
         INFO_H + TOOL_H
@@ -529,6 +535,7 @@ async fn main() {
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
     let mut should_quit = false;
+    let mut tick_accum = 0.0f32;
 
     loop {
         if should_quit {
@@ -773,113 +780,130 @@ async fn main() {
         }
 
         // Physics (frozen while paint editors / quit dialog are open).
+        // Fixed-step accumulator (column-GVSE pattern): target ~24 ticks/s
+        // so draw rate and sim rate stay decoupled — less hitch stutter
+        // than one full voxel tick every rendered frame.
         let sim_paused =
             paused || (editor.open && !editor.spawn_picker) || terrain.open || quit_dialog.open;
         if !sim_paused {
-            if rain_on {
-                apply_rain_with_temp(
-                    &mut scene.world,
-                    &settings.rain,
-                    Some(&scene.temperature),
-                    Some(&settings.phase),
-                    Some(&mut scene.humidity),
-                );
-            }
-            if evap_on {
-                apply_evaporation_into_humidity(
-                    &mut scene.world,
-                    &mut scene.humidity,
-                    &settings.evap,
-                );
-            }
-            // Vapor drifts with the wind, then coagulates into cloud
-            // parcels that rain hard when heavy enough.
-            scene
-                .humidity
-                .advect(scene.wind.climate_vx, scene.wind.climate_vy);
-            let tick_no = scene.world.tick;
-            scene.clouds.step_with_precip(
-                &mut scene.world,
-                &mut scene.humidity,
-                &scene.wind,
-                scene.params.sea_level_y,
-                scene.params.sky_ceiling_y,
-                tick_no,
-                &settings.cloud,
-                Some(&scene.temperature),
-                Some(&settings.phase),
-            );
-            // Leftover vapor: liquid drizzle when warm, thin ice frost
-            // when cold. Snow packs still come from clouds (flakes).
-            if cond_rain_on {
-                apply_condensation_rain_phased(
-                    &mut scene.world,
-                    &mut scene.humidity,
-                    &settings.cond,
-                    Some(&settings.oro),
-                    Some(&scene.temperature),
-                    Some(&settings.phase),
-                );
-            }
-            if karst_on {
-                apply_karst_dissolution(&mut scene.world, &settings.karst);
-            }
-            // Period-20 stress map: refresh before failure (S3 gate), then
-            // again after CA so the HUD matches post-tick geometry.
-            let geotech_due = geotech_map_due(scene.world.tick);
-            if geotech_due {
-                scene.geotech.rebuild_smart(&scene.world);
-            }
-            tick_with_configs_and_geotech(
-                &mut scene.world,
-                &settings.perf,
-                &settings.failure,
-                Some(&scene.geotech),
-            );
-            // Bedload / bank transport after water has moved this tick.
-            apply_flow_erosion(&mut scene.world, &settings.grain);
-            if geotech_due {
-                // Post-CA dirty halo → incremental column update (S5).
-                scene.geotech.rebuild_smart(&scene.world);
-            }
-            // Atmospheric diffusion is periodic (column-GVSE
-            // HumidityField cadence: every 20 ticks). Evap still
-            // deposits every tick; only the spread step is throttled.
-            if humidity_diffuse_due(scene.world.tick) {
-                scene
-                    .humidity
-                    .diffuse(settings.humidity_diffusion_alpha);
-            }
-            if temperature_step_due(scene.world.tick) {
-                let tick_no = scene.world.tick;
-                scene
-                    .temperature
-                    .step(Some(&scene.world), &scene.humidity, tick_no);
-            }
-            // Cold wet-sand / snow / hillside ice spill onto lake ice
-            // after the thermal step, then phase may break thin lids.
-            if settings.phase.enabled && settings.phase.enable_cold_avalanche {
-                apply_cold_avalanche(
-                    &mut scene.world,
-                    &scene.temperature,
-                    settings.phase.freeze_point_c,
-                );
-            }
-            // Phase after the temp step so a Tab cold/warm snap applies
-            // the same frame (column order: thermal → phase change).
-            // Master enable lives on PhaseConfig (I / Tab settings).
-            apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
-            if organisms_on {
-                let tick_no = scene.world.tick;
-                scene
-                    .organisms
-                    .step_with_climate(
+            let dt = get_frame_time().min(MAX_SIM_DT_SEC);
+            let hz = settings.sim_tick_hz.clamp(1.0, 120.0);
+            tick_accum += dt * hz;
+            let mut n = 0u32;
+            while tick_accum >= 1.0 && n < MAX_TICKS_PER_FRAME {
+                if rain_on {
+                    apply_rain_with_temp(
                         &mut scene.world,
-                        tick_no,
-                        &settings.climate,
+                        &settings.rain,
+                        Some(&scene.temperature),
+                        Some(&settings.phase),
                         Some(&mut scene.humidity),
                     );
+                }
+                if evap_on {
+                    apply_evaporation_into_humidity(
+                        &mut scene.world,
+                        &mut scene.humidity,
+                        &settings.evap,
+                    );
+                }
+                // Vapor drifts with the wind, then coagulates into cloud
+                // parcels that rain hard when heavy enough.
+                scene
+                    .humidity
+                    .advect(scene.wind.climate_vx, scene.wind.climate_vy);
+                let tick_no = scene.world.tick;
+                scene.clouds.step_with_precip(
+                    &mut scene.world,
+                    &mut scene.humidity,
+                    &scene.wind,
+                    scene.params.sea_level_y,
+                    scene.params.sky_ceiling_y,
+                    tick_no,
+                    &settings.cloud,
+                    Some(&scene.temperature),
+                    Some(&settings.phase),
+                );
+                // Leftover vapor: liquid drizzle when warm, thin ice frost
+                // when cold. Snow packs still come from clouds (flakes).
+                if cond_rain_on {
+                    apply_condensation_rain_phased(
+                        &mut scene.world,
+                        &mut scene.humidity,
+                        &settings.cond,
+                        Some(&settings.oro),
+                        Some(&scene.temperature),
+                        Some(&settings.phase),
+                    );
+                }
+                if karst_on {
+                    apply_karst_dissolution(&mut scene.world, &settings.karst);
+                }
+                // Period-20 stress map: refresh before failure (S3 gate), then
+                // again after CA so the HUD matches post-tick geometry.
+                let geotech_due = geotech_map_due(scene.world.tick);
+                if geotech_due {
+                    scene.geotech.rebuild_smart(&scene.world);
+                }
+                tick_with_configs_and_geotech(
+                    &mut scene.world,
+                    &settings.perf,
+                    &settings.failure,
+                    Some(&scene.geotech),
+                );
+                // Bedload / bank transport after water has moved this tick.
+                apply_flow_erosion(&mut scene.world, &settings.grain);
+                if geotech_due {
+                    // Post-CA dirty halo → incremental column update (S5).
+                    scene.geotech.rebuild_smart(&scene.world);
+                }
+                // Atmospheric diffusion is periodic (column-GVSE
+                // HumidityField cadence: every 20 ticks). Evap still
+                // deposits every tick; only the spread step is throttled.
+                if humidity_diffuse_due(scene.world.tick) {
+                    scene
+                        .humidity
+                        .diffuse(settings.humidity_diffusion_alpha);
+                }
+                if temperature_step_due(scene.world.tick) {
+                    let tick_no = scene.world.tick;
+                    scene
+                        .temperature
+                        .step(Some(&scene.world), &scene.humidity, tick_no);
+                }
+                // Cold wet-sand / snow / hillside ice spill onto lake ice
+                // after the thermal step, then phase may break thin lids.
+                if settings.phase.enabled && settings.phase.enable_cold_avalanche {
+                    apply_cold_avalanche(
+                        &mut scene.world,
+                        &scene.temperature,
+                        settings.phase.freeze_point_c,
+                    );
+                }
+                // Phase after the temp step so a Tab cold/warm snap applies
+                // the same frame (column order: thermal → phase change).
+                // Master enable lives on PhaseConfig (I / Tab settings).
+                apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
+                if organisms_on {
+                    let tick_no = scene.world.tick;
+                    scene
+                        .organisms
+                        .step_with_climate(
+                            &mut scene.world,
+                            tick_no,
+                            &settings.climate,
+                            Some(&mut scene.humidity),
+                        );
+                }
+                tick_accum -= 1.0;
+                n += 1;
             }
+            // Drop leftover accum after a hitch — don't queue a burst.
+            if n == MAX_TICKS_PER_FRAME {
+                tick_accum = 0.0;
+            }
+        } else {
+            tick_accum = 0.0;
         }
 
         // Render.
@@ -1303,8 +1327,9 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} {}",
+                "fps={:.0}  sim={:.0}Hz  tick={} {} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} {}",
                 fps_smoothed(),
+                settings.sim_tick_hz,
                 scene.world.tick,
                 tod,
                 season,

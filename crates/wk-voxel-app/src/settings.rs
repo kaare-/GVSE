@@ -73,6 +73,8 @@ pub struct SimSettings {
     pub grain: GrainConfig,
     /// Physics trade-offs (Tab → Performance). Defaults preserve water feel.
     pub perf: PerfConfig,
+    /// Sim ticks per wall-clock second (fixed-step accumulator). Default 24.
+    pub sim_tick_hz: f32,
     /// Geotech failure (Tab → Geotech). Roof collapse on by default.
     pub failure: FailureConfig,
     /// Scratch f32 for max roof events slider.
@@ -160,6 +162,8 @@ impl SimSettings {
             phase: PhaseConfig::default(),
             grain: GrainConfig::default(),
             perf: PerfConfig::default(),
+            // Keep in sync with `DEFAULT_SIM_TICK_HZ` in main.rs.
+            sim_tick_hz: 24.0,
             failure: FailureConfig::default(),
             max_roof_events: FailureConfig::default().max_roof_events as f32,
             max_shear_events: FailureConfig::default().max_shear_events as f32,
@@ -614,6 +618,17 @@ impl SimSettings {
                     ui.label(
                         None,
                         "Defaults = full water feel. Toggle to A/B cost vs cascade/leveling.",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Sim tick rate (Hz)",
+                        8.0..60.0,
+                        &mut self.sim_tick_hz,
+                    );
+                    ui.label(
+                        None,
+                        "  Fixed-step (column-style). 24Hz default — smoother than 1 tick/frame.",
                     );
                     ui.checkbox(
                         hash!(),
@@ -1094,6 +1109,7 @@ impl SimSettings {
         self.climate.moon_base_radius = self.climate.moon_base_radius.clamp(4.0, 48.0);
         self.climate.sun_base_radius = self.climate.sun_base_radius.clamp(6.0, 48.0);
         self.climate.star_strength = self.climate.star_strength.clamp(0.0, 1.0);
+        self.sim_tick_hz = self.sim_tick_hz.clamp(1.0, 120.0);
         self.cloud.max_parcels = max_parcels.round().clamp(1.0, 96.0) as usize;
         self.cloud.cloud_alt_above_sea = cloud_alt.round().clamp(4.0, 200.0) as i32;
         self.cloud.coag_min_above_sea = coag_min_alt.round().clamp(2.0, 160.0) as i32;
