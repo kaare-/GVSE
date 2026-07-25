@@ -832,8 +832,18 @@ async fn main() {
             .as_ref()
             .map(|s| format!("  fit={:.2} g={}", s.best.fitness, s.generation))
             .unwrap_or_default();
+        let hinge = arena
+            .body
+            .graph
+            .as_ref()
+            .and_then(|g| {
+                let d = g.joint_angle_delta(0)?;
+                let lim = g.joints.first()?.limit.max_turns();
+                Some(format!("  θ={:.0}°/±{:.0}°", d.to_degrees(), lim * 180.0))
+            })
+            .unwrap_or_default();
         let hud = format!(
-            "{}x{}  tick={}  {}  {}  phys={}  {drive}{fit}  brush={brush}  T={tension:.2}  {status}",
+            "{}x{}  tick={}  {}  {}  phys={}  {drive}{fit}{hinge}  brush={brush}  T={tension:.2}  {status}",
             arena.cfg.width,
             arena.cfg.height,
             arena.world.tick,
