@@ -248,6 +248,7 @@ impl SimSettings {
         let mut tall_above = self.oro.tall_above_sea as f32;
         let mut reset_materials = false;
         let mut min_sat = self.karst.min_wet_neighbour_sat as f32;
+        let mut karst_period = self.karst.period_ticks as f32;
 
         // Wide enough for value + track; labels sit on their own line
         // so they never clip against the window edge.
@@ -811,6 +812,17 @@ impl SimSettings {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Karst", |ui| {
+                    ui.label(
+                        None,
+                        "Slow geology — dissolution runs every N physics ticks.",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Period (ticks)",
+                        1.0..128.0,
+                        &mut karst_period,
+                    );
                     labeled_slider(
                         ui,
                         hash!(),
@@ -967,6 +979,7 @@ impl SimSettings {
             });
 
         self.karst.min_wet_neighbour_sat = min_sat.round().clamp(1.0, 255.0) as u8;
+        self.karst.period_ticks = karst_period.round().clamp(1.0, 128.0) as u64;
 
         if reset_materials {
             self.reset_materials_to_defaults();
