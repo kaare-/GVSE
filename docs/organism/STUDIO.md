@@ -18,22 +18,59 @@ physics sandbox with different springs.
 
 1. **One physics.** The arena is a `wk_voxel::World`. Water, gravity,
    seepage, grain, phase, temperature, and karst use the **same**
-   `tick_*` / field path as `wk-voxel-app`. No forked CA rules.
-2. **One look.** MS-Paint 1× pixels, same cell draw path as the world
+   rule implementations as `wk-voxel-app`. No forked CA maths.
+   Studio may **gate** which passes run (see Physics controls) so a
+   dry walking bench is not paying for ocean flow — gates skip work,
+   they do not replace rules.
+2. **Full material vocabulary.** Every `MaterialId` available in the
+   world is paintable in the studio (sand, stone, gravel, water, ice,
+   …) so you can build rough terrain, pools, ice sheets, etc. Tissue
+   is a separate overlay layer, not a replacement for geology.
+3. **Scalable arena.** Width/height are configurable (chunk multiples
+   welcome). A flapping-fin tank and a long rough-terrain walk track
+   are the same system at different sizes.
+4. **One look.** MS-Paint 1× pixels, same cell draw path as the world
    demo (`cell_color` + tissue overlay). No anti-aliased limbs.
-3. **Paint → activate.** The editor paints tissue / fixture / joint /
-   sensor pixels. **Activate** builds the runtime body graph. While
-   painting, the sim may be paused; after activate, the world ticks.
-4. **Export is a strip, not a rewrite.** Export drops studio-only
-   fixtures and bench sensors, keeps bone / muscle / skin / nerve /
-   neural weights, and spawns into the world organism store (or a
-   dedicated body store) on the same grid rules.
-5. **Bugfix once.** Any physics or coupling fix lands in `wk-voxel`
-   (or shared studio types that both apps call) — never “studio-only
-   water” or “world-only joints.”
+5. **Paint → activate.** Terrain paints `MaterialId` into the world.
+   Tissue paints the body overlay. **Activate** builds the runtime
+   body graph. While painting, the sim may be paused; after activate,
+   gated world ticks + body step run.
+6. **Export is a strip, not a rewrite.** Export drops studio-only
+   fixtures and bench apparatus, keeps bone / muscle / skin / nerve /
+   neural weights (+ optional terrain seed separately). Body spawns
+   into the world on the same grid rules.
+7. **Bugfix once.** Physics/coupling fixes land in `wk-voxel` (or
+   shared studio helpers both apps call).
 
 Isolation: studio crates depend on `wk-voxel` + `wk-material` only
 (same guardrail as `wk-voxel-app`). No column-stack imports.
+
+## Physics controls
+
+Default training benches turn **most** world passes off and keep only
+what the scenario needs:
+
+| Preset | Typical gates |
+|--------|----------------|
+| `body_only` | CA off — morphology / net debug |
+| `dry_walk` | gravity + grain (+ repose); flow/seepage/failure off |
+| `hydro_fin` | gravity + water flow (+ optional seepage); failure off |
+| `full` | same as world demo CA path |
+
+Karst / rain / clouds / temperature stay opt-in (off unless the
+scenario wires them). More toggles can land without changing rule code.
+
+## Sensors (evolving)
+
+| Priority | Sensor | Role |
+|----------|--------|------|
+| **v1** | **Muscle feedback** | Length, commanded actuation, tension proxy — proprioception for the net |
+| later | Fixture force / contact | Bench thrust / ground reaction |
+| later | Vestibular, touch, chem, vision-ish | Creature inputs for gait / behaviour |
+
+Until the richer set exists, training fitness and net inputs come from
+**muscle feedback** (and simple kinematics). Fixture `ForceSensor`
+paint remains reserved.
 
 ## Product shape
 
@@ -50,11 +87,15 @@ world, not a second physics engine.
 
 ## Paint vocabulary
 
-Tissue and bench pixels are a **studio layer** (`TissueKind`) drawn
-and saved with the body. They are **not** new geological
-`MaterialId`s (those stay rock / sand / water). After activate, the
-body **occupies** grid cells for collision and hydro coupling the
-same way world organisms do — so a flapping fin pushes water.
+Two layers:
+
+1. **Geology** — full `MaterialId` set (sand, stone, gravel, water, ice,
+   …) painted into the `World` for rough terrain, pools, etc.
+2. **Tissue** — studio overlay (`TissueKind`) for the creature / bench.
+
+After activate, the body **occupies** grid cells for collision and
+hydro coupling the same way world organisms do — so a flapping fin
+pushes water.
 
 | Kind | Role | Default RGB | Notes |
 |------|------|-------------|-------|
@@ -164,11 +205,11 @@ Postcard + schema version, same spirit as `.gvsecrt`.
 |-------|-------------|-----------|
 | **S0** | This doc + `wk-voxel-studio` types + empty studio app arena | ✅ Arena ticks water with world rules; paint enum + colours locked |
 | **S1** | Paint UI + activate → `BodyGraph` (bones, fixtures) | ✅ `Enter` activates; hung bones stay, free bones fall (discrete gravity); no muscle yet |
-| **S2** | Joints + muscle actuation (open-loop / scripted) | Scripted flap moves water enough to move a tracer |
-| **S3** | Nerve graph + neuron blobs + force sensors | Sensor time series readable in UI |
-| **S4** | Neural training regime (fixed morphology) | Net learns a flap above a fitness floor |
-| **S5** | GA morphology search (parallel episodes) | Better-than-seed fin after N generations |
-| **S6** | Export `.gvsebody` → spawn in `wk-voxel-app` | Same weights behave in open water |
+| **S2** | Joints + scripted muscle + hydro push + muscle feedback | ✅ Muscle links bones; scripted actuation; tension feedback; water displace |
+| **S3** | Nerves / richer sensors | Muscle feedback is v1 input; fixture force later |
+| **S4** | Neural training (fixed morphology) | ✅ Hill-climb on muscle-feedback net |
+| **S5** | GA morphology search | ✅ Paint mutate + evaluate episodes |
+| **S6** | Export `.gvsebody` → world spawn | Partial export; world spawn hook next |
 
 Do not start S4 until S2 proves hydro coupling on the shared CA.
 

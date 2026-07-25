@@ -6,16 +6,30 @@
 mod arena;
 mod body;
 mod export;
+mod ga;
+mod neural;
 mod palette;
+mod physics;
+mod scenarios;
 mod tissue;
+mod train;
 
-pub use arena::{ArenaConfig, StudioArena};
+pub use arena::{ArenaConfig, StudioArena, ARENA_MAX, ARENA_MIN};
 pub use body::{
-    activate, step_body, ActivateError, BodyGraph, PartKind, RigidPart,
+    activate, script_muscles, step_body, ActivateError, BodyGraph, Joint, Muscle, MuscleFeedback,
+    PartKind, RigidPart,
 };
-pub use export::{export_body, ExportError, BODY_SCHEMA_VERSION};
+pub use export::{
+    decode_body, encode_body, export_body, export_body_with_net, import_body_paint, ExportError,
+    ExportedBody, BODY_SCHEMA_VERSION,
+};
+pub use ga::{evolve_morphology, mutate_paint, GaIndividual};
+pub use neural::StudioNet;
 pub use palette::{tissue_rgb, JOINT_SYMBOL};
+pub use physics::{tick_world_gated, StudioPhysicsConfig};
+pub use scenarios::{fin_hydro_arena, paint_fin_bench, paint_rough_terrain, rough_walk_arena};
 pub use tissue::{
     ForceSensor, JointLimit, StudioBody, TissueKind, TissuePaint, FIXTURE_RGB, MUSCLE_RGB,
     NERVE_RGB, NEURON_BLOB_RGB, SKIN_RGB,
 };
+pub use train::{evaluate_net, hill_climb, EpisodeResult};
