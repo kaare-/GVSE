@@ -10,17 +10,24 @@ smallest useful mark is a 1×1 pixel; a module is a coloured pixel with
 one job, one cost, and one visible tradeoff. If you cannot see it, it
 is not a module.
 
-Preferences (locked):
+Preferences (locked for Sets A–E ecology):
 
 - Few `ChemType` channels over realistic biochemistry.
-- Few wires over a learned neural net.
+- Few wires over a learned neural net **in the open world**.
 - Grow the palette in stages so the simplest creature stays two pixels.
 - Phenotype is the drawing. Save the drawing, save the creature.
 
+**Studio track:** trainable nets + muscle/bone benches live in
+[`STUDIO.md`](STUDIO.md) on the **same** `wk-voxel` physics. Export
+frozen bodies into the world; do not fork the CA.
+
 ## Petri = the current GVSE world
 
-There is no separate sandbox crate. The petri dish is the world you
-already scroll through in `wk-app`:
+Sets A–E ecology still use the live world as the petri dish. The
+Muscle / Bone / Neural **Studio** is an arena *mode* of that same
+voxel physics (`wk-voxel-studio-app`), not a second engine.
+
+Historical column-stack note (legacy `wk-app`):
 
 - Columns, layers, chunks, and the material vocabulary in
   [`crates/wk-material`](../../crates/wk-material) and
@@ -53,6 +60,8 @@ already scroll through in `wk-app`:
 | [`FIELDS.md`](FIELDS.md) | Petri fields (light, temp, chem, moisture, organic, substrate, stem wetness) |
 | [`SCENARIOS.md`](SCENARIOS.md) | 16 falsification scenes numbered E30–E45 |
 | [`EDITOR.md`](EDITOR.md) | MS-Paint editor tab UX, canvas, `Blueprint` save format, spawn flow |
+| [`STUDIO.md`](STUDIO.md) | Muscle / bone / neural test studio — shared physics, GA, export |
+| [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) | Active voxel plant/fungus port status |
 
 ## GVSE hook table
 

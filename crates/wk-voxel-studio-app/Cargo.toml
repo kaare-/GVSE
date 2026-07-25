@@ -1,0 +1,21 @@
+[package]
+name = "wk-voxel-studio-app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ISOLATION GUARDRAIL
+# ------------------------------------------------------------------
+# Studio UI for muscle / bone / neural benches. Depends on
+# wk-voxel-studio + wk-voxel + wk-material only. See
+# docs/organism/STUDIO.md.
+
+[dependencies]
+wk-voxel = { path = "../wk-voxel" }
+wk-voxel-studio = { path = "../wk-voxel-studio" }
+wk-material = { path = "../wk-material" }
+macroquad = "=0.4.14"
+
+[[bin]]
+name = "wk-voxel-studio"
+path = "src/main.rs"

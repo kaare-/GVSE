@@ -1,0 +1,18 @@
+[package]
+name = "wk-voxel-studio"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+# ISOLATION GUARDRAIL
+# ------------------------------------------------------------------
+# Muscle / Bone / Neural Test Studio shared types + arena helpers.
+# Depends on wk-voxel + wk-material only. MUST NOT import column-stack
+# crates. See docs/organism/STUDIO.md.
+
+[dependencies]
+wk-voxel = { path = "../wk-voxel" }
+wk-material = { path = "../wk-material" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
