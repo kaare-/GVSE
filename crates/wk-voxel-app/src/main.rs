@@ -50,8 +50,10 @@ use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, day_night_factor_cfg, geotech_map_due,
-    humidity_diffuse_due, is_daytime_cfg, is_standing_water, precip_forms_snow_at_air, sky_rgb,
-    sky_rgb_at_height, temperature_step_due, tick_with_configs_and_geotech, ClimateConfig,
+    humidity_diffuse_due, is_daytime_cfg, is_standing_water, lunar_fraction_cfg,
+    moon_apparent_scale, moon_illumination, precip_forms_snow_at_air, season_fraction_cfg,
+    season_name, sky_rgb_at_height_cfg, sky_rgb_cfg, sun_apparent_scale,
+    temperature_step_due, tick_with_configs_and_geotech, ClimateConfig,
     GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
 
@@ -80,6 +82,12 @@ const PX_PER_CELL: f32 = 3.0;
 /// band. Both are omitted when `F1` hides HUD chrome.
 const INFO_H: f32 = 24.0;
 const TOOL_H: f32 = 20.0;
+
+/// Cap catch-up ticks per rendered frame — same spirit as column-GVSE
+/// `MAX_TICKS_PER_FRAME` (avoid hitch → more ticks → worse hitch).
+const MAX_TICKS_PER_FRAME: u32 = 2;
+/// Frame-time clamp for the sim clock (ignore multi-hundred-ms spikes).
+const MAX_SIM_DT_SEC: f32 = 1.0 / 20.0;
 
 fn hud_height(show_hud: bool) -> f32 {
     if show_hud {
@@ -118,15 +126,18 @@ fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
     (18.0 + norm * 42.0) as u8
 }
 
-/// Day/night sky gradient + sun or moon arc.
+/// Day/night sky gradient + seasonal wash, stars, sun/moon with
+/// distance-driven size and lunar phase.
 fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
     let dn = day_night_factor_cfg(tick, climate);
-    const BANDS: i32 = 28;
+    let season = season_fraction_cfg(tick, climate);
+    let tint = climate.season_sky_tint;
+    const BANDS: i32 = 36;
     for i in 0..BANDS {
         let y0 = sh * (i as f32) / BANDS as f32;
         let h = y0 + sh / BANDS as f32;
         let height_01 = (i as f32 + 0.5) / BANDS as f32;
-        let [r, g, b] = sky_rgb_at_height(dn, height_01);
+        let [r, g, b] = sky_rgb_at_height_cfg(dn, height_01, season, tint);
         draw_rectangle(
             0.0,
             y0,
@@ -135,22 +146,108 @@ fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
             Color::from_rgba(r, g, b, 255),
         );
     }
-    let (cx, cy) = celestial_screen_pos_cfg(tick, sw, sh, climate);
-    if is_daytime_cfg(tick, climate) {
-        draw_circle(cx, cy, 22.0, Color::from_rgba(255, 200, 70, 60));
-        draw_circle(cx, cy, 16.0, Color::from_rgba(255, 220, 90, 255));
-        draw_circle(cx, cy, 10.0, Color::from_rgba(255, 245, 180, 255));
-    } else {
-        let [sr, sg, sb] = sky_rgb(dn);
-        draw_circle(cx, cy, 14.0, Color::from_rgba(230, 235, 245, 255));
-        // Crescent bite using local sky colour.
-        draw_circle(
-            cx + 5.0,
-            cy - 2.0,
-            12.0,
-            Color::from_rgba(sr, sg, sb, 255),
+
+    // Soft horizon haze strip (dusk/dawn + mild daytime).
+    if dn > -0.55 {
+        let glow = if dn >= 0.0 {
+            0.12 + 0.10 * (1.0 - dn)
+        } else {
+            0.22 * (1.0 + dn / 0.55)
+        };
+        let haze_h = sh * (0.10 + 0.06 * glow);
+        let [hr, hg, hb] = sky_rgb_cfg(dn.max(-0.1), season, tint);
+        draw_rectangle(
+            0.0,
+            sh - haze_h,
+            sw,
+            haze_h,
+            Color::from_rgba(hr, hg, hb, (40.0 + 90.0 * glow) as u8),
         );
     }
+
+    // Starfield — fades in as night deepens.
+    let star_alpha = climate.star_strength.clamp(0.0, 1.0) * ((-dn).clamp(0.0, 1.0)).powf(1.4);
+    if star_alpha > 0.04 {
+        draw_starfield(tick, sw, sh, star_alpha);
+    }
+
+    let (cx, cy) = celestial_screen_pos_cfg(tick, sw, sh, climate);
+    if is_daytime_cfg(tick, climate) {
+        let scale = sun_apparent_scale(tick, climate);
+        let r = climate.sun_base_radius * scale;
+        draw_circle(cx, cy, r * 1.55, Color::from_rgba(255, 200, 70, 50));
+        draw_circle(cx, cy, r * 1.15, Color::from_rgba(255, 210, 80, 90));
+        draw_circle(cx, cy, r, Color::from_rgba(255, 220, 90, 255));
+        draw_circle(cx, cy, r * 0.62, Color::from_rgba(255, 245, 180, 255));
+    } else {
+        let scale = moon_apparent_scale(tick, climate);
+        let r = climate.moon_base_radius * scale;
+        let illum = moon_illumination(tick, climate);
+        let phase = lunar_fraction_cfg(tick, climate);
+        // Match shadow to the sky band behind the moon (not zenith).
+        let height_01 = (cy / sh).clamp(0.0, 1.0);
+        let [sr, sg, sb] = sky_rgb_at_height_cfg(dn, height_01, season, tint);
+        draw_moon(cx, cy, r, phase, illum, sr, sg, sb);
+    }
+}
+
+fn draw_starfield(tick: u64, sw: f32, sh: f32, alpha: f32) {
+    // Deterministic pseudo-random stars; slow drift with the night.
+    let drift = (tick as f32 * 0.002) % sw;
+    let mut s: u32 = 0xC0FF_EE42;
+    for _ in 0..90 {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let x = ((s >> 8) as f32 / u32::MAX as f32) * sw + drift;
+        let x = if x >= sw { x - sw } else { x };
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let y = ((s >> 8) as f32 / u32::MAX as f32) * sh * 0.72;
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let bright = 0.45 + 0.55 * (((s >> 16) & 0xFFFF) as f32 / 65535.0);
+        let a = (alpha * bright * 255.0) as u8;
+        let rad = if s & 7 == 0 { 1.6 } else { 1.0 };
+        draw_circle(x, y, rad, Color::from_rgba(220, 230, 255, a));
+    }
+}
+
+/// Simple two-circle moon: bright disk + sky-coloured shadow disk.
+///
+/// `phase` 0 = new → 0.5 = full → 1 = new. The shadow uses the sky
+/// sample behind the moon so the unlit limb disappears into the background.
+fn draw_moon(
+    cx: f32,
+    cy: f32,
+    r: f32,
+    phase: f32,
+    illum: f32,
+    sky_r: u8,
+    sky_g: u8,
+    sky_b: u8,
+) {
+    let r = r.max(4.0);
+    let lit = Color::from_rgba(232, 236, 245, 255);
+    let shade = Color::from_rgba(sky_r, sky_g, sky_b, 255);
+
+    // Soft bloom only when mostly full (avoids a ring around crescents).
+    if illum > 0.55 {
+        let a = ((illum - 0.55) / 0.45 * 40.0) as u8;
+        draw_circle(cx, cy, r * 1.35, Color::from_rgba(200, 210, 230, a));
+    }
+
+    if illum < 0.03 {
+        // New moon — nearly invisible against the sky.
+        return;
+    }
+
+    // Bright body, then a same-radius sky disk that slides across.
+    // illum 0 → shadow centred (new); illum 1 → shadow parked 2r off (full).
+    draw_circle(cx, cy, r, lit);
+    // Two soft mare spots (under the shadow so they only show when lit).
+    draw_circle(cx - r * 0.22, cy - r * 0.12, r * 0.22, Color::from_rgba(200, 205, 220, 70));
+    draw_circle(cx + r * 0.28, cy + r * 0.18, r * 0.14, Color::from_rgba(195, 200, 215, 55));
+
+    let sign = if phase <= 0.5 { -1.0 } else { 1.0 };
+    let offset = sign * illum * 2.0 * r;
+    draw_circle(cx + offset, cy, r, shade);
 }
 
 /// Cool cyan → hot amber for geotech shear score on face cells.
@@ -438,6 +535,7 @@ async fn main() {
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
     let mut should_quit = false;
+    let mut tick_accum = 0.0f32;
 
     loop {
         if should_quit {
@@ -682,113 +780,130 @@ async fn main() {
         }
 
         // Physics (frozen while paint editors / quit dialog are open).
+        // Fixed-step accumulator (column-GVSE pattern): target ~24 ticks/s
+        // so draw rate and sim rate stay decoupled — less hitch stutter
+        // than one full voxel tick every rendered frame.
         let sim_paused =
             paused || (editor.open && !editor.spawn_picker) || terrain.open || quit_dialog.open;
         if !sim_paused {
-            if rain_on {
-                apply_rain_with_temp(
-                    &mut scene.world,
-                    &settings.rain,
-                    Some(&scene.temperature),
-                    Some(&settings.phase),
-                    Some(&mut scene.humidity),
-                );
-            }
-            if evap_on {
-                apply_evaporation_into_humidity(
-                    &mut scene.world,
-                    &mut scene.humidity,
-                    &settings.evap,
-                );
-            }
-            // Vapor drifts with the wind, then coagulates into cloud
-            // parcels that rain hard when heavy enough.
-            scene
-                .humidity
-                .advect(scene.wind.climate_vx, scene.wind.climate_vy);
-            let tick_no = scene.world.tick;
-            scene.clouds.step_with_precip(
-                &mut scene.world,
-                &mut scene.humidity,
-                &scene.wind,
-                scene.params.sea_level_y,
-                scene.params.sky_ceiling_y,
-                tick_no,
-                &settings.cloud,
-                Some(&scene.temperature),
-                Some(&settings.phase),
-            );
-            // Leftover vapor: liquid drizzle when warm, thin ice frost
-            // when cold. Snow packs still come from clouds (flakes).
-            if cond_rain_on {
-                apply_condensation_rain_phased(
-                    &mut scene.world,
-                    &mut scene.humidity,
-                    &settings.cond,
-                    Some(&settings.oro),
-                    Some(&scene.temperature),
-                    Some(&settings.phase),
-                );
-            }
-            if karst_on {
-                apply_karst_dissolution(&mut scene.world, &settings.karst);
-            }
-            // Period-20 stress map: refresh before failure (S3 gate), then
-            // again after CA so the HUD matches post-tick geometry.
-            let geotech_due = geotech_map_due(scene.world.tick);
-            if geotech_due {
-                scene.geotech.rebuild_smart(&scene.world);
-            }
-            tick_with_configs_and_geotech(
-                &mut scene.world,
-                &settings.perf,
-                &settings.failure,
-                Some(&scene.geotech),
-            );
-            // Bedload / bank transport after water has moved this tick.
-            apply_flow_erosion(&mut scene.world, &settings.grain);
-            if geotech_due {
-                // Post-CA dirty halo → incremental column update (S5).
-                scene.geotech.rebuild_smart(&scene.world);
-            }
-            // Atmospheric diffusion is periodic (column-GVSE
-            // HumidityField cadence: every 20 ticks). Evap still
-            // deposits every tick; only the spread step is throttled.
-            if humidity_diffuse_due(scene.world.tick) {
-                scene
-                    .humidity
-                    .diffuse(settings.humidity_diffusion_alpha);
-            }
-            if temperature_step_due(scene.world.tick) {
-                let tick_no = scene.world.tick;
-                scene
-                    .temperature
-                    .step(Some(&scene.world), &scene.humidity, tick_no);
-            }
-            // Cold wet-sand / snow / hillside ice spill onto lake ice
-            // after the thermal step, then phase may break thin lids.
-            if settings.phase.enabled && settings.phase.enable_cold_avalanche {
-                apply_cold_avalanche(
-                    &mut scene.world,
-                    &scene.temperature,
-                    settings.phase.freeze_point_c,
-                );
-            }
-            // Phase after the temp step so a Tab cold/warm snap applies
-            // the same frame (column order: thermal → phase change).
-            // Master enable lives on PhaseConfig (I / Tab settings).
-            apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
-            if organisms_on {
-                let tick_no = scene.world.tick;
-                scene
-                    .organisms
-                    .step_with_climate(
+            let dt = get_frame_time().min(MAX_SIM_DT_SEC);
+            let hz = settings.sim_tick_hz.clamp(1.0, 120.0);
+            tick_accum += dt * hz;
+            let mut n = 0u32;
+            while tick_accum >= 1.0 && n < MAX_TICKS_PER_FRAME {
+                if rain_on {
+                    apply_rain_with_temp(
                         &mut scene.world,
-                        tick_no,
-                        &settings.climate,
+                        &settings.rain,
+                        Some(&scene.temperature),
+                        Some(&settings.phase),
                         Some(&mut scene.humidity),
                     );
+                }
+                if evap_on {
+                    apply_evaporation_into_humidity(
+                        &mut scene.world,
+                        &mut scene.humidity,
+                        &settings.evap,
+                    );
+                }
+                // Vapor drifts with the wind, then coagulates into cloud
+                // parcels that rain hard when heavy enough.
+                scene
+                    .humidity
+                    .advect(scene.wind.climate_vx, scene.wind.climate_vy);
+                let tick_no = scene.world.tick;
+                scene.clouds.step_with_precip(
+                    &mut scene.world,
+                    &mut scene.humidity,
+                    &scene.wind,
+                    scene.params.sea_level_y,
+                    scene.params.sky_ceiling_y,
+                    tick_no,
+                    &settings.cloud,
+                    Some(&scene.temperature),
+                    Some(&settings.phase),
+                );
+                // Leftover vapor: liquid drizzle when warm, thin ice frost
+                // when cold. Snow packs still come from clouds (flakes).
+                if cond_rain_on {
+                    apply_condensation_rain_phased(
+                        &mut scene.world,
+                        &mut scene.humidity,
+                        &settings.cond,
+                        Some(&settings.oro),
+                        Some(&scene.temperature),
+                        Some(&settings.phase),
+                    );
+                }
+                if karst_on {
+                    apply_karst_dissolution(&mut scene.world, &settings.karst);
+                }
+                // Period-20 stress map: refresh before failure (S3 gate), then
+                // again after CA so the HUD matches post-tick geometry.
+                let geotech_due = geotech_map_due(scene.world.tick);
+                if geotech_due {
+                    scene.geotech.rebuild_smart(&scene.world);
+                }
+                tick_with_configs_and_geotech(
+                    &mut scene.world,
+                    &settings.perf,
+                    &settings.failure,
+                    Some(&scene.geotech),
+                );
+                // Bedload / bank transport after water has moved this tick.
+                apply_flow_erosion(&mut scene.world, &settings.grain);
+                if geotech_due {
+                    // Post-CA dirty halo → incremental column update (S5).
+                    scene.geotech.rebuild_smart(&scene.world);
+                }
+                // Atmospheric diffusion is periodic (column-GVSE
+                // HumidityField cadence: every 20 ticks). Evap still
+                // deposits every tick; only the spread step is throttled.
+                if humidity_diffuse_due(scene.world.tick) {
+                    scene
+                        .humidity
+                        .diffuse(settings.humidity_diffusion_alpha);
+                }
+                if temperature_step_due(scene.world.tick) {
+                    let tick_no = scene.world.tick;
+                    scene
+                        .temperature
+                        .step(Some(&scene.world), &scene.humidity, tick_no);
+                }
+                // Cold wet-sand / snow / hillside ice spill onto lake ice
+                // after the thermal step, then phase may break thin lids.
+                if settings.phase.enabled && settings.phase.enable_cold_avalanche {
+                    apply_cold_avalanche(
+                        &mut scene.world,
+                        &scene.temperature,
+                        settings.phase.freeze_point_c,
+                    );
+                }
+                // Phase after the temp step so a Tab cold/warm snap applies
+                // the same frame (column order: thermal → phase change).
+                // Master enable lives on PhaseConfig (I / Tab settings).
+                apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
+                if organisms_on {
+                    let tick_no = scene.world.tick;
+                    scene
+                        .organisms
+                        .step_with_climate(
+                            &mut scene.world,
+                            tick_no,
+                            &settings.climate,
+                            Some(&mut scene.humidity),
+                        );
+                }
+                tick_accum -= 1.0;
+                n += 1;
             }
+            // Drop leftover accum after a hitch — don't queue a burst.
+            if n == MAX_TICKS_PER_FRAME {
+                tick_accum = 0.0;
+            }
+        } else {
+            tick_accum = 0.0;
         }
 
         // Render.
@@ -1193,7 +1308,7 @@ async fn main() {
         // Creature / terrain editor overlays (paint UI, or spawn banner).
         editor.draw();
         terrain.draw();
-        settings.draw();
+        settings.draw(scene.world.tick);
         quit_dialog.draw();
 
         // HUD chrome (info + hotkeys + inspector) toggled with F1.
@@ -1203,6 +1318,7 @@ async fn main() {
             } else {
                 "night"
             };
+            let season = season_name(season_fraction_cfg(scene.world.tick, &settings.climate));
             let rain_tag = if !rain_on {
                 "off"
             } else if settings.rain.closed_loop {
@@ -1211,10 +1327,12 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} {}",
+                "fps={:.0}  sim={:.0}Hz  tick={} {} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} {}",
                 fps_smoothed(),
+                settings.sim_tick_hz,
                 scene.world.tick,
                 tod,
+                season,
                 scene.temperature.mean(),
                 rain_tag,
                 if evap_on { "on" } else { "off" },
