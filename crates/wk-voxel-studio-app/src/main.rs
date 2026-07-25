@@ -464,6 +464,8 @@ async fn main() {
                 Ok(g) => {
                     let bones = g.bone_count();
                     let mus = g.muscles.len();
+                    let joints = g.joints.len();
+                    let hinged = g.hinged_bone_count();
                     let nerves = g.nerves.len();
                     let ctrl = g.has_controller;
                     let drive = if arena.physics.scripted_muscle {
@@ -472,7 +474,7 @@ async fn main() {
                         "neural"
                     };
                     status = format!(
-                        "active bones={bones} mus={mus} nerves={nerves} ctrl={ctrl} drive={drive}"
+                        "active bones={bones} joints={joints} hinged={hinged} mus={mus} nerves={nerves} ctrl={ctrl} drive={drive}"
                     );
                     paused = false;
                     train = None;

@@ -31,7 +31,11 @@ pub struct RigidPart {
     pub cells: Vec<(i32, i32)>,
     pub offset_x: i32,
     pub offset_y: i32,
+    /// Fixture or bone welded to a fixture — never moves.
     pub anchored: bool,
+    /// Joint-linked to an anchored part — no gravity, may articulate.
+    #[serde(default)]
+    pub hinged: bool,
 }
 
 impl RigidPart {
@@ -61,6 +65,7 @@ impl RigidPart {
 pub struct Joint {
     pub part_a: u32,
     pub part_b: u32,
+    /// Paint-space joint cell; world pivot follows the anchored side's offset.
     pub pivot: (i32, i32),
     pub limit: JointLimit,
 }
@@ -160,6 +165,13 @@ impl BodyGraph {
             .count()
     }
 
+    pub fn hinged_bone_count(&self) -> usize {
+        self.parts
+            .iter()
+            .filter(|p| p.kind == PartKind::Bone && p.hinged)
+            .count()
+    }
+
     pub fn muscle_feedback(&self) -> Vec<MuscleFeedback> {
         self.muscles.iter().map(Muscle::feedback).collect()
     }
@@ -239,6 +251,7 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
                 offset_x: 0,
                 offset_y: 0,
                 anchored: part_kind == PartKind::Fixture,
+                hinged: false,
             });
         }
     }
@@ -269,8 +282,8 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
     }
 
     let joints = collect_joints(paint, &cell_owner);
-    // Bones linked by a joint to an anchored part become hinged (still
-    // movable under muscle — not gravity-anchored unless they touch fixture).
+    // Bones linked by a joint chain to an anchored part articulate (no fall-off).
+    mark_hinged_from_joints(&mut parts, &joints);
     let muscles = collect_muscles(paint, &cell_owner, &parts);
     let neurons = collect_neurons(paint);
     let nerves = collect_nerves(paint, &muscles, &neurons);
@@ -285,6 +298,35 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
         has_controller,
         script_phase: 0.0,
     })
+}
+
+/// BFS through joints from anchored parts → mark distal bones as hinged.
+fn mark_hinged_from_joints(parts: &mut [RigidPart], joints: &[Joint]) {
+    let mut supported: HashSet<u32> = parts
+        .iter()
+        .filter(|p| p.anchored)
+        .map(|p| p.id)
+        .collect();
+    let mut q: VecDeque<u32> = supported.iter().copied().collect();
+    while let Some(id) = q.pop_front() {
+        for j in joints {
+            let other = if j.part_a == id {
+                j.part_b
+            } else if j.part_b == id {
+                j.part_a
+            } else {
+                continue;
+            };
+            if supported.insert(other) {
+                q.push_back(other);
+            }
+        }
+    }
+    for p in parts.iter_mut() {
+        if p.kind == PartKind::Bone && !p.anchored && supported.contains(&p.id) {
+            p.hinged = true;
+        }
+    }
 }
 
 fn neighbors4(x: i32, y: i32) -> [(i32, i32); 4] {
@@ -538,6 +580,9 @@ fn try_move_part(
     if dx == 0 && dy == 0 {
         return true;
     }
+    if graph.parts[idx].anchored {
+        return false;
+    }
     let cells: Vec<(i32, i32)> = graph.parts[idx].world_cells().collect();
     let mut occ = occupied(graph);
     for c in &cells {
@@ -560,6 +605,190 @@ fn try_move_part(
     graph.parts[idx].offset_x += dx;
     graph.parts[idx].offset_y += dy;
     true
+}
+
+/// Move several free parts together (free-floating assemblies under gravity).
+fn try_move_parts(
+    graph: &mut BodyGraph,
+    world: &mut World,
+    indices: &[usize],
+    dx: i32,
+    dy: i32,
+) -> bool {
+    if dx == 0 && dy == 0 || indices.is_empty() {
+        return true;
+    }
+    if indices.iter().any(|&i| graph.parts[i].anchored) {
+        return false;
+    }
+    let mut moving: HashSet<(i32, i32)> = HashSet::new();
+    let mut cells_by_part: Vec<(usize, Vec<(i32, i32)>)> = Vec::new();
+    for &idx in indices {
+        let cells: Vec<(i32, i32)> = graph.parts[idx].world_cells().collect();
+        for c in &cells {
+            moving.insert(*c);
+        }
+        cells_by_part.push((idx, cells));
+    }
+    let mut occ = occupied(graph);
+    for c in &moving {
+        occ.remove(c);
+    }
+    for (_idx, cells) in &cells_by_part {
+        for &(x, y) in cells {
+            let tx = x + dx;
+            let ty = y + dy;
+            if !cell_passable(world, tx, ty) {
+                return false;
+            }
+            // Allow landing in a cell another moving part is vacating.
+            if occ.contains(&(tx, ty)) && !moving.contains(&(tx, ty)) {
+                return false;
+            }
+        }
+    }
+    for (_idx, cells) in &cells_by_part {
+        for &(x, y) in cells {
+            push_sat(world, x + dx, y + dy, x, y);
+        }
+    }
+    for &idx in indices {
+        graph.parts[idx].offset_x += dx;
+        graph.parts[idx].offset_y += dy;
+    }
+    true
+}
+
+fn chebyshev(a: (i32, i32), b: (i32, i32)) -> i32 {
+    (a.0 - b.0).abs().max((a.1 - b.1).abs())
+}
+
+/// World-space hinge point: pinned to the anchored side (or average if free).
+fn pivot_world(graph: &BodyGraph, joint: &Joint) -> (i32, i32) {
+    let ia = graph.part_index(joint.part_a);
+    let ib = graph.part_index(joint.part_b);
+    let (Some(ia), Some(ib)) = (ia, ib) else {
+        return joint.pivot;
+    };
+    let (ox, oy) = if graph.parts[ia].anchored {
+        (graph.parts[ia].offset_x, graph.parts[ia].offset_y)
+    } else if graph.parts[ib].anchored {
+        (graph.parts[ib].offset_x, graph.parts[ib].offset_y)
+    } else {
+        (
+            (graph.parts[ia].offset_x + graph.parts[ib].offset_x) / 2,
+            (graph.parts[ia].offset_y + graph.parts[ib].offset_y) / 2,
+        )
+    };
+    (joint.pivot.0 + ox, joint.pivot.1 + oy)
+}
+
+fn part_touches_pivot(part: &RigidPart, pivot: (i32, i32)) -> bool {
+    part.world_cells().any(|c| chebyshev(c, pivot) <= 1)
+}
+
+fn joints_satisfied(graph: &BodyGraph) -> bool {
+    graph.joints.iter().all(|j| {
+        let Some(ia) = graph.part_index(j.part_a) else {
+            return true;
+        };
+        let Some(ib) = graph.part_index(j.part_b) else {
+            return true;
+        };
+        let p = pivot_world(graph, j);
+        part_touches_pivot(&graph.parts[ia], p) && part_touches_pivot(&graph.parts[ib], p)
+    })
+}
+
+/// Move a part, then revert if any joint hinge would break.
+fn try_move_part_hinged(
+    graph: &mut BodyGraph,
+    world: &mut World,
+    idx: usize,
+    dx: i32,
+    dy: i32,
+) -> bool {
+    if !try_move_part(graph, world, idx, dx, dy) {
+        return false;
+    }
+    if joints_satisfied(graph) {
+        return true;
+    }
+    // Revert translation (ignore hydro undo — sat nudge is cosmetic).
+    graph.parts[idx].offset_x -= dx;
+    graph.parts[idx].offset_y -= dy;
+    false
+}
+
+/// Pull separated parts back toward the hinge (repairs fall-off / fly-off).
+fn enforce_joints(graph: &mut BodyGraph, world: &mut World) {
+    for _ in 0..6 {
+        if joints_satisfied(graph) {
+            return;
+        }
+        let snaps: Vec<Joint> = graph.joints.clone();
+        let mut progressed = false;
+        for j in snaps {
+            let p = pivot_world(graph, &j);
+            let Some(ia) = graph.part_index(j.part_a) else {
+                continue;
+            };
+            let Some(ib) = graph.part_index(j.part_b) else {
+                continue;
+            };
+            for idx in [ia, ib] {
+                if graph.parts[idx].anchored {
+                    continue;
+                }
+                if part_touches_pivot(&graph.parts[idx], p) {
+                    continue;
+                }
+                let (cx, cy) = graph.parts[idx].centroid();
+                let dx = (p.0 as f32 - cx).signum() as i32;
+                let dy = (p.1 as f32 - cy).signum() as i32;
+                if dx != 0 && try_move_part(graph, world, idx, dx, 0) {
+                    progressed = true;
+                } else if dy != 0 && try_move_part(graph, world, idx, 0, dy) {
+                    progressed = true;
+                }
+            }
+        }
+        if !progressed {
+            break;
+        }
+    }
+}
+
+/// Joint-connected component ids (part ids).
+fn joint_components(graph: &BodyGraph) -> Vec<Vec<usize>> {
+    let n = graph.parts.len();
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn find(parent: &mut [usize], i: usize) -> usize {
+        let mut i = i;
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    fn unite(parent: &mut [usize], a: usize, b: usize) {
+        let pa = find(parent, a);
+        let pb = find(parent, b);
+        if pa != pb {
+            parent[pa] = pb;
+        }
+    }
+    for j in &graph.joints {
+        if let (Some(ia), Some(ib)) = (graph.part_index(j.part_a), graph.part_index(j.part_b)) {
+            unite(&mut parent, ia, ib);
+        }
+    }
+    let mut groups: HashMap<usize, Vec<usize>> = HashMap::new();
+    for i in 0..n {
+        let root = find(&mut parent, i);
+        groups.entry(root).or_default().push(i);
+    }
+    groups.into_values().collect()
 }
 
 fn push_sat(world: &mut World, from_x: i32, from_y: i32, to_x: i32, to_y: i32) {
@@ -667,12 +896,43 @@ fn apply_muscle_forces(graph: &mut BodyGraph, world: &mut World) {
         let (tx, ty) = graph.parts[toward_idx].centroid();
         let dx = (tx - mx).signum() as i32;
         let dy = (ty - my).signum() as i32;
-        // Prefer horizontal flap for fins.
+        // Prefer horizontal flap for fins; reject moves that tear the hinge.
         if dx != 0 {
-            let _ = try_move_part(graph, world, move_idx, dx, 0);
+            let _ = try_move_part_hinged(graph, world, move_idx, dx, 0);
         } else if dy != 0 {
-            let _ = try_move_part(graph, world, move_idx, 0, dy);
+            let _ = try_move_part_hinged(graph, world, move_idx, 0, dy);
         }
+    }
+}
+
+fn apply_gravity(graph: &mut BodyGraph, world: &mut World) {
+    let mut comps = joint_components(graph);
+    comps.sort_by_key(|c| c.iter().map(|&i| graph.parts[i].id).min().unwrap_or(0));
+    for mut indices in comps {
+        indices.sort_by_key(|&i| graph.parts[i].id);
+        let has_anchor = indices.iter().any(|&i| graph.parts[i].anchored);
+        if has_anchor {
+            // Fixture-rooted chain: hinged bones stay up (muscle articulates).
+            continue;
+        }
+        // Free-floating assembly — fall together so joints don't separate.
+        let movable: Vec<usize> = indices
+            .into_iter()
+            .filter(|&i| graph.parts[i].kind == PartKind::Bone)
+            .collect();
+        if movable.is_empty() {
+            continue;
+        }
+        let busy = movable.iter().any(|&idx| {
+            let id = graph.parts[idx].id;
+            graph.muscles.iter().any(|m| {
+                m.actuation >= 0.55 && (m.part_a == id || m.part_b == id)
+            })
+        });
+        if busy {
+            continue;
+        }
+        let _ = try_move_parts(graph, world, &movable, 0, -1);
     }
 }
 
@@ -681,6 +941,7 @@ fn apply_muscle_forces(graph: &mut BodyGraph, world: &mut World) {
 /// When `scripted_muscle` is true, open-loop sinusoid overwrites actuation.
 /// When false, actuation is left as set by the neural controller (or caller).
 /// Muscle forces always run when muscles exist so net-driven episodes move.
+/// Joints keep hinged bones attached to their fixture-rooted chain.
 pub fn step_body(graph: &mut BodyGraph, world: &mut World, scripted_muscle: bool) {
     if graph.parts.is_empty() {
         return;
@@ -692,23 +953,8 @@ pub fn step_body(graph: &mut BodyGraph, world: &mut World, scripted_muscle: bool
         apply_muscle_forces(graph, world);
     }
 
-    // Gravity on free bones (not hinged-only — still apply if unanchored).
-    let mut order: Vec<usize> = (0..graph.parts.len()).collect();
-    order.sort_by_key(|&i| graph.parts[i].id);
-    for &idx in &order {
-        if graph.parts[idx].anchored || graph.parts[idx].kind != PartKind::Bone {
-            continue;
-        }
-        // Skip gravity pull if a muscle is actively yanking this tick.
-        let busy = graph.muscles.iter().any(|m| {
-            m.actuation >= 0.55 && (m.part_a == graph.parts[idx].id || m.part_b == graph.parts[idx].id)
-        });
-        if busy {
-            continue;
-        }
-        let _ = try_move_part(graph, world, idx, 0, -1);
-    }
-
+    apply_gravity(graph, world);
+    enforce_joints(graph, world);
     refresh_muscle_state(graph);
 }
 
@@ -783,6 +1029,106 @@ mod tests {
             .unwrap()
             .offset_y;
         assert_eq!(y0, y1, "fixture-hung bone must not fall");
+    }
+
+    #[test]
+    fn hinged_distal_bone_does_not_fall_off() {
+        let mut arena = StudioArena::new(ArenaConfig {
+            width: 48,
+            height: 32,
+            seed: 11,
+            water_to_y: None,
+        });
+        arena.physics = StudioPhysicsConfig::body_only();
+        // Scripted off so net/noise isn't required — pure gravity + joint.
+        arena.physics.scripted_muscle = false;
+        for y in 4..20 {
+            arena.body.paint.set(2, y as u32, TissueKind::Fixture);
+        }
+        arena.body.paint.set(3, 10, TissueKind::Bone);
+        arena.body.paint.set(4, 10, TissueKind::Bone);
+        arena.body.paint.set(5, 10, TissueKind::JointHalf);
+        arena.body.paint.set(6, 10, TissueKind::Bone);
+        arena.body.paint.set(7, 10, TissueKind::Bone);
+        arena.body.paint.set(8, 10, TissueKind::Bone);
+        arena.body.paint.set(4, 11, TissueKind::Muscle);
+        arena.body.paint.set(5, 11, TissueKind::Muscle);
+        arena.body.paint.set(6, 11, TissueKind::Muscle);
+
+        let g = arena.activate().unwrap();
+        assert!(g.joints.len() >= 1, "expected joint between bones");
+        assert!(
+            g.hinged_bone_count() >= 1,
+            "distal bone should be hinged to fixture chain"
+        );
+        let distal_id = g
+            .parts
+            .iter()
+            .find(|p| p.kind == PartKind::Bone && p.hinged)
+            .map(|p| p.id)
+            .expect("hinged bone");
+        for _ in 0..50 {
+            arena.tick();
+        }
+        let distal = arena
+            .body
+            .graph
+            .as_ref()
+            .unwrap()
+            .parts
+            .iter()
+            .find(|p| p.id == distal_id)
+            .unwrap();
+        assert_eq!(
+            distal.offset_y, 0,
+            "hinged distal bone must not fall off (offset_y={})",
+            distal.offset_y
+        );
+        assert!(
+            joints_satisfied(arena.body.graph.as_ref().unwrap()),
+            "joint hinge must remain satisfied"
+        );
+    }
+
+    #[test]
+    fn free_jointed_pair_falls_together() {
+        let mut arena = StudioArena::new(ArenaConfig {
+            width: 32,
+            height: 32,
+            seed: 12,
+            water_to_y: None,
+        });
+        arena.physics = StudioPhysicsConfig::body_only();
+        arena.physics.scripted_muscle = false;
+        arena.body.paint.set(8, 20, TissueKind::Bone);
+        arena.body.paint.set(9, 20, TissueKind::Bone);
+        arena.body.paint.set(10, 20, TissueKind::JointHalf);
+        arena.body.paint.set(11, 20, TissueKind::Bone);
+        arena.body.paint.set(12, 20, TissueKind::Bone);
+        arena.activate().unwrap();
+        let y0: Vec<i32> = arena
+            .body
+            .graph
+            .as_ref()
+            .unwrap()
+            .parts
+            .iter()
+            .filter(|p| p.kind == PartKind::Bone)
+            .map(|p| p.offset_y)
+            .collect();
+        for _ in 0..25 {
+            arena.tick();
+        }
+        let g = arena.body.graph.as_ref().unwrap();
+        let y1: Vec<i32> = g
+            .parts
+            .iter()
+            .filter(|p| p.kind == PartKind::Bone)
+            .map(|p| p.offset_y)
+            .collect();
+        assert!(y1.iter().all(|&y| y < y0[0]), "pair should fall");
+        assert_eq!(y1[0], y1[1], "jointed bones must share gravity offset");
+        assert!(joints_satisfied(g), "hinge must hold while falling");
     }
 
     #[test]
