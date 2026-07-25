@@ -30,7 +30,15 @@ creature count):
 2. Whether the hot path is flow ×12 scans or the serial frame shell.
 3. Gate: only invest where a pass is roughly ≥10–15% of frame time.
 
-Harness notes live in `crates/wk-voxel/tests/perf_profile.rs`.
+Harness notes live in `crates/wk-voxel/tests/perf_profile.rs`
+(`busy play` = 48×6 chunks + plants + terrain-edit churn).
+
+**Phase 0 snapshot (release headless, ~24Hz budget = 41.7ms):** busy play
+was ~70ms/tick with **geotech roof** scanning every loaded chunk
+(~53ms). After dirty-wake + periodic full-scan failure and cheaper
+thermal props refresh, busy sits ~39ms/tick (≈93% of budget). Next
+≥10% candidates on busy: failure full-scan ticks, karst, flow erosion,
+water flow; organisms were negligible at ~140 plants.
 
 ## Phase 1 — Easy wins (same pattern as seepage)
 

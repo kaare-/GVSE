@@ -50,7 +50,8 @@ pub use clouds::{
     cloud_floor_y, CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS,
 };
 pub use failure::{
-    apply_compaction, apply_failure, apply_roof_collapse, apply_shear_weaken, compaction_load_ok,
+    apply_compaction, apply_failure, apply_failure_with_wake, apply_roof_collapse,
+    apply_shear_weaken, compaction_load_ok,
     effective_cohesion, face_shear_demand, pore_wetness, roof_collapse_debris, roof_span_cells,
     roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
     COMPACTION_SIGMA_MIN,
