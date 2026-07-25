@@ -178,7 +178,10 @@ fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
         let r = climate.moon_base_radius * scale;
         let illum = moon_illumination(tick, climate);
         let phase = lunar_fraction_cfg(tick, climate);
-        draw_moon(cx, cy, r, phase, illum, dn, season, tint);
+        // Match shadow to the sky band behind the moon (not zenith).
+        let height_01 = (cy / sh).clamp(0.0, 1.0);
+        let [sr, sg, sb] = sky_rgb_at_height_cfg(dn, height_01, season, tint);
+        draw_moon(cx, cy, r, phase, illum, sr, sg, sb);
     }
 }
 
@@ -200,23 +203,23 @@ fn draw_starfield(tick: u64, sw: f32, sh: f32, alpha: f32) {
     }
 }
 
-/// Simple two-circle moon: bright disk + dark shadow disk.
+/// Simple two-circle moon: bright disk + sky-coloured shadow disk.
 ///
-/// `phase` 0 = new → 0.5 = full → 1 = new. No raster/grid — just clean
-/// circles so crescents and gibbous read without banding.
+/// `phase` 0 = new → 0.5 = full → 1 = new. The shadow uses the sky
+/// sample behind the moon so the unlit limb disappears into the background.
 fn draw_moon(
     cx: f32,
     cy: f32,
     r: f32,
     phase: f32,
     illum: f32,
-    _dn: f32,
-    _season: f32,
-    _tint: f32,
+    sky_r: u8,
+    sky_g: u8,
+    sky_b: u8,
 ) {
     let r = r.max(4.0);
     let lit = Color::from_rgba(232, 236, 245, 255);
-    let shade = Color::from_rgba(42, 46, 62, 255);
+    let shade = Color::from_rgba(sky_r, sky_g, sky_b, 255);
 
     // Soft bloom only when mostly full (avoids a ring around crescents).
     if illum > 0.55 {
@@ -225,12 +228,11 @@ fn draw_moon(
     }
 
     if illum < 0.03 {
-        // New moon — faint earthshine disk only.
-        draw_circle(cx, cy, r, Color::from_rgba(42, 46, 62, 180));
+        // New moon — nearly invisible against the sky.
         return;
     }
 
-    // Bright body, then a same-radius shadow disk that slides across.
+    // Bright body, then a same-radius sky disk that slides across.
     // illum 0 → shadow centred (new); illum 1 → shadow parked 2r off (full).
     draw_circle(cx, cy, r, lit);
     // Two soft mare spots (under the shadow so they only show when lit).
