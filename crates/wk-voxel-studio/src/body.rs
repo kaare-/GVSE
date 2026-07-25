@@ -104,12 +104,36 @@ pub struct MuscleFeedback {
     pub tension: f32,
 }
 
+/// Painted nerve thread (1-px signal path).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NerveStrand {
+    pub id: u32,
+    pub cells: Vec<(i32, i32)>,
+    /// Muscle ids this strand touches (4-neighbour).
+    pub muscle_ids: Vec<u32>,
+    /// Neuron cluster ids this strand touches.
+    pub neuron_ids: Vec<u32>,
+}
+
+/// Connected NeuronBlob mass — controller site when area ≥ 2×2.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeuronCluster {
+    pub id: u32,
+    pub cells: Vec<(i32, i32)>,
+    /// True when the blob spans at least 2×2 (processing mass).
+    pub is_controller: bool,
+}
+
 /// Activated studio body for simulation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BodyGraph {
     pub parts: Vec<RigidPart>,
     pub joints: Vec<Joint>,
     pub muscles: Vec<Muscle>,
+    pub nerves: Vec<NerveStrand>,
+    pub neurons: Vec<NeuronCluster>,
+    /// At least one controller-sized neuron blob is present.
+    pub has_controller: bool,
     /// Radians-ish phase for scripted sinusoid (accumulates with tick).
     pub script_phase: f32,
 }
@@ -159,6 +183,16 @@ impl BodyGraph {
         for m in &self.muscles {
             if m.cells.iter().any(|&(x, y)| x == gx && y == gy) {
                 return Some(TissueKind::Muscle);
+            }
+        }
+        for n in &self.neurons {
+            if n.cells.iter().any(|&(x, y)| x == gx && y == gy) {
+                return Some(TissueKind::NeuronBlob);
+            }
+        }
+        for n in &self.nerves {
+            if n.cells.iter().any(|&(x, y)| x == gx && y == gy) {
+                return Some(TissueKind::Nerve);
             }
         }
         None
@@ -238,11 +272,17 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
     // Bones linked by a joint to an anchored part become hinged (still
     // movable under muscle — not gravity-anchored unless they touch fixture).
     let muscles = collect_muscles(paint, &cell_owner, &parts);
+    let neurons = collect_neurons(paint);
+    let nerves = collect_nerves(paint, &muscles, &neurons);
+    let has_controller = neurons.iter().any(|n| n.is_controller);
 
     Ok(BodyGraph {
         parts,
         joints,
         muscles,
+        nerves,
+        neurons,
+        has_controller,
         script_phase: 0.0,
     })
 }
@@ -344,6 +384,102 @@ fn collect_muscles(
         }
     }
     muscles
+}
+
+fn collect_neurons(paint: &TissuePaint) -> Vec<NeuronCluster> {
+    let w = paint.width as i32;
+    let h = paint.height as i32;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let mut next = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            if paint.get(x as u32, y as u32) != TissueKind::NeuronBlob {
+                continue;
+            }
+            if !seen.insert((x, y)) {
+                continue;
+            }
+            let cells = flood(paint, x, y, TissueKind::NeuronBlob, &mut seen);
+            if cells.is_empty() {
+                continue;
+            }
+            let min_x = cells.iter().map(|c| c.0).min().unwrap_or(0);
+            let max_x = cells.iter().map(|c| c.0).max().unwrap_or(0);
+            let min_y = cells.iter().map(|c| c.1).min().unwrap_or(0);
+            let max_y = cells.iter().map(|c| c.1).max().unwrap_or(0);
+            let span_w = (max_x - min_x + 1) as usize;
+            let span_h = (max_y - min_y + 1) as usize;
+            // Spec: ≥2×2 nerve mass = processing / controller site.
+            let is_controller = span_w >= 2 && span_h >= 2 && cells.len() >= 4;
+            out.push(NeuronCluster {
+                id: next,
+                cells,
+                is_controller,
+            });
+            next += 1;
+        }
+    }
+    out
+}
+
+fn collect_nerves(
+    paint: &TissuePaint,
+    muscles: &[Muscle],
+    neurons: &[NeuronCluster],
+) -> Vec<NerveStrand> {
+    let w = paint.width as i32;
+    let h = paint.height as i32;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let mut next = 0u32;
+    let muscle_at = |x: i32, y: i32| -> Option<u32> {
+        muscles
+            .iter()
+            .find(|m| m.cells.iter().any(|&c| c == (x, y)))
+            .map(|m| m.id)
+    };
+    let neuron_at = |x: i32, y: i32| -> Option<u32> {
+        neurons
+            .iter()
+            .find(|n| n.cells.iter().any(|&c| c == (x, y)))
+            .map(|n| n.id)
+    };
+    for y in 0..h {
+        for x in 0..w {
+            if paint.get(x as u32, y as u32) != TissueKind::Nerve {
+                continue;
+            }
+            if !seen.insert((x, y)) {
+                continue;
+            }
+            let cells = flood(paint, x, y, TissueKind::Nerve, &mut seen);
+            let mut muscle_ids = Vec::new();
+            let mut neuron_ids = Vec::new();
+            for &(cx, cy) in &cells {
+                for (nx, ny) in neighbors4(cx, cy) {
+                    if let Some(id) = muscle_at(nx, ny) {
+                        muscle_ids.push(id);
+                    }
+                    if let Some(id) = neuron_at(nx, ny) {
+                        neuron_ids.push(id);
+                    }
+                }
+            }
+            muscle_ids.sort_unstable();
+            muscle_ids.dedup();
+            neuron_ids.sort_unstable();
+            neuron_ids.dedup();
+            out.push(NerveStrand {
+                id: next,
+                cells,
+                muscle_ids,
+                neuron_ids,
+            });
+            next += 1;
+        }
+    }
+    out
 }
 
 fn flood(
@@ -541,12 +677,18 @@ fn apply_muscle_forces(graph: &mut BodyGraph, world: &mut World) {
 }
 
 /// S1/S2 body step after voxel CA.
+///
+/// When `scripted_muscle` is true, open-loop sinusoid overwrites actuation.
+/// When false, actuation is left as set by the neural controller (or caller).
+/// Muscle forces always run when muscles exist so net-driven episodes move.
 pub fn step_body(graph: &mut BodyGraph, world: &mut World, scripted_muscle: bool) {
     if graph.parts.is_empty() {
         return;
     }
-    if scripted_muscle && !graph.muscles.is_empty() {
-        script_muscles(graph, world.tick);
+    if !graph.muscles.is_empty() {
+        if scripted_muscle {
+            script_muscles(graph, world.tick);
+        }
         apply_muscle_forces(graph, world);
     }
 
@@ -727,6 +869,39 @@ mod tests {
         assert!(
             x1 != x0 || tension > 0.01,
             "scripted muscle should move bone or report tension (x {x0}→{x1}, T={tension})"
+        );
+    }
+
+    #[test]
+    fn activate_wires_nerve_and_controller_blob() {
+        let mut paint = TissuePaint::new(24, 24);
+        for y in 4..14 {
+            paint.set(2, y, TissueKind::Fixture);
+        }
+        paint.set(3, 8, TissueKind::Bone);
+        paint.set(4, 8, TissueKind::Bone);
+        paint.set(5, 8, TissueKind::JointHalf);
+        paint.set(6, 8, TissueKind::Bone);
+        paint.set(7, 8, TissueKind::Bone);
+        paint.set(4, 9, TissueKind::Muscle);
+        paint.set(5, 9, TissueKind::Muscle);
+        paint.set(6, 9, TissueKind::Muscle);
+        // Neuron blob ≥2×2
+        paint.set(8, 10, TissueKind::NeuronBlob);
+        paint.set(9, 10, TissueKind::NeuronBlob);
+        paint.set(8, 11, TissueKind::NeuronBlob);
+        paint.set(9, 11, TissueKind::NeuronBlob);
+        // Nerve path from blob toward muscle
+        paint.set(7, 10, TissueKind::Nerve);
+        paint.set(6, 10, TissueKind::Nerve);
+
+        let g = activate(&paint).unwrap();
+        assert!(g.has_controller, "2×2 neuron blob should be a controller");
+        assert!(!g.neurons.is_empty());
+        assert!(!g.nerves.is_empty());
+        assert!(
+            g.nerves.iter().any(|n| !n.neuron_ids.is_empty()),
+            "nerve should touch neuron cluster"
         );
     }
 }

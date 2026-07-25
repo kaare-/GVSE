@@ -206,10 +206,10 @@ Postcard + schema version, same spirit as `.gvsecrt`.
 | **S0** | This doc + `wk-voxel-studio` types + empty studio app arena | ✅ Arena ticks water with world rules; paint enum + colours locked |
 | **S1** | Paint UI + activate → `BodyGraph` (bones, fixtures) | ✅ `Enter` activates; hung bones stay, free bones fall (discrete gravity); no muscle yet |
 | **S2** | Joints + scripted muscle + hydro push + muscle feedback | ✅ Muscle links bones; scripted actuation; tension feedback; water displace |
-| **S3** | Nerves / richer sensors | Muscle feedback is v1 input; fixture force later |
-| **S4** | Neural training (fixed morphology) | ✅ Hill-climb on muscle-feedback net |
-| **S5** | GA morphology search | ✅ Paint mutate + evaluate episodes |
-| **S6** | Export `.gvsebody` → world spawn | Partial export; world spawn hook next |
+| **S3** | Nerves / richer sensors | ✅ Nerve strands + neuron blobs on activate; muscle feedback is v1 net input; fixture force later |
+| **S4** | Neural training (fixed morphology) | ✅ Hill-climb + live `StudioNet` drive; app `H` / `C` / `N` |
+| **S5** | GA morphology search | ✅ Paint mutate + evaluate; app `M` |
+| **S6** | Export `.gvsebody` → world spawn | ✅ Studio `E` export with net; world spawn hook next |
 
 Do not start S4 until S2 proves hydro coupling on the shared CA.
 

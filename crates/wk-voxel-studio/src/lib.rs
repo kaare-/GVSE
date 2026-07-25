@@ -17,7 +17,7 @@ mod train;
 pub use arena::{ArenaConfig, StudioArena, ARENA_MAX, ARENA_MIN};
 pub use body::{
     activate, script_muscles, step_body, ActivateError, BodyGraph, Joint, Muscle, MuscleFeedback,
-    PartKind, RigidPart,
+    NerveStrand, NeuronCluster, PartKind, RigidPart,
 };
 pub use export::{
     decode_body, encode_body, export_body, export_body_with_net, import_body_paint, ExportError,
@@ -32,4 +32,4 @@ pub use tissue::{
     ForceSensor, JointLimit, StudioBody, TissueKind, TissuePaint, FIXTURE_RGB, MUSCLE_RGB,
     NERVE_RGB, NEURON_BLOB_RGB, SKIN_RGB,
 };
-pub use train::{evaluate_net, hill_climb, EpisodeResult};
+pub use train::{apply_net, evaluate_net, hill_climb, EpisodeResult, TrainingSession};

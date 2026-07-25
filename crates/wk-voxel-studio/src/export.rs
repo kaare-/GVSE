@@ -65,6 +65,7 @@ pub fn import_body_paint(body: &mut StudioBody, exp: &ExportedBody) {
     body.paint = exp.paint.clone();
     body.activated = false;
     body.graph = None;
+    body.net = exp.net.clone();
 }
 
 #[cfg(test)]
@@ -83,6 +84,7 @@ mod tests {
             paint,
             activated: true,
             graph: None,
+            net: None,
         };
         let exp = export_body(&body).unwrap();
         assert_eq!(exp.paint.get(1, 1), TissueKind::Bone);

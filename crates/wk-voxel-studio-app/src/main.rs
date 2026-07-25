@@ -5,14 +5,17 @@
 //!
 //! Left dock: clickable tissue + geology palette.
 //! Space pause · Enter activate · W flood/drain · R reset
+//! N net/scripted · H hill-climb · C continuous train · E export
 //! F1–F4 physics · F5 fin example · F6 rough terrain · [/] ;/' size
 
 use macroquad::prelude::*;
+use std::path::PathBuf;
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::Cell;
 use wk_voxel_studio::{
-    paint_fin_bench, paint_rough_terrain, tissue_rgb, ArenaConfig, StudioArena, StudioPhysicsConfig,
-    TissueKind, ARENA_MAX, ARENA_MIN,
+    encode_body, export_body_with_net, evolve_morphology, paint_fin_bench, paint_rough_terrain,
+    tissue_rgb, ArenaConfig, StudioArena, StudioPhysicsConfig, TissueKind, TrainingSession,
+    ARENA_MAX, ARENA_MIN,
 };
 
 const CELL_PX: f32 = 3.0;
@@ -340,7 +343,7 @@ fn draw_palette_dock(
         }
     }
 
-    let foot = screen_height() - 70.0;
+    let foot = screen_height() - 88.0;
     draw_text(
         "LMB paint  RMB erase",
         10.0,
@@ -356,14 +359,35 @@ fn draw_palette_dock(
         Color::from_rgba(160, 168, 180, 255),
     );
     draw_text(
-        "W water fill  R reset",
+        "W water  R reset  N net",
         10.0,
         foot + 32.0,
         13.0,
         Color::from_rgba(160, 168, 180, 255),
     );
+    draw_text(
+        "H train  C cont  E export",
+        10.0,
+        foot + 48.0,
+        13.0,
+        Color::from_rgba(160, 168, 180, 255),
+    );
 
     pick
+}
+
+/// Snapshot paint + physics into a fresh arena for episode evaluation.
+fn clone_bench(arena: &StudioArena) -> StudioArena {
+    let mut a = StudioArena::new(ArenaConfig {
+        width: arena.cfg.width,
+        height: arena.cfg.height,
+        seed: arena.cfg.seed,
+        water_to_y: arena.cfg.water_to_y,
+    });
+    a.physics = arena.physics;
+    a.body.paint = arena.body.paint.clone();
+    a.body.net = arena.body.net.clone();
+    a
 }
 
 #[macroquad::main("GVSE Studio — muscle / bone / neural")]
@@ -376,6 +400,9 @@ async fn main() {
     let mut terrain = MaterialId::Sand;
     let mut water_on = false;
     let mut status = String::from("dry arena — pick a brush on the left");
+    let mut train: Option<TrainingSession> = None;
+    let mut continuous = false;
+    let mut train_seed = 0x71A1_u64;
 
     loop {
         if is_key_pressed(KeyCode::Escape) {
@@ -408,7 +435,7 @@ async fn main() {
         }
         if is_key_pressed(KeyCode::F5) {
             paint_fin_bench(&mut arena);
-            status = "example: fin tissue (optional)".into();
+            status = "example: fin + nerve + neuron (Enter)".into();
         }
         if is_key_pressed(KeyCode::F6) {
             paint_rough_terrain(&mut arena);
@@ -435,17 +462,156 @@ async fn main() {
         if is_key_pressed(KeyCode::Enter) {
             match arena.activate() {
                 Ok(g) => {
+                    let bones = g.bone_count();
+                    let mus = g.muscles.len();
+                    let nerves = g.nerves.len();
+                    let ctrl = g.has_controller;
+                    let drive = if arena.physics.scripted_muscle {
+                        "scripted"
+                    } else {
+                        "neural"
+                    };
                     status = format!(
-                        "active bones={} muscles={} hung={}",
-                        g.bone_count(),
-                        g.muscles.len(),
-                        g.anchored_bone_count()
+                        "active bones={bones} mus={mus} nerves={nerves} ctrl={ctrl} drive={drive}"
                     );
                     paused = false;
+                    train = None;
+                    continuous = false;
                 }
                 Err(_) => status = "activate failed — paint bone/fixture first".into(),
             }
         }
+
+        // Toggle neural vs scripted muscle drive.
+        if is_key_pressed(KeyCode::N) {
+            if !arena.body.activated {
+                status = "activate first (Enter)".into();
+            } else if arena.ensure_net(train_seed).is_none() {
+                status = "need muscles for a net".into();
+            } else {
+                arena.physics.scripted_muscle = !arena.physics.scripted_muscle;
+                status = if arena.physics.scripted_muscle {
+                    "drive: scripted sinusoid".into()
+                } else {
+                    "drive: StudioNet (muscle feedback)".into()
+                };
+            }
+        }
+
+        // Burst hill-climb on current morphology.
+        if is_key_pressed(KeyCode::H) {
+            if !arena.body.activated {
+                status = "activate first (Enter)".into();
+            } else if arena.ensure_net(train_seed).is_none() {
+                status = "need muscles to train".into();
+            } else {
+                let paint = arena.body.paint.clone();
+                let cfg = arena.cfg;
+                let phys = arena.physics;
+                let seed = train_seed;
+                train_seed = train_seed.wrapping_add(1);
+                let make = || {
+                    let mut a = StudioArena::new(cfg);
+                    a.physics = phys;
+                    a.physics.scripted_muscle = false;
+                    a.body.paint = paint.clone();
+                    a
+                };
+                let (net, best) = wk_voxel_studio::hill_climb(make, 12, 48, seed);
+                arena.physics.scripted_muscle = false;
+                arena.body.net = Some(net.clone());
+                let _ = arena.activate();
+                arena.body.net = Some(net.clone());
+                continuous = false;
+                train = TrainingSession::new(&arena, seed, 48);
+                if let Some(s) = train.as_mut() {
+                    s.best_net = net;
+                    s.best = best.clone();
+                    s.generation = 12;
+                }
+                status = format!(
+                    "hill-climb fit={:.2} travel={:.1} T={:.2} gen=12",
+                    best.fitness, best.bone_travel, best.mean_tension
+                );
+                paused = false;
+            }
+        }
+
+        // Morphology GA burst (heavier).
+        if is_key_pressed(KeyCode::M) {
+            if arena.body.paint.cells.iter().all(|k| *k == TissueKind::Empty) {
+                status = "paint a body first (or F5)".into();
+            } else {
+                let paint = arena.body.paint.clone();
+                let cfg = arena.cfg;
+                let phys = arena.physics;
+                let seed = train_seed;
+                train_seed = train_seed.wrapping_add(17);
+                let make = || {
+                    let mut a = StudioArena::new(cfg);
+                    a.physics = phys;
+                    a.body.paint = paint.clone();
+                    a
+                };
+                let (best, hist) = evolve_morphology(make, 4, 3, 32, seed);
+                let hist_s = hist
+                    .iter()
+                    .map(|v| format!("{v:.1}"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                arena.body.paint = best.paint;
+                arena.physics.scripted_muscle = false;
+                arena.body.net = Some(best.net.clone());
+                let _ = arena.activate();
+                arena.body.net = Some(best.net);
+                continuous = false;
+                train = None;
+                status = format!("GA morph fit={:.2} hist=[{hist_s}]", best.fitness);
+                paused = false;
+            }
+        }
+
+        if is_key_pressed(KeyCode::C) {
+            if !arena.body.activated {
+                status = "activate first (Enter)".into();
+            } else if arena.ensure_net(train_seed).is_none() {
+                status = "need muscles to train".into();
+            } else {
+                continuous = !continuous;
+                if continuous {
+                    arena.physics.scripted_muscle = false;
+                    train = TrainingSession::new(&arena, train_seed, 40);
+                    train_seed = train_seed.wrapping_add(1);
+                    status = "continuous train ON (C to stop)".into();
+                    paused = true; // episodes run on clones; live arena shows best
+                } else {
+                    status = "continuous train OFF".into();
+                }
+            }
+        }
+
+        if is_key_pressed(KeyCode::E) {
+            match export_body_with_net(&arena.body, arena.body.net.clone()) {
+                Ok(exp) => match encode_body(&exp) {
+                    Ok(bytes) => {
+                        let path = PathBuf::from("export.gvsebody");
+                        match std::fs::write(&path, &bytes) {
+                            Ok(()) => {
+                                status = format!(
+                                    "exported {} bytes → {}",
+                                    bytes.len(),
+                                    path.display()
+                                );
+                            }
+                            Err(e) => status = format!("export write failed: {e}"),
+                        }
+                    }
+                    Err(e) => status = format!("encode failed: {e}"),
+                },
+                Err(_) => status = "export failed — empty body".into(),
+            }
+        }
+
         if is_key_pressed(KeyCode::W) {
             water_on = !water_on;
             arena.set_water_to(if water_on {
@@ -470,8 +636,40 @@ async fn main() {
                 ..ArenaConfig::default()
             });
             arena.physics = phys;
+            train = None;
+            continuous = false;
             status = "reset".into();
             paused = true;
+        }
+
+        // Continuous regime: one generation per frame on a paint clone.
+        if continuous {
+            if let Some(session) = train.as_mut() {
+                let bench = clone_bench(&arena);
+                let paint = bench.body.paint.clone();
+                let cfg = bench.cfg;
+                let phys = bench.physics;
+                let improved = session.step(|| {
+                    let mut a = StudioArena::new(cfg);
+                    a.physics = phys;
+                    a.physics.scripted_muscle = false;
+                    a.body.paint = paint.clone();
+                    a
+                });
+                arena.body.net = Some(session.best_net.clone());
+                arena.physics.scripted_muscle = false;
+                if improved {
+                    status = format!(
+                        "train gen={} fit={:.2} travel={:.1}",
+                        session.generation, session.best.fitness, session.best.bone_travel
+                    );
+                } else if session.generation % 5 == 0 {
+                    status = format!(
+                        "train gen={} best={:.2}",
+                        session.generation, session.best.fitness
+                    );
+                }
+            }
         }
 
         if !paused {
@@ -551,8 +749,19 @@ async fn main() {
             PaintLayer::Tissue => format!("{tissue:?}"),
             PaintLayer::Terrain => format!("{terrain:?}"),
         };
+        let drive = if arena.physics.scripted_muscle {
+            "script"
+        } else if arena.body.net.is_some() {
+            "net"
+        } else {
+            "idle"
+        };
+        let fit = train
+            .as_ref()
+            .map(|s| format!("  fit={:.2} g={}", s.best.fitness, s.generation))
+            .unwrap_or_default();
         let hud = format!(
-            "{}x{}  tick={}  {}  {}  phys={}  brush={brush}  T={tension:.2}  {status}",
+            "{}x{}  tick={}  {}  {}  phys={}  {drive}{fit}  brush={brush}  T={tension:.2}  {status}",
             arena.cfg.width,
             arena.cfg.height,
             arena.world.tick,

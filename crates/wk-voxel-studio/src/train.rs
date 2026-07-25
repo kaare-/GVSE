@@ -12,11 +12,71 @@ pub struct EpisodeResult {
     pub ticks: u64,
 }
 
+/// Incremental hill-climb state for live studio / continuous regimes.
+#[derive(Debug, Clone)]
+pub struct TrainingSession {
+    pub best_net: StudioNet,
+    pub best: EpisodeResult,
+    pub generation: u32,
+    pub seed: u64,
+    pub episode_ticks: u64,
+}
+
+impl TrainingSession {
+    /// Build from an activated arena (needs ≥1 muscle).
+    pub fn new(arena: &StudioArena, seed: u64, episode_ticks: u64) -> Option<Self> {
+        let n_mus = arena.body.graph.as_ref()?.muscles.len();
+        if n_mus == 0 {
+            return None;
+        }
+        let best_net = arena
+            .body
+            .net
+            .clone()
+            .unwrap_or_else(|| StudioNet::for_muscles(n_mus, seed));
+        Some(Self {
+            best_net,
+            best: EpisodeResult {
+                fitness: f32::NEG_INFINITY,
+                mean_tension: 0.0,
+                bone_travel: 0.0,
+                ticks: 0,
+            },
+            generation: 0,
+            seed,
+            episode_ticks,
+        })
+    }
+
+    /// One mutate → evaluate generation. Returns whether fitness improved.
+    pub fn step(&mut self, make_arena: impl Fn() -> StudioArena) -> bool {
+        let cand = if self.generation == 0 && self.best.fitness.is_infinite() {
+            self.best_net.clone()
+        } else {
+            self.best_net
+                .mutate(self.seed.wrapping_add(self.generation as u64 + 1), 0.35)
+        };
+        let mut a = make_arena();
+        let r = evaluate_net(&mut a, &cand, self.episode_ticks);
+        self.generation += 1;
+        let improved = r.fitness > self.best.fitness;
+        if improved {
+            self.best = r;
+            self.best_net = cand;
+        }
+        improved
+    }
+}
+
 /// Run `ticks` with the net driving muscle actuation; fitness rewards
 /// free-bone travel and mild tension (work), penalizes collapse to floor.
 pub fn evaluate_net(arena: &mut StudioArena, net: &StudioNet, ticks: u64) -> EpisodeResult {
     arena.physics.scripted_muscle = false;
+    arena.body.net = Some(net.clone());
     let _ = arena.activate();
+    // Re-install after activate (activate may rebuild a mismatched net).
+    arena.body.net = Some(net.clone());
+    arena.physics.scripted_muscle = false;
     let Some(graph) = arena.body.graph.as_ref() else {
         return EpisodeResult {
             fitness: -1.0e6,
@@ -45,7 +105,6 @@ pub fn evaluate_net(arena: &mut StudioArena, net: &StudioNet, ticks: u64) -> Epi
     let mut samples = 0u64;
 
     for _ in 0..ticks {
-        apply_net(arena, net);
         arena.tick();
         if let Some(g) = arena.body.graph.as_ref() {
             tension_acc += g.mean_tension();
@@ -91,7 +150,8 @@ fn centroids(graph: &BodyGraph, ids: &[u32]) -> Vec<(f32, f32)> {
         .collect()
 }
 
-fn apply_net(arena: &mut StudioArena, net: &StudioNet) {
+/// Write net outputs into muscle actuation from current feedback.
+pub fn apply_net(arena: &mut StudioArena, net: &StudioNet) {
     let Some(graph) = arena.body.graph.as_mut() else {
         return;
     };
@@ -125,21 +185,22 @@ pub fn hill_climb(
         .map(|g| g.muscles.len())
         .unwrap_or(0)
         .max(1);
-    let mut best_net = StudioNet::for_muscles(n_mus, seed);
-    let mut best = {
-        let mut a = make_arena();
-        evaluate_net(&mut a, &best_net, episode_ticks)
+    let mut session = TrainingSession {
+        best_net: StudioNet::for_muscles(n_mus, seed),
+        best: EpisodeResult {
+            fitness: f32::NEG_INFINITY,
+            mean_tension: 0.0,
+            bone_travel: 0.0,
+            ticks: 0,
+        },
+        generation: 0,
+        seed,
+        episode_ticks,
     };
-    for g in 0..generations {
-        let cand = best_net.mutate(seed.wrapping_add(g as u64 + 1), 0.35);
-        let mut a = make_arena();
-        let r = evaluate_net(&mut a, &cand, episode_ticks);
-        if r.fitness > best.fitness {
-            best = r;
-            best_net = cand;
-        }
+    for _ in 0..generations {
+        let _ = session.step(&make_arena);
     }
-    (best_net, best)
+    (session.best_net, session.best)
 }
 
 #[cfg(test)]
@@ -153,5 +214,61 @@ mod tests {
         // Smoke: finishes with finite fitness (may be low on tiny episodes).
         assert!(best.fitness.is_finite());
         assert_eq!(best.ticks, 40);
+    }
+
+    #[test]
+    fn net_drive_applies_muscle_forces() {
+        let mut arena = fin_hydro_arena();
+        arena.physics = crate::physics::StudioPhysicsConfig::body_only();
+        arena.physics.scripted_muscle = false;
+        let g = arena.activate().unwrap();
+        let n = g.muscles.len();
+        assert!(n >= 1);
+        let mut net = StudioNet::for_muscles(n, 11);
+        // Bias outputs high so actuation crosses the 0.55 pull threshold.
+        for v in net.b2.iter_mut() {
+            *v = 3.0;
+        }
+        arena.body.net = Some(net.clone());
+        let free_id = arena
+            .body
+            .graph
+            .as_ref()
+            .unwrap()
+            .parts
+            .iter()
+            .find(|p| p.kind == crate::body::PartKind::Bone && !p.anchored)
+            .map(|p| p.id)
+            .expect("free bone");
+        let x0 = arena
+            .body
+            .graph
+            .as_ref()
+            .unwrap()
+            .parts
+            .iter()
+            .find(|p| p.id == free_id)
+            .unwrap()
+            .offset_x;
+        for _ in 0..60 {
+            arena.tick();
+        }
+        let g = arena.body.graph.as_ref().unwrap();
+        let x1 = g.parts.iter().find(|p| p.id == free_id).unwrap().offset_x;
+        let act: f32 = g.muscles.iter().map(|m| m.actuation).sum::<f32>() / g.muscles.len() as f32;
+        assert!(
+            act > 0.5 || x1 != x0 || g.mean_tension() > 0.01,
+            "net should drive actuation/motion (act={act}, x {x0}→{x1})"
+        );
+    }
+
+    #[test]
+    fn training_session_steps() {
+        let mut probe = fin_hydro_arena();
+        probe.activate().unwrap();
+        let mut session = TrainingSession::new(&probe, 3, 24).unwrap();
+        let _ = session.step(fin_hydro_arena);
+        assert_eq!(session.generation, 1);
+        assert!(session.best.fitness.is_finite());
     }
 }

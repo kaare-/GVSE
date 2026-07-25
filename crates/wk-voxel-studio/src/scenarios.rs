@@ -28,6 +28,15 @@ pub fn paint_fin_bench(arena: &mut StudioArena) {
             .paint
             .set(x, (mid_y + 1) as u32, TissueKind::Muscle);
     }
+    // Controller blob + nerve path toward the muscle (S3 → S4).
+    let by = (mid_y - 2) as u32;
+    arena.body.paint.set(10, by, TissueKind::NeuronBlob);
+    arena.body.paint.set(11, by, TissueKind::NeuronBlob);
+    arena.body.paint.set(10, by + 1, TissueKind::NeuronBlob);
+    arena.body.paint.set(11, by + 1, TissueKind::NeuronBlob);
+    arena.body.paint.set(9, by, TissueKind::Nerve);
+    arena.body.paint.set(8, by, TissueKind::Nerve);
+    arena.body.paint.set(8, (mid_y + 1) as u32, TissueKind::Nerve);
 }
 
 /// Sawtooth rough ground for dry gait benches.
@@ -80,6 +89,9 @@ mod tests {
         let g = arena.activate().unwrap();
         assert!(g.muscles.len() >= 1);
         assert!(g.bone_count() >= 2);
+        assert!(g.has_controller, "fin example paints a neuron blob");
+        assert!(arena.body.net.is_some(), "controller enables a StudioNet");
+        assert!(!arena.physics.scripted_muscle);
     }
 
     #[test]

@@ -4,8 +4,10 @@ use wk_material::MaterialId;
 use wk_voxel::{Cell, ChunkCoord, World, CHUNK_CELLS_H, CHUNK_CELLS_W};
 
 use crate::body::{activate, step_body, ActivateError, BodyGraph};
+use crate::neural::StudioNet;
 use crate::physics::{tick_world_gated, StudioPhysicsConfig};
 use crate::tissue::{StudioBody, TissuePaint};
+use crate::train::apply_net;
 
 /// Soft limits — large enough for rough-terrain walk tracks.
 pub const ARENA_MIN: i32 = 32;
@@ -91,9 +93,44 @@ impl StudioArena {
 
     pub fn activate(&mut self) -> Result<&BodyGraph, ActivateError> {
         let graph = activate(&self.body.paint)?;
+        let n_mus = graph.muscles.len();
+        // Prefer neural drive when a controller blob is painted and muscles exist.
+        if n_mus > 0 && graph.has_controller {
+            let need_new = match self.body.net.as_ref() {
+                Some(net) => net.n_out != n_mus,
+                None => true,
+            };
+            if need_new {
+                self.body.net = Some(StudioNet::for_muscles(n_mus, self.cfg.seed ^ 0xC011_7E11));
+            }
+            self.physics.scripted_muscle = false;
+        } else if n_mus > 0 {
+            // Keep an existing compatible net; otherwise leave scripted mode.
+            if let Some(net) = self.body.net.as_ref() {
+                if net.n_out != n_mus {
+                    self.body.net = Some(StudioNet::for_muscles(n_mus, self.cfg.seed ^ 0xC011_7E11));
+                }
+            }
+        }
         self.body.graph = Some(graph);
         self.body.activated = true;
         Ok(self.body.graph.as_ref().unwrap())
+    }
+
+    /// Ensure a net matching current muscle count exists (for train / N toggle).
+    pub fn ensure_net(&mut self, seed: u64) -> Option<&StudioNet> {
+        let n_mus = self.body.graph.as_ref()?.muscles.len();
+        if n_mus == 0 {
+            return None;
+        }
+        let need_new = match self.body.net.as_ref() {
+            Some(net) => net.n_out != n_mus,
+            None => true,
+        };
+        if need_new {
+            self.body.net = Some(StudioNet::for_muscles(n_mus, seed));
+        }
+        self.body.net.as_ref()
     }
 
     /// Paint any world [`MaterialId`] into the interior (shell stays bedrock).
@@ -112,7 +149,15 @@ impl StudioArena {
     }
 
     /// Gated CA tick, then body step.
+    ///
+    /// When a net is attached and scripted muscle is off, the controller
+    /// writes actuation from muscle feedback before the body step.
     pub fn tick(&mut self) {
+        if !self.physics.scripted_muscle {
+            if let Some(net) = self.body.net.clone() {
+                apply_net(self, &net);
+            }
+        }
         tick_world_gated(&mut self.world, &self.physics);
         if self.physics.body_enabled {
             if let Some(graph) = self.body.graph.as_mut() {

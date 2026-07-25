@@ -7,6 +7,7 @@
 use serde::{Deserialize, Serialize};
 
 use crate::body::BodyGraph;
+use crate::neural::StudioNet;
 
 /// Default RGB mirrors (also used by tests for freeze checks).
 pub const BONE_RGB: [u8; 3] = [0xEF, 0xE7, 0xDA];
@@ -134,7 +135,7 @@ impl TissuePaint {
     }
 }
 
-/// Painted + optional activated body graph.
+/// Painted + optional activated body graph + optional neural controller.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StudioBody {
     pub paint: TissuePaint,
@@ -143,6 +144,9 @@ pub struct StudioBody {
     /// Runtime rigid parts (S1+). Cleared when paint is edited.
     #[serde(default)]
     pub graph: Option<BodyGraph>,
+    /// Frozen / trainable feed-forward controller (S4).
+    #[serde(default)]
+    pub net: Option<StudioNet>,
 }
 
 impl Default for StudioBody {
@@ -157,10 +161,12 @@ impl StudioBody {
             paint,
             activated: false,
             graph: None,
+            net: None,
         }
     }
 
-    /// Editing paint invalidates the activated graph.
+    /// Editing paint invalidates the activated graph (keeps net weights
+    /// until activate rebuilds topology).
     pub fn paint_set(&mut self, x: u32, y: u32, kind: TissueKind) {
         self.paint.set(x, y, kind);
         self.activated = false;
