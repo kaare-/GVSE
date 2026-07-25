@@ -2314,9 +2314,10 @@ fn orographic_factors(
 /// Karst dissolution parameters for [`apply_karst_dissolution`].
 #[derive(Debug, Clone, Copy)]
 pub struct KarstConfig {
-    /// Base probability per tick that a Limestone cell dissolves
-    /// *per* wet neighbour it has. Effective probability is
-    /// `min(1, prob_per_wet_neighbour × wet_count)`.
+    /// Base probability per dissolution step that a Limestone cell
+    /// dissolves *per* wet neighbour it has. Effective probability is
+    /// `min(1, prob_per_wet_neighbour × wet_count)`. Only evaluated on
+    /// ticks where [`karst_due`] is true.
     pub prob_per_wet_neighbour: f32,
     /// A neighbouring Air cell counts as "wet" once its sat is at
     /// or above this threshold. Prevents faint rain droplets from
@@ -2325,19 +2326,31 @@ pub struct KarstConfig {
     /// Salt mixed into the per-cell tick hash so callers can run
     /// different karst regimes side-by-side.
     pub seed_salt: u64,
+    /// Only run on ticks where `world.tick % period_ticks == 0`.
+    /// Karst is a slow geological process — default skips most physics
+    /// ticks (see also Tab → Karst).
+    pub period_ticks: u64,
 }
 
 impl Default for KarstConfig {
     fn default() -> Self {
         // Tuned so a limestone body under constant water exposure
-        // dissolves visibly over a few thousand ticks — game-scale,
-        // not real karst-formation-scale.
+        // dissolves visibly over tens of thousands of physics ticks —
+        // slow geology, not every-frame CA. `period_ticks` keeps the
+        // limestone scan off the hot path.
         Self {
             prob_per_wet_neighbour: 0.001,
             min_wet_neighbour_sat: 200,
             seed_salt: 0xCAFE_D155_01F0_D000_u64,
+            period_ticks: 32,
         }
     }
+}
+
+/// True when this tick should run [`apply_karst_dissolution`].
+pub fn karst_due(tick: u64, cfg: &KarstConfig) -> bool {
+    let period = cfg.period_ticks.max(1);
+    tick % period == 0
 }
 
 /// Karst dissolution: Limestone cells with wet Air neighbours
@@ -2352,7 +2365,12 @@ impl Default for KarstConfig {
 /// Chunks without [`Chunk::has_limestone`] are skipped; the flag is
 /// sticky on write and cleared here when a scan finds no limestone
 /// left (empty sky / pure-stone slabs stay cheap).
+///
+/// No-ops on ticks where [`karst_due`] is false.
 pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
+    if !karst_due(world.tick, cfg) {
+        return;
+    }
     let mut converts: Vec<(i32, i32, Cell)> = Vec::new();
     let mut coords: Vec<ChunkCoord> = world
         .chunks
@@ -4964,6 +4982,7 @@ mod tests {
         let cfg = KarstConfig {
             prob_per_wet_neighbour: 1.0,
             min_wet_neighbour_sat: 200,
+            period_ticks: 1,
             seed_salt: 1,
         };
         for _ in 0..50 {
@@ -4990,6 +5009,7 @@ mod tests {
         let cfg = KarstConfig {
             prob_per_wet_neighbour: 1.0,
             min_wet_neighbour_sat: 200,
+            period_ticks: 1,
             seed_salt: 42,
         };
         // With prob 1.0 the top-most limestone under the puddle
@@ -4997,6 +5017,36 @@ mod tests {
         apply_karst_dissolution(&mut w, &cfg);
         let after = w.get_cell(10, 10).unwrap();
         assert_eq!(after.material, MaterialId::Air, "wet limestone must dissolve");
+    }
+
+    #[test]
+    fn karst_respects_period_ticks() {
+        let mut w = setup_limestone_world();
+        w.set_cell(10, 11, Cell::water());
+        let cfg = KarstConfig {
+            prob_per_wet_neighbour: 1.0,
+            min_wet_neighbour_sat: 200,
+            period_ticks: 4,
+            seed_salt: 42,
+        };
+        assert!(karst_due(0, &cfg));
+        assert!(!karst_due(1, &cfg));
+        assert!(karst_due(4, &cfg));
+
+        w.tick = 1;
+        apply_karst_dissolution(&mut w, &cfg);
+        assert_eq!(
+            w.get_cell(10, 10).unwrap().material,
+            MaterialId::Limestone,
+            "off-period tick must skip dissolution"
+        );
+        w.tick = 4;
+        apply_karst_dissolution(&mut w, &cfg);
+        assert_eq!(
+            w.get_cell(10, 10).unwrap().material,
+            MaterialId::Air,
+            "on-period tick must dissolve"
+        );
     }
 
     #[test]
@@ -5011,6 +5061,7 @@ mod tests {
         let cfg = KarstConfig {
             prob_per_wet_neighbour: 0.5,
             min_wet_neighbour_sat: 200,
+            period_ticks: 1,
             seed_salt: 7,
         };
         for _ in 0..10 {
@@ -5040,6 +5091,7 @@ mod tests {
         let cfg = KarstConfig {
             prob_per_wet_neighbour: 1.0,
             min_wet_neighbour_sat: 200,
+            period_ticks: 1,
             seed_salt: 3,
         };
         for _ in 0..20 {
@@ -5354,6 +5406,7 @@ mod tests {
         let cfg = KarstConfig {
             prob_per_wet_neighbour: 1.0,
             min_wet_neighbour_sat: 200,
+            period_ticks: 1,
             seed_salt: 4,
         };
         for _ in 0..10 {
@@ -5467,6 +5520,7 @@ mod tests {
         let cfg = KarstConfig {
             prob_per_wet_neighbour: 1.0,
             min_wet_neighbour_sat: 1,
+            period_ticks: 1,
             seed_salt: 1,
         };
         apply_karst_dissolution(&mut w, &cfg);
