@@ -16,10 +16,11 @@ use std::time::{Duration, Instant};
 use wk_material::MaterialId;
 use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
-    apply_failure, apply_flow_erosion, apply_grain_fall_regions, apply_grain_repose_regions,
-    apply_gravity_fall_regions, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    apply_seepage_regions, apply_water_flow_regions, clear_all_dirty, find_plant_slot,
-    humidity_diffuse_due, partition_checkerboard, plan_active, set_parallel_enabled,
+    apply_failure_with_wake, apply_flow_erosion, apply_grain_fall_regions,
+    apply_grain_repose_regions, apply_gravity_fall_regions, apply_karst_dissolution, apply_phase,
+    apply_rain_with_temp, apply_seepage_regions, apply_water_flow_regions, clear_all_dirty,
+    find_plant_slot, humidity_diffuse_due, partition_checkerboard, plan_active,
+    set_parallel_enabled,
     stamp_world, temperature_step_due, tick_with_perf, Blueprint, Cell, ClimateConfig,
     CloudConfig, CloudStore, CondensationConfig, EvapConfig, FailureConfig, Genome, GrainConfig,
     Humidity, KarstConfig, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, RainConfig,
@@ -507,6 +508,7 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>, terrain_edit
 /// Timed mirror of [`tick_with_perf`] — keep in sync with `rules`.
 fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum) {
     set_parallel_enabled(perf.parallel_physics);
+    let geotech_wake = plan_active(world);
     for step in 0..FLOW_SUBSTEPS {
         let t0 = Instant::now();
         let active = plan_active(world);
@@ -572,7 +574,7 @@ fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum
     }
 
     let t0 = Instant::now();
-    apply_failure(world, &FailureConfig::default(), None);
+    apply_failure_with_wake(world, &FailureConfig::default(), None, &geotech_wake);
     a.failure += t0.elapsed();
 
     world.tick = world.tick.wrapping_add(1);

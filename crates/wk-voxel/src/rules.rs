@@ -2534,6 +2534,9 @@ pub fn tick_with_configs_and_geotech(
     geotech: Option<&crate::geotech_map::GeotechMap>,
 ) {
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
+    // Snapshot dirty before the flow loop clears it so geotech still
+    // sees digs / re-wets / rain that didn't rewrite those cells.
+    let geotech_wake = plan_active(world);
     for step in 0..FLOW_SUBSTEPS {
         let active = plan_active(world);
         clear_all_dirty(world);
@@ -2585,7 +2588,7 @@ pub fn tick_with_configs_and_geotech(
     }
 
     // Geotech: roof / overhang collapse after grain has seated.
-    crate::failure::apply_failure(world, failure, geotech);
+    crate::failure::apply_failure_with_wake(world, failure, geotech, &geotech_wake);
 
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {
