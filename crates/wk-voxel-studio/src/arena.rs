@@ -94,21 +94,22 @@ impl StudioArena {
     pub fn activate(&mut self) -> Result<&BodyGraph, ActivateError> {
         let graph = activate(&self.body.paint)?;
         let n_mus = graph.muscles.len();
-        // Prefer neural drive when a controller blob is painted and muscles exist.
-        if n_mus > 0 && graph.has_controller {
-            let need_new = match self.body.net.as_ref() {
-                Some(net) => net.n_out != n_mus,
-                None => true,
-            };
-            if need_new {
-                self.body.net = Some(StudioNet::for_muscles(n_mus, self.cfg.seed ^ 0xC011_7E11));
-            }
-            self.physics.scripted_muscle = false;
-        } else if n_mus > 0 {
-            // Keep an existing compatible net; otherwise leave scripted mode.
-            if let Some(net) = self.body.net.as_ref() {
-                if net.n_out != n_mus {
-                    self.body.net = Some(StudioNet::for_muscles(n_mus, self.cfg.seed ^ 0xC011_7E11));
+        // Attach a controller net when a neuron blob + muscles exist, but keep
+        // scripted sinusoid as the default drive. A fresh random net often sits
+        // below the muscle pull threshold, which looked like "nothing happens"
+        // after Enter. Switch to neural with N, or after H/C training.
+        if n_mus > 0 {
+            let want_net = graph.has_controller || self.body.net.is_some();
+            if want_net {
+                let need_new = match self.body.net.as_ref() {
+                    Some(net) => net.n_out != n_mus,
+                    None => true,
+                };
+                if need_new {
+                    self.body.net = Some(StudioNet::for_muscles(
+                        n_mus,
+                        self.cfg.seed ^ 0xC011_7E11,
+                    ));
                 }
             }
         }
@@ -281,5 +282,19 @@ mod tests {
         assert_eq!(cfg.height, CHUNK_CELLS_H as i32 * 2);
         let arena = StudioArena::new(cfg);
         assert_eq!(arena.cfg.width, cfg.width);
+    }
+
+    #[test]
+    fn controller_blob_does_not_disable_scripted_drive() {
+        use crate::scenarios::fin_hydro_arena;
+        let mut arena = fin_hydro_arena();
+        arena.physics.scripted_muscle = true;
+        let g = arena.activate().unwrap();
+        assert!(g.has_controller);
+        assert!(arena.body.net.is_some());
+        assert!(
+            arena.physics.scripted_muscle,
+            "Enter must keep scripted flap until N/H"
+        );
     }
 }

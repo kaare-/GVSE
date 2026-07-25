@@ -478,13 +478,15 @@ async fn main() {
                         "active bones={bones} joints={joints} hinged={hinged} mus={mus} nerves={nerves} ctrl={ctrl} drive={drive}"
                     );
                     if joints == 0 && fs_bridge > 0 {
-                        msg.push_str(" | blue ForceSense ≠ joint — paint cyan Joint 1/2");
+                        msg.push_str(" | need cyan Joint between the two bones (ForceSense on fixture is fine)");
                     } else if joints == 0 {
-                        msg.push_str(" | no joint — cyan Joint* between fixture/bone and bone");
+                        msg.push_str(" | no joint — cyan Joint* between the two bones");
                     } else if mus == 0 {
                         msg.push_str(" | no muscle link — red must touch both bones or the joint");
                     } else if hinged == 0 && bones >= 2 {
                         msg.push_str(" | tip: fixture must touch the root bone");
+                    } else if ctrl && arena.physics.scripted_muscle {
+                        msg.push_str(" | net ready — flapping scripted; N=neural H=train");
                     }
                     status = msg;
                     paused = false;

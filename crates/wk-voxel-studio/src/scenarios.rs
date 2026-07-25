@@ -90,8 +90,9 @@ mod tests {
         assert!(g.muscles.len() >= 1);
         assert!(g.bone_count() >= 2);
         assert!(g.has_controller, "fin example paints a neuron blob");
-        assert!(arena.body.net.is_some(), "controller enables a StudioNet");
-        assert!(!arena.physics.scripted_muscle);
+        assert!(arena.body.net.is_some(), "controller attaches a StudioNet");
+        // Scripted stays on until N / training — random net would idle the fin.
+        assert!(arena.physics.scripted_muscle);
     }
 
     #[test]
