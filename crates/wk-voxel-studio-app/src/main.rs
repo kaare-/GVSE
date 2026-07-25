@@ -13,9 +13,9 @@ use std::path::PathBuf;
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::Cell;
 use wk_voxel_studio::{
-    encode_body, export_body_with_net, evolve_morphology, paint_fin_bench, paint_rough_terrain,
-    tissue_rgb, ArenaConfig, StudioArena, StudioPhysicsConfig, TissueKind, TrainingSession,
-    ARENA_MAX, ARENA_MIN,
+    encode_body, export_body_with_net, evolve_morphology, force_sensors_bridging_parts,
+    paint_fin_bench, paint_rough_terrain, tissue_rgb, ArenaConfig, StudioArena,
+    StudioPhysicsConfig, TissueKind, TrainingSession, ARENA_MAX, ARENA_MIN, JOINT_RGB,
 };
 
 const CELL_PX: f32 = 3.0;
@@ -67,7 +67,7 @@ const TISSUE_PALETTE: &[TissueEntry] = &[
     },
     TissueEntry {
         kind: TissueKind::JointFull,
-        label: "Joint full",
+        label: "Joint full (cyan)",
     },
     TissueEntry {
         kind: TissueKind::JointThreeQuarter,
@@ -75,7 +75,7 @@ const TISSUE_PALETTE: &[TissueEntry] = &[
     },
     TissueEntry {
         kind: TissueKind::JointHalf,
-        label: "Joint 1/2",
+        label: "Joint 1/2 (cyan)",
     },
     TissueEntry {
         kind: TissueKind::JointQuarter,
@@ -83,7 +83,7 @@ const TISSUE_PALETTE: &[TissueEntry] = &[
     },
     TissueEntry {
         kind: TissueKind::ForceSensor,
-        label: "Force sense",
+        label: "Force sense (blue)",
     },
 ];
 
@@ -460,6 +460,7 @@ async fn main() {
         }
 
         if is_key_pressed(KeyCode::Enter) {
+            let fs_bridge = force_sensors_bridging_parts(&arena.body.paint);
             match arena.activate() {
                 Ok(g) => {
                     let bones = g.bone_count();
@@ -473,9 +474,19 @@ async fn main() {
                     } else {
                         "neural"
                     };
-                    status = format!(
+                    let mut msg = format!(
                         "active bones={bones} joints={joints} hinged={hinged} mus={mus} nerves={nerves} ctrl={ctrl} drive={drive}"
                     );
+                    if joints == 0 && fs_bridge > 0 {
+                        msg.push_str(" | blue ForceSense ≠ joint — paint cyan Joint 1/2");
+                    } else if joints == 0 {
+                        msg.push_str(" | no joint — cyan Joint* between fixture/bone and bone");
+                    } else if mus == 0 {
+                        msg.push_str(" | no muscle link — red must touch both bones or the joint");
+                    } else if hinged == 0 && bones >= 2 {
+                        msg.push_str(" | tip: fixture must touch the root bone");
+                    }
+                    status = msg;
                     paused = false;
                     train = None;
                     continuous = false;
@@ -504,6 +515,27 @@ async fn main() {
         if is_key_pressed(KeyCode::H) {
             if !arena.body.activated {
                 status = "activate first (Enter)".into();
+            } else if arena
+                .body
+                .graph
+                .as_ref()
+                .map(|g| g.muscles.is_empty())
+                .unwrap_or(true)
+            {
+                let fs = force_sensors_bridging_parts(&arena.body.paint);
+                let joints = arena
+                    .body
+                    .graph
+                    .as_ref()
+                    .map(|g| g.joints.len())
+                    .unwrap_or(0);
+                status = if joints == 0 && fs > 0 {
+                    "H: no muscles — replace blue ForceSense with cyan Joint 1/2, then muscle".into()
+                } else if joints == 0 {
+                    "H: no muscles — need cyan Joint + red Muscle spanning the hinge".into()
+                } else {
+                    "H: no muscle link — paint Muscle touching both bones or the joint".into()
+                };
             } else if arena.ensure_net(train_seed).is_none() {
                 status = "need muscles to train".into();
             } else {
@@ -738,6 +770,33 @@ async fn main() {
                 let sx = DOCK_W + x as f32 * CELL_PX;
                 let sy = screen_height() - (y as f32 + 1.0) * CELL_PX;
                 draw_rectangle(sx, sy, CELL_PX, CELL_PX, rgb_color(rgb));
+            }
+        }
+
+        // Always stamp active joint pivots (cyan) so hinges stay visible after Enter.
+        if let Some(graph) = arena.body.graph.as_ref() {
+            for (px, py) in graph.joint_world_pivots() {
+                if px < 0 || py < 0 || px >= max_x || py >= max_y {
+                    continue;
+                }
+                let sx = DOCK_W + px as f32 * CELL_PX;
+                let sy = screen_height() - (py as f32 + 1.0) * CELL_PX;
+                draw_rectangle(sx, sy, CELL_PX, CELL_PX, rgb_color(JOINT_RGB));
+                // Tiny cross so hinges read even at 3px.
+                draw_rectangle(
+                    sx + CELL_PX * 0.35,
+                    sy,
+                    CELL_PX * 0.3,
+                    CELL_PX,
+                    Color::from_rgba(10, 40, 50, 220),
+                );
+                draw_rectangle(
+                    sx,
+                    sy + CELL_PX * 0.35,
+                    CELL_PX,
+                    CELL_PX * 0.3,
+                    Color::from_rgba(10, 40, 50, 220),
+                );
             }
         }
 

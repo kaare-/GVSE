@@ -105,11 +105,11 @@ pushes water.
 | `Nerve` | 1-px signal thread | `#B08A8A` | Pink-gray; studio thickens into soma |
 | `NeuronBlob` | ≥2×2 nerve mass = processing | `#9A7070` | Holds neurons / weights |
 | `Fixture` | Infinitely strong bench mount | `#2A2A2A` | Studio-only; stripped on export |
-| `JointFull` | Free hinge | `#FFFFFF` + symbol | Rotation limit = τ |
-| `Joint3_4` | ±3/4 turn | `#F5F5F5` + symbol | |
-| `JointHalf` | ±1/2 turn | `#EBEBEB` + symbol | |
-| `JointQuarter` | ±1/4 turn | `#E0E0E0` + symbol | |
-| `ForceSensor` | Uniaxial force on fixture | `#4A6FA5` | Studio-only; feeds fitness |
+| `JointFull` | Free hinge | cyan `#2EE0F0` | Rotation limit = τ; **not** ForceSensor |
+| `Joint3_4` | ±3/4 turn | cyan `#2EE0F0` | |
+| `JointHalf` | ±1/2 turn | cyan `#2EE0F0` | Paint between fixture/bone and distal bone |
+| `JointQuarter` | ±1/4 turn | cyan `#2EE0F0` | |
+| `ForceSensor` | Uniaxial force on fixture | steel `#4A6FA5` | Studio-only; **does not hinge** |
 
 Symbols on joint pixels are 1× overlays (tick marks), not separate
 materials. Exact glyph atlas lives next to the studio palette module.

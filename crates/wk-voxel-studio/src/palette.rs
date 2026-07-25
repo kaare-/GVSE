@@ -2,8 +2,8 @@
 //! `docs/organism/PALETTE.md` for Bone / Muscle / Skin.
 
 use crate::tissue::{
-    TissueKind, BONE_RGB, FIXTURE_RGB, FORCE_SENSOR_RGB, MUSCLE_RGB, NERVE_RGB, NEURON_BLOB_RGB,
-    SKIN_RGB,
+    TissueKind, BONE_RGB, FIXTURE_RGB, FORCE_SENSOR_RGB, JOINT_RGB, MUSCLE_RGB, NERVE_RGB,
+    NEURON_BLOB_RGB, SKIN_RGB,
 };
 
 /// Joint overlay glyph id (drawn as a 1× tick mark in the app).
@@ -34,7 +34,7 @@ pub fn tissue_rgb(kind: TissueKind) -> Option<[u8; 3]> {
         TissueKind::JointFull
         | TissueKind::JointThreeQuarter
         | TissueKind::JointHalf
-        | TissueKind::JointQuarter => Some([0xFF, 0xFF, 0xFF]),
+        | TissueKind::JointQuarter => Some(JOINT_RGB),
         TissueKind::ForceSensor => Some(FORCE_SENSOR_RGB),
     }
 }

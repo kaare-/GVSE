@@ -172,6 +172,11 @@ impl BodyGraph {
             .count()
     }
 
+    /// World-space joint pivot cells for drawing after activate.
+    pub fn joint_world_pivots(&self) -> Vec<(i32, i32)> {
+        self.joints.iter().map(|j| pivot_world(self, j)).collect()
+    }
+
     pub fn muscle_feedback(&self) -> Vec<MuscleFeedback> {
         self.muscles.iter().map(Muscle::feedback).collect()
     }
@@ -284,7 +289,7 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
     let joints = collect_joints(paint, &cell_owner);
     // Bones linked by a joint chain to an anchored part articulate (no fall-off).
     mark_hinged_from_joints(&mut parts, &joints);
-    let muscles = collect_muscles(paint, &cell_owner, &parts);
+    let muscles = collect_muscles(paint, &cell_owner, &parts, &joints);
     let neurons = collect_neurons(paint);
     let nerves = collect_nerves(paint, &muscles, &neurons);
     let has_controller = neurons.iter().any(|n| n.is_controller);
@@ -298,6 +303,49 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
         has_controller,
         script_phase: 0.0,
     })
+}
+
+/// Count ForceSensor cells that sit between two rigid parts — common Joint mix-up.
+pub fn force_sensors_bridging_parts(paint: &TissuePaint) -> usize {
+    let w = paint.width as i32;
+    let h = paint.height as i32;
+    let mut owner: HashMap<(i32, i32), u32> = HashMap::new();
+    let mut next = 1u32;
+    let mut seen = HashSet::new();
+    for y in 0..h {
+        for x in 0..w {
+            let kind = paint.get(x as u32, y as u32);
+            if !matches!(kind, TissueKind::Bone | TissueKind::Fixture) {
+                continue;
+            }
+            if !seen.insert((x, y)) {
+                continue;
+            }
+            let cells = flood(paint, x, y, kind, &mut seen);
+            for c in cells {
+                owner.insert(c, next);
+            }
+            next += 1;
+        }
+    }
+    let mut n = 0usize;
+    for y in 0..h {
+        for x in 0..w {
+            if paint.get(x as u32, y as u32) != TissueKind::ForceSensor {
+                continue;
+            }
+            let mut ids: Vec<u32> = neighbors4(x, y)
+                .into_iter()
+                .filter_map(|c| owner.get(&c).copied())
+                .collect();
+            ids.sort_unstable();
+            ids.dedup();
+            if ids.len() >= 2 {
+                n += 1;
+            }
+        }
+    }
+    n
 }
 
 /// BFS through joints from anchored parts → mark distal bones as hinged.
@@ -376,9 +424,14 @@ fn collect_muscles(
     paint: &TissuePaint,
     owner: &HashMap<(i32, i32), u32>,
     parts: &[RigidPart],
+    joints: &[Joint],
 ) -> Vec<Muscle> {
     let w = paint.width as i32;
     let h = paint.height as i32;
+    let joint_parts: HashMap<(i32, i32), (u32, u32)> = joints
+        .iter()
+        .map(|j| (j.pivot, (j.part_a, j.part_b)))
+        .collect();
     let mut seen = HashSet::new();
     let mut muscles = Vec::new();
     let mut next = 0u32;
@@ -396,6 +449,20 @@ fn collect_muscles(
                 for n in neighbors4(cx, cy) {
                     if let Some(&id) = owner.get(&n) {
                         touch.push(id);
+                    }
+                    // Muscle beside a joint counts as spanning that hinge.
+                    if let Some(&(a, b)) = joint_parts.get(&n) {
+                        touch.push(a);
+                        touch.push(b);
+                    }
+                    if paint.get(n.0 as u32, n.1 as u32).joint_limit().is_some() {
+                        // Joint cell may not be in joint_parts if wiring failed;
+                        // still try owner neighbors of the joint for a second part.
+                        for jn in neighbors4(n.0, n.1) {
+                            if let Some(&id) = owner.get(&jn) {
+                                touch.push(id);
+                            }
+                        }
                     }
                 }
             }
@@ -1216,6 +1283,48 @@ mod tests {
             x1 != x0 || tension > 0.01,
             "scripted muscle should move bone or report tension (x {x0}→{x1}, T={tension})"
         );
+    }
+
+    #[test]
+    fn force_sensor_between_parts_is_not_a_joint() {
+        let mut paint = TissuePaint::new(24, 16);
+        for y in 4..12 {
+            paint.set(2, y, TissueKind::Fixture);
+        }
+        paint.set(3, 8, TissueKind::Bone);
+        paint.set(4, 8, TissueKind::Bone);
+        paint.set(5, 8, TissueKind::ForceSensor); // blue — not a hinge
+        paint.set(6, 8, TissueKind::Bone);
+        paint.set(7, 8, TissueKind::Bone);
+        let g = activate(&paint).unwrap();
+        assert!(g.joints.is_empty(), "ForceSensor must not create joints");
+        assert_eq!(force_sensors_bridging_parts(&paint), 1);
+        assert_eq!(g.hinged_bone_count(), 0);
+    }
+
+    #[test]
+    fn muscle_beside_joint_links_both_parts() {
+        let mut paint = TissuePaint::new(24, 16);
+        for y in 4..12 {
+            paint.set(2, y, TissueKind::Fixture);
+        }
+        paint.set(3, 8, TissueKind::Bone);
+        paint.set(4, 8, TissueKind::Bone);
+        paint.set(5, 8, TissueKind::JointHalf);
+        paint.set(6, 8, TissueKind::Bone);
+        paint.set(7, 8, TissueKind::Bone);
+        paint.set(8, 8, TissueKind::Bone);
+        // Muscle only under distal bone, but touches the joint cell above.
+        paint.set(5, 9, TissueKind::Muscle);
+        paint.set(6, 9, TissueKind::Muscle);
+        paint.set(7, 9, TissueKind::Muscle);
+        let g = activate(&paint).unwrap();
+        assert!(g.joints.len() >= 1);
+        assert!(
+            g.muscles.len() >= 1,
+            "muscle adjacent to joint should span the hinge"
+        );
+        assert!(g.hinged_bone_count() >= 1);
     }
 
     #[test]

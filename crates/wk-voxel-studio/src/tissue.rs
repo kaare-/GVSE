@@ -17,6 +17,8 @@ pub const NERVE_RGB: [u8; 3] = [0xB0, 0x8A, 0x8A];
 pub const NEURON_BLOB_RGB: [u8; 3] = [0x9A, 0x70, 0x70];
 pub const FIXTURE_RGB: [u8; 3] = [0x2A, 0x2A, 0x2A];
 pub const FORCE_SENSOR_RGB: [u8; 3] = [0x4A, 0x6F, 0xA5];
+/// Bright cyan — must not look like ForceSensor blue (common mix-up).
+pub const JOINT_RGB: [u8; 3] = [0x2E, 0xE0, 0xF0];
 
 /// Joint hinge rotation limit as a fraction of a full turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
