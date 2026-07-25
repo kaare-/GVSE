@@ -929,7 +929,32 @@ pub fn script_muscles(graph: &mut BodyGraph, tick: u64) {
     }
 }
 
-/// Apply muscle contraction as discrete pulls on free bones.
+/// Aim muscle pulls at a shared joint pivot (hinge) or the nearest cell of
+/// the other part — never the raw centroid of a big fixture bar, which yank
+/// vertical arms sideways.
+fn muscle_pull_target(graph: &BodyGraph, move_idx: usize, toward_idx: usize) -> (f32, f32) {
+    let id_m = graph.parts[move_idx].id;
+    let id_t = graph.parts[toward_idx].id;
+    if let Some(j) = graph.joints.iter().find(|j| {
+        (j.part_a == id_m && j.part_b == id_t) || (j.part_b == id_m && j.part_a == id_t)
+    }) {
+        let (px, py) = pivot_world(graph, j);
+        return (px as f32, py as f32);
+    }
+    let (mx, my) = graph.parts[move_idx].centroid();
+    let mut best = graph.parts[toward_idx].centroid();
+    let mut best_d = f32::MAX;
+    for (x, y) in graph.parts[toward_idx].world_cells() {
+        let d = (x as f32 - mx).hypot(y as f32 - my);
+        if d < best_d {
+            best_d = d;
+            best = (x as f32, y as f32);
+        }
+    }
+    best
+}
+
+/// Apply muscle contraction as discrete pulls on free / hinged bones.
 fn apply_muscle_forces(graph: &mut BodyGraph, world: &mut World) {
     let pulls: Vec<(u32, u32, f32)> = graph
         .muscles
@@ -944,13 +969,16 @@ fn apply_muscle_forces(graph: &mut BodyGraph, world: &mut World) {
             (Some(ia), Some(ib)) => (ia, ib),
             _ => continue,
         };
-        // Prefer moving the non-anchored bone toward the other.
-        let (move_idx, toward_idx) = if !graph.parts[ia].anchored && graph.parts[ib].anchored {
+        // Prefer moving the hinged/free bone; keep anchored fixtures fixed.
+        let (move_idx, toward_idx) = if graph.parts[ia].hinged && !graph.parts[ib].hinged {
+            (ia, ib)
+        } else if graph.parts[ib].hinged && !graph.parts[ia].hinged {
+            (ib, ia)
+        } else if !graph.parts[ia].anchored && graph.parts[ib].anchored {
             (ia, ib)
         } else if graph.parts[ia].anchored && !graph.parts[ib].anchored {
             (ib, ia)
         } else if !graph.parts[ia].anchored && !graph.parts[ib].anchored {
-            // Move the higher-id bone for determinism.
             if graph.parts[ia].id > graph.parts[ib].id {
                 (ia, ib)
             } else {
@@ -960,14 +988,27 @@ fn apply_muscle_forces(graph: &mut BodyGraph, world: &mut World) {
             continue;
         };
         let (mx, my) = graph.parts[move_idx].centroid();
-        let (tx, ty) = graph.parts[toward_idx].centroid();
+        let (tx, ty) = muscle_pull_target(graph, move_idx, toward_idx);
         let dx = (tx - mx).signum() as i32;
         let dy = (ty - my).signum() as i32;
-        // Prefer horizontal flap for fins; reject moves that tear the hinge.
-        if dx != 0 {
-            let _ = try_move_part_hinged(graph, world, move_idx, dx, 0);
-        } else if dy != 0 {
-            let _ = try_move_part_hinged(graph, world, move_idx, 0, dy);
+        let ax = (tx - mx).abs();
+        let ay = (ty - my).abs();
+        // Move along the dominant axis first (vertical arms articulate on Y;
+        // fins still prefer X when that separation is larger). Always hinge-safe.
+        if ay >= ax {
+            if dy != 0 && try_move_part_hinged(graph, world, move_idx, 0, dy) {
+                continue;
+            }
+            if dx != 0 {
+                let _ = try_move_part_hinged(graph, world, move_idx, dx, 0);
+            }
+        } else {
+            if dx != 0 && try_move_part_hinged(graph, world, move_idx, dx, 0) {
+                continue;
+            }
+            if dy != 0 {
+                let _ = try_move_part_hinged(graph, world, move_idx, 0, dy);
+            }
         }
     }
 }
@@ -1154,6 +1195,66 @@ mod tests {
         assert!(
             joints_satisfied(arena.body.graph.as_ref().unwrap()),
             "joint hinge must remain satisfied"
+        );
+    }
+
+    #[test]
+    fn vertical_arm_does_not_ratchet_sideways() {
+        let mut arena = StudioArena::new(ArenaConfig {
+            width: 32,
+            height: 48,
+            seed: 21,
+            water_to_y: None,
+        });
+        arena.physics = StudioPhysicsConfig::body_only();
+        // Ceiling fixture + vertical stem.
+        for x in 8..20 {
+            arena.body.paint.set(x, 40, TissueKind::Fixture);
+        }
+        for y in 28..40 {
+            arena.body.paint.set(12, y as u32, TissueKind::Fixture);
+        }
+        arena.body.paint.set(12, 30, TissueKind::ForceSensor);
+        // Proximal bone, joint, distal bone (vertical).
+        arena.body.paint.set(12, 27, TissueKind::Bone);
+        arena.body.paint.set(12, 26, TissueKind::Bone);
+        arena.body.paint.set(12, 25, TissueKind::JointHalf);
+        arena.body.paint.set(12, 24, TissueKind::Bone);
+        arena.body.paint.set(12, 23, TissueKind::Bone);
+        arena.body.paint.set(12, 22, TissueKind::Bone);
+        // Side muscle next to joint / distal (same pattern as the live bench).
+        arena.body.paint.set(13, 25, TissueKind::Muscle);
+        arena.body.paint.set(13, 24, TissueKind::Muscle);
+        arena.body.paint.set(13, 23, TissueKind::Muscle);
+
+        let g = arena.activate().unwrap();
+        assert!(g.joints.len() >= 1);
+        assert!(g.muscles.len() >= 1);
+        assert!(g.hinged_bone_count() >= 1);
+        let distal_id = g
+            .parts
+            .iter()
+            .find(|p| p.kind == PartKind::Bone && p.hinged)
+            .map(|p| p.id)
+            .unwrap();
+        let mut max_abs_x = 0i32;
+        for _ in 0..120 {
+            arena.tick();
+            let ox = arena
+                .body
+                .graph
+                .as_ref()
+                .unwrap()
+                .parts
+                .iter()
+                .find(|p| p.id == distal_id)
+                .unwrap()
+                .offset_x;
+            max_abs_x = max_abs_x.max(ox.abs());
+        }
+        assert!(
+            max_abs_x <= 1,
+            "vertical hinge should not ratchet sideways (max |offset_x|={max_abs_x})"
         );
     }
 
