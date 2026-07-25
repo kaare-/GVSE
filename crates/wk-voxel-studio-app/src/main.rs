@@ -3,10 +3,9 @@
 //! Isolation: wk-voxel + wk-voxel-studio + wk-material only.
 //! See docs/organism/STUDIO.md.
 //!
-//! Layers: `T` tissue · `G` geology (all MaterialIds)
-//! Physics: `F1` body-only · `F2` dry walk · `F3` hydro fin · `F4` full
-//! Size: `[` / `]` width · `;` / `'` height
-//! Sim: Space · Enter activate · W water · R reset · F5 fin · F6 rough terrain
+//! Left dock: clickable tissue + geology palette.
+//! Space pause · Enter activate · W flood/drain · R reset
+//! F1–F4 physics · F5 fin example · F6 rough terrain · [/] ;/' size
 
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
@@ -18,12 +17,123 @@ use wk_voxel_studio::{
 
 const CELL_PX: f32 = 3.0;
 const WATER_FILM: [u8; 3] = [0xB8, 0xD4, 0xEE];
+const DOCK_W: f32 = 168.0;
+const SWATCH: f32 = 22.0;
+const ROW_H: f32 = 26.0;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum PaintLayer {
     Tissue,
     Terrain,
 }
+
+struct TissueEntry {
+    kind: TissueKind,
+    label: &'static str,
+}
+
+struct TerrainEntry {
+    mat: MaterialId,
+    label: &'static str,
+}
+
+const TISSUE_PALETTE: &[TissueEntry] = &[
+    TissueEntry {
+        kind: TissueKind::Bone,
+        label: "Bone",
+    },
+    TissueEntry {
+        kind: TissueKind::Muscle,
+        label: "Muscle",
+    },
+    TissueEntry {
+        kind: TissueKind::Skin,
+        label: "Skin",
+    },
+    TissueEntry {
+        kind: TissueKind::Nerve,
+        label: "Nerve",
+    },
+    TissueEntry {
+        kind: TissueKind::NeuronBlob,
+        label: "Neuron",
+    },
+    TissueEntry {
+        kind: TissueKind::Fixture,
+        label: "Fixture",
+    },
+    TissueEntry {
+        kind: TissueKind::JointFull,
+        label: "Joint full",
+    },
+    TissueEntry {
+        kind: TissueKind::JointThreeQuarter,
+        label: "Joint 3/4",
+    },
+    TissueEntry {
+        kind: TissueKind::JointHalf,
+        label: "Joint 1/2",
+    },
+    TissueEntry {
+        kind: TissueKind::JointQuarter,
+        label: "Joint 1/4",
+    },
+    TissueEntry {
+        kind: TissueKind::ForceSensor,
+        label: "Force sense",
+    },
+];
+
+const TERRAIN_PALETTE: &[TerrainEntry] = &[
+    TerrainEntry {
+        mat: MaterialId::Sand,
+        label: "Sand",
+    },
+    TerrainEntry {
+        mat: MaterialId::Stone,
+        label: "Stone",
+    },
+    TerrainEntry {
+        mat: MaterialId::Gravel,
+        label: "Gravel",
+    },
+    TerrainEntry {
+        mat: MaterialId::LooseRock,
+        label: "Loose rock",
+    },
+    TerrainEntry {
+        mat: MaterialId::Clay,
+        label: "Clay",
+    },
+    TerrainEntry {
+        mat: MaterialId::Limestone,
+        label: "Limestone",
+    },
+    TerrainEntry {
+        mat: MaterialId::Bedrock,
+        label: "Bedrock",
+    },
+    TerrainEntry {
+        mat: MaterialId::Organic,
+        label: "Organic",
+    },
+    TerrainEntry {
+        mat: MaterialId::Ice,
+        label: "Ice",
+    },
+    TerrainEntry {
+        mat: MaterialId::Snow,
+        label: "Snow",
+    },
+    TerrainEntry {
+        mat: MaterialId::Water,
+        label: "Water",
+    },
+    TerrainEntry {
+        mat: MaterialId::Air,
+        label: "Air / erase",
+    },
+];
 
 fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8
@@ -51,35 +161,6 @@ fn cell_color(cell: Cell) -> [u8; 3] {
         base
     }
 }
-
-fn tissue_from_digit(d: u8) -> Option<TissueKind> {
-    Some(match d {
-        1 => TissueKind::Bone,
-        2 => TissueKind::Muscle,
-        3 => TissueKind::Skin,
-        4 => TissueKind::Nerve,
-        5 => TissueKind::NeuronBlob,
-        6 => TissueKind::Fixture,
-        7 => TissueKind::ForceSensor,
-        8 => TissueKind::JointFull,
-        9 => TissueKind::JointThreeQuarter,
-        0 => TissueKind::JointHalf,
-        _ => return None,
-    })
-}
-
-const TERRAIN_BRUSHES: [MaterialId; 10] = [
-    MaterialId::Sand,
-    MaterialId::Stone,
-    MaterialId::Gravel,
-    MaterialId::LooseRock,
-    MaterialId::Clay,
-    MaterialId::Limestone,
-    MaterialId::Organic,
-    MaterialId::Ice,
-    MaterialId::Snow,
-    MaterialId::Water,
-];
 
 fn overlay_rgb(arena: &StudioArena, x: i32, y: i32) -> Option<[u8; 3]> {
     if arena.body.activated {
@@ -114,41 +195,187 @@ fn preset_name(p: &StudioPhysicsConfig) -> &'static str {
     }
 }
 
-fn digit_pressed() -> Option<u8> {
-    if is_key_pressed(KeyCode::Key1) {
-        Some(1)
-    } else if is_key_pressed(KeyCode::Key2) {
-        Some(2)
-    } else if is_key_pressed(KeyCode::Key3) {
-        Some(3)
-    } else if is_key_pressed(KeyCode::Key4) {
-        Some(4)
-    } else if is_key_pressed(KeyCode::Key5) {
-        Some(5)
-    } else if is_key_pressed(KeyCode::Key6) {
-        Some(6)
-    } else if is_key_pressed(KeyCode::Key7) {
-        Some(7)
-    } else if is_key_pressed(KeyCode::Key8) {
-        Some(8)
-    } else if is_key_pressed(KeyCode::Key9) {
-        Some(9)
-    } else if is_key_pressed(KeyCode::Key0) {
-        Some(0)
-    } else {
-        None
+fn rgb_color(rgb: [u8; 3]) -> Color {
+    Color::from_rgba(rgb[0], rgb[1], rgb[2], 255)
+}
+
+fn point_in(mx: f32, my: f32, x: f32, y: f32, w: f32, h: f32) -> bool {
+    mx >= x && mx < x + w && my >= y && my < y + h
+}
+
+struct DockPick {
+    tissue: Option<TissueKind>,
+    terrain: Option<MaterialId>,
+    layer: Option<PaintLayer>,
+}
+
+/// Draw left dock and optionally consume a click on a swatch/tab.
+fn draw_palette_dock(
+    mx: f32,
+    my: f32,
+    click: bool,
+    layer: PaintLayer,
+    tissue: TissueKind,
+    terrain: MaterialId,
+) -> DockPick {
+    draw_rectangle(0.0, 0.0, DOCK_W, screen_height(), Color::from_rgba(28, 32, 40, 255));
+    draw_rectangle(
+        DOCK_W - 1.0,
+        0.0,
+        1.0,
+        screen_height(),
+        Color::from_rgba(60, 66, 78, 255),
+    );
+
+    let mut pick = DockPick {
+        tissue: None,
+        terrain: None,
+        layer: None,
+    };
+
+    let mut y = 10.0;
+    draw_text("STUDIO", 12.0, y + 12.0, 18.0, WHITE);
+    y += 28.0;
+
+    let tab_w = (DOCK_W - 24.0) * 0.5;
+    let tissue_tab = (10.0, y, tab_w, 22.0);
+    let geo_tab = (14.0 + tab_w, y, tab_w, 22.0);
+    for (x, ty, w, h, label, active, set) in [
+        (
+            tissue_tab.0,
+            tissue_tab.1,
+            tissue_tab.2,
+            tissue_tab.3,
+            "Tissue",
+            layer == PaintLayer::Tissue,
+            PaintLayer::Tissue,
+        ),
+        (
+            geo_tab.0,
+            geo_tab.1,
+            geo_tab.2,
+            geo_tab.3,
+            "Geology",
+            layer == PaintLayer::Terrain,
+            PaintLayer::Terrain,
+        ),
+    ] {
+        let bg = if active {
+            Color::from_rgba(70, 90, 120, 255)
+        } else {
+            Color::from_rgba(40, 44, 54, 255)
+        };
+        draw_rectangle(x, ty, w, h, bg);
+        draw_text(label, x + 8.0, ty + 15.0, 14.0, WHITE);
+        if click && point_in(mx, my, x, ty, w, h) {
+            pick.layer = Some(set);
+        }
     }
+    y += 34.0;
+
+    match layer {
+        PaintLayer::Tissue => {
+            draw_text(
+                "CREATURE",
+                12.0,
+                y + 10.0,
+                13.0,
+                Color::from_rgba(180, 190, 210, 255),
+            );
+            y += 18.0;
+            for entry in TISSUE_PALETTE {
+                let selected = tissue == entry.kind;
+                let rgb = tissue_rgb(entry.kind).unwrap_or([80, 80, 80]);
+                if selected {
+                    draw_rectangle(
+                        6.0,
+                        y - 2.0,
+                        DOCK_W - 12.0,
+                        ROW_H,
+                        Color::from_rgba(50, 60, 80, 255),
+                    );
+                }
+                draw_rectangle(12.0, y + 2.0, SWATCH, SWATCH, rgb_color(rgb));
+                draw_rectangle_lines(12.0, y + 2.0, SWATCH, SWATCH, 1.0, WHITE);
+                draw_text(entry.label, 42.0, y + 17.0, 15.0, WHITE);
+                if click && point_in(mx, my, 6.0, y - 2.0, DOCK_W - 12.0, ROW_H) {
+                    pick.tissue = Some(entry.kind);
+                }
+                y += ROW_H;
+            }
+        }
+        PaintLayer::Terrain => {
+            draw_text(
+                "WORLD MATERIALS",
+                12.0,
+                y + 10.0,
+                13.0,
+                Color::from_rgba(180, 190, 210, 255),
+            );
+            y += 18.0;
+            for entry in TERRAIN_PALETTE {
+                let selected = terrain == entry.mat;
+                let rgb = if entry.mat == MaterialId::Air {
+                    [40, 48, 60]
+                } else {
+                    MaterialRegistry::colour_rgb(entry.mat)
+                };
+                if selected {
+                    draw_rectangle(
+                        6.0,
+                        y - 2.0,
+                        DOCK_W - 12.0,
+                        ROW_H,
+                        Color::from_rgba(50, 60, 80, 255),
+                    );
+                }
+                draw_rectangle(12.0, y + 2.0, SWATCH, SWATCH, rgb_color(rgb));
+                draw_rectangle_lines(12.0, y + 2.0, SWATCH, SWATCH, 1.0, WHITE);
+                draw_text(entry.label, 42.0, y + 17.0, 15.0, WHITE);
+                if click && point_in(mx, my, 6.0, y - 2.0, DOCK_W - 12.0, ROW_H) {
+                    pick.terrain = Some(entry.mat);
+                }
+                y += ROW_H;
+            }
+        }
+    }
+
+    let foot = screen_height() - 70.0;
+    draw_text(
+        "LMB paint  RMB erase",
+        10.0,
+        foot,
+        13.0,
+        Color::from_rgba(160, 168, 180, 255),
+    );
+    draw_text(
+        "Enter activate  Space run",
+        10.0,
+        foot + 16.0,
+        13.0,
+        Color::from_rgba(160, 168, 180, 255),
+    );
+    draw_text(
+        "W water fill  R reset",
+        10.0,
+        foot + 32.0,
+        13.0,
+        Color::from_rgba(160, 168, 180, 255),
+    );
+
+    pick
 }
 
 #[macroquad::main("GVSE Studio — muscle / bone / neural")]
 async fn main() {
     let mut arena = StudioArena::new(ArenaConfig::default());
+    arena.physics = StudioPhysicsConfig::dry_walk();
     let mut paused = true;
     let mut layer = PaintLayer::Tissue;
     let mut tissue = TissueKind::Bone;
-    let mut terrain_idx = 0usize;
-    let mut water_on = arena.cfg.water_to_y.is_some();
-    let mut status = String::from("T tissue · G geology · F1–F4 physics · Enter activate");
+    let mut terrain = MaterialId::Sand;
+    let mut water_on = false;
+    let mut status = String::from("dry arena — pick a brush on the left");
 
     loop {
         if is_key_pressed(KeyCode::Escape) {
@@ -181,26 +408,11 @@ async fn main() {
         }
         if is_key_pressed(KeyCode::F5) {
             paint_fin_bench(&mut arena);
-            status = "loaded fin bench tissue".into();
+            status = "example: fin tissue (optional)".into();
         }
         if is_key_pressed(KeyCode::F6) {
             paint_rough_terrain(&mut arena);
-            status = "painted rough terrain".into();
-        }
-        if is_key_pressed(KeyCode::Minus) && layer == PaintLayer::Tissue {
-            tissue = TissueKind::JointQuarter;
-        }
-        if let Some(d) = digit_pressed() {
-            match layer {
-                PaintLayer::Tissue => {
-                    if let Some(b) = tissue_from_digit(d) {
-                        tissue = b;
-                    }
-                }
-                PaintLayer::Terrain => {
-                    terrain_idx = if d == 0 { 9 } else { (d as usize - 1).min(9) };
-                }
-            }
+            status = "example: rough terrain".into();
         }
 
         if is_key_pressed(KeyCode::LeftBracket) {
@@ -231,7 +443,7 @@ async fn main() {
                     );
                     paused = false;
                 }
-                Err(_) => status = "activate failed — need bone/fixture".into(),
+                Err(_) => status = "activate failed — paint bone/fixture first".into(),
             }
         }
         if is_key_pressed(KeyCode::W) {
@@ -241,6 +453,11 @@ async fn main() {
             } else {
                 None
             });
+            status = if water_on {
+                "water fill on".into()
+            } else {
+                "water drained".into()
+            };
         }
         if is_key_pressed(KeyCode::R) {
             let phys = arena.physics;
@@ -257,16 +474,43 @@ async fn main() {
             paused = true;
         }
 
+        if !paused {
+            arena.tick();
+        }
+
+        clear_background(Color::from_rgba(0x1A, 0x1E, 0x24, 255));
+
         let (mx, my) = mouse_position();
-        let gx = (mx / CELL_PX).floor() as i32;
+        let click = is_mouse_button_pressed(MouseButton::Left);
+        let pick = draw_palette_dock(mx, my, click, layer, tissue, terrain);
+        if let Some(l) = pick.layer {
+            layer = l;
+        }
+        if let Some(t) = pick.tissue {
+            tissue = t;
+            layer = PaintLayer::Tissue;
+        }
+        if let Some(g) = pick.terrain {
+            terrain = g;
+            layer = PaintLayer::Terrain;
+        }
+
+        let over_dock = mx < DOCK_W;
+        let palette_consumed =
+            pick.tissue.is_some() || pick.terrain.is_some() || pick.layer.is_some();
+        let gx = ((mx - DOCK_W) / CELL_PX).floor() as i32;
         let gy = ((screen_height() - my) / CELL_PX).floor() as i32;
-        if gx >= 0 && gy >= 0 && gx < arena.cfg.width && gy < arena.cfg.height {
+        if !over_dock
+            && !palette_consumed
+            && gx >= 0
+            && gy >= 0
+            && gx < arena.cfg.width
+            && gy < arena.cfg.height
+        {
             if is_mouse_button_down(MouseButton::Left) {
                 match layer {
                     PaintLayer::Tissue => arena.body.paint_set(gx as u32, gy as u32, tissue),
-                    PaintLayer::Terrain => {
-                        arena.paint_terrain(gx, gy, TERRAIN_BRUSHES[terrain_idx]);
-                    }
+                    PaintLayer::Terrain => arena.paint_terrain(gx, gy, terrain),
                 }
             } else if is_mouse_button_down(MouseButton::Right) {
                 match layer {
@@ -280,12 +524,7 @@ async fn main() {
             }
         }
 
-        if !paused {
-            arena.tick();
-        }
-
-        clear_background(Color::from_rgba(0x1A, 0x1E, 0x24, 255));
-        let max_x = ((screen_width() / CELL_PX) as i32).min(arena.cfg.width);
+        let max_x = (((screen_width() - DOCK_W) / CELL_PX) as i32).min(arena.cfg.width);
         let max_y = ((screen_height() / CELL_PX) as i32).min(arena.cfg.height);
         for y in 0..max_y {
             for x in 0..max_x {
@@ -296,15 +535,9 @@ async fn main() {
                 if let Some(tr) = overlay_rgb(&arena, x, y) {
                     rgb = tr;
                 }
-                let sx = x as f32 * CELL_PX;
+                let sx = DOCK_W + x as f32 * CELL_PX;
                 let sy = screen_height() - (y as f32 + 1.0) * CELL_PX;
-                draw_rectangle(
-                    sx,
-                    sy,
-                    CELL_PX,
-                    CELL_PX,
-                    Color::from_rgba(rgb[0], rgb[1], rgb[2], 255),
-                );
+                draw_rectangle(sx, sy, CELL_PX, CELL_PX, rgb_color(rgb));
             }
         }
 
@@ -316,12 +549,10 @@ async fn main() {
             .unwrap_or(0.0);
         let brush = match layer {
             PaintLayer::Tissue => format!("{tissue:?}"),
-            PaintLayer::Terrain => format!("{:?}", TERRAIN_BRUSHES[terrain_idx]),
+            PaintLayer::Terrain => format!("{terrain:?}"),
         };
         let hud = format!(
-            "STUDIO  {}x{}  tick={}  {}  {}  phys={}  layer={layer:?}\n\
-             brush={brush}  muscleT={tension:.2}  {status}\n\
-             F1 body  F2 dry_walk  F3 hydro  F4 full  F5 fin  F6 rough  [/] ;/' size",
+            "{}x{}  tick={}  {}  {}  phys={}  brush={brush}  T={tension:.2}  {status}",
             arena.cfg.width,
             arena.cfg.height,
             arena.world.tick,
@@ -333,7 +564,7 @@ async fn main() {
             },
             preset_name(&arena.physics),
         );
-        draw_text(&hud, 8.0, 16.0, 14.0, WHITE);
+        draw_text(&hud, DOCK_W + 10.0, 18.0, 15.0, WHITE);
 
         next_frame().await;
     }

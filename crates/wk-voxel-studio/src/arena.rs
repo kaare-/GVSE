@@ -27,7 +27,8 @@ impl Default for ArenaConfig {
             width: CHUNK_CELLS_W as i32 * 2,
             height: CHUNK_CELLS_H as i32 * 2,
             seed: 0x57_00_10,
-            water_to_y: Some(CHUNK_CELLS_H as i32 + 20),
+            // Dry by default — fill water only when the scenario needs it.
+            water_to_y: None,
         }
     }
 }
@@ -184,16 +185,23 @@ mod tests {
             width: 64,
             height: 64,
             seed: 1,
-            water_to_y: Some(20),
+            water_to_y: None,
         });
         assert_eq!(
             arena.world.get_cell(0, 0).unwrap().material,
             MaterialId::Bedrock
         );
-        assert!(arena.world.get_cell(8, 10).unwrap().sat.0 > 0);
+        assert!(arena.world.get_cell(8, 10).unwrap().sat.is_empty());
         let tick0 = arena.world.tick;
         arena.tick();
         assert_eq!(arena.world.tick, tick0 + 1);
+    }
+
+    #[test]
+    fn default_arena_is_dry() {
+        let arena = StudioArena::new(ArenaConfig::default());
+        assert!(arena.cfg.water_to_y.is_none());
+        assert!(arena.world.get_cell(8, 8).unwrap().sat.is_empty());
     }
 
     #[test]

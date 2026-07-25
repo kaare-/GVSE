@@ -29,8 +29,8 @@ pub struct StudioPhysicsConfig {
 
 impl Default for StudioPhysicsConfig {
     fn default() -> Self {
-        // Hydro fin bench — water matters; geotech/karst do not.
-        Self::hydro_fin()
+        // General bench: solids settle, no ocean flow until opted in.
+        Self::dry_walk()
     }
 }
 
