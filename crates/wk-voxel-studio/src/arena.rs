@@ -3,6 +3,7 @@
 use wk_material::MaterialId;
 use wk_voxel::{tick_with_perf, Cell, ChunkCoord, PerfConfig, World, CHUNK_CELLS_H, CHUNK_CELLS_W};
 
+use crate::body::{activate, step_body, ActivateError, BodyGraph};
 use crate::tissue::{StudioBody, TissuePaint};
 
 /// Box arena dimensions in cells (kept small for interactive benches).
@@ -50,9 +51,25 @@ impl StudioArena {
         }
     }
 
+    /// Paint → [`BodyGraph`] (bones + fixtures). Clears prior offsets.
+    pub fn activate(&mut self) -> Result<&BodyGraph, ActivateError> {
+        let graph = activate(&self.body.paint)?;
+        self.body.graph = Some(graph);
+        self.body.activated = true;
+        Ok(self.body.graph.as_ref().unwrap())
+    }
+
     /// One production physics tick (same path as the world demo).
     pub fn tick_physics(&mut self) {
         tick_with_perf(&mut self.world, &self.perf);
+    }
+
+    /// CA tick, then body step (STUDIO.md frame order).
+    pub fn tick(&mut self) {
+        self.tick_physics();
+        if let Some(graph) = self.body.graph.as_mut() {
+            step_body(graph, &self.world);
+        }
     }
 
     /// Flood or drain the interior (leaves the bedrock shell).
@@ -123,7 +140,6 @@ mod tests {
         let tick0 = arena.world.tick;
         arena.tick_physics();
         assert_eq!(arena.world.tick, tick0 + 1);
-        // Settled box may still have a dirty halo from stamping; plan is valid.
         let _ = plan_active(&arena.world);
     }
 }

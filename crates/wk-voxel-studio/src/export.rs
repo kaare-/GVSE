@@ -60,6 +60,7 @@ mod tests {
         let body = StudioBody {
             paint,
             activated: true,
+            graph: None,
         };
         let exp = export_body(&body).unwrap();
         assert_eq!(exp.paint.get(1, 1), TissueKind::Bone);

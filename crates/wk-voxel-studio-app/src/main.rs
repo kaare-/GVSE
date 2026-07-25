@@ -3,11 +3,12 @@
 //! Isolation: wk-voxel + wk-voxel-studio + wk-material only.
 //! See docs/organism/STUDIO.md.
 //!
-//! Controls (S0):
-//! - `Space` — pause / resume physics
+//! Controls (S1):
+//! - `Space` — pause / resume (CA + body)
+//! - `Enter` — activate paint → body graph (bones hang on fixtures)
 //! - `1`–`7` — brush: bone, muscle, skin, nerve, neuron, fixture, sensor
 //! - `8`–`0` / `-` — joints (full / 3/4 / 1/2 / 1/4)
-//! - LMB paint, RMB erase
+//! - LMB paint, RMB erase (invalidates activate)
 //! - `W` — toggle water fill
 //! - `R` — reset arena
 //! - `Esc` — quit
@@ -92,12 +93,32 @@ fn brush_label(k: TissueKind) -> &'static str {
     }
 }
 
+/// Overlay colour: live body graph for bone/fixture when activated,
+/// otherwise paint (and non-rigid paint kinds always from paint).
+fn overlay_rgb(arena: &StudioArena, x: i32, y: i32) -> Option<[u8; 3]> {
+    if arena.body.activated {
+        if let Some(graph) = arena.body.graph.as_ref() {
+            if let Some(k) = graph.kind_at(x, y) {
+                return tissue_rgb(k);
+            }
+        }
+        let paint_k = arena.body.paint.get(x as u32, y as u32);
+        // Hide rest-pose bone/fixture (moved into graph); keep other paint.
+        if matches!(paint_k, TissueKind::Bone | TissueKind::Fixture | TissueKind::Empty) {
+            return None;
+        }
+        return tissue_rgb(paint_k);
+    }
+    tissue_rgb(arena.body.paint.get(x as u32, y as u32))
+}
+
 #[macroquad::main("GVSE Studio — muscle / bone / neural")]
 async fn main() {
     let mut arena = StudioArena::new(ArenaConfig::default());
     let mut paused = true;
     let mut brush = TissueKind::Bone;
     let mut water_on = arena.cfg.water_to_y.is_some();
+    let mut status = String::from("paint a fixture + bone, then Enter");
 
     loop {
         if is_key_pressed(KeyCode::Escape) {
@@ -108,6 +129,20 @@ async fn main() {
         }
         if let Some(b) = brush_from_key() {
             brush = b;
+        }
+        if is_key_pressed(KeyCode::Enter) {
+            match arena.activate() {
+                Ok(g) => {
+                    status = format!(
+                        "activated: {} fixture parts, {} bones ({} hung)",
+                        g.fixture_count(),
+                        g.bone_count(),
+                        g.anchored_bone_count()
+                    );
+                    paused = false;
+                }
+                Err(_) => status = "activate failed — paint bone or fixture first".into(),
+            }
         }
         if is_key_pressed(KeyCode::W) {
             water_on = !water_on;
@@ -126,6 +161,8 @@ async fn main() {
                 },
                 ..ArenaConfig::default()
             });
+            status = "reset — paint, then Enter".into();
+            paused = true;
         }
 
         let (mx, my) = mouse_position();
@@ -133,20 +170,14 @@ async fn main() {
         let gy = ((screen_height() - my) / CELL_PX).floor() as i32;
         if gx >= 0 && gy >= 0 && gx < arena.cfg.width && gy < arena.cfg.height {
             if is_mouse_button_down(MouseButton::Left) {
-                arena
-                    .body
-                    .paint
-                    .set(gx as u32, gy as u32, brush);
+                arena.body.paint_set(gx as u32, gy as u32, brush);
             } else if is_mouse_button_down(MouseButton::Right) {
-                arena
-                    .body
-                    .paint
-                    .set(gx as u32, gy as u32, TissueKind::Empty);
+                arena.body.paint_set(gx as u32, gy as u32, TissueKind::Empty);
             }
         }
 
         if !paused {
-            arena.tick_physics();
+            arena.tick();
         }
 
         clear_background(Color::from_rgba(0x1A, 0x1E, 0x24, 255));
@@ -156,8 +187,7 @@ async fn main() {
                     continue;
                 };
                 let mut rgb = cell_color(cell);
-                if let Some(tr) = tissue_rgb(arena.body.paint.get(x as u32, y as u32)) {
-                    // Tissue paints over world cells (studio layer).
+                if let Some(tr) = overlay_rgb(&arena, x, y) {
                     rgb = tr;
                 }
                 let sx = x as f32 * CELL_PX;
@@ -172,29 +202,36 @@ async fn main() {
             }
         }
 
+        let mode = if arena.body.activated {
+            "ACTIVE"
+        } else {
+            "PAINT"
+        };
         let hud = format!(
-            "STUDIO S0  tick={}  {}  brush={}  [Space] pause  [W] water  [R] reset\n\
-             1 bone  2 muscle  3 skin  4 nerve  5 neuron  6 fixture  7 sensor  8–0/- joints",
+            "STUDIO S1  tick={}  {}  {}  brush={}\n\
+             [Enter] activate  [Space] pause  [W] water  [R] reset\n\
+             1 bone  2 muscle  3 skin  4 nerve  5 neuron  6 fixture  7 sensor  8–0/- joints\n\
+             {status}",
             arena.world.tick,
             if paused { "PAUSED" } else { "RUN" },
+            mode,
             brush_label(brush),
         );
-        draw_text(&hud, 8.0, 18.0, 18.0, WHITE);
+        draw_text(&hud, 8.0, 18.0, 16.0, WHITE);
 
-        // Tiny palette swatches
         let swatches = [
-            (TissueKind::Bone, "bone"),
-            (TissueKind::Muscle, "mus"),
-            (TissueKind::Skin, "skin"),
-            (TissueKind::Nerve, "nrv"),
-            (TissueKind::NeuronBlob, "neu"),
-            (TissueKind::Fixture, "fix"),
+            TissueKind::Bone,
+            TissueKind::Muscle,
+            TissueKind::Skin,
+            TissueKind::Nerve,
+            TissueKind::NeuronBlob,
+            TissueKind::Fixture,
         ];
-        for (i, (kind, _label)) in swatches.iter().enumerate() {
+        for (i, kind) in swatches.iter().enumerate() {
             let rgb = tissue_rgb(*kind).unwrap_or([0, 0, 0]);
             draw_rectangle(
                 8.0 + i as f32 * 28.0,
-                40.0,
+                72.0,
                 24.0,
                 16.0,
                 Color::from_rgba(rgb[0], rgb[1], rgb[2], 255),

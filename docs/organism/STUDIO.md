@@ -162,8 +162,8 @@ Postcard + schema version, same spirit as `.gvsecrt`.
 
 | Phase | Deliverable | Done when |
 |-------|-------------|-----------|
-| **S0** | This doc + `wk-voxel-studio` types + empty studio app arena | Arena ticks water with world rules; paint enum + colours locked |
-| **S1** | Paint UI + activate → `BodyGraph` (bones, fixtures) | Fin bones hang from fixture; no muscle yet |
+| **S0** | This doc + `wk-voxel-studio` types + empty studio app arena | ✅ Arena ticks water with world rules; paint enum + colours locked |
+| **S1** | Paint UI + activate → `BodyGraph` (bones, fixtures) | ✅ `Enter` activates; hung bones stay, free bones fall (discrete gravity); no muscle yet |
 | **S2** | Joints + muscle actuation (open-loop / scripted) | Scripted flap moves water enough to move a tracer |
 | **S3** | Nerve graph + neuron blobs + force sensors | Sensor time series readable in UI |
 | **S4** | Neural training regime (fixed morphology) | Net learns a flap above a fitness floor |
