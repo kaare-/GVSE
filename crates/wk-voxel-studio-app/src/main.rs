@@ -6,7 +6,7 @@
 //! Left dock: clickable tissue + geology palette.
 //! Space pause · Enter activate · W flood/drain · R reset
 //! N net/scripted · H hill-climb · C continuous train · E export
-//! F1–F4 physics · F5 fin example · F6 rough terrain · [/] ;/' size
+//! F1–F4 physics · F5 fin · F6 terrain · F7 vertical arm · F8 quarter-gate arm
 
 use macroquad::prelude::*;
 use std::path::PathBuf;
@@ -14,8 +14,9 @@ use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::Cell;
 use wk_voxel_studio::{
     encode_body, export_body_with_net, evolve_morphology, force_sensors_bridging_parts,
-    paint_fin_bench, paint_rough_terrain, tissue_rgb, ArenaConfig, StudioArena,
-    StudioPhysicsConfig, TissueKind, TrainingSession, ARENA_MAX, ARENA_MIN, JOINT_RGB,
+    paint_fin_bench, paint_rough_terrain, paint_vertical_arm, tissue_rgb, ArenaConfig,
+    JointLimit, StudioArena, StudioPhysicsConfig, TissueKind, TrainingSession, ARENA_MAX,
+    ARENA_MIN, JOINT_RGB,
 };
 
 const CELL_PX: f32 = 3.0;
@@ -440,6 +441,14 @@ async fn main() {
         if is_key_pressed(KeyCode::F6) {
             paint_rough_terrain(&mut arena);
             status = "example: rough terrain".into();
+        }
+        if is_key_pressed(KeyCode::F7) {
+            paint_vertical_arm(&mut arena, JointLimit::Half);
+            status = "example: vertical arm JointHalf + antagonists (Enter)".into();
+        }
+        if is_key_pressed(KeyCode::F8) {
+            paint_vertical_arm(&mut arena, JointLimit::Quarter);
+            status = "example: vertical arm JointQuarter gate (Enter)".into();
         }
 
         if is_key_pressed(KeyCode::LeftBracket) {

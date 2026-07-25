@@ -27,7 +27,10 @@ pub use ga::{evolve_morphology, mutate_paint, GaIndividual};
 pub use neural::StudioNet;
 pub use palette::{tissue_rgb, JOINT_SYMBOL};
 pub use physics::{tick_world_gated, StudioPhysicsConfig};
-pub use scenarios::{fin_hydro_arena, paint_fin_bench, paint_rough_terrain, rough_walk_arena};
+pub use scenarios::{
+    fin_hydro_arena, paint_fin_bench, paint_rough_terrain, paint_vertical_arm, rough_walk_arena,
+    vertical_arm_arena,
+};
 pub use tissue::{
     ForceSensor, JointLimit, StudioBody, TissueKind, TissuePaint, FIXTURE_RGB, JOINT_RGB,
     MUSCLE_RGB, NERVE_RGB, NEURON_BLOB_RGB, SKIN_RGB,

@@ -4,7 +4,7 @@ use wk_material::MaterialId;
 
 use crate::arena::{ArenaConfig, StudioArena};
 use crate::physics::StudioPhysicsConfig;
-use crate::tissue::TissueKind;
+use crate::tissue::{JointLimit, TissueKind};
 
 /// Fixture + hinged free bone + muscle (flapping fin seed).
 pub fn paint_fin_bench(arena: &mut StudioArena) {
@@ -37,6 +37,84 @@ pub fn paint_fin_bench(arena: &mut StudioArena) {
     arena.body.paint.set(9, by, TissueKind::Nerve);
     arena.body.paint.set(8, by, TissueKind::Nerve);
     arena.body.paint.set(8, (mid_y + 1) as u32, TissueKind::Nerve);
+}
+
+/// Vertical arm: fixture stem + force sense + bone–joint–bone + bilateral muscle.
+pub fn paint_vertical_arm(arena: &mut StudioArena, joint: JointLimit) {
+    let cx = arena.cfg.width / 2;
+    let top = arena.cfg.height - 6;
+    for x in (cx - 6)..(cx + 6) {
+        arena.body.paint.set(x as u32, top as u32, TissueKind::Fixture);
+    }
+    for y in (top - 12)..top {
+        arena.body.paint.set(cx as u32, y as u32, TissueKind::Fixture);
+    }
+    arena
+        .body
+        .paint
+        .set(cx as u32, (top - 6) as u32, TissueKind::ForceSensor);
+
+    let joint_kind = match joint {
+        JointLimit::Full => TissueKind::JointFull,
+        JointLimit::ThreeQuarter => TissueKind::JointThreeQuarter,
+        JointLimit::Half => TissueKind::JointHalf,
+        JointLimit::Quarter => TissueKind::JointQuarter,
+    };
+    // Proximal bone, cyan joint, distal bone.
+    arena.body.paint.set(cx as u32, (top - 13) as u32, TissueKind::Bone);
+    arena.body.paint.set(cx as u32, (top - 14) as u32, TissueKind::Bone);
+    arena
+        .body
+        .paint
+        .set(cx as u32, (top - 15) as u32, joint_kind);
+    arena.body.paint.set(cx as u32, (top - 16) as u32, TissueKind::Bone);
+    arena.body.paint.set(cx as u32, (top - 17) as u32, TissueKind::Bone);
+    arena.body.paint.set(cx as u32, (top - 18) as u32, TissueKind::Bone);
+    arena.body.paint.set(cx as u32, (top - 19) as u32, TissueKind::Bone);
+
+    // Bilateral antagonists flanking the hinge.
+    for y in (top - 18)..=(top - 15) {
+        arena
+            .body
+            .paint
+            .set((cx + 1) as u32, y as u32, TissueKind::Muscle);
+        arena
+            .body
+            .paint
+            .set((cx - 1) as u32, y as u32, TissueKind::Muscle);
+    }
+
+    // Small controller + nerves to each muscle column.
+    let ny = (top - 12) as u32;
+    arena.body.paint.set((cx + 3) as u32, ny, TissueKind::NeuronBlob);
+    arena
+        .body
+        .paint
+        .set((cx + 4) as u32, ny, TissueKind::NeuronBlob);
+    arena
+        .body
+        .paint
+        .set((cx + 3) as u32, ny + 1, TissueKind::NeuronBlob);
+    arena
+        .body
+        .paint
+        .set((cx + 4) as u32, ny + 1, TissueKind::NeuronBlob);
+    arena
+        .body
+        .paint
+        .set((cx + 2) as u32, ny, TissueKind::Nerve);
+    arena
+        .body
+        .paint
+        .set((cx + 2) as u32, (top - 16) as u32, TissueKind::Nerve);
+    arena
+        .body
+        .paint
+        .set((cx - 2) as u32, (top - 16) as u32, TissueKind::Nerve);
+    arena
+        .body
+        .paint
+        .set((cx + 2) as u32, (top - 15) as u32, TissueKind::Nerve);
 }
 
 /// Sawtooth rough ground for dry gait benches.
@@ -72,6 +150,18 @@ pub fn fin_hydro_arena() -> StudioArena {
     arena
 }
 
+pub fn vertical_arm_arena(joint: JointLimit) -> StudioArena {
+    let mut arena = StudioArena::new(ArenaConfig {
+        width: 48,
+        height: 64,
+        seed: 0xA8_00_01,
+        water_to_y: None,
+    });
+    arena.physics = StudioPhysicsConfig::body_only();
+    paint_vertical_arm(&mut arena, joint);
+    arena
+}
+
 pub fn rough_walk_arena() -> StudioArena {
     let mut arena = StudioArena::new(ArenaConfig::from_chunks(3, 2, 0xA1C0_0001));
     arena.physics = StudioPhysicsConfig::dry_walk();
@@ -93,6 +183,17 @@ mod tests {
         assert!(arena.body.net.is_some(), "controller attaches a StudioNet");
         // Scripted stays on until N / training — random net would idle the fin.
         assert!(arena.physics.scripted_muscle);
+    }
+
+    #[test]
+    fn vertical_arm_bench_wires_hinge_and_antagonists() {
+        let mut arena = vertical_arm_arena(JointLimit::Half);
+        let g = arena.activate().unwrap();
+        assert!(g.joints.len() >= 1);
+        assert!(g.muscles.len() >= 2, "bilateral muscles");
+        assert!(g.hinged_bone_count() >= 1);
+        assert!(matches!(g.joints[0].limit, JointLimit::Half));
+        assert!(g.joints[0].rest_radius >= 1.0);
     }
 
     #[test]
