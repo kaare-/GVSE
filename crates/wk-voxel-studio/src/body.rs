@@ -143,6 +143,9 @@ pub struct MuscleFeedback {
 pub struct NerveStrand {
     pub id: u32,
     pub cells: Vec<(i32, i32)>,
+    /// Bone/fixture this strand rides with when the skeleton poses.
+    #[serde(default)]
+    pub host_part: u32,
     /// Muscle ids this strand touches (4-neighbour).
     pub muscle_ids: Vec<u32>,
     /// Neuron cluster ids this strand touches.
@@ -154,8 +157,19 @@ pub struct NerveStrand {
 pub struct NeuronCluster {
     pub id: u32,
     pub cells: Vec<(i32, i32)>,
+    /// Bone/fixture this blob rides with when the skeleton poses.
+    #[serde(default)]
+    pub host_part: u32,
     /// True when the blob spans at least 2×2 (processing mass).
     pub is_controller: bool,
+}
+
+/// Skin (or other soft coat) attached to a rigid part.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachedTissue {
+    pub kind: TissueKind,
+    pub cells: Vec<(i32, i32)>,
+    pub host_part: u32,
 }
 
 /// Activated studio body for simulation.
@@ -166,6 +180,9 @@ pub struct BodyGraph {
     pub muscles: Vec<Muscle>,
     pub nerves: Vec<NerveStrand>,
     pub neurons: Vec<NeuronCluster>,
+    /// Skin patches posed with their host bones.
+    #[serde(default)]
+    pub skins: Vec<AttachedTissue>,
     /// At least one controller-sized neuron blob is present.
     pub has_controller: bool,
     /// Radians-ish phase for scripted sinusoid (accumulates with tick).
@@ -234,13 +251,27 @@ impl BodyGraph {
                 return Some(TissueKind::Muscle);
             }
         }
+        for s in &self.skins {
+            if pose_cells_for_part(self, s.host_part, &s.cells)
+                .into_iter()
+                .any(|(x, y)| x == gx && y == gy)
+            {
+                return Some(s.kind);
+            }
+        }
         for n in &self.neurons {
-            if n.cells.iter().any(|&(x, y)| x == gx && y == gy) {
+            if pose_cells_for_part(self, n.host_part, &n.cells)
+                .into_iter()
+                .any(|(x, y)| x == gx && y == gy)
+            {
                 return Some(TissueKind::NeuronBlob);
             }
         }
         for n in &self.nerves {
-            if n.cells.iter().any(|&(x, y)| x == gx && y == gy) {
+            if pose_cells_for_part(self, n.host_part, &n.cells)
+                .into_iter()
+                .any(|(x, y)| x == gx && y == gy)
+            {
                 return Some(TissueKind::Nerve);
             }
         }
@@ -331,8 +362,9 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
     mark_hinged_from_joints(&mut parts, &joints);
     fill_joint_rest_poses(&mut joints, &parts);
     let muscles = collect_muscles(paint, &cell_owner, &parts, &joints);
-    let neurons = collect_neurons(paint);
-    let nerves = collect_nerves(paint, &muscles, &neurons);
+    let neurons = collect_neurons(paint, &cell_owner);
+    let nerves = collect_nerves(paint, &cell_owner, &muscles, &neurons);
+    let skins = collect_skins(paint, &cell_owner);
     let has_controller = neurons.iter().any(|n| n.is_controller);
 
     Ok(BodyGraph {
@@ -341,6 +373,7 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
         muscles,
         nerves,
         neurons,
+        skins,
         has_controller,
         script_phase: 0.0,
     })
@@ -544,6 +577,107 @@ fn rotate_local_cells(
     out
 }
 
+/// Nearest rigid part to a paint cell (4-neighbour BFS through non-owned cells).
+fn nearest_part_id(owner: &HashMap<(i32, i32), u32>, cell: (i32, i32)) -> Option<u32> {
+    if let Some(&id) = owner.get(&cell) {
+        return Some(id);
+    }
+    let mut seen = HashSet::new();
+    let mut q = VecDeque::new();
+    q.push_back(cell);
+    seen.insert(cell);
+    let mut steps = 0u32;
+    while let Some((x, y)) = q.pop_front() {
+        if let Some(&id) = owner.get(&(x, y)) {
+            return Some(id);
+        }
+        steps += 1;
+        if steps > 256 {
+            break;
+        }
+        for n in neighbors4(x, y) {
+            if seen.insert(n) {
+                q.push_back(n);
+            }
+        }
+    }
+    None
+}
+
+/// Majority host among cells; ties broken by first seen.
+fn majority_host(owner: &HashMap<(i32, i32), u32>, cells: &[(i32, i32)]) -> Option<u32> {
+    let mut counts: HashMap<u32, u32> = HashMap::new();
+    for &c in cells {
+        if let Some(id) = nearest_part_id(owner, c) {
+            *counts.entry(id).or_default() += 1;
+        }
+    }
+    counts.into_iter().max_by_key(|(_, n)| *n).map(|(id, _)| id)
+}
+
+/// Paint-space cells → world cells following a rigid part's pose (chain or offset).
+fn pose_cells_for_part(
+    graph: &BodyGraph,
+    host_part: u32,
+    paint_cells: &[(i32, i32)],
+) -> Vec<(i32, i32)> {
+    if paint_cells.is_empty() {
+        return Vec::new();
+    }
+    if let Some(j) = joint_for_swing(graph, host_part) {
+        let pivot = pivot_world(graph, j);
+        let cum = cumulative_angle(graph, host_part);
+        let local: Vec<(i32, i32)> = paint_cells
+            .iter()
+            .map(|(x, y)| (*x - j.pivot.0, *y - j.pivot.1))
+            .collect();
+        return rotate_local_cells(&local, pivot, cum);
+    }
+    if let Some(p) = graph.parts.iter().find(|p| p.id == host_part) {
+        return paint_cells
+            .iter()
+            .map(|(x, y)| (*x + p.offset_x, *y + p.offset_y))
+            .collect();
+    }
+    paint_cells.to_vec()
+}
+
+fn collect_skins(
+    paint: &TissuePaint,
+    owner: &HashMap<(i32, i32), u32>,
+) -> Vec<AttachedTissue> {
+    let w = paint.width as i32;
+    let h = paint.height as i32;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    for y in 0..h {
+        for x in 0..w {
+            if paint.get(x as u32, y as u32) != TissueKind::Skin {
+                continue;
+            }
+            if !seen.insert((x, y)) {
+                continue;
+            }
+            let cells = flood(paint, x, y, TissueKind::Skin, &mut seen);
+            // Split by host so coats across a hinge don't stick to one bone.
+            let mut by_host: HashMap<u32, Vec<(i32, i32)>> = HashMap::new();
+            for c in cells {
+                if let Some(id) = nearest_part_id(owner, c) {
+                    by_host.entry(id).or_default().push(c);
+                }
+            }
+            for (host_part, cells) in by_host {
+                out.push(AttachedTissue {
+                    kind: TissueKind::Skin,
+                    cells,
+                    host_part,
+                });
+            }
+        }
+    }
+    out
+}
+
 fn collect_muscles(
     paint: &TissuePaint,
     owner: &HashMap<(i32, i32), u32>,
@@ -619,7 +753,10 @@ fn collect_muscles(
     muscles
 }
 
-fn collect_neurons(paint: &TissuePaint) -> Vec<NeuronCluster> {
+fn collect_neurons(
+    paint: &TissuePaint,
+    owner: &HashMap<(i32, i32), u32>,
+) -> Vec<NeuronCluster> {
     let w = paint.width as i32;
     let h = paint.height as i32;
     let mut seen = HashSet::new();
@@ -645,9 +782,11 @@ fn collect_neurons(paint: &TissuePaint) -> Vec<NeuronCluster> {
             let span_h = (max_y - min_y + 1) as usize;
             // Spec: ≥2×2 nerve mass = processing / controller site.
             let is_controller = span_w >= 2 && span_h >= 2 && cells.len() >= 4;
+            let host_part = majority_host(owner, &cells).unwrap_or(u32::MAX);
             out.push(NeuronCluster {
                 id: next,
                 cells,
+                host_part,
                 is_controller,
             });
             next += 1;
@@ -658,6 +797,7 @@ fn collect_neurons(paint: &TissuePaint) -> Vec<NeuronCluster> {
 
 fn collect_nerves(
     paint: &TissuePaint,
+    owner: &HashMap<(i32, i32), u32>,
     muscles: &[Muscle],
     neurons: &[NeuronCluster],
 ) -> Vec<NerveStrand> {
@@ -703,13 +843,23 @@ fn collect_nerves(
             muscle_ids.dedup();
             neuron_ids.sort_unstable();
             neuron_ids.dedup();
-            out.push(NerveStrand {
-                id: next,
-                cells,
-                muscle_ids,
-                neuron_ids,
-            });
-            next += 1;
+            // Split by nearest bone so strands across a hinge pose per link.
+            let mut by_host: HashMap<u32, Vec<(i32, i32)>> = HashMap::new();
+            for c in cells {
+                if let Some(id) = nearest_part_id(owner, c) {
+                    by_host.entry(id).or_default().push(c);
+                }
+            }
+            for (host_part, cells) in by_host {
+                out.push(NerveStrand {
+                    id: next,
+                    cells,
+                    host_part,
+                    muscle_ids: muscle_ids.clone(),
+                    neuron_ids: neuron_ids.clone(),
+                });
+                next += 1;
+            }
         }
     }
     out
@@ -1200,46 +1350,24 @@ pub fn script_muscles(graph: &mut BodyGraph, tick: u64) {
     }
 }
 
-/// World cells for a muscle blob (rotates with its hinged bone around the pivot).
+/// World cells for a muscle blob (rides the more distal hinged attachment).
 fn muscle_world_cells(graph: &BodyGraph, m: &Muscle) -> Vec<(i32, i32)> {
     let dist = part_root_dist(&graph.parts, &graph.joints);
-    // Prefer the more distal hinged attachment so child-link muscles follow the chain.
-    let mut hinged_ids: Vec<u32> = [m.part_a, m.part_b]
-        .into_iter()
-        .filter(|&id| {
+    let mut candidates: Vec<u32> = [m.part_a, m.part_b].into_iter().collect();
+    candidates.sort_by_key(|id| std::cmp::Reverse(dist.get(id).copied().unwrap_or(0)));
+    // Prefer hinged distal, else any attachment that can pose.
+    let host = candidates
+        .iter()
+        .copied()
+        .find(|&id| {
             graph
                 .parts
                 .iter()
                 .any(|p| p.id == id && p.hinged && joint_for_swing(graph, id).is_some())
         })
-        .collect();
-    hinged_ids.sort_by_key(|id| std::cmp::Reverse(dist.get(id).copied().unwrap_or(0)));
-    if let Some(&id) = hinged_ids.first() {
-        if let Some(j) = joint_for_swing(graph, id) {
-            let pivot = pivot_world(graph, j);
-            let cum = cumulative_angle(graph, id);
-            let local: Vec<(i32, i32)> = m
-                .cells
-                .iter()
-                .map(|(x, y)| (*x - j.pivot.0, *y - j.pivot.1))
-                .collect();
-            return rotate_local_cells(&local, pivot, cum);
-        }
-    }
-    for &id in &[m.part_a, m.part_b] {
-        if let Some(p) = graph
-            .parts
-            .iter()
-            .find(|p| p.id == id && !p.anchored && p.kind == PartKind::Bone)
-        {
-            return m
-                .cells
-                .iter()
-                .map(|(x, y)| (*x + p.offset_x, *y + p.offset_y))
-                .collect();
-        }
-    }
-    m.cells.clone()
+        .or_else(|| candidates.first().copied())
+        .unwrap_or(m.part_b);
+    pose_cells_for_part(graph, host, &m.cells)
 }
 
 /// Contractile length: rotated muscle tissue → non-swinging attachment.

@@ -173,10 +173,22 @@ fn overlay_rgb(arena: &StudioArena, x: i32, y: i32) -> Option<[u8; 3]> {
                 return tissue_rgb(k);
             }
         }
+        // Soft tissue + joints are posed via BodyGraph; hide paint-space ghosts.
         let paint_k = arena.body.paint.get(x as u32, y as u32);
         if matches!(
             paint_k,
-            TissueKind::Bone | TissueKind::Fixture | TissueKind::Muscle | TissueKind::Empty
+            TissueKind::Bone
+                | TissueKind::Fixture
+                | TissueKind::Muscle
+                | TissueKind::Skin
+                | TissueKind::Nerve
+                | TissueKind::NeuronBlob
+                | TissueKind::JointFull
+                | TissueKind::JointThreeQuarter
+                | TissueKind::JointHalf
+                | TissueKind::JointQuarter
+                | TissueKind::ForceSensor
+                | TissueKind::Empty
         ) {
             return None;
         }
