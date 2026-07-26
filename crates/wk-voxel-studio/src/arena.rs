@@ -3,7 +3,7 @@
 use wk_material::MaterialId;
 use wk_voxel::{Cell, ChunkCoord, World, CHUNK_CELLS_H, CHUNK_CELLS_W};
 
-use crate::body::{activate, step_body, ActivateError, BodyGraph};
+use crate::body::{activate, claim_body_volume, step_body, ActivateError, BodyGraph};
 use crate::neural::StudioNet;
 use crate::physics::{enable_water_physics, tick_world_gated, StudioPhysicsConfig};
 use crate::tissue::{StudioBody, TissuePaint};
@@ -115,6 +115,9 @@ impl StudioArena {
         }
         self.body.graph = Some(graph);
         self.body.activated = true;
+        if let Some(g) = self.body.graph.as_ref() {
+            claim_body_volume(g, &mut self.world);
+        }
         Ok(self.body.graph.as_ref().unwrap())
     }
 

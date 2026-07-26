@@ -16,8 +16,9 @@ mod train;
 
 pub use arena::{ArenaConfig, StudioArena, ARENA_MAX, ARENA_MIN};
 pub use body::{
-    activate, force_sensors_bridging_parts, script_muscles, step_body, ActivateError, AttachedTissue,
-    BodyGraph, Joint, Muscle, MuscleFeedback, NerveStrand, NeuronCluster, PartKind, RigidPart,
+    activate, claim_body_volume, force_sensors_bridging_parts, script_muscles, step_body,
+    ActivateError, AttachedTissue, BodyGraph, Joint, Muscle, MuscleFeedback, NerveStrand,
+    NeuronCluster, PartKind, RigidPart,
 };
 pub use export::{
     decode_body, encode_body, export_body, export_body_with_net, import_body_paint, ExportError,

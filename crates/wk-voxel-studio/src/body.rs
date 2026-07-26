@@ -46,6 +46,11 @@ pub struct RigidPart {
     /// Radians from rest pose for hinged bones (0 = as painted).
     #[serde(default)]
     pub hinge_angle: f32,
+    /// Discrete translational momentum (cells/tick), free roots only.
+    #[serde(default)]
+    pub vel_x: i32,
+    #[serde(default)]
+    pub vel_y: i32,
 }
 
 impl RigidPart {
@@ -332,6 +337,8 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
                 assembly_root: false,
                 hinged: false,
                 hinge_angle: 0.0,
+                vel_x: 0,
+                vel_y: 0,
             });
         }
     }
@@ -992,6 +999,60 @@ fn cell_passable(world: &World, gx: i32, gy: i32) -> bool {
     }
 }
 
+fn cell_wet(world: &World, gx: i32, gy: i32) -> bool {
+    world
+        .get_cell(gx, gy)
+        .is_some_and(|c| c.material == MaterialId::Air && !c.sat.is_empty())
+}
+
+fn cell_sat(world: &World, gx: i32, gy: i32) -> u8 {
+    world
+        .get_cell(gx, gy)
+        .map(|c| {
+            if c.material == MaterialId::Air {
+                c.sat.0
+            } else {
+                0
+            }
+        })
+        .unwrap_or(0)
+}
+
+fn cell_room(world: &World, gx: i32, gy: i32) -> u8 {
+    world
+        .get_cell(gx, gy)
+        .map(|c| {
+            if c.material == MaterialId::Air {
+                u8::MAX.saturating_sub(c.sat.0)
+            } else {
+                0
+            }
+        })
+        .unwrap_or(0)
+}
+
+fn assembly_wet_frac(graph: &BodyGraph, world: &World, indices: &[usize]) -> f32 {
+    // Footprint sat is cleared by [`claim_body_volume`]; sample the halo
+    // (self + 4-neighbours) so buoyancy still sees the surrounding tank.
+    let mut n = 0u32;
+    let mut wet = 0u32;
+    for &i in indices {
+        for (x, y) in graph.parts[i].world_cells() {
+            for (sx, sy) in std::iter::once((x, y)).chain(neighbors4(x, y)) {
+                n += 1;
+                if cell_wet(world, sx, sy) {
+                    wet += 1;
+                }
+            }
+        }
+    }
+    if n == 0 {
+        0.0
+    } else {
+        wet as f32 / n as f32
+    }
+}
+
 fn occupied(graph: &BodyGraph) -> HashSet<(i32, i32)> {
     let mut set = HashSet::new();
     for p in &graph.parts {
@@ -1029,12 +1090,12 @@ fn try_move_part(
     if !ok {
         return false;
     }
-    // Hydro push: shove standing water from destination toward origin.
-    for &(x, y) in &cells {
-        let tx = x + dx;
-        let ty = y + dy;
-        push_sat(world, tx, ty, x, y);
+    let vacated: Vec<(i32, i32)> = cells.clone();
+    let entered: Vec<(i32, i32)> = cells.iter().map(|&(x, y)| (x + dx, y + dy)).collect();
+    if !water_allows_entry(world, &entered, &vacated) {
+        return false;
     }
+    displace_body_water(world, &vacated, &entered);
     graph.parts[idx].offset_x += dx;
     graph.parts[idx].offset_y += dy;
     true
@@ -1080,11 +1141,18 @@ fn try_move_parts(
             }
         }
     }
+    let mut vacated = Vec::new();
+    let mut entered = Vec::new();
     for (_idx, cells) in &cells_by_part {
         for &(x, y) in cells {
-            push_sat(world, x + dx, y + dy, x, y);
+            vacated.push((x, y));
+            entered.push((x + dx, y + dy));
         }
     }
+    if !water_allows_entry(world, &entered, &vacated) {
+        return false;
+    }
+    displace_body_water(world, &vacated, &entered);
     for &idx in indices {
         graph.parts[idx].offset_x += dx;
         graph.parts[idx].offset_y += dy;
@@ -1229,11 +1297,15 @@ fn joints_satisfied(graph: &BodyGraph) -> bool {
 }
 
 /// Apply a relative hinge angle; re-poses this link and all distal children.
+///
+/// When `apply_hydro` is true, water in newly occupied cells is displaced
+/// into vacated seats (muscle probes pass false so search does not leak sat).
 fn try_set_hinge_angle(
     graph: &mut BodyGraph,
-    world: &World,
+    world: &mut World,
     joint: &Joint,
     angle: f32,
+    apply_hydro: bool,
 ) -> bool {
     if joint.local_cells.is_empty() {
         return false;
@@ -1256,24 +1328,26 @@ fn try_set_hinge_angle(
             ))
         })
         .collect();
+    let mut vacated: Vec<(i32, i32)> = Vec::new();
+    for &(id, _, _) in &saved {
+        if let Some(idx) = graph.part_index(id) {
+            vacated.extend(graph.parts[idx].world_cells());
+        }
+    }
     graph.parts[swing_idx].hinge_angle = angle;
 
     let mut occ = occupied(graph);
-    for &(id, _, _) in &saved {
-        if let Some(idx) = graph.part_index(id) {
-            for c in graph.parts[idx].world_cells() {
-                occ.remove(&c);
-            }
-        }
+    for c in &vacated {
+        occ.remove(c);
     }
 
     let snaps: Vec<Joint> = affected
         .iter()
         .filter_map(|&id| joint_for_swing(graph, id).cloned())
         .collect();
+    let mut entered: Vec<(i32, i32)> = Vec::new();
     for j in &snaps {
         let Some(new_cells) = stamp_swing_cells(graph, j) else {
-            // revert
             for (id, cells, ang) in saved {
                 if let Some(idx) = graph.part_index(id) {
                     graph.parts[idx].cells = cells;
@@ -1298,10 +1372,37 @@ fn try_set_hinge_angle(
         };
         for c in &new_cells {
             occ.insert(*c);
+            entered.push(*c);
         }
         graph.parts[idx].cells = new_cells;
         graph.parts[idx].offset_x = 0;
         graph.parts[idx].offset_y = 0;
+    }
+
+    // Only seats the body newly covers / frees participate in hydro.
+    let vac_set: HashSet<_> = vacated.iter().copied().collect();
+    let ent_set: HashSet<_> = entered.iter().copied().collect();
+    let vacated_only: Vec<_> = vacated
+        .into_iter()
+        .filter(|c| !ent_set.contains(c))
+        .collect();
+    let entered_only: Vec<_> = entered
+        .into_iter()
+        .filter(|c| !vac_set.contains(c))
+        .collect();
+
+    if apply_hydro && !entered_only.is_empty() {
+        if !water_allows_entry(world, &entered_only, &vacated_only) {
+            for (id, cells, ang) in saved {
+                if let Some(idx) = graph.part_index(id) {
+                    graph.parts[idx].cells = cells;
+                    graph.parts[idx].hinge_angle = ang;
+                }
+            }
+            return false;
+        }
+        displace_body_water(world, &vacated_only, &entered_only);
+        apply_hydro_reaction(graph, &vacated_only, &entered_only);
     }
     true
 }
@@ -1367,24 +1468,24 @@ fn joint_components(graph: &BodyGraph) -> Vec<Vec<usize>> {
     groups.into_values().collect()
 }
 
-fn push_sat(world: &mut World, from_x: i32, from_y: i32, to_x: i32, to_y: i32) {
+/// Move as much sat as fits from `from` into `to` (mass-conserving).
+fn push_sat(world: &mut World, from_x: i32, from_y: i32, to_x: i32, to_y: i32) -> u8 {
     let Some(src) = world.get_cell(from_x, from_y) else {
-        return;
+        return 0;
     };
     if src.material != MaterialId::Air || src.sat.is_empty() {
-        return;
+        return 0;
     }
     let Some(dst) = world.get_cell(to_x, to_y) else {
-        return;
+        return 0;
     };
     if dst.material != MaterialId::Air {
-        return;
+        return 0;
     }
-    let move_amt = (src.sat.0 / 2).max(1).min(src.sat.0);
-    let dst_room = 255u8.saturating_sub(dst.sat.0);
-    let amt = move_amt.min(dst_room);
+    let dst_room = u8::MAX.saturating_sub(dst.sat.0);
+    let amt = src.sat.0.min(dst_room);
     if amt == 0 {
-        return;
+        return 0;
     }
     world.set_cell(
         from_x,
@@ -1403,6 +1504,218 @@ fn push_sat(world: &mut World, from_x: i32, from_y: i32, to_x: i32, to_y: i32) {
             ..dst
         },
     );
+    amt
+}
+
+/// Spill sat out of a cell into nearby Air, then clear it (body claims the seat).
+fn spill_and_clear(world: &mut World, gx: i32, gy: i32, forbid: &HashSet<(i32, i32)>) {
+    let mut sat = cell_sat(world, gx, gy);
+    if sat == 0 {
+        return;
+    }
+    let mut q = VecDeque::new();
+    let mut seen = HashSet::new();
+    q.push_back((gx, gy));
+    seen.insert((gx, gy));
+    while sat > 0 {
+        let Some((x, y)) = q.pop_front() else {
+            break;
+        };
+        for n in neighbors4(x, y) {
+            if !seen.insert(n) || forbid.contains(&n) {
+                continue;
+            }
+            if cell_room(world, n.0, n.1) == 0 {
+                if cell_passable(world, n.0, n.1) {
+                    q.push_back(n);
+                }
+                continue;
+            }
+            let moved = push_sat(world, gx, gy, n.0, n.1);
+            sat = sat.saturating_sub(moved);
+            if sat == 0 {
+                break;
+            }
+            q.push_back(n);
+            if seen.len() > 64 {
+                break;
+            }
+        }
+    }
+    if let Some(c) = world.get_cell(gx, gy) {
+        if c.material == MaterialId::Air && !c.sat.is_empty() {
+            world.set_cell(
+                gx,
+                gy,
+                Cell {
+                    sat: Sat::EMPTY,
+                    ..c
+                },
+            );
+        }
+    }
+}
+
+/// Body footprint excludes free water — spill then clear sat under bones.
+pub fn claim_body_volume(graph: &BodyGraph, world: &mut World) {
+    let footprint: HashSet<(i32, i32)> = graph
+        .parts
+        .iter()
+        .flat_map(|p| p.world_cells())
+        .collect();
+    let cells: Vec<_> = footprint.iter().copied().collect();
+    for (x, y) in cells {
+        spill_and_clear(world, x, y, &footprint);
+    }
+}
+
+/// Soft block only when there is nowhere at all for the sat to go.
+fn water_allows_entry(
+    world: &World,
+    entered: &[(i32, i32)],
+    vacated: &[(i32, i32)],
+) -> bool {
+    let need: u32 = entered
+        .iter()
+        .map(|&(x, y)| cell_sat(world, x, y) as u32)
+        .sum();
+    if need == 0 {
+        return true;
+    }
+    // Vacated seats are about to be freed by the body — treat as full capacity
+    // even if sat still sits there from an unclaimed overlay footprint.
+    let mut room: u32 = vacated.len() as u32 * u8::MAX as u32;
+    let vac: HashSet<_> = vacated.iter().copied().collect();
+    let ent: HashSet<_> = entered.iter().copied().collect();
+    for &(x, y) in vacated {
+        for n in neighbors4(x, y) {
+            if vac.contains(&n) || ent.contains(&n) {
+                continue;
+            }
+            room += cell_room(world, n.0, n.1) as u32;
+        }
+    }
+    room >= need / 4 // very soft — packed tanks still allow a stroke
+}
+
+/// Displace water from cells the body enters into seats it vacates (then neighbours).
+fn displace_body_water(
+    world: &mut World,
+    vacated: &[(i32, i32)],
+    entered: &[(i32, i32)],
+) {
+    let ent: HashSet<_> = entered.iter().copied().collect();
+    // Free vacated seats first so they can accept the shove.
+    for &(x, y) in vacated {
+        spill_and_clear(world, x, y, &ent);
+        // Ensure vacated is dry empty Air ready to receive.
+        if let Some(c) = world.get_cell(x, y) {
+            if c.material == MaterialId::Air {
+                world.set_cell(
+                    x,
+                    y,
+                    Cell {
+                        sat: Sat::EMPTY,
+                        ..c
+                    },
+                );
+            }
+        }
+    }
+    let mut sinks: Vec<(i32, i32)> = vacated.to_vec();
+    let vac: HashSet<_> = vacated.iter().copied().collect();
+    for &(x, y) in vacated {
+        for n in neighbors4(x, y) {
+            if !vac.contains(&n) && !ent.contains(&n) && cell_passable(world, n.0, n.1) {
+                sinks.push(n);
+            }
+        }
+    }
+    sinks.sort_unstable();
+    sinks.dedup();
+    for &(ex, ey) in entered {
+        let mut guard = 0;
+        while cell_sat(world, ex, ey) > 0 && guard < 32 {
+            guard += 1;
+            let mut moved_any = false;
+            for &(sx, sy) in &sinks {
+                if push_sat(world, ex, ey, sx, sy) > 0 {
+                    moved_any = true;
+                    if cell_sat(world, ex, ey) == 0 {
+                        break;
+                    }
+                }
+            }
+            if !moved_any {
+                spill_and_clear(world, ex, ey, &ent);
+                break;
+            }
+        }
+        // Body claims the seat.
+        if let Some(c) = world.get_cell(ex, ey) {
+            if c.material == MaterialId::Air && !c.sat.is_empty() {
+                world.set_cell(
+                    ex,
+                    ey,
+                    Cell {
+                        sat: Sat::EMPTY,
+                        ..c
+                    },
+                );
+            }
+        }
+    }
+}
+
+/// Free assemblies get a kick toward the stroke (water shoved the other way).
+fn apply_hydro_reaction(
+    graph: &mut BodyGraph,
+    vacated: &[(i32, i32)],
+    entered: &[(i32, i32)],
+) {
+    if vacated.is_empty() || entered.is_empty() {
+        return;
+    }
+    let ex: i32 = entered.iter().map(|c| c.0).sum::<i32>() / entered.len() as i32;
+    let ey: i32 = entered.iter().map(|c| c.1).sum::<i32>() / entered.len() as i32;
+    let vx: i32 = vacated.iter().map(|c| c.0).sum::<i32>() / vacated.len() as i32;
+    let vy: i32 = vacated.iter().map(|c| c.1).sum::<i32>() / vacated.len() as i32;
+    let ix = (ex - vx).signum();
+    let iy = (ey - vy).signum();
+    if ix == 0 && iy == 0 {
+        return;
+    }
+    // Fixture-rooted chains stay planted; only free roots coast.
+    let mut fixture_comp: HashSet<u32> = graph
+        .parts
+        .iter()
+        .filter(|p| p.anchored)
+        .map(|p| p.id)
+        .collect();
+    let mut q: VecDeque<u32> = fixture_comp.iter().copied().collect();
+    while let Some(id) = q.pop_front() {
+        for j in &graph.joints {
+            let other = if j.part_a == id {
+                j.part_b
+            } else if j.part_b == id {
+                j.part_a
+            } else {
+                continue;
+            };
+            if fixture_comp.insert(other) {
+                q.push_back(other);
+            }
+        }
+    }
+    for p in graph.parts.iter_mut() {
+        if p.kind != PartKind::Bone || fixture_comp.contains(&p.id) {
+            continue;
+        }
+        if p.assembly_root || (!p.hinged && !p.anchored) {
+            p.vel_x = (p.vel_x + ix).clamp(-2, 2);
+            p.vel_y = (p.vel_y + iy).clamp(-2, 2);
+        }
+    }
 }
 
 fn refresh_muscle_state(graph: &mut BodyGraph) {
@@ -1538,7 +1851,7 @@ fn muscle_torque_sign(graph: &BodyGraph, joint: &Joint, muscle: &Muscle) -> f32 
 /// Rotate the hinge; prefer span shortening, else torque direction.
 fn try_hinge_muscle_step(
     graph: &mut BodyGraph,
-    world: &World,
+    world: &mut World,
     joint: &Joint,
     muscle: &Muscle,
 ) -> bool {
@@ -1554,22 +1867,34 @@ fn try_hinge_muscle_step(
     } else if torque > 0.0 {
         dirs = [HINGE_STEP, HINGE_STEP * 0.5, -HINGE_STEP, -HINGE_STEP * 0.5];
     }
+    let affected = chain_from(graph, joint.swing_part);
     let mut best: Option<(f32, f32)> = None; // angle, score
     for dir in dirs {
         let cand = current + dir;
-        let saved_cells = graph.parts[swing_idx].cells.clone();
-        let saved_ang = graph.parts[swing_idx].hinge_angle;
-        if !try_set_hinge_angle(graph, world, joint, cand) {
+        let saved: Vec<(u32, Vec<(i32, i32)>, f32)> = affected
+            .iter()
+            .filter_map(|&id| {
+                let idx = graph.part_index(id)?;
+                Some((
+                    id,
+                    graph.parts[idx].cells.clone(),
+                    graph.parts[idx].hinge_angle,
+                ))
+            })
+            .collect();
+        // Dry probe — no sat leak while searching.
+        if !try_set_hinge_angle(graph, world, joint, cand, false) {
             continue;
         }
         let len = muscle_span_length(graph, muscle);
         let gain = before - len;
         let toward_torque = torque != 0.0 && dir.signum() == torque;
-        // Restore probe pose.
-        graph.parts[swing_idx].cells = saved_cells;
-        graph.parts[swing_idx].hinge_angle = saved_ang;
-        // Span shorten wins; otherwise accept a valid torque step even if the
-        // discrete length metric is flat (common for short side muscles).
+        for (id, cells, ang) in saved {
+            if let Some(idx) = graph.part_index(id) {
+                graph.parts[idx].cells = cells;
+                graph.parts[idx].hinge_angle = ang;
+            }
+        }
         if gain > 0.02 || (toward_torque && gain >= -0.25) {
             let score = gain + if toward_torque { 0.5 } else { 0.0 };
             let replace = best.map(|(_, s)| score > s).unwrap_or(true);
@@ -1579,7 +1904,7 @@ fn try_hinge_muscle_step(
         }
     }
     if let Some((ang, _)) = best {
-        return try_set_hinge_angle(graph, world, joint, ang);
+        return try_set_hinge_angle(graph, world, joint, ang, true);
     }
     false
 }
@@ -1668,7 +1993,75 @@ fn apply_gravity(graph: &mut BodyGraph, world: &mut World) {
                 continue;
             }
         }
+        let wet = assembly_wet_frac(graph, world, &movable);
+        if wet > 0.55 {
+            // Buoyancy: try to float up when the halo is mostly wet.
+            let _ = try_move_parts(graph, world, &movable, 0, 1);
+            continue;
+        }
+        if wet > 0.25 {
+            // Drag: sink slower in water.
+            if world.tick % 3 != 0 {
+                continue;
+            }
+        }
         let _ = try_move_parts(graph, world, &movable, 0, -1);
+    }
+}
+
+/// Coast free roots by discrete velocity, with stronger damping when wet.
+fn apply_inertia(graph: &mut BodyGraph, world: &mut World) {
+    let mut comps = joint_components(graph);
+    comps.sort_by_key(|c| c.iter().map(|&i| graph.parts[i].id).min().unwrap_or(0));
+    for mut indices in comps {
+        indices.sort_by_key(|&i| graph.parts[i].id);
+        if indices.iter().any(|&i| graph.parts[i].anchored) {
+            continue;
+        }
+        let movable: Vec<usize> = indices
+            .iter()
+            .copied()
+            .filter(|&i| graph.parts[i].kind == PartKind::Bone)
+            .collect();
+        if movable.is_empty() {
+            continue;
+        }
+        let root_idx = movable
+            .iter()
+            .copied()
+            .find(|&i| graph.parts[i].assembly_root)
+            .or_else(|| {
+                movable
+                    .iter()
+                    .copied()
+                    .find(|&i| !graph.parts[i].hinged)
+            });
+        let Some(ri) = root_idx else {
+            continue;
+        };
+        let (vx, vy) = (
+            graph.parts[ri].vel_x.clamp(-1, 1),
+            graph.parts[ri].vel_y.clamp(-1, 1),
+        );
+        if vx != 0 {
+            let _ = try_move_parts(graph, world, &movable, vx, 0);
+        }
+        if vy != 0 {
+            let _ = try_move_parts(graph, world, &movable, 0, vy);
+        }
+        let wet = assembly_wet_frac(graph, world, &movable);
+        let damp = if wet > 0.35 { 1 } else { 0 };
+        let p = &mut graph.parts[ri];
+        if p.vel_x > 0 {
+            p.vel_x = (p.vel_x - 1 - damp).max(0);
+        } else if p.vel_x < 0 {
+            p.vel_x = (p.vel_x + 1 + damp).min(0);
+        }
+        if p.vel_y > 0 {
+            p.vel_y = (p.vel_y - 1 - damp).max(0);
+        } else if p.vel_y < 0 {
+            p.vel_y = (p.vel_y + 1 + damp).min(0);
+        }
     }
 }
 
@@ -1677,11 +2070,14 @@ fn apply_gravity(graph: &mut BodyGraph, world: &mut World) {
 /// When `scripted_muscle` is true, open-loop sinusoid overwrites actuation.
 /// When false, actuation is left as set by the neural controller (or caller).
 /// Muscle forces always run when muscles exist so net-driven episodes move.
-/// Joints keep hinged bones attached to their fixture-rooted chain.
+/// Joints keep hinged bones attached; hydro displace/buoyancy/inertia couple
+/// bodies to the shared water CA.
 pub fn step_body(graph: &mut BodyGraph, world: &mut World, scripted_muscle: bool) {
     if graph.parts.is_empty() {
         return;
     }
+    // Keep free water out from under the skeleton so strokes have somewhere to push.
+    claim_body_volume(graph, world);
     if !graph.muscles.is_empty() {
         if scripted_muscle {
             script_muscles(graph, world.tick);
@@ -1690,7 +2086,9 @@ pub fn step_body(graph: &mut BodyGraph, world: &mut World, scripted_muscle: bool
     }
 
     apply_gravity(graph, world);
+    apply_inertia(graph, world);
     enforce_joints(graph, world);
+    claim_body_volume(graph, world);
     refresh_muscle_state(graph);
 }
 
