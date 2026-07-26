@@ -5,7 +5,7 @@ use wk_voxel::{Cell, ChunkCoord, World, CHUNK_CELLS_H, CHUNK_CELLS_W};
 
 use crate::body::{activate, step_body, ActivateError, BodyGraph};
 use crate::neural::StudioNet;
-use crate::physics::{tick_world_gated, StudioPhysicsConfig};
+use crate::physics::{enable_water_physics, tick_world_gated, StudioPhysicsConfig};
 use crate::tissue::{StudioBody, TissuePaint};
 use crate::train::apply_net;
 
@@ -143,7 +143,11 @@ impl StudioArena {
         }
         let cell = match material {
             MaterialId::Air => Cell::air(),
-            MaterialId::Water => Cell::water(),
+            MaterialId::Water => {
+                // dry_walk / body_only would otherwise leave columns unflowed.
+                enable_water_physics(&mut self.world, &mut self.physics);
+                Cell::water()
+            }
             other => Cell::solid(other),
         };
         self.world.set_cell(x, y, cell);
@@ -169,6 +173,9 @@ impl StudioArena {
 
     pub fn set_water_to(&mut self, water_to_y: Option<i32>) {
         self.cfg.water_to_y = water_to_y;
+        if water_to_y.is_some() {
+            enable_water_physics(&mut self.world, &mut self.physics);
+        }
         fill_interior_keep_terrain(&mut self.world, &self.cfg);
     }
 }
@@ -295,6 +302,23 @@ mod tests {
         assert!(
             arena.physics.scripted_muscle,
             "Enter must keep scripted flap until N/H"
+        );
+    }
+
+    #[test]
+    fn painting_water_enables_flow_even_on_dry_walk() {
+        let mut arena = StudioArena::new(ArenaConfig {
+            width: 64,
+            height: 64,
+            seed: 1,
+            water_to_y: None,
+        });
+        arena.physics = StudioPhysicsConfig::dry_walk();
+        assert!(!arena.physics.water_flow);
+        arena.paint_terrain(10, 10, MaterialId::Water);
+        assert!(
+            arena.physics.water_flow && arena.physics.ca_enabled && arena.physics.gravity,
+            "painting water must turn on flow physics"
         );
     }
 }

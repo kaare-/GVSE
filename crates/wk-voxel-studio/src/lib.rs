@@ -26,7 +26,9 @@ pub use export::{
 pub use ga::{evolve_morphology, mutate_paint, GaIndividual};
 pub use neural::StudioNet;
 pub use palette::{tissue_rgb, JOINT_SYMBOL};
-pub use physics::{tick_world_gated, StudioPhysicsConfig};
+pub use physics::{
+    enable_water_physics, tick_world_gated, wake_fluid_chunks, StudioPhysicsConfig,
+};
 pub use scenarios::{
     fin_hydro_arena, paint_fin_bench, paint_rough_terrain, paint_vertical_arm, rough_walk_arena,
     vertical_arm_arena,

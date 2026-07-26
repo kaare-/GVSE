@@ -53,9 +53,14 @@ what the scenario needs:
 | Preset | Typical gates |
 |--------|----------------|
 | `body_only` | CA off — morphology / net debug |
+| `sandbox` | gravity + water flow + grain (default paint bench) |
 | `dry_walk` | gravity + grain (+ repose); flow/seepage/failure off |
 | `hydro_fin` | gravity + water flow (+ optional seepage); failure off |
 | `full` | same as world demo CA path |
+
+Painting water (or `W` flood) calls `enable_water_physics` so columns
+do not sit unflowed under `dry_walk` / `body_only` (also re-wakes
+settled wet chunks).
 
 Karst / rain / clouds / temperature stay opt-in (off unless the
 scenario wires them). More toggles can land without changing rule code.

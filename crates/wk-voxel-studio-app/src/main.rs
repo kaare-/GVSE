@@ -6,7 +6,7 @@
 //! Left dock: clickable tissue + geology palette.
 //! Space pause · Enter activate · W flood/drain · R reset
 //! N net/scripted · H hill-climb · C continuous train · E export
-//! F1–F4 physics · F5 fin · F6 terrain · F7 vertical arm · F8 quarter-gate arm
+//! F1 body · F2 sandbox · F3 hydro · F4 full · F5 fin · F6 terrain · F7/F8 arms
 
 use macroquad::prelude::*;
 use std::path::PathBuf;
@@ -14,9 +14,9 @@ use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::Cell;
 use wk_voxel_studio::{
     encode_body, export_body_with_net, evolve_morphology, force_sensors_bridging_parts,
-    paint_fin_bench, paint_rough_terrain, paint_vertical_arm, tissue_rgb, ArenaConfig,
-    JointLimit, StudioArena, StudioPhysicsConfig, TissueKind, TrainingSession, ARENA_MAX,
-    ARENA_MIN, JOINT_RGB,
+    paint_fin_bench, paint_rough_terrain, paint_vertical_arm, tissue_rgb, wake_fluid_chunks,
+    ArenaConfig, JointLimit, StudioArena, StudioPhysicsConfig, TissueKind, TrainingSession,
+    ARENA_MAX, ARENA_MIN, JOINT_RGB,
 };
 
 const CELL_PX: f32 = 3.0;
@@ -200,6 +200,8 @@ fn overlay_rgb(arena: &StudioArena, x: i32, y: i32) -> Option<[u8; 3]> {
 fn preset_name(p: &StudioPhysicsConfig) -> &'static str {
     if !p.ca_enabled {
         "body_only"
+    } else if p.water_flow && p.grain && !p.failure && !p.seepage {
+        "sandbox"
     } else if p.water_flow && !p.grain && !p.failure {
         "hydro_fin"
     } else if p.grain && !p.water_flow {
@@ -406,13 +408,13 @@ fn clone_bench(arena: &StudioArena) -> StudioArena {
 #[macroquad::main("GVSE Studio — muscle / bone / neural")]
 async fn main() {
     let mut arena = StudioArena::new(ArenaConfig::default());
-    arena.physics = StudioPhysicsConfig::dry_walk();
+    arena.physics = StudioPhysicsConfig::sandbox();
     let mut paused = true;
     let mut layer = PaintLayer::Tissue;
     let mut tissue = TissueKind::Bone;
     let mut terrain = MaterialId::Sand;
     let mut water_on = false;
-    let mut status = String::from("dry arena — pick a brush on the left");
+    let mut status = String::from("sandbox — Space to run · water flows when painted");
     let mut train: Option<TrainingSession> = None;
     let mut continuous = false;
     let mut train_seed = 0x71A1_u64;
@@ -435,15 +437,18 @@ async fn main() {
             status = "physics: body_only".into();
         }
         if is_key_pressed(KeyCode::F2) {
-            arena.physics = StudioPhysicsConfig::dry_walk();
-            status = "physics: dry_walk".into();
+            arena.physics = StudioPhysicsConfig::sandbox();
+            wake_fluid_chunks(&mut arena.world);
+            status = "physics: sandbox (gravity+flow+grain)".into();
         }
         if is_key_pressed(KeyCode::F3) {
             arena.physics = StudioPhysicsConfig::hydro_fin();
+            wake_fluid_chunks(&mut arena.world);
             status = "physics: hydro_fin".into();
         }
         if is_key_pressed(KeyCode::F4) {
             arena.physics = StudioPhysicsConfig::full();
+            wake_fluid_chunks(&mut arena.world);
             status = "physics: full".into();
         }
         if is_key_pressed(KeyCode::F5) {
@@ -674,7 +679,7 @@ async fn main() {
                 None
             });
             status = if water_on {
-                "water fill on".into()
+                "water fill on (flow enabled)".into()
             } else {
                 "water drained".into()
             };

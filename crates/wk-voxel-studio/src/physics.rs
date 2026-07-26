@@ -6,7 +6,7 @@
 use wk_voxel::{
     apply_failure, apply_grain_fall_regions, apply_grain_repose_regions, apply_gravity_fall_regions,
     apply_seepage_regions, apply_water_flow_regions, clear_all_dirty, partition_checkerboard,
-    plan_active, set_parallel_enabled, FailureConfig, PerfConfig, World, FLOW_QUIET_AREA,
+    plan_active, set_parallel_enabled, FailureConfig, PerfConfig, Rect, World, FLOW_QUIET_AREA,
     FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
 };
 
@@ -29,8 +29,8 @@ pub struct StudioPhysicsConfig {
 
 impl Default for StudioPhysicsConfig {
     fn default() -> Self {
-        // General bench: solids settle, no ocean flow until opted in.
-        Self::dry_walk()
+        // Paint-friendly sandbox: solids settle and water can spread.
+        Self::sandbox()
     }
 }
 
@@ -50,6 +50,21 @@ impl StudioPhysicsConfig {
                 parallel_physics: true,
                 ..PerfConfig::default()
             },
+        }
+    }
+
+    /// General studio bench — gravity, lateral water flow, and grain.
+    pub fn sandbox() -> Self {
+        Self {
+            ca_enabled: true,
+            gravity: true,
+            water_flow: true,
+            seepage: false,
+            grain: true,
+            failure: false,
+            body_enabled: true,
+            scripted_muscle: true,
+            perf: PerfConfig::default(),
         }
     }
 
@@ -96,6 +111,31 @@ impl StudioPhysicsConfig {
             scripted_muscle: true,
             perf: PerfConfig::default(),
         }
+    }
+
+    /// Turn on the CA passes water needs (gravity + lateral flow).
+    pub fn ensure_water_physics(&mut self) {
+        self.ca_enabled = true;
+        self.gravity = true;
+        self.water_flow = true;
+    }
+}
+
+/// Re-dirty wet chunks so lateral flow runs after a dry/body-only settle.
+pub fn wake_fluid_chunks(world: &mut World) {
+    for chunk in world.chunks.values_mut() {
+        if chunk.has_wet_air {
+            chunk.dirty = Some(Rect::full());
+        }
+    }
+}
+
+/// Enable water CA gates and wake any settled fluid so it can spread.
+pub fn enable_water_physics(world: &mut World, cfg: &mut StudioPhysicsConfig) {
+    let already = cfg.ca_enabled && cfg.gravity && cfg.water_flow;
+    cfg.ensure_water_physics();
+    if !already {
+        wake_fluid_chunks(world);
     }
 }
 
@@ -186,5 +226,73 @@ mod tests {
         let t0 = w.tick;
         tick_world_gated(&mut w, &StudioPhysicsConfig::body_only());
         assert_eq!(w.tick, t0 + 1);
+    }
+
+    #[test]
+    fn sandbox_water_spreads_laterally() {
+        let mut w = World::new(2);
+        for cy in 0..2 {
+            for cx in 0..2 {
+                w.ensure_chunk(ChunkCoord::new(cx, cy));
+            }
+        }
+        // Floor + a water column with dry air beside it.
+        for x in 0..24 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..=6 {
+            w.set_cell(8, y, Cell::water());
+        }
+        let cfg = StudioPhysicsConfig::sandbox();
+        for _ in 0..80 {
+            tick_world_gated(&mut w, &cfg);
+        }
+        let mut wet_neighbors = 0usize;
+        for x in 0..24 {
+            if x == 8 {
+                continue;
+            }
+            if let Some(c) = w.get_cell(x, 1) {
+                if !c.sat.is_empty() {
+                    wet_neighbors += 1;
+                }
+            }
+        }
+        assert!(
+            wet_neighbors >= 2,
+            "sandbox flow should spread water sideways (wet seats={wet_neighbors})"
+        );
+    }
+
+    #[test]
+    fn dry_walk_stacks_until_flow_enabled() {
+        let mut w = World::new(2);
+        for cy in 0..2 {
+            for cx in 0..2 {
+                w.ensure_chunk(ChunkCoord::new(cx, cy));
+            }
+        }
+        for x in 0..24 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..=6 {
+            w.set_cell(8, y, Cell::water());
+        }
+        let mut cfg = StudioPhysicsConfig::dry_walk();
+        for _ in 0..40 {
+            tick_world_gated(&mut w, &cfg);
+        }
+        let stacked = (1..=6)
+            .filter(|&y| w.get_cell(8, y).is_some_and(|c| !c.sat.is_empty()))
+            .count();
+        assert!(stacked >= 4, "dry_walk keeps a tall wet column");
+        enable_water_physics(&mut w, &mut cfg);
+        for _ in 0..80 {
+            tick_world_gated(&mut w, &cfg);
+        }
+        let spread = (0..24)
+            .filter(|&x| x != 8 && w.get_cell(x, 1).is_some_and(|c| !c.sat.is_empty()))
+            .count();
+        assert!(spread >= 2, "enable_water_physics unlocks lateral flow");
     }
 }
