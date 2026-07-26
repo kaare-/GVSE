@@ -72,10 +72,13 @@ impl RigidPart {
 pub struct Joint {
     pub part_a: u32,
     pub part_b: u32,
-    /// Paint-space joint cell; world pivot follows the anchored side's offset.
+    /// Paint-space joint cell (rest pose).
     pub pivot: (i32, i32),
     pub limit: JointLimit,
-    /// Swinging bone id (hinged distal).
+    /// Parent link (closer to fixture root).
+    #[serde(default)]
+    pub parent_part: u32,
+    /// Child bone that rotates about this hinge.
     #[serde(default)]
     pub swing_part: u32,
     /// Swing-part cells relative to [`Self::pivot`] at rest (activate pose).
@@ -452,7 +455,9 @@ fn collect_joints(paint: &TissuePaint, owner: &HashMap<(i32, i32), u32>) -> Vec<
                 part_b: b,
                 pivot: (x, y),
                 limit,
-                swing_part: 0,
+                // u32::MAX = unset (0 is a valid part id).
+                parent_part: u32::MAX,
+                swing_part: u32::MAX,
                 local_cells: Vec::new(),
                 rest_angle: 0.0,
                 rest_radius: 1.0,
@@ -462,24 +467,58 @@ fn collect_joints(paint: &TissuePaint, owner: &HashMap<(i32, i32), u32>) -> Vec<
     joints
 }
 
+/// Graph distance from fixture-anchored roots along joints.
+fn part_root_dist(parts: &[RigidPart], joints: &[Joint]) -> HashMap<u32, u32> {
+    let mut dist: HashMap<u32, u32> = HashMap::new();
+    let mut q = VecDeque::new();
+    for p in parts {
+        if p.anchored {
+            dist.insert(p.id, 0);
+            q.push_back(p.id);
+        }
+    }
+    while let Some(id) = q.pop_front() {
+        let d = dist[&id];
+        for j in joints {
+            let other = if j.part_a == id {
+                j.part_b
+            } else if j.part_b == id {
+                j.part_a
+            } else {
+                continue;
+            };
+            if let std::collections::hash_map::Entry::Vacant(e) = dist.entry(other) {
+                e.insert(d + 1);
+                q.push_back(other);
+            }
+        }
+    }
+    dist
+}
+
 fn fill_joint_rest_poses(joints: &mut [Joint], parts: &[RigidPart]) {
+    let dist = part_root_dist(parts, joints);
     for j in joints.iter_mut() {
-        // Only fixture-rooted hinges get a rotation socket. Free-floating
-        // jointed pairs keep paint cells + shared translation.
-        let swing = parts
-            .iter()
-            .find(|p| p.id == j.part_a && p.hinged)
-            .or_else(|| parts.iter().find(|p| p.id == j.part_b && p.hinged));
-        let Some(p) = swing else {
+        let da = dist.get(&j.part_a).copied();
+        let db = dist.get(&j.part_b).copied();
+        let (parent_id, swing_id) = match (da, db) {
+            (Some(a), Some(b)) if a < b => (j.part_a, j.part_b),
+            (Some(a), Some(b)) if b < a => (j.part_b, j.part_a),
+            (Some(_), None) => (j.part_a, j.part_b),
+            (None, Some(_)) => (j.part_b, j.part_a),
+            _ => continue,
+        };
+        let Some(swing) = parts.iter().find(|p| p.id == swing_id && p.hinged) else {
             continue;
         };
-        j.swing_part = p.id;
-        j.local_cells = p
+        j.parent_part = parent_id;
+        j.swing_part = swing_id;
+        j.local_cells = swing
             .cells
             .iter()
             .map(|(x, y)| (*x - j.pivot.0, *y - j.pivot.1))
             .collect();
-        let (cx, cy) = p.centroid();
+        let (cx, cy) = swing.centroid();
         let (px, py) = (j.pivot.0 as f32, j.pivot.1 as f32);
         j.rest_angle = 0.0;
         j.rest_radius = (cx - px).hypot(cy - py).max(1.0);
@@ -816,24 +855,117 @@ fn chebyshev(a: (i32, i32), b: (i32, i32)) -> i32 {
     (a.0 - b.0).abs().max((a.1 - b.1).abs())
 }
 
-/// World-space hinge point: pinned to the anchored side (or average if free).
+fn joint_for_swing<'a>(graph: &'a BodyGraph, swing_id: u32) -> Option<&'a Joint> {
+    graph
+        .joints
+        .iter()
+        .find(|j| j.swing_part == swing_id && !j.local_cells.is_empty())
+}
+
+/// Sum of relative hinge angles from the fixture root through `part_id`.
+fn cumulative_angle(graph: &BodyGraph, part_id: u32) -> f32 {
+    let mut total = 0.0;
+    let mut cur = part_id;
+    for _ in 0..32 {
+        let Some(j) = joint_for_swing(graph, cur) else {
+            break;
+        };
+        let Some(idx) = graph.part_index(cur) else {
+            break;
+        };
+        total += graph.parts[idx].hinge_angle;
+        cur = j.parent_part;
+        if graph
+            .part_index(cur)
+            .is_some_and(|i| graph.parts[i].anchored)
+        {
+            break;
+        }
+    }
+    total
+}
+
+/// World-space hinge pivot — follows parent link pose in a serial chain.
 fn pivot_world(graph: &BodyGraph, joint: &Joint) -> (i32, i32) {
-    let ia = graph.part_index(joint.part_a);
-    let ib = graph.part_index(joint.part_b);
-    let (Some(ia), Some(ib)) = (ia, ib) else {
+    if joint.local_cells.is_empty() || joint.swing_part == u32::MAX {
+        return joint.pivot;
+    }
+    let Some(pi) = graph.part_index(joint.parent_part) else {
         return joint.pivot;
     };
-    let (ox, oy) = if graph.parts[ia].anchored {
-        (graph.parts[ia].offset_x, graph.parts[ia].offset_y)
-    } else if graph.parts[ib].anchored {
-        (graph.parts[ib].offset_x, graph.parts[ib].offset_y)
-    } else {
-        (
-            (graph.parts[ia].offset_x + graph.parts[ib].offset_x) / 2,
-            (graph.parts[ia].offset_y + graph.parts[ib].offset_y) / 2,
-        )
+    let parent = &graph.parts[pi];
+    if parent.anchored || !parent.hinged {
+        return (
+            joint.pivot.0 + parent.offset_x,
+            joint.pivot.1 + parent.offset_y,
+        );
+    }
+    let Some(pj) = joint_for_swing(graph, joint.parent_part) else {
+        return joint.pivot;
     };
-    (joint.pivot.0 + ox, joint.pivot.1 + oy)
+    let pp = pivot_world(graph, pj);
+    let parent_cum = cumulative_angle(graph, joint.parent_part);
+    let lx = (joint.pivot.0 - pj.pivot.0) as f32;
+    let ly = (joint.pivot.1 - pj.pivot.1) as f32;
+    let (s, c) = parent_cum.sin_cos();
+    (
+        pp.0 + (lx * c - ly * s).round() as i32,
+        pp.1 + (lx * s + ly * c).round() as i32,
+    )
+}
+
+/// Swing parts that must be re-posed after `root_swing` moves (self + children).
+fn chain_from(graph: &BodyGraph, root_swing: u32) -> Vec<u32> {
+    let dist = part_root_dist(&graph.parts, &graph.joints);
+    let root_d = dist.get(&root_swing).copied().unwrap_or(0);
+    let mut ids: Vec<u32> = graph
+        .joints
+        .iter()
+        .filter(|j| j.swing_part != u32::MAX && !j.local_cells.is_empty())
+        .filter(|j| {
+            let d = dist.get(&j.swing_part).copied().unwrap_or(0);
+            d >= root_d
+                && (j.swing_part == root_swing
+                    || is_descendant_of(graph, j.swing_part, root_swing))
+        })
+        .map(|j| j.swing_part)
+        .collect();
+    ids.sort_by_key(|id| dist.get(id).copied().unwrap_or(0));
+    ids.dedup();
+    if !ids.contains(&root_swing) {
+        ids.insert(0, root_swing);
+    }
+    ids
+}
+
+fn is_descendant_of(graph: &BodyGraph, part: u32, ancestor: u32) -> bool {
+    let mut cur = part;
+    for _ in 0..32 {
+        let Some(j) = joint_for_swing(graph, cur) else {
+            return false;
+        };
+        if j.parent_part == ancestor {
+            return true;
+        }
+        cur = j.parent_part;
+        if graph
+            .part_index(cur)
+            .is_some_and(|i| graph.parts[i].anchored)
+        {
+            return false;
+        }
+    }
+    false
+}
+
+fn stamp_swing_cells(graph: &BodyGraph, joint: &Joint) -> Option<Vec<(i32, i32)>> {
+    let pivot = pivot_world(graph, joint);
+    let cum = cumulative_angle(graph, joint.swing_part);
+    let cells = rotate_local_cells(&joint.local_cells, pivot, cum);
+    if cells.is_empty() || !cells.iter().any(|&c| chebyshev(c, pivot) <= 1) {
+        return None;
+    }
+    Some(cells)
 }
 
 #[cfg(test)]
@@ -844,18 +976,18 @@ fn part_touches_pivot(part: &RigidPart, pivot: (i32, i32)) -> bool {
 #[cfg(test)]
 fn joints_satisfied(graph: &BodyGraph) -> bool {
     graph.joints.iter().all(|j| {
-        let Some(ia) = graph.part_index(j.part_a) else {
+        if j.local_cells.is_empty() {
             return true;
-        };
-        let Some(ib) = graph.part_index(j.part_b) else {
+        }
+        let Some(si) = graph.part_index(j.swing_part) else {
             return true;
         };
         let p = pivot_world(graph, j);
-        part_touches_pivot(&graph.parts[ia], p) && part_touches_pivot(&graph.parts[ib], p)
+        part_touches_pivot(&graph.parts[si], p)
     })
 }
 
-/// Apply a hinge angle; rewrites swing-part cells from local×rotation.
+/// Apply a relative hinge angle; re-poses this link and all distal children.
 fn try_set_hinge_angle(
     graph: &mut BodyGraph,
     world: &World,
@@ -868,34 +1000,68 @@ fn try_set_hinge_angle(
     let Some(swing_idx) = graph.part_index(joint.swing_part) else {
         return false;
     };
-    if !graph.parts[swing_idx].hinged {
+    if !graph.parts[swing_idx].hinged || !hinge_angle_within_limit(joint, angle) {
         return false;
     }
-    if !hinge_angle_within_limit(joint, angle) {
-        return false;
-    }
-    let pivot = pivot_world(graph, joint);
-    let new_cells = rotate_local_cells(&joint.local_cells, pivot, angle);
-    if new_cells.is_empty() {
-        return false;
-    }
-    // Must keep a socket cell on the pivot ring (no detach / slide-away).
-    if !new_cells.iter().any(|&c| chebyshev(c, pivot) <= 1) {
-        return false;
-    }
+    let affected = chain_from(graph, joint.swing_part);
+    let saved: Vec<(u32, Vec<(i32, i32)>, f32)> = affected
+        .iter()
+        .filter_map(|&id| {
+            let idx = graph.part_index(id)?;
+            Some((
+                id,
+                graph.parts[idx].cells.clone(),
+                graph.parts[idx].hinge_angle,
+            ))
+        })
+        .collect();
+    graph.parts[swing_idx].hinge_angle = angle;
+
     let mut occ = occupied(graph);
-    for c in graph.parts[swing_idx].world_cells() {
-        occ.remove(&c);
-    }
-    for &(x, y) in &new_cells {
-        if !cell_passable(world, x, y) || occ.contains(&(x, y)) {
-            return false;
+    for &(id, _, _) in &saved {
+        if let Some(idx) = graph.part_index(id) {
+            for c in graph.parts[idx].world_cells() {
+                occ.remove(&c);
+            }
         }
     }
-    graph.parts[swing_idx].cells = new_cells;
-    graph.parts[swing_idx].offset_x = 0;
-    graph.parts[swing_idx].offset_y = 0;
-    graph.parts[swing_idx].hinge_angle = angle;
+
+    let snaps: Vec<Joint> = affected
+        .iter()
+        .filter_map(|&id| joint_for_swing(graph, id).cloned())
+        .collect();
+    for j in &snaps {
+        let Some(new_cells) = stamp_swing_cells(graph, j) else {
+            // revert
+            for (id, cells, ang) in saved {
+                if let Some(idx) = graph.part_index(id) {
+                    graph.parts[idx].cells = cells;
+                    graph.parts[idx].hinge_angle = ang;
+                }
+            }
+            return false;
+        };
+        for &(x, y) in &new_cells {
+            if !cell_passable(world, x, y) || occ.contains(&(x, y)) {
+                for (id, cells, ang) in saved {
+                    if let Some(idx) = graph.part_index(id) {
+                        graph.parts[idx].cells = cells;
+                        graph.parts[idx].hinge_angle = ang;
+                    }
+                }
+                return false;
+            }
+        }
+        let Some(idx) = graph.part_index(j.swing_part) else {
+            continue;
+        };
+        for c in &new_cells {
+            occ.insert(*c);
+        }
+        graph.parts[idx].cells = new_cells;
+        graph.parts[idx].offset_x = 0;
+        graph.parts[idx].offset_y = 0;
+    }
     true
 }
 
@@ -907,23 +1073,23 @@ fn hinge_angle_within_limit(joint: &Joint, angle: f32) -> bool {
     angle.abs() <= max + 0.02
 }
 
-/// Re-stamp hinged poses from their stored angles (keeps sockets on the pivot).
+/// Re-stamp all hinged links root→leaf so child pivots follow parents.
 fn enforce_joints(graph: &mut BodyGraph, _world: &mut World) {
-    let snaps: Vec<Joint> = graph.joints.clone();
-    for j in snaps {
-        if j.local_cells.is_empty() {
-            continue;
-        }
-        let Some(idx) = graph.part_index(j.swing_part) else {
-            continue;
-        };
-        let ang = graph.parts[idx].hinge_angle;
-        let pivot = pivot_world(graph, &j);
-        let cells = rotate_local_cells(&j.local_cells, pivot, ang);
-        if cells.iter().any(|&c| chebyshev(c, pivot) <= 1) {
-            graph.parts[idx].cells = cells;
-            graph.parts[idx].offset_x = 0;
-            graph.parts[idx].offset_y = 0;
+    let dist = part_root_dist(&graph.parts, &graph.joints);
+    let mut order: Vec<Joint> = graph
+        .joints
+        .iter()
+        .filter(|j| !j.local_cells.is_empty())
+        .cloned()
+        .collect();
+    order.sort_by_key(|j| dist.get(&j.swing_part).copied().unwrap_or(0));
+    for j in order {
+        if let Some(cells) = stamp_swing_cells(graph, &j) {
+            if let Some(idx) = graph.part_index(j.swing_part) {
+                graph.parts[idx].cells = cells;
+                graph.parts[idx].offset_x = 0;
+                graph.parts[idx].offset_y = 0;
+            }
         }
     }
 }
@@ -1036,20 +1202,29 @@ pub fn script_muscles(graph: &mut BodyGraph, tick: u64) {
 
 /// World cells for a muscle blob (rotates with its hinged bone around the pivot).
 fn muscle_world_cells(graph: &BodyGraph, m: &Muscle) -> Vec<(i32, i32)> {
-    for &id in &[m.part_a, m.part_b] {
-        let Some(p) = graph.parts.iter().find(|p| p.id == id && p.hinged) else {
-            continue;
-        };
-        let Some(j) = graph.joints.iter().find(|j| j.swing_part == p.id) else {
-            continue;
-        };
-        let pivot = pivot_world(graph, j);
-        let local: Vec<(i32, i32)> = m
-            .cells
-            .iter()
-            .map(|(x, y)| (*x - j.pivot.0, *y - j.pivot.1))
-            .collect();
-        return rotate_local_cells(&local, pivot, p.hinge_angle);
+    let dist = part_root_dist(&graph.parts, &graph.joints);
+    // Prefer the more distal hinged attachment so child-link muscles follow the chain.
+    let mut hinged_ids: Vec<u32> = [m.part_a, m.part_b]
+        .into_iter()
+        .filter(|&id| {
+            graph
+                .parts
+                .iter()
+                .any(|p| p.id == id && p.hinged && joint_for_swing(graph, id).is_some())
+        })
+        .collect();
+    hinged_ids.sort_by_key(|id| std::cmp::Reverse(dist.get(id).copied().unwrap_or(0)));
+    if let Some(&id) = hinged_ids.first() {
+        if let Some(j) = joint_for_swing(graph, id) {
+            let pivot = pivot_world(graph, j);
+            let cum = cumulative_angle(graph, id);
+            let local: Vec<(i32, i32)> = m
+                .cells
+                .iter()
+                .map(|(x, y)| (*x - j.pivot.0, *y - j.pivot.1))
+                .collect();
+            return rotate_local_cells(&local, pivot, cum);
+        }
     }
     for &id in &[m.part_a, m.part_b] {
         if let Some(p) = graph
