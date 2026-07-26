@@ -23,7 +23,11 @@ pub enum ActivateError {
     Empty,
 }
 
-/// One rigid connected component in paint space, plus live translation.
+/// One rigid connected component in paint space, plus live pose.
+///
+/// Free bones translate via `offset_*`. Hinged bones keep `offset_*=0` and
+/// store absolute cells rewritten from [`Joint::local_cells`] × `hinge_angle`
+/// around the live pivot (true articulation — not sideways slide).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RigidPart {
     pub id: u32,
@@ -36,6 +40,9 @@ pub struct RigidPart {
     /// Joint-linked to an anchored part — no gravity, may articulate.
     #[serde(default)]
     pub hinged: bool,
+    /// Radians from rest pose for hinged bones (0 = as painted).
+    #[serde(default)]
+    pub hinge_angle: f32,
 }
 
 impl RigidPart {
@@ -68,7 +75,13 @@ pub struct Joint {
     /// Paint-space joint cell; world pivot follows the anchored side's offset.
     pub pivot: (i32, i32),
     pub limit: JointLimit,
-    /// Atan2 of the swinging part's centroid relative to the pivot at activate.
+    /// Swinging bone id (hinged distal).
+    #[serde(default)]
+    pub swing_part: u32,
+    /// Swing-part cells relative to [`Self::pivot`] at rest (activate pose).
+    #[serde(default)]
+    pub local_cells: Vec<(i32, i32)>,
+    /// Unused historically; angle delta lives on [`RigidPart::hinge_angle`].
     #[serde(default)]
     pub rest_angle: f32,
     /// Centroid distance from pivot to the swinging part at activate.
@@ -79,6 +92,9 @@ pub struct Joint {
 fn default_rest_radius() -> f32 {
     1.0
 }
+
+/// Discrete hinge step (~12°).
+const HINGE_STEP: f32 = 0.22;
 
 /// Contractile link — command + proprioceptive feedback.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -208,10 +224,9 @@ impl BodyGraph {
             }
         }
         for m in &self.muscles {
-            let (ox, oy) = muscle_draw_offset(self, m);
-            if m.cells
-                .iter()
-                .any(|&(x, y)| x + ox == gx && y + oy == gy)
+            if muscle_world_cells(self, m)
+                .into_iter()
+                .any(|(x, y)| x == gx && y == gy)
             {
                 return Some(TissueKind::Muscle);
             }
@@ -229,33 +244,11 @@ impl BodyGraph {
         None
     }
 
-    /// Signed angle of the swinging bone relative to joint rest (radians).
+    /// Signed hinge angle of the swinging bone (radians from rest).
     pub fn joint_angle_delta(&self, joint_idx: usize) -> Option<f32> {
         let j = self.joints.get(joint_idx)?;
-        let swing = self.swing_part_for_joint(j)?;
-        let p = pivot_world(self, j);
-        let ang = part_angle_at(self, swing, p);
-        Some(ang - j.rest_angle)
-    }
-
-    fn swing_part_for_joint(&self, j: &Joint) -> Option<usize> {
-        let ia = self.part_index(j.part_a)?;
-        let ib = self.part_index(j.part_b)?;
-        if self.parts[ia].hinged && !self.parts[ib].hinged {
-            Some(ia)
-        } else if self.parts[ib].hinged && !self.parts[ia].hinged {
-            Some(ib)
-        } else if !self.parts[ia].anchored && self.parts[ib].anchored {
-            Some(ia)
-        } else if !self.parts[ib].anchored && self.parts[ia].anchored {
-            Some(ib)
-        } else if !self.parts[ia].anchored {
-            Some(ia)
-        } else if !self.parts[ib].anchored {
-            Some(ib)
-        } else {
-            None
-        }
+        let swing = self.part_index(j.swing_part)?;
+        Some(self.parts[swing].hinge_angle)
     }
 
     fn part_index(&self, id: u32) -> Option<usize> {
@@ -300,6 +293,7 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
                 offset_y: 0,
                 anchored: part_kind == PartKind::Fixture,
                 hinged: false,
+                hinge_angle: 0.0,
             });
         }
     }
@@ -458,6 +452,8 @@ fn collect_joints(paint: &TissuePaint, owner: &HashMap<(i32, i32), u32>) -> Vec<
                 part_b: b,
                 pivot: (x, y),
                 limit,
+                swing_part: 0,
+                local_cells: Vec::new(),
                 rest_angle: 0.0,
                 rest_radius: 1.0,
             });
@@ -468,20 +464,45 @@ fn collect_joints(paint: &TissuePaint, owner: &HashMap<(i32, i32), u32>) -> Vec<
 
 fn fill_joint_rest_poses(joints: &mut [Joint], parts: &[RigidPart]) {
     for j in joints.iter_mut() {
+        // Only fixture-rooted hinges get a rotation socket. Free-floating
+        // jointed pairs keep paint cells + shared translation.
         let swing = parts
             .iter()
             .find(|p| p.id == j.part_a && p.hinged)
-            .or_else(|| parts.iter().find(|p| p.id == j.part_b && p.hinged))
-            .or_else(|| parts.iter().find(|p| p.id == j.part_a && !p.anchored))
-            .or_else(|| parts.iter().find(|p| p.id == j.part_b && !p.anchored));
+            .or_else(|| parts.iter().find(|p| p.id == j.part_b && p.hinged));
         let Some(p) = swing else {
             continue;
         };
+        j.swing_part = p.id;
+        j.local_cells = p
+            .cells
+            .iter()
+            .map(|(x, y)| (*x - j.pivot.0, *y - j.pivot.1))
+            .collect();
         let (cx, cy) = p.centroid();
         let (px, py) = (j.pivot.0 as f32, j.pivot.1 as f32);
-        j.rest_angle = (cy - py).atan2(cx - px);
+        j.rest_angle = 0.0;
         j.rest_radius = (cx - px).hypot(cy - py).max(1.0);
     }
+}
+
+fn rotate_local_cells(
+    local: &[(i32, i32)],
+    pivot: (i32, i32),
+    angle: f32,
+) -> Vec<(i32, i32)> {
+    let (s, c) = angle.sin_cos();
+    let mut out: Vec<(i32, i32)> = local
+        .iter()
+        .map(|&(lx, ly)| {
+            let fx = lx as f32 * c - ly as f32 * s;
+            let fy = lx as f32 * s + ly as f32 * c;
+            (pivot.0 + fx.round() as i32, pivot.1 + fy.round() as i32)
+        })
+        .collect();
+    out.sort_unstable();
+    out.dedup();
+    out
 }
 
 fn collect_muscles(
@@ -711,7 +732,8 @@ fn try_move_part(
     if dx == 0 && dy == 0 {
         return true;
     }
-    if graph.parts[idx].anchored {
+    if graph.parts[idx].anchored || graph.parts[idx].hinged {
+        // Hinged bones articulate via [`try_set_hinge_angle`], not translation.
         return false;
     }
     let cells: Vec<(i32, i32)> = graph.parts[idx].world_cells().collect();
@@ -814,10 +836,12 @@ fn pivot_world(graph: &BodyGraph, joint: &Joint) -> (i32, i32) {
     (joint.pivot.0 + ox, joint.pivot.1 + oy)
 }
 
+#[cfg(test)]
 fn part_touches_pivot(part: &RigidPart, pivot: (i32, i32)) -> bool {
     part.world_cells().any(|c| chebyshev(c, pivot) <= 1)
 }
 
+#[cfg(test)]
 fn joints_satisfied(graph: &BodyGraph) -> bool {
     graph.joints.iter().all(|j| {
         let Some(ia) = graph.part_index(j.part_a) else {
@@ -831,61 +855,75 @@ fn joints_satisfied(graph: &BodyGraph) -> bool {
     })
 }
 
-/// Move a part, then revert if any joint hinge would break.
-fn try_move_part_hinged(
+/// Apply a hinge angle; rewrites swing-part cells from local×rotation.
+fn try_set_hinge_angle(
     graph: &mut BodyGraph,
-    world: &mut World,
-    idx: usize,
-    dx: i32,
-    dy: i32,
+    world: &World,
+    joint: &Joint,
+    angle: f32,
 ) -> bool {
-    if !try_move_part(graph, world, idx, dx, dy) {
+    if joint.local_cells.is_empty() {
         return false;
     }
-    if joints_satisfied(graph) {
-        return true;
+    let Some(swing_idx) = graph.part_index(joint.swing_part) else {
+        return false;
+    };
+    if !graph.parts[swing_idx].hinged {
+        return false;
     }
-    // Revert translation (ignore hydro undo — sat nudge is cosmetic).
-    graph.parts[idx].offset_x -= dx;
-    graph.parts[idx].offset_y -= dy;
-    false
+    if !hinge_angle_within_limit(joint, angle) {
+        return false;
+    }
+    let pivot = pivot_world(graph, joint);
+    let new_cells = rotate_local_cells(&joint.local_cells, pivot, angle);
+    if new_cells.is_empty() {
+        return false;
+    }
+    // Must keep a socket cell on the pivot ring (no detach / slide-away).
+    if !new_cells.iter().any(|&c| chebyshev(c, pivot) <= 1) {
+        return false;
+    }
+    let mut occ = occupied(graph);
+    for c in graph.parts[swing_idx].world_cells() {
+        occ.remove(&c);
+    }
+    for &(x, y) in &new_cells {
+        if !cell_passable(world, x, y) || occ.contains(&(x, y)) {
+            return false;
+        }
+    }
+    graph.parts[swing_idx].cells = new_cells;
+    graph.parts[swing_idx].offset_x = 0;
+    graph.parts[swing_idx].offset_y = 0;
+    graph.parts[swing_idx].hinge_angle = angle;
+    true
 }
 
-/// Pull separated parts back toward the hinge (repairs fall-off / fly-off).
-fn enforce_joints(graph: &mut BodyGraph, world: &mut World) {
-    for _ in 0..6 {
-        if joints_satisfied(graph) {
-            return;
+fn hinge_angle_within_limit(joint: &Joint, angle: f32) -> bool {
+    if matches!(joint.limit, JointLimit::Full) {
+        return true;
+    }
+    let max = joint.limit.max_turns() * std::f32::consts::TAU;
+    angle.abs() <= max + 0.02
+}
+
+/// Re-stamp hinged poses from their stored angles (keeps sockets on the pivot).
+fn enforce_joints(graph: &mut BodyGraph, _world: &mut World) {
+    let snaps: Vec<Joint> = graph.joints.clone();
+    for j in snaps {
+        if j.local_cells.is_empty() {
+            continue;
         }
-        let snaps: Vec<Joint> = graph.joints.clone();
-        let mut progressed = false;
-        for j in snaps {
-            let p = pivot_world(graph, &j);
-            let Some(ia) = graph.part_index(j.part_a) else {
-                continue;
-            };
-            let Some(ib) = graph.part_index(j.part_b) else {
-                continue;
-            };
-            for idx in [ia, ib] {
-                if graph.parts[idx].anchored {
-                    continue;
-                }
-                if part_touches_pivot(&graph.parts[idx], p) {
-                    continue;
-                }
-                let (cx, cy) = graph.parts[idx].centroid();
-                let dx = (p.0 as f32 - cx).signum() as i32;
-                let dy = (p.1 as f32 - cy).signum() as i32;
-                if dx != 0 && try_move_part(graph, world, idx, dx, 0) {
-                    progressed = true;
-                } else if dy != 0 && try_move_part(graph, world, idx, 0, dy) {
-                    progressed = true;
-                }
-            }
-        }
-        if !progressed {
-            break;
+        let Some(idx) = graph.part_index(j.swing_part) else {
+            continue;
+        };
+        let ang = graph.parts[idx].hinge_angle;
+        let pivot = pivot_world(graph, &j);
+        let cells = rotate_local_cells(&j.local_cells, pivot, ang);
+        if cells.iter().any(|&c| chebyshev(c, pivot) <= 1) {
+            graph.parts[idx].cells = cells;
+            graph.parts[idx].offset_x = 0;
+            graph.parts[idx].offset_y = 0;
         }
     }
 }
@@ -996,54 +1034,40 @@ pub fn script_muscles(graph: &mut BodyGraph, tick: u64) {
     }
 }
 
-fn muscle_draw_offset(graph: &BodyGraph, m: &Muscle) -> (i32, i32) {
+/// World cells for a muscle blob (rotates with its hinged bone around the pivot).
+fn muscle_world_cells(graph: &BodyGraph, m: &Muscle) -> Vec<(i32, i32)> {
+    for &id in &[m.part_a, m.part_b] {
+        let Some(p) = graph.parts.iter().find(|p| p.id == id && p.hinged) else {
+            continue;
+        };
+        let Some(j) = graph.joints.iter().find(|j| j.swing_part == p.id) else {
+            continue;
+        };
+        let pivot = pivot_world(graph, j);
+        let local: Vec<(i32, i32)> = m
+            .cells
+            .iter()
+            .map(|(x, y)| (*x - j.pivot.0, *y - j.pivot.1))
+            .collect();
+        return rotate_local_cells(&local, pivot, p.hinge_angle);
+    }
     for &id in &[m.part_a, m.part_b] {
         if let Some(p) = graph
             .parts
             .iter()
-            .find(|p| p.id == id && (p.hinged || (!p.anchored && p.kind == PartKind::Bone)))
+            .find(|p| p.id == id && !p.anchored && p.kind == PartKind::Bone)
         {
-            return (p.offset_x, p.offset_y);
+            return m
+                .cells
+                .iter()
+                .map(|(x, y)| (*x + p.offset_x, *y + p.offset_y))
+                .collect();
         }
     }
-    (0, 0)
+    m.cells.clone()
 }
 
-fn part_angle_at(graph: &BodyGraph, part_idx: usize, pivot: (i32, i32)) -> f32 {
-    let (cx, cy) = graph.parts[part_idx].centroid();
-    (cy - pivot.1 as f32).atan2(cx - pivot.0 as f32)
-}
-
-fn part_radius_at(graph: &BodyGraph, part_idx: usize, pivot: (i32, i32)) -> f32 {
-    let (cx, cy) = graph.parts[part_idx].centroid();
-    (cx - pivot.0 as f32).hypot(cy - pivot.1 as f32)
-}
-
-fn joint_gates_ok(graph: &BodyGraph, joint: &Joint, swing_idx: usize) -> bool {
-    let p = pivot_world(graph, joint);
-    if !part_touches_pivot(&graph.parts[swing_idx], p) {
-        return false;
-    }
-    let r = part_radius_at(graph, swing_idx, p);
-    // Allow slight arc stretch, but never collapse into the pivot.
-    if r < joint.rest_radius - 0.35 {
-        return false;
-    }
-    if r > joint.rest_radius + 1.35 {
-        return false;
-    }
-    if matches!(joint.limit, JointLimit::Full) {
-        return true;
-    }
-    let ang = part_angle_at(graph, swing_idx, p);
-    let max = joint.limit.max_turns() * std::f32::consts::TAU;
-    // Discrete grid slack (~25°) so a single cell step is not rejected.
-    (ang - joint.rest_angle).abs() <= max + 0.45
-}
-
-/// Effective contractile length: muscle tissue → the non-swinging attachment.
-/// Muscle cells ride the hinged bone's offset, so a side muscle shortens when
-/// the limb swings toward that side's inner arc.
+/// Contractile length: rotated muscle tissue → non-swinging attachment.
 fn muscle_span_length(graph: &BodyGraph, m: &Muscle) -> f32 {
     let Some(ia) = graph.part_index(m.part_a) else {
         return 0.0;
@@ -1062,10 +1086,13 @@ fn muscle_span_length(graph: &BodyGraph, m: &Muscle) -> f32 {
     } else {
         ib
     };
-    let (ox, oy) = muscle_draw_offset(graph, m);
-    let n = m.cells.len().max(1) as f32;
-    let mx = m.cells.iter().map(|c| (c.0 + ox) as f32).sum::<f32>() / n;
-    let my = m.cells.iter().map(|c| (c.1 + oy) as f32).sum::<f32>() / n;
+    let cells = muscle_world_cells(graph, m);
+    if cells.is_empty() {
+        return 0.0;
+    }
+    let n = cells.len() as f32;
+    let mx = cells.iter().map(|c| c.0 as f32).sum::<f32>() / n;
+    let my = cells.iter().map(|c| c.1 as f32).sum::<f32>() / n;
     let mut best = f32::MAX;
     for (x, y) in graph.parts[other].world_cells() {
         best = best.min((mx - x as f32).hypot(my - y as f32));
@@ -1083,93 +1110,75 @@ fn shared_joint<'a>(graph: &'a BodyGraph, a: u32, b: u32) -> Option<&'a Joint> {
     })
 }
 
-/// Hinge step: try cardinal moves, keep radius/angle gates, shorten this muscle.
+/// Rotate the hinge ±STEP; keep the pose that shortens this muscle most.
 fn try_hinge_muscle_step(
     graph: &mut BodyGraph,
-    world: &mut World,
-    move_idx: usize,
+    world: &World,
     joint: &Joint,
     muscle: &Muscle,
 ) -> bool {
+    let Some(swing_idx) = graph.part_index(joint.swing_part) else {
+        return false;
+    };
+    let current = graph.parts[swing_idx].hinge_angle;
     let before = muscle_span_length(graph, muscle);
-    let mut best: Option<(i32, i32, f32)> = None;
-    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
-        if !try_move_part(graph, world, move_idx, dx, dy) {
+    let mut best: Option<(f32, f32)> = None; // angle, gain
+    for dir in [HINGE_STEP, -HINGE_STEP] {
+        let cand = current + dir;
+        let saved_cells = graph.parts[swing_idx].cells.clone();
+        let saved_ang = graph.parts[swing_idx].hinge_angle;
+        if !try_set_hinge_angle(graph, world, joint, cand) {
             continue;
         }
-        let ok = joints_satisfied(graph) && joint_gates_ok(graph, joint, move_idx);
         let len = muscle_span_length(graph, muscle);
-        graph.parts[move_idx].offset_x -= dx;
-        graph.parts[move_idx].offset_y -= dy;
-        if !ok {
-            continue;
-        }
-        // Must shorten this muscle (true contraction), not slide into the pivot.
         let gain = before - len;
-        if gain > 0.05 {
-            let replace = best.map(|(_, _, g)| gain > g).unwrap_or(true);
+        // Restore probe pose.
+        graph.parts[swing_idx].cells = saved_cells;
+        graph.parts[swing_idx].hinge_angle = saved_ang;
+        if gain > 0.02 {
+            let replace = best.map(|(_, g)| gain > g).unwrap_or(true);
             if replace {
-                best = Some((dx, dy, gain));
+                best = Some((cand, gain));
             }
         }
     }
-    if let Some((dx, dy, _)) = best {
-        if !try_move_part(graph, world, move_idx, dx, dy) {
-            return false;
-        }
-        if joints_satisfied(graph) && joint_gates_ok(graph, joint, move_idx) {
-            return true;
-        }
-        graph.parts[move_idx].offset_x -= dx;
-        graph.parts[move_idx].offset_y -= dy;
-        return false;
+    if let Some((ang, _)) = best {
+        return try_set_hinge_angle(graph, world, joint, ang);
     }
     false
 }
 
-/// Apply muscle contraction as hinge swings (or linear pulls without a joint).
+/// Apply muscle contraction as hinge rotations (or linear pulls without a joint).
 fn apply_muscle_forces(graph: &mut BodyGraph, world: &mut World) {
-    let pulls: Vec<(usize, f32)> = graph
+    let pulls: Vec<usize> = graph
         .muscles
         .iter()
         .enumerate()
         .filter(|(_, m)| m.actuation >= 0.55)
-        .map(|(i, m)| (i, m.actuation))
+        .map(|(i, _)| i)
         .collect();
-    for (mi, _act) in pulls {
+    for mi in pulls {
         let (a, b) = {
             let m = &graph.muscles[mi];
             (m.part_a, m.part_b)
         };
+        if let Some(j) = shared_joint(graph, a, b).cloned() {
+            let muscle = graph.muscles[mi].clone();
+            let _ = try_hinge_muscle_step(graph, world, &j, &muscle);
+            continue;
+        }
+
         let (ia, ib) = match (graph.part_index(a), graph.part_index(b)) {
             (Some(ia), Some(ib)) => (ia, ib),
             _ => continue,
         };
-        let move_idx = if graph.parts[ia].hinged && !graph.parts[ib].hinged {
+        let move_idx = if !graph.parts[ia].anchored && !graph.parts[ia].hinged {
             ia
-        } else if graph.parts[ib].hinged && !graph.parts[ia].hinged {
+        } else if !graph.parts[ib].anchored && !graph.parts[ib].hinged {
             ib
-        } else if !graph.parts[ia].anchored && graph.parts[ib].anchored {
-            ia
-        } else if graph.parts[ia].anchored && !graph.parts[ib].anchored {
-            ib
-        } else if !graph.parts[ia].anchored && !graph.parts[ib].anchored {
-            if graph.parts[ia].id > graph.parts[ib].id {
-                ia
-            } else {
-                ib
-            }
         } else {
             continue;
         };
-
-        if let Some(j) = shared_joint(graph, a, b).cloned() {
-            let muscle = graph.muscles[mi].clone();
-            let _ = try_hinge_muscle_step(graph, world, move_idx, &j, &muscle);
-            continue;
-        }
-
-        // No shared hinge — linear pull toward nearest cell of the other part.
         let toward_idx = if move_idx == ia { ib } else { ia };
         let (mx, my) = graph.parts[move_idx].centroid();
         let mut best = graph.parts[toward_idx].centroid();
@@ -1183,18 +1192,10 @@ fn apply_muscle_forces(graph: &mut BodyGraph, world: &mut World) {
         }
         let dx = (best.0 - mx).signum() as i32;
         let dy = (best.1 - my).signum() as i32;
-        let ax = (best.0 - mx).abs();
-        let ay = (best.1 - my).abs();
-        if ay >= ax {
-            if dy != 0 {
-                let _ = try_move_part_hinged(graph, world, move_idx, 0, dy);
-            } else if dx != 0 {
-                let _ = try_move_part_hinged(graph, world, move_idx, dx, 0);
-            }
-        } else if dx != 0 {
-            let _ = try_move_part_hinged(graph, world, move_idx, dx, 0);
+        if dx != 0 {
+            let _ = try_move_part(graph, world, move_idx, dx, 0);
         } else if dy != 0 {
-            let _ = try_move_part_hinged(graph, world, move_idx, 0, dy);
+            let _ = try_move_part(graph, world, move_idx, 0, dy);
         }
     }
 }
@@ -1386,75 +1387,32 @@ mod tests {
 
     #[test]
     fn vertical_arm_swings_not_compresses() {
-        let mut arena = StudioArena::new(ArenaConfig {
-            width: 32,
-            height: 48,
-            seed: 21,
-            water_to_y: None,
-        });
-        arena.physics = StudioPhysicsConfig::body_only();
-        for x in 8..20 {
-            arena.body.paint.set(x, 40, TissueKind::Fixture);
-        }
-        for y in 28..40 {
-            arena.body.paint.set(12, y as u32, TissueKind::Fixture);
-        }
-        arena.body.paint.set(12, 30, TissueKind::ForceSensor);
-        arena.body.paint.set(12, 27, TissueKind::Bone);
-        arena.body.paint.set(12, 26, TissueKind::Bone);
-        arena.body.paint.set(12, 25, TissueKind::JointHalf);
-        arena.body.paint.set(12, 24, TissueKind::Bone);
-        arena.body.paint.set(12, 23, TissueKind::Bone);
-        arena.body.paint.set(12, 22, TissueKind::Bone);
-        // Bilateral antagonists (script phases them apart).
-        for y in 23..=25 {
-            arena.body.paint.set(13, y, TissueKind::Muscle);
-            arena.body.paint.set(11, y, TissueKind::Muscle);
-        }
-
+        use crate::scenarios::vertical_arm_arena;
+        let mut arena = vertical_arm_arena(JointLimit::Half);
+        arena.physics.scripted_muscle = true;
         let g = arena.activate().unwrap();
         assert!(g.joints.len() >= 1);
         assert!(g.muscles.len() >= 2);
-        let distal_id = g
-            .parts
-            .iter()
-            .find(|p| p.kind == PartKind::Bone && p.hinged)
-            .map(|p| p.id)
-            .unwrap();
-        let y0 = g.parts.iter().find(|p| p.id == distal_id).unwrap().offset_y;
-        let mut saw_swing = false;
-        let mut max_up = 0i32;
+        assert!(!g.joints[0].local_cells.is_empty());
+        let distal_id = g.joints[0].swing_part;
+        let mut max_abs_angle = 0.0f32;
         for _ in 0..160 {
             arena.tick();
-            let p = arena
-                .body
-                .graph
-                .as_ref()
-                .unwrap()
-                .parts
-                .iter()
-                .find(|p| p.id == distal_id)
-                .unwrap();
-            if p.offset_x != 0 {
-                saw_swing = true;
-            }
-            max_up = max_up.max(p.offset_y - y0);
+            let g = arena.body.graph.as_ref().unwrap();
+            let p = g.parts.iter().find(|p| p.id == distal_id).unwrap();
+            max_abs_angle = max_abs_angle.max(p.hinge_angle.abs());
+            assert_eq!(p.offset_x, 0, "no sideways slide");
+            assert_eq!(p.offset_y, 0, "no compress slide");
         }
-        assert!(saw_swing, "antagonist muscles should swing the distal bone");
         assert!(
-            max_up <= 1,
-            "hinge must not compress into the joint (max Δy up={max_up})"
+            max_abs_angle > 0.1,
+            "antagonists should rotate the hinge (max |θ|={max_abs_angle})"
         );
-        let delta = arena
-            .body
-            .graph
-            .as_ref()
-            .unwrap()
-            .joint_angle_delta(0)
-            .unwrap()
-            .abs();
-        let max = JointLimit::Half.max_turns() * std::f32::consts::TAU + 0.45;
-        assert!(delta <= max + 0.01, "Half gate: |Δθ|={delta} max={max}");
+        let max = JointLimit::Half.max_turns() * std::f32::consts::TAU + 0.02;
+        assert!(
+            max_abs_angle <= max + 0.01,
+            "Half gate: |Δθ|={max_abs_angle} max={max}"
+        );
     }
 
     #[test]
@@ -1474,7 +1432,7 @@ mod tests {
             .joint_angle_delta(0)
             .unwrap()
             .abs();
-        let max = JointLimit::Quarter.max_turns() * std::f32::consts::TAU + 0.45;
+        let max = JointLimit::Quarter.max_turns() * std::f32::consts::TAU + 0.02;
         assert!(
             delta <= max + 0.01,
             "Quarter gate should clamp swing (|Δθ|={delta} > {max})"
@@ -1579,7 +1537,7 @@ mod tests {
             .find(|p| p.kind == PartKind::Bone && !p.anchored)
             .map(|p| p.id)
             .expect("free bone");
-        let x0 = arena
+        let c0 = arena
             .body
             .graph
             .as_ref()
@@ -1588,25 +1546,22 @@ mod tests {
             .iter()
             .find(|p| p.id == free_id)
             .unwrap()
-            .offset_x;
+            .centroid();
         for _ in 0..80 {
             arena.tick();
         }
-        let x1 = arena
-            .body
-            .graph
-            .as_ref()
-            .unwrap()
-            .parts
-            .iter()
-            .find(|p| p.id == free_id)
-            .unwrap()
-            .offset_x;
-        let tension = arena.body.graph.as_ref().unwrap().mean_tension();
+        let g = arena.body.graph.as_ref().unwrap();
+        let free = g.parts.iter().find(|p| p.id == free_id).unwrap();
+        let c1 = free.centroid();
+        let moved = (c0.0 - c1.0).hypot(c0.1 - c1.1) > 0.5 || free.hinge_angle.abs() > 0.1;
+        let tension = g.mean_tension();
         assert!(
-            x1 != x0 || tension > 0.01,
-            "scripted muscle should move bone or report tension (x {x0}→{x1}, T={tension})"
+            moved || tension > 0.01,
+            "scripted muscle should articulate or report tension (centroid {c0:?}→{c1:?}, θ={}, T={tension})",
+            free.hinge_angle
         );
+        assert_eq!(free.offset_x, 0, "hinged fin bone must not slide on x");
+        assert_eq!(free.offset_y, 0, "hinged fin bone must not slide on y");
     }
 
     #[test]

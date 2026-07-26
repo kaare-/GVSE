@@ -205,7 +205,7 @@ Postcard + schema version, same spirit as `.gvsecrt`.
 |-------|-------------|-----------|
 | **S0** | This doc + `wk-voxel-studio` types + empty studio app arena | ✅ Arena ticks water with world rules; paint enum + colours locked |
 | **S1** | Paint UI + activate → `BodyGraph` (bones, fixtures) | ✅ `Enter` activates; hung bones stay, free bones fall (discrete gravity); no muscle yet |
-| **S2** | Joints + scripted muscle + hydro push + muscle feedback | ✅ Hinge swing (not compress); JointLimit angle gates; antagonist script; muscle feedback; water displace |
+| **S2** | Joints + scripted muscle + hydro push + muscle feedback | ✅ True pivot rotation (no sideways slide); JointLimit gates; antagonist script; `tests/hinge_no_slide.rs` |
 | **S3** | Nerves / richer sensors | ✅ Nerve strands + neuron blobs on activate; muscle feedback is v1 net input; fixture force later |
 | **S4** | Neural training (fixed morphology) | ✅ Hill-climb + live `StudioNet` drive; app `H` / `C` / `N` |
 | **S5** | GA morphology search | ✅ Paint mutate + evaluate; app `M` |
