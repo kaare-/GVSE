@@ -37,7 +37,10 @@ pub struct RigidPart {
     pub offset_y: i32,
     /// Fixture or bone welded to a fixture — never moves.
     pub anchored: bool,
-    /// Joint-linked to an anchored part — no gravity, may articulate.
+    /// Kinematic root of a free (unfixtured) joint assembly — translates under gravity.
+    #[serde(default)]
+    pub assembly_root: bool,
+    /// Joint-linked child — articulates about parent; no independent gravity.
     #[serde(default)]
     pub hinged: bool,
     /// Radians from rest pose for hinged bones (0 = as painted).
@@ -326,6 +329,7 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
                 offset_x: 0,
                 offset_y: 0,
                 anchored: part_kind == PartKind::Fixture,
+                assembly_root: false,
                 hinged: false,
                 hinge_angle: 0.0,
             });
@@ -423,6 +427,7 @@ pub fn force_sensors_bridging_parts(paint: &TissuePaint) -> usize {
 }
 
 /// BFS through joints from anchored parts → mark distal bones as hinged.
+/// Unfixtured joint clusters pick an assembly root; other bones hinge to it.
 fn mark_hinged_from_joints(parts: &mut [RigidPart], joints: &[Joint]) {
     let mut supported: HashSet<u32> = parts
         .iter()
@@ -447,6 +452,92 @@ fn mark_hinged_from_joints(parts: &mut [RigidPart], joints: &[Joint]) {
     for p in parts.iter_mut() {
         if p.kind == PartKind::Bone && !p.anchored && supported.contains(&p.id) {
             p.hinged = true;
+        }
+    }
+    mark_free_assembly_hinges(parts, joints);
+}
+
+/// Part-id union-find components linked by joints.
+fn joint_part_components(parts: &[RigidPart], joints: &[Joint]) -> Vec<Vec<u32>> {
+    let mut parent: HashMap<u32, u32> = parts.iter().map(|p| (p.id, p.id)).collect();
+    fn find(parent: &mut HashMap<u32, u32>, id: u32) -> u32 {
+        let mut i = id;
+        while parent[&i] != i {
+            let p = parent[&i];
+            let pp = parent[&p];
+            parent.insert(i, pp);
+            i = p;
+        }
+        i
+    }
+    fn unite(parent: &mut HashMap<u32, u32>, a: u32, b: u32) {
+        let pa = find(parent, a);
+        let pb = find(parent, b);
+        if pa != pb {
+            parent.insert(pa, pb);
+        }
+    }
+    for j in joints {
+        if parent.contains_key(&j.part_a) && parent.contains_key(&j.part_b) {
+            unite(&mut parent, j.part_a, j.part_b);
+        }
+    }
+    let mut groups: HashMap<u32, Vec<u32>> = HashMap::new();
+    for p in parts {
+        let root = find(&mut parent, p.id);
+        groups.entry(root).or_default().push(p.id);
+    }
+    groups.into_values().collect()
+}
+
+fn pick_assembly_root(parts: &[RigidPart], bone_ids: &[u32]) -> Option<u32> {
+    bone_ids
+        .iter()
+        .copied()
+        .max_by_key(|id| {
+            let p = parts.iter().find(|p| p.id == *id).unwrap();
+            (p.cells.len(), u32::MAX - *id)
+        })
+}
+
+/// No fixture: choose one bone as translational root; hinge the rest.
+fn mark_free_assembly_hinges(parts: &mut [RigidPart], joints: &[Joint]) {
+    if joints.is_empty() {
+        return;
+    }
+    let comps = joint_part_components(parts, joints);
+    for comp in comps {
+        let has_anchor = comp.iter().any(|&id| {
+            parts
+                .iter()
+                .any(|p| p.id == id && p.anchored)
+        });
+        if has_anchor {
+            continue;
+        }
+        let bones: Vec<u32> = comp
+            .iter()
+            .copied()
+            .filter(|&id| {
+                parts
+                    .iter()
+                    .any(|p| p.id == id && p.kind == PartKind::Bone)
+            })
+            .collect();
+        if bones.len() < 2 {
+            continue;
+        }
+        let Some(root) = pick_assembly_root(parts, &bones) else {
+            continue;
+        };
+        for p in parts.iter_mut() {
+            if p.id == root {
+                p.assembly_root = true;
+                p.hinged = false;
+            } else if bones.contains(&p.id) {
+                p.assembly_root = false;
+                p.hinged = true;
+            }
         }
     }
 }
@@ -500,12 +591,12 @@ fn collect_joints(paint: &TissuePaint, owner: &HashMap<(i32, i32), u32>) -> Vec<
     joints
 }
 
-/// Graph distance from fixture-anchored roots along joints.
+/// Graph distance from fixture anchors / free assembly roots along joints.
 fn part_root_dist(parts: &[RigidPart], joints: &[Joint]) -> HashMap<u32, u32> {
     let mut dist: HashMap<u32, u32> = HashMap::new();
     let mut q = VecDeque::new();
     for p in parts {
-        if p.anchored {
+        if p.anchored || p.assembly_root {
             dist.insert(p.id, 0);
             q.push_back(p.id);
         }
@@ -1563,14 +1654,19 @@ fn apply_gravity(graph: &mut BodyGraph, world: &mut World) {
         if movable.is_empty() {
             continue;
         }
-        let busy = movable.iter().any(|&idx| {
-            let id = graph.parts[idx].id;
-            graph.muscles.iter().any(|m| {
-                m.actuation >= 0.55 && (m.part_a == id || m.part_b == id)
-            })
-        });
-        if busy {
-            continue;
+        let articulated = movable.iter().any(|&i| graph.parts[i].hinged);
+        // Unjointed free pairs: skip gravity while a muscle is yanking them.
+        // Articulated free assemblies translate as a unit even while wobbling.
+        if !articulated {
+            let busy = movable.iter().any(|&idx| {
+                let id = graph.parts[idx].id;
+                graph.muscles.iter().any(|m| {
+                    m.actuation >= 0.55 && (m.part_a == id || m.part_b == id)
+                })
+            });
+            if busy {
+                continue;
+            }
         }
         let _ = try_move_parts(graph, world, &movable, 0, -1);
     }
@@ -1799,30 +1895,138 @@ mod tests {
         arena.body.paint.set(10, 20, TissueKind::JointHalf);
         arena.body.paint.set(11, 20, TissueKind::Bone);
         arena.body.paint.set(12, 20, TissueKind::Bone);
-        arena.activate().unwrap();
-        let y0: Vec<i32> = arena
-            .body
-            .graph
-            .as_ref()
-            .unwrap()
-            .parts
-            .iter()
-            .filter(|p| p.kind == PartKind::Bone)
-            .map(|p| p.offset_y)
-            .collect();
+        let g0 = arena.activate().unwrap();
+        assert_eq!(g0.hinged_bone_count(), 1, "one bone hinges to free assembly root");
+        assert_eq!(
+            g0.parts.iter().filter(|p| p.assembly_root).count(),
+            1,
+            "free cluster picks an assembly root"
+        );
+        assert!(
+            g0.joints.iter().all(|j| !j.local_cells.is_empty()),
+            "free hinges need rest poses"
+        );
+        let pivot0 = g0.joint_world_pivots()[0];
         for _ in 0..25 {
             arena.tick();
         }
         let g = arena.body.graph.as_ref().unwrap();
-        let y1: Vec<i32> = g
-            .parts
-            .iter()
-            .filter(|p| p.kind == PartKind::Bone)
-            .map(|p| p.offset_y)
-            .collect();
-        assert!(y1.iter().all(|&y| y < y0[0]), "pair should fall");
-        assert_eq!(y1[0], y1[1], "jointed bones must share gravity offset");
+        let root = g.parts.iter().find(|p| p.assembly_root).unwrap();
+        assert!(root.offset_y < 0, "assembly root should fall");
+        let pivot1 = g.joint_world_pivots()[0];
+        assert!(
+            pivot1.1 < pivot0.1,
+            "joint pivot must fall with the body ({pivot0:?} → {pivot1:?})"
+        );
         assert!(joints_satisfied(g), "hinge must hold while falling");
+    }
+
+    #[test]
+    fn free_wobble_arm_falls_and_articulates() {
+        let mut arena = StudioArena::new(ArenaConfig {
+            width: 48,
+            height: 48,
+            seed: 4,
+            water_to_y: None,
+        });
+        arena.physics = StudioPhysicsConfig::body_only();
+        arena.physics.scripted_muscle = true;
+        let cx = 20i32;
+        let y0 = 36i32;
+        // bone — joint — bone — joint — bone  (no fixture)
+        for y in y0..(y0 + 5) {
+            arena.body.paint.set(cx as u32, y as u32, TissueKind::Bone);
+        }
+        arena
+            .body
+            .paint
+            .set(cx as u32, (y0 - 1) as u32, TissueKind::JointHalf);
+        for y in (y0 - 6)..(y0 - 1) {
+            arena.body.paint.set(cx as u32, y as u32, TissueKind::Bone);
+        }
+        arena
+            .body
+            .paint
+            .set(cx as u32, (y0 - 7) as u32, TissueKind::JointHalf);
+        for y in (y0 - 12)..(y0 - 7) {
+            arena.body.paint.set(cx as u32, y as u32, TissueKind::Bone);
+        }
+        // Skin on middle + muscle on each hinge
+        for y in (y0 - 5)..(y0 - 2) {
+            arena
+                .body
+                .paint
+                .set((cx - 1) as u32, y as u32, TissueKind::Skin);
+        }
+        for y in (y0 - 2)..=y0 {
+            arena
+                .body
+                .paint
+                .set((cx + 1) as u32, y as u32, TissueKind::Muscle);
+        }
+        for y in (y0 - 8)..=(y0 - 6) {
+            arena
+                .body
+                .paint
+                .set((cx + 1) as u32, y as u32, TissueKind::Muscle);
+        }
+        let g = arena.activate().unwrap();
+        assert_eq!(g.fixture_count(), 0);
+        assert_eq!(g.joints.len(), 2);
+        assert!(g.hinged_bone_count() >= 2);
+        assert!(!g.skins.is_empty());
+        let pivots_rest = g.joint_world_pivots();
+        let skin_rest: Vec<_> = g.skins.iter().flat_map(|s| s.cells.clone()).collect();
+
+        let mut fell = false;
+        let mut swung = false;
+        let mut skin_followed = false;
+        for _ in 0..300 {
+            arena.tick();
+            let g = arena.body.graph.as_ref().unwrap();
+            let root = g.parts.iter().find(|p| p.assembly_root).unwrap();
+            if root.offset_y <= -8 {
+                fell = true;
+            }
+            if g.parts.iter().any(|p| p.hinged && p.hinge_angle.abs() > 0.15) {
+                swung = true;
+            }
+            let pivots = g.joint_world_pivots();
+            if fell
+                && pivots
+                    .iter()
+                    .zip(pivots_rest.iter())
+                    .all(|(a, b)| a.1 < b.1)
+            {
+                // skin should not remain entirely at paint seats once fallen/swung
+                let mut at_rest = 0usize;
+                let mut world_n = 0usize;
+                for y in 0..48 {
+                    for x in 0..48 {
+                        if g.kind_at(x, y) == Some(TissueKind::Skin) {
+                            world_n += 1;
+                            if skin_rest.contains(&(x, y)) {
+                                at_rest += 1;
+                            }
+                        }
+                    }
+                }
+                if world_n > 0 && at_rest * 2 < skin_rest.len().max(1) {
+                    skin_followed = true;
+                }
+            }
+            if fell && swung && skin_followed {
+                break;
+            }
+        }
+        assert!(fell, "unfixtured arm should fall toward the ground");
+        assert!(swung, "free assembly should still articulate under script");
+        let g = arena.body.graph.as_ref().unwrap();
+        assert!(joints_satisfied(g), "hinges stay linked on the way down");
+        assert!(
+            skin_followed || swung,
+            "soft tissue should ride the free assembly"
+        );
     }
 
     #[test]
