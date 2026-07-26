@@ -478,13 +478,8 @@ async fn main() {
                     let hinged = g.hinged_bone_count();
                     let nerves = g.nerves.len();
                     let ctrl = g.has_controller;
-                    let drive = if arena.physics.scripted_muscle {
-                        "scripted"
-                    } else {
-                        "neural"
-                    };
                     let mut msg = format!(
-                        "active bones={bones} joints={joints} hinged={hinged} mus={mus} nerves={nerves} ctrl={ctrl} drive={drive}"
+                        "active bones={bones} joints={joints} hinged={hinged} mus={mus} nerves={nerves} ctrl={ctrl} drive=scripted"
                     );
                     if joints == 0 && fs_bridge > 0 {
                         msg.push_str(" | need cyan Joint between the two bones (ForceSense on fixture is fine)");
@@ -494,10 +489,12 @@ async fn main() {
                         msg.push_str(" | no muscle link — red must touch both bones or the joint");
                     } else if hinged == 0 && bones >= 2 {
                         msg.push_str(" | tip: fixture must touch the root bone");
-                    } else if ctrl && arena.physics.scripted_muscle {
+                    } else if ctrl {
                         msg.push_str(" | net ready — flapping scripted; N=neural H=train");
                     }
                     status = msg;
+                    // After g is dropped: force visible sinusoid (N may have left neural on).
+                    arena.physics.scripted_muscle = true;
                     paused = false;
                     train = None;
                     continuous = false;

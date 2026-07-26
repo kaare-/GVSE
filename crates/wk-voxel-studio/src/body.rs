@@ -1110,7 +1110,38 @@ fn shared_joint<'a>(graph: &'a BodyGraph, a: u32, b: u32) -> Option<&'a Joint> {
     })
 }
 
-/// Rotate the hinge ±STEP; keep the pose that shortens this muscle most.
+/// Preferred hinge rotation sign from muscle placement (cross product).
+/// Negative ⇒ clockwise in screen space with +y up.
+fn muscle_torque_sign(graph: &BodyGraph, joint: &Joint, muscle: &Muscle) -> f32 {
+    let Some(si) = graph.part_index(joint.swing_part) else {
+        return 0.0;
+    };
+    let pivot = pivot_world(graph, joint);
+    let (cx, cy) = graph.parts[si].centroid();
+    let cells = muscle_world_cells(graph, muscle);
+    if cells.is_empty() {
+        return 0.0;
+    }
+    let n = cells.len() as f32;
+    let mx = cells.iter().map(|c| c.0 as f32).sum::<f32>() / n;
+    let my = cells.iter().map(|c| c.1 as f32).sum::<f32>() / n;
+    let rx = cx - pivot.0 as f32;
+    let ry = cy - pivot.1 as f32;
+    let mux = mx - pivot.0 as f32;
+    let muy = my - pivot.1 as f32;
+    let cross = rx * muy - ry * mux;
+    if cross.abs() < 1e-3 {
+        // Vertical hang fallback: muscle on +x pulls tip toward −x (CW).
+        if mux.abs() < 1e-3 {
+            return 0.0;
+        }
+        return -mux.signum();
+    }
+    // Contract toward the muscle side (shorten that path).
+    -cross.signum()
+}
+
+/// Rotate the hinge; prefer span shortening, else torque direction.
 fn try_hinge_muscle_step(
     graph: &mut BodyGraph,
     world: &World,
@@ -1122,8 +1153,15 @@ fn try_hinge_muscle_step(
     };
     let current = graph.parts[swing_idx].hinge_angle;
     let before = muscle_span_length(graph, muscle);
-    let mut best: Option<(f32, f32)> = None; // angle, gain
-    for dir in [HINGE_STEP, -HINGE_STEP] {
+    let torque = muscle_torque_sign(graph, joint, muscle);
+    let mut dirs = [HINGE_STEP, -HINGE_STEP, HINGE_STEP * 0.5, -HINGE_STEP * 0.5];
+    if torque < 0.0 {
+        dirs = [-HINGE_STEP, -HINGE_STEP * 0.5, HINGE_STEP, HINGE_STEP * 0.5];
+    } else if torque > 0.0 {
+        dirs = [HINGE_STEP, HINGE_STEP * 0.5, -HINGE_STEP, -HINGE_STEP * 0.5];
+    }
+    let mut best: Option<(f32, f32)> = None; // angle, score
+    for dir in dirs {
         let cand = current + dir;
         let saved_cells = graph.parts[swing_idx].cells.clone();
         let saved_ang = graph.parts[swing_idx].hinge_angle;
@@ -1132,13 +1170,17 @@ fn try_hinge_muscle_step(
         }
         let len = muscle_span_length(graph, muscle);
         let gain = before - len;
+        let toward_torque = torque != 0.0 && dir.signum() == torque;
         // Restore probe pose.
         graph.parts[swing_idx].cells = saved_cells;
         graph.parts[swing_idx].hinge_angle = saved_ang;
-        if gain > 0.02 {
-            let replace = best.map(|(_, g)| gain > g).unwrap_or(true);
+        // Span shorten wins; otherwise accept a valid torque step even if the
+        // discrete length metric is flat (common for short side muscles).
+        if gain > 0.02 || (toward_torque && gain >= -0.25) {
+            let score = gain + if toward_torque { 0.5 } else { 0.0 };
+            let replace = best.map(|(_, s)| score > s).unwrap_or(true);
             if replace {
-                best = Some((cand, gain));
+                best = Some((cand, score));
             }
         }
     }
