@@ -71,12 +71,17 @@ scenario wires them). More toggles can land without changing rule code.
 |----------|--------|------|
 | **v1** | **Muscle feedback** | Length, commanded actuation, tension proxy — proprioception for the net |
 | **v1** | **Pressure ending** | Contact + hydro pressure; works under skin or bare; net input channel |
+| **v1** | **Light ending** | `day_factor` × upward column openness (lab roof = sky) |
+| **v1** | **Vestibular ending** | Cochlea-like: upright, angular rate, fall speed |
 | later | Fixture force / contact | Bench thrust / ground reaction (`ForceSensor`) |
-| later | Vestibular, chem, vision-ish | Creature inputs for gait / behaviour |
+| later | Chem | Creature chem channels |
 
 Net topology is tagged (`NetKind::FeedForwardV1` today) so alternate
-controllers can land later. HUD shows effectors, pressure channels,
+controllers can land later. HUD shows effectors, P/L/V channels,
 neuron blob count / link state, and `in→hidden→out`.
+
+Studio UI is a **controlled lab**: light gray chamber air (not outdoor
+sky), top tabs (Paint / Physics / Bench / Train / Keys), left dock.
 
 ## Product shape
 
