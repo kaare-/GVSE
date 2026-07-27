@@ -237,7 +237,7 @@ pub fn clear_all_dirty(world: &mut World) {
 /// four-pass sweep — and later a parallel one — never updates two
 /// neighbouring chunks in the same sub-pass (Purho / Noita, GDC 2019).
 #[inline]
-pub fn checkerboard_phase(coord: ChunkCoord) -> u8 {
+pub(crate) fn checkerboard_phase(coord: ChunkCoord) -> u8 {
     let px = coord.cx.rem_euclid(2) as u8;
     let py = coord.cy.rem_euclid(2) as u8;
     px + 2 * py

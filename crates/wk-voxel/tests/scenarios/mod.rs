@@ -1,0 +1,11 @@
+//! Headless wk-voxel scenario ports of legacy E1 / E2 / E6 / E8.
+//!
+//! Column-stack oracles live in `tests/scenarios/` (via wk-sim). This
+//! harness never imports those crates — isolation guardrails in
+//! `docs/VOXEL_MIGRATION.md`.
+
+mod e1_rain_hill;
+mod e2_basin;
+mod e6_chunk_seam;
+mod e8_save_load;
+mod helpers;

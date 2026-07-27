@@ -17,3 +17,8 @@ wk-material = { path = "../wk-material" }
 serde = { version = "1", features = ["derive"] }
 rayon = "1.10"
 postcard = { version = "1", features = ["alloc"] }
+
+# Scenario ports of legacy E1/E2/E6/E8 product intents (greenfield only).
+[[test]]
+name = "scenarios"
+path = "tests/scenarios/mod.rs"
