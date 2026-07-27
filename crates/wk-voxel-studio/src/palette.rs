@@ -3,7 +3,7 @@
 
 use crate::tissue::{
     TissueKind, BONE_RGB, FIXTURE_RGB, FORCE_SENSOR_RGB, JOINT_RGB, MUSCLE_RGB, NERVE_RGB,
-    NEURON_BLOB_RGB, SKIN_RGB,
+    NEURON_BLOB_RGB, PRESSURE_ENDING_RGB, SKIN_RGB,
 };
 
 /// Joint overlay glyph id (drawn as a 1× tick mark in the app).
@@ -36,6 +36,7 @@ pub fn tissue_rgb(kind: TissueKind) -> Option<[u8; 3]> {
         | TissueKind::JointHalf
         | TissueKind::JointQuarter => Some(JOINT_RGB),
         TissueKind::ForceSensor => Some(FORCE_SENSOR_RGB),
+        TissueKind::PressureEnding => Some(PRESSURE_ENDING_RGB),
     }
 }
 

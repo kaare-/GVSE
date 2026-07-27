@@ -2534,6 +2534,10 @@ pub fn tick_with_configs_and_geotech(
     geotech: Option<&crate::geotech_map::GeotechMap>,
 ) {
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
+    // Capture pre-flow dirty regions. Dry sand/grain often write nothing
+    // during gravity/flow, so the post-loop plan would be empty and grain
+    // would starve — keep this seed for seepage/grain/repose.
+    let tick_seed = plan_active(world);
     for step in 0..FLOW_SUBSTEPS {
         let active = plan_active(world);
         clear_all_dirty(world);
@@ -2554,6 +2558,8 @@ pub fn tick_with_configs_and_geotech(
         }
         // Quiet early-out: after the minimum passes, peek at dirty
         // written by this substep — a tiny halo means water settled.
+        // Never early-out on the first substep when we still owe grain
+        // a scan of the tick seed (dry towers).
         if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_MIN {
             let next = plan_active(world);
             if next.is_empty() || active_cell_area(&next) <= FLOW_QUIET_AREA {
@@ -2562,11 +2568,12 @@ pub fn tick_with_configs_and_geotech(
         }
     }
 
-    // Seepage + grain fall read the same dirty halo the substep loop
-    // built. Do NOT clear dirty here: if these passes don't write
-    // (e.g. no porous solids, no grains), we still need next tick to
-    // re-process the cells the substeps just modified.
-    let active = plan_active(world);
+    // Seepage + grain fall: prefer fresh dirty from flow; else re-scan
+    // the pre-tick seed so painted sand piles still settle.
+    let mut active = plan_active(world);
+    if active.is_empty() {
+        active = tick_seed;
+    }
     if !active.is_empty() {
         apply_seepage_regions(world, &active);
         let passes = partition_checkerboard(&active);
@@ -2575,7 +2582,10 @@ pub fn tick_with_configs_and_geotech(
         }
         // Repose reads dirty written by grain fall; re-plan so new Air
         // seats from the fall pass can receive diagonal slides.
-        let repose_active = plan_active(world);
+        let mut repose_active = plan_active(world);
+        if repose_active.is_empty() {
+            repose_active = active;
+        }
         if !repose_active.is_empty() {
             let repose_passes = partition_checkerboard(&repose_active);
             for pass in &repose_passes {
@@ -5520,5 +5530,31 @@ mod tests {
         }
         // Leave the process default (parallel on) for later tests.
         crate::parallel::set_parallel_enabled(true);
+    }
+
+    #[test]
+    fn dry_sand_tower_settles_under_tick() {
+        let mut w = World::new(7);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..=6 {
+            w.set_cell(8, y, Cell::solid(MaterialId::Sand));
+        }
+        for _ in 0..80 {
+            tick(&mut w);
+        }
+        let max_h = (1..=10)
+            .filter(|&y| {
+                w.get_cell(8, y)
+                    .is_some_and(|c| c.material == MaterialId::Sand)
+            })
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_h <= 3,
+            "dry sand tower under tick() should repose (max_h={max_h})"
+        );
     }
 }

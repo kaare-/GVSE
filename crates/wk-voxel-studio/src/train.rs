@@ -25,15 +25,17 @@ pub struct TrainingSession {
 impl TrainingSession {
     /// Build from an activated arena (needs ≥1 muscle).
     pub fn new(arena: &StudioArena, seed: u64, episode_ticks: u64) -> Option<Self> {
-        let n_mus = arena.body.graph.as_ref()?.muscles.len();
+        let g = arena.body.graph.as_ref()?;
+        let n_mus = g.muscles.len();
         if n_mus == 0 {
             return None;
         }
+        let n_pressure = g.pressures.len();
         let best_net = arena
             .body
             .net
             .clone()
-            .unwrap_or_else(|| StudioNet::for_muscles(n_mus, seed));
+            .unwrap_or_else(|| StudioNet::for_body(n_mus, n_pressure, seed));
         Some(Self {
             best_net,
             best: EpisodeResult {
@@ -150,7 +152,7 @@ fn centroids(graph: &BodyGraph, ids: &[u32]) -> Vec<(f32, f32)> {
         .collect()
 }
 
-/// Write net outputs into muscle actuation from current feedback.
+/// Write net outputs into muscle actuation from current feedback + sensors.
 pub fn apply_net(arena: &mut StudioArena, net: &StudioNet) {
     let Some(graph) = arena.body.graph.as_mut() else {
         return;
@@ -159,7 +161,8 @@ pub fn apply_net(arena: &mut StudioArena, net: &StudioNet) {
     if fb.is_empty() {
         return;
     }
-    let input = StudioNet::encode_feedback(&fb);
+    let pressure = graph.pressure_samples();
+    let input = StudioNet::encode_inputs(&fb, &pressure);
     if input.len() != net.n_in {
         return;
     }
@@ -178,15 +181,14 @@ pub fn hill_climb(
 ) -> (StudioNet, EpisodeResult) {
     let mut probe = make_arena();
     let _ = probe.activate();
-    let n_mus = probe
+    let (n_mus, n_pressure) = probe
         .body
         .graph
         .as_ref()
-        .map(|g| g.muscles.len())
-        .unwrap_or(0)
-        .max(1);
+        .map(|g| (g.muscles.len().max(1), g.pressures.len()))
+        .unwrap_or((1, 0));
     let mut session = TrainingSession {
-        best_net: StudioNet::for_muscles(n_mus, seed),
+        best_net: StudioNet::for_body(n_mus, n_pressure, seed),
         best: EpisodeResult {
             fitness: f32::NEG_INFINITY,
             mean_tension: 0.0,

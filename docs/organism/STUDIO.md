@@ -70,12 +70,13 @@ scenario wires them). More toggles can land without changing rule code.
 | Priority | Sensor | Role |
 |----------|--------|------|
 | **v1** | **Muscle feedback** | Length, commanded actuation, tension proxy — proprioception for the net |
-| later | Fixture force / contact | Bench thrust / ground reaction |
-| later | Vestibular, touch, chem, vision-ish | Creature inputs for gait / behaviour |
+| **v1** | **Pressure ending** | Contact + hydro pressure; works under skin or bare; net input channel |
+| later | Fixture force / contact | Bench thrust / ground reaction (`ForceSensor`) |
+| later | Vestibular, chem, vision-ish | Creature inputs for gait / behaviour |
 
-Until the richer set exists, training fitness and net inputs come from
-**muscle feedback** (and simple kinematics). Fixture `ForceSensor`
-paint remains reserved.
+Net topology is tagged (`NetKind::FeedForwardV1` today) so alternate
+controllers can land later. HUD shows effectors, pressure channels,
+neuron blob count / link state, and `in→hidden→out`.
 
 ## Product shape
 
@@ -210,8 +211,8 @@ Postcard + schema version, same spirit as `.gvsecrt`.
 |-------|-------------|-----------|
 | **S0** | This doc + `wk-voxel-studio` types + empty studio app arena | ✅ Arena ticks water with world rules; paint enum + colours locked |
 | **S1** | Paint UI + activate → `BodyGraph` (bones, fixtures) | ✅ `Enter` activates; hung bones stay, free bones fall (discrete gravity); no muscle yet |
-| **S2** | Joints + scripted muscle + hydro push + muscle feedback | ✅ Hinge water displace; free-body buoyancy/drag/inertia; serial chains; soft tissue follow; `tests/hydro_body.rs`, `tests/hinge_*.rs` |
-| **S3** | Nerves / richer sensors | ✅ Nerve strands + neuron blobs on activate; muscle feedback is v1 net input; fixture force later |
+| **S2** | Joints + scripted muscle + hydro push + muscle feedback | ✅ Hinge water displace; free-body buoyancy/drag/inertia; grain seed fix; `tests/hydro_body.rs` |
+| **S3** | Nerves / richer sensors | ✅ Pressure endings → net inputs; nerve/blob HUD; fixture force later |
 | **S4** | Neural training (fixed morphology) | ✅ Hill-climb + live `StudioNet` drive; app `H` / `C` / `N` |
 | **S5** | GA morphology search | ✅ Paint mutate + evaluate; app `M` |
 | **S6** | Export `.gvsebody` → world spawn | ✅ Studio `E` export with net; world spawn hook next |

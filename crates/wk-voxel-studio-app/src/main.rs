@@ -63,6 +63,10 @@ const TISSUE_PALETTE: &[TissueEntry] = &[
         label: "Neuron",
     },
     TissueEntry {
+        kind: TissueKind::PressureEnding,
+        label: "Pressure end",
+    },
+    TissueEntry {
         kind: TissueKind::Fixture,
         label: "Fixture",
     },
@@ -183,6 +187,7 @@ fn overlay_rgb(arena: &StudioArena, x: i32, y: i32) -> Option<[u8; 3]> {
                 | TissueKind::Skin
                 | TissueKind::Nerve
                 | TissueKind::NeuronBlob
+                | TissueKind::PressureEnding
                 | TissueKind::JointFull
                 | TissueKind::JointThreeQuarter
                 | TissueKind::JointHalf
@@ -856,8 +861,36 @@ async fn main() {
                 Some(format!("  θ={:.0}°/±{:.0}°", d.to_degrees(), lim * 180.0))
             })
             .unwrap_or_default();
+        let net_hud = match (arena.body.graph.as_ref(), arena.body.net.as_ref()) {
+            (Some(g), Some(net)) => {
+                let s = g.neural_summary();
+                let link = if s.blobs_linked { "linked" } else { "split" };
+                format!(
+                    "  net={} {}→{}→{}  eff={}  P={}({:.2})  blobs={}/{} ({link})  nerves={}",
+                    net.kind_label(),
+                    net.n_in,
+                    net.n_hidden,
+                    net.n_out,
+                    s.n_effectors,
+                    s.n_pressure,
+                    g.mean_pressure(),
+                    s.n_controllers,
+                    s.n_neuron_blobs,
+                    s.n_nerves,
+                )
+            }
+            (Some(g), None) => {
+                let s = g.neural_summary();
+                let link = if s.blobs_linked { "linked" } else { "split" };
+                format!(
+                    "  eff={}  P={}  blobs={}/{} ({link})  nerves={}",
+                    s.n_effectors, s.n_pressure, s.n_controllers, s.n_neuron_blobs, s.n_nerves,
+                )
+            }
+            _ => String::new(),
+        };
         let hud = format!(
-            "{}x{}  tick={}  {}  {}  phys={}  {drive}{fit}{hinge}  brush={brush}  T={tension:.2}  {status}",
+            "{}x{}  tick={}  {}  {}  phys={}  {drive}{fit}{hinge}{net_hud}  brush={brush}  T={tension:.2}  {status}",
             arena.cfg.width,
             arena.cfg.height,
             arena.world.tick,
@@ -869,7 +902,7 @@ async fn main() {
             },
             preset_name(&arena.physics),
         );
-        draw_text(&hud, DOCK_W + 10.0, 18.0, 15.0, WHITE);
+        draw_text(&hud, DOCK_W + 10.0, 18.0, 14.0, WHITE);
 
         next_frame().await;
     }

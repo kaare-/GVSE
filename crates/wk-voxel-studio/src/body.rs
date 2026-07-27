@@ -180,6 +180,39 @@ pub struct AttachedTissue {
     pub host_part: u32,
 }
 
+/// Pressure / contact nerve ending on a host bone (works under skin).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct PressureEnding {
+    pub id: u32,
+    pub cells: Vec<(i32, i32)>,
+    pub host_part: u32,
+    /// Neuron blob ids this ending touches (via nerve or adjacency).
+    #[serde(default)]
+    pub neuron_ids: Vec<u32>,
+    /// Latest sample 0..1 (solid contact + hydro pressure).
+    #[serde(default)]
+    pub pressure: f32,
+}
+
+/// One pressure channel for the neural encoder.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct PressureSample {
+    pub id: u32,
+    pub pressure: f32,
+}
+
+/// Snapshot of neural / sensor topology for HUD and net sizing.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct NeuralSummary {
+    pub n_effectors: usize,
+    pub n_pressure: usize,
+    pub n_neuron_blobs: usize,
+    pub n_controllers: usize,
+    /// True when ≥2 blobs share a nerve path (or direct adjacency).
+    pub blobs_linked: bool,
+    pub n_nerves: usize,
+}
+
 /// Activated studio body for simulation.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct BodyGraph {
@@ -191,6 +224,9 @@ pub struct BodyGraph {
     /// Skin patches posed with their host bones.
     #[serde(default)]
     pub skins: Vec<AttachedTissue>,
+    /// Pressure endings (creature touch / hydro sensors).
+    #[serde(default)]
+    pub pressures: Vec<PressureEnding>,
     /// At least one controller-sized neuron blob is present.
     pub has_controller: bool,
     /// Radians-ish phase for scripted sinusoid (accumulates with tick).
@@ -242,6 +278,35 @@ impl BodyGraph {
         self.muscles.iter().map(|m| m.tension).sum::<f32>() / self.muscles.len() as f32
     }
 
+    pub fn pressure_samples(&self) -> Vec<PressureSample> {
+        self.pressures
+            .iter()
+            .map(|p| PressureSample {
+                id: p.id,
+                pressure: p.pressure,
+            })
+            .collect()
+    }
+
+    pub fn mean_pressure(&self) -> f32 {
+        if self.pressures.is_empty() {
+            return 0.0;
+        }
+        self.pressures.iter().map(|p| p.pressure).sum::<f32>() / self.pressures.len() as f32
+    }
+
+    pub fn neural_summary(&self) -> NeuralSummary {
+        let n_controllers = self.neurons.iter().filter(|n| n.is_controller).count();
+        NeuralSummary {
+            n_effectors: self.muscles.len(),
+            n_pressure: self.pressures.len(),
+            n_neuron_blobs: self.neurons.len(),
+            n_controllers,
+            blobs_linked: neuron_blobs_linked(self),
+            n_nerves: self.nerves.len(),
+        }
+    }
+
     pub fn kind_at(&self, gx: i32, gy: i32) -> Option<TissueKind> {
         for p in &self.parts {
             if p.contains_world(gx, gy) {
@@ -265,6 +330,14 @@ impl BodyGraph {
                 .any(|(x, y)| x == gx && y == gy)
             {
                 return Some(s.kind);
+            }
+        }
+        for p in &self.pressures {
+            if pose_cells_for_part(self, p.host_part, &p.cells)
+                .into_iter()
+                .any(|(x, y)| x == gx && y == gy)
+            {
+                return Some(TissueKind::PressureEnding);
             }
         }
         for n in &self.neurons {
@@ -376,6 +449,7 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
     let neurons = collect_neurons(paint, &cell_owner);
     let nerves = collect_nerves(paint, &cell_owner, &muscles, &neurons);
     let skins = collect_skins(paint, &cell_owner);
+    let pressures = collect_pressures(paint, &cell_owner, &neurons, &nerves);
     let has_controller = neurons.iter().any(|n| n.is_controller);
 
     Ok(BodyGraph {
@@ -385,6 +459,7 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
         nerves,
         neurons,
         skins,
+        pressures,
         has_controller,
         script_phase: 0.0,
     })
@@ -774,6 +849,157 @@ fn collect_skins(
         }
     }
     out
+}
+
+fn collect_pressures(
+    paint: &TissuePaint,
+    owner: &HashMap<(i32, i32), u32>,
+    neurons: &[NeuronCluster],
+    nerves: &[NerveStrand],
+) -> Vec<PressureEnding> {
+    let w = paint.width as i32;
+    let h = paint.height as i32;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let mut next = 0u32;
+    let neuron_at = |x: i32, y: i32| -> Option<u32> {
+        neurons
+            .iter()
+            .find(|n| n.cells.iter().any(|&c| c == (x, y)))
+            .map(|n| n.id)
+    };
+    for y in 0..h {
+        for x in 0..w {
+            if paint.get(x as u32, y as u32) != TissueKind::PressureEnding {
+                continue;
+            }
+            if !seen.insert((x, y)) {
+                continue;
+            }
+            let cells = flood(paint, x, y, TissueKind::PressureEnding, &mut seen);
+            let host_part = majority_host(owner, &cells).unwrap_or(u32::MAX);
+            let mut neuron_ids = Vec::new();
+            for &(cx, cy) in &cells {
+                for (nx, ny) in neighbors4(cx, cy) {
+                    if let Some(id) = neuron_at(nx, ny) {
+                        neuron_ids.push(id);
+                    }
+                    // Nerve touching this ending links its neuron ids.
+                    for nerve in nerves {
+                        if nerve.cells.iter().any(|&c| c == (nx, ny) || c == (cx, cy)) {
+                            neuron_ids.extend(nerve.neuron_ids.iter().copied());
+                        }
+                    }
+                }
+            }
+            neuron_ids.sort_unstable();
+            neuron_ids.dedup();
+            out.push(PressureEnding {
+                id: next,
+                cells,
+                host_part,
+                neuron_ids,
+                pressure: 0.0,
+            });
+            next += 1;
+        }
+    }
+    out
+}
+
+fn neuron_blobs_linked(graph: &BodyGraph) -> bool {
+    if graph.neurons.len() < 2 {
+        return false;
+    }
+    // Union-find over blobs via shared nerves or adjacency.
+    let mut parent: HashMap<u32, u32> = graph.neurons.iter().map(|n| (n.id, n.id)).collect();
+    fn find(p: &mut HashMap<u32, u32>, id: u32) -> u32 {
+        let mut i = id;
+        while p[&i] != i {
+            let n = p[&i];
+            let nn = p[&n];
+            p.insert(i, nn);
+            i = n;
+        }
+        i
+    }
+    fn unite(p: &mut HashMap<u32, u32>, a: u32, b: u32) {
+        let pa = find(p, a);
+        let pb = find(p, b);
+        if pa != pb {
+            p.insert(pa, pb);
+        }
+    }
+    for nerve in &graph.nerves {
+        if nerve.neuron_ids.len() >= 2 {
+            let first = nerve.neuron_ids[0];
+            for &id in &nerve.neuron_ids[1..] {
+                unite(&mut parent, first, id);
+            }
+        }
+    }
+    // Direct blob adjacency.
+    for a in &graph.neurons {
+        for b in &graph.neurons {
+            if a.id >= b.id {
+                continue;
+            }
+            let touch = a.cells.iter().any(|&c| {
+                neighbors4(c.0, c.1)
+                    .into_iter()
+                    .any(|n| b.cells.contains(&n))
+            });
+            if touch {
+                unite(&mut parent, a.id, b.id);
+            }
+        }
+    }
+    let roots: HashSet<u32> = graph
+        .neurons
+        .iter()
+        .map(|n| find(&mut parent, n.id))
+        .collect();
+    roots.len() < graph.neurons.len()
+}
+
+/// Sample contact / hydro pressure at posed ending cells (skin is overlay-only).
+fn sample_pressure_endings(graph: &mut BodyGraph, world: &World) {
+    let hosts: Vec<(u32, Vec<(i32, i32)>)> = graph
+        .pressures
+        .iter()
+        .map(|p| (p.host_part, p.cells.clone()))
+        .collect();
+    let mut readings = Vec::with_capacity(hosts.len());
+    for (host, cells) in &hosts {
+        let world_cells = pose_cells_for_part(graph, *host, cells);
+        if world_cells.is_empty() {
+            readings.push(0.0);
+            continue;
+        }
+        let mut score = 0.0f32;
+        let mut n = 0u32;
+        for &(x, y) in &world_cells {
+            for (sx, sy) in std::iter::once((x, y)).chain(neighbors4(x, y)) {
+                n += 1;
+                let Some(c) = world.get_cell(sx, sy) else {
+                    continue;
+                };
+                if c.material != MaterialId::Air {
+                    score += 1.0;
+                } else if !c.sat.is_empty() {
+                    score += c.sat.as_f32();
+                }
+            }
+        }
+        readings.push(if n == 0 {
+            0.0
+        } else {
+            (score / n as f32).clamp(0.0, 1.0)
+        });
+    }
+    for (p, reading) in graph.pressures.iter_mut().zip(readings) {
+        p.pressure = reading;
+    }
 }
 
 fn collect_muscles(
@@ -2089,6 +2315,7 @@ pub fn step_body(graph: &mut BodyGraph, world: &mut World, scripted_muscle: bool
     apply_inertia(graph, world);
     enforce_joints(graph, world);
     claim_body_volume(graph, world);
+    sample_pressure_endings(graph, world);
     refresh_muscle_state(graph);
 }
 

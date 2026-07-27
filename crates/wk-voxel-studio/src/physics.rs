@@ -156,6 +156,8 @@ pub fn tick_world_gated(world: &mut World, cfg: &StudioPhysicsConfig) {
     set_parallel_enabled(cfg.perf.parallel_physics);
     if cfg.ca_enabled && (cfg.gravity || cfg.water_flow || cfg.seepage || cfg.grain || cfg.failure)
     {
+        // Pre-flow dirty seed — dry sand otherwise starves after clear_all_dirty.
+        let tick_seed = plan_active(world);
         for step in 0..FLOW_SUBSTEPS {
             let active = plan_active(world);
             clear_all_dirty(world);
@@ -181,7 +183,10 @@ pub fn tick_world_gated(world: &mut World, cfg: &StudioPhysicsConfig) {
             }
         }
 
-        let active = plan_active(world);
+        let mut active = plan_active(world);
+        if active.is_empty() && (cfg.grain || cfg.seepage) {
+            active = tick_seed;
+        }
         if !active.is_empty() {
             if cfg.seepage {
                 apply_seepage_regions(world, &active);
@@ -191,7 +196,10 @@ pub fn tick_world_gated(world: &mut World, cfg: &StudioPhysicsConfig) {
                 for pass in &passes {
                     apply_grain_fall_regions(world, pass);
                 }
-                let repose_active = plan_active(world);
+                let mut repose_active = plan_active(world);
+                if repose_active.is_empty() {
+                    repose_active = active;
+                }
                 if !repose_active.is_empty() {
                     let repose_passes = partition_checkerboard(&repose_active);
                     for pass in &repose_passes {
@@ -261,6 +269,37 @@ mod tests {
         assert!(
             wet_neighbors >= 2,
             "sandbox flow should spread water sideways (wet seats={wet_neighbors})"
+        );
+    }
+
+    #[test]
+    fn sandbox_sand_tower_settles() {
+        let mut w = World::new(11);
+        for cy in 0..2 {
+            for cx in 0..2 {
+                w.ensure_chunk(ChunkCoord::new(cx, cy));
+            }
+        }
+        for x in 0..24 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 1..=6 {
+            w.set_cell(8, y, Cell::solid(MaterialId::Sand));
+        }
+        let cfg = StudioPhysicsConfig::sandbox();
+        for _ in 0..80 {
+            tick_world_gated(&mut w, &cfg);
+        }
+        let max_h = (1..=10)
+            .filter(|&y| {
+                w.get_cell(8, y)
+                    .is_some_and(|c| c.material == MaterialId::Sand)
+            })
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_h <= 3,
+            "sandbox grain should flatten sand towers (max_h={max_h})"
         );
     }
 

@@ -69,7 +69,7 @@ pub fn evolve_morphology(
             } else {
                 mutate_paint(&paint0, seed.wrapping_add(i as u64 * 17))
             };
-            let net = StudioNet::for_muscles(n_mus, seed.wrapping_add(i as u64));
+            let net = StudioNet::for_body(n_mus, 0, seed.wrapping_add(i as u64));
             GaIndividual {
                 paint,
                 net,
@@ -82,20 +82,21 @@ pub fn evolve_morphology(
         for (i, ind) in pop.iter_mut().enumerate() {
             let mut arena = base();
             arena.body.paint = ind.paint.clone();
-            // Resize net if muscle count changed after paint mutate.
+            // Resize net if muscle/sensor counts changed after paint mutate.
             let _ = arena.activate();
-            let m = arena
+            let (m, np) = arena
                 .body
                 .graph
                 .as_ref()
-                .map(|g| g.muscles.len())
-                .unwrap_or(0);
+                .map(|g| (g.muscles.len(), g.pressures.len()))
+                .unwrap_or((0, 0));
             if m == 0 {
                 ind.fitness = -1.0e5;
                 continue;
             }
-            if ind.net.n_out != m {
-                ind.net = StudioNet::for_muscles(m, seed.wrapping_add(g as u64 * 100 + i as u64));
+            if ind.net.n_out != m || ind.net.n_pressure != np {
+                ind.net =
+                    StudioNet::for_body(m, np, seed.wrapping_add(g as u64 * 100 + i as u64));
             }
             let r: EpisodeResult = evaluate_net(&mut arena, &ind.net, episode_ticks);
             ind.fitness = r.fitness;

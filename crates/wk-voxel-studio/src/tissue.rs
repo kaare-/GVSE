@@ -19,6 +19,8 @@ pub const FIXTURE_RGB: [u8; 3] = [0x2A, 0x2A, 0x2A];
 pub const FORCE_SENSOR_RGB: [u8; 3] = [0x4A, 0x6F, 0xA5];
 /// Bright cyan — must not look like ForceSensor blue (common mix-up).
 pub const JOINT_RGB: [u8; 3] = [0x2E, 0xE0, 0xF0];
+/// Pressure / contact nerve ending (creature sensor, exportable).
+pub const PRESSURE_ENDING_RGB: [u8; 3] = [0xD4, 0xA0, 0x3C];
 
 /// Joint hinge rotation limit as a fraction of a full turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -63,6 +65,8 @@ pub enum TissueKind {
     JointQuarter = 10,
     /// Uniaxial force sampler on a fixture. Stripped on export.
     ForceSensor = 11,
+    /// Creature pressure / contact ending — works under skin or bare.
+    PressureEnding = 12,
 }
 
 impl TissueKind {
@@ -94,7 +98,12 @@ impl TissueKind {
     pub fn exportable(self) -> bool {
         matches!(
             self,
-            Self::Bone | Self::Muscle | Self::Skin | Self::Nerve | Self::NeuronBlob
+            Self::Bone
+                | Self::Muscle
+                | Self::Skin
+                | Self::Nerve
+                | Self::NeuronBlob
+                | Self::PressureEnding
         ) || self.joint_limit().is_some()
     }
 }
@@ -197,6 +206,7 @@ mod tests {
         assert!(TissueKind::JointHalf.exportable());
         assert!(!TissueKind::Fixture.exportable());
         assert!(!TissueKind::ForceSensor.exportable());
+        assert!(TissueKind::PressureEnding.exportable());
         assert!(!TissueKind::Empty.exportable());
     }
 

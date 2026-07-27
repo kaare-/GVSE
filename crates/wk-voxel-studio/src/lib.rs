@@ -18,14 +18,14 @@ pub use arena::{ArenaConfig, StudioArena, ARENA_MAX, ARENA_MIN};
 pub use body::{
     activate, claim_body_volume, force_sensors_bridging_parts, script_muscles, step_body,
     ActivateError, AttachedTissue, BodyGraph, Joint, Muscle, MuscleFeedback, NerveStrand,
-    NeuronCluster, PartKind, RigidPart,
+    NeuralSummary, NeuronCluster, PartKind, PressureEnding, PressureSample, RigidPart,
 };
 pub use export::{
     decode_body, encode_body, export_body, export_body_with_net, import_body_paint, ExportError,
     ExportedBody, BODY_SCHEMA_VERSION,
 };
 pub use ga::{evolve_morphology, mutate_paint, GaIndividual};
-pub use neural::StudioNet;
+pub use neural::{NetKind, StudioNet};
 pub use palette::{tissue_rgb, JOINT_SYMBOL};
 pub use physics::{
     enable_water_physics, tick_world_gated, wake_fluid_chunks, StudioPhysicsConfig,
@@ -36,6 +36,6 @@ pub use scenarios::{
 };
 pub use tissue::{
     ForceSensor, JointLimit, StudioBody, TissueKind, TissuePaint, FIXTURE_RGB, JOINT_RGB,
-    MUSCLE_RGB, NERVE_RGB, NEURON_BLOB_RGB, SKIN_RGB,
+    MUSCLE_RGB, NERVE_RGB, NEURON_BLOB_RGB, PRESSURE_ENDING_RGB, SKIN_RGB,
 };
 pub use train::{apply_net, evaluate_net, hill_climb, EpisodeResult, TrainingSession};
