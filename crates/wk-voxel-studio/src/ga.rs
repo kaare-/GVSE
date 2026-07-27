@@ -1,7 +1,7 @@
 //! Morphology GA — mutate tissue paint, keep best by episode fitness (S5).
 
 use crate::arena::StudioArena;
-use crate::neural::StudioNet;
+use crate::neural::{SensorCounts, StudioNet};
 use crate::tissue::{TissueKind, TissuePaint};
 use crate::train::{evaluate_net, EpisodeResult};
 
@@ -69,7 +69,7 @@ pub fn evolve_morphology(
             } else {
                 mutate_paint(&paint0, seed.wrapping_add(i as u64 * 17))
             };
-            let net = StudioNet::for_body(n_mus, 0, seed.wrapping_add(i as u64));
+            let net = StudioNet::for_body(n_mus, SensorCounts::default(), seed.wrapping_add(i as u64));
             GaIndividual {
                 paint,
                 net,
@@ -84,19 +84,19 @@ pub fn evolve_morphology(
             arena.body.paint = ind.paint.clone();
             // Resize net if muscle/sensor counts changed after paint mutate.
             let _ = arena.activate();
-            let (m, np) = arena
+            let (m, sensors) = arena
                 .body
                 .graph
                 .as_ref()
-                .map(|g| (g.muscles.len(), g.pressures.len()))
-                .unwrap_or((0, 0));
+                .map(|g| (g.muscles.len(), g.sensor_counts()))
+                .unwrap_or((0, SensorCounts::default()));
             if m == 0 {
                 ind.fitness = -1.0e5;
                 continue;
             }
-            if ind.net.n_out != m || ind.net.n_pressure != np {
+            if !ind.net.matches_body(m, sensors) {
                 ind.net =
-                    StudioNet::for_body(m, np, seed.wrapping_add(g as u64 * 100 + i as u64));
+                    StudioNet::for_body(m, sensors, seed.wrapping_add(g as u64 * 100 + i as u64));
             }
             let r: EpisodeResult = evaluate_net(&mut arena, &ind.net, episode_ticks);
             ind.fitness = r.fitness;

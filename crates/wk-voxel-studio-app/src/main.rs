@@ -67,6 +67,14 @@ const TISSUE_PALETTE: &[TissueEntry] = &[
         label: "Pressure end",
     },
     TissueEntry {
+        kind: TissueKind::LightEnding,
+        label: "Light end",
+    },
+    TissueEntry {
+        kind: TissueKind::VestibularEnding,
+        label: "Vestibular",
+    },
+    TissueEntry {
         kind: TissueKind::Fixture,
         label: "Fixture",
     },
@@ -188,6 +196,8 @@ fn overlay_rgb(arena: &StudioArena, x: i32, y: i32) -> Option<[u8; 3]> {
                 | TissueKind::Nerve
                 | TissueKind::NeuronBlob
                 | TissueKind::PressureEnding
+                | TissueKind::LightEnding
+                | TissueKind::VestibularEnding
                 | TissueKind::JointFull
                 | TissueKind::JointThreeQuarter
                 | TissueKind::JointHalf
@@ -866,7 +876,7 @@ async fn main() {
                 let s = g.neural_summary();
                 let link = if s.blobs_linked { "linked" } else { "split" };
                 format!(
-                    "  net={} {}→{}→{}  eff={}  P={}({:.2})  blobs={}/{} ({link})  nerves={}",
+                    "  net={} {}→{}→{}  eff={}  P={}({:.2})  L={}({:.2})  V={}({:.2})  blobs={}/{} ({link})  nerves={}",
                     net.kind_label(),
                     net.n_in,
                     net.n_hidden,
@@ -874,6 +884,10 @@ async fn main() {
                     s.n_effectors,
                     s.n_pressure,
                     g.mean_pressure(),
+                    s.n_light,
+                    g.mean_light(),
+                    s.n_vestibular,
+                    g.mean_upright(),
                     s.n_controllers,
                     s.n_neuron_blobs,
                     s.n_nerves,
@@ -883,8 +897,14 @@ async fn main() {
                 let s = g.neural_summary();
                 let link = if s.blobs_linked { "linked" } else { "split" };
                 format!(
-                    "  eff={}  P={}  blobs={}/{} ({link})  nerves={}",
-                    s.n_effectors, s.n_pressure, s.n_controllers, s.n_neuron_blobs, s.n_nerves,
+                    "  eff={}  P={}  L={}  V={}  blobs={}/{} ({link})  nerves={}",
+                    s.n_effectors,
+                    s.n_pressure,
+                    s.n_light,
+                    s.n_vestibular,
+                    s.n_controllers,
+                    s.n_neuron_blobs,
+                    s.n_nerves,
                 )
             }
             _ => String::new(),

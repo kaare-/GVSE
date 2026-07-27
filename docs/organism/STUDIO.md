@@ -212,7 +212,7 @@ Postcard + schema version, same spirit as `.gvsecrt`.
 | **S0** | This doc + `wk-voxel-studio` types + empty studio app arena | ✅ Arena ticks water with world rules; paint enum + colours locked |
 | **S1** | Paint UI + activate → `BodyGraph` (bones, fixtures) | ✅ `Enter` activates; hung bones stay, free bones fall (discrete gravity); no muscle yet |
 | **S2** | Joints + scripted muscle + hydro push + muscle feedback | ✅ Hinge water displace; free-body buoyancy/drag/inertia; grain seed fix; `tests/hydro_body.rs` |
-| **S3** | Nerves / richer sensors | ✅ Pressure endings → net inputs; nerve/blob HUD; fixture force later |
+| **S3** | Nerves / richer sensors | ✅ Pressure + light (day×column) + vestibular gyro → net; nerve/blob HUD; fixture force later |
 | **S4** | Neural training (fixed morphology) | ✅ Hill-climb + live `StudioNet` drive; app `H` / `C` / `N` |
 | **S5** | GA morphology search | ✅ Paint mutate + evaluate; app `M` |
 | **S6** | Export `.gvsebody` → world spawn | ✅ Studio `E` export with net; world spawn hook next |

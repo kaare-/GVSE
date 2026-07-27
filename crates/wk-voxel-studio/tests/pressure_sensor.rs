@@ -6,7 +6,7 @@
 
 use wk_material::MaterialId;
 use wk_voxel_studio::{
-    ArenaConfig, StudioArena, StudioPhysicsConfig, StudioNet, TissueKind,
+    ArenaConfig, SensorFrame, StudioArena, StudioNet, StudioPhysicsConfig, TissueKind,
 };
 
 #[test]
@@ -86,14 +86,19 @@ fn net_grows_pressure_inputs() {
     assert_eq!(g.pressures.len(), 1);
     let n_mus = g.muscles.len();
     let fb = g.muscle_feedback();
-    let ps = g.pressure_samples();
+    let frame = SensorFrame {
+        pressure: g.pressure_samples(),
+        ..SensorFrame::default()
+    };
     let summary = g.neural_summary();
     assert_eq!(summary.n_effectors, n_mus);
     assert_eq!(summary.n_pressure, 1);
+    assert_eq!(summary.n_light, 0);
+    assert_eq!(summary.n_vestibular, 0);
     let net = arena.body.net.as_ref().expect("controller attaches net");
     assert_eq!(net.n_pressure, 1);
     assert_eq!(net.n_in, n_mus * 3 + 1);
     assert_eq!(net.kind_label(), "FF-v1");
-    let input = StudioNet::encode_inputs(&fb, &ps);
+    let input = StudioNet::encode_inputs(&fb, &frame);
     assert_eq!(input.len(), net.n_in);
 }

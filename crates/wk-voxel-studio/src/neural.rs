@@ -2,7 +2,7 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::body::{MuscleFeedback, PressureSample};
+use crate::body::{LightSample, MuscleFeedback, PressureSample, VestibularSample};
 
 /// Controller architecture tag — more kinds can land later.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -10,6 +10,39 @@ pub enum NetKind {
     /// Classic MLP: proprioception (+ sensors) → hidden → muscle actuations.
     #[default]
     FeedForwardV1,
+}
+
+/// How many of each sensor ending feed the net.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SensorCounts {
+    pub pressure: usize,
+    pub light: usize,
+    /// Cochlea-like balance organs (3 channels each).
+    pub vestibular: usize,
+}
+
+impl SensorCounts {
+    pub fn extra_inputs(self) -> usize {
+        self.pressure + self.light + self.vestibular * 3
+    }
+}
+
+/// One encode frame of creature sensors.
+#[derive(Debug, Clone, Default)]
+pub struct SensorFrame {
+    pub pressure: Vec<PressureSample>,
+    pub light: Vec<LightSample>,
+    pub vestibular: Vec<VestibularSample>,
+}
+
+impl SensorFrame {
+    pub fn counts(&self) -> SensorCounts {
+        SensorCounts {
+            pressure: self.pressure.len(),
+            light: self.light.len(),
+            vestibular: self.vestibular.len(),
+        }
+    }
 }
 
 /// Fixed-topology controller: feedback → hidden → muscle actuations.
@@ -23,9 +56,12 @@ pub struct StudioNet {
     /// Muscle effector count (outputs).
     #[serde(default)]
     pub n_effectors: usize,
-    /// Pressure ending input channels (trailing inputs after muscle proprio).
     #[serde(default)]
     pub n_pressure: usize,
+    #[serde(default)]
+    pub n_light: usize,
+    #[serde(default)]
+    pub n_vestibular: usize,
     /// Row-major `n_hidden × n_in`.
     pub w1: Vec<f32>,
     pub b1: Vec<f32>,
@@ -35,31 +71,29 @@ pub struct StudioNet {
 }
 
 impl StudioNet {
-    pub fn new(n_in: usize, n_hidden: usize, n_out: usize, seed: u64) -> Self {
-        Self::new_kind(
-            NetKind::FeedForwardV1,
-            n_in,
-            n_hidden,
+    pub fn new(n_in: usize, _n_hidden: usize, n_out: usize, seed: u64) -> Self {
+        Self::for_body(
             n_out,
-            n_out,
-            n_in.saturating_sub(n_out * 3),
+            SensorCounts {
+                pressure: n_in.saturating_sub(n_out * 3),
+                ..SensorCounts::default()
+            },
             seed,
         )
     }
 
-    pub fn new_kind(
-        kind: NetKind,
-        n_in: usize,
-        n_hidden: usize,
-        n_out: usize,
-        n_effectors: usize,
-        n_pressure: usize,
-        seed: u64,
-    ) -> Self {
+    pub fn for_muscles(n_muscles: usize, seed: u64) -> Self {
+        Self::for_body(n_muscles, SensorCounts::default(), seed)
+    }
+
+    /// Muscle proprio (×3) + sensor channels.
+    pub fn for_body(n_muscles: usize, sensors: SensorCounts, seed: u64) -> Self {
+        let n_in = n_muscles * 3 + sensors.extra_inputs();
+        let n_hidden = (n_muscles * 4 + sensors.extra_inputs() * 2).max(4);
         let mut w1 = vec![0.0; n_hidden * n_in];
-        let mut w2 = vec![0.0; n_out * n_hidden];
+        let mut w2 = vec![0.0; n_muscles * n_hidden];
         let mut b1 = vec![0.0; n_hidden];
-        let mut b2 = vec![0.0; n_out];
+        let mut b2 = vec![0.0; n_muscles];
         let mut s = seed;
         for v in w1.iter_mut().chain(w2.iter_mut()) {
             s = hash(s);
@@ -70,12 +104,14 @@ impl StudioNet {
             *v = ((s % 1000) as f32 / 1000.0) * 0.2 - 0.1;
         }
         Self {
-            kind,
+            kind: NetKind::FeedForwardV1,
             n_in,
             n_hidden,
-            n_out,
-            n_effectors,
-            n_pressure,
+            n_out: n_muscles,
+            n_effectors: n_muscles,
+            n_pressure: sensors.pressure,
+            n_light: sensors.light,
+            n_vestibular: sensors.vestibular,
             w1,
             b1,
             w2,
@@ -83,23 +119,16 @@ impl StudioNet {
         }
     }
 
-    pub fn for_muscles(n_muscles: usize, seed: u64) -> Self {
-        Self::for_body(n_muscles, 0, seed)
+    pub fn sensor_counts(&self) -> SensorCounts {
+        SensorCounts {
+            pressure: self.n_pressure,
+            light: self.n_light,
+            vestibular: self.n_vestibular,
+        }
     }
 
-    /// Muscle proprio (×3) + one pressure channel per ending.
-    pub fn for_body(n_muscles: usize, n_pressure: usize, seed: u64) -> Self {
-        let n_in = n_muscles * 3 + n_pressure;
-        let n_hidden = (n_muscles * 4 + n_pressure * 2).max(4);
-        Self::new_kind(
-            NetKind::FeedForwardV1,
-            n_in,
-            n_hidden,
-            n_muscles,
-            n_muscles,
-            n_pressure,
-            seed,
-        )
+    pub fn matches_body(&self, n_muscles: usize, sensors: SensorCounts) -> bool {
+        self.n_out == n_muscles && self.sensor_counts() == sensors
     }
 
     pub fn kind_label(&self) -> &'static str {
@@ -109,18 +138,26 @@ impl StudioNet {
     }
 
     pub fn encode_feedback(fb: &[MuscleFeedback]) -> Vec<f32> {
-        Self::encode_inputs(fb, &[])
+        Self::encode_inputs(fb, &SensorFrame::default())
     }
 
-    pub fn encode_inputs(fb: &[MuscleFeedback], pressure: &[PressureSample]) -> Vec<f32> {
-        let mut v = Vec::with_capacity(fb.len() * 3 + pressure.len());
+    pub fn encode_inputs(fb: &[MuscleFeedback], sensors: &SensorFrame) -> Vec<f32> {
+        let mut v = Vec::with_capacity(fb.len() * 3 + sensors.counts().extra_inputs());
         for m in fb {
             v.push(m.actuation);
             v.push((m.length / m.rest_length.max(0.01)).clamp(0.0, 2.0) * 0.5);
             v.push(m.tension.clamp(0.0, 4.0) * 0.25);
         }
-        for p in pressure {
+        for p in &sensors.pressure {
             v.push(p.pressure.clamp(0.0, 1.0));
+        }
+        for l in &sensors.light {
+            v.push(l.light.clamp(0.0, 1.0));
+        }
+        for g in &sensors.vestibular {
+            v.push(g.upright.clamp(0.0, 1.0));
+            v.push(g.ang_rate.clamp(0.0, 1.0));
+            v.push(g.fall_speed.clamp(0.0, 1.0));
         }
         v
     }
@@ -196,11 +233,16 @@ mod tests {
     }
 
     #[test]
-    fn pressure_channels_extend_input() {
-        let net = StudioNet::for_body(1, 2, 3);
-        assert_eq!(net.n_in, 5);
-        assert_eq!(net.n_pressure, 2);
-        assert_eq!(net.kind_label(), "FF-v1");
+    fn multi_sensor_channels() {
+        let sensors = SensorCounts {
+            pressure: 1,
+            light: 1,
+            vestibular: 1,
+        };
+        let net = StudioNet::for_body(1, sensors, 3);
+        assert_eq!(net.n_in, 3 + 1 + 1 + 3);
+        assert_eq!(net.n_light, 1);
+        assert_eq!(net.n_vestibular, 1);
         let fb = [MuscleFeedback {
             muscle_id: 0,
             actuation: 0.0,
@@ -208,17 +250,20 @@ mod tests {
             rest_length: 1.0,
             tension: 0.0,
         }];
-        let p = [
-            PressureSample {
+        let frame = SensorFrame {
+            pressure: vec![PressureSample {
                 id: 0,
                 pressure: 0.5,
-            },
-            PressureSample {
-                id: 1,
-                pressure: 1.0,
-            },
-        ];
-        let out = net.forward(&StudioNet::encode_inputs(&fb, &p));
+            }],
+            light: vec![LightSample { id: 0, light: 0.8 }],
+            vestibular: vec![VestibularSample {
+                id: 0,
+                upright: 0.9,
+                ang_rate: 0.1,
+                fall_speed: 0.0,
+            }],
+        };
+        let out = net.forward(&StudioNet::encode_inputs(&fb, &frame));
         assert_eq!(out.len(), 1);
     }
 }

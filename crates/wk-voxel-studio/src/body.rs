@@ -7,8 +7,9 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
-use wk_voxel::{Cell, Sat, World};
+use wk_voxel::{day_factor, Cell, Sat, World};
 
+use crate::neural::{SensorCounts, SensorFrame};
 use crate::tissue::{JointLimit, TissueKind, TissuePaint};
 
 /// What a rigid part is made of.
@@ -46,6 +47,9 @@ pub struct RigidPart {
     /// Radians from rest pose for hinged bones (0 = as painted).
     #[serde(default)]
     pub hinge_angle: f32,
+    /// Previous tick hinge angle (vestibular angular-rate).
+    #[serde(default)]
+    pub prev_hinge_angle: f32,
     /// Discrete translational momentum (cells/tick), free roots only.
     #[serde(default)]
     pub vel_x: i32,
@@ -201,11 +205,61 @@ pub struct PressureSample {
     pub pressure: f32,
 }
 
+/// Light / dark photoreceptor on a host bone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LightEnding {
+    pub id: u32,
+    pub cells: Vec<(i32, i32)>,
+    pub host_part: u32,
+    #[serde(default)]
+    pub neuron_ids: Vec<u32>,
+    /// Latest sample 0..1 (day_factor × upward column openness).
+    #[serde(default)]
+    pub light: f32,
+}
+
+/// One light channel for the neural encoder.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct LightSample {
+    pub id: u32,
+    pub light: f32,
+}
+
+/// Vestibular / cochlea-like balance organ on a host bone.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VestibularEnding {
+    pub id: u32,
+    pub cells: Vec<(i32, i32)>,
+    pub host_part: u32,
+    #[serde(default)]
+    pub neuron_ids: Vec<u32>,
+    /// 1 = upright (pivot→centroid points +Y), 0 = inverted / flat.
+    #[serde(default)]
+    pub upright: f32,
+    /// Normalized |Δhinge| / tumble cue, 0..1.
+    #[serde(default)]
+    pub ang_rate: f32,
+    /// Normalized downward speed cue, 0..1.
+    #[serde(default)]
+    pub fall_speed: f32,
+}
+
+/// Vestibular channels for the neural encoder (3 floats per ending).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct VestibularSample {
+    pub id: u32,
+    pub upright: f32,
+    pub ang_rate: f32,
+    pub fall_speed: f32,
+}
+
 /// Snapshot of neural / sensor topology for HUD and net sizing.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct NeuralSummary {
     pub n_effectors: usize,
     pub n_pressure: usize,
+    pub n_light: usize,
+    pub n_vestibular: usize,
     pub n_neuron_blobs: usize,
     pub n_controllers: usize,
     /// True when ≥2 blobs share a nerve path (or direct adjacency).
@@ -227,6 +281,12 @@ pub struct BodyGraph {
     /// Pressure endings (creature touch / hydro sensors).
     #[serde(default)]
     pub pressures: Vec<PressureEnding>,
+    /// Light / dark photoreceptors.
+    #[serde(default)]
+    pub lights: Vec<LightEnding>,
+    /// Vestibular / cochlea-like balance organs.
+    #[serde(default)]
+    pub vestibulars: Vec<VestibularEnding>,
     /// At least one controller-sized neuron blob is present.
     pub has_controller: bool,
     /// Radians-ish phase for scripted sinusoid (accumulates with tick).
@@ -288,6 +348,44 @@ impl BodyGraph {
             .collect()
     }
 
+    pub fn light_samples(&self) -> Vec<LightSample> {
+        self.lights
+            .iter()
+            .map(|l| LightSample {
+                id: l.id,
+                light: l.light,
+            })
+            .collect()
+    }
+
+    pub fn vestibular_samples(&self) -> Vec<VestibularSample> {
+        self.vestibulars
+            .iter()
+            .map(|v| VestibularSample {
+                id: v.id,
+                upright: v.upright,
+                ang_rate: v.ang_rate,
+                fall_speed: v.fall_speed,
+            })
+            .collect()
+    }
+
+    pub fn sensor_counts(&self) -> SensorCounts {
+        SensorCounts {
+            pressure: self.pressures.len(),
+            light: self.lights.len(),
+            vestibular: self.vestibulars.len(),
+        }
+    }
+
+    pub fn sensor_frame(&self) -> SensorFrame {
+        SensorFrame {
+            pressure: self.pressure_samples(),
+            light: self.light_samples(),
+            vestibular: self.vestibular_samples(),
+        }
+    }
+
     pub fn mean_pressure(&self) -> f32 {
         if self.pressures.is_empty() {
             return 0.0;
@@ -295,11 +393,27 @@ impl BodyGraph {
         self.pressures.iter().map(|p| p.pressure).sum::<f32>() / self.pressures.len() as f32
     }
 
+    pub fn mean_light(&self) -> f32 {
+        if self.lights.is_empty() {
+            return 0.0;
+        }
+        self.lights.iter().map(|l| l.light).sum::<f32>() / self.lights.len() as f32
+    }
+
+    pub fn mean_upright(&self) -> f32 {
+        if self.vestibulars.is_empty() {
+            return 0.0;
+        }
+        self.vestibulars.iter().map(|v| v.upright).sum::<f32>() / self.vestibulars.len() as f32
+    }
+
     pub fn neural_summary(&self) -> NeuralSummary {
         let n_controllers = self.neurons.iter().filter(|n| n.is_controller).count();
         NeuralSummary {
             n_effectors: self.muscles.len(),
             n_pressure: self.pressures.len(),
+            n_light: self.lights.len(),
+            n_vestibular: self.vestibulars.len(),
             n_neuron_blobs: self.neurons.len(),
             n_controllers,
             blobs_linked: neuron_blobs_linked(self),
@@ -338,6 +452,22 @@ impl BodyGraph {
                 .any(|(x, y)| x == gx && y == gy)
             {
                 return Some(TissueKind::PressureEnding);
+            }
+        }
+        for l in &self.lights {
+            if pose_cells_for_part(self, l.host_part, &l.cells)
+                .into_iter()
+                .any(|(x, y)| x == gx && y == gy)
+            {
+                return Some(TissueKind::LightEnding);
+            }
+        }
+        for v in &self.vestibulars {
+            if pose_cells_for_part(self, v.host_part, &v.cells)
+                .into_iter()
+                .any(|(x, y)| x == gx && y == gy)
+            {
+                return Some(TissueKind::VestibularEnding);
             }
         }
         for n in &self.neurons {
@@ -410,6 +540,7 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
                 assembly_root: false,
                 hinged: false,
                 hinge_angle: 0.0,
+                prev_hinge_angle: 0.0,
                 vel_x: 0,
                 vel_y: 0,
             });
@@ -450,6 +581,8 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
     let nerves = collect_nerves(paint, &cell_owner, &muscles, &neurons);
     let skins = collect_skins(paint, &cell_owner);
     let pressures = collect_pressures(paint, &cell_owner, &neurons, &nerves);
+    let lights = collect_lights(paint, &cell_owner, &neurons, &nerves);
+    let vestibulars = collect_vestibulars(paint, &cell_owner, &neurons, &nerves);
     let has_controller = neurons.iter().any(|n| n.is_controller);
 
     Ok(BodyGraph {
@@ -460,6 +593,8 @@ pub fn activate(paint: &TissuePaint) -> Result<BodyGraph, ActivateError> {
         neurons,
         skins,
         pressures,
+        lights,
+        vestibulars,
         has_controller,
         script_phase: 0.0,
     })
@@ -851,6 +986,35 @@ fn collect_skins(
     out
 }
 
+fn ending_neuron_ids(
+    cells: &[(i32, i32)],
+    neurons: &[NeuronCluster],
+    nerves: &[NerveStrand],
+) -> Vec<u32> {
+    let neuron_at = |x: i32, y: i32| -> Option<u32> {
+        neurons
+            .iter()
+            .find(|n| n.cells.iter().any(|&c| c == (x, y)))
+            .map(|n| n.id)
+    };
+    let mut neuron_ids = Vec::new();
+    for &(cx, cy) in cells {
+        for (nx, ny) in neighbors4(cx, cy) {
+            if let Some(id) = neuron_at(nx, ny) {
+                neuron_ids.push(id);
+            }
+            for nerve in nerves {
+                if nerve.cells.iter().any(|&c| c == (nx, ny) || c == (cx, cy)) {
+                    neuron_ids.extend(nerve.neuron_ids.iter().copied());
+                }
+            }
+        }
+    }
+    neuron_ids.sort_unstable();
+    neuron_ids.dedup();
+    neuron_ids
+}
+
 fn collect_pressures(
     paint: &TissuePaint,
     owner: &HashMap<(i32, i32), u32>,
@@ -862,12 +1026,6 @@ fn collect_pressures(
     let mut seen = HashSet::new();
     let mut out = Vec::new();
     let mut next = 0u32;
-    let neuron_at = |x: i32, y: i32| -> Option<u32> {
-        neurons
-            .iter()
-            .find(|n| n.cells.iter().any(|&c| c == (x, y)))
-            .map(|n| n.id)
-    };
     for y in 0..h {
         for x in 0..w {
             if paint.get(x as u32, y as u32) != TissueKind::PressureEnding {
@@ -878,28 +1036,85 @@ fn collect_pressures(
             }
             let cells = flood(paint, x, y, TissueKind::PressureEnding, &mut seen);
             let host_part = majority_host(owner, &cells).unwrap_or(u32::MAX);
-            let mut neuron_ids = Vec::new();
-            for &(cx, cy) in &cells {
-                for (nx, ny) in neighbors4(cx, cy) {
-                    if let Some(id) = neuron_at(nx, ny) {
-                        neuron_ids.push(id);
-                    }
-                    // Nerve touching this ending links its neuron ids.
-                    for nerve in nerves {
-                        if nerve.cells.iter().any(|&c| c == (nx, ny) || c == (cx, cy)) {
-                            neuron_ids.extend(nerve.neuron_ids.iter().copied());
-                        }
-                    }
-                }
-            }
-            neuron_ids.sort_unstable();
-            neuron_ids.dedup();
+            let neuron_ids = ending_neuron_ids(&cells, neurons, nerves);
             out.push(PressureEnding {
                 id: next,
                 cells,
                 host_part,
                 neuron_ids,
                 pressure: 0.0,
+            });
+            next += 1;
+        }
+    }
+    out
+}
+
+fn collect_lights(
+    paint: &TissuePaint,
+    owner: &HashMap<(i32, i32), u32>,
+    neurons: &[NeuronCluster],
+    nerves: &[NerveStrand],
+) -> Vec<LightEnding> {
+    let w = paint.width as i32;
+    let h = paint.height as i32;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let mut next = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            if paint.get(x as u32, y as u32) != TissueKind::LightEnding {
+                continue;
+            }
+            if !seen.insert((x, y)) {
+                continue;
+            }
+            let cells = flood(paint, x, y, TissueKind::LightEnding, &mut seen);
+            let host_part = majority_host(owner, &cells).unwrap_or(u32::MAX);
+            let neuron_ids = ending_neuron_ids(&cells, neurons, nerves);
+            out.push(LightEnding {
+                id: next,
+                cells,
+                host_part,
+                neuron_ids,
+                light: 0.0,
+            });
+            next += 1;
+        }
+    }
+    out
+}
+
+fn collect_vestibulars(
+    paint: &TissuePaint,
+    owner: &HashMap<(i32, i32), u32>,
+    neurons: &[NeuronCluster],
+    nerves: &[NerveStrand],
+) -> Vec<VestibularEnding> {
+    let w = paint.width as i32;
+    let h = paint.height as i32;
+    let mut seen = HashSet::new();
+    let mut out = Vec::new();
+    let mut next = 0u32;
+    for y in 0..h {
+        for x in 0..w {
+            if paint.get(x as u32, y as u32) != TissueKind::VestibularEnding {
+                continue;
+            }
+            if !seen.insert((x, y)) {
+                continue;
+            }
+            let cells = flood(paint, x, y, TissueKind::VestibularEnding, &mut seen);
+            let host_part = majority_host(owner, &cells).unwrap_or(u32::MAX);
+            let neuron_ids = ending_neuron_ids(&cells, neurons, nerves);
+            out.push(VestibularEnding {
+                id: next,
+                cells,
+                host_part,
+                neuron_ids,
+                upright: 1.0,
+                ang_rate: 0.0,
+                fall_speed: 0.0,
             });
             next += 1;
         }
@@ -999,6 +1214,148 @@ fn sample_pressure_endings(graph: &mut BodyGraph, world: &World) {
     }
     for (p, reading) in graph.pressures.iter_mut().zip(readings) {
         p.pressure = reading;
+    }
+}
+
+/// Day factor × upward column openness (solids block; moist air attenuates).
+///
+/// Arena shells are [`MaterialId::Bedrock`] on the rim — treat bedrock as the
+/// open sky dome so photoreceptors are not permanently dark under the lid.
+fn column_light(world: &World, x: i32, y: i32) -> f32 {
+    let day = day_factor(world.tick);
+    let mut open = 1.0f32;
+    let mut cy = y + 1;
+    // Scan skyward until an occluding solid or leave the loaded grid.
+    for _ in 0..512 {
+        let Some(c) = world.get_cell(x, cy) else {
+            break;
+        };
+        if c.material == MaterialId::Bedrock {
+            break;
+        }
+        if c.material != MaterialId::Air {
+            open = 0.0;
+            break;
+        }
+        if !c.sat.is_empty() {
+            open *= (1.0 - 0.35 * c.sat.as_f32()).clamp(0.0, 1.0);
+        }
+        cy += 1;
+    }
+    (day * open).clamp(0.0, 1.0)
+}
+
+fn sample_light_endings(graph: &mut BodyGraph, world: &World) {
+    let hosts: Vec<(u32, Vec<(i32, i32)>)> = graph
+        .lights
+        .iter()
+        .map(|l| (l.host_part, l.cells.clone()))
+        .collect();
+    let mut readings = Vec::with_capacity(hosts.len());
+    for (host, cells) in &hosts {
+        let world_cells = pose_cells_for_part(graph, *host, cells);
+        if world_cells.is_empty() {
+            readings.push(0.0);
+            continue;
+        }
+        let sum: f32 = world_cells
+            .iter()
+            .map(|&(x, y)| column_light(world, x, y))
+            .sum();
+        readings.push((sum / world_cells.len() as f32).clamp(0.0, 1.0));
+    }
+    for (l, reading) in graph.lights.iter_mut().zip(readings) {
+        l.light = reading;
+    }
+}
+
+fn assembly_root_for(graph: &BodyGraph, part_id: u32) -> Option<&RigidPart> {
+    // Walk parent joints toward the root; fall back to the part itself.
+    let mut cur = part_id;
+    for _ in 0..64 {
+        if let Some(j) = graph.joints.iter().find(|j| j.swing_part == cur) {
+            cur = j.parent_part;
+            continue;
+        }
+        break;
+    }
+    graph.parts.iter().find(|p| p.id == cur)
+}
+
+fn host_upright(graph: &BodyGraph, host_id: u32) -> f32 {
+    let Some(host) = graph.parts.iter().find(|p| p.id == host_id) else {
+        return 0.5;
+    };
+    if let Some(j) = graph.joints.iter().find(|j| j.swing_part == host_id) {
+        let (px, py) = pivot_world(graph, j);
+        let (cx, cy) = host.centroid();
+        let dx = cx - px as f32;
+        let dy = cy - py as f32;
+        let len = (dx * dx + dy * dy).sqrt().max(1e-3);
+        // +Y is up; 1 when centroid is directly above the pivot.
+        return ((dy / len) * 0.5 + 0.5).clamp(0.0, 1.0);
+    }
+    // Free / anchored: taller-than-wide resting pose reads more upright.
+    let (min_x, max_x, min_y, max_y) = host.cells.iter().fold(
+        (i32::MAX, i32::MIN, i32::MAX, i32::MIN),
+        |(a, b, c, d), &(x, y)| (a.min(x), b.max(x), c.min(y), d.max(y)),
+    );
+    let w = (max_x - min_x + 1).max(1) as f32;
+    let h = (max_y - min_y + 1).max(1) as f32;
+    let aspect = (h / (h + w)).clamp(0.2, 0.9);
+    let root = assembly_root_for(graph, host_id);
+    let speed = root.map(|r| r.vel_x.abs().max(r.vel_y.abs()) as f32).unwrap_or(0.0);
+    (aspect / (1.0 + 0.35 * speed)).clamp(0.0, 1.0)
+}
+
+fn host_ang_rate(graph: &BodyGraph, host_id: u32) -> f32 {
+    let mut rate = 0.0f32;
+    let mut n = 0u32;
+    for j in &graph.joints {
+        if j.swing_part != host_id && j.parent_part != host_id {
+            continue;
+        }
+        if let Some(p) = graph.parts.iter().find(|p| p.id == j.swing_part) {
+            rate += (p.hinge_angle - p.prev_hinge_angle).abs();
+            n += 1;
+        }
+    }
+    if n == 0 {
+        // Free body tumble cue from horizontal velocity.
+        return assembly_root_for(graph, host_id)
+            .map(|r| (r.vel_x.abs() as f32 / 2.0).clamp(0.0, 1.0))
+            .unwrap_or(0.0);
+    }
+    // ~π/8 rad/tick ≈ full-scale spin sensation.
+    ((rate / n as f32) / (std::f32::consts::FRAC_PI_8)).clamp(0.0, 1.0)
+}
+
+fn host_fall_speed(graph: &BodyGraph, host_id: u32) -> f32 {
+    let Some(root) = assembly_root_for(graph, host_id) else {
+        return 0.0;
+    };
+    // Falling is negative vel_y (world +Y up).
+    ((-root.vel_y).max(0) as f32 / 2.0).clamp(0.0, 1.0)
+}
+
+fn sample_vestibular_endings(graph: &mut BodyGraph) {
+    let hosts: Vec<u32> = graph.vestibulars.iter().map(|v| v.host_part).collect();
+    let mut readings = Vec::with_capacity(hosts.len());
+    for &host in &hosts {
+        readings.push((
+            host_upright(graph, host),
+            host_ang_rate(graph, host),
+            host_fall_speed(graph, host),
+        ));
+    }
+    for (v, (u, a, f)) in graph.vestibulars.iter_mut().zip(readings) {
+        v.upright = u;
+        v.ang_rate = a;
+        v.fall_speed = f;
+    }
+    // Latch hinge angles for next-tick angular rate.
+    for p in &mut graph.parts {
+        p.prev_hinge_angle = p.hinge_angle;
     }
 }
 
@@ -2316,6 +2673,8 @@ pub fn step_body(graph: &mut BodyGraph, world: &mut World, scripted_muscle: bool
     enforce_joints(graph, world);
     claim_body_volume(graph, world);
     sample_pressure_endings(graph, world);
+    sample_light_endings(graph, world);
+    sample_vestibular_endings(graph);
     refresh_muscle_state(graph);
 }
 

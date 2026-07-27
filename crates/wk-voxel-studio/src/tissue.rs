@@ -21,6 +21,10 @@ pub const FORCE_SENSOR_RGB: [u8; 3] = [0x4A, 0x6F, 0xA5];
 pub const JOINT_RGB: [u8; 3] = [0x2E, 0xE0, 0xF0];
 /// Pressure / contact nerve ending (creature sensor, exportable).
 pub const PRESSURE_ENDING_RGB: [u8; 3] = [0xD4, 0xA0, 0x3C];
+/// Light / dark photoreceptor (exportable).
+pub const LIGHT_ENDING_RGB: [u8; 3] = [0xEB, 0xDC, 0x59];
+/// Vestibular / cochlea-like balance organ (exportable).
+pub const VESTIBULAR_ENDING_RGB: [u8; 3] = [0x59, 0xB8, 0xAD];
 
 /// Joint hinge rotation limit as a fraction of a full turn.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -67,6 +71,10 @@ pub enum TissueKind {
     ForceSensor = 11,
     /// Creature pressure / contact ending — works under skin or bare.
     PressureEnding = 12,
+    /// Light / dark photoreceptor (day factor × upward column openness).
+    LightEnding = 13,
+    /// Vestibular / cochlea-like gyro (uprightness, angular rate, fall).
+    VestibularEnding = 14,
 }
 
 impl TissueKind {
@@ -104,6 +112,8 @@ impl TissueKind {
                 | Self::Nerve
                 | Self::NeuronBlob
                 | Self::PressureEnding
+                | Self::LightEnding
+                | Self::VestibularEnding
         ) || self.joint_limit().is_some()
     }
 }
@@ -207,6 +217,8 @@ mod tests {
         assert!(!TissueKind::Fixture.exportable());
         assert!(!TissueKind::ForceSensor.exportable());
         assert!(TissueKind::PressureEnding.exportable());
+        assert!(TissueKind::LightEnding.exportable());
+        assert!(TissueKind::VestibularEnding.exportable());
         assert!(!TissueKind::Empty.exportable());
     }
 

@@ -94,7 +94,7 @@ impl StudioArena {
     pub fn activate(&mut self) -> Result<&BodyGraph, ActivateError> {
         let graph = activate(&self.body.paint)?;
         let n_mus = graph.muscles.len();
-        let n_pressure = graph.pressures.len();
+        let sensors = graph.sensor_counts();
         // Attach a controller net when a neuron blob + muscles exist, but keep
         // scripted sinusoid as the default drive. A fresh random net often sits
         // below the muscle pull threshold, which looked like "nothing happens"
@@ -103,13 +103,13 @@ impl StudioArena {
             let want_net = graph.has_controller || self.body.net.is_some();
             if want_net {
                 let need_new = match self.body.net.as_ref() {
-                    Some(net) => net.n_out != n_mus || net.n_pressure != n_pressure,
+                    Some(net) => !net.matches_body(n_mus, sensors),
                     None => true,
                 };
                 if need_new {
                     self.body.net = Some(StudioNet::for_body(
                         n_mus,
-                        n_pressure,
+                        sensors,
                         self.cfg.seed ^ 0xC011_7E11,
                     ));
                 }
@@ -127,16 +127,16 @@ impl StudioArena {
     pub fn ensure_net(&mut self, seed: u64) -> Option<&StudioNet> {
         let g = self.body.graph.as_ref()?;
         let n_mus = g.muscles.len();
-        let n_pressure = g.pressures.len();
+        let sensors = g.sensor_counts();
         if n_mus == 0 {
             return None;
         }
         let need_new = match self.body.net.as_ref() {
-            Some(net) => net.n_out != n_mus || net.n_pressure != n_pressure,
+            Some(net) => !net.matches_body(n_mus, sensors),
             None => true,
         };
         if need_new {
-            self.body.net = Some(StudioNet::for_body(n_mus, n_pressure, seed));
+            self.body.net = Some(StudioNet::for_body(n_mus, sensors, seed));
         }
         self.body.net.as_ref()
     }

@@ -2,7 +2,7 @@
 
 use crate::arena::StudioArena;
 use crate::body::BodyGraph;
-use crate::neural::StudioNet;
+use crate::neural::{SensorCounts, StudioNet};
 
 #[derive(Debug, Clone)]
 pub struct EpisodeResult {
@@ -30,12 +30,12 @@ impl TrainingSession {
         if n_mus == 0 {
             return None;
         }
-        let n_pressure = g.pressures.len();
+        let sensors = g.sensor_counts();
         let best_net = arena
             .body
             .net
             .clone()
-            .unwrap_or_else(|| StudioNet::for_body(n_mus, n_pressure, seed));
+            .unwrap_or_else(|| StudioNet::for_body(n_mus, sensors, seed));
         Some(Self {
             best_net,
             best: EpisodeResult {
@@ -161,8 +161,8 @@ pub fn apply_net(arena: &mut StudioArena, net: &StudioNet) {
     if fb.is_empty() {
         return;
     }
-    let pressure = graph.pressure_samples();
-    let input = StudioNet::encode_inputs(&fb, &pressure);
+    let sensors = graph.sensor_frame();
+    let input = StudioNet::encode_inputs(&fb, &sensors);
     if input.len() != net.n_in {
         return;
     }
@@ -181,14 +181,14 @@ pub fn hill_climb(
 ) -> (StudioNet, EpisodeResult) {
     let mut probe = make_arena();
     let _ = probe.activate();
-    let (n_mus, n_pressure) = probe
+    let (n_mus, sensors) = probe
         .body
         .graph
         .as_ref()
-        .map(|g| (g.muscles.len().max(1), g.pressures.len()))
-        .unwrap_or((1, 0));
+        .map(|g| (g.muscles.len().max(1), g.sensor_counts()))
+        .unwrap_or((1, SensorCounts::default()));
     let mut session = TrainingSession {
-        best_net: StudioNet::for_body(n_mus, n_pressure, seed),
+        best_net: StudioNet::for_body(n_mus, sensors, seed),
         best: EpisodeResult {
             fitness: f32::NEG_INFINITY,
             mean_tension: 0.0,
