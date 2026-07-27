@@ -15,6 +15,10 @@ members = [
     # wk-material only; NEVER on wk-world / wk-sim / wk-agents /
     # wk-app / wk-io / wk-field.
     "crates/wk-voxel-app",
+    # Muscle / Bone / Neural Test Studio — shared types + arena.
+    # Same isolation as wk-voxel-app. See docs/organism/STUDIO.md.
+    "crates/wk-voxel-studio",
+    "crates/wk-voxel-studio-app",
 ]
 
 [workspace.package]

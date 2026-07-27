@@ -141,7 +141,10 @@ The kernel arc **does not** include:
 - Horizontal swimming, hunting, or full animal locomotion.
   (Lane passability from [`LANES.md`](LANES.md) is a locked
   design constraint for when they arrive in Phase 7.)
-- Learned neural nets (plastic training loops). Weights are genes.
+- Learned neural nets (plastic training loops) **in open-world
+  ecology**. Weights are genes there. The
+  [`STUDIO.md`](STUDIO.md) arena **does** train nets + run GA, then
+  exports frozen weights into the world.
 - Active predation / chasing. `Digest` of *living* tissue can wait.
 - True mycorrhizae (mutualist hypha↔root sugar/water exchange).
   Plausible follow-on, slot reserved.
@@ -149,7 +152,9 @@ The kernel arc **does not** include:
   animation. One `integrity` scalar + collapse event is enough.
 - True wood rings, branching morphogenesis, seasonal leaf drop.
   Fake with module loss later.
-- Bones, muscle, multi-cell tissues as animation. Slots reserved.
+- Bones, muscle, multi-cell tissues as **world ecology animation**
+  without the studio track. Slots reserved; studio owns the first
+  implementation (shared physics — [`STUDIO.md`](STUDIO.md)).
 - Freeform drawing (MUD). Grid pixels only.
 - Full GVSE geology coupling beyond `MaterialId::Organic` +
   substrate tag. Karst, burrows, karst-integrated roof rules already

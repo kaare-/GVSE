@@ -19,6 +19,7 @@ notes intended to survive re-reads of the codebase.
 | [`BURROWS.md`](BURROWS.md) | Dig / burrow API. |
 | [`EVOLUTION.md`](EVOLUTION.md) | Reproduction and mutation loop. |
 | [`organism/`](organism/) | Organism Kernel freeze docs. |
+| [`organism/STUDIO.md`](organism/STUDIO.md) | Muscle / bone / neural test studio (shared `wk-voxel` physics). |
 
 Read order for the **active voxel stack:** `VOXEL_WATER.md` →
 `VOXEL_FAILURE.md` / `VOXEL_GEOTECH_MAP.md` → `VOXEL_FIELDS.md`.
