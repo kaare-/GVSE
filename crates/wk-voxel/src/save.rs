@@ -25,6 +25,10 @@ pub const SIM_SAVE_DIR: &str = "saves";
 /// File extension for voxel sim snapshots.
 pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// Bump when the postcard shape changes incompatibly.
+///
+/// `Cell` is a fixed 4-byte layout (`material`, `sat`, `flags`, `_pad`).
+/// Widening `_pad` or adding fields is a schema bump and needs a
+/// migration path for `.gvsesim` files on disk.
 pub const SIM_SCHEMA_VERSION: u32 = 1;
 
 /// Serializable capture of a running voxel demo scene.

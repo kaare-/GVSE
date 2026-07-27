@@ -12,6 +12,9 @@ Can a simple side-view landscape accumulate readable geological history
 without numerical instability, unbounded memory growth, or unexplained
 mass drift?
 
+Cell-sat inventory: `wk_voxel::sat_totals` (see `docs/VOXEL_WATER.md`
+§ Mass inventory).
+
 ## Crates (active)
 
 | Crate | Role |
