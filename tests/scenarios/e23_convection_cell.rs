@@ -5,7 +5,8 @@
 //! that blob relative to cooler flanks, plus convergent horizontal inflow.
 
 use crate::helpers::*;
-use wk_material::{MaterialId, CHUNK_W, SAMPLE_WIDTH_M};
+use wk_material::{MaterialId, SAMPLE_WIDTH_M};
+use wk_world::{CHUNK_W};
 use wk_world::chunk::Chunk;
 use wk_world::terrain::mass_for_height;
 use wk_world::world::World;

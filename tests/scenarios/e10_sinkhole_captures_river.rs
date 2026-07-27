@@ -4,7 +4,8 @@
 //! column into void storage instead of leaving it entirely on top.
 
 use crate::helpers::*;
-use wk_material::{CHUNK_W, MaterialId};
+use wk_material::{MaterialId};
+use wk_world::{CHUNK_W};
 use wk_world::column::{Void, VoidOrigin};
 use wk_world::terrain::generate_flat_sand;
 use wk_world::world::World;

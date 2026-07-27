@@ -18,7 +18,7 @@ pub fn setup_hill_world(columns: usize) -> World {
     world.rain_rate = 80.0;
     world.wake_all();
 
-    let chunks_needed = (columns + wk_material::CHUNK_W - 1) / wk_material::CHUNK_W;
+    let chunks_needed = (columns + wk_world::CHUNK_W - 1) / wk_world::CHUNK_W;
     let center = (columns / 2) as i32;
     for c in 0..chunks_needed as i32 {
         let chunk = generate_chunk_hill(c, world.seed, center, 0.0);
@@ -101,7 +101,7 @@ pub fn setup_flat_sand() -> World {
 }
 
 pub fn setup_two_chunks() -> World {
-    use wk_material::CHUNK_W;
+    use wk_world::CHUNK_W;
     use wk_world::chunk::Chunk;
     use wk_world::terrain::{fill_column_strata, gaussian_hill_surface};
 

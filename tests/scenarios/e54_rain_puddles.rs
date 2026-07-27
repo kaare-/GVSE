@@ -13,7 +13,7 @@
 //! standing puddle on top.
 
 use crate::helpers::*;
-use wk_material::CHUNK_W;
+use wk_world::CHUNK_W;
 use wk_sim::subsystems::{recharge_deep_water_tables, run_infiltration};
 use wk_sim::WorldTransferScratch;
 use wk_world::terrain::generate_flat_sand;

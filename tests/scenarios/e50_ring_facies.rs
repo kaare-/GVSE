@@ -1,7 +1,8 @@
 //! E50 — Ring world topology + facies belts (worldgen).
 
 use crate::helpers::*;
-use wk_material::{MaterialId, CHUNK_W};
+use wk_material::{MaterialId};
+use wk_world::{CHUNK_W};
 use wk_world::terrain::{generate_chunk, BEDROCK_FLOOR_M};
 use wk_world::world::World;
 use wk_world::{FaciesBelt, WorldGenParams, WorldGenProfile, WorldTopology};

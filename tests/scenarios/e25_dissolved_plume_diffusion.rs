@@ -5,7 +5,7 @@
 //! dissolved mass (no solid dissolution yet — Limestone lands in stage 7).
 
 use crate::helpers::*;
-use wk_material::CHUNK_W;
+use wk_world::CHUNK_W;
 use wk_world::terrain::generate_flat_sand;
 use wk_world::world::World;
 

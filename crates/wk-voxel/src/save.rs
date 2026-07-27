@@ -25,7 +25,9 @@ pub const SIM_SAVE_DIR: &str = "saves";
 /// File extension for voxel sim snapshots.
 pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// Bump when the postcard shape changes incompatibly.
-pub const SIM_SCHEMA_VERSION: u32 = 1;
+///
+/// v2: `World.hydro` ([`wk_material::HydroOverrides`]) saved with the sim.
+pub const SIM_SCHEMA_VERSION: u32 = 2;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -140,6 +142,7 @@ mod tests {
         world.set_cell(3, 4, Cell::solid(MaterialId::Sand));
         world.set_cell(3, 5, Cell::water());
         world.tick = 42;
+        world.hydro.set_porosity(MaterialId::Sand, 90);
         let humidity = Humidity::with_world_bounds(
             4,
             0,
@@ -186,5 +189,9 @@ mod tests {
             Some(MaterialId::Sand)
         );
         assert!(loaded.world.get_cell(3, 5).unwrap().sat.is_full());
+        assert_eq!(
+            loaded.world.hydro.slots[MaterialId::Sand as usize].porosity,
+            Some(90)
+        );
     }
 }

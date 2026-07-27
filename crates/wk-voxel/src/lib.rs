@@ -62,6 +62,8 @@ pub use geotech_map::{
     GEOTECH_MAP_PHASE,
 };
 pub use grid::World;
+// HydroOverrides is defined in wk-material; re-export for app convenience.
+pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
     Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,
     CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,

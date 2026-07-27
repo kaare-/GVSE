@@ -1,0 +1,11 @@
+[package]
+name = "wk-world"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wk-material = { path = "../../wk-material" }
+wk-field = { path = "../wk-field" }
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]

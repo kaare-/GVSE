@@ -1,0 +1,12 @@
+[package]
+name = "wk-app"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+wk-material = { path = "../../wk-material" }
+wk-world = { path = "../wk-world" }
+wk-sim = { path = "../wk-sim" }
+wk-io = { path = "../wk-io" }
+# 0.4.15 uses const f32::{min,max,abs} that need rustc > 1.83.
+macroquad = "=0.4.14"

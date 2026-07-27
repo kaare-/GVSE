@@ -7,7 +7,8 @@
 //! oscillation as a sine curve.
 
 use crate::helpers::*;
-use wk_material::{CHUNK_W, MaterialId};
+use wk_material::{MaterialId};
+use wk_world::{CHUNK_W};
 use wk_sim::subsystems::{run_lake_level, run_surface_void_capture, run_void_water_flow};
 use wk_world::column::{Void, VoidOrigin};
 use wk_world::terrain::generate_flat_sand;

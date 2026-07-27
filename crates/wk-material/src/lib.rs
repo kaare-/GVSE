@@ -2,16 +2,13 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Number of [`MaterialId`] variants (shared by both stacks).
 pub const MATERIAL_COUNT: usize = 12;
+/// Horizontal cell / column width in metres (shared scale).
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
-pub const MAX_LAYERS: usize = 8;
-pub const CHUNK_W: usize = 64;
-/// Raised for grand ring maps (~192–256 chunks). Streaming can lower this later.
-pub const MAX_LOADED_CHUNKS: usize = 256;
-pub const MAX_MARKERS: usize = 64;
-pub const FIXED_SCALE: i64 = 1000;
-pub const MERGE_GAP: u64 = 100;
-pub const MERGE_MAX_THICKNESS: i64 = 1_000_000;
+
+// Column-stack layout constants live in `wk_world` / `wk_sim`
+// (`crates/legacy/`). Voxel uses its own `CHUNK_CELLS_*` in `wk_voxel`.
 
 /// Every substance in the simulation is one of these — including water,
 /// ice, and snow. Materials differ only in their property table (density,
@@ -196,59 +193,112 @@ pub struct MaterialProps {
 
 pub struct MaterialRegistry;
 
-/// Runtime overrides for hydrology tuning (permeability / porosity).
-/// Cleared via [`MaterialRegistry::clear_hydro_overrides`].
-#[derive(Debug, Clone, Copy, Default)]
-struct HydroOverride {
-    permeability: Option<u8>,
-    porosity: Option<u8>,
+/// Per-material hydrology tuning (permeability / porosity).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HydroSlot {
+    pub permeability: Option<u8>,
+    pub porosity: Option<u8>,
 }
 
-fn hydro_overrides() -> &'static std::sync::RwLock<[HydroOverride; 12]> {
-    use std::sync::{OnceLock, RwLock};
-    static CELL: OnceLock<RwLock<[HydroOverride; 12]>> = OnceLock::new();
-    CELL.get_or_init(|| RwLock::new([HydroOverride::default(); 12]))
+/// Full material hydrology override table.
+///
+/// Canonical storage for the voxel stack is [`wk_voxel::World::hydro`]
+/// (serialized with the sim). [`MaterialRegistry::props`] still reads a
+/// process-installed copy so hot paths need not thread `&World` yet —
+/// call [`MaterialRegistry::install_hydro_overrides`] after load / settings.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HydroOverrides {
+    pub slots: [HydroSlot; MATERIAL_COUNT],
 }
 
-impl MaterialRegistry {
-    /// Effective props = base table + optional hydrology overrides.
-    pub fn props(material: MaterialId) -> MaterialProps {
-        let mut p = Self::base_props(material);
-        let i = material as usize;
-        if let Ok(guard) = hydro_overrides().read() {
-            if let Some(o) = guard.get(i) {
-                if let Some(v) = o.permeability {
-                    p.permeability = v;
-                }
-                if let Some(v) = o.porosity {
-                    p.porosity = v;
-                }
+impl Default for HydroOverrides {
+    fn default() -> Self {
+        Self {
+            slots: [HydroSlot::default(); MATERIAL_COUNT],
+        }
+    }
+}
+
+impl HydroOverrides {
+    pub fn set_permeability(&mut self, material: MaterialId, value: u8) {
+        if let Some(slot) = self.slots.get_mut(material as usize) {
+            slot.permeability = Some(value);
+        }
+    }
+
+    pub fn set_porosity(&mut self, material: MaterialId, value: u8) {
+        if let Some(slot) = self.slots.get_mut(material as usize) {
+            slot.porosity = Some(value);
+        }
+    }
+
+    pub fn clear(&mut self) {
+        *self = Self::default();
+    }
+
+    pub fn apply(self, material: MaterialId, mut p: MaterialProps) -> MaterialProps {
+        if let Some(o) = self.slots.get(material as usize) {
+            if let Some(v) = o.permeability {
+                p.permeability = v;
+            }
+            if let Some(v) = o.porosity {
+                p.porosity = v;
             }
         }
         p
     }
+}
 
-    /// Override permeability (0–255). Used by the voxel settings menu.
+fn installed_hydro() -> &'static std::sync::RwLock<HydroOverrides> {
+    use std::sync::{OnceLock, RwLock};
+    static CELL: OnceLock<RwLock<HydroOverrides>> = OnceLock::new();
+    CELL.get_or_init(|| RwLock::new(HydroOverrides::default()))
+}
+
+impl MaterialRegistry {
+    /// Effective props = base table + **installed** hydrology overrides.
+    ///
+    /// Prefer storing overrides on the sim [`HydroOverrides`] / voxel
+    /// `World::hydro` and calling [`Self::install_hydro_overrides`].
+    pub fn props(material: MaterialId) -> MaterialProps {
+        let base = Self::base_props(material);
+        if let Ok(guard) = installed_hydro().read() {
+            guard.apply(material, base)
+        } else {
+            base
+        }
+    }
+
+    /// Props with an explicit override table (no process global).
+    pub fn props_with(material: MaterialId, hydro: &HydroOverrides) -> MaterialProps {
+        hydro.apply(material, Self::base_props(material))
+    }
+
+    /// Install overrides for [`Self::props`] readers (voxel settings / load).
+    pub fn install_hydro_overrides(hydro: &HydroOverrides) {
+        if let Ok(mut guard) = installed_hydro().write() {
+            *guard = *hydro;
+        }
+    }
+
+    /// Override permeability (0–255). Prefer mutating `World::hydro` then
+    /// [`Self::install_hydro_overrides`].
     pub fn set_permeability_override(material: MaterialId, value: u8) {
-        if let Ok(mut guard) = hydro_overrides().write() {
-            if let Some(slot) = guard.get_mut(material as usize) {
-                slot.permeability = Some(value);
-            }
+        if let Ok(mut guard) = installed_hydro().write() {
+            guard.set_permeability(material, value);
         }
     }
 
     /// Override porosity / water capacity for solids (0–255).
     pub fn set_porosity_override(material: MaterialId, value: u8) {
-        if let Ok(mut guard) = hydro_overrides().write() {
-            if let Some(slot) = guard.get_mut(material as usize) {
-                slot.porosity = Some(value);
-            }
+        if let Ok(mut guard) = installed_hydro().write() {
+            guard.set_porosity(material, value);
         }
     }
 
     pub fn clear_hydro_overrides() {
-        if let Ok(mut guard) = hydro_overrides().write() {
-            *guard = [HydroOverride::default(); 12];
+        if let Ok(mut guard) = installed_hydro().write() {
+            guard.clear();
         }
     }
 
