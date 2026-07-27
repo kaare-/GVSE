@@ -22,5 +22,15 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 
+# Shared third-party pins — bump here, not per-crate.
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+postcard = { version = "1", features = ["alloc"] }
+# 0.11 needs rustc > 1.83 for `query_disjoint_mut`.
+hecs = "=0.10.5"
+# 0.4.15 uses const f32::{min,max,abs} that need rustc > 1.83.
+macroquad = "=0.4.14"
+rayon = "1.10"
+
 [profile.test]
 opt-level = 2

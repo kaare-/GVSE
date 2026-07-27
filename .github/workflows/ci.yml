@@ -1,0 +1,36 @@
+# Minimal CI for the active voxel stack + isolation guardrails.
+# Deliberately narrow (Wave A): no workspace-wide clippy -D warnings yet.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  voxel:
+    name: voxel stack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain
+        # rust-toolchain.toml pins 1.83.0 (+ rustfmt/clippy).
+        run: rustc --version && cargo --version
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Isolation (wk-voxel / wk-voxel-app)
+        # Targeted tree check — cargo-deny bans cannot scope path
+        # workspace members to "legacy only" (see deny.toml).
+        run: bash scripts/check-voxel-isolation.sh
+
+      - name: Test active stack
+        run: |
+          cargo test -p wk-material --lib
+          cargo test -p wk-voxel --lib
+          cargo test -p wk-voxel-app

@@ -94,6 +94,25 @@ pub(crate) fn pull_write_coords(active: &[ActiveChunk]) -> Vec<ChunkCoord> {
     coords
 }
 
+/// True when each region's write set (own + `cy + 1`) is unique in `active`.
+///
+/// Required for [`ChunkPtrMap`]'s `Sync` contract under rayon. Callers pass
+/// one checkerboard colour; overlapping sets mean a data race in parallel.
+pub(crate) fn pull_write_coords_disjoint(active: &[ActiveChunk]) -> bool {
+    let mut claimed: HashMap<ChunkCoord, ChunkCoord> = HashMap::new();
+    for ac in active {
+        for c in [
+            ac.coord,
+            ChunkCoord::new(ac.coord.cx, ac.coord.cy + 1),
+        ] {
+            if claimed.insert(c, ac.coord).is_some() {
+                return false;
+            }
+        }
+    }
+    true
+}
+
 fn wrap_x(wrap_width: Option<i32>, gx: i32) -> i32 {
     match wrap_width {
         Some(w) if w > 0 => gx.rem_euclid(w),
@@ -149,6 +168,12 @@ pub(crate) fn for_each_region_parallel(
     if active.is_empty() {
         return;
     }
+    // Dev-only: catch a future rule that widens the pull write-set before
+    // we race on aliased `*mut Chunk` in release.
+    debug_assert!(
+        pull_write_coords_disjoint(active),
+        "pull write-sets overlap within a colour pass (own + cy+1 must be unique)"
+    );
     let wrap_width = world.wrap_width;
     let coords = pull_write_coords(active);
     let ptrs = chunk_ptrs_mut(world, &coords);
@@ -219,27 +244,31 @@ mod tests {
         .collect();
         let passes = partition_checkerboard(&active);
         for pass in &passes {
-            if pass.len() < 2 {
-                continue;
-            }
-            // Per-region write sets (own + cy+1) must not overlap.
-            let mut claimed: HashMap<ChunkCoord, ChunkCoord> = HashMap::new();
-            for ac in pass {
-                for c in [
-                    ac.coord,
-                    ChunkCoord::new(ac.coord.cx, ac.coord.cy + 1),
-                ] {
-                    if let Some(prev) = claimed.insert(c, ac.coord) {
-                        panic!(
-                            "colour {} write-set overlap on {:?}: {:?} vs {:?}",
-                            checkerboard_phase(ac.coord),
-                            c,
-                            prev,
-                            ac.coord
-                        );
-                    }
-                }
-            }
+            assert!(
+                pull_write_coords_disjoint(pass),
+                "colour {} write-sets must be disjoint",
+                pass
+                    .first()
+                    .map(|ac| checkerboard_phase(ac.coord))
+                    .unwrap_or(0)
+            );
         }
+    }
+
+    #[test]
+    fn overlapping_vertical_neighbours_are_not_disjoint() {
+        // Same colour would not schedule these together; the helper must
+        // still report overlap if a caller ever did.
+        let active = [
+            ActiveChunk {
+                coord: ChunkCoord::new(0, 0),
+                rect: Rect::full(),
+            },
+            ActiveChunk {
+                coord: ChunkCoord::new(0, 1),
+                rect: Rect::full(),
+            },
+        ];
+        assert!(!pull_write_coords_disjoint(&active));
     }
 }
