@@ -548,6 +548,31 @@ fn hydraulic_head_ranks_full_air_above_dry_sand() {
 }
 
 #[test]
+fn world_hydro_porosity_caps_seepage_into_sand() {
+    // Default sand soaks a neighbouring full water cell. Zero porosity
+    // via World.hydro must block that soak with no install step.
+    let mut w = setup_column_world();
+    w.set_cell(4, 1, Cell::solid(MaterialId::Sand));
+    w.set_cell(5, 1, Cell::water());
+    apply_seepage(&mut w);
+    let soaked = w.get_cell(4, 1).unwrap().sat.0;
+    assert!(soaked > 0, "default sand should take pore water");
+
+    let mut sealed = setup_column_world();
+    sealed.hydro.set_porosity(MaterialId::Sand, 0);
+    sealed.hydro.set_permeability(MaterialId::Sand, 0);
+    sealed.set_cell(4, 1, Cell::solid(MaterialId::Sand));
+    sealed.set_cell(5, 1, Cell::water());
+    apply_seepage(&mut sealed);
+    assert_eq!(
+        sealed.get_cell(4, 1).unwrap().sat.0,
+        0,
+        "zero-porosity sand via World.hydro must not take pore water"
+    );
+    assert_eq!(sealed.water_capacity(MaterialId::Sand), 0);
+}
+
+#[test]
 fn spill_crosses_chunk_boundary() {
     // Full water cell at gx=63 in chunk (0, 0); empty air at
     // gx=64 in chunk (1, 0). Stone wall at gx=62 so only the

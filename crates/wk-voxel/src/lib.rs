@@ -37,9 +37,10 @@ pub use audit::{
     assert_cell_sat_conserved, mass_audit_enabled, sat_totals, set_mass_audit_enabled,
     tracked_totals, SatTotals, CELL_SAT_TICK_TOLERANCE,
 };
-pub use parallel::{parallel_enabled, set_parallel_enabled};pub use cell::{
+pub use parallel::{parallel_enabled, set_parallel_enabled};
+pub use cell::{
     falls_through_empty_air, grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain,
-    water_capacity, Cell, CellFlags, Sat,
+    water_capacity, water_capacity_with, Cell, CellFlags, Sat,
 };
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use blueprint::{Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR};
@@ -53,8 +54,8 @@ pub use clouds::{
 };
 pub use failure::{
     apply_compaction, apply_failure, apply_roof_collapse, apply_shear_weaken, compaction_load_ok,
-    effective_cohesion, face_shear_demand, pore_wetness, roof_collapse_debris, roof_span_cells,
-    roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
+    effective_cohesion, face_shear_demand, pore_wetness, pore_wetness_with, roof_collapse_debris,
+    roof_span_cells, roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
     COMPACTION_SIGMA_MIN,
 };
 pub use fungi::{is_fungus, soft_litter_at, add_soft_litter};

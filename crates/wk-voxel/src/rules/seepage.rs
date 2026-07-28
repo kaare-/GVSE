@@ -5,12 +5,12 @@
 //! Permeability-limited pore soak.
 
 use crate::active::{partition_checkerboard, ActiveChunk};
-use crate::cell::{water_capacity, Cell, Sat};
+use crate::cell::{water_capacity_with, Cell, Sat};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::{map_regions_parallel};
 
-use super::head::{is_porous_solid, sat_move_to_equalize_heads, seepage_rate};
+use super::head::{is_porous_solid_with, sat_move_to_equalize_heads, seepage_rate_with};
 use super::plan::regions_for_standalone;
 
 /// Permeability-limited soak: water moves from wet cells into
@@ -56,7 +56,7 @@ pub fn apply_seepage_regions(world: &mut World, active: &[ActiveChunk]) {
         let Some(dst) = world.get_cell(to.0, to.1) else {
             continue;
         };
-        let cap_dst = water_capacity(dst.material) as i32;
+        let cap_dst = water_capacity_with(dst.material, &world.hydro) as i32;
         if cap_dst == 0 {
             continue;
         }
@@ -90,6 +90,7 @@ fn accumulate_seepage_xfers(
     xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) {
     const OFFSETS: [(i32, i32); 2] = [(1, 0), (0, 1)];
+    let hydro = world.hydro;
     let local = map_regions_parallel(active, |ac| {
         let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
         for y in ac.rect.y0..=ac.rect.y1 {
@@ -99,7 +100,7 @@ fn accumulate_seepage_xfers(
                 let Some(a) = world.get_cell(gx, gy) else {
                     continue;
                 };
-                let cap_a = water_capacity(a.material);
+                let cap_a = water_capacity_with(a.material, &hydro);
                 if cap_a == 0 {
                     continue;
                 }
@@ -112,12 +113,12 @@ fn accumulate_seepage_xfers(
                     let Some(b) = world.get_cell(nx, ny) else {
                         continue;
                     };
-                    let cap_b = water_capacity(b.material);
+                    let cap_b = water_capacity_with(b.material, &hydro);
                     if cap_b == 0 {
                         continue;
                     }
-                    let a_solid = is_porous_solid(a.material);
-                    let b_solid = is_porous_solid(b.material);
+                    let a_solid = is_porous_solid_with(a.material, &hydro);
+                    let b_solid = is_porous_solid_with(b.material, &hydro);
                     if !a_solid && !b_solid {
                         continue;
                     }
@@ -128,11 +129,11 @@ fn accumulate_seepage_xfers(
                         continue;
                     }
                     let rate = if a_solid && b_solid {
-                        seepage_rate(a.material).min(seepage_rate(b.material))
+                        seepage_rate_with(a.material, &hydro).min(seepage_rate_with(b.material, &hydro))
                     } else if a_solid {
-                        seepage_rate(a.material)
+                        seepage_rate_with(a.material, &hydro)
                     } else {
-                        seepage_rate(b.material)
+                        seepage_rate_with(b.material, &hydro)
                     };
                     // Fully saturated faces weep faster into open Air
                     // (cliff springs) — still permeability-capped, but

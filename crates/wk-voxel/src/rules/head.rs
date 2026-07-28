@@ -4,9 +4,9 @@
 //!
 //! Hydraulic head and shared surface/seepage helpers.
 
-use wk_material::MaterialId;
+use wk_material::{HydroOverrides, MaterialId, MaterialRegistry};
 
-use crate::cell::{water_capacity, Sat};
+use crate::cell::{water_capacity_with, Sat};
 use crate::grid::World;
 
 /// Free-surface / pore hydraulic head in cell units:
@@ -61,8 +61,11 @@ pub(crate) fn sat_move_to_equalize_heads(
 /// Max sat transferred through a porous solid per seepage step,
 /// scaled by [`wk_material::MaterialProps::permeability`].
 pub(crate) fn seepage_rate(material: MaterialId) -> i32 {
-    use wk_material::MaterialRegistry;
-    let p = MaterialRegistry::props(material).permeability;
+    seepage_rate_with(material, &HydroOverrides::default())
+}
+
+pub(crate) fn seepage_rate_with(material: MaterialId, hydro: &HydroOverrides) -> i32 {
+    let p = MaterialRegistry::props_with(material, hydro).permeability;
     if p == 0 {
         return 0;
     }
@@ -71,7 +74,11 @@ pub(crate) fn seepage_rate(material: MaterialId) -> i32 {
 }
 
 pub(crate) fn is_porous_solid(material: MaterialId) -> bool {
-    material != MaterialId::Air && water_capacity(material) > 0
+    is_porous_solid_with(material, &HydroOverrides::default())
+}
+
+pub(crate) fn is_porous_solid_with(material: MaterialId, hydro: &HydroOverrides) -> bool {
+    material != MaterialId::Air && water_capacity_with(material, hydro) > 0
 }
 
 /// How far same-Y lake equalise looks for a drier surface cell / edge.
@@ -112,7 +119,7 @@ pub(crate) fn plan_same_y_pairwise_edge(
     if left.material != MaterialId::Air || right.material != MaterialId::Air {
         return;
     }
-    let cap = water_capacity(MaterialId::Air);
+    let cap = water_capacity_with(MaterialId::Air, &world.hydro);
     let move_amt = sat_move_to_equalize_heads(left.sat.0, cap, gy, right.sat.0, cap, gy);
     if move_amt > 0 {
         let free = u8::MAX.saturating_sub(right.sat.0) as i32;

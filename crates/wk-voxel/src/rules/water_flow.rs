@@ -9,14 +9,13 @@ use std::collections::HashMap;
 use wk_material::MaterialId;
 
 use crate::active::{partition_checkerboard, ActiveChunk};
-use crate::cell::{water_capacity, Cell, Sat};
+use crate::cell::{water_capacity_with, Cell, Sat};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::{map_regions_parallel};
 
 use super::head::{
-    is_porous_solid, plan_same_y_pairwise_edge,
-    same_y_cascade_pull, seepage_rate,
+    is_porous_solid_with, plan_same_y_pairwise_edge, same_y_cascade_pull, seepage_rate_with,
 };
 use super::plan::regions_for_standalone;
 
@@ -129,6 +128,7 @@ fn accumulate_water_flow_xfers(
     xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) {
     let tick_flip = (world.tick & 1) == 0;
+    let hydro = world.hydro;
     let local = map_regions_parallel(active, |ac| {
         let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
         for y in ac.rect.y0..=ac.rect.y1 {
@@ -274,14 +274,14 @@ fn accumulate_water_flow_xfers(
                     let Some(below1) = world.get_cell(nx, gy - 1) else {
                         continue;
                     };
-                    if !is_porous_solid(below1.material) {
+                    if !is_porous_solid_with(below1.material, &hydro) {
                         continue;
                     }
-                    let cap1 = water_capacity(below1.material);
+                    let cap1 = water_capacity_with(below1.material, &hydro);
                     if below1.sat.0 < cap1 {
                         continue; // gravity + seepage handle unsaturated
                     }
-                    let mut rate = seepage_rate(below1.material);
+                    let mut rate = seepage_rate_with(below1.material, &hydro);
                     // Prefer the shallowest exit so mid-cliff springs beat
                     // a deep toe drain when both are open.
                     let mut best: Option<(i32, i32, i32)> = None; // depth, tx, ty
@@ -300,14 +300,14 @@ fn accumulate_water_flow_xfers(
                             }
                             break;
                         }
-                        if !is_porous_solid(nb.material) {
+                        if !is_porous_solid_with(nb.material, &hydro) {
                             break;
                         }
-                        let cap = water_capacity(nb.material);
+                        let cap = water_capacity_with(nb.material, &hydro);
                         if nb.sat.0 < cap {
                             break;
                         }
-                        rate = rate.min(seepage_rate(nb.material));
+                        rate = rate.min(seepage_rate_with(nb.material, &hydro));
                         // Side springs: open Air beside this saturated cell.
                         for sdx in [-1_i32, 1] {
                             let sx = world.wrap_x(nx + sdx);

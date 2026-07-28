@@ -5,7 +5,7 @@
 //! Vertical gravity fall for free water.
 
 use crate::active::{partition_checkerboard, ActiveChunk};
-use crate::cell::{water_capacity, Cell, Sat};
+use crate::cell::{water_capacity_with, Cell, Sat};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::{self, for_each_region_parallel};
@@ -46,6 +46,7 @@ pub fn apply_gravity_fall(world: &mut World) {
 /// full plan should wrap with [`partition_checkerboard`]. Regions in
 /// the same colour run on rayon when [`parallel::parallel_enabled`].
 pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
+    let hydro = world.hydro;
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
@@ -56,7 +57,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 let Some(cur) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy) }) else {
                     continue;
                 };
-                let cap = water_capacity(cur.material);
+                let cap = water_capacity_with(cur.material, &hydro);
                 if cap == 0 {
                     continue;
                 }
@@ -72,7 +73,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 if above.sat.is_empty() {
                     continue;
                 }
-                if water_capacity(above.material) == 0 {
+                if water_capacity_with(above.material, &hydro) == 0 {
                     continue;
                 }
                 let move_amt = above.sat.0.min(free);

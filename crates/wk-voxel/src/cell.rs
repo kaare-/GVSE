@@ -183,7 +183,17 @@ pub fn grain_max_stable_step(material: MaterialId) -> i32 {
 /// so Air itself is listed there as `porosity = 0`. In the voxel
 /// world an Air cell is empty *space* — the whole cell can turn into
 /// water — so we shim it here rather than editing shared props.
+///
+/// Uses **table defaults** (no sim overrides). Prefer
+/// [`water_capacity_with`] / [`crate::grid::World::water_capacity`] when
+/// the world's [`wk_material::HydroOverrides`] must apply.
 pub fn water_capacity(material: MaterialId) -> u8 {
+    water_capacity_with(material, &wk_material::HydroOverrides::default())
+}
+
+/// [`water_capacity`] with an explicit hydrology override table
+/// (typically [`crate::grid::World::hydro`]).
+pub fn water_capacity_with(material: MaterialId, hydro: &wk_material::HydroOverrides) -> u8 {
     use wk_material::MaterialRegistry;
     match material {
         // Free-air cells hold a full unit of water. Any Air cell with
@@ -193,8 +203,9 @@ pub fn water_capacity(material: MaterialId) -> u8 {
         // v1 rules: water doesn't pool inside a snow cell, and a
         // liquid Water cell is redundant with Air+sat=FULL.
         MaterialId::Water | MaterialId::Ice | MaterialId::Snow => 0,
-        // Rock and dirt: capacity = material porosity (0..255).
-        _ => MaterialRegistry::props(material).porosity,
+        // Rock and dirt: capacity = material porosity (0..255), with
+        // optional sim overrides from `hydro`.
+        _ => MaterialRegistry::props_with(material, hydro).porosity,
     }
 }
 
@@ -227,6 +238,16 @@ mod tests {
     fn ice_and_snow_treated_impermeable_here() {
         assert_eq!(water_capacity(MaterialId::Ice), 0);
         assert_eq!(water_capacity(MaterialId::Snow), 0);
+    }
+
+    #[test]
+    fn hydro_overrides_change_capacity_without_install() {
+        let base = water_capacity(MaterialId::Sand);
+        let mut hydro = wk_material::HydroOverrides::default();
+        hydro.set_porosity(MaterialId::Sand, 40);
+        assert_eq!(water_capacity_with(MaterialId::Sand, &hydro), 40);
+        // Bare helper still returns table defaults (no process-global state).
+        assert_eq!(water_capacity(MaterialId::Sand), base);
     }
 
     #[test]

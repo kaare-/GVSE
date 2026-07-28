@@ -4,8 +4,8 @@
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
-    is_fungus, is_land_plant, soft_litter_at, water_capacity, Atom, Cell, Corpse, GeotechMap,
-    Humidity, Temperature, World, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS,
+    is_fungus, is_land_plant, soft_litter_at, Atom, Cell, Corpse, GeotechMap, Humidity,
+    Temperature, World, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS,
 };
 
 fn material_name(mat: MaterialId) -> &'static str {
@@ -87,14 +87,14 @@ pub fn draw_block_inspector(
             // Pore fill is relative to material capacity (porosity for
             // solids, 255 for Air) — not always /255. Stone at sat=20
             // with porosity 20 is fully saturated, not "8% wet".
-            let cap = water_capacity(c.material);
+            let cap = world.water_capacity(c.material);
             let pct = if cap > 0 {
                 (c.sat.0 as f32 / cap as f32) * 100.0
             } else {
                 0.0
             };
             lines.push(format!("sat={}/{cap} ({pct:.0}% of capacity)", c.sat.0));
-            let props = MaterialRegistry::props(c.material);
+            let props = MaterialRegistry::props_with(c.material, &world.hydro);
             lines.push(format!(
                 "porosity={}  permeability={}",
                 props.porosity, props.permeability

@@ -7,7 +7,7 @@ Demo / draw: `wk-voxel-app`.
 ## Representation
 
 - Free water is **`Air` + `sat`** (`0..=255`). There is no live `MaterialId::Water` cell in the voxel CA.
-- Porous solids hold pore water in the same `sat` field, capped by **`water_capacity(material)`** (= material porosity for solids, `255` for Air).
+- Porous solids hold pore water in the same `sat` field, capped by **`World::water_capacity(material)`** (= material porosity for solids, `255` for Air), reading `World.hydro` overrides via `water_capacity_with`.
 - **Bedrock / Ice / Snow** have capacity `0` — impermeable to the CA.
 
 ## Mass inventory
@@ -115,7 +115,11 @@ Demo order after `tick`: thermal step → **`apply_cold_avalanche`** → **`appl
 | Stone | 20 | 5 | 1 |
 | Bedrock | 0 | 0 | 0 |
 
-Tab → **Material permeability / porosity** overrides these at runtime (`MaterialRegistry` hydro overrides). Setting sand porosity **and** permeability to 0 makes the sand cap an impermeable lid — pore water will not enter the body below.
+Tab → **Material permeability / porosity** writes into `World.hydro`
+(`HydroOverrides`). Physics reads that table through `props_with` /
+`water_capacity_with` — there is no process-global install step.
+Setting sand porosity **and** permeability to 0 makes the sand cap an
+impermeable lid — pore water will not enter the body below.
 
 ## What “working” looks like
 

@@ -15,7 +15,7 @@ use wk_material::{MaterialId, MaterialRegistry};
 
 use crate::active::{plan_active, ActiveChunk};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
-use crate::failure::{face_shear_demand, pore_wetness};
+use crate::failure::{face_shear_demand, pore_wetness_with};
 use crate::grid::World;
 
 /// Rebuild period (ticks), matching Temperature / humidity diffuse.
@@ -291,7 +291,7 @@ fn maybe_insert_face(
         return;
     }
     let hydro = wet_air_column_beside(world, gx, gy);
-    let wet = pore_wetness(cell);
+    let wet = pore_wetness_with(cell, &world.hydro);
     let sigma = overburden.get(&(gx, gy)).copied().unwrap_or(0.0);
     faces.insert(
         (gx, gy),

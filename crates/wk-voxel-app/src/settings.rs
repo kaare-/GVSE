@@ -211,7 +211,8 @@ impl SimSettings {
         }
     }
 
-    /// Push material slider values onto `world.hydro` and install for props().
+    /// Push material slider values onto `world.hydro` (read by physics
+    /// via [`World::water_capacity`] / `props_with` — no install step).
     pub fn apply_material_overrides(&self, world: &mut World) {
         world.hydro.clear();
         for id in MaterialId::ALL_SOLIDS {
@@ -223,12 +224,10 @@ impl SimSettings {
                 .hydro
                 .set_porosity(id, self.mat_poro[i].round() as u8);
         }
-        world.install_hydro();
     }
 
     pub fn reset_materials_to_defaults(&mut self, world: &mut World) {
         world.hydro.clear();
-        world.install_hydro();
         for id in MaterialId::ALL_SOLIDS {
             let i = id as usize;
             let base = MaterialRegistry::base_props(id);

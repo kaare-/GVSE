@@ -17,7 +17,9 @@
 use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
 
 use crate::active::ActiveChunk;
-use crate::cell::{falls_through_empty_air, is_grain, water_capacity, Cell, CellFlags, Sat};
+use crate::cell::{
+    falls_through_empty_air, is_grain, water_capacity, water_capacity_with, Cell, CellFlags, Sat,
+};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
@@ -83,8 +85,16 @@ impl Default for FailureConfig {
 }
 
 /// Pore wetness 0..1 for a cell (`sat / capacity`; 0 if impermeable).
+///
+/// Uses table-default capacity. Prefer [`pore_wetness_with`] when the
+/// world's [`wk_material::HydroOverrides`] must apply.
 pub fn pore_wetness(cell: Cell) -> f32 {
-    let cap = water_capacity(cell.material);
+    pore_wetness_with(cell, &wk_material::HydroOverrides::default())
+}
+
+/// [`pore_wetness`] with an explicit hydrology override table.
+pub fn pore_wetness_with(cell: Cell, hydro: &wk_material::HydroOverrides) -> f32 {
+    let cap = water_capacity_with(cell.material, hydro);
     if cap == 0 {
         return 0.0;
     }
@@ -393,7 +403,7 @@ fn collapse_one_ceiling(world: &mut World, gx: i32, gy: i32) -> bool {
     }
 
     let debris_mat = roof_collapse_debris(roof.material);
-    let cap = water_capacity(debris_mat);
+    let cap = water_capacity_with(debris_mat, &world.hydro);
     let mut debris_sat = roof.sat.0.min(cap);
     let mut leftover = below.sat.0.saturating_add(roof.sat.0.saturating_sub(debris_sat));
     if cap > debris_sat {
@@ -578,7 +588,10 @@ fn face_fails_shear(
 
     if use_map {
         if let Some(face) = geotech.and_then(|m| m.at_cell(gx, gy)) {
-            let wet = face_strength_wetness(pore_wetness(cell), face.hydro_load);
+            let wet = face_strength_wetness(
+                pore_wetness_with(cell, &world.hydro),
+                face.hydro_load,
+            );
             if wet <= 0.0 {
                 return false;
             }
@@ -591,7 +604,7 @@ fn face_fails_shear(
     if demand < 1 {
         return false;
     }
-    let wet = pore_wetness(cell);
+    let wet = pore_wetness_with(cell, &world.hydro);
     if wet <= 0.0 {
         return false;
     }
@@ -617,7 +630,7 @@ fn shear_one_face(
         return false;
     }
     let debris_mat = shear_weaken_debris(cell.material);
-    let cap = water_capacity(debris_mat);
+    let cap = water_capacity_with(debris_mat, &world.hydro);
     let debris = Cell {
         material: debris_mat,
         sat: Sat(cell.sat.0.min(cap)),
@@ -788,7 +801,7 @@ fn compact_one(
     let Some(dst) = world.get_cell(tx, ty) else {
         return false;
     };
-    let cap = water_capacity(dst.material);
+    let cap = water_capacity_with(dst.material, &world.hydro);
     let free = cap.saturating_sub(dst.sat.0);
     if free == 0 {
         return false;

@@ -4,12 +4,12 @@
 //!
 //! Grain fall, repose, cold avalanche, and flow erosion.
 
-use wk_material::MaterialId;
+use wk_material::{HydroOverrides, MaterialId};
 
 use crate::active::{partition_checkerboard, ActiveChunk};
 use crate::cell::{
     falls_through_empty_air, grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain,
-    water_capacity, Cell, CellFlags, Sat,
+    water_capacity_with, Cell, CellFlags, Sat,
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
@@ -119,6 +119,7 @@ fn apply_repose_pass(
     let seed = world.seed.0;
     let tick_no = world.tick;
     let cold_mode = temp.is_some();
+    let hydro = world.hydro;
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
@@ -185,7 +186,7 @@ fn apply_repose_pass(
                     // always lose a step; high-c′ clay needs near-saturation.
                     // Wetness is sat/capacity so low-porosity LooseRock can
                     // soften when soaked (absolute sat>=40 never fires there).
-                    let pore = crate::failure::pore_wetness(src);
+                    let pore = crate::failure::pore_wetness_with(src, &hydro);
                     let standing_wet = matches!(
                         below_src,
                         Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
@@ -205,7 +206,7 @@ fn apply_repose_pass(
                         continue;
                     }
                     write_repose_swap(
-                        ptrs, wrap_width, gx, gy, dest, sx, sy, src,
+                        ptrs, wrap_width, &hydro, gx, gy, dest, sx, sy, src,
                     );
                     moved = true;
                     break;
@@ -251,7 +252,7 @@ fn apply_repose_pass(
                         _ => {}
                     }
                     write_repose_swap(
-                        ptrs, wrap_width, gx, gy, dest, sx, sy, src,
+                        ptrs, wrap_width, &hydro, gx, gy, dest, sx, sy, src,
                     );
                     break;
                 }
@@ -270,6 +271,7 @@ fn apply_repose_pass(
 fn write_repose_swap(
     ptrs: &parallel::ChunkPtrMap,
     wrap_width: Option<i32>,
+    hydro: &HydroOverrides,
     dest_x: i32,
     dest_y: i32,
     dest: Cell,
@@ -281,7 +283,7 @@ fn write_repose_swap(
         || air_has_standing_water_neighbor(ptrs, wrap_width, dest_x, dest_y)
         || air_has_standing_water_neighbor(ptrs, wrap_width, src_x, src_y);
     if is_grain(src.material) && submerged && dest.sat.0 < 200 {
-        let cap = water_capacity(src.material);
+        let cap = water_capacity_with(src.material, hydro);
         let room = cap.saturating_sub(src.sat.0);
         let into_pore = dest.sat.0.min(room);
         let mut placed = src;
@@ -573,7 +575,7 @@ pub fn apply_flow_erosion(world: &mut World, cfg: &GrainConfig) {
         // cell. Bed scour leaves empty Air (gravity pulls the column
         // down) — never mint a fresh Cell::water().
         let (placed, mut leftover) =
-            absorb_free_water_into_grain(ev.grain, dest.sat);
+            absorb_free_water_into_grain(ev.grain, dest.sat, &world.hydro);
         world.set_cell(ev.deposit_x, ev.deposit_y, placed);
         leftover = push_sat_upward(world, ev.deposit_x, ev.deposit_y + 1, leftover);
         // Vacated hole is empty Air, plus any free water that could not
@@ -598,8 +600,12 @@ pub fn apply_flow_erosion(world: &mut World, cfg: &GrainConfig) {
 }
 
 /// Soak free-water `sat` into a moving grain's pores; return `(placed, leftover)`.
-fn absorb_free_water_into_grain(grain: Cell, free: Sat) -> (Cell, Sat) {
-    let cap = water_capacity(grain.material);
+fn absorb_free_water_into_grain(
+    grain: Cell,
+    free: Sat,
+    hydro: &HydroOverrides,
+) -> (Cell, Sat) {
+    let cap = water_capacity_with(grain.material, hydro);
     let room = cap.saturating_sub(grain.sat.0);
     let into_pore = free.0.min(room);
     let mut placed = grain;

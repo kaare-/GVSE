@@ -42,7 +42,8 @@ pub struct World {
     #[serde(default)]
     pub soft_litter: HashMap<i32, u16>,
     /// Per-sim hydrology material overrides (saved with the world).
-    /// Install into [`wk_material::MaterialRegistry`] for hot-path readers.
+    /// Hot paths read this via [`Self::water_capacity`] /
+    /// [`crate::cell::water_capacity_with`] — no process-global install.
     #[serde(default)]
     pub hydro: HydroOverrides,
 }
@@ -59,10 +60,10 @@ impl World {
         }
     }
 
-    /// Copy [`Self::hydro`] into the process registry used by
-    /// [`wk_material::MaterialRegistry::props`].
-    pub fn install_hydro(&self) {
-        wk_material::MaterialRegistry::install_hydro_overrides(&self.hydro);
+    /// Water capacity for `material` under this world's hydro overrides.
+    #[inline]
+    pub fn water_capacity(&self, material: wk_material::MaterialId) -> u8 {
+        crate::cell::water_capacity_with(material, &self.hydro)
     }
 
     /// Map a world-x into the stored range when wrap is enabled.

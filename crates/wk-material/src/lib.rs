@@ -203,9 +203,9 @@ pub struct HydroSlot {
 /// Full material hydrology override table.
 ///
 /// Canonical storage for the voxel stack is [`wk_voxel::World::hydro`]
-/// (serialized with the sim). [`MaterialRegistry::props`] still reads a
-/// process-installed copy so hot paths need not thread `&World` yet —
-/// call [`MaterialRegistry::install_hydro_overrides`] after load / settings.
+/// (serialized with the sim). Hot paths pass this table into
+/// [`MaterialRegistry::props_with`] / voxel `water_capacity_with` —
+/// there is no process-global install step.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HydroOverrides {
     pub slots: [HydroSlot; MATERIAL_COUNT],
@@ -249,57 +249,18 @@ impl HydroOverrides {
     }
 }
 
-fn installed_hydro() -> &'static std::sync::RwLock<HydroOverrides> {
-    use std::sync::{OnceLock, RwLock};
-    static CELL: OnceLock<RwLock<HydroOverrides>> = OnceLock::new();
-    CELL.get_or_init(|| RwLock::new(HydroOverrides::default()))
-}
-
 impl MaterialRegistry {
-    /// Effective props = base table + **installed** hydrology overrides.
+    /// Compile-time material table (no runtime hydrology overrides).
     ///
-    /// Prefer storing overrides on the sim [`HydroOverrides`] / voxel
-    /// `World::hydro` and calling [`Self::install_hydro_overrides`].
+    /// For porosity / permeability with sim overrides, use
+    /// [`Self::props_with`] and the world's [`HydroOverrides`].
     pub fn props(material: MaterialId) -> MaterialProps {
-        let base = Self::base_props(material);
-        if let Ok(guard) = installed_hydro().read() {
-            guard.apply(material, base)
-        } else {
-            base
-        }
+        Self::base_props(material)
     }
 
-    /// Props with an explicit override table (no process global).
+    /// Props with an explicit override table (voxel `World::hydro`).
     pub fn props_with(material: MaterialId, hydro: &HydroOverrides) -> MaterialProps {
         hydro.apply(material, Self::base_props(material))
-    }
-
-    /// Install overrides for [`Self::props`] readers (voxel settings / load).
-    pub fn install_hydro_overrides(hydro: &HydroOverrides) {
-        if let Ok(mut guard) = installed_hydro().write() {
-            *guard = *hydro;
-        }
-    }
-
-    /// Override permeability (0–255). Prefer mutating `World::hydro` then
-    /// [`Self::install_hydro_overrides`].
-    pub fn set_permeability_override(material: MaterialId, value: u8) {
-        if let Ok(mut guard) = installed_hydro().write() {
-            guard.set_permeability(material, value);
-        }
-    }
-
-    /// Override porosity / water capacity for solids (0–255).
-    pub fn set_porosity_override(material: MaterialId, value: u8) {
-        if let Ok(mut guard) = installed_hydro().write() {
-            guard.set_porosity(material, value);
-        }
-    }
-
-    pub fn clear_hydro_overrides() {
-        if let Ok(mut guard) = installed_hydro().write() {
-            guard.clear();
-        }
     }
 
     /// Compile-time material table (ignores runtime overrides).
