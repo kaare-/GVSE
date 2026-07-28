@@ -197,12 +197,15 @@ nerves / scenarios docs.
 
 Voxel intent:
 
-- Editor and palette are UI. They live in `wk-app` today; when
-  `wk-app` swaps to voxel, they carry over verbatim modulo the
-  pixel-to-cell mapping (already 1:1 in intent).
+- Editor and palette are UI. They live in `wk-voxel-app` on the
+  active path (historical column host was `wk-app`). Pixel-to-cell
+  mapping is already 1:1 in intent.
 - Chem / gases: heatmaps.
 - Lanes / fore-back drawing: retained. Voxel cells are 2D but the
   render can still paint back / body / fore in three passes.
+- Spec docs under [`docs/organism/`](organism/) still cite column
+  crates as design anchors; the live petri is `wk-voxel` /
+  `wk-voxel-app` (see that directory's README).
 - **Deferred** until the fluid + agent ports land.
 
 ## 4. Coordinate system and chunk sizing
