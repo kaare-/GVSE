@@ -36,8 +36,8 @@ pub use active::{clear_all_dirty, partition_checkerboard, plan_active, ActiveChu
 pub use audit::{
     assert_cell_sat_conserved, mass_audit_enabled, sat_totals, set_mass_audit_enabled,
     tracked_totals, SatTotals, CELL_SAT_TICK_TOLERANCE,
-};pub use parallel::{parallel_enabled, set_parallel_enabled};
-pub use cell::{
+};
+pub use parallel::{parallel_enabled, set_parallel_enabled};pub use cell::{
     falls_through_empty_air, grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain,
     water_capacity, Cell, CellFlags, Sat,
 };
