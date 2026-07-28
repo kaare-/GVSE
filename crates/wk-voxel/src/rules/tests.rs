@@ -12,9 +12,9 @@ use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::phase::PhaseConfig;
 use crate::temperature::Temperature;
-use wk_material::MaterialId;
+use wk_material::{HydroOverrides, MaterialId};
 
-use super::head::{hydraulic_head, seepage_rate};
+use super::head::{hydraulic_head, seepage_rate_with};
 
 fn setup_column_world() -> World {
     // One chunk. Row y=0 is a solid Bedrock floor; every other
@@ -408,7 +408,7 @@ fn seepage_wets_adjacent_sand_from_air_water() {
         "mass conserved"
     );
     // Rate-limited: one tick can't dump the whole lake into sand.
-    let rate = seepage_rate(MaterialId::Sand);
+    let rate = seepage_rate_with(MaterialId::Sand, &HydroOverrides::default());
     assert!(sand.sat.0 as i32 <= rate);
 }
 

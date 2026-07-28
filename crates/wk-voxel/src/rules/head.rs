@@ -60,10 +60,6 @@ pub(crate) fn sat_move_to_equalize_heads(
 
 /// Max sat transferred through a porous solid per seepage step,
 /// scaled by [`wk_material::MaterialProps::permeability`].
-pub(crate) fn seepage_rate(material: MaterialId) -> i32 {
-    seepage_rate_with(material, &HydroOverrides::default())
-}
-
 pub(crate) fn seepage_rate_with(material: MaterialId, hydro: &HydroOverrides) -> i32 {
     let p = MaterialRegistry::props_with(material, hydro).permeability;
     if p == 0 {
@@ -71,10 +67,6 @@ pub(crate) fn seepage_rate_with(material: MaterialId, hydro: &HydroOverrides) ->
     }
     // Cap at 32 sat-units/tick at permeability 255 (gravel-ish).
     ((p as i32 * 32) / 255).max(1)
-}
-
-pub(crate) fn is_porous_solid(material: MaterialId) -> bool {
-    is_porous_solid_with(material, &HydroOverrides::default())
 }
 
 pub(crate) fn is_porous_solid_with(material: MaterialId, hydro: &HydroOverrides) -> bool {
