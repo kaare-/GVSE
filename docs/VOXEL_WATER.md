@@ -1,7 +1,7 @@
 # Voxel water (working model)
 
 Canonical notes for free-surface water and pore hydrology in `wk-voxel`.
-Runtime entry point: [`tick`](../crates/wk-voxel/src/rules.rs) in `wk-voxel`.
+Runtime entry point: [`tick`](../crates/wk-voxel/src/rules/tick.rs) in `wk-voxel`.
 Demo / draw: `wk-voxel-app`.
 
 ## Representation
