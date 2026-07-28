@@ -1,20 +1,20 @@
 # Editor
 
-*Frozen UX for the MS-Paint style creature editor tab in `wk-app`.
-Extra beyond the frontmatter todo list, but required per the user
-brief. Not implemented yet — this is the spec Phase 2 builds
-against.*
+*Frozen UX for the MS-Paint style creature studio / editor.
+Active host: [`wk-voxel-app`](../../crates/wk-voxel-app). The column-era
+host was [`crates/legacy/wk-app`](../../crates/legacy/wk-app) — archive
+only.*
 
 ## Purpose
 
-The editor is a tab inside the existing `wk-app` window
-([`crates/wk-app`](../../crates/wk-app)). It lets a user construct
-a creature by painting modules on a small grid using the palette
-from [`PALETTE.md`](PALETTE.md), name it, save it to disk, and drop
-it into the running GVSE world at a chosen column.
+The editor is a studio tab inside
+[`wk-voxel-app`](../../crates/wk-voxel-app). It lets a user construct a
+creature by painting modules on a small grid using the palette from
+[`PALETTE.md`](PALETTE.md), name it, save it to disk, and drop it into
+the running GVSE world at a chosen cell.
 
 The world *is* the petri dish. There is no separate sandbox — you
-paint the creature, click a column, and it lives.
+paint the creature, click a cell, and it lives.
 
 ## Activation
 
@@ -30,9 +30,9 @@ paint the creature, click a column, and it lives.
 
 ## Layout
 
-Three-panel modal, macroquad UI (same widget system used by the
-existing settings window in
-[`state.rs::draw_settings_ui`](../../crates/wk-app/src/state.rs)):
+Three-panel modal, macroquad UI (same pattern as the voxel settings /
+editor panels in `wk-voxel-app`; column-era reference was
+[`state.rs::draw_settings_ui`](../../crates/legacy/wk-app/src/state.rs)):
 
 ```
 +---------------------------+---------------------+---------------+
@@ -165,29 +165,24 @@ pub struct Wire {
 
 ## Spawn flow
 
-1. Click **Spawn** in the info bar. Editor enters column-picker
-   mode.
-2. The world view highlights columns under the mouse (same
-   selector already used by `wk-app::state::handle_input`).
-3. Click a column. The blueprint is instantiated:
-   - One hecs entity per module cell (Phase 2 module ECS) or one
-     compound `AgentEntity` with an inline module grid — the choice
-     is Phase 2's, the editor just calls the spawn API.
+1. Click **Spawn** in the info bar. Editor enters cell-picker mode.
+2. The world view highlights the cell under the mouse (same
+   selector already used by the voxel app input path).
+3. Click a cell. The blueprint is instantiated via
+   `OrganismStore::spawn_blueprint_free` (or habitat-aware spawn) on
+   `wk-voxel`:
    - Genome is applied.
-   - Wires are registered.
-   - `agent_keep_awake` in
-     [`crates/wk-world/src/world.rs`](../../crates/wk-world/src/world.rs)
-     adds the host column so hydrology stays active.
+   - Land plants / fungi snap to a surface Air crown when needed.
 4. Editor closes and world sim resumes.
 
-If the user tries to spawn a plant on ocean, or a water blob on dry
-land, the info bar warns and refuses to spawn. Working defaults:
+If the user tries to spawn a plant with no solid seat, or a water
+Atom with no wet Air, the info bar warns and refuses to spawn
+(voxel seating rules in `wk-voxel` plant / organism modules).
 
-- Land plants require a column with `column.surface_y >
-  world.sea_level` and `SubstrateTag != Rock` at surface (loose or
-  organic).
-- Water blobs require the pick point to be below `sea_level` or
-  inside a filled void.
+Column-era note (archive): the old host used
+`agent_keep_awake` in
+[`crates/legacy/wk-world`](../../crates/legacy/wk-world) so hydrology
+stayed active under a grazer — not used on the voxel path.
 
 ## Determinism
 
@@ -207,9 +202,9 @@ land, the info bar warns and refuses to spawn. Working defaults:
   in `wires` (kind = `Axon`).
 - Hyphae render the same but with the cream palette entry.
 
-Renderer changes for Phase 2 are minimal — one new pass in
-[`crates/wk-app/src/render.rs`](../../crates/wk-app/src/render.rs)
-that walks the module store and draws pixels.
+Voxel draw already paints module pixels from `OrganismStore::draw_list`
+in `wk-voxel-app`. Column-era reference pass lived in
+[`crates/legacy/wk-app/src/render.rs`](../../crates/legacy/wk-app/src/render.rs).
 
 ## Debug overlays
 

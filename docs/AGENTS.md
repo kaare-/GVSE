@@ -1,6 +1,10 @@
 # Agents: ECS creature layer
 
-*Stages 10–11 design record. Implemented alongside this document.*
+*Column-stack archive. Stages 10–11 design record for the scripted
+grazer in [`crates/legacy/wk-agents`](../crates/legacy/wk-agents).
+Active life is module-pixel `OrganismStore` in `wk-voxel` / studio in
+`wk-voxel-app` — see [`organism/`](organism/). Do not extend this
+path.*
 
 ## Choice: `hecs`
 

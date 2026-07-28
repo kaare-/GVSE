@@ -1,6 +1,9 @@
 # Burrows: dig API
 
-*Stage 9. Builds on void annotations from stage 7 (`UNDERGROUND.md`).*
+*Column-stack archive. Stage 9 dig / void API on
+[`crates/legacy/wk-world`](../crates/legacy/wk-world). Voxel caves today
+are Air cells + karst / roof collapse (`wk-voxel`); a dig API may
+return later on that stack. Do not extend this path.*
 
 ## API
 

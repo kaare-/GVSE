@@ -132,7 +132,7 @@ target = argmax over neighbours n of:
   surface dries.
 
 Groundwater head field (already implemented in
-[`crates/wk-field`](../../crates/wk-field)) provides the deeper
+[`crates/legacy/wk-field`](../../crates/legacy/wk-field)) provides the deeper
 moisture gradient. Sienna reads `moisture` for the shallow layer and
 `gw_head` for the deep, blending by depth.
 

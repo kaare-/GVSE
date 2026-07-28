@@ -48,7 +48,7 @@ no wire — the input is absent, not zero.
 | `depth_target` | `Buoyancy` | Desired float depth in metres; `Buoyancy` pumps toward it |
 | `metabolic_throttle` | `Photosystem` (green harvest) | Multiplies effective harvest 0..1; enables a "close stomata" analogue |
 | `active_gate` | `Nucleus` clock | Optional soma override on the sleep window (see `CircadianPhase` in [`GENES.md`](GENES.md)) |
-| `dig_drive` | scripted body / Phase 2 grazer | Bridging wire for the current `wk_agents::Grazer` behaviour until the module ECS replaces it |
+| `dig_drive` | archived column grazer | Bridging wire for legacy `wk_agents::Grazer` only; not used by voxel `OrganismStore` |
 
 ## Wire semantics
 
@@ -93,7 +93,8 @@ Per-axon (stored in the `Blueprint::wires` vector) genes:
 The overlay in Phase 3 will draw each active axon coloured by
 signed activation (blue = inhibit, orange = excite, brightness =
 magnitude), so watching a creature "think" is a screenshot. Same
-principle as the existing overlays cycled by `O` in `wk-app`.
+principle as the existing overlays cycled in `wk-voxel-app` (column-era
+`O` cycle lived in archived `wk-app`).
 
 ## Coupling to existing GVSE
 
@@ -104,7 +105,7 @@ principle as the existing overlays cycled by `O` in `wk-app`.
   subsystem — a `run_neural` pass computes wire values into a scratch
   buffer, and effector modules apply them the next tick.
 - `Genome::mutate` in
-  [`crates/wk-agents/src/lib.rs`](../../crates/wk-agents/src/lib.rs)
+  [`crates/legacy/wk-agents/src/lib.rs`](../../crates/legacy/wk-agents/src/lib.rs)
   extends to jitter the neural genes above. The existing
   determinism seed (`hash_u64(world.seed, tick, entity_id, salt)`)
   applies unchanged.

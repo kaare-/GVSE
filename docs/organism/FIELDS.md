@@ -11,7 +11,7 @@ For every field below, the freeze names either:
 - **REUSE** — the existing GVSE hook that already carries this data.
 - **NEW** — a new field slot that follows the same pattern as
   existing ones in
-  [`crates/wk-field/`](../../crates/wk-field/).
+  [`crates/legacy/wk-field/`](../../crates/legacy/wk-field/).
 
 Preference is always REUSE — the petri and the GVSE world are the
 same substrate.
@@ -56,7 +56,7 @@ same substrate.
 
 - **Kind:** per-column scalar.
 - **Slot:** REUSE. `column.moisture`, `column.moisture_cap` in
-  [`crates/wk-world/src/column.rs`](../../crates/wk-world/src/column.rs).
+  [`crates/legacy/wk-world/src/column.rs`](../../crates/legacy/wk-world/src/column.rs).
 - **Feeds:** `Root` elongation tropism, `Digest` (litter dries out),
   `Photosystem` term in Set A/D (moisture gates growth).
 - **Producer:** existing `run_infiltration`, `run_evaporation`,

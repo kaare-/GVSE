@@ -74,7 +74,7 @@ pub enum SubstrateTag {
   to `moisture` and `ecology`. If per-cell granularity turns out to
   matter (Set E work), promote it into a sparse per-cell tag on
   the karst void patch machinery already in
-  [`crates/wk-world/src/karst.rs`](../../crates/wk-world/).
+  [`crates/legacy/wk-world/src/karst.rs`](../../crates/legacy/wk-world/).
 - Ties to `MaterialId::Organic` once organic gets a real layer type:
   a column whose top layer is `MaterialId::Organic` reports
   `SubstrateTag::Organic` automatically; the tag is a *derived*

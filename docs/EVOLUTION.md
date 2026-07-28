@@ -1,6 +1,9 @@
 # Evolution: species-selection loop
 
-*Stage 11 design record. Implemented alongside this document.*
+*Column-stack archive. Stage 11 design record for genome fission on
+the scripted grazer ([`crates/legacy/wk-agents`](../crates/legacy/wk-agents)).
+Voxel evolution / studio follow-ups are not this document. Do not
+extend this path.*
 
 ## Principle
 

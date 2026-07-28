@@ -74,7 +74,7 @@ Simulation::step:
 - Writes: per-column `light_remaining: Vec<f32>` cached on the
   `Simulation` scratch (same shape and lifecycle as
   `per_column_flux` in
-  [`OverlayData`](../../crates/wk-world/src/world.rs)). No new mass
+  [`OverlayData`](../../crates/legacy/wk-world/src/world.rs)). No new mass
   bucket — light is not tracked in the mass audit.
 
 ## Sky transmit
@@ -97,7 +97,8 @@ Cycle-`O` overlay adds a new mode `OverlayMode::LightRemaining`. Per
 column, colour the top of the column by `light_remaining[top] / L0` —
 dim red for shaded floor, bright white for exposed top. This is the
 same shape as `TemperatureField` and `HumidityField` overlays already
-in [`state.rs`](../../crates/wk-app/src/state.rs), so it fits the
+in the archived column [`state.rs`](../../crates/legacy/wk-app/src/state.rs);
+voxel overlays live in `wk-voxel-app`. It fits the
 existing key.
 
 ## Interaction with column `Ecology`

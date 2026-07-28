@@ -55,7 +55,8 @@ Back → Mid → Fore. Same column `x` can hold a Mid stem *and* a Fore
 creature without collision — the Fore creature draws over the trunk
 so it reads as passing.
 
-`wk-app` currently draws every column top-down with no lane awareness.
+The archived column `wk-app` drew every column top-down with no lane
+awareness; voxel draw is in `wk-voxel-app`.
 Phase 2 does not need lanes on screen; Phase 5 introduces plant
 authoring at Mid; Phase 7 (animals) adds Fore drawn last with its own
 horizontal position.

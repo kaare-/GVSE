@@ -3,7 +3,7 @@
 *Isolated `wk-voxel` port of Set D (and later Set E) from the column
 kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 [`CORE_FEATURES.md`](CORE_FEATURES.md), [`LIGHT.md`](LIGHT.md),
-[`SCENARIOS.md`](SCENARIOS.md). No `wk-agents` / `wk-world` imports.*
+[`SCENARIOS.md`](SCENARIOS.md). No `crates/legacy/` column-crate imports.*
 
 ## Already landed (slice 0)
 

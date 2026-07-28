@@ -24,28 +24,31 @@ you scroll through — **today that is [`wk-voxel-app`](../../crates/wk-voxel-ap
 on the greenfield cell grid ([`wk-voxel`](../../crates/wk-voxel)). See
 [`VOXEL_MIGRATION.md`](../VOXEL_MIGRATION.md).
 
-These specs still name the **column-stack hooks** below as the original
-design anchors (materials, ecology ledger, field slots, grazer ECS).
-Those crates remain in-tree on `main` for reference and for the
-legacy scenario suite; they are **not** the active runtime. Link paths
-stay as `crates/wk-*` until a later stack-clarity move (if any).
+Creature studio / editor UX lives in `wk-voxel-app` (see
+[`EDITOR.md`](EDITOR.md)). Atom-bloom and other kernel falsification
+scenes (E30+) are studio / follow-up work, not a physics-wave
+prerequisite.
 
-- Columns, layers, chunks, and the material vocabulary in
-  [`crates/wk-material`](../../crates/wk-material) and
-  [`crates/wk-world`](../../crates/wk-world).
-- Multirate scheduler + barrier-commit in
-  [`crates/wk-sim`](../../crates/wk-sim).
-- Field slots (thermal / humidity / pressure / wind / groundwater head
-  / dissolved) in [`crates/wk-field`](../../crates/wk-field) — new
-  organism fields (`light`, `chem[c]`) slot in the same way.
-- Existing ECS creature store in
-  [`crates/wk-agents`](../../crates/wk-agents) — evolves from the
-  scripted `Grazer` into the module-pixel blueprint model in Phase 2.
-- MS-Paint style creature editor lives in
-  [`crates/wk-voxel-app`](../../crates/wk-voxel-app) (studio / editor
-  tabs). Historical column UI host was
-  [`crates/wk-app`](../../crates/wk-app). Spec in
-  [`EDITOR.md`](EDITOR.md).
+### Column stack = archive only
+
+The original design anchors (column ecology ledger, field slots,
+scripted grazer ECS) live under **[`crates/legacy/`](../../crates/legacy/)**.
+They remain for reference and for the column scenario suite in
+`tests/scenarios/`. They are **not** the active runtime. Do not add
+features there; do not import them from `wk-voxel` / `wk-voxel-app`.
+
+| Archived column hook | Path |
+|----------------------|------|
+| Columns, layers, chunks | [`crates/legacy/wk-world`](../../crates/legacy/wk-world) |
+| Multirate scheduler | [`crates/legacy/wk-sim`](../../crates/legacy/wk-sim) |
+| Field slots (thermal / humidity / …) | [`crates/legacy/wk-field`](../../crates/legacy/wk-field) |
+| Scripted grazer ECS | [`crates/legacy/wk-agents`](../../crates/legacy/wk-agents) |
+| Column UI host | [`crates/legacy/wk-app`](../../crates/legacy/wk-app) |
+| Shared material vocabulary | [`crates/wk-material`](../../crates/wk-material) (still shared) |
+
+Live Set A / Set D organisms are implemented in `wk-voxel`
+(`organism.rs`, `plant.rs`, `fungi.rs`) and drawn/edited in
+`wk-voxel-app`. Plant notes: [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md).
 
 ## Reading order
 
@@ -54,32 +57,32 @@ stay as `crates/wk-*` until a later stack-clarity move (if any).
 | [`PALETTE.md`](PALETTE.md) | The module colour atlas + exact RGB hex + pixel grammar |
 | [`CHEM.md`](CHEM.md) | `ChemType` IDs, per-chunk chem field, sensor/emitter tuning |
 | [`NERVES.md`](NERVES.md) | Fixed neural graph inputs / outputs / wire semantics |
-| [`LIGHT.md`](LIGHT.md) | Column shade scan and the light competition rule |
+| [`LIGHT.md`](LIGHT.md) | Shade scan and the light competition rule |
 | [`PLANTS.md`](PLANTS.md) | Rooted land plants, deep roots, epiphytes, topple pipeline |
+| [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) | What landed on the voxel stack (Set D / E1 fungi) |
 | [`FUNGI.md`](FUNGI.md) | Litter fungi, hyphae, substrate memory, ghost roots |
 | [`LANES.md`](LANES.md) | Fore / Mid / Back depth-lane occupancy for future animals |
 | [`CORE_FEATURES.md`](CORE_FEATURES.md) | Feature Sets A–E lock and explicit non-goals |
-| [`GENES.md`](GENES.md) | Gene table with tradeoffs; merge notes vs existing `wk-agents::Genome` |
+| [`GENES.md`](GENES.md) | Gene table with tradeoffs; merge notes vs archived `wk_agents::Genome` |
 | [`FIELDS.md`](FIELDS.md) | Petri fields (light, temp, chem, moisture, organic, substrate, stem wetness) |
-| [`SCENARIOS.md`](SCENARIOS.md) | 16 falsification scenes numbered E30–E45 |
-| [`EDITOR.md`](EDITOR.md) | MS-Paint editor tab UX, canvas, `Blueprint` save format, spawn flow |
+| [`SCENARIOS.md`](SCENARIOS.md) | Falsification scenes (E30–E45 skeletons; column E1–E17 archived) |
+| [`EDITOR.md`](EDITOR.md) | MS-Paint editor / studio UX, `Blueprint` save format, spawn flow |
 
-## GVSE hook table
+## Archive hook table (column stack)
 
-These are the anchors Phase 2 code will bind to. Naming them here
-locks the coupling contract:
+Historical anchors the kernel specs grew against. **Reference only** —
+paths are under `crates/legacy/`. New work binds to `wk-voxel` instead.
 
-| Concept | Existing GVSE hook |
-|---------|--------------------|
-| Coarse column biomass | `Ecology { root_density, leaf_area, alive_biomass, dead_biomass, nutrient }` in [`crates/wk-world/src/column.rs`](../../crates/wk-world/src/column.rs) |
-| Dead plant / root mass ledger | `MassAudit::biomass_decay_total` + `biomass_eaten_total` in [`crates/wk-world/src/world.rs`](../../crates/wk-world/src/world.rs) |
-| Future organic material slot | `MaterialId::Organic` (reserved in the material vocabulary) |
-| Per-chunk scalar / vector fields | Slot pattern in [`crates/wk-field`](../../crates/wk-field); enable flags on [`World`](../../crates/wk-world/src/world.rs) |
-| Genome storage | `wk_agents::Genome` in [`crates/wk-agents/src/lib.rs`](../../crates/wk-agents/src/lib.rs). See [`GENES.md`](GENES.md) for the merge plan |
-| Post-barrier subsystem slot | Direct-mutation section of `Simulation::step` in [`crates/wk-sim/src/sim.rs`](../../crates/wk-sim/src/sim.rs) — new `run_shade`, `run_chem`, module-driven `run_agents` sit here |
-| Column moisture / water table | `column.moisture` + `moisture_cap` + `run_groundwater_head_field` |
-| Existing scripted grazer | `wk_agents::Grazer` / `AgentStore::step_grazers` — Phase 2 replaces the scripted body with a module-pixel behaviour driven by `Blueprint` |
-| App UI host | Creature editor / studio in [`crates/wk-voxel-app`](../../crates/wk-voxel-app). Column-era host was `state.rs::draw_settings_ui` in [`crates/wk-app/src/state.rs`](../../crates/wk-app/src/state.rs) |
+| Concept | Archived column hook |
+|---------|----------------------|
+| Coarse column biomass | `Ecology { … }` in [`crates/legacy/wk-world/src/column.rs`](../../crates/legacy/wk-world/src/column.rs) |
+| Dead plant / root mass ledger | `MassAudit` biomass buckets in [`crates/legacy/wk-world/src/world.rs`](../../crates/legacy/wk-world/src/world.rs) |
+| Organic material slot | `MaterialId::Organic` in [`crates/wk-material`](../../crates/wk-material) (shared; used by voxel too) |
+| Per-chunk fields | Slot pattern in [`crates/legacy/wk-field`](../../crates/legacy/wk-field) |
+| Genome / scripted grazer | [`crates/legacy/wk-agents`](../../crates/legacy/wk-agents) — superseded by module-pixel `Blueprint` + `OrganismStore` in `wk-voxel` |
+| Post-barrier subsystem slot | `Simulation::step` in [`crates/legacy/wk-sim/src/sim.rs`](../../crates/legacy/wk-sim/src/sim.rs) |
+| Column moisture / water table | `column.moisture` + groundwater head in the legacy stack |
+| App UI host | Studio in [`crates/wk-voxel-app`](../../crates/wk-voxel-app); column-era host was [`crates/legacy/wk-app`](../../crates/legacy/wk-app) |
 
 ## Cross-cutting invariants (unchanged)
 
@@ -87,32 +90,14 @@ The organism kernel obeys the four rules that carry the rest of GVSE:
 
 1. **Determinism.** Blueprint spawn, mutation, and every organism
    subsystem seed off `hash_u64(world.seed, tick, entity_id, salt)`.
-2. **Mass audit.** Every new mass sink or source gets its own bucket
-   (`biomass_grow_total`, `biomass_decay_total`, `biomass_eaten_total`
-   already exist; module upkeep and emitter cost land as new buckets in
-   Phase 2). Creature body mass may stay outside `total_tracked` for
-   the initial phases (as in stage 10/11); this is called out per
-   subsystem.
+2. **Mass audit.** Every new mass sink or source gets its own bucket.
 3. **Buffered writes + barrier commit** or post-barrier direct
    mutation. Never both in one pass.
-4. **Save/load round-trip.** Every new per-column, per-chunk, or
-   per-entity field carries `#[serde(default)]` so pre-kernel saves
-   still open.
+4. **Save/load round-trip.** New fields carry `#[serde(default)]` so
+   older saves still open.
 
-## What is deliberately not here
+## Non-goals (this directory)
 
-This directory freezes the *design*, not the implementation. See the
-[Organism Kernel plan](../../.cursor/plans) for phase timing:
-
-- Phase 1 (this directory) — spec freeze.
-- Phase 2 — Set A + editor scaffolding.
-- Phase 3 — Set B (chem + nerves).
-- Phase 4 — Set C (buoyancy + temp niche).
-- Phase 5 — Set D (land plants + shade).
-- Phase 6 — Set E (litter fungi + epiphytes + toppling + ghost roots).
-- Phase 7 — animals (Fore-lane locomotion), outside the kernel arc.
-
-No animal locomotion, no learned nets, no true mycorrhizae, no MUD
-freeform drawing, no full GVSE geology coupling beyond `Organic` +
-the substrate tag from [`FUNGI.md`](FUNGI.md). See
-[`CORE_FEATURES.md`](CORE_FEATURES.md) for the explicit non-goals.
+- Implementing systems (code lives in `wk-voxel` / `wk-voxel-app`)
+- Re-activating the scripted column grazer
+- A separate Petri crate

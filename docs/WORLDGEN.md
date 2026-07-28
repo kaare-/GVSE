@@ -123,7 +123,7 @@ So this document takes as fixed:
 
 ## The current state, and what has to change
 
-The current `continental_surface_y` in `crates/wk-world/src/terrain.rs`
+The current `continental_surface_y` in `crates/legacy/wk-world/src/terrain.rs`
 defines a fixed profile:
 
 ```
@@ -350,7 +350,7 @@ region has stabilised).
 At runtime, `humidity(coord)` relaxes toward `humidity_target(coord)`
 with time constant ~1 in-game day. Local evaporation raises it,
 precipitation lowers it. This replaces the hardcoded
-`const HUMIDITY: f32 = 0.4` in `crates/wk-sim/src/subsystems.rs` with a
+`const HUMIDITY: f32 = 0.4` in `crates/legacy/wk-sim/src/subsystems.rs` with a
 lookup, and the existing `run_evaporation` picks up regional variation
 essentially for free.
 
@@ -500,7 +500,8 @@ to. Only physically meaningful excess crosses.
 ## Persistence
 
 **Phase 1**: in-memory chunk-store. When a chunk is evicted, its
-serialised bytes (via the existing `postcard` path in `wk-io`) go into
+serialised bytes (via the existing `postcard` path in
+`crates/legacy/wk-io`, or voxel `wk-voxel` save) go into
 a `HashMap<i32, Vec<u8>>` on the world. When re-loaded, deserialised
 back into a `Chunk`. This is cheap and preserves state without disk
 I/O; the trade-off is that quitting the app loses everything not in
