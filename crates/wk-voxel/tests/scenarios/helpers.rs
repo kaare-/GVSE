@@ -1,4 +1,4 @@
-//! Shared fixtures for wk-voxel scenario ports of legacy E1/E2/E6/E8.
+//! Shared fixtures for wk-voxel scenario ports of legacy E-series intents.
 //!
 //! These exercise the same *product intents* as `tests/scenarios/` in the
 //! column stack, but use only the greenfield voxel APIs. See
@@ -18,6 +18,28 @@ pub fn sat_sum(world: &World, x0: i32, x1: i32, y0: i32, y1: i32) -> i64 {
         }
     }
     total
+}
+
+/// Count cells of `material` in an inclusive rectangle.
+pub fn count_material(
+    world: &World,
+    material: MaterialId,
+    x0: i32,
+    x1: i32,
+    y0: i32,
+    y1: i32,
+) -> usize {
+    let mut n = 0usize;
+    for x in x0..=x1 {
+        for y in y0..=y1 {
+            if let Some(c) = world.get_cell(x, y) {
+                if c.material == material {
+                    n += 1;
+                }
+            }
+        }
+    }
+    n
 }
 
 /// Impermeable floor across `width` columns at y=0.
@@ -77,6 +99,34 @@ pub fn setup_seam_terrace(seed: u64) -> World {
     lay_bedrock_floor(&mut w, 128);
     for x in 0..128 {
         w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+    }
+    w
+}
+
+/// Flat stone plain with an open surface pit (sinkhole) at `[pit_x0, pit_x1]`.
+///
+/// Pit columns have Air from y=1..=pit_depth (open to sky). Neighbouring
+/// columns have stone at y=1 so surface water can pond on the rim.
+pub fn setup_sinkhole_world(
+    seed: u64,
+    width: i32,
+    pit_x0: i32,
+    pit_x1: i32,
+    pit_depth: i32,
+) -> World {
+    let mut w = World::new(seed);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    lay_bedrock_floor(&mut w, width);
+    for x in 0..width {
+        if x >= pit_x0 && x <= pit_x1 {
+            continue;
+        }
+        w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+    }
+    for x in pit_x0..=pit_x1 {
+        for y in 1..=pit_depth {
+            w.set_cell(x, y, Cell::air());
+        }
     }
     w
 }
