@@ -16,3 +16,8 @@ wk-material = { path = "../wk-material" }
 serde = { workspace = true }
 rayon = { workspace = true }
 postcard = { workspace = true }
+
+# Scenario ports of legacy E1/E2/E6/E8 product intents (greenfield only).
+[[test]]
+name = "scenarios"
+path = "tests/scenarios/mod.rs"

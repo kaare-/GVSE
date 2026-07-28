@@ -47,7 +47,7 @@ fn regions_for_standalone(world: &World) -> Vec<ActiveChunk> {
 
 /// Free-surface / pore hydraulic head in cell units:
 /// `y + sat / capacity`. Adjacent cells equalise toward matching heads.
-pub fn hydraulic_head(gy: i32, sat: Sat, capacity: u8) -> f32 {
+pub(crate) fn hydraulic_head(gy: i32, sat: Sat, capacity: u8) -> f32 {
     if capacity == 0 {
         return gy as f32;
     }
@@ -1860,7 +1860,7 @@ pub fn is_standing_water(world: &World, gx: i32, gy: i32) -> bool {
 /// water columns, but will **not** grow a one-cell film on bare rock
 /// into a tall slope wedge (returns 0 when that film is already full
 /// so runoff can clear the hillside first).
-pub fn deposit_water_on_surface(world: &mut World, gx: i32, start_y: i32, budget: f32) -> f32 {
+pub(crate) fn deposit_water_on_surface(world: &mut World, gx: i32, start_y: i32, budget: f32) -> f32 {
     if budget <= 0.0 {
         return 0.0;
     }
