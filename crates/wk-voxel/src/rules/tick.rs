@@ -1,0 +1,179 @@
+//! wk-voxel is an isolated greenfield sim. It MUST NOT import from
+//! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
+//! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
+//!
+//! Physics tick orchestration and performance knobs.
+
+use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
+use crate::grid::World;
+
+use super::grain::{apply_grain_fall_regions, apply_grain_repose_regions};
+use super::gravity::apply_gravity_fall_regions;
+use super::seepage::apply_seepage_regions;
+use super::water_flow::apply_water_flow_regions;
+
+/// How many gravity→surface-flow cycles run inside one [`tick`].
+///
+/// Several substeps with re-planned dirty halos let ponds level and
+/// hill water drain at a liquid pace. On flat shelves where cascade
+/// edges are 5-10 cells away, half-gap propagates at ~1 cell/substep,
+/// so we need enough substeps to keep up with steady rain.
+pub const FLOW_SUBSTEPS: usize = 12;
+/// Minimum flow substeps before a quiet dirty halo may early-out.
+pub const FLOW_SUBSTEPS_MIN: usize = 6;
+/// If the planned dirty area (cells) drops to this or below after
+/// [`FLOW_SUBSTEPS_MIN`], stop the flow loop early — settled films
+/// don't need the full ×12. Busy rain / cascades stay at max.
+pub const FLOW_QUIET_AREA: usize = 512;
+
+/// Live-tunable physics trade-offs (Tab → Performance). Defaults keep
+/// the full water-feel path; opt-ins trade some leveling speed for ms.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PerfConfig {
+    /// Run surface water flow only on odd substeps (gravity still every
+    /// substep). Default **off** — same feel as the tuned ×12 path.
+    pub flow_every_other_substep: bool,
+    /// After [`FLOW_SUBSTEPS_MIN`], stop when the dirty halo is tiny.
+    pub flow_quiet_early_out: bool,
+    /// Rayon checkerboard parallelism for gravity / grain / flow scan.
+    pub parallel_physics: bool,
+}
+
+impl Default for PerfConfig {
+    fn default() -> Self {
+        Self {
+            flow_every_other_substep: false,
+            // Off by default — early-out can stall hill drains / shelf
+            // cascades when the dirty halo shrinks mid-leveling. Opt in
+            // via Tab → Performance after eyeballing water feel.
+            flow_quiet_early_out: false,
+            parallel_physics: true,
+        }
+    }
+}
+
+fn active_cell_area(active: &[crate::active::ActiveChunk]) -> usize {
+    active
+        .iter()
+        .map(|a| {
+            let w = (a.rect.x1 as usize).saturating_sub(a.rect.x0 as usize) + 1;
+            let h = (a.rect.y1 as usize).saturating_sub(a.rect.y0 as usize) + 1;
+            w.saturating_mul(h)
+        })
+        .sum()
+}
+
+/// Advance the sim by one tick.
+///
+/// Runs the sub-passes in a fixed order:
+///
+/// 1. **Flow substeps** (×[`FLOW_SUBSTEPS`]): gravity fall, then
+///    Air–Air hydraulic-head surface flow (horizontal + diagonal).
+///    Each substep re-plans from dirty so water can advance several
+///    cells per tick and seek a flat free surface on slopes.
+/// 2. Seepage — water soaks into / through porous solids by head,
+///    rate-limited by permeability.
+/// 3. Grain fall — granular materials sink into the Air cell below.
+/// 4. Grain repose — diagonal slides when steeper than material repose.
+///
+/// Rain, evaporation, and [`apply_flow_erosion`] are **opt-in**: callers
+/// wire them into their per-frame loop. Scenario tests pass `tick(world)`
+/// alone and stay deterministic without weather / sediment.
+///
+/// **Dirty / active chunks.** Each flow substep [`plan_active`]s from
+/// dirty rects (halo + neighbour wake), then [`clear_all_dirty`].
+/// Writes rebuild dirty for the next substep / tick. A fully settled
+/// world plans nothing and the physics passes early-out.
+///
+/// **Checkerboard.** Gravity and grain run four colour sub-passes
+/// (EE → OE → EO → OO); within a colour, regions run on rayon when
+/// enabled. Surface flow and seepage scan the same partition (also
+/// parallel per colour) but apply from one snapshot so edges are not
+/// re-solved mid-rule.
+pub fn tick(world: &mut World) {
+    tick_with_perf(world, &PerfConfig::default());
+}
+
+/// [`tick`] with live [`PerfConfig`] knobs (demo Tab → Performance).
+///
+/// Uses default [`crate::failure::FailureConfig`] (roof collapse on).
+pub fn tick_with_perf(world: &mut World, perf: &PerfConfig) {
+    tick_with_configs(world, perf, &crate::failure::FailureConfig::default());
+}
+
+/// [`tick`] with performance + geotech failure knobs.
+pub fn tick_with_configs(
+    world: &mut World,
+    perf: &PerfConfig,
+    failure: &crate::failure::FailureConfig,
+) {
+    tick_with_configs_and_geotech(world, perf, failure, None);
+}
+
+/// [`tick_with_configs`] plus optional [`crate::geotech_map::GeotechMap`]
+/// for map-gated F2b shear (S3).
+pub fn tick_with_configs_and_geotech(
+    world: &mut World,
+    perf: &PerfConfig,
+    failure: &crate::failure::FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) {
+    crate::parallel::set_parallel_enabled(perf.parallel_physics);
+    for step in 0..FLOW_SUBSTEPS {
+        let active = plan_active(world);
+        clear_all_dirty(world);
+        if active.is_empty() {
+            break;
+        }
+        let passes = partition_checkerboard(&active);
+        for pass in &passes {
+            apply_gravity_fall_regions(world, pass);
+        }
+        // Every-other flow: gravity still runs every pass; surface
+        // leveling runs on even substeps when opted in. (Must include
+        // step 0 — odd-only skipped flow after clear_all_dirty, then
+        // step 1 saw an empty plan and broke before any leveling.)
+        let run_flow = !perf.flow_every_other_substep || (step % 2 == 0);
+        if run_flow {
+            apply_water_flow_regions(world, &active);
+        }
+        // Quiet early-out: after the minimum passes, peek at dirty
+        // written by this substep — a tiny halo means water settled.
+        if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_MIN {
+            let next = plan_active(world);
+            if next.is_empty() || active_cell_area(&next) <= FLOW_QUIET_AREA {
+                break;
+            }
+        }
+    }
+
+    // Seepage + grain fall read the same dirty halo the substep loop
+    // built. Do NOT clear dirty here: if these passes don't write
+    // (e.g. no porous solids, no grains), we still need next tick to
+    // re-process the cells the substeps just modified.
+    let active = plan_active(world);
+    if !active.is_empty() {
+        apply_seepage_regions(world, &active);
+        let passes = partition_checkerboard(&active);
+        for pass in &passes {
+            apply_grain_fall_regions(world, pass);
+        }
+        // Repose reads dirty written by grain fall; re-plan so new Air
+        // seats from the fall pass can receive diagonal slides.
+        let repose_active = plan_active(world);
+        if !repose_active.is_empty() {
+            let repose_passes = partition_checkerboard(&repose_active);
+            for pass in &repose_passes {
+                apply_grain_repose_regions(world, pass);
+            }
+        }
+    }
+
+    // Geotech: roof / overhang collapse after grain has seated.
+    crate::failure::apply_failure(world, failure, geotech);
+
+    world.tick = world.tick.wrapping_add(1);
+    for chunk in world.chunks.values_mut() {
+        chunk.tick = chunk.tick.wrapping_add(1);
+    }
+}
