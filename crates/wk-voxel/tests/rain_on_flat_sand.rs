@@ -4,13 +4,15 @@
 //! the world. After one tick:
 //!   - The sand row has absorbed water up to its porosity capacity.
 //!   - The water row above holds the remainder.
-//!   - Dirty rectangles clear after each tick.
+//!   - A settled bed leaves no dirty plan for the next tick (the flow
+//!     substep loop clears dirty at the start of each pass and exits
+//!     once `plan_active` is empty).
 //!
 //! Surface flow / seepage behaviour is covered in `rules.rs` unit
 //! tests and documented in `docs/VOXEL_WATER.md`.
 
 use wk_material::MaterialId;
-use wk_voxel::{apply_gravity_fall, is_grain, tick, water_capacity, Cell, World};
+use wk_voxel::{apply_gravity_fall, is_grain, plan_active, tick, water_capacity, Cell, World};
 
 #[test]
 fn rain_row_saturates_sand_over_one_tick() {
@@ -23,6 +25,12 @@ fn rain_row_saturates_sand_over_one_tick() {
     }
     assert!(w.get_cell(4, 1).unwrap().sat.is_full());
     assert!(w.get_cell(4, 0).unwrap().sat.is_empty());
+    // Setup writes must wake physics for the first tick.
+    let (coord, _, _) = World::split(4, 1);
+    assert!(
+        w.chunks.get(&coord).unwrap().dirty.is_some(),
+        "set_cell should dirty the chunk before tick"
+    );
 
     tick(&mut w);
 
@@ -43,11 +51,12 @@ fn rain_row_saturates_sand_over_one_tick() {
         assert_eq!(above.material, MaterialId::Air);
     }
 
-    // Dirty tracks this tick's writes so the *next* tick can plan an
-    // active region (cleared at the start of that tick, not the end).
-    let (coord, _, _) = World::split(4, 1);
-    let chunk = w.chunks.get(&coord).unwrap();
-    assert!(chunk.dirty.is_some(), "settling writes should dirty the chunk");
+    // After a full tick the bed is quiescent: the last flow substep
+    // cleared dirty and saw an empty plan, so nothing is scheduled.
+    assert!(
+        plan_active(&w).is_empty(),
+        "settled sand+film should leave no active plan"
+    );
     assert_eq!(w.tick, 1);
 
     // A second tick doesn't change anything — sand is at capacity,
