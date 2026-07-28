@@ -5,13 +5,6 @@
 
 ## Numbering
 
-<<<<<<< HEAD
-- **E1–E16** — existing hydrology / karst / ecology / burrow / grazer
-  tests on the **column** stack. See
-  [`tests/scenarios/mod.rs`](../../tests/scenarios/mod.rs).
-  Product-intent ports of a subset (rain/basin/seam/save, sinkhole,
-  roof collapse, roots/repose E15, …) also live under
-=======
 - **E1–E17 (column archive)** — hydrology / karst / ecology / burrow /
   grazer / reproduction tests on the **legacy column** stack. Code:
   [`tests/scenarios/`](../../tests/scenarios/) via
@@ -20,7 +13,6 @@
   targets for the voxel stack.
 - **Voxel product-intent ports** — rain/basin/seam/save, sinkhole,
   roof collapse, roots/repose (E15), … live under
->>>>>>> 7dd6a82 (docs: retarget organism/column hooks to crates/legacy archive)
   [`crates/wk-voxel/tests/scenarios/`](../../crates/wk-voxel/tests/scenarios/)
   and never import column crates.
 - **E30–E45** — organism kernel skeletons below (studio / follow-up;
