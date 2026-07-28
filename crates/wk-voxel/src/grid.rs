@@ -9,6 +9,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
+use wk_material::HydroOverrides;
 
 use crate::cell::Cell;
 use crate::chunk::{Chunk, ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
@@ -40,6 +41,10 @@ pub struct World {
     /// Death deposits units here; fungi digest them before Organic cells.
     #[serde(default)]
     pub soft_litter: HashMap<i32, u16>,
+    /// Per-sim hydrology material overrides (saved with the world).
+    /// Install into [`wk_material::MaterialRegistry`] for hot-path readers.
+    #[serde(default)]
+    pub hydro: HydroOverrides,
 }
 
 impl World {
@@ -50,7 +55,14 @@ impl World {
             tick: 0,
             wrap_width: None,
             soft_litter: HashMap::new(),
+            hydro: HydroOverrides::default(),
         }
+    }
+
+    /// Copy [`Self::hydro`] into the process registry used by
+    /// [`wk_material::MaterialRegistry::props`].
+    pub fn install_hydro(&self) {
+        wk_material::MaterialRegistry::install_hydro_overrides(&self.hydro);
     }
 
     /// Map a world-x into the stored range when wrap is enabled.

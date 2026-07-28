@@ -6,7 +6,8 @@
 //! equalising across the whole domain.
 
 use crate::helpers::*;
-use wk_material::{MaterialId, CHUNK_W};
+use wk_material::{MaterialId};
+use wk_world::{CHUNK_W};
 use wk_world::chunk::Chunk;
 use wk_world::terrain::fill_column_strata;
 use wk_world::world::World;

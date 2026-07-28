@@ -24,7 +24,7 @@ fn e8_save_load_continuation() {
 
     for (coord, chunk1) in &world.chunks {
         let chunk2 = world2.chunks.get(coord).expect("chunk exists");
-        for i in 0..wk_material::CHUNK_W {
+        for i in 0..wk_world::CHUNK_W {
             let c1 = &chunk1.columns[i];
             let c2 = &chunk2.columns[i];
             assert_eq!(c1.surface_y, c2.surface_y);

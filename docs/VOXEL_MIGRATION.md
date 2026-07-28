@@ -40,9 +40,9 @@ This is the *contract* between the two sims. Enforced by tooling
 - `crates/wk-voxel/Cargo.toml` depends on **exactly one** existing
   crate: `wk-material`. Material IDs and property tables are pure
   data and safe to share. No other GVSE crate is a dependency.
-- No file under `crates/wk-app/`, `crates/wk-world/`,
-  `crates/wk-agents/`, `crates/wk-sim/`, `crates/wk-io/`, or
-  `crates/wk-field/` gains a `wk-voxel` dependency.
+- Column-stack crates live under `crates/legacy/` (`wk-world`,
+  `wk-sim`, `wk-agents`, `wk-io`, `wk-app`, `wk-field`). No file
+  there gains a `wk-voxel` dependency.
 - Every `.rs` file in `crates/wk-voxel/src/` begins with the block:
 
   ```rust
@@ -115,7 +115,7 @@ Voxel intent:
   gravel / loose-rock body, sand cap, water above submerged beds,
   extra sky headroom.
 - **Chunk generation.** Analogous to `generate_chunk_continental` in
-  `crates/wk-world/src/terrain.rs`. One cellular chunk = 64×64
+  `crates/legacy/wk-world/src/terrain.rs`. One cellular chunk = 64×64
   cells. Generation is deterministic on `(seed, cx, cy)`.
 - **Deferred.** Streaming chunk load/unload — start with the whole
   ring in memory (the column build already fits at CHUNK_W=64).

@@ -28,7 +28,7 @@ fn e14_ecology_grows_when_wet() {
     let dry_hi = 56usize;
     {
         let chunk = world.chunks.get_mut(&0).unwrap();
-        for i in 0..wk_material::CHUNK_W {
+        for i in 0..wk_world::CHUNK_W {
             let col = &mut chunk.columns[i];
             col.ecology = Ecology {
                 root_density: 0.2,

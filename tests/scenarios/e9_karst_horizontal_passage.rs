@@ -6,7 +6,8 @@
 //! (solid ↓ ↔ dissolved ↑).
 
 use crate::helpers::*;
-use wk_material::{CHUNK_W, MaterialId};
+use wk_material::{MaterialId};
+use wk_world::{CHUNK_W};
 use wk_world::terrain::generate_limestone_bed;
 use wk_world::world::World;
 

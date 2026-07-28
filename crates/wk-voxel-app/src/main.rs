@@ -416,7 +416,7 @@ async fn main() {
     let params = WorldgenParams::default();
     let mut scene = Scene::new(params);
     let mut settings = SimSettings::new(&scene.params);
-    settings.apply_material_overrides();
+    settings.apply_material_overrides(&mut scene.world);
     let mut paused = false;
     // Climatic drizzle is physics-only by default — sky pixels hide thin
     // wet Air so the old rain-streak look doesn't paint over the sky.
@@ -1193,7 +1193,7 @@ async fn main() {
         // Creature / terrain editor overlays (paint UI, or spawn banner).
         editor.draw();
         terrain.draw();
-        settings.draw();
+        settings.draw(&mut scene.world);
         quit_dialog.draw();
 
         // HUD chrome (info + hotkeys + inspector) toggled with F1.

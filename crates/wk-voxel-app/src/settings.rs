@@ -8,8 +8,8 @@ use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
     ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, FailureConfig, Genome, GrainConfig,
     KarstConfig, OrographicConfig, PerfConfig, PhaseConfig, PlantGrowthCaps, RainConfig, TempConfig,
-    WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
-    MAX_STEM_MODULES,
+    World, WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES,
+    MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 
 /// Default plant / fungus gene knobs applied on spawn (and optionally to living plants).
@@ -211,17 +211,24 @@ impl SimSettings {
         }
     }
 
-    /// Push material slider values into the shared registry overrides.
-    pub fn apply_material_overrides(&self) {
+    /// Push material slider values onto `world.hydro` and install for props().
+    pub fn apply_material_overrides(&self, world: &mut World) {
+        world.hydro.clear();
         for id in MaterialId::ALL_SOLIDS {
             let i = id as usize;
-            MaterialRegistry::set_permeability_override(id, self.mat_perm[i].round() as u8);
-            MaterialRegistry::set_porosity_override(id, self.mat_poro[i].round() as u8);
+            world
+                .hydro
+                .set_permeability(id, self.mat_perm[i].round() as u8);
+            world
+                .hydro
+                .set_porosity(id, self.mat_poro[i].round() as u8);
         }
+        world.install_hydro();
     }
 
-    pub fn reset_materials_to_defaults(&mut self) {
-        MaterialRegistry::clear_hydro_overrides();
+    pub fn reset_materials_to_defaults(&mut self, world: &mut World) {
+        world.hydro.clear();
+        world.install_hydro();
         for id in MaterialId::ALL_SOLIDS {
             let i = id as usize;
             let base = MaterialRegistry::base_props(id);
@@ -230,7 +237,7 @@ impl SimSettings {
         }
     }
 
-    pub fn draw(&mut self) {
+    pub fn draw(&mut self, world: &mut World) {
         if !self.open {
             return;
         }
@@ -969,9 +976,9 @@ impl SimSettings {
         self.karst.min_wet_neighbour_sat = min_sat.round().clamp(1.0, 255.0) as u8;
 
         if reset_materials {
-            self.reset_materials_to_defaults();
+            self.reset_materials_to_defaults(world);
         } else {
-            self.apply_material_overrides();
+            self.apply_material_overrides(world);
         }
 
         self.evap.rate_per_tick = evap_rate.round().clamp(0.0, 32.0) as u8;

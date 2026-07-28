@@ -95,6 +95,8 @@ impl Scene {
     pub fn from_snapshot(snap: SimSnapshot) -> Self {
         let mut geotech = GeotechMap::new();
         geotech.rebuild(&snap.world);
+        // Restore hydrology overrides into the process registry.
+        snap.world.install_hydro();
         Self {
             world: snap.world,
             params: snap.params,

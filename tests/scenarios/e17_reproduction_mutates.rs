@@ -5,7 +5,7 @@
 //! thresholds + deterministic mutation.
 
 use crate::helpers::*;
-use wk_material::CHUNK_W;
+use wk_world::CHUNK_W;
 use wk_sim::Genome;
 use wk_world::column::Ecology;
 use wk_world::terrain::generate_flat_sand;

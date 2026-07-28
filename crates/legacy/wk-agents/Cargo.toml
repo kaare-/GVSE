@@ -1,0 +1,15 @@
+[package]
+name = "wk-agents"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+# Workspace pins hecs =0.10.5 — 0.11 needs newer rustc than 1.83 for
+# `query_disjoint_mut::<_>()`.
+hecs = { workspace = true }
+wk-material = { path = "../../wk-material" }
+wk-world = { path = "../wk-world" }
+serde = { workspace = true }
+postcard = { workspace = true }
+
+[dev-dependencies]

@@ -3,8 +3,8 @@
 Local-first 2D side-view geological / ecological research prototype.
 
 **Active stack:** voxel cellular automata (`wk-voxel` + `wk-voxel-app`).
-The older column stack (`wk-world` / `wk-sim` / `wk-app`) is **legacy** —
-kept in-tree for reference, not the development path.
+The older column stack lives under `crates/legacy/` (`wk-world` /
+`wk-sim` / `wk-app` / …) — reference only, not the development path.
 
 ## Question
 

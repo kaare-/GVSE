@@ -5,7 +5,8 @@
 //! groundwater head) and for seeding a solid underground water table at
 //! continental generation.
 
-use wk_material::{CHUNK_W, MaterialId};
+use wk_material::{MaterialId};
+use wk_world::{CHUNK_W};
 use wk_world::terrain::{
     generate_chunk_continental, generate_flat_sand, BEDROCK_FLOOR_M,
 };
