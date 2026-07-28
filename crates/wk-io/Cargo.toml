@@ -7,7 +7,7 @@ edition.workspace = true
 wk-material = { path = "../wk-material" }
 wk-world = { path = "../wk-world" }
 wk-sim = { path = "../wk-sim" }
-postcard = { version = "1", features = ["alloc"] }
-serde = { version = "1", features = ["derive"] }
+postcard = { workspace = true }
+serde = { workspace = true }
 
 [dev-dependencies]

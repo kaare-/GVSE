@@ -1,0 +1,5 @@
+# Pin to the version already assumed by dependency pins (hecs 0.10.5,
+# macroquad 0.4.14). Newer crates need rustc > 1.83.
+[toolchain]
+channel = "1.83.0"
+components = ["rustfmt", "clippy"]

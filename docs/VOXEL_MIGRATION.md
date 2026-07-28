@@ -25,9 +25,15 @@ attempt; it is now the default.
 
 ## 2. Isolation Guardrails
 
-This is the *contract* between the two sims. Both are enforced by
-structure (Cargo.toml + guardrail comments) rather than trusted to
-intent.
+This is the *contract* between the two sims. Enforced by tooling
+(not only comments):
+
+- `scripts/check-voxel-isolation.sh` — asserts `wk-voxel` /
+  `wk-voxel-app` trees contain no column-stack crates (CI).
+- File-header comments remain as a human reminder.
+- `deny.toml` is reserved for third-party bans; path workspace
+  members cannot be scoped with `bans.deny` wrappers (roots would
+  always match).
 
 ### Structural rules
 

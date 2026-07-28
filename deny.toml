@@ -1,0 +1,18 @@
+# cargo-deny configuration (optional / future).
+#
+# Wave A: voxel ↔ column isolation is enforced by
+# `scripts/check-voxel-isolation.sh`, not by [bans] below.
+#
+# Why not ban wk-world / wk-sim / … here?
+# Those crates are workspace members. `bans.deny` flags the crate
+# whenever it appears in the graph — including as a root member — so
+# wrappers cannot express "legacy may use these; voxel may not."
+# The shell script scopes the check to wk-voxel / wk-voxel-app trees.
+#
+# Keep this file for third-party bans / license policy later.
+# CI currently runs `check bans` only to ensure the config stays valid.
+
+[bans]
+multiple-versions = "allow"
+wildcards = "allow"
+deny = []

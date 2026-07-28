@@ -31,7 +31,12 @@ cargo run --release -p wk-voxel-app
 # Library tests
 cargo test -p wk-voxel --lib
 cargo test -p wk-voxel-app
+
+# Isolation: wk-voxel must not depend on the column stack
+bash scripts/check-voxel-isolation.sh
 ```
+
+Toolchain is pinned in `rust-toolchain.toml` (1.83). License: `LICENSE-MIT`.
 
 ## Controls (voxel app)
 
