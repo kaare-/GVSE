@@ -101,15 +101,13 @@ in the archived column [`state.rs`](../../crates/legacy/wk-app/src/state.rs);
 voxel overlays live in `wk-voxel-app`. It fits the
 existing key.
 
-## Interaction with column `Ecology`
+## Interaction with column `Ecology` (archive)
 
-The coarse `Ecology.leaf_area` per column continues to work exactly
-as it does now for chemistry / hydrology feedback (leaf ET,
-infiltration, root erosion). The new shade rule operates on **module
-pixels**, not the coarse LAI scalar. In Phase 5, `run_ecology`
-gains a small tap that reads `light_remaining[surface_y]` for its
-plant growth term — so column-scale grasslands feel canopy shade too
-even where no individual creature is drawn.
+On the **archived** column stack, coarse `Ecology.leaf_area` still
+feeds leaf ET / infiltration / root erosion. The shade rule in this
+spec operates on **module pixels**, not that LAI scalar. Voxel plants
+use Set D modules + `wk-voxel` shade (`CanopyIndex`); they do not
+read column `Ecology`.
 
 ## Interaction with water blobs
 
