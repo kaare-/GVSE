@@ -18,7 +18,18 @@ Each `tick`:
 2. Once: `plan_active` → **`apply_seepage`** → grain fall → **grain repose** → **`apply_roof_collapse`** (geotech F1; Tab → Geotech)
 3. Opt-in (demo): **`apply_flow_erosion`** — cascade/head-drop water scours erodible beds/banks and deposits downhill
 
-Dirty rectangles + a 1-cell halo drive the active set. Writes rebuild dirty for the next substep.
+Dirty rectangles + a 1-cell halo drive the active set. Writes rebuild
+dirty for the **next substep**. Important quiescence detail: dirty is
+cleared at the *start* of every flow substep; if that substep then sees
+an empty plan, the loop exits. A fully settled bed can therefore end the
+tick with **no dirty rects left** — `plan_active` is empty going into
+the next tick. That is intentional (idle water should not rescan the
+world), not a missed wake. Setup / rain / editor writes must dirty
+cells so the following tick re-enters the loop.
+
+Optional early-out (`PerfConfig::flow_quiet_early_out`, default **off**)
+may stop the ×12 loop sooner when the dirty halo shrinks below
+`FLOW_QUIET_AREA` after `FLOW_SUBSTEPS_MIN` passes.
 
 ### Gravity fall
 
