@@ -2533,6 +2533,15 @@ pub fn tick_with_configs_and_geotech(
     failure: &crate::failure::FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
 ) {
+    // Opt-in cell-sat inventory (debug only). Atmosphere stores are
+    // outside this tick — see `audit::tracked_totals`.
+    #[cfg(debug_assertions)]
+    let mass_before = if crate::audit::mass_audit_enabled() {
+        Some(crate::audit::sat_totals(world))
+    } else {
+        None
+    };
+
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
     for step in 0..FLOW_SUBSTEPS {
         let active = plan_active(world);
@@ -2590,6 +2599,12 @@ pub fn tick_with_configs_and_geotech(
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {
         chunk.tick = chunk.tick.wrapping_add(1);
+    }
+
+    #[cfg(debug_assertions)]
+    if let Some(before) = mass_before {
+        let after = crate::audit::sat_totals(world);
+        crate::audit::assert_cell_sat_conserved(&before, &after, "tick_with_configs_and_geotech");
     }
 }
 

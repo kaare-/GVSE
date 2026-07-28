@@ -9,6 +9,7 @@
 //! (material IDs + property tables — pure data with no coupling).
 
 pub mod active;
+pub mod audit;
 pub mod blueprint;
 pub mod cell;
 pub mod chunk;
@@ -33,6 +34,10 @@ pub mod worldgen;
 
 pub use active::{
     checkerboard_phase, clear_all_dirty, partition_checkerboard, plan_active, ActiveChunk,
+};
+pub use audit::{
+    assert_cell_sat_conserved, mass_audit_enabled, sat_totals, set_mass_audit_enabled,
+    tracked_totals, SatTotals, CELL_SAT_TICK_TOLERANCE,
 };
 pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{

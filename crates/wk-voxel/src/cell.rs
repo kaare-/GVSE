@@ -79,8 +79,9 @@ pub struct Cell {
     pub sat: Sat,
     pub flags: CellFlags,
     /// Reserved for future use (temperature quantile, sediment
-    /// carrier, etc.). Kept in the layout so growing the cell state
-    /// later doesn't ripple through every save.
+    /// carrier, etc.). Baked into every save via postcard — widening
+    /// `Cell` past 4 bytes bumps [`crate::SIM_SCHEMA_VERSION`] and
+    /// needs a migration (see `save.rs`).
     pub _pad: u8,
 }
 

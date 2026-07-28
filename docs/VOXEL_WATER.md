@@ -10,6 +10,21 @@ Demo / draw: `wk-voxel-app`.
 - Porous solids hold pore water in the same `sat` field, capped by **`water_capacity(material)`** (= material porosity for solids, `255` for Air).
 - **Bedrock / Ice / Snow** have capacity `0` — impermeable to the CA.
 
+## Mass inventory
+
+`wk_voxel::audit::sat_totals(world)` sums **free Air sat** and **pore
+sat** over loaded chunks. Humidity + clouds are separate stores —
+combine with `tracked_totals(world, humidity, clouds)`.
+
+Physics `tick` should keep `cell_total` flat (closed basin). Opt-in
+debug assert: `set_mass_audit_enabled(true)` or `GVSE_MASS_AUDIT=1`
+(debug builds only; default off). Long smoke:
+`cargo test -p wk-voxel --test mass_audit_smoke`.
+
+Known sinks **outside** tick: bare evaporation, open-loop rain mint,
+ice/snow cull, humidity OOB drop. Do not expect `tracked` flat across
+those passes unless they are closed-loop.
+
 ## Tick pipeline
 
 Each `tick`:
