@@ -19,8 +19,16 @@ Preferences (locked):
 
 ## Petri = the current GVSE world
 
-There is no separate sandbox crate. The petri dish is the world you
-already scroll through in `wk-app`:
+There is no separate sandbox crate. The petri dish is the live world
+you scroll through — **today that is [`wk-voxel-app`](../../crates/wk-voxel-app)**
+on the greenfield cell grid ([`wk-voxel`](../../crates/wk-voxel)). See
+[`VOXEL_MIGRATION.md`](../VOXEL_MIGRATION.md).
+
+These specs still name the **column-stack hooks** below as the original
+design anchors (materials, ecology ledger, field slots, grazer ECS).
+Those crates remain in-tree on `main` for reference and for the
+legacy scenario suite; they are **not** the active runtime. Link paths
+stay as `crates/wk-*` until a later stack-clarity move (if any).
 
 - Columns, layers, chunks, and the material vocabulary in
   [`crates/wk-material`](../../crates/wk-material) and
@@ -34,7 +42,9 @@ already scroll through in `wk-app`:
   [`crates/wk-agents`](../../crates/wk-agents) — evolves from the
   scripted `Grazer` into the module-pixel blueprint model in Phase 2.
 - MS-Paint style creature editor lives in
-  [`crates/wk-app`](../../crates/wk-app) as a new tab. Spec in
+  [`crates/wk-voxel-app`](../../crates/wk-voxel-app) (studio / editor
+  tabs). Historical column UI host was
+  [`crates/wk-app`](../../crates/wk-app). Spec in
   [`EDITOR.md`](EDITOR.md).
 
 ## Reading order
@@ -69,7 +79,7 @@ locks the coupling contract:
 | Post-barrier subsystem slot | Direct-mutation section of `Simulation::step` in [`crates/wk-sim/src/sim.rs`](../../crates/wk-sim/src/sim.rs) — new `run_shade`, `run_chem`, module-driven `run_agents` sit here |
 | Column moisture / water table | `column.moisture` + `moisture_cap` + `run_groundwater_head_field` |
 | Existing scripted grazer | `wk_agents::Grazer` / `AgentStore::step_grazers` — Phase 2 replaces the scripted body with a module-pixel behaviour driven by `Blueprint` |
-| App UI host | `state.rs::draw_settings_ui` in [`crates/wk-app/src/state.rs`](../../crates/wk-app/src/state.rs) — same `macroquad::ui` used for the editor tab |
+| App UI host | Creature editor / studio in [`crates/wk-voxel-app`](../../crates/wk-voxel-app). Column-era host was `state.rs::draw_settings_ui` in [`crates/wk-app/src/state.rs`](../../crates/wk-app/src/state.rs) |
 
 ## Cross-cutting invariants (unchanged)
 

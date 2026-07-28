@@ -6,7 +6,13 @@
 ## Numbering
 
 - **E1–E16** — existing hydrology / karst / ecology / burrow / grazer
-  tests. See [`tests/scenarios/mod.rs`](../../tests/scenarios/mod.rs).
+  tests on the **column** stack. See
+  [`tests/scenarios/mod.rs`](../../tests/scenarios/mod.rs).
+  Product-intent ports of a subset (rain/basin/seam/save, sinkhole,
+  roof collapse, …) also live under
+  [`crates/wk-voxel/tests/scenarios/`](../../crates/wk-voxel/tests/scenarios/)
+  when that harness is present on the branch — they never import the
+  column crates.
 - **E17–E29** — reserved for evolution-loop follow-ups (E17 is the
   reproduction / mutation test on the `cursor/evolution-loop-fdf9`
   branch).
