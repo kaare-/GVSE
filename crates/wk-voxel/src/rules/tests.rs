@@ -1110,6 +1110,44 @@ fn sand_pile_flattens_over_ticks() {
     );
 }
 
+#[test]
+fn live_roots_bind_sand_repose() {
+    use std::collections::HashSet;
+    use super::grain::ROOT_REPOSE_STEP_BONUS;
+
+    let mut bare = setup_column_world();
+    let mut rooted = setup_column_world();
+    for y in 1..=5 {
+        bare.set_cell(8, y, Cell::solid(MaterialId::Sand));
+        rooted.set_cell(8, y, Cell::solid(MaterialId::Sand));
+    }
+    let mut roots = HashSet::new();
+    for y in 1..=5 {
+        roots.insert((8, y));
+    }
+    assert!(ROOT_REPOSE_STEP_BONUS >= 1);
+
+    for _ in 0..40 {
+        apply_grain_fall(&mut bare);
+        apply_grain_repose(&mut bare);
+        apply_grain_fall(&mut rooted);
+        apply_grain_repose_bound(&mut rooted, Some(&roots));
+    }
+
+    let height = |w: &World| {
+        (1..=8)
+            .rev()
+            .find(|&y| w.get_cell(8, y).map(|c| c.material) == Some(MaterialId::Sand))
+            .unwrap_or(0)
+    };
+    let h_bare = height(&bare);
+    let h_rooted = height(&rooted);
+    assert!(
+        h_rooted > h_bare,
+        "rooted column should hold a taller pile (bare={h_bare} rooted={h_rooted})"
+    );
+}
+
 // ------------ flow erosion ------------
 
 fn cascade_shelf_world(bed: MaterialId) -> World {

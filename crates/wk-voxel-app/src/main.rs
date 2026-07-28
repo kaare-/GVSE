@@ -47,12 +47,12 @@ mod terrain;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
-    apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    celestial_screen_pos_cfg, cloud_floor_y, day_night_factor_cfg, geotech_map_due,
-    humidity_diffuse_due, is_daytime_cfg, is_standing_water, precip_forms_snow_at_air, sky_rgb,
-    sky_rgb_at_height, temperature_step_due, tick_with_configs_and_geotech, ClimateConfig,
-    GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
+    apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity,
+    apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
+    celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
+    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
+    precip_forms_snow_at_air, sky_rgb, sky_rgb_at_height, temperature_step_due, tick_with_life,
+    ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
 
 use crate::editor::CreatureEditor;
@@ -739,14 +739,21 @@ async fn main() {
             if geotech_due {
                 scene.geotech.rebuild_smart(&scene.world);
             }
-            tick_with_configs_and_geotech(
+            // Living roots bind grain repose / bedload (legacy E15).
+            let rooted = if organisms_on {
+                Some(collect_live_root_world_cells(&scene.organisms.atoms))
+            } else {
+                None
+            };
+            tick_with_life(
                 &mut scene.world,
                 &settings.perf,
                 &settings.failure,
                 Some(&scene.geotech),
+                rooted.as_ref(),
             );
             // Bedload / bank transport after water has moved this tick.
-            apply_flow_erosion(&mut scene.world, &settings.grain);
+            apply_flow_erosion_bound(&mut scene.world, &settings.grain, rooted.as_ref());
             if geotech_due {
                 // Post-CA dirty halo → incremental column update (S5).
                 scene.geotech.rebuild_smart(&scene.world);
@@ -768,10 +775,16 @@ async fn main() {
             // Cold wet-sand / snow / hillside ice spill onto lake ice
             // after the thermal step, then phase may break thin lids.
             if settings.phase.enabled && settings.phase.enable_cold_avalanche {
-                apply_cold_avalanche(
+                let rooted = if organisms_on {
+                    Some(collect_live_root_world_cells(&scene.organisms.atoms))
+                } else {
+                    None
+                };
+                apply_cold_avalanche_bound(
                     &mut scene.world,
                     &scene.temperature,
                     settings.phase.freeze_point_c,
+                    rooted.as_ref(),
                 );
             }
             // Phase after the temp step so a Tab cold/warm snap applies

@@ -519,7 +519,7 @@ fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum
             let repose_passes = partition_checkerboard(&repose_active);
             let t0 = Instant::now();
             for pass in &repose_passes {
-                apply_grain_repose_regions(world, pass);
+                apply_grain_repose_regions(world, pass, None);
             }
             a.grain_repose += t0.elapsed();
         }

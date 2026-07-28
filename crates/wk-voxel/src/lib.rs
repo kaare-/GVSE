@@ -72,8 +72,9 @@ pub use organism::{
     CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
 };
 pub use plant::{
-    find_fungus_slot, find_plant_slot, find_surface_air_slot, is_land_plant, sync_alloc_to_body,
-    PlantGrowthCaps, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
+    collect_live_root_world_cells, find_fungus_slot, find_plant_slot, find_surface_air_slot,
+    is_land_plant, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
+    MAX_STEM_MODULES,
 };
 pub use shade::{build_canopy_index, effective_photo_light, CanopyIndex};
 pub use heatmap::Heatmap;
@@ -85,15 +86,17 @@ pub use phase::{
     ice_lid_thickness, precip_forms_snow_at_air, PhaseConfig,
 };
 pub use rules::{
-    apply_cold_avalanche, apply_condensation_rain, apply_condensation_rain_phased,
-    apply_condensation_rain_with_orographic, apply_evaporation, apply_evaporation_into_humidity,
-    apply_flow_erosion, apply_grain_fall, apply_grain_fall_regions, apply_grain_repose,
+    apply_cold_avalanche, apply_cold_avalanche_bound, apply_condensation_rain,
+    apply_condensation_rain_phased, apply_condensation_rain_with_orographic, apply_evaporation,
+    apply_evaporation_into_humidity, apply_flow_erosion, apply_flow_erosion_bound,
+    apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
     apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
     apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
-    is_standing_water, tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_perf,
-    CondensationConfig, EvapConfig, GrainConfig, KarstConfig, OrographicConfig, PerfConfig,
-    RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
+    is_standing_water, tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life,
+    tick_with_perf, CondensationConfig, EvapConfig, GrainConfig, KarstConfig, OrographicConfig,
+    PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN, ROOT_EROSION_BIND,
+    ROOT_REPOSE_STEP_BONUS,
 };
 pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,

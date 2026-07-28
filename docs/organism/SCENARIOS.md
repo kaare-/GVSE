@@ -9,7 +9,7 @@
   tests on the **column** stack. See
   [`tests/scenarios/mod.rs`](../../tests/scenarios/mod.rs).
   Product-intent ports of a subset (rain/basin/seam/save, sinkhole,
-  roof collapse, …) also live under
+  roof collapse, roots/repose E15, …) also live under
   [`crates/wk-voxel/tests/scenarios/`](../../crates/wk-voxel/tests/scenarios/)
   when that harness is present on the branch — they never import the
   column crates.

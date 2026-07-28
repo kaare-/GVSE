@@ -4,6 +4,8 @@
 //!
 //! Physics tick orchestration and performance knobs.
 
+use std::collections::HashSet;
+
 use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
 use crate::grid::World;
 
@@ -118,6 +120,18 @@ pub fn tick_with_configs_and_geotech(
     failure: &crate::failure::FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
 ) {
+    tick_with_life(world, perf, failure, geotech, None);
+}
+
+/// [`tick_with_configs_and_geotech`] plus optional living-root cells for
+/// grain repose binding (Set D plants / legacy E15 intent).
+pub fn tick_with_life(
+    world: &mut World,
+    perf: &PerfConfig,
+    failure: &crate::failure::FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+    rooted: Option<&HashSet<(i32, i32)>>,
+) {
     // Opt-in cell-sat inventory (debug only). Atmosphere stores are
     // outside this tick — see `audit::tracked_totals`.
     #[cfg(debug_assertions)]
@@ -173,7 +187,7 @@ pub fn tick_with_configs_and_geotech(
         if !repose_active.is_empty() {
             let repose_passes = partition_checkerboard(&repose_active);
             for pass in &repose_passes {
-                apply_grain_repose_regions(world, pass);
+                apply_grain_repose_regions(world, pass, rooted);
             }
         }
     }
@@ -189,6 +203,6 @@ pub fn tick_with_configs_and_geotech(
     #[cfg(debug_assertions)]
     if let Some(before) = mass_before {
         let after = crate::audit::sat_totals(world);
-        crate::audit::assert_cell_sat_conserved(&before, &after, "tick_with_configs_and_geotech");
+        crate::audit::assert_cell_sat_conserved(&before, &after, "tick_with_life");
     }
 }

@@ -83,6 +83,9 @@ Wetness at gen time can bump the seed; rain then grows it further.
 
 - **E14** — wet warm plains accumulate alive biomass; dry/cold does not
 - **E15** — rooted column resists erosion vs bare twin under the same flow
+  (column: `Ecology.root_density`; voxel port: living `ModuleId::Root`
+  cells bind grain repose / bedload — see
+  `crates/wk-voxel/tests/scenarios/e15_roots_reduce_erosion.rs`)
 
 ## Non-goals (later stages)
 

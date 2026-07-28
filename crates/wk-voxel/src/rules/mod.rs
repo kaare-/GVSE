@@ -31,8 +31,9 @@ pub use condensation::{
 };
 pub use evap::{apply_evaporation, apply_evaporation_into_humidity, EvapConfig};
 pub use grain::{
-    apply_cold_avalanche, apply_flow_erosion, apply_grain_fall, apply_grain_fall_regions,
-    apply_grain_repose, apply_grain_repose_regions, GrainConfig,
+    apply_cold_avalanche, apply_cold_avalanche_bound, apply_flow_erosion, apply_flow_erosion_bound,
+    apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
+    apply_grain_repose_regions, GrainConfig, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
 pub use gravity::{apply_gravity_fall, apply_gravity_fall_regions};
 pub use karst::{apply_karst_dissolution, KarstConfig};
@@ -41,7 +42,7 @@ pub use rain::{apply_rain, apply_rain_with_temp, is_standing_water, RainConfig};
 pub use seepage::{apply_seepage, apply_seepage_regions};
 pub use spill::{apply_lateral_spill, apply_lateral_spill_regions};
 pub use tick::{
-    tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_perf, PerfConfig,
-    FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
+    tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life, tick_with_perf,
+    PerfConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
 };
 pub use water_flow::{apply_water_flow, apply_water_flow_regions};

@@ -4,6 +4,8 @@
 //!
 //! Grain fall, repose, cold avalanche, and flow erosion.
 
+use std::collections::HashSet;
+
 use wk_material::{HydroOverrides, MaterialId};
 
 use crate::active::{partition_checkerboard, ActiveChunk};
@@ -19,6 +21,17 @@ use crate::temperature::Temperature;
 use super::gravity::apply_gravity_fall;
 use super::plan::regions_for_standalone;
 use super::util::hash_prob;
+
+/// Extra `max_step` cells when a living Root occupies the grain cell.
+///
+/// Column ecology used `repose_rise *= (1 + 3ρ)`; for sand
+/// (`repose_rise_m=0.15`, `SAMPLE_WIDTH_M=0.25`) that is ≈ +2 steps at
+/// full root density. Binary per-cell roots use the same bonus.
+pub const ROOT_REPOSE_STEP_BONUS: i32 = 2;
+
+/// Flow-erosion susceptibility divisor when a living Root is present
+/// (`≈ 1 + 2.5ρ` at ρ=1 from column `run_sediment`).
+pub const ROOT_EROSION_BIND: f32 = 3.5;
 
 /// One-cell-per-pass grain fall.
 ///
@@ -84,18 +97,31 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
 ///
 /// Sand (`max_step = 0`) won't hold a 1-cell cliff — piles flatten.
 /// LooseRock (`max_step ≥ 1`) can hold short stairs. Wet grains
-/// (pore sat or standing water below) loosen by one step. One move per
-/// cell per pass; run after [`apply_grain_fall`].
+/// (pore sat or standing water below) loosen by one step. Living Root
+/// cells raise the local step via [`ROOT_REPOSE_STEP_BONUS`]. One move
+/// per cell per pass; run after [`apply_grain_fall`].
 pub fn apply_grain_repose(world: &mut World) {
+    apply_grain_repose_bound(world, None);
+}
+
+/// [`apply_grain_repose`] with an optional set of living root cells.
+pub fn apply_grain_repose_bound(
+    world: &mut World,
+    rooted: Option<&HashSet<(i32, i32)>>,
+) {
     let regions = regions_for_standalone(world);
     for pass in partition_checkerboard(&regions) {
-        apply_grain_repose_regions(world, &pass);
+        apply_grain_repose_regions(world, &pass, rooted);
     }
 }
 
 /// Repose slide restricted to a pre-planned active set.
-pub fn apply_grain_repose_regions(world: &mut World, active: &[ActiveChunk]) {
-    apply_repose_pass(world, active, None, f32::INFINITY);
+pub fn apply_grain_repose_regions(
+    world: &mut World,
+    active: &[ActiveChunk],
+    rooted: Option<&HashSet<(i32, i32)>>,
+) {
+    apply_repose_pass(world, active, None, f32::INFINITY, rooted);
 }
 
 /// Cold snap avalanche: wet sand loosens, snow/hillside ice spill onto
@@ -104,9 +130,19 @@ pub fn apply_grain_repose_regions(world: &mut World, active: &[ActiveChunk]) {
 /// and before [`crate::phase::apply_phase`] so thin lids can then break
 /// under the new load.
 pub fn apply_cold_avalanche(world: &mut World, temp: &Temperature, freeze_point_c: f32) {
+    apply_cold_avalanche_bound(world, temp, freeze_point_c, None);
+}
+
+/// [`apply_cold_avalanche`] with optional living-root binding.
+pub fn apply_cold_avalanche_bound(
+    world: &mut World,
+    temp: &Temperature,
+    freeze_point_c: f32,
+    rooted: Option<&HashSet<(i32, i32)>>,
+) {
     let regions = regions_for_standalone(world);
     for pass in partition_checkerboard(&regions) {
-        apply_repose_pass(world, &pass, Some(temp), freeze_point_c);
+        apply_repose_pass(world, &pass, Some(temp), freeze_point_c, rooted);
     }
 }
 
@@ -115,6 +151,7 @@ fn apply_repose_pass(
     active: &[ActiveChunk],
     temp: Option<&Temperature>,
     freeze_point_c: f32,
+    rooted: Option<&HashSet<(i32, i32)>>,
 ) {
     let seed = world.seed.0;
     let tick_no = world.tick;
@@ -182,6 +219,10 @@ fn apply_repose_pass(
                     } else {
                         grain_max_stable_step(src.material)
                     };
+                    // Live roots bind the grain (column Ecology.root_density).
+                    if rooted.is_some_and(|r| r.contains(&(sx, sy))) {
+                        max_step = max_step.saturating_add(ROOT_REPOSE_STEP_BONUS);
+                    }
                     // F2a: wet loosen scaled by cohesion — low-c′ grains
                     // always lose a step; high-c′ clay needs near-saturation.
                     // Wetness is sat/capacity so low-porosity LooseRock can
@@ -455,6 +496,15 @@ impl Default for GrainConfig {
 ///
 /// Compute-then-apply; deterministic given `(seed, tick, cfg.seed_salt)`.
 pub fn apply_flow_erosion(world: &mut World, cfg: &GrainConfig) {
+    apply_flow_erosion_bound(world, cfg, None);
+}
+
+/// [`apply_flow_erosion`] with optional living-root binding.
+pub fn apply_flow_erosion_bound(
+    world: &mut World,
+    cfg: &GrainConfig,
+    rooted: Option<&HashSet<(i32, i32)>>,
+) {
     if !cfg.enabled || cfg.erosion_rate <= 0.0 {
         return;
     }
@@ -509,6 +559,7 @@ pub fn apply_flow_erosion(world: &mut World, cfg: &GrainConfig) {
                             bed,
                             flow_dx,
                             true,
+                            rooted,
                             &mut events,
                         );
                     }
@@ -532,6 +583,7 @@ pub fn apply_flow_erosion(world: &mut World, cfg: &GrainConfig) {
                         bank,
                         flow_dx,
                         false,
+                        rooted,
                         &mut events,
                     );
                 }
@@ -664,6 +716,7 @@ fn maybe_queue_erosion(
     grain: Cell,
     flow_dx: i32,
     bed_scour: bool,
+    rooted: Option<&HashSet<(i32, i32)>>,
     out: &mut Vec<ErosionEvent>,
 ) {
     use wk_material::MaterialRegistry;
@@ -671,6 +724,9 @@ fn maybe_queue_erosion(
     let mut sus = (1.0 - (resistance / 180.0).clamp(0.0, 0.95)).max(0.02);
     if grain.sat.0 >= 40 {
         sus *= 1.4; // wet grains loosen (column sim saturation collapse)
+    }
+    if rooted.is_some_and(|r| r.contains(&(ex, ey))) {
+        sus /= ROOT_EROSION_BIND;
     }
     let p = (sus * cfg.erosion_rate).clamp(0.0, 1.0);
     let roll = hash_prob(
