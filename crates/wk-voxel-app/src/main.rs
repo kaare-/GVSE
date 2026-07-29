@@ -18,6 +18,7 @@
 //! - `C` — toggle condensation rain (feedback from humidity heatmap)
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
+//! - `B` — toggle biological decay (Bone/Muscle/Skin; off by default)
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle soft white humidity haze (vapor hint; clouds carry the look)
 //! - `N` — toggle cloud drawing (coagulated parcels; darker = wetter)
@@ -49,7 +50,8 @@ mod terrain;
 use macroquad::prelude::*;
 use wk_voxel::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity,
-    apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
+    apply_biological_decay, apply_flow_erosion_bound, apply_karst_dissolution, apply_phase,
+    apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
     precip_forms_snow_at_air, sky_rgb, sky_rgb_at_height, temperature_step_due, tick_with_life,
@@ -426,6 +428,7 @@ async fn main() {
     let mut cond_rain_on = true;
     let mut evap_on = true;
     let mut karst_on = true;
+    let mut bio_decay_on = false;
     let mut organisms_on = true;
     let mut humidity_overlay = false;
     let mut clouds_on = true;
@@ -617,6 +620,9 @@ async fn main() {
             if is_key_pressed(KeyCode::K) {
                 karst_on = !karst_on;
             }
+            if is_key_pressed(KeyCode::B) {
+                bio_decay_on = !bio_decay_on;
+            }
             if is_key_pressed(KeyCode::H) {
                 humidity_overlay = !humidity_overlay;
             }
@@ -733,6 +739,9 @@ async fn main() {
             }
             if karst_on {
                 apply_karst_dissolution(&mut scene.world, &settings.karst);
+            }
+            if bio_decay_on {
+                apply_biological_decay(&mut scene.world, &settings.bio_decay);
             }
             // Period-20 stress map: refresh before failure (S3 gate), then
             // again after CA so the HUD matches post-tick geometry.
@@ -1243,7 +1252,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/H/G|F1 HUD|F2 creat|F3 terra|F5/F9 save|Esc quit",
+                "Tab|Space|R|W/C/E/K/B/O|I|N/T/H/G|F1 HUD|F2 creat|F3 terra|F5/F9 save|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

@@ -22,6 +22,9 @@ fn material_name(mat: MaterialId) -> &'static str {
         MaterialId::Air => "air",
         MaterialId::Snow => "snow",
         MaterialId::Ice => "ice",
+        MaterialId::Bone => "bone",
+        MaterialId::Muscle => "muscle",
+        MaterialId::Skin => "skin",
     }
 }
 

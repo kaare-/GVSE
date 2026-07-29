@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Number of [`MaterialId`] variants (shared by both stacks).
-pub const MATERIAL_COUNT: usize = 12;
+pub const MATERIAL_COUNT: usize = 15;
 /// Horizontal cell / column width in metres (shared scale).
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
 
@@ -47,6 +47,15 @@ pub enum MaterialId {
     /// drive karst cave formation (stage 7). Do not represent caves as
     /// Air layers — voids are sparse column annotations (see `Void`).
     Limestone = 11,
+    /// Dead bone — dense, high cohesion, cliff-stable. Palette matches
+    /// `ModuleId::Bone` (`#EFE7DA`). Wave L biological material.
+    Bone = 12,
+    /// Dead muscle — soft grain, porous, flow-erodible. Palette
+    /// `#C33C3C` (`ModuleId::Muscle`).
+    Muscle = 13,
+    /// Dead skin — soft litter, floats on water like Organic. Palette
+    /// `#FFDBAC` (`ModuleId::Skin`).
+    Skin = 14,
 }
 
 impl MaterialId {
@@ -76,6 +85,9 @@ impl MaterialId {
             9 => Some(MaterialId::LooseRock),
             10 => Some(MaterialId::Gravel),
             11 => Some(MaterialId::Limestone),
+            12 => Some(MaterialId::Bone),
+            13 => Some(MaterialId::Muscle),
+            14 => Some(MaterialId::Skin),
             _ => None,
         }
     }
@@ -100,6 +112,9 @@ impl MaterialId {
                 | MaterialId::Organic
                 | MaterialId::Snow
                 | MaterialId::Ice
+                | MaterialId::Bone
+                | MaterialId::Muscle
+                | MaterialId::Skin
         )
     }
 
@@ -483,6 +498,54 @@ impl MaterialRegistry {
                 solubility: 40,
                 roof_span_max_m: 10.0,
             },
+            MaterialId::Bone => MaterialProps {
+                density: 1900,
+                permeability: 8,
+                erosion_resistance: 160,
+                cohesion: 220,
+                porosity: 30,
+                phase_change: None,
+                render_alpha: 255,
+                // Cliff-stable — bone holds shapes until decay.
+                repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0012,
+                heat_capacity: 4.0,
+                albedo: 0.55,
+                solubility: 0,
+                // Modest roof — giant bone arches eventually collapse.
+                roof_span_max_m: 4.0,
+            },
+            MaterialId::Muscle => MaterialProps {
+                density: 1050,
+                permeability: 100,
+                erosion_resistance: 35,
+                cohesion: 40,
+                porosity: 190,
+                phase_change: None,
+                render_alpha: 255,
+                // Soft tissue slumps easily.
+                repose_rise_m: 0.08,
+                thermal_diffusivity: 0.002,
+                heat_capacity: 3.5,
+                albedo: 0.2,
+                solubility: 0,
+                roof_span_max_m: 0.0,
+            },
+            MaterialId::Skin => MaterialProps {
+                density: 900,
+                permeability: 80,
+                erosion_resistance: 25,
+                cohesion: 30,
+                porosity: 160,
+                phase_change: None,
+                render_alpha: 255,
+                repose_rise_m: 0.10,
+                thermal_diffusivity: 0.0022,
+                heat_capacity: 3.0,
+                albedo: 0.4,
+                solubility: 0,
+                roof_span_max_m: 0.0,
+            },
         }
     }
 
@@ -511,6 +574,10 @@ impl MaterialRegistry {
             MaterialId::Ice => [0xC7, 0xE0, 0xF2],
             // Warm pale grey — distinct from cooler Stone.
             MaterialId::Limestone => [0xC8, 0xC2, 0xB0],
+            // Match ModuleId::Bone / Muscle / Skin palette hex.
+            MaterialId::Bone => [0xEF, 0xE7, 0xDA],
+            MaterialId::Muscle => [0xC3, 0x3C, 0x3C],
+            MaterialId::Skin => [0xFF, 0xDB, 0xAC],
         }
     }
 }
@@ -526,5 +593,13 @@ mod tests {
         let stone = MaterialRegistry::erosion_rank(MaterialId::Stone);
         assert!(sand < clay);
         assert!(clay < stone);
+    }
+
+    #[test]
+    fn bone_material_from_u8_round_trips() {
+        for m in [MaterialId::Bone, MaterialId::Muscle, MaterialId::Skin] {
+            assert_eq!(MaterialId::from_u8(m as u8), Some(m));
+        }
+        assert_eq!(MATERIAL_COUNT, 15);
     }
 }

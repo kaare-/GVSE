@@ -81,7 +81,7 @@ This is what wets a dry beach **sideways** from a puddle, equalises pore sat bet
 
 ### Grain fall + repose
 
-- **Fall:** Sand / Gravel / Clay / LooseRock sink through Air (any sat). **Snow, Ice, and Organic** fall through *empty* Air only (float on water) so unsupported pack / leaf litter does not hang mid-air.
+- **Fall:** Sand / Gravel / Clay / LooseRock / **Muscle** sink through Air (any sat). **Snow, Ice, Organic, and Skin** fall through *empty* Air only (float on water) so unsupported pack / leaf litter does not hang mid-air. **Bone** is a solid (no grain fall).
 - **Repose** (`apply_grain_repose`): supported grains slide diagonally into Air when the drop exceeds `floor(repose_rise_m / SAMPLE_WIDTH_m)`. Sand≈0 (no 1-cell cliffs), Organic litter≈0 (sprawls instead of towers), LooseRock≥1 (short stairs). Wet grains loosen one step. Snow avalanches on land, not into standing water. Underwater, dense grains collapsing into empty/film seats fill the vacated cell with standing water (no sky-flash bubble on the slope face).
 - Ice is not a repose grain and not flow-erodible; hillside glaze can still peel in the cold-avalanche pass.
 
@@ -109,11 +109,17 @@ Demo order after `tick`: thermal step → **`apply_cold_avalanche`** → **`appl
 | Sand | 180 | 160 | 20 |
 | Gravel | 120 | 240 | 30 |
 | Organic | 200 | 120 | 15 |
+| Muscle | 190 | 100 | (porous soft grain) |
+| Skin | 160 | 80 | (soft litter) |
+| Bone | 30 | 8 | (dense solid) |
 | Limestone | 40 | 140 | 17 |
 | Clay | 60 | 10 | 1 |
 | LooseRock | 25 | 40 | 5 |
 | Stone | 20 | 5 | 1 |
 | Bedrock | 0 | 0 | 0 |
+
+Biological materials (Bone / Muscle / Skin) are documented in
+[`VOXEL_BIOLOGY.md`](VOXEL_BIOLOGY.md).
 
 Tab → **Material permeability / porosity** writes into `World.hydro`
 (`HydroOverrides`). Physics reads that table through `props_with` /

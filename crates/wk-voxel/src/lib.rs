@@ -11,6 +11,7 @@
 pub mod active;
 pub mod aggregate;
 pub mod audit;
+pub mod biology;
 pub mod blueprint;
 pub mod cell;
 pub mod chunk;
@@ -45,6 +46,7 @@ pub use cell::{
 };
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use aggregate::{body_plan_from, body_plan_from_kinds, BodyPlan};
+pub use biology::module_death_material;
 pub use blueprint::{Blueprint, Genome, LaneId, PixelTraits, PlacedModule, BLUEPRINT_DIR};
 pub use climate::{
     celestial_local, celestial_local_cfg, celestial_screen_pos, celestial_screen_pos_cfg, day_factor,
@@ -60,7 +62,7 @@ pub use failure::{
     roof_span_cells, roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
     COMPACTION_SIGMA_MIN,
 };
-pub use fungi::{is_fungus, soft_litter_at, add_soft_litter};
+pub use fungi::{add_soft_litter, dissolve_corpse_to_organic, is_fungus, soft_litter_at};
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
     wet_air_column_beside, FaceStress, GeotechMap, GeotechOverlayMode, GEOTECH_MAP_PERIOD,
@@ -88,16 +90,17 @@ pub use phase::{
     ice_lid_thickness, precip_forms_snow_at_air, PhaseConfig,
 };
 pub use rules::{
-    apply_cold_avalanche, apply_cold_avalanche_bound, apply_condensation_rain,
-    apply_condensation_rain_phased, apply_condensation_rain_with_orographic, apply_evaporation,
-    apply_evaporation_into_humidity, apply_flow_erosion, apply_flow_erosion_bound,
-    apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
-    apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
-    apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
-    apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
-    is_standing_water, tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life,
-    tick_with_perf, CondensationConfig, EvapConfig, GrainConfig, KarstConfig, OrographicConfig,
-    PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN, ROOT_EROSION_BIND,
+    apply_biological_decay, apply_cold_avalanche, apply_cold_avalanche_bound,
+    apply_condensation_rain, apply_condensation_rain_phased,
+    apply_condensation_rain_with_orographic, apply_evaporation, apply_evaporation_into_humidity,
+    apply_flow_erosion, apply_flow_erosion_bound, apply_grain_fall, apply_grain_fall_regions,
+    apply_grain_repose, apply_grain_repose_bound, apply_grain_repose_regions, apply_gravity_fall,
+    apply_gravity_fall_regions, apply_karst_dissolution, apply_lateral_spill, apply_rain,
+    apply_rain_with_temp, apply_seepage, apply_seepage_regions, apply_water_flow,
+    apply_water_flow_regions, is_standing_water, tick, tick_with_configs,
+    tick_with_configs_and_geotech, tick_with_life, tick_with_perf, BiologicalDecayConfig,
+    CondensationConfig, EvapConfig, GrainConfig, KarstConfig, OrographicConfig, PerfConfig,
+    RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN, ROOT_EROSION_BIND,
     ROOT_REPOSE_STEP_BONUS,
 };
 pub use temperature::{

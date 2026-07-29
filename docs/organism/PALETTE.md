@@ -55,9 +55,12 @@ not committed a job to.
 | `0x0D` | Root | `#7A4B2A` | Sienna. Anchors, drinks moisture, elongates down a moisture gradient. |
 | `0x0E` | Stem | `#556B2F` | Olive. Stacks upward, holds leaves into the light column, casts shade. Substrate for epiphytes. |
 | `0x0F` | Holdfast | `#FF3D9A` | Pink. Grips another organism's olive stem (rock later). No ground root required. |
-| `0x13` | Skin | `#FFDBAC` | Animal outer layer. Studio-live (Wave K); every pixel carries `PixelTraits`. World material + decay in Wave L. |
-| `0x14` | Muscle | `#C33C3C` | Animal motility tissue. Studio-live (Wave K); world material + decay in Wave L. |
-| `0x15` | Bone | `#EFE7DA` | Skeletal element. Studio-live (Wave K); world material + decay in Wave L. |
+| `0x13` | Skin | `#FFDBAC` | Animal outer layer. Studio-live; every pixel carries `PixelTraits`. Dead cells → `MaterialId::Skin` (Wave L). |
+| `0x14` | Muscle | `#C33C3C` | Animal motility tissue. Dead cells → `MaterialId::Muscle` (Wave L). |
+| `0x15` | Bone | `#EFE7DA` | Skeletal element. Dead cells → `MaterialId::Bone` (Wave L). |
+
+Studio `ModuleId` ↔ dead `MaterialId` parity for these three is
+documented in [`docs/VOXEL_BIOLOGY.md`](../VOXEL_BIOLOGY.md).
 
 Every painted module cell also stores a [`PixelTraits`](GENES.md)
 payload (mass, density, stiffness, …). Aggregates form the body plan;
