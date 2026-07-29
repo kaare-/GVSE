@@ -84,10 +84,25 @@ editor panels in `wk-voxel-app`; column-era reference was
   - A one-line job description.
   - A keyboard shortcut for the paint tool
     (e.g. `1..9` cycle within a group; digit + letter picks it).
-- Reserved modules (`Bark`, `Skin`, etc.) are greyed out with a
+- Reserved modules (`Bark`, `Fruit`, …) are greyed out with a
   "reserved slot" tooltip.
+- **Bone / Muscle / Skin** are first-class (Wave K): hotkeys `7` /
+  `8` / `9`, full paint / inspect / mutate / aggregate.
 - The user can drag a palette entry onto the canvas (drops on the
   hovered cell) or pick + click.
+
+## Gene panels (Wave K)
+
+Right of the canvas in `wk-voxel-app` (`gene_inspector.rs`):
+
+| Panel | Job |
+|-------|-----|
+| **Gene Inspector** | Click a painted pixel. Sliders for that cell's `PixelTraits` (only traits meaningful for its `ModuleId` are shown). |
+| **Body Plan** | Live readout of `Blueprint::body_plan()` — `total_mass`, `metabolic_rate`, `clone_fidelity`, `reproduce_at`, `photo_capacity`, `has_repro_gate`. |
+| **Mutation Preview** | Rolls `mutate_child(seed=0, tick=0, parent_id=0)`, shows Δpixels / Δmass / Δmetabolic and a half-size child glyph. |
+
+Hotkeys in the live editor: `1` Nucleus · `2` Photosystem · `3` Root
+· `4` Stem · `5` Digest · `6` Hypha · `7` Bone · `8` Muscle · `9` Skin.
 
 ## Tools
 
@@ -129,7 +144,7 @@ pub struct PlacedModule {
     pub y: i16,
     pub lane: LaneId, // Fore / Mid / Back
     pub module: ModuleId,
-    pub per_module_gene: PerModuleGene, // e.g. sensor/emitter tuning
+    pub traits: PixelTraits, // Wave K per-pixel genes (serde default)
 }
 
 pub struct Wire {

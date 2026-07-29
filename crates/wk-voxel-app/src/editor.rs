@@ -1,9 +1,12 @@
 //! MS-Paint creature editor for wk-voxel-app.
 //! Mirrors the column `wk-app` editor (docs/organism/EDITOR.md):
 //! Set A Atom + Set D plant + Set E fungus — no wk-agents / wk-app imports.
+//! Wave K: Bone / Muscle / Skin brushes + gene inspector panels.
 
 use macroquad::prelude::*;
-use wk_voxel::{Blueprint, LaneId, ModuleId, PlacedModule};
+use wk_voxel::{Blueprint, LaneId, ModuleId, PixelTraits, PlacedModule};
+
+use crate::gene_inspector::{draw_gene_panels, GenePanelAction};
 
 const CELL_PX: f32 = 22.0;
 const CANVAS_ORIGIN: (f32, f32) = (40.0, 80.0);
@@ -23,6 +26,10 @@ pub struct CreatureEditor {
     pub spawn_picker: bool,
     pub was_paused: bool,
     name_buf: String,
+    /// Index into `blueprint.modules` for the Gene Inspector.
+    pub selected: Option<usize>,
+    /// Last rolled mutation preview child.
+    pub preview_child: Option<Blueprint>,
 }
 
 impl Default for CreatureEditor {
@@ -32,10 +39,12 @@ impl Default for CreatureEditor {
             blueprint: Blueprint::atom(),
             tool: EditorTool::Paint,
             brush: ModuleId::Photosystem,
-            status: "Paint Atom / Plant / Fungus, then Enter + click to spawn".into(),
+            status: "Paint Atom / Plant / Fungus / Bone, then Enter + click to spawn".into(),
             spawn_picker: false,
             was_paused: true,
             name_buf: "atom".into(),
+            selected: None,
+            preview_child: None,
         }
     }
 }
@@ -50,8 +59,10 @@ impl CreatureEditor {
             self.was_paused = currently_paused;
             self.spawn_picker = false;
             self.status =
-                "1-6 modules | A Atom  T Plant  F Fungus | Enter then click spawn site"
+                "1-9 modules | A Atom  T Plant  F Fungus | Enter then click spawn site"
                     .into();
+            self.selected = None;
+            self.preview_child = None;
         }
     }
 
@@ -83,6 +94,18 @@ impl CreatureEditor {
             self.brush = ModuleId::Hypha;
             self.tool = EditorTool::Paint;
         }
+        if is_key_pressed(KeyCode::Key7) {
+            self.brush = ModuleId::Bone;
+            self.tool = EditorTool::Paint;
+        }
+        if is_key_pressed(KeyCode::Key8) {
+            self.brush = ModuleId::Muscle;
+            self.tool = EditorTool::Paint;
+        }
+        if is_key_pressed(KeyCode::Key9) {
+            self.brush = ModuleId::Skin;
+            self.tool = EditorTool::Paint;
+        }
         if is_key_pressed(KeyCode::E) {
             self.tool = EditorTool::Erase;
         }
@@ -92,16 +115,22 @@ impl CreatureEditor {
         if is_key_pressed(KeyCode::A) {
             self.blueprint = Blueprint::atom();
             self.name_buf = "atom".into();
+            self.selected = None;
+            self.preview_child = None;
             self.status = "Reset to Atom template (spawn on wet Air)".into();
         }
         if is_key_pressed(KeyCode::T) {
             self.blueprint = Blueprint::minimal_plant();
             self.name_buf = "plant".into();
+            self.selected = None;
+            self.preview_child = None;
             self.status = "Minimal plant template (spawn on moist sand/soil)".into();
         }
         if is_key_pressed(KeyCode::F) {
             self.blueprint = Blueprint::minimal_fungus();
             self.name_buf = "fungus".into();
+            self.selected = None;
+            self.preview_child = None;
             self.status =
                 "Minimal fungus template (spawn on Organic / wet sand / any solid)".into();
         }
@@ -118,6 +147,8 @@ impl CreatureEditor {
                     Ok(bp) => {
                         self.name_buf = bp.name.clone();
                         self.blueprint = bp;
+                        self.selected = None;
+                        self.preview_child = None;
                         self.status = format!("Loaded {}", path.display());
                     }
                     Err(e) => self.status = format!("Load failed: {e}"),
@@ -140,9 +171,26 @@ impl CreatureEditor {
             self.status = "Spawn cancelled".into();
         }
 
+        if !self.spawn_picker && is_mouse_button_pressed(MouseButton::Left) {
+            if let Some((cx, cy)) = self.mouse_to_cell() {
+                // Select existing pixel for gene inspector; paint/erase still apply.
+                self.selected = self
+                    .blueprint
+                    .modules
+                    .iter()
+                    .position(|m| m.x == cx && m.y == cy && m.lane == LaneId::Mid);
+            }
+        }
         if !self.spawn_picker && is_mouse_button_down(MouseButton::Left) {
             if let Some((cx, cy)) = self.mouse_to_cell() {
                 self.apply_tool(cx, cy);
+                // Keep selection on the cell we just painted.
+                self.selected = self
+                    .blueprint
+                    .modules
+                    .iter()
+                    .position(|m| m.x == cx && m.y == cy && m.lane == LaneId::Mid);
+                self.preview_child = None;
             }
         }
     }
@@ -171,11 +219,12 @@ impl CreatureEditor {
                 y: cy,
                 lane: LaneId::Mid,
                 module: self.brush,
+                traits: PixelTraits::default(),
             });
         }
     }
 
-    pub fn draw(&self) {
+    pub fn draw(&mut self) {
         if !self.open {
             return;
         }
@@ -263,16 +312,23 @@ impl CreatureEditor {
             LIGHTGRAY,
         );
         draw_text(
-            "1 Nucleus  2 Photo  3 Root  4 Stem  5 Digest  6 Hypha  | E erase  P paint",
+            "1 Nucleus  2 Photo  3 Root  4 Stem  5 Digest  6 Hypha",
             px,
             oy + 52.0,
             14.0,
             GRAY,
         );
         draw_text(
+            "7 Bone  8 Muscle  9 Skin  | E erase  P paint",
+            px,
+            oy + 70.0,
+            14.0,
+            GRAY,
+        );
+        draw_text(
             "A Atom  T Plant  F Fungus  | S save  L load  | Enter spawn",
             px,
-            oy + 72.0,
+            oy + 90.0,
             14.0,
             GRAY,
         );
@@ -284,11 +340,11 @@ impl CreatureEditor {
                 self.name_buf
             ),
             px,
-            oy + 100.0,
+            oy + 118.0,
             14.0,
             WHITE,
         );
-        draw_text(&self.status, px, oy + 130.0, 14.0, YELLOW);
+        draw_text(&self.status, px, oy + 140.0, 14.0, YELLOW);
 
         for (i, mid) in [
             ModuleId::Nucleus,
@@ -297,17 +353,41 @@ impl CreatureEditor {
             ModuleId::Stem,
             ModuleId::Digest,
             ModuleId::Hypha,
+            ModuleId::Bone,
+            ModuleId::Muscle,
+            ModuleId::Skin,
         ]
         .iter()
         .enumerate()
         {
             let (r, g, b) = mid.rgb();
-            let sx = px + i as f32 * 36.0;
-            let sy = oy + 160.0;
+            let sx = px + (i % 6) as f32 * 36.0;
+            let sy = oy + 168.0 + (i / 6) as f32 * 34.0;
             draw_rectangle(sx, sy, 28.0, 28.0, Color::from_rgba(r, g, b, 255));
             if *mid == self.brush {
                 draw_rectangle_lines(sx, sy, 28.0, 28.0, 2.0, WHITE);
             }
+        }
+
+        // Highlight selected pixel on the canvas.
+        if let Some(i) = self.selected {
+            if let Some(m) = self.blueprint.modules.get(i) {
+                let sx = ox + m.x as f32 * CELL_PX;
+                let sy = oy + (self.blueprint.canvas_h as i16 - 1 - m.y) as f32 * CELL_PX;
+                draw_rectangle_lines(sx, sy, CELL_PX, CELL_PX, 2.0, YELLOW);
+            }
+        }
+
+        let panel_x = px + 230.0;
+        let panel_y = oy;
+        let action: GenePanelAction =
+            draw_gene_panels(&mut self.blueprint, self.selected, &self.preview_child, panel_x, panel_y);
+        if action.roll_preview {
+            self.preview_child = Some(self.blueprint.mutate_child(0, 0, 0));
+            self.status = "Mutation preview rolled (seed=0, tick=0, parent=0)".into();
+        }
+        if action.traits_changed {
+            self.preview_child = None;
         }
     }
 }

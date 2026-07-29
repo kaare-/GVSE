@@ -9,6 +9,7 @@
 //! (material IDs + property tables — pure data with no coupling).
 
 pub mod active;
+pub mod aggregate;
 pub mod audit;
 pub mod blueprint;
 pub mod cell;
@@ -43,7 +44,8 @@ pub use cell::{
     water_capacity, water_capacity_with, Cell, CellFlags, Sat,
 };
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
-pub use blueprint::{Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR};
+pub use aggregate::{body_plan_from, body_plan_from_kinds, BodyPlan};
+pub use blueprint::{Blueprint, Genome, LaneId, PixelTraits, PlacedModule, BLUEPRINT_DIR};
 pub use climate::{
     celestial_local, celestial_local_cfg, celestial_screen_pos, celestial_screen_pos_cfg, day_factor,
     day_factor_cfg, day_night_factor, day_night_factor_cfg, is_daytime, is_daytime_cfg, phase_fraction,

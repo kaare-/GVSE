@@ -1,25 +1,102 @@
 # Genes
 
-*Frozen gene table with tradeoffs and merge notes against the
-**archived** column [`wk_agents::Genome`](../../crates/legacy/wk-agents/src/lib.rs).
-Live voxel genomes live on `wk-voxel` organisms / blueprints.
-`gene-table` in the Organism Kernel plan.*
+*Pixel-gene model (Wave K). Every painted module cell carries a
+[`PixelTraits`](../../crates/wk-voxel/src/blueprint.rs) payload; the
+organism's global scalars are **aggregates** of those pixels
+([`BodyPlan`](../../crates/wk-voxel/src/aggregate.rs)).*
 
-## Rules for genes
+## Pixel-gene model
+
+- A **pixel gene** is one `PlacedModule`: `(x, y, lane, ModuleId, PixelTraits)`.
+- There is no separate authoritative global gene table for new work.
+  The vestigial `Genome` on `Blueprint` / `Atom` still drives live
+  physics (metabolism, plant alloc, digest, …) until follow-up waves
+  rewire those reads to `BodyPlan`.
+- **Bone / Muscle / Skin** are first-class studio kinds: paint,
+  inspect, aggregate, mutate. Sim physics for them lands in Wave L
+  (world `MaterialId` + differential decay).
+
+### `PixelTraits` (per cell)
+
+All fields default to `1.0` (`#[serde(default)]`) so older mental
+models and missing postcard fields upgrade cleanly:
+
+| Trait | Role |
+|-------|------|
+| `mass` | Local mass contribution |
+| `density` | Scales mass into `total_mass` (`mass × density`) |
+| `stiffness` | Bone / structure (schema only in Wave K) |
+| `strength` | Muscle (schema only in Wave K) |
+| `upkeep_bias` | Contributes to aggregate metabolic cost |
+| `absorb_bias` | Photosystem harvest lean |
+| `drink_bias` | Root drink lean |
+| `clone_fidelity_bias` | Mutation tightness |
+| `reproduce_at_bias` | Repro energy gate lean |
+| `buoyancy_bias` | Float / sink lean |
+
+Kinds ignore traits they do not use; unused fields stay inert until
+a physics wave binds them.
+
+### `BodyPlan` aggregates
+
+Computed by `body_plan_from` / `Blueprint::body_plan` /
+`Atom::recompute_body_plan`:
+
+| Aggregate | Formula (first cut) |
+|-----------|---------------------|
+| `total_mass` | Σ (`mass × density`) |
+| `metabolic_rate` | Σ `upkeep_bias` (floor 0.05) |
+| `clone_fidelity` | Mass-weighted mean of `clone_fidelity_bias` |
+| `reproduce_at` | Mass-weighted mean of `reproduce_at_bias` |
+| `buoyancy_bias` | Mass-weighted mean of `buoyancy_bias` |
+| `photo_capacity` | Σ `absorb_bias` over Photosystem pixels |
+| `nucleus_count` / `has_repro_gate` | Nucleus presence |
+
+Nucleus is a functional kind (anchor + repro gate), not a schema
+requirement for painting. Anchor rule: first Nucleus if present,
+else bounding-box centre.
+
+### Mutation (`Blueprint::mutate_child`)
+
+Deterministic in `(world_seed, tick, parent_id)`. Ops:
+
+1. **Jitter** — every pixel's traits wiggle; sigma scales with
+   `(1 − clone_fidelity)`.
+2. **Chain-grow** — rare append of a same-kind orthogonal neighbour
+   with jittered traits.
+3. **Delete** — rarer removal of a non-last-Nucleus pixel.
+
+Studio **Mutation Preview** rolls `mutate_child(0, 0, 0)` and shows
+Δpixels / Δmass / Δmetabolic beside a half-size child glyph.
+
+Live fission still mutates the vestigial `Genome` / buoyancy fields
+on `Atom` (unchanged this wave).
+
+## Studio surfaces
+
+See [`EDITOR.md`](EDITOR.md): Gene Inspector (selected pixel
+sliders), Body Plan readout, Mutation Preview. Hotkeys `7` / `8` /
+`9` paint Bone / Muscle / Skin.
+
+## Superseded — global `Genome` table
+
+The sections below document the pre-Wave-K organism-wide gene table
+and the archived column `wk_agents::Genome`. Kept for provenance;
+new design work should extend `PixelTraits` / aggregates instead.
+
+### Rules for genes (legacy framing)
 
 - A gene has a **name**, a **domain**, a **tradeoff**, and a
   **default**.
-- Genes are stored on `Genome` (per organism) or on a specific
+- Genes were stored on `Genome` (per organism) or on a specific
   module blueprint entry (per-module tuning like emitter
   `tuned_type`).
-- Mutation is deterministic per trait. See `Genome::mutate` in
-  [`crates/legacy/wk-agents/src/lib.rs`](../../crates/legacy/wk-agents/src/lib.rs)
-  for the hash-and-jitter template that all new genes follow.
-- Every new gene gets `#[serde(default)]` so old blueprints load.
+- Mutation was deterministic per trait via `Genome::mutate`.
+- Every new gene got `#[serde(default)]` so old blueprints load.
 - No gene is silently free — a high value must **cost** something on
   screen (upkeep, waste, wrong-niche death).
 
-## Archived `wk_agents::Genome` fields
+### Archived `wk_agents::Genome` fields
 
 For reference, the column-stack fields (stage 10 / 11) in
 `crates/legacy/wk-agents`:
@@ -41,99 +118,45 @@ These map into the kernel table as follows:
 | Existing | Kernel gene | Change |
 |----------|-------------|--------|
 | `metabolism` | `MetabolicRate` | Rename only. Same meaning. |
-| `repro_drive` | (rolled into) `ReproduceAt` | `repro_drive` was a per-tick roll gate; the kernel `ReproduceAt` is an energy fraction threshold. Keep `repro_drive` as an *additional* gate for compatibility, but the primary trigger becomes the energy threshold. |
-| `move_speed` | `LocomotionSpeed` (Phase 7) | Retained; only used when locomotion arrives. Zero for plants and fungi. |
-| `graze_rate` | `BrowseRate` (Phase 7) | Retained; used by the animal `Browse` interaction on Mid plant cells. Not used by Set A–E organisms. |
+| `repro_drive` | (rolled into) `ReproduceAt` | Energy-fraction threshold is primary. |
+| `move_speed` | `LocomotionSpeed` (Phase 7) | Retained; unused until locomotion. |
+| `graze_rate` | `BrowseRate` (Phase 7) | Animal browse; not Set A–E. |
 | `graze_efficiency` | `BrowseEfficiency` (Phase 7) | As above. |
-| `drink_rate` | `DrinkRate` | Retained for water-column and thirsty walker use. Plants use moisture read, not drink rate. |
-| `dig_drive` | (removed) | The scripted grazer's dig drive is replaced by a module-triggered `world.dig` call in Phase 6+ (fungal cavity + burrow already have an API). Kept until Phase 7 for backwards compat. |
+| `drink_rate` | `DrinkRate` | Water-column / walker; plants use moisture. |
+| `dig_drive` | (removed) | Replaced by module-triggered dig later. |
 
-Nothing is deleted immediately. Phase 2 renames `metabolism →
-metabolic_rate` inside `Genome` with a `#[serde(alias = "metabolism")]`
-so pre-kernel saves still load. Everything else is left in place;
-new kernel genes append.
+### Kernel gene table (still mirrored on vestigial `Genome`)
 
-## Kernel gene table
-
-### Metabolism & life cycle
+#### Metabolism & life cycle
 
 | Gene | Domain | High | Low |
 |------|--------|------|-----|
 | `MetabolicRate` | `f32 ≥ 0` | Wins blooms; starves fast. | Thrifty; loses races. |
-| `ReproduceAt` | `f32 in 0..1` (energy fraction of max) | Reproduces often, offspring weak. | Rare, fat offspring. |
+| `ReproduceAt` | `f32 in 0..1` | Reproduces often, offspring weak. | Rare, fat offspring. |
 | `CloneFidelity` | `f32 in 0..1` | Costly precise clones. | Cheap messy / mutative clones. |
-| `CircadianPhase` | `f32 in 0..1` (phase within day) | Locks activity into a specific band; saves upkeep. | Always-on cost. |
-| `ActiveWindow` | `f32 in 0..1` (fraction of day active) | Long active window; more harvest, more upkeep. | Narrow window. |
+| `CircadianPhase` | `f32 in 0..1` | Locks activity into a band. | Always-on cost. |
+| `ActiveWindow` | `f32 in 0..1` | Long active window. | Narrow window. |
 
-### Physical niche (water column and land)
-
-| Gene | Domain | High | Low |
-|------|--------|------|-----|
-| `TempOptimum` | `f32` (°C) | Comfort centre for photo / fission (default 22). | Same. |
-| `TempWidth` | `f32 ≥ 0` (°C) | Wide comfort; reproduces in more climates (default 18). | Narrow specialist; cold/hot throttles fission. |
-| `BuoyancyBias` | `f32 in 0..1` | Heavy: sinks toward the water bed. | Buoyant: rides ~1 m under the live free-water surface; rises/falls with water via weight vs buoyancy (not a constant `sea_level` snap). **Circadian:** active window pulls toward the float side; inactive (night) pulls deeper — day-float / night-sink (E33 interim, before Set C soma wiring). |
-
-### Chemistry (per sensor / emitter module)
-
-| Gene | Domain | Meaning |
-|------|--------|---------|
-| `tuned_type` | `ChemTypeId` (0..3) | Which channel this sensor / emitter binds. |
-| `gain` | `f32 ≥ 0` | Response amplitude. |
-| `threshold` | `f32 ≥ 0` | Deadzone. |
-| `sensor_mode` | `enum { Level, Gradient }` | Sensor reads local level or spatial gradient. |
-
-### Nerves (global + per-axon)
-
-| Gene | Domain | Meaning |
-|------|--------|---------|
-| `soma_activation_shape` | `u8` enum | Tanh / clamp / linear activation. |
-| `soma_bias` | `f32` | Baseline pre-activation offset. |
-| `axon_upkeep_per_px` | `f32 ≥ 0` | Upkeep tax on every axon pixel. |
-| `axon.sign` | `+1` / `-1` | Excitatory / inhibitory. |
-| `axon.weight` | `f32` in a small range | Signed weight. |
-| `axon.delay` | `u8` (0 or 1 for Core) | Optional one-tick delay. |
-
-### Land plants
+#### Physical niche
 
 | Gene | Domain | High | Low |
 |------|--------|------|-----|
-| `StemVsLeafVsRoot` | `[f32; 3]` summing to 1 | Skew of surplus into stem / leaf / root. Wrong split is visible: pole, bush, or leafless stump. | |
-| `LeafAbsorb` | `f32 in 0..1` | Strong shade cast; self-hunger if stacked. | Passes light through; understory friendly. |
-| `ShadeEfficiency` | `f32 in 0..1` | Harvest well in dim light; lower peak in sun. | Full-sun specialist. |
-| `RootDepthBias` | `f32 in 0..1` | Deep dive into water table; slow in dry season race. | Shallow sprawl; wins wet seasons, dies in drought. |
+| `BuoyancyBias` | `f32 in 0..1` | Heavy: sinks. | Buoyant: rides under free surface. |
 
-### Epiphytes and fungi
+#### Land plants
 
 | Gene | Domain | High | Low |
 |------|--------|------|-----|
-| `AttachPrefer` | `f32 in 0..1` | Seek olive host stems (epiphyte establishment). | Ignores hosts; needs its own root. |
-| `HostLeaveFraction` | `f32 in 0..1` | Gentle rider: passes X of light through own stack to host below. | Smotherer: takes everything. |
-| `DigestRate` | `f32 ≥ 0` | Fast litter clearing; boom-crash cycles. | Starves when litter is scarce. |
+| `StemVsLeafVsRoot` | `[f32; 3]` | Skew surplus into stem / leaf / root. | |
+| `LeafAbsorb` | `f32 in 0..1` | Strong shade cast. | Passes light. |
+| `ShadeEfficiency` | `f32 in 0..1` | Dim-light harvest. | Full-sun specialist. |
+| `RootDepthBias` | `f32 in 0..1` | Deep dive. | Shallow sprawl. |
 
-### Reserved gene slots
+#### Fungi
 
-Kept named for editor readability, not yet used by any subsystem:
-
-- `LocomotionSpeed`, `BrowseRate`, `BrowseEfficiency` (Phase 7).
-- `Woodiness` (`Bark` slot in [`PALETTE.md`](PALETTE.md), Phase 6+).
-- `MutualistDrive` (mycorrhizae, deferred).
-
-## Merge and rename plan
-
-Phase 2 (Set A code slice) is the moment to reshape `Genome`. The
-mechanical plan is:
-
-1. Rename `metabolism → metabolic_rate` with
-   `#[serde(alias = "metabolism")]`.
-2. Add the Set A / B / C / D / E kernel genes above as new fields
-   with `#[serde(default)]` sensible defaults and a `Genome::default()`
-   that produces a viable Atom.
-3. Column `Genome` graze/dig/repro fields stay on the **archived**
-   `crates/legacy/wk-agents` type so column scenarios (E16/E17) keep
-   compiling. Voxel organisms do not grow those fields.
-4. `Genome::mutate` extends to include the new fields; the salt list
-   keeps growing but each gene has its own `trait_i` so mutation is
-   stable across additions.
+| Gene | Domain | High | Low |
+|------|--------|------|-----|
+| `DigestRate` | `f32 ≥ 0` | Fast litter clearing. | Starves when litter scarce. |
 
 ## What is deliberately not here
 
@@ -141,5 +164,6 @@ mechanical plan is:
 - Fitness functions. No global fitness — see
   [`docs/EVOLUTION.md`](../EVOLUTION.md).
 - Meta-genes (mutation rate of the mutation rate). Later.
+- Kind-specific Bone / Muscle / Skin world physics — Wave L.
 - Runtime-modifiable weights outside mutation. See
   [`NERVES.md`](NERVES.md) — no plastic learning.
