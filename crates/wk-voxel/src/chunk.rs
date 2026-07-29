@@ -93,6 +93,10 @@ pub struct Chunk {
     /// held limestone.
     #[serde(default)]
     pub has_limestone: bool,
+    /// Sticky occupancy: at least one Bone / Muscle / Skin cell was
+    /// written. Biological decay skips chunks that never held biomaterial.
+    #[serde(default)]
+    pub has_biomaterial: bool,
 }
 
 impl Chunk {
@@ -104,6 +108,7 @@ impl Chunk {
             tick: 0,
             has_wet_air: false,
             has_limestone: false,
+            has_biomaterial: false,
         }
     }
 
@@ -147,6 +152,12 @@ impl Chunk {
         }
         if cell.material == MaterialId::Limestone {
             self.has_limestone = true;
+        }
+        if matches!(
+            cell.material,
+            MaterialId::Bone | MaterialId::Muscle | MaterialId::Skin
+        ) {
+            self.has_biomaterial = true;
         }
     }
 
@@ -214,13 +225,17 @@ mod tests {
         let mut c = Chunk::new(ChunkCoord::new(0, 0));
         assert!(!c.has_wet_air);
         assert!(!c.has_limestone);
+        assert!(!c.has_biomaterial);
         c.set(1, 1, Cell::water());
         assert!(c.has_wet_air);
         c.set(2, 2, Cell::solid(MaterialId::Limestone));
         assert!(c.has_limestone);
+        c.set(3, 3, Cell::solid(MaterialId::Bone));
+        assert!(c.has_biomaterial);
         // Dry air / stone do not clear sticky flags.
         c.set(1, 1, Cell::air());
         assert!(c.has_wet_air);
+        assert!(c.has_biomaterial);
     }
 
     #[test]

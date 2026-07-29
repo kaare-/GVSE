@@ -130,26 +130,33 @@ impl Cell {
 pub fn is_grain(material: MaterialId) -> bool {
     matches!(
         material,
-        MaterialId::Sand | MaterialId::Gravel | MaterialId::Clay | MaterialId::LooseRock
+        MaterialId::Sand
+            | MaterialId::Gravel
+            | MaterialId::Clay
+            | MaterialId::LooseRock
+            | MaterialId::Muscle
     )
 }
 
 /// Soft pack / litter: falls through *empty* Air, floats on standing water.
-/// Organic is included so dead leaves and dissolved stems drop to the bed
-/// without soaking into lakes.
+/// Organic / Skin are included so dead leaves and membranes drop to the bed
+/// without soaking into lakes. Bone is a solid (not soft litter).
 pub fn falls_through_empty_air(material: MaterialId) -> bool {
     matches!(
         material,
-        MaterialId::Snow | MaterialId::Ice | MaterialId::Organic
+        MaterialId::Snow | MaterialId::Ice | MaterialId::Organic | MaterialId::Skin
     )
 }
 
 /// Materials that participate in angle-of-repose diagonal slides.
-/// Includes [`is_grain`] plus Snow and Organic litter (leaf piles
+/// Includes [`is_grain`] plus Snow / Organic / Skin litter (leaf piles
 /// should sprawl, not stack into 1-cell towers).
 pub fn is_repose_grain(material: MaterialId) -> bool {
     is_grain(material)
-        || matches!(material, MaterialId::Snow | MaterialId::Organic)
+        || matches!(
+            material,
+            MaterialId::Snow | MaterialId::Organic | MaterialId::Skin
+        )
 }
 
 /// Dense grains soft enough for flow bedload / bank undercut.
@@ -284,6 +291,17 @@ mod tests {
             falls_through_empty_air(MaterialId::Organic),
             "Organic litter must fall through empty Air"
         );
+        assert!(is_grain(MaterialId::Muscle), "Muscle falls as soft grain");
+        assert!(is_repose_grain(MaterialId::Muscle));
+        assert!(
+            falls_through_empty_air(MaterialId::Skin),
+            "Skin floats like Organic"
+        );
+        assert!(!is_grain(MaterialId::Skin));
+        assert!(is_repose_grain(MaterialId::Skin));
+        assert!(!is_grain(MaterialId::Bone));
+        assert!(!is_repose_grain(MaterialId::Bone));
+        assert!(!falls_through_empty_air(MaterialId::Bone));
         for m in [
             MaterialId::Bedrock,
             MaterialId::Stone,
@@ -291,11 +309,24 @@ mod tests {
             MaterialId::Water,
             MaterialId::Air,
             MaterialId::Ice,
+            MaterialId::Bone,
         ] {
             assert!(!is_grain(m), "{m:?} must not be classified as a grain");
             assert!(!is_repose_grain(m), "{m:?} must not repose");
         }
         assert!(!falls_through_empty_air(MaterialId::Sand));
+    }
+
+    #[test]
+    fn skin_floats_on_water_like_organic() {
+        assert_eq!(
+            falls_through_empty_air(MaterialId::Skin),
+            falls_through_empty_air(MaterialId::Organic)
+        );
+        assert!(!is_grain(MaterialId::Skin));
+        assert!(!is_flow_erodible(MaterialId::Skin));
+        assert!(is_flow_erodible(MaterialId::Muscle));
+        assert!(!is_flow_erodible(MaterialId::Bone));
     }
 
     #[test]

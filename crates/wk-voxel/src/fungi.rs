@@ -341,19 +341,24 @@ pub fn deposit_death_litter(world: &mut World, gx: i32, gy: i32, n_modules: usiz
     deposit_organic_cell(world, gx, gy);
 }
 
-/// Dissolve a lingering corpse into Organic matter + soft litter.
+/// Dissolve a lingering corpse into world materials + soft litter.
 ///
 /// Shoot modules (Stem / Nucleus / Photosystem) never become mid-air Organic
 /// pillars — water and snow must pass dead trunks; compost belongs on the
-/// bed (fallback pile) or in soil already painted by dead roots. Digest /
-/// Hypha / Root footprints still convert solids (and dry Air for detritus).
-/// Wet Air (free water) is left alone so lakes aren't plugged.
+/// bed (fallback pile) or in soil already painted by dead roots.
+///
+/// Bone / Muscle / Skin paint their kind-specific [`MaterialId`] (Wave L)
+/// via [`crate::biology::module_death_material`]. Digest / Hypha / Root
+/// still compost to Organic. Wet Air (free water) is left alone so lakes
+/// aren't plugged.
 pub fn dissolve_corpse_to_organic(
     world: &mut World,
     gx: i32,
     gy: i32,
     body: &[(i16, i16, ModuleId)],
 ) {
+    use crate::biology::module_death_material;
+
     let n_modules = body.len().max(1);
     let units = (DEATH_LITTER_PER_MODULE as usize)
         .saturating_mul(n_modules)
@@ -363,12 +368,14 @@ pub fn dissolve_corpse_to_organic(
     let mut painted = 0u32;
     for &(dx, dy, mid) in body {
         // Grey trunks / crowns / leaves: litter only — do not dam flow.
+        // Animal tissues (Bone / Muscle / Skin) are *not* skipped.
         if matches!(
             mid,
             ModuleId::Stem | ModuleId::Nucleus | ModuleId::Photosystem
         ) {
             continue;
         }
+        let death_mat = module_death_material(mid);
         let wx = world.wrap_x(gx + dx as i32);
         let wy = gy + dy as i32;
         let Some(c) = world.get_cell(wx, wy) else {
@@ -376,7 +383,7 @@ pub fn dissolve_corpse_to_organic(
         };
         match c.material {
             MaterialId::Air if c.sat.is_empty() => {
-                world.set_cell(wx, wy, Cell::solid(MaterialId::Organic));
+                world.set_cell(wx, wy, Cell::solid(death_mat));
                 painted += 1;
             }
             MaterialId::Air => {
@@ -384,12 +391,12 @@ pub fn dissolve_corpse_to_organic(
             }
             MaterialId::Bedrock | MaterialId::Ice | MaterialId::Snow | MaterialId::Water => {}
             _ => {
-                // Sand / stone / clay / Organic → Organic residue.
+                // Sand / stone / clay / Organic / biomaterial → death residue.
                 // Preserve pore sat so dissolve doesn't destroy water mass.
-                let mut org = Cell::solid(MaterialId::Organic);
-                let cap = water_capacity(MaterialId::Organic);
-                org.sat.0 = if cap > 0 { c.sat.0.min(cap) } else { 0 };
-                world.set_cell(wx, wy, org);
+                let mut next = Cell::solid(death_mat);
+                let cap = water_capacity(death_mat);
+                next.sat.0 = if cap > 0 { c.sat.0.min(cap) } else { 0 };
+                world.set_cell(wx, wy, next);
                 painted += 1;
             }
         }

@@ -20,6 +20,7 @@ mod rain;
 mod evap;
 mod condensation;
 mod karst;
+mod decay;
 mod tick;
 
 #[cfg(test)]
@@ -36,6 +37,7 @@ pub use grain::{
     apply_grain_repose_regions, GrainConfig, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
 pub use gravity::{apply_gravity_fall, apply_gravity_fall_regions};
+pub use decay::{apply_biological_decay, BiologicalDecayConfig};
 pub use karst::{apply_karst_dissolution, KarstConfig};
 pub(crate) use rain::deposit_water_on_surface;
 pub use rain::{apply_rain, apply_rain_with_temp, is_standing_water, RainConfig};

@@ -6,10 +6,10 @@ use macroquad::prelude::*;
 use macroquad::ui::{hash, root_ui, widgets};
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
-    ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, FailureConfig, Genome, GrainConfig,
-    KarstConfig, OrographicConfig, PerfConfig, PhaseConfig, PlantGrowthCaps, RainConfig, TempConfig,
-    World, WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES,
-    MAX_ROOT_MODULES, MAX_STEM_MODULES,
+    BiologicalDecayConfig, ClimateConfig, CloudConfig, CondensationConfig, EvapConfig,
+    FailureConfig, Genome, GrainConfig, KarstConfig, OrographicConfig, PerfConfig, PhaseConfig,
+    PlantGrowthCaps, RainConfig, TempConfig, World, WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS,
+    MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 
 /// Default plant / fungus gene knobs applied on spawn (and optionally to living plants).
@@ -66,6 +66,8 @@ pub struct SimSettings {
     pub cond: CondensationConfig,
     pub oro: OrographicConfig,
     pub karst: KarstConfig,
+    /// Opt-in Bone / Muscle / Skin decay (Wave L). Off by default.
+    pub bio_decay: BiologicalDecayConfig,
     pub cloud: CloudConfig,
     pub climate: ClimateConfig,
     pub temp: TempConfig,
@@ -154,6 +156,7 @@ impl SimSettings {
                 ..OrographicConfig::default()
             },
             karst: KarstConfig::default(),
+            bio_decay: BiologicalDecayConfig::default(),
             cloud: CloudConfig::default(),
             climate: ClimateConfig::default(),
             temp: TempConfig::default(),
@@ -828,6 +831,31 @@ impl SimSettings {
                 });
                 ui.separator();
 
+                ui.tree_node(hash!(), "Bio decay (B key)", |ui| {
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Muscle → Organic / tick",
+                        0.0..0.05,
+                        &mut self.bio_decay.muscle_prob,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Skin → Organic / tick",
+                        0.0..0.02,
+                        &mut self.bio_decay.skin_prob,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Bone → Sand / tick",
+                        0.0..0.002,
+                        &mut self.bio_decay.bone_prob,
+                    );
+                });
+                ui.separator();
+
                 ui.tree_node(hash!(), "Creatures / population caps", |ui| {
                     ui.label(
                         None,
@@ -1043,6 +1071,9 @@ fn material_short_name(id: MaterialId) -> &'static str {
         MaterialId::LooseRock => "LooseRock",
         MaterialId::Gravel => "Gravel",
         MaterialId::Limestone => "Limestone",
+        MaterialId::Bone => "Bone",
+        MaterialId::Muscle => "Muscle",
+        MaterialId::Skin => "Skin",
         _ => "?",
     }
 }

@@ -57,10 +57,11 @@ fn is_diggable(mat: MaterialId) -> bool {
 /// softening basement rock.
 pub fn root_penetrate_cost(mat: MaterialId) -> Option<f32> {
     match mat {
-        MaterialId::Organic => Some(0.7),
+        MaterialId::Organic | MaterialId::Skin | MaterialId::Muscle => Some(0.7),
         MaterialId::Sand | MaterialId::Clay => Some(1.8),
         MaterialId::Gravel => Some(2.6),
         MaterialId::LooseRock | MaterialId::Limestone => Some(6.5),
+        MaterialId::Bone => Some(8.0),
         MaterialId::Stone => Some(12.0),
         MaterialId::Bedrock
         | MaterialId::Water

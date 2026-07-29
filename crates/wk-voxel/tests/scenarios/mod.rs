@@ -11,4 +11,5 @@ mod e8_save_load;
 mod e10_sinkhole;
 mod e11_cave_roof;
 mod e15_roots_reduce_erosion;
+mod e18_bone_persists_after_muscle_rots;
 mod helpers;
