@@ -19,6 +19,7 @@
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
+use crate::aggregate::{body_plan_from_kinds, BodyPlan};
 use crate::blueprint::Genome;
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
@@ -93,7 +94,7 @@ const MUTATION_SIGMA: f32 = 0.12;
 const CONTACT_BOUNCE: f32 = 0.12;
 
 /// Module IDs — values match `wk_agents::ModuleId` / PALETTE.md.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[repr(u8)]
 pub enum ModuleId {
     Nucleus = 0x00,
@@ -106,6 +107,12 @@ pub enum ModuleId {
     Root = 0x0D,
     /// Olive — upright stack holding leaves (Set D).
     Stem = 0x0E,
+    /// Peach — animal outer layer (Wave K studio; Wave L → material).
+    Skin = 0x13,
+    /// Crimson — animal motility tissue (Wave K studio; Wave L → material).
+    Muscle = 0x14,
+    /// Bone-ivory — skeletal element (Wave K studio; Wave L → material).
+    Bone = 0x15,
 }
 
 impl ModuleId {
@@ -118,6 +125,9 @@ impl ModuleId {
             ModuleId::Hypha => (0xF1, 0xE6, 0xC4),
             ModuleId::Root => (0x7A, 0x4B, 0x2A),
             ModuleId::Stem => (0x55, 0x6B, 0x2F),
+            ModuleId::Skin => (0xFF, 0xDB, 0xAC),
+            ModuleId::Muscle => (0xC3, 0x3C, 0x3C),
+            ModuleId::Bone => (0xEF, 0xE7, 0xDA),
         }
     }
 
@@ -129,6 +139,9 @@ impl ModuleId {
             ModuleId::Hypha => "Hypha",
             ModuleId::Root => "Root",
             ModuleId::Stem => "Stem",
+            ModuleId::Skin => "Skin",
+            ModuleId::Muscle => "Muscle",
+            ModuleId::Bone => "Bone",
         }
     }
 }
@@ -177,12 +190,18 @@ pub struct Atom {
     /// Live genes (allocation, depth bias, shade knobs, …).
     #[serde(default)]
     pub genome: Genome,
+    /// Cached aggregate over [`Self::body`] (Wave K). Physics still
+    /// reads [`Self::genome`]; recompute on structural change.
+    #[serde(default)]
+    pub body_plan: BodyPlan,
 }
 
 impl Atom {
     pub fn new(gx: i32, gy: i32, energy_max: f32) -> Self {
         let genome = Genome::default();
         let energy_max = energy_max.max(1.0);
+        let body = default_atom_body();
+        let body_plan = body_plan_from_kinds(body.iter().map(|(_, _, m)| m));
         Self {
             gx,
             gy,
@@ -200,8 +219,9 @@ impl Atom {
             circadian_phase: 0.25,
             active_window: 0.55,
             last_water_top: None,
-            body: default_atom_body(),
+            body,
             genome,
+            body_plan,
         }
     }
 
@@ -210,7 +230,13 @@ impl Atom {
         if !body.is_empty() {
             a.body = body;
         }
+        a.recompute_body_plan();
         a
+    }
+
+    /// Refresh [`Self::body_plan`] from the live module list (default traits).
+    pub fn recompute_body_plan(&mut self) {
+        self.body_plan = body_plan_from_kinds(self.body.iter().map(|(_, _, m)| m));
     }
 
     pub fn photosystem_count(&self) -> usize {

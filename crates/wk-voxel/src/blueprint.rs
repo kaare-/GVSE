@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::aggregate::{body_plan_from, BodyPlan};
 use crate::organism::ModuleId;
 
 pub const BLUEPRINT_SCHEMA_VERSION: u16 = 1;
@@ -26,12 +27,76 @@ pub enum LaneId {
     Back = 2,
 }
 
+fn one() -> f32 {
+    1.0
+}
+
+/// Per-pixel gene payload (Wave K). Every painted module carries these
+/// scalars; aggregates form the [`BodyPlan`]. Fields unused by a kind
+/// stay inert until a later physics wave reads them.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct PixelTraits {
+    #[serde(default = "one")]
+    pub mass: f32,
+    #[serde(default = "one")]
+    pub density: f32,
+    #[serde(default = "one")]
+    pub stiffness: f32,
+    #[serde(default = "one")]
+    pub strength: f32,
+    #[serde(default = "one")]
+    pub upkeep_bias: f32,
+    #[serde(default = "one")]
+    pub absorb_bias: f32,
+    #[serde(default = "one")]
+    pub drink_bias: f32,
+    #[serde(default = "one")]
+    pub clone_fidelity_bias: f32,
+    #[serde(default = "one")]
+    pub reproduce_at_bias: f32,
+    #[serde(default = "one")]
+    pub buoyancy_bias: f32,
+}
+
+impl Default for PixelTraits {
+    fn default() -> Self {
+        Self {
+            mass: 1.0,
+            density: 1.0,
+            stiffness: 1.0,
+            strength: 1.0,
+            upkeep_bias: 1.0,
+            absorb_bias: 1.0,
+            drink_bias: 1.0,
+            clone_fidelity_bias: 1.0,
+            reproduce_at_bias: 1.0,
+            buoyancy_bias: 1.0,
+        }
+    }
+}
+
+/// One painted module cell + its gene traits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlacedModule {
     pub x: i16,
     pub y: i16,
     pub lane: LaneId,
     pub module: ModuleId,
+    /// Per-pixel traits. Old postcard blobs omit this; serde defaults apply.
+    #[serde(default)]
+    pub traits: PixelTraits,
+}
+
+impl PlacedModule {
+    pub fn new(x: i16, y: i16, module: ModuleId) -> Self {
+        Self {
+            x,
+            y,
+            lane: LaneId::Mid,
+            module,
+            traits: PixelTraits::default(),
+        }
+    }
 }
 
 /// Live genes for Atom + land plant (Set D). Older postcard files get
@@ -186,13 +251,15 @@ impl Blueprint {
                     y: 0,
                     lane: LaneId::Mid,
                     module: ModuleId::Nucleus,
-                },
+                    traits: PixelTraits::default(),
+                    },
                 PlacedModule {
                     x: 1,
                     y: 0,
                     lane: LaneId::Mid,
                     module: ModuleId::Photosystem,
-                },
+                    traits: PixelTraits::default(),
+                    },
             ],
             genome: Genome::default(),
             name: "atom".into(),
@@ -213,25 +280,29 @@ impl Blueprint {
                     y: 4,
                     lane: LaneId::Mid,
                     module: ModuleId::Root,
-                },
+                    traits: PixelTraits::default(),
+                    },
                 PlacedModule {
                     x: 8,
                     y: 5,
                     lane: LaneId::Mid,
                     module: ModuleId::Nucleus,
-                },
+                    traits: PixelTraits::default(),
+                    },
                 PlacedModule {
                     x: 8,
                     y: 6,
                     lane: LaneId::Mid,
                     module: ModuleId::Stem,
-                },
+                    traits: PixelTraits::default(),
+                    },
                 PlacedModule {
                     x: 8,
                     y: 7,
                     lane: LaneId::Mid,
                     module: ModuleId::Stem,
-                },
+                    traits: PixelTraits::default(),
+                    },
                 // Leaves sit beside the upper stem so the tip column stays
                 // free for olive elongation (no leaf→stem→leaf tower).
                 PlacedModule {
@@ -239,13 +310,15 @@ impl Blueprint {
                     y: 7,
                     lane: LaneId::Mid,
                     module: ModuleId::Photosystem,
-                },
+                    traits: PixelTraits::default(),
+                    },
                 PlacedModule {
                     x: 9,
                     y: 7,
                     lane: LaneId::Mid,
                     module: ModuleId::Photosystem,
-                },
+                    traits: PixelTraits::default(),
+                    },
             ],
             genome: Genome::default(),
             name: "plant".into(),
@@ -265,25 +338,29 @@ impl Blueprint {
                     y: 0,
                     lane: LaneId::Mid,
                     module: ModuleId::Nucleus,
-                },
+                    traits: PixelTraits::default(),
+                    },
                 PlacedModule {
                     x: 1,
                     y: 0,
                     lane: LaneId::Mid,
                     module: ModuleId::Digest,
-                },
+                    traits: PixelTraits::default(),
+                    },
                 PlacedModule {
                     x: 2,
                     y: 0,
                     lane: LaneId::Mid,
                     module: ModuleId::Hypha,
-                },
+                    traits: PixelTraits::default(),
+                    },
                 PlacedModule {
                     x: 3,
                     y: 0,
                     lane: LaneId::Mid,
                     module: ModuleId::Hypha,
-                },
+                    traits: PixelTraits::default(),
+                    },
             ],
             genome: Genome {
                 digest_rate: 1.0,
@@ -374,19 +451,189 @@ impl Blueprint {
             .collect()
     }
 
+    /// Aggregate body plan from painted pixel genes.
+    pub fn body_plan(&self) -> BodyPlan {
+        body_plan_from(&self.modules)
+    }
+
+    /// Anchor for placement: first Nucleus, else bounding-box centre.
+    pub fn anchor_origin(&self) -> Option<(i16, i16)> {
+        if let Some(o) = self.nucleus_origin() {
+            return Some(o);
+        }
+        if self.modules.is_empty() {
+            return None;
+        }
+        let min_x = self.modules.iter().map(|m| m.x).min().unwrap();
+        let max_x = self.modules.iter().map(|m| m.x).max().unwrap();
+        let min_y = self.modules.iter().map(|m| m.y).min().unwrap();
+        let max_y = self.modules.iter().map(|m| m.y).max().unwrap();
+        Some(((min_x + max_x) / 2, (min_y + max_y) / 2))
+    }
+
+    /// Deterministic child blueprint: jitter traits, rare chain-grow /
+    /// delete. Budget and sigma scale with aggregate `clone_fidelity`.
+    ///
+    /// The vestigial [`Genome`] field is copied unchanged (Wave K).
+    pub fn mutate_child(&self, world_seed: u64, tick: u64, parent_id: u32) -> Blueprint {
+        let plan = self.body_plan();
+        let fidelity = plan.clone_fidelity.clamp(0.05, 1.0);
+        let strength = (1.0 - fidelity) * MUTATION_SIGMA;
+        let salt_base = tick
+            .wrapping_mul(0x9E37_79B9)
+            .wrapping_add(parent_id as u64);
+
+        let mut child = self.clone();
+        let mut trait_i = 0u64;
+        {
+            let mut jitter = |value: f32, lo: f32, hi: f32| -> f32 {
+                trait_i += 1;
+                let h = hash_u64(world_seed, salt_base, trait_i, 0xC0DE);
+                let u = (h as f32 / u64::MAX as f32) * 2.0 - 1.0;
+                (value + u * strength * (hi - lo).max(0.1)).clamp(lo, hi)
+            };
+            for m in &mut child.modules {
+                let t = &mut m.traits;
+                t.mass = jitter(t.mass, 0.05, 4.0);
+                t.density = jitter(t.density, 0.05, 4.0);
+                t.stiffness = jitter(t.stiffness, 0.05, 4.0);
+                t.strength = jitter(t.strength, 0.05, 4.0);
+                t.upkeep_bias = jitter(t.upkeep_bias, 0.05, 4.0);
+                t.absorb_bias = jitter(t.absorb_bias, 0.05, 4.0);
+                t.drink_bias = jitter(t.drink_bias, 0.05, 4.0);
+                t.clone_fidelity_bias = jitter(t.clone_fidelity_bias, 0.05, 1.0);
+                t.reproduce_at_bias = jitter(t.reproduce_at_bias, 0.05, 1.0);
+                t.buoyancy_bias = jitter(t.buoyancy_bias, 0.0, 1.0);
+            }
+        }
+
+        // Structural ops share the same deterministic stream as trait jitter.
+        let mut u01 = || {
+            trait_i += 1;
+            let h = hash_u64(world_seed, salt_base, trait_i, 0xC0DE);
+            h as f32 / u64::MAX as f32
+        };
+
+        // Chain-grow: chance rises as fidelity falls.
+        let grow_p = (1.0 - fidelity) * 0.55;
+        if !child.modules.is_empty() && u01() < grow_p {
+            let idx = (u01() * child.modules.len() as f32) as usize % child.modules.len();
+            let src = child.modules[idx].clone();
+            let dirs = [(1i16, 0i16), (-1, 0), (0, 1), (0, -1)];
+            let di = (u01() * 4.0) as usize % 4;
+            let (dx, dy) = dirs[di];
+            let nx = src.x + dx;
+            let ny = src.y + dy;
+            let occupied = child
+                .modules
+                .iter()
+                .any(|m| m.x == nx && m.y == ny && m.lane == src.lane);
+            let in_bounds = nx >= 0
+                && ny >= 0
+                && (nx as u16) < child.canvas_w
+                && (ny as u16) < child.canvas_h;
+            if !occupied && in_bounds {
+                let mut grown = src;
+                grown.x = nx;
+                grown.y = ny;
+                let um = u01() * 2.0 - 1.0;
+                let ud = u01() * 2.0 - 1.0;
+                grown.traits.mass =
+                    (grown.traits.mass + um * strength * 3.95).clamp(0.05, 4.0);
+                grown.traits.density =
+                    (grown.traits.density + ud * strength * 3.95).clamp(0.05, 4.0);
+                child.modules.push(grown);
+            }
+        }
+
+        // Delete: rare, never the last Nucleus.
+        let delete_p = (1.0 - fidelity) * 0.12;
+        if child.modules.len() > 1 && u01() < delete_p {
+            let nucleus_count = child
+                .modules
+                .iter()
+                .filter(|m| m.module == ModuleId::Nucleus)
+                .count();
+            let candidates: Vec<usize> = (0..child.modules.len())
+                .filter(|i| {
+                    child.modules[*i].module != ModuleId::Nucleus || nucleus_count > 1
+                })
+                .collect();
+            if !candidates.is_empty() {
+                let pick = (u01() * candidates.len() as f32) as usize % candidates.len();
+                child.modules.remove(candidates[pick]);
+            }
+        }
+
+        child.name = format!("{}-child", self.name);
+        child.notes = format!("mutated from {} @ tick {tick}", self.name);
+        child
+    }
+
     pub fn to_bytes(&self) -> Result<Vec<u8>, String> {
         postcard::to_allocvec(self).map_err(|e| e.to_string())
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let bp: Blueprint = postcard::from_bytes(bytes).map_err(|e| e.to_string())?;
-        if bp.schema_version > BLUEPRINT_SCHEMA_VERSION {
-            return Err(format!(
-                "blueprint schema {} newer than supported {}",
-                bp.schema_version, BLUEPRINT_SCHEMA_VERSION
-            ));
+        match postcard::from_bytes::<Blueprint>(bytes) {
+            Ok(bp) => {
+                if bp.schema_version > BLUEPRINT_SCHEMA_VERSION {
+                    return Err(format!(
+                        "blueprint schema {} newer than supported {}",
+                        bp.schema_version, BLUEPRINT_SCHEMA_VERSION
+                    ));
+                }
+                Ok(bp)
+            }
+            Err(_) => {
+                // Pre-Wave-K postcard: PlacedModule had no `traits` field.
+                // Postcard is positional, so serde(default) cannot fill the gap.
+                #[derive(Deserialize)]
+                struct LegacyPlaced {
+                    x: i16,
+                    y: i16,
+                    lane: LaneId,
+                    module: ModuleId,
+                }
+                #[derive(Deserialize)]
+                struct LegacyBlueprint {
+                    schema_version: u16,
+                    canvas_w: u16,
+                    canvas_h: u16,
+                    modules: Vec<LegacyPlaced>,
+                    genome: Genome,
+                    name: String,
+                    notes: String,
+                }
+                let old: LegacyBlueprint =
+                    postcard::from_bytes(bytes).map_err(|e| e.to_string())?;
+                if old.schema_version > BLUEPRINT_SCHEMA_VERSION {
+                    return Err(format!(
+                        "blueprint schema {} newer than supported {}",
+                        old.schema_version, BLUEPRINT_SCHEMA_VERSION
+                    ));
+                }
+                Ok(Blueprint {
+                    schema_version: old.schema_version,
+                    canvas_w: old.canvas_w,
+                    canvas_h: old.canvas_h,
+                    modules: old
+                        .modules
+                        .into_iter()
+                        .map(|m| PlacedModule {
+                            x: m.x,
+                            y: m.y,
+                            lane: m.lane,
+                            module: m.module,
+                            traits: PixelTraits::default(),
+                        })
+                        .collect(),
+                    genome: old.genome,
+                    name: old.name,
+                    notes: old.notes,
+                })
+            }
         }
-        Ok(bp)
     }
 
     pub fn save_path(name: &str) -> PathBuf {
@@ -501,5 +748,128 @@ mod tests {
                 || (child.alloc_stem - parent.alloc_stem).abs() > 1e-6,
             "low-fidelity mutate should jitter plant genes"
         );
+    }
+
+    #[test]
+    fn pixel_traits_round_trips_postcard() {
+        let mut bp = Blueprint::atom();
+        bp.modules[1].traits.density = 2.25;
+        bp.modules[1].traits.absorb_bias = 0.6;
+        let loaded = Blueprint::from_bytes(&bp.to_bytes().unwrap()).unwrap();
+        assert!((loaded.modules[1].traits.density - 2.25).abs() < 1e-5);
+        assert!((loaded.modules[1].traits.absorb_bias - 0.6).abs() < 1e-5);
+    }
+
+    #[test]
+    fn old_blueprint_loads_with_default_traits() {
+        // Pre-Wave-K postcard shape: PlacedModule without traits field.
+        #[derive(Serialize)]
+        struct OldPlaced {
+            x: i16,
+            y: i16,
+            lane: LaneId,
+            module: ModuleId,
+        }
+        #[derive(Serialize)]
+        struct OldBlueprint {
+            schema_version: u16,
+            canvas_w: u16,
+            canvas_h: u16,
+            modules: Vec<OldPlaced>,
+            genome: Genome,
+            name: String,
+            notes: String,
+        }
+        let old = OldBlueprint {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![
+                OldPlaced {
+                    x: 0,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Nucleus,
+                },
+                OldPlaced {
+                    x: 1,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                },
+            ],
+            genome: Genome::default(),
+            name: "legacy".into(),
+            notes: String::new(),
+        };
+        let bytes = postcard::to_allocvec(&old).unwrap();
+        let loaded = Blueprint::from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.modules.len(), 2);
+        assert_eq!(loaded.modules[0].traits, PixelTraits::default());
+        assert_eq!(loaded.modules[1].traits, PixelTraits::default());
+        assert!(loaded.is_valid_atom());
+    }
+
+    #[test]
+    fn mutate_child_is_deterministic_for_seed_tick_parent() {
+        let mut parent = Blueprint::atom();
+        // Low fidelity → strong mutation so structural ops can fire.
+        for m in &mut parent.modules {
+            m.traits.clone_fidelity_bias = 0.1;
+        }
+        let a = parent.mutate_child(99, 7, 3);
+        let b = parent.mutate_child(99, 7, 3);
+        assert_eq!(a.modules.len(), b.modules.len());
+        for (ma, mb) in a.modules.iter().zip(b.modules.iter()) {
+            assert_eq!(ma.x, mb.x);
+            assert_eq!(ma.y, mb.y);
+            assert_eq!(ma.module, mb.module);
+            assert_eq!(ma.traits, mb.traits);
+        }
+    }
+
+    #[test]
+    fn mutate_child_chain_grow_extends_same_kind_neighbour() {
+        let mut parent = Blueprint::atom();
+        for m in &mut parent.modules {
+            m.traits.clone_fidelity_bias = 0.0;
+        }
+        // Search a small seed/tick space for a grow event.
+        let mut grew = false;
+        for tick in 0..64u64 {
+            for pid in 0..16u32 {
+                let child = parent.mutate_child(12345, tick, pid);
+                if child.modules.len() > parent.modules.len() {
+                    // New pixel shares a kind with some neighbour of that kind.
+                    let parent_cells: std::collections::HashSet<_> = parent
+                        .modules
+                        .iter()
+                        .map(|m| (m.x, m.y, m.module))
+                        .collect();
+                    let added: Vec<_> = child
+                        .modules
+                        .iter()
+                        .filter(|m| !parent_cells.contains(&(m.x, m.y, m.module)))
+                        .collect();
+                    assert!(!added.is_empty());
+                    for a in &added {
+                        let adj = [(1i16, 0), (-1, 0), (0, 1), (0, -1)];
+                        let has_same_kind_neighbour = child.modules.iter().any(|m| {
+                            m.module == a.module
+                                && adj.iter().any(|(dx, dy)| {
+                                    m.x == a.x + dx && m.y == a.y + dy
+                                })
+                        });
+                        assert!(has_same_kind_neighbour);
+                    }
+                    grew = true;
+                    break;
+                }
+            }
+            if grew {
+                break;
+            }
+        }
+        assert!(grew, "expected at least one chain-grow across seed search");
     }
 }

@@ -849,6 +849,7 @@ pub fn try_elongate_root(
     };
     atom.energy -= cost;
     atom.body.push((nx, ny, ModuleId::Root));
+    atom.recompute_body_plan();
     cost
 }
 
@@ -996,6 +997,7 @@ pub fn try_grow_shoot(
             }
             atom.energy -= cost;
             atom.body.push((nx, ny, ModuleId::Photosystem));
+            atom.recompute_body_plan();
             return true;
         }
         false
@@ -1032,6 +1034,7 @@ pub fn try_grow_shoot(
             }
             atom.energy -= cost;
             atom.body.push((nx, ny, ModuleId::Stem));
+            atom.recompute_body_plan();
             return true;
         }
         false

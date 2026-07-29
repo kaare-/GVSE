@@ -38,6 +38,7 @@
 //! Temperature tiles warm with sun, cool at night, and shade under clouds.
 
 mod editor;
+mod gene_inspector;
 mod inspector;
 mod palette;
 mod quit;
