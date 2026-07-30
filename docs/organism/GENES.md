@@ -68,10 +68,15 @@ Deterministic in `(world_seed, tick, parent_id)`. Ops:
    `(1 − clone_fidelity)`.
 2. **Chain-grow** — rare append of a same-kind orthogonal neighbour
    with jittered traits.
-3. **Delete** — rarer removal of a non-last-Nucleus pixel.
+3. **Kind-swap** (Wave Q) — rarer rewrite of one pixel to a related
+   kind (`kind_swap_partners`); never the last Nucleus.
+4. **Delete** — rarer removal of a non-last-Nucleus pixel.
 
 Studio **Mutation Preview** rolls `mutate_child(0, 0, 0)` and shows
 Δpixels / Δmass / Δmetabolic beside a half-size child glyph.
+
+Live Atom fission builds a temporary blueprint via
+`Atom::to_mutation_blueprint` and runs the same `mutate_child` path.
 
 ### Wave M — live physics binding
 
@@ -117,6 +122,14 @@ not `atom.genome` (which stays a Tab / blueprint mirror).
 then `recompute_body_plan` mirrors aggregates back onto `Genome`.
 Studio Gene Inspector exposes the new sliders per kind. Full deletion of
 the `Genome` struct is deferred until blueprint postcard migration.
+
+### Wave Q — kind-swap mutation
+
+`Blueprint::mutate_child` may rewrite one pixel to a related kind via
+[`kind_swap_partners`](../../crates/wk-voxel/src/blueprint.rs)
+(Photosystem↔Stem/Skin, Root↔Stem, Digest↔Hypha, Bone↔Muscle, …).
+Never swaps away the last Nucleus. Live Atom fission uses the same
+pipeline through `Atom::to_mutation_blueprint`.
 
 ### Wave P — visual trait feedback
 

@@ -190,12 +190,29 @@ pub fn draw_gene_panels(
         let d_pix = child_plan.pixel_count as i32 - parent_plan.pixel_count as i32;
         let d_mass = child_plan.total_mass - parent_plan.total_mass;
         let d_meta = child_plan.metabolic_rate - parent_plan.metabolic_rate;
+        let parent_kinds: std::collections::HashSet<_> =
+            blueprint.modules.iter().map(|m| m.module).collect();
+        let child_kinds: std::collections::HashSet<_> =
+            child.modules.iter().map(|m| m.module).collect();
+        let kinds_changed = parent_kinds != child_kinds;
         draw_text(
             &format!("Δpixels={d_pix:+}  Δmass={d_mass:+.2}  Δmeta={d_meta:+.2}"),
             px,
             y,
             13.0,
             Color::from_rgba(180, 220, 160, 255),
+        );
+        y += 16.0;
+        draw_text(
+            if kinds_changed {
+                "kinds: changed (swap/grow/delete)"
+            } else {
+                "kinds: same set"
+            },
+            px,
+            y,
+            12.0,
+            Color::from_rgba(160, 180, 200, 255),
         );
         y += 18.0;
         // Half-size child glyph strip.
