@@ -360,6 +360,68 @@ impl Atom {
         }
     }
 
+    /// Chassis blueprint for plant/fungus sprout (Wave R).
+    ///
+    /// Places `chassis` around canvas centre, copying traits from the first
+    /// parent pixel of the same kind (else defaults). Pose knobs stamped
+    /// like [`Self::to_mutation_blueprint`]. Ready for [`Blueprint::mutate_child`].
+    pub fn chassis_mutation_blueprint(&self, chassis: &[BodyModule]) -> Blueprint {
+        const CW: u16 = 32;
+        const CH: u16 = 32;
+        let ox = (CW / 2) as i16;
+        let oy = (CH / 2) as i16;
+        let mut modules = Vec::with_capacity(chassis.len());
+        for &(dx, dy, mid) in chassis {
+            let x = ox + dx;
+            let y = oy + dy;
+            if x < 0 || y < 0 || (x as u16) >= CW || (y as u16) >= CH {
+                continue;
+            }
+            let mut traits = self
+                .body
+                .iter()
+                .enumerate()
+                .find(|(_, (_, _, m))| *m == mid)
+                .map(|(i, _)| self.trait_at(i))
+                .unwrap_or_else(PixelTraits::default);
+            traits.clone_fidelity_bias = self.clone_fidelity.clamp(0.05, 1.0);
+            traits.buoyancy_bias = self.buoyancy_bias.clamp(0.0, 1.0);
+            // Nucleus also carries plant alloc habit from body plan / genome mirror.
+            if mid == ModuleId::Nucleus {
+                traits.alloc_stem = self.body_plan.alloc_stem;
+                traits.alloc_leaf = self.body_plan.alloc_leaf;
+                traits.alloc_root = self.body_plan.alloc_root;
+                traits.reproduce_at_bias = self.body_plan.reproduce_at;
+            }
+            if mid == ModuleId::Root {
+                traits.root_depth_bias = self.body_plan.root_depth_bias;
+            }
+            if mid == ModuleId::Photosystem {
+                traits.shade_efficiency = self.body_plan.shade_efficiency;
+                traits.absorb_bias = self.leaf_absorb_effective();
+            }
+            if matches!(mid, ModuleId::Digest | ModuleId::Hypha) {
+                traits.digest_rate = self.body_plan.digest_rate;
+            }
+            modules.push(PlacedModule {
+                x,
+                y,
+                lane: LaneId::Mid,
+                module: mid,
+                traits,
+            });
+        }
+        Blueprint {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: CW,
+            canvas_h: CH,
+            modules,
+            genome: self.genome,
+            name: "live-chassis".into(),
+            notes: String::new(),
+        }
+    }
+
     /// Refresh [`Self::body_plan`] from body + traits; sync pose knobs.
     pub fn recompute_body_plan(&mut self) {
         self.align_body_traits();
@@ -3215,6 +3277,37 @@ mod tests {
         let a = &store.atoms[0];
         assert!((a.trait_at(1).absorb_bias - 2.5).abs() < 1e-5);
         assert!((a.body_plan.photo_capacity - 2.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn chassis_mutation_blueprint_inherits_kinded_traits() {
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (2, 0, ModuleId::Hypha),
+        ];
+        let mut traits = vec![PixelTraits::default(); 3];
+        traits[1].digest_rate = 1.6;
+        traits[0].alloc_root = 0.7;
+        let atom = Atom::from_body_with_traits(4, 2, 40.0, body, traits);
+        let chassis = crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus();
+        let bp = atom.chassis_mutation_blueprint(&chassis);
+        let digest = bp
+            .modules
+            .iter()
+            .find(|m| m.module == ModuleId::Digest)
+            .expect("digest on chassis");
+        assert!(
+            (digest.traits.digest_rate - 1.6).abs() < 1e-5
+                || (digest.traits.digest_rate - atom.body_plan.digest_rate).abs() < 1e-5,
+            "chassis should inherit digest lean (got {})",
+            digest.traits.digest_rate
+        );
+        let child = bp.mutate_child(9, 3, 1);
+        assert!(
+            child.modules.iter().any(|m| m.module == ModuleId::Nucleus),
+            "mutated chassis keeps a nucleus"
+        );
     }
 
     #[test]

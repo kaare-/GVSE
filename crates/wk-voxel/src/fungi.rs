@@ -7,11 +7,10 @@
 
 use wk_material::MaterialId;
 
-use crate::blueprint::Genome;
 use crate::cell::{water_capacity, Cell};
 use crate::grid::World;
 use crate::organism::{Atom, ModuleId};
-use crate::plant::{apply_genome, find_fungus_slot, pin_plant_pose};
+use crate::plant::{find_fungus_slot, pin_plant_pose};
 
 /// Soft litter units treated as fully labile food (per column).
 /// Stratigraphic Organic cells contribute this many labile units each.
@@ -317,10 +316,26 @@ pub fn try_spore(
     atom.energy -= cost;
     atom.cooldown = FUNGUS_SPORE_PERIOD;
 
-    let body = crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus();
-    let child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
-    let mut child = Atom::from_body(wx, gy, tank, body);
-    apply_genome(&mut child, child_genome);
+    // Wave R: chassis + parent digest traits → mutate_child (same path as
+    // Atom fission / plant sprout).
+    let chassis = crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus();
+    let parent_bp = atom.chassis_mutation_blueprint(&chassis);
+    if parent_bp.modules.is_empty() {
+        atom.energy = (atom.energy + cost).min(atom.energy_max);
+        atom.cooldown = 0;
+        return None;
+    }
+    let child_bp = parent_bp.mutate_child(world.seed.0, tick, entity_id);
+    let (body, traits) = child_bp.modules_relative_with_traits();
+    if body.is_empty()
+        || !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus)
+        || !body.iter().any(|(_, _, m)| *m == ModuleId::Digest)
+    {
+        atom.energy = (atom.energy + cost).min(atom.energy_max);
+        atom.cooldown = 0;
+        return None;
+    }
+    let mut child = Atom::from_body_with_traits(wx, gy, tank, body, traits);
     child.energy = (cost * 0.5).clamp(1.0, child.energy_max);
     child.cooldown = FUNGUS_SPORE_PERIOD;
     pin_plant_pose(&mut child);
@@ -440,10 +455,11 @@ fn hash_u64(a: u64, b: u64, c: u64, salt: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blueprint::PixelTraits;
+    use crate::blueprint::{Genome, PixelTraits};
     use crate::cell::Sat;
     use crate::chunk::ChunkCoord;
     use crate::organism::BodyModule;
+    use crate::plant::apply_genome;
 
     fn litter_plot() -> World {
         let mut w = World::new(5);

@@ -1196,8 +1196,9 @@ pub fn pick_sprout_column(world: &World, atom: &Atom) -> Option<i32> {
 /// Vegetative sucker: child plant on moist land at a lateral runner tip.
 ///
 /// Requires painted lateral root, enough roots, energy, and cooldown.
-/// Child chassis follows the parent (stemless stays stemless); genome is
-/// mutated then re-synced so alloc can't reintroduce a trunk.
+/// Child chassis follows the parent (stemless stays stemless). Wave R:
+/// traits/structure mutate via [`Blueprint::mutate_child`], then alloc is
+/// re-synced so a stemless parent cannot invent a trunk.
 pub fn try_vegetative_sprout(
     world: &World,
     atom: &mut Atom,
@@ -1224,12 +1225,32 @@ pub fn try_vegetative_sprout(
     atom.energy -= cost;
     atom.cooldown = LAND_SPROUT_PERIOD;
 
-    let body = sprout_body(atom);
-    let mut child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
-    sync_alloc_to_body(&mut child_genome, &body);
+    let chassis = sprout_body(atom);
+    let parent_bp = atom.chassis_mutation_blueprint(&chassis);
+    if parent_bp.modules.is_empty() {
+        atom.energy = (atom.energy + cost).min(atom.energy_max);
+        atom.cooldown = 0;
+        return None;
+    }
+    let child_bp = parent_bp.mutate_child(world.seed.0, tick, entity_id);
+    let (mut body, mut traits) = child_bp.modules_relative_with_traits();
+    if body.is_empty() || !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+        atom.energy = (atom.energy + cost).min(atom.energy_max);
+        atom.cooldown = 0;
+        return None;
+    }
+    // Habit lock: stemless parents must not gain Stem via kind-swap.
+    if stem_count(atom) == 0 {
+        for ((_, _, m), t) in body.iter_mut().zip(traits.iter_mut()) {
+            if *m == ModuleId::Stem {
+                *m = ModuleId::Photosystem;
+                // Prefer leaf-leaning absorb if traits were stem-ish defaults.
+                t.absorb_bias = t.absorb_bias.max(0.05);
+            }
+        }
+    }
     // Child inherits spawn-tank size, not the parent's root-inflated max.
-    let mut child = Atom::from_body(wx, gy, tank, body);
-    apply_genome(&mut child, child_genome);
+    let mut child = Atom::from_body_with_traits(wx, gy, tank, body, traits);
     sync_alloc_on_atom(&mut child);
     child.energy = (cost * 0.5).clamp(1.0, child.energy_max);
     child.cooldown = LAND_SPROUT_PERIOD;
