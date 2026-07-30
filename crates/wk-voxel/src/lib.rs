@@ -67,7 +67,10 @@ pub use failure::{
     shear_weaken_debris, wet_repose_loosens, FailureConfig, BONE_CRUSH_SIGMA_MIN,
     COMPACTION_SIGMA_MIN,
 };
-pub use fungi::{add_soft_litter, dissolve_corpse_to_organic, is_fungus, soft_litter_at};
+pub use fungi::{
+    add_soft_litter, deposit_organic_on_surface, dissolve_corpse_to_organic, is_fungus,
+    soft_litter_at,
+};
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
     wet_air_column_beside, FaceStress, GeotechMap, GeotechOverlayMode, GEOTECH_MAP_PERIOD,
@@ -77,8 +80,9 @@ pub use grid::World;
 // HydroOverrides is defined in wk-material; re-export for app convenience.
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
-    bone_column_capacity, fracture_overloaded_bones, Atom, BodyModule, Corpse, ModuleId,
-    OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS,
+    bone_column_capacity, fracture_overloaded_bones, stem_integrity_failing_index, topple_stem_at,
+    Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,
+    CORPSE_SETTLE_WATER_TICKS, DEAD_DECAY_PER_TICK, INTEGRITY_TOPPLE_THRESHOLD, MAX_ATOMS,
     MAX_CORPSES,
 };
 pub use plant::{

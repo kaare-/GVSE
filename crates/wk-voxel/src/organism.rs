@@ -25,8 +25,9 @@ use crate::blueprint::{
 };
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
-    digest_budget_units, digest_labile, dissolve_corpse_to_organic, fungus_should_hibernate,
-    fungus_upkeep, is_fungus, is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
+    add_soft_litter, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
+    fungus_should_hibernate, fungus_upkeep, is_fungus, is_fungus_seated, try_spore,
+    FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -79,6 +80,10 @@ const PLANT_LIFE_TICKS: u64 = DEMO_DAY_TICKS * 16;
 
 /// Land / fungus corpses rest this long before becoming Organic (~0.75 demo day).
 pub const CORPSE_SETTLE_LAND_TICKS: u32 = 900;
+/// Stem integrity at/below this fails (Wave V topple).
+pub const INTEGRITY_TOPPLE_THRESHOLD: f32 = 0.0;
+/// Standing-dead Stem integrity drain per corpse tick (~500 ticks to fail).
+pub const DEAD_DECAY_PER_TICK: f32 = 0.002;
 /// Plankton corpses linger longer so bloom deaths leave a visible carpet.
 pub const CORPSE_SETTLE_WATER_TICKS: u32 = 2_400;
 
@@ -203,6 +208,10 @@ pub struct Atom {
     /// Cached aggregate over body + traits. Recompute on structural change.
     #[serde(default)]
     pub body_plan: BodyPlan,
+    /// Per-module structural integrity aligned with [`Self::body`] (Wave V).
+    /// Empty means every module is at `1.0`. Not a gene — bookkeeping only.
+    #[serde(default)]
+    pub body_integrity: Vec<f32>,
 }
 
 impl Atom {
@@ -231,6 +240,7 @@ impl Atom {
             body,
             body_traits,
             body_plan: BodyPlan::default(),
+            body_integrity: Vec::new(),
         };
         a.recompute_body_plan();
         a
@@ -241,6 +251,7 @@ impl Atom {
         if !body.is_empty() {
             a.body = body;
             a.body_traits = vec![PixelTraits::default(); a.body.len()];
+            a.body_integrity.clear();
         }
         a.recompute_body_plan();
         a
@@ -273,6 +284,13 @@ impl Atom {
         self.body_traits.truncate(self.body.len());
     }
 
+    pub(crate) fn align_body_integrity(&mut self) {
+        while self.body_integrity.len() < self.body.len() {
+            self.body_integrity.push(1.0);
+        }
+        self.body_integrity.truncate(self.body.len());
+    }
+
     /// Trait payload for body index `i` (default if missing).
     pub fn trait_at(&self, i: usize) -> PixelTraits {
         self.body_traits
@@ -281,11 +299,22 @@ impl Atom {
             .unwrap_or_else(PixelTraits::default)
     }
 
+    /// Structural integrity for body index `i` (`1.0` when unset).
+    pub fn integrity_at(&self, i: usize) -> f32 {
+        self.body_integrity.get(i).copied().unwrap_or(1.0)
+    }
+
     /// Append a module + traits and refresh aggregates.
     pub fn push_module(&mut self, dx: i16, dy: i16, module: ModuleId, traits: PixelTraits) {
         self.align_body_traits();
+        if !self.body_integrity.is_empty() {
+            self.align_body_integrity();
+        }
         self.body.push((dx, dy, module));
         self.body_traits.push(traits);
+        if !self.body_integrity.is_empty() {
+            self.body_integrity.push(1.0);
+        }
         self.recompute_body_plan();
     }
 
@@ -548,8 +577,102 @@ pub fn fracture_overloaded_bones(world: &mut World, atom: &mut Atom) -> bool {
     if idx < atom.body_traits.len() {
         atom.body_traits.remove(idx);
     }
+    if idx < atom.body_integrity.len() {
+        atom.body_integrity.remove(idx);
+    }
     atom.recompute_body_plan();
     true
+}
+
+/// Index of the lowest (`dy`) Stem at/below [`INTEGRITY_TOPPLE_THRESHOLD`].
+pub fn stem_integrity_failing_index(body: &[BodyModule], integrity: &[f32]) -> Option<usize> {
+    let mut best: Option<(i16, usize)> = None;
+    for (i, &(_, dy, m)) in body.iter().enumerate() {
+        if m != ModuleId::Stem {
+            continue;
+        }
+        let integ = integrity.get(i).copied().unwrap_or(1.0);
+        if integ > INTEGRITY_TOPPLE_THRESHOLD {
+            continue;
+        }
+        match best {
+            None => best = Some((dy, i)),
+            Some((bdy, _)) if dy < bdy => best = Some((dy, i)),
+            _ => {}
+        }
+    }
+    best.map(|(_, i)| i)
+}
+
+/// Topple a standing-dead trunk at the failing Stem (Wave V).
+///
+/// Removes the fail Stem and every module with `dy >= fail_dy`, deposits
+/// Organic on the ground in a deterministic L/R band, and returns the
+/// world cells that lost a Stem (for epiphyte unseat).
+pub fn topple_stem_at(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    body: &mut Vec<BodyModule>,
+    integrity: &mut Vec<f32>,
+    tick: u64,
+    salt: u32,
+) -> Vec<(i32, i32)> {
+    while integrity.len() < body.len() {
+        integrity.push(1.0);
+    }
+    integrity.truncate(body.len());
+    let Some(fail_i) = stem_integrity_failing_index(body, integrity) else {
+        return Vec::new();
+    };
+    let fail_dy = body[fail_i].1;
+    let dir = if topple_side_hash(gx, gy, tick, salt) & 1 == 0 {
+        -1i32
+    } else {
+        1i32
+    };
+
+    let mut fallen_stems = Vec::new();
+    let mut keep_body = Vec::with_capacity(body.len());
+    let mut keep_integ = Vec::with_capacity(body.len());
+    let mut band_i = 0i32;
+    for (i, &(dx, dy, mid)) in body.iter().enumerate() {
+        if dy < fail_dy {
+            keep_body.push((dx, dy, mid));
+            keep_integ.push(integrity.get(i).copied().unwrap_or(1.0));
+            continue;
+        }
+        if mid == ModuleId::Stem {
+            let wx = world.wrap_x(gx + dx as i32);
+            let wy = gy + dy as i32;
+            fallen_stems.push((wx, wy));
+        }
+        // Horizontal fallen-log band on the ground (not mid-air pillars).
+        let col = world.wrap_x(gx + dir.saturating_mul(band_i));
+        crate::fungi::deposit_organic_on_surface(world, col, gy);
+        band_i += 1;
+    }
+    let n_fallen = body.len().saturating_sub(keep_body.len());
+    if n_fallen > 0 {
+        let units = (n_fallen as u16).saturating_mul(2).min(48);
+        add_soft_litter(world, gx, units);
+    }
+    *body = keep_body;
+    *integrity = keep_integ;
+    fallen_stems
+}
+
+fn topple_side_hash(gx: i32, gy: i32, tick: u64, salt: u32) -> u64 {
+    let mut x = (gx as u64)
+        .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+        .wrapping_add(gy as u64)
+        .wrapping_add(tick)
+        .wrapping_add(salt as u64)
+        .wrapping_add(0x70B1_E11);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x
 }
 
 /// Dead body: keeps drawing (grey), sinks / rests, then becomes Organic.
@@ -565,23 +688,45 @@ pub struct Corpse {
     /// Plant or fungus — pinned on land; plankton sinks in water.
     pub land: bool,
     pub last_water_top: Option<i32>,
+    /// Per-module integrity (Wave V). Empty ⇒ all `1.0`.
+    #[serde(default)]
+    pub body_integrity: Vec<f32>,
 }
 
 impl Corpse {
     pub fn from_atom(atom: &Atom) -> Self {
-        let land = is_land_plant(atom) || is_fungus(atom);
+        let land = is_land_plant(atom) || is_fungus(atom) || is_epiphyte(atom);
         // Roots → Organic in soil; leaves → falling Organic litter.
         // Lingering grey corpse keeps stem / nucleus / crown only.
-        let body = if is_land_plant(atom) {
-            atom.body
-                .iter()
-                .copied()
-                .filter(|(_, _, m)| {
-                    *m != ModuleId::Root && *m != ModuleId::Photosystem
-                })
-                .collect()
+        let (body, body_integrity) = if is_land_plant(atom) {
+            let mut body = Vec::new();
+            let mut integ = Vec::new();
+            let mut any_integ = false;
+            for (i, m) in atom.body.iter().enumerate() {
+                if m.2 == ModuleId::Root || m.2 == ModuleId::Photosystem {
+                    continue;
+                }
+                body.push(*m);
+                let v = atom.integrity_at(i);
+                if (v - 1.0).abs() > 1e-6 {
+                    any_integ = true;
+                }
+                integ.push(v);
+            }
+            if any_integ || !atom.body_integrity.is_empty() {
+                (body, integ)
+            } else {
+                (body, Vec::new())
+            }
         } else {
-            atom.body.clone()
+            (
+                atom.body.clone(),
+                if atom.body_integrity.is_empty() {
+                    Vec::new()
+                } else {
+                    atom.body_integrity.clone()
+                },
+            )
         };
         Self {
             gx: atom.gx,
@@ -593,6 +738,7 @@ impl Corpse {
             settled_ticks: 0,
             land,
             last_water_top: atom.last_water_top,
+            body_integrity,
         }
     }
 
@@ -1173,13 +1319,39 @@ impl OrganismStore {
         self.corpses.push(corpse);
     }
 
-    /// Sink / pin corpses; after settle, paint Organic + soft litter.
+    /// Sink / pin corpses; stem integrity topple; after settle → Organic.
     fn step_corpses(&mut self, world: &mut World) {
         let mut dissolve: Vec<usize> = Vec::new();
+        let mut fallen_stems: std::collections::HashSet<(i32, i32)> =
+            std::collections::HashSet::new();
+        let tick = world.tick;
         for (i, corpse) in self.corpses.iter_mut().enumerate() {
             corpse.ticks = corpse.ticks.saturating_add(1);
             if corpse.land {
                 pin_corpse_land(corpse);
+                decay_corpse_stem_integrity(corpse);
+                let fallen = topple_stem_at(
+                    world,
+                    corpse.gx,
+                    corpse.gy,
+                    &mut corpse.body,
+                    &mut corpse.body_integrity,
+                    tick,
+                    i as u32,
+                );
+                for c in fallen {
+                    fallen_stems.insert(c);
+                }
+                // Empty standing-dead after a full topple — dissolve soon.
+                if corpse.body.is_empty()
+                    || !corpse.body.iter().any(|(_, _, m)| *m == ModuleId::Stem)
+                {
+                    // Keep nucleus stump until settle, unless nothing left.
+                    if corpse.body.is_empty() {
+                        dissolve.push(i);
+                        continue;
+                    }
+                }
                 corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
                 if corpse.settled_ticks >= CORPSE_SETTLE_LAND_TICKS {
                     dissolve.push(i);
@@ -1204,6 +1376,26 @@ impl OrganismStore {
             }
         }
 
+        // Wave V: riders on fallen Stem cells lose their seat immediately.
+        if !fallen_stems.is_empty() {
+            for atom in &mut self.atoms {
+                if !is_epiphyte(atom) {
+                    continue;
+                }
+                let unseated = atom.body.iter().any(|&(dx, dy, mid)| {
+                    if mid != ModuleId::Holdfast {
+                        return false;
+                    }
+                    let wx = world.wrap_x(atom.gx + dx as i32);
+                    let wy = atom.gy + dy as i32;
+                    fallen_stems.contains(&(wx, wy))
+                });
+                if unseated {
+                    atom.drought_ticks = EPIPHYTE_UNSEATED_MAX;
+                }
+            }
+        }
+
         dissolve.sort_unstable();
         dissolve.dedup();
         for &i in dissolve.iter().rev() {
@@ -1213,6 +1405,19 @@ impl OrganismStore {
             if i < self.corpses.len() {
                 self.corpses.swap_remove(i);
             }
+        }
+    }
+}
+
+fn decay_corpse_stem_integrity(corpse: &mut Corpse) {
+    while corpse.body_integrity.len() < corpse.body.len() {
+        corpse.body_integrity.push(1.0);
+    }
+    corpse.body_integrity.truncate(corpse.body.len());
+    for (i, (_, _, m)) in corpse.body.iter().enumerate() {
+        if *m == ModuleId::Stem {
+            corpse.body_integrity[i] =
+                (corpse.body_integrity[i] - DEAD_DECAY_PER_TICK).max(0.0);
         }
     }
 }

@@ -98,8 +98,16 @@ Features:
 - Editor: `0` Holdfast brush, `Y` minimal epiphyte template
 - Scenario `e40_epiphyte_seat`
 
-**Deferred (Wave V+):** stem `integrity`, topple / fallen log, smother
-shade-kill chain, `stem_wetness` drink, attach/leave genes, ghost roots.
+**Wave V — Standing-dead topple *(landed)*:**
+- `Atom` / `Corpse.body_integrity` (empty ⇒ `1.0`); `SIM_SCHEMA_VERSION` 4
+- Standing-dead Stem drain `DEAD_DECAY_PER_TICK`; fail ≤ `INTEGRITY_TOPPLE_THRESHOLD`
+- `topple_stem_at`: break at lowest failing Stem, drop Organic in L/R ground band
+- Epiphytes on fallen Stem cells force-unseat
+- Scenario `e42_standing_dead_stem_topples`
+
+**Deferred (Wave W+):** living stem load drain / recharge, fungal
+digest→integrity, smother shade-kill chain, `stem_wetness` drink,
+attach/leave genes, ghost roots, fallen-log animation.
 
 ## Explicitly out of Core for voxel
 

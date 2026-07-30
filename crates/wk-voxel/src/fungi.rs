@@ -422,6 +422,11 @@ pub fn dissolve_corpse_to_organic(
     }
 }
 
+/// Place one Organic on the first dry Air above solid under `(gx, gy)`.
+pub fn deposit_organic_on_surface(world: &mut World, gx: i32, gy: i32) {
+    deposit_organic_cell(world, gx, gy);
+}
+
 fn deposit_organic_cell(world: &mut World, gx: i32, gy: i32) {
     let gx = world.wrap_x(gx);
     let mut y = gy;
