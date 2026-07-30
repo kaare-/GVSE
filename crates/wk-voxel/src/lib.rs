@@ -68,8 +68,8 @@ pub use failure::{
     COMPACTION_SIGMA_MIN,
 };
 pub use fungi::{
-    add_soft_litter, deposit_organic_on_surface, dissolve_corpse_to_organic, is_fungus,
-    soft_litter_at,
+    add_soft_litter, collect_fungus_tissue_world_cells, deposit_organic_on_surface,
+    dissolve_corpse_to_organic, is_fungus, soft_litter_at,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
@@ -82,8 +82,8 @@ pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
     bone_column_capacity, fracture_overloaded_bones, stem_integrity_failing_index, topple_stem_at,
     Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,
-    CORPSE_SETTLE_WATER_TICKS, DEAD_DECAY_PER_TICK, INTEGRITY_TOPPLE_THRESHOLD, MAX_ATOMS,
-    MAX_CORPSES,
+    CORPSE_SETTLE_WATER_TICKS, DEAD_DECAY_PER_TICK, FUNGAL_DECAY_PER_TICK,
+    INTEGRITY_TOPPLE_THRESHOLD, MAX_ATOMS, MAX_CORPSES,
 };
 pub use plant::{
     collect_live_root_world_cells, collect_live_stem_world_cells, find_fungus_slot, find_plant_slot,

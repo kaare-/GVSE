@@ -15,4 +15,5 @@ mod e18_bone_persists_after_muscle_rots;
 mod e19_bone_fragility;
 mod e40_epiphyte_seat;
 mod e42_standing_dead_stem_topples;
+mod e42b_fungal_rot_accelerates_topple;
 mod helpers;

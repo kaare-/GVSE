@@ -25,9 +25,9 @@ use crate::blueprint::{
 };
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
-    add_soft_litter, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
-    fungus_should_hibernate, fungus_upkeep, is_fungus, is_fungus_seated, try_spore,
-    FUNGUS_HIBERNATE_MAX_TICKS,
+    add_soft_litter, collect_fungus_tissue_world_cells, digest_budget_units, digest_labile,
+    dissolve_corpse_to_organic, fungus_should_hibernate, fungus_upkeep, is_fungus,
+    is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -84,6 +84,9 @@ pub const CORPSE_SETTLE_LAND_TICKS: u32 = 900;
 pub const INTEGRITY_TOPPLE_THRESHOLD: f32 = 0.0;
 /// Standing-dead Stem integrity drain per corpse tick (~500 ticks to fail).
 pub const DEAD_DECAY_PER_TICK: f32 = 0.002;
+/// Extra Stem integrity drain when Digest/Hypha occupies the Stem cell
+/// (Wave W fungal rot — ~50 ticks to fail from full when alone).
+pub const FUNGAL_DECAY_PER_TICK: f32 = 0.02;
 /// Plankton corpses linger longer so bloom deaths leave a visible carpet.
 pub const CORPSE_SETTLE_WATER_TICKS: u32 = 2_400;
 
@@ -1325,11 +1328,13 @@ impl OrganismStore {
         let mut fallen_stems: std::collections::HashSet<(i32, i32)> =
             std::collections::HashSet::new();
         let tick = world.tick;
+        // Wave W: Digest/Hypha tissue on a Stem cell accelerates rot.
+        let fungus_cells = collect_fungus_tissue_world_cells(world, &self.atoms);
         for (i, corpse) in self.corpses.iter_mut().enumerate() {
             corpse.ticks = corpse.ticks.saturating_add(1);
             if corpse.land {
                 pin_corpse_land(corpse);
-                decay_corpse_stem_integrity(corpse);
+                decay_corpse_stem_integrity(corpse, &fungus_cells, |x| world.wrap_x(x));
                 let fallen = topple_stem_at(
                     world,
                     corpse.gx,
@@ -1409,16 +1414,28 @@ impl OrganismStore {
     }
 }
 
-fn decay_corpse_stem_integrity(corpse: &mut Corpse) {
+fn decay_corpse_stem_integrity<F>(
+    corpse: &mut Corpse,
+    fungus_cells: &std::collections::HashSet<(i32, i32)>,
+    wrap_x: F,
+) where
+    F: Fn(i32) -> i32,
+{
     while corpse.body_integrity.len() < corpse.body.len() {
         corpse.body_integrity.push(1.0);
     }
     corpse.body_integrity.truncate(corpse.body.len());
-    for (i, (_, _, m)) in corpse.body.iter().enumerate() {
-        if *m == ModuleId::Stem {
-            corpse.body_integrity[i] =
-                (corpse.body_integrity[i] - DEAD_DECAY_PER_TICK).max(0.0);
+    for (i, &(dx, dy, m)) in corpse.body.iter().enumerate() {
+        if m != ModuleId::Stem {
+            continue;
         }
+        let mut drain = DEAD_DECAY_PER_TICK;
+        let wx = wrap_x(corpse.gx + dx as i32);
+        let wy = corpse.gy + dy as i32;
+        if fungus_cells.contains(&(wx, wy)) {
+            drain += FUNGAL_DECAY_PER_TICK;
+        }
+        corpse.body_integrity[i] = (corpse.body_integrity[i] - drain).max(0.0);
     }
 }
 
