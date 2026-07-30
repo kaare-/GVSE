@@ -41,8 +41,8 @@ fn default_buoyancy_bias() -> f32 {
 }
 
 /// Per-pixel gene payload (Wave K). Every painted module carries these
-/// scalars; aggregates form the [`BodyPlan`]. Wave M binds live physics
-/// to those aggregates (upkeep, photo, drink, buoyancy, repro).
+/// scalars; aggregates form the [`BodyPlan`]. Wave M/O bind live physics
+/// to those aggregates (upkeep, photo, drink, buoyancy, repro, plant knobs).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PixelTraits {
     #[serde(default = "one")]
@@ -68,6 +68,22 @@ pub struct PixelTraits {
     /// Matches vestigial [`Genome::buoyancy_bias`] default (floater).
     #[serde(default = "default_buoyancy_bias")]
     pub buoyancy_bias: f32,
+    /// Nucleus habit — surplus toward stem (Wave O).
+    #[serde(default = "default_alloc_stem")]
+    pub alloc_stem: f32,
+    #[serde(default = "default_alloc_leaf")]
+    pub alloc_leaf: f32,
+    #[serde(default = "default_alloc_root")]
+    pub alloc_root: f32,
+    /// Root dive lean (Wave O).
+    #[serde(default = "default_root_depth_bias")]
+    pub root_depth_bias: f32,
+    /// Photosystem dim-light harvest lean (Wave O).
+    #[serde(default = "default_shade_efficiency")]
+    pub shade_efficiency: f32,
+    /// Digest / Hypha litter rate (Wave O).
+    #[serde(default = "default_digest_rate")]
+    pub digest_rate: f32,
 }
 
 impl Default for PixelTraits {
@@ -83,6 +99,12 @@ impl Default for PixelTraits {
             clone_fidelity_bias: default_clone_fidelity_bias(),
             reproduce_at_bias: default_reproduce_at_bias(),
             buoyancy_bias: default_buoyancy_bias(),
+            alloc_stem: default_alloc_stem(),
+            alloc_leaf: default_alloc_leaf(),
+            alloc_root: default_alloc_root(),
+            root_depth_bias: default_root_depth_bias(),
+            shade_efficiency: default_shade_efficiency(),
+            digest_rate: default_digest_rate(),
         }
     }
 }
@@ -111,8 +133,12 @@ impl PlacedModule {
     }
 }
 
-/// Live genes for Atom + land plant (Set D). Older postcard files get
-/// plant fields via `#[serde(default)]`.
+/// Vestigial organism-wide gene bag (Tab / blueprint mirror).
+///
+/// Wave O: live plant/fungus reads come from [`PixelTraits`] /
+/// [`BodyPlan`]. `Genome` remains on blueprints and as a sync target for
+/// Tab → Plants; [`crate::plant::apply_genome`] paints traits then
+/// recomputes the body plan.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Genome {
     pub metabolic_rate: f32,
@@ -526,6 +552,12 @@ impl Blueprint {
                 t.clone_fidelity_bias = jitter(t.clone_fidelity_bias, 0.05, 1.0);
                 t.reproduce_at_bias = jitter(t.reproduce_at_bias, 0.05, 1.0);
                 t.buoyancy_bias = jitter(t.buoyancy_bias, 0.0, 1.0);
+                t.alloc_stem = jitter(t.alloc_stem, 0.0, 1.0);
+                t.alloc_leaf = jitter(t.alloc_leaf, 0.0, 1.0);
+                t.alloc_root = jitter(t.alloc_root, 0.0, 1.0);
+                t.root_depth_bias = jitter(t.root_depth_bias, 0.0, 1.0);
+                t.shade_efficiency = jitter(t.shade_efficiency, 0.0, 1.0);
+                t.digest_rate = jitter(t.digest_rate, 0.05, 2.0);
             }
         }
 
@@ -589,6 +621,32 @@ impl Blueprint {
 
         child.name = format!("{}-child", self.name);
         child.notes = format!("mutated from {} @ tick {tick}", self.name);
+        // Keep vestigial Genome mirror aligned with pixel aggregates.
+        let plan = child.body_plan();
+        child.genome.clone_fidelity = plan.clone_fidelity;
+        child.genome.reproduce_at = plan.reproduce_at;
+        child.genome.buoyancy_bias = plan.buoyancy_bias;
+        child.genome.alloc_stem = plan.alloc_stem;
+        child.genome.alloc_leaf = plan.alloc_leaf;
+        child.genome.alloc_root = plan.alloc_root;
+        child.genome.root_depth_bias = plan.root_depth_bias;
+        child.genome.shade_efficiency = plan.shade_efficiency;
+        child.genome.digest_rate = plan.digest_rate;
+        child.genome.leaf_absorb = if plan.photo_capacity > 0.0 {
+            let n = child
+                .modules
+                .iter()
+                .filter(|m| m.module == ModuleId::Photosystem)
+                .count()
+                .max(1) as f32;
+            (plan.photo_capacity / n).clamp(0.05, 1.0)
+        } else {
+            child.genome.leaf_absorb
+        };
+        if plan.pixel_count > 0 {
+            child.genome.metabolic_rate =
+                (plan.metabolic_rate / plan.pixel_count as f32).clamp(0.05, 4.0);
+        }
         child
     }
 

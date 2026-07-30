@@ -33,6 +33,10 @@ models and missing postcard fields upgrade cleanly:
 | `clone_fidelity_bias` | Mutation tightness |
 | `reproduce_at_bias` | Repro energy gate lean |
 | `buoyancy_bias` | Float / sink lean |
+| `alloc_stem` / `alloc_leaf` / `alloc_root` | Nucleus growth habit (Wave O) |
+| `root_depth_bias` | Root dive lean (Wave O) |
+| `shade_efficiency` | Photosystem dim-light lean (Wave O) |
+| `digest_rate` | Digest / Hypha litter rate (Wave O) |
 
 Kinds ignore traits they do not use; unused fields stay inert until
 a physics wave binds them.
@@ -82,10 +86,6 @@ Spawn copies painted traits onto `Atom.body_traits`. Aggregates drive:
 | Root drink energy | mean Root `drink_bias` |
 | Leaf shade cast | `leaf_absorb_effective()` (painted absorb, else `Genome::leaf_absorb`) |
 
-Plant-only knobs (`alloc_*`, `root_depth_bias`, `shade_efficiency`,
-`digest_rate`) still live on the vestigial `Genome`. Fission jitters
-per-pixel traits then recomputes the body plan.
-
 `PixelTraits` defaults for buoyancy / fidelity / repro match the old
 `Genome` defaults (floater, 0.9, 0.85) so unpainted bodies behave as
 before.
@@ -98,6 +98,25 @@ Live `ModuleId::Bone` capacity =
 Overloaded Bone fractures (drops world `Sand`, removes the pixel).
 Dead world Bone crush is a separate opt-in geotech pass — see
 [`VOXEL_BIOLOGY.md`](../VOXEL_BIOLOGY.md).
+
+### Wave O — plant / fungus knobs on pixels
+
+Remaining `Genome` plant fields are painted onto kinded traits and
+aggregated on `BodyPlan`. Live growth / shade / digest **read the plan**,
+not `atom.genome` (which stays a Tab / blueprint mirror).
+
+| Knob | Pixel home | BodyPlan aggregate |
+|------|------------|--------------------|
+| `alloc_stem/leaf/root` | Nucleus | Mean Nucleus (else mean all) |
+| `root_depth_bias` | Root | Mean Root (default 0.55) |
+| `shade_efficiency` | Photosystem | Mean Photosystem (default 0.40) |
+| `digest_rate` | Digest / Hypha | Mean of those kinds (default 0.8) |
+| `leaf_absorb` (Tab) | Photosystem `absorb_bias` | via `photo_capacity` / `leaf_absorb_effective` |
+
+`apply_genome` writes Tab / blueprint values into the matching pixels,
+then `recompute_body_plan` mirrors aggregates back onto `Genome`.
+Studio Gene Inspector exposes the new sliders per kind. Full deletion of
+the `Genome` struct is deferred until blueprint postcard migration.
 
 ## Studio surfaces
 
