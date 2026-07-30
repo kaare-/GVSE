@@ -106,6 +106,10 @@ impl CreatureEditor {
             self.brush = ModuleId::Skin;
             self.tool = EditorTool::Paint;
         }
+        if is_key_pressed(KeyCode::Key0) {
+            self.brush = ModuleId::Holdfast;
+            self.tool = EditorTool::Paint;
+        }
         if is_key_pressed(KeyCode::E) {
             self.tool = EditorTool::Erase;
         }
@@ -133,6 +137,14 @@ impl CreatureEditor {
             self.preview_child = None;
             self.status =
                 "Minimal fungus template (spawn on Organic / wet sand / any solid)".into();
+        }
+        if is_key_pressed(KeyCode::Y) {
+            self.blueprint = Blueprint::minimal_epiphyte();
+            self.name_buf = "epiphyte".into();
+            self.selected = None;
+            self.preview_child = None;
+            self.status =
+                "Epiphyte template — seat Holdfast on a host Stem (0 = Holdfast brush)".into();
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
             self.blueprint.name = self.name_buf.clone();
@@ -357,6 +369,7 @@ impl CreatureEditor {
             ModuleId::Bone,
             ModuleId::Muscle,
             ModuleId::Skin,
+            ModuleId::Holdfast,
         ]
         .iter()
         .enumerate()

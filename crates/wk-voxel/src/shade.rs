@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use crate::blueprint::Genome;
 use crate::organism::{Atom, ModuleId};
-use crate::plant::is_land_plant;
+use crate::plant::{is_epiphyte, is_land_plant};
 
 /// Columns left/right that can cast shade onto a plant.
 pub const SHADE_RADIUS: i32 = 3;
@@ -100,7 +100,7 @@ pub fn record_canopy(
 pub fn build_canopy_index(atoms: &[Atom]) -> CanopyIndex {
     let mut index = CanopyIndex::default();
     for (id, atom) in atoms.iter().enumerate() {
-        if !is_land_plant(atom) {
+        if !is_land_plant(atom) && !is_epiphyte(atom) {
             continue;
         }
         let n_photo = atom.photosystem_count();

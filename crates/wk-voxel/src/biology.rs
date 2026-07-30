@@ -24,7 +24,8 @@ pub fn module_death_material(module: ModuleId) -> MaterialId {
         | ModuleId::Digest
         | ModuleId::Hypha
         | ModuleId::Root
-        | ModuleId::Stem => MaterialId::Organic,
+        | ModuleId::Stem
+        | ModuleId::Holdfast => MaterialId::Organic,
     }
 }
 
@@ -39,6 +40,10 @@ mod tests {
         assert_eq!(module_death_material(ModuleId::Skin), MaterialId::Skin);
         assert_eq!(module_death_material(ModuleId::Root), MaterialId::Organic);
         assert_eq!(module_death_material(ModuleId::Stem), MaterialId::Organic);
+        assert_eq!(
+            module_death_material(ModuleId::Holdfast),
+            MaterialId::Organic
+        );
         assert_eq!(
             module_death_material(ModuleId::Photosystem),
             MaterialId::Organic

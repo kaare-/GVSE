@@ -155,7 +155,7 @@ pub fn modulate_module_rgb(module: ModuleId, traits: &PixelTraits) -> (u8, u8, u
                 mul_channel(b, moist * darken * 0.95 + 0.05),
             )
         }
-        ModuleId::Stem => {
+        ModuleId::Stem | ModuleId::Holdfast => {
             let mass = trait_scale(traits.mass * traits.density, 1.0);
             let darken = 1.12 - 0.12 * mass;
             (
@@ -322,7 +322,7 @@ const MUTATION_SIGMA: f32 = 0.12;
 /// plants don't casually sprout Digest, etc.
 pub fn kind_swap_partners(module: ModuleId) -> &'static [ModuleId] {
     match module {
-        ModuleId::Nucleus => &[],
+        ModuleId::Nucleus | ModuleId::Holdfast => &[],
         ModuleId::Photosystem => &[ModuleId::Stem, ModuleId::Skin],
         ModuleId::Stem => &[ModuleId::Photosystem, ModuleId::Root],
         ModuleId::Root => &[ModuleId::Stem],
@@ -532,6 +532,43 @@ impl Blueprint {
         }
     }
 
+    /// Minimal epiphyte (E2): pink Holdfast + nucleus + leaf (no Root).
+    ///
+    /// Seat the Holdfast on a host Stem cell at spawn; relative offsets
+    /// place Holdfast at nucleus, leaf above.
+    pub fn minimal_epiphyte() -> Self {
+        Self {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![
+                PlacedModule {
+                    x: 8,
+                    y: 5,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Holdfast,
+                    traits: PixelTraits::default(),
+                },
+                PlacedModule {
+                    x: 8,
+                    y: 5,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Nucleus,
+                    traits: PixelTraits::default(),
+                },
+                PlacedModule {
+                    x: 8,
+                    y: 6,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                    traits: PixelTraits::default(),
+                },
+            ],
+            name: "epiphyte".into(),
+            notes: "Set E2 epiphyte — Holdfast on host Stem".into(),
+        }
+    }
+
     pub fn nucleus_count(&self) -> usize {
         self.modules
             .iter()
@@ -560,11 +597,19 @@ impl Blueprint {
             .count()
     }
 
+    pub fn holdfast_count(&self) -> usize {
+        self.modules
+            .iter()
+            .filter(|m| m.module == ModuleId::Holdfast)
+            .count()
+    }
+
     pub fn is_valid_atom(&self) -> bool {
         self.nucleus_count() >= 1
             && self.photosystem_count() >= 1
             && self.root_count() == 0
             && self.digest_count() == 0
+            && self.holdfast_count() == 0
     }
 
     pub fn is_valid_plant(&self) -> bool {
@@ -573,18 +618,31 @@ impl Blueprint {
             && self.root_count() >= 1
     }
 
-    /// Nucleus + Digest, no root/stem (detritus habit).
+    /// Nucleus + Digest, no root/stem/holdfast (detritus habit).
     pub fn is_valid_fungus(&self) -> bool {
         self.nucleus_count() >= 1
             && self.digest_count() >= 1
-            && !self
-                .modules
-                .iter()
-                .any(|m| matches!(m.module, ModuleId::Root | ModuleId::Stem))
+            && !self.modules.iter().any(|m| {
+                matches!(
+                    m.module,
+                    ModuleId::Root | ModuleId::Stem | ModuleId::Holdfast
+                )
+            })
+    }
+
+    /// Nucleus + Holdfast + Photosystem, no Root (canopy freeloader).
+    pub fn is_valid_epiphyte(&self) -> bool {
+        self.nucleus_count() >= 1
+            && self.holdfast_count() >= 1
+            && self.photosystem_count() >= 1
+            && self.root_count() == 0
     }
 
     pub fn is_valid_creature(&self) -> bool {
-        self.is_valid_atom() || self.is_valid_plant() || self.is_valid_fungus()
+        self.is_valid_atom()
+            || self.is_valid_plant()
+            || self.is_valid_fungus()
+            || self.is_valid_epiphyte()
     }
 
     /// Editor spawn gate: any painted body with a Nucleus (habit rules are
@@ -943,6 +1001,43 @@ mod tests {
     }
 
     #[test]
+    fn minimal_epiphyte_is_valid_holdfast_habit() {
+        let bp = Blueprint::minimal_epiphyte();
+        assert!(bp.is_valid_epiphyte());
+        assert!(!bp.is_valid_atom());
+        assert!(!bp.is_valid_plant());
+        assert!(!bp.is_valid_fungus());
+        assert_eq!(bp.holdfast_count(), 1);
+        assert_eq!(ModuleId::Holdfast.rgb(), (0xFF, 0x3D, 0x9A));
+    }
+
+    #[test]
+    fn holdfast_appended_keeps_bone_postcard_index() {
+        // Variant index order (not hex): … Skin=7, Muscle=8, Bone=9, Holdfast=10.
+        #[derive(Serialize, Deserialize, PartialEq, Debug)]
+        #[repr(u8)]
+        enum Probe {
+            Nucleus = 0x00,
+            Photosystem = 0x01,
+            Digest = 0x0A,
+            Hypha = 0x0B,
+            Root = 0x0D,
+            Stem = 0x0E,
+            Skin = 0x13,
+            Muscle = 0x14,
+            Bone = 0x15,
+            Holdfast = 0x0F,
+        }
+        let bone = postcard::to_allocvec(&Probe::Bone).unwrap();
+        let hold = postcard::to_allocvec(&Probe::Holdfast).unwrap();
+        let live_bone = postcard::to_allocvec(&ModuleId::Bone).unwrap();
+        let live_hold = postcard::to_allocvec(&ModuleId::Holdfast).unwrap();
+        assert_eq!(bone, live_bone, "Bone index must stay stable");
+        assert_eq!(hold, live_hold);
+        assert_ne!(bone, hold);
+    }
+
+    #[test]
     fn editor_spawn_allows_any_nucleus_body() {
         let mut bp = Blueprint::atom();
         assert!(bp.can_editor_spawn());
@@ -1205,6 +1300,7 @@ mod tests {
             ModuleId::Bone,
             ModuleId::Muscle,
             ModuleId::Skin,
+            ModuleId::Holdfast,
         ] {
             assert_eq!(
                 modulate_module_rgb(m, &t),
