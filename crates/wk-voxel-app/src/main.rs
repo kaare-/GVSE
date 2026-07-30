@@ -893,7 +893,8 @@ async fn main() {
                 if editor.spawn_picker {
                     let (body, traits) = editor.blueprint.modules_relative_with_traits();
                     // Tab plant-gene knobs apply when the body has land/fungus
-                    // tissues; pure plankton keeps painted blueprint genes.
+                    // tissues; pure plankton keeps painted canvas traits only
+                    // (schema-2 blueprints have no Genome field).
                     let has_land_tissue = body.iter().any(|(_, _, m)| {
                         matches!(
                             m,
@@ -904,13 +905,16 @@ async fn main() {
                         )
                     });
                     let g = if has_land_tissue {
+                        let plan = editor.blueprint.body_plan();
                         let mut g = settings.plant_genes.to_genome();
-                        g.buoyancy_bias = editor.blueprint.genome.buoyancy_bias;
+                        g.buoyancy_bias = plan.buoyancy_bias;
+                        g.clone_fidelity = plan.clone_fidelity;
+                        g.reproduce_at = plan.reproduce_at;
                         // Don't invent tissues the painted body never had.
                         wk_voxel::sync_alloc_to_body(&mut g, &body);
-                        g
+                        Some(g)
                     } else {
-                        editor.blueprint.genome
+                        None
                     };
                     match scene.organisms.spawn_blueprint_free_with_traits(
                         &scene.world,

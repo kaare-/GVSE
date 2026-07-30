@@ -48,7 +48,8 @@ pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use aggregate::{body_plan_from, body_plan_from_kinds, BodyPlan};
 pub use biology::module_death_material;
 pub use blueprint::{
-    kind_swap_partners, modulate_module_rgb, Blueprint, Genome, LaneId, PixelTraits, PlacedModule,
+    kind_swap_partners, modulate_module_rgb, paint_genome_onto_modules, paint_genome_onto_traits,
+    Blueprint, Genome, LaneId, PixelTraits, PlacedModule,
     BLUEPRINT_DIR,
 };
 pub use climate::{

@@ -19,8 +19,8 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 
 ### D1 — Growth & allocation genes *(landed)*
 
-Knobs on Tab `Genome` DTO → Nucleus / Root pixel traits (live reads
-`BodyPlan`):
+Knobs on Tab `Genome` paint DTO → Nucleus / Root pixel traits (live
+reads `BodyPlan`; not stored on `.gvsecrt`):
 
 | Gene | Role |
 |------|------|

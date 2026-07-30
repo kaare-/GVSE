@@ -13,7 +13,13 @@ use serde::{Deserialize, Serialize};
 use crate::aggregate::{body_plan_from, BodyPlan};
 use crate::organism::ModuleId;
 
-pub const BLUEPRINT_SCHEMA_VERSION: u16 = 1;
+/// Postcard schema for `.gvsecrt`.
+///
+/// - **1** — modules (+ Wave K `traits`) + vestigial `Genome` field.
+/// - **2** — modules with traits only; plant knobs live on pixels.
+///   Schema-1 files still load via [`Blueprint::from_bytes`] (genome baked
+///   into traits).
+pub const BLUEPRINT_SCHEMA_VERSION: u16 = 2;
 pub const BLUEPRINT_DIR: &str = "blueprints";
 pub const BLUEPRINT_EXT: &str = "gvsecrt";
 
@@ -232,13 +238,12 @@ impl PlacedModule {
     }
 }
 
-/// Tab / blueprint paint DTO for organism-wide plant knobs.
+/// Tab paint DTO for organism-wide plant knobs (not stored on `.gvsecrt`).
 ///
-/// Wave S: live [`crate::organism::Atom`] no longer stores a genome.
-/// Studio Tab and `.gvsecrt` still carry this bag; spawn / Apply Genes
-/// route through [`crate::plant::apply_genome`] onto [`PixelTraits`] /
-/// [`BodyPlan`]. Mutation is [`Blueprint::mutate_child`], not a Genome
-/// helper.
+/// Wave T: [`Blueprint`] no longer carries a genome field. Studio Tab and
+/// spawn / Apply Genes still build this bag and route through
+/// [`crate::plant::apply_genome`] / [`paint_genome_onto_modules`] onto
+/// [`PixelTraits`] / [`BodyPlan`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Genome {
     pub metabolic_rate: f32,
@@ -340,6 +345,38 @@ impl Genome {
     }
 }
 
+/// Paint one module's traits from a Tab / schema-1 [`Genome`] bag.
+pub fn paint_genome_onto_traits(module: ModuleId, traits: &mut PixelTraits, genome: &Genome) {
+    match module {
+        ModuleId::Nucleus => {
+            traits.alloc_stem = genome.alloc_stem.clamp(0.0, 1.0);
+            traits.alloc_leaf = genome.alloc_leaf.clamp(0.0, 1.0);
+            traits.alloc_root = genome.alloc_root.clamp(0.0, 1.0);
+            traits.clone_fidelity_bias = genome.clone_fidelity.clamp(0.05, 1.0);
+            traits.reproduce_at_bias = genome.reproduce_at.clamp(0.05, 0.99);
+            traits.buoyancy_bias = genome.buoyancy_bias.clamp(0.0, 1.0);
+        }
+        ModuleId::Root => {
+            traits.root_depth_bias = genome.root_depth_bias.clamp(0.0, 1.0);
+        }
+        ModuleId::Photosystem => {
+            traits.shade_efficiency = genome.shade_efficiency.clamp(0.0, 1.0);
+            traits.absorb_bias = genome.leaf_absorb.clamp(0.05, 1.0);
+        }
+        ModuleId::Digest | ModuleId::Hypha => {
+            traits.digest_rate = genome.digest_rate.clamp(0.05, 2.0);
+        }
+        _ => {}
+    }
+}
+
+/// Paint Tab / schema-1 [`Genome`] knobs onto kinded module traits.
+pub fn paint_genome_onto_modules(modules: &mut [PlacedModule], genome: Genome) {
+    for m in modules.iter_mut() {
+        paint_genome_onto_traits(m.module, &mut m.traits, &genome);
+    }
+}
+
 fn hash_u64(seed: u64, a: u64, b: u64, salt: u64) -> u64 {
     let mut x = seed
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
@@ -361,7 +398,6 @@ pub struct Blueprint {
     pub canvas_w: u16,
     pub canvas_h: u16,
     pub modules: Vec<PlacedModule>,
-    pub genome: Genome,
     pub name: String,
     pub notes: String,
 }
@@ -388,7 +424,6 @@ impl Blueprint {
                     traits: PixelTraits::default(),
                     },
             ],
-            genome: Genome::default(),
             name: "atom".into(),
             notes: "Set A Atom".into(),
         }
@@ -447,7 +482,6 @@ impl Blueprint {
                     traits: PixelTraits::default(),
                     },
             ],
-            genome: Genome::default(),
             name: "plant".into(),
             notes: "Set D minimal land plant".into(),
         }
@@ -455,6 +489,10 @@ impl Blueprint {
 
     /// Minimal litter fungus (E): nucleus + digest + a short hypha thread.
     pub fn minimal_fungus() -> Self {
+        let digest_traits = PixelTraits {
+            digest_rate: 1.0,
+            ..PixelTraits::default()
+        };
         Self {
             schema_version: BLUEPRINT_SCHEMA_VERSION,
             canvas_w: 16,
@@ -472,27 +510,23 @@ impl Blueprint {
                     y: 0,
                     lane: LaneId::Mid,
                     module: ModuleId::Digest,
-                    traits: PixelTraits::default(),
+                    traits: digest_traits,
                     },
                 PlacedModule {
                     x: 2,
                     y: 0,
                     lane: LaneId::Mid,
                     module: ModuleId::Hypha,
-                    traits: PixelTraits::default(),
+                    traits: digest_traits,
                     },
                 PlacedModule {
                     x: 3,
                     y: 0,
                     lane: LaneId::Mid,
                     module: ModuleId::Hypha,
-                    traits: PixelTraits::default(),
+                    traits: digest_traits,
                     },
             ],
-            genome: Genome {
-                digest_rate: 1.0,
-                ..Genome::default()
-            },
             name: "fungus".into(),
             notes: "Set E litter fungus".into(),
         }
@@ -612,8 +646,6 @@ impl Blueprint {
     /// kind-swap / delete. Budget and sigma scale with aggregate
     /// `clone_fidelity`.
     ///
-    /// Blueprint [`Genome`] paint DTO is re-synced from the child
-    /// [`BodyPlan`] at the end (for `.gvsecrt` / Tab readers).
     pub fn mutate_child(&self, world_seed: u64, tick: u64, parent_id: u32) -> Blueprint {
         let plan = self.body_plan();
         let fidelity = plan.clone_fidelity.clamp(0.05, 1.0);
@@ -740,32 +772,7 @@ impl Blueprint {
 
         child.name = format!("{}-child", self.name);
         child.notes = format!("mutated from {} @ tick {tick}", self.name);
-        // Keep blueprint Genome DTO aligned with pixel aggregates.
-        let plan = child.body_plan();
-        child.genome.clone_fidelity = plan.clone_fidelity;
-        child.genome.reproduce_at = plan.reproduce_at;
-        child.genome.buoyancy_bias = plan.buoyancy_bias;
-        child.genome.alloc_stem = plan.alloc_stem;
-        child.genome.alloc_leaf = plan.alloc_leaf;
-        child.genome.alloc_root = plan.alloc_root;
-        child.genome.root_depth_bias = plan.root_depth_bias;
-        child.genome.shade_efficiency = plan.shade_efficiency;
-        child.genome.digest_rate = plan.digest_rate;
-        child.genome.leaf_absorb = if plan.photo_capacity > 0.0 {
-            let n = child
-                .modules
-                .iter()
-                .filter(|m| m.module == ModuleId::Photosystem)
-                .count()
-                .max(1) as f32;
-            (plan.photo_capacity / n).clamp(0.05, 1.0)
-        } else {
-            child.genome.leaf_absorb
-        };
-        if plan.pixel_count > 0 {
-            child.genome.metabolic_rate =
-                (plan.metabolic_rate / plan.pixel_count as f32).clamp(0.05, 4.0);
-        }
+        child.schema_version = BLUEPRINT_SCHEMA_VERSION;
         child
     }
 
@@ -774,65 +781,93 @@ impl Blueprint {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        match postcard::from_bytes::<Blueprint>(bytes) {
-            Ok(bp) => {
+        // Schema 2+: modules with traits, no genome field.
+        if let Ok(bp) = postcard::from_bytes::<Blueprint>(bytes) {
+            if bp.schema_version >= 2 {
                 if bp.schema_version > BLUEPRINT_SCHEMA_VERSION {
                     return Err(format!(
                         "blueprint schema {} newer than supported {}",
                         bp.schema_version, BLUEPRINT_SCHEMA_VERSION
                     ));
                 }
-                Ok(bp)
+                return Ok(bp);
             }
-            Err(_) => {
-                // Pre-Wave-K postcard: PlacedModule had no `traits` field.
-                // Postcard is positional, so serde(default) cannot fill the gap.
-                #[derive(Deserialize)]
-                struct LegacyPlaced {
-                    x: i16,
-                    y: i16,
-                    lane: LaneId,
-                    module: ModuleId,
-                }
-                #[derive(Deserialize)]
-                struct LegacyBlueprint {
-                    schema_version: u16,
-                    canvas_w: u16,
-                    canvas_h: u16,
-                    modules: Vec<LegacyPlaced>,
-                    genome: Genome,
-                    name: String,
-                    notes: String,
-                }
-                let old: LegacyBlueprint =
-                    postcard::from_bytes(bytes).map_err(|e| e.to_string())?;
-                if old.schema_version > BLUEPRINT_SCHEMA_VERSION {
-                    return Err(format!(
-                        "blueprint schema {} newer than supported {}",
-                        old.schema_version, BLUEPRINT_SCHEMA_VERSION
-                    ));
-                }
-                Ok(Blueprint {
-                    schema_version: old.schema_version,
+            // schema_version < 2 under the v2 layout is a mis-parse of an
+            // older blob — fall through to schema-1 / pre-Wave-K loaders.
+        }
+
+        // Schema 1: modules with traits + vestigial Genome (Wave K–S).
+        #[derive(Deserialize)]
+        struct BlueprintV1 {
+            schema_version: u16,
+            canvas_w: u16,
+            canvas_h: u16,
+            modules: Vec<PlacedModule>,
+            genome: Genome,
+            name: String,
+            notes: String,
+        }
+        if let Ok(old) = postcard::from_bytes::<BlueprintV1>(bytes) {
+            if old.schema_version <= 1 {
+                let mut modules = old.modules;
+                paint_genome_onto_modules(&mut modules, old.genome);
+                return Ok(Blueprint {
+                    schema_version: BLUEPRINT_SCHEMA_VERSION,
                     canvas_w: old.canvas_w,
                     canvas_h: old.canvas_h,
-                    modules: old
-                        .modules
-                        .into_iter()
-                        .map(|m| PlacedModule {
-                            x: m.x,
-                            y: m.y,
-                            lane: m.lane,
-                            module: m.module,
-                            traits: PixelTraits::default(),
-                        })
-                        .collect(),
-                    genome: old.genome,
+                    modules,
                     name: old.name,
                     notes: old.notes,
-                })
+                });
             }
         }
+
+        // Pre-Wave-K postcard: PlacedModule had no `traits` field.
+        // Postcard is positional, so serde(default) cannot fill the gap.
+        #[derive(Deserialize)]
+        struct LegacyPlaced {
+            x: i16,
+            y: i16,
+            lane: LaneId,
+            module: ModuleId,
+        }
+        #[derive(Deserialize)]
+        struct LegacyBlueprint {
+            schema_version: u16,
+            canvas_w: u16,
+            canvas_h: u16,
+            modules: Vec<LegacyPlaced>,
+            genome: Genome,
+            name: String,
+            notes: String,
+        }
+        let old: LegacyBlueprint = postcard::from_bytes(bytes).map_err(|e| e.to_string())?;
+        if old.schema_version > 1 {
+            return Err(format!(
+                "blueprint schema {} newer than supported {}",
+                old.schema_version, BLUEPRINT_SCHEMA_VERSION
+            ));
+        }
+        let mut modules: Vec<PlacedModule> = old
+            .modules
+            .into_iter()
+            .map(|m| PlacedModule {
+                x: m.x,
+                y: m.y,
+                lane: m.lane,
+                module: m.module,
+                traits: PixelTraits::default(),
+            })
+            .collect();
+        paint_genome_onto_modules(&mut modules, old.genome);
+        Ok(Blueprint {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: old.canvas_w,
+            canvas_h: old.canvas_h,
+            modules,
+            name: old.name,
+            notes: old.notes,
+        })
     }
 
     pub fn save_path(name: &str) -> PathBuf {
@@ -943,7 +978,7 @@ mod tests {
     }
 
     #[test]
-    fn old_blueprint_loads_with_default_traits() {
+    fn old_blueprint_loads_and_bakes_genome_into_traits() {
         // Pre-Wave-K postcard shape: PlacedModule without traits field.
         #[derive(Serialize)]
         struct OldPlaced {
@@ -963,7 +998,7 @@ mod tests {
             notes: String,
         }
         let old = OldBlueprint {
-            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            schema_version: 1,
             canvas_w: 16,
             canvas_h: 16,
             modules: vec![
@@ -986,10 +1021,44 @@ mod tests {
         };
         let bytes = postcard::to_allocvec(&old).unwrap();
         let loaded = Blueprint::from_bytes(&bytes).unwrap();
+        assert_eq!(loaded.schema_version, BLUEPRINT_SCHEMA_VERSION);
         assert_eq!(loaded.modules.len(), 2);
-        assert_eq!(loaded.modules[0].traits, PixelTraits::default());
-        assert_eq!(loaded.modules[1].traits, PixelTraits::default());
+        // Default Genome leaf_absorb paints Photosystem absorb.
+        assert!((loaded.modules[1].traits.absorb_bias - 0.45).abs() < 1e-5);
         assert!(loaded.is_valid_atom());
+    }
+
+    #[test]
+    fn schema1_with_traits_bakes_genome_and_upgrades() {
+        #[derive(Serialize)]
+        struct V1 {
+            schema_version: u16,
+            canvas_w: u16,
+            canvas_h: u16,
+            modules: Vec<PlacedModule>,
+            genome: Genome,
+            name: String,
+            notes: String,
+        }
+        let mut photo = PlacedModule::new(1, 0, ModuleId::Photosystem);
+        photo.traits.density = 2.0;
+        let mut g = Genome::default();
+        g.leaf_absorb = 0.8;
+        g.alloc_root = 0.9;
+        let old = V1 {
+            schema_version: 1,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![PlacedModule::new(0, 0, ModuleId::Nucleus), photo],
+            genome: g,
+            name: "v1".into(),
+            notes: String::new(),
+        };
+        let loaded = Blueprint::from_bytes(&postcard::to_allocvec(&old).unwrap()).unwrap();
+        assert_eq!(loaded.schema_version, 2);
+        assert!((loaded.modules[1].traits.density - 2.0).abs() < 1e-5);
+        assert!((loaded.modules[1].traits.absorb_bias - 0.8).abs() < 1e-5);
+        assert!((loaded.modules[0].traits.alloc_root - 0.9).abs() < 1e-5);
     }
 
     #[test]

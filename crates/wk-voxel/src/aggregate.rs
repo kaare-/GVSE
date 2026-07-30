@@ -15,7 +15,7 @@ use crate::organism::ModuleId;
 /// Cached body-plan derived from a pixel list.
 ///
 /// Formulas are first-cut gameplay knobs — expect a tuning wave when
-/// physics starts reading these instead of the vestigial `Genome`.
+/// Live physics reads these aggregates (not a global `Genome` bag).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct BodyPlan {
     /// Σ (mass × density) over every pixel.
