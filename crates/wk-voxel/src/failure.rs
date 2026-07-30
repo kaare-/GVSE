@@ -13,6 +13,10 @@
 //!
 //! F3 — overburden compaction: deep wet Clay/Organic exude pore water
 //! upward when σᵥ (or solid-cell count) exceeds a threshold.
+//!
+//! Bone crush (Wave N) — dead [`MaterialId::Bone`] under high overburden
+//! converts to Sand (opt-in). Live `ModuleId::Bone` fragility lives in
+//! [`crate::organism`].
 
 use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
 
@@ -35,6 +39,12 @@ pub const COMPACTION_MIN_SAT: u8 = 12;
 /// Max upward search for an unsaturated receiver.
 pub const COMPACTION_EXUDE_REACH: i32 = 24;
 
+/// Minimum relative σᵥ to crush dead Bone → Sand (Wave N).
+/// Slightly below F3 clay threshold — bone piles crush before soft beds.
+pub const BONE_CRUSH_SIGMA_MIN: f32 = 12.0;
+/// Fallback solid-cell count above when no geotech map.
+pub const BONE_CRUSH_MIN_CELLS_ABOVE: i32 = 6;
+
 /// Wetness multiplier on cohesion: `c_eff = c * (1 - k_wet * wet)`.
 pub const SHEAR_K_WET: f32 = 0.70;
 /// Wet repose (F2a) loosens `max_step` when `c_eff` is below this.
@@ -53,18 +63,24 @@ pub struct FailureConfig {
     pub enable_shear_weaken: bool,
     /// F3 — overburden compaction (Clay/Organic pore squeeze).
     pub enable_compaction: bool,
+    /// Wave N — dead Bone under high overburden → Sand.
+    pub enable_bone_crush: bool,
     /// Max roof cells converted / dropped per tick.
     pub max_roof_events: u32,
     /// Max rock-face shear converts per tick.
     pub max_shear_events: u32,
     /// Max compaction exudation pulses per tick.
     pub max_compaction_events: u32,
+    /// Max Bone → Sand crush converts per tick.
+    pub max_bone_crush_events: u32,
     /// Per-candidate success chance in parts-per-thousand (0..=1000).
     /// Keeps mountains from melting in one tick.
     pub shear_chance_per_mille: u32,
+    /// Bone-crush success chance in parts-per-thousand (0..=1000).
+    pub bone_crush_chance_per_mille: u32,
     /// When true and a [`crate::geotech_map::GeotechMap`] is supplied,
     /// F2b gates on map `shear_score` + hydro wetting (S3);
-    /// F3 gates on map σᵥ (S4).
+    /// F3 / bone crush gate on map σᵥ (S4).
     pub use_geotech_map: bool,
 }
 
@@ -75,10 +91,13 @@ impl Default for FailureConfig {
             // Off until tuned — enable in Tab → Geotech.
             enable_shear_weaken: false,
             enable_compaction: false,
+            enable_bone_crush: false,
             max_roof_events: 32,
             max_shear_events: 16,
             max_compaction_events: 16,
+            max_bone_crush_events: 16,
             shear_chance_per_mille: 250,
+            bone_crush_chance_per_mille: 400,
             use_geotech_map: true,
         }
     }
@@ -284,6 +303,8 @@ pub fn roof_collapse_debris(material: MaterialId) -> MaterialId {
     match material {
         MaterialId::Stone | MaterialId::Limestone => MaterialId::LooseRock,
         MaterialId::Bedrock => MaterialId::LooseRock, // should not be selected (∞ span)
+        // Bone is a solid (not a grain) — crush to Sand so debris seats.
+        MaterialId::Bone => MaterialId::Sand,
         other => other,
     }
 }
@@ -834,7 +855,122 @@ fn compact_one(
     true
 }
 
-/// Run enabled failure passes (F1 roof, F2b shear, F3 compaction).
+/// True when overburden is high enough to crush dead Bone.
+pub fn bone_crush_load_ok(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    use_map: bool,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) -> bool {
+    if use_map {
+        if let Some(m) = geotech {
+            return m.overburden_at(gx, gy) >= BONE_CRUSH_SIGMA_MIN;
+        }
+    }
+    solid_cells_above(world, gx, gy, 32) >= BONE_CRUSH_MIN_CELLS_ABOVE
+}
+
+/// Wave N: convert dead [`MaterialId::Bone`] under high overburden to Sand.
+///
+/// Opt-in (`enable_bone_crush`). Compute-then-apply; event-capped.
+/// Live organism Bone pixels use [`crate::organism::fracture_overloaded_bones`].
+pub fn apply_bone_crush(
+    world: &mut World,
+    cfg: &FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) {
+    if !cfg.enable_bone_crush || cfg.max_bone_crush_events == 0 {
+        return;
+    }
+    let regions = regions_for_failure(world);
+    apply_bone_crush_regions(world, &regions, cfg, geotech);
+}
+
+/// Bone crush restricted to a pre-planned active set.
+pub fn apply_bone_crush_regions(
+    world: &mut World,
+    active: &[ActiveChunk],
+    cfg: &FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) {
+    if !cfg.enable_bone_crush || cfg.max_bone_crush_events == 0 || active.is_empty() {
+        return;
+    }
+
+    let use_map = cfg.use_geotech_map && geotech.is_some();
+    let seed = world.seed.0;
+    let tick_no = world.tick;
+    // Deepest first so under-stack bone fails before the pile above.
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    for ac in active {
+        for y in ac.rect.y0..=ac.rect.y1 {
+            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            if gy <= 0 {
+                continue;
+            }
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
+                let Some(cell) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if cell.material != MaterialId::Bone {
+                    continue;
+                }
+                if !bone_crush_load_ok(world, gx, gy, use_map, geotech) {
+                    continue;
+                }
+                if !shear_hash_ok(seed, tick_no, gx, gy, cfg.bone_crush_chance_per_mille) {
+                    continue;
+                }
+                candidates.push((gy, gx));
+            }
+        }
+    }
+
+    candidates.sort_unstable();
+    candidates.dedup();
+
+    let mut applied = 0u32;
+    for (gy, gx) in candidates {
+        if applied >= cfg.max_bone_crush_events {
+            break;
+        }
+        if crush_one_bone(world, gx, gy, use_map, geotech) {
+            applied += 1;
+        }
+    }
+}
+
+fn crush_one_bone(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    use_map: bool,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+) -> bool {
+    let gx = world.wrap_x(gx);
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return false;
+    };
+    if cell.material != MaterialId::Bone {
+        return false;
+    }
+    if !bone_crush_load_ok(world, gx, gy, use_map, geotech) {
+        return false;
+    }
+    let debris_mat = MaterialId::Sand;
+    let cap = water_capacity_with(debris_mat, &world.hydro);
+    let debris = Cell {
+        material: debris_mat,
+        sat: Sat(cell.sat.0.min(cap)),
+        ..cell
+    };
+    world.set_cell(gx, gy, debris);
+    true
+}
+
+/// Run enabled failure passes (F1 roof, F2b shear, F3 compaction, bone crush).
 pub fn apply_failure(
     world: &mut World,
     cfg: &FailureConfig,
@@ -848,6 +984,9 @@ pub fn apply_failure(
     }
     if cfg.enable_compaction {
         apply_compaction(world, cfg, geotech);
+    }
+    if cfg.enable_bone_crush {
+        apply_bone_crush(world, cfg, geotech);
     }
 }
 
@@ -1445,5 +1584,108 @@ mod tests {
             );
             assert_eq!(w.get_cell(2, y).unwrap().sat.0, 0);
         }
+    }
+
+    #[test]
+    fn bone_roof_debris_is_sand() {
+        assert_eq!(roof_collapse_debris(MaterialId::Bone), MaterialId::Sand);
+        assert_eq!(
+            roof_collapse_debris(MaterialId::Stone),
+            MaterialId::LooseRock
+        );
+        assert_eq!(roof_collapse_debris(MaterialId::Sand), MaterialId::Sand);
+    }
+
+    #[test]
+    fn bone_ceiling_collapses_to_sand_debris() {
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 12);
+        // Bone span limit = 4.0m / 0.25 = 16 cells; short cavity (3 Air)
+        // still collapses because bone arches are modest — wait, span 3
+        // is under 16. Need a wider cavity.
+        // Actually for a short demo: bone roof_span_max_m = 4.0 → 16 cells.
+        // Build cavity span 18 so it exceeds the limit.
+        let x0 = 2;
+        let x1 = 20; // 19 Air cells
+        w.set_cell(x0 - 1, 1, Cell::solid(MaterialId::Bone));
+        w.set_cell(x1 + 1, 1, Cell::solid(MaterialId::Bone));
+        for x in x0..=x1 {
+            w.set_cell(x, 1, Cell::air());
+            w.set_cell(x, 2, Cell::solid(MaterialId::Bone));
+        }
+        let cfg = FailureConfig {
+            enable_roof_collapse: true,
+            max_roof_events: 64,
+            ..FailureConfig::default()
+        };
+        apply_roof_collapse(&mut w, &cfg);
+        let mut sand_debris = 0usize;
+        let mut bone_roof = 0usize;
+        for x in x0..=x1 {
+            if w.get_cell(x, 1).unwrap().material == MaterialId::Sand {
+                sand_debris += 1;
+            }
+            if w.get_cell(x, 2).unwrap().material == MaterialId::Bone {
+                bone_roof += 1;
+            }
+        }
+        assert!(
+            sand_debris > 0,
+            "bone roof must drop Sand into the cavity (got {sand_debris})"
+        );
+        assert!(
+            bone_roof < (x1 - x0 + 1) as usize,
+            "some bone ceiling cells must vacate"
+        );
+    }
+
+    #[test]
+    fn deep_bone_crushes_to_sand_when_enabled() {
+        let mut w = World::new(42);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 4);
+        // Bone at y=1 under a tall Sand stack.
+        w.set_cell(2, 1, Cell::solid(MaterialId::Bone));
+        for y in 2..=10 {
+            w.set_cell(2, y, Cell::solid(MaterialId::Sand));
+        }
+        let cfg = FailureConfig {
+            enable_bone_crush: true,
+            enable_roof_collapse: false,
+            use_geotech_map: false,
+            bone_crush_chance_per_mille: 1000,
+            max_bone_crush_events: 8,
+            ..FailureConfig::default()
+        };
+        apply_bone_crush(&mut w, &cfg, None);
+        assert_eq!(
+            w.get_cell(2, 1).unwrap().material,
+            MaterialId::Sand,
+            "overburdened Bone must crush to Sand"
+        );
+    }
+
+    #[test]
+    fn shallow_bone_does_not_crush() {
+        let mut w = World::new(43);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 4);
+        w.set_cell(2, 1, Cell::solid(MaterialId::Bone));
+        w.set_cell(2, 2, Cell::solid(MaterialId::Sand)); // only 1 above
+        let cfg = FailureConfig {
+            enable_bone_crush: true,
+            enable_roof_collapse: false,
+            use_geotech_map: false,
+            bone_crush_chance_per_mille: 1000,
+            max_bone_crush_events: 8,
+            ..FailureConfig::default()
+        };
+        apply_bone_crush(&mut w, &cfg, None);
+        assert_eq!(
+            w.get_cell(2, 1).unwrap().material,
+            MaterialId::Bone,
+            "shallow Bone must stay"
+        );
     }
 }

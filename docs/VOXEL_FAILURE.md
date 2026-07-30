@@ -223,12 +223,19 @@ Tab → Geotech (or Performance)
   [x] Roof collapse
   [ ] Shear weaken (rock faces)
   [ ] Compaction
+  [ ] Bone crush (dead Bone → Sand)
   Max roof events / tick
   Max shear events / tick
+  Max bone-crush events / tick
 ```
 
 Defaults: roof **on**, shear rock-face **off** until tuned, compaction
-**off**.
+**off**, bone crush **off**.
+
+Bone roofs (Wave N): `MaterialId::Bone` has a modest `roof_span_max_m`;
+collapse debris is **Sand** so grain fall can seat it. Live Bone
+fragility (pixel `stiffness` / `density` / `strength`) runs in the
+organism pass — see [`VOXEL_BIOLOGY.md`](VOXEL_BIOLOGY.md).
 
 ## Parallelism
 

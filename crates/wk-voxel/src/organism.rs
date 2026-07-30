@@ -363,6 +363,78 @@ impl Atom {
     }
 }
 
+/// Base column load a default Bone pixel can hold (Wave N).
+///
+/// Capacity = `BONE_CAPACITY_BASE × stiffness × density × strength`.
+/// With all traits at 1.0, about three default-mass modules may stack
+/// above before the bottom Bone fractures.
+pub const BONE_CAPACITY_BASE: f32 = 3.5;
+
+/// Column capacity for a live Bone pixel from its traits.
+pub fn bone_column_capacity(traits: &PixelTraits) -> f32 {
+    BONE_CAPACITY_BASE
+        * traits.stiffness.max(0.05)
+        * traits.density.max(0.05)
+        * traits.strength.max(0.05)
+}
+
+/// Σ (`mass × density`) of body modules in the same `dx` column with
+/// `dy` strictly above `bone_dy` (world-up).
+pub fn bone_column_load_above(atom: &Atom, bone_dx: i16, bone_dy: i16) -> f32 {
+    let mut load = 0.0f32;
+    for (i, &(dx, dy, _)) in atom.body.iter().enumerate() {
+        if dx == bone_dx && dy > bone_dy {
+            let t = atom.trait_at(i);
+            load += (t.mass * t.density).max(0.0);
+        }
+    }
+    load
+}
+
+/// Fracture the lowest overloaded live Bone pixel (at most one / call).
+///
+/// Drops [`MaterialId::Sand`] into dry Air at that cell, removes the
+/// module + traits, and recomputes [`Atom::body_plan`]. Returns true
+/// when a Bone pixel was removed.
+pub fn fracture_overloaded_bones(world: &mut World, atom: &mut Atom) -> bool {
+    atom.align_body_traits();
+    // (dy, index) — prefer the bottom-most failure each tick.
+    let mut best: Option<(i16, usize)> = None;
+    for (i, &(dx, dy, m)) in atom.body.iter().enumerate() {
+        if m != ModuleId::Bone {
+            continue;
+        }
+        let t = atom.trait_at(i);
+        let capacity = bone_column_capacity(&t);
+        let load = bone_column_load_above(atom, dx, dy);
+        if load <= capacity {
+            continue;
+        }
+        match best {
+            None => best = Some((dy, i)),
+            Some((bdy, _)) if dy < bdy => best = Some((dy, i)),
+            _ => {}
+        }
+    }
+    let Some((_, idx)) = best else {
+        return false;
+    };
+    let (dx, dy, _) = atom.body[idx];
+    let wx = world.wrap_x(atom.gx + dx as i32);
+    let wy = atom.gy + dy as i32;
+    if let Some(c) = world.get_cell(wx, wy) {
+        if c.material == MaterialId::Air && c.sat.is_empty() {
+            world.set_cell(wx, wy, crate::cell::Cell::solid(MaterialId::Sand));
+        }
+    }
+    atom.body.remove(idx);
+    if idx < atom.body_traits.len() {
+        atom.body_traits.remove(idx);
+    }
+    atom.recompute_body_plan();
+    true
+}
+
 /// Dead body: keeps drawing (grey), sinks / rests, then becomes Organic.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Corpse {
@@ -784,6 +856,13 @@ impl OrganismStore {
                 LIFE_TICKS
             };
             if atom.age_ticks >= life_cap {
+                deaths.push(i);
+                continue;
+            }
+
+            // Wave N: live Bone under self-stack load → Sand debris.
+            let _ = fracture_overloaded_bones(world, atom);
+            if !atom.body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
                 deaths.push(i);
                 continue;
             }
@@ -3059,5 +3138,65 @@ mod tests {
         let a = &store.atoms[0];
         assert!((a.trait_at(1).absorb_bias - 2.5).abs() < 1e-5);
         assert!((a.body_plan.photo_capacity - 2.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn stiff_bone_column_holds_short_stack() {
+        // Nucleus beside column; 1 Bone + 2 mass above → load 2 < capacity 3.5.
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Bone),
+            (1, 1, ModuleId::Muscle),
+            (1, 2, ModuleId::Muscle),
+        ];
+        let mut atom = Atom::from_body(5, 2, 40.0, body);
+        let mut w = World::new(19);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for y in 0..8 {
+            w.set_cell(5, y, Cell::air());
+            w.set_cell(6, y, Cell::air());
+        }
+        let bones_before = atom.body.iter().filter(|(_, _, m)| *m == ModuleId::Bone).count();
+        assert!(!fracture_overloaded_bones(&mut w, &mut atom));
+        let bones_after = atom.body.iter().filter(|(_, _, m)| *m == ModuleId::Bone).count();
+        assert_eq!(bones_before, bones_after);
+    }
+
+    #[test]
+    fn soft_bone_fractures_under_stack_and_drops_sand() {
+        // Weak bone under 4 default modules → load 4 > capacity 3.5 * 0.2.
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Bone),
+            (1, 1, ModuleId::Muscle),
+            (1, 2, ModuleId::Muscle),
+            (1, 3, ModuleId::Muscle),
+            (1, 4, ModuleId::Muscle),
+        ];
+        let mut traits = vec![PixelTraits::default(); body.len()];
+        traits[1].stiffness = 0.2;
+        traits[1].density = 1.0;
+        traits[1].strength = 1.0;
+        let mut atom = Atom::from_body_with_traits(5, 2, 40.0, body, traits);
+        let mut w = World::new(20);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 4..8 {
+            for y in 0..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let load = bone_column_load_above(&atom, 1, 0);
+        let cap = bone_column_capacity(&atom.trait_at(1));
+        assert!(load > cap, "fixture must overload soft bone (load={load} cap={cap})");
+        assert!(fracture_overloaded_bones(&mut w, &mut atom));
+        assert!(
+            atom.body.iter().all(|(_, _, m)| *m != ModuleId::Bone),
+            "soft bone pixel must be removed"
+        );
+        assert_eq!(
+            w.get_cell(6, 2).map(|c| c.material),
+            Some(MaterialId::Sand),
+            "fracture should leave Sand debris at the bone cell"
+        );
     }
 }
