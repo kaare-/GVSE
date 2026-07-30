@@ -85,13 +85,21 @@ Features:
 - Stronger moisture tropism for root elongation
 - Softer upkeep / longer plant life; Tab → Plants/fungi gene knobs
 
-### E2 — Epiphytes + topple *(later)*
+### E2 — Epiphytes + topple
 
 | Gene | Role |
 |------|------|
-| `attach_prefer` / `host_leave_fraction` | Epiphytes |
+| `attach_prefer` / `host_leave_fraction` | Epiphytes *(deferred)* |
 
-Features: stem `integrity`, topple, Holdfast. Needs dead stems.
+**Wave U — Holdfast seating *(landed)*:**
+- `ModuleId::Holdfast` (`0x0F`, `#FF3D9A`) appended after Bone (postcard-safe)
+- `is_epiphyte` / `is_holdfast_anchored`; habitat spawn requires a host Stem
+- Epiphyte tick: photo + upkeep; dies within ~8 ticks if unseated
+- Editor: `0` Holdfast brush, `Y` minimal epiphyte template
+- Scenario `e40_epiphyte_seat`
+
+**Deferred (Wave V+):** stem `integrity`, topple / fallen log, smother
+shade-kill chain, `stem_wetness` drink, attach/leave genes, ghost roots.
 
 ## Explicitly out of Core for voxel
 

@@ -33,7 +33,8 @@ use crate::humidity::Humidity;
 use crate::plant::{
     apply_genome, collect_live_root_world_cells, collect_trunk_world_cells, drink_roots,
     drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, find_surface_air_slot,
-    is_anchored, is_land_plant, leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac,
+    collect_live_stem_world_cells, is_anchored, is_epiphyte, is_holdfast_anchored, is_land_plant,
+    leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac,
     sync_root_storage, try_grow_plant, try_vegetative_sprout, DroughtBand, PlantGrowthCaps,
     DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
 };
@@ -111,6 +112,9 @@ pub enum ModuleId {
     Muscle = 0x14,
     /// Bone-ivory — skeletal element (Wave K studio; Wave L → material).
     Bone = 0x15,
+    /// Pink — grips a host Stem (Set E2 epiphyte). Appended so Skin/Muscle/Bone
+    /// postcard variant indices stay stable.
+    Holdfast = 0x0F,
 }
 
 impl ModuleId {
@@ -126,6 +130,7 @@ impl ModuleId {
             ModuleId::Skin => (0xFF, 0xDB, 0xAC),
             ModuleId::Muscle => (0xC3, 0x3C, 0x3C),
             ModuleId::Bone => (0xEF, 0xE7, 0xDA),
+            ModuleId::Holdfast => (0xFF, 0x3D, 0x9A),
         }
     }
 
@@ -145,6 +150,7 @@ impl ModuleId {
             ModuleId::Skin => "Skin",
             ModuleId::Muscle => "Muscle",
             ModuleId::Bone => "Bone",
+            ModuleId::Holdfast => "Holdfast",
         }
     }
 }
@@ -731,12 +737,23 @@ impl OrganismStore {
         }
         let gx = world.wrap_x(gx);
         let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
-        let fungus = body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant;
+        let epi = body.iter().any(|(_, _, m)| *m == ModuleId::Holdfast) && !plant;
+        let fungus =
+            body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant && !epi;
         let gy = if plant {
             let Some(slot) = find_plant_slot(world, gx, gy) else {
                 return false;
             };
             slot
+        } else if epi {
+            if is_wet_air(world, gx, gy) || world.get_cell(gx, gy).map(|c| c.material) == Some(MaterialId::Air)
+            {
+                gy
+            } else if let Some(slot) = find_air_near(world, gx, gy) {
+                slot
+            } else {
+                return false;
+            }
         } else if fungus {
             let Some(slot) = find_fungus_slot(world, gx, gy) else {
                 return false;
@@ -755,6 +772,12 @@ impl OrganismStore {
         if plant {
             pin_plant_pose(&mut atom);
             if !is_anchored(world, &atom) {
+                return false;
+            }
+        } else if epi {
+            pin_plant_pose(&mut atom);
+            let stems = collect_live_stem_world_cells(world, &self.atoms);
+            if !is_holdfast_anchored(&atom, &stems, |x| world.wrap_x(x)) {
                 return false;
             }
         } else if fungus {
@@ -788,12 +811,24 @@ impl OrganismStore {
         }
         let gx = world.wrap_x(gx);
         let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
-        let fungus = body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant;
+        let epi = body.iter().any(|(_, _, m)| *m == ModuleId::Holdfast) && !plant;
+        let fungus =
+            body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant && !epi;
         let gy = if plant {
             let Some(slot) = find_plant_slot(world, gx, gy) else {
                 return false;
             };
             slot
+        } else if epi {
+            if is_wet_air(world, gx, gy)
+                || world.get_cell(gx, gy).map(|c| c.material) == Some(MaterialId::Air)
+            {
+                gy
+            } else if let Some(slot) = find_air_near(world, gx, gy) {
+                slot
+            } else {
+                return false;
+            }
         } else if fungus {
             let Some(slot) = find_fungus_slot(world, gx, gy) else {
                 return false;
@@ -814,6 +849,12 @@ impl OrganismStore {
         if plant {
             pin_plant_pose(&mut atom);
             if !is_anchored(world, &atom) {
+                return false;
+            }
+        } else if epi {
+            pin_plant_pose(&mut atom);
+            let stems = collect_live_stem_world_cells(world, &self.atoms);
+            if !is_holdfast_anchored(&atom, &stems, |x| world.wrap_x(x)) {
                 return false;
             }
         } else if fungus {
@@ -868,7 +909,7 @@ impl OrganismStore {
         let mut atom = Atom::from_body(gx, gy, energy_max, body);
         apply_genome(&mut atom, genome);
         atom.recompute_body_plan();
-        if is_land_plant(&atom) || is_fungus(&atom) {
+        if is_land_plant(&atom) || is_fungus(&atom) || is_epiphyte(&atom) {
             pin_plant_pose(&mut atom);
         } else if let Some((top, _)) = wet_band(world, gx, gy) {
             atom.last_water_top = Some(top);
@@ -899,7 +940,9 @@ impl OrganismStore {
         }
         let gx = world.wrap_x(gx);
         let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
-        let fungus = body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant;
+        let epi = body.iter().any(|(_, _, m)| *m == ModuleId::Holdfast) && !plant;
+        let fungus =
+            body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant && !epi;
         let gy = if plant {
             find_surface_air_slot(world, gx, gy)
                 .or_else(|| find_air_near(world, gx, gy))
@@ -910,6 +953,7 @@ impl OrganismStore {
                 .or_else(|| find_air_near(world, gx, gy))
                 .ok_or(SpawnFail::NoAir)?
         } else {
+            // Epiphyte + plankton: place in Air near the click.
             find_air_near(world, gx, gy).ok_or(SpawnFail::NoAir)?
         };
         let mut atom = Atom::from_body_with_traits(gx, gy, energy_max, body, traits);
@@ -917,7 +961,7 @@ impl OrganismStore {
             apply_genome(&mut atom, g);
         }
         atom.recompute_body_plan();
-        if is_land_plant(&atom) || is_fungus(&atom) {
+        if is_land_plant(&atom) || is_fungus(&atom) || is_epiphyte(&atom) {
             pin_plant_pose(&mut atom);
         } else if let Some((top, _)) = wet_band(world, gx, gy) {
             atom.last_water_top = Some(top);
@@ -961,6 +1005,8 @@ impl OrganismStore {
         let trunks = collect_trunk_world_cells(&self.atoms, &self.corpses);
         // All living Root cells — spacing applies across plants.
         let live_roots = collect_live_root_world_cells(&self.atoms);
+        // Host Stem cells for epiphyte Holdfast attach (Wave U).
+        let host_stems = collect_live_stem_world_cells(world, &self.atoms);
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let pop = self.atoms.len();
@@ -973,7 +1019,8 @@ impl OrganismStore {
             atom.age_ticks = atom.age_ticks.saturating_add(1);
             atom.cooldown = atom.cooldown.saturating_sub(1);
 
-            let life_cap = if is_land_plant(atom) || is_fungus(atom) {
+            let life_cap = if is_land_plant(atom) || is_fungus(atom) || is_epiphyte(atom)
+            {
                 PLANT_LIFE_TICKS
             } else {
                 LIFE_TICKS
@@ -1021,6 +1068,15 @@ impl OrganismStore {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
                     PlantStep::Sprout(child) => births.push(child),
+                }
+                continue;
+            }
+
+            if is_epiphyte(atom) {
+                match step_epiphyte(world, atom, day, &canopy, &host_stems, i as u32) {
+                    PlantStep::Dead => deaths.push(i),
+                    PlantStep::Alive { .. } => {}
+                    PlantStep::Sprout(_) => {}
                 }
                 continue;
             }
@@ -1292,6 +1348,56 @@ fn step_land_plant(
     }
 }
 
+/// Max ticks an epiphyte may float unseated before dying (Wave U).
+const EPIPHYTE_UNSEATED_MAX: u32 = 8;
+
+/// Epiphyte tick: require Holdfast on a host Stem; photo only (no drink/growth).
+fn step_epiphyte(
+    world: &World,
+    atom: &mut Atom,
+    day: f32,
+    canopy: &CanopyIndex,
+    host_stems: &std::collections::HashSet<(i32, i32)>,
+    entity_id: u32,
+) -> PlantStep {
+    pin_plant_pose(atom);
+    if !is_holdfast_anchored(atom, host_stems, |x| world.wrap_x(x)) {
+        atom.drought_ticks = atom.drought_ticks.saturating_add(1);
+        if atom.drought_ticks >= EPIPHYTE_UNSEATED_MAX {
+            return PlantStep::Dead;
+        }
+    } else {
+        atom.drought_ticks = 0;
+    }
+
+    let n_photo = atom.photosystem_count();
+    let metabolic = atom.body_plan.metabolic_rate.max(0.05);
+    let upkeep =
+        UPKEEP_PER_MODULE * PLANT_UPKEEP_MULT * metabolic * (0.45 + 0.55 * day);
+    let sample_y = canopy_top_y(atom);
+    let sky = column_light(world, atom.gx, sample_y) * day;
+    let light = crate::shade::effective_photo_light_absorb(
+        canopy,
+        atom.gx,
+        sample_y,
+        sky,
+        entity_id,
+        n_photo,
+        atom.leaf_absorb_effective(),
+        atom.body_plan.shade_efficiency,
+    );
+    let photo_cap = atom.body_plan.photo_capacity.max(1.0);
+    let harvest = PHOTON_RATE * light * photo_cap;
+    atom.energy = (atom.energy + harvest - upkeep).clamp(0.0, atom.energy_max);
+    if atom.energy <= 0.0 {
+        return PlantStep::Dead;
+    }
+    PlantStep::Alive {
+        sat: 0,
+        at: (atom.gx, atom.gy),
+    }
+}
+
 /// Litter fungus tick: digest soft litter / Organic, hibernate, spore.
 fn step_fungus(
     world: &mut World,
@@ -1482,11 +1588,13 @@ fn resolve_contacts(world: &World, atoms: &mut [Atom]) {
     for _ in 0..4 {
         for i in 0..n {
             for j in (i + 1)..n {
-                // Land plants / fungi stay pinned — only plankton shove apart.
+                // Land plants / fungi / epiphytes stay pinned — only plankton shove.
                 if is_land_plant(&atoms[i])
                     || is_land_plant(&atoms[j])
                     || is_fungus(&atoms[i])
                     || is_fungus(&atoms[j])
+                    || is_epiphyte(&atoms[i])
+                    || is_epiphyte(&atoms[j])
                 {
                     continue;
                 }

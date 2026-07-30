@@ -207,6 +207,54 @@ pub fn is_land_plant(atom: &Atom) -> bool {
     atom.body.iter().any(|(_, _, m)| *m == ModuleId::Root)
 }
 
+/// True when the body is an epiphyte (Holdfast, no Root).
+///
+/// Wave U: seats on a host Stem via [`is_holdfast_anchored`]. No own
+/// drink / growth this wave.
+pub fn is_epiphyte(atom: &Atom) -> bool {
+    let has_holdfast = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Holdfast);
+    let has_root = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Root);
+    has_holdfast && !has_root
+}
+
+pub fn holdfast_count(atom: &Atom) -> usize {
+    atom.body
+        .iter()
+        .filter(|(_, _, m)| *m == ModuleId::Holdfast)
+        .count()
+}
+
+/// World cells occupied by living Stem modules (host attach sites).
+pub fn collect_live_stem_world_cells(world: &World, atoms: &[Atom]) -> HashSet<(i32, i32)> {
+    let mut out = HashSet::new();
+    for atom in atoms {
+        for &(dx, dy, mid) in &atom.body {
+            if mid == ModuleId::Stem {
+                out.insert((world.wrap_x(atom.gx + dx as i32), atom.gy + dy as i32));
+            }
+        }
+    }
+    out
+}
+
+/// True when at least one Holdfast shares a world cell with a host Stem.
+///
+/// `host_stems` should omit the epiphyte's own Stem cells if any (epiphytes
+/// usually have none). `wrap_x` is typically [`World::wrap_x`].
+pub fn is_holdfast_anchored<F>(atom: &Atom, host_stems: &HashSet<(i32, i32)>, wrap_x: F) -> bool
+where
+    F: Fn(i32) -> i32,
+{
+    atom.body.iter().any(|&(dx, dy, mid)| {
+        if mid != ModuleId::Holdfast {
+            return false;
+        }
+        let wx = wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        host_stems.contains(&(wx, wy))
+    })
+}
+
 pub fn root_count(atom: &Atom) -> usize {
     atom.body
         .iter()

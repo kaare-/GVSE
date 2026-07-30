@@ -902,6 +902,7 @@ async fn main() {
                                 | wk_voxel::ModuleId::Stem
                                 | wk_voxel::ModuleId::Digest
                                 | wk_voxel::ModuleId::Hypha
+                                | wk_voxel::ModuleId::Holdfast
                         )
                     });
                     let g = if has_land_tissue {

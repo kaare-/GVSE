@@ -22,7 +22,7 @@ fn visible_traits(module: ModuleId) -> &'static [&'static str] {
             "alloc_root",
         ],
         ModuleId::Digest | ModuleId::Hypha => &["mass", "density", "digest_rate", "upkeep_bias"],
-        ModuleId::Stem => &["mass", "density", "upkeep_bias"],
+        ModuleId::Stem | ModuleId::Holdfast => &["mass", "density", "upkeep_bias"],
     }
 }
 

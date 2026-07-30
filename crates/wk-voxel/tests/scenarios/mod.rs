@@ -13,4 +13,5 @@ mod e11_cave_roof;
 mod e15_roots_reduce_erosion;
 mod e18_bone_persists_after_muscle_rots;
 mod e19_bone_fragility;
+mod e40_epiphyte_seat;
 mod helpers;

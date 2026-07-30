@@ -46,12 +46,13 @@ pub const DEATH_LITTER_MAX: u16 = 48;
 /// How many Organic cells to scan below the crown when counting food.
 const ORGANIC_SCAN_DEPTH: i32 = 6;
 
-/// True when the body is a detritus habit (Digest, no Root/Stem).
+/// True when the body is a detritus habit (Digest, no Root/Stem/Holdfast).
 pub fn is_fungus(atom: &Atom) -> bool {
     let has_digest = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Digest);
     let has_root = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Root);
     let has_stem = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Stem);
-    has_digest && !has_root && !has_stem
+    let has_holdfast = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Holdfast);
+    has_digest && !has_root && !has_stem && !has_holdfast
 }
 
 pub fn digest_count(atom: &Atom) -> usize {

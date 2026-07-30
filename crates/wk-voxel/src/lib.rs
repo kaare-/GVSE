@@ -82,9 +82,10 @@ pub use organism::{
     MAX_CORPSES,
 };
 pub use plant::{
-    collect_live_root_world_cells, find_fungus_slot, find_plant_slot, find_surface_air_slot,
-    apply_genome, is_land_plant, sync_alloc_on_atom, sync_alloc_to_body, PlantGrowthCaps,
-    MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
+    collect_live_root_world_cells, collect_live_stem_world_cells, find_fungus_slot, find_plant_slot,
+    find_surface_air_slot, apply_genome, is_epiphyte, is_holdfast_anchored, is_land_plant,
+    sync_alloc_on_atom, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
+    MAX_STEM_MODULES,
 };
 pub use shade::{build_canopy_index, effective_photo_light, CanopyIndex};
 pub use heatmap::Heatmap;
