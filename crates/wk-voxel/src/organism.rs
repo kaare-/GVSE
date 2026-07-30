@@ -19,8 +19,8 @@
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
-use crate::aggregate::{body_plan_from_kinds, BodyPlan};
-use crate::blueprint::Genome;
+use crate::aggregate::{body_plan_from, BodyPlan};
+use crate::blueprint::{Genome, PixelTraits};
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
     digest_budget_units, digest_labile, dissolve_corpse_to_organic, fungus_should_hibernate,
@@ -35,7 +35,7 @@ use crate::plant::{
     sync_root_storage, try_grow_plant, try_vegetative_sprout, DroughtBand, PlantGrowthCaps,
     DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
 };
-use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
+use crate::shade::{build_canopy_index, canopy_top_y, CanopyIndex};
 
 /// Default **entity** ceiling (Tab → Creatures can raise/lower).
 /// One Atom / plant / fungus = 1, not body pixels (roots, leaves, …).
@@ -67,8 +67,6 @@ const PHOTON_RATE: f32 = 0.35;
 const UPKEEP_PER_MODULE: f32 = 0.04;
 /// Fraction of tank spent to fission.
 const REPRO_COST_FRAC: f32 = 0.45;
-/// Minimum energy fraction of max to attempt fission.
-const REPRODUCE_AT: f32 = 0.85;
 /// Ticks between fission attempts.
 const REPRO_PERIOD: u64 = 40;
 /// Age soft-cap for plankton (ticks).
@@ -188,10 +186,15 @@ pub struct Atom {
     /// Modules relative to `(gx, gy)`.
     pub body: Vec<BodyModule>,
     /// Live genes (allocation, depth bias, shade knobs, …).
+    /// Plant alloc / digest / shade_efficiency still read here; Wave M
+    /// shared scalars come from [`Self::body_plan`].
     #[serde(default)]
     pub genome: Genome,
-    /// Cached aggregate over [`Self::body`] (Wave K). Physics still
-    /// reads [`Self::genome`]; recompute on structural change.
+    /// Per-module traits aligned with [`Self::body`] (Wave M). Empty
+    /// means every module uses [`PixelTraits::default`].
+    #[serde(default)]
+    pub body_traits: Vec<PixelTraits>,
+    /// Cached aggregate over body + traits. Recompute on structural change.
     #[serde(default)]
     pub body_plan: BodyPlan,
 }
@@ -201,8 +204,8 @@ impl Atom {
         let genome = Genome::default();
         let energy_max = energy_max.max(1.0);
         let body = default_atom_body();
-        let body_plan = body_plan_from_kinds(body.iter().map(|(_, _, m)| m));
-        Self {
+        let body_traits = vec![PixelTraits::default(); body.len()];
+        let mut a = Self {
             gx,
             gy,
             fy: gy as f32,
@@ -221,22 +224,121 @@ impl Atom {
             last_water_top: None,
             body,
             genome,
-            body_plan,
-        }
+            body_traits,
+            body_plan: BodyPlan::default(),
+        };
+        a.recompute_body_plan();
+        a
     }
 
     pub fn from_body(gx: i32, gy: i32, energy_max: f32, body: Vec<BodyModule>) -> Self {
         let mut a = Self::new(gx, gy, energy_max);
         if !body.is_empty() {
             a.body = body;
+            a.body_traits = vec![PixelTraits::default(); a.body.len()];
         }
         a.recompute_body_plan();
         a
     }
 
-    /// Refresh [`Self::body_plan`] from the live module list (default traits).
+    /// Spawn with painted pixel traits (Wave M).
+    pub fn from_body_with_traits(
+        gx: i32,
+        gy: i32,
+        energy_max: f32,
+        body: Vec<BodyModule>,
+        traits: Vec<PixelTraits>,
+    ) -> Self {
+        let mut a = Self::from_body(gx, gy, energy_max, body);
+        a.set_body_traits(traits);
+        a
+    }
+
+    /// Replace per-pixel traits (pads/truncates to body length).
+    pub fn set_body_traits(&mut self, traits: Vec<PixelTraits>) {
+        self.body_traits = traits;
+        self.align_body_traits();
+        self.recompute_body_plan();
+    }
+
+    fn align_body_traits(&mut self) {
+        while self.body_traits.len() < self.body.len() {
+            self.body_traits.push(PixelTraits::default());
+        }
+        self.body_traits.truncate(self.body.len());
+    }
+
+    /// Trait payload for body index `i` (default if missing).
+    pub fn trait_at(&self, i: usize) -> PixelTraits {
+        self.body_traits
+            .get(i)
+            .copied()
+            .unwrap_or_else(PixelTraits::default)
+    }
+
+    /// Append a module + traits and refresh aggregates.
+    pub fn push_module(&mut self, dx: i16, dy: i16, module: ModuleId, traits: PixelTraits) {
+        self.align_body_traits();
+        self.body.push((dx, dy, module));
+        self.body_traits.push(traits);
+        self.recompute_body_plan();
+    }
+
+    /// Mean absorb_bias over Photosystem pixels.
+    ///
+    /// When every photosystem still has the paint-default absorb (`1.0`),
+    /// fall back to [`Genome::leaf_absorb`] so Tab plant knobs keep working.
+    pub fn leaf_absorb_effective(&self) -> f32 {
+        let n = self.photosystem_count();
+        if n == 0 {
+            return self.genome.leaf_absorb.clamp(0.05, 1.0);
+        }
+        let mean = self.body_plan.photo_capacity / n as f32;
+        if (mean - 1.0).abs() < 1e-4 {
+            return self.genome.leaf_absorb.clamp(0.05, 1.0);
+        }
+        mean.clamp(0.05, 1.0)
+    }
+
+    /// Mean drink_bias over Root pixels (1.0 when no roots).
+    pub fn drink_bias_effective(&self) -> f32 {
+        let mut sum = 0.0f32;
+        let mut n = 0usize;
+        for (i, (_, _, m)) in self.body.iter().enumerate() {
+            if *m == ModuleId::Root {
+                sum += self.trait_at(i).drink_bias.max(0.0);
+                n += 1;
+            }
+        }
+        if n == 0 {
+            1.0
+        } else {
+            (sum / n as f32).clamp(0.05, 4.0)
+        }
+    }
+
+    /// Refresh [`Self::body_plan`] from body + traits; sync pose knobs.
     pub fn recompute_body_plan(&mut self) {
-        self.body_plan = body_plan_from_kinds(self.body.iter().map(|(_, _, m)| m));
+        self.align_body_traits();
+        let pairs: Vec<(ModuleId, PixelTraits)> = self
+            .body
+            .iter()
+            .enumerate()
+            .map(|(i, (_, _, m))| (*m, self.trait_at(i)))
+            .collect();
+        self.body_plan = body_plan_from(&pairs);
+        self.buoyancy_bias = self.body_plan.buoyancy_bias;
+        self.clone_fidelity = self.body_plan.clone_fidelity;
+        // Keep vestigial Genome mirrors in sync for save/UI readers.
+        self.genome.buoyancy_bias = self.buoyancy_bias;
+        self.genome.clone_fidelity = self.clone_fidelity;
+        self.genome.metabolic_rate = if self.body_plan.pixel_count > 0 {
+            (self.body_plan.metabolic_rate / self.body_plan.pixel_count as f32).clamp(0.05, 4.0)
+        } else {
+            1.0
+        };
+        self.genome.reproduce_at = self.body_plan.reproduce_at;
+        self.genome.leaf_absorb = self.leaf_absorb_effective();
     }
 
     pub fn photosystem_count(&self) -> usize {
@@ -464,6 +566,61 @@ impl OrganismStore {
         };
         let mut atom = Atom::from_body(gx, gy, energy_max, body);
         apply_genome(&mut atom, genome);
+        atom.recompute_body_plan();
+        if plant {
+            pin_plant_pose(&mut atom);
+            if !is_anchored(world, &atom) {
+                return false;
+            }
+        } else if fungus {
+            pin_plant_pose(&mut atom);
+            if !is_fungus_seated(world, &atom) {
+                return false;
+            }
+        } else if let Some((top, _)) = wet_band(world, gx, gy) {
+            atom.last_water_top = Some(top);
+        }
+        self.atoms.push(atom);
+        true
+    }
+
+    /// Like [`Self::spawn_blueprint`] but carries painted [`PixelTraits`].
+    pub fn spawn_blueprint_with_traits(
+        &mut self,
+        world: &World,
+        gx: i32,
+        gy: i32,
+        body: Vec<BodyModule>,
+        traits: Vec<PixelTraits>,
+        energy_max: f32,
+        genome: Genome,
+    ) -> bool {
+        if self.atoms.len() >= self.atom_cap() || body.is_empty() {
+            return false;
+        }
+        let gx = world.wrap_x(gx);
+        let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
+        let fungus = body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant;
+        let gy = if plant {
+            let Some(slot) = find_plant_slot(world, gx, gy) else {
+                return false;
+            };
+            slot
+        } else if fungus {
+            let Some(slot) = find_fungus_slot(world, gx, gy) else {
+                return false;
+            };
+            slot
+        } else if is_wet_air(world, gx, gy) {
+            gy
+        } else if let Some(slot) = find_wet_near(world, gx, gy) {
+            slot
+        } else {
+            return false;
+        };
+        let mut atom = Atom::from_body_with_traits(gx, gy, energy_max, body, traits);
+        apply_genome(&mut atom, genome);
+        atom.recompute_body_plan();
         if plant {
             pin_plant_pose(&mut atom);
             if !is_anchored(world, &atom) {
@@ -520,6 +677,51 @@ impl OrganismStore {
         };
         let mut atom = Atom::from_body(gx, gy, energy_max, body);
         apply_genome(&mut atom, genome);
+        atom.recompute_body_plan();
+        if is_land_plant(&atom) || is_fungus(&atom) {
+            pin_plant_pose(&mut atom);
+        } else if let Some((top, _)) = wet_band(world, gx, gy) {
+            atom.last_water_top = Some(top);
+        }
+        self.atoms.push(atom);
+        Ok(())
+    }
+
+    /// Editor spawn with painted pixel traits (Wave M).
+    pub fn spawn_blueprint_free_with_traits(
+        &mut self,
+        world: &World,
+        gx: i32,
+        gy: i32,
+        body: Vec<BodyModule>,
+        traits: Vec<PixelTraits>,
+        energy_max: f32,
+        genome: Genome,
+    ) -> Result<(), SpawnFail> {
+        if self.atoms.len() >= self.atom_cap() {
+            return Err(SpawnFail::PopCap);
+        }
+        if body.is_empty() || !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+            return Err(SpawnFail::InvalidBody);
+        }
+        let gx = world.wrap_x(gx);
+        let plant = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
+        let fungus = body.iter().any(|(_, _, m)| *m == ModuleId::Digest) && !plant;
+        let gy = if plant {
+            find_surface_air_slot(world, gx, gy)
+                .or_else(|| find_air_near(world, gx, gy))
+                .ok_or(SpawnFail::NoAir)?
+        } else if fungus {
+            find_fungus_slot(world, gx, gy)
+                .or_else(|| find_surface_air_slot(world, gx, gy))
+                .or_else(|| find_air_near(world, gx, gy))
+                .ok_or(SpawnFail::NoAir)?
+        } else {
+            find_air_near(world, gx, gy).ok_or(SpawnFail::NoAir)?
+        };
+        let mut atom = Atom::from_body_with_traits(gx, gy, energy_max, body, traits);
+        apply_genome(&mut atom, genome);
+        atom.recompute_body_plan();
         if is_land_plant(&atom) || is_fungus(&atom) {
             pin_plant_pose(&mut atom);
         } else if let Some((top, _)) = wet_band(world, gx, gy) {
@@ -639,19 +841,26 @@ impl OrganismStore {
                 }
             }
 
-            let n_photo = atom.photosystem_count().max(1) as f32;
-            let n_mod = atom.body.len().max(1) as f32;
             let light = column_light(world, atom.gx, atom.gy) * day;
-            let harvest = PHOTON_RATE * light * n_photo;
-            let upkeep = UPKEEP_PER_MODULE * n_mod * (0.45 + 0.55 * day);
+            // Wave M: photo_capacity / metabolic_rate are BodyPlan aggregates.
+            // Default absorb_bias=1 → photo_capacity == photosystem count.
+            let photo_cap = atom.body_plan.photo_capacity.max(1.0);
+            let harvest = PHOTON_RATE * light * photo_cap;
+            let metabolic = atom.body_plan.metabolic_rate.max(0.05);
+            let upkeep = UPKEEP_PER_MODULE * metabolic * (0.45 + 0.55 * day);
             atom.energy = (atom.energy + harvest - upkeep).clamp(0.0, atom.energy_max);
             if atom.energy <= 0.0 {
                 deaths.push(i);
                 continue;
             }
 
+            let repro_at = if atom.body_plan.has_repro_gate {
+                atom.body_plan.reproduce_at
+            } else {
+                1.0 // no nucleus → never fission
+            };
             if atom.cooldown == 0
-                && atom.energy >= atom.energy_max * REPRODUCE_AT
+                && atom.energy >= atom.energy_max * repro_at
                 && pop + births.len() < atom_cap
             {
                 let cost = atom.energy_max * REPRO_COST_FRAC;
@@ -822,9 +1031,10 @@ fn step_land_plant(
     }
 
     let n_photo = atom.photosystem_count();
-    let n_mod = atom.body.len().max(1) as f32;
-    // Plants respire less than plankton blooms.
-    let mut upkeep = UPKEEP_PER_MODULE * PLANT_UPKEEP_MULT * n_mod * (0.45 + 0.55 * day);
+    // Plants respire less than plankton blooms; metabolic_rate = Σ upkeep_bias.
+    let metabolic = atom.body_plan.metabolic_rate.max(0.05);
+    let mut upkeep =
+        UPKEEP_PER_MODULE * PLANT_UPKEEP_MULT * metabolic * (0.45 + 0.55 * day);
 
     if dormant {
         upkeep *= DROUGHT_DORMANT_UPKEEP;
@@ -843,21 +1053,23 @@ fn step_land_plant(
     // Sky column light × day, then neighbour canopy + gene remap (D2).
     let sample_y = canopy_top_y(atom);
     let sky = column_light(world, atom.gx, sample_y) * day;
-    let light = effective_photo_light(
+    let light = crate::shade::effective_photo_light_absorb(
         canopy,
         atom.gx,
         sample_y,
         sky,
         entity_id,
         n_photo,
-        &atom.genome,
+        atom.leaf_absorb_effective(),
+        atom.genome.shade_efficiency,
     );
     let photo_scale = match drought {
         DroughtBand::Hydrated => 1.25, // mild bonus so moist sand recovers
         DroughtBand::Stressed => 0.55,
         DroughtBand::Dormant => 0.0,
     };
-    let harvest = PHOTON_RATE * light * n_photo.max(1) as f32 * photo_scale;
+    let photo_cap = atom.body_plan.photo_capacity.max(1.0);
+    let harvest = PHOTON_RATE * light * photo_cap * photo_scale;
     let stress = match drought {
         DroughtBand::Stressed => DROUGHT_STRESS_DRAIN,
         DroughtBand::Hydrated | DroughtBand::Dormant => 0.0,
@@ -1198,24 +1410,34 @@ fn try_fission(world: &World, parent: &Atom, child_energy: f32, tick: u64) -> Op
         let nx = world.wrap_x(parent.gx + dx);
         let ny = parent.gy + dy;
         if is_wet_air(world, nx, ny) {
-            let mut child =
-                Atom::from_body(nx, ny, parent.energy_max, parent.body.clone());
+            let mut child = Atom::from_body_with_traits(
+                nx,
+                ny,
+                parent.energy_max,
+                parent.body.clone(),
+                parent.body_traits.clone(),
+            );
             child.energy = child_energy.clamp(1.0, parent.energy_max);
             child.cooldown = REPRO_PERIOD;
             child.circadian_phase = parent.circadian_phase;
             child.active_window = parent.active_window;
             child.last_water_top = parent.last_water_top;
-            // Mutate buoyancy (and fidelity a little) on clone.
-            let strength = (1.0 - parent.clone_fidelity.clamp(0.0, 1.0)) * MUTATION_SIGMA;
-            let j_b = hash_signed(tick, parent.gx as u64, parent.gy as u64, 0xB0A7);
-            let j_f = hash_signed(tick, parent.gx as u64, parent.age_ticks, 0xF1DE);
-            child.buoyancy_bias =
-                (parent.buoyancy_bias + j_b * strength * 2.0).clamp(0.0, 1.0);
-            child.clone_fidelity =
-                (parent.clone_fidelity + j_f * strength).clamp(0.05, 1.0);
             child.genome = parent.genome;
-            child.genome.buoyancy_bias = child.buoyancy_bias;
-            child.genome.clone_fidelity = child.clone_fidelity;
+            // Jitter per-pixel traits; aggregate drives buoyancy / fidelity.
+            let strength = (1.0 - parent.clone_fidelity.clamp(0.0, 1.0)) * MUTATION_SIGMA;
+            for (i, t) in child.body_traits.iter_mut().enumerate() {
+                let salt = 0xB0A7u64.wrapping_add(i as u64);
+                let j = hash_signed(tick, parent.gx as u64, parent.gy as u64, salt);
+                t.buoyancy_bias = (t.buoyancy_bias + j * strength * 2.0).clamp(0.0, 1.0);
+                let j2 = hash_signed(tick, parent.gx as u64, parent.age_ticks, salt ^ 0xF1DE);
+                t.clone_fidelity_bias =
+                    (t.clone_fidelity_bias + j2 * strength).clamp(0.05, 1.0);
+                let j3 = hash_signed(tick, parent.age_ticks, i as u64, 0xA11CE);
+                t.upkeep_bias = (t.upkeep_bias + j3 * strength).clamp(0.05, 4.0);
+                let j4 = hash_signed(tick, i as u64, parent.gy as u64, 0xAB50_70);
+                t.absorb_bias = (t.absorb_bias + j4 * strength).clamp(0.05, 4.0);
+            }
+            child.recompute_body_plan();
             return Some(child);
         }
     }
@@ -1287,7 +1509,7 @@ fn hash_signed(a: u64, b: u64, c: u64, salt: u64) -> f32 {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::blueprint::Genome;
+    use crate::blueprint::{Blueprint, Genome, PixelTraits};
     use crate::cell::{Cell, Sat};
     use crate::chunk::ChunkCoord;
     use crate::plant::LAND_GROW_PERIOD;
@@ -2762,5 +2984,80 @@ mod tests {
             e_shaded < e_alone,
             "shaded short plant should harvest less (shaded={e_shaded}, alone={e_alone})"
         );
+    }
+
+    #[test]
+    fn body_traits_drive_body_plan_and_pose_knobs() {
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Photosystem),
+        ];
+        let mut traits = vec![PixelTraits::default(); 2];
+        traits[0].buoyancy_bias = 0.8;
+        traits[1].buoyancy_bias = 0.8;
+        traits[0].clone_fidelity_bias = 0.4;
+        traits[1].clone_fidelity_bias = 0.4;
+        traits[1].absorb_bias = 2.0;
+        traits[1].upkeep_bias = 3.0;
+        let a = Atom::from_body_with_traits(0, 0, 40.0, body, traits);
+        assert!((a.body_plan.buoyancy_bias - 0.8).abs() < 1e-5);
+        assert!((a.buoyancy_bias - a.body_plan.buoyancy_bias).abs() < 1e-5);
+        assert!((a.clone_fidelity - a.body_plan.clone_fidelity).abs() < 1e-5);
+        assert!((a.body_plan.photo_capacity - 2.0).abs() < 1e-5);
+        assert!((a.body_plan.metabolic_rate - 4.0).abs() < 1e-5); // 1 + 3
+        assert!((a.leaf_absorb_effective() - 1.0).abs() < 1e-5); // clamped
+    }
+
+    #[test]
+    fn high_upkeep_traits_raise_metabolic_rate() {
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Photosystem),
+        ];
+        let thrifty = Atom::from_body_with_traits(
+            0,
+            0,
+            40.0,
+            body.clone(),
+            vec![
+                PixelTraits {
+                    upkeep_bias: 0.2,
+                    ..PixelTraits::default()
+                };
+                2
+            ],
+        );
+        let hungry = Atom::from_body_with_traits(
+            0,
+            0,
+            40.0,
+            body,
+            vec![
+                PixelTraits {
+                    upkeep_bias: 3.0,
+                    ..PixelTraits::default()
+                };
+                2
+            ],
+        );
+        assert!(thrifty.body_plan.metabolic_rate < hungry.body_plan.metabolic_rate);
+        assert!((thrifty.body_plan.metabolic_rate - 0.4).abs() < 1e-5);
+        assert!((hungry.body_plan.metabolic_rate - 6.0).abs() < 1e-5);
+    }
+
+    #[test]
+    fn spawn_with_traits_round_trips_from_blueprint() {
+        let mut bp = Blueprint::atom();
+        bp.modules[1].traits.absorb_bias = 2.5;
+        bp.modules[0].traits.buoyancy_bias = 0.7;
+        let (body, traits) = bp.modules_relative_with_traits();
+        let w = wet_column();
+        let mut store = OrganismStore::new();
+        assert!(store
+            .spawn_blueprint_free_with_traits(&w, 4, 5, body, traits, 40.0, Genome::default())
+            .is_ok());
+        let a = &store.atoms[0];
+        assert!((a.trait_at(1).absorb_bias - 2.5).abs() < 1e-5);
+        assert!((a.body_plan.photo_capacity - 2.5).abs() < 1e-5);
     }
 }
