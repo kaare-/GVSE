@@ -25,8 +25,8 @@ models and missing postcard fields upgrade cleanly:
 |-------|------|
 | `mass` | Local mass contribution |
 | `density` | Scales mass into `total_mass` (`mass × density`) |
-| `stiffness` | Bone / structure (schema only in Wave K) |
-| `strength` | Muscle (schema only in Wave K) |
+| `stiffness` | Bone column capacity (Wave N live fragility) |
+| `strength` | Scales Bone capacity; Muscle contraction later |
 | `upkeep_bias` | Contributes to aggregate metabolic cost |
 | `absorb_bias` | Photosystem harvest lean |
 | `drink_bias` | Root drink lean |
@@ -89,6 +89,15 @@ per-pixel traits then recomputes the body plan.
 `PixelTraits` defaults for buoyancy / fidelity / repro match the old
 `Genome` defaults (floater, 0.9, 0.85) so unpainted bodies behave as
 before.
+
+### Wave N — Bone fragility
+
+Live `ModuleId::Bone` capacity =
+`3.5 × stiffness × density × strength`. Column load is Σ
+(`mass × density`) of modules stacked above in the same body `dx`.
+Overloaded Bone fractures (drops world `Sand`, removes the pixel).
+Dead world Bone crush is a separate opt-in geotech pass — see
+[`VOXEL_BIOLOGY.md`](../VOXEL_BIOLOGY.md).
 
 ## Studio surfaces
 

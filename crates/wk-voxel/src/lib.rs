@@ -57,9 +57,10 @@ pub use clouds::{
     cloud_floor_y, CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS,
 };
 pub use failure::{
-    apply_compaction, apply_failure, apply_roof_collapse, apply_shear_weaken, compaction_load_ok,
-    effective_cohesion, face_shear_demand, pore_wetness, pore_wetness_with, roof_collapse_debris,
-    roof_span_cells, roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
+    apply_bone_crush, apply_compaction, apply_failure, apply_roof_collapse, apply_shear_weaken,
+    bone_crush_load_ok, compaction_load_ok, effective_cohesion, face_shear_demand, pore_wetness,
+    pore_wetness_with, roof_collapse_debris, roof_span_cells, roof_span_limit_cells,
+    shear_weaken_debris, wet_repose_loosens, FailureConfig, BONE_CRUSH_SIGMA_MIN,
     COMPACTION_SIGMA_MIN,
 };
 pub use fungi::{add_soft_litter, dissolve_corpse_to_organic, is_fungus, soft_litter_at};
@@ -72,8 +73,9 @@ pub use grid::World;
 // HydroOverrides is defined in wk-material; re-export for app convenience.
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
-    Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,
-    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
+    bone_column_capacity, fracture_overloaded_bones, Atom, BodyModule, Corpse, ModuleId,
+    OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS,
+    MAX_CORPSES,
 };
 pub use plant::{
     collect_live_root_world_cells, find_fungus_slot, find_plant_slot, find_surface_air_slot,

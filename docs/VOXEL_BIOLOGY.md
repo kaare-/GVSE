@@ -70,8 +70,30 @@ Wave L makes dead cells of those kinds persist as world materials.
 See [`organism/PALETTE.md`](organism/PALETTE.md) and
 [`organism/GENES.md`](organism/GENES.md).
 
+## Bone fragility (Wave N)
+
+Two paths turn Bone into Sand under load:
+
+1. **Dead world Bone** — opt-in [`apply_bone_crush`](../crates/wk-voxel/src/failure.rs)
+   (Tab → Geotech → **Bone crush**). When overburden σᵥ ≥
+   `BONE_CRUSH_SIGMA_MIN` (or ≥ 6 solid cells above without a map),
+   `MaterialId::Bone` → `Sand`. Chance + event caps match other geotech
+   knobs. Off by default.
+2. **Live `ModuleId::Bone`** — always on during `OrganismStore::step`.
+   Column load = Σ (`mass × density`) of body modules in the same `dx`
+   with higher `dy`. Capacity =
+   `3.5 × stiffness × density × strength`. The lowest overloaded Bone
+   pixel fractures (at most one / tick / organism), drops Sand into dry
+   Air, and is removed from the body.
+
+**F1 roof:** Bone ceilings participate (`roof_span_max_m = 4`). Debris is
+**Sand** (Bone is not a grain — identity-keep would strand solids).
+
 ## Scenario
 
 `e18_bone_persists_after_muscle_rots` — Nucleus + Bone + Muscle + Skin
 creature dies; after dissolve, Muscle/Skin become Organic while Bone
 lingers, then Bone eventually becomes Sand under elevated `bone_prob`.
+
+`e19_bone_fragility` — Bone roof → Sand debris; dead Bone crush under
+stack; live soft Bone fractures under self-stack.
