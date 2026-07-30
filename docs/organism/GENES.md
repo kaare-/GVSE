@@ -131,6 +131,14 @@ the `Genome` struct is deferred until blueprint postcard migration.
 Never swaps away the last Nucleus. Live Atom fission uses the same
 pipeline through `Atom::to_mutation_blueprint`.
 
+### Wave R — sprout / spore on `mutate_child`
+
+Vegetative plant sprout and fungus spore build a chassis blueprint via
+`Atom::chassis_mutation_blueprint` (inherit kinded traits + pose knobs),
+run `mutate_child`, then seat the child. Stemless plant parents re-lock
+any kind-swapped Stem back to Photosystem so habit cannot invent a trunk.
+`Genome::mutate` is no longer on these live paths.
+
 ### Wave P — visual trait feedback
 
 Draw path tints module RGB from local `PixelTraits` via
