@@ -9,6 +9,9 @@ Organism Kernel plan.*
   Phase 2, its hex is frozen forever. Blueprints in `.gvsecrt` files
   and postcard saves reference the module by its `ModuleId` enum
   variant, and the palette maps that variant to the frozen hex.
+- **Wave P draw tint** may shift brightness/coolness from `PixelTraits`
+  at render time only (`modulate_module_rgb`). Defaults match the frozen
+  hex exactly; the save identity is still `ModuleId`, not the tinted RGB.
 - **Renaming is fine, renumbering is not.** `ModuleId` values must be
   stable in `#[repr(u8)]` for save-compat; new modules append.
 - **Add colours slowly.** A new colour costs the reader another mental

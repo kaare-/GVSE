@@ -109,6 +109,105 @@ impl Default for PixelTraits {
     }
 }
 
+/// Scale relative to a trait's paint-default. `1.0` when `value == default`.
+fn trait_scale(value: f32, default: f32) -> f32 {
+    if default <= 1e-6 {
+        return 1.0;
+    }
+    (value / default).clamp(0.65, 1.45)
+}
+
+fn mul_channel(c: u8, factor: f32) -> u8 {
+    ((c as f32) * factor).round().clamp(0.0, 255.0) as u8
+}
+
+/// Wave P: tint frozen [`ModuleId`] RGB from local traits.
+///
+/// Palette hex stays the identity ([`ModuleId::rgb`]); this only shifts
+/// brightness / coolness for draw. **Default traits → identical RGB.**
+pub fn modulate_module_rgb(module: ModuleId, traits: &PixelTraits) -> (u8, u8, u8) {
+    let (r, g, b) = module.rgb();
+    match module {
+        ModuleId::Nucleus => (r, g, b), // keep #000000 identity
+        ModuleId::Photosystem => {
+            let bright = trait_scale(traits.absorb_bias, 1.0);
+            let cool = trait_scale(traits.shade_efficiency, default_shade_efficiency());
+            (
+                mul_channel(r, 0.92 * bright + 0.08),
+                mul_channel(g, bright),
+                mul_channel(b, bright * (0.85 + 0.15 * cool)),
+            )
+        }
+        ModuleId::Root => {
+            let moist = trait_scale(traits.drink_bias, 1.0);
+            let deep = trait_scale(traits.root_depth_bias, default_root_depth_bias());
+            // Deeper roots read darker; drinky roots a touch richer.
+            let darken = 1.15 - 0.15 * deep;
+            (
+                mul_channel(r, moist * darken),
+                mul_channel(g, moist * darken * 0.98 + 0.02),
+                mul_channel(b, moist * darken * 0.95 + 0.05),
+            )
+        }
+        ModuleId::Stem => {
+            let mass = trait_scale(traits.mass * traits.density, 1.0);
+            let darken = 1.12 - 0.12 * mass;
+            (
+                mul_channel(r, darken),
+                mul_channel(g, darken),
+                mul_channel(b, darken),
+            )
+        }
+        ModuleId::Digest => {
+            let rate = trait_scale(traits.digest_rate, default_digest_rate());
+            (
+                mul_channel(r, rate),
+                mul_channel(g, 0.9 * rate + 0.1),
+                mul_channel(b, 0.9 * rate + 0.1),
+            )
+        }
+        ModuleId::Hypha => {
+            let rate = trait_scale(traits.digest_rate, default_digest_rate());
+            let dens = trait_scale(traits.density, 1.0);
+            let darken = 1.1 - 0.1 * dens;
+            (
+                mul_channel(r, rate * darken),
+                mul_channel(g, rate * darken),
+                mul_channel(b, rate * darken),
+            )
+        }
+        ModuleId::Bone => {
+            let dens = trait_scale(traits.density, 1.0);
+            let stiff = trait_scale(traits.stiffness, 1.0);
+            let darken = 1.12 - 0.12 * dens;
+            (
+                mul_channel(r, darken),
+                mul_channel(g, darken * (0.96 + 0.04 * stiff)),
+                mul_channel(b, darken * (0.92 + 0.08 * stiff)),
+            )
+        }
+        ModuleId::Muscle => {
+            let str = trait_scale(traits.strength, 1.0);
+            let dens = trait_scale(traits.density, 1.0);
+            let darken = 1.1 - 0.1 * dens;
+            (
+                mul_channel(r, str * darken),
+                mul_channel(g, (0.85 * str + 0.15) * darken),
+                mul_channel(b, (0.85 * str + 0.15) * darken),
+            )
+        }
+        ModuleId::Skin => {
+            let dens = trait_scale(traits.density, 1.0);
+            let darken = 1.1 - 0.1 * dens;
+            (
+                mul_channel(r, darken),
+                mul_channel(g, darken),
+                mul_channel(b, darken),
+            )
+        }
+    }
+}
+
 /// One painted module cell + its gene traits.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PlacedModule {
@@ -951,5 +1050,54 @@ mod tests {
             }
         }
         assert!(grew, "expected at least one chain-grow across seed search");
+    }
+
+    #[test]
+    fn default_traits_preserve_frozen_palette_rgb() {
+        let t = PixelTraits::default();
+        for m in [
+            ModuleId::Nucleus,
+            ModuleId::Photosystem,
+            ModuleId::Root,
+            ModuleId::Stem,
+            ModuleId::Digest,
+            ModuleId::Hypha,
+            ModuleId::Bone,
+            ModuleId::Muscle,
+            ModuleId::Skin,
+        ] {
+            assert_eq!(
+                modulate_module_rgb(m, &t),
+                m.rgb(),
+                "{:?} default traits must match frozen palette",
+                m
+            );
+        }
+    }
+
+    #[test]
+    fn high_absorb_brightens_photosystem() {
+        let mut t = PixelTraits::default();
+        t.absorb_bias = 2.0;
+        let base = ModuleId::Photosystem.rgb();
+        let tinted = modulate_module_rgb(ModuleId::Photosystem, &t);
+        assert!(
+            tinted.1 > base.1,
+            "high absorb should raise green (base={base:?} tinted={tinted:?})"
+        );
+        // Still recognizably green-dominant.
+        assert!(tinted.1 > tinted.0 && tinted.1 > tinted.2);
+    }
+
+    #[test]
+    fn dense_bone_darkens() {
+        let mut t = PixelTraits::default();
+        t.density = 2.5;
+        let base = ModuleId::Bone.rgb();
+        let tinted = modulate_module_rgb(ModuleId::Bone, &t);
+        assert!(
+            tinted.0 < base.0 && tinted.1 < base.1 && tinted.2 < base.2,
+            "dense bone should darken (base={base:?} tinted={tinted:?})"
+        );
     }
 }

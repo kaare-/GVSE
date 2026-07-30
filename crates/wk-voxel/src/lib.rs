@@ -47,7 +47,9 @@ pub use cell::{
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use aggregate::{body_plan_from, body_plan_from_kinds, BodyPlan};
 pub use biology::module_death_material;
-pub use blueprint::{Blueprint, Genome, LaneId, PixelTraits, PlacedModule, BLUEPRINT_DIR};
+pub use blueprint::{
+    modulate_module_rgb, Blueprint, Genome, LaneId, PixelTraits, PlacedModule, BLUEPRINT_DIR,
+};
 pub use climate::{
     celestial_local, celestial_local_cfg, celestial_screen_pos, celestial_screen_pos_cfg, day_factor,
     day_factor_cfg, day_night_factor, day_night_factor_cfg, is_daytime, is_daytime_cfg, phase_fraction,
