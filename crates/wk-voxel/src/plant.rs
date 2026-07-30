@@ -290,6 +290,7 @@ pub fn drink_roots(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32))
         return (0.0, 0, (atom.gx, atom.gy));
     }
     let want = budget.min(ROOT_SIP_MAX_SAT);
+    let drink_bias = atom.drink_bias_effective();
     let mut energy = 0.0f32;
     let mut taken = 0u8;
     let mut deposit_at = (atom.gx, atom.gy);
@@ -300,13 +301,13 @@ pub fn drink_roots(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32))
         let wx = world.wrap_x(atom.gx + dx as i32);
         let wy = atom.gy + dy as i32;
         if let Some(n) = sip_porous(world, wx, wy, want - taken) {
-            energy += ROOT_WATER_ENERGY * n as f32;
+            energy += ROOT_WATER_ENERGY * n as f32 * drink_bias;
             taken += n;
             deposit_at = (wx, wy);
             continue;
         }
         if let Some(n) = sip_porous(world, wx, wy - 1, want - taken) {
-            energy += ROOT_WATER_ENERGY * n as f32;
+            energy += ROOT_WATER_ENERGY * n as f32 * drink_bias;
             taken += n;
             deposit_at = (wx, wy - 1);
         }
@@ -848,8 +849,7 @@ pub fn try_elongate_root(
         return 0.0;
     };
     atom.energy -= cost;
-    atom.body.push((nx, ny, ModuleId::Root));
-    atom.recompute_body_plan();
+    atom.push_module(nx, ny, ModuleId::Root, crate::blueprint::PixelTraits::default());
     cost
 }
 
@@ -996,8 +996,12 @@ pub fn try_grow_shoot(
                 continue;
             }
             atom.energy -= cost;
-            atom.body.push((nx, ny, ModuleId::Photosystem));
-            atom.recompute_body_plan();
+            atom.push_module(
+                nx,
+                ny,
+                ModuleId::Photosystem,
+                crate::blueprint::PixelTraits::default(),
+            );
             return true;
         }
         false
@@ -1033,8 +1037,7 @@ pub fn try_grow_shoot(
                 continue;
             }
             atom.energy -= cost;
-            atom.body.push((nx, ny, ModuleId::Stem));
-            atom.recompute_body_plan();
+            atom.push_module(nx, ny, ModuleId::Stem, crate::blueprint::PixelTraits::default());
             return true;
         }
         false
@@ -1223,14 +1226,52 @@ fn hash01(a: u64, b: u64, c: u64, salt: u64) -> f32 {
 }
 
 /// Apply genome fields that also live as Atom pose knobs.
+///
+/// Wave M: when pixel traits are present, [`Atom::recompute_body_plan`]
+/// owns buoyancy / clone_fidelity / metabolic / leaf_absorb mirrors.
+/// This helper only copies genome → pose when `body_traits` is empty.
 pub fn sync_atom_from_genome(atom: &mut Atom) {
-    atom.buoyancy_bias = atom.genome.buoyancy_bias.clamp(0.0, 1.0);
-    atom.clone_fidelity = atom.genome.clone_fidelity.clamp(0.05, 1.0);
+    if atom.body_traits.is_empty() {
+        atom.buoyancy_bias = atom.genome.buoyancy_bias.clamp(0.0, 1.0);
+        atom.clone_fidelity = atom.genome.clone_fidelity.clamp(0.05, 1.0);
+    }
 }
 
 pub fn apply_genome(atom: &mut Atom, genome: Genome) {
+    // Plant-only knobs (alloc / depth / shade_efficiency / digest) always
+    // come from the argument. Shared scalars are refreshed from pixels
+    // when `body_traits` is populated.
+    let shade_efficiency = genome.shade_efficiency;
+    let digest_rate = genome.digest_rate;
+    let alloc_stem = genome.alloc_stem;
+    let alloc_leaf = genome.alloc_leaf;
+    let alloc_root = genome.alloc_root;
+    let root_depth_bias = genome.root_depth_bias;
+    let leaf_absorb = genome.leaf_absorb;
     atom.genome = genome;
-    sync_atom_from_genome(atom);
+    atom.genome.shade_efficiency = shade_efficiency;
+    atom.genome.digest_rate = digest_rate;
+    atom.genome.alloc_stem = alloc_stem;
+    atom.genome.alloc_leaf = alloc_leaf;
+    atom.genome.alloc_root = alloc_root;
+    atom.genome.root_depth_bias = root_depth_bias;
+    if atom.body_traits.is_empty() {
+        atom.genome.leaf_absorb = leaf_absorb;
+        sync_atom_from_genome(atom);
+    } else {
+        // Seed photosystem absorb from genome leaf_absorb so Tab plant
+        // knobs still affect shade when the painted absorb was default.
+        if (leaf_absorb - 0.45).abs() > 1e-4 {
+            for (i, (_, _, m)) in atom.body.iter().enumerate() {
+                if *m == ModuleId::Photosystem {
+                    if let Some(t) = atom.body_traits.get_mut(i) {
+                        t.absorb_bias = leaf_absorb.clamp(0.05, 1.0);
+                    }
+                }
+            }
+        }
+        atom.recompute_body_plan();
+    }
 }
 
 /// Body helper for tests / templates.

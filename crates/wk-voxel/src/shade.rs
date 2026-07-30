@@ -112,7 +112,7 @@ pub fn build_canopy_index(atoms: &[Atom]) -> CanopyIndex {
         if n_photo == 0 && n_stem == 0 {
             continue;
         }
-        let absorb = cast_strength(n_photo, n_stem, atom.genome.leaf_absorb);
+        let absorb = cast_strength(n_photo, n_stem, atom.leaf_absorb_effective());
         record_canopy(
             &mut index,
             atom.gx,
@@ -189,6 +189,29 @@ pub fn effective_photo_light(
     self_n_photo: usize,
     genome: &Genome,
 ) -> f32 {
+    effective_photo_light_absorb(
+        index,
+        wx,
+        sample_y,
+        sky_l0,
+        self_entity,
+        self_n_photo,
+        genome.leaf_absorb,
+        genome.shade_efficiency,
+    )
+}
+
+/// Like [`effective_photo_light`] with explicit absorb (Wave M body plan).
+pub fn effective_photo_light_absorb(
+    index: &CanopyIndex,
+    wx: i32,
+    sample_y: i32,
+    sky_l0: f32,
+    self_entity: u32,
+    self_n_photo: usize,
+    leaf_absorb: f32,
+    shade_efficiency: f32,
+) -> f32 {
     if sky_l0 <= 0.01 {
         return 0.0;
     }
@@ -198,10 +221,10 @@ pub fn effective_photo_light(
         sample_y,
         self_entity,
         self_n_photo,
-        genome.leaf_absorb,
+        leaf_absorb,
     );
     let attenuated = (sky_l0 * transmit).clamp(0.0, 1.0);
-    shade_harvest_light(attenuated, genome.shade_efficiency)
+    shade_harvest_light(attenuated, shade_efficiency)
 }
 
 #[cfg(test)]

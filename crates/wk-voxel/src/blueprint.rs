@@ -30,10 +30,19 @@ pub enum LaneId {
 fn one() -> f32 {
     1.0
 }
+fn default_clone_fidelity_bias() -> f32 {
+    0.9
+}
+fn default_reproduce_at_bias() -> f32 {
+    0.85
+}
+fn default_buoyancy_bias() -> f32 {
+    0.0
+}
 
 /// Per-pixel gene payload (Wave K). Every painted module carries these
-/// scalars; aggregates form the [`BodyPlan`]. Fields unused by a kind
-/// stay inert until a later physics wave reads them.
+/// scalars; aggregates form the [`BodyPlan`]. Wave M binds live physics
+/// to those aggregates (upkeep, photo, drink, buoyancy, repro).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PixelTraits {
     #[serde(default = "one")]
@@ -50,11 +59,14 @@ pub struct PixelTraits {
     pub absorb_bias: f32,
     #[serde(default = "one")]
     pub drink_bias: f32,
-    #[serde(default = "one")]
+    /// Matches vestigial [`Genome::clone_fidelity`] default.
+    #[serde(default = "default_clone_fidelity_bias")]
     pub clone_fidelity_bias: f32,
-    #[serde(default = "one")]
+    /// Matches vestigial [`Genome::reproduce_at`] default.
+    #[serde(default = "default_reproduce_at_bias")]
     pub reproduce_at_bias: f32,
-    #[serde(default = "one")]
+    /// Matches vestigial [`Genome::buoyancy_bias`] default (floater).
+    #[serde(default = "default_buoyancy_bias")]
     pub buoyancy_bias: f32,
 }
 
@@ -68,9 +80,9 @@ impl Default for PixelTraits {
             upkeep_bias: 1.0,
             absorb_bias: 1.0,
             drink_bias: 1.0,
-            clone_fidelity_bias: 1.0,
-            reproduce_at_bias: 1.0,
-            buoyancy_bias: 1.0,
+            clone_fidelity_bias: default_clone_fidelity_bias(),
+            reproduce_at_bias: default_reproduce_at_bias(),
+            buoyancy_bias: default_buoyancy_bias(),
         }
     }
 }
@@ -442,13 +454,23 @@ impl Blueprint {
 
     /// Modules as offsets from the nucleus (for world placement).
     pub fn modules_relative_to_nucleus(&self) -> Vec<(i16, i16, ModuleId)> {
+        self.modules_relative_with_traits().0
+    }
+
+    /// Body offsets + per-pixel traits for live spawn (Wave M).
+    pub fn modules_relative_with_traits(
+        &self,
+    ) -> (Vec<(i16, i16, ModuleId)>, Vec<PixelTraits>) {
         let Some((ox, oy)) = self.nucleus_origin() else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
-        self.modules
-            .iter()
-            .map(|m| (m.x - ox, m.y - oy, m.module))
-            .collect()
+        let mut body = Vec::with_capacity(self.modules.len());
+        let mut traits = Vec::with_capacity(self.modules.len());
+        for m in &self.modules {
+            body.push((m.x - ox, m.y - oy, m.module));
+            traits.push(m.traits);
+        }
+        (body, traits)
     }
 
     /// Aggregate body plan from painted pixel genes.

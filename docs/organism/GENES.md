@@ -69,8 +69,26 @@ Deterministic in `(world_seed, tick, parent_id)`. Ops:
 Studio **Mutation Preview** rolls `mutate_child(0, 0, 0)` and shows
 Δpixels / Δmass / Δmetabolic beside a half-size child glyph.
 
-Live fission still mutates the vestigial `Genome` / buoyancy fields
-on `Atom` (unchanged this wave).
+### Wave M — live physics binding
+
+Spawn copies painted traits onto `Atom.body_traits`. Aggregates drive:
+
+| Read | Source |
+|------|--------|
+| Upkeep | `body_plan.metabolic_rate` (= Σ `upkeep_bias`) |
+| Photo harvest | `body_plan.photo_capacity` (= Σ Photosystem `absorb_bias`) |
+| Repro gate / threshold | `has_repro_gate` / `reproduce_at` |
+| Buoyancy / clone fidelity | mass-weighted means (synced onto `Atom` pose knobs) |
+| Root drink energy | mean Root `drink_bias` |
+| Leaf shade cast | `leaf_absorb_effective()` (painted absorb, else `Genome::leaf_absorb`) |
+
+Plant-only knobs (`alloc_*`, `root_depth_bias`, `shade_efficiency`,
+`digest_rate`) still live on the vestigial `Genome`. Fission jitters
+per-pixel traits then recomputes the body plan.
+
+`PixelTraits` defaults for buoyancy / fidelity / repro match the old
+`Genome` defaults (floater, 0.9, 0.85) so unpainted bodies behave as
+before.
 
 ## Studio surfaces
 

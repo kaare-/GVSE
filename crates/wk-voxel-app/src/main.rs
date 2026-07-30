@@ -889,7 +889,7 @@ async fn main() {
                 scene.params.wrap_x,
             ) {
                 if editor.spawn_picker {
-                    let body = editor.blueprint.modules_relative_to_nucleus();
+                    let (body, traits) = editor.blueprint.modules_relative_with_traits();
                     // Tab plant-gene knobs apply when the body has land/fungus
                     // tissues; pure plankton keeps painted blueprint genes.
                     let has_land_tissue = body.iter().any(|(_, _, m)| {
@@ -910,11 +910,12 @@ async fn main() {
                     } else {
                         editor.blueprint.genome
                     };
-                    match scene.organisms.spawn_blueprint_free(
+                    match scene.organisms.spawn_blueprint_free_with_traits(
                         &scene.world,
                         gx,
                         gy,
                         body,
+                        traits,
                         40.0,
                         g,
                     ) {
