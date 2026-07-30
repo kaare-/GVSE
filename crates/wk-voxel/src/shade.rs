@@ -232,6 +232,7 @@ mod tests {
     use super::*;
     use crate::blueprint::Genome;
     use crate::organism::{Atom, ModuleId};
+    use crate::plant::apply_genome;
 
     fn plant_at(gx: i32, gy: i32, stems: i16, photos: i16, genome: Genome) -> Atom {
         let mut body = vec![
@@ -246,7 +247,7 @@ mod tests {
             body.push((p, top + 1, ModuleId::Photosystem));
         }
         let mut a = Atom::from_body(gx, gy, 40.0, body);
-        a.genome = genome;
+        apply_genome(&mut a, genome);
         a
     }
 

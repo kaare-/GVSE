@@ -9,9 +9,9 @@ organism's global scalars are **aggregates** of those pixels
 
 - A **pixel gene** is one `PlacedModule`: `(x, y, lane, ModuleId, PixelTraits)`.
 - There is no separate authoritative global gene table for new work.
-  The vestigial `Genome` on `Blueprint` / `Atom` still drives live
-  physics (metabolism, plant alloc, digest, …) until follow-up waves
-  rewire those reads to `BodyPlan`.
+  Live physics reads `BodyPlan` / `PixelTraits`. `Genome` remains only
+  as a Tab / `.gvsecrt` paint DTO on `Blueprint` (Wave S retired it from
+  live `Atom`).
 - **Bone / Muscle / Skin** are first-class studio kinds: paint,
   inspect, aggregate, mutate. Sim physics for them lands in Wave L
   (world `MaterialId` + differential decay).
@@ -89,7 +89,7 @@ Spawn copies painted traits onto `Atom.body_traits`. Aggregates drive:
 | Repro gate / threshold | `has_repro_gate` / `reproduce_at` |
 | Buoyancy / clone fidelity | mass-weighted means (synced onto `Atom` pose knobs) |
 | Root drink energy | mean Root `drink_bias` |
-| Leaf shade cast | `leaf_absorb_effective()` (painted absorb, else `Genome::leaf_absorb`) |
+| Leaf shade cast | `leaf_absorb_effective()` (painted absorb; paint-default → `0.45`) |
 
 `PixelTraits` defaults for buoyancy / fidelity / repro match the old
 `Genome` defaults (floater, 0.9, 0.85) so unpainted bodies behave as
@@ -107,8 +107,7 @@ Dead world Bone crush is a separate opt-in geotech pass — see
 ### Wave O — plant / fungus knobs on pixels
 
 Remaining `Genome` plant fields are painted onto kinded traits and
-aggregated on `BodyPlan`. Live growth / shade / digest **read the plan**,
-not `atom.genome` (which stays a Tab / blueprint mirror).
+aggregated on `BodyPlan`. Live growth / shade / digest **read the plan**.
 
 | Knob | Pixel home | BodyPlan aggregate |
 |------|------------|--------------------|
@@ -119,9 +118,9 @@ not `atom.genome` (which stays a Tab / blueprint mirror).
 | `leaf_absorb` (Tab) | Photosystem `absorb_bias` | via `photo_capacity` / `leaf_absorb_effective` |
 
 `apply_genome` writes Tab / blueprint values into the matching pixels,
-then `recompute_body_plan` mirrors aggregates back onto `Genome`.
-Studio Gene Inspector exposes the new sliders per kind. Full deletion of
-the `Genome` struct is deferred until blueprint postcard migration.
+then `recompute_body_plan`. Studio Gene Inspector exposes the new
+sliders per kind. Full deletion of the `Genome` struct (and
+`Blueprint.genome`) is deferred until blueprint postcard migration.
 
 ### Wave Q — kind-swap mutation
 
@@ -137,7 +136,16 @@ Vegetative plant sprout and fungus spore build a chassis blueprint via
 `Atom::chassis_mutation_blueprint` (inherit kinded traits + pose knobs),
 run `mutate_child`, then seat the child. Stemless plant parents re-lock
 any kind-swapped Stem back to Photosystem so habit cannot invent a trunk.
-`Genome::mutate` is no longer on these live paths.
+
+### Wave S — Atom genome retired
+
+Live `Atom` no longer stores `genome`. Tab / spawn still pass a
+`Genome` paint DTO into `apply_genome` → pixels. Mutation blueprints
+fill `Blueprint.genome` via `Atom::genome_snapshot()` for `.gvsecrt`
+readers; `mutate_child` re-syncs the child DTO from `BodyPlan`.
+`Genome::mutate` is deleted (pixel path only). Sim postcard
+`SIM_SCHEMA_VERSION` is 3 (v2 demo saves with Atom.genome are not
+loadable). `Blueprint.genome` stays at schema 1.
 
 ### Wave P — visual trait feedback
 

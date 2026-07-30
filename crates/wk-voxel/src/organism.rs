@@ -190,10 +190,6 @@ pub struct Atom {
     pub last_water_top: Option<i32>,
     /// Modules relative to `(gx, gy)`.
     pub body: Vec<BodyModule>,
-    /// Vestigial gene bag (Tab / save mirror). Wave O live plant knobs
-    /// read from [`Self::body_plan`] / [`Self::body_traits`].
-    #[serde(default)]
-    pub genome: Genome,
     /// Per-module traits aligned with [`Self::body`] (Wave M). Empty
     /// means every module uses [`PixelTraits::default`].
     #[serde(default)]
@@ -205,7 +201,7 @@ pub struct Atom {
 
 impl Atom {
     pub fn new(gx: i32, gy: i32, energy_max: f32) -> Self {
-        let genome = Genome::default();
+        let pose = Genome::default();
         let energy_max = energy_max.max(1.0);
         let body = default_atom_body();
         let body_traits = vec![PixelTraits::default(); body.len()];
@@ -221,13 +217,12 @@ impl Atom {
             cooldown: REPRO_PERIOD / 2,
             drought_ticks: 0,
             sip_acc: 0.0,
-            buoyancy_bias: genome.buoyancy_bias,
-            clone_fidelity: genome.clone_fidelity,
+            buoyancy_bias: pose.buoyancy_bias,
+            clone_fidelity: pose.clone_fidelity,
             circadian_phase: 0.25,
             active_window: 0.55,
             last_water_top: None,
             body,
-            genome,
             body_traits,
             body_plan: BodyPlan::default(),
         };
@@ -290,18 +285,42 @@ impl Atom {
 
     /// Mean absorb_bias over Photosystem pixels.
     ///
-    /// When every photosystem still has the paint-default absorb (`1.0`),
-    /// fall back to [`Genome::leaf_absorb`] so Tab plant knobs keep working.
+    /// Paint-default absorb (`1.0`) maps to the historical Tab default
+    /// (`0.45`) so unpainted greens keep the same harvest / shade weight
+    /// they had when [`Genome::leaf_absorb`] lived on the atom.
     pub fn leaf_absorb_effective(&self) -> f32 {
         let n = self.photosystem_count();
         if n == 0 {
-            return self.genome.leaf_absorb.clamp(0.05, 1.0);
+            return 0.45;
         }
         let mean = self.body_plan.photo_capacity / n as f32;
         if (mean - 1.0).abs() < 1e-4 {
-            return self.genome.leaf_absorb.clamp(0.05, 1.0);
+            return 0.45;
         }
         mean.clamp(0.05, 1.0)
+    }
+
+    /// Tab / blueprint [`Genome`] mirror of live pose + [`BodyPlan`]
+    /// (Wave S). Live atoms no longer store a genome field; mutation
+    /// blueprints and `.gvsecrt` still carry this DTO.
+    pub fn genome_snapshot(&self) -> Genome {
+        let mut g = Genome::default();
+        g.buoyancy_bias = self.buoyancy_bias;
+        g.clone_fidelity = self.clone_fidelity;
+        g.metabolic_rate = if self.body_plan.pixel_count > 0 {
+            (self.body_plan.metabolic_rate / self.body_plan.pixel_count as f32).clamp(0.05, 4.0)
+        } else {
+            1.0
+        };
+        g.reproduce_at = self.body_plan.reproduce_at;
+        g.leaf_absorb = self.leaf_absorb_effective();
+        g.alloc_stem = self.body_plan.alloc_stem;
+        g.alloc_leaf = self.body_plan.alloc_leaf;
+        g.alloc_root = self.body_plan.alloc_root;
+        g.root_depth_bias = self.body_plan.root_depth_bias;
+        g.shade_efficiency = self.body_plan.shade_efficiency;
+        g.digest_rate = self.body_plan.digest_rate;
+        g
     }
 
     /// Mean drink_bias over Root pixels (1.0 when no roots).
@@ -354,7 +373,7 @@ impl Atom {
             canvas_w: CW,
             canvas_h: CH,
             modules,
-            genome: self.genome,
+            genome: self.genome_snapshot(),
             name: "live-atom".into(),
             notes: String::new(),
         }
@@ -386,7 +405,7 @@ impl Atom {
                 .unwrap_or_else(PixelTraits::default);
             traits.clone_fidelity_bias = self.clone_fidelity.clamp(0.05, 1.0);
             traits.buoyancy_bias = self.buoyancy_bias.clamp(0.0, 1.0);
-            // Nucleus also carries plant alloc habit from body plan / genome mirror.
+            // Nucleus also carries plant alloc habit from body plan.
             if mid == ModuleId::Nucleus {
                 traits.alloc_stem = self.body_plan.alloc_stem;
                 traits.alloc_leaf = self.body_plan.alloc_leaf;
@@ -416,7 +435,7 @@ impl Atom {
             canvas_w: CW,
             canvas_h: CH,
             modules,
-            genome: self.genome,
+            genome: self.genome_snapshot(),
             name: "live-chassis".into(),
             notes: String::new(),
         }
@@ -434,22 +453,6 @@ impl Atom {
         self.body_plan = body_plan_from(&pairs);
         self.buoyancy_bias = self.body_plan.buoyancy_bias;
         self.clone_fidelity = self.body_plan.clone_fidelity;
-        // Keep vestigial Genome mirrors in sync for save/UI readers.
-        self.genome.buoyancy_bias = self.buoyancy_bias;
-        self.genome.clone_fidelity = self.clone_fidelity;
-        self.genome.metabolic_rate = if self.body_plan.pixel_count > 0 {
-            (self.body_plan.metabolic_rate / self.body_plan.pixel_count as f32).clamp(0.05, 4.0)
-        } else {
-            1.0
-        };
-        self.genome.reproduce_at = self.body_plan.reproduce_at;
-        self.genome.leaf_absorb = self.leaf_absorb_effective();
-        self.genome.alloc_stem = self.body_plan.alloc_stem;
-        self.genome.alloc_leaf = self.body_plan.alloc_leaf;
-        self.genome.alloc_root = self.body_plan.alloc_root;
-        self.genome.root_depth_bias = self.body_plan.root_depth_bias;
-        self.genome.shade_efficiency = self.body_plan.shade_efficiency;
-        self.genome.digest_rate = self.body_plan.digest_rate;
     }
 
     pub fn photosystem_count(&self) -> usize {
@@ -3266,8 +3269,9 @@ mod tests {
     #[test]
     fn spawn_with_traits_round_trips_from_blueprint() {
         let mut bp = Blueprint::atom();
+        // `density` is pixel-only (apply_genome does not touch it).
+        bp.modules[1].traits.density = 2.25;
         bp.modules[1].traits.absorb_bias = 2.5;
-        bp.modules[0].traits.buoyancy_bias = 0.7;
         let (body, traits) = bp.modules_relative_with_traits();
         let w = wet_column();
         let mut store = OrganismStore::new();
@@ -3275,8 +3279,10 @@ mod tests {
             .spawn_blueprint_free_with_traits(&w, 4, 5, body, traits, 40.0, Genome::default())
             .is_ok());
         let a = &store.atoms[0];
-        assert!((a.trait_at(1).absorb_bias - 2.5).abs() < 1e-5);
-        assert!((a.body_plan.photo_capacity - 2.5).abs() < 1e-5);
+        assert!((a.trait_at(1).density - 2.25).abs() < 1e-5);
+        // Genome DTO leaf_absorb (default 0.45) overwrites canvas absorb.
+        assert!((a.trait_at(1).absorb_bias - 0.45).abs() < 1e-5);
+        assert!((a.body_plan.photo_capacity - 0.45).abs() < 1e-5);
     }
 
     #[test]
@@ -3324,8 +3330,8 @@ mod tests {
         assert!((atom.body_plan.alloc_root - 0.9).abs() < 1e-5);
         assert!((atom.body_plan.root_depth_bias - 0.85).abs() < 1e-5);
         assert!((atom.body_plan.shade_efficiency - 0.65).abs() < 1e-5);
-        // Mirror stays aligned for Tab / inspector readers.
-        assert!((atom.genome.alloc_root - 0.9).abs() < 1e-5);
+        // DTO snapshot stays aligned for Tab / blueprint readers.
+        assert!((atom.genome_snapshot().alloc_root - 0.9).abs() < 1e-5);
         let (_, _, w_root) = atom.body_plan.alloc_weights();
         assert!(w_root > 0.8);
     }
