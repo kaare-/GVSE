@@ -3269,8 +3269,9 @@ mod tests {
     #[test]
     fn spawn_with_traits_round_trips_from_blueprint() {
         let mut bp = Blueprint::atom();
+        // `density` is pixel-only (apply_genome does not touch it).
+        bp.modules[1].traits.density = 2.25;
         bp.modules[1].traits.absorb_bias = 2.5;
-        bp.modules[0].traits.buoyancy_bias = 0.7;
         let (body, traits) = bp.modules_relative_with_traits();
         let w = wet_column();
         let mut store = OrganismStore::new();
@@ -3278,8 +3279,10 @@ mod tests {
             .spawn_blueprint_free_with_traits(&w, 4, 5, body, traits, 40.0, Genome::default())
             .is_ok());
         let a = &store.atoms[0];
-        assert!((a.trait_at(1).absorb_bias - 2.5).abs() < 1e-5);
-        assert!((a.body_plan.photo_capacity - 2.5).abs() < 1e-5);
+        assert!((a.trait_at(1).density - 2.25).abs() < 1e-5);
+        // Genome DTO leaf_absorb (default 0.45) overwrites canvas absorb.
+        assert!((a.trait_at(1).absorb_bias - 0.45).abs() < 1e-5);
+        assert!((a.body_plan.photo_capacity - 0.45).abs() < 1e-5);
     }
 
     #[test]
