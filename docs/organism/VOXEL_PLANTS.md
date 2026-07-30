@@ -19,7 +19,8 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 
 ### D1 — Growth & allocation genes *(landed)*
 
-Genes on `Genome` (mutated later on sprouts):
+Knobs on Tab `Genome` DTO → Nucleus / Root pixel traits (live reads
+`BodyPlan`):
 
 | Gene | Role |
 |------|------|
@@ -48,7 +49,7 @@ Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 ### D3 — Vegetative sprout *(landed)*
 
 - Lateral rhizome tip → child plant on moist neighbour
-- `Genome::mutate` with `clone_fidelity`
+- `Blueprint::mutate_child` via chassis blueprint (`clone_fidelity`)
 - Soft pop cap shared with Atoms
 - Root elongation biases sideways when banking for a sprout
 

@@ -31,7 +31,10 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// migration path for `.gvsesim` files on disk.
 ///
 /// v2: `World.hydro` ([`wk_material::HydroOverrides`]) saved with the sim.
-pub const SIM_SCHEMA_VERSION: u32 = 2;
+/// v3: live `Atom` no longer stores a vestigial `Genome` field (Wave S);
+/// plant knobs live on `body_traits` / `body_plan`. Demo `.gvsesim` from
+/// v2 are not loadable (no organism shim).
+pub const SIM_SCHEMA_VERSION: u32 = 3;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]

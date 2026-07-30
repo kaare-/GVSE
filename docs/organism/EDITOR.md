@@ -189,7 +189,8 @@ pub struct Wire {
 3. Click a cell. The blueprint is instantiated via
    `OrganismStore::spawn_blueprint_free` (or habitat-aware spawn) on
    `wk-voxel`:
-   - Genome is applied.
+   - Blueprint `Genome` DTO is painted onto pixel traits via
+     `apply_genome` (not stored on the live atom).
    - Land plants / fungi snap to a surface Air crown when needed.
 4. Editor closes and world sim resumes.
 

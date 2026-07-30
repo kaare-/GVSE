@@ -232,12 +232,13 @@ impl PlacedModule {
     }
 }
 
-/// Vestigial organism-wide gene bag (Tab / blueprint mirror).
+/// Tab / blueprint paint DTO for organism-wide plant knobs.
 ///
-/// Wave O: live plant/fungus reads come from [`PixelTraits`] /
-/// [`BodyPlan`]. `Genome` remains on blueprints and as a sync target for
-/// Tab → Plants; [`crate::plant::apply_genome`] paints traits then
-/// recomputes the body plan.
+/// Wave S: live [`crate::organism::Atom`] no longer stores a genome.
+/// Studio Tab and `.gvsecrt` still carry this bag; spawn / Apply Genes
+/// route through [`crate::plant::apply_genome`] onto [`PixelTraits`] /
+/// [`BodyPlan`]. Mutation is [`Blueprint::mutate_child`], not a Genome
+/// helper.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct Genome {
     pub metabolic_rate: f32,
@@ -336,35 +337,6 @@ impl Genome {
         let r = self.alloc_root.max(0.0);
         let sum = (s + l + r).max(1e-6);
         (s / sum, l / sum, r / sum)
-    }
-
-    /// Deterministic per-trait mutation. High `clone_fidelity` → small jitter.
-    pub fn mutate(parent: Genome, world_seed: u64, tick: u64, parent_id: u32) -> Genome {
-        let mut g = parent;
-        let fidelity = parent.clone_fidelity.clamp(0.0, 1.0);
-        let strength = (1.0 - fidelity) * MUTATION_SIGMA;
-        let salt_base = tick
-            .wrapping_mul(0x9E37_79B9)
-            .wrapping_add(parent_id as u64);
-        let mut trait_i = 0u64;
-        let mut jitter = |value: f32, lo: f32, hi: f32| -> f32 {
-            trait_i += 1;
-            let h = hash_u64(world_seed, salt_base, trait_i, 0xE11);
-            let u = (h as f32 / u64::MAX as f32) * 2.0 - 1.0;
-            (value + u * strength * (hi - lo).max(0.1)).clamp(lo, hi)
-        };
-        g.metabolic_rate = jitter(g.metabolic_rate, 0.2, 2.0);
-        g.reproduce_at = jitter(g.reproduce_at, 0.3, 0.95);
-        g.clone_fidelity = jitter(g.clone_fidelity, 0.05, 1.0);
-        g.buoyancy_bias = jitter(g.buoyancy_bias, 0.0, 1.0);
-        g.root_depth_bias = jitter(g.root_depth_bias, 0.0, 1.0);
-        g.alloc_stem = jitter(g.alloc_stem, 0.0, 1.0);
-        g.alloc_leaf = jitter(g.alloc_leaf, 0.0, 1.0);
-        g.alloc_root = jitter(g.alloc_root, 0.0, 1.0);
-        g.leaf_absorb = jitter(g.leaf_absorb, 0.05, 1.0);
-        g.shade_efficiency = jitter(g.shade_efficiency, 0.0, 1.0);
-        g.digest_rate = jitter(g.digest_rate, 0.05, 2.0);
-        g
     }
 }
 
@@ -640,8 +612,8 @@ impl Blueprint {
     /// kind-swap / delete. Budget and sigma scale with aggregate
     /// `clone_fidelity`.
     ///
-    /// Vestigial [`Genome`] is re-synced from the child [`BodyPlan`] at
-    /// the end (Wave O mirror).
+    /// Blueprint [`Genome`] paint DTO is re-synced from the child
+    /// [`BodyPlan`] at the end (for `.gvsecrt` / Tab readers).
     pub fn mutate_child(&self, world_seed: u64, tick: u64, parent_id: u32) -> Blueprint {
         let plan = self.body_plan();
         let fidelity = plan.clone_fidelity.clamp(0.05, 1.0);
@@ -768,7 +740,7 @@ impl Blueprint {
 
         child.name = format!("{}-child", self.name);
         child.notes = format!("mutated from {} @ tick {tick}", self.name);
-        // Keep vestigial Genome mirror aligned with pixel aggregates.
+        // Keep blueprint Genome DTO aligned with pixel aggregates.
         let plan = child.body_plan();
         child.genome.clone_fidelity = plan.clone_fidelity;
         child.genome.reproduce_at = plan.reproduce_at;
@@ -958,23 +930,6 @@ mod tests {
         let (s, l, r) = g.alloc_weights();
         assert!((s + l + r - 1.0).abs() < 1e-5);
         assert!((r - 0.5).abs() < 1e-5);
-    }
-
-    #[test]
-    fn mutate_jitters_with_low_fidelity() {
-        let mut parent = Genome::default();
-        parent.clone_fidelity = 0.1;
-        parent.alloc_root = 0.5;
-        parent.leaf_absorb = 0.5;
-        let child = Genome::mutate(parent, 42, 100, 7);
-        // With low fidelity, at least one plant gene should usually move.
-        assert!(
-            (child.alloc_root - parent.alloc_root).abs() > 1e-6
-                || (child.leaf_absorb - parent.leaf_absorb).abs() > 1e-6
-                || (child.root_depth_bias - parent.root_depth_bias).abs() > 1e-6
-                || (child.alloc_stem - parent.alloc_stem).abs() > 1e-6,
-            "low-fidelity mutate should jitter plant genes"
-        );
     }
 
     #[test]

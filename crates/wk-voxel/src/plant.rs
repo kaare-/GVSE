@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
-use crate::blueprint::Genome;
+use crate::blueprint::{Genome, PixelTraits};
 use crate::cell::water_capacity;
 use crate::grid::World;
 use crate::organism::{Atom, BodyModule, ModuleId};
@@ -1081,7 +1081,6 @@ pub fn sync_alloc_to_body(genome: &mut Genome, body: &[BodyModule]) {
 
 /// Clamp Nucleus alloc traits to match painted tissues, then recompute.
 pub fn sync_alloc_on_atom(atom: &mut Atom) {
-    sync_alloc_to_body(&mut atom.genome, &atom.body);
     atom.align_body_traits();
     let has_stem = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Stem);
     let has_root = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Root);
@@ -1276,25 +1275,18 @@ fn hash01(a: u64, b: u64, c: u64, salt: u64) -> f32 {
     (x >> 40) as f32 / ((1u64 << 24) as f32)
 }
 
-/// Apply genome fields that also live as Atom pose knobs.
-///
-/// Wave M: when pixel traits are present, [`Atom::recompute_body_plan`]
-/// owns buoyancy / clone_fidelity / metabolic / leaf_absorb mirrors.
-/// This helper only copies genome → pose when `body_traits` is empty.
-pub fn sync_atom_from_genome(atom: &mut Atom) {
-    if atom.body_traits.is_empty() {
-        atom.buoyancy_bias = atom.genome.buoyancy_bias.clamp(0.0, 1.0);
-        atom.clone_fidelity = atom.genome.clone_fidelity.clamp(0.05, 1.0);
-    }
-}
-
-/// Paint Tab / blueprint [`Genome`] knobs onto kinded pixel traits (Wave O).
+/// Paint Tab / blueprint [`Genome`] knobs onto kinded pixel traits (Wave O/S).
 ///
 /// Nucleus gets alloc + fidelity/repro/buoyancy; Root gets depth; Photosystem
 /// gets shade + absorb; Digest/Hypha get digest rate. Then recomputes
-/// [`Atom::body_plan`] (which mirrors back onto `atom.genome`).
+/// [`Atom::body_plan`]. Live atoms do not store a genome field — `genome`
+/// is a paint DTO only.
 pub fn apply_genome(atom: &mut Atom, genome: Genome) {
     atom.align_body_traits();
+    if atom.body_traits.is_empty() {
+        // Ensure there is a trait slot per module so Tab paint can land.
+        atom.body_traits = vec![PixelTraits::default(); atom.body.len()];
+    }
     let leaf_absorb = genome.leaf_absorb.clamp(0.05, 1.0);
     for (i, (_, _, m)) in atom.body.iter().enumerate() {
         let Some(t) = atom.body_traits.get_mut(i) else {
@@ -1322,12 +1314,7 @@ pub fn apply_genome(atom: &mut Atom, genome: Genome) {
             _ => {}
         }
     }
-    if atom.body_traits.is_empty() {
-        atom.genome = genome;
-        sync_atom_from_genome(atom);
-    } else {
-        atom.recompute_body_plan();
-    }
+    atom.recompute_body_plan();
 }
 
 /// Body helper for tests / templates.
