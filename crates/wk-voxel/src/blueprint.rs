@@ -310,6 +310,24 @@ impl Default for Genome {
 /// Mutation strength scale (column `MUTATION_SIGMA`).
 const MUTATION_SIGMA: f32 = 0.12;
 
+/// Related kinds a pixel may become under Wave Q kind-swap.
+///
+/// Empty = never swapped (Nucleus). Pairs stay within a tissue family so
+/// plants don't casually sprout Digest, etc.
+pub fn kind_swap_partners(module: ModuleId) -> &'static [ModuleId] {
+    match module {
+        ModuleId::Nucleus => &[],
+        ModuleId::Photosystem => &[ModuleId::Stem, ModuleId::Skin],
+        ModuleId::Stem => &[ModuleId::Photosystem, ModuleId::Root],
+        ModuleId::Root => &[ModuleId::Stem],
+        ModuleId::Digest => &[ModuleId::Hypha],
+        ModuleId::Hypha => &[ModuleId::Digest],
+        ModuleId::Bone => &[ModuleId::Muscle],
+        ModuleId::Muscle => &[ModuleId::Bone, ModuleId::Skin],
+        ModuleId::Skin => &[ModuleId::Muscle, ModuleId::Photosystem],
+    }
+}
+
 impl Genome {
     /// Normalized `(stem, leaf, root)` surplus weights (sum to 1).
     pub fn alloc_weights(self) -> (f32, f32, f32) {
@@ -619,9 +637,11 @@ impl Blueprint {
     }
 
     /// Deterministic child blueprint: jitter traits, rare chain-grow /
-    /// delete. Budget and sigma scale with aggregate `clone_fidelity`.
+    /// kind-swap / delete. Budget and sigma scale with aggregate
+    /// `clone_fidelity`.
     ///
-    /// The vestigial [`Genome`] field is copied unchanged (Wave K).
+    /// Vestigial [`Genome`] is re-synced from the child [`BodyPlan`] at
+    /// the end (Wave O mirror).
     pub fn mutate_child(&self, world_seed: u64, tick: u64, parent_id: u32) -> Blueprint {
         let plan = self.body_plan();
         let fidelity = plan.clone_fidelity.clamp(0.05, 1.0);
@@ -696,6 +716,34 @@ impl Blueprint {
                 grown.traits.density =
                     (grown.traits.density + ud * strength * 3.95).clamp(0.05, 4.0);
                 child.modules.push(grown);
+            }
+        }
+
+        // Kind-swap (Wave Q): rarer than grow, never the last Nucleus.
+        let swap_p = (1.0 - fidelity) * 0.22;
+        if !child.modules.is_empty() && u01() < swap_p {
+            let nucleus_count = child
+                .modules
+                .iter()
+                .filter(|m| m.module == ModuleId::Nucleus)
+                .count();
+            let candidates: Vec<usize> = (0..child.modules.len())
+                .filter(|&i| {
+                    let m = child.modules[i].module;
+                    if m == ModuleId::Nucleus && nucleus_count <= 1 {
+                        return false;
+                    }
+                    !kind_swap_partners(m).is_empty()
+                })
+                .collect();
+            if !candidates.is_empty() {
+                let pick = (u01() * candidates.len() as f32) as usize % candidates.len();
+                let idx = candidates[pick];
+                let partners = kind_swap_partners(child.modules[idx].module);
+                if !partners.is_empty() {
+                    let pi = (u01() * partners.len() as f32) as usize % partners.len();
+                    child.modules[idx].module = partners[pi];
+                }
             }
         }
 
@@ -1050,6 +1098,74 @@ mod tests {
             }
         }
         assert!(grew, "expected at least one chain-grow across seed search");
+    }
+
+    #[test]
+    fn kind_swap_can_change_module_kind() {
+        let mut parent = Blueprint::atom();
+        // Low fidelity → frequent structural ops.
+        for m in &mut parent.modules {
+            m.traits.clone_fidelity_bias = 0.05;
+        }
+        // Extra swappable tissue so Nucleus isn't the only candidate.
+        parent.modules.push(PlacedModule {
+            x: 2,
+            y: 0,
+            lane: LaneId::Mid,
+            module: ModuleId::Muscle,
+            traits: PixelTraits {
+                clone_fidelity_bias: 0.05,
+                ..PixelTraits::default()
+            },
+        });
+        let parent_kinds: Vec<_> = parent.modules.iter().map(|m| m.module).collect();
+        let mut swapped = false;
+        for seed in 0..400u64 {
+            for tick in 0..40u64 {
+                let child = parent.mutate_child(seed, tick, 7);
+                let child_kinds: Vec<_> = child.modules.iter().map(|m| m.module).collect();
+                if child_kinds != parent_kinds
+                    && child.modules.iter().any(|m| m.module == ModuleId::Nucleus)
+                {
+                    // At least one pixel became a partner kind.
+                    let changed = child.modules.iter().any(|cm| {
+                        parent.modules.iter().any(|pm| {
+                            pm.x == cm.x
+                                && pm.y == cm.y
+                                && pm.module != cm.module
+                                && kind_swap_partners(pm.module).contains(&cm.module)
+                        })
+                    });
+                    if changed {
+                        swapped = true;
+                        break;
+                    }
+                }
+            }
+            if swapped {
+                break;
+            }
+        }
+        assert!(swapped, "expected at least one kind-swap across seed search");
+    }
+
+    #[test]
+    fn kind_swap_never_removes_last_nucleus() {
+        let mut parent = Blueprint::atom();
+        for m in &mut parent.modules {
+            m.traits.clone_fidelity_bias = 0.05;
+        }
+        for seed in 0..80u64 {
+            for tick in 0..40u64 {
+                let child = parent.mutate_child(seed, tick, 3);
+                let n = child
+                    .modules
+                    .iter()
+                    .filter(|m| m.module == ModuleId::Nucleus)
+                    .count();
+                assert!(n >= 1, "child must keep a Nucleus (seed={seed} tick={tick})");
+            }
+        }
     }
 
     #[test]

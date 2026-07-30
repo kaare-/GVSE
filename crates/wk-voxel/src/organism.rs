@@ -20,7 +20,9 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::aggregate::{body_plan_from, BodyPlan};
-use crate::blueprint::{Genome, PixelTraits};
+use crate::blueprint::{
+    Blueprint, Genome, LaneId, PixelTraits, PlacedModule, BLUEPRINT_SCHEMA_VERSION,
+};
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
     digest_budget_units, digest_labile, dissolve_corpse_to_organic, fungus_should_hibernate,
@@ -86,8 +88,6 @@ const GRAVITY: f32 = 0.08;
 const WATER_DRAG: f32 = 0.25;
 const AIR_DRAG: f32 = 0.05;
 const EQ_SPRING: f32 = 0.12;
-/// Gene jitter scale on fission — matches column `MUTATION_SIGMA`.
-const MUTATION_SIGMA: f32 = 0.12;
 /// Soft contact impulse when two Atoms share a cell.
 const CONTACT_BOUNCE: f32 = 0.12;
 
@@ -318,6 +318,45 @@ impl Atom {
             1.0
         } else {
             (sum / n as f32).clamp(0.05, 4.0)
+        }
+    }
+
+    /// Temporary studio-shaped blueprint for [`Blueprint::mutate_child`]
+    /// (Wave Q live fission). Nucleus sits at canvas centre.
+    ///
+    /// Live pose knobs (`clone_fidelity`, `buoyancy_bias`) are stamped onto
+    /// every pixel so Tab / test overrides still drive mutation strength.
+    pub fn to_mutation_blueprint(&self) -> Blueprint {
+        const CW: u16 = 32;
+        const CH: u16 = 32;
+        let ox = (CW / 2) as i16;
+        let oy = (CH / 2) as i16;
+        let mut modules = Vec::with_capacity(self.body.len());
+        for (i, &(dx, dy, mid)) in self.body.iter().enumerate() {
+            let x = ox + dx;
+            let y = oy + dy;
+            if x < 0 || y < 0 || (x as u16) >= CW || (y as u16) >= CH {
+                continue;
+            }
+            let mut traits = self.trait_at(i);
+            traits.clone_fidelity_bias = self.clone_fidelity.clamp(0.05, 1.0);
+            traits.buoyancy_bias = self.buoyancy_bias.clamp(0.0, 1.0);
+            modules.push(PlacedModule {
+                x,
+                y,
+                lane: LaneId::Mid,
+                module: mid,
+                traits,
+            });
+        }
+        Blueprint {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: CW,
+            canvas_h: CH,
+            modules,
+            genome: self.genome,
+            name: "live-atom".into(),
+            notes: String::new(),
         }
     }
 
@@ -1501,46 +1540,24 @@ fn try_fission(world: &World, parent: &Atom, child_energy: f32, tick: u64) -> Op
         let nx = world.wrap_x(parent.gx + dx);
         let ny = parent.gy + dy;
         if is_wet_air(world, nx, ny) {
-            let mut child = Atom::from_body_with_traits(
-                nx,
-                ny,
-                parent.energy_max,
-                parent.body.clone(),
-                parent.body_traits.clone(),
-            );
+            // Wave Q: same mutate_child path as studio (jitter + grow +
+            // kind-swap + delete), then seat the relative body.
+            let parent_bp = parent.to_mutation_blueprint();
+            if parent_bp.modules.is_empty() {
+                continue;
+            }
+            let child_bp = parent_bp.mutate_child(world.seed.0, tick, parent.gx as u32);
+            let (body, traits) = child_bp.modules_relative_with_traits();
+            if body.is_empty() || !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+                continue;
+            }
+            let mut child =
+                Atom::from_body_with_traits(nx, ny, parent.energy_max, body, traits);
             child.energy = child_energy.clamp(1.0, parent.energy_max);
             child.cooldown = REPRO_PERIOD;
             child.circadian_phase = parent.circadian_phase;
             child.active_window = parent.active_window;
             child.last_water_top = parent.last_water_top;
-            child.genome = parent.genome;
-            // Jitter per-pixel traits; aggregate drives buoyancy / fidelity.
-            let strength = (1.0 - parent.clone_fidelity.clamp(0.0, 1.0)) * MUTATION_SIGMA;
-            for (i, t) in child.body_traits.iter_mut().enumerate() {
-                let salt = 0xB0A7u64.wrapping_add(i as u64);
-                let j = hash_signed(tick, parent.gx as u64, parent.gy as u64, salt);
-                t.buoyancy_bias = (t.buoyancy_bias + j * strength * 2.0).clamp(0.0, 1.0);
-                let j2 = hash_signed(tick, parent.gx as u64, parent.age_ticks, salt ^ 0xF1DE);
-                t.clone_fidelity_bias =
-                    (t.clone_fidelity_bias + j2 * strength).clamp(0.05, 1.0);
-                let j3 = hash_signed(tick, parent.age_ticks, i as u64, 0xA11CE);
-                t.upkeep_bias = (t.upkeep_bias + j3 * strength).clamp(0.05, 4.0);
-                let j4 = hash_signed(tick, i as u64, parent.gy as u64, 0xAB50_70);
-                t.absorb_bias = (t.absorb_bias + j4 * strength).clamp(0.05, 4.0);
-                let j5 = hash_signed(tick, parent.gx as u64, i as u64, 0xA110C);
-                t.alloc_stem = (t.alloc_stem + j5 * strength).clamp(0.0, 1.0);
-                let j6 = hash_signed(tick, parent.gy as u64, i as u64, 0x1EAF);
-                t.alloc_leaf = (t.alloc_leaf + j6 * strength).clamp(0.0, 1.0);
-                let j7 = hash_signed(tick, i as u64, parent.age_ticks, 0x7007);
-                t.alloc_root = (t.alloc_root + j7 * strength).clamp(0.0, 1.0);
-                let j8 = hash_signed(tick, salt, parent.age_ticks, 0xDEE9);
-                t.root_depth_bias = (t.root_depth_bias + j8 * strength).clamp(0.0, 1.0);
-                let j9 = hash_signed(tick, salt ^ 0x51, i as u64, 0x51ADE);
-                t.shade_efficiency = (t.shade_efficiency + j9 * strength).clamp(0.0, 1.0);
-                let j10 = hash_signed(tick, i as u64, salt, 0xD16E57);
-                t.digest_rate = (t.digest_rate + j10 * strength).clamp(0.05, 2.0);
-            }
-            child.recompute_body_plan();
             return Some(child);
         }
     }
@@ -1600,13 +1617,6 @@ fn hash_u64(seed: u64, a: u64, salt: u64) -> u64 {
     x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
     x ^= x >> 31;
     x
-}
-
-/// Deterministic signed noise in [-1, 1].
-fn hash_signed(a: u64, b: u64, c: u64, salt: u64) -> f32 {
-    let h = hash_u64(a ^ b, c, salt);
-    let u = (h >> 40) as f32 / ((1u64 << 24) as f32);
-    u * 2.0 - 1.0
 }
 
 #[cfg(test)]
