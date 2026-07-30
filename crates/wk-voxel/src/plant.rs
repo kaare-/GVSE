@@ -12,7 +12,7 @@ use std::collections::HashSet;
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
-use crate::blueprint::{Genome, PixelTraits};
+use crate::blueprint::{paint_genome_onto_traits, Genome, PixelTraits};
 use crate::cell::water_capacity;
 use crate::grid::World;
 use crate::organism::{Atom, BodyModule, ModuleId};
@@ -1275,44 +1275,20 @@ fn hash01(a: u64, b: u64, c: u64, salt: u64) -> f32 {
     (x >> 40) as f32 / ((1u64 << 24) as f32)
 }
 
-/// Paint Tab / blueprint [`Genome`] knobs onto kinded pixel traits (Wave O/S).
+/// Paint Tab [`Genome`] knobs onto kinded pixel traits (Wave O/T).
 ///
-/// Nucleus gets alloc + fidelity/repro/buoyancy; Root gets depth; Photosystem
-/// gets shade + absorb; Digest/Hypha get digest rate. Then recomputes
-/// [`Atom::body_plan`]. Live atoms do not store a genome field — `genome`
-/// is a paint DTO only.
+/// Live atoms and schema-2 blueprints do not store a genome field — `genome`
+/// is a paint DTO only. See [`paint_genome_onto_traits`].
 pub fn apply_genome(atom: &mut Atom, genome: Genome) {
     atom.align_body_traits();
     if atom.body_traits.is_empty() {
-        // Ensure there is a trait slot per module so Tab paint can land.
         atom.body_traits = vec![PixelTraits::default(); atom.body.len()];
     }
-    let leaf_absorb = genome.leaf_absorb.clamp(0.05, 1.0);
     for (i, (_, _, m)) in atom.body.iter().enumerate() {
         let Some(t) = atom.body_traits.get_mut(i) else {
             continue;
         };
-        match *m {
-            ModuleId::Nucleus => {
-                t.alloc_stem = genome.alloc_stem.clamp(0.0, 1.0);
-                t.alloc_leaf = genome.alloc_leaf.clamp(0.0, 1.0);
-                t.alloc_root = genome.alloc_root.clamp(0.0, 1.0);
-                t.clone_fidelity_bias = genome.clone_fidelity.clamp(0.05, 1.0);
-                t.reproduce_at_bias = genome.reproduce_at.clamp(0.05, 0.99);
-                t.buoyancy_bias = genome.buoyancy_bias.clamp(0.0, 1.0);
-            }
-            ModuleId::Root => {
-                t.root_depth_bias = genome.root_depth_bias.clamp(0.0, 1.0);
-            }
-            ModuleId::Photosystem => {
-                t.shade_efficiency = genome.shade_efficiency.clamp(0.0, 1.0);
-                t.absorb_bias = leaf_absorb;
-            }
-            ModuleId::Digest | ModuleId::Hypha => {
-                t.digest_rate = genome.digest_rate.clamp(0.05, 2.0);
-            }
-            _ => {}
-        }
+        paint_genome_onto_traits(*m, t, &genome);
     }
     atom.recompute_body_plan();
 }

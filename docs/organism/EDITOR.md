@@ -129,15 +129,14 @@ ring buffer of the last 32 canvas states.
 Postcard binary, extension `.gvsecrt`, one file per blueprint:
 
 ```rust
-pub const BLUEPRINT_SCHEMA_VERSION: u16 = 1;
+pub const BLUEPRINT_SCHEMA_VERSION: u16 = 2; // Wave T: no genome field
 
 pub struct Blueprint {
     pub schema_version: u16,
     pub canvas_w: u16,
     pub canvas_h: u16,
     pub modules: Vec<PlacedModule>,
-    pub wires:   Vec<Wire>,
-    pub genome:  Genome,
+    pub wires:   Vec<Wire>, // aspirational; not on voxel postcard yet
     pub name:    String,
     pub notes:   String,
 }
@@ -163,10 +162,11 @@ pub struct Wire {
 - Files live in `blueprints/*.gvsecrt` next to `world_save.bin`.
 - `schema_version` is bumped on breaking changes; readers keep two
   versions back.
-- Old blueprint on new build: opens. Missing genome fields default
-  via `#[serde(default)]`. Reserved modules referenced by ID that
-  the binary does not know: refuses to open with `"unknown module
-  0xNN"` and the editor logs the error to the status bar.
+- Schema 1 (with vestigial `Genome`) and pre-Wave-K (no `traits`)
+  still open: genome knobs bake into pixel traits on load. Reserved
+  modules referenced by ID that the binary does not know: refuses to
+  open with `"unknown module 0xNN"` and the editor logs the error to
+  the status bar.
 
 ## Library panel
 
@@ -189,8 +189,8 @@ pub struct Wire {
 3. Click a cell. The blueprint is instantiated via
    `OrganismStore::spawn_blueprint_free` (or habitat-aware spawn) on
    `wk-voxel`:
-   - Blueprint `Genome` DTO is painted onto pixel traits via
-     `apply_genome` (not stored on the live atom).
+   - Land / fungus spawns may paint Tab `PlantGeneSettings` onto
+     pixels via `apply_genome`; plankton keeps canvas traits only.
    - Land plants / fungi snap to a surface Air crown when needed.
 4. Editor closes and world sim resumes.
 

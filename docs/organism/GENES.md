@@ -10,8 +10,8 @@ organism's global scalars are **aggregates** of those pixels
 - A **pixel gene** is one `PlacedModule`: `(x, y, lane, ModuleId, PixelTraits)`.
 - There is no separate authoritative global gene table for new work.
   Live physics reads `BodyPlan` / `PixelTraits`. `Genome` remains only
-  as a Tab / `.gvsecrt` paint DTO on `Blueprint` (Wave S retired it from
-  live `Atom`).
+  as a Tab paint DTO (Wave S retired it from live `Atom`; Wave T removed
+  it from `.gvsecrt` `Blueprint`).
 - **Bone / Muscle / Skin** are first-class studio kinds: paint,
   inspect, aggregate, mutate. Sim physics for them lands in Wave L
   (world `MaterialId` + differential decay).
@@ -117,10 +117,9 @@ aggregated on `BodyPlan`. Live growth / shade / digest **read the plan**.
 | `digest_rate` | Digest / Hypha | Mean of those kinds (default 0.8) |
 | `leaf_absorb` (Tab) | Photosystem `absorb_bias` | via `photo_capacity` / `leaf_absorb_effective` |
 
-`apply_genome` writes Tab / blueprint values into the matching pixels,
-then `recompute_body_plan`. Studio Gene Inspector exposes the new
-sliders per kind. Full deletion of the `Genome` struct (and
-`Blueprint.genome`) is deferred until blueprint postcard migration.
+`apply_genome` writes Tab values into the matching pixels, then
+`recompute_body_plan`. Studio Gene Inspector exposes the new sliders
+per kind.
 
 ### Wave Q — kind-swap mutation
 
@@ -140,12 +139,19 @@ any kind-swapped Stem back to Photosystem so habit cannot invent a trunk.
 ### Wave S — Atom genome retired
 
 Live `Atom` no longer stores `genome`. Tab / spawn still pass a
-`Genome` paint DTO into `apply_genome` → pixels. Mutation blueprints
-fill `Blueprint.genome` via `Atom::genome_snapshot()` for `.gvsecrt`
-readers; `mutate_child` re-syncs the child DTO from `BodyPlan`.
+`Genome` paint DTO into `apply_genome` → pixels.
 `Genome::mutate` is deleted (pixel path only). Sim postcard
 `SIM_SCHEMA_VERSION` is 3 (v2 demo saves with Atom.genome are not
-loadable). `Blueprint.genome` stays at schema 1.
+loadable).
+
+### Wave T — Blueprint genome retired
+
+`.gvsecrt` schema **2**: `Blueprint` drops the positional `genome`
+field. Plant knobs live only on `modules[].traits`. Schema-1 and
+pre-Wave-K files still load — genome is baked into traits via
+`paint_genome_onto_modules`. Tab `PlantGeneSettings` / `Genome` remain
+as a paint bag for Apply Genes and land-plant spawn (`Option<Genome>`
+on `spawn_*_with_traits`; plankton uses canvas traits only).
 
 ### Wave P — visual trait feedback
 

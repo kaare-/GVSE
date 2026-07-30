@@ -300,9 +300,8 @@ impl Atom {
         mean.clamp(0.05, 1.0)
     }
 
-    /// Tab / blueprint [`Genome`] mirror of live pose + [`BodyPlan`]
-    /// (Wave S). Live atoms no longer store a genome field; mutation
-    /// blueprints and `.gvsecrt` still carry this DTO.
+    /// Tab [`Genome`] paint DTO mirrored from live pose + [`BodyPlan`]
+    /// (Wave S/T). Live atoms and schema-2 blueprints do not store a genome.
     pub fn genome_snapshot(&self) -> Genome {
         let mut g = Genome::default();
         g.buoyancy_bias = self.buoyancy_bias;
@@ -373,7 +372,6 @@ impl Atom {
             canvas_w: CW,
             canvas_h: CH,
             modules,
-            genome: self.genome_snapshot(),
             name: "live-atom".into(),
             notes: String::new(),
         }
@@ -435,7 +433,6 @@ impl Atom {
             canvas_w: CW,
             canvas_h: CH,
             modules,
-            genome: self.genome_snapshot(),
             name: "live-chassis".into(),
             notes: String::new(),
         }
@@ -773,6 +770,9 @@ impl OrganismStore {
     }
 
     /// Like [`Self::spawn_blueprint`] but carries painted [`PixelTraits`].
+    ///
+    /// When `genome` is `Some`, Tab knobs are painted after canvas traits
+    /// (Tab wins for plant fields). `None` keeps canvas traits only.
     pub fn spawn_blueprint_with_traits(
         &mut self,
         world: &World,
@@ -781,7 +781,7 @@ impl OrganismStore {
         body: Vec<BodyModule>,
         traits: Vec<PixelTraits>,
         energy_max: f32,
-        genome: Genome,
+        genome: Option<Genome>,
     ) -> bool {
         if self.atoms.len() >= self.atom_cap() || body.is_empty() {
             return false;
@@ -807,7 +807,9 @@ impl OrganismStore {
             return false;
         };
         let mut atom = Atom::from_body_with_traits(gx, gy, energy_max, body, traits);
-        apply_genome(&mut atom, genome);
+        if let Some(g) = genome {
+            apply_genome(&mut atom, g);
+        }
         atom.recompute_body_plan();
         if plant {
             pin_plant_pose(&mut atom);
@@ -875,7 +877,10 @@ impl OrganismStore {
         Ok(())
     }
 
-    /// Editor spawn with painted pixel traits (Wave M).
+    /// Editor spawn with painted pixel traits (Wave M/T).
+    ///
+    /// `genome: Some` paints Tab knobs after canvas traits; `None` keeps
+    /// canvas traits only (schema-2 blueprints / plankton).
     pub fn spawn_blueprint_free_with_traits(
         &mut self,
         world: &World,
@@ -884,7 +889,7 @@ impl OrganismStore {
         body: Vec<BodyModule>,
         traits: Vec<PixelTraits>,
         energy_max: f32,
-        genome: Genome,
+        genome: Option<Genome>,
     ) -> Result<(), SpawnFail> {
         if self.atoms.len() >= self.atom_cap() {
             return Err(SpawnFail::PopCap);
@@ -908,7 +913,9 @@ impl OrganismStore {
             find_air_near(world, gx, gy).ok_or(SpawnFail::NoAir)?
         };
         let mut atom = Atom::from_body_with_traits(gx, gy, energy_max, body, traits);
-        apply_genome(&mut atom, genome);
+        if let Some(g) = genome {
+            apply_genome(&mut atom, g);
+        }
         atom.recompute_body_plan();
         if is_land_plant(&atom) || is_fungus(&atom) {
             pin_plant_pose(&mut atom);
@@ -3269,20 +3276,22 @@ mod tests {
     #[test]
     fn spawn_with_traits_round_trips_from_blueprint() {
         let mut bp = Blueprint::atom();
-        // `density` is pixel-only (apply_genome does not touch it).
         bp.modules[1].traits.density = 2.25;
         bp.modules[1].traits.absorb_bias = 2.5;
+        bp.modules[0].traits.buoyancy_bias = 0.7;
+        bp.modules[1].traits.buoyancy_bias = 0.7;
         let (body, traits) = bp.modules_relative_with_traits();
         let w = wet_column();
         let mut store = OrganismStore::new();
+        // Canvas traits only — no Tab Genome paint.
         assert!(store
-            .spawn_blueprint_free_with_traits(&w, 4, 5, body, traits, 40.0, Genome::default())
+            .spawn_blueprint_free_with_traits(&w, 4, 5, body, traits, 40.0, None)
             .is_ok());
         let a = &store.atoms[0];
         assert!((a.trait_at(1).density - 2.25).abs() < 1e-5);
-        // Genome DTO leaf_absorb (default 0.45) overwrites canvas absorb.
-        assert!((a.trait_at(1).absorb_bias - 0.45).abs() < 1e-5);
-        assert!((a.body_plan.photo_capacity - 0.45).abs() < 1e-5);
+        assert!((a.trait_at(1).absorb_bias - 2.5).abs() < 1e-5);
+        assert!((a.body_plan.photo_capacity - 2.5).abs() < 1e-5);
+        assert!((a.buoyancy_bias - 0.7).abs() < 1e-5);
     }
 
     #[test]
