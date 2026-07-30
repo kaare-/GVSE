@@ -151,11 +151,11 @@ pub fn fungus_should_hibernate(world: &World, atom: &Atom) -> bool {
     fungus_moisture_frac(world, atom) < FUNGUS_DROUGHT_FRAC
 }
 
-/// Unit budget for one digest event from gene + modules.
-pub fn digest_budget_units(genome: &Genome, atom: &Atom) -> u16 {
+/// Unit budget for one digest event from body-plan digest rate + modules.
+pub fn digest_budget_units(atom: &Atom) -> u16 {
     let n_d = digest_count(atom).max(1) as f32;
     let n_h = hypha_count(atom) as f32;
-    let rate = genome.digest_rate.clamp(0.05, 2.0);
+    let rate = atom.body_plan.digest_rate.clamp(0.05, 2.0);
     let scale = n_d * (1.0 + 0.15 * n_h) * rate;
     let u = (scale * DIGEST_MAX_UNITS as f32).round() as u16;
     u.clamp(1, DIGEST_MAX_UNITS.saturating_mul(2))
@@ -440,6 +440,7 @@ fn hash_u64(a: u64, b: u64, c: u64, salt: u64) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blueprint::PixelTraits;
     use crate::cell::Sat;
     use crate::chunk::ChunkCoord;
     use crate::organism::BodyModule;
@@ -532,11 +533,17 @@ mod tests {
             ..Genome::default()
         };
         let mut atom = Atom::from_body(4, 2, 40.0, fungus_body());
-        atom.genome = g;
-        let base = digest_budget_units(&g, &atom);
-        atom.body.push((4, 0, ModuleId::Hypha));
-        atom.body.push((5, 0, ModuleId::Hypha));
-        let boosted = digest_budget_units(&g, &atom);
+        apply_genome(&mut atom, g);
+        let base = digest_budget_units(&atom);
+        atom.push_module(4, 0, ModuleId::Hypha, PixelTraits {
+            digest_rate: 1.0,
+            ..PixelTraits::default()
+        });
+        atom.push_module(5, 0, ModuleId::Hypha, PixelTraits {
+            digest_rate: 1.0,
+            ..PixelTraits::default()
+        });
+        let boosted = digest_budget_units(&atom);
         assert!(boosted >= base);
     }
 }

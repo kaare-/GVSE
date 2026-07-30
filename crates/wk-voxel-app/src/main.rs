@@ -681,9 +681,11 @@ async fn main() {
             for atom in &mut scene.organisms.atoms {
                 if wk_voxel::is_land_plant(atom) || wk_voxel::is_fungus(atom) {
                     let mut next = g;
-                    next.buoyancy_bias = atom.genome.buoyancy_bias;
-                    atom.genome = next;
-                    atom.clone_fidelity = atom.genome.clone_fidelity;
+                    next.buoyancy_bias = atom.body_plan.buoyancy_bias;
+                    next.clone_fidelity = atom.body_plan.clone_fidelity;
+                    next.reproduce_at = atom.body_plan.reproduce_at;
+                    wk_voxel::apply_genome(atom, next);
+                    wk_voxel::sync_alloc_on_atom(atom);
                 }
             }
         }

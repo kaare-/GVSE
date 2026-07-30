@@ -632,7 +632,7 @@ pub fn try_elongate_root(
     if n_roots >= caps.max_roots.max(1) {
         return 0.0;
     }
-    let (_, _, w_root) = atom.genome.alloc_weights();
+    let (_, _, w_root) = atom.body_plan.alloc_weights();
     if w_root < 0.08 {
         return 0.0;
     }
@@ -669,7 +669,7 @@ pub fn try_elongate_root(
         sites
     };
 
-    let depth_bias = atom.genome.root_depth_bias.clamp(0.0, 1.0);
+    let depth_bias = atom.body_plan.root_depth_bias.clamp(0.0, 1.0);
     let banking_for_sprout = atom.energy >= tank * LAND_SPROUT_ENERGY_FRAC * 0.85;
     // Cardinal + diagonal-down forks — branchy fans, not only a pipe.
     const DIRS: [(i16, i16); 5] = [(0, -1), (-1, -1), (1, -1), (-1, 0), (1, 0)];
@@ -931,7 +931,7 @@ pub fn try_grow_shoot(
     trunks: &HashSet<(i32, i32)>,
     caps: &PlantGrowthCaps,
 ) -> f32 {
-    let (w_stem, w_leaf, _) = atom.genome.alloc_weights();
+    let (w_stem, w_leaf, _) = atom.body_plan.alloc_weights();
     let tank = tank_ref(atom);
     if atom.energy < tank * (LAND_GROW_ENERGY_FRAC + 0.08) {
         return 0.0;
@@ -1079,6 +1079,35 @@ pub fn sync_alloc_to_body(genome: &mut Genome, body: &[BodyModule]) {
     }
 }
 
+/// Clamp Nucleus alloc traits to match painted tissues, then recompute.
+pub fn sync_alloc_on_atom(atom: &mut Atom) {
+    sync_alloc_to_body(&mut atom.genome, &atom.body);
+    atom.align_body_traits();
+    let has_stem = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Stem);
+    let has_root = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Root);
+    let has_leaf = atom
+        .body
+        .iter()
+        .any(|(_, _, m)| *m == ModuleId::Photosystem);
+    for (i, (_, _, m)) in atom.body.iter().enumerate() {
+        if *m != ModuleId::Nucleus {
+            continue;
+        }
+        if let Some(t) = atom.body_traits.get_mut(i) {
+            if !has_stem {
+                t.alloc_stem = t.alloc_stem.min(0.05);
+            }
+            if !has_root {
+                t.alloc_root = t.alloc_root.min(0.05);
+            }
+            if !has_leaf {
+                t.alloc_leaf = t.alloc_leaf.min(0.05);
+            }
+        }
+    }
+    atom.recompute_body_plan();
+}
+
 /// Child body for vegetative sprout — inherits stemless vs stemmed habit.
 pub fn sprout_body(parent: &Atom) -> Vec<BodyModule> {
     if stem_count(parent) > 0 {
@@ -1104,7 +1133,7 @@ pub fn try_grow_plant(
     if atom.age_ticks % LAND_GROW_PERIOD != 0 {
         return 0.0;
     }
-    let (w_stem, w_leaf, w_root) = atom.genome.alloc_weights();
+    let (w_stem, w_leaf, w_root) = atom.body_plan.alloc_weights();
     let roll = hash01(tick, atom.gx as u64, atom.gy as u64, 0x6110);
     let mut spent = 0.0;
     // Weighted pick: try preferred tissue first, then the other.
@@ -1201,6 +1230,7 @@ pub fn try_vegetative_sprout(
     // Child inherits spawn-tank size, not the parent's root-inflated max.
     let mut child = Atom::from_body(wx, gy, tank, body);
     apply_genome(&mut child, child_genome);
+    sync_alloc_on_atom(&mut child);
     child.energy = (cost * 0.5).clamp(1.0, child.energy_max);
     child.cooldown = LAND_SPROUT_PERIOD;
     pin_plant_pose(&mut child);
@@ -1237,39 +1267,44 @@ pub fn sync_atom_from_genome(atom: &mut Atom) {
     }
 }
 
+/// Paint Tab / blueprint [`Genome`] knobs onto kinded pixel traits (Wave O).
+///
+/// Nucleus gets alloc + fidelity/repro/buoyancy; Root gets depth; Photosystem
+/// gets shade + absorb; Digest/Hypha get digest rate. Then recomputes
+/// [`Atom::body_plan`] (which mirrors back onto `atom.genome`).
 pub fn apply_genome(atom: &mut Atom, genome: Genome) {
-    // Plant-only knobs (alloc / depth / shade_efficiency / digest) always
-    // come from the argument. Shared scalars are refreshed from pixels
-    // when `body_traits` is populated.
-    let shade_efficiency = genome.shade_efficiency;
-    let digest_rate = genome.digest_rate;
-    let alloc_stem = genome.alloc_stem;
-    let alloc_leaf = genome.alloc_leaf;
-    let alloc_root = genome.alloc_root;
-    let root_depth_bias = genome.root_depth_bias;
-    let leaf_absorb = genome.leaf_absorb;
-    atom.genome = genome;
-    atom.genome.shade_efficiency = shade_efficiency;
-    atom.genome.digest_rate = digest_rate;
-    atom.genome.alloc_stem = alloc_stem;
-    atom.genome.alloc_leaf = alloc_leaf;
-    atom.genome.alloc_root = alloc_root;
-    atom.genome.root_depth_bias = root_depth_bias;
+    atom.align_body_traits();
+    let leaf_absorb = genome.leaf_absorb.clamp(0.05, 1.0);
+    for (i, (_, _, m)) in atom.body.iter().enumerate() {
+        let Some(t) = atom.body_traits.get_mut(i) else {
+            continue;
+        };
+        match *m {
+            ModuleId::Nucleus => {
+                t.alloc_stem = genome.alloc_stem.clamp(0.0, 1.0);
+                t.alloc_leaf = genome.alloc_leaf.clamp(0.0, 1.0);
+                t.alloc_root = genome.alloc_root.clamp(0.0, 1.0);
+                t.clone_fidelity_bias = genome.clone_fidelity.clamp(0.05, 1.0);
+                t.reproduce_at_bias = genome.reproduce_at.clamp(0.05, 0.99);
+                t.buoyancy_bias = genome.buoyancy_bias.clamp(0.0, 1.0);
+            }
+            ModuleId::Root => {
+                t.root_depth_bias = genome.root_depth_bias.clamp(0.0, 1.0);
+            }
+            ModuleId::Photosystem => {
+                t.shade_efficiency = genome.shade_efficiency.clamp(0.0, 1.0);
+                t.absorb_bias = leaf_absorb;
+            }
+            ModuleId::Digest | ModuleId::Hypha => {
+                t.digest_rate = genome.digest_rate.clamp(0.05, 2.0);
+            }
+            _ => {}
+        }
+    }
     if atom.body_traits.is_empty() {
-        atom.genome.leaf_absorb = leaf_absorb;
+        atom.genome = genome;
         sync_atom_from_genome(atom);
     } else {
-        // Seed photosystem absorb from genome leaf_absorb so Tab plant
-        // knobs still affect shade when the painted absorb was default.
-        if (leaf_absorb - 0.45).abs() > 1e-4 {
-            for (i, (_, _, m)) in atom.body.iter().enumerate() {
-                if *m == ModuleId::Photosystem {
-                    if let Some(t) = atom.body_traits.get_mut(i) {
-                        t.absorb_bias = leaf_absorb.clamp(0.05, 1.0);
-                    }
-                }
-            }
-        }
         atom.recompute_body_plan();
     }
 }

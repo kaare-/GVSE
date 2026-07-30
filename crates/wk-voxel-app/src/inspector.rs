@@ -153,7 +153,7 @@ pub fn draw_block_inspector(
             lines.push("habit=fungus (digest litter / Organic)".into());
             lines.push(format!(
                 "digest_rate={:.2}  drought_ticks={}",
-                atom.genome.digest_rate, atom.drought_ticks
+                atom.body_plan.digest_rate, atom.drought_ticks
             ));
             let digests = atom
                 .body
@@ -167,15 +167,16 @@ pub fn draw_block_inspector(
                 .count();
             lines.push(format!("digest={digests}  hypha={hyphae}"));
         } else if is_land_plant(atom) {
-            let (s, l, r) = atom.genome.alloc_weights();
+            let (s, l, r) = atom.body_plan.alloc_weights();
             lines.push("habit=land (fixed crown, root drink)".into());
             lines.push(format!(
                 "alloc S/L/R={s:.2}/{l:.2}/{r:.2}  depth={:.2}",
-                atom.genome.root_depth_bias
+                atom.body_plan.root_depth_bias
             ));
             lines.push(format!(
                 "leaf_abs={:.2}  shade_eff={:.2}",
-                atom.genome.leaf_absorb, atom.genome.shade_efficiency
+                atom.leaf_absorb_effective(),
+                atom.body_plan.shade_efficiency
             ));
             let roots = atom
                 .body

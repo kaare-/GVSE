@@ -185,9 +185,8 @@ pub struct Atom {
     pub last_water_top: Option<i32>,
     /// Modules relative to `(gx, gy)`.
     pub body: Vec<BodyModule>,
-    /// Live genes (allocation, depth bias, shade knobs, …).
-    /// Plant alloc / digest / shade_efficiency still read here; Wave M
-    /// shared scalars come from [`Self::body_plan`].
+    /// Vestigial gene bag (Tab / save mirror). Wave O live plant knobs
+    /// read from [`Self::body_plan`] / [`Self::body_traits`].
     #[serde(default)]
     pub genome: Genome,
     /// Per-module traits aligned with [`Self::body`] (Wave M). Empty
@@ -261,7 +260,7 @@ impl Atom {
         self.recompute_body_plan();
     }
 
-    fn align_body_traits(&mut self) {
+    pub(crate) fn align_body_traits(&mut self) {
         while self.body_traits.len() < self.body.len() {
             self.body_traits.push(PixelTraits::default());
         }
@@ -339,6 +338,12 @@ impl Atom {
         };
         self.genome.reproduce_at = self.body_plan.reproduce_at;
         self.genome.leaf_absorb = self.leaf_absorb_effective();
+        self.genome.alloc_stem = self.body_plan.alloc_stem;
+        self.genome.alloc_leaf = self.body_plan.alloc_leaf;
+        self.genome.alloc_root = self.body_plan.alloc_root;
+        self.genome.root_depth_bias = self.body_plan.root_depth_bias;
+        self.genome.shade_efficiency = self.body_plan.shade_efficiency;
+        self.genome.digest_rate = self.body_plan.digest_rate;
     }
 
     pub fn photosystem_count(&self) -> usize {
@@ -1140,7 +1145,7 @@ fn step_land_plant(
         entity_id,
         n_photo,
         atom.leaf_absorb_effective(),
-        atom.genome.shade_efficiency,
+        atom.body_plan.shade_efficiency,
     );
     let photo_scale = match drought {
         DroughtBand::Hydrated => 1.25, // mild bonus so moist sand recovers
@@ -1203,7 +1208,7 @@ fn step_fungus(
     upkeep += UPKEEP_PER_MODULE * 0.35 * (0.45 + 0.55 * day);
 
     if !dormant {
-        let want = digest_budget_units(&atom.genome, atom);
+        let want = digest_budget_units(atom);
         let (_taken, gained) = digest_labile(world, atom.gx, atom.gy, want);
         atom.energy = (atom.energy + gained).min(atom.energy_max);
     }
@@ -1515,6 +1520,18 @@ fn try_fission(world: &World, parent: &Atom, child_energy: f32, tick: u64) -> Op
                 t.upkeep_bias = (t.upkeep_bias + j3 * strength).clamp(0.05, 4.0);
                 let j4 = hash_signed(tick, i as u64, parent.gy as u64, 0xAB50_70);
                 t.absorb_bias = (t.absorb_bias + j4 * strength).clamp(0.05, 4.0);
+                let j5 = hash_signed(tick, parent.gx as u64, i as u64, 0xA110C);
+                t.alloc_stem = (t.alloc_stem + j5 * strength).clamp(0.0, 1.0);
+                let j6 = hash_signed(tick, parent.gy as u64, i as u64, 0x1EAF);
+                t.alloc_leaf = (t.alloc_leaf + j6 * strength).clamp(0.0, 1.0);
+                let j7 = hash_signed(tick, i as u64, parent.age_ticks, 0x7007);
+                t.alloc_root = (t.alloc_root + j7 * strength).clamp(0.0, 1.0);
+                let j8 = hash_signed(tick, salt, parent.age_ticks, 0xDEE9);
+                t.root_depth_bias = (t.root_depth_bias + j8 * strength).clamp(0.0, 1.0);
+                let j9 = hash_signed(tick, salt ^ 0x51, i as u64, 0x51ADE);
+                t.shade_efficiency = (t.shade_efficiency + j9 * strength).clamp(0.0, 1.0);
+                let j10 = hash_signed(tick, i as u64, salt, 0xD16E57);
+                t.digest_rate = (t.digest_rate + j10 * strength).clamp(0.05, 2.0);
             }
             child.recompute_body_plan();
             return Some(child);
@@ -1965,9 +1982,11 @@ mod tests {
     fn growth_caps_block_root_elongation() {
         let w = moist_sand_plot();
         let mut atom = Atom::from_body(4, 2, 80.0, minimal_plant_body());
-        atom.genome.alloc_root = 1.0;
-        atom.genome.alloc_stem = 0.0;
-        atom.genome.alloc_leaf = 0.0;
+        let mut g = Genome::default();
+        g.alloc_root = 1.0;
+        g.alloc_stem = 0.0;
+        g.alloc_leaf = 0.0;
+        apply_genome(&mut atom, g);
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
         let tight = PlantGrowthCaps {
@@ -2393,7 +2412,7 @@ mod tests {
             (0, 2, ModuleId::Photosystem),
         ];
         let mut atom = Atom::from_body(4, 6, 80.0, body);
-        atom.genome = g;
+        apply_genome(&mut atom, g);
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
         let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
@@ -2450,7 +2469,7 @@ mod tests {
             (0, 2, ModuleId::Photosystem),
         ];
         let mut atom = Atom::from_body(4, 6, 80.0, body);
-        atom.genome = g;
+        apply_genome(&mut atom, g);
         atom.energy = 80.0;
         // Only open sand left beside tip is (1,-2)=(5,4); foreign root at (5,3).
         let mut roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
@@ -2478,7 +2497,7 @@ mod tests {
             (0, 2, ModuleId::Photosystem),
         ];
         let mut atom = Atom::from_body(4, 6, 80.0, body);
-        atom.genome = g;
+        apply_genome(&mut atom, g);
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
         let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
@@ -2518,7 +2537,7 @@ mod tests {
             (0, 2, ModuleId::Photosystem),
         ];
         let mut atom = Atom::from_body(4, 6, 80.0, body);
-        atom.genome = g;
+        apply_genome(&mut atom, g);
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
         let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
@@ -2572,7 +2591,7 @@ mod tests {
         ];
         // Nucleus at y=12 so roots sit in sand (y=11..5).
         let mut atom = Atom::from_body(4, 12, 80.0, body);
-        atom.genome = g;
+        apply_genome(&mut atom, g);
         atom.energy = 80.0;
         let tip_hops = crate::plant::root_transport_hops(&atom, 5, -8);
         let bud_hops = crate::plant::root_transport_hops(&atom, -1, -2);
@@ -2636,7 +2655,7 @@ mod tests {
             (0, 2, ModuleId::Photosystem),
         ];
         let mut atom = Atom::from_body(4, 6, 80.0, body);
-        atom.genome = g;
+        apply_genome(&mut atom, g);
         // Above grow floor (0.30·tank) but below sprout-banking (~0.44·tank).
         atom.energy = 32.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
@@ -2675,7 +2694,7 @@ mod tests {
             (0, 2, ModuleId::Photosystem),
         ];
         let mut atom = Atom::from_body(4, 6, 80.0, body);
-        atom.genome = g;
+        apply_genome(&mut atom, g);
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
         let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
@@ -2728,9 +2747,11 @@ mod tests {
                 (0, 1, ModuleId::Stem),
             ],
         );
-        atom.genome.alloc_stem = 1.0;
-        atom.genome.alloc_leaf = 0.05;
-        atom.genome.alloc_root = 0.05;
+        let mut g = Genome::default();
+        g.alloc_stem = 1.0;
+        g.alloc_leaf = 0.05;
+        g.alloc_root = 0.05;
+        apply_genome(&mut atom, g);
         atom.energy = 80.0;
         // Foreign live trunk one cell beside the tip column.
         // Tip is at (0,1) → candidate (0,2) world (4,4). Neighbour (5,4) is Moore.
@@ -2765,9 +2786,11 @@ mod tests {
                 (1, 1, ModuleId::Photosystem),
             ],
         );
-        atom.genome.alloc_stem = 0.05;
-        atom.genome.alloc_leaf = 1.0;
-        atom.genome.alloc_root = 0.05;
+        let mut g = Genome::default();
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 1.0;
+        g.alloc_root = 0.05;
+        apply_genome(&mut atom, g);
         atom.energy = 80.0;
         let n0 = atom.photosystem_count();
         for t in 0..40u64 {
@@ -2860,9 +2883,11 @@ mod tests {
             (1, 1, ModuleId::Photosystem),
         ];
         let mut atom = Atom::from_body(4, 2, 80.0, body);
-        atom.genome.alloc_stem = 1.0;
-        atom.genome.alloc_leaf = 0.5;
-        atom.genome.alloc_root = 0.05;
+        let mut g = Genome::default();
+        g.alloc_stem = 1.0;
+        g.alloc_leaf = 0.5;
+        g.alloc_root = 0.05;
+        apply_genome(&mut atom, g);
         atom.energy = 80.0;
         let empty = std::collections::HashSet::new();
         for t in 0..30u64 {
@@ -3138,6 +3163,26 @@ mod tests {
         let a = &store.atoms[0];
         assert!((a.trait_at(1).absorb_bias - 2.5).abs() < 1e-5);
         assert!((a.body_plan.photo_capacity - 2.5).abs() < 1e-5);
+    }
+
+    #[test]
+    fn apply_genome_paints_plant_knobs_onto_body_plan() {
+        let body = minimal_plant_body();
+        let mut atom = Atom::from_body(4, 2, 40.0, body);
+        let mut g = Genome::default();
+        g.alloc_root = 0.9;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        g.root_depth_bias = 0.85;
+        g.shade_efficiency = 0.65;
+        apply_genome(&mut atom, g);
+        assert!((atom.body_plan.alloc_root - 0.9).abs() < 1e-5);
+        assert!((atom.body_plan.root_depth_bias - 0.85).abs() < 1e-5);
+        assert!((atom.body_plan.shade_efficiency - 0.65).abs() < 1e-5);
+        // Mirror stays aligned for Tab / inspector readers.
+        assert!((atom.genome.alloc_root - 0.9).abs() < 1e-5);
+        let (_, _, w_root) = atom.body_plan.alloc_weights();
+        assert!(w_root > 0.8);
     }
 
     #[test]

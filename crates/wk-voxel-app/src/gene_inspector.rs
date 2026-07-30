@@ -10,17 +10,19 @@ fn visible_traits(module: ModuleId) -> &'static [&'static str] {
         ModuleId::Bone => &["mass", "density", "stiffness", "upkeep_bias"],
         ModuleId::Muscle => &["mass", "density", "strength", "upkeep_bias"],
         ModuleId::Skin => &["mass", "density", "upkeep_bias", "buoyancy_bias"],
-        ModuleId::Photosystem => &["mass", "absorb_bias", "upkeep_bias"],
-        ModuleId::Root => &["mass", "drink_bias", "upkeep_bias"],
+        ModuleId::Photosystem => &["mass", "absorb_bias", "shade_efficiency", "upkeep_bias"],
+        ModuleId::Root => &["mass", "drink_bias", "root_depth_bias", "upkeep_bias"],
         ModuleId::Nucleus => &[
             "mass",
             "upkeep_bias",
             "clone_fidelity_bias",
             "reproduce_at_bias",
+            "alloc_stem",
+            "alloc_leaf",
+            "alloc_root",
         ],
-        ModuleId::Digest | ModuleId::Hypha | ModuleId::Stem => {
-            &["mass", "density", "upkeep_bias"]
-        }
+        ModuleId::Digest | ModuleId::Hypha => &["mass", "density", "digest_rate", "upkeep_bias"],
+        ModuleId::Stem => &["mass", "density", "upkeep_bias"],
     }
 }
 
@@ -36,23 +38,34 @@ fn trait_get(t: &PixelTraits, name: &str) -> f32 {
         "clone_fidelity_bias" => t.clone_fidelity_bias,
         "reproduce_at_bias" => t.reproduce_at_bias,
         "buoyancy_bias" => t.buoyancy_bias,
+        "alloc_stem" => t.alloc_stem,
+        "alloc_leaf" => t.alloc_leaf,
+        "alloc_root" => t.alloc_root,
+        "root_depth_bias" => t.root_depth_bias,
+        "shade_efficiency" => t.shade_efficiency,
+        "digest_rate" => t.digest_rate,
         _ => 0.0,
     }
 }
 
 fn trait_set(t: &mut PixelTraits, name: &str, v: f32) {
-    let v = v.clamp(0.0, 4.0);
     match name {
-        "mass" => t.mass = v,
-        "density" => t.density = v,
-        "stiffness" => t.stiffness = v,
-        "strength" => t.strength = v,
-        "upkeep_bias" => t.upkeep_bias = v,
-        "absorb_bias" => t.absorb_bias = v,
-        "drink_bias" => t.drink_bias = v,
+        "mass" => t.mass = v.clamp(0.0, 4.0),
+        "density" => t.density = v.clamp(0.0, 4.0),
+        "stiffness" => t.stiffness = v.clamp(0.0, 4.0),
+        "strength" => t.strength = v.clamp(0.0, 4.0),
+        "upkeep_bias" => t.upkeep_bias = v.clamp(0.0, 4.0),
+        "absorb_bias" => t.absorb_bias = v.clamp(0.0, 4.0),
+        "drink_bias" => t.drink_bias = v.clamp(0.0, 4.0),
         "clone_fidelity_bias" => t.clone_fidelity_bias = v.clamp(0.05, 1.0),
         "reproduce_at_bias" => t.reproduce_at_bias = v.clamp(0.05, 1.0),
         "buoyancy_bias" => t.buoyancy_bias = v.clamp(0.0, 1.0),
+        "alloc_stem" => t.alloc_stem = v.clamp(0.0, 1.0),
+        "alloc_leaf" => t.alloc_leaf = v.clamp(0.0, 1.0),
+        "alloc_root" => t.alloc_root = v.clamp(0.0, 1.0),
+        "root_depth_bias" => t.root_depth_bias = v.clamp(0.0, 1.0),
+        "shade_efficiency" => t.shade_efficiency = v.clamp(0.0, 1.0),
+        "digest_rate" => t.digest_rate = v.clamp(0.05, 2.0),
         _ => {}
     }
 }
@@ -127,6 +140,7 @@ pub fn draw_gene_panels(
     draw_text("BODY PLAN", px, y, 18.0, Color::from_rgba(255, 220, 80, 255));
     y += 20.0;
     let plan = blueprint.body_plan();
+    let (s, l, r) = plan.alloc_weights();
     let lines = [
         format!("pixels={}", plan.pixel_count),
         format!("total_mass={:.2}", plan.total_mass),
@@ -134,6 +148,11 @@ pub fn draw_gene_panels(
         format!("clone_fidelity={:.2}", plan.clone_fidelity),
         format!("reproduce_at={:.2}", plan.reproduce_at),
         format!("photo_cap={:.2}", plan.photo_capacity),
+        format!("alloc S/L/R={s:.2}/{l:.2}/{r:.2}"),
+        format!(
+            "depth={:.2}  shade={:.2}  digest={:.2}",
+            plan.root_depth_bias, plan.shade_efficiency, plan.digest_rate
+        ),
         format!(
             "repro_gate={} (nuclei={})",
             plan.has_repro_gate, plan.nucleus_count
