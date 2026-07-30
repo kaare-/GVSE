@@ -105,8 +105,13 @@ Features:
 - Epiphytes on fallen Stem cells force-unseat
 - Scenario `e42_standing_dead_stem_topples`
 
-**Deferred (Wave W+):** living stem load drain / recharge, fungal
-digest→integrity, smother shade-kill chain, `stem_wetness` drink,
+**Wave W — Fungal stem rot *(landed)*:**
+- Living Digest/Hypha sharing a standing-dead Stem world cell adds `FUNGAL_DECAY_PER_TICK`
+- No new Atom fields / no schema bump (`collect_fungus_tissue_world_cells` each corpse tick)
+- Scenario `e42b_fungal_rot_accelerates_topple` (abiotic control vs fungal treatment)
+
+**Deferred (Wave X+):** living stem load drain / recharge, hypha
+morphogenesis into olive, smother shade-kill chain, `stem_wetness` drink,
 attach/leave genes, ghost roots, fallen-log animation.
 
 ## Explicitly out of Core for voxel

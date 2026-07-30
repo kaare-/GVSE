@@ -69,6 +69,23 @@ pub fn hypha_count(atom: &Atom) -> usize {
         .count()
 }
 
+/// World cells occupied by living Digest / Hypha (Wave W stem rot).
+pub fn collect_fungus_tissue_world_cells(
+    world: &World,
+    atoms: &[Atom],
+) -> std::collections::HashSet<(i32, i32)> {
+    use std::collections::HashSet;
+    let mut out = HashSet::new();
+    for atom in atoms {
+        for &(dx, dy, mid) in &atom.body {
+            if matches!(mid, ModuleId::Digest | ModuleId::Hypha) {
+                out.insert((world.wrap_x(atom.gx + dx as i32), atom.gy + dy as i32));
+            }
+        }
+    }
+    out
+}
+
 /// Soft litter units at wrapped column `gx`.
 pub fn soft_litter_at(world: &World, gx: i32) -> u16 {
     let gx = world.wrap_x(gx);
