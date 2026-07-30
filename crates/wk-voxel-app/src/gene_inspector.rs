@@ -201,7 +201,7 @@ pub fn draw_gene_panels(
         // Half-size child glyph strip.
         let cell = 8.0;
         for m in &child.modules {
-            let (r, g, b) = m.module.rgb();
+            let (r, g, b) = m.module.rgb_with_traits(&m.traits);
             draw_rectangle(
                 px + m.x as f32 * cell,
                 y + (16.0 - m.y as f32) * cell,

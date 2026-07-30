@@ -99,7 +99,10 @@ Right of the canvas in `wk-voxel-app` (`gene_inspector.rs`):
 |-------|-----|
 | **Gene Inspector** | Click a painted pixel. Sliders for that cell's `PixelTraits` (only traits meaningful for its `ModuleId` are shown). Wave O: Nucleus shows `alloc_*`; Root `root_depth_bias`; Photosystem `shade_efficiency`; Digest/Hypha `digest_rate`. |
 | **Body Plan** | Live readout of `Blueprint::body_plan()` — mass / metabolic / fidelity / repro / photo, plus alloc S/L/R, depth, shade, digest. |
-| **Mutation Preview** | Rolls `mutate_child(seed=0, tick=0, parent_id=0)`, shows Δpixels / Δmass / Δmetabolic and a half-size child glyph. |
+| **Mutation Preview** | Rolls `mutate_child(seed=0, tick=0, parent_id=0)`, shows Δpixels / Δmass / Δmetabolic and a half-size child glyph (Wave P: glyph uses trait-tinted RGB). |
+
+Canvas painted modules also use trait tint; brush swatches stay on the
+frozen palette so kind identity stays readable.
 
 Hotkeys in the live editor: `1` Nucleus · `2` Photosystem · `3` Root
 · `4` Stem · `5` Digest · `6` Hypha · `7` Bone · `8` Muscle · `9` Skin.

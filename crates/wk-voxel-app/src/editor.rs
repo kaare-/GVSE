@@ -283,7 +283,8 @@ impl CreatureEditor {
         for m in &self.blueprint.modules {
             let sx = ox + m.x as f32 * CELL_PX;
             let sy = oy + (self.blueprint.canvas_h as i16 - 1 - m.y) as f32 * CELL_PX;
-            let (r, g, b) = m.module.rgb();
+            // Wave P: canvas shows trait tint; brush swatches stay frozen.
+            let (r, g, b) = m.module.rgb_with_traits(&m.traits);
             draw_rectangle(
                 sx + 1.0,
                 sy + 1.0,

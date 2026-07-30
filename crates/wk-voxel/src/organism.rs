@@ -129,6 +129,11 @@ impl ModuleId {
         }
     }
 
+    /// Draw RGB with Wave P trait tint ([`crate::blueprint::modulate_module_rgb`]).
+    pub fn rgb_with_traits(self, traits: &PixelTraits) -> (u8, u8, u8) {
+        crate::blueprint::modulate_module_rgb(self, traits)
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             ModuleId::Nucleus => "Nucleus",
@@ -588,11 +593,13 @@ impl OrganismStore {
     pub fn draw_list(&self) -> Vec<(i32, i32, (u8, u8, u8))> {
         let mut out = Vec::with_capacity((self.atoms.len() + self.corpses.len()) * 2);
         for atom in &self.atoms {
-            for &(dx, dy, mid) in &atom.body {
-                out.push((atom.gx + dx as i32, atom.gy + dy as i32, mid.rgb()));
+            for (i, &(dx, dy, mid)) in atom.body.iter().enumerate() {
+                let rgb = mid.rgb_with_traits(&atom.trait_at(i));
+                out.push((atom.gx + dx as i32, atom.gy + dy as i32, rgb));
             }
         }
         for corpse in &self.corpses {
+            // Corpses drop per-pixel traits — frozen palette, then grey.
             for &(dx, dy, mid) in &corpse.body {
                 out.push((
                     corpse.gx + dx as i32,
@@ -1635,6 +1642,41 @@ mod tests {
         assert_eq!(list.len(), 2);
         assert!(list.contains(&(4, 5, (0, 0, 0))));
         assert!(list.contains(&(5, 5, (0x2E, 0xCC, 0x40))));
+    }
+
+    #[test]
+    fn draw_list_tints_living_traits_not_corpses() {
+        let mut store = OrganismStore::new();
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Photosystem),
+        ];
+        let mut traits = vec![PixelTraits::default(); 2];
+        traits[1].absorb_bias = 2.0;
+        let mut atom = Atom::from_body_with_traits(4, 5, 50.0, body, traits);
+        store.atoms.push(atom.clone());
+        let live = store.draw_list();
+        let photo = live
+            .iter()
+            .find(|(x, y, _)| *x == 5 && *y == 5)
+            .map(|(_, _, rgb)| *rgb)
+            .expect("photosystem pixel");
+        assert_ne!(
+            photo,
+            ModuleId::Photosystem.rgb(),
+            "living high-absorb leaf should tint"
+        );
+        // Kill → corpse uses frozen palette then grey (no trait tint).
+        atom.energy = 0.0;
+        store.atoms.clear();
+        store.corpses.push(Corpse::from_atom(&atom));
+        let dead = store.draw_list();
+        let corpse_photo = dead
+            .iter()
+            .find(|(x, y, _)| *x == 5 && *y == 5)
+            .map(|(_, _, rgb)| *rgb)
+            .expect("corpse photosystem");
+        assert_eq!(corpse_photo, corpse_rgb(ModuleId::Photosystem.rgb()));
     }
 
     #[test]

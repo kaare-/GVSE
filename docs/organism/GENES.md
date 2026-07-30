@@ -118,6 +118,19 @@ then `recompute_body_plan` mirrors aggregates back onto `Genome`.
 Studio Gene Inspector exposes the new sliders per kind. Full deletion of
 the `Genome` struct is deferred until blueprint postcard migration.
 
+### Wave P — visual trait feedback
+
+Draw path tints module RGB from local `PixelTraits` via
+[`modulate_module_rgb`](../../crates/wk-voxel/src/blueprint.rs):
+
+- Frozen [`ModuleId::rgb`](PALETTE.md) remains the save-format identity.
+- **Default traits → identical RGB** (no drift for unpainted bodies).
+- Kind-aware leans: Photosystem absorb/shade, Root drink/depth, Bone
+  density/stiffness, Muscle strength, Digest/Hypha rate, Stem mass, Skin
+  density. Nucleus stays `#000000`.
+- Living `OrganismStore::draw_list` and studio canvas / mutation preview
+  use the tint. Corpses drop traits → frozen palette then `corpse_rgb`.
+
 ## Studio surfaces
 
 See [`EDITOR.md`](EDITOR.md): Gene Inspector (selected pixel
