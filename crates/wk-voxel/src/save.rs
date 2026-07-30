@@ -34,7 +34,8 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// v3: live `Atom` no longer stores a vestigial `Genome` field (Wave S);
 /// plant knobs live on `body_traits` / `body_plan`. Demo `.gvsesim` from
 /// v2 are not loadable (no organism shim).
-pub const SIM_SCHEMA_VERSION: u32 = 3;
+/// v4: `Atom` / `Corpse` carry `body_integrity` (Wave V stem topple).
+pub const SIM_SCHEMA_VERSION: u32 = 4;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
