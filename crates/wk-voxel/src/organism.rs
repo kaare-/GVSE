@@ -4048,6 +4048,46 @@ mod tests {
     }
 
     #[test]
+    fn stem_wetness_tracks_drought_bands() {
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 2, 40.0, body);
+        let mut w = World::new(41);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 3..6 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat.0 = 24;
+            w.set_cell(x, 1, sand);
+            w.set_cell(x, 2, Cell::air());
+        }
+        for _ in 0..20 {
+            update_stem_wetness(&w, &mut atom);
+        }
+        assert!(
+            atom.stem_wetness > 0.9,
+            "hydrated roots should drive wet stems (wet={})",
+            atom.stem_wetness
+        );
+        for x in 3..6 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat.0 = 0;
+            w.set_cell(x, 1, sand);
+        }
+        for _ in 0..20 {
+            update_stem_wetness(&w, &mut atom);
+        }
+        assert!(
+            atom.stem_wetness < EPI_STEM_DRY_FRAC,
+            "dormant roots should dry stems (wet={})",
+            atom.stem_wetness
+        );
+    }
+
+    #[test]
     fn living_stem_recharge_beats_self_load() {
         let body = vec![
             (0, -1, ModuleId::Root),
