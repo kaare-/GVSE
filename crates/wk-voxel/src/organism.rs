@@ -41,7 +41,10 @@ use crate::plant::{
     PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN,
     PLANT_UPKEEP_MULT,
 };
-use crate::shade::{build_canopy_index, canopy_top_y, CanopyIndex};
+use crate::shade::{
+    build_canopy_index_full, canopy_top_y, gap_flash_transmit, register_gap_flash, tick_gap_flash,
+    CanopyIndex, GAP_FLASH_FUNGUS_ENERGY, GAP_FLASH_LIGHT_BONUS,
+};
 
 /// Default **entity** ceiling (Tab → Creatures can raise/lower).
 /// One Atom / plant / fungus = 1, not body pixels (roots, leaves, …).
@@ -1042,6 +1045,9 @@ pub struct OrganismStore {
     /// Per-plant Root / Stem / Photosystem pixel ceilings.
     #[serde(default)]
     pub growth_caps: PlantGrowthCaps,
+    /// Wave AF: column → gap-flash ticks remaining (ephemeral; not saved).
+    #[serde(skip)]
+    pub gap_flash: std::collections::HashMap<i32, u32>,
 }
 
 impl Default for OrganismStore {
@@ -1052,6 +1058,7 @@ impl Default for OrganismStore {
             max_atoms: MAX_ATOMS,
             max_corpses: MAX_CORPSES,
             growth_caps: PlantGrowthCaps::default(),
+            gap_flash: std::collections::HashMap::new(),
         }
     }
 }
@@ -1435,8 +1442,10 @@ impl OrganismStore {
         }
         let day = day_factor_cfg(tick, climate);
         let phase = phase_fraction_cfg(tick, climate);
-        // Build canopy once / tick so taller neighbours shade short plants.
-        let canopy = build_canopy_index(&self.atoms);
+        // Build canopy once / tick (living + standing-dead stems, Wave AF).
+        let canopy = build_canopy_index_full(&self.atoms, &self.corpses);
+        // Snapshot — atom loop mutably borrows `self.atoms`.
+        let gap_flash_snap = self.gap_flash.clone();
         // Live + grey-corpse Stem cells — shoot growth keeps a trunk gap.
         let trunks = collect_trunk_world_cells(&self.atoms, &self.corpses);
         // All living Root cells — spacing applies across plants.
@@ -1512,6 +1521,7 @@ impl OrganismStore {
                     &trunks,
                     &live_roots,
                     &epi_load,
+                    &gap_flash_snap,
                     &mut live_fallen,
                     &mut live_fallen_logs,
                     rider_t,
@@ -1532,7 +1542,16 @@ impl OrganismStore {
 
             if is_fungus(atom) {
                 let room = pop + births.len() < atom_cap;
-                match step_fungus(world, atom, day, tick, i as u32, room, &corpse_stems) {
+                match step_fungus(
+                    world,
+                    atom,
+                    day,
+                    tick,
+                    i as u32,
+                    room,
+                    &corpse_stems,
+                    &gap_flash_snap,
+                ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
                     PlantStep::Sprout(child) => births.push(child),
@@ -1612,6 +1631,13 @@ impl OrganismStore {
 
         // Wave X: live topple unseats riders before death bookkeeping.
         unseat_epiphytes_on_fallen(world, &mut self.atoms, &live_fallen);
+        // Wave AF: live topple opens a canopy-gap flash on cleared columns.
+        if !live_fallen.is_empty() {
+            register_gap_flash(
+                &mut self.gap_flash,
+                live_fallen.iter().map(|&(wx, _)| wx),
+            );
+        }
         // Wave AE: live topple leaves a horizontal grey log (not instant Organic).
         for log in live_fallen_logs {
             self.push_corpse(world, log);
@@ -1636,6 +1662,8 @@ impl OrganismStore {
         self.atoms.extend(births);
         resolve_contacts(world, &mut self.atoms);
         self.step_corpses(world);
+        // Wave AF: gap-flash timers tick after corpse topples may refresh them.
+        tick_gap_flash(&mut self.gap_flash);
 
         // Wave AD / E39: soft litter past threshold invites spontaneous fungi.
         let bloom_room = self.atom_cap().saturating_sub(self.atoms.len());
@@ -1671,6 +1699,7 @@ impl OrganismStore {
         let mut fallen_stems: std::collections::HashSet<(i32, i32)> =
             std::collections::HashSet::new();
         let mut pending_logs: Vec<Corpse> = Vec::new();
+        let mut pending_flash: Vec<i32> = Vec::new();
         let tick = world.tick;
         // Wave W: Digest/Hypha tissue on a Stem cell accelerates rot.
         let fungus_cells = collect_fungus_tissue_world_cells(world, &self.atoms);
@@ -1699,6 +1728,7 @@ impl OrganismStore {
                 );
                 for c in toppled.fallen_stems {
                     fallen_stems.insert(c);
+                    pending_flash.push(c.0);
                 }
                 if let Some(log) = toppled.fallen_log {
                     pending_logs.push(log);
@@ -1739,6 +1769,10 @@ impl OrganismStore {
 
         // Wave V/X: riders on fallen Stem cells lose their seat immediately.
         unseat_epiphytes_on_fallen(world, &mut self.atoms, &fallen_stems);
+        // Wave AF: standing-dead topple opens the light column.
+        if !pending_flash.is_empty() {
+            register_gap_flash(&mut self.gap_flash, pending_flash);
+        }
 
         dissolve.sort_unstable();
         dissolve.dedup();
@@ -1852,6 +1886,7 @@ fn step_land_plant(
     trunks: &std::collections::HashSet<(i32, i32)>,
     live_roots: &std::collections::HashSet<(i32, i32)>,
     epi_load: &std::collections::HashMap<(i32, i32), u32>,
+    gap_flash: &std::collections::HashMap<i32, u32>,
     live_fallen: &mut std::collections::HashSet<(i32, i32)>,
     live_fallen_logs: &mut Vec<Corpse>,
     rider_transmit: f32,
@@ -1908,7 +1943,7 @@ fn step_land_plant(
     // Sky column light × day, then neighbour canopy + gene remap (D2).
     let sample_y = canopy_top_y(atom);
     let sky = column_light(world, atom.gx, sample_y) * day;
-    let light = crate::shade::effective_photo_light_absorb(
+    let mut light = crate::shade::effective_photo_light_absorb(
         canopy,
         atom.gx,
         sample_y,
@@ -1919,6 +1954,8 @@ fn step_land_plant(
         atom.body_plan.shade_efficiency,
         rider_transmit,
     );
+    // Wave AF: canopy-gap flash after a neighbour trunk topples.
+    light = (light * gap_flash_transmit(gap_flash, atom.gx)).clamp(0.0, 1.0);
     let photo_scale = match drought {
         DroughtBand::Hydrated => 1.25, // mild bonus so moist sand recovers
         DroughtBand::Stressed => 0.55,
@@ -2081,6 +2118,7 @@ fn step_fungus(
     entity_id: u32,
     pop_room: bool,
     corpse_stems: &std::collections::HashSet<(i32, i32)>,
+    gap_flash: &std::collections::HashMap<i32, u32>,
 ) -> PlantStep {
     pin_plant_pose(atom);
     // Same sandbox rule as plants: snap to a solid crown, don't cull.
@@ -2110,6 +2148,13 @@ fn step_fungus(
         let want = digest_budget_units(atom);
         let (_taken, gained) = digest_labile(world, atom.gx, atom.gy, want);
         atom.energy = (atom.energy + gained).min(atom.energy_max);
+        // Wave AF: floor fungi get a small burst under a canopy gap.
+        let flash = gap_flash_transmit(gap_flash, atom.gx);
+        if flash > 1.0 {
+            let frac = ((flash - 1.0) / GAP_FLASH_LIGHT_BONUS).clamp(0.0, 1.0);
+            atom.energy =
+                (atom.energy + GAP_FLASH_FUNGUS_ENERGY * frac).min(atom.energy_max);
+        }
     }
 
     atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);

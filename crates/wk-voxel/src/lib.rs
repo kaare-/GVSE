@@ -100,7 +100,9 @@ pub use plant::{
     MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use shade::{
-    build_canopy_index, effective_photo_light, epiphyte_rider_transmit, CanopyIndex,
+    build_canopy_index, build_canopy_index_full, canopy_top_y, effective_photo_light,
+    epiphyte_rider_transmit, gap_flash_transmit, register_gap_flash, tick_gap_flash, CanopyIndex,
+    GAP_FLASH_FUNGUS_ENERGY, GAP_FLASH_LIGHT_BONUS, GAP_FLASH_TICKS, STANDING_DEAD_CAST_SCALE,
 };
 pub use heatmap::Heatmap;
 pub use humidity::{

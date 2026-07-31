@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 use crate::blueprint::Genome;
-use crate::organism::{Atom, ModuleId};
+use crate::organism::{is_fallen_log, Atom, Corpse, ModuleId};
 use crate::plant::{is_epiphyte, is_land_plant};
 
 /// Columns left/right that can cast shade onto a plant.
@@ -24,6 +24,14 @@ pub const SHADE_PER_STEM: f32 = 0.07;
 pub const SHADE_CAST_CAP: f32 = 0.88;
 /// Self-shade per extra photosystem above the first (× `leaf_absorb`).
 pub const SHADE_SELF_PER_EXTRA_LEAF: f32 = 0.10;
+/// Standing-dead olive cast vs living (Wave AF — grey trunks still shade).
+pub const STANDING_DEAD_CAST_SCALE: f32 = 0.55;
+/// Ticks a canopy-gap flash lingers after topple (Wave AF / PLANTS.md).
+pub const GAP_FLASH_TICKS: u32 = 90;
+/// Peak light multiplier bonus at a flashing column (fades with remaining ticks).
+pub const GAP_FLASH_LIGHT_BONUS: f32 = 0.35;
+/// Floor-fungus energy sip from a full gap flash (Wave AF).
+pub const GAP_FLASH_FUNGUS_ENERGY: f32 = 0.10;
 
 /// One column's shade-casting canopy (tallest / strongest plant wins).
 #[derive(Debug, Clone, Copy)]
@@ -98,6 +106,11 @@ pub fn record_canopy(
 
 /// Build canopy index from all living land plants in the store.
 pub fn build_canopy_index(atoms: &[Atom]) -> CanopyIndex {
+    build_canopy_index_full(atoms, &[])
+}
+
+/// Living canopy plus standing-dead Stem shade (Wave AF). Fallen logs do not cast.
+pub fn build_canopy_index_full(atoms: &[Atom], corpses: &[Corpse]) -> CanopyIndex {
     let mut index = CanopyIndex::default();
     for (id, atom) in atoms.iter().enumerate() {
         if !is_land_plant(atom) && !is_epiphyte(atom) {
@@ -122,7 +135,84 @@ pub fn build_canopy_index(atoms: &[Atom]) -> CanopyIndex {
             id as u32,
         );
     }
+    record_standing_dead_canopy(&mut index, corpses);
     index
+}
+
+/// World-Y of the highest Stem on a grey corpse (leaves already stripped).
+pub fn corpse_canopy_top_y(corpse: &Corpse) -> i32 {
+    let mut max_y = i32::MIN;
+    for &(dx, dy, mid) in &corpse.body {
+        let _ = dx;
+        if mid == ModuleId::Stem {
+            max_y = max_y.max(corpse.gy + dy as i32);
+        }
+    }
+    if max_y == i32::MIN {
+        corpse.gy
+    } else {
+        max_y
+    }
+}
+
+/// Standing-dead trunks cast stem-only shade until they topple (Wave AF).
+pub fn record_standing_dead_canopy(index: &mut CanopyIndex, corpses: &[Corpse]) {
+    for (i, corpse) in corpses.iter().enumerate() {
+        if !corpse.land || is_fallen_log(corpse) {
+            continue;
+        }
+        let n_stem = corpse
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Stem)
+            .count();
+        if n_stem == 0 {
+            continue;
+        }
+        let absorb = (n_stem as f32 * SHADE_PER_STEM * STANDING_DEAD_CAST_SCALE)
+            .clamp(0.0, SHADE_CAST_CAP);
+        // Unique non-living entity ids so plants never treat a corpse as self.
+        let entity_id = u32::MAX.saturating_sub(i as u32);
+        record_canopy(
+            index,
+            corpse.gx,
+            corpse_canopy_top_y(corpse),
+            absorb,
+            0,
+            entity_id,
+        );
+    }
+}
+
+/// Register / refresh gap-flash columns after a topple (Wave AF).
+pub fn register_gap_flash(gap_flash: &mut HashMap<i32, u32>, columns: impl IntoIterator<Item = i32>) {
+    for wx in columns {
+        let entry = gap_flash.entry(wx).or_insert(0);
+        *entry = (*entry).max(GAP_FLASH_TICKS);
+    }
+}
+
+/// Decay gap-flash timers; drop spent columns.
+pub fn tick_gap_flash(gap_flash: &mut HashMap<i32, u32>) {
+    gap_flash.retain(|_, ticks| {
+        *ticks = ticks.saturating_sub(1);
+        *ticks > 0
+    });
+}
+
+/// Light multiplier from nearby canopy-gap flash (`1.0` = none).
+pub fn gap_flash_transmit(gap_flash: &HashMap<i32, u32>, wx: i32) -> f32 {
+    let mut best = 0u32;
+    for dx in -SHADE_RADIUS..=SHADE_RADIUS {
+        if let Some(&t) = gap_flash.get(&(wx + dx)) {
+            best = best.max(t);
+        }
+    }
+    if best == 0 {
+        return 1.0;
+    }
+    let frac = (best as f32 / GAP_FLASH_TICKS as f32).clamp(0.0, 1.0);
+    1.0 + GAP_FLASH_LIGHT_BONUS * frac
 }
 
 fn neighbour_weight(dx: i32) -> f32 {
@@ -324,6 +414,39 @@ mod tests {
             understory > sun_thug,
             "high shade_efficiency should harvest better in dim light"
         );
+    }
+
+    #[test]
+    fn standing_dead_stems_cast_shade() {
+        let short = plant_at(5, 2, 1, 2, Genome::default());
+        let tall_live = plant_at(6, 2, 4, 2, Genome::default());
+        let corpse = Corpse::from_atom(&tall_live);
+        assert!(corpse.body.iter().any(|(_, _, m)| *m == ModuleId::Stem));
+        let open = build_canopy_index_full(&[short.clone()], &[]);
+        let shaded = build_canopy_index_full(&[short.clone()], &[corpse]);
+        let sample_y = canopy_top_y(&short);
+        let lit_open = effective_photo_light(&open, 5, sample_y, 1.0, 0, 2, &Genome::default(), 1.0);
+        let lit_dead =
+            effective_photo_light(&shaded, 5, sample_y, 1.0, 0, 2, &Genome::default(), 1.0);
+        assert!(
+            lit_dead < lit_open,
+            "standing-dead neighbour should shade (dead={lit_dead} open={lit_open})"
+        );
+    }
+
+    #[test]
+    fn gap_flash_boosts_then_fades() {
+        let mut flash = HashMap::new();
+        register_gap_flash(&mut flash, [6]);
+        let near = gap_flash_transmit(&flash, 5);
+        let at = gap_flash_transmit(&flash, 6);
+        assert!(at > 1.0 && (at - near).abs() < 1e-5, "radius shares full flash");
+        assert_eq!(gap_flash_transmit(&flash, 6 + SHADE_RADIUS + 1), 1.0);
+        for _ in 0..GAP_FLASH_TICKS {
+            tick_gap_flash(&mut flash);
+        }
+        assert!(flash.is_empty());
+        assert_eq!(gap_flash_transmit(&flash, 6), 1.0);
     }
 
     #[test]
