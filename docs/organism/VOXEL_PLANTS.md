@@ -123,8 +123,14 @@ Features:
 - `.gvsecrt` schema **3**; `SIM_SCHEMA_VERSION` **5** (schema-2 blueprints dual-load)
 - Scenario `e43_host_leave_smother` (gentle host energy > smotherer)
 
-**Deferred (Wave Z+):** hypha morphogenesis into olive, `stem_wetness` drink,
-`attach_prefer`, ghost roots, fallen-log animation, long-soak E43 lineages.
+**Wave Z — Stem wetness drink *(landed)*:**
+- Land plants track `Atom.stem_wetness` toward root pore moisture (`STEM_WET_TRACK`)
+- Epiphytes drink via Holdfast (`EPI_STEM_DRINK`); dry/unseated stress shares the U clock
+- `SIM_SCHEMA_VERSION` **6**
+- Scenario `e41_stem_wetness_drink` (moist keeps epi; drought kills epi, host lives)
+
+**Deferred (Wave AA+):** hypha morphogenesis into olive, `attach_prefer`,
+ghost roots, fallen-log animation, long-soak E43 lineages.
 
 ## Explicitly out of Core for voxel
 

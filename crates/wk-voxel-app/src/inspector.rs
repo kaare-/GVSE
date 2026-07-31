@@ -188,7 +188,10 @@ pub fn draw_block_inspector(
                 .iter()
                 .filter(|(_, _, m)| *m == wk_voxel::ModuleId::Stem)
                 .count();
-            lines.push(format!("roots={roots}  stems={stems}"));
+            lines.push(format!(
+                "roots={roots}  stems={stems}  stem_wet={:.2}",
+                atom.stem_wetness
+            ));
         } else {
             lines.push(format!(
                 "buoyancy={:.2}  vel_y={:.2}  fy={:.1}",

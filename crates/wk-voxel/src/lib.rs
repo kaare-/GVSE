@@ -81,11 +81,13 @@ pub use grid::World;
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
     apply_living_stem_integrity, bone_column_capacity, collect_epiphyte_load_on_stems,
-    fracture_overloaded_bones, stem_integrity_failing_index, stem_weight_above, topple_stem_at,
-    Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,
-    CORPSE_SETTLE_WATER_TICKS, DEAD_DECAY_PER_TICK, FUNGAL_DECAY_PER_TICK,
-    INTEGRITY_TOPPLE_THRESHOLD, MAX_ATOMS, MAX_CORPSES, STEM_FREE_LOAD,
+    collect_stem_wetness_on_cells, epiphyte_stem_wetness, fracture_overloaded_bones,
+    stem_integrity_failing_index, stem_weight_above, topple_stem_at, update_stem_wetness, Atom,
+    BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,
+    CORPSE_SETTLE_WATER_TICKS, DEAD_DECAY_PER_TICK, EPI_STEM_DRINK, EPI_STEM_DRY_FRAC,
+    FUNGAL_DECAY_PER_TICK, INTEGRITY_TOPPLE_THRESHOLD, MAX_ATOMS, MAX_CORPSES, STEM_FREE_LOAD,
     STEM_LOAD_DRAIN_PER_ABOVE, STEM_RECHARGE_ENERGY_PER_UNIT, STEM_RECHARGE_PER_TICK,
+    STEM_WET_TRACK,
 };
 pub use plant::{
     collect_live_root_world_cells, collect_live_stem_world_cells, find_fungus_slot, find_plant_slot,
