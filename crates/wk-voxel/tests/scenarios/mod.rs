@@ -21,4 +21,5 @@ mod e42c_hypha_invades_dead_stem;
 mod e45_live_stem_load_topple;
 mod e43_host_leave_smother;
 mod e41_stem_wetness_drink;
+mod e44_ghost_roots;
 mod helpers;

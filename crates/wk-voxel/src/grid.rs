@@ -6,7 +6,7 @@
 //! only unit of storage; the world is thin glue for lookup and
 //! iteration.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use wk_material::HydroOverrides;
@@ -41,6 +41,10 @@ pub struct World {
     /// Death deposits units here; fungi digest them before Organic cells.
     #[serde(default)]
     pub soft_litter: HashMap<i32, u16>,
+    /// Ghost-root preferential path overlay (Wave AC / FUNGI.md).
+    /// Survives material swaps — "there was a root here" memory.
+    #[serde(default)]
+    pub preferential_root: HashSet<(i32, i32)>,
     /// Per-sim hydrology material overrides (saved with the world).
     /// Hot paths read this via [`Self::water_capacity`] /
     /// [`crate::cell::water_capacity_with`] — no process-global install.
@@ -56,8 +60,21 @@ impl World {
             tick: 0,
             wrap_width: None,
             soft_litter: HashMap::new(),
+            preferential_root: HashSet::new(),
             hydro: HydroOverrides::default(),
         }
+    }
+
+    /// Mark `(gx, gy)` as a PreferentialRootPath cell (Wave AC).
+    pub fn mark_preferential_root(&mut self, gx: i32, gy: i32) {
+        let gx = self.wrap_x(gx);
+        self.preferential_root.insert((gx, gy));
+    }
+
+    /// True when roots get the ghost-path subsidy at this cell.
+    pub fn is_preferential_root(&self, gx: i32, gy: i32) -> bool {
+        let gx = self.wrap_x(gx);
+        self.preferential_root.contains(&(gx, gy))
     }
 
     /// Water capacity for `material` under this world's hydro overrides.

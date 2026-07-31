@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use wk_material::MaterialId;
 
 use crate::blueprint::PixelTraits;
-use crate::cell::{water_capacity, Cell};
+use crate::cell::{water_capacity, Cell, CellFlags};
 use crate::grid::World;
 use crate::organism::{Atom, ModuleId};
 use crate::plant::{find_fungus_slot, pin_plant_pose};
@@ -281,8 +281,9 @@ fn find_organic_xy(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
 }
 
 /// Remove up to `want` labile units; returns (units_taken, energy).
-/// Prefers soft litter, then converts Organic cells → Sand (loose soil),
-/// preserving pore sat so digests don't flash-dry the bed.
+/// Prefers soft litter, then peels Organic:
+/// - [`CellFlags::ROOT_RESIDUE`] → Air void + PreferentialRootPath (Wave AC)
+/// - other Organic → Sand (loose soil), preserving pore sat
 pub fn digest_labile(world: &mut World, gx: i32, gy: i32, want: u16) -> (u16, f32) {
     if want == 0 {
         return (0, 0.0);
@@ -306,14 +307,21 @@ pub fn digest_labile(world: &mut World, gx: i32, gy: i32, want: u16) -> (u16, f3
         let Some((ox, oy)) = find_organic_xy(world, gx, gy) else {
             break;
         };
-        let sat = world
-            .get_cell(ox, oy)
-            .map(|c| c.sat.0)
-            .unwrap_or(0);
-        let mut soil = Cell::solid(MaterialId::Sand);
-        let cap = water_capacity(MaterialId::Sand);
-        soil.sat.0 = if cap > 0 { sat.min(cap) } else { 0 };
-        world.set_cell(ox, oy, soil);
+        let cell = world.get_cell(ox, oy).unwrap_or_else(Cell::air);
+        let sat = cell.sat.0;
+        if cell.flags.contains(CellFlags::ROOT_RESIDUE) {
+            // Ghost-root cavity: Void + preferential memory (FUNGI.md).
+            let mut void = Cell::air();
+            // Keep a film of pore moisture as free Air sat when present.
+            void.sat.0 = sat;
+            world.set_cell(ox, oy, void);
+            world.mark_preferential_root(ox, oy);
+        } else {
+            let mut soil = Cell::solid(MaterialId::Sand);
+            let cap = water_capacity(MaterialId::Sand);
+            soil.sat.0 = if cap > 0 { sat.min(cap) } else { 0 };
+            world.set_cell(ox, oy, soil);
+        }
         let spend = (LABILE_ORGANIC_UNITS.ceil() as u16).max(1).min(left);
         taken = taken.saturating_add(spend);
         left = left.saturating_sub(spend);
@@ -324,6 +332,43 @@ pub fn digest_labile(world: &mut World, gx: i32, gy: i32, want: u16) -> (u16, f3
     } else {
         (0, 0.0)
     }
+}
+
+/// Collapse loose Sand/Clay into preferential Air voids (Wave AC).
+///
+/// One cell per preferential void per call — Void → Loose fill. The
+/// PreferentialRootPath overlay stays on the filled coordinate.
+pub fn fill_ghost_root_voids(world: &mut World) -> u32 {
+    let targets: Vec<(i32, i32)> = world.preferential_root.iter().copied().collect();
+    let mut filled = 0u32;
+    for (gx, gy) in targets {
+        let Some(cur) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if cur.material != MaterialId::Air {
+            continue;
+        }
+        let Some(above) = world.get_cell(gx, gy + 1) else {
+            continue;
+        };
+        if !matches!(above.material, MaterialId::Sand | MaterialId::Clay) {
+            continue;
+        }
+        // Pull loose fill down; vacate the upper cell as empty Air.
+        let mut loose = above;
+        // Pore sat from the void film rides into the fill when capacity allows.
+        let cap = water_capacity(loose.material);
+        if cap > 0 && cur.sat.0 > 0 {
+            loose.sat.0 = loose.sat.0.saturating_add(cur.sat.0).min(cap);
+        }
+        world.set_cell(gx, gy, loose);
+        world.set_cell(gx, gy + 1, Cell::air());
+        // Memory stays on (gx, gy); also stamp the vacated column cell so
+        // a pipe of fill keeps the preferential trail.
+        world.mark_preferential_root(gx, gy);
+        filled += 1;
+    }
+    filled
 }
 
 /// Active upkeep for Digest + Hypha tissue.
@@ -632,6 +677,47 @@ mod tests {
             soil.sat.0,
             100.min(water_capacity(MaterialId::Sand)),
             "pore sat must survive the conversion"
+        );
+        assert!(
+            w.preferential_root.is_empty(),
+            "litter Organic must not open a ghost cavity"
+        );
+    }
+
+    #[test]
+    fn digest_root_residue_opens_preferential_void() {
+        use crate::cell::CellFlags;
+        let mut w = litter_plot();
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(80);
+            org.flags.set(CellFlags::ROOT_RESIDUE);
+            w.set_cell(4, y, org);
+        }
+        // Cap of loose Sand so fill can collapse into the void.
+        w.set_cell(4, 4, Cell::solid(MaterialId::Sand));
+        let (taken, _) = digest_labile(&mut w, 4, 3, 4);
+        assert!(taken > 0);
+        let void_y = (1..=3).find(|&y| {
+            w.get_cell(4, y)
+                .map(|c| c.material == MaterialId::Air)
+                .unwrap_or(false)
+        });
+        let void_y = void_y.expect("root residue should become an Air void");
+        assert!(
+            w.is_preferential_root(4, void_y),
+            "void must be PreferentialRootPath"
+        );
+        let filled = fill_ghost_root_voids(&mut w);
+        assert!(filled >= 1, "Sand cap should collapse into the void");
+        assert_eq!(
+            w.get_cell(4, void_y).map(|c| c.material),
+            Some(MaterialId::Sand),
+            "filled cavity is Loose (Sand)"
+        );
+        assert!(
+            w.is_preferential_root(4, void_y),
+            "preferential memory survives fill"
         );
     }
 

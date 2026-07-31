@@ -69,7 +69,8 @@ pub use failure::{
 };
 pub use fungi::{
     add_soft_litter, collect_fungus_tissue_world_cells, deposit_organic_on_surface,
-    dissolve_corpse_to_organic, hypha_count, is_fungus, soft_litter_at,
+    digest_labile, dissolve_corpse_to_organic, fill_ghost_root_voids, hypha_count, is_fungus,
+    soft_litter_at,
     try_grow_hypha_into_dead_stem, HYPHA_GROW_COST, HYPHA_GROW_PERIOD, MAX_HYPHA_MODULES,
 };
 pub use geotech_map::{
@@ -93,8 +94,9 @@ pub use organism::{
 pub use plant::{
     attach_seek_radius, collect_live_root_world_cells, collect_live_stem_world_cells,
     find_fungus_slot, find_plant_slot, find_surface_air_slot, apply_genome, is_epiphyte,
-    is_holdfast_anchored, is_land_plant, sync_alloc_on_atom, sync_alloc_to_body,
-    try_epiphyte_reseat, PlantGrowthCaps, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
+    is_holdfast_anchored, is_land_plant, leave_dead_roots_in_place, sync_alloc_on_atom,
+    sync_alloc_to_body, try_elongate_root, try_epiphyte_reseat, PlantGrowthCaps,
+    MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use shade::{
     build_canopy_index, effective_photo_light, epiphyte_rider_transmit, CanopyIndex,
