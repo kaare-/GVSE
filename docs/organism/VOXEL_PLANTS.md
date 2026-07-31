@@ -110,9 +110,15 @@ Features:
 - No new Atom fields / no schema bump (`collect_fungus_tissue_world_cells` each corpse tick)
 - Scenario `e42b_fungal_rot_accelerates_topple` (abiotic control vs fungal treatment)
 
-**Deferred (Wave X+):** living stem load drain / recharge, hypha
-morphogenesis into olive, smother shade-kill chain, `stem_wetness` drink,
-attach/leave genes, ghost roots, fallen-log animation.
+**Wave X — Living stem load / recharge *(landed)*:**
+- Per-Stem weight = own Stem/Photosystem above + epiphyte modules on this stem or higher
+- Excess over `STEM_FREE_LOAD` drains at `STEM_LOAD_DRAIN_PER_ABOVE`; recharge from energy
+- Live topple via `topple_stem_at` (keeps `body_traits`); unseats riders
+- Scenario `e45_live_stem_load_topple` (self-load holds vs epiphyte overload)
+
+**Deferred (Wave Y+):** hypha morphogenesis into olive, smother shade-kill
+chain / `HostLeaveFraction`, `stem_wetness` drink, attach genes, ghost
+roots, fallen-log animation.
 
 ## Explicitly out of Core for voxel
 
