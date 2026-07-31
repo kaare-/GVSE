@@ -25,4 +25,5 @@ mod e43_host_leave_smother;
 mod e43b_gentle_wins_long_soak;
 mod e41_stem_wetness_drink;
 mod e44_ghost_roots;
+mod e46_canopy_gap_flash;
 mod helpers;

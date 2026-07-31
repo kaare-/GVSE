@@ -159,6 +159,12 @@ Features:
 - Instant re-pose only — Bezier fall animation stays out of Core
 - Scenarios `e42_standing_dead_stem_topples` (log + delayed Organic) and `e42d_fallen_log_cascade`
 
+**Wave AF — Canopy gap flash *(landed)*:**
+- Standing-dead Stems cast shade (`STANDING_DEAD_CAST_SCALE`); fallen logs do not
+- Topple registers ephemeral `gap_flash` columns (`GAP_FLASH_TICKS` / `GAP_FLASH_LIGHT_BONUS`)
+- Understory harvest × flash transmit; floor fungi get a small energy sip
+- Scenario `e46_canopy_gap_flash` (standing-dead shade → topple opens light)
+
 ## Explicitly out of Core for voxel
 
 - Branching morphogenesis, seasonal leaf drop, wood rings
