@@ -1,14 +1,15 @@
-//! E42 spirit — standing-dead Stem integrity collapses → topple (Wave V).
+//! E42 spirit — standing-dead Stem integrity collapses → topple (Wave V / AE).
 //!
 //! Kill a host plant (grey corpse with Stems), force Stem integrity to the
 //! topple threshold, step once: trunk modules above the break leave the
-//! corpse, Organic appears on the ground in a horizontal band, and a
-//! seated epiphyte loses its host.
+//! standing corpse as a horizontal grey fallen log (Wave AE), soft litter
+//! banks at the stump, and a seated epiphyte loses its host. Organic on
+//! the ground band arrives when the log settles — not on the topple tick.
 
 use wk_material::MaterialId;
 use wk_voxel::{
-    is_epiphyte, BodyModule, Cell, ChunkCoord, Genome, ModuleId, OrganismStore, World,
-    DEMO_DAY_TICKS, INTEGRITY_TOPPLE_THRESHOLD,
+    is_epiphyte, is_fallen_log, soft_litter_at, BodyModule, Cell, ChunkCoord, Genome, ModuleId,
+    OrganismStore, World, CORPSE_SETTLE_LAND_TICKS, DEMO_DAY_TICKS, INTEGRITY_TOPPLE_THRESHOLD,
 };
 
 use crate::helpers::lay_bedrock_floor;
@@ -124,24 +125,86 @@ fn e42_standing_dead_stem_topples_organic() {
     assert!(stems_before >= 2);
 
     let organic_before = count_organic_band(&world, hx - 6, hx + 6, 1, 4);
+    let litter_before = soft_litter_at(&world, hx);
     let tick = world.tick;
     orgs.step(&mut world, tick);
     world.tick = tick.wrapping_add(1);
 
-    let stems_after = orgs.corpses.get(0).map(|c| {
-        c.body
-            .iter()
-            .filter(|(_, _, m)| *m == ModuleId::Stem)
-            .count()
-    });
+    let stems_after = orgs
+        .corpses
+        .iter()
+        .filter(|c| !is_fallen_log(c))
+        .map(|c| {
+            c.body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Stem)
+                .count()
+        })
+        .sum::<usize>();
     assert!(
-        stems_after.unwrap_or(0) < stems_before,
-        "topple should remove the failing Stem and modules above"
+        stems_after < stems_before,
+        "topple should remove the failing Stem and modules above from the standing corpse"
     );
-    let organic_after = count_organic_band(&world, hx - 6, hx + 6, 1, 4);
+    let log = orgs
+        .corpses
+        .iter()
+        .find(|c| is_fallen_log(c))
+        .expect("Wave AE: topple should leave a horizontal fallen-log Corpse");
+    let log_stems = log
+        .body
+        .iter()
+        .filter(|(_, _, m)| *m == ModuleId::Stem)
+        .count();
+    assert!(log_stems >= 2, "fallen log keeps the toppled Stems");
+    let dys: Vec<i16> = log.body.iter().map(|(_, dy, _)| *dy).collect();
     assert!(
-        organic_after > organic_before,
-        "topple should deposit Organic on the ground band (before={organic_before} after={organic_after})"
+        dys.iter().all(|d| *d == dys[0]),
+        "fallen log is a single horizontal row"
+    );
+    let dx_span = log
+        .body
+        .iter()
+        .map(|(dx, _, _)| *dx)
+        .max()
+        .unwrap()
+        - log
+            .body
+            .iter()
+            .map(|(dx, _, _)| *dx)
+            .min()
+            .unwrap();
+    assert!(dx_span >= 1, "fallen log spreads along x");
+
+    let organic_after = count_organic_band(&world, hx - 6, hx + 6, 1, 4);
+    assert_eq!(
+        organic_after, organic_before,
+        "Organic waits for fallen-log settle (before={organic_before} after={organic_after})"
+    );
+    assert!(
+        soft_litter_at(&world, hx) > litter_before,
+        "topple still banks soft litter at the stump"
+    );
+
+    // Force settle → Organic band on the ground.
+    let log_i = orgs
+        .corpses
+        .iter()
+        .position(|c| is_fallen_log(c))
+        .expect("log");
+    orgs.corpses[log_i].settled_ticks = CORPSE_SETTLE_LAND_TICKS;
+    {
+        let tick = world.tick;
+        orgs.step(&mut world, tick);
+        world.tick = tick.wrapping_add(1);
+    }
+    let organic_settled = count_organic_band(&world, hx - 6, hx + 6, 1, 4);
+    assert!(
+        organic_settled > organic_before,
+        "settled fallen log deposits Organic on the ground band (before={organic_before} after={organic_settled})"
+    );
+    assert!(
+        !orgs.corpses.iter().any(is_fallen_log),
+        "fallen log dissolves after settle"
     );
 
     // Epiphyte was force-unseated; dies on the next tick(s).

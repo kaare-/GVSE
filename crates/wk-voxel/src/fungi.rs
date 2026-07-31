@@ -616,19 +616,29 @@ pub fn dissolve_corpse_to_organic(
         .min(DEATH_LITTER_MAX as usize) as u16;
     add_soft_litter(world, gx, units);
 
+    // Wave AE: horizontal fallen logs compost onto the ground band per
+    // column. Standing trunks still skip mid-air Stem paint (water/snow pass).
+    let fallen_log = !body.is_empty()
+        && body.iter().any(|(_, _, m)| *m == ModuleId::Stem)
+        && body.iter().all(|(_, dy, _)| *dy == body[0].1);
+
     let mut painted = 0u32;
     for &(dx, dy, mid) in body {
-        // Grey trunks / crowns / leaves: litter only — do not dam flow.
-        // Animal tissues (Bone / Muscle / Skin) are *not* skipped.
+        let wx = world.wrap_x(gx + dx as i32);
+        let wy = gy + dy as i32;
         if matches!(
             mid,
             ModuleId::Stem | ModuleId::Nucleus | ModuleId::Photosystem
         ) {
+            if fallen_log {
+                // Search from corpse origin height so stacked Organic from
+                // a prior column module cannot raise the "surface".
+                deposit_organic_cell(world, wx, gy);
+                painted += 1;
+            }
             continue;
         }
         let death_mat = module_death_material(mid);
-        let wx = world.wrap_x(gx + dx as i32);
-        let wy = gy + dy as i32;
         let Some(c) = world.get_cell(wx, wy) else {
             continue;
         };

@@ -102,7 +102,7 @@ Features:
 **Wave V — Standing-dead topple *(landed)*:**
 - `Atom` / `Corpse.body_integrity` (empty ⇒ `1.0`); `SIM_SCHEMA_VERSION` 4
 - Standing-dead Stem drain `DEAD_DECAY_PER_TICK`; fail ≤ `INTEGRITY_TOPPLE_THRESHOLD`
-- `topple_stem_at`: break at lowest failing Stem, drop Organic in L/R ground band
+- `topple_stem_at`: break at lowest failing Stem (Wave AE re-projects a grey log)
 - Epiphytes on fallen Stem cells force-unseat
 - Scenario `e42_standing_dead_stem_topples`
 
@@ -153,7 +153,11 @@ Features:
 - Scenario `e39_litter_bloom` (seed → drawdown → crash after starve)
 - Scenario `e43b_gentle_wins_long_soak` (gentle epi lineages outlast smotherers)
 
-**Deferred (Wave AE+):** fallen-log animation (Bezier explicitly out of Core).
+**Wave AE — Fallen-log Corpse *(landed)*:**
+- `topple_stem_at` re-projects fallen modules into a horizontal grey `Corpse` (`is_fallen_log`)
+- Soft litter banks on topple; Organic waits for `CORPSE_SETTLE_LAND_TICKS` dissolve
+- Instant re-pose only — Bezier fall animation stays out of Core
+- Scenarios `e42_standing_dead_stem_topples` (log + delayed Organic) and `e42d_fallen_log_cascade`
 
 ## Explicitly out of Core for voxel
 
