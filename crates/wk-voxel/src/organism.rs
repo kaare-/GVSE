@@ -637,12 +637,38 @@ pub fn stem_integrity_failing_index(body: &[BodyModule], integrity: &[f32]) -> O
     best.map(|(_, i)| i)
 }
 
-/// Topple a trunk at the failing Stem (Wave V; live path Wave X).
+/// Outcome of [`topple_stem_at`] (Wave V / X / AE).
+#[derive(Debug, Clone, Default)]
+pub struct ToppleResult {
+    /// World cells that lost a Stem (epiphyte unseat).
+    pub fallen_stems: Vec<(i32, i32)>,
+    /// Lingering grey horizontal log; settles → Organic (Wave AE).
+    /// Bezier fall animation stays out of Core — this is an instant re-pose.
+    pub fallen_log: Option<Corpse>,
+}
+
+/// True when a land corpse is already a horizontal fallen log (Wave AE).
 ///
-/// Removes the fail Stem and every module with `dy >= fail_dy`, deposits
-/// Organic on the ground in a deterministic L/R band, and returns the
-/// world cells that lost a Stem (for epiphyte unseat). When `traits` is
-/// `Some`, keeps the matching per-module traits (living Atoms).
+/// Heuristic (no schema field): every module shares one `dy` and at least
+/// one Stem is present. Standing trunks keep Nucleus + stacked Stem `dy`s.
+pub fn is_fallen_log(corpse: &Corpse) -> bool {
+    if !corpse.land || corpse.body.is_empty() {
+        return false;
+    }
+    if !corpse.body.iter().any(|(_, _, m)| *m == ModuleId::Stem) {
+        return false;
+    }
+    let dy0 = corpse.body[0].1;
+    corpse.body.iter().all(|(_, dy, _)| *dy == dy0)
+}
+
+/// Topple a trunk at the failing Stem (Wave V; live path Wave X; Wave AE log).
+///
+/// Removes the fail Stem and every module with `dy >= fail_dy`, re-projects
+/// them into a horizontal grey [`Corpse`] on the ground band (soft litter
+/// only — Organic waits for settle), and returns stem cells for epiphyte
+/// unseat. When `traits` is `Some`, keeps matching per-module traits on
+/// the living stump (living Atoms).
 pub fn topple_stem_at(
     world: &mut World,
     gx: i32,
@@ -652,13 +678,13 @@ pub fn topple_stem_at(
     traits: Option<&mut Vec<PixelTraits>>,
     tick: u64,
     salt: u32,
-) -> Vec<(i32, i32)> {
+) -> ToppleResult {
     while integrity.len() < body.len() {
         integrity.push(1.0);
     }
     integrity.truncate(body.len());
     let Some(fail_i) = stem_integrity_failing_index(body, integrity) else {
-        return Vec::new();
+        return ToppleResult::default();
     };
     let fail_dy = body[fail_i].1;
     let dir = if topple_side_hash(gx, gy, tick, salt) & 1 == 0 {
@@ -668,6 +694,7 @@ pub fn topple_stem_at(
     };
 
     let mut fallen_stems = Vec::new();
+    let mut log_body = Vec::new();
     let mut keep_body = Vec::with_capacity(body.len());
     let mut keep_integ = Vec::with_capacity(body.len());
     let mut keep_traits = traits.as_ref().map(|_| Vec::with_capacity(body.len()));
@@ -691,8 +718,8 @@ pub fn topple_stem_at(
             fallen_stems.push((wx, wy));
         }
         // Horizontal fallen-log band on the ground (not mid-air pillars).
-        let col = world.wrap_x(gx + dir.saturating_mul(band_i));
-        crate::fungi::deposit_organic_on_surface(world, col, gy);
+        let log_dx = (dir.saturating_mul(band_i)) as i16;
+        log_body.push((log_dx, 0i16, mid));
         band_i += 1;
     }
     let n_fallen = body.len().saturating_sub(keep_body.len());
@@ -705,7 +732,26 @@ pub fn topple_stem_at(
     if let (Some(tr), Some(kt)) = (traits, keep_traits) {
         *tr = kt;
     }
-    fallen_stems
+    let fallen_log = if log_body.is_empty() {
+        None
+    } else {
+        Some(Corpse {
+            gx,
+            gy,
+            fy: gy as f32,
+            vel_y: 0.0,
+            body: log_body,
+            ticks: 0,
+            settled_ticks: 0,
+            land: true,
+            last_water_top: None,
+            body_integrity: Vec::new(),
+        })
+    };
+    ToppleResult {
+        fallen_stems,
+        fallen_log,
+    }
 }
 
 /// Epiphyte body-module weight keyed by Holdfast world cell (Wave X).
@@ -1425,6 +1471,7 @@ impl OrganismStore {
         let mut deaths: Vec<usize> = Vec::new();
         let mut live_fallen: std::collections::HashSet<(i32, i32)> =
             std::collections::HashSet::new();
+        let mut live_fallen_logs: Vec<Corpse> = Vec::new();
         let pop = self.atoms.len();
         let atom_cap = self.atom_cap();
         let growth_caps = self.growth_caps.clamp();
@@ -1466,6 +1513,7 @@ impl OrganismStore {
                     &live_roots,
                     &epi_load,
                     &mut live_fallen,
+                    &mut live_fallen_logs,
                     rider_t,
                     i as u32,
                     room,
@@ -1564,6 +1612,10 @@ impl OrganismStore {
 
         // Wave X: live topple unseats riders before death bookkeeping.
         unseat_epiphytes_on_fallen(world, &mut self.atoms, &live_fallen);
+        // Wave AE: live topple leaves a horizontal grey log (not instant Organic).
+        for log in live_fallen_logs {
+            self.push_corpse(world, log);
+        }
 
         deaths.sort_unstable();
         deaths.dedup();
@@ -1618,6 +1670,7 @@ impl OrganismStore {
         let mut dissolve: Vec<usize> = Vec::new();
         let mut fallen_stems: std::collections::HashSet<(i32, i32)> =
             std::collections::HashSet::new();
+        let mut pending_logs: Vec<Corpse> = Vec::new();
         let tick = world.tick;
         // Wave W: Digest/Hypha tissue on a Stem cell accelerates rot.
         let fungus_cells = collect_fungus_tissue_world_cells(world, &self.atoms);
@@ -1625,8 +1678,16 @@ impl OrganismStore {
             corpse.ticks = corpse.ticks.saturating_add(1);
             if corpse.land {
                 pin_corpse_land(corpse);
+                // Wave AE: horizontal logs only settle — no re-topple / rot drain.
+                if is_fallen_log(corpse) {
+                    corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
+                    if corpse.settled_ticks >= CORPSE_SETTLE_LAND_TICKS {
+                        dissolve.push(i);
+                    }
+                    continue;
+                }
                 decay_corpse_stem_integrity(corpse, &fungus_cells, |x| world.wrap_x(x));
-                let fallen = topple_stem_at(
+                let toppled = topple_stem_at(
                     world,
                     corpse.gx,
                     corpse.gy,
@@ -1636,8 +1697,11 @@ impl OrganismStore {
                     tick,
                     i as u32,
                 );
-                for c in fallen {
+                for c in toppled.fallen_stems {
                     fallen_stems.insert(c);
+                }
+                if let Some(log) = toppled.fallen_log {
+                    pending_logs.push(log);
                 }
                 // Empty standing-dead after a full topple — dissolve soon.
                 if corpse.body.is_empty()
@@ -1685,6 +1749,9 @@ impl OrganismStore {
             if i < self.corpses.len() {
                 self.corpses.swap_remove(i);
             }
+        }
+        for log in pending_logs {
+            self.push_corpse(world, log);
         }
     }
 }
@@ -1786,6 +1853,7 @@ fn step_land_plant(
     live_roots: &std::collections::HashSet<(i32, i32)>,
     epi_load: &std::collections::HashMap<(i32, i32), u32>,
     live_fallen: &mut std::collections::HashSet<(i32, i32)>,
+    live_fallen_logs: &mut Vec<Corpse>,
     rider_transmit: f32,
     entity_id: u32,
     pop_room: bool,
@@ -1876,7 +1944,7 @@ fn step_land_plant(
     // Wave X: structural load vs maintenance recharge (before growth spend).
     apply_living_stem_integrity(atom, epi_load, |x| world.wrap_x(x));
     if stem_integrity_failing_index(&atom.body, &atom.body_integrity).is_some() {
-        let fallen = topple_stem_at(
+        let toppled = topple_stem_at(
             world,
             atom.gx,
             atom.gy,
@@ -1886,8 +1954,11 @@ fn step_land_plant(
             tick,
             entity_id,
         );
-        for c in fallen {
+        for c in toppled.fallen_stems {
             live_fallen.insert(c);
+        }
+        if let Some(log) = toppled.fallen_log {
+            live_fallen_logs.push(log);
         }
         atom.align_body_traits();
         atom.recompute_body_plan();
@@ -4221,5 +4292,50 @@ mod tests {
             "heavy epi load without recharge should collapse (integ={})",
             atom.integrity_at(lowest)
         );
+    }
+
+    #[test]
+    fn topple_projects_horizontal_fallen_log() {
+        let mut w = moist_sand_plot();
+        let mut body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Stem),
+        ];
+        let mut integ = vec![1.0, INTEGRITY_TOPPLE_THRESHOLD, 1.0, 1.0];
+        let organic_before = (0..8)
+            .filter(|&x| {
+                (1..=4).any(|y| {
+                    w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic)
+                })
+            })
+            .count();
+        let result = topple_stem_at(&mut w, 4, 2, &mut body, &mut integ, None, 1, 0);
+        assert!(
+            body.iter().all(|(_, _, m)| *m != ModuleId::Stem),
+            "failing Stem and above leave the standing body"
+        );
+        assert!(body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus));
+        let log = result.fallen_log.expect("fallen log Corpse");
+        assert!(is_fallen_log(&log));
+        assert_eq!(
+            log.body.iter().filter(|(_, _, m)| *m == ModuleId::Stem).count(),
+            3
+        );
+        let dy0 = log.body[0].1;
+        assert!(log.body.iter().all(|(_, dy, _)| *dy == dy0));
+        let organic_after = (0..8)
+            .filter(|&x| {
+                (1..=4).any(|y| {
+                    w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic)
+                })
+            })
+            .count();
+        assert_eq!(
+            organic_after, organic_before,
+            "Organic waits for fallen-log settle"
+        );
+        assert_eq!(result.fallen_stems.len(), 3);
     }
 }
