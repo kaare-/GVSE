@@ -45,6 +45,8 @@ pub struct BodyPlan {
     pub shade_efficiency: f32,
     /// Mean Digest/Hypha `digest_rate` (default when none).
     pub digest_rate: f32,
+    /// Mean Photosystem `host_leave_fraction` (Wave Y; default smotherer).
+    pub host_leave_fraction: f32,
 }
 
 impl Default for BodyPlan {
@@ -65,6 +67,7 @@ impl Default for BodyPlan {
             root_depth_bias: 0.55,
             shade_efficiency: 0.40,
             digest_rate: 0.8,
+            host_leave_fraction: 0.0,
         }
     }
 }
@@ -131,6 +134,8 @@ where
     let mut root_n = 0usize;
     let mut shade_acc = 0.0f32;
     let mut shade_n = 0usize;
+    let mut leave_acc = 0.0f32;
+    let mut leave_n = 0usize;
     let mut digest_acc = 0.0f32;
     let mut digest_n = 0usize;
 
@@ -152,6 +157,8 @@ where
                 photo_capacity += t.absorb_bias.max(0.0);
                 shade_acc += t.shade_efficiency.clamp(0.0, 1.0);
                 shade_n += 1;
+                leave_acc += t.host_leave_fraction.clamp(0.0, 1.0);
+                leave_n += 1;
             }
             ModuleId::Nucleus => {
                 nucleus_count += 1;
@@ -213,6 +220,11 @@ where
             (digest_acc / digest_n as f32).clamp(0.05, 2.0)
         } else {
             defaults.digest_rate
+        },
+        host_leave_fraction: if leave_n > 0 {
+            (leave_acc / leave_n as f32).clamp(0.0, 1.0)
+        } else {
+            defaults.host_leave_fraction
         },
     }
 }

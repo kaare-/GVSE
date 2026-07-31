@@ -170,6 +170,38 @@ pub fn shade_transmit(
     transmit.clamp(SHADE_AMBIENT_FLOOR, 1.0)
 }
 
+/// Same-column epiphyte steal for modules below `sample_y` (Wave Y).
+///
+/// `HostLeaveFraction` leaves light for the host: steal scales with
+/// `(1 − leave) × cast_strength`. Gentle riders (`leave → 1`) barely
+/// shade the landlord; smotherers (`leave = 0`) take hard.
+pub fn epiphyte_rider_transmit(atoms: &[Atom], wx: i32, sample_y: i32, self_entity: u32) -> f32 {
+    let mut transmit = 1.0f32;
+    for (id, atom) in atoms.iter().enumerate() {
+        if id as u32 == self_entity {
+            continue;
+        }
+        if !is_epiphyte(atom) {
+            continue;
+        }
+        if atom.gx != wx {
+            continue;
+        }
+        // Shade host / understory at or below the rider canopy (equal height
+        // still steals — freeloader greens share the crown cell).
+        if canopy_top_y(atom) < sample_y {
+            continue;
+        }
+        let leave = atom.body_plan.host_leave_fraction.clamp(0.0, 1.0);
+        let n_photo = atom.photosystem_count();
+        let steal = (1.0 - leave)
+            * cast_strength(n_photo, 0, atom.leaf_absorb_effective())
+            * 0.90;
+        transmit *= (1.0 - steal.clamp(0.0, 0.92)).clamp(0.0, 1.0);
+    }
+    transmit.clamp(SHADE_AMBIENT_FLOOR, 1.0)
+}
+
 /// Remap attenuated light through `ShadeEfficiency` (sun thug vs understory).
 pub fn shade_harvest_light(light: f32, shade_eff: f32) -> f32 {
     let l = light.clamp(0.0, 1.0);
@@ -188,6 +220,7 @@ pub fn effective_photo_light(
     self_entity: u32,
     self_n_photo: usize,
     genome: &Genome,
+    rider_transmit: f32,
 ) -> f32 {
     effective_photo_light_absorb(
         index,
@@ -198,10 +231,14 @@ pub fn effective_photo_light(
         self_n_photo,
         genome.leaf_absorb,
         genome.shade_efficiency,
+        rider_transmit,
     )
 }
 
 /// Like [`effective_photo_light`] with explicit absorb (Wave M body plan).
+///
+/// `rider_transmit` is the Wave Y same-column epiphyte factor
+/// ([`epiphyte_rider_transmit`]); pass `1.0` when no riders apply.
 pub fn effective_photo_light_absorb(
     index: &CanopyIndex,
     wx: i32,
@@ -211,11 +248,12 @@ pub fn effective_photo_light_absorb(
     self_n_photo: usize,
     leaf_absorb: f32,
     shade_efficiency: f32,
+    rider_transmit: f32,
 ) -> f32 {
     if sky_l0 <= 0.01 {
         return 0.0;
     }
-    let transmit = shade_transmit(
+    let mut transmit = shade_transmit(
         index,
         wx,
         sample_y,
@@ -223,6 +261,8 @@ pub fn effective_photo_light_absorb(
         self_n_photo,
         leaf_absorb,
     );
+    transmit *= rider_transmit.clamp(SHADE_AMBIENT_FLOOR, 1.0);
+    transmit = transmit.clamp(SHADE_AMBIENT_FLOOR, 1.0);
     let attenuated = (sky_l0 * transmit).clamp(0.0, 1.0);
     shade_harvest_light(attenuated, shade_efficiency)
 }
@@ -266,7 +306,7 @@ mod tests {
         let atoms = [short, tall];
         let index = build_canopy_index(&atoms);
         let sample_y = canopy_top_y(&atoms[0]);
-        let lit = effective_photo_light(&index, 5, sample_y, 1.0, 0, 2, &short_g);
+        let lit = effective_photo_light(&index, 5, sample_y, 1.0, 0, 2, &short_g, 1.0);
         assert!(
             lit < 0.85,
             "tall neighbour should shade short plant (lit={lit})"
@@ -283,6 +323,69 @@ mod tests {
         assert!(
             understory > sun_thug,
             "high shade_efficiency should harvest better in dim light"
+        );
+    }
+
+    #[test]
+    fn smother_epiphyte_shades_host_more_than_gentle() {
+        let host_body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Photosystem),
+        ];
+        let host = Atom::from_body(8, 2, 80.0, host_body);
+        let epi_body = vec![
+            (0, 0, ModuleId::Holdfast),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Photosystem),
+        ];
+        let mut smother_g = Genome::default();
+        smother_g.leaf_absorb = 0.95;
+        smother_g.host_leave_fraction = 0.0;
+        let mut gentle_g = Genome::default();
+        gentle_g.leaf_absorb = 0.95;
+        gentle_g.host_leave_fraction = 0.85;
+
+        // Holdfast on upper stem (y=5); epi leaf at y=6 matches host crown.
+        let mut smother = Atom::from_body(8, 5, 40.0, epi_body.clone());
+        apply_genome(&mut smother, smother_g);
+        let mut gentle = Atom::from_body(8, 5, 40.0, epi_body);
+        apply_genome(&mut gentle, gentle_g);
+
+        let smother_atoms = [host.clone(), smother];
+        let gentle_atoms = [host.clone(), gentle];
+        let idx_s = build_canopy_index(&smother_atoms);
+        let idx_g = build_canopy_index(&gentle_atoms);
+        let sample_y = canopy_top_y(&host);
+        let rt_s = epiphyte_rider_transmit(&smother_atoms, 8, sample_y, 0);
+        let rt_g = epiphyte_rider_transmit(&gentle_atoms, 8, sample_y, 0);
+        let lit_s = effective_photo_light_absorb(
+            &idx_s,
+            8,
+            sample_y,
+            1.0,
+            0,
+            host.photosystem_count(),
+            host.leaf_absorb_effective(),
+            host.body_plan.shade_efficiency,
+            rt_s,
+        );
+        let lit_g = effective_photo_light_absorb(
+            &idx_g,
+            8,
+            sample_y,
+            1.0,
+            0,
+            host.photosystem_count(),
+            host.leaf_absorb_effective(),
+            host.body_plan.shade_efficiency,
+            rt_g,
+        );
+        assert!(
+            lit_s < lit_g,
+            "smotherer should leave less light for host (smother={lit_s} gentle={lit_g})"
         );
     }
 }

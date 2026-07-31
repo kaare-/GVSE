@@ -10,7 +10,13 @@ fn visible_traits(module: ModuleId) -> &'static [&'static str] {
         ModuleId::Bone => &["mass", "density", "stiffness", "upkeep_bias"],
         ModuleId::Muscle => &["mass", "density", "strength", "upkeep_bias"],
         ModuleId::Skin => &["mass", "density", "upkeep_bias", "buoyancy_bias"],
-        ModuleId::Photosystem => &["mass", "absorb_bias", "shade_efficiency", "upkeep_bias"],
+        ModuleId::Photosystem => &[
+            "mass",
+            "absorb_bias",
+            "shade_efficiency",
+            "host_leave_fraction",
+            "upkeep_bias",
+        ],
         ModuleId::Root => &["mass", "drink_bias", "root_depth_bias", "upkeep_bias"],
         ModuleId::Nucleus => &[
             "mass",
@@ -44,6 +50,7 @@ fn trait_get(t: &PixelTraits, name: &str) -> f32 {
         "root_depth_bias" => t.root_depth_bias,
         "shade_efficiency" => t.shade_efficiency,
         "digest_rate" => t.digest_rate,
+        "host_leave_fraction" => t.host_leave_fraction,
         _ => 0.0,
     }
 }
@@ -66,6 +73,7 @@ fn trait_set(t: &mut PixelTraits, name: &str, v: f32) {
         "root_depth_bias" => t.root_depth_bias = v.clamp(0.0, 1.0),
         "shade_efficiency" => t.shade_efficiency = v.clamp(0.0, 1.0),
         "digest_rate" => t.digest_rate = v.clamp(0.05, 2.0),
+        "host_leave_fraction" => t.host_leave_fraction = v.clamp(0.0, 1.0),
         _ => {}
     }
 }
@@ -150,8 +158,11 @@ pub fn draw_gene_panels(
         format!("photo_cap={:.2}", plan.photo_capacity),
         format!("alloc S/L/R={s:.2}/{l:.2}/{r:.2}"),
         format!(
-            "depth={:.2}  shade={:.2}  digest={:.2}",
-            plan.root_depth_bias, plan.shade_efficiency, plan.digest_rate
+            "depth={:.2}  shade={:.2}  digest={:.2}  leave={:.2}",
+            plan.root_depth_bias,
+            plan.shade_efficiency,
+            plan.digest_rate,
+            plan.host_leave_fraction
         ),
         format!(
             "repro_gate={} (nuclei={})",

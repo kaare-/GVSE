@@ -17,9 +17,9 @@ use crate::organism::ModuleId;
 ///
 /// - **1** — modules (+ Wave K `traits`) + vestigial `Genome` field.
 /// - **2** — modules with traits only; plant knobs live on pixels.
-///   Schema-1 files still load via [`Blueprint::from_bytes`] (genome baked
-///   into traits).
-pub const BLUEPRINT_SCHEMA_VERSION: u16 = 2;
+/// - **3** — `PixelTraits.host_leave_fraction` (Wave Y). Schema-1/2 still
+///   load via [`Blueprint::from_bytes`] (defaults fill the new field).
+pub const BLUEPRINT_SCHEMA_VERSION: u16 = 3;
 pub const BLUEPRINT_DIR: &str = "blueprints";
 pub const BLUEPRINT_EXT: &str = "gvsecrt";
 
@@ -90,6 +90,10 @@ pub struct PixelTraits {
     /// Digest / Hypha litter rate (Wave O).
     #[serde(default = "default_digest_rate")]
     pub digest_rate: f32,
+    /// Fraction of light left for modules below (Wave Y epiphyte smother).
+    /// 0 = smotherer; 1 = fully gentle rider.
+    #[serde(default = "default_host_leave_fraction")]
+    pub host_leave_fraction: f32,
 }
 
 impl Default for PixelTraits {
@@ -111,6 +115,7 @@ impl Default for PixelTraits {
             root_depth_bias: default_root_depth_bias(),
             shade_efficiency: default_shade_efficiency(),
             digest_rate: default_digest_rate(),
+            host_leave_fraction: default_host_leave_fraction(),
         }
     }
 }
@@ -271,6 +276,9 @@ pub struct Genome {
     /// Litter digest rate (Set E fungi).
     #[serde(default = "default_digest_rate")]
     pub digest_rate: f32,
+    /// Light left for host / modules below (Wave Y). Epiphyte smother gene.
+    #[serde(default = "default_host_leave_fraction")]
+    pub host_leave_fraction: f32,
 }
 
 fn default_root_depth_bias() -> f32 {
@@ -294,6 +302,9 @@ fn default_shade_efficiency() -> f32 {
 fn default_digest_rate() -> f32 {
     0.8
 }
+fn default_host_leave_fraction() -> f32 {
+    0.0
+}
 
 impl Default for Genome {
     fn default() -> Self {
@@ -309,6 +320,7 @@ impl Default for Genome {
             leaf_absorb: default_leaf_absorb(),
             shade_efficiency: default_shade_efficiency(),
             digest_rate: default_digest_rate(),
+            host_leave_fraction: default_host_leave_fraction(),
         }
     }
 }
@@ -362,6 +374,7 @@ pub fn paint_genome_onto_traits(module: ModuleId, traits: &mut PixelTraits, geno
         ModuleId::Photosystem => {
             traits.shade_efficiency = genome.shade_efficiency.clamp(0.0, 1.0);
             traits.absorb_bias = genome.leaf_absorb.clamp(0.05, 1.0);
+            traits.host_leave_fraction = genome.host_leave_fraction.clamp(0.0, 1.0);
         }
         ModuleId::Digest | ModuleId::Hypha => {
             traits.digest_rate = genome.digest_rate.clamp(0.05, 2.0);
@@ -739,6 +752,7 @@ impl Blueprint {
                 t.root_depth_bias = jitter(t.root_depth_bias, 0.0, 1.0);
                 t.shade_efficiency = jitter(t.shade_efficiency, 0.0, 1.0);
                 t.digest_rate = jitter(t.digest_rate, 0.05, 2.0);
+                t.host_leave_fraction = jitter(t.host_leave_fraction, 0.0, 1.0);
             }
         }
 
@@ -839,9 +853,9 @@ impl Blueprint {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        // Schema 2+: modules with traits, no genome field.
+        // Schema 3+: modules with traits including host_leave_fraction.
         if let Ok(bp) = postcard::from_bytes::<Blueprint>(bytes) {
-            if bp.schema_version >= 2 {
+            if bp.schema_version >= 3 {
                 if bp.schema_version > BLUEPRINT_SCHEMA_VERSION {
                     return Err(format!(
                         "blueprint schema {} newer than supported {}",
@@ -850,25 +864,199 @@ impl Blueprint {
                 }
                 return Ok(bp);
             }
-            // schema_version < 2 under the v2 layout is a mis-parse of an
-            // older blob — fall through to schema-1 / pre-Wave-K loaders.
+            // schema_version < 3 under the v3 layout is a mis-parse — fall through.
+        }
+
+        // Schema 2: PixelTraits without host_leave_fraction (Wave T–X).
+        #[derive(Deserialize)]
+        struct PixelTraitsV2 {
+            mass: f32,
+            density: f32,
+            stiffness: f32,
+            strength: f32,
+            upkeep_bias: f32,
+            absorb_bias: f32,
+            drink_bias: f32,
+            clone_fidelity_bias: f32,
+            reproduce_at_bias: f32,
+            buoyancy_bias: f32,
+            alloc_stem: f32,
+            alloc_leaf: f32,
+            alloc_root: f32,
+            root_depth_bias: f32,
+            shade_efficiency: f32,
+            digest_rate: f32,
+        }
+        #[derive(Deserialize)]
+        struct PlacedModuleV2 {
+            x: i16,
+            y: i16,
+            lane: LaneId,
+            module: ModuleId,
+            traits: PixelTraitsV2,
+        }
+        #[derive(Deserialize)]
+        struct BlueprintV2 {
+            schema_version: u16,
+            canvas_w: u16,
+            canvas_h: u16,
+            modules: Vec<PlacedModuleV2>,
+            name: String,
+            notes: String,
+        }
+        if let Ok(old) = postcard::from_bytes::<BlueprintV2>(bytes) {
+            if old.schema_version == 2 {
+                let modules = old
+                    .modules
+                    .into_iter()
+                    .map(|m| {
+                        let t = m.traits;
+                        PlacedModule {
+                            x: m.x,
+                            y: m.y,
+                            lane: m.lane,
+                            module: m.module,
+                            traits: PixelTraits {
+                                mass: t.mass,
+                                density: t.density,
+                                stiffness: t.stiffness,
+                                strength: t.strength,
+                                upkeep_bias: t.upkeep_bias,
+                                absorb_bias: t.absorb_bias,
+                                drink_bias: t.drink_bias,
+                                clone_fidelity_bias: t.clone_fidelity_bias,
+                                reproduce_at_bias: t.reproduce_at_bias,
+                                buoyancy_bias: t.buoyancy_bias,
+                                alloc_stem: t.alloc_stem,
+                                alloc_leaf: t.alloc_leaf,
+                                alloc_root: t.alloc_root,
+                                root_depth_bias: t.root_depth_bias,
+                                shade_efficiency: t.shade_efficiency,
+                                digest_rate: t.digest_rate,
+                                host_leave_fraction: default_host_leave_fraction(),
+                            },
+                        }
+                    })
+                    .collect();
+                return Ok(Blueprint {
+                    schema_version: BLUEPRINT_SCHEMA_VERSION,
+                    canvas_w: old.canvas_w,
+                    canvas_h: old.canvas_h,
+                    modules,
+                    name: old.name,
+                    notes: old.notes,
+                });
+            }
         }
 
         // Schema 1: modules with traits + vestigial Genome (Wave K–S).
+        // Genome shape predates host_leave_fraction.
+        #[derive(Deserialize)]
+        struct GenomeV1 {
+            metabolic_rate: f32,
+            reproduce_at: f32,
+            clone_fidelity: f32,
+            buoyancy_bias: f32,
+            root_depth_bias: f32,
+            alloc_stem: f32,
+            alloc_leaf: f32,
+            alloc_root: f32,
+            leaf_absorb: f32,
+            shade_efficiency: f32,
+            digest_rate: f32,
+        }
+        impl From<GenomeV1> for Genome {
+            fn from(g: GenomeV1) -> Self {
+                Genome {
+                    metabolic_rate: g.metabolic_rate,
+                    reproduce_at: g.reproduce_at,
+                    clone_fidelity: g.clone_fidelity,
+                    buoyancy_bias: g.buoyancy_bias,
+                    root_depth_bias: g.root_depth_bias,
+                    alloc_stem: g.alloc_stem,
+                    alloc_leaf: g.alloc_leaf,
+                    alloc_root: g.alloc_root,
+                    leaf_absorb: g.leaf_absorb,
+                    shade_efficiency: g.shade_efficiency,
+                    digest_rate: g.digest_rate,
+                    host_leave_fraction: default_host_leave_fraction(),
+                }
+            }
+        }
+        #[derive(Deserialize)]
+        struct PixelTraitsV1 {
+            mass: f32,
+            density: f32,
+            stiffness: f32,
+            strength: f32,
+            upkeep_bias: f32,
+            absorb_bias: f32,
+            drink_bias: f32,
+            clone_fidelity_bias: f32,
+            reproduce_at_bias: f32,
+            buoyancy_bias: f32,
+            alloc_stem: f32,
+            alloc_leaf: f32,
+            alloc_root: f32,
+            root_depth_bias: f32,
+            shade_efficiency: f32,
+            digest_rate: f32,
+        }
+        impl From<PixelTraitsV1> for PixelTraits {
+            fn from(t: PixelTraitsV1) -> Self {
+                PixelTraits {
+                    mass: t.mass,
+                    density: t.density,
+                    stiffness: t.stiffness,
+                    strength: t.strength,
+                    upkeep_bias: t.upkeep_bias,
+                    absorb_bias: t.absorb_bias,
+                    drink_bias: t.drink_bias,
+                    clone_fidelity_bias: t.clone_fidelity_bias,
+                    reproduce_at_bias: t.reproduce_at_bias,
+                    buoyancy_bias: t.buoyancy_bias,
+                    alloc_stem: t.alloc_stem,
+                    alloc_leaf: t.alloc_leaf,
+                    alloc_root: t.alloc_root,
+                    root_depth_bias: t.root_depth_bias,
+                    shade_efficiency: t.shade_efficiency,
+                    digest_rate: t.digest_rate,
+                    host_leave_fraction: default_host_leave_fraction(),
+                }
+            }
+        }
+        #[derive(Deserialize)]
+        struct PlacedModuleV1 {
+            x: i16,
+            y: i16,
+            lane: LaneId,
+            module: ModuleId,
+            traits: PixelTraitsV1,
+        }
         #[derive(Deserialize)]
         struct BlueprintV1 {
             schema_version: u16,
             canvas_w: u16,
             canvas_h: u16,
-            modules: Vec<PlacedModule>,
-            genome: Genome,
+            modules: Vec<PlacedModuleV1>,
+            genome: GenomeV1,
             name: String,
             notes: String,
         }
         if let Ok(old) = postcard::from_bytes::<BlueprintV1>(bytes) {
             if old.schema_version <= 1 {
-                let mut modules = old.modules;
-                paint_genome_onto_modules(&mut modules, old.genome);
+                let mut modules: Vec<PlacedModule> = old
+                    .modules
+                    .into_iter()
+                    .map(|m| PlacedModule {
+                        x: m.x,
+                        y: m.y,
+                        lane: m.lane,
+                        module: m.module,
+                        traits: m.traits.into(),
+                    })
+                    .collect();
+                paint_genome_onto_modules(&mut modules, old.genome.into());
                 return Ok(Blueprint {
                     schema_version: BLUEPRINT_SCHEMA_VERSION,
                     canvas_w: old.canvas_w,
@@ -895,7 +1083,7 @@ impl Blueprint {
             canvas_w: u16,
             canvas_h: u16,
             modules: Vec<LegacyPlaced>,
-            genome: Genome,
+            genome: GenomeV1,
             name: String,
             notes: String,
         }
@@ -917,7 +1105,7 @@ impl Blueprint {
                 traits: PixelTraits::default(),
             })
             .collect();
-        paint_genome_onto_modules(&mut modules, old.genome);
+        paint_genome_onto_modules(&mut modules, old.genome.into());
         Ok(Blueprint {
             schema_version: BLUEPRINT_SCHEMA_VERSION,
             canvas_w: old.canvas_w,
@@ -1083,15 +1271,30 @@ mod tests {
             module: ModuleId,
         }
         #[derive(Serialize)]
+        struct OldGenome {
+            metabolic_rate: f32,
+            reproduce_at: f32,
+            clone_fidelity: f32,
+            buoyancy_bias: f32,
+            root_depth_bias: f32,
+            alloc_stem: f32,
+            alloc_leaf: f32,
+            alloc_root: f32,
+            leaf_absorb: f32,
+            shade_efficiency: f32,
+            digest_rate: f32,
+        }
+        #[derive(Serialize)]
         struct OldBlueprint {
             schema_version: u16,
             canvas_w: u16,
             canvas_h: u16,
             modules: Vec<OldPlaced>,
-            genome: Genome,
+            genome: OldGenome,
             name: String,
             notes: String,
         }
+        let g = Genome::default();
         let old = OldBlueprint {
             schema_version: 1,
             canvas_w: 16,
@@ -1110,7 +1313,19 @@ mod tests {
                     module: ModuleId::Photosystem,
                 },
             ],
-            genome: Genome::default(),
+            genome: OldGenome {
+                metabolic_rate: g.metabolic_rate,
+                reproduce_at: g.reproduce_at,
+                clone_fidelity: g.clone_fidelity,
+                buoyancy_bias: g.buoyancy_bias,
+                root_depth_bias: g.root_depth_bias,
+                alloc_stem: g.alloc_stem,
+                alloc_leaf: g.alloc_leaf,
+                alloc_root: g.alloc_root,
+                leaf_absorb: g.leaf_absorb,
+                shade_efficiency: g.shade_efficiency,
+                digest_rate: g.digest_rate,
+            },
             name: "legacy".into(),
             notes: String::new(),
         };
@@ -1126,34 +1341,223 @@ mod tests {
     #[test]
     fn schema1_with_traits_bakes_genome_and_upgrades() {
         #[derive(Serialize)]
+        struct TraitsV1 {
+            mass: f32,
+            density: f32,
+            stiffness: f32,
+            strength: f32,
+            upkeep_bias: f32,
+            absorb_bias: f32,
+            drink_bias: f32,
+            clone_fidelity_bias: f32,
+            reproduce_at_bias: f32,
+            buoyancy_bias: f32,
+            alloc_stem: f32,
+            alloc_leaf: f32,
+            alloc_root: f32,
+            root_depth_bias: f32,
+            shade_efficiency: f32,
+            digest_rate: f32,
+        }
+        #[derive(Serialize)]
+        struct PlacedV1 {
+            x: i16,
+            y: i16,
+            lane: LaneId,
+            module: ModuleId,
+            traits: TraitsV1,
+        }
+        #[derive(Serialize)]
+        struct GenomeV1 {
+            metabolic_rate: f32,
+            reproduce_at: f32,
+            clone_fidelity: f32,
+            buoyancy_bias: f32,
+            root_depth_bias: f32,
+            alloc_stem: f32,
+            alloc_leaf: f32,
+            alloc_root: f32,
+            leaf_absorb: f32,
+            shade_efficiency: f32,
+            digest_rate: f32,
+        }
+        #[derive(Serialize)]
         struct V1 {
             schema_version: u16,
             canvas_w: u16,
             canvas_h: u16,
-            modules: Vec<PlacedModule>,
-            genome: Genome,
+            modules: Vec<PlacedV1>,
+            genome: GenomeV1,
             name: String,
             notes: String,
         }
-        let mut photo = PlacedModule::new(1, 0, ModuleId::Photosystem);
-        photo.traits.density = 2.0;
+        let d = PixelTraits::default();
         let mut g = Genome::default();
         g.leaf_absorb = 0.8;
         g.alloc_root = 0.9;
+        let from_traits = |t: PixelTraits| TraitsV1 {
+            mass: t.mass,
+            density: t.density,
+            stiffness: t.stiffness,
+            strength: t.strength,
+            upkeep_bias: t.upkeep_bias,
+            absorb_bias: t.absorb_bias,
+            drink_bias: t.drink_bias,
+            clone_fidelity_bias: t.clone_fidelity_bias,
+            reproduce_at_bias: t.reproduce_at_bias,
+            buoyancy_bias: t.buoyancy_bias,
+            alloc_stem: t.alloc_stem,
+            alloc_leaf: t.alloc_leaf,
+            alloc_root: t.alloc_root,
+            root_depth_bias: t.root_depth_bias,
+            shade_efficiency: t.shade_efficiency,
+            digest_rate: t.digest_rate,
+        };
+        let mut photo_t = d;
+        photo_t.density = 2.0;
         let old = V1 {
             schema_version: 1,
             canvas_w: 16,
             canvas_h: 16,
-            modules: vec![PlacedModule::new(0, 0, ModuleId::Nucleus), photo],
-            genome: g,
+            modules: vec![
+                PlacedV1 {
+                    x: 0,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Nucleus,
+                    traits: from_traits(d),
+                },
+                PlacedV1 {
+                    x: 1,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                    traits: from_traits(photo_t),
+                },
+            ],
+            genome: GenomeV1 {
+                metabolic_rate: g.metabolic_rate,
+                reproduce_at: g.reproduce_at,
+                clone_fidelity: g.clone_fidelity,
+                buoyancy_bias: g.buoyancy_bias,
+                root_depth_bias: g.root_depth_bias,
+                alloc_stem: g.alloc_stem,
+                alloc_leaf: g.alloc_leaf,
+                alloc_root: g.alloc_root,
+                leaf_absorb: g.leaf_absorb,
+                shade_efficiency: g.shade_efficiency,
+                digest_rate: g.digest_rate,
+            },
             name: "v1".into(),
             notes: String::new(),
         };
         let loaded = Blueprint::from_bytes(&postcard::to_allocvec(&old).unwrap()).unwrap();
-        assert_eq!(loaded.schema_version, 2);
+        assert_eq!(loaded.schema_version, BLUEPRINT_SCHEMA_VERSION);
         assert!((loaded.modules[1].traits.density - 2.0).abs() < 1e-5);
         assert!((loaded.modules[1].traits.absorb_bias - 0.8).abs() < 1e-5);
         assert!((loaded.modules[0].traits.alloc_root - 0.9).abs() < 1e-5);
+    }
+
+    #[test]
+    fn schema2_upgrades_with_default_host_leave() {
+        #[derive(Serialize)]
+        struct TraitsV2 {
+            mass: f32,
+            density: f32,
+            stiffness: f32,
+            strength: f32,
+            upkeep_bias: f32,
+            absorb_bias: f32,
+            drink_bias: f32,
+            clone_fidelity_bias: f32,
+            reproduce_at_bias: f32,
+            buoyancy_bias: f32,
+            alloc_stem: f32,
+            alloc_leaf: f32,
+            alloc_root: f32,
+            root_depth_bias: f32,
+            shade_efficiency: f32,
+            digest_rate: f32,
+        }
+        #[derive(Serialize)]
+        struct PlacedV2 {
+            x: i16,
+            y: i16,
+            lane: LaneId,
+            module: ModuleId,
+            traits: TraitsV2,
+        }
+        #[derive(Serialize)]
+        struct V2 {
+            schema_version: u16,
+            canvas_w: u16,
+            canvas_h: u16,
+            modules: Vec<PlacedV2>,
+            name: String,
+            notes: String,
+        }
+        let d = PixelTraits::default();
+        let old = V2 {
+            schema_version: 2,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![
+                PlacedV2 {
+                    x: 0,
+                    y: 0,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Nucleus,
+                    traits: TraitsV2 {
+                        mass: d.mass,
+                        density: d.density,
+                        stiffness: d.stiffness,
+                        strength: d.strength,
+                        upkeep_bias: d.upkeep_bias,
+                        absorb_bias: d.absorb_bias,
+                        drink_bias: d.drink_bias,
+                        clone_fidelity_bias: d.clone_fidelity_bias,
+                        reproduce_at_bias: d.reproduce_at_bias,
+                        buoyancy_bias: d.buoyancy_bias,
+                        alloc_stem: d.alloc_stem,
+                        alloc_leaf: d.alloc_leaf,
+                        alloc_root: d.alloc_root,
+                        root_depth_bias: d.root_depth_bias,
+                        shade_efficiency: d.shade_efficiency,
+                        digest_rate: d.digest_rate,
+                    },
+                },
+                PlacedV2 {
+                    x: 0,
+                    y: 1,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                    traits: TraitsV2 {
+                        mass: d.mass,
+                        density: d.density,
+                        stiffness: d.stiffness,
+                        strength: d.strength,
+                        upkeep_bias: d.upkeep_bias,
+                        absorb_bias: 0.7,
+                        drink_bias: d.drink_bias,
+                        clone_fidelity_bias: d.clone_fidelity_bias,
+                        reproduce_at_bias: d.reproduce_at_bias,
+                        buoyancy_bias: d.buoyancy_bias,
+                        alloc_stem: d.alloc_stem,
+                        alloc_leaf: d.alloc_leaf,
+                        alloc_root: d.alloc_root,
+                        root_depth_bias: d.root_depth_bias,
+                        shade_efficiency: d.shade_efficiency,
+                        digest_rate: d.digest_rate,
+                    },
+                },
+            ],
+            name: "v2".into(),
+            notes: String::new(),
+        };
+        let loaded = Blueprint::from_bytes(&postcard::to_allocvec(&old).unwrap()).unwrap();
+        assert_eq!(loaded.schema_version, BLUEPRINT_SCHEMA_VERSION);
+        assert!((loaded.modules[1].traits.absorb_bias - 0.7).abs() < 1e-5);
+        assert!((loaded.modules[1].traits.host_leave_fraction - 0.0).abs() < 1e-5);
     }
 
     #[test]
