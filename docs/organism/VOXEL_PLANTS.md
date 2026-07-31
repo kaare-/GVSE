@@ -148,7 +148,12 @@ Features:
 - Root elongate: preferential cells use `GHOST_ROOT_PENETRATE` + `ROOT_GHOST_AFFINITY`
 - `SIM_SCHEMA_VERSION` **8**; scenario `e44_ghost_roots`
 
-**Deferred (Wave AD+):** fallen-log animation, long-soak E43 lineages.
+**Wave AD — Litter bloom + gentle long soak *(landed)*:**
+- `try_seed_litter_bloom` when `soft_litter ≥ LITTER_BLOOM_THRESHOLD` (E39 auto-seed)
+- Scenario `e39_litter_bloom` (seed → drawdown → crash after starve)
+- Scenario `e43b_gentle_wins_long_soak` (gentle epi lineages outlast smotherers)
+
+**Deferred (Wave AE+):** fallen-log animation (Bezier explicitly out of Core).
 
 ## Explicitly out of Core for voxel
 
