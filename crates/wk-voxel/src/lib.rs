@@ -68,10 +68,10 @@ pub use failure::{
     COMPACTION_SIGMA_MIN,
 };
 pub use fungi::{
-    add_soft_litter, collect_fungus_tissue_world_cells, deposit_organic_on_surface,
-    digest_labile, dissolve_corpse_to_organic, fill_ghost_root_voids, hypha_count, is_fungus,
-    soft_litter_at,
-    try_grow_hypha_into_dead_stem, HYPHA_GROW_COST, HYPHA_GROW_PERIOD, MAX_HYPHA_MODULES,
+    add_soft_litter, collect_fungus_tissue_world_cells, deposit_organic_on_surface, digest_labile,
+    dissolve_corpse_to_organic, fill_ghost_root_voids, fungus_near, hypha_count, is_fungus,
+    soft_litter_at, try_grow_hypha_into_dead_stem, try_seed_litter_bloom, HYPHA_GROW_COST,
+    HYPHA_GROW_PERIOD, LITTER_BLOOM_THRESHOLD, MAX_HYPHA_MODULES,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,

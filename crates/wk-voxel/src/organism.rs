@@ -26,9 +26,9 @@ use crate::blueprint::{
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
     add_soft_litter, collect_fungus_tissue_world_cells, digest_budget_units, digest_labile,
-    fill_ghost_root_voids,
-    dissolve_corpse_to_organic, fungus_should_hibernate, fungus_upkeep, is_fungus,
-    is_fungus_seated, try_grow_hypha_into_dead_stem, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
+    dissolve_corpse_to_organic, fill_ghost_root_voids, fungus_should_hibernate, fungus_upkeep,
+    is_fungus, is_fungus_seated, try_grow_hypha_into_dead_stem, try_seed_litter_bloom, try_spore,
+    FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -1379,13 +1379,14 @@ impl OrganismStore {
         climate: &ClimateConfig,
         humidity: Option<&mut Humidity>,
     ) {
-        if self.atoms.is_empty() && self.corpses.is_empty() {
-            // Wave AC: still collapse preferential voids even with no life.
-            let _ = fill_ghost_root_voids(world);
-            return;
-        }
         // Wave AC: Void → Loose fill on PreferentialRootPath cavities.
         let _ = fill_ghost_root_voids(world);
+        if self.atoms.is_empty() && self.corpses.is_empty() {
+            // Wave AD: litter can still invite a first fungus with no life yet.
+            let bloom = try_seed_litter_bloom(world, &[], tick, self.atom_cap());
+            self.atoms.extend(bloom);
+            return;
+        }
         let day = day_factor_cfg(tick, climate);
         let phase = phase_fraction_cfg(tick, climate);
         // Build canopy once / tick so taller neighbours shade short plants.
@@ -1583,6 +1584,13 @@ impl OrganismStore {
         self.atoms.extend(births);
         resolve_contacts(world, &mut self.atoms);
         self.step_corpses(world);
+
+        // Wave AD / E39: soft litter past threshold invites spontaneous fungi.
+        let bloom_room = self.atom_cap().saturating_sub(self.atoms.len());
+        let bloom = try_seed_litter_bloom(world, &self.atoms, tick, bloom_room);
+        if !bloom.is_empty() {
+            self.atoms.extend(bloom);
+        }
 
         // Return drunk pore sat to atmospheric humidity (mass conservation).
         if let Some(hum) = humidity {
@@ -1854,7 +1862,14 @@ fn step_land_plant(
         DroughtBand::Stressed => DROUGHT_STRESS_DRAIN,
         DroughtBand::Hydrated | DroughtBand::Dormant => 0.0,
     };
-    atom.energy = (atom.energy + harvest + drink_e - upkeep - stress).clamp(0.0, atom.energy_max);
+    // Wave AD: smothering riders (low host_leave) stress the landlord.
+    let smother = if rider_transmit < SMOTHER_STRESS_TRANSMIT {
+        SMOTHER_STRESS_DRAIN * (SMOTHER_STRESS_TRANSMIT - rider_transmit)
+    } else {
+        0.0
+    };
+    atom.energy =
+        (atom.energy + harvest + drink_e - upkeep - stress - smother).clamp(0.0, atom.energy_max);
     if atom.energy <= 0.0 {
         return PlantStep::Dead;
     }
@@ -1899,6 +1914,13 @@ fn step_land_plant(
 
 /// Max ticks an epiphyte may float unseated / dry before dying (Wave U/Z).
 const EPIPHYTE_UNSEATED_MAX: u32 = 8;
+/// Extra host drain when same-column riders leave little light (Wave AD / E43).
+/// Pure photo attenuation alone cannot shade-kill a drinking landlord on wet
+/// sand; this stress is the fitness pressure that makes smotherers collapse
+/// with their hosts while gentle riders do not.
+const SMOTHER_STRESS_DRAIN: f32 = 0.13;
+/// Rider transmit below this invites [`SMOTHER_STRESS_DRAIN`].
+const SMOTHER_STRESS_TRANSMIT: f32 = 0.72;
 
 /// Epiphyte tick: Holdfast on host Stem; photo + stem-wetness drink (Wave Z).
 /// Wave AB: high `attach_prefer` re-seeks a nearby host Stem when unseated.

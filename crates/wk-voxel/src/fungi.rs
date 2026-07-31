@@ -15,6 +15,14 @@ use crate::grid::World;
 use crate::organism::{Atom, ModuleId};
 use crate::plant::{find_fungus_slot, pin_plant_pose};
 
+/// Soft litter units that invite a spontaneous fungus seed (Wave AD / E39).
+pub const LITTER_BLOOM_THRESHOLD: u16 = 28;
+/// Attempt litter-bloom seeding every N ticks.
+pub const LITTER_BLOOM_PERIOD: u64 = 12;
+/// Max spontaneous fungus seeds per bloom pass.
+pub const LITTER_BLOOM_MAX_SEEDS: usize = 3;
+/// Columns to scan for an existing fungus before seeding.
+pub const LITTER_BLOOM_CLEAR_RADIUS: i32 = 2;
 /// Soft litter units treated as fully labile food (per column).
 /// Stratigraphic Organic cells contribute this many labile units each.
 pub const LABILE_ORGANIC_UNITS: f32 = 5.0;
@@ -432,6 +440,86 @@ pub fn pick_spore_site(world: &World, atom: &Atom, tick: u64, id: u32) -> Option
     None
 }
 
+/// True when a living fungus already occupies columns near `gx`.
+pub fn fungus_near(atoms: &[Atom], world: &World, gx: i32, radius: i32) -> bool {
+    let gx = world.wrap_x(gx);
+    atoms.iter().any(|a| {
+        if !is_fungus(a) {
+            return false;
+        }
+        let dx = {
+            let raw = (a.gx - gx).abs();
+            match world.wrap_width {
+                Some(w) if w > 0 => raw.min(w - raw),
+                _ => raw,
+            }
+        };
+        dx <= radius
+    })
+}
+
+/// Spontaneous fungus seed when soft litter crosses [`LITTER_BLOOM_THRESHOLD`].
+///
+/// E39 spirit: plant die-off litter invites cream hyphae without a manual
+/// brush. Picks the richest unoccupied litter column; returns at most
+/// [`LITTER_BLOOM_MAX_SEEDS`] new fungi for the caller to append.
+pub fn try_seed_litter_bloom(
+    world: &World,
+    atoms: &[Atom],
+    tick: u64,
+    pop_room: usize,
+) -> Vec<Atom> {
+    if pop_room == 0 || world.soft_litter.is_empty() {
+        return Vec::new();
+    }
+    if tick % LITTER_BLOOM_PERIOD.max(1) != 0 {
+        return Vec::new();
+    }
+
+    let mut candidates: Vec<(u16, i32)> = world
+        .soft_litter
+        .iter()
+        .filter(|(_, &u)| u >= LITTER_BLOOM_THRESHOLD)
+        .map(|(&gx, &u)| (u, world.wrap_x(gx)))
+        .filter(|(_, gx)| !fungus_near(atoms, world, *gx, LITTER_BLOOM_CLEAR_RADIUS))
+        .collect();
+    if candidates.is_empty() {
+        return Vec::new();
+    }
+    // Richest first; ties broken by column for determinism.
+    candidates.sort_by(|a, b| b.0.cmp(&a.0).then_with(|| a.1.cmp(&b.1)));
+
+    let chassis = crate::blueprint::Blueprint::minimal_fungus();
+    let (body, traits) = chassis.modules_relative_with_traits();
+    let mut out = Vec::new();
+    for &(_units, gx) in candidates.iter().take(LITTER_BLOOM_MAX_SEEDS.min(pop_room)) {
+        // Deterministic seat search around mid-soil / surface.
+        let hint_y = 4;
+        let Some(gy) = find_fungus_slot(world, gx, hint_y)
+            .or_else(|| find_fungus_slot(world, gx, hint_y + 2))
+            .or_else(|| find_fungus_slot(world, gx, hint_y - 2))
+        else {
+            continue;
+        };
+        if fungus_near(atoms, world, gx, LITTER_BLOOM_CLEAR_RADIUS)
+            || fungus_near(&out, world, gx, LITTER_BLOOM_CLEAR_RADIUS)
+        {
+            continue;
+        }
+        let mut atom = Atom::from_body_with_traits(gx, gy, 36.0, body.clone(), traits.clone());
+        atom.energy = 28.0;
+        // Stagger spore cooldown so a bloom doesn't immediately re-spore.
+        atom.cooldown = FUNGUS_SPORE_PERIOD
+            + (hash_u64(world.seed.0, tick, gx as u64, 0xB100) % 17) as u64;
+        pin_plant_pose(&mut atom);
+        if !is_fungus_seated(world, &atom) {
+            continue;
+        }
+        out.push(atom);
+    }
+    out
+}
+
 /// Spore fission: child fungus on a neighbour litter column.
 pub fn try_spore(
     world: &World,
@@ -777,5 +865,26 @@ mod tests {
             "Hypha should land at (0,1) relative"
         );
         assert!(atom.energy < 20.0, "growth costs energy");
+    }
+
+    #[test]
+    fn litter_bloom_seeds_fungus_above_threshold() {
+        let mut w = litter_plot();
+        add_soft_litter(&mut w, 4, LITTER_BLOOM_THRESHOLD);
+        add_soft_litter(&mut w, 8, LITTER_BLOOM_THRESHOLD + 10);
+        let seeds = try_seed_litter_bloom(&w, &[], LITTER_BLOOM_PERIOD, 4);
+        assert!(
+            !seeds.is_empty(),
+            "litter past threshold should invite a fungus"
+        );
+        assert!(seeds.iter().all(is_fungus));
+        // Occupied column refuses a second seed in the clear radius.
+        let again = try_seed_litter_bloom(&w, &seeds, LITTER_BLOOM_PERIOD * 2, 4);
+        for s in &again {
+            assert!(
+                !fungus_near(&seeds, &w, s.gx, LITTER_BLOOM_CLEAR_RADIUS),
+                "bloom must not stack on an existing fungus seat"
+            );
+        }
     }
 }
