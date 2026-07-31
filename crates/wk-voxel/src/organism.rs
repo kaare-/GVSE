@@ -368,6 +368,7 @@ impl Atom {
         g.root_depth_bias = self.body_plan.root_depth_bias;
         g.shade_efficiency = self.body_plan.shade_efficiency;
         g.digest_rate = self.body_plan.digest_rate;
+        g.host_leave_fraction = self.body_plan.host_leave_fraction;
         g
     }
 
@@ -1295,6 +1296,24 @@ impl OrganismStore {
         let host_stems = collect_live_stem_world_cells(world, &self.atoms);
         // Wave X: epiphyte body weight seated on host Stem cells.
         let epi_load = collect_epiphyte_load_on_stems(world, &self.atoms);
+        // Wave Y: same-column epiphyte light steal (precomputed — mut loop).
+        let rider_transmit: Vec<f32> = self
+            .atoms
+            .iter()
+            .enumerate()
+            .map(|(i, atom)| {
+                if is_land_plant(atom) || is_epiphyte(atom) {
+                    crate::shade::epiphyte_rider_transmit(
+                        &self.atoms,
+                        atom.gx,
+                        canopy_top_y(atom),
+                        i as u32,
+                    )
+                } else {
+                    1.0
+                }
+            })
+            .collect();
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let mut live_fallen: std::collections::HashSet<(i32, i32)> =
@@ -1329,6 +1348,7 @@ impl OrganismStore {
 
             if is_land_plant(atom) {
                 let room = pop + births.len() < atom_cap;
+                let rider_t = rider_transmit.get(i).copied().unwrap_or(1.0);
                 match step_land_plant(
                     world,
                     atom,
@@ -1339,6 +1359,7 @@ impl OrganismStore {
                     &live_roots,
                     &epi_load,
                     &mut live_fallen,
+                    rider_t,
                     i as u32,
                     room,
                     &growth_caps,
@@ -1365,7 +1386,9 @@ impl OrganismStore {
             }
 
             if is_epiphyte(atom) {
-                match step_epiphyte(world, atom, day, &canopy, &host_stems, i as u32) {
+                let rider_t = rider_transmit.get(i).copied().unwrap_or(1.0);
+                match step_epiphyte(world, atom, day, &canopy, &host_stems, rider_t, i as u32)
+                {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
                     PlantStep::Sprout(_) => {}
@@ -1641,6 +1664,7 @@ fn step_land_plant(
     live_roots: &std::collections::HashSet<(i32, i32)>,
     epi_load: &std::collections::HashMap<(i32, i32), u32>,
     live_fallen: &mut std::collections::HashSet<(i32, i32)>,
+    rider_transmit: f32,
     entity_id: u32,
     pop_room: bool,
     growth_caps: &PlantGrowthCaps,
@@ -1701,6 +1725,7 @@ fn step_land_plant(
         n_photo,
         atom.leaf_absorb_effective(),
         atom.body_plan.shade_efficiency,
+        rider_transmit,
     );
     let photo_scale = match drought {
         DroughtBand::Hydrated => 1.25, // mild bonus so moist sand recovers
@@ -1766,6 +1791,7 @@ fn step_epiphyte(
     day: f32,
     canopy: &CanopyIndex,
     host_stems: &std::collections::HashSet<(i32, i32)>,
+    rider_transmit: f32,
     entity_id: u32,
 ) -> PlantStep {
     pin_plant_pose(atom);
@@ -1793,6 +1819,7 @@ fn step_epiphyte(
         n_photo,
         atom.leaf_absorb_effective(),
         atom.body_plan.shade_efficiency,
+        rider_transmit,
     );
     let photo_cap = atom.body_plan.photo_capacity.max(1.0);
     let harvest = PHOTON_RATE * light * photo_cap;

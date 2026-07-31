@@ -22,6 +22,7 @@ pub struct PlantGeneSettings {
     pub leaf_absorb: f32,
     pub shade_efficiency: f32,
     pub digest_rate: f32,
+    pub host_leave_fraction: f32,
     pub clone_fidelity: f32,
 }
 
@@ -36,6 +37,7 @@ impl Default for PlantGeneSettings {
             leaf_absorb: g.leaf_absorb,
             shade_efficiency: g.shade_efficiency,
             digest_rate: g.digest_rate,
+            host_leave_fraction: g.host_leave_fraction,
             clone_fidelity: g.clone_fidelity,
         }
     }
@@ -51,6 +53,7 @@ impl PlantGeneSettings {
             leaf_absorb: self.leaf_absorb.clamp(0.05, 1.0),
             shade_efficiency: self.shade_efficiency.clamp(0.0, 1.0),
             digest_rate: self.digest_rate.clamp(0.05, 2.0),
+            host_leave_fraction: self.host_leave_fraction.clamp(0.0, 1.0),
             clone_fidelity: self.clone_fidelity.clamp(0.05, 1.0),
             ..Genome::default()
         }
@@ -1008,6 +1011,13 @@ impl SimSettings {
                         "Digest rate (fungi)",
                         0.05..2.0,
                         &mut self.plant_genes.digest_rate,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Host leave (epiphyte light)",
+                        0.0..1.0,
+                        &mut self.plant_genes.host_leave_fraction,
                     );
                     labeled_slider(
                         ui,

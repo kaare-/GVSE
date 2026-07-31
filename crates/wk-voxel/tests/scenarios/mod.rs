@@ -17,4 +17,5 @@ mod e40_epiphyte_seat;
 mod e42_standing_dead_stem_topples;
 mod e42b_fungal_rot_accelerates_topple;
 mod e45_live_stem_load_topple;
+mod e43_host_leave_smother;
 mod helpers;

@@ -89,7 +89,8 @@ Features:
 
 | Gene | Role |
 |------|------|
-| `attach_prefer` / `host_leave_fraction` | Epiphytes *(deferred)* |
+| `host_leave_fraction` | Epiphyte light left for host *(Wave Y)* |
+| `attach_prefer` | Epiphyte seating bias *(deferred)* |
 
 **Wave U — Holdfast seating *(landed)*:**
 - `ModuleId::Holdfast` (`0x0F`, `#FF3D9A`) appended after Bone (postcard-safe)
@@ -116,9 +117,14 @@ Features:
 - Live topple via `topple_stem_at` (keeps `body_traits`); unseats riders
 - Scenario `e45_live_stem_load_topple` (self-load holds vs epiphyte overload)
 
-**Deferred (Wave Y+):** hypha morphogenesis into olive, smother shade-kill
-chain / `HostLeaveFraction`, `stem_wetness` drink, attach genes, ghost
-roots, fallen-log animation.
+**Wave Y — HostLeaveFraction smother *(landed)*:**
+- Photosystem `host_leave_fraction` (Tab / `BodyPlan`); default `0` = smotherer
+- Same-column epiphytes above the host attenuate host light by `(1 − leave) × cast`
+- `.gvsecrt` schema **3**; `SIM_SCHEMA_VERSION` **5** (schema-2 blueprints dual-load)
+- Scenario `e43_host_leave_smother` (gentle host energy > smotherer)
+
+**Deferred (Wave Z+):** hypha morphogenesis into olive, `stem_wetness` drink,
+`attach_prefer`, ghost roots, fallen-log animation, long-soak E43 lineages.
 
 ## Explicitly out of Core for voxel
 

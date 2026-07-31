@@ -35,7 +35,8 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// plant knobs live on `body_traits` / `body_plan`. Demo `.gvsesim` from
 /// v2 are not loadable (no organism shim).
 /// v4: `Atom` / `Corpse` carry `body_integrity` (Wave V stem topple).
-pub const SIM_SCHEMA_VERSION: u32 = 4;
+/// v5: `PixelTraits` / `BodyPlan` gain `host_leave_fraction` (Wave Y).
+pub const SIM_SCHEMA_VERSION: u32 = 5;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
