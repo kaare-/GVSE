@@ -30,7 +30,7 @@ those passes unless they are closed-loop.
 Each `tick`:
 
 1. **Flow substeps** (×12): `plan_active` → clear dirty → **gravity fall** → **`apply_water_flow`**
-2. Once: `plan_active` → **`apply_seepage`** → grain fall → **grain repose** → **`apply_roof_collapse`** (geotech F1; Tab → Geotech)
+2. Once: `plan_active` → **`apply_seepage`** → **grain fall (full loaded chunks)** → **grain repose** → **`apply_roof_collapse`** (geotech F1; Tab → Geotech)
 3. Opt-in (demo): **`apply_flow_erosion`** — cascade/head-drop water scours erodible beds/banks and deposits downhill
 
 Dirty rectangles + a 1-cell halo drive the active set. Writes rebuild
@@ -81,7 +81,7 @@ This is what wets a dry beach **sideways** from a puddle, equalises pore sat bet
 
 ### Grain fall + repose
 
-- **Fall:** Sand / Gravel / Clay / LooseRock sink through Air (any sat). **Snow, Ice, and Organic** fall through *empty* Air only (float on water) so unsupported pack / leaf litter does not hang mid-air.
+- **Fall:** Sand / Gravel / Clay / LooseRock sink through Air (any sat). **Snow, Ice, and Organic** fall through *empty* Air only (float on water) so unsupported pack / leaf litter does not hang mid-air. Grain fall scans **all loaded chunks** each tick (not the water dirty halo) so overhangs left by dig/erosion cannot hang until bedload peels them line-by-line.
 - **Repose** (`apply_grain_repose`): supported grains slide diagonally into Air when the drop exceeds `floor(repose_rise_m / SAMPLE_WIDTH_m)`. Sand≈0 (no 1-cell cliffs), Organic litter≈0 (sprawls instead of towers), LooseRock≥1 (short stairs). Wet grains loosen one step. Snow avalanches on land, not into standing water. Underwater, dense grains collapsing into empty/film seats fill the vacated cell with standing water (no sky-flash bubble on the slope face).
 - Ice is not a repose grain and not flow-erodible; hillside glaze can still peel in the cold-avalanche pass.
 
