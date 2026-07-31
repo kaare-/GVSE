@@ -87,6 +87,17 @@ pub const DEAD_DECAY_PER_TICK: f32 = 0.002;
 /// Extra Stem integrity drain when Digest/Hypha occupies the Stem cell
 /// (Wave W fungal rot — ~50 ticks to fail from full when alone).
 pub const FUNGAL_DECAY_PER_TICK: f32 = 0.02;
+/// Living Stem integrity drain per tick per *excess* weight unit (Wave X).
+/// Weight = own Stem/Photosystem modules higher in the column + epiphyte
+/// body modules whose Holdfast seats on this stem or above.
+pub const STEM_LOAD_DRAIN_PER_ABOVE: f32 = 0.012;
+/// Self-supporting trunk budget — weight at/below this does not drain
+/// (PLANTS.md “excess load”).
+pub const STEM_FREE_LOAD: u32 = 6;
+/// Max integrity recharged toward 1.0 per living Stem per tick (Wave X).
+pub const STEM_RECHARGE_PER_TICK: f32 = 0.04;
+/// Energy spent per integrity point recharged on living Stems (Wave X).
+pub const STEM_RECHARGE_ENERGY_PER_UNIT: f32 = 0.15;
 /// Plankton corpses linger longer so bloom deaths leave a visible carpet.
 pub const CORPSE_SETTLE_WATER_TICKS: u32 = 2_400;
 
@@ -607,17 +618,19 @@ pub fn stem_integrity_failing_index(body: &[BodyModule], integrity: &[f32]) -> O
     best.map(|(_, i)| i)
 }
 
-/// Topple a standing-dead trunk at the failing Stem (Wave V).
+/// Topple a trunk at the failing Stem (Wave V; live path Wave X).
 ///
 /// Removes the fail Stem and every module with `dy >= fail_dy`, deposits
 /// Organic on the ground in a deterministic L/R band, and returns the
-/// world cells that lost a Stem (for epiphyte unseat).
+/// world cells that lost a Stem (for epiphyte unseat). When `traits` is
+/// `Some`, keeps the matching per-module traits (living Atoms).
 pub fn topple_stem_at(
     world: &mut World,
     gx: i32,
     gy: i32,
     body: &mut Vec<BodyModule>,
     integrity: &mut Vec<f32>,
+    traits: Option<&mut Vec<PixelTraits>>,
     tick: u64,
     salt: u32,
 ) -> Vec<(i32, i32)> {
@@ -638,11 +651,19 @@ pub fn topple_stem_at(
     let mut fallen_stems = Vec::new();
     let mut keep_body = Vec::with_capacity(body.len());
     let mut keep_integ = Vec::with_capacity(body.len());
+    let mut keep_traits = traits.as_ref().map(|_| Vec::with_capacity(body.len()));
     let mut band_i = 0i32;
     for (i, &(dx, dy, mid)) in body.iter().enumerate() {
         if dy < fail_dy {
             keep_body.push((dx, dy, mid));
             keep_integ.push(integrity.get(i).copied().unwrap_or(1.0));
+            if let Some(kt) = keep_traits.as_mut() {
+                let t = traits
+                    .as_ref()
+                    .and_then(|tr| tr.get(i).copied())
+                    .unwrap_or_else(PixelTraits::default);
+                kt.push(t);
+            }
             continue;
         }
         if mid == ModuleId::Stem {
@@ -662,7 +683,123 @@ pub fn topple_stem_at(
     }
     *body = keep_body;
     *integrity = keep_integ;
+    if let (Some(tr), Some(kt)) = (traits, keep_traits) {
+        *tr = kt;
+    }
     fallen_stems
+}
+
+/// Epiphyte body-module weight keyed by Holdfast world cell (Wave X).
+pub fn collect_epiphyte_load_on_stems(
+    world: &World,
+    atoms: &[Atom],
+) -> std::collections::HashMap<(i32, i32), u32> {
+    use std::collections::HashMap;
+    let mut out: HashMap<(i32, i32), u32> = HashMap::new();
+    for atom in atoms {
+        if !is_epiphyte(atom) {
+            continue;
+        }
+        let n = atom.body.len() as u32;
+        if n == 0 {
+            continue;
+        }
+        for &(dx, dy, mid) in &atom.body {
+            if mid != ModuleId::Holdfast {
+                continue;
+            }
+            let wx = world.wrap_x(atom.gx + dx as i32);
+            let wy = atom.gy + dy as i32;
+            *out.entry((wx, wy)).or_insert(0) += n;
+        }
+    }
+    out
+}
+
+/// Stem/Photosystem modules above `wy` plus epiphyte load on this stem or higher.
+pub fn stem_weight_above(
+    atom: &Atom,
+    stem_wx: i32,
+    stem_wy: i32,
+    epi_load: &std::collections::HashMap<(i32, i32), u32>,
+    wrap_x: impl Fn(i32) -> i32,
+) -> u32 {
+    let mut weight = 0u32;
+    for &(_dx, dy, mid) in &atom.body {
+        if !matches!(mid, ModuleId::Stem | ModuleId::Photosystem) {
+            continue;
+        }
+        let oy = atom.gy + dy as i32;
+        if oy > stem_wy {
+            weight = weight.saturating_add(1);
+        }
+    }
+    for &(dx, dy, mid) in &atom.body {
+        if mid != ModuleId::Stem {
+            continue;
+        }
+        let wx = wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        if wy < stem_wy {
+            continue;
+        }
+        // Same column preferred; allow dx≠0 stems to carry their own riders.
+        if wy == stem_wy && wx != stem_wx {
+            continue;
+        }
+        if let Some(&n) = epi_load.get(&(wx, wy)) {
+            weight = weight.saturating_add(n);
+        }
+    }
+    weight
+}
+
+/// Wave X: drain living Stem integrity by load above; recharge from energy.
+pub fn apply_living_stem_integrity(
+    atom: &mut Atom,
+    epi_load: &std::collections::HashMap<(i32, i32), u32>,
+    wrap_x: impl Fn(i32) -> i32,
+) {
+    atom.align_body_integrity();
+    for (i, &(dx, dy, m)) in atom.body.iter().enumerate() {
+        if m != ModuleId::Stem {
+            continue;
+        }
+        let wx = wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        let weight = stem_weight_above(atom, wx, wy, epi_load, &wrap_x);
+        let excess = weight.saturating_sub(STEM_FREE_LOAD);
+        if excess == 0 {
+            continue;
+        }
+        let drain = STEM_LOAD_DRAIN_PER_ABOVE * excess as f32;
+        atom.body_integrity[i] = (atom.body_integrity[i] - drain).max(0.0);
+    }
+    for (i, &(_, _, m)) in atom.body.iter().enumerate() {
+        if m != ModuleId::Stem {
+            continue;
+        }
+        let cur = atom.body_integrity[i];
+        // A stem that already failed this tick cannot heal before topple.
+        if cur <= INTEGRITY_TOPPLE_THRESHOLD {
+            continue;
+        }
+        if cur >= 1.0 - 1e-5 {
+            atom.body_integrity[i] = 1.0;
+            continue;
+        }
+        let want = (1.0 - cur).min(STEM_RECHARGE_PER_TICK);
+        if want <= 0.0 || STEM_RECHARGE_ENERGY_PER_UNIT <= 0.0 {
+            continue;
+        }
+        let afford = atom.energy / STEM_RECHARGE_ENERGY_PER_UNIT;
+        let got = want.min(afford).max(0.0);
+        if got <= 0.0 {
+            continue;
+        }
+        atom.energy = (atom.energy - got * STEM_RECHARGE_ENERGY_PER_UNIT).max(0.0);
+        atom.body_integrity[i] = (cur + got).min(1.0);
+    }
 }
 
 fn topple_side_hash(gx: i32, gy: i32, tick: u64, salt: u32) -> u64 {
@@ -1156,8 +1293,12 @@ impl OrganismStore {
         let live_roots = collect_live_root_world_cells(&self.atoms);
         // Host Stem cells for epiphyte Holdfast attach (Wave U).
         let host_stems = collect_live_stem_world_cells(world, &self.atoms);
+        // Wave X: epiphyte body weight seated on host Stem cells.
+        let epi_load = collect_epiphyte_load_on_stems(world, &self.atoms);
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
+        let mut live_fallen: std::collections::HashSet<(i32, i32)> =
+            std::collections::HashSet::new();
         let pop = self.atoms.len();
         let atom_cap = self.atom_cap();
         let growth_caps = self.growth_caps.clamp();
@@ -1196,6 +1337,8 @@ impl OrganismStore {
                     &canopy,
                     &trunks,
                     &live_roots,
+                    &epi_load,
+                    &mut live_fallen,
                     i as u32,
                     room,
                     &growth_caps,
@@ -1281,6 +1424,9 @@ impl OrganismStore {
             }
         }
 
+        // Wave X: live topple unseats riders before death bookkeeping.
+        unseat_epiphytes_on_fallen(world, &mut self.atoms, &live_fallen);
+
         deaths.sort_unstable();
         deaths.dedup();
         for &i in deaths.iter().rev() {
@@ -1341,6 +1487,7 @@ impl OrganismStore {
                     corpse.gy,
                     &mut corpse.body,
                     &mut corpse.body_integrity,
+                    None,
                     tick,
                     i as u32,
                 );
@@ -1381,25 +1528,8 @@ impl OrganismStore {
             }
         }
 
-        // Wave V: riders on fallen Stem cells lose their seat immediately.
-        if !fallen_stems.is_empty() {
-            for atom in &mut self.atoms {
-                if !is_epiphyte(atom) {
-                    continue;
-                }
-                let unseated = atom.body.iter().any(|&(dx, dy, mid)| {
-                    if mid != ModuleId::Holdfast {
-                        return false;
-                    }
-                    let wx = world.wrap_x(atom.gx + dx as i32);
-                    let wy = atom.gy + dy as i32;
-                    fallen_stems.contains(&(wx, wy))
-                });
-                if unseated {
-                    atom.drought_ticks = EPIPHYTE_UNSEATED_MAX;
-                }
-            }
-        }
+        // Wave V/X: riders on fallen Stem cells lose their seat immediately.
+        unseat_epiphytes_on_fallen(world, &mut self.atoms, &fallen_stems);
 
         dissolve.sort_unstable();
         dissolve.dedup();
@@ -1472,8 +1602,35 @@ enum PlantStep {
     Sprout(Atom),
 }
 
+fn unseat_epiphytes_on_fallen(
+    world: &World,
+    atoms: &mut [Atom],
+    fallen_stems: &std::collections::HashSet<(i32, i32)>,
+) {
+    if fallen_stems.is_empty() {
+        return;
+    }
+    for atom in atoms {
+        if !is_epiphyte(atom) {
+            continue;
+        }
+        let unseated = atom.body.iter().any(|&(dx, dy, mid)| {
+            if mid != ModuleId::Holdfast {
+                return false;
+            }
+            let wx = world.wrap_x(atom.gx + dx as i32);
+            let wy = atom.gy + dy as i32;
+            fallen_stems.contains(&(wx, wy))
+        });
+        if unseated {
+            atom.drought_ticks = EPIPHYTE_UNSEATED_MAX;
+        }
+    }
+}
+
 /// Land plant tick: drink, shade photo, grow, maybe vegetative sprout.
 /// D4: root starch tank + drought bands (stress / hibernate).
+/// Wave X: living Stem load drain / recharge; live topple when integrity fails.
 fn step_land_plant(
     world: &mut World,
     atom: &mut Atom,
@@ -1482,6 +1639,8 @@ fn step_land_plant(
     canopy: &CanopyIndex,
     trunks: &std::collections::HashSet<(i32, i32)>,
     live_roots: &std::collections::HashSet<(i32, i32)>,
+    epi_load: &std::collections::HashMap<(i32, i32), u32>,
+    live_fallen: &mut std::collections::HashSet<(i32, i32)>,
     entity_id: u32,
     pop_room: bool,
     growth_caps: &PlantGrowthCaps,
@@ -1557,6 +1716,33 @@ fn step_land_plant(
     atom.energy = (atom.energy + harvest + drink_e - upkeep - stress).clamp(0.0, atom.energy_max);
     if atom.energy <= 0.0 {
         return PlantStep::Dead;
+    }
+    // Wave X: structural load vs maintenance recharge (before growth spend).
+    apply_living_stem_integrity(atom, epi_load, |x| world.wrap_x(x));
+    if stem_integrity_failing_index(&atom.body, &atom.body_integrity).is_some() {
+        let fallen = topple_stem_at(
+            world,
+            atom.gx,
+            atom.gy,
+            &mut atom.body,
+            &mut atom.body_integrity,
+            Some(&mut atom.body_traits),
+            tick,
+            entity_id,
+        );
+        for c in fallen {
+            live_fallen.insert(c);
+        }
+        atom.align_body_traits();
+        atom.recompute_body_plan();
+        if !atom.body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+            return PlantStep::Dead;
+        }
+        sync_root_storage(atom);
+        return PlantStep::Alive {
+            sat: sat_taken,
+            at: drink_at,
+        };
     }
     // Surplus → tissue (root / stem / leaf) from allocation genes.
     let _ = try_grow_plant(world, atom, tick, trunks, live_roots, growth_caps);
@@ -3732,6 +3918,70 @@ mod tests {
             w.get_cell(6, 2).map(|c| c.material),
             Some(MaterialId::Sand),
             "fracture should leave Sand debris at the bone cell"
+        );
+    }
+
+    #[test]
+    fn living_stem_recharge_beats_self_load() {
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Stem),
+            (0, 4, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 2, 80.0, body);
+        atom.energy = 80.0;
+        let epi = std::collections::HashMap::new();
+        for _ in 0..40 {
+            apply_living_stem_integrity(&mut atom, &epi, |x| x);
+        }
+        let lowest = atom
+            .body
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, m))| *m == ModuleId::Stem)
+            .min_by_key(|(_, (_, dy, _))| *dy)
+            .map(|(i, _)| i)
+            .expect("stem");
+        assert!(
+            atom.integrity_at(lowest) > 0.9,
+            "healthy recharge should hold self-load (integ={})",
+            atom.integrity_at(lowest)
+        );
+    }
+
+    #[test]
+    fn living_stem_epiphyte_load_drains_without_energy() {
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Stem),
+            (0, 4, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 2, 80.0, body);
+        atom.energy = 0.0; // no recharge
+        let mut epi = std::collections::HashMap::new();
+        // Three riders on the upper stem cell (wx=4, wy=5 → host_gy+3).
+        epi.insert((4, 5), 9);
+        for _ in 0..30 {
+            apply_living_stem_integrity(&mut atom, &epi, |x| x);
+        }
+        let lowest = atom
+            .body
+            .iter()
+            .enumerate()
+            .filter(|(_, (_, _, m))| *m == ModuleId::Stem)
+            .min_by_key(|(_, (_, dy, _))| *dy)
+            .map(|(i, _)| i)
+            .expect("stem");
+        assert!(
+            atom.integrity_at(lowest) <= INTEGRITY_TOPPLE_THRESHOLD + 1e-4,
+            "heavy epi load without recharge should collapse (integ={})",
+            atom.integrity_at(lowest)
         );
     }
 }
