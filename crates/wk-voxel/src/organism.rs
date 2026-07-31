@@ -98,8 +98,18 @@ pub const STEM_FREE_LOAD: u32 = 6;
 pub const STEM_RECHARGE_PER_TICK: f32 = 0.04;
 /// Energy spent per integrity point recharged on living Stems (Wave X).
 pub const STEM_RECHARGE_ENERGY_PER_UNIT: f32 = 0.15;
+/// How fast land-plant [`Atom::stem_wetness`] tracks root moisture (Wave Z).
+pub const STEM_WET_TRACK: f32 = 0.35;
+/// Epiphyte energy from a fully wet host Stem per tick (Wave Z).
+pub const EPI_STEM_DRINK: f32 = 0.10;
+/// Holdfast stem wetness below this stresses the epiphyte (Wave Z).
+pub const EPI_STEM_DRY_FRAC: f32 = 0.06;
 /// Plankton corpses linger longer so bloom deaths leave a visible carpet.
 pub const CORPSE_SETTLE_WATER_TICKS: u32 = 2_400;
+
+fn default_stem_wetness() -> f32 {
+    1.0
+}
 
 /// Floater equilibrium depth below the free surface (cells).
 const FLOAT_DEPTH: f32 = 1.5;
@@ -226,6 +236,10 @@ pub struct Atom {
     /// Empty means every module is at `1.0`. Not a gene — bookkeeping only.
     #[serde(default)]
     pub body_integrity: Vec<f32>,
+    /// Land-plant stem surface wetness `0..1` (Wave Z). Epiphytes drink this
+    /// via Holdfast. Tracks root moisture; not a mass-audit quantity.
+    #[serde(default = "default_stem_wetness")]
+    pub stem_wetness: f32,
 }
 
 impl Atom {
@@ -255,6 +269,7 @@ impl Atom {
             body_traits,
             body_plan: BodyPlan::default(),
             body_integrity: Vec::new(),
+            stem_wetness: default_stem_wetness(),
         };
         a.recompute_body_plan();
         a
@@ -753,6 +768,69 @@ pub fn stem_weight_above(
         }
     }
     weight
+}
+
+/// Track land-plant stem surface wetness toward a drought-band target (Wave Z).
+///
+/// Raw pore fill on typical moist sand is only a few percent of capacity;
+/// epiphytes read the same hydrated / stressed / dormant bands as roots.
+pub fn update_stem_wetness(world: &World, atom: &mut Atom) {
+    if !is_land_plant(atom) {
+        return;
+    }
+    let moist = root_moisture_frac(world, atom);
+    let target = match drought_band(moist) {
+        DroughtBand::Hydrated => 1.0,
+        DroughtBand::Stressed => 0.35,
+        DroughtBand::Dormant => 0.0,
+    };
+    let cur = atom.stem_wetness.clamp(0.0, 1.0);
+    atom.stem_wetness = (cur + (target - cur) * STEM_WET_TRACK).clamp(0.0, 1.0);
+}
+
+/// Stem-cell → host [`Atom::stem_wetness`] (max if several) for epiphyte drink.
+pub fn collect_stem_wetness_on_cells(
+    world: &World,
+    atoms: &[Atom],
+) -> std::collections::HashMap<(i32, i32), f32> {
+    use std::collections::HashMap;
+    let mut out: HashMap<(i32, i32), f32> = HashMap::new();
+    for atom in atoms {
+        if !is_land_plant(atom) {
+            continue;
+        }
+        let wet = atom.stem_wetness.clamp(0.0, 1.0);
+        for &(dx, dy, mid) in &atom.body {
+            if mid != ModuleId::Stem {
+                continue;
+            }
+            let wx = world.wrap_x(atom.gx + dx as i32);
+            let wy = atom.gy + dy as i32;
+            let e = out.entry((wx, wy)).or_insert(0.0);
+            *e = e.max(wet);
+        }
+    }
+    out
+}
+
+/// Max stem wetness under this epiphyte's Holdfast cells (0 if unseated).
+pub fn epiphyte_stem_wetness(
+    atom: &Atom,
+    stem_wet: &std::collections::HashMap<(i32, i32), f32>,
+    wrap_x: impl Fn(i32) -> i32,
+) -> f32 {
+    let mut best = 0.0f32;
+    for &(dx, dy, mid) in &atom.body {
+        if mid != ModuleId::Holdfast {
+            continue;
+        }
+        let wx = wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        if let Some(&w) = stem_wet.get(&(wx, wy)) {
+            best = best.max(w);
+        }
+    }
+    best
 }
 
 /// Wave X: drain living Stem integrity by load above; recharge from energy.
@@ -1296,6 +1374,8 @@ impl OrganismStore {
         let host_stems = collect_live_stem_world_cells(world, &self.atoms);
         // Wave X: epiphyte body weight seated on host Stem cells.
         let epi_load = collect_epiphyte_load_on_stems(world, &self.atoms);
+        // Wave Z: host Stem wetness for epiphyte drink (precomputed — mut loop).
+        let stem_wet = collect_stem_wetness_on_cells(world, &self.atoms);
         // Wave Y: same-column epiphyte light steal (precomputed — mut loop).
         let rider_transmit: Vec<f32> = self
             .atoms
@@ -1387,8 +1467,16 @@ impl OrganismStore {
 
             if is_epiphyte(atom) {
                 let rider_t = rider_transmit.get(i).copied().unwrap_or(1.0);
-                match step_epiphyte(world, atom, day, &canopy, &host_stems, rider_t, i as u32)
-                {
+                match step_epiphyte(
+                    world,
+                    atom,
+                    day,
+                    &canopy,
+                    &host_stems,
+                    &stem_wet,
+                    rider_t,
+                    i as u32,
+                ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
                     PlantStep::Sprout(_) => {}
@@ -1681,6 +1769,8 @@ fn step_land_plant(
     }
     // Roots bank surplus above the spawn tank (starch analogy).
     sync_root_storage(atom);
+    // Wave Z: stem surface wetness tracks pore moisture (epiphyte drink).
+    update_stem_wetness(world, atom);
     let moist = root_moisture_frac(world, atom);
     let drought = drought_band(moist);
     let dormant = matches!(drought, DroughtBand::Dormant);
@@ -1781,21 +1871,29 @@ fn step_land_plant(
     }
 }
 
-/// Max ticks an epiphyte may float unseated before dying (Wave U).
+/// Max ticks an epiphyte may float unseated / dry before dying (Wave U/Z).
 const EPIPHYTE_UNSEATED_MAX: u32 = 8;
 
-/// Epiphyte tick: require Holdfast on a host Stem; photo only (no drink/growth).
+/// Epiphyte tick: Holdfast on host Stem; photo + stem-wetness drink (Wave Z).
 fn step_epiphyte(
     world: &World,
     atom: &mut Atom,
     day: f32,
     canopy: &CanopyIndex,
     host_stems: &std::collections::HashSet<(i32, i32)>,
+    stem_wet: &std::collections::HashMap<(i32, i32), f32>,
     rider_transmit: f32,
     entity_id: u32,
 ) -> PlantStep {
     pin_plant_pose(atom);
-    if !is_holdfast_anchored(atom, host_stems, |x| world.wrap_x(x)) {
+    let seated = is_holdfast_anchored(atom, host_stems, |x| world.wrap_x(x));
+    let wet = if seated {
+        epiphyte_stem_wetness(atom, stem_wet, |x| world.wrap_x(x))
+    } else {
+        0.0
+    };
+    // Unseated or dry stem → stress clock (E41 allocation trap).
+    if !seated || wet < EPI_STEM_DRY_FRAC {
         atom.drought_ticks = atom.drought_ticks.saturating_add(1);
         if atom.drought_ticks >= EPIPHYTE_UNSEATED_MAX {
             return PlantStep::Dead;
@@ -1823,7 +1921,8 @@ fn step_epiphyte(
     );
     let photo_cap = atom.body_plan.photo_capacity.max(1.0);
     let harvest = PHOTON_RATE * light * photo_cap;
-    atom.energy = (atom.energy + harvest - upkeep).clamp(0.0, atom.energy_max);
+    let drink = EPI_STEM_DRINK * wet * (0.55 + 0.45 * day);
+    atom.energy = (atom.energy + harvest + drink - upkeep).clamp(0.0, atom.energy_max);
     if atom.energy <= 0.0 {
         return PlantStep::Dead;
     }
