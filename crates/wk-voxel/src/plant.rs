@@ -38,6 +38,10 @@ pub const DROUGHT_HIBERNATE_MAX_TICKS: u32 = 9_000;
 pub const DROUGHT_DORMANT_UPKEEP: f32 = 0.12;
 /// Land-plant basal upkeep vs plankton (woody roots respire less).
 pub const PLANT_UPKEEP_MULT: f32 = 0.35;
+/// Score bonus for PreferentialRootPath / ghost-root cells (Wave AC).
+pub const ROOT_GHOST_AFFINITY: f32 = 1.35;
+/// Penetrate multiplier on preferential ghost-path cells (cheaper than Organic).
+pub const GHOST_ROOT_PENETRATE: f32 = 0.12;
 /// Extra score weight so roots prefer wetter substrate cells.
 pub const ROOT_MOISTURE_AFFINITY: f32 = 2.8;
 /// Soft local density: roots packed near the crown pay this extra.
@@ -477,8 +481,11 @@ fn sip_porous(world: &mut World, gx: i32, gy: i32, want: u8) -> Option<u8> {
 /// Paint Root modules into `MaterialId::Organic` in place (preserve pore sat).
 /// Returns how many cells were converted. Used when a land plant dies so the
 /// root stencil stays in the ground as dead organic matter.
+///
+/// Wave AC: marks [`CellFlags::ROOT_RESIDUE`] so fungal digest opens a
+/// preferential void rather than composting to ordinary Sand.
 pub fn leave_dead_roots_in_place(world: &mut World, atom: &Atom) -> u32 {
-    use crate::cell::Cell;
+    use crate::cell::{Cell, CellFlags};
     let mut painted = 0u32;
     for &(dx, dy, mid) in &atom.body {
         if mid != ModuleId::Root {
@@ -495,12 +502,16 @@ pub fn leave_dead_roots_in_place(world: &mut World, atom: &Atom) -> u32 {
                 // Don't plug free water with Organic.
             }
             MaterialId::Organic => {
+                let mut org = c;
+                org.flags.set(CellFlags::ROOT_RESIDUE);
+                world.set_cell(wx, wy, org);
                 painted += 1; // already organic residue
             }
             _ => {
                 let mut org = Cell::solid(MaterialId::Organic);
                 let cap = water_capacity(MaterialId::Organic);
                 org.sat.0 = if cap > 0 { c.sat.0.min(cap) } else { 0 };
+                org.flags.set(CellFlags::ROOT_RESIDUE);
                 world.set_cell(wx, wy, org);
                 painted += 1;
             }
@@ -674,6 +685,15 @@ fn penetrate_cost(mat: MaterialId) -> Option<f32> {
     }
 }
 
+/// Penetrate cost with Wave AC ghost-path subsidy.
+fn penetrate_cost_at(world: &World, gx: i32, gy: i32, mat: MaterialId) -> Option<f32> {
+    if world.is_preferential_root(gx, gy) {
+        // Preferential path is effectively free even through Stone fill.
+        return Some(GHOST_ROOT_PENETRATE);
+    }
+    penetrate_cost(mat)
+}
+
 /// World cells occupied by living Root modules (all plants).
 pub fn collect_live_root_world_cells<'a, I>(atoms: I) -> HashSet<(i32, i32)>
 where
@@ -841,11 +861,13 @@ pub fn try_elongate_root(
             let Some(cell) = world.get_cell(wx, wy) else {
                 continue;
             };
-            let Some(pen) = penetrate_cost(cell.material) else {
+            let Some(pen) = penetrate_cost_at(world, wx, wy, cell.material) else {
                 continue;
             };
             // Prefer solid substrate; allow Air only as a rare gap step.
-            if cell.material == MaterialId::Air && dy == 0 {
+            // Wave AC: preferential voids (ghost cavities) are fair game.
+            if cell.material == MaterialId::Air && dy == 0 && !world.is_preferential_root(wx, wy)
+            {
                 // lateral air — skip (roots stay in ground)
                 continue;
             }
@@ -872,6 +894,9 @@ pub fn try_elongate_root(
                 MaterialId::Organic => score += ROOT_ORGANIC_AFFINITY,
                 MaterialId::Sand => score += ROOT_SAND_AFFINITY,
                 _ => {}
+            }
+            if world.is_preferential_root(wx, wy) {
+                score += ROOT_GHOST_AFFINITY;
             }
             // Extra nudge into clearly wetter cells than the site's host.
             let site_moist = cell_moisture_frac(

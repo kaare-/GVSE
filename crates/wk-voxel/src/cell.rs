@@ -54,6 +54,9 @@ impl CellFlags {
     /// Soft sediment already pulsed a compaction exudation this cycle.
     /// Cleared when pore sat rises again (re-wetting).
     pub const COMPACTED: CellFlags = CellFlags(0b0000_0010);
+    /// Organic painted from a dead Root stencil (Wave AC ghost roots).
+    /// Digest turns these into preferential voids; litter Organic stays unmarked.
+    pub const ROOT_RESIDUE: CellFlags = CellFlags(0b0000_0100);
 
     pub const fn empty() -> Self {
         Self(0)

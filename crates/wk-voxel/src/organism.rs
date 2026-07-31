@@ -26,6 +26,7 @@ use crate::blueprint::{
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
     add_soft_litter, collect_fungus_tissue_world_cells, digest_budget_units, digest_labile,
+    fill_ghost_root_voids,
     dissolve_corpse_to_organic, fungus_should_hibernate, fungus_upkeep, is_fungus,
     is_fungus_seated, try_grow_hypha_into_dead_stem, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
 };
@@ -1379,8 +1380,12 @@ impl OrganismStore {
         humidity: Option<&mut Humidity>,
     ) {
         if self.atoms.is_empty() && self.corpses.is_empty() {
+            // Wave AC: still collapse preferential voids even with no life.
+            let _ = fill_ghost_root_voids(world);
             return;
         }
+        // Wave AC: Void → Loose fill on PreferentialRootPath cavities.
+        let _ = fill_ghost_root_voids(world);
         let day = day_factor_cfg(tick, climate);
         let phase = phase_fraction_cfg(tick, climate);
         // Build canopy once / tick so taller neighbours shade short plants.

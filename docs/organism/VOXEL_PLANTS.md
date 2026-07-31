@@ -141,7 +141,14 @@ Features:
 - `.gvsecrt` schema **4**; `SIM_SCHEMA_VERSION` **7** (schema-3 blueprints dual-load)
 - Scenario `e40b_attach_prefer_reseat` (sticky re-seats; cling-free dies; near-miss spawn)
 
-**Deferred (Wave AC+):** ghost roots, fallen-log animation, long-soak E43 lineages.
+**Wave AC — Ghost roots *(landed)*:**
+- Dead Root → Organic with `CellFlags::ROOT_RESIDUE`
+- Fungal digest of residue → Air void + `World.preferential_root` overlay
+- `fill_ghost_root_voids`: Sand/Clay collapses into preferential voids (Void → Loose)
+- Root elongate: preferential cells use `GHOST_ROOT_PENETRATE` + `ROOT_GHOST_AFFINITY`
+- `SIM_SCHEMA_VERSION` **8**; scenario `e44_ghost_roots`
+
+**Deferred (Wave AD+):** fallen-log animation, long-soak E43 lineages.
 
 ## Explicitly out of Core for voxel
 
