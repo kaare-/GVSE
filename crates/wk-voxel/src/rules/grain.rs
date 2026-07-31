@@ -75,9 +75,13 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 if is_grain(above.material) {
                     // Dense grains sink through any Air sat.
                 } else if falls_through_empty_air(above.material) {
-                    // Snow / Ice / Organic: drop through empty Air, float
-                    // on standing water (lids, shore slush, leaf litter).
-                    if !cur.sat.is_empty() {
+                    // Snow / Ice / Organic: drop through empty Air *and*
+                    // haze; float only on standing (full) water — lids,
+                    // shore slush, leaf litter. Must match phase support
+                    // (`min_sat_to_freeze` / full cell): floating on
+                    // partial sat while phase melted that seat caused a
+                    // melt→refreeze pump (±1 cell every phase period).
+                    if cur.sat.is_full() {
                         continue;
                     }
                 } else {

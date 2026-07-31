@@ -639,11 +639,10 @@ fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &
 
 /// Ice/Snow must rest on solid, standing water, or more frozen pack.
 ///
-/// **Empty Air below** is owned by [`crate::rules::apply_grain_fall`]
-/// (the pack drops as ice/snow). This pass only converts packs sitting
-/// on non-supporting haze (Air with some sat but below
-/// [`PhaseConfig::min_sat_to_freeze`]) into water — rare, kept as a
-/// safety valve when fall will not enter a misty gap.
+/// **Air below** (empty *or* haze short of [`PhaseConfig::min_sat_to_freeze`])
+/// is owned by [`crate::rules::apply_grain_fall`] — the pack drops through
+/// misty gaps instead of melting. Melting haze seats used to fight freeze
+/// at the free surface and pump a flake ±1 cell every phase period.
 fn break_unsupported_frozen(world: &mut World, gx: i32, cfg: &PhaseConfig) {
     let Some((y0, y1)) = y_bounds(world) else {
         return;
@@ -663,10 +662,10 @@ fn break_unsupported_frozen(world: &mut World, gx: i32, cfg: &PhaseConfig) {
         if frozen_is_supported(world, gx, y, cfg) {
             continue;
         }
-        // Empty gap → fall in tick, do not melt into water mid-air.
+        // Empty / haze gap → fall in tick, do not melt into water mid-air.
         if matches!(
             world.get_cell(gx, y - 1),
-            Some(b) if b.material == MaterialId::Air && b.sat.is_empty()
+            Some(b) if b.material == MaterialId::Air && b.sat.0 < cfg.min_sat_to_freeze
         ) {
             continue;
         }
@@ -1594,5 +1593,91 @@ mod tests {
             "warm water melts snow into water"
         );
         assert!(w.get_cell(1, 2).unwrap().sat.is_full());
+    }
+
+    #[test]
+    fn unsupported_ice_over_haze_is_not_melted_by_phase() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(1, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(
+            1,
+            1,
+            Cell {
+                material: MaterialId::Air,
+                sat: Sat(128),
+                flags: Default::default(),
+                _pad: 0,
+            },
+        );
+        w.set_cell(1, 2, Cell::solid(MaterialId::Ice));
+        let temp = cold_temp(16, 16, -5.0);
+        let cfg = PhaseConfig {
+            enable_freeze: false,
+            enable_slush: false,
+            ..PhaseConfig::default()
+        };
+        apply_phase(&mut w, &temp, &cfg);
+        assert_eq!(
+            w.get_cell(1, 2).unwrap().material,
+            MaterialId::Ice,
+            "phase must not melt ice over haze (grain fall drops it)"
+        );
+    }
+
+    #[test]
+    fn ice_on_haze_does_not_melt_refreeze_pump() {
+        // Regression: flake over partial sat used to float (grain) but fail
+        // phase support → melt → freeze at free surface → ±1 cell pump.
+        let mut w = World::new(11);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::water());
+            w.set_cell(x, 2, Cell::water());
+        }
+        // Misty column under a free-floating flake (neighbours keep full water).
+        w.set_cell(
+            3,
+            2,
+            Cell {
+                material: MaterialId::Air,
+                sat: Sat(64),
+                flags: Default::default(),
+                _pad: 0,
+            },
+        );
+        w.set_cell(3, 3, Cell::solid(MaterialId::Ice));
+        let temp = cold_temp(16, 16, -8.0);
+        let cfg = PhaseConfig::default();
+        let mut ys = Vec::new();
+        for t in 0..24u64 {
+            w.tick = t;
+            crate::rules::apply_grain_fall(&mut w);
+            apply_phase(&mut w, &temp, &cfg);
+            let y_ice = (0..8)
+                .rev()
+                .find(|&y| {
+                    w.get_cell(3, y).map(|c| c.material) == Some(MaterialId::Ice)
+                })
+                .expect("ice flake must persist");
+            ys.push(y_ice);
+        }
+        let min_y = *ys.iter().min().unwrap();
+        let max_y = *ys.iter().max().unwrap();
+        assert!(
+            max_y - min_y <= 1,
+            "ice must not pump ±1 every phase period (ys={ys:?})"
+        );
+        // No alternating every period_ticks once settled.
+        let period = cfg.period_ticks.max(1) as usize;
+        if ys.len() > period * 3 {
+            let tail = &ys[ys.len() - period * 2..];
+            let unique: std::collections::HashSet<_> = tail.iter().copied().collect();
+            assert!(
+                unique.len() == 1,
+                "settled flake Y must be steady across phase periods (tail={tail:?})"
+            );
+        }
     }
 }

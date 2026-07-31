@@ -637,6 +637,28 @@ fn ice_falls_through_empty_air_but_floats_on_water() {
     assert_eq!(w2.get_cell(3, 2).unwrap().material, MaterialId::Ice);
     assert_eq!(w2.get_cell(3, 1).unwrap().material, MaterialId::Air);
     assert!(w2.get_cell(3, 1).unwrap().sat.is_full());
+
+    // Haze is not a float seat — drop through (closes the ice-pump dead-band).
+    let mut w3 = setup_column_world();
+    w3.set_cell(
+        3,
+        1,
+        Cell {
+            material: MaterialId::Air,
+            sat: Sat(128),
+            flags: Default::default(),
+            _pad: 0,
+        },
+    );
+    w3.set_cell(3, 2, Cell::solid(MaterialId::Ice));
+    apply_grain_fall(&mut w3);
+    assert_eq!(
+        w3.get_cell(3, 1).unwrap().material,
+        MaterialId::Ice,
+        "ice must fall through partial-sat haze"
+    );
+    assert_eq!(w3.get_cell(3, 2).unwrap().material, MaterialId::Air);
+    assert_eq!(w3.get_cell(3, 2).unwrap().sat.0, 128);
 }
 
 #[test]
