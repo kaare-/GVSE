@@ -36,8 +36,9 @@ use crate::plant::{
     drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, find_surface_air_slot,
     collect_live_stem_world_cells, is_anchored, is_epiphyte, is_holdfast_anchored, is_land_plant,
     leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac,
-    sync_root_storage, try_grow_plant, try_vegetative_sprout, DroughtBand, PlantGrowthCaps,
-    DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
+    sync_root_storage, try_epiphyte_reseat, try_grow_plant, try_vegetative_sprout, DroughtBand,
+    PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN,
+    PLANT_UPKEEP_MULT,
 };
 use crate::shade::{build_canopy_index, canopy_top_y, CanopyIndex};
 
@@ -384,6 +385,7 @@ impl Atom {
         g.shade_efficiency = self.body_plan.shade_efficiency;
         g.digest_rate = self.body_plan.digest_rate;
         g.host_leave_fraction = self.body_plan.host_leave_fraction;
+        g.attach_prefer = self.body_plan.attach_prefer;
         g
     }
 
@@ -1142,7 +1144,9 @@ impl OrganismStore {
         } else if epi {
             pin_plant_pose(&mut atom);
             let stems = collect_live_stem_world_cells(world, &self.atoms);
-            if !is_holdfast_anchored(&atom, &stems, |x| world.wrap_x(x)) {
+            if !is_holdfast_anchored(&atom, &stems, |x| world.wrap_x(x))
+                && !try_epiphyte_reseat(world, &mut atom, &stems)
+            {
                 return false;
             }
         } else if fungus {
@@ -1219,7 +1223,9 @@ impl OrganismStore {
         } else if epi {
             pin_plant_pose(&mut atom);
             let stems = collect_live_stem_world_cells(world, &self.atoms);
-            if !is_holdfast_anchored(&atom, &stems, |x| world.wrap_x(x)) {
+            if !is_holdfast_anchored(&atom, &stems, |x| world.wrap_x(x))
+                && !try_epiphyte_reseat(world, &mut atom, &stems)
+            {
                 return false;
             }
         } else if fungus {
@@ -1274,8 +1280,15 @@ impl OrganismStore {
         let mut atom = Atom::from_body(gx, gy, energy_max, body);
         apply_genome(&mut atom, genome);
         atom.recompute_body_plan();
-        if is_land_plant(&atom) || is_fungus(&atom) || is_epiphyte(&atom) {
+        if is_land_plant(&atom) || is_fungus(&atom) {
             pin_plant_pose(&mut atom);
+        } else if is_epiphyte(&atom) {
+            pin_plant_pose(&mut atom);
+            // Wave AB: sticky Holdfasts snag a nearby Stem from a near-miss click.
+            let stems = collect_live_stem_world_cells(world, &self.atoms);
+            if !is_holdfast_anchored(&atom, &stems, |x| world.wrap_x(x)) {
+                let _ = try_epiphyte_reseat(world, &mut atom, &stems);
+            }
         } else if let Some((top, _)) = wet_band(world, gx, gy) {
             atom.last_water_top = Some(top);
         }
@@ -1326,8 +1339,14 @@ impl OrganismStore {
             apply_genome(&mut atom, g);
         }
         atom.recompute_body_plan();
-        if is_land_plant(&atom) || is_fungus(&atom) || is_epiphyte(&atom) {
+        if is_land_plant(&atom) || is_fungus(&atom) {
             pin_plant_pose(&mut atom);
+        } else if is_epiphyte(&atom) {
+            pin_plant_pose(&mut atom);
+            let stems = collect_live_stem_world_cells(world, &self.atoms);
+            if !is_holdfast_anchored(&atom, &stems, |x| world.wrap_x(x)) {
+                let _ = try_epiphyte_reseat(world, &mut atom, &stems);
+            }
         } else if let Some((top, _)) = wet_band(world, gx, gy) {
             atom.last_water_top = Some(top);
         }
@@ -1877,6 +1896,7 @@ fn step_land_plant(
 const EPIPHYTE_UNSEATED_MAX: u32 = 8;
 
 /// Epiphyte tick: Holdfast on host Stem; photo + stem-wetness drink (Wave Z).
+/// Wave AB: high `attach_prefer` re-seeks a nearby host Stem when unseated.
 fn step_epiphyte(
     world: &World,
     atom: &mut Atom,
@@ -1888,7 +1908,10 @@ fn step_epiphyte(
     entity_id: u32,
 ) -> PlantStep {
     pin_plant_pose(atom);
-    let seated = is_holdfast_anchored(atom, host_stems, |x| world.wrap_x(x));
+    let mut seated = is_holdfast_anchored(atom, host_stems, |x| world.wrap_x(x));
+    if !seated {
+        seated = try_epiphyte_reseat(world, atom, host_stems);
+    }
     let wet = if seated {
         epiphyte_stem_wetness(atom, stem_wet, |x| world.wrap_x(x))
     } else {

@@ -23,6 +23,7 @@ pub struct PlantGeneSettings {
     pub shade_efficiency: f32,
     pub digest_rate: f32,
     pub host_leave_fraction: f32,
+    pub attach_prefer: f32,
     pub clone_fidelity: f32,
 }
 
@@ -38,6 +39,7 @@ impl Default for PlantGeneSettings {
             shade_efficiency: g.shade_efficiency,
             digest_rate: g.digest_rate,
             host_leave_fraction: g.host_leave_fraction,
+            attach_prefer: g.attach_prefer,
             clone_fidelity: g.clone_fidelity,
         }
     }
@@ -54,6 +56,7 @@ impl PlantGeneSettings {
             shade_efficiency: self.shade_efficiency.clamp(0.0, 1.0),
             digest_rate: self.digest_rate.clamp(0.05, 2.0),
             host_leave_fraction: self.host_leave_fraction.clamp(0.0, 1.0),
+            attach_prefer: self.attach_prefer.clamp(0.0, 1.0),
             clone_fidelity: self.clone_fidelity.clamp(0.05, 1.0),
             ..Genome::default()
         }
@@ -1018,6 +1021,13 @@ impl SimSettings {
                         "Host leave (epiphyte light)",
                         0.0..1.0,
                         &mut self.plant_genes.host_leave_fraction,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Attach prefer (epiphyte reseat)",
+                        0.0..1.0,
+                        &mut self.plant_genes.attach_prefer,
                     );
                     labeled_slider(
                         ui,

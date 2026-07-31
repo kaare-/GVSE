@@ -90,7 +90,7 @@ Features:
 | Gene | Role |
 |------|------|
 | `host_leave_fraction` | Epiphyte light left for host *(Wave Y)* |
-| `attach_prefer` | Epiphyte seating bias *(deferred)* |
+| `attach_prefer` | Epiphyte seating / re-seek bias *(Wave AB)* |
 
 **Wave U — Holdfast seating *(landed)*:**
 - `ModuleId::Holdfast` (`0x0F`, `#FF3D9A`) appended after Bone (postcard-safe)
@@ -135,8 +135,13 @@ Features:
 - Closes invade→rot→topple without manually seating Digest on the trunk
 - Scenario `e42c_hypha_invades_dead_stem`
 
-**Deferred (Wave AB+):** `attach_prefer`, ghost roots, fallen-log animation,
-long-soak E43 lineages.
+**Wave AB — AttachPrefer reseat *(landed)*:**
+- Holdfast `attach_prefer` (Tab / `BodyPlan`); default `0` = no re-seek (E40 clock)
+- Seek radius `1 + floor(prefer×4)` (max 5); `try_epiphyte_reseat` from tick + habitat/editor spawn
+- `.gvsecrt` schema **4**; `SIM_SCHEMA_VERSION` **7** (schema-3 blueprints dual-load)
+- Scenario `e40b_attach_prefer_reseat` (sticky re-seats; cling-free dies; near-miss spawn)
+
+**Deferred (Wave AC+):** ghost roots, fallen-log animation, long-soak E43 lineages.
 
 ## Explicitly out of Core for voxel
 
