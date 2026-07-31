@@ -14,6 +14,7 @@ mod e15_roots_reduce_erosion;
 mod e18_bone_persists_after_muscle_rots;
 mod e19_bone_fragility;
 mod e40_epiphyte_seat;
+mod e40b_attach_prefer_reseat;
 mod e42_standing_dead_stem_topples;
 mod e42b_fungal_rot_accelerates_topple;
 mod e42c_hypha_invades_dead_stem;

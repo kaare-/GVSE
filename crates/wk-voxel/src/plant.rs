@@ -255,6 +255,96 @@ where
     })
 }
 
+/// Chebyshev seek radius from [`BodyPlan::attach_prefer`] (Wave AB).
+///
+/// `0` → no re-seek; `1` → up to 5 cells (`1 + prefer×4`).
+pub fn attach_seek_radius(attach_prefer: f32) -> i32 {
+    let p = attach_prefer.clamp(0.0, 1.0);
+    if p < 1e-3 {
+        return 0;
+    }
+    1 + (p * 4.0).floor() as i32
+}
+
+fn wrap_dx(world: &World, from: i32, to: i32) -> i32 {
+    let d = to - from;
+    match world.wrap_width {
+        Some(w) if w > 0 => {
+            let w = w as i32;
+            let mut ad = d.rem_euclid(w);
+            if ad > w / 2 {
+                ad -= w;
+            }
+            ad
+        }
+        _ => d,
+    }
+}
+
+fn epi_slot_is_air(world: &World, gx: i32, gy: i32) -> bool {
+    matches!(
+        world.get_cell(gx, gy),
+        Some(c) if c.material == MaterialId::Air
+    )
+}
+
+/// Move an unseated epiphyte so a Holdfast lands on a nearby host Stem.
+///
+/// Radius = [`attach_seek_radius`]. Returns `true` when the pose changed
+/// and the Holdfast is now anchored. Prefer = 0 never moves (E40 default).
+pub fn try_epiphyte_reseat(
+    world: &World,
+    atom: &mut Atom,
+    host_stems: &HashSet<(i32, i32)>,
+) -> bool {
+    let radius = attach_seek_radius(atom.body_plan.attach_prefer);
+    if radius <= 0 || host_stems.is_empty() {
+        return false;
+    }
+    let holdfasts: Vec<(i16, i16)> = atom
+        .body
+        .iter()
+        .filter(|(_, _, m)| *m == ModuleId::Holdfast)
+        .map(|&(dx, dy, _)| (dx, dy))
+        .collect();
+    if holdfasts.is_empty() {
+        return false;
+    }
+
+    let mut best: Option<(i32, i32, i32)> = None; // (dist2, gx, gy)
+    for &(sx, sy) in host_stems {
+        for &(hdx, hdy) in &holdfasts {
+            // Nucleus pose that seats this Holdfast on (sx, sy).
+            let ngx = world.wrap_x(sx - hdx as i32);
+            let ngy = sy - hdy as i32;
+            let dx = wrap_dx(world, atom.gx, ngx).abs();
+            let dy = (ngy - atom.gy).abs();
+            if dx.max(dy) > radius {
+                continue;
+            }
+            if !epi_slot_is_air(world, ngx, ngy) {
+                continue;
+            }
+            let d2 = dx * dx + dy * dy;
+            match best {
+                Some((bd, _, _)) if bd <= d2 => {}
+                _ => best = Some((d2, ngx, ngy)),
+            }
+        }
+    }
+
+    let Some((_, gx, gy)) = best else {
+        return false;
+    };
+    if gx == atom.gx && gy == atom.gy {
+        return is_holdfast_anchored(atom, host_stems, |x| world.wrap_x(x));
+    }
+    atom.gx = gx;
+    atom.gy = gy;
+    pin_plant_pose(atom);
+    true
+}
+
 pub fn root_count(atom: &Atom) -> usize {
     atom.body
         .iter()

@@ -28,7 +28,8 @@ fn visible_traits(module: ModuleId) -> &'static [&'static str] {
             "alloc_root",
         ],
         ModuleId::Digest | ModuleId::Hypha => &["mass", "density", "digest_rate", "upkeep_bias"],
-        ModuleId::Stem | ModuleId::Holdfast => &["mass", "density", "upkeep_bias"],
+        ModuleId::Stem => &["mass", "density", "upkeep_bias"],
+        ModuleId::Holdfast => &["mass", "density", "attach_prefer", "upkeep_bias"],
     }
 }
 
@@ -51,6 +52,7 @@ fn trait_get(t: &PixelTraits, name: &str) -> f32 {
         "shade_efficiency" => t.shade_efficiency,
         "digest_rate" => t.digest_rate,
         "host_leave_fraction" => t.host_leave_fraction,
+        "attach_prefer" => t.attach_prefer,
         _ => 0.0,
     }
 }
@@ -74,6 +76,7 @@ fn trait_set(t: &mut PixelTraits, name: &str, v: f32) {
         "shade_efficiency" => t.shade_efficiency = v.clamp(0.0, 1.0),
         "digest_rate" => t.digest_rate = v.clamp(0.05, 2.0),
         "host_leave_fraction" => t.host_leave_fraction = v.clamp(0.0, 1.0),
+        "attach_prefer" => t.attach_prefer = v.clamp(0.0, 1.0),
         _ => {}
     }
 }
@@ -158,11 +161,12 @@ pub fn draw_gene_panels(
         format!("photo_cap={:.2}", plan.photo_capacity),
         format!("alloc S/L/R={s:.2}/{l:.2}/{r:.2}"),
         format!(
-            "depth={:.2}  shade={:.2}  digest={:.2}  leave={:.2}",
+            "depth={:.2}  shade={:.2}  digest={:.2}  leave={:.2}  attach={:.2}",
             plan.root_depth_bias,
             plan.shade_efficiency,
             plan.digest_rate,
-            plan.host_leave_fraction
+            plan.host_leave_fraction,
+            plan.attach_prefer
         ),
         format!(
             "repro_gate={} (nuclei={})",

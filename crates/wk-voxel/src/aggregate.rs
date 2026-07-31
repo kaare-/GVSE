@@ -47,6 +47,8 @@ pub struct BodyPlan {
     pub digest_rate: f32,
     /// Mean Photosystem `host_leave_fraction` (Wave Y; default smotherer).
     pub host_leave_fraction: f32,
+    /// Mean Holdfast `attach_prefer` (Wave AB; default no re-seek).
+    pub attach_prefer: f32,
 }
 
 impl Default for BodyPlan {
@@ -68,6 +70,7 @@ impl Default for BodyPlan {
             shade_efficiency: 0.40,
             digest_rate: 0.8,
             host_leave_fraction: 0.0,
+            attach_prefer: 0.0,
         }
     }
 }
@@ -136,6 +139,8 @@ where
     let mut shade_n = 0usize;
     let mut leave_acc = 0.0f32;
     let mut leave_n = 0usize;
+    let mut attach_acc = 0.0f32;
+    let mut attach_n = 0usize;
     let mut digest_acc = 0.0f32;
     let mut digest_n = 0usize;
 
@@ -159,6 +164,10 @@ where
                 shade_n += 1;
                 leave_acc += t.host_leave_fraction.clamp(0.0, 1.0);
                 leave_n += 1;
+            }
+            ModuleId::Holdfast => {
+                attach_acc += t.attach_prefer.clamp(0.0, 1.0);
+                attach_n += 1;
             }
             ModuleId::Nucleus => {
                 nucleus_count += 1;
@@ -225,6 +234,11 @@ where
             (leave_acc / leave_n as f32).clamp(0.0, 1.0)
         } else {
             defaults.host_leave_fraction
+        },
+        attach_prefer: if attach_n > 0 {
+            (attach_acc / attach_n as f32).clamp(0.0, 1.0)
+        } else {
+            defaults.attach_prefer
         },
     }
 }

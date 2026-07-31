@@ -37,7 +37,8 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// v4: `Atom` / `Corpse` carry `body_integrity` (Wave V stem topple).
 /// v5: `PixelTraits` / `BodyPlan` gain `host_leave_fraction` (Wave Y).
 /// v6: `Atom.stem_wetness` for epiphyte drink (Wave Z).
-pub const SIM_SCHEMA_VERSION: u32 = 6;
+/// v7: `PixelTraits` / `BodyPlan` gain `attach_prefer` (Wave AB).
+pub const SIM_SCHEMA_VERSION: u32 = 7;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
