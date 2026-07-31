@@ -161,6 +161,9 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   cell (lake skin). Partial films must not freeze — thaw always yields a
   full water cell, so freezing mist would mint mass. **Cold lids then
   thicken downward** one cell / tick into **full** wet Air under Ice/Snow.
+  Open-surface freeze is skipped when the column already has Ice/Snow
+  below — prevents a second skin above a fallen/submerged flake (shore
+  “float up” after break/fall).
 - **Thaw:** top-of-stack Ice/Snow when `temp > freeze_point_c` → `Air+FULL`.
 - **Rain on ice:** stays as a water film on top (no density-swap under the
   sheet — that lofted ice into the rain). Melts the ice when **warm** only
