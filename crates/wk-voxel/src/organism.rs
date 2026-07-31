@@ -27,7 +27,7 @@ use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY
 use crate::fungi::{
     add_soft_litter, collect_fungus_tissue_world_cells, digest_budget_units, digest_labile,
     dissolve_corpse_to_organic, fungus_should_hibernate, fungus_upkeep, is_fungus,
-    is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
+    is_fungus_seated, try_grow_hypha_into_dead_stem, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -1376,6 +1376,8 @@ impl OrganismStore {
         let epi_load = collect_epiphyte_load_on_stems(world, &self.atoms);
         // Wave Z: host Stem wetness for epiphyte drink (precomputed — mut loop).
         let stem_wet = collect_stem_wetness_on_cells(world, &self.atoms);
+        // Wave AA: standing-dead Stem cells for hypha invasion.
+        let corpse_stems = collect_corpse_stem_world_cells(world, &self.corpses);
         // Wave Y: same-column epiphyte light steal (precomputed — mut loop).
         let rider_transmit: Vec<f32> = self
             .atoms
@@ -1457,7 +1459,7 @@ impl OrganismStore {
 
             if is_fungus(atom) {
                 let room = pop + births.len() < atom_cap;
-                match step_fungus(world, atom, day, tick, i as u32, room) {
+                match step_fungus(world, atom, day, tick, i as u32, room, &corpse_stems) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
                     PlantStep::Sprout(child) => births.push(child),
@@ -1932,7 +1934,24 @@ fn step_epiphyte(
     }
 }
 
-/// Litter fungus tick: digest soft litter / Organic, hibernate, spore.
+/// Standing-dead Stem world cells (Wave AA hypha invasion targets).
+pub fn collect_corpse_stem_world_cells(
+    world: &World,
+    corpses: &[Corpse],
+) -> std::collections::HashSet<(i32, i32)> {
+    use std::collections::HashSet;
+    let mut out = HashSet::new();
+    for corpse in corpses {
+        for &(dx, dy, mid) in &corpse.body {
+            if mid == ModuleId::Stem {
+                out.insert((world.wrap_x(corpse.gx + dx as i32), corpse.gy + dy as i32));
+            }
+        }
+    }
+    out
+}
+
+/// Litter fungus tick: digest soft litter / Organic, hibernate, invade, spore.
 fn step_fungus(
     world: &mut World,
     atom: &mut Atom,
@@ -1940,6 +1959,7 @@ fn step_fungus(
     tick: u64,
     entity_id: u32,
     pop_room: bool,
+    corpse_stems: &std::collections::HashSet<(i32, i32)>,
 ) -> PlantStep {
     pin_plant_pose(atom);
     // Same sandbox rule as plants: snap to a solid crown, don't cull.
@@ -1976,6 +1996,8 @@ fn step_fungus(
         return PlantStep::Dead;
     }
     if !dormant {
+        // Wave AA: cream hyphae grow into standing-dead olive stems.
+        let _ = try_grow_hypha_into_dead_stem(world, atom, corpse_stems, tick, entity_id);
         if let Some(child) = try_spore(world, atom, tick, entity_id, pop_room) {
             return PlantStep::Sprout(child);
         }

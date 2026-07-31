@@ -69,7 +69,8 @@ pub use failure::{
 };
 pub use fungi::{
     add_soft_litter, collect_fungus_tissue_world_cells, deposit_organic_on_surface,
-    dissolve_corpse_to_organic, is_fungus, soft_litter_at,
+    dissolve_corpse_to_organic, hypha_count, is_fungus, soft_litter_at,
+    try_grow_hypha_into_dead_stem, HYPHA_GROW_COST, HYPHA_GROW_PERIOD, MAX_HYPHA_MODULES,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
@@ -80,13 +81,13 @@ pub use grid::World;
 // HydroOverrides is defined in wk-material; re-export for app convenience.
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
-    apply_living_stem_integrity, bone_column_capacity, collect_epiphyte_load_on_stems,
-    collect_stem_wetness_on_cells, epiphyte_stem_wetness, fracture_overloaded_bones,
-    stem_integrity_failing_index, stem_weight_above, topple_stem_at, update_stem_wetness, Atom,
-    BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,
-    CORPSE_SETTLE_WATER_TICKS, DEAD_DECAY_PER_TICK, EPI_STEM_DRINK, EPI_STEM_DRY_FRAC,
-    FUNGAL_DECAY_PER_TICK, INTEGRITY_TOPPLE_THRESHOLD, MAX_ATOMS, MAX_CORPSES, STEM_FREE_LOAD,
-    STEM_LOAD_DRAIN_PER_ABOVE, STEM_RECHARGE_ENERGY_PER_UNIT, STEM_RECHARGE_PER_TICK,
+    apply_living_stem_integrity, bone_column_capacity, collect_corpse_stem_world_cells,
+    collect_epiphyte_load_on_stems, collect_stem_wetness_on_cells, epiphyte_stem_wetness,
+    fracture_overloaded_bones, stem_integrity_failing_index, stem_weight_above, topple_stem_at,
+    update_stem_wetness, Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail,
+    CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS, DEAD_DECAY_PER_TICK, EPI_STEM_DRINK,
+    EPI_STEM_DRY_FRAC, FUNGAL_DECAY_PER_TICK, INTEGRITY_TOPPLE_THRESHOLD, MAX_ATOMS, MAX_CORPSES,
+    STEM_FREE_LOAD, STEM_LOAD_DRAIN_PER_ABOVE, STEM_RECHARGE_ENERGY_PER_UNIT, STEM_RECHARGE_PER_TICK,
     STEM_WET_TRACK,
 };
 pub use plant::{

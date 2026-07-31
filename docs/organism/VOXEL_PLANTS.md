@@ -129,8 +129,14 @@ Features:
 - `SIM_SCHEMA_VERSION` **6**
 - Scenario `e41_stem_wetness_drink` (moist keeps epi; drought kills epi, host lives)
 
-**Deferred (Wave AA+):** hypha morphogenesis into olive, `attach_prefer`,
-ghost roots, fallen-log animation, long-soak E43 lineages.
+**Wave AA — Hypha invade standing-dead *(landed)*:**
+- Active fungi extend Hypha into orthogonally adjacent corpse Stem cells
+- `try_grow_hypha_into_dead_stem` (`HYPHA_GROW_COST` / `HYPHA_GROW_PERIOD` / `MAX_HYPHA_MODULES`)
+- Closes invade→rot→topple without manually seating Digest on the trunk
+- Scenario `e42c_hypha_invades_dead_stem`
+
+**Deferred (Wave AB+):** `attach_prefer`, ghost roots, fallen-log animation,
+long-soak E43 lineages.
 
 ## Explicitly out of Core for voxel
 

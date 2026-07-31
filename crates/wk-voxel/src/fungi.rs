@@ -5,8 +5,11 @@
 //! Set E litter fungi (thin slice): Digest + Hypha on soft litter /
 //! Organic cells. Spec: `docs/organism/FUNGI.md`.
 
+use std::collections::HashSet;
+
 use wk_material::MaterialId;
 
+use crate::blueprint::PixelTraits;
 use crate::cell::{water_capacity, Cell};
 use crate::grid::World;
 use crate::organism::{Atom, ModuleId};
@@ -45,6 +48,12 @@ pub const DEATH_LITTER_PER_MODULE: u16 = 6;
 pub const DEATH_LITTER_MAX: u16 = 48;
 /// How many Organic cells to scan below the crown when counting food.
 const ORGANIC_SCAN_DEPTH: i32 = 6;
+/// Energy to extend one Hypha into a standing-dead Stem (Wave AA).
+pub const HYPHA_GROW_COST: f32 = 1.5;
+/// Attempt hypha invasion every N ticks (staggered by entity id).
+pub const HYPHA_GROW_PERIOD: u64 = 6;
+/// Soft cap on Hypha modules per fungus (invasion morphogenesis).
+pub const MAX_HYPHA_MODULES: usize = 16;
 
 /// True when the body is a detritus habit (Digest, no Root/Stem/Holdfast).
 pub fn is_fungus(atom: &Atom) -> bool {
@@ -73,8 +82,7 @@ pub fn hypha_count(atom: &Atom) -> usize {
 pub fn collect_fungus_tissue_world_cells(
     world: &World,
     atoms: &[Atom],
-) -> std::collections::HashSet<(i32, i32)> {
-    use std::collections::HashSet;
+) -> HashSet<(i32, i32)> {
     let mut out = HashSet::new();
     for atom in atoms {
         for &(dx, dy, mid) in &atom.body {
@@ -84,6 +92,83 @@ pub fn collect_fungus_tissue_world_cells(
         }
     }
     out
+}
+
+/// Wave AA: extend a Hypha into an orthogonally adjacent standing-dead Stem cell.
+///
+/// Closes the PLANTS.md invade→rot chain: cream tissue grows into olive
+/// corpse pixels so Wave W fungal drain can fire without manual seating.
+pub fn try_grow_hypha_into_dead_stem(
+    world: &World,
+    atom: &mut Atom,
+    corpse_stems: &HashSet<(i32, i32)>,
+    tick: u64,
+    entity_id: u32,
+) -> bool {
+    if corpse_stems.is_empty() || !is_fungus(atom) {
+        return false;
+    }
+    if hypha_count(atom) >= MAX_HYPHA_MODULES {
+        return false;
+    }
+    if atom.energy < HYPHA_GROW_COST {
+        return false;
+    }
+    let period = HYPHA_GROW_PERIOD.max(1);
+    if tick % period != (entity_id as u64) % period {
+        return false;
+    }
+
+    let mut occupied = HashSet::new();
+    let mut tips: Vec<(i16, i16)> = Vec::new();
+    for &(dx, dy, mid) in &atom.body {
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        occupied.insert((wx, wy));
+        if matches!(mid, ModuleId::Digest | ModuleId::Hypha) {
+            tips.push((dx, dy));
+        }
+    }
+    if tips.is_empty() {
+        return false;
+    }
+
+    let mut candidates: Vec<(i16, i16, i32)> = Vec::new(); // rel dx, dy, score
+    for &(tdx, tdy) in &tips {
+        for (odx, ody) in [(1i16, 0), (-1, 0), (0, 1), (0, -1)] {
+            let ndx = tdx.saturating_add(odx);
+            let ndy = tdy.saturating_add(ody);
+            let wx = world.wrap_x(atom.gx + ndx as i32);
+            let wy = atom.gy + ndy as i32;
+            if occupied.contains(&(wx, wy)) {
+                continue;
+            }
+            if !corpse_stems.contains(&(wx, wy)) {
+                continue;
+            }
+            // Prefer upward into the trunk.
+            let score = ody as i32 * 4 + odx.abs() as i32;
+            candidates.push((ndx, ndy, score));
+        }
+    }
+    if candidates.is_empty() {
+        return false;
+    }
+    candidates.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.0.cmp(&b.0)).then_with(|| a.1.cmp(&b.1)));
+    // Deterministic pick among top-scoring ties.
+    let best_score = candidates[0].2;
+    let top: Vec<_> = candidates
+        .into_iter()
+        .filter(|c| c.2 == best_score)
+        .collect();
+    let pick = (hash_u64(world.seed.0, tick, entity_id as u64, 0xA11A) as usize) % top.len();
+    let (ndx, ndy, _) = top[pick];
+
+    let mut traits = PixelTraits::default();
+    traits.digest_rate = atom.body_plan.digest_rate.clamp(0.05, 2.0);
+    atom.energy = (atom.energy - HYPHA_GROW_COST).max(0.0);
+    atom.push_module(ndx, ndy, ModuleId::Hypha, traits);
+    true
 }
 
 /// Soft litter units at wrapped column `gx`.
@@ -584,5 +669,27 @@ mod tests {
         });
         let boosted = digest_budget_units(&atom);
         assert!(boosted >= base);
+    }
+
+    #[test]
+    fn hypha_invades_adjacent_corpse_stem() {
+        let w = litter_plot();
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, 0, ModuleId::Digest),
+        ];
+        let mut atom = Atom::from_body(4, 2, 40.0, body);
+        atom.energy = 20.0;
+        let mut stems = HashSet::new();
+        stems.insert((4, 3)); // directly above Digest
+        let grew = try_grow_hypha_into_dead_stem(&w, &mut atom, &stems, HYPHA_GROW_PERIOD, 0);
+        assert!(grew, "should extend Hypha into adjacent dead Stem");
+        assert!(
+            atom.body
+                .iter()
+                .any(|&(dx, dy, m)| m == ModuleId::Hypha && dx == 0 && dy == 1),
+            "Hypha should land at (0,1) relative"
+        );
+        assert!(atom.energy < 20.0, "growth costs energy");
     }
 }
