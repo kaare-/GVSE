@@ -26,7 +26,7 @@
 //! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
 //! - `F1` — toggle HUD chrome (bottom info/tools + block inspector)
 //! - `F2` — creature editor (Atom / plant MS-Paint; `C` stays condensation)
-//! - `F3` — terrain editor (paint / erase block types; world stays visible)
+//! - `F3` — terrain editor (pauses ticks; grains still settle after paint/dig)
 //! - `F5` / `F9` — save / load simulation (`saves/*.gvsesim`)
 //! - `Tab` — live settings (world size, materials, wind, clouds, …)
 //! - click — block / organism inspector (hidden while F1 HUD is off)
@@ -48,9 +48,9 @@ mod terrain;
 use macroquad::prelude::*;
 use wk_voxel::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity,
-    apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
-    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
+    apply_flow_erosion_bound, apply_grain_fall, apply_karst_dissolution, apply_phase,
+    apply_rain_with_temp, celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells,
+    day_night_factor_cfg, geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
     precip_forms_snow_at_air, sky_rgb, sky_rgb_at_height, temperature_step_due, tick_with_life,
     ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
@@ -682,8 +682,13 @@ async fn main() {
         }
 
         // Physics (frozen while paint editors / quit dialog are open).
+        // F3 still runs grain fall so mid-air Sand/Snow/Ice painted or
+        // undercut while paused settle instead of hanging until close.
         let sim_paused =
             paused || (editor.open && !editor.spawn_picker) || terrain.open || quit_dialog.open;
+        if terrain.open {
+            apply_grain_fall(&mut scene.world);
+        }
         if !sim_paused {
             if rain_on {
                 apply_rain_with_temp(
