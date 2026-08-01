@@ -3,7 +3,10 @@
 //! Isolation: wk-voxel + wk-material + macroquad only.
 //!
 //! Toggle with F3. Paint / erase every block type while the world stays
-//! visible underneath. Free water is `Air + sat = FULL` (not solid Water).
+//! visible underneath. Opening F3 pauses full physics ticks; the app
+//! still runs grain fall each frame so unsupported Sand / Snow / Ice
+//! settle instead of floating until the editor closes. Free water is
+//! `Air + sat = FULL` (not solid Water).
 
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
