@@ -49,20 +49,6 @@ fn default_max_corpses() -> usize {
     MAX_CORPSES
 }
 
-/// Living creature counts by habit (one entity each — not body pixels).
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct HabitCounts {
-    pub plants: usize,
-    pub fungi: usize,
-    pub plankton: usize,
-}
-
-impl HabitCounts {
-    pub fn total(self) -> usize {
-        self.plants + self.fungi + self.plankton
-    }
-}
-
 /// Why [`OrganismStore::spawn_blueprint_free`] refused a placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnFail {
@@ -350,21 +336,6 @@ impl OrganismStore {
 
     pub fn is_empty(&self) -> bool {
         self.atoms.is_empty()
-    }
-
-    /// Living pop broken down by habit (for HUD / diagnostics).
-    pub fn habit_counts(&self) -> HabitCounts {
-        let mut c = HabitCounts::default();
-        for atom in &self.atoms {
-            if is_land_plant(atom) {
-                c.plants += 1;
-            } else if is_fungus(atom) {
-                c.fungi += 1;
-            } else {
-                c.plankton += 1;
-            }
-        }
-        c
     }
 
     pub fn corpse_count(&self) -> usize {
@@ -2663,12 +2634,12 @@ mod tests {
             }
             store.step(&mut w, t);
         }
-        let plants = store.habit_counts().plants;
+        let n = store.len();
         assert!(
-            plants <= crate::plant::SPROUT_LOCAL_MAX + 1,
-            "one founder must not carpet the plot (plants={plants})"
+            n <= crate::plant::SPROUT_LOCAL_MAX + 1,
+            "one founder must not carpet the plot (creatures={n})"
         );
-        assert!(plants >= 1);
+        assert!(n >= 1);
     }
 
     #[test]

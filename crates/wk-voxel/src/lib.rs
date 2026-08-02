@@ -68,8 +68,8 @@ pub use grid::World;
 // HydroOverrides is defined in wk-material; re-export for app convenience.
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
-    Atom, BodyModule, Corpse, HabitCounts, ModuleId, OrganismStore, SpawnFail,
-    CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
+    Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,
+    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
 };
 pub use plant::{
     collect_live_root_world_cells, find_fungus_slot, find_plant_slot, find_surface_air_slot,
