@@ -328,9 +328,12 @@ pub fn colonize_and_compost(
     } else {
         (0.70 + 0.30 * moist.clamp(0.0, 1.0)).clamp(0.55, 1.0)
     };
+    // Forage stipend stays near break-even even at low digest_rate —
+    // that gene paces threading, not whether the fungus can live on Organic.
+    let forage_rate = rate.clamp(0.85, 1.5);
     let mut energy = MYCELIUM_FORAGE
         * (1.0 + 0.06 * n_h as f32)
-        * rate.clamp(0.25, 1.5)
+        * forage_rate
         * moist_scale;
 
     // Period stretches when digest_rate is low; high rate shortens slightly.

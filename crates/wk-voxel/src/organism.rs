@@ -953,30 +953,34 @@ fn step_fungus(
         if atom.drought_ticks >= FUNGUS_HIBERNATE_MAX_TICKS {
             return PlantStep::Dead;
         }
-    } else {
-        atom.drought_ticks = 0;
+        // Hibernate: tiny upkeep, but do not energy-starve to death —
+        // only the dormant-tick cap ends a starving fungus. (Active
+        // ticks still die at energy 0 when forage fails.)
+        let upkeep = fungus_upkeep(atom, true);
+        atom.energy = (atom.energy - upkeep).max(0.05).min(atom.energy_max);
+        return PlantStep::Alive {
+            sat: 0,
+            at: (atom.gx, atom.gy),
+        };
     }
+    atom.drought_ticks = 0;
 
-    let mut upkeep = fungus_upkeep(atom, dormant);
+    let mut upkeep = fungus_upkeep(atom, false);
     // Light basal tax — kept low so Organic forage can sustain a
     // Digest+Hypha body without soft litter (tissue upkeep is the main cost).
     upkeep += UPKEEP_PER_MODULE * 0.12 * (0.45 + 0.55 * day);
 
-    if !dormant {
-        let want = digest_budget_units(&atom.genome, atom);
-        let (_taken, from_litter) = digest_labile(world, atom.gx, atom.gy, want);
-        let from_myc = colonize_and_compost(world, atom.gx, atom.gy, &atom.genome, atom, tick);
-        atom.energy = (atom.energy + from_litter + from_myc).min(atom.energy_max);
-    }
+    let want = digest_budget_units(&atom.genome, atom);
+    let (_taken, from_litter) = digest_labile(world, atom.gx, atom.gy, want);
+    let from_myc = colonize_and_compost(world, atom.gx, atom.gy, &atom.genome, atom, tick);
+    atom.energy = (atom.energy + from_litter + from_myc).min(atom.energy_max);
 
     atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);
     if atom.energy <= 0.0 {
         return PlantStep::Dead;
     }
-    if !dormant {
-        if let Some(child) = try_spore(world, atom, tick, entity_id, pop_room, wind_vx) {
-            return PlantStep::Sprout(child);
-        }
+    if let Some(child) = try_spore(world, atom, tick, entity_id, pop_room, wind_vx) {
+        return PlantStep::Sprout(child);
     }
     PlantStep::Alive {
         sat: 0,
@@ -1886,6 +1890,48 @@ mod tests {
             1,
             "prolonged starve should leave a corpse after hibernate max"
         );
+    }
+
+    #[test]
+    fn fungus_on_saturated_organic_gains_energy() {
+        let mut w = moist_sand_plot();
+        for y in 1..=4 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(200);
+            w.set_cell(4, y, org);
+        }
+        let mut store = OrganismStore::new();
+        let g = Genome {
+            digest_rate: 0.8,
+            ..Genome::default()
+        };
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            3,
+            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
+            40.0,
+            g,
+        ));
+        assert!(!crate::fungi::fungus_should_hibernate(&w, &store.atoms[0]));
+        store.atoms[0].energy = 20.0;
+        let e0 = store.atoms[0].energy;
+        for t in 1..=300 {
+            w.tick = t;
+            store.step(&mut w, t);
+        }
+        assert_eq!(store.len(), 1, "fungus on saturated Organic must live");
+        assert!(
+            store.atoms[0].energy + 1e-3 >= e0,
+            "energy should hold/rise on wet Organic (was {e0}, now {})",
+            store.atoms[0].energy
+        );
+        let threaded = (1..=4).any(|y| {
+            w.get_cell(4, y)
+                .map(|c| c.material == MaterialId::Organic && c.mycelium() > 0)
+                .unwrap_or(false)
+        });
+        assert!(threaded, "mycelium should advance");
     }
 
     #[test]
