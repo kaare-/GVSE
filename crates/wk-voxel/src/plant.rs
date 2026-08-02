@@ -114,15 +114,22 @@ pub const ROOT_ELONGATE_BASE_COST: f32 = 2.4;
 /// Energy to place one Stem / Photosystem pixel.
 pub const SHOOT_GROW_COST: f32 = 1.6;
 /// Energy fraction of spawn tank to fire a vegetative sprout.
-pub const LAND_SPROUT_ENERGY_FRAC: f32 = 0.52;
-/// Ticks between sprout attempts.
-pub const LAND_SPROUT_PERIOD: u64 = 48;
+/// High on purpose — one planted template must not rhizome-flood the
+/// entity pop cap (was 0.52 / 48 ticks → thousands of root-only sprouts).
+pub const LAND_SPROUT_ENERGY_FRAC: f32 = 0.72;
+/// Ticks between sprout attempts (~0.6 demo day at `DEMO_DAY_TICKS=1200`).
+pub const LAND_SPROUT_PERIOD: u64 = 720;
 /// Painted Root modules required before a sprout may fire.
-pub const LAND_SPROUT_MIN_ROOTS: usize = 3;
+pub const LAND_SPROUT_MIN_ROOTS: usize = 5;
 /// Max columns a rhizome sprout may emerge from the crown.
 pub const ROOT_SPROUT_MAX_DIST: i32 = 6;
 /// Fraction of spawn tank spent to sprout (child gets half).
-pub const LAND_SPROUT_COST_FRAC: f32 = 0.45;
+pub const LAND_SPROUT_COST_FRAC: f32 = 0.55;
+/// Neighbourhood half-width (columns) for local plant density gate.
+pub const SPROUT_LOCAL_RADIUS: i32 = 5;
+/// Max living land plants in `[gx±radius]` (including self) before rhizome
+/// sprouting is blocked. Stops a single founder from carpeting the hillside.
+pub const SPROUT_LOCAL_MAX: usize = 2;
 
 /// Moisture band driving photo / growth / hibernate gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1158,19 +1165,42 @@ pub fn pick_sprout_column(world: &World, atom: &Atom) -> Option<i32> {
     best.map(|_| best_wx)
 }
 
+/// Column distance on a possibly ring-wrapped world.
+pub fn column_dist(a: i32, b: i32, wrap_width: Option<i32>) -> i32 {
+    let d = (a - b).abs();
+    match wrap_width {
+        Some(w) if w > 0 => d.min(w - d.min(w)),
+        _ => d,
+    }
+}
+
+/// Count land plants whose crown column is within `radius` of `gx`.
+pub fn count_plants_near(plant_cols: &[i32], gx: i32, radius: i32, wrap_width: Option<i32>) -> usize {
+    plant_cols
+        .iter()
+        .filter(|&&px| column_dist(px, gx, wrap_width) <= radius)
+        .count()
+}
+
 /// Vegetative sucker: child plant on moist land at a lateral runner tip.
 ///
-/// Requires painted lateral root, enough roots, energy, and cooldown.
-/// Child chassis follows the parent (stemless stays stemless); genome is
-/// mutated then re-synced so alloc can't reintroduce a trunk.
+/// Requires painted lateral root, enough roots, energy, cooldown, global
+/// pop room, and local density below [`SPROUT_LOCAL_MAX`]. Child chassis
+/// follows the parent (stemless stays stemless); genome is mutated then
+/// re-synced so alloc can't reintroduce a trunk.
 pub fn try_vegetative_sprout(
     world: &World,
     atom: &mut Atom,
     tick: u64,
     entity_id: u32,
     pop_room: bool,
+    plant_cols: &[i32],
 ) -> Option<Atom> {
     if !pop_room || atom.cooldown > 0 {
+        return None;
+    }
+    let local = count_plants_near(plant_cols, atom.gx, SPROUT_LOCAL_RADIUS, world.wrap_width);
+    if local >= SPROUT_LOCAL_MAX {
         return None;
     }
     if root_count(atom) < LAND_SPROUT_MIN_ROOTS {
@@ -1181,6 +1211,11 @@ pub fn try_vegetative_sprout(
         return None;
     }
     let wx = pick_sprout_column(world, atom)?;
+    // Target neighbourhood must also have a free slot (includes parent if nearby).
+    let near_target = count_plants_near(plant_cols, wx, SPROUT_LOCAL_RADIUS, world.wrap_width);
+    if near_target >= SPROUT_LOCAL_MAX {
+        return None;
+    }
     let gy = find_plant_slot(world, wx, atom.gy)?;
     let cost = tank * LAND_SPROUT_COST_FRAC;
     if atom.energy < cost {
@@ -1196,7 +1231,8 @@ pub fn try_vegetative_sprout(
     let mut child = Atom::from_body(wx, gy, tank, body);
     apply_genome(&mut child, child_genome);
     child.energy = (cost * 0.5).clamp(1.0, child.energy_max);
-    child.cooldown = LAND_SPROUT_PERIOD;
+    // Children must mature a long time before chaining another sprout.
+    child.cooldown = LAND_SPROUT_PERIOD.saturating_mul(2);
     pin_plant_pose(&mut child);
     if !is_anchored(world, &child) {
         // Refund — site looked plantable but crown didn't seat.

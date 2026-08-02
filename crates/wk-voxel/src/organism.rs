@@ -49,6 +49,20 @@ fn default_max_corpses() -> usize {
     MAX_CORPSES
 }
 
+/// Living creature counts by habit (one entity each — not body pixels).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HabitCounts {
+    pub plants: usize,
+    pub fungi: usize,
+    pub plankton: usize,
+}
+
+impl HabitCounts {
+    pub fn total(self) -> usize {
+        self.plants + self.fungi + self.plankton
+    }
+}
+
 /// Why [`OrganismStore::spawn_blueprint_free`] refused a placement.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SpawnFail {
@@ -338,6 +352,21 @@ impl OrganismStore {
         self.atoms.is_empty()
     }
 
+    /// Living pop broken down by habit (for HUD / diagnostics).
+    pub fn habit_counts(&self) -> HabitCounts {
+        let mut c = HabitCounts::default();
+        for atom in &self.atoms {
+            if is_land_plant(atom) {
+                c.plants += 1;
+            } else if is_fungus(atom) {
+                c.fungi += 1;
+            } else {
+                c.plankton += 1;
+            }
+        }
+        c
+    }
+
     pub fn corpse_count(&self) -> usize {
         self.corpses.len()
     }
@@ -543,6 +572,13 @@ impl OrganismStore {
         let pop = self.atoms.len();
         let atom_cap = self.atom_cap();
         let growth_caps = self.growth_caps.clamp();
+        // Crown columns of living land plants — rhizome density gate.
+        let plant_cols: Vec<i32> = self
+            .atoms
+            .iter()
+            .filter(|a| is_land_plant(a))
+            .map(|a| a.gx)
+            .collect();
         // Transpiration return: (gx, gy, sat_units) → humidity mass.
         let mut transpired: Vec<(i32, i32, u32)> = Vec::new();
 
@@ -573,6 +609,7 @@ impl OrganismStore {
                     i as u32,
                     room,
                     &growth_caps,
+                    &plant_cols,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -770,6 +807,7 @@ fn step_land_plant(
     entity_id: u32,
     pop_room: bool,
     growth_caps: &PlantGrowthCaps,
+    plant_cols: &[i32],
 ) -> PlantStep {
     pin_plant_pose(atom);
     // Free-spawn / canopy clicks can leave a plant briefly unanchored.
@@ -843,7 +881,9 @@ fn step_land_plant(
     // Surplus → tissue (root / stem / leaf) from allocation genes.
     let _ = try_grow_plant(world, atom, tick, trunks, live_roots, growth_caps);
     sync_root_storage(atom);
-    if let Some(child) = try_vegetative_sprout(world, atom, tick, entity_id, pop_room) {
+    if let Some(child) =
+        try_vegetative_sprout(world, atom, tick, entity_id, pop_room, plant_cols)
+    {
         return PlantStep::Sprout(child);
     }
     PlantStep::Alive {
@@ -2500,6 +2540,7 @@ mod tests {
         a.body.push((-1, -1, ModuleId::Root));
         a.body.push((-2, -1, ModuleId::Root));
         a.body.push((1, -1, ModuleId::Root));
+        a.body.push((2, -1, ModuleId::Root));
         a.energy = 60.0;
         a.cooldown = 0;
         let n0 = store.len();
@@ -2573,6 +2614,7 @@ mod tests {
         a.body.push((-1, -1, ModuleId::Root));
         a.body.push((-2, -1, ModuleId::Root));
         a.body.push((1, -1, ModuleId::Root));
+        a.body.push((2, -1, ModuleId::Root));
         a.energy = 60.0;
         a.cooldown = 0;
         let n0 = store.len();
@@ -2595,6 +2637,38 @@ mod tests {
         let cols: std::collections::HashSet<i32> =
             store.atoms.iter().map(|a| a.gx).collect();
         assert!(cols.len() >= 2, "sprout should emerge on a neighbour column");
+    }
+
+    #[test]
+    fn single_plant_does_not_rhizome_flood_pop_cap() {
+        // Regression: one F2 plant template used to fill max_atoms with
+        // short-lived root sprouts (brown underground pepper, HUD at cap).
+        let mut w = moist_sand_plot();
+        for x in 0..12 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(160);
+            w.set_cell(x, 1, sand);
+        }
+        let mut store = OrganismStore::new();
+        store.max_atoms = 64;
+        let mut g = Genome::default();
+        g.alloc_root = 0.9;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        assert!(store.spawn_blueprint(&w, 4, 2, minimal_plant_body(), 80.0, g));
+        // Natural cooldowns — do not cheat period to zero.
+        for t in 0..4_000u64 {
+            if let Some(p) = store.atoms.first_mut() {
+                p.energy = p.energy_max;
+            }
+            store.step(&mut w, t);
+        }
+        let plants = store.habit_counts().plants;
+        assert!(
+            plants <= crate::plant::SPROUT_LOCAL_MAX + 1,
+            "one founder must not carpet the plot (plants={plants})"
+        );
+        assert!(plants >= 1);
     }
 
     #[test]
