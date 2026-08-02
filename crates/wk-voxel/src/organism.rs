@@ -958,13 +958,14 @@ fn step_fungus(
     }
 
     let mut upkeep = fungus_upkeep(atom, dormant);
-    // Light basal tax so empty chassis still burns sugar.
-    upkeep += UPKEEP_PER_MODULE * 0.35 * (0.45 + 0.55 * day);
+    // Light basal tax — kept low so Organic forage can sustain a
+    // Digest+Hypha body without soft litter (tissue upkeep is the main cost).
+    upkeep += UPKEEP_PER_MODULE * 0.12 * (0.45 + 0.55 * day);
 
     if !dormant {
         let want = digest_budget_units(&atom.genome, atom);
         let (_taken, from_litter) = digest_labile(world, atom.gx, atom.gy, want);
-        let from_myc = colonize_and_compost(world, atom.gx, atom.gy, &atom.genome, atom);
+        let from_myc = colonize_and_compost(world, atom.gx, atom.gy, &atom.genome, atom, tick);
         atom.energy = (atom.energy + from_litter + from_myc).min(atom.energy_max);
     }
 
@@ -1885,6 +1886,57 @@ mod tests {
             1,
             "prolonged starve should leave a corpse after hibernate max"
         );
+    }
+
+    #[test]
+    fn fungus_survives_and_threads_dry_organic_without_litter() {
+        // Repro of old F3 path: bone-dry Organic, fungus, no soft litter.
+        let mut w = moist_sand_plot();
+        for y in 1..=3 {
+            w.set_cell(4, y, Cell::solid(MaterialId::Organic));
+        }
+        let mut store = OrganismStore::new();
+        let g = Genome {
+            digest_rate: 1.0,
+            ..Genome::default()
+        };
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            3,
+            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
+            40.0,
+            g,
+        ));
+        store.atoms[0].energy = 20.0;
+        let e0 = store.atoms[0].energy;
+        for t in 1..=240 {
+            w.tick = t;
+            store.step(&mut w, t);
+        }
+        assert!(
+            !store.is_empty(),
+            "fungus on Organic must not starve out"
+        );
+        assert!(
+            store.atoms.iter().all(|a| a.drought_ticks == 0),
+            "must stay active on Organic"
+        );
+        let e_max = store
+            .atoms
+            .iter()
+            .map(|a| a.energy)
+            .fold(0.0f32, f32::max);
+        assert!(
+            e_max + 1e-3 >= e0 * 0.9,
+            "Organic forage should hold energy near start (was {e0}, now {e_max})"
+        );
+        let threaded = (1..=3).any(|y| {
+            w.get_cell(4, y)
+                .map(|c| c.material == MaterialId::Organic && c.mycelium() > 0)
+                .unwrap_or(false)
+        });
+        assert!(threaded, "mycelium should advance on Organic");
     }
 
     #[test]

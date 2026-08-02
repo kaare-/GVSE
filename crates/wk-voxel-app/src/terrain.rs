@@ -7,7 +7,7 @@
 
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
-use wk_voxel::{Cell, World};
+use wk_voxel::{water_capacity, Cell, Sat, World};
 
 /// Panel that steals clicks so world paint doesn't fire under UI.
 const PANEL_W: f32 = 300.0;
@@ -110,7 +110,16 @@ impl TerrainBrush {
             TerrainBrush::Rock => Cell::solid(MaterialId::Stone),
             TerrainBrush::Clay => Cell::solid(MaterialId::Clay),
             TerrainBrush::Soil => Cell::solid(MaterialId::Soil),
-            TerrainBrush::Organic => Cell::solid(MaterialId::Organic),
+            // Fresh litter bed — not bone-dry. `Cell::solid` leaves sat=0,
+            // which used to drought-hibernate fungi on F3-painted Organic
+            // before they could thread mycelium.
+            TerrainBrush::Organic => {
+                let mut c = Cell::solid(MaterialId::Organic);
+                let cap = water_capacity(MaterialId::Organic);
+                // ~35% pore fill — damp compost, still dark when rendered.
+                c.sat = Sat(((cap as u16 * 35) / 100).min(u8::MAX as u16) as u8);
+                c
+            }
             TerrainBrush::Limestone => Cell::solid(MaterialId::Limestone),
             TerrainBrush::Bedrock => Cell::solid(MaterialId::Bedrock),
         }
@@ -340,19 +349,43 @@ impl TerrainEditor {
 
     /// Paint or erase a disk of cells around `(gx, gy)`.
     pub fn apply_at(&self, world: &mut World, gx: i32, gy: i32) {
-        let cell = match self.tool {
-            TerrainTool::Erase => Cell::air(),
-            TerrainTool::Paint => self.brush.to_cell(),
-        };
         let r = self.radius.clamp(0, MAX_BRUSH_RADIUS);
         for dy in -r..=r {
             for dx in -r..=r {
                 if dx * dx + dy * dy > r * r {
                     continue;
                 }
-                world.set_cell(gx + dx, gy + dy, cell);
+                let nx = gx + dx;
+                let ny = gy + dy;
+                let cell = match self.tool {
+                    TerrainTool::Erase => Cell::air(),
+                    TerrainTool::Paint => self.paint_cell(world, nx, ny),
+                };
+                world.set_cell(nx, ny, cell);
             }
         }
+    }
+
+    /// Build the painted cell, inheriting pore water when covering wet ground
+    /// with Organic so a damp sand bed stays usable for fungi.
+    fn paint_cell(&self, world: &World, gx: i32, gy: i32) -> Cell {
+        let mut cell = self.brush.to_cell();
+        if self.brush != TerrainBrush::Organic {
+            return cell;
+        }
+        let Some(old) = world.get_cell(gx, gy) else {
+            return cell;
+        };
+        if old.material == MaterialId::Air || old.sat.is_empty() {
+            return cell;
+        }
+        let cap = water_capacity(MaterialId::Organic);
+        if cap == 0 {
+            return cell;
+        }
+        // Keep the wetter of brush default vs inherited pore water.
+        cell.sat.0 = cell.sat.0.max(old.sat.0.min(cap));
+        cell
     }
 
     pub fn draw(&self) {
@@ -539,6 +572,35 @@ mod tests {
             TerrainBrush::Rock.to_cell().material,
             MaterialId::Stone
         );
+    }
+
+    #[test]
+    fn organic_brush_is_damp_not_bone_dry() {
+        let c = TerrainBrush::Organic.to_cell();
+        assert_eq!(c.material, MaterialId::Organic);
+        assert!(
+            c.sat.0 > 0,
+            "F3 Organic must carry pore water so fungi can colonize"
+        );
+    }
+
+    #[test]
+    fn organic_paint_inherits_wetter_ground() {
+        let mut w = World::new(1);
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(180);
+        w.set_cell(5, 5, sand);
+        let ed = TerrainEditor {
+            brush: TerrainBrush::Organic,
+            tool: TerrainTool::Paint,
+            radius: 0,
+            ..TerrainEditor::default()
+        };
+        ed.apply_at(&mut w, 5, 5);
+        let c = w.get_cell(5, 5).unwrap();
+        assert_eq!(c.material, MaterialId::Organic);
+        let cap = water_capacity(MaterialId::Organic);
+        assert_eq!(c.sat.0, 180u8.min(cap));
     }
 
     #[test]
