@@ -58,18 +58,22 @@ Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 - Soft root:shoot budget; stressed moisture lifts root allowance
 - Hibernate band (`DROUGHT_DORMANT_FRAC`): slow upkeep, no photo/drink/growth; die after max dormant ticks
 
-### E1 — Litter + fungi *(landed)*
+### E1 — Litter + fungi *(landed; mycelium redesign)*
 
 | Gene | Role |
 |------|------|
-| `digest_rate` | Fungi digest speed |
+| `digest_rate` | Mycelium colonization cadence (+ soft-litter sip) |
 
 Features:
 
-- Soft litter field (`World::soft_litter`)
-- `Digest` / `Hypha` modules; digest soft litter first, then peel Organic → Air
-- Starve / dry hibernate (mirror plant drought); spore burst to neighbour litter
-- Editor: `F` fungus template, brushes `5` Digest / `6` Hypha
+- Soft litter field (`World::soft_litter`) — slow energy sip only
+- `Digest` / `Hypha` modules colonize Organic via `Cell::_pad` mycelium
+  intensity (faint cream threads in the renderer); **never** flash Organic → Sand
+- After long colonization, rare compost Organic → `MaterialId::Soil` with
+  pore sat preserved (excess pushed to neighbours; mild `COMPACTED` flag)
+- Placeable underground (nucleus in Organic) as well as Air-above-solid
+- Starve / dry hibernate; rare surface fruiting → wind-biased spores
+- Editor: `F` fungus template, brushes `5` Digest / `6` Hypha; F3 Soil brush
 
 ### E1b — Lingering corpses → Organic *(landed)*
 

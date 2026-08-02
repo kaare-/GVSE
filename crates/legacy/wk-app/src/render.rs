@@ -744,6 +744,7 @@ fn material_name(mat: MaterialId) -> &'static str {
         MaterialId::Gravel => "gravel",
         MaterialId::Sand => "sand",
         MaterialId::Clay => "clay",
+        MaterialId::Soil => "soil",
         MaterialId::Organic => "organic",
         MaterialId::Water => "water",
         MaterialId::Air => "air",
