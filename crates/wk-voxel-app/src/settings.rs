@@ -4,7 +4,7 @@
 
 use macroquad::prelude::*;
 use macroquad::ui::{hash, root_ui, widgets};
-use wk_material::{MaterialId, MaterialRegistry};
+use wk_material::{MaterialId, MaterialRegistry, MATERIAL_COUNT};
 use wk_voxel::{
     ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, FailureConfig, Genome, GrainConfig,
     KarstConfig, OrographicConfig, PerfConfig, PhaseConfig, PlantGrowthCaps, RainConfig, TempConfig,
