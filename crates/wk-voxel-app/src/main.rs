@@ -27,6 +27,7 @@
 //! - `F1` — toggle HUD chrome (bottom info/tools + block inspector)
 //! - `F2` — creature editor (Atom / plant MS-Paint; `C` stays condensation)
 //! - `F3` — terrain editor (paint / erase block types; world stays visible)
+//! - `F4` — creature list (living / dead roster; click row to inspect)
 //! - `F5` / `F9` — save / load simulation (`saves/*.gvsesim`)
 //! - `Tab` — live settings (world size, materials, wind, clouds, …)
 //! - click — block / organism inspector (hidden while F1 HUD is off)
@@ -37,6 +38,7 @@
 //! Sky follows the shared climate clock (sun by day, moon by night).
 //! Temperature tiles warm with sun, cool at night, and shade under clouds.
 
+mod creature_list;
 mod editor;
 mod inspector;
 mod palette;
@@ -55,6 +57,7 @@ use wk_voxel::{
     ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
 
+use crate::creature_list::CreatureList;
 use crate::editor::CreatureEditor;
 use crate::inspector::{draw_block_inspector, draw_selection_outline, screen_to_world};
 use crate::palette::cell_color;
@@ -433,6 +436,7 @@ async fn main() {
     let mut show_hud = true;
     let mut editor = CreatureEditor::default();
     let mut terrain = TerrainEditor::default();
+    let mut creature_list = CreatureList::default();
     let mut quit_dialog = QuitDialog::default();
     let mut inspect: Option<(i32, i32)> = None;
     let mut cam_x = 0.0f32;
@@ -481,6 +485,8 @@ async fn main() {
             } else if terrain.open {
                 terrain.open = false;
                 paused = terrain.was_paused;
+            } else if creature_list.open {
+                creature_list.open = false;
             } else if settings.open {
                 settings.open = false;
             } else {
@@ -492,6 +498,9 @@ async fn main() {
         }
         if !quit_dialog.open && is_key_pressed(KeyCode::Tab) && !editor.open && !terrain.open {
             settings.open = !settings.open;
+        }
+        if !quit_dialog.open && is_key_pressed(KeyCode::F4) {
+            creature_list.toggle();
         }
         // Editor is F2 only — `C` is condensation in the voxel demo
         // (column-GVSE can use C/F2 because it has no condensation toggle).
@@ -831,11 +840,20 @@ async fn main() {
         // Screen +y is down. World +y is up. Flip when placing rows.
         let origin_y = (sh + world_h_px) * 0.5 + cam_y;
 
+        // Creature list (F4) — before world clicks so rows steal the mouse.
+        if !quit_dialog.open {
+            if let Some(at) = creature_list.handle_input(&scene.organisms) {
+                inspect = Some(at);
+                show_hud = true;
+            }
+        }
+
         // World clicks: terrain paint, spawn picker, or block inspector.
         let (mx, my) = mouse_position();
         if !quit_dialog.open
             && terrain.open
             && !terrain.hits_panel(mx, my)
+            && !creature_list.hits_panel(mx, my)
             && !terrain.blocks_world_paint()
         {
             let paint = is_mouse_button_down(MouseButton::Left);
@@ -866,6 +884,7 @@ async fn main() {
             && (!editor.open || editor.spawn_picker)
             && !terrain.open
             && !settings.open
+            && !creature_list.hits_panel(mx, my)
         {
             if let Some((gx, gy)) = screen_to_world(
                 mx,
@@ -1206,6 +1225,7 @@ async fn main() {
         // Creature / terrain editor overlays (paint UI, or spawn banner).
         editor.draw();
         terrain.draw();
+        creature_list.draw(&scene.organisms);
         settings.draw(&mut scene.world);
         quit_dialog.draw();
 
@@ -1243,7 +1263,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/H/G|F1 HUD|F2 creat|F3 terra|F5/F9 save|Esc quit",
+                "Tab|Space|R|W/C/E/K/O|I|N/T/H/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,
