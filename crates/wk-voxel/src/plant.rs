@@ -1132,8 +1132,14 @@ pub fn has_lateral_runner(atom: &Atom) -> bool {
         .any(|&(dx, _, m)| m == ModuleId::Root && dx != 0)
 }
 
+/// True when a living land-plant crown already claims column `gx`.
+pub fn column_occupied(plant_cols: &[i32], gx: i32) -> bool {
+    plant_cols.iter().any(|&c| c == gx)
+}
+
 /// Pick a world column for vegetative sprout from a lateral runner tip.
-pub fn pick_sprout_column(world: &World, atom: &Atom) -> Option<i32> {
+/// Skips columns that already host a living crown (`plant_cols`).
+pub fn pick_sprout_column(world: &World, atom: &Atom, plant_cols: &[i32]) -> Option<i32> {
     if !has_lateral_runner(atom) || root_count(atom) < LAND_SPROUT_MIN_ROOTS {
         return None;
     }
@@ -1144,6 +1150,9 @@ pub fn pick_sprout_column(world: &World, atom: &Atom) -> Option<i32> {
             continue;
         }
         let wx = world.wrap_x(atom.gx + dx as i32);
+        if column_occupied(plant_cols, wx) {
+            continue;
+        }
         let dist = dx.abs() as i32;
         if dist < 1 || dist > ROOT_SPROUT_MAX_DIST {
             continue;
@@ -1186,9 +1195,10 @@ pub fn count_plants_near(plant_cols: &[i32], gx: i32, radius: i32, wrap_width: O
 /// Vegetative sucker: child plant on moist land at a lateral runner tip.
 ///
 /// Requires painted lateral root, enough roots, energy, cooldown, global
-/// pop room, and local density below [`SPROUT_LOCAL_MAX`]. Child chassis
-/// follows the parent (stemless stays stemless); genome is mutated then
-/// re-synced so alloc can't reintroduce a trunk.
+/// pop room, an **unoccupied** target column, and local density below
+/// [`SPROUT_LOCAL_MAX`]. Child chassis follows the parent (stemless stays
+/// stemless); genome is mutated then re-synced so alloc can't reintroduce
+/// a trunk.
 pub fn try_vegetative_sprout(
     world: &World,
     atom: &mut Atom,
@@ -1211,8 +1221,12 @@ pub fn try_vegetative_sprout(
     if atom.energy < tank * LAND_SPROUT_ENERGY_FRAC {
         return None;
     }
-    let wx = pick_sprout_column(world, atom)?;
-    // Target neighbourhood must also have a free slot (includes parent if nearby).
+    let wx = pick_sprout_column(world, atom, plant_cols)?;
+    // One living crown per column — never stack nuclei on the same seat.
+    if column_occupied(plant_cols, wx) {
+        return None;
+    }
+    // Target neighbourhood must also have room (includes parent if nearby).
     let near_target = count_plants_near(plant_cols, wx, SPROUT_LOCAL_RADIUS, world.wrap_width);
     if near_target >= SPROUT_LOCAL_MAX {
         return None;

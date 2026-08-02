@@ -543,8 +543,11 @@ impl OrganismStore {
         let pop = self.atoms.len();
         let atom_cap = self.atom_cap();
         let growth_caps = self.growth_caps.clamp();
-        // Crown columns of living land plants — rhizome density gate.
-        let plant_cols: Vec<i32> = self
+        // One crown per column: destack any pre-existing overlaps first.
+        reseat_stacked_land_plants(world, &mut self.atoms);
+        // Crown columns of living land plants — density + occupancy gate.
+        // Mutated as sprouts birth so same-tick siblings can't share a seat.
+        let mut plant_cols: Vec<i32> = self
             .atoms
             .iter()
             .filter(|a| is_land_plant(a))
@@ -588,7 +591,10 @@ impl OrganismStore {
                             transpired.push((at.0, at.1, sat));
                         }
                     }
-                    PlantStep::Sprout(child) => births.push(child),
+                    PlantStep::Sprout(child) => {
+                        plant_cols.push(child.gx);
+                        births.push(child);
+                    }
                 }
                 continue;
             }
@@ -763,6 +769,51 @@ enum PlantStep {
     Dead,
     Alive { sat: u32, at: (i32, i32) },
     Sprout(Atom),
+}
+
+/// Oldest land plant keeps its column; younger stack-mates reseat nearby.
+/// Fixes ghost-looking overlays from rhizome sprouts sharing one crown cell.
+fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
+    let mut land_idx: Vec<usize> = atoms
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| is_land_plant(a))
+        .map(|(i, _)| i)
+        .collect();
+    if land_idx.len() < 2 {
+        return;
+    }
+    // Oldest first — they claim the column.
+    land_idx.sort_by_key(|&i| std::cmp::Reverse(atoms[i].age_ticks));
+    let mut claimed = std::collections::HashSet::new();
+    for i in land_idx {
+        let gx = atoms[i].gx;
+        if claimed.insert(gx) {
+            continue;
+        }
+        let gy = atoms[i].gy;
+        let mut moved = false;
+        for dist in 1..=16 {
+            for sign in [1i32, -1] {
+                let nx = world.wrap_x(gx + sign * dist);
+                if claimed.contains(&nx) {
+                    continue;
+                }
+                let Some(ny) = find_plant_slot(world, nx, gy) else {
+                    continue;
+                };
+                atoms[i].gx = nx;
+                atoms[i].gy = ny;
+                pin_plant_pose(&mut atoms[i]);
+                claimed.insert(nx);
+                moved = true;
+                break;
+            }
+            if moved {
+                break;
+            }
+        }
+    }
 }
 
 /// Land plant tick: drink, shade photo, grow, maybe vegetative sprout.
@@ -2608,6 +2659,90 @@ mod tests {
         let cols: std::collections::HashSet<i32> =
             store.atoms.iter().map(|a| a.gx).collect();
         assert!(cols.len() >= 2, "sprout should emerge on a neighbour column");
+    }
+
+    #[test]
+    fn stacked_crowns_are_reseated_to_distinct_columns() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        let body = store.atoms[0].body.clone();
+        let gx = store.atoms[0].gx;
+        let gy = store.atoms[0].gy;
+        store.atoms[0].age_ticks = 500;
+        // Two younger clones stacked on the same crown cell.
+        for _ in 0..2 {
+            let mut twin = Atom::from_body(gx, gy, 40.0, body.clone());
+            twin.age_ticks = 10;
+            apply_genome(&mut twin, Genome::default());
+            pin_plant_pose(&mut twin);
+            store.atoms.push(twin);
+        }
+        assert_eq!(
+            store.atoms.iter().filter(|a| a.gx == gx && a.gy == gy).count(),
+            3
+        );
+        store.step(&mut w, 0);
+        let cols: std::collections::HashSet<i32> =
+            store.atoms.iter().map(|a| a.gx).collect();
+        assert_eq!(
+            cols.len(),
+            store.len(),
+            "living land crowns must not share a column after reseat"
+        );
+    }
+
+    #[test]
+    fn vegetative_sprout_skips_occupied_columns() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let mut g = Genome::default();
+        g.clone_fidelity = 0.5;
+        g.alloc_root = 0.8;
+        assert!(store.spawn_blueprint(&w, 4, 2, minimal_plant_body(), 60.0, g));
+        // Neighbour columns already claimed.
+        for &(x, age) in &[(3, 200u64), (5, 200)] {
+            let body = store.atoms[0].body.clone();
+            let mut other = Atom::from_body(x, 2, 40.0, body);
+            other.age_ticks = age;
+            apply_genome(&mut other, Genome::default());
+            pin_plant_pose(&mut other);
+            store.atoms.push(other);
+        }
+        let a = &mut store.atoms[0];
+        a.body.push((-1, -1, ModuleId::Root));
+        a.body.push((-2, -1, ModuleId::Root));
+        a.body.push((1, -1, ModuleId::Root));
+        a.body.push((2, -1, ModuleId::Root));
+        a.energy = 60.0;
+        a.cooldown = 0;
+        let n0 = store.len();
+        let cols0: std::collections::HashSet<i32> =
+            store.atoms.iter().map(|a| a.gx).collect();
+        for t in 0..80u64 {
+            store.step(&mut w, t);
+            if let Some(p) = store.atoms.first_mut() {
+                p.energy = p.energy_max;
+                p.cooldown = 0;
+            }
+        }
+        // May or may not sprout farther out, but must never stack on 3/4/5.
+        for a in &store.atoms {
+            let same = store
+                .atoms
+                .iter()
+                .filter(|b| b.gx == a.gx)
+                .count();
+            assert_eq!(same, 1, "column {} has {same} crowns", a.gx);
+        }
+        let _ = (n0, cols0);
     }
 
     #[test]
