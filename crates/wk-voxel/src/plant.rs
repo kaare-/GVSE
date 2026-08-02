@@ -126,10 +126,11 @@ pub const ROOT_SPROUT_MAX_DIST: i32 = 6;
 /// Fraction of spawn tank spent to sprout (child gets half).
 pub const LAND_SPROUT_COST_FRAC: f32 = 0.55;
 /// Neighbourhood half-width (columns) for local plant density gate.
-pub const SPROUT_LOCAL_RADIUS: i32 = 5;
-/// Max living land plants in `[gx±radius]` (including self) before rhizome
-/// sprouting is blocked. Stops a single founder from carpeting the hillside.
-pub const SPROUT_LOCAL_MAX: usize = 2;
+pub const SPROUT_LOCAL_RADIUS: i32 = 4;
+/// Max living crowns in `[gx±radius]` (including self) before rhizome
+/// sprouting is blocked. High enough for a slow local grove; the long
+/// [`LAND_SPROUT_PERIOD`] is what stops one template filling the pop cap.
+pub const SPROUT_LOCAL_MAX: usize = 8;
 
 /// Moisture band driving photo / growth / hibernate gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

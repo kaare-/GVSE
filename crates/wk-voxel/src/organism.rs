@@ -2628,15 +2628,17 @@ mod tests {
         g.alloc_leaf = 0.05;
         assert!(store.spawn_blueprint(&w, 4, 2, minimal_plant_body(), 80.0, g));
         // Natural cooldowns — do not cheat period to zero.
+        // ~3–4 max sprout windows in 4k ticks at period 720; must stay
+        // far below a pop-cap carpet even with energy cheated full.
         for t in 0..4_000u64 {
-            if let Some(p) = store.atoms.first_mut() {
+            for p in &mut store.atoms {
                 p.energy = p.energy_max;
             }
             store.step(&mut w, t);
         }
         let n = store.len();
         assert!(
-            n <= crate::plant::SPROUT_LOCAL_MAX + 1,
+            n < 16,
             "one founder must not carpet the plot (creatures={n})"
         );
         assert!(n >= 1);

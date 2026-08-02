@@ -51,10 +51,9 @@ Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 - `Genome::mutate` with `clone_fidelity`
 - Soft pop cap shared with Atoms
 - Root elongation biases sideways when banking for a sprout
-- **Anti-flood:** long sprout period (~0.6 demo day), high energy gate,
-  ≥5 roots, and local density ≤2 crowns in ±5 columns — one planted
-  template must not fill the creature entity cap with underground
-  root sprouts.
+- **Anti-flood:** long sprout period (~0.6 demo day), higher energy /
+  root gates, and a soft local density cap (≤8 crowns in ±4 columns) so
+  a grove can form slowly without one template filling the creature cap.
 
 ### D4 — Drought banking *(landed)*
 
