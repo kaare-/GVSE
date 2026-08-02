@@ -71,10 +71,9 @@ Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 Features:
 
 - Soft litter field (`World::soft_litter`) — bonus energy sip
-- `Digest` / `Hypha` modules colonize Organic via `Cell::_pad` mycelium
-  intensity (faint cream threads in the renderer); **never** flash Organic → Sand
-- Organic substrate itself sustains forage energy (dry painted beds still
-  thread slowly); hibernate only with no litter **and** no Organic
+- Organic substrate sustains forage energy (no cell destroy); mycelium
+  threads in `Cell::_pad`; **never** flash Organic → Sand
+- Standing rain water counts as moisture; Organic beds do not drought-hibernate
 - After long colonization, rare compost Organic → `MaterialId::Soil` with
   pore sat preserved (excess pushed to neighbours; mild `COMPACTED` flag)
 - Placeable underground (nucleus in Organic) as well as Air-above-solid

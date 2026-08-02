@@ -23,8 +23,8 @@ use crate::blueprint::Genome;
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
     colonize_and_compost, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
-    fungus_should_hibernate,
-    fungus_upkeep, is_fungus, is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
+    forage_organic_energy, fungus_should_hibernate, fungus_upkeep, is_fungus,
+    is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -953,34 +953,31 @@ fn step_fungus(
         if atom.drought_ticks >= FUNGUS_HIBERNATE_MAX_TICKS {
             return PlantStep::Dead;
         }
-        // Hibernate: tiny upkeep, but do not energy-starve to death —
-        // only the dormant-tick cap ends a starving fungus. (Active
-        // ticks still die at energy 0 when forage fails.)
-        let upkeep = fungus_upkeep(atom, true);
-        atom.energy = (atom.energy - upkeep).max(0.05).min(atom.energy_max);
-        return PlantStep::Alive {
-            sat: 0,
-            at: (atom.gx, atom.gy),
-        };
+    } else {
+        atom.drought_ticks = 0;
     }
-    atom.drought_ticks = 0;
 
-    let mut upkeep = fungus_upkeep(atom, false);
-    // Light basal tax — kept low so Organic forage can sustain a
-    // Digest+Hypha body without soft litter (tissue upkeep is the main cost).
-    upkeep += UPKEEP_PER_MODULE * 0.12 * (0.45 + 0.55 * day);
+    let mut upkeep = fungus_upkeep(atom, dormant);
+    // Light basal tax so empty chassis still burns sugar.
+    upkeep += UPKEEP_PER_MODULE * 0.35 * (0.45 + 0.55 * day);
 
-    let want = digest_budget_units(&atom.genome, atom);
-    let (_taken, from_litter) = digest_labile(world, atom.gx, atom.gy, want);
-    let from_myc = colonize_and_compost(world, atom.gx, atom.gy, &atom.genome, atom, tick);
-    atom.energy = (atom.energy + from_litter + from_myc).min(atom.energy_max);
+    if !dormant {
+        let want = digest_budget_units(&atom.genome, atom);
+        let (_taken, from_litter) = digest_labile(world, atom.gx, atom.gy, want);
+        let from_organic = forage_organic_energy(world, atom.gx, atom.gy, &atom.genome, atom);
+        let from_myc = colonize_and_compost(world, atom.gx, atom.gy, &atom.genome, atom);
+        atom.energy =
+            (atom.energy + from_litter + from_organic + from_myc).min(atom.energy_max);
+    }
 
     atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);
     if atom.energy <= 0.0 {
         return PlantStep::Dead;
     }
-    if let Some(child) = try_spore(world, atom, tick, entity_id, pop_room, wind_vx) {
-        return PlantStep::Sprout(child);
+    if !dormant {
+        if let Some(child) = try_spore(world, atom, tick, entity_id, pop_room, wind_vx) {
+            return PlantStep::Sprout(child);
+        }
     }
     PlantStep::Alive {
         sat: 0,
@@ -1893,13 +1890,16 @@ mod tests {
     }
 
     #[test]
-    fn fungus_on_saturated_organic_gains_energy() {
+    fn fungus_on_humid_organic_without_litter_grows_mycelium() {
+        // Rain-soaked Organic, no soft litter: must stay active, hold energy,
+        // and advance mycelium (the reported "dies in humid organic" case).
         let mut w = moist_sand_plot();
-        for y in 1..=4 {
+        for y in 1..=3 {
             let mut org = Cell::solid(MaterialId::Organic);
             org.sat = Sat(200);
             w.set_cell(4, y, org);
         }
+        w.set_cell(4, 4, Cell::water()); // ponded rain above
         let mut store = OrganismStore::new();
         let g = Genome {
             digest_rate: 0.8,
@@ -1913,76 +1913,29 @@ mod tests {
             40.0,
             g,
         ));
-        assert!(!crate::fungi::fungus_should_hibernate(&w, &store.atoms[0]));
+        assert!(
+            !crate::fungi::fungus_should_hibernate(&w, &store.atoms[0]),
+            "humid Organic must not hibernate"
+        );
         store.atoms[0].energy = 20.0;
         let e0 = store.atoms[0].energy;
-        for t in 1..=300 {
+        for t in 1..=320 {
             w.tick = t;
             store.step(&mut w, t);
         }
-        assert_eq!(store.len(), 1, "fungus on saturated Organic must live");
+        assert_eq!(store.len(), 1, "must not starve on humid Organic");
+        assert_eq!(store.atoms[0].drought_ticks, 0);
         assert!(
             store.atoms[0].energy + 1e-3 >= e0,
-            "energy should hold/rise on wet Organic (was {e0}, now {})",
+            "Organic forage should hold energy (was {e0}, now {})",
             store.atoms[0].energy
-        );
-        let threaded = (1..=4).any(|y| {
-            w.get_cell(4, y)
-                .map(|c| c.material == MaterialId::Organic && c.mycelium() > 0)
-                .unwrap_or(false)
-        });
-        assert!(threaded, "mycelium should advance");
-    }
-
-    #[test]
-    fn fungus_survives_and_threads_dry_organic_without_litter() {
-        // Repro of old F3 path: bone-dry Organic, fungus, no soft litter.
-        let mut w = moist_sand_plot();
-        for y in 1..=3 {
-            w.set_cell(4, y, Cell::solid(MaterialId::Organic));
-        }
-        let mut store = OrganismStore::new();
-        let g = Genome {
-            digest_rate: 1.0,
-            ..Genome::default()
-        };
-        assert!(store.spawn_blueprint(
-            &w,
-            4,
-            3,
-            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
-            40.0,
-            g,
-        ));
-        store.atoms[0].energy = 20.0;
-        let e0 = store.atoms[0].energy;
-        for t in 1..=240 {
-            w.tick = t;
-            store.step(&mut w, t);
-        }
-        assert!(
-            !store.is_empty(),
-            "fungus on Organic must not starve out"
-        );
-        assert!(
-            store.atoms.iter().all(|a| a.drought_ticks == 0),
-            "must stay active on Organic"
-        );
-        let e_max = store
-            .atoms
-            .iter()
-            .map(|a| a.energy)
-            .fold(0.0f32, f32::max);
-        assert!(
-            e_max + 1e-3 >= e0 * 0.9,
-            "Organic forage should hold energy near start (was {e0}, now {e_max})"
         );
         let threaded = (1..=3).any(|y| {
             w.get_cell(4, y)
                 .map(|c| c.material == MaterialId::Organic && c.mycelium() > 0)
                 .unwrap_or(false)
         });
-        assert!(threaded, "mycelium should advance on Organic");
+        assert!(threaded, "mycelium must advance on humid Organic");
     }
 
     #[test]

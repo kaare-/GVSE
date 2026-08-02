@@ -7,7 +7,7 @@
 
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
-use wk_voxel::{add_soft_litter, water_capacity, Cell, Sat, World};
+use wk_voxel::{Cell, World};
 
 /// Panel that steals clicks so world paint doesn't fire under UI.
 const PANEL_W: f32 = 300.0;
@@ -110,16 +110,7 @@ impl TerrainBrush {
             TerrainBrush::Rock => Cell::solid(MaterialId::Stone),
             TerrainBrush::Clay => Cell::solid(MaterialId::Clay),
             TerrainBrush::Soil => Cell::solid(MaterialId::Soil),
-            // Fresh litter bed — not bone-dry. `Cell::solid` leaves sat=0,
-            // which used to drought-hibernate fungi on F3-painted Organic
-            // before they could thread mycelium.
-            TerrainBrush::Organic => {
-                let mut c = Cell::solid(MaterialId::Organic);
-                let cap = water_capacity(MaterialId::Organic);
-                // ~35% pore fill — damp compost, still dark when rendered.
-                c.sat = Sat(((cap as u16 * 35) / 100).min(u8::MAX as u16) as u8);
-                c
-            }
+            TerrainBrush::Organic => Cell::solid(MaterialId::Organic),
             TerrainBrush::Limestone => Cell::solid(MaterialId::Limestone),
             TerrainBrush::Bedrock => Cell::solid(MaterialId::Bedrock),
         }
@@ -349,72 +340,19 @@ impl TerrainEditor {
 
     /// Paint or erase a disk of cells around `(gx, gy)`.
     pub fn apply_at(&self, world: &mut World, gx: i32, gy: i32) {
+        let cell = match self.tool {
+            TerrainTool::Erase => Cell::air(),
+            TerrainTool::Paint => self.brush.to_cell(),
+        };
         let r = self.radius.clamp(0, MAX_BRUSH_RADIUS);
         for dy in -r..=r {
             for dx in -r..=r {
                 if dx * dx + dy * dy > r * r {
                     continue;
                 }
-                let nx = gx + dx;
-                let ny = gy + dy;
-                match self.tool {
-                    TerrainTool::Erase => {
-                        world.set_cell(nx, ny, Cell::air());
-                    }
-                    TerrainTool::Paint => {
-                        let cell = self.paint_cell(world, nx, ny);
-                        let painted_organic = cell.material == MaterialId::Organic
-                            && self.brush == TerrainBrush::Organic;
-                        world.set_cell(nx, ny, cell);
-                        // Labile crumbs for fungi — Organic cells are substrate,
-                        // soft litter is the sipable fuel bank.
-                        if painted_organic {
-                            add_soft_litter(world, nx, 6);
-                        }
-                    }
-                }
+                world.set_cell(gx + dx, gy + dy, cell);
             }
         }
-    }
-
-    /// Build the painted cell.
-    ///
-    /// - **Water on porous solid** fills pore `sat` in place (does **not**
-    ///   replace Organic/Sand/Soil with wet Air — that used to delete the
-    ///   fungus bed when players tried to "saturate" it).
-    /// - **Organic** inherits wetter ground sat when covering damp cells.
-    fn paint_cell(&self, world: &World, gx: i32, gy: i32) -> Cell {
-        if self.brush == TerrainBrush::Water {
-            if let Some(old) = world.get_cell(gx, gy) {
-                if old.material != MaterialId::Air {
-                    let cap = water_capacity(old.material);
-                    if cap > 0 {
-                        let mut soaked = old;
-                        soaked.sat.0 = cap;
-                        return soaked;
-                    }
-                }
-            }
-            return Cell::water();
-        }
-
-        let mut cell = self.brush.to_cell();
-        if self.brush != TerrainBrush::Organic {
-            return cell;
-        }
-        let Some(old) = world.get_cell(gx, gy) else {
-            return cell;
-        };
-        if old.material == MaterialId::Air || old.sat.is_empty() {
-            return cell;
-        }
-        let cap = water_capacity(MaterialId::Organic);
-        if cap == 0 {
-            return cell;
-        }
-        // Keep the wetter of brush default vs inherited pore water.
-        cell.sat.0 = cell.sat.0.max(old.sat.0.min(cap));
-        cell
     }
 
     pub fn draw(&self) {
@@ -558,7 +496,7 @@ impl TerrainEditor {
 
         let foot_y = oy + 6.0 * (SWATCH + SWATCH_GAP + 16.0) + 12.0;
         draw_text(
-            "LMB paint  RMB erase  ·  Water soaks solids",
+            "LMB paint  RMB erase  ·  drag size slider",
             PANEL_PAD,
             foot_y,
             13.0,
@@ -601,73 +539,6 @@ mod tests {
             TerrainBrush::Rock.to_cell().material,
             MaterialId::Stone
         );
-    }
-
-    #[test]
-    fn organic_brush_is_damp_not_bone_dry() {
-        let c = TerrainBrush::Organic.to_cell();
-        assert_eq!(c.material, MaterialId::Organic);
-        assert!(
-            c.sat.0 > 0,
-            "F3 Organic must carry pore water so fungi can colonize"
-        );
-    }
-
-    #[test]
-    fn organic_paint_inherits_wetter_ground() {
-        let mut w = World::new(1);
-        let mut sand = Cell::solid(MaterialId::Sand);
-        sand.sat = Sat(180);
-        w.set_cell(5, 5, sand);
-        let ed = TerrainEditor {
-            brush: TerrainBrush::Organic,
-            tool: TerrainTool::Paint,
-            radius: 0,
-            ..TerrainEditor::default()
-        };
-        ed.apply_at(&mut w, 5, 5);
-        let c = w.get_cell(5, 5).unwrap();
-        assert_eq!(c.material, MaterialId::Organic);
-        let cap = water_capacity(MaterialId::Organic);
-        assert_eq!(c.sat.0, 180u8.min(cap));
-    }
-
-    #[test]
-    fn water_brush_soaks_organic_instead_of_replacing() {
-        let mut w = World::new(1);
-        let mut org = Cell::solid(MaterialId::Organic);
-        org.sat = Sat(20);
-        w.set_cell(5, 5, org);
-        let ed = TerrainEditor {
-            brush: TerrainBrush::Water,
-            tool: TerrainTool::Paint,
-            radius: 0,
-            ..TerrainEditor::default()
-        };
-        ed.apply_at(&mut w, 5, 5);
-        let c = w.get_cell(5, 5).unwrap();
-        assert_eq!(
-            c.material,
-            MaterialId::Organic,
-            "saturating must not delete Organic into wet Air"
-        );
-        assert_eq!(c.sat.0, water_capacity(MaterialId::Organic));
-    }
-
-    #[test]
-    fn water_brush_still_fills_air_as_free_water() {
-        let mut w = World::new(1);
-        w.set_cell(5, 5, Cell::air());
-        let ed = TerrainEditor {
-            brush: TerrainBrush::Water,
-            tool: TerrainTool::Paint,
-            radius: 0,
-            ..TerrainEditor::default()
-        };
-        ed.apply_at(&mut w, 5, 5);
-        let c = w.get_cell(5, 5).unwrap();
-        assert_eq!(c.material, MaterialId::Air);
-        assert_eq!(c.sat, Sat::FULL);
     }
 
     #[test]

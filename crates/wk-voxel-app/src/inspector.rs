@@ -153,14 +153,8 @@ pub fn draw_block_inspector(
         if is_fungus(atom) {
             lines.push("habit=fungus (mycelium on Organic → Soil)".into());
             lines.push(format!(
-                "digest_rate={:.2}  drought_ticks={}{}",
-                atom.genome.digest_rate,
-                atom.drought_ticks,
-                if atom.drought_ticks > 0 {
-                    " (hibernating — need Organic)"
-                } else {
-                    ""
-                }
+                "digest_rate={:.2}  drought_ticks={}",
+                atom.genome.digest_rate, atom.drought_ticks
             ));
             let digests = atom
                 .body

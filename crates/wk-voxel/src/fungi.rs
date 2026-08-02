@@ -27,15 +27,15 @@ pub const DIGEST_MAX_UNITS: u16 = 1;
 /// Energy gained per soft-litter unit digested.
 pub const DIGEST_ENERGY_PER_UNIT: f32 = 0.55;
 /// Tiny energy from advancing mycelium one step (not from destroying cells).
-pub const MYCELIUM_ENERGY: f32 = 0.12;
-/// Baseline energy / tick while hyphae forage on Organic substrate.
-/// Soft litter is a bonus sip; Organic alone must keep a seated fungus alive
-/// even on dry / low-`digest_rate` beds.
-pub const MYCELIUM_FORAGE: f32 = 0.075;
+pub const MYCELIUM_ENERGY: f32 = 0.08;
+/// Energy / tick while Digest forages labile Organic in place.
+/// Soft litter is optional boom fuel; Organic substrate must sustain the
+/// fungus or humid beds starve before mycelium is visible.
+pub const ORGANIC_FORAGE_ENERGY: f32 = 0.055;
 /// Ticks between mycelium growth pulses on a local Organic cell.
-pub const MYCELIUM_GROW_PERIOD: u64 = 24;
+pub const MYCELIUM_GROW_PERIOD: u64 = 32;
 /// Mycelium intensity gained per growth pulse (toward 255).
-pub const MYCELIUM_GROW_AMOUNT: u8 = 2;
+pub const MYCELIUM_GROW_AMOUNT: u8 = 1;
 /// Intensity before Organic may compost into Soil.
 pub const MYCELIUM_SOIL_THRESHOLD: u8 = 220;
 /// 1-in-N chance per eligible growth pulse to compost a fully threaded cell.
@@ -148,7 +148,11 @@ pub fn has_organic_substrate(world: &World, gx: i32, gy: i32) -> bool {
     organic_cells_near(world, gx, gy) > 0
 }
 
-/// Pore moisture under / around the fungus (supports underground seats).
+/// Pore / standing-water moisture under / around the fungus.
+///
+/// Free-water Air (`sat > 0`) counts — rain ponds on Organic are how beds
+/// get humid. Skipping Air made rain-wet columns look bone-dry and forced
+/// drought hibernate (no mycelium growth).
 pub fn fungus_moisture_frac(world: &World, atom: &Atom) -> f32 {
     let gx = world.wrap_x(atom.gx);
     let mut best = 0.0f32;
@@ -156,6 +160,9 @@ pub fn fungus_moisture_frac(world: &World, atom: &Atom) -> f32 {
         let y = atom.gy + dy;
         if let Some(c) = world.get_cell(gx, y) {
             if c.material == MaterialId::Air {
+                if !c.sat.is_empty() {
+                    best = best.max(c.sat.0 as f32 / u8::MAX as f32);
+                }
                 continue;
             }
             let cap = water_capacity(c.material);
@@ -167,22 +174,32 @@ pub fn fungus_moisture_frac(world: &World, atom: &Atom) -> f32 {
     best
 }
 
-/// True when fungi should hibernate (no litter and no Organic).
+/// True when fungi should hibernate (no food bed, or bone-dry without Organic).
 ///
-/// Bone-dry seats without Organic still dormancy. Painted Organic is the
-/// colony substrate even at sat=0 — drought only slows foraging (see
-/// [`colonize_and_compost`]), it must not shut the fungus off entirely or
-/// editor-placed beds starve to death without ever threading.
+/// Organic substrate is a live colony bed — do not drought-hibernate just
+/// because pores are briefly dry under a rain film.
 pub fn fungus_should_hibernate(world: &World, atom: &Atom) -> bool {
     let litter = labile_food_units(world, atom.gx, atom.gy);
     let substrate = has_organic_substrate(world, atom.gx, atom.gy);
     if litter < FUNGUS_STARVE_UNITS && !substrate {
         return true;
     }
-    if !substrate && fungus_moisture_frac(world, atom) < FUNGUS_DROUGHT_FRAC {
-        return true;
+    if substrate {
+        return false;
     }
-    false
+    fungus_moisture_frac(world, atom) < FUNGUS_DROUGHT_FRAC
+}
+
+/// Labile forage from nearby Organic. Does not destroy or convert cells —
+/// mycelium intensity is the visible progress ([`colonize_and_compost`]).
+pub fn forage_organic_energy(world: &World, gx: i32, gy: i32, genome: &Genome, atom: &Atom) -> f32 {
+    if !has_organic_substrate(world, gx, gy) {
+        return 0.0;
+    }
+    let n_d = digest_count(atom).max(1) as f32;
+    let n_h = hypha_count(atom) as f32;
+    let rate = genome.digest_rate.clamp(0.05, 2.0);
+    ORGANIC_FORAGE_ENERGY * n_d * (1.0 + 0.10 * n_h) * rate.clamp(0.5, 1.5)
 }
 
 /// Soft-litter sip budget from gene + modules (capped low — mycelium is slow).
@@ -303,74 +320,47 @@ pub fn digest_labile(world: &mut World, gx: i32, _gy: i32, want: u16) -> (u16, f
 
 /// Grow mycelium with gene/hypha scaling; compost when ready.
 /// Preferred entry from `step_fungus` (includes genome).
-///
-/// Returns forage energy every call when Organic is in range (keeps a
-/// seated fungus alive without soft litter). Intensity pulses on a
-/// slower cadence; dry beds slow both forage and threading but do not
-/// zero them out.
 pub fn colonize_and_compost(
     world: &mut World,
     gx: i32,
     gy: i32,
     genome: &Genome,
     atom: &Atom,
-    tick: u64,
 ) -> f32 {
+    let mut energy = 0.0f32;
+    let n_h = hypha_count(atom) as u8;
+    let rate = genome.digest_rate.clamp(0.05, 2.0);
+    // Period stretches when digest_rate is low; high rate shortens slightly.
+    let period = ((MYCELIUM_GROW_PERIOD as f32) / rate.clamp(0.25, 2.0)).round() as u64;
+    let period = period.max(8);
+    if world.tick % period != 0 {
+        return 0.0;
+    }
     let Some((ox, oy)) = find_organic_xy(world, gx, gy) else {
         return 0.0;
     };
-    let n_h = hypha_count(atom) as u8;
-    let rate = genome.digest_rate.clamp(0.05, 2.0);
-    let moist = fungus_moisture_frac(world, atom);
-    // Dry Organic still feeds slowly; wet beds forage at full rate.
-    let moist_scale = if moist < FUNGUS_DROUGHT_FRAC {
-        0.55
-    } else {
-        (0.70 + 0.30 * moist.clamp(0.0, 1.0)).clamp(0.55, 1.0)
-    };
-    // Forage stipend stays near break-even even at low digest_rate —
-    // that gene paces threading, not whether the fungus can live on Organic.
-    let forage_rate = rate.clamp(0.85, 1.5);
-    let mut energy = MYCELIUM_FORAGE
-        * (1.0 + 0.06 * n_h as f32)
-        * forage_rate
-        * moist_scale;
-
-    // Period stretches when digest_rate is low; high rate shortens slightly.
-    // Use the organism tick (not only `world.tick`) so growth stays paced
-    // even when callers forget to sync World::tick in tests.
-    let period = ((MYCELIUM_GROW_PERIOD as f32) / rate.clamp(0.25, 2.0)).round() as u64;
-    let period = period.max(8);
-    if tick % period == 0 {
-        if let Some(mut c) = world.get_cell(ox, oy) {
-            let before = c.mycelium();
-            if before < 255 {
-                let add = MYCELIUM_GROW_AMOUNT.saturating_add(n_h / 4).max(1);
-                // Dry beds thread more slowly.
-                let add = if moist < FUNGUS_DROUGHT_FRAC {
-                    add.min(1)
-                } else {
-                    add.min(3)
-                };
-                c.set_mycelium(before.saturating_add(add));
-                world.set_cell(ox, oy, c);
-                energy += MYCELIUM_ENERGY * (1.0 + 0.05 * n_h as f32) * moist_scale;
-            }
-            let intensity = world
-                .get_cell(ox, oy)
-                .map(|c| c.mycelium())
-                .unwrap_or(before);
-            if intensity >= MYCELIUM_SOIL_THRESHOLD {
-                let h = hash_u64(world.seed.0, tick, ox as u64, oy as u64);
-                if h % MYCELIUM_SOIL_CONVERT_ODDS == 0 {
-                    compost_organic_to_soil(world, ox, oy);
-                }
+    if let Some(mut c) = world.get_cell(ox, oy) {
+        let before = c.mycelium();
+        if before < 255 {
+            let add = MYCELIUM_GROW_AMOUNT.saturating_add(n_h / 4).max(1);
+            c.set_mycelium(before.saturating_add(add.min(3)));
+            world.set_cell(ox, oy, c);
+            energy += MYCELIUM_ENERGY * (1.0 + 0.05 * n_h as f32);
+        }
+        let intensity = world
+            .get_cell(ox, oy)
+            .map(|c| c.mycelium())
+            .unwrap_or(before);
+        if intensity >= MYCELIUM_SOIL_THRESHOLD {
+            let h = hash_u64(world.seed.0, world.tick, ox as u64, oy as u64);
+            if h % MYCELIUM_SOIL_CONVERT_ODDS == 0 {
+                compost_organic_to_soil(world, ox, oy);
             }
         }
-        let h = hash_u64(world.seed.0, tick, gx as u64, 0x51CE_A11C);
-        if h % MYCELIUM_SPREAD_ODDS == 0 {
-            spread_mycelium_once(world, ox, oy);
-        }
+    }
+    let h = hash_u64(world.seed.0, world.tick, gx as u64, 0x51CE_A11C);
+    if h % MYCELIUM_SPREAD_ODDS == 0 {
+        spread_mycelium_once(world, ox, oy);
     }
     energy
 }
@@ -700,12 +690,13 @@ mod tests {
             org.sat = Sat(100);
             w.set_cell(4, y, org);
         }
+        w.tick = MYCELIUM_GROW_PERIOD;
         let g = Genome {
             digest_rate: 1.0,
             ..Genome::default()
         };
         let atom = Atom::from_body(4, 3, 40.0, fungus_body());
-        let _ = colonize_and_compost(&mut w, 4, 3, &g, &atom, MYCELIUM_GROW_PERIOD);
+        let _ = colonize_and_compost(&mut w, 4, 3, &g, &atom);
         let sands = (1..=4)
             .filter(|&y| {
                 w.get_cell(4, y)
@@ -770,34 +761,23 @@ mod tests {
     }
 
     #[test]
-    fn dry_organic_substrate_does_not_hibernate() {
-        // Fully dry column of Organic (old F3 sat=0) — still a food bed.
+    fn ponded_rain_above_dry_organic_counts_as_humid() {
         let mut w = litter_plot();
+        // Dry bedrock column — no wet sand below to mask the bug.
         for y in 1..=4 {
-            w.set_cell(4, y, Cell::solid(MaterialId::Organic));
+            w.set_cell(4, y, Cell::solid(MaterialId::Bedrock));
         }
-        let atom = Atom::from_body(4, 2, 40.0, fungus_body());
-        assert_eq!(fungus_moisture_frac(&w, &atom), 0.0);
+        w.set_cell(4, 2, Cell::solid(MaterialId::Organic)); // dry pores
+        w.set_cell(4, 3, Cell::water()); // rain pond
+        let atom = Atom::from_body(4, 3, 40.0, fungus_body());
+        let moist = fungus_moisture_frac(&w, &atom);
+        assert!(
+            moist > FUNGUS_DROUGHT_FRAC,
+            "ponded rain must count as moisture (got {moist})"
+        );
         assert!(
             !fungus_should_hibernate(&w, &atom),
-            "dry Organic must not force drought hibernate"
-        );
-    }
-
-    #[test]
-    fn forage_on_organic_without_litter_is_positive() {
-        let mut w = litter_plot();
-        w.set_cell(4, 2, Cell::solid(MaterialId::Organic));
-        let g = Genome {
-            digest_rate: 1.0,
-            ..Genome::default()
-        };
-        let atom = Atom::from_body(4, 2, 40.0, fungus_body());
-        // Off-pulse tick — forage stipend still applies.
-        let e = colonize_and_compost(&mut w, 4, 2, &g, &atom, 1);
-        assert!(
-            e >= MYCELIUM_FORAGE * 0.5,
-            "Organic forage must yield energy without soft litter (got {e})"
+            "must not drought-hibernate on rain-wet Organic bed"
         );
     }
 
@@ -807,6 +787,22 @@ mod tests {
         w.set_cell(4, 3, Cell::solid(MaterialId::Organic));
         let atom = Atom::from_body(4, 3, 40.0, fungus_body());
         assert!(is_fungus_seated(&w, &atom));
+    }
+
+    #[test]
+    fn organic_forage_without_litter_is_positive() {
+        let mut w = litter_plot();
+        w.set_cell(4, 2, Cell::solid(MaterialId::Organic));
+        let g = Genome {
+            digest_rate: 1.0,
+            ..Genome::default()
+        };
+        let atom = Atom::from_body(4, 2, 40.0, fungus_body());
+        let e = forage_organic_energy(&w, 4, 2, &g, &atom);
+        assert!(
+            e >= ORGANIC_FORAGE_ENERGY * 0.5,
+            "Organic forage must yield energy without soft litter (got {e})"
+        );
     }
 
     #[test]
