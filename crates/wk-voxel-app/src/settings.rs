@@ -85,9 +85,9 @@ pub struct SimSettings {
     pub shear_chance_pct: f32,
     pub wind_vx: f32,
     pub humidity_diffusion_alpha: f32,
-    /// Scratch f32s for material sliders (synced → MaterialRegistry overrides).
-    pub mat_perm: [f32; 12],
-    pub mat_poro: [f32; 12],
+    /// Scratch f32s for material sliders (synced → world hydro overrides).
+    pub mat_perm: [f32; MATERIAL_COUNT],
+    pub mat_poro: [f32; MATERIAL_COUNT],
     /// Plant / fungus gene defaults (Tab → Plants).
     pub plant_genes: PlantGeneSettings,
     /// Set by UI when user clicks "Apply genes to living plants".
@@ -129,8 +129,8 @@ impl SimSettings {
         cond.max_prob_per_tick = 0.10;
         cond.mass_per_droplet = 40.0;
 
-        let mut mat_perm = [0.0f32; 12];
-        let mut mat_poro = [0.0f32; 12];
+        let mut mat_perm = [0.0f32; MATERIAL_COUNT];
+        let mut mat_poro = [0.0f32; MATERIAL_COUNT];
         for id in MaterialId::ALL_SOLIDS {
             let i = id as usize;
             let base = MaterialRegistry::base_props(id);
