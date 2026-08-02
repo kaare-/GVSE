@@ -1224,7 +1224,7 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
@@ -1238,6 +1238,7 @@ async fn main() {
                 scene.wind.climate_vx,
                 scene.organisms.len(),
                 scene.organisms.atom_cap(),
+                scene.organisms.corpse_count(),
                 if sim_paused { "[paused]" } else { "" }
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
