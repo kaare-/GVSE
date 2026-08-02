@@ -58,7 +58,9 @@ pub use failure::{
     roof_span_cells, roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
     COMPACTION_SIGMA_MIN,
 };
-pub use fungi::{is_fungus, soft_litter_at, add_soft_litter};
+pub use fungi::{
+    add_soft_litter, compost_organic_to_soil, is_fungus, seed_mycelium_near, soft_litter_at,
+};
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
     wet_air_column_beside, FaceStress, GeotechMap, GeotechOverlayMode, GEOTECH_MAP_PERIOD,

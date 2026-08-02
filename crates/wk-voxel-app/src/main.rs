@@ -802,14 +802,13 @@ async fn main() {
             apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
             if organisms_on {
                 let tick_no = scene.world.tick;
-                scene
-                    .organisms
-                    .step_with_climate(
-                        &mut scene.world,
-                        tick_no,
-                        &settings.climate,
-                        Some(&mut scene.humidity),
-                    );
+                scene.organisms.step_with_climate_wind(
+                    &mut scene.world,
+                    tick_no,
+                    &settings.climate,
+                    Some(&mut scene.humidity),
+                    scene.wind.climate_vx,
+                );
             }
         }
 
@@ -928,6 +927,17 @@ async fn main() {
                         g,
                     ) {
                         Ok(()) => {
+                            if editor.blueprint.is_valid_fungus() {
+                                if let Some(atom) = scene.organisms.atoms.last() {
+                                    let (fx, fy) = (atom.gx, atom.gy);
+                                    wk_voxel::seed_mycelium_near(
+                                        &mut scene.world,
+                                        fx,
+                                        fy,
+                                        32,
+                                    );
+                                }
+                            }
                             editor.status = format!(
                                 "Spawned {} at ({gx},{gy})  creatures={}/{} (entities, not pixels)",
                                 editor.blueprint.name,
