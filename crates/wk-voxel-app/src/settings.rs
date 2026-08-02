@@ -1039,6 +1039,7 @@ fn material_short_name(id: MaterialId) -> &'static str {
         MaterialId::Stone => "Stone",
         MaterialId::Sand => "Sand",
         MaterialId::Clay => "Clay",
+        MaterialId::Soil => "Soil",
         MaterialId::Organic => "Organic",
         MaterialId::LooseRock => "LooseRock",
         MaterialId::Gravel => "Gravel",

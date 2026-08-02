@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Number of [`MaterialId`] variants (shared by both stacks).
-pub const MATERIAL_COUNT: usize = 12;
+pub const MATERIAL_COUNT: usize = 13;
 /// Horizontal cell / column width in metres (shared scale).
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
 
@@ -47,12 +47,17 @@ pub enum MaterialId {
     /// drive karst cave formation (stage 7). Do not represent caves as
     /// Air layers — voids are sparse column annotations (see `Void`).
     Limestone = 11,
+    /// Humified soil — long-term product of mycelium composting
+    /// [`Organic`] litter. Slightly denser / less porous than fresh
+    /// Organic (mild compaction) so pore water mostly survives the
+    /// conversion; excess sat is pushed to neighbours.
+    Soil = 12,
 }
 
 impl MaterialId {
     /// Ground-forming solids (never fluid, never phase-changes at the
     /// world's normal temperature range).
-    pub const ALL_SOLIDS: [MaterialId; 7] = [
+    pub const ALL_SOLIDS: [MaterialId; 8] = [
         MaterialId::Bedrock,
         MaterialId::Stone,
         MaterialId::Limestone,
@@ -60,6 +65,7 @@ impl MaterialId {
         MaterialId::Gravel,
         MaterialId::Sand,
         MaterialId::Clay,
+        MaterialId::Soil,
     ];
 
     pub fn from_u8(v: u8) -> Option<Self> {
@@ -76,6 +82,7 @@ impl MaterialId {
             9 => Some(MaterialId::LooseRock),
             10 => Some(MaterialId::Gravel),
             11 => Some(MaterialId::Limestone),
+            12 => Some(MaterialId::Soil),
             _ => None,
         }
     }
@@ -97,6 +104,7 @@ impl MaterialId {
                 | MaterialId::Gravel
                 | MaterialId::Sand
                 | MaterialId::Clay
+                | MaterialId::Soil
                 | MaterialId::Organic
                 | MaterialId::Snow
                 | MaterialId::Ice
@@ -385,6 +393,24 @@ impl MaterialRegistry {
                 solubility: 0,
                 roof_span_max_m: 0.0,
             },
+            MaterialId::Soil => MaterialProps {
+                // Humus-rich soil: denser and slightly less porous than
+                // fresh Organic (mycelium compaction), still holds a lot
+                // of water so composting does not flash-dry the bed.
+                density: 1350,
+                permeability: 90,
+                erosion_resistance: 55,
+                cohesion: 110,
+                porosity: 160,
+                phase_change: None,
+                render_alpha: 255,
+                repose_rise_m: 0.14,
+                thermal_diffusivity: 0.0015,
+                heat_capacity: 3.5,
+                albedo: 0.16,
+                solubility: 0,
+                roof_span_max_m: 0.0,
+            },
             MaterialId::Water => MaterialProps {
                 density: 1000,
                 permeability: 0,
@@ -505,6 +531,8 @@ impl MaterialRegistry {
             MaterialId::Clay => [0xB8, 0xA4, 0x90],
             // Dark olive mud — reads as bed ooze, not living green.
             MaterialId::Organic => [0x3A, 0x4A, 0x28],
+            // Warm dark loam — distinct from Clay's dusty tan and Sand.
+            MaterialId::Soil => [0x5A, 0x42, 0x2E],
             MaterialId::Water => [0x23, 0x64, 0xD2],
             MaterialId::Air => [0x87, 0xCE, 0xEB],
             MaterialId::Snow => [0xF6, 0xF8, 0xFF],

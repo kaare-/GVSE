@@ -31,7 +31,9 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// migration path for `.gvsesim` files on disk.
 ///
 /// v2: `World.hydro` ([`wk_material::HydroOverrides`]) saved with the sim.
-pub const SIM_SCHEMA_VERSION: u32 = 2;
+/// v3: `MaterialId::Soil` + mycelium intensity in `Cell::_pad` on Organic
+/// (HydroOverrides slot table grows with [`wk_material::MATERIAL_COUNT`]).
+pub const SIM_SCHEMA_VERSION: u32 = 3;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]

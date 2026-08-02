@@ -22,7 +22,8 @@ use wk_material::MaterialId;
 use crate::blueprint::Genome;
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
-    digest_budget_units, digest_labile, dissolve_corpse_to_organic, fungus_should_hibernate,
+    colonize_and_compost, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
+    fungus_should_hibernate,
     fungus_upkeep, is_fungus, is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::grid::World;
@@ -527,6 +528,18 @@ impl OrganismStore {
         climate: &ClimateConfig,
         humidity: Option<&mut Humidity>,
     ) {
+        self.step_with_climate_wind(world, tick, climate, humidity, 0.0);
+    }
+
+    /// Like [`Self::step_with_climate`] with horizontal wind for fungal spores.
+    pub fn step_with_climate_wind(
+        &mut self,
+        world: &mut World,
+        tick: u64,
+        climate: &ClimateConfig,
+        humidity: Option<&mut Humidity>,
+        wind_vx: f32,
+    ) {
         if self.atoms.is_empty() && self.corpses.is_empty() {
             return;
         }
@@ -587,7 +600,7 @@ impl OrganismStore {
 
             if is_fungus(atom) {
                 let room = pop + births.len() < atom_cap;
-                match step_fungus(world, atom, day, tick, i as u32, room) {
+                match step_fungus(world, atom, day, tick, i as u32, room, wind_vx) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
                     PlantStep::Sprout(child) => births.push(child),
@@ -852,7 +865,7 @@ fn step_land_plant(
     }
 }
 
-/// Litter fungus tick: digest soft litter / Organic, hibernate, spore.
+/// Mycelial fungus tick: sip litter, colonize Organic, rare fruiting spore.
 fn step_fungus(
     world: &mut World,
     atom: &mut Atom,
@@ -860,9 +873,10 @@ fn step_fungus(
     tick: u64,
     entity_id: u32,
     pop_room: bool,
+    wind_vx: f32,
 ) -> PlantStep {
     pin_plant_pose(atom);
-    // Same sandbox rule as plants: snap to a solid crown, don't cull.
+    // Prefer Organic seats; fall back to Air-above-solid crown.
     if !is_fungus_seated(world, atom) {
         if let Some(slot) = find_fungus_slot(world, atom.gx, atom.gy)
             .or_else(|| find_surface_air_slot(world, atom.gx, atom.gy))
@@ -887,8 +901,9 @@ fn step_fungus(
 
     if !dormant {
         let want = digest_budget_units(&atom.genome, atom);
-        let (_taken, gained) = digest_labile(world, atom.gx, atom.gy, want);
-        atom.energy = (atom.energy + gained).min(atom.energy_max);
+        let (_taken, from_litter) = digest_labile(world, atom.gx, atom.gy, want);
+        let from_myc = colonize_and_compost(world, atom.gx, atom.gy, &atom.genome, atom);
+        atom.energy = (atom.energy + from_litter + from_myc).min(atom.energy_max);
     }
 
     atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);
@@ -896,7 +911,7 @@ fn step_fungus(
         return PlantStep::Dead;
     }
     if !dormant {
-        if let Some(child) = try_spore(world, atom, tick, entity_id, pop_room) {
+        if let Some(child) = try_spore(world, atom, tick, entity_id, pop_room, wind_vx) {
             return PlantStep::Sprout(child);
         }
     }

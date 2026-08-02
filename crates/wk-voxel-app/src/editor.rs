@@ -103,7 +103,7 @@ impl CreatureEditor {
             self.blueprint = Blueprint::minimal_fungus();
             self.name_buf = "fungus".into();
             self.status =
-                "Minimal fungus template (spawn on Organic / wet sand / any solid)".into();
+                "Mycelium fungus (place in Organic underground; slow → Soil)".into();
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
             self.blueprint.name = self.name_buf.clone();

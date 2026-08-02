@@ -644,7 +644,7 @@ fn shear_one_face(
 fn is_compactable(material: MaterialId) -> bool {
     matches!(
         material,
-        MaterialId::Clay | MaterialId::Organic | MaterialId::Sand
+        MaterialId::Clay | MaterialId::Soil | MaterialId::Organic | MaterialId::Sand
     )
 }
 

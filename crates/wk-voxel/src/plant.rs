@@ -488,10 +488,14 @@ fn plantable_crown(world: &World, gx: i32, nucleus_y: i32) -> bool {
 }
 
 fn fungus_crown(world: &World, gx: i32, nucleus_y: i32) -> bool {
-    let Some(air) = world.get_cell(gx, nucleus_y) else {
+    let Some(here) = world.get_cell(gx, nucleus_y) else {
         return false;
     };
-    if air.material != MaterialId::Air {
+    // Prefer embedding the nucleus in Organic (underground mycelium).
+    if here.material == MaterialId::Organic {
+        return true;
+    }
+    if here.material != MaterialId::Air {
         return false;
     }
     matches!(
@@ -501,11 +505,19 @@ fn fungus_crown(world: &World, gx: i32, nucleus_y: i32) -> bool {
 }
 
 fn fungus_seat_score(world: &World, gx: i32, nucleus_y: i32) -> i32 {
+    let Some(here) = world.get_cell(gx, nucleus_y) else {
+        return 0;
+    };
+    if here.material == MaterialId::Organic {
+        // Deeper / more threaded Organic seats score higher.
+        return 120 + (here.mycelium() as i32 / 4);
+    }
     let Some(below) = world.get_cell(gx, nucleus_y - 1) else {
         return 0;
     };
     match below.material {
-        MaterialId::Organic => 100,
+        MaterialId::Organic => 100 + (below.mycelium() as i32 / 8),
+        MaterialId::Soil => 70,
         MaterialId::Sand => {
             let cap = water_capacity(MaterialId::Sand).max(1);
             40 + (below.sat.0 as i32 * 40) / cap as i32
@@ -528,7 +540,7 @@ fn penetrate_cost(mat: MaterialId) -> Option<f32> {
     match mat {
         MaterialId::Bedrock | MaterialId::Ice | MaterialId::Snow | MaterialId::Water => None,
         MaterialId::Organic => Some(0.35),
-        MaterialId::Sand | MaterialId::Clay => Some(0.65),
+        MaterialId::Sand | MaterialId::Clay | MaterialId::Soil => Some(0.65),
         MaterialId::Stone => Some(1.6),
         MaterialId::Air => Some(0.45), // gaps / rhizome air pockets
         _ => Some(1.0),
