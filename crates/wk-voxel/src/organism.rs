@@ -24,7 +24,7 @@ use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY
 use crate::fungi::{
     colonize_and_compost, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
     forage_organic_energy, fruiting_body_supported, fungus_should_hibernate, fungus_upkeep,
-    is_fungus, is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
+    is_fungus, is_fungus_seated, try_emergent_fruiting, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -540,9 +540,6 @@ impl OrganismStore {
         humidity: Option<&mut Humidity>,
         wind_vx: f32,
     ) {
-        if self.atoms.is_empty() && self.corpses.is_empty() {
-            return;
-        }
         let day = day_factor_cfg(tick, climate);
         let phase = phase_fraction_cfg(tick, climate);
         // Build canopy once / tick so taller neighbours shade short plants.
@@ -566,8 +563,34 @@ impl OrganismStore {
             .filter(|a| is_land_plant(a))
             .map(|a| a.gx)
             .collect();
+        let fungus_cols: Vec<i32> = self
+            .atoms
+            .iter()
+            .filter(|a| is_fungus(a))
+            .map(|a| a.gx)
+            .collect();
         // Transpiration return: (gx, gy, sat_units) → humidity mass.
         let mut transpired: Vec<(i32, i32, u32)> = Vec::new();
+
+        // Empty store: still allow mycelium field → fruiting body emergence
+        // (and corpse settle). Spores need a living body afterward.
+        if self.atoms.is_empty() {
+            if self.corpses.is_empty() {
+                let room = births.len() < atom_cap;
+                if let Some(child) =
+                    try_emergent_fruiting(world, &fungus_cols, tick, room)
+                {
+                    self.atoms.push(child);
+                }
+                return;
+            }
+            self.step_corpses(world);
+            let room = self.atoms.len() < atom_cap;
+            if let Some(child) = try_emergent_fruiting(world, &[], tick, room) {
+                self.atoms.push(child);
+            }
+            return;
+        }
 
         for (i, atom) in self.atoms.iter_mut().enumerate() {
             atom.age_ticks = atom.age_ticks.saturating_add(1);
@@ -683,6 +706,22 @@ impl OrganismStore {
             }
         }
         self.atoms.extend(births);
+        // Cream network → new fruiting body (may later shed spores).
+        let mut fungus_cols_now: Vec<i32> = self
+            .atoms
+            .iter()
+            .filter(|a| is_fungus(a))
+            .map(|a| a.gx)
+            .collect();
+        if self.atoms.len() < atom_cap {
+            if let Some(child) =
+                try_emergent_fruiting(world, &fungus_cols_now, tick, true)
+            {
+                fungus_cols_now.push(child.gx);
+                self.atoms.push(child);
+            }
+        }
+        let _ = fungus_cols_now;
         resolve_contacts(world, &mut self.atoms);
         self.step_corpses(world);
 

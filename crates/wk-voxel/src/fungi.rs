@@ -8,6 +8,8 @@
 //! - **Mycelium field** — `Cell::_pad` intensity on Organic. Lives in the
 //!   ground as a world process ([`step_mycelium_field`]); keeps spreading
 //!   in moist Organic after the fruiting body dies. Not studio-painted.
+//!   Rich moist networks can [`try_emergent_fruiting`] a new body, which
+//!   may later [`try_spore`].
 //! Soft litter is bonus fuel. Long colonization may compost Organic → Soil
 //! (never Sand). Spec: `docs/organism/FUNGI.md`, `docs/organism/VOXEL_PLANTS.md`.
 
@@ -51,6 +53,14 @@ pub const MYCELIUM_FIELD_SPREAD_ODDS: u64 = 20;
 pub const MYCELIUM_FIELD_MAX_CELLS: usize = 256;
 /// Pore / film moisture below which field growth pauses (slow decay).
 pub const MYCELIUM_FIELD_MOIST: f32 = 0.04;
+/// Ticks between mycelium-field → fruiting-body emergence attempts.
+pub const MYCELIUM_EMERGE_PERIOD: u64 = 160;
+/// 1-in-N chance per eligible column when an emergence pulse fires.
+pub const MYCELIUM_EMERGE_ODDS: u64 = 36;
+/// Mycelium intensity burned from the surface Organic when a fruiting body emerges.
+pub const MYCELIUM_EMERGE_COST: u8 = 16;
+/// Starting energy fraction for an emerged fruiting body (can spore soon).
+pub const MYCELIUM_EMERGE_ENERGY_FRAC: f32 = 0.75;
 /// Intensity before Organic may compost into Soil.
 pub const MYCELIUM_SOIL_THRESHOLD: u8 = 220;
 /// 1-in-N chance per eligible growth pulse to compost a fully threaded cell.
@@ -676,6 +686,84 @@ pub fn seed_mycelium_near(world: &mut World, gx: i32, gy: i32, amount: u8) {
     }
 }
 
+/// Mycelium field raises a surface fruiting body on a well-threaded, moist
+/// Organic column (no living parent required). The new body can later
+/// [`try_spore`].
+pub fn try_emergent_fruiting(
+    world: &mut World,
+    occupied_fungus_cols: &[i32],
+    tick: u64,
+    pop_room: bool,
+) -> Option<Atom> {
+    if !pop_room || tick % MYCELIUM_EMERGE_PERIOD != 0 {
+        return None;
+    }
+    use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
+
+    let mut candidates: Vec<(i32, i32, u8)> = Vec::new(); // gx, air_y, myc
+    let coords: Vec<_> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let gx = world.wrap_x(coord.cx * CHUNK_CELLS_W as i32 + lx as i32);
+                let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
+                let Some(c) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if c.material != MaterialId::Organic || c.mycelium() < 80 {
+                    continue;
+                }
+                if organic_cell_moist_frac(world, gx, gy) < MYCELIUM_FIELD_MOIST {
+                    continue;
+                }
+                if !matches!(
+                    world.get_cell(gx, gy + 1),
+                    Some(a) if a.material == MaterialId::Air
+                ) {
+                    continue;
+                }
+                if occupied_fungus_cols
+                    .iter()
+                    .any(|&ox| world.wrap_x(ox) == gx)
+                {
+                    continue;
+                }
+                candidates.push((gx, gy + 1, c.mycelium()));
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return None;
+    }
+    // Prefer the richest patch; rarity gate on the winner.
+    candidates.sort_by(|a, b| b.2.cmp(&a.2));
+    let (gx, air_y, _myc) = candidates[0];
+    let h = hash_u64(world.seed.0, tick, gx as u64, 0xE3E7_F001);
+    if h % MYCELIUM_EMERGE_ODDS != 0 {
+        return None;
+    }
+    // Spend field intensity — fruiting costs the network.
+    if let Some(mut bed) = world.get_cell(gx, air_y - 1) {
+        if bed.material == MaterialId::Organic {
+            bed.set_mycelium(bed.mycelium().saturating_sub(MYCELIUM_EMERGE_COST));
+            world.set_cell(gx, air_y - 1, bed);
+        }
+    }
+    let body = crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus();
+    let tank = 40.0f32;
+    let mut child = Atom::from_body(gx, air_y, tank, body);
+    apply_genome(&mut child, Genome::default());
+    child.genome.digest_rate = 1.0;
+    child.energy = (tank * MYCELIUM_EMERGE_ENERGY_FRAC).clamp(1.0, child.energy_max);
+    // Short cooldown, then it can try wind-biased spores.
+    child.cooldown = FUNGUS_SPORE_PERIOD / 6;
+    pin_plant_pose(&mut child);
+    if !is_fungus_seated(world, &child) {
+        return None;
+    }
+    Some(child)
+}
+
 /// Rare fruiting: energy cost, wind-biased spore child on Organic / litter.
 pub fn try_spore(
     world: &mut World,
@@ -1079,6 +1167,72 @@ mod tests {
         // Neighbour Organic may be missing on this plot — thickening alone is enough.
         let _ = spread;
         assert!(myc1 >= 48 + 4, "moist field should keep growing without a fruiting body");
+    }
+
+    fn rich_moist_surface(w: &mut World, gx: i32, myc: u8) {
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(160);
+            w.set_cell(gx, y, org);
+        }
+        if let Some(mut c) = w.get_cell(gx, 3) {
+            c.set_mycelium(myc);
+            w.set_cell(gx, 3, c);
+        }
+    }
+
+    #[test]
+    fn cream_network_emerges_fruiting_body() {
+        let mut w = litter_plot();
+        rich_moist_surface(&mut w, 4, 120);
+        let myc_before = w.get_cell(4, 3).unwrap().mycelium();
+        let mut child = None;
+        // Period + rarity gates — sweep pulses until the hash opens.
+        for pulse in 0..2_000u64 {
+            let tick = pulse * MYCELIUM_EMERGE_PERIOD;
+            if let Some(a) = try_emergent_fruiting(&mut w, &[], tick, true) {
+                child = Some(a);
+                break;
+            }
+        }
+        let child = child.expect("rich moist mycelium must eventually raise a fruiting body");
+        assert!(is_fungus(&child), "emergent body must be fungus habit");
+        assert!(
+            is_fungus_seated(&w, &child),
+            "emergent body must seat on / above Organic"
+        );
+        let myc_after = w.get_cell(4, 3).unwrap().mycelium();
+        assert!(
+            myc_after < myc_before,
+            "emergence must burn mycelium intensity ({myc_before} → {myc_after})"
+        );
+    }
+
+    #[test]
+    fn fruiting_body_can_spread_spores() {
+        let mut w = litter_plot();
+        // Parent column + a downwind Organic bank for the spore to land on.
+        rich_moist_surface(&mut w, 4, 100);
+        for x in 5..12 {
+            rich_moist_surface(&mut w, x, 40);
+            add_soft_litter(&mut w, x, 20);
+        }
+        let mut atom = Atom::from_body(4, 4, 40.0, fungus_body());
+        atom.energy = atom.energy_max;
+        atom.cooldown = 0;
+        assert!(fruiting_surface_ready(&w, 4).is_some());
+        let mut spore = None;
+        for tick in 0..4_000u64 {
+            atom.energy = atom.energy_max;
+            atom.cooldown = 0;
+            if let Some(c) = try_spore(&mut w, &mut atom, tick, 7, true, 0.4) {
+                spore = Some(c);
+                break;
+            }
+        }
+        let spore = spore.expect("fruiting body on ready surface must eventually spore");
+        assert!(is_fungus(&spore));
+        assert!(spore.gx != 4, "spore should leave the parent column");
     }
 
     #[test]

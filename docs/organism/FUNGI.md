@@ -160,6 +160,9 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
 - **Mycelium field** — intensity in `Cell::_pad` on Organic. World process
   (`step_mycelium_field`): thickens and spreads on moist Organic without a
   living fruiting body. Renderer: faint cream threads.
+- **Emergence** — a rich moist network can raise a new fruiting body
+  (`try_emergent_fruiting`, burns field intensity). That body may later
+  shed wind-biased spores (`try_spore`) onto Organic / litter banks.
 - Soft litter is a bonus sip — fungi do **not** flash Organic into Sand.
 - After long colonization, Organic rarely composts into
   `MaterialId::Soil` with pore water preserved (excess sat pushed to
