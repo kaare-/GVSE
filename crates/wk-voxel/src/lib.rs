@@ -84,7 +84,8 @@ pub use plant::{
     MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use shade::{
-    build_canopy_index, build_canopy_index_posed, effective_photo_light, CanopyIndex, PosedModule,
+    build_canopy_index, build_canopy_index_posed, effective_photo_light, shade_transmit,
+    sum_posed_photo_light, CanopyIndex, PosedModule,
 };
 pub use heatmap::Heatmap;
 pub use humidity::{

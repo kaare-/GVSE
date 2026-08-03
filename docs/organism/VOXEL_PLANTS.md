@@ -42,12 +42,12 @@ Falsifiers: root grows into wetter sand; stem-heavy alloc grows taller.
 | `leaf_absorb` | How hard greens shade neighbours / self-stack |
 | `shade_efficiency` | Dim-light harvest vs sun peak |
 
-Features: sparse canopy index + neighbour cast (`shade.rs`, lite
-`LIGHT.md`); plant photo uses `effective_photo_light`. Standing water
-attenuates sky light with depth (`column_sky_light`) — deep seats go
-dark, so submerged stemmed plants stem-race toward the surface, while
-stemless seaweed elongates its Photosystem ribbon, or they fail the
-cost/benefit. E36/E37 spirit.
+Features: column Beer–Lambert through posed Photosystem / Stem cells
+(`shade.rs`, per `LIGHT.md`); plant photo sums per-leaf
+`effective_photo_light`. Standing water attenuates sky light with depth
+(`column_sky_light`) — deep seats go dark, so submerged stemmed plants
+stem-race toward the surface, while stemless seaweed elongates its
+Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 
 ### Seaweed template *(landed)*
 
@@ -73,11 +73,12 @@ cost/benefit. E36/E37 spirit.
   (`WOODY_LEAF_MIN_LIGHT`) so dim / crowded sites stay bare. Underwater
   tips lean with climate wind **or** local water-sat shear. Woody `Stem`
   stays upright on land.
-- **Light competition:** equal-height neighbours shade each other (dense
-  meadows). Canopy index + photo sample use posed draw cells, so flopped
-  piles cast and receive shade where the greens sit. Photosystem pixels
-  (land and water) tint bright `#2ECC40` → dim olive from **raw** sky ×
-  canopy at the posed cell — understory genes don't wash out the read.
+- **Light competition:** sky attenuates top-down through leaf/stem stacks
+  (self-shade + taller neighbours). Equal-height peers still compete via
+  lateral bleed. Cast / harvest / tint use posed draw cells, so flopped
+  piles shade where the greens sit. Photosystem pixels tint bright
+  `#2ECC40` → dim olive from **raw** sky × column transmit — understory
+  genes don't wash out the read.
 
 ### D3 — Vegetative sprout *(landed)*
 

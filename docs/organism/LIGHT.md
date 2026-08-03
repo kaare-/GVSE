@@ -125,11 +125,13 @@ so submerged plants either race stems toward the brighter surface
 (stemmed plants urge olive up; stemless seaweed elongates its leaf
 ribbon) or starve. Dry land columns stay clear.
 
-**wk-voxel lite canopy (`shade.rs`):** sparse neighbour cast (not a full
-column Beer–Lambert scan). Equal-height peers still shade each other
-(`SHADE_PEER_FACTOR`) so dense meadows compete. Cast / sample use
-*posed* draw cells (flop + pile), so dry mats stacked on a beach shade
-the greens underneath.
+**wk-voxel column canopy (`shade.rs`):** Beer–Lambert top-down through
+posed Photosystem / Stem cells (`LeafAbsorb` per leaf, fixed stem
+absorb). Light at `(x, y)` is sky attenuated by every foliage cell at
+greater `y` in the column, plus soft lateral bleed so neighbours cast
+sideways shade. Equal-height peers still compete via same-Y lateral.
+Harvest sums per-leaf exposure (lower leaves self-shade); draw tint
+uses raw sky × transmit at each posed cell.
 
 ## What is deliberately not here
 

@@ -12,7 +12,7 @@
 //! **Set A (Atom):** Nucleus + Photosystem in wet Air; buoyancy,
 //! circadian day-float / night-sink, fission.
 //! **Set D (minimal plant):** Root + Stem + Photosystem on land; fixed
-//! crown, drinks pore `sat` ([`crate::plant`]). No canopy shade yet.
+//! crown, drinks pore `sat` ([`crate::plant`]), column Beer–Lambert shade.
 //!
 //! Palette hex is frozen (`docs/organism/PALETTE.md`).
 
@@ -39,8 +39,8 @@ use crate::plant::{
     DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
 };
 use crate::shade::{
-    build_canopy_index_posed, canopy_top_y, effective_photo_light, posed_canopy_sample,
-    shade_transmit, CanopyIndex, PosedModule,
+    build_canopy_index_posed, canopy_top_y, posed_canopy_sample, shade_transmit,
+    sum_posed_photo_light, CanopyIndex, PosedModule,
 };
 
 /// Default **entity** ceiling (Tab → Creatures can raise/lower).
@@ -447,18 +447,10 @@ impl OrganismStore {
         let mut out = Vec::with_capacity(posed.len() + self.corpses.len() * 2);
         for p in &posed {
             let rgb = if p.mid == ModuleId::Photosystem {
-                let atom = &self.atoms[p.atom_idx];
-                // Raw exposure (sky × canopy), land and water — not the
-                // harvest remap, which understory genes push back toward green.
+                // Raw exposure (sky × column Beer–Lambert), land and water —
+                // not the harvest remap, which understory genes wash toward green.
                 let sky = column_light(world, p.wx, p.wy);
-                let transmit = shade_transmit(
-                    &canopy,
-                    p.wx,
-                    p.wy,
-                    p.atom_idx as u32,
-                    atom.photosystem_count(),
-                    atom.genome.leaf_absorb,
-                );
+                let transmit = shade_transmit(&canopy, p.wx, p.wy);
                 let exposure = (sky * transmit).clamp(0.0, 1.0);
                 ModuleId::photosystem_rgb_for_light(exposure)
             } else {
@@ -701,17 +693,14 @@ impl OrganismStore {
                 let room = pop + births.len() < atom_cap;
                 let parent_gx = atom.gx;
                 let parent_gy = atom.gy;
-                let (sample_x, sample_y) = posed_canopy_sample(
-                    &posed,
-                    i,
-                    (atom.gx, canopy_top_y(atom)),
-                );
                 match step_land_plant(
                     world,
                     atom,
                     day,
                     tick,
                     &canopy,
+                    &posed,
+                    i,
                     &trunks,
                     &live_roots,
                     &live_photos,
@@ -720,8 +709,6 @@ impl OrganismStore {
                     &growth_caps,
                     &plant_cols,
                     wind_vx,
-                    sample_x,
-                    sample_y,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -1072,6 +1059,8 @@ fn step_land_plant(
     day: f32,
     tick: u64,
     canopy: &CanopyIndex,
+    posed: &[PosedModule],
+    atom_idx: usize,
     trunks: &std::collections::HashSet<(i32, i32)>,
     live_roots: &std::collections::HashSet<(i32, i32)>,
     live_photos: &std::collections::HashSet<(i32, i32)>,
@@ -1080,8 +1069,6 @@ fn step_land_plant(
     growth_caps: &PlantGrowthCaps,
     plant_cols: &[i32],
     wind_vx: f32,
-    sample_x: i32,
-    sample_y: i32,
 ) -> PlantStep {
     pin_plant_pose(atom);
     // Free-spawn / canopy clicks can leave a plant briefly unanchored.
@@ -1128,26 +1115,36 @@ fn step_land_plant(
     }
 
     let (drink_e, sat_taken, drink_at) = drink_plant(world, atom);
-    // Sky + canopy at the posed sample (draw/flop cell). Flopped mats and
-    // meadow peers shade where the greens actually sit.
-    let sample_x = world.wrap_x(sample_x);
-    let submerged = is_wet_air(world, sample_x, sample_y);
-    let sky = column_light(world, sample_x, sample_y) * day;
-    let light = effective_photo_light(
+    // Per-leaf column Beer–Lambert at posed cells (flop/pile). Lower leaves
+    // and plants under taller neighbours harvest less than open tips.
+    let (tip_x, tip_y) = posed_canopy_sample(posed, atom_idx, (atom.gx, canopy_top_y(atom)));
+    let tip_x = world.wrap_x(tip_x);
+    let submerged = is_wet_air(world, tip_x, tip_y);
+    let mut light_sum = sum_posed_photo_light(
         canopy,
-        sample_x,
-        sample_y,
-        sky,
-        entity_id,
-        n_photo,
+        posed,
+        atom_idx,
+        &|wx, wy| column_light(world, world.wrap_x(wx), wy) * day,
         &atom.genome,
     );
+    // Fallback when pose missed leaves: tip sample × count (pre-pose path).
+    if light_sum <= 0.0 && n_photo > 0 {
+        let sky = column_light(world, tip_x, tip_y) * day;
+        let tip = crate::shade::effective_photo_light(canopy, tip_x, tip_y, sky, &atom.genome);
+        light_sum = tip * n_photo as f32;
+    }
+    // Mean leaf light for submerged stem-urge threshold.
+    let light = if n_photo > 0 {
+        light_sum / n_photo as f32
+    } else {
+        0.0
+    };
     let photo_scale = match drought {
         DroughtBand::Hydrated => 1.25, // mild bonus so moist sand recovers
         DroughtBand::Stressed => 0.55,
         DroughtBand::Dormant => 0.0,
     };
-    let harvest = PHOTON_RATE * light * n_photo.max(1) as f32 * photo_scale;
+    let harvest = PHOTON_RATE * light_sum * photo_scale;
     let stress = match drought {
         DroughtBand::Stressed => DROUGHT_STRESS_DRAIN,
         DroughtBand::Hydrated | DroughtBand::Dormant => 0.0,
@@ -2001,6 +1998,35 @@ mod tests {
         assert!(
             shaded_g < alone_g,
             "shaded plant greens should draw darker (shaded g={shaded_g}, alone g={alone_g})"
+        );
+    }
+
+    #[test]
+    fn stacked_leaves_self_shade_in_draw_tint() {
+        let w = moist_sand_plot();
+        let mut g = Genome::default();
+        g.leaf_absorb = 0.55;
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+            (0, 3, ModuleId::Photosystem),
+            (0, 4, ModuleId::Photosystem),
+        ];
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(&w, 4, 2, body, 40.0, g));
+        let greens: Vec<(i32, u8)> = store
+            .draw_list(&w, 0, 0.0)
+            .into_iter()
+            .filter(|&(x, _, (r, g, b))| x == 4 && g > r && g > b)
+            .map(|(_, y, rgb)| (y, rgb.1))
+            .collect();
+        let tip_g = greens.iter().max_by_key(|(y, _)| *y).map(|(_, g)| *g);
+        let low_g = greens.iter().min_by_key(|(y, _)| *y).map(|(_, g)| *g);
+        assert!(
+            tip_g.unwrap() > low_g.unwrap(),
+            "tip leaf should draw brighter than lower leaf (tip={tip_g:?}, low={low_g:?})"
         );
     }
 

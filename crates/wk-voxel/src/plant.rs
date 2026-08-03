@@ -818,21 +818,13 @@ fn woody_leaf_light_ok(
     world: &World,
     atom: &Atom,
     canopy: &CanopyIndex,
-    entity_id: u32,
+    _entity_id: u32,
     wx: i32,
     wy: i32,
-    n_photo: usize,
+    _n_photo: usize,
 ) -> bool {
     let sky = column_sky_light(world, wx, wy);
-    let lit = effective_photo_light(
-        canopy,
-        wx,
-        wy,
-        sky,
-        entity_id,
-        n_photo,
-        &atom.genome,
-    );
+    let lit = effective_photo_light(canopy, wx, wy, sky, &atom.genome);
     lit >= WOODY_LEAF_MIN_LIGHT
 }
 
