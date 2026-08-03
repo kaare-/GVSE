@@ -1,8 +1,8 @@
 //! Ephemeral wind-borne spore puffs (cosmetic). Not saved / not sim mass.
 //!
 //! Spawned when [`wk_voxel::OrganismStore::step_with_climate_wind`] reports
-//! a [`wk_voxel::SporeRelease`]. Particles drift with climate wind toward
-//! the landing column, then fade.
+//! a [`wk_voxel::SporeRelease`]. Particles loft, home toward the landing
+//! column, settle on the sporeling seat, then fade.
 
 use macroquad::prelude::*;
 use wk_voxel::{ModuleId, SporeRelease};
@@ -14,10 +14,15 @@ struct SporePuff {
     y: f32,
     vx: f32,
     vy: f32,
+    /// Landing seat (sporeling crown).
+    tx: f32,
+    ty: f32,
     life: f32,
     max_life: f32,
     /// 0..1 size scale.
     size: f32,
+    /// True after the puff reaches the seat — fade in place.
+    landed: bool,
 }
 
 #[derive(Debug, Default)]
@@ -36,34 +41,43 @@ impl SporeFx {
     pub fn burst(&mut self, release: &SporeRelease, wind_vx: f32) {
         self.burst_i = self.burst_i.wrapping_add(1);
         let dx = (release.to_gx - release.from_gx) as f32;
-        let dir = if dx.abs() > 0.5 {
-            dx.signum()
-        } else if wind_vx.abs() > 0.01 {
-            wind_vx.signum()
-        } else if self.burst_i & 1 == 0 {
-            1.0
-        } else {
-            -1.0
-        };
-        // climate_vx is tiles/tick — amplify into readable cell/sec drift.
-        let wind_boost = wind_vx.abs() * 48.0;
-        let speed = (2.2 + wind_boost + dx.abs() * 0.08).clamp(1.5, 14.0);
+        let dy = (release.to_gy - release.from_gy) as f32;
+        let dist = (dx * dx + dy * dy).sqrt().max(1.0);
+        // Flight time scales with distance so long hops stay readable.
+        let flight = (0.7 + dist * 0.09).clamp(0.8, 2.8);
         let n = 8usize;
         for i in 0..n {
             let h = hash01(self.burst_i, i as u64, 0x5F0E);
             let h2 = hash01(self.burst_i, i as u64, 0x5F0F);
             let h3 = hash01(self.burst_i, i as u64, 0x5F10);
-            let life = 0.9 + h * 1.1;
-            let scatter_y = (h2 - 0.5) * 1.4;
-            let scatter_x = (h3 - 0.5) * 0.8;
+            let scatter_y = (h2 - 0.5) * 1.2;
+            let scatter_x = (h3 - 0.5) * 0.7;
+            // Aim near the landing crown with a little ground scatter.
+            let tx = release.to_gx as f32 + 0.5 + scatter_x * 0.35;
+            let ty = release.to_gy as f32 + 0.35 + scatter_y.abs() * 0.15;
+            // Initial loft + wind; homing takes over in `update`.
+            let dir = if dx.abs() > 0.5 {
+                dx.signum()
+            } else if wind_vx.abs() > 0.01 {
+                wind_vx.signum()
+            } else if self.burst_i & 1 == 0 {
+                1.0
+            } else {
+                -1.0
+            };
+            let speed = (dist / flight) * (0.85 + h * 0.35);
+            let life = flight + 0.35 + h * 0.45; // linger briefly after landing
             self.puffs.push(SporePuff {
                 x: release.from_gx as f32 + 0.5 + scatter_x,
-                y: release.from_gy as f32 + 0.8 + scatter_y * 0.4,
-                vx: dir * speed * (0.75 + h * 0.5) + wind_vx * 20.0,
-                vy: 0.55 + h2 * 0.9 - scatter_y.abs() * 0.15,
+                y: release.from_gy as f32 + 0.85 + scatter_y * 0.35,
+                vx: dir * speed * 0.55 + wind_vx * 8.0,
+                vy: 1.1 + h2 * 0.8,
+                tx,
+                ty,
                 life,
                 max_life: life,
                 size: 0.35 + h3 * 0.55,
+                landed: false,
             });
         }
         // Soft cap so long demos don't accumulate thousands of puffs.
@@ -84,17 +98,71 @@ impl SporeFx {
         if dt <= 0.0 || self.puffs.is_empty() {
             return;
         }
-        let wind_cells = wind_vx * 12.0;
+        let wind_cells = wind_vx * 10.0;
         for p in &mut self.puffs {
             p.life -= dt;
-            p.vx = p.vx * (1.0 - 0.35 * dt) + wind_cells * dt * 4.0;
-            p.vy -= 0.55 * dt; // gentle settle after loft
+            if p.landed {
+                // Settle: stick near the seat, faint drift, then fade out.
+                p.vx *= 1.0 - 4.0 * dt;
+                p.vy *= 1.0 - 4.0 * dt;
+                p.x += p.vx * dt * 0.15;
+                p.y += p.vy * dt * 0.15;
+                continue;
+            }
+
+            // Shortest wrapped delta to the landing seat.
+            let mut ddx = p.tx - p.x;
+            if let Some(w) = wrap_width {
+                if w > 0 {
+                    let wf = w as f32;
+                    if ddx > wf * 0.5 {
+                        ddx -= wf;
+                    } else if ddx < -wf * 0.5 {
+                        ddx += wf;
+                    }
+                }
+            }
+            let ddy = p.ty - p.y;
+            let dist = (ddx * ddx + ddy * ddy).sqrt();
+
+            if dist < 0.35 {
+                p.x = p.tx;
+                p.y = p.ty;
+                p.vx = 0.0;
+                p.vy = 0.0;
+                p.landed = true;
+                // Keep a short linger so the landing reads.
+                p.life = p.life.min(0.45);
+                p.max_life = p.life.max(0.2);
+                continue;
+            }
+
+            // Home toward the seat; wind adds a soft cross-breeze.
+            let home = 5.5 + dist * 0.35;
+            let inv = 1.0 / dist;
+            p.vx = p.vx * (1.0 - 1.8 * dt) + ddx * inv * home * dt * 8.0 + wind_cells * dt * 2.0;
+            p.vy = p.vy * (1.0 - 1.5 * dt) + ddy * inv * home * dt * 8.0 - 0.25 * dt;
+            // Cap so far seats don't teleport.
+            let speed = (p.vx * p.vx + p.vy * p.vy).sqrt();
+            let max_speed = 18.0;
+            if speed > max_speed {
+                p.vx *= max_speed / speed;
+                p.vy *= max_speed / speed;
+            }
             p.x += p.vx * dt;
             p.y += p.vy * dt;
             if let Some(w) = wrap_width {
                 if w > 0 {
                     let wf = w as f32;
                     p.x = p.x.rem_euclid(wf);
+                    // Keep target in the same wrap frame as the puff.
+                    let mut tdx = p.tx - p.x;
+                    if tdx > wf * 0.5 {
+                        p.tx -= wf;
+                    } else if tdx < -wf * 0.5 {
+                        p.tx += wf;
+                    }
+                    let _ = tdx;
                 }
             }
         }
@@ -119,13 +187,15 @@ impl SporeFx {
         let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
         for p in &self.puffs {
             let t = (p.life / p.max_life).clamp(0.0, 1.0);
-            // Fade in quick, linger, fade out.
-            let alpha = if t > 0.75 {
-                ((1.0 - t) / 0.25).clamp(0.0, 1.0)
+            // Fade in quick; landed puffs fade out from the seat.
+            let alpha = if p.landed {
+                (t / 0.9).clamp(0.0, 1.0)
+            } else if t > 0.85 {
+                ((1.0 - t) / 0.15).clamp(0.0, 1.0)
             } else {
-                (t / 0.75).clamp(0.2, 1.0)
+                t.clamp(0.25, 1.0)
             };
-            let a = (alpha * 220.0) as u8;
+            let a = (alpha * 230.0) as u8;
             let px = (p.size * cell_px * 0.55).clamp(1.5, cell_px * 0.85);
             for &x_copy in x_copies {
                 let sx = origin_x + (p.x + x_copy as f32 * width_cols as f32) * cell_px;
