@@ -83,7 +83,9 @@ pub use plant::{
     is_land_plant, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
     MAX_STEM_MODULES,
 };
-pub use shade::{build_canopy_index, effective_photo_light, CanopyIndex};
+pub use shade::{
+    build_canopy_index, build_canopy_index_posed, effective_photo_light, CanopyIndex, PosedModule,
+};
 pub use heatmap::Heatmap;
 pub use humidity::{
     humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,

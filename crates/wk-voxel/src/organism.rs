@@ -37,7 +37,10 @@ use crate::plant::{
     try_vegetative_sprout, DroughtBand, PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP,
     DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
 };
-use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
+use crate::shade::{
+    build_canopy_index_posed, canopy_top_y, effective_photo_light, posed_canopy_sample,
+    CanopyIndex, PosedModule,
+};
 
 /// Default **entity** ceiling (Tab → Creatures can raise/lower).
 /// One Atom / plant / fungus = 1, not body pixels (roots, leaves, …).
@@ -405,20 +408,19 @@ impl OrganismStore {
     /// Draw list: world cell + frozen module RGB (living + grey corpses).
     ///
     /// Soft fronds (Photosystem / Stem) sway under water and lay along the
-    /// free surface when taller than the water column. Pass `wind_vx` for
-    /// lean direction; `tick` phases the underwater wave.
+    /// free surface when taller than the water column. Flopped greens **pile**
+    /// when they would share a cell. Pass `wind_vx` for lean direction;
+    /// `tick` phases the underwater wave.
     pub fn draw_list(
         &self,
         world: &World,
         tick: u64,
         wind_vx: f32,
     ) -> Vec<(i32, i32, (u8, u8, u8))> {
-        let mut out = Vec::with_capacity((self.atoms.len() + self.corpses.len()) * 2);
-        for atom in &self.atoms {
-            for &(dx, dy, mid) in &atom.body {
-                let (wx, wy) = frond_draw_cell(world, atom, dx, dy, mid, tick, wind_vx);
-                out.push((wx, wy, mid.rgb()));
-            }
+        let posed = resolve_organism_draw_cells(world, &self.atoms, tick, wind_vx);
+        let mut out = Vec::with_capacity(posed.len() + self.corpses.len() * 2);
+        for p in &posed {
+            out.push((p.wx, p.wy, p.mid.rgb()));
         }
         for corpse in &self.corpses {
             for &(dx, dy, mid) in &corpse.body {
@@ -576,8 +578,10 @@ impl OrganismStore {
     ) -> Vec<SporeRelease> {
         let day = day_factor_cfg(tick, climate);
         let phase = phase_fraction_cfg(tick, climate);
-        // Build canopy once / tick so taller neighbours shade short plants.
-        let canopy = build_canopy_index(&self.atoms);
+        // Posed draw cells (flop + pile) feed canopy shade so dry mats and
+        // equal-height meadows compete for light where they actually sit.
+        let posed = resolve_organism_draw_cells(world, &self.atoms, tick, wind_vx);
+        let canopy = build_canopy_index_posed(&self.atoms, &posed);
         // Live + grey-corpse Stem cells — shoot growth keeps a trunk gap.
         let trunks = collect_trunk_world_cells(&self.atoms, &self.corpses);
         // All living Root cells — spacing applies across plants.
@@ -646,6 +650,11 @@ impl OrganismStore {
                 let room = pop + births.len() < atom_cap;
                 let parent_gx = atom.gx;
                 let parent_gy = atom.gy;
+                let (sample_x, sample_y) = posed_canopy_sample(
+                    &posed,
+                    i,
+                    (atom.gx, canopy_top_y(atom)),
+                );
                 match step_land_plant(
                     world,
                     atom,
@@ -659,6 +668,8 @@ impl OrganismStore {
                     &growth_caps,
                     &plant_cols,
                     wind_vx,
+                    sample_x,
+                    sample_y,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -1016,6 +1027,8 @@ fn step_land_plant(
     growth_caps: &PlantGrowthCaps,
     plant_cols: &[i32],
     wind_vx: f32,
+    sample_x: i32,
+    sample_y: i32,
 ) -> PlantStep {
     pin_plant_pose(atom);
     // Free-spawn / canopy clicks can leave a plant briefly unanchored.
@@ -1062,14 +1075,14 @@ fn step_land_plant(
     }
 
     let (drink_e, sat_taken, drink_at) = drink_plant(world, atom);
-    // Sky column light × day, then neighbour canopy + gene remap (D2).
-    // Water column attenuates strongly with depth — deep seats go dark.
-    let sample_y = canopy_top_y(atom);
-    let submerged = is_wet_air(world, atom.gx, sample_y);
-    let sky = column_light(world, atom.gx, sample_y) * day;
+    // Sky + canopy at the posed sample (draw/flop cell). Flopped mats and
+    // meadow peers shade where the greens actually sit.
+    let sample_x = world.wrap_x(sample_x);
+    let submerged = is_wet_air(world, sample_x, sample_y);
+    let sky = column_light(world, sample_x, sample_y) * day;
     let light = effective_photo_light(
         canopy,
-        atom.gx,
+        sample_x,
         sample_y,
         sky,
         entity_id,
@@ -1242,13 +1255,65 @@ pub const FROND_STILL_WIND: f32 = 0.08;
 /// Cells of soft leaf a dry plant can hold rigid before the rest hangs.
 pub const LEAF_SUPPORT_DRY: i32 = 1;
 
+/// Resolve every living module to a world draw cell (flop + pile).
+///
+/// Soft Photosystems that would share a cell stack upward so dry mats
+/// pile instead of overwriting. Same pose feeds canopy shade.
+pub fn resolve_organism_draw_cells(
+    world: &World,
+    atoms: &[Atom],
+    tick: u64,
+    wind_vx: f32,
+) -> Vec<PosedModule> {
+    use std::collections::HashSet;
+    let mut occupied: HashSet<(i32, i32)> = HashSet::new();
+    let mut out = Vec::with_capacity(atoms.iter().map(|a| a.body.len()).sum());
+    for (atom_idx, atom) in atoms.iter().enumerate() {
+        for &(dx, dy, mid) in &atom.body {
+            let (wx0, wy0) = frond_draw_cell(world, atom, dx, dy, mid, tick, wind_vx);
+            let wx = world.wrap_x(wx0);
+            let mut wy = wy0;
+            if mid == ModuleId::Photosystem {
+                for _ in 0..24 {
+                    let solid = match world.get_cell(wx, wy) {
+                        Some(c) => c.material != MaterialId::Air,
+                        None => true,
+                    };
+                    if !solid && !occupied.contains(&(wx, wy)) {
+                        break;
+                    }
+                    wy += 1;
+                }
+            } else {
+                // Non-leaf modules still claim their cell so leaves pile above.
+                let solid = match world.get_cell(wx, wy) {
+                    Some(c) => c.material != MaterialId::Air,
+                    None => true,
+                };
+                if solid {
+                    wy = clear_solid_y(world, wx, wy);
+                }
+            }
+            occupied.insert((wx, wy));
+            out.push(PosedModule {
+                atom_idx,
+                wx,
+                wy,
+                mid,
+            });
+        }
+    }
+    out
+}
+
 /// Soft frond draw pose. Roots / Nucleus / Digest stay rigid. Cosmetic —
 /// body cells for physics stay upright.
 ///
 /// - **Photosystem** (all plants): soft. Underwater tips lean with wind /
 ///   flowing water. Emerged tips lay on the free surface. Dry / long leaves
 ///   hang past [`LEAF_SUPPORT_DRY`]. Flopped cells settle onto terrain —
-///   never painted inside solid.
+///   never painted inside solid. Callers that need non-overlapping mats
+///   should use [`resolve_organism_draw_cells`] (pile).
 /// - **Stem** (woody): upright on land; underwater leans with drive.
 pub fn frond_draw_cell(
     world: &World,
@@ -1967,6 +2032,37 @@ mod tests {
             wx != base_x
         });
         assert!(bent, "sat shear (flowing water) should bend the frond");
+    }
+
+    #[test]
+    fn flopped_fronds_pile_instead_of_sharing_one_cell() {
+        let w = moist_sand_plot();
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        // Adjacent holdfasts — dry flop leans the same way and would overlap.
+        store.atoms.push(Atom::from_body(4, 2, 40.0, body.clone()));
+        store.atoms.push(Atom::from_body(5, 2, 40.0, body.clone()));
+        store.atoms.push(Atom::from_body(6, 2, 40.0, body));
+        let list = store.draw_list(&w, 0, 0.0);
+        let mut greens: Vec<(i32, i32)> = list
+            .iter()
+            .filter(|(_, _, rgb)| *rgb == ModuleId::Photosystem.rgb())
+            .map(|&(x, y, _)| (x, y))
+            .collect();
+        let before = greens.len();
+        greens.sort_unstable();
+        greens.dedup();
+        assert_eq!(
+            greens.len(),
+            before,
+            "flopped Photosystems must pile to unique cells, not overwrite"
+        );
+        let max_y = greens.iter().map(|(_, y)| *y).max().unwrap();
+        let min_y = greens.iter().map(|(_, y)| *y).min().unwrap();
+        assert!(
+            max_y > min_y,
+            "dry meadow should stack into a pile height (min={min_y} max={max_y})"
+        );
     }
 
     #[test]
@@ -3813,25 +3909,29 @@ mod tests {
 
         let mut alone = OrganismStore::new();
         assert!(alone.spawn_blueprint(&w, 3, 2, short_body.clone(), 40.0, short_g));
-        alone.atoms[0].energy = 20.0;
 
         let mut shaded = OrganismStore::new();
         assert!(shaded.spawn_blueprint(&w, 3, 2, short_body, 40.0, short_g));
         assert!(shaded.spawn_blueprint(&w, 4, 2, tall_body, 40.0, tall_g));
-        shaded.atoms[0].energy = 20.0;
-        shaded.atoms[1].energy = 20.0;
 
-        // Noon-ish ticks so day factor is high.
+        // Reset energy each tick so we measure harvest rate, not the tank cap.
+        let mut gain_alone = 0.0f32;
+        let mut gain_shaded = 0.0f32;
         for t in 0..60u64 {
+            alone.atoms[0].energy = 10.0;
+            shaded.atoms[0].energy = 10.0;
+            if let Some(a) = shaded.atoms.get_mut(1) {
+                a.energy = 10.0;
+            }
             alone.step(&mut w, t);
             shaded.step(&mut w, t);
+            gain_alone += alone.atoms[0].energy - 10.0;
+            gain_shaded += shaded.atoms[0].energy - 10.0;
         }
         assert!(!alone.is_empty() && !shaded.is_empty());
-        let e_alone = alone.atoms[0].energy;
-        let e_shaded = shaded.atoms[0].energy;
         assert!(
-            e_shaded < e_alone,
-            "shaded short plant should harvest less (shaded={e_shaded}, alone={e_alone})"
+            gain_shaded < gain_alone * 0.95,
+            "shaded short plant should harvest less (shaded={gain_shaded}, alone={gain_alone})"
         );
     }
 }

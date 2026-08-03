@@ -17,13 +17,15 @@ pub const SHADE_RADIUS: i32 = 3;
 /// Floor transmit so deep shade is dim, not black.
 pub const SHADE_AMBIENT_FLOOR: f32 = 0.08;
 /// Per-photosystem contribution to cast strength (× `leaf_absorb`).
-pub const SHADE_PER_LEAF: f32 = 0.16;
+pub const SHADE_PER_LEAF: f32 = 0.22;
 /// Per-stem contribution to cast strength (olive attenuation).
 pub const SHADE_PER_STEM: f32 = 0.07;
 /// Soft cap on how hard one column can shade its neighbours.
-pub const SHADE_CAST_CAP: f32 = 0.88;
+pub const SHADE_CAST_CAP: f32 = 0.92;
 /// Self-shade per extra photosystem above the first (× `leaf_absorb`).
-pub const SHADE_SELF_PER_EXTRA_LEAF: f32 = 0.10;
+pub const SHADE_SELF_PER_EXTRA_LEAF: f32 = 0.12;
+/// Equal-height neighbour cast factor (dense peer carpets).
+pub const SHADE_PEER_FACTOR: f32 = 0.72;
 
 /// One column's shade-casting canopy (tallest / strongest plant wins).
 #[derive(Debug, Clone, Copy)]
@@ -62,7 +64,10 @@ pub fn cast_strength(n_photo: usize, n_stem: usize, leaf_absorb: f32) -> f32 {
     raw.clamp(0.0, SHADE_CAST_CAP)
 }
 
-/// Insert / reinforce a column's canopy entry (keep taller, else stronger).
+/// Insert / reinforce a column's canopy entry.
+///
+/// Taller foliage becomes the column top; equal-height and lower leaves
+/// still thicken absorb so dense carpets / flop piles shade harder.
 pub fn record_canopy(
     index: &mut CanopyIndex,
     wx: i32,
@@ -71,15 +76,27 @@ pub fn record_canopy(
     n_photo: usize,
     entity_id: u32,
 ) {
+    let absorb = absorb.clamp(0.0, SHADE_CAST_CAP);
+    let n = n_photo.min(u16::MAX as usize) as u16;
     match index.get_mut(&wx) {
         Some(c) => {
-            if top_y > c.top_y || (top_y == c.top_y && absorb > c.absorb) {
+            if top_y > c.top_y {
+                let below = c.absorb * 0.35;
                 *c = CanopyColumn {
                     top_y,
-                    absorb,
-                    n_photo: n_photo.min(u16::MAX as usize) as u16,
+                    absorb: (absorb + below).min(SHADE_CAST_CAP),
+                    n_photo: n.saturating_add(c.n_photo / 2),
                     entity_id,
                 };
+            } else if top_y == c.top_y {
+                c.absorb = (c.absorb + absorb * 0.85).min(SHADE_CAST_CAP);
+                c.n_photo = c.n_photo.saturating_add(n);
+                if entity_id != c.entity_id && absorb >= c.absorb * 0.5 {
+                    // Keep a stable owner; prefer first unless much stronger.
+                }
+            } else {
+                c.absorb = (c.absorb + absorb * 0.45).min(SHADE_CAST_CAP);
+                c.n_photo = c.n_photo.saturating_add(n.min(4));
             }
         }
         None => {
@@ -88,7 +105,7 @@ pub fn record_canopy(
                 CanopyColumn {
                     top_y,
                     absorb,
-                    n_photo: n_photo.min(u16::MAX as usize) as u16,
+                    n_photo: n,
                     entity_id,
                 },
             );
@@ -96,7 +113,7 @@ pub fn record_canopy(
     }
 }
 
-/// Build canopy index from all living land plants in the store.
+/// Build canopy index from upright body modules (tests / fallback).
 pub fn build_canopy_index(atoms: &[Atom]) -> CanopyIndex {
     let mut index = CanopyIndex::default();
     for (id, atom) in atoms.iter().enumerate() {
@@ -113,6 +130,26 @@ pub fn build_canopy_index(atoms: &[Atom]) -> CanopyIndex {
             continue;
         }
         let absorb = cast_strength(n_photo, n_stem, atom.genome.leaf_absorb);
+        // Footprint: every Photosystem / Stem column casts, not only the crown.
+        let mut cols: Vec<(i32, i32)> = Vec::new();
+        for &(dx, dy, mid) in &atom.body {
+            if matches!(mid, ModuleId::Photosystem | ModuleId::Stem) {
+                cols.push((atom.gx + dx as i32, atom.gy + dy as i32));
+            }
+        }
+        if cols.is_empty() {
+            cols.push((atom.gx, canopy_top_y(atom)));
+        }
+        for &(wx, wy) in &cols {
+            let leaf_cast = if n_photo > 0 {
+                (atom.genome.leaf_absorb.clamp(0.0, 1.0) * SHADE_PER_LEAF).min(SHADE_CAST_CAP)
+            } else {
+                SHADE_PER_STEM
+            };
+            let a = if cols.len() == 1 { absorb } else { leaf_cast };
+            record_canopy(&mut index, wx, wy, a, 1, id as u32);
+        }
+        // Ensure crown column carries the full plant cast as well.
         record_canopy(
             &mut index,
             atom.gx,
@@ -125,16 +162,69 @@ pub fn build_canopy_index(atoms: &[Atom]) -> CanopyIndex {
     index
 }
 
+/// One resolved draw cell after flop + pile (see `resolve_organism_draw_cells`).
+#[derive(Debug, Clone, Copy)]
+pub struct PosedModule {
+    pub atom_idx: usize,
+    pub wx: i32,
+    pub wy: i32,
+    pub mid: ModuleId,
+}
+
+/// Build canopy from posed (draw) modules so flopped mats shade each other.
+pub fn build_canopy_index_posed(atoms: &[Atom], posed: &[PosedModule]) -> CanopyIndex {
+    let mut index = CanopyIndex::default();
+    for p in posed {
+        if !matches!(p.mid, ModuleId::Photosystem | ModuleId::Stem) {
+            continue;
+        }
+        let Some(atom) = atoms.get(p.atom_idx) else {
+            continue;
+        };
+        if !is_land_plant(atom) {
+            continue;
+        }
+        let a = if p.mid == ModuleId::Photosystem {
+            (atom.genome.leaf_absorb.clamp(0.0, 1.0) * SHADE_PER_LEAF).min(SHADE_CAST_CAP)
+        } else {
+            SHADE_PER_STEM
+        };
+        record_canopy(&mut index, p.wx, p.wy, a, 1, p.atom_idx as u32);
+    }
+    index
+}
+
+/// Highest Photosystem/Stem draw cell for a plant (photo sample point).
+pub fn posed_canopy_sample(posed: &[PosedModule], atom_idx: usize, fallback: (i32, i32)) -> (i32, i32) {
+    let mut best: Option<(i32, i32)> = None;
+    for p in posed {
+        if p.atom_idx != atom_idx {
+            continue;
+        }
+        if !matches!(p.mid, ModuleId::Photosystem | ModuleId::Stem) {
+            continue;
+        }
+        let replace = best
+            .map(|(_, by)| p.wy > by || (p.wy == by && p.mid == ModuleId::Photosystem))
+            .unwrap_or(true);
+        if replace {
+            best = Some((p.wx, p.wy));
+        }
+    }
+    best.unwrap_or(fallback)
+}
+
 fn neighbour_weight(dx: i32) -> f32 {
     match dx.abs() {
-        1 => 0.55,
-        2 => 0.30,
-        3 => 0.16,
+        0 => 0.90, // same-column pile / thicker stack
+        1 => 0.65,
+        2 => 0.35,
+        3 => 0.18,
         _ => 0.0,
     }
 }
 
-/// Sky-light transmit through taller neighbours + own leaf stack (`0..1`).
+/// Sky-light transmit through taller / peer neighbours + own leaf stack (`0..1`).
 pub fn shade_transmit(
     index: &CanopyIndex,
     wx: i32,
@@ -145,27 +235,29 @@ pub fn shade_transmit(
 ) -> f32 {
     let mut transmit = 1.0f32;
     for dx in -SHADE_RADIUS..=SHADE_RADIUS {
-        if dx == 0 {
-            continue;
-        }
         let Some(c) = index.get(&(wx + dx)) else {
             continue;
         };
         if c.entity_id == self_entity {
             continue;
         }
-        if c.top_y <= sample_y {
+        let factor = if c.top_y > sample_y {
+            let rise = ((c.top_y - sample_y) as f32 / 2.5).clamp(0.0, 1.0);
+            0.40 + 0.60 * rise
+        } else if c.top_y == sample_y {
+            // Dense equal-height carpets (seaweed meadows) still compete.
+            SHADE_PEER_FACTOR
+        } else {
             continue;
-        }
-        let rise = ((c.top_y - sample_y) as f32 / 2.5).clamp(0.0, 1.0);
+        };
         let w = neighbour_weight(dx);
-        transmit *= (1.0 - c.absorb * w * (0.40 + 0.60 * rise)).clamp(0.0, 1.0);
+        transmit *= (1.0 - c.absorb * w * factor).clamp(0.0, 1.0);
     }
     if self_n_photo > 1 {
         let stack = (self_n_photo - 1) as f32
             * self_leaf_absorb.clamp(0.0, 1.0)
             * SHADE_SELF_PER_EXTRA_LEAF;
-        transmit *= (1.0 - stack.clamp(0.0, 0.55)).clamp(0.0, 1.0);
+        transmit *= (1.0 - stack.clamp(0.0, 0.60)).clamp(0.0, 1.0);
     }
     transmit.clamp(SHADE_AMBIENT_FLOOR, 1.0)
 }
@@ -211,10 +303,7 @@ mod tests {
     use crate::organism::{Atom, ModuleId};
 
     fn plant_at(gx: i32, gy: i32, stems: i16, photos: i16, genome: Genome) -> Atom {
-        let mut body = vec![
-            (0, 0, ModuleId::Nucleus),
-            (0, -1, ModuleId::Root),
-        ];
+        let mut body = vec![(0, 0, ModuleId::Nucleus), (0, -1, ModuleId::Root)];
         for s in 1..=stems {
             body.push((0, s, ModuleId::Stem));
         }
@@ -236,7 +325,6 @@ mod tests {
         short_g.leaf_absorb = 0.3;
         short_g.shade_efficiency = 0.15;
 
-        // Short crown at y=4, tall crown at y=4 with much taller canopy.
         let short = plant_at(5, 4, 1, 2, short_g);
         let tall = plant_at(6, 4, 6, 3, tall_g);
         let atoms = [short, tall];
@@ -249,6 +337,72 @@ mod tests {
         );
         let open = shade_harvest_light(1.0, short_g.shade_efficiency);
         assert!(lit < open * 0.95);
+    }
+
+    #[test]
+    fn equal_height_peers_shade_each_other() {
+        let mut g = Genome::default();
+        g.leaf_absorb = 0.7;
+        g.shade_efficiency = 0.2;
+        let a = plant_at(5, 2, 0, 4, g);
+        let b = plant_at(6, 2, 0, 4, g);
+        let c = plant_at(4, 2, 0, 4, g);
+        let alone = [plant_at(5, 2, 0, 4, g)];
+        let meadow = [a, b, c];
+        let open = effective_photo_light(
+            &build_canopy_index(&alone),
+            5,
+            canopy_top_y(&alone[0]),
+            1.0,
+            0,
+            4,
+            &g,
+        );
+        let crowded = effective_photo_light(
+            &build_canopy_index(&meadow),
+            5,
+            canopy_top_y(&meadow[0]),
+            1.0,
+            0,
+            4,
+            &g,
+        );
+        assert!(
+            crowded < open * 0.85,
+            "peer meadow should cut light (crowded={crowded}, open={open})"
+        );
+    }
+
+    #[test]
+    fn piled_same_column_shades_lower_leaf() {
+        let mut g = Genome::default();
+        g.leaf_absorb = 0.8;
+        let atoms = [
+            plant_at(5, 2, 0, 2, g),
+            plant_at(6, 2, 0, 2, g),
+        ];
+        // Both flopped into column 5 — upper pile at y=5, lower at y=3.
+        let posed = [
+            PosedModule {
+                atom_idx: 0,
+                wx: 5,
+                wy: 3,
+                mid: ModuleId::Photosystem,
+            },
+            PosedModule {
+                atom_idx: 1,
+                wx: 5,
+                wy: 5,
+                mid: ModuleId::Photosystem,
+            },
+        ];
+        let index = build_canopy_index_posed(&atoms, &posed);
+        let low = effective_photo_light(&index, 5, 3, 1.0, 0, 2, &g);
+        let high = effective_photo_light(&index, 5, 5, 1.0, 1, 2, &g);
+        assert!(
+            low < high * 0.9,
+            "lower pile leaf should be shaded (low={low}, high={high})"
+        );
     }
 
     #[test]

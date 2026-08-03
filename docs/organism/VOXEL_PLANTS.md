@@ -64,12 +64,14 @@ cost/benefit. E36/E37 spirit.
   seaweed flag).
 - **Soft leaves (draw + growth):** all Photosystems are soft tissue.
   Stemless ribbons elongate *up* into standing water as the column rises
-  (flop is draw-only — no permanent sideways L). Stemmed canopies can
-  lengthen soft leaf chains that hang past `LEAF_SUPPORT_DRY` on land.
-  Underwater tips lean with climate wind **or** local water-sat shear
-  (flowing films). Emerged tips lay on the free surface; dry mats settle
-  onto the terrain surface (never painted through solid). Woody `Stem`
-  stays upright on land.
+  (no permanent sideways L body). Stemmed canopies can lengthen soft leaf
+  chains that hang past `LEAF_SUPPORT_DRY` on land. Underwater tips lean
+  with climate wind **or** local water-sat shear. Emerged / dry mats settle
+  onto the terrain surface and **pile** when cells collide (stacked greens
+  instead of one overwritten line). Woody `Stem` stays upright on land.
+- **Light competition:** equal-height neighbours shade each other (dense
+  meadows). Canopy index + photo sample use posed draw cells, so flopped
+  piles cast and receive shade where the greens sit.
 
 ### D3 — Vegetative sprout *(landed)*
 

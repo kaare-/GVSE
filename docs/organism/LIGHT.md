@@ -125,6 +125,12 @@ so submerged plants either race stems toward the brighter surface
 (stemmed plants urge olive up; stemless seaweed elongates its leaf
 ribbon) or starve. Dry land columns stay clear.
 
+**wk-voxel lite canopy (`shade.rs`):** sparse neighbour cast (not a full
+column Beer–Lambert scan). Equal-height peers still shade each other
+(`SHADE_PEER_FACTOR`) so dense meadows compete. Cast / sample use
+*posed* draw cells (flop + pile), so dry mats stacked on a beach shade
+the greens underneath.
+
 ## What is deliberately not here
 
 - Refractive scattering, angle-of-incidence, or sun elevation
