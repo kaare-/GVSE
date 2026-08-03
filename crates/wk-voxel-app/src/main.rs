@@ -1280,7 +1280,7 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
@@ -1294,6 +1294,10 @@ async fn main() {
                 scene.wind.climate_vx,
                 scene.organisms.len(),
                 scene.organisms.atom_cap(),
+                {
+                    let (p, f, a) = scene.organisms.habit_counts();
+                    format!("p={p} f={f} a={a}")
+                },
                 scene.organisms.corpse_count(),
                 if sim_paused { "[paused]" } else { "" }
             );

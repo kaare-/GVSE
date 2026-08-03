@@ -85,6 +85,13 @@ pub const FUNGUS_SPORE_ENERGY_FRAC: f32 = 0.70;
 pub const FUNGUS_SPORE_PERIOD: u64 = 2_400;
 /// Max columns a wind-borne spore may travel.
 pub const FUNGUS_SPORE_MAX_DIST: i32 = 28;
+/// Neighbourhood half-width for local fruiting-body density gate.
+pub const FUNGUS_SPORE_LOCAL_RADIUS: i32 = 4;
+/// Max living fruiting bodies in `[gx±radius]` before further spores
+/// / emergence are blocked (anti-flood; mirrors plant sprout density).
+pub const FUNGUS_SPORE_LOCAL_MAX: usize = 6;
+/// Age before network support prevents energy-starve (babies must earn).
+pub const FRUIT_SUPPORT_MIN_AGE: u64 = 480;
 /// Soft litter deposited per body module on death.
 pub const DEATH_LITTER_PER_MODULE: u16 = 6;
 /// Cap soft litter added from one corpse.
@@ -633,12 +640,15 @@ pub fn fruiting_surface_ready(world: &World, gx: i32) -> Option<i32> {
 }
 
 /// Pick a downwind Organic seat for a spore (wind-biased).
+/// Skips columns that already host a living fruiting body and enforces
+/// a soft local density cap ([`FUNGUS_SPORE_LOCAL_MAX`]).
 pub fn pick_spore_site(
     world: &World,
     atom: &Atom,
     tick: u64,
     id: u32,
     wind_vx: f32,
+    fungus_cols: &[i32],
 ) -> Option<(i32, i32)> {
     let wx0 = atom.gx;
     let prefer_dir = if wind_vx.abs() < 0.05 {
@@ -657,6 +667,13 @@ pub fn pick_spore_site(
     for dist in 1..=FUNGUS_SPORE_MAX_DIST {
         for &sign in &[prefer_dir, -prefer_dir] {
             let wx = world.wrap_x(wx0 + sign * dist);
+            if fungus_cols.iter().any(|&ox| world.wrap_x(ox) == wx) {
+                continue;
+            }
+            let local = count_fungi_near(fungus_cols, wx, FUNGUS_SPORE_LOCAL_RADIUS, world.wrap_width);
+            if local >= FUNGUS_SPORE_LOCAL_MAX {
+                continue;
+            }
             let Some(gy) = find_fungus_slot(world, wx, atom.gy) else {
                 continue;
             };
@@ -674,6 +691,26 @@ pub fn pick_spore_site(
         }
     }
     best.map(|(_, wx, gy)| (wx, gy))
+}
+
+/// Count living fruiting-body crowns within `radius` columns of `gx`.
+pub fn count_fungi_near(
+    fungus_cols: &[i32],
+    gx: i32,
+    radius: i32,
+    wrap_width: Option<i32>,
+) -> usize {
+    fungus_cols
+        .iter()
+        .filter(|&&px| {
+            let d = (px - gx).abs();
+            let dist = match wrap_width {
+                Some(w) if w > 0 => d.min(w - d.min(w)),
+                _ => d,
+            };
+            dist <= radius
+        })
+        .count()
 }
 
 /// Seed a faint mycelium patch on Organic near `(gx, gy)`.
@@ -728,6 +765,15 @@ pub fn try_emergent_fruiting(
                 {
                     continue;
                 }
+                let local = count_fungi_near(
+                    occupied_fungus_cols,
+                    gx,
+                    FUNGUS_SPORE_LOCAL_RADIUS,
+                    world.wrap_width,
+                );
+                if local >= FUNGUS_SPORE_LOCAL_MAX {
+                    continue;
+                }
                 candidates.push((gx, gy + 1, c.mycelium()));
             }
         }
@@ -755,8 +801,8 @@ pub fn try_emergent_fruiting(
     apply_genome(&mut child, Genome::default());
     child.genome.digest_rate = 1.0;
     child.energy = (tank * MYCELIUM_EMERGE_ENERGY_FRAC).clamp(1.0, child.energy_max);
-    // Short cooldown, then it can try wind-biased spores.
-    child.cooldown = FUNGUS_SPORE_PERIOD / 6;
+    // Mature before sporing — emergence must not immediately flood.
+    child.cooldown = FUNGUS_SPORE_PERIOD;
     pin_plant_pose(&mut child);
     if !is_fungus_seated(world, &child) {
         return None;
@@ -766,6 +812,7 @@ pub fn try_emergent_fruiting(
 
 /// Rare fruiting: energy cost, wind-biased spore child on Organic / litter.
 /// Requires at least one painted [`ModuleId::ReproSpore`] on the fruiting body.
+/// One living fruiting body per column + local density gate (anti-flood).
 pub fn try_spore(
     world: &mut World,
     atom: &mut Atom,
@@ -773,6 +820,7 @@ pub fn try_spore(
     entity_id: u32,
     pop_room: bool,
     wind_vx: f32,
+    fungus_cols: &[i32],
 ) -> Option<Atom> {
     if !pop_room || atom.cooldown > 0 {
         return None;
@@ -793,6 +841,15 @@ pub fn try_spore(
     if fruiting_surface_ready(world, atom.gx).is_none() {
         return None;
     }
+    let local = count_fungi_near(
+        fungus_cols,
+        atom.gx,
+        FUNGUS_SPORE_LOCAL_RADIUS,
+        world.wrap_width,
+    );
+    if local >= FUNGUS_SPORE_LOCAL_MAX {
+        return None;
+    }
     let tank = if atom.energy_base_max >= 1.0 {
         atom.energy_base_max
     } else {
@@ -807,7 +864,7 @@ pub fn try_spore(
     if h % 17 != 0 {
         return None;
     }
-    let (wx, gy) = pick_spore_site(world, atom, tick, entity_id, wind_vx)?;
+    let (wx, gy) = pick_spore_site(world, atom, tick, entity_id, wind_vx, fungus_cols)?;
     let cost = tank * 0.45;
     if atom.energy < cost {
         return None;
@@ -837,7 +894,8 @@ pub fn try_spore(
     let mut child = Atom::from_body(wx, gy, tank, body);
     apply_genome(&mut child, child_genome);
     child.energy = (cost * 0.5).clamp(1.0, child.energy_max);
-    child.cooldown = FUNGUS_SPORE_PERIOD / 2;
+    // Children must mature before chaining another spore burst.
+    child.cooldown = FUNGUS_SPORE_PERIOD.saturating_mul(2);
     pin_plant_pose(&mut child);
     if !is_fungus_seated(world, &child) {
         atom.energy = (atom.energy + cost).min(atom.energy_max);
@@ -1239,6 +1297,27 @@ mod tests {
     }
 
     #[test]
+    fn fungus_spore_skips_occupied_columns() {
+        let mut w = litter_plot();
+        rich_moist_surface(&mut w, 4, 100);
+        for x in 0..12 {
+            rich_moist_surface(&mut w, x, 40);
+            add_soft_litter(&mut w, x, 20);
+        }
+        let mut atom = Atom::from_body(4, 4, 40.0, fungus_body());
+        // Entire moist plot claimed — must not stack on any column.
+        let occupied: Vec<i32> = (0..12).collect();
+        for tick in 0..4_000u64 {
+            atom.energy = atom.energy_max;
+            atom.cooldown = 0;
+            assert!(
+                try_spore(&mut w, &mut atom, tick, 7, true, 0.4, &occupied).is_none(),
+                "spore must not land on an occupied fungus column"
+            );
+        }
+    }
+
+    #[test]
     fn fruiting_body_can_spread_spores() {
         let mut w = litter_plot();
         // Parent column + a downwind Organic bank for the spore to land on.
@@ -1255,7 +1334,7 @@ mod tests {
         for tick in 0..4_000u64 {
             atom.energy = atom.energy_max;
             atom.cooldown = 0;
-            if let Some(c) = try_spore(&mut w, &mut atom, tick, 7, true, 0.4) {
+            if let Some(c) = try_spore(&mut w, &mut atom, tick, 7, true, 0.4, &[4]) {
                 spore = Some(c);
                 break;
             }

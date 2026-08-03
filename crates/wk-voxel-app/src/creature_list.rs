@@ -141,8 +141,11 @@ impl CreatureList {
 
         let live_n = store.len();
         let dead_n = store.corpse_count();
+        let (p, f, a) = store.habit_counts();
         let title = match self.section {
-            ListSection::Living => format!("CREATURES (living {live_n})  [Q]=dead"),
+            ListSection::Living => {
+                format!("CREATURES (living {live_n}  p={p} f={f} a={a})  [Q]=dead")
+            }
             ListSection::Dead => format!("CREATURES (dead {dead_n})  [Q]=living"),
         };
         draw_text(&title, x0 + PAD, y0 + 18.0, 16.0, Color::from_rgba(180, 210, 255, 255));

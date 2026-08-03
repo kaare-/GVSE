@@ -24,7 +24,8 @@ use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY
 use crate::fungi::{
     colonize_and_compost, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
     forage_organic_energy, fruiting_body_supported, fungus_should_hibernate, fungus_upkeep,
-    is_fungus, is_fungus_seated, try_emergent_fruiting, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
+    is_fungus, is_fungus_seated, try_emergent_fruiting, try_spore, FRUIT_SUPPORT_MIN_AGE,
+    FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -338,6 +339,24 @@ impl OrganismStore {
         self.atoms.len()
     }
 
+    /// Living habit breakdown: `(plants, fungi, atoms)`.
+    /// HUD uses this so a fungus spore bloom isn't mistaken for "invisible plants".
+    pub fn habit_counts(&self) -> (usize, usize, usize) {
+        let mut plants = 0usize;
+        let mut fungi = 0usize;
+        let mut atoms = 0usize;
+        for a in &self.atoms {
+            if is_land_plant(a) {
+                plants += 1;
+            } else if is_fungus(a) {
+                fungi += 1;
+            } else {
+                atoms += 1;
+            }
+        }
+        (plants, fungi, atoms)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.atoms.is_empty()
     }
@@ -561,6 +580,7 @@ impl OrganismStore {
         let growth_caps = self.growth_caps.clamp();
         // One crown per column: destack any pre-existing overlaps first.
         reseat_stacked_land_plants(world, &mut self.atoms);
+        reseat_stacked_fungi(world, &mut self.atoms);
         // Crown columns of living land plants — density + occupancy gate.
         // Mutated as sprouts birth so same-tick siblings can't share a seat.
         let mut plant_cols: Vec<i32> = self
@@ -569,7 +589,7 @@ impl OrganismStore {
             .filter(|a| is_land_plant(a))
             .map(|a| a.gx)
             .collect();
-        let fungus_cols: Vec<i32> = self
+        let mut fungus_cols: Vec<i32> = self
             .atoms
             .iter()
             .filter(|a| is_fungus(a))
@@ -658,10 +678,22 @@ impl OrganismStore {
                 let room = pop + births.len() < atom_cap;
                 let parent_gx = atom.gx;
                 let parent_gy = atom.gy;
-                match step_fungus(world, atom, day, tick, i as u32, room, wind_vx) {
+                match step_fungus(
+                    world,
+                    atom,
+                    day,
+                    tick,
+                    i as u32,
+                    room,
+                    wind_vx,
+                    &fungus_cols,
+                ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
-                    PlantStep::Sprout(child) => births.push(child),
+                    PlantStep::Sprout(child) => {
+                        fungus_cols.push(child.gx);
+                        births.push(child);
+                    }
                     PlantStep::Spore(child) => {
                         spore_releases.push(SporeRelease {
                             from_gx: parent_gx,
@@ -669,6 +701,7 @@ impl OrganismStore {
                             to_gx: child.gx,
                             to_gy: child.gy,
                         });
+                        fungus_cols.push(child.gx);
                         births.push(child);
                     }
                 }
@@ -911,6 +944,52 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
     }
 }
 
+/// Oldest fruiting body keeps its column; younger stack-mates reseat.
+/// Spore floods used to pile hundreds of `N1D1H2Sp1` on one Organic seat.
+fn reseat_stacked_fungi(world: &World, atoms: &mut [Atom]) {
+    let mut fungus_idx: Vec<usize> = atoms
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| is_fungus(a))
+        .map(|(i, _)| i)
+        .collect();
+    if fungus_idx.len() < 2 {
+        return;
+    }
+    fungus_idx.sort_by_key(|&i| std::cmp::Reverse(atoms[i].age_ticks));
+    let mut claimed = std::collections::HashSet::new();
+    for i in fungus_idx {
+        let gx = atoms[i].gx;
+        if claimed.insert(gx) {
+            continue;
+        }
+        let gy = atoms[i].gy;
+        let mut moved = false;
+        for dist in 1..=24 {
+            for sign in [1i32, -1] {
+                let nx = world.wrap_x(gx + sign * dist);
+                if claimed.contains(&nx) {
+                    continue;
+                }
+                let Some(ny) = find_fungus_slot(world, nx, gy)
+                    .or_else(|| find_surface_air_slot(world, nx, gy))
+                else {
+                    continue;
+                };
+                atoms[i].gx = nx;
+                atoms[i].gy = ny;
+                pin_plant_pose(&mut atoms[i]);
+                claimed.insert(nx);
+                moved = true;
+                break;
+            }
+            if moved {
+                break;
+            }
+        }
+    }
+}
+
 /// Land plant tick: drink, shade photo, grow, maybe rhizome sprout or
 /// wind spore (needs painted [`ModuleId::ReproSpore`], fern-style).
 /// D4: root starch tank + drought bands (stress / hibernate).
@@ -1037,6 +1116,7 @@ fn step_fungus(
     entity_id: u32,
     pop_room: bool,
     wind_vx: f32,
+    fungus_cols: &[i32],
 ) -> PlantStep {
     pin_plant_pose(atom);
     // Prefer Organic seats; fall back to Air-above-solid crown.
@@ -1077,15 +1157,17 @@ fn step_fungus(
     }
 
     atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);
-    // Network-backed fruiting bodies don't energy-starve on moist beds —
-    // the mycelium field keeps feeding them (and outlives them on death).
-    if network {
+    // Mature network-backed fruiting bodies don't energy-starve — babies
+    // must still earn (anti-flood: sporelings can't pad the pop forever).
+    if network && atom.age_ticks >= FRUIT_SUPPORT_MIN_AGE {
         atom.energy = atom.energy.max(1.0);
     } else if atom.energy <= 0.0 {
         return PlantStep::Dead;
     }
     if !dormant {
-        if let Some(child) = try_spore(world, atom, tick, entity_id, pop_room, wind_vx) {
+        if let Some(child) =
+            try_spore(world, atom, tick, entity_id, pop_room, wind_vx, fungus_cols)
+        {
             return PlantStep::Spore(child);
         }
     }
