@@ -35,8 +35,8 @@
 //! - `Up` / `Down` — pan vertically
 //! - `Esc` — close overlays, or quit confirm (save / discard / cancel)
 //!
-//! Sky follows the shared climate clock (sun by day, moon by night).
-//! Temperature tiles warm with sun, cool at night, and shade under clouds.
+//! Sky follows the shared climate clock (pixel sun by day, pixel moon by night).
+//! Temperature tiles warm with sun, cool at night, and shade under pixel clouds.
 
 mod creature_list;
 mod editor;
@@ -54,7 +54,7 @@ use wk_voxel::{
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    precip_forms_snow_at_air, sky_rgb, sky_rgb_at_height, temperature_step_due, tick_with_life,
+    precip_forms_snow_at_air, sky_rgb_at_height, temperature_step_due, tick_with_life,
     ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
 
@@ -123,7 +123,7 @@ fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
     (18.0 + norm * 42.0) as u8
 }
 
-/// Day/night sky gradient + sun or moon arc.
+/// Day/night sky gradient + pixel-art sun or moon (same block size as the world).
 fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
     let dn = day_night_factor_cfg(tick, climate);
     const BANDS: i32 = 28;
@@ -141,20 +141,87 @@ fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
         );
     }
     let (cx, cy) = celestial_screen_pos_cfg(tick, sw, sh, climate);
+    let px = PX_PER_CELL;
     if is_daytime_cfg(tick, climate) {
-        draw_circle(cx, cy, 22.0, Color::from_rgba(255, 200, 70, 60));
-        draw_circle(cx, cy, 16.0, Color::from_rgba(255, 220, 90, 255));
-        draw_circle(cx, cy, 10.0, Color::from_rgba(255, 245, 180, 255));
+        // Outer corona → mid → hot core, all square pixels.
+        draw_pixel_disk(cx, cy, 7.0 * px, px, Color::from_rgba(255, 190, 60, 90));
+        draw_pixel_disk(cx, cy, 5.0 * px, px, Color::from_rgba(255, 215, 70, 255));
+        draw_pixel_disk(cx, cy, 3.0 * px, px, Color::from_rgba(255, 240, 160, 255));
+        draw_pixel_disk(cx, cy, 1.5 * px, px, Color::from_rgba(255, 252, 220, 255));
     } else {
-        let [sr, sg, sb] = sky_rgb(dn);
-        draw_circle(cx, cy, 14.0, Color::from_rgba(230, 235, 245, 255));
-        // Crescent bite using local sky colour.
-        draw_circle(
-            cx + 5.0,
-            cy - 2.0,
-            12.0,
-            Color::from_rgba(sr, sg, sb, 255),
+        // Blocky crescent: full moon disk minus an offset sky-colored bite.
+        draw_pixel_crescent(
+            cx,
+            cy,
+            4.5 * px,
+            cx + 2.0 * px,
+            cy - 0.5 * px,
+            4.0 * px,
+            px,
+            Color::from_rgba(220, 226, 238, 255),
         );
+    }
+}
+
+/// Filled disk rasterized as axis-aligned squares (`pixel` ≈ world cell size).
+fn draw_pixel_disk(cx: f32, cy: f32, radius: f32, pixel: f32, color: Color) {
+    if radius <= 0.0 || pixel <= 0.0 {
+        return;
+    }
+    let r2 = radius * radius;
+    let min_x = ((cx - radius) / pixel).floor() as i32;
+    let max_x = ((cx + radius) / pixel).ceil() as i32;
+    let min_y = ((cy - radius) / pixel).floor() as i32;
+    let max_y = ((cy + radius) / pixel).ceil() as i32;
+    for iy in min_y..=max_y {
+        for ix in min_x..=max_x {
+            let px = (ix as f32 + 0.5) * pixel;
+            let py = (iy as f32 + 0.5) * pixel;
+            let dx = px - cx;
+            let dy = py - cy;
+            if dx * dx + dy * dy <= r2 {
+                draw_rectangle(ix as f32 * pixel, iy as f32 * pixel, pixel, pixel, color);
+            }
+        }
+    }
+}
+
+/// Moon disk with a circular bite removed (crescent), all square pixels.
+fn draw_pixel_crescent(
+    cx: f32,
+    cy: f32,
+    r_moon: f32,
+    bite_cx: f32,
+    bite_cy: f32,
+    r_bite: f32,
+    pixel: f32,
+    color: Color,
+) {
+    if r_moon <= 0.0 || pixel <= 0.0 {
+        return;
+    }
+    let r2 = r_moon * r_moon;
+    let b2 = r_bite * r_bite;
+    let min_x = ((cx - r_moon) / pixel).floor() as i32;
+    let max_x = ((cx + r_moon) / pixel).ceil() as i32;
+    let min_y = ((cy - r_moon) / pixel).floor() as i32;
+    let max_y = ((cy + r_moon) / pixel).ceil() as i32;
+    for iy in min_y..=max_y {
+        for ix in min_x..=max_x {
+            let px = (ix as f32 + 0.5) * pixel;
+            let py = (iy as f32 + 0.5) * pixel;
+            let dx = px - cx;
+            let dy = py - cy;
+            if dx * dx + dy * dy > r2 {
+                continue;
+            }
+            let bx = px - bite_cx;
+            let by = py - bite_cy;
+            if bx * bx + by * by <= b2 {
+                continue;
+            }
+            draw_rectangle(ix as f32 * pixel, iy as f32 * pixel, pixel, pixel, color);
+        }
     }
 }
 
@@ -200,7 +267,7 @@ fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
     Color::from_rgba(r, g, b, 120)
 }
 
-/// Cartoon clouds from coagulated [`wk_voxel::CloudStore`] parcels.
+/// Cartoon → pixel clouds from coagulated [`wk_voxel::CloudStore`] parcels.
 /// Darker / denser = wetter; raining parcels get falling drops beneath.
 fn draw_clouds(
     clouds: &wk_voxel::CloudStore,
@@ -252,12 +319,12 @@ fn draw_clouds(
             if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
                 continue;
             }
-            draw_cartoon_cloud(sx, sy, r, shade, alpha, p.shape_seed, p.deform);
+            draw_pixel_cloud(sx, sy, r, shade, alpha, p.shape_seed, p.deform, cell_px);
             if p.raining {
                 if as_snow {
-                    draw_falling_snow(sx, sy, r, ground_sy, wet, sw, sh);
+                    draw_falling_snow(sx, sy, r, ground_sy, wet, sw, sh, cell_px);
                 } else {
-                    draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh);
+                    draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh, cell_px);
                 }
             }
         }
@@ -273,6 +340,7 @@ fn draw_falling_rain(
     wetness: f32,
     sw: f32,
     sh: f32,
+    cell_px: f32,
 ) {
     let t = get_time() as f32;
     let top = sy + r * 0.35;
@@ -281,24 +349,24 @@ fn draw_falling_rain(
     let right = (sx + r * 0.85).min(sw + 12.0);
     let band = (right - left).max(1.0);
     let n = ((band / 7.0) * (0.7 + wetness)).ceil().clamp(10.0, 48.0) as usize;
-    let drop_len = 10.0 + wetness * 6.0;
+    let drop_len = (2.0 + wetness).ceil().clamp(2.0, 4.0) * cell_px;
     let fall_speed = 380.0 + wetness * 160.0;
     let cycle = (bottom - top + drop_len).max(drop_len + 1.0);
     for i in 0..n {
         let seed = i as f32;
-        let x = left + ((seed * 97.371) % band);
+        let x = ((left + ((seed * 97.371) % band)) / cell_px).floor() * cell_px;
         let phase = (seed * 0.6180339) % 1.0;
         let y = top + ((t * fall_speed + phase * cycle) % cycle) - drop_len;
         if y + drop_len < top || y > bottom {
             continue;
         }
         let alpha = (100.0 + wetness * 50.0) as u8;
-        draw_line(
+        // Blocky rain streak (1 cell wide).
+        draw_rectangle(
             x,
             y,
-            x - 2.5,
-            y + drop_len,
-            1.15,
+            cell_px,
+            drop_len,
             Color::from_rgba(195, 215, 240, alpha),
         );
     }
@@ -313,6 +381,7 @@ fn draw_falling_snow(
     wetness: f32,
     sw: f32,
     sh: f32,
+    cell_px: f32,
 ) {
     let t = get_time() as f32;
     let top = sy + r * 0.35;
@@ -323,13 +392,13 @@ fn draw_falling_snow(
     let n = ((band / 9.0) * (0.65 + wetness * 0.85))
         .ceil()
         .clamp(8.0, 40.0) as usize;
-    let flake = 2.2 + wetness * 1.4;
+    let flake = cell_px;
     let fall_speed = 95.0 + wetness * 55.0;
     let cycle = (bottom - top + flake * 4.0).max(flake * 4.0 + 1.0);
     for i in 0..n {
         let seed = i as f32;
         let drift = ((t * 18.0 + seed * 11.3).sin()) * 6.0;
-        let x = left + ((seed * 97.371) % band) + drift;
+        let x = ((left + ((seed * 97.371) % band) + drift) / cell_px).floor() * cell_px;
         let phase = (seed * 0.6180339) % 1.0;
         let y = top + ((t * fall_speed + phase * cycle) % cycle) - flake;
         if y + flake < top || y > bottom {
@@ -337,15 +406,16 @@ fn draw_falling_snow(
         }
         let alpha = (130.0 + wetness * 60.0) as u8;
         let c = Color::from_rgba(235, 242, 255, alpha);
-        // Tiny plus / diamond flake.
-        draw_line(x - flake, y, x + flake, y, 1.1, c);
-        draw_line(x, y - flake, x, y + flake, 1.1, c);
-        draw_line(x - flake * 0.7, y - flake * 0.7, x + flake * 0.7, y + flake * 0.7, 0.9, c);
+        // 2×2 block flake.
+        draw_rectangle(x, y, flake, flake, c);
+        if wetness > 0.45 {
+            draw_rectangle(x + flake, y, flake, flake, c);
+        }
     }
 }
 
-/// Multi-bump cartoon cloud with per-parcel silhouette + soft ridge squash.
-fn draw_cartoon_cloud(
+/// Multi-bump cloud rasterized as world-sized square pixels.
+fn draw_pixel_cloud(
     cx: f32,
     cy: f32,
     r: f32,
@@ -353,54 +423,90 @@ fn draw_cartoon_cloud(
     alpha: u8,
     shape_seed: u32,
     deform: f32,
+    cell_px: f32,
 ) {
+    if r <= 0.0 || cell_px <= 0.0 {
+        return;
+    }
     let body = Color::from_rgba(shade, shade, shade.saturating_add(6), alpha);
     let hilite = Color::from_rgba(
-        shade.saturating_add(25),
-        shade.saturating_add(25),
-        shade.saturating_add(30),
-        (alpha as f32 * 0.55) as u8,
+        shade.saturating_add(28),
+        shade.saturating_add(28),
+        shade.saturating_add(34),
+        (alpha as f32 * 0.7) as u8,
     );
     let d = deform.clamp(0.0, 1.0);
-    // Soft deform: widen and flatten when scraping a ridge.
     let sx = 1.0 + d * 0.22;
     let sy = 1.0 - d * 0.28;
-    let s = |n: u32| ((shape_seed.wrapping_mul(0x9E37_79B9).wrapping_add(n * 0x85EB_CA6B)) >> 8) as f32
-        / 16_777_216.0;
+    let s = |n: u32| {
+        ((shape_seed.wrapping_mul(0x9E37_79B9).wrapping_add(n * 0x85EB_CA6B)) >> 8) as f32
+            / 16_777_216.0
+    };
     let jx = |n: u32| (s(n) - 0.5) * 0.28;
     let jy = |n: u32| (s(n.wrapping_add(17)) - 0.5) * 0.22;
     let jr = |n: u32| 0.88 + s(n.wrapping_add(31)) * 0.28;
-    let puff = |ox: f32, oy: f32, rr: f32, n: u32| {
-        draw_circle(
-            cx + (ox + jx(n)) * r * sx,
-            cy + (oy + jy(n)) * r * sy,
-            rr * jr(n) * r * ((sx + sy) * 0.5),
-            body,
-        );
-    };
-    // Body + side puffs (layout varies with seed).
-    puff(0.0, 0.02, 0.95, 1);
-    puff(-0.72, 0.08, 0.70, 2);
-    puff(0.78, 0.06, 0.68, 3);
-    // Upper lobes — count/bias from seed so silhouettes differ.
-    puff(-0.32 + jx(4) * 0.4, -0.42, 0.60, 4);
-    puff(0.28 + jx(5) * 0.4, -0.52, 0.66, 5);
+
+    // Same lobe layout as the old cartoon cloud, sampled as a pixel mask.
+    let mut lobes: Vec<(f32, f32, f32)> = vec![
+        (0.0, 0.02, 0.95 * jr(1)),
+        (-0.72, 0.08, 0.70 * jr(2)),
+        (0.78, 0.06, 0.68 * jr(3)),
+        (-0.32 + jx(4) * 0.4, -0.42, 0.60 * jr(4)),
+        (0.28 + jx(5) * 0.4, -0.52, 0.66 * jr(5)),
+    ];
     if shape_seed & 1 == 0 {
-        puff(0.82, -0.22, 0.52, 6);
+        lobes.push((0.82, -0.22, 0.52 * jr(6)));
     }
     if shape_seed & 2 == 0 {
-        puff(-0.88, -0.12, 0.48, 7);
+        lobes.push((-0.88, -0.12, 0.48 * jr(7)));
     }
     if shape_seed % 5 < 3 {
-        puff(jx(8) * 0.5, -0.68, 0.42, 8);
+        lobes.push((jx(8) * 0.5, -0.68, 0.42 * jr(8)));
     }
-    // Soft highlight on the sun-facing top.
-    draw_circle(
-        cx + (0.12 + jx(9) * 0.3) * r * sx,
-        cy + (-0.48 + jy(9) * 0.2) * r * sy,
-        r * 0.32 * jr(9),
-        hilite,
-    );
+    let hilite_lobe = (0.12 + jx(9) * 0.3, -0.48 + jy(9) * 0.2, 0.32 * jr(9));
+
+    let half_w = r * sx * 1.35;
+    let half_h = r * sy * 1.15;
+    let min_x = ((cx - half_w) / cell_px).floor() as i32;
+    let max_x = ((cx + half_w) / cell_px).ceil() as i32;
+    let min_y = ((cy - half_h) / cell_px).floor() as i32;
+    let max_y = ((cy + half_h) / cell_px).ceil() as i32;
+
+    for iy in min_y..=max_y {
+        for ix in min_x..=max_x {
+            let px = (ix as f32 + 0.5) * cell_px;
+            let py = (iy as f32 + 0.5) * cell_px;
+            // Normalize into lobe space.
+            let nx = (px - cx) / (r * sx).max(1e-3);
+            let ny = (py - cy) / (r * sy).max(1e-3);
+            let mut inside = false;
+            for &(ox, oy, rr) in &lobes {
+                let dx = nx - (ox + jx(1) * 0.05);
+                let dy = ny - oy;
+                if dx * dx + dy * dy <= rr * rr {
+                    inside = true;
+                    break;
+                }
+            }
+            if !inside {
+                continue;
+            }
+            let hx = nx - hilite_lobe.0;
+            let hy = ny - hilite_lobe.1;
+            let color = if hx * hx + hy * hy <= hilite_lobe.2 * hilite_lobe.2 {
+                hilite
+            } else {
+                body
+            };
+            draw_rectangle(
+                ix as f32 * cell_px,
+                iy as f32 * cell_px,
+                cell_px,
+                cell_px,
+                color,
+            );
+        }
+    }
 }
 
 #[cfg(test)]
