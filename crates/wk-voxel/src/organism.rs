@@ -1322,6 +1322,9 @@ pub fn resolve_organism_draw_cells(
             let wx = wx0;
             let mut wy = wy0;
             let qx = world.wrap_x(wx);
+            // Photosystems pile in free Air. Roots / Digest / Hypha live in
+            // solid substrate — never lift them to the surface. Stem /
+            // Nucleus stay on their body pose as well.
             if mid == ModuleId::Photosystem {
                 for _ in 0..24 {
                     // Missing world cells (tests / unloaded) count as free air.
@@ -1334,12 +1337,6 @@ pub fn resolve_organism_draw_cells(
                     }
                     wy += 1;
                 }
-            } else if matches!(
-                world.get_cell(qx, wy),
-                Some(c) if c.material != MaterialId::Air
-            ) {
-                // Lift rigid modules out of solid when the world is loaded.
-                wy = clear_solid_y(world, qx, wy);
             }
             occupied.insert((wx, wy));
             out.push(PosedModule {
@@ -2070,6 +2067,44 @@ mod tests {
             "dry ribbon should flop laterally (wx={wx})"
         );
         assert!(wx > atom.gx, "flops into a mat beside the holdfast");
+    }
+
+    #[test]
+    fn roots_draw_inside_substrate_not_on_surface() {
+        let w = moist_sand_plot(); // sand at y=1, air above
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let atom = Atom::from_body(4, 2, 40.0, body);
+        // Template root is at (0,-1) → world (4,1) inside sand.
+        let root_body_y = atom.gy
+            + atom
+                .body
+                .iter()
+                .find(|(_, _, m)| *m == ModuleId::Root)
+                .map(|(_, y, _)| *y)
+                .unwrap() as i32;
+        assert_eq!(root_body_y, 1, "fixture root sits in the sand row");
+        let mut store = OrganismStore::new();
+        store.atoms.push(atom);
+        let list = store.draw_list(&w, 0, 0.0);
+        let root_rgb = ModuleId::Root.rgb();
+        let root_draws: Vec<(i32, i32)> = list
+            .iter()
+            .filter(|(_, _, rgb)| *rgb == root_rgb)
+            .map(|&(x, y, _)| (x, y))
+            .collect();
+        assert!(
+            !root_draws.is_empty(),
+            "plant should draw at least one Root"
+        );
+        for &(wx, wy) in &root_draws {
+            let cell = w.get_cell(wx, wy).expect("root draw in world");
+            assert_ne!(
+                cell.material,
+                MaterialId::Air,
+                "root must not be lifted onto the surface ({wx},{wy})"
+            );
+            assert_eq!(wy, root_body_y, "root draw stays on body Y");
+        }
     }
 
     #[test]
