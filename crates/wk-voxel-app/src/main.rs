@@ -123,7 +123,7 @@ fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
     (18.0 + norm * 42.0) as u8
 }
 
-/// Day/night sky gradient + pixel-art sun or moon (same block size as the world).
+/// Day/night sky gradient + round sun/moon built from world-sized pixels.
 fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
     let dn = day_night_factor_cfg(tick, climate);
     const BANDS: i32 = 28;
@@ -143,84 +143,81 @@ fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
     let (cx, cy) = celestial_screen_pos_cfg(tick, sw, sh, climate);
     let px = PX_PER_CELL;
     if is_daytime_cfg(tick, climate) {
-        // Outer corona → mid → hot core, all square pixels.
-        draw_pixel_disk(cx, cy, 7.0 * px, px, Color::from_rgba(255, 190, 60, 90));
-        draw_pixel_disk(cx, cy, 5.0 * px, px, Color::from_rgba(255, 215, 70, 255));
-        draw_pixel_disk(cx, cy, 3.0 * px, px, Color::from_rgba(255, 240, 160, 255));
-        draw_pixel_disk(cx, cy, 1.5 * px, px, Color::from_rgba(255, 252, 220, 255));
+        // Round silhouette (radius in cells), square pixels only as the fill.
+        draw_pixel_disk_cells(cx, cy, 8, px, Color::from_rgba(255, 190, 60, 85));
+        draw_pixel_disk_cells(cx, cy, 6, px, Color::from_rgba(255, 215, 70, 255));
+        draw_pixel_disk_cells(cx, cy, 4, px, Color::from_rgba(255, 238, 150, 255));
+        draw_pixel_disk_cells(cx, cy, 2, px, Color::from_rgba(255, 252, 220, 255));
     } else {
-        // Blocky crescent: full moon disk minus an offset sky-colored bite.
-        draw_pixel_crescent(
+        // Round crescent: moon disk minus offset bite (still cell lattice).
+        draw_pixel_crescent_cells(
             cx,
             cy,
-            4.5 * px,
-            cx + 2.0 * px,
-            cy - 0.5 * px,
-            4.0 * px,
+            6,
+            2,
+            -1,
+            5,
             px,
             Color::from_rgba(220, 226, 238, 255),
         );
     }
 }
 
-/// Filled disk rasterized as axis-aligned squares (`pixel` ≈ world cell size).
-fn draw_pixel_disk(cx: f32, cy: f32, radius: f32, pixel: f32, color: Color) {
-    if radius <= 0.0 || pixel <= 0.0 {
+/// Round disk centered on `(cx, cy)`, filled with `pixel`-sized squares.
+/// Lattice is body-centered so the silhouette stays circular as it moves.
+fn draw_pixel_disk_cells(cx: f32, cy: f32, radius_cells: i32, pixel: f32, color: Color) {
+    if radius_cells <= 0 || pixel <= 0.0 {
         return;
     }
-    let r2 = radius * radius;
-    let min_x = ((cx - radius) / pixel).floor() as i32;
-    let max_x = ((cx + radius) / pixel).ceil() as i32;
-    let min_y = ((cy - radius) / pixel).floor() as i32;
-    let max_y = ((cy + radius) / pixel).ceil() as i32;
-    for iy in min_y..=max_y {
-        for ix in min_x..=max_x {
-            let px = (ix as f32 + 0.5) * pixel;
-            let py = (iy as f32 + 0.5) * pixel;
-            let dx = px - cx;
-            let dy = py - cy;
-            if dx * dx + dy * dy <= r2 {
-                draw_rectangle(ix as f32 * pixel, iy as f32 * pixel, pixel, pixel, color);
+    // Slight expand so staircase edges still read as a circle, not a diamond.
+    let r2 = (radius_cells as f32 + 0.35).powi(2);
+    for dy in -radius_cells..=radius_cells {
+        for dx in -radius_cells..=radius_cells {
+            let fx = dx as f32;
+            let fy = dy as f32;
+            if fx * fx + fy * fy > r2 {
+                continue;
             }
+            let x = cx + fx * pixel - pixel * 0.5;
+            let y = cy + fy * pixel - pixel * 0.5;
+            draw_rectangle(x, y, pixel, pixel, color);
         }
     }
 }
 
-/// Moon disk with a circular bite removed (crescent), all square pixels.
-fn draw_pixel_crescent(
+/// Round crescent: moon disk minus a circular bite, body-centered cells.
+fn draw_pixel_crescent_cells(
     cx: f32,
     cy: f32,
-    r_moon: f32,
-    bite_cx: f32,
-    bite_cy: f32,
-    r_bite: f32,
+    radius_cells: i32,
+    bite_dx: i32,
+    bite_dy: i32,
+    bite_radius: i32,
     pixel: f32,
     color: Color,
 ) {
-    if r_moon <= 0.0 || pixel <= 0.0 {
+    if radius_cells <= 0 || pixel <= 0.0 {
         return;
     }
-    let r2 = r_moon * r_moon;
-    let b2 = r_bite * r_bite;
-    let min_x = ((cx - r_moon) / pixel).floor() as i32;
-    let max_x = ((cx + r_moon) / pixel).ceil() as i32;
-    let min_y = ((cy - r_moon) / pixel).floor() as i32;
-    let max_y = ((cy + r_moon) / pixel).ceil() as i32;
-    for iy in min_y..=max_y {
-        for ix in min_x..=max_x {
-            let px = (ix as f32 + 0.5) * pixel;
-            let py = (iy as f32 + 0.5) * pixel;
-            let dx = px - cx;
-            let dy = py - cy;
-            if dx * dx + dy * dy > r2 {
+    let r2 = (radius_cells as f32 + 0.35).powi(2);
+    let b2 = (bite_radius as f32 + 0.15).powi(2);
+    let bcx = bite_dx as f32;
+    let bcy = bite_dy as f32;
+    for dy in -radius_cells..=radius_cells {
+        for dx in -radius_cells..=radius_cells {
+            let fx = dx as f32;
+            let fy = dy as f32;
+            if fx * fx + fy * fy > r2 {
                 continue;
             }
-            let bx = px - bite_cx;
-            let by = py - bite_cy;
+            let bx = fx - bcx;
+            let by = fy - bcy;
             if bx * bx + by * by <= b2 {
                 continue;
             }
-            draw_rectangle(ix as f32 * pixel, iy as f32 * pixel, pixel, pixel, color);
+            let x = cx + fx * pixel - pixel * 0.5;
+            let y = cy + fy * pixel - pixel * 0.5;
+            draw_rectangle(x, y, pixel, pixel, color);
         }
     }
 }
