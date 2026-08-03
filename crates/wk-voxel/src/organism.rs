@@ -31,10 +31,10 @@ use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::plant::{
     apply_genome, collect_live_photo_world_cells, collect_live_root_world_cells,
-    collect_trunk_world_cells, drink_plant,
-    drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, find_surface_air_slot,
-    is_anchored, is_land_plant, leave_dead_roots_in_place, leaves_bathing, pin_plant_pose,
-    plant_moisture_frac, sync_root_storage, try_grow_plant, try_plant_wind_spore,
+    collect_trunk_world_cells, drink_plant, drought_band, drop_dead_leaves, find_fungus_slot,
+    find_plant_slot, find_surface_air_slot, is_anchored, is_land_plant,
+    leave_dead_roots_in_place, leaves_bathing, pin_plant_pose, plant_moisture_frac,
+    shed_unproductive_woody_leaves, sync_root_storage, try_grow_plant, try_plant_wind_spore,
     try_vegetative_sprout, DroughtBand, PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP,
     DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
 };
@@ -209,6 +209,10 @@ pub struct Atom {
     /// Live genes (allocation, depth bias, shade knobs, …).
     #[serde(default)]
     pub genome: Genome,
+    /// Woody Photosystem starve counters: `(local_x, local_y, ticks)`.
+    /// Stemless seaweed ignores this. Cleared when a leaf is productive again.
+    #[serde(default)]
+    pub leaf_starve: Vec<(i16, i16, u16)>,
 }
 
 impl Atom {
@@ -234,6 +238,7 @@ impl Atom {
             last_water_top: None,
             body: default_atom_body(),
             genome,
+            leaf_starve: Vec::new(),
         }
     }
 
@@ -1158,6 +1163,9 @@ fn step_land_plant(
     if atom.energy <= 0.0 {
         return PlantStep::Dead;
     }
+    // Woody plants shed leaves that stay dim (self/neighbour shade). Seaweed
+    // ribbons keep their frond — no abscission on stemless bodies.
+    let _ = shed_unproductive_woody_leaves(world, atom, canopy, day, tick);
     // Surplus → tissue. Submerged + dim light: race toward brighter water.
     // Stemmed plants urge olive upward; stemless seaweed elongates the
     // Photosystem ribbon instead (no trunk invent). When leaves bathe in
@@ -4170,5 +4178,57 @@ mod tests {
             gain_shaded < gain_alone * 0.95,
             "shaded short plant should harvest less (shaded={gain_shaded}, alone={gain_alone})"
         );
+    }
+
+    #[test]
+    fn woody_understory_leaf_drops_after_sustained_shade() {
+        let mut w = moist_sand_plot();
+        let mut short_g = Genome::default();
+        short_g.leaf_absorb = 0.35;
+        short_g.shade_efficiency = 0.15;
+        short_g.alloc_stem = 0.05;
+        short_g.alloc_leaf = 0.05;
+        short_g.alloc_root = 0.9;
+        let mut tall_g = Genome::default();
+        tall_g.leaf_absorb = 0.95;
+        tall_g.shade_efficiency = 0.05;
+        tall_g.alloc_stem = 0.05;
+        tall_g.alloc_leaf = 0.05;
+        tall_g.alloc_root = 0.9;
+
+        let short_body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+            (0, 3, ModuleId::Photosystem),
+            (0, 4, ModuleId::Photosystem),
+        ];
+        let mut tall_body = minimal_plant_body();
+        for s in 3..=8 {
+            tall_body.push((0, s, ModuleId::Stem));
+        }
+        tall_body.push((0, 9, ModuleId::Photosystem));
+
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(&w, 3, 2, short_body, 40.0, short_g));
+        assert!(store.spawn_blueprint(&w, 4, 2, tall_body, 40.0, tall_g));
+        let n0 = store.atoms[0].photosystem_count();
+        assert!(n0 >= 3);
+        for t in 0..(crate::plant::WOODY_LEAF_STARVE_TICKS as u64 + 80) {
+            store.atoms[0].energy = 30.0;
+            if let Some(a) = store.atoms.get_mut(1) {
+                a.energy = 30.0;
+            }
+            // Lock growth so the short plant can't replace dropped leaves.
+            store.atoms[0].genome.alloc_leaf = 0.0;
+            store.step(&mut w, t);
+        }
+        let n1 = store.atoms[0].photosystem_count();
+        assert!(
+            n1 < n0,
+            "chronically shaded woody leaves should abscise (had {n0}, now {n1})"
+        );
+        assert!(n1 >= 1, "keep at least one Photosystem");
     }
 }

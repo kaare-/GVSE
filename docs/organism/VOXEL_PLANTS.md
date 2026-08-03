@@ -79,6 +79,11 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
   piles shade where the greens sit. Photosystem pixels tint bright
   `#2ECC40` → dim olive from **raw** sky × column transmit — understory
   genes don't wash out the read.
+- **Woody leaf abscission:** stemmed plants drop Photosystems that stay
+  below `WOODY_LEAF_STARVE_LIGHT` for `WOODY_LEAF_STARVE_TICKS` (sky ×
+  shade, ignoring the day clock so night alone never strips a canopy).
+  Litter paints as Organic in dry Air. Stemless seaweed ribbons never
+  shed this way; at least one leaf is always kept.
 
 ### D3 — Vegetative sprout *(landed)*
 
@@ -154,7 +159,8 @@ Features: stem `integrity`, topple, Holdfast. Needs dead stems.
 
 ## Explicitly out of Core for voxel
 
-- Branching morphogenesis, seasonal leaf drop, wood rings
+- Branching morphogenesis, seasonal (calendar) leaf drop, wood rings
+  (productivity abscission for woody leaves is landed — see above)
 - Groundwater head field (use cell `sat` gradient only for now)
 - Coarse `Ecology` LAI / ET bucket (column-only unless reintroduced)
 - FEM / wind throw

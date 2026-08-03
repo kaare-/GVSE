@@ -17,7 +17,7 @@ use crate::blueprint::Genome;
 use crate::cell::water_capacity;
 use crate::grid::World;
 use crate::organism::{column_sky_light, Atom, BodyModule, ModuleId};
-use crate::shade::{effective_photo_light, CanopyIndex};
+use crate::shade::{effective_photo_light, shade_transmit, CanopyIndex};
 
 /// Energy from one sat unit drunk by roots.
 pub const ROOT_WATER_ENERGY: f32 = 0.08;
@@ -76,6 +76,13 @@ pub const WOODY_LEAF_MAX_CANT: i32 = 2;
 /// Woody leaf sites need at least this effective light (sky × canopy).
 /// Dim understory spots stay bare — competition, not a cosmetic gap.
 pub const WOODY_LEAF_MIN_LIGHT: f32 = 0.34;
+/// Sky×shade (no day clock) below which a woody leaf accrues starve ticks.
+/// Night alone must not strip the canopy — only chronic dim sites.
+pub const WOODY_LEAF_STARVE_LIGHT: f32 = 0.22;
+/// Consecutive starve ticks before a woody Photosystem abscises (~8 s @ 60 Hz).
+pub const WOODY_LEAF_STARVE_TICKS: u16 = 480;
+/// At most one woody leaf drop every this many ticks (spread litter).
+pub const WOODY_LEAF_DROP_PERIOD: u64 = 24;
 /// Extra Root modules allowed per photosystem beyond the sprout minimum.
 pub const LAND_ROOTS_PER_PHOTOSYSTEM: usize = 3;
 
@@ -519,23 +526,111 @@ pub fn leave_dead_roots_in_place(world: &mut World, atom: &Atom) -> u32 {
 /// Drop Photosystem modules as falling Organic litter (dry Air only).
 /// Leaves peel off the corpse immediately; stems linger grey until dissolve.
 pub fn drop_dead_leaves(world: &mut World, atom: &Atom) -> u32 {
-    use crate::cell::Cell;
     let mut painted = 0u32;
     for &(dx, dy, mid) in &atom.body {
         if mid != ModuleId::Photosystem {
             continue;
         }
-        let wx = world.wrap_x(atom.gx + dx as i32);
-        let wy = atom.gy + dy as i32;
-        let Some(c) = world.get_cell(wx, wy) else {
-            continue;
-        };
-        if c.material == MaterialId::Air && c.sat.is_empty() {
-            world.set_cell(wx, wy, Cell::solid(MaterialId::Organic));
+        if paint_leaf_litter(world, atom.gx + dx as i32, atom.gy + dy as i32) {
             painted += 1;
         }
     }
     painted
+}
+
+fn paint_leaf_litter(world: &mut World, wx: i32, wy: i32) -> bool {
+    use crate::cell::Cell;
+    let wx = world.wrap_x(wx);
+    let Some(c) = world.get_cell(wx, wy) else {
+        return false;
+    };
+    if c.material == MaterialId::Air && c.sat.is_empty() {
+        world.set_cell(wx, wy, Cell::solid(MaterialId::Organic));
+        true
+    } else {
+        false
+    }
+}
+
+/// Woody abscission: Photosystems that stay dim drop as Organic litter.
+///
+/// Stemless seaweed / ribbons are untouched — only bodies with a `Stem`
+/// shed. Productivity uses sky × canopy transmit (day clock ignored so
+/// night does not strip the canopy). Keeps at least one Photosystem.
+/// Returns how many leaves were removed this call (0 or 1).
+pub fn shed_unproductive_woody_leaves(
+    world: &mut World,
+    atom: &mut Atom,
+    canopy: &CanopyIndex,
+    _day: f32,
+    tick: u64,
+) -> u32 {
+    if stem_count(atom) == 0 {
+        atom.leaf_starve.clear();
+        return 0;
+    }
+    let photos: Vec<(i16, i16)> = atom
+        .body
+        .iter()
+        .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+        .map(|&(x, y, _)| (x, y))
+        .collect();
+    if photos.len() <= 1 {
+        // Keep a last leaf; prune stale counters.
+        atom.leaf_starve
+            .retain(|&(x, y, _)| photos.iter().any(|&(px, py)| px == x && py == y));
+        return 0;
+    }
+
+    // Refresh starve counters from current column light (no day factor).
+    let mut next: Vec<(i16, i16, u16)> = Vec::with_capacity(photos.len());
+    for &(lx, ly) in &photos {
+        let wx = world.wrap_x(atom.gx + lx as i32);
+        let wy = atom.gy + ly as i32;
+        let sky = column_sky_light(world, wx, wy);
+        // Raw sky × transmit — same diagnostic axis as draw tint.
+        let lit = (sky * shade_transmit(canopy, wx, wy)).clamp(0.0, 1.0);
+        let prev = atom
+            .leaf_starve
+            .iter()
+            .find(|&&(x, y, _)| x == lx && y == ly)
+            .map(|&(_, _, t)| t)
+            .unwrap_or(0);
+        let ticks = if lit < WOODY_LEAF_STARVE_LIGHT {
+            prev.saturating_add(1)
+        } else {
+            0
+        };
+        if ticks > 0 {
+            next.push((lx, ly, ticks));
+        }
+    }
+    atom.leaf_starve = next;
+
+    if tick % WOODY_LEAF_DROP_PERIOD != 0 {
+        return 0;
+    }
+
+    // Drop the most starved leaf that crossed the threshold.
+    let Some(&(dx, dy, _)) = atom
+        .leaf_starve
+        .iter()
+        .filter(|&&(_, _, t)| t >= WOODY_LEAF_STARVE_TICKS)
+        .max_by_key(|&&(_, _, t)| t)
+    else {
+        return 0;
+    };
+
+    let before = atom.body.len();
+    atom.body
+        .retain(|&(x, y, m)| !(m == ModuleId::Photosystem && x == dx && y == dy));
+    if atom.body.len() == before {
+        return 0;
+    }
+    atom.leaf_starve
+        .retain(|&(x, y, _)| !(x == dx && y == dy));
+    let _ = paint_leaf_litter(world, atom.gx + dx as i32, atom.gy + dy as i32);
+    1
 }
 
 /// Nucleus y for a plant: Air cell directly above a porous solid near `gy`.
@@ -2143,6 +2238,117 @@ mod tests {
         assert!(
             spore_count(&child) >= 1,
             "sporeling should inherit a sorus"
+        );
+    }
+
+    #[test]
+    fn woody_leaf_abscises_after_chronic_starve() {
+        let mut w = moist_plot();
+        // Self-stack: high absorb tips keep the lowest leaf chronically dim.
+        let mut short = Atom::from_body(
+            4,
+            2,
+            40.0,
+            vec![
+                (0, -1, ModuleId::Root),
+                (0, 0, ModuleId::Nucleus),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Photosystem),
+                (0, 3, ModuleId::Photosystem),
+                (0, 4, ModuleId::Photosystem),
+                (0, 5, ModuleId::Photosystem),
+            ],
+        );
+        short.genome.leaf_absorb = 0.75;
+        let canopy = crate::shade::build_canopy_index(std::slice::from_ref(&short));
+        let low_lit = crate::shade::shade_transmit(&canopy, 4, 4); // local (0,2) → y=4
+        assert!(
+            low_lit < WOODY_LEAF_STARVE_LIGHT,
+            "fixture must keep lower leaf dim (lit={low_lit})"
+        );
+        short.leaf_starve = vec![(0, 2, WOODY_LEAF_STARVE_TICKS)];
+        let n0 = short.photosystem_count();
+        let dropped = shed_unproductive_woody_leaves(
+            &mut w,
+            &mut short,
+            &canopy,
+            1.0,
+            WOODY_LEAF_DROP_PERIOD,
+        );
+        assert_eq!(dropped, 1, "starved woody leaf should abscise");
+        assert_eq!(short.photosystem_count(), n0 - 1);
+        assert!(
+            short
+                .leaf_starve
+                .iter()
+                .all(|&(x, y, _)| !(x == 0 && y == 2)),
+            "starve counter cleared for dropped leaf"
+        );
+    }
+
+    #[test]
+    fn stemless_ribbon_never_abscises() {
+        let mut w = moist_plot();
+        let mut atom = Atom::from_body(
+            4,
+            2,
+            40.0,
+            crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus(),
+        );
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_seaweed().genome,
+        );
+        let n0 = atom.photosystem_count();
+        atom.leaf_starve = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|&(x, y, _)| (x, y, WOODY_LEAF_STARVE_TICKS))
+            .collect();
+        let dropped = shed_unproductive_woody_leaves(
+            &mut w,
+            &mut atom,
+            &CanopyIndex::default(),
+            1.0,
+            WOODY_LEAF_DROP_PERIOD,
+        );
+        assert_eq!(dropped, 0, "seaweed must not shed frond leaves");
+        assert_eq!(atom.photosystem_count(), n0);
+        assert!(
+            atom.leaf_starve.is_empty(),
+            "stemless path clears starve state"
+        );
+    }
+
+    #[test]
+    fn productive_woody_leaf_resets_starve_counter() {
+        let mut w = moist_plot();
+        let mut atom = Atom::from_body(
+            4,
+            2,
+            40.0,
+            vec![
+                (0, -1, ModuleId::Root),
+                (0, 0, ModuleId::Nucleus),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Photosystem),
+                (1, 2, ModuleId::Photosystem),
+            ],
+        );
+        atom.leaf_starve = vec![(0, 2, 100), (1, 2, 100)];
+        // Open sky canopy — both leaves productive.
+        let _ = shed_unproductive_woody_leaves(
+            &mut w,
+            &mut atom,
+            &CanopyIndex::default(),
+            1.0,
+            1,
+        );
+        assert!(
+            atom.leaf_starve.is_empty(),
+            "full light should clear starve ticks ({:?})",
+            atom.leaf_starve
         );
     }
 }
