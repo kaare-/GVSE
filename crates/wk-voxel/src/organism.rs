@@ -1238,12 +1238,16 @@ fn equilibrium_y(top: i32, bed: i32, bias: f32) -> f32 {
 /// Horizontal drive below which submerged fronds hang still (no idle wave).
 pub const FROND_STILL_WIND: f32 = 0.08;
 
+/// Cells of soft leaf a dry plant can hold rigid before the rest hangs.
+pub const LEAF_SUPPORT_DRY: i32 = 1;
+/// Water buoyancy supports a longer soft frond before it droops.
+pub const LEAF_SUPPORT_WET: i32 = 5;
+
 /// Soft frond draw pose. Roots / Nucleus / Digest stay rigid. Cosmetic —
 /// body cells for physics stay upright.
 ///
-/// - **Stemless Photosystems** (seaweed ribbon): only stand when bathed in
-///   standing water. Dry air / dropped waterline → collapse into a mat
-///   (soft leaves can't hold a tower).
+/// - **Photosystem** (all plants): soft. Short leaves stay near support;
+///   longer ones hang. Water supports more length than dry air.
 /// - **Stem** (woody): upright on land; underwater leans with wind.
 /// - Submerged sway only when `|wind_vx| ≥ [`FROND_STILL_WIND`].
 pub fn frond_draw_cell(
@@ -1257,9 +1261,8 @@ pub fn frond_draw_cell(
 ) -> (i32, i32) {
     let base_x = atom.gx + dx as i32;
     let base_y = atom.gy + dy as i32;
-    let stemless = !atom.body.iter().any(|(_, _, m)| *m == ModuleId::Stem);
-    let soft_leaf = mid == ModuleId::Photosystem && stemless;
     let woody = mid == ModuleId::Stem;
+    let soft_leaf = mid == ModuleId::Photosystem;
     if !soft_leaf && !woody {
         return (base_x, base_y);
     }
@@ -1268,36 +1271,88 @@ pub fn frond_draw_cell(
     let dir = if wind_vx >= 0.0 { 1 } else { -1 };
     let lean_dir = if drive < FROND_STILL_WIND { 1 } else { dir };
     let band = wet_band(world, atom.gx, atom.gy);
+    let cant = leaf_cantilever(atom, dx, dy);
+
+    if woody {
+        let Some((top, bed)) = band else {
+            return (base_x, base_y);
+        };
+        if base_y > top || base_y < bed || drive < FROND_STILL_WIND {
+            return (base_x, base_y);
+        }
+        let tip_w = (dy.max(0) as f32) * 0.30;
+        let lean_mag = (drive * (1.2 + tip_w)).ceil().clamp(1.0, 2.0) as i32;
+        return (base_x + dir * lean_mag, base_y);
+    }
+
+    // Soft Photosystem — hang grows with cantilever length.
+    let outward = if dx == 0 {
+        lean_dir
+    } else if dx > 0 {
+        1
+    } else {
+        -1
+    };
 
     if let Some((top, bed)) = band {
         if base_y > top {
-            // Emerged tip: flop onto the waterline (not a dry land mat).
             let overhang = base_y - top;
             return (atom.gx + dx as i32 + lean_dir * overhang, top);
         }
         if base_y >= bed {
-            // Underwater: still hang, or lean with drive.
+            let hang = (cant - LEAF_SUPPORT_WET).max(0);
+            let wy = base_y - hang.min(2);
             if drive < FROND_STILL_WIND {
-                return (base_x, base_y);
+                return (base_x + outward * hang.min(1), wy);
             }
-            let tip_w = (dy.max(0) as f32) * 0.30;
+            let tip_w = cant as f32 * 0.20;
             let phase = tick as f32 * (0.04 + drive * 0.10)
                 + atom.gx as f32 * 0.19
                 + dy as f32 * 0.85;
             let amp = (drive * 0.9 * (0.5 + tip_w)).clamp(0.0, 1.4);
             let sway = (phase.sin() * amp).round() as i32;
             let lean_mag = (drive * (1.2 + tip_w)).ceil().clamp(1.0, 2.0) as i32;
-            return (base_x + dir * lean_mag + sway, base_y);
+            return (base_x + dir * lean_mag + sway + outward * hang.min(1), wy);
         }
     }
 
-    // Soft stemless ribbon with no water column → collapse into a mat.
-    // Woody stems stay upright on land (handled by early return above).
-    if soft_leaf {
-        let rise = dy.max(0) as i32;
-        return (atom.gx + lean_dir * rise + dx as i32, atom.gy);
+    // Dry air: short leaves stay by the support; longer ones hang down/out.
+    let hang = (cant - LEAF_SUPPORT_DRY).max(0);
+    let (sx, sy) = nearest_leaf_support(atom, dx, dy);
+    let wx = atom.gx + sx as i32 + outward * (LEAF_SUPPORT_DRY.min(cant) + hang);
+    let wy = atom.gy + sy as i32 - hang;
+    (wx, wy.max(atom.gy - 1))
+}
+
+/// Manhattan distance from a Photosystem to the nearest Stem, else Nucleus.
+fn leaf_cantilever(atom: &Atom, dx: i16, dy: i16) -> i32 {
+    let mut best = i32::MAX;
+    for &(x, y, m) in &atom.body {
+        if m != ModuleId::Stem && m != ModuleId::Nucleus {
+            continue;
+        }
+        let d = (x - dx).abs() as i32 + (y - dy).abs() as i32;
+        best = best.min(d);
     }
-    (base_x, base_y)
+    if best == i32::MAX {
+        dx.abs() as i32 + dy.max(0) as i32
+    } else {
+        best
+    }
+}
+
+fn nearest_leaf_support(atom: &Atom, dx: i16, dy: i16) -> (i16, i16) {
+    let mut best: Option<(i32, i16, i16)> = None;
+    for &(x, y, m) in &atom.body {
+        if m != ModuleId::Stem && m != ModuleId::Nucleus {
+            continue;
+        }
+        let d = (x - dx).abs() as i32 + (y - dy).abs() as i32;
+        if best.map(|(bd, _, _)| d < bd).unwrap_or(true) {
+            best = Some((d, x, y));
+        }
+    }
+    best.map(|(_, x, y)| (x, y)).unwrap_or((0, 0))
 }
 
 /// Contiguous wet-Air band containing `hint_y` (or nearest wet cell).
@@ -1732,12 +1787,52 @@ mod tests {
             .find(|(_, y, m)| *m == ModuleId::Photosystem && *y == tip_dy)
             .unwrap();
         let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, 0, 0.0);
-        assert_eq!(wy, atom.gy, "unsupported soft leaf draws at crown height");
+        assert!(
+            tip_dy as i32 > LEAF_SUPPORT_DRY,
+            "fixture tip must be long enough to hang"
+        );
+        assert!(
+            wy < atom.gy + tip_dy as i32,
+            "long dry ribbon tip hangs below body Y (wy={wy} body={})",
+            atom.gy + tip_dy as i32
+        );
         assert!(
             wx != atom.gx + dx as i32 || tip_dy == 0,
             "dry ribbon should flop laterally (wx={wx})"
         );
         assert!(wx > atom.gx, "flops into a mat beside the holdfast");
+    }
+
+    #[test]
+    fn longer_stemmed_leaf_hangs_when_dry() {
+        let w = moist_sand_plot();
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (1, 2, ModuleId::Photosystem),
+            (2, 2, ModuleId::Photosystem),
+            (3, 2, ModuleId::Photosystem),
+            (4, 2, ModuleId::Photosystem),
+        ];
+        let atom = Atom::from_body(4, 2, 40.0, body);
+        let (dx, dy, mid) = (4i16, 2i16, ModuleId::Photosystem);
+        let base_x = atom.gx + dx as i32;
+        let base_y = atom.gy + dy as i32;
+        let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, 0, 0.0);
+        assert!(
+            wy < base_y,
+            "cantilever past dry support must hang (wy={wy} base={base_y})"
+        );
+        assert!(
+            wx != base_x || wy != base_y,
+            "long soft leaf must leave the rigid body pose"
+        );
+        // Short petiole near the stem stays up.
+        let (sx, sy) = frond_draw_cell(&w, &atom, 1, 2, ModuleId::Photosystem, 0, 0.0);
+        assert_eq!(sy, atom.gy + 2, "short leaf near stem stays supported");
+        assert!((sx - (atom.gx + 1)).abs() <= 1);
     }
 
     #[test]

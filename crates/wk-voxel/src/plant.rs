@@ -1140,8 +1140,61 @@ pub fn try_grow_shoot(
         if n_photo >= caps.max_photos.max(1) {
             return false;
         }
-        // Stemmed: beside tallest stem. Stemless ribbon: tip of the leaf
-        // string (or nucleus) so seaweed elongates upward without a trunk.
+
+        // Soft tip elongation: Photosystem chains grow longer from the
+        // farthest leaf (cantilever from Stem/Nucleus). Longer leaves hang
+        // in draw (`frond_draw_cell`). Upward tip steps need standing water.
+        let tip = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .copied()
+            .max_by_key(|&(x, y, _)| {
+                let cant = leaf_support_dist(atom, x, y);
+                (cant, x.unsigned_abs(), y)
+            })
+            .map(|(x, y, _)| (x, y));
+
+        if let Some((tx, ty)) = tip {
+            // Prefer outward / slightly down on land; climb only when wet.
+            let dirs: &[(i16, i16)] = if n_stem > 0 {
+                &[(1, 0), (-1, 0), (1, -1), (-1, -1), (1, 1), (-1, 1), (0, 1)]
+            } else {
+                &[(0, 1), (1, 0), (-1, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)]
+            };
+            for &(dx, dy) in dirs {
+                let nx = tx + dx;
+                let ny = ty + dy;
+                if ny < -8 || ny > 16 || occupied.contains(&(nx, ny)) {
+                    continue;
+                }
+                // Never park a leaf on the olive tip column — blocks stem.
+                if n_stem > 0
+                    && atom
+                        .body
+                        .iter()
+                        .any(|&(x, y, m)| m == ModuleId::Stem && x == nx && y == ny - 1)
+                {
+                    continue;
+                }
+                if dy > 0 {
+                    let wx = world.wrap_x(atom.gx + nx as i32);
+                    let wy = atom.gy + ny as i32;
+                    if !crate::rules::is_standing_water(world, wx, wy) {
+                        continue;
+                    }
+                }
+                atom.energy -= cost;
+                atom.body.push((nx, ny, ModuleId::Photosystem));
+                return true;
+            }
+            // Stemless: one ribbon — do not side-sprout a second frond.
+            if n_stem == 0 {
+                return false;
+            }
+        }
+
+        // New leaf beside tallest stem (or nucleus if no tip yet).
         let anchor = if n_stem > 0 {
             atom.body
                 .iter()
@@ -1151,23 +1204,12 @@ pub fn try_grow_shoot(
         } else {
             atom.body
                 .iter()
-                .filter(|(_, _, m)| *m == ModuleId::Photosystem)
-                .max_by_key(|(_, y, _)| *y)
+                .find(|(_, _, m)| *m == ModuleId::Nucleus)
                 .map(|&(x, y, _)| (x, y))
-                .or_else(|| {
-                    atom.body
-                        .iter()
-                        .find(|(_, _, m)| *m == ModuleId::Nucleus)
-                        .map(|&(x, y, _)| (x, y))
-                })
         };
         let Some((tx, ty)) = anchor else {
             return false;
         };
-        // Keep the olive tip clear whenever a trunk exists — stacking a
-        // leaf on `(0,+1)` produced leaf→stem→leaf towers and blocked
-        // further stem growth. Stemless ribbons elongate upward only
-        // into wet Air (soft leaves can't build a dry tower).
         let dirs: &[(i16, i16)] = if n_stem > 0 {
             &[(1, 0), (-1, 0), (1, 1), (-1, 1)]
         } else {
@@ -1179,21 +1221,14 @@ pub fn try_grow_shoot(
             if ny > 16 || occupied.contains(&(nx, ny)) {
                 continue;
             }
-            // Stemmed plants: never leaf-on-leaf in a column (keeps trunk
-            // clear). Stemless ribbons *are* a leaf column — allow it.
-            if n_stem > 0
-                && dy == 1
-                && atom
-                    .body
-                    .iter()
-                    .any(|&(x, y, m)| m == ModuleId::Photosystem && x == nx && y == ny - 1)
-            {
+            // Keep trunk column clear of stacked leaves.
+            if n_stem > 0 && nx == tx {
                 continue;
             }
+            // Stemless first leaf: only climb into standing water.
             if n_stem == 0 && dy > 0 {
                 let wx = world.wrap_x(atom.gx + nx as i32);
                 let wy = atom.gy + ny as i32;
-                // Soft ribbon needs water buoyancy to stand / climb.
                 if !crate::rules::is_standing_water(world, wx, wy) {
                     continue;
                 }
@@ -1257,6 +1292,23 @@ pub fn try_grow_shoot(
         }
     }
     0.0
+}
+
+/// Manhattan distance from a body cell to the nearest Stem, else Nucleus.
+fn leaf_support_dist(atom: &Atom, dx: i16, dy: i16) -> i32 {
+    let mut best = i32::MAX;
+    for &(x, y, m) in &atom.body {
+        if m != ModuleId::Stem && m != ModuleId::Nucleus {
+            continue;
+        }
+        let d = (x - dx).abs() as i32 + (y - dy).abs() as i32;
+        best = best.min(d);
+    }
+    if best == i32::MAX {
+        dx.abs() as i32 + dy.max(0) as i32
+    } else {
+        best
+    }
 }
 
 /// Bias genome allocation toward tissues that are already painted.
@@ -1747,6 +1799,45 @@ mod tests {
             .max()
             .unwrap();
         assert!(tip >= 5, "frond tip should climb (tip y={tip})");
+    }
+
+    #[test]
+    fn stemmed_plant_elongates_soft_leaf_chain() {
+        let w = moist_plot();
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (1, 2, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(4, 2, 80.0, body);
+        atom.genome.alloc_stem = 0.05;
+        atom.genome.alloc_leaf = 1.0;
+        atom.genome.alloc_root = 0.05;
+        let trunks = HashSet::new();
+        let caps = PlantGrowthCaps::default();
+        let n0 = atom.photosystem_count();
+        let mut max_cant = 1i32;
+        for t in 0..40u64 {
+            atom.energy = atom.energy_max;
+            atom.age_ticks = t * LAND_GROW_PERIOD;
+            let _ = try_grow_shoot(&w, &mut atom, t, &trunks, &caps);
+            for &(x, y, m) in &atom.body {
+                if m == ModuleId::Photosystem {
+                    max_cant = max_cant.max(leaf_support_dist(&atom, x, y));
+                }
+            }
+        }
+        assert!(
+            atom.photosystem_count() > n0,
+            "leaf-heavy shoot should add Photosystems"
+        );
+        assert!(
+            max_cant >= 3,
+            "soft leaf chain should lengthen past a short petiole (cant={max_cant})"
+        );
+        assert!(stem_count(&atom) >= 1, "trunk stays");
     }
 
     #[test]

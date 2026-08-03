@@ -62,10 +62,13 @@ cost/benefit. E36/E37 spirit.
   sat. Dry-land / film Air does not count — shore leaves never drink.
   When leaves bathe, soft root budget collapses to one holdfast (no
   seaweed flag).
-- **Floppy frond (draw):** stemless Photosystems only stand in standing
-  water; dry air / a dropped waterline collapses them into a mat. They
-  cannot elongate upward into dry Air (no soft leaf towers). Underwater
-  tips lean with wind; above the free surface they lay on the waterline.
+- **Soft leaves (draw + growth):** all Photosystems are soft tissue.
+  Shoot growth elongates an existing leaf tip into a longer chain (stemmed
+  canopies and stemless ribbons). Upward tip steps need standing water —
+  soft leaves cannot build dry towers. Draw hangs the tip past a short
+  dry support length (`LEAF_SUPPORT_DRY`); water buoys a longer span
+  (`LEAF_SUPPORT_WET`). Underwater tips lean with wind; above the free
+  surface they lay on the waterline. Woody `Stem` stays upright on land.
 
 ### D3 — Vegetative sprout *(landed)*
 
