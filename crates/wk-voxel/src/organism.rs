@@ -1295,8 +1295,11 @@ fn equilibrium_y(top: i32, bed: i32, bias: f32) -> f32 {
 /// Climate wind and local water-sat shear both count as drive.
 pub const FROND_STILL_WIND: f32 = 0.08;
 
-/// Cells of soft leaf a dry plant can hold rigid before the rest hangs.
+/// Cells of soft leaf a dry *stemless* ribbon can hold before it hangs.
 pub const LEAF_SUPPORT_DRY: i32 = 1;
+/// Woody canopy: petiole length held stiff before a small tip nod (cells).
+/// Leaves on a trunk/branch never flatten into a ground mat.
+pub const LEAF_SUPPORT_WOODY: i32 = 3;
 
 /// Resolve every living module to a world draw cell (flop + pile).
 ///
@@ -1353,11 +1356,13 @@ pub fn resolve_organism_draw_cells(
 /// Soft frond draw pose. Roots / Nucleus / Digest stay rigid. Cosmetic —
 /// body cells for physics stay upright.
 ///
-/// - **Photosystem** (all plants): soft. Underwater tips lean with wind /
-///   flowing water. Emerged tips lay on the free surface. Dry / long leaves
-///   hang past [`LEAF_SUPPORT_DRY`]. Flopped cells settle onto terrain —
-///   never painted inside solid. Callers that need non-overlapping mats
-///   should use [`resolve_organism_draw_cells`] (pile).
+/// - **Stemless Photosystem** (seaweed ribbon): soft. Underwater lean with
+///   wind/flow; emerged tips lay on the free surface; dry mats hang past
+///   [`LEAF_SUPPORT_DRY`] and settle onto terrain (pile via
+///   [`resolve_organism_draw_cells`]).
+/// - **Photosystem on Stem / branch**: stays in the canopy. Long tips may
+///   nod a little ([`LEAF_SUPPORT_WOODY`]) but never flatten to the ground
+///   or waterline — wood holds the leaf up.
 /// - **Stem** (woody): upright on land; underwater leans with drive.
 pub fn frond_draw_cell(
     world: &World,
@@ -1389,6 +1394,11 @@ pub fn frond_draw_cell(
     let lean_dir = if drive < FROND_STILL_WIND { 1 } else { dir };
     let band = wet_band(world, atom.gx, atom.gy);
     let cant = leaf_cantilever(atom, dx, dy);
+    let on_wood = soft_leaf
+        && atom
+            .body
+            .iter()
+            .any(|(_, _, m)| *m == ModuleId::Stem);
 
     if woody {
         let Some((top, bed)) = band else {
@@ -1402,6 +1412,20 @@ pub fn frond_draw_cell(
         return (base_x + dir * lean_mag, base_y);
     }
 
+    // Leaves attached to a trunk/branch stay in the canopy.
+    if on_wood {
+        let nod = (cant - LEAF_SUPPORT_WOODY).max(0).min(2);
+        let wy = base_y - nod;
+        if let Some((top, bed)) = band {
+            if base_y >= bed && base_y <= top && drive >= FROND_STILL_WIND {
+                let tip_w = (dy.max(0) as f32) * 0.20;
+                let lean_mag = (drive * (0.8 + tip_w)).ceil().clamp(1.0, 2.0) as i32;
+                return (base_x + dir * lean_mag, wy);
+            }
+        }
+        return (base_x, wy);
+    }
+
     let outward = if dx == 0 {
         lean_dir
     } else if dx > 0 {
@@ -1412,15 +1436,15 @@ pub fn frond_draw_cell(
 
     if let Some((top, bed)) = band {
         if base_y > top {
-            // Emerged tip: flop onto the waterline, then lift clear of solid
-            // so shore ribbons rest on the beach instead of inside the bank.
+            // Stemless emerged tip: flop onto the waterline, then lift clear
+            // of solid so shore ribbons rest on the beach.
             let overhang = base_y - top;
             let wx = atom.gx + dx as i32 + lean_dir * overhang;
             let wy = rest_soft_leaf_y(world, wx, top);
             return (wx, wy);
         }
         if base_y >= bed {
-            // Underwater: upright ribbon; lean / ripple with wind or flow.
+            // Stemless underwater: lean / ripple with wind or flow.
             if drive < FROND_STILL_WIND {
                 return (base_x, base_y);
             }
@@ -1435,9 +1459,7 @@ pub fn frond_draw_cell(
         }
     }
 
-    // Dry air: short leaves stay by the support; longer ones hang down/out.
-    // Only settled (hanging) tips drop onto the terrain — short petioles keep
-    // their support height and only lift if they would paint inside solid.
+    // Stemless dry air: hang into a mat on the terrain surface.
     let hang = (cant - LEAF_SUPPORT_DRY).max(0);
     let (sx, sy) = nearest_leaf_support(atom, dx, dy);
     let wx = atom.gx + sx as i32 + outward * (LEAF_SUPPORT_DRY.min(cant) + hang);
@@ -2051,7 +2073,7 @@ mod tests {
     }
 
     #[test]
-    fn longer_stemmed_leaf_hangs_when_dry() {
+    fn woody_canopy_leaves_stay_on_the_branch() {
         let w = moist_sand_plot();
         let body = vec![
             (0, -1, ModuleId::Root),
@@ -2064,22 +2086,30 @@ mod tests {
             (4, 2, ModuleId::Photosystem),
         ];
         let atom = Atom::from_body(4, 2, 40.0, body);
-        let (dx, dy, mid) = (4i16, 2i16, ModuleId::Photosystem);
-        let base_x = atom.gx + dx as i32;
-        let base_y = atom.gy + dy as i32;
-        let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, 0, 0.0);
+        let base_y = atom.gy + 2;
+        for &(dx, dy, mid) in &atom.body {
+            if mid != ModuleId::Photosystem {
+                continue;
+            }
+            let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, 0, 0.0);
+            assert_eq!(wx, atom.gx + dx as i32, "branch leaf keeps its column");
+            assert!(
+                wy >= base_y - 2,
+                "woody leaf must stay in the canopy, not flatten (wy={wy})"
+            );
+            assert!(
+                wy > atom.gy,
+                "trunk leaf must not settle onto the crown/ground (wy={wy})"
+            );
+        }
+        // Long tip may nod a little past woody support length.
+        let (_, tip_y) = frond_draw_cell(&w, &atom, 4, 2, ModuleId::Photosystem, 0, 0.0);
+        let (_, near_y) = frond_draw_cell(&w, &atom, 1, 2, ModuleId::Photosystem, 0, 0.0);
+        assert_eq!(near_y, base_y, "short petiole stays level with the branch");
         assert!(
-            wy < base_y,
-            "cantilever past dry support must hang (wy={wy} base={base_y})"
+            tip_y <= near_y,
+            "long tip may nod at most a little (tip={tip_y} near={near_y})"
         );
-        assert!(
-            wx != base_x || wy != base_y,
-            "long soft leaf must leave the rigid body pose"
-        );
-        // Short petiole near the stem stays up.
-        let (sx, sy) = frond_draw_cell(&w, &atom, 1, 2, ModuleId::Photosystem, 0, 0.0);
-        assert_eq!(sy, atom.gy + 2, "short leaf near stem stays supported");
-        assert!((sx - (atom.gx + 1)).abs() <= 1);
     }
 
     #[test]

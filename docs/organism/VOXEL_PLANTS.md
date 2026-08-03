@@ -62,13 +62,13 @@ cost/benefit. E36/E37 spirit.
   sat. Dry-land / film Air does not count — shore leaves never drink.
   When leaves bathe, soft root budget collapses to one holdfast (no
   seaweed flag).
-- **Soft leaves (draw + growth):** all Photosystems are soft tissue.
-  Stemless ribbons elongate *up* into standing water as the column rises
-  (no permanent sideways L body). Stemmed canopies can lengthen soft leaf
-  chains that hang past `LEAF_SUPPORT_DRY` on land. Underwater tips lean
-  with climate wind **or** local water-sat shear. Emerged / dry mats settle
-  onto the terrain surface and **pile** when cells collide (stacked greens
-  instead of one overwritten line). Woody `Stem` stays upright on land.
+- **Soft leaves (draw + growth):** stemless ribbons are floppy — they
+  elongate *up* into standing water, lay on the waterline when emerged, and
+  dry-mat onto terrain (piling when cells collide). Photosystems on a
+  `Stem` / branch stay in the canopy (wood holds them up; long tips may
+  nod a little past `LEAF_SUPPORT_WOODY` but never flatten to the ground).
+  Underwater tips lean with climate wind **or** local water-sat shear.
+  Woody `Stem` stays upright on land.
 - **Light competition:** equal-height neighbours shade each other (dense
   meadows). Canopy index + photo sample use posed draw cells, so flopped
   piles cast and receive shade where the greens sit. Photosystem pixels
