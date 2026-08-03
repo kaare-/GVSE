@@ -159,12 +159,16 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   the mycelium field; may die of age while the network remains.
 - **Mycelium field** — intensity in `Cell::_pad` on Organic. World process
   (`step_mycelium_field`): thickens and spreads on moist Organic without a
-  living fruiting body. Renderer: faint cream threads.
-- **Emergence** — a rich moist network can raise a new fruiting body
-  (`try_emergent_fruiting`, burns field intensity). That body may later
-  shed wind-biased spores (`try_spore`) onto Organic / litter banks when
-  it carries a painted `ReproSpore` module (included on the `F` template).
-  The app renders lilac puffs drifting on climate wind (`SporeFx`).
+  living fruiting body. Threads prefer climbing toward free Air. Renderer:
+  faint cream threads.
+- **Emergence** — only after the network has **breached the surface**
+  (colonized Organic open to Air *and* feeder mycelium below/beside).
+  `try_emergent_fruiting` seats a stalk in Air and burns field intensity.
+- **Two dispersal habits** (`try_spore`, needs painted `ReproSpore`):
+  - *Underground* (nucleus in Organic) — short rhizomorph hops that seed
+    mycelium nearby (no wind / surface gate).
+  - *Surface stalk* (nucleus in Air) — wind carries spores far once the
+    column is surface-ready. App: lilac puffs on climate wind (`SporeFx`).
 - **Anti-flood:** one living fruiting body per column, soft local density
   (≤6 in ±4 columns), long child cooldown; babies aren't network-immortal
   until mature. HUD shows `p=/f=/a=` habit split.
