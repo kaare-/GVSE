@@ -1236,20 +1236,20 @@ fn equilibrium_y(top: i32, bed: i32, bias: f32) -> f32 {
 }
 
 /// Horizontal drive below which submerged fronds hang still (no idle wave).
+/// Climate wind and local water-sat shear both count as drive.
 pub const FROND_STILL_WIND: f32 = 0.08;
 
 /// Cells of soft leaf a dry plant can hold rigid before the rest hangs.
 pub const LEAF_SUPPORT_DRY: i32 = 1;
-/// Water buoyancy supports a longer soft frond before it droops.
-pub const LEAF_SUPPORT_WET: i32 = 5;
 
 /// Soft frond draw pose. Roots / Nucleus / Digest stay rigid. Cosmetic —
 /// body cells for physics stay upright.
 ///
-/// - **Photosystem** (all plants): soft. Short leaves stay near support;
-///   longer ones hang. Water supports more length than dry air.
-/// - **Stem** (woody): upright on land; underwater leans with wind.
-/// - Submerged sway only when `|wind_vx| ≥ [`FROND_STILL_WIND`].
+/// - **Photosystem** (all plants): soft. Underwater tips lean with wind /
+///   flowing water. Emerged tips lay on the free surface. Dry / long leaves
+///   hang past [`LEAF_SUPPORT_DRY`]. Flopped cells settle onto terrain —
+///   never painted inside solid.
+/// - **Stem** (woody): upright on land; underwater leans with drive.
 pub fn frond_draw_cell(
     world: &World,
     atom: &Atom,
@@ -1267,8 +1267,16 @@ pub fn frond_draw_cell(
         return (base_x, base_y);
     }
 
-    let drive = wind_vx.abs();
-    let dir = if wind_vx >= 0.0 { 1 } else { -1 };
+    let flow = local_water_drive(world, base_x, base_y);
+    let wind = wind_vx.abs();
+    let drive = wind.max(flow);
+    let dir = if flow > wind {
+        local_water_dir(world, base_x, base_y)
+    } else if wind_vx >= 0.0 {
+        1
+    } else {
+        -1
+    };
     let lean_dir = if drive < FROND_STILL_WIND { 1 } else { dir };
     let band = wet_band(world, atom.gx, atom.gy);
     let cant = leaf_cantilever(atom, dx, dy);
@@ -1285,7 +1293,6 @@ pub fn frond_draw_cell(
         return (base_x + dir * lean_mag, base_y);
     }
 
-    // Soft Photosystem — hang grows with cantilever length.
     let outward = if dx == 0 {
         lean_dir
     } else if dx > 0 {
@@ -1296,32 +1303,42 @@ pub fn frond_draw_cell(
 
     if let Some((top, bed)) = band {
         if base_y > top {
+            // Emerged tip: flop onto the waterline, then lift clear of solid
+            // so shore ribbons rest on the beach instead of inside the bank.
             let overhang = base_y - top;
-            return (atom.gx + dx as i32 + lean_dir * overhang, top);
+            let wx = atom.gx + dx as i32 + lean_dir * overhang;
+            let wy = rest_soft_leaf_y(world, wx, top);
+            return (wx, wy);
         }
         if base_y >= bed {
-            let hang = (cant - LEAF_SUPPORT_WET).max(0);
-            let wy = base_y - hang.min(2);
+            // Underwater: upright ribbon; lean / ripple with wind or flow.
             if drive < FROND_STILL_WIND {
-                return (base_x + outward * hang.min(1), wy);
+                return (base_x, base_y);
             }
-            let tip_w = cant as f32 * 0.20;
+            let tip_w = (dy.max(0) as f32).max(cant as f32 * 0.5) * 0.30;
             let phase = tick as f32 * (0.04 + drive * 0.10)
                 + atom.gx as f32 * 0.19
                 + dy as f32 * 0.85;
             let amp = (drive * 0.9 * (0.5 + tip_w)).clamp(0.0, 1.4);
             let sway = (phase.sin() * amp).round() as i32;
             let lean_mag = (drive * (1.2 + tip_w)).ceil().clamp(1.0, 2.0) as i32;
-            return (base_x + dir * lean_mag + sway + outward * hang.min(1), wy);
+            return (base_x + dir * lean_mag + sway, base_y);
         }
     }
 
     // Dry air: short leaves stay by the support; longer ones hang down/out.
+    // Only settled (hanging) tips drop onto the terrain — short petioles keep
+    // their support height and only lift if they would paint inside solid.
     let hang = (cant - LEAF_SUPPORT_DRY).max(0);
     let (sx, sy) = nearest_leaf_support(atom, dx, dy);
     let wx = atom.gx + sx as i32 + outward * (LEAF_SUPPORT_DRY.min(cant) + hang);
-    let wy = atom.gy + sy as i32 - hang;
-    (wx, wy.max(atom.gy - 1))
+    let preferred = (atom.gy + sy as i32 - hang).max(atom.gy - 1);
+    let wy = if hang > 0 {
+        rest_soft_leaf_y(world, wx, preferred)
+    } else {
+        clear_solid_y(world, wx, preferred)
+    };
+    (wx, wy)
 }
 
 /// Manhattan distance from a Photosystem to the nearest Stem, else Nucleus.
@@ -1353,6 +1370,64 @@ fn nearest_leaf_support(atom: &Atom, dx: i16, dy: i16) -> (i16, i16) {
         }
     }
     best.map(|(_, x, y)| (x, y)).unwrap_or((0, 0))
+}
+
+fn air_sat(world: &World, gx: i32, gy: i32) -> i16 {
+    match world.get_cell(world.wrap_x(gx), gy) {
+        Some(c) if c.material == MaterialId::Air => c.sat.0 as i16,
+        _ => 0,
+    }
+}
+
+/// Lateral sat shear near a cell — proxy for surface / column flow.
+fn local_water_drive(world: &World, gx: i32, gy: i32) -> f32 {
+    let mut best = 0i16;
+    for y in [gy - 1, gy, gy + 1] {
+        let l = air_sat(world, gx - 1, y);
+        let c = air_sat(world, gx, y);
+        let r = air_sat(world, gx + 1, y);
+        best = best.max((r - l).abs()).max((c - l).abs()).max((c - r).abs());
+    }
+    (best as f32 / 255.0) * 0.65
+}
+
+fn local_water_dir(world: &World, gx: i32, gy: i32) -> i32 {
+    let l = air_sat(world, gx - 1, gy) + air_sat(world, gx - 1, gy + 1);
+    let r = air_sat(world, gx + 1, gy) + air_sat(world, gx + 1, gy + 1);
+    if r >= l {
+        1
+    } else {
+        -1
+    }
+}
+
+fn clear_solid_y(world: &World, gx: i32, preferred_y: i32) -> i32 {
+    let gx = world.wrap_x(gx);
+    let mut y = preferred_y.max(0);
+    for _ in 0..64 {
+        match world.get_cell(gx, y) {
+            Some(c) if c.material != MaterialId::Air => y += 1,
+            None => y += 1,
+            _ => break,
+        }
+    }
+    y
+}
+
+/// Lift out of solid, then (when dry) drop onto the ground so flopped
+/// leaves rest on the terrain surface instead of painting through it.
+fn rest_soft_leaf_y(world: &World, gx: i32, preferred_y: i32) -> i32 {
+    let gx = world.wrap_x(gx);
+    let mut y = clear_solid_y(world, gx, preferred_y);
+    if !is_wet_air(world, gx, y) {
+        for _ in 0..64 {
+            match world.get_cell(gx, y - 1) {
+                Some(c) if c.material == MaterialId::Air && c.sat.is_empty() => y -= 1,
+                _ => break,
+            }
+        }
+    }
+    y
 }
 
 /// Contiguous wet-Air band containing `hint_y` (or nearest wet cell).
@@ -1863,6 +1938,74 @@ mod tests {
             wx != base_x
         });
         assert!(bent, "moving water should bend the frond tip");
+    }
+
+    #[test]
+    fn submerged_frond_leans_with_local_water_flow() {
+        let mut w = wet_column();
+        // Shear sat across the tip column so flow drive exceeds the still gate.
+        for y in 1..8 {
+            let mut left = Cell::air();
+            left.sat = Sat(40);
+            w.set_cell(3, y, left);
+            let mut right = Cell::air();
+            right.sat = Sat(255);
+            w.set_cell(5, y, right);
+        }
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let atom = Atom::from_body(4, 2, 40.0, body);
+        let (dx, dy, mid) = atom
+            .body
+            .iter()
+            .copied()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .max_by_key(|(_, y, _)| *y)
+            .unwrap();
+        let base_x = atom.gx + dx as i32;
+        let bent = [0u64, 11, 23, 40, 70].iter().any(|&tick| {
+            let (wx, _) = frond_draw_cell(&w, &atom, dx, dy, mid, tick, 0.0);
+            wx != base_x
+        });
+        assert!(bent, "sat shear (flowing water) should bend the frond");
+    }
+
+    #[test]
+    fn flopped_frond_rests_on_terrain_not_inside_solid() {
+        let mut w = moist_sand_plot();
+        // Rising beach to the right of the holdfast.
+        for x in 5..10 {
+            let h = 1 + (x - 4);
+            for y in 1..=h {
+                let mut sand = Cell::solid(MaterialId::Sand);
+                sand.sat = Sat(80);
+                w.set_cell(x, y, sand);
+            }
+            for y in (h + 1)..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let atom = Atom::from_body(4, 2, 40.0, body);
+        for &(dx, dy, mid) in &atom.body {
+            if mid != ModuleId::Photosystem {
+                continue;
+            }
+            let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, 0, 0.0);
+            let cell = w.get_cell(wx, wy).expect("draw cell in world");
+            assert_eq!(
+                cell.material,
+                MaterialId::Air,
+                "flopped leaf must not paint inside solid at ({wx},{wy})"
+            );
+            if wx >= 5 {
+                let below = w.get_cell(wx, wy - 1).unwrap();
+                assert_ne!(
+                    below.material,
+                    MaterialId::Air,
+                    "on the beach, mat should rest on sand ({wx},{wy})"
+                );
+            }
+        }
     }
 
     #[test]

@@ -1141,26 +1141,36 @@ pub fn try_grow_shoot(
             return false;
         }
 
-        // Soft tip elongation: Photosystem chains grow longer from the
-        // farthest leaf (cantilever from Stem/Nucleus). Longer leaves hang
-        // in draw (`frond_draw_cell`). Upward tip steps need standing water.
-        let tip = atom
-            .body
-            .iter()
-            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
-            .copied()
-            .max_by_key(|&(x, y, _)| {
-                let cant = leaf_support_dist(atom, x, y);
-                (cant, x.unsigned_abs(), y)
-            })
-            .map(|(x, y, _)| (x, y));
+        // Soft tip elongation. Stemless ribbons climb from the *highest*
+        // leaf into standing water only (flop is draw-only — never grow a
+        // permanent sideways L). Stemmed canopies lengthen the farthest
+        // cantilever so long leaves can hang in draw.
+        let tip = if n_stem == 0 {
+            atom.body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+                .copied()
+                .max_by_key(|&(x, y, _)| (y, x.unsigned_abs()))
+                .map(|(x, y, _)| (x, y))
+        } else {
+            atom.body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+                .copied()
+                .max_by_key(|&(x, y, _)| {
+                    let cant = leaf_support_dist(atom, x, y);
+                    (cant, x.unsigned_abs(), y)
+                })
+                .map(|(x, y, _)| (x, y))
+        };
 
         if let Some((tx, ty)) = tip {
-            // Prefer outward / slightly down on land; climb only when wet.
             let dirs: &[(i16, i16)] = if n_stem > 0 {
+                // Outward / down first (hanging leaves); climb only when wet.
                 &[(1, 0), (-1, 0), (1, -1), (-1, -1), (1, 1), (-1, 1), (0, 1)]
             } else {
-                &[(0, 1), (1, 0), (-1, 0), (1, 1), (-1, 1), (1, -1), (-1, -1)]
+                // Seaweed: grow up with the water column — no dry laterals.
+                &[(0, 1), (1, 1), (-1, 1)]
             };
             for &(dx, dy) in dirs {
                 let nx = tx + dx;
@@ -1853,6 +1863,7 @@ mod tests {
             .map(|(_, y, _)| *y)
             .max()
             .unwrap();
+        let photos0 = atom.photosystem_count();
         let trunks = HashSet::new();
         let roots = HashSet::new();
         let caps = PlantGrowthCaps::default();
@@ -1872,7 +1883,68 @@ mod tests {
             tip1, tip0,
             "dry air must not let soft leaves stack into a tower (tip {tip0}→{tip1})"
         );
+        assert_eq!(
+            atom.photosystem_count(),
+            photos0,
+            "dry stemless must not grow a permanent sideways L"
+        );
         assert_eq!(stem_count(&atom), 0);
+    }
+
+    #[test]
+    fn stemless_ribbon_climbs_when_water_column_rises() {
+        let mut w = moist_plot();
+        // Shallow pool first — tip sits at the free surface.
+        for y in 2..=5 {
+            w.set_cell(4, y, Cell::water());
+        }
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut atom = Atom::from_body(4, 2, 80.0, body);
+        apply_genome(&mut atom, crate::blueprint::Blueprint::minimal_seaweed().genome);
+        // Trim ribbon so the tip is inside the shallow pool.
+        atom.body
+            .retain(|&(_, y, m)| m != ModuleId::Photosystem || y <= 3);
+        let tip0 = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|(_, y, _)| *y)
+            .max()
+            .unwrap();
+        let trunks = HashSet::new();
+        let roots = HashSet::new();
+        let caps = PlantGrowthCaps::default();
+        // Raise the water, then grow.
+        for y in 6..=9 {
+            w.set_cell(4, y, Cell::water());
+        }
+        for pulse in 0..40u64 {
+            atom.energy = atom.energy_max;
+            atom.age_ticks = pulse * LAND_GROW_PERIOD;
+            let _ = try_grow_plant(&w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &caps);
+        }
+        let tip1 = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|(_, y, _)| *y)
+            .max()
+            .unwrap();
+        assert!(
+            tip1 > tip0,
+            "ribbon should climb with the rising water (tip {tip0}→{tip1})"
+        );
+        let max_dx = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|(x, _, _)| x.abs())
+            .max()
+            .unwrap();
+        assert!(
+            max_dx <= 1,
+            "rising-water growth must stay a vertical ribbon, not an L (max_dx={max_dx})"
+        );
     }
 
     #[test]

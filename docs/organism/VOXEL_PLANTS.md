@@ -63,12 +63,13 @@ cost/benefit. E36/E37 spirit.
   When leaves bathe, soft root budget collapses to one holdfast (no
   seaweed flag).
 - **Soft leaves (draw + growth):** all Photosystems are soft tissue.
-  Shoot growth elongates an existing leaf tip into a longer chain (stemmed
-  canopies and stemless ribbons). Upward tip steps need standing water —
-  soft leaves cannot build dry towers. Draw hangs the tip past a short
-  dry support length (`LEAF_SUPPORT_DRY`); water buoys a longer span
-  (`LEAF_SUPPORT_WET`). Underwater tips lean with wind; above the free
-  surface they lay on the waterline. Woody `Stem` stays upright on land.
+  Stemless ribbons elongate *up* into standing water as the column rises
+  (flop is draw-only — no permanent sideways L). Stemmed canopies can
+  lengthen soft leaf chains that hang past `LEAF_SUPPORT_DRY` on land.
+  Underwater tips lean with climate wind **or** local water-sat shear
+  (flowing films). Emerged tips lay on the free surface; dry mats settle
+  onto the terrain surface (never painted through solid). Woody `Stem`
+  stays upright on land.
 
 ### D3 — Vegetative sprout *(landed)*
 
