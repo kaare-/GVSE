@@ -13,7 +13,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | Fixed crown (no buoyancy) | Done |
 | Pore-`sat` drink + drought stress | Done |
 | Spawn on Air above porous solid | Done |
-| Editor brushes + `T` minimal plant | Done |
+| Editor brushes + `T` minimal plant + `W` seaweed | Done |
 
 ## Roadmap
 
@@ -45,8 +45,19 @@ Falsifiers: root grows into wetter sand; stem-heavy alloc grows taller.
 Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 `LIGHT.md`); plant photo uses `effective_photo_light`. Standing water
 attenuates sky light with depth (`column_sky_light`) — deep seats go
-dark, so submerged plants either stem-race toward the surface or fail
-the cost/benefit. E36/E37 spirit.
+dark, so submerged stemmed plants stem-race toward the surface, while
+stemless seaweed elongates its Photosystem ribbon, or they fail the
+cost/benefit. E36/E37 spirit.
+
+### Seaweed template *(landed)*
+
+- Editor `W` → `Blueprint::minimal_seaweed`: Nucleus + one Root holdfast +
+  vertical Photosystem string (no Stem).
+- Shoot growth keeps stemless habits stemless and stacks leaves upward
+  from the frond tip.
+- Mutation will not invent a trunk on a stemless parent.
+- Spawn under water on a moist bed; Tab plant knobs do not overwrite the
+  ribbon’s leaf-heavy alloc.
 
 ### D3 — Vegetative sprout *(landed)*
 

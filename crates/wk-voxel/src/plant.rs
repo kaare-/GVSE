@@ -961,6 +961,7 @@ pub fn stem_spacing_ok(atom: &Atom, nx: i16, ny: i16, trunks: &HashSet<(i32, i32
 /// - Stem stacks only on Stem / Nucleus / Root — never on a leaf.
 /// - Leaves attach to the highest Stem (or Nucleus if leafless chassis).
 /// - Stemless bodies stay stemless: olive only elongates painted Stem.
+/// - Stemless ribbons (seaweed): leaves stack upward from the frond tip.
 /// - New Stem needs a Moore gap from other live/dead trunks (leaves may touch).
 pub fn try_grow_shoot(
     atom: &mut Atom,
@@ -992,30 +993,37 @@ pub fn try_grow_shoot(
         if n_photo >= caps.max_photos.max(1) {
             return false;
         }
-        // Attach beside the tallest stem (or nucleus if leafless chassis).
-        let anchor = atom
-            .body
-            .iter()
-            .filter(|(_, _, m)| *m == ModuleId::Stem)
-            .max_by_key(|(_, y, _)| *y)
-            .map(|&(x, y, _)| (x, y))
-            .or_else(|| {
-                atom.body
-                    .iter()
-                    .find(|(_, _, m)| *m == ModuleId::Nucleus)
-                    .map(|&(x, y, _)| (x, y))
-            });
+        // Stemmed: beside tallest stem. Stemless ribbon: tip of the leaf
+        // string (or nucleus) so seaweed elongates upward without a trunk.
+        let anchor = if n_stem > 0 {
+            atom.body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Stem)
+                .max_by_key(|(_, y, _)| *y)
+                .map(|&(x, y, _)| (x, y))
+        } else {
+            atom.body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+                .max_by_key(|(_, y, _)| *y)
+                .map(|&(x, y, _)| (x, y))
+                .or_else(|| {
+                    atom.body
+                        .iter()
+                        .find(|(_, _, m)| *m == ModuleId::Nucleus)
+                        .map(|&(x, y, _)| (x, y))
+                })
+        };
         let Some((tx, ty)) = anchor else {
             return false;
         };
         // Keep the olive tip clear whenever a trunk exists — stacking a
         // leaf on `(0,+1)` produced leaf→stem→leaf towers and blocked
-        // further stem growth. Stemless chassis may still put a leaf up.
-        // Leaves may sit next to other leaves — no spacing tax.
+        // further stem growth. Stemless ribbons elongate straight up.
         let dirs: &[(i16, i16)] = if n_stem > 0 {
             &[(1, 0), (-1, 0), (1, 1), (-1, 1)]
         } else {
-            &[(1, 0), (-1, 0), (0, 1), (1, 1), (-1, 1)]
+            &[(0, 1), (1, 0), (-1, 0), (1, 1), (-1, 1)]
         };
         for &(dx, dy) in dirs {
             let nx = tx + dx;
@@ -1023,8 +1031,10 @@ pub fn try_grow_shoot(
             if ny > 16 || occupied.contains(&(nx, ny)) {
                 continue;
             }
-            // Never plant a leaf directly above another leaf.
-            if dy == 1
+            // Stemmed plants: never leaf-on-leaf in a column (keeps trunk
+            // clear). Stemless ribbons *are* a leaf column — allow it.
+            if n_stem > 0
+                && dy == 1
                 && atom
                     .body
                     .iter()
@@ -1489,6 +1499,43 @@ mod tests {
         let mut body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
         body.push((1, 2, ModuleId::ReproSpore));
         body
+    }
+
+    #[test]
+    fn seaweed_ribbon_elongates_without_inventing_stem() {
+        let w = moist_plot();
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut atom = Atom::from_body(4, 2, 80.0, body);
+        apply_genome(&mut atom, crate::blueprint::Blueprint::minimal_seaweed().genome);
+        assert_eq!(stem_count(&atom), 0);
+        let photos0 = atom.photosystem_count();
+        let trunks = HashSet::new();
+        let roots = HashSet::new();
+        let caps = PlantGrowthCaps::default();
+        let mut grew = false;
+        for pulse in 0..40u64 {
+            atom.energy = atom.energy_max;
+            atom.age_ticks = pulse * LAND_GROW_PERIOD;
+            let spent = try_grow_plant(&w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &caps);
+            if spent > 0.0 {
+                grew = true;
+            }
+        }
+        assert!(grew, "seaweed should spend energy on tissue");
+        assert_eq!(stem_count(&atom), 0, "must stay stemless");
+        assert!(
+            atom.photosystem_count() > photos0,
+            "ribbon should lengthen (was {photos0}, now {})",
+            atom.photosystem_count()
+        );
+        let tip = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|(_, y, _)| *y)
+            .max()
+            .unwrap();
+        assert!(tip >= 5, "frond tip should climb (tip y={tip})");
     }
 
     #[test]

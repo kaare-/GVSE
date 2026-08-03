@@ -32,7 +32,8 @@ impl Default for CreatureEditor {
             blueprint: Blueprint::atom(),
             tool: EditorTool::Paint,
             brush: ModuleId::Photosystem,
-            status: "Paint Atom / Plant / fruiting body, then Enter + click to spawn".into(),
+            status: "Paint Atom / Plant / seaweed / fruiting body, then Enter + click to spawn"
+                .into(),
             spawn_picker: false,
             was_paused: true,
             name_buf: "atom".into(),
@@ -50,7 +51,7 @@ impl CreatureEditor {
             self.was_paused = currently_paused;
             self.spawn_picker = false;
             self.status =
-                "1-6 modules | A Atom  T Plant  F fruiting body | Enter then click spawn"
+                "1-7 modules | A Atom  T Plant  W seaweed  F fruiting | Enter then click spawn"
                     .into();
         }
     }
@@ -102,6 +103,12 @@ impl CreatureEditor {
             self.blueprint = Blueprint::minimal_plant();
             self.name_buf = "plant".into();
             self.status = "Minimal plant template (spawn on moist sand/soil)".into();
+        }
+        if is_key_pressed(KeyCode::W) {
+            self.blueprint = Blueprint::minimal_seaweed();
+            self.name_buf = "seaweed".into();
+            self.status =
+                "Seaweed — stemless leaf ribbon; one Root holdfast; thrives submerged".into();
         }
         if is_key_pressed(KeyCode::F) {
             self.blueprint = Blueprint::minimal_fungus();
@@ -274,7 +281,7 @@ impl CreatureEditor {
             GRAY,
         );
         draw_text(
-            "A Atom  T Plant  F fruiting body  | S save  L load  | Enter spawn",
+            "A Atom  T Plant  W seaweed  F fruiting  | S save  L load  | Enter spawn",
             px,
             oy + 72.0,
             14.0,

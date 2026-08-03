@@ -122,7 +122,8 @@ through wet Air with Beer–Lambert-ish transmittance
 (`WATER_LIGHT_TRANSMIT` ≈ 0.85 / cell, plus a surface film). Deep
 seats go dark — photosynthesis can't pay for tall stems / deep roots,
 so submerged plants either race stems toward the brighter surface
-(seaweed urge when dim) or starve. Dry land columns stay clear.
+(stemmed plants urge olive up; stemless seaweed elongates its leaf
+ribbon) or starve. Dry land columns stay clear.
 
 ## What is deliberately not here
 

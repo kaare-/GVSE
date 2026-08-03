@@ -1078,13 +1078,20 @@ fn step_land_plant(
     if atom.energy <= 0.0 {
         return PlantStep::Dead;
     }
-    // Surplus → tissue. Submerged + dim light: urge stem toward the
-    // brighter surface (seaweed race) while energy still pays for it.
+    // Surplus → tissue. Submerged + dim light: race toward brighter water.
+    // Stemmed plants urge olive upward; stemless seaweed elongates the
+    // Photosystem ribbon instead (no trunk invent).
     let genome_save = atom.genome;
-    if submerged && light < SUBMERGED_STEM_URGE_LIGHT && crate::plant::stem_count(atom) > 0 {
-        atom.genome.alloc_stem = (atom.genome.alloc_stem + 0.40).min(1.0);
-        atom.genome.alloc_root = (atom.genome.alloc_root * 0.55).max(0.05);
-        atom.genome.alloc_leaf = (atom.genome.alloc_leaf * 0.85).max(0.05);
+    if submerged && light < SUBMERGED_STEM_URGE_LIGHT {
+        if crate::plant::stem_count(atom) > 0 {
+            atom.genome.alloc_stem = (atom.genome.alloc_stem + 0.40).min(1.0);
+            atom.genome.alloc_root = (atom.genome.alloc_root * 0.55).max(0.05);
+            atom.genome.alloc_leaf = (atom.genome.alloc_leaf * 0.85).max(0.05);
+        } else if n_photo > 0 {
+            atom.genome.alloc_leaf = (atom.genome.alloc_leaf + 0.40).min(1.0);
+            atom.genome.alloc_root = (atom.genome.alloc_root * 0.55).max(0.05);
+            atom.genome.alloc_stem = 0.0;
+        }
     }
     let _ = try_grow_plant(world, atom, tick, trunks, live_roots, growth_caps);
     atom.genome = genome_save;

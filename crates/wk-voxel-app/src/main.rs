@@ -1029,7 +1029,20 @@ async fn main() {
                     });
                     let g = if has_land_tissue {
                         let mut g = settings.plant_genes.to_genome();
-                        g.buoyancy_bias = editor.blueprint.genome.buoyancy_bias;
+                        let bp = &editor.blueprint.genome;
+                        g.buoyancy_bias = bp.buoyancy_bias;
+                        // Stemless ribbons (seaweed) keep template alloc /
+                        // shade knobs — Tab plant defaults assume a trunk.
+                        let stemless = !body
+                            .iter()
+                            .any(|(_, _, m)| *m == wk_voxel::ModuleId::Stem);
+                        if stemless {
+                            g.alloc_stem = bp.alloc_stem;
+                            g.alloc_leaf = bp.alloc_leaf;
+                            g.alloc_root = bp.alloc_root;
+                            g.root_depth_bias = bp.root_depth_bias;
+                            g.shade_efficiency = bp.shade_efficiency;
+                        }
                         // Don't invent tissues the painted body never had.
                         wk_voxel::sync_alloc_to_body(&mut g, &body);
                         g
