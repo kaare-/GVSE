@@ -48,7 +48,8 @@ Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 ### D3 — Vegetative sprout *(landed)*
 
 - Lateral rhizome tip → child plant on moist neighbour
-- `Genome::mutate` with `clone_fidelity`
+- `Genome::mutate` + `mutate_body` with `clone_fidelity` (genes and
+  module add/swap/delete; habit stays plant)
 - Soft pop cap shared with Atoms
 - Root elongation biases sideways when banking for a sprout
 - **Anti-flood:** long sprout period (~0.6 demo day), higher energy /
@@ -61,6 +62,7 @@ Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 - Paint [`ReproSpore`](PALETTE.md) (`7` in the editor) on a land plant
 - Rare wind-biased dispersal farther than rhizome reach (`try_plant_wind_spore`)
 - Child is a juvenile plant that keeps a sorus so ferns can keep spreading
+- Gene + blueprint mutation on the same `clone_fidelity` knob
 - Rhizome sprout still works without spore modules (local clone only)
 
 ### D4 — Drought banking *(landed)*

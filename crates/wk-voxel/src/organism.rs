@@ -89,8 +89,6 @@ const GRAVITY: f32 = 0.08;
 const WATER_DRAG: f32 = 0.25;
 const AIR_DRAG: f32 = 0.05;
 const EQ_SPRING: f32 = 0.12;
-/// Gene jitter scale on fission — matches column `MUTATION_SIGMA`.
-const MUTATION_SIGMA: f32 = 0.12;
 /// Soft contact impulse when two Atoms share a cell.
 const CONTACT_BOUNCE: f32 = 0.12;
 
@@ -1315,24 +1313,21 @@ fn try_fission(world: &World, parent: &Atom, child_energy: f32, tick: u64) -> Op
         let nx = world.wrap_x(parent.gx + dx);
         let ny = parent.gy + dy;
         if is_wet_air(world, nx, ny) {
-            let mut child =
-                Atom::from_body(nx, ny, parent.energy_max, parent.body.clone());
+            let body = crate::blueprint::mutate_body(
+                &parent.body,
+                parent.clone_fidelity,
+                world.seed.0,
+                tick,
+                parent.age_ticks as u32,
+            );
+            let mut child = Atom::from_body(nx, ny, parent.energy_max, body);
             child.energy = child_energy.clamp(1.0, parent.energy_max);
             child.cooldown = REPRO_PERIOD;
             child.circadian_phase = parent.circadian_phase;
             child.active_window = parent.active_window;
             child.last_water_top = parent.last_water_top;
-            // Mutate buoyancy (and fidelity a little) on clone.
-            let strength = (1.0 - parent.clone_fidelity.clamp(0.0, 1.0)) * MUTATION_SIGMA;
-            let j_b = hash_signed(tick, parent.gx as u64, parent.gy as u64, 0xB0A7);
-            let j_f = hash_signed(tick, parent.gx as u64, parent.age_ticks, 0xF1DE);
-            child.buoyancy_bias =
-                (parent.buoyancy_bias + j_b * strength * 2.0).clamp(0.0, 1.0);
-            child.clone_fidelity =
-                (parent.clone_fidelity + j_f * strength).clamp(0.05, 1.0);
-            child.genome = parent.genome;
-            child.genome.buoyancy_bias = child.buoyancy_bias;
-            child.genome.clone_fidelity = child.clone_fidelity;
+            let g = Genome::mutate(parent.genome, world.seed.0, tick, parent.age_ticks as u32);
+            apply_genome(&mut child, g);
             return Some(child);
         }
     }
@@ -1392,13 +1387,6 @@ fn hash_u64(seed: u64, a: u64, salt: u64) -> u64 {
     x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
     x ^= x >> 31;
     x
-}
-
-/// Deterministic signed noise in [-1, 1].
-fn hash_signed(a: u64, b: u64, c: u64, salt: u64) -> f32 {
-    let h = hash_u64(a ^ b, c, salt);
-    let u = (h >> 40) as f32 / ((1u64 << 24) as f32);
-    u * 2.0 - 1.0
 }
 
 #[cfg(test)]

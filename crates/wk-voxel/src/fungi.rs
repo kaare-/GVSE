@@ -15,7 +15,7 @@
 
 use wk_material::MaterialId;
 
-use crate::blueprint::Genome;
+use crate::blueprint::{mutate_body, Genome};
 use crate::cell::{water_capacity, Cell, CellFlags};
 use crate::grid::World;
 use crate::organism::{Atom, ModuleId};
@@ -815,7 +815,24 @@ pub fn try_spore(
     atom.energy -= cost;
     atom.cooldown = FUNGUS_SPORE_PERIOD;
 
-    let body = crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus();
+    // Inherit parent fruiting-body pixels, then morph-mutate.
+    let mut body = mutate_body(
+        &atom.body,
+        atom.genome.clone_fidelity,
+        world.seed.0,
+        tick,
+        entity_id,
+    );
+    // Guarantee a spore packet so the line can keep dispersing.
+    if !body.iter().any(|(_, _, m)| *m == ModuleId::ReproSpore) {
+        let occupied: std::collections::HashSet<(i16, i16)> =
+            body.iter().map(|&(x, y, _)| (x, y)).collect();
+        let spot = [(1i16, 1i16), (1, 0), (0, 1), (-1, 1), (2, 0)]
+            .into_iter()
+            .find(|p| !occupied.contains(p))
+            .unwrap_or((1, 1));
+        body.push((spot.0, spot.1, ModuleId::ReproSpore));
+    }
     let child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
     let mut child = Atom::from_body(wx, gy, tank, body);
     apply_genome(&mut child, child_genome);

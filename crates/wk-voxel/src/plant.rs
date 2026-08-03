@@ -1269,7 +1269,14 @@ pub fn try_vegetative_sprout(
     atom.energy -= cost;
     atom.cooldown = LAND_SPROUT_PERIOD;
 
-    let body = sprout_body(atom);
+    let mut body = sprout_body(atom);
+    body = crate::blueprint::mutate_body(
+        &body,
+        atom.genome.clone_fidelity,
+        world.seed.0,
+        tick,
+        entity_id,
+    );
     let mut child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
     sync_alloc_to_body(&mut child_genome, &body);
     // Child inherits spawn-tank size, not the parent's root-inflated max.
@@ -1401,7 +1408,14 @@ pub fn try_plant_wind_spore(
     atom.energy -= cost;
     atom.cooldown = PLANT_SPORE_PERIOD;
 
-    let body = spore_dispersal_body(atom);
+    let mut body = spore_dispersal_body(atom);
+    body = crate::blueprint::mutate_body(
+        &body,
+        atom.genome.clone_fidelity,
+        world.seed.0,
+        tick,
+        entity_id,
+    );
     let mut child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
     sync_alloc_to_body(&mut child_genome, &body);
     let mut child = Atom::from_body(wx, gy, tank, body);

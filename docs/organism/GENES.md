@@ -134,6 +134,12 @@ mechanical plan is:
 4. `Genome::mutate` extends to include the new fields; the salt list
    keeps growing but each gene has its own `trait_i` so mutation is
    stable across additions.
+5. **Blueprint / body mutation** (`mutate_body`) runs on the same
+   `clone_fidelity` knob: module **swap**, **add**, or **delete**
+   within the parent's habit palette (Atom / plant / fungus). Habit
+   never flips (plants keep Root+Photosystem; fungi keep Digest and
+   never gain Root/Stem). Wired into rhizome sprouts, plant wind
+   spores, fungal spores, and Atom fission.
 
 ## What is deliberately not here
 
@@ -143,3 +149,4 @@ mechanical plan is:
 - Meta-genes (mutation rate of the mutation rate). Later.
 - Runtime-modifiable weights outside mutation. See
   [`NERVES.md`](NERVES.md) — no plastic learning.
+- Cross-habit chimeras (plant↔fungus body swaps). Deferred.
