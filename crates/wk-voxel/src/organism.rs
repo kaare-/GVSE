@@ -1238,12 +1238,14 @@ fn equilibrium_y(top: i32, bed: i32, bias: f32) -> f32 {
 /// Horizontal drive below which submerged fronds hang still (no idle wave).
 pub const FROND_STILL_WIND: f32 = 0.08;
 
-/// Soft frond draw pose: Photosystem / Stem sway underwater and lay along
-/// the free surface when taller than the water column. Roots / Nucleus /
-/// Digest stay rigid. Cosmetic — body cells for physics stay upright.
+/// Soft frond draw pose. Roots / Nucleus / Digest stay rigid. Cosmetic —
+/// body cells for physics stay upright.
 ///
-/// Submerged sway only when `|wind_vx| ≥ [`FROND_STILL_WIND`]` — still
-/// water keeps the ribbon upright (no tick-driven idle motion).
+/// - **Stemless Photosystems** (seaweed ribbon): only stand when bathed in
+///   standing water. Dry air / dropped waterline → collapse into a mat
+///   (soft leaves can't hold a tower).
+/// - **Stem** (woody): upright on land; underwater leans with wind.
+/// - Submerged sway only when `|wind_vx| ≥ [`FROND_STILL_WIND`].
 pub fn frond_draw_cell(
     world: &World,
     atom: &Atom,
@@ -1255,37 +1257,47 @@ pub fn frond_draw_cell(
 ) -> (i32, i32) {
     let base_x = atom.gx + dx as i32;
     let base_y = atom.gy + dy as i32;
-    let floppy = matches!(mid, ModuleId::Photosystem | ModuleId::Stem);
-    if !floppy {
+    let stemless = !atom.body.iter().any(|(_, _, m)| *m == ModuleId::Stem);
+    let soft_leaf = mid == ModuleId::Photosystem && stemless;
+    let woody = mid == ModuleId::Stem;
+    if !soft_leaf && !woody {
         return (base_x, base_y);
     }
-    let Some((top, _bed)) = wet_band(world, atom.gx, atom.gy) else {
-        return (base_x, base_y);
-    };
+
     let drive = wind_vx.abs();
     let dir = if wind_vx >= 0.0 { 1 } else { -1 };
-    if base_y > top {
-        // Above free surface: flop onto the waterline (soft ribbon).
-        let overhang = base_y - top;
-        let lean_dir = if drive < FROND_STILL_WIND { 1 } else { dir };
-        (atom.gx + dx as i32 + lean_dir * overhang, top)
-    } else if drive < FROND_STILL_WIND {
-        // Still water — hang straight, no idle sine wave.
-        (base_x, base_y)
-    } else {
-        // Moving water / wind: lean with the drive and a small ripple.
-        // At least one cell of lean once past the still threshold so the
-        // ribbon doesn't look frozen while wind is clearly on.
-        let tip_w = (dy.max(0) as f32) * 0.30;
-        let phase = tick as f32 * (0.04 + drive * 0.10)
-            + atom.gx as f32 * 0.19
-            + dy as f32 * 0.85;
-        let amp = (drive * 0.9 * (0.5 + tip_w)).clamp(0.0, 1.4);
-        let sway = (phase.sin() * amp).round() as i32;
-        let lean_mag = (drive * (1.2 + tip_w)).ceil().clamp(1.0, 2.0) as i32;
-        let lean = dir * lean_mag;
-        (base_x + lean + sway, base_y)
+    let lean_dir = if drive < FROND_STILL_WIND { 1 } else { dir };
+    let band = wet_band(world, atom.gx, atom.gy);
+
+    if let Some((top, bed)) = band {
+        if base_y > top {
+            // Emerged tip: flop onto the waterline (not a dry land mat).
+            let overhang = base_y - top;
+            return (atom.gx + dx as i32 + lean_dir * overhang, top);
+        }
+        if base_y >= bed {
+            // Underwater: still hang, or lean with drive.
+            if drive < FROND_STILL_WIND {
+                return (base_x, base_y);
+            }
+            let tip_w = (dy.max(0) as f32) * 0.30;
+            let phase = tick as f32 * (0.04 + drive * 0.10)
+                + atom.gx as f32 * 0.19
+                + dy as f32 * 0.85;
+            let amp = (drive * 0.9 * (0.5 + tip_w)).clamp(0.0, 1.4);
+            let sway = (phase.sin() * amp).round() as i32;
+            let lean_mag = (drive * (1.2 + tip_w)).ceil().clamp(1.0, 2.0) as i32;
+            return (base_x + dir * lean_mag + sway, base_y);
+        }
     }
+
+    // Soft stemless ribbon with no water column → collapse into a mat.
+    // Woody stems stay upright on land (handled by early return above).
+    if soft_leaf {
+        let rise = dy.max(0) as i32;
+        return (atom.gx + lean_dir * rise + dx as i32, atom.gy);
+    }
+    (base_x, base_y)
 }
 
 /// Contiguous wet-Air band containing `hint_y` (or nearest wet cell).
@@ -1699,6 +1711,33 @@ mod tests {
         let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, 0, 0.5);
         assert_eq!(wy, top, "tip draws on the waterline");
         assert!(wx > atom.gx, "positive wind lays the tip downwind");
+    }
+
+    #[test]
+    fn dry_stemless_frond_flops_into_a_mat() {
+        let w = moist_sand_plot(); // no standing water column
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let atom = Atom::from_body(4, 2, 40.0, body);
+        let tip_dy = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|(_, y, _)| *y)
+            .max()
+            .unwrap();
+        let (dx, dy, mid) = atom
+            .body
+            .iter()
+            .copied()
+            .find(|(_, y, m)| *m == ModuleId::Photosystem && *y == tip_dy)
+            .unwrap();
+        let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, 0, 0.0);
+        assert_eq!(wy, atom.gy, "unsupported soft leaf draws at crown height");
+        assert!(
+            wx != atom.gx + dx as i32 || tip_dy == 0,
+            "dry ribbon should flop laterally (wx={wx})"
+        );
+        assert!(wx > atom.gx, "flops into a mat beside the holdfast");
     }
 
     #[test]
@@ -3080,13 +3119,21 @@ mod tests {
         );
         // Growth may still place a leaf, but must not add Stem beside the gap.
         atom.age_ticks = LAND_GROW_PERIOD;
-        let _ = crate::plant::try_grow_shoot(&mut atom, 1, &trunks, &crate::plant::PlantGrowthCaps::default());
+        let w = moist_sand_plot();
+        let _ = crate::plant::try_grow_shoot(
+            &w,
+            &mut atom,
+            1,
+            &trunks,
+            &crate::plant::PlantGrowthCaps::default(),
+        );
         assert_eq!(crate::plant::stem_count(&atom), 1);
     }
 
     #[test]
     fn leaves_may_touch_each_other() {
         let empty = std::collections::HashSet::new();
+        let w = moist_sand_plot();
         let mut atom = Atom::from_body(
             4,
             2,
@@ -3105,7 +3152,13 @@ mod tests {
         let n0 = atom.photosystem_count();
         for t in 0..40u64 {
             atom.age_ticks = t * LAND_GROW_PERIOD;
-            let _ = crate::plant::try_grow_shoot(&mut atom, t, &empty, &crate::plant::PlantGrowthCaps::default());
+            let _ = crate::plant::try_grow_shoot(
+                &w,
+                &mut atom,
+                t,
+                &empty,
+                &crate::plant::PlantGrowthCaps::default(),
+            );
         }
         assert!(
             atom.photosystem_count() > n0,
@@ -3199,9 +3252,16 @@ mod tests {
         atom.genome.alloc_root = 0.05;
         atom.energy = 80.0;
         let empty = std::collections::HashSet::new();
+        let w = moist_sand_plot();
         for t in 0..30u64 {
             atom.age_ticks = t * LAND_GROW_PERIOD;
-            let _ = crate::plant::try_grow_shoot(&mut atom, t, &empty, &crate::plant::PlantGrowthCaps::default());
+            let _ = crate::plant::try_grow_shoot(
+                &w,
+                &mut atom,
+                t,
+                &empty,
+                &crate::plant::PlantGrowthCaps::default(),
+            );
         }
         let stem_on_leaf = atom.body.iter().any(|&(x, y, m)| {
             m == ModuleId::Stem

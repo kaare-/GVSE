@@ -1110,6 +1110,7 @@ pub fn stem_spacing_ok(atom: &Atom, nx: i16, ny: i16, trunks: &HashSet<(i32, i32
 /// - Stemless ribbons (seaweed): leaves stack upward from the frond tip.
 /// - New Stem needs a Moore gap from other live/dead trunks (leaves may touch).
 pub fn try_grow_shoot(
+    world: &World,
     atom: &mut Atom,
     tick: u64,
     trunks: &HashSet<(i32, i32)>,
@@ -1165,7 +1166,8 @@ pub fn try_grow_shoot(
         };
         // Keep the olive tip clear whenever a trunk exists — stacking a
         // leaf on `(0,+1)` produced leaf→stem→leaf towers and blocked
-        // further stem growth. Stemless ribbons elongate straight up.
+        // further stem growth. Stemless ribbons elongate upward only
+        // into wet Air (soft leaves can't build a dry tower).
         let dirs: &[(i16, i16)] = if n_stem > 0 {
             &[(1, 0), (-1, 0), (1, 1), (-1, 1)]
         } else {
@@ -1187,6 +1189,14 @@ pub fn try_grow_shoot(
                     .any(|&(x, y, m)| m == ModuleId::Photosystem && x == nx && y == ny - 1)
             {
                 continue;
+            }
+            if n_stem == 0 && dy > 0 {
+                let wx = world.wrap_x(atom.gx + nx as i32);
+                let wy = atom.gy + ny as i32;
+                // Soft ribbon needs water buoyancy to stand / climb.
+                if !crate::rules::is_standing_water(world, wx, wy) {
+                    continue;
+                }
             }
             atom.energy -= cost;
             atom.body.push((nx, ny, ModuleId::Photosystem));
@@ -1300,10 +1310,10 @@ pub fn try_grow_plant(
     if try_root_first {
         spent += try_elongate_root(world, atom, live_roots, caps);
         if spent <= 0.0 {
-            spent += try_grow_shoot(atom, tick, trunks, caps);
+            spent += try_grow_shoot(world, atom, tick, trunks, caps);
         }
     } else {
-        spent += try_grow_shoot(atom, tick, trunks, caps);
+        spent += try_grow_shoot(world, atom, tick, trunks, caps);
         if spent <= 0.0 {
             spent += try_elongate_root(world, atom, live_roots, caps);
         }
@@ -1700,7 +1710,11 @@ mod tests {
 
     #[test]
     fn seaweed_ribbon_elongates_without_inventing_stem() {
-        let w = moist_plot();
+        let mut w = moist_plot();
+        // Soft ribbons only climb into standing water.
+        for y in 2..=9 {
+            w.set_cell(4, y, Cell::water());
+        }
         let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
         let mut atom = Atom::from_body(4, 2, 80.0, body);
         apply_genome(&mut atom, crate::blueprint::Blueprint::minimal_seaweed().genome);
@@ -1733,6 +1747,41 @@ mod tests {
             .max()
             .unwrap();
         assert!(tip >= 5, "frond tip should climb (tip y={tip})");
+    }
+
+    #[test]
+    fn stemless_ribbon_cannot_grow_upright_tower_in_dry_air() {
+        let w = moist_plot(); // dry Air above sand
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut atom = Atom::from_body(4, 2, 80.0, body);
+        apply_genome(&mut atom, crate::blueprint::Blueprint::minimal_seaweed().genome);
+        let tip0 = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|(_, y, _)| *y)
+            .max()
+            .unwrap();
+        let trunks = HashSet::new();
+        let roots = HashSet::new();
+        let caps = PlantGrowthCaps::default();
+        for pulse in 0..40u64 {
+            atom.energy = atom.energy_max;
+            atom.age_ticks = pulse * LAND_GROW_PERIOD;
+            let _ = try_grow_plant(&w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &caps);
+        }
+        let tip1 = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|(_, y, _)| *y)
+            .max()
+            .unwrap();
+        assert_eq!(
+            tip1, tip0,
+            "dry air must not let soft leaves stack into a tower (tip {tip0}→{tip1})"
+        );
+        assert_eq!(stem_count(&atom), 0);
     }
 
     #[test]

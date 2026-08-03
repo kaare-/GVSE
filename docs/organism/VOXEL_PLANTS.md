@@ -62,8 +62,10 @@ cost/benefit. E36/E37 spirit.
   sat. Dry-land / film Air does not count — shore leaves never drink.
   When leaves bathe, soft root budget collapses to one holdfast (no
   seaweed flag).
-- **Floppy frond (draw):** Photosystem / Stem sway underwater with wind
-  phase; tips above the free surface lay along the waterline.
+- **Floppy frond (draw):** stemless Photosystems only stand in standing
+  water; dry air / a dropped waterline collapses them into a mat. They
+  cannot elongate upward into dry Air (no soft leaf towers). Underwater
+  tips lean with wind; above the free surface they lay on the waterline.
 
 ### D3 — Vegetative sprout *(landed)*
 
