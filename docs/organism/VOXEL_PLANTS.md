@@ -63,6 +63,7 @@ Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 - Rare wind-biased dispersal farther than rhizome reach (`try_plant_wind_spore`)
 - Child is a juvenile plant that keeps a sorus so ferns can keep spreading
 - Gene + blueprint mutation on the same `clone_fidelity` knob
+- App draws lilac spore puffs drifting on climate wind (`SporeFx`)
 - Rhizome sprout still works without spore modules (local clone only)
 
 ### D4 — Drought banking *(landed)*

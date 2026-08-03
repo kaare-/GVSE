@@ -164,6 +164,7 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   (`try_emergent_fruiting`, burns field intensity). That body may later
   shed wind-biased spores (`try_spore`) onto Organic / litter banks when
   it carries a painted `ReproSpore` module (included on the `F` template).
+  The app renders lilac puffs drifting on climate wind (`SporeFx`).
 - Soft litter is a bonus sip — fungi do **not** flash Organic into Sand.
 - After long colonization, Organic rarely composts into
   `MaterialId::Soil` with pore water preserved (excess sat pushed to
