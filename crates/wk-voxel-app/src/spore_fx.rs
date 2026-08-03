@@ -156,13 +156,12 @@ impl SporeFx {
                     let wf = w as f32;
                     p.x = p.x.rem_euclid(wf);
                     // Keep target in the same wrap frame as the puff.
-                    let mut tdx = p.tx - p.x;
+                    let tdx = p.tx - p.x;
                     if tdx > wf * 0.5 {
                         p.tx -= wf;
                     } else if tdx < -wf * 0.5 {
                         p.tx += wf;
                     }
-                    let _ = tdx;
                 }
             }
         }
