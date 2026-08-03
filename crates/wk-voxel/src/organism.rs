@@ -1274,15 +1274,16 @@ pub fn frond_draw_cell(
         (base_x, base_y)
     } else {
         // Moving water / wind: lean with the drive and a small ripple.
+        // At least one cell of lean once past the still threshold so the
+        // ribbon doesn't look frozen while wind is clearly on.
         let tip_w = (dy.max(0) as f32) * 0.30;
         let phase = tick as f32 * (0.04 + drive * 0.10)
             + atom.gx as f32 * 0.19
             + dy as f32 * 0.85;
-        let amp = (drive * 0.85 * (0.6 + tip_w)).clamp(0.0, 1.4);
+        let amp = (drive * 0.9 * (0.5 + tip_w)).clamp(0.0, 1.4);
         let sway = (phase.sin() * amp).round() as i32;
-        let lean = (dir as f32 * drive * (0.4 + tip_w * 0.5))
-            .round()
-            .clamp(-2.0, 2.0) as i32;
+        let lean_mag = (drive * (1.2 + tip_w)).ceil().clamp(1.0, 2.0) as i32;
+        let lean = dir * lean_mag;
         (base_x + lean + sway, base_y)
     }
 }
@@ -1709,7 +1710,8 @@ mod tests {
             .body
             .iter()
             .copied()
-            .find(|(_, _, m)| *m == ModuleId::Photosystem)
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .max_by_key(|(_, y, _)| *y)
             .unwrap();
         let base_x = atom.gx + dx as i32;
         let base_y = atom.gy + dy as i32;
@@ -1721,9 +1723,12 @@ mod tests {
                 "calm water must not idle-wave (tick={tick})"
             );
         }
-        // Stronger drive may lean / ripple off the upright seat.
-        let (wx, _) = frond_draw_cell(&w, &atom, dx, dy, mid, 40, 0.35);
-        assert_ne!(wx, base_x, "moving water should bend the frond");
+        // Stronger drive leans the tip; try a few phases so sin isn't ~0.
+        let bent = [0u64, 11, 23, 40, 70].iter().any(|&tick| {
+            let (wx, _) = frond_draw_cell(&w, &atom, dx, dy, mid, tick, 0.40);
+            wx != base_x
+        });
+        assert!(bent, "moving water should bend the frond tip");
     }
 
     #[test]
