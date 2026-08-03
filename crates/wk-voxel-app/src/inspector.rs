@@ -131,7 +131,7 @@ pub fn draw_block_inspector(
     if let Some((id, atom)) = organism {
         lines.push("--- organism ---".into());
         let kind = if is_fungus(atom) {
-            "Fungus"
+            "Fruiting body"
         } else if is_land_plant(atom) {
             "Plant"
         } else {
@@ -151,9 +151,10 @@ pub fn draw_block_inspector(
             atom.cooldown
         ));
         if is_fungus(atom) {
-            lines.push("habit=fungus (mycelium on Organic → Soil)".into());
+            lines.push("habit=fruiting body (mycelium = ground field on Organic)".into());
+            let myc = wk_voxel::max_mycelium_near(world, atom.gx, atom.gy);
             lines.push(format!(
-                "digest_rate={:.2}  drought_ticks={}",
+                "digest_rate={:.2}  drought_ticks={}  field_myc={myc}/255",
                 atom.genome.digest_rate, atom.drought_ticks
             ));
             let digests = atom

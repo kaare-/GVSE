@@ -32,7 +32,7 @@ impl Default for CreatureEditor {
             blueprint: Blueprint::atom(),
             tool: EditorTool::Paint,
             brush: ModuleId::Photosystem,
-            status: "Paint Atom / Plant / Fungus, then Enter + click to spawn".into(),
+            status: "Paint Atom / Plant / fruiting body, then Enter + click to spawn".into(),
             spawn_picker: false,
             was_paused: true,
             name_buf: "atom".into(),
@@ -50,7 +50,7 @@ impl CreatureEditor {
             self.was_paused = currently_paused;
             self.spawn_picker = false;
             self.status =
-                "1-6 modules | A Atom  T Plant  F Fungus | Enter then click spawn site"
+                "1-6 modules | A Atom  T Plant  F fruiting body | Enter then click spawn"
                     .into();
         }
     }
@@ -101,9 +101,9 @@ impl CreatureEditor {
         }
         if is_key_pressed(KeyCode::F) {
             self.blueprint = Blueprint::minimal_fungus();
-            self.name_buf = "fungus".into();
+            self.name_buf = "fruiting body".into();
             self.status =
-                "Mycelium fungus (place in Organic underground; slow → Soil)".into();
+                "Fruiting body — plant on Organic; mycelium lives in the ground field".into();
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
             self.blueprint.name = self.name_buf.clone();
@@ -246,7 +246,7 @@ impl CreatureEditor {
 
         let px = ox + cw + 24.0;
         let kind = if self.blueprint.is_valid_fungus() {
-            "Set E fungus"
+            "Set E fruiting body"
         } else if self.blueprint.is_valid_plant() {
             "Set D plant"
         } else if self.blueprint.is_valid_atom() {
@@ -270,7 +270,7 @@ impl CreatureEditor {
             GRAY,
         );
         draw_text(
-            "A Atom  T Plant  F Fungus  | S save  L load  | Enter spawn",
+            "A Atom  T Plant  F fruiting body  | S save  L load  | Enter spawn",
             px,
             oy + 72.0,
             14.0,

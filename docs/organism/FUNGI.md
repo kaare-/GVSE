@@ -150,20 +150,20 @@ Incentives this creates:
   is a slumping call with an oversize threshold rather than a new
   subsystem.
 
-## Voxel path (wk-voxel) — mycelium redesign
+## Voxel path (wk-voxel) — fruiting body + mycelium field
 
 The live voxel stack diverges from the ghost-root cavity cascade above
 on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
 
-- Organic cells keep their material while mycelium intensity ramps in
-  `Cell::_pad` (renderer: faint cream threads on wet/dry Organic).
-- Soft litter is a slow energy sip only — fungi do **not** flash Organic
-  into Sand.
+- **Fruiting body** — studio creature (`F`). Temporary. Seeds / feeds from
+  the mycelium field; may die of age while the network remains.
+- **Mycelium field** — intensity in `Cell::_pad` on Organic. World process
+  (`step_mycelium_field`): thickens and spreads on moist Organic without a
+  living fruiting body. Renderer: faint cream threads.
+- Soft litter is a bonus sip — fungi do **not** flash Organic into Sand.
 - After long colonization, Organic rarely composts into
   `MaterialId::Soil` with pore water preserved (excess sat pushed to
   neighbours; mild compaction flag).
-- Nucleus may sit underground inside Organic; rare surface fruiting
-  sheds wind-biased spores.
 
 Ghost-root Void fill remains a column-kernel / later voxel goal.
 

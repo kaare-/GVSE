@@ -195,6 +195,9 @@ pub fn tick_with_life(
     // Geotech: roof / overhang collapse after grain has seated.
     crate::failure::apply_failure(world, failure, geotech);
 
+    // Mycelium field: lives in Organic independently of fruiting bodies.
+    crate::fungi::step_mycelium_field(world);
+
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {
         chunk.tick = chunk.tick.wrapping_add(1);

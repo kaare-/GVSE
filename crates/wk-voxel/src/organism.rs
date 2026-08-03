@@ -23,8 +23,8 @@ use crate::blueprint::Genome;
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
     colonize_and_compost, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
-    forage_organic_energy, fungus_should_hibernate, fungus_upkeep, is_fungus,
-    is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
+    forage_organic_energy, fruiting_body_supported, fungus_should_hibernate, fungus_upkeep,
+    is_fungus, is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -927,7 +927,8 @@ fn step_land_plant(
     }
 }
 
-/// Mycelial fungus tick: sip litter, colonize Organic, rare fruiting spore.
+/// Fruiting-body tick: feed from mycelium field / litter, seed local threads.
+/// Underground network persistence is [`crate::fungi::step_mycelium_field`].
 fn step_fungus(
     world: &mut World,
     atom: &mut Atom,
@@ -957,9 +958,14 @@ fn step_fungus(
         atom.drought_ticks = 0;
     }
 
-    let mut upkeep = fungus_upkeep(atom, dormant);
+    let network = fruiting_body_supported(world, atom);
+    let mut upkeep = fungus_upkeep(atom, dormant || network);
     // Light basal tax so empty chassis still burns sugar.
     upkeep += UPKEEP_PER_MODULE * 0.35 * (0.45 + 0.55 * day);
+    if network {
+        // Established moist mycelium carries most of the metabolic load.
+        upkeep *= 0.35;
+    }
 
     if !dormant {
         let want = digest_budget_units(&atom.genome, atom);
@@ -971,7 +977,11 @@ fn step_fungus(
     }
 
     atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);
-    if atom.energy <= 0.0 {
+    // Network-backed fruiting bodies don't energy-starve on moist beds —
+    // the mycelium field keeps feeding them (and outlives them on death).
+    if network {
+        atom.energy = atom.energy.max(1.0);
+    } else if atom.energy <= 0.0 {
         return PlantStep::Dead;
     }
     if !dormant {
@@ -1886,6 +1896,63 @@ mod tests {
             store.corpse_count(),
             1,
             "prolonged starve should leave a corpse after hibernate max"
+        );
+    }
+
+    #[test]
+    fn mycelium_field_keeps_spreading_after_fruiting_body_dies() {
+        use crate::failure::FailureConfig;
+        use crate::rules::{tick_with_life, PerfConfig};
+        let mut w = moist_sand_plot();
+        for x in 3..=5 {
+            for y in 1..=3 {
+                let mut org = Cell::solid(MaterialId::Organic);
+                org.sat = Sat(180);
+                w.set_cell(x, y, org);
+            }
+        }
+        let mut store = OrganismStore::new();
+        let g = Genome {
+            digest_rate: 1.0,
+            ..Genome::default()
+        };
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            3,
+            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
+            40.0,
+            g,
+        ));
+        crate::fungi::seed_mycelium_near(&mut w, 4, 3, 48);
+        let perf = PerfConfig::default();
+        let fail = FailureConfig::default();
+        for _ in 0..120 {
+            tick_with_life(&mut w, &perf, &fail, None, None);
+            let tick = w.tick;
+            store.step(&mut w, tick);
+        }
+        // Kill the fruiting body; mycelium field must continue.
+        store.atoms.clear();
+        let myc0 = crate::fungi::max_mycelium_near(&w, 4, 2);
+        assert!(myc0 >= 40, "need an established network before death");
+        for _ in 0..200 {
+            tick_with_life(&mut w, &perf, &fail, None, None);
+        }
+        let myc1 = crate::fungi::max_mycelium_near(&w, 4, 2);
+        assert!(
+            myc1 >= myc0,
+            "mycelium field must persist after fruiting body dies (was {myc0}, now {myc1})"
+        );
+        assert!(
+            myc1 > myc0 || (3..=5).any(|x| {
+                (1..=3).any(|y| {
+                    w.get_cell(x, y)
+                        .map(|c| c.material == MaterialId::Organic && c.mycelium() > 0)
+                        .unwrap_or(false)
+                })
+            }),
+            "field should keep living on moist Organic without a fruiting body"
         );
     }
 

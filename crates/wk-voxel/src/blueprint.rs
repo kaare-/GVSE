@@ -253,7 +253,8 @@ impl Blueprint {
         }
     }
 
-    /// Minimal litter fungus (E): nucleus + digest + a short hypha thread.
+    /// Minimal fruiting body (E): nucleus + digest + short hyphae.
+    /// Underground mycelium is a ground field on Organic, not painted here.
     pub fn minimal_fungus() -> Self {
         Self {
             schema_version: BLUEPRINT_SCHEMA_VERSION,
@@ -289,8 +290,8 @@ impl Blueprint {
                 digest_rate: 1.0,
                 ..Genome::default()
             },
-            name: "fungus".into(),
-            notes: "Set E litter fungus".into(),
+            name: "fruiting body".into(),
+            notes: "Fruiting body — mycelium lives in moist Organic as a ground field".into(),
         }
     }
 

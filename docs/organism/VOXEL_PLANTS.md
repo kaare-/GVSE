@@ -62,23 +62,24 @@ Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 - Soft root:shoot budget; stressed moisture lifts root allowance
 - Hibernate band (`DROUGHT_DORMANT_FRAC`): slow upkeep, no photo/drink/growth; die after max dormant ticks
 
-### E1 — Litter + fungi *(landed; mycelium redesign)*
+### E1 — Litter + fungi *(landed; fruiting body + mycelium field)*
 
 | Gene | Role |
 |------|------|
-| `digest_rate` | Mycelium colonization cadence (+ soft-litter sip) |
+| `digest_rate` | Fruiting-body forage / local seed cadence |
 
 Features:
 
-- Soft litter field (`World::soft_litter`) — bonus energy sip
-- Organic substrate sustains forage energy (no cell destroy); mycelium
-  threads in `Cell::_pad`; **never** flash Organic → Sand
-- Standing rain water counts as moisture; Organic beds do not drought-hibernate
-- After long colonization, rare compost Organic → `MaterialId::Soil` with
-  pore sat preserved (excess pushed to neighbours; mild `COMPACTED` flag)
-- Placeable underground (nucleus in Organic) as well as Air-above-solid
-- Rare surface fruiting → wind-biased spores
-- Editor: `F` fungus template, brushes `5` Digest / `6` Hypha; F3 Soil brush
+- **Studio designs the fruiting body** (`F` template: Nucleus / Digest / Hypha
+  pixels). Plant it on Organic; it seeds the ground network.
+- **Mycelium is a ground field** (`Cell::_pad` on Organic), not something you
+  paint in the creature editor. `step_mycelium_field` thickens / spreads on
+  moist Organic even after the fruiting body dies.
+- Soft litter — bonus energy sip; Organic forage scales with field intensity
+- Established moist networks support fruiting bodies (no energy-starve)
+- Standing rain counts as moisture; **never** flash Organic → Sand
+- Long colonization may compost Organic → `MaterialId::Soil` (sat preserved)
+- Editor: `F` fruiting body; brushes `5` Digest / `6` Hypha; F3 Soil brush
 
 ### E1b — Lingering corpses → Organic *(landed)*
 

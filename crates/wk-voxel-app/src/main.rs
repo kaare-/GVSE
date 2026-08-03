@@ -934,7 +934,7 @@ async fn main() {
                                         &mut scene.world,
                                         fx,
                                         fy,
-                                        32,
+                                        48,
                                     );
                                 }
                             }

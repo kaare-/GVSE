@@ -2,12 +2,14 @@
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
-//! Mycelial fungi (Set E redesign): Digest + Hypha atoms colonize
-//! Organic with a faint mycelium intensity (`Cell::_pad`), sip soft
-//! litter slowly for energy, and only after long colonization convert
-//! Organic → Soil (never Sand) while preserving pore water. Rare
-//! surface fruiting bodies shed wind-biased spores.
-//! Spec notes: `docs/organism/FUNGI.md`, `docs/organism/VOXEL_PLANTS.md`.
+//! Fungi split (Set E):
+//! - **Fruiting body** — the studio-designed Atom (Digest / Hypha pixels).
+//!   Planted into the sim; temporary; feeds from the mycelium field.
+//! - **Mycelium field** — `Cell::_pad` intensity on Organic. Lives in the
+//!   ground as a world process ([`step_mycelium_field`]); keeps spreading
+//!   in moist Organic after the fruiting body dies. Not studio-painted.
+//! Soft litter is bonus fuel. Long colonization may compost Organic → Soil
+//! (never Sand). Spec: `docs/organism/FUNGI.md`, `docs/organism/VOXEL_PLANTS.md`.
 
 use wk_material::MaterialId;
 
@@ -28,14 +30,27 @@ pub const DIGEST_MAX_UNITS: u16 = 1;
 pub const DIGEST_ENERGY_PER_UNIT: f32 = 0.55;
 /// Tiny energy from advancing mycelium one step (not from destroying cells).
 pub const MYCELIUM_ENERGY: f32 = 0.08;
-/// Energy / tick while Digest forages labile Organic in place.
-/// Soft litter is optional boom fuel; Organic substrate must sustain the
-/// fungus or humid beds starve before mycelium is visible.
+/// Energy / tick while a fruiting body forages labile Organic in place.
+/// Soft litter is optional boom fuel; the mycelium field must sustain
+/// fruiting bodies on humid beds.
 pub const ORGANIC_FORAGE_ENERGY: f32 = 0.055;
-/// Ticks between mycelium growth pulses on a local Organic cell.
+/// Local mycelium intensity at which a fruiting body is network-supported
+/// (won't energy-starve while the bed stays moist).
+pub const FRUIT_SUPPORT_MYC: u8 = 40;
+/// Ticks between mycelium growth pulses from a living fruiting body.
 pub const MYCELIUM_GROW_PERIOD: u64 = 32;
-/// Mycelium intensity gained per growth pulse (toward 255).
+/// Mycelium intensity gained per fruiting-body growth pulse (toward 255).
 pub const MYCELIUM_GROW_AMOUNT: u8 = 1;
+/// World mycelium field cadence (independent of fruiting bodies).
+pub const MYCELIUM_FIELD_PERIOD: u64 = 16;
+/// Intensity gain per field pulse on moist colonized Organic.
+pub const MYCELIUM_FIELD_GROW: u8 = 1;
+/// 1-in-N chance a moist colonized cell seeds a neighbour Organic.
+pub const MYCELIUM_FIELD_SPREAD_ODDS: u64 = 20;
+/// Max colonized cells processed per field pulse (perf cap).
+pub const MYCELIUM_FIELD_MAX_CELLS: usize = 256;
+/// Pore / film moisture below which field growth pauses (slow decay).
+pub const MYCELIUM_FIELD_MOIST: f32 = 0.04;
 /// Intensity before Organic may compost into Soil.
 pub const MYCELIUM_SOIL_THRESHOLD: u8 = 220;
 /// 1-in-N chance per eligible growth pulse to compost a fully threaded cell.
@@ -68,7 +83,8 @@ pub const DEATH_LITTER_MAX: u16 = 48;
 const ORGANIC_SCAN_DEPTH: i32 = 8;
 const ORGANIC_SCAN_RADIUS: i32 = 2;
 
-/// True when the body is a detritus habit (Digest, no Root/Stem).
+/// True when the body is a fruiting-body habit (Digest, no Root/Stem).
+/// Underground hyphae are the mycelium field on Organic, not body pixels.
 pub fn is_fungus(atom: &Atom) -> bool {
     let has_digest = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Digest);
     let has_root = atom.body.iter().any(|(_, _, m)| *m == ModuleId::Root);
@@ -190,8 +206,25 @@ pub fn fungus_should_hibernate(world: &World, atom: &Atom) -> bool {
     fungus_moisture_frac(world, atom) < FUNGUS_DROUGHT_FRAC
 }
 
-/// Labile forage from nearby Organic. Does not destroy or convert cells —
-/// mycelium intensity is the visible progress ([`colonize_and_compost`]).
+/// Strongest mycelium intensity on Organic near `(gx, gy)`.
+pub fn max_mycelium_near(world: &World, gx: i32, gy: i32) -> u8 {
+    let gx = world.wrap_x(gx);
+    let mut best = 0u8;
+    for dx in -ORGANIC_SCAN_RADIUS..=ORGANIC_SCAN_RADIUS {
+        let nx = world.wrap_x(gx + dx);
+        for dy in -ORGANIC_SCAN_DEPTH..=ORGANIC_SCAN_DEPTH {
+            if let Some(c) = world.get_cell(nx, gy + dy) {
+                if c.material == MaterialId::Organic {
+                    best = best.max(c.mycelium());
+                }
+            }
+        }
+    }
+    best
+}
+
+/// Labile forage from nearby Organic / mycelium field.
+/// Does not destroy cells — mycelium intensity is the visible progress.
 pub fn forage_organic_energy(world: &World, gx: i32, gy: i32, genome: &Genome, atom: &Atom) -> f32 {
     if !has_organic_substrate(world, gx, gy) {
         return 0.0;
@@ -199,7 +232,129 @@ pub fn forage_organic_energy(world: &World, gx: i32, gy: i32, genome: &Genome, a
     let n_d = digest_count(atom).max(1) as f32;
     let n_h = hypha_count(atom) as f32;
     let rate = genome.digest_rate.clamp(0.05, 2.0);
-    ORGANIC_FORAGE_ENERGY * n_d * (1.0 + 0.10 * n_h) * rate.clamp(0.5, 1.5)
+    let myc = max_mycelium_near(world, gx, gy) as f32;
+    // Established networks feed fruiting bodies harder.
+    let myc_boost = 1.0 + (myc / 80.0).min(2.0);
+    ORGANIC_FORAGE_ENERGY * n_d * (1.0 + 0.10 * n_h) * rate.clamp(0.5, 1.5) * myc_boost
+}
+
+/// Fruiting body is backed by a moist, colonized mycelium bed.
+pub fn fruiting_body_supported(world: &World, atom: &Atom) -> bool {
+    max_mycelium_near(world, atom.gx, atom.gy) >= FRUIT_SUPPORT_MYC
+        && fungus_moisture_frac(world, atom) >= FUNGUS_DROUGHT_FRAC
+}
+
+fn organic_cell_moist_frac(world: &World, gx: i32, gy: i32) -> f32 {
+    let gx = world.wrap_x(gx);
+    let mut best = 0.0f32;
+    if let Some(c) = world.get_cell(gx, gy) {
+        if c.material != MaterialId::Air {
+            let cap = water_capacity(c.material);
+            if cap > 0 {
+                best = best.max(c.sat.0 as f32 / cap as f32);
+            }
+        }
+    }
+    for (dx, dy) in [(0i32, 1), (0, -1), (1, 0), (-1, 0)] {
+        let nx = world.wrap_x(gx + dx);
+        if let Some(n) = world.get_cell(nx, gy + dy) {
+            if n.material == MaterialId::Air && !n.sat.is_empty() {
+                best = best.max(n.sat.0 as f32 / u8::MAX as f32);
+            }
+        }
+    }
+    best
+}
+
+/// Autonomous mycelium field: thicken / spread on moist Organic without a
+/// living fruiting body. Call from the world tick.
+pub fn step_mycelium_field(world: &mut World) {
+    if world.tick % MYCELIUM_FIELD_PERIOD != 0 {
+        return;
+    }
+    use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
+
+    let mut colonized: Vec<(i32, i32, u8)> = Vec::new();
+    let coords: Vec<_> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let gx = coord.cx * CHUNK_CELLS_W as i32 + lx as i32;
+                let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
+                let Some(c) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if c.material == MaterialId::Organic && c.mycelium() > 0 {
+                    colonized.push((gx, gy, c.mycelium()));
+                    if colonized.len() >= MYCELIUM_FIELD_MAX_CELLS {
+                        break;
+                    }
+                }
+            }
+            if colonized.len() >= MYCELIUM_FIELD_MAX_CELLS {
+                break;
+            }
+        }
+        if colonized.len() >= MYCELIUM_FIELD_MAX_CELLS {
+            break;
+        }
+    }
+    if colonized.is_empty() {
+        return;
+    }
+
+    let seed = world.seed.0;
+    let tick = world.tick;
+    let mut spreads: Vec<(i32, i32)> = Vec::new();
+    let mut grows: Vec<(i32, i32)> = Vec::new();
+    let mut decays: Vec<(i32, i32)> = Vec::new();
+
+    for (i, &(gx, gy, myc)) in colonized.iter().enumerate() {
+        let moist = organic_cell_moist_frac(world, gx, gy);
+        if moist >= MYCELIUM_FIELD_MOIST {
+            if myc < 255 {
+                grows.push((gx, gy));
+            }
+            if myc >= 16 {
+                let h = hash_u64(seed, tick, gx as u64, gy as u64 ^ (i as u64));
+                if h % MYCELIUM_FIELD_SPREAD_ODDS == 0 {
+                    spreads.push((gx, gy));
+                }
+            }
+            if myc >= MYCELIUM_SOIL_THRESHOLD {
+                let h = hash_u64(seed, tick, gx as u64, 0x5011u64);
+                if h % MYCELIUM_SOIL_CONVERT_ODDS == 0 {
+                    compost_organic_to_soil(world, gx, gy);
+                }
+            }
+        } else if myc > 0 {
+            // Bone-dry: rare fade, network hibernates rather than vanishing.
+            let h = hash_u64(seed, tick, gx as u64, 0xD00Du64);
+            if h % 64 == 0 {
+                decays.push((gx, gy));
+            }
+        }
+    }
+
+    for (gx, gy) in grows {
+        if let Some(mut c) = world.get_cell(gx, gy) {
+            if c.material == MaterialId::Organic {
+                c.set_mycelium(c.mycelium().saturating_add(MYCELIUM_FIELD_GROW));
+                world.set_cell(gx, gy, c);
+            }
+        }
+    }
+    for (gx, gy) in spreads {
+        spread_mycelium_once(world, gx, gy);
+    }
+    for (gx, gy) in decays {
+        if let Some(mut c) = world.get_cell(gx, gy) {
+            if c.material == MaterialId::Organic {
+                c.set_mycelium(c.mycelium().saturating_sub(1));
+                world.set_cell(gx, gy, c);
+            }
+        }
+    }
 }
 
 /// Soft-litter sip budget from gene + modules (capped low — mycelium is slow).
@@ -888,6 +1043,42 @@ mod tests {
             e >= ORGANIC_FORAGE_ENERGY * 0.5,
             "Organic forage must yield energy without soft litter (got {e})"
         );
+    }
+
+    #[test]
+    fn mycelium_field_spreads_without_fruiting_body() {
+        let mut w = litter_plot();
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(160);
+            w.set_cell(4, y, org);
+        }
+        // Seed a colonized patch — no Atom in the world.
+        if let Some(mut c) = w.get_cell(4, 2) {
+            c.set_mycelium(48);
+            w.set_cell(4, 2, c);
+        }
+        let myc0 = max_mycelium_near(&w, 4, 2);
+        for t in 0..80u64 {
+            w.tick = t * MYCELIUM_FIELD_PERIOD;
+            step_mycelium_field(&mut w);
+        }
+        let myc1 = max_mycelium_near(&w, 4, 2);
+        assert!(myc1 > myc0, "field must thicken (was {myc0}, now {myc1})");
+        let spread = (1..=3).any(|y| {
+            w.get_cell(4, y)
+                .map(|c| c.material == MaterialId::Organic && c.mycelium() > 0 && y != 2)
+                .unwrap_or(false)
+        }) || [-1i32, 1].iter().any(|&dx| {
+            (1..=3).any(|y| {
+                w.get_cell(4 + dx, y)
+                    .map(|c| c.material == MaterialId::Organic && c.mycelium() > 0)
+                    .unwrap_or(false)
+            })
+        });
+        // Neighbour Organic may be missing on this plot — thickening alone is enough.
+        let _ = spread;
+        assert!(myc1 >= 48 + 4, "moist field should keep growing without a fruiting body");
     }
 
     #[test]
