@@ -16,7 +16,8 @@ use wk_material::MaterialId;
 use crate::blueprint::Genome;
 use crate::cell::water_capacity;
 use crate::grid::World;
-use crate::organism::{Atom, BodyModule, ModuleId};
+use crate::organism::{column_sky_light, Atom, BodyModule, ModuleId};
+use crate::shade::{effective_photo_light, CanopyIndex};
 
 /// Energy from one sat unit drunk by roots.
 pub const ROOT_WATER_ENERGY: f32 = 0.08;
@@ -72,6 +73,9 @@ pub const MAX_PHOTO_MODULES: usize = 12;
 /// Max Manhattan distance a woody canopy leaf may grow from Stem/Nucleus.
 /// Stemless seaweed ribbons ignore this and climb with the water column.
 pub const WOODY_LEAF_MAX_CANT: i32 = 2;
+/// Woody leaf sites need at least this effective light (sky × canopy).
+/// Dim understory spots stay bare — competition, not a cosmetic gap.
+pub const WOODY_LEAF_MIN_LIGHT: f32 = 0.34;
 /// Extra Root modules allowed per photosystem beyond the sprout minimum.
 pub const LAND_ROOTS_PER_PHOTOSYSTEM: usize = 3;
 
@@ -735,9 +739,31 @@ where
     out
 }
 
+/// World cells occupied by living Photosystem modules (all plants).
+pub fn collect_live_photo_world_cells<'a, I>(atoms: I) -> HashSet<(i32, i32)>
+where
+    I: IntoIterator<Item = &'a Atom>,
+{
+    let mut out = HashSet::new();
+    for a in atoms {
+        for &(dx, dy, m) in &a.body {
+            if m == ModuleId::Photosystem {
+                out.insert((a.gx + dx as i32, a.gy + dy as i32));
+            }
+        }
+    }
+    out
+}
+
 fn own_root_at(atom: &Atom, wx: i32, wy: i32) -> bool {
     atom.body.iter().any(|&(bx, by, m)| {
         m == ModuleId::Root && atom.gx + bx as i32 == wx && atom.gy + by as i32 == wy
+    })
+}
+
+fn own_photo_at(atom: &Atom, wx: i32, wy: i32) -> bool {
+    atom.body.iter().any(|&(bx, by, m)| {
+        m == ModuleId::Photosystem && atom.gx + bx as i32 == wx && atom.gy + by as i32 == wy
     })
 }
 
@@ -762,6 +788,52 @@ pub fn beside_foreign_live_root(
         }
     }
     false
+}
+
+/// True when `(wx,wy)` is Moore-adjacent to a *foreign* live Photosystem.
+/// Same exclusion spirit as roots — leaves don't pack into a neighbour's canopy.
+pub fn beside_foreign_live_photo(
+    atom: &Atom,
+    wx: i32,
+    wy: i32,
+    live_photos: &HashSet<(i32, i32)>,
+) -> bool {
+    for ox in -1i32..=1 {
+        for oy in -1i32..=1 {
+            let tx = wx + ox;
+            let ty = wy + oy;
+            if !live_photos.contains(&(tx, ty)) {
+                continue;
+            }
+            if own_photo_at(atom, tx, ty) {
+                continue;
+            }
+            return true;
+        }
+    }
+    false
+}
+
+fn woody_leaf_light_ok(
+    world: &World,
+    atom: &Atom,
+    canopy: &CanopyIndex,
+    entity_id: u32,
+    wx: i32,
+    wy: i32,
+    n_photo: usize,
+) -> bool {
+    let sky = column_sky_light(world, wx, wy);
+    let lit = effective_photo_light(
+        canopy,
+        wx,
+        wy,
+        sky,
+        entity_id,
+        n_photo,
+        &atom.genome,
+    );
+    lit >= WOODY_LEAF_MIN_LIGHT
 }
 
 /// Try to add one Root pixel toward moisture / depth bias.
@@ -1111,13 +1183,18 @@ pub fn stem_spacing_ok(atom: &Atom, nx: i16, ny: i16, trunks: &HashSet<(i32, i32
 /// - Leaves attach to the highest Stem (or Nucleus if leafless chassis).
 /// - Stemless bodies stay stemless: olive only elongates painted Stem.
 /// - Stemless ribbons (seaweed): leaves stack upward from the frond tip.
-/// - New Stem needs a Moore gap from other live/dead trunks (leaves may touch).
+/// - New Stem needs a Moore gap from other live/dead trunks.
+/// - Woody leaves: short petioles, Moore gap from *foreign* live leaves
+///   (same spirit as root spacing), and a minimum effective light.
 pub fn try_grow_shoot(
     world: &World,
     atom: &mut Atom,
     tick: u64,
     trunks: &HashSet<(i32, i32)>,
+    live_photos: &HashSet<(i32, i32)>,
     caps: &PlantGrowthCaps,
+    canopy: &CanopyIndex,
+    entity_id: u32,
 ) -> f32 {
     let (w_stem, w_leaf, _) = atom.genome.alloc_weights();
     let tank = tank_ref(atom);
@@ -1184,13 +1261,15 @@ pub fn try_grow_shoot(
         // —— Woody canopy: short petioles beside the trunk/branch.
         // Prefer a new side-leaf on a stem cell over elongating one tip into
         // a seaweed-like ribbon. Cap cantilever at [`WOODY_LEAF_MAX_CANT`].
+        // Refuse Moore-adjacent foreign leaves (root-spacing analogue) and
+        // sites too dim for the leaf to pay for itself.
         let mut stem_anchors: Vec<(i16, i16)> = atom
             .body
             .iter()
             .filter(|(_, _, m)| *m == ModuleId::Stem)
             .map(|&(x, y, _)| (x, y))
             .collect();
-        // Prefer higher stem first, then fill gaps lower on the trunk.
+        // Prefer higher / brighter stem first, then fill gaps lower down.
         stem_anchors.sort_by_key(|&(_, y)| std::cmp::Reverse(y));
         const SIDE: [(i16, i16); 4] = [(1, 0), (-1, 0), (1, 1), (-1, 1)];
         for &(tx, ty) in &stem_anchors {
@@ -1201,6 +1280,14 @@ pub fn try_grow_shoot(
                     continue;
                 }
                 if leaf_support_dist(atom, nx, ny) > WOODY_LEAF_MAX_CANT {
+                    continue;
+                }
+                let wx = world.wrap_x(atom.gx + nx as i32);
+                let wy = atom.gy + ny as i32;
+                if beside_foreign_live_photo(atom, wx, wy, live_photos) {
+                    continue;
+                }
+                if !woody_leaf_light_ok(world, atom, canopy, entity_id, wx, wy, n_photo) {
                     continue;
                 }
                 atom.energy -= cost;
@@ -1237,6 +1324,14 @@ pub fn try_grow_shoot(
                         .iter()
                         .any(|&(x, y, m)| m == ModuleId::Stem && x == nx && y == ny - 1)
                     {
+                        continue;
+                    }
+                    let wx = world.wrap_x(atom.gx + nx as i32);
+                    let wy = atom.gy + ny as i32;
+                    if beside_foreign_live_photo(atom, wx, wy, live_photos) {
+                        continue;
+                    }
+                    if !woody_leaf_light_ok(world, atom, canopy, entity_id, wx, wy, n_photo) {
                         continue;
                     }
                     atom.energy -= cost;
@@ -1357,7 +1452,10 @@ pub fn try_grow_plant(
     tick: u64,
     trunks: &HashSet<(i32, i32)>,
     live_roots: &HashSet<(i32, i32)>,
+    live_photos: &HashSet<(i32, i32)>,
     caps: &PlantGrowthCaps,
+    canopy: &CanopyIndex,
+    entity_id: u32,
 ) -> f32 {
     if atom.age_ticks % LAND_GROW_PERIOD != 0 {
         return 0.0;
@@ -1370,10 +1468,14 @@ pub fn try_grow_plant(
     if try_root_first {
         spent += try_elongate_root(world, atom, live_roots, caps);
         if spent <= 0.0 {
-            spent += try_grow_shoot(world, atom, tick, trunks, caps);
+            spent += try_grow_shoot(
+                world, atom, tick, trunks, live_photos, caps, canopy, entity_id,
+            );
         }
     } else {
-        spent += try_grow_shoot(world, atom, tick, trunks, caps);
+        spent += try_grow_shoot(
+            world, atom, tick, trunks, live_photos, caps, canopy, entity_id,
+        );
         if spent <= 0.0 {
             spent += try_elongate_root(world, atom, live_roots, caps);
         }
@@ -1787,7 +1889,7 @@ mod tests {
         for pulse in 0..40u64 {
             atom.energy = atom.energy_max;
             atom.age_ticks = pulse * LAND_GROW_PERIOD;
-            let spent = try_grow_plant(&w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &caps);
+            let spent = try_grow_plant(&w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &HashSet::new(), &caps, &CanopyIndex::default(), 0);
             if spent > 0.0 {
                 grew = true;
             }
@@ -1807,6 +1909,43 @@ mod tests {
             .max()
             .unwrap();
         assert!(tip >= 5, "frond tip should climb (tip y={tip})");
+    }
+
+    #[test]
+    fn woody_leaf_refuses_moore_beside_foreign_live_photo() {
+        let w = moist_plot();
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+        ];
+        let mut atom = Atom::from_body(4, 2, 80.0, body);
+        atom.genome.alloc_stem = 0.05;
+        atom.genome.alloc_leaf = 1.0;
+        atom.genome.alloc_root = 0.05;
+        // Neighbour already owns the side-leaf cells at both stem heights.
+        let mut foreign = HashSet::new();
+        foreign.insert((5, 3)); // beside stem (4,2)+(1,0) → wait gy=2, stem dy=1 → (4,3)+ (1,0)=(5,3)
+        foreign.insert((5, 4));
+        foreign.insert((3, 3));
+        foreign.insert((3, 4));
+        foreign.insert((5, 5));
+        foreign.insert((3, 5));
+        let trunks = HashSet::new();
+        let caps = PlantGrowthCaps::default();
+        let canopy = CanopyIndex::default();
+        let n0 = atom.photosystem_count();
+        for t in 0..20u64 {
+            atom.energy = atom.energy_max;
+            atom.age_ticks = t * LAND_GROW_PERIOD;
+            let _ = try_grow_shoot(&w, &mut atom, t, &trunks, &foreign, &caps, &canopy, 0);
+        }
+        assert_eq!(
+            atom.photosystem_count(),
+            n0,
+            "foreign canopy Moore ring must block woody side-leaves"
+        );
     }
 
     #[test]
@@ -1831,7 +1970,7 @@ mod tests {
         for t in 0..40u64 {
             atom.energy = atom.energy_max;
             atom.age_ticks = t * LAND_GROW_PERIOD;
-            let _ = try_grow_shoot(&w, &mut atom, t, &trunks, &caps);
+            let _ = try_grow_shoot(&w, &mut atom, t, &trunks, &HashSet::new(), &caps, &CanopyIndex::default(), 0);
             for &(x, y, m) in &atom.body {
                 if m == ModuleId::Photosystem {
                     max_cant = max_cant.max(leaf_support_dist(&atom, x, y));
@@ -1886,7 +2025,7 @@ mod tests {
         for pulse in 0..40u64 {
             atom.energy = atom.energy_max;
             atom.age_ticks = pulse * LAND_GROW_PERIOD;
-            let _ = try_grow_plant(&w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &caps);
+            let _ = try_grow_plant(&w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &HashSet::new(), &caps, &CanopyIndex::default(), 0);
         }
         let tip1 = atom
             .body
@@ -1937,7 +2076,7 @@ mod tests {
         for pulse in 0..40u64 {
             atom.energy = atom.energy_max;
             atom.age_ticks = pulse * LAND_GROW_PERIOD;
-            let _ = try_grow_plant(&w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &caps);
+            let _ = try_grow_plant(&w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &HashSet::new(), &caps, &CanopyIndex::default(), 0);
         }
         let tip1 = atom
             .body

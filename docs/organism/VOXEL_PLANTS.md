@@ -67,7 +67,10 @@ cost/benefit. E36/E37 spirit.
   dry-mat onto terrain (piling when cells collide). Woody canopies grow
   **short petioles** beside the trunk/branch (`WOODY_LEAF_MAX_CANT`) — not
   seaweed-length tip chains — and stay in the canopy in draw (wood holds
-  them up; tips may nod a little past `LEAF_SUPPORT_WOODY`). Underwater
+  them up; tips may nod a little past `LEAF_SUPPORT_WOODY`). New woody
+  leaves also obey competition: Moore gap from *foreign* live Photosystems
+  (same spirit as root spacing) and a minimum effective light
+  (`WOODY_LEAF_MIN_LIGHT`) so dim / crowded sites stay bare. Underwater
   tips lean with climate wind **or** local water-sat shear. Woody `Stem`
   stays upright on land.
 - **Light competition:** equal-height neighbours shade each other (dense

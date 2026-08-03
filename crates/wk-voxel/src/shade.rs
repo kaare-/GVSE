@@ -10,7 +10,12 @@ use std::collections::HashMap;
 
 use crate::blueprint::Genome;
 use crate::organism::{Atom, ModuleId};
-use crate::plant::is_land_plant;
+
+fn atom_casts_canopy(atom: &Atom) -> bool {
+    // Land plants (Root present). Avoid depending on `plant` to keep the
+    // shade ↔ growth import graph acyclic.
+    atom.body.iter().any(|(_, _, m)| *m == ModuleId::Root)
+}
 
 /// Columns left/right that can cast shade onto a plant.
 pub const SHADE_RADIUS: i32 = 3;
@@ -117,7 +122,7 @@ pub fn record_canopy(
 pub fn build_canopy_index(atoms: &[Atom]) -> CanopyIndex {
     let mut index = CanopyIndex::default();
     for (id, atom) in atoms.iter().enumerate() {
-        if !is_land_plant(atom) {
+        if !atom_casts_canopy(atom) {
             continue;
         }
         let n_photo = atom.photosystem_count();
@@ -181,7 +186,7 @@ pub fn build_canopy_index_posed(atoms: &[Atom], posed: &[PosedModule]) -> Canopy
         let Some(atom) = atoms.get(p.atom_idx) else {
             continue;
         };
-        if !is_land_plant(atom) {
+        if !atom_casts_canopy(atom) {
             continue;
         }
         let a = if p.mid == ModuleId::Photosystem {

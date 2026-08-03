@@ -79,9 +79,9 @@ pub use organism::{
     SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
 pub use plant::{
-    collect_live_root_world_cells, find_fungus_slot, find_plant_slot, find_surface_air_slot,
-    is_land_plant, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
-    MAX_STEM_MODULES,
+    collect_live_photo_world_cells, collect_live_root_world_cells, find_fungus_slot, find_plant_slot,
+    find_surface_air_slot, is_land_plant, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES,
+    MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use shade::{
     build_canopy_index, build_canopy_index_posed, effective_photo_light, CanopyIndex, PosedModule,

@@ -30,7 +30,8 @@ use crate::fungi::{
 use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::plant::{
-    apply_genome, collect_live_root_world_cells, collect_trunk_world_cells, drink_plant,
+    apply_genome, collect_live_photo_world_cells, collect_live_root_world_cells,
+    collect_trunk_world_cells, drink_plant,
     drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, find_surface_air_slot,
     is_anchored, is_land_plant, leave_dead_roots_in_place, leaves_bathing, pin_plant_pose,
     plant_moisture_frac, sync_root_storage, try_grow_plant, try_plant_wind_spore,
@@ -627,8 +628,9 @@ impl OrganismStore {
         let canopy = build_canopy_index_posed(&self.atoms, &posed);
         // Live + grey-corpse Stem cells — shoot growth keeps a trunk gap.
         let trunks = collect_trunk_world_cells(&self.atoms, &self.corpses);
-        // All living Root cells — spacing applies across plants.
+        // All living Root / Photosystem cells — Moore spacing across plants.
         let live_roots = collect_live_root_world_cells(&self.atoms);
+        let live_photos = collect_live_photo_world_cells(&self.atoms);
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let mut spore_releases: Vec<SporeRelease> = Vec::new();
@@ -706,6 +708,7 @@ impl OrganismStore {
                     &canopy,
                     &trunks,
                     &live_roots,
+                    &live_photos,
                     i as u32,
                     room,
                     &growth_caps,
@@ -1065,6 +1068,7 @@ fn step_land_plant(
     canopy: &CanopyIndex,
     trunks: &std::collections::HashSet<(i32, i32)>,
     live_roots: &std::collections::HashSet<(i32, i32)>,
+    live_photos: &std::collections::HashSet<(i32, i32)>,
     entity_id: u32,
     pop_room: bool,
     growth_caps: &PlantGrowthCaps,
@@ -1169,7 +1173,17 @@ fn step_land_plant(
             atom.genome.alloc_stem = 0.0;
         }
     }
-    let _ = try_grow_plant(world, atom, tick, trunks, live_roots, growth_caps);
+    let _ = try_grow_plant(
+        world,
+        atom,
+        tick,
+        trunks,
+        live_roots,
+        live_photos,
+        growth_caps,
+        canopy,
+        entity_id,
+    );
     atom.genome = genome_save;
     sync_root_storage(atom);
     // Fern-style wind spores before local rhizome (longer range, needs ReproSpore).
@@ -3636,7 +3650,10 @@ mod tests {
             &mut atom,
             1,
             &trunks,
+            &std::collections::HashSet::new(),
             &crate::plant::PlantGrowthCaps::default(),
+            &CanopyIndex::default(),
+            0,
         );
         assert_eq!(crate::plant::stem_count(&atom), 1);
     }
@@ -3668,7 +3685,10 @@ mod tests {
                 &mut atom,
                 t,
                 &empty,
+                &std::collections::HashSet::new(),
                 &crate::plant::PlantGrowthCaps::default(),
+                &CanopyIndex::default(),
+                0,
             );
         }
         assert!(
@@ -3771,7 +3791,10 @@ mod tests {
                 &mut atom,
                 t,
                 &empty,
+                &std::collections::HashSet::new(),
                 &crate::plant::PlantGrowthCaps::default(),
+                &CanopyIndex::default(),
+                0,
             );
         }
         let stem_on_leaf = atom.body.iter().any(|&(x, y, m)| {
