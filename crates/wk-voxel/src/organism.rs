@@ -114,18 +114,37 @@ pub enum ModuleId {
     ReproSpore = 0x10,
 }
 
+/// Bright Photosystem green (full light) — `docs/organism/PALETTE.md`.
+pub const PHOTO_RGB_ACTIVE: (u8, u8, u8) = (0x2E, 0xCC, 0x40);
+/// Dim olive when a leaf is deeply shaded / light-starved (diagnostic).
+pub const PHOTO_RGB_SHADED: (u8, u8, u8) = (0x2A, 0x5A, 0x2E);
+
 impl ModuleId {
     /// Frozen RGB from `docs/organism/PALETTE.md`.
     pub fn rgb(self) -> (u8, u8, u8) {
         match self {
             ModuleId::Nucleus => (0x00, 0x00, 0x00),
-            ModuleId::Photosystem => (0x2E, 0xCC, 0x40),
+            ModuleId::Photosystem => PHOTO_RGB_ACTIVE,
             ModuleId::Digest => (0x8B, 0x2E, 0x2E),
             ModuleId::Hypha => (0xF1, 0xE6, 0xC4),
             ModuleId::Root => (0x7A, 0x4B, 0x2A),
             ModuleId::Stem => (0x55, 0x6B, 0x2F),
             ModuleId::ReproSpore => (0xD0, 0xB0, 0xFF),
         }
+    }
+
+    /// Photosystem tint from effective light `0..1` (active → shaded).
+    pub fn photosystem_rgb_for_light(light: f32) -> (u8, u8, u8) {
+        let t = light.clamp(0.0, 1.0);
+        // Bias the ramp so middling shade still reads darker than full sun.
+        let t = (t.powf(0.75)).clamp(0.0, 1.0);
+        let (r0, g0, b0) = PHOTO_RGB_SHADED;
+        let (r1, g1, b1) = PHOTO_RGB_ACTIVE;
+        (
+            (r0 as f32 + (r1 as f32 - r0 as f32) * t).round() as u8,
+            (g0 as f32 + (g1 as f32 - g0 as f32) * t).round() as u8,
+            (b0 as f32 + (b1 as f32 - b0 as f32) * t).round() as u8,
+        )
     }
 
     pub fn name(self) -> &'static str {
@@ -409,8 +428,9 @@ impl OrganismStore {
     ///
     /// Soft fronds (Photosystem / Stem) sway under water and lay along the
     /// free surface when taller than the water column. Flopped greens **pile**
-    /// when they would share a cell. Pass `wind_vx` for lean direction;
-    /// `tick` phases the underwater wave.
+    /// when they would share a cell. Photosystems tint bright→dim green by
+    /// effective light at their posed cell (shade / depth diagnostic).
+    /// Pass `wind_vx` for lean direction; `tick` phases the underwater wave.
     pub fn draw_list(
         &self,
         world: &World,
@@ -418,16 +438,39 @@ impl OrganismStore {
         wind_vx: f32,
     ) -> Vec<(i32, i32, (u8, u8, u8))> {
         let posed = resolve_organism_draw_cells(world, &self.atoms, tick, wind_vx);
+        let canopy = build_canopy_index_posed(&self.atoms, &posed);
         let mut out = Vec::with_capacity(posed.len() + self.corpses.len() * 2);
         for p in &posed {
-            out.push((p.wx, p.wy, p.mid.rgb()));
+            let rgb = if p.mid == ModuleId::Photosystem {
+                let atom = &self.atoms[p.atom_idx];
+                let sky = column_light(world, p.wx, p.wy);
+                let lit = effective_photo_light(
+                    &canopy,
+                    p.wx,
+                    p.wy,
+                    sky,
+                    p.atom_idx as u32,
+                    atom.photosystem_count(),
+                    &atom.genome,
+                );
+                ModuleId::photosystem_rgb_for_light(lit)
+            } else {
+                p.mid.rgb()
+            };
+            out.push((p.wx, p.wy, rgb));
         }
         for corpse in &self.corpses {
             for &(dx, dy, mid) in &corpse.body {
+                let rgb = if mid == ModuleId::Photosystem {
+                    // Corpses keep the shaded leaf tone (no harvest).
+                    PHOTO_RGB_SHADED
+                } else {
+                    mid.rgb()
+                };
                 out.push((
                     corpse.gx + dx as i32,
                     corpse.gy + dy as i32,
-                    corpse_rgb(mid.rgb()),
+                    corpse_rgb(rgb),
                 ));
             }
         }
@@ -1271,28 +1314,29 @@ pub fn resolve_organism_draw_cells(
     for (atom_idx, atom) in atoms.iter().enumerate() {
         for &(dx, dy, mid) in &atom.body {
             let (wx0, wy0) = frond_draw_cell(world, atom, dx, dy, mid, tick, wind_vx);
-            let wx = world.wrap_x(wx0);
+            // Keep unwrapped draw X for the renderer (it paints wrap copies).
+            // World queries use wrap_x.
+            let wx = wx0;
             let mut wy = wy0;
+            let qx = world.wrap_x(wx);
             if mid == ModuleId::Photosystem {
                 for _ in 0..24 {
-                    let solid = match world.get_cell(wx, wy) {
+                    // Missing world cells (tests / unloaded) count as free air.
+                    let blocked = match world.get_cell(qx, wy) {
                         Some(c) => c.material != MaterialId::Air,
-                        None => true,
+                        None => false,
                     };
-                    if !solid && !occupied.contains(&(wx, wy)) {
+                    if !blocked && !occupied.contains(&(wx, wy)) {
                         break;
                     }
                     wy += 1;
                 }
-            } else {
-                // Non-leaf modules still claim their cell so leaves pile above.
-                let solid = match world.get_cell(wx, wy) {
-                    Some(c) => c.material != MaterialId::Air,
-                    None => true,
-                };
-                if solid {
-                    wy = clear_solid_y(world, wx, wy);
-                }
+            } else if matches!(
+                world.get_cell(qx, wy),
+                Some(c) if c.material != MaterialId::Air
+            ) {
+                // Lift rigid modules out of solid when the world is loaded.
+                wy = clear_solid_y(world, qx, wy);
             }
             occupied.insert((wx, wy));
             out.push(PosedModule {
@@ -1472,7 +1516,7 @@ fn clear_solid_y(world: &World, gx: i32, preferred_y: i32) -> i32 {
     for _ in 0..64 {
         match world.get_cell(gx, y) {
             Some(c) if c.material != MaterialId::Air => y += 1,
-            None => y += 1,
+            // Missing / unloaded cells: leave the pose alone.
             _ => break,
         }
     }
@@ -1868,6 +1912,60 @@ mod tests {
     }
 
     #[test]
+    fn photosystem_tint_darkens_under_shade() {
+        assert_eq!(
+            ModuleId::photosystem_rgb_for_light(1.0),
+            PHOTO_RGB_ACTIVE
+        );
+        assert_eq!(
+            ModuleId::photosystem_rgb_for_light(0.0),
+            PHOTO_RGB_SHADED
+        );
+        let mid = ModuleId::photosystem_rgb_for_light(0.35);
+        assert!(
+            mid.1 < PHOTO_RGB_ACTIVE.1 && mid.1 > PHOTO_RGB_SHADED.1,
+            "mid light should sit between active and shaded ({mid:?})"
+        );
+
+        let w = moist_sand_plot();
+        let mut open_g = Genome::default();
+        open_g.leaf_absorb = 0.2;
+        let mut thug_g = Genome::default();
+        thug_g.leaf_absorb = 0.95;
+        let short = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut tall = short.clone();
+        tall.push((0, 3, ModuleId::Stem));
+        tall.push((0, 4, ModuleId::Stem));
+        tall.push((0, 5, ModuleId::Stem));
+        tall.push((0, 6, ModuleId::Photosystem));
+
+        let mut alone = OrganismStore::new();
+        assert!(alone.spawn_blueprint(&w, 3, 2, short.clone(), 40.0, open_g));
+        let mut shaded = OrganismStore::new();
+        assert!(shaded.spawn_blueprint(&w, 3, 2, short, 40.0, open_g));
+        assert!(shaded.spawn_blueprint(&w, 4, 2, tall, 40.0, thug_g));
+
+        let alone_g = alone
+            .draw_list(&w, 0, 0.0)
+            .into_iter()
+            .filter(|(_, _, (r, g, b))| *g > *r && *g > *b)
+            .map(|(_, _, rgb)| rgb.1)
+            .max()
+            .unwrap();
+        let shaded_g = shaded
+            .draw_list(&w, 0, 0.0)
+            .into_iter()
+            .filter(|&(x, _, (r, g, b))| x == 3 && g > r && g > b)
+            .map(|(_, _, rgb)| rgb.1)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            shaded_g < alone_g,
+            "shaded plant greens should draw darker (shaded g={shaded_g}, alone g={alone_g})"
+        );
+    }
+
+    #[test]
     fn atom_draw_list_is_black_and_green_pixels() {
         let mut store = OrganismStore::new();
         store.atoms.push(Atom::new(4, 5, 50.0));
@@ -1875,7 +1973,16 @@ mod tests {
         let list = store.draw_list(&w, 0, 0.0);
         assert_eq!(list.len(), 2);
         assert!(list.contains(&(4, 5, (0, 0, 0))));
-        assert!(list.contains(&(5, 5, (0x2E, 0xCC, 0x40))));
+        let green = list
+            .iter()
+            .find(|&&(x, y, _)| x == 5 && y == 5)
+            .map(|&(_, _, rgb)| rgb)
+            .expect("photosystem pixel");
+        // Open-sky leaf should sit near the active palette green.
+        assert!(
+            green.1 >= 0xA0 && green.2 >= 0x30,
+            "lit photosystem should read bright green, got {green:?}"
+        );
     }
 
     #[test]
@@ -2044,11 +2151,16 @@ mod tests {
         store.atoms.push(Atom::from_body(5, 2, 40.0, body.clone()));
         store.atoms.push(Atom::from_body(6, 2, 40.0, body));
         let list = store.draw_list(&w, 0, 0.0);
+        let n_photo: usize = store.atoms.iter().map(|a| a.photosystem_count()).sum();
         let mut greens: Vec<(i32, i32)> = list
             .iter()
-            .filter(|(_, _, rgb)| *rgb == ModuleId::Photosystem.rgb())
+            .filter(|(_, _, (r, g, b))| {
+                // Any photosystem tint (active‥shaded), not roots/stems.
+                *g > *r && *g > *b && *g >= 0x50
+            })
             .map(|&(x, y, _)| (x, y))
             .collect();
+        assert_eq!(greens.len(), n_photo, "all photosystems should draw");
         let before = greens.len();
         greens.sort_unstable();
         greens.dedup();

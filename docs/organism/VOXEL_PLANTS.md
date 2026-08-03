@@ -71,7 +71,9 @@ cost/benefit. E36/E37 spirit.
   instead of one overwritten line). Woody `Stem` stays upright on land.
 - **Light competition:** equal-height neighbours shade each other (dense
   meadows). Canopy index + photo sample use posed draw cells, so flopped
-  piles cast and receive shade where the greens sit.
+  piles cast and receive shade where the greens sit. Photosystem pixels
+  tint bright `#2ECC40` → dim olive by effective light (easy to read which
+  leaves are working).
 
 ### D3 — Vegetative sprout *(landed)*
 
