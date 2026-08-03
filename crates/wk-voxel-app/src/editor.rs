@@ -154,8 +154,36 @@ impl CreatureEditor {
         if !self.spawn_picker && is_mouse_button_down(MouseButton::Left) {
             if let Some((cx, cy)) = self.mouse_to_cell() {
                 self.apply_tool(cx, cy);
+            } else if let Some(brush) = self.mouse_to_palette_brush() {
+                self.brush = brush;
+                self.tool = EditorTool::Paint;
             }
         }
+    }
+
+    /// Palette swatches drawn to the right of the canvas (same layout as [`draw`]).
+    fn mouse_to_palette_brush(&self) -> Option<ModuleId> {
+        let (mx, my) = mouse_position();
+        let (ox, oy) = CANVAS_ORIGIN;
+        let cw = self.blueprint.canvas_w as f32 * CELL_PX;
+        let px = ox + cw + 24.0;
+        let sy = oy + 160.0;
+        let brushes = [
+            ModuleId::Nucleus,
+            ModuleId::Photosystem,
+            ModuleId::Root,
+            ModuleId::Stem,
+            ModuleId::Digest,
+            ModuleId::Hypha,
+            ModuleId::ReproSpore,
+        ];
+        for (i, mid) in brushes.iter().enumerate() {
+            let sx = px + i as f32 * 36.0;
+            if mx >= sx && mx < sx + 28.0 && my >= sy && my < sy + 28.0 {
+                return Some(*mid);
+            }
+        }
+        None
     }
 
     fn mouse_to_cell(&self) -> Option<(i16, i16)> {

@@ -444,13 +444,18 @@ impl OrganismStore {
     ) -> Vec<(i32, i32, (u8, u8, u8))> {
         let posed = resolve_organism_draw_cells(world, &self.atoms, tick, wind_vx);
         let canopy = build_canopy_index_posed(&self.atoms, &posed);
+        // Cache transmit per posed cell — many leaves share a flop pile cell.
+        let mut transmit_cache: std::collections::HashMap<(i32, i32), f32> =
+            std::collections::HashMap::with_capacity(posed.len());
         let mut out = Vec::with_capacity(posed.len() + self.corpses.len() * 2);
         for p in &posed {
             let rgb = if p.mid == ModuleId::Photosystem {
                 // Raw exposure (sky × column Beer–Lambert), land and water —
                 // not the harvest remap, which understory genes wash toward green.
                 let sky = column_light(world, p.wx, p.wy);
-                let transmit = shade_transmit(&canopy, p.wx, p.wy);
+                let transmit = *transmit_cache
+                    .entry((p.wx, p.wy))
+                    .or_insert_with(|| shade_transmit(&canopy, p.wx, p.wy));
                 let exposure = (sky * transmit).clamp(0.0, 1.0);
                 ModuleId::photosystem_rgb_for_light(exposure)
             } else {

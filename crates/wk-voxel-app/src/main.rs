@@ -660,6 +660,8 @@ async fn main() {
             if opening {
                 settings.open = false;
                 terrain.open = false;
+                // F4 list panel overlaps the paint canvas — close it.
+                creature_list.open = false;
                 paused = true;
             } else {
                 paused = editor.was_paused;
@@ -1350,26 +1352,31 @@ async fn main() {
             }
         }
 
-        // Set A organisms: 1×1 module pixels (Nucleus black, Photosystem
-        // green) — same palette as column-GVSE, always drawn when present.
-        for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list(
-            &scene.world,
-            scene.world.tick,
-            scene.wind.climate_vx,
-        ) {
-            for &x_copy in x_copies {
-                let sx = origin_x + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
-                let sy = origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;
-                if sx + cell_px < 0.0 || sx > sw || sy < 0.0 || sy - cell_px > sh {
-                    continue;
+        // Organisms: skip the shaded draw while the F2 canvas covers the
+        // world (pose + Beer–Lambert is wasted under the overlay and was
+        // starving editor input on dense meadows). Spawn-picker keeps the
+        // world visible, so draw then.
+        let editor_covers_world = editor.open && !editor.spawn_picker;
+        if !editor_covers_world {
+            for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list(
+                &scene.world,
+                scene.world.tick,
+                scene.wind.climate_vx,
+            ) {
+                for &x_copy in x_copies {
+                    let sx = origin_x + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
+                    let sy = origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw || sy < 0.0 || sy - cell_px > sh {
+                        continue;
+                    }
+                    draw_rectangle(
+                        sx,
+                        sy - cell_px,
+                        cell_px,
+                        cell_px,
+                        Color::from_rgba(r, g, b, 255),
+                    );
                 }
-                draw_rectangle(
-                    sx,
-                    sy - cell_px,
-                    cell_px,
-                    cell_px,
-                    Color::from_rgba(r, g, b, 255),
-                );
             }
         }
 

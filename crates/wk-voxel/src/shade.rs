@@ -9,8 +9,12 @@
 //!
 //! Cast / sample use *posed* draw cells (flop + pile) so dry mats
 //! stacked on a beach shade the greens underneath.
+//!
+//! Implementation stores per-column `BTreeMap`s so `shade_transmit` only
+//! walks occupied foliage rows above the sample (not every empty Y up to
+//! a global max — that froze the frame loop / F2 editor on dense worlds).
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use crate::blueprint::Genome;
 use crate::organism::{Atom, ModuleId};
@@ -34,23 +38,25 @@ pub const LATERAL_SHADE_SCALE: f32 = 0.45;
 /// Same-height lateral peer carpet factor (meadows at equal tip height).
 pub const PEER_LATERAL_SCALE: f32 = 0.55;
 
-/// Sparse per-cell foliage absorption (`0..MAX_CELL_ABSORB`).
+/// Sparse per-column foliage absorption (`0..MAX_CELL_ABSORB`).
 #[derive(Debug, Clone, Default)]
 pub struct CanopyIndex {
-    cells: HashMap<(i32, i32), f32>,
-    /// Highest foliage Y recorded (scan bound).
-    max_y: i32,
+    /// `wx → (wy → absorb)`.
+    cols: HashMap<i32, BTreeMap<i32, f32>>,
 }
 
 impl CanopyIndex {
     #[inline]
     pub fn is_empty(&self) -> bool {
-        self.cells.is_empty()
+        self.cols.is_empty()
     }
 
     #[inline]
     pub fn absorb_at(&self, x: i32, y: i32) -> f32 {
-        self.cells.get(&(x, y)).copied().unwrap_or(0.0)
+        self.cols
+            .get(&x)
+            .and_then(|c| c.get(&y).copied())
+            .unwrap_or(0.0)
     }
 
     fn record(&mut self, wx: i32, wy: i32, absorb: f32) {
@@ -58,9 +64,9 @@ impl CanopyIndex {
         if a <= 0.0 {
             return;
         }
-        let e = self.cells.entry((wx, wy)).or_insert(0.0);
+        let col = self.cols.entry(wx).or_default();
+        let e = col.entry(wy).or_insert(0.0);
         *e = (*e + a).min(MAX_CELL_ABSORB);
-        self.max_y = self.max_y.max(wy);
     }
 }
 
@@ -130,25 +136,33 @@ pub fn shade_transmit(index: &CanopyIndex, wx: i32, sample_y: i32) -> f32 {
     if index.is_empty() {
         return 1.0;
     }
+    // Only occupied foliage rows above the sample (plus lateral columns).
+    let mut ys: BTreeSet<i32> = BTreeSet::new();
+    for dx in -SHADE_RADIUS..=SHADE_RADIUS {
+        let Some(col) = index.cols.get(&(wx + dx)) else {
+            continue;
+        };
+        for &y in col.range((sample_y + 1)..).map(|(y, _)| y) {
+            ys.insert(y);
+        }
+    }
+
     let mut transmit = 1.0_f32;
-    let y_hi = index.max_y;
-    if y_hi > sample_y {
-        for y in (sample_y + 1)..=y_hi {
-            let mut optical = index.absorb_at(wx, y);
-            if SHADE_RADIUS > 0 {
-                let mut side = 0.0_f32;
-                for dx in -SHADE_RADIUS..=SHADE_RADIUS {
-                    if dx == 0 {
-                        continue;
-                    }
-                    side += index.absorb_at(wx + dx, y) * lateral_weight(dx);
+    for y in ys {
+        let mut optical = index.absorb_at(wx, y);
+        if SHADE_RADIUS > 0 {
+            let mut side = 0.0_f32;
+            for dx in -SHADE_RADIUS..=SHADE_RADIUS {
+                if dx == 0 {
+                    continue;
                 }
-                optical += LATERAL_SHADE_SCALE * side;
+                side += index.absorb_at(wx + dx, y) * lateral_weight(dx);
             }
-            optical = optical.min(MAX_CELL_ABSORB);
-            if optical > 0.0 {
-                transmit *= (1.0 - optical).clamp(0.0, 1.0);
-            }
+            optical += LATERAL_SHADE_SCALE * side;
+        }
+        optical = optical.min(MAX_CELL_ABSORB);
+        if optical > 0.0 {
+            transmit *= (1.0 - optical).clamp(0.0, 1.0);
         }
     }
     // Equal-height meadow: neighbours at the same Y still steal light.
@@ -401,6 +415,25 @@ mod tests {
         // Tip ~1, mid ~(1-a), low ~(1-a)^2 → sum < 3
         assert!(sum < 2.6, "stacked leaves should self-shade (sum={sum})");
         assert!(sum > 1.5, "still some harvest (sum={sum})");
+    }
+
+    #[test]
+    fn sparse_tall_canopy_transmit_stays_cheap() {
+        // One leaf at y=5 and one tip at y=500 — must not scan 495 empty rows.
+        let mut index = CanopyIndex::default();
+        index.record(0, 5, 0.4);
+        index.record(0, 500, 0.4);
+        let t0 = std::time::Instant::now();
+        let mut acc = 0.0f32;
+        for _ in 0..20_000 {
+            acc += shade_transmit(&index, 0, 5);
+        }
+        let ms = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(acc > 0.0);
+        assert!(
+            ms < 500.0,
+            "occupied-row scan should stay cheap (got {ms:.1}ms for 20k queries)"
+        );
     }
 
     #[test]
