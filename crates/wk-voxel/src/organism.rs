@@ -1235,9 +1235,15 @@ fn equilibrium_y(top: i32, bed: i32, bias: f32) -> f32 {
     float_y + (bed_f - float_y) * bias.clamp(0.0, 1.0)
 }
 
+/// Horizontal drive below which submerged fronds hang still (no idle wave).
+pub const FROND_STILL_WIND: f32 = 0.08;
+
 /// Soft frond draw pose: Photosystem / Stem sway underwater and lay along
 /// the free surface when taller than the water column. Roots / Nucleus /
 /// Digest stay rigid. Cosmetic — body cells for physics stay upright.
+///
+/// Submerged sway only when `|wind_vx| ≥ [`FROND_STILL_WIND`]` — still
+/// water keeps the ribbon upright (no tick-driven idle motion).
 pub fn frond_draw_cell(
     world: &World,
     atom: &Atom,
@@ -1256,20 +1262,28 @@ pub fn frond_draw_cell(
     let Some((top, _bed)) = wet_band(world, atom.gx, atom.gy) else {
         return (base_x, base_y);
     };
+    let drive = wind_vx.abs();
     let dir = if wind_vx >= 0.0 { 1 } else { -1 };
     if base_y > top {
-        // Above free surface: flop onto the waterline downwind.
+        // Above free surface: flop onto the waterline (soft ribbon).
         let overhang = base_y - top;
-        (atom.gx + dx as i32 + dir * overhang, top)
+        let lean_dir = if drive < FROND_STILL_WIND { 1 } else { dir };
+        (atom.gx + dx as i32 + lean_dir * overhang, top)
+    } else if drive < FROND_STILL_WIND {
+        // Still water — hang straight, no idle sine wave.
+        (base_x, base_y)
     } else {
-        // Submerged: gentle wave; tip amps more than the holdfast.
-        let tip_w = (dy.max(0) as f32) * 0.35;
-        let phase = tick as f32 * 0.11
+        // Moving water / wind: lean with the drive and a small ripple.
+        let tip_w = (dy.max(0) as f32) * 0.30;
+        let phase = tick as f32 * (0.04 + drive * 0.10)
             + atom.gx as f32 * 0.19
             + dy as f32 * 0.85;
-        let amp = (0.25 + wind_vx.abs() * 0.55 + tip_w).clamp(0.2, 1.6);
+        let amp = (drive * 0.85 * (0.6 + tip_w)).clamp(0.0, 1.4);
         let sway = (phase.sin() * amp).round() as i32;
-        (base_x + sway, base_y)
+        let lean = (dir as f32 * drive * (0.4 + tip_w * 0.5))
+            .round()
+            .clamp(-2.0, 2.0) as i32;
+        (base_x + lean + sway, base_y)
     }
 }
 
@@ -1670,7 +1684,7 @@ mod tests {
             .max()
             .unwrap();
         let tip_world_y = atom.gy + tip_dy as i32;
-        let (top, _) = wet_band(&w, 4, 2).expect("wet column");
+        let (top, _) = wet_band(&w, 4, 4).expect("wet column");
         assert!(
             tip_world_y > top,
             "fixture tip should clear the free surface (tip={tip_world_y} top={top})"
@@ -1684,6 +1698,32 @@ mod tests {
         let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, 0, 0.5);
         assert_eq!(wy, top, "tip draws on the waterline");
         assert!(wx > atom.gx, "positive wind lays the tip downwind");
+    }
+
+    #[test]
+    fn submerged_frond_still_when_water_is_calm() {
+        let w = wet_column();
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let atom = Atom::from_body(4, 2, 40.0, body);
+        let (dx, dy, mid) = atom
+            .body
+            .iter()
+            .copied()
+            .find(|(_, _, m)| *m == ModuleId::Photosystem)
+            .unwrap();
+        let base_x = atom.gx + dx as i32;
+        let base_y = atom.gy + dy as i32;
+        for tick in [0u64, 17, 99, 400] {
+            let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, tick, 0.05);
+            assert_eq!(
+                (wx, wy),
+                (base_x, base_y),
+                "calm water must not idle-wave (tick={tick})"
+            );
+        }
+        // Stronger drive may lean / ripple off the upright seat.
+        let (wx, _) = frond_draw_cell(&w, &atom, dx, dy, mid, 40, 0.35);
+        assert_ne!(wx, base_x, "moving water should bend the frond");
     }
 
     #[test]
