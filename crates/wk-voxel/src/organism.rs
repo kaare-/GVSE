@@ -30,12 +30,12 @@ use crate::fungi::{
 use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::plant::{
-    apply_genome, collect_live_root_world_cells, collect_trunk_world_cells, drink_roots,
+    apply_genome, collect_live_root_world_cells, collect_trunk_world_cells, drink_plant,
     drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, find_surface_air_slot,
-    is_anchored, is_land_plant, leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac,
-    sync_root_storage, try_grow_plant, try_plant_wind_spore, try_vegetative_sprout, DroughtBand,
-    PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN,
-    PLANT_UPKEEP_MULT,
+    is_anchored, is_land_plant, leave_dead_roots_in_place, leaves_bathing, pin_plant_pose,
+    plant_moisture_frac, sync_root_storage, try_grow_plant, try_plant_wind_spore,
+    try_vegetative_sprout, DroughtBand, PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP,
+    DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
 };
 use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
 
@@ -166,7 +166,7 @@ pub struct Atom {
     /// Consecutive ticks in drought dormancy (land plants). Resets when moist.
     #[serde(default)]
     pub drought_ticks: u32,
-    /// Fractional pore-sip accumulator (land plants) — see `drink_roots`.
+    /// Fractional water-sip accumulator (roots + bathing leaves).
     #[serde(default)]
     pub sip_acc: f32,
     /// 0 = floater, 1 = sinker (column `Genome::buoyancy_bias`).
@@ -403,11 +403,21 @@ impl OrganismStore {
     }
 
     /// Draw list: world cell + frozen module RGB (living + grey corpses).
-    pub fn draw_list(&self) -> Vec<(i32, i32, (u8, u8, u8))> {
+    ///
+    /// Soft fronds (Photosystem / Stem) sway under water and lay along the
+    /// free surface when taller than the water column. Pass `wind_vx` for
+    /// lean direction; `tick` phases the underwater wave.
+    pub fn draw_list(
+        &self,
+        world: &World,
+        tick: u64,
+        wind_vx: f32,
+    ) -> Vec<(i32, i32, (u8, u8, u8))> {
         let mut out = Vec::with_capacity((self.atoms.len() + self.corpses.len()) * 2);
         for atom in &self.atoms {
             for &(dx, dy, mid) in &atom.body {
-                out.push((atom.gx + dx as i32, atom.gy + dy as i32, mid.rgb()));
+                let (wx, wy) = frond_draw_cell(world, atom, dx, dy, mid, tick, wind_vx);
+                out.push((wx, wy, mid.rgb()));
             }
         }
         for corpse in &self.corpses {
@@ -1019,7 +1029,9 @@ fn step_land_plant(
     }
     // Roots bank surplus above the spawn tank (starch analogy).
     sync_root_storage(atom);
-    let moist = root_moisture_frac(world, atom);
+    // Pore moisture under roots, or free standing water on leaves.
+    let moist = plant_moisture_frac(world, atom);
+    let bathing = leaves_bathing(world, atom);
     let drought = drought_band(moist);
     let dormant = matches!(drought, DroughtBand::Dormant);
     if dormant {
@@ -1049,7 +1061,7 @@ fn step_land_plant(
         };
     }
 
-    let (drink_e, sat_taken, drink_at) = drink_roots(world, atom);
+    let (drink_e, sat_taken, drink_at) = drink_plant(world, atom);
     // Sky column light × day, then neighbour canopy + gene remap (D2).
     // Water column attenuates strongly with depth — deep seats go dark.
     let sample_y = canopy_top_y(atom);
@@ -1080,8 +1092,16 @@ fn step_land_plant(
     }
     // Surplus → tissue. Submerged + dim light: race toward brighter water.
     // Stemmed plants urge olive upward; stemless seaweed elongates the
-    // Photosystem ribbon instead (no trunk invent).
+    // Photosystem ribbon instead (no trunk invent). When leaves bathe in
+    // standing water, root urge collapses — holdfast is enough.
     let genome_save = atom.genome;
+    if bathing {
+        atom.genome.alloc_root = atom.genome.alloc_root.min(0.06);
+        if crate::plant::stem_count(atom) == 0 && n_photo > 0 {
+            atom.genome.alloc_leaf = (atom.genome.alloc_leaf + 0.20).min(1.0);
+            atom.genome.alloc_stem = 0.0;
+        }
+    }
     if submerged && light < SUBMERGED_STEM_URGE_LIGHT {
         if crate::plant::stem_count(atom) > 0 {
             atom.genome.alloc_stem = (atom.genome.alloc_stem + 0.40).min(1.0);
@@ -1215,8 +1235,47 @@ fn equilibrium_y(top: i32, bed: i32, bias: f32) -> f32 {
     float_y + (bed_f - float_y) * bias.clamp(0.0, 1.0)
 }
 
+/// Soft frond draw pose: Photosystem / Stem sway underwater and lay along
+/// the free surface when taller than the water column. Roots / Nucleus /
+/// Digest stay rigid. Cosmetic — body cells for physics stay upright.
+pub fn frond_draw_cell(
+    world: &World,
+    atom: &Atom,
+    dx: i16,
+    dy: i16,
+    mid: ModuleId,
+    tick: u64,
+    wind_vx: f32,
+) -> (i32, i32) {
+    let base_x = atom.gx + dx as i32;
+    let base_y = atom.gy + dy as i32;
+    let floppy = matches!(mid, ModuleId::Photosystem | ModuleId::Stem);
+    if !floppy {
+        return (base_x, base_y);
+    }
+    let Some((top, _bed)) = wet_band(world, atom.gx, atom.gy) else {
+        return (base_x, base_y);
+    };
+    let dir = if wind_vx >= 0.0 { 1 } else { -1 };
+    if base_y > top {
+        // Above free surface: flop onto the waterline downwind.
+        let overhang = base_y - top;
+        (atom.gx + dx as i32 + dir * overhang, top)
+    } else {
+        // Submerged: gentle wave; tip amps more than the holdfast.
+        let tip_w = (dy.max(0) as f32) * 0.35;
+        let phase = tick as f32 * 0.11
+            + atom.gx as f32 * 0.19
+            + dy as f32 * 0.85;
+        let amp = (0.25 + wind_vx.abs() * 0.55 + tip_w).clamp(0.2, 1.6);
+        let sway = (phase.sin() * amp).round() as i32;
+        (base_x + sway, base_y)
+    }
+}
+
 /// Contiguous wet-Air band containing `hint_y` (or nearest wet cell).
-fn wet_band(world: &World, gx: i32, hint_y: i32) -> Option<(i32, i32)> {
+/// Returns `(top, bed)` free-surface and bed Y.
+pub fn wet_band(world: &World, gx: i32, hint_y: i32) -> Option<(i32, i32)> {
     let start = if is_wet_air(world, gx, hint_y) {
         hint_y
     } else {
@@ -1590,10 +1649,41 @@ mod tests {
     fn atom_draw_list_is_black_and_green_pixels() {
         let mut store = OrganismStore::new();
         store.atoms.push(Atom::new(4, 5, 50.0));
-        let list = store.draw_list();
+        let w = World::new(3);
+        let list = store.draw_list(&w, 0, 0.0);
         assert_eq!(list.len(), 2);
         assert!(list.contains(&(4, 5, (0, 0, 0))));
         assert!(list.contains(&(5, 5, (0x2E, 0xCC, 0x40))));
+    }
+
+    #[test]
+    fn frond_lays_along_free_surface_when_taller_than_water() {
+        let w = wet_column();
+        // wet_column free surface ~y=7; seat high so the ribbon tip clears it.
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let atom = Atom::from_body(4, 4, 40.0, body);
+        let tip_dy = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|(_, y, _)| *y)
+            .max()
+            .unwrap();
+        let tip_world_y = atom.gy + tip_dy as i32;
+        let (top, _) = wet_band(&w, 4, 2).expect("wet column");
+        assert!(
+            tip_world_y > top,
+            "fixture tip should clear the free surface (tip={tip_world_y} top={top})"
+        );
+        let (dx, dy, mid) = atom
+            .body
+            .iter()
+            .copied()
+            .find(|(_, y, m)| *m == ModuleId::Photosystem && *y == tip_dy)
+            .unwrap();
+        let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, 0, 0.5);
+        assert_eq!(wy, top, "tip draws on the waterline");
+        assert!(wx > atom.gx, "positive wind lays the tip downwind");
     }
 
     #[test]
@@ -1710,7 +1800,7 @@ mod tests {
             "litter waits until dissolve, not instant death"
         );
         // Grey corpse still drawable.
-        let draw = store.draw_list();
+        let draw = store.draw_list(&w, 0, 0.0);
         assert!(!draw.is_empty());
         let (_, _, rgb) = draw[0];
         assert!(rgb.0 <= 120 && rgb.2 <= 70, "corpse should be desaturated brown-grey");
@@ -3295,7 +3385,12 @@ mod tests {
         }
         a.energy = 80.0;
         let roots0 = crate::plant::root_count(a);
-        assert!(crate::plant::roots_past_soft_budget_for(a, DroughtBand::Hydrated, &crate::plant::PlantGrowthCaps::default()));
+        assert!(crate::plant::roots_past_soft_budget_for(
+            a,
+            DroughtBand::Hydrated,
+            &crate::plant::PlantGrowthCaps::default(),
+            false,
+        ));
         for t in 0..200 {
             store.step(&mut w, t);
             if let Some(p) = store.atoms.first_mut() {
@@ -3304,8 +3399,12 @@ mod tests {
         }
         assert!(!store.is_empty());
         let roots1 = crate::plant::root_count(&store.atoms[0]);
-        let budget_now =
-            crate::plant::useful_root_budget_for(&store.atoms[0], DroughtBand::Hydrated, &crate::plant::PlantGrowthCaps::default());
+        let budget_now = crate::plant::useful_root_budget_for(
+            &store.atoms[0],
+            DroughtBand::Hydrated,
+            &crate::plant::PlantGrowthCaps::default(),
+            false,
+        );
         assert!(
             roots1 <= budget_now.max(roots0) + 1,
             "hydrated plant should stay near soft budget (had {roots0}, now {roots1}, budget={budget_now})"
@@ -3325,8 +3424,18 @@ mod tests {
             Genome::default(),
         ));
         let a = &store.atoms[0];
-        let hydrated = crate::plant::useful_root_budget_for(a, DroughtBand::Hydrated, &crate::plant::PlantGrowthCaps::default());
-        let stressed = crate::plant::useful_root_budget_for(a, DroughtBand::Stressed, &crate::plant::PlantGrowthCaps::default());
+        let hydrated = crate::plant::useful_root_budget_for(
+            a,
+            DroughtBand::Hydrated,
+            &crate::plant::PlantGrowthCaps::default(),
+            false,
+        );
+        let stressed = crate::plant::useful_root_budget_for(
+            a,
+            DroughtBand::Stressed,
+            &crate::plant::PlantGrowthCaps::default(),
+            false,
+        );
         assert!(
             stressed > hydrated,
             "stress should allow deeper boring (hydrated={hydrated} stressed={stressed})"

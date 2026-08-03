@@ -3,8 +3,9 @@
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
 //! Minimal Set D land plant (docs/organism/PLANTS.md § C + D1–D4):
-//! Root + Stem + Photosystem on a fixed crown. Drinks pore `sat`,
-//! elongates by `StemVsLeafVsRoot` / `RootDepthBias`. Shade race = D2.
+//! Root + Stem + Photosystem on a fixed crown. Roots drink pore `sat`;
+//! Photosystems in standing water drink free-column sat (shore leaves do
+//! not). Elongates by `StemVsLeafVsRoot` / `RootDepthBias`. Shade = D2.
 //! Vegetative sprouts = D3. Root starch tank + drought hibernate = D4.
 
 use std::collections::HashSet;
@@ -19,10 +20,14 @@ use crate::organism::{Atom, BodyModule, ModuleId};
 
 /// Energy from one sat unit drunk by roots.
 pub const ROOT_WATER_ENERGY: f32 = 0.08;
+/// Energy from one sat unit drunk by Photosystems in standing water.
+pub const LEAF_WATER_ENERGY: f32 = 0.07;
 /// Fractional sip progress per Root module per tick. Integer sat only
 /// leaves the cell when the accumulator crosses 1 — stops roots from
 /// flash-drying hills (column `ROOT_SIP_KG_PER_ROOT` spirit).
 pub const ROOT_SIP_FRAC_PER_ROOT: f32 = 0.025;
+/// Fractional sip progress per Photosystem in standing water per tick.
+pub const LEAF_SIP_FRAC_PER_PHOTO: f32 = 0.035;
 /// Hard cap on sat units removed in one drink event.
 pub const ROOT_SIP_MAX_SAT: u8 = 1;
 /// Soft stress drain while drying (Stressed band). Hibernate handles
@@ -169,9 +174,21 @@ pub fn useful_root_budget(atom: &Atom, caps: &PlantGrowthCaps) -> usize {
 }
 
 /// Drought-aware soft budget — stress lifts the cap so plants keep digging.
-pub fn useful_root_budget_for(atom: &Atom, drought: DroughtBand, caps: &PlantGrowthCaps) -> usize {
-    let base = useful_root_budget(atom, caps);
+///
+/// When Photosystems sit in **standing water** (`leaf_bathing`), one holdfast
+/// root is enough — leaves drink the free water. Dry-land leaves never bathe,
+/// so the full shoot-driven budget still applies on shore.
+pub fn useful_root_budget_for(
+    atom: &Atom,
+    drought: DroughtBand,
+    caps: &PlantGrowthCaps,
+    leaf_bathing: bool,
+) -> usize {
     let hard = caps.max_roots.max(1);
+    if leaf_bathing {
+        return 1.min(hard);
+    }
+    let base = useful_root_budget(atom, caps);
     match drought {
         DroughtBand::Hydrated | DroughtBand::Dormant => base,
         DroughtBand::Stressed => {
@@ -185,8 +202,9 @@ pub fn roots_past_soft_budget_for(
     atom: &Atom,
     drought: DroughtBand,
     caps: &PlantGrowthCaps,
+    leaf_bathing: bool,
 ) -> bool {
-    root_count(atom) >= useful_root_budget_for(atom, drought, caps)
+    root_count(atom) >= useful_root_budget_for(atom, drought, caps, leaf_bathing)
 }
 
 /// Effective energy tank from painted roots (starch / reserve analogy).
@@ -260,6 +278,39 @@ pub fn root_moisture_frac(world: &World, atom: &Atom) -> f32 {
         best = best.max(cell_moisture_frac(world, wx, wy - 1));
     }
     best
+}
+
+/// Best standing-water fill at Photosystem cells (0..1).
+///
+/// Dry-land Air / thin films return 0 — only [`is_standing_water`] counts,
+/// so shore leaves do not drink or count as bathed.
+pub fn leaf_bathing_frac(world: &World, atom: &Atom) -> f32 {
+    use crate::rules::is_standing_water;
+    let mut best = 0.0f32;
+    for &(dx, dy, mid) in &atom.body {
+        if mid != ModuleId::Photosystem {
+            continue;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        if !is_standing_water(world, wx, wy) {
+            continue;
+        }
+        if let Some(c) = world.get_cell(wx, wy) {
+            best = best.max(c.sat.0 as f32 / 255.0);
+        }
+    }
+    best
+}
+
+/// True when any Photosystem sits in standing water (leaf can drink).
+pub fn leaves_bathing(world: &World, atom: &Atom) -> bool {
+    leaf_bathing_frac(world, atom) >= 0.12
+}
+
+/// Plant water status: pore moisture under roots, or free water on leaves.
+pub fn plant_moisture_frac(world: &World, atom: &Atom) -> f32 {
+    root_moisture_frac(world, atom).max(leaf_bathing_frac(world, atom))
 }
 
 fn cell_moisture_frac(world: &World, gx: i32, gy: i32) -> f32 {
@@ -341,6 +392,53 @@ pub fn drink_roots(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32))
     (energy, taken as u32, deposit_at)
 }
 
+/// Photosystems in **standing water** sip free-column sat → energy.
+///
+/// Dry Air / non-standing films yield nothing — land leaves do not drink.
+/// Prefer this before root pore-sips when the frond is bathed.
+pub fn drink_leaves(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32)) {
+    use crate::rules::is_standing_water;
+    let n_photo = atom.photosystem_count() as f32;
+    if n_photo < 1.0 {
+        return (0.0, 0, (atom.gx, atom.gy));
+    }
+    atom.sip_acc = (atom.sip_acc + n_photo * LEAF_SIP_FRAC_PER_PHOTO).min(2.5);
+    let budget = atom.sip_acc.floor() as u8;
+    if budget == 0 {
+        return (0.0, 0, (atom.gx, atom.gy));
+    }
+    let want = budget.min(ROOT_SIP_MAX_SAT);
+    let mut energy = 0.0f32;
+    let mut taken = 0u8;
+    let mut deposit_at = (atom.gx, atom.gy);
+    for &(dx, dy, mid) in &atom.body {
+        if mid != ModuleId::Photosystem || taken >= want {
+            continue;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        if !is_standing_water(world, wx, wy) {
+            continue;
+        }
+        if let Some(n) = sip_standing_air(world, wx, wy, want - taken) {
+            energy += LEAF_WATER_ENERGY * n as f32;
+            taken += n;
+            deposit_at = (wx, wy);
+        }
+    }
+    atom.sip_acc = (atom.sip_acc - taken as f32).max(0.0);
+    (energy, taken as u32, deposit_at)
+}
+
+/// Roots + bathing leaves. Leaves try first so submerged fronds hydrate
+/// without digging a root mat.
+pub fn drink_plant(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32)) {
+    let (e_l, s_l, at_l) = drink_leaves(world, atom);
+    let (e_r, s_r, at_r) = drink_roots(world, atom);
+    let at = if s_l > 0 { at_l } else { at_r };
+    (e_l + e_r, s_l + s_r, at)
+}
+
 fn sip_porous(world: &mut World, gx: i32, gy: i32, want: u8) -> Option<u8> {
     if want == 0 {
         return None;
@@ -352,6 +450,21 @@ fn sip_porous(world: &mut World, gx: i32, gy: i32, want: u8) -> Option<u8> {
     }
     let cap = water_capacity(cell.material);
     if cap == 0 || cell.sat.0 == 0 {
+        return None;
+    }
+    let take = want.min(cell.sat.0).min(ROOT_SIP_MAX_SAT);
+    let mut next = cell;
+    next.sat.0 = cell.sat.0 - take;
+    world.set_cell(gx, gy, next);
+    Some(take)
+}
+
+fn sip_standing_air(world: &mut World, gx: i32, gy: i32, want: u8) -> Option<u8> {
+    if want == 0 {
+        return None;
+    }
+    let cell = world.get_cell(gx, gy)?;
+    if cell.material != MaterialId::Air || cell.sat.0 == 0 {
         return None;
     }
     let take = want.min(cell.sat.0).min(ROOT_SIP_MAX_SAT);
@@ -679,15 +792,18 @@ pub fn try_elongate_root(
         return 0.0;
     }
 
-    let host_moist = root_moisture_frac(world, atom);
+    let bathing = leaves_bathing(world, atom);
+    let host_moist = plant_moisture_frac(world, atom);
     let drought = drought_band(host_moist);
-    let thirsty = matches!(drought, DroughtBand::Stressed);
+    let thirsty = matches!(drought, DroughtBand::Stressed) && !bathing;
     // Urge a lateral runner before sprouting (column rhizome bias).
-    let need_runner = !has_lateral_runner(atom)
+    // Bathed fronds don't need rhizome pressure — holdfast is enough.
+    let need_runner = !bathing
+        && !has_lateral_runner(atom)
         && n_roots >= LAND_SPROUT_MIN_ROOTS.saturating_sub(1);
     // Past the soft root:shoot budget, only grow roots when thirsty or
     // forcing a rhizome runner.
-    if roots_past_soft_budget_for(atom, drought, caps) && !need_runner && !thirsty {
+    if roots_past_soft_budget_for(atom, drought, caps, bathing) && !need_runner && !thirsty {
         return 0.0;
     }
 
@@ -1499,6 +1615,57 @@ mod tests {
         let mut body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
         body.push((1, 2, ModuleId::ReproSpore));
         body
+    }
+
+    #[test]
+    fn dry_land_leaves_do_not_drink() {
+        let mut w = moist_plot();
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut atom = Atom::from_body(4, 2, 40.0, body);
+        let sat0: u32 = (2..10)
+            .map(|y| w.get_cell(4, y).map(|c| c.sat.0 as u32).unwrap_or(0))
+            .sum();
+        for _ in 0..20 {
+            atom.sip_acc = 2.0;
+            let (_, taken, _) = drink_leaves(&mut w, &mut atom);
+            assert_eq!(taken, 0, "shore Air must not count as leaf drink");
+        }
+        let sat1: u32 = (2..10)
+            .map(|y| w.get_cell(4, y).map(|c| c.sat.0 as u32).unwrap_or(0))
+            .sum();
+        assert_eq!(sat0, sat1);
+        assert!(!leaves_bathing(&w, &atom));
+    }
+
+    #[test]
+    fn submerged_leaves_drink_standing_water_and_shrink_root_budget() {
+        let mut w = moist_plot();
+        // Flood the column so the seaweed ribbon sits in standing water.
+        for y in 2..=8 {
+            w.set_cell(4, y, Cell::water());
+        }
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        // Seat: root in sand (y=1), nucleus at y=2, leaves up through water.
+        let mut atom = Atom::from_body(4, 2, 40.0, body);
+        assert!(leaves_bathing(&w, &atom), "ribbon must bathe in standing water");
+        let budget = useful_root_budget_for(
+            &atom,
+            DroughtBand::Hydrated,
+            &PlantGrowthCaps::default(),
+            true,
+        );
+        assert_eq!(budget, 1, "bathed frond needs only a holdfast");
+        let sat0 = w.get_cell(4, 3).unwrap().sat.0;
+        let mut drank = 0u32;
+        for _ in 0..40 {
+            atom.sip_acc = 2.0;
+            let (e, taken, _) = drink_leaves(&mut w, &mut atom);
+            drank += taken;
+            assert!(e >= 0.0);
+        }
+        assert!(drank > 0, "leaves should sip standing water");
+        let sat1 = w.get_cell(4, 3).unwrap().sat.0;
+        assert!(sat1 < sat0 || drank > 0);
     }
 
     #[test]

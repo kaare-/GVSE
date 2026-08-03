@@ -1308,7 +1308,11 @@ async fn main() {
 
         // Set A organisms: 1×1 module pixels (Nucleus black, Photosystem
         // green) — same palette as column-GVSE, always drawn when present.
-        for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list() {
+        for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list(
+            &scene.world,
+            scene.world.tick,
+            scene.wind.climate_vx,
+        ) {
             for &x_copy in x_copies {
                 let sx = origin_x + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
                 let sy = origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;

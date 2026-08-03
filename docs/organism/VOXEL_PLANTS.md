@@ -58,6 +58,12 @@ cost/benefit. E36/E37 spirit.
 - Mutation will not invent a trunk on a stemless parent.
 - Spawn under water on a moist bed; Tab plant knobs do not overwrite the
   ribbon’s leaf-heavy alloc.
+- **Leaf drink (emergent):** Photosystems in *standing water* sip free-column
+  sat. Dry-land / film Air does not count — shore leaves never drink.
+  When leaves bathe, soft root budget collapses to one holdfast (no
+  seaweed flag).
+- **Floppy frond (draw):** Photosystem / Stem sway underwater with wind
+  phase; tips above the free surface lay along the waterline.
 
 ### D3 — Vegetative sprout *(landed)*
 
