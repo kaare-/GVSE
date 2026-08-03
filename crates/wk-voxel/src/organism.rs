@@ -32,8 +32,9 @@ use crate::plant::{
     apply_genome, collect_live_root_world_cells, collect_trunk_world_cells, drink_roots,
     drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, find_surface_air_slot,
     is_anchored, is_land_plant, leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac,
-    sync_root_storage, try_grow_plant, try_vegetative_sprout, DroughtBand, PlantGrowthCaps,
-    DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
+    sync_root_storage, try_grow_plant, try_plant_wind_spore, try_vegetative_sprout, DroughtBand,
+    PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN,
+    PLANT_UPKEEP_MULT,
 };
 use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
 
@@ -107,6 +108,8 @@ pub enum ModuleId {
     Root = 0x0D,
     /// Olive — upright stack holding leaves (Set D).
     Stem = 0x0E,
+    /// Lilac — wind-borne spore / seed packet (ferns, fruiting bodies).
+    ReproSpore = 0x10,
 }
 
 impl ModuleId {
@@ -119,6 +122,7 @@ impl ModuleId {
             ModuleId::Hypha => (0xF1, 0xE6, 0xC4),
             ModuleId::Root => (0x7A, 0x4B, 0x2A),
             ModuleId::Stem => (0x55, 0x6B, 0x2F),
+            ModuleId::ReproSpore => (0xD0, 0xB0, 0xFF),
         }
     }
 
@@ -130,6 +134,7 @@ impl ModuleId {
             ModuleId::Hypha => "Hypha",
             ModuleId::Root => "Root",
             ModuleId::Stem => "Stem",
+            ModuleId::ReproSpore => "ReproSpore",
         }
     }
 }
@@ -531,7 +536,8 @@ impl OrganismStore {
         self.step_with_climate_wind(world, tick, climate, humidity, 0.0);
     }
 
-    /// Like [`Self::step_with_climate`] with horizontal wind for fungal spores.
+    /// Like [`Self::step_with_climate`] with horizontal wind for spores
+    /// (fungi fruiting bodies + plants with [`ModuleId::ReproSpore`]).
     pub fn step_with_climate_wind(
         &mut self,
         world: &mut World,
@@ -620,6 +626,7 @@ impl OrganismStore {
                     room,
                     &growth_caps,
                     &plant_cols,
+                    wind_vx,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -868,7 +875,8 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
     }
 }
 
-/// Land plant tick: drink, shade photo, grow, maybe vegetative sprout.
+/// Land plant tick: drink, shade photo, grow, maybe rhizome sprout or
+/// wind spore (needs painted [`ModuleId::ReproSpore`], fern-style).
 /// D4: root starch tank + drought bands (stress / hibernate).
 fn step_land_plant(
     world: &mut World,
@@ -882,6 +890,7 @@ fn step_land_plant(
     pop_room: bool,
     growth_caps: &PlantGrowthCaps,
     plant_cols: &[i32],
+    wind_vx: f32,
 ) -> PlantStep {
     pin_plant_pose(atom);
     // Free-spawn / canopy clicks can leave a plant briefly unanchored.
@@ -955,6 +964,12 @@ fn step_land_plant(
     // Surplus → tissue (root / stem / leaf) from allocation genes.
     let _ = try_grow_plant(world, atom, tick, trunks, live_roots, growth_caps);
     sync_root_storage(atom);
+    // Fern-style wind spores before local rhizome (longer range, needs ReproSpore).
+    if let Some(child) =
+        try_plant_wind_spore(world, atom, tick, entity_id, pop_room, plant_cols, wind_vx)
+    {
+        return PlantStep::Sprout(child);
+    }
     if let Some(child) =
         try_vegetative_sprout(world, atom, tick, entity_id, pop_room, plant_cols)
     {
@@ -2010,14 +2025,11 @@ mod tests {
             digest_rate: 1.0,
             ..Genome::default()
         };
-        assert!(store.spawn_blueprint(
-            &w,
-            4,
-            3,
-            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
-            40.0,
-            g,
-        ));
+        let mut body =
+            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus();
+        // This test is about local mycelium growth, not wind spores.
+        body.retain(|(_, _, m)| *m != ModuleId::ReproSpore);
+        assert!(store.spawn_blueprint(&w, 4, 3, body, 40.0, g));
         let (fx, fy) = (store.atoms[0].gx, store.atoms[0].gy);
         crate::fungi::seed_mycelium_near(&mut w, fx, fy, 32);
         let myc_near0 = (-1..=1)

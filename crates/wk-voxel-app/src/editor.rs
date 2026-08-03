@@ -83,6 +83,10 @@ impl CreatureEditor {
             self.brush = ModuleId::Hypha;
             self.tool = EditorTool::Paint;
         }
+        if is_key_pressed(KeyCode::Key7) {
+            self.brush = ModuleId::ReproSpore;
+            self.tool = EditorTool::Paint;
+        }
         if is_key_pressed(KeyCode::E) {
             self.tool = EditorTool::Erase;
         }
@@ -103,7 +107,7 @@ impl CreatureEditor {
             self.blueprint = Blueprint::minimal_fungus();
             self.name_buf = "fruiting body".into();
             self.status =
-                "Fruiting body — plant on Organic; mycelium lives in the ground field".into();
+                "Fruiting body — Organic bed; cream field in ground; 7 = spore packet".into();
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
             self.blueprint.name = self.name_buf.clone();
@@ -297,6 +301,7 @@ impl CreatureEditor {
             ModuleId::Stem,
             ModuleId::Digest,
             ModuleId::Hypha,
+            ModuleId::ReproSpore,
         ]
         .iter()
         .enumerate()

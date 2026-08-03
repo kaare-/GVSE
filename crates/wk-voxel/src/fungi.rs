@@ -765,6 +765,7 @@ pub fn try_emergent_fruiting(
 }
 
 /// Rare fruiting: energy cost, wind-biased spore child on Organic / litter.
+/// Requires at least one painted [`ModuleId::ReproSpore`] on the fruiting body.
 pub fn try_spore(
     world: &mut World,
     atom: &mut Atom,
@@ -777,6 +778,15 @@ pub fn try_spore(
         return None;
     }
     if !is_fungus(atom) || digest_count(atom) < 1 {
+        return None;
+    }
+    if atom
+        .body
+        .iter()
+        .filter(|(_, _, m)| *m == ModuleId::ReproSpore)
+        .count()
+        < 1
+    {
         return None;
     }
     // Fruiting bodies only launch from a surface-ready column.
@@ -855,7 +865,10 @@ pub fn dissolve_corpse_to_organic(
         // Grey trunks / crowns / leaves: litter only — do not dam flow.
         if matches!(
             mid,
-            ModuleId::Stem | ModuleId::Nucleus | ModuleId::Photosystem
+            ModuleId::Stem
+                | ModuleId::Nucleus
+                | ModuleId::Photosystem
+                | ModuleId::ReproSpore
         ) {
             continue;
         }

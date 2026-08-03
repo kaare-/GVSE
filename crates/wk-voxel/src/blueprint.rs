@@ -253,7 +253,7 @@ impl Blueprint {
         }
     }
 
-    /// Minimal fruiting body (E): nucleus + digest + short hyphae.
+    /// Minimal fruiting body (E): nucleus + digest + hyphae + spore packet.
     /// Underground mycelium is a ground field on Organic, not painted here.
     pub fn minimal_fungus() -> Self {
         Self {
@@ -285,13 +285,19 @@ impl Blueprint {
                     lane: LaneId::Mid,
                     module: ModuleId::Hypha,
                 },
+                PlacedModule {
+                    x: 1,
+                    y: 1,
+                    lane: LaneId::Mid,
+                    module: ModuleId::ReproSpore,
+                },
             ],
             genome: Genome {
                 digest_rate: 1.0,
                 ..Genome::default()
             },
             name: "fruiting body".into(),
-            notes: "Fruiting body — mycelium lives in moist Organic as a ground field".into(),
+            notes: "Fruiting body — mycelium lives in moist Organic as a ground field; ReproSpore sheds wind spores".into(),
         }
     }
 
@@ -460,6 +466,10 @@ mod tests {
         assert!(!bp.is_valid_atom());
         assert!(!bp.is_valid_plant());
         assert!(bp.digest_count() >= 1);
+        assert!(
+            bp.modules.iter().any(|m| m.module == ModuleId::ReproSpore),
+            "fruiting body template includes a spore packet"
+        );
     }
 
     #[test]

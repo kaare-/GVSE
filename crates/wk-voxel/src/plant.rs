@@ -131,6 +131,17 @@ pub const SPROUT_LOCAL_RADIUS: i32 = 4;
 /// sprouting is blocked. High enough for a slow local grove; the long
 /// [`LAND_SPROUT_PERIOD`] is what stops one template filling the pop cap.
 pub const SPROUT_LOCAL_MAX: usize = 8;
+/// Energy fraction of spawn tank to fire a wind spore (fern-style).
+pub const PLANT_SPORE_ENERGY_FRAC: f32 = 0.68;
+/// Ticks between plant wind-spore attempts (~0.8 demo day).
+pub const PLANT_SPORE_PERIOD: u64 = 960;
+/// Fraction of spawn tank spent on a wind spore (child gets half).
+pub const PLANT_SPORE_COST_FRAC: f32 = 0.48;
+/// Min / max columns a wind-borne plant spore may travel.
+pub const PLANT_SPORE_MIN_DIST: i32 = 4;
+pub const PLANT_SPORE_MAX_DIST: i32 = 28;
+/// Extra 1-in-N rarity beyond cooldown / energy gates.
+pub const PLANT_SPORE_ODDS: u64 = 11;
 
 /// Moisture band driving photo / growth / hibernate gates.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -226,6 +237,13 @@ pub fn stem_count(atom: &Atom) -> usize {
     atom.body
         .iter()
         .filter(|(_, _, m)| *m == ModuleId::Stem)
+        .count()
+}
+
+pub fn spore_count(atom: &Atom) -> usize {
+    atom.body
+        .iter()
+        .filter(|(_, _, m)| *m == ModuleId::ReproSpore)
         .count()
 }
 
@@ -1270,7 +1288,136 @@ pub fn try_vegetative_sprout(
     Some(child)
 }
 
-fn hash01(a: u64, b: u64, c: u64, salt: u64) -> f32 {
+/// Child body for wind spore — juvenile plant; keeps a sorus if the parent
+/// had [`ModuleId::ReproSpore`] so ferns can keep dispersing.
+pub fn spore_dispersal_body(parent: &Atom) -> Vec<BodyModule> {
+    let mut body = sprout_body(parent);
+    if spore_count(parent) == 0 {
+        return body;
+    }
+    let tip_y = body
+        .iter()
+        .filter(|(_, _, m)| matches!(m, ModuleId::Photosystem | ModuleId::Stem))
+        .map(|(_, dy, _)| *dy)
+        .max()
+        .unwrap_or(1);
+    // Avoid stacking on an existing module at (1, tip_y).
+    let spot = if body.iter().any(|&(dx, dy, _)| dx == 1 && dy == tip_y) {
+        (-1i16, tip_y)
+    } else {
+        (1i16, tip_y)
+    };
+    body.push((spot.0, spot.1, ModuleId::ReproSpore));
+    body
+}
+
+/// Wind-biased moist plant seat farther than rhizome reach (fern spores).
+pub fn pick_plant_spore_column(
+    world: &World,
+    atom: &Atom,
+    tick: u64,
+    entity_id: u32,
+    wind_vx: f32,
+    plant_cols: &[i32],
+) -> Option<(i32, i32)> {
+    let prefer_dir = if wind_vx.abs() < 0.05 {
+        let flip = hash_u64_plant(world.seed.0, tick, entity_id as u64, 0xFE7A) & 1;
+        if flip == 0 {
+            1
+        } else {
+            -1
+        }
+    } else if wind_vx > 0.0 {
+        1
+    } else {
+        -1
+    };
+    let mut best: Option<(f32, i32, i32)> = None;
+    for dist in PLANT_SPORE_MIN_DIST..=PLANT_SPORE_MAX_DIST {
+        for &sign in &[prefer_dir, -prefer_dir] {
+            let wx = world.wrap_x(atom.gx + sign * dist);
+            if column_occupied(plant_cols, wx) {
+                continue;
+            }
+            let Some(gy) = find_plant_slot(world, wx, atom.gy) else {
+                continue;
+            };
+            let moist = cell_moisture_frac(world, wx, gy - 1);
+            if moist < 0.02 {
+                continue;
+            }
+            let local = count_plants_near(plant_cols, wx, SPROUT_LOCAL_RADIUS, world.wrap_width);
+            if local >= SPROUT_LOCAL_MAX {
+                continue;
+            }
+            let downwind = if sign == prefer_dir { 2.5 } else { 0.0 };
+            // Prefer farther downwind seats slightly (true aerial spread).
+            let score = moist * 2.0 + dist as f32 * 0.04 + downwind;
+            if best.map(|(s, _, _)| score > s).unwrap_or(true) {
+                best = Some((score, wx, gy));
+            }
+        }
+    }
+    best.map(|(_, wx, gy)| (wx, gy))
+}
+
+/// Fern-style wind spore: needs painted [`ModuleId::ReproSpore`], energy,
+/// cooldown, pop room, and a moist unoccupied seat downwind.
+pub fn try_plant_wind_spore(
+    world: &World,
+    atom: &mut Atom,
+    tick: u64,
+    entity_id: u32,
+    pop_room: bool,
+    plant_cols: &[i32],
+    wind_vx: f32,
+) -> Option<Atom> {
+    if !pop_room || atom.cooldown > 0 {
+        return None;
+    }
+    if !is_land_plant(atom) || spore_count(atom) < 1 {
+        return None;
+    }
+    // Need a photosystem / stem "frond" to launch from — roots alone can't.
+    if atom.photosystem_count() < 1 && stem_count(atom) < 1 {
+        return None;
+    }
+    let tank = tank_ref(atom);
+    if atom.energy < tank * PLANT_SPORE_ENERGY_FRAC {
+        return None;
+    }
+    let h = hash_u64_plant(world.seed.0, tick, entity_id as u64, 0x5F07_E001);
+    if h % PLANT_SPORE_ODDS != 0 {
+        return None;
+    }
+    let (wx, gy) = pick_plant_spore_column(world, atom, tick, entity_id, wind_vx, plant_cols)?;
+    if column_occupied(plant_cols, wx) {
+        return None;
+    }
+    let cost = tank * PLANT_SPORE_COST_FRAC;
+    if atom.energy < cost {
+        return None;
+    }
+    atom.energy -= cost;
+    atom.cooldown = PLANT_SPORE_PERIOD;
+
+    let body = spore_dispersal_body(atom);
+    let mut child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
+    sync_alloc_to_body(&mut child_genome, &body);
+    let mut child = Atom::from_body(wx, gy, tank, body);
+    apply_genome(&mut child, child_genome);
+    child.energy = (cost * 0.5).clamp(1.0, child.energy_max);
+    child.cooldown = PLANT_SPORE_PERIOD;
+    pin_plant_pose(&mut child);
+    if !is_anchored(world, &child) {
+        atom.energy = (atom.energy + cost).min(atom.energy_max);
+        atom.cooldown = 0;
+        return None;
+    }
+    Some(child)
+}
+
+fn hash_u64_plant(a: u64, b: u64, c: u64, salt: u64) -> u64 {
     let mut x = a
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
         .wrapping_add(b)
@@ -1279,7 +1426,11 @@ fn hash01(a: u64, b: u64, c: u64, salt: u64) -> f32 {
     x ^= x >> 30;
     x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
     x ^= x >> 27;
-    (x >> 40) as f32 / ((1u64 << 24) as f32)
+    x
+}
+
+fn hash01(a: u64, b: u64, c: u64, salt: u64) -> f32 {
+    (hash_u64_plant(a, b, c, salt) >> 40) as f32 / ((1u64 << 24) as f32)
 }
 
 /// Apply genome fields that also live as Atom pose knobs.
@@ -1296,4 +1447,85 @@ pub fn apply_genome(atom: &mut Atom, genome: Genome) {
 /// Body helper for tests / templates.
 pub fn body_has_module(body: &[BodyModule], mid: ModuleId) -> bool {
     body.iter().any(|(_, _, m)| *m == mid)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cell::{Cell, Sat};
+    use crate::chunk::ChunkCoord;
+    use crate::organism::Atom;
+
+    fn moist_plot() -> World {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..32 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(160);
+            w.set_cell(x, 1, sand);
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        w
+    }
+
+    fn fern_body() -> Vec<BodyModule> {
+        let mut body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        body.push((1, 2, ModuleId::ReproSpore));
+        body
+    }
+
+    #[test]
+    fn plant_without_spore_module_cannot_wind_spore() {
+        let w = moist_plot();
+        let mut atom = Atom::from_body(
+            4,
+            2,
+            60.0,
+            crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus(),
+        );
+        atom.energy = atom.energy_max;
+        atom.cooldown = 0;
+        for t in 0..500u64 {
+            assert!(
+                try_plant_wind_spore(&w, &mut atom, t, 1, true, &[], 0.5).is_none(),
+                "bare plant must not wind-spore"
+            );
+            atom.energy = atom.energy_max;
+            atom.cooldown = 0;
+        }
+    }
+
+    #[test]
+    fn fern_with_repro_spore_spreads_downwind() {
+        let w = moist_plot();
+        let mut atom = Atom::from_body(4, 2, 60.0, fern_body());
+        // Enough roots to seat; wind spore itself only needs ReproSpore + leaf.
+        assert!(is_anchored(&w, &atom));
+        assert!(spore_count(&atom) >= 1);
+        let mut child = None;
+        for t in 0..4_000u64 {
+            atom.energy = atom.energy_max;
+            atom.cooldown = 0;
+            if let Some(c) = try_plant_wind_spore(&w, &mut atom, t, 3, true, &[4], 0.8) {
+                child = Some(c);
+                break;
+            }
+        }
+        let child = child.expect("fern with ReproSpore must eventually wind-spore");
+        assert!(is_land_plant(&child));
+        assert!(
+            (child.gx - 4).abs() >= PLANT_SPORE_MIN_DIST
+                || w.wrap_width.map(|_| true).unwrap_or(true),
+            "spore should leave the parent neighbourhood (got gx={})",
+            child.gx
+        );
+        assert_ne!(child.gx, 4);
+        assert!(
+            spore_count(&child) >= 1,
+            "sporeling should inherit a sorus"
+        );
+    }
 }

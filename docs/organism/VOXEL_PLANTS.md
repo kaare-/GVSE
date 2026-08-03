@@ -56,6 +56,13 @@ Features: sparse canopy index + neighbour cast (`shade.rs`, lite
   living crown per column** (sprouts skip occupied seats; stacked
   saves reseat younger crowns on the next tick).
 
+### D3b — Wind spores / ferns *(landed)*
+
+- Paint [`ReproSpore`](PALETTE.md) (`7` in the editor) on a land plant
+- Rare wind-biased dispersal farther than rhizome reach (`try_plant_wind_spore`)
+- Child is a juvenile plant that keeps a sorus so ferns can keep spreading
+- Rhizome sprout still works without spore modules (local clone only)
+
 ### D4 — Drought banking *(landed)*
 
 - Root count raises `energy_max` (starch storage); photo / growth floors stay on `energy_base_max`
@@ -81,7 +88,8 @@ Features:
 - Established moist networks support fruiting bodies (no energy-starve)
 - Standing rain counts as moisture; **never** flash Organic → Sand
 - Long colonization may compost Organic → `MaterialId::Soil` (sat preserved)
-- Editor: `F` fruiting body; brushes `5` Digest / `6` Hypha; F3 Soil brush
+- Editor: `F` fruiting body; brushes `5` Digest / `6` Hypha / `7` ReproSpore;
+  F3 Soil brush
 
 ### E1b — Lingering corpses → Organic *(landed)*
 

@@ -162,7 +162,8 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   living fruiting body. Renderer: faint cream threads.
 - **Emergence** — a rich moist network can raise a new fruiting body
   (`try_emergent_fruiting`, burns field intensity). That body may later
-  shed wind-biased spores (`try_spore`) onto Organic / litter banks.
+  shed wind-biased spores (`try_spore`) onto Organic / litter banks when
+  it carries a painted `ReproSpore` module (included on the `F` template).
 - Soft litter is a bonus sip — fungi do **not** flash Organic into Sand.
 - After long colonization, Organic rarely composts into
   `MaterialId::Soil` with pore water preserved (excess sat pushed to
@@ -174,9 +175,10 @@ Ghost-root Void fill remains a column-kernel / later voxel goal.
 
 - True mycorrhizae (mutualist hypha↔root sugar/water exchange). The
   cream-line-to-live-sienna slot is drawn but unused in Core.
-- Dedicated `ReproSpore` / fruiting-body modules — surface fruiting is
-  still a Nucleus behaviour with a long cooldown (palette slot stays a
-  placeholder for a later draw).
+- Dedicated fruiting-body *geometry* modules — surface fruiting is still
+  Digest + Hypha + `ReproSpore` on a Nucleus chassis (palette `Fruit` /
+  bark stay reserved). Land plants share `ReproSpore` for fern-style
+  wind dispersal (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) D3b).
 - Pathogenic fungi on living plants. Deferred until active predation
   makes sense.
 - Full geotechnical fill mechanics. One tick per loose-collapse
