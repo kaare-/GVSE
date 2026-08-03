@@ -44,6 +44,10 @@ impl Sat {
 /// Reserved per-cell flags. Kept as an opaque `u8` bitfield today so
 /// future rules (frozen, sediment-carrying, momentum-carrying) can
 /// slot in without changing `Cell`'s memory shape.
+///
+/// Mycelium colonization intensity lives in [`Cell::_pad`] on
+/// [`MaterialId::Organic`] cells (0 = clean litter, 255 = fully
+/// threaded) — not in these flag bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CellFlags(pub u8);
 
@@ -78,10 +82,9 @@ pub struct Cell {
     pub material: MaterialId,
     pub sat: Sat,
     pub flags: CellFlags,
-    /// Reserved for future use (temperature quantile, sediment
-    /// carrier, etc.). Baked into every save via postcard — widening
-    /// `Cell` past 4 bytes bumps [`crate::SIM_SCHEMA_VERSION`] and
-    /// needs a migration (see `save.rs`).
+    /// On [`MaterialId::Organic`]: mycelium thread intensity (0..=255).
+    /// Cleared on material change. Elsewhere reserved / zero.
+    /// Widening `Cell` past 4 bytes bumps [`crate::SIM_SCHEMA_VERSION`].
     pub _pad: u8,
 }
 
@@ -110,6 +113,26 @@ impl Cell {
         }
     }
 
+    /// Mycelium colonization on Organic (0 = none, 255 = fully threaded).
+    #[inline]
+    pub fn mycelium(self) -> u8 {
+        if self.material == MaterialId::Organic {
+            self._pad
+        } else {
+            0
+        }
+    }
+
+    /// Set mycelium intensity; only retained on Organic cells.
+    #[inline]
+    pub fn set_mycelium(&mut self, intensity: u8) {
+        self._pad = if self.material == MaterialId::Organic {
+            intensity
+        } else {
+            0
+        };
+    }
+
     /// Convenience: an Air cell already fully saturated with water.
     /// Rules treat this the same as any other cell with `sat == FULL`
     /// — "fully waterlogged air" is our stand-in for a free-water
@@ -130,7 +153,11 @@ impl Cell {
 pub fn is_grain(material: MaterialId) -> bool {
     matches!(
         material,
-        MaterialId::Sand | MaterialId::Gravel | MaterialId::Clay | MaterialId::LooseRock
+        MaterialId::Sand
+            | MaterialId::Gravel
+            | MaterialId::Clay
+            | MaterialId::Soil
+            | MaterialId::LooseRock
     )
 }
 
@@ -263,6 +290,7 @@ mod tests {
             MaterialId::Sand,
             MaterialId::Gravel,
             MaterialId::Clay,
+            MaterialId::Soil,
             MaterialId::LooseRock,
         ] {
             assert!(is_grain(m), "{m:?} should be granular");

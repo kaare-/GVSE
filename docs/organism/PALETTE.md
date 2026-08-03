@@ -55,12 +55,12 @@ not committed a job to.
 | `0x0D` | Root | `#7A4B2A` | Sienna. Anchors, drinks moisture, elongates down a moisture gradient. |
 | `0x0E` | Stem | `#556B2F` | Olive. Stacks upward, holds leaves into the light column, casts shade. Substrate for epiphytes. |
 | `0x0F` | Holdfast | `#FF3D9A` | Pink. Grips another organism's olive stem (rock later). No ground root required. |
+| `0x10` | ReproSpore | `#D0B0FF` | Lilac dispersal packet. Wind-biased spores for ferns (land plants) and fruiting bodies. |
 
 ### Reserved (frozen slots, no code yet)
 
 | ID | Name | Hex | Note |
 |----|------|-----|------|
-| `0x10` | ReproSpore | `#D0B0FF` | Dispersal packet (seed / spore). Draft; may fold into `Nucleus` behaviour. |
 | `0x11` | Fruit | `#E85D75` | Reproductive body, animal-attractant vector for Phase 7+. |
 | `0x12` | Bark | `#3E2E1F` | Woody protective sheath; requires stem integrity work first. |
 | `0x13` | Skin | `#FFDBAC` | Placeholder for animal outer layer. |
@@ -81,6 +81,7 @@ For editor palette drawer layout (see [`EDITOR.md`](EDITOR.md)):
 - **Physiology / niche** — Buoyancy, TempTolerance, Motility.
 - **Detritus loop** — Digest, Hypha.
 - **Land body** — Root, Stem, Holdfast.
+- **Dispersal** — ReproSpore.
 
 Colour choices were picked to be readable at 1× zoom on a mid-gray
 world background, distinguish adjacent categories (green / olive not

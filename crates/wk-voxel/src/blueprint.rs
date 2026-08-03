@@ -148,6 +148,242 @@ impl Genome {
     }
 }
 
+/// Soft cap on body size after morphological mutation.
+pub const BODY_MUTATION_MAX_MODULES: usize = 28;
+/// Max add/swap/delete attempts per clone (scaled by messiness).
+pub const BODY_MUTATION_MAX_EDITS: usize = 3;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum BodyHabit {
+    Atom,
+    Plant,
+    Fungus,
+}
+
+fn classify_body_habit(body: &[(i16, i16, ModuleId)]) -> BodyHabit {
+    let has_root = body.iter().any(|(_, _, m)| *m == ModuleId::Root);
+    let has_digest = body.iter().any(|(_, _, m)| *m == ModuleId::Digest);
+    if has_root {
+        BodyHabit::Plant
+    } else if has_digest {
+        BodyHabit::Fungus
+    } else {
+        BodyHabit::Atom
+    }
+}
+
+fn habit_palette(habit: BodyHabit) -> &'static [ModuleId] {
+    match habit {
+        BodyHabit::Atom => &[ModuleId::Photosystem],
+        BodyHabit::Plant => &[
+            ModuleId::Photosystem,
+            ModuleId::Root,
+            ModuleId::Stem,
+            ModuleId::ReproSpore,
+        ],
+        BodyHabit::Fungus => &[ModuleId::Digest, ModuleId::Hypha, ModuleId::ReproSpore],
+    }
+}
+
+fn count_mid(body: &[(i16, i16, ModuleId)], mid: ModuleId) -> usize {
+    body.iter().filter(|(_, _, m)| *m == mid).count()
+}
+
+fn module_is_required_singleton(
+    habit: BodyHabit,
+    mid: ModuleId,
+    body: &[(i16, i16, ModuleId)],
+) -> bool {
+    if mid == ModuleId::Nucleus {
+        return count_mid(body, ModuleId::Nucleus) <= 1;
+    }
+    match habit {
+        BodyHabit::Atom => mid == ModuleId::Photosystem && count_mid(body, mid) <= 1,
+        BodyHabit::Plant => {
+            (mid == ModuleId::Root || mid == ModuleId::Photosystem) && count_mid(body, mid) <= 1
+        }
+        BodyHabit::Fungus => mid == ModuleId::Digest && count_mid(body, mid) <= 1,
+    }
+}
+
+fn body_still_valid_habit(habit: BodyHabit, body: &[(i16, i16, ModuleId)]) -> bool {
+    if count_mid(body, ModuleId::Nucleus) < 1 {
+        return false;
+    }
+    match habit {
+        BodyHabit::Atom => {
+            count_mid(body, ModuleId::Photosystem) >= 1
+                && count_mid(body, ModuleId::Root) == 0
+                && count_mid(body, ModuleId::Digest) == 0
+        }
+        BodyHabit::Plant => {
+            count_mid(body, ModuleId::Root) >= 1 && count_mid(body, ModuleId::Photosystem) >= 1
+        }
+        BodyHabit::Fungus => {
+            count_mid(body, ModuleId::Digest) >= 1
+                && count_mid(body, ModuleId::Root) == 0
+                && count_mid(body, ModuleId::Stem) == 0
+        }
+    }
+}
+
+/// Morphological mutation of a body blueprint (module add / swap / delete).
+///
+/// Driven by `clone_fidelity` the same way as [`Genome::mutate`]: high
+/// fidelity → few or no edits; low fidelity → messier offspring.
+/// Never removes the last Nucleus or breaks the parent's habit class
+/// (Atom / plant / fungus).
+pub fn mutate_body(
+    parent_body: &[(i16, i16, ModuleId)],
+    fidelity: f32,
+    world_seed: u64,
+    tick: u64,
+    parent_id: u32,
+) -> Vec<(i16, i16, ModuleId)> {
+    let mut body: Vec<(i16, i16, ModuleId)> = parent_body.to_vec();
+    if body.is_empty() {
+        return body;
+    }
+    let habit = classify_body_habit(&body);
+    let palette = habit_palette(habit);
+    let fidelity = fidelity.clamp(0.0, 1.0);
+    let mess = 1.0 - fidelity;
+    // Default fidelity (~0.9) → gene-only clones; lower fidelity unlocks
+    // 1..=MAX morphological edits.
+    let edits =
+        ((mess * BODY_MUTATION_MAX_EDITS as f32).floor() as usize).min(BODY_MUTATION_MAX_EDITS);
+    let salt_base = tick
+        .wrapping_mul(0x9E37_79B9)
+        .wrapping_add(parent_id as u64)
+        .wrapping_add(0xB0D4_0001);
+    for edit_i in 0..edits {
+        let h = hash_u64(world_seed, salt_base, edit_i as u64, 0xED17);
+        // Bias: swap most common, then add, then delete.
+        let kind = h % 5;
+        match kind {
+            0 | 1 => try_swap_module(&mut body, habit, palette, world_seed, salt_base, edit_i),
+            2 | 3 => try_add_module(&mut body, habit, palette, world_seed, salt_base, edit_i),
+            _ => try_delete_module(&mut body, habit, world_seed, salt_base, edit_i),
+        }
+    }
+    // Safety net — should already hold if helpers refuse bad edits.
+    if !body_still_valid_habit(habit, &body) {
+        return parent_body.to_vec();
+    }
+    body
+}
+
+fn try_swap_module(
+    body: &mut Vec<(i16, i16, ModuleId)>,
+    habit: BodyHabit,
+    palette: &[ModuleId],
+    world_seed: u64,
+    salt_base: u64,
+    edit_i: usize,
+) {
+    let candidates: Vec<usize> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, _, m))| *m != ModuleId::Nucleus)
+        .map(|(i, _)| i)
+        .collect();
+    if candidates.is_empty() || palette.is_empty() {
+        return;
+    }
+    let pick =
+        hash_u64(world_seed, salt_base, edit_i as u64, 0x5A10) as usize % candidates.len();
+    let idx = candidates[pick];
+    let old = body[idx].2;
+    let new_mid = palette
+        [hash_u64(world_seed, salt_base, edit_i as u64, 0x5A11) as usize % palette.len()];
+    if new_mid == old {
+        return;
+    }
+    // Don't strip the last required module of its type.
+    if module_is_required_singleton(habit, old, body) {
+        return;
+    }
+    let prev = body[idx].2;
+    body[idx].2 = new_mid;
+    if !body_still_valid_habit(habit, body) {
+        body[idx].2 = prev;
+    }
+}
+
+fn try_add_module(
+    body: &mut Vec<(i16, i16, ModuleId)>,
+    habit: BodyHabit,
+    palette: &[ModuleId],
+    world_seed: u64,
+    salt_base: u64,
+    edit_i: usize,
+) {
+    if body.len() >= BODY_MUTATION_MAX_MODULES || palette.is_empty() {
+        return;
+    }
+    let occupied: std::collections::HashSet<(i16, i16)> =
+        body.iter().map(|&(x, y, _)| (x, y)).collect();
+    let anchors: Vec<(i16, i16)> = body.iter().map(|&(x, y, _)| (x, y)).collect();
+    if anchors.is_empty() {
+        return;
+    }
+    let a_i = hash_u64(world_seed, salt_base, edit_i as u64, 0xAD01) as usize % anchors.len();
+    let (ax, ay) = anchors[a_i];
+    const NEIGH: [(i16, i16); 8] = [
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (1, -1),
+        (-1, 1),
+        (-1, -1),
+    ];
+    let n_i = hash_u64(world_seed, salt_base, edit_i as u64, 0xAD02) as usize % NEIGH.len();
+    let (dx, dy) = NEIGH[n_i];
+    let nx = ax + dx;
+    let ny = ay + dy;
+    // Keep blueprints near the nucleus — avoid runaway diagonals.
+    if nx.abs() > 8 || ny.abs() > 8 {
+        return;
+    }
+    if occupied.contains(&(nx, ny)) {
+        return;
+    }
+    let mid = palette
+        [hash_u64(world_seed, salt_base, edit_i as u64, 0xAD03) as usize % palette.len()];
+    body.push((nx, ny, mid));
+    if !body_still_valid_habit(habit, body) {
+        body.pop();
+    }
+}
+
+fn try_delete_module(
+    body: &mut Vec<(i16, i16, ModuleId)>,
+    habit: BodyHabit,
+    world_seed: u64,
+    salt_base: u64,
+    edit_i: usize,
+) {
+    let candidates: Vec<usize> = body
+        .iter()
+        .enumerate()
+        .filter(|(_, (_, _, m))| *m != ModuleId::Nucleus)
+        .filter(|(_, (_, _, m))| !module_is_required_singleton(habit, *m, body))
+        .map(|(i, _)| i)
+        .collect();
+    if candidates.is_empty() {
+        return;
+    }
+    let pick =
+        hash_u64(world_seed, salt_base, edit_i as u64, 0xDE01) as usize % candidates.len();
+    let idx = candidates[pick];
+    let removed = body.remove(idx);
+    if !body_still_valid_habit(habit, body) {
+        body.insert(idx, removed);
+    }
+}
+
 fn hash_u64(seed: u64, a: u64, b: u64, salt: u64) -> u64 {
     let mut x = seed
         .wrapping_mul(0x9E37_79B9_7F4A_7C15)
@@ -253,7 +489,8 @@ impl Blueprint {
         }
     }
 
-    /// Minimal litter fungus (E): nucleus + digest + a short hypha thread.
+    /// Minimal fruiting body (E): nucleus + digest + hyphae + spore packet.
+    /// Underground mycelium is a ground field on Organic, not painted here.
     pub fn minimal_fungus() -> Self {
         Self {
             schema_version: BLUEPRINT_SCHEMA_VERSION,
@@ -284,13 +521,19 @@ impl Blueprint {
                     lane: LaneId::Mid,
                     module: ModuleId::Hypha,
                 },
+                PlacedModule {
+                    x: 1,
+                    y: 1,
+                    lane: LaneId::Mid,
+                    module: ModuleId::ReproSpore,
+                },
             ],
             genome: Genome {
                 digest_rate: 1.0,
                 ..Genome::default()
             },
-            name: "fungus".into(),
-            notes: "Set E litter fungus".into(),
+            name: "fruiting body".into(),
+            notes: "Fruiting body — mycelium lives in moist Organic as a ground field; ReproSpore sheds wind spores".into(),
         }
     }
 
@@ -459,6 +702,10 @@ mod tests {
         assert!(!bp.is_valid_atom());
         assert!(!bp.is_valid_plant());
         assert!(bp.digest_count() >= 1);
+        assert!(
+            bp.modules.iter().any(|m| m.module == ModuleId::ReproSpore),
+            "fruiting body template includes a spore packet"
+        );
     }
 
     #[test]
@@ -501,5 +748,58 @@ mod tests {
                 || (child.alloc_stem - parent.alloc_stem).abs() > 1e-6,
             "low-fidelity mutate should jitter plant genes"
         );
+    }
+
+    #[test]
+    fn high_fidelity_body_mutate_is_stable() {
+        let parent = Blueprint::minimal_plant().modules_relative_to_nucleus();
+        // Default-ish fidelity (0.9) and higher → no morph edits.
+        let child = mutate_body(&parent, 0.9, 1, 10, 3);
+        assert_eq!(
+            child, parent,
+            "clone_fidelity ≥ ~0.67 should skip morphology at default max-edits"
+        );
+    }
+
+    #[test]
+    fn low_fidelity_body_mutate_edits_but_keeps_habit() {
+        let parent = Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut saw_change = false;
+        for tick in 0..200u64 {
+            let child = mutate_body(&parent, 0.05, 99, tick, 11);
+            assert!(
+                child.iter().any(|(_, _, m)| *m == ModuleId::Nucleus),
+                "must keep a Nucleus"
+            );
+            assert!(
+                child.iter().any(|(_, _, m)| *m == ModuleId::Root),
+                "plant must keep a Root"
+            );
+            assert!(
+                child.iter().any(|(_, _, m)| *m == ModuleId::Photosystem),
+                "plant must keep a Photosystem"
+            );
+            assert!(
+                !child.iter().any(|(_, _, m)| *m == ModuleId::Digest),
+                "plant must not gain Digest"
+            );
+            if child != parent {
+                saw_change = true;
+            }
+        }
+        assert!(saw_change, "messy fidelity should sometimes change pixels");
+    }
+
+    #[test]
+    fn fungus_body_mutate_never_gains_roots() {
+        let parent = Blueprint::minimal_fungus().modules_relative_to_nucleus();
+        for tick in 0..100u64 {
+            let child = mutate_body(&parent, 0.05, 7, tick, 2);
+            assert!(child.iter().any(|(_, _, m)| *m == ModuleId::Digest));
+            assert!(!child.iter().any(|(_, _, m)| matches!(
+                m,
+                ModuleId::Root | ModuleId::Stem
+            )));
+        }
     }
 }

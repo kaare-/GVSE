@@ -43,14 +43,31 @@ Falsifiers: root grows into wetter sand; stem-heavy alloc grows taller.
 | `shade_efficiency` | Dim-light harvest vs sun peak |
 
 Features: sparse canopy index + neighbour cast (`shade.rs`, lite
-`LIGHT.md`); plant photo uses `effective_photo_light`. E36/E37 spirit.
+`LIGHT.md`); plant photo uses `effective_photo_light`. Standing water
+attenuates sky light with depth (`column_sky_light`) — deep seats go
+dark, so submerged plants either stem-race toward the surface or fail
+the cost/benefit. E36/E37 spirit.
 
 ### D3 — Vegetative sprout *(landed)*
 
 - Lateral rhizome tip → child plant on moist neighbour
-- `Genome::mutate` with `clone_fidelity`
+- `Genome::mutate` + `mutate_body` with `clone_fidelity` (genes and
+  module add/swap/delete; habit stays plant)
 - Soft pop cap shared with Atoms
 - Root elongation biases sideways when banking for a sprout
+- **Anti-flood:** long sprout period (~0.6 demo day), higher energy /
+  root gates, soft local density (≤8 crowns in ±4 columns), and **one
+  living crown per column** (sprouts skip occupied seats; stacked
+  saves reseat younger crowns on the next tick).
+
+### D3b — Wind spores / ferns *(landed)*
+
+- Paint [`ReproSpore`](PALETTE.md) (`7` in the editor) on a land plant
+- Rare wind-biased dispersal farther than rhizome reach (`try_plant_wind_spore`)
+- Child is a juvenile plant that keeps a sorus so ferns can keep spreading
+- Gene + blueprint mutation on the same `clone_fidelity` knob
+- App draws lilac spore puffs drifting on climate wind (`SporeFx`)
+- Rhizome sprout still works without spore modules (local clone only)
 
 ### D4 — Drought banking *(landed)*
 
@@ -58,18 +75,27 @@ Features: sparse canopy index + neighbour cast (`shade.rs`, lite
 - Soft root:shoot budget; stressed moisture lifts root allowance
 - Hibernate band (`DROUGHT_DORMANT_FRAC`): slow upkeep, no photo/drink/growth; die after max dormant ticks
 
-### E1 — Litter + fungi *(landed)*
+### E1 — Litter + fungi *(landed; fruiting body + mycelium field)*
 
 | Gene | Role |
 |------|------|
-| `digest_rate` | Fungi digest speed |
+| `digest_rate` | Fruiting-body forage / local seed cadence |
 
 Features:
 
-- Soft litter field (`World::soft_litter`)
-- `Digest` / `Hypha` modules; digest soft litter first, then peel Organic → Air
-- Starve / dry hibernate (mirror plant drought); spore burst to neighbour litter
-- Editor: `F` fungus template, brushes `5` Digest / `6` Hypha
+- **Studio designs the fruiting body** (`F` template: Nucleus / Digest / Hypha
+  pixels). Plant it on Organic; it seeds the ground network.
+- **Mycelium is a ground field** (`Cell::_pad` on Organic), not something you
+  paint in the creature editor. `step_mycelium_field` thickens / spreads on
+  moist Organic even after the fruiting body dies.
+- Rich cream networks can **emerge a new fruiting body**, which can then
+  spread wind-biased spores to other Organic / litter columns
+- Soft litter — bonus energy sip; Organic forage scales with field intensity
+- Established moist networks support fruiting bodies (no energy-starve)
+- Standing rain counts as moisture; **never** flash Organic → Sand
+- Long colonization may compost Organic → `MaterialId::Soil` (sat preserved)
+- Editor: `F` fruiting body; brushes `5` Digest / `6` Hypha / `7` ReproSpore;
+  F3 Soil brush
 
 ### E1b — Lingering corpses → Organic *(landed)*
 

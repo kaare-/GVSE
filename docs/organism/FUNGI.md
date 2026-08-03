@@ -150,13 +150,39 @@ Incentives this creates:
   is a slumping call with an oversize threshold rather than a new
   subsystem.
 
+## Voxel path (wk-voxel) — fruiting body + mycelium field
+
+The live voxel stack diverges from the ghost-root cavity cascade above
+on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
+
+- **Fruiting body** — studio creature (`F`). Temporary. Seeds / feeds from
+  the mycelium field; may die of age while the network remains.
+- **Mycelium field** — intensity in `Cell::_pad` on Organic. World process
+  (`step_mycelium_field`): thickens and spreads on moist Organic without a
+  living fruiting body. Renderer: faint cream threads.
+- **Emergence** — a rich moist network can raise a new fruiting body
+  (`try_emergent_fruiting`, burns field intensity). That body may later
+  shed wind-biased spores (`try_spore`) onto Organic / litter banks when
+  it carries a painted `ReproSpore` module (included on the `F` template).
+  The app renders lilac puffs drifting on climate wind (`SporeFx`).
+- **Anti-flood:** one living fruiting body per column, soft local density
+  (≤6 in ±4 columns), long child cooldown; babies aren't network-immortal
+  until mature. HUD shows `p=/f=/a=` habit split.
+- Soft litter is a bonus sip — fungi do **not** flash Organic into Sand.
+- After long colonization, Organic rarely composts into
+  `MaterialId::Soil` with pore water preserved (excess sat pushed to
+  neighbours; mild compaction flag).
+
+Ghost-root Void fill remains a column-kernel / later voxel goal.
+
 ## What is deliberately not here
 
 - True mycorrhizae (mutualist hypha↔root sugar/water exchange). The
   cream-line-to-live-sienna slot is drawn but unused in Core.
-- Fruiting bodies as separate reproductive modules. Spore drop is a
-  Nucleus behaviour (like plant seeds) — the `ReproSpore` slot in
-  [`PALETTE.md`](PALETTE.md) is a placeholder.
+- Dedicated fruiting-body *geometry* modules — surface fruiting is still
+  Digest + Hypha + `ReproSpore` on a Nucleus chassis (palette `Fruit` /
+  bark stay reserved). Land plants share `ReproSpore` for fern-style
+  wind dispersal (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) D3b).
 - Pathogenic fungi on living plants. Deferred until active predation
   makes sense.
 - Full geotechnical fill mechanics. One tick per loose-collapse

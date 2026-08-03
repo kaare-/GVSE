@@ -43,7 +43,10 @@ pub use cell::{
     water_capacity, water_capacity_with, Cell, CellFlags, Sat,
 };
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
-pub use blueprint::{Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR};
+pub use blueprint::{
+    mutate_body, Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR, BODY_MUTATION_MAX_EDITS,
+    BODY_MUTATION_MAX_MODULES,
+};
 pub use climate::{
     celestial_local, celestial_local_cfg, celestial_screen_pos, celestial_screen_pos_cfg, day_factor,
     day_factor_cfg, day_night_factor, day_night_factor_cfg, is_daytime, is_daytime_cfg, phase_fraction,
@@ -58,7 +61,10 @@ pub use failure::{
     roof_span_cells, roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
     COMPACTION_SIGMA_MIN,
 };
-pub use fungi::{is_fungus, soft_litter_at, add_soft_litter};
+pub use fungi::{
+    add_soft_litter, compost_organic_to_soil, is_fungus, max_mycelium_near, seed_mycelium_near,
+    soft_litter_at, step_mycelium_field,
+};
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
     wet_air_column_beside, FaceStress, GeotechMap, GeotechOverlayMode, GEOTECH_MAP_PERIOD,
@@ -68,8 +74,9 @@ pub use grid::World;
 // HydroOverrides is defined in wk-material; re-export for app convenience.
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
-    Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,
-    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
+    column_sky_light, Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, SporeRelease,
+    CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
+    SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
 pub use plant::{
     collect_live_root_world_cells, find_fungus_slot, find_plant_slot, find_surface_air_slot,

@@ -117,6 +117,13 @@ harvests. Depth changes light exposure exactly as required for
 day-float / night-sink to matter (see
 [`SCENARIOS.md`](SCENARIOS.md) E33).
 
+**Standing water column (wk-voxel):** `column_sky_light` attenuates
+through wet Air with Beer–Lambert-ish transmittance
+(`WATER_LIGHT_TRANSMIT` ≈ 0.85 / cell, plus a surface film). Deep
+seats go dark — photosynthesis can't pay for tall stems / deep roots,
+so submerged plants either race stems toward the brighter surface
+(seaweed urge when dim) or starve. Dry land columns stay clear.
+
 ## What is deliberately not here
 
 - Refractive scattering, angle-of-incidence, or sun elevation

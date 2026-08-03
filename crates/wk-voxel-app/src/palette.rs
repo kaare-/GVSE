@@ -20,6 +20,9 @@ fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8
 }
 
+/// Faint cream hypha tint blended onto colonized Organic (palette Hypha).
+const MYCELIUM_THREAD_RGB: [u8; 3] = [0xF1, 0xE6, 0xC4];
+
 pub fn cell_color(cell: Cell) -> [u8; 3] {
     let base = MaterialRegistry::colour_rgb(cell.material);
     let t = cell.sat.as_f32();
@@ -45,11 +48,23 @@ pub fn cell_color(cell: Cell) -> [u8; 3] {
         // moisture rises. Real palette work can come later; this
         // gives instant visual feedback for infiltration.
         let darken = 0.35 * t;
-        [
+        let mut rgb = [
             lerp_u8(base[0], 40, darken),
             lerp_u8(base[1], 55, darken),
             lerp_u8(base[2], 85, darken),
-        ]
+        ];
+        // Organic with mycelium: faint cream threads (keeps wet/dry darken).
+        if cell.material == MaterialId::Organic {
+            let myc = (cell.mycelium() as f32 / 255.0) * 0.45;
+            if myc > 0.0 {
+                rgb = [
+                    lerp_u8(rgb[0], MYCELIUM_THREAD_RGB[0], myc),
+                    lerp_u8(rgb[1], MYCELIUM_THREAD_RGB[1], myc),
+                    lerp_u8(rgb[2], MYCELIUM_THREAD_RGB[2], myc),
+                ];
+            }
+        }
+        rgb
     }
 }
 

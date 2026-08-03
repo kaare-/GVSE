@@ -17,6 +17,7 @@ fn material_name(mat: MaterialId) -> &'static str {
         MaterialId::Gravel => "gravel",
         MaterialId::Sand => "sand",
         MaterialId::Clay => "clay",
+        MaterialId::Soil => "soil",
         MaterialId::Organic => "organic",
         MaterialId::Water => "water",
         MaterialId::Air => "air",
@@ -100,6 +101,9 @@ pub fn draw_block_inspector(
                 props.porosity, props.permeability
             ));
             lines.push(format!("flags=0x{:02X}", c.flags.0));
+            if c.material == MaterialId::Organic && c.mycelium() > 0 {
+                lines.push(format!("mycelium={}/255", c.mycelium()));
+            }
         }
         None => lines.push("cell: (empty / unstamped)".into()),
     }
@@ -127,7 +131,7 @@ pub fn draw_block_inspector(
     if let Some((id, atom)) = organism {
         lines.push("--- organism ---".into());
         let kind = if is_fungus(atom) {
-            "Fungus"
+            "Fruiting body"
         } else if is_land_plant(atom) {
             "Plant"
         } else {
@@ -147,9 +151,10 @@ pub fn draw_block_inspector(
             atom.cooldown
         ));
         if is_fungus(atom) {
-            lines.push("habit=fungus (digest litter / Organic)".into());
+            lines.push("habit=fruiting body (mycelium = ground field on Organic)".into());
+            let myc = wk_voxel::max_mycelium_near(world, atom.gx, atom.gy);
             lines.push(format!(
-                "digest_rate={:.2}  drought_ticks={}",
+                "digest_rate={:.2}  drought_ticks={}  field_myc={myc}/255",
                 atom.genome.digest_rate, atom.drought_ticks
             ));
             let digests = atom

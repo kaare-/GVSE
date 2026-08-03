@@ -22,8 +22,10 @@ use wk_material::MaterialId;
 use crate::blueprint::Genome;
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
-    digest_budget_units, digest_labile, dissolve_corpse_to_organic, fungus_should_hibernate,
-    fungus_upkeep, is_fungus, is_fungus_seated, try_spore, FUNGUS_HIBERNATE_MAX_TICKS,
+    colonize_and_compost, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
+    forage_organic_energy, fruiting_body_supported, fungus_should_hibernate, fungus_upkeep,
+    is_fungus, is_fungus_seated, try_emergent_fruiting, try_spore, FRUIT_SUPPORT_MIN_AGE,
+    FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -31,8 +33,9 @@ use crate::plant::{
     apply_genome, collect_live_root_world_cells, collect_trunk_world_cells, drink_roots,
     drought_band, drop_dead_leaves, find_fungus_slot, find_plant_slot, find_surface_air_slot,
     is_anchored, is_land_plant, leave_dead_roots_in_place, pin_plant_pose, root_moisture_frac,
-    sync_root_storage, try_grow_plant, try_vegetative_sprout, DroughtBand, PlantGrowthCaps,
-    DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
+    sync_root_storage, try_grow_plant, try_plant_wind_spore, try_vegetative_sprout, DroughtBand,
+    PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP, DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN,
+    PLANT_UPKEEP_MULT,
 };
 use crate::shade::{build_canopy_index, canopy_top_y, effective_photo_light, CanopyIndex};
 
@@ -87,8 +90,6 @@ const GRAVITY: f32 = 0.08;
 const WATER_DRAG: f32 = 0.25;
 const AIR_DRAG: f32 = 0.05;
 const EQ_SPRING: f32 = 0.12;
-/// Gene jitter scale on fission — matches column `MUTATION_SIGMA`.
-const MUTATION_SIGMA: f32 = 0.12;
 /// Soft contact impulse when two Atoms share a cell.
 const CONTACT_BOUNCE: f32 = 0.12;
 
@@ -106,6 +107,8 @@ pub enum ModuleId {
     Root = 0x0D,
     /// Olive — upright stack holding leaves (Set D).
     Stem = 0x0E,
+    /// Lilac — wind-borne spore / seed packet (ferns, fruiting bodies).
+    ReproSpore = 0x10,
 }
 
 impl ModuleId {
@@ -118,6 +121,7 @@ impl ModuleId {
             ModuleId::Hypha => (0xF1, 0xE6, 0xC4),
             ModuleId::Root => (0x7A, 0x4B, 0x2A),
             ModuleId::Stem => (0x55, 0x6B, 0x2F),
+            ModuleId::ReproSpore => (0xD0, 0xB0, 0xFF),
         }
     }
 
@@ -129,6 +133,7 @@ impl ModuleId {
             ModuleId::Hypha => "Hypha",
             ModuleId::Root => "Root",
             ModuleId::Stem => "Stem",
+            ModuleId::ReproSpore => "ReproSpore",
         }
     }
 }
@@ -334,6 +339,24 @@ impl OrganismStore {
         self.atoms.len()
     }
 
+    /// Living habit breakdown: `(plants, fungi, atoms)`.
+    /// HUD uses this so a fungus spore bloom isn't mistaken for "invisible plants".
+    pub fn habit_counts(&self) -> (usize, usize, usize) {
+        let mut plants = 0usize;
+        let mut fungi = 0usize;
+        let mut atoms = 0usize;
+        for a in &self.atoms {
+            if is_land_plant(a) {
+                plants += 1;
+            } else if is_fungus(a) {
+                fungi += 1;
+            } else {
+                atoms += 1;
+            }
+        }
+        (plants, fungi, atoms)
+    }
+
     pub fn is_empty(&self) -> bool {
         self.atoms.is_empty()
     }
@@ -516,7 +539,7 @@ impl OrganismStore {
     /// One organism step: plankton buoyancy / plant drink, light,
     /// upkeep, fission (Atoms only), death → corpse, corpse settle → Organic.
     pub fn step(&mut self, world: &mut World, tick: u64) {
-        self.step_with_climate(world, tick, &ClimateConfig::default(), None);
+        let _ = self.step_with_climate(world, tick, &ClimateConfig::default(), None);
     }
 
     /// Like [`Self::step_with_climate`] but without humidity bookkeeping.
@@ -527,9 +550,20 @@ impl OrganismStore {
         climate: &ClimateConfig,
         humidity: Option<&mut Humidity>,
     ) {
-        if self.atoms.is_empty() && self.corpses.is_empty() {
-            return;
-        }
+        let _ = self.step_with_climate_wind(world, tick, climate, humidity, 0.0);
+    }
+
+    /// Like [`Self::step_with_climate`] with horizontal wind for spores
+    /// (fungi fruiting bodies + plants with [`ModuleId::ReproSpore`]).
+    /// Returns spore-release events for the renderer (not saved).
+    pub fn step_with_climate_wind(
+        &mut self,
+        world: &mut World,
+        tick: u64,
+        climate: &ClimateConfig,
+        humidity: Option<&mut Humidity>,
+        wind_vx: f32,
+    ) -> Vec<SporeRelease> {
         let day = day_factor_cfg(tick, climate);
         let phase = phase_fraction_cfg(tick, climate);
         // Build canopy once / tick so taller neighbours shade short plants.
@@ -540,11 +574,49 @@ impl OrganismStore {
         let live_roots = collect_live_root_world_cells(&self.atoms);
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
+        let mut spore_releases: Vec<SporeRelease> = Vec::new();
         let pop = self.atoms.len();
         let atom_cap = self.atom_cap();
         let growth_caps = self.growth_caps.clamp();
+        // One crown per column: destack any pre-existing overlaps first.
+        reseat_stacked_land_plants(world, &mut self.atoms);
+        reseat_stacked_fungi(world, &mut self.atoms);
+        // Crown columns of living land plants — density + occupancy gate.
+        // Mutated as sprouts birth so same-tick siblings can't share a seat.
+        let mut plant_cols: Vec<i32> = self
+            .atoms
+            .iter()
+            .filter(|a| is_land_plant(a))
+            .map(|a| a.gx)
+            .collect();
+        let mut fungus_cols: Vec<i32> = self
+            .atoms
+            .iter()
+            .filter(|a| is_fungus(a))
+            .map(|a| a.gx)
+            .collect();
         // Transpiration return: (gx, gy, sat_units) → humidity mass.
         let mut transpired: Vec<(i32, i32, u32)> = Vec::new();
+
+        // Empty store: still allow mycelium field → fruiting body emergence
+        // (and corpse settle). Spores need a living body afterward.
+        if self.atoms.is_empty() {
+            if self.corpses.is_empty() {
+                let room = births.len() < atom_cap;
+                if let Some(child) =
+                    try_emergent_fruiting(world, &fungus_cols, tick, room)
+                {
+                    self.atoms.push(child);
+                }
+                return spore_releases;
+            }
+            self.step_corpses(world);
+            let room = self.atoms.len() < atom_cap;
+            if let Some(child) = try_emergent_fruiting(world, &[], tick, room) {
+                self.atoms.push(child);
+            }
+            return spore_releases;
+        }
 
         for (i, atom) in self.atoms.iter_mut().enumerate() {
             atom.age_ticks = atom.age_ticks.saturating_add(1);
@@ -562,6 +634,8 @@ impl OrganismStore {
 
             if is_land_plant(atom) {
                 let room = pop + births.len() < atom_cap;
+                let parent_gx = atom.gx;
+                let parent_gy = atom.gy;
                 match step_land_plant(
                     world,
                     atom,
@@ -573,6 +647,8 @@ impl OrganismStore {
                     i as u32,
                     room,
                     &growth_caps,
+                    &plant_cols,
+                    wind_vx,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -580,17 +656,54 @@ impl OrganismStore {
                             transpired.push((at.0, at.1, sat));
                         }
                     }
-                    PlantStep::Sprout(child) => births.push(child),
+                    PlantStep::Sprout(child) => {
+                        plant_cols.push(child.gx);
+                        births.push(child);
+                    }
+                    PlantStep::Spore(child) => {
+                        spore_releases.push(SporeRelease {
+                            from_gx: parent_gx,
+                            from_gy: parent_gy,
+                            to_gx: child.gx,
+                            to_gy: child.gy,
+                        });
+                        plant_cols.push(child.gx);
+                        births.push(child);
+                    }
                 }
                 continue;
             }
 
             if is_fungus(atom) {
                 let room = pop + births.len() < atom_cap;
-                match step_fungus(world, atom, day, tick, i as u32, room) {
+                let parent_gx = atom.gx;
+                let parent_gy = atom.gy;
+                match step_fungus(
+                    world,
+                    atom,
+                    day,
+                    tick,
+                    i as u32,
+                    room,
+                    wind_vx,
+                    &fungus_cols,
+                ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
-                    PlantStep::Sprout(child) => births.push(child),
+                    PlantStep::Sprout(child) => {
+                        fungus_cols.push(child.gx);
+                        births.push(child);
+                    }
+                    PlantStep::Spore(child) => {
+                        spore_releases.push(SporeRelease {
+                            from_gx: parent_gx,
+                            from_gy: parent_gy,
+                            to_gx: child.gx,
+                            to_gy: child.gy,
+                        });
+                        fungus_cols.push(child.gx);
+                        births.push(child);
+                    }
                 }
                 continue;
             }
@@ -656,6 +769,22 @@ impl OrganismStore {
             }
         }
         self.atoms.extend(births);
+        // Cream network → new fruiting body (may later shed spores).
+        let mut fungus_cols_now: Vec<i32> = self
+            .atoms
+            .iter()
+            .filter(|a| is_fungus(a))
+            .map(|a| a.gx)
+            .collect();
+        if self.atoms.len() < atom_cap {
+            if let Some(child) =
+                try_emergent_fruiting(world, &fungus_cols_now, tick, true)
+            {
+                fungus_cols_now.push(child.gx);
+                self.atoms.push(child);
+            }
+        }
+        let _ = fungus_cols_now;
         resolve_contacts(world, &mut self.atoms);
         self.step_corpses(world);
 
@@ -667,6 +796,7 @@ impl OrganismStore {
                 }
             }
         }
+        spore_releases
     }
 
     fn push_corpse(&mut self, world: &mut World, corpse: Corpse) {
@@ -754,10 +884,114 @@ fn step_corpse_buoyancy(world: &World, corpse: &mut Corpse) {
 enum PlantStep {
     Dead,
     Alive { sat: u32, at: (i32, i32) },
+    /// Vegetative rhizome child (local).
     Sprout(Atom),
+    /// Wind-borne spore child (fern / fruiting body) — emit VFX.
+    Spore(Atom),
 }
 
-/// Land plant tick: drink, shade photo, grow, maybe vegetative sprout.
+/// One wind-spore launch for the renderer (ephemeral; not saved).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SporeRelease {
+    pub from_gx: i32,
+    pub from_gy: i32,
+    pub to_gx: i32,
+    pub to_gy: i32,
+}
+
+/// Oldest land plant keeps its column; younger stack-mates reseat nearby.
+/// Fixes ghost-looking overlays from rhizome sprouts sharing one crown cell.
+fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
+    let mut land_idx: Vec<usize> = atoms
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| is_land_plant(a))
+        .map(|(i, _)| i)
+        .collect();
+    if land_idx.len() < 2 {
+        return;
+    }
+    // Oldest first — they claim the column.
+    land_idx.sort_by_key(|&i| std::cmp::Reverse(atoms[i].age_ticks));
+    let mut claimed = std::collections::HashSet::new();
+    for i in land_idx {
+        let gx = atoms[i].gx;
+        if claimed.insert(gx) {
+            continue;
+        }
+        let gy = atoms[i].gy;
+        let mut moved = false;
+        for dist in 1..=16 {
+            for sign in [1i32, -1] {
+                let nx = world.wrap_x(gx + sign * dist);
+                if claimed.contains(&nx) {
+                    continue;
+                }
+                let Some(ny) = find_plant_slot(world, nx, gy) else {
+                    continue;
+                };
+                atoms[i].gx = nx;
+                atoms[i].gy = ny;
+                pin_plant_pose(&mut atoms[i]);
+                claimed.insert(nx);
+                moved = true;
+                break;
+            }
+            if moved {
+                break;
+            }
+        }
+    }
+}
+
+/// Oldest fruiting body keeps its column; younger stack-mates reseat.
+/// Spore floods used to pile hundreds of `N1D1H2Sp1` on one Organic seat.
+fn reseat_stacked_fungi(world: &World, atoms: &mut [Atom]) {
+    let mut fungus_idx: Vec<usize> = atoms
+        .iter()
+        .enumerate()
+        .filter(|(_, a)| is_fungus(a))
+        .map(|(i, _)| i)
+        .collect();
+    if fungus_idx.len() < 2 {
+        return;
+    }
+    fungus_idx.sort_by_key(|&i| std::cmp::Reverse(atoms[i].age_ticks));
+    let mut claimed = std::collections::HashSet::new();
+    for i in fungus_idx {
+        let gx = atoms[i].gx;
+        if claimed.insert(gx) {
+            continue;
+        }
+        let gy = atoms[i].gy;
+        let mut moved = false;
+        for dist in 1..=24 {
+            for sign in [1i32, -1] {
+                let nx = world.wrap_x(gx + sign * dist);
+                if claimed.contains(&nx) {
+                    continue;
+                }
+                let Some(ny) = find_fungus_slot(world, nx, gy)
+                    .or_else(|| find_surface_air_slot(world, nx, gy))
+                else {
+                    continue;
+                };
+                atoms[i].gx = nx;
+                atoms[i].gy = ny;
+                pin_plant_pose(&mut atoms[i]);
+                claimed.insert(nx);
+                moved = true;
+                break;
+            }
+            if moved {
+                break;
+            }
+        }
+    }
+}
+
+/// Land plant tick: drink, shade photo, grow, maybe rhizome sprout or
+/// wind spore (needs painted [`ModuleId::ReproSpore`], fern-style).
 /// D4: root starch tank + drought bands (stress / hibernate).
 fn step_land_plant(
     world: &mut World,
@@ -770,6 +1004,8 @@ fn step_land_plant(
     entity_id: u32,
     pop_room: bool,
     growth_caps: &PlantGrowthCaps,
+    plant_cols: &[i32],
+    wind_vx: f32,
 ) -> PlantStep {
     pin_plant_pose(atom);
     // Free-spawn / canopy clicks can leave a plant briefly unanchored.
@@ -815,7 +1051,9 @@ fn step_land_plant(
 
     let (drink_e, sat_taken, drink_at) = drink_roots(world, atom);
     // Sky column light × day, then neighbour canopy + gene remap (D2).
+    // Water column attenuates strongly with depth — deep seats go dark.
     let sample_y = canopy_top_y(atom);
+    let submerged = is_wet_air(world, atom.gx, sample_y);
     let sky = column_light(world, atom.gx, sample_y) * day;
     let light = effective_photo_light(
         canopy,
@@ -840,10 +1078,26 @@ fn step_land_plant(
     if atom.energy <= 0.0 {
         return PlantStep::Dead;
     }
-    // Surplus → tissue (root / stem / leaf) from allocation genes.
+    // Surplus → tissue. Submerged + dim light: urge stem toward the
+    // brighter surface (seaweed race) while energy still pays for it.
+    let genome_save = atom.genome;
+    if submerged && light < SUBMERGED_STEM_URGE_LIGHT && crate::plant::stem_count(atom) > 0 {
+        atom.genome.alloc_stem = (atom.genome.alloc_stem + 0.40).min(1.0);
+        atom.genome.alloc_root = (atom.genome.alloc_root * 0.55).max(0.05);
+        atom.genome.alloc_leaf = (atom.genome.alloc_leaf * 0.85).max(0.05);
+    }
     let _ = try_grow_plant(world, atom, tick, trunks, live_roots, growth_caps);
+    atom.genome = genome_save;
     sync_root_storage(atom);
-    if let Some(child) = try_vegetative_sprout(world, atom, tick, entity_id, pop_room) {
+    // Fern-style wind spores before local rhizome (longer range, needs ReproSpore).
+    if let Some(child) =
+        try_plant_wind_spore(world, atom, tick, entity_id, pop_room, plant_cols, wind_vx)
+    {
+        return PlantStep::Spore(child);
+    }
+    if let Some(child) =
+        try_vegetative_sprout(world, atom, tick, entity_id, pop_room, plant_cols)
+    {
         return PlantStep::Sprout(child);
     }
     PlantStep::Alive {
@@ -852,7 +1106,8 @@ fn step_land_plant(
     }
 }
 
-/// Litter fungus tick: digest soft litter / Organic, hibernate, spore.
+/// Fruiting-body tick: feed from mycelium field / litter, seed local threads.
+/// Underground network persistence is [`crate::fungi::step_mycelium_field`].
 fn step_fungus(
     world: &mut World,
     atom: &mut Atom,
@@ -860,9 +1115,11 @@ fn step_fungus(
     tick: u64,
     entity_id: u32,
     pop_room: bool,
+    wind_vx: f32,
+    fungus_cols: &[i32],
 ) -> PlantStep {
     pin_plant_pose(atom);
-    // Same sandbox rule as plants: snap to a solid crown, don't cull.
+    // Prefer Organic seats; fall back to Air-above-solid crown.
     if !is_fungus_seated(world, atom) {
         if let Some(slot) = find_fungus_slot(world, atom.gx, atom.gy)
             .or_else(|| find_surface_air_slot(world, atom.gx, atom.gy))
@@ -881,23 +1138,37 @@ fn step_fungus(
         atom.drought_ticks = 0;
     }
 
-    let mut upkeep = fungus_upkeep(atom, dormant);
+    let network = fruiting_body_supported(world, atom);
+    let mut upkeep = fungus_upkeep(atom, dormant || network);
     // Light basal tax so empty chassis still burns sugar.
     upkeep += UPKEEP_PER_MODULE * 0.35 * (0.45 + 0.55 * day);
+    if network {
+        // Established moist mycelium carries most of the metabolic load.
+        upkeep *= 0.35;
+    }
 
     if !dormant {
         let want = digest_budget_units(&atom.genome, atom);
-        let (_taken, gained) = digest_labile(world, atom.gx, atom.gy, want);
-        atom.energy = (atom.energy + gained).min(atom.energy_max);
+        let (_taken, from_litter) = digest_labile(world, atom.gx, atom.gy, want);
+        let from_organic = forage_organic_energy(world, atom.gx, atom.gy, &atom.genome, atom);
+        let from_myc = colonize_and_compost(world, atom.gx, atom.gy, &atom.genome, atom, tick);
+        atom.energy =
+            (atom.energy + from_litter + from_organic + from_myc).min(atom.energy_max);
     }
 
     atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);
-    if atom.energy <= 0.0 {
+    // Mature network-backed fruiting bodies don't energy-starve — babies
+    // must still earn (anti-flood: sporelings can't pad the pop forever).
+    if network && atom.age_ticks >= FRUIT_SUPPORT_MIN_AGE {
+        atom.energy = atom.energy.max(1.0);
+    } else if atom.energy <= 0.0 {
         return PlantStep::Dead;
     }
     if !dormant {
-        if let Some(child) = try_spore(world, atom, tick, entity_id, pop_room) {
-            return PlantStep::Sprout(child);
+        if let Some(child) =
+            try_spore(world, atom, tick, entity_id, pop_room, wind_vx, fungus_cols)
+        {
+            return PlantStep::Spore(child);
         }
     }
     PlantStep::Alive {
@@ -1104,24 +1375,59 @@ fn occupied_by_other(atoms: &[Atom], self_i: usize, gx: i32, gy: i32) -> bool {
         .any(|(k, a)| k != self_i && a.occupies(gx, gy))
 }
 
-fn column_light(world: &World, gx: i32, gy: i32) -> f32 {
+/// Beer–Lambert-ish transmittance per standing-water (wet Air) cell
+/// when scanning skyward from a photosystem. ~0.85^10 ≈ 0.20 at 10 deep.
+pub const WATER_LIGHT_TRANSMIT: f32 = 0.85;
+/// One-time loss when light crosses the free-water surface into dry air.
+pub const WATER_SURFACE_TRANSMIT: f32 = 0.90;
+/// Below this effective light, submerged stemmed plants urge toward the
+/// surface (seaweed race) while surplus still exists.
+pub const SUBMERGED_STEM_URGE_LIGHT: f32 = 0.42;
+
+/// Sky light remaining at `(gx, gy)` after water / solid occlusion.
+/// Dry air is clear; each wet Air cell attenuates; solids nearly black out.
+pub fn column_sky_light(world: &World, gx: i32, gy: i32) -> f32 {
     let mut light = 1.0f32;
+    let mut under_water = is_wet_air(world, gx, gy);
+    let mut applied_surface = false;
     let mut y = gy + 1;
     let mut steps = 0;
-    while steps < 64 {
+    while steps < 96 {
         match world.get_cell(gx, y) {
-            None => return light,
+            None => break,
             Some(c) if c.material == MaterialId::Air => {
                 if !c.sat.is_empty() {
-                    light *= 0.97;
+                    light *= WATER_LIGHT_TRANSMIT;
+                    under_water = true;
+                } else if under_water {
+                    if !applied_surface {
+                        light *= WATER_SURFACE_TRANSMIT;
+                        applied_surface = true;
+                    }
+                    under_water = false;
                 }
             }
-            Some(_) => return light * 0.15,
+            Some(c)
+                if matches!(
+                    c.material,
+                    MaterialId::Ice | MaterialId::Snow
+                ) =>
+            {
+                light *= 0.35;
+            }
+            Some(_) => {
+                // Buried under rock / soil / Organic — only a trickle.
+                return (light * 0.12).clamp(0.0, 1.0);
+            }
         }
         y += 1;
         steps += 1;
     }
-    light
+    light.clamp(0.0, 1.0)
+}
+
+fn column_light(world: &World, gx: i32, gy: i32) -> f32 {
+    column_sky_light(world, gx, gy)
 }
 
 fn is_wet_air(world: &World, gx: i32, gy: i32) -> bool {
@@ -1172,24 +1478,21 @@ fn try_fission(world: &World, parent: &Atom, child_energy: f32, tick: u64) -> Op
         let nx = world.wrap_x(parent.gx + dx);
         let ny = parent.gy + dy;
         if is_wet_air(world, nx, ny) {
-            let mut child =
-                Atom::from_body(nx, ny, parent.energy_max, parent.body.clone());
+            let body = crate::blueprint::mutate_body(
+                &parent.body,
+                parent.clone_fidelity,
+                world.seed.0,
+                tick,
+                parent.age_ticks as u32,
+            );
+            let mut child = Atom::from_body(nx, ny, parent.energy_max, body);
             child.energy = child_energy.clamp(1.0, parent.energy_max);
             child.cooldown = REPRO_PERIOD;
             child.circadian_phase = parent.circadian_phase;
             child.active_window = parent.active_window;
             child.last_water_top = parent.last_water_top;
-            // Mutate buoyancy (and fidelity a little) on clone.
-            let strength = (1.0 - parent.clone_fidelity.clamp(0.0, 1.0)) * MUTATION_SIGMA;
-            let j_b = hash_signed(tick, parent.gx as u64, parent.gy as u64, 0xB0A7);
-            let j_f = hash_signed(tick, parent.gx as u64, parent.age_ticks, 0xF1DE);
-            child.buoyancy_bias =
-                (parent.buoyancy_bias + j_b * strength * 2.0).clamp(0.0, 1.0);
-            child.clone_fidelity =
-                (parent.clone_fidelity + j_f * strength).clamp(0.05, 1.0);
-            child.genome = parent.genome;
-            child.genome.buoyancy_bias = child.buoyancy_bias;
-            child.genome.clone_fidelity = child.clone_fidelity;
+            let g = Genome::mutate(parent.genome, world.seed.0, tick, parent.age_ticks as u32);
+            apply_genome(&mut child, g);
             return Some(child);
         }
     }
@@ -1249,13 +1552,6 @@ fn hash_u64(seed: u64, a: u64, salt: u64) -> u64 {
     x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
     x ^= x >> 31;
     x
-}
-
-/// Deterministic signed noise in [-1, 1].
-fn hash_signed(a: u64, b: u64, c: u64, salt: u64) -> f32 {
-    let h = hash_u64(a ^ b, c, salt);
-    let u = (h >> 40) as f32 / ((1u64 << 24) as f32);
-    u * 2.0 - 1.0
 }
 
 #[cfg(test)]
@@ -1811,6 +2107,175 @@ mod tests {
     }
 
     #[test]
+    fn mycelium_field_keeps_spreading_after_fruiting_body_dies() {
+        use crate::failure::FailureConfig;
+        use crate::rules::{tick_with_life, PerfConfig};
+        let mut w = moist_sand_plot();
+        for x in 3..=5 {
+            for y in 1..=3 {
+                let mut org = Cell::solid(MaterialId::Organic);
+                org.sat = Sat(180);
+                w.set_cell(x, y, org);
+            }
+        }
+        let mut store = OrganismStore::new();
+        let g = Genome {
+            digest_rate: 1.0,
+            ..Genome::default()
+        };
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            3,
+            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
+            40.0,
+            g,
+        ));
+        crate::fungi::seed_mycelium_near(&mut w, 4, 3, 48);
+        let perf = PerfConfig::default();
+        let fail = FailureConfig::default();
+        for _ in 0..120 {
+            tick_with_life(&mut w, &perf, &fail, None, None);
+            let tick = w.tick;
+            store.step(&mut w, tick);
+        }
+        // Kill the fruiting body; mycelium field must continue.
+        store.atoms.clear();
+        let myc0 = crate::fungi::max_mycelium_near(&w, 4, 2);
+        assert!(myc0 >= 40, "need an established network before death");
+        for _ in 0..200 {
+            tick_with_life(&mut w, &perf, &fail, None, None);
+        }
+        let myc1 = crate::fungi::max_mycelium_near(&w, 4, 2);
+        assert!(
+            myc1 >= myc0,
+            "mycelium field must persist after fruiting body dies (was {myc0}, now {myc1})"
+        );
+        assert!(
+            myc1 > myc0 || (3..=5).any(|x| {
+                (1..=3).any(|y| {
+                    w.get_cell(x, y)
+                        .map(|c| c.material == MaterialId::Organic && c.mycelium() > 0)
+                        .unwrap_or(false)
+                })
+            }),
+            "field should keep living on moist Organic without a fruiting body"
+        );
+    }
+
+    #[test]
+    fn fungus_mycelium_thickens_near_seat_under_physics() {
+        use crate::failure::FailureConfig;
+        use crate::rules::{tick_with_life, PerfConfig};
+        let mut w = moist_sand_plot();
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(200);
+            w.set_cell(4, y, org);
+        }
+        let mut store = OrganismStore::new();
+        let g = Genome {
+            digest_rate: 1.0,
+            ..Genome::default()
+        };
+        let mut body =
+            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus();
+        // This test is about local mycelium growth, not wind spores.
+        body.retain(|(_, _, m)| *m != ModuleId::ReproSpore);
+        assert!(store.spawn_blueprint(&w, 4, 3, body, 40.0, g));
+        let (fx, fy) = (store.atoms[0].gx, store.atoms[0].gy);
+        crate::fungi::seed_mycelium_near(&mut w, fx, fy, 32);
+        let myc_near0 = (-1..=1)
+            .flat_map(|dy| {
+                w.get_cell(fx, fy + dy)
+                    .map(|c| {
+                        if c.material == MaterialId::Organic {
+                            c.mycelium()
+                        } else {
+                            0
+                        }
+                    })
+            })
+            .max()
+            .unwrap_or(0);
+        let perf = PerfConfig::default();
+        let fail = FailureConfig::default();
+        for _ in 0..400 {
+            tick_with_life(&mut w, &perf, &fail, None, None);
+            let tick = w.tick;
+            store.step(&mut w, tick);
+        }
+        assert_eq!(store.len(), 1);
+        let (fx, fy) = (store.atoms[0].gx, store.atoms[0].gy);
+        let myc_near1 = (-2..=2)
+            .flat_map(|dy| {
+                w.get_cell(fx, fy + dy)
+                    .map(|c| {
+                        if c.material == MaterialId::Organic {
+                            c.mycelium()
+                        } else {
+                            0
+                        }
+                    })
+            })
+            .max()
+            .unwrap_or(0);
+        assert!(
+            myc_near1 > myc_near0,
+            "mycelium must thicken near the fungus (was {myc_near0}, now {myc_near1})"
+        );
+    }
+
+    #[test]
+    fn fungus_on_humid_organic_without_litter_grows_mycelium() {
+        // Rain-soaked Organic, no soft litter: must stay active, hold energy,
+        // and advance mycelium (the reported "dies in humid organic" case).
+        let mut w = moist_sand_plot();
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(200);
+            w.set_cell(4, y, org);
+        }
+        w.set_cell(4, 4, Cell::water()); // ponded rain above
+        let mut store = OrganismStore::new();
+        let g = Genome {
+            digest_rate: 0.8,
+            ..Genome::default()
+        };
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            3,
+            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
+            40.0,
+            g,
+        ));
+        assert!(
+            !crate::fungi::fungus_should_hibernate(&w, &store.atoms[0]),
+            "humid Organic must not hibernate"
+        );
+        store.atoms[0].energy = 20.0;
+        let e0 = store.atoms[0].energy;
+        for t in 1..=320 {
+            w.tick = t;
+            store.step(&mut w, t);
+        }
+        assert_eq!(store.len(), 1, "must not starve on humid Organic");
+        assert_eq!(store.atoms[0].drought_ticks, 0);
+        assert!(
+            store.atoms[0].energy + 1e-3 >= e0,
+            "Organic forage should hold energy (was {e0}, now {})",
+            store.atoms[0].energy
+        );
+        let threaded = (1..=3).any(|y| {
+            w.get_cell(4, y)
+                .map(|c| c.material == MaterialId::Organic && c.mycelium() > 0)
+                .unwrap_or(false)
+        });
+        assert!(threaded, "mycelium must advance on humid Organic");
+    }
+
+    #[test]
     fn demo_atoms_survive_physics_ticks() {
         use crate::worldgen::{stamp_world, WorldgenParams};
         let params = WorldgenParams::default();
@@ -1850,6 +2315,59 @@ mod tests {
             assert_eq!(c.material, MaterialId::Air);
             assert!(!c.sat.is_empty());
         }
+    }
+
+    #[test]
+    fn water_column_light_fades_with_depth() {
+        // Free surface at y=20; bed wet down to y=1.
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=20 {
+            let mut wet = Cell::air();
+            wet.sat = Sat(255);
+            w.set_cell(4, y, wet);
+        }
+        for y in 21..28 {
+            w.set_cell(4, y, Cell::air());
+        }
+        let surface = column_sky_light(&w, 4, 19); // 1 wet cell above + surface film
+        let mid = column_sky_light(&w, 4, 12);
+        let deep = column_sky_light(&w, 4, 3);
+        assert!(
+            surface > mid && mid > deep,
+            "deeper must be darker (surface={surface}, mid={mid}, deep={deep})"
+        );
+        assert!(
+            deep < 0.15,
+            "deep water must be near-dark for cost/benefit cliff (deep={deep})"
+        );
+        let land = column_sky_light(&w, 4, 22); // dry air, clear sky
+        assert!(
+            land > 0.95,
+            "dry air above the lake must stay bright (land={land})"
+        );
+    }
+
+    #[test]
+    fn raising_canopy_toward_surface_recovers_light() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=16 {
+            let mut wet = Cell::air();
+            wet.sat = Sat(255);
+            w.set_cell(5, y, wet);
+        }
+        for y in 17..24 {
+            w.set_cell(5, y, Cell::air());
+        }
+        let deep = column_sky_light(&w, 5, 4);
+        let taller = column_sky_light(&w, 5, 14);
+        assert!(
+            taller > deep * 2.0,
+            "stem-racing toward the surface must reclaim light ({taller} vs {deep})"
+        );
     }
 
     #[test]
@@ -2500,6 +3018,7 @@ mod tests {
         a.body.push((-1, -1, ModuleId::Root));
         a.body.push((-2, -1, ModuleId::Root));
         a.body.push((1, -1, ModuleId::Root));
+        a.body.push((2, -1, ModuleId::Root));
         a.energy = 60.0;
         a.cooldown = 0;
         let n0 = store.len();
@@ -2573,6 +3092,7 @@ mod tests {
         a.body.push((-1, -1, ModuleId::Root));
         a.body.push((-2, -1, ModuleId::Root));
         a.body.push((1, -1, ModuleId::Root));
+        a.body.push((2, -1, ModuleId::Root));
         a.energy = 60.0;
         a.cooldown = 0;
         let n0 = store.len();
@@ -2595,6 +3115,124 @@ mod tests {
         let cols: std::collections::HashSet<i32> =
             store.atoms.iter().map(|a| a.gx).collect();
         assert!(cols.len() >= 2, "sprout should emerge on a neighbour column");
+    }
+
+    #[test]
+    fn stacked_crowns_are_reseated_to_distinct_columns() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        let body = store.atoms[0].body.clone();
+        let gx = store.atoms[0].gx;
+        let gy = store.atoms[0].gy;
+        store.atoms[0].age_ticks = 500;
+        // Two younger clones stacked on the same crown cell.
+        for _ in 0..2 {
+            let mut twin = Atom::from_body(gx, gy, 40.0, body.clone());
+            twin.age_ticks = 10;
+            apply_genome(&mut twin, Genome::default());
+            pin_plant_pose(&mut twin);
+            store.atoms.push(twin);
+        }
+        assert_eq!(
+            store.atoms.iter().filter(|a| a.gx == gx && a.gy == gy).count(),
+            3
+        );
+        store.step(&mut w, 0);
+        let cols: std::collections::HashSet<i32> =
+            store.atoms.iter().map(|a| a.gx).collect();
+        assert_eq!(
+            cols.len(),
+            store.len(),
+            "living land crowns must not share a column after reseat"
+        );
+    }
+
+    #[test]
+    fn vegetative_sprout_skips_occupied_columns() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let mut g = Genome::default();
+        g.clone_fidelity = 0.5;
+        g.alloc_root = 0.8;
+        assert!(store.spawn_blueprint(&w, 4, 2, minimal_plant_body(), 60.0, g));
+        // Neighbour columns already claimed.
+        for &(x, age) in &[(3, 200u64), (5, 200)] {
+            let body = store.atoms[0].body.clone();
+            let mut other = Atom::from_body(x, 2, 40.0, body);
+            other.age_ticks = age;
+            apply_genome(&mut other, Genome::default());
+            pin_plant_pose(&mut other);
+            store.atoms.push(other);
+        }
+        let a = &mut store.atoms[0];
+        a.body.push((-1, -1, ModuleId::Root));
+        a.body.push((-2, -1, ModuleId::Root));
+        a.body.push((1, -1, ModuleId::Root));
+        a.body.push((2, -1, ModuleId::Root));
+        a.energy = 60.0;
+        a.cooldown = 0;
+        let n0 = store.len();
+        let cols0: std::collections::HashSet<i32> =
+            store.atoms.iter().map(|a| a.gx).collect();
+        for t in 0..80u64 {
+            store.step(&mut w, t);
+            if let Some(p) = store.atoms.first_mut() {
+                p.energy = p.energy_max;
+                p.cooldown = 0;
+            }
+        }
+        // May or may not sprout farther out, but must never stack on 3/4/5.
+        for a in &store.atoms {
+            let same = store
+                .atoms
+                .iter()
+                .filter(|b| b.gx == a.gx)
+                .count();
+            assert_eq!(same, 1, "column {} has {same} crowns", a.gx);
+        }
+        let _ = (n0, cols0);
+    }
+
+    #[test]
+    fn single_plant_does_not_rhizome_flood_pop_cap() {
+        // Regression: one F2 plant template used to fill max_atoms with
+        // short-lived root sprouts (brown underground pepper, HUD at cap).
+        let mut w = moist_sand_plot();
+        for x in 0..12 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(160);
+            w.set_cell(x, 1, sand);
+        }
+        let mut store = OrganismStore::new();
+        store.max_atoms = 64;
+        let mut g = Genome::default();
+        g.alloc_root = 0.9;
+        g.alloc_stem = 0.05;
+        g.alloc_leaf = 0.05;
+        assert!(store.spawn_blueprint(&w, 4, 2, minimal_plant_body(), 80.0, g));
+        // Natural cooldowns — do not cheat period to zero.
+        // ~3–4 max sprout windows in 4k ticks at period 720; must stay
+        // far below a pop-cap carpet even with energy cheated full.
+        for t in 0..4_000u64 {
+            for p in &mut store.atoms {
+                p.energy = p.energy_max;
+            }
+            store.step(&mut w, t);
+        }
+        let n = store.len();
+        assert!(
+            n < 16,
+            "one founder must not carpet the plot (creatures={n})"
+        );
+        assert!(n >= 1);
     }
 
     #[test]
