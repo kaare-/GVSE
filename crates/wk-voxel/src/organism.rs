@@ -520,7 +520,7 @@ impl OrganismStore {
     /// One organism step: plankton buoyancy / plant drink, light,
     /// upkeep, fission (Atoms only), death → corpse, corpse settle → Organic.
     pub fn step(&mut self, world: &mut World, tick: u64) {
-        self.step_with_climate(world, tick, &ClimateConfig::default(), None);
+        let _ = self.step_with_climate(world, tick, &ClimateConfig::default(), None);
     }
 
     /// Like [`Self::step_with_climate`] but without humidity bookkeeping.
@@ -531,11 +531,12 @@ impl OrganismStore {
         climate: &ClimateConfig,
         humidity: Option<&mut Humidity>,
     ) {
-        self.step_with_climate_wind(world, tick, climate, humidity, 0.0);
+        let _ = self.step_with_climate_wind(world, tick, climate, humidity, 0.0);
     }
 
     /// Like [`Self::step_with_climate`] with horizontal wind for spores
     /// (fungi fruiting bodies + plants with [`ModuleId::ReproSpore`]).
+    /// Returns spore-release events for the renderer (not saved).
     pub fn step_with_climate_wind(
         &mut self,
         world: &mut World,
@@ -543,7 +544,7 @@ impl OrganismStore {
         climate: &ClimateConfig,
         humidity: Option<&mut Humidity>,
         wind_vx: f32,
-    ) {
+    ) -> Vec<SporeRelease> {
         let day = day_factor_cfg(tick, climate);
         let phase = phase_fraction_cfg(tick, climate);
         // Build canopy once / tick so taller neighbours shade short plants.
@@ -554,6 +555,7 @@ impl OrganismStore {
         let live_roots = collect_live_root_world_cells(&self.atoms);
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
+        let mut spore_releases: Vec<SporeRelease> = Vec::new();
         let pop = self.atoms.len();
         let atom_cap = self.atom_cap();
         let growth_caps = self.growth_caps.clamp();
@@ -586,14 +588,14 @@ impl OrganismStore {
                 {
                     self.atoms.push(child);
                 }
-                return;
+                return spore_releases;
             }
             self.step_corpses(world);
             let room = self.atoms.len() < atom_cap;
             if let Some(child) = try_emergent_fruiting(world, &[], tick, room) {
                 self.atoms.push(child);
             }
-            return;
+            return spore_releases;
         }
 
         for (i, atom) in self.atoms.iter_mut().enumerate() {
@@ -612,6 +614,8 @@ impl OrganismStore {
 
             if is_land_plant(atom) {
                 let room = pop + births.len() < atom_cap;
+                let parent_gx = atom.gx;
+                let parent_gy = atom.gy;
                 match step_land_plant(
                     world,
                     atom,
@@ -636,16 +640,37 @@ impl OrganismStore {
                         plant_cols.push(child.gx);
                         births.push(child);
                     }
+                    PlantStep::Spore(child) => {
+                        spore_releases.push(SporeRelease {
+                            from_gx: parent_gx,
+                            from_gy: parent_gy,
+                            to_gx: child.gx,
+                            to_gy: child.gy,
+                        });
+                        plant_cols.push(child.gx);
+                        births.push(child);
+                    }
                 }
                 continue;
             }
 
             if is_fungus(atom) {
                 let room = pop + births.len() < atom_cap;
+                let parent_gx = atom.gx;
+                let parent_gy = atom.gy;
                 match step_fungus(world, atom, day, tick, i as u32, room, wind_vx) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
                     PlantStep::Sprout(child) => births.push(child),
+                    PlantStep::Spore(child) => {
+                        spore_releases.push(SporeRelease {
+                            from_gx: parent_gx,
+                            from_gy: parent_gy,
+                            to_gx: child.gx,
+                            to_gy: child.gy,
+                        });
+                        births.push(child);
+                    }
                 }
                 continue;
             }
@@ -738,6 +763,7 @@ impl OrganismStore {
                 }
             }
         }
+        spore_releases
     }
 
     fn push_corpse(&mut self, world: &mut World, corpse: Corpse) {
@@ -825,7 +851,19 @@ fn step_corpse_buoyancy(world: &World, corpse: &mut Corpse) {
 enum PlantStep {
     Dead,
     Alive { sat: u32, at: (i32, i32) },
+    /// Vegetative rhizome child (local).
     Sprout(Atom),
+    /// Wind-borne spore child (fern / fruiting body) — emit VFX.
+    Spore(Atom),
+}
+
+/// One wind-spore launch for the renderer (ephemeral; not saved).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SporeRelease {
+    pub from_gx: i32,
+    pub from_gy: i32,
+    pub to_gx: i32,
+    pub to_gy: i32,
 }
 
 /// Oldest land plant keeps its column; younger stack-mates reseat nearby.
@@ -966,7 +1004,7 @@ fn step_land_plant(
     if let Some(child) =
         try_plant_wind_spore(world, atom, tick, entity_id, pop_room, plant_cols, wind_vx)
     {
-        return PlantStep::Sprout(child);
+        return PlantStep::Spore(child);
     }
     if let Some(child) =
         try_vegetative_sprout(world, atom, tick, entity_id, pop_room, plant_cols)
@@ -1038,7 +1076,7 @@ fn step_fungus(
     }
     if !dormant {
         if let Some(child) = try_spore(world, atom, tick, entity_id, pop_room, wind_vx) {
-            return PlantStep::Sprout(child);
+            return PlantStep::Spore(child);
         }
     }
     PlantStep::Alive {

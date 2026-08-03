@@ -45,6 +45,7 @@ mod palette;
 mod quit;
 mod scene;
 mod settings;
+mod spore_fx;
 mod terrain;
 
 use macroquad::prelude::*;
@@ -64,6 +65,7 @@ use crate::palette::cell_color;
 use crate::quit::{QuitChoice, QuitDialog};
 use crate::scene::Scene;
 use crate::settings::SimSettings;
+use crate::spore_fx::SporeFx;
 use crate::terrain::{TerrainEditor, TerrainTool};
 
 fn window_conf() -> Conf {
@@ -420,6 +422,7 @@ async fn main() {
     let mut scene = Scene::new(params);
     let mut settings = SimSettings::new(&scene.params);
     settings.apply_material_overrides(&mut scene.world);
+    let mut spore_fx = SporeFx::new();
     let mut paused = false;
     // Climatic drizzle is physics-only by default — sky pixels hide thin
     // wet Air so the old rain-streak look doesn't paint over the sky.
@@ -802,15 +805,27 @@ async fn main() {
             apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
             if organisms_on {
                 let tick_no = scene.world.tick;
-                scene.organisms.step_with_climate_wind(
+                let releases = scene.organisms.step_with_climate_wind(
                     &mut scene.world,
                     tick_no,
                     &settings.climate,
                     Some(&mut scene.humidity),
                     scene.wind.climate_vx,
                 );
+                spore_fx.burst_all(&releases, scene.wind.climate_vx);
             }
         }
+
+        // Spore puffs keep drifting while paused so the wind trail stays readable.
+        spore_fx.update(
+            get_frame_time(),
+            scene.wind.climate_vx,
+            if scene.params.wrap_x {
+                Some(scene.params.width_cols)
+            } else {
+                None
+            },
+        );
 
         // Render.
         let sw = screen_width();
@@ -1193,6 +1208,17 @@ async fn main() {
                 );
             }
         }
+
+        spore_fx.draw(
+            origin_x,
+            origin_y,
+            cell_px,
+            scene.params.bedrock_floor_y,
+            scene.params.width_cols,
+            scene.params.wrap_x,
+            sw,
+            sh,
+        );
 
         if let Some((gx, gy)) = inspect {
             if show_hud {
