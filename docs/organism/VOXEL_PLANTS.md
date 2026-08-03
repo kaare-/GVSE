@@ -64,11 +64,12 @@ cost/benefit. E36/E37 spirit.
   seaweed flag).
 - **Soft leaves (draw + growth):** stemless ribbons are floppy — they
   elongate *up* into standing water, lay on the waterline when emerged, and
-  dry-mat onto terrain (piling when cells collide). Photosystems on a
-  `Stem` / branch stay in the canopy (wood holds them up; long tips may
-  nod a little past `LEAF_SUPPORT_WOODY` but never flatten to the ground).
-  Underwater tips lean with climate wind **or** local water-sat shear.
-  Woody `Stem` stays upright on land.
+  dry-mat onto terrain (piling when cells collide). Woody canopies grow
+  **short petioles** beside the trunk/branch (`WOODY_LEAF_MAX_CANT`) — not
+  seaweed-length tip chains — and stay in the canopy in draw (wood holds
+  them up; tips may nod a little past `LEAF_SUPPORT_WOODY`). Underwater
+  tips lean with climate wind **or** local water-sat shear. Woody `Stem`
+  stays upright on land.
 - **Light competition:** equal-height neighbours shade each other (dense
   meadows). Canopy index + photo sample use posed draw cells, so flopped
   piles cast and receive shade where the greens sit. Photosystem pixels

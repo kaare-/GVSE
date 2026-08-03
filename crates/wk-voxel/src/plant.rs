@@ -69,6 +69,9 @@ pub const STEM_INVENT_MIN_ALLOC: f32 = 0.18;
 pub const MAX_ROOT_MODULES: usize = 16;
 pub const MAX_STEM_MODULES: usize = 10;
 pub const MAX_PHOTO_MODULES: usize = 12;
+/// Max Manhattan distance a woody canopy leaf may grow from Stem/Nucleus.
+/// Stemless seaweed ribbons ignore this and climb with the water column.
+pub const WOODY_LEAF_MAX_CANT: i32 = 2;
 /// Extra Root modules allowed per photosystem beyond the sprout minimum.
 pub const LAND_ROOTS_PER_PHOTOSYSTEM: usize = 3;
 
@@ -1141,111 +1144,106 @@ pub fn try_grow_shoot(
             return false;
         }
 
-        // Soft tip elongation. Stemless ribbons climb from the *highest*
-        // leaf into standing water only (flop is draw-only — never grow a
-        // permanent sideways L). Stemmed canopies lengthen the farthest
-        // cantilever so long leaves can hang in draw.
-        let tip = if n_stem == 0 {
-            atom.body
+        // —— Stemless ribbon: climb from the highest tip into standing water.
+        // Flop is draw-only; never grow a permanent sideways L.
+        if n_stem == 0 {
+            let tip = atom
+                .body
                 .iter()
                 .filter(|(_, _, m)| *m == ModuleId::Photosystem)
                 .copied()
                 .max_by_key(|&(x, y, _)| (y, x.unsigned_abs()))
                 .map(|(x, y, _)| (x, y))
-        } else {
-            atom.body
-                .iter()
-                .filter(|(_, _, m)| *m == ModuleId::Photosystem)
-                .copied()
-                .max_by_key(|&(x, y, _)| {
-                    let cant = leaf_support_dist(atom, x, y);
-                    (cant, x.unsigned_abs(), y)
-                })
-                .map(|(x, y, _)| (x, y))
-        };
-
-        if let Some((tx, ty)) = tip {
-            let dirs: &[(i16, i16)] = if n_stem > 0 {
-                // Outward / down first (hanging leaves); climb only when wet.
-                &[(1, 0), (-1, 0), (1, -1), (-1, -1), (1, 1), (-1, 1), (0, 1)]
-            } else {
-                // Seaweed: grow up with the water column — no dry laterals.
-                &[(0, 1), (1, 1), (-1, 1)]
+                .or_else(|| {
+                    atom.body
+                        .iter()
+                        .find(|(_, _, m)| *m == ModuleId::Nucleus)
+                        .map(|&(x, y, _)| (x, y))
+                });
+            let Some((tx, ty)) = tip else {
+                return false;
             };
-            for &(dx, dy) in dirs {
+            for &(dx, dy) in &[(0i16, 1i16), (1, 1), (-1, 1)] {
                 let nx = tx + dx;
                 let ny = ty + dy;
-                if ny < -8 || ny > 16 || occupied.contains(&(nx, ny)) {
+                if ny > 16 || occupied.contains(&(nx, ny)) {
                     continue;
                 }
-                // Never park a leaf on the olive tip column — blocks stem.
-                if n_stem > 0
-                    && atom
-                        .body
-                        .iter()
-                        .any(|&(x, y, m)| m == ModuleId::Stem && x == nx && y == ny - 1)
-                {
-                    continue;
-                }
-                if dy > 0 {
-                    let wx = world.wrap_x(atom.gx + nx as i32);
-                    let wy = atom.gy + ny as i32;
-                    if !crate::rules::is_standing_water(world, wx, wy) {
-                        continue;
-                    }
-                }
-                atom.energy -= cost;
-                atom.body.push((nx, ny, ModuleId::Photosystem));
-                return true;
-            }
-            // Stemless: one ribbon — do not side-sprout a second frond.
-            if n_stem == 0 {
-                return false;
-            }
-        }
-
-        // New leaf beside tallest stem (or nucleus if no tip yet).
-        let anchor = if n_stem > 0 {
-            atom.body
-                .iter()
-                .filter(|(_, _, m)| *m == ModuleId::Stem)
-                .max_by_key(|(_, y, _)| *y)
-                .map(|&(x, y, _)| (x, y))
-        } else {
-            atom.body
-                .iter()
-                .find(|(_, _, m)| *m == ModuleId::Nucleus)
-                .map(|&(x, y, _)| (x, y))
-        };
-        let Some((tx, ty)) = anchor else {
-            return false;
-        };
-        let dirs: &[(i16, i16)] = if n_stem > 0 {
-            &[(1, 0), (-1, 0), (1, 1), (-1, 1)]
-        } else {
-            &[(0, 1), (1, 0), (-1, 0), (1, 1), (-1, 1)]
-        };
-        for &(dx, dy) in dirs {
-            let nx = tx + dx;
-            let ny = ty + dy;
-            if ny > 16 || occupied.contains(&(nx, ny)) {
-                continue;
-            }
-            // Keep trunk column clear of stacked leaves.
-            if n_stem > 0 && nx == tx {
-                continue;
-            }
-            // Stemless first leaf: only climb into standing water.
-            if n_stem == 0 && dy > 0 {
                 let wx = world.wrap_x(atom.gx + nx as i32);
                 let wy = atom.gy + ny as i32;
                 if !crate::rules::is_standing_water(world, wx, wy) {
                     continue;
                 }
+                atom.energy -= cost;
+                atom.body.push((nx, ny, ModuleId::Photosystem));
+                return true;
             }
-            atom.energy -= cost;
-            atom.body.push((nx, ny, ModuleId::Photosystem));
-            return true;
+            return false;
+        }
+
+        // —— Woody canopy: short petioles beside the trunk/branch.
+        // Prefer a new side-leaf on a stem cell over elongating one tip into
+        // a seaweed-like ribbon. Cap cantilever at [`WOODY_LEAF_MAX_CANT`].
+        let mut stem_anchors: Vec<(i16, i16)> = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Stem)
+            .map(|&(x, y, _)| (x, y))
+            .collect();
+        // Prefer higher stem first, then fill gaps lower on the trunk.
+        stem_anchors.sort_by_key(|&(_, y)| std::cmp::Reverse(y));
+        const SIDE: [(i16, i16); 4] = [(1, 0), (-1, 0), (1, 1), (-1, 1)];
+        for &(tx, ty) in &stem_anchors {
+            for &(dx, dy) in &SIDE {
+                let nx = tx + dx;
+                let ny = ty + dy;
+                if ny > 16 || nx == tx || occupied.contains(&(nx, ny)) {
+                    continue;
+                }
+                if leaf_support_dist(atom, nx, ny) > WOODY_LEAF_MAX_CANT {
+                    continue;
+                }
+                atom.energy -= cost;
+                atom.body.push((nx, ny, ModuleId::Photosystem));
+                return true;
+            }
+        }
+
+        // Short tip extend only while under the woody petiole cap (no climb).
+        let tip = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .copied()
+            .max_by_key(|&(x, y, _)| {
+                let cant = leaf_support_dist(atom, x, y);
+                (cant, x.unsigned_abs(), y)
+            })
+            .map(|(x, y, _)| (x, y));
+        if let Some((tx, ty)) = tip {
+            if leaf_support_dist(atom, tx, ty) < WOODY_LEAF_MAX_CANT {
+                for &(dx, dy) in &[(1i16, 0i16), (-1, 0), (1, -1), (-1, -1)] {
+                    let nx = tx + dx;
+                    let ny = ty + dy;
+                    if ny > 16 || occupied.contains(&(nx, ny)) {
+                        continue;
+                    }
+                    if leaf_support_dist(atom, nx, ny) > WOODY_LEAF_MAX_CANT {
+                        continue;
+                    }
+                    // Keep the olive tip column clear.
+                    if atom
+                        .body
+                        .iter()
+                        .any(|&(x, y, m)| m == ModuleId::Stem && x == nx && y == ny - 1)
+                    {
+                        continue;
+                    }
+                    atom.energy -= cost;
+                    atom.body.push((nx, ny, ModuleId::Photosystem));
+                    return true;
+                }
+            }
         }
         false
     };
@@ -1812,13 +1810,14 @@ mod tests {
     }
 
     #[test]
-    fn stemmed_plant_elongates_soft_leaf_chain() {
+    fn woody_canopy_keeps_short_petioles_not_seaweed_ribbons() {
         let w = moist_plot();
         let body = vec![
             (0, -1, ModuleId::Root),
             (0, 0, ModuleId::Nucleus),
             (0, 1, ModuleId::Stem),
             (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Stem),
             (1, 2, ModuleId::Photosystem),
         ];
         let mut atom = Atom::from_body(4, 2, 80.0, body);
@@ -1844,8 +1843,25 @@ mod tests {
             "leaf-heavy shoot should add Photosystems"
         );
         assert!(
-            max_cant >= 3,
-            "soft leaf chain should lengthen past a short petiole (cant={max_cant})"
+            max_cant <= WOODY_LEAF_MAX_CANT,
+            "woody leaves must stay short petioles (cant={max_cant} > {WOODY_LEAF_MAX_CANT})"
+        );
+        // Prefer filling beside the trunk over one long tip chain.
+        let leaf_cols: HashSet<i16> = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|&(x, _, _)| x)
+            .collect();
+        let leaf_rows: HashSet<i16> = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|&(_, y, _)| y)
+            .collect();
+        assert!(
+            leaf_cols.len() >= 2 || leaf_rows.len() >= 2,
+            "new leaves should fan beside the stem, not one seaweed tip"
         );
         assert!(stem_count(&atom) >= 1, "trunk stays");
     }
