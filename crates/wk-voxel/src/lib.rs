@@ -62,8 +62,8 @@ pub use failure::{
     COMPACTION_SIGMA_MIN,
 };
 pub use fungi::{
-    add_soft_litter, compost_organic_to_soil, is_fungus, max_mycelium_near, seed_mycelium_near,
-    soft_litter_at, step_mycelium_field,
+    add_soft_litter, compost_organic_to_soil, is_fungus, is_surface_stalk, max_mycelium_near,
+    seed_mycelium_near, soft_litter_at, step_mycelium_field,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,

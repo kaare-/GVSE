@@ -104,9 +104,11 @@ Features:
   pixels). Plant it on Organic; it seeds the ground network.
 - **Mycelium is a ground field** (`Cell::_pad` on Organic), not something you
   paint in the creature editor. `step_mycelium_field` thickens / spreads on
-  moist Organic even after the fruiting body dies.
-- Rich cream networks can **emerge a new fruiting body**, which can then
-  spread wind-biased spores to other Organic / litter columns
+  moist Organic even after the fruiting body dies; threads prefer climbing
+  toward free Air.
+- Networks that **breach the surface from below** can emerge a **surface
+  stalk**. Buried bodies rhizomorph-hop locally; stalks wind-disperse spores
+  far (`ReproSpore`).
 - Soft litter — bonus energy sip; Organic forage scales with field intensity
 - Established moist networks support fruiting bodies (no energy-starve)
 - Standing rain counts as moisture; **never** flash Organic → Sand
