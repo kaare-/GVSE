@@ -965,7 +965,7 @@ fn step_fungus(
         let want = digest_budget_units(&atom.genome, atom);
         let (_taken, from_litter) = digest_labile(world, atom.gx, atom.gy, want);
         let from_organic = forage_organic_energy(world, atom.gx, atom.gy, &atom.genome, atom);
-        let from_myc = colonize_and_compost(world, atom.gx, atom.gy, &atom.genome, atom);
+        let from_myc = colonize_and_compost(world, atom.gx, atom.gy, &atom.genome, atom, tick);
         atom.energy =
             (atom.energy + from_litter + from_organic + from_myc).min(atom.energy_max);
     }
@@ -1886,6 +1886,72 @@ mod tests {
             store.corpse_count(),
             1,
             "prolonged starve should leave a corpse after hibernate max"
+        );
+    }
+
+    #[test]
+    fn fungus_mycelium_thickens_near_seat_under_physics() {
+        use crate::failure::FailureConfig;
+        use crate::rules::{tick_with_life, PerfConfig};
+        let mut w = moist_sand_plot();
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(200);
+            w.set_cell(4, y, org);
+        }
+        let mut store = OrganismStore::new();
+        let g = Genome {
+            digest_rate: 1.0,
+            ..Genome::default()
+        };
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            3,
+            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
+            40.0,
+            g,
+        ));
+        let (fx, fy) = (store.atoms[0].gx, store.atoms[0].gy);
+        crate::fungi::seed_mycelium_near(&mut w, fx, fy, 32);
+        let myc_near0 = (-1..=1)
+            .flat_map(|dy| {
+                w.get_cell(fx, fy + dy)
+                    .map(|c| {
+                        if c.material == MaterialId::Organic {
+                            c.mycelium()
+                        } else {
+                            0
+                        }
+                    })
+            })
+            .max()
+            .unwrap_or(0);
+        let perf = PerfConfig::default();
+        let fail = FailureConfig::default();
+        for _ in 0..400 {
+            tick_with_life(&mut w, &perf, &fail, None, None);
+            let tick = w.tick;
+            store.step(&mut w, tick);
+        }
+        assert_eq!(store.len(), 1);
+        let (fx, fy) = (store.atoms[0].gx, store.atoms[0].gy);
+        let myc_near1 = (-2..=2)
+            .flat_map(|dy| {
+                w.get_cell(fx, fy + dy)
+                    .map(|c| {
+                        if c.material == MaterialId::Organic {
+                            c.mycelium()
+                        } else {
+                            0
+                        }
+                    })
+            })
+            .max()
+            .unwrap_or(0);
+        assert!(
+            myc_near1 > myc_near0,
+            "mycelium must thicken near the fungus (was {myc_near0}, now {myc_near1})"
         );
     }
 

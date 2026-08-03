@@ -212,20 +212,40 @@ pub fn digest_budget_units(genome: &Genome, atom: &Atom) -> u16 {
     u.clamp(1, DIGEST_MAX_UNITS)
 }
 
+/// Pick an Organic cell to thread next.
+///
+/// Prefer close cells under/around the fungus and thicken an existing
+/// patch before spraying +1 onto the farthest clean cell in the scan
+/// window (that dilution made colonies look idle while energy still rose).
 fn find_organic_xy(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
     let gx = world.wrap_x(gx);
-    let mut best: Option<(u8, i32, i32)> = None; // lowest mycelium first
+    let mut best: Option<(i32, i32, i32)> = None; // score, x, y — lower wins
     for dx in -ORGANIC_SCAN_RADIUS..=ORGANIC_SCAN_RADIUS {
         let nx = world.wrap_x(gx + dx);
         for dy in -ORGANIC_SCAN_DEPTH..=ORGANIC_SCAN_DEPTH {
             let y = gy + dy;
-            if let Some(c) = world.get_cell(nx, y) {
-                if c.material == MaterialId::Organic {
-                    let m = c.mycelium();
-                    if best.map(|(bm, _, _)| m < bm).unwrap_or(true) {
-                        best = Some((m, nx, y));
-                    }
-                }
+            let Some(c) = world.get_cell(nx, y) else {
+                continue;
+            };
+            if c.material != MaterialId::Organic {
+                continue;
+            }
+            let m = c.mycelium();
+            if m >= 255 {
+                continue;
+            }
+            let dist = dx.abs() + dy.abs();
+            // 0 = young patch (keep thickening), 1 = mid, 2 = virgin frontier.
+            let stage = if (1..80).contains(&m) {
+                0
+            } else if m >= 80 {
+                1
+            } else {
+                2
+            };
+            let score = dist * 8 + stage;
+            if best.map(|(bs, _, _)| score < bs).unwrap_or(true) {
+                best = Some((score, nx, y));
             }
         }
     }
@@ -320,12 +340,16 @@ pub fn digest_labile(world: &mut World, gx: i32, _gy: i32, want: u16) -> (u16, f
 
 /// Grow mycelium with gene/hypha scaling; compost when ready.
 /// Preferred entry from `step_fungus` (includes genome).
+///
+/// Uses the organism `tick` (not only `World::tick`) so growth stays paced
+/// with the creature step even if callers disagree on world clock sync.
 pub fn colonize_and_compost(
     world: &mut World,
     gx: i32,
     gy: i32,
     genome: &Genome,
     atom: &Atom,
+    tick: u64,
 ) -> f32 {
     let mut energy = 0.0f32;
     let n_h = hypha_count(atom) as u8;
@@ -333,7 +357,7 @@ pub fn colonize_and_compost(
     // Period stretches when digest_rate is low; high rate shortens slightly.
     let period = ((MYCELIUM_GROW_PERIOD as f32) / rate.clamp(0.25, 2.0)).round() as u64;
     let period = period.max(8);
-    if world.tick % period != 0 {
+    if tick % period != 0 {
         return 0.0;
     }
     let Some((ox, oy)) = find_organic_xy(world, gx, gy) else {
@@ -342,8 +366,21 @@ pub fn colonize_and_compost(
     if let Some(mut c) = world.get_cell(ox, oy) {
         let before = c.mycelium();
         if before < 255 {
-            let add = MYCELIUM_GROW_AMOUNT.saturating_add(n_h / 4).max(1);
-            c.set_mycelium(before.saturating_add(add.min(3)));
+            // Closer to the fungus → thicker threads (visible local change).
+            let dist = (ox - world.wrap_x(gx)).abs() + (oy - gy).abs();
+            let near_bonus = if dist <= 1 {
+                2
+            } else if dist <= 3 {
+                1
+            } else {
+                0
+            };
+            let add = MYCELIUM_GROW_AMOUNT
+                .saturating_add(n_h / 4)
+                .saturating_add(near_bonus)
+                .max(1)
+                .min(4);
+            c.set_mycelium(before.saturating_add(add));
             world.set_cell(ox, oy, c);
             energy += MYCELIUM_ENERGY * (1.0 + 0.05 * n_h as f32);
         }
@@ -352,13 +389,13 @@ pub fn colonize_and_compost(
             .map(|c| c.mycelium())
             .unwrap_or(before);
         if intensity >= MYCELIUM_SOIL_THRESHOLD {
-            let h = hash_u64(world.seed.0, world.tick, ox as u64, oy as u64);
+            let h = hash_u64(world.seed.0, tick, ox as u64, oy as u64);
             if h % MYCELIUM_SOIL_CONVERT_ODDS == 0 {
                 compost_organic_to_soil(world, ox, oy);
             }
         }
     }
-    let h = hash_u64(world.seed.0, world.tick, gx as u64, 0x51CE_A11C);
+    let h = hash_u64(world.seed.0, tick, gx as u64, 0x51CE_A11C);
     if h % MYCELIUM_SPREAD_ODDS == 0 {
         spread_mycelium_once(world, ox, oy);
     }
@@ -690,13 +727,12 @@ mod tests {
             org.sat = Sat(100);
             w.set_cell(4, y, org);
         }
-        w.tick = MYCELIUM_GROW_PERIOD;
         let g = Genome {
             digest_rate: 1.0,
             ..Genome::default()
         };
         let atom = Atom::from_body(4, 3, 40.0, fungus_body());
-        let _ = colonize_and_compost(&mut w, 4, 3, &g, &atom);
+        let _ = colonize_and_compost(&mut w, 4, 3, &g, &atom, MYCELIUM_GROW_PERIOD);
         let sands = (1..=4)
             .filter(|&y| {
                 w.get_cell(4, y)
@@ -711,6 +747,55 @@ mod tests {
                 .unwrap_or(false)
         });
         assert!(threaded, "should raise mycelium on Organic");
+    }
+
+    #[test]
+    fn colonize_thickens_organic_under_fungus_not_far_pad() {
+        let mut w = litter_plot();
+        // Near Organic under the seat + a far Organic pad in scan radius.
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(100);
+            w.set_cell(4, y, org);
+        }
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(100);
+            w.set_cell(6, y, org); // dx=2 edge of scan
+        }
+        let g = Genome {
+            digest_rate: 1.0,
+            ..Genome::default()
+        };
+        let atom = Atom::from_body(4, 3, 40.0, fungus_body());
+        // Seed a young patch under the fungus, leave far cells virgin.
+        if let Some(mut c) = w.get_cell(4, 2) {
+            c.set_mycelium(24);
+            w.set_cell(4, 2, c);
+        }
+        for pulse in 0..12u64 {
+            let _ = colonize_and_compost(
+                &mut w,
+                4,
+                3,
+                &g,
+                &atom,
+                MYCELIUM_GROW_PERIOD * (pulse + 1),
+            );
+        }
+        let near = w.get_cell(4, 2).unwrap().mycelium();
+        let far = (1..=3)
+            .map(|y| w.get_cell(6, y).unwrap().mycelium())
+            .max()
+            .unwrap();
+        assert!(
+            near > 24,
+            "patch under fungus must thicken (got {near})"
+        );
+        assert!(
+            near > far,
+            "near colony should outpace far virgin pad (near={near} far={far})"
+        );
     }
 
     #[test]
