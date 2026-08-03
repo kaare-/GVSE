@@ -475,13 +475,43 @@ fn air_above_solid(world: &World, gx: i32, nucleus_y: i32) -> bool {
 /// Fungus seat: Air above any solid. Prefers Organic / wet Sand, but
 /// will land on bare rock too (may starve later — that's fine).
 pub fn find_fungus_slot(world: &World, gx: i32, gy: i32) -> Option<i32> {
+    find_fungus_slot_biased(world, gx, gy, false)
+}
+
+/// Like [`find_fungus_slot`], but `prefer_surface` seats wind-spore children
+/// in Air above Organic (stalks) instead of burying them in the bed.
+pub fn find_fungus_slot_biased(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    prefer_surface: bool,
+) -> Option<i32> {
     let gx = world.wrap_x(gx);
     let mut best: Option<(i32, i32)> = None; // score, y
     let consider = |world: &World, y: i32, best: &mut Option<(i32, i32)>| {
         if !fungus_crown(world, gx, y) {
             return;
         }
-        let score = fungus_seat_score(world, gx, y);
+        let mut score = fungus_seat_score(world, gx, y);
+        if prefer_surface {
+            if let Some(here) = world.get_cell(gx, y) {
+                if here.material == MaterialId::Air {
+                    // Prefer standing on Organic / Soil for a visible stalk.
+                    score = match world.get_cell(gx, y - 1).map(|c| c.material) {
+                        Some(MaterialId::Organic) => {
+                            200 + world
+                                .get_cell(gx, y - 1)
+                                .map(|c| c.mycelium() as i32 / 4)
+                                .unwrap_or(0)
+                        }
+                        Some(MaterialId::Soil) => 160,
+                        _ => score + 40,
+                    };
+                } else if here.material == MaterialId::Organic {
+                    score /= 2; // deprioritize buried seats for wind spores
+                }
+            }
+        }
         if best.map(|(s, _)| score > s).unwrap_or(true) {
             *best = Some((score, y));
         }

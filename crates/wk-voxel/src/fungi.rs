@@ -8,8 +8,13 @@
 //! - **Mycelium field** — `Cell::_pad` intensity on Organic. Lives in the
 //!   ground as a world process ([`step_mycelium_field`]); keeps spreading
 //!   in moist Organic after the fruiting body dies. Not studio-painted.
-//!   Rich moist networks can [`try_emergent_fruiting`] a new body, which
-//!   may later [`try_spore`].
+//!   Threads prefer climbing toward free Air; a rich moist network that
+//!   has breached the surface can [`try_emergent_fruiting`].
+//! - **Two dispersal habits** via [`try_spore`]:
+//!   - *Underground* (nucleus in Organic) — short rhizomorph hops that
+//!     seed mycelium nearby (no wind launch).
+//!   - *Surface stalk* (nucleus in Air above the bed) — wind carries
+//!     spores far once the column is surface-ready.
 //! Soft litter is bonus fuel. Long colonization may compost Organic → Soil
 //! (never Sand). Spec: `docs/organism/FUNGI.md`, `docs/organism/VOXEL_PLANTS.md`.
 
@@ -19,7 +24,7 @@ use crate::blueprint::{mutate_body, Genome};
 use crate::cell::{water_capacity, Cell, CellFlags};
 use crate::grid::World;
 use crate::organism::{Atom, ModuleId};
-use crate::plant::{apply_genome, find_fungus_slot, pin_plant_pose};
+use crate::plant::{apply_genome, find_fungus_slot_biased, pin_plant_pose};
 
 /// Soft litter units treated as fully labile food (per column).
 /// Stratigraphic Organic cells are substrate (mycelium), not instant fuel.
@@ -83,8 +88,13 @@ pub const FUNGUS_DORMANT_UPKEEP: f32 = 0.15;
 pub const FUNGUS_SPORE_ENERGY_FRAC: f32 = 0.70;
 /// Minimum ticks between fruiting attempts (very rare).
 pub const FUNGUS_SPORE_PERIOD: u64 = 2_400;
-/// Max columns a wind-borne spore may travel.
-pub const FUNGUS_SPORE_MAX_DIST: i32 = 28;
+/// Min / max columns a *surface stalk* wind spore may travel.
+pub const FUNGUS_STALK_SPORE_MIN_DIST: i32 = 6;
+pub const FUNGUS_STALK_SPORE_MAX_DIST: i32 = 36;
+/// Max columns an *underground* rhizomorph hop may travel (local only).
+pub const FUNGUS_RHIZOMORPH_MAX_DIST: i32 = 5;
+/// Legacy alias — stalk wind ceiling (HUD / settings may still refer).
+pub const FUNGUS_SPORE_MAX_DIST: i32 = FUNGUS_STALK_SPORE_MAX_DIST;
 /// Neighbourhood half-width for local fruiting-body density gate.
 pub const FUNGUS_SPORE_LOCAL_RADIUS: i32 = 4;
 /// Max living fruiting bodies in `[gx±radius]` before further spores
@@ -415,7 +425,20 @@ fn find_organic_xy(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
             } else {
                 2
             };
-            let score = dist * 8 + stage;
+            // Prefer climbing toward free Air so networks breach the surface
+            // before raising a stalk (slight bias — still thicken near seat).
+            let open_above = matches!(
+                world.get_cell(nx, y + 1),
+                Some(a) if a.material == MaterialId::Air
+            );
+            let climb = if open_above {
+                0
+            } else if dy > 0 {
+                1
+            } else {
+                2
+            };
+            let score = dist * 8 + stage + climb;
             if best.map(|(bs, _, _)| score < bs).unwrap_or(true) {
                 best = Some((score, nx, y));
             }
@@ -576,7 +599,17 @@ pub fn colonize_and_compost(
 
 fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
     let gx = world.wrap_x(gx);
-    for (dx, dy) in [(1i32, 0), (-1, 0), (0, 1), (0, -1), (1, -1), (-1, -1)] {
+    // Up first — networks grow toward the free surface before lateral fill.
+    for (dx, dy) in [
+        (0i32, 1),
+        (1, 1),
+        (-1, 1),
+        (1, 0),
+        (-1, 0),
+        (0, -1),
+        (1, -1),
+        (-1, -1),
+    ] {
         let nx = world.wrap_x(gx + dx);
         let ny = gy + dy;
         if let Some(mut c) = world.get_cell(nx, ny) {
@@ -618,10 +651,26 @@ pub fn is_fungus_seated(world: &World, atom: &Atom) -> bool {
     )
 }
 
-/// True when this column has colonized Organic open to Air (fruiting site).
+/// True when the fruiting body sits in Air above the bed (surface stalk).
+/// Stalks launch wind spores; buried bodies only rhizomorph-hop locally.
+pub fn is_surface_stalk(world: &World, atom: &Atom) -> bool {
+    let gx = world.wrap_x(atom.gx);
+    let Some(here) = world.get_cell(gx, atom.gy) else {
+        return false;
+    };
+    if here.material != MaterialId::Air {
+        return false;
+    }
+    matches!(
+        world.get_cell(gx, atom.gy - 1),
+        Some(c) if c.material != MaterialId::Air
+    )
+}
+
+/// True when colonized Organic in this column is open to Air *and* the
+/// network has threaded from below (not a lone surface film).
 pub fn fruiting_surface_ready(world: &World, gx: i32) -> Option<i32> {
     let gx = world.wrap_x(gx);
-    // Scan for Organic with mycelium that has Air directly above.
     for y in (-64..128).rev() {
         let Some(c) = world.get_cell(gx, y) else {
             continue;
@@ -629,17 +678,52 @@ pub fn fruiting_surface_ready(world: &World, gx: i32) -> Option<i32> {
         if c.material != MaterialId::Organic || c.mycelium() < 80 {
             continue;
         }
-        if matches!(
+        if !matches!(
             world.get_cell(gx, y + 1),
             Some(a) if a.material == MaterialId::Air
         ) {
-            return Some(y + 1); // Air cell for the fruiting body / spore launch
+            continue;
         }
+        if !mycelium_breached_from_below(world, gx, y) {
+            continue;
+        }
+        return Some(y + 1); // Air cell for the fruiting body / spore launch
     }
     None
 }
 
-/// Pick a downwind Organic seat for a spore (wind-biased).
+/// Surface Organic must connect to deeper mycelium (grew upward to breach).
+fn mycelium_breached_from_below(world: &World, gx: i32, surface_y: i32) -> bool {
+    // Same-column deeper thread, or a neighbour column feeder at/below.
+    for dy in 1..=4 {
+        let y = surface_y - dy;
+        if matches!(
+            world.get_cell(gx, y),
+            Some(c) if c.material == MaterialId::Organic && c.mycelium() > 0
+        ) {
+            return true;
+        }
+    }
+    for dx in [-1i32, 1] {
+        let nx = world.wrap_x(gx + dx);
+        for dy in 0..=3 {
+            let y = surface_y - dy;
+            if matches!(
+                world.get_cell(nx, y),
+                Some(c) if c.material == MaterialId::Organic && c.mycelium() >= 16
+            ) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+/// Pick a seat for a spore / rhizomorph hop.
+///
+/// - `wind_far`: surface stalk — prefer farther downwind seats.
+/// - otherwise: underground — short local hops only.
+///
 /// Skips columns that already host a living fruiting body and enforces
 /// a soft local density cap ([`FUNGUS_SPORE_LOCAL_MAX`]).
 pub fn pick_spore_site(
@@ -649,6 +733,18 @@ pub fn pick_spore_site(
     id: u32,
     wind_vx: f32,
     fungus_cols: &[i32],
+) -> Option<(i32, i32)> {
+    pick_spore_site_mode(world, atom, tick, id, wind_vx, fungus_cols, is_surface_stalk(world, atom))
+}
+
+fn pick_spore_site_mode(
+    world: &World,
+    atom: &Atom,
+    tick: u64,
+    id: u32,
+    wind_vx: f32,
+    fungus_cols: &[i32],
+    wind_far: bool,
 ) -> Option<(i32, i32)> {
     let wx0 = atom.gx;
     let prefer_dir = if wind_vx.abs() < 0.05 {
@@ -663,8 +759,13 @@ pub fn pick_spore_site(
     } else {
         -1
     };
+    let (min_d, max_d) = if wind_far {
+        (FUNGUS_STALK_SPORE_MIN_DIST, FUNGUS_STALK_SPORE_MAX_DIST)
+    } else {
+        (1, FUNGUS_RHIZOMORPH_MAX_DIST)
+    };
     let mut best: Option<(f32, i32, i32)> = None;
-    for dist in 1..=FUNGUS_SPORE_MAX_DIST {
+    for dist in min_d..=max_d {
         for &sign in &[prefer_dir, -prefer_dir] {
             let wx = world.wrap_x(wx0 + sign * dist);
             if fungus_cols.iter().any(|&ox| world.wrap_x(ox) == wx) {
@@ -674,7 +775,7 @@ pub fn pick_spore_site(
             if local >= FUNGUS_SPORE_LOCAL_MAX {
                 continue;
             }
-            let Some(gy) = find_fungus_slot(world, wx, atom.gy) else {
+            let Some(gy) = find_fungus_slot_biased(world, wx, atom.gy, wind_far) else {
                 continue;
             };
             // Prefer Organic substrate; allow any fungus seat as bank.
@@ -684,7 +785,13 @@ pub fn pick_spore_site(
                 continue;
             }
             let downwind = if sign == prefer_dir { 2.0 } else { 0.0 };
-            let score = organic * 3.0 + litter * 0.05 - dist as f32 * 0.15 + downwind;
+            let score = if wind_far {
+                // Aerial stalk: farther downwind is better (like ferns).
+                organic * 2.0 + litter * 0.04 + dist as f32 * 0.06 + downwind
+            } else {
+                // Rhizomorph: stay close, thicken the local network.
+                organic * 3.0 + litter * 0.05 - dist as f32 * 0.35 + downwind * 0.25
+            };
             if best.map(|(s, _, _)| score > s).unwrap_or(true) {
                 best = Some((score, wx, gy));
             }
@@ -723,9 +830,9 @@ pub fn seed_mycelium_near(world: &mut World, gx: i32, gy: i32, amount: u8) {
     }
 }
 
-/// Mycelium field raises a surface fruiting body on a well-threaded, moist
-/// Organic column (no living parent required). The new body can later
-/// [`try_spore`].
+/// Mycelium field raises a surface stalk once a moist network has climbed
+/// to Organic open to Air (no living parent required). The new body can
+/// later [`try_spore`] on the wind.
 pub fn try_emergent_fruiting(
     world: &mut World,
     occupied_fungus_cols: &[i32],
@@ -757,6 +864,10 @@ pub fn try_emergent_fruiting(
                     world.get_cell(gx, gy + 1),
                     Some(a) if a.material == MaterialId::Air
                 ) {
+                    continue;
+                }
+                // Must have grown up from below — not a lone surface film.
+                if !mycelium_breached_from_below(world, gx, gy) {
                     continue;
                 }
                 if occupied_fungus_cols
@@ -810,8 +921,14 @@ pub fn try_emergent_fruiting(
     Some(child)
 }
 
-/// Rare fruiting: energy cost, wind-biased spore child on Organic / litter.
-/// Requires at least one painted [`ModuleId::ReproSpore`] on the fruiting body.
+/// Rare dispersal: energy cost, child on Organic / litter.
+///
+/// Requires painted [`ModuleId::ReproSpore`]. Habit depends on seating:
+/// - **Surface stalk** — column must be [`fruiting_surface_ready`]; wind
+///   carries the child far ([`FUNGUS_STALK_SPORE_MIN_DIST`]…).
+/// - **Underground** — short rhizomorph hop ([`FUNGUS_RHIZOMORPH_MAX_DIST`])
+///   that seeds mycelium nearby (no surface / wind requirement).
+///
 /// One living fruiting body per column + local density gate (anti-flood).
 pub fn try_spore(
     world: &mut World,
@@ -837,8 +954,13 @@ pub fn try_spore(
     {
         return None;
     }
-    // Fruiting bodies only launch from a surface-ready column.
-    if fruiting_surface_ready(world, atom.gx).is_none() {
+    let stalk = is_surface_stalk(world, atom);
+    // Stalks only launch once mycelium has breached this column's surface.
+    if stalk && fruiting_surface_ready(world, atom.gx).is_none() {
+        return None;
+    }
+    // Buried bodies may rhizomorph without a surface breach.
+    if !stalk && !is_fungus_seated(world, atom) {
         return None;
     }
     let local = count_fungi_near(
@@ -859,18 +981,23 @@ pub fn try_spore(
     if atom.energy < tank * FUNGUS_SPORE_ENERGY_FRAC {
         return None;
     }
-    // Extra rarity gate beyond cooldown.
+    // Extra rarity gate beyond cooldown (stalks rarer than local hops).
     let h = hash_u64(world.seed.0, tick, entity_id as u64, 0xF801_700D);
-    if h % 17 != 0 {
+    let odds = if stalk { 17 } else { 11 };
+    if h % odds != 0 {
         return None;
     }
-    let (wx, gy) = pick_spore_site(world, atom, tick, entity_id, wind_vx, fungus_cols)?;
-    let cost = tank * 0.45;
+    let (wx, gy) = pick_spore_site_mode(world, atom, tick, entity_id, wind_vx, fungus_cols, stalk)?;
+    let cost = tank * if stalk { 0.45 } else { 0.32 };
     if atom.energy < cost {
         return None;
     }
     atom.energy -= cost;
-    atom.cooldown = FUNGUS_SPORE_PERIOD;
+    atom.cooldown = if stalk {
+        FUNGUS_SPORE_PERIOD
+    } else {
+        FUNGUS_SPORE_PERIOD / 2
+    };
 
     // Inherit parent fruiting-body pixels, then morph-mutate.
     let mut body = mutate_body(
@@ -895,15 +1022,19 @@ pub fn try_spore(
     apply_genome(&mut child, child_genome);
     child.energy = (cost * 0.5).clamp(1.0, child.energy_max);
     // Children must mature before chaining another spore burst.
-    child.cooldown = FUNGUS_SPORE_PERIOD.saturating_mul(2);
+    child.cooldown = if stalk {
+        FUNGUS_SPORE_PERIOD.saturating_mul(2)
+    } else {
+        FUNGUS_SPORE_PERIOD
+    };
     pin_plant_pose(&mut child);
     if !is_fungus_seated(world, &child) {
         atom.energy = (atom.energy + cost).min(atom.energy_max);
         atom.cooldown = 0;
         return None;
     }
-    // Spore germinates as faint white threads in the landing Organic.
-    seed_mycelium_near(world, wx, gy, 24);
+    // Spore / rhizomorph germinates as faint threads in the landing Organic.
+    seed_mycelium_near(world, wx, gy, if stalk { 24 } else { 18 });
     Some(child)
 }
 
@@ -1257,11 +1388,17 @@ mod tests {
         assert!(myc1 >= 48 + 4, "moist field should keep growing without a fruiting body");
     }
 
+    /// Moist Organic column with mycelium that has climbed from below.
     fn rich_moist_surface(w: &mut World, gx: i32, myc: u8) {
         for y in 1..=3 {
             let mut org = Cell::solid(MaterialId::Organic);
             org.sat = Sat(160);
             w.set_cell(gx, y, org);
+        }
+        // Deeper feeder + surface breach (emergence / stalk gate).
+        if let Some(mut c) = w.get_cell(gx, 2) {
+            c.set_mycelium((myc / 2).max(24));
+            w.set_cell(gx, 2, c);
         }
         if let Some(mut c) = w.get_cell(gx, 3) {
             c.set_mycelium(myc);
@@ -1286,14 +1423,56 @@ mod tests {
         let child = child.expect("rich moist mycelium must eventually raise a fruiting body");
         assert!(is_fungus(&child), "emergent body must be fungus habit");
         assert!(
-            is_fungus_seated(&w, &child),
-            "emergent body must seat on / above Organic"
+            is_surface_stalk(&w, &child),
+            "emergent body must be a surface stalk in Air"
         );
         let myc_after = w.get_cell(4, 3).unwrap().mycelium();
         assert!(
             myc_after < myc_before,
             "emergence must burn mycelium intensity ({myc_before} → {myc_after})"
         );
+    }
+
+    #[test]
+    fn surface_film_alone_does_not_emerge() {
+        let mut w = litter_plot();
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(160);
+            w.set_cell(4, y, org);
+        }
+        // Rich surface only — no deeper feeder thread.
+        if let Some(mut c) = w.get_cell(4, 3) {
+            c.set_mycelium(200);
+            w.set_cell(4, 3, c);
+        }
+        assert!(fruiting_surface_ready(&w, 4).is_none());
+        for pulse in 0..400u64 {
+            let tick = pulse * MYCELIUM_EMERGE_PERIOD;
+            assert!(
+                try_emergent_fruiting(&mut w, &[], tick, true).is_none(),
+                "lone surface film must not raise a stalk"
+            );
+        }
+    }
+
+    #[test]
+    fn mycelium_spread_prefers_upward_neighbor() {
+        let mut w = litter_plot();
+        for y in 1..=4 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(160);
+            w.set_cell(4, y, org);
+        }
+        if let Some(mut c) = w.get_cell(4, 2) {
+            c.set_mycelium(48);
+            w.set_cell(4, 2, c);
+        }
+        spread_mycelium_once(&mut w, 4, 2);
+        let up = w.get_cell(4, 3).unwrap().mycelium();
+        let side = w.get_cell(5, 2).map(|c| c.mycelium()).unwrap_or(0);
+        assert!(up >= 8, "spread should climb toward surface first (up={up})");
+        assert_eq!(side, 0, "lateral should wait until up is taken");
     }
 
     #[test]
@@ -1329,6 +1508,7 @@ mod tests {
         let mut atom = Atom::from_body(4, 4, 40.0, fungus_body());
         atom.energy = atom.energy_max;
         atom.cooldown = 0;
+        assert!(is_surface_stalk(&w, &atom));
         assert!(fruiting_surface_ready(&w, 4).is_some());
         let mut spore = None;
         for tick in 0..4_000u64 {
@@ -1339,9 +1519,45 @@ mod tests {
                 break;
             }
         }
-        let spore = spore.expect("fruiting body on ready surface must eventually spore");
+        let spore = spore.expect("surface stalk must eventually wind-spore");
         assert!(is_fungus(&spore));
-        assert!(spore.gx != 4, "spore should leave the parent column");
+        let d = (spore.gx - 4).abs();
+        assert!(
+            d >= FUNGUS_STALK_SPORE_MIN_DIST,
+            "stalk wind spore should travel far (dist={d})"
+        );
+    }
+
+    #[test]
+    fn underground_fungus_rhizomorph_stays_local() {
+        let mut w = litter_plot();
+        for x in 0..12 {
+            for y in 1..=3 {
+                let mut org = Cell::solid(MaterialId::Organic);
+                org.sat = Sat(160);
+                w.set_cell(x, y, org);
+            }
+            add_soft_litter(&mut w, x, 20);
+        }
+        // Buried fruiting body (nucleus inside Organic) — no surface stalk.
+        let mut atom = Atom::from_body(4, 2, 40.0, fungus_body());
+        assert!(!is_surface_stalk(&w, &atom));
+        assert!(is_fungus_seated(&w, &atom));
+        let mut child = None;
+        for tick in 0..4_000u64 {
+            atom.energy = atom.energy_max;
+            atom.cooldown = 0;
+            if let Some(c) = try_spore(&mut w, &mut atom, tick, 11, true, 0.4, &[4]) {
+                child = Some(c);
+                break;
+            }
+        }
+        let child = child.expect("buried fungus should rhizomorph-hop locally");
+        let d = (child.gx - 4).abs();
+        assert!(
+            d >= 1 && d <= FUNGUS_RHIZOMORPH_MAX_DIST,
+            "rhizomorph must stay local (dist={d})"
+        );
     }
 
     #[test]
