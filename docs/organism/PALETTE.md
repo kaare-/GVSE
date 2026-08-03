@@ -40,7 +40,7 @@ not committed a job to.
 | ID | Name | Hex | Job |
 |----|------|-----|-----|
 | `0x00` | Nucleus | `#000000` | Always on. Genome home. Emits life stats (energy, health, clock phase). Baseline upkeep. |
-| `0x01` | Photosystem | `#2ECC40` | Light + water/air → energy. Emits `production` signal. Draw tints toward a dim olive (`#2A5A2E`) when the posed cell is shaded / deep — visual light diagnostic. |
+| `0x01` | Photosystem | `#2ECC40` | Light + water/air → energy. Emits `production` signal. Draw tints toward dim olive (`#3A4E22`) from raw sky × canopy at the posed cell (land and water) — visual light diagnostic; not harvest-remapped. |
 | `0x02` | Chemosystem | `#B58900` | Consume one `ChemType` → energy. Alternate / add-on to photosystem. |
 | `0x03` | ChemoSensor | `#0A6C74` | Reads a gene-chosen `ChemType` local level or gradient → neural input. |
 | `0x04` | ChemoEmitter | `#39CCCC` | Releases a gene-chosen `ChemType` into the water at a controlled rate. |

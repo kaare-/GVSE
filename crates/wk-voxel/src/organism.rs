@@ -40,7 +40,7 @@ use crate::plant::{
 };
 use crate::shade::{
     build_canopy_index_posed, canopy_top_y, effective_photo_light, posed_canopy_sample,
-    CanopyIndex, PosedModule,
+    shade_transmit, CanopyIndex, PosedModule,
 };
 
 /// Default **entity** ceiling (Tab → Creatures can raise/lower).
@@ -118,7 +118,8 @@ pub enum ModuleId {
 /// Bright Photosystem green (full light) — `docs/organism/PALETTE.md`.
 pub const PHOTO_RGB_ACTIVE: (u8, u8, u8) = (0x2E, 0xCC, 0x40);
 /// Dim olive when a leaf is deeply shaded / light-starved (diagnostic).
-pub const PHOTO_RGB_SHADED: (u8, u8, u8) = (0x2A, 0x5A, 0x2E);
+/// Kept well away from active green so land canopies read at a glance.
+pub const PHOTO_RGB_SHADED: (u8, u8, u8) = (0x3A, 0x4E, 0x22);
 
 impl ModuleId {
     /// Frozen RGB from `docs/organism/PALETTE.md`.
@@ -134,11 +135,14 @@ impl ModuleId {
         }
     }
 
-    /// Photosystem tint from effective light `0..1` (active → shaded).
+    /// Photosystem tint from light exposure `0..1` (active → shaded).
+    ///
+    /// Pass **raw** sky × canopy transmit — not harvest-remapped light —
+    /// so `ShadeEfficiency` understory genes don't wash out the diagnostic.
     pub fn photosystem_rgb_for_light(light: f32) -> (u8, u8, u8) {
         let t = light.clamp(0.0, 1.0);
-        // Bias the ramp so middling shade still reads darker than full sun.
-        let t = (t.powf(0.75)).clamp(0.0, 1.0);
+        // Slightly compress highlights so mid-shade still reads darker.
+        let t = (t.powf(1.35)).clamp(0.0, 1.0);
         let (r0, g0, b0) = PHOTO_RGB_SHADED;
         let (r1, g1, b1) = PHOTO_RGB_ACTIVE;
         (
@@ -444,17 +448,19 @@ impl OrganismStore {
         for p in &posed {
             let rgb = if p.mid == ModuleId::Photosystem {
                 let atom = &self.atoms[p.atom_idx];
+                // Raw exposure (sky × canopy), land and water — not the
+                // harvest remap, which understory genes push back toward green.
                 let sky = column_light(world, p.wx, p.wy);
-                let lit = effective_photo_light(
+                let transmit = shade_transmit(
                     &canopy,
                     p.wx,
                     p.wy,
-                    sky,
                     p.atom_idx as u32,
                     atom.photosystem_count(),
-                    &atom.genome,
+                    atom.genome.leaf_absorb,
                 );
-                ModuleId::photosystem_rgb_for_light(lit)
+                let exposure = (sky * transmit).clamp(0.0, 1.0);
+                ModuleId::photosystem_rgb_for_light(exposure)
             } else {
                 p.mid.rgb()
             };
