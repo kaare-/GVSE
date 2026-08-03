@@ -972,7 +972,9 @@ fn step_land_plant(
 
     let (drink_e, sat_taken, drink_at) = drink_roots(world, atom);
     // Sky column light × day, then neighbour canopy + gene remap (D2).
+    // Water column attenuates strongly with depth — deep seats go dark.
     let sample_y = canopy_top_y(atom);
+    let submerged = is_wet_air(world, atom.gx, sample_y);
     let sky = column_light(world, atom.gx, sample_y) * day;
     let light = effective_photo_light(
         canopy,
@@ -997,8 +999,16 @@ fn step_land_plant(
     if atom.energy <= 0.0 {
         return PlantStep::Dead;
     }
-    // Surplus → tissue (root / stem / leaf) from allocation genes.
+    // Surplus → tissue. Submerged + dim light: urge stem toward the
+    // brighter surface (seaweed race) while energy still pays for it.
+    let genome_save = atom.genome;
+    if submerged && light < SUBMERGED_STEM_URGE_LIGHT && crate::plant::stem_count(atom) > 0 {
+        atom.genome.alloc_stem = (atom.genome.alloc_stem + 0.40).min(1.0);
+        atom.genome.alloc_root = (atom.genome.alloc_root * 0.55).max(0.05);
+        atom.genome.alloc_leaf = (atom.genome.alloc_leaf * 0.85).max(0.05);
+    }
     let _ = try_grow_plant(world, atom, tick, trunks, live_roots, growth_caps);
+    atom.genome = genome_save;
     sync_root_storage(atom);
     // Fern-style wind spores before local rhizome (longer range, needs ReproSpore).
     if let Some(child) =
@@ -1283,24 +1293,59 @@ fn occupied_by_other(atoms: &[Atom], self_i: usize, gx: i32, gy: i32) -> bool {
         .any(|(k, a)| k != self_i && a.occupies(gx, gy))
 }
 
-fn column_light(world: &World, gx: i32, gy: i32) -> f32 {
+/// Beer–Lambert-ish transmittance per standing-water (wet Air) cell
+/// when scanning skyward from a photosystem. ~0.85^10 ≈ 0.20 at 10 deep.
+pub const WATER_LIGHT_TRANSMIT: f32 = 0.85;
+/// One-time loss when light crosses the free-water surface into dry air.
+pub const WATER_SURFACE_TRANSMIT: f32 = 0.90;
+/// Below this effective light, submerged stemmed plants urge toward the
+/// surface (seaweed race) while surplus still exists.
+pub const SUBMERGED_STEM_URGE_LIGHT: f32 = 0.42;
+
+/// Sky light remaining at `(gx, gy)` after water / solid occlusion.
+/// Dry air is clear; each wet Air cell attenuates; solids nearly black out.
+pub fn column_sky_light(world: &World, gx: i32, gy: i32) -> f32 {
     let mut light = 1.0f32;
+    let mut under_water = is_wet_air(world, gx, gy);
+    let mut applied_surface = false;
     let mut y = gy + 1;
     let mut steps = 0;
-    while steps < 64 {
+    while steps < 96 {
         match world.get_cell(gx, y) {
-            None => return light,
+            None => break,
             Some(c) if c.material == MaterialId::Air => {
                 if !c.sat.is_empty() {
-                    light *= 0.97;
+                    light *= WATER_LIGHT_TRANSMIT;
+                    under_water = true;
+                } else if under_water {
+                    if !applied_surface {
+                        light *= WATER_SURFACE_TRANSMIT;
+                        applied_surface = true;
+                    }
+                    under_water = false;
                 }
             }
-            Some(_) => return light * 0.15,
+            Some(c)
+                if matches!(
+                    c.material,
+                    MaterialId::Ice | MaterialId::Snow
+                ) =>
+            {
+                light *= 0.35;
+            }
+            Some(_) => {
+                // Buried under rock / soil / Organic — only a trickle.
+                return (light * 0.12).clamp(0.0, 1.0);
+            }
         }
         y += 1;
         steps += 1;
     }
-    light
+    light.clamp(0.0, 1.0)
+}
+
+fn column_light(world: &World, gx: i32, gy: i32) -> f32 {
+    column_sky_light(world, gx, gy)
 }
 
 fn is_wet_air(world: &World, gx: i32, gy: i32) -> bool {
@@ -2188,6 +2233,59 @@ mod tests {
             assert_eq!(c.material, MaterialId::Air);
             assert!(!c.sat.is_empty());
         }
+    }
+
+    #[test]
+    fn water_column_light_fades_with_depth() {
+        // Free surface at y=20; bed wet down to y=1.
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=20 {
+            let mut wet = Cell::air();
+            wet.sat = Sat(255);
+            w.set_cell(4, y, wet);
+        }
+        for y in 21..28 {
+            w.set_cell(4, y, Cell::air());
+        }
+        let surface = column_sky_light(&w, 4, 19); // 1 wet cell above + surface film
+        let mid = column_sky_light(&w, 4, 12);
+        let deep = column_sky_light(&w, 4, 3);
+        assert!(
+            surface > mid && mid > deep,
+            "deeper must be darker (surface={surface}, mid={mid}, deep={deep})"
+        );
+        assert!(
+            deep < 0.15,
+            "deep water must be near-dark for cost/benefit cliff (deep={deep})"
+        );
+        let land = column_sky_light(&w, 4, 22); // dry air, clear sky
+        assert!(
+            land > 0.95,
+            "dry air above the lake must stay bright (land={land})"
+        );
+    }
+
+    #[test]
+    fn raising_canopy_toward_surface_recovers_light() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=16 {
+            let mut wet = Cell::air();
+            wet.sat = Sat(255);
+            w.set_cell(5, y, wet);
+        }
+        for y in 17..24 {
+            w.set_cell(5, y, Cell::air());
+        }
+        let deep = column_sky_light(&w, 5, 4);
+        let taller = column_sky_light(&w, 5, 14);
+        assert!(
+            taller > deep * 2.0,
+            "stem-racing toward the surface must reclaim light ({taller} vs {deep})"
+        );
     }
 
     #[test]

@@ -43,7 +43,10 @@ Falsifiers: root grows into wetter sand; stem-heavy alloc grows taller.
 | `shade_efficiency` | Dim-light harvest vs sun peak |
 
 Features: sparse canopy index + neighbour cast (`shade.rs`, lite
-`LIGHT.md`); plant photo uses `effective_photo_light`. E36/E37 spirit.
+`LIGHT.md`); plant photo uses `effective_photo_light`. Standing water
+attenuates sky light with depth (`column_sky_light`) — deep seats go
+dark, so submerged plants either stem-race toward the surface or fail
+the cost/benefit. E36/E37 spirit.
 
 ### D3 — Vegetative sprout *(landed)*
 
