@@ -79,14 +79,20 @@ pub fn settle_loose_grains(
 /// solid (a real lake / puddle). Mid-air full-sat blobs (condensation /
 /// invisible suspended water) return false so Organic/Snow sink through
 /// instead of hanging forever on an invisible seat.
+///
+/// Partial-sat Air (haze / soak drawdown) still counts as column water —
+/// only a true empty gap (`sat == 0`) breaks grounding. Otherwise floating
+/// litter soak punching a deep donor cell would make the whole lake look
+/// "ungrounded" and Organic would freefall through the ocean every tick.
 fn water_column_grounded_world(world: &World, gx: i32, gy: i32) -> bool {
     let mut y = gy;
     for _ in 0..512 {
         let Some(c) = world.get_cell(gx, y) else {
-            return false;
+            // Ran off the loaded map through water — treat as bedded.
+            return true;
         };
         if c.material == MaterialId::Air {
-            if !c.sat.is_full() {
+            if c.sat.is_empty() {
                 return false;
             }
             y -= 1;
@@ -106,10 +112,13 @@ fn water_column_grounded_ptrs(
     let mut y = gy;
     for _ in 0..512 {
         let Some(c) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, y) }) else {
-            return false;
+            // Lower chunk not in this pass's ptr map (checkerboard / halo)
+            // while we are still in water — do not treat as a suspended
+            // gap or Organic freefalls through the ocean every settle pass.
+            return true;
         };
         if c.material == MaterialId::Air {
-            if !c.sat.is_full() {
+            if c.sat.is_empty() {
                 return false;
             }
             y -= 1;
@@ -138,50 +147,6 @@ fn floats_on_air_seat_ptrs(
     seat.material == MaterialId::Air
         && seat.sat.is_full()
         && water_column_grounded_ptrs(ptrs, wrap_width, gx, gy)
-}
-
-/// True when buoyant litter at `(gx, gy)` still has standing water beside
-/// it — i.e. it occupies a lake cell and should pop into empty Air above
-/// rather than sit flush inside the water column.
-fn litter_needs_freeboard_pop(
-    ptrs: &parallel::ChunkPtrMap,
-    wrap_width: Option<i32>,
-    gx: i32,
-    gy: i32,
-) -> bool {
-    let Some(under) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy - 1) }) else {
-        return false;
-    };
-    if !floats_on_air_seat_ptrs(ptrs, wrap_width, under, gx, gy - 1) {
-        return false;
-    }
-    for dx in [-1, 1] {
-        let Some(side) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx + dx, gy) }) else {
-            continue;
-        };
-        if side.material == MaterialId::Air && side.sat.is_full() {
-            return true;
-        }
-    }
-    false
-}
-
-fn litter_needs_freeboard_pop_world(world: &World, gx: i32, gy: i32) -> bool {
-    let Some(under) = world.get_cell(gx, gy - 1) else {
-        return false;
-    };
-    if !floats_on_air_seat_world(world, under, gx, gy - 1) {
-        return false;
-    }
-    for dx in [-1, 1] {
-        let Some(side) = world.get_cell(gx + dx, gy) else {
-            continue;
-        };
-        if side.material == MaterialId::Air && side.sat.is_full() {
-            return true;
-        }
-    }
-    false
 }
 
 /// Re-dirty every grain / litter cell that has empty (or non-supporting)
@@ -224,12 +189,6 @@ pub fn wake_unsupported_grains(world: &mut World) {
                     // means this cell must buoyancy-rise, not sit forever.
                     if let Some(above) = world.get_cell(gx, gy + 1) {
                         if floats_on_air_seat_world(world, above, gx, gy + 1) {
-                            world.touch_dirty(gx, gy);
-                            world.touch_dirty(gx, gy + 1);
-                        } else if above.material == MaterialId::Air
-                            && above.sat.is_empty()
-                            && litter_needs_freeboard_pop_world(world, gx, gy)
-                        {
                             world.touch_dirty(gx, gy);
                             world.touch_dirty(gx, gy + 1);
                         }
@@ -381,10 +340,10 @@ pub fn settle_loose_grains_regions(
             break;
         }
         let mut moved = 0u32;
-        let fall_passes = partition_checkerboard(&cur);
-        for pass in &fall_passes {
-            moved += apply_grain_fall_regions(world, pass);
-        }
+        // Fall on the full active set (no checkerboard). Splitting by
+        // colour drops lower ocean chunks from the ptr map so float
+        // grounded walks falsely fail and Organic oscillates forever.
+        moved += apply_grain_fall_regions(world, &cur);
         let after_fall = plan_active(world);
         let repose_src = if after_fall.is_empty() {
             cur.clone()
@@ -438,9 +397,11 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                         continue;
                     }
                 } else {
-                    // Buoyancy / freeboard: only when litter sits below —
-                    // never run the expensive grounded-column walk on every
-                    // lake Air cell just to find nothing.
+                    // Buoyancy: only pull litter up through grounded full
+                    // water. (Freeboard pop into empty Air was removed —
+                    // on an uneven ocean surface it swapped Organic up
+                    // then immediately fell back, burning 1024 settle
+                    // passes per tick.)
                     let Some(below) =
                         (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy - 1) })
                     else {
@@ -449,12 +410,7 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                     if !falls_through_empty_air(below.material) {
                         continue;
                     }
-                    let rise = if cur.sat.is_empty() {
-                        litter_needs_freeboard_pop(ptrs, wrap_width, gx, gy - 1)
-                    } else {
-                        floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy)
-                    };
-                    if !rise {
+                    if !floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy) {
                         continue;
                     }
                     unsafe {
@@ -531,18 +487,29 @@ pub fn soak_floating_litter(world: &mut World) {
             continue;
         }
         let mut taken = 0u8;
-        for dy in 2..=12 {
-            if taken >= want {
-                break;
-            }
+        // Drain deepest water first so mid-column stays full for longer
+        // (float seats remain grounded full-sat at the surface).
+        let mut donors: Vec<i32> = Vec::new();
+        for dy in 2..=64 {
             let y = gy - dy;
             let Some(donor) = world.get_cell(gx, y) else {
                 break;
             };
+            if donor.material != MaterialId::Air {
+                break;
+            }
+            if donor.sat.0 > 0 {
+                donors.push(y);
+            }
+        }
+        for y in donors.into_iter().rev() {
+            if taken >= want {
+                break;
+            }
+            let Some(donor) = world.get_cell(gx, y) else {
+                break;
+            };
             if donor.material != MaterialId::Air || donor.sat.0 == 0 {
-                if donor.material != MaterialId::Air {
-                    break;
-                }
                 continue;
             }
             let give = donor.sat.0.min(want - taken);
@@ -605,8 +572,6 @@ pub fn rise_buoyant_litter(world: &mut World) {
             }
             let rise = if floats_on_air_seat_world(world, above, gx, gy + 1) {
                 true
-            } else if above.sat.is_empty() {
-                litter_needs_freeboard_pop_world(world, gx, gy)
             } else {
                 false
             };

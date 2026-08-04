@@ -3724,3 +3724,104 @@ fn large_sand_blob_across_chunk_seam_no_cliff() {
         "chunk-seam sand blob left a hard cliff (worst_left={worst_left})"
     );
 }
+
+
+#[test]
+fn organic_on_lake_tick_is_cheap() {
+    use std::time::Instant;
+    let mut w = World::new(42);
+    for cx in 0..4 {
+        for cy in 0..2 {
+            w.ensure_chunk(ChunkCoord::new(cx, cy));
+        }
+    }
+    let width = 4 * CHUNK_CELLS_W as i32;
+    for x in 0..width {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=20 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for _ in 0..30 {
+        tick(&mut w);
+    }
+    for x in 40..55 {
+        for y in 21..28 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Organic));
+        }
+    }
+    let t0 = Instant::now();
+    for _ in 0..5 {
+        tick(&mut w);
+    }
+    let land_ms = t0.elapsed().as_secs_f64() * 1000.0 / 5.0;
+    let t1 = Instant::now();
+    for _ in 0..20 {
+        tick(&mut w);
+    }
+    let steady_ms = t1.elapsed().as_secs_f64() * 1000.0 / 20.0;
+    eprintln!("organic-on-lake landing={land_ms:.2} ms/tick steady={steady_ms:.2} ms/tick");
+    assert!(land_ms < 800.0, "landing too slow: {land_ms:.1}");
+    assert!(steady_ms < 500.0, "steady too slow: {steady_ms:.1}");
+}
+
+
+
+
+
+
+
+
+
+
+
+#[test]
+fn organic_on_demo_sized_ocean_tick_cost() {
+    use std::time::Instant;
+    use crate::worldgen::{stamp_world, WorldgenParams};
+    let mut w = World::new(9);
+    // Half demo width keeps CI sane but still stresses ocean+wake.
+    let p = WorldgenParams {
+        width_cols: (CHUNK_CELLS_W as i32) * 8,
+        sky_ceiling_y: (CHUNK_CELLS_H as i32) * 3,
+        ..WorldgenParams::default()
+    };
+    stamp_world(&mut w, &p);
+    for _ in 0..10 {
+        tick(&mut w);
+    }
+    let t_base0 = Instant::now();
+    for _ in 0..10 {
+        tick(&mut w);
+    }
+    let base = t_base0.elapsed().as_secs_f64() * 1000.0 / 10.0;
+
+    // Paint organic on open water near sea level.
+    let y0 = p.sea_level_y + 1;
+    for x in 30..50 {
+        for y in y0..y0 + 6 {
+            if w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Air) {
+                w.set_cell(x, y, Cell::solid(MaterialId::Organic));
+            }
+        }
+    }
+    let t0 = Instant::now();
+    for _ in 0..5 {
+        tick(&mut w);
+    }
+    let land = t0.elapsed().as_secs_f64() * 1000.0 / 5.0;
+    let t1 = Instant::now();
+    for _ in 0..15 {
+        tick(&mut w);
+    }
+    let steady = t1.elapsed().as_secs_f64() * 1000.0 / 15.0;
+    eprintln!(
+        "demo-ocean base={base:.2} landing={land:.2} steady={steady:.2} ms/tick (ratio steady/base={:.2})",
+        steady / base.max(0.01)
+    );
+    assert!(
+        steady < base * 8.0 + 50.0,
+        "organic on ocean made ticks too expensive: base={base:.1} steady={steady:.1}"
+    );
+}
+
