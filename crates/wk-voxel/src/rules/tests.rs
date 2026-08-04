@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::active::{clear_all_dirty, plan_active};
-use crate::cell::{water_capacity, Cell, Sat};
+use crate::cell::{water_capacity, Cell, CellFlags, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -3633,6 +3633,69 @@ fn organic_alone_still_floats_without_punch() {
         })
         .sum::<usize>();
     assert_eq!(n, 2, "stacked Organic litter must stay as a raft (n={n})");
+}
+
+#[test]
+fn waterlogged_organic_sinks_through_standing_water() {
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let mut org = Cell::solid(MaterialId::Organic);
+    org.sat = Sat(water_capacity(MaterialId::Organic));
+    org.flags.set(CellFlags::WATERLOGGED);
+    w.set_cell(5, 6, org);
+    for _ in 0..20 {
+        tick(&mut w);
+    }
+    assert_ne!(
+        w.get_cell(5, 6).map(|c| c.material),
+        Some(MaterialId::Organic),
+        "waterlogged Organic must leave the free surface"
+    );
+    let sunk = (1..=5).any(|y| {
+        w.get_cell(5, y)
+            .map(|c| c.material == MaterialId::Organic)
+            .unwrap_or(false)
+    });
+    assert!(sunk, "waterlogged Organic should sit in the water column or on the bed");
+}
+
+#[test]
+fn saturated_floating_organic_eventually_waterlogs() {
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let mut org = Cell::solid(MaterialId::Organic);
+    org.sat = Sat(water_capacity(MaterialId::Organic));
+    w.set_cell(5, 6, org);
+    let mut logged = false;
+    for tick_n in 0..20_000u64 {
+        w.tick = tick_n;
+        soak_floating_litter(&mut w);
+        if w
+            .get_cell(5, 6)
+            .map(|c| c.flags.contains(CellFlags::WATERLOGGED))
+            .unwrap_or(false)
+        {
+            logged = true;
+            break;
+        }
+    }
+    assert!(logged, "fully soaked floating Organic should eventually waterlog");
 }
 
 #[test]

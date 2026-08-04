@@ -213,6 +213,9 @@ pub struct Atom {
     /// Stemless seaweed ignores this. Cleared when a leaf is productive again.
     #[serde(default)]
     pub leaf_starve: Vec<(i16, i16, u16)>,
+    /// Lost purchase over water — floats at the free surface, drawn tipped.
+    #[serde(default)]
+    pub fallen: bool,
 }
 
 impl Atom {
@@ -239,6 +242,7 @@ impl Atom {
             body: default_atom_body(),
             genome,
             leaf_starve: Vec::new(),
+            fallen: false,
         }
     }
 
@@ -285,6 +289,9 @@ pub struct Corpse {
     /// Plant or fungus — pinned on land; plankton sinks in water.
     pub land: bool,
     pub last_water_top: Option<i32>,
+    /// Land plant/fungus corpse floating tipped on open water.
+    #[serde(default)]
+    pub fallen: bool,
 }
 
 impl Corpse {
@@ -313,6 +320,7 @@ impl Corpse {
             settled_ticks: 0,
             land,
             last_water_top: atom.last_water_top,
+            fallen: atom.fallen,
         }
     }
 
@@ -469,7 +477,12 @@ impl OrganismStore {
             out.push((p.wx, p.wy, rgb));
         }
         for corpse in &self.corpses {
-            for &(dx, dy, mid) in &corpse.body {
+            for &(dx0, dy0, mid) in &corpse.body {
+                let (dx, dy) = if corpse.fallen {
+                    fallen_body_offset(dx0, dy0)
+                } else {
+                    (dx0, dy0)
+                };
                 let rgb = if mid == ModuleId::Photosystem {
                     // Corpses keep the shaded leaf tone (no harvest).
                     PHOTO_RGB_SHADED
@@ -886,7 +899,18 @@ impl OrganismStore {
         for (i, corpse) in self.corpses.iter_mut().enumerate() {
             corpse.ticks = corpse.ticks.saturating_add(1);
             if corpse.land {
-                pin_corpse_land(corpse);
+                if let Some((top, _bed)) = wet_band(world, corpse.gx, corpse.gy) {
+                    // Dead land plant on open water — float tipped at the
+                    // free surface until compost (don't pin to the bed).
+                    corpse.fallen = true;
+                    corpse.gy = top;
+                    corpse.fy = top as f32;
+                    corpse.vel_y = 0.0;
+                    corpse.last_water_top = Some(top);
+                } else {
+                    corpse.fallen = false;
+                    pin_corpse_land(corpse);
+                }
                 corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
                 if corpse.settled_ticks >= CORPSE_SETTLE_LAND_TICKS {
                     dissolve.push(i);
@@ -895,6 +919,7 @@ impl OrganismStore {
             }
 
             // Plankton corpse: heavy sink toward the wet-band bed.
+            corpse.fallen = false;
             step_corpse_buoyancy(world, corpse);
             let on_bed = match wet_band(world, corpse.gx, corpse.gy) {
                 Some((_top, bed)) => corpse.gy <= bed + 1,
@@ -1080,15 +1105,26 @@ fn step_land_plant(
     plant_cols: &[i32],
     wind_vx: f32,
 ) -> PlantStep {
-    pin_plant_pose(atom);
     // Free-spawn / canopy clicks can leave a plant briefly unanchored.
-    // Snap down to a surface crown instead of culling — sandbox drops
-    // should starve slowly (drought), not vanish on the next tick.
-    if !is_anchored(world, atom) {
-        if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
-            atom.gy = slot;
-            pin_plant_pose(atom);
-        }
+    // Over open water: float tipped at the free surface (don't snap to the
+    // lake bed — that made lost raft plants sink then compost-float again).
+    // On dry land: snap to a surface crown and starve slowly.
+    if is_anchored(world, atom) {
+        atom.fallen = false;
+        pin_plant_pose(atom);
+    } else if let Some((top, _bed)) = wet_band(world, atom.gx, atom.gy) {
+        atom.fallen = true;
+        atom.gy = top;
+        atom.fy = top as f32;
+        atom.vel_y = 0.0;
+        atom.last_water_top = Some(top);
+    } else if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
+        atom.fallen = false;
+        atom.gy = slot;
+        pin_plant_pose(atom);
+    } else {
+        atom.fallen = false;
+        pin_plant_pose(atom);
     }
     // Roots bank surplus above the spawn tank (starch analogy).
     sync_root_storage(atom);
@@ -1345,7 +1381,12 @@ pub fn resolve_organism_draw_cells(
     let mut occupied: HashSet<(i32, i32)> = HashSet::new();
     let mut out = Vec::with_capacity(atoms.iter().map(|a| a.body.len()).sum());
     for (atom_idx, atom) in atoms.iter().enumerate() {
-        for &(dx, dy, mid) in &atom.body {
+        for &(dx0, dy0, mid) in &atom.body {
+            let (dx, dy) = if atom.fallen {
+                fallen_body_offset(dx0, dy0)
+            } else {
+                (dx0, dy0)
+            };
             let (wx0, wy0) = frond_draw_cell(world, atom, dx, dy, mid, tick, wind_vx);
             // Keep unwrapped draw X for the renderer (it paints wrap copies).
             // World queries use wrap_x.
@@ -1380,6 +1421,12 @@ pub fn resolve_organism_draw_cells(
     out
 }
 
+/// Tip an upright body onto its side for free-float draw (90° CW).
+/// Physics body offsets stay upright; only the renderer uses this.
+pub fn fallen_body_offset(dx: i16, dy: i16) -> (i16, i16) {
+    (-dy, dx)
+}
+
 /// Soft frond draw pose. Roots / Nucleus / Digest stay rigid. Cosmetic —
 /// body cells for physics stay upright.
 ///
@@ -1402,6 +1449,10 @@ pub fn frond_draw_cell(
 ) -> (i32, i32) {
     let base_x = atom.gx + dx as i32;
     let base_y = atom.gy + dy as i32;
+    // Free-floating plants already tip via [`fallen_body_offset`]; no lean.
+    if atom.fallen {
+        return (base_x, base_y);
+    }
     let woody = mid == ModuleId::Stem;
     let soft_leaf = mid == ModuleId::Photosystem;
     if !soft_leaf && !woody {

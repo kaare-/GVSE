@@ -58,6 +58,9 @@ impl CellFlags {
     /// Soft sediment already pulsed a compaction exudation this cycle.
     /// Cleared when pore sat rises again (re-wetting).
     pub const COMPACTED: CellFlags = CellFlags(0b0000_0010);
+    /// Fully soaked Organic that has waterlogged — no longer floats;
+    /// sinks through standing water like a dense grain.
+    pub const WATERLOGGED: CellFlags = CellFlags(0b0000_0100);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -131,6 +134,12 @@ impl Cell {
         } else {
             0
         };
+    }
+
+    /// True when Organic has waterlogged and should sink through lakes.
+    #[inline]
+    pub fn is_waterlogged_organic(self) -> bool {
+        self.material == MaterialId::Organic && self.flags.contains(CellFlags::WATERLOGGED)
     }
 
     /// Convenience: an Air cell already fully saturated with water.

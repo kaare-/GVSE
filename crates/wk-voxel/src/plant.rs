@@ -2138,6 +2138,43 @@ mod tests {
     }
 
     #[test]
+    fn unanchored_plant_floats_tipped_on_open_water() {
+        use crate::organism::{fallen_body_offset, OrganismStore};
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Drop an upright plant into the water column with no Organic holdfast.
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 3, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(
+            store.atoms[0].fallen,
+            "lost-grip plant over water must tip / free-float"
+        );
+        assert_eq!(
+            store.atoms[0].gy, 5,
+            "should rest at the free surface, not the lake bed"
+        );
+        let (dx, dy) = fallen_body_offset(0, 1);
+        assert_eq!((dx, dy), (-1, 0), "upright stem tips onto its side");
+    }
+
+    #[test]
     fn multi_root_plant_binds_full_organic_span() {
         // Later roots (not only the first Organic contact) must claim the
         // mat so the plant cannot drift ahead of the pile.

@@ -163,6 +163,9 @@ fn raft_rests_on_float_water_world(world: &World, gx: i32, litter_y: i32) -> boo
     if !falls_through_empty_air(start.material) {
         return false;
     }
+    if start.is_waterlogged_organic() {
+        return false;
+    }
     let mut y = litter_y - 1;
     for _ in 0..128 {
         let Some(c) = world.get_cell(gx, y) else {
@@ -323,7 +326,9 @@ pub fn wake_unsupported_grains(world: &mut World) {
                     continue;
                 }
                 // Snow / Ice / Organic float on grounded lakes only.
+                // Waterlogged Organic has finished soaking and sinks.
                 if falls_through_empty_air(cell.material)
+                    && !cell.is_waterlogged_organic()
                     && floats_on_air_seat_world(world, below, gx, gy - 1)
                 {
                     // Submerged under a refilled surface: full water above
@@ -538,9 +543,10 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                 } else if falls_through_empty_air(above.material) {
                     // Snow / Ice / Organic: drop through empty Air, haze,
                     // and *suspended* full-sat blobs. Float only on
-                    // grounded lake / puddle surfaces.
-                    if floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy) {
-                        // Floating raft cannot carry dense cargo. Walk up
+                    // grounded lake / puddle surfaces (unless waterlogged).
+                    if floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy)
+                        && !above.is_waterlogged_organic()
+                    {                        // Floating raft cannot carry dense cargo. Walk up
                         // contiguous litter to the lowest grain and swap
                         // that grain with the water-contact litter cell.
                         let mut cargo_y = gy + 2;
@@ -583,6 +589,9 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                     if !falls_through_empty_air(below.material) {
                         continue;
                     }
+                    if below.is_waterlogged_organic() {
+                        continue;
+                    }
                     if !floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy) {
                         continue;
                     }
@@ -607,6 +616,10 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
 /// Max pore sat absorbed per tick from the water column under a floating
 /// Organic / Soil raft. Keeps the surface cell full so the raft still floats.
 const FLOAT_SOAK_RATE: u8 = 16;
+/// After pores fill, chance per tick that floating Organic waterlogs and
+/// begins sinking through the lake. Expected wait ≈ `1 / rate` ticks
+/// (~2500 at `0.0004`) — a long counter without widening `Cell`.
+const ORGANIC_WATERLOG_RATE: f32 = 0.0004;
 /// Max cells a submerged litter grain may rise in one tick.
 const BUOYANT_RISE_MAX: i32 = 16;
 
@@ -634,6 +647,9 @@ fn collect_buoyant_litter(world: &World) -> Vec<(i32, i32)> {
 /// deeper cells in the water column (never drains the surface seat below
 /// full — that would sink the raft and recreate submerged litter lines).
 ///
+/// Once Organic pores are full, a slow probabilistic counter waterlogs the
+/// cell ([`CellFlags::WATERLOGGED`]) so it eventually sinks.
+///
 /// Scans only buoyant litter cells (not the whole grid).
 pub fn soak_floating_litter(world: &mut World) {
     let litter = collect_buoyant_litter(world);
@@ -644,14 +660,31 @@ pub fn soak_floating_litter(world: &mut World) {
         if !matches!(raft.material, MaterialId::Organic | MaterialId::Soil) {
             continue;
         }
-        let cap = water_capacity_with(raft.material, &world.hydro);
-        if cap == 0 || raft.sat.0 >= cap {
-            continue;
-        }
         let Some(surface) = world.get_cell(gx, gy - 1) else {
             continue;
         };
         if !floats_on_air_seat_world(world, surface, gx, gy - 1) {
+            continue;
+        }
+        let cap = water_capacity_with(raft.material, &world.hydro);
+        if cap == 0 {
+            continue;
+        }
+        // Fully soaked Organic: age toward waterlogging / sink.
+        if raft.sat.0 >= cap {
+            if raft.material == MaterialId::Organic
+                && !raft.flags.contains(CellFlags::WATERLOGGED)
+                && hash_prob(
+                    world.seed.0,
+                    gx,
+                    world.tick.wrapping_add(gy as u64),
+                    0x50A7_51A7u64,
+                ) < ORGANIC_WATERLOG_RATE
+            {
+                let mut wet = raft;
+                wet.flags.set(CellFlags::WATERLOGGED);
+                world.set_cell(gx, gy, wet);
+            }
             continue;
         }
         let room = cap - raft.sat.0;
@@ -786,6 +819,9 @@ pub fn collect_floating_organic_columns(
             for lx in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(lx, ly);
                 if cell.material != MaterialId::Organic {
+                    continue;
+                }
+                if cell.is_waterlogged_organic() {
                     continue;
                 }
                 let gx = x0 + lx as i32;
@@ -1037,6 +1073,9 @@ pub fn rise_buoyant_litter(world: &mut World) {
                 break;
             };
             if !falls_through_empty_air(here.material) {
+                break;
+            }
+            if here.is_waterlogged_organic() {
                 break;
             }
             let Some(above) = world.get_cell(gx, gy + 1) else {
