@@ -1106,24 +1106,42 @@ fn step_land_plant(
     wind_vx: f32,
 ) -> PlantStep {
     // Pose / seat:
-    // - Holdfast in Organic (raft or soil compost) → upright.
-    // - Else a lake in this column → tip and float at the free surface.
-    //   Never snap to the underwater bed (find_surface_air_slot under a
-    //   lake seats on sand). Deep roots touching the seabed must not
-    //   "re-root" a free-floating tree.
-    // - Else dry land → surface crown / existing anchor.
-    if rooted_in_organic(world, atom) {
-        atom.fallen = false;
-        pin_plant_pose(atom);
-    } else if let Some(top) = column_water_top(world, atom.gx, atom.gy) {
+    // - Organic holdfast: upright unless the raft support is tippy.
+    // - Open lake (no holdfast): tip and float at the free surface.
+    // - Shore: stay tipped and grow roots; once anchored in ground, stand.
+    let water_top = column_water_top(world, atom.gx, atom.gy);
+    let on_org = rooted_in_organic(world, atom);
+    if on_org {
+        let tippy = raft_plant_should_tip(world, atom);
+        atom.fallen = tippy;
+        if tippy {
+            if let Some(top) = water_top {
+                atom.gy = top;
+                atom.last_water_top = Some(top);
+            }
+            atom.fy = atom.gy as f32;
+            atom.vel_y = 0.0;
+        } else {
+            pin_plant_pose(atom);
+        }
+    } else if let Some(top) = water_top {
         atom.fallen = true;
         atom.gy = top;
         atom.fy = top as f32;
         atom.vel_y = 0.0;
         atom.last_water_top = Some(top);
     } else if is_anchored(world, atom) {
+        // Washed ashore and rooted into ground — right yourself.
         atom.fallen = false;
         pin_plant_pose(atom);
+    } else if atom.fallen {
+        // Washed up, not yet rooted — lie on the beach and grow down.
+        if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
+            atom.gy = slot;
+        }
+        atom.fy = atom.gy as f32;
+        atom.vel_y = 0.0;
+        atom.last_water_top = None;
     } else if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
         atom.fallen = false;
         atom.gy = slot;
@@ -1214,9 +1232,16 @@ fn step_land_plant(
     // standing water, root urge collapses — holdfast is enough.
     let genome_save = atom.genome;
     if atom.fallen {
-        // Free-float: no root dive into the seabed, no trunk race.
-        atom.genome.alloc_root = 0.0;
-        atom.genome.alloc_stem = atom.genome.alloc_stem.min(0.05);
+        if water_top.is_some() {
+            // Lake float: sip through dangling roots; don't pipe to the bed.
+            atom.genome.alloc_root = 0.0;
+            atom.genome.alloc_stem = atom.genome.alloc_stem.min(0.05);
+            atom.genome.alloc_leaf = atom.genome.alloc_leaf.max(0.35);
+        } else {
+            // Shore strand: grow roots into the beach to stand back up.
+            atom.genome.alloc_root = (atom.genome.alloc_root + 0.30).min(0.75);
+            atom.genome.alloc_stem = atom.genome.alloc_stem.min(0.12);
+        }
     } else if bathing {
         atom.genome.alloc_root = atom.genome.alloc_root.min(0.06);
         if crate::plant::stem_count(atom) == 0 && n_photo > 0 {
@@ -1431,10 +1456,17 @@ pub fn resolve_organism_draw_cells(
     out
 }
 
-/// Tip an upright body onto its side for free-float draw (90° CW).
-/// Physics body offsets stay upright; only the renderer uses this.
+/// Tip pose for free-float / unstable-raft draw.
+///
+/// Canopy (dy ≥ 0) lays along +x at the waterline; roots (dy < 0) hang
+/// straight down into the water — never into the air. Physics body
+/// offsets stay upright; only the renderer uses this.
 pub fn fallen_body_offset(dx: i16, dy: i16) -> (i16, i16) {
-    (-dy, dx)
+    if dy < 0 {
+        (dx, dy)
+    } else {
+        (dx + dy, 0)
+    }
 }
 
 /// Soft frond draw pose. Roots / Nucleus / Digest stay rigid. Cosmetic —
@@ -1680,6 +1712,46 @@ fn rooted_in_organic(world: &World, atom: &Atom) -> bool {
         }
     }
     false
+}
+
+/// Tall plant on a skinny floating mat — tip over (draw) while holdfast stays.
+fn raft_plant_should_tip(world: &World, atom: &Atom) -> bool {
+    use crate::plant::holdfast_on_float_column;
+
+    let columns = crate::rules::collect_floating_organic_columns(world);
+    if columns.is_empty() {
+        return false;
+    }
+    let mut height = 0i32;
+    let mut min_x = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut has_holdfast = false;
+    for &(dx, dy, m) in &atom.body {
+        if matches!(
+            m,
+            ModuleId::Stem | ModuleId::Photosystem | ModuleId::Nucleus
+        ) {
+            height = height.max(dy as i32);
+        }
+        if m != ModuleId::Root && m != ModuleId::Nucleus {
+            continue;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        min_x = min_x.min(wx);
+        max_x = max_x.max(wx);
+        if holdfast_on_float_column(&columns, m, wx, wy) {
+            has_holdfast = true;
+        }
+    }
+    if !has_holdfast || min_x > max_x {
+        return false;
+    }
+    let support = (min_x..=max_x)
+        .filter(|x| columns.contains_key(x))
+        .count() as i32;
+    // Tip when the sail is tall relative to the mat footprint.
+    support > 0 && height >= 3 && height >= support * 2
 }
 
 /// Free-surface y of standing water in this column near `hint_y`.
