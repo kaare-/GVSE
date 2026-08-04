@@ -207,6 +207,10 @@ pub fn tick_with_life(
         settle_loose_grains_regions(world, &grain_active, rooted, GRAIN_SETTLE_PASSES);
     }
 
+    // Always clear submerged litter lines, then let rafts drink.
+    super::grain::rise_buoyant_litter(world);
+    super::grain::soak_floating_litter(world);
+
     // Geotech: roof / overhang collapse after grain has seated.
     crate::failure::apply_failure(world, failure, geotech);
 

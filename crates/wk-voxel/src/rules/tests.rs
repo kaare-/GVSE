@@ -3318,6 +3318,138 @@ fn organic_still_floats_on_grounded_lake() {
     );
 }
 
+#[test]
+fn submerged_organic_rises_out_of_water_column() {
+    // Glitch line: Organic stuck under a refilled lake surface must buoyancy-rise.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    // Raft on the surface + a submerged "glitch" cell mid-column.
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 3, Cell::solid(MaterialId::Organic));
+    for _ in 0..8 {
+        tick(&mut w);
+    }
+    assert_ne!(
+        w.get_cell(5, 3).unwrap().material,
+        MaterialId::Organic,
+        "submerged Organic must leave mid-column"
+    );
+    let organics: Vec<(i32, i32)> = (3..=7)
+        .flat_map(|x| {
+            (1..=8)
+                .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+                .map(|y| (x, y))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        organics.len() >= 2,
+        "both Organic cells must survive ({organics:?})"
+    );
+    assert!(
+        organics.iter().all(|&(_, y)| y >= 4),
+        "Organic must leave the deep water column ({organics:?})"
+    );
+    // No cell may remain with full water both above and below (glitch line).
+    for &(x, y) in &organics {
+        let above_water = matches!(
+            w.get_cell(x, y + 1),
+            Some(c) if c.material == MaterialId::Air && c.sat.is_full()
+        );
+        let below_water = matches!(
+            w.get_cell(x, y - 1),
+            Some(c) if c.material == MaterialId::Air && c.sat.is_full()
+        );
+        assert!(
+            !(above_water && below_water),
+            "Organic at ({x},{y}) still fully submerged"
+        );
+    }
+}
+
+#[test]
+fn floating_organic_soaks_from_water_column() {
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    let sat_sum = |w: &World| -> i64 {
+        let mut s = 0i64;
+        for x in 0..16 {
+            for y in 0..16 {
+                if let Some(c) = w.get_cell(x, y) {
+                    s += c.sat.0 as i64;
+                }
+            }
+        }
+        s
+    };
+    let before = sat_sum(&w);
+    for _ in 0..10 {
+        tick(&mut w);
+    }
+    let org = (3..=7)
+        .flat_map(|x| (5..=7).map(move |y| (x, y)))
+        .find_map(|(x, y)| {
+            let c = w.get_cell(x, y)?;
+            (c.material == MaterialId::Organic).then_some(c)
+        })
+        .expect("floating Organic must remain");
+    assert!(
+        org.sat.0 > 0,
+        "floating Organic must soak pore water (sat={})",
+        org.sat.0
+    );
+    assert_eq!(sat_sum(&w), before, "soak must conserve water mass");
+}
+
+#[test]
+fn plant_can_seat_on_wet_floating_organic() {
+    use crate::plant::find_plant_slot;
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let mut org = Cell::solid(MaterialId::Organic);
+    org.sat = Sat(40); // moist enough for spore/sprout gate
+    w.set_cell(5, 6, org);
+    let slot = find_plant_slot(&w, 5, 6);
+    assert_eq!(
+        slot,
+        Some(7),
+        "Air above floating Organic must be a plantable crown"
+    );
+    // Moisture on the bed cell must clear the spore gate.
+    let bed = w.get_cell(5, 6).unwrap();
+    let cap = water_capacity(MaterialId::Organic).max(1);
+    let moist = bed.sat.0 as f32 / cap as f32;
+    assert!(
+        moist >= 0.02,
+        "wet floating Organic must clear plant moisture gate (moist={moist})"
+    );
+}
+
 
 #[test]
 fn organic_sky_drop_does_not_leave_cliff_walls() {
