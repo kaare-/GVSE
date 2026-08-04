@@ -2409,13 +2409,17 @@ mod tests {
         assert!(!atom.draws_upright(0, 1));
         let atoms = vec![atom.clone()];
         let posed = resolve_organism_draw_cells(&w, &atoms, 0, 0.0);
+        // Body Y still counts the tipped trunk; draw collapses so the first
+        // new shoot sits on the waterline crown (gy+1), not floating above a gap.
+        let (draw_dx, draw_dy) = atom.fallen_draw_offset(new_stem.0, new_stem.1);
+        assert_eq!(draw_dy, 1, "first upright stem should sit just above the crown");
         assert!(
             posed.iter().any(|p| {
                 p.mid == ModuleId::Stem
-                    && p.wx == atom.gx + new_stem.0 as i32
-                    && p.wy == atom.gy + new_stem.1 as i32
+                    && p.wx == atom.gx + draw_dx as i32
+                    && p.wy == atom.gy + draw_dy as i32
             }),
-            "new stem draws upright at body offsets"
+            "new stem draws upright from the waterline, got {posed:?}"
         );
         let (ox, oy) = fallen_body_offset(0, 1);
         assert!(
@@ -2425,6 +2429,61 @@ mod tests {
                     && p.wy == atom.gy + oy as i32
             }),
             "pre-tip stem still draws tipped along the waterline"
+        );
+    }
+
+    #[test]
+    fn upright_shoots_do_not_float_above_tipped_trunk_gap() {
+        use crate::organism::resolve_organism_draw_cells;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Tall pre-tip trunk + new upright stem/leaf above it in body space.
+        let mut atom = Atom::from_body(
+            5,
+            5,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Stem),
+                (0, 4, ModuleId::Stem), // grown after tip
+                (0, 5, ModuleId::Photosystem),
+                (1, 5, ModuleId::Photosystem),
+            ],
+        );
+        atom.fallen = true;
+        atom.upright_growth = vec![(0, 4), (0, 5), (1, 5)];
+        let posed = resolve_organism_draw_cells(&w, &[atom.clone()], 0, 0.0);
+        let stem_ys: Vec<i32> = posed
+            .iter()
+            .filter(|p| p.mid == ModuleId::Stem && p.wx == atom.gx)
+            .map(|p| p.wy)
+            .collect();
+        assert!(
+            stem_ys.contains(&(atom.gy + 1)),
+            "upright trunk must occupy gy+1 (no air gap), stems at {stem_ys:?}"
+        );
+        assert!(
+            !stem_ys.contains(&(atom.gy + 4)),
+            "must not draw new stem at raw body Y above the tipped trunk"
+        );
+        assert!(
+            posed.iter().any(|p| {
+                p.mid == ModuleId::Photosystem && p.wx == atom.gx && p.wy == atom.gy + 2
+            }),
+            "upright leaf should sit on the remapped shoot, not float at gy+5"
         );
     }
 

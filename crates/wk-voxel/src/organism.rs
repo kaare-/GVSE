@@ -270,6 +270,11 @@ impl Atom {
         !self.fallen || self.upright_growth.iter().any(|&p| p == (dx, dy))
     }
 
+    /// Body → draw offset while tipped (pre-tip canopy flat; new shoots upright).
+    pub fn fallen_draw_offset(&self, dx: i16, dy: i16) -> (i16, i16) {
+        fallen_draw_offset(self.fallen, &self.upright_growth, &self.body, dx, dy)
+    }
+
     pub fn photosystem_count(&self) -> usize {
         self.body
             .iter()
@@ -346,6 +351,10 @@ impl Corpse {
 
     fn draws_upright(&self, dx: i16, dy: i16) -> bool {
         !self.fallen || self.upright_growth.iter().any(|&p| p == (dx, dy))
+    }
+
+    fn fallen_draw_offset(&self, dx: i16, dy: i16) -> (i16, i16) {
+        fallen_draw_offset(self.fallen, &self.upright_growth, &self.body, dx, dy)
     }
 
     pub fn occupies(&self, wx: i32, wy: i32) -> bool {
@@ -502,11 +511,7 @@ impl OrganismStore {
         }
         for corpse in &self.corpses {
             for &(dx0, dy0, mid) in &corpse.body {
-                let (dx, dy) = if corpse.fallen && !corpse.draws_upright(dx0, dy0) {
-                    fallen_body_offset(dx0, dy0)
-                } else {
-                    (dx0, dy0)
-                };
+                let (dx, dy) = corpse.fallen_draw_offset(dx0, dy0);
                 let rgb = if mid == ModuleId::Photosystem {
                     // Corpses keep the shaded leaf tone (no harvest).
                     PHOTO_RGB_SHADED
@@ -1440,11 +1445,7 @@ pub fn resolve_organism_draw_cells(
     let mut out = Vec::with_capacity(atoms.iter().map(|a| a.body.len()).sum());
     for (atom_idx, atom) in atoms.iter().enumerate() {
         for &(dx0, dy0, mid) in &atom.body {
-            let (dx, dy) = if atom.fallen && !atom.draws_upright(dx0, dy0) {
-                fallen_body_offset(dx0, dy0)
-            } else {
-                (dx0, dy0)
-            };
+            let (dx, dy) = atom.fallen_draw_offset(dx0, dy0);
             let (wx0, wy0) = frond_draw_cell(world, atom, dx, dy, mid, tick, wind_vx);
             // Keep unwrapped draw X for the renderer (it paints wrap copies).
             // World queries use wrap_x.
@@ -1490,6 +1491,37 @@ pub fn fallen_body_offset(dx: i16, dy: i16) -> (i16, i16) {
     } else {
         (dx + dy, 0)
     }
+}
+
+/// Draw offset for a tipped plant cell.
+///
+/// Pre-tip canopy uses [`fallen_body_offset`]. Cells in `upright_growth`
+/// stack upright from the waterline crown — body Y still includes the
+/// tipped trunk height, so we subtract that top or new shoots would float
+/// above a one-cell gap where the old stem laid flat.
+pub fn fallen_draw_offset(
+    fallen: bool,
+    upright_growth: &[(i16, i16)],
+    body: &[BodyModule],
+    dx: i16,
+    dy: i16,
+) -> (i16, i16) {
+    if !fallen {
+        return (dx, dy);
+    }
+    let is_upright = upright_growth.iter().any(|&p| p == (dx, dy));
+    if !is_upright {
+        return fallen_body_offset(dx, dy);
+    }
+    let tipped_top = body
+        .iter()
+        .filter(|&&(x, y, _)| {
+            y >= 0 && !upright_growth.iter().any(|&p| p == (x, y))
+        })
+        .map(|&(_, y, _)| y)
+        .max()
+        .unwrap_or(0);
+    (dx, (dy - tipped_top).max(1))
 }
 
 /// Soft frond draw pose. Roots / Nucleus / Digest stay rigid. Cosmetic —
