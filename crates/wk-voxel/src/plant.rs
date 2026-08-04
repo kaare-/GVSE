@@ -46,6 +46,13 @@ pub const DROUGHT_DORMANT_UPKEEP: f32 = 0.12;
 pub const PLANT_UPKEEP_MULT: f32 = 0.35;
 /// Extra score weight so roots prefer wetter substrate cells.
 pub const ROOT_MOISTURE_AFFINITY: f32 = 2.8;
+/// Score bonus for stepping into standing-water Air (legacy wet-void).
+///
+/// Free-column water has no pore moisture (`cell_moisture_frac` = 0), so
+/// after floating Organic soaks from the lake the raft alone outscores
+/// every dive into the water column. This bonus restores raft-plant
+/// roots under the mat without letting dry Air gaps look wet.
+pub const ROOT_WET_VOID_AFFINITY: f32 = 1.6;
 /// Soft local density: roots packed near the crown pay this extra.
 pub const ROOT_CROWN_BLOB_PENALTY: f32 = 1.8;
 /// Penalty per extra cell when elongating a same-column pipe (≥3 deep).
@@ -1066,13 +1073,23 @@ pub fn try_elongate_root(
                 continue;
             }
             // Moisture tropism: sample the step cell and one deeper.
-            let moist = cell_moisture_frac(world, wx, wy)
+            // Standing-water Air counts as wet void (not dry gap) so roots
+            // under a soaked floating Organic raft still dive into the lake.
+            let mut moist = cell_moisture_frac(world, wx, wy)
                 .max(cell_moisture_frac(world, wx, wy - 1))
                 .max(cell_moisture_frac(world, wx, wy - 2) * 0.85);
+            let wet_void = cell.material == MaterialId::Air
+                && crate::rules::is_standing_water(world, wx, wy);
+            if wet_void {
+                moist = moist.max(cell.sat.0 as f32 / 255.0);
+            }
             let mut score = moist * ROOT_MOISTURE_AFFINITY
                 + root_dir_preference(dx, dy, depth_bias)
                 - pen * 0.03
                 - ROOT_TRANSPORT_TAX * hops;
+            if wet_void {
+                score += ROOT_WET_VOID_AFFINITY * (cell.sat.0 as f32 / 255.0);
+            }
             // Organic is transformed dead-root compost — fine to sit beside
             // or step into (score bonus below). Live roots stay exclusive.
             match cell.material {
@@ -1904,6 +1921,63 @@ mod tests {
         let mut body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
         body.push((1, 2, ModuleId::ReproSpore));
         body
+    }
+
+    #[test]
+    fn roots_dive_into_water_under_soaked_floating_organic() {
+        // soak_floating_litter fills raft Organic; without wet-void tropism
+        // roots sprawl only inside the mat and never enter the lake.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut raft = Cell::solid(MaterialId::Organic);
+        raft.sat = Sat(water_capacity(MaterialId::Organic));
+        w.set_cell(5, 6, raft);
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        // Nucleus above the raft; holdfast Root sits in soaked Organic.
+        let mut atom = Atom::from_body(5, 7, 80.0, body);
+        apply_genome(&mut atom, crate::blueprint::Blueprint::minimal_plant().genome);
+        atom.genome.root_depth_bias = 0.9;
+        atom.genome.alloc_root = 0.55;
+        atom.genome.alloc_stem = 0.2;
+        atom.genome.alloc_leaf = 0.25;
+        let caps = PlantGrowthCaps::default();
+        for _ in 0..24 {
+            atom.energy = atom.energy_max;
+            let mut live = HashSet::new();
+            for &(dx, dy, m) in &atom.body {
+                if m == ModuleId::Root {
+                    live.insert((atom.gx + dx as i32, atom.gy + dy as i32));
+                }
+            }
+            let _ = try_elongate_root(&w, &mut atom, &live, &caps);
+        }
+        let in_water = atom.body.iter().any(|&(dx, dy, m)| {
+            if m != ModuleId::Root {
+                return false;
+            }
+            let wx = atom.gx + dx as i32;
+            let wy = atom.gy + dy as i32;
+            wy <= 5
+                && w.get_cell(wx, wy).map(|c| c.material) == Some(MaterialId::Air)
+                && w.get_cell(wx, wy).map(|c| !c.sat.is_empty()) == Some(true)
+        });
+        assert!(
+            in_water,
+            "holdfast on soaked floating Organic must elongate into the water column ({:?})",
+            atom.body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Root)
+                .collect::<Vec<_>>()
+        );
     }
 
     #[test]
