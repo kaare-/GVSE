@@ -207,11 +207,19 @@ pub fn tick_with_life(
         apply_seepage_regions(world, &flow_active);
     }
 
-    // Always re-wake unsupported grains and steep cliff faces — lakes
-    // often leave a non-empty dirty plan far from F3 paint, and seated
-    // Organic/sand walls have solid under them so fall-wake alone never
-    // sees them. One combined grid scan (was two full walks).
-    super::grain::wake_grains_for_settle(world);
+    // Re-wake unsupported grains and steep cliff faces — lakes often
+    // leave a non-empty dirty plan far from F3 paint, and seated
+    // Organic/sand walls have solid under them so fall-wake alone
+    // never sees them. Cadence-gated: this is a full-grid safety scan
+    // that only matters when a grain was orphaned mid-air; running
+    // every tick was ~1.6 ms of pure insurance. Every 4 ticks trades
+    // a ≤4-tick delay before a stranded grain drops for that budget.
+    // Also runs on tick 0 (fresh world / after save-load) so painted
+    // mid-air grains fall on the first tick.
+    const GRAIN_WAKE_EVERY: u64 = 4;
+    if world.tick % GRAIN_WAKE_EVERY == 0 {
+        super::grain::wake_grains_for_settle(world);
+    }
     let grain_active = {
         let dirty = plan_active(world);
         if dirty.is_empty() {
@@ -227,8 +235,12 @@ pub fn tick_with_life(
     // Dense cargo cannot ride floating Organic/Snow/Ice. Full-grid punch
     // once per tick (not per settle pass — that re-scanned oceans to death),
     // then a short re-settle so punched grains sink through the water seat.
-    if super::grain::punch_through_floating_rafts(world) > 0 {
-        super::grain::wake_unsupported_grains(world);
+    // Cadence-gated with grain wake to share the "no fresh grain paint"
+    // quiet path (~0.7 ms/tick).
+    if world.tick % GRAIN_WAKE_EVERY == 0
+        && super::grain::punch_through_floating_rafts(world) > 0
+    {
+        super::grain::wake_grains_for_settle(world);
         let sink = plan_active(world);
         if !sink.is_empty() {
             settle_loose_grains_regions(world, &sink, rooted, GRAIN_SETTLE_PASSES);

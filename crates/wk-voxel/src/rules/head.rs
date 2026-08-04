@@ -90,18 +90,10 @@ pub(crate) fn is_surface_support(world: &World, gx: i32, gy: i32) -> bool {
 /// Plan a single +x standing-surface head equalise for the edge
 /// `(gx,gy) — (gx+1,gy)`. Emits at most one transfer, owned by the
 /// left endpoint so each edge is solved once per pass.
-pub(crate) fn plan_same_y_pairwise_edge(
-    world: &World,
-    gx: i32,
-    gy: i32,
-    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
-) {
-    plan_same_y_pairwise_edge_in(world, None, gx, gy, 0, 0, local);
-}
-
-/// Chunk-local fast path. `chunk`/`base_(gx,gy)`/`(lx,ly)` are the region
-/// cache; hot-loop callers pass them so neighbours inside the chunk skip
-/// the `world.get_cell` wrap + HashMap.
+///
+/// `chunk`/`(lx,ly)` are an optional chunk-local read cache; when set,
+/// neighbour probes that fall inside the chunk skip `world.get_cell`
+/// (~10× cheaper) — see `get_cell_microbench`.
 pub(crate) fn plan_same_y_pairwise_edge_in(
     world: &World,
     chunk: Option<(&Chunk, i32, i32)>,

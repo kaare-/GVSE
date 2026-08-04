@@ -15,8 +15,8 @@ use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
 use super::head::{
-    hydraulic_head, is_porous_solid_with, plan_same_y_pairwise_edge,
-    plan_same_y_pairwise_edge_in, same_y_cascade_pull, seepage_rate_with,
+    hydraulic_head, is_porous_solid_with, plan_same_y_pairwise_edge_in, same_y_cascade_pull,
+    seepage_rate_with,
 };
 use super::plan::{regions_all_loaded, regions_for_standalone};
 

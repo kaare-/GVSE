@@ -1185,8 +1185,20 @@ async fn main() {
         }
 
         // Draw the ring once, plus ±1 world-width copies so the seam
-        // never shows a gap while panning.
+        // never shows a gap while panning. Y range is pre-clamped to
+        // the visible frustum so we don't iterate hidden sky rows.
         let x_copies: &[i32] = if scene.params.wrap_x { &[-1, 0, 1] } else { &[0] };
+        // Solve sy = origin_y - (y - bedrock_floor_y) * cell_px for the
+        // visible strip. draw_rectangle uses (sx, sy - cell_px) as top-
+        // left, so a cell is visible when [sy - cell_px, sy] ⊂ [0, sh].
+        let y_max_vis = {
+            let y = scene.params.bedrock_floor_y as f32 + (origin_y + cell_px) / cell_px;
+            (y.ceil() as i32).min(scene.params.sky_ceiling_y)
+        };
+        let y_min_vis = {
+            let y = scene.params.bedrock_floor_y as f32 + (origin_y - sh) / cell_px;
+            (y.floor() as i32).max(scene.params.bedrock_floor_y)
+        };
         for &x_copy in x_copies {
             let x_shift = x_copy * scene.params.width_cols;
             for x in 0..scene.params.width_cols {
@@ -1194,8 +1206,9 @@ async fn main() {
                 if sx + cell_px < 0.0 || sx > sw {
                     continue;
                 }
-                for y in scene.params.bedrock_floor_y..scene.params.sky_ceiling_y {
+                for y in y_min_vis..y_max_vis {
                     let sy = origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
+                    // Guard for the rounding slop on the frustum bounds.
                     if sy + cell_px < 0.0 || sy > sh {
                         continue;
                     }
@@ -1206,11 +1219,6 @@ async fn main() {
                     // puddles). Mid-air sat stays invisible — falling rain
                     // is the cosmetic streak under raining clouds.
                     if cell.material == wk_material::MaterialId::Air {
-                        // Any non-zero fill (even 1/255) must paint — the
-                        // palette maps that to a faint blue-white film so
-                        // trickle / leveling cells stay visible. Mid-air
-                        // sat stays invisible; falling rain is the
-                        // cosmetic streak under raining clouds.
                         if cell.sat.is_empty() {
                             continue;
                         }
