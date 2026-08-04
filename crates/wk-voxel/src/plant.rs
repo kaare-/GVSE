@@ -950,9 +950,10 @@ pub(crate) fn holdfast_on_float_column(
 /// and carry their land plants along (dispersal).
 ///
 /// Only plants with a holdfast in floating Organic translate — submerged /
-/// free-floating plants are not hitchhiked when litter slides past. Every
-/// root column across a mounted plant's span claims the mat (not only the
-/// first Organic contact). Loose unrooted litter may still peel apart.
+/// free-floating plants are not hitchhiked when litter slides past. Plants
+/// with sand/rock purchase also stay put (shore mats must not drag them).
+/// Every root column across a mounted plant's span claims the mat (not only
+/// the first Organic contact). Loose unrooted litter may still peel apart.
 /// Returns how many Organic columns moved.
 pub fn sail_plants_on_wind_rafts(
     world: &mut World,
@@ -966,6 +967,10 @@ pub fn sail_plants_on_wind_rafts(
 
     for (i, atom) in atoms.iter().enumerate() {
         if !is_land_plant(atom) || atom.energy <= 0.0 {
+            continue;
+        }
+        // Sand-rooted plants stay put — beach litter must not drag them.
+        if crate::organism::plant_grounded_in_substrate(world, atom, &columns) {
             continue;
         }
         let mut min_rx = i32::MAX;
@@ -2566,6 +2571,114 @@ mod tests {
     }
 
     #[test]
+    fn sand_rooted_plant_not_hoisted_by_shore_organic_pile() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..20 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Beach: sand at y=2; lake water to the left.
+        for x in 0..=6 {
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        for x in 7..=14 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 2, sand);
+        }
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(9, 3, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        let gy0 = store.atoms[0].gy;
+        assert_eq!(gy0, 3);
+        // Beach litter pile beside / over the crown columns (grounded Organic
+        // on sand — the old holdfast path treated this as higher ground).
+        for x in 8..=10 {
+            w.set_cell(x, 3, Cell::solid(MaterialId::Organic));
+            w.set_cell(x, 4, Cell::solid(MaterialId::Organic));
+            w.set_cell(x, 5, Cell::solid(MaterialId::Organic));
+        }
+        for tick in 1..30u64 {
+            store.step(&mut w, tick);
+        }
+        assert_eq!(
+            store.atoms[0].gy, gy0,
+            "sand-rooted crown must not pump up onto shore Organic (gy={} want {})",
+            store.atoms[0].gy, gy0
+        );
+        assert!(
+            !store.atoms[0].fallen,
+            "must stay upright on sand"
+        );
+    }
+
+    #[test]
+    fn sand_rooted_plant_does_not_sail_with_shore_raft() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..24 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 0..=10 {
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        for x in 11..=18 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 2, sand);
+        }
+        // Floating mat touching the beach plant.
+        for x in 8..=12 {
+            w.set_cell(x, 6, Cell::solid(MaterialId::Organic));
+        }
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            // Root tip also brushes the floating mat.
+            (-2, 3, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut atoms = vec![Atom::from_body(12, 3, 40.0, body)];
+        apply_genome(
+            &mut atoms[0],
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        let gx0 = atoms[0].gx;
+        for tick in 0..200u64 {
+            w.tick = tick;
+            let _ = sail_plants_on_wind_rafts(&mut w, &mut atoms, 0.35, 4);
+        }
+        assert_eq!(
+            atoms[0].gx, gx0,
+            "sand-rooted plant must not hitchhike shore rafts"
+        );
+    }
+
+    #[test]
     fn moist_seepage_does_not_tip_land_plant() {
         use crate::organism::OrganismStore;
 
@@ -3482,6 +3595,48 @@ mod tests {
             rooted_in_organic_for_test(&w, &store.atoms[0])
                 || w.get_cell(8, 6).map(|c| c.material) == Some(MaterialId::Organic),
             "holdfast should still be on the Organic mat"
+        );
+    }
+
+    #[test]
+    fn deep_root_keel_keeps_tall_plant_upright_on_skinny_raft() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..20 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        w.set_cell(8, 6, Cell::solid(MaterialId::Organic));
+        // Same sail height as the tippy case, but a heavy root keel under the raft.
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, -3, ModuleId::Root),
+            (0, -4, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Stem),
+            (0, 4, ModuleId::Photosystem),
+        ];
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(8, 7, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(
+            !store.atoms[0].fallen,
+            "dangling root keel should stabilize a tall plant on a skinny raft"
         );
     }
 

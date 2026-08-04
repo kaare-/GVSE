@@ -1141,9 +1141,9 @@ fn step_land_plant(
     float_columns: &std::collections::HashMap<i32, (i32, i32)>,
 ) -> PlantStep {
     // Pose / seat:
-    // - Crown-column substrate holdfast: reseat on local ground; never ride
-    //   a rising waterline (lateral rhizomes upslope must not hoist the crown).
-    // - Any other upright substrate anchor: stay put (don't float).
+    // - Sand/rock purchase wins: once grounded, organics and water never
+    //   hoist the crown (shore mats / rising lake only settle downward).
+    // - Crown-column substrate holdfast: reseat when not grounded.
     // - Floating-Organic raft holdfast (only): tip check; ride the surface.
     // - No holdfast over full-sat water: tip and free-float.
     // - Woody tip always bakes into body (plan survives as horizontal trunk);
@@ -1154,19 +1154,30 @@ fn step_land_plant(
     let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
     let stemless = crate::plant::stem_count(atom) == 0;
     let grounded = grounded_substrate_anchor(world, atom, float_columns);
-    if let Some(solid_y) = holdfast_solid {
-        // Local ground under the crown. Stemless seaweed drops a stale tip
-        // once the holdfast is back; woody plants stay tipped so only new
-        // upright_growth shoots stand up after shore re-root.
+    if grounded {
+        // Fixed in sand/rock/grounded compost. Stemless clears a stale tip
+        // when a short crown grip is still present; woody stays tipped after
+        // shore re-root. Never raise gy onto organic piles or the waterline.
+        if stemless && holdfast_solid.is_some() {
+            atom.fallen = false;
+            atom.upright_growth.clear();
+        }
+        if let Some(solid_y) = holdfast_solid {
+            let seat = solid_y + 1;
+            if seat < atom.gy {
+                atom.gy = seat;
+            }
+        }
+        pin_plant_pose(atom);
+    } else if let Some(solid_y) = holdfast_solid {
+        // Local ground under the crown (no sand purchase yet). Stemless
+        // seaweed drops a stale tip once the holdfast is back; woody plants
+        // stay tipped so only upright_growth shoots stand up after re-root.
         if stemless {
             atom.fallen = false;
             atom.upright_growth.clear();
         }
         atom.gy = solid_y + 1;
-        pin_plant_pose(atom);
-    } else if grounded && !atom.fallen {
-        // Still fixed to sand/rock/grounded organic — rising water must not
-        // carry an upright plant. (Floating-Organic rafts are not "grounded".)
         pin_plant_pose(atom);
     } else if on_float_raft {
         let water_top = column_standing_surface(world, atom.gx, atom.gy);
@@ -1882,13 +1893,17 @@ fn organic_in_floating_column(
 }
 
 /// Root purchase in sand/rock/grounded organic — not a floating raft cell.
+///
+/// Only near-crown roots (`dy >= -6`) count. Deep free-floater tendrils that
+/// scrape the lake bed must not pin a castaway mid-air or block surface ride.
 fn grounded_substrate_anchor(
     world: &World,
     atom: &Atom,
     columns: &std::collections::HashMap<i32, (i32, i32)>,
 ) -> bool {
+    const MAX_ROOT_LEN: i16 = 6;
     for &(dx, dy, m) in &atom.body {
-        if m != ModuleId::Root {
+        if m != ModuleId::Root || dy < -MAX_ROOT_LEN {
             continue;
         }
         let wx = world.wrap_x(atom.gx + dx as i32);
@@ -1915,10 +1930,14 @@ fn grounded_substrate_anchor(
 /// rhizomes upslope must not hoist `gy` — that was lifting shoreline plants
 /// with the waterline. Deep free-floater tendrils are ignored so castaways
 /// stay on the surface.
+///
+/// **Organic never counts** — floating mats and beach litter must not become
+/// a holdfast seat that pumps sand-rooted crowns upward. Raft seating uses
+/// [`rooted_in_floating_organic`] instead.
 fn crown_holdfast_solid_y(
     world: &World,
     atom: &Atom,
-    columns: &std::collections::HashMap<i32, (i32, i32)>,
+    _columns: &std::collections::HashMap<i32, (i32, i32)>,
 ) -> Option<i32> {
     const MAX_ROOT_LEN: i16 = 6;
     let mut best: Option<i32> = None;
@@ -1932,13 +1951,10 @@ fn crown_holdfast_solid_y(
             let Some(c) = world.get_cell(wx, y) else {
                 continue;
             };
-            if c.material == MaterialId::Air {
+            if c.material == MaterialId::Air || c.material == MaterialId::Organic {
                 continue;
             }
-            if c.material == MaterialId::Organic && organic_in_floating_column(columns, wx, y) {
-                continue;
-            }
-            // Ground surface under the crown (highest solid in crown columns).
+            // Ground surface under the crown (highest mineral solid).
             best = Some(best.map_or(y, |b| b.max(y)));
         }
     }
@@ -1990,12 +2006,15 @@ fn column_standing_surface(world: &World, gx: i32, hint_y: i32) -> Option<i32> {
 /// Woody plants bake the flop into body offsets so the next stem elongates
 /// upward. Stemless seaweed only sets `fallen` (soft draw) — baking would
 /// turn the ribbon into a permanent sideways trunk.
+///
+/// Effective beam = floating-Organic footprint + root keel (extra dangling
+/// roots under the raft make tip less likely).
 fn apply_raft_tip(
     world: &World,
     atom: &mut Atom,
     columns: &std::collections::HashMap<i32, (i32, i32)>,
 ) {
-    let Some(support) = raft_support_width(world, atom, columns) else {
+    let Some(support) = raft_tip_support(world, atom, columns) else {
         return;
     };
     let stemless = crate::plant::stem_count(atom) == 0;
@@ -2015,6 +2034,30 @@ fn apply_raft_tip(
     if upright_mast_tippy(atom, support) {
         bake_tip_into_body(atom);
     }
+}
+
+/// Raft beam for tip checks: Organic footprint width plus dangling-root keel.
+fn raft_tip_support(
+    world: &World,
+    atom: &Atom,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+) -> Option<i32> {
+    let width = raft_support_width(world, atom, columns)?;
+    let keel = raft_root_keel(atom);
+    Some(width + keel)
+}
+
+/// Extra roots hanging under the crown act as a keel against tip.
+///
+/// The first root is the mount; each additional `dy < 0` Root adds one
+/// effective support column so a heavily rooted skinny raft stays upright.
+fn raft_root_keel(atom: &Atom) -> i32 {
+    let roots = atom
+        .body
+        .iter()
+        .filter(|(_, dy, m)| *m == ModuleId::Root && *dy < 0)
+        .count() as i32;
+    roots.saturating_sub(1)
 }
 
 fn raft_support_width(
@@ -2049,6 +2092,15 @@ fn raft_support_width(
         .filter(|x| columns.contains_key(x))
         .count() as i32;
     (support > 0).then_some(support)
+}
+
+/// True when a Root has purchase in sand/rock/grounded compost (not a raft).
+pub(crate) fn plant_grounded_in_substrate(
+    world: &World,
+    atom: &Atom,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+) -> bool {
+    grounded_substrate_anchor(world, atom, columns)
 }
 
 /// Upright (pre-tip) body sail height vs raft footprint.
