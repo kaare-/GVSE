@@ -716,6 +716,134 @@ pub fn soak_floating_litter(world: &mut World) {
     }
 }
 
+/// Base chance for a 1-cell Organic film to drift one column when
+/// `|wind|·tile_cols ≈ 0.2` (typical mean climate). Tall sails multiply this.
+const RAFT_DRIFT_BASE: f32 = 0.06;
+/// Extra sail from each Organic cell stacked above the waterline.
+const RAFT_DRIFT_ORGANIC_SAIL: f32 = 0.35;
+/// Extra sail per cell of living plant height above the raft top.
+const RAFT_DRIFT_PLANT_SAIL: f32 = 0.55;
+
+/// Wind shove for Organic piles floating on grounded lakes.
+///
+/// Moves a contiguous Organic stack sideways when the destination column
+/// has a float seat and freeboard Air. Probability scales with
+/// `|wind_vx|`, Organic pile height, and optional living plant tops
+/// (`plant_tops`: world-x → max plant cell y). Snow/Ice on the raft are
+/// left behind (they re-seat next tick). Never crawls into the water column.
+pub fn drift_floating_organic(
+    world: &mut World,
+    wind_vx_tiles: f32,
+    tile_cols: i32,
+    plant_tops: Option<&std::collections::HashMap<i32, i32>>,
+) -> u32 {
+    if wind_vx_tiles.abs() < 1e-5 {
+        return 0;
+    }
+    let sign: i32 = if wind_vx_tiles >= 0.0 { 1 } else { -1 };
+    let speed = wind_vx_tiles.abs() * tile_cols.max(1) as f32;
+
+    // Bottom Organic cell of each floating column.
+    let mut columns: Vec<(i32, i32, i32)> = Vec::new(); // gx, bottom_y, height
+    let litter = collect_buoyant_litter(world);
+    for (gx, gy) in litter {
+        let Some(cell) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if cell.material != MaterialId::Organic {
+            continue;
+        }
+        let Some(seat) = world.get_cell(gx, gy - 1) else {
+            continue;
+        };
+        if !floats_on_air_seat_world(world, seat, gx, gy - 1) {
+            continue;
+        }
+        // Contiguous Organic stack above the waterline.
+        let mut height = 1i32;
+        while let Some(above) = world.get_cell(gx, gy + height) {
+            if above.material != MaterialId::Organic {
+                break;
+            }
+            height += 1;
+            if height > 48 {
+                break;
+            }
+        }
+        columns.push((gx, gy, height));
+    }
+    if columns.is_empty() {
+        return 0;
+    }
+    // Downwind columns first so a convoy can follow into vacated seats.
+    columns.sort_by(|a, b| {
+        if sign > 0 {
+            b.0.cmp(&a.0)
+        } else {
+            a.0.cmp(&b.0)
+        }
+    });
+
+    let mut moved = 0u32;
+    for (gx, bottom_y, height) in columns {
+        let nx = world.wrap_x(gx + sign);
+        let Some(dest_seat) = world.get_cell(nx, bottom_y - 1) else {
+            continue;
+        };
+        if !floats_on_air_seat_world(world, dest_seat, nx, bottom_y - 1) {
+            continue;
+        }
+        let mut clear = true;
+        for dy in 0..height {
+            let Some(dest) = world.get_cell(nx, bottom_y + dy) else {
+                clear = false;
+                break;
+            };
+            if dest.material != MaterialId::Air || dest.sat.is_full() {
+                clear = false;
+                break;
+            }
+            // Refuse underwater film seats under the freeboard slot.
+            if dy == 0 {
+                // dest is freeboard above float water — OK even with haze.
+            } else if !dest.sat.is_empty() && dest.sat.0 > GRAIN_REPOSE_HAZE_MAX {
+                clear = false;
+                break;
+            }
+        }
+        if !clear {
+            continue;
+        }
+
+        let plant_h = plant_tops
+            .and_then(|m| m.get(&gx).copied())
+            .map(|top| (top - (bottom_y + height - 1)).max(0))
+            .unwrap_or(0);
+        let sail = 1.0
+            + RAFT_DRIFT_ORGANIC_SAIL * (height - 1) as f32
+            + RAFT_DRIFT_PLANT_SAIL * plant_h as f32;
+        let p = (speed * RAFT_DRIFT_BASE * sail).clamp(0.0, 0.85);
+        if hash_prob(world.seed.0, gx, world.tick, 0xD61F_4AF7) >= p {
+            continue;
+        }
+
+        // Move top-down so we don't overwrite within the column.
+        for dy in (0..height).rev() {
+            let y = bottom_y + dy;
+            let Some(org) = world.get_cell(gx, y) else {
+                continue;
+            };
+            let Some(dest) = world.get_cell(nx, y) else {
+                continue;
+            };
+            world.set_cell(nx, y, org);
+            world.set_cell(gx, y, dest);
+        }
+        moved += 1;
+    }
+    moved
+}
+
 /// Lift submerged Snow/Ice/Organic through grounded full water, and pop
 /// litter that still has lake water beside it onto freeboard Air.
 ///

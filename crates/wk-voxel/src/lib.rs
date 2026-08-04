@@ -80,7 +80,8 @@ pub use organism::{
     SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
 pub use plant::{
-    collect_live_photo_world_cells, collect_live_root_world_cells, find_fungus_slot, find_plant_slot,
+    collect_live_photo_world_cells, collect_live_root_world_cells, collect_plant_sail_tops,
+    find_fungus_slot, find_plant_slot,
     find_surface_air_slot, is_land_plant, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES,
     MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
@@ -104,9 +105,10 @@ pub use rules::{
     apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
     apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
-    is_standing_water, settle_loose_grains, settle_loose_grains_regions, tick, tick_with_configs,
-    tick_with_configs_and_geotech, tick_with_life, tick_with_perf, wake_unsupported_grains,
-    wake_unstable_slopes, CondensationConfig, EvapConfig, GrainConfig, KarstConfig,
+    drift_floating_organic, is_standing_water, settle_loose_grains, settle_loose_grains_regions,
+    tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life, tick_with_perf,
+    wake_unsupported_grains, wake_unstable_slopes, CondensationConfig, EvapConfig, GrainConfig,
+    KarstConfig,
     OrographicConfig, PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
     GRAIN_REPOSE_HAZE_MAX, GRAIN_SETTLE_PASSES, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };

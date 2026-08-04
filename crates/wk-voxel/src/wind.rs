@@ -2,24 +2,29 @@
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
-//! Coarse wind field for cloud / humidity advection.
+//! Coarse wind field for cloud / humidity advection and raft drift.
 //!
-//! Climate wind is mostly a horizontal prevailing flow; orographic
-//! lift adds a small upward component where the free surface rises
-//! in the wind direction (tall mountains).
+//! Climate wind is a horizontal prevailing flow; orographic lift adds a
+//! small upward component where the free surface rises in the wind
+//! direction. Gustiness / meander modulate instantaneous force and
+//! direction from the mean so weather is not a constant push.
 
 use serde::{Deserialize, Serialize};
 
 use crate::humidity::TileBounds;
 use crate::worldgen::continental_surface_y;
 
-/// Tile-scale wind used to advect atmospheric water.
+/// Tile-scale wind used to advect atmospheric water and shove rafts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wind {
-    /// Prevailing horizontal speed in **tiles per tick** (positive = +x).
+    /// Mean prevailing horizontal speed in **tiles per tick** (positive = +x).
     pub climate_vx: f32,
     /// Base vertical drift (usually ~0).
     pub climate_vy: f32,
+    /// Gust amplitude 0..1 — scales instantaneous |vx| around the mean.
+    pub gustiness: f32,
+    /// Direction meander 0..1 — slow sway that can weaken or reverse the mean.
+    pub meander: f32,
     /// Fractional advection residual (shared; climate is uniform).
     pub residual_x: f32,
     pub residual_y: f32,
@@ -44,9 +49,11 @@ impl Wind {
         sky_ceiling_y: i32,
         wrap_x: bool,
     ) -> Self {
-        let mut w = Self {
+        Self {
             climate_vx,
             climate_vy: 0.0,
+            gustiness: 0.45,
+            meander: 0.35,
             residual_x: 0.0,
             residual_y: 0.0,
             tile_cols: tile_cols.max(1),
@@ -61,12 +68,36 @@ impl Wind {
             seed,
             width_cols: width_cols.max(1),
             sea_level_y,
-        };
-        let _ = &mut w;
-        w
+        }
+    }
+
+    /// Instantaneous horizontal wind (tiles / tick) at sim `tick`.
+    ///
+    /// Combines the Tab mean (`climate_vx`) with a gust envelope and a
+    /// slow direction meander. `gustiness = meander = 0` recovers a
+    /// perfectly steady wind. High meander can reverse the heading.
+    pub fn effective_vx(&self, tick: u64) -> f32 {
+        let t = tick as f32;
+        let g = self.gustiness.clamp(0.0, 1.0);
+        let m = self.meander.clamp(0.0, 1.0);
+        let gust = 1.0 + g * (0.55 * (t * 0.019).sin() + 0.40 * (t * 0.047 + 2.1).sin());
+        // (1−m) keeps the mean heading; m blends in a slow sine that
+        // reaches ±1 so full meander can reverse the wind.
+        let heading = (1.0 - m) + m * (t * 0.0033).sin();
+        (self.climate_vx * gust * heading).clamp(-1.0, 1.0)
+    }
+
+    /// Instantaneous vertical climate drift (tiles / tick). Mild gust on `vy`.
+    pub fn effective_vy(&self, tick: u64) -> f32 {
+        let t = tick as f32;
+        let wobble = self.gustiness.clamp(0.0, 1.0) * 0.015 * (t * 0.023 + 0.8).sin();
+        self.climate_vy + wobble
     }
 
     /// Horizontal wind at a humidity tile (tiles / tick).
+    ///
+    /// Uses the mean climate value for orographic geometry; callers that
+    /// advect mass should prefer [`Self::effective_vx`].
     pub fn vx_at(&self, _hx: i32, _hy: i32) -> f32 {
         self.climate_vx
     }
@@ -142,6 +173,55 @@ mod tests {
         assert!(
             max_ascent > 5.0,
             "expected some orographic ascent across the ring, got {max_ascent}"
+        );
+    }
+
+    #[test]
+    fn steady_knobs_recover_climate_vx() {
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.08,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.gustiness = 0.0;
+        wind.meander = 0.0;
+        for tick in [0u64, 17, 100, 9999] {
+            assert!(
+                (wind.effective_vx(tick) - 0.08).abs() < 1e-5,
+                "tick={tick} got {}",
+                wind.effective_vx(tick)
+            );
+        }
+    }
+
+    #[test]
+    fn gust_and_meander_vary_over_time() {
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.10,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.gustiness = 0.8;
+        wind.meander = 0.85;
+        let samples: Vec<f32> = (0..2500).map(|t| wind.effective_vx(t)).collect();
+        let min = samples.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(max - min > 0.06, "expected wind to breathe, range={}", max - min);
+        assert!(
+            samples.iter().any(|&v| v < 0.0),
+            "high meander should reverse the mean (min={min} max={max})"
         );
     }
 }

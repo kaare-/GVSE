@@ -52,11 +52,11 @@ use macroquad::prelude::*;
 use wk_voxel::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
-    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    precip_forms_snow_at_air, sky_rgb_at_height, temperature_step_due, tick_with_life,
-    wake_unsupported_grains, wake_unstable_slopes, ClimateConfig, GeotechOverlayMode, SimSnapshot,
-    Wind, World, WorldgenParams,
+    celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, collect_plant_sail_tops,
+    day_night_factor_cfg, drift_floating_organic, geotech_map_due, humidity_diffuse_due,
+    is_daytime_cfg, is_standing_water, precip_forms_snow_at_air, sky_rgb_at_height,
+    temperature_step_due, tick_with_life, wake_unsupported_grains, wake_unstable_slopes,
+    ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
 
 use crate::creature_list::CreatureList;
@@ -834,13 +834,17 @@ async fn main() {
 
         // Sync live settings into scene subsystems.
         scene.wind.climate_vx = settings.wind_vx;
+        scene.wind.gustiness = settings.wind_gustiness;
+        scene.wind.meander = settings.wind_meander;
+        let wind_vx = scene.wind.effective_vx(scene.world.tick);
+        let wind_vy = scene.wind.effective_vy(scene.world.tick);
         scene.temperature.config = settings.temp;
         scene.temperature.climate = settings.climate;
         settings.apply_pop_caps(&mut scene.organisms);
         settings.oro.seed = scene.params.seed;
         settings.oro.width_cols = scene.params.width_cols;
         settings.oro.sea_level_y = scene.params.sea_level_y;
-        settings.oro.wind_sign = if settings.wind_vx >= 0.0 { 1 } else { -1 };
+        settings.oro.wind_sign = if wind_vx >= 0.0 { 1 } else { -1 };
 
         if settings.apply_genes_to_living {
             settings.apply_genes_to_living = false;
@@ -877,9 +881,7 @@ async fn main() {
             }
             // Vapor drifts with the wind, then coagulates into cloud
             // parcels that rain hard when heavy enough.
-            scene
-                .humidity
-                .advect(scene.wind.climate_vx, scene.wind.climate_vy);
+            scene.humidity.advect(wind_vx, wind_vy);
             let tick_no = scene.world.tick;
             scene.clouds.step_with_precip(
                 &mut scene.world,
@@ -925,6 +927,18 @@ async fn main() {
                 &settings.failure,
                 Some(&scene.geotech),
                 rooted.as_ref(),
+            );
+            // Floating Organic piles shove with the gusty wind; tall plants sail.
+            let sails = if organisms_on {
+                Some(collect_plant_sail_tops(&scene.organisms.atoms))
+            } else {
+                None
+            };
+            drift_floating_organic(
+                &mut scene.world,
+                wind_vx,
+                scene.wind.tile_cols,
+                sails.as_ref(),
             );
             // Bedload / bank transport after water has moved this tick.
             apply_flow_erosion_bound(&mut scene.world, &settings.grain, rooted.as_ref());
@@ -972,16 +986,17 @@ async fn main() {
                     tick_no,
                     &settings.climate,
                     Some(&mut scene.humidity),
-                    scene.wind.climate_vx,
+                    wind_vx,
                 );
-                spore_fx.burst_all(&releases, scene.wind.climate_vx);
+                spore_fx.burst_all(&releases, wind_vx);
             }
         }
 
         // Spore puffs keep drifting while paused so the wind trail stays readable.
+        let draw_wind_vx = scene.wind.effective_vx(scene.world.tick);
         spore_fx.update(
             get_frame_time(),
-            scene.wind.climate_vx,
+            draw_wind_vx,
             if scene.params.wrap_x {
                 Some(scene.params.width_cols)
             } else {
@@ -1374,7 +1389,7 @@ async fn main() {
             for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list(
                 &scene.world,
                 scene.world.tick,
-                scene.wind.climate_vx,
+                draw_wind_vx,
             ) {
                 for &x_copy in x_copies {
                     let sx = origin_x + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
@@ -1475,7 +1490,7 @@ async fn main() {
                 scene.clouds.len(),
                 scene.clouds.total_mass(),
                 scene.humidity.total_mass(),
-                scene.wind.climate_vx,
+                draw_wind_vx,
                 scene.organisms.len(),
                 scene.organisms.atom_cap(),
                 {

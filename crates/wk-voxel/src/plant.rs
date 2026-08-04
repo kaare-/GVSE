@@ -8,7 +8,7 @@
 //! not). Elongates by `StemVsLeafVsRoot` / `RootDepthBias`. Shade = D2.
 //! Vegetative sprouts = D3. Root starch tank + drought hibernate = D4.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
@@ -852,6 +852,34 @@ where
             if m == ModuleId::Photosystem {
                 out.insert((a.gx + dx as i32, a.gy + dy as i32));
             }
+        }
+    }
+    out
+}
+
+/// Per-column max world-y of living plant sail (Stem / Photosystem / Nucleus).
+///
+/// Used by floating-Organic wind drift so tall plants act as sails.
+pub fn collect_plant_sail_tops<'a, I>(atoms: I) -> HashMap<i32, i32>
+where
+    I: IntoIterator<Item = &'a Atom>,
+{
+    let mut out: HashMap<i32, i32> = HashMap::new();
+    for a in atoms {
+        if !is_land_plant(a) {
+            continue;
+        }
+        for &(dx, dy, m) in &a.body {
+            if !matches!(
+                m,
+                ModuleId::Photosystem | ModuleId::Stem | ModuleId::Nucleus
+            ) {
+                continue;
+            }
+            let wx = a.gx + dx as i32;
+            let wy = a.gy + dy as i32;
+            let e = out.entry(wx).or_insert(wy);
+            *e = (*e).max(wy);
         }
     }
     out

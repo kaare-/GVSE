@@ -3520,6 +3520,42 @@ fn demo_ocean_loose_rock_punches_organic_mat() {
 }
 
 #[test]
+fn floating_organic_drifts_with_wind() {
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(14, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=13 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 7, Cell::solid(MaterialId::Organic));
+    let x0 = 5;
+    let mut moved = false;
+    for tick in 0..400u64 {
+        w.tick = tick;
+        let n = drift_floating_organic(&mut w, 0.20, 4, None);
+        if n > 0 {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "tall Organic raft should eventually drift downwind");
+    let xs: Vec<_> = (3..=13)
+        .filter(|&x| {
+            (6..=8).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+        })
+        .collect();
+    assert!(
+        xs.iter().any(|&x| x > x0),
+        "Organic should sit further +x after +wind drift ({xs:?})"
+    );
+}
+
+#[test]
 fn organic_alone_still_floats_without_punch() {
     let mut w = setup_column_world();
     for y in 1..=6 {
