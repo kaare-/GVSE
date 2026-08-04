@@ -11,7 +11,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 |---------|--------|
 | `Root` / `Stem` / `Photosystem` / `Nucleus` modules | Done |
 | Fixed crown on purchase; free-float tipped when unanchored over water | Done |
-| Woody tip always bakes body (raft / free-float / sand undercut) | Done |
+| Woody tip rigid-bakes body (stem+root rotate together; raft / free-float / sand undercut) | Done |
 | Sand-rooted crowns never hoist on organic mats / water; no shore sail | Done |
 | Raft tip resists with root keel (more dangling roots → harder tip) | Done |
 | Upright draw ranks ignore shed cells; stemless never marks upright | Done |

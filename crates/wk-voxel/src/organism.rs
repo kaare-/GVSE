@@ -1588,10 +1588,11 @@ pub fn resolve_organism_draw_cells(
     out
 }
 
-/// Tip pose for free-float / unstable-raft draw.
+/// Soft stemless tip pose (draw-time only).
 ///
 /// Canopy (dy ≥ 0) lays along +x at the waterline; roots (dy < 0) hang
-/// straight down into the water — never into the air.
+/// straight down. Woody plants use [`rigid_tip_offset`] + [`bake_tip_into_body`]
+/// instead so root and stem stay one rigid body.
 pub fn fallen_body_offset(dx: i16, dy: i16) -> (i16, i16) {
     if dy < 0 {
         (dx, dy)
@@ -1600,59 +1601,139 @@ pub fn fallen_body_offset(dx: i16, dy: i16) -> (i16, i16) {
     }
 }
 
+/// Rigid 90° clockwise tip around the nucleus.
+///
+/// Former up (+y stem) becomes +x along the waterline; former down (−y
+/// roots) becomes −x. The whole chassis rotates together — no
+/// canopy-flatten that abandons the root ball.
+pub fn rigid_tip_offset(dx: i16, dy: i16) -> (i16, i16) {
+    (dy, -dx)
+}
+
 /// Bake the tip into body offsets so growth reorients.
 ///
-/// After this, the old canopy lies on `dy == 0` and new Stem elongation
-/// (`ay + 1`) grows **up** from the waterline instead of continuing the
-/// phantom pre-tip vertical axis. Clears `upright_growth`.
+/// Woody plants get a **rigid** 90° tip ([`rigid_tip_offset`]): stem and
+/// roots stay one connected body. After this, new Stem elongation
+/// (`ay + 1`) grows **up** from the nucleus. Clears `upright_growth`.
+///
+/// Re-tipping an already-fallen mast folds new upright shoots onto the
+/// existing waterline trunk without re-rotating roots.
 pub fn bake_tip_into_body(atom: &mut Atom) {
     use std::collections::HashSet;
 
     atom.fallen = true;
+    // Already tipped with a live upright mast: fold mast onto the log.
+    if !atom.upright_growth.is_empty()
+        && atom
+            .body
+            .iter()
+            .any(|&(_, y, m)| m == ModuleId::Stem && y == 0)
+    {
+        fold_upright_mast_into_waterline(atom);
+        return;
+    }
+
     let mut next: Vec<BodyModule> = Vec::with_capacity(atom.body.len());
     let mut used: HashSet<(i16, i16)> = HashSet::new();
 
-    // Roots keep hanging; nucleus stays at the crown.
-    for &(dx, dy, m) in &atom.body {
-        if m == ModuleId::Nucleus {
-            if used.insert((0, 0)) {
-                next.push((0, 0, ModuleId::Nucleus));
+    let mut place = |next: &mut Vec<BodyModule>,
+                     used: &mut HashSet<(i16, i16)>,
+                     mut nx: i16,
+                     mut ny: i16,
+                     m: ModuleId| {
+        let mut guard = 0;
+        while !used.insert((nx, ny)) && guard < 32 {
+            // Prefer a small droop/rise over stretching the log longer.
+            if ny <= 0 {
+                ny -= 1;
+            } else {
+                ny += 1;
             }
+            guard += 1;
+        }
+        if guard < 32 {
+            next.push((nx, ny, m));
+        }
+    };
+
+    // Stable order: nucleus, then by pre-tip distance from crown.
+    let mut cells: Vec<BodyModule> = atom.body.clone();
+    cells.sort_by_key(|&(dx, dy, m)| {
+        (
+            if m == ModuleId::Nucleus { 0 } else { 1 },
+            dy.abs() + dx.abs(),
+            dy,
+            dx,
+        )
+    });
+    for &(dx, dy, m) in &cells {
+        if m == ModuleId::Nucleus {
+            place(&mut next, &mut used, 0, 0, ModuleId::Nucleus);
             continue;
         }
-        if m == ModuleId::Root || dy < 0 {
-            let mut place = (dx, dy);
-            let mut guard = 0;
-            while !used.insert(place) && guard < 24 {
-                place.0 += if place.0 >= 0 { 1 } else { -1 };
-                guard += 1;
-            }
-            if guard < 24 {
-                next.push((place.0, place.1, m));
-            }
-        }
+        let (nx, ny) = rigid_tip_offset(dx, dy);
+        place(&mut next, &mut used, nx, ny, m);
     }
 
-    let mut canopy: Vec<BodyModule> = atom
+    if !next.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+        next.insert(0, (0, 0, ModuleId::Nucleus));
+    }
+    atom.body = next;
+    atom.upright_growth.clear();
+    atom.leaf_starve.clear();
+}
+
+/// Fold post-tip upright mast cells onto the waterline trunk (+x).
+fn fold_upright_mast_into_waterline(atom: &mut Atom) {
+    use std::collections::HashSet;
+
+    let mast: Vec<(i16, i16, ModuleId)> = atom
         .body
         .iter()
         .copied()
-        .filter(|&(_, dy, m)| m != ModuleId::Nucleus && m != ModuleId::Root && dy >= 0)
+        .filter(|&(x, y, _)| atom.upright_growth.iter().any(|&p| p == (x, y)))
         .collect();
-    // Lower body-Y claims the waterline first (stable tip order).
-    canopy.sort_by_key(|&(dx, dy, _)| (dy, dx));
-    for (dx, dy, m) in canopy {
-        let (mut nx, ny) = fallen_body_offset(dx, dy);
+    if mast.is_empty() {
+        atom.upright_growth.clear();
+        atom.leaf_starve.clear();
+        return;
+    }
+
+    let mut used: HashSet<(i16, i16)> = atom
+        .body
+        .iter()
+        .filter(|&&(x, y, _)| !atom.upright_growth.iter().any(|&p| p == (x, y)))
+        .map(|&(x, y, _)| (x, y))
+        .collect();
+    let mut tip_x = used
+        .iter()
+        .filter(|&&(_, y)| y == 0)
+        .map(|&(x, _)| x)
+        .max()
+        .unwrap_or(0);
+
+    let mut next: Vec<BodyModule> = atom
+        .body
+        .iter()
+        .copied()
+        .filter(|&(x, y, _)| !atom.upright_growth.iter().any(|&p| p == (x, y)))
+        .collect();
+
+    let mut mast_sorted = mast;
+    mast_sorted.sort_by_key(|&(x, y, _)| (y, x.abs()));
+    for (_, _, m) in mast_sorted {
+        tip_x += 1;
+        let mut nx = tip_x;
+        let mut ny = 0i16;
         let mut guard = 0;
         while !used.insert((nx, ny)) && guard < 32 {
-            nx += 1;
+            ny -= 1;
             guard += 1;
         }
         if guard < 32 {
             next.push((nx, ny, m));
         }
     }
-
     atom.body = next;
     atom.upright_growth.clear();
     atom.leaf_starve.clear();
@@ -1660,11 +1741,11 @@ pub fn bake_tip_into_body(atom: &mut Atom) {
 
 /// Draw offset for a tipped plant cell.
 ///
-/// Pre-tip canopy uses [`fallen_body_offset`]. Cells in `upright_growth`
-/// stack upright from the waterline with no gaps: visual Y is `1 +` the
-/// number of distinct upright body-Y values below this cell. (Body Y still
-/// includes the tipped trunk, so a raw `dy - tipped_top` remap can skip a
-/// row when trunk/leaf heights don't line up.)
+/// - **Woody** (has Stem): body already holds the rigid tip pose from
+///   [`bake_tip_into_body`]; non-mast cells draw at body offsets.
+/// - **Stemless**: soft [`fallen_body_offset`] at draw time.
+/// - Cells in `upright_growth` stack upright from the waterline with no
+///   gaps (visual Y = `1 +` distinct surviving upright body-Ys below).
 pub fn fallen_draw_offset(
     fallen: bool,
     upright_growth: &[(i16, i16)],
@@ -1676,6 +1757,24 @@ pub fn fallen_draw_offset(
         return (dx, dy);
     }
     if !upright_growth.iter().any(|&p| p == (dx, dy)) {
+        let woody = body.iter().any(|(_, _, m)| *m == ModuleId::Stem);
+        if woody {
+            // Body not yet bake-tipped (still has unmarked upright shoots):
+            // apply rigid tip at draw so root+stem stay one pose. After bake,
+            // those cells lie on the log and draw at body offsets.
+            let needs_draw_tip = body.iter().any(|&(x, y, m)| {
+                y > 0
+                    && matches!(
+                        m,
+                        ModuleId::Stem | ModuleId::Photosystem | ModuleId::ReproSpore
+                    )
+                    && !upright_growth.iter().any(|&p| p == (x, y))
+            });
+            if needs_draw_tip {
+                return rigid_tip_offset(dx, dy);
+            }
+            return (dx, dy);
+        }
         return fallen_body_offset(dx, dy);
     }
     // Distinct upright body-Y values strictly below `dy` that still exist on

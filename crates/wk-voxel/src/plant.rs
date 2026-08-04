@@ -1879,17 +1879,21 @@ pub fn sprout_body(parent: &Atom) -> Vec<BodyModule> {
 
 /// Approximate inverse of [`crate::organism::bake_tip_into_body`] for juveniles.
 ///
-/// Waterline canopy (`dy == 0`, `dx > 0`) maps back onto the crown column;
-/// roots and already-upright mast cells keep their offsets.
+/// Rigid tip mapped `(dx, dy) → (dy, -dx)`; inverse is `(dx, dy) → (-dy, dx)`.
+/// Post-tip upright mast cells (`dy > 0`) are already world-up.
 fn straighten_tipped_body_for_juvenile(body: &[BodyModule]) -> Vec<BodyModule> {
     use std::collections::HashSet;
 
     let mut next: Vec<BodyModule> = Vec::with_capacity(body.len());
     let mut used: HashSet<(i16, i16)> = HashSet::new();
-    let place = |used: &mut HashSet<(i16, i16)>, next: &mut Vec<BodyModule>, mut nx: i16, ny: i16, m: ModuleId| {
+    let place = |used: &mut HashSet<(i16, i16)>, next: &mut Vec<BodyModule>, mut nx: i16, mut ny: i16, m: ModuleId| {
         let mut guard = 0;
         while !used.insert((nx, ny)) && guard < 16 {
-            nx += 1;
+            if ny <= 0 {
+                ny -= 1;
+            } else {
+                nx += 1;
+            }
             guard += 1;
         }
         if guard < 16 {
@@ -1902,21 +1906,14 @@ fn straighten_tipped_body_for_juvenile(body: &[BodyModule]) -> Vec<BodyModule> {
             place(&mut used, &mut next, 0, 0, ModuleId::Nucleus);
             continue;
         }
-        if m == ModuleId::Root || dy < 0 {
-            place(&mut used, &mut next, dx, dy, m);
-            continue;
-        }
         if dy > 0 {
             // Post-tip upright mast — already world-up.
             place(&mut used, &mut next, dx, dy, m);
             continue;
         }
-        // Waterline canopy from bake: former (0, k) → (k, 0).
-        if dx > 0 {
-            place(&mut used, &mut next, 0, dx, m);
-        } else if dx < 0 {
-            place(&mut used, &mut next, dx, 1, m);
-        }
+        // Inverse rigid tip: (dx, dy) → (-dy, dx).
+        let (nx, ny) = (-dy, dx);
+        place(&mut used, &mut next, nx, ny, m);
     }
     if !next.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
         next.insert(0, (0, 0, ModuleId::Nucleus));
@@ -2936,7 +2933,7 @@ mod tests {
 
     #[test]
     fn unanchored_plant_floats_tipped_on_open_water() {
-        use crate::organism::{fallen_body_offset, OrganismStore};
+        use crate::organism::{rigid_tip_offset, OrganismStore};
 
         let mut w = World::new(5);
         w.ensure_chunk(ChunkCoord::new(0, 0));
@@ -2967,10 +2964,31 @@ mod tests {
             store.atoms[0].gy, 5,
             "should rest at the free surface, not the lake bed"
         );
-        let (dx, dy) = fallen_body_offset(0, 1);
-        assert_eq!((dx, dy), (1, 0), "upright stem lays along the waterline");
-        let (rx, ry) = fallen_body_offset(1, -1);
-        assert_eq!((rx, ry), (1, -1), "roots must hang down into water, not into air");
+        assert_eq!(
+            rigid_tip_offset(0, 1),
+            (1, 0),
+            "stem swings onto +x waterline"
+        );
+        assert_eq!(
+            rigid_tip_offset(0, -1),
+            (-1, 0),
+            "root swings onto −x as part of the same body"
+        );
+        let a = &store.atoms[0];
+        assert!(
+            a.body
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Stem && y == 0 && x > 0),
+            "baked stem should lie on +x waterline, body={:?}",
+            a.body
+        );
+        assert!(
+            a.body
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Root && x < 0 && y <= 0),
+            "baked root should sit on the −x side of the log, body={:?}",
+            a.body
+        );
     }
 
     #[test]
@@ -3110,7 +3128,7 @@ mod tests {
 
     #[test]
     fn tipped_floater_grows_new_stem_upright() {
-        use crate::organism::{fallen_body_offset, resolve_organism_draw_cells};
+        use crate::organism::{resolve_organism_draw_cells, rigid_tip_offset};
         use crate::shade::CanopyIndex;
         use std::collections::HashSet;
 
@@ -3186,14 +3204,15 @@ mod tests {
             }),
             "new stem draws upright from the waterline, got {posed:?}"
         );
-        let (ox, oy) = fallen_body_offset(0, 1);
+        let (ox, oy) = rigid_tip_offset(0, 1);
+        assert_eq!((ox, oy), (1, 0));
         assert!(
             posed.iter().any(|p| {
                 p.mid == ModuleId::Stem
                     && p.wx == atom.gx + ox as i32
                     && p.wy == atom.gy + oy as i32
             }),
-            "pre-tip stem still draws tipped along the waterline"
+            "pre-tip stem still draws as part of the rigid tip log"
         );
     }
 
@@ -3319,7 +3338,7 @@ mod tests {
             ],
         );
         bake_tip_into_body(&mut atom);
-        // Baked stem lies on the waterline at (3,0) body → world (8,5).
+        // Rigid tip: stem (0,3) → (3,0) body → world (8,5).
         assert!(
             atom.occupies(8, 5),
             "tipped canopy must be pickable on the waterline"
@@ -3328,8 +3347,78 @@ mod tests {
             !atom.occupies(5, 8),
             "must not occupy the pre-tip upright phantom cell"
         );
-        // Dangling root still pickable at body cell.
-        assert!(atom.occupies(5, 4));
+        // Root (0,-1) → (-1,0) body → world (4,5), still attached to the log.
+        assert!(atom.occupies(4, 5));
+    }
+
+    #[test]
+    fn woody_tip_keeps_root_and_stem_as_one_rigid_body() {
+        use crate::organism::bake_tip_into_body;
+
+        let mut atom = Atom::from_body(
+            5,
+            5,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, -2, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Stem),
+                (0, 4, ModuleId::Stem),
+                (0, 5, ModuleId::Photosystem),
+                (-1, 5, ModuleId::Photosystem),
+                (1, 5, ModuleId::Photosystem),
+            ],
+        );
+        let stem_h = 4i16;
+        let root_d = 2i16;
+        bake_tip_into_body(&mut atom);
+        // Stem length preserved on +x — no collision stretch into a mega-log.
+        let stem_xs: Vec<i16> = atom
+            .body
+            .iter()
+            .filter(|&&(_, _, m)| m == ModuleId::Stem)
+            .map(|&(x, _, _)| x)
+            .collect();
+        assert!(
+            stem_xs.iter().all(|&x| x > 0),
+            "stems should lie on +x after rigid tip, body={:?}",
+            atom.body
+        );
+        assert_eq!(
+            stem_xs.iter().copied().max(),
+            Some(stem_h),
+            "tip must not stretch stem longer than pre-tip height"
+        );
+        // Roots rotate to −x — same body, not abandoned under the old crown.
+        let roots: Vec<(i16, i16)> = atom
+            .body
+            .iter()
+            .filter(|&&(_, _, m)| m == ModuleId::Root)
+            .map(|&(x, y, _)| (x, y))
+            .collect();
+        assert_eq!(roots.len(), 2);
+        assert!(
+            roots.iter().all(|&(x, _)| x < 0),
+            "roots should occupy the −x end of the log, got {roots:?}"
+        );
+        assert!(
+            roots.contains(&(-1, 0)) && roots.contains(&(-2, 0)),
+            "root depths become −x waterline offsets, got {roots:?}"
+        );
+        let _ = root_d;
+        // Connected through nucleus: every non-nucleus cell touches another.
+        for &(x, y, m) in &atom.body {
+            if m == ModuleId::Nucleus {
+                continue;
+            }
+            let near = atom.body.iter().any(|&(ox, oy, _)| {
+                (ox, oy) != (x, y) && (ox - x).abs() <= 1 && (oy - y).abs() <= 1
+            });
+            assert!(near, "cell ({x},{y},{m:?}) disconnected after tip: {:?}", atom.body);
+        }
     }
 
     #[test]
@@ -3720,8 +3809,8 @@ mod tests {
             atom.body
                 .iter()
                 .filter(|(_, _, m)| *m == ModuleId::Root)
-                .any(|(_, y, _)| *y <= -2),
-            "dangling root should deepen below the crown, body={:?}",
+                .any(|(_, y, _)| *y < 0),
+            "new roots should droop below the waterline log, body={:?}",
             atom.body
         );
     }
@@ -3790,13 +3879,24 @@ mod tests {
             roots0,
             "root count must survive tip bake"
         );
+        // Rigid tip: stems on +x waterline, roots on −x; side leaves may sit
+        // one cell off the waterline from the rotation.
         assert!(
             store.atoms[0]
                 .body
                 .iter()
-                .filter(|(_, _, m)| *m == ModuleId::Stem || *m == ModuleId::Photosystem)
-                .all(|(_, y, _)| *y == 0),
-            "baked canopy lies on dy==0, body={:?}",
+                .filter(|(_, _, m)| *m == ModuleId::Stem)
+                .all(|&(x, y, _)| y == 0 && x > 0),
+            "baked stems lie on +x waterline, body={:?}",
+            store.atoms[0].body
+        );
+        assert!(
+            store.atoms[0]
+                .body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Root)
+                .all(|&(x, y, _)| x < 0 || y < 0),
+            "baked roots stay on the root end of the log, body={:?}",
             store.atoms[0].body
         );
     }
@@ -3922,6 +4022,8 @@ mod tests {
 
     #[test]
     fn upright_mast_counts_as_wind_sail() {
+        use crate::organism::bake_tip_into_body;
+
         let mut tipped = Atom::from_body(
             5,
             5,
@@ -3940,13 +4042,16 @@ mod tests {
             &mut tipped,
             crate::blueprint::Blueprint::minimal_plant().genome,
         );
-        tipped.fallen = true;
-        // Fully tipped — flat on the waterline, no upright sail height.
+        bake_tip_into_body(&mut tipped);
+        // Fully tipped log — sail tops sit on the waterline (nucleus column).
         let flat = collect_plant_sail_tops(std::iter::once(&tipped));
         let flat_top = flat.get(&5).copied().unwrap_or(tipped.gy);
         assert_eq!(flat_top, tipped.gy, "fully tipped canopy is waterline-flat");
 
-        tipped.upright_growth = vec![(0, 4), (0, 5)];
+        // Post-tip upright mast on the crown column.
+        tipped.body.push((0, 1, ModuleId::Stem));
+        tipped.body.push((0, 2, ModuleId::Photosystem));
+        tipped.upright_growth = vec![(0, 1), (0, 2)];
         let sailed = collect_plant_sail_tops(std::iter::once(&tipped));
         let sail_top = sailed.get(&5).copied().unwrap_or(tipped.gy);
         assert!(
