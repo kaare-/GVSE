@@ -1723,7 +1723,7 @@ fn fold_upright_mast_into_waterline(atom: &mut Atom) {
     mast_sorted.sort_by_key(|&(x, y, _)| (y, x.abs()));
     for (_, _, m) in mast_sorted {
         tip_x += 1;
-        let mut nx = tip_x;
+        let nx = tip_x;
         let mut ny = 0i16;
         let mut guard = 0;
         while !used.insert((nx, ny)) && guard < 32 {
