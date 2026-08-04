@@ -15,6 +15,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | Upright mast re-tips when tippy; draw-space sail counts new shoots | Done |
 | Tip bakes into body (new stems grow up); floaters elongate roots | Done |
 | Substrate-rooted plants stay pinned when flooded (raft organic floats) | Done |
+| Seaweed stays on bed holdfast; floats only if holdfast lost/rafting | Done |
 | Pore-`sat` drink + drought stress | Done |
 | Spawn on Air above porous solid | Done |
 | Editor brushes + `T` minimal plant + `W` seaweed | Done |
