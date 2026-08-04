@@ -3319,6 +3319,84 @@ fn organic_still_floats_on_grounded_lake() {
 }
 
 #[test]
+fn dense_grain_punches_through_floating_organic_raft() {
+    // Thin Organic on water must not carry Soil / LooseRock piles.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 7, Cell::solid(MaterialId::Soil));
+    w.set_cell(5, 8, Cell::solid(MaterialId::LooseRock));
+    w.set_cell(5, 9, Cell::solid(MaterialId::LooseRock));
+    for _ in 0..20 {
+        tick(&mut w);
+    }
+    let mut organs = vec![];
+    let mut rocks = vec![];
+    let mut soils = vec![];
+    for x in 2..=8 {
+        for y in 1..=12 {
+            match w.get_cell(x, y).map(|c| c.material) {
+                Some(MaterialId::Organic) => organs.push((x, y)),
+                Some(MaterialId::LooseRock) => rocks.push((x, y)),
+                Some(MaterialId::Soil) => soils.push((x, y)),
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        !rocks.iter().any(|&(_, y)| y >= 6),
+        "LooseRock must not remain stacked above the lake on Organic ({rocks:?})"
+    );
+    assert!(
+        rocks.iter().any(|&(_, y)| y <= 5),
+        "LooseRock must sink into / through the water column ({rocks:?})"
+    );
+    assert!(
+        !soils.iter().any(|&(_, y)| y >= 6),
+        "Soil must not ride the floating Organic raft ({soils:?})"
+    );
+    assert!(
+        !organs.is_empty(),
+        "Organic raft should still exist somewhere near the lake"
+    );
+}
+
+#[test]
+fn organic_alone_still_floats_without_punch() {
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 7, Cell::solid(MaterialId::Organic));
+    for _ in 0..10 {
+        tick(&mut w);
+    }
+    let n = (3..=7)
+        .map(|x| {
+            (1..=10)
+                .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+                .count()
+        })
+        .sum::<usize>();
+    assert_eq!(n, 2, "stacked Organic litter must stay as a raft (n={n})");
+}
+
+#[test]
 fn submerged_organic_rises_out_of_water_column() {
     // Glitch line: Organic stuck under a refilled lake surface must buoyancy-rise.
     let mut w = setup_column_world();

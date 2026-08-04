@@ -178,6 +178,16 @@ pub fn wake_unsupported_grains(world: &mut World) {
                     world.touch_dirty(gx, gy);
                     continue;
                 };
+                // Dense cargo on a floating litter raft — punch-through wake.
+                if is_grain(cell.material) && falls_through_empty_air(below.material) {
+                    if let Some(under) = world.get_cell(gx, gy - 2) {
+                        if floats_on_air_seat_world(world, under, gx, gy - 2) {
+                            world.touch_dirty(gx, gy);
+                            world.touch_dirty(gx, gy - 1);
+                            continue;
+                        }
+                    }
+                }
                 if below.material != MaterialId::Air {
                     continue;
                 }
@@ -394,6 +404,23 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                     // and *suspended* full-sat blobs. Float only on
                     // grounded lake / puddle surfaces.
                     if floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy) {
+                        // Floating raft cannot carry dense cargo — swap
+                        // grain down through the litter so it can sink.
+                        if let Some(cargo) =
+                            (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy + 2) })
+                        {
+                            if is_grain(cargo.material) {
+                                unsafe {
+                                    parallel::set_cell(
+                                        ptrs, wrap_width, gx, gy + 1, cargo,
+                                    );
+                                    parallel::set_cell(
+                                        ptrs, wrap_width, gx, gy + 2, above,
+                                    );
+                                }
+                                moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                        }
                         continue;
                     }
                 } else {
