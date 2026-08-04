@@ -62,9 +62,10 @@ pub fn apply_grain_fall(world: &mut World) {
 /// pass budget is spent. Starts from the world's current dirty wake
 /// (F3 paint, editor writes, prior CA).
 ///
-/// The terrain editor pauses the full tick while open — call this so
-/// painted Organic/Sand still falls instead of hanging until F3 closes
-/// (or until roof-collapse / erosion re-wakes the column).
+/// The terrain editor pauses the full tick while open — that is fine;
+/// on unpause, [`tick_with_life`] calls this so painted Organic/Sand
+/// seats instead of hanging until roof-collapse / erosion re-wakes
+/// the column.
 pub fn settle_loose_grains(
     world: &mut World,
     rooted: Option<&HashSet<(i32, i32)>>,

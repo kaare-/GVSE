@@ -960,8 +960,8 @@ fn painted_midair_organic_falls_under_tick() {
 
 #[test]
 fn settle_loose_grains_drops_organic_without_full_tick() {
-    // F3 pauses water/organisms but still settles grains — paint must
-    // not require closing the editor before litter falls.
+    // After F3 unpause, settle (via tick or directly) must drop litter
+    // that was painted mid-air while the editor held the sim paused.
     let mut w = setup_column_world();
     w.set_cell(5, 40, Cell::solid(MaterialId::Organic));
     settle_loose_grains(&mut w, None, GRAIN_SETTLE_PASSES);
