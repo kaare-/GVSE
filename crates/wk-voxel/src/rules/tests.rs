@@ -2129,6 +2129,139 @@ fn continuous_rain_on_stepped_shore_does_not_pool_on_shelves() {
 }
 
 
+
+#[test]
+fn water_under_floating_organic_equalizes_with_open_lake() {
+    // Tall water pedestal under a floating Organic lid next to a lower
+    // open free surface — the lake must level; the raft must settle.
+    //
+    //   y=6: . . O O O . . .
+    //   y=5: . . W W W . . .
+    //   y=4: . . W W W . . .
+    //   y=3: W W W W W W W .
+    //   y=2: W W W W W W W .
+    //   y=1: # # # # # # # #
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..10 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(0, 2, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(0, 3, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(0, 4, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(0, 5, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(9, 2, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(9, 3, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(9, 4, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(9, 5, Cell::solid(MaterialId::Bedrock));
+    for x in 1..9 {
+        w.set_cell(x, 2, Cell::water());
+        w.set_cell(x, 3, Cell::water());
+    }
+    // Pedestal under the future raft.
+    for x in 3..=5 {
+        w.set_cell(x, 4, Cell::water());
+        w.set_cell(x, 5, Cell::water());
+        w.set_cell(x, 6, Cell::solid(MaterialId::Organic));
+    }
+    for _ in 0..80 {
+        tick(&mut w);
+    }
+    // Open free surface should not sit far below water still under the mat.
+    let open_top = (1..9)
+        .filter(|&x| !(3..=5).contains(&x))
+        .map(|x| {
+            (1..=8)
+                .rev()
+                .find(|&y| w.get_cell(x, y).map(|c| c.material == MaterialId::Air && c.sat.0 > 200).unwrap_or(false))
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0);
+    let under_mat_top = (3..=5)
+        .map(|x| {
+            (1..=8)
+                .rev()
+                .find(|&y| {
+                    w.get_cell(x, y)
+                        .map(|c| c.material == MaterialId::Air && c.sat.0 > 200)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(
+        under_mat_top <= open_top + 1,
+        "water pedestal under Organic must level with open lake (under={under_mat_top} open={open_top})"
+    );
+    // Raft should have settled onto the leveled free surface (not floating
+    // on a 2-cell mound above the open waterline).
+    let org_ys: Vec<i32> = (1..9)
+        .flat_map(|x| {
+            (1..=8)
+                .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+                .map(|y| y)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(!org_ys.is_empty(), "Organic raft must survive");
+    let org_min = *org_ys.iter().min().unwrap();
+    assert!(
+        org_min <= open_top + 2,
+        "Organic should settle near the open free surface (org_min={org_min} open={open_top} ys={org_ys:?})"
+    );
+}
+
+
+#[test]
+fn water_mound_under_wide_organic_lid_drains_to_open_vent() {
+    // Wide Organic lid over a high water mound with only a narrow open vent
+    // on the left — the free surface under the lid must fall to the vent.
+    let mut w = World::new(12);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..14 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=7 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(13, y, Cell::solid(MaterialId::Bedrock));
+    }
+    // Deep basin water.
+    for x in 1..13 {
+        w.set_cell(x, 2, Cell::water());
+        w.set_cell(x, 3, Cell::water());
+    }
+    // High mound under a wide lid (x=3..11), vent at x=1..2 open.
+    for x in 3..12 {
+        w.set_cell(x, 4, Cell::water());
+        w.set_cell(x, 5, Cell::water());
+        w.set_cell(x, 6, Cell::water());
+        w.set_cell(x, 7, Cell::solid(MaterialId::Organic));
+    }
+    for _ in 0..200 {
+        tick(&mut w);
+    }
+    let free_top = |x: i32| -> i32 {
+        (1..=10)
+            .rev()
+            .find(|&y| {
+                w.get_cell(x, y)
+                    .map(|c| c.material == MaterialId::Air && c.sat.0 > 200)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(0)
+    };
+    let vent_top = free_top(1).max(free_top(2));
+    let lid_top = (3..12).map(free_top).max().unwrap_or(0);
+    assert!(
+        lid_top <= vent_top + 1,
+        "free surface under Organic lid must level with open vent (lid={lid_top} vent={vent_top})"
+    );
+}
+
 #[test]
 fn same_y_equalize_flattens_stepped_lake_surface() {
     // Free-surface terrace inside a closed basin (solid shores):
