@@ -15,7 +15,7 @@ use crate::cell::{
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
-use crate::parallel::{self, for_each_region_parallel};
+use crate::parallel::{self, for_each_region_parallel, for_each_region_serial_moore};
 use crate::temperature::Temperature;
 
 use super::gravity::apply_gravity_fall;
@@ -36,7 +36,7 @@ pub const ROOT_EROSION_BIND: f32 = 3.5;
 /// Max vertical fall cells when settling unsupported grains in one
 /// call. Default sky is ~5 chunks tall (`64×5`); cover that so F3
 /// litter does not take hundreds of ticks to land.
-pub const GRAIN_SETTLE_PASSES: u32 = 384;
+pub const GRAIN_SETTLE_PASSES: u32 = 1024;
 
 /// One-cell-per-pass grain fall.
 ///
@@ -458,7 +458,8 @@ fn apply_repose_pass(
     let cold_mode = temp.is_some();
     let hydro = world.hydro;
     let moves = std::sync::atomic::AtomicU32::new(0);
-    for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
+    // Moore ptr map + serial: repose writes horizontally across seams.
+    for_each_region_serial_moore(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {

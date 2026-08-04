@@ -3498,3 +3498,97 @@ fn sand_ledge_walks_off_sideways_into_open_air() {
         "top ledge sand must walk off / fall"
     );
 }
+
+#[test]
+fn large_sand_blob_does_not_keep_vertical_cliff() {
+    let mut w = setup_column_world();
+    // Organic bed like the screenshot.
+    for x in 0..64 {
+        for y in 1..=6 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Organic));
+        }
+    }
+    // Large sand blob dropped on/near the bed (partly mid-air).
+    for x in 18..=48 {
+        for y in 7..=32 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+    }
+    tick(&mut w);
+    // Measure max vertical run of sand with Air to the left / right.
+    let mut worst_left = 0i32;
+    let mut worst_right = 0i32;
+    for x in 1..63 {
+        let mut run_l = 0i32;
+        let mut run_r = 0i32;
+        for y in 1..50 {
+            let here = w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand);
+            let left_air = w.get_cell(x - 1, y).map(|c| c.material) == Some(MaterialId::Air);
+            let right_air = w.get_cell(x + 1, y).map(|c| c.material) == Some(MaterialId::Air);
+            if here && left_air {
+                run_l += 1;
+                worst_left = worst_left.max(run_l);
+            } else {
+                run_l = 0;
+            }
+            if here && right_air {
+                run_r += 1;
+                worst_right = worst_right.max(run_r);
+            } else {
+                run_r = 0;
+            }
+        }
+    }
+    // A hard cliff is a long vertical Air-exposed run. 45° stairs only
+    // expose 1 cell at a time on a face.
+    assert!(
+        worst_left <= 2 && worst_right <= 2,
+        "hard cliff face remained (left={worst_left} right={worst_right})"
+    );
+}
+
+#[test]
+fn large_sand_blob_across_chunk_seam_no_cliff() {
+    use crate::parallel::set_parallel_enabled;
+    set_parallel_enabled(true);
+    let mut w = World::new(7);
+    w.wrap_width = Some(CHUNK_CELLS_W as i32 * 2);
+    for cx in 0..2 {
+        w.ensure_chunk(ChunkCoord::new(cx, 0));
+        w.ensure_chunk(ChunkCoord::new(cx, 1));
+    }
+    for x in 0..(CHUNK_CELLS_W as i32 * 2) {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Organic));
+        }
+    }
+    // Blob straddling the x=64 seam.
+    for x in 50..=80 {
+        for y in 5..=28 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+    }
+    for _ in 0..10 {
+        tick(&mut w);
+    }
+    let mut worst_left = 0i32;
+    for x in 1..120 {
+        let mut run = 0i32;
+        for y in 1..40 {
+            let here = w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand);
+            let left_air = w.get_cell(x - 1, y).map(|c| c.material) == Some(MaterialId::Air);
+            if here && left_air {
+                run += 1;
+                worst_left = worst_left.max(run);
+            } else {
+                run = 0;
+            }
+        }
+    }
+    set_parallel_enabled(true);
+    assert!(
+        worst_left <= 3,
+        "chunk-seam sand blob left a hard cliff (worst_left={worst_left})"
+    );
+}

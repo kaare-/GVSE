@@ -94,6 +94,26 @@ pub(crate) fn pull_write_coords(active: &[ActiveChunk]) -> Vec<ChunkCoord> {
     coords
 }
 
+/// Moore neighbourhood of every active chunk (self + 8 neighbours).
+///
+/// Repose / same-Y walk-off write horizontally across chunk seams; the
+/// gravity pull set ([`pull_write_coords`]) only includes `cy + 1`, so
+/// those slides silently no-op'd and left hard cliff faces on one side
+/// of large F3 sand blobs.
+pub(crate) fn moore_write_coords(active: &[ActiveChunk]) -> Vec<ChunkCoord> {
+    let mut coords = Vec::with_capacity(active.len() * 9);
+    for ac in active {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                coords.push(ChunkCoord::new(ac.coord.cx + dx, ac.coord.cy + dy));
+            }
+        }
+    }
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    coords.dedup();
+    coords
+}
+
 /// True when each region's write set (own + `cy + 1`) is unique in `active`.
 ///
 /// Required for [`ChunkPtrMap`]'s `Sync` contract under rayon. Callers pass
@@ -183,6 +203,28 @@ pub(crate) fn for_each_region_parallel(
         for ac in active {
             body(&ptrs, wrap_width, ac);
         }
+    }
+}
+
+/// Serial region scan with a Moore-neighbour chunk ptr map.
+///
+/// Used by grain repose: slides write `cx ± 1` and must not silently
+/// no-op at chunk seams. Serial so overlapping Moore write sets cannot
+/// race (unlike [`for_each_region_parallel`]'s pull-only contract).
+pub(crate) fn for_each_region_serial_moore(
+    world: &mut World,
+    active: &[ActiveChunk],
+    body: impl Fn(&ChunkPtrMap, Option<i32>, &ActiveChunk),
+) {
+    if active.is_empty() {
+        return;
+    }
+    let wrap_width = world.wrap_width;
+    let mut coords = moore_write_coords(active);
+    coords.retain(|c| world.chunks.contains_key(c));
+    let ptrs = chunk_ptrs_mut(world, &coords);
+    for ac in active {
+        body(&ptrs, wrap_width, ac);
     }
 }
 
