@@ -903,6 +903,35 @@ fn organic_does_not_repose_into_standing_water() {
 }
 
 #[test]
+fn painted_organic_platform_falls_under_tick() {
+    // Wide F3 brush stroke high in empty sky — must not hang as a floating island.
+    let mut w = setup_column_world();
+    for x in 2..=12 {
+        for y in 20..=22 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Organic));
+        }
+    }
+    // One tick must seat the platform (multi-pass grain settle).
+    tick(&mut w);
+    let floating = (2..=12)
+        .flat_map(|x| (15..=22).map(move |y| (x, y)))
+        .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+        .count();
+    assert_eq!(
+        floating, 0,
+        "organic platform must leave the sky ({floating} cells left high)"
+    );
+    let seated = (1..=14)
+        .flat_map(|x| (1..=6).map(move |y| (x, y)))
+        .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+        .count();
+    assert!(
+        seated >= 20,
+        "most litter should seat near bed (seated={seated})"
+    );
+}
+
+#[test]
 fn painted_midair_organic_falls_under_tick() {
     // F3 terrain paint marks dirty, but water substeps clear it and write
     // nothing — grain fall used to see an empty plan and leave litter
@@ -910,9 +939,7 @@ fn painted_midair_organic_falls_under_tick() {
     let mut w = setup_column_world();
     w.set_cell(5, 8, Cell::solid(MaterialId::Organic));
     w.set_cell(5, 9, Cell::solid(MaterialId::Organic));
-    for _ in 0..20 {
-        tick(&mut w);
-    }
+    tick(&mut w);
     assert_eq!(
         w.get_cell(5, 9).unwrap().material,
         MaterialId::Air,
@@ -929,6 +956,25 @@ fn painted_midair_organic_falls_under_tick() {
             || w.get_cell(6, y).map(|c| c.material) == Some(MaterialId::Organic)
     });
     assert!(on_bed, "Organic should seat near bedrock (fall + repose)");
+}
+
+#[test]
+fn settle_loose_grains_drops_organic_without_full_tick() {
+    // F3 pauses water/organisms but still settles grains — paint must
+    // not require closing the editor before litter falls.
+    let mut w = setup_column_world();
+    w.set_cell(5, 40, Cell::solid(MaterialId::Organic));
+    settle_loose_grains(&mut w, None, GRAIN_SETTLE_PASSES);
+    assert_eq!(
+        w.get_cell(5, 40).unwrap().material,
+        MaterialId::Air,
+        "settle_loose_grains must drop mid-air Organic"
+    );
+    assert_eq!(
+        w.get_cell(5, 1).unwrap().material,
+        MaterialId::Organic,
+        "Organic should seat on bedrock"
+    );
 }
 
 #[test]

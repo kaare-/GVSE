@@ -8,7 +8,7 @@ use std::collections::HashSet;
 
 use wk_material::{HydroOverrides, MaterialId};
 
-use crate::active::{partition_checkerboard, ActiveChunk};
+use crate::active::{partition_checkerboard, plan_active, ActiveChunk};
 use crate::cell::{
     falls_through_empty_air, grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain,
     water_capacity_with, Cell, CellFlags, Sat,
@@ -33,6 +33,11 @@ pub const ROOT_REPOSE_STEP_BONUS: i32 = 2;
 /// (`≈ 1 + 2.5ρ` at ρ=1 from column `run_sediment`).
 pub const ROOT_EROSION_BIND: f32 = 3.5;
 
+/// Max vertical fall cells when settling unsupported grains in one
+/// call. Default sky is ~5 chunks tall (`64×5`); cover that so F3
+/// litter does not take hundreds of ticks to land.
+pub const GRAIN_SETTLE_PASSES: u32 = 384;
+
 /// One-cell-per-pass grain fall.
 ///
 /// Each `Air` cell **pulls** a granular neighbour from directly above
@@ -53,8 +58,74 @@ pub fn apply_grain_fall(world: &mut World) {
     }
 }
 
+/// Drop unsupported grains / litter through Air until seated or the
+/// pass budget is spent. Starts from the world's current dirty wake
+/// (F3 paint, editor writes, prior CA).
+///
+/// The terrain editor pauses the full tick while open — call this so
+/// painted Organic/Sand still falls instead of hanging until F3 closes
+/// (or until roof-collapse / erosion re-wakes the column).
+pub fn settle_loose_grains(
+    world: &mut World,
+    rooted: Option<&HashSet<(i32, i32)>>,
+    max_passes: u32,
+) {
+    let active = plan_active(world);
+    settle_loose_grains_regions(world, &active, rooted, max_passes);
+}
+
+/// [`settle_loose_grains`] from a pre-planned active set (e.g. the
+/// post-flow halo when water wrote nothing).
+///
+/// Does **not** clear dirty: seepage / water wakes must survive a
+/// settle pass that finds nothing to drop. Stops when a fall pass
+/// makes no swaps (one trailing repose still runs).
+pub fn settle_loose_grains_regions(
+    world: &mut World,
+    initial: &[ActiveChunk],
+    rooted: Option<&HashSet<(i32, i32)>>,
+    max_passes: u32,
+) {
+    let mut cur: Vec<ActiveChunk> = initial.to_vec();
+    for _ in 0..max_passes {
+        if cur.is_empty() {
+            break;
+        }
+        let mut moved = 0u32;
+        let fall_passes = partition_checkerboard(&cur);
+        for pass in &fall_passes {
+            moved += apply_grain_fall_regions(world, pass);
+        }
+        let after_fall = plan_active(world);
+        let repose_src = if after_fall.is_empty() {
+            cur.clone()
+        } else {
+            after_fall
+        };
+        if !repose_src.is_empty() {
+            let repose_passes = partition_checkerboard(&repose_src);
+            for pass in &repose_passes {
+                apply_grain_repose_regions(world, pass, rooted);
+            }
+        }
+        if moved == 0 {
+            // No vertical drop — leave dirty intact so seepage / flow
+            // can keep wetting on the next tick.
+            break;
+        }
+        let next = plan_active(world);
+        if next.is_empty() {
+            break;
+        }
+        cur = next;
+    }
+}
+
 /// Grain fall restricted to a pre-planned active set.
-pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
+///
+/// Returns how many Air↔grain swaps this pass performed.
+pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u32 {
+    let moves = std::sync::atomic::AtomicU32::new(0);
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
@@ -91,9 +162,11 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     parallel::set_cell(ptrs, wrap_width, gx, gy, above);
                     parallel::set_cell(ptrs, wrap_width, gx, gy + 1, cur);
                 }
+                moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
     });
+    moves.into_inner()
 }
 
 /// Angle-of-repose slide: supported grains move diagonally down into Air

@@ -54,8 +54,9 @@ use wk_voxel::{
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    precip_forms_snow_at_air, sky_rgb_at_height, temperature_step_due, tick_with_life,
-    ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
+    precip_forms_snow_at_air, settle_loose_grains, sky_rgb_at_height, temperature_step_due,
+    tick_with_life, ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
+    GRAIN_SETTLE_PASSES,
 };
 
 use crate::creature_list::CreatureList;
@@ -843,8 +844,13 @@ async fn main() {
         }
 
         // Physics (frozen while paint editors / quit dialog are open).
+        // Terrain editor still settles loose grains so F3 Organic/Sand
+        // drops under gravity instead of hanging until the panel closes.
         let sim_paused =
             paused || (editor.open && !editor.spawn_picker) || terrain.open || quit_dialog.open;
+        if terrain.open && !quit_dialog.open {
+            settle_loose_grains(&mut scene.world, None, GRAIN_SETTLE_PASSES);
+        }
         if !sim_paused {
             if rain_on {
                 apply_rain_with_temp(
