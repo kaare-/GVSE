@@ -194,7 +194,8 @@ compaction → map-gated thin-dam shear.
 ### 7. Air pressure (research)
 
 Powder Toy–style gas. Migration already flags Air as first-class;
-voxel wind is still climate-scale. Defer until hydro + thermal are
+voxel wind is still climate-scale (mean + gust/meander modulation; no
+pressure field yet). Defer cell wind until hydro + thermal are
 boring.
 
 ## Architecture notes

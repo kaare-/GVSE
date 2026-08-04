@@ -14,6 +14,13 @@ use serde::{Deserialize, Serialize};
 use crate::humidity::TileBounds;
 use crate::worldgen::continental_surface_y;
 
+fn default_gustiness() -> f32 {
+    0.45
+}
+fn default_meander() -> f32 {
+    0.35
+}
+
 /// Tile-scale wind used to advect atmospheric water and shove rafts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wind {
@@ -22,8 +29,10 @@ pub struct Wind {
     /// Base vertical drift (usually ~0).
     pub climate_vy: f32,
     /// Gust amplitude 0..1 — scales instantaneous |vx| around the mean.
+    #[serde(default = "default_gustiness")]
     pub gustiness: f32,
     /// Direction meander 0..1 — slow sway that can weaken or reverse the mean.
+    #[serde(default = "default_meander")]
     pub meander: f32,
     /// Fractional advection residual (shared; climate is uniform).
     pub residual_x: f32,
