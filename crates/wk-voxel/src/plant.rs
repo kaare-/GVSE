@@ -154,9 +154,12 @@ pub const LAND_SPROUT_COST_FRAC: f32 = 0.55;
 /// Neighbourhood half-width (columns) for local plant density gate.
 pub const SPROUT_LOCAL_RADIUS: i32 = 4;
 /// Max living crowns in `[gx±radius]` (including self) before rhizome
-/// sprouting is blocked. High enough for a slow local grove; the long
-/// [`LAND_SPROUT_PERIOD`] is what stops one template filling the pop cap.
-pub const SPROUT_LOCAL_MAX: usize = 8;
+/// sprouting is blocked. Paired with [`SPROUT_CROWN_CLEARANCE`] so groves
+/// stay readable instead of a solid green bar.
+pub const SPROUT_LOCAL_MAX: usize = 5;
+/// No other living crown within this many columns of a new sprout seat.
+/// `2` → minimum crown spacing of 3 (one empty column between ±1 T-canopies).
+pub const SPROUT_CROWN_CLEARANCE: i32 = 2;
 /// Energy fraction of spawn tank to fire a wind spore (fern-style).
 pub const PLANT_SPORE_ENERGY_FRAC: f32 = 0.68;
 /// Ticks between plant wind-spore attempts (~0.8 demo day).
@@ -2044,8 +2047,19 @@ pub fn column_occupied(plant_cols: &[i32], gx: i32) -> bool {
     plant_cols.iter().any(|&c| c == gx)
 }
 
+/// True when `gx` is far enough from every living crown for readable spacing.
+pub fn crown_clearance_ok(
+    plant_cols: &[i32],
+    gx: i32,
+    wrap_width: Option<i32>,
+) -> bool {
+    !plant_cols.iter().any(|&c| {
+        column_dist(c, gx, wrap_width) <= SPROUT_CROWN_CLEARANCE
+    })
+}
+
 /// Pick a world column for vegetative sprout from a lateral runner tip.
-/// Skips columns that already host a living crown (`plant_cols`).
+/// Skips seats that violate [`SPROUT_CROWN_CLEARANCE`] against living crowns.
 pub fn pick_sprout_column(world: &World, atom: &Atom, plant_cols: &[i32]) -> Option<i32> {
     if !has_lateral_runner(atom) || root_count(atom) < LAND_SPROUT_MIN_ROOTS {
         return None;
@@ -2057,7 +2071,7 @@ pub fn pick_sprout_column(world: &World, atom: &Atom, plant_cols: &[i32]) -> Opt
             continue;
         }
         let wx = world.wrap_x(atom.gx + dx as i32);
-        if column_occupied(plant_cols, wx) {
+        if !crown_clearance_ok(plant_cols, wx, world.wrap_width) {
             continue;
         }
         let dist = dx.abs() as i32;
@@ -2102,10 +2116,10 @@ pub fn count_plants_near(plant_cols: &[i32], gx: i32, radius: i32, wrap_width: O
 /// Vegetative sucker: child plant on moist land at a lateral runner tip.
 ///
 /// Requires painted lateral root, enough roots, energy, cooldown, global
-/// pop room, an **unoccupied** target column, and local density below
-/// [`SPROUT_LOCAL_MAX`]. Child chassis is a pruned upright clone of the
-/// parent body (stemless stays stemless); genome is mutated then re-synced
-/// so alloc can't reintroduce a trunk.
+/// pop room, a seat with [`SPROUT_CROWN_CLEARANCE`] from living crowns, and
+/// local density below [`SPROUT_LOCAL_MAX`]. Child chassis is a pruned
+/// upright clone of the parent body (stemless stays stemless); genome is
+/// mutated then re-synced so alloc can't reintroduce a trunk.
 pub fn try_vegetative_sprout(
     world: &World,
     atom: &mut Atom,
@@ -2129,8 +2143,8 @@ pub fn try_vegetative_sprout(
         return None;
     }
     let wx = pick_sprout_column(world, atom, plant_cols)?;
-    // One living crown per column — never stack nuclei on the same seat.
-    if column_occupied(plant_cols, wx) {
+    // Readable spacing — not just "one crown per column".
+    if !crown_clearance_ok(plant_cols, wx, world.wrap_width) {
         return None;
     }
     // Target neighbourhood must also have room (includes parent if nearby).
@@ -2220,7 +2234,7 @@ pub fn pick_plant_spore_column(
     for dist in PLANT_SPORE_MIN_DIST..=PLANT_SPORE_MAX_DIST {
         for &sign in &[prefer_dir, -prefer_dir] {
             let wx = world.wrap_x(atom.gx + sign * dist);
-            if column_occupied(plant_cols, wx) {
+            if !crown_clearance_ok(plant_cols, wx, world.wrap_width) {
                 continue;
             }
             let Some(gy) = find_plant_slot(world, wx, atom.gy) else {
@@ -2275,7 +2289,7 @@ pub fn try_plant_wind_spore(
         return None;
     }
     let (wx, gy) = pick_plant_spore_column(world, atom, tick, entity_id, wind_vx, plant_cols)?;
-    if column_occupied(plant_cols, wx) {
+    if !crown_clearance_ok(plant_cols, wx, world.wrap_width) {
         return None;
     }
     let cost = tank * PLANT_SPORE_COST_FRAC;
@@ -3700,6 +3714,24 @@ mod tests {
                 .all(|(_, y, _)| *y == 0),
             "baked canopy lies on dy==0, body={:?}",
             store.atoms[0].body
+        );
+    }
+
+    #[test]
+    fn crown_clearance_blocks_adjacent_sprout_seats() {
+        let cols = vec![10i32, 16, 22];
+        assert!(crown_clearance_ok(&cols, 13, None), "mid-gap should be free");
+        assert!(
+            !crown_clearance_ok(&cols, 11, None),
+            "one column from a crown must be blocked"
+        );
+        assert!(
+            !crown_clearance_ok(&cols, 12, None),
+            "two columns from a crown must be blocked"
+        );
+        assert!(
+            !crown_clearance_ok(&cols, 10, None),
+            "exact crown column must be blocked"
         );
     }
 

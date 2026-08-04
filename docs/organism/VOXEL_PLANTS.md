@@ -106,10 +106,10 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
   module add/swap/delete; habit stays plant)
 - Soft pop cap shared with Atoms
 - Root elongation biases sideways when banking for a sprout
-- **Anti-flood:** long sprout period (~0.6 demo day), higher energy /
-  root gates, soft local density (≤8 crowns in ±4 columns), and **one
-  living crown per column** (sprouts skip occupied seats; stacked
-  saves reseat younger crowns on the next tick).
+- **Anti-flood / spacing:** long sprout period (~0.6 demo day), higher
+  energy / root gates, soft local density (≤5 crowns in ±4 columns), and
+  **crown clearance** (no neighbour within 2 columns — keeps T-canopies
+  readable). Crowded / stacked saves reseat younger crowns outward.
 
 ### D3b — Wind spores / ferns *(landed)*
 

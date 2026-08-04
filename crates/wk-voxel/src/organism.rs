@@ -1064,9 +1064,12 @@ pub struct SporeRelease {
     pub to_gy: i32,
 }
 
-/// Oldest land plant keeps its column; younger stack-mates reseat nearby.
-/// Fixes ghost-looking overlays from rhizome sprouts sharing one crown cell.
+/// Oldest land plant keeps its column; younger neighbours that violate
+/// [`crate::plant::SPROUT_CROWN_CLEARANCE`] (or share a column) reseat nearby.
+/// Keeps T-canopies readable instead of a solid green bar.
 fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
+    use crate::plant::{column_dist, SPROUT_CROWN_CLEARANCE};
+
     let mut land_idx: Vec<usize> = atoms
         .iter()
         .enumerate()
@@ -1076,20 +1079,26 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
     if land_idx.len() < 2 {
         return;
     }
-    // Oldest first — they claim the column.
+    // Oldest first — they claim space.
     land_idx.sort_by_key(|&i| std::cmp::Reverse(atoms[i].age_ticks));
-    let mut claimed = std::collections::HashSet::new();
+    let mut claimed: Vec<i32> = Vec::new();
+    let clear_of_claimed = |claimed: &[i32], nx: i32| {
+        !claimed.iter().any(|&c| {
+            column_dist(c, nx, world.wrap_width) <= SPROUT_CROWN_CLEARANCE
+        })
+    };
     for i in land_idx {
         let gx = atoms[i].gx;
-        if claimed.insert(gx) {
+        if clear_of_claimed(&claimed, gx) {
+            claimed.push(gx);
             continue;
         }
         let gy = atoms[i].gy;
         let mut moved = false;
-        for dist in 1..=16 {
+        for dist in 1..=24 {
             for sign in [1i32, -1] {
                 let nx = world.wrap_x(gx + sign * dist);
-                if claimed.contains(&nx) {
+                if !clear_of_claimed(&claimed, nx) {
                     continue;
                 }
                 let Some(ny) = find_plant_slot(world, nx, gy) else {
@@ -1098,13 +1107,17 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
                 atoms[i].gx = nx;
                 atoms[i].gy = ny;
                 pin_plant_pose(&mut atoms[i]);
-                claimed.insert(nx);
+                claimed.push(nx);
                 moved = true;
                 break;
             }
             if moved {
                 break;
             }
+        }
+        if !moved {
+            // No clear seat — keep the plant; don't despawn for spacing.
+            claimed.push(gx);
         }
     }
 }
@@ -4545,6 +4558,52 @@ mod tests {
             cols.len(),
             store.len(),
             "living land crowns must not share a column after reseat"
+        );
+        // Clearance: no two upright crowns within SPROUT_CROWN_CLEARANCE.
+        for (i, a) in store.atoms.iter().enumerate() {
+            for (j, b) in store.atoms.iter().enumerate() {
+                if i >= j {
+                    continue;
+                }
+                let d = crate::plant::column_dist(a.gx, b.gx, w.wrap_width);
+                assert!(
+                    d > crate::plant::SPROUT_CROWN_CLEARANCE,
+                    "crowns too close after reseat: {} and {} (dist={d})",
+                    a.gx, b.gx
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn adjacent_crowns_reseated_for_canopy_clearance() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        store.atoms[0].age_ticks = 500;
+        let body = store.atoms[0].body.clone();
+        // Neighbour in the next column — T-canopies would touch.
+        let mut near = Atom::from_body(5, 2, 40.0, body);
+        near.age_ticks = 10;
+        apply_genome(&mut near, Genome::default());
+        pin_plant_pose(&mut near);
+        store.atoms.push(near);
+        store.step(&mut w, 0);
+        let d = crate::plant::column_dist(
+            store.atoms[0].gx,
+            store.atoms[1].gx,
+            w.wrap_width,
+        );
+        assert!(
+            d > crate::plant::SPROUT_CROWN_CLEARANCE,
+            "adjacent crowns should reseat with clearance, dist={d}"
         );
     }
 
