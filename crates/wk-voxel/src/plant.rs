@@ -868,18 +868,37 @@ fn shoot_cell_free(world: &World, wx: i32, wy: i32) -> bool {
 }
 
 /// Penetrate multiplier — higher = harder / costlier. `None` = refuse.
+///
+/// Stone / Limestone are allowed but expensive: roots find cracks slowly.
+/// Elongation into competent rock then opens the crack ([`crack_rock_for_root`]).
 fn penetrate_cost(mat: MaterialId) -> Option<f32> {
     match mat {
-        MaterialId::Bedrock
-        | MaterialId::Ice
-        | MaterialId::Snow
-        | MaterialId::Water
-        | MaterialId::Stone => None,
+        MaterialId::Bedrock | MaterialId::Ice | MaterialId::Snow | MaterialId::Water => None,
         MaterialId::Organic => Some(0.35),
         MaterialId::Sand | MaterialId::Clay | MaterialId::Soil => Some(0.65),
+        MaterialId::Stone | MaterialId::Limestone => Some(1.6),
         MaterialId::Air => Some(0.45), // gaps / rhizome air pockets
         _ => Some(1.0), // LooseRock, Gravel, …
     }
+}
+
+/// Root force opens a crack: Stone → LooseRock (or Limestone analogue).
+/// Living roots stay an overlay; this is the lasting substrate change.
+fn crack_rock_for_root(world: &mut World, wx: i32, wy: i32) {
+    use crate::cell::Cell;
+    let Some(c) = world.get_cell(wx, wy) else {
+        return;
+    };
+    let loose = match c.material {
+        MaterialId::Stone => MaterialId::LooseRock,
+        MaterialId::Limestone => MaterialId::LooseLimestone,
+        _ => return,
+    };
+    let mut next = Cell::solid(loose);
+    next.sat = c.sat;
+    next.flags = c.flags;
+    next._pad = c._pad;
+    world.set_cell(wx, wy, next);
 }
 
 /// World cells occupied by living Root modules (all plants).
@@ -991,8 +1010,8 @@ pub fn sail_plants_on_wind_rafts(
         if crate::organism::plant_grounded_in_substrate(world, atom, &columns) {
             continue;
         }
-        let mut min_rx = i32::MAX;
-        let mut max_rx = i32::MIN;
+        let mut min_dx = i16::MAX;
+        let mut max_dx = i16::MIN;
         let mut mounted = false;
         for &(dx, dy, m) in &atom.body {
             if m != ModuleId::Root && m != ModuleId::Nucleus {
@@ -1000,19 +1019,20 @@ pub fn sail_plants_on_wind_rafts(
             }
             let wx = world.wrap_x(atom.gx + dx as i32);
             let wy = atom.gy + dy as i32;
-            min_rx = min_rx.min(wx);
-            max_rx = max_rx.max(wx);
+            min_dx = min_dx.min(dx);
+            max_dx = max_dx.max(dx);
             if holdfast_on_float_column(&columns, m, wx, wy) {
                 mounted = true;
             }
         }
-        if !mounted || min_rx > max_rx {
+        if !mounted || min_dx > max_dx {
             continue;
         }
         raft_mounted.push(i);
-        // Bind the full root/nucleus span so later roots keep the mat under
-        // the plant — not just the first Organic contact column.
-        for x in min_rx..=max_rx {
+        // Bind the body-local root/nucleus span (not wrapped min..=max —
+        // that explodes across the ring when roots sit near both seams).
+        for d in min_dx..=max_dx {
+            let x = world.wrap_x(atom.gx + d as i32);
             if columns.contains_key(&x) {
                 bound_cols.insert(x);
             }
@@ -1168,7 +1188,7 @@ fn root_dir_preference(dx: i16, dy: i16, depth_bias: f32) -> f32 {
 /// `live_roots` is every living Root world cell (all plants) so spacing
 /// applies across neighbours, not just within one body.
 pub fn try_elongate_root(
-    world: &World,
+    world: &mut World,
     atom: &mut Atom,
     live_roots: &HashSet<(i32, i32)>,
     caps: &PlantGrowthCaps,
@@ -1406,6 +1426,10 @@ pub fn try_elongate_root(
     let Some((_score, nx, ny, cost)) = best else {
         return 0.0;
     };
+    let wx = world.wrap_x(atom.gx + nx as i32);
+    let wy = atom.gy + ny as i32;
+    // Open cracks in competent rock as the root wedges in.
+    crack_rock_for_root(world, wx, wy);
     atom.energy -= cost;
     atom.body.push((nx, ny, ModuleId::Root));
     cost
@@ -1972,7 +1996,7 @@ fn dedupe_juvenile_body(body: Vec<BodyModule>) -> Vec<BodyModule> {
 
 /// One growth pulse: root and/or shoot from allocation weights.
 pub fn try_grow_plant(
-    world: &World,
+    world: &mut World,
     atom: &mut Atom,
     tick: u64,
     trunks: &HashSet<(i32, i32)>,
@@ -3196,6 +3220,84 @@ mod tests {
     }
 
     #[test]
+    fn woody_photos_do_not_pile_off_their_stem() {
+        use crate::organism::resolve_organism_draw_cells;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+            for y in 2..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Two woody plants with leaves that would collide at the same draw cell.
+        let a = Atom::from_body(
+            4,
+            2,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (1, 1, ModuleId::Photosystem),
+            ],
+        );
+        let b = Atom::from_body(
+            6,
+            2,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (-1, 1, ModuleId::Photosystem), // collides with a's leaf at (5,3)
+            ],
+        );
+        let posed = resolve_organism_draw_cells(&w, &[a, b], 0, 0.0);
+        let leaf_ys: Vec<i32> = posed
+            .iter()
+            .filter(|p| p.mid == ModuleId::Photosystem)
+            .map(|p| p.wy)
+            .collect();
+        assert!(
+            leaf_ys.iter().all(|&y| y == 3),
+            "woody leaves must stay on the petiole row, not pile upward: {leaf_ys:?}"
+        );
+    }
+
+    #[test]
+    fn tipped_plant_occupies_draw_pose_not_phantom_upright() {
+        use crate::organism::bake_tip_into_body;
+
+        let mut atom = Atom::from_body(
+            5,
+            5,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Photosystem),
+            ],
+        );
+        bake_tip_into_body(&mut atom);
+        // Baked stem lies on the waterline at (3,0) body → world (8,5).
+        assert!(
+            atom.occupies(8, 5),
+            "tipped canopy must be pickable on the waterline"
+        );
+        assert!(
+            !atom.occupies(5, 8),
+            "must not occupy the pre-tip upright phantom cell"
+        );
+        // Dangling root still pickable at body cell.
+        assert!(atom.occupies(5, 4));
+    }
+
+    #[test]
     fn shed_upright_leaf_does_not_leave_draw_gap() {
         use crate::organism::{fallen_draw_offset, resolve_organism_draw_cells};
 
@@ -3261,17 +3363,20 @@ mod tests {
     }
 
     #[test]
-    fn roots_refuse_stone_and_dead_roots_skip_dry_air() {
+    fn roots_crack_stone_but_death_skips_stone_and_dry_air() {
         let mut w = World::new(5);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         for x in 0..12 {
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
             w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
-            w.set_cell(x, 2, Cell::solid(MaterialId::Sand));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 2, sand);
             for y in 3..10 {
                 w.set_cell(x, y, Cell::air());
             }
         }
+        // Death path: sand converts; stone / dry-Air do not become Organic holes.
         let atom = Atom::from_body(
             4,
             3,
@@ -3279,13 +3384,13 @@ mod tests {
             vec![
                 (0, 0, ModuleId::Nucleus),
                 (0, -1, ModuleId::Root), // sand
-                (0, -2, ModuleId::Root), // stone — must not convert on death
+                (0, -2, ModuleId::Root), // stone — crack while living, not Organic on death
                 (1, 1, ModuleId::Root),  // dry Air rhizome gap
                 (0, 1, ModuleId::Stem),
                 (0, 2, ModuleId::Photosystem),
             ],
         );
-        assert_eq!(penetrate_cost(MaterialId::Stone), None);
+        assert!(penetrate_cost(MaterialId::Stone).unwrap() > 1.0);
         let n = leave_dead_roots_in_place(&mut w, &atom);
         assert!(n >= 1, "sand root should convert");
         assert_eq!(
@@ -3296,12 +3401,51 @@ mod tests {
         assert_eq!(
             w.get_cell(4, 1).map(|c| c.material),
             Some(MaterialId::Stone),
-            "stone must not become an Organic hole"
+            "stone must not become an Organic hole on death"
         );
         assert_eq!(
             w.get_cell(5, 4).map(|c| c.material),
             Some(MaterialId::Air),
             "dry-Air rhizome must not spawn floating Organic"
+        );
+
+        // Living elongate into Stone opens a LooseRock crack.
+        let mut grower = Atom::from_body(
+            6,
+            3,
+            120.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Photosystem),
+            ],
+        );
+        apply_genome(
+            &mut grower,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        grower.energy = grower.energy_max;
+        grower.genome.alloc_root = 1.0;
+        grower.genome.alloc_stem = 0.0;
+        grower.genome.alloc_leaf = 0.0;
+        grower.genome.root_depth_bias = 1.0;
+        let caps = PlantGrowthCaps::default();
+        let mut cracked = false;
+        for _ in 0..48 {
+            let _ = try_elongate_root(&mut w, &mut grower, &HashSet::new(), &caps);
+            // May dive under a side runner — any Stone→LooseRock counts.
+            if (0..12).any(|x| {
+                w.get_cell(x, 1).map(|c| c.material) == Some(MaterialId::LooseRock)
+            }) {
+                cracked = true;
+                break;
+            }
+        }
+        assert!(
+            cracked,
+            "root wedging into Stone should open a LooseRock crack, body={:?}",
+            grower.body
         );
     }
 
@@ -3467,7 +3611,7 @@ mod tests {
         let caps = PlantGrowthCaps::default();
         let mut grew = false;
         for _ in 0..24 {
-            let spent = try_elongate_root(&w, &mut atom, &HashSet::new(), &caps);
+            let spent = try_elongate_root(&mut w, &mut atom, &HashSet::new(), &caps);
             if spent > 0.0 || root_count(&atom) > roots0 {
                 grew = true;
                 break;
@@ -3896,7 +4040,7 @@ mod tests {
                     live.insert((atom.gx + dx as i32, atom.gy + dy as i32));
                 }
             }
-            let _ = try_elongate_root(&w, &mut atom, &live, &caps);
+            let _ = try_elongate_root(&mut w, &mut atom, &live, &caps);
         }
         let in_water = atom.body.iter().any(|&(dx, dy, m)| {
             if m != ModuleId::Root {
@@ -3988,7 +4132,7 @@ mod tests {
         for pulse in 0..40u64 {
             atom.energy = atom.energy_max;
             atom.age_ticks = pulse * LAND_GROW_PERIOD;
-            let spent = try_grow_plant(&w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &HashSet::new(), &caps, &CanopyIndex::default(), 0);
+            let spent = try_grow_plant(&mut w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &HashSet::new(), &caps, &CanopyIndex::default(), 0);
             if spent > 0.0 {
                 grew = true;
             }
@@ -4106,7 +4250,7 @@ mod tests {
 
     #[test]
     fn stemless_ribbon_cannot_grow_upright_tower_in_dry_air() {
-        let w = moist_plot(); // dry Air above sand
+        let mut w = moist_plot(); // dry Air above sand
         let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
         let mut atom = Atom::from_body(4, 2, 80.0, body);
         apply_genome(&mut atom, crate::blueprint::Blueprint::minimal_seaweed().genome);
@@ -4124,7 +4268,7 @@ mod tests {
         for pulse in 0..40u64 {
             atom.energy = atom.energy_max;
             atom.age_ticks = pulse * LAND_GROW_PERIOD;
-            let _ = try_grow_plant(&w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &HashSet::new(), &caps, &CanopyIndex::default(), 0);
+            let _ = try_grow_plant(&mut w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &HashSet::new(), &caps, &CanopyIndex::default(), 0);
         }
         let tip1 = atom
             .body
@@ -4175,7 +4319,7 @@ mod tests {
         for pulse in 0..40u64 {
             atom.energy = atom.energy_max;
             atom.age_ticks = pulse * LAND_GROW_PERIOD;
-            let _ = try_grow_plant(&w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &HashSet::new(), &caps, &CanopyIndex::default(), 0);
+            let _ = try_grow_plant(&mut w, &mut atom, pulse * LAND_GROW_PERIOD, &trunks, &roots, &HashSet::new(), &caps, &CanopyIndex::default(), 0);
         }
         let tip1 = atom
             .body

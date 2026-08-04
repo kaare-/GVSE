@@ -297,10 +297,18 @@ impl Atom {
             .count()
     }
 
+    /// True when a posed (tipped / upright-mast) cell sits at `(wx, wy)`.
+    /// Roots also match their body cells so substrate purchase stays pickable.
     pub fn occupies(&self, wx: i32, wy: i32) -> bool {
-        self.body
-            .iter()
-            .any(|(dx, dy, _)| self.gx + *dx as i32 == wx && self.gy + *dy as i32 == wy)
+        self.body.iter().any(|(dx0, dy0, m)| {
+            let (dx, dy) = self.fallen_draw_offset(*dx0, *dy0);
+            if self.gx + dx as i32 == wx && self.gy + dy as i32 == wy {
+                return true;
+            }
+            *m == ModuleId::Root
+                && self.gx + *dx0 as i32 == wx
+                && self.gy + *dy0 as i32 == wy
+        })
     }
 
     fn body_top_offset(&self) -> f32 {
@@ -376,9 +384,10 @@ impl Corpse {
     }
 
     pub fn occupies(&self, wx: i32, wy: i32) -> bool {
-        self.body
-            .iter()
-            .any(|(dx, dy, _)| self.gx + *dx as i32 == wx && self.gy + *dy as i32 == wy)
+        self.body.iter().any(|(dx0, dy0, _)| {
+            let (dx, dy) = self.fallen_draw_offset(*dx0, *dy0);
+            self.gx + dx as i32 == wx && self.gy + dy as i32 == wy
+        })
     }
 }
 
@@ -1535,10 +1544,10 @@ pub fn resolve_organism_draw_cells(
             let wx = wx0;
             let mut wy = wy0;
             let qx = world.wrap_x(wx);
-            // Photosystems pile in free Air. Roots / Digest / Hypha live in
-            // solid substrate — never lift them to the surface. Stem /
-            // Nucleus stay on their body pose as well.
-            if mid == ModuleId::Photosystem {
+            // Stemless soft mats pile in free Air so flopped greens don't
+            // overwrite. Woody canopy leaves stay on their stem pose —
+            // piling would float them a cell off the petiole.
+            if mid == ModuleId::Photosystem && crate::plant::stem_count(atom) == 0 {
                 for _ in 0..24 {
                     // Missing world cells (tests / unloaded) count as free air.
                     let blocked = match world.get_cell(qx, wy) {
@@ -2118,8 +2127,9 @@ fn raft_support_width(
     if columns.is_empty() {
         return None;
     }
-    let mut min_x = i32::MAX;
-    let mut max_x = i32::MIN;
+    // Body-local span — never `wrap_x` min..=max (ring seams explode that).
+    let mut min_dx = i16::MAX;
+    let mut max_dx = i16::MIN;
     let mut has_holdfast = false;
     for &(dx, dy, m) in &atom.body {
         if m != ModuleId::Root && m != ModuleId::Nucleus {
@@ -2127,17 +2137,17 @@ fn raft_support_width(
         }
         let wx = world.wrap_x(atom.gx + dx as i32);
         let wy = atom.gy + dy as i32;
-        min_x = min_x.min(wx);
-        max_x = max_x.max(wx);
+        min_dx = min_dx.min(dx);
+        max_dx = max_dx.max(dx);
         if holdfast_on_float_column(columns, m, wx, wy) {
             has_holdfast = true;
         }
     }
-    if !has_holdfast || min_x > max_x {
+    if !has_holdfast || min_dx > max_dx {
         return None;
     }
-    let support = (min_x..=max_x)
-        .filter(|x| columns.contains_key(x))
+    let support = (min_dx..=max_dx)
+        .filter(|&d| columns.contains_key(&world.wrap_x(atom.gx + d as i32)))
         .count() as i32;
     (support > 0).then_some(support)
 }
@@ -2575,7 +2585,7 @@ mod tests {
             "mid light should sit between active and shaded ({mid:?})"
         );
 
-        let w = moist_sand_plot();
+        let mut w = moist_sand_plot();
         let mut open_g = Genome::default();
         open_g.leaf_absorb = 0.2;
         let mut thug_g = Genome::default();
@@ -2615,7 +2625,7 @@ mod tests {
 
     #[test]
     fn stacked_leaves_self_shade_in_draw_tint() {
-        let w = moist_sand_plot();
+        let mut w = moist_sand_plot();
         let mut g = Genome::default();
         g.leaf_absorb = 0.55;
         let body = vec![
@@ -2694,7 +2704,7 @@ mod tests {
 
     #[test]
     fn dry_stemless_frond_flops_into_a_mat() {
-        let w = moist_sand_plot(); // no standing water column
+        let mut w = moist_sand_plot(); // no standing water column
         let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
         let atom = Atom::from_body(4, 2, 40.0, body);
         let tip_dy = atom
@@ -2729,7 +2739,7 @@ mod tests {
 
     #[test]
     fn roots_draw_inside_substrate_not_on_surface() {
-        let w = moist_sand_plot(); // sand at y=1, air above
+        let mut w = moist_sand_plot(); // sand at y=1, air above
         let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
         let atom = Atom::from_body(4, 2, 40.0, body);
         // Template root is at (0,-1) → world (4,1) inside sand.
@@ -2767,7 +2777,7 @@ mod tests {
 
     #[test]
     fn woody_canopy_leaves_stay_on_the_branch() {
-        let w = moist_sand_plot();
+        let mut w = moist_sand_plot();
         let body = vec![
             (0, -1, ModuleId::Root),
             (0, 0, ModuleId::Nucleus),
@@ -2869,7 +2879,7 @@ mod tests {
 
     #[test]
     fn flopped_fronds_pile_instead_of_sharing_one_cell() {
-        let w = moist_sand_plot();
+        let mut w = moist_sand_plot();
         let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
         let mut store = OrganismStore::new();
         // Adjacent holdfasts — dry flop leans the same way and would overlap.
@@ -3285,7 +3295,7 @@ mod tests {
 
     #[test]
     fn growth_caps_block_root_elongation() {
-        let w = moist_sand_plot();
+        let mut w = moist_sand_plot();
         let mut atom = Atom::from_body(4, 2, 80.0, minimal_plant_body());
         atom.genome.alloc_root = 1.0;
         atom.genome.alloc_stem = 0.0;
@@ -3297,7 +3307,7 @@ mod tests {
             max_stems: 10,
             max_photos: 12,
         };
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &tight);
+        let spent = crate::plant::try_elongate_root(&mut w, &mut atom, &roots, &tight);
         assert_eq!(spent, 0.0, "max_roots=1 must refuse further elongation");
         assert_eq!(crate::plant::root_count(&atom), 1);
     }
@@ -3379,7 +3389,7 @@ mod tests {
 
     #[test]
     fn editor_free_spawn_allows_odd_module_mix() {
-        let w = moist_sand_plot();
+        let mut w = moist_sand_plot();
         let mut store = OrganismStore::new();
         // Root + Digest is neither a valid plant nor fungus habit.
         let body = vec![
@@ -3923,7 +3933,7 @@ mod tests {
 
     #[test]
     fn root_elongation_refuses_cell_beside_other_live_root() {
-        let w = deep_moist_sand();
+        let mut w = deep_moist_sand();
         let mut g = Genome::default();
         g.alloc_root = 1.0;
         g.alloc_stem = 0.05;
@@ -3940,7 +3950,7 @@ mod tests {
         atom.genome = g;
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
+        let spent = crate::plant::try_elongate_root(&mut w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert!(spent > 0.0, "vertical dive past the tip should still be legal");
         let added = atom
             .body
@@ -3999,14 +4009,14 @@ mod tests {
         // Only open sand left beside tip is (1,-2)=(5,4); foreign root at (5,3).
         let mut roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
         roots.insert((5, 3));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
+        let spent = crate::plant::try_elongate_root(&mut w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert_eq!(spent, 0.0, "must not elongate beside another plant's live root");
         assert_eq!(crate::plant::root_count(&atom), 2);
     }
 
     #[test]
     fn root_growth_prefers_branch_over_deep_pipe() {
-        let w = deep_moist_sand();
+        let mut w = deep_moist_sand();
         let mut g = Genome::default();
         g.alloc_root = 1.0;
         g.alloc_stem = 0.05;
@@ -4025,7 +4035,7 @@ mod tests {
         atom.genome = g;
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
+        let spent = crate::plant::try_elongate_root(&mut w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert!(spent > 0.0, "pipe tip should still be able to fork");
         let added = atom
             .body
@@ -4065,7 +4075,7 @@ mod tests {
         atom.genome = g;
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
+        let spent = crate::plant::try_elongate_root(&mut w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert!(spent > 0.0, "mid-pipe site should be able to bud");
         let added = atom
             .body
@@ -4125,7 +4135,7 @@ mod tests {
             "tendril tip should be much farther from crown ({tip_hops} vs {bud_hops})"
         );
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
+        let spent = crate::plant::try_elongate_root(&mut w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert!(spent > 0.0, "should still grow somewhere");
         let prior = [
             (0, -1),
@@ -4184,7 +4194,7 @@ mod tests {
         // Above grow floor (0.30·tank) but below sprout-banking (~0.44·tank).
         atom.energy = 32.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
+        let spent = crate::plant::try_elongate_root(&mut w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert!(spent > 0.0);
         let added = atom
             .body
@@ -4222,7 +4232,7 @@ mod tests {
         atom.genome = g;
         atom.energy = 80.0;
         let roots = crate::plant::collect_live_root_world_cells(std::slice::from_ref(&atom));
-        let spent = crate::plant::try_elongate_root(&w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
+        let spent = crate::plant::try_elongate_root(&mut w, &mut atom, &roots, &crate::plant::PlantGrowthCaps::default());
         assert!(
             spent > 0.0,
             "Organic compost is transformed dead root — OK to sit beside"
@@ -4291,7 +4301,7 @@ mod tests {
         );
         // Growth may still place a leaf, but must not add Stem beside the gap.
         atom.age_ticks = LAND_GROW_PERIOD;
-        let w = moist_sand_plot();
+        let mut w = moist_sand_plot();
         let _ = crate::plant::try_grow_shoot(
             &w,
             &mut atom,
@@ -4308,7 +4318,7 @@ mod tests {
     #[test]
     fn leaves_may_touch_each_other() {
         let empty = std::collections::HashSet::new();
-        let w = moist_sand_plot();
+        let mut w = moist_sand_plot();
         let mut atom = Atom::from_body(
             4,
             2,
@@ -4430,7 +4440,7 @@ mod tests {
         atom.genome.alloc_root = 0.05;
         atom.energy = 80.0;
         let empty = std::collections::HashSet::new();
-        let w = moist_sand_plot();
+        let mut w = moist_sand_plot();
         for t in 0..30u64 {
             atom.age_ticks = t * LAND_GROW_PERIOD;
             let _ = crate::plant::try_grow_shoot(
@@ -4620,7 +4630,7 @@ mod tests {
 
     #[test]
     fn rooted_plant_gains_energy_capacity_from_roots() {
-        let w = moist_sand_plot();
+        let mut w = moist_sand_plot();
         let mut store = OrganismStore::new();
         assert!(store.spawn_blueprint(
             &w,
@@ -4700,7 +4710,7 @@ mod tests {
     #[test]
     fn drought_stress_lifts_soft_root_budget() {
         let mut store = OrganismStore::new();
-        let w = moist_sand_plot();
+        let mut w = moist_sand_plot();
         assert!(store.spawn_blueprint(
             &w,
             4,
@@ -4817,14 +4827,21 @@ mod tests {
         assert!(store.spawn_blueprint(&w, 4, 2, tall_body, 40.0, tall_g));
         let n0 = store.atoms[0].photosystem_count();
         assert!(n0 >= 3);
-        for t in 0..(crate::plant::WOODY_LEAF_STARVE_TICKS as u64 + 80) {
+        for t in 0..(crate::plant::WOODY_LEAF_STARVE_TICKS as u64 + 120) {
             store.atoms[0].energy = 30.0;
             if let Some(a) = store.atoms.get_mut(1) {
                 a.energy = 30.0;
             }
-            // Lock growth so the short plant can't replace dropped leaves.
+            // Lock shoot growth so the short plant can't replace dropped leaves.
             store.atoms[0].genome.alloc_leaf = 0.0;
+            store.atoms[0].genome.alloc_stem = 0.0;
             store.step(&mut w, t);
+            // Keep age off LAND_GROW_PERIOD (step increments age_ticks).
+            if let Some(a) = store.atoms.get_mut(0) {
+                a.age_ticks = 1;
+                a.genome.alloc_leaf = 0.0;
+                a.genome.alloc_stem = 0.0;
+            }
         }
         let n1 = store.atoms[0].photosystem_count();
         assert!(

@@ -15,7 +15,9 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | Sand-rooted crowns never hoist on organic mats / water; no shore sail | Done |
 | Raft tip resists with root keel (more dangling roots → harder tip) | Done |
 | Upright draw ranks ignore shed cells; stemless never marks upright | Done |
-| Shoots need Air; roots refuse Stone; dead roots skip dry-Air gaps | Done |
+| Shoots need Air; roots crack Stone→LooseRock; death skips Stone/dry-Air | Done |
+| Woody leaves do not pile-lift; pick uses tipped draw pose | Done |
+| Raft/sail spans use body-local dx (no ring wrap explosion) | Done |
 | Tipped plants stay tipped after re-root; new Stem/Photo grow upright | Done |
 | Upright mast re-tips when tippy; draw-space sail counts new shoots | Done |
 | Tip bakes into body (new stems grow up); floaters elongate roots | Done |
