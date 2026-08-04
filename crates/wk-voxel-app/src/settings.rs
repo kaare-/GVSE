@@ -84,6 +84,8 @@ pub struct SimSettings {
     /// Scratch f32 for shear chance (percent UI → per-mille).
     pub shear_chance_pct: f32,
     pub wind_vx: f32,
+    /// Natural variance 0..1 — wind force and direction wander around the mean.
+    pub wind_variance: f32,
     pub humidity_diffusion_alpha: f32,
     /// Scratch f32s for material sliders (synced → world hydro overrides).
     pub mat_perm: [f32; MATERIAL_COUNT],
@@ -166,6 +168,7 @@ impl SimSettings {
             max_compaction_events: FailureConfig::default().max_compaction_events as f32,
             shear_chance_pct: FailureConfig::default().shear_chance_per_mille as f32 / 10.0,
             wind_vx: 0.05,
+            wind_variance: 0.55,
             humidity_diffusion_alpha: 0.15,
             mat_perm,
             mat_poro,
@@ -640,7 +643,18 @@ impl SimSettings {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Wind + humidity", |ui| {
-                    labeled_slider(ui, hash!(), "Wind (tiles/tick)", -0.5..0.5, &mut self.wind_vx);
+                    labeled_slider(ui, hash!(), "Wind mean (tiles/tick)", -0.5..0.5, &mut self.wind_vx);
+                    ui.label(
+                        None,
+                        "Natural variance: 0 = steady push; higher = force & direction shift over time.",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Natural variance",
+                        0.0..1.0,
+                        &mut self.wind_variance,
+                    );
                     labeled_slider(
                         ui,
                         hash!(),

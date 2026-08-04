@@ -10,7 +10,13 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | Feature | Status |
 |---------|--------|
 | `Root` / `Stem` / `Photosystem` / `Nucleus` modules | Done |
-| Fixed crown (no buoyancy) | Done |
+| Fixed crown on purchase; free-float tipped when unanchored over water | Done |
+| Tipped plants stay tipped after re-root; new Stem/Photo grow upright | Done |
+| Upright mast re-tips when tippy; draw-space sail counts new shoots | Done |
+| Tip bakes into body (new stems grow up); floaters elongate roots | Done |
+| Substrate-rooted plants stay pinned when flooded (raft organic floats) | Done |
+| Seaweed stays on bed holdfast; floats only if holdfast lost/rafting | Done |
+| Crown holdfast ignores seepage; reseats if displaced; no stream tip | Done |
 | Pore-`sat` drink + drought stress | Done |
 | Spawn on Air above porous solid | Done |
 | Editor brushes + `T` minimal plant + `W` seaweed | Done |

@@ -6,7 +6,7 @@
 
 use super::*;
 use crate::active::{clear_all_dirty, plan_active};
-use crate::cell::{water_capacity, Cell, Sat};
+use crate::cell::{water_capacity, Cell, CellFlags, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -2129,6 +2129,391 @@ fn continuous_rain_on_stepped_shore_does_not_pool_on_shelves() {
 }
 
 
+
+#[test]
+fn water_under_floating_organic_equalizes_with_open_lake() {
+    // Tall water pedestal under a floating Organic lid next to a lower
+    // open free surface — the lake must level; the raft must settle.
+    //
+    //   y=6: . . O O O . . .
+    //   y=5: . . W W W . . .
+    //   y=4: . . W W W . . .
+    //   y=3: W W W W W W W .
+    //   y=2: W W W W W W W .
+    //   y=1: # # # # # # # #
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..10 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(0, 2, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(0, 3, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(0, 4, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(0, 5, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(9, 2, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(9, 3, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(9, 4, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(9, 5, Cell::solid(MaterialId::Bedrock));
+    for x in 1..9 {
+        w.set_cell(x, 2, Cell::water());
+        w.set_cell(x, 3, Cell::water());
+    }
+    // Pedestal under the future raft.
+    for x in 3..=5 {
+        w.set_cell(x, 4, Cell::water());
+        w.set_cell(x, 5, Cell::water());
+        w.set_cell(x, 6, Cell::solid(MaterialId::Organic));
+    }
+    for _ in 0..80 {
+        tick(&mut w);
+    }
+    // Open free surface should not sit far below water still under the mat.
+    let open_top = (1..9)
+        .filter(|&x| !(3..=5).contains(&x))
+        .map(|x| {
+            (1..=8)
+                .rev()
+                .find(|&y| w.get_cell(x, y).map(|c| c.material == MaterialId::Air && c.sat.0 > 200).unwrap_or(false))
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0);
+    let under_mat_top = (3..=5)
+        .map(|x| {
+            (1..=8)
+                .rev()
+                .find(|&y| {
+                    w.get_cell(x, y)
+                        .map(|c| c.material == MaterialId::Air && c.sat.0 > 200)
+                        .unwrap_or(false)
+                })
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0);
+    assert!(
+        under_mat_top <= open_top + 1,
+        "water pedestal under Organic must level with open lake (under={under_mat_top} open={open_top})"
+    );
+    // Raft should have settled onto the leveled free surface (not floating
+    // on a 2-cell mound above the open waterline).
+    let org_ys: Vec<i32> = (1..9)
+        .flat_map(|x| {
+            (1..=8)
+                .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+                .map(|y| y)
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(!org_ys.is_empty(), "Organic raft must survive");
+    let org_min = *org_ys.iter().min().unwrap();
+    assert!(
+        org_min <= open_top + 2,
+        "Organic should settle near the open free surface (org_min={org_min} open={open_top} ys={org_ys:?})"
+    );
+}
+
+
+#[test]
+fn water_mound_under_wide_organic_lid_drains_to_open_vent() {
+    // Wide Organic lid over a high water mound with only a narrow open vent
+    // on the left — the free surface under the lid must fall to the vent.
+    let mut w = World::new(12);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..14 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=7 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(13, y, Cell::solid(MaterialId::Bedrock));
+    }
+    // Deep basin water.
+    for x in 1..13 {
+        w.set_cell(x, 2, Cell::water());
+        w.set_cell(x, 3, Cell::water());
+    }
+    // High mound under a wide lid (x=3..11), vent at x=1..2 open.
+    for x in 3..12 {
+        w.set_cell(x, 4, Cell::water());
+        w.set_cell(x, 5, Cell::water());
+        w.set_cell(x, 6, Cell::water());
+        w.set_cell(x, 7, Cell::solid(MaterialId::Organic));
+    }
+    for _ in 0..200 {
+        tick(&mut w);
+    }
+    let free_top = |x: i32| -> i32 {
+        (1..=10)
+            .rev()
+            .find(|&y| {
+                w.get_cell(x, y)
+                    .map(|c| c.material == MaterialId::Air && c.sat.0 > 200)
+                    .unwrap_or(false)
+            })
+            .unwrap_or(0)
+    };
+    let vent_top = free_top(1).max(free_top(2));
+    let lid_top = (3..12).map(free_top).max().unwrap_or(0);
+    assert!(
+        lid_top <= vent_top + 1,
+        "free surface under Organic lid must level with open vent (lid={lid_top} vent={vent_top})"
+    );
+}
+
+#[test]
+fn communicating_vessels_bedrock_l_pipe_equalizes() {
+    // Reservoir on the left, bedrock L-pipe into a vertical shaft.
+    // Confined head must raise the shaft free surface to match the
+    // reservoir — the bug that left pipes stuck after thousands of
+    // ticks when only down/cascade/same-Y flow existed.
+    //
+    //   y=8: # W W W W W # # # . #
+    //   y=2: # W W W W W # # # . #
+    //   y=1: # W W W W W W W W W #
+    //   y=0: #####################
+    //                    ^pipe^ ^shaft x=10
+    let mut w = World::new(77);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Side walls (y=1 up) and pipe / shaft lining (y=2 up so y=1
+    // stays open for the horizontal run under the left shaft wall).
+    for y in 1..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(11, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=10 {
+        w.set_cell(7, y, Cell::solid(MaterialId::Bedrock)); // separator
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock)); // shaft left
+    }
+    // Cap over the horizontal run only (not the shaft at x=10).
+    w.set_cell(8, 2, Cell::solid(MaterialId::Bedrock));
+    // Reservoir column water up to y=8.
+    for x in 1..=6 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    // Horizontal pipe full; shaft starts empty above the elbow.
+    for x in 7..=10 {
+        w.set_cell(x, 1, Cell::water());
+    }
+
+    let mass_before: i64 = (0..16)
+        .flat_map(|x| (0..12).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y))
+        .map(|c| c.sat.0 as i64)
+        .sum();
+
+    for _ in 0..400 {
+        tick(&mut w);
+    }
+
+    let mass_after: i64 = (0..16)
+        .flat_map(|x| (0..12).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y))
+        .map(|c| c.sat.0 as i64)
+        .sum();
+    assert_eq!(mass_before, mass_after, "confined head must conserve mass");
+
+    // Shaft column at x=10 should have risen near the reservoir head.
+    let shaft_top = (1..=10)
+        .rev()
+        .find(|&y| w.get_cell(10, y).map(|c| c.sat.0 > 0).unwrap_or(false))
+        .expect("shaft should hold water");
+    assert!(
+        shaft_top >= 7,
+        "shaft free surface should approach reservoir level (top={shaft_top})"
+    );
+    // Must not fountain above the equalised head (~7–8).
+    assert!(
+        w.get_cell(10, 9).map(|c| c.sat.0).unwrap_or(0) < 32,
+        "shaft must not fountain above reservoir head"
+    );
+}
+
+#[test]
+fn confined_head_rises_in_two_wide_shaft() {
+    // 2-wide bedrock shaft: neither column has solid on *both* sides,
+    // so a both-walls gate would skip forever. Higher-row ocean donor
+    // must still lift the column.
+    let mut w = World::new(80);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..18 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 1..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(12, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=10 {
+        w.set_cell(7, y, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(8, 2, Cell::solid(MaterialId::Bedrock));
+    for x in 1..=6 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 7..=11 {
+        w.set_cell(x, 1, Cell::water());
+    }
+
+    for _ in 0..400 {
+        tick(&mut w);
+    }
+
+    let top_a = (1..=10)
+        .rev()
+        .find(|&y| w.get_cell(10, y).map(|c| c.sat.0 > 0).unwrap_or(false));
+    let top_b = (1..=10)
+        .rev()
+        .find(|&y| w.get_cell(11, y).map(|c| c.sat.0 > 0).unwrap_or(false));
+    let top = top_a.max(top_b).expect("2-wide shaft should hold water");
+    // Mass spreads into two shaft columns, so equilibrium sits a bit
+    // below the original reservoir free surface.
+    assert!(
+        top >= 5,
+        "2-wide shaft should equalise toward reservoir (top={top})"
+    );
+}
+
+#[test]
+fn confined_head_wake_scans_despite_unrelated_dirty() {
+    // Evap keeps ocean-surface cells dirty. The wake must still scan
+    // loaded chunks (not the dirty halo), or a quiet pipe stalls.
+    let mut w = World::new(81);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 1..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(11, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=10 {
+        w.set_cell(7, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(8, 2, Cell::solid(MaterialId::Bedrock));
+    for x in 1..=6 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 7..=10 {
+        w.set_cell(x, 1, Cell::water());
+    }
+
+    clear_all_dirty(&mut w);
+    // Only a reservoir-surface cell is dirty (evap stand-in).
+    w.touch_dirty(3, 8);
+    w.tick = 8; // wake fires inside tick
+    for _ in 0..60 {
+        tick(&mut w);
+    }
+
+    let shaft_top = (1..=10)
+        .rev()
+        .find(|&y| w.get_cell(10, y).map(|c| c.sat.0 > 0).unwrap_or(false))
+        .expect("shaft should rise via full-chunk wake");
+    assert!(
+        shaft_top >= 7,
+        "wake must equalise despite unrelated dirty halo (top={shaft_top})"
+    );
+}
+
+#[test]
+fn confined_head_equalizes_across_large_deep_ocean() {
+    // Naive flood-fill of a deep ocean exceeds CONFINED_HEAD_BFS_LIMIT
+    // before reaching the free surface; column-climb must still find
+    // the head so a far shaft equalises.
+    // Ocean: x=0..199, water y=1..40 (surface at 40). Pipe at y=1
+    // from x=200..210 into a walled shaft at x=210.
+    let mut w = World::new(79);
+    for cx in 0..4 {
+        w.ensure_chunk(ChunkCoord::new(cx, 0));
+    }
+    let ocean_w = 200;
+    let surface = 40;
+    for x in 0..=212 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 0..ocean_w {
+        for y in 1..=surface {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    // Bedrock hillside / pipe lining (walls include y=1 so the
+    // elbow cannot laterally spill into open Air).
+    for y in 1..=surface + 2 {
+        w.set_cell(209, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(211, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=surface + 2 {
+        w.set_cell(ocean_w, y, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(208, 2, Cell::solid(MaterialId::Bedrock));
+    // Horizontal pipe full under the hillside; shaft empty above elbow.
+    for x in ocean_w..=210 {
+        w.set_cell(x, 1, Cell::water());
+    }
+    // Throat through the left shaft wall at pipe level.
+    w.set_cell(209, 1, Cell::water());
+
+    for _ in 0..500 {
+        tick(&mut w);
+    }
+
+    let shaft_top = (1..=surface + 1)
+        .rev()
+        .find(|&y| w.get_cell(210, y).map(|c| c.sat.0 > 0).unwrap_or(false))
+        .expect("shaft should hold water");
+    assert!(
+        shaft_top >= surface - 3,
+        "large-ocean confined head must reach near sea level (top={shaft_top}, sea={surface})"
+    );
+}
+
+#[test]
+fn closed_basin_lake_does_not_fountain_upward() {
+    // Still lake in a bedrock cup — confined head must not loft
+    // water into empty sky above the free surface.
+    let mut w = World::new(78);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..10 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=6 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 1..9 {
+        for y in 2..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+
+    for _ in 0..80 {
+        tick(&mut w);
+    }
+
+    for x in 1..9 {
+        let sky = w.get_cell(x, 5).unwrap().sat.0;
+        assert_eq!(sky, 0, "lake must not fountain into y=5 at x={x}");
+        let high = w.get_cell(x, 6).unwrap().sat.0;
+        assert_eq!(high, 0, "lake must not fountain into y=6 at x={x}");
+    }
+    // Surface row still holds the original free-surface mass.
+    let surface: i32 = (1..9).map(|x| w.get_cell(x, 4).unwrap().sat.0 as i32).sum();
+    assert_eq!(surface, 8 * 255, "closed basin surface mass stayed put");
+}
+
 #[test]
 fn same_y_equalize_flattens_stepped_lake_surface() {
     // Free-surface terrace inside a closed basin (solid shores):
@@ -3520,6 +3905,95 @@ fn demo_ocean_loose_rock_punches_organic_mat() {
 }
 
 #[test]
+fn floating_organic_drifts_with_wind() {
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(14, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=13 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 7, Cell::solid(MaterialId::Organic));
+    let x0 = 5;
+    let mut moved = false;
+    for tick in 0..400u64 {
+        w.tick = tick;
+        let (n, _, _) = drift_floating_organic(&mut w, 0.20, 4, None, None);
+        if n > 0 {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "tall Organic raft should eventually drift downwind");
+    let xs: Vec<_> = (3..=13)
+        .filter(|&x| {
+            (6..=8).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+        })
+        .collect();
+    assert!(
+        xs.iter().any(|&x| x > x0),
+        "Organic should sit further +x after +wind drift ({xs:?})"
+    );
+}
+
+#[test]
+fn rooted_organic_raft_stays_together_in_wind() {
+    // Living roots stitch neighbouring floating Organic so the island
+    // sails as one instead of blowing into scattered flecks.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(1, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(20, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 2..=19 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 6..=10 {
+        w.set_cell(x, 6, Cell::solid(MaterialId::Organic));
+    }
+    // Holdfast columns claimed by living roots in the middle of the mat.
+    let mut roots = std::collections::HashSet::new();
+    roots.insert(8);
+    let mut moved_together = false;
+    for tick in 0..500u64 {
+        w.tick = tick;
+        // Snapshot which columns still have Organic at the waterline.
+        let before: Vec<i32> = (2..=19)
+            .filter(|&x| w.get_cell(x, 6).map(|c| c.material) == Some(MaterialId::Organic))
+            .collect();
+        if before.len() < 3 {
+            break;
+        }
+        let (n, sign, _) = drift_floating_organic(&mut w, 0.25, 4, None, Some(&roots));
+        if n == 0 {
+            continue;
+        }
+        let after: Vec<i32> = (2..=19)
+            .filter(|&x| w.get_cell(x, 6).map(|c| c.material) == Some(MaterialId::Organic))
+            .collect();
+        // Bound mat should remain a contiguous block (no holes of width>1).
+        let mut xs = after.clone();
+        xs.sort_unstable();
+        let span = xs.last().unwrap() - xs.first().unwrap() + 1;
+        let holes = span - xs.len() as i32;
+        assert!(
+            holes <= 1,
+            "rooted raft should stay cohesive after drift (before={before:?} after={after:?} sign={sign})"
+        );
+        assert_eq!(after.len(), before.len(), "should not lose Organic cells");
+        moved_together = true;
+        break;
+    }
+    assert!(moved_together, "rooted raft should eventually sail");
+}
+
+#[test]
 fn organic_alone_still_floats_without_punch() {
     let mut w = setup_column_world();
     for y in 1..=6 {
@@ -3544,6 +4018,69 @@ fn organic_alone_still_floats_without_punch() {
         })
         .sum::<usize>();
     assert_eq!(n, 2, "stacked Organic litter must stay as a raft (n={n})");
+}
+
+#[test]
+fn waterlogged_organic_sinks_through_standing_water() {
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let mut org = Cell::solid(MaterialId::Organic);
+    org.sat = Sat(water_capacity(MaterialId::Organic));
+    org.flags.set(CellFlags::WATERLOGGED);
+    w.set_cell(5, 6, org);
+    for _ in 0..20 {
+        tick(&mut w);
+    }
+    assert_ne!(
+        w.get_cell(5, 6).map(|c| c.material),
+        Some(MaterialId::Organic),
+        "waterlogged Organic must leave the free surface"
+    );
+    let sunk = (1..=5).any(|y| {
+        w.get_cell(5, y)
+            .map(|c| c.material == MaterialId::Organic)
+            .unwrap_or(false)
+    });
+    assert!(sunk, "waterlogged Organic should sit in the water column or on the bed");
+}
+
+#[test]
+fn saturated_floating_organic_eventually_waterlogs() {
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let mut org = Cell::solid(MaterialId::Organic);
+    org.sat = Sat(water_capacity(MaterialId::Organic));
+    w.set_cell(5, 6, org);
+    let mut logged = false;
+    for tick_n in 0..20_000u64 {
+        w.tick = tick_n;
+        soak_floating_litter(&mut w);
+        if w
+            .get_cell(5, 6)
+            .map(|c| c.flags.contains(CellFlags::WATERLOGGED))
+            .unwrap_or(false)
+        {
+            logged = true;
+            break;
+        }
+    }
+    assert!(logged, "fully soaked floating Organic should eventually waterlog");
 }
 
 #[test]

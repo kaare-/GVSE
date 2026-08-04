@@ -17,7 +17,14 @@ pub(crate) fn regions_for_standalone(world: &World) -> Vec<ActiveChunk> {
     if !planned.is_empty() {
         return planned;
     }
-    // Full scan fallback — only loaded chunks.
+    regions_all_loaded(world)
+}
+
+/// All loaded chunks as full-rect active regions (ignores dirty halo).
+///
+/// Used by confined-head wake so ocean evaporation cannot starve a quiet
+/// pipe shaft of scans.
+pub(crate) fn regions_all_loaded(world: &World) -> Vec<ActiveChunk> {
     let mut coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords

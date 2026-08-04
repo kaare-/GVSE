@@ -8,7 +8,7 @@
 //! not). Elongates by `StemVsLeafVsRoot` / `RootDepthBias`. Shade = D2.
 //! Vegetative sprouts = D3. Root starch tank + drought hibernate = D4.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
@@ -199,6 +199,9 @@ pub fn useful_root_budget(atom: &Atom, caps: &PlantGrowthCaps) -> usize {
 /// When Photosystems sit in **standing water** (`leaf_bathing`), one holdfast
 /// root is enough — leaves drink the free water. Dry-land leaves never bathe,
 /// so the full shoot-driven budget still applies on shore.
+///
+/// Exception: tipped floaters still elongate dangling roots into the wet
+/// column / raft even while canopy leaves bathe.
 pub fn useful_root_budget_for(
     atom: &Atom,
     drought: DroughtBand,
@@ -206,10 +209,16 @@ pub fn useful_root_budget_for(
     leaf_bathing: bool,
 ) -> usize {
     let hard = caps.max_roots.max(1);
-    if leaf_bathing {
+    if leaf_bathing && !atom.fallen {
         return 1.min(hard);
     }
     let base = useful_root_budget(atom, caps);
+    let base = if atom.fallen {
+        // At least a short dangling pipe under a tipped crown.
+        base.max(3).min(hard)
+    } else {
+        base
+    };
     match drought {
         DroughtBand::Hydrated | DroughtBand::Dormant => base,
         DroughtBand::Stressed => {
@@ -297,8 +306,23 @@ pub fn root_moisture_frac(world: &World, atom: &Atom) -> f32 {
         let wy = atom.gy + dy as i32;
         best = best.max(cell_moisture_frac(world, wx, wy));
         best = best.max(cell_moisture_frac(world, wx, wy - 1));
+        if atom.fallen {
+            best = best.max(standing_water_frac(world, wx, wy));
+            best = best.max(standing_water_frac(world, wx, wy - 1));
+        }
     }
     best
+}
+
+fn standing_water_frac(world: &World, gx: i32, gy: i32) -> f32 {
+    use crate::rules::is_standing_water;
+    if !is_standing_water(world, gx, gy) {
+        return 0.0;
+    }
+    world
+        .get_cell(gx, gy)
+        .map(|c| c.sat.0 as f32 / 255.0)
+        .unwrap_or(0.0)
 }
 
 /// Best standing-water fill at Photosystem cells (0..1).
@@ -407,6 +431,21 @@ pub fn drink_roots(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32))
             energy += ROOT_WATER_ENERGY * n as f32;
             taken += n;
             deposit_at = (wx, wy - 1);
+            continue;
+        }
+        // Free-float / tipped plants: dangling roots sip the lake column.
+        if atom.fallen {
+            if let Some(n) = sip_standing_air(world, wx, wy, want - taken) {
+                energy += ROOT_WATER_ENERGY * n as f32;
+                taken += n;
+                deposit_at = (wx, wy);
+                continue;
+            }
+            if let Some(n) = sip_standing_air(world, wx, wy - 1, want - taken) {
+                energy += ROOT_WATER_ENERGY * n as f32;
+                taken += n;
+                deposit_at = (wx, wy - 1);
+            }
         }
     }
     atom.sip_acc = (atom.sip_acc - taken as f32).max(0.0);
@@ -855,6 +894,139 @@ where
         }
     }
     out
+}
+
+/// Per-column max world-y of living plant sail (Stem / Photosystem / Nucleus).
+///
+/// Uses **draw** offsets so a tipped trunk lying on the waterline does not
+/// cast a phantom upright sail, while post-tip upright shoots still count.
+pub fn collect_plant_sail_tops<'a, I>(atoms: I) -> HashMap<i32, i32>
+where
+    I: IntoIterator<Item = &'a Atom>,
+{
+    let mut out: HashMap<i32, i32> = HashMap::new();
+    for a in atoms {
+        if !is_land_plant(a) {
+            continue;
+        }
+        for &(dx0, dy0, m) in &a.body {
+            if !matches!(
+                m,
+                ModuleId::Photosystem | ModuleId::Stem | ModuleId::Nucleus
+            ) {
+                continue;
+            }
+            let (dx, dy) = a.fallen_draw_offset(dx0, dy0);
+            let wx = a.gx + dx as i32;
+            let wy = a.gy + dy as i32;
+            let e = out.entry(wx).or_insert(wy);
+            *e = (*e).max(wy);
+        }
+    }
+    out
+}
+
+/// True when a Root/Nucleus sits in or on a floating Organic column.
+pub(crate) fn holdfast_on_float_column(
+    columns: &HashMap<i32, (i32, i32)>,
+    mid: ModuleId,
+    wx: i32,
+    wy: i32,
+) -> bool {
+    let Some(&(bottom, height)) = columns.get(&wx) else {
+        return false;
+    };
+    let top = bottom + height - 1;
+    // In the mat or on the deck.
+    if (wy >= bottom && wy <= top) || wy == top + 1 {
+        return true;
+    }
+    // Roots may dive a couple cells under the raft; nucleus does not —
+    // otherwise a submerged crown below drifting litter looks "mounted".
+    mid == ModuleId::Root && wy >= bottom - 2 && wy < bottom
+}
+
+/// Drift floating Organic with the wind; root-bound mats sail as one island
+/// and carry their land plants along (dispersal).
+///
+/// Only plants with a holdfast in floating Organic translate — submerged /
+/// free-floating plants are not hitchhiked when litter slides past. Every
+/// root column across a mounted plant's span claims the mat (not only the
+/// first Organic contact). Loose unrooted litter may still peel apart.
+/// Returns how many Organic columns moved.
+pub fn sail_plants_on_wind_rafts(
+    world: &mut World,
+    atoms: &mut [Atom],
+    wind_vx_tiles: f32,
+    tile_cols: i32,
+) -> u32 {
+    let columns = crate::rules::collect_floating_organic_columns(world);
+    let mut bound_cols: HashSet<i32> = HashSet::new();
+    let mut raft_mounted: Vec<usize> = Vec::new();
+
+    for (i, atom) in atoms.iter().enumerate() {
+        if !is_land_plant(atom) || atom.energy <= 0.0 {
+            continue;
+        }
+        let mut min_rx = i32::MAX;
+        let mut max_rx = i32::MIN;
+        let mut mounted = false;
+        for &(dx, dy, m) in &atom.body {
+            if m != ModuleId::Root && m != ModuleId::Nucleus {
+                continue;
+            }
+            let wx = world.wrap_x(atom.gx + dx as i32);
+            let wy = atom.gy + dy as i32;
+            min_rx = min_rx.min(wx);
+            max_rx = max_rx.max(wx);
+            if holdfast_on_float_column(&columns, m, wx, wy) {
+                mounted = true;
+            }
+        }
+        if !mounted || min_rx > max_rx {
+            continue;
+        }
+        raft_mounted.push(i);
+        // Bind the full root/nucleus span so later roots keep the mat under
+        // the plant — not just the first Organic contact column.
+        for x in min_rx..=max_rx {
+            if columns.contains_key(&x) {
+                bound_cols.insert(x);
+            }
+        }
+    }
+
+    let sails = collect_plant_sail_tops(
+        raft_mounted
+            .iter()
+            .filter_map(|&i| atoms.get(i)),
+    );
+    let (moved, sign, moved_cols) = crate::rules::drift_floating_organic(
+        world,
+        wind_vx_tiles,
+        tile_cols,
+        Some(&sails),
+        Some(&bound_cols),
+    );
+    if moved == 0 || sign == 0 || moved_cols.is_empty() {
+        return moved;
+    }
+    for &i in &raft_mounted {
+        let Some(atom) = atoms.get_mut(i) else {
+            continue;
+        };
+        let hitch = atom.body.iter().any(|&(dx, _dy, m)| {
+            if m != ModuleId::Root && m != ModuleId::Nucleus {
+                return false;
+            }
+            let wx = world.wrap_x(atom.gx + dx as i32);
+            moved_cols.contains(&wx)
+        });
+        if hitch {
+            atom.gx = world.wrap_x(atom.gx + sign);
+        }
+    }
+    moved
 }
 
 fn own_root_at(atom: &Atom, wx: i32, wy: i32) -> bool {
@@ -1357,6 +1529,7 @@ pub fn try_grow_shoot(
                 }
                 atom.energy -= cost;
                 atom.body.push((nx, ny, ModuleId::Photosystem));
+                atom.mark_upright_growth(nx, ny);
                 return true;
             }
             return false;
@@ -1370,7 +1543,18 @@ pub fn try_grow_shoot(
         let mut stem_anchors: Vec<(i16, i16)> = atom
             .body
             .iter()
-            .filter(|(_, _, m)| *m == ModuleId::Stem)
+            .filter(|&&(x, y, m)| {
+                if m != ModuleId::Stem {
+                    return false;
+                }
+                // Tipped plants: leaf on the upright mast, not along the
+                // baked waterline trunk (that reads as sideways growth).
+                if atom.fallen {
+                    y > 0 || atom.upright_growth.iter().any(|&p| p == (x, y))
+                } else {
+                    true
+                }
+            })
             .map(|&(x, y, _)| (x, y))
             .collect();
         // Prefer higher / brighter stem first, then fill gaps lower down.
@@ -1381,6 +1565,9 @@ pub fn try_grow_shoot(
                 let nx = tx + dx;
                 let ny = ty + dy;
                 if ny > 16 || nx == tx || occupied.contains(&(nx, ny)) {
+                    continue;
+                }
+                if atom.fallen && ny <= 0 {
                     continue;
                 }
                 if leaf_support_dist(atom, nx, ny) > WOODY_LEAF_MAX_CANT {
@@ -1396,6 +1583,7 @@ pub fn try_grow_shoot(
                 }
                 atom.energy -= cost;
                 atom.body.push((nx, ny, ModuleId::Photosystem));
+                atom.mark_upright_growth(nx, ny);
                 return true;
             }
         }
@@ -1440,6 +1628,7 @@ pub fn try_grow_shoot(
                     }
                     atom.energy -= cost;
                     atom.body.push((nx, ny, ModuleId::Photosystem));
+                    atom.mark_upright_growth(nx, ny);
                     return true;
                 }
             }
@@ -1451,6 +1640,63 @@ pub fn try_grow_shoot(
         if !can_grow_stem {
             return false;
         }
+        let try_place = |atom: &mut Atom, nx: i16, ny: i16, occupied: &HashSet<(i16, i16)>| -> bool {
+            if ny > 16 || ny < 1 || occupied.contains(&(nx, ny)) {
+                return false;
+            }
+            // Hard rule: stem never sits on a photosystem cell.
+            if atom
+                .body
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Photosystem && x == nx && y == ny - 1)
+            {
+                return false;
+            }
+            if !stem_spacing_ok(atom, nx, ny, trunks) {
+                return false;
+            }
+            atom.energy -= cost;
+            atom.body.push((nx, ny, ModuleId::Stem));
+            atom.mark_upright_growth(nx, ny);
+            true
+        };
+
+        if atom.fallen {
+            // After tip bake, canopy lies on dy==0. Prefer continuing the
+            // upright mast, else start a fresh shoot above the nucleus.
+            let mut up_anchors: Vec<(i16, i16)> = atom
+                .body
+                .iter()
+                .filter(|&&(x, y, m)| {
+                    m == ModuleId::Stem && (y > 0 || atom.upright_growth.iter().any(|&p| p == (x, y)))
+                })
+                .map(|&(x, y, _)| (x, y))
+                .collect();
+            up_anchors.sort_by_key(|&(x, y)| (std::cmp::Reverse(y), x.abs()));
+            for (ax, ay) in up_anchors {
+                if try_place(atom, ax, ay + 1, occupied) {
+                    return true;
+                }
+            }
+            if try_place(atom, 0, 1, occupied) {
+                return true;
+            }
+            // Last resort: shoot upward from a waterline stem tip.
+            let mut flat: Vec<(i16, i16)> = atom
+                .body
+                .iter()
+                .filter(|(_, y, m)| *m == ModuleId::Stem && *y == 0)
+                .map(|&(x, y, _)| (x, y))
+                .collect();
+            flat.sort_by_key(|&(x, _)| x.abs());
+            for (ax, ay) in flat {
+                if try_place(atom, ax, ay + 1, occupied) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         // Elongate the tallest painted stem with clear air above.
         let mut anchors: Vec<(i16, i16)> = atom
             .body
@@ -1460,25 +1706,9 @@ pub fn try_grow_shoot(
             .collect();
         anchors.sort_by_key(|&(_, y)| std::cmp::Reverse(y));
         for (ax, ay) in anchors {
-            let nx = ax;
-            let ny = ay + 1;
-            if ny > 16 || occupied.contains(&(nx, ny)) {
-                continue;
+            if try_place(atom, ax, ay + 1, occupied) {
+                return true;
             }
-            // Hard rule: stem never sits on a photosystem cell.
-            if atom
-                .body
-                .iter()
-                .any(|&(x, y, m)| m == ModuleId::Photosystem && x == nx && y == ay)
-            {
-                continue;
-            }
-            if !stem_spacing_ok(atom, nx, ny, trunks) {
-                continue;
-            }
-            atom.energy -= cost;
-            atom.body.push((nx, ny, ModuleId::Stem));
-            return true;
         }
         false
     };
@@ -1921,6 +2151,1089 @@ mod tests {
         let mut body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
         body.push((1, 2, ModuleId::ReproSpore));
         body
+    }
+
+    #[test]
+    fn wind_sails_plant_with_rooted_organic_raft() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..24 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 6..=9 {
+            w.set_cell(x, 6, Cell::solid(MaterialId::Organic));
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        // Nucleus above raft; root in Organic at (8,6).
+        let mut atoms = vec![Atom::from_body(8, 7, 40.0, body)];
+        apply_genome(
+            &mut atoms[0],
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        let gx0 = atoms[0].gx;
+        let mut sailed = false;
+        for tick in 0..600u64 {
+            w.tick = tick;
+            let n = sail_plants_on_wind_rafts(&mut w, &mut atoms, 0.22, 4);
+            if n > 0 && atoms[0].gx != gx0 {
+                sailed = true;
+                break;
+            }
+        }
+        assert!(sailed, "plant gx should travel with its Organic raft");
+        let wx = atoms[0].gx;
+        let root_y = atoms[0].gy - 1;
+        assert_eq!(
+            w.get_cell(wx, root_y).map(|c| c.material),
+            Some(MaterialId::Organic),
+            "holdfast should still sit on Organic after sailing"
+        );
+    }
+
+    #[test]
+    fn submerged_plant_does_not_hitchhike_drifting_organic() {
+        // Free-floating / seabed plants must not translate when litter
+        // slides into a neighbouring column (old wx-sign hitch).
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..24 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        w.set_cell(6, 6, Cell::solid(MaterialId::Organic));
+        w.set_cell(7, 6, Cell::solid(MaterialId::Organic));
+        // Plant rooted in the water column, not on the Organic mat.
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut atoms = vec![Atom::from_body(12, 4, 40.0, body)];
+        apply_genome(
+            &mut atoms[0],
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        let gx0 = atoms[0].gx;
+        let mut first_move = None;
+        for tick in 0..400u64 {
+            w.tick = tick;
+            let n = sail_plants_on_wind_rafts(&mut w, &mut atoms, 0.30, 4);
+            if atoms[0].gx != gx0 && first_move.is_none() {
+                first_move = Some((tick, n, atoms[0].gx));
+                break;
+            }
+        }
+        assert!(
+            first_move.is_none(),
+            "submerged plant must not sail with nearby Organic litter (moved {first_move:?})"
+        );
+    }
+
+    #[test]
+    fn submerged_seaweed_stays_on_holdfast() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..=8 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 9..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 2, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_seaweed().genome,
+        );
+        store.atoms.push(atom);
+        for tick in 0..40u64 {
+            store.step(&mut w, tick);
+            if store.atoms.is_empty() {
+                panic!("seaweed died at {tick}");
+            }
+        }
+        assert!(
+            !store.atoms[0].fallen,
+            "holdfast seaweed must not tip/float"
+        );
+        assert_eq!(
+            store.atoms[0].gy, 2,
+            "must stay on the bed holdfast, not float to waterline (gy={})",
+            store.atoms[0].gy
+        );
+        assert!(is_anchored(&w, &store.atoms[0]));
+    }
+
+    #[test]
+    fn detached_seaweed_floats_when_holdfast_lost() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=6 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 7..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        // Mid-column, no solid under the root — holdfast gone.
+        let mut atom = Atom::from_body(5, 3, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_seaweed().genome,
+        );
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(
+            store.atoms[0].fallen,
+            "seaweed without holdfast must free-float"
+        );
+        assert_eq!(
+            store.atoms[0].gy, 6,
+            "detached ribbon should ride the free surface"
+        );
+    }
+
+    #[test]
+    fn seaweed_with_holdfast_clears_stale_tip() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..=8 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 9..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 2, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_seaweed().genome,
+        );
+        atom.fallen = true; // stale tip while holdfast is actually intact
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(
+            !store.atoms[0].fallen,
+            "intact bed holdfast must clear tip / not float"
+        );
+        assert_eq!(store.atoms[0].gy, 2);
+    }
+
+    #[test]
+    fn shoreline_plant_does_not_rise_with_waterline() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Beach slope: low sand at x=4..=6 (y=2), higher sand inland x=8..=10 (y=5).
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 4..=6 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 2, sand);
+        }
+        for x in 8..=10 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 5, sand);
+        }
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            // Lateral rhizome into the higher beach — must not hoist the crown.
+            (3, 2, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 3, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        let gy0 = store.atoms[0].gy;
+        assert_eq!(gy0, 3, "crown seats on local sand, not inland slope");
+        // Rising lake covers the shoreline plant.
+        for x in 0..=7 {
+            for y in 3..=7 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        for tick in 1..40u64 {
+            store.step(&mut w, tick);
+        }
+        assert!(
+            !store.atoms[0].fallen,
+            "shore plant must stay upright on its bed holdfast"
+        );
+        assert_eq!(
+            store.atoms[0].gy, gy0,
+            "must not ride the rising waterline (gy={} want {})",
+            store.atoms[0].gy, gy0
+        );
+    }
+
+    #[test]
+    fn moist_seepage_does_not_tip_land_plant() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..12 {
+                // Damp film / seepage — not a standing-water body.
+                let mut air = Cell::air();
+                air.sat = Sat(40);
+                w.set_cell(x, y, air);
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 2, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        store.atoms.push(atom);
+        for tick in 0..30u64 {
+            store.step(&mut w, tick);
+        }
+        assert!(
+            !store.atoms[0].fallen,
+            "seepage films must not tip substrate-rooted plants"
+        );
+        assert_eq!(store.atoms[0].gy, 2);
+    }
+
+    #[test]
+    fn stream_flood_does_not_tip_rooted_land_plant() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 2, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        // Pretend a prior wet frame wrongly tipped it.
+        atom.fallen = true;
+        store.atoms.push(atom);
+        for y in 2..=5 {
+            w.set_cell(5, y, Cell::water());
+        }
+        for tick in 0..20u64 {
+            store.step(&mut w, tick);
+        }
+        assert!(
+            !store.atoms[0].fallen,
+            "crown holdfast must clear tip even in a stream flood"
+        );
+        assert_eq!(
+            store.atoms[0].gy, 2,
+            "must stay on sand, not ride the stream surface"
+        );
+    }
+
+    #[test]
+    fn seaweed_pulled_back_to_holdfast_if_displaced() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..=8 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 9..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        // Wrongly floated to the surface, but short root still reaches sand.
+        let mut atom = Atom::from_body(5, 6, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_seaweed().genome,
+        );
+        // Root body -1 at gy=6 → world y=5 (water). Extend a short root to sand.
+        atom.body.push((0, -5, ModuleId::Root));
+        atom.fallen = true;
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(!store.atoms[0].fallen);
+        assert_eq!(
+            store.atoms[0].gy, 2,
+            "seaweed with a short bed root must reseat on the holdfast"
+        );
+    }
+
+    #[test]
+    fn substrate_rooted_plant_stays_put_when_flooded() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Dry land plant on sand, then flood the column above it.
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 2, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(!store.atoms[0].fallen);
+        assert!(is_anchored(&w, &store.atoms[0]));
+        let gy0 = store.atoms[0].gy;
+        // Flood: standing water from the crown up.
+        for y in 2..=7 {
+            w.set_cell(5, y, Cell::water());
+        }
+        for y in 8..12 {
+            w.set_cell(5, y, Cell::air());
+        }
+        for tick in 1..20u64 {
+            store.step(&mut w, tick);
+        }
+        assert!(
+            !store.atoms[0].fallen,
+            "sand-rooted land plant must not tip when flooded"
+        );
+        assert_eq!(
+            store.atoms[0].gy, gy0,
+            "must stay on the substrate crown, not float to the waterline"
+        );
+        assert!(
+            is_anchored(&w, &store.atoms[0]),
+            "roots must remain in the sand"
+        );
+    }
+
+    #[test]
+    fn unanchored_plant_floats_tipped_on_open_water() {
+        use crate::organism::{fallen_body_offset, OrganismStore};
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Drop an upright plant into the water column with no Organic holdfast.
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 3, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(
+            store.atoms[0].fallen,
+            "lost-grip plant over water must tip / free-float"
+        );
+        assert_eq!(
+            store.atoms[0].gy, 5,
+            "should rest at the free surface, not the lake bed"
+        );
+        let (dx, dy) = fallen_body_offset(0, 1);
+        assert_eq!((dx, dy), (1, 0), "upright stem lays along the waterline");
+        let (rx, ry) = fallen_body_offset(1, -1);
+        assert_eq!((rx, ry), (1, -1), "roots must hang down into water, not into air");
+    }
+
+    #[test]
+    fn fallen_raft_plant_does_not_root_on_lake_bed() {
+        // After leaving a tall raft, the plant may sit many cells above a
+        // lowered waterline. It must float at the surface — never snap to
+        // sand via find_surface_air_slot, and must not re-root on the bed.
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+            for y in 2..=6 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 7..20 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        // Former raft height — well above the free surface at y=6.
+        let mut atom = Atom::from_body(5, 14, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        // Already free-floating (left the raft); a long root may scrape sand
+        // without counting as a land holdfast that pins the crown underwater.
+        atom.fallen = true;
+        atom.body.push((0, -13, ModuleId::Root));
+        store.atoms.push(atom);
+        for tick in 0..30u64 {
+            store.step(&mut w, tick);
+        }
+        assert!(
+            store.atoms[0].fallen,
+            "must stay free-floating, not re-root on sand"
+        );
+        assert_eq!(
+            store.atoms[0].gy, 6,
+            "must sit at the free surface (gy={})",
+            store.atoms[0].gy
+        );
+        assert!(
+            store.atoms[0].gy > 2,
+            "must not snap to the underwater bed seat"
+        );
+    }
+
+    #[test]
+    fn fallen_floater_stays_alive_by_sipping_lake() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 4, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        atom.energy = atom.energy_max;
+        store.atoms.push(atom);
+        for tick in 0..200u64 {
+            store.step(&mut w, tick);
+            if store.atoms.is_empty() {
+                break;
+            }
+        }
+        assert_eq!(store.atoms.len(), 1, "floater should stay alive on the lake");
+        assert!(store.atoms[0].fallen);
+        assert!(
+            store.atoms[0].energy > 1.0,
+            "dangling roots should sip enough to keep energy (e={})",
+            store.atoms[0].energy
+        );
+    }
+
+    #[test]
+    fn stranded_fallen_plant_can_reroot_on_shore() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 2, 80.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        atom.fallen = true;
+        atom.energy = atom.energy_max;
+        atom.genome.alloc_root = 0.6;
+        atom.genome.alloc_stem = 0.15;
+        atom.genome.alloc_leaf = 0.25;
+        store.atoms.push(atom);
+        let mut anchored = false;
+        for tick in 0..120u64 {
+            store.step(&mut w, tick);
+            if store.atoms.is_empty() {
+                break;
+            }
+            if is_anchored(&w, &store.atoms[0]) {
+                anchored = true;
+                break;
+            }
+        }
+        assert!(anchored, "stranded floater should grow roots into the beach");
+        assert!(
+            store.atoms[0].fallen,
+            "re-rooted shore plant must stay tipped; only new shoots stand up"
+        );
+    }
+
+    #[test]
+    fn tipped_floater_grows_new_stem_upright() {
+        use crate::organism::{fallen_body_offset, resolve_organism_draw_cells};
+        use crate::shade::CanopyIndex;
+        use std::collections::HashSet;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Side leaf so the trunk tip has clear air for stem elongation.
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (1, 1, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(5, 5, 120.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        atom.fallen = true;
+        atom.energy = atom.energy_max;
+        atom.genome.alloc_root = 0.0;
+        // Strong stem bias so growth prefers trunk elongation over a side leaf.
+        atom.genome.alloc_stem = 0.92;
+        atom.genome.alloc_leaf = 0.08;
+        let caps = PlantGrowthCaps::default();
+        let mut spent = 0.0;
+        for t in 0..24u64 {
+            spent = try_grow_shoot(
+                &w,
+                &mut atom,
+                t,
+                &HashSet::new(),
+                &HashSet::new(),
+                &caps,
+                &CanopyIndex::default(),
+                0,
+            );
+            if atom.body.iter().any(|&(dx, dy, m)| {
+                m == ModuleId::Stem && atom.upright_growth.contains(&(dx, dy))
+            }) {
+                break;
+            }
+        }
+        assert!(spent > 0.0, "tipped floater should grow a shoot");
+        let new_stem = atom
+            .body
+            .iter()
+            .copied()
+            .find(|&(dx, dy, m)| m == ModuleId::Stem && atom.upright_growth.contains(&(dx, dy)))
+            .expect("new stem cell marked upright_growth");
+        assert!(atom.fallen);
+        assert!(atom.draws_upright(new_stem.0, new_stem.1));
+        assert!(!atom.draws_upright(0, 1));
+        let atoms = vec![atom.clone()];
+        let posed = resolve_organism_draw_cells(&w, &atoms, 0, 0.0);
+        // Body Y still counts the tipped trunk; draw collapses so the first
+        // new shoot sits on the waterline crown (gy+1), not floating above a gap.
+        let (draw_dx, draw_dy) = atom.fallen_draw_offset(new_stem.0, new_stem.1);
+        assert_eq!(draw_dy, 1, "first upright stem should sit just above the crown");
+        assert!(
+            posed.iter().any(|p| {
+                p.mid == ModuleId::Stem
+                    && p.wx == atom.gx + draw_dx as i32
+                    && p.wy == atom.gy + draw_dy as i32
+            }),
+            "new stem draws upright from the waterline, got {posed:?}"
+        );
+        let (ox, oy) = fallen_body_offset(0, 1);
+        assert!(
+            posed.iter().any(|p| {
+                p.mid == ModuleId::Stem
+                    && p.wx == atom.gx + ox as i32
+                    && p.wy == atom.gy + oy as i32
+            }),
+            "pre-tip stem still draws tipped along the waterline"
+        );
+    }
+
+    #[test]
+    fn upright_shoots_do_not_float_above_tipped_trunk_gap() {
+        use crate::organism::resolve_organism_draw_cells;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Pre-tip trunk + post-tip shoots with a skipped body Y (4 then 6).
+        // Rank stacking must still put the first shoot at gy+1.
+        let mut atom = Atom::from_body(
+            5,
+            5,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Photosystem),
+                (0, 4, ModuleId::Stem),
+                (0, 6, ModuleId::Stem),
+                (0, 7, ModuleId::Photosystem),
+                (1, 7, ModuleId::Photosystem),
+            ],
+        );
+        atom.fallen = true;
+        atom.upright_growth = vec![(0, 4), (0, 6), (0, 7), (1, 7)];
+        let posed = resolve_organism_draw_cells(&w, &[atom.clone()], 0, 0.0);
+        let stem_ys: Vec<i32> = posed
+            .iter()
+            .filter(|p| p.mid == ModuleId::Stem && p.wx == atom.gx)
+            .map(|p| p.wy)
+            .collect();
+        assert!(
+            stem_ys.contains(&(atom.gy + 1)) && stem_ys.contains(&(atom.gy + 2)),
+            "upright trunk must be contiguous from gy+1, stems at {stem_ys:?}"
+        );
+        assert!(
+            !stem_ys.contains(&(atom.gy + 4)) && !stem_ys.contains(&(atom.gy + 6)),
+            "must not draw new stems at raw body Y"
+        );
+        assert!(
+            posed.iter().any(|p| {
+                p.mid == ModuleId::Photosystem && p.wx == atom.gx && p.wy == atom.gy + 3
+            }),
+            "upright leaf should sit on the remapped shoot stack"
+        );
+    }
+
+    #[test]
+    fn tall_upright_mast_on_skinny_raft_tips_again() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..20 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        w.set_cell(8, 6, Cell::solid(MaterialId::Organic));
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            // Post-tip mast (3 distinct upright Y → tippy on 1-wide raft).
+            (0, 3, ModuleId::Stem),
+            (0, 4, ModuleId::Stem),
+            (0, 5, ModuleId::Photosystem),
+        ];
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(8, 6, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        atom.fallen = true;
+        atom.upright_growth = vec![(0, 3), (0, 4), (0, 5)];
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(store.atoms[0].fallen, "must stay tipped");
+        assert!(
+            store.atoms[0].upright_growth.is_empty(),
+            "tippy upright mast should bake flat, got {:?}",
+            store.atoms[0].upright_growth
+        );
+        assert!(
+            store.atoms[0]
+                .body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Stem || *m == ModuleId::Photosystem)
+                .all(|(_, y, _)| *y == 0),
+            "baked canopy must lie on the waterline (dy==0), body={:?}",
+            store.atoms[0].body
+        );
+    }
+
+    #[test]
+    fn after_tip_bake_new_stem_grows_up_from_crown() {
+        use crate::organism::bake_tip_into_body;
+        use crate::shade::CanopyIndex;
+        use std::collections::HashSet;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut atom = Atom::from_body(
+            5,
+            5,
+            120.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Stem),
+                (0, 4, ModuleId::Photosystem),
+            ],
+        );
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        atom.energy = atom.energy_max;
+        bake_tip_into_body(&mut atom);
+        assert!(atom.body.iter().any(|&(x, y, m)| {
+            m == ModuleId::Stem && y == 0 && x > 0
+        }));
+        // Old vertical axis is gone — (0,1) is free for a fresh upright shoot.
+        assert!(!atom.body.iter().any(|&(x, y, _)| x == 0 && y == 1));
+        atom.genome.alloc_stem = 0.92;
+        atom.genome.alloc_leaf = 0.08;
+        atom.genome.alloc_root = 0.0;
+        let caps = PlantGrowthCaps::default();
+        let mut grew_up = false;
+        for t in 0..16u64 {
+            let _ = try_grow_shoot(
+                &w,
+                &mut atom,
+                t,
+                &HashSet::new(),
+                &HashSet::new(),
+                &caps,
+                &CanopyIndex::default(),
+                0,
+            );
+            if atom
+                .body
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Stem && x == 0 && y == 1)
+            {
+                grew_up = true;
+                break;
+            }
+        }
+        assert!(grew_up, "post-bake stem must reorient upward above nucleus");
+        assert!(atom.upright_growth.contains(&(0, 1)));
+    }
+
+    #[test]
+    fn tipped_floater_can_elongate_dangling_roots() {
+        use crate::organism::bake_tip_into_body;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut atom = Atom::from_body(
+            5,
+            5,
+            120.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Photosystem),
+            ],
+        );
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        atom.energy = atom.energy_max;
+        bake_tip_into_body(&mut atom);
+        atom.genome.alloc_root = 0.5;
+        atom.genome.alloc_stem = 0.25;
+        atom.genome.alloc_leaf = 0.25;
+        let roots0 = root_count(&atom);
+        let caps = PlantGrowthCaps::default();
+        let mut grew = false;
+        for _ in 0..24 {
+            let spent = try_elongate_root(&w, &mut atom, &HashSet::new(), &caps);
+            if spent > 0.0 || root_count(&atom) > roots0 {
+                grew = true;
+                break;
+            }
+        }
+        assert!(grew, "tipped floater should elongate roots into wet void");
+        assert!(
+            atom.body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Root)
+                .any(|(_, y, _)| *y <= -2),
+            "dangling root should deepen below the crown, body={:?}",
+            atom.body
+        );
+    }
+
+    #[test]
+    fn upright_mast_counts_as_wind_sail() {
+        let mut tipped = Atom::from_body(
+            5,
+            5,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Stem),
+                (0, 4, ModuleId::Stem),
+                (0, 5, ModuleId::Photosystem),
+            ],
+        );
+        apply_genome(
+            &mut tipped,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        tipped.fallen = true;
+        // Fully tipped — flat on the waterline, no upright sail height.
+        let flat = collect_plant_sail_tops(std::iter::once(&tipped));
+        let flat_top = flat.get(&5).copied().unwrap_or(tipped.gy);
+        assert_eq!(flat_top, tipped.gy, "fully tipped canopy is waterline-flat");
+
+        tipped.upright_growth = vec![(0, 4), (0, 5)];
+        let sailed = collect_plant_sail_tops(std::iter::once(&tipped));
+        let sail_top = sailed.get(&5).copied().unwrap_or(tipped.gy);
+        assert!(
+            sail_top >= tipped.gy + 2,
+            "post-tip upright mast must raise sail top (got {sail_top}, gy={})",
+            tipped.gy
+        );
+    }
+
+    #[test]
+    fn tall_plant_on_skinny_raft_tips_over() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..20 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // One-column floating mat.
+        w.set_cell(8, 6, Cell::solid(MaterialId::Organic));
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Stem),
+            (0, 4, ModuleId::Photosystem),
+        ];
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(8, 7, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(
+            store.atoms[0].fallen,
+            "tall sail on a 1-wide raft should tip"
+        );
+        assert!(
+            rooted_in_organic_for_test(&w, &store.atoms[0])
+                || w.get_cell(8, 6).map(|c| c.material) == Some(MaterialId::Organic),
+            "holdfast should still be on the Organic mat"
+        );
+    }
+
+    fn rooted_in_organic_for_test(world: &World, atom: &Atom) -> bool {
+        atom.body.iter().any(|&(dx, dy, m)| {
+            if m != ModuleId::Root && m != ModuleId::Nucleus {
+                return false;
+            }
+            let wx = world.wrap_x(atom.gx + dx as i32);
+            let wy = atom.gy + dy as i32;
+            world
+                .get_cell(wx, wy)
+                .map(|c| c.material == MaterialId::Organic)
+                .unwrap_or(false)
+                || world
+                    .get_cell(wx, wy - 1)
+                    .map(|c| c.material == MaterialId::Organic)
+                    .unwrap_or(false)
+        })
+    }
+
+    #[test]
+    fn multi_root_plant_binds_full_organic_span() {
+        // Later roots (not only the first Organic contact) must claim the
+        // mat so the plant cannot drift ahead of the pile.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..28 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 6..=12 {
+            w.set_cell(x, 6, Cell::solid(MaterialId::Organic));
+        }
+        // Nucleus at (9,7); roots spanning 7..11 at the waterline.
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+            (-2, -1, ModuleId::Root),
+            (-1, -1, ModuleId::Root),
+            (0, -1, ModuleId::Root),
+            (1, -1, ModuleId::Root),
+            (2, -1, ModuleId::Root),
+        ];
+        let mut atoms = vec![Atom::from_body(9, 7, 40.0, body)];
+        apply_genome(
+            &mut atoms[0],
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        let gx0 = atoms[0].gx;
+        let mut sailed = false;
+        for tick in 0..700u64 {
+            w.tick = tick;
+            let n = sail_plants_on_wind_rafts(&mut w, &mut atoms, 0.22, 4);
+            if n > 0 && atoms[0].gx != gx0 {
+                sailed = true;
+                break;
+            }
+        }
+        assert!(sailed, "multi-root raft plant should eventually sail");
+        let wx = atoms[0].gx;
+        // Every root column under the plant should still have Organic.
+        for &(dx, dy, m) in &atoms[0].body {
+            if m != ModuleId::Root {
+                continue;
+            }
+            let rx = w.wrap_x(wx + dx as i32);
+            let ry = atoms[0].gy + dy as i32;
+            assert_eq!(
+                w.get_cell(rx, ry).map(|c| c.material),
+                Some(MaterialId::Organic),
+                "root at ({rx},{ry}) should stay bound to Organic after sail"
+            );
+        }
     }
 
     #[test]
