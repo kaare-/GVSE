@@ -1146,8 +1146,10 @@ fn step_land_plant(
     // - Any other upright substrate anchor: stay put (don't float).
     // - Floating-Organic raft holdfast (only): tip check; ride the surface.
     // - No holdfast over full-sat water: tip and free-float.
-    // - Woody tip bakes into body; stemless tips for draw only.
-    // - Shore: stay tipped; grow roots into the beach.
+    // - Woody tip always bakes into body (plan survives as horizontal trunk);
+    //   stemless tips for draw only.
+    // - Sand undercut with no water yet: woody tip-bakes, then reseats.
+    // - Shore: stay tipped; grow roots into the beach; new shoots upright.
     let on_float_raft = rooted_in_floating_organic(world, atom, float_columns);
     let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
     let stemless = crate::plant::stem_count(atom) == 0;
@@ -1197,6 +1199,16 @@ fn step_land_plant(
         atom.last_water_top = Some(top);
     } else if atom.fallen {
         // Shore (rooted or not): stay tipped; seat on the beach surface.
+        if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
+            atom.gy = slot;
+        }
+        atom.fy = atom.gy as f32;
+        atom.vel_y = 0.0;
+        atom.last_water_top = None;
+    } else if !stemless {
+        // Substrate gone (sand eroded) with no standing water: bake the tip
+        // so the chassis survives, then drop onto the local surface tipped.
+        bake_tip_into_body(atom);
         if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
             atom.gy = slot;
         }

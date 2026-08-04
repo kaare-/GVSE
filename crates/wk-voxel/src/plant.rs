@@ -1767,17 +1767,170 @@ pub fn sync_alloc_to_body(genome: &mut Genome, body: &[BodyModule]) {
     }
 }
 
-/// Child body for vegetative sprout — inherits stemless vs stemmed habit.
+/// Max stem body-Y kept on a vegetative / spore juvenile.
+const SPROUT_MAX_STEM_Y: i16 = 2;
+/// Shallowest root depth kept (most negative dy magnitude).
+const SPROUT_MAX_ROOT_DEPTH: i16 = 2;
+const SPROUT_MAX_ROOTS: usize = 3;
+/// Main-column stems + room for one low side-branch bud.
+const SPROUT_MAX_STEMS: usize = 3;
+const SPROUT_MAX_LEAVES: usize = 2;
+
+/// Child body for vegetative sprout — pruned upright clone of the parent plan.
+///
+/// Not [`Blueprint::minimal_plant`]: a tall / multi-rooted / branched parent
+/// yields a short sapling that still carries those habit traits. Stemless
+/// parents stay stemless. Tipped (baked) parents are straightened so the
+/// child is born upright, not horizontal.
 pub fn sprout_body(parent: &Atom) -> Vec<BodyModule> {
-    if stem_count(parent) > 0 {
-        crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus()
+    let stemless = stem_count(parent) == 0;
+    let source = if parent.fallen {
+        straighten_tipped_body_for_juvenile(&parent.body)
     } else {
-        vec![
-            (0, -1, ModuleId::Root),
-            (0, 0, ModuleId::Nucleus),
-            (0, 1, ModuleId::Photosystem),
-        ]
+        parent.body.clone()
+    };
+    prune_body_to_juvenile(&source, stemless)
+}
+
+/// Approximate inverse of [`crate::organism::bake_tip_into_body`] for juveniles.
+///
+/// Waterline canopy (`dy == 0`, `dx > 0`) maps back onto the crown column;
+/// roots and already-upright mast cells keep their offsets.
+fn straighten_tipped_body_for_juvenile(body: &[BodyModule]) -> Vec<BodyModule> {
+    use std::collections::HashSet;
+
+    let mut next: Vec<BodyModule> = Vec::with_capacity(body.len());
+    let mut used: HashSet<(i16, i16)> = HashSet::new();
+    let place = |used: &mut HashSet<(i16, i16)>, next: &mut Vec<BodyModule>, mut nx: i16, ny: i16, m: ModuleId| {
+        let mut guard = 0;
+        while !used.insert((nx, ny)) && guard < 16 {
+            nx += 1;
+            guard += 1;
+        }
+        if guard < 16 {
+            next.push((nx, ny, m));
+        }
+    };
+
+    for &(dx, dy, m) in body {
+        if m == ModuleId::Nucleus {
+            place(&mut used, &mut next, 0, 0, ModuleId::Nucleus);
+            continue;
+        }
+        if m == ModuleId::Root || dy < 0 {
+            place(&mut used, &mut next, dx, dy, m);
+            continue;
+        }
+        if dy > 0 {
+            // Post-tip upright mast — already world-up.
+            place(&mut used, &mut next, dx, dy, m);
+            continue;
+        }
+        // Waterline canopy from bake: former (0, k) → (k, 0).
+        if dx > 0 {
+            place(&mut used, &mut next, 0, dx, m);
+        } else if dx < 0 {
+            place(&mut used, &mut next, dx, 1, m);
+        }
     }
+    if !next.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+        next.insert(0, (0, 0, ModuleId::Nucleus));
+    }
+    next
+}
+
+fn prune_body_to_juvenile(body: &[BodyModule], stemless: bool) -> Vec<BodyModule> {
+    use std::collections::HashSet;
+
+    let mut out: Vec<BodyModule> = vec![(0, 0, ModuleId::Nucleus)];
+
+    let mut roots: Vec<BodyModule> = body
+        .iter()
+        .copied()
+        .filter(|&(dx, dy, m)| {
+            m == ModuleId::Root && dy >= -SPROUT_MAX_ROOT_DEPTH && dx.abs() <= 2
+        })
+        .collect();
+    roots.sort_by_key(|&(dx, dy, _)| (dy.abs() + dx.abs(), dx.abs()));
+    roots.truncate(SPROUT_MAX_ROOTS);
+    if roots.is_empty() {
+        roots.push((0, -1, ModuleId::Root));
+    }
+    out.extend(roots);
+
+    if stemless {
+        let leaf = body
+            .iter()
+            .copied()
+            .filter(|&(_, dy, m)| m == ModuleId::Photosystem && dy > 0)
+            .min_by_key(|&(dx, dy, _)| (dy, dx.abs()))
+            .map(|(dx, dy, _)| (dx.clamp(-1, 1), dy.min(2).max(1), ModuleId::Photosystem))
+            .unwrap_or((0, 1, ModuleId::Photosystem));
+        out.push(leaf);
+        return dedupe_juvenile_body(out);
+    }
+
+    // Prefer the crown column, then a low side bud so branched parents
+    // don't collapse to a plain monopodial sapling.
+    let mut stems: Vec<BodyModule> = body
+        .iter()
+        .copied()
+        .filter(|&(dx, dy, m)| {
+            m == ModuleId::Stem && dy >= 1 && dy <= SPROUT_MAX_STEM_Y && dx.abs() <= 1
+        })
+        .collect();
+    stems.sort_by_key(|&(dx, dy, _)| (dx.abs(), dy));
+    stems.truncate(SPROUT_MAX_STEMS);
+    if stems.is_empty() {
+        stems.push((0, 1, ModuleId::Stem));
+    }
+    out.extend(stems);
+
+    let stem_set: HashSet<(i16, i16)> = out
+        .iter()
+        .filter(|(_, _, m)| *m == ModuleId::Stem)
+        .map(|&(x, y, _)| (x, y))
+        .collect();
+    let mut leaves: Vec<BodyModule> = body
+        .iter()
+        .copied()
+        .filter(|&(dx, dy, m)| {
+            m == ModuleId::Photosystem
+                && dy >= 1
+                && dy <= SPROUT_MAX_STEM_Y + 1
+                && dx.abs() <= 2
+        })
+        .collect();
+    leaves.sort_by_key(|&(dx, dy, _)| {
+        let near = stem_set
+            .iter()
+            .any(|&(sx, sy)| (sx - dx).abs() + (sy - dy).abs() <= 2);
+        (!near, dy, dx.abs())
+    });
+    leaves.truncate(SPROUT_MAX_LEAVES);
+    if leaves.is_empty() {
+        let tip_y = out
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Stem)
+            .map(|(_, y, _)| *y)
+            .max()
+            .unwrap_or(1);
+        leaves.push((-1, tip_y, ModuleId::Photosystem));
+    }
+    out.extend(leaves);
+    dedupe_juvenile_body(out)
+}
+
+fn dedupe_juvenile_body(body: Vec<BodyModule>) -> Vec<BodyModule> {
+    use std::collections::HashSet;
+    let mut seen = HashSet::new();
+    let mut out = Vec::with_capacity(body.len());
+    for (dx, dy, m) in body {
+        if seen.insert((dx, dy)) {
+            out.push((dx, dy, m));
+        }
+    }
+    out
 }
 
 /// One growth pulse: root and/or shoot from allocation weights.
@@ -1889,9 +2042,9 @@ pub fn count_plants_near(plant_cols: &[i32], gx: i32, radius: i32, wrap_width: O
 ///
 /// Requires painted lateral root, enough roots, energy, cooldown, global
 /// pop room, an **unoccupied** target column, and local density below
-/// [`SPROUT_LOCAL_MAX`]. Child chassis follows the parent (stemless stays
-/// stemless); genome is mutated then re-synced so alloc can't reintroduce
-/// a trunk.
+/// [`SPROUT_LOCAL_MAX`]. Child chassis is a pruned upright clone of the
+/// parent body (stemless stays stemless); genome is mutated then re-synced
+/// so alloc can't reintroduce a trunk.
 pub fn try_vegetative_sprout(
     world: &World,
     atom: &mut Atom,
@@ -3073,6 +3226,182 @@ mod tests {
                 .any(|(_, y, _)| *y <= -2),
             "dangling root should deepen below the crown, body={:?}",
             atom.body
+        );
+    }
+
+    #[test]
+    fn sand_eroded_under_woody_plant_tips_and_keeps_plan() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            // Thick sand so undercut does not leave bedrock in the root grip.
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+            w.set_cell(x, 2, Cell::solid(MaterialId::Sand));
+            for y in 3..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Distinct plan: side root + tall trunk + side leaf.
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (1, -1, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Stem),
+            (1, 3, ModuleId::Photosystem),
+        ];
+        let stems0 = body.iter().filter(|(_, _, m)| *m == ModuleId::Stem).count();
+        let roots0 = body.iter().filter(|(_, _, m)| *m == ModuleId::Root).count();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 3, 80.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(!store.atoms[0].fallen, "sand-rooted plant starts upright");
+        // Erode the sand under the crown columns — no water yet.
+        for x in 4..=6 {
+            w.set_cell(x, 1, Cell::air());
+            w.set_cell(x, 2, Cell::air());
+        }
+        store.step(&mut w, 1);
+        assert!(
+            store.atoms[0].fallen,
+            "woody plant must tip when sand undercut removes support"
+        );
+        assert_eq!(
+            store.atoms[0]
+                .body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Stem)
+                .count(),
+            stems0,
+            "stem count must survive tip bake"
+        );
+        assert_eq!(
+            store.atoms[0]
+                .body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Root)
+                .count(),
+            roots0,
+            "root count must survive tip bake"
+        );
+        assert!(
+            store.atoms[0]
+                .body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Stem || *m == ModuleId::Photosystem)
+                .all(|(_, y, _)| *y == 0),
+            "baked canopy lies on dy==0, body={:?}",
+            store.atoms[0].body
+        );
+    }
+
+    #[test]
+    fn sprout_body_preserves_parent_habit_not_template() {
+        let parent = Atom::from_body(
+            4,
+            2,
+            80.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (1, -1, ModuleId::Root), // distinctive side root
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Stem),
+                (0, 4, ModuleId::Stem),
+                (0, 5, ModuleId::Stem),
+                (1, 2, ModuleId::Stem), // low side branch
+                (-1, 2, ModuleId::Photosystem),
+                (1, 5, ModuleId::Photosystem),
+            ],
+        );
+        let child = sprout_body(&parent);
+        let template =
+            crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        assert!(
+            child
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Root && x == 1 && y == -1),
+            "juvenile must keep parent's side root, got {child:?}"
+        );
+        assert!(
+            child
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Stem && x == 1 && y == 2),
+            "juvenile should keep a pruned side-branch bud, got {child:?}"
+        );
+        assert!(
+            child
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Stem)
+                .all(|(_, y, _)| *y <= SPROUT_MAX_STEM_Y),
+            "tall parent trunk must be pruned, got {child:?}"
+        );
+        assert_ne!(
+            child, template,
+            "must not fall back to the minimal_plant template"
+        );
+        // Stemless parent stays stemless.
+        let seaweed = Atom::from_body(
+            4,
+            2,
+            40.0,
+            crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus(),
+        );
+        let sw_child = sprout_body(&seaweed);
+        assert_eq!(
+            sw_child
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Stem)
+                .count(),
+            0,
+            "stemless juvenile must stay stemless: {sw_child:?}"
+        );
+        assert!(sw_child.iter().any(|(_, _, m)| *m == ModuleId::Photosystem));
+    }
+
+    #[test]
+    fn sprout_body_from_tipped_parent_is_upright_juvenile() {
+        use crate::organism::bake_tip_into_body;
+
+        let mut parent = Atom::from_body(
+            5,
+            5,
+            80.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Stem),
+                (-1, 3, ModuleId::Photosystem),
+            ],
+        );
+        bake_tip_into_body(&mut parent);
+        assert!(parent.fallen);
+        assert!(parent
+            .body
+            .iter()
+            .any(|&(_, y, m)| m == ModuleId::Stem && y == 0));
+        let child = sprout_body(&parent);
+        assert!(
+            child
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Stem && x == 0 && y > 0),
+            "tipped parent must yield an upright sapling stem, got {child:?}"
+        );
+        assert!(
+            child.iter().any(|(_, _, m)| *m == ModuleId::Photosystem),
+            "juvenile should keep a leaf, got {child:?}"
         );
     }
 
