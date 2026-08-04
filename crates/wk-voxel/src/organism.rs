@@ -1384,13 +1384,13 @@ pub fn resolve_organism_draw_cells(
 /// body cells for physics stay upright.
 ///
 /// - **Stemless Photosystem** (seaweed ribbon): soft. Underwater lean with
-///   wind/flow; emerged tips lay on the free surface; dry mats hang past
-///   [`LEAF_SUPPORT_DRY`] and settle onto terrain (pile via
-///   [`resolve_organism_draw_cells`]).
+///   local water flow only (not air wind); emerged tips lay on the free
+///   surface; dry mats hang past [`LEAF_SUPPORT_DRY`] and settle onto
+///   terrain (pile via [`resolve_organism_draw_cells`]).
 /// - **Photosystem on Stem / branch**: stays in the canopy. Long tips may
 ///   nod a little ([`LEAF_SUPPORT_WOODY`]) but never flatten to the ground
 ///   or waterline — wood holds the leaf up.
-/// - **Stem** (woody): upright on land; underwater leans with drive.
+/// - **Stem** (woody): upright on land; underwater leans with flow only.
 pub fn frond_draw_cell(
     world: &World,
     atom: &Atom,
@@ -1410,8 +1410,16 @@ pub fn frond_draw_cell(
 
     let flow = local_water_drive(world, base_x, base_y);
     let wind = wind_vx.abs();
-    let drive = wind.max(flow);
-    let dir = if flow > wind {
+    // Emerged tissue feels air wind; submerged tissue only follows water flow
+    // so seabed / drowned plants don't "sail" visually with the breeze.
+    let band = wet_band(world, atom.gx, atom.gy);
+    let submerged = band
+        .map(|(top, bed)| base_y >= bed && base_y <= top)
+        .unwrap_or(false);
+    let drive = if submerged { flow } else { wind.max(flow) };
+    let dir = if submerged {
+        local_water_dir(world, base_x, base_y)
+    } else if flow > wind {
         local_water_dir(world, base_x, base_y)
     } else if wind_vx >= 0.0 {
         1
@@ -1419,7 +1427,6 @@ pub fn frond_draw_cell(
         -1
     };
     let lean_dir = if drive < FROND_STILL_WIND { 1 } else { dir };
-    let band = wet_band(world, atom.gx, atom.gy);
     let cant = leaf_cantilever(atom, dx, dy);
     let on_wood = soft_leaf
         && atom
@@ -1471,7 +1478,7 @@ pub fn frond_draw_cell(
             return (wx, wy);
         }
         if base_y >= bed {
-            // Stemless underwater: lean / ripple with wind or flow.
+            // Stemless underwater: lean / ripple with local flow only.
             if drive < FROND_STILL_WIND {
                 return (base_x, base_y);
             }
@@ -2228,12 +2235,15 @@ mod tests {
                 "calm water must not idle-wave (tick={tick})"
             );
         }
-        // Stronger drive leans the tip; try a few phases so sin isn't ~0.
-        let bent = [0u64, 11, 23, 40, 70].iter().any(|&tick| {
-            let (wx, _) = frond_draw_cell(&w, &atom, dx, dy, mid, tick, 0.40);
-            wx != base_x
-        });
-        assert!(bent, "moving water should bend the frond tip");
+        // Atmospheric wind must not bend submerged fronds (flow-only lean).
+        for tick in [0u64, 11, 23, 40, 70] {
+            let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, tick, 0.40);
+            assert_eq!(
+                (wx, wy),
+                (base_x, base_y),
+                "air wind must not lean submerged fronds (tick={tick})"
+            );
+        }
     }
 
     #[test]

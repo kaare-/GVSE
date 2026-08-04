@@ -3572,10 +3572,9 @@ fn rooted_organic_raft_stays_together_in_wind() {
     for x in 6..=10 {
         w.set_cell(x, 6, Cell::solid(MaterialId::Organic));
     }
-    // Holdfast roots in the middle of the mat.
+    // Holdfast columns claimed by living roots in the middle of the mat.
     let mut roots = std::collections::HashSet::new();
-    roots.insert((8, 6));
-    roots.insert((8, 5)); // dangling into water
+    roots.insert(8);
     let mut moved_together = false;
     for tick in 0..500u64 {
         w.tick = tick;

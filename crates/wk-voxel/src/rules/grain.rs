@@ -731,7 +731,7 @@ const RAFT_ROOT_BIND_RADIUS: i32 = 1;
 /// Full [`floats_on_air_seat_world`] is correct for fall/buoyancy but too
 /// expensive to re-run on every Organic cell every tick. Drift only needs
 /// "full standing water immediately below."
-fn drift_float_seat(seat: Cell) -> bool {
+pub(crate) fn drift_float_seat(seat: Cell) -> bool {
     seat.material == MaterialId::Air && seat.sat.is_full()
 }
 
@@ -770,33 +770,13 @@ fn drift_move_column(world: &mut World, gx: i32, bottom_y: i32, height: i32, nx:
     }
 }
 
-/// Wind shove for Organic piles floating on grounded lakes.
-///
-/// Loose litter drifts per-column (wind can tear thin mats apart). Columns
-/// claimed by living roots — plus a 1-column bind radius — move as one
-/// raft so trees can sail. Returns `(columns_moved, wind_sign)` so callers
-/// can translate plant nuclei with the mat.
-///
-/// `live_roots`: world cells of living Root modules. `plant_tops`: world-x →
-/// max plant cell y for sail area.
-pub fn drift_floating_organic(
-    world: &mut World,
-    wind_vx_tiles: f32,
-    tile_cols: i32,
-    plant_tops: Option<&std::collections::HashMap<i32, i32>>,
-    live_roots: Option<&HashSet<(i32, i32)>>,
-) -> (u32, i32, HashSet<i32>) {
-    if wind_vx_tiles.abs() < 1e-5 {
-        return (0, 0, HashSet::new());
-    }
-    let sign: i32 = if wind_vx_tiles >= 0.0 { 1 } else { -1 };
-    let speed = wind_vx_tiles.abs() * tile_cols.max(1) as f32;
-
-    // gx → (bottom_y, height)
+/// Floating Organic columns: `gx → (waterline_y, stack_height)`.
+pub fn collect_floating_organic_columns(
+    world: &World,
+) -> std::collections::HashMap<i32, (i32, i32)> {
     let mut columns: std::collections::HashMap<i32, (i32, i32)> =
         std::collections::HashMap::new();
-    let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
-    for coord in coords {
+    for &coord in world.chunks.keys() {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
         let Some(chunk) = world.chunks.get(&coord) else {
@@ -835,26 +815,41 @@ pub fn drift_floating_organic(
             }
         }
     }
+    columns
+}
+
+/// Wind shove for Organic piles floating on grounded lakes.
+///
+/// Loose litter drifts per-column (wind can tear thin mats apart). Columns
+/// in `root_bound_columns` move as one raft. Returns
+/// `(columns_moved, wind_sign, source_columns_that_moved)`.
+///
+/// `plant_tops`: world-x → max plant cell y for sail area.
+pub fn drift_floating_organic(
+    world: &mut World,
+    wind_vx_tiles: f32,
+    tile_cols: i32,
+    plant_tops: Option<&std::collections::HashMap<i32, i32>>,
+    root_bound_columns: Option<&HashSet<i32>>,
+) -> (u32, i32, HashSet<i32>) {
+    if wind_vx_tiles.abs() < 1e-5 {
+        return (0, 0, HashSet::new());
+    }
+    let sign: i32 = if wind_vx_tiles >= 0.0 { 1 } else { -1 };
+    let speed = wind_vx_tiles.abs() * tile_cols.max(1) as f32;
+
+    let columns = collect_floating_organic_columns(world);
     if columns.is_empty() {
         return (0, sign, HashSet::new());
     }
 
-    // Columns stitched by living roots (holdfast in/under the mat).
-    let mut claimed: HashSet<i32> = HashSet::new();
-    if let Some(roots) = live_roots {
-        for &(rx, ry) in roots {
-            let Some(&(bottom, height)) = columns.get(&rx) else {
-                continue;
-            };
-            // Root in the Organic stack, or dangling a few cells into water.
-            if ry >= bottom - 6 && ry <= bottom + height {
-                claimed.insert(rx);
-            }
-        }
-    }
-    // Dilate: roots bind neighbouring litter so the island stays together.
-    let mut bound = claimed.clone();
-    for &c in &claimed {
+    // Precomputed by the plant layer (span of every root on the mat).
+    let mut bound: HashSet<i32> = root_bound_columns
+        .map(|s| s.iter().copied().filter(|x| columns.contains_key(x)).collect())
+        .unwrap_or_default();
+    // Dilate once so a holdfast still grips neighbouring litter.
+    let claimed: Vec<i32> = bound.iter().copied().collect();
+    for c in claimed {
         for dx in -RAFT_ROOT_BIND_RADIUS..=RAFT_ROOT_BIND_RADIUS {
             let nx = world.wrap_x(c + dx);
             if columns.contains_key(&nx) {
