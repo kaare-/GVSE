@@ -49,4 +49,4 @@ pub use tick::{
     tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life, tick_with_perf,
     PerfConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
 };
-pub use water_flow::{apply_water_flow, apply_water_flow_regions};
+pub use water_flow::{apply_water_flow, apply_water_flow_regions, wake_confined_head};

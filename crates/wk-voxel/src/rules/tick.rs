@@ -176,6 +176,10 @@ pub fn tick_with_life(
         }
     }
 
+    // Communicating vessels: a filled pipe can go locally quiet while the
+    // reservoir head is still higher. Periodic full-chunk confined scan.
+    super::water_flow::wake_confined_head(world);
+
     // Seepage follows the water dirty / flow halo.
     let flow_active = {
         let dirty = plan_active(world);

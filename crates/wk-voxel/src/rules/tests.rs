@@ -2263,6 +2263,258 @@ fn water_mound_under_wide_organic_lid_drains_to_open_vent() {
 }
 
 #[test]
+fn communicating_vessels_bedrock_l_pipe_equalizes() {
+    // Reservoir on the left, bedrock L-pipe into a vertical shaft.
+    // Confined head must raise the shaft free surface to match the
+    // reservoir — the bug that left pipes stuck after thousands of
+    // ticks when only down/cascade/same-Y flow existed.
+    //
+    //   y=8: # W W W W W # # # . #
+    //   y=2: # W W W W W # # # . #
+    //   y=1: # W W W W W W W W W #
+    //   y=0: #####################
+    //                    ^pipe^ ^shaft x=10
+    let mut w = World::new(77);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Side walls (y=1 up) and pipe / shaft lining (y=2 up so y=1
+    // stays open for the horizontal run under the left shaft wall).
+    for y in 1..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(11, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=10 {
+        w.set_cell(7, y, Cell::solid(MaterialId::Bedrock)); // separator
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock)); // shaft left
+    }
+    // Cap over the horizontal run only (not the shaft at x=10).
+    w.set_cell(8, 2, Cell::solid(MaterialId::Bedrock));
+    // Reservoir column water up to y=8.
+    for x in 1..=6 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    // Horizontal pipe full; shaft starts empty above the elbow.
+    for x in 7..=10 {
+        w.set_cell(x, 1, Cell::water());
+    }
+
+    let mass_before: i64 = (0..16)
+        .flat_map(|x| (0..12).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y))
+        .map(|c| c.sat.0 as i64)
+        .sum();
+
+    for _ in 0..400 {
+        tick(&mut w);
+    }
+
+    let mass_after: i64 = (0..16)
+        .flat_map(|x| (0..12).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y))
+        .map(|c| c.sat.0 as i64)
+        .sum();
+    assert_eq!(mass_before, mass_after, "confined head must conserve mass");
+
+    // Shaft column at x=10 should have risen near the reservoir head.
+    let shaft_top = (1..=10)
+        .rev()
+        .find(|&y| w.get_cell(10, y).map(|c| c.sat.0 > 0).unwrap_or(false))
+        .expect("shaft should hold water");
+    assert!(
+        shaft_top >= 7,
+        "shaft free surface should approach reservoir level (top={shaft_top})"
+    );
+    // Must not fountain above the equalised head (~7–8).
+    assert!(
+        w.get_cell(10, 9).map(|c| c.sat.0).unwrap_or(0) < 32,
+        "shaft must not fountain above reservoir head"
+    );
+}
+
+#[test]
+fn confined_head_rises_in_two_wide_shaft() {
+    // 2-wide bedrock shaft: neither column has solid on *both* sides,
+    // so a both-walls gate would skip forever. Higher-row ocean donor
+    // must still lift the column.
+    let mut w = World::new(80);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..18 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 1..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(12, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=10 {
+        w.set_cell(7, y, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(8, 2, Cell::solid(MaterialId::Bedrock));
+    for x in 1..=6 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 7..=11 {
+        w.set_cell(x, 1, Cell::water());
+    }
+
+    for _ in 0..400 {
+        tick(&mut w);
+    }
+
+    let top_a = (1..=10)
+        .rev()
+        .find(|&y| w.get_cell(10, y).map(|c| c.sat.0 > 0).unwrap_or(false));
+    let top_b = (1..=10)
+        .rev()
+        .find(|&y| w.get_cell(11, y).map(|c| c.sat.0 > 0).unwrap_or(false));
+    let top = top_a.max(top_b).expect("2-wide shaft should hold water");
+    // Mass spreads into two shaft columns, so equilibrium sits a bit
+    // below the original reservoir free surface.
+    assert!(
+        top >= 5,
+        "2-wide shaft should equalise toward reservoir (top={top})"
+    );
+}
+
+#[test]
+fn confined_head_wake_scans_despite_unrelated_dirty() {
+    // Evap keeps ocean-surface cells dirty. The wake must still scan
+    // loaded chunks (not the dirty halo), or a quiet pipe stalls.
+    let mut w = World::new(81);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 1..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(11, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=10 {
+        w.set_cell(7, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(8, 2, Cell::solid(MaterialId::Bedrock));
+    for x in 1..=6 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 7..=10 {
+        w.set_cell(x, 1, Cell::water());
+    }
+
+    clear_all_dirty(&mut w);
+    // Only a reservoir-surface cell is dirty (evap stand-in).
+    w.touch_dirty(3, 8);
+    w.tick = 8; // wake fires inside tick
+    for _ in 0..60 {
+        tick(&mut w);
+    }
+
+    let shaft_top = (1..=10)
+        .rev()
+        .find(|&y| w.get_cell(10, y).map(|c| c.sat.0 > 0).unwrap_or(false))
+        .expect("shaft should rise via full-chunk wake");
+    assert!(
+        shaft_top >= 7,
+        "wake must equalise despite unrelated dirty halo (top={shaft_top})"
+    );
+}
+
+#[test]
+fn confined_head_equalizes_across_large_deep_ocean() {
+    // Naive flood-fill of a deep ocean exceeds CONFINED_HEAD_BFS_LIMIT
+    // before reaching the free surface; column-climb must still find
+    // the head so a far shaft equalises.
+    // Ocean: x=0..199, water y=1..40 (surface at 40). Pipe at y=1
+    // from x=200..210 into a walled shaft at x=210.
+    let mut w = World::new(79);
+    for cx in 0..4 {
+        w.ensure_chunk(ChunkCoord::new(cx, 0));
+    }
+    let ocean_w = 200;
+    let surface = 40;
+    for x in 0..=212 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 0..ocean_w {
+        for y in 1..=surface {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    // Bedrock hillside / pipe lining (walls include y=1 so the
+    // elbow cannot laterally spill into open Air).
+    for y in 1..=surface + 2 {
+        w.set_cell(209, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(211, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=surface + 2 {
+        w.set_cell(ocean_w, y, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(208, 2, Cell::solid(MaterialId::Bedrock));
+    // Horizontal pipe full under the hillside; shaft empty above elbow.
+    for x in ocean_w..=210 {
+        w.set_cell(x, 1, Cell::water());
+    }
+    // Throat through the left shaft wall at pipe level.
+    w.set_cell(209, 1, Cell::water());
+
+    for _ in 0..500 {
+        tick(&mut w);
+    }
+
+    let shaft_top = (1..=surface + 1)
+        .rev()
+        .find(|&y| w.get_cell(210, y).map(|c| c.sat.0 > 0).unwrap_or(false))
+        .expect("shaft should hold water");
+    assert!(
+        shaft_top >= surface - 3,
+        "large-ocean confined head must reach near sea level (top={shaft_top}, sea={surface})"
+    );
+}
+
+#[test]
+fn closed_basin_lake_does_not_fountain_upward() {
+    // Still lake in a bedrock cup — confined head must not loft
+    // water into empty sky above the free surface.
+    let mut w = World::new(78);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..10 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 2..=6 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 1..9 {
+        for y in 2..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+
+    for _ in 0..80 {
+        tick(&mut w);
+    }
+
+    for x in 1..9 {
+        let sky = w.get_cell(x, 5).unwrap().sat.0;
+        assert_eq!(sky, 0, "lake must not fountain into y=5 at x={x}");
+        let high = w.get_cell(x, 6).unwrap().sat.0;
+        assert_eq!(high, 0, "lake must not fountain into y=6 at x={x}");
+    }
+    // Surface row still holds the original free-surface mass.
+    let surface: i32 = (1..9).map(|x| w.get_cell(x, 4).unwrap().sat.0 as i32).sum();
+    assert_eq!(surface, 8 * 255, "closed basin surface mass stayed put");
+}
+
+#[test]
 fn same_y_equalize_flattens_stepped_lake_surface() {
     // Free-surface terrace inside a closed basin (solid shores):
     //
