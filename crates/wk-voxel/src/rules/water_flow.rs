@@ -15,8 +15,8 @@ use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
 use super::head::{
-    hydraulic_head, is_porous_solid_with, plan_same_y_pairwise_edge, same_y_cascade_pull,
-    seepage_rate_with,
+    hydraulic_head, is_porous_solid_with, plan_same_y_pairwise_edge,
+    plan_same_y_pairwise_edge_in, same_y_cascade_pull, seepage_rate_with,
 };
 use super::plan::{regions_all_loaded, regions_for_standalone};
 
@@ -431,21 +431,53 @@ fn accumulate_water_flow_xfers(
 ) {
     let tick_flip = (world.tick & 1) == 0;
     let hydro = world.hydro;
+    let cw = CHUNK_CELLS_W as i32;
+    let ch = CHUNK_CELLS_H as i32;
     let local = map_regions_parallel(active, |ac| {
         let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
+        // Cache the source chunk once. Inner probes read chunk-local when
+        // they stay inside the region's chunk; only edge probes fall back
+        // to `world.get_cell` (wrap + HashMap). Measured 10× cheaper.
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            return local;
+        };
+        let base_gx = ac.coord.cx * cw;
+        let base_gy = ac.coord.cy * ch;
+        // Read (gx, gy) via chunk when (lx, ly) is in-chunk, else world.
+        let read = |lx: i32, ly: i32, gx: i32, gy: i32| -> Option<Cell> {
+            if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
+                Some(chunk.get(lx as usize, ly as usize))
+            } else {
+                world.get_cell(gx, gy)
+            }
+        };
         for y in ac.rect.y0..=ac.rect.y1 {
-            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            let gy = base_gy + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {
-                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
-                let Some(cur) = world.get_cell(gx, gy) else {
-                    continue;
-                };
+                let lx = x as i32;
+                let ly = y as i32;
+                // Source cell — always in-chunk under the rect bounds.
+                let cur = chunk.get(x as usize, y as usize);
                 if cur.material != MaterialId::Air {
                     continue;
                 }
+                let gx = world.wrap_x(base_gx + lx);
+                // Ocean-body fast path: a full-sat Air with a full-sat Air
+                // directly above is a **buried** water cell, not a free
+                // surface. Priorities 1–4 are all no-ops in that geometry
+                // (diagonal, cascade, equalise, throughflow neighbours are
+                // all full water / non-porous). Skipping avoids ~10 reads
+                // and up-to-12-cell same-Y look-ahead per ocean interior
+                // cell × 12 substeps.
+                if cur.sat.is_full() {
+                    let above = read(lx, ly + 1, gx, gy + 1);
+                    if matches!(above, Some(a) if a.material == MaterialId::Air && a.sat.is_full()) {
+                        continue;
+                    }
+                }
                 // Below tells us whether we're on a "surface" (below is
                 // solid or full water) or falling (below is Air with room).
-                let below_cell = world.get_cell(gx, gy - 1);
+                let below_cell = read(lx, ly - 1, gx, gy - 1);
                 let on_surface = match below_cell {
                     None => false,
                     Some(b) => b.material != MaterialId::Air || b.sat.is_full(),
@@ -458,7 +490,15 @@ fn accumulate_water_flow_xfers(
                 // / hill-drain feel in the water suite.
                 if cur.sat.is_empty() {
                     if on_surface {
-                        plan_same_y_pairwise_edge(world, gx, gy, &mut local);
+                        plan_same_y_pairwise_edge_in(
+                            world,
+                            Some((chunk, base_gx, base_gy)),
+                            gx,
+                            gy,
+                            lx,
+                            ly,
+                            &mut local,
+                        );
                     }
                     continue;
                 }
@@ -476,7 +516,7 @@ fn accumulate_water_flow_xfers(
                     }
                     let nx = world.wrap_x(gx + dx);
                     let ny = gy - 1;
-                    let Some(dst) = world.get_cell(nx, ny) else {
+                    let Some(dst) = read(lx + dx, ly - 1, nx, ny) else {
                         continue;
                     };
                     if dst.material != MaterialId::Air {
@@ -500,13 +540,13 @@ fn accumulate_water_flow_xfers(
                             break;
                         }
                         let nx = world.wrap_x(gx + dx);
-                        let Some(side) = world.get_cell(nx, gy) else {
+                        let Some(side) = read(lx + dx, ly, nx, gy) else {
                             continue;
                         };
                         if side.material != MaterialId::Air {
                             continue;
                         }
-                        let side_below = world.get_cell(nx, gy - 1);
+                        let side_below = read(lx + dx, ly - 1, nx, gy - 1);
                         let cascade_edge = matches!(
                             side_below,
                             Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
@@ -555,7 +595,15 @@ fn accumulate_water_flow_xfers(
                 // Always, even if cascade dumped everything — the edge
                 // may still need the reverse transfer from a wetter +x.
                 if on_surface {
-                    plan_same_y_pairwise_edge(world, gx, gy, &mut local);
+                    plan_same_y_pairwise_edge_in(
+                        world,
+                        Some((chunk, base_gx, base_gy)),
+                        gx,
+                        gy,
+                        lx,
+                        ly,
+                        &mut local,
+                    );
                 }
 
                 if remaining == 0 || !on_surface {
@@ -573,7 +621,7 @@ fn accumulate_water_flow_xfers(
                         break;
                     }
                     let nx = world.wrap_x(gx + dx);
-                    let Some(below1) = world.get_cell(nx, gy - 1) else {
+                    let Some(below1) = read(lx + dx, ly - 1, nx, gy - 1) else {
                         continue;
                     };
                     if !is_porous_solid_with(below1.material, &hydro) {
@@ -589,8 +637,9 @@ fn accumulate_water_flow_xfers(
                     let mut best: Option<(i32, i32, i32)> = None; // depth, tx, ty
                     let mut depth = 1i32;
                     let mut ty = gy - 1;
+                    let mut lty = ly - 1;
                     for _ in 0..24 {
-                        let Some(nb) = world.get_cell(nx, ty) else {
+                        let Some(nb) = read(lx + dx, lty, nx, ty) else {
                             break;
                         };
                         if nb.material == MaterialId::Air {
@@ -616,7 +665,7 @@ fn accumulate_water_flow_xfers(
                             if sx == nx {
                                 continue;
                             }
-                            let Some(side) = world.get_cell(sx, ty) else {
+                            let Some(side) = read(lx + dx + sdx, lty, sx, ty) else {
                                 continue;
                             };
                             if side.material != MaterialId::Air {
@@ -632,6 +681,7 @@ fn accumulate_water_flow_xfers(
                         }
                         depth += 1;
                         ty -= 1;
+                        lty -= 1;
                     }
                     if let Some((_d, tx, ty)) = best {
                         let amt = rate.min(remaining).max(1);

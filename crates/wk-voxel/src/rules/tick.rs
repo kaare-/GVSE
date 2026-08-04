@@ -147,6 +147,7 @@ pub fn tick_with_life(
     // Last non-empty flow plan — grain/seepage fall back to this when
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
+    let mut start_area: usize = 0;
     for step in 0..FLOW_SUBSTEPS {
         let active = plan_active(world);
         clear_all_dirty(world);
@@ -154,6 +155,10 @@ pub fn tick_with_life(
             break;
         }
         flow_halo = active.clone();
+        let this_area = active_cell_area(&active);
+        if step == 0 {
+            start_area = this_area;
+        }
         let passes = partition_checkerboard(&active);
         for pass in &passes {
             apply_gravity_fall_regions(world, pass);
@@ -168,9 +173,18 @@ pub fn tick_with_life(
         }
         // Quiet early-out: after the minimum passes, peek at dirty
         // written by this substep — a tiny halo means water settled.
+        // Absolute threshold catches truly settled worlds; a *shrink*
+        // check catches busy shores that started large but have since
+        // fallen off (adaptive substeps for the tuned feel path).
         if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_MIN {
             let next = plan_active(world);
-            if next.is_empty() || active_cell_area(&next) <= FLOW_QUIET_AREA {
+            let next_area = active_cell_area(&next);
+            if next.is_empty() || next_area <= FLOW_QUIET_AREA {
+                break;
+            }
+            // Adaptive: halo shrunk by ≥ 1/3 relative to start-of-tick —
+            // remaining flow is polishing, not cascading.
+            if start_area > 0 && next_area * 3 <= start_area * 2 {
                 break;
             }
         }
