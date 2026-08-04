@@ -1131,18 +1131,25 @@ fn step_land_plant(
     wind_vx: f32,
 ) -> PlantStep {
     // Pose / seat:
-    // - Floating-Organic raft holdfast: tip check; ride the free surface.
-    // - Substrate holdfast (sand/rock/grounded organic) — woody or seaweed:
-    //   stay pinned; do not float up with the waterline.
-    // - Unanchored over water: tip and free-float at the surface.
-    // - Woody tip/re-tip bakes the flop into body so new stems grow upward.
-    //   Stemless ribbons tip for draw only (no body bake).
+    // - Near-crown substrate holdfast (sand/rock/grounded organic): always
+    //   pinned upright — running water / floods must not tip land plants or
+    //   lift seaweed off the bed.
+    // - Floating-Organic raft holdfast (only): tip check; ride the surface.
+    // - No holdfast over *standing* water: tip and free-float.
+    //   Moist seepage films alone never count as a float surface.
+    // - Woody tip bakes into body; stemless tips for draw only.
     // - Shore: stay tipped; grow roots into the beach.
-    let water_top = column_water_top(world, atom.gx, atom.gy);
     let on_float_raft = rooted_in_floating_organic(world, atom);
-    let on_substrate = anchored_in_substrate(world, atom);
+    let holdfast_solid = crown_holdfast_solid_y(world, atom);
     let stemless = crate::plant::stem_count(atom) == 0;
-    if on_float_raft && !on_substrate {
+    if let Some(solid_y) = holdfast_solid {
+        // Intact bed holdfast — reseat on the crown and clear any stale tip.
+        atom.fallen = false;
+        atom.upright_growth.clear();
+        atom.gy = solid_y + 1;
+        pin_plant_pose(atom);
+    } else if on_float_raft {
+        let water_top = column_standing_surface(world, atom.gx, atom.gy);
         apply_raft_tip(world, atom);
         if atom.fallen {
             if let Some(top) = water_top {
@@ -1154,17 +1161,7 @@ fn step_land_plant(
         } else {
             pin_plant_pose(atom);
         }
-    } else if on_substrate && (!atom.fallen || stemless) {
-        // Bed holdfast: planted / spore seaweed and upright land plants stay
-        // on the substrate. Stemless also clears a stale tip if the holdfast
-        // is intact again. Woody free-floaters that only scrape the bed with
-        // a long root keep `fallen` and use the waterline path below.
-        if stemless {
-            atom.fallen = false;
-            atom.upright_growth.clear();
-        }
-        pin_plant_pose(atom);
-    } else if let Some(top) = water_top {
+    } else if let Some(top) = column_standing_surface(world, atom.gx, atom.gy) {
         if stemless {
             // Detached seaweed: ride the surface; keep ribbon body offsets.
             atom.fallen = true;
@@ -1277,8 +1274,9 @@ fn step_land_plant(
     // Photosystem ribbon instead (no trunk invent). When leaves bathe in
     // standing water, root urge collapses — holdfast is enough.
     let genome_save = atom.genome;
+    let lake_surface = column_standing_surface(world, atom.gx, atom.gy);
     if atom.fallen {
-        if water_top.is_some() {
+        if lake_surface.is_some() {
             // Lake float: elongate dangling roots into wet void / raft, and
             // grow a fresh upright mast (body tip is baked flat).
             atom.genome.alloc_root = atom.genome.alloc_root.max(0.20).min(0.40);
@@ -1852,19 +1850,23 @@ fn organic_in_floating_column(
     wy >= bottom && wy < bottom + height
 }
 
-/// Root purchase in sand/rock/grounded organic — not a floating raft cell.
+/// Solid Y of a near-crown substrate holdfast, if any.
 ///
-/// Used so flooded land plants stay pinned. Free-floaters that scrape the
-/// lake bed with a long root are handled separately via `fallen`.
-fn anchored_in_substrate(world: &World, atom: &Atom) -> bool {
+/// Only short roots (`dy >= -6`) count, so a free-floater's deep tendril
+/// scraping the lake bed does not pin the crown underwater. If a short
+/// root still grips sand/rock/grounded organic, we reseat on that solid
+/// even after a bad float frame.
+fn crown_holdfast_solid_y(world: &World, atom: &Atom) -> Option<i32> {
+    const MAX_ROOT_LEN: i16 = 6;
     let columns = crate::rules::collect_floating_organic_columns(world);
+    let mut best: Option<i32> = None;
     for &(dx, dy, m) in &atom.body {
-        if m != ModuleId::Root {
+        if m != ModuleId::Root || dy < -MAX_ROOT_LEN {
             continue;
         }
         let wx = world.wrap_x(atom.gx + dx as i32);
         let wy = atom.gy + dy as i32;
-        for y in [wy, wy - 1] {
+        for y in (wy - 1)..=(wy + 1) {
             let Some(c) = world.get_cell(wx, y) else {
                 continue;
             };
@@ -1874,10 +1876,50 @@ fn anchored_in_substrate(world: &World, atom: &Atom) -> bool {
             if c.material == MaterialId::Organic && organic_in_floating_column(&columns, wx, y) {
                 continue;
             }
-            return true;
+            best = Some(best.map_or(y, |b| b.max(y)));
         }
     }
-    false
+    best
+}
+
+/// Top Y of a full standing-water column near `hint_y`.
+///
+/// Only **full-sat** wet Air counts — damp seepage films must not tip land
+/// plants or lift holdfast seaweed. (`is_standing_water` alone is too loose:
+/// any non-empty sat on solid would look like a stream.)
+fn column_standing_surface(world: &World, gx: i32, hint_y: i32) -> Option<i32> {
+    let gx = world.wrap_x(gx);
+    let is_body = |world: &World, x: i32, y: i32| {
+        matches!(
+            world.get_cell(x, y),
+            Some(c) if c.material == MaterialId::Air && c.sat.is_full()
+        )
+    };
+    let mut start = None;
+    if is_body(world, gx, hint_y) {
+        start = Some(hint_y);
+    } else {
+        for dy in 1..=48 {
+            for y in [hint_y - dy, hint_y + dy] {
+                if is_body(world, gx, y) {
+                    start = Some(y);
+                    break;
+                }
+            }
+            if start.is_some() {
+                break;
+            }
+        }
+    }
+    let start = start?;
+    let mut top = start;
+    while is_body(world, gx, top + 1) {
+        top += 1;
+        if top - start > 256 {
+            break;
+        }
+    }
+    Some(top)
 }
 
 /// First tip, or re-tip an upright mast that grew too tall on a skinny raft.

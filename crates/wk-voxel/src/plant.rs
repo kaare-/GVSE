@@ -2351,6 +2351,121 @@ mod tests {
     }
 
     #[test]
+    fn moist_seepage_does_not_tip_land_plant() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..12 {
+                // Damp film / seepage — not a standing-water body.
+                let mut air = Cell::air();
+                air.sat = Sat(40);
+                w.set_cell(x, y, air);
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 2, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        store.atoms.push(atom);
+        for tick in 0..30u64 {
+            store.step(&mut w, tick);
+        }
+        assert!(
+            !store.atoms[0].fallen,
+            "seepage films must not tip substrate-rooted plants"
+        );
+        assert_eq!(store.atoms[0].gy, 2);
+    }
+
+    #[test]
+    fn stream_flood_does_not_tip_rooted_land_plant() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 2, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        // Pretend a prior wet frame wrongly tipped it.
+        atom.fallen = true;
+        store.atoms.push(atom);
+        for y in 2..=5 {
+            w.set_cell(5, y, Cell::water());
+        }
+        for tick in 0..20u64 {
+            store.step(&mut w, tick);
+        }
+        assert!(
+            !store.atoms[0].fallen,
+            "crown holdfast must clear tip even in a stream flood"
+        );
+        assert_eq!(
+            store.atoms[0].gy, 2,
+            "must stay on sand, not ride the stream surface"
+        );
+    }
+
+    #[test]
+    fn seaweed_pulled_back_to_holdfast_if_displaced() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..=8 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 9..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        // Wrongly floated to the surface, but short root still reaches sand.
+        let mut atom = Atom::from_body(5, 6, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_seaweed().genome,
+        );
+        // Root body -1 at gy=6 → world y=5 (water). Extend a short root to sand.
+        atom.body.push((0, -5, ModuleId::Root));
+        atom.fallen = true;
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(!store.atoms[0].fallen);
+        assert_eq!(
+            store.atoms[0].gy, 2,
+            "seaweed with a short bed root must reseat on the holdfast"
+        );
+    }
+
+    #[test]
     fn substrate_rooted_plant_stays_put_when_flooded() {
         use crate::organism::OrganismStore;
 
