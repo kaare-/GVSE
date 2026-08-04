@@ -912,7 +912,7 @@ pub fn sail_plants_on_wind_rafts(
         if !is_land_plant(atom) {
             continue;
         }
-        let on_raft = atom.body.iter().any(|&(dx, dy, m)| {
+        let on_raft = atom.body.iter().any(|&(dx, _dy, m)| {
             if m != ModuleId::Root && m != ModuleId::Nucleus {
                 return false;
             }
