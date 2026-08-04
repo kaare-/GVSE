@@ -3398,6 +3398,69 @@ mod tests {
     }
 
     #[test]
+    fn unmarked_tipped_shoots_heal_instead_of_waterline_flecks() {
+        use crate::organism::{resolve_organism_draw_cells, OrganismStore};
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 1, sand);
+            for y in 2..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Shore-tipped woody plant with a mid-mast stem missing from
+        // upright_growth. Heal must mark it so draw stays contiguous
+        // (no waterline fleck + floating canopy).
+        let mut atom = Atom::from_body(
+            5,
+            2,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (1, 0, ModuleId::Stem),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem), // unmarked → would become horizontal fleck
+                (0, 3, ModuleId::Stem),
+                (0, 4, ModuleId::Photosystem),
+                (-1, 4, ModuleId::Photosystem),
+                (1, 4, ModuleId::Photosystem),
+            ],
+        );
+        atom.fallen = true;
+        atom.upright_growth = vec![(0, 1), (0, 3), (0, 4), (-1, 4), (1, 4)];
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        let mut store = OrganismStore::new();
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        let atom = &store.atoms[0];
+        assert!(atom.fallen, "woody shore re-root stays tipped");
+        assert!(
+            atom.upright_growth.contains(&(0, 2)),
+            "heal must mark the missing mid-mast stem"
+        );
+        let posed = resolve_organism_draw_cells(&w, &[atom.clone()], 0, 0.0);
+        let stem_ys: Vec<i32> = posed
+            .iter()
+            .filter(|p| p.mid == ModuleId::Stem && p.wx == atom.gx && p.wy > atom.gy)
+            .map(|p| p.wy)
+            .collect();
+        assert!(
+            stem_ys.contains(&(atom.gy + 1))
+                && stem_ys.contains(&(atom.gy + 2))
+                && stem_ys.contains(&(atom.gy + 3)),
+            "mast must stay contiguous above the crown, stems={stem_ys:?}"
+        );
+    }
+
+    #[test]
     fn roots_crack_stone_but_death_skips_stone_and_dry_air() {
         let mut w = World::new(5);
         w.ensure_chunk(ChunkCoord::new(0, 0));

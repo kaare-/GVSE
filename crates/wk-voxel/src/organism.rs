@@ -1203,6 +1203,9 @@ fn step_land_plant(
     let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
     let stemless = crate::plant::stem_count(atom) == 0;
     let grounded = grounded_substrate_anchor(world, atom, float_columns);
+    // Tipped woody shoots must all draw upright — unmarked dy>0 stem/leaf
+    // cells flatten to the waterline and leave mid-mast holes.
+    heal_fallen_upright_marks(atom);
     if grounded {
         // Fixed in sand/rock/grounded compost. Stemless clears a stale tip
         // when a short crown grip is still present; woody stays tipped after
@@ -1698,8 +1701,10 @@ pub fn fallen_draw_offset(
 ///   terrain (pile via [`resolve_organism_draw_cells`]).
 /// - **Photosystem on Stem / branch**: stays in the canopy. Long tips may
 ///   nod a little ([`LEAF_SUPPORT_WOODY`]) but never flatten to the ground
-///   or waterline — wood holds the leaf up.
-/// - **Stem** (woody): upright on land; underwater leans with flow only.
+///   or waterline — wood holds the leaf up. No underwater lean either:
+///   leaning only the wet base of a tall land plant opened mid-stem gaps.
+/// - **Stem** (woody): always rigid in draw. Tip / [`bake_tip_into_body`]
+///   handles flop; per-cell underwater lean punched holes in wet-slope trunks.
 pub fn frond_draw_cell(
     world: &World,
     atom: &Atom,
@@ -1715,9 +1720,12 @@ pub fn frond_draw_cell(
     if atom.fallen {
         return (base_x, base_y);
     }
-    let woody = mid == ModuleId::Stem;
+    // Woody trunks stay on body pose — never lean.
+    if mid == ModuleId::Stem {
+        return (base_x, base_y);
+    }
     let soft_leaf = mid == ModuleId::Photosystem;
-    if !soft_leaf && !woody {
+    if !soft_leaf {
         return (base_x, base_y);
     }
 
@@ -1741,35 +1749,15 @@ pub fn frond_draw_cell(
     };
     let lean_dir = if drive < FROND_STILL_WIND { 1 } else { dir };
     let cant = leaf_cantilever(atom, dx, dy);
-    let on_wood = soft_leaf
-        && atom
-            .body
-            .iter()
-            .any(|(_, _, m)| *m == ModuleId::Stem);
+    let on_wood = atom
+        .body
+        .iter()
+        .any(|(_, _, m)| *m == ModuleId::Stem);
 
-    if woody {
-        let Some((top, bed)) = band else {
-            return (base_x, base_y);
-        };
-        if base_y > top || base_y < bed || drive < FROND_STILL_WIND {
-            return (base_x, base_y);
-        }
-        let tip_w = (dy.max(0) as f32) * 0.30;
-        let lean_mag = (drive * (1.2 + tip_w)).ceil().clamp(1.0, 2.0) as i32;
-        return (base_x + dir * lean_mag, base_y);
-    }
-
-    // Leaves attached to a trunk/branch stay in the canopy.
+    // Leaves attached to a trunk/branch stay in the canopy (no flow lean).
     if on_wood {
         let nod = (cant - LEAF_SUPPORT_WOODY).max(0).min(2);
         let wy = base_y - nod;
-        if let Some((top, bed)) = band {
-            if base_y >= bed && base_y <= top && drive >= FROND_STILL_WIND {
-                let tip_w = (dy.max(0) as f32) * 0.20;
-                let lean_mag = (drive * (0.8 + tip_w)).ceil().clamp(1.0, 2.0) as i32;
-                return (base_x + dir * lean_mag, wy);
-            }
-        }
         return (base_x, wy);
     }
 
@@ -2003,7 +1991,8 @@ fn substrate_purchase_at(
 ///
 /// **Organic never counts** — floating mats and beach litter must not become
 /// a holdfast seat that pumps sand-rooted crowns upward. Raft seating uses
-/// [`rooted_in_floating_organic`] instead.
+/// [`rooted_in_floating_organic`] instead. Grounded compost still anchors via
+/// [`grounded_substrate_anchor`] (settle-down only).
 fn crown_holdfast_solid_y(
     world: &World,
     atom: &Atom,
@@ -2029,6 +2018,30 @@ fn crown_holdfast_solid_y(
         }
     }
     best
+}
+
+/// While tipped, every shoot cell above the waterline must be in
+/// `upright_growth` so draw does not flatten it into a horizontal fleck.
+fn heal_fallen_upright_marks(atom: &mut Atom) {
+    if !atom.fallen || crate::plant::stem_count(atom) == 0 {
+        return;
+    }
+    atom.sync_upright_growth();
+    let shoot: Vec<(i16, i16)> = atom
+        .body
+        .iter()
+        .filter(|&&(_, dy, m)| {
+            dy > 0
+                && matches!(
+                    m,
+                    ModuleId::Stem | ModuleId::Photosystem | ModuleId::ReproSpore
+                )
+        })
+        .map(|&(dx, dy, _)| (dx, dy))
+        .collect();
+    for (dx, dy) in shoot {
+        atom.mark_upright_growth(dx, dy);
+    }
 }
 
 /// Top Y of a full standing-water column near `hint_y`.
@@ -2888,6 +2901,56 @@ mod tests {
             wx != base_x
         });
         assert!(bent, "sat shear (flowing water) should bend the frond");
+    }
+
+    #[test]
+    fn woody_trunk_stays_rigid_in_wet_flow() {
+        // Wet-slope glitch: leaning only the submerged base of a tall woody
+        // plant punched mid-stem holes while the dry canopy stayed upright.
+        let mut w = wet_column();
+        for y in 1..8 {
+            let mut left = Cell::air();
+            left.sat = Sat(40);
+            w.set_cell(3, y, left);
+            let mut right = Cell::air();
+            right.sat = Sat(255);
+            w.set_cell(5, y, right);
+        }
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Stem),
+            (0, 4, ModuleId::Stem),
+            (0, 5, ModuleId::Photosystem),
+            (-1, 5, ModuleId::Photosystem),
+            (1, 5, ModuleId::Photosystem),
+        ];
+        let atom = Atom::from_body(4, 2, 40.0, body);
+        for &(dx, dy, mid) in &atom.body {
+            if mid != ModuleId::Stem {
+                continue;
+            }
+            let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, 11, 0.0);
+            assert_eq!(
+                (wx, wy),
+                (atom.gx + dx as i32, atom.gy + dy as i32),
+                "woody stem must not lean with flow (body=({dx},{dy}))"
+            );
+        }
+        // Canopy leaves may nod vertically but stay in their column.
+        for &(dx, dy, mid) in &atom.body {
+            if mid != ModuleId::Photosystem {
+                continue;
+            }
+            let (wx, _) = frond_draw_cell(&w, &atom, dx, dy, mid, 11, 0.0);
+            assert_eq!(
+                wx,
+                atom.gx + dx as i32,
+                "woody leaf must not flow-lean off the trunk"
+            );
+        }
     }
 
     #[test]
