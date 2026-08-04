@@ -247,7 +247,9 @@ fn apply_repose_pass(
                     {
                         max_step = max_step.saturating_sub(1);
                     }
-                    if !diag_drop_exceeds(ptrs, wrap_width, gx, sy, max_step) {
+                    let through_haze =
+                        matches!(src.material, MaterialId::Organic | MaterialId::Soil);
+                    if !diag_drop_exceeds(ptrs, wrap_width, gx, sy, max_step, through_haze) {
                         continue;
                     }
                     write_repose_swap(
@@ -427,12 +429,16 @@ fn seat_on_ice(below_dest: Option<Cell>) -> bool {
 }
 
 /// Snow/ice may sit on empty Air or on a wet film that rests on Ice.
-/// Dense grains may only repose into **dry** Air. Wet film and standing
-/// water seats are fall-only — sliding into film + stealing lake water
-/// was the shoreline sand fleck cycle (bright grains forever).
+/// Dense grains (sand etc.) may only repose into **dry** Air — sliding
+/// into film + stealing lake water was the shoreline fleck cycle.
+/// Organic litter / composted Soil match grain-fall: sprawl through
+/// haze/film, float only on full standing water (else humid cliffs freeze).
 fn avalanche_seat_ok(src: MaterialId, dest: Cell, below_dest: Option<Cell>) -> bool {
     if dest.sat.is_empty() {
         return true;
+    }
+    if matches!(src, MaterialId::Organic | MaterialId::Soil) {
+        return !dest.sat.is_full();
     }
     if is_grain(src) {
         // Any non-zero sat (film or lake) — sink via grain-fall only.
@@ -850,6 +856,7 @@ fn diag_drop_exceeds(
     dest_gx: i32,
     from_y: i32,
     max_step: i32,
+    through_haze: bool,
 ) -> bool {
     let mut drop = 0i32;
     for dy in 1..=(max_step + 2) {
@@ -860,8 +867,9 @@ fn diag_drop_exceeds(
         if c.material != MaterialId::Air {
             break;
         }
-        // Wet Air (film or lake) supports repose — fall handles sinking.
-        if !c.sat.is_empty() {
+        // Full water always supports. Film/haze blocks sand (shore flecks)
+        // but Organic/Soil may sprawl through — same rule as grain-fall.
+        if !c.sat.is_empty() && !(through_haze && !c.sat.is_full()) {
             break;
         }
         drop += 1;

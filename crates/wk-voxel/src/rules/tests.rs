@@ -827,6 +827,82 @@ fn organic_litter_slides_diagonally() {
 }
 
 #[test]
+fn organic_cliff_slides_into_humid_air_film() {
+    // Long-soak bug: Organic was routed through the ice-seat check, so
+    // humid/film Air next to a litter cliff froze the face in place.
+    // Fall + repose matches the real tick (mid slide can leave an overhang).
+    let mut w = setup_column_world();
+    w.set_cell(5, 1, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 2, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 3, Cell::solid(MaterialId::Organic));
+    for x in [4, 6] {
+        for y in 1..=3 {
+            let mut haze = Cell::air();
+            haze.sat = Sat(24);
+            w.set_cell(x, y, haze);
+        }
+    }
+    for _ in 0..12 {
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+    }
+    assert_eq!(
+        w.get_cell(5, 3).unwrap().material,
+        MaterialId::Air,
+        "Organic tip must not persist as a humid cliff"
+    );
+    let height = (1..=3)
+        .filter(|&y| w.get_cell(5, y).map(|c| c.material) == Some(MaterialId::Organic))
+        .count();
+    assert!(
+        height <= 1,
+        "Organic column should sprawl under haze (height={height})"
+    );
+}
+
+#[test]
+fn soil_cliff_slides_into_humid_air_film() {
+    let mut w = setup_column_world();
+    w.set_cell(5, 1, Cell::solid(MaterialId::Soil));
+    w.set_cell(5, 2, Cell::solid(MaterialId::Soil));
+    w.set_cell(5, 3, Cell::solid(MaterialId::Soil));
+    for x in [4, 6] {
+        for y in 1..=3 {
+            let mut haze = Cell::air();
+            haze.sat = Sat(24);
+            w.set_cell(x, y, haze);
+        }
+    }
+    for _ in 0..12 {
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+    }
+    assert_eq!(
+        w.get_cell(5, 3).unwrap().material,
+        MaterialId::Air,
+        "Soil tip must not persist as a humid cliff"
+    );
+}
+
+#[test]
+fn organic_does_not_repose_into_standing_water() {
+    let mut w = setup_column_world();
+    w.set_cell(5, 1, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 2, Cell::solid(MaterialId::Organic));
+    for x in [4, 6] {
+        for y in 1..=2 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    apply_grain_repose(&mut w);
+    assert_eq!(
+        w.get_cell(5, 2).unwrap().material,
+        MaterialId::Organic,
+        "Organic must float on full water, not slide into the lake"
+    );
+}
+
+#[test]
 fn underwater_sand_repose_does_not_leave_dry_air() {
     // Sand on an underwater ledge slides into an empty pocket beside
     // standing water. Vacated cell must become water (not sky-flash Air).
