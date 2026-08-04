@@ -35,9 +35,11 @@ pub enum TerrainBrush {
     Sand,
     Gravel,
     LooseRock,
+    /// Broken limestone rubble (collapse / shear debris).
+    LooseLimestone,
     /// Solid stone ("rock" in the UI).
     Rock,
-    /// Clay — cohesive mineral fines.
+    /// Clay — cohesive mineral fines (dry powder / plastic / mud by wetness).
     Clay,
     /// Humified soil (fungal compost end-product).
     Soil,
@@ -48,7 +50,7 @@ pub enum TerrainBrush {
 }
 
 impl TerrainBrush {
-    pub const ALL: [TerrainBrush; 13] = [
+    pub const ALL: [TerrainBrush; 14] = [
         TerrainBrush::Erase,
         TerrainBrush::Water,
         TerrainBrush::Ice,
@@ -56,6 +58,7 @@ impl TerrainBrush {
         TerrainBrush::Sand,
         TerrainBrush::Gravel,
         TerrainBrush::LooseRock,
+        TerrainBrush::LooseLimestone,
         TerrainBrush::Rock,
         TerrainBrush::Clay,
         TerrainBrush::Soil,
@@ -73,6 +76,7 @@ impl TerrainBrush {
             TerrainBrush::Sand => "Sand",
             TerrainBrush::Gravel => "Gravel",
             TerrainBrush::LooseRock => "Loose rock",
+            TerrainBrush::LooseLimestone => "Loose limestone",
             TerrainBrush::Rock => "Rock",
             TerrainBrush::Clay => "Clay",
             TerrainBrush::Soil => "Soil",
@@ -94,7 +98,10 @@ impl TerrainBrush {
             TerrainBrush::Rock => Some("7"),
             TerrainBrush::Clay => Some("8"),
             TerrainBrush::Organic => Some("9"),
-            TerrainBrush::Soil | TerrainBrush::Limestone | TerrainBrush::Bedrock => None,
+            TerrainBrush::LooseLimestone
+            | TerrainBrush::Soil
+            | TerrainBrush::Limestone
+            | TerrainBrush::Bedrock => None,
         }
     }
 
@@ -107,6 +114,7 @@ impl TerrainBrush {
             TerrainBrush::Sand => Cell::solid(MaterialId::Sand),
             TerrainBrush::Gravel => Cell::solid(MaterialId::Gravel),
             TerrainBrush::LooseRock => Cell::solid(MaterialId::LooseRock),
+            TerrainBrush::LooseLimestone => Cell::solid(MaterialId::LooseLimestone),
             TerrainBrush::Rock => Cell::solid(MaterialId::Stone),
             TerrainBrush::Clay => Cell::solid(MaterialId::Clay),
             TerrainBrush::Soil => Cell::solid(MaterialId::Soil),

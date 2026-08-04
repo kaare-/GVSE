@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Number of [`MaterialId`] variants (shared by both stacks).
-pub const MATERIAL_COUNT: usize = 13;
+pub const MATERIAL_COUNT: usize = 14;
 /// Horizontal cell / column width in metres (shared scale).
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
 
@@ -52,16 +52,21 @@ pub enum MaterialId {
     /// Organic (mild compaction) so pore water mostly survives the
     /// conversion; excess sat is pushed to neighbours.
     Soil = 12,
+    /// Broken limestone rubble / carbonate talus. Fallable debris from
+    /// [`Limestone`] roof collapse and face shear — distinct from
+    /// [`LooseRock`] (silicate cobbles) so karst cliffs shed pale scree.
+    LooseLimestone = 13,
 }
 
 impl MaterialId {
     /// Ground-forming solids (never fluid, never phase-changes at the
     /// world's normal temperature range).
-    pub const ALL_SOLIDS: [MaterialId; 8] = [
+    pub const ALL_SOLIDS: [MaterialId; 9] = [
         MaterialId::Bedrock,
         MaterialId::Stone,
         MaterialId::Limestone,
         MaterialId::LooseRock,
+        MaterialId::LooseLimestone,
         MaterialId::Gravel,
         MaterialId::Sand,
         MaterialId::Clay,
@@ -83,6 +88,7 @@ impl MaterialId {
             10 => Some(MaterialId::Gravel),
             11 => Some(MaterialId::Limestone),
             12 => Some(MaterialId::Soil),
+            13 => Some(MaterialId::LooseLimestone),
             _ => None,
         }
     }
@@ -101,6 +107,7 @@ impl MaterialId {
                 | MaterialId::Stone
                 | MaterialId::Limestone
                 | MaterialId::LooseRock
+                | MaterialId::LooseLimestone
                 | MaterialId::Gravel
                 | MaterialId::Sand
                 | MaterialId::Clay
@@ -343,6 +350,23 @@ impl MaterialRegistry {
                 solubility: 0,
                 roof_span_max_m: 2.0,
             },
+            MaterialId::LooseLimestone => MaterialProps {
+                density: 2400,
+                permeability: 50,
+                erosion_resistance: 100,
+                cohesion: 90,
+                porosity: 30,
+                phase_change: None,
+                render_alpha: 255,
+                // Same talus angle as LooseRock — pale carbonate scree
+                // still stacks steeper than sand.
+                repose_rise_m: 0.25,
+                thermal_diffusivity: 0.0014,
+                heat_capacity: 3.0,
+                albedo: 0.32,
+                solubility: 0,
+                roof_span_max_m: 1.5,
+            },
             MaterialId::Gravel => MaterialProps {
                 density: 2000,
                 permeability: 240,
@@ -367,9 +391,11 @@ impl MaterialRegistry {
                 porosity: 60,
                 phase_change: None,
                 render_alpha: 255,
-                // Cohesive but slumps once saturated (which run_sediment
-                // already reflects via the wet-erosion multiplier).
-                repose_rise_m: 0.22,
+                // Table value = dry powder (sand-like, max_step 0).
+                // Plastic / mud behaviour is pore-wetness gated in
+                // voxel `grain_repose_max_step` (semi-wet holds shape;
+                // near-saturated flows as mud).
+                repose_rise_m: 0.15,
                 thermal_diffusivity: 0.0012,
                 heat_capacity: 3.5,
                 albedo: 0.22,
@@ -523,6 +549,8 @@ impl MaterialRegistry {
             MaterialId::Stone => [0x80, 0x80, 0x80],
             // Cobble grey with a warm tint — reads as darker than Stone.
             MaterialId::LooseRock => [0x66, 0x62, 0x60],
+            // Pale chalky rubble — between Limestone and LooseRock grey.
+            MaterialId::LooseLimestone => [0xB0, 0xA8, 0x96],
             // Mix of tan and grey (mixed-grain aggregate).
             MaterialId::Gravel => [0xB4, 0xA4, 0x80],
             MaterialId::Sand => [0xE8, 0xD6, 0x6B],

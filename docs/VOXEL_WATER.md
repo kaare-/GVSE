@@ -30,7 +30,7 @@ those passes unless they are closed-loop.
 Each `tick`:
 
 1. **Flow substeps** (×12): `plan_active` → clear dirty → **gravity fall** → **`apply_water_flow`**
-2. Once: `plan_active` → **`apply_seepage`** → grain fall → **grain repose** → **`apply_roof_collapse`** (geotech F1; Tab → Geotech)
+2. Once: `plan_active` → **`apply_seepage`** → multi-pass grain settle (fall + repose, up to `GRAIN_SETTLE_PASSES`) → **`apply_roof_collapse`** (geotech F1; Tab → Geotech)
 3. Opt-in (demo): **`apply_flow_erosion`** — cascade/head-drop water scours erodible beds/banks and deposits downhill
 
 Dirty rectangles + a 1-cell halo drive the active set. Writes rebuild
@@ -81,8 +81,9 @@ This is what wets a dry beach **sideways** from a puddle, equalises pore sat bet
 
 ### Grain fall + repose
 
-- **Fall:** Sand / Gravel / Clay / LooseRock sink through Air (any sat). **Snow, Ice, and Organic** fall through empty Air *and* haze; they float only on **full** standing water (`sat == 255`) so unsupported pack does not hang mid-air and phase cannot melt→refreeze a misty seat into a ±1-cell pump.
-- **Repose** (`apply_grain_repose`): supported grains slide diagonally into Air when the drop exceeds `floor(repose_rise_m / SAMPLE_WIDTH_m)`. Sand≈0 (no 1-cell cliffs), Organic litter≈0 (sprawls instead of towers), LooseRock≥1 (short stairs). Wet grains loosen one step. Snow avalanches on land, not into standing water. Underwater, dense grains collapsing into empty/film seats fill the vacated cell with standing water (no sky-flash bubble on the slope face).
+- **Settle:** After seepage, every tick runs `wake_unsupported_grains` + `wake_unstable_slopes` then multi-pass fall and multi-pass repose (up to `GRAIN_SETTLE_PASSES`), then litter-centric `rise_buoyant_litter` + `soak_floating_litter` (only Snow/Ice/Organic cells — not a full-grid × height scan). Fall alone left Organic/sand as vertical cliff faces; repose now keeps avalanching until the pile is flat (max_step ≈ 0). Sand may repose through thin atmospheric haze (`sat ≤ GRAIN_REPOSE_HAZE_MAX`) and can walk sideways off ledges into open air; shore film / standing water still block sand (fleck cycle). Repose uses a Moore-neighbour chunk ptr map (serial) so slides across chunk seams actually write — a pull-only `cy+1` map used to silently no-op one face of large F3 blobs. **Snow / Ice / Organic** float only on **grounded** full standing water; suspended mid-air full-sat is not a seat. Submerged buoyant litter rises through the column; floating Organic/Soil soaks from deeper lake water (surface stays full).
+- **Repose** (`apply_grain_repose`): supported grains slide diagonally into Air when the drop exceeds `floor(repose_rise_m / SAMPLE_WIDTH_m)`. Sand≈0 (no 1-cell cliffs), Organic litter / Soil≈0 (sprawl instead of towers), LooseRock / LooseLimestone≥1 (short stairs). Wet grains (except Clay) loosen one step. **Clay** is pore-wetness gated: dry powder ≈ sand (max_step 0), semi-wet plastic holds steeper faces (max_step 2), near-saturated mud flows again (max_step 0). Sand stays dry-Air-only (shore flecks). Organic / Soil match grain-fall: sprawl through land haze/film, float only on full standing water — otherwise humid cliffs freeze; they refuse underwater film seats (no crawl into the lake). Snow avalanches on land, not into standing water. Underwater, dense grains collapsing into empty/film seats fill the vacated cell with standing water (no sky-flash bubble on the slope face).
+- **Fall:** Sand / Gravel / Clay / LooseRock / LooseLimestone sink through Air (any sat). **Snow, Ice, and Organic** fall through empty Air *and* haze; they float only on **full** standing water (`sat == 255`) so unsupported pack does not hang mid-air and phase cannot melt→refreeze a misty seat into a ±1-cell pump. Full water seats also **pull submerged** Snow/Ice/Organic upward (buoyancy) so a refilled lake surface cannot trap a “glitch line” of litter below a floating raft. Float “grounded column” walks treat partial-sat water and missing lower chunks as still bedded (so soak drawdown / checkerboard halos cannot make Organic freefall through the ocean). Grain settle runs fall on the full active set (not checkerboard) for the same reason. **Dense grains punch through floating litter rafts** (Organic/Snow/Ice on water cannot carry Soil/Sand/LooseRock piles — cargo swaps down through the raft then sinks).
 - Ice is not a repose grain and not flow-erodible; hillside glaze can still peel in the cold-avalanche pass.
 
 ### Flow erosion + deposition (`apply_flow_erosion`)
@@ -90,7 +91,7 @@ This is what wets a dry beach **sideways** from a puddle, equalises pore sat bet
 Opt-in (wired in `wk-voxel-app` after `tick`, Tab → Grain / sediment):
 
 - Only cells with **flow bias** (cascade lip or clear head drop to a neighbor). Still lakes do not scour.
-- Targets [`is_flow_erodible`] materials: Sand / Gravel / Clay / LooseRock (`erosion_resistance < 150`). Not Ice / Stone / Snow.
+- Targets [`is_flow_erodible`] materials: Sand / Gravel / Clay / LooseRock / LooseLimestone (`erosion_resistance < 150`). Not Ice / Stone / Snow.
 - **Bed scour** under standing water → vacated cell becomes **empty Air** (gravity pulls the column down — no minted water); **bank undercut** → Air (pore sat released).
 - Picked grain deposits on a solid-supported Air seat; any free water already in that seat soaks into the grain's pores or is pushed upward — deposit must not delete lake sat.
 - Rate scales with `1 - resistance/180` and `GrainConfig.erosion_rate`; wet grains (pore sat) erode faster.
@@ -110,8 +111,9 @@ Demo order after `tick`: thermal step → **`apply_cold_avalanche`** → **`appl
 | Gravel | 120 | 240 | 30 |
 | Organic | 200 | 120 | 15 |
 | Limestone | 40 | 140 | 17 |
-| Clay | 60 | 10 | 1 |
 | LooseRock | 25 | 40 | 5 |
+| LooseLimestone | 30 | 50 | 5 |
+| Clay | 60 | 10 | 1 |
 | Stone | 20 | 5 | 1 |
 | Bedrock | 0 | 0 | 0 |
 

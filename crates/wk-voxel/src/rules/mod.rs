@@ -33,7 +33,11 @@ pub use evap::{apply_evaporation, apply_evaporation_into_humidity, EvapConfig};
 pub use grain::{
     apply_cold_avalanche, apply_cold_avalanche_bound, apply_flow_erosion, apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
-    apply_grain_repose_regions, GrainConfig, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
+    apply_grain_repose_regions, settle_loose_grains, settle_loose_grains_regions,
+    punch_through_floating_rafts, rise_buoyant_litter, soak_floating_litter,
+    wake_unsupported_grains, wake_unstable_slopes,
+    GrainConfig, GRAIN_REPOSE_HAZE_MAX, GRAIN_SETTLE_PASSES, ROOT_EROSION_BIND,
+    ROOT_REPOSE_STEP_BONUS,
 };
 pub use gravity::{apply_gravity_fall, apply_gravity_fall_regions};
 pub use karst::{apply_karst_dissolution, KarstConfig};

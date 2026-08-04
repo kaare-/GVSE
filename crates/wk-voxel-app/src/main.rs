@@ -55,7 +55,8 @@ use wk_voxel::{
     celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
     precip_forms_snow_at_air, sky_rgb_at_height, temperature_step_due, tick_with_life,
-    ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
+    wake_unsupported_grains, wake_unstable_slopes, ClimateConfig, GeotechOverlayMode, SimSnapshot,
+    Wind, World, WorldgenParams,
 };
 
 use crate::creature_list::CreatureList;
@@ -265,7 +266,10 @@ fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
 }
 
 /// Cartoon → pixel clouds from coagulated [`wk_voxel::CloudStore`] parcels.
-/// Darker / denser = wetter; raining parcels get falling drops beneath.
+///
+/// Overlapping parcels stamp into one occupancy mask and paint each
+/// world-cell once, so close blobs read as a single bank (and neck /
+/// split when physics drifts them apart). Rain streaks stay per-parcel.
 fn draw_clouds(
     clouds: &wk_voxel::CloudStore,
     world: &World,
@@ -281,34 +285,66 @@ fn draw_clouds(
     downpour_mass: f32,
     snowing: impl Fn(f32, f32) -> bool,
 ) {
-    if clouds.is_empty() {
+    if clouds.is_empty() || cell_px <= 0.0 {
         return;
     }
     let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-    // Low parcels first so ridge-top clouds paint over them.
-    let mut order: Vec<usize> = (0..clouds.parcels.len()).collect();
-    order.sort_by(|&a, &b| {
-        clouds.parcels[a]
-            .fy
-            .partial_cmp(&clouds.parcels[b].fy)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for &idx in &order {
-        let p = &clouds.parcels[idx];
+
+    // Screen-cell occupancy: max wetness wins (no alpha-stack rings).
+    let mut mask: std::collections::HashMap<(i32, i32), f32> =
+        std::collections::HashMap::with_capacity(clouds.parcels.len() * 96);
+
+    for p in &clouds.parcels {
         let wet = p.wetness_with(downpour_mass);
-        // Narrow shade/alpha ranges so vapor mass changes don't pulse.
-        let shade = (228.0 - wet * 95.0) as u8;
-        let alpha = (145.0 + wet * 55.0) as u8;
         let r = p.radius() * cell_px;
-        // Highest floor under the silhouette so streaks don't punch
-        // through a slope when the parcel centre sits over a valley.
+        for &x_copy in x_copies {
+            let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px;
+            let sy = origin_y - (p.fy - bedrock_floor_y as f32) * cell_px;
+            if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
+                continue;
+            }
+            stamp_pixel_cloud_mask(&mut mask, sx, sy, r, wet, p.shape_seed, p.deform, cell_px);
+        }
+    }
+
+    // Paint the union once. Lighten only the top silhouette edge — no
+    // circular hilite lobes (those read as holes against the sky).
+    for (&(ix, iy), &wet) in &mask {
+        let shade = (228.0 - wet * 95.0) as u8;
+        let alpha = (190.0 + wet * 50.0).min(235.0) as u8;
+        let top_edge = !mask.contains_key(&(ix, iy - 1));
+        let color = if top_edge {
+            Color::from_rgba(
+                shade.saturating_add(22),
+                shade.saturating_add(22),
+                shade.saturating_add(28),
+                alpha,
+            )
+        } else {
+            Color::from_rgba(shade, shade, shade.saturating_add(6), alpha)
+        };
+        draw_rectangle(
+            ix as f32 * cell_px,
+            iy as f32 * cell_px,
+            cell_px,
+            cell_px,
+            color,
+        );
+    }
+
+    // Cosmetic precip under each raining parcel (physics is separate).
+    for p in &clouds.parcels {
+        if !p.raining {
+            continue;
+        }
+        let wet = p.wetness_with(downpour_mass);
+        let r = p.radius() * cell_px;
         let r_cells = p.radius();
         let floor = [-0.85_f32, -0.4, 0.0, 0.4, 0.85]
             .iter()
             .map(|t| cloud_floor_y(world, wind, p.fx + t * r_cells))
             .fold(f32::NEG_INFINITY, f32::max);
         let ground_sy = origin_y - (floor - bedrock_floor_y as f32) * cell_px;
-        // Flake vs streak from air temp at the parcel, not the ground.
         let as_snow = snowing(p.fx, p.fy);
         for &x_copy in x_copies {
             let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px;
@@ -316,13 +352,10 @@ fn draw_clouds(
             if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
                 continue;
             }
-            draw_pixel_cloud(sx, sy, r, shade, alpha, p.shape_seed, p.deform, cell_px);
-            if p.raining {
-                if as_snow {
-                    draw_falling_snow(sx, sy, r, ground_sy, wet, sw, sh, cell_px);
-                } else {
-                    draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh, cell_px);
-                }
+            if as_snow {
+                draw_falling_snow(sx, sy, r, ground_sy, wet, sw, sh, cell_px);
+            } else {
+                draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh, cell_px);
             }
         }
     }
@@ -411,39 +444,20 @@ fn draw_falling_snow(
     }
 }
 
-/// Multi-bump cloud rasterized as world-sized square pixels.
-fn draw_pixel_cloud(
-    cx: f32,
-    cy: f32,
-    r: f32,
-    shade: u8,
-    alpha: u8,
-    shape_seed: u32,
-    deform: f32,
-    cell_px: f32,
-) {
-    if r <= 0.0 || cell_px <= 0.0 {
-        return;
-    }
-    let body = Color::from_rgba(shade, shade, shade.saturating_add(6), alpha);
-    let hilite = Color::from_rgba(
-        shade.saturating_add(28),
-        shade.saturating_add(28),
-        shade.saturating_add(34),
-        (alpha as f32 * 0.7) as u8,
-    );
+/// Soft lobe offsets for one parcel silhouette (normalized cloud space).
+fn cloud_lobe_layout(shape_seed: u32, deform: f32) -> (f32, f32, Vec<(f32, f32, f32)>) {
     let d = deform.clamp(0.0, 1.0);
     let sx = 1.0 + d * 0.22;
     let sy = 1.0 - d * 0.28;
     let s = |n: u32| {
-        ((shape_seed.wrapping_mul(0x9E37_79B9).wrapping_add(n * 0x85EB_CA6B)) >> 8) as f32
+        ((shape_seed
+            .wrapping_mul(0x9E37_79B9)
+            .wrapping_add(n.wrapping_mul(0x85EB_CA6B)))
+            >> 8) as f32
             / 16_777_216.0
     };
     let jx = |n: u32| (s(n) - 0.5) * 0.28;
-    let jy = |n: u32| (s(n.wrapping_add(17)) - 0.5) * 0.22;
     let jr = |n: u32| 0.88 + s(n.wrapping_add(31)) * 0.28;
-
-    // Same lobe layout as the old cartoon cloud, sampled as a pixel mask.
     let mut lobes: Vec<(f32, f32, f32)> = vec![
         (0.0, 0.02, 0.95 * jr(1)),
         (-0.72, 0.08, 0.70 * jr(2)),
@@ -460,25 +474,47 @@ fn draw_pixel_cloud(
     if shape_seed % 5 < 3 {
         lobes.push((jx(8) * 0.5, -0.68, 0.42 * jr(8)));
     }
-    let hilite_lobe = (0.12 + jx(9) * 0.3, -0.48 + jy(9) * 0.2, 0.32 * jr(9));
+    (sx, sy, lobes)
+}
 
+/// Stamp one parcel's lobe mask into the shared sky occupancy map.
+fn stamp_pixel_cloud_mask(
+    mask: &mut std::collections::HashMap<(i32, i32), f32>,
+    cx: f32,
+    cy: f32,
+    r: f32,
+    wet: f32,
+    shape_seed: u32,
+    deform: f32,
+    cell_px: f32,
+) {
+    if r <= 0.0 || cell_px <= 0.0 {
+        return;
+    }
+    let (sx, sy, lobes) = cloud_lobe_layout(shape_seed, deform);
+    let jx1 = {
+        let s = ((shape_seed.wrapping_mul(0x9E37_79B9).wrapping_add(0x85EB_CA6B)) >> 8) as f32
+            / 16_777_216.0;
+        (s - 0.5) * 0.28
+    };
     let half_w = r * sx * 1.35;
     let half_h = r * sy * 1.15;
     let min_x = ((cx - half_w) / cell_px).floor() as i32;
     let max_x = ((cx + half_w) / cell_px).ceil() as i32;
     let min_y = ((cy - half_h) / cell_px).floor() as i32;
     let max_y = ((cy + half_h) / cell_px).ceil() as i32;
+    let inv_rx = 1.0 / (r * sx).max(1e-3);
+    let inv_ry = 1.0 / (r * sy).max(1e-3);
 
     for iy in min_y..=max_y {
         for ix in min_x..=max_x {
             let px = (ix as f32 + 0.5) * cell_px;
             let py = (iy as f32 + 0.5) * cell_px;
-            // Normalize into lobe space.
-            let nx = (px - cx) / (r * sx).max(1e-3);
-            let ny = (py - cy) / (r * sy).max(1e-3);
+            let nx = (px - cx) * inv_rx;
+            let ny = (py - cy) * inv_ry;
             let mut inside = false;
             for &(ox, oy, rr) in &lobes {
-                let dx = nx - (ox + jx(1) * 0.05);
+                let dx = nx - (ox + jx1 * 0.05);
                 let dy = ny - oy;
                 if dx * dx + dy * dy <= rr * rr {
                     inside = true;
@@ -488,27 +524,17 @@ fn draw_pixel_cloud(
             if !inside {
                 continue;
             }
-            let hx = nx - hilite_lobe.0;
-            let hy = ny - hilite_lobe.1;
-            let color = if hx * hx + hy * hy <= hilite_lobe.2 * hilite_lobe.2 {
-                hilite
-            } else {
-                body
-            };
-            draw_rectangle(
-                ix as f32 * cell_px,
-                iy as f32 * cell_px,
-                cell_px,
-                cell_px,
-                color,
-            );
+            mask.entry((ix, iy))
+                .and_modify(|w| *w = (*w).max(wet))
+                .or_insert(wet);
         }
     }
 }
 
 #[cfg(test)]
 mod overlay_tests {
-    use super::humidity_haze_alpha;
+    use super::{humidity_haze_alpha, stamp_pixel_cloud_mask};
+    use std::collections::HashMap;
 
     #[test]
     fn haze_ignores_thin_vapor_and_stays_soft() {
@@ -516,6 +542,25 @@ mod overlay_tests {
         assert_eq!(humidity_haze_alpha(5.0, 100.0), 0); // below 12% floor
         assert!(humidity_haze_alpha(50.0, 100.0) >= 18);
         assert!(humidity_haze_alpha(100.0, 100.0) <= 70);
+    }
+
+    #[test]
+    fn overlapping_parcels_union_into_one_mask() {
+        let cell = 3.0_f32;
+        let mut mask = HashMap::new();
+        // Two nearby parcels — silhouettes overlap in screen space.
+        stamp_pixel_cloud_mask(&mut mask, 100.0, 80.0, 36.0, 0.4, 1, 0.0, cell);
+        let alone = mask.len();
+        stamp_pixel_cloud_mask(&mut mask, 118.0, 82.0, 36.0, 0.9, 2, 0.0, cell);
+        assert!(alone > 20, "first parcel should stamp a real footprint");
+        assert!(
+            mask.len() < alone * 2,
+            "overlap must share cells (alone={alone} union={})",
+            mask.len()
+        );
+        // Max wetness wins in the overlap (no additive alpha stack).
+        let wet_max = mask.values().cloned().fold(0.0_f32, f32::max);
+        assert!((wet_max - 0.9).abs() < 1e-5);
     }
 }
 
@@ -591,6 +636,10 @@ async fn main() {
             } else if terrain.open {
                 terrain.open = false;
                 paused = terrain.was_paused;
+                // Mid-air F3 paint can lose its dirty wake; re-dirty
+                // unsupported sand/Organic so the next tick seats them.
+                wake_unsupported_grains(&mut scene.world);
+                wake_unstable_slopes(&mut scene.world);
             } else if creature_list.open {
                 creature_list.open = false;
             } else if settings.open {
@@ -616,6 +665,8 @@ async fn main() {
             if opening {
                 settings.open = false;
                 terrain.open = false;
+                // F4 list panel overlaps the paint canvas — close it.
+                creature_list.open = false;
                 paused = true;
             } else {
                 paused = editor.was_paused;
@@ -631,6 +682,8 @@ async fn main() {
                 paused = true;
             } else {
                 paused = terrain.was_paused;
+                wake_unsupported_grains(&mut scene.world);
+                wake_unstable_slopes(&mut scene.world);
             }
         }
         if !quit_dialog.open && editor.open {
@@ -708,7 +761,13 @@ async fn main() {
 
         if (!editor.open || editor.spawn_picker) && !settings.open && !terrain.open {
             if is_key_pressed(KeyCode::Space) {
+                let was = paused;
                 paused = !paused;
+                if was && !paused {
+                    // Same stranded-grain wake as F3 close.
+                    wake_unsupported_grains(&mut scene.world);
+                    wake_unstable_slopes(&mut scene.world);
+                }
             }
             if is_key_pressed(KeyCode::R) {
                 let new_seed = scene.params.seed.wrapping_add(1);
@@ -1029,7 +1088,20 @@ async fn main() {
                     });
                     let g = if has_land_tissue {
                         let mut g = settings.plant_genes.to_genome();
-                        g.buoyancy_bias = editor.blueprint.genome.buoyancy_bias;
+                        let bp = &editor.blueprint.genome;
+                        g.buoyancy_bias = bp.buoyancy_bias;
+                        // Stemless ribbons (seaweed) keep template alloc /
+                        // shade knobs — Tab plant defaults assume a trunk.
+                        let stemless = !body
+                            .iter()
+                            .any(|(_, _, m)| *m == wk_voxel::ModuleId::Stem);
+                        if stemless {
+                            g.alloc_stem = bp.alloc_stem;
+                            g.alloc_leaf = bp.alloc_leaf;
+                            g.alloc_root = bp.alloc_root;
+                            g.root_depth_bias = bp.root_depth_bias;
+                            g.shade_efficiency = bp.shade_efficiency;
+                        }
                         // Don't invent tissues the painted body never had.
                         wk_voxel::sync_alloc_to_body(&mut g, &body);
                         g
@@ -1293,22 +1365,31 @@ async fn main() {
             }
         }
 
-        // Set A organisms: 1×1 module pixels (Nucleus black, Photosystem
-        // green) — same palette as column-GVSE, always drawn when present.
-        for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list() {
-            for &x_copy in x_copies {
-                let sx = origin_x + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
-                let sy = origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;
-                if sx + cell_px < 0.0 || sx > sw || sy < 0.0 || sy - cell_px > sh {
-                    continue;
+        // Organisms: skip the shaded draw while the F2 canvas covers the
+        // world (pose + Beer–Lambert is wasted under the overlay and was
+        // starving editor input on dense meadows). Spawn-picker keeps the
+        // world visible, so draw then.
+        let editor_covers_world = editor.open && !editor.spawn_picker;
+        if !editor_covers_world {
+            for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list(
+                &scene.world,
+                scene.world.tick,
+                scene.wind.climate_vx,
+            ) {
+                for &x_copy in x_copies {
+                    let sx = origin_x + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
+                    let sy = origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw || sy < 0.0 || sy - cell_px > sh {
+                        continue;
+                    }
+                    draw_rectangle(
+                        sx,
+                        sy - cell_px,
+                        cell_px,
+                        cell_px,
+                        Color::from_rgba(r, g, b, 255),
+                    );
                 }
-                draw_rectangle(
-                    sx,
-                    sy - cell_px,
-                    cell_px,
-                    cell_px,
-                    Color::from_rgba(r, g, b, 255),
-                );
             }
         }
 

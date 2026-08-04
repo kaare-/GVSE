@@ -245,7 +245,17 @@ pub fn mutate_body(
         return body;
     }
     let habit = classify_body_habit(&body);
-    let palette = habit_palette(habit);
+    // Stemless plants (seaweed) must not invent a trunk via mutation.
+    let has_stem = body.iter().any(|(_, _, m)| *m == ModuleId::Stem);
+    let palette: &[ModuleId] = if habit == BodyHabit::Plant && !has_stem {
+        &[
+            ModuleId::Photosystem,
+            ModuleId::Root,
+            ModuleId::ReproSpore,
+        ]
+    } else {
+        habit_palette(habit)
+    };
     let fidelity = fidelity.clamp(0.0, 1.0);
     let mess = 1.0 - fidelity;
     // Default fidelity (~0.9) → gene-only clones; lower fidelity unlocks
@@ -489,6 +499,68 @@ impl Blueprint {
         }
     }
 
+    /// Stemless aquatic ribbon: one holdfast root, nucleus, leaf string.
+    /// No Stem — underwater plants don't need a trunk; shoot growth elongates
+    /// Photosystems upward as a seaweed frond.
+    pub fn minimal_seaweed() -> Self {
+        Self {
+            schema_version: BLUEPRINT_SCHEMA_VERSION,
+            canvas_w: 16,
+            canvas_h: 16,
+            modules: vec![
+                PlacedModule {
+                    x: 8,
+                    y: 3,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Root,
+                },
+                PlacedModule {
+                    x: 8,
+                    y: 4,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Nucleus,
+                },
+                // Vertical leaf ribbon (no olive Stem).
+                PlacedModule {
+                    x: 8,
+                    y: 5,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                },
+                PlacedModule {
+                    x: 8,
+                    y: 6,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                },
+                PlacedModule {
+                    x: 8,
+                    y: 7,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                },
+                PlacedModule {
+                    x: 8,
+                    y: 8,
+                    lane: LaneId::Mid,
+                    module: ModuleId::Photosystem,
+                },
+            ],
+            genome: Genome {
+                alloc_stem: 0.0,
+                alloc_leaf: 0.70,
+                alloc_root: 0.30,
+                // Slight sink so the holdfast stays on the bed.
+                buoyancy_bias: 0.55,
+                root_depth_bias: 0.35,
+                shade_efficiency: 0.55,
+                ..Genome::default()
+            },
+            name: "seaweed".into(),
+            notes: "Stemless ribbon — one Root holdfast + Photosystem string; thrives submerged".into(),
+        }
+    }
+
     /// Minimal fruiting body (E): nucleus + digest + hyphae + spore packet.
     /// Underground mycelium is a ground field on Organic, not painted here.
     pub fn minimal_fungus() -> Self {
@@ -706,6 +778,45 @@ mod tests {
             bp.modules.iter().any(|m| m.module == ModuleId::ReproSpore),
             "fruiting body template includes a spore packet"
         );
+    }
+
+    #[test]
+    fn minimal_seaweed_is_stemless_plant_ribbon() {
+        let bp = Blueprint::minimal_seaweed();
+        assert!(bp.is_valid_plant());
+        assert!(!bp.is_valid_fungus());
+        let rel = bp.modules_relative_to_nucleus();
+        assert!(rel.contains(&(0, 0, ModuleId::Nucleus)));
+        assert!(rel
+            .iter()
+            .any(|&(dx, dy, m)| m == ModuleId::Root && dy < 0 && dx == 0));
+        assert!(
+            !rel.iter().any(|&(_, _, m)| m == ModuleId::Stem),
+            "seaweed must not paint a trunk"
+        );
+        let photos: Vec<i16> = rel
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+            .map(|(_, y, _)| *y)
+            .collect();
+        assert!(photos.len() >= 3, "ribbon of leaves");
+        assert!(photos.iter().all(|&y| y > 0), "leaves above nucleus");
+        assert!(bp.genome.alloc_stem <= 0.05);
+        assert!(bp.genome.alloc_leaf >= 0.5);
+    }
+
+    #[test]
+    fn stemless_plant_mutation_does_not_invent_stem() {
+        let parent = Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        for tick in 0..40u64 {
+            let child = mutate_body(&parent, 0.05, 42, tick, 9);
+            assert!(
+                !child.iter().any(|&(_, _, m)| m == ModuleId::Stem),
+                "seaweed clone must stay stemless (tick={tick})"
+            );
+            assert!(child.iter().any(|&(_, _, m)| m == ModuleId::Root));
+            assert!(child.iter().any(|&(_, _, m)| m == ModuleId::Photosystem));
+        }
     }
 
     #[test]

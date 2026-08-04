@@ -568,7 +568,7 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "Shear: wet low-c′ grains loosen in repose; rock faces → LooseRock.",
+                        "Shear: wet low-c′ grains loosen in repose; rock → LooseRock, limestone → LooseLimestone.",
                     );
                     ui.checkbox(
                         hash!(),
@@ -1042,6 +1042,7 @@ fn material_short_name(id: MaterialId) -> &'static str {
         MaterialId::Soil => "Soil",
         MaterialId::Organic => "Organic",
         MaterialId::LooseRock => "LooseRock",
+        MaterialId::LooseLimestone => "LooseLimestone",
         MaterialId::Gravel => "Gravel",
         MaterialId::Limestone => "Limestone",
         _ => "?",

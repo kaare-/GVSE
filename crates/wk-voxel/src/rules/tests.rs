@@ -827,6 +827,157 @@ fn organic_litter_slides_diagonally() {
 }
 
 #[test]
+fn organic_cliff_slides_into_humid_air_film() {
+    // Long-soak bug: Organic was routed through the ice-seat check, so
+    // humid/film Air next to a litter cliff froze the face in place.
+    // Fall + repose matches the real tick (mid slide can leave an overhang).
+    let mut w = setup_column_world();
+    w.set_cell(5, 1, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 2, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 3, Cell::solid(MaterialId::Organic));
+    for x in [4, 6] {
+        for y in 1..=3 {
+            let mut haze = Cell::air();
+            haze.sat = Sat(24);
+            w.set_cell(x, y, haze);
+        }
+    }
+    for _ in 0..12 {
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+    }
+    assert_eq!(
+        w.get_cell(5, 3).unwrap().material,
+        MaterialId::Air,
+        "Organic tip must not persist as a humid cliff"
+    );
+    let height = (1..=3)
+        .filter(|&y| w.get_cell(5, y).map(|c| c.material) == Some(MaterialId::Organic))
+        .count();
+    assert!(
+        height <= 1,
+        "Organic column should sprawl under haze (height={height})"
+    );
+}
+
+#[test]
+fn soil_cliff_slides_into_humid_air_film() {
+    let mut w = setup_column_world();
+    w.set_cell(5, 1, Cell::solid(MaterialId::Soil));
+    w.set_cell(5, 2, Cell::solid(MaterialId::Soil));
+    w.set_cell(5, 3, Cell::solid(MaterialId::Soil));
+    for x in [4, 6] {
+        for y in 1..=3 {
+            let mut haze = Cell::air();
+            haze.sat = Sat(24);
+            w.set_cell(x, y, haze);
+        }
+    }
+    for _ in 0..12 {
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+    }
+    assert_eq!(
+        w.get_cell(5, 3).unwrap().material,
+        MaterialId::Air,
+        "Soil tip must not persist as a humid cliff"
+    );
+}
+
+#[test]
+fn organic_does_not_repose_into_standing_water() {
+    let mut w = setup_column_world();
+    w.set_cell(5, 1, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 2, Cell::solid(MaterialId::Organic));
+    for x in [4, 6] {
+        for y in 1..=2 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    apply_grain_repose(&mut w);
+    assert_eq!(
+        w.get_cell(5, 2).unwrap().material,
+        MaterialId::Organic,
+        "Organic must float on full water, not slide into the lake"
+    );
+}
+
+#[test]
+fn painted_organic_platform_falls_under_tick() {
+    // Wide F3 brush stroke high in empty sky — must not hang as a floating island.
+    let mut w = setup_column_world();
+    for x in 2..=12 {
+        for y in 20..=22 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Organic));
+        }
+    }
+    // One tick must seat the platform (multi-pass grain settle).
+    tick(&mut w);
+    let floating = (2..=12)
+        .flat_map(|x| (15..=22).map(move |y| (x, y)))
+        .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+        .count();
+    assert_eq!(
+        floating, 0,
+        "organic platform must leave the sky ({floating} cells left high)"
+    );
+    let seated = (1..=14)
+        .flat_map(|x| (1..=6).map(move |y| (x, y)))
+        .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+        .count();
+    assert!(
+        seated >= 20,
+        "most litter should seat near bed (seated={seated})"
+    );
+}
+
+#[test]
+fn painted_midair_organic_falls_under_tick() {
+    // F3 terrain paint marks dirty, but water substeps clear it and write
+    // nothing — grain fall used to see an empty plan and leave litter
+    // floating until shear/erosion re-dirtied the column.
+    let mut w = setup_column_world();
+    w.set_cell(5, 8, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 9, Cell::solid(MaterialId::Organic));
+    tick(&mut w);
+    assert_eq!(
+        w.get_cell(5, 9).unwrap().material,
+        MaterialId::Air,
+        "mid-air Organic tip must fall under tick gravity"
+    );
+    assert_eq!(
+        w.get_cell(5, 8).unwrap().material,
+        MaterialId::Air,
+        "mid-air Organic must leave the paint height"
+    );
+    let on_bed = (1..=3).any(|y| {
+        w.get_cell(5, y).map(|c| c.material) == Some(MaterialId::Organic)
+            || w.get_cell(4, y).map(|c| c.material) == Some(MaterialId::Organic)
+            || w.get_cell(6, y).map(|c| c.material) == Some(MaterialId::Organic)
+    });
+    assert!(on_bed, "Organic should seat near bedrock (fall + repose)");
+}
+
+#[test]
+fn settle_loose_grains_drops_organic_without_full_tick() {
+    // After F3 unpause, settle (via tick or directly) must drop litter
+    // that was painted mid-air while the editor held the sim paused.
+    let mut w = setup_column_world();
+    w.set_cell(5, 40, Cell::solid(MaterialId::Organic));
+    settle_loose_grains(&mut w, None, GRAIN_SETTLE_PASSES);
+    assert_eq!(
+        w.get_cell(5, 40).unwrap().material,
+        MaterialId::Air,
+        "settle_loose_grains must drop mid-air Organic"
+    );
+    assert_eq!(
+        w.get_cell(5, 1).unwrap().material,
+        MaterialId::Organic,
+        "Organic should seat on bedrock"
+    );
+}
+
+#[test]
 fn underwater_sand_repose_does_not_leave_dry_air() {
     // Sand on an underwater ledge slides into an empty pocket beside
     // standing water. Vacated cell must become water (not sky-flash Air).
@@ -3023,3 +3174,882 @@ fn parallel_tick_matches_serial_on_multi_chunk_fixture() {
     // Leave the process default (parallel on) for later tests.
     crate::parallel::set_parallel_enabled(true);
 }
+#[test]
+fn stamped_world_midair_sand_falls_after_quiet_then_paint() {
+    // App path: world runs quiet (dirty cleared), F3 paints sand in sky
+    // while paused, then unpause → one tick must seat the sand.
+    use crate::worldgen::{stamp_world, WorldgenParams};
+    let mut w = World::new(7);
+    let p = WorldgenParams {
+        seed: 1,
+        width_cols: CHUNK_CELLS_W as i32 * 2,
+        bedrock_floor_y: 0,
+        sea_level_y: 40,
+        sky_ceiling_y: CHUNK_CELLS_H as i32 * 3,
+        bedrock_thickness: 4,
+        stone_thickness: 8,
+        sand_cap_thickness: 2,
+        limestone_in_shelf_and_coast: false,
+        wrap_x: true,
+    };
+    stamp_world(&mut w, &p);
+    // Drain residual worldgen dirty like a running demo.
+    for _ in 0..30 {
+        tick(&mut w);
+    }
+    clear_all_dirty(&mut w);
+    assert!(plan_active(&w).is_empty(), "precondition: quiet world");
+
+    // Paint mid-air sand high above terrain (F3 brush).
+    let gx = 40;
+    let gy = 140;
+    for dx in -3..=3 {
+        for dy in 0..=4 {
+            w.set_cell(gx + dx, gy + dy, Cell::solid(MaterialId::Sand));
+        }
+    }
+    assert!(!plan_active(&w).is_empty(), "paint must dirty");
+
+    tick(&mut w);
+
+    let floating = (-3..=3)
+        .flat_map(|dx| (gy - 5..=gy + 4).map(move |y| (gx + dx, y)))
+        .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert_eq!(
+        floating, 0,
+        "mid-air sand must leave the paint height after one unpause tick (left={floating})"
+    );
+}
+
+#[test]
+fn stranded_midair_sand_falls_after_dirty_cleared() {
+    // Regression: quiet ticks cleared the F3 paint wake before grain
+    // fall ran; sand hung until shear. Wake + tick must seat it.
+    let mut w = setup_column_world();
+    for x in 3..=8 {
+        for y in 30..=35 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+    }
+    clear_all_dirty(&mut w);
+    assert!(plan_active(&w).is_empty());
+    // Simulate the periodic stranded-grain scan inside tick.
+    wake_unsupported_grains(&mut w);
+    assert!(!plan_active(&w).is_empty(), "wake must dirty unsupported sand");
+    tick(&mut w);
+    let floating = (3..=8)
+        .flat_map(|x| (25..=35).map(move |y| (x, y)))
+        .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert_eq!(floating, 0, "stranded sand must fall ({floating} still high)");
+}
+
+#[test]
+fn floating_sand_settles_fast_despite_distant_lake_dirty() {
+    // Lakes keep a non-empty dirty plan; grain settle must still wake and
+    // drop a far mid-air sand blob in one tick (not drip via roof collapse).
+    let mut w = setup_column_world();
+    for y in 1..=4 {
+        w.set_cell(2, y, Cell::water());
+    }
+    for x in 10..=16 {
+        for y in 40..=48 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+    }
+    // Simulate "only the lake is dirty".
+    clear_all_dirty(&mut w);
+    w.touch_dirty(2, 4);
+    tick(&mut w);
+    let floating = (10..=16)
+        .flat_map(|x| (35..=48).map(move |y| (x, y)))
+        .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert_eq!(
+        floating, 0,
+        "sand blob must fully seat in one tick despite lake dirty (left={floating})"
+    );
+}
+
+#[test]
+fn organic_sinks_through_suspended_full_sat() {
+    // Invisible mid-air full water under litter must not pin Organic.
+    let mut w = setup_column_world();
+    w.set_cell(5, 20, Cell::water()); // suspended full-sat Air
+    w.set_cell(5, 21, Cell::solid(MaterialId::Organic));
+    tick(&mut w);
+    assert_eq!(
+        w.get_cell(5, 21).unwrap().material,
+        MaterialId::Air,
+        "Organic must leave the paint height"
+    );
+    assert_ne!(
+        w.get_cell(5, 1).unwrap().material,
+        MaterialId::Air,
+        "Organic should seat near bedrock"
+    );
+}
+
+#[test]
+fn organic_still_floats_on_grounded_lake() {
+    let mut w = setup_column_world();
+    // Bedrock walls so surface flow cannot empty the column under litter.
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    for _ in 0..5 {
+        tick(&mut w);
+    }
+    let on_surface = (3..=7).any(|x| {
+        (5..=7).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+    });
+    assert!(
+        on_surface,
+        "Organic must remain on the grounded lake surface (sat@5,5={})",
+        w.get_cell(5, 5).map(|c| c.sat.0).unwrap_or(0)
+    );
+}
+
+#[test]
+fn dense_grain_punches_through_floating_organic_raft() {
+    // Thin Organic on water must not carry Soil / LooseRock piles.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 7, Cell::solid(MaterialId::Soil));
+    w.set_cell(5, 8, Cell::solid(MaterialId::LooseRock));
+    w.set_cell(5, 9, Cell::solid(MaterialId::LooseRock));
+    for _ in 0..20 {
+        tick(&mut w);
+    }
+    let mut organs = vec![];
+    let mut rocks = vec![];
+    let mut soils = vec![];
+    for x in 2..=8 {
+        for y in 1..=12 {
+            match w.get_cell(x, y).map(|c| c.material) {
+                Some(MaterialId::Organic) => organs.push((x, y)),
+                Some(MaterialId::LooseRock) => rocks.push((x, y)),
+                Some(MaterialId::Soil) => soils.push((x, y)),
+                _ => {}
+            }
+        }
+    }
+    assert!(
+        !rocks.iter().any(|&(_, y)| y >= 6),
+        "LooseRock must not remain stacked above the lake on Organic ({rocks:?})"
+    );
+    assert!(
+        rocks.iter().any(|&(_, y)| y <= 5),
+        "LooseRock must sink into / through the water column ({rocks:?})"
+    );
+    assert!(
+        !soils.iter().any(|&(_, y)| y >= 6),
+        "Soil must not ride the floating Organic raft ({soils:?})"
+    );
+    assert!(
+        !organs.is_empty(),
+        "Organic raft should still exist somewhere near the lake"
+    );
+}
+
+#[test]
+fn loose_rock_punches_through_stacked_organic_raft() {
+    // User bug: Organic|Organic mat still held a steep LooseRock pile.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 7, Cell::solid(MaterialId::Organic));
+    for y in 8..=18 {
+        w.set_cell(5, y, Cell::solid(MaterialId::LooseRock));
+    }
+    for _ in 0..30 {
+        tick(&mut w);
+    }
+    let mut riding = Vec::new();
+    let mut rocks_in_water = 0usize;
+    for x in 2..=8 {
+        for y in 1..=22 {
+            let Some(c) = w.get_cell(x, y) else {
+                continue;
+            };
+            if c.material != MaterialId::LooseRock {
+                continue;
+            }
+            if y <= 5 {
+                rocks_in_water += 1;
+            }
+            if let Some(below) = w.get_cell(x, y - 1) {
+                if below.material == MaterialId::Organic {
+                    riding.push((x, y));
+                }
+            }
+        }
+    }
+    assert!(
+        riding.is_empty(),
+        "LooseRock must not ride floating Organic ({riding:?})"
+    );
+    assert!(
+        rocks_in_water > 0,
+        "LooseRock pile must punch into the lake"
+    );
+}
+
+#[test]
+fn punch_continues_through_organic_sandwiched_on_sunk_rock() {
+    // After the first punch a tall pile becomes Rock|Organic|Rock|Water.
+    // Punch must keep walking through the submerged grain to the lake.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 5, Cell::solid(MaterialId::LooseRock)); // already in water
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 7, Cell::solid(MaterialId::LooseRock));
+    w.set_cell(5, 8, Cell::solid(MaterialId::LooseRock));
+    for _ in 0..20 {
+        tick(&mut w);
+    }
+    let mut riding = Vec::new();
+    for y in 1..=12 {
+        if w.get_cell(5, y).map(|c| c.material) == Some(MaterialId::LooseRock) {
+            if w.get_cell(5, y - 1).map(|c| c.material) == Some(MaterialId::Organic) {
+                riding.push(y);
+            }
+        }
+    }
+    assert!(
+        riding.is_empty(),
+        "LooseRock must not stay stranded on Organic over sunk rock ({riding:?})"
+    );
+}
+
+#[test]
+fn demo_ocean_loose_rock_punches_organic_mat() {
+    use crate::worldgen::{stamp_world, WorldgenParams};
+    let mut w = World::new(9);
+    let p = WorldgenParams {
+        width_cols: (CHUNK_CELLS_W as i32) * 4,
+        sky_ceiling_y: (CHUNK_CELLS_H as i32) * 2,
+        ..WorldgenParams::default()
+    };
+    stamp_world(&mut w, &p);
+    let y_surf = p.sea_level_y;
+    let mut ox = None;
+    for x in 20..80 {
+        let Some(surf) = w.get_cell(x, y_surf) else {
+            continue;
+        };
+        let Some(above) = w.get_cell(x, y_surf + 1) else {
+            continue;
+        };
+        if surf.material == MaterialId::Air
+            && surf.sat.is_full()
+            && above.material == MaterialId::Air
+            && above.sat.is_empty()
+        {
+            ox = Some(x);
+            break;
+        }
+    }
+    let ox = ox.expect("need open water column");
+    for x in ox..ox + 9 {
+        w.set_cell(x, y_surf + 1, Cell::solid(MaterialId::Organic));
+    }
+    for dy in 0..10 {
+        let y = y_surf + 2 + dy;
+        let half = (dy / 2).min(4);
+        for x in (ox + 4 - half)..=(ox + 4 + half) {
+            if w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Air) {
+                w.set_cell(x, y, Cell::solid(MaterialId::LooseRock));
+            }
+        }
+    }
+    for _ in 0..40 {
+        tick(&mut w);
+    }
+    let mut riding = Vec::new();
+    for x in ox - 2..ox + 12 {
+        for y in y_surf..y_surf + 20 {
+            let Some(c) = w.get_cell(x, y) else {
+                continue;
+            };
+            if c.material != MaterialId::LooseRock {
+                continue;
+            }
+            if w.get_cell(x, y - 1).map(|c| c.material) == Some(MaterialId::Organic) {
+                riding.push((x, y));
+            }
+        }
+    }
+    assert!(
+        riding.is_empty(),
+        "LooseRock still riding Organic on demo ocean: {riding:?}"
+    );
+}
+
+#[test]
+fn organic_alone_still_floats_without_punch() {
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 7, Cell::solid(MaterialId::Organic));
+    for _ in 0..10 {
+        tick(&mut w);
+    }
+    let n = (3..=7)
+        .map(|x| {
+            (1..=10)
+                .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+                .count()
+        })
+        .sum::<usize>();
+    assert_eq!(n, 2, "stacked Organic litter must stay as a raft (n={n})");
+}
+
+#[test]
+fn submerged_organic_rises_out_of_water_column() {
+    // Glitch line: Organic stuck under a refilled lake surface must buoyancy-rise.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    // Raft on the surface + a submerged "glitch" cell mid-column.
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 3, Cell::solid(MaterialId::Organic));
+    for _ in 0..8 {
+        tick(&mut w);
+    }
+    assert_ne!(
+        w.get_cell(5, 3).unwrap().material,
+        MaterialId::Organic,
+        "submerged Organic must leave mid-column"
+    );
+    let organics: Vec<(i32, i32)> = (3..=7)
+        .flat_map(|x| {
+            (1..=8)
+                .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+                .map(|y| (x, y))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(
+        organics.len() >= 2,
+        "both Organic cells must survive ({organics:?})"
+    );
+    assert!(
+        organics.iter().all(|&(_, y)| y >= 4),
+        "Organic must leave the deep water column ({organics:?})"
+    );
+    // No cell may remain with full water both above and below (glitch line).
+    for &(x, y) in &organics {
+        let above_water = matches!(
+            w.get_cell(x, y + 1),
+            Some(c) if c.material == MaterialId::Air && c.sat.is_full()
+        );
+        let below_water = matches!(
+            w.get_cell(x, y - 1),
+            Some(c) if c.material == MaterialId::Air && c.sat.is_full()
+        );
+        assert!(
+            !(above_water && below_water),
+            "Organic at ({x},{y}) still fully submerged"
+        );
+    }
+}
+
+#[test]
+fn floating_organic_soaks_from_water_column() {
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    let sat_sum = |w: &World| -> i64 {
+        let mut s = 0i64;
+        for x in 0..16 {
+            for y in 0..16 {
+                if let Some(c) = w.get_cell(x, y) {
+                    s += c.sat.0 as i64;
+                }
+            }
+        }
+        s
+    };
+    let before = sat_sum(&w);
+    for _ in 0..10 {
+        tick(&mut w);
+    }
+    let org = (3..=7)
+        .flat_map(|x| (5..=7).map(move |y| (x, y)))
+        .find_map(|(x, y)| {
+            let c = w.get_cell(x, y)?;
+            (c.material == MaterialId::Organic).then_some(c)
+        })
+        .expect("floating Organic must remain");
+    assert!(
+        org.sat.0 > 0,
+        "floating Organic must soak pore water (sat={})",
+        org.sat.0
+    );
+    assert_eq!(sat_sum(&w), before, "soak must conserve water mass");
+}
+
+#[test]
+fn plant_can_seat_on_wet_floating_organic() {
+    use crate::plant::find_plant_slot;
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let mut org = Cell::solid(MaterialId::Organic);
+    org.sat = Sat(40); // moist enough for spore/sprout gate
+    w.set_cell(5, 6, org);
+    let slot = find_plant_slot(&w, 5, 6);
+    assert_eq!(
+        slot,
+        Some(7),
+        "Air above floating Organic must be a plantable crown"
+    );
+    // Moisture on the bed cell must clear the spore gate.
+    let bed = w.get_cell(5, 6).unwrap();
+    let cap = water_capacity(MaterialId::Organic).max(1);
+    let moist = bed.sat.0 as f32 / cap as f32;
+    assert!(
+        moist >= 0.02,
+        "wet floating Organic must clear plant moisture gate (moist={moist})"
+    );
+}
+
+
+#[test]
+fn organic_sky_drop_does_not_leave_cliff_walls() {
+    // Vertical Organic "cliff wall" on bedrock must avalanche into a
+    // low sprawl in one tick (interleaved fall + repose).
+    let mut w = setup_column_world();
+    for y in 1..=12 {
+        w.set_cell(8, y, Cell::solid(MaterialId::Organic));
+    }
+    tick(&mut w);
+    let max_col_h = (0..16)
+        .map(|x| {
+            (1..=16)
+                .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    let width = (0..16)
+        .filter(|&x| {
+            (1..=16).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+        })
+        .count();
+    assert!(
+        max_col_h <= 4,
+        "Organic cliff must sprawl (tallest column={max_col_h}, width={width})"
+    );
+    assert!(width >= 5, "Organic cliff should spread sideways (width={width})");
+}
+
+#[test]
+fn organic_sky_blob_lands_as_repose_pile_not_block() {
+    let mut w = setup_column_world();
+    for x in 6..=10 {
+        for y in 20..=28 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Organic));
+        }
+    }
+    tick(&mut w);
+    // No vertical face taller than a couple of cells: count columns
+    // where height >= 4 and a side neighbour is empty at mid-height.
+    let mut cliff_faces = 0;
+    for x in 1..15 {
+        for y in 2..=8 {
+            let here = w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic);
+            let below = w.get_cell(x, y - 1).map(|c| c.material) == Some(MaterialId::Organic);
+            let left_air = w.get_cell(x - 1, y).map(|c| c.material) == Some(MaterialId::Air);
+            let right_air = w.get_cell(x + 1, y).map(|c| c.material) == Some(MaterialId::Air);
+            if here && below && (left_air || right_air) {
+                // 2-cell vertical face exposure
+                let above = w.get_cell(x, y + 1).map(|c| c.material) == Some(MaterialId::Organic);
+                if above {
+                    cliff_faces += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        cliff_faces <= 2,
+        "sky blob must not land as cliff walls (exposed face cells={cliff_faces})"
+    );
+}
+
+#[test]
+fn sand_sky_drop_does_not_leave_cliff_walls() {
+    let mut w = setup_column_world();
+    for y in 1..=12 {
+        w.set_cell(8, y, Cell::solid(MaterialId::Sand));
+    }
+    tick(&mut w);
+    let max_col_h = (0..16)
+        .map(|x| {
+            (1..=16)
+                .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    let width = (0..16)
+        .filter(|&x| {
+            (1..=16).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+        })
+        .count();
+    assert!(
+        max_col_h <= 4,
+        "Sand cliff must sprawl (tallest column={max_col_h}, width={width})"
+    );
+    assert!(width >= 5, "Sand cliff should spread sideways (width={width})");
+}
+
+#[test]
+fn sand_micro_cliff_on_stone_slope_keeps_reposing() {
+    // 2–3 cell vertical sand lips on a rock face (the screenshot case).
+    let mut w = setup_column_world();
+    // Stone ramp: y = x/2 style steps.
+    for x in 2..=12 {
+        for y in 1..=(x / 2).max(1) {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    // Vertical sand lip on the left face at mid slope.
+    w.set_cell(6, 4, Cell::solid(MaterialId::Sand));
+    w.set_cell(6, 5, Cell::solid(MaterialId::Sand));
+    w.set_cell(6, 6, Cell::solid(MaterialId::Sand));
+    // Ensure dry Air seats to the left.
+    for y in 1..=8 {
+        if w.get_cell(5, y).map(|c| c.material) != Some(MaterialId::Stone) {
+            w.set_cell(5, y, Cell::air());
+        }
+    }
+    for _ in 0..5 {
+        tick(&mut w);
+    }
+    let lip = (4..=6)
+        .filter(|&y| w.get_cell(6, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert!(
+        lip <= 1,
+        "sand micro-cliff must avalanche off the face (cells still stacked={lip})"
+    );
+}
+
+#[test]
+fn sand_micro_cliff_reposes_through_thin_haze() {
+    // Inland humidity haze used to freeze sand lips (any sat blocked
+    // repose). Thin haze must not; shore film still must.
+    let mut w = setup_column_world();
+    for x in 2..=12 {
+        for y in 1..=(x / 2).max(1) {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    w.set_cell(6, 4, Cell::solid(MaterialId::Sand));
+    w.set_cell(6, 5, Cell::solid(MaterialId::Sand));
+    w.set_cell(6, 6, Cell::solid(MaterialId::Sand));
+    for y in 1..=8 {
+        if w.get_cell(5, y).map(|c| c.material) != Some(MaterialId::Stone) {
+            let mut haze = Cell::air();
+            haze.sat = Sat(24);
+            w.set_cell(5, y, haze);
+        }
+    }
+    for _ in 0..5 {
+        tick(&mut w);
+    }
+    let lip = (4..=6)
+        .filter(|&y| w.get_cell(6, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert!(
+        lip <= 1,
+        "sand lip must avalanche through thin haze (stacked={lip})"
+    );
+}
+
+#[test]
+fn sand_ledge_walks_off_sideways_into_open_air() {
+    // Diagonal-down blocked by stone; open Air beside with Air below.
+    let mut w = setup_column_world();
+    for x in 5..=8 {
+        for y in 1..=3 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    // Ledge sand with a vertical lip above open air to the left.
+    w.set_cell(5, 4, Cell::solid(MaterialId::Sand));
+    w.set_cell(5, 5, Cell::solid(MaterialId::Sand));
+    w.set_cell(4, 1, Cell::solid(MaterialId::Stone));
+    w.set_cell(4, 2, Cell::air());
+    w.set_cell(4, 3, Cell::air());
+    w.set_cell(4, 4, Cell::air());
+    w.set_cell(4, 5, Cell::air());
+    for _ in 0..8 {
+        tick(&mut w);
+    }
+    assert_ne!(
+        w.get_cell(5, 5).unwrap().material,
+        MaterialId::Sand,
+        "top ledge sand must walk off / fall"
+    );
+}
+
+#[test]
+fn large_sand_blob_does_not_keep_vertical_cliff() {
+    let mut w = setup_column_world();
+    // Organic bed like the screenshot.
+    for x in 0..64 {
+        for y in 1..=6 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Organic));
+        }
+    }
+    // Large sand blob dropped on/near the bed (partly mid-air).
+    for x in 18..=48 {
+        for y in 7..=32 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+    }
+    tick(&mut w);
+    // Measure max vertical run of sand with Air to the left / right.
+    let mut worst_left = 0i32;
+    let mut worst_right = 0i32;
+    for x in 1..63 {
+        let mut run_l = 0i32;
+        let mut run_r = 0i32;
+        for y in 1..50 {
+            let here = w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand);
+            let left_air = w.get_cell(x - 1, y).map(|c| c.material) == Some(MaterialId::Air);
+            let right_air = w.get_cell(x + 1, y).map(|c| c.material) == Some(MaterialId::Air);
+            if here && left_air {
+                run_l += 1;
+                worst_left = worst_left.max(run_l);
+            } else {
+                run_l = 0;
+            }
+            if here && right_air {
+                run_r += 1;
+                worst_right = worst_right.max(run_r);
+            } else {
+                run_r = 0;
+            }
+        }
+    }
+    // A hard cliff is a long vertical Air-exposed run. 45° stairs only
+    // expose 1 cell at a time on a face.
+    assert!(
+        worst_left <= 2 && worst_right <= 2,
+        "hard cliff face remained (left={worst_left} right={worst_right})"
+    );
+}
+
+#[test]
+fn large_sand_blob_across_chunk_seam_no_cliff() {
+    use crate::parallel::set_parallel_enabled;
+    set_parallel_enabled(true);
+    let mut w = World::new(7);
+    w.wrap_width = Some(CHUNK_CELLS_W as i32 * 2);
+    for cx in 0..2 {
+        w.ensure_chunk(ChunkCoord::new(cx, 0));
+        w.ensure_chunk(ChunkCoord::new(cx, 1));
+    }
+    for x in 0..(CHUNK_CELLS_W as i32 * 2) {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Organic));
+        }
+    }
+    // Blob straddling the x=64 seam.
+    for x in 50..=80 {
+        for y in 5..=28 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+    }
+    for _ in 0..10 {
+        tick(&mut w);
+    }
+    let mut worst_left = 0i32;
+    for x in 1..120 {
+        let mut run = 0i32;
+        for y in 1..40 {
+            let here = w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand);
+            let left_air = w.get_cell(x - 1, y).map(|c| c.material) == Some(MaterialId::Air);
+            if here && left_air {
+                run += 1;
+                worst_left = worst_left.max(run);
+            } else {
+                run = 0;
+            }
+        }
+    }
+    set_parallel_enabled(true);
+    assert!(
+        worst_left <= 3,
+        "chunk-seam sand blob left a hard cliff (worst_left={worst_left})"
+    );
+}
+
+
+#[test]
+fn organic_on_lake_tick_is_cheap() {
+    use std::time::Instant;
+    let mut w = World::new(42);
+    for cx in 0..4 {
+        for cy in 0..2 {
+            w.ensure_chunk(ChunkCoord::new(cx, cy));
+        }
+    }
+    let width = 4 * CHUNK_CELLS_W as i32;
+    for x in 0..width {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=20 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for _ in 0..30 {
+        tick(&mut w);
+    }
+    for x in 40..55 {
+        for y in 21..28 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Organic));
+        }
+    }
+    let t0 = Instant::now();
+    for _ in 0..5 {
+        tick(&mut w);
+    }
+    let land_ms = t0.elapsed().as_secs_f64() * 1000.0 / 5.0;
+    let t1 = Instant::now();
+    for _ in 0..20 {
+        tick(&mut w);
+    }
+    let steady_ms = t1.elapsed().as_secs_f64() * 1000.0 / 20.0;
+    eprintln!("organic-on-lake landing={land_ms:.2} ms/tick steady={steady_ms:.2} ms/tick");
+    assert!(land_ms < 800.0, "landing too slow: {land_ms:.1}");
+    assert!(steady_ms < 500.0, "steady too slow: {steady_ms:.1}");
+}
+
+
+
+
+
+
+
+
+
+
+
+#[test]
+fn organic_on_demo_sized_ocean_tick_cost() {
+    use std::time::Instant;
+    use crate::worldgen::{stamp_world, WorldgenParams};
+    let mut w = World::new(9);
+    // Half demo width keeps CI sane but still stresses ocean+wake.
+    let p = WorldgenParams {
+        width_cols: (CHUNK_CELLS_W as i32) * 8,
+        sky_ceiling_y: (CHUNK_CELLS_H as i32) * 3,
+        ..WorldgenParams::default()
+    };
+    stamp_world(&mut w, &p);
+    for _ in 0..10 {
+        tick(&mut w);
+    }
+    let t_base0 = Instant::now();
+    for _ in 0..10 {
+        tick(&mut w);
+    }
+    let base = t_base0.elapsed().as_secs_f64() * 1000.0 / 10.0;
+
+    // Paint organic on open water near sea level.
+    let y0 = p.sea_level_y + 1;
+    for x in 30..50 {
+        for y in y0..y0 + 6 {
+            if w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Air) {
+                w.set_cell(x, y, Cell::solid(MaterialId::Organic));
+            }
+        }
+    }
+    let t0 = Instant::now();
+    for _ in 0..5 {
+        tick(&mut w);
+    }
+    let land = t0.elapsed().as_secs_f64() * 1000.0 / 5.0;
+    let t1 = Instant::now();
+    for _ in 0..15 {
+        tick(&mut w);
+    }
+    let steady = t1.elapsed().as_secs_f64() * 1000.0 / 15.0;
+    eprintln!(
+        "demo-ocean base={base:.2} landing={land:.2} steady={steady:.2} ms/tick (ratio steady/base={:.2})",
+        steady / base.max(0.01)
+    );
+    assert!(
+        steady < base * 8.0 + 50.0,
+        "organic on ocean made ticks too expensive: base={base:.1} steady={steady:.1}"
+    );
+}
+

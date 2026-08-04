@@ -57,13 +57,14 @@ pub use clouds::{
 };
 pub use failure::{
     apply_compaction, apply_failure, apply_roof_collapse, apply_shear_weaken, compaction_load_ok,
-    effective_cohesion, face_shear_demand, pore_wetness, pore_wetness_with, roof_collapse_debris,
-    roof_span_cells, roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
+    effective_cohesion, face_shear_demand, grain_repose_max_step, pore_wetness, pore_wetness_with,
+    roof_collapse_debris, roof_span_cells, roof_span_limit_cells, shear_weaken_debris,
+    wet_repose_loosens, FailureConfig,
     COMPACTION_SIGMA_MIN,
 };
 pub use fungi::{
-    add_soft_litter, compost_organic_to_soil, is_fungus, max_mycelium_near, seed_mycelium_near,
-    soft_litter_at, step_mycelium_field,
+    add_soft_litter, compost_organic_to_soil, is_fungus, is_surface_stalk, max_mycelium_near,
+    seed_mycelium_near, soft_litter_at, step_mycelium_field,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
@@ -79,11 +80,14 @@ pub use organism::{
     SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
 pub use plant::{
-    collect_live_root_world_cells, find_fungus_slot, find_plant_slot, find_surface_air_slot,
-    is_land_plant, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
-    MAX_STEM_MODULES,
+    collect_live_photo_world_cells, collect_live_root_world_cells, find_fungus_slot, find_plant_slot,
+    find_surface_air_slot, is_land_plant, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES,
+    MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
-pub use shade::{build_canopy_index, effective_photo_light, CanopyIndex};
+pub use shade::{
+    build_canopy_index, build_canopy_index_posed, effective_photo_light, shade_transmit,
+    sum_posed_photo_light, CanopyIndex, PosedModule,
+};
 pub use heatmap::Heatmap;
 pub use humidity::{
     humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,
@@ -100,10 +104,11 @@ pub use rules::{
     apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
     apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
-    is_standing_water, tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life,
-    tick_with_perf, CondensationConfig, EvapConfig, GrainConfig, KarstConfig, OrographicConfig,
-    PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN, ROOT_EROSION_BIND,
-    ROOT_REPOSE_STEP_BONUS,
+    is_standing_water, settle_loose_grains, settle_loose_grains_regions, tick, tick_with_configs,
+    tick_with_configs_and_geotech, tick_with_life, tick_with_perf, wake_unsupported_grains,
+    wake_unstable_slopes, CondensationConfig, EvapConfig, GrainConfig, KarstConfig,
+    OrographicConfig, PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
+    GRAIN_REPOSE_HAZE_MAX, GRAIN_SETTLE_PASSES, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
 pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,

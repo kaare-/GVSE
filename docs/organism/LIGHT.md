@@ -122,7 +122,16 @@ through wet Air with Beer–Lambert-ish transmittance
 (`WATER_LIGHT_TRANSMIT` ≈ 0.85 / cell, plus a surface film). Deep
 seats go dark — photosynthesis can't pay for tall stems / deep roots,
 so submerged plants either race stems toward the brighter surface
-(seaweed urge when dim) or starve. Dry land columns stay clear.
+(stemmed plants urge olive up; stemless seaweed elongates its leaf
+ribbon) or starve. Dry land columns stay clear.
+
+**wk-voxel column canopy (`shade.rs`):** Beer–Lambert top-down through
+posed Photosystem / Stem cells (`LeafAbsorb` per leaf, fixed stem
+absorb). Light at `(x, y)` is sky attenuated by every foliage cell at
+greater `y` in the column, plus soft lateral bleed so neighbours cast
+sideways shade. Equal-height peers still compete via same-Y lateral.
+Harvest sums per-leaf exposure (lower leaves self-shade); draw tint
+uses raw sky × transmit at each posed cell.
 
 ## What is deliberately not here
 

@@ -32,7 +32,8 @@ impl Default for CreatureEditor {
             blueprint: Blueprint::atom(),
             tool: EditorTool::Paint,
             brush: ModuleId::Photosystem,
-            status: "Paint Atom / Plant / fruiting body, then Enter + click to spawn".into(),
+            status: "Paint Atom / Plant / seaweed / fruiting body, then Enter + click to spawn"
+                .into(),
             spawn_picker: false,
             was_paused: true,
             name_buf: "atom".into(),
@@ -50,7 +51,7 @@ impl CreatureEditor {
             self.was_paused = currently_paused;
             self.spawn_picker = false;
             self.status =
-                "1-6 modules | A Atom  T Plant  F fruiting body | Enter then click spawn"
+                "1-7 modules | A Atom  T Plant  W seaweed  F fruiting | Enter then click spawn"
                     .into();
         }
     }
@@ -103,6 +104,12 @@ impl CreatureEditor {
             self.name_buf = "plant".into();
             self.status = "Minimal plant template (spawn on moist sand/soil)".into();
         }
+        if is_key_pressed(KeyCode::W) {
+            self.blueprint = Blueprint::minimal_seaweed();
+            self.name_buf = "seaweed".into();
+            self.status =
+                "Seaweed — stemless leaf ribbon; one Root holdfast; thrives submerged".into();
+        }
         if is_key_pressed(KeyCode::F) {
             self.blueprint = Blueprint::minimal_fungus();
             self.name_buf = "fruiting body".into();
@@ -147,8 +154,36 @@ impl CreatureEditor {
         if !self.spawn_picker && is_mouse_button_down(MouseButton::Left) {
             if let Some((cx, cy)) = self.mouse_to_cell() {
                 self.apply_tool(cx, cy);
+            } else if let Some(brush) = self.mouse_to_palette_brush() {
+                self.brush = brush;
+                self.tool = EditorTool::Paint;
             }
         }
+    }
+
+    /// Palette swatches drawn to the right of the canvas (same layout as [`draw`]).
+    fn mouse_to_palette_brush(&self) -> Option<ModuleId> {
+        let (mx, my) = mouse_position();
+        let (ox, oy) = CANVAS_ORIGIN;
+        let cw = self.blueprint.canvas_w as f32 * CELL_PX;
+        let px = ox + cw + 24.0;
+        let sy = oy + 160.0;
+        let brushes = [
+            ModuleId::Nucleus,
+            ModuleId::Photosystem,
+            ModuleId::Root,
+            ModuleId::Stem,
+            ModuleId::Digest,
+            ModuleId::Hypha,
+            ModuleId::ReproSpore,
+        ];
+        for (i, mid) in brushes.iter().enumerate() {
+            let sx = px + i as f32 * 36.0;
+            if mx >= sx && mx < sx + 28.0 && my >= sy && my < sy + 28.0 {
+                return Some(*mid);
+            }
+        }
+        None
     }
 
     fn mouse_to_cell(&self) -> Option<(i16, i16)> {
@@ -274,7 +309,7 @@ impl CreatureEditor {
             GRAY,
         );
         draw_text(
-            "A Atom  T Plant  F fruiting body  | S save  L load  | Enter spawn",
+            "A Atom  T Plant  W seaweed  F fruiting  | S save  L load  | Enter spawn",
             px,
             oy + 72.0,
             14.0,

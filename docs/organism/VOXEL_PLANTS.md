@@ -13,7 +13,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | Fixed crown (no buoyancy) | Done |
 | Pore-`sat` drink + drought stress | Done |
 | Spawn on Air above porous solid | Done |
-| Editor brushes + `T` minimal plant | Done |
+| Editor brushes + `T` minimal plant + `W` seaweed | Done |
 
 ## Roadmap
 
@@ -42,11 +42,48 @@ Falsifiers: root grows into wetter sand; stem-heavy alloc grows taller.
 | `leaf_absorb` | How hard greens shade neighbours / self-stack |
 | `shade_efficiency` | Dim-light harvest vs sun peak |
 
-Features: sparse canopy index + neighbour cast (`shade.rs`, lite
-`LIGHT.md`); plant photo uses `effective_photo_light`. Standing water
-attenuates sky light with depth (`column_sky_light`) — deep seats go
-dark, so submerged plants either stem-race toward the surface or fail
-the cost/benefit. E36/E37 spirit.
+Features: column Beer–Lambert through posed Photosystem / Stem cells
+(`shade.rs`, per `LIGHT.md`); plant photo sums per-leaf
+`effective_photo_light`. Standing water attenuates sky light with depth
+(`column_sky_light`) — deep seats go dark, so submerged stemmed plants
+stem-race toward the surface, while stemless seaweed elongates its
+Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
+
+### Seaweed template *(landed)*
+
+- Editor `W` → `Blueprint::minimal_seaweed`: Nucleus + one Root holdfast +
+  vertical Photosystem string (no Stem).
+- Shoot growth keeps stemless habits stemless and stacks leaves upward
+  from the frond tip.
+- Mutation will not invent a trunk on a stemless parent.
+- Spawn under water on a moist bed; Tab plant knobs do not overwrite the
+  ribbon’s leaf-heavy alloc.
+- **Leaf drink (emergent):** Photosystems in *standing water* sip free-column
+  sat. Dry-land / film Air does not count — shore leaves never drink.
+  When leaves bathe, soft root budget collapses to one holdfast (no
+  seaweed flag).
+- **Soft leaves (draw + growth):** stemless ribbons are floppy — they
+  elongate *up* into standing water, lay on the waterline when emerged, and
+  dry-mat onto terrain (piling when cells collide). Woody canopies grow
+  **short petioles** beside the trunk/branch (`WOODY_LEAF_MAX_CANT`) — not
+  seaweed-length tip chains — and stay in the canopy in draw (wood holds
+  them up; tips may nod a little past `LEAF_SUPPORT_WOODY`). New woody
+  leaves also obey competition: Moore gap from *foreign* live Photosystems
+  (same spirit as root spacing) and a minimum effective light
+  (`WOODY_LEAF_MIN_LIGHT`) so dim / crowded sites stay bare. Underwater
+  tips lean with climate wind **or** local water-sat shear. Woody `Stem`
+  stays upright on land.
+- **Light competition:** sky attenuates top-down through leaf/stem stacks
+  (self-shade + taller neighbours). Equal-height peers still compete via
+  lateral bleed. Cast / harvest / tint use posed draw cells, so flopped
+  piles shade where the greens sit. Photosystem pixels tint bright
+  `#2ECC40` → dim olive from **raw** sky × column transmit — understory
+  genes don't wash out the read.
+- **Woody leaf abscission:** stemmed plants drop Photosystems that stay
+  below `WOODY_LEAF_STARVE_LIGHT` for `WOODY_LEAF_STARVE_TICKS` (sky ×
+  shade, ignoring the day clock so night alone never strips a canopy).
+  Litter paints as Organic in dry Air. Stemless seaweed ribbons never
+  shed this way; at least one leaf is always kept.
 
 ### D3 — Vegetative sprout *(landed)*
 
@@ -87,9 +124,11 @@ Features:
   pixels). Plant it on Organic; it seeds the ground network.
 - **Mycelium is a ground field** (`Cell::_pad` on Organic), not something you
   paint in the creature editor. `step_mycelium_field` thickens / spreads on
-  moist Organic even after the fruiting body dies.
-- Rich cream networks can **emerge a new fruiting body**, which can then
-  spread wind-biased spores to other Organic / litter columns
+  moist Organic even after the fruiting body dies; threads prefer climbing
+  toward free Air.
+- Networks that **breach the surface from below** can emerge a **surface
+  stalk**. Buried bodies rhizomorph-hop locally; stalks wind-disperse spores
+  far (`ReproSpore`).
 - Soft litter — bonus energy sip; Organic forage scales with field intensity
 - Established moist networks support fruiting bodies (no energy-starve)
 - Standing rain counts as moisture; **never** flash Organic → Sand
@@ -120,7 +159,8 @@ Features: stem `integrity`, topple, Holdfast. Needs dead stems.
 
 ## Explicitly out of Core for voxel
 
-- Branching morphogenesis, seasonal leaf drop, wood rings
+- Branching morphogenesis, seasonal (calendar) leaf drop, wood rings
+  (productivity abscission for woody leaves is landed — see above)
 - Groundwater head field (use cell `sat` gradient only for now)
 - Coarse `Ecology` LAI / ET bucket (column-only unless reintroduced)
 - FEM / wind throw

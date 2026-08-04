@@ -8,14 +8,14 @@ use std::collections::HashSet;
 
 use wk_material::{HydroOverrides, MaterialId};
 
-use crate::active::{partition_checkerboard, ActiveChunk};
+use crate::active::{partition_checkerboard, plan_active, ActiveChunk};
 use crate::cell::{
-    falls_through_empty_air, grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain,
+    falls_through_empty_air, is_flow_erodible, is_grain, is_repose_grain,
     water_capacity_with, Cell, CellFlags, Sat,
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
-use crate::parallel::{self, for_each_region_parallel};
+use crate::parallel::{self, for_each_region_parallel, for_each_region_serial_moore};
 use crate::temperature::Temperature;
 
 use super::gravity::apply_gravity_fall;
@@ -32,6 +32,11 @@ pub const ROOT_REPOSE_STEP_BONUS: i32 = 2;
 /// Flow-erosion susceptibility divisor when a living Root is present
 /// (`≈ 1 + 2.5ρ` at ρ=1 from column `run_sediment`).
 pub const ROOT_EROSION_BIND: f32 = 3.5;
+
+/// Max vertical fall cells when settling unsupported grains in one
+/// call. Default sky is ~5 chunks tall (`64×5`); cover that so F3
+/// litter does not take hundreds of ticks to land.
+pub const GRAIN_SETTLE_PASSES: u32 = 1024;
 
 /// One-cell-per-pass grain fall.
 ///
@@ -53,8 +58,464 @@ pub fn apply_grain_fall(world: &mut World) {
     }
 }
 
+/// Drop unsupported grains / litter through Air until seated or the
+/// pass budget is spent. Starts from the world's current dirty wake
+/// (F3 paint, editor writes, prior CA).
+///
+/// The terrain editor pauses the full tick while open — that is fine;
+/// on unpause, [`tick_with_life`] calls this so painted Organic/Sand
+/// seats instead of hanging until roof-collapse / erosion re-wakes
+/// the column.
+pub fn settle_loose_grains(
+    world: &mut World,
+    rooted: Option<&HashSet<(i32, i32)>>,
+    max_passes: u32,
+) {
+    let active = plan_active(world);
+    settle_loose_grains_regions(world, &active, rooted, max_passes);
+}
+
+/// True when a full-sat Air cell is part of a water column that rests on
+/// solid (a real lake / puddle). Mid-air full-sat blobs (condensation /
+/// invisible suspended water) return false so Organic/Snow sink through
+/// instead of hanging forever on an invisible seat.
+///
+/// Partial-sat Air (haze / soak drawdown) still counts as column water —
+/// only a true empty gap (`sat == 0`) breaks grounding. Otherwise floating
+/// litter soak punching a deep donor cell would make the whole lake look
+/// "ungrounded" and Organic would freefall through the ocean every tick.
+fn water_column_grounded_world(world: &World, gx: i32, gy: i32) -> bool {
+    let mut y = gy;
+    for _ in 0..512 {
+        let Some(c) = world.get_cell(gx, y) else {
+            // Ran off the loaded map through water — treat as bedded.
+            return true;
+        };
+        if c.material == MaterialId::Air {
+            if c.sat.is_empty() {
+                return false;
+            }
+            y -= 1;
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn water_column_grounded_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    let mut y = gy;
+    for _ in 0..512 {
+        let Some(c) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, y) }) else {
+            // Lower chunk not in this pass's ptr map (checkerboard / halo)
+            // while we are still in water — do not treat as a suspended
+            // gap or Organic freefalls through the ocean every settle pass.
+            return true;
+        };
+        if c.material == MaterialId::Air {
+            if c.sat.is_empty() {
+                return false;
+            }
+            y -= 1;
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Snow / Ice / Organic may float on this Air seat only when it is full
+/// standing water that reaches solid ground (lake surface).
+fn floats_on_air_seat_world(world: &World, seat: Cell, gx: i32, gy: i32) -> bool {
+    seat.material == MaterialId::Air
+        && seat.sat.is_full()
+        && water_column_grounded_world(world, gx, gy)
+}
+
+fn floats_on_air_seat_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    seat: Cell,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    seat.material == MaterialId::Air
+        && seat.sat.is_full()
+        && water_column_grounded_ptrs(ptrs, wrap_width, gx, gy)
+}
+
+/// True when `litter_y` is buoyant litter whose column reaches a grounded
+/// lake seat.
+///
+/// Walks down through more litter **and** dense grains. After the first
+/// punch of a tall pile the stack is often `Rock|Organic|Rock|Water` —
+/// stopping at the submerged grain left the upper cargo stranded on the
+/// raft forever (the in-game "still holding" bug).
+fn raft_rests_on_float_water_world(world: &World, gx: i32, litter_y: i32) -> bool {
+    let Some(start) = world.get_cell(gx, litter_y) else {
+        return false;
+    };
+    if !falls_through_empty_air(start.material) {
+        return false;
+    }
+    let mut y = litter_y - 1;
+    for _ in 0..128 {
+        let Some(c) = world.get_cell(gx, y) else {
+            return false;
+        };
+        if floats_on_air_seat_world(world, c, gx, y) {
+            return true;
+        }
+        // Partial / haze water still counts as a lake column under a raft
+        // (surface may be momentarily not-full after flow/soak).
+        if c.material == MaterialId::Air && !c.sat.is_empty() && water_column_grounded_world(world, gx, y)
+        {
+            return true;
+        }
+        if falls_through_empty_air(c.material) || is_grain(c.material) {
+            y -= 1;
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+/// Max punch swaps per call — tall piles on thick rafts need several
+/// grain↔litter steps before cargo reaches the water seat.
+const FLOAT_PUNCH_MAX: u32 = 64;
+
+/// Dense grains cannot ride a floating Organic / Snow / Ice raft.
+///
+/// Scans the whole grid (like [`rise_buoyant_litter`]) so punch still
+/// runs when only the pile was dirtied and the water seat is quiet.
+/// Each pass swaps a grain with the litter cell immediately below it
+/// when that litter column rests on a grounded lake; settle/tick then
+/// sinks the grain through water.
+pub fn punch_through_floating_rafts(world: &mut World) -> u32 {
+    let mut total = 0u32;
+    for _ in 0..FLOAT_PUNCH_MAX {
+        let mut swaps: Vec<(i32, i32)> = Vec::new();
+        for &coord in world.chunks.keys() {
+            let x0 = coord.cx * CHUNK_CELLS_W as i32;
+            let y0 = coord.cy * CHUNK_CELLS_H as i32;
+            let Some(chunk) = world.chunks.get(&coord) else {
+                continue;
+            };
+            for ly in 0..CHUNK_CELLS_H {
+                for lx in 0..CHUNK_CELLS_W {
+                    let cell = chunk.get(lx, ly);
+                    if !is_grain(cell.material) {
+                        continue;
+                    }
+                    let gx = x0 + lx as i32;
+                    let gy = y0 + ly as i32;
+                    let Some(below) = world.get_cell(gx, gy - 1) else {
+                        continue;
+                    };
+                    if !falls_through_empty_air(below.material) {
+                        continue;
+                    }
+                    if !raft_rests_on_float_water_world(world, gx, gy - 1) {
+                        continue;
+                    }
+                    swaps.push((gx, gy));
+                }
+            }
+        }
+        if swaps.is_empty() {
+            break;
+        }
+        // Bottom grains first so Soil under LooseRock punches before rock.
+        swaps.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        let mut moved = 0u32;
+        for (gx, gy) in swaps {
+            let Some(grain) = world.get_cell(gx, gy) else {
+                continue;
+            };
+            if !is_grain(grain.material) {
+                continue;
+            }
+            let Some(litter) = world.get_cell(gx, gy - 1) else {
+                continue;
+            };
+            if !falls_through_empty_air(litter.material) {
+                continue;
+            }
+            if !raft_rests_on_float_water_world(world, gx, gy - 1) {
+                continue;
+            }
+            world.set_cell(gx, gy - 1, grain);
+            world.set_cell(gx, gy, litter);
+            // Keep the water seat awake so the next fall pass sinks cargo.
+            if let Some(seat) = world.get_cell(gx, gy - 2) {
+                if seat.material == MaterialId::Air {
+                    world.touch_dirty(gx, gy - 2);
+                }
+            }
+            moved += 1;
+        }
+        total += moved;
+        if moved == 0 {
+            break;
+        }
+    }
+    total
+}
+
+/// Re-dirty every grain / litter cell that has empty (or non-supporting)
+/// Air directly below — and the Air seat itself.
+///
+/// Needed when mid-air F3 paint lost its dirty wake (quiet water ticks
+/// cleared it before grain fall ran, or the world was saved/loaded).
+/// Without this, floating sand only moves when roof-collapse / erosion
+/// happens to re-wake the column.
+pub fn wake_unsupported_grains(world: &mut World) {
+    let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        for ly in 0..CHUNK_CELLS_H as i32 {
+            for lx in 0..CHUNK_CELLS_W as i32 {
+                let gx = x0 + lx;
+                let gy = y0 + ly;
+                let Some(cell) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                let loose = is_grain(cell.material)
+                    || falls_through_empty_air(cell.material)
+                    || is_repose_grain(cell.material);
+                if !loose {
+                    continue;
+                }
+                let Some(below) = world.get_cell(gx, gy - 1) else {
+                    world.touch_dirty(gx, gy);
+                    continue;
+                };
+                // Dense cargo on a floating litter raft — punch-through wake.
+                if is_grain(cell.material) && falls_through_empty_air(below.material) {
+                    if raft_rests_on_float_water_world(world, gx, gy - 1) {
+                        world.touch_dirty(gx, gy);
+                        world.touch_dirty(gx, gy - 1);
+                        // Water seat under the raft must be active so fall
+                        // can sink cargo after the punch swap.
+                        let mut y = gy - 2;
+                        while let Some(c) = world.get_cell(gx, y) {
+                            if falls_through_empty_air(c.material) {
+                                world.touch_dirty(gx, y);
+                                y -= 1;
+                                continue;
+                            }
+                            if c.material == MaterialId::Air {
+                                world.touch_dirty(gx, y);
+                            }
+                            break;
+                        }
+                        continue;
+                    }
+                }
+                if below.material != MaterialId::Air {
+                    continue;
+                }
+                // Snow / Ice / Organic float on grounded lakes only.
+                if falls_through_empty_air(cell.material)
+                    && floats_on_air_seat_world(world, below, gx, gy - 1)
+                {
+                    // Submerged under a refilled surface: full water above
+                    // means this cell must buoyancy-rise, not sit forever.
+                    if let Some(above) = world.get_cell(gx, gy + 1) {
+                        if floats_on_air_seat_world(world, above, gx, gy + 1) {
+                            world.touch_dirty(gx, gy);
+                            world.touch_dirty(gx, gy + 1);
+                        }
+                    }
+                    continue;
+                }
+                world.touch_dirty(gx, gy);
+                world.touch_dirty(gx, gy - 1);
+            }
+        }
+    }
+}
+
+/// Re-dirty supported grains whose diagonal-down seat is steeper than
+/// repose — vertical Organic/sand cliff faces that already have solid
+/// under them never trip [`wake_unsupported_grains`], so without this
+/// they freeze as walls after the first settle pass.
+pub fn wake_unstable_slopes(world: &mut World) {
+    let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        for ly in 0..CHUNK_CELLS_H as i32 {
+            for lx in 0..CHUNK_CELLS_W as i32 {
+                let gx = x0 + lx;
+                let gy = y0 + ly;
+                let Some(cell) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if !is_repose_grain(cell.material) {
+                    continue;
+                }
+                let Some(below) = world.get_cell(gx, gy - 1) else {
+                    continue;
+                };
+                // Freefall seats are handled by [`wake_unsupported_grains`].
+                if below.material == MaterialId::Air {
+                    continue;
+                }
+                let max_step = {
+                    let wet = crate::failure::pore_wetness_with(cell, &world.hydro);
+                    crate::failure::grain_repose_max_step(cell.material, wet)
+                };
+                let through_haze =
+                    matches!(cell.material, MaterialId::Organic | MaterialId::Soil);
+                for dx in [-1, 1] {
+                    let sx = gx + dx;
+                    let sy = gy - 1;
+                    let Some(seat) = world.get_cell(sx, sy) else {
+                        continue;
+                    };
+                    if seat.material != MaterialId::Air {
+                        continue;
+                    }
+                    if seat.sat.is_full()
+                        && matches!(
+                            cell.material,
+                            MaterialId::Organic | MaterialId::Soil | MaterialId::Snow
+                        )
+                    {
+                        continue;
+                    }
+                    if is_grain(cell.material) && seat.sat.0 > GRAIN_REPOSE_HAZE_MAX {
+                        continue;
+                    }
+                    if diag_drop_exceeds_world(world, sx, gy, max_step, through_haze) {
+                        world.touch_dirty(gx, gy);
+                        world.touch_dirty(sx, sy);
+                        break;
+                    }
+                }
+                // Same-Y walk-off seat (Air beside with Air below).
+                if max_step > 0 {
+                    continue;
+                }
+                for dx in [-1, 1] {
+                    let sx = gx + dx;
+                    let Some(seat) = world.get_cell(sx, gy) else {
+                        continue;
+                    };
+                    if seat.material != MaterialId::Air {
+                        continue;
+                    }
+                    if is_grain(cell.material) && seat.sat.0 > GRAIN_REPOSE_HAZE_MAX {
+                        continue;
+                    }
+                    if matches!(cell.material, MaterialId::Organic | MaterialId::Soil)
+                        && seat.sat.is_full()
+                    {
+                        continue;
+                    }
+                    let Some(below_seat) = world.get_cell(sx, gy - 1) else {
+                        continue;
+                    };
+                    if below_seat.material != MaterialId::Air || below_seat.sat.is_full() {
+                        continue;
+                    }
+                    world.touch_dirty(gx, gy);
+                    world.touch_dirty(sx, gy);
+                    break;
+                }
+            }
+        }
+    }
+}
+
+fn diag_drop_exceeds_world(
+    world: &World,
+    dest_gx: i32,
+    from_y: i32,
+    max_step: i32,
+    through_haze: bool,
+) -> bool {
+    let mut drop = 0i32;
+    for dy in 1..=(max_step + 2) {
+        let y = from_y - dy;
+        let Some(c) = world.get_cell(dest_gx, y) else {
+            break;
+        };
+        if c.material != MaterialId::Air {
+            break;
+        }
+        if !repose_gap_air(c, through_haze) {
+            break;
+        }
+        drop += 1;
+        if drop > max_step {
+            return true;
+        }
+    }
+    drop > max_step
+}
+
+/// [`settle_loose_grains`] from a pre-planned active set (e.g. the
+/// post-flow halo when water wrote nothing).
+///
+/// Interleaves fall and repose: a fall-then-repose split left Organic
+/// cliff faces / overhangs because repose can undercut a stack and
+/// those cells never freefall again in the same settle.
+pub fn settle_loose_grains_regions(
+    world: &mut World,
+    initial: &[ActiveChunk],
+    rooted: Option<&HashSet<(i32, i32)>>,
+    max_passes: u32,
+) {
+    let mut cur: Vec<ActiveChunk> = initial.to_vec();
+    for _ in 0..max_passes {
+        if cur.is_empty() {
+            break;
+        }
+        let mut moved = 0u32;
+        // Checkerboard so pull write-sets stay disjoint under rayon.
+        // `water_column_grounded_ptrs` treats a missing lower chunk as
+        // bedded, so float seats no longer freefall when the ocean floor
+        // is outside this colour's ptr map.
+        for pass in &partition_checkerboard(&cur) {
+            if !pass.is_empty() {
+                moved += apply_grain_fall_regions(world, pass);
+            }
+        }
+        let after_fall = plan_active(world);
+        let repose_src = if after_fall.is_empty() {
+            cur.clone()
+        } else {
+            after_fall
+        };
+        let repose_passes = partition_checkerboard(&repose_src);
+        for pass in &repose_passes {
+            moved += apply_grain_repose_regions(world, pass, rooted);
+        }
+        if moved == 0 {
+            break;
+        }
+        let next = plan_active(world);
+        if next.is_empty() {
+            break;
+        }
+        cur = next;
+    }
+}
+
 /// Grain fall restricted to a pre-planned active set.
-pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
+///
+/// Returns how many Air↔grain swaps this pass performed.
+pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u32 {
+    let moves = std::sync::atomic::AtomicU32::new(0);
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
@@ -75,25 +536,226 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 if is_grain(above.material) {
                     // Dense grains sink through any Air sat.
                 } else if falls_through_empty_air(above.material) {
-                    // Snow / Ice / Organic: drop through empty Air *and*
-                    // haze; float only on standing (full) water — lids,
-                    // shore slush, leaf litter. Must match phase support
-                    // (`min_sat_to_freeze` / full cell): floating on
-                    // partial sat while phase melted that seat caused a
-                    // melt→refreeze pump (±1 cell every phase period).
-                    if cur.sat.is_full() {
+                    // Snow / Ice / Organic: drop through empty Air, haze,
+                    // and *suspended* full-sat blobs. Float only on
+                    // grounded lake / puddle surfaces.
+                    if floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy) {
+                        // Floating raft cannot carry dense cargo. Walk up
+                        // contiguous litter to the lowest grain and swap
+                        // that grain with the water-contact litter cell.
+                        let mut cargo_y = gy + 2;
+                        for _ in 0..32 {
+                            let Some(cargo) = (unsafe {
+                                parallel::get_cell(ptrs, wrap_width, gx, cargo_y)
+                            }) else {
+                                break;
+                            };
+                            if falls_through_empty_air(cargo.material) {
+                                cargo_y += 1;
+                                continue;
+                            }
+                            if is_grain(cargo.material) {
+                                unsafe {
+                                    parallel::set_cell(
+                                        ptrs, wrap_width, gx, gy + 1, cargo,
+                                    );
+                                    parallel::set_cell(
+                                        ptrs, wrap_width, gx, cargo_y, above,
+                                    );
+                                }
+                                moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            }
+                            break;
+                        }
                         continue;
                     }
                 } else {
+                    // Buoyancy: only pull litter up through grounded full
+                    // water. (Freeboard pop into empty Air was removed —
+                    // on an uneven ocean surface it swapped Organic up
+                    // then immediately fell back, burning 1024 settle
+                    // passes per tick.)
+                    let Some(below) =
+                        (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy - 1) })
+                    else {
+                        continue;
+                    };
+                    if !falls_through_empty_air(below.material) {
+                        continue;
+                    }
+                    if !floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy) {
+                        continue;
+                    }
+                    unsafe {
+                        parallel::set_cell(ptrs, wrap_width, gx, gy, below);
+                        parallel::set_cell(ptrs, wrap_width, gx, gy - 1, cur);
+                    }
+                    moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     continue;
                 }
                 unsafe {
                     parallel::set_cell(ptrs, wrap_width, gx, gy, above);
                     parallel::set_cell(ptrs, wrap_width, gx, gy + 1, cur);
                 }
+                moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
     });
+    moves.into_inner()
+}
+
+/// Max pore sat absorbed per tick from the water column under a floating
+/// Organic / Soil raft. Keeps the surface cell full so the raft still floats.
+const FLOAT_SOAK_RATE: u8 = 16;
+/// Max cells a submerged litter grain may rise in one tick.
+const BUOYANT_RISE_MAX: i32 = 16;
+
+fn collect_buoyant_litter(world: &World) -> Vec<(i32, i32)> {
+    let mut litter = Vec::new();
+    for &coord in world.chunks.keys() {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(lx, ly);
+                if falls_through_empty_air(cell.material) {
+                    litter.push((x0 + lx as i32, y0 + ly as i32));
+                }
+            }
+        }
+    }
+    litter
+}
+
+/// Organic / Soil sitting on a grounded lake surface soaks pore water from
+/// deeper cells in the water column (never drains the surface seat below
+/// full — that would sink the raft and recreate submerged litter lines).
+///
+/// Scans only buoyant litter cells (not the whole grid).
+pub fn soak_floating_litter(world: &mut World) {
+    let litter = collect_buoyant_litter(world);
+    for (gx, gy) in litter {
+        let Some(raft) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if !matches!(raft.material, MaterialId::Organic | MaterialId::Soil) {
+            continue;
+        }
+        let cap = water_capacity_with(raft.material, &world.hydro);
+        if cap == 0 || raft.sat.0 >= cap {
+            continue;
+        }
+        let Some(surface) = world.get_cell(gx, gy - 1) else {
+            continue;
+        };
+        if !floats_on_air_seat_world(world, surface, gx, gy - 1) {
+            continue;
+        }
+        let room = cap - raft.sat.0;
+        let want = room.min(FLOAT_SOAK_RATE);
+        if want == 0 {
+            continue;
+        }
+        let mut taken = 0u8;
+        // Drain deepest water first so mid-column stays full for longer
+        // (float seats remain grounded full-sat at the surface).
+        let mut donors: Vec<i32> = Vec::new();
+        for dy in 2..=64 {
+            let y = gy - dy;
+            let Some(donor) = world.get_cell(gx, y) else {
+                break;
+            };
+            if donor.material != MaterialId::Air {
+                break;
+            }
+            if donor.sat.0 > 0 {
+                donors.push(y);
+            }
+        }
+        for y in donors.into_iter().rev() {
+            if taken >= want {
+                break;
+            }
+            let Some(donor) = world.get_cell(gx, y) else {
+                break;
+            };
+            if donor.material != MaterialId::Air || donor.sat.0 == 0 {
+                continue;
+            }
+            let give = donor.sat.0.min(want - taken);
+            if give == 0 {
+                continue;
+            }
+            world.set_cell(
+                gx,
+                y,
+                Cell {
+                    sat: Sat(donor.sat.0 - give),
+                    ..donor
+                },
+            );
+            taken = taken.saturating_add(give);
+        }
+        if taken == 0 {
+            continue;
+        }
+        let Some(raft_now) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        world.set_cell(
+            gx,
+            gy,
+            Cell {
+                sat: Sat(raft_now.sat.0.saturating_add(taken)),
+                ..raft_now
+            },
+        );
+    }
+}
+
+/// Lift submerged Snow/Ice/Organic through grounded full water, and pop
+/// litter that still has lake water beside it onto freeboard Air.
+///
+/// Litter-centric (not a full-grid × height scan): finds buoyant cells once,
+/// then bubbles each up at most [`BUOYANT_RISE_MAX`] steps this tick.
+pub fn rise_buoyant_litter(world: &mut World) {
+    let mut litter = collect_buoyant_litter(world);
+    if litter.is_empty() {
+        return;
+    }
+    // Bottom-up so lower cells rise before upper ones in the same column.
+    litter.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    for (gx, gy0) in litter {
+        let mut gy = gy0;
+        for _ in 0..BUOYANT_RISE_MAX {
+            let Some(here) = world.get_cell(gx, gy) else {
+                break;
+            };
+            if !falls_through_empty_air(here.material) {
+                break;
+            }
+            let Some(above) = world.get_cell(gx, gy + 1) else {
+                break;
+            };
+            if above.material != MaterialId::Air {
+                break;
+            }
+            let rise = if floats_on_air_seat_world(world, above, gx, gy + 1) {
+                true
+            } else {
+                false
+            };
+            if !rise {
+                break;
+            }
+            world.set_cell(gx, gy + 1, here);
+            world.set_cell(gx, gy, above);
+            gy += 1;
+        }
+    }
 }
 
 /// Angle-of-repose slide: supported grains move diagonally down into Air
@@ -101,9 +763,10 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) {
 ///
 /// Sand (`max_step = 0`) won't hold a 1-cell cliff — piles flatten.
 /// LooseRock (`max_step ≥ 1`) can hold short stairs. Wet grains
-/// (pore sat or standing water below) loosen by one step. Living Root
-/// cells raise the local step via [`ROOT_REPOSE_STEP_BONUS`]. One move
-/// per cell per pass; run after [`apply_grain_fall`].
+/// (pore sat or standing water below) loosen by one step; Clay uses a
+/// dry-powder / plastic / mud curve instead. Living Root cells raise
+/// the local step via [`ROOT_REPOSE_STEP_BONUS`]. One move per cell per
+/// pass; run after [`apply_grain_fall`].
 pub fn apply_grain_repose(world: &mut World) {
     apply_grain_repose_bound(world, None);
 }
@@ -120,12 +783,14 @@ pub fn apply_grain_repose_bound(
 }
 
 /// Repose slide restricted to a pre-planned active set.
+///
+/// Returns how many diagonal slides this pass performed.
 pub fn apply_grain_repose_regions(
     world: &mut World,
     active: &[ActiveChunk],
     rooted: Option<&HashSet<(i32, i32)>>,
-) {
-    apply_repose_pass(world, active, None, f32::INFINITY, rooted);
+) -> u32 {
+    apply_repose_pass(world, active, None, f32::INFINITY, rooted)
 }
 
 /// Cold snap avalanche: wet sand loosens, snow/hillside ice spill onto
@@ -156,12 +821,14 @@ fn apply_repose_pass(
     temp: Option<&Temperature>,
     freeze_point_c: f32,
     rooted: Option<&HashSet<(i32, i32)>>,
-) {
+) -> u32 {
     let seed = world.seed.0;
     let tick_no = world.tick;
     let cold_mode = temp.is_some();
     let hydro = world.hydro;
-    for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
+    let moves = std::sync::atomic::AtomicU32::new(0);
+    // Moore ptr map + serial: repose writes horizontally across seams.
+    for_each_region_serial_moore(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in ac.rect.x0..=ac.rect.x1 {
@@ -221,33 +888,19 @@ fn apply_repose_pass(
                     let mut max_step = if src.material == MaterialId::Ice {
                         0 // hillside glaze — no 1-cell cliff
                     } else {
-                        grain_max_stable_step(src.material)
+                        // Clay plasticity + F2a wet loosen for other grains.
+                        crate::failure::grain_repose_max_step(
+                            src.material,
+                            wet_frac_for(src, below_src, &hydro),
+                        )
                     };
                     // Live roots bind the grain (column Ecology.root_density).
                     if rooted.is_some_and(|r| r.contains(&(sx, sy))) {
                         max_step = max_step.saturating_add(ROOT_REPOSE_STEP_BONUS);
                     }
-                    // F2a: wet loosen scaled by cohesion — low-c′ grains
-                    // always lose a step; high-c′ clay needs near-saturation.
-                    // Wetness is sat/capacity so low-porosity LooseRock can
-                    // soften when soaked (absolute sat>=40 never fires there).
-                    let pore = crate::failure::pore_wetness_with(src, &hydro);
-                    let standing_wet = matches!(
-                        below_src,
-                        Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
-                    );
-                    let wet_frac = if standing_wet {
-                        1.0
-                    } else {
-                        pore
-                    };
-                    let meaningfully_wet = standing_wet || pore >= 0.2 || src.sat.0 >= 40;
-                    if meaningfully_wet
-                        && crate::failure::wet_repose_loosens(src.material, wet_frac)
-                    {
-                        max_step = max_step.saturating_sub(1);
-                    }
-                    if !diag_drop_exceeds(ptrs, wrap_width, gx, sy, max_step) {
+                    let through_haze =
+                        matches!(src.material, MaterialId::Organic | MaterialId::Soil);
+                    if !diag_drop_exceeds(ptrs, wrap_width, gx, sy, max_step, through_haze) {
                         continue;
                     }
                     write_repose_swap(
@@ -256,7 +909,62 @@ fn apply_repose_pass(
                     moved = true;
                     break;
                 }
-                if moved || !cold_mode {
+                if moved {
+                    moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                }
+                // Same-Y walk-off: max_step==0 grains on a rock ledge where
+                // diagonal-down is blocked can still step sideways into Air
+                // that opens downward — clears 2–3 cell sand lips on slopes.
+                if !cold_mode {
+                    let open_drop = matches!(
+                        below_dest,
+                        Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
+                    );
+                    if !open_drop {
+                        continue;
+                    }
+                    for &from_dx in &order {
+                        let sx = gx + from_dx;
+                        let sy = gy;
+                        let Some(src) =
+                            (unsafe { parallel::get_cell(ptrs, wrap_width, sx, sy) })
+                        else {
+                            continue;
+                        };
+                        let below_src =
+                            unsafe { parallel::get_cell(ptrs, wrap_width, sx, sy - 1) };
+                        let mut step = crate::failure::grain_repose_max_step(
+                            src.material,
+                            wet_frac_for(src, below_src, &hydro),
+                        );
+                        if rooted.is_some_and(|r| r.contains(&(sx, sy))) {
+                            step = step.saturating_add(ROOT_REPOSE_STEP_BONUS);
+                        }
+                        // Rooted sand / plastic clay can hold short stairs —
+                        // don't walk off.
+                        if step > 0 {
+                            continue;
+                        }
+                        if !is_grain(src.material)
+                            && !matches!(src.material, MaterialId::Organic | MaterialId::Soil)
+                        {
+                            continue;
+                        }
+                        match below_src {
+                            Some(b) if b.material == MaterialId::Air => continue,
+                            None => continue,
+                            _ => {}
+                        }
+                        if !avalanche_seat_ok(src.material, dest, below_dest) {
+                            continue;
+                        }
+                        write_repose_swap(
+                            ptrs, wrap_width, &hydro, gx, gy, dest, sx, sy, src,
+                        );
+                        moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
                     continue;
                 }
                 // Same-Y smear: cold wet sand (or snow) onto an ice lid seat.
@@ -299,11 +1007,13 @@ fn apply_repose_pass(
                     write_repose_swap(
                         ptrs, wrap_width, &hydro, gx, gy, dest, sx, sy, src,
                     );
+                    moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     break;
                 }
             }
         }
     });
+    moves.into_inner()
 }
 
 /// Swap grain into a diagonal/lateral Air seat.
@@ -422,24 +1132,83 @@ fn grain_is_wet(src: Cell, below_src: Option<Cell>) -> bool {
     )
 }
 
+/// Pore wetness for repose, treating standing water under the grain as
+/// fully wet (shore / lake toe).
+fn wet_frac_for(
+    src: Cell,
+    below_src: Option<Cell>,
+    hydro: &wk_material::HydroOverrides,
+) -> f32 {
+    let pore = crate::failure::pore_wetness_with(src, hydro);
+    let standing_wet = matches!(
+        below_src,
+        Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
+    );
+    if standing_wet {
+        1.0
+    } else {
+        pore
+    }
+}
+
 fn seat_on_ice(below_dest: Option<Cell>) -> bool {
     matches!(below_dest, Some(b) if b.material == MaterialId::Ice)
 }
 
+/// Atmospheric haze sand/gravel/clay may repose into. Wetter seats are
+/// treated as shore film (fleck cycle) and refused. Organic/Soil still
+/// use full through-haze on land, but refuse underwater film seats.
+pub const GRAIN_REPOSE_HAZE_MAX: u8 = 32;
+
 /// Snow/ice may sit on empty Air or on a wet film that rests on Ice.
-/// Dense grains may only repose into **dry** Air. Wet film and standing
-/// water seats are fall-only — sliding into film + stealing lake water
-/// was the shoreline sand fleck cycle (bright grains forever).
+/// Dense grains may repose into **dry** Air or thin atmospheric haze;
+/// sliding into shore film + stealing lake water was the fleck cycle.
+/// Organic litter / composted Soil match grain-fall: sprawl through
+/// land haze/film, float only on grounded full standing water (else humid
+/// cliffs freeze). Suspended mid-air full-sat is not a seat. Organic must
+/// not sprawl into underwater film (that left a submerged "glitch line").
 fn avalanche_seat_ok(src: MaterialId, dest: Cell, below_dest: Option<Cell>) -> bool {
     if dest.sat.is_empty() {
         return true;
     }
+    if matches!(src, MaterialId::Organic | MaterialId::Soil) {
+        if dest.sat.is_full() {
+            return false;
+        }
+        // Underwater gap: Air with standing water beneath — refuse so
+        // litter does not crawl into the water column under a raft.
+        if matches!(
+            below_dest,
+            Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
+        ) {
+            return false;
+        }
+        return true;
+    }
     if is_grain(src) {
-        // Any non-zero sat (film or lake) — sink via grain-fall only.
-        return false;
+        // Thin humidity haze OK (inland cliffs); shore film / lake not.
+        return dest.sat.0 <= GRAIN_REPOSE_HAZE_MAX;
     }
     // Snow / hillside ice: spill onto lake ice, not into open water.
     seat_on_ice(below_dest)
+}
+
+/// Whether this Air cell counts as empty gap for a repose drop measure.
+fn repose_gap_air(c: Cell, through_haze: bool) -> bool {
+    if c.material != MaterialId::Air {
+        return false;
+    }
+    if c.sat.is_empty() {
+        return true;
+    }
+    if c.sat.is_full() {
+        return false;
+    }
+    if through_haze {
+        return true; // Organic/Soil: any non-full film
+    }
+    // Dense grains: only thin atmospheric haze.
+    c.sat.0 <= GRAIN_REPOSE_HAZE_MAX
 }
 
 fn hillside_ice_support(below_src: Option<Cell>) -> bool {
@@ -850,6 +1619,7 @@ fn diag_drop_exceeds(
     dest_gx: i32,
     from_y: i32,
     max_step: i32,
+    through_haze: bool,
 ) -> bool {
     let mut drop = 0i32;
     for dy in 1..=(max_step + 2) {
@@ -860,8 +1630,7 @@ fn diag_drop_exceeds(
         if c.material != MaterialId::Air {
             break;
         }
-        // Wet Air (film or lake) supports repose — fall handles sinking.
-        if !c.sat.is_empty() {
+        if !repose_gap_air(c, through_haze) {
             break;
         }
         drop += 1;
