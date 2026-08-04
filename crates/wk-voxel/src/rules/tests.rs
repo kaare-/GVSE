@@ -3421,6 +3421,105 @@ fn loose_rock_punches_through_stacked_organic_raft() {
 }
 
 #[test]
+fn punch_continues_through_organic_sandwiched_on_sunk_rock() {
+    // After the first punch a tall pile becomes Rock|Organic|Rock|Water.
+    // Punch must keep walking through the submerged grain to the lake.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 5, Cell::solid(MaterialId::LooseRock)); // already in water
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 7, Cell::solid(MaterialId::LooseRock));
+    w.set_cell(5, 8, Cell::solid(MaterialId::LooseRock));
+    for _ in 0..20 {
+        tick(&mut w);
+    }
+    let mut riding = Vec::new();
+    for y in 1..=12 {
+        if w.get_cell(5, y).map(|c| c.material) == Some(MaterialId::LooseRock) {
+            if w.get_cell(5, y - 1).map(|c| c.material) == Some(MaterialId::Organic) {
+                riding.push(y);
+            }
+        }
+    }
+    assert!(
+        riding.is_empty(),
+        "LooseRock must not stay stranded on Organic over sunk rock ({riding:?})"
+    );
+}
+
+#[test]
+fn demo_ocean_loose_rock_punches_organic_mat() {
+    use crate::worldgen::{stamp_world, WorldgenParams};
+    let mut w = World::new(9);
+    let p = WorldgenParams {
+        width_cols: (CHUNK_CELLS_W as i32) * 4,
+        sky_ceiling_y: (CHUNK_CELLS_H as i32) * 2,
+        ..WorldgenParams::default()
+    };
+    stamp_world(&mut w, &p);
+    let y_surf = p.sea_level_y;
+    let mut ox = None;
+    for x in 20..80 {
+        let Some(surf) = w.get_cell(x, y_surf) else {
+            continue;
+        };
+        let Some(above) = w.get_cell(x, y_surf + 1) else {
+            continue;
+        };
+        if surf.material == MaterialId::Air
+            && surf.sat.is_full()
+            && above.material == MaterialId::Air
+            && above.sat.is_empty()
+        {
+            ox = Some(x);
+            break;
+        }
+    }
+    let ox = ox.expect("need open water column");
+    for x in ox..ox + 9 {
+        w.set_cell(x, y_surf + 1, Cell::solid(MaterialId::Organic));
+    }
+    for dy in 0..10 {
+        let y = y_surf + 2 + dy;
+        let half = (dy / 2).min(4);
+        for x in (ox + 4 - half)..=(ox + 4 + half) {
+            if w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Air) {
+                w.set_cell(x, y, Cell::solid(MaterialId::LooseRock));
+            }
+        }
+    }
+    for _ in 0..40 {
+        tick(&mut w);
+    }
+    let mut riding = Vec::new();
+    for x in ox - 2..ox + 12 {
+        for y in y_surf..y_surf + 20 {
+            let Some(c) = w.get_cell(x, y) else {
+                continue;
+            };
+            if c.material != MaterialId::LooseRock {
+                continue;
+            }
+            if w.get_cell(x, y - 1).map(|c| c.material) == Some(MaterialId::Organic) {
+                riding.push((x, y));
+            }
+        }
+    }
+    assert!(
+        riding.is_empty(),
+        "LooseRock still riding Organic on demo ocean: {riding:?}"
+    );
+}
+
+#[test]
 fn organic_alone_still_floats_without_punch() {
     let mut w = setup_column_world();
     for y in 1..=6 {

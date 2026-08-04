@@ -150,7 +150,12 @@ fn floats_on_air_seat_ptrs(
 }
 
 /// True when `litter_y` is buoyant litter whose column reaches a grounded
-/// lake seat through only more litter (stacked Organic rafts).
+/// lake seat.
+///
+/// Walks down through more litter **and** dense grains. After the first
+/// punch of a tall pile the stack is often `Rock|Organic|Rock|Water` —
+/// stopping at the submerged grain left the upper cargo stranded on the
+/// raft forever (the in-game "still holding" bug).
 fn raft_rests_on_float_water_world(world: &World, gx: i32, litter_y: i32) -> bool {
     let Some(start) = world.get_cell(gx, litter_y) else {
         return false;
@@ -159,14 +164,20 @@ fn raft_rests_on_float_water_world(world: &World, gx: i32, litter_y: i32) -> boo
         return false;
     }
     let mut y = litter_y - 1;
-    for _ in 0..64 {
+    for _ in 0..128 {
         let Some(c) = world.get_cell(gx, y) else {
             return false;
         };
         if floats_on_air_seat_world(world, c, gx, y) {
             return true;
         }
-        if falls_through_empty_air(c.material) {
+        // Partial / haze water still counts as a lake column under a raft
+        // (surface may be momentarily not-full after flow/soak).
+        if c.material == MaterialId::Air && !c.sat.is_empty() && water_column_grounded_world(world, gx, y)
+        {
+            return true;
+        }
+        if falls_through_empty_air(c.material) || is_grain(c.material) {
             y -= 1;
             continue;
         }
@@ -470,10 +481,15 @@ pub fn settle_loose_grains_regions(
             break;
         }
         let mut moved = 0u32;
-        // Fall on the full active set (no checkerboard). Splitting by
-        // colour drops lower ocean chunks from the ptr map so float
-        // grounded walks falsely fail and Organic oscillates forever.
-        moved += apply_grain_fall_regions(world, &cur);
+        // Checkerboard so pull write-sets stay disjoint under rayon.
+        // `water_column_grounded_ptrs` treats a missing lower chunk as
+        // bedded, so float seats no longer freefall when the ocean floor
+        // is outside this colour's ptr map.
+        for pass in &partition_checkerboard(&cur) {
+            if !pass.is_empty() {
+                moved += apply_grain_fall_regions(world, pass);
+            }
+        }
         let after_fall = plan_active(world);
         let repose_src = if after_fall.is_empty() {
             cur.clone()
