@@ -1696,12 +1696,37 @@ impl Default for GrainConfig {
     }
 }
 
+/// True when this cell can be picked up by flow bedload / bank undercut.
+///
+/// Dense grains use [`is_flow_erodible`]. Grounded or waterlogged Organic
+/// also scours (beach litter / sunk mats) so current can drag compost
+/// downhill like sand. Floating raft Organic is skipped — wind drift
+/// owns surface mats; chewing them would dissolve plant holdfasts.
+fn cell_is_flow_erodible(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
+    if is_flow_erodible(cell.material) {
+        return true;
+    }
+    if cell.material != MaterialId::Organic {
+        return false;
+    }
+    use wk_material::MaterialRegistry;
+    if MaterialRegistry::erosion_rank(MaterialId::Organic) >= 150 {
+        return false;
+    }
+    // Floating (or stacked on a raft) — leave for wind / soak / waterlog.
+    if raft_rests_on_float_water_world(world, gx, gy) {
+        return false;
+    }
+    true
+}
+
 /// Flow erosion + immediate downhill deposition for erodible grains.
 ///
 /// Standing water with a cascade / head-drop neighbor undercuts the bed
 /// or bank and places the grain on a lower solid-supported Air seat.
 /// Still pools (no flow bias) are skipped so lakes don't chew their
-/// floors. Ice is never targeted ([`is_flow_erodible`]).
+/// floors. Ice is never targeted ([`is_flow_erodible`]). Grounded /
+/// waterlogged Organic is included; floating rafts are not.
 ///
 /// Compute-then-apply; deterministic given `(seed, tick, cfg.seed_salt)`.
 pub fn apply_flow_erosion(world: &mut World, cfg: &GrainConfig) {
@@ -1757,7 +1782,7 @@ pub fn apply_flow_erosion_bound(
 
                 // Bed scour under this water cell.
                 if let Some(bed) = world.get_cell(gx, gy - 1) {
-                    if is_flow_erodible(bed.material) {
+                    if cell_is_flow_erodible(world, gx, gy - 1, bed) {
                         maybe_queue_erosion(
                             world,
                             cfg,
@@ -1779,7 +1804,7 @@ pub fn apply_flow_erosion_bound(
                     let Some(bank) = world.get_cell(bx, gy) else {
                         continue;
                     };
-                    if !is_flow_erodible(bank.material) {
+                    if !cell_is_flow_erodible(world, bx, gy, bank) {
                         continue;
                     }
                     maybe_queue_erosion(
@@ -1835,8 +1860,15 @@ pub fn apply_flow_erosion_bound(
         // through the Air column, and park any remainder in the vacated
         // cell. Bed scour leaves empty Air (gravity pulls the column
         // down) — never mint a fresh Cell::water().
-        let (placed, mut leftover) =
+        let (mut placed, mut leftover) =
             absorb_free_water_into_grain(ev.grain, dest.sat, &world.hydro);
+        // Organic moved by current stays as bedload: waterlog wet deposits
+        // so buoyancy does not yank them back onto the free surface.
+        if placed.material == MaterialId::Organic
+            && (dest.sat.0 > 0 || placed.sat.0 > 0 || ev.grain.is_waterlogged_organic())
+        {
+            placed.flags.set(CellFlags::WATERLOGGED);
+        }
         world.set_cell(ev.deposit_x, ev.deposit_y, placed);
         leftover = push_sat_upward(world, ev.deposit_x, ev.deposit_y + 1, leftover);
         // Vacated hole is empty Air, plus any free water that could not

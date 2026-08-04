@@ -193,6 +193,10 @@ pub fn is_repose_grain(material: MaterialId) -> bool {
 /// Dense grains soft enough for flow bedload / bank undercut.
 /// Matches the column sim's `erosion_resistance < 150` cut (excludes
 /// Stone / Limestone / Ice). Snow uses repose + phase, not bedload.
+///
+/// **Organic** is not included here — it floats, so bedload uses the
+/// world-aware gate in [`crate::rules::grain`] (grounded / waterlogged
+/// only; floating rafts stay). **Soil** is a dense grain and is included.
 pub fn is_flow_erodible(material: MaterialId) -> bool {
     use wk_material::MaterialRegistry;
     is_grain(material) && MaterialRegistry::erosion_rank(material) < 150
@@ -353,8 +357,10 @@ mod tests {
         assert!(is_flow_erodible(MaterialId::Sand));
         assert!(is_flow_erodible(MaterialId::Gravel));
         assert!(is_flow_erodible(MaterialId::Clay));
+        assert!(is_flow_erodible(MaterialId::Soil));
         assert!(is_flow_erodible(MaterialId::LooseRock));
         assert!(is_flow_erodible(MaterialId::LooseLimestone));
+        assert!(!is_flow_erodible(MaterialId::Organic)); // world-aware gate in grain.rs
         assert!(!is_flow_erodible(MaterialId::Ice));
         assert!(!is_flow_erodible(MaterialId::Snow));
         assert!(!is_flow_erodible(MaterialId::Stone));

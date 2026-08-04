@@ -1366,6 +1366,104 @@ fn flowing_water_scours_sand_bed_downhill() {
 }
 
 #[test]
+fn flowing_water_scours_soil_bed_downhill() {
+    let mut w = cascade_shelf_world(MaterialId::Soil);
+    let cfg = GrainConfig {
+        erosion_rate: 1.0,
+        max_events_per_tick: 32,
+        ..GrainConfig::default()
+    };
+    for t in 0..30 {
+        w.tick = t;
+        apply_flow_erosion(&mut w, &cfg);
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+    }
+    let soil_at_lip = w.get_cell(7, 1).map(|c| c.material) == Some(MaterialId::Soil)
+        || w.get_cell(8, 1).map(|c| c.material) == Some(MaterialId::Soil);
+    let bed_hole = (3..=6).any(|x| {
+        w.get_cell(x, 1).map(|c| c.material) != Some(MaterialId::Soil)
+    });
+    assert!(
+        soil_at_lip || bed_hole,
+        "cascade should drag Soil bedload like sand (lip={soil_at_lip}, hole={bed_hole})"
+    );
+}
+
+#[test]
+fn flowing_water_scours_grounded_organic_bed_downhill() {
+    // Organic on solid (beach / sunk mat) under a cascade — not a raft.
+    let mut w = cascade_shelf_world(MaterialId::Organic);
+    let cfg = GrainConfig {
+        erosion_rate: 1.0,
+        max_events_per_tick: 32,
+        ..GrainConfig::default()
+    };
+    for t in 0..40 {
+        w.tick = t;
+        apply_flow_erosion(&mut w, &cfg);
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+    }
+    let org_at_lip = w.get_cell(7, 1).map(|c| c.material) == Some(MaterialId::Organic)
+        || w.get_cell(8, 1).map(|c| c.material) == Some(MaterialId::Organic);
+    let bed_hole = (3..=6).any(|x| {
+        w.get_cell(x, 1).map(|c| c.material) != Some(MaterialId::Organic)
+    });
+    assert!(
+        org_at_lip || bed_hole,
+        "grounded Organic should scour under cascade (lip={org_at_lip}, hole={bed_hole})"
+    );
+}
+
+#[test]
+fn floating_organic_raft_is_not_flow_eroded() {
+    // Lake surface Organic raft beside a cascade lip — wind owns this mat.
+    let mut w = setup_column_world();
+    for x in 3..=6 {
+        // Deep water column so Organic floats (not grounded bed).
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+        w.set_cell(x, 5, Cell::solid(MaterialId::Organic));
+    }
+    // Cascade lip at x=7 (empty below water surface height).
+    for y in 1..=5 {
+        w.set_cell(7, y, Cell::air());
+    }
+    // Give the lip a thin water sheet at the raft height so flow_bias sees
+    // a cascade from the raft-side water under the Organic? Actually bed
+    // scour looks under water cells — put water next to raft at surface.
+    w.set_cell(6, 5, Cell::water()); // replace one Organic with water for bias
+    w.set_cell(5, 5, Cell::solid(MaterialId::Organic));
+    let cfg = GrainConfig {
+        erosion_rate: 1.0,
+        max_events_per_tick: 64,
+        ..GrainConfig::default()
+    };
+    let org_before: Vec<(i32, i32)> = (3..=6)
+        .flat_map(|x| {
+            (1..=6)
+                .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+                .map(|y| (x, y))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(!org_before.is_empty());
+    for t in 0..40 {
+        w.tick = t;
+        apply_flow_erosion(&mut w, &cfg);
+    }
+    for &(x, y) in &org_before {
+        assert_eq!(
+            w.get_cell(x, y).map(|c| c.material),
+            Some(MaterialId::Organic),
+            "floating raft Organic at ({x},{y}) must not be flow-scoured"
+        );
+    }
+}
+
+#[test]
 fn still_lake_does_not_erode_sand_bed() {
     let mut w = setup_column_world();
     // Closed basin: sand floor, water, stone walls — no cascade.
