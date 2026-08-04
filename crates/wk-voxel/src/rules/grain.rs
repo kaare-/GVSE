@@ -437,47 +437,31 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                     if floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy) {
                         continue;
                     }
-                } else if cur.sat.is_empty() {
-                    // Freeboard pop: empty Air above litter that still has
-                    // standing water beside it (occupying a lake cell) —
-                    // lift onto the surface so buoyancy doesn't stop one
-                    // cell short inside the water column.
-                    let Some(below) =
-                        (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy - 1) })
-                    else {
-                        continue;
-                    };
-                    if !falls_through_empty_air(below.material) {
-                        continue;
-                    }
-                    if !litter_needs_freeboard_pop(ptrs, wrap_width, gx, gy - 1) {
-                        continue;
-                    }
-                    unsafe {
-                        parallel::set_cell(ptrs, wrap_width, gx, gy, below);
-                        parallel::set_cell(ptrs, wrap_width, gx, gy - 1, cur);
-                    }
-                    moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    continue;
-                } else if floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy) {
-                    // Buoyancy: pull submerged litter up through the water
-                    // column so Organic doesn't leave a "glitch line" under
-                    // a floating raft when water refills above it.
-                    let Some(below) =
-                        (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy - 1) })
-                    else {
-                        continue;
-                    };
-                    if !falls_through_empty_air(below.material) {
-                        continue;
-                    }
-                    unsafe {
-                        parallel::set_cell(ptrs, wrap_width, gx, gy, below);
-                        parallel::set_cell(ptrs, wrap_width, gx, gy - 1, cur);
-                    }
-                    moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    continue;
                 } else {
+                    // Buoyancy / freeboard: only when litter sits below —
+                    // never run the expensive grounded-column walk on every
+                    // lake Air cell just to find nothing.
+                    let Some(below) =
+                        (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy - 1) })
+                    else {
+                        continue;
+                    };
+                    if !falls_through_empty_air(below.material) {
+                        continue;
+                    }
+                    let rise = if cur.sat.is_empty() {
+                        litter_needs_freeboard_pop(ptrs, wrap_width, gx, gy - 1)
+                    } else {
+                        floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy)
+                    };
+                    if !rise {
+                        continue;
+                    }
+                    unsafe {
+                        parallel::set_cell(ptrs, wrap_width, gx, gy, below);
+                        parallel::set_cell(ptrs, wrap_width, gx, gy - 1, cur);
+                    }
+                    moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     continue;
                 }
                 unsafe {
@@ -494,140 +478,144 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
 /// Max pore sat absorbed per tick from the water column under a floating
 /// Organic / Soil raft. Keeps the surface cell full so the raft still floats.
 const FLOAT_SOAK_RATE: u8 = 16;
+/// Max cells a submerged litter grain may rise in one tick.
+const BUOYANT_RISE_MAX: i32 = 16;
+
+fn collect_buoyant_litter(world: &World) -> Vec<(i32, i32)> {
+    let mut litter = Vec::new();
+    for &coord in world.chunks.keys() {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(lx, ly);
+                if falls_through_empty_air(cell.material) {
+                    litter.push((x0 + lx as i32, y0 + ly as i32));
+                }
+            }
+        }
+    }
+    litter
+}
 
 /// Organic / Soil sitting on a grounded lake surface soaks pore water from
 /// deeper cells in the water column (never drains the surface seat below
 /// full — that would sink the raft and recreate submerged litter lines).
+///
+/// Scans only buoyant litter cells (not the whole grid).
 pub fn soak_floating_litter(world: &mut World) {
-    let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
-    for coord in coords {
-        let x0 = coord.cx * CHUNK_CELLS_W as i32;
-        let y0 = coord.cy * CHUNK_CELLS_H as i32;
-        for ly in 0..CHUNK_CELLS_H as i32 {
-            for lx in 0..CHUNK_CELLS_W as i32 {
-                let gx = x0 + lx;
-                let gy = y0 + ly;
-                let Some(raft) = world.get_cell(gx, gy) else {
-                    continue;
-                };
-                if !matches!(raft.material, MaterialId::Organic | MaterialId::Soil) {
-                    continue;
-                }
-                let cap = water_capacity_with(raft.material, &world.hydro);
-                if cap == 0 || raft.sat.0 >= cap {
-                    continue;
-                }
-                let Some(surface) = world.get_cell(gx, gy - 1) else {
-                    continue;
-                };
-                if !floats_on_air_seat_world(world, surface, gx, gy - 1) {
-                    continue;
-                }
-                let room = cap - raft.sat.0;
-                let want = room.min(FLOAT_SOAK_RATE);
-                if want == 0 {
-                    continue;
-                }
-                // Steal from deeper water first so the surface stays full.
-                let mut taken = 0u8;
-                for dy in 2..=12 {
-                    if taken >= want {
-                        break;
-                    }
-                    let dy = dy as i32;
-                    let y = gy - dy;
-                    let Some(donor) = world.get_cell(gx, y) else {
-                        break;
-                    };
-                    if donor.material != MaterialId::Air || donor.sat.0 == 0 {
-                        if donor.material != MaterialId::Air {
-                            break;
-                        }
-                        continue;
-                    }
-                    let give = donor.sat.0.min(want - taken);
-                    if give == 0 {
-                        continue;
-                    }
-                    world.set_cell(
-                        gx,
-                        y,
-                        Cell {
-                            sat: Sat(donor.sat.0 - give),
-                            ..donor
-                        },
-                    );
-                    taken = taken.saturating_add(give);
-                }
-                if taken == 0 {
-                    continue;
-                }
-                let Some(raft_now) = world.get_cell(gx, gy) else {
-                    continue;
-                };
-                world.set_cell(
-                    gx,
-                    gy,
-                    Cell {
-                        sat: Sat(raft_now.sat.0.saturating_add(taken)),
-                        ..raft_now
-                    },
-                );
-            }
+    let litter = collect_buoyant_litter(world);
+    for (gx, gy) in litter {
+        let Some(raft) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if !matches!(raft.material, MaterialId::Organic | MaterialId::Soil) {
+            continue;
         }
+        let cap = water_capacity_with(raft.material, &world.hydro);
+        if cap == 0 || raft.sat.0 >= cap {
+            continue;
+        }
+        let Some(surface) = world.get_cell(gx, gy - 1) else {
+            continue;
+        };
+        if !floats_on_air_seat_world(world, surface, gx, gy - 1) {
+            continue;
+        }
+        let room = cap - raft.sat.0;
+        let want = room.min(FLOAT_SOAK_RATE);
+        if want == 0 {
+            continue;
+        }
+        let mut taken = 0u8;
+        for dy in 2..=12 {
+            if taken >= want {
+                break;
+            }
+            let y = gy - dy;
+            let Some(donor) = world.get_cell(gx, y) else {
+                break;
+            };
+            if donor.material != MaterialId::Air || donor.sat.0 == 0 {
+                if donor.material != MaterialId::Air {
+                    break;
+                }
+                continue;
+            }
+            let give = donor.sat.0.min(want - taken);
+            if give == 0 {
+                continue;
+            }
+            world.set_cell(
+                gx,
+                y,
+                Cell {
+                    sat: Sat(donor.sat.0 - give),
+                    ..donor
+                },
+            );
+            taken = taken.saturating_add(give);
+        }
+        if taken == 0 {
+            continue;
+        }
+        let Some(raft_now) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        world.set_cell(
+            gx,
+            gy,
+            Cell {
+                sat: Sat(raft_now.sat.0.saturating_add(taken)),
+                ..raft_now
+            },
+        );
     }
 }
 
 /// Lift submerged Snow/Ice/Organic through grounded full water, and pop
 /// litter that still has lake water beside it onto freeboard Air.
 ///
-/// Runs over all loaded chunks (not only the dirty halo) so a refilled
-/// lake surface cannot leave a permanent Organic "glitch line" mid-column.
+/// Litter-centric (not a full-grid × height scan): finds buoyant cells once,
+/// then bubbles each up at most [`BUOYANT_RISE_MAX`] steps this tick.
 pub fn rise_buoyant_litter(world: &mut World) {
-    for _ in 0..CHUNK_CELLS_H {
-        let mut moved = false;
-        let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
-        // Bottom-up so one pass can bubble several cells.
-        let mut cells: Vec<(i32, i32)> = Vec::new();
-        for coord in coords {
-            let x0 = coord.cx * CHUNK_CELLS_W as i32;
-            let y0 = coord.cy * CHUNK_CELLS_H as i32;
-            for ly in 0..CHUNK_CELLS_H as i32 {
-                for lx in 0..CHUNK_CELLS_W as i32 {
-                    cells.push((x0 + lx, y0 + ly));
-                }
-            }
-        }
-        cells.sort_by_key(|&(_, y)| y);
-        for (gx, gy) in cells {
-            let Some(cur) = world.get_cell(gx, gy) else {
-                continue;
+    let mut litter = collect_buoyant_litter(world);
+    if litter.is_empty() {
+        return;
+    }
+    // Bottom-up so lower cells rise before upper ones in the same column.
+    litter.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+    for (gx, gy0) in litter {
+        let mut gy = gy0;
+        for _ in 0..BUOYANT_RISE_MAX {
+            let Some(here) = world.get_cell(gx, gy) else {
+                break;
             };
-            if cur.material != MaterialId::Air {
-                continue;
+            if !falls_through_empty_air(here.material) {
+                break;
             }
-            let Some(below) = world.get_cell(gx, gy - 1) else {
-                continue;
+            let Some(above) = world.get_cell(gx, gy + 1) else {
+                break;
             };
-            if !falls_through_empty_air(below.material) {
-                continue;
+            if above.material != MaterialId::Air {
+                break;
             }
-            let rise = if floats_on_air_seat_world(world, cur, gx, gy) {
+            let rise = if floats_on_air_seat_world(world, above, gx, gy + 1) {
                 true
-            } else if cur.sat.is_empty() {
-                litter_needs_freeboard_pop_world(world, gx, gy - 1)
+            } else if above.sat.is_empty() {
+                litter_needs_freeboard_pop_world(world, gx, gy)
             } else {
                 false
             };
             if !rise {
-                continue;
+                break;
             }
-            world.set_cell(gx, gy, below);
-            world.set_cell(gx, gy - 1, cur);
-            moved = true;
-        }
-        if !moved {
-            break;
+            world.set_cell(gx, gy + 1, here);
+            world.set_cell(gx, gy, above);
+            gy += 1;
         }
     }
 }
