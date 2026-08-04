@@ -148,8 +148,9 @@ impl Cell {
 }
 
 /// True for dense granular materials that fall under gravity through
-/// Air (including water-filled Air). Sand / Gravel / Clay / LooseRock.
-/// Snow / Ice use [`falls_through_empty_air`] instead (float on water).
+/// Air (including water-filled Air). Sand / Gravel / Clay / LooseRock /
+/// LooseLimestone. Snow / Ice use [`falls_through_empty_air`] instead
+/// (float on water).
 pub fn is_grain(material: MaterialId) -> bool {
     matches!(
         material,
@@ -158,6 +159,7 @@ pub fn is_grain(material: MaterialId) -> bool {
             | MaterialId::Clay
             | MaterialId::Soil
             | MaterialId::LooseRock
+            | MaterialId::LooseLimestone
     )
 }
 
@@ -292,6 +294,7 @@ mod tests {
             MaterialId::Clay,
             MaterialId::Soil,
             MaterialId::LooseRock,
+            MaterialId::LooseLimestone,
         ] {
             assert!(is_grain(m), "{m:?} should be granular");
             assert!(is_repose_grain(m), "{m:?} should repose");
@@ -342,6 +345,7 @@ mod tests {
         assert!(is_flow_erodible(MaterialId::Gravel));
         assert!(is_flow_erodible(MaterialId::Clay));
         assert!(is_flow_erodible(MaterialId::LooseRock));
+        assert!(is_flow_erodible(MaterialId::LooseLimestone));
         assert!(!is_flow_erodible(MaterialId::Ice));
         assert!(!is_flow_erodible(MaterialId::Snow));
         assert!(!is_flow_erodible(MaterialId::Stone));

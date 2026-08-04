@@ -141,6 +141,7 @@ fn draw_terrain_column(
                         | MaterialId::Clay
                         | MaterialId::Gravel
                         | MaterialId::LooseRock
+                        | MaterialId::LooseLimestone
                         | MaterialId::Stone
                         | MaterialId::Limestone
                         | MaterialId::Organic
@@ -741,6 +742,7 @@ fn material_name(mat: MaterialId) -> &'static str {
         MaterialId::Stone => "stone",
         MaterialId::Limestone => "limestone",
         MaterialId::LooseRock => "looserock",
+        MaterialId::LooseLimestone => "looselimestone",
         MaterialId::Gravel => "gravel",
         MaterialId::Sand => "sand",
         MaterialId::Clay => "clay",

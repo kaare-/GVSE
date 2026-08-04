@@ -662,7 +662,8 @@ mod tests {
 
     #[test]
     fn stamped_world_is_stable_across_ticks() {
-        use crate::rules::tick;
+        use crate::failure::FailureConfig;
+        use crate::rules::{tick_with_configs, PerfConfig};
         let mut w = World::new(6);
         let p = small_params();
         stamp_world(&mut w, &p);
@@ -696,8 +697,20 @@ mod tests {
         let g0 = count_grains(&w);
         assert!(s0 > 0);
         assert!(g0 > 0);
+        // Roof collapse converts Stone/Limestone → fallable grains, which
+        // would inflate the grain count; keep geotech off for this check.
+        let fail = FailureConfig {
+            enable_roof_collapse: false,
+            enable_shear_weaken: false,
+            enable_compaction: false,
+            ..FailureConfig::default()
+        };
+        let perf = PerfConfig {
+            parallel_physics: false,
+            ..PerfConfig::default()
+        };
         for _ in 0..25 {
-            tick(&mut w);
+            tick_with_configs(&mut w, &perf, &fail);
         }
         let s1 = count_sat(&w);
         let g1 = count_grains(&w);

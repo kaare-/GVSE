@@ -57,8 +57,9 @@ pub use clouds::{
 };
 pub use failure::{
     apply_compaction, apply_failure, apply_roof_collapse, apply_shear_weaken, compaction_load_ok,
-    effective_cohesion, face_shear_demand, pore_wetness, pore_wetness_with, roof_collapse_debris,
-    roof_span_cells, roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
+    effective_cohesion, face_shear_demand, grain_repose_max_step, pore_wetness, pore_wetness_with,
+    roof_collapse_debris, roof_span_cells, roof_span_limit_cells, shear_weaken_debris,
+    wet_repose_loosens, FailureConfig,
     COMPACTION_SIGMA_MIN,
 };
 pub use fungi::{

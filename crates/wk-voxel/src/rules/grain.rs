@@ -10,7 +10,7 @@ use wk_material::{HydroOverrides, MaterialId};
 
 use crate::active::{partition_checkerboard, plan_active, ActiveChunk};
 use crate::cell::{
-    falls_through_empty_air, grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain,
+    falls_through_empty_air, is_flow_erodible, is_grain, is_repose_grain,
     water_capacity_with, Cell, CellFlags, Sat,
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
@@ -211,7 +211,10 @@ pub fn wake_unstable_slopes(world: &mut World) {
                 if below.material == MaterialId::Air {
                     continue;
                 }
-                let max_step = grain_max_stable_step(cell.material);
+                let max_step = {
+                    let wet = crate::failure::pore_wetness_with(cell, &world.hydro);
+                    crate::failure::grain_repose_max_step(cell.material, wet)
+                };
                 let through_haze =
                     matches!(cell.material, MaterialId::Organic | MaterialId::Soil);
                 for dx in [-1, 1] {
@@ -395,9 +398,10 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
 ///
 /// Sand (`max_step = 0`) won't hold a 1-cell cliff — piles flatten.
 /// LooseRock (`max_step ≥ 1`) can hold short stairs. Wet grains
-/// (pore sat or standing water below) loosen by one step. Living Root
-/// cells raise the local step via [`ROOT_REPOSE_STEP_BONUS`]. One move
-/// per cell per pass; run after [`apply_grain_fall`].
+/// (pore sat or standing water below) loosen by one step; Clay uses a
+/// dry-powder / plastic / mud curve instead. Living Root cells raise
+/// the local step via [`ROOT_REPOSE_STEP_BONUS`]. One move per cell per
+/// pass; run after [`apply_grain_fall`].
 pub fn apply_grain_repose(world: &mut World) {
     apply_grain_repose_bound(world, None);
 }
@@ -519,31 +523,15 @@ fn apply_repose_pass(
                     let mut max_step = if src.material == MaterialId::Ice {
                         0 // hillside glaze — no 1-cell cliff
                     } else {
-                        grain_max_stable_step(src.material)
+                        // Clay plasticity + F2a wet loosen for other grains.
+                        crate::failure::grain_repose_max_step(
+                            src.material,
+                            wet_frac_for(src, below_src, &hydro),
+                        )
                     };
                     // Live roots bind the grain (column Ecology.root_density).
                     if rooted.is_some_and(|r| r.contains(&(sx, sy))) {
                         max_step = max_step.saturating_add(ROOT_REPOSE_STEP_BONUS);
-                    }
-                    // F2a: wet loosen scaled by cohesion — low-c′ grains
-                    // always lose a step; high-c′ clay needs near-saturation.
-                    // Wetness is sat/capacity so low-porosity LooseRock can
-                    // soften when soaked (absolute sat>=40 never fires there).
-                    let pore = crate::failure::pore_wetness_with(src, &hydro);
-                    let standing_wet = matches!(
-                        below_src,
-                        Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
-                    );
-                    let wet_frac = if standing_wet {
-                        1.0
-                    } else {
-                        pore
-                    };
-                    let meaningfully_wet = standing_wet || pore >= 0.2 || src.sat.0 >= 40;
-                    if meaningfully_wet
-                        && crate::failure::wet_repose_loosens(src.material, wet_frac)
-                    {
-                        max_step = max_step.saturating_sub(1);
                     }
                     let through_haze =
                         matches!(src.material, MaterialId::Organic | MaterialId::Soil);
@@ -579,11 +567,17 @@ fn apply_repose_pass(
                         else {
                             continue;
                         };
-                        let mut step = grain_max_stable_step(src.material);
+                        let below_src =
+                            unsafe { parallel::get_cell(ptrs, wrap_width, sx, sy - 1) };
+                        let mut step = crate::failure::grain_repose_max_step(
+                            src.material,
+                            wet_frac_for(src, below_src, &hydro),
+                        );
                         if rooted.is_some_and(|r| r.contains(&(sx, sy))) {
                             step = step.saturating_add(ROOT_REPOSE_STEP_BONUS);
                         }
-                        // Rooted sand can hold short stairs — don't walk off.
+                        // Rooted sand / plastic clay can hold short stairs —
+                        // don't walk off.
                         if step > 0 {
                             continue;
                         }
@@ -592,8 +586,6 @@ fn apply_repose_pass(
                         {
                             continue;
                         }
-                        let below_src =
-                            unsafe { parallel::get_cell(ptrs, wrap_width, sx, sy - 1) };
                         match below_src {
                             Some(b) if b.material == MaterialId::Air => continue,
                             None => continue,
@@ -773,6 +765,25 @@ fn grain_is_wet(src: Cell, below_src: Option<Cell>) -> bool {
         below_src,
         Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
     )
+}
+
+/// Pore wetness for repose, treating standing water under the grain as
+/// fully wet (shore / lake toe).
+fn wet_frac_for(
+    src: Cell,
+    below_src: Option<Cell>,
+    hydro: &wk_material::HydroOverrides,
+) -> f32 {
+    let pore = crate::failure::pore_wetness_with(src, hydro);
+    let standing_wet = matches!(
+        below_src,
+        Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
+    );
+    if standing_wet {
+        1.0
+    } else {
+        pore
+    }
 }
 
 fn seat_on_ice(below_dest: Option<Cell>) -> bool {

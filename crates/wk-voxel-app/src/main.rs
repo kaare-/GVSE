@@ -766,7 +766,7 @@ async fn main() {
                 if was && !paused {
                     // Same stranded-grain wake as F3 close.
                     wake_unsupported_grains(&mut scene.world);
-                wake_unstable_slopes(&mut scene.world);
+                    wake_unstable_slopes(&mut scene.world);
                 }
             }
             if is_key_pressed(KeyCode::R) {
