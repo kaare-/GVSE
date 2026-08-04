@@ -537,6 +537,9 @@ fn sip_standing_air(world: &mut World, gx: i32, gy: i32, want: u8) -> Option<u8>
 /// Paint Root modules into `MaterialId::Organic` in place (preserve pore sat).
 /// Returns how many cells were converted. Used when a land plant dies so the
 /// root stencil stays in the ground as dead organic matter.
+///
+/// Only porous plantable media convert — never Stone/Bedrock holes, and never
+/// dry-Air rhizome gaps (those would float as orphan Organic fragments).
 pub fn leave_dead_roots_in_place(world: &mut World, atom: &Atom) -> u32 {
     use crate::cell::Cell;
     let mut painted = 0u32;
@@ -550,20 +553,17 @@ pub fn leave_dead_roots_in_place(world: &mut World, atom: &Atom) -> u32 {
             continue;
         };
         match c.material {
-            MaterialId::Bedrock | MaterialId::Ice | MaterialId::Snow | MaterialId::Water => {}
-            MaterialId::Air if !c.sat.is_empty() => {
-                // Don't plug free water with Organic.
-            }
-            MaterialId::Organic => {
-                painted += 1; // already organic residue
-            }
-            _ => {
+            MaterialId::Sand | MaterialId::Clay | MaterialId::Soil => {
                 let mut org = Cell::solid(MaterialId::Organic);
                 let cap = water_capacity(MaterialId::Organic);
                 org.sat.0 = if cap > 0 { c.sat.0.min(cap) } else { 0 };
                 world.set_cell(wx, wy, org);
                 painted += 1;
             }
+            MaterialId::Organic => {
+                painted += 1; // already organic residue
+            }
+            _ => {}
         }
     }
     painted
@@ -571,13 +571,17 @@ pub fn leave_dead_roots_in_place(world: &mut World, atom: &Atom) -> u32 {
 
 /// Drop Photosystem modules as falling Organic litter (dry Air only).
 /// Leaves peel off the corpse immediately; stems linger grey until dissolve.
+///
+/// Uses tipped draw pose so stemless / upright-mast leaves don't spawn
+/// Organic on the upright phantom axis.
 pub fn drop_dead_leaves(world: &mut World, atom: &Atom) -> u32 {
     let mut painted = 0u32;
     for &(dx, dy, mid) in &atom.body {
         if mid != ModuleId::Photosystem {
             continue;
         }
-        if paint_leaf_litter(world, atom.gx + dx as i32, atom.gy + dy as i32) {
+        let (odx, ody) = atom.fallen_draw_offset(dx, dy);
+        if paint_leaf_litter(world, atom.gx + odx as i32, atom.gy + ody as i32) {
             painted += 1;
         }
     }
@@ -667,6 +671,8 @@ pub fn shed_unproductive_woody_leaves(
         return 0;
     };
 
+    // Pose before removal — sync would drop this leaf from upright_growth.
+    let (odx, ody) = atom.fallen_draw_offset(dx, dy);
     let before = atom.body.len();
     atom.body
         .retain(|&(x, y, m)| !(m == ModuleId::Photosystem && x == dx && y == dy));
@@ -675,7 +681,8 @@ pub fn shed_unproductive_woody_leaves(
     }
     atom.leaf_starve
         .retain(|&(x, y, _)| !(x == dx && y == dy));
-    let _ = paint_leaf_litter(world, atom.gx + dx as i32, atom.gy + dy as i32);
+    atom.sync_upright_growth();
+    let _ = paint_leaf_litter(world, atom.gx + odx as i32, atom.gy + ody as i32);
     1
 }
 
@@ -852,15 +859,26 @@ pub fn pin_plant_pose(atom: &mut Atom) {
     atom.last_water_top = None;
 }
 
+/// Shoot (Stem / woody Photosystem) may occupy dry or wet Air, not solids.
+fn shoot_cell_free(world: &World, wx: i32, wy: i32) -> bool {
+    matches!(
+        world.get_cell(wx, wy),
+        Some(c) if c.material == MaterialId::Air
+    )
+}
+
 /// Penetrate multiplier — higher = harder / costlier. `None` = refuse.
 fn penetrate_cost(mat: MaterialId) -> Option<f32> {
     match mat {
-        MaterialId::Bedrock | MaterialId::Ice | MaterialId::Snow | MaterialId::Water => None,
+        MaterialId::Bedrock
+        | MaterialId::Ice
+        | MaterialId::Snow
+        | MaterialId::Water
+        | MaterialId::Stone => None,
         MaterialId::Organic => Some(0.35),
         MaterialId::Sand | MaterialId::Clay | MaterialId::Soil => Some(0.65),
-        MaterialId::Stone => Some(1.6),
         MaterialId::Air => Some(0.45), // gaps / rhizome air pockets
-        _ => Some(1.0),
+        _ => Some(1.0), // LooseRock, Gravel, …
     }
 }
 
@@ -1581,6 +1599,9 @@ pub fn try_grow_shoot(
                 }
                 let wx = world.wrap_x(atom.gx + nx as i32);
                 let wy = atom.gy + ny as i32;
+                if !shoot_cell_free(world, wx, wy) {
+                    continue;
+                }
                 if beside_foreign_live_photo(atom, wx, wy, live_photos) {
                     continue;
                 }
@@ -1613,6 +1634,9 @@ pub fn try_grow_shoot(
                     if ny > 16 || occupied.contains(&(nx, ny)) {
                         continue;
                     }
+                    if atom.fallen && ny <= 0 {
+                        continue;
+                    }
                     if leaf_support_dist(atom, nx, ny) > WOODY_LEAF_MAX_CANT {
                         continue;
                     }
@@ -1626,6 +1650,9 @@ pub fn try_grow_shoot(
                     }
                     let wx = world.wrap_x(atom.gx + nx as i32);
                     let wy = atom.gy + ny as i32;
+                    if !shoot_cell_free(world, wx, wy) {
+                        continue;
+                    }
                     if beside_foreign_live_photo(atom, wx, wy, live_photos) {
                         continue;
                     }
@@ -1656,6 +1683,11 @@ pub fn try_grow_shoot(
                 .iter()
                 .any(|&(x, y, m)| m == ModuleId::Photosystem && x == nx && y == ny - 1)
             {
+                return false;
+            }
+            let wx = world.wrap_x(atom.gx + nx as i32);
+            let wy = atom.gy + ny as i32;
+            if !shoot_cell_free(world, wx, wy) {
                 return false;
             }
             if !stem_spacing_ok(atom, nx, ny, trunks) {
@@ -3160,6 +3192,116 @@ mod tests {
                 p.mid == ModuleId::Photosystem && p.wx == atom.gx && p.wy == atom.gy + 3
             }),
             "upright leaf should sit on the remapped shoot stack"
+        );
+    }
+
+    #[test]
+    fn shed_upright_leaf_does_not_leave_draw_gap() {
+        use crate::organism::{fallen_draw_offset, resolve_organism_draw_cells};
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Unique middle upright Y (=4) so a ghost rank would open a gap.
+        let mut atom = Atom::from_body(
+            5,
+            5,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (1, 0, ModuleId::Stem), // tipped trunk remnant
+                (0, 3, ModuleId::Stem),
+                (0, 4, ModuleId::Photosystem), // middle leaf (unique Y)
+                (0, 5, ModuleId::Stem),
+                (0, 6, ModuleId::Photosystem),
+            ],
+        );
+        atom.fallen = true;
+        atom.upright_growth = vec![(0, 3), (0, 4), (0, 5), (0, 6)];
+        atom.body
+            .retain(|&(x, y, m)| !(m == ModuleId::Photosystem && x == 0 && y == 4));
+        // Stale upright entry at the removed Y — must not inflate tip rank.
+        assert!(atom.upright_growth.contains(&(0, 4)));
+        assert!(!atom.body.iter().any(|&(x, y, _)| x == 0 && y == 4));
+        let (_dx, tip_dy) = fallen_draw_offset(
+            atom.fallen,
+            &atom.upright_growth,
+            &atom.body,
+            0,
+            6,
+        );
+        // Surviving upright Ys below tip: 3 and 5 → visual dy = 1+2 = 3.
+        assert_eq!(
+            tip_dy, 3,
+            "tip leaf rank must collapse after middle Y is gone (dy={tip_dy})"
+        );
+        let posed = resolve_organism_draw_cells(&w, &[atom.clone()], 0, 0.0);
+        let mast_ys: Vec<i32> = posed
+            .iter()
+            .filter(|p| {
+                p.wx == atom.gx
+                    && matches!(p.mid, ModuleId::Stem | ModuleId::Photosystem)
+                    && p.wy > atom.gy
+            })
+            .map(|p| p.wy)
+            .collect();
+        assert!(
+            !mast_ys.contains(&(atom.gy + 4)),
+            "phantom middle rank must not float the tip, mast={mast_ys:?}"
+        );
+    }
+
+    #[test]
+    fn roots_refuse_stone_and_dead_roots_skip_dry_air() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+            w.set_cell(x, 2, Cell::solid(MaterialId::Sand));
+            for y in 3..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let atom = Atom::from_body(
+            4,
+            3,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root), // sand
+                (0, -2, ModuleId::Root), // stone — must not convert on death
+                (1, 1, ModuleId::Root),  // dry Air rhizome gap
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Photosystem),
+            ],
+        );
+        assert_eq!(penetrate_cost(MaterialId::Stone), None);
+        let n = leave_dead_roots_in_place(&mut w, &atom);
+        assert!(n >= 1, "sand root should convert");
+        assert_eq!(
+            w.get_cell(4, 2).map(|c| c.material),
+            Some(MaterialId::Organic),
+            "sand root → Organic"
+        );
+        assert_eq!(
+            w.get_cell(4, 1).map(|c| c.material),
+            Some(MaterialId::Stone),
+            "stone must not become an Organic hole"
+        );
+        assert_eq!(
+            w.get_cell(5, 4).map(|c| c.material),
+            Some(MaterialId::Air),
+            "dry-Air rhizome must not spawn floating Organic"
         );
     }
 

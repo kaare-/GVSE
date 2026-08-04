@@ -259,10 +259,25 @@ impl Atom {
     }
 
     /// Record a shoot cell grown while tipped — draws upright, not tipped.
+    ///
+    /// Stemless tip is draw-only (body stays vertical); marking upright would
+    /// detach new frond cells from the soft ribbon. Woody only.
     pub fn mark_upright_growth(&mut self, dx: i16, dy: i16) {
-        if self.fallen && !self.upright_growth.iter().any(|&p| p == (dx, dy)) {
+        if !self.fallen {
+            return;
+        }
+        if !self.body.iter().any(|(_, _, m)| *m == ModuleId::Stem) {
+            return;
+        }
+        if !self.upright_growth.iter().any(|&p| p == (dx, dy)) {
             self.upright_growth.push((dx, dy));
         }
+    }
+
+    /// Drop upright-growth entries whose body cells were removed (shed / prune).
+    pub fn sync_upright_growth(&mut self) {
+        self.upright_growth
+            .retain(|&(x, y)| self.body.iter().any(|&(bx, by, _)| bx == x && by == y));
     }
 
     /// True when this body cell should skip the tip transform when drawn.
@@ -323,7 +338,7 @@ impl Corpse {
         let land = is_land_plant(atom) || is_fungus(atom);
         // Roots → Organic in soil; leaves → falling Organic litter.
         // Lingering grey corpse keeps stem / nucleus / crown only.
-        let body = if is_land_plant(atom) {
+        let body: Vec<BodyModule> = if is_land_plant(atom) {
             atom.body
                 .iter()
                 .copied()
@@ -334,6 +349,13 @@ impl Corpse {
         } else {
             atom.body.clone()
         };
+        // Ghost leaf ranks from shed Photosystems must not gape the grey stem.
+        let upright_growth: Vec<(i16, i16)> = atom
+            .upright_growth
+            .iter()
+            .copied()
+            .filter(|&(x, y)| body.iter().any(|&(bx, by, _)| bx == x && by == y))
+            .collect();
         Self {
             gx: atom.gx,
             gy: atom.gy,
@@ -345,7 +367,7 @@ impl Corpse {
             land,
             last_water_top: atom.last_water_top,
             fallen: atom.fallen,
-            upright_growth: atom.upright_growth.clone(),
+            upright_growth,
         }
     }
 
@@ -942,7 +964,12 @@ impl OrganismStore {
                     corpse.vel_y = 0.0;
                     corpse.last_water_top = Some(top);
                 } else {
-                    corpse.fallen = false;
+                    // Reseat on beach/bed — don't leave a grey stem at the
+                    // vanished waterline. Woody bake already flattened the
+                    // body; keep fallen so upright mast ranks still draw.
+                    if let Some(slot) = find_surface_air_slot(world, corpse.gx, corpse.gy) {
+                        corpse.gy = slot;
+                    }
                     pin_corpse_land(corpse);
                 }
                 corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
@@ -1616,7 +1643,7 @@ pub fn bake_tip_into_body(atom: &mut Atom) {
 pub fn fallen_draw_offset(
     fallen: bool,
     upright_growth: &[(i16, i16)],
-    _body: &[BodyModule],
+    body: &[BodyModule],
     dx: i16,
     dy: i16,
 ) -> (i16, i16) {
@@ -1626,11 +1653,14 @@ pub fn fallen_draw_offset(
     if !upright_growth.iter().any(|&p| p == (dx, dy)) {
         return fallen_body_offset(dx, dy);
     }
-    // Distinct upright body-Y values strictly below `dy` (side-leaves at the
-    // same body Y share one visual row with their stem).
+    // Distinct upright body-Y values strictly below `dy` that still exist on
+    // the body (shed leaves must not leave phantom ranks / gaps).
     let mut seen: Vec<i16> = Vec::with_capacity(upright_growth.len());
-    for &(_, uy) in upright_growth {
-        if uy < dy && !seen.contains(&uy) {
+    for &(ux, uy) in upright_growth {
+        if uy < dy
+            && !seen.contains(&uy)
+            && body.iter().any(|&(bx, by, _)| bx == ux && by == uy)
+        {
             seen.push(uy);
         }
     }
@@ -1894,34 +1924,52 @@ fn organic_in_floating_column(
 
 /// Root purchase in sand/rock/grounded organic — not a floating raft cell.
 ///
-/// Only near-crown roots (`dy >= -6`) count. Deep free-floater tendrils that
-/// scrape the lake bed must not pin a castaway mid-air or block surface ride.
+/// - Near-crown roots (`dy >= -6`): grip the root cell or the cell below
+///   (root in Air above sand).
+/// - Deeper roots embedded in mineral count only when the crown is **not**
+///   over standing water — so land plants keep deep sand purchase, but a
+///   free-floater tendril scraping the lake bed cannot pin the crown mid-air.
 fn grounded_substrate_anchor(
     world: &World,
     atom: &Atom,
     columns: &std::collections::HashMap<i32, (i32, i32)>,
 ) -> bool {
-    const MAX_ROOT_LEN: i16 = 6;
+    const NEAR_CROWN: i16 = 6;
+    let over_water = column_standing_surface(world, atom.gx, atom.gy).is_some();
     for &(dx, dy, m) in &atom.body {
-        if m != ModuleId::Root || dy < -MAX_ROOT_LEN {
+        if m != ModuleId::Root {
             continue;
         }
         let wx = world.wrap_x(atom.gx + dx as i32);
         let wy = atom.gy + dy as i32;
-        for y in [wy, wy - 1] {
-            let Some(c) = world.get_cell(wx, y) else {
-                continue;
-            };
-            if c.material == MaterialId::Air {
-                continue;
+        if substrate_purchase_at(world, columns, wx, wy) {
+            if dy >= -NEAR_CROWN || !over_water {
+                return true;
             }
-            if c.material == MaterialId::Organic && organic_in_floating_column(columns, wx, y) {
-                continue;
-            }
+        }
+        if dy >= -NEAR_CROWN && substrate_purchase_at(world, columns, wx, wy - 1) {
             return true;
         }
     }
     false
+}
+
+fn substrate_purchase_at(
+    world: &World,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+    wx: i32,
+    wy: i32,
+) -> bool {
+    let Some(c) = world.get_cell(wx, wy) else {
+        return false;
+    };
+    if c.material == MaterialId::Air {
+        return false;
+    }
+    if c.material == MaterialId::Organic && organic_in_floating_column(columns, wx, wy) {
+        return false;
+    }
+    true
 }
 
 /// Solid Y of the local ground under the crown, if short roots still grip it.
