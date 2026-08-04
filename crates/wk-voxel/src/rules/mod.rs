@@ -11,6 +11,7 @@
 mod plan;
 mod head;
 mod util;
+pub(crate) use util::hash_prob;
 mod gravity;
 mod water_flow;
 mod spill;

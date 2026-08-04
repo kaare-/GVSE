@@ -86,6 +86,10 @@ const PLANT_LIFE_TICKS: u64 = DEMO_DAY_TICKS * 16;
 pub const CORPSE_SETTLE_LAND_TICKS: u32 = 900;
 /// Plankton corpses linger longer so bloom deaths leave a visible carpet.
 pub const CORPSE_SETTLE_WATER_TICKS: u32 = 2_400;
+/// Base chance for a floating corpse to drift one cell when `|push| ≈ 1`.
+/// Tuned so wind ~0.2 or modest sat-shear current visibly slides dead stems.
+const CORPSE_DRIFT_BASE: f32 = 0.55;
+const CORPSE_DRIFT_SALT: u64 = 0xC0B5_E0FF_DEAD_u64;
 
 /// Floater equilibrium depth below the free surface (cells).
 const FLOAT_DEPTH: f32 = 1.5;
@@ -754,7 +758,7 @@ impl OrganismStore {
                 }
                 return spore_releases;
             }
-            self.step_corpses(world);
+            self.step_corpses(world, tick, wind_vx);
             let room = self.atoms.len() < atom_cap;
             if let Some(child) = try_emergent_fruiting(world, &[], tick, room) {
                 self.atoms.push(child);
@@ -934,7 +938,7 @@ impl OrganismStore {
         }
         let _ = fungus_cols_now;
         resolve_contacts(world, &mut self.atoms);
-        self.step_corpses(world);
+        self.step_corpses(world, tick, wind_vx);
 
         // Return drunk pore sat to atmospheric humidity (mass conservation).
         if let Some(hum) = humidity {
@@ -959,7 +963,10 @@ impl OrganismStore {
     }
 
     /// Sink / pin corpses; after settle, paint Organic + soft litter.
-    fn step_corpses(&mut self, world: &mut World) {
+    ///
+    /// Floating corpses also drift with climate wind and local water-sat
+    /// shear so dead stems don't freeze in a current.
+    fn step_corpses(&mut self, world: &mut World, tick: u64, wind_vx: f32) {
         let mut dissolve: Vec<usize> = Vec::new();
         for (i, corpse) in self.corpses.iter_mut().enumerate() {
             corpse.ticks = corpse.ticks.saturating_add(1);
@@ -972,6 +979,13 @@ impl OrganismStore {
                     corpse.fy = top as f32;
                     corpse.vel_y = 0.0;
                     corpse.last_water_top = Some(top);
+                    drift_floating_corpse(world, corpse, tick, wind_vx);
+                    // Re-seat after a possible lateral slide.
+                    if let Some((top2, _)) = wet_band(world, corpse.gx, corpse.gy) {
+                        corpse.gy = top2;
+                        corpse.fy = top2 as f32;
+                        corpse.last_water_top = Some(top2);
+                    }
                 } else {
                     // Reseat on beach/bed — don't leave a grey stem at the
                     // vanished waterline. Woody bake already flattened the
@@ -991,6 +1005,11 @@ impl OrganismStore {
             // Plankton corpse: heavy sink toward the wet-band bed.
             corpse.fallen = false;
             step_corpse_buoyancy(world, corpse);
+            // Mid-column / surface plankton also ride current a little.
+            if wet_band(world, corpse.gx, corpse.gy).is_some() {
+                drift_floating_corpse(world, corpse, tick, wind_vx);
+                step_corpse_buoyancy(world, corpse);
+            }
             let on_bed = match wet_band(world, corpse.gx, corpse.gy) {
                 Some((_top, bed)) => corpse.gy <= bed + 1,
                 None => true, // stranded — count as settled
@@ -1044,6 +1063,40 @@ fn step_corpse_buoyancy(world: &World, corpse: &mut Corpse) {
     }
     corpse.gy = corpse.fy.round() as i32;
     corpse.last_water_top = Some(top);
+}
+
+/// Slide a floating / submerged corpse one cell with wind + local flow.
+///
+/// Dead stems used to pin at the free surface forever; this lets currents
+/// and breeze carry them toward shore or along the lake.
+fn drift_floating_corpse(world: &World, corpse: &mut Corpse, tick: u64, wind_vx: f32) {
+    let flow = local_water_drive(world, corpse.gx, corpse.gy);
+    let flow_dir = local_water_dir(world, corpse.gx, corpse.gy) as f32;
+    let wind = wind_vx.clamp(-1.5, 1.5);
+    let at_surface = wet_band(world, corpse.gx, corpse.gy)
+        .map(|(top, _)| (corpse.gy - top).abs() <= 1)
+        .unwrap_or(false);
+    // Surface logs catch wind; deeper corpses follow sat-shear current.
+    let push = if at_surface {
+        wind * 0.90 + flow_dir * flow * 0.55
+    } else {
+        flow_dir * flow * 1.25 + wind * 0.20
+    };
+    if push.abs() < 1e-4 {
+        return;
+    }
+    let chance = (push.abs() * CORPSE_DRIFT_BASE).clamp(0.0, 0.90);
+    if crate::rules::hash_prob(world.seed.0, corpse.gx, tick, CORPSE_DRIFT_SALT) >= chance {
+        return;
+    }
+    let dir = if push >= 0.0 { 1 } else { -1 };
+    let nx = world.wrap_x(corpse.gx + dir);
+    // Block solid walls at the nucleus row (cliffs / bed pillars).
+    match world.get_cell(nx, corpse.gy) {
+        Some(c) if c.material == MaterialId::Air => {}
+        _ => return,
+    }
+    corpse.gx = nx;
 }
 
 enum PlantStep {
@@ -3418,6 +3471,56 @@ mod tests {
             )
         });
         assert!(bed_organic, "dissolve should still leave bed Organic / root residue");
+    }
+
+    #[test]
+    fn floating_land_corpse_drifts_with_wind() {
+        // Wide lake so a surface corpse can slide without hitting a cliff.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        for x in 0..48 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=6 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 7..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut store = OrganismStore::new();
+        let mut corpse = Corpse::from_atom(&Atom::from_body(
+            10,
+            6,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Stem),
+            ],
+        ));
+        corpse.land = true;
+        corpse.fallen = true;
+        store.corpses.push(corpse);
+        let gx0 = store.corpses[0].gx;
+        let climate = ClimateConfig::default();
+        let mut moved = false;
+        for t in 0..400u64 {
+            let _ = store.step_with_climate_wind(&mut w, t, &climate, None, 0.35);
+            assert_eq!(store.corpse_count(), 1, "should still be floating");
+            if store.corpses[0].gx != gx0 {
+                moved = true;
+                break;
+            }
+        }
+        assert!(moved, "surface corpse must slide with wind (gx stayed {gx0})");
+        assert!(
+            store.corpses[0].gx > gx0,
+            "positive wind should carry the corpse +x (gx0={gx0}, now={})",
+            store.corpses[0].gx
+        );
     }
 
     #[test]
