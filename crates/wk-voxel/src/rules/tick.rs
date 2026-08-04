@@ -189,11 +189,12 @@ pub fn tick_with_life(
         apply_seepage_regions(world, &flow_active);
     }
 
-    // Always re-wake unsupported grains — lakes/rain often leave a
-    // non-empty dirty plan that used to skip this scan, so floating
-    // F3 sand only dripped via roof collapse (one cell at a time) and
-    // Organic on suspended full-sat never moved.
+    // Always re-wake unsupported grains and steep cliff faces — lakes
+    // often leave a non-empty dirty plan far from F3 paint, and seated
+    // Organic/sand walls have solid under them so fall-wake alone never
+    // sees them.
     super::grain::wake_unsupported_grains(world);
+    super::grain::wake_unstable_slopes(world);
     let grain_active = {
         let dirty = plan_active(world);
         if dirty.is_empty() {

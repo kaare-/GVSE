@@ -185,12 +185,99 @@ pub fn wake_unsupported_grains(world: &mut World) {
     }
 }
 
+/// Re-dirty supported grains whose diagonal-down seat is steeper than
+/// repose — vertical Organic/sand cliff faces that already have solid
+/// under them never trip [`wake_unsupported_grains`], so without this
+/// they freeze as walls after the first settle pass.
+pub fn wake_unstable_slopes(world: &mut World) {
+    let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        for ly in 0..CHUNK_CELLS_H as i32 {
+            for lx in 0..CHUNK_CELLS_W as i32 {
+                let gx = x0 + lx;
+                let gy = y0 + ly;
+                let Some(cell) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if !is_repose_grain(cell.material) {
+                    continue;
+                }
+                let Some(below) = world.get_cell(gx, gy - 1) else {
+                    continue;
+                };
+                // Freefall seats are handled by [`wake_unsupported_grains`].
+                if below.material == MaterialId::Air {
+                    continue;
+                }
+                let max_step = grain_max_stable_step(cell.material);
+                let through_haze =
+                    matches!(cell.material, MaterialId::Organic | MaterialId::Soil);
+                for dx in [-1, 1] {
+                    let sx = gx + dx;
+                    let sy = gy - 1;
+                    let Some(seat) = world.get_cell(sx, sy) else {
+                        continue;
+                    };
+                    if seat.material != MaterialId::Air {
+                        continue;
+                    }
+                    if seat.sat.is_full()
+                        && matches!(
+                            cell.material,
+                            MaterialId::Organic | MaterialId::Soil | MaterialId::Snow
+                        )
+                    {
+                        continue;
+                    }
+                    if is_grain(cell.material) && !seat.sat.is_empty() {
+                        continue;
+                    }
+                    if diag_drop_exceeds_world(world, sx, gy, max_step, through_haze) {
+                        world.touch_dirty(gx, gy);
+                        world.touch_dirty(sx, sy);
+                        break;
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn diag_drop_exceeds_world(
+    world: &World,
+    dest_gx: i32,
+    from_y: i32,
+    max_step: i32,
+    through_haze: bool,
+) -> bool {
+    let mut drop = 0i32;
+    for dy in 1..=(max_step + 2) {
+        let y = from_y - dy;
+        let Some(c) = world.get_cell(dest_gx, y) else {
+            break;
+        };
+        if c.material != MaterialId::Air {
+            break;
+        }
+        if !c.sat.is_empty() && !(through_haze && !c.sat.is_full()) {
+            break;
+        }
+        drop += 1;
+        if drop > max_step {
+            return true;
+        }
+    }
+    drop > max_step
+}
+
 /// [`settle_loose_grains`] from a pre-planned active set (e.g. the
 /// post-flow halo when water wrote nothing).
 ///
-/// Does **not** clear dirty: seepage / water wakes must survive a
-/// settle pass that finds nothing to drop. Stops when a fall pass
-/// makes no swaps (one trailing repose still runs).
+/// Interleaves fall and repose: a fall-then-repose split left Organic
+/// cliff faces / overhangs because repose can undercut a stack and
+/// those cells never freefall again in the same settle.
 pub fn settle_loose_grains_regions(
     world: &mut World,
     initial: &[ActiveChunk],
@@ -213,15 +300,11 @@ pub fn settle_loose_grains_regions(
         } else {
             after_fall
         };
-        if !repose_src.is_empty() {
-            let repose_passes = partition_checkerboard(&repose_src);
-            for pass in &repose_passes {
-                apply_grain_repose_regions(world, pass, rooted);
-            }
+        let repose_passes = partition_checkerboard(&repose_src);
+        for pass in &repose_passes {
+            moved += apply_grain_repose_regions(world, pass, rooted);
         }
         if moved == 0 {
-            // No vertical drop — leave dirty intact so seepage / flow
-            // can keep wetting on the next tick.
             break;
         }
         let next = plan_active(world);
@@ -301,12 +384,14 @@ pub fn apply_grain_repose_bound(
 }
 
 /// Repose slide restricted to a pre-planned active set.
+///
+/// Returns how many diagonal slides this pass performed.
 pub fn apply_grain_repose_regions(
     world: &mut World,
     active: &[ActiveChunk],
     rooted: Option<&HashSet<(i32, i32)>>,
-) {
-    apply_repose_pass(world, active, None, f32::INFINITY, rooted);
+) -> u32 {
+    apply_repose_pass(world, active, None, f32::INFINITY, rooted)
 }
 
 /// Cold snap avalanche: wet sand loosens, snow/hillside ice spill onto
@@ -337,11 +422,12 @@ fn apply_repose_pass(
     temp: Option<&Temperature>,
     freeze_point_c: f32,
     rooted: Option<&HashSet<(i32, i32)>>,
-) {
+) -> u32 {
     let seed = world.seed.0;
     let tick_no = world.tick;
     let cold_mode = temp.is_some();
     let hydro = world.hydro;
+    let moves = std::sync::atomic::AtomicU32::new(0);
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
@@ -439,7 +525,11 @@ fn apply_repose_pass(
                     moved = true;
                     break;
                 }
-                if moved || !cold_mode {
+                if moved {
+                    moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    continue;
+                }
+                if !cold_mode {
                     continue;
                 }
                 // Same-Y smear: cold wet sand (or snow) onto an ice lid seat.
@@ -482,11 +572,13 @@ fn apply_repose_pass(
                     write_repose_swap(
                         ptrs, wrap_width, &hydro, gx, gy, dest, sx, sy, src,
                     );
+                    moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     break;
                 }
             }
         }
     });
+    moves.into_inner()
 }
 
 /// Swap grain into a diagonal/lateral Air seat.

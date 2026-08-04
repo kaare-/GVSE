@@ -3318,3 +3318,92 @@ fn organic_still_floats_on_grounded_lake() {
     );
 }
 
+
+#[test]
+fn organic_sky_drop_does_not_leave_cliff_walls() {
+    // Vertical Organic "cliff wall" on bedrock must avalanche into a
+    // low sprawl in one tick (interleaved fall + repose).
+    let mut w = setup_column_world();
+    for y in 1..=12 {
+        w.set_cell(8, y, Cell::solid(MaterialId::Organic));
+    }
+    tick(&mut w);
+    let max_col_h = (0..16)
+        .map(|x| {
+            (1..=16)
+                .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    let width = (0..16)
+        .filter(|&x| {
+            (1..=16).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+        })
+        .count();
+    assert!(
+        max_col_h <= 4,
+        "Organic cliff must sprawl (tallest column={max_col_h}, width={width})"
+    );
+    assert!(width >= 5, "Organic cliff should spread sideways (width={width})");
+}
+
+#[test]
+fn organic_sky_blob_lands_as_repose_pile_not_block() {
+    let mut w = setup_column_world();
+    for x in 6..=10 {
+        for y in 20..=28 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Organic));
+        }
+    }
+    tick(&mut w);
+    // No vertical face taller than a couple of cells: count columns
+    // where height >= 4 and a side neighbour is empty at mid-height.
+    let mut cliff_faces = 0;
+    for x in 1..15 {
+        for y in 2..=8 {
+            let here = w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic);
+            let below = w.get_cell(x, y - 1).map(|c| c.material) == Some(MaterialId::Organic);
+            let left_air = w.get_cell(x - 1, y).map(|c| c.material) == Some(MaterialId::Air);
+            let right_air = w.get_cell(x + 1, y).map(|c| c.material) == Some(MaterialId::Air);
+            if here && below && (left_air || right_air) {
+                // 2-cell vertical face exposure
+                let above = w.get_cell(x, y + 1).map(|c| c.material) == Some(MaterialId::Organic);
+                if above {
+                    cliff_faces += 1;
+                }
+            }
+        }
+    }
+    assert!(
+        cliff_faces <= 2,
+        "sky blob must not land as cliff walls (exposed face cells={cliff_faces})"
+    );
+}
+
+#[test]
+fn sand_sky_drop_does_not_leave_cliff_walls() {
+    let mut w = setup_column_world();
+    for y in 1..=12 {
+        w.set_cell(8, y, Cell::solid(MaterialId::Sand));
+    }
+    tick(&mut w);
+    let max_col_h = (0..16)
+        .map(|x| {
+            (1..=16)
+                .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+                .count()
+        })
+        .max()
+        .unwrap_or(0);
+    let width = (0..16)
+        .filter(|&x| {
+            (1..=16).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+        })
+        .count();
+    assert!(
+        max_col_h <= 4,
+        "Sand cliff must sprawl (tallest column={max_col_h}, width={width})"
+    );
+    assert!(width >= 5, "Sand cliff should spread sideways (width={width})");
+}
