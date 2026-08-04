@@ -724,6 +724,15 @@ const RAFT_DRIFT_ORGANIC_SAIL: f32 = 0.35;
 /// Extra sail per cell of living plant height above the raft top.
 const RAFT_DRIFT_PLANT_SAIL: f32 = 0.55;
 
+/// Cheap float-seat check for raft drift (no 512-deep grounded walk).
+///
+/// Full [`floats_on_air_seat_world`] is correct for fall/buoyancy but too
+/// expensive to re-run on every Organic cell every tick. Drift only needs
+/// "full standing water immediately below."
+fn drift_float_seat(seat: Cell) -> bool {
+    seat.material == MaterialId::Air && seat.sat.is_full()
+}
+
 /// Wind shove for Organic piles floating on grounded lakes.
 ///
 /// Moves a contiguous Organic stack sideways when the destination column
@@ -731,6 +740,9 @@ const RAFT_DRIFT_PLANT_SAIL: f32 = 0.55;
 /// `|wind_vx|`, Organic pile height, and optional living plant tops
 /// (`plant_tops`: world-x → max plant cell y). Snow/Ice on the raft are
 /// left behind (they re-seat next tick). Never crawls into the water column.
+///
+/// Scans **Organic only** (not the full buoyant-litter set) so snow/ice
+/// skies do not make every tick walk the whole world again.
 pub fn drift_floating_organic(
     world: &mut World,
     wind_vx_tiles: f32,
@@ -743,34 +755,48 @@ pub fn drift_floating_organic(
     let sign: i32 = if wind_vx_tiles >= 0.0 { 1 } else { -1 };
     let speed = wind_vx_tiles.abs() * tile_cols.max(1) as f32;
 
-    // Bottom Organic cell of each floating column.
+    // Bottom Organic cell of each floating column (Organic-only scan).
     let mut columns: Vec<(i32, i32, i32)> = Vec::new(); // gx, bottom_y, height
-    let litter = collect_buoyant_litter(world);
-    for (gx, gy) in litter {
-        let Some(cell) = world.get_cell(gx, gy) else {
+    let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
-        if cell.material != MaterialId::Organic {
-            continue;
-        }
-        let Some(seat) = world.get_cell(gx, gy - 1) else {
-            continue;
-        };
-        if !floats_on_air_seat_world(world, seat, gx, gy - 1) {
-            continue;
-        }
-        // Contiguous Organic stack above the waterline.
-        let mut height = 1i32;
-        while let Some(above) = world.get_cell(gx, gy + height) {
-            if above.material != MaterialId::Organic {
-                break;
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(lx, ly);
+                if cell.material != MaterialId::Organic {
+                    continue;
+                }
+                let gx = x0 + lx as i32;
+                let gy = y0 + ly as i32;
+                // Only the water-contact cell of a stack (Organic above skips).
+                if let Some(below_org) = world.get_cell(gx, gy - 1) {
+                    if below_org.material == MaterialId::Organic {
+                        continue;
+                    }
+                }
+                let Some(seat) = world.get_cell(gx, gy - 1) else {
+                    continue;
+                };
+                if !drift_float_seat(seat) {
+                    continue;
+                }
+                let mut height = 1i32;
+                while let Some(above) = world.get_cell(gx, gy + height) {
+                    if above.material != MaterialId::Organic {
+                        break;
+                    }
+                    height += 1;
+                    if height > 48 {
+                        break;
+                    }
+                }
+                columns.push((gx, gy, height));
             }
-            height += 1;
-            if height > 48 {
-                break;
-            }
         }
-        columns.push((gx, gy, height));
     }
     if columns.is_empty() {
         return 0;
@@ -790,7 +816,7 @@ pub fn drift_floating_organic(
         let Some(dest_seat) = world.get_cell(nx, bottom_y - 1) else {
             continue;
         };
-        if !floats_on_air_seat_world(world, dest_seat, nx, bottom_y - 1) {
+        if !drift_float_seat(dest_seat) {
             continue;
         }
         let mut clear = true;
@@ -803,10 +829,7 @@ pub fn drift_floating_organic(
                 clear = false;
                 break;
             }
-            // Refuse underwater film seats under the freeboard slot.
-            if dy == 0 {
-                // dest is freeboard above float water — OK even with haze.
-            } else if !dest.sat.is_empty() && dest.sat.0 > GRAIN_REPOSE_HAZE_MAX {
+            if dy > 0 && !dest.sat.is_empty() && dest.sat.0 > GRAIN_REPOSE_HAZE_MAX {
                 clear = false;
                 break;
             }
@@ -827,7 +850,6 @@ pub fn drift_floating_organic(
             continue;
         }
 
-        // Move top-down so we don't overwrite within the column.
         for dy in (0..height).rev() {
             let y = bottom_y + dy;
             let Some(org) = world.get_cell(gx, y) else {

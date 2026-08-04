@@ -859,9 +859,14 @@ async fn main() {
             }
         }
 
-        // Physics (frozen while paint editors / quit dialog are open).
-        let sim_paused =
-            paused || (editor.open && !editor.spawn_picker) || terrain.open || quit_dialog.open;
+        // Physics (frozen while paint editors / Tab settings / quit are open).
+        // Tab must pause too — a busy tick (raft drift, settle) otherwise
+        // starves the frame loop and the settings UI feels dead.
+        let sim_paused = paused
+            || settings.open
+            || (editor.open && !editor.spawn_picker)
+            || terrain.open
+            || quit_dialog.open;
         if !sim_paused {
             if rain_on {
                 apply_rain_with_temp(
@@ -1380,12 +1385,12 @@ async fn main() {
             }
         }
 
-        // Organisms: skip the shaded draw while the F2 canvas covers the
-        // world (pose + Beer–Lambert is wasted under the overlay and was
-        // starving editor input on dense meadows). Spawn-picker keeps the
-        // world visible, so draw then.
+        // Organisms: skip the shaded draw while the F2 canvas or Tab
+        // settings cover interaction (pose + Beer–Lambert was starving
+        // menu input on dense meadows). Spawn-picker keeps the world
+        // visible, so draw then.
         let editor_covers_world = editor.open && !editor.spawn_picker;
-        if !editor_covers_world {
+        if !editor_covers_world && !settings.open {
             for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list(
                 &scene.world,
                 scene.world.tick,
