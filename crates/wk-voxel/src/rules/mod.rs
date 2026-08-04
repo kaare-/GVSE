@@ -34,7 +34,8 @@ pub use grain::{
     apply_cold_avalanche, apply_cold_avalanche_bound, apply_flow_erosion, apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
     apply_grain_repose_regions, settle_loose_grains, settle_loose_grains_regions,
-    rise_buoyant_litter, soak_floating_litter, wake_unsupported_grains, wake_unstable_slopes,
+    punch_through_floating_rafts, rise_buoyant_litter, soak_floating_litter,
+    wake_unsupported_grains, wake_unstable_slopes,
     GrainConfig, GRAIN_REPOSE_HAZE_MAX, GRAIN_SETTLE_PASSES, ROOT_EROSION_BIND,
     ROOT_REPOSE_STEP_BONUS,
 };

@@ -3370,6 +3370,57 @@ fn dense_grain_punches_through_floating_organic_raft() {
 }
 
 #[test]
+fn loose_rock_punches_through_stacked_organic_raft() {
+    // User bug: Organic|Organic mat still held a steep LooseRock pile.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 7, Cell::solid(MaterialId::Organic));
+    for y in 8..=18 {
+        w.set_cell(5, y, Cell::solid(MaterialId::LooseRock));
+    }
+    for _ in 0..30 {
+        tick(&mut w);
+    }
+    let mut riding = Vec::new();
+    let mut rocks_in_water = 0usize;
+    for x in 2..=8 {
+        for y in 1..=22 {
+            let Some(c) = w.get_cell(x, y) else {
+                continue;
+            };
+            if c.material != MaterialId::LooseRock {
+                continue;
+            }
+            if y <= 5 {
+                rocks_in_water += 1;
+            }
+            if let Some(below) = w.get_cell(x, y - 1) {
+                if below.material == MaterialId::Organic {
+                    riding.push((x, y));
+                }
+            }
+        }
+    }
+    assert!(
+        riding.is_empty(),
+        "LooseRock must not ride floating Organic ({riding:?})"
+    );
+    assert!(
+        rocks_in_water > 0,
+        "LooseRock pile must punch into the lake"
+    );
+}
+
+#[test]
 fn organic_alone_still_floats_without_punch() {
     let mut w = setup_column_world();
     for y in 1..=6 {

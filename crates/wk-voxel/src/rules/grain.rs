@@ -149,6 +149,114 @@ fn floats_on_air_seat_ptrs(
         && water_column_grounded_ptrs(ptrs, wrap_width, gx, gy)
 }
 
+/// True when `litter_y` is buoyant litter whose column reaches a grounded
+/// lake seat through only more litter (stacked Organic rafts).
+fn raft_rests_on_float_water_world(world: &World, gx: i32, litter_y: i32) -> bool {
+    let Some(start) = world.get_cell(gx, litter_y) else {
+        return false;
+    };
+    if !falls_through_empty_air(start.material) {
+        return false;
+    }
+    let mut y = litter_y - 1;
+    for _ in 0..64 {
+        let Some(c) = world.get_cell(gx, y) else {
+            return false;
+        };
+        if floats_on_air_seat_world(world, c, gx, y) {
+            return true;
+        }
+        if falls_through_empty_air(c.material) {
+            y -= 1;
+            continue;
+        }
+        return false;
+    }
+    false
+}
+
+/// Max punch swaps per call — tall piles on thick rafts need several
+/// grain↔litter steps before cargo reaches the water seat.
+const FLOAT_PUNCH_MAX: u32 = 64;
+
+/// Dense grains cannot ride a floating Organic / Snow / Ice raft.
+///
+/// Scans the whole grid (like [`rise_buoyant_litter`]) so punch still
+/// runs when only the pile was dirtied and the water seat is quiet.
+/// Each pass swaps a grain with the litter cell immediately below it
+/// when that litter column rests on a grounded lake; settle/tick then
+/// sinks the grain through water.
+pub fn punch_through_floating_rafts(world: &mut World) -> u32 {
+    let mut total = 0u32;
+    for _ in 0..FLOAT_PUNCH_MAX {
+        let mut swaps: Vec<(i32, i32)> = Vec::new();
+        for &coord in world.chunks.keys() {
+            let x0 = coord.cx * CHUNK_CELLS_W as i32;
+            let y0 = coord.cy * CHUNK_CELLS_H as i32;
+            let Some(chunk) = world.chunks.get(&coord) else {
+                continue;
+            };
+            for ly in 0..CHUNK_CELLS_H {
+                for lx in 0..CHUNK_CELLS_W {
+                    let cell = chunk.get(lx, ly);
+                    if !is_grain(cell.material) {
+                        continue;
+                    }
+                    let gx = x0 + lx as i32;
+                    let gy = y0 + ly as i32;
+                    let Some(below) = world.get_cell(gx, gy - 1) else {
+                        continue;
+                    };
+                    if !falls_through_empty_air(below.material) {
+                        continue;
+                    }
+                    if !raft_rests_on_float_water_world(world, gx, gy - 1) {
+                        continue;
+                    }
+                    swaps.push((gx, gy));
+                }
+            }
+        }
+        if swaps.is_empty() {
+            break;
+        }
+        // Bottom grains first so Soil under LooseRock punches before rock.
+        swaps.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
+        let mut moved = 0u32;
+        for (gx, gy) in swaps {
+            let Some(grain) = world.get_cell(gx, gy) else {
+                continue;
+            };
+            if !is_grain(grain.material) {
+                continue;
+            }
+            let Some(litter) = world.get_cell(gx, gy - 1) else {
+                continue;
+            };
+            if !falls_through_empty_air(litter.material) {
+                continue;
+            }
+            if !raft_rests_on_float_water_world(world, gx, gy - 1) {
+                continue;
+            }
+            world.set_cell(gx, gy - 1, grain);
+            world.set_cell(gx, gy, litter);
+            // Keep the water seat awake so the next fall pass sinks cargo.
+            if let Some(seat) = world.get_cell(gx, gy - 2) {
+                if seat.material == MaterialId::Air {
+                    world.touch_dirty(gx, gy - 2);
+                }
+            }
+            moved += 1;
+        }
+        total += moved;
+        if moved == 0 {
+            break;
+        }
+    }
+    total
+}
+
 /// Re-dirty every grain / litter cell that has empty (or non-supporting)
 /// Air directly below — and the Air seat itself.
 ///
@@ -180,12 +288,24 @@ pub fn wake_unsupported_grains(world: &mut World) {
                 };
                 // Dense cargo on a floating litter raft — punch-through wake.
                 if is_grain(cell.material) && falls_through_empty_air(below.material) {
-                    if let Some(under) = world.get_cell(gx, gy - 2) {
-                        if floats_on_air_seat_world(world, under, gx, gy - 2) {
-                            world.touch_dirty(gx, gy);
-                            world.touch_dirty(gx, gy - 1);
-                            continue;
+                    if raft_rests_on_float_water_world(world, gx, gy - 1) {
+                        world.touch_dirty(gx, gy);
+                        world.touch_dirty(gx, gy - 1);
+                        // Water seat under the raft must be active so fall
+                        // can sink cargo after the punch swap.
+                        let mut y = gy - 2;
+                        while let Some(c) = world.get_cell(gx, y) {
+                            if falls_through_empty_air(c.material) {
+                                world.touch_dirty(gx, y);
+                                y -= 1;
+                                continue;
+                            }
+                            if c.material == MaterialId::Air {
+                                world.touch_dirty(gx, y);
+                            }
+                            break;
                         }
+                        continue;
                     }
                 }
                 if below.material != MaterialId::Air {
@@ -404,22 +524,32 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                     // and *suspended* full-sat blobs. Float only on
                     // grounded lake / puddle surfaces.
                     if floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy) {
-                        // Floating raft cannot carry dense cargo — swap
-                        // grain down through the litter so it can sink.
-                        if let Some(cargo) =
-                            (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy + 2) })
-                        {
+                        // Floating raft cannot carry dense cargo. Walk up
+                        // contiguous litter to the lowest grain and swap
+                        // that grain with the water-contact litter cell.
+                        let mut cargo_y = gy + 2;
+                        for _ in 0..32 {
+                            let Some(cargo) = (unsafe {
+                                parallel::get_cell(ptrs, wrap_width, gx, cargo_y)
+                            }) else {
+                                break;
+                            };
+                            if falls_through_empty_air(cargo.material) {
+                                cargo_y += 1;
+                                continue;
+                            }
                             if is_grain(cargo.material) {
                                 unsafe {
                                     parallel::set_cell(
                                         ptrs, wrap_width, gx, gy + 1, cargo,
                                     );
                                     parallel::set_cell(
-                                        ptrs, wrap_width, gx, gy + 2, above,
+                                        ptrs, wrap_width, gx, cargo_y, above,
                                     );
                                 }
                                 moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
+                            break;
                         }
                         continue;
                     }

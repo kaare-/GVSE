@@ -207,6 +207,16 @@ pub fn tick_with_life(
         settle_loose_grains_regions(world, &grain_active, rooted, GRAIN_SETTLE_PASSES);
     }
 
+    // Dense cargo cannot ride floating Organic/Snow/Ice. Full-grid punch
+    // once per tick (not per settle pass — that re-scanned oceans to death),
+    // then a short re-settle so punched grains sink through the water seat.
+    if super::grain::punch_through_floating_rafts(world) > 0 {
+        super::grain::wake_unsupported_grains(world);
+        let sink = plan_active(world);
+        if !sink.is_empty() {
+            settle_loose_grains_regions(world, &sink, rooted, GRAIN_SETTLE_PASSES);
+        }
+    }
     // Always clear submerged litter lines, then let rafts drink.
     super::grain::rise_buoyant_litter(world);
     super::grain::soak_floating_litter(world);
