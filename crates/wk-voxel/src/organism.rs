@@ -1131,22 +1131,26 @@ fn step_land_plant(
     wind_vx: f32,
 ) -> PlantStep {
     // Pose / seat:
-    // - Near-crown substrate holdfast (sand/rock/grounded organic): always
-    //   pinned upright — running water / floods must not tip land plants or
-    //   lift seaweed off the bed.
+    // - Crown-column substrate holdfast: reseat on local ground; never ride
+    //   a rising waterline (lateral rhizomes upslope must not hoist the crown).
+    // - Any other upright substrate anchor: stay put (don't float).
     // - Floating-Organic raft holdfast (only): tip check; ride the surface.
-    // - No holdfast over *standing* water: tip and free-float.
-    //   Moist seepage films alone never count as a float surface.
+    // - No holdfast over full-sat water: tip and free-float.
     // - Woody tip bakes into body; stemless tips for draw only.
     // - Shore: stay tipped; grow roots into the beach.
     let on_float_raft = rooted_in_floating_organic(world, atom);
     let holdfast_solid = crown_holdfast_solid_y(world, atom);
     let stemless = crate::plant::stem_count(atom) == 0;
+    let grounded = grounded_substrate_anchor(world, atom);
     if let Some(solid_y) = holdfast_solid {
-        // Intact bed holdfast — reseat on the crown and clear any stale tip.
+        // Local ground under the crown — clear stale tip / bad float frames.
         atom.fallen = false;
         atom.upright_growth.clear();
         atom.gy = solid_y + 1;
+        pin_plant_pose(atom);
+    } else if grounded && !atom.fallen {
+        // Still fixed to sand/rock/grounded organic — rising water must not
+        // carry an upright plant. (Floating-Organic rafts are not "grounded".)
         pin_plant_pose(atom);
     } else if on_float_raft {
         let water_top = column_standing_surface(world, atom.gx, atom.gy);
@@ -1185,8 +1189,6 @@ fn step_land_plant(
         atom.fy = atom.gy as f32;
         atom.vel_y = 0.0;
         atom.last_water_top = None;
-    } else if is_anchored(world, atom) {
-        pin_plant_pose(atom);
     } else if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
         atom.gy = slot;
         pin_plant_pose(atom);
@@ -1850,18 +1852,43 @@ fn organic_in_floating_column(
     wy >= bottom && wy < bottom + height
 }
 
-/// Solid Y of a near-crown substrate holdfast, if any.
+/// Root purchase in sand/rock/grounded organic — not a floating raft cell.
+fn grounded_substrate_anchor(world: &World, atom: &Atom) -> bool {
+    let columns = crate::rules::collect_floating_organic_columns(world);
+    for &(dx, dy, m) in &atom.body {
+        if m != ModuleId::Root {
+            continue;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        for y in [wy, wy - 1] {
+            let Some(c) = world.get_cell(wx, y) else {
+                continue;
+            };
+            if c.material == MaterialId::Air {
+                continue;
+            }
+            if c.material == MaterialId::Organic && organic_in_floating_column(&columns, wx, y) {
+                continue;
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// Solid Y of the local ground under the crown, if short roots still grip it.
 ///
-/// Only short roots (`dy >= -6`) count, so a free-floater's deep tendril
-/// scraping the lake bed does not pin the crown underwater. If a short
-/// root still grips sand/rock/grounded organic, we reseat on that solid
-/// even after a bad float frame.
+/// Only roots in the crown columns (`|dx| <= 1`, `dy >= -6`) count. Lateral
+/// rhizomes upslope must not hoist `gy` — that was lifting shoreline plants
+/// with the waterline. Deep free-floater tendrils are ignored so castaways
+/// stay on the surface.
 fn crown_holdfast_solid_y(world: &World, atom: &Atom) -> Option<i32> {
     const MAX_ROOT_LEN: i16 = 6;
     let columns = crate::rules::collect_floating_organic_columns(world);
     let mut best: Option<i32> = None;
     for &(dx, dy, m) in &atom.body {
-        if m != ModuleId::Root || dy < -MAX_ROOT_LEN {
+        if m != ModuleId::Root || dy < -MAX_ROOT_LEN || dx.abs() > 1 {
             continue;
         }
         let wx = world.wrap_x(atom.gx + dx as i32);
@@ -1876,6 +1903,7 @@ fn crown_holdfast_solid_y(world: &World, atom: &Atom) -> Option<i32> {
             if c.material == MaterialId::Organic && organic_in_floating_column(&columns, wx, y) {
                 continue;
             }
+            // Ground surface under the crown (highest solid in crown columns).
             best = Some(best.map_or(y, |b| b.max(y)));
         }
     }

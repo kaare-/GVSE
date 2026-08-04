@@ -2351,6 +2351,67 @@ mod tests {
     }
 
     #[test]
+    fn shoreline_plant_does_not_rise_with_waterline() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Beach slope: low sand at x=4..=6 (y=2), higher sand inland x=8..=10 (y=5).
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 4..=6 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 2, sand);
+        }
+        for x in 8..=10 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 5, sand);
+        }
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            // Lateral rhizome into the higher beach — must not hoist the crown.
+            (3, 2, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 3, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        let gy0 = store.atoms[0].gy;
+        assert_eq!(gy0, 3, "crown seats on local sand, not inland slope");
+        // Rising lake covers the shoreline plant.
+        for x in 0..=7 {
+            for y in 3..=7 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        for tick in 1..40u64 {
+            store.step(&mut w, tick);
+        }
+        assert!(
+            !store.atoms[0].fallen,
+            "shore plant must stay upright on its bed holdfast"
+        );
+        assert_eq!(
+            store.atoms[0].gy, gy0,
+            "must not ride the rising waterline (gy={} want {})",
+            store.atoms[0].gy, gy0
+        );
+    }
+
+    #[test]
     fn moist_seepage_does_not_tip_land_plant() {
         use crate::organism::OrganismStore;
 
