@@ -578,7 +578,12 @@ fn apply_repose_pass(
                         else {
                             continue;
                         };
-                        if grain_max_stable_step(src.material) > 0 {
+                        let mut step = grain_max_stable_step(src.material);
+                        if rooted.is_some_and(|r| r.contains(&(sx, sy))) {
+                            step = step.saturating_add(ROOT_REPOSE_STEP_BONUS);
+                        }
+                        // Rooted sand can hold short stairs — don't walk off.
+                        if step > 0 {
                             continue;
                         }
                         if !is_grain(src.material)
