@@ -349,10 +349,6 @@ impl Corpse {
         }
     }
 
-    fn draws_upright(&self, dx: i16, dy: i16) -> bool {
-        !self.fallen || self.upright_growth.iter().any(|&p| p == (dx, dy))
-    }
-
     fn fallen_draw_offset(&self, dx: i16, dy: i16) -> (i16, i16) {
         fallen_draw_offset(self.fallen, &self.upright_growth, &self.body, dx, dy)
     }
@@ -1137,14 +1133,13 @@ fn step_land_plant(
     // Pose / seat:
     // - Once tipped, stay tipped (re-rooting does not stand the old body up).
     // - New Stem/Photosystem grown while tipped draws upright.
+    // - When that upright mast gets tippy again, flop it (clear upright_growth).
     // - Open lake (no holdfast): tip and float at the free surface.
     // - Shore: tip / stay tipped; grow roots into the beach.
     let water_top = column_water_top(world, atom.gx, atom.gy);
     let on_org = rooted_in_organic(world, atom);
     if on_org {
-        if !atom.fallen && raft_plant_should_tip(world, atom) {
-            atom.fallen = true;
-        }
+        apply_raft_tip(world, atom);
         if atom.fallen {
             if let Some(top) = water_top {
                 atom.gy = top;
@@ -1157,6 +1152,10 @@ fn step_land_plant(
         }
     } else if let Some(top) = water_top {
         atom.fallen = true;
+        // Free-float mast can tip over again once tall enough.
+        if upright_mast_tippy(atom, 1) {
+            atom.upright_growth.clear();
+        }
         atom.gy = top;
         atom.fy = top as f32;
         atom.vel_y = 0.0;
@@ -1496,32 +1495,32 @@ pub fn fallen_body_offset(dx: i16, dy: i16) -> (i16, i16) {
 /// Draw offset for a tipped plant cell.
 ///
 /// Pre-tip canopy uses [`fallen_body_offset`]. Cells in `upright_growth`
-/// stack upright from the waterline crown — body Y still includes the
-/// tipped trunk height, so we subtract that top or new shoots would float
-/// above a one-cell gap where the old stem laid flat.
+/// stack upright from the waterline with no gaps: visual Y is `1 +` the
+/// number of distinct upright body-Y values below this cell. (Body Y still
+/// includes the tipped trunk, so a raw `dy - tipped_top` remap can skip a
+/// row when trunk/leaf heights don't line up.)
 pub fn fallen_draw_offset(
     fallen: bool,
     upright_growth: &[(i16, i16)],
-    body: &[BodyModule],
+    _body: &[BodyModule],
     dx: i16,
     dy: i16,
 ) -> (i16, i16) {
     if !fallen {
         return (dx, dy);
     }
-    let is_upright = upright_growth.iter().any(|&p| p == (dx, dy));
-    if !is_upright {
+    if !upright_growth.iter().any(|&p| p == (dx, dy)) {
         return fallen_body_offset(dx, dy);
     }
-    let tipped_top = body
-        .iter()
-        .filter(|&&(x, y, _)| {
-            y >= 0 && !upright_growth.iter().any(|&p| p == (x, y))
-        })
-        .map(|&(_, y, _)| y)
-        .max()
-        .unwrap_or(0);
-    (dx, (dy - tipped_top).max(1))
+    // Distinct upright body-Y values strictly below `dy` (side-leaves at the
+    // same body Y share one visual row with their stem).
+    let mut seen: Vec<i16> = Vec::with_capacity(upright_growth.len());
+    for &(_, uy) in upright_growth {
+        if uy < dy && !seen.contains(&uy) {
+            seen.push(uy);
+        }
+    }
+    (dx, 1 + seen.len() as i16)
 }
 
 /// Soft frond draw pose. Roots / Nucleus / Digest stay rigid. Cosmetic —
@@ -1769,25 +1768,35 @@ fn rooted_in_organic(world: &World, atom: &Atom) -> bool {
     false
 }
 
-/// Tall plant on a skinny floating mat — tip over (draw) while holdfast stays.
-fn raft_plant_should_tip(world: &World, atom: &Atom) -> bool {
+/// First tip, or re-tip an upright mast that grew too tall on a skinny raft.
+fn apply_raft_tip(world: &World, atom: &mut Atom) {
+    let Some(support) = raft_support_width(world, atom) else {
+        return;
+    };
+    if !atom.fallen {
+        if upright_body_tippy(atom, support) {
+            atom.fallen = true;
+        }
+        return;
+    }
+    if upright_mast_tippy(atom, support) {
+        // Fold the post-tip shoots onto the waterline; further growth starts
+        // a fresh upright mast.
+        atom.upright_growth.clear();
+    }
+}
+
+fn raft_support_width(world: &World, atom: &Atom) -> Option<i32> {
     use crate::plant::holdfast_on_float_column;
 
     let columns = crate::rules::collect_floating_organic_columns(world);
     if columns.is_empty() {
-        return false;
+        return None;
     }
-    let mut height = 0i32;
     let mut min_x = i32::MAX;
     let mut max_x = i32::MIN;
     let mut has_holdfast = false;
     for &(dx, dy, m) in &atom.body {
-        if matches!(
-            m,
-            ModuleId::Stem | ModuleId::Photosystem | ModuleId::Nucleus
-        ) {
-            height = height.max(dy as i32);
-        }
         if m != ModuleId::Root && m != ModuleId::Nucleus {
             continue;
         }
@@ -1800,13 +1809,48 @@ fn raft_plant_should_tip(world: &World, atom: &Atom) -> bool {
         }
     }
     if !has_holdfast || min_x > max_x {
-        return false;
+        return None;
     }
     let support = (min_x..=max_x)
         .filter(|x| columns.contains_key(x))
         .count() as i32;
-    // Tip when the sail is tall relative to the mat footprint.
-    support > 0 && height >= 3 && height >= support * 2
+    (support > 0).then_some(support)
+}
+
+/// Upright (pre-tip) body sail height vs raft footprint.
+fn upright_body_tippy(atom: &Atom, support: i32) -> bool {
+    let height = atom
+        .body
+        .iter()
+        .filter(|(_, _, m)| {
+            matches!(
+                m,
+                ModuleId::Stem | ModuleId::Photosystem | ModuleId::Nucleus
+            )
+        })
+        .map(|(_, dy, _)| i32::from(*dy))
+        .max()
+        .unwrap_or(0);
+    sail_tippy(height, support)
+}
+
+/// Post-tip upright mast height (draw stack) vs support footprint.
+fn upright_mast_tippy(atom: &Atom, support: i32) -> bool {
+    if atom.upright_growth.is_empty() {
+        return false;
+    }
+    let mut seen: Vec<i16> = Vec::new();
+    for &(_, y) in &atom.upright_growth {
+        if !seen.contains(&y) {
+            seen.push(y);
+        }
+    }
+    sail_tippy(seen.len() as i32, support)
+}
+
+fn sail_tippy(height: i32, support: i32) -> bool {
+    let support = support.max(1);
+    height >= 3 && height >= support * 2
 }
 
 /// Free-surface y of standing water in this column near `hint_y`.

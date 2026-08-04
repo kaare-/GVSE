@@ -889,7 +889,8 @@ where
 
 /// Per-column max world-y of living plant sail (Stem / Photosystem / Nucleus).
 ///
-/// Used by floating-Organic wind drift so tall plants act as sails.
+/// Uses **draw** offsets so a tipped trunk lying on the waterline does not
+/// cast a phantom upright sail, while post-tip upright shoots still count.
 pub fn collect_plant_sail_tops<'a, I>(atoms: I) -> HashMap<i32, i32>
 where
     I: IntoIterator<Item = &'a Atom>,
@@ -899,13 +900,14 @@ where
         if !is_land_plant(a) {
             continue;
         }
-        for &(dx, dy, m) in &a.body {
+        for &(dx0, dy0, m) in &a.body {
             if !matches!(
                 m,
                 ModuleId::Photosystem | ModuleId::Stem | ModuleId::Nucleus
             ) {
                 continue;
             }
+            let (dx, dy) = a.fallen_draw_offset(dx0, dy0);
             let wx = a.gx + dx as i32;
             let wy = a.gy + dy as i32;
             let e = out.entry(wx).or_insert(wy);
@@ -2447,7 +2449,8 @@ mod tests {
                 w.set_cell(x, y, Cell::air());
             }
         }
-        // Tall pre-tip trunk + new upright stem/leaf above it in body space.
+        // Pre-tip trunk + post-tip shoots with a skipped body Y (4 then 6).
+        // Rank stacking must still put the first shoot at gy+1.
         let mut atom = Atom::from_body(
             5,
             5,
@@ -2457,14 +2460,15 @@ mod tests {
                 (0, -1, ModuleId::Root),
                 (0, 1, ModuleId::Stem),
                 (0, 2, ModuleId::Stem),
-                (0, 3, ModuleId::Stem),
-                (0, 4, ModuleId::Stem), // grown after tip
-                (0, 5, ModuleId::Photosystem),
-                (1, 5, ModuleId::Photosystem),
+                (0, 3, ModuleId::Photosystem),
+                (0, 4, ModuleId::Stem),
+                (0, 6, ModuleId::Stem),
+                (0, 7, ModuleId::Photosystem),
+                (1, 7, ModuleId::Photosystem),
             ],
         );
         atom.fallen = true;
-        atom.upright_growth = vec![(0, 4), (0, 5), (1, 5)];
+        atom.upright_growth = vec![(0, 4), (0, 6), (0, 7), (1, 7)];
         let posed = resolve_organism_draw_cells(&w, &[atom.clone()], 0, 0.0);
         let stem_ys: Vec<i32> = posed
             .iter()
@@ -2472,18 +2476,98 @@ mod tests {
             .map(|p| p.wy)
             .collect();
         assert!(
-            stem_ys.contains(&(atom.gy + 1)),
-            "upright trunk must occupy gy+1 (no air gap), stems at {stem_ys:?}"
+            stem_ys.contains(&(atom.gy + 1)) && stem_ys.contains(&(atom.gy + 2)),
+            "upright trunk must be contiguous from gy+1, stems at {stem_ys:?}"
         );
         assert!(
-            !stem_ys.contains(&(atom.gy + 4)),
-            "must not draw new stem at raw body Y above the tipped trunk"
+            !stem_ys.contains(&(atom.gy + 4)) && !stem_ys.contains(&(atom.gy + 6)),
+            "must not draw new stems at raw body Y"
         );
         assert!(
             posed.iter().any(|p| {
-                p.mid == ModuleId::Photosystem && p.wx == atom.gx && p.wy == atom.gy + 2
+                p.mid == ModuleId::Photosystem && p.wx == atom.gx && p.wy == atom.gy + 3
             }),
-            "upright leaf should sit on the remapped shoot, not float at gy+5"
+            "upright leaf should sit on the remapped shoot stack"
+        );
+    }
+
+    #[test]
+    fn tall_upright_mast_on_skinny_raft_tips_again() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..20 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        w.set_cell(8, 6, Cell::solid(MaterialId::Organic));
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            // Post-tip mast (3 distinct upright Y → tippy on 1-wide raft).
+            (0, 3, ModuleId::Stem),
+            (0, 4, ModuleId::Stem),
+            (0, 5, ModuleId::Photosystem),
+        ];
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(8, 6, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        atom.fallen = true;
+        atom.upright_growth = vec![(0, 3), (0, 4), (0, 5)];
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(store.atoms[0].fallen, "must stay tipped");
+        assert!(
+            store.atoms[0].upright_growth.is_empty(),
+            "tippy upright mast should flop (clear upright_growth), got {:?}",
+            store.atoms[0].upright_growth
+        );
+    }
+
+    #[test]
+    fn upright_mast_counts_as_wind_sail() {
+        let mut tipped = Atom::from_body(
+            5,
+            5,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Stem),
+                (0, 4, ModuleId::Stem),
+                (0, 5, ModuleId::Photosystem),
+            ],
+        );
+        apply_genome(
+            &mut tipped,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        tipped.fallen = true;
+        // Fully tipped — flat on the waterline, no upright sail height.
+        let flat = collect_plant_sail_tops(std::iter::once(&tipped));
+        let flat_top = flat.get(&5).copied().unwrap_or(tipped.gy);
+        assert_eq!(flat_top, tipped.gy, "fully tipped canopy is waterline-flat");
+
+        tipped.upright_growth = vec![(0, 4), (0, 5)];
+        let sailed = collect_plant_sail_tops(std::iter::once(&tipped));
+        let sail_top = sailed.get(&5).copied().unwrap_or(tipped.gy);
+        assert!(
+            sail_top >= tipped.gy + 2,
+            "post-tip upright mast must raise sail top (got {sail_top}, gy={})",
+            tipped.gy
         );
     }
 
