@@ -702,6 +702,14 @@ impl OrganismStore {
             .collect();
         // Transpiration return: (gx, gy, sat_units) → humidity mass.
         let mut transpired: Vec<(i32, i32, u32)> = Vec::new();
+        // Floating-Organic raft columns: once per organism tick. Seat / tip /
+        // holdfast helpers used to re-scan the whole world per plant (and
+        // several times each) — that was O(plants × cells) and crushed FPS.
+        let float_columns = if plant_cols.is_empty() {
+            std::collections::HashMap::new()
+        } else {
+            crate::rules::collect_floating_organic_columns(world)
+        };
 
         // Empty store: still allow mycelium field → fruiting body emergence
         // (and corpse settle). Spores need a living body afterward.
@@ -757,6 +765,7 @@ impl OrganismStore {
                     &growth_caps,
                     &plant_cols,
                     wind_vx,
+                    &float_columns,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -1129,6 +1138,7 @@ fn step_land_plant(
     growth_caps: &PlantGrowthCaps,
     plant_cols: &[i32],
     wind_vx: f32,
+    float_columns: &std::collections::HashMap<i32, (i32, i32)>,
 ) -> PlantStep {
     // Pose / seat:
     // - Crown-column substrate holdfast: reseat on local ground; never ride
@@ -1138,14 +1148,18 @@ fn step_land_plant(
     // - No holdfast over full-sat water: tip and free-float.
     // - Woody tip bakes into body; stemless tips for draw only.
     // - Shore: stay tipped; grow roots into the beach.
-    let on_float_raft = rooted_in_floating_organic(world, atom);
-    let holdfast_solid = crown_holdfast_solid_y(world, atom);
+    let on_float_raft = rooted_in_floating_organic(world, atom, float_columns);
+    let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
     let stemless = crate::plant::stem_count(atom) == 0;
-    let grounded = grounded_substrate_anchor(world, atom);
+    let grounded = grounded_substrate_anchor(world, atom, float_columns);
     if let Some(solid_y) = holdfast_solid {
-        // Local ground under the crown — clear stale tip / bad float frames.
-        atom.fallen = false;
-        atom.upright_growth.clear();
+        // Local ground under the crown. Stemless seaweed drops a stale tip
+        // once the holdfast is back; woody plants stay tipped so only new
+        // upright_growth shoots stand up after shore re-root.
+        if stemless {
+            atom.fallen = false;
+            atom.upright_growth.clear();
+        }
         atom.gy = solid_y + 1;
         pin_plant_pose(atom);
     } else if grounded && !atom.fallen {
@@ -1154,7 +1168,7 @@ fn step_land_plant(
         pin_plant_pose(atom);
     } else if on_float_raft {
         let water_top = column_standing_surface(world, atom.gx, atom.gy);
-        apply_raft_tip(world, atom);
+        apply_raft_tip(world, atom, float_columns);
         if atom.fallen {
             if let Some(top) = water_top {
                 atom.gy = top;
@@ -1821,10 +1835,13 @@ fn rest_soft_leaf_y(world: &World, gx: i32, preferred_y: i32) -> i32 {
 
 /// True when a Root/Nucleus sits in or on Organic (raft / compost holdfast).
 /// Holdfast on a *floating* Organic column (raft), not grounded compost.
-fn rooted_in_floating_organic(world: &World, atom: &Atom) -> bool {
+fn rooted_in_floating_organic(
+    world: &World,
+    atom: &Atom,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+) -> bool {
     use crate::plant::holdfast_on_float_column;
 
-    let columns = crate::rules::collect_floating_organic_columns(world);
     if columns.is_empty() {
         return false;
     }
@@ -1834,7 +1851,7 @@ fn rooted_in_floating_organic(world: &World, atom: &Atom) -> bool {
         }
         let wx = world.wrap_x(atom.gx + dx as i32);
         let wy = atom.gy + dy as i32;
-        if holdfast_on_float_column(&columns, m, wx, wy) {
+        if holdfast_on_float_column(columns, m, wx, wy) {
             return true;
         }
     }
@@ -1853,8 +1870,11 @@ fn organic_in_floating_column(
 }
 
 /// Root purchase in sand/rock/grounded organic — not a floating raft cell.
-fn grounded_substrate_anchor(world: &World, atom: &Atom) -> bool {
-    let columns = crate::rules::collect_floating_organic_columns(world);
+fn grounded_substrate_anchor(
+    world: &World,
+    atom: &Atom,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+) -> bool {
     for &(dx, dy, m) in &atom.body {
         if m != ModuleId::Root {
             continue;
@@ -1868,7 +1888,7 @@ fn grounded_substrate_anchor(world: &World, atom: &Atom) -> bool {
             if c.material == MaterialId::Air {
                 continue;
             }
-            if c.material == MaterialId::Organic && organic_in_floating_column(&columns, wx, y) {
+            if c.material == MaterialId::Organic && organic_in_floating_column(columns, wx, y) {
                 continue;
             }
             return true;
@@ -1883,9 +1903,12 @@ fn grounded_substrate_anchor(world: &World, atom: &Atom) -> bool {
 /// rhizomes upslope must not hoist `gy` — that was lifting shoreline plants
 /// with the waterline. Deep free-floater tendrils are ignored so castaways
 /// stay on the surface.
-fn crown_holdfast_solid_y(world: &World, atom: &Atom) -> Option<i32> {
+fn crown_holdfast_solid_y(
+    world: &World,
+    atom: &Atom,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+) -> Option<i32> {
     const MAX_ROOT_LEN: i16 = 6;
-    let columns = crate::rules::collect_floating_organic_columns(world);
     let mut best: Option<i32> = None;
     for &(dx, dy, m) in &atom.body {
         if m != ModuleId::Root || dy < -MAX_ROOT_LEN || dx.abs() > 1 {
@@ -1900,7 +1923,7 @@ fn crown_holdfast_solid_y(world: &World, atom: &Atom) -> Option<i32> {
             if c.material == MaterialId::Air {
                 continue;
             }
-            if c.material == MaterialId::Organic && organic_in_floating_column(&columns, wx, y) {
+            if c.material == MaterialId::Organic && organic_in_floating_column(columns, wx, y) {
                 continue;
             }
             // Ground surface under the crown (highest solid in crown columns).
@@ -1955,8 +1978,12 @@ fn column_standing_surface(world: &World, gx: i32, hint_y: i32) -> Option<i32> {
 /// Woody plants bake the flop into body offsets so the next stem elongates
 /// upward. Stemless seaweed only sets `fallen` (soft draw) — baking would
 /// turn the ribbon into a permanent sideways trunk.
-fn apply_raft_tip(world: &World, atom: &mut Atom) {
-    let Some(support) = raft_support_width(world, atom) else {
+fn apply_raft_tip(
+    world: &World,
+    atom: &mut Atom,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+) {
+    let Some(support) = raft_support_width(world, atom, columns) else {
         return;
     };
     let stemless = crate::plant::stem_count(atom) == 0;
@@ -1978,10 +2005,13 @@ fn apply_raft_tip(world: &World, atom: &mut Atom) {
     }
 }
 
-fn raft_support_width(world: &World, atom: &Atom) -> Option<i32> {
+fn raft_support_width(
+    world: &World,
+    atom: &Atom,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+) -> Option<i32> {
     use crate::plant::holdfast_on_float_column;
 
-    let columns = crate::rules::collect_floating_organic_columns(world);
     if columns.is_empty() {
         return None;
     }
@@ -1996,7 +2026,7 @@ fn raft_support_width(world: &World, atom: &Atom) -> Option<i32> {
         let wy = atom.gy + dy as i32;
         min_x = min_x.min(wx);
         max_x = max_x.max(wx);
-        if holdfast_on_float_column(&columns, m, wx, wy) {
+        if holdfast_on_float_column(columns, m, wx, wy) {
             has_holdfast = true;
         }
     }

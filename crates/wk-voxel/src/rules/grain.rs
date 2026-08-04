@@ -868,13 +868,33 @@ pub fn drift_floating_organic(
     plant_tops: Option<&std::collections::HashMap<i32, i32>>,
     root_bound_columns: Option<&HashSet<i32>>,
 ) -> (u32, i32, HashSet<i32>) {
+    let columns = collect_floating_organic_columns(world);
+    drift_floating_organic_columns(
+        world,
+        &columns,
+        wind_vx_tiles,
+        tile_cols,
+        plant_tops,
+        root_bound_columns,
+    )
+}
+
+/// Like [`drift_floating_organic`] with a precomputed floating-Organic map
+/// (avoids a second full-world scan when the plant layer already collected).
+pub fn drift_floating_organic_columns(
+    world: &mut World,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+    wind_vx_tiles: f32,
+    tile_cols: i32,
+    plant_tops: Option<&std::collections::HashMap<i32, i32>>,
+    root_bound_columns: Option<&HashSet<i32>>,
+) -> (u32, i32, HashSet<i32>) {
     if wind_vx_tiles.abs() < 1e-5 {
         return (0, 0, HashSet::new());
     }
     let sign: i32 = if wind_vx_tiles >= 0.0 { 1 } else { -1 };
     let speed = wind_vx_tiles.abs() * tile_cols.max(1) as f32;
 
-    let columns = collect_floating_organic_columns(world);
     if columns.is_empty() {
         return (0, sign, HashSet::new());
     }

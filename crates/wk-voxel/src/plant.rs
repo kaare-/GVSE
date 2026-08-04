@@ -1001,8 +1001,9 @@ pub fn sail_plants_on_wind_rafts(
             .iter()
             .filter_map(|&i| atoms.get(i)),
     );
-    let (moved, sign, moved_cols) = crate::rules::drift_floating_organic(
+    let (moved, sign, moved_cols) = crate::rules::drift_floating_organic_columns(
         world,
+        &columns,
         wind_vx_tiles,
         tile_cols,
         Some(&sails),
@@ -2469,8 +2470,6 @@ mod tests {
             &mut atom,
             crate::blueprint::Blueprint::minimal_plant().genome,
         );
-        // Pretend a prior wet frame wrongly tipped it.
-        atom.fallen = true;
         store.atoms.push(atom);
         for y in 2..=5 {
             w.set_cell(5, y, Cell::water());
@@ -2480,7 +2479,7 @@ mod tests {
         }
         assert!(
             !store.atoms[0].fallen,
-            "crown holdfast must clear tip even in a stream flood"
+            "rooted crown holdfast must not tip in a stream flood"
         );
         assert_eq!(
             store.atoms[0].gy, 2,
