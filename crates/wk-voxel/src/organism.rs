@@ -1000,7 +1000,7 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
     let mut land_idx: Vec<usize> = atoms
         .iter()
         .enumerate()
-        .filter(|(_, a)| is_land_plant(a))
+        .filter(|(_, a)| is_land_plant(a) && !a.fallen)
         .map(|(i, _)| i)
         .collect();
     if land_idx.len() < 2 {
@@ -1105,19 +1105,25 @@ fn step_land_plant(
     plant_cols: &[i32],
     wind_vx: f32,
 ) -> PlantStep {
-    // Free-spawn / canopy clicks can leave a plant briefly unanchored.
-    // Over open water: float tipped at the free surface (don't snap to the
-    // lake bed — that made lost raft plants sink then compost-float again).
-    // On dry land: snap to a surface crown and starve slowly.
-    if is_anchored(world, atom) {
+    // Pose / seat:
+    // - Holdfast in Organic (raft or soil compost) → upright.
+    // - Else a lake in this column → tip and float at the free surface.
+    //   Never snap to the underwater bed (find_surface_air_slot under a
+    //   lake seats on sand). Deep roots touching the seabed must not
+    //   "re-root" a free-floating tree.
+    // - Else dry land → surface crown / existing anchor.
+    if rooted_in_organic(world, atom) {
         atom.fallen = false;
         pin_plant_pose(atom);
-    } else if let Some((top, _bed)) = wet_band(world, atom.gx, atom.gy) {
+    } else if let Some(top) = column_water_top(world, atom.gx, atom.gy) {
         atom.fallen = true;
         atom.gy = top;
         atom.fy = top as f32;
         atom.vel_y = 0.0;
         atom.last_water_top = Some(top);
+    } else if is_anchored(world, atom) {
+        atom.fallen = false;
+        pin_plant_pose(atom);
     } else if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
         atom.fallen = false;
         atom.gy = slot;
@@ -1207,14 +1213,18 @@ fn step_land_plant(
     // Photosystem ribbon instead (no trunk invent). When leaves bathe in
     // standing water, root urge collapses — holdfast is enough.
     let genome_save = atom.genome;
-    if bathing {
+    if atom.fallen {
+        // Free-float: no root dive into the seabed, no trunk race.
+        atom.genome.alloc_root = 0.0;
+        atom.genome.alloc_stem = atom.genome.alloc_stem.min(0.05);
+    } else if bathing {
         atom.genome.alloc_root = atom.genome.alloc_root.min(0.06);
         if crate::plant::stem_count(atom) == 0 && n_photo > 0 {
             atom.genome.alloc_leaf = (atom.genome.alloc_leaf + 0.20).min(1.0);
             atom.genome.alloc_stem = 0.0;
         }
     }
-    if submerged && light < SUBMERGED_STEM_URGE_LIGHT {
+    if !atom.fallen && submerged && light < SUBMERGED_STEM_URGE_LIGHT {
         if crate::plant::stem_count(atom) > 0 {
             atom.genome.alloc_stem = (atom.genome.alloc_stem + 0.40).min(1.0);
             atom.genome.alloc_root = (atom.genome.alloc_root * 0.55).max(0.05);
@@ -1644,6 +1654,52 @@ fn rest_soft_leaf_y(world: &World, gx: i32, preferred_y: i32) -> i32 {
         }
     }
     y
+}
+
+/// True when a Root/Nucleus sits in or on Organic (raft / compost holdfast).
+fn rooted_in_organic(world: &World, atom: &Atom) -> bool {
+    for &(dx, dy, m) in &atom.body {
+        if m != ModuleId::Root && m != ModuleId::Nucleus {
+            continue;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        if world
+            .get_cell(wx, wy)
+            .map(|c| c.material == MaterialId::Organic)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if world
+            .get_cell(wx, wy - 1)
+            .map(|c| c.material == MaterialId::Organic)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Free-surface y of standing water in this column near `hint_y`.
+///
+/// Searches much farther than [`find_wet_near`] so a plant that left a
+/// tall raft still finds the lake after the waterline drops, instead of
+/// falling through to [`find_surface_air_slot`] on the seabed.
+fn column_water_top(world: &World, gx: i32, hint_y: i32) -> Option<i32> {
+    if let Some((top, _)) = wet_band(world, gx, hint_y) {
+        return Some(top);
+    }
+    let gx = world.wrap_x(gx);
+    for dy in 0..=192 {
+        for y in [hint_y - dy, hint_y + dy] {
+            if is_wet_air(world, gx, y) {
+                return wet_band(world, gx, y).map(|(top, _)| top);
+            }
+        }
+    }
+    None
 }
 
 /// Contiguous wet-Air band containing `hint_y` (or nearest wet cell).

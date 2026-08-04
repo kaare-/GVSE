@@ -2175,6 +2175,54 @@ mod tests {
     }
 
     #[test]
+    fn fallen_raft_plant_does_not_root_on_lake_bed() {
+        // After leaving a tall raft, the plant may sit many cells above a
+        // lowered waterline. It must float at the surface — never snap to
+        // sand via find_surface_air_slot, and must not re-root on the bed.
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+            for y in 2..=6 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 7..20 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        // Former raft height — well above the free surface at y=6.
+        let mut atom = Atom::from_body(5, 14, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        // Pretend a diving root already touches the sand bed.
+        atom.body.push((0, -13, ModuleId::Root));
+        store.atoms.push(atom);
+        for tick in 0..30u64 {
+            store.step(&mut w, tick);
+        }
+        assert!(
+            store.atoms[0].fallen,
+            "must stay free-floating, not re-root on sand"
+        );
+        assert_eq!(
+            store.atoms[0].gy, 6,
+            "must sit at the free surface (gy={})",
+            store.atoms[0].gy
+        );
+        assert!(
+            store.atoms[0].gy > 2,
+            "must not snap to the underwater bed seat"
+        );
+    }
+
+    #[test]
     fn multi_root_plant_binds_full_organic_span() {
         // Later roots (not only the first Organic contact) must claim the
         // mat so the plant cannot drift ahead of the pile.
