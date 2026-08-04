@@ -147,6 +147,7 @@ pub fn tick_with_life(
     // Last non-empty flow plan — grain/seepage fall back to this when
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
+    let mut start_area: usize = 0;
     for step in 0..FLOW_SUBSTEPS {
         let active = plan_active(world);
         clear_all_dirty(world);
@@ -154,6 +155,10 @@ pub fn tick_with_life(
             break;
         }
         flow_halo = active.clone();
+        let this_area = active_cell_area(&active);
+        if step == 0 {
+            start_area = this_area;
+        }
         let passes = partition_checkerboard(&active);
         for pass in &passes {
             apply_gravity_fall_regions(world, pass);
@@ -168,9 +173,18 @@ pub fn tick_with_life(
         }
         // Quiet early-out: after the minimum passes, peek at dirty
         // written by this substep — a tiny halo means water settled.
+        // Absolute threshold catches truly settled worlds; a *shrink*
+        // check catches busy shores that started large but have since
+        // fallen off (adaptive substeps for the tuned feel path).
         if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_MIN {
             let next = plan_active(world);
-            if next.is_empty() || active_cell_area(&next) <= FLOW_QUIET_AREA {
+            let next_area = active_cell_area(&next);
+            if next.is_empty() || next_area <= FLOW_QUIET_AREA {
+                break;
+            }
+            // Adaptive: halo shrunk by ≥ 1/3 relative to start-of-tick —
+            // remaining flow is polishing, not cascading.
+            if start_area > 0 && next_area * 3 <= start_area * 2 {
                 break;
             }
         }
@@ -193,12 +207,19 @@ pub fn tick_with_life(
         apply_seepage_regions(world, &flow_active);
     }
 
-    // Always re-wake unsupported grains and steep cliff faces — lakes
-    // often leave a non-empty dirty plan far from F3 paint, and seated
-    // Organic/sand walls have solid under them so fall-wake alone never
-    // sees them.
-    super::grain::wake_unsupported_grains(world);
-    super::grain::wake_unstable_slopes(world);
+    // Re-wake unsupported grains and steep cliff faces — lakes often
+    // leave a non-empty dirty plan far from F3 paint, and seated
+    // Organic/sand walls have solid under them so fall-wake alone
+    // never sees them. Cadence-gated: this is a full-grid safety scan
+    // that only matters when a grain was orphaned mid-air; running
+    // every tick was ~1.6 ms of pure insurance. Every 4 ticks trades
+    // a ≤4-tick delay before a stranded grain drops for that budget.
+    // Also runs on tick 0 (fresh world / after save-load) so painted
+    // mid-air grains fall on the first tick.
+    const GRAIN_WAKE_EVERY: u64 = 4;
+    if world.tick % GRAIN_WAKE_EVERY == 0 {
+        super::grain::wake_grains_for_settle(world);
+    }
     let grain_active = {
         let dirty = plan_active(world);
         if dirty.is_empty() {
@@ -214,16 +235,19 @@ pub fn tick_with_life(
     // Dense cargo cannot ride floating Organic/Snow/Ice. Full-grid punch
     // once per tick (not per settle pass — that re-scanned oceans to death),
     // then a short re-settle so punched grains sink through the water seat.
-    if super::grain::punch_through_floating_rafts(world) > 0 {
-        super::grain::wake_unsupported_grains(world);
+    // Cadence-gated with grain wake to share the "no fresh grain paint"
+    // quiet path (~0.7 ms/tick).
+    if world.tick % GRAIN_WAKE_EVERY == 0
+        && super::grain::punch_through_floating_rafts(world) > 0
+    {
+        super::grain::wake_grains_for_settle(world);
         let sink = plan_active(world);
         if !sink.is_empty() {
             settle_loose_grains_regions(world, &sink, rooted, GRAIN_SETTLE_PASSES);
         }
     }
-    // Always clear submerged litter lines, then let rafts drink.
-    super::grain::rise_buoyant_litter(world);
-    super::grain::soak_floating_litter(world);
+    // Clear submerged litter lines, then let rafts drink — shared litter scan.
+    super::grain::rise_and_soak_buoyant_litter(world);
 
     // Geotech: roof / overhang collapse after grain has seated.
     crate::failure::apply_failure(world, failure, geotech);
