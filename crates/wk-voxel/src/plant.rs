@@ -1518,6 +1518,7 @@ pub fn try_grow_shoot(
                 }
                 atom.energy -= cost;
                 atom.body.push((nx, ny, ModuleId::Photosystem));
+                atom.mark_upright_growth(nx, ny);
                 return true;
             }
             return false;
@@ -1557,6 +1558,7 @@ pub fn try_grow_shoot(
                 }
                 atom.energy -= cost;
                 atom.body.push((nx, ny, ModuleId::Photosystem));
+                atom.mark_upright_growth(nx, ny);
                 return true;
             }
         }
@@ -1601,6 +1603,7 @@ pub fn try_grow_shoot(
                     }
                     atom.energy -= cost;
                     atom.body.push((nx, ny, ModuleId::Photosystem));
+                    atom.mark_upright_growth(nx, ny);
                     return true;
                 }
             }
@@ -1639,6 +1642,7 @@ pub fn try_grow_shoot(
             }
             atom.energy -= cost;
             atom.body.push((nx, ny, ModuleId::Stem));
+            atom.mark_upright_growth(nx, ny);
             return true;
         }
         false
@@ -2321,20 +2325,106 @@ mod tests {
         atom.genome.alloc_stem = 0.15;
         atom.genome.alloc_leaf = 0.25;
         store.atoms.push(atom);
-        let mut upright = false;
+        let mut anchored = false;
         for tick in 0..120u64 {
             store.step(&mut w, tick);
             if store.atoms.is_empty() {
                 break;
             }
-            if !store.atoms[0].fallen && is_anchored(&w, &store.atoms[0]) {
-                upright = true;
+            if is_anchored(&w, &store.atoms[0]) {
+                anchored = true;
                 break;
             }
         }
+        assert!(anchored, "stranded floater should grow roots into the beach");
         assert!(
-            upright,
-            "stranded floater should grow into the beach and stand upright"
+            store.atoms[0].fallen,
+            "re-rooted shore plant must stay tipped; only new shoots stand up"
+        );
+    }
+
+    #[test]
+    fn tipped_floater_grows_new_stem_upright() {
+        use crate::organism::{fallen_body_offset, resolve_organism_draw_cells};
+        use crate::shade::CanopyIndex;
+        use std::collections::HashSet;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Side leaf so the trunk tip has clear air for stem elongation.
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (1, 1, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(5, 5, 120.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        atom.fallen = true;
+        atom.energy = atom.energy_max;
+        atom.genome.alloc_root = 0.0;
+        // Strong stem bias so growth prefers trunk elongation over a side leaf.
+        atom.genome.alloc_stem = 0.92;
+        atom.genome.alloc_leaf = 0.08;
+        let caps = PlantGrowthCaps::default();
+        let mut spent = 0.0;
+        for t in 0..24u64 {
+            spent = try_grow_shoot(
+                &w,
+                &mut atom,
+                t,
+                &HashSet::new(),
+                &HashSet::new(),
+                &caps,
+                &CanopyIndex::default(),
+                0,
+            );
+            if atom.body.iter().any(|&(dx, dy, m)| {
+                m == ModuleId::Stem && atom.upright_growth.contains(&(dx, dy))
+            }) {
+                break;
+            }
+        }
+        assert!(spent > 0.0, "tipped floater should grow a shoot");
+        let new_stem = atom
+            .body
+            .iter()
+            .copied()
+            .find(|&(dx, dy, m)| m == ModuleId::Stem && atom.upright_growth.contains(&(dx, dy)))
+            .expect("new stem cell marked upright_growth");
+        assert!(atom.fallen);
+        assert!(atom.draws_upright(new_stem.0, new_stem.1));
+        assert!(!atom.draws_upright(0, 1));
+        let atoms = vec![atom.clone()];
+        let posed = resolve_organism_draw_cells(&w, &atoms, 0, 0.0);
+        assert!(
+            posed.iter().any(|p| {
+                p.mid == ModuleId::Stem
+                    && p.wx == atom.gx + new_stem.0 as i32
+                    && p.wy == atom.gy + new_stem.1 as i32
+            }),
+            "new stem draws upright at body offsets"
+        );
+        let (ox, oy) = fallen_body_offset(0, 1);
+        assert!(
+            posed.iter().any(|p| {
+                p.mid == ModuleId::Stem
+                    && p.wx == atom.gx + ox as i32
+                    && p.wy == atom.gy + oy as i32
+            }),
+            "pre-tip stem still draws tipped along the waterline"
         );
     }
 

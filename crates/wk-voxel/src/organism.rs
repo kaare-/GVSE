@@ -213,9 +213,12 @@ pub struct Atom {
     /// Stemless seaweed ignores this. Cleared when a leaf is productive again.
     #[serde(default)]
     pub leaf_starve: Vec<(i16, i16, u16)>,
-    /// Lost purchase over water — floats at the free surface, drawn tipped.
+    /// Lost purchase / tippy raft — original body drawn tipped.
     #[serde(default)]
     pub fallen: bool,
+    /// Body-local cells grown after tipping; drawn upright (new shoots).
+    #[serde(default)]
+    pub upright_growth: Vec<(i16, i16)>,
 }
 
 impl Atom {
@@ -243,6 +246,7 @@ impl Atom {
             genome,
             leaf_starve: Vec::new(),
             fallen: false,
+            upright_growth: Vec::new(),
         }
     }
 
@@ -252,6 +256,18 @@ impl Atom {
             a.body = body;
         }
         a
+    }
+
+    /// Record a shoot cell grown while tipped — draws upright, not tipped.
+    pub fn mark_upright_growth(&mut self, dx: i16, dy: i16) {
+        if self.fallen && !self.upright_growth.iter().any(|&p| p == (dx, dy)) {
+            self.upright_growth.push((dx, dy));
+        }
+    }
+
+    /// True when this body cell should skip the tip transform when drawn.
+    pub fn draws_upright(&self, dx: i16, dy: i16) -> bool {
+        !self.fallen || self.upright_growth.iter().any(|&p| p == (dx, dy))
     }
 
     pub fn photosystem_count(&self) -> usize {
@@ -292,6 +308,9 @@ pub struct Corpse {
     /// Land plant/fungus corpse floating tipped on open water.
     #[serde(default)]
     pub fallen: bool,
+    /// Pre-death upright shoots — still drawn upright on a tipped corpse.
+    #[serde(default)]
+    pub upright_growth: Vec<(i16, i16)>,
 }
 
 impl Corpse {
@@ -321,7 +340,12 @@ impl Corpse {
             land,
             last_water_top: atom.last_water_top,
             fallen: atom.fallen,
+            upright_growth: atom.upright_growth.clone(),
         }
+    }
+
+    fn draws_upright(&self, dx: i16, dy: i16) -> bool {
+        !self.fallen || self.upright_growth.iter().any(|&p| p == (dx, dy))
     }
 
     pub fn occupies(&self, wx: i32, wy: i32) -> bool {
@@ -478,7 +502,7 @@ impl OrganismStore {
         }
         for corpse in &self.corpses {
             for &(dx0, dy0, mid) in &corpse.body {
-                let (dx, dy) = if corpse.fallen {
+                let (dx, dy) = if corpse.fallen && !corpse.draws_upright(dx0, dy0) {
                     fallen_body_offset(dx0, dy0)
                 } else {
                     (dx0, dy0)
@@ -1106,15 +1130,17 @@ fn step_land_plant(
     wind_vx: f32,
 ) -> PlantStep {
     // Pose / seat:
-    // - Organic holdfast: upright unless the raft support is tippy.
+    // - Once tipped, stay tipped (re-rooting does not stand the old body up).
+    // - New Stem/Photosystem grown while tipped draws upright.
     // - Open lake (no holdfast): tip and float at the free surface.
-    // - Shore: stay tipped and grow roots; once anchored in ground, stand.
+    // - Shore: tip / stay tipped; grow roots into the beach.
     let water_top = column_water_top(world, atom.gx, atom.gy);
     let on_org = rooted_in_organic(world, atom);
     if on_org {
-        let tippy = raft_plant_should_tip(world, atom);
-        atom.fallen = tippy;
-        if tippy {
+        if !atom.fallen && raft_plant_should_tip(world, atom) {
+            atom.fallen = true;
+        }
+        if atom.fallen {
             if let Some(top) = water_top {
                 atom.gy = top;
                 atom.last_water_top = Some(top);
@@ -1130,24 +1156,20 @@ fn step_land_plant(
         atom.fy = top as f32;
         atom.vel_y = 0.0;
         atom.last_water_top = Some(top);
-    } else if is_anchored(world, atom) {
-        // Washed ashore and rooted into ground — right yourself.
-        atom.fallen = false;
-        pin_plant_pose(atom);
     } else if atom.fallen {
-        // Washed up, not yet rooted — lie on the beach and grow down.
+        // Shore (rooted or not): stay tipped; seat on the beach surface.
         if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
             atom.gy = slot;
         }
         atom.fy = atom.gy as f32;
         atom.vel_y = 0.0;
         atom.last_water_top = None;
+    } else if is_anchored(world, atom) {
+        pin_plant_pose(atom);
     } else if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
-        atom.fallen = false;
         atom.gy = slot;
         pin_plant_pose(atom);
     } else {
-        atom.fallen = false;
         pin_plant_pose(atom);
     }
     // Roots bank surplus above the spawn tank (starch analogy).
@@ -1234,13 +1256,14 @@ fn step_land_plant(
     if atom.fallen {
         if water_top.is_some() {
             // Lake float: sip through dangling roots; don't pipe to the bed.
+            // New shoots may grow upright from the tipped body.
             atom.genome.alloc_root = 0.0;
-            atom.genome.alloc_stem = atom.genome.alloc_stem.min(0.05);
-            atom.genome.alloc_leaf = atom.genome.alloc_leaf.max(0.35);
+            atom.genome.alloc_stem = atom.genome.alloc_stem.max(0.28);
+            atom.genome.alloc_leaf = atom.genome.alloc_leaf.max(0.30);
         } else {
-            // Shore strand: grow roots into the beach to stand back up.
+            // Shore strand: root into the beach; new stems still grow upright.
             atom.genome.alloc_root = (atom.genome.alloc_root + 0.30).min(0.75);
-            atom.genome.alloc_stem = atom.genome.alloc_stem.min(0.12);
+            atom.genome.alloc_stem = atom.genome.alloc_stem.max(0.22);
         }
     } else if bathing {
         atom.genome.alloc_root = atom.genome.alloc_root.min(0.06);
@@ -1417,7 +1440,7 @@ pub fn resolve_organism_draw_cells(
     let mut out = Vec::with_capacity(atoms.iter().map(|a| a.body.len()).sum());
     for (atom_idx, atom) in atoms.iter().enumerate() {
         for &(dx0, dy0, mid) in &atom.body {
-            let (dx, dy) = if atom.fallen {
+            let (dx, dy) = if atom.fallen && !atom.draws_upright(dx0, dy0) {
                 fallen_body_offset(dx0, dy0)
             } else {
                 (dx0, dy0)
