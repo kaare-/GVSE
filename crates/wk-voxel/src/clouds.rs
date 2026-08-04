@@ -688,7 +688,7 @@ mod tests {
     use wk_material::MaterialId;
 
     fn wind_for(p: &WorldgenParams) -> Wind {
-        Wind::climate(
+        let mut w = Wind::climate(
             4,
             0.1,
             p.seed,
@@ -697,7 +697,10 @@ mod tests {
             p.bedrock_floor_y,
             p.sky_ceiling_y,
             true,
-        )
+        );
+        // Cloud unit tests want a steady prevailing push.
+        w.variance = 0.0;
+        w
     }
 
     #[test]

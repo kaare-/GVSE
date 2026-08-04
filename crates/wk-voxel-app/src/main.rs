@@ -834,8 +834,7 @@ async fn main() {
 
         // Sync live settings into scene subsystems.
         scene.wind.climate_vx = settings.wind_vx;
-        scene.wind.gustiness = settings.wind_gustiness;
-        scene.wind.meander = settings.wind_meander;
+        scene.wind.variance = settings.wind_variance;
         let wind_vx = scene.wind.effective_vx(scene.world.tick);
         let wind_vy = scene.wind.effective_vy(scene.world.tick);
         scene.temperature.config = settings.temp;
