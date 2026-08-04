@@ -84,8 +84,10 @@ fn active_cell_area(active: &[crate::active::ActiveChunk]) -> usize {
 ///
 /// **Dirty / active chunks.** Each flow substep [`plan_active`]s from
 /// dirty rects (halo + neighbour wake), then [`clear_all_dirty`].
-/// Writes rebuild dirty for the next substep / tick. A fully settled
-/// world plans nothing and the physics passes early-out.
+/// Writes rebuild dirty for the next substep / tick. Seepage + grain
+/// fall prefer post-flow dirty; if water was quiet they reuse the last
+/// non-empty flow halo so F3-painted Organic / sand mid-air still falls.
+/// A fully settled world plans nothing and the physics passes early-out.
 ///
 /// **Checkerboard.** Gravity and grain run four colour sub-passes
 /// (EE → OE → EO → OO); within a colour, regions run on rayon when
@@ -142,12 +144,16 @@ pub fn tick_with_life(
     };
 
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
+    // Last non-empty flow plan — grain/seepage fall back to this when
+    // water writes nothing (painted solids mid-air, dry edits, …).
+    let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
     for step in 0..FLOW_SUBSTEPS {
         let active = plan_active(world);
         clear_all_dirty(world);
         if active.is_empty() {
             break;
         }
+        flow_halo = active.clone();
         let passes = partition_checkerboard(&active);
         for pass in &passes {
             apply_gravity_fall_regions(world, pass);
@@ -170,11 +176,18 @@ pub fn tick_with_life(
         }
     }
 
-    // Seepage + grain fall read the same dirty halo the substep loop
-    // built. Do NOT clear dirty here: if these passes don't write
-    // (e.g. no porous solids, no grains), we still need next tick to
-    // re-process the cells the substeps just modified.
-    let active = plan_active(world);
+    // Prefer dirty written by flow; if water was quiet, reuse the flow
+    // halo so grain fall still sees F3 / editor solid paints.
+    // Do NOT clear dirty here: if seepage/grain don't write, next tick
+    // still needs that wake (repose continues from grain-fall dirty).
+    let active = {
+        let dirty = plan_active(world);
+        if dirty.is_empty() {
+            flow_halo
+        } else {
+            dirty
+        }
+    };
     if !active.is_empty() {
         apply_seepage_regions(world, &active);
         let passes = partition_checkerboard(&active);
@@ -182,8 +195,16 @@ pub fn tick_with_life(
             apply_grain_fall_regions(world, pass);
         }
         // Repose reads dirty written by grain fall; re-plan so new Air
-        // seats from the fall pass can receive diagonal slides.
-        let repose_active = plan_active(world);
+        // seats from the fall pass can receive diagonal slides. If fall
+        // wrote nothing (already seated), reuse the same halo once.
+        let repose_active = {
+            let dirty = plan_active(world);
+            if dirty.is_empty() {
+                active
+            } else {
+                dirty
+            }
+        };
         if !repose_active.is_empty() {
             let repose_passes = partition_checkerboard(&repose_active);
             for pass in &repose_passes {

@@ -903,6 +903,35 @@ fn organic_does_not_repose_into_standing_water() {
 }
 
 #[test]
+fn painted_midair_organic_falls_under_tick() {
+    // F3 terrain paint marks dirty, but water substeps clear it and write
+    // nothing — grain fall used to see an empty plan and leave litter
+    // floating until shear/erosion re-dirtied the column.
+    let mut w = setup_column_world();
+    w.set_cell(5, 8, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 9, Cell::solid(MaterialId::Organic));
+    for _ in 0..20 {
+        tick(&mut w);
+    }
+    assert_eq!(
+        w.get_cell(5, 9).unwrap().material,
+        MaterialId::Air,
+        "mid-air Organic tip must fall under tick gravity"
+    );
+    assert_eq!(
+        w.get_cell(5, 8).unwrap().material,
+        MaterialId::Air,
+        "mid-air Organic must leave the paint height"
+    );
+    let on_bed = (1..=3).any(|y| {
+        w.get_cell(5, y).map(|c| c.material) == Some(MaterialId::Organic)
+            || w.get_cell(4, y).map(|c| c.material) == Some(MaterialId::Organic)
+            || w.get_cell(6, y).map(|c| c.material) == Some(MaterialId::Organic)
+    });
+    assert!(on_bed, "Organic should seat near bedrock (fall + repose)");
+}
+
+#[test]
 fn underwater_sand_repose_does_not_leave_dry_air() {
     // Sand on an underwater ledge slides into an empty pocket beside
     // standing water. Vacated cell must become water (not sky-flash Air).
