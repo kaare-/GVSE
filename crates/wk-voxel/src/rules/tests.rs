@@ -3970,7 +3970,11 @@ fn rooted_organic_raft_stays_together_in_wind() {
         if before.len() < 3 {
             break;
         }
-        let (n, sign, _) = drift_floating_organic(&mut w, 0.25, 4, None, Some(&roots));
+        // Bind radius 1 stitches neighbour litter into the holdfast raft.
+        let mut grain = GrainConfig::default();
+        grain.raft_root_bind_radius = 1;
+        let (n, sign, _) =
+            drift_floating_organic_cfg(&mut w, 0.25, 4, None, Some(&roots), &grain);
         if n == 0 {
             continue;
         }

@@ -604,10 +604,6 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
 /// Max pore sat absorbed per tick from the water column under a floating
 /// Organic / Soil raft. Keeps the surface cell full so the raft still floats.
 const FLOAT_SOAK_RATE: u8 = 16;
-/// After pores fill, chance per tick that floating Organic waterlogs and
-/// begins sinking through the lake. Expected wait ≈ `1 / rate` ticks
-/// (~2500 at `0.0004`) — a long counter without widening `Cell`.
-const ORGANIC_WATERLOG_RATE: f32 = 0.0004;
 /// Max cells a submerged litter grain may rise in one tick.
 const BUOYANT_RISE_MAX: i32 = 16;
 
@@ -632,13 +628,21 @@ fn collect_buoyant_litter(world: &World) -> Vec<(i32, i32)> {
 }
 
 /// [`rise_buoyant_litter`] then [`soak_floating_litter`] with one litter scan.
+///
+/// Uses [`GrainConfig::default`] waterlog rate. Prefer
+/// [`rise_and_soak_buoyant_litter_cfg`] when live Tab knobs are available.
 pub fn rise_and_soak_buoyant_litter(world: &mut World) {
+    rise_and_soak_buoyant_litter_cfg(world, &GrainConfig::default());
+}
+
+/// [`rise_and_soak_buoyant_litter`] with live [`GrainConfig`] waterlog rate.
+pub fn rise_and_soak_buoyant_litter_cfg(world: &mut World, grain: &GrainConfig) {
     let mut litter = collect_buoyant_litter(world);
     if litter.is_empty() {
         return;
     }
     rise_buoyant_litter_list(world, &mut litter);
-    soak_floating_litter_list(world, &litter);
+    soak_floating_litter_list(world, &litter, grain.organic_waterlog_rate);
 }
 
 /// Organic / Soil sitting on a grounded lake surface soaks pore water from
@@ -650,11 +654,17 @@ pub fn rise_and_soak_buoyant_litter(world: &mut World) {
 ///
 /// Scans only buoyant litter cells (not the whole grid).
 pub fn soak_floating_litter(world: &mut World) {
-    let litter = collect_buoyant_litter(world);
-    soak_floating_litter_list(world, &litter);
+    soak_floating_litter_cfg(world, &GrainConfig::default());
 }
 
-fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)]) {
+/// [`soak_floating_litter`] with live [`GrainConfig`] waterlog rate.
+pub fn soak_floating_litter_cfg(world: &mut World, grain: &GrainConfig) {
+    let litter = collect_buoyant_litter(world);
+    soak_floating_litter_list(world, &litter, grain.organic_waterlog_rate);
+}
+
+fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)], waterlog_rate: f32) {
+    let waterlog_rate = waterlog_rate.clamp(0.0, 1.0);
     for &(gx, gy) in litter {
         let Some(raft) = world.get_cell(gx, gy) else {
             continue;
@@ -676,12 +686,13 @@ fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)]) {
         if raft.sat.0 >= cap {
             if raft.material == MaterialId::Organic
                 && !raft.flags.contains(CellFlags::WATERLOGGED)
+                && waterlog_rate > 0.0
                 && hash_prob(
                     world.seed.0,
                     gx,
                     world.tick.wrapping_add(gy as u64),
                     0x50A7_51A7u64,
-                ) < ORGANIC_WATERLOG_RATE
+                ) < waterlog_rate
             {
                 let mut wet = raft;
                 wet.flags.set(CellFlags::WATERLOGGED);
@@ -758,8 +769,6 @@ const RAFT_DRIFT_BASE: f32 = 0.06;
 const RAFT_DRIFT_ORGANIC_SAIL: f32 = 0.35;
 /// Extra sail per cell of living plant height above the raft top.
 const RAFT_DRIFT_PLANT_SAIL: f32 = 0.55;
-/// How many neighbour columns a living root stitches into its raft mat.
-const RAFT_ROOT_BIND_RADIUS: i32 = 1;
 
 /// Cheap float-seat check for raft drift (no 512-deep grounded walk).
 ///
@@ -863,6 +872,9 @@ pub fn collect_floating_organic_columns(
 /// `(columns_moved, wind_sign, source_columns_that_moved)`.
 ///
 /// `plant_tops`: world-x → max plant cell y for sail area.
+///
+/// Uses [`GrainConfig::default`] raft bind radius. Prefer
+/// [`drift_floating_organic_cfg`] when live Tab knobs are available.
 pub fn drift_floating_organic(
     world: &mut World,
     wind_vx_tiles: f32,
@@ -870,14 +882,34 @@ pub fn drift_floating_organic(
     plant_tops: Option<&std::collections::HashMap<i32, i32>>,
     root_bound_columns: Option<&HashSet<i32>>,
 ) -> (u32, i32, HashSet<i32>) {
+    drift_floating_organic_cfg(
+        world,
+        wind_vx_tiles,
+        tile_cols,
+        plant_tops,
+        root_bound_columns,
+        &GrainConfig::default(),
+    )
+}
+
+/// [`drift_floating_organic`] with live [`GrainConfig`] raft bind radius.
+pub fn drift_floating_organic_cfg(
+    world: &mut World,
+    wind_vx_tiles: f32,
+    tile_cols: i32,
+    plant_tops: Option<&std::collections::HashMap<i32, i32>>,
+    root_bound_columns: Option<&HashSet<i32>>,
+    grain: &GrainConfig,
+) -> (u32, i32, HashSet<i32>) {
     let columns = collect_floating_organic_columns(world);
-    drift_floating_organic_columns(
+    drift_floating_organic_columns_cfg(
         world,
         &columns,
         wind_vx_tiles,
         tile_cols,
         plant_tops,
         root_bound_columns,
+        grain,
     )
 }
 
@@ -891,6 +923,27 @@ pub fn drift_floating_organic_columns(
     plant_tops: Option<&std::collections::HashMap<i32, i32>>,
     root_bound_columns: Option<&HashSet<i32>>,
 ) -> (u32, i32, HashSet<i32>) {
+    drift_floating_organic_columns_cfg(
+        world,
+        columns,
+        wind_vx_tiles,
+        tile_cols,
+        plant_tops,
+        root_bound_columns,
+        &GrainConfig::default(),
+    )
+}
+
+/// [`drift_floating_organic_columns`] with live [`GrainConfig`] raft bind radius.
+pub fn drift_floating_organic_columns_cfg(
+    world: &mut World,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+    wind_vx_tiles: f32,
+    tile_cols: i32,
+    plant_tops: Option<&std::collections::HashMap<i32, i32>>,
+    root_bound_columns: Option<&HashSet<i32>>,
+    grain: &GrainConfig,
+) -> (u32, i32, HashSet<i32>) {
     if wind_vx_tiles.abs() < 1e-5 {
         return (0, 0, HashSet::new());
     }
@@ -901,17 +954,21 @@ pub fn drift_floating_organic_columns(
         return (0, sign, HashSet::new());
     }
 
+    let bind_radius = grain.raft_root_bind_radius.max(0);
+
     // Precomputed by the plant layer (span of every root on the mat).
     let mut bound: HashSet<i32> = root_bound_columns
         .map(|s| s.iter().copied().filter(|x| columns.contains_key(x)).collect())
         .unwrap_or_default();
-    // Dilate once so a holdfast still grips neighbouring litter.
-    let claimed: Vec<i32> = bound.iter().copied().collect();
-    for c in claimed {
-        for dx in -RAFT_ROOT_BIND_RADIUS..=RAFT_ROOT_BIND_RADIUS {
-            let nx = world.wrap_x(c + dx);
-            if columns.contains_key(&nx) {
-                bound.insert(nx);
+    // Dilate so a holdfast still grips neighbouring litter (0 = body span only).
+    if bind_radius > 0 {
+        let claimed: Vec<i32> = bound.iter().copied().collect();
+        for c in claimed {
+            for dx in -bind_radius..=bind_radius {
+                let nx = world.wrap_x(c + dx);
+                if columns.contains_key(&nx) {
+                    bound.insert(nx);
+                }
             }
         }
     }
@@ -1593,10 +1650,11 @@ fn avalanche_source_ok(mat: MaterialId, below_src: Option<Cell>, cold_mode: bool
     cold_mode && mat == MaterialId::Ice && hillside_ice_support(below_src)
 }
 
-/// Tunables for flow bedload / bank erosion + deposition.
+/// Tunables for grain / sediment + floating Organic litter.
 ///
-/// Angle-of-repose slides always run inside [`tick`]; this config only
-/// gates the water-driven transport pass ([`apply_flow_erosion`]).
+/// Angle-of-repose slides always run inside [`tick`]; flow erosion is
+/// gated by [`Self::enabled`]. Floating-litter soak / raft bind also
+/// live here so Tab can tune shore stickiness live.
 #[derive(Debug, Clone)]
 pub struct GrainConfig {
     /// When false, [`apply_flow_erosion`] is a no-op.
@@ -1610,6 +1668,15 @@ pub struct GrainConfig {
     /// Cap on erosion events applied per call (0 = unlimited).
     pub max_events_per_tick: u32,
     pub seed_salt: u64,
+    /// After pores fill, chance per tick that floating Organic waterlogs
+    /// and begins sinking. Expected wait ≈ `1 / rate` ticks (~500 at
+    /// `0.002`). Higher = mats shed water blisters sooner.
+    pub organic_waterlog_rate: f32,
+    /// Extra neighbour columns a living-root holdfast stitches into its
+    /// wind raft (`0` = only columns the plant body already claims).
+    /// Higher values make Organic mats stick to plants and form perched
+    /// water bladders on slopes.
+    pub raft_root_bind_radius: i32,
 }
 
 impl Default for GrainConfig {
@@ -1620,6 +1687,11 @@ impl Default for GrainConfig {
             min_flow_sat: 180,
             max_events_per_tick: 96,
             seed_salt: 0xE70D_E5ED_u64,
+            // Faster than the old 0.0004 (~2500 ticks) so shore mats don't
+            // glue plants into perched water blisters for so long.
+            organic_waterlog_rate: 0.002,
+            // Body-span bind only — no neighbour dilation (was 1).
+            raft_root_bind_radius: 0,
         }
     }
 }

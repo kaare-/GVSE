@@ -995,11 +995,31 @@ pub(crate) fn holdfast_on_float_column(
 /// Every root column across a mounted plant's span claims the mat (not only
 /// the first Organic contact). Loose unrooted litter may still peel apart.
 /// Returns how many Organic columns moved.
+///
+/// Uses [`crate::GrainConfig::default`] raft bind radius. Prefer
+/// [`sail_plants_on_wind_rafts_cfg`] when live Tab knobs are available.
 pub fn sail_plants_on_wind_rafts(
     world: &mut World,
     atoms: &mut [Atom],
     wind_vx_tiles: f32,
     tile_cols: i32,
+) -> u32 {
+    sail_plants_on_wind_rafts_cfg(
+        world,
+        atoms,
+        wind_vx_tiles,
+        tile_cols,
+        &crate::GrainConfig::default(),
+    )
+}
+
+/// [`sail_plants_on_wind_rafts`] with live [`crate::GrainConfig`] raft bind.
+pub fn sail_plants_on_wind_rafts_cfg(
+    world: &mut World,
+    atoms: &mut [Atom],
+    wind_vx_tiles: f32,
+    tile_cols: i32,
+    grain: &crate::GrainConfig,
 ) -> u32 {
     let columns = crate::rules::collect_floating_organic_columns(world);
     let mut bound_cols: HashSet<i32> = HashSet::new();
@@ -1047,13 +1067,14 @@ pub fn sail_plants_on_wind_rafts(
             .iter()
             .filter_map(|&i| atoms.get(i)),
     );
-    let (moved, sign, moved_cols) = crate::rules::drift_floating_organic_columns(
+    let (moved, sign, moved_cols) = crate::rules::drift_floating_organic_columns_cfg(
         world,
         &columns,
         wind_vx_tiles,
         tile_cols,
         Some(&sails),
         Some(&bound_cols),
+        grain,
     );
     if moved == 0 || sign == 0 || moved_cols.is_empty() {
         return moved;

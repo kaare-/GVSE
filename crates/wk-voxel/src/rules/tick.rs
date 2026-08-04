@@ -122,17 +122,21 @@ pub fn tick_with_configs_and_geotech(
     failure: &crate::failure::FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
 ) {
-    tick_with_life(world, perf, failure, geotech, None);
+    tick_with_life(world, perf, failure, geotech, None, None);
 }
 
 /// [`tick_with_configs_and_geotech`] plus optional living-root cells for
 /// grain repose binding (Set D plants / legacy E15 intent).
+///
+/// `grain` supplies floating-Organic waterlog rate (Tab → Grain / sediment);
+/// `None` uses [`super::grain::GrainConfig::default`].
 pub fn tick_with_life(
     world: &mut World,
     perf: &PerfConfig,
     failure: &crate::failure::FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
     rooted: Option<&HashSet<(i32, i32)>>,
+    grain: Option<&super::grain::GrainConfig>,
 ) {
     // Opt-in cell-sat inventory (debug only). Atmosphere stores are
     // outside this tick — see `audit::tracked_totals`.
@@ -247,7 +251,10 @@ pub fn tick_with_life(
         }
     }
     // Clear submerged litter lines, then let rafts drink — shared litter scan.
-    super::grain::rise_and_soak_buoyant_litter(world);
+    match grain {
+        Some(g) => super::grain::rise_and_soak_buoyant_litter_cfg(world, g),
+        None => super::grain::rise_and_soak_buoyant_litter(world),
+    }
 
     // Geotech: roof / overhang collapse after grain has seated.
     crate::failure::apply_failure(world, failure, geotech);

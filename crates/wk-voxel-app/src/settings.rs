@@ -639,6 +639,22 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Max events / tick", 0.0..256.0, &mut max_ev);
                     self.grain.min_flow_sat = min_sat.round().clamp(1.0, 255.0) as u8;
                     self.grain.max_events_per_tick = max_ev.round().clamp(0.0, 512.0) as u32;
+                    ui.separator();
+                    ui.label(
+                        None,
+                        "Floating Organic: higher waterlog = mats sink sooner; \
+                         bind radius dilates root rafts (0 = body span only).",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Organic waterlog rate",
+                        0.0..0.02,
+                        &mut self.grain.organic_waterlog_rate,
+                    );
+                    let mut bind = self.grain.raft_root_bind_radius as f32;
+                    labeled_slider(ui, hash!(), "Raft root bind radius", 0.0..4.0, &mut bind);
+                    self.grain.raft_root_bind_radius = bind.round().clamp(0.0, 8.0) as i32;
                 });
                 ui.separator();
 

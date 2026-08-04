@@ -54,7 +54,8 @@ use wk_voxel::{
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    precip_forms_snow_at_air, sail_plants_on_wind_rafts, sky_rgb_at_height, temperature_step_due,
+    precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, sky_rgb_at_height,
+    temperature_step_due,
     tick_with_life, wake_unsupported_grains, wake_unstable_slopes, ClimateConfig,
     GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
@@ -931,22 +932,25 @@ async fn main() {
                 &settings.failure,
                 Some(&scene.geotech),
                 rooted.as_ref(),
+                Some(&settings.grain),
             );
             // Floating Organic drifts with the wind; root-bound mats sail plants.
             if organisms_on {
-                sail_plants_on_wind_rafts(
+                sail_plants_on_wind_rafts_cfg(
                     &mut scene.world,
                     &mut scene.organisms.atoms,
                     wind_vx,
                     scene.wind.tile_cols,
+                    &settings.grain,
                 );
             } else {
-                let _ = wk_voxel::drift_floating_organic(
+                let _ = wk_voxel::drift_floating_organic_cfg(
                     &mut scene.world,
                     wind_vx,
                     scene.wind.tile_cols,
                     None,
                     None,
+                    &settings.grain,
                 );
             }
             // Bedload / bank transport after water has moved this tick.
