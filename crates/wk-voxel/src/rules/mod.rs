@@ -36,7 +36,8 @@ pub use grain::{
     apply_grain_repose_regions, settle_loose_grains, settle_loose_grains_regions,
     collect_floating_organic_columns, drift_floating_organic, drift_floating_organic_columns,
     punch_through_floating_rafts,
-    rise_buoyant_litter, soak_floating_litter, wake_unsupported_grains, wake_unstable_slopes,
+    rise_and_soak_buoyant_litter, rise_buoyant_litter, soak_floating_litter,
+    wake_grains_for_settle, wake_unsupported_grains, wake_unstable_slopes,
     GrainConfig, GRAIN_REPOSE_HAZE_MAX, GRAIN_SETTLE_PASSES, ROOT_EROSION_BIND,
     ROOT_REPOSE_STEP_BONUS,
 };

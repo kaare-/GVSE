@@ -375,40 +375,49 @@ pub fn apply_roof_collapse_regions(
     }
 
     // (gy, gx) — lowest ceilings first, then x for determinism.
-    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    // Phase 1: chunk-local filter for roof-over-Air candidates (avoids
+    // HashMap get_cell on every solid cell). Phase 2: span checks.
+    let mut probes: Vec<(i32, i32)> = Vec::new();
     for ac in active {
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            continue;
+        };
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             if gy <= 0 {
                 continue;
             }
+            let below_in_chunk = y > 0;
             for x in ac.rect.x0..=ac.rect.x1 {
-                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
-                let Some(roof) = world.get_cell(gx, gy) else {
-                    continue;
-                };
+                let roof = chunk.get(x as usize, y as usize);
                 if !is_roof_candidate(roof.material) {
                     continue;
                 }
-                let Some(below) = world.get_cell(gx, gy - 1) else {
-                    continue;
+                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
+                let below_ok = if below_in_chunk {
+                    let below = chunk.get(x as usize, (y - 1) as usize);
+                    below.material == MaterialId::Air && !below.sat.is_full()
+                } else {
+                    matches!(
+                        world.get_cell(gx, gy - 1),
+                        Some(c) if c.material == MaterialId::Air && !c.sat.is_full()
+                    )
                 };
-                if below.material != MaterialId::Air {
-                    continue;
-                }
-                // Standing water is a seat (boats / litter), not a cave.
-                if below.sat.is_full() {
-                    continue;
-                }
-                let span = roof_span_cells(world, gx, gy - 1);
-                if span <= 0 {
-                    continue;
-                }
-                let limit = weakest_roof_limit(world, gx, gy - 1, gy);
-                if span > limit {
-                    candidates.push((gy, gx));
+                if below_ok {
+                    probes.push((gy, gx));
                 }
             }
+        }
+    }
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    for (gy, gx) in probes {
+        let span = roof_span_cells(world, gx, gy - 1);
+        if span <= 0 {
+            continue;
+        }
+        let limit = weakest_roof_limit(world, gx, gy - 1, gy);
+        if span > limit {
+            candidates.push((gy, gx));
         }
     }
 

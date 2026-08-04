@@ -271,107 +271,73 @@ pub fn punch_through_floating_rafts(world: &mut World) -> u32 {
     total
 }
 
-/// Re-dirty every grain / litter cell that has empty (or non-supporting)
-/// Air directly below — and the Air seat itself.
+/// Re-dirty freefall seats **and** over-steep repose faces in one grid scan.
 ///
-/// Needed when mid-air F3 paint lost its dirty wake (quiet water ticks
-/// cleared it before grain fall ran, or the world was saved/loaded).
-/// Without this, floating sand only moves when roof-collapse / erosion
-/// happens to re-wake the column.
-pub fn wake_unsupported_grains(world: &mut World) {
+/// Used by the physics tick instead of calling [`wake_unsupported_grains`]
+/// then [`wake_unstable_slopes`] (two full-world walks).
+pub fn wake_grains_for_settle(world: &mut World) {
     let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    let mut dirty: Vec<(i32, i32)> = Vec::new();
     for coord in coords {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
-        for ly in 0..CHUNK_CELLS_H as i32 {
-            for lx in 0..CHUNK_CELLS_W as i32 {
-                let gx = x0 + lx;
-                let gy = y0 + ly;
-                let Some(cell) = world.get_cell(gx, gy) else {
-                    continue;
-                };
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(lx, ly);
+                let gx = x0 + lx as i32;
+                let gy = y0 + ly as i32;
                 let loose = is_grain(cell.material)
                     || falls_through_empty_air(cell.material)
                     || is_repose_grain(cell.material);
                 if !loose {
                     continue;
                 }
+                // --- unsupported / freefall ---
                 let Some(below) = world.get_cell(gx, gy - 1) else {
-                    world.touch_dirty(gx, gy);
+                    dirty.push((gx, gy));
                     continue;
                 };
-                // Dense cargo on a floating litter raft — punch-through wake.
                 if is_grain(cell.material) && falls_through_empty_air(below.material) {
                     if raft_rests_on_float_water_world(world, gx, gy - 1) {
-                        world.touch_dirty(gx, gy);
-                        world.touch_dirty(gx, gy - 1);
-                        // Water seat under the raft must be active so fall
-                        // can sink cargo after the punch swap.
+                        dirty.push((gx, gy));
+                        dirty.push((gx, gy - 1));
                         let mut y = gy - 2;
                         while let Some(c) = world.get_cell(gx, y) {
                             if falls_through_empty_air(c.material) {
-                                world.touch_dirty(gx, y);
+                                dirty.push((gx, y));
                                 y -= 1;
                                 continue;
                             }
                             if c.material == MaterialId::Air {
-                                world.touch_dirty(gx, y);
+                                dirty.push((gx, y));
                             }
                             break;
                         }
                         continue;
                     }
                 }
-                if below.material != MaterialId::Air {
-                    continue;
-                }
-                // Snow / Ice / Organic float on grounded lakes only.
-                // Waterlogged Organic has finished soaking and sinks.
-                if falls_through_empty_air(cell.material)
-                    && !cell.is_waterlogged_organic()
-                    && floats_on_air_seat_world(world, below, gx, gy - 1)
-                {
-                    // Submerged under a refilled surface: full water above
-                    // means this cell must buoyancy-rise, not sit forever.
-                    if let Some(above) = world.get_cell(gx, gy + 1) {
-                        if floats_on_air_seat_world(world, above, gx, gy + 1) {
-                            world.touch_dirty(gx, gy);
-                            world.touch_dirty(gx, gy + 1);
+                if below.material == MaterialId::Air {
+                    if falls_through_empty_air(cell.material)
+                        && !cell.is_waterlogged_organic()
+                        && floats_on_air_seat_world(world, below, gx, gy - 1)
+                    {
+                        if let Some(above) = world.get_cell(gx, gy + 1) {
+                            if floats_on_air_seat_world(world, above, gx, gy + 1) {
+                                dirty.push((gx, gy));
+                                dirty.push((gx, gy + 1));
+                            }
                         }
+                    } else {
+                        dirty.push((gx, gy));
+                        dirty.push((gx, gy - 1));
                     }
                     continue;
                 }
-                world.touch_dirty(gx, gy);
-                world.touch_dirty(gx, gy - 1);
-            }
-        }
-    }
-}
-
-/// Re-dirty supported grains whose diagonal-down seat is steeper than
-/// repose — vertical Organic/sand cliff faces that already have solid
-/// under them never trip [`wake_unsupported_grains`], so without this
-/// they freeze as walls after the first settle pass.
-pub fn wake_unstable_slopes(world: &mut World) {
-    let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
-    for coord in coords {
-        let x0 = coord.cx * CHUNK_CELLS_W as i32;
-        let y0 = coord.cy * CHUNK_CELLS_H as i32;
-        for ly in 0..CHUNK_CELLS_H as i32 {
-            for lx in 0..CHUNK_CELLS_W as i32 {
-                let gx = x0 + lx;
-                let gy = y0 + ly;
-                let Some(cell) = world.get_cell(gx, gy) else {
-                    continue;
-                };
+                // --- unstable slopes (supported repose grains only) ---
                 if !is_repose_grain(cell.material) {
-                    continue;
-                }
-                let Some(below) = world.get_cell(gx, gy - 1) else {
-                    continue;
-                };
-                // Freefall seats are handled by [`wake_unsupported_grains`].
-                if below.material == MaterialId::Air {
                     continue;
                 }
                 let max_step = {
@@ -380,6 +346,7 @@ pub fn wake_unstable_slopes(world: &mut World) {
                 };
                 let through_haze =
                     matches!(cell.material, MaterialId::Organic | MaterialId::Soil);
+                let mut woke = false;
                 for dx in [-1, 1] {
                     let sx = gx + dx;
                     let sy = gy - 1;
@@ -401,13 +368,13 @@ pub fn wake_unstable_slopes(world: &mut World) {
                         continue;
                     }
                     if diag_drop_exceeds_world(world, sx, gy, max_step, through_haze) {
-                        world.touch_dirty(gx, gy);
-                        world.touch_dirty(sx, sy);
+                        dirty.push((gx, gy));
+                        dirty.push((sx, sy));
+                        woke = true;
                         break;
                     }
                 }
-                // Same-Y walk-off seat (Air beside with Air below).
-                if max_step > 0 {
+                if woke || max_step > 0 {
                     continue;
                 }
                 for dx in [-1, 1] {
@@ -432,13 +399,34 @@ pub fn wake_unstable_slopes(world: &mut World) {
                     if below_seat.material != MaterialId::Air || below_seat.sat.is_full() {
                         continue;
                     }
-                    world.touch_dirty(gx, gy);
-                    world.touch_dirty(sx, gy);
+                    dirty.push((gx, gy));
+                    dirty.push((sx, gy));
                     break;
                 }
             }
         }
     }
+    for (gx, gy) in dirty {
+        world.touch_dirty(gx, gy);
+    }
+}
+
+/// Re-dirty every grain / litter cell that has empty (or non-supporting)
+/// Air directly below — and the Air seat itself.
+///
+/// Prefer [`wake_grains_for_settle`] in the hot tick (one scan).
+pub fn wake_unsupported_grains(world: &mut World) {
+    wake_grains_for_settle(world);
+}
+
+/// Re-dirty supported grains whose diagonal-down seat is steeper than
+/// repose — vertical Organic/sand cliff faces that already have solid
+/// under them never trip freefall wake, so without this they freeze as
+/// walls after the first settle pass.
+///
+/// Prefer [`wake_grains_for_settle`] in the hot tick (one scan).
+pub fn wake_unstable_slopes(world: &mut World) {
+    wake_grains_for_settle(world);
 }
 
 fn diag_drop_exceeds_world(
@@ -643,6 +631,16 @@ fn collect_buoyant_litter(world: &World) -> Vec<(i32, i32)> {
     litter
 }
 
+/// [`rise_buoyant_litter`] then [`soak_floating_litter`] with one litter scan.
+pub fn rise_and_soak_buoyant_litter(world: &mut World) {
+    let mut litter = collect_buoyant_litter(world);
+    if litter.is_empty() {
+        return;
+    }
+    rise_buoyant_litter_list(world, &mut litter);
+    soak_floating_litter_list(world, &litter);
+}
+
 /// Organic / Soil sitting on a grounded lake surface soaks pore water from
 /// deeper cells in the water column (never drains the surface seat below
 /// full — that would sink the raft and recreate submerged litter lines).
@@ -653,7 +651,11 @@ fn collect_buoyant_litter(world: &World) -> Vec<(i32, i32)> {
 /// Scans only buoyant litter cells (not the whole grid).
 pub fn soak_floating_litter(world: &mut World) {
     let litter = collect_buoyant_litter(world);
-    for (gx, gy) in litter {
+    soak_floating_litter_list(world, &litter);
+}
+
+fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)]) {
+    for &(gx, gy) in litter {
         let Some(raft) = world.get_cell(gx, gy) else {
             continue;
         };
@@ -1081,13 +1083,18 @@ pub fn drift_floating_organic_columns(
 /// then bubbles each up at most [`BUOYANT_RISE_MAX`] steps this tick.
 pub fn rise_buoyant_litter(world: &mut World) {
     let mut litter = collect_buoyant_litter(world);
+    rise_buoyant_litter_list(world, &mut litter);
+}
+
+fn rise_buoyant_litter_list(world: &mut World, litter: &mut [(i32, i32)]) {
     if litter.is_empty() {
         return;
     }
     // Bottom-up so lower cells rise before upper ones in the same column.
     litter.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-    for (gx, gy0) in litter {
-        let mut gy = gy0;
+    for entry in litter.iter_mut() {
+        let gx = entry.0;
+        let mut gy = entry.1;
         for _ in 0..BUOYANT_RISE_MAX {
             let Some(here) = world.get_cell(gx, gy) else {
                 break;
@@ -1104,18 +1111,14 @@ pub fn rise_buoyant_litter(world: &mut World) {
             if above.material != MaterialId::Air {
                 break;
             }
-            let rise = if floats_on_air_seat_world(world, above, gx, gy + 1) {
-                true
-            } else {
-                false
-            };
-            if !rise {
+            if !floats_on_air_seat_world(world, above, gx, gy + 1) {
                 break;
             }
             world.set_cell(gx, gy + 1, here);
             world.set_cell(gx, gy, above);
             gy += 1;
         }
+        entry.1 = gy;
     }
 }
 

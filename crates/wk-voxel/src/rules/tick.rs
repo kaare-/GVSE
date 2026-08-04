@@ -196,9 +196,8 @@ pub fn tick_with_life(
     // Always re-wake unsupported grains and steep cliff faces — lakes
     // often leave a non-empty dirty plan far from F3 paint, and seated
     // Organic/sand walls have solid under them so fall-wake alone never
-    // sees them.
-    super::grain::wake_unsupported_grains(world);
-    super::grain::wake_unstable_slopes(world);
+    // sees them. One combined grid scan (was two full walks).
+    super::grain::wake_grains_for_settle(world);
     let grain_active = {
         let dirty = plan_active(world);
         if dirty.is_empty() {
@@ -221,9 +220,8 @@ pub fn tick_with_life(
             settle_loose_grains_regions(world, &sink, rooted, GRAIN_SETTLE_PASSES);
         }
     }
-    // Always clear submerged litter lines, then let rafts drink.
-    super::grain::rise_buoyant_litter(world);
-    super::grain::soak_floating_litter(world);
+    // Clear submerged litter lines, then let rafts drink — shared litter scan.
+    super::grain::rise_and_soak_buoyant_litter(world);
 
     // Geotech: roof / overhang collapse after grain has seated.
     crate::failure::apply_failure(world, failure, geotech);
