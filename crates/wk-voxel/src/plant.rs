@@ -2237,6 +2237,58 @@ mod tests {
     }
 
     #[test]
+    fn substrate_rooted_plant_stays_put_when_flooded() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Dry land plant on sand, then flood the column above it.
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 2, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(!store.atoms[0].fallen);
+        assert!(is_anchored(&w, &store.atoms[0]));
+        let gy0 = store.atoms[0].gy;
+        // Flood: standing water from the crown up.
+        for y in 2..=7 {
+            w.set_cell(5, y, Cell::water());
+        }
+        for y in 8..12 {
+            w.set_cell(5, y, Cell::air());
+        }
+        for tick in 1..20u64 {
+            store.step(&mut w, tick);
+        }
+        assert!(
+            !store.atoms[0].fallen,
+            "sand-rooted land plant must not tip when flooded"
+        );
+        assert_eq!(
+            store.atoms[0].gy, gy0,
+            "must stay on the substrate crown, not float to the waterline"
+        );
+        assert!(
+            is_anchored(&w, &store.atoms[0]),
+            "roots must remain in the sand"
+        );
+    }
+
+    #[test]
     fn unanchored_plant_floats_tipped_on_open_water() {
         use crate::organism::{fallen_body_offset, OrganismStore};
 
@@ -2302,7 +2354,9 @@ mod tests {
             &mut atom,
             crate::blueprint::Blueprint::minimal_plant().genome,
         );
-        // Pretend a diving root already touches the sand bed.
+        // Already free-floating (left the raft); a long root may scrape sand
+        // without counting as a land holdfast that pins the crown underwater.
+        atom.fallen = true;
         atom.body.push((0, -13, ModuleId::Root));
         store.atoms.push(atom);
         for tick in 0..30u64 {

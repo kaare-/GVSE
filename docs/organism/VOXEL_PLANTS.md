@@ -14,6 +14,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | Tipped plants stay tipped after re-root; new Stem/Photo grow upright | Done |
 | Upright mast re-tips when tippy; draw-space sail counts new shoots | Done |
 | Tip bakes into body (new stems grow up); floaters elongate roots | Done |
+| Substrate-rooted plants stay pinned when flooded (raft organic floats) | Done |
 | Pore-`sat` drink + drought stress | Done |
 | Spawn on Air above porous solid | Done |
 | Editor brushes + `T` minimal plant + `W` seaweed | Done |

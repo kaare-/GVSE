@@ -1131,14 +1131,16 @@ fn step_land_plant(
     wind_vx: f32,
 ) -> PlantStep {
     // Pose / seat:
-    // - Once tipped, stay tipped (re-rooting does not stand the old body up).
-    // - Tip/re-tip **bakes** the flop into body offsets so new stems grow up.
-    // - New Stem/Photosystem grown while tipped draws upright until re-tip.
-    // - Open lake (no holdfast): tip and float at the free surface.
-    // - Shore: tip / stay tipped; grow roots into the beach.
+    // - Floating-Organic raft holdfast: tip check; ride the free surface.
+    // - Substrate-rooted land plants (sand/rock/grounded organic): stay
+    //   pinned when flooded — do not float up with the waterline.
+    // - Unanchored over water: tip and free-float at the surface.
+    // - Tip/re-tip bakes the flop into body so new stems grow upward.
+    // - Shore: stay tipped; grow roots into the beach.
     let water_top = column_water_top(world, atom.gx, atom.gy);
-    let on_org = rooted_in_organic(world, atom);
-    if on_org {
+    let on_float_raft = rooted_in_floating_organic(world, atom);
+    let on_substrate = anchored_in_substrate(world, atom);
+    if on_float_raft && !on_substrate {
         apply_raft_tip(world, atom);
         if atom.fallen {
             if let Some(top) = water_top {
@@ -1150,6 +1152,11 @@ fn step_land_plant(
         } else {
             pin_plant_pose(atom);
         }
+    } else if on_substrate && !atom.fallen {
+        // Flooded (or dry) land plant fixed to the bed — do not chase the
+        // free surface. A free-floater that merely scrapes the bed with a
+        // long root stays on the waterline path below (`fallen` already).
+        pin_plant_pose(atom);
     } else if let Some(top) = water_top {
         let was_fallen = atom.fallen;
         if !was_fallen {
@@ -1803,25 +1810,60 @@ fn rest_soft_leaf_y(world: &World, gx: i32, preferred_y: i32) -> i32 {
 }
 
 /// True when a Root/Nucleus sits in or on Organic (raft / compost holdfast).
-fn rooted_in_organic(world: &World, atom: &Atom) -> bool {
+/// Holdfast on a *floating* Organic column (raft), not grounded compost.
+fn rooted_in_floating_organic(world: &World, atom: &Atom) -> bool {
+    use crate::plant::holdfast_on_float_column;
+
+    let columns = crate::rules::collect_floating_organic_columns(world);
+    if columns.is_empty() {
+        return false;
+    }
     for &(dx, dy, m) in &atom.body {
         if m != ModuleId::Root && m != ModuleId::Nucleus {
             continue;
         }
         let wx = world.wrap_x(atom.gx + dx as i32);
         let wy = atom.gy + dy as i32;
-        if world
-            .get_cell(wx, wy)
-            .map(|c| c.material == MaterialId::Organic)
-            .unwrap_or(false)
-        {
+        if holdfast_on_float_column(&columns, m, wx, wy) {
             return true;
         }
-        if world
-            .get_cell(wx, wy - 1)
-            .map(|c| c.material == MaterialId::Organic)
-            .unwrap_or(false)
-        {
+    }
+    false
+}
+
+fn organic_in_floating_column(
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+    wx: i32,
+    wy: i32,
+) -> bool {
+    let Some(&(bottom, height)) = columns.get(&wx) else {
+        return false;
+    };
+    wy >= bottom && wy < bottom + height
+}
+
+/// Root purchase in sand/rock/grounded organic — not a floating raft cell.
+///
+/// Used so flooded land plants stay pinned. Free-floaters that scrape the
+/// lake bed with a long root are handled separately via `fallen`.
+fn anchored_in_substrate(world: &World, atom: &Atom) -> bool {
+    let columns = crate::rules::collect_floating_organic_columns(world);
+    for &(dx, dy, m) in &atom.body {
+        if m != ModuleId::Root {
+            continue;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        for y in [wy, wy - 1] {
+            let Some(c) = world.get_cell(wx, y) else {
+                continue;
+            };
+            if c.material == MaterialId::Air {
+                continue;
+            }
+            if c.material == MaterialId::Organic && organic_in_floating_column(&columns, wx, y) {
+                continue;
+            }
             return true;
         }
     }
