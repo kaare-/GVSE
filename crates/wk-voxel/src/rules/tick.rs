@@ -178,7 +178,7 @@ pub fn tick_with_life(
 
     // Prefer dirty written by flow; if water was quiet, reuse the flow
     // halo so grain fall still sees F3 / editor solid paints.
-    let active = {
+    let mut active = {
         let dirty = plan_active(world);
         if dirty.is_empty() {
             flow_halo
@@ -186,6 +186,14 @@ pub fn tick_with_life(
             dirty
         }
     };
+    // Stranded mid-air sand/Organic (wake cleared by quiet ticks before
+    // grain fall ran) never re-enters the plan — re-scan periodically.
+    // F3 close / Space unpause also call `wake_unsupported_grains` for
+    // an immediate drop without waiting on this throttle.
+    if active.is_empty() && world.tick % 15 == 0 {
+        super::grain::wake_unsupported_grains(world);
+        active = plan_active(world);
+    }
     if !active.is_empty() {
         apply_seepage_regions(world, &active);
         // Multi-pass fall+repose so mid-air F3 Organic/Sand seats in

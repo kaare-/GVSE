@@ -3174,3 +3174,73 @@ fn parallel_tick_matches_serial_on_multi_chunk_fixture() {
     // Leave the process default (parallel on) for later tests.
     crate::parallel::set_parallel_enabled(true);
 }
+#[test]
+fn stamped_world_midair_sand_falls_after_quiet_then_paint() {
+    // App path: world runs quiet (dirty cleared), F3 paints sand in sky
+    // while paused, then unpause → one tick must seat the sand.
+    use crate::worldgen::{stamp_world, WorldgenParams};
+    let mut w = World::new(7);
+    let p = WorldgenParams {
+        seed: 1,
+        width_cols: CHUNK_CELLS_W as i32 * 2,
+        bedrock_floor_y: 0,
+        sea_level_y: 40,
+        sky_ceiling_y: CHUNK_CELLS_H as i32 * 3,
+        bedrock_thickness: 4,
+        stone_thickness: 8,
+        sand_cap_thickness: 2,
+        limestone_in_shelf_and_coast: false,
+        wrap_x: true,
+    };
+    stamp_world(&mut w, &p);
+    // Drain residual worldgen dirty like a running demo.
+    for _ in 0..30 {
+        tick(&mut w);
+    }
+    clear_all_dirty(&mut w);
+    assert!(plan_active(&w).is_empty(), "precondition: quiet world");
+
+    // Paint mid-air sand high above terrain (F3 brush).
+    let gx = 40;
+    let gy = 140;
+    for dx in -3..=3 {
+        for dy in 0..=4 {
+            w.set_cell(gx + dx, gy + dy, Cell::solid(MaterialId::Sand));
+        }
+    }
+    assert!(!plan_active(&w).is_empty(), "paint must dirty");
+
+    tick(&mut w);
+
+    let floating = (-3..=3)
+        .flat_map(|dx| (gy - 5..=gy + 4).map(move |y| (gx + dx, y)))
+        .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert_eq!(
+        floating, 0,
+        "mid-air sand must leave the paint height after one unpause tick (left={floating})"
+    );
+}
+
+#[test]
+fn stranded_midair_sand_falls_after_dirty_cleared() {
+    // Regression: quiet ticks cleared the F3 paint wake before grain
+    // fall ran; sand hung until shear. Wake + tick must seat it.
+    let mut w = setup_column_world();
+    for x in 3..=8 {
+        for y in 30..=35 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+    }
+    clear_all_dirty(&mut w);
+    assert!(plan_active(&w).is_empty());
+    // Simulate the periodic stranded-grain scan inside tick.
+    wake_unsupported_grains(&mut w);
+    assert!(!plan_active(&w).is_empty(), "wake must dirty unsupported sand");
+    tick(&mut w);
+    let floating = (3..=8)
+        .flat_map(|x| (25..=35).map(move |y| (x, y)))
+        .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert_eq!(floating, 0, "stranded sand must fall ({floating} still high)");
+}

@@ -75,6 +75,50 @@ pub fn settle_loose_grains(
     settle_loose_grains_regions(world, &active, rooted, max_passes);
 }
 
+/// Re-dirty every grain / litter cell that has empty (or non-supporting)
+/// Air directly below — and the Air seat itself.
+///
+/// Needed when mid-air F3 paint lost its dirty wake (quiet water ticks
+/// cleared it before grain fall ran, or the world was saved/loaded).
+/// Without this, floating sand only moves when roof-collapse / erosion
+/// happens to re-wake the column.
+pub fn wake_unsupported_grains(world: &mut World) {
+    let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        for ly in 0..CHUNK_CELLS_H as i32 {
+            for lx in 0..CHUNK_CELLS_W as i32 {
+                let gx = x0 + lx;
+                let gy = y0 + ly;
+                let Some(cell) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                let loose = is_grain(cell.material)
+                    || falls_through_empty_air(cell.material)
+                    || is_repose_grain(cell.material);
+                if !loose {
+                    continue;
+                }
+                let Some(below) = world.get_cell(gx, gy - 1) else {
+                    world.touch_dirty(gx, gy);
+                    continue;
+                };
+                if below.material != MaterialId::Air {
+                    continue;
+                }
+                // Snow / Ice / Organic float on full standing water.
+                if falls_through_empty_air(cell.material) && below.sat.is_full() {
+                    continue;
+                }
+                // Dense grains (sand etc.) fall through any Air sat.
+                world.touch_dirty(gx, gy);
+                world.touch_dirty(gx, gy - 1);
+            }
+        }
+    }
+}
+
 /// [`settle_loose_grains`] from a pre-planned active set (e.g. the
 /// post-flow halo when water wrote nothing).
 ///

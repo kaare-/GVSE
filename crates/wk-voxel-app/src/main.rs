@@ -55,7 +55,8 @@ use wk_voxel::{
     celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
     precip_forms_snow_at_air, sky_rgb_at_height, temperature_step_due, tick_with_life,
-    ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
+    wake_unsupported_grains, ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World,
+    WorldgenParams,
 };
 
 use crate::creature_list::CreatureList;
@@ -635,6 +636,9 @@ async fn main() {
             } else if terrain.open {
                 terrain.open = false;
                 paused = terrain.was_paused;
+                // Mid-air F3 paint can lose its dirty wake; re-dirty
+                // unsupported sand/Organic so the next tick seats them.
+                wake_unsupported_grains(&mut scene.world);
             } else if creature_list.open {
                 creature_list.open = false;
             } else if settings.open {
@@ -677,6 +681,7 @@ async fn main() {
                 paused = true;
             } else {
                 paused = terrain.was_paused;
+                wake_unsupported_grains(&mut scene.world);
             }
         }
         if !quit_dialog.open && editor.open {
@@ -754,7 +759,12 @@ async fn main() {
 
         if (!editor.open || editor.spawn_picker) && !settings.open && !terrain.open {
             if is_key_pressed(KeyCode::Space) {
+                let was = paused;
                 paused = !paused;
+                if was && !paused {
+                    // Same stranded-grain wake as F3 close.
+                    wake_unsupported_grains(&mut scene.world);
+                }
             }
             if is_key_pressed(KeyCode::R) {
                 let new_seed = scene.params.seed.wrapping_add(1);

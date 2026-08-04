@@ -104,9 +104,10 @@ pub use rules::{
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
     apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
     is_standing_water, settle_loose_grains, settle_loose_grains_regions, tick, tick_with_configs,
-    tick_with_configs_and_geotech, tick_with_life, tick_with_perf, CondensationConfig, EvapConfig,
-    GrainConfig, KarstConfig, OrographicConfig, PerfConfig, RainConfig, FLOW_QUIET_AREA,
-    FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN, GRAIN_SETTLE_PASSES, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
+    tick_with_configs_and_geotech, tick_with_life, tick_with_perf, wake_unsupported_grains,
+    CondensationConfig, EvapConfig, GrainConfig, KarstConfig, OrographicConfig, PerfConfig,
+    RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN, GRAIN_SETTLE_PASSES,
+    ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
 pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,
