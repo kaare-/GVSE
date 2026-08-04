@@ -3537,7 +3537,7 @@ fn floating_organic_drifts_with_wind() {
     let mut moved = false;
     for tick in 0..400u64 {
         w.tick = tick;
-        let n = drift_floating_organic(&mut w, 0.20, 4, None);
+        let (n, _, _) = drift_floating_organic(&mut w, 0.20, 4, None, None);
         if n > 0 {
             moved = true;
             break;
@@ -3553,6 +3553,60 @@ fn floating_organic_drifts_with_wind() {
         xs.iter().any(|&x| x > x0),
         "Organic should sit further +x after +wind drift ({xs:?})"
     );
+}
+
+#[test]
+fn rooted_organic_raft_stays_together_in_wind() {
+    // Living roots stitch neighbouring floating Organic so the island
+    // sails as one instead of blowing into scattered flecks.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(1, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(20, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 2..=19 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 6..=10 {
+        w.set_cell(x, 6, Cell::solid(MaterialId::Organic));
+    }
+    // Holdfast roots in the middle of the mat.
+    let mut roots = std::collections::HashSet::new();
+    roots.insert((8, 6));
+    roots.insert((8, 5)); // dangling into water
+    let mut moved_together = false;
+    for tick in 0..500u64 {
+        w.tick = tick;
+        // Snapshot which columns still have Organic at the waterline.
+        let before: Vec<i32> = (2..=19)
+            .filter(|&x| w.get_cell(x, 6).map(|c| c.material) == Some(MaterialId::Organic))
+            .collect();
+        if before.len() < 3 {
+            break;
+        }
+        let (n, sign, _) = drift_floating_organic(&mut w, 0.25, 4, None, Some(&roots));
+        if n == 0 {
+            continue;
+        }
+        let after: Vec<i32> = (2..=19)
+            .filter(|&x| w.get_cell(x, 6).map(|c| c.material) == Some(MaterialId::Organic))
+            .collect();
+        // Bound mat should remain a contiguous block (no holes of width>1).
+        let mut xs = after.clone();
+        xs.sort_unstable();
+        let span = xs.last().unwrap() - xs.first().unwrap() + 1;
+        let holes = span - xs.len() as i32;
+        assert!(
+            holes <= 1,
+            "rooted raft should stay cohesive after drift (before={before:?} after={after:?} sign={sign})"
+        );
+        assert_eq!(after.len(), before.len(), "should not lose Organic cells");
+        moved_together = true;
+        break;
+    }
+    assert!(moved_together, "rooted raft should eventually sail");
 }
 
 #[test]

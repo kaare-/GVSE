@@ -885,6 +885,48 @@ where
     out
 }
 
+/// Drift floating Organic with the wind; root-bound mats sail as one island
+/// and carry their land plants along (dispersal).
+///
+/// Loose unrooted litter may still peel apart. Returns how many Organic
+/// columns moved.
+pub fn sail_plants_on_wind_rafts(
+    world: &mut World,
+    atoms: &mut [Atom],
+    wind_vx_tiles: f32,
+    tile_cols: i32,
+) -> u32 {
+    let sails = collect_plant_sail_tops(atoms.iter());
+    let roots = collect_live_root_world_cells(atoms.iter());
+    let (moved, sign, moved_cols) = crate::rules::drift_floating_organic(
+        world,
+        wind_vx_tiles,
+        tile_cols,
+        Some(&sails),
+        Some(&roots),
+    );
+    if moved == 0 || sign == 0 || moved_cols.is_empty() {
+        return moved;
+    }
+    for atom in atoms.iter_mut() {
+        if !is_land_plant(atom) {
+            continue;
+        }
+        let on_raft = atom.body.iter().any(|&(dx, dy, m)| {
+            if m != ModuleId::Root && m != ModuleId::Nucleus {
+                return false;
+            }
+            let wx = world.wrap_x(atom.gx + dx as i32);
+            // Column that moved, or the seat we just arrived on.
+            moved_cols.contains(&wx) || moved_cols.contains(&world.wrap_x(wx - sign))
+        });
+        if on_raft {
+            atom.gx = world.wrap_x(atom.gx + sign);
+        }
+    }
+    moved
+}
+
 fn own_root_at(atom: &Atom, wx: i32, wy: i32) -> bool {
     atom.body.iter().any(|&(bx, by, m)| {
         m == ModuleId::Root && atom.gx + bx as i32 == wx && atom.gy + by as i32 == wy
@@ -1949,6 +1991,49 @@ mod tests {
         let mut body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
         body.push((1, 2, ModuleId::ReproSpore));
         body
+    }
+
+    #[test]
+    fn wind_sails_plant_with_rooted_organic_raft() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..24 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 6..=9 {
+            w.set_cell(x, 6, Cell::solid(MaterialId::Organic));
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        // Nucleus above raft; root in Organic at (8,6).
+        let mut atoms = vec![Atom::from_body(8, 7, 40.0, body)];
+        apply_genome(
+            &mut atoms[0],
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        let gx0 = atoms[0].gx;
+        let mut sailed = false;
+        for tick in 0..600u64 {
+            w.tick = tick;
+            let n = sail_plants_on_wind_rafts(&mut w, &mut atoms, 0.22, 4);
+            if n > 0 && atoms[0].gx != gx0 {
+                sailed = true;
+                break;
+            }
+        }
+        assert!(sailed, "plant gx should travel with its Organic raft");
+        let wx = atoms[0].gx;
+        let root_y = atoms[0].gy - 1;
+        assert_eq!(
+            w.get_cell(wx, root_y).map(|c| c.material),
+            Some(MaterialId::Organic),
+            "holdfast should still sit on Organic after sailing"
+        );
     }
 
     #[test]

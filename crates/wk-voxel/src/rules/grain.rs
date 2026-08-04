@@ -723,6 +723,8 @@ const RAFT_DRIFT_BASE: f32 = 0.06;
 const RAFT_DRIFT_ORGANIC_SAIL: f32 = 0.35;
 /// Extra sail per cell of living plant height above the raft top.
 const RAFT_DRIFT_PLANT_SAIL: f32 = 0.55;
+/// How many neighbour columns a living root stitches into its raft mat.
+const RAFT_ROOT_BIND_RADIUS: i32 = 1;
 
 /// Cheap float-seat check for raft drift (no 512-deep grounded walk).
 ///
@@ -733,30 +735,66 @@ fn drift_float_seat(seat: Cell) -> bool {
     seat.material == MaterialId::Air && seat.sat.is_full()
 }
 
+fn drift_dest_clear(world: &World, nx: i32, bottom_y: i32, height: i32) -> bool {
+    let Some(dest_seat) = world.get_cell(nx, bottom_y - 1) else {
+        return false;
+    };
+    if !drift_float_seat(dest_seat) {
+        return false;
+    }
+    for dy in 0..height {
+        let Some(dest) = world.get_cell(nx, bottom_y + dy) else {
+            return false;
+        };
+        if dest.material != MaterialId::Air || dest.sat.is_full() {
+            return false;
+        }
+        if dy > 0 && !dest.sat.is_empty() && dest.sat.0 > GRAIN_REPOSE_HAZE_MAX {
+            return false;
+        }
+    }
+    true
+}
+
+fn drift_move_column(world: &mut World, gx: i32, bottom_y: i32, height: i32, nx: i32) {
+    for dy in (0..height).rev() {
+        let y = bottom_y + dy;
+        let Some(org) = world.get_cell(gx, y) else {
+            continue;
+        };
+        let Some(dest) = world.get_cell(nx, y) else {
+            continue;
+        };
+        world.set_cell(nx, y, org);
+        world.set_cell(gx, y, dest);
+    }
+}
+
 /// Wind shove for Organic piles floating on grounded lakes.
 ///
-/// Moves a contiguous Organic stack sideways when the destination column
-/// has a float seat and freeboard Air. Probability scales with
-/// `|wind_vx|`, Organic pile height, and optional living plant tops
-/// (`plant_tops`: world-x → max plant cell y). Snow/Ice on the raft are
-/// left behind (they re-seat next tick). Never crawls into the water column.
+/// Loose litter drifts per-column (wind can tear thin mats apart). Columns
+/// claimed by living roots — plus a 1-column bind radius — move as one
+/// raft so trees can sail. Returns `(columns_moved, wind_sign)` so callers
+/// can translate plant nuclei with the mat.
 ///
-/// Scans **Organic only** (not the full buoyant-litter set) so snow/ice
-/// skies do not make every tick walk the whole world again.
+/// `live_roots`: world cells of living Root modules. `plant_tops`: world-x →
+/// max plant cell y for sail area.
 pub fn drift_floating_organic(
     world: &mut World,
     wind_vx_tiles: f32,
     tile_cols: i32,
     plant_tops: Option<&std::collections::HashMap<i32, i32>>,
-) -> u32 {
+    live_roots: Option<&HashSet<(i32, i32)>>,
+) -> (u32, i32, HashSet<i32>) {
     if wind_vx_tiles.abs() < 1e-5 {
-        return 0;
+        return (0, 0, HashSet::new());
     }
     let sign: i32 = if wind_vx_tiles >= 0.0 { 1 } else { -1 };
     let speed = wind_vx_tiles.abs() * tile_cols.max(1) as f32;
 
-    // Bottom Organic cell of each floating column (Organic-only scan).
-    let mut columns: Vec<(i32, i32, i32)> = Vec::new(); // gx, bottom_y, height
+    // gx → (bottom_y, height)
+    let mut columns: std::collections::HashMap<i32, (i32, i32)> =
+        std::collections::HashMap::new();
     let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
     for coord in coords {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
@@ -772,7 +810,6 @@ pub fn drift_floating_organic(
                 }
                 let gx = x0 + lx as i32;
                 let gy = y0 + ly as i32;
-                // Only the water-contact cell of a stack (Organic above skips).
                 if let Some(below_org) = world.get_cell(gx, gy - 1) {
                     if below_org.material == MaterialId::Organic {
                         continue;
@@ -794,50 +831,179 @@ pub fn drift_floating_organic(
                         break;
                     }
                 }
-                columns.push((gx, gy, height));
+                columns.insert(gx, (gy, height));
             }
         }
     }
     if columns.is_empty() {
-        return 0;
+        return (0, sign, HashSet::new());
     }
-    // Downwind columns first so a convoy can follow into vacated seats.
-    columns.sort_by(|a, b| {
-        if sign > 0 {
-            b.0.cmp(&a.0)
-        } else {
-            a.0.cmp(&b.0)
-        }
-    });
 
+    // Columns stitched by living roots (holdfast in/under the mat).
+    let mut claimed: HashSet<i32> = HashSet::new();
+    if let Some(roots) = live_roots {
+        for &(rx, ry) in roots {
+            let Some(&(bottom, height)) = columns.get(&rx) else {
+                continue;
+            };
+            // Root in the Organic stack, or dangling a few cells into water.
+            if ry >= bottom - 6 && ry <= bottom + height {
+                claimed.insert(rx);
+            }
+        }
+    }
+    // Dilate: roots bind neighbouring litter so the island stays together.
+    let mut bound = claimed.clone();
+    for &c in &claimed {
+        for dx in -RAFT_ROOT_BIND_RADIUS..=RAFT_ROOT_BIND_RADIUS {
+            let nx = world.wrap_x(c + dx);
+            if columns.contains_key(&nx) {
+                bound.insert(nx);
+            }
+        }
+    }
+
+    // Union-find over bound columns connected by adjacency.
+    let mut parent: std::collections::HashMap<i32, i32> =
+        bound.iter().map(|&x| (x, x)).collect();
+    fn find(parent: &mut std::collections::HashMap<i32, i32>, x: i32) -> i32 {
+        let mut v = x;
+        while parent.get(&v).copied().unwrap_or(v) != v {
+            let p = parent[&v];
+            let gp = parent.get(&p).copied().unwrap_or(p);
+            parent.insert(v, gp);
+            v = p;
+        }
+        v
+    }
+    fn union(parent: &mut std::collections::HashMap<i32, i32>, a: i32, b: i32) {
+        let ra = find(parent, a);
+        let rb = find(parent, b);
+        if ra != rb {
+            parent.insert(ra, rb);
+        }
+    }
+    let mut bound_list: Vec<i32> = bound.iter().copied().collect();
+    bound_list.sort_unstable();
+    for window in bound_list.windows(2) {
+        let a = window[0];
+        let b = window[1];
+        // Adjacent in world-x (including wrap seam: treat wrap_x(a+1)==b).
+        if b == a + 1 || world.wrap_x(a + 1) == b || world.wrap_x(b + 1) == a {
+            union(&mut parent, a, b);
+        }
+    }
+
+    let mut components: std::collections::HashMap<i32, Vec<i32>> =
+        std::collections::HashMap::new();
+    for &c in &bound_list {
+        let r = find(&mut parent, c);
+        components.entry(r).or_default().push(c);
+    }
+
+    let mut moved_cols: HashSet<i32> = HashSet::new();
     let mut moved = 0u32;
-    for (gx, bottom_y, height) in columns {
-        let nx = world.wrap_x(gx + sign);
-        let Some(dest_seat) = world.get_cell(nx, bottom_y - 1) else {
-            continue;
-        };
-        if !drift_float_seat(dest_seat) {
+
+    // 1) Root-bound rafts — one roll, whole component moves or none.
+    let mut comp_list: Vec<Vec<i32>> = components.into_values().collect();
+    for comp in &mut comp_list {
+        comp.sort_unstable();
+        if sign > 0 {
+            comp.reverse(); // downwind first within the mat
+        }
+        let mut sail = 1.0f32;
+        for &gx in comp.iter() {
+            let Some(&(bottom, height)) = columns.get(&gx) else {
+                continue;
+            };
+            let plant_h = plant_tops
+                .and_then(|m| m.get(&gx).copied())
+                .map(|top| (top - (bottom + height - 1)).max(0))
+                .unwrap_or(0);
+            sail = sail
+                .max(
+                    1.0
+                        + RAFT_DRIFT_ORGANIC_SAIL * (height - 1) as f32
+                        + RAFT_DRIFT_PLANT_SAIL * plant_h as f32,
+                );
+        }
+        // Bound mats get a small cohesion bonus (harder to strand, easier sail).
+        sail += 0.25 * (comp.len() as f32).sqrt();
+        let p = (speed * RAFT_DRIFT_BASE * sail).clamp(0.0, 0.9);
+        let key = comp.first().copied().unwrap_or(0);
+        if hash_prob(world.seed.0, key, world.tick, 0xD61F_4AF7) >= p {
             continue;
         }
-        let mut clear = true;
-        for dy in 0..height {
-            let Some(dest) = world.get_cell(nx, bottom_y + dy) else {
-                clear = false;
+        let mut all_clear = true;
+        for &gx in comp.iter() {
+            let Some(&(bottom, height)) = columns.get(&gx) else {
+                all_clear = false;
                 break;
             };
-            if dest.material != MaterialId::Air || dest.sat.is_full() {
-                clear = false;
-                break;
+            let nx = world.wrap_x(gx + sign);
+            // Destination may be another column of this same raft vacating —
+            // allow if that dest column is also in the component.
+            if comp.iter().any(|&c| c == nx) {
+                continue;
             }
-            if dy > 0 && !dest.sat.is_empty() && dest.sat.0 > GRAIN_REPOSE_HAZE_MAX {
-                clear = false;
+            if !drift_dest_clear(world, nx, bottom, height) {
+                all_clear = false;
                 break;
             }
         }
-        if !clear {
+        if !all_clear {
             continue;
         }
+        for &gx in comp.iter() {
+            let Some(&(bottom, height)) = columns.get(&gx) else {
+                continue;
+            };
+            let nx = world.wrap_x(gx + sign);
+            if comp.iter().any(|&c| c == nx) {
+                // Shift within the raft footprint: defer to a two-phase move.
+                continue;
+            }
+            drift_move_column(world, gx, bottom, height, nx);
+            moved_cols.insert(gx);
+            moved += 1;
+        }
+        // Second phase: columns whose dest was in-component (convoy).
+        // Process again downwind→upwind into seats freed above.
+        for &gx in comp.iter() {
+            if moved_cols.contains(&gx) {
+                continue;
+            }
+            let Some(&(bottom, height)) = columns.get(&gx) else {
+                continue;
+            };
+            let nx = world.wrap_x(gx + sign);
+            if !drift_dest_clear(world, nx, bottom, height) {
+                continue;
+            }
+            drift_move_column(world, gx, bottom, height, nx);
+            moved_cols.insert(gx);
+            moved += 1;
+        }
+    }
 
+    // 2) Loose (unbound) litter — may blow apart column by column.
+    let mut loose: Vec<i32> = columns
+        .keys()
+        .copied()
+        .filter(|x| !bound.contains(x))
+        .collect();
+    loose.sort_unstable();
+    if sign > 0 {
+        loose.reverse();
+    }
+    for gx in loose {
+        let Some(&(bottom_y, height)) = columns.get(&gx) else {
+            continue;
+        };
+        let nx = world.wrap_x(gx + sign);
+        if !drift_dest_clear(world, nx, bottom_y, height) {
+            continue;
+        }
         let plant_h = plant_tops
             .and_then(|m| m.get(&gx).copied())
             .map(|top| (top - (bottom_y + height - 1)).max(0))
@@ -846,24 +1012,15 @@ pub fn drift_floating_organic(
             + RAFT_DRIFT_ORGANIC_SAIL * (height - 1) as f32
             + RAFT_DRIFT_PLANT_SAIL * plant_h as f32;
         let p = (speed * RAFT_DRIFT_BASE * sail).clamp(0.0, 0.85);
-        if hash_prob(world.seed.0, gx, world.tick, 0xD61F_4AF7) >= p {
+        if hash_prob(world.seed.0, gx, world.tick, 0xD61F_1005) >= p {
             continue;
         }
-
-        for dy in (0..height).rev() {
-            let y = bottom_y + dy;
-            let Some(org) = world.get_cell(gx, y) else {
-                continue;
-            };
-            let Some(dest) = world.get_cell(nx, y) else {
-                continue;
-            };
-            world.set_cell(nx, y, org);
-            world.set_cell(gx, y, dest);
-        }
+        drift_move_column(world, gx, bottom_y, height, nx);
+        moved_cols.insert(gx);
         moved += 1;
     }
-    moved
+
+    (moved, sign, moved_cols)
 }
 
 /// Lift submerged Snow/Ice/Organic through grounded full water, and pop

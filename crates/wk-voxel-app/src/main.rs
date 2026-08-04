@@ -52,11 +52,11 @@ use macroquad::prelude::*;
 use wk_voxel::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, collect_plant_sail_tops,
-    day_night_factor_cfg, drift_floating_organic, geotech_map_due, humidity_diffuse_due,
-    is_daytime_cfg, is_standing_water, precip_forms_snow_at_air, sky_rgb_at_height,
-    temperature_step_due, tick_with_life, wake_unsupported_grains, wake_unstable_slopes,
-    ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
+    celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
+    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
+    precip_forms_snow_at_air, sail_plants_on_wind_rafts, sky_rgb_at_height, temperature_step_due,
+    tick_with_life, wake_unsupported_grains, wake_unstable_slopes, ClimateConfig,
+    GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
 
 use crate::creature_list::CreatureList;
@@ -933,18 +933,23 @@ async fn main() {
                 Some(&scene.geotech),
                 rooted.as_ref(),
             );
-            // Floating Organic piles shove with the gusty wind; tall plants sail.
-            let sails = if organisms_on {
-                Some(collect_plant_sail_tops(&scene.organisms.atoms))
+            // Floating Organic drifts with the wind; root-bound mats sail plants.
+            if organisms_on {
+                sail_plants_on_wind_rafts(
+                    &mut scene.world,
+                    &mut scene.organisms.atoms,
+                    wind_vx,
+                    scene.wind.tile_cols,
+                );
             } else {
-                None
-            };
-            drift_floating_organic(
-                &mut scene.world,
-                wind_vx,
-                scene.wind.tile_cols,
-                sails.as_ref(),
-            );
+                let _ = wk_voxel::drift_floating_organic(
+                    &mut scene.world,
+                    wind_vx,
+                    scene.wind.tile_cols,
+                    None,
+                    None,
+                );
+            }
             // Bedload / bank transport after water has moved this tick.
             apply_flow_erosion_bound(&mut scene.world, &settings.grain, rooted.as_ref());
             if geotech_due {

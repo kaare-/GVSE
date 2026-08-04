@@ -81,8 +81,8 @@ pub use organism::{
 };
 pub use plant::{
     collect_live_photo_world_cells, collect_live_root_world_cells, collect_plant_sail_tops,
-    find_fungus_slot, find_plant_slot,
-    find_surface_air_slot, is_land_plant, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES,
+    find_fungus_slot, find_plant_slot, find_surface_air_slot, is_land_plant,
+    sail_plants_on_wind_rafts, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES,
     MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use shade::{
