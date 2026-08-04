@@ -2017,26 +2017,6 @@ fn sail_tippy(height: i32, support: i32) -> bool {
     height >= 3 && height >= support * 2
 }
 
-/// Free-surface y of standing water in this column near `hint_y`.
-///
-/// Searches much farther than [`find_wet_near`] so a plant that left a
-/// tall raft still finds the lake after the waterline drops, instead of
-/// falling through to [`find_surface_air_slot`] on the seabed.
-fn column_water_top(world: &World, gx: i32, hint_y: i32) -> Option<i32> {
-    if let Some((top, _)) = wet_band(world, gx, hint_y) {
-        return Some(top);
-    }
-    let gx = world.wrap_x(gx);
-    for dy in 0..=192 {
-        for y in [hint_y - dy, hint_y + dy] {
-            if is_wet_air(world, gx, y) {
-                return wet_band(world, gx, y).map(|(top, _)| top);
-            }
-        }
-    }
-    None
-}
-
 /// Contiguous wet-Air band containing `hint_y` (or nearest wet cell).
 /// Returns `(top, bed)` free-surface and bed Y.
 pub fn wet_band(world: &World, gx: i32, hint_y: i32) -> Option<(i32, i32)> {
