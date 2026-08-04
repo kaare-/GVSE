@@ -107,7 +107,7 @@ pub use rules::{
     tick_with_configs_and_geotech, tick_with_life, tick_with_perf, wake_unsupported_grains,
     wake_unstable_slopes, CondensationConfig, EvapConfig, GrainConfig, KarstConfig,
     OrographicConfig, PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
-    GRAIN_SETTLE_PASSES, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
+    GRAIN_REPOSE_HAZE_MAX, GRAIN_SETTLE_PASSES, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
 pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,

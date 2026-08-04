@@ -231,7 +231,7 @@ pub fn wake_unstable_slopes(world: &mut World) {
                     {
                         continue;
                     }
-                    if is_grain(cell.material) && !seat.sat.is_empty() {
+                    if is_grain(cell.material) && seat.sat.0 > GRAIN_REPOSE_HAZE_MAX {
                         continue;
                     }
                     if diag_drop_exceeds_world(world, sx, gy, max_step, through_haze) {
@@ -239,6 +239,36 @@ pub fn wake_unstable_slopes(world: &mut World) {
                         world.touch_dirty(sx, sy);
                         break;
                     }
+                }
+                // Same-Y walk-off seat (Air beside with Air below).
+                if max_step > 0 {
+                    continue;
+                }
+                for dx in [-1, 1] {
+                    let sx = gx + dx;
+                    let Some(seat) = world.get_cell(sx, gy) else {
+                        continue;
+                    };
+                    if seat.material != MaterialId::Air {
+                        continue;
+                    }
+                    if is_grain(cell.material) && seat.sat.0 > GRAIN_REPOSE_HAZE_MAX {
+                        continue;
+                    }
+                    if matches!(cell.material, MaterialId::Organic | MaterialId::Soil)
+                        && seat.sat.is_full()
+                    {
+                        continue;
+                    }
+                    let Some(below_seat) = world.get_cell(sx, gy - 1) else {
+                        continue;
+                    };
+                    if below_seat.material != MaterialId::Air || below_seat.sat.is_full() {
+                        continue;
+                    }
+                    world.touch_dirty(gx, gy);
+                    world.touch_dirty(sx, gy);
+                    break;
                 }
             }
         }
@@ -261,7 +291,7 @@ fn diag_drop_exceeds_world(
         if c.material != MaterialId::Air {
             break;
         }
-        if !c.sat.is_empty() && !(through_haze && !c.sat.is_full()) {
+        if !repose_gap_air(c, through_haze) {
             break;
         }
         drop += 1;
@@ -529,7 +559,49 @@ fn apply_repose_pass(
                     moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     continue;
                 }
+                // Same-Y walk-off: max_step==0 grains on a rock ledge where
+                // diagonal-down is blocked can still step sideways into Air
+                // that opens downward — clears 2–3 cell sand lips on slopes.
                 if !cold_mode {
+                    let open_drop = matches!(
+                        below_dest,
+                        Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
+                    );
+                    if !open_drop {
+                        continue;
+                    }
+                    for &from_dx in &order {
+                        let sx = gx + from_dx;
+                        let sy = gy;
+                        let Some(src) =
+                            (unsafe { parallel::get_cell(ptrs, wrap_width, sx, sy) })
+                        else {
+                            continue;
+                        };
+                        if grain_max_stable_step(src.material) > 0 {
+                            continue;
+                        }
+                        if !is_grain(src.material)
+                            && !matches!(src.material, MaterialId::Organic | MaterialId::Soil)
+                        {
+                            continue;
+                        }
+                        let below_src =
+                            unsafe { parallel::get_cell(ptrs, wrap_width, sx, sy - 1) };
+                        match below_src {
+                            Some(b) if b.material == MaterialId::Air => continue,
+                            None => continue,
+                            _ => {}
+                        }
+                        if !avalanche_seat_ok(src.material, dest, below_dest) {
+                            continue;
+                        }
+                        write_repose_swap(
+                            ptrs, wrap_width, &hydro, gx, gy, dest, sx, sy, src,
+                        );
+                        moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
                     continue;
                 }
                 // Same-Y smear: cold wet sand (or snow) onto an ice lid seat.
@@ -701,9 +773,14 @@ fn seat_on_ice(below_dest: Option<Cell>) -> bool {
     matches!(below_dest, Some(b) if b.material == MaterialId::Ice)
 }
 
+/// Atmospheric haze sand/gravel/clay may repose into. Wetter seats are
+/// treated as shore film (fleck cycle) and refused. Organic/Soil still
+/// use full through-haze.
+pub const GRAIN_REPOSE_HAZE_MAX: u8 = 32;
+
 /// Snow/ice may sit on empty Air or on a wet film that rests on Ice.
-/// Dense grains (sand etc.) may only repose into **dry** Air — sliding
-/// into film + stealing lake water was the shoreline fleck cycle.
+/// Dense grains may repose into **dry** Air or thin atmospheric haze;
+/// sliding into shore film + stealing lake water was the fleck cycle.
 /// Organic litter / composted Soil match grain-fall: sprawl through
 /// haze/film, float only on grounded full standing water (else humid
 /// cliffs freeze). Suspended mid-air full-sat is not a seat.
@@ -713,16 +790,32 @@ fn avalanche_seat_ok(src: MaterialId, dest: Cell, below_dest: Option<Cell>) -> b
     }
     if matches!(src, MaterialId::Organic | MaterialId::Soil) {
         // Repose into film/haze; refuse only full sat (lake surface).
-        // Suspended full-sat is rare in repose seats; grain-fall handles
-        // vertical sink through those.
         return !dest.sat.is_full();
     }
     if is_grain(src) {
-        // Any non-zero sat (film or lake) — sink via grain-fall only.
-        return false;
+        // Thin humidity haze OK (inland cliffs); shore film / lake not.
+        return dest.sat.0 <= GRAIN_REPOSE_HAZE_MAX;
     }
     // Snow / hillside ice: spill onto lake ice, not into open water.
     seat_on_ice(below_dest)
+}
+
+/// Whether this Air cell counts as empty gap for a repose drop measure.
+fn repose_gap_air(c: Cell, through_haze: bool) -> bool {
+    if c.material != MaterialId::Air {
+        return false;
+    }
+    if c.sat.is_empty() {
+        return true;
+    }
+    if c.sat.is_full() {
+        return false;
+    }
+    if through_haze {
+        return true; // Organic/Soil: any non-full film
+    }
+    // Dense grains: only thin atmospheric haze.
+    c.sat.0 <= GRAIN_REPOSE_HAZE_MAX
 }
 
 fn hillside_ice_support(below_src: Option<Cell>) -> bool {
@@ -1144,9 +1237,7 @@ fn diag_drop_exceeds(
         if c.material != MaterialId::Air {
             break;
         }
-        // Full water always supports. Film/haze blocks sand (shore flecks)
-        // but Organic/Soil may sprawl through — same rule as grain-fall.
-        if !c.sat.is_empty() && !(through_haze && !c.sat.is_full()) {
+        if !repose_gap_air(c, through_haze) {
             break;
         }
         drop += 1;

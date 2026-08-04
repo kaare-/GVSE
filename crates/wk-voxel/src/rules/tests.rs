@@ -3407,3 +3407,94 @@ fn sand_sky_drop_does_not_leave_cliff_walls() {
     );
     assert!(width >= 5, "Sand cliff should spread sideways (width={width})");
 }
+
+#[test]
+fn sand_micro_cliff_on_stone_slope_keeps_reposing() {
+    // 2–3 cell vertical sand lips on a rock face (the screenshot case).
+    let mut w = setup_column_world();
+    // Stone ramp: y = x/2 style steps.
+    for x in 2..=12 {
+        for y in 1..=(x / 2).max(1) {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    // Vertical sand lip on the left face at mid slope.
+    w.set_cell(6, 4, Cell::solid(MaterialId::Sand));
+    w.set_cell(6, 5, Cell::solid(MaterialId::Sand));
+    w.set_cell(6, 6, Cell::solid(MaterialId::Sand));
+    // Ensure dry Air seats to the left.
+    for y in 1..=8 {
+        if w.get_cell(5, y).map(|c| c.material) != Some(MaterialId::Stone) {
+            w.set_cell(5, y, Cell::air());
+        }
+    }
+    for _ in 0..5 {
+        tick(&mut w);
+    }
+    let lip = (4..=6)
+        .filter(|&y| w.get_cell(6, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert!(
+        lip <= 1,
+        "sand micro-cliff must avalanche off the face (cells still stacked={lip})"
+    );
+}
+
+#[test]
+fn sand_micro_cliff_reposes_through_thin_haze() {
+    // Inland humidity haze used to freeze sand lips (any sat blocked
+    // repose). Thin haze must not; shore film still must.
+    let mut w = setup_column_world();
+    for x in 2..=12 {
+        for y in 1..=(x / 2).max(1) {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    w.set_cell(6, 4, Cell::solid(MaterialId::Sand));
+    w.set_cell(6, 5, Cell::solid(MaterialId::Sand));
+    w.set_cell(6, 6, Cell::solid(MaterialId::Sand));
+    for y in 1..=8 {
+        if w.get_cell(5, y).map(|c| c.material) != Some(MaterialId::Stone) {
+            let mut haze = Cell::air();
+            haze.sat = Sat(24);
+            w.set_cell(5, y, haze);
+        }
+    }
+    for _ in 0..5 {
+        tick(&mut w);
+    }
+    let lip = (4..=6)
+        .filter(|&y| w.get_cell(6, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert!(
+        lip <= 1,
+        "sand lip must avalanche through thin haze (stacked={lip})"
+    );
+}
+
+#[test]
+fn sand_ledge_walks_off_sideways_into_open_air() {
+    // Diagonal-down blocked by stone; open Air beside with Air below.
+    let mut w = setup_column_world();
+    for x in 5..=8 {
+        for y in 1..=3 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    // Ledge sand with a vertical lip above open air to the left.
+    w.set_cell(5, 4, Cell::solid(MaterialId::Sand));
+    w.set_cell(5, 5, Cell::solid(MaterialId::Sand));
+    w.set_cell(4, 1, Cell::solid(MaterialId::Stone));
+    w.set_cell(4, 2, Cell::air());
+    w.set_cell(4, 3, Cell::air());
+    w.set_cell(4, 4, Cell::air());
+    w.set_cell(4, 5, Cell::air());
+    for _ in 0..8 {
+        tick(&mut w);
+    }
+    assert_ne!(
+        w.get_cell(5, 5).unwrap().material,
+        MaterialId::Sand,
+        "top ledge sand must walk off / fall"
+    );
+}
