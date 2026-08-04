@@ -3244,3 +3244,77 @@ fn stranded_midair_sand_falls_after_dirty_cleared() {
         .count();
     assert_eq!(floating, 0, "stranded sand must fall ({floating} still high)");
 }
+
+#[test]
+fn floating_sand_settles_fast_despite_distant_lake_dirty() {
+    // Lakes keep a non-empty dirty plan; grain settle must still wake and
+    // drop a far mid-air sand blob in one tick (not drip via roof collapse).
+    let mut w = setup_column_world();
+    for y in 1..=4 {
+        w.set_cell(2, y, Cell::water());
+    }
+    for x in 10..=16 {
+        for y in 40..=48 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+    }
+    // Simulate "only the lake is dirty".
+    clear_all_dirty(&mut w);
+    w.touch_dirty(2, 4);
+    tick(&mut w);
+    let floating = (10..=16)
+        .flat_map(|x| (35..=48).map(move |y| (x, y)))
+        .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert_eq!(
+        floating, 0,
+        "sand blob must fully seat in one tick despite lake dirty (left={floating})"
+    );
+}
+
+#[test]
+fn organic_sinks_through_suspended_full_sat() {
+    // Invisible mid-air full water under litter must not pin Organic.
+    let mut w = setup_column_world();
+    w.set_cell(5, 20, Cell::water()); // suspended full-sat Air
+    w.set_cell(5, 21, Cell::solid(MaterialId::Organic));
+    tick(&mut w);
+    assert_eq!(
+        w.get_cell(5, 21).unwrap().material,
+        MaterialId::Air,
+        "Organic must leave the paint height"
+    );
+    assert_ne!(
+        w.get_cell(5, 1).unwrap().material,
+        MaterialId::Air,
+        "Organic should seat near bedrock"
+    );
+}
+
+#[test]
+fn organic_still_floats_on_grounded_lake() {
+    let mut w = setup_column_world();
+    // Bedrock walls so surface flow cannot empty the column under litter.
+    for y in 1..=6 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 3..=7 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
+    for _ in 0..5 {
+        tick(&mut w);
+    }
+    let on_surface = (3..=7).any(|x| {
+        (5..=7).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+    });
+    assert!(
+        on_surface,
+        "Organic must remain on the grounded lake surface (sat@5,5={})",
+        w.get_cell(5, 5).map(|c| c.sat.0).unwrap_or(0)
+    );
+}
+

@@ -176,9 +176,8 @@ pub fn tick_with_life(
         }
     }
 
-    // Prefer dirty written by flow; if water was quiet, reuse the flow
-    // halo so grain fall still sees F3 / editor solid paints.
-    let mut active = {
+    // Seepage follows the water dirty / flow halo.
+    let flow_active = {
         let dirty = plan_active(world);
         if dirty.is_empty() {
             flow_halo
@@ -186,28 +185,25 @@ pub fn tick_with_life(
             dirty
         }
     };
-    // Stranded mid-air sand/Organic (wake cleared by quiet ticks before
-    // grain fall ran) never re-enters the plan — re-scan periodically.
-    // F3 close / Space unpause also call `wake_unsupported_grains` for
-    // an immediate drop without waiting on this throttle.
-    if active.is_empty() && world.tick % 15 == 0 {
-        super::grain::wake_unsupported_grains(world);
-        active = plan_active(world);
+    if !flow_active.is_empty() {
+        apply_seepage_regions(world, &flow_active);
     }
-    if !active.is_empty() {
-        apply_seepage_regions(world, &active);
-        // Multi-pass fall+repose so mid-air F3 Organic/Sand seats in
-        // one tick instead of crawling one cell per frame (and looking
-        // "stuck" until roof collapse / erosion re-wakes the column).
-        let settle_seed = {
-            let dirty = plan_active(world);
-            if dirty.is_empty() {
-                active
-            } else {
-                dirty
-            }
-        };
-        settle_loose_grains_regions(world, &settle_seed, rooted, GRAIN_SETTLE_PASSES);
+
+    // Always re-wake unsupported grains — lakes/rain often leave a
+    // non-empty dirty plan that used to skip this scan, so floating
+    // F3 sand only dripped via roof collapse (one cell at a time) and
+    // Organic on suspended full-sat never moved.
+    super::grain::wake_unsupported_grains(world);
+    let grain_active = {
+        let dirty = plan_active(world);
+        if dirty.is_empty() {
+            flow_active
+        } else {
+            dirty
+        }
+    };
+    if !grain_active.is_empty() {
+        settle_loose_grains_regions(world, &grain_active, rooted, GRAIN_SETTLE_PASSES);
     }
 
     // Geotech: roof / overhang collapse after grain has seated.

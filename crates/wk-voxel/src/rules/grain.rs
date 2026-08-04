@@ -75,6 +75,71 @@ pub fn settle_loose_grains(
     settle_loose_grains_regions(world, &active, rooted, max_passes);
 }
 
+/// True when a full-sat Air cell is part of a water column that rests on
+/// solid (a real lake / puddle). Mid-air full-sat blobs (condensation /
+/// invisible suspended water) return false so Organic/Snow sink through
+/// instead of hanging forever on an invisible seat.
+fn water_column_grounded_world(world: &World, gx: i32, gy: i32) -> bool {
+    let mut y = gy;
+    for _ in 0..512 {
+        let Some(c) = world.get_cell(gx, y) else {
+            return false;
+        };
+        if c.material == MaterialId::Air {
+            if !c.sat.is_full() {
+                return false;
+            }
+            y -= 1;
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+fn water_column_grounded_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    let mut y = gy;
+    for _ in 0..512 {
+        let Some(c) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, y) }) else {
+            return false;
+        };
+        if c.material == MaterialId::Air {
+            if !c.sat.is_full() {
+                return false;
+            }
+            y -= 1;
+            continue;
+        }
+        return true;
+    }
+    false
+}
+
+/// Snow / Ice / Organic may float on this Air seat only when it is full
+/// standing water that reaches solid ground (lake surface).
+fn floats_on_air_seat_world(world: &World, seat: Cell, gx: i32, gy: i32) -> bool {
+    seat.material == MaterialId::Air
+        && seat.sat.is_full()
+        && water_column_grounded_world(world, gx, gy)
+}
+
+fn floats_on_air_seat_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    seat: Cell,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    seat.material == MaterialId::Air
+        && seat.sat.is_full()
+        && water_column_grounded_ptrs(ptrs, wrap_width, gx, gy)
+}
+
 /// Re-dirty every grain / litter cell that has empty (or non-supporting)
 /// Air directly below — and the Air seat itself.
 ///
@@ -107,11 +172,12 @@ pub fn wake_unsupported_grains(world: &mut World) {
                 if below.material != MaterialId::Air {
                     continue;
                 }
-                // Snow / Ice / Organic float on full standing water.
-                if falls_through_empty_air(cell.material) && below.sat.is_full() {
+                // Snow / Ice / Organic float on grounded lakes only.
+                if falls_through_empty_air(cell.material)
+                    && floats_on_air_seat_world(world, below, gx, gy - 1)
+                {
                     continue;
                 }
-                // Dense grains (sand etc.) fall through any Air sat.
                 world.touch_dirty(gx, gy);
                 world.touch_dirty(gx, gy - 1);
             }
@@ -191,13 +257,10 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                 if is_grain(above.material) {
                     // Dense grains sink through any Air sat.
                 } else if falls_through_empty_air(above.material) {
-                    // Snow / Ice / Organic: drop through empty Air *and*
-                    // haze; float only on standing (full) water — lids,
-                    // shore slush, leaf litter. Must match phase support
-                    // (`min_sat_to_freeze` / full cell): floating on
-                    // partial sat while phase melted that seat caused a
-                    // melt→refreeze pump (±1 cell every phase period).
-                    if cur.sat.is_full() {
+                    // Snow / Ice / Organic: drop through empty Air, haze,
+                    // and *suspended* full-sat blobs. Float only on
+                    // grounded lake / puddle surfaces.
+                    if floats_on_air_seat_ptrs(ptrs, wrap_width, cur, gx, gy) {
                         continue;
                     }
                 } else {
@@ -550,12 +613,16 @@ fn seat_on_ice(below_dest: Option<Cell>) -> bool {
 /// Dense grains (sand etc.) may only repose into **dry** Air — sliding
 /// into film + stealing lake water was the shoreline fleck cycle.
 /// Organic litter / composted Soil match grain-fall: sprawl through
-/// haze/film, float only on full standing water (else humid cliffs freeze).
+/// haze/film, float only on grounded full standing water (else humid
+/// cliffs freeze). Suspended mid-air full-sat is not a seat.
 fn avalanche_seat_ok(src: MaterialId, dest: Cell, below_dest: Option<Cell>) -> bool {
     if dest.sat.is_empty() {
         return true;
     }
     if matches!(src, MaterialId::Organic | MaterialId::Soil) {
+        // Repose into film/haze; refuse only full sat (lake surface).
+        // Suspended full-sat is rare in repose seats; grain-fall handles
+        // vertical sink through those.
         return !dest.sat.is_full();
     }
     if is_grain(src) {

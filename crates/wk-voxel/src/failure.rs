@@ -353,6 +353,10 @@ pub fn apply_roof_collapse_regions(
                 if below.material != MaterialId::Air {
                     continue;
                 }
+                // Standing water is a seat (boats / litter), not a cave.
+                if below.sat.is_full() {
+                    continue;
+                }
                 let span = roof_span_cells(world, gx, gy - 1);
                 if span <= 0 {
                     continue;
@@ -393,6 +397,10 @@ fn collapse_one_ceiling(world: &mut World, gx: i32, gy: i32) -> bool {
         return false;
     };
     if below.material != MaterialId::Air {
+        return false;
+    }
+    // Do not collapse roofs into standing water (lake surface seat).
+    if below.sat.is_full() {
         return false;
     }
     // Re-check span — neighbour collapse may have changed the cavity.
