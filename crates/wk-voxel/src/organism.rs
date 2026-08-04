@@ -1132,8 +1132,8 @@ fn step_land_plant(
 ) -> PlantStep {
     // Pose / seat:
     // - Once tipped, stay tipped (re-rooting does not stand the old body up).
-    // - New Stem/Photosystem grown while tipped draws upright.
-    // - When that upright mast gets tippy again, flop it (clear upright_growth).
+    // - Tip/re-tip **bakes** the flop into body offsets so new stems grow up.
+    // - New Stem/Photosystem grown while tipped draws upright until re-tip.
     // - Open lake (no holdfast): tip and float at the free surface.
     // - Shore: tip / stay tipped; grow roots into the beach.
     let water_top = column_water_top(world, atom.gx, atom.gy);
@@ -1151,10 +1151,13 @@ fn step_land_plant(
             pin_plant_pose(atom);
         }
     } else if let Some(top) = water_top {
-        atom.fallen = true;
-        // Free-float mast can tip over again once tall enough.
-        if upright_mast_tippy(atom, 1) {
-            atom.upright_growth.clear();
+        let was_fallen = atom.fallen;
+        if !was_fallen {
+            bake_tip_into_body(atom);
+        } else if upright_mast_tippy(atom, 1) {
+            bake_tip_into_body(atom);
+        } else {
+            atom.fallen = true;
         }
         atom.gy = top;
         atom.fy = top as f32;
@@ -1259,11 +1262,11 @@ fn step_land_plant(
     let genome_save = atom.genome;
     if atom.fallen {
         if water_top.is_some() {
-            // Lake float: sip through dangling roots; don't pipe to the bed.
-            // New shoots may grow upright from the tipped body.
-            atom.genome.alloc_root = 0.0;
+            // Lake float: elongate dangling roots into wet void / raft, and
+            // grow a fresh upright mast (body tip is baked flat).
+            atom.genome.alloc_root = atom.genome.alloc_root.max(0.20).min(0.40);
             atom.genome.alloc_stem = atom.genome.alloc_stem.max(0.28);
-            atom.genome.alloc_leaf = atom.genome.alloc_leaf.max(0.30);
+            atom.genome.alloc_leaf = atom.genome.alloc_leaf.max(0.28);
         } else {
             // Shore strand: root into the beach; new stems still grow upright.
             atom.genome.alloc_root = (atom.genome.alloc_root + 0.30).min(0.75);
@@ -1482,14 +1485,71 @@ pub fn resolve_organism_draw_cells(
 /// Tip pose for free-float / unstable-raft draw.
 ///
 /// Canopy (dy ≥ 0) lays along +x at the waterline; roots (dy < 0) hang
-/// straight down into the water — never into the air. Physics body
-/// offsets stay upright; only the renderer uses this.
+/// straight down into the water — never into the air.
 pub fn fallen_body_offset(dx: i16, dy: i16) -> (i16, i16) {
     if dy < 0 {
         (dx, dy)
     } else {
         (dx + dy, 0)
     }
+}
+
+/// Bake the tip into body offsets so growth reorients.
+///
+/// After this, the old canopy lies on `dy == 0` and new Stem elongation
+/// (`ay + 1`) grows **up** from the waterline instead of continuing the
+/// phantom pre-tip vertical axis. Clears `upright_growth`.
+pub fn bake_tip_into_body(atom: &mut Atom) {
+    use std::collections::HashSet;
+
+    atom.fallen = true;
+    let mut next: Vec<BodyModule> = Vec::with_capacity(atom.body.len());
+    let mut used: HashSet<(i16, i16)> = HashSet::new();
+
+    // Roots keep hanging; nucleus stays at the crown.
+    for &(dx, dy, m) in &atom.body {
+        if m == ModuleId::Nucleus {
+            if used.insert((0, 0)) {
+                next.push((0, 0, ModuleId::Nucleus));
+            }
+            continue;
+        }
+        if m == ModuleId::Root || dy < 0 {
+            let mut place = (dx, dy);
+            let mut guard = 0;
+            while !used.insert(place) && guard < 24 {
+                place.0 += if place.0 >= 0 { 1 } else { -1 };
+                guard += 1;
+            }
+            if guard < 24 {
+                next.push((place.0, place.1, m));
+            }
+        }
+    }
+
+    let mut canopy: Vec<BodyModule> = atom
+        .body
+        .iter()
+        .copied()
+        .filter(|&(_, dy, m)| m != ModuleId::Nucleus && m != ModuleId::Root && dy >= 0)
+        .collect();
+    // Lower body-Y claims the waterline first (stable tip order).
+    canopy.sort_by_key(|&(dx, dy, _)| (dy, dx));
+    for (dx, dy, m) in canopy {
+        let (mut nx, ny) = fallen_body_offset(dx, dy);
+        let mut guard = 0;
+        while !used.insert((nx, ny)) && guard < 32 {
+            nx += 1;
+            guard += 1;
+        }
+        if guard < 32 {
+            next.push((nx, ny, m));
+        }
+    }
+
+    atom.body = next;
+    atom.upright_growth.clear();
+    atom.leaf_starve.clear();
 }
 
 /// Draw offset for a tipped plant cell.
@@ -1769,20 +1829,21 @@ fn rooted_in_organic(world: &World, atom: &Atom) -> bool {
 }
 
 /// First tip, or re-tip an upright mast that grew too tall on a skinny raft.
+///
+/// Baking rewrites canopy body cells onto the waterline so the next stem
+/// elongates upward (`ay + 1`) instead of extending the old vertical axis.
 fn apply_raft_tip(world: &World, atom: &mut Atom) {
     let Some(support) = raft_support_width(world, atom) else {
         return;
     };
     if !atom.fallen {
         if upright_body_tippy(atom, support) {
-            atom.fallen = true;
+            bake_tip_into_body(atom);
         }
         return;
     }
     if upright_mast_tippy(atom, support) {
-        // Fold the post-tip shoots onto the waterline; further growth starts
-        // a fresh upright mast.
-        atom.upright_growth.clear();
+        bake_tip_into_body(atom);
     }
 }
 

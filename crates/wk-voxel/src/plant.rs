@@ -199,6 +199,9 @@ pub fn useful_root_budget(atom: &Atom, caps: &PlantGrowthCaps) -> usize {
 /// When Photosystems sit in **standing water** (`leaf_bathing`), one holdfast
 /// root is enough — leaves drink the free water. Dry-land leaves never bathe,
 /// so the full shoot-driven budget still applies on shore.
+///
+/// Exception: tipped floaters still elongate dangling roots into the wet
+/// column / raft even while canopy leaves bathe.
 pub fn useful_root_budget_for(
     atom: &Atom,
     drought: DroughtBand,
@@ -206,10 +209,16 @@ pub fn useful_root_budget_for(
     leaf_bathing: bool,
 ) -> usize {
     let hard = caps.max_roots.max(1);
-    if leaf_bathing {
+    if leaf_bathing && !atom.fallen {
         return 1.min(hard);
     }
     let base = useful_root_budget(atom, caps);
+    let base = if atom.fallen {
+        // At least a short dangling pipe under a tipped crown.
+        base.max(3).min(hard)
+    } else {
+        base
+    };
     match drought {
         DroughtBand::Hydrated | DroughtBand::Dormant => base,
         DroughtBand::Stressed => {
@@ -1534,7 +1543,18 @@ pub fn try_grow_shoot(
         let mut stem_anchors: Vec<(i16, i16)> = atom
             .body
             .iter()
-            .filter(|(_, _, m)| *m == ModuleId::Stem)
+            .filter(|&&(x, y, m)| {
+                if m != ModuleId::Stem {
+                    return false;
+                }
+                // Tipped plants: leaf on the upright mast, not along the
+                // baked waterline trunk (that reads as sideways growth).
+                if atom.fallen {
+                    y > 0 || atom.upright_growth.iter().any(|&p| p == (x, y))
+                } else {
+                    true
+                }
+            })
             .map(|&(x, y, _)| (x, y))
             .collect();
         // Prefer higher / brighter stem first, then fill gaps lower down.
@@ -1545,6 +1565,9 @@ pub fn try_grow_shoot(
                 let nx = tx + dx;
                 let ny = ty + dy;
                 if ny > 16 || nx == tx || occupied.contains(&(nx, ny)) {
+                    continue;
+                }
+                if atom.fallen && ny <= 0 {
                     continue;
                 }
                 if leaf_support_dist(atom, nx, ny) > WOODY_LEAF_MAX_CANT {
@@ -1617,6 +1640,63 @@ pub fn try_grow_shoot(
         if !can_grow_stem {
             return false;
         }
+        let try_place = |atom: &mut Atom, nx: i16, ny: i16, occupied: &HashSet<(i16, i16)>| -> bool {
+            if ny > 16 || ny < 1 || occupied.contains(&(nx, ny)) {
+                return false;
+            }
+            // Hard rule: stem never sits on a photosystem cell.
+            if atom
+                .body
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Photosystem && x == nx && y == ny - 1)
+            {
+                return false;
+            }
+            if !stem_spacing_ok(atom, nx, ny, trunks) {
+                return false;
+            }
+            atom.energy -= cost;
+            atom.body.push((nx, ny, ModuleId::Stem));
+            atom.mark_upright_growth(nx, ny);
+            true
+        };
+
+        if atom.fallen {
+            // After tip bake, canopy lies on dy==0. Prefer continuing the
+            // upright mast, else start a fresh shoot above the nucleus.
+            let mut up_anchors: Vec<(i16, i16)> = atom
+                .body
+                .iter()
+                .filter(|&&(x, y, m)| {
+                    m == ModuleId::Stem && (y > 0 || atom.upright_growth.iter().any(|&p| p == (x, y)))
+                })
+                .map(|&(x, y, _)| (x, y))
+                .collect();
+            up_anchors.sort_by_key(|&(x, y)| (std::cmp::Reverse(y), x.abs()));
+            for (ax, ay) in up_anchors {
+                if try_place(atom, ax, ay + 1, occupied) {
+                    return true;
+                }
+            }
+            if try_place(atom, 0, 1, occupied) {
+                return true;
+            }
+            // Last resort: shoot upward from a waterline stem tip.
+            let mut flat: Vec<(i16, i16)> = atom
+                .body
+                .iter()
+                .filter(|(_, y, m)| *m == ModuleId::Stem && *y == 0)
+                .map(|&(x, y, _)| (x, y))
+                .collect();
+            flat.sort_by_key(|&(x, _)| x.abs());
+            for (ax, ay) in flat {
+                if try_place(atom, ax, ay + 1, occupied) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         // Elongate the tallest painted stem with clear air above.
         let mut anchors: Vec<(i16, i16)> = atom
             .body
@@ -1626,26 +1706,9 @@ pub fn try_grow_shoot(
             .collect();
         anchors.sort_by_key(|&(_, y)| std::cmp::Reverse(y));
         for (ax, ay) in anchors {
-            let nx = ax;
-            let ny = ay + 1;
-            if ny > 16 || occupied.contains(&(nx, ny)) {
-                continue;
+            if try_place(atom, ax, ay + 1, occupied) {
+                return true;
             }
-            // Hard rule: stem never sits on a photosystem cell.
-            if atom
-                .body
-                .iter()
-                .any(|&(x, y, m)| m == ModuleId::Photosystem && x == nx && y == ay)
-            {
-                continue;
-            }
-            if !stem_spacing_ok(atom, nx, ny, trunks) {
-                continue;
-            }
-            atom.energy -= cost;
-            atom.body.push((nx, ny, ModuleId::Stem));
-            atom.mark_upright_growth(nx, ny);
-            return true;
         }
         false
     };
@@ -2530,8 +2593,143 @@ mod tests {
         assert!(store.atoms[0].fallen, "must stay tipped");
         assert!(
             store.atoms[0].upright_growth.is_empty(),
-            "tippy upright mast should flop (clear upright_growth), got {:?}",
+            "tippy upright mast should bake flat, got {:?}",
             store.atoms[0].upright_growth
+        );
+        assert!(
+            store.atoms[0]
+                .body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Stem || *m == ModuleId::Photosystem)
+                .all(|(_, y, _)| *y == 0),
+            "baked canopy must lie on the waterline (dy==0), body={:?}",
+            store.atoms[0].body
+        );
+    }
+
+    #[test]
+    fn after_tip_bake_new_stem_grows_up_from_crown() {
+        use crate::organism::bake_tip_into_body;
+        use crate::shade::CanopyIndex;
+        use std::collections::HashSet;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut atom = Atom::from_body(
+            5,
+            5,
+            120.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Stem),
+                (0, 4, ModuleId::Photosystem),
+            ],
+        );
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        atom.energy = atom.energy_max;
+        bake_tip_into_body(&mut atom);
+        assert!(atom.body.iter().any(|&(x, y, m)| {
+            m == ModuleId::Stem && y == 0 && x > 0
+        }));
+        // Old vertical axis is gone — (0,1) is free for a fresh upright shoot.
+        assert!(!atom.body.iter().any(|&(x, y, _)| x == 0 && y == 1));
+        atom.genome.alloc_stem = 0.92;
+        atom.genome.alloc_leaf = 0.08;
+        atom.genome.alloc_root = 0.0;
+        let caps = PlantGrowthCaps::default();
+        let mut grew_up = false;
+        for t in 0..16u64 {
+            let _ = try_grow_shoot(
+                &w,
+                &mut atom,
+                t,
+                &HashSet::new(),
+                &HashSet::new(),
+                &caps,
+                &CanopyIndex::default(),
+                0,
+            );
+            if atom
+                .body
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Stem && x == 0 && y == 1)
+            {
+                grew_up = true;
+                break;
+            }
+        }
+        assert!(grew_up, "post-bake stem must reorient upward above nucleus");
+        assert!(atom.upright_growth.contains(&(0, 1)));
+    }
+
+    #[test]
+    fn tipped_floater_can_elongate_dangling_roots() {
+        use crate::organism::bake_tip_into_body;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..16 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut atom = Atom::from_body(
+            5,
+            5,
+            120.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Photosystem),
+            ],
+        );
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        atom.energy = atom.energy_max;
+        bake_tip_into_body(&mut atom);
+        atom.genome.alloc_root = 0.5;
+        atom.genome.alloc_stem = 0.25;
+        atom.genome.alloc_leaf = 0.25;
+        let roots0 = root_count(&atom);
+        let caps = PlantGrowthCaps::default();
+        let mut grew = false;
+        for _ in 0..24 {
+            let spent = try_elongate_root(&w, &mut atom, &HashSet::new(), &caps);
+            if spent > 0.0 || root_count(&atom) > roots0 {
+                grew = true;
+                break;
+            }
+        }
+        assert!(grew, "tipped floater should elongate roots into wet void");
+        assert!(
+            atom.body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Root)
+                .any(|(_, y, _)| *y <= -2),
+            "dangling root should deepen below the crown, body={:?}",
+            atom.body
         );
     }
 
