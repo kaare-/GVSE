@@ -2237,6 +2237,120 @@ mod tests {
     }
 
     #[test]
+    fn submerged_seaweed_stays_on_holdfast() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..=8 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 9..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 2, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_seaweed().genome,
+        );
+        store.atoms.push(atom);
+        for tick in 0..40u64 {
+            store.step(&mut w, tick);
+            if store.atoms.is_empty() {
+                panic!("seaweed died at {tick}");
+            }
+        }
+        assert!(
+            !store.atoms[0].fallen,
+            "holdfast seaweed must not tip/float"
+        );
+        assert_eq!(
+            store.atoms[0].gy, 2,
+            "must stay on the bed holdfast, not float to waterline (gy={})",
+            store.atoms[0].gy
+        );
+        assert!(is_anchored(&w, &store.atoms[0]));
+    }
+
+    #[test]
+    fn detached_seaweed_floats_when_holdfast_lost() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=6 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 7..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        // Mid-column, no solid under the root — holdfast gone.
+        let mut atom = Atom::from_body(5, 3, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_seaweed().genome,
+        );
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(
+            store.atoms[0].fallen,
+            "seaweed without holdfast must free-float"
+        );
+        assert_eq!(
+            store.atoms[0].gy, 6,
+            "detached ribbon should ride the free surface"
+        );
+    }
+
+    #[test]
+    fn seaweed_with_holdfast_clears_stale_tip() {
+        use crate::organism::OrganismStore;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(200);
+            w.set_cell(x, 1, sand);
+            for y in 2..=8 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 9..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 2, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_seaweed().genome,
+        );
+        atom.fallen = true; // stale tip while holdfast is actually intact
+        store.atoms.push(atom);
+        store.step(&mut w, 0);
+        assert!(
+            !store.atoms[0].fallen,
+            "intact bed holdfast must clear tip / not float"
+        );
+        assert_eq!(store.atoms[0].gy, 2);
+    }
+
+    #[test]
     fn substrate_rooted_plant_stays_put_when_flooded() {
         use crate::organism::OrganismStore;
 

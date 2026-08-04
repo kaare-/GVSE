@@ -1132,14 +1132,16 @@ fn step_land_plant(
 ) -> PlantStep {
     // Pose / seat:
     // - Floating-Organic raft holdfast: tip check; ride the free surface.
-    // - Substrate-rooted land plants (sand/rock/grounded organic): stay
-    //   pinned when flooded — do not float up with the waterline.
+    // - Substrate holdfast (sand/rock/grounded organic) — woody or seaweed:
+    //   stay pinned; do not float up with the waterline.
     // - Unanchored over water: tip and free-float at the surface.
-    // - Tip/re-tip bakes the flop into body so new stems grow upward.
+    // - Woody tip/re-tip bakes the flop into body so new stems grow upward.
+    //   Stemless ribbons tip for draw only (no body bake).
     // - Shore: stay tipped; grow roots into the beach.
     let water_top = column_water_top(world, atom.gx, atom.gy);
     let on_float_raft = rooted_in_floating_organic(world, atom);
     let on_substrate = anchored_in_substrate(world, atom);
+    let stemless = crate::plant::stem_count(atom) == 0;
     if on_float_raft && !on_substrate {
         apply_raft_tip(world, atom);
         if atom.fallen {
@@ -1152,14 +1154,22 @@ fn step_land_plant(
         } else {
             pin_plant_pose(atom);
         }
-    } else if on_substrate && !atom.fallen {
-        // Flooded (or dry) land plant fixed to the bed — do not chase the
-        // free surface. A free-floater that merely scrapes the bed with a
-        // long root stays on the waterline path below (`fallen` already).
+    } else if on_substrate && (!atom.fallen || stemless) {
+        // Bed holdfast: planted / spore seaweed and upright land plants stay
+        // on the substrate. Stemless also clears a stale tip if the holdfast
+        // is intact again. Woody free-floaters that only scrape the bed with
+        // a long root keep `fallen` and use the waterline path below.
+        if stemless {
+            atom.fallen = false;
+            atom.upright_growth.clear();
+        }
         pin_plant_pose(atom);
     } else if let Some(top) = water_top {
-        let was_fallen = atom.fallen;
-        if !was_fallen {
+        if stemless {
+            // Detached seaweed: ride the surface; keep ribbon body offsets.
+            atom.fallen = true;
+            atom.upright_growth.clear();
+        } else if !atom.fallen {
             bake_tip_into_body(atom);
         } else if upright_mast_tippy(atom, 1) {
             bake_tip_into_body(atom);
@@ -1872,12 +1882,21 @@ fn anchored_in_substrate(world: &World, atom: &Atom) -> bool {
 
 /// First tip, or re-tip an upright mast that grew too tall on a skinny raft.
 ///
-/// Baking rewrites canopy body cells onto the waterline so the next stem
-/// elongates upward (`ay + 1`) instead of extending the old vertical axis.
+/// Woody plants bake the flop into body offsets so the next stem elongates
+/// upward. Stemless seaweed only sets `fallen` (soft draw) — baking would
+/// turn the ribbon into a permanent sideways trunk.
 fn apply_raft_tip(world: &World, atom: &mut Atom) {
     let Some(support) = raft_support_width(world, atom) else {
         return;
     };
+    let stemless = crate::plant::stem_count(atom) == 0;
+    if stemless {
+        if upright_body_tippy(atom, support) {
+            atom.fallen = true;
+            atom.upright_growth.clear();
+        }
+        return;
+    }
     if !atom.fallen {
         if upright_body_tippy(atom, support) {
             bake_tip_into_body(atom);
