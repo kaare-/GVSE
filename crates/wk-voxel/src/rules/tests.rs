@@ -1107,6 +1107,46 @@ fn underwater_sand_cliff_flattens_under_repose() {
     );
 }
 
+
+#[test]
+fn waterline_sand_lip_reposes_into_lake() {
+    // Screenshot case: nearly vertical sand face at the free surface into
+    // standing water. Must avalanche, not freeze as a 4–5 cell cliff.
+    let mut w = setup_column_world();
+    // Lake on the left, sand shelf on the right.
+    for x in 0..=4 {
+        for y in 1..=6 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 5..=12 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+    }
+    // Tall waterline lip (the steep bank).
+    w.set_cell(5, 6, Cell::solid(MaterialId::Sand));
+    w.set_cell(5, 7, Cell::solid(MaterialId::Sand));
+    w.set_cell(5, 8, Cell::solid(MaterialId::Sand));
+    for _ in 0..40 {
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+        apply_gravity_fall(&mut w);
+    }
+    let lip = (6..=8)
+        .filter(|&y| w.get_cell(5, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert!(
+        lip <= 1,
+        "waterline sand lip must repose into the lake (stacked={lip})"
+    );
+    let toe = (1..=4).any(|x| {
+        (1..=5).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+    });
+    assert!(toe, "sand must spread into the submerged toe");
+}
+
+
 #[test]
 fn repose_does_not_slide_sand_into_wet_film() {
     // Shoreline film (sat 1..199) was the remaining fleck cycle: sand
