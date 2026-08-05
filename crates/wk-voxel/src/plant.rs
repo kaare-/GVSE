@@ -77,9 +77,10 @@ pub const STEM_INVENT_MIN_ALLOC: f32 = 0.18;
 pub const MAX_ROOT_MODULES: usize = 16;
 pub const MAX_STEM_MODULES: usize = 10;
 pub const MAX_PHOTO_MODULES: usize = 12;
-/// Max Manhattan distance a woody canopy leaf may grow from Stem/Nucleus.
-/// Stemless seaweed ribbons ignore this and climb with the water column.
-pub const WOODY_LEAF_MAX_CANT: i32 = 2;
+/// Max Chebyshev distance a woody canopy leaf may sit from a Stem
+/// (Moore neighbourhood). Distance 2 left empty cells between leaf and
+/// trunk — midair green flecks. Stemless seaweed ignores this.
+pub const WOODY_LEAF_MAX_CANT: i32 = 1;
 /// Woody leaf sites need at least this effective light (sky × canopy).
 /// Dim understory spots stay bare — competition, not a cosmetic gap.
 pub const WOODY_LEAF_MIN_LIGHT: f32 = 0.34;
@@ -1546,6 +1547,8 @@ pub fn try_grow_shoot(
     canopy: &CanopyIndex,
     entity_id: u32,
 ) -> f32 {
+    // Heal legacy bodies that grew Manhattan-2 flecks beside the trunk.
+    let _ = prune_detached_woody_leaves(atom);
     let (w_stem, w_leaf, _) = atom.genome.alloc_weights();
     let tank = tank_ref(atom);
     if atom.energy < tank * (LAND_GROW_ENERGY_FRAC + 0.08) {
@@ -1610,8 +1613,8 @@ pub fn try_grow_shoot(
         }
 
         // —— Woody canopy: short petioles beside the trunk/branch.
-        // Prefer a new side-leaf on a stem cell over elongating one tip into
-        // a seaweed-like ribbon. Cap cantilever at [`WOODY_LEAF_MAX_CANT`].
+        // Prefer a new side-leaf on a stem cell. Must stay Moore-adjacent
+        // to Stem ([`WOODY_LEAF_MAX_CANT`]) — Manhattan-2 left midair flecks.
         // Refuse Moore-adjacent foreign leaves (root-spacing analogue) and
         // sites too dim for the leaf to pay for itself.
         let mut stem_anchors: Vec<(i16, i16)> = atom
@@ -1633,6 +1636,7 @@ pub fn try_grow_shoot(
             .collect();
         // Prefer higher / brighter stem first, then fill gaps lower down.
         stem_anchors.sort_by_key(|&(_, y)| std::cmp::Reverse(y));
+        // Orthogonal + diagonal-up — all Moore-adjacent to the stem cell.
         const SIDE: [(i16, i16); 4] = [(1, 0), (-1, 0), (1, 1), (-1, 1)];
         for &(tx, ty) in &stem_anchors {
             for &(dx, dy) in &SIDE {
@@ -1644,7 +1648,7 @@ pub fn try_grow_shoot(
                 if atom.fallen && ny <= 0 {
                     continue;
                 }
-                if leaf_support_dist(atom, nx, ny) > WOODY_LEAF_MAX_CANT {
+                if !woody_leaf_attached(atom, nx, ny) {
                     continue;
                 }
                 let wx = world.wrap_x(atom.gx + nx as i32);
@@ -1662,58 +1666,6 @@ pub fn try_grow_shoot(
                 atom.body.push((nx, ny, ModuleId::Photosystem));
                 atom.mark_upright_growth(nx, ny);
                 return true;
-            }
-        }
-
-        // Short tip extend only while under the woody petiole cap (no climb).
-        let tip = atom
-            .body
-            .iter()
-            .filter(|(_, _, m)| *m == ModuleId::Photosystem)
-            .copied()
-            .max_by_key(|&(x, y, _)| {
-                let cant = leaf_support_dist(atom, x, y);
-                (cant, x.unsigned_abs(), y)
-            })
-            .map(|(x, y, _)| (x, y));
-        if let Some((tx, ty)) = tip {
-            if leaf_support_dist(atom, tx, ty) < WOODY_LEAF_MAX_CANT {
-                for &(dx, dy) in &[(1i16, 0i16), (-1, 0), (1, -1), (-1, -1)] {
-                    let nx = tx + dx;
-                    let ny = ty + dy;
-                    if ny > 16 || occupied.contains(&(nx, ny)) {
-                        continue;
-                    }
-                    if atom.fallen && ny <= 0 {
-                        continue;
-                    }
-                    if leaf_support_dist(atom, nx, ny) > WOODY_LEAF_MAX_CANT {
-                        continue;
-                    }
-                    // Keep the olive tip column clear.
-                    if atom
-                        .body
-                        .iter()
-                        .any(|&(x, y, m)| m == ModuleId::Stem && x == nx && y == ny - 1)
-                    {
-                        continue;
-                    }
-                    let wx = world.wrap_x(atom.gx + nx as i32);
-                    let wy = atom.gy + ny as i32;
-                    if !shoot_cell_free(world, wx, wy) {
-                        continue;
-                    }
-                    if beside_foreign_live_photo(atom, wx, wy, live_photos) {
-                        continue;
-                    }
-                    if !woody_leaf_light_ok(world, atom, canopy, entity_id, wx, wy, n_photo) {
-                        continue;
-                    }
-                    atom.energy -= cost;
-                    atom.body.push((nx, ny, ModuleId::Photosystem));
-                    atom.mark_upright_growth(nx, ny);
-                    return true;
-                }
             }
         }
         false
@@ -1819,21 +1771,76 @@ pub fn try_grow_shoot(
     0.0
 }
 
-/// Manhattan distance from a body cell to the nearest Stem, else Nucleus.
-fn leaf_support_dist(atom: &Atom, dx: i16, dy: i16) -> i32 {
+/// Chebyshev distance from a cell to the nearest Stem (wood only).
+fn woody_leaf_wood_dist(atom: &Atom, dx: i16, dy: i16) -> i32 {
     let mut best = i32::MAX;
     for &(x, y, m) in &atom.body {
-        if m != ModuleId::Stem && m != ModuleId::Nucleus {
+        if m != ModuleId::Stem {
             continue;
         }
-        let d = (x - dx).abs() as i32 + (y - dy).abs() as i32;
+        let d = (x - dx).abs().max(y - dy).abs() as i32;
         best = best.min(d);
     }
-    if best == i32::MAX {
-        dx.abs() as i32 + dy.max(0) as i32
-    } else {
-        best
+    best
+}
+
+/// True when a woody leaf touches Stem in the Moore neighbourhood.
+fn woody_leaf_attached(atom: &Atom, dx: i16, dy: i16) -> bool {
+    let d = woody_leaf_wood_dist(atom, dx, dy);
+    d != i32::MAX && d <= WOODY_LEAF_MAX_CANT
+}
+
+/// Drop woody Photosystems that no longer touch the trunk (midair flecks).
+///
+/// Keeps at least one Photosystem (closest to wood) so a plant is not
+/// stripped bare in one prune. Returns how many leaves were removed.
+pub fn prune_detached_woody_leaves(atom: &mut Atom) -> u32 {
+    if stem_count(atom) == 0 {
+        return 0;
     }
+    let photos: Vec<(i16, i16)> = atom
+        .body
+        .iter()
+        .filter(|(_, _, m)| *m == ModuleId::Photosystem)
+        .map(|&(x, y, _)| (x, y))
+        .collect();
+    if photos.is_empty() {
+        return 0;
+    }
+    let detached: Vec<(i16, i16)> = photos
+        .iter()
+        .copied()
+        .filter(|&(x, y)| !woody_leaf_attached(atom, x, y))
+        .collect();
+    if detached.is_empty() {
+        return 0;
+    }
+    let attached_n = photos.len() - detached.len();
+    let drop_list: Vec<(i16, i16)> = if attached_n > 0 {
+        detached
+    } else {
+        // All gapped — keep the closest fleck, drop the rest.
+        let mut ranked = detached;
+        ranked.sort_by_key(|&(x, y)| woody_leaf_wood_dist(atom, x, y));
+        ranked.into_iter().skip(1).collect()
+    };
+    if drop_list.is_empty() {
+        return 0;
+    }
+    let before = atom.body.len();
+    atom.body.retain(|&(x, y, m)| {
+        !(m == ModuleId::Photosystem && drop_list.iter().any(|&(dx, dy)| dx == x && dy == y))
+    });
+    let removed = (before - atom.body.len()) as u32;
+    if removed > 0 {
+        atom.leaf_starve.retain(|&(x, y, _)| {
+            atom.body
+                .iter()
+                .any(|&(bx, by, m)| m == ModuleId::Photosystem && bx == x && by == y)
+        });
+        atom.sync_upright_growth();
+    }
+    removed
 }
 
 /// Bias genome allocation toward tissues that are already painted.
@@ -3317,6 +3324,84 @@ mod tests {
     }
 
     #[test]
+    fn midair_woody_leaf_fleck_is_pruned() {
+        // Manhattan-2 leaf left an empty cell beside the trunk (user bug:
+        // floating green pixel belonging to the same plant).
+        let mut atom = Atom::from_body(
+            5,
+            2,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Stem),
+                (0, 4, ModuleId::Stem),
+                (0, 5, ModuleId::Photosystem),
+                (-2, 3, ModuleId::Photosystem), // gap at (-1, 3)
+            ],
+        );
+        assert!(!woody_leaf_attached(&atom, -2, 3));
+        let n = prune_detached_woody_leaves(&mut atom);
+        assert_eq!(n, 1, "gapped fleck must drop");
+        assert!(
+            !atom
+                .body
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Photosystem && x == -2 && y == 3),
+            "midair leaf should be gone"
+        );
+        assert!(
+            atom.body
+                .iter()
+                .any(|&(x, y, m)| m == ModuleId::Photosystem && x == 0 && y == 5),
+            "crown leaf on wood must stay"
+        );
+    }
+
+    #[test]
+    fn woody_growth_cannot_place_gapped_side_leaf() {
+        let w = moist_plot();
+        let body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Stem),
+            (1, 3, ModuleId::Photosystem), // already fills +x at tip
+        ];
+        let mut atom = Atom::from_body(4, 2, 80.0, body);
+        atom.genome.alloc_stem = 0.0;
+        atom.genome.alloc_leaf = 1.0;
+        atom.genome.alloc_root = 0.0;
+        let trunks = HashSet::new();
+        let caps = PlantGrowthCaps::default();
+        for t in 0..30u64 {
+            atom.energy = atom.energy_max;
+            atom.age_ticks = t * LAND_GROW_PERIOD;
+            let _ = try_grow_shoot(
+                &w,
+                &mut atom,
+                t,
+                &trunks,
+                &HashSet::new(),
+                &caps,
+                &CanopyIndex::default(),
+                0,
+            );
+        }
+        for &(x, y, m) in &atom.body {
+            if m == ModuleId::Photosystem {
+                assert!(
+                    woody_leaf_attached(&atom, x, y),
+                    "grown leaf at ({x},{y}) must touch Stem"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn woody_photos_do_not_pile_off_their_stem() {
         use crate::organism::resolve_organism_draw_cells;
 
@@ -4473,14 +4558,14 @@ mod tests {
         let trunks = HashSet::new();
         let caps = PlantGrowthCaps::default();
         let n0 = atom.photosystem_count();
-        let mut max_cant = 1i32;
+        let mut max_wood = 1i32;
         for t in 0..40u64 {
             atom.energy = atom.energy_max;
             atom.age_ticks = t * LAND_GROW_PERIOD;
             let _ = try_grow_shoot(&w, &mut atom, t, &trunks, &HashSet::new(), &caps, &CanopyIndex::default(), 0);
             for &(x, y, m) in &atom.body {
                 if m == ModuleId::Photosystem {
-                    max_cant = max_cant.max(leaf_support_dist(&atom, x, y));
+                    max_wood = max_wood.max(woody_leaf_wood_dist(&atom, x, y));
                 }
             }
         }
@@ -4489,8 +4574,8 @@ mod tests {
             "leaf-heavy shoot should add Photosystems"
         );
         assert!(
-            max_cant <= WOODY_LEAF_MAX_CANT,
-            "woody leaves must stay short petioles (cant={max_cant} > {WOODY_LEAF_MAX_CANT})"
+            max_wood <= WOODY_LEAF_MAX_CANT,
+            "woody leaves must stay Moore-adjacent to Stem (dist={max_wood} > {WOODY_LEAF_MAX_CANT})"
         );
         // Prefer filling beside the trunk over one long tip chain.
         let leaf_cols: HashSet<i16> = atom

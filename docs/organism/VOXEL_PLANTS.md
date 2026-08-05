@@ -18,6 +18,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | Upright draw ranks ignore shed cells; stemless never marks upright | Done |
 | Shoots need Air; roots crack Stone→LooseRock; death skips Stone/dry-Air | Done |
 | Woody leaves do not pile-lift; pick uses tipped draw pose | Done |
+| Woody leaves Moore-adjacent to Stem (no midair flecks) | Done |
 | Raft/sail spans use body-local dx (no ring wrap explosion) | Done |
 | Tipped plants stay tipped after re-root; new Stem/Photo grow upright | Done |
 | Upright mast re-tips when tippy; draw-space sail counts new shoots | Done |

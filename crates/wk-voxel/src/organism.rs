@@ -38,8 +38,9 @@ use crate::plant::{
     collect_trunk_world_cells, drink_plant, drought_band, drop_dead_leaves, find_fungus_slot,
     find_plant_slot, find_surface_air_slot, is_anchored, is_land_plant,
     leave_dead_roots_in_place, leaves_bathing, pin_plant_pose, plant_moisture_frac,
-    shed_unproductive_woody_leaves, sync_root_storage, try_grow_plant, try_plant_wind_spore,
-    try_vegetative_sprout, DroughtBand, PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP,
+    prune_detached_woody_leaves, shed_unproductive_woody_leaves, sync_root_storage,
+    try_grow_plant, try_plant_wind_spore, try_vegetative_sprout, DroughtBand, PlantGrowthCaps,
+    DROUGHT_DORMANT_UPKEEP,
     DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
 };
 use crate::shade::{
@@ -1578,8 +1579,9 @@ fn step_land_plant(
     if atom.energy <= 0.0 {
         return PlantStep::Dead;
     }
-    // Woody plants shed leaves that stay dim (self/neighbour shade). Seaweed
-    // ribbons keep their frond — no abscission on stemless bodies.
+    // Drop midair flecks that no longer touch the trunk, then dim-shade shed.
+    // Seaweed ribbons keep their frond — no abscission on stemless bodies.
+    let _ = prune_detached_woody_leaves(atom);
     let _ = shed_unproductive_woody_leaves(world, atom, canopy, day, tick);
     // Surplus → tissue. Submerged + dim light: race toward brighter water.
     // Stemmed plants urge olive upward; stemless seaweed elongates the
