@@ -41,7 +41,8 @@ use crate::plant::{
     prune_detached_woody_leaves, shed_unproductive_woody_leaves, sync_root_storage,
     try_grow_plant, try_plant_wind_spore, try_vegetative_sprout, DroughtBand, PlantGrowthCaps,
     DROUGHT_DORMANT_UPKEEP,
-    DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
+    DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_GROW_MIN_DAY,
+    PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
 };
 use crate::shade::{
     build_canopy_index_posed, canopy_top_y, posed_canopy_sample, shade_transmit,
@@ -1547,9 +1548,10 @@ fn step_land_plant(
     }
 
     let n_photo = atom.photosystem_count();
-    let n_mod = atom.body.len().max(1) as f32;
-    // Plants respire less than plankton blooms.
-    let mut upkeep = UPKEEP_PER_MODULE * PLANT_UPKEEP_MULT * n_mod * (0.45 + 0.55 * day);
+    // Leaves respire harder than Stem/Root — see [`plant_metabolic_load`].
+    let metabolic = plant_metabolic_load(atom);
+    let day_respire = PLANT_UPKEEP_DAY_BLEND + (1.0 - PLANT_UPKEEP_DAY_BLEND) * day;
+    let mut upkeep = UPKEEP_PER_MODULE * PLANT_UPKEEP_MULT * metabolic * day_respire;
 
     if dormant {
         upkeep *= DROUGHT_DORMANT_UPKEEP;
@@ -1637,7 +1639,10 @@ fn step_land_plant(
             atom.genome.alloc_stem = 0.0;
         }
     }
-    if !atom.fallen && submerged && light < SUBMERGED_STEM_URGE_LIGHT {
+    // Night: no submerged stem-urge and no elongation — dim light used to
+    // force trunk growth all night and empty the tank in a river.
+    let grow_day = day >= PLANT_GROW_MIN_DAY;
+    if grow_day && !atom.fallen && submerged && light < SUBMERGED_STEM_URGE_LIGHT {
         if crate::plant::stem_count(atom) > 0 {
             atom.genome.alloc_stem = (atom.genome.alloc_stem + 0.40).min(1.0);
             atom.genome.alloc_root = (atom.genome.alloc_root * 0.55).max(0.05);
@@ -1648,17 +1653,19 @@ fn step_land_plant(
             atom.genome.alloc_stem = 0.0;
         }
     }
-    let _ = try_grow_plant(
-        world,
-        atom,
-        tick,
-        trunks,
-        live_roots,
-        live_photos,
-        growth_caps,
-        canopy,
-        entity_id,
-    );
+    if grow_day {
+        let _ = try_grow_plant(
+            world,
+            atom,
+            tick,
+            trunks,
+            live_roots,
+            live_photos,
+            growth_caps,
+            canopy,
+            entity_id,
+        );
+    }
     atom.genome = genome_save;
     sync_root_storage(atom);
     // Fern-style wind spores before local rhizome (longer range, needs ReproSpore).
@@ -3882,6 +3889,74 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn river_plant_survives_nights_after_growth() {
+        // Large river plants used to burn their tank overnight: every
+        // Stem/Root counted full upkeep, and submerged night still elongated.
+        use crate::rules::tick;
+        let mut w = World::new(7);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 1, sand);
+            w.set_cell(x, 2, sand);
+            for y in 3..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let climate = ClimateConfig::default();
+        let mut carbon = CarbonBudget::default();
+        let carbon_cfg = CarbonConfig::default();
+        let mut g = Genome::default();
+        g.alloc_stem = 0.45;
+        g.alloc_leaf = 0.45;
+        g.alloc_root = 0.35;
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(&w, 4, 3, minimal_plant_body(), 40.0, g));
+        let mut min_e = f32::MAX;
+        let mut max_drought = 0u32;
+        let mut max_mods = 0usize;
+        for t in 0..(climate.total_ticks() * 3) {
+            tick(&mut w);
+            if let Some(a) = store.atoms.first() {
+                min_e = min_e.min(a.energy);
+                max_drought = max_drought.max(a.drought_ticks);
+                max_mods = max_mods.max(a.body.len());
+            }
+            let _ = store.step_with_carbon(
+                &mut w,
+                t,
+                &climate,
+                None,
+                0.2,
+                None,
+                Some(&mut carbon),
+                &carbon_cfg,
+            );
+            assert!(
+                !store.is_empty(),
+                "river plant died at tick {t} (min_e={min_e:.2}, drought={max_drought}, mods={max_mods})"
+            );
+        }
+        assert!(
+            max_drought == 0,
+            "river plant should stay hydrated (max_drought={max_drought})"
+        );
+        assert!(
+            min_e > 5.0,
+            "night should not empty the tank (min_e={min_e:.2}, max_mods={max_mods})"
+        );
+        assert!(
+            max_mods >= 12,
+            "expected the plant to grow in the river (max_mods={max_mods})"
+        );
+    }
 
     #[test]
     fn plant_survives_several_days_on_moist_sand() {

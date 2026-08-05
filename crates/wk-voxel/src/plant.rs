@@ -50,6 +50,12 @@ pub const DROUGHT_HIBERNATE_MAX_TICKS: u32 = 9_000;
 pub const DROUGHT_DORMANT_UPKEEP: f32 = 0.12;
 /// Land-plant basal upkeep vs plankton (woody roots respire less).
 pub const PLANT_UPKEEP_MULT: f32 = 0.35;
+/// Day-factor blend for plant respiration (`a + (1-a)*day`).
+/// Lower night floor than plankton — a 27-module river plant used to burn
+/// its whole tank in one 600-tick night when every Stem/Root counted 1:1.
+pub const PLANT_UPKEEP_DAY_BLEND: f32 = 0.22;
+/// Day factor below which plants skip elongation / submerged stem-urge.
+pub const PLANT_GROW_MIN_DAY: f32 = 0.20;
 /// Extra score weight so roots prefer wetter substrate cells.
 pub const ROOT_MOISTURE_AFFINITY: f32 = 2.8;
 /// Score bonus for stepping into standing-water Air (legacy wet-void).
@@ -366,6 +372,27 @@ pub fn leaves_bathing(world: &World, atom: &Atom) -> bool {
 /// Plant water status: pore moisture under roots, or free water on leaves.
 pub fn plant_moisture_frac(world: &World, atom: &Atom) -> f32 {
     root_moisture_frac(world, atom).max(leaf_bathing_frac(world, atom))
+}
+
+/// Metabolic load for land-plant upkeep (leaves cost more than wood/roots).
+///
+/// Counting every body module at 1.0 made river plants that grew a trunk
+/// overnight their energy on the first night — Stem/Root tissue should not
+/// respire like Photosystems.
+pub fn plant_metabolic_load(atom: &Atom) -> f32 {
+    let mut load = 0.0f32;
+    for &(_, _, m) in &atom.body {
+        load += match m {
+            ModuleId::Photosystem => 1.0,
+            ModuleId::Stem => 0.28,
+            ModuleId::Root => 0.18,
+            ModuleId::Nucleus => 0.40,
+            ModuleId::ReproSpore => 0.45,
+            ModuleId::Digest | ModuleId::Hypha => 0.50,
+            _ => 0.40,
+        };
+    }
+    load.max(1.0)
 }
 
 pub(crate) fn cell_moisture_frac(world: &World, gx: i32, gy: i32) -> f32 {

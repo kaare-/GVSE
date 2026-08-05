@@ -128,6 +128,10 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 - Root count raises `energy_max` (starch storage); photo / growth floors stay on `energy_base_max`
 - Soft root:shoot budget; stressed moisture lifts root allowance
 - Hibernate band (`DROUGHT_DORMANT_FRAC`): slow upkeep, no photo/drink/growth; die after max dormant ticks
+- **Respiration:** upkeep uses tissue-weighted load (Photosystem ≫ Stem/Root) and a
+  lower night floor than plankton — full module-count upkeep emptied river plants
+  on the first night once they grew a trunk. Elongation / submerged stem-urge
+  only run while `day ≥ PLANT_GROW_MIN_DAY`.
 
 ### E1 — Litter + fungi *(landed; fruiting body + mycelium field)*
 
