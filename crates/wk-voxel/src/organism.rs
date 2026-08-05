@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::blueprint::Genome;
+use crate::carbon::{gate_algae_photo, gate_plant_photo, CarbonBudget, CarbonConfig};
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
     colonize_and_compost_cfg, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
@@ -742,6 +743,30 @@ impl OrganismStore {
         wind_vx: f32,
         temperature: Option<&Temperature>,
     ) -> Vec<SporeRelease> {
+        self.step_with_carbon(
+            world,
+            tick,
+            climate,
+            humidity,
+            wind_vx,
+            temperature,
+            None,
+            &CarbonConfig::default(),
+        )
+    }
+
+    /// Full organism step with crude CO₂ buckets (algae / land photo).
+    pub fn step_with_carbon(
+        &mut self,
+        world: &mut World,
+        tick: u64,
+        climate: &ClimateConfig,
+        humidity: Option<&mut Humidity>,
+        wind_vx: f32,
+        temperature: Option<&Temperature>,
+        mut carbon: Option<&mut CarbonBudget>,
+        carbon_cfg: &CarbonConfig,
+    ) -> Vec<SporeRelease> {
         let day = day_factor_cfg(tick, climate);
         let phase = phase_fraction_cfg(tick, climate);
         // Posed draw cells (flop + pile) feed canopy shade so dry mats and
@@ -845,6 +870,8 @@ impl OrganismStore {
                     wind_vx,
                     &float_columns,
                     &bank_cfg,
+                    carbon.as_deref_mut(),
+                    carbon_cfg,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -943,7 +970,12 @@ impl OrganismStore {
             let n_photo = atom.photosystem_count().max(1) as f32;
             let n_mod = atom.body.len().max(1) as f32;
             let light = column_light(world, atom.gx, atom.gy) * day;
-            let harvest = PHOTON_RATE * light * n_photo;
+            let raw_harvest = PHOTON_RATE * light * n_photo;
+            // Set A algae: bloom rate gated by dissolved C bucket.
+            let harvest = match carbon.as_deref_mut() {
+                Some(budget) => gate_algae_photo(budget, carbon_cfg, raw_harvest),
+                None => raw_harvest,
+            };
             let upkeep = UPKEEP_PER_MODULE * n_mod * (0.45 + 0.55 * day);
             atom.energy = (atom.energy + harvest - upkeep).clamp(0.0, atom.energy_max);
             if atom.energy <= 0.0 {
@@ -1365,6 +1397,8 @@ fn step_land_plant(
     wind_vx: f32,
     float_columns: &std::collections::HashMap<i32, (i32, i32)>,
     bank_cfg: &SporeBankConfig,
+    carbon: Option<&mut CarbonBudget>,
+    carbon_cfg: &CarbonConfig,
 ) -> PlantStep {
     // Pose / seat:
     // - Sand/rock purchase wins: once grounded, organics and water never
@@ -1530,7 +1564,12 @@ fn step_land_plant(
         DroughtBand::Stressed => 0.55,
         DroughtBand::Dormant => 0.0,
     };
-    let harvest = PHOTON_RATE * light_sum * photo_scale;
+    let raw_harvest = PHOTON_RATE * light_sum * photo_scale;
+    // Land plants lightly pull atmosphere C so litter oxidation isn't one-way.
+    let harvest = match carbon {
+        Some(budget) => gate_plant_photo(budget, carbon_cfg, raw_harvest),
+        None => raw_harvest,
+    };
     let stress = match drought {
         DroughtBand::Stressed => DROUGHT_STRESS_DRAIN,
         DroughtBand::Hydrated | DroughtBand::Dormant => 0.0,
@@ -5659,6 +5698,80 @@ mod tests {
             "chronically shaded woody leaves should abscise (had {n0}, now {n1})"
         );
         assert!(n1 >= 1, "keep at least one Photosystem");
+    }
+
+    #[test]
+    fn algae_bloom_draws_dissolved_carbon() {
+        let mut w = wet_column();
+        let mut store = OrganismStore::new();
+        // Mid-column wet air — Set A Atom.
+        store.atoms.push(Atom::new(4, 4, 40.0));
+        let mut carbon = CarbonBudget {
+            atmosphere: 1_000.0,
+            dissolved: 200.0,
+        };
+        let cfg = CarbonConfig::default();
+        let climate = ClimateConfig::default();
+        let before = carbon.dissolved;
+        for t in 0..30u64 {
+            let _ = store.step_with_carbon(
+                &mut w,
+                t,
+                &climate,
+                None,
+                0.0,
+                None,
+                Some(&mut carbon),
+                &cfg,
+            );
+        }
+        assert!(
+            carbon.dissolved < before,
+            "algae photo must debit dissolved C (before={before}, after={})",
+            carbon.dissolved
+        );
+    }
+
+    #[test]
+    fn land_plant_photo_draws_atmosphere_carbon() {
+        let mut w = moist_sand_plot();
+        let mut store = OrganismStore::new();
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let genome = crate::blueprint::Blueprint::minimal_plant().genome;
+        assert!(store.spawn_blueprint(&w, 4, 2, body, 40.0, genome));
+        let mut carbon = CarbonBudget {
+            atmosphere: 1_000.0,
+            dissolved: 200.0,
+        };
+        let cfg = CarbonConfig::default();
+        let climate = ClimateConfig::default();
+        let before = carbon.atmosphere;
+        for t in 0..40u64 {
+            // Keep energy mid-tank so photo still runs (not dormant).
+            if let Some(a) = store.atoms.get_mut(0) {
+                a.energy = 20.0;
+            }
+            let _ = store.step_with_carbon(
+                &mut w,
+                t,
+                &climate,
+                None,
+                0.0,
+                None,
+                Some(&mut carbon),
+                &cfg,
+            );
+        }
+        assert!(
+            carbon.atmosphere < before,
+            "land photo must debit atm C (before={before}, after={})",
+            carbon.atmosphere
+        );
+        assert!(
+            before - carbon.atmosphere < 50.0,
+            "plant draw should stay light (delta={})",
+            before - carbon.atmosphere
+        );
     }
 
     #[test]

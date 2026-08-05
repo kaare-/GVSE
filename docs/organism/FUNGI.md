@@ -181,8 +181,10 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   litter blankets humify before plants lose pore water.
 - Crude global **carbon buckets** (atmosphere + dissolved) live beside
   the water mass store: surface Organic can oxidize to Soil and credit
-  atm C; lakes exchange atm ↔ dissolved on a slow cadence. Algae /
-  O₂ creatures can draw these pools later — not a per-tick chemistry field.
+  atm C; lakes exchange atm ↔ dissolved on a slow cadence. Set A algae
+  draw dissolved C (bloom harvest throttles when the pool empties);
+  land plants lightly pull atmosphere on photo growth. Buckets persist
+  in `.gvsesim` saves. O₂ creatures later — not a per-cell chemistry field.
 - **Spore bank** (`World::spore_bank`): fruiting-body / plant wind spores
   that cannot germinate on landing (crowded, dry, cold, buried) stay tied
   to that cell and wake on a slow cadence when conditions improve — a

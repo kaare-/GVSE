@@ -149,7 +149,8 @@ Features:
 - Established moist networks support fruiting bodies (no energy-starve)
 - Standing rain counts as moisture; **never** flash Organic → Sand
 - Mycelium compost Organic → `MaterialId::Soil` (sat preserved; Tab knobs)
-- Crude CO₂ buckets (atm + dissolved) for litter oxidation / later blooms
+- Crude CO₂ buckets (atm + dissolved): litter oxidation, algae draw dissolved,
+  land photo lightly pulls atm; buckets persist in saves
 - **Spore bank:** wind spores that land dry / crowded / cold hibernate on the
   landing cell and may germinate much later when moisture, space, or warmth
   return (Tab → Life → Spore bank; HUD `spores=`)

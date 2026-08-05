@@ -12,6 +12,7 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use crate::carbon::CarbonBudget;
 use crate::clouds::CloudStore;
 use crate::grid::World;
 use crate::humidity::Humidity;
@@ -34,7 +35,8 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// v3: `MaterialId::Soil` + mycelium intensity in `Cell::_pad` on Organic
 /// (HydroOverrides slot table grows with [`wk_material::MATERIAL_COUNT`]).
 /// v4: `MaterialId::LooseLimestone` (MATERIAL_COUNT 13→14).
-pub const SIM_SCHEMA_VERSION: u32 = 4;
+/// v5: [`CarbonBudget`] (atm + dissolved CO₂ buckets) saved with the sim.
+pub const SIM_SCHEMA_VERSION: u32 = 5;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -47,6 +49,22 @@ pub struct SimSnapshot {
     pub temperature: Temperature,
     pub clouds: CloudStore,
     pub organisms: OrganismStore,
+    /// Crude atmosphere + dissolved CO₂ buckets.
+    #[serde(default)]
+    pub carbon: CarbonBudget,
+}
+
+/// Pre-v5 postcard shape (no carbon field).
+#[derive(Debug, Clone, Deserialize)]
+struct SimSnapshotV4 {
+    schema_version: u32,
+    params: WorldgenParams,
+    world: World,
+    humidity: Humidity,
+    wind: Wind,
+    temperature: Temperature,
+    clouds: CloudStore,
+    organisms: OrganismStore,
 }
 
 impl SimSnapshot {
@@ -58,6 +76,7 @@ impl SimSnapshot {
         temperature: Temperature,
         clouds: CloudStore,
         organisms: OrganismStore,
+        carbon: CarbonBudget,
     ) -> Self {
         Self {
             schema_version: SIM_SCHEMA_VERSION,
@@ -68,6 +87,7 @@ impl SimSnapshot {
             temperature,
             clouds,
             organisms,
+            carbon,
         }
     }
 
@@ -76,14 +96,40 @@ impl SimSnapshot {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        let snap: Self = postcard::from_bytes(bytes).map_err(|e| e.to_string())?;
-        if snap.schema_version > SIM_SCHEMA_VERSION {
-            return Err(format!(
-                "sim schema {} newer than supported {}",
-                snap.schema_version, SIM_SCHEMA_VERSION
-            ));
+        // Prefer current schema; fall back to v4 (no carbon) for older demos.
+        match postcard::from_bytes::<Self>(bytes) {
+            Ok(snap) => {
+                if snap.schema_version > SIM_SCHEMA_VERSION {
+                    return Err(format!(
+                        "sim schema {} newer than supported {}",
+                        snap.schema_version, SIM_SCHEMA_VERSION
+                    ));
+                }
+                Ok(snap)
+            }
+            Err(_) => {
+                let old: SimSnapshotV4 =
+                    postcard::from_bytes(bytes).map_err(|e| e.to_string())?;
+                if old.schema_version > SIM_SCHEMA_VERSION {
+                    return Err(format!(
+                        "sim schema {} newer than supported {}",
+                        old.schema_version, SIM_SCHEMA_VERSION
+                    ));
+                }
+                Ok(Self {
+                    schema_version: SIM_SCHEMA_VERSION,
+                    params: old.params,
+                    world: old.world,
+                    humidity: old.humidity,
+                    wind: old.wind,
+                    temperature: old.temperature,
+                    clouds: old.clouds,
+                    organisms: old.organisms,
+                    // Session-local buckets become ambient on first v5 load.
+                    carbon: CarbonBudget::default(),
+                })
+            }
         }
-        Ok(snap)
     }
 
     pub fn save_path(name: &str) -> PathBuf {
@@ -137,19 +183,7 @@ mod tests {
     use crate::cell::Cell;
     use wk_material::MaterialId;
 
-    #[test]
-    fn snapshot_round_trips_postcard() {
-        let params = WorldgenParams {
-            width_cols: 64,
-            sky_ceiling_y: 64,
-            sea_level_y: 20,
-            ..WorldgenParams::default()
-        };
-        let mut world = World::new(params.seed);
-        world.set_cell(3, 4, Cell::solid(MaterialId::Sand));
-        world.set_cell(3, 5, Cell::water());
-        world.tick = 42;
-        world.hydro.set_porosity(MaterialId::Sand, 90);
+    fn demo_climate(params: &WorldgenParams) -> (Humidity, Wind, Temperature) {
         let humidity = Humidity::with_world_bounds(
             4,
             0,
@@ -178,6 +212,27 @@ mod tests {
             params.sea_level_y,
             params.wrap_x,
         );
+        (humidity, wind, temperature)
+    }
+
+    #[test]
+    fn snapshot_round_trips_postcard() {
+        let params = WorldgenParams {
+            width_cols: 64,
+            sky_ceiling_y: 64,
+            sea_level_y: 20,
+            ..WorldgenParams::default()
+        };
+        let mut world = World::new(params.seed);
+        world.set_cell(3, 4, Cell::solid(MaterialId::Sand));
+        world.set_cell(3, 5, Cell::water());
+        world.tick = 42;
+        world.hydro.set_porosity(MaterialId::Sand, 90);
+        let (humidity, wind, temperature) = demo_climate(&params);
+        let carbon = CarbonBudget {
+            atmosphere: 777.0,
+            dissolved: 88.0,
+        };
         let snap = SimSnapshot::new(
             params,
             world,
@@ -186,6 +241,7 @@ mod tests {
             temperature,
             CloudStore::new(),
             OrganismStore::new(),
+            carbon,
         );
         let loaded = SimSnapshot::from_bytes(&snap.to_bytes().unwrap()).unwrap();
         assert_eq!(loaded.schema_version, SIM_SCHEMA_VERSION);
@@ -200,5 +256,46 @@ mod tests {
             loaded.world.hydro.slots[MaterialId::Sand as usize].porosity,
             Some(90)
         );
+        assert_eq!(loaded.carbon.atmosphere, 777.0);
+        assert_eq!(loaded.carbon.dissolved, 88.0);
+    }
+
+    #[test]
+    fn snapshot_loads_v4_bytes_with_ambient_carbon() {
+        #[derive(Serialize)]
+        struct V4Out {
+            schema_version: u32,
+            params: WorldgenParams,
+            world: World,
+            humidity: Humidity,
+            wind: Wind,
+            temperature: Temperature,
+            clouds: CloudStore,
+            organisms: OrganismStore,
+        }
+        let params = WorldgenParams {
+            width_cols: 32,
+            sky_ceiling_y: 32,
+            sea_level_y: 10,
+            ..WorldgenParams::default()
+        };
+        let mut world = World::new(params.seed);
+        world.tick = 7;
+        let (humidity, wind, temperature) = demo_climate(&params);
+        let bytes = postcard::to_allocvec(&V4Out {
+            schema_version: 4,
+            params,
+            world,
+            humidity,
+            wind,
+            temperature,
+            clouds: CloudStore::new(),
+            organisms: OrganismStore::new(),
+        })
+        .unwrap();
+        let loaded = SimSnapshot::from_bytes(&bytes).expect("migrate v4");
+        assert_eq!(loaded.world.tick, 7);
+        assert_eq!(loaded.carbon, CarbonBudget::default());
+        assert_eq!(loaded.schema_version, SIM_SCHEMA_VERSION);
     }
 }

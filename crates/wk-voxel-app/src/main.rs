@@ -997,13 +997,15 @@ async fn main() {
             apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
             if organisms_on {
                 let tick_no = scene.world.tick;
-                let releases = scene.organisms.step_with_climate_wind_temp(
+                let releases = scene.organisms.step_with_carbon(
                     &mut scene.world,
                     tick_no,
                     &settings.climate,
                     Some(&mut scene.humidity),
                     wind_vx,
                     Some(&scene.temperature),
+                    Some(&mut scene.carbon),
+                    &settings.carbon,
                 );
                 spore_fx.burst_all(&releases, wind_vx);
             }

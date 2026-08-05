@@ -1121,7 +1121,7 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Carbon (CO2 buckets)", |ui| {
                     ui.label(
                         None,
-                        "Crude atmosphere + dissolved pools. Surface Organic oxidizes to Soil                          and credits atm C (not humidity). Lakes exchange atm ↔ dissolved.                          Later: algae draw dissolved; O2 bucket when animals land.",
+                        "Crude atmosphere + dissolved pools. Surface Organic oxidizes to Soil                          and credits atm C (not humidity). Lakes exchange atm ↔ dissolved.                          Algae draw dissolved (bloom throttles when empty); land plants lightly                          pull atm. Buckets persist in saves. O2 bucket later.",
                     );
                     ui.checkbox(hash!(), "Carbon enabled", &mut self.carbon.enabled);
                     let mut ox_period = self.carbon.oxidize_period as f32;
@@ -1175,6 +1175,34 @@ impl SimSettings {
                         "Henry ratio (dissolved/atm)",
                         0.05..1.0,
                         &mut self.carbon.henry_ratio,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Algae C / energy",
+                        0.0..0.5,
+                        &mut self.carbon.algae_c_per_energy,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Algae half-sat (dissolved)",
+                        1.0..200.0,
+                        &mut self.carbon.algae_half_sat,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Plant C / energy",
+                        0.0..0.2,
+                        &mut self.carbon.plant_c_per_energy,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Plant half-sat (atm)",
+                        10.0..500.0,
+                        &mut self.carbon.plant_half_sat,
                     );
                     self.carbon.oxidize_period =
                         ox_period.round().clamp(1.0, 10_000.0) as u64;

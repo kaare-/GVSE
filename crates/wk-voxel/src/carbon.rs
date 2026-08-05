@@ -9,9 +9,11 @@
 //!   credits atmospheric C. Never invents humidity mass.
 //! - Atmosphere ↔ dissolved exchange toward a Henry-ish ratio when lakes
 //!   / standing water are present (sampled, not every cell every tick).
+//! - Set A algae / blooms draw dissolved C (harvest throttles as the pool
+//!   empties). Land plants lightly pull atmosphere on photo growth so
+//!   litter→air oxidation is not a one-way leak.
 //!
-//! Later: algae / blooms consume dissolved C and throttle when the pool
-//! runs dry; oxygen creatures get an O₂ bucket beside this one.
+//! Oxygen creatures get an O₂ bucket beside this one later.
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
@@ -47,6 +49,14 @@ pub struct CarbonConfig {
     pub henry_ratio: f32,
     /// Atmospheric C added per oxidized Organic cell.
     pub oxidize_c_per_cell: f32,
+    /// Dissolved C drawn per unit of algae photo harvest.
+    pub algae_c_per_energy: f32,
+    /// Half-saturation for algae dissolved-C throttle (Michaelis–Menten).
+    pub algae_half_sat: f32,
+    /// Atmospheric C drawn per unit of land-plant photo harvest (light).
+    pub plant_c_per_energy: f32,
+    /// Half-saturation for land-plant atm-C throttle (softer than algae).
+    pub plant_half_sat: f32,
 }
 
 impl Default for CarbonConfig {
@@ -62,6 +72,11 @@ impl Default for CarbonConfig {
             // Dissolved sits below air at equilibrium (Henry-ish).
             henry_ratio: 0.25,
             oxidize_c_per_cell: OXIDIZE_C_PER_CELL,
+            // Blooms can starve lakes; land plants only nibble air.
+            algae_c_per_energy: 0.18,
+            algae_half_sat: 30.0,
+            plant_c_per_energy: 0.04,
+            plant_half_sat: 120.0,
         }
     }
 }
@@ -89,19 +104,57 @@ impl CarbonBudget {
         self.atmosphere + self.dissolved
     }
 
-    /// Hook for future algae / bloom consumers. Returns units actually taken.
+    /// Algae / bloom consumer. Returns units actually taken.
     pub fn take_dissolved(&mut self, want: f32) -> f32 {
         let take = want.max(0.0).min(self.dissolved);
         self.dissolved -= take;
         take
     }
 
-    /// Hook for land photosynthesis later (draw from atmosphere).
+    /// Land photosynthesis consumer (draw from atmosphere).
     pub fn take_atmosphere(&mut self, want: f32) -> f32 {
         let take = want.max(0.0).min(self.atmosphere);
         self.atmosphere -= take;
         take
     }
+}
+
+/// Gate Set A algae photo harvest on dissolved C and debit the pool.
+///
+/// When the pool empties, harvest → 0 (bloom throttles). No per-cell chemistry.
+pub fn gate_algae_photo(
+    budget: &mut CarbonBudget,
+    cfg: &CarbonConfig,
+    raw_harvest: f32,
+) -> f32 {
+    if !cfg.enabled || raw_harvest <= 0.0 {
+        return raw_harvest.max(0.0);
+    }
+    let half = cfg.algae_half_sat.max(1e-3);
+    let factor = budget.dissolved / (budget.dissolved + half);
+    let harvest = raw_harvest.max(0.0) * factor;
+    let want = harvest * cfg.algae_c_per_energy.max(0.0);
+    let _ = budget.take_dissolved(want);
+    harvest
+}
+
+/// Soft-gate land-plant photo harvest on atmosphere C and debit the pool.
+///
+/// Closes the litter→atm oxidation loop without hard-starving forests.
+pub fn gate_plant_photo(
+    budget: &mut CarbonBudget,
+    cfg: &CarbonConfig,
+    raw_harvest: f32,
+) -> f32 {
+    if !cfg.enabled || raw_harvest <= 0.0 {
+        return raw_harvest.max(0.0);
+    }
+    let half = cfg.plant_half_sat.max(1e-3);
+    let factor = budget.atmosphere / (budget.atmosphere + half);
+    let harvest = raw_harvest.max(0.0) * factor;
+    let want = harvest * cfg.plant_c_per_energy.max(0.0);
+    let _ = budget.take_atmosphere(want);
+    harvest
 }
 
 /// One crude carbon step: optional surface oxidation + atm↔dissolved exchange.
@@ -311,5 +364,43 @@ mod tests {
         assert_eq!(budget.take_dissolved(40.0), 10.0);
         assert_eq!(budget.dissolved, 0.0);
         assert_eq!(budget.take_dissolved(1.0), 0.0);
+    }
+
+    #[test]
+    fn algae_photo_throttles_when_dissolved_empty() {
+        let cfg = CarbonConfig::default();
+        let mut rich = CarbonBudget {
+            atmosphere: 1_000.0,
+            dissolved: 200.0,
+        };
+        let mut dry = CarbonBudget {
+            atmosphere: 1_000.0,
+            dissolved: 0.0,
+        };
+        let rich_h = gate_algae_photo(&mut rich, &cfg, 1.0);
+        let dry_h = gate_algae_photo(&mut dry, &cfg, 1.0);
+        assert!(rich_h > 0.5, "rich lake should feed algae (got {rich_h})");
+        assert_eq!(dry_h, 0.0, "empty dissolved pool must zero algae harvest");
+        assert!(rich.dissolved < 200.0, "algae must debit dissolved C");
+    }
+
+    #[test]
+    fn plant_photo_lightly_draws_atmosphere() {
+        let cfg = CarbonConfig::default();
+        let mut budget = CarbonBudget {
+            atmosphere: 1_000.0,
+            dissolved: 200.0,
+        };
+        let h = gate_plant_photo(&mut budget, &cfg, 1.0);
+        assert!(h > 0.7, "ambient atm should barely throttle plants (got {h})");
+        assert!(
+            budget.atmosphere < 1_000.0,
+            "land photo must debit atmosphere"
+        );
+        assert!(
+            1_000.0 - budget.atmosphere < 0.1,
+            "plant draw should be light (delta={})",
+            1_000.0 - budget.atmosphere
+        );
     }
 }

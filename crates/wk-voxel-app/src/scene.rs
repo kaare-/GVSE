@@ -22,7 +22,7 @@ pub struct Scene {
     pub clouds: CloudStore,
     pub temperature: Temperature,
     pub organisms: OrganismStore,
-    /// Crude atmosphere + dissolved CO₂ buckets (not in sim snapshot yet).
+    /// Crude atmosphere + dissolved CO₂ buckets (saved in sim snapshot).
     pub carbon: CarbonBudget,
     /// Slow derived shear/wet/hydro face map (not saved — rebuilds).
     pub geotech: GeotechMap,
@@ -93,6 +93,7 @@ impl Scene {
             self.temperature.clone(),
             self.clouds.clone(),
             self.organisms.clone(),
+            self.carbon,
         )
     }
 
@@ -107,8 +108,7 @@ impl Scene {
             clouds: snap.clouds,
             temperature: snap.temperature,
             organisms: snap.organisms,
-            // Crude C buckets are session-local until snapshot schema grows.
-            carbon: CarbonBudget::default(),
+            carbon: snap.carbon,
             geotech,
         }
     }

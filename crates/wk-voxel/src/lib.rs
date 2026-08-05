@@ -65,7 +65,8 @@ pub use failure::{
     COMPACTION_SIGMA_MIN,
 };
 pub use carbon::{
-    step_carbon_budget, CarbonBudget, CarbonConfig, AMBIENT_ATM_C, AMBIENT_DISSOLVED_C,
+    gate_algae_photo, gate_plant_photo, step_carbon_budget, CarbonBudget, CarbonConfig,
+    AMBIENT_ATM_C, AMBIENT_DISSOLVED_C,
 };
 pub use spore_bank::{
     spore_bank_len, DormantSpore, SporeBank, SporeBankConfig, SporeKind, SPORE_BANK_PERIOD,
