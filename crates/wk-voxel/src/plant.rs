@@ -36,6 +36,12 @@ pub const ROOT_SIP_MAX_SAT: u8 = 1;
 pub const DROUGHT_STRESS_DRAIN: f32 = 0.003;
 /// Pore fill fraction below which photo slows and stress starts.
 pub const DROUGHT_STRESS_FRAC: f32 = 0.06;
+/// Pore fill above which land roots stop sipping.
+///
+/// Without this, growing plants strip moist sand to bone-dry in ~1–2
+/// days, tip into dormancy, and night-starve. Keep a hydrated buffer
+/// above [`DROUGHT_STRESS_FRAC`].
+pub const ROOT_DRINK_COMFORT_FRAC: f32 = 0.12;
 /// Pore fill fraction that triggers drought dormancy (hibernate).
 pub const DROUGHT_DORMANT_FRAC: f32 = 0.015;
 /// Max consecutive dormant ticks before the plant dies (~2.5 min @ 60 Hz).
@@ -496,9 +502,22 @@ pub fn drink_leaves(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32)
 
 /// Roots + bathing leaves. Leaves try first so submerged fronds hydrate
 /// without digging a root mat.
+///
+/// Land roots only sip while below [`ROOT_DRINK_COMFORT_FRAC`] — once the
+/// bed is comfortably moist, stop stripping pores. Fallen / lake plants
+/// still sip through dangling roots (standing water regenerates).
 pub fn drink_plant(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32)) {
+    let moist = plant_moisture_frac(world, atom);
     let (e_l, s_l, at_l) = drink_leaves(world, atom);
-    let (e_r, s_r, at_r) = drink_roots(world, atom);
+    let need_root_sip = atom.fallen || moist < ROOT_DRINK_COMFORT_FRAC;
+    let (e_r, s_r, at_r) = if need_root_sip {
+        drink_roots(world, atom)
+    } else {
+        // Decay unused sip progress so a later dry spell doesn't gulp
+        // a banked multi-sat dump from the comfort pause.
+        atom.sip_acc *= 0.5;
+        (0.0, 0, (atom.gx, atom.gy))
+    };
     let at = if s_l > 0 { at_l } else { at_r };
     (e_l + e_r, s_l + s_r, at)
 }

@@ -3882,6 +3882,62 @@ mod tests {
         );
     }
 
+
+    #[test]
+    fn plant_survives_several_days_on_moist_sand() {
+        // Growing plants used to sip sand dry → dormancy → night energy death
+        // within ~2 climate cycles. Comfort-gated root drink should keep a
+        // moist buffer and leave photo income intact.
+        let mut w = moist_sand_plot();
+        let climate = ClimateConfig::default(); // 600/600
+        let mut carbon = CarbonBudget::default();
+        let carbon_cfg = CarbonConfig::default();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        let mut max_drought = 0u32;
+        for t in 0..(climate.total_ticks() * 4) {
+            max_drought = max_drought.max(
+                store.atoms.first().map(|a| a.drought_ticks).unwrap_or(0),
+            );
+            let _ = store.step_with_carbon(
+                &mut w,
+                t,
+                &climate,
+                None,
+                0.0,
+                None,
+                Some(&mut carbon),
+                &carbon_cfg,
+            );
+            assert!(
+                !store.is_empty(),
+                "plant died at tick {t} (max_drought={max_drought}, atm={:.1})",
+                carbon.atmosphere
+            );
+        }
+        let moist = crate::plant::plant_moisture_frac(&w, &store.atoms[0]);
+        assert!(
+            moist >= crate::plant::DROUGHT_DORMANT_FRAC,
+            "sand under plant should stay above dormancy (moist={moist})"
+        );
+        assert!(
+            store.atoms[0].energy > 1.0,
+            "plant should keep energy across nights (e={})",
+            store.atoms[0].energy
+        );
+        assert!(
+            max_drought < 600,
+            "should not spend a whole night bone-dry dormant (max_drought={max_drought})"
+        );
+    }
+
     #[test]
     fn plant_senescence_scales_with_climate_day_length() {
         // Long Tab days used to kill plants at DEMO_DAY_TICKS*16 (~3 live
