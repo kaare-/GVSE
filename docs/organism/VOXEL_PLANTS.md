@@ -134,6 +134,14 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
   floats/rests. Stemless seaweed may still snap back to a short holdfast.
 - Shore re-root stays tipped; only `upright_growth` shoots stand up.
 
+### Stemless ribbons vs floating Organic
+
+- Plant free-surface seating ignores full-sat water **sealed under Organic**
+  (raft soak pockets). Under-mat flicker used to alternate with the open
+  lake top so seaweed “pumped” through litter.
+- Stemless rescue seats skip Air-on-Organic; holdfast may see mineral through
+  a thin compost lid but never seats *on* Organic.
+
 ### D4 — Drought banking *(landed)*
 
 - Root count raises `energy_max` (starch storage); photo / growth floors stay on `energy_base_max`

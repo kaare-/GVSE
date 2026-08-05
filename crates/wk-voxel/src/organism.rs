@@ -1509,7 +1509,9 @@ fn step_land_plant(
         atom.last_water_top = Some(top);
     } else if atom.fallen {
         // Shore (rooted or not): stay tipped; seat on the beach surface.
-        if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
+        // Stemless: never surf an Organic deck — that fights waterline/raft
+        // seating and pumps ribbons through floating litter.
+        if let Some(slot) = surface_seat_for_plant(world, atom.gx, atom.gy, stemless) {
             atom.gy = slot;
         }
         atom.fy = atom.gy as f32;
@@ -1525,7 +1527,7 @@ fn step_land_plant(
         atom.fy = atom.gy as f32;
         atom.vel_y = 0.0;
         atom.last_water_top = None;
-    } else if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
+    } else if let Some(slot) = surface_seat_for_plant(world, atom.gx, atom.gy, true) {
         atom.gy = slot;
         pin_plant_pose(atom);
     } else {
@@ -2671,6 +2673,7 @@ fn crown_holdfast_solid_y(
     _columns: &std::collections::HashMap<i32, (i32, i32)>,
 ) -> Option<i32> {
     const MAX_ROOT_LEN: i16 = 6;
+    const SEE_THROUGH_ORG: i32 = 8;
     let mut best: Option<i32> = None;
     for &(dx, dy, m) in &atom.body {
         if m != ModuleId::Root || dy < -MAX_ROOT_LEN || dx.abs() > 1 {
@@ -2682,7 +2685,14 @@ fn crown_holdfast_solid_y(
             let Some(c) = world.get_cell(wx, y) else {
                 continue;
             };
-            if c.material == MaterialId::Air || c.material == MaterialId::Organic {
+            if c.material == MaterialId::Air {
+                continue;
+            }
+            if c.material == MaterialId::Organic {
+                // Compost / litter lid: see through to mineral, never seat on Organic.
+                if let Some(mineral_y) = mineral_solid_below(world, wx, y, SEE_THROUGH_ORG) {
+                    best = Some(best.map_or(mineral_y, |b| b.max(mineral_y)));
+                }
                 continue;
             }
             // Ground surface under the crown (highest mineral solid).
@@ -2690,6 +2700,59 @@ fn crown_holdfast_solid_y(
         }
     }
     best
+}
+
+/// Highest non-Air, non-Organic solid at or below `start_y` within `max_down`.
+fn mineral_solid_below(world: &World, gx: i32, start_y: i32, max_down: i32) -> Option<i32> {
+    let gx = world.wrap_x(gx);
+    let mut best: Option<i32> = None;
+    for dy in 0..=max_down {
+        let y = start_y - dy;
+        let Some(c) = world.get_cell(gx, y) else {
+            break;
+        };
+        if c.material == MaterialId::Air {
+            continue;
+        }
+        if c.material == MaterialId::Organic {
+            continue;
+        }
+        best = Some(best.map_or(y, |b| b.max(y)));
+    }
+    best
+}
+
+/// Beach / rescue seat. Stemless ribbons skip Air-on-Organic so floating
+/// litter cannot hoist them off the waterline (pump / oscillation bug).
+fn surface_seat_for_plant(world: &World, gx: i32, gy: i32, stemless: bool) -> Option<i32> {
+    if !stemless {
+        return find_surface_air_slot(world, gx, gy);
+    }
+    let gx = world.wrap_x(gx);
+    let ok = |y: i32| {
+        let Some(air) = world.get_cell(gx, y) else {
+            return false;
+        };
+        if air.material != MaterialId::Air {
+            return false;
+        }
+        match world.get_cell(gx, y - 1) {
+            Some(c) if c.material != MaterialId::Air && c.material != MaterialId::Organic => true,
+            _ => false,
+        }
+    };
+    for dy in [0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6, 8, -8, 12, -12, 16, -16] {
+        let y = gy + dy;
+        if ok(y) {
+            return Some(y);
+        }
+    }
+    for y in (gy - 64..=gy + 8).rev() {
+        if ok(y) {
+            return Some(y);
+        }
+    }
+    None
 }
 
 /// While tipped, every shoot cell above the waterline must be in
@@ -2721,21 +2784,31 @@ fn heal_fallen_upright_marks(atom: &mut Atom) {
 /// Only **full-sat** wet Air counts — damp seepage films must not tip land
 /// plants or lift holdfast seaweed. (`is_standing_water` alone is too loose:
 /// any non-empty sat on solid would look like a stream.)
+///
+/// Full-sat pockets **sealed under Organic** (raft soak) are ignored: that
+/// under-mat water used to alternate with the open free surface as soak
+/// flickered, so stemless ribbons pumped through floating litter.
 fn column_standing_surface(world: &World, gx: i32, hint_y: i32) -> Option<i32> {
     let gx = world.wrap_x(gx);
-    let is_body = |world: &World, x: i32, y: i32| {
-        matches!(
-            world.get_cell(x, y),
-            Some(c) if c.material == MaterialId::Air && c.sat.is_full()
-        )
+    let is_open_body = |world: &World, x: i32, y: i32| {
+        match world.get_cell(x, y) {
+            Some(c) if c.material == MaterialId::Air && c.sat.is_full() => {
+                // Under-raft soak: Organic lid is not the free surface.
+                !matches!(
+                    world.get_cell(x, y + 1),
+                    Some(above) if above.material == MaterialId::Organic
+                )
+            }
+            _ => false,
+        }
     };
     let mut start = None;
-    if is_body(world, gx, hint_y) {
+    if is_open_body(world, gx, hint_y) {
         start = Some(hint_y);
     } else {
         for dy in 1..=48 {
             for y in [hint_y - dy, hint_y + dy] {
-                if is_body(world, gx, y) {
+                if is_open_body(world, gx, y) {
                     start = Some(y);
                     break;
                 }
@@ -2747,7 +2820,7 @@ fn column_standing_surface(world: &World, gx: i32, hint_y: i32) -> Option<i32> {
     }
     let start = start?;
     let mut top = start;
-    while is_body(world, gx, top + 1) {
+    while is_open_body(world, gx, top + 1) {
         top += 1;
         if top - start > 256 {
             break;

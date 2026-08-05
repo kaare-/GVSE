@@ -2695,6 +2695,78 @@ mod tests {
     }
 
     #[test]
+    fn bed_seaweed_does_not_pump_through_floating_organic() {
+        // Deep water + floating Organic lid: under-mat soak flicker used to
+        // alternate gy between the sealed pocket and the open free surface
+        // so stemless ribbons pumped through the litter.
+        use crate::organism::OrganismStore;
+        use crate::rules::collect_floating_organic_columns;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+            for y in 2..=10 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 11..20 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 3..=7 {
+            for y in 11..=13 {
+                let mut org = Cell::solid(MaterialId::Organic);
+                org.sat = Sat(60);
+                w.set_cell(x, y, org);
+            }
+        }
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, 1, ModuleId::Photosystem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        let mut store = OrganismStore::new();
+        let mut atom = Atom::from_body(5, 14, 40.0, body);
+        apply_genome(&mut atom, crate::blueprint::Blueprint::minimal_seaweed().genome);
+        atom.fallen = true;
+        store.atoms.push(atom);
+        assert!(!collect_floating_organic_columns(&w).is_empty());
+        let mut gys = Vec::new();
+        for tick in 0..30u64 {
+            let full = tick % 2 == 0;
+            for x in 3..=7 {
+                if full {
+                    w.set_cell(x, 10, Cell::water());
+                } else {
+                    let mut cell = Cell::air();
+                    cell.sat = Sat(40);
+                    w.set_cell(x, 10, cell);
+                }
+                for y in 2..=9 {
+                    w.set_cell(x, y, Cell::water());
+                }
+            }
+            store.step(&mut w, tick);
+            assert!(!store.atoms.is_empty(), "died at {tick}");
+            gys.push(store.atoms[0].gy);
+        }
+        let mut uniq = gys[4..].to_vec();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert!(
+            uniq.len() <= 1,
+            "must not oscillate across organic (uniq={uniq:?} gys={gys:?})"
+        );
+        assert!(
+            *gys.iter().max().unwrap() <= 10,
+            "must not surf above the organic deck (gys={gys:?})"
+        );
+    }
+
+    #[test]
     fn shoreline_plant_does_not_rise_with_waterline() {
         use crate::organism::OrganismStore;
 
