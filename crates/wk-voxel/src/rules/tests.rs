@@ -1194,7 +1194,7 @@ fn underwater_soil_cliff_flattens_under_repose() {
 
 #[test]
 fn organic_still_refuses_lake_after_soil_uw_repose() {
-    // Guard: splitting Soil off the refuse path must not let Organic crawl in.
+    // Guard: floating raft Organic must not crawl into the lake.
     let mut w = setup_column_world();
     w.set_cell(5, 1, Cell::solid(MaterialId::Organic));
     w.set_cell(5, 2, Cell::solid(MaterialId::Organic));
@@ -1214,6 +1214,72 @@ fn organic_still_refuses_lake_after_soil_uw_repose() {
     let in_lake = w.get_cell(4, 1).map(|c| c.material) == Some(MaterialId::Organic)
         || w.get_cell(6, 1).map(|c| c.material) == Some(MaterialId::Organic);
     assert!(!in_lake, "Organic must not occupy underwater seats");
+}
+
+#[test]
+fn settled_organic_cliff_flattens_underwater() {
+    // Bed / waterlogged Organic used to share the raft refuse path and freeze
+    // as vertical compost walls in deep water. Settled ooze must sprawl.
+    use crate::cell::CellFlags;
+    let mut w = setup_column_world();
+    for x in 2..=12 {
+        for y in 1..=7 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 2..=6 {
+        w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+    }
+    for y in 2..=4 {
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(water_capacity(MaterialId::Organic));
+        org.flags.set(CellFlags::WATERLOGGED);
+        w.set_cell(6, y, org);
+    }
+    for _ in 0..40 {
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+        apply_gravity_fall(&mut w);
+    }
+    let cliff = (2..=4)
+        .filter(|&y| w.get_cell(6, y).map(|c| c.material) == Some(MaterialId::Organic))
+        .count();
+    assert!(
+        cliff <= 1,
+        "settled underwater Organic cliff must flatten (stacked on face={cliff})"
+    );
+    let spread = (7..=10)
+        .filter(|&x| {
+            (1..=3).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+        })
+        .count();
+    assert!(
+        spread >= 1,
+        "settled Organic must spread onto the submerged toe"
+    );
+}
+
+#[test]
+fn bed_settled_organic_reposes_into_standing_water() {
+    // Organic grounded on stone under a lake (not a surface raft) should
+    // avalanche into water seats like Soil.
+    let mut w = setup_column_world();
+    for x in 3..=7 {
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+    let mut org = Cell::solid(MaterialId::Organic);
+    org.sat = Sat(water_capacity(MaterialId::Organic));
+    w.set_cell(5, 2, org);
+    apply_grain_repose(&mut w);
+    let slid = w.get_cell(4, 1).map(|c| c.material) == Some(MaterialId::Organic)
+        || w.get_cell(6, 1).map(|c| c.material) == Some(MaterialId::Organic);
+    assert!(
+        slid,
+        "bed-settled Organic must avalanche into standing water"
+    );
 }
 
 
