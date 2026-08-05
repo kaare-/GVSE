@@ -1441,14 +1441,19 @@ fn step_land_plant(
     //   stemless tips for draw only.
     // - Sand undercut with no water yet: woody tip-bakes, then reseats.
     // - Shore: stay tipped; grow roots into the beach; new shoots upright.
+    // - Fallen woody castaway = one rigid body: proximal-root scrapes on
+    //   bed/shore/neighbour substrate must NOT teleport `gy` to the bed.
+    //   New roots may elongate into the ground from the resting pose —
+    //   that purchase keeps the log where it floats/rests.
     let on_float_raft = rooted_in_floating_organic(world, atom, float_columns);
     let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
     let stemless = crate::plant::stem_count(atom) == 0;
     let grounded = grounded_substrate_anchor(world, atom, float_columns);
+    let woody_castaway = atom.fallen && !stemless;
     // Tipped woody shoots must all draw upright — unmarked dy>0 stem/leaf
     // cells flatten to the waterline and leave mid-mast holes.
     heal_fallen_upright_marks(atom);
-    if grounded {
+    if grounded && !woody_castaway {
         // Fixed in sand/rock/grounded compost. Stemless clears a stale tip
         // when a short crown grip is still present; woody stays tipped after
         // shore re-root. Never raise gy onto organic piles or the waterline.
@@ -1463,7 +1468,7 @@ fn step_land_plant(
             }
         }
         pin_plant_pose(atom);
-    } else if let Some(solid_y) = holdfast_solid {
+    } else if let Some(solid_y) = holdfast_solid.filter(|_| !woody_castaway) {
         // Local ground under the crown (no sand purchase yet). Stemless
         // seaweed drops a stale tip once the holdfast is back; woody plants
         // stay tipped so only upright_growth shoots stand up after re-root.

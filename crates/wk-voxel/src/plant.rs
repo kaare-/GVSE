@@ -3139,6 +3139,70 @@ mod tests {
     }
 
     #[test]
+    fn tipped_floater_proximal_root_scrape_does_not_bed_seat() {
+        // After rigid tip, former (0,-1) root becomes (-1,0). Scraping sand
+        // / bed / neighbour substrate used to teleport gy to solid_y+1 —
+        // the log sat on the lake floor. Castaways stay a rigid body at the
+        // free surface; new roots may grow into the bed without moving gy.
+        use crate::organism::{bake_tip_into_body, OrganismStore};
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+            for y in 2..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body = crate::blueprint::Blueprint::minimal_plant().modules_relative_to_nucleus();
+        let mut atom = Atom::from_body(5, 5, 40.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        bake_tip_into_body(&mut atom);
+        assert!(atom.fallen);
+        // Log floats at the free surface while crown-column roots scrape the
+        // bed. Without the woody-castaway gate, `grounded` + holdfast would
+        // set `gy = solid_y + 1` and plant the trunk on the lake floor.
+        atom.gy = 5; // water top
+        if !atom
+            .body
+            .iter()
+            .any(|&(x, y, m)| m == ModuleId::Root && x == -1 && y == 0)
+        {
+            atom.body.push((-1, 0, ModuleId::Root));
+        }
+        // Crown-column tendril into sand/water column (|dx|<=1) — the scrape
+        // that used to teleport the seat. Lateral purchase alone is not enough
+        // to exercise `crown_holdfast_solid_y`.
+        atom.body.push((0, -4, ModuleId::Root));
+        let mut store = OrganismStore::new();
+        store.atoms.push(atom);
+        for tick in 0..40u64 {
+            store.step(&mut w, tick);
+        }
+        assert!(
+            store.atoms[0].fallen,
+            "castaway must stay tipped"
+        );
+        assert_eq!(
+            store.atoms[0].gy, 5,
+            "proximal/bed scrape must not bed-seat the log (gy={})",
+            store.atoms[0].gy
+        );
+        // Root still reaches mineral — purchase without moving the chassis.
+        assert!(
+            is_anchored(&w, &store.atoms[0]),
+            "dangling roots may grip the bed; nucleus stays at the surface"
+        );
+    }
+
+    #[test]
     fn fallen_floater_stays_alive_by_sipping_lake() {
         use crate::organism::OrganismStore;
 

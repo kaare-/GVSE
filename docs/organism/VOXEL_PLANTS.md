@@ -123,6 +123,17 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 - App draws lilac spore puffs drifting on climate wind (`SporeFx`)
 - Rhizome sprout still works without spore modules (local clone only)
 
+### Floating / tipped woody castaways
+
+- An **unseated** woody plant (`fallen`) is one rigid body: it rides the
+  free surface or rests on the beach. Proximal-root scrapes on bed, shore,
+  or neighbour substrate must **not** teleport the nucleus to `solid_y+1`
+  (that used to plant floating trees on the lake floor).
+- **New seat purchase:** roots may elongate into the ground from that
+  resting pose; the new segment is the grip — the chassis stays where it
+  floats/rests. Stemless seaweed may still snap back to a short holdfast.
+- Shore re-root stays tipped; only `upright_growth` shoots stand up.
+
 ### D4 — Drought banking *(landed)*
 
 - Root count raises `energy_max` (starch storage); photo / growth floors stay on `energy_base_max`
