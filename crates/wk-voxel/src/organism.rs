@@ -1897,17 +1897,41 @@ pub fn resolve_organism_draw_cells(
             // Stemless soft mats pile in free Air so flopped greens don't
             // overwrite. Woody canopy leaves stay on their stem pose —
             // piling would float them a cell off the petiole.
+            //
+            // Never climb through world solids (esp. floating Organic): the
+            // old "blocked → wy+=1" loop pumped ribbon tips out the top of
+            // litter mats and made them oscillate as sway/soak moved.
             if mid == ModuleId::Photosystem && crate::plant::stem_count(atom) == 0 {
+                let solid = |world: &World, x: i32, y: i32| {
+                    matches!(
+                        world.get_cell(x, y),
+                        Some(c) if c.material != MaterialId::Air
+                    )
+                };
+                // If the soft pose landed inside litter / terrain, drop to
+                // free Air under the lid (under-raft) instead of erupting up.
                 for _ in 0..24 {
-                    // Missing world cells (tests / unloaded) count as free air.
-                    let blocked = match world.get_cell(qx, wy) {
-                        Some(c) => c.material != MaterialId::Air,
-                        None => false,
-                    };
-                    if !blocked && !occupied.contains(&(wx, wy)) {
+                    if !solid(world, qx, wy) {
+                        break;
+                    }
+                    wy -= 1;
+                }
+                if solid(world, qx, wy) {
+                    continue;
+                }
+                for _ in 0..24 {
+                    if !occupied.contains(&(wx, wy)) {
+                        break;
+                    }
+                    // Refuse to pile into Organic / rock above.
+                    if solid(world, qx, wy + 1) {
                         break;
                     }
                     wy += 1;
+                    if solid(world, qx, wy) {
+                        wy -= 1;
+                        break;
+                    }
                 }
             }
             occupied.insert((wx, wy));
@@ -3471,6 +3495,54 @@ mod tests {
         let (wx, wy) = frond_draw_cell(&w, &atom, dx, dy, mid, 0, 0.5);
         assert_eq!(wy, top, "tip draws on the waterline");
         assert!(wx > atom.gx, "positive wind lays the tip downwind");
+    }
+
+    #[test]
+    fn stemless_tip_does_not_pile_through_floating_organic() {
+        // Holdfast stays on the bed; ribbon cells that intersect a floating
+        // Organic lid must draw under it — never climb out the top (the
+        // "tip pumps through litter" look).
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+            for y in 2..=6 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 7..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 4..=6 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(60);
+            w.set_cell(x, 5, org);
+            w.set_cell(x, 6, org);
+        }
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Photosystem),
+            (0, 2, ModuleId::Photosystem),
+            (0, 3, ModuleId::Photosystem),
+            (0, 4, ModuleId::Photosystem),
+        ];
+        let atom = Atom::from_body(5, 2, 40.0, body);
+        assert_eq!(atom.gy, 2, "fixture holdfast on bed");
+        let posed = resolve_organism_draw_cells(&w, &[atom.clone()], 0, 0.3);
+        let tip_ys: Vec<i32> = posed
+            .iter()
+            .filter(|p| p.mid == ModuleId::Photosystem)
+            .map(|p| p.wy)
+            .collect();
+        assert!(!tip_ys.is_empty(), "ribbon should still draw");
+        let max_tip = *tip_ys.iter().max().unwrap();
+        assert!(
+            max_tip < 5,
+            "tips must stay under the Organic lid (max_tip={max_tip} tips={tip_ys:?})"
+        );
+        assert_eq!(atom.gy, 2, "nucleus seating must not move");
     }
 
     #[test]

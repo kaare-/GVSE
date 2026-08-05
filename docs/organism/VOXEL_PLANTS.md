@@ -136,11 +136,13 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 
 ### Stemless ribbons vs floating Organic
 
-- Plant free-surface seating ignores full-sat water **sealed under Organic**
-  (raft soak pockets). Under-mat flicker used to alternate with the open
-  lake top so seaweed “pumped” through litter.
-- Stemless rescue seats skip Air-on-Organic; holdfast may see mineral through
-  a thin compost lid but never seats *on* Organic.
+- **Draw / collision:** stemless Photosystem pile-up only stacks in free Air.
+  Tips that land in floating Organic drop under the lid instead of climbing
+  out the top (that looked like the tip “pumping” through litter while the
+  holdfast stayed put).
+- **Seating:** free-surface ignores full-sat water sealed under Organic; stemless
+  rescue skips Air-on-Organic. Holdfast may see mineral through a thin compost
+  lid but never seats *on* Organic.
 
 ### D4 — Drought banking *(landed)*
 
