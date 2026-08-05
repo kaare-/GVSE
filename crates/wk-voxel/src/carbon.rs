@@ -75,11 +75,19 @@ impl Default for CarbonConfig {
             // Blooms can starve lakes; land plants only nibble air.
             algae_c_per_energy: 0.18,
             algae_half_sat: 30.0,
-            plant_c_per_energy: 0.04,
-            plant_half_sat: 120.0,
+            // Light draw — meadows used to empty atm in ~5 days at 0.04.
+            plant_c_per_energy: 0.015,
+            // Softer MM curve than the old 120 half-sat.
+            plant_half_sat: 60.0,
         }
     }
 }
+
+/// Minimum land-plant photo factor even when atmosphere is empty.
+///
+/// Matches the "without hard-starving forests" contract — algae may hard
+/// throttle on dissolved C; land plants always keep a limp-along harvest.
+pub const PLANT_PHOTO_C_FLOOR: f32 = 0.50;
 
 /// World-level atmosphere + dissolved carbon pools.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -140,7 +148,10 @@ pub fn gate_algae_photo(
 
 /// Soft-gate land-plant photo harvest on atmosphere C and debit the pool.
 ///
-/// Closes the litter→atm oxidation loop without hard-starving forests.
+/// Closes the litter→atm oxidation loop without hard-starving forests:
+/// factor never drops below [`PLANT_PHOTO_C_FLOOR`]. C is only debited for
+/// the share actually available in the pool (floor harvest can limp with
+/// empty air).
 pub fn gate_plant_photo(
     budget: &mut CarbonBudget,
     cfg: &CarbonConfig,
@@ -150,10 +161,12 @@ pub fn gate_plant_photo(
         return raw_harvest.max(0.0);
     }
     let half = cfg.plant_half_sat.max(1e-3);
-    let factor = budget.atmosphere / (budget.atmosphere + half);
+    let raw_factor = budget.atmosphere / (budget.atmosphere + half);
+    let factor = raw_factor.max(PLANT_PHOTO_C_FLOOR).min(1.0);
     let harvest = raw_harvest.max(0.0) * factor;
-    let want = harvest * cfg.plant_c_per_energy.max(0.0);
-    let _ = budget.take_atmosphere(want);
+    // Charge only the C-limited share, not the floor limp-along.
+    let billed = raw_harvest.max(0.0) * raw_factor * cfg.plant_c_per_energy.max(0.0);
+    let _ = budget.take_atmosphere(billed);
     harvest
 }
 
@@ -392,15 +405,30 @@ mod tests {
             dissolved: 200.0,
         };
         let h = gate_plant_photo(&mut budget, &cfg, 1.0);
-        assert!(h > 0.7, "ambient atm should barely throttle plants (got {h})");
+        assert!(h > 0.9, "ambient atm should barely throttle plants (got {h})");
         assert!(
             budget.atmosphere < 1_000.0,
             "land photo must debit atmosphere"
         );
         assert!(
-            1_000.0 - budget.atmosphere < 0.1,
+            1_000.0 - budget.atmosphere < 0.05,
             "plant draw should be light (delta={})",
             1_000.0 - budget.atmosphere
         );
+    }
+
+    #[test]
+    fn plant_photo_keeps_floor_when_atmosphere_empty() {
+        let cfg = CarbonConfig::default();
+        let mut budget = CarbonBudget {
+            atmosphere: 0.0,
+            dissolved: 0.0,
+        };
+        let h = gate_plant_photo(&mut budget, &cfg, 1.0);
+        assert!(
+            (h - PLANT_PHOTO_C_FLOOR).abs() < 1e-4,
+            "empty atm must limp at photo floor (got {h})"
+        );
+        assert_eq!(budget.atmosphere, 0.0, "floor harvest must not mint atm C");
     }
 }

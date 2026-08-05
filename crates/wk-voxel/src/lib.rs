@@ -66,7 +66,7 @@ pub use failure::{
 };
 pub use carbon::{
     gate_algae_photo, gate_plant_photo, step_carbon_budget, CarbonBudget, CarbonConfig,
-    AMBIENT_ATM_C, AMBIENT_DISSOLVED_C,
+    AMBIENT_ATM_C, AMBIENT_DISSOLVED_C, PLANT_PHOTO_C_FLOOR,
 };
 pub use spore_bank::{
     spore_bank_len, DormantSpore, SporeBank, SporeBankConfig, SporeKind, SPORE_BANK_PERIOD,

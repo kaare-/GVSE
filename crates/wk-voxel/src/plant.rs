@@ -49,11 +49,13 @@ pub const DROUGHT_HIBERNATE_MAX_TICKS: u32 = 9_000;
 /// Upkeep multiplier while drought-dormant (respiration only).
 pub const DROUGHT_DORMANT_UPKEEP: f32 = 0.12;
 /// Land-plant basal upkeep vs plankton (woody roots respire less).
-pub const PLANT_UPKEEP_MULT: f32 = 0.35;
+/// Nudged down after Beer-Lambert + carbon made day surplus tighter than
+/// the pre-shade `tip×n_photo` era.
+pub const PLANT_UPKEEP_MULT: f32 = 0.28;
 /// Day-factor blend for plant respiration (`a + (1-a)*day`).
 /// Lower night floor than plankton — a 27-module river plant used to burn
 /// its whole tank in one 600-tick night when every Stem/Root counted 1:1.
-pub const PLANT_UPKEEP_DAY_BLEND: f32 = 0.22;
+pub const PLANT_UPKEEP_DAY_BLEND: f32 = 0.18;
 /// Day factor below which plants skip elongation / submerged stem-urge.
 pub const PLANT_GROW_MIN_DAY: f32 = 0.20;
 /// Extra score weight so roots prefer wetter substrate cells.
@@ -389,7 +391,6 @@ pub fn plant_metabolic_load(atom: &Atom) -> f32 {
             ModuleId::Nucleus => 0.40,
             ModuleId::ReproSpore => 0.45,
             ModuleId::Digest | ModuleId::Hypha => 0.50,
-            _ => 0.40,
         };
     }
     load.max(1.0)
