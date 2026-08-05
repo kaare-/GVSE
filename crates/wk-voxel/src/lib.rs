@@ -11,6 +11,7 @@
 pub mod active;
 pub mod audit;
 pub mod blueprint;
+pub mod carbon;
 pub mod cell;
 pub mod chunk;
 pub mod climate;
@@ -28,6 +29,7 @@ pub mod plant;
 pub mod rules;
 pub mod save;
 pub mod shade;
+pub mod spore_bank;
 pub mod temperature;
 pub mod wind;
 pub mod worldgen;
@@ -62,9 +64,17 @@ pub use failure::{
     wet_repose_loosens, FailureConfig,
     COMPACTION_SIGMA_MIN,
 };
+pub use carbon::{
+    gate_algae_photo, gate_plant_photo, step_carbon_budget, CarbonBudget, CarbonConfig,
+    AMBIENT_ATM_C, AMBIENT_DISSOLVED_C,
+};
+pub use spore_bank::{
+    spore_bank_len, DormantSpore, SporeBank, SporeBankConfig, SporeKind, SPORE_BANK_PERIOD,
+};
 pub use fungi::{
-    add_soft_litter, compost_organic_to_soil, is_fungus, is_surface_stalk, max_mycelium_near,
-    seed_mycelium_near, soft_litter_at, step_mycelium_field,
+    add_soft_litter, compost_organic_to_soil, infect_mycelium_at, is_fungus, is_surface_stalk,
+    max_mycelium_near, seed_mycelium_near, soft_litter_at, step_mycelium_field,
+    step_mycelium_field_cfg, FungiConfig,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
@@ -75,14 +85,16 @@ pub use grid::World;
 // HydroOverrides is defined in wk-material; re-export for app convenience.
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
-    column_sky_light, Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, SporeRelease,
-    CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
+    bake_tip_into_body, column_sky_light, fallen_body_offset, rigid_tip_offset, Atom, BodyModule,
+    Corpse, ModuleId, OrganismStore, SpawnFail, SporeRelease, CORPSE_SETTLE_LAND_TICKS,
+    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT,
     SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
 pub use plant::{
     collect_live_photo_world_cells, collect_live_root_world_cells, collect_plant_sail_tops,
     find_fungus_slot, find_plant_slot, find_surface_air_slot, is_land_plant,
-    sail_plants_on_wind_rafts, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES,
+    sail_plants_on_wind_rafts, sail_plants_on_wind_rafts_cfg, sync_alloc_to_body,
+    PlantGrowthCaps, MAX_PHOTO_MODULES,
     MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use shade::{
@@ -105,15 +117,18 @@ pub use rules::{
     apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
     apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
-    collect_floating_organic_columns, drift_floating_organic, drift_floating_organic_columns,
+    collect_floating_organic_columns, drift_floating_organic, drift_floating_organic_cfg,
+    drift_floating_organic_columns, drift_floating_organic_columns_cfg,
     is_standing_water, punch_through_floating_rafts, rise_and_soak_buoyant_litter,
-    rise_buoyant_litter, settle_loose_grains, settle_loose_grains_regions, soak_floating_litter,
+    rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter, settle_loose_grains,
+    settle_loose_grains_regions, soak_floating_litter, soak_floating_litter_cfg,
     tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life, tick_with_perf,
     wake_confined_head, wake_grains_for_settle, wake_unsupported_grains, wake_unstable_slopes,
     CondensationConfig, EvapConfig, GrainConfig,
     KarstConfig,
     OrographicConfig, PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
-    GRAIN_REPOSE_HAZE_MAX, GRAIN_SETTLE_PASSES, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
+    GRAIN_REPOSE_HAZE_MAX, GRAIN_SETTLE_PASSES, MYCELIUM_EROSION_BIND, MYCELIUM_RAFT_BIND_MIN,
+    MYCELIUM_REPOSE_STEP_BONUS, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
 pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,

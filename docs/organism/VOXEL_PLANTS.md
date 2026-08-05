@@ -11,9 +11,20 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 |---------|--------|
 | `Root` / `Stem` / `Photosystem` / `Nucleus` modules | Done |
 | Fixed crown on purchase; free-float tipped when unanchored over water | Done |
+| Woody tip rigid-bakes body (stem+root rotate together; raft / free-float / sand undercut) | Done |
+| Floating land/plankton corpses drift with wind + local water current | Done |
+| Sand-rooted crowns never hoist on organic mats / water; no shore sail | Done |
+| Raft tip resists with root keel (more dangling roots → harder tip) | Done |
+| Upright draw ranks ignore shed cells; stemless never marks upright | Done |
+| Shoots need Air; roots crack Stone→LooseRock; death skips Stone/dry-Air | Done |
+| Woody leaves do not pile-lift; pick uses tipped draw pose | Done |
+| Woody leaves Moore-adjacent to Stem (no midair flecks) | Done |
+| Raft/sail spans use body-local dx (no ring wrap explosion) | Done |
 | Tipped plants stay tipped after re-root; new Stem/Photo grow upright | Done |
 | Upright mast re-tips when tippy; draw-space sail counts new shoots | Done |
 | Tip bakes into body (new stems grow up); floaters elongate roots | Done |
+| Tipped waterline logs capped; re-tip folds Stem only; no terrain pierce | Done |
+| Vegetative / spore juvenile = pruned parent clone (not template) | Done |
 | Substrate-rooted plants stay pinned when flooded (raft organic floats) | Done |
 | Seaweed stays on bed holdfast; floats only if holdfast lost/rafting | Done |
 | Crown holdfast ignores seepage; reseats if displaced; no stream tip | Done |
@@ -98,10 +109,10 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
   module add/swap/delete; habit stays plant)
 - Soft pop cap shared with Atoms
 - Root elongation biases sideways when banking for a sprout
-- **Anti-flood:** long sprout period (~0.6 demo day), higher energy /
-  root gates, soft local density (≤8 crowns in ±4 columns), and **one
-  living crown per column** (sprouts skip occupied seats; stacked
-  saves reseat younger crowns on the next tick).
+- **Anti-flood / spacing:** long sprout period (~0.6 demo day), higher
+  energy / root gates, soft local density (≤5 crowns in ±4 columns), and
+  **crown clearance** (no neighbour within 2 columns — keeps T-canopies
+  readable). Crowded / stacked saves reseat younger crowns outward.
 
 ### D3b — Wind spores / ferns *(landed)*
 
@@ -133,14 +144,20 @@ Features:
   moist Organic even after the fruiting body dies; threads prefer climbing
   toward free Air.
 - Networks that **breach the surface from below** can emerge a **surface
-  stalk**. Buried bodies rhizomorph-hop locally; stalks wind-disperse spores
-  far (`ReproSpore`).
+  stalk**. Default seats prefer Air-on-Organic/Soil; buried bodies
+  rhizomorph-hop locally; stalks wind-disperse spores far (`ReproSpore`).
 - Soft litter — bonus energy sip; Organic forage scales with field intensity
 - Established moist networks support fruiting bodies (no energy-starve)
 - Standing rain counts as moisture; **never** flash Organic → Sand
-- Long colonization may compost Organic → `MaterialId::Soil` (sat preserved)
+- Mycelium compost Organic → `MaterialId::Soil` (sat preserved; Tab knobs)
+- Mycelium cream (0..=255) sticks Organic (repose/scour) and toughens rafts
+- Crude CO₂ buckets (atm + dissolved): litter oxidation, algae draw dissolved,
+  land photo lightly pulls atm; buckets persist in saves
+- **Spore bank:** wind spores that land dry / crowded / cold hibernate on the
+  landing cell and may germinate much later when moisture, space, or warmth
+  return (Tab → Life → Spore bank; HUD `spores=`)
 - Editor: `F` fruiting body; brushes `5` Digest / `6` Hypha / `7` ReproSpore;
-  F3 Soil brush
+  F3 Soil brush; Tab → Life pages for compost + carbon + spore bank
 
 ### E1b — Lingering corpses → Organic *(landed)*
 

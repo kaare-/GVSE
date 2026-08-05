@@ -41,6 +41,9 @@ pub struct World {
     /// Death deposits units here; fungi digest them before Organic cells.
     #[serde(default)]
     pub soft_litter: HashMap<i32, u16>,
+    /// Hibernating plant/fungus spores keyed by landing cell (Set E bank).
+    #[serde(default)]
+    pub spore_bank: crate::spore_bank::SporeBank,
     /// Per-sim hydrology material overrides (saved with the world).
     /// Hot paths read this via [`Self::water_capacity`] /
     /// [`crate::cell::water_capacity_with`] — no process-global install.
@@ -56,6 +59,7 @@ impl World {
             tick: 0,
             wrap_width: None,
             soft_litter: HashMap::new(),
+            spore_bank: crate::spore_bank::SporeBank::default(),
             hydro: HydroOverrides::default(),
         }
     }

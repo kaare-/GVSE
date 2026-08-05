@@ -92,7 +92,8 @@ This is what wets a dry beach **sideways** from a puddle, equalises pore sat bet
 Opt-in (wired in `wk-voxel-app` after `tick`, Tab → Grain / sediment):
 
 - Only cells with **flow bias** (cascade lip or clear head drop to a neighbor). Still lakes do not scour.
-- Targets [`is_flow_erodible`] materials: Sand / Gravel / Clay / LooseRock / LooseLimestone (`erosion_resistance < 150`). Not Ice / Stone / Snow.
+- Targets dense [`is_flow_erodible`] grains: Sand / Gravel / Clay / **Soil** / LooseRock / LooseLimestone (`erosion_resistance < 150`). Not Ice / Stone / Snow.
+- **Organic** is contextual: grounded beach litter and waterlogged/sunk mats scour under flow (deposits stay `WATERLOGGED` so they remain bedload). Floating raft Organic is skipped — wind drift owns surface mats.
 - **Bed scour** under standing water → vacated cell becomes **empty Air** (gravity pulls the column down — no minted water); **bank undercut** → Air (pore sat released).
 - Picked grain deposits on a solid-supported Air seat; any free water already in that seat soaks into the grain's pores or is pushed upward — deposit must not delete lake sat.
 - Rate scales with `1 - resistance/180` and `GrainConfig.erosion_rate`; wet grains (pore sat) erode faster.

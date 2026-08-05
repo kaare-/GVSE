@@ -32,7 +32,7 @@ impl Default for CreatureEditor {
             blueprint: Blueprint::atom(),
             tool: EditorTool::Paint,
             brush: ModuleId::Photosystem,
-            status: "Paint Atom / Plant / seaweed / fruiting body, then Enter + click to spawn"
+            status: "Paint Atom / Plant / seaweed / fungus, then Enter + click to plant"
                 .into(),
             spawn_picker: false,
             was_paused: true,
@@ -51,7 +51,7 @@ impl CreatureEditor {
             self.was_paused = currently_paused;
             self.spawn_picker = false;
             self.status =
-                "1-7 modules | A Atom  T Plant  W seaweed  F fruiting | Enter then click spawn"
+                "1-7 modules | A Atom  T Plant  W seaweed  F fungus | Enter then click plant"
                     .into();
         }
     }
@@ -114,7 +114,8 @@ impl CreatureEditor {
             self.blueprint = Blueprint::minimal_fungus();
             self.name_buf = "fruiting body".into();
             self.status =
-                "Fruiting body — Organic bed; cream field in ground; 7 = spore packet".into();
+                "Fungus — Enter plants mycelium on Organic; stalk emerges later from a rich network"
+                    .into();
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
             self.blueprint.name = self.name_buf.clone();
@@ -285,7 +286,7 @@ impl CreatureEditor {
 
         let px = ox + cw + 24.0;
         let kind = if self.blueprint.is_valid_fungus() {
-            "Set E fruiting body"
+            "Set E fungus (inoculate)"
         } else if self.blueprint.is_valid_plant() {
             "Set D plant"
         } else if self.blueprint.is_valid_atom() {
@@ -309,7 +310,7 @@ impl CreatureEditor {
             GRAY,
         );
         draw_text(
-            "A Atom  T Plant  W seaweed  F fruiting  | S save  L load  | Enter spawn",
+            "A Atom  T Plant  W seaweed  F fungus  | S save  L load  | Enter plant",
             px,
             oy + 72.0,
             14.0,

@@ -152,7 +152,9 @@ pub fn draw_block_inspector(
             atom.cooldown
         ));
         if is_fungus(atom) {
-            lines.push("habit=fruiting body (mycelium = ground field on Organic)".into());
+            lines.push(
+                "habit=fruiting body (emerged stalk; mycelium = cream field on Organic)".into(),
+            );
             let myc = wk_voxel::max_mycelium_near(world, atom.gx, atom.gy);
             lines.push(format!(
                 "digest_rate={:.2}  drought_ticks={}  field_myc={myc}/255",

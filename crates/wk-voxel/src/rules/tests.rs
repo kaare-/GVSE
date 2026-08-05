@@ -1321,6 +1321,163 @@ fn live_roots_bind_sand_repose() {
     );
 }
 
+#[test]
+fn mycelium_binds_organic_repose() {
+    use super::grain::{mycelium_repose_bonus, MYCELIUM_REPOSE_STEP_BONUS};
+
+    let mut bare = Cell::solid(MaterialId::Organic);
+    bare.set_mycelium(0);
+    let mut cream = Cell::solid(MaterialId::Organic);
+    cream.set_mycelium(255);
+    assert_eq!(mycelium_repose_bonus(bare), 0);
+    assert_eq!(mycelium_repose_bonus(cream), MYCELIUM_REPOSE_STEP_BONUS);
+
+    let mut bare_w = setup_column_world();
+    let mut myc_w = setup_column_world();
+    for y in 1..=5 {
+        bare_w.set_cell(8, y, Cell::solid(MaterialId::Organic));
+        let mut c = Cell::solid(MaterialId::Organic);
+        c.set_mycelium(255);
+        myc_w.set_cell(8, y, c);
+    }
+    for _ in 0..50 {
+        apply_grain_fall(&mut bare_w);
+        apply_grain_repose(&mut bare_w);
+        apply_grain_fall(&mut myc_w);
+        apply_grain_repose(&mut myc_w);
+    }
+    let height = |w: &World| {
+        (1..=8)
+            .rev()
+            .find(|&y| w.get_cell(8, y).map(|c| c.material) == Some(MaterialId::Organic))
+            .unwrap_or(0)
+    };
+    let h_bare = height(&bare_w);
+    let h_myc = height(&myc_w);
+    assert!(
+        h_myc > h_bare,
+        "colonized Organic should hold a taller pile (bare={h_bare} myc={h_myc})"
+    );
+}
+
+#[test]
+fn mycelium_slows_floating_organic_waterlog() {
+    use super::grain::{mycelium_waterlog_scale, soak_floating_litter_cfg};
+
+    assert!((mycelium_waterlog_scale(0) - 1.0).abs() < 1e-5);
+    assert!(mycelium_waterlog_scale(255) < 0.2);
+
+    let pond = |myc: u8| {
+        let mut w = setup_column_world();
+        for y in 1..=6 {
+            w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+        }
+        for x in 3..=7 {
+            for y in 1..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+        }
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(water_capacity(MaterialId::Organic));
+        org.set_mycelium(myc);
+        w.set_cell(5, 6, org);
+        w
+    };
+
+    let grain = GrainConfig {
+        organic_waterlog_rate: 0.05,
+        ..GrainConfig::default()
+    };
+    let mut bare = pond(0);
+    let mut cream = pond(255);
+    let mut bare_t = None;
+    let mut cream_t = None;
+    for t in 0..4_000u64 {
+        bare.tick = t;
+        cream.tick = t;
+        soak_floating_litter_cfg(&mut bare, &grain);
+        soak_floating_litter_cfg(&mut cream, &grain);
+        if bare_t.is_none()
+            && bare
+                .get_cell(5, 6)
+                .map(|c| c.flags.contains(CellFlags::WATERLOGGED))
+                .unwrap_or(false)
+        {
+            bare_t = Some(t);
+        }
+        if cream_t.is_none()
+            && cream
+                .get_cell(5, 6)
+                .map(|c| c.flags.contains(CellFlags::WATERLOGGED))
+                .unwrap_or(false)
+        {
+            cream_t = Some(t);
+        }
+        if bare_t.is_some() && cream_t.is_some() {
+            break;
+        }
+    }
+    let bare_t = bare_t.expect("bare litter should waterlog");
+    let cream_t = cream_t.expect("colonized litter should still waterlog eventually");
+    assert!(
+        cream_t > bare_t,
+        "mycelium should delay waterlog (bare={bare_t} cream={cream_t})"
+    );
+}
+
+#[test]
+fn mycelium_binds_floating_organic_raft() {
+    use super::grain::{drift_floating_organic_cfg, MYCELIUM_RAFT_BIND_MIN};
+
+    // Small cream mat in a wide pond — room to sail +x into empty water.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(1, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(20, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 2..=19 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 6..=10 {
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.set_mycelium(MYCELIUM_RAFT_BIND_MIN.saturating_add(20));
+        w.set_cell(x, 6, org);
+    }
+    let grain = GrainConfig::default();
+    let mut moved_together = false;
+    for t in 0..500u64 {
+        w.tick = t;
+        let before: Vec<i32> = (2..=19)
+            .filter(|&x| w.get_cell(x, 6).map(|c| c.material) == Some(MaterialId::Organic))
+            .collect();
+        if before.len() < 3 {
+            break;
+        }
+        let (n, _, _) = drift_floating_organic_cfg(&mut w, 0.25, 4, None, None, &grain);
+        if n == 0 {
+            continue;
+        }
+        let after: Vec<i32> = (2..=19)
+            .filter(|&x| w.get_cell(x, 6).map(|c| c.material) == Some(MaterialId::Organic))
+            .collect();
+        let mut xs = after.clone();
+        xs.sort_unstable();
+        let span = xs.last().unwrap() - xs.first().unwrap() + 1;
+        let holes = span - xs.len() as i32;
+        assert!(
+            holes <= 1,
+            "mycelium raft should stay cohesive (before={before:?} after={after:?})"
+        );
+        assert_eq!(after.len(), before.len());
+        moved_together = true;
+        break;
+    }
+    assert!(moved_together, "mycelium-bound raft should eventually sail");
+}
+
 // ------------ flow erosion ------------
 
 fn cascade_shelf_world(bed: MaterialId) -> World {
@@ -1363,6 +1520,104 @@ fn flowing_water_scours_sand_bed_downhill() {
         sand_at_lip || bed_hole,
         "cascade should move sand off the shelf (before={sand_before}, lip={sand_at_lip}, hole={bed_hole})"
     );
+}
+
+#[test]
+fn flowing_water_scours_soil_bed_downhill() {
+    let mut w = cascade_shelf_world(MaterialId::Soil);
+    let cfg = GrainConfig {
+        erosion_rate: 1.0,
+        max_events_per_tick: 32,
+        ..GrainConfig::default()
+    };
+    for t in 0..30 {
+        w.tick = t;
+        apply_flow_erosion(&mut w, &cfg);
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+    }
+    let soil_at_lip = w.get_cell(7, 1).map(|c| c.material) == Some(MaterialId::Soil)
+        || w.get_cell(8, 1).map(|c| c.material) == Some(MaterialId::Soil);
+    let bed_hole = (3..=6).any(|x| {
+        w.get_cell(x, 1).map(|c| c.material) != Some(MaterialId::Soil)
+    });
+    assert!(
+        soil_at_lip || bed_hole,
+        "cascade should drag Soil bedload like sand (lip={soil_at_lip}, hole={bed_hole})"
+    );
+}
+
+#[test]
+fn flowing_water_scours_grounded_organic_bed_downhill() {
+    // Organic on solid (beach / sunk mat) under a cascade — not a raft.
+    let mut w = cascade_shelf_world(MaterialId::Organic);
+    let cfg = GrainConfig {
+        erosion_rate: 1.0,
+        max_events_per_tick: 32,
+        ..GrainConfig::default()
+    };
+    for t in 0..40 {
+        w.tick = t;
+        apply_flow_erosion(&mut w, &cfg);
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+    }
+    let org_at_lip = w.get_cell(7, 1).map(|c| c.material) == Some(MaterialId::Organic)
+        || w.get_cell(8, 1).map(|c| c.material) == Some(MaterialId::Organic);
+    let bed_hole = (3..=6).any(|x| {
+        w.get_cell(x, 1).map(|c| c.material) != Some(MaterialId::Organic)
+    });
+    assert!(
+        org_at_lip || bed_hole,
+        "grounded Organic should scour under cascade (lip={org_at_lip}, hole={bed_hole})"
+    );
+}
+
+#[test]
+fn floating_organic_raft_is_not_flow_eroded() {
+    // Lake surface Organic raft beside a cascade lip — wind owns this mat.
+    let mut w = setup_column_world();
+    for x in 3..=6 {
+        // Deep water column so Organic floats (not grounded bed).
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+        w.set_cell(x, 5, Cell::solid(MaterialId::Organic));
+    }
+    // Cascade lip at x=7 (empty below water surface height).
+    for y in 1..=5 {
+        w.set_cell(7, y, Cell::air());
+    }
+    // Give the lip a thin water sheet at the raft height so flow_bias sees
+    // a cascade from the raft-side water under the Organic? Actually bed
+    // scour looks under water cells — put water next to raft at surface.
+    w.set_cell(6, 5, Cell::water()); // replace one Organic with water for bias
+    w.set_cell(5, 5, Cell::solid(MaterialId::Organic));
+    let cfg = GrainConfig {
+        erosion_rate: 1.0,
+        max_events_per_tick: 64,
+        ..GrainConfig::default()
+    };
+    let org_before: Vec<(i32, i32)> = (3..=6)
+        .flat_map(|x| {
+            (1..=6)
+                .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+                .map(|y| (x, y))
+                .collect::<Vec<_>>()
+        })
+        .collect();
+    assert!(!org_before.is_empty());
+    for t in 0..40 {
+        w.tick = t;
+        apply_flow_erosion(&mut w, &cfg);
+    }
+    for &(x, y) in &org_before {
+        assert_eq!(
+            w.get_cell(x, y).map(|c| c.material),
+            Some(MaterialId::Organic),
+            "floating raft Organic at ({x},{y}) must not be flow-scoured"
+        );
+    }
 }
 
 #[test]
@@ -3970,7 +4225,11 @@ fn rooted_organic_raft_stays_together_in_wind() {
         if before.len() < 3 {
             break;
         }
-        let (n, sign, _) = drift_floating_organic(&mut w, 0.25, 4, None, Some(&roots));
+        // Bind radius 1 stitches neighbour litter into the holdfast raft.
+        let mut grain = GrainConfig::default();
+        grain.raft_root_bind_radius = 1;
+        let (n, sign, _) =
+            drift_floating_organic_cfg(&mut w, 0.25, 4, None, Some(&roots), &grain);
         if n == 0 {
             continue;
         }

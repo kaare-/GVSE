@@ -33,10 +33,71 @@ pub const ROOT_REPOSE_STEP_BONUS: i32 = 2;
 /// (`≈ 1 + 2.5ρ` at ρ=1 from column `run_sediment`).
 pub const ROOT_EROSION_BIND: f32 = 3.5;
 
+/// Full mycelium intensity (255) matches living-root repose bonus.
+///
+/// Stickiness scales with Organic [`Cell::mycelium`] 0..=255 — the same
+/// cream field fungi already paint. No separate sticky material.
+pub const MYCELIUM_REPOSE_STEP_BONUS: i32 = ROOT_REPOSE_STEP_BONUS;
+
+/// Full mycelium intensity matches living-root erosion bind.
+pub const MYCELIUM_EROSION_BIND: f32 = ROOT_EROSION_BIND;
+
+/// Floating Organic columns with at least this mycelium sail as one raft
+/// (cream mats stick together instead of tearing column-by-column).
+pub const MYCELIUM_RAFT_BIND_MIN: u8 = 40;
+
+/// At full mycelium, floating Organic waterlogs at this fraction of the
+/// base rate — colonized mats float longer, bare litter sinks sooner.
+const MYCELIUM_WATERLOG_MIN_SCALE: f32 = 0.12;
+
 /// Max vertical fall cells when settling unsupported grains in one
 /// call. Default sky is ~5 chunks tall (`64×5`); cover that so F3
 /// litter does not take hundreds of ticks to land.
 pub const GRAIN_SETTLE_PASSES: u32 = 1024;
+
+/// Repose `max_step` bonus from mycelium intensity on Organic (0..=2).
+#[inline]
+pub fn mycelium_repose_bonus(cell: Cell) -> i32 {
+    if cell.material != MaterialId::Organic || cell.mycelium() == 0 {
+        return 0;
+    }
+    let m = cell.mycelium() as i32;
+    // Round so light colonization already helps a little.
+    (m * MYCELIUM_REPOSE_STEP_BONUS + 254) / 255
+}
+
+/// Flow-erosion susceptibility divisor from mycelium (1.0..=bind).
+#[inline]
+pub fn mycelium_erosion_bind(cell: Cell) -> f32 {
+    if cell.material != MaterialId::Organic || cell.mycelium() == 0 {
+        return 1.0;
+    }
+    let t = cell.mycelium() as f32 / 255.0;
+    1.0 + (MYCELIUM_EROSION_BIND - 1.0) * t
+}
+
+/// Scale waterlog probability by mycelium (1.0 bare → ~0.12 at full cream).
+#[inline]
+pub fn mycelium_waterlog_scale(myc: u8) -> f32 {
+    if myc == 0 {
+        return 1.0;
+    }
+    let t = myc as f32 / 255.0;
+    (1.0 - (1.0 - MYCELIUM_WATERLOG_MIN_SCALE) * t).clamp(MYCELIUM_WATERLOG_MIN_SCALE, 1.0)
+}
+
+/// Strongest mycelium in a floating Organic column stack.
+fn column_max_mycelium(world: &World, gx: i32, bottom: i32, height: i32) -> u8 {
+    let mut m = 0u8;
+    for y in bottom..bottom.saturating_add(height) {
+        if let Some(c) = world.get_cell(gx, y) {
+            if c.material == MaterialId::Organic {
+                m = m.max(c.mycelium());
+            }
+        }
+    }
+    m
+}
 
 /// One-cell-per-pass grain fall.
 ///
@@ -604,10 +665,6 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
 /// Max pore sat absorbed per tick from the water column under a floating
 /// Organic / Soil raft. Keeps the surface cell full so the raft still floats.
 const FLOAT_SOAK_RATE: u8 = 16;
-/// After pores fill, chance per tick that floating Organic waterlogs and
-/// begins sinking through the lake. Expected wait ≈ `1 / rate` ticks
-/// (~2500 at `0.0004`) — a long counter without widening `Cell`.
-const ORGANIC_WATERLOG_RATE: f32 = 0.0004;
 /// Max cells a submerged litter grain may rise in one tick.
 const BUOYANT_RISE_MAX: i32 = 16;
 
@@ -632,13 +689,21 @@ fn collect_buoyant_litter(world: &World) -> Vec<(i32, i32)> {
 }
 
 /// [`rise_buoyant_litter`] then [`soak_floating_litter`] with one litter scan.
+///
+/// Uses [`GrainConfig::default`] waterlog rate. Prefer
+/// [`rise_and_soak_buoyant_litter_cfg`] when live Tab knobs are available.
 pub fn rise_and_soak_buoyant_litter(world: &mut World) {
+    rise_and_soak_buoyant_litter_cfg(world, &GrainConfig::default());
+}
+
+/// [`rise_and_soak_buoyant_litter`] with live [`GrainConfig`] waterlog rate.
+pub fn rise_and_soak_buoyant_litter_cfg(world: &mut World, grain: &GrainConfig) {
     let mut litter = collect_buoyant_litter(world);
     if litter.is_empty() {
         return;
     }
     rise_buoyant_litter_list(world, &mut litter);
-    soak_floating_litter_list(world, &litter);
+    soak_floating_litter_list(world, &litter, grain.organic_waterlog_rate);
 }
 
 /// Organic / Soil sitting on a grounded lake surface soaks pore water from
@@ -650,11 +715,17 @@ pub fn rise_and_soak_buoyant_litter(world: &mut World) {
 ///
 /// Scans only buoyant litter cells (not the whole grid).
 pub fn soak_floating_litter(world: &mut World) {
-    let litter = collect_buoyant_litter(world);
-    soak_floating_litter_list(world, &litter);
+    soak_floating_litter_cfg(world, &GrainConfig::default());
 }
 
-fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)]) {
+/// [`soak_floating_litter`] with live [`GrainConfig`] waterlog rate.
+pub fn soak_floating_litter_cfg(world: &mut World, grain: &GrainConfig) {
+    let litter = collect_buoyant_litter(world);
+    soak_floating_litter_list(world, &litter, grain.organic_waterlog_rate);
+}
+
+fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)], waterlog_rate: f32) {
+    let waterlog_rate = waterlog_rate.clamp(0.0, 1.0);
     for &(gx, gy) in litter {
         let Some(raft) = world.get_cell(gx, gy) else {
             continue;
@@ -673,19 +744,24 @@ fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)]) {
             continue;
         }
         // Fully soaked Organic: age toward waterlogging / sink.
+        // Colonized mats (high mycelium) soak slower — raft toughness.
         if raft.sat.0 >= cap {
             if raft.material == MaterialId::Organic
                 && !raft.flags.contains(CellFlags::WATERLOGGED)
-                && hash_prob(
-                    world.seed.0,
-                    gx,
-                    world.tick.wrapping_add(gy as u64),
-                    0x50A7_51A7u64,
-                ) < ORGANIC_WATERLOG_RATE
             {
-                let mut wet = raft;
-                wet.flags.set(CellFlags::WATERLOGGED);
-                world.set_cell(gx, gy, wet);
+                let rate = waterlog_rate * mycelium_waterlog_scale(raft.mycelium());
+                if rate > 0.0
+                    && hash_prob(
+                        world.seed.0,
+                        gx,
+                        world.tick.wrapping_add(gy as u64),
+                        0x50A7_51A7u64,
+                    ) < rate
+                {
+                    let mut wet = raft;
+                    wet.flags.set(CellFlags::WATERLOGGED);
+                    world.set_cell(gx, gy, wet);
+                }
             }
             continue;
         }
@@ -758,8 +834,6 @@ const RAFT_DRIFT_BASE: f32 = 0.06;
 const RAFT_DRIFT_ORGANIC_SAIL: f32 = 0.35;
 /// Extra sail per cell of living plant height above the raft top.
 const RAFT_DRIFT_PLANT_SAIL: f32 = 0.55;
-/// How many neighbour columns a living root stitches into its raft mat.
-const RAFT_ROOT_BIND_RADIUS: i32 = 1;
 
 /// Cheap float-seat check for raft drift (no 512-deep grounded walk).
 ///
@@ -863,6 +937,9 @@ pub fn collect_floating_organic_columns(
 /// `(columns_moved, wind_sign, source_columns_that_moved)`.
 ///
 /// `plant_tops`: world-x → max plant cell y for sail area.
+///
+/// Uses [`GrainConfig::default`] raft bind radius. Prefer
+/// [`drift_floating_organic_cfg`] when live Tab knobs are available.
 pub fn drift_floating_organic(
     world: &mut World,
     wind_vx_tiles: f32,
@@ -870,14 +947,34 @@ pub fn drift_floating_organic(
     plant_tops: Option<&std::collections::HashMap<i32, i32>>,
     root_bound_columns: Option<&HashSet<i32>>,
 ) -> (u32, i32, HashSet<i32>) {
+    drift_floating_organic_cfg(
+        world,
+        wind_vx_tiles,
+        tile_cols,
+        plant_tops,
+        root_bound_columns,
+        &GrainConfig::default(),
+    )
+}
+
+/// [`drift_floating_organic`] with live [`GrainConfig`] raft bind radius.
+pub fn drift_floating_organic_cfg(
+    world: &mut World,
+    wind_vx_tiles: f32,
+    tile_cols: i32,
+    plant_tops: Option<&std::collections::HashMap<i32, i32>>,
+    root_bound_columns: Option<&HashSet<i32>>,
+    grain: &GrainConfig,
+) -> (u32, i32, HashSet<i32>) {
     let columns = collect_floating_organic_columns(world);
-    drift_floating_organic_columns(
+    drift_floating_organic_columns_cfg(
         world,
         &columns,
         wind_vx_tiles,
         tile_cols,
         plant_tops,
         root_bound_columns,
+        grain,
     )
 }
 
@@ -891,6 +988,27 @@ pub fn drift_floating_organic_columns(
     plant_tops: Option<&std::collections::HashMap<i32, i32>>,
     root_bound_columns: Option<&HashSet<i32>>,
 ) -> (u32, i32, HashSet<i32>) {
+    drift_floating_organic_columns_cfg(
+        world,
+        columns,
+        wind_vx_tiles,
+        tile_cols,
+        plant_tops,
+        root_bound_columns,
+        &GrainConfig::default(),
+    )
+}
+
+/// [`drift_floating_organic_columns`] with live [`GrainConfig`] raft bind radius.
+pub fn drift_floating_organic_columns_cfg(
+    world: &mut World,
+    columns: &std::collections::HashMap<i32, (i32, i32)>,
+    wind_vx_tiles: f32,
+    tile_cols: i32,
+    plant_tops: Option<&std::collections::HashMap<i32, i32>>,
+    root_bound_columns: Option<&HashSet<i32>>,
+    grain: &GrainConfig,
+) -> (u32, i32, HashSet<i32>) {
     if wind_vx_tiles.abs() < 1e-5 {
         return (0, 0, HashSet::new());
     }
@@ -901,17 +1019,41 @@ pub fn drift_floating_organic_columns(
         return (0, sign, HashSet::new());
     }
 
+    let bind_radius = grain.raft_root_bind_radius.max(0);
+
     // Precomputed by the plant layer (span of every root on the mat).
     let mut bound: HashSet<i32> = root_bound_columns
         .map(|s| s.iter().copied().filter(|x| columns.contains_key(x)).collect())
         .unwrap_or_default();
-    // Dilate once so a holdfast still grips neighbouring litter.
-    let claimed: Vec<i32> = bound.iter().copied().collect();
-    for c in claimed {
-        for dx in -RAFT_ROOT_BIND_RADIUS..=RAFT_ROOT_BIND_RADIUS {
-            let nx = world.wrap_x(c + dx);
-            if columns.contains_key(&nx) {
-                bound.insert(nx);
+    // Cream mycelium also felts floating mats into cohesive rafts.
+    let mut myc_bound: HashSet<i32> = HashSet::new();
+    for (&gx, &(bottom, height)) in columns {
+        if column_max_mycelium(world, gx, bottom, height) >= MYCELIUM_RAFT_BIND_MIN {
+            myc_bound.insert(gx);
+            bound.insert(gx);
+        }
+    }
+    // Dilate so a holdfast still grips neighbouring litter (0 = body span only).
+    if bind_radius > 0 {
+        let claimed: Vec<i32> = bound.iter().copied().collect();
+        for c in claimed {
+            for dx in -bind_radius..=bind_radius {
+                let nx = world.wrap_x(c + dx);
+                if columns.contains_key(&nx) {
+                    bound.insert(nx);
+                }
+            }
+        }
+    }
+    // Mycelium mats stitch one neighbour so cream edges don't fray.
+    if !myc_bound.is_empty() {
+        let claimed: Vec<i32> = myc_bound.iter().copied().collect();
+        for c in claimed {
+            for dx in -1..=1 {
+                let nx = world.wrap_x(c + dx);
+                if columns.contains_key(&nx) {
+                    bound.insert(nx);
+                }
             }
         }
     }
@@ -1129,8 +1271,9 @@ fn rise_buoyant_litter_list(world: &mut World, litter: &mut [(i32, i32)]) {
 /// LooseRock (`max_step ≥ 1`) can hold short stairs. Wet grains
 /// (pore sat or standing water below) loosen by one step; Clay uses a
 /// dry-powder / plastic / mud curve instead. Living Root cells raise
-/// the local step via [`ROOT_REPOSE_STEP_BONUS`]. One move per cell per
-/// pass; run after [`apply_grain_fall`].
+/// the local step via [`ROOT_REPOSE_STEP_BONUS`]. Organic mycelium
+/// intensity (0..=255) raises it the same way — cream mats feel sticky.
+/// One move per cell per pass; run after [`apply_grain_fall`].
 pub fn apply_grain_repose(world: &mut World) {
     apply_grain_repose_bound(world, None);
 }
@@ -1262,6 +1405,8 @@ fn apply_repose_pass(
                     if rooted.is_some_and(|r| r.contains(&(sx, sy))) {
                         max_step = max_step.saturating_add(ROOT_REPOSE_STEP_BONUS);
                     }
+                    // Cream mycelium felts Organic — same 0..=255 intensity.
+                    max_step = max_step.saturating_add(mycelium_repose_bonus(src));
                     let through_haze =
                         matches!(src.material, MaterialId::Organic | MaterialId::Soil);
                     if !diag_drop_exceeds(ptrs, wrap_width, gx, sy, max_step, through_haze) {
@@ -1305,8 +1450,9 @@ fn apply_repose_pass(
                         if rooted.is_some_and(|r| r.contains(&(sx, sy))) {
                             step = step.saturating_add(ROOT_REPOSE_STEP_BONUS);
                         }
+                        step = step.saturating_add(mycelium_repose_bonus(src));
                         // Rooted sand / plastic clay can hold short stairs —
-                        // don't walk off.
+                        // don't walk off. Colonized Organic likewise.
                         if step > 0 {
                             continue;
                         }
@@ -1593,10 +1739,11 @@ fn avalanche_source_ok(mat: MaterialId, below_src: Option<Cell>, cold_mode: bool
     cold_mode && mat == MaterialId::Ice && hillside_ice_support(below_src)
 }
 
-/// Tunables for flow bedload / bank erosion + deposition.
+/// Tunables for grain / sediment + floating Organic litter.
 ///
-/// Angle-of-repose slides always run inside [`tick`]; this config only
-/// gates the water-driven transport pass ([`apply_flow_erosion`]).
+/// Angle-of-repose slides always run inside [`tick`]; flow erosion is
+/// gated by [`Self::enabled`]. Floating-litter soak / raft bind also
+/// live here so Tab can tune shore stickiness live.
 #[derive(Debug, Clone)]
 pub struct GrainConfig {
     /// When false, [`apply_flow_erosion`] is a no-op.
@@ -1610,6 +1757,15 @@ pub struct GrainConfig {
     /// Cap on erosion events applied per call (0 = unlimited).
     pub max_events_per_tick: u32,
     pub seed_salt: u64,
+    /// After pores fill, chance per tick that floating Organic waterlogs
+    /// and begins sinking. Expected wait ≈ `1 / rate` ticks (~500 at
+    /// `0.002`). Higher = mats shed water blisters sooner.
+    pub organic_waterlog_rate: f32,
+    /// Extra neighbour columns a living-root holdfast stitches into its
+    /// wind raft (`0` = only columns the plant body already claims).
+    /// Higher values make Organic mats stick to plants and form perched
+    /// water bladders on slopes.
+    pub raft_root_bind_radius: i32,
 }
 
 impl Default for GrainConfig {
@@ -1620,8 +1776,37 @@ impl Default for GrainConfig {
             min_flow_sat: 180,
             max_events_per_tick: 96,
             seed_salt: 0xE70D_E5ED_u64,
+            // Faster than the old 0.0004 (~2500 ticks) so shore mats don't
+            // glue plants into perched water blisters for so long.
+            organic_waterlog_rate: 0.002,
+            // Body-span bind only — no neighbour dilation (was 1).
+            raft_root_bind_radius: 0,
         }
     }
+}
+
+/// True when this cell can be picked up by flow bedload / bank undercut.
+///
+/// Dense grains use [`is_flow_erodible`]. Grounded or waterlogged Organic
+/// also scours (beach litter / sunk mats) so current can drag compost
+/// downhill like sand. Floating raft Organic is skipped — wind drift
+/// owns surface mats; chewing them would dissolve plant holdfasts.
+fn cell_is_flow_erodible(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
+    if is_flow_erodible(cell.material) {
+        return true;
+    }
+    if cell.material != MaterialId::Organic {
+        return false;
+    }
+    use wk_material::MaterialRegistry;
+    if MaterialRegistry::erosion_rank(MaterialId::Organic) >= 150 {
+        return false;
+    }
+    // Floating (or stacked on a raft) — leave for wind / soak / waterlog.
+    if raft_rests_on_float_water_world(world, gx, gy) {
+        return false;
+    }
+    true
 }
 
 /// Flow erosion + immediate downhill deposition for erodible grains.
@@ -1629,7 +1814,8 @@ impl Default for GrainConfig {
 /// Standing water with a cascade / head-drop neighbor undercuts the bed
 /// or bank and places the grain on a lower solid-supported Air seat.
 /// Still pools (no flow bias) are skipped so lakes don't chew their
-/// floors. Ice is never targeted ([`is_flow_erodible`]).
+/// floors. Ice is never targeted ([`is_flow_erodible`]). Grounded /
+/// waterlogged Organic is included; floating rafts are not.
 ///
 /// Compute-then-apply; deterministic given `(seed, tick, cfg.seed_salt)`.
 pub fn apply_flow_erosion(world: &mut World, cfg: &GrainConfig) {
@@ -1685,7 +1871,7 @@ pub fn apply_flow_erosion_bound(
 
                 // Bed scour under this water cell.
                 if let Some(bed) = world.get_cell(gx, gy - 1) {
-                    if is_flow_erodible(bed.material) {
+                    if cell_is_flow_erodible(world, gx, gy - 1, bed) {
                         maybe_queue_erosion(
                             world,
                             cfg,
@@ -1707,7 +1893,7 @@ pub fn apply_flow_erosion_bound(
                     let Some(bank) = world.get_cell(bx, gy) else {
                         continue;
                     };
-                    if !is_flow_erodible(bank.material) {
+                    if !cell_is_flow_erodible(world, bx, gy, bank) {
                         continue;
                     }
                     maybe_queue_erosion(
@@ -1763,8 +1949,15 @@ pub fn apply_flow_erosion_bound(
         // through the Air column, and park any remainder in the vacated
         // cell. Bed scour leaves empty Air (gravity pulls the column
         // down) — never mint a fresh Cell::water().
-        let (placed, mut leftover) =
+        let (mut placed, mut leftover) =
             absorb_free_water_into_grain(ev.grain, dest.sat, &world.hydro);
+        // Organic moved by current stays as bedload: waterlog wet deposits
+        // so buoyancy does not yank them back onto the free surface.
+        if placed.material == MaterialId::Organic
+            && (dest.sat.0 > 0 || placed.sat.0 > 0 || ev.grain.is_waterlogged_organic())
+        {
+            placed.flags.set(CellFlags::WATERLOGGED);
+        }
         world.set_cell(ev.deposit_x, ev.deposit_y, placed);
         leftover = push_sat_upward(world, ev.deposit_x, ev.deposit_y + 1, leftover);
         // Vacated hole is empty Air, plus any free water that could not
@@ -1865,6 +2058,8 @@ fn maybe_queue_erosion(
     if rooted.is_some_and(|r| r.contains(&(ex, ey))) {
         sus /= ROOT_EROSION_BIND;
     }
+    // Colonized Organic resists cascade chew (scales with cream intensity).
+    sus /= mycelium_erosion_bind(grain);
     let p = (sus * cfg.erosion_rate).clamp(0.0, 1.0);
     let roll = hash_prob(
         seed,

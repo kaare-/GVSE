@@ -54,9 +54,10 @@ use wk_voxel::{
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    precip_forms_snow_at_air, sail_plants_on_wind_rafts, sky_rgb_at_height, temperature_step_due,
-    tick_with_life, wake_unsupported_grains, wake_unstable_slopes, ClimateConfig,
-    GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
+    precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, sky_rgb_at_height,
+    temperature_step_due,
+    step_carbon_budget, tick_with_life, wake_unsupported_grains, wake_unstable_slopes,
+    ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
 
 use crate::creature_list::CreatureList;
@@ -931,22 +932,28 @@ async fn main() {
                 &settings.failure,
                 Some(&scene.geotech),
                 rooted.as_ref(),
+                Some(&settings.grain),
+                Some(&settings.fungi),
             );
+            // Crude CO₂ buckets: surface Organic oxidation + atm↔lake exchange.
+            step_carbon_budget(&mut scene.carbon, &mut scene.world, &settings.carbon);
             // Floating Organic drifts with the wind; root-bound mats sail plants.
             if organisms_on {
-                sail_plants_on_wind_rafts(
+                sail_plants_on_wind_rafts_cfg(
                     &mut scene.world,
                     &mut scene.organisms.atoms,
                     wind_vx,
                     scene.wind.tile_cols,
+                    &settings.grain,
                 );
             } else {
-                let _ = wk_voxel::drift_floating_organic(
+                let _ = wk_voxel::drift_floating_organic_cfg(
                     &mut scene.world,
                     wind_vx,
                     scene.wind.tile_cols,
                     None,
                     None,
+                    &settings.grain,
                 );
             }
             // Bedload / bank transport after water has moved this tick.
@@ -990,12 +997,15 @@ async fn main() {
             apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
             if organisms_on {
                 let tick_no = scene.world.tick;
-                let releases = scene.organisms.step_with_climate_wind(
+                let releases = scene.organisms.step_with_carbon(
                     &mut scene.world,
                     tick_no,
                     &settings.climate,
                     Some(&mut scene.humidity),
                     wind_vx,
+                    Some(&scene.temperature),
+                    Some(&mut scene.carbon),
+                    &settings.carbon,
                 );
                 spore_fx.burst_all(&releases, wind_vx);
             }
@@ -1098,6 +1108,25 @@ async fn main() {
                 scene.params.wrap_x,
             ) {
                 if editor.spawn_picker {
+                    // Fungi: plant as mycelium infection only — no visible
+                    // fruiting body until a rich cream network emerges.
+                    if editor.blueprint.is_valid_fungus() {
+                        match wk_voxel::infect_mycelium_at(&mut scene.world, gx, gy) {
+                            Some((ox, oy)) => {
+                                editor.status = format!(
+                                    "Inoculated mycelium at ({ox},{oy}) — stalk emerges later from a rich moist network"
+                                );
+                                editor.spawn_picker = false;
+                                editor.open = false;
+                                paused = editor.was_paused;
+                                inspect = Some((ox, oy));
+                            }
+                            None => {
+                                editor.status =
+                                    "Inoculate failed — click Organic (or litter above it)".into();
+                            }
+                        }
+                    } else {
                     let body = editor.blueprint.modules_relative_to_nucleus();
                     // Tab plant-gene knobs apply when the body has land/fungus
                     // tissues; pure plankton keeps painted blueprint genes.
@@ -1141,17 +1170,6 @@ async fn main() {
                         g,
                     ) {
                         Ok(()) => {
-                            if editor.blueprint.is_valid_fungus() {
-                                if let Some(atom) = scene.organisms.atoms.last() {
-                                    let (fx, fy) = (atom.gx, atom.gy);
-                                    wk_voxel::seed_mycelium_near(
-                                        &mut scene.world,
-                                        fx,
-                                        fy,
-                                        48,
-                                    );
-                                }
-                            }
                             editor.status = format!(
                                 "Spawned {} at ({gx},{gy})  creatures={}/{} (entities, not pixels)",
                                 editor.blueprint.name,
@@ -1177,6 +1195,7 @@ async fn main() {
                         Err(wk_voxel::SpawnFail::InvalidBody) => {
                             editor.status = "Spawn failed — need a Nucleus on the canvas".into();
                         }
+                    }
                     }
                 } else {
                     inspect = Some((gx, gy));
@@ -1478,7 +1497,7 @@ async fn main() {
         editor.draw();
         terrain.draw();
         creature_list.draw(&scene.organisms);
-        settings.draw(&mut scene.world);
+        settings.draw(&mut scene.world, &scene.carbon);
         quit_dialog.draw();
 
         // HUD chrome (info + hotkeys + inspector) toggled with F1.
@@ -1496,7 +1515,7 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
@@ -1507,6 +1526,9 @@ async fn main() {
                 scene.clouds.len(),
                 scene.clouds.total_mass(),
                 scene.humidity.total_mass(),
+                scene.carbon.atmosphere,
+                scene.carbon.dissolved,
+                scene.world.spore_bank.len(),
                 draw_wind_vx,
                 scene.organisms.len(),
                 scene.organisms.atom_cap(),

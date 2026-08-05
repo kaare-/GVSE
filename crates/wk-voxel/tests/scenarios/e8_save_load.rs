@@ -4,8 +4,8 @@
 //! Product intent: save → load preserves state; sim can continue.
 
 use wk_voxel::{
-    tick, Cell, CloudStore, Humidity, OrganismStore, SimSnapshot, Temperature, Wind, World,
-    WorldgenParams, CHUNK_CELLS_W,
+    tick, CarbonBudget, Cell, CloudStore, Humidity, OrganismStore, SimSnapshot, Temperature, Wind,
+    World, WorldgenParams, CHUNK_CELLS_W,
 };
 
 use crate::helpers::{sat_sum, setup_hill_world};
@@ -74,6 +74,7 @@ fn e8_save_load_continuation() {
         temperature,
         CloudStore::new(),
         OrganismStore::new(),
+        CarbonBudget::default(),
     );
     let bytes = snap.to_bytes().expect("serialize");
     let loaded = SimSnapshot::from_bytes(&bytes).expect("deserialize");
