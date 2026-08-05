@@ -26,9 +26,10 @@ use crate::fungi::{
     FungiConfig,
     forage_organic_energy, fruiting_body_supported, fungus_should_hibernate, fungus_upkeep,
     is_fungus, is_fungus_seated, is_surface_stalk, try_emergent_fruiting, try_spore,
-    FRUIT_SUPPORT_MIN_AGE,
-    FUNGUS_HIBERNATE_MAX_TICKS,
+    FRUIT_SUPPORT_MIN_AGE, FUNGUS_HIBERNATE_MAX_TICKS,
 };
+use crate::spore_bank::{DispersalResult, SporeBankConfig};
+use crate::temperature::Temperature;
 use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::plant::{
@@ -426,6 +427,9 @@ pub struct OrganismStore {
     /// not persisted (avoids busting older sim snapshots).
     #[serde(skip)]
     pub fungi: FungiConfig,
+    /// Hibernating spore bank knobs (Tab → Life). Synced from settings.
+    #[serde(skip)]
+    pub spore_bank: SporeBankConfig,
 }
 
 impl Default for OrganismStore {
@@ -437,6 +441,7 @@ impl Default for OrganismStore {
             max_corpses: MAX_CORPSES,
             growth_caps: PlantGrowthCaps::default(),
             fungi: FungiConfig::default(),
+            spore_bank: SporeBankConfig::default(),
         }
     }
 }
@@ -708,6 +713,20 @@ impl OrganismStore {
         humidity: Option<&mut Humidity>,
         wind_vx: f32,
     ) -> Vec<SporeRelease> {
+        self.step_with_climate_wind_temp(world, tick, climate, humidity, wind_vx, None)
+    }
+
+    /// [`Self::step_with_climate_wind`] plus optional temperature for the
+    /// hibernating spore-bank cold gate.
+    pub fn step_with_climate_wind_temp(
+        &mut self,
+        world: &mut World,
+        tick: u64,
+        climate: &ClimateConfig,
+        humidity: Option<&mut Humidity>,
+        wind_vx: f32,
+        temperature: Option<&Temperature>,
+    ) -> Vec<SporeRelease> {
         let day = day_factor_cfg(tick, climate);
         let phase = phase_fraction_cfg(tick, climate);
         // Posed draw cells (flop + pile) feed canopy shade so dry mats and
@@ -726,6 +745,7 @@ impl OrganismStore {
         let atom_cap = self.atom_cap();
         let growth_caps = self.growth_caps.clamp();
         let fungi_cfg = self.fungi;
+        let bank_cfg = self.spore_bank;
         // One crown per column: destack any pre-existing overlaps first.
         reseat_stacked_land_plants(world, &mut self.atoms);
         reseat_stacked_fungi(world, &mut self.atoms);
@@ -809,6 +829,7 @@ impl OrganismStore {
                     &plant_cols,
                     wind_vx,
                     &float_columns,
+                    &bank_cfg,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -830,6 +851,14 @@ impl OrganismStore {
                         plant_cols.push(child.gx);
                         births.push(child);
                     }
+                    PlantStep::SporeBanked { gx, gy } => {
+                        spore_releases.push(SporeRelease {
+                            from_gx: parent_gx,
+                            from_gy: parent_gy,
+                            to_gx: gx,
+                            to_gy: gy,
+                        });
+                    }
                 }
                 continue;
             }
@@ -848,6 +877,7 @@ impl OrganismStore {
                     wind_vx,
                     &fungus_cols,
                     &fungi_cfg,
+                    &bank_cfg,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
@@ -864,6 +894,14 @@ impl OrganismStore {
                         });
                         fungus_cols.push(child.gx);
                         births.push(child);
+                    }
+                    PlantStep::SporeBanked { gx, gy } => {
+                        spore_releases.push(SporeRelease {
+                            from_gx: parent_gx,
+                            from_gy: parent_gy,
+                            to_gx: gx,
+                            to_gy: gy,
+                        });
                     }
                 }
                 continue;
@@ -944,6 +982,40 @@ impl OrganismStore {
                 fungus_cols_now.push(child.gx);
                 self.atoms.push(child);
             }
+        }
+        // Hibernating spore bank — wake when moisture / space / warmth return.
+        let plant_cols_now: Vec<i32> = self
+            .atoms
+            .iter()
+            .filter(|a| is_land_plant(a))
+            .map(|a| a.gx)
+            .collect();
+        fungus_cols_now = self
+            .atoms
+            .iter()
+            .filter(|a| is_fungus(a))
+            .map(|a| a.gx)
+            .collect();
+        let room = atom_cap.saturating_sub(self.atoms.len());
+        let mut bank = std::mem::take(&mut world.spore_bank);
+        let woken = bank.step(
+            world,
+            tick,
+            &bank_cfg,
+            temperature,
+            &plant_cols_now,
+            &fungus_cols_now,
+            room,
+        );
+        world.spore_bank = bank;
+        for child in woken {
+            spore_releases.push(SporeRelease {
+                from_gx: child.gx,
+                from_gy: child.gy,
+                to_gx: child.gx,
+                to_gy: child.gy,
+            });
+            self.atoms.push(child);
         }
         let _ = fungus_cols_now;
         resolve_contacts(world, &mut self.atoms);
@@ -1115,6 +1187,8 @@ enum PlantStep {
     Sprout(Atom),
     /// Wind-borne spore child (fern / fruiting body) — emit VFX.
     Spore(Atom),
+    /// Spore landed but hibernated in [`World::spore_bank`] — emit VFX only.
+    SporeBanked { gx: i32, gy: i32 },
 }
 
 /// One wind-spore launch for the renderer (ephemeral; not saved).
@@ -1250,6 +1324,7 @@ fn step_land_plant(
     plant_cols: &[i32],
     wind_vx: f32,
     float_columns: &std::collections::HashMap<i32, (i32, i32)>,
+    bank_cfg: &SporeBankConfig,
 ) -> PlantStep {
     // Pose / seat:
     // - Sand/rock purchase wins: once grounded, organics and water never
@@ -1472,10 +1547,19 @@ fn step_land_plant(
     atom.genome = genome_save;
     sync_root_storage(atom);
     // Fern-style wind spores before local rhizome (longer range, needs ReproSpore).
-    if let Some(child) =
-        try_plant_wind_spore(world, atom, tick, entity_id, pop_room, plant_cols, wind_vx)
-    {
-        return PlantStep::Spore(child);
+    match try_plant_wind_spore(
+        world,
+        atom,
+        tick,
+        entity_id,
+        pop_room,
+        plant_cols,
+        wind_vx,
+        bank_cfg,
+    ) {
+        DispersalResult::Germinated(child) => return PlantStep::Spore(child),
+        DispersalResult::Banked { gx, gy } => return PlantStep::SporeBanked { gx, gy },
+        DispersalResult::None => {}
     }
     if let Some(child) =
         try_vegetative_sprout(world, atom, tick, entity_id, pop_room, plant_cols)
@@ -1500,6 +1584,7 @@ fn step_fungus(
     wind_vx: f32,
     fungus_cols: &[i32],
     fungi_cfg: &FungiConfig,
+    bank_cfg: &SporeBankConfig,
 ) -> PlantStep {
     pin_plant_pose(atom);
     // Prefer surface Air-on-bed seats; fall back to Air-above-solid crown.
@@ -1571,10 +1656,19 @@ fn step_fungus(
         return PlantStep::Dead;
     }
     if !dormant {
-        if let Some(child) =
-            try_spore(world, atom, tick, entity_id, pop_room, wind_vx, fungus_cols)
-        {
-            return PlantStep::Spore(child);
+        match try_spore(
+            world,
+            atom,
+            tick,
+            entity_id,
+            pop_room,
+            wind_vx,
+            fungus_cols,
+            bank_cfg,
+        ) {
+            DispersalResult::Germinated(child) => return PlantStep::Spore(child),
+            DispersalResult::Banked { gx, gy } => return PlantStep::SporeBanked { gx, gy },
+            DispersalResult::None => {}
         }
     }
     PlantStep::Alive {

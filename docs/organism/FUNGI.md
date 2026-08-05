@@ -183,6 +183,10 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   the water mass store: surface Organic can oxidize to Soil and credit
   atm C; lakes exchange atm ↔ dissolved on a slow cadence. Algae /
   O₂ creatures can draw these pools later — not a per-tick chemistry field.
+- **Spore bank** (`World::spore_bank`): fruiting-body / plant wind spores
+  that cannot germinate on landing (crowded, dry, cold, buried) stay tied
+  to that cell and wake on a slow cadence when conditions improve — a
+  crude seed/spore bank for droughts and cold snaps.
 
 Ghost-root Void fill remains a column-kernel / later voxel goal.
 

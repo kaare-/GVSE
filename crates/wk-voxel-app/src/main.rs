@@ -997,12 +997,13 @@ async fn main() {
             apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
             if organisms_on {
                 let tick_no = scene.world.tick;
-                let releases = scene.organisms.step_with_climate_wind(
+                let releases = scene.organisms.step_with_climate_wind_temp(
                     &mut scene.world,
                     tick_no,
                     &settings.climate,
                     Some(&mut scene.humidity),
                     wind_vx,
+                    Some(&scene.temperature),
                 );
                 spore_fx.burst_all(&releases, wind_vx);
             }
@@ -1503,7 +1504,7 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} wind={:.2} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
@@ -1516,6 +1517,7 @@ async fn main() {
                 scene.humidity.total_mass(),
                 scene.carbon.atmosphere,
                 scene.carbon.dissolved,
+                scene.world.spore_bank.len(),
                 draw_wind_vx,
                 scene.organisms.len(),
                 scene.organisms.atom_cap(),

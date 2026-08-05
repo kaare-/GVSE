@@ -29,6 +29,7 @@ pub mod plant;
 pub mod rules;
 pub mod save;
 pub mod shade;
+pub mod spore_bank;
 pub mod temperature;
 pub mod wind;
 pub mod worldgen;
@@ -65,6 +66,9 @@ pub use failure::{
 };
 pub use carbon::{
     step_carbon_budget, CarbonBudget, CarbonConfig, AMBIENT_ATM_C, AMBIENT_DISSOLVED_C,
+};
+pub use spore_bank::{
+    spore_bank_len, DormantSpore, SporeBank, SporeBankConfig, SporeKind, SPORE_BANK_PERIOD,
 };
 pub use fungi::{
     add_soft_litter, compost_organic_to_soil, is_fungus, is_surface_stalk, max_mycelium_near,

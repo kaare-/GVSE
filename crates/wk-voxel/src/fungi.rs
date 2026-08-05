@@ -190,7 +190,7 @@ fn take_soft_litter(world: &mut World, gx: i32, want: u16) -> u16 {
 }
 
 /// Count Organic solid cells in the litter / soil band near the fungus.
-fn organic_cells_near(world: &World, gx: i32, gy: i32) -> u32 {
+pub(crate) fn organic_cells_near(world: &World, gx: i32, gy: i32) -> u32 {
     let gx = world.wrap_x(gx);
     let mut n = 0u32;
     for dx in -ORGANIC_SCAN_RADIUS..=ORGANIC_SCAN_RADIUS {
@@ -988,12 +988,15 @@ pub fn try_spore(
     pop_room: bool,
     wind_vx: f32,
     fungus_cols: &[i32],
-) -> Option<Atom> {
-    if !pop_room || atom.cooldown > 0 {
-        return None;
+    bank_cfg: &crate::spore_bank::SporeBankConfig,
+) -> crate::spore_bank::DispersalResult {
+    use crate::spore_bank::{packet_from_child, DispersalResult, SporeKind};
+
+    if atom.cooldown > 0 {
+        return DispersalResult::None;
     }
     if !is_fungus(atom) || digest_count(atom) < 1 {
-        return None;
+        return DispersalResult::None;
     }
     if atom
         .body
@@ -1002,16 +1005,16 @@ pub fn try_spore(
         .count()
         < 1
     {
-        return None;
+        return DispersalResult::None;
     }
     let stalk = is_surface_stalk(world, atom);
     // Stalks only launch once mycelium has breached this column's surface.
     if stalk && fruiting_surface_ready(world, atom.gx).is_none() {
-        return None;
+        return DispersalResult::None;
     }
     // Buried bodies may rhizomorph without a surface breach.
     if !stalk && !is_fungus_seated(world, atom) {
-        return None;
+        return DispersalResult::None;
     }
     let local = count_fungi_near(
         fungus_cols,
@@ -1020,7 +1023,7 @@ pub fn try_spore(
         world.wrap_width,
     );
     if local >= FUNGUS_SPORE_LOCAL_MAX {
-        return None;
+        return DispersalResult::None;
     }
     let tank = if atom.energy_base_max >= 1.0 {
         atom.energy_base_max
@@ -1029,18 +1032,30 @@ pub fn try_spore(
     }
     .max(1.0);
     if atom.energy < tank * FUNGUS_SPORE_ENERGY_FRAC {
-        return None;
+        return DispersalResult::None;
     }
     // Extra rarity gate beyond cooldown (stalks rarer than local hops).
     let h = hash_u64(world.seed.0, tick, entity_id as u64, 0xF801_700D);
     let odds = if stalk { 17 } else { 11 };
     if h % odds != 0 {
-        return None;
+        return DispersalResult::None;
     }
-    let (wx, gy) = pick_spore_site_mode(world, atom, tick, entity_id, wind_vx, fungus_cols, stalk)?;
+    // Prefer a ready seat; bank-capable pick lands even on crowded/dry columns.
+    let Some((wx, gy)) =
+        pick_spore_site_mode(world, atom, tick, entity_id, wind_vx, fungus_cols, stalk)
+            .or_else(|| {
+                if bank_cfg.enabled {
+                    pick_spore_bank_landing(world, atom, tick, entity_id, wind_vx, stalk)
+                } else {
+                    None
+                }
+            })
+    else {
+        return DispersalResult::None;
+    };
     let cost = tank * if stalk { 0.45 } else { 0.32 };
     if atom.energy < cost {
-        return None;
+        return DispersalResult::None;
     }
     atom.energy -= cost;
     atom.cooldown = if stalk {
@@ -1078,14 +1093,70 @@ pub fn try_spore(
         FUNGUS_SPORE_PERIOD
     };
     pin_plant_pose(&mut child);
-    if !is_fungus_seated(world, &child) {
-        atom.energy = (atom.energy + cost).min(atom.energy_max);
-        atom.cooldown = 0;
-        return None;
+
+    let organic = organic_cells_near(world, wx, gy) as f32;
+    let litter = soft_litter_at(world, wx) as f32;
+    let food_ok = organic >= 1.0 || litter >= FUNGUS_STARVE_UNITS;
+    let col_free = !fungus_cols
+        .iter()
+        .any(|&ox| world.wrap_x(ox) == world.wrap_x(wx));
+    let local_ok = count_fungi_near(
+        fungus_cols,
+        wx,
+        FUNGUS_SPORE_LOCAL_RADIUS,
+        world.wrap_width,
+    ) < FUNGUS_SPORE_LOCAL_MAX;
+    let ready = pop_room && food_ok && col_free && local_ok && is_fungus_seated(world, &child);
+    if ready {
+        seed_mycelium_near(world, wx, gy, if stalk { 24 } else { 18 });
+        return DispersalResult::Germinated(child);
     }
-    // Spore / rhizomorph germinates as faint threads in the landing Organic.
-    seed_mycelium_near(world, wx, gy, if stalk { 24 } else { 18 });
-    Some(child)
+    if bank_cfg.enabled {
+        let packet = packet_from_child(SporeKind::Fungus, &child, tick, stalk);
+        let wx = world.wrap_x(wx);
+        if world.spore_bank.deposit(wx, gy, packet, bank_cfg) {
+            return DispersalResult::Banked { gx: wx, gy };
+        }
+    }
+    atom.energy = (atom.energy + cost).min(atom.energy_max);
+    atom.cooldown = 0;
+    DispersalResult::None
+}
+
+/// Any fungus crown downwind — ignores density / food (hibernation landing).
+fn pick_spore_bank_landing(
+    world: &World,
+    atom: &Atom,
+    tick: u64,
+    id: u32,
+    wind_vx: f32,
+    wind_far: bool,
+) -> Option<(i32, i32)> {
+    let prefer_dir = if wind_vx.abs() < 0.05 {
+        if hash_u64(world.seed.0, tick, id as u64, 0xBA11) & 1 == 0 {
+            1
+        } else {
+            -1
+        }
+    } else if wind_vx > 0.0 {
+        1
+    } else {
+        -1
+    };
+    let (min_d, max_d) = if wind_far {
+        (FUNGUS_STALK_SPORE_MIN_DIST, FUNGUS_STALK_SPORE_MAX_DIST)
+    } else {
+        (1, FUNGUS_RHIZOMORPH_MAX_DIST)
+    };
+    for dist in min_d..=max_d {
+        for &sign in &[prefer_dir, -prefer_dir] {
+            let wx = world.wrap_x(atom.gx + sign * dist);
+            if let Some(gy) = find_fungus_slot_biased(world, wx, atom.gy, wind_far) {
+                return Some((wx, gy));
+            }
+        }
+    }
+    None
 }
 
 /// Soft litter + one Organic on the bed (fallback when no body cells paint).
@@ -1534,14 +1605,19 @@ mod tests {
             add_soft_litter(&mut w, x, 20);
         }
         let mut atom = Atom::from_body(4, 4, 40.0, fungus_body());
-        // Entire moist plot claimed — must not stack on any column.
+        // Entire moist plot claimed — must not germinate on any column
+        // (may hibernate in the spore bank instead).
         let occupied: Vec<i32> = (0..12).collect();
+        let bank = crate::spore_bank::SporeBankConfig::default();
         for tick in 0..4_000u64 {
             atom.energy = atom.energy_max;
             atom.cooldown = 0;
             assert!(
-                try_spore(&mut w, &mut atom, tick, 7, true, 0.4, &occupied).is_none(),
-                "spore must not land on an occupied fungus column"
+                !matches!(
+                    try_spore(&mut w, &mut atom, tick, 7, true, 0.4, &occupied, &bank),
+                    crate::spore_bank::DispersalResult::Germinated(_)
+                ),
+                "spore must not germinate on an occupied fungus column"
             );
         }
     }
@@ -1560,11 +1636,14 @@ mod tests {
         atom.cooldown = 0;
         assert!(is_surface_stalk(&w, &atom));
         assert!(fruiting_surface_ready(&w, 4).is_some());
+        let bank = crate::spore_bank::SporeBankConfig::default();
         let mut spore = None;
         for tick in 0..4_000u64 {
             atom.energy = atom.energy_max;
             atom.cooldown = 0;
-            if let Some(c) = try_spore(&mut w, &mut atom, tick, 7, true, 0.4, &[4]) {
+            if let crate::spore_bank::DispersalResult::Germinated(c) =
+                try_spore(&mut w, &mut atom, tick, 7, true, 0.4, &[4], &bank)
+            {
                 spore = Some(c);
                 break;
             }
@@ -1593,11 +1672,14 @@ mod tests {
         let mut atom = Atom::from_body(4, 2, 40.0, fungus_body());
         assert!(!is_surface_stalk(&w, &atom));
         assert!(is_fungus_seated(&w, &atom));
+        let bank = crate::spore_bank::SporeBankConfig::default();
         let mut child = None;
         for tick in 0..4_000u64 {
             atom.energy = atom.energy_max;
             atom.cooldown = 0;
-            if let Some(c) = try_spore(&mut w, &mut atom, tick, 11, true, 0.4, &[4]) {
+            if let crate::spore_bank::DispersalResult::Germinated(c) =
+                try_spore(&mut w, &mut atom, tick, 11, true, 0.4, &[4], &bank)
+            {
                 child = Some(c);
                 break;
             }

@@ -149,8 +149,11 @@ Features:
 - Standing rain counts as moisture; **never** flash Organic → Sand
 - Mycelium compost Organic → `MaterialId::Soil` (sat preserved; Tab knobs)
 - Crude CO₂ buckets (atm + dissolved) for litter oxidation / later blooms
+- **Spore bank:** wind spores that land dry / crowded / cold hibernate on the
+  landing cell and may germinate much later when moisture, space, or warmth
+  return (Tab → Life → Spore bank; HUD `spores=`)
 - Editor: `F` fruiting body; brushes `5` Digest / `6` Hypha / `7` ReproSpore;
-  F3 Soil brush; Tab → Life pages for compost + carbon
+  F3 Soil brush; Tab → Life pages for compost + carbon + spore bank
 
 ### E1b — Lingering corpses → Organic *(landed)*
 

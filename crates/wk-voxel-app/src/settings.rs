@@ -8,8 +8,8 @@ use wk_material::{MaterialId, MaterialRegistry, MATERIAL_COUNT};
 use wk_voxel::{
     CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CondensationConfig, EvapConfig,
     FailureConfig, FungiConfig, Genome, GrainConfig, KarstConfig, OrographicConfig, PerfConfig,
-    PhaseConfig, PlantGrowthCaps, RainConfig, TempConfig, World, WorldgenParams, CHUNK_CELLS_W,
-    MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
+    PhaseConfig, PlantGrowthCaps, RainConfig, SporeBankConfig, TempConfig, World, WorldgenParams,
+    CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 
 /// Top-level Tab settings pages (keeps the long menu navigable).
@@ -84,6 +84,8 @@ pub struct SimSettings {
     pub fungi: FungiConfig,
     /// Crude CO₂ buckets (Tab → Life → Carbon).
     pub carbon: CarbonConfig,
+    /// Hibernating spore bank (Tab → Life → Spore bank).
+    pub spore_bank: SporeBankConfig,
     /// Which settings page is open.
     pub page: SettingsPage,
     /// Physics trade-offs (Tab → Performance). Defaults preserve water feel.
@@ -178,6 +180,7 @@ impl SimSettings {
             grain: GrainConfig::default(),
             fungi: FungiConfig::default(),
             carbon: CarbonConfig::default(),
+            spore_bank: SporeBankConfig::default(),
             page: SettingsPage::World,
             perf: PerfConfig::default(),
             failure: FailureConfig::default(),
@@ -334,7 +337,9 @@ impl SimSettings {
                         SettingsPage::World => "World — size, materials, karst",
                         SettingsPage::Climate => "Climate — day/night, ice, wind, clouds, rain",
                         SettingsPage::Physics => "Physics — performance, geotech, grain",
-                        SettingsPage::Life => "Life — creatures, plants, fungi compost, carbon",
+                        SettingsPage::Life => {
+                            "Life — creatures, plants, fungi compost, carbon, spore bank"
+                        }
                     },
                 );
                 ui.separator();
@@ -1188,7 +1193,53 @@ impl SimSettings {
                         ),
                     );
                 });
-                } // Life
+                
+                ui.separator();
+
+                ui.tree_node(hash!(), "Spore bank", |ui| {
+                    ui.label(
+                        None,
+                        "Spores that land dry / crowded / cold hibernate on that cell                          and may germinate much later when conditions improve.",
+                    );
+                    ui.checkbox(hash!(), "Spore bank enabled", &mut self.spore_bank.enabled);
+                    let mut period = self.spore_bank.step_period as f32;
+                    let mut per_cell = self.spore_bank.max_per_cell as f32;
+                    let mut max_total = self.spore_bank.max_total as f32;
+                    let mut max_age = self.spore_bank.max_age_ticks as f32;
+                    let mut odds = self.spore_bank.germinate_odds as f32;
+                    labeled_slider(ui, hash!(), "Wake period (ticks)", 8.0..512.0, &mut period);
+                    labeled_slider(ui, hash!(), "Max per cell", 1.0..16.0, &mut per_cell);
+                    labeled_slider(ui, hash!(), "Max total banked", 16.0..2048.0, &mut max_total);
+                    labeled_slider(ui, hash!(), "Max age (ticks)", 1_000.0..500_000.0, &mut max_age);
+                    labeled_slider(ui, hash!(), "Germinate odds (1-in-N)", 1.0..64.0, &mut odds);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Min temp °C (cold gate)",
+                        -10.0..20.0,
+                        &mut self.spore_bank.min_temp_c,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Plant min bed moisture",
+                        0.0..0.2,
+                        &mut self.spore_bank.plant_min_moist,
+                    );
+                    self.spore_bank.step_period = period.round().clamp(1.0, 10_000.0) as u64;
+                    self.spore_bank.max_per_cell = per_cell.round().clamp(1.0, 32.0) as u8;
+                    self.spore_bank.max_total = max_total.round().clamp(1.0, 8_000.0) as u16;
+                    self.spore_bank.max_age_ticks = max_age.round().clamp(100.0, 2_000_000.0) as u64;
+                    self.spore_bank.germinate_odds = odds.round().clamp(1.0, 10_000.0) as u64;
+                    if ui.button(None, "Reset spore bank knobs to defaults") {
+                        self.spore_bank = SporeBankConfig::default();
+                    }
+                    ui.label(
+                        None,
+                        &format!("Live banked spores: {}", world.spore_bank.len()),
+                    );
+                });
+} // Life
                 ui.separator();
                 ui.label(
                     None,
@@ -1246,6 +1297,7 @@ impl SimSettings {
         }
         .clamp();
         organisms.fungi = self.fungi;
+        organisms.spore_bank = self.spore_bank;
     }
 
     /// Pull growth + pop caps from a loaded organism store into the UI.

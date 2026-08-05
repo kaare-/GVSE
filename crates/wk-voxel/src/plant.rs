@@ -361,7 +361,7 @@ pub fn plant_moisture_frac(world: &World, atom: &Atom) -> f32 {
     root_moisture_frac(world, atom).max(leaf_bathing_frac(world, atom))
 }
 
-fn cell_moisture_frac(world: &World, gx: i32, gy: i32) -> f32 {
+pub(crate) fn cell_moisture_frac(world: &World, gx: i32, gy: i32) -> f32 {
     let Some(cell) = world.get_cell(gx, gy) else {
         return 0.0;
     };
@@ -2230,6 +2230,9 @@ pub fn spore_dispersal_body(parent: &Atom) -> Vec<BodyModule> {
 }
 
 /// Wind-biased moist plant seat farther than rhizome reach (fern spores).
+///
+/// When `allow_bank` is true, dry / crowded columns still score as
+/// hibernation landings (spore bank) so dispersal is not lost.
 pub fn pick_plant_spore_column(
     world: &World,
     atom: &Atom,
@@ -2237,6 +2240,18 @@ pub fn pick_plant_spore_column(
     entity_id: u32,
     wind_vx: f32,
     plant_cols: &[i32],
+) -> Option<(i32, i32)> {
+    pick_plant_spore_column_mode(world, atom, tick, entity_id, wind_vx, plant_cols, false)
+}
+
+fn pick_plant_spore_column_mode(
+    world: &World,
+    atom: &Atom,
+    tick: u64,
+    entity_id: u32,
+    wind_vx: f32,
+    plant_cols: &[i32],
+    allow_bank: bool,
 ) -> Option<(i32, i32)> {
     let prefer_dir = if wind_vx.abs() < 0.05 {
         let flip = hash_u64_plant(world.seed.0, tick, entity_id as u64, 0xFE7A) & 1;
@@ -2254,23 +2269,24 @@ pub fn pick_plant_spore_column(
     for dist in PLANT_SPORE_MIN_DIST..=PLANT_SPORE_MAX_DIST {
         for &sign in &[prefer_dir, -prefer_dir] {
             let wx = world.wrap_x(atom.gx + sign * dist);
-            if !crown_clearance_ok(plant_cols, wx, world.wrap_width) {
-                continue;
-            }
             let Some(gy) = find_plant_slot(world, wx, atom.gy) else {
                 continue;
             };
             let moist = cell_moisture_frac(world, wx, gy - 1);
-            if moist < 0.02 {
-                continue;
-            }
+            let clear = crown_clearance_ok(plant_cols, wx, world.wrap_width);
             let local = count_plants_near(plant_cols, wx, SPROUT_LOCAL_RADIUS, world.wrap_width);
-            if local >= SPROUT_LOCAL_MAX {
+            let roomy = local < SPROUT_LOCAL_MAX;
+            let ready = clear && moist >= 0.02 && roomy;
+            if !ready && !allow_bank {
                 continue;
             }
             let downwind = if sign == prefer_dir { 2.5 } else { 0.0 };
-            // Prefer farther downwind seats slightly (true aerial spread).
-            let score = moist * 2.0 + dist as f32 * 0.04 + downwind;
+            // Ready seats outrank bank-only landings.
+            let score = if ready {
+                moist * 2.0 + dist as f32 * 0.04 + downwind + 50.0
+            } else {
+                moist * 0.5 + dist as f32 * 0.02 + downwind
+            };
             if best.map(|(s, _, _)| score > s).unwrap_or(true) {
                 best = Some((score, wx, gy));
             }
@@ -2280,41 +2296,53 @@ pub fn pick_plant_spore_column(
 }
 
 /// Fern-style wind spore: needs painted [`ModuleId::ReproSpore`], energy,
-/// cooldown, pop room, and a moist unoccupied seat downwind.
+/// cooldown, and a downwind landing. Germinates immediately when the seat
+/// is moist / uncrowded; otherwise hibernates in [`World::spore_bank`].
 pub fn try_plant_wind_spore(
-    world: &World,
+    world: &mut World,
     atom: &mut Atom,
     tick: u64,
     entity_id: u32,
     pop_room: bool,
     plant_cols: &[i32],
     wind_vx: f32,
-) -> Option<Atom> {
-    if !pop_room || atom.cooldown > 0 {
-        return None;
+    bank_cfg: &crate::spore_bank::SporeBankConfig,
+) -> crate::spore_bank::DispersalResult {
+    use crate::spore_bank::{packet_from_child, plant_seat_ready, DispersalResult, SporeKind};
+
+    if atom.cooldown > 0 {
+        return DispersalResult::None;
     }
     if !is_land_plant(atom) || spore_count(atom) < 1 {
-        return None;
+        return DispersalResult::None;
     }
     // Need a photosystem / stem "frond" to launch from — roots alone can't.
     if atom.photosystem_count() < 1 && stem_count(atom) < 1 {
-        return None;
+        return DispersalResult::None;
     }
     let tank = tank_ref(atom);
     if atom.energy < tank * PLANT_SPORE_ENERGY_FRAC {
-        return None;
+        return DispersalResult::None;
     }
     let h = hash_u64_plant(world.seed.0, tick, entity_id as u64, 0x5F07_E001);
     if h % PLANT_SPORE_ODDS != 0 {
-        return None;
+        return DispersalResult::None;
     }
-    let (wx, gy) = pick_plant_spore_column(world, atom, tick, entity_id, wind_vx, plant_cols)?;
-    if !crown_clearance_ok(plant_cols, wx, world.wrap_width) {
-        return None;
-    }
+    // Prefer a ready seat; fall back to any plantable crown for the bank.
+    let Some((wx, gy)) = pick_plant_spore_column_mode(
+        world,
+        atom,
+        tick,
+        entity_id,
+        wind_vx,
+        plant_cols,
+        bank_cfg.enabled,
+    ) else {
+        return DispersalResult::None;
+    };
     let cost = tank * PLANT_SPORE_COST_FRAC;
     if atom.energy < cost {
-        return None;
+        return DispersalResult::None;
     }
     atom.energy -= cost;
     atom.cooldown = PLANT_SPORE_PERIOD;
@@ -2334,12 +2362,25 @@ pub fn try_plant_wind_spore(
     child.energy = (cost * 0.5).clamp(1.0, child.energy_max);
     child.cooldown = PLANT_SPORE_PERIOD;
     pin_plant_pose(&mut child);
-    if !is_anchored(world, &child) {
-        atom.energy = (atom.energy + cost).min(atom.energy_max);
-        atom.cooldown = 0;
-        return None;
+
+    let ready = pop_room
+        && plant_seat_ready(world, wx, gy, plant_cols, bank_cfg.plant_min_moist)
+        && is_anchored(world, &child);
+    if ready {
+        return DispersalResult::Germinated(child);
     }
-    Some(child)
+    // Hibernation: keep the spent dispersal as a cell-tied dormant packet.
+    if bank_cfg.enabled {
+        let packet = packet_from_child(SporeKind::Plant, &child, tick, true);
+        let wx = world.wrap_x(wx);
+        if world.spore_bank.deposit(wx, gy, packet, bank_cfg) {
+            return DispersalResult::Banked { gx: wx, gy };
+        }
+    }
+    // Bank full / disabled — refund like the old failure path.
+    atom.energy = (atom.energy + cost).min(atom.energy_max);
+    atom.cooldown = 0;
+    DispersalResult::None
 }
 
 fn hash_u64_plant(a: u64, b: u64, c: u64, salt: u64) -> u64 {
@@ -4570,7 +4611,7 @@ mod tests {
 
     #[test]
     fn plant_without_spore_module_cannot_wind_spore() {
-        let w = moist_plot();
+        let mut w = moist_plot();
         let mut atom = Atom::from_body(
             4,
             2,
@@ -4579,9 +4620,13 @@ mod tests {
         );
         atom.energy = atom.energy_max;
         atom.cooldown = 0;
+        let bank = crate::spore_bank::SporeBankConfig::default();
         for t in 0..500u64 {
             assert!(
-                try_plant_wind_spore(&w, &mut atom, t, 1, true, &[], 0.5).is_none(),
+                matches!(
+                    try_plant_wind_spore(&mut w, &mut atom, t, 1, true, &[], 0.5, &bank),
+                    crate::spore_bank::DispersalResult::None
+                ),
                 "bare plant must not wind-spore"
             );
             atom.energy = atom.energy_max;
@@ -4591,16 +4636,19 @@ mod tests {
 
     #[test]
     fn fern_with_repro_spore_spreads_downwind() {
-        let w = moist_plot();
+        let mut w = moist_plot();
         let mut atom = Atom::from_body(4, 2, 60.0, fern_body());
         // Enough roots to seat; wind spore itself only needs ReproSpore + leaf.
         assert!(is_anchored(&w, &atom));
         assert!(spore_count(&atom) >= 1);
+        let bank = crate::spore_bank::SporeBankConfig::default();
         let mut child = None;
         for t in 0..4_000u64 {
             atom.energy = atom.energy_max;
             atom.cooldown = 0;
-            if let Some(c) = try_plant_wind_spore(&w, &mut atom, t, 3, true, &[4], 0.8) {
+            if let crate::spore_bank::DispersalResult::Germinated(c) =
+                try_plant_wind_spore(&mut w, &mut atom, t, 3, true, &[4], 0.8, &bank)
+            {
                 child = Some(c);
                 break;
             }
