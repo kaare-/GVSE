@@ -18,6 +18,7 @@
 //! Soft litter is bonus fuel. Long colonization may compost Organic → Soil
 //! (never Sand). Spec: `docs/organism/FUNGI.md`, `docs/organism/VOXEL_PLANTS.md`.
 
+use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::blueprint::{mutate_body, Genome};
@@ -25,6 +26,31 @@ use crate::cell::{water_capacity, Cell, CellFlags};
 use crate::grid::World;
 use crate::organism::{Atom, ModuleId};
 use crate::plant::{apply_genome, find_fungus_slot_biased, pin_plant_pose};
+
+/// Live Tab knobs for mycelium compost (Organic → Soil).
+///
+/// Defaults are intentionally faster than the old hard-coded
+/// `220 / 1-in-6000` so thick litter blankets humify before plants starve
+/// for pore water. Raise odds / threshold to slow compost again.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FungiConfig {
+    /// Mycelium intensity before Organic may compost into Soil.
+    pub soil_mycelium_threshold: u8,
+    /// 1-in-N chance per eligible pulse to compost a threaded cell.
+    /// Lower = faster humification.
+    pub soil_convert_odds: u64,
+}
+
+impl Default for FungiConfig {
+    fn default() -> Self {
+        Self {
+            // Was 220 — lower so mid-thread beds can humify.
+            soil_mycelium_threshold: 140,
+            // Was 6_000 — ~7.5× faster expected compost pulses.
+            soil_convert_odds: 800,
+        }
+    }
+}
 
 /// Soft litter units treated as fully labile food (per column).
 /// Stratigraphic Organic cells are substrate (mycelium), not instant fuel.
@@ -66,10 +92,11 @@ pub const MYCELIUM_EMERGE_ODDS: u64 = 36;
 pub const MYCELIUM_EMERGE_COST: u8 = 16;
 /// Starting energy fraction for an emerged fruiting body (can spore soon).
 pub const MYCELIUM_EMERGE_ENERGY_FRAC: f32 = 0.75;
-/// Intensity before Organic may compost into Soil.
-pub const MYCELIUM_SOIL_THRESHOLD: u8 = 220;
-/// 1-in-N chance per eligible growth pulse to compost a fully threaded cell.
-pub const MYCELIUM_SOIL_CONVERT_ODDS: u64 = 6_000;
+/// Legacy default intensity before Organic may compost into Soil.
+/// Prefer [`FungiConfig::soil_mycelium_threshold`].
+pub const MYCELIUM_SOIL_THRESHOLD: u8 = 140;
+/// Legacy 1-in-N compost odds. Prefer [`FungiConfig::soil_convert_odds`].
+pub const MYCELIUM_SOIL_CONVERT_ODDS: u64 = 800;
 /// Neighbour Organic cells colonized from a threaded cell (1-in-N).
 pub const MYCELIUM_SPREAD_ODDS: u64 = 48;
 /// Upkeep per Hypha module / tick while active.
@@ -296,10 +323,18 @@ fn organic_cell_moist_frac(world: &World, gx: i32, gy: i32) -> f32 {
 /// Autonomous mycelium field: thicken / spread on moist Organic without a
 /// living fruiting body. Call from the world tick.
 pub fn step_mycelium_field(world: &mut World) {
+    step_mycelium_field_cfg(world, &FungiConfig::default());
+}
+
+/// [`step_mycelium_field`] with live [`FungiConfig`] compost knobs.
+pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
     if world.tick % MYCELIUM_FIELD_PERIOD != 0 {
         return;
     }
     use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
+
+    let threshold = cfg.soil_mycelium_threshold;
+    let convert_odds = cfg.soil_convert_odds.max(1);
 
     let mut colonized: Vec<(i32, i32, u8)> = Vec::new();
     let coords: Vec<_> = world.chunks.keys().copied().collect();
@@ -348,9 +383,9 @@ pub fn step_mycelium_field(world: &mut World) {
                     spreads.push((gx, gy));
                 }
             }
-            if myc >= MYCELIUM_SOIL_THRESHOLD {
+            if myc >= threshold {
                 let h = hash_u64(seed, tick, gx as u64, 0x5011u64);
-                if h % MYCELIUM_SOIL_CONVERT_ODDS == 0 {
+                if h % convert_odds == 0 {
                     compost_organic_to_soil(world, gx, gy);
                 }
             }
@@ -546,6 +581,19 @@ pub fn colonize_and_compost(
     atom: &Atom,
     tick: u64,
 ) -> f32 {
+    colonize_and_compost_cfg(world, gx, gy, genome, atom, tick, &FungiConfig::default())
+}
+
+/// [`colonize_and_compost`] with live [`FungiConfig`] compost knobs.
+pub fn colonize_and_compost_cfg(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    genome: &Genome,
+    atom: &Atom,
+    tick: u64,
+    cfg: &FungiConfig,
+) -> f32 {
     let mut energy = 0.0f32;
     let n_h = hypha_count(atom) as u8;
     let rate = genome.digest_rate.clamp(0.05, 2.0);
@@ -558,6 +606,8 @@ pub fn colonize_and_compost(
     let Some((ox, oy)) = find_organic_xy(world, gx, gy) else {
         return 0.0;
     };
+    let threshold = cfg.soil_mycelium_threshold;
+    let convert_odds = cfg.soil_convert_odds.max(1);
     if let Some(mut c) = world.get_cell(ox, oy) {
         let before = c.mycelium();
         if before < 255 {
@@ -583,9 +633,9 @@ pub fn colonize_and_compost(
             .get_cell(ox, oy)
             .map(|c| c.mycelium())
             .unwrap_or(before);
-        if intensity >= MYCELIUM_SOIL_THRESHOLD {
+        if intensity >= threshold {
             let h = hash_u64(world.seed.0, tick, ox as u64, oy as u64);
-            if h % MYCELIUM_SOIL_CONVERT_ODDS == 0 {
+            if h % convert_odds == 0 {
                 compost_organic_to_soil(world, ox, oy);
             }
         }
@@ -1575,5 +1625,34 @@ mod tests {
         // Cap is 1 now — budget stays at cap but call must not panic.
         assert!(boosted >= 1);
         assert!(base >= 1);
+    }
+
+    #[test]
+    fn fast_fungi_config_composts_threaded_organic() {
+        let mut w = litter_plot();
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(120);
+            org.set_mycelium(200);
+            w.set_cell(4, y, org);
+        }
+        let cfg = FungiConfig {
+            soil_mycelium_threshold: 100,
+            soil_convert_odds: 1, // every eligible pulse
+        };
+        let mut saw_soil = false;
+        for t in 0..40u64 {
+            w.tick = t * MYCELIUM_FIELD_PERIOD;
+            step_mycelium_field_cfg(&mut w, &cfg);
+            if (1..=3).any(|y| {
+                w.get_cell(4, y)
+                    .map(|c| c.material == MaterialId::Soil)
+                    .unwrap_or(false)
+            }) {
+                saw_soil = true;
+                break;
+            }
+        }
+        assert!(saw_soil, "low-odds FungiConfig must compost Organic → Soil");
     }
 }

@@ -173,9 +173,16 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   (≤6 in ±4 columns), long child cooldown; babies aren't network-immortal
   until mature. HUD shows `p=/f=/a=` habit split.
 - Soft litter is a bonus sip — fungi do **not** flash Organic into Sand.
-- After long colonization, Organic rarely composts into
-  `MaterialId::Soil` with pore water preserved (excess sat pushed to
-  neighbours; mild compaction flag).
+- Fruiting seats **prefer Air on Organic/Soil** (visible stalks). Buried
+  Organic seats remain for rhizomorph hops (`prefer_surface = false`).
+- Mycelium compost (Organic → `MaterialId::Soil`, pore water preserved)
+  is gated by live [`FungiConfig`] knobs (Tab → Life → Fungi / compost).
+  Defaults are faster than the old hard-coded `220 / 1-in-6000` so thick
+  litter blankets humify before plants lose pore water.
+- Crude global **carbon buckets** (atmosphere + dissolved) live beside
+  the water mass store: surface Organic can oxidize to Soil and credit
+  atm C; lakes exchange atm ↔ dissolved on a slow cadence. Algae /
+  O₂ creatures can draw these pools later — not a per-tick chemistry field.
 
 Ghost-root Void fill remains a column-kernel / later voxel goal.
 

@@ -11,6 +11,7 @@
 pub mod active;
 pub mod audit;
 pub mod blueprint;
+pub mod carbon;
 pub mod cell;
 pub mod chunk;
 pub mod climate;
@@ -62,9 +63,12 @@ pub use failure::{
     wet_repose_loosens, FailureConfig,
     COMPACTION_SIGMA_MIN,
 };
+pub use carbon::{
+    step_carbon_budget, CarbonBudget, CarbonConfig, AMBIENT_ATM_C, AMBIENT_DISSOLVED_C,
+};
 pub use fungi::{
     add_soft_litter, compost_organic_to_soil, is_fungus, is_surface_stalk, max_mycelium_near,
-    seed_mycelium_near, soft_litter_at, step_mycelium_field,
+    seed_mycelium_near, soft_litter_at, step_mycelium_field, step_mycelium_field_cfg, FungiConfig,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,

@@ -142,14 +142,15 @@ Features:
   moist Organic even after the fruiting body dies; threads prefer climbing
   toward free Air.
 - Networks that **breach the surface from below** can emerge a **surface
-  stalk**. Buried bodies rhizomorph-hop locally; stalks wind-disperse spores
-  far (`ReproSpore`).
+  stalk**. Default seats prefer Air-on-Organic/Soil; buried bodies
+  rhizomorph-hop locally; stalks wind-disperse spores far (`ReproSpore`).
 - Soft litter — bonus energy sip; Organic forage scales with field intensity
 - Established moist networks support fruiting bodies (no energy-starve)
 - Standing rain counts as moisture; **never** flash Organic → Sand
-- Long colonization may compost Organic → `MaterialId::Soil` (sat preserved)
+- Mycelium compost Organic → `MaterialId::Soil` (sat preserved; Tab knobs)
+- Crude CO₂ buckets (atm + dissolved) for litter oxidation / later blooms
 - Editor: `F` fruiting body; brushes `5` Digest / `6` Hypha / `7` ReproSpore;
-  F3 Soil brush
+  F3 Soil brush; Tab → Life pages for compost + carbon
 
 ### E1b — Lingering corpses → Organic *(landed)*
 

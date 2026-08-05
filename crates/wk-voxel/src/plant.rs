@@ -743,14 +743,15 @@ fn air_above_solid(world: &World, gx: i32, nucleus_y: i32) -> bool {
     )
 }
 
-/// Fungus seat: Air above any solid. Prefers Organic / wet Sand, but
-/// will land on bare rock too (may starve later — that's fine).
+/// Fungus seat: prefers Air above Organic / Soil (visible fruiting stalk).
+/// Buried Organic seats stay legal for rhizomorph hops via
+/// [`find_fungus_slot_biased`] with `prefer_surface = false`.
 pub fn find_fungus_slot(world: &World, gx: i32, gy: i32) -> Option<i32> {
-    find_fungus_slot_biased(world, gx, gy, false)
+    find_fungus_slot_biased(world, gx, gy, true)
 }
 
-/// Like [`find_fungus_slot`], but `prefer_surface` seats wind-spore children
-/// in Air above Organic (stalks) instead of burying them in the bed.
+/// Like [`find_fungus_slot`], but `prefer_surface` boosts Air-on-bed seats
+/// (stalks) and deprioritizes buried Organic. Rhizomorph hops pass `false`.
 pub fn find_fungus_slot_biased(
     world: &World,
     gx: i32,
@@ -770,16 +771,16 @@ pub fn find_fungus_slot_biased(
                     // Prefer standing on Organic / Soil for a visible stalk.
                     score = match world.get_cell(gx, y - 1).map(|c| c.material) {
                         Some(MaterialId::Organic) => {
-                            200 + world
+                            220 + world
                                 .get_cell(gx, y - 1)
                                 .map(|c| c.mycelium() as i32 / 4)
                                 .unwrap_or(0)
                         }
-                        Some(MaterialId::Soil) => 160,
+                        Some(MaterialId::Soil) => 180,
                         _ => score + 40,
                     };
                 } else if here.material == MaterialId::Organic {
-                    score /= 2; // deprioritize buried seats for wind spores
+                    score /= 3; // bury only when no surface seat is nearby
                 }
             }
         }
@@ -835,16 +836,17 @@ fn fungus_seat_score(world: &World, gx: i32, nucleus_y: i32) -> i32 {
     let Some(here) = world.get_cell(gx, nucleus_y) else {
         return 0;
     };
+    // Surface stalks (Air on bed) outrank buried Organic so fruiting
+    // bodies stay visible; rhizomorph hops still allow bury via bias.
     if here.material == MaterialId::Organic {
-        // Deeper / more threaded Organic seats score higher.
-        return 120 + (here.mycelium() as i32 / 4);
+        return 50 + (here.mycelium() as i32 / 8);
     }
     let Some(below) = world.get_cell(gx, nucleus_y - 1) else {
         return 0;
     };
     match below.material {
-        MaterialId::Organic => 100 + (below.mycelium() as i32 / 8),
-        MaterialId::Soil => 70,
+        MaterialId::Organic => 140 + (below.mycelium() as i32 / 4),
+        MaterialId::Soil => 110,
         MaterialId::Sand => {
             let cap = water_capacity(MaterialId::Sand).max(1);
             40 + (below.sat.0 as i32 * 40) / cap as i32
@@ -4726,6 +4728,39 @@ mod tests {
             atom.leaf_starve.is_empty(),
             "full light should clear starve ticks ({:?})",
             atom.leaf_starve
+        );
+    }
+
+    #[test]
+    fn fungus_slot_prefers_air_on_organic_over_buried() {
+        let mut w = moist_plot();
+        // Thick Organic bed with free Air above.
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(120);
+            org.set_mycelium(80);
+            w.set_cell(4, y, org);
+        }
+        w.set_cell(4, 4, Cell::air());
+        let slot = find_fungus_slot(&w, 4, 2).expect("must find a fungus seat");
+        assert_eq!(
+            w.get_cell(4, slot).map(|c| c.material),
+            Some(MaterialId::Air),
+            "default seat should be surface Air, got y={slot}"
+        );
+        assert_eq!(
+            w.get_cell(4, slot - 1).map(|c| c.material),
+            Some(MaterialId::Organic),
+            "stalk should stand on Organic"
+        );
+        // Rhizomorph path may still pick a buried Organic seat.
+        let buried = find_fungus_slot_biased(&w, 4, 2, false).expect("buried search");
+        assert!(
+            matches!(
+                w.get_cell(4, buried).map(|c| c.material),
+                Some(MaterialId::Organic) | Some(MaterialId::Air)
+            ),
+            "rhizomorph bias must still return a legal fungus crown"
         );
     }
 }

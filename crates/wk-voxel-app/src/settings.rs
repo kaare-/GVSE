@@ -6,11 +6,20 @@ use macroquad::prelude::*;
 use macroquad::ui::{hash, root_ui, widgets};
 use wk_material::{MaterialId, MaterialRegistry, MATERIAL_COUNT};
 use wk_voxel::{
-    ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, FailureConfig, Genome, GrainConfig,
-    KarstConfig, OrographicConfig, PerfConfig, PhaseConfig, PlantGrowthCaps, RainConfig, TempConfig,
-    World, WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES,
-    MAX_ROOT_MODULES, MAX_STEM_MODULES,
+    CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CondensationConfig, EvapConfig,
+    FailureConfig, FungiConfig, Genome, GrainConfig, KarstConfig, OrographicConfig, PerfConfig,
+    PhaseConfig, PlantGrowthCaps, RainConfig, TempConfig, World, WorldgenParams, CHUNK_CELLS_W,
+    MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
+
+/// Top-level Tab settings pages (keeps the long menu navigable).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettingsPage {
+    World,
+    Climate,
+    Physics,
+    Life,
+}
 
 /// Default plant / fungus gene knobs applied on spawn (and optionally to living plants).
 #[derive(Debug, Clone)]
@@ -71,6 +80,12 @@ pub struct SimSettings {
     pub temp: TempConfig,
     pub phase: PhaseConfig,
     pub grain: GrainConfig,
+    /// Mycelium compost knobs (Tab → Life → Fungi / compost).
+    pub fungi: FungiConfig,
+    /// Crude CO₂ buckets (Tab → Life → Carbon).
+    pub carbon: CarbonConfig,
+    /// Which settings page is open.
+    pub page: SettingsPage,
     /// Physics trade-offs (Tab → Performance). Defaults preserve water feel.
     pub perf: PerfConfig,
     /// Geotech failure (Tab → Geotech). Roof collapse on by default.
@@ -161,6 +176,9 @@ impl SimSettings {
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
             grain: GrainConfig::default(),
+            fungi: FungiConfig::default(),
+            carbon: CarbonConfig::default(),
+            page: SettingsPage::World,
             perf: PerfConfig::default(),
             failure: FailureConfig::default(),
             max_roof_events: FailureConfig::default().max_roof_events as f32,
@@ -239,10 +257,13 @@ impl SimSettings {
         }
     }
 
-    pub fn draw(&mut self, world: &mut World) {
+    pub fn draw(&mut self, world: &mut World, carbon: &CarbonBudget) {
         if !self.open {
             return;
         }
+        let carbon_atm = carbon.atmosphere;
+        let carbon_diss = carbon.dissolved;
+        let carbon_total = carbon.total();
 
         // Keep integer-ish fields as f32 scratch for sliders.
         let mut evap_rate = self.evap.rate_per_tick as f32;
@@ -265,6 +286,60 @@ impl SimSettings {
         widgets::Window::new(hash!(), vec2(12.0, 12.0), vec2(win_w, win_h))
             .label("Settings (Tab to close)")
             .ui(&mut *root_ui(), |ui| {
+                ui.label(None, "Page:");
+                if ui.button(
+                    None,
+                    if self.page == SettingsPage::World {
+                        "[*] World"
+                    } else {
+                        "[ ] World"
+                    },
+                ) {
+                    self.page = SettingsPage::World;
+                }
+                if ui.button(
+                    None,
+                    if self.page == SettingsPage::Climate {
+                        "[*] Climate"
+                    } else {
+                        "[ ] Climate"
+                    },
+                ) {
+                    self.page = SettingsPage::Climate;
+                }
+                if ui.button(
+                    None,
+                    if self.page == SettingsPage::Physics {
+                        "[*] Physics"
+                    } else {
+                        "[ ] Physics"
+                    },
+                ) {
+                    self.page = SettingsPage::Physics;
+                }
+                if ui.button(
+                    None,
+                    if self.page == SettingsPage::Life {
+                        "[*] Life"
+                    } else {
+                        "[ ] Life"
+                    },
+                ) {
+                    self.page = SettingsPage::Life;
+                }
+                ui.separator();
+                ui.label(
+                    None,
+                    match self.page {
+                        SettingsPage::World => "World — size, materials, karst",
+                        SettingsPage::Climate => "Climate — day/night, ice, wind, clouds, rain",
+                        SettingsPage::Physics => "Physics — performance, geotech, grain",
+                        SettingsPage::Life => "Life — creatures, plants, fungi compost, carbon",
+                    },
+                );
+                ui.separator();
+
+                if self.page == SettingsPage::World {
                 ui.tree_node(hash!(), "World size", |ui| {
                     ui.label(
                         None,
@@ -303,6 +378,8 @@ impl SimSettings {
                         self.request_regen = true;
                     }
                 });
+                } // World page (size); materials/karst further below
+                if self.page == SettingsPage::Climate {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Day / night / temperature", |ui| {
@@ -515,6 +592,8 @@ impl SimSettings {
                     self.phase.min_budget_to_snow =
                         self.phase.min_budget_to_snow.clamp(1.0, 255.0);
                 });
+                } // Climate (day + ice)
+                if self.page == SettingsPage::Physics {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Performance", |ui| {
@@ -656,6 +735,8 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Raft root bind radius", 0.0..4.0, &mut bind);
                     self.grain.raft_root_bind_radius = bind.round().clamp(0.0, 8.0) as i32;
                 });
+                } // Physics
+                if self.page == SettingsPage::Climate {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Wind + humidity", |ui| {
@@ -818,6 +899,8 @@ impl SimSettings {
                         &mut self.oro.ascent_scale,
                     );
                 });
+                } // Climate (wind/clouds/rain)
+                if self.page == SettingsPage::World {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Material permeability / porosity", |ui| {
@@ -856,6 +939,8 @@ impl SimSettings {
                     );
                     labeled_slider(ui, hash!(), "Min wet neighbour sat", 1.0..255.0, &mut min_sat);
                 });
+                } // World (materials/karst)
+                if self.page == SettingsPage::Life {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Creatures / population caps", |ui| {
@@ -996,9 +1081,118 @@ impl SimSettings {
                     }
                 });
                 ui.separator();
+
+                ui.tree_node(hash!(), "Fungi / compost", |ui| {
+                    ui.label(
+                        None,
+                        "Mycelium humifies Organic → Soil. Lower odds = faster compost.                          Fruiting seats prefer Air on Organic/Soil (rhizomorph can still bury).",
+                    );
+                    let mut thresh = self.fungi.soil_mycelium_threshold as f32;
+                    let mut odds = self.fungi.soil_convert_odds as f32;
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Soil mycelium threshold",
+                        40.0..255.0,
+                        &mut thresh,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Soil convert odds (1-in-N)",
+                        50.0..8_000.0,
+                        &mut odds,
+                    );
+                    self.fungi.soil_mycelium_threshold =
+                        thresh.round().clamp(1.0, 255.0) as u8;
+                    self.fungi.soil_convert_odds =
+                        odds.round().clamp(1.0, 100_000.0) as u64;
+                    if ui.button(None, "Reset fungi compost to defaults") {
+                        self.fungi = FungiConfig::default();
+                    }
+                });
+                ui.separator();
+
+                ui.tree_node(hash!(), "Carbon (CO2 buckets)", |ui| {
+                    ui.label(
+                        None,
+                        "Crude atmosphere + dissolved pools. Surface Organic oxidizes to Soil                          and credits atm C (not humidity). Lakes exchange atm ↔ dissolved.                          Later: algae draw dissolved; O2 bucket when animals land.",
+                    );
+                    ui.checkbox(hash!(), "Carbon enabled", &mut self.carbon.enabled);
+                    let mut ox_period = self.carbon.oxidize_period as f32;
+                    let mut ox_max = self.carbon.oxidize_max_events as f32;
+                    let mut ex_period = self.carbon.exchange_period as f32;
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Oxidize period (ticks)",
+                        8.0..512.0,
+                        &mut ox_period,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Oxidize rate / cell",
+                        0.0..0.05,
+                        &mut self.carbon.oxidize_rate,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Oxidize max events",
+                        0.0..128.0,
+                        &mut ox_max,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "C per oxidized cell",
+                        0.0..4.0,
+                        &mut self.carbon.oxidize_c_per_cell,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Exchange period (ticks)",
+                        8.0..256.0,
+                        &mut ex_period,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Exchange rate",
+                        0.0..0.5,
+                        &mut self.carbon.exchange_rate,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Henry ratio (dissolved/atm)",
+                        0.05..1.0,
+                        &mut self.carbon.henry_ratio,
+                    );
+                    self.carbon.oxidize_period =
+                        ox_period.round().clamp(1.0, 10_000.0) as u64;
+                    self.carbon.oxidize_max_events =
+                        ox_max.round().clamp(0.0, 512.0) as u32;
+                    self.carbon.exchange_period =
+                        ex_period.round().clamp(1.0, 10_000.0) as u64;
+                    if ui.button(None, "Reset carbon knobs to defaults") {
+                        self.carbon = CarbonConfig::default();
+                    }
+                    ui.separator();
+                    ui.label(
+                        None,
+                        &format!(
+                            "Live buckets: atm={carbon_atm:.0}  dissolved={carbon_diss:.0}  total={carbon_total:.0}"
+                        ),
+                    );
+                });
+                } // Life
+                ui.separator();
                 ui.label(
                     None,
-                    "Tip: Tab closes · F2 creatures · F3 terrain · F5/F9 save/load · F1 HUD",
+                    "Tip: Tab closes · pages above · F2 creatures · F3 terrain · F5/F9 save/load",
                 );
             });
 
@@ -1051,6 +1245,7 @@ impl SimSettings {
             max_photos: self.max_photos.round().clamp(1.0, 256.0) as usize,
         }
         .clamp();
+        organisms.fungi = self.fungi;
     }
 
     /// Pull growth + pop caps from a loaded organism store into the UI.

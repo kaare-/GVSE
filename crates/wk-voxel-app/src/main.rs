@@ -56,8 +56,8 @@ use wk_voxel::{
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
     precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, sky_rgb_at_height,
     temperature_step_due,
-    tick_with_life, wake_unsupported_grains, wake_unstable_slopes, ClimateConfig,
-    GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
+    step_carbon_budget, tick_with_life, wake_unsupported_grains, wake_unstable_slopes,
+    ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
 
 use crate::creature_list::CreatureList;
@@ -933,7 +933,10 @@ async fn main() {
                 Some(&scene.geotech),
                 rooted.as_ref(),
                 Some(&settings.grain),
+                Some(&settings.fungi),
             );
+            // Crude CO₂ buckets: surface Organic oxidation + atm↔lake exchange.
+            step_carbon_budget(&mut scene.carbon, &mut scene.world, &settings.carbon);
             // Floating Organic drifts with the wind; root-bound mats sail plants.
             if organisms_on {
                 sail_plants_on_wind_rafts_cfg(
@@ -1482,7 +1485,7 @@ async fn main() {
         editor.draw();
         terrain.draw();
         creature_list.draw(&scene.organisms);
-        settings.draw(&mut scene.world);
+        settings.draw(&mut scene.world, &scene.carbon);
         quit_dialog.draw();
 
         // HUD chrome (info + hotkeys + inspector) toggled with F1.
@@ -1500,7 +1503,7 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} wind={:.2} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
@@ -1511,6 +1514,8 @@ async fn main() {
                 scene.clouds.len(),
                 scene.clouds.total_mass(),
                 scene.humidity.total_mass(),
+                scene.carbon.atmosphere,
+                scene.carbon.dissolved,
                 draw_wind_vx,
                 scene.organisms.len(),
                 scene.organisms.atom_cap(),

@@ -22,9 +22,11 @@ use wk_material::MaterialId;
 use crate::blueprint::Genome;
 use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
 use crate::fungi::{
-    colonize_and_compost, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
+    colonize_and_compost_cfg, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
+    FungiConfig,
     forage_organic_energy, fruiting_body_supported, fungus_should_hibernate, fungus_upkeep,
-    is_fungus, is_fungus_seated, try_emergent_fruiting, try_spore, FRUIT_SUPPORT_MIN_AGE,
+    is_fungus, is_fungus_seated, is_surface_stalk, try_emergent_fruiting, try_spore,
+    FRUIT_SUPPORT_MIN_AGE,
     FUNGUS_HIBERNATE_MAX_TICKS,
 };
 use crate::grid::World;
@@ -420,6 +422,10 @@ pub struct OrganismStore {
     /// Per-plant Root / Stem / Photosystem pixel ceilings.
     #[serde(default)]
     pub growth_caps: PlantGrowthCaps,
+    /// Mycelium compost knobs (Tab → Life). Synced from settings each frame;
+    /// not persisted (avoids busting older sim snapshots).
+    #[serde(skip)]
+    pub fungi: FungiConfig,
 }
 
 impl Default for OrganismStore {
@@ -430,6 +436,7 @@ impl Default for OrganismStore {
             max_atoms: MAX_ATOMS,
             max_corpses: MAX_CORPSES,
             growth_caps: PlantGrowthCaps::default(),
+            fungi: FungiConfig::default(),
         }
     }
 }
@@ -718,6 +725,7 @@ impl OrganismStore {
         let pop = self.atoms.len();
         let atom_cap = self.atom_cap();
         let growth_caps = self.growth_caps.clamp();
+        let fungi_cfg = self.fungi;
         // One crown per column: destack any pre-existing overlaps first.
         reseat_stacked_land_plants(world, &mut self.atoms);
         reseat_stacked_fungi(world, &mut self.atoms);
@@ -839,6 +847,7 @@ impl OrganismStore {
                     room,
                     wind_vx,
                     &fungus_cols,
+                    &fungi_cfg,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { .. } => {}
@@ -1490,15 +1499,31 @@ fn step_fungus(
     pop_room: bool,
     wind_vx: f32,
     fungus_cols: &[i32],
+    fungi_cfg: &FungiConfig,
 ) -> PlantStep {
     pin_plant_pose(atom);
-    // Prefer Organic seats; fall back to Air-above-solid crown.
+    // Prefer surface Air-on-bed seats; fall back to Air-above-solid crown.
     if !is_fungus_seated(world, atom) {
         if let Some(slot) = find_fungus_slot(world, atom.gx, atom.gy)
             .or_else(|| find_surface_air_slot(world, atom.gx, atom.gy))
         {
             atom.gy = slot;
             pin_plant_pose(atom);
+        }
+    } else if !is_surface_stalk(world, atom) {
+        // Crawl out of thick Organic blankets onto a visible stalk seat
+        // when one exists in-column (buried habit remains for rhizomorph
+        // placement until the next seat check).
+        if let Some(slot) = find_fungus_slot(world, atom.gx, atom.gy) {
+            if slot != atom.gy
+                && matches!(
+                    world.get_cell(atom.gx, slot),
+                    Some(c) if c.material == MaterialId::Air
+                )
+            {
+                atom.gy = slot;
+                pin_plant_pose(atom);
+            }
         }
     }
     let dormant = fungus_should_hibernate(world, atom);
@@ -1524,7 +1549,15 @@ fn step_fungus(
         let want = digest_budget_units(&atom.genome, atom);
         let (_taken, from_litter) = digest_labile(world, atom.gx, atom.gy, want);
         let from_organic = forage_organic_energy(world, atom.gx, atom.gy, &atom.genome, atom);
-        let from_myc = colonize_and_compost(world, atom.gx, atom.gy, &atom.genome, atom, tick);
+        let from_myc = colonize_and_compost_cfg(
+            world,
+            atom.gx,
+            atom.gy,
+            &atom.genome,
+            atom,
+            tick,
+            fungi_cfg,
+        );
         atom.energy =
             (atom.energy + from_litter + from_organic + from_myc).min(atom.energy_max);
     }
@@ -3776,7 +3809,7 @@ mod tests {
         let perf = PerfConfig::default();
         let fail = FailureConfig::default();
         for _ in 0..120 {
-            tick_with_life(&mut w, &perf, &fail, None, None, None);
+            tick_with_life(&mut w, &perf, &fail, None, None, None, None);
             let tick = w.tick;
             store.step(&mut w, tick);
         }
@@ -3785,7 +3818,7 @@ mod tests {
         let myc0 = crate::fungi::max_mycelium_near(&w, 4, 2);
         assert!(myc0 >= 40, "need an established network before death");
         for _ in 0..200 {
-            tick_with_life(&mut w, &perf, &fail, None, None, None);
+            tick_with_life(&mut w, &perf, &fail, None, None, None, None);
         }
         let myc1 = crate::fungi::max_mycelium_near(&w, 4, 2);
         assert!(
@@ -3842,7 +3875,7 @@ mod tests {
         let perf = PerfConfig::default();
         let fail = FailureConfig::default();
         for _ in 0..400 {
-            tick_with_life(&mut w, &perf, &fail, None, None, None);
+            tick_with_life(&mut w, &perf, &fail, None, None, None, None);
             let tick = w.tick;
             store.step(&mut w, tick);
         }
