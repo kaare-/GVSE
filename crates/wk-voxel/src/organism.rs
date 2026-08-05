@@ -1151,15 +1151,28 @@ fn step_corpse_buoyancy(world: &World, corpse: &mut Corpse) {
 /// Dead stems used to pin at the free surface forever; this lets currents
 /// and breeze carry them toward shore or along the lake.
 fn drift_floating_corpse(world: &World, corpse: &mut Corpse, tick: u64, wind_vx: f32) {
-    let flow = local_water_drive(world, corpse.gx, corpse.gy);
-    let flow_dir = local_water_dir(world, corpse.gx, corpse.gy) as f32;
+    // Sample flow at the free-surface top when floating — sat shear at the
+    // nucleus row on steep drops often points *upstream* (water piles high
+    // against the cascade), which looked like logs swimming uphill.
+    let sample_y = wet_band(world, corpse.gx, corpse.gy)
+        .map(|(top, _)| top)
+        .unwrap_or(corpse.gy);
+    let flow = local_water_drive(world, corpse.gx, sample_y);
+    let flow_dir = local_water_dir(world, corpse.gx, sample_y) as f32;
     let wind = wind_vx.clamp(-1.5, 1.5);
     let at_surface = wet_band(world, corpse.gx, corpse.gy)
         .map(|(top, _)| (corpse.gy - top).abs() <= 1)
         .unwrap_or(false);
-    // Surface logs catch wind; deeper corpses follow sat-shear current.
+    // Surface logs catch wind; deeper corpses follow downhill current.
+    // On steep terrain, flow (head drop / cascade) outranks a mild breeze
+    // so corpses don't sail upstream against a waterfall.
     let push = if at_surface {
-        wind * 0.90 + flow_dir * flow * 0.55
+        let flow_push = flow_dir * flow * 0.85;
+        if flow > 0.22 && flow_push.abs() > wind.abs() * 0.55 {
+            flow_push + wind * 0.25
+        } else {
+            wind * 0.90 + flow_push * 0.65
+        }
     } else {
         flow_dir * flow * 1.25 + wind * 0.20
     };
@@ -2124,7 +2137,10 @@ fn air_sat(world: &World, gx: i32, gy: i32) -> i16 {
     }
 }
 
-/// Lateral sat shear near a cell — proxy for surface / column flow.
+/// Lateral flow strength near a cell — sat shear plus free-surface head drop.
+///
+/// Steep cascades register strongly even when neighbour sat is also high
+/// (ponded against the lip), so corpses / fronds follow the fall.
 fn local_water_drive(world: &World, gx: i32, gy: i32) -> f32 {
     let mut best = 0i16;
     for y in [gy - 1, gy, gy + 1] {
@@ -2133,16 +2149,97 @@ fn local_water_drive(world: &World, gx: i32, gy: i32) -> f32 {
         let r = air_sat(world, gx + 1, y);
         best = best.max((r - l).abs()).max((c - l).abs()).max((c - r).abs());
     }
-    (best as f32 / 255.0) * 0.65
+    let mut head = 0.0f32;
+    if let Some((top_here, _)) = wet_band(world, gx, gy) {
+        // Peek ±2 so approach to a lip feels the pull before the last cell.
+        for dx in [-2_i32, -1, 1, 2] {
+            let nx = world.wrap_x(gx + dx);
+            let falloff = 1.0 / (dx.abs() as f32);
+            if let Some((top_n, _)) = wet_band(world, nx, gy) {
+                head = head.max((top_here - top_n).max(0) as f32 / 5.0 * falloff);
+            } else {
+                head = head.max(0.55 * falloff);
+            }
+            // Cascade lip: empty / partial Air below the sample row.
+            for dy in [0_i32, -1, -2] {
+                match world.get_cell(nx, gy + dy) {
+                    Some(b) if b.material == MaterialId::Air && !b.sat.is_full() => {
+                        // Only count as a lip when our column is wet here.
+                        if air_sat(world, gx, gy + dy) > 64 {
+                            head = head.max(0.65 * falloff);
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    ((best as f32 / 255.0) * 0.40 + head * 0.70).clamp(0.0, 1.45)
 }
 
+/// Horizontal flow direction: downhill / cascade exit, not toward higher sat.
+///
+/// Old "toward higher sat" pointed *upstream* on steep terrain where water
+/// piles against the drop — corpses looked like they swam uphill.
 fn local_water_dir(world: &World, gx: i32, gy: i32) -> i32 {
-    let l = air_sat(world, gx - 1, gy) + air_sat(world, gx - 1, gy + 1);
-    let r = air_sat(world, gx + 1, gy) + air_sat(world, gx + 1, gy + 1);
-    if r >= l {
+    let top_here = wet_band(world, gx, gy).map(|(t, _)| t);
+    let mut score_pos = 0.0f32; // +x
+    let mut score_neg = 0.0f32; // -x
+    for dx in [-2_i32, -1, 1, 2] {
+        let nx = world.wrap_x(gx + dx);
+        let falloff = 1.0 / (dx.abs() as f32);
+        let mut score = 0.0f32;
+        let here = air_sat(world, gx, gy).max(air_sat(world, gx, gy - 1));
+        let n_sat = air_sat(world, nx, gy).max(air_sat(world, nx, gy - 1));
+        // Water wants to leave toward lower saturation.
+        if here > n_sat.saturating_add(24) {
+            score += 0.45 * falloff;
+        } else if n_sat > here.saturating_add(24) {
+            score -= 0.40 * falloff; // climbing into a ponded head
+        }
+        // Empty / thin Air beside a wet cell ≈ cascade exit.
+        for dy in [0_i32, -1, -2] {
+            match world.get_cell(nx, gy + dy) {
+                Some(b) if b.material == MaterialId::Air && !b.sat.is_full() => {
+                    if air_sat(world, gx, gy + dy.max(-1)) > 64 || dy == 0 {
+                        score += 0.95 * falloff;
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        match (top_here, wet_band(world, nx, gy)) {
+            (Some(th), Some((tn, _))) if th > tn => {
+                score += (0.90 + (th - tn) as f32 * 0.15) * falloff;
+            }
+            (Some(th), Some((tn, _))) if tn > th => {
+                score -= (0.70 + (tn - th) as f32 * 0.12) * falloff;
+            }
+            (Some(_), None) => score += 0.75 * falloff,
+            _ => {}
+        }
+        if dx > 0 {
+            score_pos += score;
+        } else {
+            score_neg += score;
+        }
+    }
+    if score_pos >= score_neg + 0.20 {
         1
-    } else {
+    } else if score_neg >= score_pos + 0.20 {
         -1
+    } else {
+        // Quiet pool: residual toward lower sat (never toward the high pile).
+        let l = air_sat(world, gx - 1, gy) + air_sat(world, gx - 1, gy + 1);
+        let r = air_sat(world, gx + 1, gy) + air_sat(world, gx + 1, gy + 1);
+        if r < l {
+            1
+        } else if l < r {
+            -1
+        } else {
+            1
+        }
     }
 }
 
@@ -3647,6 +3744,68 @@ mod tests {
             store.corpses[0].gx > gx0,
             "positive wind should carry the corpse +x (gx0={gx0}, now={})",
             store.corpses[0].gx
+        );
+    }
+
+    #[test]
+    fn floating_corpse_follows_cascade_downhill_not_upstream() {
+        // Tall water on the left, lower pool on the right — free-surface
+        // head drops +x. Old sat-shear dir pointed upstream (toward the
+        // piled high column); corpses must ride the fall instead.
+        let mut w = World::new(17);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..24 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let top = if x <= 8 { 7 } else { 3 };
+            for y in 1..=top {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in (top + 1)..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Pond a little extra sat against the lip (upstream pile).
+        if let Some(mut c) = w.get_cell(8, 7) {
+            c.sat = Sat(u8::MAX);
+            w.set_cell(8, 7, c);
+        }
+        if let Some(mut c) = w.get_cell(7, 7) {
+            c.sat = Sat(u8::MAX);
+            w.set_cell(7, 7, c);
+        }
+        let mut store = OrganismStore::new();
+        let mut corpse = Corpse::from_atom(&Atom::from_body(
+            8,
+            7,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+            ],
+        ));
+        corpse.land = true;
+        corpse.fallen = true;
+        store.corpses.push(corpse);
+        let gx0 = store.corpses[0].gx;
+        let climate = ClimateConfig::default();
+        let mut moved_downhill = false;
+        for t in 0..500u64 {
+            // Mild adverse wind — cascade head must still win.
+            let _ = store.step_with_climate_wind(&mut w, t, &climate, None, -0.08);
+            assert_eq!(store.corpse_count(), 1);
+            let gx = store.corpses[0].gx;
+            if gx < gx0 {
+                panic!("corpse drifted upstream against the cascade (gx0={gx0}, now={gx})");
+            }
+            if gx > gx0 {
+                moved_downhill = true;
+                break;
+            }
+        }
+        assert!(
+            moved_downhill,
+            "cascade head drop must carry the corpse downhill (+x); stayed at {gx0}"
         );
     }
 
