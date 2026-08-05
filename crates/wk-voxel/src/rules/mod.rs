@@ -41,7 +41,8 @@ pub use grain::{
     rise_and_soak_buoyant_litter, rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter,
     soak_floating_litter, soak_floating_litter_cfg,
     wake_grains_for_settle, wake_unsupported_grains, wake_unstable_slopes,
-    GrainConfig, GRAIN_REPOSE_HAZE_MAX, GRAIN_SETTLE_PASSES, MYCELIUM_EROSION_BIND,
+    GrainConfig, GRAIN_REPOSE_HAZE_MAX, GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES,
+    MYCELIUM_EROSION_BIND,
     MYCELIUM_RAFT_BIND_MIN, MYCELIUM_REPOSE_STEP_BONUS, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
 pub use gravity::{apply_gravity_fall, apply_gravity_fall_regions};

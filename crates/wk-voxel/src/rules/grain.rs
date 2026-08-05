@@ -425,7 +425,8 @@ pub fn wake_grains_for_settle(world: &mut World) {
                     {
                         continue;
                     }
-                    if is_grain(cell.material) && seat.sat.0 > GRAIN_REPOSE_HAZE_MAX {
+                    // Dense grains: haze + lake seats wake; mid film does not.
+                    if is_grain(cell.material) && !grain_repose_air_seat(seat) {
                         continue;
                     }
                     if diag_drop_exceeds_world(world, sx, gy, max_step, through_haze) {
@@ -446,7 +447,7 @@ pub fn wake_grains_for_settle(world: &mut World) {
                     if seat.material != MaterialId::Air {
                         continue;
                     }
-                    if is_grain(cell.material) && seat.sat.0 > GRAIN_REPOSE_HAZE_MAX {
+                    if is_grain(cell.material) && !grain_repose_air_seat(seat) {
                         continue;
                     }
                     if matches!(cell.material, MaterialId::Organic | MaterialId::Soil)
@@ -457,7 +458,10 @@ pub fn wake_grains_for_settle(world: &mut World) {
                     let Some(below_seat) = world.get_cell(sx, gy - 1) else {
                         continue;
                     };
-                    if below_seat.material != MaterialId::Air || below_seat.sat.is_full() {
+                    // Walk-off wake: dry/haze drop only (not film / lake).
+                    if below_seat.material != MaterialId::Air
+                        || below_seat.sat.0 > GRAIN_REPOSE_HAZE_MAX
+                    {
                         continue;
                     }
                     dirty.push((gx, gy));
@@ -1425,10 +1429,16 @@ fn apply_repose_pass(
                 // Same-Y walk-off: max_step==0 grains on a rock ledge where
                 // diagonal-down is blocked can still step sideways into Air
                 // that opens downward — clears 2–3 cell sand lips on slopes.
+                // Below must be dry/haze only: a film toe under a lake seat
+                // used to let sand walk into standing water and bypass the
+                // shore-film refuse (fleck cycle). Diagonal-down into full
+                // lake water still handles gentler submerged banks.
                 if !cold_mode {
                     let open_drop = matches!(
                         below_dest,
-                        Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
+                        Some(b)
+                            if b.material == MaterialId::Air
+                                && b.sat.0 <= GRAIN_REPOSE_HAZE_MAX
                     );
                     if !open_drop {
                         continue;
@@ -1528,11 +1538,13 @@ fn apply_repose_pass(
 
 /// Swap grain into a diagonal/lateral Air seat.
 ///
-/// Underwater, sliding into empty / film Air used to leave that pale
-/// low-sat cell on the slope face for a frame (sky / film flash) until
-/// flow refilled it. Dense grains collapse those bubbles: soak seat sat
-/// into pores and **steal** standing water from a neighbour into the
-/// vacated cell — never mint a fresh full water cell.
+/// Underwater seats:
+/// - **Full lake water** — plain swap leaves standing water in the
+///   vacated cell (mass conserved; gentler submerged banks).
+/// - **Empty / haze bubble** beside the lake — soak seat sat into pores
+///   and **steal** neighbour standing water into the vacated cell so the
+///   slope face does not sky-flash. Never mint a fresh full water cell.
+/// Mid shore film is refused upstream ([`avalanche_seat_ok`]).
 fn write_repose_swap(
     ptrs: &parallel::ChunkPtrMap,
     wrap_width: Option<i32>,
@@ -1665,18 +1677,31 @@ fn seat_on_ice(below_dest: Option<Cell>) -> bool {
     matches!(below_dest, Some(b) if b.material == MaterialId::Ice)
 }
 
-/// Atmospheric haze sand/gravel/clay may repose into. Wetter seats are
-/// treated as shore film (fleck cycle) and refused. Organic/Soil still
-/// use full through-haze on land, but refuse underwater film seats.
+/// Atmospheric haze sand/gravel/clay may repose into. Wetter mid-film
+/// seats are shore film (fleck cycle) and refused. Full standing water
+/// is allowed so submerged banks can avalanche to a gentler repose.
+/// Organic/Soil still use full through-haze on land, but refuse
+/// underwater film seats.
 pub const GRAIN_REPOSE_HAZE_MAX: u8 = 32;
+/// Standing-water floor for dense-grain lake seats (matches steal /
+/// submerged helpers). Mid film `HAZE_MAX+1 .. LAKE_MIN-1` stays refused.
+pub const GRAIN_REPOSE_LAKE_MIN: u8 = 200;
+
+/// Dense grains may slide into dry Air, thin haze, or standing water.
+#[inline]
+fn grain_repose_air_seat(dest: Cell) -> bool {
+    dest.sat.0 <= GRAIN_REPOSE_HAZE_MAX || dest.sat.0 >= GRAIN_REPOSE_LAKE_MIN
+}
 
 /// Snow/ice may sit on empty Air or on a wet film that rests on Ice.
-/// Dense grains may repose into **dry** Air or thin atmospheric haze;
-/// sliding into shore film + stealing lake water was the fleck cycle.
-/// Organic litter / composted Soil match grain-fall: sprawl through
-/// land haze/film, float only on grounded full standing water (else humid
-/// cliffs freeze). Suspended mid-air full-sat is not a seat. Organic must
-/// not sprawl into underwater film (that left a submerged "glitch line").
+/// Dense grains may repose into dry Air, thin atmospheric haze, **or**
+/// standing lake water (gentler submerged banks). Mid shore film is
+/// still refused — sliding into film + stealing lake water was the
+/// fleck cycle. Organic litter / composted Soil match grain-fall:
+/// sprawl through land haze/film, float only on grounded full standing
+/// water (else humid cliffs freeze). Suspended mid-air full-sat is not
+/// a seat. Organic must not sprawl into underwater film (that left a
+/// submerged "glitch line").
 fn avalanche_seat_ok(src: MaterialId, dest: Cell, below_dest: Option<Cell>) -> bool {
     if dest.sat.is_empty() {
         return true;
@@ -1689,15 +1714,15 @@ fn avalanche_seat_ok(src: MaterialId, dest: Cell, below_dest: Option<Cell>) -> b
         // litter does not crawl into the water column under a raft.
         if matches!(
             below_dest,
-            Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
+            Some(b) if b.material == MaterialId::Air && b.sat.0 >= GRAIN_REPOSE_LAKE_MIN
         ) {
             return false;
         }
         return true;
     }
     if is_grain(src) {
-        // Thin humidity haze OK (inland cliffs); shore film / lake not.
-        return dest.sat.0 <= GRAIN_REPOSE_HAZE_MAX;
+        // Thin haze + full lake OK; mid shore film still blocked.
+        return grain_repose_air_seat(dest);
     }
     // Snow / hillside ice: spill onto lake ice, not into open water.
     seat_on_ice(below_dest)
@@ -1711,14 +1736,13 @@ fn repose_gap_air(c: Cell, through_haze: bool) -> bool {
     if c.sat.is_empty() {
         return true;
     }
-    if c.sat.is_full() {
-        return false;
-    }
     if through_haze {
-        return true; // Organic/Soil: any non-full film
+        // Organic/Soil: any non-full film; full lake is support.
+        return !c.sat.is_full();
     }
-    // Dense grains: only thin atmospheric haze.
-    c.sat.0 <= GRAIN_REPOSE_HAZE_MAX
+    // Dense grains: thin haze **or** standing water count as relief so
+    // submerged cliffs can avalanche. Mid shore film remains support.
+    grain_repose_air_seat(c)
 }
 
 fn hillside_ice_support(below_src: Option<Cell>) -> bool {
@@ -2170,8 +2194,9 @@ fn find_deposit_seat(world: &World, from_x: i32, from_y: i32, prefer_dx: i32) ->
 
 /// True when the destination column has more than `max_step` empty
 /// Air cells stacked downward from `from_y - 1` (the diagonal seat).
-/// Any wet Air (film or standing) is support — grains do not treat the
-/// waterline as a dry cliff to avalanche into.
+/// Dense grains treat standing lake water as gap (gentler UW banks);
+/// mid shore film remains support. Organic/Soil still treat full water
+/// as support.
 fn diag_drop_exceeds(
     ptrs: &parallel::ChunkPtrMap,
     wrap_width: Option<i32>,
