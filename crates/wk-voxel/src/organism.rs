@@ -5711,7 +5711,7 @@ mod tests {
         }
         let upright: Vec<(i16, i16)> = body
             .iter()
-            .filter(|&&(x, y, _)| y > 0)
+            .filter(|&&(_x, y, _)| y > 0)
             .map(|&(x, y, _)| (x, y))
             .collect();
         let mut atom = Atom::from_body(4, 8, 40.0, body);
