@@ -1108,6 +1108,25 @@ async fn main() {
                 scene.params.wrap_x,
             ) {
                 if editor.spawn_picker {
+                    // Fungi: plant as mycelium infection only — no visible
+                    // fruiting body until a rich cream network emerges.
+                    if editor.blueprint.is_valid_fungus() {
+                        match wk_voxel::infect_mycelium_at(&mut scene.world, gx, gy) {
+                            Some((ox, oy)) => {
+                                editor.status = format!(
+                                    "Inoculated mycelium at ({ox},{oy}) — stalk emerges later from a rich moist network"
+                                );
+                                editor.spawn_picker = false;
+                                editor.open = false;
+                                paused = editor.was_paused;
+                                inspect = Some((ox, oy));
+                            }
+                            None => {
+                                editor.status =
+                                    "Inoculate failed — click Organic (or litter above it)".into();
+                            }
+                        }
+                    } else {
                     let body = editor.blueprint.modules_relative_to_nucleus();
                     // Tab plant-gene knobs apply when the body has land/fungus
                     // tissues; pure plankton keeps painted blueprint genes.
@@ -1151,17 +1170,6 @@ async fn main() {
                         g,
                     ) {
                         Ok(()) => {
-                            if editor.blueprint.is_valid_fungus() {
-                                if let Some(atom) = scene.organisms.atoms.last() {
-                                    let (fx, fy) = (atom.gx, atom.gy);
-                                    wk_voxel::seed_mycelium_near(
-                                        &mut scene.world,
-                                        fx,
-                                        fy,
-                                        48,
-                                    );
-                                }
-                            }
                             editor.status = format!(
                                 "Spawned {} at ({gx},{gy})  creatures={}/{} (entities, not pixels)",
                                 editor.blueprint.name,
@@ -1187,6 +1195,7 @@ async fn main() {
                         Err(wk_voxel::SpawnFail::InvalidBody) => {
                             editor.status = "Spawn failed — need a Nucleus on the canvas".into();
                         }
+                    }
                     }
                 } else {
                     inspect = Some((gx, gy));

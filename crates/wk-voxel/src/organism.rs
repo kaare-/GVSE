@@ -902,6 +902,9 @@ impl OrganismStore {
                             to_gy: gy,
                         });
                     }
+                    PlantStep::SporeInoculated { .. } => {
+                        // Plants never inoculate mycelium.
+                    }
                 }
                 continue;
             }
@@ -945,6 +948,17 @@ impl OrganismStore {
                             to_gx: gx,
                             to_gy: gy,
                         });
+                    }
+                    PlantStep::SporeInoculated { gx, gy, collapse } => {
+                        spore_releases.push(SporeRelease {
+                            from_gx: parent_gx,
+                            from_gy: parent_gy,
+                            to_gx: gx,
+                            to_gy: gy,
+                        });
+                        if collapse {
+                            deaths.push(i);
+                        }
                     }
                 }
                 continue;
@@ -1258,10 +1272,12 @@ enum PlantStep {
     Alive { sat: u32, at: (i32, i32) },
     /// Vegetative rhizome child (local).
     Sprout(Atom),
-    /// Wind-borne spore child (fern / fruiting body) — emit VFX.
+    /// Wind-borne spore child (fern) — emit VFX.
     Spore(Atom),
     /// Spore landed but hibernated in [`World::spore_bank`] — emit VFX only.
     SporeBanked { gx: i32, gy: i32 },
+    /// Fungus spore became mycelium infection — puff VFX; optional stalk death.
+    SporeInoculated { gx: i32, gy: i32, collapse: bool },
 }
 
 /// One wind-spore launch for the renderer (ephemeral; not saved).
@@ -1645,6 +1661,7 @@ fn step_land_plant(
     ) {
         DispersalResult::Germinated(child) => return PlantStep::Spore(child),
         DispersalResult::Banked { gx, gy } => return PlantStep::SporeBanked { gx, gy },
+        DispersalResult::Inoculated { .. } => {}
         DispersalResult::None => {}
     }
     if let Some(child) =
@@ -1753,7 +1770,20 @@ fn step_fungus(
             bank_cfg,
         ) {
             DispersalResult::Germinated(child) => return PlantStep::Spore(child),
-            DispersalResult::Banked { gx, gy } => return PlantStep::SporeBanked { gx, gy },
+            DispersalResult::Banked { gx, gy } => {
+                // Spent stalk collapses even when the packet only banked.
+                if atom.energy <= 0.0 {
+                    return PlantStep::SporeInoculated {
+                        gx,
+                        gy,
+                        collapse: true,
+                    };
+                }
+                return PlantStep::SporeBanked { gx, gy };
+            }
+            DispersalResult::Inoculated { gx, gy, collapse } => {
+                return PlantStep::SporeInoculated { gx, gy, collapse };
+            }
             DispersalResult::None => {}
         }
     }

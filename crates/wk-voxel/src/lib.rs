@@ -72,8 +72,9 @@ pub use spore_bank::{
     spore_bank_len, DormantSpore, SporeBank, SporeBankConfig, SporeKind, SPORE_BANK_PERIOD,
 };
 pub use fungi::{
-    add_soft_litter, compost_organic_to_soil, is_fungus, is_surface_stalk, max_mycelium_near,
-    seed_mycelium_near, soft_litter_at, step_mycelium_field, step_mycelium_field_cfg, FungiConfig,
+    add_soft_litter, compost_organic_to_soil, infect_mycelium_at, is_fungus, is_surface_stalk,
+    max_mycelium_near, seed_mycelium_near, soft_litter_at, step_mycelium_field,
+    step_mycelium_field_cfg, FungiConfig,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,

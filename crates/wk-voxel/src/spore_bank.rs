@@ -14,16 +14,13 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::blueprint::Genome;
-use crate::fungi::{
-    count_fungi_near, is_fungus_seated, organic_cells_near, seed_mycelium_near, soft_litter_at,
-    FUNGUS_SPORE_LOCAL_MAX, FUNGUS_SPORE_LOCAL_RADIUS, FUNGUS_STARVE_UNITS,
-};
+use crate::fungi::infect_mycelium_at;
 use crate::grid::World;
 use crate::organism::{Atom, BodyModule};
 use crate::plant::{
-    apply_genome, cell_moisture_frac, count_plants_near, crown_clearance_ok, find_fungus_slot,
-    find_plant_slot, is_anchored, is_land_plant, pin_plant_pose, sync_alloc_to_body,
-    SPROUT_LOCAL_MAX, SPROUT_LOCAL_RADIUS,
+    apply_genome, cell_moisture_frac, count_plants_near, crown_clearance_ok, find_plant_slot,
+    is_anchored, is_land_plant, pin_plant_pose, sync_alloc_to_body, SPROUT_LOCAL_MAX,
+    SPROUT_LOCAL_RADIUS,
 };
 use crate::temperature::Temperature;
 
@@ -192,7 +189,7 @@ impl SporeBank {
                     continue;
                 }
                 let spore = stack[i].clone();
-                if let Some(child) = try_wake_spore(
+                match try_wake_spore(
                     world,
                     key.0,
                     key.1,
@@ -202,13 +199,20 @@ impl SporeBank {
                     plant_cols,
                     fungus_cols,
                 ) {
-                    stack.remove(i);
-                    births.push(child);
-                    room = room.saturating_sub(1);
-                    // One germinate per cell per pulse.
-                    break;
-                } else {
-                    i += 1;
+                    WakeOutcome::Birth(child) => {
+                        stack.remove(i);
+                        births.push(child);
+                        room = room.saturating_sub(1);
+                        break;
+                    }
+                    WakeOutcome::Inoculated => {
+                        // Fungus packet spent as cream infection — no Atom.
+                        stack.remove(i);
+                        break;
+                    }
+                    WakeOutcome::Wait => {
+                        i += 1;
+                    }
                 }
             }
             if stack.is_empty() {
@@ -222,6 +226,13 @@ impl SporeBank {
     }
 }
 
+enum WakeOutcome {
+    Birth(Atom),
+    /// Fungus spore became mycelium infection (no living body).
+    Inoculated,
+    Wait,
+}
+
 fn try_wake_spore(
     world: &mut World,
     gx: i32,
@@ -231,17 +242,28 @@ fn try_wake_spore(
     temp: Option<&Temperature>,
     plant_cols: &[i32],
     fungus_cols: &[i32],
-) -> Option<Atom> {
+) -> WakeOutcome {
+    let _ = fungus_cols;
     // Buried: solid where we landed and no free Air seat nearby → wait.
     // Cold: stay dormant through freezes / winter snaps.
     if let Some(t) = temp {
         if t.at_cell(gx, gy) < cfg.min_temp_c {
-            return None;
+            return WakeOutcome::Wait;
         }
     }
     match spore.kind {
-        SporeKind::Plant => wake_plant(world, gx, gy, spore, cfg, plant_cols),
-        SporeKind::Fungus => wake_fungus(world, gx, gy, spore, fungus_cols),
+        SporeKind::Plant => match wake_plant(world, gx, gy, spore, cfg, plant_cols) {
+            Some(child) => WakeOutcome::Birth(child),
+            None => WakeOutcome::Wait,
+        },
+        // Fungus bank packets inoculate cream — mushrooms emerge later.
+        SporeKind::Fungus => {
+            if infect_mycelium_at(world, gx, gy).is_some() {
+                WakeOutcome::Inoculated
+            } else {
+                WakeOutcome::Wait
+            }
+        }
     }
 }
 
@@ -278,56 +300,19 @@ fn wake_plant(
     Some(child)
 }
 
-fn wake_fungus(
-    world: &mut World,
-    gx: i32,
-    gy: i32,
-    spore: &DormantSpore,
-    fungus_cols: &[i32],
-) -> Option<Atom> {
-    if fungus_cols
-        .iter()
-        .any(|&ox| world.wrap_x(ox) == world.wrap_x(gx))
-    {
-        return None;
-    }
-    let local = count_fungi_near(
-        fungus_cols,
-        gx,
-        FUNGUS_SPORE_LOCAL_RADIUS,
-        world.wrap_width,
-    );
-    if local >= FUNGUS_SPORE_LOCAL_MAX {
-        return None;
-    }
-    let seat_y = if spore.prefer_surface {
-        find_fungus_slot(world, gx, gy)?
-    } else {
-        crate::plant::find_fungus_slot_biased(world, gx, gy, false)?
-    };
-    let organic = organic_cells_near(world, gx, seat_y) as f32;
-    let litter = soft_litter_at(world, gx) as f32;
-    if organic < 1.0 && litter < FUNGUS_STARVE_UNITS {
-        return None;
-    }
-    let tank = spore.energy.max(8.0);
-    let mut child = Atom::from_body(gx, seat_y, tank, spore.body.clone());
-    apply_genome(&mut child, spore.genome);
-    child.energy = spore.energy.clamp(1.0, child.energy_max);
-    pin_plant_pose(&mut child);
-    if !is_fungus_seated(world, &child) {
-        return None;
-    }
-    seed_mycelium_near(world, gx, seat_y, 16);
-    Some(child)
-}
-
 /// Result of a live dispersal attempt (immediate germinate vs bank vs no-op).
 #[derive(Debug)]
 pub enum DispersalResult {
     Germinated(Atom),
     /// Paid the dispersal cost; packet sleeps at `(gx, gy)`.
     Banked { gx: i32, gy: i32 },
+    /// Fungus spore became mycelium infection (puff VFX; no Atom child).
+    Inoculated {
+        gx: i32,
+        gy: i32,
+        /// Surface stalk spent itself and should collapse to litter.
+        collapse: bool,
+    },
     /// No attempt (cooldown / rarity / no launch tissue).
     None,
 }
