@@ -126,7 +126,8 @@ pub use rules::{
     CondensationConfig, EvapConfig, GrainConfig,
     KarstConfig,
     OrographicConfig, PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
-    GRAIN_REPOSE_HAZE_MAX, GRAIN_SETTLE_PASSES, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
+    GRAIN_REPOSE_HAZE_MAX, GRAIN_SETTLE_PASSES, MYCELIUM_EROSION_BIND, MYCELIUM_RAFT_BIND_MIN,
+    MYCELIUM_REPOSE_STEP_BONUS, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
 pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,

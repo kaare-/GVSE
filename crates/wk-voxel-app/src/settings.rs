@@ -727,7 +727,9 @@ impl SimSettings {
                     ui.label(
                         None,
                         "Floating Organic: higher waterlog = mats sink sooner; \
-                         bind radius dilates root rafts (0 = body span only).",
+                         bind radius dilates root rafts (0 = body span only). \
+                         Mycelium cream (0–255) also sticks grounded litter and \
+                         toughens colonized rafts automatically.",
                     );
                     labeled_slider(
                         ui,

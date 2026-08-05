@@ -179,6 +179,10 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   is gated by live [`FungiConfig`] knobs (Tab → Life → Fungi / compost).
   Defaults are faster than the old hard-coded `220 / 1-in-6000` so thick
   litter blankets humify before plants lose pore water.
+- **Mycelium stickiness** uses the same cream intensity (`Cell::_pad`
+  0..=255): colonized Organic holds short repose faces and resists flow
+  scour; floating mats with myc ≥ ~40 sail as cohesive rafts and
+  waterlog slower than bare litter. No separate sticky material.
 - Crude global **carbon buckets** (atmosphere + dissolved) live beside
   the water mass store: surface Organic can oxidize to Soil and credit
   atm C; lakes exchange atm ↔ dissolved on a slow cadence. Set A algae
