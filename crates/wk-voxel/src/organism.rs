@@ -82,10 +82,27 @@ const REPRO_COST_FRAC: f32 = 0.45;
 const REPRODUCE_AT: f32 = 0.85;
 /// Ticks between fission attempts.
 const REPRO_PERIOD: u64 = 40;
-/// Age soft-cap for plankton (ticks).
-const LIFE_TICKS: u64 = DEMO_DAY_TICKS * 4;
+/// Plankton soft age-cap in climate cycles (day+night).
+const PLANKTON_LIFE_CYCLES: u64 = 4;
 /// Land plants / fungi live longer — senescence is softer than plankton blooms.
-const PLANT_LIFE_TICKS: u64 = DEMO_DAY_TICKS * 16;
+const PLANT_LIFE_CYCLES: u64 = 16;
+/// Default-climate plankton life (tests / docs). Live ticks use [`life_ticks`].
+const LIFE_TICKS: u64 = DEMO_DAY_TICKS * PLANKTON_LIFE_CYCLES;
+/// Default-climate plant life. Live ticks scale with [`ClimateConfig::total_ticks`].
+const PLANT_LIFE_TICKS: u64 = DEMO_DAY_TICKS * PLANT_LIFE_CYCLES;
+
+/// Soft age-cap in ticks for the active climate clock.
+///
+/// Must track live day/night lengths — a fixed `DEMO_DAY_TICKS * N` cap
+/// kills plants after ~3 long days when the Tab day slider is stretched.
+fn life_ticks(climate: &ClimateConfig, plant_or_fungus: bool) -> u64 {
+    let cycles = if plant_or_fungus {
+        PLANT_LIFE_CYCLES
+    } else {
+        PLANKTON_LIFE_CYCLES
+    };
+    climate.total_ticks().saturating_mul(cycles)
+}
 
 /// Land / fungus corpses rest this long before becoming Organic (~0.75 demo day).
 pub const CORPSE_SETTLE_LAND_TICKS: u32 = 900;
@@ -839,11 +856,7 @@ impl OrganismStore {
             atom.age_ticks = atom.age_ticks.saturating_add(1);
             atom.cooldown = atom.cooldown.saturating_sub(1);
 
-            let life_cap = if is_land_plant(atom) || is_fungus(atom) {
-                PLANT_LIFE_TICKS
-            } else {
-                LIFE_TICKS
-            };
+            let life_cap = life_ticks(climate, is_land_plant(atom) || is_fungus(atom));
             if atom.age_ticks >= life_cap {
                 deaths.push(i);
                 continue;
@@ -3866,6 +3879,50 @@ mod tests {
             w.get_cell(root_cell.0, root_cell.1).unwrap().sat.0,
             sat_before.min(crate::cell::water_capacity(MaterialId::Organic)),
             "Organic conversion must not destroy pore sat"
+        );
+    }
+
+    #[test]
+    fn plant_senescence_scales_with_climate_day_length() {
+        // Long Tab days used to kill plants at DEMO_DAY_TICKS*16 (~3 live
+        // days when day=6000). Cap must track climate.total_ticks()*16.
+        let mut w = moist_sand_plot();
+        let climate = ClimateConfig {
+            day_ticks: 6_000,
+            night_ticks: 600,
+        };
+        let cap = super::life_ticks(&climate, true);
+        assert_eq!(cap, climate.total_ticks() * 16);
+        assert!(
+            cap > super::PLANT_LIFE_TICKS,
+            "long climate must outlive the old fixed demo cap"
+        );
+
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        // Past old demo senescence, still young for this climate.
+        store.atoms[0].age_ticks = super::PLANT_LIFE_TICKS;
+        store.atoms[0].energy = 40.0;
+        let _ = store.step_with_climate(&mut w, 0, &climate, None);
+        assert_eq!(
+            store.len(),
+            1,
+            "plant must survive past DEMO_DAY_TICKS*16 under long days"
+        );
+
+        store.atoms[0].age_ticks = cap;
+        store.atoms[0].energy = 40.0;
+        let _ = store.step_with_climate(&mut w, 0, &climate, None);
+        assert!(
+            store.is_empty(),
+            "plant must still senesce at climate.total_ticks()*16"
         );
     }
 
