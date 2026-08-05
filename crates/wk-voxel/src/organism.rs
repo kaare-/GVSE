@@ -93,6 +93,9 @@ pub const CORPSE_SETTLE_WATER_TICKS: u32 = 2_400;
 /// Tuned so wind ~0.2 or modest sat-shear current visibly slides dead stems.
 const CORPSE_DRIFT_BASE: f32 = 0.55;
 const CORPSE_DRIFT_SALT: u64 = 0xC0B5_E0FF_DEAD_u64;
+/// Max |body dx| for a tipped waterline log (stem/leaf). Stops re-tip folds
+/// from growing absurd floaters that pierce shore terrain.
+pub const MAX_FALLEN_WATERLINE_EXTENT: i16 = 12;
 
 /// Floater equilibrium depth below the free surface (cells).
 const FLOAT_DEPTH: f32 = 1.5;
@@ -371,6 +374,10 @@ impl Corpse {
             .copied()
             .filter(|&(x, y)| body.iter().any(|&(bx, by, _)| bx == x && by == y))
             .collect();
+        let fallen = atom.fallen;
+        let mut upright_growth = upright_growth;
+        let mut body = body;
+        clamp_fallen_body_extent(fallen, &mut body, &mut upright_growth);
         Self {
             gx: atom.gx,
             gy: atom.gy,
@@ -381,7 +388,7 @@ impl Corpse {
             settled_ticks: 0,
             land,
             last_water_top: atom.last_water_top,
-            fallen: atom.fallen,
+            fallen,
             upright_growth,
         }
     }
@@ -555,17 +562,25 @@ impl OrganismStore {
         for corpse in &self.corpses {
             for &(dx0, dy0, mid) in &corpse.body {
                 let (dx, dy) = corpse.fallen_draw_offset(dx0, dy0);
+                if corpse.fallen && fallen_pose_past_extent(mid, dx) {
+                    continue;
+                }
+                let wx = corpse.gx + dx as i32;
+                let wy = corpse.gy + dy as i32;
+                if corpse.fallen {
+                    if let Some(c) = world.get_cell(world.wrap_x(wx), wy) {
+                        if terrain_occludes_module(mid, c.material) {
+                            continue;
+                        }
+                    }
+                }
                 let rgb = if mid == ModuleId::Photosystem {
                     // Corpses keep the shaded leaf tone (no harvest).
                     PHOTO_RGB_SHADED
                 } else {
                     mid.rgb()
                 };
-                out.push((
-                    corpse.gx + dx as i32,
-                    corpse.gy + dy as i32,
-                    corpse_rgb(rgb),
-                ));
+                out.push((wx, wy, corpse_rgb(rgb)));
             }
         }
         out
@@ -1067,6 +1082,12 @@ impl OrganismStore {
                         corpse.fy = top2 as f32;
                         corpse.last_water_top = Some(top2);
                     }
+                    clamp_fallen_body_extent(
+                        corpse.fallen,
+                        &mut corpse.body,
+                        &mut corpse.upright_growth,
+                    );
+                    prune_fallen_corpse_canopy_in_solid(world, corpse);
                 } else {
                     // Reseat on beach/bed — don't leave a grey stem at the
                     // vanished waterline. Woody bake already flattened the
@@ -1075,6 +1096,12 @@ impl OrganismStore {
                         corpse.gy = slot;
                     }
                     pin_corpse_land(corpse);
+                    clamp_fallen_body_extent(
+                        corpse.fallen,
+                        &mut corpse.body,
+                        &mut corpse.upright_growth,
+                    );
+                    prune_fallen_corpse_canopy_in_solid(world, corpse);
                 }
                 corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
                 if corpse.settled_ticks >= CORPSE_SETTLE_LAND_TICKS {
@@ -1434,6 +1461,11 @@ fn step_land_plant(
     } else {
         pin_plant_pose(atom);
     }
+    // Tipped logs: trim absurd waterline span and shed canopy buried in rock.
+    if atom.fallen {
+        clamp_fallen_log_extent(atom);
+        prune_fallen_canopy_in_solid(world, atom);
+    }
     // Roots bank surplus above the spawn tank (starch analogy).
     sync_root_storage(atom);
     // Pore moisture under roots, or free standing water on leaves.
@@ -1747,12 +1779,23 @@ pub fn resolve_organism_draw_cells(
     for (atom_idx, atom) in atoms.iter().enumerate() {
         for &(dx0, dy0, mid) in &atom.body {
             let (dx, dy) = atom.fallen_draw_offset(dx0, dy0);
+            if atom.fallen && fallen_pose_past_extent(mid, dx) {
+                continue;
+            }
             let (wx0, wy0) = frond_draw_cell(world, atom, dx, dy, mid, tick, wind_vx);
             // Keep unwrapped draw X for the renderer (it paints wrap copies).
             // World queries use wrap_x.
             let wx = wx0;
             let mut wy = wy0;
             let qx = world.wrap_x(wx);
+            // Tipped canopy must not paint through solid hillside / beach.
+            if atom.fallen {
+                if let Some(c) = world.get_cell(qx, wy) {
+                    if terrain_occludes_module(mid, c.material) {
+                        continue;
+                    }
+                }
+            }
             // Stemless soft mats pile in free Air so flopped greens don't
             // overwrite. Woody canopy leaves stay on their stem pose —
             // piling would float them a cell off the petiole.
@@ -1786,11 +1829,15 @@ pub fn resolve_organism_draw_cells(
 /// Canopy (dy ≥ 0) lays along +x at the waterline; roots (dy < 0) hang
 /// straight down. Woody plants use [`rigid_tip_offset`] + [`bake_tip_into_body`]
 /// instead so root and stem stay one rigid body.
+///
+/// Horizontal span is capped at [`MAX_FALLEN_WATERLINE_EXTENT`] so tall
+/// ribbons cannot become screen-wide floaters that pierce shore terrain.
 pub fn fallen_body_offset(dx: i16, dy: i16) -> (i16, i16) {
     if dy < 0 {
         (dx, dy)
     } else {
-        (dx + dy, 0)
+        let lean = (dx + dy).clamp(-MAX_FALLEN_WATERLINE_EXTENT, MAX_FALLEN_WATERLINE_EXTENT);
+        (lean, 0)
     }
 }
 
@@ -1874,21 +1921,36 @@ pub fn bake_tip_into_body(atom: &mut Atom) {
     atom.body = next;
     atom.upright_growth.clear();
     atom.leaf_starve.clear();
+    clamp_fallen_log_extent(atom);
 }
 
 /// Fold post-tip upright mast cells onto the waterline trunk (+x).
+///
+/// Only **Stem** modules extend the log. Leaves / spores on the mast are
+/// shed — folding every Photosystem pixel was growing screen-wide floaters.
 fn fold_upright_mast_into_waterline(atom: &mut Atom) {
     use std::collections::HashSet;
 
-    let mast: Vec<(i16, i16, ModuleId)> = atom
+    let mast_stem: Vec<(i16, i16, ModuleId)> = atom
         .body
         .iter()
         .copied()
-        .filter(|&(x, y, _)| atom.upright_growth.iter().any(|&p| p == (x, y)))
+        .filter(|&(x, y, m)| {
+            m == ModuleId::Stem && atom.upright_growth.iter().any(|&p| p == (x, y))
+        })
         .collect();
-    if mast.is_empty() {
+    // Drop upright leaves/spores — they do not become more log length.
+    atom.body.retain(|&(x, y, m)| {
+        let upright = atom.upright_growth.iter().any(|&p| p == (x, y));
+        if !upright {
+            return true;
+        }
+        m == ModuleId::Stem
+    });
+    if mast_stem.is_empty() {
         atom.upright_growth.clear();
         atom.leaf_starve.clear();
+        clamp_fallen_log_extent(atom);
         return;
     }
 
@@ -1903,7 +1965,8 @@ fn fold_upright_mast_into_waterline(atom: &mut Atom) {
         .filter(|&&(_, y)| y == 0)
         .map(|&(x, _)| x)
         .max()
-        .unwrap_or(0);
+        .unwrap_or(0)
+        .min(MAX_FALLEN_WATERLINE_EXTENT);
 
     let mut next: Vec<BodyModule> = atom
         .body
@@ -1912,9 +1975,12 @@ fn fold_upright_mast_into_waterline(atom: &mut Atom) {
         .filter(|&(x, y, _)| !atom.upright_growth.iter().any(|&p| p == (x, y)))
         .collect();
 
-    let mut mast_sorted = mast;
+    let mut mast_sorted = mast_stem;
     mast_sorted.sort_by_key(|&(x, y, _)| (y, x.abs()));
     for (_, _, m) in mast_sorted {
+        if tip_x >= MAX_FALLEN_WATERLINE_EXTENT {
+            break;
+        }
         tip_x += 1;
         let nx = tip_x;
         let mut ny = 0i16;
@@ -1930,6 +1996,137 @@ fn fold_upright_mast_into_waterline(atom: &mut Atom) {
     atom.body = next;
     atom.upright_growth.clear();
     atom.leaf_starve.clear();
+    clamp_fallen_log_extent(atom);
+}
+
+/// Trim tipped logs that grew past [`MAX_FALLEN_WATERLINE_EXTENT`].
+///
+/// Prefers shedding canopy (Photosystem / ReproSpore) before Stem; never
+/// removes the Nucleus. Roots on −x are clamped to the same extent.
+pub fn clamp_fallen_log_extent(atom: &mut Atom) {
+    clamp_fallen_body_extent(atom.fallen, &mut atom.body, &mut atom.upright_growth);
+}
+
+fn clamp_fallen_body_extent(
+    fallen: bool,
+    body: &mut Vec<BodyModule>,
+    upright_growth: &mut Vec<(i16, i16)>,
+) {
+    if !fallen {
+        return;
+    }
+    let cap = MAX_FALLEN_WATERLINE_EXTENT;
+    let over = |dx: i16| dx.abs() > cap;
+    // First pass: drop far canopy.
+    body.retain(|&(dx, _, m)| {
+        if m == ModuleId::Nucleus || m == ModuleId::Root {
+            return !over(dx) || m == ModuleId::Nucleus;
+        }
+        if matches!(m, ModuleId::Photosystem | ModuleId::ReproSpore) && over(dx) {
+            return false;
+        }
+        true
+    });
+    // Second pass: trim far stem tips until within cap.
+    while body
+        .iter()
+        .any(|&(dx, _, m)| m == ModuleId::Stem && dx.abs() > cap)
+    {
+        let Some((idx, _)) = body
+            .iter()
+            .enumerate()
+            .filter(|(_, &(dx, _, m))| m == ModuleId::Stem && dx.abs() > cap)
+            .max_by_key(|(_, &(dx, _, _))| dx.abs())
+        else {
+            break;
+        };
+        body.remove(idx);
+    }
+    // Clamp leftover roots that still stick past the cap.
+    body.retain(|&(dx, _, m)| {
+        m == ModuleId::Nucleus || !over(dx) || m == ModuleId::Digest || m == ModuleId::Hypha
+    });
+    if !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+        body.insert(0, (0, 0, ModuleId::Nucleus));
+    }
+    upright_growth.retain(|&(x, y)| body.iter().any(|&(bx, by, _)| bx == x && by == y));
+}
+
+/// True when a non-substrate module would paint through solid terrain.
+///
+/// Air and Water are free (floaters live on the surface / in the column).
+/// Roots / fungal threads may live inside substrate; canopy must not.
+fn terrain_occludes_module(mid: ModuleId, mat: MaterialId) -> bool {
+    if matches!(mat, MaterialId::Air | MaterialId::Water) {
+        return false;
+    }
+    !matches!(
+        mid,
+        ModuleId::Root | ModuleId::Digest | ModuleId::Hypha
+    )
+}
+
+/// Soft/rigid tip pose past the waterline cap — skip rather than pile.
+fn fallen_pose_past_extent(mid: ModuleId, dx: i16) -> bool {
+    if mid == ModuleId::Nucleus
+        || matches!(mid, ModuleId::Root | ModuleId::Digest | ModuleId::Hypha)
+    {
+        return false;
+    }
+    dx.abs() > MAX_FALLEN_WATERLINE_EXTENT
+}
+
+/// Drop tipped canopy modules that already sit inside solid ground.
+pub fn prune_fallen_canopy_in_solid(world: &World, atom: &mut Atom) {
+    prune_fallen_body_in_solid(
+        world,
+        atom.fallen,
+        atom.gx,
+        atom.gy,
+        &mut atom.body,
+        &mut atom.upright_growth,
+    );
+}
+
+fn prune_fallen_corpse_canopy_in_solid(world: &World, corpse: &mut Corpse) {
+    prune_fallen_body_in_solid(
+        world,
+        corpse.fallen,
+        corpse.gx,
+        corpse.gy,
+        &mut corpse.body,
+        &mut corpse.upright_growth,
+    );
+}
+
+fn prune_fallen_body_in_solid(
+    world: &World,
+    fallen: bool,
+    gx: i32,
+    gy: i32,
+    body: &mut Vec<BodyModule>,
+    upright_growth: &mut Vec<(i16, i16)>,
+) {
+    if !fallen {
+        return;
+    }
+    body.retain(|&(dx, dy, m)| {
+        if m == ModuleId::Nucleus
+            || matches!(m, ModuleId::Root | ModuleId::Digest | ModuleId::Hypha)
+        {
+            return true;
+        }
+        let wx = world.wrap_x(gx + dx as i32);
+        let wy = gy + dy as i32;
+        match world.get_cell(wx, wy) {
+            Some(c) if terrain_occludes_module(m, c.material) => false,
+            _ => true,
+        }
+    });
+    if !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+        body.insert(0, (0, 0, ModuleId::Nucleus));
+    }
+    upright_growth.retain(|&(x, y)| body.iter().any(|&(bx, by, _)| bx == x && by == y));
 }
 
 /// Draw offset for a tipped plant cell.
@@ -1964,10 +2161,13 @@ pub fn fallen_draw_offset(
                     && !upright_growth.iter().any(|&p| p == (x, y))
             });
             if needs_draw_tip {
+                // Uncapped rigid tip; [`resolve_organism_draw_cells`] skips
+                // modules past [`MAX_FALLEN_WATERLINE_EXTENT`].
                 return rigid_tip_offset(dx, dy);
             }
             return (dx, dy);
         }
+        // Soft tip already clamps inside [`fallen_body_offset`].
         return fallen_body_offset(dx, dy);
     }
     // Distinct upright body-Y values strictly below `dy` that still exist on
@@ -5459,5 +5659,125 @@ mod tests {
             "chronically shaded woody leaves should abscise (had {n0}, now {n1})"
         );
         assert!(n1 >= 1, "keep at least one Photosystem");
+    }
+
+    #[test]
+    fn soft_tip_caps_waterline_span() {
+        let tall = 40i16;
+        let (dx, dy) = fallen_body_offset(0, tall);
+        assert_eq!(dy, 0);
+        assert!(
+            dx.abs() <= MAX_FALLEN_WATERLINE_EXTENT,
+            "soft tip must not map tall ribbons into screen-wide floaters (dx={dx})"
+        );
+    }
+
+    #[test]
+    fn tall_tip_bake_clamps_waterline_extent() {
+        let mut body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+        ];
+        for y in 1..=20i16 {
+            body.push((0, y, ModuleId::Stem));
+        }
+        body.push((0, 21, ModuleId::Photosystem));
+        let mut atom = Atom::from_body(4, 8, 40.0, body);
+        bake_tip_into_body(&mut atom);
+        let max_dx = atom
+            .body
+            .iter()
+            .map(|&(dx, _, _)| dx.abs())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_dx <= MAX_FALLEN_WATERLINE_EXTENT,
+            "baked tip log must stay within waterline cap (max_dx={max_dx}), body={:?}",
+            atom.body
+        );
+    }
+
+    #[test]
+    fn retip_fold_only_extends_stem_and_stays_capped() {
+        let mut body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Stem),
+            (2, 0, ModuleId::Stem),
+        ];
+        // Tall upright mast: stems + many leaves (old bug folded every leaf).
+        for y in 1..=16i16 {
+            body.push((0, y, ModuleId::Stem));
+            body.push((1, y, ModuleId::Photosystem));
+        }
+        let upright: Vec<(i16, i16)> = body
+            .iter()
+            .filter(|&&(x, y, _)| y > 0)
+            .map(|&(x, y, _)| (x, y))
+            .collect();
+        let mut atom = Atom::from_body(4, 8, 40.0, body);
+        atom.fallen = true;
+        atom.upright_growth = upright;
+        let photo_before = atom.photosystem_count();
+        bake_tip_into_body(&mut atom);
+        let max_dx = atom
+            .body
+            .iter()
+            .map(|&(dx, _, _)| dx.abs())
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_dx <= MAX_FALLEN_WATERLINE_EXTENT,
+            "re-tip must not grow a mega-log (max_dx={max_dx})"
+        );
+        assert!(
+            atom.photosystem_count() < photo_before,
+            "upright leaves should shed on re-tip, not become more log length"
+        );
+        assert!(atom.upright_growth.is_empty());
+    }
+
+    #[test]
+    fn tipped_draw_skips_canopy_inside_solid_terrain() {
+        let mut w = World::new(9);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Water left, sand hill right — a long waterline log would pierce it.
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            if x <= 6 {
+                for y in 1..=5 {
+                    w.set_cell(x, y, Cell::water());
+                }
+                for y in 6..12 {
+                    w.set_cell(x, y, Cell::air());
+                }
+            } else {
+                for y in 1..=5 {
+                    w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+                }
+                for y in 6..12 {
+                    w.set_cell(x, y, Cell::air());
+                }
+            }
+        }
+        let mut body = vec![(0, 0, ModuleId::Nucleus)];
+        for x in 1..=9i16 {
+            body.push((x, 0, ModuleId::Stem));
+        }
+        body.push((10, 0, ModuleId::Photosystem));
+        let mut atom = Atom::from_body(4, 5, 40.0, body);
+        atom.fallen = true;
+        let posed = resolve_organism_draw_cells(&w, &[atom], 0, 0.0);
+        assert!(
+            posed.iter().any(|p| p.mid == ModuleId::Stem && p.wx <= 6),
+            "log over water should still draw"
+        );
+        assert!(
+            !posed.iter().any(|p| {
+                let mat = w.get_cell(w.wrap_x(p.wx), p.wy).map(|c| c.material);
+                matches!(mat, Some(MaterialId::Sand | MaterialId::Bedrock))
+                    && matches!(p.mid, ModuleId::Stem | ModuleId::Photosystem)
+            }),
+            "tipped canopy must not paint through the sand hill: {posed:?}"
+        );
     }
 }

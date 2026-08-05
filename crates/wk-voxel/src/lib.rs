@@ -85,8 +85,8 @@ pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
     bake_tip_into_body, column_sky_light, fallen_body_offset, rigid_tip_offset, Atom, BodyModule,
     Corpse, ModuleId, OrganismStore, SpawnFail, SporeRelease, CORPSE_SETTLE_LAND_TICKS,
-    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES, SUBMERGED_STEM_URGE_LIGHT,
-    WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
+    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT,
+    SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
 pub use plant::{
     collect_live_photo_world_cells, collect_live_root_world_cells, collect_plant_sail_tops,

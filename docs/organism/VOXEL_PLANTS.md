@@ -22,6 +22,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | Tipped plants stay tipped after re-root; new Stem/Photo grow upright | Done |
 | Upright mast re-tips when tippy; draw-space sail counts new shoots | Done |
 | Tip bakes into body (new stems grow up); floaters elongate roots | Done |
+| Tipped waterline logs capped; re-tip folds Stem only; no terrain pierce | Done |
 | Vegetative / spore juvenile = pruned parent clone (not template) | Done |
 | Substrate-rooted plants stay pinned when flooded (raft organic floats) | Done |
 | Seaweed stays on bed holdfast; floats only if holdfast lost/rafting | Done |
