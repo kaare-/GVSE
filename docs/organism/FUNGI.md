@@ -166,7 +166,9 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   Dry cells fade (disconnect); remoistened neighbours can re-spread
   (reconnect). Compost leaves a residual cream corridor on Soil **only
   when the Organic already had cream** — virgin surface oxidation must
-  not invent orphan `mycelium=1` soil.
+  not invent orphan `mycelium=1` soil. Each field pulse processes a
+  rotating, frontier-biased sample (perf cap) so dense hubs cannot
+  permanently starve climb / food-seeking fronts.
   Renderer: faint cream threads (stronger on Organic).
 - **Multi-strain shares** — a cell’s 255 cream budget is shared. Each
   inoculum mints a strain id; several strains can hold intensity on the

@@ -86,7 +86,11 @@ pub const MYCELIUM_FIELD_GROW: u8 = 1;
 /// 1-in-N chance a moist colonized cell seeds a neighbour Organic.
 pub const MYCELIUM_FIELD_SPREAD_ODDS: u64 = 20;
 /// Max colonized cells processed per field pulse (perf cap).
-pub const MYCELIUM_FIELD_MAX_CELLS: usize = 256;
+///
+/// Old value (256) + fixed scan order let dense hubs monopolize every
+/// pulse so moist frontiers looked "stalled" forever. We now scan all
+/// cream cells, then pick a rotating frontier-biased sample.
+pub const MYCELIUM_FIELD_MAX_CELLS: usize = 768;
 /// Pore / film moisture below which field growth pauses (slow decay).
 pub const MYCELIUM_FIELD_MOIST: f32 = 0.04;
 /// Ticks between mycelium-field → fruiting-body emergence attempts.
@@ -863,42 +867,16 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
     if world.tick % MYCELIUM_FIELD_PERIOD != 0 {
         return;
     }
-    use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 
     let threshold = cfg.soil_mycelium_threshold;
     let convert_odds = cfg.soil_convert_odds.max(1);
 
-    let mut colonized: Vec<(i32, i32, u8, MaterialId)> = Vec::new();
-    let coords: Vec<_> = world.chunks.keys().copied().collect();
-    for coord in coords {
-        for ly in 0..CHUNK_CELLS_H {
-            for lx in 0..CHUNK_CELLS_W {
-                let gx = coord.cx * CHUNK_CELLS_W as i32 + lx as i32;
-                let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
-                let Some(c) = world.get_cell(gx, gy) else {
-                    continue;
-                };
-                if hosts_mycelium(c.material) && c.mycelium() > 0 {
-                    colonized.push((gx, gy, c.mycelium(), c.material));
-                    if colonized.len() >= MYCELIUM_FIELD_MAX_CELLS {
-                        break;
-                    }
-                }
-            }
-            if colonized.len() >= MYCELIUM_FIELD_MAX_CELLS {
-                break;
-            }
-        }
-        if colonized.len() >= MYCELIUM_FIELD_MAX_CELLS {
-            break;
-        }
-    }
+    let seed = world.seed.0;
+    let tick = world.tick;
+    let colonized = collect_mycelium_field_cells(world, tick, seed, MYCELIUM_FIELD_MAX_CELLS);
     if colonized.is_empty() {
         return;
     }
-
-    let seed = world.seed.0;
-    let tick = world.tick;
     let mut spreads: Vec<(i32, i32)> = Vec::new();
     let mut grows: Vec<(i32, i32)> = Vec::new();
     let mut decays: Vec<(i32, i32)> = Vec::new();
@@ -1954,6 +1932,90 @@ fn hash_u64(a: u64, b: u64, c: u64, salt: u64) -> u64 {
     x
 }
 
+/// Scan every cream cell, then pick up to `max` for this pulse.
+///
+/// ~¾ of the budget prefers frontier cells (`myc < 80`) so networks keep
+/// climbing / seeking Organic; the rest rotates through dense hubs so they
+/// still thicken, compost, and push outward. Without this, a fixed
+/// first-N scan froze growth once hubs filled the old 256-cell cap.
+fn collect_mycelium_field_cells(
+    world: &World,
+    tick: u64,
+    seed: u64,
+    max: usize,
+) -> Vec<(i32, i32, u8, MaterialId)> {
+    use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
+
+    let mut frontier: Vec<(i32, i32, u8, MaterialId)> = Vec::new();
+    let mut core: Vec<(i32, i32, u8, MaterialId)> = Vec::new();
+    let mut coords: Vec<_> = world.chunks.keys().copied().collect();
+    if coords.is_empty() || max == 0 {
+        return Vec::new();
+    }
+    coords.sort_by_key(|c| (c.cy, c.cx));
+    // Rotate chunk visit order each pulse so no region is permanently last.
+    let pulse = (tick / MYCELIUM_FIELD_PERIOD.max(1)) as usize;
+    let start = pulse % coords.len();
+    coords.rotate_left(start);
+
+    for coord in coords {
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let gx = coord.cx * CHUNK_CELLS_W as i32 + lx as i32;
+                let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
+                let Some(c) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if !hosts_mycelium(c.material) {
+                    continue;
+                }
+                let myc = c.mycelium();
+                if myc == 0 {
+                    continue;
+                }
+                if myc < 80 {
+                    frontier.push((gx, gy, myc, c.material));
+                } else {
+                    core.push((gx, gy, myc, c.material));
+                }
+            }
+        }
+    }
+
+    let n_front = (max * 3 / 4).max(1).min(max);
+    let mut out = take_rotated_sample(&mut frontier, tick, seed, 0xF70A, n_front);
+    let remain = max.saturating_sub(out.len());
+    out.extend(take_rotated_sample(&mut core, tick, seed, 0xC0A1, remain));
+    // If one tier was short, top up from leftovers of the other.
+    if out.len() < max && !frontier.is_empty() {
+        let need = max - out.len();
+        out.extend(take_rotated_sample(&mut frontier, tick, seed, 0xF70B, need));
+    }
+    if out.len() < max && !core.is_empty() {
+        let need = max - out.len();
+        out.extend(take_rotated_sample(&mut core, tick, seed, 0xC0A2, need));
+    }
+    out
+}
+
+fn take_rotated_sample(
+    cells: &mut Vec<(i32, i32, u8, MaterialId)>,
+    tick: u64,
+    seed: u64,
+    salt: u64,
+    n: usize,
+) -> Vec<(i32, i32, u8, MaterialId)> {
+    if cells.is_empty() || n == 0 {
+        return Vec::new();
+    }
+    // Deterministic shuffle-lite: sort by hash(tick, pos) then take prefix.
+    cells.sort_by_key(|&(gx, gy, myc, _)| {
+        hash_u64(seed, tick ^ salt, gx as u64, gy as u64 ^ (myc as u64))
+    });
+    let take = n.min(cells.len());
+    cells.drain(..take).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2107,6 +2169,42 @@ mod tests {
         assert!(
             total >= 200,
             "water must not vanish on compost (total={total})"
+        );
+    }
+
+    #[test]
+    fn field_sample_prefers_frontier_when_over_cap() {
+        let mut w = litter_plot();
+        // Dense saturated hub — would have monopolized the old fixed scan.
+        for x in 0..8 {
+            for y in 1..6 {
+                let mut sand = Cell::solid(MaterialId::Sand);
+                sand.sat = Sat(180);
+                sand.set_mycelium(200);
+                w.set_cell(x, y, sand);
+                let s = alloc_mycelium_strain(&mut w);
+                w.mycelium_strains.insert((x, y), vec![(s, 200)]);
+            }
+        }
+        // Thin frontier corridor toward fresh Organic.
+        for y in 1..=4 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            sand.set_mycelium(20);
+            w.set_cell(10, y, sand);
+            let s = alloc_mycelium_strain(&mut w);
+            w.mycelium_strains.insert((10, y), vec![(s, 20)]);
+        }
+        let mut food = Cell::solid(MaterialId::Organic);
+        food.sat = Sat(160);
+        w.set_cell(10, 5, food);
+
+        let picked = collect_mycelium_field_cells(&w, MYCELIUM_FIELD_PERIOD, w.seed.0, 16);
+        assert_eq!(picked.len(), 16, "sample respects process budget");
+        let frontier_hits = picked.iter().filter(|&&(gx, _, myc, _)| gx == 10 && myc < 80).count();
+        assert!(
+            frontier_hits >= 3,
+            "frontier corridor must get slots when hubs overflow the cap (hits={frontier_hits})"
         );
     }
 
