@@ -41,8 +41,8 @@ pub use audit::{
 };
 pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{
-    falls_through_empty_air, grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain,
-    water_capacity, water_capacity_with, Cell, CellFlags, Sat,
+    falls_through_empty_air, grain_max_stable_step, hosts_mycelium, is_flow_erodible, is_grain,
+    is_repose_grain, water_capacity, water_capacity_with, Cell, CellFlags, Sat,
 };
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use blueprint::{
@@ -72,9 +72,10 @@ pub use spore_bank::{
     spore_bank_len, DormantSpore, SporeBank, SporeBankConfig, SporeKind, SPORE_BANK_PERIOD,
 };
 pub use fungi::{
-    add_soft_litter, compost_organic_to_soil, infect_mycelium_at, is_fungus, is_surface_stalk,
-    max_mycelium_near, seed_mycelium_near, soft_litter_at, step_mycelium_field,
-    step_mycelium_field_cfg, FungiConfig,
+    add_soft_litter, compost_organic_to_soil, infect_mycelium_at, infect_mycelium_with_lineage,
+    is_fungus, is_surface_stalk, max_mycelium_near, seed_mycelium_near, soft_litter_at,
+    stamp_mycelium_lineage, step_mycelium_field, step_mycelium_field_cfg, FungiConfig,
+    MyceliumLineage, MyceliumLineageMap, FUNGUS_STALK_SPORE_MAX_DIST, FUNGUS_STALK_SPORE_MIN_DIST,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,

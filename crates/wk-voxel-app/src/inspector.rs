@@ -102,7 +102,7 @@ pub fn draw_block_inspector(
                 props.porosity, props.permeability
             ));
             lines.push(format!("flags=0x{:02X}", c.flags.0));
-            if c.material == MaterialId::Organic && c.mycelium() > 0 {
+            if c.mycelium() > 0 {
                 lines.push(format!("mycelium={}/255", c.mycelium()));
             }
         }
@@ -153,7 +153,7 @@ pub fn draw_block_inspector(
         ));
         if is_fungus(atom) {
             lines.push(
-                "habit=fruiting body (emerged stalk; mycelium = cream field on Organic)".into(),
+                "habit=fruiting body (emerged stalk; mycelium = cream on Organic + mineral corridors)".into(),
             );
             let myc = wk_voxel::max_mycelium_near(world, atom.gx, atom.gy);
             lines.push(format!(

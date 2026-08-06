@@ -8,13 +8,16 @@
 //! isolated. Format is intentionally independent of column-GVSE
 //! `.gvse` / scenario files.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
+use wk_material::HydroOverrides;
 
 use crate::carbon::CarbonBudget;
+use crate::chunk::{Chunk, ChunkCoord};
 use crate::clouds::CloudStore;
-use crate::grid::World;
+use crate::grid::{World, WorldSeed};
 use crate::humidity::Humidity;
 use crate::organism::OrganismStore;
 use crate::temperature::Temperature;
@@ -36,7 +39,9 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// (HydroOverrides slot table grows with [`wk_material::MATERIAL_COUNT`]).
 /// v4: `MaterialId::LooseLimestone` (MATERIAL_COUNT 13→14).
 /// v5: [`CarbonBudget`] (atm + dissolved CO₂ buckets) saved with the sim.
-pub const SIM_SCHEMA_VERSION: u32 = 5;
+/// v6: [`World::mycelium_lineage`] (editor/spore fruiting-body stamps) +
+/// mycelium cream on porous mineral hosts (Soil/Sand/…).
+pub const SIM_SCHEMA_VERSION: u32 = 6;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -54,12 +59,57 @@ pub struct SimSnapshot {
     pub carbon: CarbonBudget,
 }
 
+/// Pre-v6 world (no mycelium_lineage map).
+#[derive(Debug, Clone, Deserialize)]
+struct WorldV5 {
+    seed: WorldSeed,
+    chunks: HashMap<ChunkCoord, Chunk>,
+    tick: u64,
+    wrap_width: Option<i32>,
+    #[serde(default)]
+    soft_litter: HashMap<i32, u16>,
+    #[serde(default)]
+    spore_bank: crate::spore_bank::SporeBank,
+    #[serde(default)]
+    hydro: HydroOverrides,
+}
+
+impl WorldV5 {
+    fn into_world(self) -> World {
+        World {
+            seed: self.seed,
+            chunks: self.chunks,
+            tick: self.tick,
+            wrap_width: self.wrap_width,
+            soft_litter: self.soft_litter,
+            spore_bank: self.spore_bank,
+            hydro: self.hydro,
+            mycelium_lineage: crate::fungi::MyceliumLineageMap::default(),
+        }
+    }
+}
+
+/// Pre-v6 postcard shape (carbon, no mycelium_lineage).
+#[derive(Debug, Clone, Deserialize)]
+struct SimSnapshotV5 {
+    schema_version: u32,
+    params: WorldgenParams,
+    world: WorldV5,
+    humidity: Humidity,
+    wind: Wind,
+    temperature: Temperature,
+    clouds: CloudStore,
+    organisms: OrganismStore,
+    #[serde(default)]
+    carbon: CarbonBudget,
+}
+
 /// Pre-v5 postcard shape (no carbon field).
 #[derive(Debug, Clone, Deserialize)]
 struct SimSnapshotV4 {
     schema_version: u32,
     params: WorldgenParams,
-    world: World,
+    world: WorldV5,
     humidity: Humidity,
     wind: Wind,
     temperature: Temperature,
@@ -96,7 +146,7 @@ impl SimSnapshot {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        // Prefer current schema; fall back to v4 (no carbon) for older demos.
+        // Prefer current schema; fall back to v5 (no lineage) then v4 (no carbon).
         match postcard::from_bytes::<Self>(bytes) {
             Ok(snap) => {
                 if snap.schema_version > SIM_SCHEMA_VERSION {
@@ -107,28 +157,48 @@ impl SimSnapshot {
                 }
                 Ok(snap)
             }
-            Err(_) => {
-                let old: SimSnapshotV4 =
-                    postcard::from_bytes(bytes).map_err(|e| e.to_string())?;
-                if old.schema_version > SIM_SCHEMA_VERSION {
-                    return Err(format!(
-                        "sim schema {} newer than supported {}",
-                        old.schema_version, SIM_SCHEMA_VERSION
-                    ));
+            Err(_) => match postcard::from_bytes::<SimSnapshotV5>(bytes) {
+                Ok(old) => {
+                    if old.schema_version > SIM_SCHEMA_VERSION {
+                        return Err(format!(
+                            "sim schema {} newer than supported {}",
+                            old.schema_version, SIM_SCHEMA_VERSION
+                        ));
+                    }
+                    Ok(Self {
+                        schema_version: SIM_SCHEMA_VERSION,
+                        params: old.params,
+                        world: old.world.into_world(),
+                        humidity: old.humidity,
+                        wind: old.wind,
+                        temperature: old.temperature,
+                        clouds: old.clouds,
+                        organisms: old.organisms,
+                        carbon: old.carbon,
+                    })
                 }
-                Ok(Self {
-                    schema_version: SIM_SCHEMA_VERSION,
-                    params: old.params,
-                    world: old.world,
-                    humidity: old.humidity,
-                    wind: old.wind,
-                    temperature: old.temperature,
-                    clouds: old.clouds,
-                    organisms: old.organisms,
-                    // Session-local buckets become ambient on first v5 load.
-                    carbon: CarbonBudget::default(),
-                })
-            }
+                Err(_) => {
+                    let old: SimSnapshotV4 =
+                        postcard::from_bytes(bytes).map_err(|e| e.to_string())?;
+                    if old.schema_version > SIM_SCHEMA_VERSION {
+                        return Err(format!(
+                            "sim schema {} newer than supported {}",
+                            old.schema_version, SIM_SCHEMA_VERSION
+                        ));
+                    }
+                    Ok(Self {
+                        schema_version: SIM_SCHEMA_VERSION,
+                        params: old.params,
+                        world: old.world.into_world(),
+                        humidity: old.humidity,
+                        wind: old.wind,
+                        temperature: old.temperature,
+                        clouds: old.clouds,
+                        organisms: old.organisms,
+                        carbon: CarbonBudget::default(),
+                    })
+                }
+            },
         }
     }
 
@@ -262,11 +332,22 @@ mod tests {
 
     #[test]
     fn snapshot_loads_v4_bytes_with_ambient_carbon() {
+        // Pre-lineage world shape (schema ≤5) — must not include mycelium_lineage.
+        #[derive(Serialize)]
+        struct WorldOut {
+            seed: WorldSeed,
+            chunks: HashMap<ChunkCoord, Chunk>,
+            tick: u64,
+            wrap_width: Option<i32>,
+            soft_litter: HashMap<i32, u16>,
+            spore_bank: crate::spore_bank::SporeBank,
+            hydro: HydroOverrides,
+        }
         #[derive(Serialize)]
         struct V4Out {
             schema_version: u32,
             params: WorldgenParams,
-            world: World,
+            world: WorldOut,
             humidity: Humidity,
             wind: Wind,
             temperature: Temperature,
@@ -285,7 +366,15 @@ mod tests {
         let bytes = postcard::to_allocvec(&V4Out {
             schema_version: 4,
             params,
-            world,
+            world: WorldOut {
+                seed: world.seed,
+                chunks: world.chunks,
+                tick: world.tick,
+                wrap_width: world.wrap_width,
+                soft_litter: world.soft_litter,
+                spore_bank: world.spore_bank,
+                hydro: world.hydro,
+            },
             humidity,
             wind,
             temperature,
@@ -296,6 +385,70 @@ mod tests {
         let loaded = SimSnapshot::from_bytes(&bytes).expect("migrate v4");
         assert_eq!(loaded.world.tick, 7);
         assert_eq!(loaded.carbon, CarbonBudget::default());
+        assert_eq!(loaded.schema_version, SIM_SCHEMA_VERSION);
+        assert!(loaded.world.mycelium_lineage.cells.is_empty());
+    }
+
+    #[test]
+    fn snapshot_loads_v5_bytes_with_empty_lineage() {
+        #[derive(Serialize)]
+        struct WorldOut {
+            seed: WorldSeed,
+            chunks: HashMap<ChunkCoord, Chunk>,
+            tick: u64,
+            wrap_width: Option<i32>,
+            soft_litter: HashMap<i32, u16>,
+            spore_bank: crate::spore_bank::SporeBank,
+            hydro: HydroOverrides,
+        }
+        #[derive(Serialize)]
+        struct V5Out {
+            schema_version: u32,
+            params: WorldgenParams,
+            world: WorldOut,
+            humidity: Humidity,
+            wind: Wind,
+            temperature: Temperature,
+            clouds: CloudStore,
+            organisms: OrganismStore,
+            carbon: CarbonBudget,
+        }
+        let params = WorldgenParams {
+            width_cols: 32,
+            sky_ceiling_y: 32,
+            sea_level_y: 10,
+            ..WorldgenParams::default()
+        };
+        let mut world = World::new(params.seed);
+        world.tick = 9;
+        let (humidity, wind, temperature) = demo_climate(&params);
+        let bytes = postcard::to_allocvec(&V5Out {
+            schema_version: 5,
+            params,
+            world: WorldOut {
+                seed: world.seed,
+                chunks: world.chunks,
+                tick: world.tick,
+                wrap_width: world.wrap_width,
+                soft_litter: world.soft_litter,
+                spore_bank: world.spore_bank,
+                hydro: world.hydro,
+            },
+            humidity,
+            wind,
+            temperature,
+            clouds: CloudStore::new(),
+            organisms: OrganismStore::new(),
+            carbon: CarbonBudget {
+                atmosphere: 12.0,
+                dissolved: 3.0,
+            },
+        })
+        .unwrap();
+        let loaded = SimSnapshot::from_bytes(&bytes).expect("migrate v5");
+        assert_eq!(loaded.world.tick, 9);
+        assert_eq!(loaded.carbon.atmosphere, 12.0);
+        assert!(loaded.world.mycelium_lineage.cells.is_empty());
         assert_eq!(loaded.schema_version, SIM_SCHEMA_VERSION);
     }
 }

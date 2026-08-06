@@ -1111,10 +1111,17 @@ async fn main() {
                     // Fungi: plant as mycelium infection only — no visible
                     // fruiting body until a rich cream network emerges.
                     if editor.blueprint.is_valid_fungus() {
-                        match wk_voxel::infect_mycelium_at(&mut scene.world, gx, gy) {
+                        let body = editor.blueprint.modules_relative_to_nucleus();
+                        let genome = editor.blueprint.genome;
+                        match wk_voxel::infect_mycelium_with_lineage(
+                            &mut scene.world,
+                            gx,
+                            gy,
+                            Some((genome, body)),
+                        ) {
                             Some((ox, oy)) => {
                                 editor.status = format!(
-                                    "Inoculated mycelium at ({ox},{oy}) — stalk emerges later from a rich moist network"
+                                    "Inoculated mycelium at ({ox},{oy}) — stalk emerges later matching this design"
                                 );
                                 editor.spawn_picker = false;
                                 editor.open = false;

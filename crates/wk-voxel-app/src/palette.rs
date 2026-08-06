@@ -53,16 +53,19 @@ pub fn cell_color(cell: Cell) -> [u8; 3] {
             lerp_u8(base[1], 55, darken),
             lerp_u8(base[2], 85, darken),
         ];
-        // Organic with mycelium: faint cream threads (keeps wet/dry darken).
-        if cell.material == MaterialId::Organic {
-            let myc = (cell.mycelium() as f32 / 255.0) * 0.45;
-            if myc > 0.0 {
-                rgb = [
-                    lerp_u8(rgb[0], MYCELIUM_THREAD_RGB[0], myc),
-                    lerp_u8(rgb[1], MYCELIUM_THREAD_RGB[1], myc),
-                    lerp_u8(rgb[2], MYCELIUM_THREAD_RGB[2], myc),
-                ];
-            }
+        // Porous hosts with mycelium: faint cream threads (Organic stronger).
+        if cell.mycelium() > 0 {
+            let strength = if cell.material == MaterialId::Organic {
+                0.45
+            } else {
+                0.28
+            };
+            let myc = (cell.mycelium() as f32 / 255.0) * strength;
+            rgb = [
+                lerp_u8(rgb[0], MYCELIUM_THREAD_RGB[0], myc),
+                lerp_u8(rgb[1], MYCELIUM_THREAD_RGB[1], myc),
+                lerp_u8(rgb[2], MYCELIUM_THREAD_RGB[2], myc),
+            ];
         }
         rgb
     }

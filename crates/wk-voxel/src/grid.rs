@@ -49,6 +49,10 @@ pub struct World {
     /// [`crate::cell::water_capacity_with`] — no process-global install.
     #[serde(default)]
     pub hydro: HydroOverrides,
+    /// Sparse mycelium lineage (editor / spore genome+body) keyed by cell.
+    /// Emergent stalks prefer the nearest stamp over `minimal_fungus`.
+    #[serde(default)]
+    pub mycelium_lineage: crate::fungi::MyceliumLineageMap,
 }
 
 impl World {
@@ -61,6 +65,7 @@ impl World {
             soft_litter: HashMap::new(),
             spore_bank: crate::spore_bank::SporeBank::default(),
             hydro: HydroOverrides::default(),
+            mycelium_lineage: crate::fungi::MyceliumLineageMap::default(),
         }
     }
 

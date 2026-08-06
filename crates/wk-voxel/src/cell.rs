@@ -45,9 +45,9 @@ impl Sat {
 /// future rules (frozen, sediment-carrying, momentum-carrying) can
 /// slot in without changing `Cell`'s memory shape.
 ///
-/// Mycelium colonization intensity lives in [`Cell::_pad`] on
-/// [`MaterialId::Organic`] cells (0 = clean litter, 255 = fully
-/// threaded) — not in these flag bits.
+/// Mycelium colonization intensity lives in [`Cell::_pad`] on porous
+/// hosts ([`MaterialId::Organic`], Soil, Sand, Clay, loose rock) —
+/// 0 = clean, 255 = fully threaded. Not in these flag bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CellFlags(pub u8);
 
@@ -85,8 +85,8 @@ pub struct Cell {
     pub material: MaterialId,
     pub sat: Sat,
     pub flags: CellFlags,
-    /// On [`MaterialId::Organic`]: mycelium thread intensity (0..=255).
-    /// Cleared on material change. Elsewhere reserved / zero.
+    /// Mycelium thread intensity (0..=255) on porous hosts
+    /// ([`hosts_mycelium`]). Cleared on material change / non-hosts.
     /// Widening `Cell` past 4 bytes bumps [`crate::SIM_SCHEMA_VERSION`].
     pub _pad: u8,
 }
@@ -116,20 +116,20 @@ impl Cell {
         }
     }
 
-    /// Mycelium colonization on Organic (0 = none, 255 = fully threaded).
+    /// Mycelium colonization on a porous host (0 = none, 255 = fully threaded).
     #[inline]
     pub fn mycelium(self) -> u8 {
-        if self.material == MaterialId::Organic {
+        if hosts_mycelium(self.material) {
             self._pad
         } else {
             0
         }
     }
 
-    /// Set mycelium intensity; only retained on Organic cells.
+    /// Set mycelium intensity; retained only on porous hosts.
     #[inline]
     pub fn set_mycelium(&mut self, intensity: u8) {
-        self._pad = if self.material == MaterialId::Organic {
+        self._pad = if hosts_mycelium(self.material) {
             intensity
         } else {
             0
@@ -154,6 +154,26 @@ impl Cell {
             _pad: 0,
         }
     }
+}
+
+/// Materials that can carry a mycelium cream field in `_pad`.
+///
+/// Organic is the food substrate; Soil / Sand / Clay / loose rock are
+/// mineral corridors (harder to thread). Competent Stone is allowed only
+/// as a rare crack path (see fungi spread costs). Bedrock refuses.
+#[inline]
+pub fn hosts_mycelium(material: MaterialId) -> bool {
+    matches!(
+        material,
+        MaterialId::Organic
+            | MaterialId::Soil
+            | MaterialId::Sand
+            | MaterialId::Clay
+            | MaterialId::LooseRock
+            | MaterialId::LooseLimestone
+            | MaterialId::Stone
+            | MaterialId::Limestone
+    )
 }
 
 /// True for dense granular materials that fall under gravity through

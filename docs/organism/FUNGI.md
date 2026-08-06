@@ -155,36 +155,45 @@ Incentives this creates:
 The live voxel stack diverges from the ghost-root cavity cascade above
 on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
 
-- **Editor plant (`F`)** — paints a fruiting-body chassis for design, but
-  terrain click calls `infect_mycelium_at`: cream on Organic (+ a short
-  feeder column below). **No living Atom** until the network emerges.
-- **Mycelium field** — intensity in `Cell::_pad` on Organic. World process
-  (`step_mycelium_field`): thickens and spreads on moist Organic without a
-  living stalk. Threads prefer climbing toward free Air. Renderer: faint
-  cream threads.
+- **Editor plant (`F`)** — paints a fruiting-body chassis; terrain click
+  calls `infect_mycelium_with_lineage`: cream on a porous host (+ short
+  feeder column) **and** stamps that genome/body into
+  `World::mycelium_lineage`. **No living Atom** until the network emerges.
+- **Mycelium field** — intensity in `Cell::_pad` on porous hosts
+  (Organic food; Soil / Sand / Clay easier when moist; loose rock harder;
+  Stone rare cracks; Bedrock refuses). World process
+  (`step_mycelium_field`) goal-seeks Organic and the free surface.
+  Dry cells fade (disconnect); remoistened neighbours can re-spread
+  (reconnect). Compost leaves a residual cream corridor on Soil.
+  Renderer: faint cream threads (stronger on Organic).
 - **Emergence** — a rare forest event. Only after the network has
   **breached the surface** (colonized Organic open to Air *and* feeder
-  mycelium below/beside), with high intensity (`MYCELIUM_EMERGE_MIN`),
-  slow cadence, and sparse local density. `try_emergent_fruiting` seats a
-  stalk in Air and burns field intensity.
+  mycelium below/beside — feeders may be mineral corridors), with high
+  intensity (`MYCELIUM_EMERGE_MIN`), slow cadence, and sparse local
+  density. `try_emergent_fruiting` seats a stalk matching the nearest
+  stamped lineage (else `minimal_fungus`) and burns field intensity.
 - **Fruiting body** — temporary Atom. Feeds from the field / litter; when
   a surface stalk sporulates it **collapses** → corpse → litter → Organic.
   Mushrooms should feel special, not wallpaper the slope.
 - **Two dispersal habits** (`try_spore`, needs painted `ReproSpore`) —
-  both **inoculate mycelium** (never birth a child fruiting Atom):
+  both **mutate** genome/body then **inoculate mycelium** (never birth a
+  child fruiting Atom):
   - *Underground* (nucleus in Organic) — short rhizomorph hops (no wind).
-  - *Surface stalk* (nucleus in Air) — wind carries inoculum far once the
-    column is surface-ready; stalk then dies. App: lilac puffs (`SporeFx`).
+  - *Surface stalk* (nucleus in Air) — wind carries inoculum far
+    (`FUNGUS_STALK_SPORE_MIN_DIST`…`MAX`, up to ~72 cols) once the column
+    is surface-ready; stalk then dies. App: lilac puffs (`SporeFx`).
 - **Anti-flood:** one living fruiting body per column, tight local density
   (≤2 in ±4 columns), slow emergence odds / period; babies aren't
   network-immortal until mature. HUD shows `p=/f=/a=` habit split.
 - Soft litter is a bonus sip — fungi do **not** flash Organic into Sand.
 - Fruiting seats **prefer Air on Organic/Soil** (visible stalks). Buried
   Organic seats remain for rhizomorph hops (`prefer_surface = false`).
-- Mycelium compost (Organic → `MaterialId::Soil`, pore water preserved)
-  is gated by live [`FungiConfig`] knobs (Tab → Life → Fungi / compost).
-  Defaults are faster than the old hard-coded `220 / 1-in-6000` so thick
-  litter blankets humify before plants lose pore water.
+- Mycelium compost (Organic → `MaterialId::Soil`, pore water preserved,
+  residual cream) is gated by live [`FungiConfig`] knobs
+  (Tab → Life → Fungi / compost). Defaults are faster than the old
+  hard-coded `220 / 1-in-6000` so thick litter blankets humify before
+  plants lose pore water. Per-cell humify is why colonized beds can look
+  “square” — Soil patches replace Organic voxels, not a drawn rectangle.
 - **Mycelium stickiness** uses the same cream intensity (`Cell::_pad`
   0..=255): colonized Organic holds short repose faces and resists flow
   scour; floating mats with myc ≥ ~40 sail as cohesive rafts and
@@ -197,9 +206,9 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   so empty air never hard-zeros forests. Buckets persist in `.gvsesim`
   saves. O₂ creatures later — not a per-cell chemistry field.
 - **Spore bank** (`World::spore_bank`): fungus packets that cannot infect
-  on landing (no Organic, cold) stay tied to that cell and **inoculate
-  cream** on wake — they do not stamp fruiting bodies. Plant packets
-  still germinate as living sprouts when seats open.
+  on landing (no host, cold) stay tied to that cell and **inoculate cream
+  + lineage** on wake — they do not stamp living fruiting bodies. Plant
+  packets still germinate as living sprouts when seats open.
 
 Ghost-root Void fill remains a column-kernel / later voxel goal.
 
