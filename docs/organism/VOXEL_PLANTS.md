@@ -179,7 +179,8 @@ Features:
   free surface; dry fade disconnects, remoisten reconnects; compost leaves
   residual cream on Soil (square Soil patches = per-cell humify).
   Press **`M`** for a bright per-strain overlay (cells may host several
-  strains sharing the 255 cream budget).
+  strains sharing the 255 cream budget; thin climb paths stay neon, and
+  cream-bearing grains carry their strain shares when they move).
 - Networks that **breach the surface from below** emerge a **surface stalk**
   from the nearest lineage (else `minimal_fungus`). Stalks wind-disperse
   mutated spores far; rhizomorph hops stay local.

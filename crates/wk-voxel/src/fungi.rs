@@ -343,6 +343,10 @@ pub fn mycelium_strain_rgb(strain: u32) -> [u8; 3] {
 }
 
 /// Blend strain colors by share weight; alpha from total intensity.
+///
+/// Thin mineral corridors (cream ≈5–16) must stay neon-readable on the `M`
+/// overlay — a low alpha floor made climb paths look like dark-green veins
+/// while only dense hubs glowed.
 pub fn mycelium_shares_overlay_rgba(shares: &[(u32, u8)], total: u8) -> [u8; 4] {
     if shares.is_empty() || total == 0 {
         return [0, 0, 0, 0];
@@ -365,13 +369,106 @@ pub fn mycelium_shares_overlay_rgba(shares: &[(u32, u8)], total: u8) -> [u8; 4] 
     if wsum <= 0.0 {
         return [0, 0, 0, 0];
     }
-    let a = (70u32 + (total as u32 * 170) / 255).min(230) as u8;
+    // Floor ~210 so even residual corridors (compost / rock cracks) read as
+    // strain color, not muddy wash against dark rock.
+    let a = (210u32 + (total as u32 * 45) / 255).min(255) as u8;
     [
         (r / wsum).round() as u8,
         (g / wsum).round() as u8,
         (b / wsum).round() as u8,
         a,
     ]
+}
+
+/// Swap per-cell mycelium strain shares (and lineage stamps) when two cells
+/// exchange places. Cream rides in [`Cell::_pad`]; shares are coordinate-keyed
+/// and must move with the host or the `M` overlay / inspector desync.
+pub fn swap_mycelium_meta(world: &mut World, ax: i32, ay: i32, bx: i32, by: i32) {
+    let ax = world.wrap_x(ax);
+    let bx = world.wrap_x(bx);
+    if ax == bx && ay == by {
+        return;
+    }
+    let a_shares = world.mycelium_strains.remove(&(ax, ay));
+    let b_shares = world.mycelium_strains.remove(&(bx, by));
+    match (a_shares, b_shares) {
+        (Some(a), Some(b)) => {
+            world.mycelium_strains.insert((ax, ay), b);
+            world.mycelium_strains.insert((bx, by), a);
+        }
+        (Some(a), None) => {
+            world.mycelium_strains.insert((bx, by), a);
+        }
+        (None, Some(b)) => {
+            world.mycelium_strains.insert((ax, ay), b);
+        }
+        (None, None) => {}
+    }
+    let a_lin = world.mycelium_lineage.cells.remove(&(ax, ay));
+    let b_lin = world.mycelium_lineage.cells.remove(&(bx, by));
+    match (a_lin, b_lin) {
+        (Some(a), Some(b)) => {
+            world.mycelium_lineage.cells.insert((ax, ay), b);
+            world.mycelium_lineage.cells.insert((bx, by), a);
+        }
+        (Some(a), None) => {
+            world.mycelium_lineage.cells.insert((bx, by), a);
+        }
+        (None, Some(b)) => {
+            world.mycelium_lineage.cells.insert((ax, ay), b);
+        }
+        (None, None) => {}
+    }
+}
+
+/// Move mycelium meta from one cell to another (erosion / bedload deposit).
+///
+/// Destination shares are replaced (deposit seats are Air). Source cleared.
+pub fn move_mycelium_meta(
+    world: &mut World,
+    from_x: i32,
+    from_y: i32,
+    to_x: i32,
+    to_y: i32,
+) {
+    let from_x = world.wrap_x(from_x);
+    let to_x = world.wrap_x(to_x);
+    if from_x == to_x && from_y == to_y {
+        return;
+    }
+    let shares = world.mycelium_strains.remove(&(from_x, from_y));
+    world.mycelium_strains.remove(&(to_x, to_y));
+    if let Some(s) = shares {
+        if !s.is_empty() {
+            world.mycelium_strains.insert((to_x, to_y), s);
+        }
+    }
+    let lin = world.mycelium_lineage.cells.remove(&(from_x, from_y));
+    world.mycelium_lineage.cells.remove(&(to_x, to_y));
+    if let Some(l) = lin {
+        world.mycelium_lineage.cells.insert((to_x, to_y), l);
+    }
+}
+
+/// Swap two cells and their mycelium meta (raft drift, buoyancy, punch).
+pub fn swap_cells_preserving_mycelium(
+    world: &mut World,
+    ax: i32,
+    ay: i32,
+    bx: i32,
+    by: i32,
+) {
+    let ax = world.wrap_x(ax);
+    let bx = world.wrap_x(bx);
+    let Some(a) = world.get_cell(ax, ay) else {
+        return;
+    };
+    let Some(b) = world.get_cell(bx, by) else {
+        return;
+    };
+    world.set_cell(ax, ay, b);
+    world.set_cell(bx, by, a);
+    swap_mycelium_meta(world, ax, ay, bx, by);
 }
 
 fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
@@ -2421,6 +2518,65 @@ mod tests {
             r.max(g).max(b) >= 200,
             "strain colors should be bright (got {r},{g},{b})"
         );
+    }
+
+    #[test]
+    fn overlay_keeps_thin_corridors_neon() {
+        let rgba = mycelium_shares_overlay_rgba(&[(7, 8)], 8);
+        assert!(
+            rgba[3] >= 200,
+            "thin cream must stay high-alpha on M overlay (got a={})",
+            rgba[3]
+        );
+        assert!(
+            rgba[0].max(rgba[1]).max(rgba[2]) >= 180,
+            "strain color must stay bright"
+        );
+    }
+
+    #[test]
+    fn cell_swap_migrates_strain_shares() {
+        let mut w = litter_plot();
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(160);
+        sand.set_mycelium(40);
+        w.set_cell(4, 2, sand);
+        w.set_cell(5, 2, Cell::air());
+        let strain = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(strain, 40)]);
+        swap_cells_preserving_mycelium(&mut w, 4, 2, 5, 2);
+        assert_eq!(
+            w.get_cell(5, 2).map(|c| c.mycelium()),
+            Some(40),
+            "cream rides with the sand cell"
+        );
+        assert_eq!(
+            mycelium_shares_at(&w, 5, 2),
+            &[(strain, 40)][..],
+            "strain shares must follow the host"
+        );
+        assert!(
+            mycelium_shares_at(&w, 4, 2).is_empty(),
+            "vacated seat must not keep orphan shares"
+        );
+    }
+
+    #[test]
+    fn bedload_move_migrates_strain_shares() {
+        let mut w = litter_plot();
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.set_mycelium(55);
+        w.set_cell(3, 1, sand);
+        w.set_cell(6, 1, Cell::air());
+        let strain = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((3, 1), vec![(strain, 55)]);
+        // Simulate erosion: place grain at deposit, move meta, clear source.
+        let placed = w.get_cell(3, 1).unwrap();
+        w.set_cell(6, 1, placed);
+        move_mycelium_meta(&mut w, 3, 1, 6, 1);
+        w.set_cell(3, 1, Cell::air());
+        assert_eq!(mycelium_shares_at(&w, 6, 1), &[(strain, 55)][..]);
+        assert!(mycelium_shares_at(&w, 3, 1).is_empty());
     }
 
     #[test]

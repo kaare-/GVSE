@@ -171,8 +171,11 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   same block (`strain A 40/255`, `strain B 60/255`, …; `_pad` = sum).
   Spread adds into free room without wiping neighbours.
 - **Strain overlay (`M`)** — `World::mycelium_strains` lists per-cell
-  shares. Overlay blends bright golden-angle colors by share weight
-  (alpha = total intensity). Inspector lists every strain on the cell.
+  shares. Overlay blends bright golden-angle colors by share weight with a
+  high alpha floor so thin mineral climb corridors stay neon-readable (not
+  dark-green veins). Grain/raft/erosion moves migrate shares with the host
+  cell so river piles and drifting mats keep strain color. Inspector lists
+  every strain on the cell.
 - **Emergence** — a rare forest event. Only after the network has
   **breached the surface** (colonized Organic open to Air *and* feeder
   mycelium below/beside — feeders may be mineral corridors), with high
