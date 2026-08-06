@@ -114,7 +114,7 @@ impl CreatureEditor {
             self.blueprint = Blueprint::minimal_fungus();
             self.name_buf = "fruiting body".into();
             self.status =
-                "Fungus — Enter plants mycelium on Organic; stalk emerges later from a rich network"
+                "Fungus — Enter inoculates cream (Organic + mineral corridors); stalk emerges later matching this design"
                     .into();
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
