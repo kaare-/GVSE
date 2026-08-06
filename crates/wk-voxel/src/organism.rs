@@ -1443,8 +1443,8 @@ fn step_land_plant(
     // - Shore: stay tipped; grow roots into the beach; new shoots upright.
     // - Fallen woody castaway = one rigid body: proximal-root scrapes on
     //   bed/shore/neighbour substrate must NOT teleport `gy` to the bed.
-    //   New roots may elongate into the ground from the resting pose —
-    //   that purchase keeps the log where it floats/rests.
+    //   Open-water = uprooted (short wet keel, no mineral pierce). Shore
+    //   tips resting on mineral may elongate into the beach while tipped.
     let on_float_raft = rooted_in_floating_organic(world, atom, float_columns);
     let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
     let stemless = crate::plant::stem_count(atom) == 0;
@@ -1549,9 +1549,12 @@ fn step_land_plant(
         pin_plant_pose(atom);
     }
     // Tipped logs: trim absurd waterline span and shed canopy buried in rock.
+    // Open-water woody castaways also shed roots that pierce mineral / run
+    // past the short uprooted keel (roots stay a solid body, not terrain goo).
     if atom.fallen {
         clamp_fallen_log_extent(atom);
         prune_fallen_canopy_in_solid(world, atom);
+        prune_uprooted_woody_roots(world, atom);
     }
     // Roots bank surplus above the spawn tank (starch analogy).
     sync_root_storage(atom);
@@ -2763,8 +2766,9 @@ fn mineral_solid_below(world: &World, gx: i32, start_y: i32, max_down: i32) -> O
 
 /// Nucleus sits in Air directly above mineral (sand/rock/soil) — a shore
 /// rest, not an open-water float. Used so woody castaways do not ride a
-/// flickering runoff waterline.
-fn nucleus_rests_on_mineral(world: &World, atom: &Atom) -> bool {
+/// flickering runoff waterline, and so open-water plants stay uprooted
+/// (no mineral root tunnels) until they beach.
+pub(crate) fn nucleus_rests_on_mineral(world: &World, atom: &Atom) -> bool {
     let Some(here) = world.get_cell(atom.gx, atom.gy) else {
         return false;
     };
@@ -2773,11 +2777,48 @@ fn nucleus_rests_on_mineral(world: &World, atom: &Atom) -> bool {
     }
     match world.get_cell(atom.gx, atom.gy - 1) {
         Some(c)
-            if c.material != MaterialId::Air && c.material != MaterialId::Organic =>
+            if c.material != MaterialId::Air
+                && c.material != MaterialId::Organic
+                && c.material != MaterialId::Water =>
         {
             true
         }
         _ => false,
+    }
+}
+
+/// Open-water uprooted woody: drop roots inside mineral and past the short
+/// wet keel. Shore tips (`nucleus_rests_on_mineral`) keep beach purchase.
+fn prune_uprooted_woody_roots(world: &World, atom: &mut Atom) {
+    if !crate::plant::woody_uprooted(atom) {
+        return;
+    }
+    if nucleus_rests_on_mineral(world, atom) {
+        return;
+    }
+    let keel = crate::plant::UPROOTED_ROOT_KEEL_MAX;
+    atom.body.retain(|&(dx, dy, m)| {
+        if m != ModuleId::Root {
+            return true;
+        }
+        if dy < -keel {
+            return false;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        match world.get_cell(wx, wy) {
+            Some(c)
+                if c.material != MaterialId::Air
+                    && c.material != MaterialId::Water
+                    && c.material != MaterialId::Organic =>
+            {
+                false
+            }
+            _ => true,
+        }
+    });
+    if !atom.body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+        atom.body.insert(0, (0, 0, ModuleId::Nucleus));
     }
 }
 

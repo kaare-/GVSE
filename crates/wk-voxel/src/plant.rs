@@ -16,7 +16,9 @@ use wk_material::MaterialId;
 use crate::blueprint::Genome;
 use crate::cell::water_capacity;
 use crate::grid::World;
-use crate::organism::{column_sky_light, Atom, BodyModule, ModuleId};
+use crate::organism::{
+    column_sky_light, nucleus_rests_on_mineral, Atom, BodyModule, ModuleId,
+};
 use crate::shade::{effective_photo_light, shade_transmit, CanopyIndex};
 
 /// Energy from one sat unit drunk by roots.
@@ -67,6 +69,10 @@ pub const ROOT_MOISTURE_AFFINITY: f32 = 2.8;
 /// every dive into the water column. This bonus restores raft-plant
 /// roots under the mat without letting dry Air gaps look wet.
 pub const ROOT_WET_VOID_AFFINITY: f32 = 1.6;
+/// Max body-Y drop (and world cells below nucleus) for dangling roots on an
+/// **uprooted** woody floater. Longer wet-void pipes looked like the tree
+/// suddenly rooted from nucleus to bed while the chassis still floated.
+pub const UPROOTED_ROOT_KEEL_MAX: i16 = 3;
 /// Soft local density: roots packed near the crown pay this extra.
 pub const ROOT_CROWN_BLOB_PENALTY: f32 = 1.8;
 /// Penalty per extra cell when elongating a same-column pipe (≥3 deep).
@@ -426,6 +432,23 @@ pub fn is_anchored(world: &World, atom: &Atom) -> bool {
         }
     }
     false
+}
+
+/// Woody plant that has tipped — one rigid chassis (stem + roots baked together).
+///
+/// Distinct from upright substrate purchase (`!fallen`). Open-water castaways
+/// stay **uprooted** (short wet keel, no mineral tunnel). Shore tips with
+/// mineral under the nucleus may re-root while remaining tipped.
+pub fn woody_uprooted(atom: &Atom) -> bool {
+    atom.fallen && stem_count(atom) > 0
+}
+
+/// True when a root step would bore into mineral / rock (not free column or compost).
+fn root_target_is_mineral(mat: MaterialId) -> bool {
+    !matches!(
+        mat,
+        MaterialId::Air | MaterialId::Water | MaterialId::Organic
+    )
 }
 
 fn solid_purchase(world: &World, gx: i32, gy: i32) -> bool {
@@ -1353,6 +1376,20 @@ pub fn try_elongate_root(
                 // lateral air — skip (roots stay in ground)
                 continue;
             }
+            let wet_void = cell.material == MaterialId::Air
+                && crate::rules::is_standing_water(world, wx, wy);
+            // Open-water uprooted woody: rigid short keel in the free column
+            // only. No mineral tunnel (hillsides / bed pipes that looked like
+            // the floater was suddenly rooted nucleus→bed). Shore tips with
+            // mineral under the nucleus may elongate into the beach.
+            if woody_uprooted(atom) && !nucleus_rests_on_mineral(world, atom) {
+                if root_target_is_mineral(cell.material) {
+                    continue;
+                }
+                if ny < -UPROOTED_ROOT_KEEL_MAX {
+                    continue;
+                }
+            }
             // Transport length from crown — long single tendrils pay more
             // score *and* energy than short mid-pipe branches.
             let hops = root_transport_hops(atom, nx, ny) as f32;
@@ -1368,8 +1405,6 @@ pub fn try_elongate_root(
             let mut moist = cell_moisture_frac(world, wx, wy)
                 .max(cell_moisture_frac(world, wx, wy - 1))
                 .max(cell_moisture_frac(world, wx, wy - 2) * 0.85);
-            let wet_void = cell.material == MaterialId::Air
-                && crate::rules::is_standing_water(world, wx, wy);
             if wet_void {
                 moist = moist.max(cell.sat.0 as f32 / 255.0);
             }
@@ -3214,8 +3249,9 @@ mod tests {
     fn tipped_floater_proximal_root_scrape_does_not_bed_seat() {
         // After rigid tip, former (0,-1) root becomes (-1,0). Scraping sand
         // / bed / neighbour substrate used to teleport gy to solid_y+1 —
-        // the log sat on the lake floor. Castaways stay a rigid body at the
-        // free surface; new roots may grow into the bed without moving gy.
+        // the log sat on the lake floor. Open-water castaways stay a rigid
+        // uprooted body at the free surface — mineral-piercing roots are
+        // pruned (no floating "rooted to the bed" pipe).
         use crate::organism::{bake_tip_into_body, OrganismStore};
 
         let mut w = World::new(5);
@@ -3249,9 +3285,8 @@ mod tests {
         {
             atom.body.push((-1, 0, ModuleId::Root));
         }
-        // Crown-column tendril into sand/water column (|dx|<=1) — the scrape
-        // that used to teleport the seat. Lateral purchase alone is not enough
-        // to exercise `crown_holdfast_solid_y`.
+        // Crown-column tendril into sand — used to bed-seat; now pruned while
+        // floating (uprooted solid body, no terrain goo).
         atom.body.push((0, -4, ModuleId::Root));
         let mut store = OrganismStore::new();
         store.atoms.push(atom);
@@ -3267,10 +3302,29 @@ mod tests {
             "proximal/bed scrape must not bed-seat the log (gy={})",
             store.atoms[0].gy
         );
-        // Root still reaches mineral — purchase without moving the chassis.
         assert!(
-            is_anchored(&w, &store.atoms[0]),
-            "dangling roots may grip the bed; nucleus stays at the surface"
+            !store.atoms[0].body.iter().any(|&(dx, dy, m)| {
+                if m != ModuleId::Root {
+                    return false;
+                }
+                let wx = w.wrap_x(store.atoms[0].gx + dx as i32);
+                let wy = store.atoms[0].gy + dy as i32;
+                matches!(
+                    w.get_cell(wx, wy).map(|c| c.material),
+                    Some(MaterialId::Sand | MaterialId::Bedrock | MaterialId::Soil)
+                )
+            }),
+            "uprooted floater must not keep mineral-piercing roots, body={:?}",
+            store.atoms[0].body
+        );
+        assert!(
+            store.atoms[0]
+                .body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Root)
+                .all(|(_, y, _)| *y >= -UPROOTED_ROOT_KEEL_MAX),
+            "uprooted keel must stay short, body={:?}",
+            store.atoms[0].body
         );
     }
 
@@ -4194,6 +4248,156 @@ mod tests {
                 .filter(|(_, _, m)| *m == ModuleId::Root)
                 .any(|(_, y, _)| *y < 0),
             "new roots should droop below the waterline log, body={:?}",
+            atom.body
+        );
+        assert!(
+            atom.body
+                .iter()
+                .filter(|(_, _, m)| *m == ModuleId::Root)
+                .all(|(_, y, _)| *y >= -UPROOTED_ROOT_KEEL_MAX),
+            "uprooted wet keel must stay ≤ {UPROOTED_ROOT_KEEL_MAX}, body={:?}",
+            atom.body
+        );
+    }
+
+    #[test]
+    fn uprooted_floater_does_not_grow_nucleus_to_bed_pipe() {
+        use crate::organism::bake_tip_into_body;
+
+        // Deep water under a surface floater — wet-void affinity used to grow
+        // a continuous root pipe from nucleus to the sand bed.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+            for y in 2..=10 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 11..18 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut atom = Atom::from_body(
+            5,
+            10,
+            200.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Photosystem),
+            ],
+        );
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        atom.energy = atom.energy_max;
+        bake_tip_into_body(&mut atom);
+        atom.genome.alloc_root = 0.7;
+        atom.genome.alloc_stem = 0.15;
+        atom.genome.alloc_leaf = 0.15;
+        atom.genome.root_depth_bias = 1.0;
+        let caps = PlantGrowthCaps::default();
+        for _ in 0..80 {
+            atom.energy = atom.energy_max;
+            let _ = try_elongate_root(&mut w, &mut atom, &HashSet::new(), &caps);
+        }
+        let min_y = atom
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Root)
+            .map(|(_, y, _)| *y)
+            .min()
+            .unwrap_or(0);
+        assert!(
+            min_y >= -UPROOTED_ROOT_KEEL_MAX,
+            "floater must not pipe roots to the bed (min_y={min_y}), body={:?}",
+            atom.body
+        );
+        assert!(
+            !atom.body.iter().any(|&(dx, dy, m)| {
+                if m != ModuleId::Root {
+                    return false;
+                }
+                let wx = w.wrap_x(atom.gx + dx as i32);
+                let wy = atom.gy + dy as i32;
+                matches!(
+                    w.get_cell(wx, wy).map(|c| c.material),
+                    Some(MaterialId::Sand | MaterialId::Bedrock | MaterialId::Soil)
+                )
+            }),
+            "open-water uprooted roots must stay out of mineral, body={:?}",
+            atom.body
+        );
+    }
+
+    #[test]
+    fn uprooted_floater_does_not_tunnel_into_sand_cliff() {
+        use crate::organism::bake_tip_into_body;
+
+        // Floater beside an underwater sand wall — lateral mineral steps
+        // used to paint roots through the hillside.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            if x >= 8 {
+                for y in 1..=5 {
+                    w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+                }
+            } else {
+                for y in 1..=5 {
+                    w.set_cell(x, y, Cell::water());
+                }
+            }
+            for y in 6..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut atom = Atom::from_body(
+            6,
+            5,
+            200.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (-1, 0, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Photosystem),
+            ],
+        );
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        atom.energy = atom.energy_max;
+        bake_tip_into_body(&mut atom);
+        atom.gx = 6;
+        atom.gy = 5;
+        atom.genome.alloc_root = 0.7;
+        atom.genome.alloc_stem = 0.15;
+        atom.genome.alloc_leaf = 0.15;
+        let caps = PlantGrowthCaps::default();
+        for _ in 0..60 {
+            atom.energy = atom.energy_max;
+            let _ = try_elongate_root(&mut w, &mut atom, &HashSet::new(), &caps);
+        }
+        assert!(
+            !atom.body.iter().any(|&(dx, dy, m)| {
+                if m != ModuleId::Root {
+                    return false;
+                }
+                let wx = w.wrap_x(atom.gx + dx as i32);
+                let wy = atom.gy + dy as i32;
+                matches!(
+                    w.get_cell(wx, wy).map(|c| c.material),
+                    Some(MaterialId::Sand | MaterialId::Bedrock | MaterialId::Soil)
+                )
+            }),
+            "uprooted floater must not tunnel into sand cliff, body={:?}",
             atom.body
         );
     }

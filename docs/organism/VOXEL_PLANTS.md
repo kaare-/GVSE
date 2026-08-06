@@ -12,6 +12,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | `Root` / `Stem` / `Photosystem` / `Nucleus` modules | Done |
 | Fixed crown on purchase; free-float tipped when unanchored over water | Done |
 | Woody tip rigid-bakes body (stem+root rotate together; raft / free-float / sand undercut) | Done |
+| Uprooted woody: short wet keel; no mineral tunnel / nucleus→bed pipe | Done |
 | Floating land/plankton corpses drift with wind + local water current | Done |
 | Sand-rooted crowns never hoist on organic mats / water; no shore sail | Done |
 | Raft tip resists with root keel (more dangling roots → harder tip) | Done |
@@ -129,9 +130,14 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
   free surface or rests on the beach. Proximal-root scrapes on bed, shore,
   or neighbour substrate must **not** teleport the nucleus to `solid_y+1`
   (that used to plant floating trees on the lake floor).
-- **New seat purchase:** roots may elongate into the ground from that
-  resting pose; the new segment is the grip — the chassis stays where it
-  floats/rests. Stemless seaweed may still snap back to a short holdfast.
+- **Rooted vs uprooted (woody):** roots are always a solid rigid body with
+  the trunk (tip-bake), never soft terrain goo.
+  - **Uprooted** (open water / wet Air under the nucleus): short wet keel
+    only (`UPROOTED_ROOT_KEEL_MAX`); no mineral tunnels, no nucleus→bed
+    pipes. Existing pierces past the keel are pruned each tick.
+  - **Rooted purchase while tipped:** shore tips with mineral under the
+    nucleus may elongate into the beach; the chassis stays where it rests.
+  Stemless seaweed may still snap back to a short holdfast.
 - Shore re-root stays tipped; only `upright_growth` shoots stand up.
 - Shore-tipped logs resting on mineral do **not** ride a flickering runoff
   waterline (`gy = top`) — that pumped landslide regrowth ±1px when water
