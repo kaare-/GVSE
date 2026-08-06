@@ -3275,6 +3275,78 @@ mod tests {
     }
 
     #[test]
+    fn shore_tipped_woody_does_not_pump_with_runoff_film() {
+        // Landslide tip + upright regrowth on beach sand. Intermittent
+        // full-sat runoff at the crown used to set gy = water top and bob
+        // the mast ±1px as the film filled/drained.
+        use crate::organism::{bake_tip_into_body, OrganismStore};
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 1, sand);
+            for y in 2..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Photosystem),
+        ];
+        let mut atom = Atom::from_body(5, 2, 80.0, body);
+        apply_genome(
+            &mut atom,
+            crate::blueprint::Blueprint::minimal_plant().genome,
+        );
+        bake_tip_into_body(&mut atom);
+        assert!(atom.fallen);
+        // New upright shoot after tip (landslide regrowth).
+        atom.body.push((0, 1, ModuleId::Stem));
+        atom.body.push((0, 2, ModuleId::Photosystem));
+        atom.mark_upright_growth(0, 1);
+        atom.mark_upright_growth(0, 2);
+        atom.gy = 2; // Air on sand
+        atom.fy = 2.0;
+        let mut store = OrganismStore::new();
+        store.atoms.push(atom);
+        let mut gys = Vec::new();
+        for tick in 0..40u64 {
+            // Alternate 1-cell vs 2-cell full-sat film at the crown column.
+            for y in 2..=4 {
+                w.set_cell(5, y, Cell::air());
+            }
+            if tick % 2 == 0 {
+                w.set_cell(5, 2, Cell::water());
+            } else {
+                w.set_cell(5, 2, Cell::water());
+                w.set_cell(5, 3, Cell::water());
+            }
+            store.step(&mut w, tick);
+            assert!(!store.atoms.is_empty(), "died at {tick}");
+            gys.push(store.atoms[0].gy);
+        }
+        let mut uniq = gys.clone();
+        uniq.sort_unstable();
+        uniq.dedup();
+        assert!(
+            uniq.len() <= 1,
+            "shore-tipped woody must not pump with runoff (uniq={uniq:?} gys={gys:?})"
+        );
+        assert_eq!(uniq[0], 2, "must stay on beach sand seat");
+        assert!(store.atoms[0].fallen, "must stay tipped after landslide");
+        assert!(
+            !store.atoms[0].upright_growth.is_empty(),
+            "upright regrowth marks must survive"
+        );
+    }
+
+    #[test]
     fn fallen_floater_stays_alive_by_sipping_lake() {
         use crate::organism::OrganismStore;
 

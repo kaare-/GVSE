@@ -1503,19 +1503,34 @@ fn step_land_plant(
         } else {
             atom.fallen = true;
         }
-        atom.gy = top;
-        atom.fy = top as f32;
-        atom.vel_y = 0.0;
-        atom.last_water_top = Some(top);
+        // Shore-tipped woody log resting on mineral: do NOT ride the free
+        // surface. Runoff / rain that flickers full-sat by one cell used to
+        // set gy=top every tick and pump the upright mast ±1px. Open-water
+        // castaways (wet Air under the nucleus) still track the waterline.
+        if woody_castaway && nucleus_rests_on_mineral(world, atom) {
+            pin_plant_pose(atom);
+        } else {
+            atom.gy = top;
+            atom.fy = top as f32;
+            atom.vel_y = 0.0;
+            atom.last_water_top = Some(top);
+        }
     } else if atom.fallen {
         // Shore (rooted or not): stay tipped; seat on the beach surface.
         // Stemless: never surf an Organic deck — that fights waterline/raft
         // seating and pumps ribbons through floating litter.
-        if let Some(slot) = surface_seat_for_plant(world, atom.gx, atom.gy, stemless) {
+        // Mineral-resting woody castaways keep gy — re-slotting against a
+        // draining film was the other half of the ±1 shore pump.
+        if woody_castaway && nucleus_rests_on_mineral(world, atom) {
+            pin_plant_pose(atom);
+        } else if let Some(slot) = surface_seat_for_plant(world, atom.gx, atom.gy, stemless) {
             atom.gy = slot;
+            atom.fy = atom.gy as f32;
+            atom.vel_y = 0.0;
+        } else {
+            atom.fy = atom.gy as f32;
+            atom.vel_y = 0.0;
         }
-        atom.fy = atom.gy as f32;
-        atom.vel_y = 0.0;
         atom.last_water_top = None;
     } else if !stemless {
         // Substrate gone (sand eroded) with no standing water: bake the tip
@@ -2744,6 +2759,26 @@ fn mineral_solid_below(world: &World, gx: i32, start_y: i32, max_down: i32) -> O
         best = Some(best.map_or(y, |b| b.max(y)));
     }
     best
+}
+
+/// Nucleus sits in Air directly above mineral (sand/rock/soil) — a shore
+/// rest, not an open-water float. Used so woody castaways do not ride a
+/// flickering runoff waterline.
+fn nucleus_rests_on_mineral(world: &World, atom: &Atom) -> bool {
+    let Some(here) = world.get_cell(atom.gx, atom.gy) else {
+        return false;
+    };
+    if here.material != MaterialId::Air {
+        return false;
+    }
+    match world.get_cell(atom.gx, atom.gy - 1) {
+        Some(c)
+            if c.material != MaterialId::Air && c.material != MaterialId::Organic =>
+        {
+            true
+        }
+        _ => false,
+    }
 }
 
 /// Beach / rescue seat. Stemless ribbons skip Air-on-Organic so floating

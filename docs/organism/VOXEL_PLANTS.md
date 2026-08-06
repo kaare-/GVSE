@@ -133,6 +133,9 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
   resting pose; the new segment is the grip — the chassis stays where it
   floats/rests. Stemless seaweed may still snap back to a short holdfast.
 - Shore re-root stays tipped; only `upright_growth` shoots stand up.
+- Shore-tipped logs resting on mineral do **not** ride a flickering runoff
+  waterline (`gy = top`) — that pumped landslide regrowth ±1px when water
+  ran past. Open-water castaways (wet Air under the nucleus) still float.
 
 ### Stemless ribbons vs floating Organic
 
