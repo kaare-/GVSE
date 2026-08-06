@@ -103,10 +103,15 @@ pub fn draw_block_inspector(
             ));
             lines.push(format!("flags=0x{:02X}", c.flags.0));
             if c.mycelium() > 0 {
-                let strain = wk_voxel::mycelium_strain_at(world, gx, gy)
-                    .map(|s| format!(" strain={s}"))
-                    .unwrap_or_default();
-                lines.push(format!("mycelium={}/255{strain}", c.mycelium()));
+                let shares = wk_voxel::mycelium_shares_at(world, gx, gy);
+                if shares.is_empty() {
+                    lines.push(format!("mycelium={}/255", c.mycelium()));
+                } else {
+                    lines.push(format!("mycelium total={}/255", c.mycelium()));
+                    for &(sid, amt) in shares {
+                        lines.push(format!("  strain {sid}: {amt}/255"));
+                    }
+                }
             }
         }
         None => lines.push("cell: (empty / unstamped)".into()),

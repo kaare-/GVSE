@@ -73,10 +73,11 @@ pub use spore_bank::{
 };
 pub use fungi::{
     add_soft_litter, compost_organic_to_soil, infect_mycelium_at, infect_mycelium_with_lineage,
-    is_fungus, is_surface_stalk, max_mycelium_near, mycelium_strain_at, mycelium_strain_rgb,
-    seed_mycelium_near, soft_litter_at, stamp_mycelium_lineage, step_mycelium_field,
-    step_mycelium_field_cfg, FungiConfig, MyceliumLineage, MyceliumLineageMap,
-    FUNGUS_STALK_SPORE_MAX_DIST, FUNGUS_STALK_SPORE_MIN_DIST,
+    is_fungus, is_surface_stalk, max_mycelium_near, mycelium_shares_at,
+    mycelium_shares_overlay_rgba, mycelium_strain_at, mycelium_strain_rgb, seed_mycelium_near,
+    soft_litter_at, stamp_mycelium_lineage, step_mycelium_field, step_mycelium_field_cfg,
+    FungiConfig, MyceliumLineage, MyceliumLineageMap, FUNGUS_STALK_SPORE_MAX_DIST,
+    FUNGUS_STALK_SPORE_MIN_DIST,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,

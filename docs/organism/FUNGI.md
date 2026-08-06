@@ -166,10 +166,13 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   Dry cells fade (disconnect); remoistened neighbours can re-spread
   (reconnect). Compost leaves a residual cream corridor on Soil.
   Renderer: faint cream threads (stronger on Organic).
-- **Strain overlay (`M`)** — each inoculum mints a strain id; cream cells
-  carry ownership in `World::mycelium_strains`. Overlay paints bright
-  golden-angle colors per strain (alpha = intensity) so competing
-  networks read without inspecting underground cells.
+- **Multi-strain shares** — a cell’s 255 cream budget is shared. Each
+  inoculum mints a strain id; several strains can hold intensity on the
+  same block (`strain A 40/255`, `strain B 60/255`, …; `_pad` = sum).
+  Spread adds into free room without wiping neighbours.
+- **Strain overlay (`M`)** — `World::mycelium_strains` lists per-cell
+  shares. Overlay blends bright golden-angle colors by share weight
+  (alpha = total intensity). Inspector lists every strain on the cell.
 - **Emergence** — a rare forest event. Only after the network has
   **breached the surface** (colonized Organic open to Air *and* feeder
   mycelium below/beside — feeders may be mineral corridors), with high

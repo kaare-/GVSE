@@ -239,13 +239,6 @@ fn geotech_overlay_color(score: f32, s_max: f32) -> Color {
     Color::from_rgba(r, g, b, a)
 }
 
-/// Bright per-strain mycelium overlay — alpha scales with cream intensity.
-fn mycelium_overlay_color(strain: u32, intensity: u8) -> Color {
-    let [r, g, b] = wk_voxel::mycelium_strain_rgb(strain);
-    // Floor alpha so thin corridors still pop; full cream nearly opaque.
-    let a = (70u32 + (intensity as u32 * 170) / 255).min(230) as u8;
-    Color::from_rgba(r, g, b, a)
-}
 
 fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
     let u = ((temp_c - t_min) / (t_max - t_min).max(0.5)).clamp(0.0, 1.0);
@@ -1384,20 +1377,26 @@ async fn main() {
                         if myc == 0 {
                             continue;
                         }
-                        let strain = wk_voxel::mycelium_strain_at(&scene.world, x, y)
-                            .unwrap_or_else(|| {
-                                // Legacy unowned cream — stable hash so it still colors.
-                                let mut h = (x as u32).wrapping_mul(0x9E37_79B9)
-                                    ^ (y as u32).wrapping_mul(0x85EB_CA6B);
-                                h ^= h >> 16;
-                                h | 1
-                            });
+                        let shares = wk_voxel::mycelium_shares_at(&scene.world, x, y);
+                        let rgba = if shares.is_empty() {
+                            // Legacy unowned cream — stable hash color.
+                            let mut h = (x as u32).wrapping_mul(0x9E37_79B9)
+                                ^ (y as u32).wrapping_mul(0x85EB_CA6B);
+                            h ^= h >> 16;
+                            wk_voxel::mycelium_shares_overlay_rgba(&[(h | 1, myc)], myc)
+                        } else {
+                            // Multi-strain cells blend by share weight.
+                            wk_voxel::mycelium_shares_overlay_rgba(shares, myc)
+                        };
+                        if rgba[3] == 0 {
+                            continue;
+                        }
                         draw_rectangle(
                             sx,
                             sy - cell_px,
                             cell_px,
                             cell_px,
-                            mycelium_overlay_color(strain, myc),
+                            Color::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
                         );
                     }
                 }
