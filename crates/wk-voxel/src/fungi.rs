@@ -150,6 +150,8 @@ pub const DEATH_LITTER_MAX: u16 = 48;
 pub const MYCELIUM_COMPOST_RESIDUAL: u8 = 12;
 /// Soft cap on stamped lineage cells (editor / spores).
 pub const MYCELIUM_LINEAGE_MAX: usize = 512;
+/// Soft cap on per-cell strain ownership entries (overlay map).
+pub const MYCELIUM_STRAIN_MAP_MAX: usize = 8_192;
 /// How deep / wide to scan for Organic substrate under the fungus.
 const ORGANIC_SCAN_DEPTH: i32 = 8;
 const ORGANIC_SCAN_RADIUS: i32 = 2;
@@ -307,6 +309,130 @@ pub fn max_mycelium_near(world: &World, gx: i32, gy: i32) -> u8 {
         }
     }
     best
+}
+
+/// Mint a new strain id for an inoculum event.
+pub fn alloc_mycelium_strain(world: &mut World) -> u32 {
+    let id = world.next_mycelium_strain_id.max(1);
+    world.next_mycelium_strain_id = id.wrapping_add(1).max(1);
+    id
+}
+
+/// Strain owning cream at `(gx, gy)`, if any.
+pub fn mycelium_strain_at(world: &World, gx: i32, gy: i32) -> Option<u32> {
+    let gx = world.wrap_x(gx);
+    world.mycelium_strains.get(&(gx, gy)).copied()
+}
+
+/// Bright RGB for a strain id (golden-angle hues, full saturation).
+pub fn mycelium_strain_rgb(strain: u32) -> [u8; 3] {
+    // Golden-ratio hue walk so neighbouring ids stay visually distinct.
+    let h = (strain as f32 * 0.618_033_988_75).fract();
+    let s = 0.90f32;
+    let v = 1.0f32;
+    hsv_to_rgb(h, s, v)
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
+    let h = h.fract().mul_add(6.0, 0.0);
+    let i = h.floor();
+    let f = h - i;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    let (r, g, b) = match i as i32 % 6 {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    [
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+    ]
+}
+
+fn bind_mycelium_strain(world: &mut World, gx: i32, gy: i32, strain: u32) {
+    let gx = world.wrap_x(gx);
+    let map = &mut world.mycelium_strains;
+    if map.len() >= MYCELIUM_STRAIN_MAP_MAX && !map.contains_key(&(gx, gy)) {
+        if let Some(&key) = map.keys().next() {
+            map.remove(&key);
+        }
+    }
+    map.insert((gx, gy), strain);
+}
+
+fn clear_mycelium_strain(world: &mut World, gx: i32, gy: i32) {
+    let gx = world.wrap_x(gx);
+    world.mycelium_strains.remove(&(gx, gy));
+}
+
+/// Raise cream at a cell and bind (or keep) strain ownership.
+pub fn add_mycelium_with_strain(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    add: u8,
+    strain: Option<u32>,
+    cap: u8,
+) {
+    let gx = world.wrap_x(gx);
+    let Some(mut c) = world.get_cell(gx, gy) else {
+        return;
+    };
+    if !hosts_mycelium(c.material) || add == 0 {
+        return;
+    }
+    let next = c.mycelium().saturating_add(add).min(cap);
+    c.set_mycelium(next);
+    world.set_cell(gx, gy, c);
+    if next == 0 {
+        clear_mycelium_strain(world, gx, gy);
+        return;
+    }
+    if let Some(s) = strain {
+        // Virgin cell takes the incoming strain; established keeps its own
+        // so competing networks don't overwrite each other casually.
+        if mycelium_strain_at(world, gx, gy).is_none() {
+            bind_mycelium_strain(world, gx, gy, s);
+        }
+    } else if mycelium_strain_at(world, gx, gy).is_none() {
+        // Thicken a legacy/unowned patch — mint a wild strain once.
+        let s = alloc_mycelium_strain(world);
+        bind_mycelium_strain(world, gx, gy, s);
+    }
+}
+
+/// Ensure a colonized cell has a strain (inherit neighbour, else mint).
+pub fn ensure_mycelium_strain(world: &mut World, gx: i32, gy: i32) -> u32 {
+    let gx = world.wrap_x(gx);
+    if let Some(s) = mycelium_strain_at(world, gx, gy) {
+        return s;
+    }
+    for (dx, dy) in [
+        (0i32, 1),
+        (0, -1),
+        (1, 0),
+        (-1, 0),
+        (1, 1),
+        (-1, 1),
+        (1, -1),
+        (-1, -1),
+    ] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        if let Some(s) = mycelium_strain_at(world, nx, ny) {
+            bind_mycelium_strain(world, gx, gy, s);
+            return s;
+        }
+    }
+    let s = alloc_mycelium_strain(world);
+    bind_mycelium_strain(world, gx, gy, s);
+    s
 }
 
 /// Stamp editor / spore lineage at a cell (and soft-cap the map).
@@ -533,12 +659,15 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
     }
 
     for (gx, gy) in grows {
-        if let Some(mut c) = world.get_cell(gx, gy) {
-            if hosts_mycelium(c.material) {
-                c.set_mycelium(c.mycelium().saturating_add(MYCELIUM_FIELD_GROW));
-                world.set_cell(gx, gy, c);
-            }
-        }
+        let strain = mycelium_strain_at(world, gx, gy);
+        add_mycelium_with_strain(
+            world,
+            gx,
+            gy,
+            MYCELIUM_FIELD_GROW,
+            strain,
+            255,
+        );
     }
     for (gx, gy) in spreads {
         spread_mycelium_once(world, gx, gy);
@@ -546,8 +675,12 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
     for (gx, gy) in decays {
         if let Some(mut c) = world.get_cell(gx, gy) {
             if hosts_mycelium(c.material) {
-                c.set_mycelium(c.mycelium().saturating_sub(1));
+                let next = c.mycelium().saturating_sub(1);
+                c.set_mycelium(next);
                 world.set_cell(gx, gy, c);
+                if next == 0 {
+                    clear_mycelium_strain(world, gx, gy);
+                }
             }
         }
     }
@@ -674,6 +807,7 @@ pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
     }
     let old_sat = c.sat.0;
     let prior_myc = c.mycelium();
+    let prior_strain = mycelium_strain_at(world, gx, gy);
     let cap = world.water_capacity(MaterialId::Soil);
     let keep = if cap > 0 { old_sat.min(cap) } else { 0 };
     let excess = old_sat.saturating_sub(keep);
@@ -684,6 +818,13 @@ pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
     let residual = MYCELIUM_COMPOST_RESIDUAL.min(prior_myc.max(1));
     soil.set_mycelium(residual);
     world.set_cell(gx, gy, soil);
+    if residual > 0 {
+        if let Some(s) = prior_strain {
+            bind_mycelium_strain(world, gx, gy, s);
+        }
+    } else {
+        clear_mycelium_strain(world, gx, gy);
+    }
     push_excess_sat(world, gx, gy, excess);
     true
 }
@@ -772,8 +913,10 @@ pub fn colonize_and_compost_cfg(
                 .saturating_add(near_bonus)
                 .max(1)
                 .min(4);
-            c.set_mycelium(before.saturating_add(add));
-            world.set_cell(ox, oy, c);
+            let strain = mycelium_strain_at(world, ox, oy)
+                .or_else(|| mycelium_strain_at(world, gx, gy));
+            drop(c);
+            add_mycelium_with_strain(world, ox, oy, add, strain, 255);
             energy += MYCELIUM_ENERGY * (1.0 + 0.05 * n_h as f32);
         }
         let intensity = world
@@ -861,10 +1004,8 @@ fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
         }
     }
     if let Some((_, nx, ny, add)) = best {
-        if let Some(mut c) = world.get_cell(nx, ny) {
-            c.set_mycelium(c.mycelium().saturating_add(add));
-            world.set_cell(nx, ny, c);
-        }
+        let strain = Some(ensure_mycelium_strain(world, gx, gy));
+        add_mycelium_with_strain(world, nx, ny, add, strain, 255);
     }
 }
 
@@ -1070,10 +1211,11 @@ pub fn count_fungi_near(
 /// Seed a faint mycelium patch on Organic near `(gx, gy)`.
 pub fn seed_mycelium_near(world: &mut World, gx: i32, gy: i32, amount: u8) {
     if let Some((ox, oy)) = find_organic_xy(world, gx, gy) {
-        if let Some(mut c) = world.get_cell(ox, oy) {
-            c.set_mycelium(c.mycelium().saturating_add(amount).min(48));
-            world.set_cell(ox, oy, c);
-        }
+        let strain = mycelium_strain_at(world, ox, oy).or_else(|| {
+            let s = alloc_mycelium_strain(world);
+            Some(s)
+        });
+        add_mycelium_with_strain(world, ox, oy, amount, strain, 48);
     }
 }
 
@@ -1094,10 +1236,12 @@ pub fn infect_mycelium_with_lineage(
     lineage: Option<(Genome, Vec<BodyModule>)>,
 ) -> Option<(i32, i32)> {
     let (ox, oy) = find_organic_xy(world, gx, gy)?;
+    // Each inoculum event is a new strain (mutated spore / editor plant).
+    let strain = alloc_mycelium_strain(world);
     let mut hit = false;
     for dy in 0..=3 {
         let y = oy - dy;
-        let Some(mut c) = world.get_cell(ox, y) else {
+        let Some(c) = world.get_cell(ox, y) else {
             break;
         };
         if !hosts_mycelium(c.material) {
@@ -1114,12 +1258,12 @@ pub fn infect_mycelium_with_lineage(
         } else {
             (add / 2).max(4)
         };
-        c.set_mycelium(
-            c.mycelium()
-                .saturating_add(add)
-                .min(MYCELIUM_INOCULUM_CAP),
-        );
-        world.set_cell(ox, y, c);
+        // Force-bind this inoculum's strain on the feeder column.
+        let next = c.mycelium().saturating_add(add).min(MYCELIUM_INOCULUM_CAP);
+        let mut cell = c;
+        cell.set_mycelium(next);
+        world.set_cell(ox, y, cell);
+        bind_mycelium_strain(world, ox, y, strain);
         hit = true;
     }
     if hit {
@@ -1204,8 +1348,12 @@ pub fn try_emergent_fruiting(
     // Spend field intensity — fruiting costs the network.
     if let Some(mut bed) = world.get_cell(gx, air_y - 1) {
         if hosts_mycelium(bed.material) {
-            bed.set_mycelium(bed.mycelium().saturating_sub(MYCELIUM_EMERGE_COST));
+            let next = bed.mycelium().saturating_sub(MYCELIUM_EMERGE_COST);
+            bed.set_mycelium(next);
             world.set_cell(gx, air_y - 1, bed);
+            if next == 0 {
+                clear_mycelium_strain(world, gx, air_y - 1);
+            }
         }
     }
     // Prefer stamped editor / spore lineage; fall back to the stock template.
@@ -2077,6 +2225,48 @@ mod tests {
         assert!(
             sand_threaded || org_hit,
             "mycelium must network through moist sand toward Organic (sand={sand_threaded} org={org_hit})"
+        );
+    }
+
+    #[test]
+    fn inoculum_mints_strain_and_spread_inherits() {
+        let mut w = litter_plot();
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(160);
+            w.set_cell(4, y, org);
+            w.set_cell(5, y, {
+                let mut o = Cell::solid(MaterialId::Organic);
+                o.sat = Sat(160);
+                o
+            });
+        }
+        let (ox, oy) = infect_mycelium_at(&mut w, 4, 4).expect("inoculum");
+        let strain = mycelium_strain_at(&w, ox, oy).expect("inoculum must mint a strain");
+        assert!(
+            mycelium_strain_at(&w, ox, oy - 1) == Some(strain),
+            "feeder column shares the inoculum strain"
+        );
+        for _ in 0..16 {
+            spread_mycelium_once(&mut w, ox, oy);
+        }
+        let neighbor_strain = (1..=3).find_map(|y| {
+            let m = w.get_cell(5, y).map(|c| c.mycelium()).unwrap_or(0);
+            if m > 0 {
+                mycelium_strain_at(&w, 5, y)
+            } else {
+                None
+            }
+        });
+        assert_eq!(
+            neighbor_strain,
+            Some(strain),
+            "spread must inherit source strain"
+        );
+        let [r, g, b] = mycelium_strain_rgb(strain);
+        assert!(
+            r.max(g).max(b) >= 200,
+            "strain colors should be bright (got {r},{g},{b})"
         );
     }
 

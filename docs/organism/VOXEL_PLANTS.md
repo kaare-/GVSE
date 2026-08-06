@@ -178,6 +178,7 @@ Features:
   corridors: moist Soil/Sand easy, rock hard). Goal-seeks Organic and the
   free surface; dry fade disconnects, remoisten reconnects; compost leaves
   residual cream on Soil (square Soil patches = per-cell humify).
+  Press **`M`** for a bright per-strain mycelium overlay.
 - Networks that **breach the surface from below** emerge a **surface stalk**
   from the nearest lineage (else `minimal_fungus`). Stalks wind-disperse
   mutated spores far; rhizomorph hops stay local.

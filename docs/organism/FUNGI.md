@@ -166,6 +166,10 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   Dry cells fade (disconnect); remoistened neighbours can re-spread
   (reconnect). Compost leaves a residual cream corridor on Soil.
   Renderer: faint cream threads (stronger on Organic).
+- **Strain overlay (`M`)** — each inoculum mints a strain id; cream cells
+  carry ownership in `World::mycelium_strains`. Overlay paints bright
+  golden-angle colors per strain (alpha = intensity) so competing
+  networks read without inspecting underground cells.
 - **Emergence** — a rare forest event. Only after the network has
   **breached the surface** (colonized Organic open to Air *and* feeder
   mycelium below/beside — feeders may be mineral corridors), with high

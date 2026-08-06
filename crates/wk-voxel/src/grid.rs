@@ -53,6 +53,13 @@ pub struct World {
     /// Emergent stalks prefer the nearest stamp over `minimal_fungus`.
     #[serde(default)]
     pub mycelium_lineage: crate::fungi::MyceliumLineageMap,
+    /// Per-cell mycelium strain ownership for overlays / competing networks.
+    /// Keyed by wrapped `(gx, gy)`; cleared when cream intensity hits 0.
+    #[serde(default)]
+    pub mycelium_strains: HashMap<(i32, i32), u32>,
+    /// Next strain id to mint on inoculum (wraps; 0 reserved / unused).
+    #[serde(default)]
+    pub next_mycelium_strain_id: u32,
 }
 
 impl World {
@@ -66,6 +73,8 @@ impl World {
             spore_bank: crate::spore_bank::SporeBank::default(),
             hydro: HydroOverrides::default(),
             mycelium_lineage: crate::fungi::MyceliumLineageMap::default(),
+            mycelium_strains: HashMap::new(),
+            next_mycelium_strain_id: 1,
         }
     }
 
