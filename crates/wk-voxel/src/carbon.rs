@@ -329,6 +329,18 @@ mod tests {
             })
             .count();
         assert!(soils > 0, "surface Organic should become Soil");
+        // Virgin litter must not paint fake mycelium on the new Soil.
+        for x in 0..8 {
+            if let Some(c) = w.get_cell(x, 1) {
+                if c.material == MaterialId::Soil {
+                    assert_eq!(
+                        c.mycelium(),
+                        0,
+                        "oxidation Soil must not invent cream (x={x})"
+                    );
+                }
+            }
+        }
         // Pore water conserved into Soil (or pushed) — no humidity invent.
         let sat_total: u32 = (0..8)
             .flat_map(|x| (0..4).map(move |y| (x, y)))

@@ -164,7 +164,9 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   Stone rare cracks; Bedrock refuses). World process
   (`step_mycelium_field`) goal-seeks Organic and the free surface.
   Dry cells fade (disconnect); remoistened neighbours can re-spread
-  (reconnect). Compost leaves a residual cream corridor on Soil.
+  (reconnect). Compost leaves a residual cream corridor on Soil **only
+  when the Organic already had cream** — virgin surface oxidation must
+  not invent orphan `mycelium=1` soil.
   Renderer: faint cream threads (stronger on Organic).
 - **Multi-strain shares** — a cell’s 255 cream budget is shared. Each
   inoculum mints a strain id; several strains can hold intensity on the

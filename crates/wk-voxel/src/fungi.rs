@@ -627,6 +627,10 @@ fn scale_mycelium_shares_to(world: &mut World, gx: i32, gy: i32, target: u8) {
         sync_cell_mycelium_from_shares(world, gx, gy);
         return;
     }
+    if world.mycelium_strains.get(&(gx, gy)).is_none() {
+        // Orphan `_pad` residual — inherit/mint so cream never goes unowned.
+        let _ = ensure_mycelium_strain(world, gx, gy);
+    }
     let Some(shares) = world.mycelium_strains.get(&(gx, gy)).cloned() else {
         return;
     };
@@ -900,6 +904,34 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
     let mut decays: Vec<(i32, i32)> = Vec::new();
 
     for (i, &(gx, gy, myc, mat)) in colonized.iter().enumerate() {
+        // Heal orphan `_pad` (cream without strain shares). Thin isolated
+        // ghosts (myc≤1, no neighbouring shares) are leftover virgin-Organic
+        // carbon oxidation — clear them. Real corridors inherit/mint a strain.
+        if mycelium_shares_at(world, gx, gy).is_empty() {
+            let near_share = [
+                (0i32, 1),
+                (0, -1),
+                (1, 0),
+                (-1, 0),
+                (1, 1),
+                (-1, 1),
+                (1, -1),
+                (-1, -1),
+            ]
+            .iter()
+            .any(|&(dx, dy)| {
+                !mycelium_shares_at(world, world.wrap_x(gx + dx), gy + dy).is_empty()
+            });
+            if myc <= 1 && !near_share {
+                clear_mycelium_shares(world, gx, gy);
+                if let Some(mut c) = world.get_cell(gx, gy) {
+                    c.set_mycelium(0);
+                    world.set_cell(gx, gy, c);
+                }
+                continue;
+            }
+            let _ = ensure_mycelium_strain(world, gx, gy);
+        }
         let moist = organic_cell_moist_frac(world, gx, gy);
         if moist >= MYCELIUM_FIELD_MOIST {
             // Organic thickens freely; mineral corridors thicken slower.
@@ -1061,6 +1093,8 @@ fn push_excess_sat(world: &mut World, gx: i32, gy: i32, mut excess: u8) {
 ///
 /// Leaves a residual cream corridor on the Soil so the network can
 /// reconnect through the humified patch instead of hard-severing.
+/// Virgin Organic (no cream) composts clean — carbon surface oxidation
+/// uses this path and must not invent orphan `mycelium=1` soil.
 pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
     let gx = world.wrap_x(gx);
     let Some(c) = world.get_cell(gx, gy) else {
@@ -1077,12 +1111,21 @@ pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
     let mut soil = Cell::solid(MaterialId::Soil);
     soil.sat.0 = keep;
     soil.flags.set(CellFlags::COMPACTED);
-    // Residual ≤ prior intensity — never invent cream on a virgin compost.
-    let residual = MYCELIUM_COMPOST_RESIDUAL.min(prior_myc.max(1));
-    // Write soil first; scale existing multi-strain shares down to residual.
+    // Residual ≤ prior intensity — never invent cream on virgin Organic.
+    // (Previously `.max(1)` painted fake myc=1 soil with no strain shares
+    // whenever carbon oxidized surface litter.)
+    let residual = MYCELIUM_COMPOST_RESIDUAL.min(prior_myc);
     soil.set_mycelium(residual);
     world.set_cell(gx, gy, soil);
-    scale_mycelium_shares_to(world, gx, gy, residual);
+    if residual > 0 {
+        // Keep / mint strain ownership so residual corridors stay on `M`.
+        if mycelium_shares_at(world, gx, gy).is_empty() {
+            let _ = ensure_mycelium_strain(world, gx, gy);
+        }
+        scale_mycelium_shares_to(world, gx, gy, residual);
+    } else {
+        clear_mycelium_shares(world, gx, gy);
+    }
     push_excess_sat(world, gx, gy, excess);
     true
 }
@@ -2039,6 +2082,8 @@ mod tests {
         org.sat = Sat(200);
         org.set_mycelium(255);
         w.set_cell(4, 2, org);
+        let strain = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(strain, 255)]);
         // Neighbour Air can receive excess from compaction.
         w.set_cell(4, 3, Cell::air());
         assert!(compost_organic_to_soil(&mut w, 4, 2));
@@ -2049,6 +2094,12 @@ mod tests {
             "compost must leave a residual cream corridor (got {})",
             soil.mycelium()
         );
+        assert!(
+            mycelium_shares_at(&w, 4, 2)
+                .iter()
+                .any(|&(s, a)| s == strain && a > 0),
+            "residual corridor must keep strain ownership"
+        );
         let soil_cap = water_capacity(MaterialId::Soil);
         assert_eq!(soil.sat.0, 200u8.min(soil_cap));
         let above = w.get_cell(4, 3).unwrap();
@@ -2056,6 +2107,56 @@ mod tests {
         assert!(
             total >= 200,
             "water must not vanish on compost (total={total})"
+        );
+    }
+
+    #[test]
+    fn virgin_organic_compost_does_not_invent_cream() {
+        let mut w = litter_plot();
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(120);
+        // No mycelium — same path carbon surface oxidation uses.
+        w.set_cell(4, 2, org);
+        w.set_cell(4, 3, Cell::air());
+        assert!(compost_organic_to_soil(&mut w, 4, 2));
+        let soil = w.get_cell(4, 2).unwrap();
+        assert_eq!(soil.material, MaterialId::Soil);
+        assert_eq!(
+            soil.mycelium(),
+            0,
+            "virgin Organic→Soil must not invent orphan cream"
+        );
+        assert!(
+            mycelium_shares_at(&w, 4, 2).is_empty(),
+            "virgin compost must leave no strain shares"
+        );
+        assert!(
+            soil.flags.contains(CellFlags::COMPACTED),
+            "humified soil still marks compacted"
+        );
+    }
+
+    #[test]
+    fn field_clears_isolated_oxidation_ghost_cream() {
+        let mut w = litter_plot();
+        let mut soil = Cell::solid(MaterialId::Soil);
+        soil.sat = Sat(160);
+        soil.flags.set(CellFlags::COMPACTED);
+        soil.set_mycelium(1); // fake cream, no shares
+        w.set_cell(4, 2, soil);
+        // Real hub far enough that 8-neighbour check does not see it.
+        let mut hub = Cell::solid(MaterialId::Sand);
+        hub.sat = Sat(160);
+        hub.set_mycelium(80);
+        w.set_cell(8, 1, hub);
+        let strain = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((8, 1), vec![(strain, 80)]);
+        w.tick = MYCELIUM_FIELD_PERIOD;
+        step_mycelium_field(&mut w);
+        assert_eq!(
+            w.get_cell(4, 2).map(|c| c.mycelium()),
+            Some(0),
+            "isolated myc=1 soil with no shares should clear as oxidation ghost"
         );
     }
 
