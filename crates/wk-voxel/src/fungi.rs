@@ -915,7 +915,7 @@ pub fn colonize_and_compost_cfg(
                 .min(4);
             let strain = mycelium_strain_at(world, ox, oy)
                 .or_else(|| mycelium_strain_at(world, gx, gy));
-            drop(c);
+            let _ = c;
             add_mycelium_with_strain(world, ox, oy, add, strain, 255);
             energy += MYCELIUM_ENERGY * (1.0 + 0.05 * n_h as f32);
         }
