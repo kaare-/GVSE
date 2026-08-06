@@ -1021,9 +1021,9 @@ fn underwater_sand_repose_does_not_leave_dry_air() {
 }
 
 #[test]
-fn repose_does_not_slide_sand_into_standing_water() {
-    // Supported sand with only full-water diagonal seats must stay put.
-    // Vertical sink through water is grain-fall's job, not repose.
+fn underwater_sand_bank_reposes_into_standing_water() {
+    // Submerged sand on a stone ledge with only full-water diagonal seats
+    // must avalanche (gentler UW banks). Vacated cell keeps the lake sat.
     let mut w = setup_column_world();
     for x in 3..=7 {
         for y in 1..=4 {
@@ -1032,15 +1032,295 @@ fn repose_does_not_slide_sand_into_standing_water() {
     }
     w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
     w.set_cell(5, 2, Cell::solid(MaterialId::Sand));
+    let sat_before: u32 = (0..16)
+        .flat_map(|x| (0..8).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y))
+        .map(|c| c.sat.0 as u32)
+        .sum();
     apply_grain_repose(&mut w);
-    assert_eq!(
+    let slid = w.get_cell(4, 1).map(|c| c.material) == Some(MaterialId::Sand)
+        || w.get_cell(6, 1).map(|c| c.material) == Some(MaterialId::Sand);
+    assert!(
+        slid,
+        "submerged sand must avalanche into standing water (gentler banks)"
+    );
+    assert_ne!(
         w.get_cell(5, 2).unwrap().material,
         MaterialId::Sand,
-        "sand must not swim sideways into the lake via repose"
+        "ledge sand should leave after underwater repose"
     );
-    assert_ne!(w.get_cell(4, 1).unwrap().material, MaterialId::Sand);
-    assert_ne!(w.get_cell(6, 1).unwrap().material, MaterialId::Sand);
+    let vacated = w.get_cell(5, 2).unwrap();
+    assert_eq!(vacated.material, MaterialId::Air);
+    assert!(
+        vacated.sat.0 >= 200,
+        "vacated underwater cell must stay standing water (sat={})",
+        vacated.sat.0
+    );
+    let sat_after: u32 = (0..16)
+        .flat_map(|x| (0..8).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y))
+        .map(|c| c.sat.0 as u32)
+        .sum();
+    assert_eq!(
+        sat_after, sat_before,
+        "lake repose must swap/steal water, not mint or lose sat"
+    );
 }
+
+#[test]
+fn underwater_sand_cliff_flattens_under_repose() {
+    // Vertical submerged sand face (the "steep bank" artifact) should
+    // sprawl toward max_step≈0 rather than freeze as a wall.
+    let mut w = setup_column_world();
+    for x in 2..=12 {
+        for y in 1..=7 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    // Flat bedrock shelf, then a 3-high sand cliff at the drop.
+    for x in 2..=6 {
+        w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+    }
+    w.set_cell(6, 2, Cell::solid(MaterialId::Sand));
+    w.set_cell(6, 3, Cell::solid(MaterialId::Sand));
+    w.set_cell(6, 4, Cell::solid(MaterialId::Sand));
+    for _ in 0..30 {
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+        apply_gravity_fall(&mut w);
+    }
+    let cliff = (2..=4)
+        .filter(|&y| w.get_cell(6, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert!(
+        cliff <= 1,
+        "underwater sand cliff must flatten (stacked on face={cliff})"
+    );
+    let spread = (7..=10)
+        .filter(|&x| {
+            (1..=3).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+        })
+        .count();
+    assert!(
+        spread >= 1,
+        "sand must spread onto the submerged toe, not hang as a wall"
+    );
+}
+
+#[test]
+fn underwater_soil_bank_reposes_into_standing_water() {
+    // Soil used to share Organic's refuse-lake path and froze as UW cliffs.
+    // It is a dense grain — must avalanche into standing water like sand.
+    let mut w = setup_column_world();
+    for x in 3..=7 {
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+    w.set_cell(5, 2, Cell::solid(MaterialId::Soil));
+    let sat_before: u32 = (0..16)
+        .flat_map(|x| (0..8).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y))
+        .map(|c| c.sat.0 as u32)
+        .sum();
+    apply_grain_repose(&mut w);
+    let slid = w.get_cell(4, 1).map(|c| c.material) == Some(MaterialId::Soil)
+        || w.get_cell(6, 1).map(|c| c.material) == Some(MaterialId::Soil);
+    assert!(
+        slid,
+        "submerged soil must avalanche into standing water (gentler banks)"
+    );
+    assert_ne!(
+        w.get_cell(5, 2).unwrap().material,
+        MaterialId::Soil,
+        "ledge soil should leave after underwater repose"
+    );
+    let vacated = w.get_cell(5, 2).unwrap();
+    assert_eq!(vacated.material, MaterialId::Air);
+    assert!(
+        vacated.sat.0 >= 200,
+        "vacated underwater cell must stay standing water (sat={})",
+        vacated.sat.0
+    );
+    let sat_after: u32 = (0..16)
+        .flat_map(|x| (0..8).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y))
+        .map(|c| c.sat.0 as u32)
+        .sum();
+    assert_eq!(
+        sat_after, sat_before,
+        "lake repose must swap/steal water, not mint or lose sat"
+    );
+}
+
+#[test]
+fn underwater_soil_cliff_flattens_under_repose() {
+    // Long-soak artifact: vertical Soil faces into deep water shafts.
+    let mut w = setup_column_world();
+    for x in 2..=12 {
+        for y in 1..=7 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 2..=6 {
+        w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+    }
+    w.set_cell(6, 2, Cell::solid(MaterialId::Soil));
+    w.set_cell(6, 3, Cell::solid(MaterialId::Soil));
+    w.set_cell(6, 4, Cell::solid(MaterialId::Soil));
+    for _ in 0..30 {
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+        apply_gravity_fall(&mut w);
+    }
+    let cliff = (2..=4)
+        .filter(|&y| w.get_cell(6, y).map(|c| c.material) == Some(MaterialId::Soil))
+        .count();
+    assert!(
+        cliff <= 1,
+        "underwater soil cliff must flatten (stacked on face={cliff})"
+    );
+    let spread = (7..=10)
+        .filter(|&x| {
+            (1..=3).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Soil))
+        })
+        .count();
+    assert!(
+        spread >= 1,
+        "soil must spread onto the submerged toe, not hang as a wall"
+    );
+}
+
+#[test]
+fn organic_still_refuses_lake_after_soil_uw_repose() {
+    // Guard: floating raft Organic must not crawl into the lake.
+    let mut w = setup_column_world();
+    w.set_cell(5, 1, Cell::solid(MaterialId::Organic));
+    w.set_cell(5, 2, Cell::solid(MaterialId::Organic));
+    for x in [4, 6] {
+        for y in 1..=2 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for _ in 0..8 {
+        apply_grain_repose(&mut w);
+    }
+    assert_eq!(
+        w.get_cell(5, 2).unwrap().material,
+        MaterialId::Organic,
+        "Organic must still float on full water, not slide into the lake"
+    );
+    let in_lake = w.get_cell(4, 1).map(|c| c.material) == Some(MaterialId::Organic)
+        || w.get_cell(6, 1).map(|c| c.material) == Some(MaterialId::Organic);
+    assert!(!in_lake, "Organic must not occupy underwater seats");
+}
+
+#[test]
+fn settled_organic_cliff_flattens_underwater() {
+    // Bed / waterlogged Organic used to share the raft refuse path and freeze
+    // as vertical compost walls in deep water. Settled ooze must sprawl.
+    use crate::cell::CellFlags;
+    let mut w = setup_column_world();
+    for x in 2..=12 {
+        for y in 1..=7 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 2..=6 {
+        w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+    }
+    for y in 2..=4 {
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(water_capacity(MaterialId::Organic));
+        org.flags.set(CellFlags::WATERLOGGED);
+        w.set_cell(6, y, org);
+    }
+    for _ in 0..40 {
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+        apply_gravity_fall(&mut w);
+    }
+    let cliff = (2..=4)
+        .filter(|&y| w.get_cell(6, y).map(|c| c.material) == Some(MaterialId::Organic))
+        .count();
+    assert!(
+        cliff <= 1,
+        "settled underwater Organic cliff must flatten (stacked on face={cliff})"
+    );
+    let spread = (7..=10)
+        .filter(|&x| {
+            (1..=3).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+        })
+        .count();
+    assert!(
+        spread >= 1,
+        "settled Organic must spread onto the submerged toe"
+    );
+}
+
+#[test]
+fn bed_settled_organic_reposes_into_standing_water() {
+    // Organic grounded on stone under a lake (not a surface raft) should
+    // avalanche into water seats like Soil.
+    let mut w = setup_column_world();
+    for x in 3..=7 {
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
+    let mut org = Cell::solid(MaterialId::Organic);
+    org.sat = Sat(water_capacity(MaterialId::Organic));
+    w.set_cell(5, 2, org);
+    apply_grain_repose(&mut w);
+    let slid = w.get_cell(4, 1).map(|c| c.material) == Some(MaterialId::Organic)
+        || w.get_cell(6, 1).map(|c| c.material) == Some(MaterialId::Organic);
+    assert!(
+        slid,
+        "bed-settled Organic must avalanche into standing water"
+    );
+}
+
+
+#[test]
+fn waterline_sand_lip_reposes_into_lake() {
+    // Screenshot case: nearly vertical sand face at the free surface into
+    // standing water. Must avalanche, not freeze as a 4–5 cell cliff.
+    let mut w = setup_column_world();
+    // Lake on the left, sand shelf on the right.
+    for x in 0..=4 {
+        for y in 1..=6 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 5..=12 {
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+    }
+    // Tall waterline lip (the steep bank).
+    w.set_cell(5, 6, Cell::solid(MaterialId::Sand));
+    w.set_cell(5, 7, Cell::solid(MaterialId::Sand));
+    w.set_cell(5, 8, Cell::solid(MaterialId::Sand));
+    for _ in 0..40 {
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+        apply_gravity_fall(&mut w);
+    }
+    let lip = (6..=8)
+        .filter(|&y| w.get_cell(5, y).map(|c| c.material) == Some(MaterialId::Sand))
+        .count();
+    assert!(
+        lip <= 1,
+        "waterline sand lip must repose into the lake (stacked={lip})"
+    );
+    let toe = (1..=4).any(|x| {
+        (1..=5).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+    });
+    assert!(toe, "sand must spread into the submerged toe");
+}
+
 
 #[test]
 fn repose_does_not_slide_sand_into_wet_film() {

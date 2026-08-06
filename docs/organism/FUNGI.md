@@ -193,8 +193,9 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   the water mass store: surface Organic can oxidize to Soil and credit
   atm C; lakes exchange atm ↔ dissolved on a slow cadence. Set A algae
   draw dissolved C (bloom harvest throttles when the pool empties);
-  land plants lightly pull atmosphere on photo growth. Buckets persist
-  in `.gvsesim` saves. O₂ creatures later — not a per-cell chemistry field.
+  land plants lightly pull atmosphere on photo growth, with a photo floor
+  so empty air never hard-zeros forests. Buckets persist in `.gvsesim`
+  saves. O₂ creatures later — not a per-cell chemistry field.
 - **Spore bank** (`World::spore_bank`): fungus packets that cannot infect
   on landing (no Organic, cold) stay tied to that cell and **inoculate
   cream** on wake — they do not stamp fruiting bodies. Plant packets

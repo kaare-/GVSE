@@ -12,6 +12,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | `Root` / `Stem` / `Photosystem` / `Nucleus` modules | Done |
 | Fixed crown on purchase; free-float tipped when unanchored over water | Done |
 | Woody tip rigid-bakes body (stem+root rotate together; raft / free-float / sand undercut) | Done |
+| Uprooted woody: short wet keel; no mineral tunnel / nucleus→bed pipe | Done |
 | Floating land/plankton corpses drift with wind + local water current | Done |
 | Sand-rooted crowns never hoist on organic mats / water; no shore sail | Done |
 | Raft tip resists with root keel (more dangling roots → harder tip) | Done |
@@ -123,11 +124,44 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 - App draws lilac spore puffs drifting on climate wind (`SporeFx`)
 - Rhizome sprout still works without spore modules (local clone only)
 
+### Floating / tipped woody castaways
+
+- An **unseated** woody plant (`fallen`) is one rigid body: it rides the
+  free surface or rests on the beach. Proximal-root scrapes on bed, shore,
+  or neighbour substrate must **not** teleport the nucleus to `solid_y+1`
+  (that used to plant floating trees on the lake floor).
+- **Rooted vs uprooted (woody):** roots are always a solid rigid body with
+  the trunk (tip-bake), never soft terrain goo.
+  - **Uprooted** (open water / wet Air under the nucleus): short wet keel
+    only (`UPROOTED_ROOT_KEEL_MAX`); no mineral tunnels, no nucleus→bed
+    pipes. Existing pierces past the keel are pruned each tick.
+  - **Rooted purchase while tipped:** shore tips with mineral under the
+    nucleus may elongate into the beach; the chassis stays where it rests.
+  Stemless seaweed may still snap back to a short holdfast.
+- Shore re-root stays tipped; only `upright_growth` shoots stand up.
+- Shore-tipped logs resting on mineral do **not** ride a flickering runoff
+  waterline (`gy = top`) — that pumped landslide regrowth ±1px when water
+  ran past. Open-water castaways (wet Air under the nucleus) still float.
+
+### Stemless ribbons vs floating Organic
+
+- **Draw / collision:** stemless Photosystem pile-up only stacks in free Air.
+  Tips that land in floating Organic drop under the lid instead of climbing
+  out the top (that looked like the tip “pumping” through litter while the
+  holdfast stayed put).
+- **Seating:** free-surface ignores full-sat water sealed under Organic; stemless
+  rescue skips Air-on-Organic. Holdfast may see mineral through a thin compost
+  lid but never seats *on* Organic.
+
 ### D4 — Drought banking *(landed)*
 
 - Root count raises `energy_max` (starch storage); photo / growth floors stay on `energy_base_max`
 - Soft root:shoot budget; stressed moisture lifts root allowance
 - Hibernate band (`DROUGHT_DORMANT_FRAC`): slow upkeep, no photo/drink/growth; die after max dormant ticks
+- **Respiration:** upkeep uses tissue-weighted load (Photosystem ≫ Stem/Root) and a
+  lower night floor than plankton — full module-count upkeep emptied river plants
+  on the first night once they grew a trunk. Elongation / submerged stem-urge
+  only run while `day ≥ PLANT_GROW_MIN_DAY`.
 
 ### E1 — Litter + fungi *(landed; fruiting body + mycelium field)*
 
@@ -168,7 +202,9 @@ Features:
 
 ### Plant tune *(this PR)*
 
-- Root drink only touches pore sat (never free Air water); slow sip + return to humidity
+- Root drink only touches pore sat (never free Air water); slow sip + return to humidity.
+  Land roots stop sipping once pore fill is above `ROOT_DRINK_COMFORT_FRAC`
+  so growing plants do not flash-dry moist sand into drought dormancy.
 - Stronger moisture tropism for root elongation
 - Softer upkeep / longer plant life; Tab → Plants/fungi gene knobs
 

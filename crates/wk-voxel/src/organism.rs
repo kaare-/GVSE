@@ -41,7 +41,8 @@ use crate::plant::{
     prune_detached_woody_leaves, shed_unproductive_woody_leaves, sync_root_storage,
     try_grow_plant, try_plant_wind_spore, try_vegetative_sprout, DroughtBand, PlantGrowthCaps,
     DROUGHT_DORMANT_UPKEEP,
-    DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_UPKEEP_MULT,
+    DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_GROW_MIN_DAY,
+    PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
 };
 use crate::shade::{
     build_canopy_index_posed, canopy_top_y, posed_canopy_sample, shade_transmit,
@@ -82,10 +83,27 @@ const REPRO_COST_FRAC: f32 = 0.45;
 const REPRODUCE_AT: f32 = 0.85;
 /// Ticks between fission attempts.
 const REPRO_PERIOD: u64 = 40;
-/// Age soft-cap for plankton (ticks).
-const LIFE_TICKS: u64 = DEMO_DAY_TICKS * 4;
+/// Plankton soft age-cap in climate cycles (day+night).
+const PLANKTON_LIFE_CYCLES: u64 = 4;
 /// Land plants / fungi live longer — senescence is softer than plankton blooms.
-const PLANT_LIFE_TICKS: u64 = DEMO_DAY_TICKS * 16;
+const PLANT_LIFE_CYCLES: u64 = 16;
+/// Default-climate plankton life (tests / docs). Live ticks use [`life_ticks`].
+const LIFE_TICKS: u64 = DEMO_DAY_TICKS * PLANKTON_LIFE_CYCLES;
+/// Default-climate plant life. Live ticks scale with [`ClimateConfig::total_ticks`].
+const PLANT_LIFE_TICKS: u64 = DEMO_DAY_TICKS * PLANT_LIFE_CYCLES;
+
+/// Soft age-cap in ticks for the active climate clock.
+///
+/// Must track live day/night lengths — a fixed `DEMO_DAY_TICKS * N` cap
+/// kills plants after ~3 long days when the Tab day slider is stretched.
+fn life_ticks(climate: &ClimateConfig, plant_or_fungus: bool) -> u64 {
+    let cycles = if plant_or_fungus {
+        PLANT_LIFE_CYCLES
+    } else {
+        PLANKTON_LIFE_CYCLES
+    };
+    climate.total_ticks().saturating_mul(cycles)
+}
 
 /// Land / fungus corpses rest this long before becoming Organic (~0.75 demo day).
 pub const CORPSE_SETTLE_LAND_TICKS: u32 = 900;
@@ -839,11 +857,7 @@ impl OrganismStore {
             atom.age_ticks = atom.age_ticks.saturating_add(1);
             atom.cooldown = atom.cooldown.saturating_sub(1);
 
-            let life_cap = if is_land_plant(atom) || is_fungus(atom) {
-                PLANT_LIFE_TICKS
-            } else {
-                LIFE_TICKS
-            };
+            let life_cap = life_ticks(climate, is_land_plant(atom) || is_fungus(atom));
             if atom.age_ticks >= life_cap {
                 deaths.push(i);
                 continue;
@@ -1427,14 +1441,19 @@ fn step_land_plant(
     //   stemless tips for draw only.
     // - Sand undercut with no water yet: woody tip-bakes, then reseats.
     // - Shore: stay tipped; grow roots into the beach; new shoots upright.
+    // - Fallen woody castaway = one rigid body: proximal-root scrapes on
+    //   bed/shore/neighbour substrate must NOT teleport `gy` to the bed.
+    //   Open-water = uprooted (short wet keel, no mineral pierce). Shore
+    //   tips resting on mineral may elongate into the beach while tipped.
     let on_float_raft = rooted_in_floating_organic(world, atom, float_columns);
     let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
     let stemless = crate::plant::stem_count(atom) == 0;
     let grounded = grounded_substrate_anchor(world, atom, float_columns);
+    let woody_castaway = atom.fallen && !stemless;
     // Tipped woody shoots must all draw upright — unmarked dy>0 stem/leaf
     // cells flatten to the waterline and leave mid-mast holes.
     heal_fallen_upright_marks(atom);
-    if grounded {
+    if grounded && !woody_castaway {
         // Fixed in sand/rock/grounded compost. Stemless clears a stale tip
         // when a short crown grip is still present; woody stays tipped after
         // shore re-root. Never raise gy onto organic piles or the waterline.
@@ -1449,7 +1468,7 @@ fn step_land_plant(
             }
         }
         pin_plant_pose(atom);
-    } else if let Some(solid_y) = holdfast_solid {
+    } else if let Some(solid_y) = holdfast_solid.filter(|_| !woody_castaway) {
         // Local ground under the crown (no sand purchase yet). Stemless
         // seaweed drops a stale tip once the holdfast is back; woody plants
         // stay tipped so only upright_growth shoots stand up after re-root.
@@ -1484,17 +1503,34 @@ fn step_land_plant(
         } else {
             atom.fallen = true;
         }
-        atom.gy = top;
-        atom.fy = top as f32;
-        atom.vel_y = 0.0;
-        atom.last_water_top = Some(top);
+        // Shore-tipped woody log resting on mineral: do NOT ride the free
+        // surface. Runoff / rain that flickers full-sat by one cell used to
+        // set gy=top every tick and pump the upright mast ±1px. Open-water
+        // castaways (wet Air under the nucleus) still track the waterline.
+        if woody_castaway && nucleus_rests_on_mineral(world, atom) {
+            pin_plant_pose(atom);
+        } else {
+            atom.gy = top;
+            atom.fy = top as f32;
+            atom.vel_y = 0.0;
+            atom.last_water_top = Some(top);
+        }
     } else if atom.fallen {
         // Shore (rooted or not): stay tipped; seat on the beach surface.
-        if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
+        // Stemless: never surf an Organic deck — that fights waterline/raft
+        // seating and pumps ribbons through floating litter.
+        // Mineral-resting woody castaways keep gy — re-slotting against a
+        // draining film was the other half of the ±1 shore pump.
+        if woody_castaway && nucleus_rests_on_mineral(world, atom) {
+            pin_plant_pose(atom);
+        } else if let Some(slot) = surface_seat_for_plant(world, atom.gx, atom.gy, stemless) {
             atom.gy = slot;
+            atom.fy = atom.gy as f32;
+            atom.vel_y = 0.0;
+        } else {
+            atom.fy = atom.gy as f32;
+            atom.vel_y = 0.0;
         }
-        atom.fy = atom.gy as f32;
-        atom.vel_y = 0.0;
         atom.last_water_top = None;
     } else if !stemless {
         // Substrate gone (sand eroded) with no standing water: bake the tip
@@ -1506,16 +1542,19 @@ fn step_land_plant(
         atom.fy = atom.gy as f32;
         atom.vel_y = 0.0;
         atom.last_water_top = None;
-    } else if let Some(slot) = find_surface_air_slot(world, atom.gx, atom.gy) {
+    } else if let Some(slot) = surface_seat_for_plant(world, atom.gx, atom.gy, true) {
         atom.gy = slot;
         pin_plant_pose(atom);
     } else {
         pin_plant_pose(atom);
     }
     // Tipped logs: trim absurd waterline span and shed canopy buried in rock.
+    // Open-water woody castaways also shed roots that pierce mineral / run
+    // past the short uprooted keel (roots stay a solid body, not terrain goo).
     if atom.fallen {
         clamp_fallen_log_extent(atom);
         prune_fallen_canopy_in_solid(world, atom);
+        prune_uprooted_woody_roots(world, atom);
     }
     // Roots bank surplus above the spawn tank (starch analogy).
     sync_root_storage(atom);
@@ -1534,9 +1573,10 @@ fn step_land_plant(
     }
 
     let n_photo = atom.photosystem_count();
-    let n_mod = atom.body.len().max(1) as f32;
-    // Plants respire less than plankton blooms.
-    let mut upkeep = UPKEEP_PER_MODULE * PLANT_UPKEEP_MULT * n_mod * (0.45 + 0.55 * day);
+    // Leaves respire harder than Stem/Root — see [`plant_metabolic_load`].
+    let metabolic = plant_metabolic_load(atom);
+    let day_respire = PLANT_UPKEEP_DAY_BLEND + (1.0 - PLANT_UPKEEP_DAY_BLEND) * day;
+    let mut upkeep = UPKEEP_PER_MODULE * PLANT_UPKEEP_MULT * metabolic * day_respire;
 
     if dormant {
         upkeep *= DROUGHT_DORMANT_UPKEEP;
@@ -1624,7 +1664,10 @@ fn step_land_plant(
             atom.genome.alloc_stem = 0.0;
         }
     }
-    if !atom.fallen && submerged && light < SUBMERGED_STEM_URGE_LIGHT {
+    // Night: no submerged stem-urge and no elongation — dim light used to
+    // force trunk growth all night and empty the tank in a river.
+    let grow_day = day >= PLANT_GROW_MIN_DAY;
+    if grow_day && !atom.fallen && submerged && light < SUBMERGED_STEM_URGE_LIGHT {
         if crate::plant::stem_count(atom) > 0 {
             atom.genome.alloc_stem = (atom.genome.alloc_stem + 0.40).min(1.0);
             atom.genome.alloc_root = (atom.genome.alloc_root * 0.55).max(0.05);
@@ -1635,17 +1678,19 @@ fn step_land_plant(
             atom.genome.alloc_stem = 0.0;
         }
     }
-    let _ = try_grow_plant(
-        world,
-        atom,
-        tick,
-        trunks,
-        live_roots,
-        live_photos,
-        growth_caps,
-        canopy,
-        entity_id,
-    );
+    if grow_day {
+        let _ = try_grow_plant(
+            world,
+            atom,
+            tick,
+            trunks,
+            live_roots,
+            live_photos,
+            growth_caps,
+            canopy,
+            entity_id,
+        );
+    }
     atom.genome = genome_save;
     sync_root_storage(atom);
     // Fern-style wind spores before local rhizome (longer range, needs ReproSpore).
@@ -1870,17 +1915,41 @@ pub fn resolve_organism_draw_cells(
             // Stemless soft mats pile in free Air so flopped greens don't
             // overwrite. Woody canopy leaves stay on their stem pose —
             // piling would float them a cell off the petiole.
+            //
+            // Never climb through world solids (esp. floating Organic): the
+            // old "blocked → wy+=1" loop pumped ribbon tips out the top of
+            // litter mats and made them oscillate as sway/soak moved.
             if mid == ModuleId::Photosystem && crate::plant::stem_count(atom) == 0 {
+                let solid = |world: &World, x: i32, y: i32| {
+                    matches!(
+                        world.get_cell(x, y),
+                        Some(c) if c.material != MaterialId::Air
+                    )
+                };
+                // If the soft pose landed inside litter / terrain, drop to
+                // free Air under the lid (under-raft) instead of erupting up.
                 for _ in 0..24 {
-                    // Missing world cells (tests / unloaded) count as free air.
-                    let blocked = match world.get_cell(qx, wy) {
-                        Some(c) => c.material != MaterialId::Air,
-                        None => false,
-                    };
-                    if !blocked && !occupied.contains(&(wx, wy)) {
+                    if !solid(world, qx, wy) {
+                        break;
+                    }
+                    wy -= 1;
+                }
+                if solid(world, qx, wy) {
+                    continue;
+                }
+                for _ in 0..24 {
+                    if !occupied.contains(&(wx, wy)) {
+                        break;
+                    }
+                    // Refuse to pile into Organic / rock above.
+                    if solid(world, qx, wy + 1) {
                         break;
                     }
                     wy += 1;
+                    if solid(world, qx, wy) {
+                        wy -= 1;
+                        break;
+                    }
                 }
             }
             occupied.insert((wx, wy));
@@ -2646,6 +2715,7 @@ fn crown_holdfast_solid_y(
     _columns: &std::collections::HashMap<i32, (i32, i32)>,
 ) -> Option<i32> {
     const MAX_ROOT_LEN: i16 = 6;
+    const SEE_THROUGH_ORG: i32 = 8;
     let mut best: Option<i32> = None;
     for &(dx, dy, m) in &atom.body {
         if m != ModuleId::Root || dy < -MAX_ROOT_LEN || dx.abs() > 1 {
@@ -2657,7 +2727,14 @@ fn crown_holdfast_solid_y(
             let Some(c) = world.get_cell(wx, y) else {
                 continue;
             };
-            if c.material == MaterialId::Air || c.material == MaterialId::Organic {
+            if c.material == MaterialId::Air {
+                continue;
+            }
+            if c.material == MaterialId::Organic {
+                // Compost / litter lid: see through to mineral, never seat on Organic.
+                if let Some(mineral_y) = mineral_solid_below(world, wx, y, SEE_THROUGH_ORG) {
+                    best = Some(best.map_or(mineral_y, |b| b.max(mineral_y)));
+                }
                 continue;
             }
             // Ground surface under the crown (highest mineral solid).
@@ -2665,6 +2742,117 @@ fn crown_holdfast_solid_y(
         }
     }
     best
+}
+
+/// Highest non-Air, non-Organic solid at or below `start_y` within `max_down`.
+fn mineral_solid_below(world: &World, gx: i32, start_y: i32, max_down: i32) -> Option<i32> {
+    let gx = world.wrap_x(gx);
+    let mut best: Option<i32> = None;
+    for dy in 0..=max_down {
+        let y = start_y - dy;
+        let Some(c) = world.get_cell(gx, y) else {
+            break;
+        };
+        if c.material == MaterialId::Air {
+            continue;
+        }
+        if c.material == MaterialId::Organic {
+            continue;
+        }
+        best = Some(best.map_or(y, |b| b.max(y)));
+    }
+    best
+}
+
+/// Nucleus sits in Air directly above mineral (sand/rock/soil) — a shore
+/// rest, not an open-water float. Used so woody castaways do not ride a
+/// flickering runoff waterline, and so open-water plants stay uprooted
+/// (no mineral root tunnels) until they beach.
+pub(crate) fn nucleus_rests_on_mineral(world: &World, atom: &Atom) -> bool {
+    let Some(here) = world.get_cell(atom.gx, atom.gy) else {
+        return false;
+    };
+    if here.material != MaterialId::Air {
+        return false;
+    }
+    match world.get_cell(atom.gx, atom.gy - 1) {
+        Some(c)
+            if c.material != MaterialId::Air
+                && c.material != MaterialId::Organic
+                && c.material != MaterialId::Water =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Open-water uprooted woody: drop roots inside mineral and past the short
+/// wet keel. Shore tips (`nucleus_rests_on_mineral`) keep beach purchase.
+fn prune_uprooted_woody_roots(world: &World, atom: &mut Atom) {
+    if !crate::plant::woody_uprooted(atom) {
+        return;
+    }
+    if nucleus_rests_on_mineral(world, atom) {
+        return;
+    }
+    let keel = crate::plant::UPROOTED_ROOT_KEEL_MAX;
+    atom.body.retain(|&(dx, dy, m)| {
+        if m != ModuleId::Root {
+            return true;
+        }
+        if dy < -keel {
+            return false;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        match world.get_cell(wx, wy) {
+            Some(c)
+                if c.material != MaterialId::Air
+                    && c.material != MaterialId::Water
+                    && c.material != MaterialId::Organic =>
+            {
+                false
+            }
+            _ => true,
+        }
+    });
+    if !atom.body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+        atom.body.insert(0, (0, 0, ModuleId::Nucleus));
+    }
+}
+
+/// Beach / rescue seat. Stemless ribbons skip Air-on-Organic so floating
+/// litter cannot hoist them off the waterline (pump / oscillation bug).
+fn surface_seat_for_plant(world: &World, gx: i32, gy: i32, stemless: bool) -> Option<i32> {
+    if !stemless {
+        return find_surface_air_slot(world, gx, gy);
+    }
+    let gx = world.wrap_x(gx);
+    let ok = |y: i32| {
+        let Some(air) = world.get_cell(gx, y) else {
+            return false;
+        };
+        if air.material != MaterialId::Air {
+            return false;
+        }
+        match world.get_cell(gx, y - 1) {
+            Some(c) if c.material != MaterialId::Air && c.material != MaterialId::Organic => true,
+            _ => false,
+        }
+    };
+    for dy in [0, 1, -1, 2, -2, 3, -3, 4, -4, 6, -6, 8, -8, 12, -12, 16, -16] {
+        let y = gy + dy;
+        if ok(y) {
+            return Some(y);
+        }
+    }
+    for y in (gy - 64..=gy + 8).rev() {
+        if ok(y) {
+            return Some(y);
+        }
+    }
+    None
 }
 
 /// While tipped, every shoot cell above the waterline must be in
@@ -2696,21 +2884,31 @@ fn heal_fallen_upright_marks(atom: &mut Atom) {
 /// Only **full-sat** wet Air counts — damp seepage films must not tip land
 /// plants or lift holdfast seaweed. (`is_standing_water` alone is too loose:
 /// any non-empty sat on solid would look like a stream.)
+///
+/// Full-sat pockets **sealed under Organic** (raft soak) are ignored: that
+/// under-mat water used to alternate with the open free surface as soak
+/// flickered, so stemless ribbons pumped through floating litter.
 fn column_standing_surface(world: &World, gx: i32, hint_y: i32) -> Option<i32> {
     let gx = world.wrap_x(gx);
-    let is_body = |world: &World, x: i32, y: i32| {
-        matches!(
-            world.get_cell(x, y),
-            Some(c) if c.material == MaterialId::Air && c.sat.is_full()
-        )
+    let is_open_body = |world: &World, x: i32, y: i32| {
+        match world.get_cell(x, y) {
+            Some(c) if c.material == MaterialId::Air && c.sat.is_full() => {
+                // Under-raft soak: Organic lid is not the free surface.
+                !matches!(
+                    world.get_cell(x, y + 1),
+                    Some(above) if above.material == MaterialId::Organic
+                )
+            }
+            _ => false,
+        }
     };
     let mut start = None;
-    if is_body(world, gx, hint_y) {
+    if is_open_body(world, gx, hint_y) {
         start = Some(hint_y);
     } else {
         for dy in 1..=48 {
             for y in [hint_y - dy, hint_y + dy] {
-                if is_body(world, gx, y) {
+                if is_open_body(world, gx, y) {
                     start = Some(y);
                     break;
                 }
@@ -2722,7 +2920,7 @@ fn column_standing_surface(world: &World, gx: i32, hint_y: i32) -> Option<i32> {
     }
     let start = start?;
     let mut top = start;
-    while is_body(world, gx, top + 1) {
+    while is_open_body(world, gx, top + 1) {
         top += 1;
         if top - start > 256 {
             break;
@@ -3376,6 +3574,54 @@ mod tests {
     }
 
     #[test]
+    fn stemless_tip_does_not_pile_through_floating_organic() {
+        // Holdfast stays on the bed; ribbon cells that intersect a floating
+        // Organic lid must draw under it — never climb out the top (the
+        // "tip pumps through litter" look).
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+            for y in 2..=6 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 7..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        for x in 4..=6 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(60);
+            w.set_cell(x, 5, org);
+            w.set_cell(x, 6, org);
+        }
+        let body: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Photosystem),
+            (0, 2, ModuleId::Photosystem),
+            (0, 3, ModuleId::Photosystem),
+            (0, 4, ModuleId::Photosystem),
+        ];
+        let atom = Atom::from_body(5, 2, 40.0, body);
+        assert_eq!(atom.gy, 2, "fixture holdfast on bed");
+        let posed = resolve_organism_draw_cells(&w, &[atom.clone()], 0, 0.3);
+        let tip_ys: Vec<i32> = posed
+            .iter()
+            .filter(|p| p.mid == ModuleId::Photosystem)
+            .map(|p| p.wy)
+            .collect();
+        assert!(!tip_ys.is_empty(), "ribbon should still draw");
+        let max_tip = *tip_ys.iter().max().unwrap();
+        assert!(
+            max_tip < 5,
+            "tips must stay under the Organic lid (max_tip={max_tip} tips={tip_ys:?})"
+        );
+        assert_eq!(atom.gy, 2, "nucleus seating must not move");
+    }
+
+    #[test]
     fn dry_stemless_frond_flops_into_a_mat() {
         let mut w = moist_sand_plot(); // no standing water column
         let body = crate::blueprint::Blueprint::minimal_seaweed().modules_relative_to_nucleus();
@@ -3866,6 +4112,235 @@ mod tests {
             w.get_cell(root_cell.0, root_cell.1).unwrap().sat.0,
             sat_before.min(crate::cell::water_capacity(MaterialId::Organic)),
             "Organic conversion must not destroy pore sat"
+        );
+    }
+
+
+    #[test]
+    fn meadow_survives_long_soak_with_carbon_floor() {
+        // Pre-floor: dense meadows emptied atm in ~5 days and mass-died.
+        // Land photo must limp along ([`PLANT_PHOTO_C_FLOOR`]) so nights
+        // stay survivable after Beer-Lambert + carbon.
+        use crate::rules::tick;
+        let mut w = moist_sand_plot();
+        for x in 0..48 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(140);
+            for y in 1..=3 {
+                w.set_cell(x, y, sand);
+            }
+            for y in 4..12 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let climate = ClimateConfig::default();
+        let mut carbon = CarbonBudget::default();
+        let cfg = CarbonConfig::default();
+        let mut store = OrganismStore::new();
+        let mut g = Genome::default();
+        g.alloc_stem = 0.5;
+        g.alloc_leaf = 0.5;
+        g.leaf_absorb = 0.85;
+        for x in (2..40).step_by(2) {
+            let _ = store.spawn_blueprint(&w, x, 3, minimal_plant_body(), 40.0, g);
+        }
+        let n0 = store.len();
+        assert!(n0 >= 10);
+        let mut min_e = f32::MAX;
+        for t in 0..(climate.total_ticks() * 12) {
+            tick(&mut w);
+            for a in &store.atoms {
+                min_e = min_e.min(a.energy);
+            }
+            let _ = store.step_with_carbon(
+                &mut w,
+                t,
+                &climate,
+                None,
+                0.0,
+                None,
+                Some(&mut carbon),
+                &cfg,
+            );
+        }
+        assert_eq!(
+            store.len(),
+            n0,
+            "meadow must not mass-die under carbon soak (atm={:.1})",
+            carbon.atmosphere
+        );
+        assert!(
+            min_e > 8.0,
+            "night margin should stay comfortable (min_e={min_e:.2}, atm={:.1})",
+            carbon.atmosphere
+        );
+    }
+
+    #[test]
+    fn river_plant_survives_nights_after_growth() {
+        // Large river plants used to burn their tank overnight: every
+        // Stem/Root counted full upkeep, and submerged night still elongated.
+        use crate::rules::tick;
+        let mut w = World::new(7);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 1, sand);
+            w.set_cell(x, 2, sand);
+            for y in 3..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..14 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let climate = ClimateConfig::default();
+        let mut carbon = CarbonBudget::default();
+        let carbon_cfg = CarbonConfig::default();
+        let mut g = Genome::default();
+        g.alloc_stem = 0.45;
+        g.alloc_leaf = 0.45;
+        g.alloc_root = 0.35;
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(&w, 4, 3, minimal_plant_body(), 40.0, g));
+        let mut min_e = f32::MAX;
+        let mut max_drought = 0u32;
+        let mut max_mods = 0usize;
+        for t in 0..(climate.total_ticks() * 3) {
+            tick(&mut w);
+            if let Some(a) = store.atoms.first() {
+                min_e = min_e.min(a.energy);
+                max_drought = max_drought.max(a.drought_ticks);
+                max_mods = max_mods.max(a.body.len());
+            }
+            let _ = store.step_with_carbon(
+                &mut w,
+                t,
+                &climate,
+                None,
+                0.2,
+                None,
+                Some(&mut carbon),
+                &carbon_cfg,
+            );
+            assert!(
+                !store.is_empty(),
+                "river plant died at tick {t} (min_e={min_e:.2}, drought={max_drought}, mods={max_mods})"
+            );
+        }
+        assert!(
+            max_drought == 0,
+            "river plant should stay hydrated (max_drought={max_drought})"
+        );
+        assert!(
+            min_e > 5.0,
+            "night should not empty the tank (min_e={min_e:.2}, max_mods={max_mods})"
+        );
+        assert!(
+            max_mods >= 12,
+            "expected the plant to grow in the river (max_mods={max_mods})"
+        );
+    }
+
+    #[test]
+    fn plant_survives_several_days_on_moist_sand() {
+        // Growing plants used to sip sand dry → dormancy → night energy death
+        // within ~2 climate cycles. Comfort-gated root drink should keep a
+        // moist buffer and leave photo income intact.
+        let mut w = moist_sand_plot();
+        let climate = ClimateConfig::default(); // 600/600
+        let mut carbon = CarbonBudget::default();
+        let carbon_cfg = CarbonConfig::default();
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        let mut max_drought = 0u32;
+        for t in 0..(climate.total_ticks() * 4) {
+            max_drought = max_drought.max(
+                store.atoms.first().map(|a| a.drought_ticks).unwrap_or(0),
+            );
+            let _ = store.step_with_carbon(
+                &mut w,
+                t,
+                &climate,
+                None,
+                0.0,
+                None,
+                Some(&mut carbon),
+                &carbon_cfg,
+            );
+            assert!(
+                !store.is_empty(),
+                "plant died at tick {t} (max_drought={max_drought}, atm={:.1})",
+                carbon.atmosphere
+            );
+        }
+        let moist = crate::plant::plant_moisture_frac(&w, &store.atoms[0]);
+        assert!(
+            moist >= crate::plant::DROUGHT_DORMANT_FRAC,
+            "sand under plant should stay above dormancy (moist={moist})"
+        );
+        assert!(
+            store.atoms[0].energy > 1.0,
+            "plant should keep energy across nights (e={})",
+            store.atoms[0].energy
+        );
+        assert!(
+            max_drought < 600,
+            "should not spend a whole night bone-dry dormant (max_drought={max_drought})"
+        );
+    }
+
+    #[test]
+    fn plant_senescence_scales_with_climate_day_length() {
+        // Long Tab days used to kill plants at DEMO_DAY_TICKS*16 (~3 live
+        // days when day=6000). Cap must track climate.total_ticks()*16.
+        let mut w = moist_sand_plot();
+        let climate = ClimateConfig {
+            day_ticks: 6_000,
+            night_ticks: 600,
+        };
+        let cap = super::life_ticks(&climate, true);
+        assert_eq!(cap, climate.total_ticks() * 16);
+        assert!(
+            cap > super::PLANT_LIFE_TICKS,
+            "long climate must outlive the old fixed demo cap"
+        );
+
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(
+            &w,
+            4,
+            2,
+            minimal_plant_body(),
+            40.0,
+            Genome::default(),
+        ));
+        // Past old demo senescence, still young for this climate.
+        store.atoms[0].age_ticks = super::PLANT_LIFE_TICKS;
+        store.atoms[0].energy = 40.0;
+        let _ = store.step_with_climate(&mut w, 0, &climate, None);
+        assert_eq!(
+            store.len(),
+            1,
+            "plant must survive past DEMO_DAY_TICKS*16 under long days"
+        );
+
+        store.atoms[0].age_ticks = cap;
+        store.atoms[0].energy = 40.0;
+        let _ = store.step_with_climate(&mut w, 0, &climate, None);
+        assert!(
+            store.is_empty(),
+            "plant must still senesce at climate.total_ticks()*16"
         );
     }
 

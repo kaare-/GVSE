@@ -66,7 +66,7 @@ pub use failure::{
 };
 pub use carbon::{
     gate_algae_photo, gate_plant_photo, step_carbon_budget, CarbonBudget, CarbonConfig,
-    AMBIENT_ATM_C, AMBIENT_DISSOLVED_C,
+    AMBIENT_ATM_C, AMBIENT_DISSOLVED_C, PLANT_PHOTO_C_FLOOR,
 };
 pub use spore_bank::{
     spore_bank_len, DormantSpore, SporeBank, SporeBankConfig, SporeKind, SPORE_BANK_PERIOD,
@@ -127,7 +127,8 @@ pub use rules::{
     CondensationConfig, EvapConfig, GrainConfig,
     KarstConfig,
     OrographicConfig, PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
-    GRAIN_REPOSE_HAZE_MAX, GRAIN_SETTLE_PASSES, MYCELIUM_EROSION_BIND, MYCELIUM_RAFT_BIND_MIN,
+    GRAIN_REPOSE_HAZE_MAX, GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES, MYCELIUM_EROSION_BIND,
+    MYCELIUM_RAFT_BIND_MIN,
     MYCELIUM_REPOSE_STEP_BONUS, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
 pub use temperature::{
