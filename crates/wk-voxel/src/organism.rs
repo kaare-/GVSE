@@ -240,6 +240,13 @@ pub struct Atom {
     pub last_water_top: Option<i32>,
     /// Modules relative to `(gx, gy)`.
     pub body: Vec<BodyModule>,
+    /// Inherited body plan the plant grows toward (parent + mutation).
+    ///
+    /// Empty for editor spawns / mature free-growers. Sprout and spore
+    /// children start as a sapling `body` and fill this under local
+    /// sun / water / spacing gates.
+    #[serde(default)]
+    pub growth_target: Vec<BodyModule>,
     /// Live genes (allocation, depth bias, shade knobs, …).
     #[serde(default)]
     pub genome: Genome,
@@ -301,6 +308,7 @@ impl Atom {
             active_window: 0.55,
             last_water_top: None,
             body: default_atom_body(),
+            growth_target: Vec::new(),
             genome,
             leaf_starve: Vec::new(),
             fallen: false,
@@ -321,6 +329,19 @@ impl Atom {
         if !body.is_empty() {
             a.body = body;
         }
+        a
+    }
+
+    /// Birth with a sapling `body` and an inherited plan to grow into.
+    pub fn from_sapling(
+        gx: i32,
+        gy: i32,
+        energy_max: f32,
+        sapling: Vec<BodyModule>,
+        growth_target: Vec<BodyModule>,
+    ) -> Self {
+        let mut a = Self::from_body(gx, gy, energy_max, sapling);
+        a.growth_target = growth_target;
         a
     }
 

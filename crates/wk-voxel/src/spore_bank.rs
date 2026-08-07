@@ -49,6 +49,9 @@ pub struct DormantSpore {
     pub kind: SporeKind,
     pub genome: Genome,
     pub body: Vec<BodyModule>,
+    /// Inherited plan the sapling grows into (plant packets).
+    #[serde(default)]
+    pub growth_target: Vec<BodyModule>,
     /// Starter energy when it finally germinates.
     pub energy: f32,
     pub deposited_tick: u64,
@@ -296,8 +299,19 @@ fn wake_plant(
     }
     let tank = spore.energy.max(8.0);
     let mut genome = spore.genome;
-    sync_alloc_to_body(&mut genome, &spore.body);
-    let mut child = Atom::from_body(gx, seat_y, tank, spore.body.clone());
+    let alloc_src = if spore.growth_target.is_empty() {
+        &spore.body
+    } else {
+        &spore.growth_target
+    };
+    sync_alloc_to_body(&mut genome, alloc_src);
+    let mut child = Atom::from_sapling(
+        gx,
+        seat_y,
+        tank,
+        spore.body.clone(),
+        spore.growth_target.clone(),
+    );
     apply_genome(&mut child, genome);
     child.energy = spore.energy.clamp(1.0, child.energy_max);
     pin_plant_pose(&mut child);
@@ -342,6 +356,7 @@ pub fn packet_from_child(kind: SporeKind, child: &Atom, tick: u64, prefer_surfac
         kind,
         genome: child.genome,
         body: child.body.clone(),
+        growth_target: child.growth_target.clone(),
         energy: child.energy.max(1.0),
         deposited_tick: tick,
         prefer_surface,
@@ -401,6 +416,7 @@ mod tests {
             kind: SporeKind::Plant,
             genome: Genome::default(),
             body,
+            growth_target: Vec::new(),
             energy: 20.0,
             deposited_tick: tick,
             prefer_surface: true,
