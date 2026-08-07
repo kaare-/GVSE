@@ -27,7 +27,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
-use crate::blueprint::{mutate_body, Genome};
+use crate::blueprint::{ensure_symbiont_inherited, mutate_body, Genome};
 use crate::cell::{hosts_mycelium, water_capacity, Cell, CellFlags};
 use crate::grid::World;
 use crate::organism::{Atom, BodyModule, ModuleId};
@@ -2259,6 +2259,17 @@ pub fn infect_mycelium_with_lineage(
     }
 }
 
+fn default_emergent_fungus_lineage() -> (Vec<BodyModule>, Genome) {
+    (
+        crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
+        {
+            let mut g = Genome::default();
+            g.digest_rate = 1.0;
+            g
+        },
+    )
+}
+
 /// Mycelium field raises a surface stalk once a moist network has climbed
 /// to Organic open to Air (no living parent required). The new body can
 /// later [`try_spore`] on the wind.
@@ -2336,18 +2347,23 @@ pub fn try_emergent_fruiting(
         reduce_mycelium_shares(world, gx, air_y - 1, MYCELIUM_EMERGE_COST);
         let _ = take_mycelium_energy(world, gx, air_y - 1, MYCELIUM_EMERGE_ENERGY_COST);
     }
-    // Prefer stamped editor / spore lineage; fall back to the stock template.
-    let (body, genome) = if let Some(lin) = nearest_mycelium_lineage(world, gx, air_y - 1) {
+    // Prefer the cream cell's strain-bound lineage (survives long mineral
+    // corridors). Fall back to a nearby spatial stamp, then the stock body.
+    // Using only the spatial stamp used to drop Symbiont / custom designs
+    // once cream spread past the ~6-column nearest-lineage window.
+    let bed_y = air_y - 1;
+    let (body, genome) = if let Some(strain) = mycelium_strain_at(world, gx, bed_y) {
+        if let Some(lin) = lineage_for_strain_at(world, strain, gx, bed_y) {
+            (lin.body, lin.genome)
+        } else if let Some(lin) = nearest_mycelium_lineage(world, gx, bed_y) {
+            (lin.body, lin.genome)
+        } else {
+            default_emergent_fungus_lineage()
+        }
+    } else if let Some(lin) = nearest_mycelium_lineage(world, gx, bed_y) {
         (lin.body, lin.genome)
     } else {
-        (
-            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
-            {
-                let mut g = Genome::default();
-                g.digest_rate = 1.0;
-                g
-            },
-        )
+        default_emergent_fungus_lineage()
     };
     if !body.iter().any(|(_, _, m)| *m == ModuleId::Digest) {
         return None;
@@ -2462,14 +2478,16 @@ pub fn try_spore(
 
     // Mutate genome + body on release — wind/rhizomorph inoculum carries
     // a varied lineage; emergent stalks later match the painted mushroom.
+    // Keep opt-in Symbiont across generations (mutation may swap/delete it).
     let child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
-    let child_body = mutate_body(
+    let mut child_body = mutate_body(
         &atom.body,
         child_genome.clone_fidelity,
         world.seed.0,
         tick,
         entity_id,
     );
+    ensure_symbiont_inherited(&atom.body, &mut child_body);
     let lineage = (child_genome, child_body);
 
     // Spores inoculate mycelium — they do not stamp a living fruiting Atom.
@@ -3922,5 +3940,106 @@ mod tests {
             }
         }
         assert!(inoculated, "surface stalk should eventually inoculate downwind");
+    }
+
+    fn symbiont_fungus_body() -> Vec<BodyModule> {
+        let mut body = fungus_body();
+        body.push((2, 1, ModuleId::Symbiont));
+        body
+    }
+
+    #[test]
+    fn spore_from_symbiont_stalk_keeps_symbiont_on_inoculum() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        for x in 0..80 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 1, sand);
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        rich_moist_surface(&mut w, 4, 140);
+        for x in 12..40 {
+            rich_moist_surface(&mut w, x, 80);
+        }
+        let mut atom = Atom::from_body(4, 4, 80.0, symbiont_fungus_body());
+        apply_genome(&mut atom, {
+            let mut g = Genome::default();
+            g.digest_rate = 1.0;
+            g.clone_fidelity = 0.05; // messy — would otherwise drop Symbiont
+            g.sym_water = 200;
+            g.sym_energy = 80;
+            g
+        });
+        let cfg = crate::spore_bank::SporeBankConfig::default();
+        let mut found = None;
+        for tick in 0..6_000u64 {
+            atom.gx = 4;
+            atom.gy = 4;
+            atom.energy = atom.energy_max;
+            atom.cooldown = 0;
+            if let crate::spore_bank::DispersalResult::Inoculated { gx, gy, .. } =
+                try_spore(&mut w, &mut atom, tick, 13, true, 1.0, &[4], &cfg)
+            {
+                found = Some((gx, gy));
+                break;
+            }
+        }
+        let (gx, gy) = found.expect("symbiont stalk should inoculate");
+        let strain = mycelium_strain_at(&w, gx, gy).expect("inoculum strain");
+        let lin = lineage_for_strain_at(&w, strain, gx, gy).expect("strain lineage");
+        assert!(
+            lin.body.iter().any(|(_, _, m)| *m == ModuleId::Symbiont),
+            "spore inoculum must keep Symbiont; got {:?}",
+            lin.body
+        );
+        assert!(
+            (lin.genome.sym_water as i16 - 200).abs() < 80,
+            "treaty W should stay near parent after jitter"
+        );
+    }
+
+    #[test]
+    fn emergent_stalk_uses_strain_lineage_far_from_spatial_stamp() {
+        let mut w = litter_plot();
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        // Cream bed at x=4 with a Symbiont strain binding, but NO nearby
+        // spatial lineage stamp (the old nearest-window would fall back to
+        // minimal_fungus and drop Symbiont).
+        rich_moist_surface(&mut w, 4, 140);
+        let strain = ensure_mycelium_strain(&mut w, 4, 3);
+        let body = symbiont_fungus_body();
+        let mut g = Genome::default();
+        g.digest_rate = 1.2;
+        g.sym_water = 210;
+        g.sym_energy = 70;
+        bind_strain_lineage(&mut w, strain, g, body.clone());
+        // Spatial stamp far away so nearest_mycelium_lineage misses.
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(160);
+            w.set_cell(20, y, org);
+        }
+        stamp_mycelium_lineage(&mut w, 20, 3, g, body);
+
+        let mut child = None;
+        for pulse in 0..2_000u64 {
+            let tick = pulse * MYCELIUM_EMERGE_PERIOD;
+            if let Some(a) = try_emergent_fruiting(&mut w, &[], tick, true) {
+                child = Some(a);
+                break;
+            }
+        }
+        let child = child.expect("strain-bound bed must raise a stalk");
+        assert!(
+            child.body.iter().any(|(_, _, m)| *m == ModuleId::Symbiont),
+            "far-tip emergence must use strain lineage Symbiont, got {:?}",
+            child.body
+        );
+        assert_eq!(child.genome.sym_water, 210);
     }
 }

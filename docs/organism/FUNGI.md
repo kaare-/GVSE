@@ -226,8 +226,11 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   **breached the surface** (colonized Organic open to Air *and* feeder
   mycelium below/beside — feeders may be mineral corridors), with high
   intensity (`MYCELIUM_EMERGE_MIN`), slow cadence, and sparse local
-  density. `try_emergent_fruiting` seats a stalk matching the nearest
-  stamped lineage (else `minimal_fungus`) and burns field intensity.
+  density. `try_emergent_fruiting` seats a stalk from the cream cell's
+  **strain-bound lineage** first (so Symbiont / custom designs survive long
+  corridors), then a nearby spatial stamp, else `minimal_fungus`, and burns
+  field intensity. Spore inoculum runs `ensure_symbiont_inherited` after
+  morphological mutation so opt-in Symbiont is not a one-generation dead end.
 - **Fruiting body** — temporary Atom. Feeds from the field / litter; when
   a surface stalk sporulates it **collapses** → corpse → litter → Organic.
   Mushrooms should feel special, not wallpaper the slope.
