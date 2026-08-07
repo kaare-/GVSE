@@ -203,8 +203,12 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   pipe first — so a wet deep hub can support a desert plant, and a shallow
   plant-rich strain can buy water from a deep wet strain at their frontier.
   Inspector shows treaty, link state, trade mode, banking flag, both-direction
-  ledgers, potential rates, and bias. Plant ledger lives on the Atom; network
-  ledger is `World::sym_net_flow` keyed by **strain id**. **Strain↔strain**
+  ledgers, potential rates, and bias. Root modules may **cohabit** the same
+  Organic cell as cream (mycorrhizal contact); deep cream of a linked strain
+  reports `via network`, and idle cream under a linked plant says
+  `idle here (plant linked elsewhere)` so the plant and block lines agree.
+  Plant ledger lives on the Atom; network ledger is `World::sym_net_flow`
+  keyed by **strain id**. **Strain↔strain**
   trade: adjacent cream cells with different dominant strains exchange when
   both lineages paint Symbiont and treaties match
   (`World::mycelium_strain_lineage`); wetter gives water, drier pays sugar
