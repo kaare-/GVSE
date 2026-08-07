@@ -126,6 +126,12 @@ fn push_sym_probe(lines: &mut Vec<String>, probe: &wk_voxel::SymProbe) {
     }
 
     if probe.linked {
+        if probe.sugar_banking {
+            lines.push(format!(
+                "sym sugar: banking (repro reserve {:.1})",
+                probe.energy_reserve
+            ));
+        }
         lines.push(format!(
             "sym potential: water<={}/t  energy<={:.2} (~{} sugar/t)",
             probe.water_per_tick, probe.energy_per_tick, probe.sugar_per_tick

@@ -99,8 +99,9 @@ pub use organism::{
     SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
 pub use symbiosis::{
-    body_has_symbiont, probe_cream_link, probe_plant_link, step as step_symbiosis,
-    step_strain_trade, treaty_match, SymBias, SymNetFlow, SymProbe, SymTradeMode, SYM_MATCH_MIN,
+    body_has_symbiont, plant_sym_energy_reserve, plant_sym_sugar_spendable, probe_cream_link,
+    probe_plant_link, step as step_symbiosis, step_strain_trade, treaty_match, SymBias, SymNetFlow,
+    SymProbe, SymTradeMode, SYM_MATCH_MIN, SYM_NET_SUGAR_PAY_RESERVE, SYM_REPRO_RESERVE_FRAC,
 };
 pub use plant::{
     collect_live_photo_world_cells, collect_live_root_world_cells, collect_plant_sail_tops,

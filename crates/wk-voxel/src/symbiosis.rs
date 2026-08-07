@@ -10,6 +10,12 @@
 //! - **Supply** (cream wetter): fungus pore water → plant; plant energy → sugar
 //! - **Harvest** (root wetter): plant pore water → cream; network sugar → plant energy
 //!
+//! Plants keep a **reproduction reserve** ([`SYM_REPRO_RESERVE_FRAC`] of spawn
+//! tank) that supply sugar pay cannot spend — so a wet network cannot hold a
+//! grove at starvation energy and block sprouting. Water gifts still flow when
+//! the plant is banking. Networks leave a small sugar floor when paying plants
+//! or other strains ([`SYM_NET_SUGAR_PAY_RESERVE`]).
+//!
 //! Same-strain cream cells slowly equalize sugar + a trickle of pore water
 //! ([`crate::fungi::equalize_mycelium_cargo`]), so wet-side harvests can feed
 //! dry-side supply.
@@ -28,11 +34,11 @@ use crate::cell::water_capacity;
 use crate::fungi::{
     add_mycelium_energy, ensure_mycelium_strain, lineage_for_strain_at, mycelium_energy_at,
     mycelium_strain_at, nearest_mycelium_lineage, pull_mycelium_cargo_to, take_mycelium_energy,
-    MYCELIUM_CARGO_EQUALIZE_MAX, MYCELIUM_ENERGY_SIP_TO_ATOM,
+    MYCELIUM_CARGO_EQUALIZE_MAX, MYCELIUM_ENERGY_SIP_TO_ATOM, MYCELIUM_PROBE_SUGAR_RESERVE,
 };
 use crate::grid::World;
 use crate::organism::{Atom, BodyModule, ModuleId};
-use crate::plant::is_land_plant;
+use crate::plant::{is_land_plant, tank_ref, LAND_SPROUT_ENERGY_FRAC};
 
 /// Soft cap on strain-keyed network flow ledger entries.
 pub const SYM_NET_FLOW_MAP_MAX: usize = 8_192;
@@ -51,6 +57,11 @@ pub const SYM_STRAIN_CONTACT_BUDGET: usize = 48;
 pub const SYM_BIAS_GAP: u8 = 40;
 /// Minimum cream−root moist-frac gap to pick supply vs harvest.
 pub const SYM_MOIST_DELTA: f32 = 0.10;
+/// Fraction of plant spawn tank that supply sugar trade cannot spend.
+/// Matches rhizome sprout threshold so linked plants can still reproduce.
+pub const SYM_REPRO_RESERVE_FRAC: f32 = LAND_SPROUT_ENERGY_FRAC;
+/// Local network sugar left untouchable when paying plants / other strains.
+pub const SYM_NET_SUGAR_PAY_RESERVE: u8 = MYCELIUM_PROBE_SUGAR_RESERVE;
 
 /// Who the lived deal favours (same vector, lopsided rates).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,6 +167,10 @@ pub struct SymProbe {
     /// Cream inspectors use this so a conduit cell doesn't look "idle" while
     /// the strain is actively linked a few cells away.
     pub via_network: bool,
+    /// Plant energy floor reserved for reproduction (0 when unknown).
+    pub energy_reserve: f32,
+    /// Supply sugar is paused — plant is banking toward the repro reserve.
+    pub sugar_banking: bool,
 }
 
 /// True when the body paints at least one Symbiont organ.
@@ -199,6 +214,34 @@ fn exchange_rates(match_q: f32, w: u8, e: u8) -> (u8, f32, u8) {
         .round()
         .clamp(0.0, 8.0) as u8;
     (water_want, energy_want, sugar)
+}
+
+/// Spawn-tank energy that supply sugar pay must leave untouched.
+pub fn plant_sym_energy_reserve(atom: &Atom) -> f32 {
+    tank_ref(atom) * SYM_REPRO_RESERVE_FRAC
+}
+
+/// Surplus above the repro reserve that may be spent on supply sugar.
+pub fn plant_sym_sugar_spendable(atom: &Atom) -> f32 {
+    (atom.energy - plant_sym_energy_reserve(atom)).max(0.0)
+}
+
+fn apply_plant_reserve_to_probe(probe: &mut SymProbe, atom: &Atom) {
+    let reserve = plant_sym_energy_reserve(atom);
+    probe.energy_reserve = reserve;
+    if probe.linked && probe.trade_mode == SymTradeMode::Supply {
+        let want = probe.energy_per_tick;
+        if want > 0.01 && plant_sym_sugar_spendable(atom) + 1e-4 < want {
+            probe.sugar_banking = true;
+            probe.energy_per_tick = 0.0;
+            probe.sugar_per_tick = 0;
+        }
+    }
+}
+
+/// Local cream sugar available for outbound pay after the network reserve.
+fn cream_sugar_payable(world: &World, gx: i32, gy: i32) -> u8 {
+    mycelium_energy_at(world, gx, gy).saturating_sub(SYM_NET_SUGAR_PAY_RESERVE)
 }
 
 fn cell_moist_frac(world: &World, gx: i32, gy: i32) -> f32 {
@@ -277,6 +320,8 @@ fn build_probe(
         sugar_rev_total,
         strain_id,
         via_network,
+        energy_reserve: 0.0,
+        sugar_banking: false,
     }
 }
 
@@ -506,7 +551,7 @@ pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Opti
         } else {
             SymTradeMode::Supply
         };
-        let probe = build_probe(
+        let mut probe = build_probe(
             touching,
             match_q,
             Some(idx),
@@ -524,6 +569,7 @@ pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Opti
             strain,
             via_network,
         );
+        apply_plant_reserve_to_probe(&mut probe, atom);
         let better = match best {
             None => true,
             Some(b) => {
@@ -567,7 +613,7 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
     let (wl, sl, wt, st, wrl, srl, wrt, srt) = plant_ledger_probe(atom);
     let roots = plant_root_cells(world, atom);
     if roots.is_empty() {
-        return Some(build_probe(
+        let mut probe = build_probe(
             false,
             0.0,
             None,
@@ -584,7 +630,9 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
             srt,
             None,
             false,
-        ));
+        );
+        apply_plant_reserve_to_probe(&mut probe, atom);
+        return Some(probe);
     }
     let mut best: Option<SymProbe> = None;
     for &(rx, ry) in &roots {
@@ -609,7 +657,7 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
             }
             let match_q = treaty_match(atom.genome, lin.genome);
             let mode = trade_mode_at(world, rx, ry, cx, cy);
-            let probe = build_probe(
+            let mut probe = build_probe(
                 true,
                 match_q,
                 None,
@@ -627,6 +675,7 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
                 None,
                 false,
             );
+            apply_plant_reserve_to_probe(&mut probe, atom);
             let better = match best {
                 None => true,
                 Some(b) => {
@@ -639,7 +688,7 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
         }
     }
     best.or_else(|| {
-        Some(build_probe(
+        let mut probe = build_probe(
             false,
             0.0,
             None,
@@ -656,7 +705,9 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
             srt,
             None,
             false,
-        ))
+        );
+        apply_plant_reserve_to_probe(&mut probe, atom);
+        Some(probe)
     })
 }
 
@@ -766,11 +817,6 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
 
                 match mode {
                     SymTradeMode::Supply => {
-                        // Plant must have a little energy to pay.
-                        if atom.energy < 0.5 {
-                            budget = budget.saturating_sub(1);
-                            break;
-                        }
                         // Desert contact: pull water from the wider same-strain
                         // network into the cream tip before gifting.
                         if water_want > 0 {
@@ -802,8 +848,13 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
                             }
                         }
 
+                        // Sugar pay only from surplus above the repro reserve so
+                        // a wet network cannot pin plants at starvation energy.
                         let mut sugar_moved = 0u8;
-                        if sugar_want > 0 && energy_want > 0.01 && atom.energy > energy_want {
+                        if sugar_want > 0
+                            && energy_want > 0.01
+                            && plant_sym_sugar_spendable(atom) + 1e-4 >= energy_want
+                        {
                             atom.energy = (atom.energy - energy_want).max(0.0);
                             add_mycelium_energy(world, cx, cy, sugar_want);
                             sugar_moved = sugar_want;
@@ -840,7 +891,7 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
 
                         let mut sugar_moved = 0u8;
                         if sugar_want > 0 {
-                            let available = mycelium_energy_at(world, cx, cy);
+                            let available = cream_sugar_payable(world, cx, cy);
                             if available < sugar_want {
                                 let _ = pull_mycelium_cargo_to(
                                     world,
@@ -850,7 +901,7 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
                                     0,
                                 );
                             }
-                            let pay = sugar_want.min(mycelium_energy_at(world, cx, cy));
+                            let pay = sugar_want.min(cream_sugar_payable(world, cx, cy));
                             if pay > 0 {
                                 let taken = take_mycelium_energy(world, cx, cy, pay);
                                 atom.energy = (atom.energy
@@ -990,8 +1041,9 @@ pub fn step_strain_trade(world: &mut World, tick: u64) {
 
             let mut sugar_moved = 0u8;
             if sugar_want > 0 {
-                // Paying (drier) strain may pull sugar from its wider network.
-                let available = mycelium_energy_at(world, dry_xy.0, dry_xy.1);
+                // Paying (drier) strain may pull sugar from its wider network,
+                // but keeps a local floor for probes / further trade.
+                let available = cream_sugar_payable(world, dry_xy.0, dry_xy.1);
                 if available < sugar_want {
                     let _ = pull_mycelium_cargo_to(
                         world,
@@ -1001,7 +1053,7 @@ pub fn step_strain_trade(world: &mut World, tick: u64) {
                         0,
                     );
                 }
-                let pay = sugar_want.min(mycelium_energy_at(world, dry_xy.0, dry_xy.1));
+                let pay = sugar_want.min(cream_sugar_payable(world, dry_xy.0, dry_xy.1));
                 if pay > 0 {
                     let taken = take_mycelium_energy(world, dry_xy.0, dry_xy.1, pay);
                     if taken > 0 {
@@ -1108,7 +1160,8 @@ mod tests {
         let mut plant = Atom::from_body(4, 3, 40.0, plant_body);
         plant.genome.sym_water = 200;
         plant.genome.sym_energy = 80;
-        plant.energy = 30.0;
+        // Surplus above repro reserve so sugar pay is allowed.
+        plant.energy = 36.0;
         let cream_sat0 = w.get_cell(4, 1).unwrap().sat.0;
         let root_sat0 = w.get_cell(4, 2).unwrap().sat.0;
         let sugar0 = mycelium_energy_at(&w, 4, 1);
@@ -1127,7 +1180,7 @@ mod tests {
             "plant root bed should receive water"
         );
         assert!(sugar1 > sugar0, "cream should bank plant-paid sugar");
-        assert!(plant.energy < 30.0, "plant should pay energy");
+        assert!(plant.energy < 36.0, "plant should pay energy");
         assert!(
             plant.sym_water_recv_last > 0 || plant.sym_sugar_paid_last > 0,
             "plant should count actual last-tick flow"
@@ -1233,11 +1286,11 @@ mod tests {
         let mut p1 = Atom::from_body(4, 3, 40.0, plant_body.clone());
         p1.genome.sym_water = 200;
         p1.genome.sym_energy = 80;
-        p1.energy = 30.0;
+        p1.energy = 36.0;
         let mut p2 = Atom::from_body(8, 3, 40.0, plant_body);
         p2.genome.sym_water = 200;
         p2.genome.sym_energy = 80;
-        p2.energy = 30.0;
+        p2.energy = 36.0;
 
         let mut plants = [p1, p2];
         step(&mut w, &mut plants, 0);
@@ -1310,6 +1363,102 @@ mod tests {
         let plant_p = probe_plant_link(&w, &plant).expect("symbiont plant");
         assert!(plant_p.linked);
         assert_eq!(plant_p.bias, SymBias::PlantFavoring);
+    }
+
+    #[test]
+    fn supply_skips_sugar_when_plant_below_repro_reserve() {
+        let mut w = moist_bed();
+        let mut fungus_g = Genome::default();
+        fungus_g.sym_water = 200;
+        fungus_g.sym_energy = 80;
+        stamp_mycelium_lineage(
+            &mut w,
+            4,
+            1,
+            fungus_g,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (1, 0, ModuleId::Digest),
+                (2, 0, ModuleId::Symbiont),
+            ],
+        );
+        let mut plant = Atom::from_body(
+            4,
+            3,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Photosystem),
+                (1, -1, ModuleId::Symbiont),
+            ],
+        );
+        plant.genome.sym_water = 200;
+        plant.genome.sym_energy = 80;
+        // Well below 0.72 * 40 = 28.8 reserve — classic "drained by network".
+        plant.energy = 0.5;
+        let sugar0 = mycelium_energy_at(&w, 4, 1);
+        let root_sat0 = w.get_cell(4, 2).unwrap().sat.0;
+
+        step(&mut w, std::slice::from_mut(&mut plant), 0);
+
+        assert_eq!(plant.energy, 0.5, "banking plant must not pay sugar");
+        assert_eq!(
+            mycelium_energy_at(&w, 4, 1),
+            sugar0,
+            "network must not receive sugar from a banking plant"
+        );
+        assert!(
+            w.get_cell(4, 2).unwrap().sat.0 >= root_sat0,
+            "water gift may still arrive while plant banks"
+        );
+        assert_eq!(plant.sym_sugar_paid_total, 0);
+        let probe = probe_plant_link(&w, &plant).expect("symbiont plant");
+        assert!(probe.sugar_banking);
+        assert!(probe.energy_reserve > 20.0);
+        assert_eq!(probe.sugar_per_tick, 0);
+    }
+
+    #[test]
+    fn supply_never_drains_plant_below_repro_reserve() {
+        let mut w = moist_bed();
+        let mut fungus_g = Genome::default();
+        fungus_g.sym_water = 200;
+        fungus_g.sym_energy = 200; // greedy sugar ask
+        stamp_mycelium_lineage(
+            &mut w,
+            4,
+            1,
+            fungus_g,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (1, 0, ModuleId::Digest),
+                (2, 0, ModuleId::Symbiont),
+            ],
+        );
+        let mut plant = Atom::from_body(
+            4,
+            3,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Photosystem),
+                (1, -1, ModuleId::Symbiont),
+            ],
+        );
+        plant.genome.sym_water = 200;
+        plant.genome.sym_energy = 200;
+        plant.energy = 36.0;
+        let reserve = plant_sym_energy_reserve(&plant);
+        for tick in 0..200 {
+            step(&mut w, std::slice::from_mut(&mut plant), tick);
+        }
+        assert!(
+            plant.energy + 1e-3 >= reserve,
+            "after sustained supply, energy {e} must stay at/above reserve {reserve}",
+            e = plant.energy
+        );
     }
 
     #[test]
