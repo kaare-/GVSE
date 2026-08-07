@@ -166,12 +166,15 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   **Organic** thickens into a real colony (shared 255 budget). **Mineral**
   is a cheap search/conduit: soft-capped while seeking, then tapers toward
   a thin connection once it touches threaded Organic (no fat mineral
-  blobs). **Sugar-funded exploration:** virgin mineral probes (esp. dry
+  blobs).   **Sugar-funded exploration:** virgin mineral probes (esp. dry
   rock) cost network sugar scaled by host difficulty — hungry tips cannot
   free-probe hostile terrain, but a large connected bank can pull sugar to
-  a tip and send exploratory hyphae through dry sand/stone. Funded dry
-  corridors fade slowly; broke dry tips fade faster and may disconnect
-  until remoistened/refunded. Compost leaves a residual cream corridor on
+  a tip and send exploratory hyphae through dry sand/stone. Sugar-rich
+  Organic hubs also run occasional explore-only spread rolls (skip further
+  Organic thicken) so they push search hyphae into dry beds below a fed
+  colony instead of painting food forever. Funded dry corridors fade
+  slowly; broke dry tips fade faster and may disconnect until
+  remoistened/refunded. Compost leaves a residual cream corridor on
   Soil **only when the Organic already had cream** — virgin surface
   oxidation must not invent orphan `mycelium=1` soil. Each field pulse
   processes a rotating, frontier-biased sample (perf cap) so dense hubs

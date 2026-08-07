@@ -206,6 +206,13 @@ pub const MYCELIUM_CARGO_PULL_MAX: usize = 48;
 pub const MYCELIUM_STRAIN_LINEAGE_MAX: usize = 512;
 /// Tip sugar reserve targeted before a mineral probe attempt.
 pub const MYCELIUM_PROBE_SUGAR_RESERVE: u8 = 8;
+/// With at least this much tip sugar, occasional spread pulses become
+/// exclusive mineral-search rolls (skip Organic thicken) so large banks
+/// send exploratory hyphae into dry sand/soil below a fed colony.
+pub const MYCELIUM_EXPLORE_SUGAR: u8 = 12;
+/// 1-in-N chance a sugar-rich Organic tip runs an explore-only spread.
+/// Richer tips (≥24 sugar) use half these odds.
+pub const MYCELIUM_EXPLORE_ODDS: u64 = 4;
 /// Sugar left on a donor cell when another tip pulls (keeps hubs alive).
 pub const MYCELIUM_CARGO_SOURCE_RESERVE: u8 = 4;
 /// How deep / wide to scan for Organic substrate under the fungus.
@@ -1864,6 +1871,20 @@ fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
         );
     }
     let src_sugar = mycelium_energy_at(world, gx, gy);
+    // Sugar-rich Organic hubs otherwise only thicken food forever (mineral
+    // "flood" score 18). Occasional explore-only rolls skip Organic targets
+    // so funded networks send search hyphae into dry sand/soil below.
+    let explore_roll = src_on_food
+        && src_sugar >= MYCELIUM_EXPLORE_SUGAR
+        && {
+            let odds = if src_sugar >= 24 {
+                MYCELIUM_EXPLORE_ODDS / 2
+            } else {
+                MYCELIUM_EXPLORE_ODDS
+            }
+            .max(1);
+            hash_u64(world.seed.0, world.tick, gx as u64, 0xE891_7A11u64) % odds == 0
+        };
     // Score neighbours: host cost + food-seek + surface-seek. Pick best.
     // Last u8: sugar toll for this step (0 = free Organic thicken).
     let mut best: Option<(i32, i32, i32, u8, u8, u8)> = None;
@@ -1886,6 +1907,10 @@ fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
             continue;
         }
         let dest_organic = c.material == MaterialId::Organic;
+        // Explore pulse: only mineral search, not more Organic paint.
+        if explore_roll && dest_organic {
+            continue;
+        }
         let dest_cap = if dest_organic {
             255
         } else {
@@ -1947,15 +1972,23 @@ fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
             1
         } else if dy == 0 {
             2
+        } else if explore_roll || (src_sugar >= MYCELIUM_EXPLORE_SUGAR && sugar_cost > 0) {
+            // Funded downward search — less harsh than the default bury cost.
+            2
         } else {
             4
         };
         let organic_bonus = if dest_organic { 0 } else { 5 };
-        // From a fed Organic patch, don't flood mineral sideways — only
-        // probe mineral when it steps toward new food or open air.
+        // From a fed Organic patch, don't flood mineral for free — only probe
+        // toward new food / open air, or when a sugar-funded explore roll
+        // deliberately searches uncolonized mineral (incl. dry beds below).
         let mineral_flood = if src_on_food && !dest_organic {
             if food < src_food || open_air_above(world, nx, ny) {
                 0
+            } else if explore_roll && c.mycelium() == 0 {
+                1
+            } else if src_sugar >= MYCELIUM_EXPLORE_SUGAR && c.mycelium() == 0 && sugar_cost > 0 {
+                6
             } else {
                 18
             }
@@ -3546,6 +3579,43 @@ mod tests {
             w.get_cell(5, 2).unwrap().mycelium(),
             0,
             "broke tip must not free-probe dry stone"
+        );
+    }
+
+    #[test]
+    fn funded_organic_hub_explores_dry_sand_below() {
+        let mut w = litter_plot();
+        // Thick moist Organic colony with banked sugar — adjacent Organic is
+        // already past thicken skip, so only mineral below is open.
+        for x in 3..=5 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(180);
+            org.set_mycelium(80);
+            w.set_cell(x, 3, org);
+        }
+        let s = alloc_mycelium_strain(&mut w);
+        for x in 3..=5 {
+            w.mycelium_strains.insert((x, 3), vec![(s, 80)]);
+        }
+        w.mycelium_energy.insert((4, 3), 40);
+        // Dry sand bed directly under the hub (the "lower dry area").
+        for x in 3..=5 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(0);
+            w.set_cell(x, 2, sand);
+        }
+        let mut hit = false;
+        for t in 0..240u64 {
+            w.tick = t;
+            spread_mycelium_once(&mut w, 4, 3);
+            if (3..=5).any(|x| w.get_cell(x, 2).unwrap().mycelium() > 0) {
+                hit = true;
+                break;
+            }
+        }
+        assert!(
+            hit,
+            "sugar-rich Organic hub should send search hyphae into dry sand below"
         );
     }
 
