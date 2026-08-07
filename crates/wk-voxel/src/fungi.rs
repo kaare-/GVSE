@@ -10,7 +10,8 @@
 //!   Raised by [`try_emergent_fruiting`] from a moist breached network;
 //!   feeds from the field, sheds inoculum, then collapses to litter.
 //! - **Mycelium field** — `Cell::_pad` on porous hosts (Organic food +
-//!   Soil/Sand/Clay/rock corridors). World process [`step_mycelium_field`]
+//!   Soil/Sand/Clay/rock corridors) plus sparse network sugar
+//!   ([`World::mycelium_energy`]). World process [`step_mycelium_field`]
 //!   goal-seeks Organic and the free surface; dry gaps can fade and
 //!   remoisten to reconnect.
 //! - **Two dispersal habits** via [`try_spore`] (both inoculate cream +
@@ -165,6 +166,28 @@ pub const MYCELIUM_MINERAL_TAPER_ODDS: u64 = 6;
 pub const MYCELIUM_LINEAGE_MAX: usize = 512;
 /// Soft cap on per-cell strain ownership entries (overlay map).
 pub const MYCELIUM_STRAIN_MAP_MAX: usize = 8_192;
+/// Soft cap on sparse network-energy map entries.
+pub const MYCELIUM_ENERGY_MAP_MAX: usize = 8_192;
+/// Per-cell network sugar cap (glucose analog).
+pub const MYCELIUM_ENERGY_CAP: u8 = 255;
+/// Base sugar gained on moist colonized Organic each field pulse.
+pub const MYCELIUM_ENERGY_ORGANIC_GAIN: u8 = 1;
+/// Extra sugar per this many cream intensity points on Organic.
+pub const MYCELIUM_ENERGY_GAIN_PER_MYC: u8 = 64;
+/// Soft litter units → network sugar when the field sips without a stalk.
+pub const MYCELIUM_ENERGY_FROM_LITTER: u8 = 3;
+/// 1-in-N litter→sugar sip on moist Organic during the field pulse.
+pub const MYCELIUM_ENERGY_LITTER_ODDS: u64 = 10;
+/// 1-in-N mineral corridor sugar upkeep while moist.
+pub const MYCELIUM_ENERGY_MINERAL_UPKEEP_ODDS: u64 = 20;
+/// Sugar cost to probe a virgin mineral neighbour.
+pub const MYCELIUM_ENERGY_SPREAD_COST: u8 = 1;
+/// Network sugar burned when a fruiting body emerges (best-effort).
+pub const MYCELIUM_EMERGE_ENERGY_COST: u8 = 24;
+/// Atom energy gained per network sugar unit sipped by a stalk.
+pub const MYCELIUM_ENERGY_SIP_TO_ATOM: f32 = 0.12;
+/// Max network sugar a fruiting body may sip per tick.
+pub const MYCELIUM_ENERGY_SIP_MAX: u8 = 4;
 /// How deep / wide to scan for Organic substrate under the fungus.
 const ORGANIC_SCAN_DEPTH: i32 = 8;
 const ORGANIC_SCAN_RADIUS: i32 = 2;
@@ -349,6 +372,82 @@ pub fn mycelium_strain_at(world: &World, gx: i32, gy: i32) -> Option<u32> {
         .map(|(s, _)| *s)
 }
 
+/// Network sugar / glucose analog stored on a colonized cell.
+pub fn mycelium_energy_at(world: &World, gx: i32, gy: i32) -> u8 {
+    let gx = world.wrap_x(gx);
+    world.mycelium_energy.get(&(gx, gy)).copied().unwrap_or(0)
+}
+
+/// Add network sugar (capped). No-ops when the cell has no cream host.
+pub fn add_mycelium_energy(world: &mut World, gx: i32, gy: i32, add: u8) {
+    let gx = world.wrap_x(gx);
+    if add == 0 {
+        return;
+    }
+    let Some(c) = world.get_cell(gx, gy) else {
+        return;
+    };
+    if !hosts_mycelium(c.material) || c.mycelium() == 0 {
+        return;
+    }
+    let map = &mut world.mycelium_energy;
+    if map.len() >= MYCELIUM_ENERGY_MAP_MAX && !map.contains_key(&(gx, gy)) {
+        if let Some(&key) = map.keys().next() {
+            map.remove(&key);
+        }
+    }
+    let e = map.entry((gx, gy)).or_insert(0);
+    *e = (*e).saturating_add(add).min(MYCELIUM_ENERGY_CAP);
+}
+
+/// Take up to `want` network sugar from a cell. Returns amount taken.
+pub fn take_mycelium_energy(world: &mut World, gx: i32, gy: i32, want: u8) -> u8 {
+    let gx = world.wrap_x(gx);
+    if want == 0 {
+        return 0;
+    }
+    let Some(e) = world.mycelium_energy.get_mut(&(gx, gy)) else {
+        return 0;
+    };
+    let taken = (*e).min(want);
+    *e = e.saturating_sub(taken);
+    if *e == 0 {
+        world.mycelium_energy.remove(&(gx, gy));
+    }
+    taken
+}
+
+fn clear_mycelium_energy(world: &mut World, gx: i32, gy: i32) {
+    let gx = world.wrap_x(gx);
+    world.mycelium_energy.remove(&(gx, gy));
+}
+
+/// Sip network sugar from the richest cream cell near `(gx, gy)`.
+pub fn sip_mycelium_energy_near(world: &mut World, gx: i32, gy: i32, want: u8) -> u8 {
+    let gx = world.wrap_x(gx);
+    if want == 0 {
+        return 0;
+    }
+    let mut best: Option<(i32, i32, u8)> = None;
+    for dx in -ORGANIC_SCAN_RADIUS..=ORGANIC_SCAN_RADIUS {
+        let nx = world.wrap_x(gx + dx);
+        for dy in -2..=2 {
+            let ny = gy + dy;
+            let e = mycelium_energy_at(world, nx, ny);
+            if e == 0 {
+                continue;
+            }
+            if best.map(|(_, _, be)| e > be).unwrap_or(true) {
+                best = Some((nx, ny, e));
+            }
+        }
+    }
+    let Some((nx, ny, _)) = best else {
+        return 0;
+    };
+    take_mycelium_energy(world, nx, ny, want.min(MYCELIUM_ENERGY_SIP_MAX))
+}
+
 /// Bright RGB for a strain id (golden-angle hues, full saturation).
 pub fn mycelium_strain_rgb(strain: u32) -> [u8; 3] {
     let h = (strain as f32 * 0.618_033_988_75).fract();
@@ -393,8 +492,8 @@ pub fn mycelium_shares_overlay_rgba(shares: &[(u32, u8)], total: u8) -> [u8; 4] 
     ]
 }
 
-/// Swap per-cell mycelium strain shares (and lineage stamps) when two cells
-/// exchange places. Cream rides in [`Cell::_pad`]; shares are coordinate-keyed
+/// Swap per-cell mycelium meta (strains, lineage, energy) when two cells
+/// exchange places. Cream rides in [`Cell::_pad`]; maps are coordinate-keyed
 /// and must move with the host or the `M` overlay / inspector desync.
 pub fn swap_mycelium_meta(world: &mut World, ax: i32, ay: i32, bx: i32, by: i32) {
     let ax = world.wrap_x(ax);
@@ -432,11 +531,26 @@ pub fn swap_mycelium_meta(world: &mut World, ax: i32, ay: i32, bx: i32, by: i32)
         }
         (None, None) => {}
     }
+    let a_e = world.mycelium_energy.remove(&(ax, ay));
+    let b_e = world.mycelium_energy.remove(&(bx, by));
+    match (a_e, b_e) {
+        (Some(a), Some(b)) => {
+            world.mycelium_energy.insert((ax, ay), b);
+            world.mycelium_energy.insert((bx, by), a);
+        }
+        (Some(a), None) => {
+            world.mycelium_energy.insert((bx, by), a);
+        }
+        (None, Some(b)) => {
+            world.mycelium_energy.insert((ax, ay), b);
+        }
+        (None, None) => {}
+    }
 }
 
 /// Move mycelium meta from one cell to another (erosion / bedload deposit).
 ///
-/// Destination shares are replaced (deposit seats are Air). Source cleared.
+/// Destination meta is replaced (deposit seats are Air). Source cleared.
 pub fn move_mycelium_meta(
     world: &mut World,
     from_x: i32,
@@ -460,6 +574,13 @@ pub fn move_mycelium_meta(
     world.mycelium_lineage.cells.remove(&(to_x, to_y));
     if let Some(l) = lin {
         world.mycelium_lineage.cells.insert((to_x, to_y), l);
+    }
+    let energy = world.mycelium_energy.remove(&(from_x, from_y));
+    world.mycelium_energy.remove(&(to_x, to_y));
+    if let Some(e) = energy {
+        if e > 0 {
+            world.mycelium_energy.insert((to_x, to_y), e);
+        }
     }
 }
 
@@ -509,6 +630,7 @@ fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
 fn clear_mycelium_shares(world: &mut World, gx: i32, gy: i32) {
     let gx = world.wrap_x(gx);
     world.mycelium_strains.remove(&(gx, gy));
+    clear_mycelium_energy(world, gx, gy);
 }
 
 fn sync_cell_mycelium_from_shares(world: &mut World, gx: i32, gy: i32) {
@@ -526,6 +648,11 @@ fn sync_cell_mycelium_from_shares(world: &mut World, gx: i32, gy: i32) {
         if hosts_mycelium(c.material) {
             c.set_mycelium(total as u8);
             world.set_cell(gx, gy, c);
+            if total == 0 {
+                clear_mycelium_energy(world, gx, gy);
+            }
+        } else {
+            clear_mycelium_energy(world, gx, gy);
         }
     }
 }
@@ -958,6 +1085,16 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
                         spreads.push((gx, gy));
                     }
                 }
+                // Bank network sugar from the Organic bed (+ occasional litter).
+                let gain = MYCELIUM_ENERGY_ORGANIC_GAIN
+                    .saturating_add(myc / MYCELIUM_ENERGY_GAIN_PER_MYC.max(1));
+                add_mycelium_energy(world, gx, gy, gain);
+                let h_lit = hash_u64(seed, tick, gx as u64, 0x51AAu64 ^ (i as u64));
+                if h_lit % MYCELIUM_ENERGY_LITTER_ODDS == 0 && soft_litter_at(world, gx) > 0 {
+                    if take_soft_litter(world, gx, 1) > 0 {
+                        add_mycelium_energy(world, gx, gy, MYCELIUM_ENERGY_FROM_LITTER);
+                    }
+                }
                 if myc >= threshold {
                     let h = hash_u64(seed, tick, gx as u64, 0x5011u64);
                     if h % convert_odds == 0 {
@@ -967,6 +1104,13 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
             } else {
                 // Mineral: thin search front → conduit once Organic is found.
                 let fed = mineral_reached_food(world, gx, gy);
+                // Corridor upkeep — sugar keeps the mineral thread cheap to hold.
+                if mycelium_energy_at(world, gx, gy) > 0 {
+                    let h_u = hash_u64(seed, tick, gx as u64, 0x590Du64);
+                    if h_u % MYCELIUM_ENERGY_MINERAL_UPKEEP_ODDS == 0 {
+                        let _ = take_mycelium_energy(world, gx, gy, 1);
+                    }
+                }
                 if fed && myc > MYCELIUM_MINERAL_CONDUIT {
                     // Fat leftovers reabsorb quickly; near-conduit shaves slowly.
                     let odds = if myc > MYCELIUM_MINERAL_CONDUIT.saturating_add(8) {
@@ -1311,8 +1455,10 @@ fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
         .map(|c| c.material)
         .unwrap_or(MaterialId::Air);
     let src_on_food = src_mat == MaterialId::Organic;
+    let src_sugar = mycelium_energy_at(world, gx, gy);
     // Score neighbours: host cost + food-seek + surface-seek. Pick best.
-    let mut best: Option<(i32, i32, i32, u8, u8)> = None; // score, x, y, add, cap
+    // Last bool: charge spread sugar (virgin mineral probe).
+    let mut best: Option<(i32, i32, i32, u8, u8, bool)> = None;
     for (dx, dy) in [
         (0i32, 1),
         (1, 1),
@@ -1350,6 +1496,11 @@ fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
         {
             continue;
         }
+        // Virgin mineral probes spend sugar when the source can afford it.
+        // Hungry (0-sugar) fronts may still seek for free.
+        let charge = !dest_organic
+            && c.mycelium() == 0
+            && src_sugar >= MYCELIUM_ENERGY_SPREAD_COST;
         let moist = organic_cell_moist_frac(world, nx, ny);
         let Some(host_cost) = mycelium_host_cost(c.material, moist) else {
             continue;
@@ -1393,11 +1544,14 @@ fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
         let score =
             host_cost as i32 + toward_food + climb + organic_bonus + mineral_flood;
         let add = if dest_organic { 8 } else { 4 };
-        if best.map(|(bs, _, _, _, _)| score < bs).unwrap_or(true) {
-            best = Some((score, nx, ny, add, dest_cap));
+        if best.map(|(bs, _, _, _, _, _)| score < bs).unwrap_or(true) {
+            best = Some((score, nx, ny, add, dest_cap, charge));
         }
     }
-    if let Some((_, nx, ny, add, cap)) = best {
+    if let Some((_, nx, ny, add, cap, charge)) = best {
+        if charge {
+            let _ = take_mycelium_energy(world, gx, gy, MYCELIUM_ENERGY_SPREAD_COST);
+        }
         let strain = Some(ensure_mycelium_strain(world, gx, gy));
         add_mycelium_with_strain(world, nx, ny, add, strain, cap);
     }
@@ -1654,6 +1808,12 @@ pub fn infect_mycelium_with_lineage(
             ((add / 2).max(4), MYCELIUM_MINERAL_CAP)
         };
         add_mycelium_with_strain(world, ox, y, add, Some(strain), cap);
+        // Starter sugar so new inoculum can afford mineral probes soon.
+        if c.material == MaterialId::Organic {
+            add_mycelium_energy(world, ox, y, 12);
+        } else {
+            add_mycelium_energy(world, ox, y, 4);
+        }
         hit = true;
     }
     if hit {
@@ -1735,12 +1895,13 @@ pub fn try_emergent_fruiting(
     if h % MYCELIUM_EMERGE_ODDS != 0 {
         return None;
     }
-    // Spend field intensity — fruiting costs the network (all shares).
+    // Spend field intensity + banked sugar — fruiting costs the network.
     if world
         .get_cell(gx, air_y - 1)
         .is_some_and(|c| hosts_mycelium(c.material) && c.mycelium() > 0)
     {
         reduce_mycelium_shares(world, gx, air_y - 1, MYCELIUM_EMERGE_COST);
+        let _ = take_mycelium_energy(world, gx, air_y - 1, MYCELIUM_EMERGE_ENERGY_COST);
     }
     // Prefer stamped editor / spore lineage; fall back to the stock template.
     let (body, genome) = if let Some(lin) = nearest_mycelium_lineage(world, gx, air_y - 1) {
@@ -2750,6 +2911,56 @@ mod tests {
             }
         }
         assert!(saw_soil, "low-odds FungiConfig must compost Organic → Soil");
+    }
+
+    #[test]
+    fn organic_field_banks_network_sugar() {
+        let mut w = litter_plot();
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(200);
+        org.set_mycelium(40);
+        w.set_cell(4, 2, org);
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(s, 40)]);
+        for t in 0..12u64 {
+            w.tick = t * MYCELIUM_FIELD_PERIOD;
+            step_mycelium_field(&mut w);
+        }
+        assert!(
+            mycelium_energy_at(&w, 4, 2) >= 8,
+            "moist Organic cream should bank network sugar"
+        );
+    }
+
+    #[test]
+    fn network_sugar_moves_with_cell_swap() {
+        let mut w = litter_plot();
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(160);
+        sand.set_mycelium(20);
+        w.set_cell(4, 2, sand);
+        w.set_cell(5, 2, Cell::air());
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(s, 20)]);
+        w.mycelium_energy.insert((4, 2), 40);
+        swap_cells_preserving_mycelium(&mut w, 4, 2, 5, 2);
+        assert_eq!(mycelium_energy_at(&w, 5, 2), 40);
+        assert_eq!(mycelium_energy_at(&w, 4, 2), 0);
+    }
+
+    #[test]
+    fn fruiting_body_can_sip_network_sugar() {
+        let mut w = litter_plot();
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(200);
+        org.set_mycelium(80);
+        w.set_cell(4, 2, org);
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(s, 80)]);
+        w.mycelium_energy.insert((4, 2), 50);
+        let taken = sip_mycelium_energy_near(&mut w, 4, 3, MYCELIUM_ENERGY_SIP_MAX);
+        assert_eq!(taken, MYCELIUM_ENERGY_SIP_MAX);
+        assert_eq!(mycelium_energy_at(&w, 4, 2), 50 - MYCELIUM_ENERGY_SIP_MAX);
     }
 
     #[test]

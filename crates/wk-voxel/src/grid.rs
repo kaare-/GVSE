@@ -61,6 +61,10 @@ pub struct World {
     /// Next strain id to mint on inoculum (wraps; 0 reserved / unused).
     #[serde(default)]
     pub next_mycelium_strain_id: u32,
+    /// Sparse network sugar / glucose analog on colonized cells (0..=255).
+    /// Cleared when cream hits 0; migrates with grain/raft moves.
+    #[serde(default)]
+    pub mycelium_energy: HashMap<(i32, i32), u8>,
 }
 
 impl World {
@@ -76,6 +80,7 @@ impl World {
             mycelium_lineage: crate::fungi::MyceliumLineageMap::default(),
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
+            mycelium_energy: HashMap::new(),
         }
     }
 

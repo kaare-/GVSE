@@ -112,6 +112,10 @@ pub fn draw_block_inspector(
                         lines.push(format!("  strain {sid}: {amt}/255"));
                     }
                 }
+                let sugar = wk_voxel::mycelium_energy_at(world, gx, gy);
+                if sugar > 0 {
+                    lines.push(format!("network sugar={sugar}/255"));
+                }
             }
         }
         None => lines.push("cell: (empty / unstamped)".into()),
@@ -164,8 +168,10 @@ pub fn draw_block_inspector(
                 "habit=fruiting body (emerged stalk; mycelium = cream on Organic + mineral corridors)".into(),
             );
             let myc = wk_voxel::max_mycelium_near(world, atom.gx, atom.gy);
+            let sugar = wk_voxel::mycelium_energy_at(world, atom.gx, atom.gy - 1)
+                .max(wk_voxel::mycelium_energy_at(world, atom.gx, atom.gy));
             lines.push(format!(
-                "digest_rate={:.2}  drought_ticks={}  field_myc={myc}/255",
+                "digest_rate={:.2}  drought_ticks={}  field_myc={myc}/255  net_sugar={sugar}/255",
                 atom.genome.digest_rate, atom.drought_ticks
             ));
             let digests = atom

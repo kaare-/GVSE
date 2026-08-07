@@ -173,6 +173,12 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   rotating, frontier-biased sample (perf cap) so dense hubs cannot
   permanently starve climb / food-seeking fronts.
   Renderer: faint cream threads (stronger on Organic).
+- **Network sugar** — sparse `World::mycelium_energy` (0..=255 per cream
+  cell): a glucose analog banked on moist Organic (and occasional soft
+  litter sips). Mineral corridors pay light upkeep; virgin mineral probes
+  spend sugar when available. Fruiting bodies sip nearby sugar into
+  `Atom.energy`; emergence burns cream + sugar. Migrates with grain/raft
+  moves. Foundation for later symbiotic plant↔fungus exchange.
 - **Multi-strain shares** — a cell’s 255 cream budget is shared. Each
   inoculum mints a strain id; several strains can hold intensity on the
   same block (`strain A 40/255`, `strain B 60/255`, …; `_pad` = sum).

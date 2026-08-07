@@ -1791,8 +1791,17 @@ fn step_fungus(
             tick,
             fungi_cfg,
         );
-        atom.energy =
-            (atom.energy + from_litter + from_organic + from_myc).min(atom.energy_max);
+        // Draw banked network sugar into the stalk (glucose analog).
+        let net_units = crate::fungi::sip_mycelium_energy_near(
+            world,
+            atom.gx,
+            atom.gy,
+            crate::fungi::MYCELIUM_ENERGY_SIP_MAX,
+        );
+        let from_net =
+            net_units as f32 * crate::fungi::MYCELIUM_ENERGY_SIP_TO_ATOM;
+        atom.energy = (atom.energy + from_litter + from_organic + from_myc + from_net)
+            .min(atom.energy_max);
     }
 
     atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);

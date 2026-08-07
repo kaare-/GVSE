@@ -175,14 +175,15 @@ Features:
   pixels). Plant stamps cream **and** a lineage so later stalks match the
   painted mushroom (mutated on spore release).
 - **Mycelium is a ground field** (`Cell::_pad` on Organic + mineral
-  corridors: moist Soil/Sand easy, rock hard). Goal-seeks Organic and the
-  free surface; Organic colonies thicken, mineral stays a thin search /
-  conduit that tapers after food is found; dry fade disconnects, remoisten
+  corridors: moist Soil/Sand easy, rock hard) plus sparse **network sugar**
+  (`mycelium_energy`). Goal-seeks Organic and the free surface; Organic
+  colonies thicken and bank sugar, mineral stays a thin search / conduit
+  that tapers after food is found; dry fade disconnects, remoisten
   reconnects; compost leaves residual cream on Soil (square Soil patches =
   per-cell humify). Press **`M`** for a bright per-strain overlay (cells
   may host several strains sharing the 255 cream budget; thin climb paths
-  stay neon, and cream-bearing grains carry their strain shares when they
-  move).
+  stay neon, and cream-bearing grains carry their strain shares / sugar
+  when they move).
 - Networks that **breach the surface from below** emerge a **surface stalk**
   from the nearest lineage (else `minimal_fungus`). Stalks wind-disperse
   mutated spores far; rhizomorph hops stay local.

@@ -43,7 +43,8 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// mycelium cream on porous mineral hosts (Soil/Sand/…).
 /// v7: [`World::mycelium_strains`] per-cell strain ids for overlay colors.
 /// v8: mycelium_strains become multi-share lists `(strain, intensity)`.
-pub const SIM_SCHEMA_VERSION: u32 = 8;
+/// v9: [`World::mycelium_energy`] sparse network sugar / glucose analog.
+pub const SIM_SCHEMA_VERSION: u32 = 9;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,6 +90,7 @@ impl WorldV5 {
             mycelium_lineage: crate::fungi::MyceliumLineageMap::default(),
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
+            mycelium_energy: HashMap::new(),
         }
     }
 }
@@ -123,6 +125,7 @@ impl WorldV6 {
             mycelium_lineage: self.mycelium_lineage,
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
+            mycelium_energy: HashMap::new(),
         }
     }
 }
@@ -162,6 +165,7 @@ impl WorldV7 {
             mycelium_lineage: self.mycelium_lineage,
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
+            mycelium_energy: HashMap::new(),
         };
         // Promote sole ownership → one share matching current `_pad`.
         for ((gx, gy), strain) in sole {
@@ -176,6 +180,60 @@ impl WorldV7 {
         }
         world
     }
+}
+
+/// Pre-v9 world (strains, no network energy map).
+#[derive(Debug, Clone, Deserialize)]
+struct WorldV8 {
+    seed: WorldSeed,
+    chunks: HashMap<ChunkCoord, Chunk>,
+    tick: u64,
+    wrap_width: Option<i32>,
+    #[serde(default)]
+    soft_litter: HashMap<i32, u16>,
+    #[serde(default)]
+    spore_bank: crate::spore_bank::SporeBank,
+    #[serde(default)]
+    hydro: HydroOverrides,
+    #[serde(default)]
+    mycelium_lineage: crate::fungi::MyceliumLineageMap,
+    #[serde(default)]
+    mycelium_strains: HashMap<(i32, i32), Vec<(u32, u8)>>,
+    #[serde(default)]
+    next_mycelium_strain_id: u32,
+}
+
+impl WorldV8 {
+    fn into_world(self) -> World {
+        World {
+            seed: self.seed,
+            chunks: self.chunks,
+            tick: self.tick,
+            wrap_width: self.wrap_width,
+            soft_litter: self.soft_litter,
+            spore_bank: self.spore_bank,
+            hydro: self.hydro,
+            mycelium_lineage: self.mycelium_lineage,
+            mycelium_strains: self.mycelium_strains,
+            next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
+            mycelium_energy: HashMap::new(),
+        }
+    }
+}
+
+/// Pre-v9 postcard (no mycelium_energy).
+#[derive(Debug, Clone, Deserialize)]
+struct SimSnapshotV8 {
+    schema_version: u32,
+    params: WorldgenParams,
+    world: WorldV8,
+    humidity: Humidity,
+    wind: Wind,
+    temperature: Temperature,
+    clouds: CloudStore,
+    organisms: OrganismStore,
+    #[serde(default)]
+    carbon: CarbonBudget,
 }
 
 /// Pre-v8 postcard (single strain id per cell).
@@ -265,7 +323,7 @@ impl SimSnapshot {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        // Prefer current schema; fall back v7 → v6 → v5 → v4.
+        // Prefer current schema; fall back v8 → v7 → v6 → v5 → v4.
         match postcard::from_bytes::<Self>(bytes) {
             Ok(snap) => {
                 if snap.schema_version > SIM_SCHEMA_VERSION {
@@ -276,7 +334,7 @@ impl SimSnapshot {
                 }
                 Ok(snap)
             }
-            Err(_) => match postcard::from_bytes::<SimSnapshotV7>(bytes) {
+            Err(_) => match postcard::from_bytes::<SimSnapshotV8>(bytes) {
                 Ok(old) => Ok(Self {
                     schema_version: SIM_SCHEMA_VERSION,
                     params: old.params,
@@ -288,7 +346,7 @@ impl SimSnapshot {
                     organisms: old.organisms,
                     carbon: old.carbon,
                 }),
-                Err(_) => match postcard::from_bytes::<SimSnapshotV6>(bytes) {
+                Err(_) => match postcard::from_bytes::<SimSnapshotV7>(bytes) {
                     Ok(old) => Ok(Self {
                         schema_version: SIM_SCHEMA_VERSION,
                         params: old.params,
@@ -300,7 +358,7 @@ impl SimSnapshot {
                         organisms: old.organisms,
                         carbon: old.carbon,
                     }),
-                    Err(_) => match postcard::from_bytes::<SimSnapshotV5>(bytes) {
+                    Err(_) => match postcard::from_bytes::<SimSnapshotV6>(bytes) {
                         Ok(old) => Ok(Self {
                             schema_version: SIM_SCHEMA_VERSION,
                             params: old.params,
@@ -312,10 +370,8 @@ impl SimSnapshot {
                             organisms: old.organisms,
                             carbon: old.carbon,
                         }),
-                        Err(_) => {
-                            let old: SimSnapshotV4 =
-                                postcard::from_bytes(bytes).map_err(|e| e.to_string())?;
-                            Ok(Self {
+                        Err(_) => match postcard::from_bytes::<SimSnapshotV5>(bytes) {
+                            Ok(old) => Ok(Self {
                                 schema_version: SIM_SCHEMA_VERSION,
                                 params: old.params,
                                 world: old.world.into_world(),
@@ -324,9 +380,24 @@ impl SimSnapshot {
                                 temperature: old.temperature,
                                 clouds: old.clouds,
                                 organisms: old.organisms,
-                                carbon: CarbonBudget::default(),
-                            })
-                        }
+                                carbon: old.carbon,
+                            }),
+                            Err(_) => {
+                                let old: SimSnapshotV4 =
+                                    postcard::from_bytes(bytes).map_err(|e| e.to_string())?;
+                                Ok(Self {
+                                    schema_version: SIM_SCHEMA_VERSION,
+                                    params: old.params,
+                                    world: old.world.into_world(),
+                                    humidity: old.humidity,
+                                    wind: old.wind,
+                                    temperature: old.temperature,
+                                    clouds: old.clouds,
+                                    organisms: old.organisms,
+                                    carbon: CarbonBudget::default(),
+                                })
+                            }
+                        },
                     },
                 },
             },
