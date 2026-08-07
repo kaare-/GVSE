@@ -258,7 +258,7 @@ fn body_still_valid_habit(habit: BodyHabit, body: &[(i16, i16, ModuleId)]) -> bo
 }
 
 /// Re-attach one [`ModuleId::Symbiont`] when the parent opted in but the
-/// child blueprint lost it (juvenile shrink, morphological mutation, etc.).
+/// child blueprint lost it (morphological mutation, collision dedupe, etc.).
 ///
 /// Symbiosis is an opt-in organ — losing it on every spore/sprout would make
 /// the trait dead-end after one generation.
