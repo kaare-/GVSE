@@ -116,6 +116,16 @@ pub fn draw_block_inspector(
                 if sugar > 0 {
                     lines.push(format!("network sugar={sugar}/255"));
                 }
+                // Field cream carries lineage from inoculum — show treaty when
+                // the network painted Symbiont (same readout as living plants).
+                if let Some(lin) = wk_voxel::nearest_mycelium_lineage(world, gx, gy) {
+                    if wk_voxel::body_has_symbiont(&lin.body) {
+                        lines.push(format!(
+                            "symbiont treaty W={} E={}",
+                            lin.genome.sym_water, lin.genome.sym_energy
+                        ));
+                    }
+                }
             }
         }
         None => lines.push("cell: (empty / unstamped)".into()),
