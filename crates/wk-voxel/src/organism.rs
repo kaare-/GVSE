@@ -143,6 +143,8 @@ pub enum ModuleId {
     Stem = 0x0E,
     /// Lilac — wind-borne spore / seed packet (ferns, fruiting bodies).
     ReproSpore = 0x10,
+    /// Mint — opt-in plant↔fungus symbiosis organ (treaty on Genome).
+    Symbiont = 0x16,
 }
 
 /// Bright Photosystem green (full light) — `docs/organism/PALETTE.md`.
@@ -162,6 +164,7 @@ impl ModuleId {
             ModuleId::Root => (0x7A, 0x4B, 0x2A),
             ModuleId::Stem => (0x55, 0x6B, 0x2F),
             ModuleId::ReproSpore => (0xD0, 0xB0, 0xFF),
+            ModuleId::Symbiont => (0x3D, 0xBE, 0x9A),
         }
     }
 
@@ -191,6 +194,7 @@ impl ModuleId {
             ModuleId::Root => "Root",
             ModuleId::Stem => "Stem",
             ModuleId::ReproSpore => "ReproSpore",
+            ModuleId::Symbiont => "Symbiont",
         }
     }
 }
@@ -249,6 +253,30 @@ pub struct Atom {
     /// Body-local cells grown after tipping; drawn upright (new shoots).
     #[serde(default)]
     pub upright_growth: Vec<(i16, i16)>,
+    /// Symbiont supply: pore-sat units received from cream (lifetime).
+    #[serde(default)]
+    pub sym_water_recv_total: u32,
+    /// Symbiont supply: network-sugar units paid to cream (lifetime).
+    #[serde(default)]
+    pub sym_sugar_paid_total: u32,
+    /// Symbiont harvest: pore-sat units sent to cream (lifetime).
+    #[serde(default)]
+    pub sym_water_sent_total: u32,
+    /// Symbiont harvest: network-sugar units received as energy (lifetime).
+    #[serde(default)]
+    pub sym_sugar_recv_total: u32,
+    /// Symbiont supply: water received on the latest organism tick.
+    #[serde(default)]
+    pub sym_water_recv_last: u8,
+    /// Symbiont supply: sugar paid on the latest organism tick.
+    #[serde(default)]
+    pub sym_sugar_paid_last: u8,
+    /// Symbiont harvest: water sent on the latest organism tick.
+    #[serde(default)]
+    pub sym_water_sent_last: u8,
+    /// Symbiont harvest: sugar received on the latest organism tick.
+    #[serde(default)]
+    pub sym_sugar_recv_last: u8,
 }
 
 impl Atom {
@@ -277,6 +305,14 @@ impl Atom {
             leaf_starve: Vec::new(),
             fallen: false,
             upright_growth: Vec::new(),
+            sym_water_recv_total: 0,
+            sym_sugar_paid_total: 0,
+            sym_water_sent_total: 0,
+            sym_sugar_recv_total: 0,
+            sym_water_recv_last: 0,
+            sym_sugar_paid_last: 0,
+            sym_water_sent_last: 0,
+            sym_sugar_recv_last: 0,
         }
     }
 
@@ -1095,6 +1131,8 @@ impl OrganismStore {
         }
         let _ = fungus_cols_now;
         resolve_contacts(world, &mut self.atoms);
+        // Opt-in Symbiont treaty exchange (root ↔ cream) after metabolism.
+        crate::symbiosis::step(world, &mut self.atoms, tick);
         self.step_corpses(world, tick, wind_vx);
 
         // Return drunk pore sat to atmospheric humidity (mass conservation).
@@ -1791,8 +1829,17 @@ fn step_fungus(
             tick,
             fungi_cfg,
         );
-        atom.energy =
-            (atom.energy + from_litter + from_organic + from_myc).min(atom.energy_max);
+        // Draw banked network sugar into the stalk (glucose analog).
+        let net_units = crate::fungi::sip_mycelium_energy_near(
+            world,
+            atom.gx,
+            atom.gy,
+            crate::fungi::MYCELIUM_ENERGY_SIP_MAX,
+        );
+        let from_net =
+            net_units as f32 * crate::fungi::MYCELIUM_ENERGY_SIP_TO_ATOM;
+        atom.energy = (atom.energy + from_litter + from_organic + from_myc + from_net)
+            .min(atom.energy_max);
     }
 
     atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);
@@ -2184,7 +2231,11 @@ fn clamp_fallen_body_extent(
     }
     // Clamp leftover roots that still stick past the cap.
     body.retain(|&(dx, _, m)| {
-        m == ModuleId::Nucleus || !over(dx) || m == ModuleId::Digest || m == ModuleId::Hypha
+        m == ModuleId::Nucleus
+            || !over(dx)
+            || m == ModuleId::Digest
+            || m == ModuleId::Hypha
+            || m == ModuleId::Symbiont
     });
     if !body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
         body.insert(0, (0, 0, ModuleId::Nucleus));
@@ -2202,14 +2253,17 @@ fn terrain_occludes_module(mid: ModuleId, mat: MaterialId) -> bool {
     }
     !matches!(
         mid,
-        ModuleId::Root | ModuleId::Digest | ModuleId::Hypha
+        ModuleId::Root | ModuleId::Digest | ModuleId::Hypha | ModuleId::Symbiont
     )
 }
 
 /// Soft/rigid tip pose past the waterline cap — skip rather than pile.
 fn fallen_pose_past_extent(mid: ModuleId, dx: i16) -> bool {
     if mid == ModuleId::Nucleus
-        || matches!(mid, ModuleId::Root | ModuleId::Digest | ModuleId::Hypha)
+        || matches!(
+            mid,
+            ModuleId::Root | ModuleId::Digest | ModuleId::Hypha | ModuleId::Symbiont
+        )
     {
         return false;
     }
@@ -2252,7 +2306,10 @@ fn prune_fallen_body_in_solid(
     }
     body.retain(|&(dx, dy, m)| {
         if m == ModuleId::Nucleus
-            || matches!(m, ModuleId::Root | ModuleId::Digest | ModuleId::Hypha)
+            || matches!(
+                m,
+                ModuleId::Root | ModuleId::Digest | ModuleId::Hypha | ModuleId::Symbiont
+            )
         {
             return true;
         }

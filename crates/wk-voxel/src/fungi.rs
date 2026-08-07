@@ -3,28 +3,34 @@
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
 //! Fungi split (Set E):
-//! - **Mycelium infection** — editor / spore "plant" drops cream on Organic
-//!   ([`infect_mycelium_at`]); no visible fruiting body until the network
-//!   is rich enough to emerge.
+//! - **Mycelium infection** — editor / spore "plant" drops cream
+//!   ([`infect_mycelium_at`]) and stamps a [`MyceliumLineage`] so later
+//!   stalks match the painted (or mutated) fruiting body.
 //! - **Fruiting body** — temporary Atom (Digest / Hypha / ReproSpore).
 //!   Raised by [`try_emergent_fruiting`] from a moist breached network;
 //!   feeds from the field, sheds inoculum, then collapses to litter.
-//! - **Mycelium field** — `Cell::_pad` intensity on Organic. World process
-//!   ([`step_mycelium_field`]); keeps spreading in moist Organic after the
-//!   stalk dies. Threads climb toward free Air.
-//! - **Two dispersal habits** via [`try_spore`] (both inoculate cream):
+//! - **Mycelium field** — `Cell::_pad` on porous hosts (Organic food +
+//!   Soil/Sand/Clay/rock corridors) plus sparse network sugar
+//!   ([`World::mycelium_energy`]). World process [`step_mycelium_field`]
+//!   goal-seeks Organic and the free surface; dry gaps can fade and
+//!   remoisten to reconnect.
+//! - **Two dispersal habits** via [`try_spore`] (both inoculate cream +
+//!   mutate lineage on release):
 //!   - *Underground* — short rhizomorph hops (no wind; stalk stays alive).
-//!   - *Surface stalk* — wind-borne inoculum; spent stalk collapses.
+//!   - *Surface stalk* — wind-borne inoculum far; spent stalk collapses.
 //! Soft litter is bonus fuel. Long colonization may compost Organic → Soil
-//! (never Sand). Spec: `docs/organism/FUNGI.md`, `docs/organism/VOXEL_PLANTS.md`.
+//! (never Sand), leaving a residual cream corridor. Spec:
+//! `docs/organism/FUNGI.md`, `docs/organism/VOXEL_PLANTS.md`.
+
+use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
-use crate::blueprint::Genome;
-use crate::cell::{water_capacity, Cell, CellFlags};
+use crate::blueprint::{mutate_body, Genome};
+use crate::cell::{hosts_mycelium, water_capacity, Cell, CellFlags};
 use crate::grid::World;
-use crate::organism::{Atom, ModuleId};
+use crate::organism::{Atom, BodyModule, ModuleId};
 use crate::plant::{apply_genome, find_fungus_slot_biased, pin_plant_pose};
 
 /// Live Tab knobs for mycelium compost (Organic → Soil).
@@ -81,7 +87,11 @@ pub const MYCELIUM_FIELD_GROW: u8 = 1;
 /// 1-in-N chance a moist colonized cell seeds a neighbour Organic.
 pub const MYCELIUM_FIELD_SPREAD_ODDS: u64 = 20;
 /// Max colonized cells processed per field pulse (perf cap).
-pub const MYCELIUM_FIELD_MAX_CELLS: usize = 256;
+///
+/// Old value (256) + fixed scan order let dense hubs monopolize every
+/// pulse so moist frontiers looked "stalled" forever. We now scan all
+/// cream cells, then pick a rotating frontier-biased sample.
+pub const MYCELIUM_FIELD_MAX_CELLS: usize = 768;
 /// Pore / film moisture below which field growth pauses (slow decay).
 pub const MYCELIUM_FIELD_MOIST: f32 = 0.04;
 /// Ticks between mycelium-field → fruiting-body emergence attempts.
@@ -123,8 +133,8 @@ pub const FUNGUS_SPORE_ENERGY_FRAC: f32 = 0.70;
 /// Minimum ticks between fruiting attempts (very rare).
 pub const FUNGUS_SPORE_PERIOD: u64 = 2_400;
 /// Min / max columns a *surface stalk* wind spore may travel.
-pub const FUNGUS_STALK_SPORE_MIN_DIST: i32 = 6;
-pub const FUNGUS_STALK_SPORE_MAX_DIST: i32 = 36;
+pub const FUNGUS_STALK_SPORE_MIN_DIST: i32 = 8;
+pub const FUNGUS_STALK_SPORE_MAX_DIST: i32 = 72;
 /// Max columns an *underground* rhizomorph hop may travel (local only).
 pub const FUNGUS_RHIZOMORPH_MAX_DIST: i32 = 5;
 /// Legacy alias — stalk wind ceiling (HUD / settings may still refer).
@@ -140,9 +150,84 @@ pub const FRUIT_SUPPORT_MIN_AGE: u64 = 480;
 pub const DEATH_LITTER_PER_MODULE: u16 = 6;
 /// Cap soft litter added from one corpse.
 pub const DEATH_LITTER_MAX: u16 = 48;
+/// Cream left on the new Soil cell after Organic compost — keeps a
+/// mineral corridor so networks can reconnect instead of hard-severing.
+pub const MYCELIUM_COMPOST_RESIDUAL: u8 = 12;
+/// Soft cream cap on mineral hosts while *seeking* Organic / surface.
+/// Mineral is a search corridor, not a colony — keep it thin.
+pub const MYCELIUM_MINERAL_CAP: u8 = 28;
+/// After a mineral cell touches threaded Organic, taper cream toward this
+/// conduit thickness (cheaper than keeping a fat mineral blob).
+pub const MYCELIUM_MINERAL_CONDUIT: u8 = 12;
+/// 1-in-N chance per field pulse to shave one unit off an over-thick
+/// mineral conduit that has already found food.
+pub const MYCELIUM_MINERAL_TAPER_ODDS: u64 = 6;
+/// Soft cap on stamped lineage cells (editor / spores).
+pub const MYCELIUM_LINEAGE_MAX: usize = 512;
+/// Soft cap on per-cell strain ownership entries (overlay map).
+pub const MYCELIUM_STRAIN_MAP_MAX: usize = 8_192;
+/// Soft cap on sparse network-energy map entries.
+pub const MYCELIUM_ENERGY_MAP_MAX: usize = 8_192;
+/// Per-cell network sugar cap (glucose analog).
+pub const MYCELIUM_ENERGY_CAP: u8 = 255;
+/// Base sugar gained on moist colonized Organic each field pulse.
+pub const MYCELIUM_ENERGY_ORGANIC_GAIN: u8 = 1;
+/// Extra sugar per this many cream intensity points on Organic.
+pub const MYCELIUM_ENERGY_GAIN_PER_MYC: u8 = 64;
+/// Soft litter units → network sugar when the field sips without a stalk.
+pub const MYCELIUM_ENERGY_FROM_LITTER: u8 = 3;
+/// 1-in-N litter→sugar sip on moist Organic during the field pulse.
+pub const MYCELIUM_ENERGY_LITTER_ODDS: u64 = 10;
+/// 1-in-N mineral corridor sugar upkeep while moist.
+pub const MYCELIUM_ENERGY_MINERAL_UPKEEP_ODDS: u64 = 20;
+/// Sugar cost to probe a virgin mineral neighbour.
+pub const MYCELIUM_ENERGY_SPREAD_COST: u8 = 1;
+/// Network sugar burned when a fruiting body emerges (best-effort).
+pub const MYCELIUM_EMERGE_ENERGY_COST: u8 = 24;
+/// Atom energy gained per network sugar unit sipped by a stalk.
+pub const MYCELIUM_ENERGY_SIP_TO_ATOM: f32 = 0.12;
+/// Max network sugar a fruiting body may sip per tick.
+pub const MYCELIUM_ENERGY_SIP_MAX: u8 = 4;
+/// Same-strain sugar bleed toward poorer cream neighbours per field pulse.
+pub const MYCELIUM_CARGO_SUGAR_BLEED: u8 = 2;
+/// Same-strain pore-sat trickle toward drier cream neighbours per field pulse.
+pub const MYCELIUM_CARGO_WATER_BLEED: u8 = 2;
+/// Soft cap on cargo equalize source cells processed per field pulse.
+pub const MYCELIUM_CARGO_EQUALIZE_MAX: usize = 96;
+/// Chebyshev radius for same-strain cargo *pull* toward needy tips.
+pub const MYCELIUM_CARGO_PULL_RADIUS: i32 = 6;
+/// Max sugar pulled to a needy cell per call.
+pub const MYCELIUM_CARGO_PULL_SUGAR: u8 = 4;
+/// Max pore-sat pulled to a needy cell per call.
+pub const MYCELIUM_CARGO_PULL_WATER: u8 = 3;
+/// Soft cap on pull-to-tip operations per field pulse.
+pub const MYCELIUM_CARGO_PULL_MAX: usize = 48;
+/// Soft cap on strain→lineage treaty stamps.
+pub const MYCELIUM_STRAIN_LINEAGE_MAX: usize = 512;
+/// Tip sugar reserve targeted before a mineral probe attempt.
+pub const MYCELIUM_PROBE_SUGAR_RESERVE: u8 = 8;
+/// Sugar left on a donor cell when another tip pulls (keeps hubs alive).
+pub const MYCELIUM_CARGO_SOURCE_RESERVE: u8 = 4;
 /// How deep / wide to scan for Organic substrate under the fungus.
 const ORGANIC_SCAN_DEPTH: i32 = 8;
 const ORGANIC_SCAN_RADIUS: i32 = 2;
+/// Extra radius when goal-seeking distant Organic through mineral hosts.
+const ORGANIC_SEEK_RADIUS: i32 = 6;
+const ORGANIC_SEEK_DEPTH: i32 = 10;
+
+/// Genome + body remembered by a mycelium patch for later emergence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MyceliumLineage {
+    pub genome: Genome,
+    pub body: Vec<BodyModule>,
+}
+
+/// Sparse `(gx, gy) → lineage` stamps on [`World::mycelium_lineage`].
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct MyceliumLineageMap {
+    #[serde(default)]
+    pub cells: HashMap<(i32, i32), MyceliumLineage>,
+}
 
 /// True when the body is a fruiting-body habit (Digest, no Root/Stem).
 /// Underground hyphae are the mycelium field on Organic, not body pixels.
@@ -267,7 +352,7 @@ pub fn fungus_should_hibernate(world: &World, atom: &Atom) -> bool {
     fungus_moisture_frac(world, atom) < FUNGUS_DROUGHT_FRAC
 }
 
-/// Strongest mycelium intensity on Organic near `(gx, gy)`.
+/// Strongest mycelium intensity on any porous host near `(gx, gy)`.
 pub fn max_mycelium_near(world: &World, gx: i32, gy: i32) -> u8 {
     let gx = world.wrap_x(gx);
     let mut best = 0u8;
@@ -275,13 +360,759 @@ pub fn max_mycelium_near(world: &World, gx: i32, gy: i32) -> u8 {
         let nx = world.wrap_x(gx + dx);
         for dy in -ORGANIC_SCAN_DEPTH..=ORGANIC_SCAN_DEPTH {
             if let Some(c) = world.get_cell(nx, gy + dy) {
-                if c.material == MaterialId::Organic {
-                    best = best.max(c.mycelium());
-                }
+                best = best.max(c.mycelium());
             }
         }
     }
     best
+}
+
+/// Mint a new strain id for an inoculum event.
+pub fn alloc_mycelium_strain(world: &mut World) -> u32 {
+    let id = world.next_mycelium_strain_id.max(1);
+    world.next_mycelium_strain_id = id.wrapping_add(1).max(1);
+    id
+}
+
+/// All strain shares on a cell (`strain_id`, intensity). Sum = [`Cell::mycelium`].
+pub fn mycelium_shares_at(world: &World, gx: i32, gy: i32) -> &[(u32, u8)] {
+    let gx = world.wrap_x(gx);
+    world
+        .mycelium_strains
+        .get(&(gx, gy))
+        .map(|v| v.as_slice())
+        .unwrap_or(&[])
+}
+
+/// Dominant strain on a cell (highest share), if any.
+pub fn mycelium_strain_at(world: &World, gx: i32, gy: i32) -> Option<u32> {
+    mycelium_shares_at(world, gx, gy)
+        .iter()
+        .max_by_key(|(_, amt)| *amt)
+        .map(|(s, _)| *s)
+}
+
+/// Network sugar / glucose analog stored on a colonized cell.
+pub fn mycelium_energy_at(world: &World, gx: i32, gy: i32) -> u8 {
+    let gx = world.wrap_x(gx);
+    world.mycelium_energy.get(&(gx, gy)).copied().unwrap_or(0)
+}
+
+/// Add network sugar (capped). No-ops when the cell has no cream host.
+pub fn add_mycelium_energy(world: &mut World, gx: i32, gy: i32, add: u8) {
+    let gx = world.wrap_x(gx);
+    if add == 0 {
+        return;
+    }
+    let Some(c) = world.get_cell(gx, gy) else {
+        return;
+    };
+    if !hosts_mycelium(c.material) || c.mycelium() == 0 {
+        return;
+    }
+    let map = &mut world.mycelium_energy;
+    if map.len() >= MYCELIUM_ENERGY_MAP_MAX && !map.contains_key(&(gx, gy)) {
+        if let Some(&key) = map.keys().next() {
+            map.remove(&key);
+        }
+    }
+    let e = map.entry((gx, gy)).or_insert(0);
+    *e = (*e).saturating_add(add).min(MYCELIUM_ENERGY_CAP);
+}
+
+/// Take up to `want` network sugar from a cell. Returns amount taken.
+pub fn take_mycelium_energy(world: &mut World, gx: i32, gy: i32, want: u8) -> u8 {
+    let gx = world.wrap_x(gx);
+    if want == 0 {
+        return 0;
+    }
+    let Some(e) = world.mycelium_energy.get_mut(&(gx, gy)) else {
+        return 0;
+    };
+    let taken = (*e).min(want);
+    *e = e.saturating_sub(taken);
+    if *e == 0 {
+        world.mycelium_energy.remove(&(gx, gy));
+    }
+    taken
+}
+
+fn clear_mycelium_energy(world: &mut World, gx: i32, gy: i32) {
+    let gx = world.wrap_x(gx);
+    world.mycelium_energy.remove(&(gx, gy));
+}
+
+/// Sip network sugar from the richest cream cell near `(gx, gy)`.
+pub fn sip_mycelium_energy_near(world: &mut World, gx: i32, gy: i32, want: u8) -> u8 {
+    let gx = world.wrap_x(gx);
+    if want == 0 {
+        return 0;
+    }
+    let mut best: Option<(i32, i32, u8)> = None;
+    for dx in -ORGANIC_SCAN_RADIUS..=ORGANIC_SCAN_RADIUS {
+        let nx = world.wrap_x(gx + dx);
+        for dy in -2..=2 {
+            let ny = gy + dy;
+            let e = mycelium_energy_at(world, nx, ny);
+            if e == 0 {
+                continue;
+            }
+            if best.map(|(_, _, be)| e > be).unwrap_or(true) {
+                best = Some((nx, ny, e));
+            }
+        }
+    }
+    let Some((nx, ny, _)) = best else {
+        return 0;
+    };
+    take_mycelium_energy(world, nx, ny, want.min(MYCELIUM_ENERGY_SIP_MAX))
+}
+
+/// Bright RGB for a strain id (golden-angle hues, full saturation).
+pub fn mycelium_strain_rgb(strain: u32) -> [u8; 3] {
+    let h = (strain as f32 * 0.618_033_988_75).fract();
+    hsv_to_rgb(h, 0.90, 1.0)
+}
+
+/// Blend strain colors by share weight; alpha from total intensity.
+///
+/// Thin mineral corridors (cream ≈5–16) must stay neon-readable on the `M`
+/// overlay — a low alpha floor made climb paths look like dark-green veins
+/// while only dense hubs glowed.
+pub fn mycelium_shares_overlay_rgba(shares: &[(u32, u8)], total: u8) -> [u8; 4] {
+    if shares.is_empty() || total == 0 {
+        return [0, 0, 0, 0];
+    }
+    let mut r = 0.0f32;
+    let mut g = 0.0f32;
+    let mut b = 0.0f32;
+    let mut wsum = 0.0f32;
+    for &(strain, amt) in shares {
+        if amt == 0 {
+            continue;
+        }
+        let [sr, sg, sb] = mycelium_strain_rgb(strain);
+        let w = amt as f32;
+        r += sr as f32 * w;
+        g += sg as f32 * w;
+        b += sb as f32 * w;
+        wsum += w;
+    }
+    if wsum <= 0.0 {
+        return [0, 0, 0, 0];
+    }
+    // Floor ~210 so even residual corridors (compost / rock cracks) read as
+    // strain color, not muddy wash against dark rock.
+    let a = (210u32 + (total as u32 * 45) / 255).min(255) as u8;
+    [
+        (r / wsum).round() as u8,
+        (g / wsum).round() as u8,
+        (b / wsum).round() as u8,
+        a,
+    ]
+}
+
+/// Swap per-cell mycelium meta (strains, lineage, energy) when two cells
+/// exchange places. Cream rides in [`Cell::_pad`]; maps are coordinate-keyed
+/// and must move with the host or the `M` overlay / inspector desync.
+pub fn swap_mycelium_meta(world: &mut World, ax: i32, ay: i32, bx: i32, by: i32) {
+    let ax = world.wrap_x(ax);
+    let bx = world.wrap_x(bx);
+    if ax == bx && ay == by {
+        return;
+    }
+    let a_shares = world.mycelium_strains.remove(&(ax, ay));
+    let b_shares = world.mycelium_strains.remove(&(bx, by));
+    match (a_shares, b_shares) {
+        (Some(a), Some(b)) => {
+            world.mycelium_strains.insert((ax, ay), b);
+            world.mycelium_strains.insert((bx, by), a);
+        }
+        (Some(a), None) => {
+            world.mycelium_strains.insert((bx, by), a);
+        }
+        (None, Some(b)) => {
+            world.mycelium_strains.insert((ax, ay), b);
+        }
+        (None, None) => {}
+    }
+    let a_lin = world.mycelium_lineage.cells.remove(&(ax, ay));
+    let b_lin = world.mycelium_lineage.cells.remove(&(bx, by));
+    match (a_lin, b_lin) {
+        (Some(a), Some(b)) => {
+            world.mycelium_lineage.cells.insert((ax, ay), b);
+            world.mycelium_lineage.cells.insert((bx, by), a);
+        }
+        (Some(a), None) => {
+            world.mycelium_lineage.cells.insert((bx, by), a);
+        }
+        (None, Some(b)) => {
+            world.mycelium_lineage.cells.insert((ax, ay), b);
+        }
+        (None, None) => {}
+    }
+    let a_e = world.mycelium_energy.remove(&(ax, ay));
+    let b_e = world.mycelium_energy.remove(&(bx, by));
+    match (a_e, b_e) {
+        (Some(a), Some(b)) => {
+            world.mycelium_energy.insert((ax, ay), b);
+            world.mycelium_energy.insert((bx, by), a);
+        }
+        (Some(a), None) => {
+            world.mycelium_energy.insert((bx, by), a);
+        }
+        (None, Some(b)) => {
+            world.mycelium_energy.insert((ax, ay), b);
+        }
+        (None, None) => {}
+    }
+}
+
+/// Move mycelium meta from one cell to another (erosion / bedload deposit).
+///
+/// Destination meta is replaced (deposit seats are Air). Source cleared.
+pub fn move_mycelium_meta(
+    world: &mut World,
+    from_x: i32,
+    from_y: i32,
+    to_x: i32,
+    to_y: i32,
+) {
+    let from_x = world.wrap_x(from_x);
+    let to_x = world.wrap_x(to_x);
+    if from_x == to_x && from_y == to_y {
+        return;
+    }
+    let shares = world.mycelium_strains.remove(&(from_x, from_y));
+    world.mycelium_strains.remove(&(to_x, to_y));
+    if let Some(s) = shares {
+        if !s.is_empty() {
+            world.mycelium_strains.insert((to_x, to_y), s);
+        }
+    }
+    let lin = world.mycelium_lineage.cells.remove(&(from_x, from_y));
+    world.mycelium_lineage.cells.remove(&(to_x, to_y));
+    if let Some(l) = lin {
+        world.mycelium_lineage.cells.insert((to_x, to_y), l);
+    }
+    let energy = world.mycelium_energy.remove(&(from_x, from_y));
+    world.mycelium_energy.remove(&(to_x, to_y));
+    if let Some(e) = energy {
+        if e > 0 {
+            world.mycelium_energy.insert((to_x, to_y), e);
+        }
+    }
+}
+
+/// Swap two cells and their mycelium meta (raft drift, buoyancy, punch).
+pub fn swap_cells_preserving_mycelium(
+    world: &mut World,
+    ax: i32,
+    ay: i32,
+    bx: i32,
+    by: i32,
+) {
+    let ax = world.wrap_x(ax);
+    let bx = world.wrap_x(bx);
+    let Some(a) = world.get_cell(ax, ay) else {
+        return;
+    };
+    let Some(b) = world.get_cell(bx, by) else {
+        return;
+    };
+    world.set_cell(ax, ay, b);
+    world.set_cell(bx, by, a);
+    swap_mycelium_meta(world, ax, ay, bx, by);
+}
+
+fn hsv_to_rgb(h: f32, s: f32, v: f32) -> [u8; 3] {
+    let h = h.fract() * 6.0;
+    let i = h.floor();
+    let f = h - i;
+    let p = v * (1.0 - s);
+    let q = v * (1.0 - s * f);
+    let t = v * (1.0 - s * (1.0 - f));
+    let (r, g, b) = match i as i32 % 6 {
+        0 => (v, t, p),
+        1 => (q, v, p),
+        2 => (p, v, t),
+        3 => (p, q, v),
+        4 => (t, p, v),
+        _ => (v, p, q),
+    };
+    [
+        (r * 255.0).round() as u8,
+        (g * 255.0).round() as u8,
+        (b * 255.0).round() as u8,
+    ]
+}
+
+fn clear_mycelium_shares(world: &mut World, gx: i32, gy: i32) {
+    let gx = world.wrap_x(gx);
+    world.mycelium_strains.remove(&(gx, gy));
+    clear_mycelium_energy(world, gx, gy);
+}
+
+/// Cream `_pad` with no strain shares: inherit a neighbour strain, or clear.
+///
+/// Never mints a new strain for ghosts — minting turned oxidation scraps and
+/// roof-collapse debris into fake "owned" red dots that then lingered.
+fn heal_orphan_mycelium_pads(world: &mut World) {
+    use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
+
+    let mut orphans: Vec<(i32, i32, u8)> = Vec::new();
+    let coords: Vec<_> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let gx = coord.cx * CHUNK_CELLS_W as i32 + lx as i32;
+                let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
+                let Some(c) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if !hosts_mycelium(c.material) {
+                    continue;
+                }
+                let myc = c.mycelium();
+                if myc == 0 {
+                    continue;
+                }
+                if mycelium_shares_at(world, gx, gy).is_empty() {
+                    orphans.push((gx, gy, myc));
+                }
+            }
+        }
+    }
+    // Prefer cells that can inherit first so a fringe touching a real network
+    // reconnects before isolated scraps are wiped.
+    orphans.sort_by_key(|&(gx, gy, _)| {
+        let near = neighbour_has_mycelium_shares(world, gx, gy);
+        (!near, gx, gy)
+    });
+    for (gx, gy, myc) in orphans {
+        if !mycelium_shares_at(world, gx, gy).is_empty() {
+            continue;
+        }
+        if let Some(s) = neighbour_mycelium_strain(world, gx, gy) {
+            world.mycelium_strains.insert((gx, gy), vec![(s, myc)]);
+            continue;
+        }
+        clear_mycelium_shares(world, gx, gy);
+        if let Some(mut c) = world.get_cell(gx, gy) {
+            c.set_mycelium(0);
+            world.set_cell(gx, gy, c);
+        }
+    }
+}
+
+fn neighbour_has_mycelium_shares(world: &World, gx: i32, gy: i32) -> bool {
+    neighbour_mycelium_strain(world, gx, gy).is_some()
+}
+
+fn neighbour_mycelium_strain(world: &World, gx: i32, gy: i32) -> Option<u32> {
+    for (dx, dy) in [
+        (0i32, 1),
+        (0, -1),
+        (1, 0),
+        (-1, 0),
+        (1, 1),
+        (-1, 1),
+        (1, -1),
+        (-1, -1),
+    ] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        if let Some(s) = mycelium_strain_at(world, nx, ny) {
+            return Some(s);
+        }
+    }
+    None
+}
+
+fn sync_cell_mycelium_from_shares(world: &mut World, gx: i32, gy: i32) {
+    let gx = world.wrap_x(gx);
+    let total: u32 = world
+        .mycelium_strains
+        .get(&(gx, gy))
+        .map(|v| v.iter().map(|(_, a)| *a as u32).sum())
+        .unwrap_or(0)
+        .min(255);
+    if total == 0 {
+        clear_mycelium_shares(world, gx, gy);
+    }
+    if let Some(mut c) = world.get_cell(gx, gy) {
+        if hosts_mycelium(c.material) {
+            c.set_mycelium(total as u8);
+            world.set_cell(gx, gy, c);
+            if total == 0 {
+                clear_mycelium_energy(world, gx, gy);
+            }
+        } else {
+            clear_mycelium_energy(world, gx, gy);
+        }
+    }
+}
+
+/// Add cream for one strain into the cell's shared 255 budget.
+///
+/// Other strains keep their shares; only free room (`cap - total`) is taken.
+pub fn add_mycelium_with_strain(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    add: u8,
+    strain: Option<u32>,
+    cap: u8,
+) {
+    let gx = world.wrap_x(gx);
+    let Some(c) = world.get_cell(gx, gy) else {
+        return;
+    };
+    if !hosts_mycelium(c.material) || add == 0 {
+        return;
+    }
+    let cap = cap.min(255);
+    let pad = c.mycelium();
+    let strain = match strain {
+        Some(s) => s,
+        None => {
+            // Thicken dominant share, or mint wild on virgin cream.
+            mycelium_strain_at(world, gx, gy).unwrap_or_else(|| alloc_mycelium_strain(world))
+        }
+    };
+
+    let map = &mut world.mycelium_strains;
+    if map.len() >= MYCELIUM_STRAIN_MAP_MAX && !map.contains_key(&(gx, gy)) {
+        if let Some(&key) = map.keys().next() {
+            map.remove(&key);
+        }
+    }
+    let shares = map.entry((gx, gy)).or_default();
+    // Absorb legacy / test cream that lives only in `_pad`.
+    let share_sum: u32 = shares.iter().map(|(_, a)| *a as u32).sum();
+    if (pad as u32) > share_sum {
+        let orphan = (pad as u32 - share_sum) as u8;
+        if let Some(slot) = shares.iter_mut().find(|(s, _)| *s == strain) {
+            slot.1 = slot.1.saturating_add(orphan);
+        } else {
+            shares.push((strain, orphan));
+        }
+    }
+    let total: u8 = shares
+        .iter()
+        .map(|(_, a)| *a as u32)
+        .sum::<u32>()
+        .min(255) as u8;
+    let room = cap.saturating_sub(total);
+    if room == 0 {
+        shares.sort_by_key(|(s, _)| *s);
+        sync_cell_mycelium_from_shares(world, gx, gy);
+        return;
+    }
+    let gain = add.min(room);
+    if let Some(slot) = shares.iter_mut().find(|(s, _)| *s == strain) {
+        slot.1 = slot.1.saturating_add(gain);
+    } else {
+        shares.push((strain, gain));
+    }
+    // Keep shares tidy / ordered by strain id for stable inspector output.
+    shares.sort_by_key(|(s, _)| *s);
+    sync_cell_mycelium_from_shares(world, gx, gy);
+}
+
+/// Subtract cream from shares (largest first) and sync `_pad`.
+pub fn reduce_mycelium_shares(world: &mut World, gx: i32, gy: i32, amount: u8) {
+    let gx = world.wrap_x(gx);
+    if amount == 0 {
+        return;
+    }
+    let Some(shares) = world.mycelium_strains.get_mut(&(gx, gy)) else {
+        // Legacy cream with no shares — just lower `_pad`.
+        if let Some(mut c) = world.get_cell(gx, gy) {
+            c.set_mycelium(c.mycelium().saturating_sub(amount));
+            world.set_cell(gx, gy, c);
+        }
+        return;
+    };
+    let mut left = amount;
+    while left > 0 && !shares.is_empty() {
+        let idx = shares
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, (_, a))| *a)
+            .map(|(i, _)| i)
+            .unwrap();
+        let take = shares[idx].1.min(left);
+        shares[idx].1 = shares[idx].1.saturating_sub(take);
+        left = left.saturating_sub(take);
+        if shares[idx].1 == 0 {
+            shares.remove(idx);
+        }
+    }
+    if shares.is_empty() {
+        world.mycelium_strains.remove(&(gx, gy));
+    }
+    sync_cell_mycelium_from_shares(world, gx, gy);
+}
+
+/// Scale all shares so their sum equals `target` (compost residual).
+fn scale_mycelium_shares_to(world: &mut World, gx: i32, gy: i32, target: u8) {
+    let gx = world.wrap_x(gx);
+    if target == 0 {
+        clear_mycelium_shares(world, gx, gy);
+        sync_cell_mycelium_from_shares(world, gx, gy);
+        return;
+    }
+    if world.mycelium_strains.get(&(gx, gy)).is_none() {
+        // Orphan `_pad` residual — inherit/mint so cream never goes unowned.
+        let _ = ensure_mycelium_strain(world, gx, gy);
+    }
+    let Some(shares) = world.mycelium_strains.get(&(gx, gy)).cloned() else {
+        return;
+    };
+    let sum: u32 = shares.iter().map(|(_, a)| *a as u32).sum();
+    if sum == 0 {
+        clear_mycelium_shares(world, gx, gy);
+        sync_cell_mycelium_from_shares(world, gx, gy);
+        return;
+    }
+    let mut next: Vec<(u32, u8)> = Vec::with_capacity(shares.len());
+    let mut assigned = 0u32;
+    for (i, &(s, a)) in shares.iter().enumerate() {
+        if a == 0 {
+            continue;
+        }
+        let mut part = ((a as u32 * target as u32) / sum) as u8;
+        if part == 0 {
+            part = 1;
+        }
+        if i + 1 == shares.len() {
+            part = target.saturating_sub(assigned as u8);
+        }
+        assigned += part as u32;
+        if part > 0 {
+            next.push((s, part));
+        }
+    }
+    if next.is_empty() {
+        // Keep dominant as residual.
+        if let Some(&(s, _)) = shares.iter().max_by_key(|(_, a)| *a) {
+            next.push((s, target));
+        }
+    }
+    // Fix sum drift.
+    let got: u32 = next.iter().map(|(_, a)| *a as u32).sum();
+    if got != target as u32 && !next.is_empty() {
+        let d = target as i32 - got as i32;
+        let last = next.len() - 1;
+        next[last].1 = (next[last].1 as i32 + d).clamp(0, 255) as u8;
+        next.retain(|(_, a)| *a > 0);
+    }
+    if next.is_empty() {
+        clear_mycelium_shares(world, gx, gy);
+    } else {
+        world.mycelium_strains.insert((gx, gy), next);
+    }
+    sync_cell_mycelium_from_shares(world, gx, gy);
+}
+
+/// Ensure a colonized cell has at least one strain share (inherit / mint).
+pub fn ensure_mycelium_strain(world: &mut World, gx: i32, gy: i32) -> u32 {
+    let gx = world.wrap_x(gx);
+    if let Some(s) = mycelium_strain_at(world, gx, gy) {
+        return s;
+    }
+    let total = world.get_cell(gx, gy).map(|c| c.mycelium()).unwrap_or(0);
+    for (dx, dy) in [
+        (0i32, 1),
+        (0, -1),
+        (1, 0),
+        (-1, 0),
+        (1, 1),
+        (-1, 1),
+        (1, -1),
+        (-1, -1),
+    ] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        if let Some(s) = mycelium_strain_at(world, nx, ny) {
+            if total > 0 {
+                world.mycelium_strains.insert((gx, gy), vec![(s, total)]);
+            }
+            return s;
+        }
+    }
+    let s = alloc_mycelium_strain(world);
+    if total > 0 {
+        world.mycelium_strains.insert((gx, gy), vec![(s, total)]);
+    }
+    s
+}
+
+/// Stamp editor / spore lineage at a cell (and soft-cap the map).
+pub fn stamp_mycelium_lineage(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    genome: Genome,
+    body: Vec<BodyModule>,
+) {
+    let gx = world.wrap_x(gx);
+    if body.is_empty() {
+        return;
+    }
+    let map = &mut world.mycelium_lineage.cells;
+    if map.len() >= MYCELIUM_LINEAGE_MAX && !map.contains_key(&(gx, gy)) {
+        // Drop an arbitrary old stamp so new inoculum always lands.
+        if let Some(&key) = map.keys().next() {
+            map.remove(&key);
+        }
+    }
+    map.insert(
+        (gx, gy),
+        MyceliumLineage {
+            genome: genome.clone(),
+            body: body.clone(),
+        },
+    );
+    // Bind to the cell's dominant strain when known so frontiers keep the
+    // inoculum treaty after cream spreads away from the spatial stamp.
+    if let Some(strain) = mycelium_strain_at(world, gx, gy) {
+        bind_strain_lineage(world, strain, genome, body);
+    }
+}
+
+/// Remember a strain's genome+body for treaty match (strain↔strain trade).
+pub fn bind_strain_lineage(
+    world: &mut World,
+    strain: u32,
+    genome: Genome,
+    body: Vec<BodyModule>,
+) {
+    if body.is_empty() || strain == 0 {
+        return;
+    }
+    let map = &mut world.mycelium_strain_lineage;
+    if map.len() >= MYCELIUM_STRAIN_LINEAGE_MAX && !map.contains_key(&strain) {
+        if let Some(&key) = map.keys().next() {
+            map.remove(&key);
+        }
+    }
+    map.insert(strain, MyceliumLineage { genome, body });
+}
+
+/// Lineage bound to a strain id, if any.
+pub fn strain_lineage(world: &World, strain: u32) -> Option<MyceliumLineage> {
+    world.mycelium_strain_lineage.get(&strain).cloned()
+}
+
+/// Prefer strain→lineage; fall back to spatial nearest stamp at `(gx,gy)`.
+pub fn lineage_for_strain_at(
+    world: &World,
+    strain: u32,
+    gx: i32,
+    gy: i32,
+) -> Option<MyceliumLineage> {
+    strain_lineage(world, strain).or_else(|| nearest_mycelium_lineage(world, gx, gy))
+}
+
+/// Nearest stamped lineage within a small Chebyshev window (column-biased).
+pub fn nearest_mycelium_lineage(
+    world: &World,
+    gx: i32,
+    gy: i32,
+) -> Option<MyceliumLineage> {
+    let gx = world.wrap_x(gx);
+    let mut best: Option<(i32, MyceliumLineage)> = None;
+    for (&(lx, ly), lin) in &world.mycelium_lineage.cells {
+        let dx = {
+            let d = (lx - gx).abs();
+            match world.wrap_width {
+                Some(w) if w > 0 => d.min(w - d.min(w)),
+                _ => d,
+            }
+        };
+        let dy = (ly - gy).abs();
+        if dx > 6 || dy > 10 {
+            continue;
+        }
+        let dist = dx * 3 + dy; // prefer same column
+        if best.as_ref().map(|(bd, _)| dist < *bd).unwrap_or(true) {
+            best = Some((dist, lin.clone()));
+        }
+    }
+    best.map(|(_, l)| l)
+}
+
+/// Spread cost for threading into `mat` at given moisture (lower = easier).
+/// `None` = refuse (bedrock / air / ice).
+fn mycelium_host_cost(mat: MaterialId, moist: f32) -> Option<u32> {
+    let wet = moist >= MYCELIUM_FIELD_MOIST;
+    match mat {
+        MaterialId::Organic => Some(0),
+        MaterialId::Soil | MaterialId::Sand => Some(if wet { 2 } else { 6 }),
+        MaterialId::Clay => Some(if wet { 4 } else { 9 }),
+        MaterialId::LooseRock | MaterialId::LooseLimestone => Some(if wet { 10 } else { 18 }),
+        MaterialId::Stone | MaterialId::Limestone => Some(if wet { 22 } else { 36 }),
+        _ => None,
+    }
+}
+
+/// Chebyshev distance to nearest Organic cell (food) in the seek window.
+fn dist_to_organic(world: &World, gx: i32, gy: i32) -> i32 {
+    let gx = world.wrap_x(gx);
+    let mut best = i32::MAX;
+    for dx in -ORGANIC_SEEK_RADIUS..=ORGANIC_SEEK_RADIUS {
+        let nx = world.wrap_x(gx + dx);
+        for dy in -ORGANIC_SEEK_DEPTH..=ORGANIC_SEEK_DEPTH {
+            if matches!(
+                world.get_cell(nx, gy + dy),
+                Some(c) if c.material == MaterialId::Organic
+            ) {
+                let d = dx.abs().max(dy.abs());
+                best = best.min(d);
+            }
+        }
+    }
+    best
+}
+
+/// True when any cell above in-column is free Air (surface-seeking bias).
+fn open_air_above(world: &World, gx: i32, gy: i32) -> bool {
+    for dy in 1..=4 {
+        if matches!(
+            world.get_cell(gx, gy + dy),
+            Some(a) if a.material == MaterialId::Air
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
+/// Mineral corridor has reached threaded Organic food (can taper to a conduit).
+fn mineral_reached_food(world: &World, gx: i32, gy: i32) -> bool {
+    let gx = world.wrap_x(gx);
+    for (dx, dy) in [
+        (0i32, 1),
+        (0, -1),
+        (1, 0),
+        (-1, 0),
+        (1, 1),
+        (-1, 1),
+        (1, -1),
+        (-1, -1),
+    ] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        if matches!(
+            world.get_cell(nx, ny),
+            Some(c) if c.material == MaterialId::Organic && c.mycelium() > 0
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Labile forage from nearby Organic / mycelium field.
@@ -327,8 +1158,8 @@ fn organic_cell_moist_frac(world: &World, gx: i32, gy: i32) -> f32 {
     best
 }
 
-/// Autonomous mycelium field: thicken / spread on moist Organic without a
-/// living fruiting body. Call from the world tick.
+/// Autonomous mycelium field: thicken / spread on moist porous hosts without
+/// a living fruiting body. Call from the world tick.
 pub fn step_mycelium_field(world: &mut World) {
     step_mycelium_field_cfg(world, &FungiConfig::default());
 }
@@ -338,91 +1169,405 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
     if world.tick % MYCELIUM_FIELD_PERIOD != 0 {
         return;
     }
-    use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 
     let threshold = cfg.soil_mycelium_threshold;
     let convert_odds = cfg.soil_convert_odds.max(1);
 
-    let mut colonized: Vec<(i32, i32, u8)> = Vec::new();
-    let coords: Vec<_> = world.chunks.keys().copied().collect();
-    for coord in coords {
-        for ly in 0..CHUNK_CELLS_H {
-            for lx in 0..CHUNK_CELLS_W {
-                let gx = coord.cx * CHUNK_CELLS_W as i32 + lx as i32;
-                let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
-                let Some(c) = world.get_cell(gx, gy) else {
-                    continue;
-                };
-                if c.material == MaterialId::Organic && c.mycelium() > 0 {
-                    colonized.push((gx, gy, c.mycelium()));
-                    if colonized.len() >= MYCELIUM_FIELD_MAX_CELLS {
-                        break;
-                    }
-                }
-            }
-            if colonized.len() >= MYCELIUM_FIELD_MAX_CELLS {
-                break;
-            }
-        }
-        if colonized.len() >= MYCELIUM_FIELD_MAX_CELLS {
-            break;
-        }
-    }
+    let seed = world.seed.0;
+    let tick = world.tick;
+    // Full-world orphan pass (not sample-capped): cream without shares either
+    // inherits a neighbouring strain or clears. Roof-collapse / old oxidation
+    // ghosts used to linger as red `M` dots when hubs filled the process budget.
+    heal_orphan_mycelium_pads(world);
+    let colonized = collect_mycelium_field_cells(world, tick, seed, MYCELIUM_FIELD_MAX_CELLS);
     if colonized.is_empty() {
         return;
     }
-
-    let seed = world.seed.0;
-    let tick = world.tick;
     let mut spreads: Vec<(i32, i32)> = Vec::new();
     let mut grows: Vec<(i32, i32)> = Vec::new();
     let mut decays: Vec<(i32, i32)> = Vec::new();
 
-    for (i, &(gx, gy, myc)) in colonized.iter().enumerate() {
+    for (i, &(gx, gy, myc, mat)) in colonized.iter().enumerate() {
+        // Sampled cells should already be healed; skip any residual ghosts.
+        if mycelium_shares_at(world, gx, gy).is_empty() {
+            continue;
+        }
         let moist = organic_cell_moist_frac(world, gx, gy);
+        let sugar = mycelium_energy_at(world, gx, gy);
         if moist >= MYCELIUM_FIELD_MOIST {
-            if myc < 255 {
-                grows.push((gx, gy));
-            }
-            if myc >= 16 {
-                let h = hash_u64(seed, tick, gx as u64, gy as u64 ^ (i as u64));
-                if h % MYCELIUM_FIELD_SPREAD_ODDS == 0 {
-                    spreads.push((gx, gy));
+            let organic = mat == MaterialId::Organic;
+            if organic {
+                // Food substrate: thicken freely into the shared 255 budget.
+                if myc < 255 {
+                    grows.push((gx, gy));
                 }
-            }
-            if myc >= threshold {
-                let h = hash_u64(seed, tick, gx as u64, 0x5011u64);
-                if h % convert_odds == 0 {
-                    compost_organic_to_soil(world, gx, gy);
+                if myc >= 16 {
+                    let h = hash_u64(seed, tick, gx as u64, gy as u64 ^ (i as u64));
+                    if h % MYCELIUM_FIELD_SPREAD_ODDS == 0 {
+                        spreads.push((gx, gy));
+                    }
+                }
+                // Bank network sugar from the Organic bed (+ occasional litter).
+                let gain = MYCELIUM_ENERGY_ORGANIC_GAIN
+                    .saturating_add(myc / MYCELIUM_ENERGY_GAIN_PER_MYC.max(1));
+                add_mycelium_energy(world, gx, gy, gain);
+                let h_lit = hash_u64(seed, tick, gx as u64, 0x51AAu64 ^ (i as u64));
+                if h_lit % MYCELIUM_ENERGY_LITTER_ODDS == 0 && soft_litter_at(world, gx) > 0 {
+                    if take_soft_litter(world, gx, 1) > 0 {
+                        add_mycelium_energy(world, gx, gy, MYCELIUM_ENERGY_FROM_LITTER);
+                    }
+                }
+                if myc >= threshold {
+                    let h = hash_u64(seed, tick, gx as u64, 0x5011u64);
+                    if h % convert_odds == 0 {
+                        compost_organic_to_soil(world, gx, gy);
+                    }
+                }
+            } else {
+                // Mineral: thin search front → conduit once Organic is found.
+                let fed = mineral_reached_food(world, gx, gy);
+                // Corridor upkeep — sugar keeps the mineral thread cheap to hold.
+                if sugar > 0 {
+                    let h_u = hash_u64(seed, tick, gx as u64, 0x590Du64);
+                    if h_u % MYCELIUM_ENERGY_MINERAL_UPKEEP_ODDS == 0 {
+                        let _ = take_mycelium_energy(world, gx, gy, 1);
+                    }
+                }
+                if fed && myc > MYCELIUM_MINERAL_CONDUIT {
+                    // Fat leftovers reabsorb quickly; near-conduit shaves slowly.
+                    let odds = if myc > MYCELIUM_MINERAL_CONDUIT.saturating_add(8) {
+                        2
+                    } else {
+                        MYCELIUM_MINERAL_TAPER_ODDS
+                    };
+                    let h = hash_u64(seed, tick, gx as u64, 0x7A9Eu64);
+                    if h % odds == 0 {
+                        decays.push((gx, gy));
+                    }
+                } else if !fed && myc < MYCELIUM_MINERAL_CAP {
+                    let h = hash_u64(seed, tick, gx as u64, 0x680u64 ^ (i as u64));
+                    if h % 3 == 0 {
+                        grows.push((gx, gy));
+                    }
+                }
+                // Only *seeking* mineral fronts keep probing. Once fed, the
+                // Organic colony owns further spread; mineral just conducts.
+                if !fed && myc >= 8 && myc <= MYCELIUM_MINERAL_CAP {
+                    let h = hash_u64(seed, tick, gx as u64, gy as u64 ^ (i as u64));
+                    if h % MYCELIUM_FIELD_SPREAD_ODDS == 0 {
+                        spreads.push((gx, gy));
+                    }
                 }
             }
         } else if myc > 0 {
-            // Bone-dry: rare fade, network hibernates rather than vanishing.
-            let h = hash_u64(seed, tick, gx as u64, 0xD00Du64);
-            if h % 64 == 0 {
-                decays.push((gx, gy));
+            let organic = mat == MaterialId::Organic;
+            // Sugar-funded dry tips may keep probing expensive terrain — a
+            // large connected network can afford exploratory hyphae through
+            // hostile rock. Bone-dry tips with no sugar fade faster.
+            if !organic && sugar > 0 {
+                let fed = mineral_reached_food(world, gx, gy);
+                if !fed && myc >= 8 && myc <= MYCELIUM_MINERAL_CAP {
+                    let h = hash_u64(seed, tick, gx as u64, gy as u64 ^ (i as u64));
+                    if h % MYCELIUM_FIELD_SPREAD_ODDS == 0 {
+                        spreads.push((gx, gy));
+                    }
+                }
+                // Funded corridor: slow fade (sugar pays upkeep).
+                let h = hash_u64(seed, tick, gx as u64, 0xD00Du64);
+                if h % 192 == 0 {
+                    decays.push((gx, gy));
+                }
+            } else {
+                let h = hash_u64(seed, tick, gx as u64, 0xD00Du64);
+                if h % 64 == 0 {
+                    decays.push((gx, gy));
+                }
             }
         }
     }
 
     for (gx, gy) in grows {
-        if let Some(mut c) = world.get_cell(gx, gy) {
-            if c.material == MaterialId::Organic {
-                c.set_mycelium(c.mycelium().saturating_add(MYCELIUM_FIELD_GROW));
-                world.set_cell(gx, gy, c);
-            }
-        }
+        // Thicken the dominant share (or mint wild) into free room.
+        let strain = mycelium_strain_at(world, gx, gy);
+        let cap = world
+            .get_cell(gx, gy)
+            .map(|c| {
+                if c.material == MaterialId::Organic {
+                    255
+                } else {
+                    MYCELIUM_MINERAL_CAP
+                }
+            })
+            .unwrap_or(MYCELIUM_MINERAL_CAP);
+        add_mycelium_with_strain(world, gx, gy, MYCELIUM_FIELD_GROW, strain, cap);
     }
     for (gx, gy) in spreads {
         spread_mycelium_once(world, gx, gy);
     }
     for (gx, gy) in decays {
-        if let Some(mut c) = world.get_cell(gx, gy) {
-            if c.material == MaterialId::Organic {
-                c.set_mycelium(c.mycelium().saturating_sub(1));
-                world.set_cell(gx, gy, c);
+        if world
+            .get_cell(gx, gy)
+            .is_some_and(|c| hosts_mycelium(c.material) && c.mycelium() > 0)
+        {
+            reduce_mycelium_shares(world, gx, gy, 1);
+        }
+    }
+    // Wet-side harvest / dry-side supply need a pipe: adjacent bleed +
+    // longer-range pull toward needy / dry frontier tips.
+    equalize_mycelium_cargo(world, &colonized);
+    // Distinct strains that meet with matching Symbiont treaties may trade.
+    crate::symbiosis::step_strain_trade(world, tick);
+}
+
+fn shares_strain(world: &World, gx: i32, gy: i32, strain: u32) -> bool {
+    mycelium_shares_at(world, gx, gy)
+        .iter()
+        .any(|(s, amt)| *s == strain && *amt > 0)
+}
+
+/// Sugar cost for a virgin mineral probe (scales with host difficulty).
+fn virgin_mineral_sugar_cost(mat: MaterialId, moist: f32) -> u8 {
+    let Some(host_cost) = mycelium_host_cost(mat, moist) else {
+        return 0;
+    };
+    // Sand/soil wet ≈ 1; dry loose rock ≈ 2; dry stone ≈ 4.
+    (1 + host_cost / 12).min(6) as u8
+}
+
+/// Pull sugar / pore water from richer same-strain cream within
+/// [`MYCELIUM_CARGO_PULL_RADIUS`] toward `(gx, gy)`.
+///
+/// This is the long-haul pipe: a wet Organic hub can fund a dry rock tip or
+/// desert plant contact without waiting for adjacent diffusion alone.
+pub fn pull_mycelium_cargo_to(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    want_sugar: u8,
+    want_water: u8,
+) -> (u8, u8) {
+    let gx = world.wrap_x(gx);
+    if want_sugar == 0 && want_water == 0 {
+        return (0, 0);
+    }
+    let Some(strain) = mycelium_strain_at(world, gx, gy) else {
+        return (0, 0);
+    };
+    let Some(dst0) = world.get_cell(gx, gy) else {
+        return (0, 0);
+    };
+    if dst0.mycelium() == 0 || !hosts_mycelium(dst0.material) {
+        return (0, 0);
+    }
+    let dst_cap = water_capacity(dst0.material);
+    let mut sugar_got = 0u8;
+    let mut water_got = 0u8;
+
+    if want_sugar > 0 {
+        let mut best: Option<(i32, i32, u8, i32)> = None; // x,y,sugar,dist
+        for dx in -MYCELIUM_CARGO_PULL_RADIUS..=MYCELIUM_CARGO_PULL_RADIUS {
+            for dy in -MYCELIUM_CARGO_PULL_RADIUS..=MYCELIUM_CARGO_PULL_RADIUS {
+                if dx == 0 && dy == 0 {
+                    continue;
+                }
+                let nx = world.wrap_x(gx + dx);
+                let ny = gy + dy;
+                if !shares_strain(world, nx, ny, strain) {
+                    continue;
+                }
+                let e = mycelium_energy_at(world, nx, ny);
+                let available = e.saturating_sub(MYCELIUM_CARGO_SOURCE_RESERVE);
+                if available == 0
+                    || e <= mycelium_energy_at(world, gx, gy).saturating_add(1)
+                {
+                    continue;
+                }
+                let dist = dx.abs().max(dy.abs());
+                let better = match best {
+                    None => true,
+                    Some((_, _, be, bd)) => e > be || (e == be && dist < bd),
+                };
+                if better {
+                    best = Some((nx, ny, available, dist));
+                }
             }
         }
+        if let Some((sx, sy, available, _)) = best {
+            let take = want_sugar
+                .min(MYCELIUM_CARGO_PULL_SUGAR)
+                .min(available);
+            let taken = take_mycelium_energy(world, sx, sy, take);
+            if taken > 0 {
+                add_mycelium_energy(world, gx, gy, taken);
+                sugar_got = taken;
+            }
+        }
+    }
+
+    if want_water > 0 && dst_cap > 0 {
+        let dst_sat = world.get_cell(gx, gy).map(|c| c.sat.0).unwrap_or(0);
+        if dst_sat < dst_cap {
+            let mut best: Option<(i32, i32, u8, i32)> = None;
+            for dx in -MYCELIUM_CARGO_PULL_RADIUS..=MYCELIUM_CARGO_PULL_RADIUS {
+                for dy in -MYCELIUM_CARGO_PULL_RADIUS..=MYCELIUM_CARGO_PULL_RADIUS {
+                    if dx == 0 && dy == 0 {
+                        continue;
+                    }
+                    let nx = world.wrap_x(gx + dx);
+                    let ny = gy + dy;
+                    if !shares_strain(world, nx, ny, strain) {
+                        continue;
+                    }
+                    let Some(sc) = world.get_cell(nx, ny) else {
+                        continue;
+                    };
+                    if sc.mycelium() == 0 || !hosts_mycelium(sc.material) || sc.sat.0 == 0 {
+                        continue;
+                    }
+                    let scap = water_capacity(sc.material);
+                    if scap == 0 {
+                        continue;
+                    }
+                    // Prefer wetter sources (higher sat fraction).
+                    let score = ((sc.sat.0 as u32 * 1000) / scap as u32).min(u8::MAX as u32) as u8;
+                    let dist = dx.abs().max(dy.abs());
+                    let better = match best {
+                        None => true,
+                        Some((_, _, bs, bd)) => score > bs || (score == bs && dist < bd),
+                    };
+                    // Only pull from clearly wetter cells.
+                    if sc.sat.0 > dst_sat.saturating_add(1) && better {
+                        best = Some((nx, ny, score, dist));
+                    }
+                }
+            }
+            if let Some((sx, sy, _, _)) = best {
+                let room = dst_cap.saturating_sub(dst_sat);
+                let take = want_water.min(MYCELIUM_CARGO_PULL_WATER).min(room);
+                if take > 0 {
+                    if let (Some(mut src), Some(mut dst)) =
+                        (world.get_cell(sx, sy), world.get_cell(gx, gy))
+                    {
+                        let move_amt = take.min(src.sat.0);
+                        if move_amt > 0 {
+                            src.sat.0 = src.sat.0.saturating_sub(move_amt);
+                            dst.sat.0 = dst.sat.0.saturating_add(move_amt);
+                            world.set_cell(sx, sy, src);
+                            world.set_cell(gx, gy, dst);
+                            water_got = move_amt;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (sugar_got, water_got)
+}
+
+/// Equalize network sugar (and a trickle of pore water) along same-strain cream.
+///
+/// Adjacent bleed plus pull-toward-needy-tips so wet hubs can fund dry rock
+/// corridors and desert plant contacts.
+pub fn equalize_mycelium_cargo(world: &mut World, colonized: &[(i32, i32, u8, MaterialId)]) {
+    let n = colonized.len().min(MYCELIUM_CARGO_EQUALIZE_MAX);
+    let mut sugar_moves: Vec<(i32, i32, i32, i32, u8)> = Vec::new();
+    let mut water_moves: Vec<(i32, i32, i32, i32, u8)> = Vec::new();
+    let mut needy: Vec<(i32, i32)> = Vec::new();
+    for &(gx, gy, _, mat) in colonized.iter().take(n) {
+        let Some(strain) = mycelium_strain_at(world, gx, gy) else {
+            continue;
+        };
+        let src_sugar = mycelium_energy_at(world, gx, gy);
+        let src_sat = world.get_cell(gx, gy).map(|c| c.sat.0).unwrap_or(0);
+        let src_cap = world
+            .get_cell(gx, gy)
+            .map(|c| water_capacity(c.material))
+            .unwrap_or(0);
+        let moist = organic_cell_moist_frac(world, gx, gy);
+        // Dry / broke tips request a network pull after adjacent bleed.
+        let dry_or_broke = moist < MYCELIUM_FIELD_MOIST
+            || src_sugar < 2
+            || (src_cap > 0 && src_sat.saturating_mul(4) < src_cap);
+        if dry_or_broke {
+            let _ = mat;
+            needy.push((gx, gy));
+        }
+        let mut best_sugar: Option<(i32, i32, u8)> = None;
+        let mut best_water: Option<(i32, i32, u8, u8)> = None; // nx,ny,sat,cap
+        for (dx, dy) in [(1i32, 0), (-1, 0), (0, 1), (0, -1)] {
+            let nx = world.wrap_x(gx + dx);
+            let ny = gy + dy;
+            if !shares_strain(world, nx, ny, strain) {
+                continue;
+            }
+            let Some(nc) = world.get_cell(nx, ny) else {
+                continue;
+            };
+            if nc.mycelium() == 0 || !hosts_mycelium(nc.material) {
+                continue;
+            }
+            let ns = mycelium_energy_at(world, nx, ny);
+            if src_sugar > ns.saturating_add(1) {
+                if best_sugar.map(|(_, _, s)| ns < s).unwrap_or(true) {
+                    best_sugar = Some((nx, ny, ns));
+                }
+            }
+            let ncap = water_capacity(nc.material);
+            if src_cap > 0 && ncap > 0 && nc.sat.0 < ncap && src_sat > nc.sat.0.saturating_add(1) {
+                if best_water
+                    .map(|(_, _, s, _)| nc.sat.0 < s)
+                    .unwrap_or(true)
+                {
+                    best_water = Some((nx, ny, nc.sat.0, ncap));
+                }
+            }
+        }
+        if let Some((nx, ny, _)) = best_sugar {
+            if src_sugar > 0 {
+                sugar_moves.push((gx, gy, nx, ny, MYCELIUM_CARGO_SUGAR_BLEED));
+            }
+        }
+        if let Some((nx, ny, _, _)) = best_water {
+            if src_sat > 0 {
+                water_moves.push((gx, gy, nx, ny, MYCELIUM_CARGO_WATER_BLEED));
+            }
+        }
+    }
+    for (sx, sy, nx, ny, amt) in sugar_moves {
+        let taken = take_mycelium_energy(world, sx, sy, amt);
+        if taken > 0 {
+            add_mycelium_energy(world, nx, ny, taken);
+        }
+    }
+    for (sx, sy, nx, ny, amt) in water_moves {
+        let sx = world.wrap_x(sx);
+        let nx = world.wrap_x(nx);
+        let Some(mut src) = world.get_cell(sx, sy) else {
+            continue;
+        };
+        let Some(mut dst) = world.get_cell(nx, ny) else {
+            continue;
+        };
+        let dcap = water_capacity(dst.material);
+        if dcap == 0 || src.sat.0 == 0 || dst.sat.0 >= dcap {
+            continue;
+        }
+        let room = dcap - dst.sat.0;
+        let move_amt = amt.min(src.sat.0).min(room);
+        if move_amt == 0 {
+            continue;
+        }
+        src.sat.0 = src.sat.0.saturating_sub(move_amt);
+        dst.sat.0 = dst.sat.0.saturating_add(move_amt);
+        world.set_cell(sx, sy, src);
+        world.set_cell(nx, ny, dst);
+    }
+    // Longer-range pull toward needy tips (budgeted).
+    for &(gx, gy) in needy.iter().take(MYCELIUM_CARGO_PULL_MAX) {
+        let sugar = mycelium_energy_at(world, gx, gy);
+        let want_s = MYCELIUM_CARGO_PULL_SUGAR.saturating_sub(sugar.min(MYCELIUM_CARGO_PULL_SUGAR));
+        let want_w = MYCELIUM_CARGO_PULL_WATER;
+        let _ = pull_mycelium_cargo_to(world, gx, gy, want_s, want_w);
     }
 }
 
@@ -436,11 +1581,11 @@ pub fn digest_budget_units(genome: &Genome, atom: &Atom) -> u16 {
     u.clamp(1, DIGEST_MAX_UNITS)
 }
 
-/// Pick an Organic cell to thread next.
+/// Pick a cell to thread next — prefer Organic food, else mineral corridor
+/// that steps toward Organic / the free surface.
 ///
 /// Prefer close cells under/around the fungus and thicken an existing
-/// patch before spraying +1 onto the farthest clean cell in the scan
-/// window (that dilution made colonies look idle while energy still rose).
+/// patch before spraying onto the farthest clean cell in the scan window.
 fn find_organic_xy(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
     let gx = world.wrap_x(gx);
     let mut best: Option<(i32, i32, i32)> = None; // score, x, y — lower wins
@@ -451,36 +1596,53 @@ fn find_organic_xy(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
             let Some(c) = world.get_cell(nx, y) else {
                 continue;
             };
-            if c.material != MaterialId::Organic {
+            if !hosts_mycelium(c.material) {
                 continue;
             }
             let m = c.mycelium();
-            if m >= 255 {
+            let organic = c.material == MaterialId::Organic;
+            let host_cap = if organic { 255 } else { MYCELIUM_MINERAL_CAP };
+            if m >= host_cap {
                 continue;
             }
+            let moist = organic_cell_moist_frac(world, nx, y);
+            let Some(host_cost) = mycelium_host_cost(c.material, moist) else {
+                continue;
+            };
             let dist = dx.abs() + dy.abs();
-            // 0 = young patch (keep thickening), 1 = mid, 2 = virgin frontier.
-            let stage = if (1..80).contains(&m) {
+            // Organic: thicken young patches. Mineral: prefer virgin frontier
+            // (never farm a fat mineral blob under the seat).
+            let stage = if organic {
+                if (1..80).contains(&m) {
+                    0
+                } else if m >= 80 {
+                    1
+                } else {
+                    2
+                }
+            } else if m == 0 {
                 0
-            } else if m >= 80 {
+            } else if m < MYCELIUM_MINERAL_CONDUIT {
                 1
             } else {
-                2
+                3
             };
             // Prefer climbing toward free Air so networks breach the surface
             // before raising a stalk (slight bias — still thicken near seat).
-            let open_above = matches!(
-                world.get_cell(nx, y + 1),
-                Some(a) if a.material == MaterialId::Air
-            );
-            let climb = if open_above {
+            let climb = if open_air_above(world, nx, y) {
                 0
             } else if dy > 0 {
                 1
             } else {
                 2
             };
-            let score = dist * 8 + stage + climb;
+            // Goal: Organic food nearby — mineral cells pay until they reach it.
+            let food = if organic {
+                0
+            } else {
+                12 + dist_to_organic(world, nx, y).min(20)
+            };
+            let score = dist * 8 + stage + climb + host_cost as i32 + food;
             if best.map(|(bs, _, _)| score < bs).unwrap_or(true) {
                 best = Some((score, nx, y));
             }
@@ -528,6 +1690,11 @@ fn push_excess_sat(world: &mut World, gx: i32, gy: i32, mut excess: u8) {
 }
 
 /// Convert a fully colonized Organic cell into Soil, preserving water.
+///
+/// Leaves a residual cream corridor on the Soil so the network can
+/// reconnect through the humified patch instead of hard-severing.
+/// Virgin Organic (no cream) composts clean — carbon surface oxidation
+/// uses this path and must not invent orphan `mycelium=1` soil.
 pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
     let gx = world.wrap_x(gx);
     let Some(c) = world.get_cell(gx, gy) else {
@@ -537,13 +1704,28 @@ pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
         return false;
     }
     let old_sat = c.sat.0;
+    let prior_myc = c.mycelium();
     let cap = world.water_capacity(MaterialId::Soil);
     let keep = if cap > 0 { old_sat.min(cap) } else { 0 };
     let excess = old_sat.saturating_sub(keep);
     let mut soil = Cell::solid(MaterialId::Soil);
     soil.sat.0 = keep;
     soil.flags.set(CellFlags::COMPACTED);
+    // Residual ≤ prior intensity — never invent cream on virgin Organic.
+    // (Previously `.max(1)` painted fake myc=1 soil with no strain shares
+    // whenever carbon oxidized surface litter.)
+    let residual = MYCELIUM_COMPOST_RESIDUAL.min(prior_myc);
+    soil.set_mycelium(residual);
     world.set_cell(gx, gy, soil);
+    if residual > 0 {
+        // Keep / mint strain ownership so residual corridors stay on `M`.
+        if mycelium_shares_at(world, gx, gy).is_empty() {
+            let _ = ensure_mycelium_strain(world, gx, gy);
+        }
+        scale_mycelium_shares_to(world, gx, gy, residual);
+    } else {
+        clear_mycelium_shares(world, gx, gy);
+    }
     push_excess_sat(world, gx, gy, excess);
     true
 }
@@ -632,8 +1814,15 @@ pub fn colonize_and_compost_cfg(
                 .saturating_add(near_bonus)
                 .max(1)
                 .min(4);
-            c.set_mycelium(before.saturating_add(add));
-            world.set_cell(ox, oy, c);
+            let strain = mycelium_strain_at(world, ox, oy)
+                .or_else(|| mycelium_strain_at(world, gx, gy));
+            let cap = if c.material == MaterialId::Organic {
+                255
+            } else {
+                MYCELIUM_MINERAL_CAP
+            };
+            let _ = c;
+            add_mycelium_with_strain(world, ox, oy, add, strain, cap);
             energy += MYCELIUM_ENERGY * (1.0 + 0.05 * n_h as f32);
         }
         let intensity = world
@@ -656,7 +1845,28 @@ pub fn colonize_and_compost_cfg(
 
 fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
     let gx = world.wrap_x(gx);
-    // Up first — networks grow toward the free surface before lateral fill.
+    let src_food = dist_to_organic(world, gx, gy);
+    let src_mat = world
+        .get_cell(gx, gy)
+        .map(|c| c.material)
+        .unwrap_or(MaterialId::Air);
+    let src_on_food = src_mat == MaterialId::Organic;
+    // Top up the tip from the wider same-strain network before probing —
+    // large connected banks fund exploratory hyphae through expensive terrain.
+    let local = mycelium_energy_at(world, gx, gy);
+    if local < MYCELIUM_PROBE_SUGAR_RESERVE {
+        let _ = pull_mycelium_cargo_to(
+            world,
+            gx,
+            gy,
+            MYCELIUM_PROBE_SUGAR_RESERVE - local,
+            1,
+        );
+    }
+    let src_sugar = mycelium_energy_at(world, gx, gy);
+    // Score neighbours: host cost + food-seek + surface-seek. Pick best.
+    // Last u8: sugar toll for this step (0 = free Organic thicken).
+    let mut best: Option<(i32, i32, i32, u8, u8, u8)> = None;
     for (dx, dy) in [
         (0i32, 1),
         (1, 1),
@@ -669,11 +1879,110 @@ fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
     ] {
         let nx = world.wrap_x(gx + dx);
         let ny = gy + dy;
-        if let Some(mut c) = world.get_cell(nx, ny) {
-            if c.material == MaterialId::Organic && c.mycelium() < 40 {
-                c.set_mycelium(c.mycelium().saturating_add(8));
-                world.set_cell(nx, ny, c);
-                return;
+        let Some(c) = world.get_cell(nx, ny) else {
+            continue;
+        };
+        if !hosts_mycelium(c.material) {
+            continue;
+        }
+        let dest_organic = c.material == MaterialId::Organic;
+        let dest_cap = if dest_organic {
+            255
+        } else {
+            MYCELIUM_MINERAL_CAP
+        };
+        // Organic may keep thickening via grow; mineral stops at conduit cap.
+        let skip_at = if dest_organic { 40 } else { MYCELIUM_MINERAL_CAP };
+        if c.mycelium() >= skip_at {
+            continue;
+        }
+        // Don't re-thicken a mineral cell that already touches food — that
+        // fights the conduit taper and paints fat mineral blobs again.
+        if !dest_organic
+            && c.mycelium() >= MYCELIUM_MINERAL_CONDUIT
+            && mineral_reached_food(world, nx, ny)
+        {
+            continue;
+        }
+        let moist = organic_cell_moist_frac(world, nx, ny);
+        let Some(host_cost) = mycelium_host_cost(c.material, moist) else {
+            continue;
+        };
+        // Virgin mineral probes: moist sand/soil stay freely seekable;
+        // dry / hard rock costs sugar scaled by host difficulty so only
+        // funded networks traverse hostile terrain.
+        let sugar_cost = if !dest_organic && c.mycelium() == 0 {
+            if moist >= MYCELIUM_FIELD_MOIST && host_cost <= 2 {
+                0
+            } else {
+                virgin_mineral_sugar_cost(c.material, moist).max(MYCELIUM_ENERGY_SPREAD_COST)
+            }
+        } else if !dest_organic && moist < MYCELIUM_FIELD_MOIST {
+            // Advancing along an already-thin dry conduit still costs a sip.
+            1
+        } else {
+            0
+        };
+        if sugar_cost > 0 && src_sugar < sugar_cost {
+            continue;
+        }
+        // Hard rock: rare crack only.
+        if matches!(c.material, MaterialId::Stone | MaterialId::Limestone) {
+            let h = hash_u64(world.seed.0, world.tick, nx as u64, ny as u64);
+            if h % 12 != 0 {
+                continue;
+            }
+        }
+        let food = dist_to_organic(world, nx, ny);
+        let toward_food = if food < src_food {
+            0
+        } else if food == src_food {
+            2
+        } else {
+            6
+        };
+        let climb = if dy > 0 && open_air_above(world, nx, ny) {
+            0
+        } else if dy > 0 {
+            1
+        } else if dy == 0 {
+            2
+        } else {
+            4
+        };
+        let organic_bonus = if dest_organic { 0 } else { 5 };
+        // From a fed Organic patch, don't flood mineral sideways — only
+        // probe mineral when it steps toward new food or open air.
+        let mineral_flood = if src_on_food && !dest_organic {
+            if food < src_food || open_air_above(world, nx, ny) {
+                0
+            } else {
+                18
+            }
+        } else {
+            0
+        };
+        let score =
+            host_cost as i32 + toward_food + climb + organic_bonus + mineral_flood;
+        let add = if dest_organic { 8 } else { 4 };
+        if best.map(|(bs, _, _, _, _, _)| score < bs).unwrap_or(true) {
+            best = Some((score, nx, ny, add, dest_cap, sugar_cost));
+        }
+    }
+    if let Some((_, nx, ny, add, cap, sugar_cost)) = best {
+        if sugar_cost > 0 {
+            let _ = take_mycelium_energy(world, gx, gy, sugar_cost);
+        }
+        let strain = Some(ensure_mycelium_strain(world, gx, gy));
+        add_mycelium_with_strain(world, nx, ny, add, strain, cap);
+        // Seed a sip of sugar onto the new tip so the corridor can keep going.
+        if sugar_cost > 0 {
+            let tip = mycelium_energy_at(world, gx, gy);
+            if tip > 0 {
+                let seed = take_mycelium_energy(world, gx, gy, 1);
+                if seed > 0 {
+                    add_mycelium_energy(world, nx, ny, seed);
+                }
             }
         }
     }
@@ -732,6 +2041,7 @@ pub fn fruiting_surface_ready(world: &World, gx: i32) -> Option<i32> {
         let Some(c) = world.get_cell(gx, y) else {
             continue;
         };
+        // Fruiting bed is still Organic (food); feeders below may be mineral.
         if c.material != MaterialId::Organic || c.mycelium() < MYCELIUM_EMERGE_MIN {
             continue;
         }
@@ -750,13 +2060,13 @@ pub fn fruiting_surface_ready(world: &World, gx: i32) -> Option<i32> {
 }
 
 /// Surface Organic must connect to deeper mycelium (grew upward to breach).
+/// Feeders may be Organic or mineral corridors.
 fn mycelium_breached_from_below(world: &World, gx: i32, surface_y: i32) -> bool {
-    // Same-column deeper thread, or a neighbour column feeder at/below.
     for dy in 1..=4 {
         let y = surface_y - dy;
         if matches!(
             world.get_cell(gx, y),
-            Some(c) if c.material == MaterialId::Organic && c.mycelium() > 0
+            Some(c) if c.mycelium() > 0
         ) {
             return true;
         }
@@ -767,7 +2077,7 @@ fn mycelium_breached_from_below(world: &World, gx: i32, surface_y: i32) -> bool 
             let y = surface_y - dy;
             if matches!(
                 world.get_cell(nx, y),
-                Some(c) if c.material == MaterialId::Organic && c.mycelium() >= 16
+                Some(c) if c.mycelium() >= 16
             ) {
                 return true;
             }
@@ -880,27 +2190,41 @@ pub fn count_fungi_near(
 /// Seed a faint mycelium patch on Organic near `(gx, gy)`.
 pub fn seed_mycelium_near(world: &mut World, gx: i32, gy: i32, amount: u8) {
     if let Some((ox, oy)) = find_organic_xy(world, gx, gy) {
-        if let Some(mut c) = world.get_cell(ox, oy) {
-            c.set_mycelium(c.mycelium().saturating_add(amount).min(48));
-            world.set_cell(ox, oy, c);
-        }
+        let strain = mycelium_strain_at(world, ox, oy).or_else(|| {
+            let s = alloc_mycelium_strain(world);
+            Some(s)
+        });
+        add_mycelium_with_strain(world, ox, oy, amount, strain, 48);
     }
 }
 
 /// Plant a mycelium infection — no living fruiting body.
 ///
-/// Seeds the nearest Organic and a short column below so the network has
-/// a feeder for later surface emergence ([`mycelium_breached_from_below`]).
-/// Returns the surface Organic cell infected.
+/// Seeds the nearest host (prefer Organic) and a short feeder column below
+/// so the network can later breach ([`mycelium_breached_from_below`]).
+/// Returns the surface cell infected.
 pub fn infect_mycelium_at(world: &mut World, gx: i32, gy: i32) -> Option<(i32, i32)> {
+    infect_mycelium_with_lineage(world, gx, gy, None)
+}
+
+/// [`infect_mycelium_at`] plus an optional lineage stamp for later emergence.
+pub fn infect_mycelium_with_lineage(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    lineage: Option<(Genome, Vec<BodyModule>)>,
+) -> Option<(i32, i32)> {
     let (ox, oy) = find_organic_xy(world, gx, gy)?;
+    // Each inoculum event is a new strain that *shares* free cream room
+    // with any strains already on the cell (never wipes neighbours).
+    let strain = alloc_mycelium_strain(world);
     let mut hit = false;
     for dy in 0..=3 {
         let y = oy - dy;
-        let Some(mut c) = world.get_cell(ox, y) else {
+        let Some(c) = world.get_cell(ox, y) else {
             break;
         };
-        if c.material != MaterialId::Organic {
+        if !hosts_mycelium(c.material) {
             break;
         }
         let add = if dy == 0 {
@@ -908,15 +2232,31 @@ pub fn infect_mycelium_at(world: &mut World, gx: i32, gy: i32) -> Option<(i32, i
         } else {
             (MYCELIUM_INOCULUM_AMOUNT / 2).max(8)
         };
-        c.set_mycelium(
-            c.mycelium()
-                .saturating_add(add)
-                .min(MYCELIUM_INOCULUM_CAP),
-        );
-        world.set_cell(ox, y, c);
+        // Mineral feeders take a thinner inoculum into the mineral conduit cap.
+        let (add, cap) = if c.material == MaterialId::Organic {
+            (add, MYCELIUM_INOCULUM_CAP)
+        } else {
+            ((add / 2).max(4), MYCELIUM_MINERAL_CAP)
+        };
+        add_mycelium_with_strain(world, ox, y, add, Some(strain), cap);
+        // Starter sugar so new inoculum can afford mineral probes soon.
+        if c.material == MaterialId::Organic {
+            add_mycelium_energy(world, ox, y, 12);
+        } else {
+            add_mycelium_energy(world, ox, y, 4);
+        }
         hit = true;
     }
-    hit.then_some((ox, oy))
+    if hit {
+        if let Some((genome, body)) = lineage {
+            // Bind strain first so cell stamp can see the dominant id.
+            bind_strain_lineage(world, strain, genome.clone(), body.clone());
+            stamp_mycelium_lineage(world, ox, oy, genome, body);
+        }
+        Some((ox, oy))
+    } else {
+        None
+    }
 }
 
 /// Mycelium field raises a surface stalk once a moist network has climbed
@@ -988,18 +2328,33 @@ pub fn try_emergent_fruiting(
     if h % MYCELIUM_EMERGE_ODDS != 0 {
         return None;
     }
-    // Spend field intensity — fruiting costs the network.
-    if let Some(mut bed) = world.get_cell(gx, air_y - 1) {
-        if bed.material == MaterialId::Organic {
-            bed.set_mycelium(bed.mycelium().saturating_sub(MYCELIUM_EMERGE_COST));
-            world.set_cell(gx, air_y - 1, bed);
-        }
+    // Spend field intensity + banked sugar — fruiting costs the network.
+    if world
+        .get_cell(gx, air_y - 1)
+        .is_some_and(|c| hosts_mycelium(c.material) && c.mycelium() > 0)
+    {
+        reduce_mycelium_shares(world, gx, air_y - 1, MYCELIUM_EMERGE_COST);
+        let _ = take_mycelium_energy(world, gx, air_y - 1, MYCELIUM_EMERGE_ENERGY_COST);
     }
-    let body = crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus();
+    // Prefer stamped editor / spore lineage; fall back to the stock template.
+    let (body, genome) = if let Some(lin) = nearest_mycelium_lineage(world, gx, air_y - 1) {
+        (lin.body, lin.genome)
+    } else {
+        (
+            crate::blueprint::Blueprint::minimal_fungus().modules_relative_to_nucleus(),
+            {
+                let mut g = Genome::default();
+                g.digest_rate = 1.0;
+                g
+            },
+        )
+    };
+    if !body.iter().any(|(_, _, m)| *m == ModuleId::Digest) {
+        return None;
+    }
     let tank = 40.0f32;
     let mut child = Atom::from_body(gx, air_y, tank, body);
-    apply_genome(&mut child, Genome::default());
-    child.genome.digest_rate = 1.0;
+    apply_genome(&mut child, genome);
     child.energy = (tank * MYCELIUM_EMERGE_ENERGY_FRAC).clamp(1.0, child.energy_max);
     // Mature before sporing — emergence must not immediately flood.
     child.cooldown = FUNGUS_SPORE_PERIOD;
@@ -1105,8 +2460,22 @@ pub fn try_spore(
         FUNGUS_SPORE_PERIOD / 2
     };
 
-    // Spores inoculate mycelium — they do not stamp a new fruiting body.
-    if let Some((gx, gy)) = infect_mycelium_at(world, wx, gy) {
+    // Mutate genome + body on release — wind/rhizomorph inoculum carries
+    // a varied lineage; emergent stalks later match the painted mushroom.
+    let child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
+    let child_body = mutate_body(
+        &atom.body,
+        child_genome.clone_fidelity,
+        world.seed.0,
+        tick,
+        entity_id,
+    );
+    let lineage = (child_genome, child_body);
+
+    // Spores inoculate mycelium — they do not stamp a living fruiting Atom.
+    if let Some((gx, gy)) =
+        infect_mycelium_with_lineage(world, wx, gy, Some(lineage.clone()))
+    {
         if stalk {
             // Spent mushroom collapses → corpse → litter → Organic.
             atom.energy = 0.0;
@@ -1117,9 +2486,11 @@ pub fn try_spore(
             collapse: stalk,
         };
     }
-    // No Organic at landing — hibernate for a later inoculum wake.
+    // No host at landing — hibernate mutated packet for a later inoculum wake.
     if bank_cfg.enabled {
-        let packet = packet_from_child(SporeKind::Fungus, atom, tick, stalk);
+        let mut packet = packet_from_child(SporeKind::Fungus, atom, tick, stalk);
+        packet.genome = lineage.0;
+        packet.body = lineage.1;
         let wx = world.wrap_x(wx);
         if world.spore_bank.deposit(wx, gy, packet, bank_cfg) {
             if stalk {
@@ -1270,6 +2641,90 @@ fn hash_u64(a: u64, b: u64, c: u64, salt: u64) -> u64 {
     x
 }
 
+/// Scan every cream cell, then pick up to `max` for this pulse.
+///
+/// ~¾ of the budget prefers frontier cells (`myc < 80`) so networks keep
+/// climbing / seeking Organic; the rest rotates through dense hubs so they
+/// still thicken, compost, and push outward. Without this, a fixed
+/// first-N scan froze growth once hubs filled the old 256-cell cap.
+fn collect_mycelium_field_cells(
+    world: &World,
+    tick: u64,
+    seed: u64,
+    max: usize,
+) -> Vec<(i32, i32, u8, MaterialId)> {
+    use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
+
+    let mut frontier: Vec<(i32, i32, u8, MaterialId)> = Vec::new();
+    let mut core: Vec<(i32, i32, u8, MaterialId)> = Vec::new();
+    let mut coords: Vec<_> = world.chunks.keys().copied().collect();
+    if coords.is_empty() || max == 0 {
+        return Vec::new();
+    }
+    coords.sort_by_key(|c| (c.cy, c.cx));
+    // Rotate chunk visit order each pulse so no region is permanently last.
+    let pulse = (tick / MYCELIUM_FIELD_PERIOD.max(1)) as usize;
+    let start = pulse % coords.len();
+    coords.rotate_left(start);
+
+    for coord in coords {
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let gx = coord.cx * CHUNK_CELLS_W as i32 + lx as i32;
+                let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
+                let Some(c) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if !hosts_mycelium(c.material) {
+                    continue;
+                }
+                let myc = c.mycelium();
+                if myc == 0 {
+                    continue;
+                }
+                if myc < 80 {
+                    frontier.push((gx, gy, myc, c.material));
+                } else {
+                    core.push((gx, gy, myc, c.material));
+                }
+            }
+        }
+    }
+
+    let n_front = (max * 3 / 4).max(1).min(max);
+    let mut out = take_rotated_sample(&mut frontier, tick, seed, 0xF70A, n_front);
+    let remain = max.saturating_sub(out.len());
+    out.extend(take_rotated_sample(&mut core, tick, seed, 0xC0A1, remain));
+    // If one tier was short, top up from leftovers of the other.
+    if out.len() < max && !frontier.is_empty() {
+        let need = max - out.len();
+        out.extend(take_rotated_sample(&mut frontier, tick, seed, 0xF70B, need));
+    }
+    if out.len() < max && !core.is_empty() {
+        let need = max - out.len();
+        out.extend(take_rotated_sample(&mut core, tick, seed, 0xC0A2, need));
+    }
+    out
+}
+
+fn take_rotated_sample(
+    cells: &mut Vec<(i32, i32, u8, MaterialId)>,
+    tick: u64,
+    seed: u64,
+    salt: u64,
+    n: usize,
+) -> Vec<(i32, i32, u8, MaterialId)> {
+    if cells.is_empty() || n == 0 {
+        return Vec::new();
+    }
+    // Deterministic shuffle-lite: sort by hash(tick, pos) then take prefix.
+    cells.sort_by_key(|&(gx, gy, myc, _)| {
+        hash_u64(seed, tick ^ salt, gx as u64, gy as u64 ^ (myc as u64))
+    });
+    let take = n.min(cells.len());
+    cells.drain(..take).collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1398,11 +2853,24 @@ mod tests {
         org.sat = Sat(200);
         org.set_mycelium(255);
         w.set_cell(4, 2, org);
+        let strain = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(strain, 255)]);
         // Neighbour Air can receive excess from compaction.
         w.set_cell(4, 3, Cell::air());
         assert!(compost_organic_to_soil(&mut w, 4, 2));
         let soil = w.get_cell(4, 2).unwrap();
         assert_eq!(soil.material, MaterialId::Soil);
+        assert!(
+            soil.mycelium() > 0 && soil.mycelium() <= MYCELIUM_COMPOST_RESIDUAL,
+            "compost must leave a residual cream corridor (got {})",
+            soil.mycelium()
+        );
+        assert!(
+            mycelium_shares_at(&w, 4, 2)
+                .iter()
+                .any(|&(s, a)| s == strain && a > 0),
+            "residual corridor must keep strain ownership"
+        );
         let soil_cap = water_capacity(MaterialId::Soil);
         assert_eq!(soil.sat.0, 200u8.min(soil_cap));
         let above = w.get_cell(4, 3).unwrap();
@@ -1410,6 +2878,145 @@ mod tests {
         assert!(
             total >= 200,
             "water must not vanish on compost (total={total})"
+        );
+    }
+
+    #[test]
+    fn field_sample_prefers_frontier_when_over_cap() {
+        let mut w = litter_plot();
+        // Dense saturated hub — would have monopolized the old fixed scan.
+        for x in 0..8 {
+            for y in 1..6 {
+                let mut sand = Cell::solid(MaterialId::Sand);
+                sand.sat = Sat(180);
+                sand.set_mycelium(200);
+                w.set_cell(x, y, sand);
+                let s = alloc_mycelium_strain(&mut w);
+                w.mycelium_strains.insert((x, y), vec![(s, 200)]);
+            }
+        }
+        // Thin frontier corridor toward fresh Organic.
+        for y in 1..=4 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            sand.set_mycelium(20);
+            w.set_cell(10, y, sand);
+            let s = alloc_mycelium_strain(&mut w);
+            w.mycelium_strains.insert((10, y), vec![(s, 20)]);
+        }
+        let mut food = Cell::solid(MaterialId::Organic);
+        food.sat = Sat(160);
+        w.set_cell(10, 5, food);
+
+        let picked = collect_mycelium_field_cells(&w, MYCELIUM_FIELD_PERIOD, w.seed.0, 16);
+        assert_eq!(picked.len(), 16, "sample respects process budget");
+        let frontier_hits = picked.iter().filter(|&&(gx, _, myc, _)| gx == 10 && myc < 80).count();
+        assert!(
+            frontier_hits >= 3,
+            "frontier corridor must get slots when hubs overflow the cap (hits={frontier_hits})"
+        );
+    }
+
+    #[test]
+    fn virgin_organic_compost_does_not_invent_cream() {
+        let mut w = litter_plot();
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(120);
+        // No mycelium — same path carbon surface oxidation uses.
+        w.set_cell(4, 2, org);
+        w.set_cell(4, 3, Cell::air());
+        assert!(compost_organic_to_soil(&mut w, 4, 2));
+        let soil = w.get_cell(4, 2).unwrap();
+        assert_eq!(soil.material, MaterialId::Soil);
+        assert_eq!(
+            soil.mycelium(),
+            0,
+            "virgin Organic→Soil must not invent orphan cream"
+        );
+        assert!(
+            mycelium_shares_at(&w, 4, 2).is_empty(),
+            "virgin compost must leave no strain shares"
+        );
+        assert!(
+            soil.flags.contains(CellFlags::COMPACTED),
+            "humified soil still marks compacted"
+        );
+    }
+
+    #[test]
+    fn field_clears_isolated_oxidation_ghost_cream() {
+        let mut w = litter_plot();
+        let mut soil = Cell::solid(MaterialId::Soil);
+        soil.sat = Sat(160);
+        soil.flags.set(CellFlags::COMPACTED);
+        soil.set_mycelium(1); // fake cream, no shares
+        w.set_cell(4, 2, soil);
+        // Real hub far enough that 8-neighbour check does not see it.
+        let mut hub = Cell::solid(MaterialId::Sand);
+        hub.sat = Sat(160);
+        hub.set_mycelium(80);
+        w.set_cell(8, 1, hub);
+        let strain = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((8, 1), vec![(strain, 80)]);
+        w.tick = MYCELIUM_FIELD_PERIOD;
+        step_mycelium_field(&mut w);
+        assert_eq!(
+            w.get_cell(4, 2).map(|c| c.mycelium()),
+            Some(0),
+            "isolated myc=1 soil with no shares should clear as oxidation ghost"
+        );
+    }
+
+    #[test]
+    fn field_clears_isolated_orphan_cream_of_any_intensity() {
+        let mut w = litter_plot();
+        // Fat orphan (e.g. roof-collapse debris that dropped `_pad` without shares).
+        let mut loose = Cell::solid(MaterialId::LooseLimestone);
+        loose.sat = Sat(40);
+        loose.set_mycelium(28);
+        w.set_cell(4, 2, loose);
+        // Dense owned hub fills the sample budget; orphan must still heal.
+        for x in 10..26 {
+            for y in 1..=4 {
+                let mut sand = Cell::solid(MaterialId::Sand);
+                sand.sat = Sat(180);
+                sand.set_mycelium(200);
+                w.set_cell(x, y, sand);
+                let s = alloc_mycelium_strain(&mut w);
+                w.mycelium_strains.insert((x, y), vec![(s, 200)]);
+            }
+        }
+        w.tick = MYCELIUM_FIELD_PERIOD;
+        step_mycelium_field(&mut w);
+        assert_eq!(
+            w.get_cell(4, 2).map(|c| c.mycelium()),
+            Some(0),
+            "isolated shareless cream must clear even when hubs fill the process budget"
+        );
+        assert!(mycelium_shares_at(&w, 4, 2).is_empty());
+    }
+
+    #[test]
+    fn orphan_cream_beside_owned_network_inherits_strain() {
+        let mut w = litter_plot();
+        let mut hub = Cell::solid(MaterialId::Sand);
+        hub.sat = Sat(160);
+        hub.set_mycelium(80);
+        w.set_cell(4, 2, hub);
+        let strain = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(strain, 80)]);
+        let mut orphan = Cell::solid(MaterialId::LooseLimestone);
+        orphan.sat = Sat(40);
+        orphan.set_mycelium(28);
+        w.set_cell(5, 2, orphan);
+        w.tick = MYCELIUM_FIELD_PERIOD;
+        step_mycelium_field(&mut w);
+        assert_eq!(w.get_cell(5, 2).map(|c| c.mycelium()), Some(28));
+        assert!(
+            mycelium_shares_at(&w, 5, 2)
+                .iter()
+                .any(|&(s, a)| s == strain && a == 28),
+            "fringe orphan must inherit neighbour strain, not mint / clear"
         );
     }
 
@@ -1486,6 +3093,7 @@ mod tests {
     #[test]
     fn mycelium_field_spreads_without_fruiting_body() {
         let mut w = litter_plot();
+        let s = alloc_mycelium_strain(&mut w);
         for y in 1..=3 {
             let mut org = Cell::solid(MaterialId::Organic);
             org.sat = Sat(160);
@@ -1496,10 +3104,16 @@ mod tests {
             c.set_mycelium(48);
             w.set_cell(4, 2, c);
         }
+        w.mycelium_strains.insert((4, 2), vec![(s, 48)]);
+        // Keep compost from wiping the column during the thicken check.
+        let cfg = FungiConfig {
+            soil_mycelium_threshold: 250,
+            soil_convert_odds: 50_000,
+        };
         let myc0 = max_mycelium_near(&w, 4, 2);
         for t in 0..80u64 {
             w.tick = t * MYCELIUM_FIELD_PERIOD;
-            step_mycelium_field(&mut w);
+            step_mycelium_field_cfg(&mut w, &cfg);
         }
         let myc1 = max_mycelium_near(&w, 4, 2);
         assert!(myc1 > myc0, "field must thicken (was {myc0}, now {myc1})");
@@ -1652,10 +3266,21 @@ mod tests {
 
     #[test]
     fn fruiting_body_wind_spore_inoculates_and_collapses() {
-        let mut w = litter_plot();
-        // Parent column + a downwind Organic bank for the spore to land on.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        for x in 0..80 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 1, sand);
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        // Parent column + a far downwind Organic bank for long wind travel.
         rich_moist_surface(&mut w, 4, 140);
-        for x in 5..12 {
+        for x in 12..48 {
             rich_moist_surface(&mut w, x, 80);
             add_soft_litter(&mut w, x, 20);
         }
@@ -1755,11 +3380,13 @@ mod tests {
     #[test]
     fn fast_fungi_config_composts_threaded_organic() {
         let mut w = litter_plot();
+        let s = alloc_mycelium_strain(&mut w);
         for y in 1..=3 {
             let mut org = Cell::solid(MaterialId::Organic);
             org.sat = Sat(120);
             org.set_mycelium(200);
             w.set_cell(4, y, org);
+            w.mycelium_strains.insert((4, y), vec![(s, 200)]);
         }
         let cfg = FungiConfig {
             soil_mycelium_threshold: 100,
@@ -1779,5 +3406,521 @@ mod tests {
             }
         }
         assert!(saw_soil, "low-odds FungiConfig must compost Organic → Soil");
+    }
+
+    #[test]
+    fn organic_field_banks_network_sugar() {
+        let mut w = litter_plot();
+        // Bedrock jacket so the Organic hub cannot bleed sugar into a sand tip.
+        for y in 1..=3 {
+            w.set_cell(3, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(5, y, Cell::solid(MaterialId::Bedrock));
+        }
+        w.set_cell(4, 1, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(4, 3, Cell::solid(MaterialId::Bedrock));
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(200);
+        org.set_mycelium(40);
+        w.set_cell(4, 2, org);
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(s, 40)]);
+        for t in 0..12u64 {
+            w.tick = t * MYCELIUM_FIELD_PERIOD;
+            step_mycelium_field(&mut w);
+        }
+        assert!(
+            mycelium_energy_at(&w, 4, 2) >= 8,
+            "moist Organic cream should bank network sugar"
+        );
+    }
+
+    #[test]
+    fn network_sugar_moves_with_cell_swap() {
+        let mut w = litter_plot();
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(160);
+        sand.set_mycelium(20);
+        w.set_cell(4, 2, sand);
+        w.set_cell(5, 2, Cell::air());
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(s, 20)]);
+        w.mycelium_energy.insert((4, 2), 40);
+        swap_cells_preserving_mycelium(&mut w, 4, 2, 5, 2);
+        assert_eq!(mycelium_energy_at(&w, 5, 2), 40);
+        assert_eq!(mycelium_energy_at(&w, 4, 2), 0);
+    }
+
+    #[test]
+    fn same_strain_cream_equalizes_sugar_cargo() {
+        let mut w = litter_plot();
+        let s = alloc_mycelium_strain(&mut w);
+        for x in 4..=5 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(160);
+            org.set_mycelium(40);
+            w.set_cell(x, 2, org);
+            w.mycelium_strains.insert((x, 2), vec![(s, 40)]);
+        }
+        w.mycelium_energy.insert((4, 2), 30);
+        w.mycelium_energy.insert((5, 2), 2);
+        let colonized = vec![
+            (4, 2, 40, MaterialId::Organic),
+            (5, 2, 40, MaterialId::Organic),
+        ];
+        equalize_mycelium_cargo(&mut w, &colonized);
+        assert!(
+            mycelium_energy_at(&w, 4, 2) < 30,
+            "rich cell should bleed sugar"
+        );
+        assert!(
+            mycelium_energy_at(&w, 5, 2) > 2,
+            "poor neighbour should receive sugar"
+        );
+        assert_eq!(
+            mycelium_energy_at(&w, 4, 2) + mycelium_energy_at(&w, 5, 2),
+            32,
+            "sugar conserved"
+        );
+    }
+
+    #[test]
+    fn same_strain_pulls_sugar_across_distance() {
+        let mut w = litter_plot();
+        let s = alloc_mycelium_strain(&mut w);
+        // Hub at x=4, dry tip at x=9 (within pull radius 6).
+        for x in [4, 9] {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = if x == 4 { Sat(200) } else { Sat(10) };
+            org.set_mycelium(40);
+            w.set_cell(x, 2, org);
+            w.mycelium_strains.insert((x, 2), vec![(s, 40)]);
+        }
+        w.mycelium_energy.insert((4, 2), 40);
+        w.mycelium_energy.insert((9, 2), 0);
+        let (got_s, _) = pull_mycelium_cargo_to(&mut w, 9, 2, 4, 0);
+        assert!(got_s > 0, "tip should pull sugar from distant hub");
+        assert_eq!(
+            mycelium_energy_at(&w, 4, 2) + mycelium_energy_at(&w, 9, 2),
+            40,
+            "sugar conserved across pull"
+        );
+    }
+
+    #[test]
+    fn hungry_front_cannot_free_probe_dry_stone() {
+        let mut w = litter_plot();
+        // Dry sand tip with cream but no sugar, facing dry stone.
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(0);
+        sand.set_mycelium(20);
+        w.set_cell(4, 2, sand);
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(s, 20)]);
+        let mut stone = Cell::solid(MaterialId::Stone);
+        stone.sat = Sat(0);
+        w.set_cell(5, 2, stone);
+        // Force many spread attempts — without sugar, stone must stay clean.
+        for t in 0..200u64 {
+            w.tick = t;
+            spread_mycelium_once(&mut w, 4, 2);
+        }
+        assert_eq!(
+            w.get_cell(5, 2).unwrap().mycelium(),
+            0,
+            "broke tip must not free-probe dry stone"
+        );
+    }
+
+    #[test]
+    fn funded_front_can_probe_dry_sand() {
+        let mut w = litter_plot();
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(0);
+        sand.set_mycelium(20);
+        w.set_cell(4, 2, sand);
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(s, 20)]);
+        w.mycelium_energy.insert((4, 2), 30);
+        // Empty dry sand neighbour — cheaper than stone.
+        let mut dest = Cell::solid(MaterialId::Sand);
+        dest.sat = Sat(0);
+        w.set_cell(5, 2, dest);
+        // Place Organic farther so seek still has a goal.
+        let mut food = Cell::solid(MaterialId::Organic);
+        food.sat = Sat(200);
+        w.set_cell(8, 2, food);
+        let mut hit = false;
+        for t in 0..80u64 {
+            w.tick = t;
+            spread_mycelium_once(&mut w, 4, 2);
+            if w.get_cell(5, 2).unwrap().mycelium() > 0 {
+                hit = true;
+                break;
+            }
+        }
+        assert!(hit, "sugar-funded tip should probe dry sand toward food");
+    }
+
+    #[test]
+    fn fruiting_body_can_sip_network_sugar() {
+        let mut w = litter_plot();
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(200);
+        org.set_mycelium(80);
+        w.set_cell(4, 2, org);
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(s, 80)]);
+        w.mycelium_energy.insert((4, 2), 50);
+        let taken = sip_mycelium_energy_near(&mut w, 4, 3, MYCELIUM_ENERGY_SIP_MAX);
+        assert_eq!(taken, MYCELIUM_ENERGY_SIP_MAX);
+        assert_eq!(mycelium_energy_at(&w, 4, 2), 50 - MYCELIUM_ENERGY_SIP_MAX);
+    }
+
+    #[test]
+    fn mineral_cream_soft_caps_while_seeking() {
+        let mut w = litter_plot();
+        // Isolated moist sand — seeking, no Organic in reach.
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(200);
+        sand.set_mycelium(10);
+        w.set_cell(4, 2, sand);
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(s, 10)]);
+        for t in 0..200u64 {
+            w.tick = t * MYCELIUM_FIELD_PERIOD;
+            step_mycelium_field(&mut w);
+        }
+        let myc = w.get_cell(4, 2).unwrap().mycelium();
+        assert!(
+            myc > 10 && myc <= MYCELIUM_MINERAL_CAP,
+            "seeking mineral should thicken but stay ≤ mineral cap (got {myc})"
+        );
+    }
+
+    #[test]
+    fn mineral_corridor_tapers_after_reaching_organic() {
+        let mut w = litter_plot();
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(200);
+        sand.set_mycelium(MYCELIUM_MINERAL_CAP);
+        w.set_cell(4, 2, sand);
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains
+            .insert((4, 2), vec![(s, MYCELIUM_MINERAL_CAP)]);
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(200);
+        org.set_mycelium(80);
+        w.set_cell(5, 2, org);
+        w.mycelium_strains.insert((5, 2), vec![(s, 80)]);
+        for t in 0..120u64 {
+            w.tick = t * MYCELIUM_FIELD_PERIOD;
+            step_mycelium_field(&mut w);
+        }
+        let myc = w.get_cell(4, 2).unwrap().mycelium();
+        assert!(
+            myc <= MYCELIUM_MINERAL_CONDUIT + 4,
+            "fed mineral corridor should taper toward conduit (got {myc})"
+        );
+        assert!(myc > 0, "conduit must remain connected");
+    }
+
+    #[test]
+    fn mycelium_spreads_through_moist_sand_toward_organic() {
+        let mut w = litter_plot();
+        // Moist sand corridor between a seeded cell and distant Organic.
+        for x in 4..=7 {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 2, sand);
+        }
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(160);
+        w.set_cell(8, 2, org);
+        if let Some(mut c) = w.get_cell(4, 2) {
+            c.set_mycelium(40);
+            w.set_cell(4, 2, c);
+        }
+        // Seed strain + a little sugar so tip top-up / ensure path is happy.
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(s, 40)]);
+        w.mycelium_energy.insert((4, 2), 12);
+        for _ in 0..48 {
+            spread_mycelium_once(&mut w, 4, 2);
+            // Keep walking the frontier rightward if present.
+            for x in 4..=7 {
+                if w.get_cell(x, 2).map(|c| c.mycelium() > 0).unwrap_or(false) {
+                    spread_mycelium_once(&mut w, x, 2);
+                }
+            }
+        }
+        let sand_threaded = (5..=7).any(|x| {
+            w.get_cell(x, 2)
+                .map(|c| c.material == MaterialId::Sand && c.mycelium() > 0)
+                .unwrap_or(false)
+        });
+        let org_hit = w
+            .get_cell(8, 2)
+            .map(|c| c.material == MaterialId::Organic && c.mycelium() > 0)
+            .unwrap_or(false);
+        assert!(
+            sand_threaded || org_hit,
+            "mycelium must network through moist sand toward Organic (sand={sand_threaded} org={org_hit})"
+        );
+    }
+
+    #[test]
+    fn inoculum_mints_strain_and_spread_inherits() {
+        let mut w = litter_plot();
+        for y in 1..=3 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(160);
+            w.set_cell(4, y, org);
+            w.set_cell(5, y, {
+                let mut o = Cell::solid(MaterialId::Organic);
+                o.sat = Sat(160);
+                o
+            });
+        }
+        let (ox, oy) = infect_mycelium_at(&mut w, 4, 4).expect("inoculum");
+        let strain = mycelium_strain_at(&w, ox, oy).expect("inoculum must mint a strain");
+        assert!(
+            mycelium_shares_at(&w, ox, oy - 1)
+                .iter()
+                .any(|&(s, a)| s == strain && a > 0),
+            "feeder column carries the inoculum strain share"
+        );
+        for _ in 0..16 {
+            spread_mycelium_once(&mut w, ox, oy);
+        }
+        let neighbor_strain = (1..=3).find_map(|y| {
+            mycelium_shares_at(&w, 5, y)
+                .iter()
+                .find(|&&(s, a)| s == strain && a > 0)
+                .map(|&(s, _)| s)
+        });
+        assert_eq!(
+            neighbor_strain,
+            Some(strain),
+            "spread must carry source strain share"
+        );
+        let [r, g, b] = mycelium_strain_rgb(strain);
+        assert!(
+            r.max(g).max(b) >= 200,
+            "strain colors should be bright (got {r},{g},{b})"
+        );
+    }
+
+    #[test]
+    fn overlay_keeps_thin_corridors_neon() {
+        let rgba = mycelium_shares_overlay_rgba(&[(7, 8)], 8);
+        assert!(
+            rgba[3] >= 200,
+            "thin cream must stay high-alpha on M overlay (got a={})",
+            rgba[3]
+        );
+        assert!(
+            rgba[0].max(rgba[1]).max(rgba[2]) >= 180,
+            "strain color must stay bright"
+        );
+    }
+
+    #[test]
+    fn cell_swap_migrates_strain_shares() {
+        let mut w = litter_plot();
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(160);
+        sand.set_mycelium(40);
+        w.set_cell(4, 2, sand);
+        w.set_cell(5, 2, Cell::air());
+        let strain = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(strain, 40)]);
+        swap_cells_preserving_mycelium(&mut w, 4, 2, 5, 2);
+        assert_eq!(
+            w.get_cell(5, 2).map(|c| c.mycelium()),
+            Some(40),
+            "cream rides with the sand cell"
+        );
+        assert_eq!(
+            mycelium_shares_at(&w, 5, 2),
+            &[(strain, 40)][..],
+            "strain shares must follow the host"
+        );
+        assert!(
+            mycelium_shares_at(&w, 4, 2).is_empty(),
+            "vacated seat must not keep orphan shares"
+        );
+    }
+
+    #[test]
+    fn bedload_move_migrates_strain_shares() {
+        let mut w = litter_plot();
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.set_mycelium(55);
+        w.set_cell(3, 1, sand);
+        w.set_cell(6, 1, Cell::air());
+        let strain = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((3, 1), vec![(strain, 55)]);
+        // Simulate erosion: place grain at deposit, move meta, clear source.
+        let placed = w.get_cell(3, 1).unwrap();
+        w.set_cell(6, 1, placed);
+        move_mycelium_meta(&mut w, 3, 1, 6, 1);
+        w.set_cell(3, 1, Cell::air());
+        assert_eq!(mycelium_shares_at(&w, 6, 1), &[(strain, 55)][..]);
+        assert!(mycelium_shares_at(&w, 3, 1).is_empty());
+    }
+
+    #[test]
+    fn two_strains_share_one_cell_budget() {
+        let mut w = litter_plot();
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(160);
+        w.set_cell(4, 2, org);
+        let a = alloc_mycelium_strain(&mut w);
+        let b = alloc_mycelium_strain(&mut w);
+        add_mycelium_with_strain(&mut w, 4, 2, 40, Some(a), 255);
+        add_mycelium_with_strain(&mut w, 4, 2, 60, Some(b), 255);
+        let shares = mycelium_shares_at(&w, 4, 2);
+        let amt_a = shares
+            .iter()
+            .find(|(s, _)| *s == a)
+            .map(|(_, n)| *n)
+            .unwrap_or(0);
+        let amt_b = shares
+            .iter()
+            .find(|(s, _)| *s == b)
+            .map(|(_, n)| *n)
+            .unwrap_or(0);
+        assert_eq!(amt_a, 40, "strain A keeps its share");
+        assert_eq!(amt_b, 60, "strain B keeps its share");
+        assert_eq!(
+            w.get_cell(4, 2).unwrap().mycelium(),
+            100,
+            "_pad total must equal sum of shares"
+        );
+        // Fill remaining room — cannot exceed 255.
+        add_mycelium_with_strain(&mut w, 4, 2, 200, Some(a), 255);
+        assert_eq!(w.get_cell(4, 2).unwrap().mycelium(), 255);
+        let amt_a2 = mycelium_shares_at(&w, 4, 2)
+            .iter()
+            .find(|(s, _)| *s == a)
+            .map(|(_, n)| *n)
+            .unwrap_or(0);
+        assert_eq!(amt_a2, 195, "A only takes free room (40+155)");
+        assert_eq!(
+            mycelium_shares_at(&w, 4, 2)
+                .iter()
+                .find(|(s, _)| *s == b)
+                .map(|(_, n)| *n),
+            Some(60),
+            "B share untouched when A fills room"
+        );
+    }
+
+    #[test]
+    fn mycelium_refuses_bedrock_corridor() {
+        let mut w = litter_plot();
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(160);
+        org.set_mycelium(60);
+        w.set_cell(4, 2, org);
+        w.set_cell(5, 2, Cell::solid(MaterialId::Bedrock));
+        for _ in 0..24 {
+            spread_mycelium_once(&mut w, 4, 2);
+        }
+        assert_eq!(
+            w.get_cell(5, 2).map(|c| c.mycelium()).unwrap_or(0),
+            0,
+            "bedrock must not host mycelium"
+        );
+    }
+
+    #[test]
+    fn emergent_stalk_uses_stamped_lineage_body() {
+        let mut w = litter_plot();
+        rich_moist_surface(&mut w, 4, 140);
+        let custom: Vec<BodyModule> = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Digest),
+            (0, 2, ModuleId::Hypha),
+            (0, 3, ModuleId::Hypha),
+            (0, 4, ModuleId::Hypha),
+            (1, 1, ModuleId::ReproSpore),
+        ];
+        let mut g = Genome::default();
+        g.digest_rate = 1.35;
+        stamp_mycelium_lineage(&mut w, 4, 3, g, custom.clone());
+        let mut child = None;
+        for pulse in 0..2_000u64 {
+            let tick = pulse * MYCELIUM_EMERGE_PERIOD;
+            if let Some(a) = try_emergent_fruiting(&mut w, &[], tick, true) {
+                child = Some(a);
+                break;
+            }
+        }
+        let child = child.expect("lineage bed must raise a stalk");
+        let hyphae = child
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Hypha)
+            .count();
+        assert!(
+            hyphae >= 3,
+            "emergent stalk should match stamped tall hypha body, got {:?}",
+            child.body
+        );
+        assert!(
+            (child.genome.digest_rate - 1.35).abs() < 0.001,
+            "emergent genome should match lineage digest_rate"
+        );
+    }
+
+    #[test]
+    fn spore_inoculum_stamps_mutated_lineage() {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        for x in 0..80 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 1, sand);
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        rich_moist_surface(&mut w, 4, 140);
+        for x in 12..40 {
+            rich_moist_surface(&mut w, x, 80);
+        }
+        let mut atom = Atom::from_body(4, 4, 80.0, fungus_body());
+        apply_genome(&mut atom, {
+            let mut g = Genome::default();
+            g.digest_rate = 1.0;
+            g.clone_fidelity = 0.2; // messy offspring
+            g
+        });
+        atom.energy = atom.energy_max;
+        atom.cooldown = 0;
+        let cfg = crate::spore_bank::SporeBankConfig::default();
+        let mut inoculated = false;
+        for tick in 0..4_000u64 {
+            atom.gx = 4;
+            atom.gy = 4;
+            atom.energy = atom.energy_max;
+            atom.cooldown = 0;
+            match try_spore(&mut w, &mut atom, tick, 7, true, 1.0, &[4], &cfg) {
+                crate::spore_bank::DispersalResult::Inoculated { gx, gy, .. } => {
+                    assert!(
+                        w.mycelium_lineage.cells.contains_key(&(gx, gy))
+                            || nearest_mycelium_lineage(&w, gx, gy).is_some(),
+                        "spore must stamp lineage at inoculum"
+                    );
+                    inoculated = true;
+                    break;
+                }
+                _ => {}
+            }
+        }
+        assert!(inoculated, "surface stalk should eventually inoculate downwind");
     }
 }

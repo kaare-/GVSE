@@ -30,6 +30,7 @@ pub mod rules;
 pub mod save;
 pub mod shade;
 pub mod spore_bank;
+pub mod symbiosis;
 pub mod temperature;
 pub mod wind;
 pub mod worldgen;
@@ -41,8 +42,8 @@ pub use audit::{
 };
 pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{
-    falls_through_empty_air, grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain,
-    water_capacity, water_capacity_with, Cell, CellFlags, Sat,
+    falls_through_empty_air, grain_max_stable_step, hosts_mycelium, is_flow_erodible, is_grain,
+    is_repose_grain, water_capacity, water_capacity_with, Cell, CellFlags, Sat,
 };
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use blueprint::{
@@ -72,9 +73,16 @@ pub use spore_bank::{
     spore_bank_len, DormantSpore, SporeBank, SporeBankConfig, SporeKind, SPORE_BANK_PERIOD,
 };
 pub use fungi::{
-    add_soft_litter, compost_organic_to_soil, infect_mycelium_at, is_fungus, is_surface_stalk,
-    max_mycelium_near, seed_mycelium_near, soft_litter_at, step_mycelium_field,
-    step_mycelium_field_cfg, FungiConfig,
+    add_soft_litter, bind_strain_lineage, compost_organic_to_soil, infect_mycelium_at,
+    infect_mycelium_with_lineage, is_fungus, is_surface_stalk, lineage_for_strain_at,
+    max_mycelium_near, move_mycelium_meta, mycelium_energy_at, mycelium_shares_at,
+    mycelium_shares_overlay_rgba, mycelium_strain_at, mycelium_strain_rgb,
+    nearest_mycelium_lineage, pull_mycelium_cargo_to, seed_mycelium_near,
+    sip_mycelium_energy_near, soft_litter_at, stamp_mycelium_lineage, step_mycelium_field,
+    step_mycelium_field_cfg, strain_lineage,
+    swap_cells_preserving_mycelium, swap_mycelium_meta, FungiConfig, MyceliumLineage,
+    MyceliumLineageMap, FUNGUS_STALK_SPORE_MAX_DIST, FUNGUS_STALK_SPORE_MIN_DIST,
+    MYCELIUM_ENERGY_CAP,
 };
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
@@ -89,6 +97,10 @@ pub use organism::{
     Corpse, ModuleId, OrganismStore, SpawnFail, SporeRelease, CORPSE_SETTLE_LAND_TICKS,
     CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT,
     SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
+};
+pub use symbiosis::{
+    body_has_symbiont, probe_cream_link, probe_plant_link, step as step_symbiosis,
+    step_strain_trade, treaty_match, SymBias, SymNetFlow, SymProbe, SymTradeMode, SYM_MATCH_MIN,
 };
 pub use plant::{
     collect_live_photo_world_cells, collect_live_root_world_cells, collect_plant_sail_tops,

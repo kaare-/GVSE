@@ -22,6 +22,7 @@
 //! - `H` — toggle soft white humidity haze (vapor hint; clouds carry the look)
 //! - `N` — toggle cloud drawing (coagulated parcels; darker = wetter)
 //! - `T` — toggle temperature heatmap overlay
+//! - `M` — toggle mycelium strain overlay (bright per-network colors)
 //! - `G` — cycle geotech overlay (shear → σᵥ → wet → off)
 //! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
 //! - `F1` — toggle HUD chrome (bottom info/tools + block inspector)
@@ -237,6 +238,7 @@ fn geotech_overlay_color(score: f32, s_max: f32) -> Color {
     let a = (90.0 + t * 130.0) as u8;
     Color::from_rgba(r, g, b, a)
 }
+
 
 fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
     let u = ((temp_c - t_min) / (t_max - t_min).max(0.5)).clamp(0.0, 1.0);
@@ -584,6 +586,7 @@ async fn main() {
     let mut humidity_overlay = false;
     let mut clouds_on = true;
     let mut temp_overlay = false;
+    let mut mycelium_overlay = false;
     let mut geotech_mode = GeotechOverlayMode::Off;
     let mut show_hud = true;
     let mut editor = CreatureEditor::default();
@@ -799,6 +802,9 @@ async fn main() {
             }
             if is_key_pressed(KeyCode::T) {
                 temp_overlay = !temp_overlay;
+            }
+            if is_key_pressed(KeyCode::M) {
+                mycelium_overlay = !mycelium_overlay;
             }
             if is_key_pressed(KeyCode::G) {
                 geotech_mode = geotech_mode.next();
@@ -1111,10 +1117,17 @@ async fn main() {
                     // Fungi: plant as mycelium infection only — no visible
                     // fruiting body until a rich cream network emerges.
                     if editor.blueprint.is_valid_fungus() {
-                        match wk_voxel::infect_mycelium_at(&mut scene.world, gx, gy) {
+                        let body = editor.blueprint.modules_relative_to_nucleus();
+                        let genome = editor.blueprint.genome;
+                        match wk_voxel::infect_mycelium_with_lineage(
+                            &mut scene.world,
+                            gx,
+                            gy,
+                            Some((genome, body)),
+                        ) {
                             Some((ox, oy)) => {
                                 editor.status = format!(
-                                    "Inoculated mycelium at ({ox},{oy}) — stalk emerges later from a rich moist network"
+                                    "Inoculated mycelium at ({ox},{oy}) — stalk emerges later matching this design"
                                 );
                                 editor.spawn_picker = false;
                                 editor.open = false;
@@ -1342,6 +1355,54 @@ async fn main() {
             }
         }
 
+        // Mycelium strain overlay: bright per-network colors by cream intensity.
+        if mycelium_overlay {
+            for &x_copy in x_copies {
+                let x_shift = x_copy * scene.params.width_cols;
+                for x in 0..scene.params.width_cols {
+                    let sx = origin_x + (x + x_shift) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw {
+                        continue;
+                    }
+                    for y in y_min_vis..y_max_vis {
+                        let sy =
+                            origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
+                        if sy + cell_px < 0.0 || sy > sh {
+                            continue;
+                        }
+                        let Some(cell) = scene.world.get_cell(x, y) else {
+                            continue;
+                        };
+                        let myc = cell.mycelium();
+                        if myc == 0 {
+                            continue;
+                        }
+                        let shares = wk_voxel::mycelium_shares_at(&scene.world, x, y);
+                        let rgba = if shares.is_empty() {
+                            // Legacy unowned cream — stable hash color.
+                            let mut h = (x as u32).wrapping_mul(0x9E37_79B9)
+                                ^ (y as u32).wrapping_mul(0x85EB_CA6B);
+                            h ^= h >> 16;
+                            wk_voxel::mycelium_shares_overlay_rgba(&[(h | 1, myc)], myc)
+                        } else {
+                            // Multi-strain cells blend by share weight.
+                            wk_voxel::mycelium_shares_overlay_rgba(shares, myc)
+                        };
+                        if rgba[3] == 0 {
+                            continue;
+                        }
+                        draw_rectangle(
+                            sx,
+                            sy - cell_px,
+                            cell_px,
+                            cell_px,
+                            Color::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
+                        );
+                    }
+                }
+            }
+        }
+
         // Geotech overlay: G cycles shear → σᵥ → wet → off.
         if geotech_mode != GeotechOverlayMode::Off {
             match geotech_mode {
@@ -1486,6 +1547,7 @@ async fn main() {
                     &scene.temperature,
                     &scene.geotech,
                     &scene.world,
+                    &scene.organisms.atoms,
                     org,
                     corpse,
                     sw,
@@ -1541,7 +1603,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/H/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|Esc quit",
+                "Tab|Space|R|W/C/E/K/O|I|N/T/H/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

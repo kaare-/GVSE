@@ -172,14 +172,28 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 Features:
 
 - **Studio designs the fruiting body** (`F` template: Nucleus / Digest / Hypha
-  pixels). Plant it on Organic; it seeds the ground network.
-- **Mycelium is a ground field** (`Cell::_pad` on Organic), not something you
-  paint in the creature editor. `step_mycelium_field` thickens / spreads on
-  moist Organic even after the fruiting body dies; threads prefer climbing
-  toward free Air.
-- Networks that **breach the surface from below** can emerge a **surface
-  stalk**. Default seats prefer Air-on-Organic/Soil; buried bodies
-  rhizomorph-hop locally; stalks wind-disperse spores far (`ReproSpore`).
+  pixels). Plant stamps cream **and** a lineage so later stalks match the
+  painted mushroom (mutated on spore release).
+- **Mycelium is a ground field** (`Cell::_pad` on Organic + mineral
+  corridors: moist Soil/Sand easy, rock hard) plus sparse **network sugar**
+  (`mycelium_energy`). Goal-seeks Organic and the free surface; Organic
+  colonies thicken and bank sugar, mineral stays a thin search / conduit
+  that tapers after food is found; dry fade disconnects, remoisten
+  reconnects; compost leaves residual cream on Soil (square Soil patches =
+  per-cell humify). Press **`M`** for a bright per-strain overlay (cells
+  may host several strains sharing the 255 cream budget; thin climb paths
+  stay neon, and cream-bearing grains carry their strain shares / sugar
+  when they move).
+- **Symbiont** (`ModuleId::Symbiont`, editor key `8`) is opt-in on plant and
+  fungus — not every species has it. Mutable genome treaty `(W, E)` sets the
+  agreed water/energy deal; matching partners exchange on root↔cream contact
+  in either direction from local wetness (supply or harvest), with same-strain
+  cargo pull so a wet hub can support a desert plant. Matching Symbiont
+  strains trade water/sugar at cream frontiers; sugar-funded tips can probe
+  dry rock. See [`FUNGI.md`](FUNGI.md).
+- Networks that **breach the surface from below** emerge a **surface stalk**
+  from the nearest lineage (else `minimal_fungus`). Stalks wind-disperse
+  mutated spores far; rhizomorph hops stay local.
 - Soft litter — bonus energy sip; Organic forage scales with field intensity
 - Established moist networks support fruiting bodies (no energy-starve)
 - Standing rain counts as moisture; **never** flash Organic → Sand

@@ -63,6 +63,13 @@ pub struct Genome {
     /// Litter digest rate (Set E fungi).
     #[serde(default = "default_digest_rate")]
     pub digest_rate: f32,
+    /// Symbiont treaty: water the fungus offers the plant (0..=255).
+    /// Only active when both partners paint [`ModuleId::Symbiont`].
+    #[serde(default = "default_sym_water")]
+    pub sym_water: u8,
+    /// Symbiont treaty: glucose/energy the fungus asks of the plant (0..=255).
+    #[serde(default = "default_sym_energy")]
+    pub sym_energy: u8,
 }
 
 fn default_root_depth_bias() -> f32 {
@@ -86,6 +93,12 @@ fn default_shade_efficiency() -> f32 {
 fn default_digest_rate() -> f32 {
     0.8
 }
+fn default_sym_water() -> u8 {
+    128
+}
+fn default_sym_energy() -> u8 {
+    128
+}
 
 impl Default for Genome {
     fn default() -> Self {
@@ -101,6 +114,8 @@ impl Default for Genome {
             leaf_absorb: default_leaf_absorb(),
             shade_efficiency: default_shade_efficiency(),
             digest_rate: default_digest_rate(),
+            sym_water: default_sym_water(),
+            sym_energy: default_sym_energy(),
         }
     }
 }
@@ -144,6 +159,15 @@ impl Genome {
         g.leaf_absorb = jitter(g.leaf_absorb, 0.05, 1.0);
         g.shade_efficiency = jitter(g.shade_efficiency, 0.0, 1.0);
         g.digest_rate = jitter(g.digest_rate, 0.05, 2.0);
+        let mut jitter_u8 = |value: u8| -> u8 {
+            trait_i += 1;
+            let h = hash_u64(world_seed, salt_base, trait_i, 0xE11);
+            let u = (h as f32 / u64::MAX as f32) * 2.0 - 1.0;
+            let delta = (u * strength * 255.0).round() as i16;
+            (value as i16 + delta).clamp(0, 255) as u8
+        };
+        g.sym_water = jitter_u8(g.sym_water);
+        g.sym_energy = jitter_u8(g.sym_energy);
         g
     }
 }
@@ -180,8 +204,14 @@ fn habit_palette(habit: BodyHabit) -> &'static [ModuleId] {
             ModuleId::Root,
             ModuleId::Stem,
             ModuleId::ReproSpore,
+            ModuleId::Symbiont,
         ],
-        BodyHabit::Fungus => &[ModuleId::Digest, ModuleId::Hypha, ModuleId::ReproSpore],
+        BodyHabit::Fungus => &[
+            ModuleId::Digest,
+            ModuleId::Hypha,
+            ModuleId::ReproSpore,
+            ModuleId::Symbiont,
+        ],
     }
 }
 
@@ -252,6 +282,7 @@ pub fn mutate_body(
             ModuleId::Photosystem,
             ModuleId::Root,
             ModuleId::ReproSpore,
+            ModuleId::Symbiont,
         ]
     } else {
         habit_palette(habit)

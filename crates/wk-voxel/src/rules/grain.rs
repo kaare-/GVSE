@@ -5,6 +5,7 @@
 //! Grain fall, repose, cold avalanche, and flow erosion.
 
 use std::collections::HashSet;
+use std::sync::Mutex;
 
 use wk_material::{HydroOverrides, MaterialId};
 
@@ -14,6 +15,7 @@ use crate::cell::{
     water_capacity_with, Cell, CellFlags, Sat,
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::fungi::{move_mycelium_meta, swap_cells_preserving_mycelium, swap_mycelium_meta};
 use crate::grid::World;
 use crate::parallel::{self, for_each_region_parallel, for_each_region_serial_moore};
 use crate::temperature::Temperature;
@@ -352,8 +354,8 @@ pub fn punch_through_floating_rafts(world: &mut World) -> u32 {
             if !raft_rests_on_float_water_world(world, gx, gy - 1) {
                 continue;
             }
-            world.set_cell(gx, gy - 1, grain);
-            world.set_cell(gx, gy, litter);
+            // Grain ↔ litter — cream + strain shares ride with each host.
+            swap_cells_preserving_mycelium(world, gx, gy - 1, gx, gy);
             // Keep the water seat awake so the next fall pass sinks cargo.
             if let Some(seat) = world.get_cell(gx, gy - 2) {
                 if seat.material == MaterialId::Air {
@@ -627,6 +629,9 @@ pub fn settle_loose_grains_regions(
 /// Returns how many Air↔grain swaps this pass performed.
 pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u32 {
     let moves = std::sync::atomic::AtomicU32::new(0);
+    // Parallel cell writes can't touch `World::mycelium_strains`; replay
+    // share/lineage swaps after the pass so cream stays color-keyed.
+    let share_swaps: Mutex<Vec<(i32, i32, i32, i32)>> = Mutex::new(Vec::new());
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
@@ -675,6 +680,7 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                                         ptrs, wrap_width, gx, cargo_y, above,
                                     );
                                 }
+                                share_swaps.lock().unwrap().push((gx, gy + 1, gx, cargo_y));
                                 moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                             }
                             break;
@@ -705,6 +711,7 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                         parallel::set_cell(ptrs, wrap_width, gx, gy, below);
                         parallel::set_cell(ptrs, wrap_width, gx, gy - 1, cur);
                     }
+                    share_swaps.lock().unwrap().push((gx, gy, gx, gy - 1));
                     moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     continue;
                 }
@@ -712,10 +719,14 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                     parallel::set_cell(ptrs, wrap_width, gx, gy, above);
                     parallel::set_cell(ptrs, wrap_width, gx, gy + 1, cur);
                 }
+                share_swaps.lock().unwrap().push((gx, gy, gx, gy + 1));
                 moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             }
         }
     });
+    for (ax, ay, bx, by) in share_swaps.into_inner().unwrap_or_default() {
+        swap_mycelium_meta(world, ax, ay, bx, by);
+    }
     moves.into_inner()
 }
 
@@ -925,14 +936,10 @@ fn drift_dest_clear(world: &World, nx: i32, bottom_y: i32, height: i32) -> bool 
 fn drift_move_column(world: &mut World, gx: i32, bottom_y: i32, height: i32, nx: i32) {
     for dy in (0..height).rev() {
         let y = bottom_y + dy;
-        let Some(org) = world.get_cell(gx, y) else {
+        if world.get_cell(gx, y).is_none() || world.get_cell(nx, y).is_none() {
             continue;
-        };
-        let Some(dest) = world.get_cell(nx, y) else {
-            continue;
-        };
-        world.set_cell(nx, y, org);
-        world.set_cell(gx, y, dest);
+        }
+        swap_cells_preserving_mycelium(world, gx, y, nx, y);
     }
 }
 
@@ -1313,8 +1320,7 @@ fn rise_buoyant_litter_list(world: &mut World, litter: &mut [(i32, i32)]) {
             if !floats_on_air_seat_world(world, above, gx, gy + 1) {
                 break;
             }
-            world.set_cell(gx, gy + 1, here);
-            world.set_cell(gx, gy, above);
+            swap_cells_preserving_mycelium(world, gx, gy, gx, gy + 1);
             gy += 1;
         }
         entry.1 = gy;
@@ -1391,6 +1397,7 @@ fn apply_repose_pass(
     let cold_mode = temp.is_some();
     let hydro = world.hydro;
     let moves = std::sync::atomic::AtomicU32::new(0);
+    let share_swaps: Mutex<Vec<(i32, i32, i32, i32)>> = Mutex::new(Vec::new());
     // Moore ptr map + serial: repose writes horizontally across seams.
     for_each_region_serial_moore(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
@@ -1471,7 +1478,16 @@ fn apply_repose_pass(
                         continue;
                     }
                     write_repose_swap(
-                        ptrs, wrap_width, &hydro, gx, gy, dest, sx, sy, src,
+                        ptrs,
+                        wrap_width,
+                        &hydro,
+                        gx,
+                        gy,
+                        dest,
+                        sx,
+                        sy,
+                        src,
+                        &share_swaps,
                     );
                     moved = true;
                     break;
@@ -1536,7 +1552,16 @@ fn apply_repose_pass(
                             continue;
                         }
                         write_repose_swap(
-                            ptrs, wrap_width, &hydro, gx, gy, dest, sx, sy, src,
+                            ptrs,
+                            wrap_width,
+                            &hydro,
+                            gx,
+                            gy,
+                            dest,
+                            sx,
+                            sy,
+                            src,
+                            &share_swaps,
                         );
                         moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                         break;
@@ -1583,7 +1608,16 @@ fn apply_repose_pass(
                         _ => {}
                     }
                     write_repose_swap(
-                        ptrs, wrap_width, &hydro, gx, gy, dest, sx, sy, src,
+                        ptrs,
+                        wrap_width,
+                        &hydro,
+                        gx,
+                        gy,
+                        dest,
+                        sx,
+                        sy,
+                        src,
+                        &share_swaps,
                     );
                     moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     break;
@@ -1591,6 +1625,9 @@ fn apply_repose_pass(
             }
         }
     });
+    for (ax, ay, bx, by) in share_swaps.into_inner().unwrap_or_default() {
+        swap_mycelium_meta(world, ax, ay, bx, by);
+    }
     moves.into_inner()
 }
 
@@ -1613,6 +1650,7 @@ fn write_repose_swap(
     src_x: i32,
     src_y: i32,
     src: Cell,
+    share_swaps: &Mutex<Vec<(i32, i32, i32, i32)>>,
 ) {
     let submerged = dest.sat.0 >= 200
         || air_has_standing_water_neighbor(ptrs, wrap_width, dest_x, dest_y)
@@ -1630,6 +1668,11 @@ fn write_repose_swap(
                 parallel::set_cell(ptrs, wrap_width, dest_x, dest_y, placed);
                 parallel::set_cell(ptrs, wrap_width, src_x, src_y, fill);
             }
+            // Grain moved src→dest; fill is Air (no cream). Meta swap is fine.
+            share_swaps
+                .lock()
+                .unwrap()
+                .push((src_x, src_y, dest_x, dest_y));
             return;
         }
         // No neighbour water to steal — keep the bubble (swap) rather than mint.
@@ -1638,6 +1681,10 @@ fn write_repose_swap(
         parallel::set_cell(ptrs, wrap_width, dest_x, dest_y, src);
         parallel::set_cell(ptrs, wrap_width, src_x, src_y, dest);
     }
+    share_swaps
+        .lock()
+        .unwrap()
+        .push((src_x, src_y, dest_x, dest_y));
 }
 
 /// Move standing water from an adjacent Air cell into a fill cell.
@@ -2147,6 +2194,14 @@ pub fn apply_flow_erosion_bound(
             placed.flags.set(CellFlags::WATERLOGGED);
         }
         world.set_cell(ev.deposit_x, ev.deposit_y, placed);
+        // Cream + strain shares follow bedload (river piles stay colored).
+        move_mycelium_meta(
+            world,
+            ev.erode_x,
+            ev.erode_y,
+            ev.deposit_x,
+            ev.deposit_y,
+        );
         leftover = push_sat_upward(world, ev.deposit_x, ev.deposit_y + 1, leftover);
         // Vacated hole is empty Air, plus any free water that could not
         // be displaced upward. Pore water rides with the grain (placed).

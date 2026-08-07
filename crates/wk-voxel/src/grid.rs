@@ -49,6 +49,30 @@ pub struct World {
     /// [`crate::cell::water_capacity_with`] — no process-global install.
     #[serde(default)]
     pub hydro: HydroOverrides,
+    /// Sparse mycelium lineage (editor / spore genome+body) keyed by cell.
+    /// Emergent stalks prefer the nearest stamp over `minimal_fungus`.
+    #[serde(default)]
+    pub mycelium_lineage: crate::fungi::MyceliumLineageMap,
+    /// Per-cell mycelium strain shares for overlays / competing networks.
+    /// Keyed by wrapped `(gx, gy)` → list of `(strain_id, intensity)`.
+    /// Share intensities sum to [`Cell::mycelium`] (≤255); cleared at 0.
+    #[serde(default)]
+    pub mycelium_strains: HashMap<(i32, i32), Vec<(u32, u8)>>,
+    /// Next strain id to mint on inoculum (wraps; 0 reserved / unused).
+    #[serde(default)]
+    pub next_mycelium_strain_id: u32,
+    /// Sparse network sugar / glucose analog on colonized cells (0..=255).
+    /// Cleared when cream hits 0; migrates with grain/raft moves.
+    #[serde(default)]
+    pub mycelium_energy: HashMap<(i32, i32), u8>,
+    /// Sparse actual symbiont exchange counters keyed by mycelium strain id.
+    /// Same strain keeps one book across spatial split / reconnect.
+    #[serde(default)]
+    pub sym_net_flow: HashMap<u32, crate::symbiosis::SymNetFlow>,
+    /// Strain id → lineage (genome+body) for treaty match at strain frontiers.
+    /// Stamped on inoculum; survives cream spread far from the spatial stamp.
+    #[serde(default)]
+    pub mycelium_strain_lineage: HashMap<u32, crate::fungi::MyceliumLineage>,
 }
 
 impl World {
@@ -61,6 +85,12 @@ impl World {
             soft_litter: HashMap::new(),
             spore_bank: crate::spore_bank::SporeBank::default(),
             hydro: HydroOverrides::default(),
+            mycelium_lineage: crate::fungi::MyceliumLineageMap::default(),
+            mycelium_strains: HashMap::new(),
+            next_mycelium_strain_id: 1,
+            mycelium_energy: HashMap::new(),
+            sym_net_flow: HashMap::new(),
+            mycelium_strain_lineage: HashMap::new(),
         }
     }
 

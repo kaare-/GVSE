@@ -26,6 +26,7 @@ use crate::cell::{
     Cell, CellFlags, Sat,
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::fungi::move_mycelium_meta;
 use crate::grid::World;
 
 /// Minimum relative σᵥ (density-sum/1000) to compact soft sediment.
@@ -485,6 +486,9 @@ fn collapse_one_ceiling(world: &mut World, gx: i32, gy: i32) -> bool {
     };
     world.set_cell(gx, gy - 1, debris);
     world.set_cell(gx, gy, vacated);
+    // Cream rides in `_pad`; strain / lineage / sugar maps are coordinate-keyed
+    // and must follow the debris or the drop invents orphan red dots on `M`.
+    move_mycelium_meta(world, gx, gy, gx, gy - 1);
     // Competence check: debris should be able to keep falling later.
     debug_assert!(
         is_grain(debris_mat)
@@ -1041,6 +1045,52 @@ mod tests {
             .filter(|&x| w.get_cell(x, 1).unwrap().material == MaterialId::LooseLimestone)
             .count();
         assert!(debris > 0, "collapsed limestone should become LooseLimestone debris");
+    }
+
+    #[test]
+    fn roof_collapse_moves_mycelium_strain_with_debris() {
+        use crate::fungi::{alloc_mycelium_strain, mycelium_shares_at};
+
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 63);
+        let limit = roof_span_limit_cells(MaterialId::Limestone);
+        let span = limit + 2;
+        let x0 = 2;
+        let x1 = x0 + span - 1;
+        for x in x0..=x1 {
+            w.set_cell(x, 1, Cell::air());
+            let mut roof = Cell::solid(MaterialId::Limestone);
+            roof.set_mycelium(40);
+            w.set_cell(x, 2, roof);
+            let s = alloc_mycelium_strain(&mut w);
+            w.mycelium_strains.insert((x, 2), vec![(s, 40)]);
+        }
+        w.set_cell(x0 - 1, 1, Cell::solid(MaterialId::Limestone));
+        w.set_cell(x1 + 1, 1, Cell::solid(MaterialId::Limestone));
+        let cfg = FailureConfig {
+            max_roof_events: 64,
+            ..FailureConfig::default()
+        };
+        apply_roof_collapse(&mut w, &cfg);
+        let mut saw_owned_debris = false;
+        for x in x0..=x1 {
+            if w.get_cell(x, 1).map(|c| c.material) != Some(MaterialId::LooseLimestone) {
+                continue;
+            }
+            let myc = w.get_cell(x, 1).unwrap().mycelium();
+            assert!(myc > 0, "debris should keep cream pad");
+            assert!(
+                !mycelium_shares_at(&w, x, 1).is_empty(),
+                "strain shares must follow debris to y-1 (orphan red-dot bug)"
+            );
+            assert!(
+                mycelium_shares_at(&w, x, 2).is_empty(),
+                "vacated roof must not keep orphan shares"
+            );
+            saw_owned_debris = true;
+        }
+        assert!(saw_owned_debris, "expected at least one cream-bearing debris cell");
     }
 
     #[test]

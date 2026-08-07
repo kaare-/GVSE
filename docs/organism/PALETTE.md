@@ -56,6 +56,7 @@ not committed a job to.
 | `0x0E` | Stem | `#556B2F` | Olive. Stacks upward, holds leaves into the light column, casts shade. Substrate for epiphytes. |
 | `0x0F` | Holdfast | `#FF3D9A` | Pink. Grips another organism's olive stem (rock later). No ground root required. |
 | `0x10` | ReproSpore | `#D0B0FF` | Lilac dispersal packet. Wind-biased spores for ferns (land plants) and fruiting bodies. |
+| `0x16` | Symbiont | `#3DBE9A` | Opt-in plant↔fungus partnership organ. Genome `(sym_water, sym_energy)` is the mutable agreed deal; both partners need the module. Assortative match; moisture-directed supply/harvest trade; lopsided same vector = parasitism. |
 
 ### Reserved (frozen slots, no code yet)
 
@@ -82,6 +83,7 @@ For editor palette drawer layout (see [`EDITOR.md`](EDITOR.md)):
 - **Detritus loop** — Digest, Hypha.
 - **Land body** — Root, Stem, Holdfast.
 - **Dispersal** — ReproSpore.
+- **Symbiosis** — Symbiont.
 
 Colour choices were picked to be readable at 1× zoom on a mid-gray
 world background, distinguish adjacent categories (green / olive not

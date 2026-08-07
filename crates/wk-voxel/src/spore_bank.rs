@@ -14,7 +14,6 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::blueprint::Genome;
-use crate::fungi::infect_mycelium_at;
 use crate::grid::World;
 use crate::organism::{Atom, BodyModule};
 use crate::plant::{
@@ -256,9 +255,17 @@ fn try_wake_spore(
             Some(child) => WakeOutcome::Birth(child),
             None => WakeOutcome::Wait,
         },
-        // Fungus bank packets inoculate cream — mushrooms emerge later.
+        // Fungus bank packets inoculate cream + stamp mutated lineage —
+        // mushrooms emerge later matching the packet body.
         SporeKind::Fungus => {
-            if infect_mycelium_at(world, gx, gy).is_some() {
+            if crate::fungi::infect_mycelium_with_lineage(
+                world,
+                gx,
+                gy,
+                Some((spore.genome, spore.body.clone())),
+            )
+            .is_some()
+            {
                 WakeOutcome::Inoculated
             } else {
                 WakeOutcome::Wait
