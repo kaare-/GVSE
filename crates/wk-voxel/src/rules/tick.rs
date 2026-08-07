@@ -262,6 +262,10 @@ pub fn tick_with_life(
     // Geotech: roof / overhang collapse after grain has seated.
     crate::failure::apply_failure(world, failure, geotech);
 
+    // Reset network sym "last" before field + later organism plant trade
+    // share one inspector window (organism step clears plant lasts only).
+    crate::symbiosis::clear_sym_net_flow_lasts(world);
+
     // Mycelium field: lives in Organic independently of fruiting bodies.
     match fungi {
         Some(f) => crate::fungi::step_mycelium_field_cfg(world, f),
