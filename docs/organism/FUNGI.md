@@ -166,20 +166,25 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   **Organic** thickens into a real colony (shared 255 budget). **Mineral**
   is a cheap search/conduit: soft-capped while seeking, then tapers toward
   a thin connection once it touches threaded Organic (no fat mineral
-  blobs). Dry cells fade (disconnect); remoistened neighbours can
-  re-spread (reconnect). Compost leaves a residual cream corridor on Soil
-  **only when the Organic already had cream** — virgin surface oxidation
-  must not invent orphan `mycelium=1` soil. Each field pulse processes a
-  rotating, frontier-biased sample (perf cap) so dense hubs cannot
-  permanently starve climb / food-seeking fronts.
+  blobs). **Sugar-funded exploration:** virgin mineral probes (esp. dry
+  rock) cost network sugar scaled by host difficulty — hungry tips cannot
+  free-probe hostile terrain, but a large connected bank can pull sugar to
+  a tip and send exploratory hyphae through dry sand/stone. Funded dry
+  corridors fade slowly; broke dry tips fade faster and may disconnect
+  until remoistened/refunded. Compost leaves a residual cream corridor on
+  Soil **only when the Organic already had cream** — virgin surface
+  oxidation must not invent orphan `mycelium=1` soil. Each field pulse
+  processes a rotating, frontier-biased sample (perf cap) so dense hubs
+  cannot permanently starve climb / food-seeking fronts.
   Renderer: faint cream threads (stronger on Organic).
 - **Network sugar** — sparse `World::mycelium_energy` (0..=255 per cream
   cell): a glucose analog banked on moist Organic (and occasional soft
-  litter sips). Mineral corridors pay light upkeep; virgin mineral probes
-  spend sugar when available. Fruiting bodies sip nearby sugar into
-  `Atom.energy`; emergence burns cream + sugar. Migrates with grain/raft
-  moves. Plants with matching Symbiont treaties can pay energy into this
-  bank (see below).
+  litter sips). Same-strain cream adjacent-bleeds and **pulls within ~6
+  cells** so a wet hub can fund a distant dry tip or desert plant contact.
+  Mineral corridors pay light upkeep; probes spend sugar. Fruiting bodies
+  sip nearby sugar into `Atom.energy`; emergence burns cream + sugar.
+  Migrates with grain/raft moves. Symbiont plants pay into / draw from
+  this bank (see below).
 - **Symbiont treaty** — opt-in `ModuleId::Symbiont` (`0x16`, mint) on both
   the plant body and the fungus lineage body. Genome `(sym_water,
   sym_energy)` is a mutable agreed deal (editor: `8` paint, `,/.` W,
@@ -190,15 +195,16 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   Trade is **moisture-directed** at each root↔cream contact: **supply** when
   cream is wetter (network gives water, plant pays sugar) and **harvest** when
   the root bed is wetter (plant gives water, network pays sugar into plant
-  energy). Same-strain cream slowly equalizes sugar + a trickle of pore water
-  so wet-side harvests can feed dry-side supply. Inspector shows treaty, link
-  state, trade mode, both-direction ledgers, potential rates, and bias. Plant
-  ledger lives on the Atom; network ledger is `World::sym_net_flow` keyed by
-  **strain id** — split/reconnect of the same strain keeps one book; a new
-  inoculum mints a new ledger. **Strain↔strain** trade: adjacent cream cells
-  with different dominant strains exchange when both lineages paint Symbiont
-  and treaties match (`World::mycelium_strain_lineage`); wetter gives water,
-  drier pays sugar — same bidirectional rule. Same-cell multi-share barter is
+  energy). Contacts may **pull** water/sugar from the wider same-strain pipe
+  first — so a network with a wet deep hub can support a desert plant, and a
+  shallow plant-rich strain can buy water from a deep wet strain at their
+  frontier. Inspector shows treaty, link state, trade mode, both-direction
+  ledgers, potential rates, and bias. Plant ledger lives on the Atom; network
+  ledger is `World::sym_net_flow` keyed by **strain id**. **Strain↔strain**
+  trade: adjacent cream cells with different dominant strains exchange when
+  both lineages paint Symbiont and treaties match
+  (`World::mycelium_strain_lineage`); wetter gives water, drier pays sugar
+  (payers may pull sugar from their network). Same-cell multi-share barter is
   still deferred (shared sugar pool).
 - **Multi-strain shares** — a cell’s 255 cream budget is shared. Each
   inoculum mints a strain id; several strains can hold intensity on the

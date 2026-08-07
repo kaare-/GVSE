@@ -27,7 +27,7 @@ use crate::blueprint::Genome;
 use crate::cell::water_capacity;
 use crate::fungi::{
     add_mycelium_energy, ensure_mycelium_strain, lineage_for_strain_at, mycelium_energy_at,
-    mycelium_strain_at, nearest_mycelium_lineage, take_mycelium_energy,
+    mycelium_strain_at, nearest_mycelium_lineage, pull_mycelium_cargo_to, take_mycelium_energy,
     MYCELIUM_CARGO_EQUALIZE_MAX, MYCELIUM_ENERGY_SIP_TO_ATOM,
 };
 use crate::grid::World;
@@ -690,6 +690,23 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
                             budget = budget.saturating_sub(1);
                             break;
                         }
+                        // Desert contact: pull water from the wider same-strain
+                        // network into the cream tip before gifting.
+                        if water_want > 0 {
+                            let local = world
+                                .get_cell(cx, cy)
+                                .map(|c| c.sat.0)
+                                .unwrap_or(0);
+                            if local < water_want {
+                                let _ = pull_mycelium_cargo_to(
+                                    world,
+                                    cx,
+                                    cy,
+                                    0,
+                                    water_want.saturating_sub(local).saturating_add(1),
+                                );
+                            }
+                        }
                         let mut water_moved = 0u8;
                         if water_want > 0 {
                             let taken = take_pore_sat(world, cx, cy, water_want);
@@ -743,7 +760,16 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
                         let mut sugar_moved = 0u8;
                         if sugar_want > 0 {
                             let available = mycelium_energy_at(world, cx, cy);
-                            let pay = sugar_want.min(available);
+                            if available < sugar_want {
+                                let _ = pull_mycelium_cargo_to(
+                                    world,
+                                    cx,
+                                    cy,
+                                    sugar_want - available,
+                                    0,
+                                );
+                            }
+                            let pay = sugar_want.min(mycelium_energy_at(world, cx, cy));
                             if pay > 0 {
                                 let taken = take_mycelium_energy(world, cx, cy, pay);
                                 atom.energy = (atom.energy
@@ -856,6 +882,19 @@ pub fn step_strain_trade(world: &mut World, tick: u64) {
 
             let mut water_moved = 0u8;
             if water_want > 0 {
+                let local = world
+                    .get_cell(wet_xy.0, wet_xy.1)
+                    .map(|c| c.sat.0)
+                    .unwrap_or(0);
+                if local < water_want {
+                    let _ = pull_mycelium_cargo_to(
+                        world,
+                        wet_xy.0,
+                        wet_xy.1,
+                        0,
+                        water_want.saturating_sub(local).saturating_add(1),
+                    );
+                }
                 let taken = take_pore_sat(world, wet_xy.0, wet_xy.1, water_want);
                 if taken > 0 {
                     let deposited = give_pore_sat(world, dry_xy.0, dry_xy.1, taken);
@@ -870,8 +909,18 @@ pub fn step_strain_trade(world: &mut World, tick: u64) {
 
             let mut sugar_moved = 0u8;
             if sugar_want > 0 {
+                // Paying (drier) strain may pull sugar from its wider network.
                 let available = mycelium_energy_at(world, dry_xy.0, dry_xy.1);
-                let pay = sugar_want.min(available);
+                if available < sugar_want {
+                    let _ = pull_mycelium_cargo_to(
+                        world,
+                        dry_xy.0,
+                        dry_xy.1,
+                        sugar_want - available,
+                        0,
+                    );
+                }
+                let pay = sugar_want.min(mycelium_energy_at(world, dry_xy.0, dry_xy.1));
                 if pay > 0 {
                     let taken = take_mycelium_energy(world, dry_xy.0, dry_xy.1, pay);
                     if taken > 0 {
