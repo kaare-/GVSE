@@ -62,6 +62,26 @@ pub fn screen_to_world(
 
 fn push_sym_probe(lines: &mut Vec<String>, probe: &wk_voxel::SymProbe) {
     let match_pct = (probe.match_q * 100.0).round() as i32;
+    let flow_label = match probe.strain_id {
+        Some(sid) => format!(
+            "sym network (strain {sid}): sent water {}  recv sugar {}  |  total W={} S={}",
+            probe.water_last, probe.sugar_last, probe.water_total, probe.sugar_total
+        ),
+        None => format!(
+            "sym plant: recv water {}  paid sugar {}  |  total W={} S={}",
+            probe.water_last, probe.sugar_last, probe.water_total, probe.sugar_total
+        ),
+    };
+    let total_label = match probe.strain_id {
+        Some(sid) => format!(
+            "sym network (strain {sid}): total sent W={}  recv S={}",
+            probe.water_total, probe.sugar_total
+        ),
+        None => format!(
+            "sym plant: total recv W={}  paid S={}",
+            probe.water_total, probe.sugar_total
+        ),
+    };
     if probe.linked {
         let partner = match probe.plant_idx {
             Some(i) => format!(" plant#{i}"),
@@ -70,8 +90,9 @@ fn push_sym_probe(lines: &mut Vec<String>, probe: &wk_voxel::SymProbe) {
         lines.push(format!(
             "sym link: connected  match={match_pct}%{partner}"
         ));
+        lines.push(flow_label);
         lines.push(format!(
-            "sym exchange: water→plant ≤{}/t  energy→sugar ≤{:.2} (≈{} sugar/t)",
+            "sym potential: water≤{}/t  energy≤{:.2} (≈{} sugar/t)",
             probe.water_per_tick, probe.energy_per_tick, probe.sugar_per_tick
         ));
         lines.push(format!("sym bias: {}", probe.bias.label()));
@@ -80,9 +101,15 @@ fn push_sym_probe(lines: &mut Vec<String>, probe: &wk_voxel::SymProbe) {
             "sym link: touching  match={match_pct}% (need ≥{:.0}%)",
             wk_voxel::SYM_MATCH_MIN * 100.0
         ));
+        if probe.water_total > 0 || probe.sugar_total > 0 {
+            lines.push(format!("{total_label} (no exchange this tick)"));
+        }
         lines.push(format!("sym bias: {} (no exchange)", probe.bias.label()));
     } else {
         lines.push("sym link: idle (no root↔cream contact)".into());
+        if probe.water_total > 0 || probe.sugar_total > 0 {
+            lines.push(format!("{total_label} (lifetime)"));
+        }
     }
 }
 

@@ -188,8 +188,12 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   high E favours the fungus). On root↔cream contact the fungus donates
   pore water and the plant pays `Atom.energy` into network sugar.
   Inspector on cream / plant shows treaty, link state (`idle` / `touching` /
-  `connected`), match %, potential water→plant and energy→sugar rates, and
-  bias label.
+  `connected`), match %, **actual** last-tick + lifetime flow counters, potential
+  rates, and bias label. Plant ledger lives on the Atom (`recv water` /
+  `paid sugar`). Network ledger is `World::sym_net_flow` keyed by **strain id**
+  (`sent water` / `recv sugar`) — a spatial split/reconnect of the same strain
+  keeps one book; a new inoculum mints a new strain and a new ledger; different
+  strains never merge counters.
 - **Multi-strain shares** — a cell’s 255 cream budget is shared. Each
   inoculum mints a strain id; several strains can hold intensity on the
   same block (`strain A 40/255`, `strain B 60/255`, …; `_pad` = sum).

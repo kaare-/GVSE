@@ -8,15 +8,25 @@
 //!
 //! Exchange runs on root ↔ mycelium-cream contact: fungus pore water → plant
 //! root pores; plant `Atom.energy` → network sugar on the cream cell.
+//! Actual transferred amounts are counted on the plant Atom and on a sparse
+//! [`World::sym_net_flow`] ledger keyed by mycelium **strain id** (last tick +
+//! lifetime totals). Same strain keeps one book across spatial split/reconnect;
+//! a new inoculum mints a new strain and a new ledger.
+
+use serde::{Deserialize, Serialize};
 
 use crate::blueprint::Genome;
 use crate::cell::water_capacity;
 use crate::fungi::{
-    add_mycelium_energy, nearest_mycelium_lineage, MYCELIUM_ENERGY_SIP_TO_ATOM,
+    add_mycelium_energy, ensure_mycelium_strain, mycelium_strain_at,
+    nearest_mycelium_lineage, MYCELIUM_ENERGY_SIP_TO_ATOM,
 };
 use crate::grid::World;
 use crate::organism::{Atom, BodyModule, ModuleId};
 use crate::plant::is_land_plant;
+
+/// Soft cap on strain-keyed network flow ledger entries.
+pub const SYM_NET_FLOW_MAP_MAX: usize = 8_192;
 
 /// Minimum treaty similarity (0..1) before any exchange fires.
 pub const SYM_MATCH_MIN: f32 = 0.55;
@@ -49,6 +59,19 @@ impl SymBias {
     }
 }
 
+/// Actual exchange counters for one mycelium strain network (persisted).
+///
+/// Keyed on [`World::sym_net_flow`] by strain id — not by cell — so a network
+/// that splits spatially and later reconnects keeps one continuous book.
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct SymNetFlow {
+    pub water_out_total: u32,
+    pub sugar_in_total: u32,
+    pub water_out_last: u8,
+    pub sugar_in_last: u8,
+    pub last_tick: u64,
+}
+
 /// Read-only inspector snapshot of a plant↔cream symbiotic link.
 #[derive(Debug, Clone, Copy)]
 pub struct SymProbe {
@@ -71,6 +94,17 @@ pub struct SymProbe {
     /// Potential network-sugar units banked per tick.
     pub sugar_per_tick: u8,
     pub bias: SymBias,
+    /// Actual water transferred last organism tick.
+    pub water_last: u8,
+    /// Actual sugar transferred last organism tick.
+    pub sugar_last: u8,
+    /// Lifetime water transferred (plant recv / cream out).
+    pub water_total: u32,
+    /// Lifetime sugar transferred (plant paid / network in).
+    pub sugar_total: u32,
+    /// When set, counters are the **network** ledger for this strain.
+    /// When `None`, counters are the **plant** Atom ledger.
+    pub strain_id: Option<u32>,
 }
 
 /// True when the body paints at least one Symbiont organ.
@@ -122,6 +156,11 @@ fn build_probe(
     plant_idx: Option<usize>,
     plant_g: Genome,
     fungus_g: Genome,
+    water_last: u8,
+    sugar_last: u8,
+    water_total: u32,
+    sugar_total: u32,
+    strain_id: Option<u32>,
 ) -> SymProbe {
     let (deal_w, deal_e) = agreed_treaty(plant_g, fungus_g);
     let linked = touching && match_q >= SYM_MATCH_MIN;
@@ -141,6 +180,45 @@ fn build_probe(
         energy_per_tick,
         sugar_per_tick,
         bias: bias_from_deal(deal_w, deal_e),
+        water_last,
+        sugar_last,
+        water_total,
+        sugar_total,
+        strain_id,
+    }
+}
+
+fn net_flow_at(world: &World, strain: u32) -> SymNetFlow {
+    world.sym_net_flow.get(&strain).copied().unwrap_or_default()
+}
+
+fn record_net_flow(world: &mut World, strain: u32, water: u8, sugar: u8, tick: u64) {
+    if water == 0 && sugar == 0 {
+        return;
+    }
+    if world.sym_net_flow.len() >= SYM_NET_FLOW_MAP_MAX && !world.sym_net_flow.contains_key(&strain)
+    {
+        if let Some(&key) = world.sym_net_flow.keys().next() {
+            world.sym_net_flow.remove(&key);
+        }
+    }
+    let e = world.sym_net_flow.entry(strain).or_default();
+    e.water_out_total = e.water_out_total.saturating_add(water as u32);
+    e.sugar_in_total = e.sugar_in_total.saturating_add(sugar as u32);
+    e.water_out_last = e.water_out_last.saturating_add(water);
+    e.sugar_in_last = e.sugar_in_last.saturating_add(sugar);
+    e.last_tick = tick;
+}
+
+/// Clear per-tick lasts at the start of an organism symbiosis pulse.
+fn clear_sym_flow_lasts(world: &mut World, atoms: &mut [Atom]) {
+    for atom in atoms.iter_mut() {
+        atom.sym_water_recv_last = 0;
+        atom.sym_sugar_paid_last = 0;
+    }
+    for flow in world.sym_net_flow.values_mut() {
+        flow.water_out_last = 0;
+        flow.sugar_in_last = 0;
     }
 }
 
@@ -191,6 +269,8 @@ pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Opti
     if !body_has_symbiont(&lin.body) {
         return None;
     }
+    let strain = mycelium_strain_at(world, gx, gy);
+    let flow = strain.map(|s| net_flow_at(world, s)).unwrap_or_default();
     let mut best: Option<SymProbe> = None;
     for (idx, atom) in atoms.iter().enumerate() {
         if !is_land_plant(atom) || !body_has_symbiont(&atom.body) {
@@ -202,7 +282,18 @@ pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Opti
         }
         let touching = cream_touches_root(world, gx, gy, &roots);
         let match_q = treaty_match(atom.genome, lin.genome);
-        let probe = build_probe(touching, match_q, Some(idx), atom.genome, lin.genome);
+        let probe = build_probe(
+            touching,
+            match_q,
+            Some(idx),
+            atom.genome,
+            lin.genome,
+            flow.water_out_last,
+            flow.sugar_in_last,
+            flow.water_out_total,
+            flow.sugar_in_total,
+            strain,
+        );
         let better = match best {
             None => true,
             Some(b) => {
@@ -217,7 +308,18 @@ pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Opti
     }
     best.or_else(|| {
         // Symbiont network with no plant in range — idle treaty readout.
-        Some(build_probe(false, 0.0, None, lin.genome, lin.genome))
+        Some(build_probe(
+            false,
+            0.0,
+            None,
+            lin.genome,
+            lin.genome,
+            flow.water_out_last,
+            flow.sugar_in_last,
+            flow.water_out_total,
+            flow.sugar_in_total,
+            strain,
+        ))
     })
 }
 
@@ -228,7 +330,18 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
     }
     let roots = plant_root_cells(world, atom);
     if roots.is_empty() {
-        return Some(build_probe(false, 0.0, None, atom.genome, atom.genome));
+        return Some(build_probe(
+            false,
+            0.0,
+            None,
+            atom.genome,
+            atom.genome,
+            atom.sym_water_recv_last,
+            atom.sym_sugar_paid_last,
+            atom.sym_water_recv_total,
+            atom.sym_sugar_paid_total,
+            None,
+        ));
     }
     let mut best: Option<SymProbe> = None;
     for &(rx, ry) in &roots {
@@ -248,7 +361,18 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
                 continue;
             }
             let match_q = treaty_match(atom.genome, lin.genome);
-            let probe = build_probe(true, match_q, None, atom.genome, lin.genome);
+            let probe = build_probe(
+                true,
+                match_q,
+                None,
+                atom.genome,
+                lin.genome,
+                atom.sym_water_recv_last,
+                atom.sym_sugar_paid_last,
+                atom.sym_water_recv_total,
+                atom.sym_sugar_paid_total,
+                None,
+            );
             let better = match best {
                 None => true,
                 Some(b) => {
@@ -260,7 +384,20 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
             }
         }
     }
-    best.or_else(|| Some(build_probe(false, 0.0, None, atom.genome, atom.genome)))
+    best.or_else(|| {
+        Some(build_probe(
+            false,
+            0.0,
+            None,
+            atom.genome,
+            atom.genome,
+            atom.sym_water_recv_last,
+            atom.sym_sugar_paid_last,
+            atom.sym_water_recv_total,
+            atom.sym_sugar_paid_total,
+            None,
+        ))
+    })
 }
 
 fn give_pore_sat(world: &mut World, gx: i32, gy: i32, amount: u8) -> u8 {
@@ -307,7 +444,8 @@ fn take_pore_sat(world: &mut World, gx: i32, gy: i32, amount: u8) -> u8 {
 }
 
 /// Run one symbiotic exchange pulse for all eligible land plants.
-pub fn step(world: &mut World, atoms: &mut [Atom], _tick: u64) {
+pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
+    clear_sym_flow_lasts(world, atoms);
     let mut budget = SYM_CONTACT_BUDGET;
     for atom in atoms.iter_mut() {
         if budget == 0 {
@@ -352,8 +490,9 @@ pub fn step(world: &mut World, atoms: &mut [Atom], _tick: u64) {
                     continue;
                 }
                 let (w, e) = agreed_treaty(plant_g, lin.genome);
-                let (water_want, energy_want, sugar) = exchange_rates(match_q, w, e);
+                let (water_want, energy_want, sugar_want) = exchange_rates(match_q, w, e);
 
+                let mut water_moved = 0u8;
                 if water_want > 0 {
                     let taken = take_pore_sat(world, cx, cy, water_want);
                     if taken > 0 {
@@ -361,15 +500,34 @@ pub fn step(world: &mut World, atoms: &mut [Atom], _tick: u64) {
                         if deposited < taken {
                             deposited += give_pore_sat(world, rx, ry - 1, taken - deposited);
                         }
-                        // Leftover stays nowhere — rare full-pore case; mass
-                        // already left the cream cell intentionally as gift.
+                        // Count what left the cream (gift), not only what the
+                        // root bed could accept.
+                        water_moved = taken;
                         let _ = deposited;
                     }
                 }
 
-                if sugar > 0 && energy_want > 0.01 && atom.energy > energy_want {
+                let mut sugar_moved = 0u8;
+                if sugar_want > 0 && energy_want > 0.01 && atom.energy > energy_want {
                     atom.energy = (atom.energy - energy_want).max(0.0);
-                    add_mycelium_energy(world, cx, cy, sugar);
+                    add_mycelium_energy(world, cx, cy, sugar_want);
+                    sugar_moved = sugar_want;
+                }
+
+                if water_moved > 0 || sugar_moved > 0 {
+                    atom.sym_water_recv_last =
+                        atom.sym_water_recv_last.saturating_add(water_moved);
+                    atom.sym_sugar_paid_last =
+                        atom.sym_sugar_paid_last.saturating_add(sugar_moved);
+                    atom.sym_water_recv_total =
+                        atom.sym_water_recv_total.saturating_add(water_moved as u32);
+                    atom.sym_sugar_paid_total =
+                        atom.sym_sugar_paid_total.saturating_add(sugar_moved as u32);
+                    let strain = match mycelium_strain_at(world, cx, cy) {
+                        Some(s) => s,
+                        None => ensure_mycelium_strain(world, cx, cy),
+                    };
+                    record_net_flow(world, strain, water_moved, sugar_moved, tick);
                 }
 
                 budget = budget.saturating_sub(1);
@@ -386,7 +544,9 @@ mod tests {
     use crate::blueprint::Genome;
     use crate::cell::{Cell, Sat};
     use crate::chunk::ChunkCoord;
-    use crate::fungi::{mycelium_energy_at, stamp_mycelium_lineage};
+    use crate::fungi::{
+        ensure_mycelium_strain, mycelium_energy_at, mycelium_strain_at, stamp_mycelium_lineage,
+    };
     use crate::organism::Atom;
     use wk_material::MaterialId;
 
@@ -466,6 +626,62 @@ mod tests {
         );
         assert!(sugar1 > sugar0, "cream should bank plant-paid sugar");
         assert!(plant.energy < 30.0, "plant should pay energy");
+        assert!(
+            plant.sym_water_recv_last > 0 || plant.sym_sugar_paid_last > 0,
+            "plant should count actual last-tick flow"
+        );
+        assert!(
+            plant.sym_water_recv_total > 0 || plant.sym_sugar_paid_total > 0,
+            "plant should count lifetime flow"
+        );
+        let strain = mycelium_strain_at(&w, 4, 1).expect("exchange seats a strain");
+        let flow = w.sym_net_flow.get(&strain).copied().unwrap_or_default();
+        assert!(
+            flow.water_out_total > 0 || flow.sugar_in_total > 0,
+            "strain network should count actual flow"
+        );
+    }
+
+    #[test]
+    fn same_strain_keeps_one_ledger_across_split_cells() {
+        let mut w = moist_bed();
+        let mut fungus_g = Genome::default();
+        fungus_g.sym_water = 200;
+        fungus_g.sym_energy = 80;
+        let fungus_body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (2, 0, ModuleId::Symbiont),
+        ];
+        stamp_mycelium_lineage(&mut w, 4, 1, fungus_g, fungus_body.clone());
+        stamp_mycelium_lineage(&mut w, 8, 1, fungus_g, fungus_body);
+        // Two cream patches, one strain id (diverged same network).
+        let strain = ensure_mycelium_strain(&mut w, 4, 1);
+        w.mycelium_strains.insert((8, 1), vec![(strain, 80)]);
+
+        let plant_body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Photosystem),
+            (1, -1, ModuleId::Symbiont),
+        ];
+        let mut p1 = Atom::from_body(4, 3, 40.0, plant_body.clone());
+        p1.genome.sym_water = 200;
+        p1.genome.sym_energy = 80;
+        p1.energy = 30.0;
+        let mut p2 = Atom::from_body(8, 3, 40.0, plant_body);
+        p2.genome.sym_water = 200;
+        p2.genome.sym_energy = 80;
+        p2.energy = 30.0;
+
+        let mut plants = [p1, p2];
+        step(&mut w, &mut plants, 0);
+        let flow = w.sym_net_flow.get(&strain).copied().unwrap_or_default();
+        let plant_w = plants[0].sym_water_recv_total + plants[1].sym_water_recv_total;
+        let plant_s = plants[0].sym_sugar_paid_total + plants[1].sym_sugar_paid_total;
+        assert_eq!(flow.water_out_total, plant_w, "network water-out = sum plant recv");
+        assert_eq!(flow.sugar_in_total, plant_s, "network sugar-in = sum plant paid");
+        assert!(flow.water_out_total > 0 || flow.sugar_in_total > 0);
     }
 
     #[test]

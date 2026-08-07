@@ -65,6 +65,10 @@ pub struct World {
     /// Cleared when cream hits 0; migrates with grain/raft moves.
     #[serde(default)]
     pub mycelium_energy: HashMap<(i32, i32), u8>,
+    /// Sparse actual symbiont exchange counters keyed by mycelium strain id.
+    /// Same strain keeps one book across spatial split / reconnect.
+    #[serde(default)]
+    pub sym_net_flow: HashMap<u32, crate::symbiosis::SymNetFlow>,
 }
 
 impl World {
@@ -81,6 +85,7 @@ impl World {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
+            sym_net_flow: HashMap::new(),
         }
     }
 

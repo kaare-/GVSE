@@ -98,7 +98,7 @@ pub use organism::{
 };
 pub use symbiosis::{
     body_has_symbiont, probe_cream_link, probe_plant_link, step as step_symbiosis, treaty_match,
-    SymBias, SymProbe, SYM_MATCH_MIN,
+    SymBias, SymNetFlow, SymProbe, SYM_MATCH_MIN,
 };
 pub use plant::{
     collect_live_photo_world_cells, collect_live_root_world_cells, collect_plant_sail_tops,

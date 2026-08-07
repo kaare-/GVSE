@@ -253,6 +253,18 @@ pub struct Atom {
     /// Body-local cells grown after tipping; drawn upright (new shoots).
     #[serde(default)]
     pub upright_growth: Vec<(i16, i16)>,
+    /// Symbiont: pore-sat units received from cream (lifetime).
+    #[serde(default)]
+    pub sym_water_recv_total: u32,
+    /// Symbiont: network-sugar units paid to cream (lifetime).
+    #[serde(default)]
+    pub sym_sugar_paid_total: u32,
+    /// Symbiont: water received on the latest organism tick (0 if idle).
+    #[serde(default)]
+    pub sym_water_recv_last: u8,
+    /// Symbiont: sugar paid on the latest organism tick (0 if idle).
+    #[serde(default)]
+    pub sym_sugar_paid_last: u8,
 }
 
 impl Atom {
@@ -281,6 +293,10 @@ impl Atom {
             leaf_starve: Vec::new(),
             fallen: false,
             upright_growth: Vec::new(),
+            sym_water_recv_total: 0,
+            sym_sugar_paid_total: 0,
+            sym_water_recv_last: 0,
+            sym_sugar_paid_last: 0,
         }
     }
 
