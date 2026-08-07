@@ -62,24 +62,32 @@ pub fn screen_to_world(
 
 fn push_sym_probe(lines: &mut Vec<String>, probe: &wk_voxel::SymProbe) {
     let match_pct = (probe.match_q * 100.0).round() as i32;
+    let has_flow = probe.water_total > 0
+        || probe.sugar_total > 0
+        || probe.water_rev_total > 0
+        || probe.sugar_rev_total > 0;
     let flow_label = match probe.strain_id {
         Some(sid) => format!(
-            "sym network (strain {sid}): sent water {}  recv sugar {}  |  total W={} S={}",
-            probe.water_last, probe.sugar_last, probe.water_total, probe.sugar_total
+            "sym network (strain {sid}): supply −W{} +S{} | harvest +W{} −S{}  tot −W{} +S{} / +W{} −S{}",
+            probe.water_last,
+            probe.sugar_last,
+            probe.water_rev_last,
+            probe.sugar_rev_last,
+            probe.water_total,
+            probe.sugar_total,
+            probe.water_rev_total,
+            probe.sugar_rev_total
         ),
         None => format!(
-            "sym plant: recv water {}  paid sugar {}  |  total W={} S={}",
-            probe.water_last, probe.sugar_last, probe.water_total, probe.sugar_total
-        ),
-    };
-    let total_label = match probe.strain_id {
-        Some(sid) => format!(
-            "sym network (strain {sid}): total sent W={}  recv S={}",
-            probe.water_total, probe.sugar_total
-        ),
-        None => format!(
-            "sym plant: total recv W={}  paid S={}",
-            probe.water_total, probe.sugar_total
+            "sym plant: supply +W{} −S{} | harvest −W{} +S{}  tot +W{} −S{} / −W{} +S{}",
+            probe.water_last,
+            probe.sugar_last,
+            probe.water_rev_last,
+            probe.sugar_rev_last,
+            probe.water_total,
+            probe.sugar_total,
+            probe.water_rev_total,
+            probe.sugar_rev_total
         ),
     };
     if probe.linked {
@@ -88,7 +96,8 @@ fn push_sym_probe(lines: &mut Vec<String>, probe: &wk_voxel::SymProbe) {
             None => String::new(),
         };
         lines.push(format!(
-            "sym link: connected  match={match_pct}%{partner}"
+            "sym link: connected  match={match_pct}%  trade={}{partner}",
+            probe.trade_mode.label()
         ));
         lines.push(flow_label);
         lines.push(format!(
@@ -98,17 +107,18 @@ fn push_sym_probe(lines: &mut Vec<String>, probe: &wk_voxel::SymProbe) {
         lines.push(format!("sym bias: {}", probe.bias.label()));
     } else if probe.touching {
         lines.push(format!(
-            "sym link: touching  match={match_pct}% (need ≥{:.0}%)",
+            "sym link: touching  match={match_pct}%  trade={} (need ≥{:.0}%)",
+            probe.trade_mode.label(),
             wk_voxel::SYM_MATCH_MIN * 100.0
         ));
-        if probe.water_total > 0 || probe.sugar_total > 0 {
-            lines.push(format!("{total_label} (no exchange this tick)"));
+        if has_flow {
+            lines.push(format!("{flow_label} (idle this tick)"));
         }
         lines.push(format!("sym bias: {} (no exchange)", probe.bias.label()));
     } else {
         lines.push("sym link: idle (no root↔cream contact)".into());
-        if probe.water_total > 0 || probe.sugar_total > 0 {
-            lines.push(format!("{total_label} (lifetime)"));
+        if has_flow {
+            lines.push(flow_label);
         }
     }
 }

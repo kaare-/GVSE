@@ -188,6 +188,12 @@ pub const MYCELIUM_EMERGE_ENERGY_COST: u8 = 24;
 pub const MYCELIUM_ENERGY_SIP_TO_ATOM: f32 = 0.12;
 /// Max network sugar a fruiting body may sip per tick.
 pub const MYCELIUM_ENERGY_SIP_MAX: u8 = 4;
+/// Same-strain sugar bleed toward poorer cream neighbours per field pulse.
+pub const MYCELIUM_CARGO_SUGAR_BLEED: u8 = 1;
+/// Same-strain pore-sat trickle toward drier cream neighbours per field pulse.
+pub const MYCELIUM_CARGO_WATER_BLEED: u8 = 1;
+/// Soft cap on cargo equalize source cells processed per field pulse.
+pub const MYCELIUM_CARGO_EQUALIZE_MAX: usize = 96;
 /// How deep / wide to scan for Organic substrate under the fungus.
 const ORGANIC_SCAN_DEPTH: i32 = 8;
 const ORGANIC_SCAN_RADIUS: i32 = 2;
@@ -1228,6 +1234,105 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
         {
             reduce_mycelium_shares(world, gx, gy, 1);
         }
+    }
+    // Wet-side harvest / dry-side supply need a thin pipe: bleed sugar + a
+    // trickle of pore water along same-strain cream neighbours.
+    equalize_mycelium_cargo(world, &colonized);
+}
+
+fn shares_strain(world: &World, gx: i32, gy: i32, strain: u32) -> bool {
+    mycelium_shares_at(world, gx, gy)
+        .iter()
+        .any(|(s, amt)| *s == strain && *amt > 0)
+}
+
+/// Equalize network sugar (and a trickle of pore water) along same-strain cream.
+///
+/// This is the transport half of bidirectional symbiosis: a wet contact can
+/// bank water/sugar that later reaches a dry contact of the same strain.
+pub fn equalize_mycelium_cargo(world: &mut World, colonized: &[(i32, i32, u8, MaterialId)]) {
+    let n = colonized.len().min(MYCELIUM_CARGO_EQUALIZE_MAX);
+    let mut sugar_moves: Vec<(i32, i32, i32, i32, u8)> = Vec::new();
+    let mut water_moves: Vec<(i32, i32, i32, i32, u8)> = Vec::new();
+    for &(gx, gy, _, _) in colonized.iter().take(n) {
+        let Some(strain) = mycelium_strain_at(world, gx, gy) else {
+            continue;
+        };
+        let src_sugar = mycelium_energy_at(world, gx, gy);
+        let src_sat = world.get_cell(gx, gy).map(|c| c.sat.0).unwrap_or(0);
+        let src_cap = world
+            .get_cell(gx, gy)
+            .map(|c| water_capacity(c.material))
+            .unwrap_or(0);
+        let mut best_sugar: Option<(i32, i32, u8)> = None;
+        let mut best_water: Option<(i32, i32, u8, u8)> = None; // nx,ny,sat,cap
+        for (dx, dy) in [(1i32, 0), (-1, 0), (0, 1), (0, -1)] {
+            let nx = world.wrap_x(gx + dx);
+            let ny = gy + dy;
+            if !shares_strain(world, nx, ny, strain) {
+                continue;
+            }
+            let Some(nc) = world.get_cell(nx, ny) else {
+                continue;
+            };
+            if nc.mycelium() == 0 || !hosts_mycelium(nc.material) {
+                continue;
+            }
+            let ns = mycelium_energy_at(world, nx, ny);
+            if src_sugar > ns.saturating_add(1) {
+                if best_sugar.map(|(_, _, s)| ns < s).unwrap_or(true) {
+                    best_sugar = Some((nx, ny, ns));
+                }
+            }
+            let ncap = water_capacity(nc.material);
+            if src_cap > 0 && ncap > 0 && nc.sat.0 < ncap && src_sat > nc.sat.0.saturating_add(1) {
+                if best_water
+                    .map(|(_, _, s, _)| nc.sat.0 < s)
+                    .unwrap_or(true)
+                {
+                    best_water = Some((nx, ny, nc.sat.0, ncap));
+                }
+            }
+        }
+        if let Some((nx, ny, _)) = best_sugar {
+            if src_sugar > 0 {
+                sugar_moves.push((gx, gy, nx, ny, MYCELIUM_CARGO_SUGAR_BLEED));
+            }
+        }
+        if let Some((nx, ny, _, _)) = best_water {
+            if src_sat > 0 {
+                water_moves.push((gx, gy, nx, ny, MYCELIUM_CARGO_WATER_BLEED));
+            }
+        }
+    }
+    for (sx, sy, nx, ny, amt) in sugar_moves {
+        let taken = take_mycelium_energy(world, sx, sy, amt);
+        if taken > 0 {
+            add_mycelium_energy(world, nx, ny, taken);
+        }
+    }
+    for (sx, sy, nx, ny, amt) in water_moves {
+        let sx = world.wrap_x(sx);
+        let nx = world.wrap_x(nx);
+        let Some(mut src) = world.get_cell(sx, sy) else {
+            continue;
+        };
+        let Some(mut dst) = world.get_cell(nx, ny) else {
+            continue;
+        };
+        let dcap = water_capacity(dst.material);
+        if dcap == 0 || src.sat.0 == 0 || dst.sat.0 >= dcap {
+            continue;
+        }
+        let room = dcap - dst.sat.0;
+        let move_amt = amt.min(src.sat.0).min(room);
+        if move_amt == 0 {
+            continue;
+        }
+        src.sat.0 = src.sat.0.saturating_sub(move_amt);
+        dst.sat.0 = dst.sat.0.saturating_add(move_amt);
+        world.set_cell(sx, sy, src);
+        world.set_cell(nx, ny, dst);
     }
 }
 
@@ -3055,6 +3160,39 @@ mod tests {
         swap_cells_preserving_mycelium(&mut w, 4, 2, 5, 2);
         assert_eq!(mycelium_energy_at(&w, 5, 2), 40);
         assert_eq!(mycelium_energy_at(&w, 4, 2), 0);
+    }
+
+    #[test]
+    fn same_strain_cream_equalizes_sugar_cargo() {
+        let mut w = litter_plot();
+        let s = alloc_mycelium_strain(&mut w);
+        for x in 4..=5 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = Sat(160);
+            org.set_mycelium(40);
+            w.set_cell(x, 2, org);
+            w.mycelium_strains.insert((x, 2), vec![(s, 40)]);
+        }
+        w.mycelium_energy.insert((4, 2), 30);
+        w.mycelium_energy.insert((5, 2), 2);
+        let colonized = vec![
+            (4, 2, 40, MaterialId::Organic),
+            (5, 2, 40, MaterialId::Organic),
+        ];
+        equalize_mycelium_cargo(&mut w, &colonized);
+        assert!(
+            mycelium_energy_at(&w, 4, 2) < 30,
+            "rich cell should bleed sugar"
+        );
+        assert!(
+            mycelium_energy_at(&w, 5, 2) > 2,
+            "poor neighbour should receive sugar"
+        );
+        assert_eq!(
+            mycelium_energy_at(&w, 4, 2) + mycelium_energy_at(&w, 5, 2),
+            32,
+            "sugar conserved"
+        );
     }
 
     #[test]

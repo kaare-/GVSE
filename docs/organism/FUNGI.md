@@ -187,13 +187,16 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   lopsided vector is parasitism (high W / low E favours the plant; low W /
   high E favours the fungus). On root↔cream contact the fungus donates
   pore water and the plant pays `Atom.energy` into network sugar.
-  Inspector on cream / plant shows treaty, link state (`idle` / `touching` /
-  `connected`), match %, **actual** last-tick + lifetime flow counters, potential
-  rates, and bias label. Plant ledger lives on the Atom (`recv water` /
-  `paid sugar`). Network ledger is `World::sym_net_flow` keyed by **strain id**
-  (`sent water` / `recv sugar`) — a spatial split/reconnect of the same strain
-  keeps one book; a new inoculum mints a new strain and a new ledger; different
-  strains never merge counters.
+  Trade is **moisture-directed** at each root↔cream contact: **supply** when
+  cream is wetter (network gives water, plant pays sugar) and **harvest** when
+  the root bed is wetter (plant gives water, network pays sugar into plant
+  energy). Same-strain cream slowly equalizes sugar + a trickle of pore water
+  so wet-side harvests can feed dry-side supply. Inspector shows treaty, link
+  state, trade mode, both-direction ledgers, potential rates, and bias. Plant
+  ledger lives on the Atom; network ledger is `World::sym_net_flow` keyed by
+  **strain id** — split/reconnect of the same strain keeps one book; a new
+  inoculum mints a new ledger. Strain↔strain barter is deferred (cell sugar is
+  still a shared pool, not per-strain).
 - **Multi-strain shares** — a cell’s 255 cream budget is shared. Each
   inoculum mints a strain id; several strains can hold intensity on the
   same block (`strain A 40/255`, `strain B 60/255`, …; `_pad` = sum).
