@@ -1313,6 +1313,51 @@ mod tests {
     }
 
     #[test]
+    fn cream_probe_reports_via_network_when_contact_is_nearby() {
+        let mut w = moist_bed();
+        let mut fungus_g = Genome::default();
+        fungus_g.sym_water = 200;
+        fungus_g.sym_energy = 80;
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (2, 0, ModuleId::Symbiont),
+        ];
+        stamp_mycelium_lineage(&mut w, 4, 1, fungus_g, body);
+        let strain = ensure_mycelium_strain(&mut w, 4, 1);
+        // Same strain cream two cells away from the root contact.
+        w.set_cell(6, 1, {
+            let mut c = w.get_cell(6, 1).unwrap();
+            c.set_mycelium(80);
+            c
+        });
+        w.mycelium_strains.insert((6, 1), vec![(strain, 80)]);
+        bind_strain_lineage(&mut w, strain, fungus_g, vec![(0, 0, ModuleId::Symbiont)]);
+
+        let mut plant = Atom::from_body(
+            4,
+            3,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Photosystem),
+                (1, -1, ModuleId::Symbiont),
+            ],
+        );
+        plant.genome.sym_water = 200;
+        plant.genome.sym_energy = 80;
+
+        let contact = probe_cream_link(&w, 4, 1, std::slice::from_ref(&plant)).expect("contact");
+        assert!(contact.linked);
+        assert!(!contact.via_network);
+
+        let nearby = probe_cream_link(&w, 6, 1, std::slice::from_ref(&plant)).expect("nearby");
+        assert!(nearby.linked, "same-strain cream near contact should report linked");
+        assert!(nearby.via_network, "non-contact cream should flag via_network");
+    }
+
+    #[test]
     fn matching_strains_trade_water_for_sugar_across_frontier() {
         let mut w = World::new(9);
         w.ensure_chunk(ChunkCoord::new(0, 0));
