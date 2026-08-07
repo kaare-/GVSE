@@ -171,6 +171,8 @@ pub struct SymProbe {
     pub energy_reserve: f32,
     /// Supply sugar is paused — plant is banking toward the repro reserve.
     pub sugar_banking: bool,
+    /// A living Root module sits on this cream cell (shared block).
+    pub cohabit: bool,
 }
 
 /// True when the body paints at least one Symbiont organ.
@@ -290,6 +292,7 @@ fn build_probe(
     sugar_rev_total: u32,
     strain_id: Option<u32>,
     via_network: bool,
+    cohabit: bool,
 ) -> SymProbe {
     let (deal_w, deal_e) = agreed_treaty(plant_g, fungus_g);
     let linked = touching && match_q >= SYM_MATCH_MIN;
@@ -322,6 +325,7 @@ fn build_probe(
         via_network,
         energy_reserve: 0.0,
         sugar_banking: false,
+        cohabit,
     }
 }
 
@@ -393,7 +397,8 @@ const ROOT_CREAM_NEIGHBORS: [(i32, i32); 9] = [
 ];
 /// When inspecting cream that isn't the contact cell, still report a plant
 /// linked to the same strain within this Chebyshev radius.
-const CREAM_LINK_SCAN: i32 = 4;
+/// Sized for deep root spans (roots commonly dive 8–12 under the crown).
+const CREAM_LINK_SCAN: i32 = 12;
 
 fn plant_root_cells(world: &World, atom: &Atom) -> Vec<(i32, i32)> {
     atom.body
@@ -419,21 +424,30 @@ fn cream_touches_root(world: &World, cx: i32, cy: i32, roots: &[(i32, i32)]) -> 
     false
 }
 
+/// True when a living Root module occupies the cream cell itself.
+fn root_cohabits_cream(world: &World, cx: i32, cy: i32, roots: &[(i32, i32)]) -> bool {
+    let cx = world.wrap_x(cx);
+    roots
+        .iter()
+        .any(|&(rx, ry)| world.wrap_x(rx) == cx && ry == cy)
+}
+
 /// True when `roots` touch this cream cell, or same-strain cream nearby.
 ///
-/// Returns `(touching_here, via_network)`.
+/// Returns `(touching_here, via_network, cohabit)`.
 fn cream_link_to_roots(
     world: &World,
     cx: i32,
     cy: i32,
     strain: Option<u32>,
     roots: &[(i32, i32)],
-) -> (bool, bool) {
+) -> (bool, bool, bool) {
+    let cohabit = root_cohabits_cream(world, cx, cy, roots);
     if cream_touches_root(world, cx, cy, roots) {
-        return (true, false);
+        return (true, false, cohabit);
     }
     let Some(strain) = strain else {
-        return (false, false);
+        return (false, false, cohabit);
     };
     for dx in -CREAM_LINK_SCAN..=CREAM_LINK_SCAN {
         for dy in -CREAM_LINK_SCAN..=CREAM_LINK_SCAN {
@@ -452,11 +466,11 @@ fn cream_link_to_roots(
                 continue;
             }
             if cream_touches_root(world, nx, ny, roots) {
-                return (true, true);
+                return (true, true, cohabit);
             }
         }
     }
-    (false, false)
+    (false, false, cohabit)
 }
 
 fn plant_ledger_probe(atom: &Atom) -> (u8, u8, u32, u32, u8, u8, u32, u32) {
@@ -489,6 +503,20 @@ fn net_ledger_probe(flow: SymNetFlow) -> (u8, u8, u32, u32, u8, u8, u32, u32) {
 ///
 /// Returns `None` when the cell has no Symbiont lineage (not a symbiont network).
 pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Option<SymProbe> {
+    probe_cream_link_preferring(world, gx, gy, atoms, None)
+}
+
+/// [`probe_cream_link`] but prefers a plant store index when ranking partners.
+///
+/// Used by the inspector so a cohabiting / clicked plant is not drowned out
+/// by a better-matching plant elsewhere on the strain.
+pub fn probe_cream_link_preferring(
+    world: &World,
+    gx: i32,
+    gy: i32,
+    atoms: &[Atom],
+    prefer_plant: Option<usize>,
+) -> Option<SymProbe> {
     let gx = world.wrap_x(gx);
     let c = world.get_cell(gx, gy)?;
     if c.mycelium() == 0 {
@@ -513,7 +541,8 @@ pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Opti
         if roots.is_empty() {
             continue;
         }
-        let (touching, via_network) = cream_link_to_roots(world, gx, gy, strain, &roots);
+        let (touching, via_network, cohabit) =
+            cream_link_to_roots(world, gx, gy, strain, &roots);
         let match_q = treaty_match(atom.genome, lin.genome);
         let mode = if touching && !via_network {
             let mut m = SymTradeMode::Supply;
@@ -568,14 +597,19 @@ pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Opti
             srt,
             strain,
             via_network,
+            cohabit,
         );
         apply_plant_reserve_to_probe(&mut probe, atom);
+        let preferred = prefer_plant == Some(idx);
         let better = match best {
             None => true,
             Some(b) => {
-                (probe.linked && !b.linked)
+                let b_pref = prefer_plant == b.plant_idx;
+                (preferred && !b_pref && probe.touching)
+                    || (probe.cohabit && !b.cohabit)
+                    || (probe.linked && !b.linked)
                     || (probe.touching && !b.touching)
-                    || (!probe.via_network && b.via_network)
+                    || (!probe.via_network && b.via_network && probe.touching == b.touching)
                     || (probe.match_q > b.match_q + 1e-4)
             }
         };
@@ -600,6 +634,7 @@ pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Opti
             wrt,
             srt,
             strain,
+            false,
             false,
         ))
     })
@@ -630,6 +665,7 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
             srt,
             None,
             false,
+            false,
         );
         apply_plant_reserve_to_probe(&mut probe, atom);
         return Some(probe);
@@ -657,6 +693,7 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
             }
             let match_q = treaty_match(atom.genome, lin.genome);
             let mode = trade_mode_at(world, rx, ry, cx, cy);
+            let cohabit = dx == 0 && dy == 0;
             let mut probe = build_probe(
                 true,
                 match_q,
@@ -674,12 +711,15 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
                 srt,
                 None,
                 false,
+                cohabit,
             );
             apply_plant_reserve_to_probe(&mut probe, atom);
             let better = match best {
                 None => true,
                 Some(b) => {
-                    (probe.linked && !b.linked) || (probe.match_q > b.match_q + 1e-4)
+                    (probe.cohabit && !b.cohabit)
+                        || (probe.linked && !b.linked)
+                        || (probe.match_q > b.match_q + 1e-4)
                 }
             };
             if better {
@@ -704,6 +744,7 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
             wrt,
             srt,
             None,
+            false,
             false,
         );
         apply_plant_reserve_to_probe(&mut probe, atom);
@@ -1459,6 +1500,102 @@ mod tests {
             "after sustained supply, energy {e} must stay at/above reserve {reserve}",
             e = plant.energy
         );
+    }
+
+    #[test]
+    fn cream_probe_reports_cohabit_when_root_shares_cell() {
+        let mut w = moist_bed();
+        let mut fungus_g = Genome::default();
+        fungus_g.sym_water = 200;
+        fungus_g.sym_energy = 80;
+        stamp_mycelium_lineage(
+            &mut w,
+            4,
+            1,
+            fungus_g,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (1, 0, ModuleId::Digest),
+                (2, 0, ModuleId::Symbiont),
+            ],
+        );
+        // Nucleus above cream; Root painted ON the cream cell (same block).
+        let mut plant = Atom::from_body(
+            4,
+            2,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root), // world (4,1) = cream
+                (0, 1, ModuleId::Photosystem),
+                (1, -1, ModuleId::Symbiont),
+            ],
+        );
+        plant.genome.sym_water = 200;
+        plant.genome.sym_energy = 80;
+        let cream = probe_cream_link(&w, 4, 1, std::slice::from_ref(&plant)).expect("cream");
+        assert!(cream.touching);
+        assert!(cream.linked);
+        assert!(cream.cohabit, "shared root+cream cell must flag cohabit");
+        assert!(!cream.via_network);
+        let plant_p = probe_plant_link(&w, &plant).expect("plant");
+        assert!(plant_p.cohabit);
+    }
+
+    #[test]
+    fn cream_probe_via_network_reaches_deep_same_strain_cream() {
+        let mut w = moist_bed();
+        // Extend moist bed upward so a deep cream column exists.
+        for y in 4..=10 {
+            for x in 0..16 {
+                let mut org = Cell::solid(MaterialId::Organic);
+                org.sat = Sat(180);
+                org.set_mycelium(80);
+                w.set_cell(x, y, org);
+            }
+        }
+        let mut fungus_g = Genome::default();
+        fungus_g.sym_water = 200;
+        fungus_g.sym_energy = 80;
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (2, 0, ModuleId::Symbiont),
+        ];
+        stamp_mycelium_lineage(&mut w, 4, 1, fungus_g, body);
+        let strain = ensure_mycelium_strain(&mut w, 4, 1);
+        // Same strain cream 8 cells away (beyond the old scan of 4).
+        w.set_cell(4, 9, {
+            let mut c = w.get_cell(4, 9).unwrap();
+            c.set_mycelium(80);
+            c
+        });
+        w.mycelium_strains.insert((4, 9), vec![(strain, 80)]);
+        bind_strain_lineage(
+            &mut w,
+            strain,
+            fungus_g,
+            vec![(0, 0, ModuleId::Symbiont)],
+        );
+
+        let mut plant = Atom::from_body(
+            4,
+            3,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root), // contacts cream at (4,1)/(4,2)
+                (0, 1, ModuleId::Photosystem),
+                (1, -1, ModuleId::Symbiont),
+            ],
+        );
+        plant.genome.sym_water = 200;
+        plant.genome.sym_energy = 80;
+
+        let deep = probe_cream_link(&w, 4, 9, std::slice::from_ref(&plant)).expect("deep cream");
+        assert!(deep.linked, "deep same-strain cream should report linked");
+        assert!(deep.via_network);
+        assert!(!deep.cohabit);
     }
 
     #[test]

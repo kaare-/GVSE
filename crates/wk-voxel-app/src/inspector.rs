@@ -60,7 +60,11 @@ pub fn screen_to_world(
     Some((gx, gy))
 }
 
-fn push_sym_probe(lines: &mut Vec<String>, probe: &wk_voxel::SymProbe) {
+fn push_sym_probe(
+    lines: &mut Vec<String>,
+    probe: &wk_voxel::SymProbe,
+    plant_linked_elsewhere: bool,
+) {
     let match_pct = (probe.match_q * 100.0).round() as i32;
     let has_flow = probe.water_total > 0
         || probe.sugar_total > 0
@@ -75,18 +79,23 @@ fn push_sym_probe(lines: &mut Vec<String>, probe: &wk_voxel::SymProbe) {
     } else {
         ""
     };
+    let cohabit = if probe.cohabit { " cohabit" } else { "" };
 
     if probe.linked {
         lines.push(format!(
-            "sym link: connected  match={match_pct}%  trade={}{partner}{via}",
+            "sym link: connected  match={match_pct}%  trade={}{partner}{via}{cohabit}",
             probe.trade_mode.label()
         ));
     } else if probe.touching {
         lines.push(format!(
-            "sym link: touching  match={match_pct}%  trade={}{via} (need >={:.0}%)",
+            "sym link: touching  match={match_pct}%  trade={}{via}{cohabit} (need >={:.0}%)",
             probe.trade_mode.label(),
             wk_voxel::SYM_MATCH_MIN * 100.0
         ));
+    } else if plant_linked_elsewhere {
+        // Cream cell and plant share the inspector, but this cream isn't the
+        // contact — plant is trading on another root/cream pair.
+        lines.push("sym link: idle here (plant linked elsewhere)".into());
     } else {
         lines.push("sym link: idle (no root-cream contact here)".into());
     }
@@ -242,8 +251,21 @@ pub fn draw_block_inspector(
                             "symbiont treaty W={} E={}",
                             lin.genome.sym_water, lin.genome.sym_energy
                         ));
-                        if let Some(probe) = wk_voxel::probe_cream_link(world, gx, gy, atoms) {
-                            push_sym_probe(&mut lines, &probe);
+                        let prefer = organism.and_then(|(id, a)| {
+                            if is_land_plant(a) && wk_voxel::body_has_symbiont(&a.body) {
+                                Some(id)
+                            } else {
+                                None
+                            }
+                        });
+                        if let Some(probe) =
+                            wk_voxel::probe_cream_link_preferring(world, gx, gy, atoms, prefer)
+                        {
+                            let plant_elsewhere = prefer
+                                .and_then(|id| atoms.get(id))
+                                .and_then(|a| wk_voxel::probe_plant_link(world, a))
+                                .is_some_and(|p| p.linked && !probe.touching);
+                            push_sym_probe(&mut lines, &probe, plant_elsewhere);
                         }
                     }
                 }
@@ -350,7 +372,7 @@ pub fn draw_block_inspector(
                     atom.genome.sym_water, atom.genome.sym_energy
                 ));
                 if let Some(probe) = wk_voxel::probe_plant_link(world, atom) {
-                    push_sym_probe(&mut lines, &probe);
+                    push_sym_probe(&mut lines, &probe, false);
                 }
             }
         } else {
