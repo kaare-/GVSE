@@ -46,7 +46,8 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// v9: [`World::mycelium_energy`] sparse network sugar / glucose analog.
 /// v10: [`World::sym_net_flow`] strain-keyed symbiont exchange counters.
 /// v11: sym_net_flow gains harvest (water_in / sugar_out) ledger fields.
-pub const SIM_SCHEMA_VERSION: u32 = 11;
+/// v12: [`World::mycelium_strain_lineage`] strain→treaty map for strain trade.
+pub const SIM_SCHEMA_VERSION: u32 = 12;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +95,7 @@ impl WorldV5 {
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
             sym_net_flow: HashMap::new(),
+            mycelium_strain_lineage: HashMap::new(),
         }
     }
 }
@@ -130,6 +132,7 @@ impl WorldV6 {
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
             sym_net_flow: HashMap::new(),
+            mycelium_strain_lineage: HashMap::new(),
         }
     }
 }
@@ -171,6 +174,7 @@ impl WorldV7 {
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: HashMap::new(),
             sym_net_flow: HashMap::new(),
+            mycelium_strain_lineage: HashMap::new(),
         };
         // Promote sole ownership → one share matching current `_pad`.
         for ((gx, gy), strain) in sole {
@@ -223,8 +227,69 @@ impl WorldV8 {
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: HashMap::new(),
             sym_net_flow: HashMap::new(),
+            mycelium_strain_lineage: HashMap::new(),
         }
     }
+}
+
+/// Pre-v12 world (has sym_net_flow harvest fields, no strain→lineage map).
+#[derive(Debug, Clone, Deserialize)]
+struct WorldV11 {
+    seed: WorldSeed,
+    chunks: HashMap<ChunkCoord, Chunk>,
+    tick: u64,
+    wrap_width: Option<i32>,
+    #[serde(default)]
+    soft_litter: HashMap<i32, u16>,
+    #[serde(default)]
+    spore_bank: crate::spore_bank::SporeBank,
+    #[serde(default)]
+    hydro: HydroOverrides,
+    #[serde(default)]
+    mycelium_lineage: crate::fungi::MyceliumLineageMap,
+    #[serde(default)]
+    mycelium_strains: HashMap<(i32, i32), Vec<(u32, u8)>>,
+    #[serde(default)]
+    next_mycelium_strain_id: u32,
+    #[serde(default)]
+    mycelium_energy: HashMap<(i32, i32), u8>,
+    #[serde(default)]
+    sym_net_flow: HashMap<u32, crate::symbiosis::SymNetFlow>,
+}
+
+impl WorldV11 {
+    fn into_world(self) -> World {
+        World {
+            seed: self.seed,
+            chunks: self.chunks,
+            tick: self.tick,
+            wrap_width: self.wrap_width,
+            soft_litter: self.soft_litter,
+            spore_bank: self.spore_bank,
+            hydro: self.hydro,
+            mycelium_lineage: self.mycelium_lineage,
+            mycelium_strains: self.mycelium_strains,
+            next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
+            mycelium_energy: self.mycelium_energy,
+            sym_net_flow: self.sym_net_flow,
+            mycelium_strain_lineage: HashMap::new(),
+        }
+    }
+}
+
+/// Pre-v12 postcard (no mycelium_strain_lineage).
+#[derive(Debug, Clone, Deserialize)]
+struct SimSnapshotV11 {
+    schema_version: u32,
+    params: WorldgenParams,
+    world: WorldV11,
+    humidity: Humidity,
+    wind: Wind,
+    temperature: Temperature,
+    clouds: CloudStore,
+    organisms: OrganismStore,
+    #[serde(default)]
+    carbon: CarbonBudget,
 }
 
 /// Pre-v11 network ledger (supply-only counters).
@@ -297,6 +362,7 @@ impl WorldV10 {
                 .into_iter()
                 .map(|(k, v)| (k, v.into_current()))
                 .collect(),
+            mycelium_strain_lineage: HashMap::new(),
         }
     }
 }
@@ -354,6 +420,7 @@ impl WorldV9 {
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: self.mycelium_energy,
             sym_net_flow: HashMap::new(),
+            mycelium_strain_lineage: HashMap::new(),
         }
     }
 }
@@ -475,7 +542,7 @@ impl SimSnapshot {
     }
 
     pub fn from_bytes(bytes: &[u8]) -> Result<Self, String> {
-        // Prefer current schema; fall back v10 → v9 → v8 → v7 → v6 → v5 → v4.
+        // Prefer current schema; fall back v11 → v10 → v9 → …
         if let Ok(snap) = postcard::from_bytes::<Self>(bytes) {
             if snap.schema_version > SIM_SCHEMA_VERSION {
                 return Err(format!(
@@ -484,6 +551,19 @@ impl SimSnapshot {
                 ));
             }
             return Ok(snap);
+        }
+        if let Ok(old) = postcard::from_bytes::<SimSnapshotV11>(bytes) {
+            return Ok(Self {
+                schema_version: SIM_SCHEMA_VERSION,
+                params: old.params,
+                world: old.world.into_world(),
+                humidity: old.humidity,
+                wind: old.wind,
+                temperature: old.temperature,
+                clouds: old.clouds,
+                organisms: old.organisms,
+                carbon: old.carbon,
+            });
         }
         if let Ok(old) = postcard::from_bytes::<SimSnapshotV10>(bytes) {
             return Ok(Self {

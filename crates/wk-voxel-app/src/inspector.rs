@@ -180,8 +180,11 @@ pub fn draw_block_inspector(
                 if sugar > 0 {
                     lines.push(format!("network sugar={sugar}/255"));
                 }
-                // Field cream carries lineage from inoculum — treaty + link.
-                if let Some(lin) = wk_voxel::nearest_mycelium_lineage(world, gx, gy) {
+                // Prefer strain-bound lineage (frontiers), else spatial stamp.
+                let lin = wk_voxel::mycelium_strain_at(world, gx, gy)
+                    .and_then(|s| wk_voxel::lineage_for_strain_at(world, s, gx, gy))
+                    .or_else(|| wk_voxel::nearest_mycelium_lineage(world, gx, gy));
+                if let Some(lin) = lin {
                     if wk_voxel::body_has_symbiont(&lin.body) {
                         lines.push(format!(
                             "symbiont treaty W={} E={}",

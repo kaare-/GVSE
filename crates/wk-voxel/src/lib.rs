@@ -73,11 +73,12 @@ pub use spore_bank::{
     spore_bank_len, DormantSpore, SporeBank, SporeBankConfig, SporeKind, SPORE_BANK_PERIOD,
 };
 pub use fungi::{
-    add_soft_litter, compost_organic_to_soil, infect_mycelium_at, infect_mycelium_with_lineage,
-    is_fungus, is_surface_stalk, max_mycelium_near, move_mycelium_meta, mycelium_energy_at,
-    mycelium_shares_at, mycelium_shares_overlay_rgba, mycelium_strain_at, mycelium_strain_rgb,
+    add_soft_litter, bind_strain_lineage, compost_organic_to_soil, infect_mycelium_at,
+    infect_mycelium_with_lineage, is_fungus, is_surface_stalk, lineage_for_strain_at,
+    max_mycelium_near, move_mycelium_meta, mycelium_energy_at, mycelium_shares_at,
+    mycelium_shares_overlay_rgba, mycelium_strain_at, mycelium_strain_rgb,
     nearest_mycelium_lineage, seed_mycelium_near, sip_mycelium_energy_near, soft_litter_at,
-    stamp_mycelium_lineage, step_mycelium_field, step_mycelium_field_cfg,
+    stamp_mycelium_lineage, step_mycelium_field, step_mycelium_field_cfg, strain_lineage,
     swap_cells_preserving_mycelium, swap_mycelium_meta, FungiConfig, MyceliumLineage,
     MyceliumLineageMap, FUNGUS_STALK_SPORE_MAX_DIST, FUNGUS_STALK_SPORE_MIN_DIST,
     MYCELIUM_ENERGY_CAP,
@@ -97,8 +98,8 @@ pub use organism::{
     SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
 pub use symbiosis::{
-    body_has_symbiont, probe_cream_link, probe_plant_link, step as step_symbiosis, treaty_match,
-    SymBias, SymNetFlow, SymProbe, SymTradeMode, SYM_MATCH_MIN,
+    body_has_symbiont, probe_cream_link, probe_plant_link, step as step_symbiosis,
+    step_strain_trade, treaty_match, SymBias, SymNetFlow, SymProbe, SymTradeMode, SYM_MATCH_MIN,
 };
 pub use plant::{
     collect_live_photo_world_cells, collect_live_root_world_cells, collect_plant_sail_tops,

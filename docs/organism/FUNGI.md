@@ -195,8 +195,11 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   state, trade mode, both-direction ledgers, potential rates, and bias. Plant
   ledger lives on the Atom; network ledger is `World::sym_net_flow` keyed by
   **strain id** — split/reconnect of the same strain keeps one book; a new
-  inoculum mints a new ledger. Strain↔strain barter is deferred (cell sugar is
-  still a shared pool, not per-strain).
+  inoculum mints a new ledger. **Strain↔strain** trade: adjacent cream cells
+  with different dominant strains exchange when both lineages paint Symbiont
+  and treaties match (`World::mycelium_strain_lineage`); wetter gives water,
+  drier pays sugar — same bidirectional rule. Same-cell multi-share barter is
+  still deferred (shared sugar pool).
 - **Multi-strain shares** — a cell’s 255 cream budget is shared. Each
   inoculum mints a strain id; several strains can hold intensity on the
   same block (`strain A 40/255`, `strain B 60/255`, …; `_pad` = sum).

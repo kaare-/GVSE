@@ -194,6 +194,8 @@ pub const MYCELIUM_CARGO_SUGAR_BLEED: u8 = 1;
 pub const MYCELIUM_CARGO_WATER_BLEED: u8 = 1;
 /// Soft cap on cargo equalize source cells processed per field pulse.
 pub const MYCELIUM_CARGO_EQUALIZE_MAX: usize = 96;
+/// Soft cap on strain→lineage treaty stamps.
+pub const MYCELIUM_STRAIN_LINEAGE_MAX: usize = 512;
 /// How deep / wide to scan for Organic substrate under the fungus.
 const ORGANIC_SCAN_DEPTH: i32 = 8;
 const ORGANIC_SCAN_RADIUS: i32 = 2;
@@ -954,7 +956,52 @@ pub fn stamp_mycelium_lineage(
             map.remove(&key);
         }
     }
-    map.insert((gx, gy), MyceliumLineage { genome, body });
+    map.insert(
+        (gx, gy),
+        MyceliumLineage {
+            genome: genome.clone(),
+            body: body.clone(),
+        },
+    );
+    // Bind to the cell's dominant strain when known so frontiers keep the
+    // inoculum treaty after cream spreads away from the spatial stamp.
+    if let Some(strain) = mycelium_strain_at(world, gx, gy) {
+        bind_strain_lineage(world, strain, genome, body);
+    }
+}
+
+/// Remember a strain's genome+body for treaty match (strain↔strain trade).
+pub fn bind_strain_lineage(
+    world: &mut World,
+    strain: u32,
+    genome: Genome,
+    body: Vec<BodyModule>,
+) {
+    if body.is_empty() || strain == 0 {
+        return;
+    }
+    let map = &mut world.mycelium_strain_lineage;
+    if map.len() >= MYCELIUM_STRAIN_LINEAGE_MAX && !map.contains_key(&strain) {
+        if let Some(&key) = map.keys().next() {
+            map.remove(&key);
+        }
+    }
+    map.insert(strain, MyceliumLineage { genome, body });
+}
+
+/// Lineage bound to a strain id, if any.
+pub fn strain_lineage(world: &World, strain: u32) -> Option<MyceliumLineage> {
+    world.mycelium_strain_lineage.get(&strain).cloned()
+}
+
+/// Prefer strain→lineage; fall back to spatial nearest stamp at `(gx,gy)`.
+pub fn lineage_for_strain_at(
+    world: &World,
+    strain: u32,
+    gx: i32,
+    gy: i32,
+) -> Option<MyceliumLineage> {
+    strain_lineage(world, strain).or_else(|| nearest_mycelium_lineage(world, gx, gy))
 }
 
 /// Nearest stamped lineage within a small Chebyshev window (column-biased).
@@ -1238,6 +1285,8 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
     // Wet-side harvest / dry-side supply need a thin pipe: bleed sugar + a
     // trickle of pore water along same-strain cream neighbours.
     equalize_mycelium_cargo(world, &colonized);
+    // Distinct strains that meet with matching Symbiont treaties may trade.
+    crate::symbiosis::step_strain_trade(world, tick);
 }
 
 fn shares_strain(world: &World, gx: i32, gy: i32, strain: u32) -> bool {
@@ -1979,6 +2028,8 @@ pub fn infect_mycelium_with_lineage(
     }
     if hit {
         if let Some((genome, body)) = lineage {
+            // Bind strain first so cell stamp can see the dominant id.
+            bind_strain_lineage(world, strain, genome.clone(), body.clone());
             stamp_mycelium_lineage(world, ox, oy, genome, body);
         }
         Some((ox, oy))

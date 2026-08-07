@@ -12,8 +12,12 @@
 //!
 //! Same-strain cream cells slowly equalize sugar + a trickle of pore water
 //! ([`crate::fungi::equalize_mycelium_cargo`]), so wet-side harvests can feed
-//! dry-side supply. Strain↔strain trade is deferred (sugar is still a shared
-//! cell pool, not per-strain).
+//! dry-side supply.
+//!
+//! **Strain↔strain** trade runs on adjacent cream cells with different
+//! dominant strains: both need Symbiont + matching treaties
+//! ([`World::mycelium_strain_lineage`]); wetter side gives water, drier side
+//! pays sugar. Same-cell multi-share barter is deferred (shared sugar pool).
 //!
 //! Ledgers: plant Atom (both directions) and [`World::sym_net_flow`] by strain id.
 
@@ -22,8 +26,9 @@ use serde::{Deserialize, Serialize};
 use crate::blueprint::Genome;
 use crate::cell::water_capacity;
 use crate::fungi::{
-    add_mycelium_energy, ensure_mycelium_strain, mycelium_energy_at, mycelium_strain_at,
-    nearest_mycelium_lineage, take_mycelium_energy, MYCELIUM_ENERGY_SIP_TO_ATOM,
+    add_mycelium_energy, ensure_mycelium_strain, lineage_for_strain_at, mycelium_energy_at,
+    mycelium_strain_at, nearest_mycelium_lineage, take_mycelium_energy,
+    MYCELIUM_CARGO_EQUALIZE_MAX, MYCELIUM_ENERGY_SIP_TO_ATOM,
 };
 use crate::grid::World;
 use crate::organism::{Atom, BodyModule, ModuleId};
@@ -40,6 +45,8 @@ pub const SYM_WATER_MAX_SAT: u8 = 2;
 pub const SYM_ENERGY_MAX: f32 = 0.35;
 /// Soft cap on plant↔cream contacts resolved per organism tick.
 pub const SYM_CONTACT_BUDGET: usize = 48;
+/// Soft cap on strain↔strain frontier contacts per mycelium field pulse.
+pub const SYM_STRAIN_CONTACT_BUDGET: usize = 48;
 /// Treaty byte gap used to label plant- vs fungus-favoring deals.
 pub const SYM_BIAS_GAP: u8 = 40;
 /// Minimum cream−root moist-frac gap to pick supply vs harvest.
@@ -390,11 +397,14 @@ pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Opti
     if c.mycelium() == 0 {
         return None;
     }
-    let lin = nearest_mycelium_lineage(world, gx, gy)?;
+    let strain = mycelium_strain_at(world, gx, gy);
+    let lin = match strain {
+        Some(s) => lineage_for_strain_at(world, s, gx, gy)?,
+        None => nearest_mycelium_lineage(world, gx, gy)?,
+    };
     if !body_has_symbiont(&lin.body) {
         return None;
     }
-    let strain = mycelium_strain_at(world, gx, gy);
     let flow = strain.map(|s| net_flow_at(world, s)).unwrap_or_default();
     let (wl, sl, wt, st, wrl, srl, wrt, srt) = net_ledger_probe(flow);
     let mut best: Option<SymProbe> = None;
@@ -508,7 +518,11 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
             if c.mycelium() == 0 {
                 continue;
             }
-            let Some(lin) = nearest_mycelium_lineage(world, cx, cy) else {
+            let strain = mycelium_strain_at(world, cx, cy);
+            let Some(lin) = (match strain {
+                Some(s) => lineage_for_strain_at(world, s, cx, cy),
+                None => nearest_mycelium_lineage(world, cx, cy),
+            }) else {
                 continue;
             };
             if !body_has_symbiont(&lin.body) {
@@ -649,7 +663,13 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
                 if c.mycelium() == 0 {
                     continue;
                 }
-                let Some(lin) = nearest_mycelium_lineage(world, cx, cy) else {
+                let strain = match mycelium_strain_at(world, cx, cy) {
+                    Some(s) => s,
+                    None => ensure_mycelium_strain(world, cx, cy),
+                };
+                let Some(lin) = lineage_for_strain_at(world, strain, cx, cy)
+                    .or_else(|| nearest_mycelium_lineage(world, cx, cy))
+                else {
                     continue;
                 };
                 if !body_has_symbiont(&lin.body) {
@@ -662,11 +682,6 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
                 let (w, e) = agreed_treaty(plant_g, lin.genome);
                 let (water_want, energy_want, sugar_want) = exchange_rates(match_q, w, e);
                 let mode = trade_mode_at(world, rx, ry, cx, cy);
-
-                let strain = match mycelium_strain_at(world, cx, cy) {
-                    Some(s) => s,
-                    None => ensure_mycelium_strain(world, cx, cy),
-                };
 
                 match mode {
                     SymTradeMode::Supply => {
@@ -760,6 +775,123 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
     }
 }
 
+/// Bidirectional strain↔strain trade on adjacent cream frontiers.
+///
+/// Wetter dominant strain gives pore water; drier pays network sugar.
+/// Both sides need Symbiont + [`treaty_match`] ≥ [`SYM_MATCH_MIN`].
+/// Hooked from the mycelium field pulse after same-strain cargo equalize.
+pub fn step_strain_trade(world: &mut World, tick: u64) {
+    // Sample from the strain map (already colonized cells).
+    let mut cells: Vec<(i32, i32)> = world.mycelium_strains.keys().copied().collect();
+    if cells.is_empty() {
+        return;
+    }
+    // Rotate by tick so frontiers share the budget.
+    let rot = (tick as usize).wrapping_mul(17);
+    cells.sort_unstable_by_key(|&(x, y)| {
+        (x.wrapping_add(rot as i32), y.wrapping_add((rot >> 3) as i32))
+    });
+    let n = cells.len().min(MYCELIUM_CARGO_EQUALIZE_MAX);
+    let mut budget = SYM_STRAIN_CONTACT_BUDGET;
+
+    for &(ax, ay) in cells.iter().take(n) {
+        if budget == 0 {
+            break;
+        }
+        let Some(sa) = mycelium_strain_at(world, ax, ay) else {
+            continue;
+        };
+        let Some(lin_a) = lineage_for_strain_at(world, sa, ax, ay) else {
+            continue;
+        };
+        if !body_has_symbiont(&lin_a.body) {
+            continue;
+        }
+        for (dx, dy) in [(1i32, 0), (0, 1)] {
+            // Cardinal + process each undirected edge once (east / south).
+            if budget == 0 {
+                break;
+            }
+            let bx = world.wrap_x(ax + dx);
+            let by = ay + dy;
+            let Some(c_b) = world.get_cell(bx, by) else {
+                continue;
+            };
+            if c_b.mycelium() == 0 {
+                continue;
+            }
+            let Some(sb) = mycelium_strain_at(world, bx, by) else {
+                continue;
+            };
+            if sa == sb {
+                continue;
+            }
+            let Some(lin_b) = lineage_for_strain_at(world, sb, bx, by) else {
+                continue;
+            };
+            if !body_has_symbiont(&lin_b.body) {
+                continue;
+            }
+            let match_q = treaty_match(lin_a.genome, lin_b.genome);
+            if match_q < SYM_MATCH_MIN {
+                continue;
+            }
+            let moist_a = cell_moist_frac(world, ax, ay);
+            let moist_b = cell_moist_frac(world, bx, by);
+            let (w, e) = agreed_treaty(lin_a.genome, lin_b.genome);
+            let (water_want, _energy_want, sugar_want) = exchange_rates(match_q, w, e);
+            if water_want == 0 && sugar_want == 0 {
+                continue;
+            }
+
+            // Wetter gives water; drier pays sugar (same rule as plant trade).
+            let (wet_xy, dry_xy, wet_strain, dry_strain) =
+                if moist_a > moist_b + SYM_MOIST_DELTA {
+                    ((ax, ay), (bx, by), sa, sb)
+                } else if moist_b > moist_a + SYM_MOIST_DELTA {
+                    ((bx, by), (ax, ay), sb, sa)
+                } else {
+                    continue;
+                };
+
+            let mut water_moved = 0u8;
+            if water_want > 0 {
+                let taken = take_pore_sat(world, wet_xy.0, wet_xy.1, water_want);
+                if taken > 0 {
+                    let deposited = give_pore_sat(world, dry_xy.0, dry_xy.1, taken);
+                    if deposited < taken {
+                        let _ = give_pore_sat(world, wet_xy.0, wet_xy.1, taken - deposited);
+                        water_moved = deposited;
+                    } else {
+                        water_moved = taken;
+                    }
+                }
+            }
+
+            let mut sugar_moved = 0u8;
+            if sugar_want > 0 {
+                let available = mycelium_energy_at(world, dry_xy.0, dry_xy.1);
+                let pay = sugar_want.min(available);
+                if pay > 0 {
+                    let taken = take_mycelium_energy(world, dry_xy.0, dry_xy.1, pay);
+                    if taken > 0 {
+                        add_mycelium_energy(world, wet_xy.0, wet_xy.1, taken);
+                        sugar_moved = taken;
+                    }
+                }
+            }
+
+            if water_moved > 0 || sugar_moved > 0 {
+                // Wet strain: supply side (water out, sugar in).
+                record_net_supply(world, wet_strain, water_moved, sugar_moved, tick);
+                // Dry strain: harvest side (water in, sugar out).
+                record_net_harvest(world, dry_strain, water_moved, sugar_moved, tick);
+                budget = budget.saturating_sub(1);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -767,7 +899,8 @@ mod tests {
     use crate::cell::{Cell, Sat};
     use crate::chunk::ChunkCoord;
     use crate::fungi::{
-        ensure_mycelium_strain, mycelium_energy_at, mycelium_strain_at, stamp_mycelium_lineage,
+        bind_strain_lineage, ensure_mycelium_strain, mycelium_energy_at, mycelium_strain_at,
+        stamp_mycelium_lineage,
     };
     use crate::organism::Atom;
     use wk_material::MaterialId;
@@ -1047,5 +1180,114 @@ mod tests {
         let plant_p = probe_plant_link(&w, &plant).expect("symbiont plant");
         assert!(plant_p.linked);
         assert_eq!(plant_p.bias, SymBias::PlantFavoring);
+    }
+
+    #[test]
+    fn matching_strains_trade_water_for_sugar_across_frontier() {
+        let mut w = World::new(9);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 3, Cell::air());
+        }
+        // Wet cream A | dry cream B — different strains, matching treaties.
+        let mut wet = Cell::solid(MaterialId::Organic);
+        wet.sat = Sat(200);
+        wet.set_mycelium(80);
+        w.set_cell(4, 2, wet);
+        let mut dry = Cell::solid(MaterialId::Organic);
+        dry.sat = Sat(20);
+        dry.set_mycelium(80);
+        w.set_cell(5, 2, dry);
+
+        let sa = ensure_mycelium_strain(&mut w, 4, 2);
+        let sb = {
+            let id = w.next_mycelium_strain_id.max(1);
+            w.next_mycelium_strain_id = id.wrapping_add(1).max(1);
+            w.mycelium_strains.insert((5, 2), vec![(id, 80)]);
+            id
+        };
+        assert_ne!(sa, sb);
+
+        let mut g = Genome::default();
+        g.sym_water = 200;
+        g.sym_energy = 80;
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (2, 0, ModuleId::Symbiont),
+        ];
+        bind_strain_lineage(&mut w, sa, g, body.clone());
+        bind_strain_lineage(&mut w, sb, g, body);
+        stamp_mycelium_lineage(&mut w, 4, 2, g, vec![(0, 0, ModuleId::Symbiont)]);
+        stamp_mycelium_lineage(&mut w, 5, 2, g, vec![(0, 0, ModuleId::Symbiont)]);
+        add_mycelium_energy(&mut w, 5, 2, 40); // dry side can pay
+
+        let wet0 = w.get_cell(4, 2).unwrap().sat.0;
+        let dry0 = w.get_cell(5, 2).unwrap().sat.0;
+        let sugar_wet0 = mycelium_energy_at(&w, 4, 2);
+        let sugar_dry0 = mycelium_energy_at(&w, 5, 2);
+
+        step_strain_trade(&mut w, 0);
+
+        assert!(
+            w.get_cell(4, 2).unwrap().sat.0 < wet0,
+            "wet strain should donate water"
+        );
+        assert!(
+            w.get_cell(5, 2).unwrap().sat.0 > dry0,
+            "dry strain should receive water"
+        );
+        assert!(
+            mycelium_energy_at(&w, 5, 2) < sugar_dry0,
+            "dry strain should pay sugar"
+        );
+        assert!(
+            mycelium_energy_at(&w, 4, 2) > sugar_wet0,
+            "wet strain should receive sugar"
+        );
+        let fa = w.sym_net_flow.get(&sa).copied().unwrap_or_default();
+        let fb = w.sym_net_flow.get(&sb).copied().unwrap_or_default();
+        assert!(fa.water_out_total > 0 || fa.sugar_in_total > 0);
+        assert!(fb.water_in_total > 0 || fb.sugar_out_total > 0);
+    }
+
+    #[test]
+    fn mismatched_strain_treaties_do_not_trade() {
+        let mut w = World::new(10);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 4..=5 {
+            let mut org = Cell::solid(MaterialId::Organic);
+            org.sat = if x == 4 { Sat(200) } else { Sat(20) };
+            org.set_mycelium(80);
+            w.set_cell(x, 2, org);
+        }
+        let sa = ensure_mycelium_strain(&mut w, 4, 2);
+        let sb = {
+            let id = w.next_mycelium_strain_id.max(1);
+            w.next_mycelium_strain_id = id.wrapping_add(1).max(1);
+            w.mycelium_strains.insert((5, 2), vec![(id, 80)]);
+            id
+        };
+        let mut ga = Genome::default();
+        ga.sym_water = 255;
+        ga.sym_energy = 0;
+        let mut gb = Genome::default();
+        gb.sym_water = 0;
+        gb.sym_energy = 255;
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (2, 0, ModuleId::Symbiont),
+        ];
+        bind_strain_lineage(&mut w, sa, ga, body.clone());
+        bind_strain_lineage(&mut w, sb, gb, body);
+        add_mycelium_energy(&mut w, 5, 2, 40);
+        let sugar0 = mycelium_energy_at(&w, 5, 2);
+        step_strain_trade(&mut w, 0);
+        assert_eq!(mycelium_energy_at(&w, 5, 2), sugar0);
+        assert!(w.sym_net_flow.get(&sa).is_none());
+        assert!(w.sym_net_flow.get(&sb).is_none());
     }
 }

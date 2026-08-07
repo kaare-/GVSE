@@ -69,6 +69,10 @@ pub struct World {
     /// Same strain keeps one book across spatial split / reconnect.
     #[serde(default)]
     pub sym_net_flow: HashMap<u32, crate::symbiosis::SymNetFlow>,
+    /// Strain id → lineage (genome+body) for treaty match at strain frontiers.
+    /// Stamped on inoculum; survives cream spread far from the spatial stamp.
+    #[serde(default)]
+    pub mycelium_strain_lineage: HashMap<u32, crate::fungi::MyceliumLineage>,
 }
 
 impl World {
@@ -86,6 +90,7 @@ impl World {
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
             sym_net_flow: HashMap::new(),
+            mycelium_strain_lineage: HashMap::new(),
         }
     }
 
