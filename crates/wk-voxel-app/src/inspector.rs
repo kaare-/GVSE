@@ -185,6 +185,12 @@ pub fn draw_block_inspector(
                 .filter(|(_, _, m)| *m == wk_voxel::ModuleId::Hypha)
                 .count();
             lines.push(format!("digest={digests}  hypha={hyphae}"));
+            if wk_voxel::body_has_symbiont(&atom.body) {
+                lines.push(format!(
+                    "symbiont treaty W={} E={}",
+                    atom.genome.sym_water, atom.genome.sym_energy
+                ));
+            }
         } else if is_land_plant(atom) {
             let (s, l, r) = atom.genome.alloc_weights();
             lines.push("habit=land (fixed crown, root drink)".into());
@@ -207,6 +213,12 @@ pub fn draw_block_inspector(
                 .filter(|(_, _, m)| *m == wk_voxel::ModuleId::Stem)
                 .count();
             lines.push(format!("roots={roots}  stems={stems}"));
+            if wk_voxel::body_has_symbiont(&atom.body) {
+                lines.push(format!(
+                    "symbiont treaty W={} E={}",
+                    atom.genome.sym_water, atom.genome.sym_energy
+                ));
+            }
         } else {
             lines.push(format!(
                 "buoyancy={:.2}  vel_y={:.2}  fy={:.1}",

@@ -184,6 +184,10 @@ Features:
   may host several strains sharing the 255 cream budget; thin climb paths
   stay neon, and cream-bearing grains carry their strain shares / sugar
   when they move).
+- **Symbiont** (`ModuleId::Symbiont`, editor key `8`) is opt-in on plant and
+  fungus — not every species has it. Mutable genome treaty `(W, E)` sets the
+  agreed water/energy deal; matching partners exchange on root↔cream contact
+  (fungus water → plant; plant energy → network sugar). See [`FUNGI.md`](FUNGI.md).
 - Networks that **breach the surface from below** emerge a **surface stalk**
   from the nearest lineage (else `minimal_fungus`). Stalks wind-disperse
   mutated spores far; rhizomorph hops stay local.

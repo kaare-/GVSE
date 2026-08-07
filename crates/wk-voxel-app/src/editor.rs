@@ -51,7 +51,7 @@ impl CreatureEditor {
             self.was_paused = currently_paused;
             self.spawn_picker = false;
             self.status =
-                "1-7 modules | A Atom  T Plant  W seaweed  F fungus | Enter then click plant"
+                "1-8 modules | A Atom  T Plant  W seaweed  F fungus | Enter then click plant"
                     .into();
         }
     }
@@ -87,6 +87,41 @@ impl CreatureEditor {
         if is_key_pressed(KeyCode::Key7) {
             self.brush = ModuleId::ReproSpore;
             self.tool = EditorTool::Paint;
+        }
+        if is_key_pressed(KeyCode::Key8) {
+            self.brush = ModuleId::Symbiont;
+            self.tool = EditorTool::Paint;
+        }
+        // Mutable Symbiont treaty (W, E) on the blueprint genome.
+        if is_key_pressed(KeyCode::Comma) {
+            self.blueprint.genome.sym_water = self.blueprint.genome.sym_water.saturating_sub(8);
+            self.status = format!(
+                "Symbiont treaty W={} E={}  (,/. W  -/= E)",
+                self.blueprint.genome.sym_water, self.blueprint.genome.sym_energy
+            );
+        }
+        if is_key_pressed(KeyCode::Period) {
+            self.blueprint.genome.sym_water =
+                self.blueprint.genome.sym_water.saturating_add(8).min(255);
+            self.status = format!(
+                "Symbiont treaty W={} E={}  (,/. W  -/= E)",
+                self.blueprint.genome.sym_water, self.blueprint.genome.sym_energy
+            );
+        }
+        if is_key_pressed(KeyCode::Minus) {
+            self.blueprint.genome.sym_energy = self.blueprint.genome.sym_energy.saturating_sub(8);
+            self.status = format!(
+                "Symbiont treaty W={} E={}  (,/. W  -/= E)",
+                self.blueprint.genome.sym_water, self.blueprint.genome.sym_energy
+            );
+        }
+        if is_key_pressed(KeyCode::Equal) {
+            self.blueprint.genome.sym_energy =
+                self.blueprint.genome.sym_energy.saturating_add(8).min(255);
+            self.status = format!(
+                "Symbiont treaty W={} E={}  (,/. W  -/= E)",
+                self.blueprint.genome.sym_water, self.blueprint.genome.sym_energy
+            );
         }
         if is_key_pressed(KeyCode::E) {
             self.tool = EditorTool::Erase;
@@ -168,7 +203,7 @@ impl CreatureEditor {
         let (ox, oy) = CANVAS_ORIGIN;
         let cw = self.blueprint.canvas_w as f32 * CELL_PX;
         let px = ox + cw + 24.0;
-        let sy = oy + 160.0;
+        let sy = oy + 168.0;
         let brushes = [
             ModuleId::Nucleus,
             ModuleId::Photosystem,
@@ -177,6 +212,7 @@ impl CreatureEditor {
             ModuleId::Digest,
             ModuleId::Hypha,
             ModuleId::ReproSpore,
+            ModuleId::Symbiont,
         ];
         for (i, mid) in brushes.iter().enumerate() {
             let sx = px + i as f32 * 36.0;
@@ -303,7 +339,7 @@ impl CreatureEditor {
             LIGHTGRAY,
         );
         draw_text(
-            "1 Nucleus  2 Photo  3 Root  4 Stem  5 Digest  6 Hypha  | E erase  P paint",
+            "1 Nucleus  2 Photo  3 Root  4 Stem  5 Digest  6 Hypha  7 Spore  8 Symbiont",
             px,
             oy + 52.0,
             14.0,
@@ -318,17 +354,27 @@ impl CreatureEditor {
         );
         draw_text(
             &format!(
+                "treaty W={} E={}  (,/. water  -/= energy)  | E erase  P paint",
+                self.blueprint.genome.sym_water, self.blueprint.genome.sym_energy
+            ),
+            px,
+            oy + 92.0,
+            14.0,
+            Color::from_rgba(0x3D, 0xBE, 0x9A, 255),
+        );
+        draw_text(
+            &format!(
                 "modules={}  valid={}  name={}",
                 self.blueprint.modules.len(),
                 self.blueprint.is_valid_creature(),
                 self.name_buf
             ),
             px,
-            oy + 100.0,
+            oy + 114.0,
             14.0,
             WHITE,
         );
-        draw_text(&self.status, px, oy + 130.0, 14.0, YELLOW);
+        draw_text(&self.status, px, oy + 138.0, 14.0, YELLOW);
 
         for (i, mid) in [
             ModuleId::Nucleus,
@@ -338,13 +384,14 @@ impl CreatureEditor {
             ModuleId::Digest,
             ModuleId::Hypha,
             ModuleId::ReproSpore,
+            ModuleId::Symbiont,
         ]
         .iter()
         .enumerate()
         {
             let (r, g, b) = mid.rgb();
             let sx = px + i as f32 * 36.0;
-            let sy = oy + 160.0;
+            let sy = oy + 168.0;
             draw_rectangle(sx, sy, 28.0, 28.0, Color::from_rgba(r, g, b, 255));
             if *mid == self.brush {
                 draw_rectangle_lines(sx, sy, 28.0, 28.0, 2.0, WHITE);

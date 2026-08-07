@@ -396,6 +396,7 @@ pub fn plant_metabolic_load(atom: &Atom) -> f32 {
             ModuleId::Root => 0.18,
             ModuleId::Nucleus => 0.40,
             ModuleId::ReproSpore => 0.45,
+            ModuleId::Symbiont => 0.22,
             ModuleId::Digest | ModuleId::Hypha => 0.50,
         };
     }
@@ -2040,6 +2041,7 @@ fn prune_body_to_juvenile(body: &[BodyModule], stemless: bool) -> Vec<BodyModule
             .map(|(dx, dy, _)| (dx.clamp(-1, 1), dy.min(2).max(1), ModuleId::Photosystem))
             .unwrap_or((0, 1, ModuleId::Photosystem));
         out.push(leaf);
+        append_juvenile_symbiont(&mut out, body);
         return dedupe_juvenile_body(out);
     }
 
@@ -2091,7 +2093,37 @@ fn prune_body_to_juvenile(body: &[BodyModule], stemless: bool) -> Vec<BodyModule
         leaves.push((-1, tip_y, ModuleId::Photosystem));
     }
     out.extend(leaves);
+    append_juvenile_symbiont(&mut out, body);
     dedupe_juvenile_body(out)
+}
+
+/// Keep one Symbiont marker on juveniles when the parent opted in.
+fn append_juvenile_symbiont(out: &mut Vec<BodyModule>, body: &[BodyModule]) {
+    if !body.iter().any(|(_, _, m)| *m == ModuleId::Symbiont) {
+        return;
+    }
+    if out.iter().any(|(_, _, m)| *m == ModuleId::Symbiont) {
+        return;
+    }
+    // Prefer parent's offset if free; else beside the shallowest root.
+    if let Some(&(dx, dy, _)) = body.iter().find(|(_, _, m)| *m == ModuleId::Symbiont) {
+        let nx = dx.clamp(-2, 2);
+        let ny = dy.clamp(-SPROUT_MAX_ROOT_DEPTH, 0).min(-1);
+        if !out.iter().any(|&(x, y, _)| x == nx && y == ny) {
+            out.push((nx, ny, ModuleId::Symbiont));
+            return;
+        }
+    }
+    for &(rx, ry, _) in out.iter().filter(|(_, _, m)| *m == ModuleId::Root) {
+        for (ox, oy) in [(1i16, 0), (-1, 0), (0, -1), (1, -1), (-1, -1)] {
+            let nx = rx + ox;
+            let ny = (ry + oy).clamp(-SPROUT_MAX_ROOT_DEPTH, 0);
+            if !out.iter().any(|&(x, y, _)| x == nx && y == ny) {
+                out.push((nx, ny, ModuleId::Symbiont));
+                return;
+            }
+        }
+    }
 }
 
 fn dedupe_juvenile_body(body: Vec<BodyModule>) -> Vec<BodyModule> {

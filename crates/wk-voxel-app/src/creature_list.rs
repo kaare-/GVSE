@@ -219,6 +219,7 @@ fn module_tally(body: &[(i16, i16, ModuleId)]) -> String {
     let mut d = 0usize;
     let mut h = 0usize;
     let mut sp = 0usize;
+    let mut sy = 0usize;
     for (_, _, m) in body {
         match *m {
             ModuleId::Nucleus => n += 1,
@@ -228,6 +229,7 @@ fn module_tally(body: &[(i16, i16, ModuleId)]) -> String {
             ModuleId::Digest => d += 1,
             ModuleId::Hypha => h += 1,
             ModuleId::ReproSpore => sp += 1,
+            ModuleId::Symbiont => sy += 1,
         }
     }
     let mut parts = Vec::new();
@@ -251,6 +253,9 @@ fn module_tally(body: &[(i16, i16, ModuleId)]) -> String {
     }
     if sp > 0 {
         parts.push(format!("Sp{sp}"));
+    }
+    if sy > 0 {
+        parts.push(format!("Sy{sy}"));
     }
     if parts.is_empty() {
         "∅".into()

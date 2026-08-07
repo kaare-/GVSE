@@ -178,7 +178,15 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   litter sips). Mineral corridors pay light upkeep; virgin mineral probes
   spend sugar when available. Fruiting bodies sip nearby sugar into
   `Atom.energy`; emergence burns cream + sugar. Migrates with grain/raft
-  moves. Foundation for later symbiotic plant↔fungus exchange.
+  moves. Plants with matching Symbiont treaties can pay energy into this
+  bank (see below).
+- **Symbiont treaty** — opt-in `ModuleId::Symbiont` (`0x16`, mint) on both
+  the plant body and the fungus lineage body. Genome `(sym_water,
+  sym_energy)` is a mutable agreed deal (editor: `8` paint, `,/.` W,
+  `-/=` E). Match is assortative similarity of the two vectors; a shared
+  lopsided vector is parasitism (high W / low E favours the plant; low W /
+  high E favours the fungus). On root↔cream contact the fungus donates
+  pore water and the plant pays `Atom.energy` into network sugar.
 - **Multi-strain shares** — a cell’s 255 cream budget is shared. Each
   inoculum mints a strain id; several strains can hold intensity on the
   same block (`strain A 40/255`, `strain B 60/255`, …; `_pad` = sum).
