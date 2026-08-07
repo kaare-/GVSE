@@ -195,17 +195,21 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   Trade is **moisture-directed** at each root↔cream contact: **supply** when
   cream is wetter (network gives water, plant pays sugar) and **harvest** when
   the root bed is wetter (plant gives water, network pays sugar into plant
-  energy). Contacts may **pull** water/sugar from the wider same-strain pipe
-  first — so a network with a wet deep hub can support a desert plant, and a
-  shallow plant-rich strain can buy water from a deep wet strain at their
-  frontier. Inspector shows treaty, link state, trade mode, both-direction
+  energy). Plants keep a **reproduction reserve** (`SYM_REPRO_RESERVE_FRAC` =
+  rhizome sprout threshold of spawn tank) that supply sugar pay cannot spend —
+  water may still arrive while the plant banks toward sprouting. Networks leave
+  a small local sugar floor (`SYM_NET_SUGAR_PAY_RESERVE`) when paying plants or
+  other strains. Contacts may **pull** water/sugar from the wider same-strain
+  pipe first — so a wet deep hub can support a desert plant, and a shallow
+  plant-rich strain can buy water from a deep wet strain at their frontier.
+  Inspector shows treaty, link state, trade mode, banking flag, both-direction
   ledgers, potential rates, and bias. Plant ledger lives on the Atom; network
   ledger is `World::sym_net_flow` keyed by **strain id**. **Strain↔strain**
   trade: adjacent cream cells with different dominant strains exchange when
   both lineages paint Symbiont and treaties match
   (`World::mycelium_strain_lineage`); wetter gives water, drier pays sugar
-  (payers may pull sugar from their network). Same-cell multi-share barter is
-  still deferred (shared sugar pool).
+  (payers may pull sugar from their network, keeping the pay reserve). Same-cell
+  multi-share barter is still deferred (shared sugar pool).
 - **Multi-strain shares** — a cell’s 255 cream budget is shared. Each
   inoculum mints a strain id; several strains can hold intensity on the
   same block (`strain A 40/255`, `strain B 60/255`, …; `_pad` = sum).

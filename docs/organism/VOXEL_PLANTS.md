@@ -188,9 +188,11 @@ Features:
   fungus — not every species has it. Mutable genome treaty `(W, E)` sets the
   agreed water/energy deal; matching partners exchange on root↔cream contact
   in either direction from local wetness (supply or harvest), with same-strain
-  cargo pull so a wet hub can support a desert plant. Matching Symbiont
-  strains trade water/sugar at cream frontiers; sugar-funded tips can probe
-  dry rock. See [`FUNGI.md`](FUNGI.md).
+  cargo pull so a wet hub can support a desert plant. Plants bank a
+  reproduction energy reserve before paying sugar (so networks cannot pin them
+  at starvation and block sprouting). Matching Symbiont strains trade
+  water/sugar at cream frontiers; sugar-funded tips can probe dry rock. See
+  [`FUNGI.md`](FUNGI.md).
 - Networks that **breach the surface from below** emerge a **surface stalk**
   from the nearest lineage (else `minimal_fungus`). Stalks wind-disperse
   mutated spores far; rhizomorph hops stay local.
