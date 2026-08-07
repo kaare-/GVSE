@@ -633,6 +633,82 @@ fn clear_mycelium_shares(world: &mut World, gx: i32, gy: i32) {
     clear_mycelium_energy(world, gx, gy);
 }
 
+/// Cream `_pad` with no strain shares: inherit a neighbour strain, or clear.
+///
+/// Never mints a new strain for ghosts — minting turned oxidation scraps and
+/// roof-collapse debris into fake "owned" red dots that then lingered.
+fn heal_orphan_mycelium_pads(world: &mut World) {
+    use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
+
+    let mut orphans: Vec<(i32, i32, u8)> = Vec::new();
+    let coords: Vec<_> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let gx = coord.cx * CHUNK_CELLS_W as i32 + lx as i32;
+                let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
+                let Some(c) = world.get_cell(gx, gy) else {
+                    continue;
+                };
+                if !hosts_mycelium(c.material) {
+                    continue;
+                }
+                let myc = c.mycelium();
+                if myc == 0 {
+                    continue;
+                }
+                if mycelium_shares_at(world, gx, gy).is_empty() {
+                    orphans.push((gx, gy, myc));
+                }
+            }
+        }
+    }
+    // Prefer cells that can inherit first so a fringe touching a real network
+    // reconnects before isolated scraps are wiped.
+    orphans.sort_by_key(|&(gx, gy, _)| {
+        let near = neighbour_has_mycelium_shares(world, gx, gy);
+        (!near, gx, gy)
+    });
+    for (gx, gy, myc) in orphans {
+        if !mycelium_shares_at(world, gx, gy).is_empty() {
+            continue;
+        }
+        if let Some(s) = neighbour_mycelium_strain(world, gx, gy) {
+            world.mycelium_strains.insert((gx, gy), vec![(s, myc)]);
+            continue;
+        }
+        clear_mycelium_shares(world, gx, gy);
+        if let Some(mut c) = world.get_cell(gx, gy) {
+            c.set_mycelium(0);
+            world.set_cell(gx, gy, c);
+        }
+    }
+}
+
+fn neighbour_has_mycelium_shares(world: &World, gx: i32, gy: i32) -> bool {
+    neighbour_mycelium_strain(world, gx, gy).is_some()
+}
+
+fn neighbour_mycelium_strain(world: &World, gx: i32, gy: i32) -> Option<u32> {
+    for (dx, dy) in [
+        (0i32, 1),
+        (0, -1),
+        (1, 0),
+        (-1, 0),
+        (1, 1),
+        (-1, 1),
+        (1, -1),
+        (-1, -1),
+    ] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        if let Some(s) = mycelium_strain_at(world, nx, ny) {
+            return Some(s);
+        }
+    }
+    None
+}
+
 fn sync_cell_mycelium_from_shares(world: &mut World, gx: i32, gy: i32) {
     let gx = world.wrap_x(gx);
     let total: u32 = world
@@ -1034,6 +1110,10 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
 
     let seed = world.seed.0;
     let tick = world.tick;
+    // Full-world orphan pass (not sample-capped): cream without shares either
+    // inherits a neighbouring strain or clears. Roof-collapse / old oxidation
+    // ghosts used to linger as red `M` dots when hubs filled the process budget.
+    heal_orphan_mycelium_pads(world);
     let colonized = collect_mycelium_field_cells(world, tick, seed, MYCELIUM_FIELD_MAX_CELLS);
     if colonized.is_empty() {
         return;
@@ -1043,33 +1123,9 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
     let mut decays: Vec<(i32, i32)> = Vec::new();
 
     for (i, &(gx, gy, myc, mat)) in colonized.iter().enumerate() {
-        // Heal orphan `_pad` (cream without strain shares). Thin isolated
-        // ghosts (myc≤1, no neighbouring shares) are leftover virgin-Organic
-        // carbon oxidation — clear them. Real corridors inherit/mint a strain.
+        // Sampled cells should already be healed; skip any residual ghosts.
         if mycelium_shares_at(world, gx, gy).is_empty() {
-            let near_share = [
-                (0i32, 1),
-                (0, -1),
-                (1, 0),
-                (-1, 0),
-                (1, 1),
-                (-1, 1),
-                (1, -1),
-                (-1, -1),
-            ]
-            .iter()
-            .any(|&(dx, dy)| {
-                !mycelium_shares_at(world, world.wrap_x(gx + dx), gy + dy).is_empty()
-            });
-            if myc <= 1 && !near_share {
-                clear_mycelium_shares(world, gx, gy);
-                if let Some(mut c) = world.get_cell(gx, gy) {
-                    c.set_mycelium(0);
-                    world.set_cell(gx, gy, c);
-                }
-                continue;
-            }
-            let _ = ensure_mycelium_strain(world, gx, gy);
+            continue;
         }
         let moist = organic_cell_moist_frac(world, gx, gy);
         if moist >= MYCELIUM_FIELD_MOIST {
@@ -2531,6 +2587,59 @@ mod tests {
             w.get_cell(4, 2).map(|c| c.mycelium()),
             Some(0),
             "isolated myc=1 soil with no shares should clear as oxidation ghost"
+        );
+    }
+
+    #[test]
+    fn field_clears_isolated_orphan_cream_of_any_intensity() {
+        let mut w = litter_plot();
+        // Fat orphan (e.g. roof-collapse debris that dropped `_pad` without shares).
+        let mut loose = Cell::solid(MaterialId::LooseLimestone);
+        loose.sat = Sat(40);
+        loose.set_mycelium(28);
+        w.set_cell(4, 2, loose);
+        // Dense owned hub fills the sample budget; orphan must still heal.
+        for x in 10..26 {
+            for y in 1..=4 {
+                let mut sand = Cell::solid(MaterialId::Sand);
+                sand.sat = Sat(180);
+                sand.set_mycelium(200);
+                w.set_cell(x, y, sand);
+                let s = alloc_mycelium_strain(&mut w);
+                w.mycelium_strains.insert((x, y), vec![(s, 200)]);
+            }
+        }
+        w.tick = MYCELIUM_FIELD_PERIOD;
+        step_mycelium_field(&mut w);
+        assert_eq!(
+            w.get_cell(4, 2).map(|c| c.mycelium()),
+            Some(0),
+            "isolated shareless cream must clear even when hubs fill the process budget"
+        );
+        assert!(mycelium_shares_at(&w, 4, 2).is_empty());
+    }
+
+    #[test]
+    fn orphan_cream_beside_owned_network_inherits_strain() {
+        let mut w = litter_plot();
+        let mut hub = Cell::solid(MaterialId::Sand);
+        hub.sat = Sat(160);
+        hub.set_mycelium(80);
+        w.set_cell(4, 2, hub);
+        let strain = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(strain, 80)]);
+        let mut orphan = Cell::solid(MaterialId::LooseLimestone);
+        orphan.sat = Sat(40);
+        orphan.set_mycelium(28);
+        w.set_cell(5, 2, orphan);
+        w.tick = MYCELIUM_FIELD_PERIOD;
+        step_mycelium_field(&mut w);
+        assert_eq!(w.get_cell(5, 2).map(|c| c.mycelium()), Some(28));
+        assert!(
+            mycelium_shares_at(&w, 5, 2)
+                .iter()
+                .any(|&(s, a)| s == strain && a == 28),
+            "fringe orphan must inherit neighbour strain, not mint / clear"
         );
     }
 
