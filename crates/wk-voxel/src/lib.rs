@@ -96,7 +96,10 @@ pub use organism::{
     CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT,
     SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
-pub use symbiosis::{body_has_symbiont, step as step_symbiosis, treaty_match, SYM_MATCH_MIN};
+pub use symbiosis::{
+    body_has_symbiont, probe_cream_link, probe_plant_link, step as step_symbiosis, treaty_match,
+    SymBias, SymProbe, SYM_MATCH_MIN,
+};
 pub use plant::{
     collect_live_photo_world_cells, collect_live_root_world_cells, collect_plant_sail_tops,
     find_fungus_slot, find_plant_slot, find_surface_air_slot, is_land_plant,

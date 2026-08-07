@@ -187,6 +187,9 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   lopsided vector is parasitism (high W / low E favours the plant; low W /
   high E favours the fungus). On root↔cream contact the fungus donates
   pore water and the plant pays `Atom.energy` into network sugar.
+  Inspector on cream / plant shows treaty, link state (`idle` / `touching` /
+  `connected`), match %, potential water→plant and energy→sugar rates, and
+  bias label.
 - **Multi-strain shares** — a cell’s 255 cream budget is shared. Each
   inoculum mints a strain id; several strains can hold intensity on the
   same block (`strain A 40/255`, `strain B 60/255`, …; `_pad` = sum).

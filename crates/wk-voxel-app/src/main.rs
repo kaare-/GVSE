@@ -1547,6 +1547,7 @@ async fn main() {
                     &scene.temperature,
                     &scene.geotech,
                     &scene.world,
+                    &scene.organisms.atoms,
                     org,
                     corpse,
                     sw,

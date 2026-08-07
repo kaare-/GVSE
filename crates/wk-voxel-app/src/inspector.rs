@@ -60,6 +60,32 @@ pub fn screen_to_world(
     Some((gx, gy))
 }
 
+fn push_sym_probe(lines: &mut Vec<String>, probe: &wk_voxel::SymProbe) {
+    let match_pct = (probe.match_q * 100.0).round() as i32;
+    if probe.linked {
+        let partner = match probe.plant_idx {
+            Some(i) => format!(" plant#{i}"),
+            None => String::new(),
+        };
+        lines.push(format!(
+            "sym link: connected  match={match_pct}%{partner}"
+        ));
+        lines.push(format!(
+            "sym exchange: water→plant ≤{}/t  energy→sugar ≤{:.2} (≈{} sugar/t)",
+            probe.water_per_tick, probe.energy_per_tick, probe.sugar_per_tick
+        ));
+        lines.push(format!("sym bias: {}", probe.bias.label()));
+    } else if probe.touching {
+        lines.push(format!(
+            "sym link: touching  match={match_pct}% (need ≥{:.0}%)",
+            wk_voxel::SYM_MATCH_MIN * 100.0
+        ));
+        lines.push(format!("sym bias: {} (no exchange)", probe.bias.label()));
+    } else {
+        lines.push("sym link: idle (no root↔cream contact)".into());
+    }
+}
+
 pub fn draw_block_inspector(
     gx: i32,
     gy: i32,
@@ -68,6 +94,7 @@ pub fn draw_block_inspector(
     temperature: &Temperature,
     geotech: &GeotechMap,
     world: &World,
+    atoms: &[Atom],
     organism: Option<(usize, &Atom)>,
     corpse: Option<(usize, &Corpse)>,
     sw: f32,
@@ -116,14 +143,16 @@ pub fn draw_block_inspector(
                 if sugar > 0 {
                     lines.push(format!("network sugar={sugar}/255"));
                 }
-                // Field cream carries lineage from inoculum — show treaty when
-                // the network painted Symbiont (same readout as living plants).
+                // Field cream carries lineage from inoculum — treaty + link.
                 if let Some(lin) = wk_voxel::nearest_mycelium_lineage(world, gx, gy) {
                     if wk_voxel::body_has_symbiont(&lin.body) {
                         lines.push(format!(
                             "symbiont treaty W={} E={}",
                             lin.genome.sym_water, lin.genome.sym_energy
                         ));
+                        if let Some(probe) = wk_voxel::probe_cream_link(world, gx, gy, atoms) {
+                            push_sym_probe(&mut lines, &probe);
+                        }
                     }
                 }
             }
@@ -228,6 +257,9 @@ pub fn draw_block_inspector(
                     "symbiont treaty W={} E={}",
                     atom.genome.sym_water, atom.genome.sym_energy
                 ));
+                if let Some(probe) = wk_voxel::probe_plant_link(world, atom) {
+                    push_sym_probe(&mut lines, &probe);
+                }
             }
         } else {
             lines.push(format!(
