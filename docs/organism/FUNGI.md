@@ -163,10 +163,13 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   (Organic food; Soil / Sand / Clay easier when moist; loose rock harder;
   Stone rare cracks; Bedrock refuses). World process
   (`step_mycelium_field`) goal-seeks Organic and the free surface.
-  Dry cells fade (disconnect); remoistened neighbours can re-spread
-  (reconnect). Compost leaves a residual cream corridor on Soil **only
-  when the Organic already had cream** — virgin surface oxidation must
-  not invent orphan `mycelium=1` soil. Each field pulse processes a
+  **Organic** thickens into a real colony (shared 255 budget). **Mineral**
+  is a cheap search/conduit: soft-capped while seeking, then tapers toward
+  a thin connection once it touches threaded Organic (no fat mineral
+  blobs). Dry cells fade (disconnect); remoistened neighbours can
+  re-spread (reconnect). Compost leaves a residual cream corridor on Soil
+  **only when the Organic already had cream** — virgin surface oxidation
+  must not invent orphan `mycelium=1` soil. Each field pulse processes a
   rotating, frontier-biased sample (perf cap) so dense hubs cannot
   permanently starve climb / food-seeking fronts.
   Renderer: faint cream threads (stronger on Organic).

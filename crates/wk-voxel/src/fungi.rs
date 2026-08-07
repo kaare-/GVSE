@@ -152,6 +152,15 @@ pub const DEATH_LITTER_MAX: u16 = 48;
 /// Cream left on the new Soil cell after Organic compost — keeps a
 /// mineral corridor so networks can reconnect instead of hard-severing.
 pub const MYCELIUM_COMPOST_RESIDUAL: u8 = 12;
+/// Soft cream cap on mineral hosts while *seeking* Organic / surface.
+/// Mineral is a search corridor, not a colony — keep it thin.
+pub const MYCELIUM_MINERAL_CAP: u8 = 28;
+/// After a mineral cell touches threaded Organic, taper cream toward this
+/// conduit thickness (cheaper than keeping a fat mineral blob).
+pub const MYCELIUM_MINERAL_CONDUIT: u8 = 12;
+/// 1-in-N chance per field pulse to shave one unit off an over-thick
+/// mineral conduit that has already found food.
+pub const MYCELIUM_MINERAL_TAPER_ODDS: u64 = 6;
 /// Soft cap on stamped lineage cells (editor / spores).
 pub const MYCELIUM_LINEAGE_MAX: usize = 512;
 /// Soft cap on per-cell strain ownership entries (overlay map).
@@ -813,6 +822,31 @@ fn open_air_above(world: &World, gx: i32, gy: i32) -> bool {
     false
 }
 
+/// Mineral corridor has reached threaded Organic food (can taper to a conduit).
+fn mineral_reached_food(world: &World, gx: i32, gy: i32) -> bool {
+    let gx = world.wrap_x(gx);
+    for (dx, dy) in [
+        (0i32, 1),
+        (0, -1),
+        (1, 0),
+        (-1, 0),
+        (1, 1),
+        (-1, 1),
+        (1, -1),
+        (-1, -1),
+    ] {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        if matches!(
+            world.get_cell(nx, ny),
+            Some(c) if c.material == MaterialId::Organic && c.mycelium() > 0
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
 /// Labile forage from nearby Organic / mycelium field.
 /// Does not destroy cells — mycelium intensity is the visible progress.
 pub fn forage_organic_energy(world: &World, gx: i32, gy: i32, genome: &Genome, atom: &Atom) -> f32 {
@@ -912,24 +946,51 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
         }
         let moist = organic_cell_moist_frac(world, gx, gy);
         if moist >= MYCELIUM_FIELD_MOIST {
-            // Organic thickens freely; mineral corridors thicken slower.
-            let grow_odds = if mat == MaterialId::Organic { 1 } else { 3 };
-            if myc < 255 {
-                let h = hash_u64(seed, tick, gx as u64, 0x680u64 ^ (i as u64));
-                if h % grow_odds == 0 {
+            let organic = mat == MaterialId::Organic;
+            if organic {
+                // Food substrate: thicken freely into the shared 255 budget.
+                if myc < 255 {
                     grows.push((gx, gy));
                 }
-            }
-            if myc >= 16 {
-                let h = hash_u64(seed, tick, gx as u64, gy as u64 ^ (i as u64));
-                if h % MYCELIUM_FIELD_SPREAD_ODDS == 0 {
-                    spreads.push((gx, gy));
+                if myc >= 16 {
+                    let h = hash_u64(seed, tick, gx as u64, gy as u64 ^ (i as u64));
+                    if h % MYCELIUM_FIELD_SPREAD_ODDS == 0 {
+                        spreads.push((gx, gy));
+                    }
                 }
-            }
-            if mat == MaterialId::Organic && myc >= threshold {
-                let h = hash_u64(seed, tick, gx as u64, 0x5011u64);
-                if h % convert_odds == 0 {
-                    compost_organic_to_soil(world, gx, gy);
+                if myc >= threshold {
+                    let h = hash_u64(seed, tick, gx as u64, 0x5011u64);
+                    if h % convert_odds == 0 {
+                        compost_organic_to_soil(world, gx, gy);
+                    }
+                }
+            } else {
+                // Mineral: thin search front → conduit once Organic is found.
+                let fed = mineral_reached_food(world, gx, gy);
+                if fed && myc > MYCELIUM_MINERAL_CONDUIT {
+                    // Fat leftovers reabsorb quickly; near-conduit shaves slowly.
+                    let odds = if myc > MYCELIUM_MINERAL_CONDUIT.saturating_add(8) {
+                        2
+                    } else {
+                        MYCELIUM_MINERAL_TAPER_ODDS
+                    };
+                    let h = hash_u64(seed, tick, gx as u64, 0x7A9Eu64);
+                    if h % odds == 0 {
+                        decays.push((gx, gy));
+                    }
+                } else if !fed && myc < MYCELIUM_MINERAL_CAP {
+                    let h = hash_u64(seed, tick, gx as u64, 0x680u64 ^ (i as u64));
+                    if h % 3 == 0 {
+                        grows.push((gx, gy));
+                    }
+                }
+                // Only *seeking* mineral fronts keep probing. Once fed, the
+                // Organic colony owns further spread; mineral just conducts.
+                if !fed && myc >= 8 && myc <= MYCELIUM_MINERAL_CAP {
+                    let h = hash_u64(seed, tick, gx as u64, gy as u64 ^ (i as u64));
+                    if h % MYCELIUM_FIELD_SPREAD_ODDS == 0 {
+                        spreads.push((gx, gy));
+                    }
                 }
             }
         } else if myc > 0 {
@@ -945,7 +1006,17 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
     for (gx, gy) in grows {
         // Thicken the dominant share (or mint wild) into free room.
         let strain = mycelium_strain_at(world, gx, gy);
-        add_mycelium_with_strain(world, gx, gy, MYCELIUM_FIELD_GROW, strain, 255);
+        let cap = world
+            .get_cell(gx, gy)
+            .map(|c| {
+                if c.material == MaterialId::Organic {
+                    255
+                } else {
+                    MYCELIUM_MINERAL_CAP
+                }
+            })
+            .unwrap_or(MYCELIUM_MINERAL_CAP);
+        add_mycelium_with_strain(world, gx, gy, MYCELIUM_FIELD_GROW, strain, cap);
     }
     for (gx, gy) in spreads {
         spread_mycelium_once(world, gx, gy);
@@ -989,7 +1060,9 @@ fn find_organic_xy(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
                 continue;
             }
             let m = c.mycelium();
-            if m >= 255 {
+            let organic = c.material == MaterialId::Organic;
+            let host_cap = if organic { 255 } else { MYCELIUM_MINERAL_CAP };
+            if m >= host_cap {
                 continue;
             }
             let moist = organic_cell_moist_frac(world, nx, y);
@@ -997,13 +1070,22 @@ fn find_organic_xy(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
                 continue;
             };
             let dist = dx.abs() + dy.abs();
-            // 0 = young patch (keep thickening), 1 = mid, 2 = virgin frontier.
-            let stage = if (1..80).contains(&m) {
+            // Organic: thicken young patches. Mineral: prefer virgin frontier
+            // (never farm a fat mineral blob under the seat).
+            let stage = if organic {
+                if (1..80).contains(&m) {
+                    0
+                } else if m >= 80 {
+                    1
+                } else {
+                    2
+                }
+            } else if m == 0 {
                 0
-            } else if m >= 80 {
+            } else if m < MYCELIUM_MINERAL_CONDUIT {
                 1
             } else {
-                2
+                3
             };
             // Prefer climbing toward free Air so networks breach the surface
             // before raising a stalk (slight bias — still thicken near seat).
@@ -1015,7 +1097,7 @@ fn find_organic_xy(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
                 2
             };
             // Goal: Organic food nearby — mineral cells pay until they reach it.
-            let food = if c.material == MaterialId::Organic {
+            let food = if organic {
                 0
             } else {
                 12 + dist_to_organic(world, nx, y).min(20)
@@ -1194,8 +1276,13 @@ pub fn colonize_and_compost_cfg(
                 .min(4);
             let strain = mycelium_strain_at(world, ox, oy)
                 .or_else(|| mycelium_strain_at(world, gx, gy));
+            let cap = if c.material == MaterialId::Organic {
+                255
+            } else {
+                MYCELIUM_MINERAL_CAP
+            };
             let _ = c;
-            add_mycelium_with_strain(world, ox, oy, add, strain, 255);
+            add_mycelium_with_strain(world, ox, oy, add, strain, cap);
             energy += MYCELIUM_ENERGY * (1.0 + 0.05 * n_h as f32);
         }
         let intensity = world
@@ -1219,8 +1306,13 @@ pub fn colonize_and_compost_cfg(
 fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
     let gx = world.wrap_x(gx);
     let src_food = dist_to_organic(world, gx, gy);
+    let src_mat = world
+        .get_cell(gx, gy)
+        .map(|c| c.material)
+        .unwrap_or(MaterialId::Air);
+    let src_on_food = src_mat == MaterialId::Organic;
     // Score neighbours: host cost + food-seek + surface-seek. Pick best.
-    let mut best: Option<(i32, i32, i32, u8)> = None; // score, x, y, add
+    let mut best: Option<(i32, i32, i32, u8, u8)> = None; // score, x, y, add, cap
     for (dx, dy) in [
         (0i32, 1),
         (1, 1),
@@ -1236,7 +1328,26 @@ fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
         let Some(c) = world.get_cell(nx, ny) else {
             continue;
         };
-        if !hosts_mycelium(c.material) || c.mycelium() >= 40 {
+        if !hosts_mycelium(c.material) {
+            continue;
+        }
+        let dest_organic = c.material == MaterialId::Organic;
+        let dest_cap = if dest_organic {
+            255
+        } else {
+            MYCELIUM_MINERAL_CAP
+        };
+        // Organic may keep thickening via grow; mineral stops at conduit cap.
+        let skip_at = if dest_organic { 40 } else { MYCELIUM_MINERAL_CAP };
+        if c.mycelium() >= skip_at {
+            continue;
+        }
+        // Don't re-thicken a mineral cell that already touches food — that
+        // fights the conduit taper and paints fat mineral blobs again.
+        if !dest_organic
+            && c.mycelium() >= MYCELIUM_MINERAL_CONDUIT
+            && mineral_reached_food(world, nx, ny)
+        {
             continue;
         }
         let moist = organic_cell_moist_frac(world, nx, ny);
@@ -1267,24 +1378,28 @@ fn spread_mycelium_once(world: &mut World, gx: i32, gy: i32) {
         } else {
             4
         };
-        let organic_bonus = if c.material == MaterialId::Organic {
+        let organic_bonus = if dest_organic { 0 } else { 5 };
+        // From a fed Organic patch, don't flood mineral sideways — only
+        // probe mineral when it steps toward new food or open air.
+        let mineral_flood = if src_on_food && !dest_organic {
+            if food < src_food || open_air_above(world, nx, ny) {
+                0
+            } else {
+                18
+            }
+        } else {
             0
-        } else {
-            5
         };
-        let score = host_cost as i32 + toward_food + climb + organic_bonus;
-        let add = if c.material == MaterialId::Organic {
-            8
-        } else {
-            5
-        };
-        if best.map(|(bs, _, _, _)| score < bs).unwrap_or(true) {
-            best = Some((score, nx, ny, add));
+        let score =
+            host_cost as i32 + toward_food + climb + organic_bonus + mineral_flood;
+        let add = if dest_organic { 8 } else { 4 };
+        if best.map(|(bs, _, _, _, _)| score < bs).unwrap_or(true) {
+            best = Some((score, nx, ny, add, dest_cap));
         }
     }
-    if let Some((_, nx, ny, add)) = best {
+    if let Some((_, nx, ny, add, cap)) = best {
         let strain = Some(ensure_mycelium_strain(world, gx, gy));
-        add_mycelium_with_strain(world, nx, ny, add, strain, 255);
+        add_mycelium_with_strain(world, nx, ny, add, strain, cap);
     }
 }
 
@@ -1532,13 +1647,13 @@ pub fn infect_mycelium_with_lineage(
         } else {
             (MYCELIUM_INOCULUM_AMOUNT / 2).max(8)
         };
-        // Mineral feeders take a thinner inoculum.
-        let add = if c.material == MaterialId::Organic {
-            add
+        // Mineral feeders take a thinner inoculum into the mineral conduit cap.
+        let (add, cap) = if c.material == MaterialId::Organic {
+            (add, MYCELIUM_INOCULUM_CAP)
         } else {
-            (add / 2).max(4)
+            ((add / 2).max(4), MYCELIUM_MINERAL_CAP)
         };
-        add_mycelium_with_strain(world, ox, y, add, Some(strain), MYCELIUM_INOCULUM_CAP);
+        add_mycelium_with_strain(world, ox, y, add, Some(strain), cap);
         hit = true;
     }
     if hit {
@@ -2635,6 +2750,54 @@ mod tests {
             }
         }
         assert!(saw_soil, "low-odds FungiConfig must compost Organic → Soil");
+    }
+
+    #[test]
+    fn mineral_cream_soft_caps_while_seeking() {
+        let mut w = litter_plot();
+        // Isolated moist sand — seeking, no Organic in reach.
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(200);
+        sand.set_mycelium(10);
+        w.set_cell(4, 2, sand);
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains.insert((4, 2), vec![(s, 10)]);
+        for t in 0..200u64 {
+            w.tick = t * MYCELIUM_FIELD_PERIOD;
+            step_mycelium_field(&mut w);
+        }
+        let myc = w.get_cell(4, 2).unwrap().mycelium();
+        assert!(
+            myc > 10 && myc <= MYCELIUM_MINERAL_CAP,
+            "seeking mineral should thicken but stay ≤ mineral cap (got {myc})"
+        );
+    }
+
+    #[test]
+    fn mineral_corridor_tapers_after_reaching_organic() {
+        let mut w = litter_plot();
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(200);
+        sand.set_mycelium(MYCELIUM_MINERAL_CAP);
+        w.set_cell(4, 2, sand);
+        let s = alloc_mycelium_strain(&mut w);
+        w.mycelium_strains
+            .insert((4, 2), vec![(s, MYCELIUM_MINERAL_CAP)]);
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.sat = Sat(200);
+        org.set_mycelium(80);
+        w.set_cell(5, 2, org);
+        w.mycelium_strains.insert((5, 2), vec![(s, 80)]);
+        for t in 0..120u64 {
+            w.tick = t * MYCELIUM_FIELD_PERIOD;
+            step_mycelium_field(&mut w);
+        }
+        let myc = w.get_cell(4, 2).unwrap().mycelium();
+        assert!(
+            myc <= MYCELIUM_MINERAL_CONDUIT + 4,
+            "fed mineral corridor should taper toward conduit (got {myc})"
+        );
+        assert!(myc > 0, "conduit must remain connected");
     }
 
     #[test]
