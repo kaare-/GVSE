@@ -25,7 +25,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | Upright mast re-tips when tippy; draw-space sail counts new shoots | Done |
 | Tip bakes into body (new stems grow up); floaters elongate roots | Done |
 | Tipped waterline logs capped; re-tip folds Stem only; no terrain pierce | Done |
-| Vegetative / spore child = parent body plan + mutation (not template) | Done |
+| Vegetative / spore child = sapling birth, grows into parent plan + mutation | Done |
 | Substrate-rooted plants stay pinned when flooded (raft organic floats) | Done |
 | Seaweed stays on bed holdfast; floats only if holdfast lost/rafting | Done |
 | Crown holdfast ignores seepage; reseats if displaced; no stream tip | Done |
@@ -106,9 +106,11 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 ### D3 — Vegetative sprout *(landed)*
 
 - Lateral rhizome tip → child plant on moist neighbour
-- Child chassis = upright **parent body plan**, then `mutate_body` +
-  `Genome::mutate` with `clone_fidelity` (module add/swap/delete + genes;
-  habit stays plant; stemless cannot invent a trunk)
+- Child **births as a short sapling**; the mutated upright parent plan is
+  stored on `Atom::growth_target`. Growth fills missing target cells first
+  (stem scaffold → roots → leaves → organs) under local sun / water /
+  spacing gates, then free-elongates as today. `mutate_body` +
+  `Genome::mutate` use `clone_fidelity` (stemless cannot invent a trunk)
 - Soft pop cap shared with Atoms
 - Root elongation biases sideways when banking for a sprout
 - **Anti-flood / spacing:** long sprout period (~0.6 demo day), higher
@@ -120,8 +122,8 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 
 - Paint [`ReproSpore`](PALETTE.md) (`7` in the editor) on a land plant
 - Rare wind-biased dispersal farther than rhizome reach (`try_plant_wind_spore`)
-- Child is the parent body plan (plus mutation) and keeps a sorus so ferns
-  can keep spreading
+- Child is a sapling with the parent plan (+ mutation) as growth target;
+  keeps a sorus so ferns can keep spreading (bank packets store the target)
 - Gene + blueprint mutation on the same `clone_fidelity` knob
 - App draws lilac spore puffs drifting on climate wind (`SporeFx`)
 - Rhizome sprout still works without spore modules (local clone only)
