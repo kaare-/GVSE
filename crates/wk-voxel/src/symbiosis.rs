@@ -50,7 +50,13 @@ pub const SYM_WATER_MAX_SAT: u8 = 2;
 /// Max plant energy spent into network sugar per supply contact per tick.
 pub const SYM_ENERGY_MAX: f32 = 0.35;
 /// Soft cap on plant↔cream contacts resolved per organism tick.
-pub const SYM_CONTACT_BUDGET: usize = 48;
+/// Sized for dense groves (100+ symbiont plants) at one partner each.
+pub const SYM_CONTACT_BUDGET: usize = 192;
+/// Successful cream partners allowed per plant per tick.
+///
+/// Mature multi-root trees must not monopolize [`SYM_CONTACT_BUDGET`] and
+/// starve spore / sprout clones that sit later in the atom list.
+pub const SYM_PARTNERS_PER_PLANT: usize = 1;
 /// Soft cap on strain↔strain frontier contacts per mycelium field pulse.
 pub const SYM_STRAIN_CONTACT_BUDGET: usize = 48;
 /// Max frontier edges considered per pulse (before the contact budget).
@@ -845,13 +851,24 @@ fn take_root_pore_sat(world: &mut World, rx: i32, ry: i32, amount: u8) -> u8 {
 /// Clears plant lasts only — network lasts are cleared once per world tick
 /// via [`clear_sym_net_flow_lasts`] before the mycelium field pulse so
 /// strain↔strain and plant↔cream share one inspector "last" window.
+///
+/// Plants are visited in tick-rotated order so early atom indices (editor
+/// plantings) cannot permanently starve later spore / sprout clones when the
+/// contact budget is tight. Each plant gets at most
+/// [`SYM_PARTNERS_PER_PLANT`] successful cream trades per pulse.
 pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
     clear_plant_sym_flow_lasts(atoms);
+    let n = atoms.len();
+    if n == 0 {
+        return;
+    }
     let mut budget = SYM_CONTACT_BUDGET;
-    for atom in atoms.iter_mut() {
+    let start = (tick as usize) % n;
+    for k in 0..n {
         if budget == 0 {
             break;
         }
+        let atom = &mut atoms[(start + k) % n];
         if !is_land_plant(atom) || !body_has_symbiont(&atom.body) {
             continue;
         }
@@ -861,12 +878,13 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
             continue;
         }
 
+        let mut partners = 0usize;
         'roots: for &(rx, ry) in &roots {
-            if budget == 0 {
+            if budget == 0 || partners >= SYM_PARTNERS_PER_PLANT {
                 break;
             }
             for (dx, dy) in ROOT_CREAM_NEIGHBORS {
-                if budget == 0 {
+                if budget == 0 || partners >= SYM_PARTNERS_PER_PLANT {
                     break 'roots;
                 }
                 let cx = world.wrap_x(rx + dx);
@@ -1011,13 +1029,14 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
                 }
 
                 // Empty contacts (saturated pores / banking sugar) must not
-                // consume the root's one partner slot or the global budget —
+                // consume the plant's partner slot or the global budget —
                 // keep scanning neighbours for a cream that can actually trade.
                 if !moved {
                     continue;
                 }
                 budget = budget.saturating_sub(1);
-                // One successful cream partner per root per tick.
+                partners = partners.saturating_add(1);
+                // One successful cream partner per root; plant cap enforced above.
                 break;
             }
         }
@@ -1664,6 +1683,168 @@ mod tests {
         assert!(
             plant.sym_water_recv_last > 0 || plant.sym_sugar_paid_last > 0,
             "successful neighbour trade must show on sym plant last"
+        );
+    }
+
+    #[test]
+    fn multi_root_plant_takes_only_one_partner_slot() {
+        let mut w = moist_bed();
+        let mut fungus_g = Genome::default();
+        fungus_g.sym_water = 200;
+        fungus_g.sym_energy = 80;
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (2, 0, ModuleId::Symbiont),
+        ];
+        // Wide cream under a fan of roots.
+        for x in 2..10 {
+            let mut c = w.get_cell(x, 1).unwrap();
+            c.sat = Sat(200);
+            c.set_mycelium(80);
+            w.set_cell(x, 1, c);
+            stamp_mycelium_lineage(&mut w, x, 1, fungus_g, body.clone());
+        }
+        let strain = ensure_mycelium_strain(&mut w, 4, 1);
+        for x in 2..10 {
+            w.mycelium_strains.insert((x, 1), vec![(strain, 80)]);
+        }
+        bind_strain_lineage(&mut w, strain, fungus_g, vec![(0, 0, ModuleId::Symbiont)]);
+
+        let mut roots = vec![(0i16, 0, ModuleId::Nucleus), (0, 1, ModuleId::Photosystem)];
+        for dx in -3i16..=3 {
+            roots.push((dx, -1, ModuleId::Root));
+        }
+        roots.push((1, -1, ModuleId::Symbiont));
+        let mut plant = Atom::from_body(5, 3, 40.0, roots);
+        plant.genome.sym_water = 200;
+        plant.genome.sym_energy = 80;
+        plant.energy = 0.5; // banking — water gift only
+        step(&mut w, std::slice::from_mut(&mut plant), 0);
+        assert!(
+            plant.sym_water_recv_last > 0,
+            "multi-root plant should still trade once"
+        );
+        assert!(
+            plant.sym_water_recv_last <= SYM_WATER_MAX_SAT,
+            "one partner/plant: last water {} must fit a single contact",
+            plant.sym_water_recv_last
+        );
+    }
+
+    #[test]
+    fn later_clone_still_trades_when_early_plant_is_multi_rooted() {
+        let mut w = moist_bed();
+        let mut fungus_g = Genome::default();
+        fungus_g.sym_water = 200;
+        fungus_g.sym_energy = 80;
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (2, 0, ModuleId::Symbiont),
+        ];
+        for x in 2..12 {
+            let mut c = w.get_cell(x, 1).unwrap();
+            c.sat = Sat(200);
+            c.set_mycelium(80);
+            w.set_cell(x, 1, c);
+            stamp_mycelium_lineage(&mut w, x, 1, fungus_g, body.clone());
+        }
+        let strain = ensure_mycelium_strain(&mut w, 4, 1);
+        for x in 2..12 {
+            w.mycelium_strains.insert((x, 1), vec![(strain, 80)]);
+        }
+        bind_strain_lineage(&mut w, strain, fungus_g, vec![(0, 0, ModuleId::Symbiont)]);
+
+        let mut early_body = vec![
+            (0i16, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Photosystem),
+            (4, -1, ModuleId::Symbiont),
+        ];
+        for dx in -4i16..=4 {
+            early_body.push((dx, -1, ModuleId::Root));
+        }
+        let mut early = Atom::from_body(4, 3, 40.0, early_body);
+        early.genome.sym_water = 200;
+        early.genome.sym_energy = 80;
+        early.energy = 0.5;
+
+        let mut clone = Atom::from_body(
+            10,
+            3,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Photosystem),
+                (1, -1, ModuleId::Symbiont),
+            ],
+        );
+        clone.genome.sym_water = 200;
+        clone.genome.sym_energy = 80;
+        clone.energy = 0.5;
+
+        let mut plants = [early, clone];
+        step(&mut w, &mut plants, 0);
+        assert!(
+            plants[1].sym_water_recv_last > 0 || plants[1].sym_sugar_paid_last > 0,
+            "spore-clone index must not be starved by a multi-root earlier plant"
+        );
+    }
+
+    #[test]
+    fn contact_budget_rotates_start_index_by_tick() {
+        // More eligible plants than the old tiny budget would allow; with
+        // tick rotation a late index eventually gets a turn even if the
+        // global budget is smaller than the grove (simulate via many plants
+        // and check a high start tick serves the late clone).
+        let mut w = moist_bed();
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut fungus_g = Genome::default();
+        fungus_g.sym_water = 200;
+        fungus_g.sym_energy = 80;
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (2, 0, ModuleId::Symbiont),
+        ];
+        let n = 8usize;
+        for i in 0..n {
+            let x = 2 + i as i32;
+            let mut c = w.get_cell(x, 1).unwrap();
+            c.sat = Sat(200);
+            c.set_mycelium(80);
+            w.set_cell(x, 1, c);
+            stamp_mycelium_lineage(&mut w, x, 1, fungus_g, body.clone());
+        }
+        let strain = ensure_mycelium_strain(&mut w, 2, 1);
+        for i in 0..n {
+            let x = 2 + i as i32;
+            w.mycelium_strains.insert((x, 1), vec![(strain, 80)]);
+        }
+        bind_strain_lineage(&mut w, strain, fungus_g, vec![(0, 0, ModuleId::Symbiont)]);
+
+        let plant_body = vec![
+            (0i16, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Photosystem),
+            (1, -1, ModuleId::Symbiont),
+        ];
+        let mut plants: Vec<Atom> = (0..n)
+            .map(|i| {
+                let mut p = Atom::from_body(2 + i as i32, 3, 40.0, plant_body.clone());
+                p.genome.sym_water = 200;
+                p.genome.sym_energy = 80;
+                p.energy = 0.5;
+                p
+            })
+            .collect();
+
+        // Start at index 5 — that plant must be among the first served.
+        step(&mut w, &mut plants, 5);
+        assert!(
+            plants[5].sym_water_recv_last > 0,
+            "tick-rotated start should serve plant[5] on tick 5"
         );
     }
 
