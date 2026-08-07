@@ -47,7 +47,8 @@ pub use cell::{
 };
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 pub use blueprint::{
-    mutate_body, Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR, BODY_MUTATION_MAX_EDITS,
+    ensure_symbiont_inherited, mutate_body, Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR,
+    BODY_MUTATION_MAX_EDITS,
     BODY_MUTATION_MAX_MODULES,
 };
 pub use climate::{

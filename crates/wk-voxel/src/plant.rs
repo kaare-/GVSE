@@ -2309,6 +2309,7 @@ pub fn try_vegetative_sprout(
         tick,
         entity_id,
     );
+    crate::blueprint::ensure_symbiont_inherited(&atom.body, &mut body);
     let mut child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
     sync_alloc_to_body(&mut child_genome, &body);
     // Child inherits spawn-tank size, not the parent's root-inflated max.
@@ -2476,6 +2477,7 @@ pub fn try_plant_wind_spore(
         tick,
         entity_id,
     );
+    crate::blueprint::ensure_symbiont_inherited(&atom.body, &mut body);
     let mut child_genome = Genome::mutate(atom.genome, world.seed.0, tick, entity_id);
     sync_alloc_to_body(&mut child_genome, &body);
     let mut child = Atom::from_body(wx, gy, tank, body);

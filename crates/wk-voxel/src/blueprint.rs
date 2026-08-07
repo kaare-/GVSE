@@ -257,12 +257,71 @@ fn body_still_valid_habit(habit: BodyHabit, body: &[(i16, i16, ModuleId)]) -> bo
     }
 }
 
+/// Re-attach one [`ModuleId::Symbiont`] when the parent opted in but the
+/// child blueprint lost it (juvenile shrink, morphological mutation, etc.).
+///
+/// Symbiosis is an opt-in organ — losing it on every spore/sprout would make
+/// the trait dead-end after one generation.
+pub fn ensure_symbiont_inherited(
+    parent_body: &[(i16, i16, ModuleId)],
+    child_body: &mut Vec<(i16, i16, ModuleId)>,
+) {
+    if !parent_body
+        .iter()
+        .any(|(_, _, m)| *m == ModuleId::Symbiont)
+    {
+        return;
+    }
+    if child_body
+        .iter()
+        .any(|(_, _, m)| *m == ModuleId::Symbiont)
+    {
+        return;
+    }
+    let occupied: std::collections::HashSet<(i16, i16)> =
+        child_body.iter().map(|&(x, y, _)| (x, y)).collect();
+    // Prefer the parent's Symbiont seat when free.
+    if let Some(&(dx, dy, _)) = parent_body
+        .iter()
+        .find(|(_, _, m)| *m == ModuleId::Symbiont)
+    {
+        if !occupied.contains(&(dx, dy)) {
+            child_body.push((dx, dy, ModuleId::Symbiont));
+            return;
+        }
+    }
+    // Else park beside Digestion / Root / Nucleus.
+    let anchors: Vec<(i16, i16)> = child_body
+        .iter()
+        .filter(|(_, _, m)| {
+            matches!(
+                *m,
+                ModuleId::Digest | ModuleId::Root | ModuleId::Nucleus | ModuleId::Hypha
+            )
+        })
+        .map(|&(x, y, _)| (x, y))
+        .collect();
+    const NEIGH: [(i16, i16); 4] = [(1, 0), (-1, 0), (0, 1), (0, -1)];
+    for (ax, ay) in anchors {
+        for (ox, oy) in NEIGH {
+            let nx = ax + ox;
+            let ny = ay + oy;
+            if !occupied.contains(&(nx, ny)) {
+                child_body.push((nx, ny, ModuleId::Symbiont));
+                return;
+            }
+        }
+    }
+}
+
 /// Morphological mutation of a body blueprint (module add / swap / delete).
 ///
 /// Driven by `clone_fidelity` the same way as [`Genome::mutate`]: high
 /// fidelity → few or no edits; low fidelity → messier offspring.
 /// Never removes the last Nucleus or breaks the parent's habit class
-/// (Atom / plant / fungus).
+/// (Atom / plant / fungus). Does **not** treat Symbiont as required —
+/// callers that care about opt-in symbiosis should run
+/// [`ensure_symbiont_inherited`] afterward.
 pub fn mutate_body(
     parent_body: &[(i16, i16, ModuleId)],
     fidelity: f32,
@@ -943,5 +1002,28 @@ mod tests {
                 ModuleId::Root | ModuleId::Stem
             )));
         }
+    }
+
+    #[test]
+    fn ensure_symbiont_inherited_restores_lost_module() {
+        let parent = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (2, 0, ModuleId::Symbiont),
+            (1, 1, ModuleId::ReproSpore),
+        ];
+        let mut child = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (1, 1, ModuleId::ReproSpore),
+        ];
+        ensure_symbiont_inherited(&parent, &mut child);
+        assert!(
+            child.iter().any(|(_, _, m)| *m == ModuleId::Symbiont),
+            "child must regain Symbiont when parent had it"
+        );
+        let len = child.len();
+        ensure_symbiont_inherited(&parent, &mut child);
+        assert_eq!(child.len(), len, "second call must be a no-op");
     }
 }
