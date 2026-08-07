@@ -209,11 +209,15 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   `idle here (plant linked elsewhere)` so the plant and block lines agree.
   Plant ledger lives on the Atom; network ledger is `World::sym_net_flow`
   keyed by **strain id**. **Strain↔strain**
-  trade: adjacent cream cells with different dominant strains exchange when
+  trade: adjacent cream cells with different **dominant** strains exchange when
   both lineages paint Symbiont and treaties match
-  (`World::mycelium_strain_lineage`); wetter gives water, drier pays sugar
-  (payers may pull sugar from their network, keeping the pay reserve). Same-cell
-  multi-share barter is still deferred (shared sugar pool).
+  (`World::mycelium_strain_lineage`). Wetter gives water, drier pays sugar;
+  when moisture is nearly equal (soaked beds), sugar-rich peers trickle sugar
+  to poorer matching neighbours. Inspector shows `sym frontier` with peer
+  strain, moist/sugar gap, and ready/blocked reason. Overlay rainbow
+  dithering on one cell is multi-share blending — not a frontier (same-cell
+  barter still deferred). Frontiers are sampled from real dominant-strain
+  edges (not a random cream subset).
 - **Multi-strain shares** — a cell’s 255 cream budget is shared. Each
   inoculum mints a strain id; several strains can hold intensity on the
   same block (`strain A 40/255`, `strain B 60/255`, …; `_pad` = sum).

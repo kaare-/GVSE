@@ -269,6 +269,28 @@ pub fn draw_block_inspector(
                         }
                     }
                 }
+                // Strain↔strain frontier (independent of plant contact).
+                if let Some(fp) = wk_voxel::probe_strain_frontier(world, gx, gy) {
+                    lines.push(format!(
+                        "sym frontier: s{} -> s{} @({},{}) match={:.0}%",
+                        fp.self_strain,
+                        fp.peer_strain,
+                        fp.peer_x,
+                        fp.peer_y,
+                        fp.match_q * 100.0
+                    ));
+                    lines.push(format!(
+                        "  moistΔ={:+.2} sugar {} vs {} deal W{} E{}",
+                        fp.moist_delta, fp.sugar_here, fp.sugar_peer, fp.deal_w, fp.deal_e
+                    ));
+                    let status = match fp.blocked {
+                        Some(why) => format!("blocked: {why}"),
+                        None if fp.can_water => "ready: water+sugar".into(),
+                        None if fp.can_sugar_peer => "ready: sugar-peer".into(),
+                        None => "ready".into(),
+                    };
+                    lines.push(format!("  frontier trade: {status}"));
+                }
             }
         }
         None => lines.push("cell: (empty / unstamped)".into()),
