@@ -66,61 +66,107 @@ fn push_sym_probe(lines: &mut Vec<String>, probe: &wk_voxel::SymProbe) {
         || probe.sugar_total > 0
         || probe.water_rev_total > 0
         || probe.sugar_rev_total > 0;
-    let flow_label = match probe.strain_id {
-        Some(sid) => format!(
-            "sym network (strain {sid}): supply −W{} +S{} | harvest +W{} −S{}  tot −W{} +S{} / +W{} −S{}",
-            probe.water_last,
-            probe.sugar_last,
-            probe.water_rev_last,
-            probe.sugar_rev_last,
-            probe.water_total,
-            probe.sugar_total,
-            probe.water_rev_total,
-            probe.sugar_rev_total
-        ),
-        None => format!(
-            "sym plant: supply +W{} −S{} | harvest −W{} +S{}  tot +W{} −S{} / −W{} +S{}",
-            probe.water_last,
-            probe.sugar_last,
-            probe.water_rev_last,
-            probe.sugar_rev_last,
-            probe.water_total,
-            probe.sugar_total,
-            probe.water_rev_total,
-            probe.sugar_rev_total
-        ),
+    let partner = match probe.plant_idx {
+        Some(i) => format!(" plant#{i}"),
+        None => String::new(),
     };
+    let via = if probe.via_network {
+        " via network"
+    } else {
+        ""
+    };
+
     if probe.linked {
-        let partner = match probe.plant_idx {
-            Some(i) => format!(" plant#{i}"),
-            None => String::new(),
-        };
         lines.push(format!(
-            "sym link: connected  match={match_pct}%  trade={}{partner}",
+            "sym link: connected  match={match_pct}%  trade={}{partner}{via}",
             probe.trade_mode.label()
         ));
-        lines.push(flow_label);
+    } else if probe.touching {
         lines.push(format!(
-            "sym potential: water≤{}/t  energy≤{:.2} (≈{} sugar/t)",
+            "sym link: touching  match={match_pct}%  trade={}{via} (need >={:.0}%)",
+            probe.trade_mode.label(),
+            wk_voxel::SYM_MATCH_MIN * 100.0
+        ));
+    } else {
+        lines.push("sym link: idle (no root-cream contact here)".into());
+    }
+
+    // Short ASCII lines so the default font / panel width can show them.
+    match probe.strain_id {
+        Some(sid) => {
+            lines.push(format!(
+                "sym net s{sid} last: supply -W{} +S{}  harvest +W{} -S{}",
+                probe.water_last, probe.sugar_last, probe.water_rev_last, probe.sugar_rev_last
+            ));
+            if has_flow {
+                lines.push(format!(
+                    "sym net s{sid} total: supply -W{} +S{}  harvest +W{} -S{}",
+                    probe.water_total,
+                    probe.sugar_total,
+                    probe.water_rev_total,
+                    probe.sugar_rev_total
+                ));
+            }
+        }
+        None => {
+            lines.push(format!(
+                "sym plant last: supply +W{} -S{}  harvest -W{} +S{}",
+                probe.water_last, probe.sugar_last, probe.water_rev_last, probe.sugar_rev_last
+            ));
+            if has_flow {
+                lines.push(format!(
+                    "sym plant total: supply +W{} -S{}  harvest -W{} +S{}",
+                    probe.water_total,
+                    probe.sugar_total,
+                    probe.water_rev_total,
+                    probe.sugar_rev_total
+                ));
+            }
+        }
+    }
+
+    if probe.linked {
+        lines.push(format!(
+            "sym potential: water<={}/t  energy<={:.2} (~{} sugar/t)",
             probe.water_per_tick, probe.energy_per_tick, probe.sugar_per_tick
         ));
         lines.push(format!("sym bias: {}", probe.bias.label()));
     } else if probe.touching {
-        lines.push(format!(
-            "sym link: touching  match={match_pct}%  trade={} (need ≥{:.0}%)",
-            probe.trade_mode.label(),
-            wk_voxel::SYM_MATCH_MIN * 100.0
-        ));
-        if has_flow {
-            lines.push(format!("{flow_label} (idle this tick)"));
-        }
         lines.push(format!("sym bias: {} (no exchange)", probe.bias.label()));
-    } else {
-        lines.push("sym link: idle (no root↔cream contact)".into());
-        if has_flow {
-            lines.push(flow_label);
+    }
+}
+
+/// Soft-wrap a line to `max_chars` (breaks on spaces when possible).
+fn wrap_line(line: &str, max_chars: usize) -> Vec<String> {
+    if max_chars < 8 || line.chars().count() <= max_chars {
+        return vec![line.to_string()];
+    }
+    let mut out = Vec::new();
+    let mut rest = line;
+    while rest.chars().count() > max_chars {
+        let mut split_at = rest
+            .char_indices()
+            .take(max_chars + 1)
+            .map(|(i, _)| i)
+            .last()
+            .unwrap_or(rest.len());
+        let window = &rest[..split_at];
+        if let Some(sp) = window.rfind(' ') {
+            if sp > max_chars / 3 {
+                split_at = sp;
+            }
+        }
+        let (head, tail) = rest.split_at(split_at);
+        out.push(head.trim_end().to_string());
+        rest = tail.trim_start();
+        if rest.is_empty() {
+            break;
         }
     }
+    if !rest.is_empty() {
+        out.push(rest.to_string());
+    }
+    out
 }
 
 pub fn draw_block_inspector(
@@ -202,7 +248,7 @@ pub fn draw_block_inspector(
     lines.push(format!("temp={temp_c:.1}C  humidity={hum:.1}  tile=({hx},{hy})"));
     if let Some(g) = geotech.at_cell(gx, gy) {
         lines.push(format!(
-            "geotech demand={} hydro={} wet={:.0}% score={:.2} σv={:.1}",
+            "geotech demand={} hydro={} wet={:.0}% score={:.2} sv={:.1}",
             g.demand,
             g.hydro_load,
             g.wetness * 100.0,
@@ -212,7 +258,7 @@ pub fn draw_block_inspector(
     } else {
         let sigma = geotech.overburden_at(gx, gy);
         if sigma > 0.0 {
-            lines.push(format!("geotech σv={sigma:.1} (buried)"));
+            lines.push(format!("geotech sv={sigma:.1} (buried)"));
         }
     }
     let litter = soft_litter_at(world, gx);
@@ -329,8 +375,17 @@ pub fn draw_block_inspector(
         lines.push("dissolves → Organic + soft litter".into());
     }
 
-    let panel_w = 280.0;
-    let panel_h = 16.0 + lines.len() as f32 * 15.0 + 10.0;
+    // Wider panel + wrap so long sym / geotech lines stay readable.
+    let panel_w = (sw * 0.42).clamp(340.0, 520.0);
+    let font_size = 14.0;
+    let line_h = 15.0;
+    // ~6.2 px per char at size 14 for the default macroquad font.
+    let max_chars = ((panel_w - 16.0) / 6.2).floor().max(28.0) as usize;
+    let mut display: Vec<String> = Vec::new();
+    for line in &lines {
+        display.extend(wrap_line(line, max_chars));
+    }
+    let panel_h = 16.0 + display.len() as f32 * line_h + 10.0;
     let x0 = sw - panel_w - 8.0;
     let y0 = 10.0;
     draw_rectangle(x0, y0, panel_w, panel_h, Color::from_rgba(0, 0, 0, 220));
@@ -342,8 +397,14 @@ pub fn draw_block_inspector(
         1.0,
         Color::from_rgba(200, 200, 200, 255),
     );
-    for (i, line) in lines.iter().enumerate() {
-        draw_text(line, x0 + 8.0, y0 + 16.0 + i as f32 * 15.0, 14.0, WHITE);
+    for (i, line) in display.iter().enumerate() {
+        draw_text(
+            line,
+            x0 + 8.0,
+            y0 + 16.0 + i as f32 * line_h,
+            font_size,
+            WHITE,
+        );
     }
 }
 

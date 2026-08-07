@@ -152,6 +152,10 @@ pub struct SymProbe {
     /// When set, counters are the **network** ledger for this strain.
     /// When `None`, counters are the **plant** Atom ledger.
     pub strain_id: Option<u32>,
+    /// True when the plant touches same-strain cream nearby, not this cell.
+    /// Cream inspectors use this so a conduit cell doesn't look "idle" while
+    /// the strain is actively linked a few cells away.
+    pub via_network: bool,
 }
 
 /// True when the body paints at least one Symbiont organ.
@@ -242,6 +246,7 @@ fn build_probe(
     water_rev_total: u32,
     sugar_rev_total: u32,
     strain_id: Option<u32>,
+    via_network: bool,
 ) -> SymProbe {
     let (deal_w, deal_e) = agreed_treaty(plant_g, fungus_g);
     let linked = touching && match_q >= SYM_MATCH_MIN;
@@ -271,6 +276,7 @@ fn build_probe(
         water_rev_total,
         sugar_rev_total,
         strain_id,
+        via_network,
     }
 }
 
@@ -328,7 +334,8 @@ fn clear_sym_flow_lasts(world: &mut World, atoms: &mut [Atom]) {
     }
 }
 
-const ROOT_CREAM_NEIGHBORS: [(i32, i32); 7] = [
+/// Root↔cream contact: the root cell and its Moore neighbourhood.
+const ROOT_CREAM_NEIGHBORS: [(i32, i32); 9] = [
     (0, 0),
     (0, -1),
     (0, 1),
@@ -336,7 +343,12 @@ const ROOT_CREAM_NEIGHBORS: [(i32, i32); 7] = [
     (-1, 0),
     (1, -1),
     (-1, -1),
+    (1, 1),
+    (-1, 1),
 ];
+/// When inspecting cream that isn't the contact cell, still report a plant
+/// linked to the same strain within this Chebyshev radius.
+const CREAM_LINK_SCAN: i32 = 4;
 
 fn plant_root_cells(world: &World, atom: &Atom) -> Vec<(i32, i32)> {
     atom.body
@@ -360,6 +372,46 @@ fn cream_touches_root(world: &World, cx: i32, cy: i32, roots: &[(i32, i32)]) -> 
         }
     }
     false
+}
+
+/// True when `roots` touch this cream cell, or same-strain cream nearby.
+///
+/// Returns `(touching_here, via_network)`.
+fn cream_link_to_roots(
+    world: &World,
+    cx: i32,
+    cy: i32,
+    strain: Option<u32>,
+    roots: &[(i32, i32)],
+) -> (bool, bool) {
+    if cream_touches_root(world, cx, cy, roots) {
+        return (true, false);
+    }
+    let Some(strain) = strain else {
+        return (false, false);
+    };
+    for dx in -CREAM_LINK_SCAN..=CREAM_LINK_SCAN {
+        for dy in -CREAM_LINK_SCAN..=CREAM_LINK_SCAN {
+            if dx == 0 && dy == 0 {
+                continue;
+            }
+            let nx = world.wrap_x(cx + dx);
+            let ny = cy + dy;
+            let Some(c) = world.get_cell(nx, ny) else {
+                continue;
+            };
+            if c.mycelium() == 0 {
+                continue;
+            }
+            if mycelium_strain_at(world, nx, ny) != Some(strain) {
+                continue;
+            }
+            if cream_touches_root(world, nx, ny, roots) {
+                return (true, true);
+            }
+        }
+    }
+    (false, false)
 }
 
 fn plant_ledger_probe(atom: &Atom) -> (u8, u8, u32, u32, u8, u8, u32, u32) {
@@ -416,14 +468,37 @@ pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Opti
         if roots.is_empty() {
             continue;
         }
-        let touching = cream_touches_root(world, gx, gy, &roots);
+        let (touching, via_network) = cream_link_to_roots(world, gx, gy, strain, &roots);
         let match_q = treaty_match(atom.genome, lin.genome);
-        let mode = if touching {
+        let mode = if touching && !via_network {
             let mut m = SymTradeMode::Supply;
             for &(rx, ry) in &roots {
                 for (dx, dy) in ROOT_CREAM_NEIGHBORS {
                     if world.wrap_x(rx + dx) == gx && ry + dy == gy {
                         m = trade_mode_at(world, rx, ry, gx, gy);
+                    }
+                }
+            }
+            m
+        } else if touching {
+            // Contact is on nearby same-strain cream — sample moist there.
+            let mut m = SymTradeMode::Supply;
+            'scan: for dx in -CREAM_LINK_SCAN..=CREAM_LINK_SCAN {
+                for dy in -CREAM_LINK_SCAN..=CREAM_LINK_SCAN {
+                    let nx = world.wrap_x(gx + dx);
+                    let ny = gy + dy;
+                    if mycelium_strain_at(world, nx, ny) != strain {
+                        continue;
+                    }
+                    if cream_touches_root(world, nx, ny, &roots) {
+                        for &(rx, ry) in &roots {
+                            for (ox, oy) in ROOT_CREAM_NEIGHBORS {
+                                if world.wrap_x(rx + ox) == nx && ry + oy == ny {
+                                    m = trade_mode_at(world, rx, ry, nx, ny);
+                                    break 'scan;
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -447,12 +522,14 @@ pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Opti
             wrt,
             srt,
             strain,
+            via_network,
         );
         let better = match best {
             None => true,
             Some(b) => {
                 (probe.linked && !b.linked)
                     || (probe.touching && !b.touching)
+                    || (!probe.via_network && b.via_network)
                     || (probe.match_q > b.match_q + 1e-4)
             }
         };
@@ -477,6 +554,7 @@ pub fn probe_cream_link(world: &World, gx: i32, gy: i32, atoms: &[Atom]) -> Opti
             wrt,
             srt,
             strain,
+            false,
         ))
     })
 }
@@ -505,6 +583,7 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
             wrt,
             srt,
             None,
+            false,
         ));
     }
     let mut best: Option<SymProbe> = None;
@@ -546,6 +625,7 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
                 wrt,
                 srt,
                 None,
+                false,
             );
             let better = match best {
                 None => true,
@@ -575,6 +655,7 @@ pub fn probe_plant_link(world: &World, atom: &Atom) -> Option<SymProbe> {
             wrt,
             srt,
             None,
+            false,
         ))
     })
 }
