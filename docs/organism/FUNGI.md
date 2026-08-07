@@ -211,7 +211,11 @@ on purpose (see [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) E1):
   reports `via network`, and idle cream under a linked plant says
   `idle here (plant linked elsewhere)` so the plant and block lines agree.
   Plant ledger lives on the Atom; network ledger is `World::sym_net_flow`
-  keyed by **strain id**. **Strain↔strain**
+  keyed by **strain id**. Per-tick `*_last` counters share one world-tick
+  window: network lasts reset before the mycelium field pulse; plant lasts
+  reset at the organism symbiosis pulse. Empty root↔cream contacts (no water
+  or sugar moved) do not consume the root's partner slot — the scan keeps
+  looking for a cream that can trade. **Strain↔strain**
   trade: adjacent cream cells with different **dominant** strains exchange when
   both lineages paint Symbiont and treaties match
   (`World::mycelium_strain_lineage`). Wetter gives water, drier pays sugar;

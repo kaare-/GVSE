@@ -100,7 +100,8 @@ pub use organism::{
     SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
 pub use symbiosis::{
-    body_has_symbiont, plant_sym_energy_reserve, plant_sym_sugar_spendable, probe_cream_link,
+    body_has_symbiont, clear_plant_sym_flow_lasts, clear_sym_net_flow_lasts,
+    plant_sym_energy_reserve, plant_sym_sugar_spendable, probe_cream_link,
     probe_cream_link_preferring, probe_plant_link, probe_strain_frontier, step as step_symbiosis,
     step_strain_trade, treaty_match, SymBias, SymFrontierProbe, SymNetFlow, SymProbe, SymTradeMode,
     SYM_MATCH_MIN, SYM_NET_SUGAR_PAY_RESERVE, SYM_REPRO_RESERVE_FRAC,

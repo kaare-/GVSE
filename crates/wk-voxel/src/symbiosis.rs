@@ -398,14 +398,20 @@ fn record_net_harvest(world: &mut World, strain: u32, water: u8, sugar: u8, tick
     e.last_tick = tick;
 }
 
-/// Clear per-tick lasts at the start of an organism symbiosis pulse.
-fn clear_sym_flow_lasts(world: &mut World, atoms: &mut [Atom]) {
+/// Clear plant Atom per-tick sym lasts (organism pulse).
+pub fn clear_plant_sym_flow_lasts(atoms: &mut [Atom]) {
     for atom in atoms.iter_mut() {
         atom.sym_water_recv_last = 0;
         atom.sym_sugar_paid_last = 0;
         atom.sym_water_sent_last = 0;
         atom.sym_sugar_recv_last = 0;
     }
+}
+
+/// Clear network per-tick sym lasts (call once per world tick before
+/// mycelium field + organism symbiosis so strain and plant writes share
+/// one "last" window).
+pub fn clear_sym_net_flow_lasts(world: &mut World) {
     for flow in world.sym_net_flow.values_mut() {
         flow.water_out_last = 0;
         flow.sugar_in_last = 0;
@@ -835,8 +841,12 @@ fn take_root_pore_sat(world: &mut World, rx: i32, ry: i32, amount: u8) -> u8 {
 }
 
 /// Run one symbiotic exchange pulse for all eligible land plants.
+///
+/// Clears plant lasts only — network lasts are cleared once per world tick
+/// via [`clear_sym_net_flow_lasts`] before the mycelium field pulse so
+/// strain↔strain and plant↔cream share one inspector "last" window.
 pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
-    clear_sym_flow_lasts(world, atoms);
+    clear_plant_sym_flow_lasts(atoms);
     let mut budget = SYM_CONTACT_BUDGET;
     for atom in atoms.iter_mut() {
         if budget == 0 {
@@ -887,6 +897,7 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
                 let (water_want, energy_want, sugar_want) = exchange_rates(match_q, w, e);
                 let mode = trade_mode_at(world, rx, ry, cx, cy);
 
+                let mut moved = false;
                 match mode {
                     SymTradeMode::Supply => {
                         // Desert contact: pull water from the wider same-strain
@@ -942,6 +953,7 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
                             atom.sym_sugar_paid_total =
                                 atom.sym_sugar_paid_total.saturating_add(sugar_moved as u32);
                             record_net_supply(world, strain, water_moved, sugar_moved, tick);
+                            moved = true;
                         }
                     }
                     SymTradeMode::Harvest => {
@@ -993,12 +1005,19 @@ pub fn step(world: &mut World, atoms: &mut [Atom], tick: u64) {
                             atom.sym_sugar_recv_total =
                                 atom.sym_sugar_recv_total.saturating_add(sugar_moved as u32);
                             record_net_harvest(world, strain, water_moved, sugar_moved, tick);
+                            moved = true;
                         }
                     }
                 }
 
+                // Empty contacts (saturated pores / banking sugar) must not
+                // consume the root's one partner slot or the global budget —
+                // keep scanning neighbours for a cream that can actually trade.
+                if !moved {
+                    continue;
+                }
                 budget = budget.saturating_sub(1);
-                // One cream partner per root per tick keeps the pipe thin.
+                // One successful cream partner per root per tick.
                 break;
             }
         }
@@ -1572,6 +1591,112 @@ mod tests {
         let plant_p = probe_plant_link(&w, &plant).expect("symbiont plant");
         assert!(plant_p.linked);
         assert_eq!(plant_p.bias, SymBias::PlantFavoring);
+    }
+
+    #[test]
+    fn empty_cream_contact_does_not_block_later_trade() {
+        let mut w = moist_bed();
+        // Only two cream tips under the root: first neighbour (0,-1) is an
+        // empty Supply contact (equal-dry → no water/sugar move); the side
+        // tip can still gift. Wipe other cream so the scan can't cheat.
+        for x in 0..16 {
+            let mut c = w.get_cell(x, 1).unwrap();
+            c.sat = Sat(0);
+            c.set_mycelium(0);
+            w.set_cell(x, 1, c);
+        }
+        w.set_cell(4, 2, {
+            let mut c = w.get_cell(4, 2).unwrap();
+            c.sat = Sat(0);
+            c
+        });
+        w.set_cell(4, 1, {
+            let mut c = w.get_cell(4, 1).unwrap();
+            c.sat = Sat(0);
+            c.set_mycelium(80);
+            c
+        });
+        w.set_cell(5, 1, {
+            let mut c = w.get_cell(5, 1).unwrap();
+            c.sat = Sat(200);
+            c.set_mycelium(80);
+            c
+        });
+        let mut fungus_g = Genome::default();
+        fungus_g.sym_water = 200;
+        fungus_g.sym_energy = 80;
+        let body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (1, 0, ModuleId::Digest),
+            (2, 0, ModuleId::Symbiont),
+        ];
+        stamp_mycelium_lineage(&mut w, 4, 1, fungus_g, body.clone());
+        stamp_mycelium_lineage(&mut w, 5, 1, fungus_g, body);
+        let strain = ensure_mycelium_strain(&mut w, 4, 1);
+        w.mycelium_strains.insert((5, 1), vec![(strain, 80)]);
+        bind_strain_lineage(&mut w, strain, fungus_g, vec![(0, 0, ModuleId::Symbiont)]);
+
+        let mut plant = Atom::from_body(
+            4,
+            3,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Photosystem),
+                (1, -1, ModuleId::Symbiont),
+            ],
+        );
+        plant.genome.sym_water = 200;
+        plant.genome.sym_energy = 80;
+        // Banking — no sugar pay; water gift must still find the wet cream.
+        plant.energy = 0.5;
+        let root_sat0 = w.get_cell(4, 2).unwrap().sat.0;
+
+        step(&mut w, std::slice::from_mut(&mut plant), 0);
+
+        assert!(
+            w.get_cell(4, 2).unwrap().sat.0 > root_sat0
+                || plant.sym_water_recv_last > 0,
+            "plant should keep scanning after an empty cream contact; last={}",
+            plant.sym_water_recv_last
+        );
+        assert!(
+            plant.sym_water_recv_last > 0 || plant.sym_sugar_paid_last > 0,
+            "successful neighbour trade must show on sym plant last"
+        );
+    }
+
+    #[test]
+    fn organism_sym_step_preserves_network_lasts() {
+        let mut w = moist_bed();
+        let strain = 7u32;
+        w.sym_net_flow.insert(
+            strain,
+            SymNetFlow {
+                water_out_last: 9,
+                sugar_in_last: 3,
+                water_in_last: 2,
+                sugar_out_last: 4,
+                water_out_total: 9,
+                sugar_in_total: 3,
+                water_in_total: 2,
+                sugar_out_total: 4,
+                last_tick: 1,
+            },
+        );
+        // No land plants — step only clears Atom lasts.
+        step(&mut w, &mut [], 2);
+        let flow = w.sym_net_flow.get(&strain).copied().unwrap();
+        assert_eq!(flow.water_out_last, 9);
+        assert_eq!(flow.sugar_in_last, 3);
+        assert_eq!(flow.water_in_last, 2);
+        assert_eq!(flow.sugar_out_last, 4);
+        clear_sym_net_flow_lasts(&mut w);
+        let flow = w.sym_net_flow.get(&strain).copied().unwrap();
+        assert_eq!(flow.water_out_last, 0);
+        assert_eq!(flow.sugar_in_last, 0);
+        assert_eq!(flow.water_out_total, 9, "totals must survive last clear");
     }
 
     #[test]
