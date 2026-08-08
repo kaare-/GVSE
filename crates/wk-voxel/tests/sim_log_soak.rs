@@ -27,28 +27,27 @@ use wk_voxel::{
     FailureConfig, Humidity, OrganismStore, PerfConfig, Sat, SimEventKind, SimLog, Wind, World,
 };
 
-const WIDTH: i32 = 128;
-const SKY_CEILING_Y: i32 = 96;
-const SEA_LEVEL_Y: i32 = 16;
+const WIDTH: i32 = 112;
+const SKY_CEILING_Y: i32 = 48;
+const SEA_LEVEL_Y: i32 = 12;
 const BEDROCK_FLOOR_Y: i32 = 0;
 const TILE_COLS: i32 = 4;
 
 /// Moist beach + deep lake, land plants, seaweed, mycelium inoculum (no living stalk).
 fn complex_life_world(seed: u64) -> (World, OrganismStore, CarbonBudget, Humidity, Wind, CloudStore, CloudConfig) {
     let mut world = World::new(seed);
-    for cx in 0..=3 {
-        for cy in 0..=2 {
-            world.ensure_chunk(ChunkCoord::new(cx, cy));
-        }
+    // Two horizontal chunks, one vertical (sky fits in 64-tall slab).
+    for cx in 0..=1 {
+        world.ensure_chunk(ChunkCoord::new(cx, 0));
     }
 
-    // Terrain: beach (x < 56) then deeper lake basin.
+    // Terrain: beach (x < 48) then deeper lake basin.
     for x in 0..WIDTH {
         world.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
         let mut sand = Cell::solid(MaterialId::Sand);
         sand.sat = Sat(140);
         world.set_cell(x, 1, sand);
-        let topsoil = if x < 56 {
+        let topsoil = if x < 48 {
             let mut s = Cell::solid(MaterialId::Soil);
             s.sat = Sat(100);
             s
@@ -59,12 +58,12 @@ fn complex_life_world(seed: u64) -> (World, OrganismStore, CarbonBudget, Humidit
         };
         world.set_cell(x, 2, topsoil);
 
-        let water_top = if x < 56 {
-            // Shallow puddles / wet beach film near the shore.
-            if x >= 48 { 6 } else { 2 }
-        } else if x < 70 {
+        let water_top = if x < 48 {
+            // Wet beach film near the shore.
+            if x >= 40 { 5 } else { 2 }
+        } else if x < 60 {
             // Shelving shore.
-            10
+            8
         } else {
             // Deep basin — more standing water for the climate pump.
             SEA_LEVEL_Y
@@ -77,19 +76,21 @@ fn complex_life_world(seed: u64) -> (World, OrganismStore, CarbonBudget, Humidit
                 world.set_cell(x, y, Cell::air());
             }
         }
-        for y in (water_top + 1)..SKY_CEILING_Y {
+        // Sparse sky fill — only a short column above free surface.
+        let air_top = (water_top + 10).min(SKY_CEILING_Y);
+        for y in (water_top + 1)..air_top {
             world.set_cell(x, y, Cell::air());
         }
     }
 
     // Grove litter / cream strip (land) — fungus infection hosts.
-    for x in 14..46 {
+    for x in 12..40 {
         let mut org = Cell::solid(MaterialId::Organic);
         org.sat = Sat(90);
         world.set_cell(x, 2, org);
     }
     // Shore litter tongue into the shallows.
-    for x in 46..58 {
+    for x in 40..52 {
         let mut org = Cell::solid(MaterialId::Organic);
         org.sat = Sat(110);
         world.set_cell(x, 2, org);
@@ -102,7 +103,7 @@ fn complex_life_world(seed: u64) -> (World, OrganismStore, CarbonBudget, Humidit
     let plant_body = plant.modules_relative_to_nucleus();
     let mut plant_g = plant.genome;
     plant_g.clone_fidelity = 0.88;
-    for x in [16i32, 22, 28, 34, 40, 20, 32] {
+    for x in [14i32, 18, 24, 30, 36, 20, 28] {
         let ok = store.spawn_blueprint(&world, x, 3, plant_body.clone(), 48.0, plant_g);
         assert!(ok, "land plant should seat at x={x}");
     }
@@ -112,7 +113,7 @@ fn complex_life_world(seed: u64) -> (World, OrganismStore, CarbonBudget, Humidit
     let seaweed_body = seaweed.modules_relative_to_nucleus();
     let mut seaweed_g = seaweed.genome;
     seaweed_g.clone_fidelity = 0.90;
-    for x in [64i32, 72, 80, 88, 96, 104, 112, 76, 92] {
+    for x in [56i32, 64, 72, 80, 88, 96, 104, 68, 84] {
         let ok = store.spawn_blueprint(&world, x, 3, seaweed_body.clone(), 42.0, seaweed_g);
         assert!(ok, "seaweed should seat at x={x}");
     }
@@ -125,7 +126,7 @@ fn complex_life_world(seed: u64) -> (World, OrganismStore, CarbonBudget, Humidit
     fungus_g.digest_rate = 1.15;
     fungus_g.clone_fidelity = 0.82;
     let lineage = Some((fungus_g, fungus_body));
-    for x in [18i32, 26, 36, 50] {
+    for x in [16i32, 24, 34, 46] {
         let hit = infect_mycelium_with_lineage(&mut world, x, 3, lineage.clone());
         assert!(hit.is_some(), "inoculum should hit Organic at x={x}");
     }
@@ -152,14 +153,15 @@ fn complex_life_world(seed: u64) -> (World, OrganismStore, CarbonBudget, Humidit
         SKY_CEILING_Y,
         false,
     );
-    // Wetter sky loop: coagulate faster, form parcels higher above the sea.
+    // Wetter sky loop: coagulate faster, form parcels higher above the sea
+    // (raised vs defaults 0.04 / 40 / 18 — capped to this fixture's sky).
     let mut cloud_cfg = CloudConfig::default();
     cloud_cfg.coag_rate = 0.12;
     cloud_cfg.coag_max_take = 22.0;
-    cloud_cfg.cloud_alt_above_sea = 70;
-    cloud_cfg.coag_min_above_sea = 32;
+    cloud_cfg.cloud_alt_above_sea = 28;
+    cloud_cfg.coag_min_above_sea = 16;
     cloud_cfg.buoyant_rise = 0.12;
-    cloud_cfg.max_parcels = 48;
+    cloud_cfg.max_parcels = 40;
 
     (
         world,
@@ -251,20 +253,22 @@ fn run_logged(ticks: u64, sample_period: u64, label: &str) -> SimLog {
 
         log.maybe_sample(tick_no, &world, &store, Some(&carbon), None);
 
-        // Sparse progress breadcrumbs on long soaks.
-        if ticks >= 50_000 && tick_no > 0 && tick_no % 50_000 == 0 {
+        // Progress breadcrumbs + checkpoint flush on long soaks.
+        if ticks >= 10_000 && tick_no > 0 && tick_no % 25_000 == 0 {
             let (p, f, a) = store.habit_counts();
-            log.note(
-                tick_no,
-                format!(
-                    "{label} @{tick_no} p/f/a={p}/{f}/{a} \
-                     cream={} sugar={} clouds={} hum={:.0}",
-                    log.samples.last().map(|s| s.cream_cells).unwrap_or(0),
-                    log.samples.last().map(|s| s.sugar_sum).unwrap_or(0),
-                    clouds.len(),
-                    humidity.total_mass(),
-                ),
+            let cream = log.samples.last().map(|s| s.cream_cells).unwrap_or(0);
+            let sugar = log.samples.last().map(|s| s.sugar_sum).unwrap_or(0);
+            let msg = format!(
+                "{label} @{tick_no} p/f/a={p}/{f}/{a} \
+                 cream={cream} sugar={sugar} clouds={} hum={:.0}",
+                clouds.len(),
+                humidity.total_mass(),
             );
+            log.note(tick_no, msg.clone());
+            eprintln!("{msg}");
+            if let Err(e) = log.flush_env() {
+                eprintln!("sim_log checkpoint flush warning: {e}");
+            }
         }
     }
 
