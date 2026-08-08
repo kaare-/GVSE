@@ -29,6 +29,7 @@ hecs = "=0.10.5"
 # 0.4.15 uses const f32::{min,max,abs} that need rustc > 1.83.
 macroquad = "=0.4.14"
 rayon = "1.10"
+serde_json = "1"
 
 [profile.test]
 opt-level = 2

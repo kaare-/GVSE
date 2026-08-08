@@ -6,6 +6,7 @@
 
 use std::collections::HashMap;
 
+use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::cell::{water_capacity_with, Cell, Sat};
@@ -13,7 +14,7 @@ use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
 /// Surface-evaporation parameters for [`apply_evaporation`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 pub struct EvapConfig {
     /// Sat removed per qualifying tick from each surface cell.
     pub rate_per_tick: u8,
