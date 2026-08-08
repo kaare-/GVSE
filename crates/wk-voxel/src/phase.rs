@@ -639,11 +639,10 @@ fn water_on_ice_and_slush(world: &mut World, gx: i32, temp: &Temperature, cfg: &
 
 /// Ice/Snow must rest on solid, standing water, or more frozen pack.
 ///
-/// **Empty Air below** is owned by [`crate::rules::apply_grain_fall`]
-/// (the pack drops as ice/snow). This pass only converts packs sitting
-/// on non-supporting haze (Air with some sat but below
-/// [`PhaseConfig::min_sat_to_freeze`]) into water — rare, kept as a
-/// safety valve when fall will not enter a misty gap.
+/// **Air below** (empty *or* haze short of [`PhaseConfig::min_sat_to_freeze`])
+/// is owned by [`crate::rules::apply_grain_fall`] — the pack drops through
+/// misty gaps instead of melting. Melting haze seats used to fight freeze
+/// at the free surface and pump a flake ±1 cell every phase period.
 fn break_unsupported_frozen(world: &mut World, gx: i32, cfg: &PhaseConfig) {
     let Some((y0, y1)) = y_bounds(world) else {
         return;
@@ -663,10 +662,10 @@ fn break_unsupported_frozen(world: &mut World, gx: i32, cfg: &PhaseConfig) {
         if frozen_is_supported(world, gx, y, cfg) {
             continue;
         }
-        // Empty gap → fall in tick, do not melt into water mid-air.
+        // Empty / haze gap → fall in tick, do not melt into water mid-air.
         if matches!(
             world.get_cell(gx, y - 1),
-            Some(b) if b.material == MaterialId::Air && b.sat.is_empty()
+            Some(b) if b.material == MaterialId::Air && b.sat.0 < cfg.min_sat_to_freeze
         ) {
             continue;
         }
@@ -812,9 +811,14 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
             continue;
         }
         let under_lid = above_is_frozen(world, gx, y);
+        // Open-surface skin only when the column has no ice/snow below.
+        // Otherwise a fallen / submerged flake leaves a water gap and a
+        // second skin freezes above it — the flake looks like it "floated
+        // up" after breaking/falling (shore pump).
         let open_surface = is_standing_water(world, gx, y)
             && open_sky_above(world, gx, y)
-            && !below_is_frozen(world, gx, y);
+            && !below_is_frozen(world, gx, y)
+            && !frozen_anywhere_below(world, gx, y, y0);
         if !under_lid && !open_surface {
             continue;
         }
@@ -826,6 +830,19 @@ fn freeze_column_surface(world: &mut World, gx: i32, temp: &Temperature, cfg: &P
         freezes_left -= 1;
         frozen_count += 1;
     }
+}
+
+/// True when any Ice/Snow sits strictly below `gy` in this column.
+fn frozen_anywhere_below(world: &World, gx: i32, gy: i32, y0: i32) -> bool {
+    for y in y0..gy {
+        if matches!(
+            world.get_cell(gx, y).map(|c| c.material),
+            Some(MaterialId::Ice) | Some(MaterialId::Snow)
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 fn above_is_frozen(world: &World, gx: i32, gy: i32) -> bool {
@@ -1594,5 +1611,272 @@ mod tests {
             "warm water melts snow into water"
         );
         assert!(w.get_cell(1, 2).unwrap().sat.is_full());
+    }
+
+    #[test]
+    fn unsupported_ice_over_haze_is_not_melted_by_phase() {
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(1, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(
+            1,
+            1,
+            Cell {
+                material: MaterialId::Air,
+                sat: Sat(128),
+                flags: Default::default(),
+                _pad: 0,
+            },
+        );
+        w.set_cell(1, 2, Cell::solid(MaterialId::Ice));
+        let temp = cold_temp(16, 16, -5.0);
+        let cfg = PhaseConfig {
+            enable_freeze: false,
+            enable_slush: false,
+            ..PhaseConfig::default()
+        };
+        apply_phase(&mut w, &temp, &cfg);
+        assert_eq!(
+            w.get_cell(1, 2).unwrap().material,
+            MaterialId::Ice,
+            "phase must not melt ice over haze (grain fall drops it)"
+        );
+    }
+
+    fn ice_footprint(w: &World, x0: i32, x1: i32, y0: i32, y1: i32) -> Vec<(i32, i32)> {
+        let mut cells = Vec::new();
+        for x in x0..=x1 {
+            for y in y0..=y1 {
+                if w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Ice) {
+                    cells.push((x, y));
+                }
+            }
+        }
+        cells.sort_unstable();
+        cells
+    }
+
+    #[test]
+    fn shore_ice_with_water_on_top_does_not_pump() {
+        // Shoreline like the demo GIF: sand slope into a pond, thin ice at
+        // the waterline with ponded water on/around it. Full tick + cold
+        // avalanche + phase must not bob the flake ±1 every few frames.
+        use crate::rules::{apply_cold_avalanche, apply_grain_fall, tick};
+
+        let mut w = World::new(42);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Bedrock floor; sand beach rising to the right; pond on the left.
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let sand_top = if x < 6 {
+                1
+            } else if x < 10 {
+                2
+            } else {
+                3
+            };
+            for y in 1..=sand_top {
+                w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+            }
+            for y in (sand_top + 1)..=4 {
+                if x < 10 {
+                    w.set_cell(x, y, Cell::water());
+                } else {
+                    w.set_cell(x, y, Cell::air());
+                }
+            }
+        }
+        // Flake at the waterline on the sand step, with water on top.
+        w.set_cell(8, 3, Cell::solid(MaterialId::Ice));
+        w.set_cell(9, 3, Cell::solid(MaterialId::Ice));
+        w.set_cell(8, 4, Cell::water());
+        w.set_cell(9, 4, Cell::water());
+
+        let temp = cold_temp(32, 16, -6.0);
+        let cfg = PhaseConfig {
+            period_ticks: 1, // stress the phase cadence
+            ..PhaseConfig::default()
+        };
+        let mut top_ys = Vec::new();
+        for _ in 0..40 {
+            tick(&mut w);
+            apply_grain_fall(&mut w);
+            apply_cold_avalanche(&mut w, &temp, cfg.freeze_point_c);
+            apply_phase(&mut w, &temp, &cfg);
+            let cells = ice_footprint(&w, 0, 15, 0, 8);
+            top_ys.push(cells.iter().map(|(_, y)| *y).max());
+        }
+        let present: Vec<i32> = top_ys.iter().filter_map(|y| *y).collect();
+        assert!(
+            !present.is_empty(),
+            "ice should persist at the shoreline (top_ys={top_ys:?})"
+        );
+        let min_y = *present.iter().min().unwrap();
+        let max_y = *present.iter().max().unwrap();
+        assert!(
+            max_y - min_y <= 1,
+            "shore ice must not pump vertically (span={} top_ys={top_ys:?})",
+            max_y - min_y
+        );
+        // No period-2 alternation in the second half.
+        let tail = &present[present.len() / 2..];
+        let flips = tail.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(
+            flips <= 2,
+            "settled shore ice should not keep flipping Y (flips={flips} tail={tail:?})"
+        );
+    }
+
+    #[test]
+    fn hillside_shore_ice_peel_does_not_refreeze_pump() {
+        // Ice glaze on sand at the waterline can cold-avalanche peel into the
+        // basin, fall, then freeze again at the free surface — a break/fall/
+        // refreeze bob if peel keeps firing every phase tick.
+        use crate::rules::{apply_cold_avalanche, apply_grain_fall, tick};
+
+        let mut w = World::new(43);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            // Flat lake bed to x=7; sand step at x=8.. that holds glaze.
+            if x <= 7 {
+                w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+                for y in 2..=5 {
+                    w.set_cell(x, y, Cell::water());
+                }
+            } else {
+                w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+                w.set_cell(x, 2, Cell::solid(MaterialId::Sand));
+                w.set_cell(x, 3, Cell::solid(MaterialId::Sand));
+                for y in 4..=6 {
+                    w.set_cell(x, y, Cell::air());
+                }
+            }
+        }
+        // Glaze on the sand lip (hillside support — avalanche-eligible).
+        w.set_cell(8, 4, Cell::solid(MaterialId::Ice));
+        w.set_cell(9, 4, Cell::solid(MaterialId::Ice));
+        // Ponded water touching the lip so peel has a wet neighbor.
+        w.set_cell(7, 4, Cell::water());
+        w.set_cell(7, 5, Cell::water());
+
+        let temp = cold_temp(32, 16, -8.0);
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        let mut top_ys = Vec::new();
+        for _ in 0..48 {
+            tick(&mut w);
+            apply_grain_fall(&mut w);
+            apply_cold_avalanche(&mut w, &temp, cfg.freeze_point_c);
+            apply_phase(&mut w, &temp, &cfg);
+            let cells = ice_footprint(&w, 0, 15, 0, 8);
+            top_ys.push(cells.iter().map(|(_, y)| *y).max());
+        }
+        let present: Vec<i32> = top_ys.iter().filter_map(|y| *y).collect();
+        if present.is_empty() {
+            // Ice may fully melt into the basin — that is not a pump.
+            return;
+        }
+        let min_y = *present.iter().min().unwrap();
+        let max_y = *present.iter().max().unwrap();
+        let flips = present.windows(2).filter(|w| w[0] != w[1]).count();
+        assert!(
+            max_y - min_y <= 1 && flips <= 3,
+            "hillside shore ice must not endlessly peel/refreeze pump (span={} flips={flips} ys={top_ys:?})",
+            max_y - min_y
+        );
+    }
+
+    #[test]
+    fn no_second_ice_skin_above_submerged_flake() {
+        // Fallen flake at y=2 with full water above must not grow a new
+        // open-surface skin at y=4 (the visual "float up" after a fall).
+        let mut w = World::new(44);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(3, 1, Cell::water());
+        w.set_cell(3, 2, Cell::solid(MaterialId::Ice)); // submerged flake
+        w.set_cell(3, 3, Cell::water());
+        w.set_cell(3, 4, Cell::water());
+        let temp = cold_temp(16, 16, -10.0);
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        for tick in 0..6 {
+            w.tick = tick;
+            apply_phase(&mut w, &temp, &cfg);
+        }
+        assert_eq!(
+            w.get_cell(3, 2).unwrap().material,
+            MaterialId::Ice,
+            "submerged flake remains"
+        );
+        // Under-lid may thicken downward into y=1; never a new skin at/above y=3.
+        for y in 3..8 {
+            assert_ne!(
+                w.get_cell(3, y).map(|c| c.material),
+                Some(MaterialId::Ice),
+                "must not skin a second lid above submerged ice at y={y}"
+            );
+        }
+    }
+
+    #[test]
+    fn ice_on_haze_does_not_melt_refreeze_pump() {
+        // Regression: flake over partial sat used to float (grain) but fail
+        // phase support → melt → freeze at free surface → ±1 cell pump.
+        let mut w = World::new(11);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::water());
+            w.set_cell(x, 2, Cell::water());
+        }
+        // Misty column under a free-floating flake (neighbours keep full water).
+        w.set_cell(
+            3,
+            2,
+            Cell {
+                material: MaterialId::Air,
+                sat: Sat(64),
+                flags: Default::default(),
+                _pad: 0,
+            },
+        );
+        w.set_cell(3, 3, Cell::solid(MaterialId::Ice));
+        let temp = cold_temp(16, 16, -8.0);
+        let cfg = PhaseConfig::default();
+        let mut ys = Vec::new();
+        for t in 0..24u64 {
+            w.tick = t;
+            crate::rules::apply_grain_fall(&mut w);
+            apply_phase(&mut w, &temp, &cfg);
+            let y_ice = (0..8)
+                .rev()
+                .find(|&y| {
+                    w.get_cell(3, y).map(|c| c.material) == Some(MaterialId::Ice)
+                })
+                .expect("ice flake must persist");
+            ys.push(y_ice);
+        }
+        let min_y = *ys.iter().min().unwrap();
+        let max_y = *ys.iter().max().unwrap();
+        assert!(
+            max_y - min_y <= 1,
+            "ice must not pump ±1 every phase period (ys={ys:?})"
+        );
+        // No alternating every period_ticks once settled.
+        let period = cfg.period_ticks.max(1) as usize;
+        if ys.len() > period * 3 {
+            let tail = &ys[ys.len() - period * 2..];
+            let unique: std::collections::HashSet<_> = tail.iter().copied().collect();
+            assert!(
+                unique.len() == 1,
+                "settled flake Y must be steady across phase periods (tail={tail:?})"
+            );
+        }
     }
 }

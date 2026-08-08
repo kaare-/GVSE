@@ -18,14 +18,14 @@ paint the creature, click a cell, and it lives.
 
 ## Activation
 
-- **Key: `C`** — toggles the editor tab. Working default; if `C`
-  clashes with a later feature, remap; add to the status line the
-  moment it lands.
+- **Key: `F2`** — toggles the creature editor. (`C` is condensation
+  overlay in `wk-voxel-app`; do not reuse it for studio.)
+- **Key: `F4`** — living / dead creature list; click a row to inspect.
 - While the editor is open, the world sim is paused and rendered
   behind the editor at half brightness. Same paused state the
   existing `Space` key produces. The tab does not replace the world
   view; it overlays.
-- Pressing `C` again closes the editor and resumes the sim at the
+- Pressing `F2` again closes the editor and resumes the sim at the
   previous speed.
 
 ## Layout
@@ -208,13 +208,20 @@ in `wk-voxel-app`. Column-era reference pass lived in
 
 ## Debug overlays
 
-Cycled by `O` (existing overlay key):
+World overlays in `wk-voxel-app` (not the studio canvas):
 
-- `LightRemaining` (see [`LIGHT.md`](LIGHT.md)) — how much light is
-  reaching each height in each column.
-- `ChemChannel[c]` — per-channel field colour ramp.
-- `Neural` — active axons coloured by signed activation (see
-  [`NERVES.md`](NERVES.md)).
+- **`M`** — mycelium strain overlay (bright per-share colors on cream).
+- **`G`** — geotech cycle (shear → overburden → wet → off).
+- **`H` / `T` / `N`** — humidity / temperature / clouds.
+- **`C` / `E` / `K`** — condensation / evaporation / karst diagnostics.
+- **`O`** — cycles remaining column-era style overlays when wired:
+  `LightRemaining` (see [`LIGHT.md`](LIGHT.md)), `ChemChannel[c]`,
+  `Neural` (see [`NERVES.md`](NERVES.md)).
+
+Studio paint shortcuts (while `F2` is open): `1`–`4` plant chassis,
+`5` Digest / `6` Hypha / `7` ReproSpore / `8` Symbiont; `,`/`.` and
+`-`/`=` nudge Symbiont `(W, E)`; `T` / `W` / `F` stamp minimal plant /
+seaweed / fungus; `Enter` spawn picker.
 
 ## What is deliberately not here
 

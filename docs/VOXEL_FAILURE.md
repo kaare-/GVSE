@@ -75,8 +75,8 @@ For each solid cell that has **Air directly below** (ceiling):
 Compute-then-apply list of `(gx, gy_roof)`:
 
 - Roof cell → becomes **Air** (preserve sat 0) **or** converts to a
-  fallable grain (`LooseRock` for Stone/Limestone, keep Sand/Organic
-  as themselves) and is left for `apply_grain_fall` next tick.
+  fallable grain (`LooseRock` for Stone, `LooseLimestone` for Limestone;
+  keep Sand/Organic as themselves) and is left for `apply_grain_fall` next tick.
 - Prefer **convert-to-grain + fall** so debris piles read clearly.
 - Cap events per tick (`FailureConfig.max_roof_events`, default ~32)
   so a whole mountain doesn’t vanish in one frame — process lowest
@@ -143,15 +143,17 @@ side Air):
 
 ### Write
 
-- Convert face cell Stone/Limestone/Clay → `LooseRock` or `Sand`
-  (Clay→Clay grain path: Clay is already `is_grain` — prefer **boost
-  wet repose** for grains; block-fail only for `repose_rise_m` infinite
-  materials).
+- Convert face cell Stone → `LooseRock`, Limestone → `LooseLimestone`
+  (Clay→Clay grain path: Clay is already `is_grain` — moisture plasticity
+  via `grain_repose_max_step`; block-fail only for `repose_rise_m`
+  infinite materials).
 - Split implementation:
   - **F2a:** wet grains: extra `max_step` loosen already exists; scale
-    loosen by `cohesion` (low cohesion → always wet-loose).
-  - **F2b:** competent rock faces: rare convert to `LooseRock` when
-    wet + steep + random/hash gate so mountains don’t melt.
+    loosen by `cohesion` (low cohesion → always wet-loose). Clay uses a
+    dry-powder / plastic / mud curve instead of simple loosen.
+  - **F2b:** competent rock faces: rare convert to LooseRock /
+    LooseLimestone when wet + steep + random/hash gate so mountains
+    don’t melt.
 
 ### Tests (F2)
 
@@ -257,8 +259,8 @@ fields. If we add a `CellFlags::COMPACTED` bit, document in
 | PR | Deliverable |
 |----|-------------|
 | **F1** | ✅ `FailureConfig` + `apply_roof_collapse` in tick + Tab → Geotech |
-| **F2a** | ✅ Wet cohesion scales grain repose loosen (`wet_repose_loosens`) |
-| **F2b** | ✅ Competent-face → LooseRock (`apply_shear_weaken`, Tab toggle) |
+| **F2a** | ✅ Wet cohesion scales grain repose loosen (`wet_repose_loosens`); Clay plasticity via `grain_repose_max_step` |
+| **F2b** | ✅ Competent-face → LooseRock / LooseLimestone (`apply_shear_weaken`, Tab toggle) |
 | **F3** | Deep Clay/Organic sat squeeze |
 | **F4 / S1–S4** | `GeotechMap` + map-gated F2b + F3 compaction ([VOXEL_GEOTECH_MAP.md](VOXEL_GEOTECH_MAP.md)) |
 

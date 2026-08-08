@@ -8,8 +8,12 @@
 //! exceeds the roof material's [`wk_material::MaterialProps::roof_span_max_m`].
 //!
 //! F2 — wet cohesion shear: grains loosen more when wet+low-c′ (F2a in
-//! repose); competent rock faces can convert to [`MaterialId::LooseRock`]
-//! when wet and steep (F2b).
+//! repose); competent rock faces can convert to fallable debris
+//! ([`MaterialId::LooseRock`] / [`MaterialId::LooseLimestone`]) when wet
+//! and steep (F2b).
+//!
+//! Clay repose is pore-wetness gated (dry powder ≈ sand, plastic mid-wet
+//! holds shape, near-saturated mud flows) via [`grain_repose_max_step`].
 //!
 //! F3 — overburden compaction: deep wet Clay/Organic exude pore water
 //! upward when σᵥ (or solid-cell count) exceeds a threshold.
@@ -18,9 +22,11 @@ use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
 
 use crate::active::ActiveChunk;
 use crate::cell::{
-    falls_through_empty_air, is_grain, water_capacity, water_capacity_with, Cell, CellFlags, Sat,
+    falls_through_empty_air, grain_max_stable_step, is_grain, water_capacity, water_capacity_with,
+    Cell, CellFlags, Sat,
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::fungi::move_mycelium_meta;
 use crate::grid::World;
 
 /// Minimum relative σᵥ (density-sum/1000) to compact soft sediment.
@@ -39,6 +45,12 @@ pub const COMPACTION_EXUDE_REACH: i32 = 24;
 pub const SHEAR_K_WET: f32 = 0.70;
 /// Wet repose (F2a) loosens `max_step` when `c_eff` is below this.
 pub const WET_REPOSE_C_EFF_LOOSEN: f32 = 80.0;
+/// Clay pore wetness below this = dry powder (sand-like, max_step 0).
+pub const CLAY_POWDER_WET_MAX: f32 = 0.12;
+/// Clay pore wetness above this = mud / liquid limit (flows, max_step 0).
+pub const CLAY_MUD_WET_MIN: f32 = 0.78;
+/// Plastic clay holds short stairs (steeper than dry LooseRock's 1).
+pub const CLAY_PLASTIC_MAX_STEP: i32 = 2;
 /// F2b: demand-1 face needs `c_eff` below this to fail.
 pub const SHEAR_C_THRESH_DEMAND_1: f32 = 40.0;
 /// F2b: demand-2 face (taller / undercut) needs `c_eff` below this.
@@ -108,11 +120,42 @@ pub fn effective_cohesion(material: MaterialId, wet: f32) -> f32 {
 }
 
 /// F2a: wet grains with low `c_eff` lose one `max_step` of repose stability.
+/// Clay uses [`grain_repose_max_step`] instead (plasticity curve).
 pub fn wet_repose_loosens(material: MaterialId, wet: f32) -> bool {
+    if material == MaterialId::Clay {
+        return false;
+    }
     if wet <= 0.0 {
         return false;
     }
     effective_cohesion(material, wet) < WET_REPOSE_C_EFF_LOOSEN
+}
+
+/// Effective max stable height step for grain repose, including clay
+/// moisture plasticity and F2a wet loosen for other grains.
+///
+/// Clay: dry powder and near-saturated mud → 0 (sand-like); mid-wet
+/// plastic clay → [`CLAY_PLASTIC_MAX_STEP`] (holds shape).
+pub fn grain_repose_max_step(material: MaterialId, wet: f32) -> i32 {
+    if material == MaterialId::Clay {
+        return clay_plastic_max_step(wet);
+    }
+    let mut step = grain_max_stable_step(material);
+    // Match the old "meaningfully wet" gate: thin haze does not loosen.
+    if wet >= 0.2 && wet_repose_loosens(material, wet) {
+        step = step.saturating_sub(1);
+    }
+    step
+}
+
+/// Atterberg-style clay repose from pore wetness 0..1.
+fn clay_plastic_max_step(wet: f32) -> i32 {
+    let w = wet.clamp(0.0, 1.0);
+    if w < CLAY_POWDER_WET_MAX || w > CLAY_MUD_WET_MIN {
+        0
+    } else {
+        CLAY_PLASTIC_MAX_STEP
+    }
 }
 
 /// F2b threshold for a face demand of 1 or 2 cells.
@@ -282,7 +325,8 @@ fn weakest_roof_limit(world: &World, gx: i32, cavity_y: i32, roof_y: i32) -> i32
 /// fall can seat it.
 pub fn roof_collapse_debris(material: MaterialId) -> MaterialId {
     match material {
-        MaterialId::Stone | MaterialId::Limestone => MaterialId::LooseRock,
+        MaterialId::Stone => MaterialId::LooseRock,
+        MaterialId::Limestone => MaterialId::LooseLimestone,
         MaterialId::Bedrock => MaterialId::LooseRock, // should not be selected (∞ span)
         other => other,
     }
@@ -332,36 +376,49 @@ pub fn apply_roof_collapse_regions(
     }
 
     // (gy, gx) — lowest ceilings first, then x for determinism.
-    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    // Phase 1: chunk-local filter for roof-over-Air candidates (avoids
+    // HashMap get_cell on every solid cell). Phase 2: span checks.
+    let mut probes: Vec<(i32, i32)> = Vec::new();
     for ac in active {
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            continue;
+        };
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             if gy <= 0 {
                 continue;
             }
+            let below_in_chunk = y > 0;
             for x in ac.rect.x0..=ac.rect.x1 {
-                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
-                let Some(roof) = world.get_cell(gx, gy) else {
-                    continue;
-                };
+                let roof = chunk.get(x as usize, y as usize);
                 if !is_roof_candidate(roof.material) {
                     continue;
                 }
-                let Some(below) = world.get_cell(gx, gy - 1) else {
-                    continue;
+                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
+                let below_ok = if below_in_chunk {
+                    let below = chunk.get(x as usize, (y - 1) as usize);
+                    below.material == MaterialId::Air && !below.sat.is_full()
+                } else {
+                    matches!(
+                        world.get_cell(gx, gy - 1),
+                        Some(c) if c.material == MaterialId::Air && !c.sat.is_full()
+                    )
                 };
-                if below.material != MaterialId::Air {
-                    continue;
-                }
-                let span = roof_span_cells(world, gx, gy - 1);
-                if span <= 0 {
-                    continue;
-                }
-                let limit = weakest_roof_limit(world, gx, gy - 1, gy);
-                if span > limit {
-                    candidates.push((gy, gx));
+                if below_ok {
+                    probes.push((gy, gx));
                 }
             }
+        }
+    }
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    for (gy, gx) in probes {
+        let span = roof_span_cells(world, gx, gy - 1);
+        if span <= 0 {
+            continue;
+        }
+        let limit = weakest_roof_limit(world, gx, gy - 1, gy);
+        if span > limit {
+            candidates.push((gy, gx));
         }
     }
 
@@ -395,6 +452,10 @@ fn collapse_one_ceiling(world: &mut World, gx: i32, gy: i32) -> bool {
     if below.material != MaterialId::Air {
         return false;
     }
+    // Do not collapse roofs into standing water (lake surface seat).
+    if below.sat.is_full() {
+        return false;
+    }
     // Re-check span — neighbour collapse may have changed the cavity.
     let span = roof_span_cells(world, gx, gy - 1);
     let limit = weakest_roof_limit(world, gx, gy - 1, gy);
@@ -425,9 +486,17 @@ fn collapse_one_ceiling(world: &mut World, gx: i32, gy: i32) -> bool {
     };
     world.set_cell(gx, gy - 1, debris);
     world.set_cell(gx, gy, vacated);
+    // Cream rides in `_pad`; strain / lineage / sugar maps are coordinate-keyed
+    // and must follow the debris or the drop invents orphan red dots on `M`.
+    move_mycelium_meta(world, gx, gy, gx, gy - 1);
     // Competence check: debris should be able to keep falling later.
     debug_assert!(
-        is_grain(debris_mat) || falls_through_empty_air(debris_mat) || debris_mat == MaterialId::LooseRock
+        is_grain(debris_mat)
+            || falls_through_empty_air(debris_mat)
+            || matches!(
+                debris_mat,
+                MaterialId::LooseRock | MaterialId::LooseLimestone
+            )
     );
     true
 }
@@ -475,7 +544,8 @@ pub fn face_shear_demand(world: &World, gx: i32, gy: i32) -> i32 {
 /// Debris left when a competent face shears.
 pub fn shear_weaken_debris(material: MaterialId) -> MaterialId {
     match material {
-        MaterialId::Stone | MaterialId::Limestone => MaterialId::LooseRock,
+        MaterialId::Stone => MaterialId::LooseRock,
+        MaterialId::Limestone => MaterialId::LooseLimestone,
         other => other,
     }
 }
@@ -501,7 +571,8 @@ fn shear_hash_ok(seed: u64, tick_no: u64, gx: i32, gy: i32, per_mille: u32) -> b
     roll < per_mille
 }
 
-/// F2b: convert wet, steep competent rock faces to LooseRock.
+/// F2b: convert wet, steep competent rock faces to LooseRock /
+/// LooseLimestone.
 ///
 /// Compute-then-apply. Event count capped by [`FailureConfig::max_shear_events`].
 /// Gated by [`FailureConfig::enable_shear_weaken`] (off by default).
@@ -644,7 +715,7 @@ fn shear_one_face(
 fn is_compactable(material: MaterialId) -> bool {
     matches!(
         material,
-        MaterialId::Clay | MaterialId::Organic | MaterialId::Sand
+        MaterialId::Clay | MaterialId::Soil | MaterialId::Organic | MaterialId::Sand
     )
 }
 
@@ -971,9 +1042,55 @@ mod tests {
             "wide limestone room must drop at least one ceiling cell (span={span} limit={limit})"
         );
         let debris = (x0..=x1)
-            .filter(|&x| w.get_cell(x, 1).unwrap().material == MaterialId::LooseRock)
+            .filter(|&x| w.get_cell(x, 1).unwrap().material == MaterialId::LooseLimestone)
             .count();
-        assert!(debris > 0, "collapsed limestone should become LooseRock debris");
+        assert!(debris > 0, "collapsed limestone should become LooseLimestone debris");
+    }
+
+    #[test]
+    fn roof_collapse_moves_mycelium_strain_with_debris() {
+        use crate::fungi::{alloc_mycelium_strain, mycelium_shares_at};
+
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut w, 0, 63);
+        let limit = roof_span_limit_cells(MaterialId::Limestone);
+        let span = limit + 2;
+        let x0 = 2;
+        let x1 = x0 + span - 1;
+        for x in x0..=x1 {
+            w.set_cell(x, 1, Cell::air());
+            let mut roof = Cell::solid(MaterialId::Limestone);
+            roof.set_mycelium(40);
+            w.set_cell(x, 2, roof);
+            let s = alloc_mycelium_strain(&mut w);
+            w.mycelium_strains.insert((x, 2), vec![(s, 40)]);
+        }
+        w.set_cell(x0 - 1, 1, Cell::solid(MaterialId::Limestone));
+        w.set_cell(x1 + 1, 1, Cell::solid(MaterialId::Limestone));
+        let cfg = FailureConfig {
+            max_roof_events: 64,
+            ..FailureConfig::default()
+        };
+        apply_roof_collapse(&mut w, &cfg);
+        let mut saw_owned_debris = false;
+        for x in x0..=x1 {
+            if w.get_cell(x, 1).map(|c| c.material) != Some(MaterialId::LooseLimestone) {
+                continue;
+            }
+            let myc = w.get_cell(x, 1).unwrap().mycelium();
+            assert!(myc > 0, "debris should keep cream pad");
+            assert!(
+                !mycelium_shares_at(&w, x, 1).is_empty(),
+                "strain shares must follow debris to y-1 (orphan red-dot bug)"
+            );
+            assert!(
+                mycelium_shares_at(&w, x, 2).is_empty(),
+                "vacated roof must not keep orphan shares"
+            );
+            saw_owned_debris = true;
+        }
+        assert!(saw_owned_debris, "expected at least one cream-bearing debris cell");
     }
 
     #[test]
@@ -1077,12 +1194,114 @@ mod tests {
     fn wet_repose_low_cohesion_loosens_high_holds_until_soaked() {
         // Sand c=20 → always loosens when wet.
         assert!(wet_repose_loosens(MaterialId::Sand, 0.25));
-        // Clay c=180 → needs near-full wetness (c_eff < 80).
+        // Clay uses the plasticity curve, not F2a loosen.
         assert!(!wet_repose_loosens(MaterialId::Clay, 0.4));
-        assert!(wet_repose_loosens(MaterialId::Clay, 1.0));
+        assert!(!wet_repose_loosens(MaterialId::Clay, 1.0));
         // LooseRock c=100 → loosens once moderately wet.
         assert!(wet_repose_loosens(MaterialId::LooseRock, 0.5));
         assert!(!wet_repose_loosens(MaterialId::LooseRock, 0.0));
+    }
+
+    #[test]
+    fn clay_repose_powder_plastic_mud() {
+        assert_eq!(
+            grain_repose_max_step(MaterialId::Clay, 0.0),
+            0,
+            "dry powdered clay acts like sand"
+        );
+        assert_eq!(
+            grain_repose_max_step(MaterialId::Clay, 0.05),
+            0,
+            "near-dry clay still powders"
+        );
+        assert_eq!(
+            grain_repose_max_step(MaterialId::Clay, 0.45),
+            CLAY_PLASTIC_MAX_STEP,
+            "semi-wet clay is plastic and holds shape"
+        );
+        assert!(
+            grain_repose_max_step(MaterialId::Clay, 0.45)
+                > grain_repose_max_step(MaterialId::LooseRock, 0.0),
+            "plastic clay holds steeper than dry LooseRock stairs"
+        );
+        assert_eq!(
+            grain_repose_max_step(MaterialId::Clay, 0.95),
+            0,
+            "very wet clay flows as mud"
+        );
+        assert_eq!(
+            grain_repose_max_step(MaterialId::Sand, 0.0),
+            0,
+            "sand stays flat"
+        );
+        assert!(
+            grain_repose_max_step(MaterialId::LooseRock, 0.0) >= 1,
+            "loose rock still stacks steeper than sand"
+        );
+    }
+
+    #[test]
+    fn limestone_debris_is_loose_limestone_not_loose_rock() {
+        assert_eq!(
+            roof_collapse_debris(MaterialId::Limestone),
+            MaterialId::LooseLimestone
+        );
+        assert_eq!(
+            shear_weaken_debris(MaterialId::Limestone),
+            MaterialId::LooseLimestone
+        );
+        assert_eq!(
+            roof_collapse_debris(MaterialId::Stone),
+            MaterialId::LooseRock
+        );
+        assert_eq!(
+            shear_weaken_debris(MaterialId::Stone),
+            MaterialId::LooseRock
+        );
+    }
+
+    #[test]
+    fn plastic_clay_lip_holds_dry_and_mud_slide() {
+        // 1-cell clay step into Air: dry powder and mud slide; plastic holds.
+        let mut dry = World::new(1);
+        dry.ensure_chunk(ChunkCoord::new(0, 0));
+        bed(&mut dry, 0, 10);
+        for x in 0..=4 {
+            dry.set_cell(x, 1, Cell::solid(MaterialId::Clay));
+        }
+        dry.set_cell(4, 2, Cell::solid(MaterialId::Clay));
+        dry.set_cell(5, 1, Cell::air());
+        dry.set_cell(5, 2, Cell::air());
+
+        let mut plastic = dry.clone();
+        let mut mud = dry.clone();
+        let cap = water_capacity(MaterialId::Clay);
+        let mut p = Cell::solid(MaterialId::Clay);
+        p.sat = Sat((cap as f32 * 0.45) as u8);
+        plastic.set_cell(4, 2, p);
+        let mut m = Cell::solid(MaterialId::Clay);
+        m.sat = Sat(cap);
+        mud.set_cell(4, 2, m);
+
+        apply_grain_repose(&mut dry);
+        apply_grain_repose(&mut plastic);
+        apply_grain_repose(&mut mud);
+
+        assert_eq!(
+            dry.get_cell(5, 1).unwrap().material,
+            MaterialId::Clay,
+            "dry powdered clay lip must slide like sand"
+        );
+        assert_eq!(
+            plastic.get_cell(4, 2).unwrap().material,
+            MaterialId::Clay,
+            "semi-wet plastic clay lip must hold"
+        );
+        assert_eq!(
+            mud.get_cell(5, 1).unwrap().material,
+            MaterialId::Clay,
+            "saturated clay mud lip must slide"
+        );
     }
 
     #[test]
@@ -1287,11 +1506,8 @@ mod tests {
             enable_roof_collapse: false,
             shear_chance_per_mille: 1000,
             max_shear_events: 2,
+            use_geotech_map: false,
             ..FailureConfig::default()
-        };
-        let perf = PerfConfig {
-            parallel_physics: false,
-            ..PerfConfig::default()
         };
 
         let count_loose = |w: &World| -> usize {
@@ -1303,7 +1519,9 @@ mod tests {
                 .count()
         };
 
-        tick_with_configs(&mut w, &perf, &fail);
+        // Full-tick seepage can bleed lip pore water into the side Air
+        // before F2b runs; exercise the event-cap path directly.
+        apply_shear_weaken(&mut w, &fail, None);
         assert_eq!(count_loose(&w), 2, "tick 1: two lips via cap");
 
         for i in 0..n_lips {
@@ -1312,7 +1530,8 @@ mod tests {
                 w.set_cell(x, 3, wet_solid(MaterialId::Stone));
             }
         }
-        tick_with_configs(&mut w, &perf, &fail);
+        w.tick = w.tick.wrapping_add(1);
+        apply_shear_weaken(&mut w, &fail, None);
         assert_eq!(count_loose(&w), 4, "tick 2: progressive +2");
 
         for _ in 0..3 {
@@ -1322,7 +1541,8 @@ mod tests {
                     w.set_cell(x, 3, wet_solid(MaterialId::Stone));
                 }
             }
-            tick_with_configs(&mut w, &perf, &fail);
+            w.tick = w.tick.wrapping_add(1);
+            apply_shear_weaken(&mut w, &fail, None);
         }
         let after = count_loose(&w);
         assert_eq!(after, 10, "five ticks × 2 events → 10 LooseRock");

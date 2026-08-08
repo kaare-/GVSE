@@ -256,7 +256,7 @@ impl CloudStore {
         humidity.buoyant_rise(cfg.buoyant_rise, deck_hy);
 
         self.coagulate(humidity, wind, sea_level_y, sky_ceiling_y, cfg);
-        self.advect_and_collide(world, wind, sea_level_y, sky_ceiling_y, cfg);
+        self.advect_and_collide(world, wind, sea_level_y, sky_ceiling_y, tick, cfg);
         self.merge(cfg);
         self.downpour(world, wind, tick, cfg, temp, phase);
         for p in &mut self.parcels {
@@ -382,14 +382,16 @@ impl CloudStore {
         wind: &Wind,
         sea_level_y: i32,
         sky_ceiling_y: i32,
+        tick: u64,
         cfg: &CloudConfig,
     ) {
         let tc = wind.tile_cols.max(1) as f32;
-        let vx = wind.climate_vx * tc * cfg.parcel_wind_scale;
+        let eff_vx = wind.effective_vx(tick);
+        let vx = eff_vx * tc * cfg.parcel_wind_scale;
         let y_lo = (sea_level_y + cfg.coag_min_above_sea) as f32;
         let y_hi = (sky_ceiling_y - 3) as f32;
         let width = wind.width_cols.max(1) as f32;
-        let wind_sign = if wind.climate_vx >= 0.0 { 1.0 } else { -1.0 };
+        let wind_sign = if eff_vx >= 0.0 { 1.0 } else { -1.0 };
         let deck = preferred_deck(sea_level_y, sky_ceiling_y, cfg);
         for p in &mut self.parcels {
             p.on_ridge = false;
@@ -686,7 +688,7 @@ mod tests {
     use wk_material::MaterialId;
 
     fn wind_for(p: &WorldgenParams) -> Wind {
-        Wind::climate(
+        let mut w = Wind::climate(
             4,
             0.1,
             p.seed,
@@ -695,7 +697,10 @@ mod tests {
             p.bedrock_floor_y,
             p.sky_ceiling_y,
             true,
-        )
+        );
+        // Cloud unit tests want a steady prevailing push.
+        w.variance = 0.0;
+        w
     }
 
     #[test]
@@ -800,7 +805,7 @@ mod tests {
         // Soft blend needs a few ticks to clear the ridge floor.
         let world = World::new(p.seed);
         for _ in 0..8 {
-            clouds.advect_and_collide(&world, &wind, p.sea_level_y, p.sky_ceiling_y, &cfg);
+            clouds.advect_and_collide(&world, &wind, p.sea_level_y, p.sky_ceiling_y, 0, &cfg);
         }
         let c = &clouds.parcels[0];
         let min_clear = surface + cfg.ridge_clearance * 0.5;
@@ -884,7 +889,7 @@ mod tests {
         let x0 = clouds.parcels[0].fx;
         let world = World::new(p.seed);
         for _ in 0..80 {
-            clouds.advect_and_collide(&world, &wind, p.sea_level_y, p.sky_ceiling_y, &cfg);
+            clouds.advect_and_collide(&world, &wind, p.sea_level_y, p.sky_ceiling_y, 0, &cfg);
         }
         assert!(
             clouds.parcels[0].fx > x0,

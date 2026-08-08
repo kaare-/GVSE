@@ -58,9 +58,9 @@ fn is_diggable(mat: MaterialId) -> bool {
 pub fn root_penetrate_cost(mat: MaterialId) -> Option<f32> {
     match mat {
         MaterialId::Organic => Some(0.7),
-        MaterialId::Sand | MaterialId::Clay => Some(1.8),
+        MaterialId::Sand | MaterialId::Clay | MaterialId::Soil => Some(1.8),
         MaterialId::Gravel => Some(2.6),
-        MaterialId::LooseRock | MaterialId::Limestone => Some(6.5),
+        MaterialId::LooseRock | MaterialId::LooseLimestone | MaterialId::Limestone => Some(6.5),
         MaterialId::Stone => Some(12.0),
         MaterialId::Bedrock
         | MaterialId::Water

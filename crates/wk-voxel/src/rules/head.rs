@@ -6,7 +6,8 @@
 
 use wk_material::{HydroOverrides, MaterialId, MaterialRegistry};
 
-use crate::cell::{water_capacity_with, Sat};
+use crate::cell::{water_capacity_with, Cell, Sat};
+use crate::chunk::{Chunk, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
 /// Free-surface / pore hydraulic head in cell units:
@@ -89,23 +90,52 @@ pub(crate) fn is_surface_support(world: &World, gx: i32, gy: i32) -> bool {
 /// Plan a single +x standing-surface head equalise for the edge
 /// `(gx,gy) — (gx+1,gy)`. Emits at most one transfer, owned by the
 /// left endpoint so each edge is solved once per pass.
-pub(crate) fn plan_same_y_pairwise_edge(
+///
+/// `chunk`/`(lx,ly)` are an optional chunk-local read cache; when set,
+/// neighbour probes that fall inside the chunk skip `world.get_cell`
+/// (~10× cheaper) — see `get_cell_microbench`.
+pub(crate) fn plan_same_y_pairwise_edge_in(
     world: &World,
+    chunk: Option<(&Chunk, i32, i32)>,
     gx: i32,
     gy: i32,
+    lx: i32,
+    ly: i32,
     local: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) {
     let nx = world.wrap_x(gx + 1);
     if nx == gx {
         return;
     }
-    if !is_surface_support(world, gx, gy) || !is_surface_support(world, nx, gy) {
+    let read = |ax: i32, ay: i32, cx: i32, cy: i32| -> Option<Cell> {
+        if let Some((chunk, _bx, _by)) = chunk {
+            if cx >= 0 && cx < CHUNK_CELLS_W as i32 && cy >= 0 && cy < CHUNK_CELLS_H as i32 {
+                return Some(chunk.get(cx as usize, cy as usize));
+            }
+        }
+        world.get_cell(ax, ay)
+    };
+    // is_surface_support checks (x, y-1). Chunk-local when in range.
+    let left_below = read(gx, gy - 1, lx, ly - 1);
+    let left_support = matches!(
+        left_below,
+        Some(b) if b.material != MaterialId::Air || b.sat.is_full()
+    );
+    if !left_support {
         return;
     }
-    let Some(left) = world.get_cell(gx, gy) else {
+    let right_below = read(nx, gy - 1, lx + 1, ly - 1);
+    let right_support = matches!(
+        right_below,
+        Some(b) if b.material != MaterialId::Air || b.sat.is_full()
+    );
+    if !right_support {
+        return;
+    }
+    let Some(left) = read(gx, gy, lx, ly) else {
         return;
     };
-    let Some(right) = world.get_cell(nx, gy) else {
+    let Some(right) = read(nx, gy, lx + 1, ly) else {
         return;
     };
     if left.material != MaterialId::Air || right.material != MaterialId::Air {

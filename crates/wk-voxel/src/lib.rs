@@ -11,6 +11,7 @@
 pub mod active;
 pub mod audit;
 pub mod blueprint;
+pub mod carbon;
 pub mod cell;
 pub mod chunk;
 pub mod climate;
@@ -28,6 +29,8 @@ pub mod plant;
 pub mod rules;
 pub mod save;
 pub mod shade;
+pub mod spore_bank;
+pub mod symbiosis;
 pub mod temperature;
 pub mod wind;
 pub mod worldgen;
@@ -39,11 +42,15 @@ pub use audit::{
 };
 pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{
-    falls_through_empty_air, grain_max_stable_step, is_flow_erodible, is_grain, is_repose_grain,
-    water_capacity, water_capacity_with, Cell, CellFlags, Sat,
+    falls_through_empty_air, grain_max_stable_step, hosts_mycelium, is_flow_erodible, is_grain,
+    is_repose_grain, water_capacity, water_capacity_with, Cell, CellFlags, Sat,
 };
 pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
-pub use blueprint::{Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR};
+pub use blueprint::{
+    ensure_symbiont_inherited, mutate_body, Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR,
+    BODY_MUTATION_MAX_EDITS,
+    BODY_MUTATION_MAX_MODULES,
+};
 pub use climate::{
     celestial_local, celestial_local_cfg, celestial_screen_pos, celestial_screen_pos_cfg, day_factor,
     day_factor_cfg, day_night_factor, day_night_factor_cfg, is_daytime, is_daytime_cfg, phase_fraction,
@@ -54,11 +61,30 @@ pub use clouds::{
 };
 pub use failure::{
     apply_compaction, apply_failure, apply_roof_collapse, apply_shear_weaken, compaction_load_ok,
-    effective_cohesion, face_shear_demand, pore_wetness, pore_wetness_with, roof_collapse_debris,
-    roof_span_cells, roof_span_limit_cells, shear_weaken_debris, wet_repose_loosens, FailureConfig,
+    effective_cohesion, face_shear_demand, grain_repose_max_step, pore_wetness, pore_wetness_with,
+    roof_collapse_debris, roof_span_cells, roof_span_limit_cells, shear_weaken_debris,
+    wet_repose_loosens, FailureConfig,
     COMPACTION_SIGMA_MIN,
 };
-pub use fungi::{is_fungus, soft_litter_at, add_soft_litter};
+pub use carbon::{
+    gate_algae_photo, gate_plant_photo, step_carbon_budget, CarbonBudget, CarbonConfig,
+    AMBIENT_ATM_C, AMBIENT_DISSOLVED_C, PLANT_PHOTO_C_FLOOR,
+};
+pub use spore_bank::{
+    spore_bank_len, DormantSpore, SporeBank, SporeBankConfig, SporeKind, SPORE_BANK_PERIOD,
+};
+pub use fungi::{
+    add_soft_litter, bind_strain_lineage, compost_organic_to_soil, infect_mycelium_at,
+    infect_mycelium_with_lineage, is_fungus, is_surface_stalk, lineage_for_strain_at,
+    max_mycelium_near, move_mycelium_meta, mycelium_energy_at, mycelium_shares_at,
+    mycelium_shares_overlay_rgba, mycelium_strain_at, mycelium_strain_rgb,
+    nearest_mycelium_lineage, pull_mycelium_cargo_to, seed_mycelium_near,
+    sip_mycelium_energy_near, soft_litter_at, stamp_mycelium_lineage, step_mycelium_field,
+    step_mycelium_field_cfg, strain_lineage,
+    swap_cells_preserving_mycelium, swap_mycelium_meta, FungiConfig, MyceliumLineage,
+    MyceliumLineageMap, FUNGUS_STALK_SPORE_MAX_DIST, FUNGUS_STALK_SPORE_MIN_DIST,
+    MYCELIUM_ENERGY_CAP,
+};
 pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
     wet_air_column_beside, FaceStress, GeotechMap, GeotechOverlayMode, GEOTECH_MAP_PERIOD,
@@ -68,15 +94,29 @@ pub use grid::World;
 // HydroOverrides is defined in wk-material; re-export for app convenience.
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
-    Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, CORPSE_SETTLE_LAND_TICKS,
-    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
+    bake_tip_into_body, column_sky_light, fallen_body_offset, rigid_tip_offset, Atom, BodyModule,
+    Corpse, ModuleId, OrganismStore, SpawnFail, SporeRelease, CORPSE_SETTLE_LAND_TICKS,
+    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT,
+    SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
+};
+pub use symbiosis::{
+    body_has_symbiont, clear_plant_sym_flow_lasts, clear_sym_net_flow_lasts,
+    plant_sym_energy_reserve, plant_sym_sugar_spendable, probe_cream_link,
+    probe_cream_link_preferring, probe_plant_link, probe_strain_frontier, step as step_symbiosis,
+    step_strain_trade, treaty_match, SymBias, SymFrontierProbe, SymNetFlow, SymProbe, SymTradeMode,
+    SYM_MATCH_MIN, SYM_NET_SUGAR_PAY_RESERVE, SYM_REPRO_RESERVE_FRAC,
 };
 pub use plant::{
-    collect_live_root_world_cells, find_fungus_slot, find_plant_slot, find_surface_air_slot,
-    is_land_plant, sync_alloc_to_body, PlantGrowthCaps, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
-    MAX_STEM_MODULES,
+    collect_live_photo_world_cells, collect_live_root_world_cells, collect_plant_sail_tops,
+    find_fungus_slot, find_plant_slot, find_surface_air_slot, is_land_plant,
+    sail_plants_on_wind_rafts, sail_plants_on_wind_rafts_cfg, sync_alloc_to_body,
+    PlantGrowthCaps, MAX_PHOTO_MODULES,
+    MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
-pub use shade::{build_canopy_index, effective_photo_light, CanopyIndex};
+pub use shade::{
+    build_canopy_index, build_canopy_index_posed, effective_photo_light, shade_transmit,
+    sum_posed_photo_light, CanopyIndex, PosedModule,
+};
 pub use heatmap::Heatmap;
 pub use humidity::{
     humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,
@@ -93,10 +133,19 @@ pub use rules::{
     apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
     apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
-    is_standing_water, tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life,
-    tick_with_perf, CondensationConfig, EvapConfig, GrainConfig, KarstConfig, OrographicConfig,
-    PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN, ROOT_EROSION_BIND,
-    ROOT_REPOSE_STEP_BONUS,
+    collect_floating_organic_columns, drift_floating_organic, drift_floating_organic_cfg,
+    drift_floating_organic_columns, drift_floating_organic_columns_cfg,
+    is_standing_water, punch_through_floating_rafts, rise_and_soak_buoyant_litter,
+    rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter, settle_loose_grains,
+    settle_loose_grains_regions, soak_floating_litter, soak_floating_litter_cfg,
+    tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life, tick_with_perf,
+    wake_confined_head, wake_grains_for_settle, wake_unsupported_grains, wake_unstable_slopes,
+    CondensationConfig, EvapConfig, GrainConfig,
+    KarstConfig,
+    OrographicConfig, PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
+    GRAIN_REPOSE_HAZE_MAX, GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES, MYCELIUM_EROSION_BIND,
+    MYCELIUM_RAFT_BIND_MIN,
+    MYCELIUM_REPOSE_STEP_BONUS, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
 pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,

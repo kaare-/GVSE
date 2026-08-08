@@ -109,6 +109,11 @@ new kernel genes append.
 | `AttachPrefer` | `f32 in 0..1` | Seek olive host stems (epiphyte establishment). | Ignores hosts; needs its own root. |
 | `HostLeaveFraction` | `f32 in 0..1` | Gentle rider: passes X of light through own stack to host below. | Smotherer: takes everything. |
 | `DigestRate` | `f32 ≥ 0` | Fast litter clearing; boom-crash cycles. | Starves when litter is scarce. |
+| `sym_water` | `u8` | Treaty water side of opt-in Symbiont deal (editor `,` / `.`). | Low W / high E skews parasitism toward the fungus. |
+| `sym_energy` | `u8` | Treaty sugar side (editor `-` / `=`). | High W / low E skews toward the plant. |
+
+Both partners need painted `ModuleId::Symbiont`. Match is assortative
+similarity of `(sym_water, sym_energy)`; see [`FUNGI.md`](FUNGI.md).
 
 ### Reserved gene slots
 
@@ -116,7 +121,7 @@ Kept named for editor readability, not yet used by any subsystem:
 
 - `LocomotionSpeed`, `BrowseRate`, `BrowseEfficiency` (Phase 7).
 - `Woodiness` (`Bark` slot in [`PALETTE.md`](PALETTE.md), Phase 6+).
-- `MutualistDrive` (mycorrhizae, deferred).
+- `MutualistDrive` — superseded by `sym_water` / `sym_energy` + Symbiont.
 
 ## Merge and rename plan
 
@@ -134,6 +139,16 @@ mechanical plan is:
 4. `Genome::mutate` extends to include the new fields; the salt list
    keeps growing but each gene has its own `trait_i` so mutation is
    stable across additions.
+5. **Blueprint / body mutation** (`mutate_body`) runs on the same
+   `clone_fidelity` knob: **double** an existing tissue block into a
+   free neighbour, **add** a new module from the habit palette, or
+   **delete** a non-essential module. `clone_fidelity = 1.0` is an
+   identical chassis; default (~0.9) applies at least one morph edit
+   so spore/sapling kids diverge on `Atom::growth_target` before they
+   grow out. Habit never flips (plants keep Root+Photosystem; fungi
+   keep Digest and never gain Root/Stem). Kind-swap (Stem→leaf, etc.)
+   is deferred. Wired into rhizome sprouts, plant wind spores, fungal
+   spores, and Atom fission.
 
 ## What is deliberately not here
 
@@ -143,3 +158,4 @@ mechanical plan is:
 - Meta-genes (mutation rate of the mutation rate). Later.
 - Runtime-modifiable weights outside mutation. See
   [`NERVES.md`](NERVES.md) — no plastic learning.
+- Cross-habit chimeras (plant↔fungus body swaps). Deferred.

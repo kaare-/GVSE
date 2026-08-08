@@ -58,9 +58,9 @@ Live Set A / Set D organisms are implemented in `wk-voxel`
 | [`CHEM.md`](CHEM.md) | `ChemType` IDs, per-chunk chem field, sensor/emitter tuning |
 | [`NERVES.md`](NERVES.md) | Fixed neural graph inputs / outputs / wire semantics |
 | [`LIGHT.md`](LIGHT.md) | Shade scan and the light competition rule |
-| [`PLANTS.md`](PLANTS.md) | Rooted land plants, deep roots, epiphytes, topple pipeline |
-| [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) | What landed on the voxel stack (Set D / E1 fungi) |
-| [`FUNGI.md`](FUNGI.md) | Litter fungi, hyphae, substrate memory, ghost roots |
+| [`PLANTS.md`](PLANTS.md) | Design reference: rooted plants, epiphytes, topple (check [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) for live status) |
+| [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md) | What landed on the voxel stack (Set D / E1 fungi, saplings, Symbiont) |
+| [`FUNGI.md`](FUNGI.md) | Litter fungi, mycelium field, Symbiont trade, spore bank |
 | [`LANES.md`](LANES.md) | Fore / Mid / Back depth-lane occupancy for future animals |
 | [`CORE_FEATURES.md`](CORE_FEATURES.md) | Feature Sets A–E lock and explicit non-goals |
 | [`GENES.md`](GENES.md) | Gene table with tradeoffs; merge notes vs archived `wk_agents::Genome` |

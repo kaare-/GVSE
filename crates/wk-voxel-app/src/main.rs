@@ -22,11 +22,13 @@
 //! - `H` — toggle soft white humidity haze (vapor hint; clouds carry the look)
 //! - `N` — toggle cloud drawing (coagulated parcels; darker = wetter)
 //! - `T` — toggle temperature heatmap overlay
+//! - `M` — toggle mycelium strain overlay (bright per-network colors)
 //! - `G` — cycle geotech overlay (shear → σᵥ → wet → off)
 //! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
 //! - `F1` — toggle HUD chrome (bottom info/tools + block inspector)
 //! - `F2` — creature editor (Atom / plant MS-Paint; `C` stays condensation)
 //! - `F3` — terrain editor (paint / erase block types; world stays visible)
+//! - `F4` — creature list (living / dead roster; click row to inspect)
 //! - `F5` / `F9` — save / load simulation (`saves/*.gvsesim`)
 //! - `Tab` — live settings (world size, materials, wind, clouds, …)
 //! - click — block / organism inspector (hidden while F1 HUD is off)
@@ -34,15 +36,17 @@
 //! - `Up` / `Down` — pan vertically
 //! - `Esc` — close overlays, or quit confirm (save / discard / cancel)
 //!
-//! Sky follows the shared climate clock (sun by day, moon by night).
-//! Temperature tiles warm with sun, cool at night, and shade under clouds.
+//! Sky follows the shared climate clock (pixel sun by day, pixel moon by night).
+//! Temperature tiles warm with sun, cool at night, and shade under pixel clouds.
 
+mod creature_list;
 mod editor;
 mod inspector;
 mod palette;
 mod quit;
 mod scene;
 mod settings;
+mod spore_fx;
 mod terrain;
 
 use macroquad::prelude::*;
@@ -51,16 +55,20 @@ use wk_voxel::{
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    precip_forms_snow_at_air, sky_rgb, sky_rgb_at_height, temperature_step_due, tick_with_life,
+    precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, sky_rgb_at_height,
+    temperature_step_due,
+    step_carbon_budget, tick_with_life, wake_unsupported_grains, wake_unstable_slopes,
     ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
 };
 
+use crate::creature_list::CreatureList;
 use crate::editor::CreatureEditor;
 use crate::inspector::{draw_block_inspector, draw_selection_outline, screen_to_world};
 use crate::palette::cell_color;
 use crate::quit::{QuitChoice, QuitDialog};
 use crate::scene::Scene;
 use crate::settings::SimSettings;
+use crate::spore_fx::SporeFx;
 use crate::terrain::{TerrainEditor, TerrainTool};
 
 fn window_conf() -> Conf {
@@ -118,7 +126,7 @@ fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
     (18.0 + norm * 42.0) as u8
 }
 
-/// Day/night sky gradient + sun or moon arc.
+/// Day/night sky gradient + round sun/moon built from world-sized pixels.
 fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
     let dn = day_night_factor_cfg(tick, climate);
     const BANDS: i32 = 28;
@@ -136,20 +144,84 @@ fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
         );
     }
     let (cx, cy) = celestial_screen_pos_cfg(tick, sw, sh, climate);
+    let px = PX_PER_CELL;
     if is_daytime_cfg(tick, climate) {
-        draw_circle(cx, cy, 22.0, Color::from_rgba(255, 200, 70, 60));
-        draw_circle(cx, cy, 16.0, Color::from_rgba(255, 220, 90, 255));
-        draw_circle(cx, cy, 10.0, Color::from_rgba(255, 245, 180, 255));
+        // Round silhouette (radius in cells), square pixels only as the fill.
+        draw_pixel_disk_cells(cx, cy, 8, px, Color::from_rgba(255, 190, 60, 85));
+        draw_pixel_disk_cells(cx, cy, 6, px, Color::from_rgba(255, 215, 70, 255));
+        draw_pixel_disk_cells(cx, cy, 4, px, Color::from_rgba(255, 238, 150, 255));
+        draw_pixel_disk_cells(cx, cy, 2, px, Color::from_rgba(255, 252, 220, 255));
     } else {
-        let [sr, sg, sb] = sky_rgb(dn);
-        draw_circle(cx, cy, 14.0, Color::from_rgba(230, 235, 245, 255));
-        // Crescent bite using local sky colour.
-        draw_circle(
-            cx + 5.0,
-            cy - 2.0,
-            12.0,
-            Color::from_rgba(sr, sg, sb, 255),
+        // Round crescent: moon disk minus offset bite (still cell lattice).
+        draw_pixel_crescent_cells(
+            cx,
+            cy,
+            6,
+            2,
+            -1,
+            5,
+            px,
+            Color::from_rgba(220, 226, 238, 255),
         );
+    }
+}
+
+/// Round disk centered on `(cx, cy)`, filled with `pixel`-sized squares.
+/// Lattice is body-centered so the silhouette stays circular as it moves.
+fn draw_pixel_disk_cells(cx: f32, cy: f32, radius_cells: i32, pixel: f32, color: Color) {
+    if radius_cells <= 0 || pixel <= 0.0 {
+        return;
+    }
+    // Slight expand so staircase edges still read as a circle, not a diamond.
+    let r2 = (radius_cells as f32 + 0.35).powi(2);
+    for dy in -radius_cells..=radius_cells {
+        for dx in -radius_cells..=radius_cells {
+            let fx = dx as f32;
+            let fy = dy as f32;
+            if fx * fx + fy * fy > r2 {
+                continue;
+            }
+            let x = cx + fx * pixel - pixel * 0.5;
+            let y = cy + fy * pixel - pixel * 0.5;
+            draw_rectangle(x, y, pixel, pixel, color);
+        }
+    }
+}
+
+/// Round crescent: moon disk minus a circular bite, body-centered cells.
+fn draw_pixel_crescent_cells(
+    cx: f32,
+    cy: f32,
+    radius_cells: i32,
+    bite_dx: i32,
+    bite_dy: i32,
+    bite_radius: i32,
+    pixel: f32,
+    color: Color,
+) {
+    if radius_cells <= 0 || pixel <= 0.0 {
+        return;
+    }
+    let r2 = (radius_cells as f32 + 0.35).powi(2);
+    let b2 = (bite_radius as f32 + 0.15).powi(2);
+    let bcx = bite_dx as f32;
+    let bcy = bite_dy as f32;
+    for dy in -radius_cells..=radius_cells {
+        for dx in -radius_cells..=radius_cells {
+            let fx = dx as f32;
+            let fy = dy as f32;
+            if fx * fx + fy * fy > r2 {
+                continue;
+            }
+            let bx = fx - bcx;
+            let by = fy - bcy;
+            if bx * bx + by * by <= b2 {
+                continue;
+            }
+            let x = cx + fx * pixel - pixel * 0.5;
+            let y = cy + fy * pixel - pixel * 0.5;
+            draw_rectangle(x, y, pixel, pixel, color);
+        }
     }
 }
 
@@ -166,6 +238,7 @@ fn geotech_overlay_color(score: f32, s_max: f32) -> Color {
     let a = (90.0 + t * 130.0) as u8;
     Color::from_rgba(r, g, b, a)
 }
+
 
 fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
     let u = ((temp_c - t_min) / (t_max - t_min).max(0.5)).clamp(0.0, 1.0);
@@ -195,8 +268,11 @@ fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
     Color::from_rgba(r, g, b, 120)
 }
 
-/// Cartoon clouds from coagulated [`wk_voxel::CloudStore`] parcels.
-/// Darker / denser = wetter; raining parcels get falling drops beneath.
+/// Cartoon → pixel clouds from coagulated [`wk_voxel::CloudStore`] parcels.
+///
+/// Overlapping parcels stamp into one occupancy mask and paint each
+/// world-cell once, so close blobs read as a single bank (and neck /
+/// split when physics drifts them apart). Rain streaks stay per-parcel.
 fn draw_clouds(
     clouds: &wk_voxel::CloudStore,
     world: &World,
@@ -212,34 +288,66 @@ fn draw_clouds(
     downpour_mass: f32,
     snowing: impl Fn(f32, f32) -> bool,
 ) {
-    if clouds.is_empty() {
+    if clouds.is_empty() || cell_px <= 0.0 {
         return;
     }
     let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-    // Low parcels first so ridge-top clouds paint over them.
-    let mut order: Vec<usize> = (0..clouds.parcels.len()).collect();
-    order.sort_by(|&a, &b| {
-        clouds.parcels[a]
-            .fy
-            .partial_cmp(&clouds.parcels[b].fy)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    for &idx in &order {
-        let p = &clouds.parcels[idx];
+
+    // Screen-cell occupancy: max wetness wins (no alpha-stack rings).
+    let mut mask: std::collections::HashMap<(i32, i32), f32> =
+        std::collections::HashMap::with_capacity(clouds.parcels.len() * 96);
+
+    for p in &clouds.parcels {
         let wet = p.wetness_with(downpour_mass);
-        // Narrow shade/alpha ranges so vapor mass changes don't pulse.
-        let shade = (228.0 - wet * 95.0) as u8;
-        let alpha = (145.0 + wet * 55.0) as u8;
         let r = p.radius() * cell_px;
-        // Highest floor under the silhouette so streaks don't punch
-        // through a slope when the parcel centre sits over a valley.
+        for &x_copy in x_copies {
+            let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px;
+            let sy = origin_y - (p.fy - bedrock_floor_y as f32) * cell_px;
+            if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
+                continue;
+            }
+            stamp_pixel_cloud_mask(&mut mask, sx, sy, r, wet, p.shape_seed, p.deform, cell_px);
+        }
+    }
+
+    // Paint the union once. Lighten only the top silhouette edge — no
+    // circular hilite lobes (those read as holes against the sky).
+    for (&(ix, iy), &wet) in &mask {
+        let shade = (228.0 - wet * 95.0) as u8;
+        let alpha = (190.0 + wet * 50.0).min(235.0) as u8;
+        let top_edge = !mask.contains_key(&(ix, iy - 1));
+        let color = if top_edge {
+            Color::from_rgba(
+                shade.saturating_add(22),
+                shade.saturating_add(22),
+                shade.saturating_add(28),
+                alpha,
+            )
+        } else {
+            Color::from_rgba(shade, shade, shade.saturating_add(6), alpha)
+        };
+        draw_rectangle(
+            ix as f32 * cell_px,
+            iy as f32 * cell_px,
+            cell_px,
+            cell_px,
+            color,
+        );
+    }
+
+    // Cosmetic precip under each raining parcel (physics is separate).
+    for p in &clouds.parcels {
+        if !p.raining {
+            continue;
+        }
+        let wet = p.wetness_with(downpour_mass);
+        let r = p.radius() * cell_px;
         let r_cells = p.radius();
         let floor = [-0.85_f32, -0.4, 0.0, 0.4, 0.85]
             .iter()
             .map(|t| cloud_floor_y(world, wind, p.fx + t * r_cells))
             .fold(f32::NEG_INFINITY, f32::max);
         let ground_sy = origin_y - (floor - bedrock_floor_y as f32) * cell_px;
-        // Flake vs streak from air temp at the parcel, not the ground.
         let as_snow = snowing(p.fx, p.fy);
         for &x_copy in x_copies {
             let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px;
@@ -247,13 +355,10 @@ fn draw_clouds(
             if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
                 continue;
             }
-            draw_cartoon_cloud(sx, sy, r, shade, alpha, p.shape_seed, p.deform);
-            if p.raining {
-                if as_snow {
-                    draw_falling_snow(sx, sy, r, ground_sy, wet, sw, sh);
-                } else {
-                    draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh);
-                }
+            if as_snow {
+                draw_falling_snow(sx, sy, r, ground_sy, wet, sw, sh, cell_px);
+            } else {
+                draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh, cell_px);
             }
         }
     }
@@ -268,6 +373,7 @@ fn draw_falling_rain(
     wetness: f32,
     sw: f32,
     sh: f32,
+    cell_px: f32,
 ) {
     let t = get_time() as f32;
     let top = sy + r * 0.35;
@@ -276,24 +382,24 @@ fn draw_falling_rain(
     let right = (sx + r * 0.85).min(sw + 12.0);
     let band = (right - left).max(1.0);
     let n = ((band / 7.0) * (0.7 + wetness)).ceil().clamp(10.0, 48.0) as usize;
-    let drop_len = 10.0 + wetness * 6.0;
+    let drop_len = (2.0 + wetness).ceil().clamp(2.0, 4.0) * cell_px;
     let fall_speed = 380.0 + wetness * 160.0;
     let cycle = (bottom - top + drop_len).max(drop_len + 1.0);
     for i in 0..n {
         let seed = i as f32;
-        let x = left + ((seed * 97.371) % band);
+        let x = ((left + ((seed * 97.371) % band)) / cell_px).floor() * cell_px;
         let phase = (seed * 0.6180339) % 1.0;
         let y = top + ((t * fall_speed + phase * cycle) % cycle) - drop_len;
         if y + drop_len < top || y > bottom {
             continue;
         }
         let alpha = (100.0 + wetness * 50.0) as u8;
-        draw_line(
+        // Blocky rain streak (1 cell wide).
+        draw_rectangle(
             x,
             y,
-            x - 2.5,
-            y + drop_len,
-            1.15,
+            cell_px,
+            drop_len,
             Color::from_rgba(195, 215, 240, alpha),
         );
     }
@@ -308,6 +414,7 @@ fn draw_falling_snow(
     wetness: f32,
     sw: f32,
     sh: f32,
+    cell_px: f32,
 ) {
     let t = get_time() as f32;
     let top = sy + r * 0.35;
@@ -318,13 +425,13 @@ fn draw_falling_snow(
     let n = ((band / 9.0) * (0.65 + wetness * 0.85))
         .ceil()
         .clamp(8.0, 40.0) as usize;
-    let flake = 2.2 + wetness * 1.4;
+    let flake = cell_px;
     let fall_speed = 95.0 + wetness * 55.0;
     let cycle = (bottom - top + flake * 4.0).max(flake * 4.0 + 1.0);
     for i in 0..n {
         let seed = i as f32;
         let drift = ((t * 18.0 + seed * 11.3).sin()) * 6.0;
-        let x = left + ((seed * 97.371) % band) + drift;
+        let x = ((left + ((seed * 97.371) % band) + drift) / cell_px).floor() * cell_px;
         let phase = (seed * 0.6180339) % 1.0;
         let y = top + ((t * fall_speed + phase * cycle) % cycle) - flake;
         if y + flake < top || y > bottom {
@@ -332,75 +439,105 @@ fn draw_falling_snow(
         }
         let alpha = (130.0 + wetness * 60.0) as u8;
         let c = Color::from_rgba(235, 242, 255, alpha);
-        // Tiny plus / diamond flake.
-        draw_line(x - flake, y, x + flake, y, 1.1, c);
-        draw_line(x, y - flake, x, y + flake, 1.1, c);
-        draw_line(x - flake * 0.7, y - flake * 0.7, x + flake * 0.7, y + flake * 0.7, 0.9, c);
+        // 2×2 block flake.
+        draw_rectangle(x, y, flake, flake, c);
+        if wetness > 0.45 {
+            draw_rectangle(x + flake, y, flake, flake, c);
+        }
     }
 }
 
-/// Multi-bump cartoon cloud with per-parcel silhouette + soft ridge squash.
-fn draw_cartoon_cloud(
+/// Soft lobe offsets for one parcel silhouette (normalized cloud space).
+fn cloud_lobe_layout(shape_seed: u32, deform: f32) -> (f32, f32, Vec<(f32, f32, f32)>) {
+    let d = deform.clamp(0.0, 1.0);
+    let sx = 1.0 + d * 0.22;
+    let sy = 1.0 - d * 0.28;
+    let s = |n: u32| {
+        ((shape_seed
+            .wrapping_mul(0x9E37_79B9)
+            .wrapping_add(n.wrapping_mul(0x85EB_CA6B)))
+            >> 8) as f32
+            / 16_777_216.0
+    };
+    let jx = |n: u32| (s(n) - 0.5) * 0.28;
+    let jr = |n: u32| 0.88 + s(n.wrapping_add(31)) * 0.28;
+    let mut lobes: Vec<(f32, f32, f32)> = vec![
+        (0.0, 0.02, 0.95 * jr(1)),
+        (-0.72, 0.08, 0.70 * jr(2)),
+        (0.78, 0.06, 0.68 * jr(3)),
+        (-0.32 + jx(4) * 0.4, -0.42, 0.60 * jr(4)),
+        (0.28 + jx(5) * 0.4, -0.52, 0.66 * jr(5)),
+    ];
+    if shape_seed & 1 == 0 {
+        lobes.push((0.82, -0.22, 0.52 * jr(6)));
+    }
+    if shape_seed & 2 == 0 {
+        lobes.push((-0.88, -0.12, 0.48 * jr(7)));
+    }
+    if shape_seed % 5 < 3 {
+        lobes.push((jx(8) * 0.5, -0.68, 0.42 * jr(8)));
+    }
+    (sx, sy, lobes)
+}
+
+/// Stamp one parcel's lobe mask into the shared sky occupancy map.
+fn stamp_pixel_cloud_mask(
+    mask: &mut std::collections::HashMap<(i32, i32), f32>,
     cx: f32,
     cy: f32,
     r: f32,
-    shade: u8,
-    alpha: u8,
+    wet: f32,
     shape_seed: u32,
     deform: f32,
+    cell_px: f32,
 ) {
-    let body = Color::from_rgba(shade, shade, shade.saturating_add(6), alpha);
-    let hilite = Color::from_rgba(
-        shade.saturating_add(25),
-        shade.saturating_add(25),
-        shade.saturating_add(30),
-        (alpha as f32 * 0.55) as u8,
-    );
-    let d = deform.clamp(0.0, 1.0);
-    // Soft deform: widen and flatten when scraping a ridge.
-    let sx = 1.0 + d * 0.22;
-    let sy = 1.0 - d * 0.28;
-    let s = |n: u32| ((shape_seed.wrapping_mul(0x9E37_79B9).wrapping_add(n * 0x85EB_CA6B)) >> 8) as f32
-        / 16_777_216.0;
-    let jx = |n: u32| (s(n) - 0.5) * 0.28;
-    let jy = |n: u32| (s(n.wrapping_add(17)) - 0.5) * 0.22;
-    let jr = |n: u32| 0.88 + s(n.wrapping_add(31)) * 0.28;
-    let puff = |ox: f32, oy: f32, rr: f32, n: u32| {
-        draw_circle(
-            cx + (ox + jx(n)) * r * sx,
-            cy + (oy + jy(n)) * r * sy,
-            rr * jr(n) * r * ((sx + sy) * 0.5),
-            body,
-        );
+    if r <= 0.0 || cell_px <= 0.0 {
+        return;
+    }
+    let (sx, sy, lobes) = cloud_lobe_layout(shape_seed, deform);
+    let jx1 = {
+        let s = ((shape_seed.wrapping_mul(0x9E37_79B9).wrapping_add(0x85EB_CA6B)) >> 8) as f32
+            / 16_777_216.0;
+        (s - 0.5) * 0.28
     };
-    // Body + side puffs (layout varies with seed).
-    puff(0.0, 0.02, 0.95, 1);
-    puff(-0.72, 0.08, 0.70, 2);
-    puff(0.78, 0.06, 0.68, 3);
-    // Upper lobes — count/bias from seed so silhouettes differ.
-    puff(-0.32 + jx(4) * 0.4, -0.42, 0.60, 4);
-    puff(0.28 + jx(5) * 0.4, -0.52, 0.66, 5);
-    if shape_seed & 1 == 0 {
-        puff(0.82, -0.22, 0.52, 6);
+    let half_w = r * sx * 1.35;
+    let half_h = r * sy * 1.15;
+    let min_x = ((cx - half_w) / cell_px).floor() as i32;
+    let max_x = ((cx + half_w) / cell_px).ceil() as i32;
+    let min_y = ((cy - half_h) / cell_px).floor() as i32;
+    let max_y = ((cy + half_h) / cell_px).ceil() as i32;
+    let inv_rx = 1.0 / (r * sx).max(1e-3);
+    let inv_ry = 1.0 / (r * sy).max(1e-3);
+
+    for iy in min_y..=max_y {
+        for ix in min_x..=max_x {
+            let px = (ix as f32 + 0.5) * cell_px;
+            let py = (iy as f32 + 0.5) * cell_px;
+            let nx = (px - cx) * inv_rx;
+            let ny = (py - cy) * inv_ry;
+            let mut inside = false;
+            for &(ox, oy, rr) in &lobes {
+                let dx = nx - (ox + jx1 * 0.05);
+                let dy = ny - oy;
+                if dx * dx + dy * dy <= rr * rr {
+                    inside = true;
+                    break;
+                }
+            }
+            if !inside {
+                continue;
+            }
+            mask.entry((ix, iy))
+                .and_modify(|w| *w = (*w).max(wet))
+                .or_insert(wet);
+        }
     }
-    if shape_seed & 2 == 0 {
-        puff(-0.88, -0.12, 0.48, 7);
-    }
-    if shape_seed % 5 < 3 {
-        puff(jx(8) * 0.5, -0.68, 0.42, 8);
-    }
-    // Soft highlight on the sun-facing top.
-    draw_circle(
-        cx + (0.12 + jx(9) * 0.3) * r * sx,
-        cy + (-0.48 + jy(9) * 0.2) * r * sy,
-        r * 0.32 * jr(9),
-        hilite,
-    );
 }
 
 #[cfg(test)]
 mod overlay_tests {
-    use super::humidity_haze_alpha;
+    use super::{humidity_haze_alpha, stamp_pixel_cloud_mask};
+    use std::collections::HashMap;
 
     #[test]
     fn haze_ignores_thin_vapor_and_stays_soft() {
@@ -408,6 +545,25 @@ mod overlay_tests {
         assert_eq!(humidity_haze_alpha(5.0, 100.0), 0); // below 12% floor
         assert!(humidity_haze_alpha(50.0, 100.0) >= 18);
         assert!(humidity_haze_alpha(100.0, 100.0) <= 70);
+    }
+
+    #[test]
+    fn overlapping_parcels_union_into_one_mask() {
+        let cell = 3.0_f32;
+        let mut mask = HashMap::new();
+        // Two nearby parcels — silhouettes overlap in screen space.
+        stamp_pixel_cloud_mask(&mut mask, 100.0, 80.0, 36.0, 0.4, 1, 0.0, cell);
+        let alone = mask.len();
+        stamp_pixel_cloud_mask(&mut mask, 118.0, 82.0, 36.0, 0.9, 2, 0.0, cell);
+        assert!(alone > 20, "first parcel should stamp a real footprint");
+        assert!(
+            mask.len() < alone * 2,
+            "overlap must share cells (alone={alone} union={})",
+            mask.len()
+        );
+        // Max wetness wins in the overlap (no additive alpha stack).
+        let wet_max = mask.values().cloned().fold(0.0_f32, f32::max);
+        assert!((wet_max - 0.9).abs() < 1e-5);
     }
 }
 
@@ -417,6 +573,7 @@ async fn main() {
     let mut scene = Scene::new(params);
     let mut settings = SimSettings::new(&scene.params);
     settings.apply_material_overrides(&mut scene.world);
+    let mut spore_fx = SporeFx::new();
     let mut paused = false;
     // Climatic drizzle is physics-only by default — sky pixels hide thin
     // wet Air so the old rain-streak look doesn't paint over the sky.
@@ -429,10 +586,12 @@ async fn main() {
     let mut humidity_overlay = false;
     let mut clouds_on = true;
     let mut temp_overlay = false;
+    let mut mycelium_overlay = false;
     let mut geotech_mode = GeotechOverlayMode::Off;
     let mut show_hud = true;
     let mut editor = CreatureEditor::default();
     let mut terrain = TerrainEditor::default();
+    let mut creature_list = CreatureList::default();
     let mut quit_dialog = QuitDialog::default();
     let mut inspect: Option<(i32, i32)> = None;
     let mut cam_x = 0.0f32;
@@ -481,6 +640,12 @@ async fn main() {
             } else if terrain.open {
                 terrain.open = false;
                 paused = terrain.was_paused;
+                // Mid-air F3 paint can lose its dirty wake; re-dirty
+                // unsupported sand/Organic so the next tick seats them.
+                wake_unsupported_grains(&mut scene.world);
+                wake_unstable_slopes(&mut scene.world);
+            } else if creature_list.open {
+                creature_list.open = false;
             } else if settings.open {
                 settings.open = false;
             } else {
@@ -493,6 +658,9 @@ async fn main() {
         if !quit_dialog.open && is_key_pressed(KeyCode::Tab) && !editor.open && !terrain.open {
             settings.open = !settings.open;
         }
+        if !quit_dialog.open && is_key_pressed(KeyCode::F4) {
+            creature_list.toggle();
+        }
         // Editor is F2 only — `C` is condensation in the voxel demo
         // (column-GVSE can use C/F2 because it has no condensation toggle).
         if !quit_dialog.open && is_key_pressed(KeyCode::F2) {
@@ -501,6 +669,8 @@ async fn main() {
             if opening {
                 settings.open = false;
                 terrain.open = false;
+                // F4 list panel overlaps the paint canvas — close it.
+                creature_list.open = false;
                 paused = true;
             } else {
                 paused = editor.was_paused;
@@ -516,6 +686,8 @@ async fn main() {
                 paused = true;
             } else {
                 paused = terrain.was_paused;
+                wake_unsupported_grains(&mut scene.world);
+                wake_unstable_slopes(&mut scene.world);
             }
         }
         if !quit_dialog.open && editor.open {
@@ -593,7 +765,13 @@ async fn main() {
 
         if (!editor.open || editor.spawn_picker) && !settings.open && !terrain.open {
             if is_key_pressed(KeyCode::Space) {
+                let was = paused;
                 paused = !paused;
+                if was && !paused {
+                    // Same stranded-grain wake as F3 close.
+                    wake_unsupported_grains(&mut scene.world);
+                    wake_unstable_slopes(&mut scene.world);
+                }
             }
             if is_key_pressed(KeyCode::R) {
                 let new_seed = scene.params.seed.wrapping_add(1);
@@ -624,6 +802,9 @@ async fn main() {
             }
             if is_key_pressed(KeyCode::T) {
                 temp_overlay = !temp_overlay;
+            }
+            if is_key_pressed(KeyCode::M) {
+                mycelium_overlay = !mycelium_overlay;
             }
             if is_key_pressed(KeyCode::G) {
                 geotech_mode = geotech_mode.next();
@@ -660,13 +841,16 @@ async fn main() {
 
         // Sync live settings into scene subsystems.
         scene.wind.climate_vx = settings.wind_vx;
+        scene.wind.variance = settings.wind_variance;
+        let wind_vx = scene.wind.effective_vx(scene.world.tick);
+        let wind_vy = scene.wind.effective_vy(scene.world.tick);
         scene.temperature.config = settings.temp;
         scene.temperature.climate = settings.climate;
         settings.apply_pop_caps(&mut scene.organisms);
         settings.oro.seed = scene.params.seed;
         settings.oro.width_cols = scene.params.width_cols;
         settings.oro.sea_level_y = scene.params.sea_level_y;
-        settings.oro.wind_sign = if settings.wind_vx >= 0.0 { 1 } else { -1 };
+        settings.oro.wind_sign = if wind_vx >= 0.0 { 1 } else { -1 };
 
         if settings.apply_genes_to_living {
             settings.apply_genes_to_living = false;
@@ -681,9 +865,14 @@ async fn main() {
             }
         }
 
-        // Physics (frozen while paint editors / quit dialog are open).
-        let sim_paused =
-            paused || (editor.open && !editor.spawn_picker) || terrain.open || quit_dialog.open;
+        // Physics (frozen while paint editors / Tab settings / quit are open).
+        // Tab must pause too — a busy tick (raft drift, settle) otherwise
+        // starves the frame loop and the settings UI feels dead.
+        let sim_paused = paused
+            || settings.open
+            || (editor.open && !editor.spawn_picker)
+            || terrain.open
+            || quit_dialog.open;
         if !sim_paused {
             if rain_on {
                 apply_rain_with_temp(
@@ -703,9 +892,7 @@ async fn main() {
             }
             // Vapor drifts with the wind, then coagulates into cloud
             // parcels that rain hard when heavy enough.
-            scene
-                .humidity
-                .advect(scene.wind.climate_vx, scene.wind.climate_vy);
+            scene.humidity.advect(wind_vx, wind_vy);
             let tick_no = scene.world.tick;
             scene.clouds.step_with_precip(
                 &mut scene.world,
@@ -751,7 +938,30 @@ async fn main() {
                 &settings.failure,
                 Some(&scene.geotech),
                 rooted.as_ref(),
+                Some(&settings.grain),
+                Some(&settings.fungi),
             );
+            // Crude CO₂ buckets: surface Organic oxidation + atm↔lake exchange.
+            step_carbon_budget(&mut scene.carbon, &mut scene.world, &settings.carbon);
+            // Floating Organic drifts with the wind; root-bound mats sail plants.
+            if organisms_on {
+                sail_plants_on_wind_rafts_cfg(
+                    &mut scene.world,
+                    &mut scene.organisms.atoms,
+                    wind_vx,
+                    scene.wind.tile_cols,
+                    &settings.grain,
+                );
+            } else {
+                let _ = wk_voxel::drift_floating_organic_cfg(
+                    &mut scene.world,
+                    wind_vx,
+                    scene.wind.tile_cols,
+                    None,
+                    None,
+                    &settings.grain,
+                );
+            }
             // Bedload / bank transport after water has moved this tick.
             apply_flow_erosion_bound(&mut scene.world, &settings.grain, rooted.as_ref());
             if geotech_due {
@@ -793,16 +1003,31 @@ async fn main() {
             apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
             if organisms_on {
                 let tick_no = scene.world.tick;
-                scene
-                    .organisms
-                    .step_with_climate(
-                        &mut scene.world,
-                        tick_no,
-                        &settings.climate,
-                        Some(&mut scene.humidity),
-                    );
+                let releases = scene.organisms.step_with_carbon(
+                    &mut scene.world,
+                    tick_no,
+                    &settings.climate,
+                    Some(&mut scene.humidity),
+                    wind_vx,
+                    Some(&scene.temperature),
+                    Some(&mut scene.carbon),
+                    &settings.carbon,
+                );
+                spore_fx.burst_all(&releases, wind_vx);
             }
         }
+
+        // Spore puffs keep drifting while paused so the wind trail stays readable.
+        let draw_wind_vx = scene.wind.effective_vx(scene.world.tick);
+        spore_fx.update(
+            get_frame_time(),
+            draw_wind_vx,
+            if scene.params.wrap_x {
+                Some(scene.params.width_cols)
+            } else {
+                None
+            },
+        );
 
         // Render.
         let sw = screen_width();
@@ -831,11 +1056,20 @@ async fn main() {
         // Screen +y is down. World +y is up. Flip when placing rows.
         let origin_y = (sh + world_h_px) * 0.5 + cam_y;
 
+        // Creature list (F4) — before world clicks so rows steal the mouse.
+        if !quit_dialog.open {
+            if let Some(at) = creature_list.handle_input(&scene.organisms) {
+                inspect = Some(at);
+                show_hud = true;
+            }
+        }
+
         // World clicks: terrain paint, spawn picker, or block inspector.
         let (mx, my) = mouse_position();
         if !quit_dialog.open
             && terrain.open
             && !terrain.hits_panel(mx, my)
+            && !creature_list.hits_panel(mx, my)
             && !terrain.blocks_world_paint()
         {
             let paint = is_mouse_button_down(MouseButton::Left);
@@ -866,6 +1100,7 @@ async fn main() {
             && (!editor.open || editor.spawn_picker)
             && !terrain.open
             && !settings.open
+            && !creature_list.hits_panel(mx, my)
         {
             if let Some((gx, gy)) = screen_to_world(
                 mx,
@@ -879,6 +1114,32 @@ async fn main() {
                 scene.params.wrap_x,
             ) {
                 if editor.spawn_picker {
+                    // Fungi: plant as mycelium infection only — no visible
+                    // fruiting body until a rich cream network emerges.
+                    if editor.blueprint.is_valid_fungus() {
+                        let body = editor.blueprint.modules_relative_to_nucleus();
+                        let genome = editor.blueprint.genome;
+                        match wk_voxel::infect_mycelium_with_lineage(
+                            &mut scene.world,
+                            gx,
+                            gy,
+                            Some((genome, body)),
+                        ) {
+                            Some((ox, oy)) => {
+                                editor.status = format!(
+                                    "Inoculated mycelium at ({ox},{oy}) — stalk emerges later matching this design"
+                                );
+                                editor.spawn_picker = false;
+                                editor.open = false;
+                                paused = editor.was_paused;
+                                inspect = Some((ox, oy));
+                            }
+                            None => {
+                                editor.status =
+                                    "Inoculate failed — click Organic (or litter above it)".into();
+                            }
+                        }
+                    } else {
                     let body = editor.blueprint.modules_relative_to_nucleus();
                     // Tab plant-gene knobs apply when the body has land/fungus
                     // tissues; pure plankton keeps painted blueprint genes.
@@ -893,7 +1154,20 @@ async fn main() {
                     });
                     let g = if has_land_tissue {
                         let mut g = settings.plant_genes.to_genome();
-                        g.buoyancy_bias = editor.blueprint.genome.buoyancy_bias;
+                        let bp = &editor.blueprint.genome;
+                        g.buoyancy_bias = bp.buoyancy_bias;
+                        // Stemless ribbons (seaweed) keep template alloc /
+                        // shade knobs — Tab plant defaults assume a trunk.
+                        let stemless = !body
+                            .iter()
+                            .any(|(_, _, m)| *m == wk_voxel::ModuleId::Stem);
+                        if stemless {
+                            g.alloc_stem = bp.alloc_stem;
+                            g.alloc_leaf = bp.alloc_leaf;
+                            g.alloc_root = bp.alloc_root;
+                            g.root_depth_bias = bp.root_depth_bias;
+                            g.shade_efficiency = bp.shade_efficiency;
+                        }
                         // Don't invent tissues the painted body never had.
                         wk_voxel::sync_alloc_to_body(&mut g, &body);
                         g
@@ -935,6 +1209,7 @@ async fn main() {
                             editor.status = "Spawn failed — need a Nucleus on the canvas".into();
                         }
                     }
+                    }
                 } else {
                     inspect = Some((gx, gy));
                 }
@@ -942,8 +1217,20 @@ async fn main() {
         }
 
         // Draw the ring once, plus ±1 world-width copies so the seam
-        // never shows a gap while panning.
+        // never shows a gap while panning. Y range is pre-clamped to
+        // the visible frustum so we don't iterate hidden sky rows.
         let x_copies: &[i32] = if scene.params.wrap_x { &[-1, 0, 1] } else { &[0] };
+        // Solve sy = origin_y - (y - bedrock_floor_y) * cell_px for the
+        // visible strip. draw_rectangle uses (sx, sy - cell_px) as top-
+        // left, so a cell is visible when [sy - cell_px, sy] ⊂ [0, sh].
+        let y_max_vis = {
+            let y = scene.params.bedrock_floor_y as f32 + (origin_y + cell_px) / cell_px;
+            (y.ceil() as i32).min(scene.params.sky_ceiling_y)
+        };
+        let y_min_vis = {
+            let y = scene.params.bedrock_floor_y as f32 + (origin_y - sh) / cell_px;
+            (y.floor() as i32).max(scene.params.bedrock_floor_y)
+        };
         for &x_copy in x_copies {
             let x_shift = x_copy * scene.params.width_cols;
             for x in 0..scene.params.width_cols {
@@ -951,8 +1238,9 @@ async fn main() {
                 if sx + cell_px < 0.0 || sx > sw {
                     continue;
                 }
-                for y in scene.params.bedrock_floor_y..scene.params.sky_ceiling_y {
+                for y in y_min_vis..y_max_vis {
                     let sy = origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
+                    // Guard for the rounding slop on the frustum bounds.
                     if sy + cell_px < 0.0 || sy > sh {
                         continue;
                     }
@@ -963,11 +1251,6 @@ async fn main() {
                     // puddles). Mid-air sat stays invisible — falling rain
                     // is the cosmetic streak under raining clouds.
                     if cell.material == wk_material::MaterialId::Air {
-                        // Any non-zero fill (even 1/255) must paint — the
-                        // palette maps that to a faint blue-white film so
-                        // trickle / leveling cells stay visible. Mid-air
-                        // sat stays invisible; falling rain is the
-                        // cosmetic streak under raining clouds.
                         if cell.sat.is_empty() {
                             continue;
                         }
@@ -1072,6 +1355,54 @@ async fn main() {
             }
         }
 
+        // Mycelium strain overlay: bright per-network colors by cream intensity.
+        if mycelium_overlay {
+            for &x_copy in x_copies {
+                let x_shift = x_copy * scene.params.width_cols;
+                for x in 0..scene.params.width_cols {
+                    let sx = origin_x + (x + x_shift) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw {
+                        continue;
+                    }
+                    for y in y_min_vis..y_max_vis {
+                        let sy =
+                            origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
+                        if sy + cell_px < 0.0 || sy > sh {
+                            continue;
+                        }
+                        let Some(cell) = scene.world.get_cell(x, y) else {
+                            continue;
+                        };
+                        let myc = cell.mycelium();
+                        if myc == 0 {
+                            continue;
+                        }
+                        let shares = wk_voxel::mycelium_shares_at(&scene.world, x, y);
+                        let rgba = if shares.is_empty() {
+                            // Legacy unowned cream — stable hash color.
+                            let mut h = (x as u32).wrapping_mul(0x9E37_79B9)
+                                ^ (y as u32).wrapping_mul(0x85EB_CA6B);
+                            h ^= h >> 16;
+                            wk_voxel::mycelium_shares_overlay_rgba(&[(h | 1, myc)], myc)
+                        } else {
+                            // Multi-strain cells blend by share weight.
+                            wk_voxel::mycelium_shares_overlay_rgba(shares, myc)
+                        };
+                        if rgba[3] == 0 {
+                            continue;
+                        }
+                        draw_rectangle(
+                            sx,
+                            sy - cell_px,
+                            cell_px,
+                            cell_px,
+                            Color::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
+                        );
+                    }
+                }
+            }
+        }
+
         // Geotech overlay: G cycles shear → σᵥ → wet → off.
         if geotech_mode != GeotechOverlayMode::Off {
             match geotech_mode {
@@ -1146,24 +1477,44 @@ async fn main() {
             }
         }
 
-        // Set A organisms: 1×1 module pixels (Nucleus black, Photosystem
-        // green) — same palette as column-GVSE, always drawn when present.
-        for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list() {
-            for &x_copy in x_copies {
-                let sx = origin_x + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
-                let sy = origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;
-                if sx + cell_px < 0.0 || sx > sw || sy < 0.0 || sy - cell_px > sh {
-                    continue;
+        // Organisms: skip the shaded draw while the F2 canvas or Tab
+        // settings cover interaction (pose + Beer–Lambert was starving
+        // menu input on dense meadows). Spawn-picker keeps the world
+        // visible, so draw then.
+        let editor_covers_world = editor.open && !editor.spawn_picker;
+        if !editor_covers_world && !settings.open {
+            for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list(
+                &scene.world,
+                scene.world.tick,
+                draw_wind_vx,
+            ) {
+                for &x_copy in x_copies {
+                    let sx = origin_x + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
+                    let sy = origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw || sy < 0.0 || sy - cell_px > sh {
+                        continue;
+                    }
+                    draw_rectangle(
+                        sx,
+                        sy - cell_px,
+                        cell_px,
+                        cell_px,
+                        Color::from_rgba(r, g, b, 255),
+                    );
                 }
-                draw_rectangle(
-                    sx,
-                    sy - cell_px,
-                    cell_px,
-                    cell_px,
-                    Color::from_rgba(r, g, b, 255),
-                );
             }
         }
+
+        spore_fx.draw(
+            origin_x,
+            origin_y,
+            cell_px,
+            scene.params.bedrock_floor_y,
+            scene.params.width_cols,
+            scene.params.wrap_x,
+            sw,
+            sh,
+        );
 
         if let Some((gx, gy)) = inspect {
             if show_hud {
@@ -1196,6 +1547,7 @@ async fn main() {
                     &scene.temperature,
                     &scene.geotech,
                     &scene.world,
+                    &scene.organisms.atoms,
                     org,
                     corpse,
                     sw,
@@ -1206,7 +1558,8 @@ async fn main() {
         // Creature / terrain editor overlays (paint UI, or spawn banner).
         editor.draw();
         terrain.draw();
-        settings.draw(&mut scene.world);
+        creature_list.draw(&scene.organisms);
+        settings.draw(&mut scene.world, &scene.carbon);
         quit_dialog.draw();
 
         // HUD chrome (info + hotkeys + inspector) toggled with F1.
@@ -1224,7 +1577,7 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} wind={:.2} creatures={}/{} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
@@ -1235,14 +1588,22 @@ async fn main() {
                 scene.clouds.len(),
                 scene.clouds.total_mass(),
                 scene.humidity.total_mass(),
-                scene.wind.climate_vx,
+                scene.carbon.atmosphere,
+                scene.carbon.dissolved,
+                scene.world.spore_bank.len(),
+                draw_wind_vx,
                 scene.organisms.len(),
                 scene.organisms.atom_cap(),
+                {
+                    let (p, f, a) = scene.organisms.habit_counts();
+                    format!("p={p} f={f} a={a}")
+                },
+                scene.organisms.corpse_count(),
                 if sim_paused { "[paused]" } else { "" }
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/H/G|F1 HUD|F2 creat|F3 terra|F5/F9 save|Esc quit",
+                "Tab|Space|R|W/C/E/K/O|I|N/T/H/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

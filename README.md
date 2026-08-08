@@ -43,12 +43,14 @@ Toolchain is pinned in `rust-toolchain.toml` (1.83). License: `LICENSE-MIT`.
 
 ## Controls (voxel app)
 
-- **Tab** — settings (geotech, climate, materials, …)
+- **Tab** — settings (geotech, climate, materials, life, …)
 - **Space** — pause
 - **R** — regenerate world
-- **G** — cycle geotech overlay (shear → σᵥ → wet → off)
+- **W / C / E / K** — wind / condensation / evaporation / karst overlays
 - **H / T / N** — humidity / temperature / clouds
-- **F1** — HUD chrome · **F2** creature editor · **F3** terrain editor
+- **M** — mycelium strain overlay · **G** — geotech (shear → σᵥ → wet → off)
+- **I** — phase-change master (freeze / thaw / snow)
+- **F1** — HUD chrome · **F2** creature editor · **F3** terrain editor · **F4** creature list
 - **F5 / F9** — save / load
 - **Click** — block inspector · arrows — pan
 

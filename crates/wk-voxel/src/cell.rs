@@ -44,6 +44,10 @@ impl Sat {
 /// Reserved per-cell flags. Kept as an opaque `u8` bitfield today so
 /// future rules (frozen, sediment-carrying, momentum-carrying) can
 /// slot in without changing `Cell`'s memory shape.
+///
+/// Mycelium colonization intensity lives in [`Cell::_pad`] on porous
+/// hosts ([`MaterialId::Organic`], Soil, Sand, Clay, loose rock) —
+/// 0 = clean, 255 = fully threaded. Not in these flag bits.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct CellFlags(pub u8);
 
@@ -54,6 +58,9 @@ impl CellFlags {
     /// Soft sediment already pulsed a compaction exudation this cycle.
     /// Cleared when pore sat rises again (re-wetting).
     pub const COMPACTED: CellFlags = CellFlags(0b0000_0010);
+    /// Fully soaked Organic that has waterlogged — no longer floats;
+    /// sinks through standing water like a dense grain.
+    pub const WATERLOGGED: CellFlags = CellFlags(0b0000_0100);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -78,10 +85,9 @@ pub struct Cell {
     pub material: MaterialId,
     pub sat: Sat,
     pub flags: CellFlags,
-    /// Reserved for future use (temperature quantile, sediment
-    /// carrier, etc.). Baked into every save via postcard — widening
-    /// `Cell` past 4 bytes bumps [`crate::SIM_SCHEMA_VERSION`] and
-    /// needs a migration (see `save.rs`).
+    /// Mycelium thread intensity (0..=255) on porous hosts
+    /// ([`hosts_mycelium`]). Cleared on material change / non-hosts.
+    /// Widening `Cell` past 4 bytes bumps [`crate::SIM_SCHEMA_VERSION`].
     pub _pad: u8,
 }
 
@@ -110,6 +116,32 @@ impl Cell {
         }
     }
 
+    /// Mycelium colonization on a porous host (0 = none, 255 = fully threaded).
+    #[inline]
+    pub fn mycelium(self) -> u8 {
+        if hosts_mycelium(self.material) {
+            self._pad
+        } else {
+            0
+        }
+    }
+
+    /// Set mycelium intensity; retained only on porous hosts.
+    #[inline]
+    pub fn set_mycelium(&mut self, intensity: u8) {
+        self._pad = if hosts_mycelium(self.material) {
+            intensity
+        } else {
+            0
+        };
+    }
+
+    /// True when Organic has waterlogged and should sink through lakes.
+    #[inline]
+    pub fn is_waterlogged_organic(self) -> bool {
+        self.material == MaterialId::Organic && self.flags.contains(CellFlags::WATERLOGGED)
+    }
+
     /// Convenience: an Air cell already fully saturated with water.
     /// Rules treat this the same as any other cell with `sat == FULL`
     /// — "fully waterlogged air" is our stand-in for a free-water
@@ -124,13 +156,39 @@ impl Cell {
     }
 }
 
+/// Materials that can carry a mycelium cream field in `_pad`.
+///
+/// Organic is the food substrate; Soil / Sand / Clay / loose rock are
+/// mineral corridors (harder to thread). Competent Stone is allowed only
+/// as a rare crack path (see fungi spread costs). Bedrock refuses.
+#[inline]
+pub fn hosts_mycelium(material: MaterialId) -> bool {
+    matches!(
+        material,
+        MaterialId::Organic
+            | MaterialId::Soil
+            | MaterialId::Sand
+            | MaterialId::Clay
+            | MaterialId::LooseRock
+            | MaterialId::LooseLimestone
+            | MaterialId::Stone
+            | MaterialId::Limestone
+    )
+}
+
 /// True for dense granular materials that fall under gravity through
-/// Air (including water-filled Air). Sand / Gravel / Clay / LooseRock.
-/// Snow / Ice use [`falls_through_empty_air`] instead (float on water).
+/// Air (including water-filled Air). Sand / Gravel / Clay / LooseRock /
+/// LooseLimestone. Snow / Ice use [`falls_through_empty_air`] instead
+/// (float on water).
 pub fn is_grain(material: MaterialId) -> bool {
     matches!(
         material,
-        MaterialId::Sand | MaterialId::Gravel | MaterialId::Clay | MaterialId::LooseRock
+        MaterialId::Sand
+            | MaterialId::Gravel
+            | MaterialId::Clay
+            | MaterialId::Soil
+            | MaterialId::LooseRock
+            | MaterialId::LooseLimestone
     )
 }
 
@@ -155,6 +213,10 @@ pub fn is_repose_grain(material: MaterialId) -> bool {
 /// Dense grains soft enough for flow bedload / bank undercut.
 /// Matches the column sim's `erosion_resistance < 150` cut (excludes
 /// Stone / Limestone / Ice). Snow uses repose + phase, not bedload.
+///
+/// **Organic** is not included here — it floats, so bedload uses the
+/// world-aware gate in [`crate::rules::grain`] (grounded / waterlogged
+/// only; floating rafts stay). **Soil** is a dense grain and is included.
 pub fn is_flow_erodible(material: MaterialId) -> bool {
     use wk_material::MaterialRegistry;
     is_grain(material) && MaterialRegistry::erosion_rank(material) < 150
@@ -263,7 +325,9 @@ mod tests {
             MaterialId::Sand,
             MaterialId::Gravel,
             MaterialId::Clay,
+            MaterialId::Soil,
             MaterialId::LooseRock,
+            MaterialId::LooseLimestone,
         ] {
             assert!(is_grain(m), "{m:?} should be granular");
             assert!(is_repose_grain(m), "{m:?} should repose");
@@ -313,7 +377,10 @@ mod tests {
         assert!(is_flow_erodible(MaterialId::Sand));
         assert!(is_flow_erodible(MaterialId::Gravel));
         assert!(is_flow_erodible(MaterialId::Clay));
+        assert!(is_flow_erodible(MaterialId::Soil));
         assert!(is_flow_erodible(MaterialId::LooseRock));
+        assert!(is_flow_erodible(MaterialId::LooseLimestone));
+        assert!(!is_flow_erodible(MaterialId::Organic)); // world-aware gate in grain.rs
         assert!(!is_flow_erodible(MaterialId::Ice));
         assert!(!is_flow_erodible(MaterialId::Snow));
         assert!(!is_flow_erodible(MaterialId::Stone));

@@ -11,6 +11,7 @@
 mod plan;
 mod head;
 mod util;
+pub(crate) use util::hash_prob;
 mod gravity;
 mod water_flow;
 mod spill;
@@ -33,7 +34,16 @@ pub use evap::{apply_evaporation, apply_evaporation_into_humidity, EvapConfig};
 pub use grain::{
     apply_cold_avalanche, apply_cold_avalanche_bound, apply_flow_erosion, apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
-    apply_grain_repose_regions, GrainConfig, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
+    apply_grain_repose_regions, settle_loose_grains, settle_loose_grains_regions,
+    collect_floating_organic_columns, drift_floating_organic, drift_floating_organic_cfg,
+    drift_floating_organic_columns, drift_floating_organic_columns_cfg,
+    punch_through_floating_rafts,
+    rise_and_soak_buoyant_litter, rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter,
+    soak_floating_litter, soak_floating_litter_cfg,
+    wake_grains_for_settle, wake_unsupported_grains, wake_unstable_slopes,
+    GrainConfig, GRAIN_REPOSE_HAZE_MAX, GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES,
+    MYCELIUM_EROSION_BIND,
+    MYCELIUM_RAFT_BIND_MIN, MYCELIUM_REPOSE_STEP_BONUS, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
 pub use gravity::{apply_gravity_fall, apply_gravity_fall_regions};
 pub use karst::{apply_karst_dissolution, KarstConfig};
@@ -45,4 +55,4 @@ pub use tick::{
     tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life, tick_with_perf,
     PerfConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
 };
-pub use water_flow::{apply_water_flow, apply_water_flow_regions};
+pub use water_flow::{apply_water_flow, apply_water_flow_regions, wake_confined_head};

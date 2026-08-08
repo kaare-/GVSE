@@ -9,7 +9,7 @@ use std::collections::HashSet;
 use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
 use crate::grid::World;
 
-use super::grain::{apply_grain_fall_regions, apply_grain_repose_regions};
+use super::grain::{settle_loose_grains_regions, GRAIN_SETTLE_PASSES};
 use super::gravity::apply_gravity_fall_regions;
 use super::seepage::apply_seepage_regions;
 use super::water_flow::apply_water_flow_regions;
@@ -75,8 +75,8 @@ fn active_cell_area(active: &[crate::active::ActiveChunk]) -> usize {
 ///    cells per tick and seek a flat free surface on slopes.
 /// 2. Seepage — water soaks into / through porous solids by head,
 ///    rate-limited by permeability.
-/// 3. Grain fall — granular materials sink into the Air cell below.
-/// 4. Grain repose — diagonal slides when steeper than material repose.
+/// 3. Grain settle — multi-pass fall + repose ([`GRAIN_SETTLE_PASSES`])
+///    so unsupported litter seats in one tick instead of one cell/frame.
 ///
 /// Rain, evaporation, and [`apply_flow_erosion`] are **opt-in**: callers
 /// wire them into their per-frame loop. Scenario tests pass `tick(world)`
@@ -84,8 +84,10 @@ fn active_cell_area(active: &[crate::active::ActiveChunk]) -> usize {
 ///
 /// **Dirty / active chunks.** Each flow substep [`plan_active`]s from
 /// dirty rects (halo + neighbour wake), then [`clear_all_dirty`].
-/// Writes rebuild dirty for the next substep / tick. A fully settled
-/// world plans nothing and the physics passes early-out.
+/// Writes rebuild dirty for the next substep / tick. Seepage + grain
+/// settle prefer post-flow dirty; if water was quiet they reuse the last
+/// non-empty flow halo so F3-painted Organic / sand mid-air still falls.
+/// A fully settled world plans nothing and the physics passes early-out.
 ///
 /// **Checkerboard.** Gravity and grain run four colour sub-passes
 /// (EE → OE → EO → OO); within a colour, regions run on rayon when
@@ -120,17 +122,24 @@ pub fn tick_with_configs_and_geotech(
     failure: &crate::failure::FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
 ) {
-    tick_with_life(world, perf, failure, geotech, None);
+    tick_with_life(world, perf, failure, geotech, None, None, None);
 }
 
 /// [`tick_with_configs_and_geotech`] plus optional living-root cells for
 /// grain repose binding (Set D plants / legacy E15 intent).
+///
+/// `grain` supplies floating-Organic waterlog rate (Tab → Grain / sediment);
+/// `None` uses [`super::grain::GrainConfig::default`].
+/// `fungi` supplies mycelium compost knobs (Tab → Fungi / carbon);
+/// `None` uses [`crate::fungi::FungiConfig::default`].
 pub fn tick_with_life(
     world: &mut World,
     perf: &PerfConfig,
     failure: &crate::failure::FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
     rooted: Option<&HashSet<(i32, i32)>>,
+    grain: Option<&super::grain::GrainConfig>,
+    fungi: Option<&crate::fungi::FungiConfig>,
 ) {
     // Opt-in cell-sat inventory (debug only). Atmosphere stores are
     // outside this tick — see `audit::tracked_totals`.
@@ -142,11 +151,20 @@ pub fn tick_with_life(
     };
 
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
+    // Last non-empty flow plan — grain/seepage fall back to this when
+    // water writes nothing (painted solids mid-air, dry edits, …).
+    let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
+    let mut start_area: usize = 0;
     for step in 0..FLOW_SUBSTEPS {
         let active = plan_active(world);
         clear_all_dirty(world);
         if active.is_empty() {
             break;
+        }
+        flow_halo = active.clone();
+        let this_area = active_cell_area(&active);
+        if step == 0 {
+            start_area = this_area;
         }
         let passes = partition_checkerboard(&active);
         for pass in &passes {
@@ -162,38 +180,97 @@ pub fn tick_with_life(
         }
         // Quiet early-out: after the minimum passes, peek at dirty
         // written by this substep — a tiny halo means water settled.
+        // Absolute threshold catches truly settled worlds; a *shrink*
+        // check catches busy shores that started large but have since
+        // fallen off (adaptive substeps for the tuned feel path).
         if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_MIN {
             let next = plan_active(world);
-            if next.is_empty() || active_cell_area(&next) <= FLOW_QUIET_AREA {
+            let next_area = active_cell_area(&next);
+            if next.is_empty() || next_area <= FLOW_QUIET_AREA {
+                break;
+            }
+            // Adaptive: halo shrunk by ≥ 1/3 relative to start-of-tick —
+            // remaining flow is polishing, not cascading.
+            if start_area > 0 && next_area * 3 <= start_area * 2 {
                 break;
             }
         }
     }
 
-    // Seepage + grain fall read the same dirty halo the substep loop
-    // built. Do NOT clear dirty here: if these passes don't write
-    // (e.g. no porous solids, no grains), we still need next tick to
-    // re-process the cells the substeps just modified.
-    let active = plan_active(world);
-    if !active.is_empty() {
-        apply_seepage_regions(world, &active);
-        let passes = partition_checkerboard(&active);
-        for pass in &passes {
-            apply_grain_fall_regions(world, pass);
+    // Communicating vessels: a filled pipe can go locally quiet while the
+    // reservoir head is still higher. Periodic full-chunk confined scan.
+    super::water_flow::wake_confined_head(world);
+
+    // Seepage follows the water dirty / flow halo.
+    let flow_active = {
+        let dirty = plan_active(world);
+        if dirty.is_empty() {
+            flow_halo
+        } else {
+            dirty
         }
-        // Repose reads dirty written by grain fall; re-plan so new Air
-        // seats from the fall pass can receive diagonal slides.
-        let repose_active = plan_active(world);
-        if !repose_active.is_empty() {
-            let repose_passes = partition_checkerboard(&repose_active);
-            for pass in &repose_passes {
-                apply_grain_repose_regions(world, pass, rooted);
-            }
+    };
+    if !flow_active.is_empty() {
+        apply_seepage_regions(world, &flow_active);
+    }
+
+    // Re-wake unsupported grains and steep cliff faces — lakes often
+    // leave a non-empty dirty plan far from F3 paint, and seated
+    // Organic/sand walls have solid under them so fall-wake alone
+    // never sees them. Cadence-gated: this is a full-grid safety scan
+    // that only matters when a grain was orphaned mid-air; running
+    // every tick was ~1.6 ms of pure insurance. Every 4 ticks trades
+    // a ≤4-tick delay before a stranded grain drops for that budget.
+    // Also runs on tick 0 (fresh world / after save-load) so painted
+    // mid-air grains fall on the first tick.
+    const GRAIN_WAKE_EVERY: u64 = 4;
+    if world.tick % GRAIN_WAKE_EVERY == 0 {
+        super::grain::wake_grains_for_settle(world);
+    }
+    let grain_active = {
+        let dirty = plan_active(world);
+        if dirty.is_empty() {
+            flow_active
+        } else {
+            dirty
         }
+    };
+    if !grain_active.is_empty() {
+        settle_loose_grains_regions(world, &grain_active, rooted, GRAIN_SETTLE_PASSES);
+    }
+
+    // Dense cargo cannot ride floating Organic/Snow/Ice. Full-grid punch
+    // once per tick (not per settle pass — that re-scanned oceans to death),
+    // then a short re-settle so punched grains sink through the water seat.
+    // Cadence-gated with grain wake to share the "no fresh grain paint"
+    // quiet path (~0.7 ms/tick).
+    if world.tick % GRAIN_WAKE_EVERY == 0
+        && super::grain::punch_through_floating_rafts(world) > 0
+    {
+        super::grain::wake_grains_for_settle(world);
+        let sink = plan_active(world);
+        if !sink.is_empty() {
+            settle_loose_grains_regions(world, &sink, rooted, GRAIN_SETTLE_PASSES);
+        }
+    }
+    // Clear submerged litter lines, then let rafts drink — shared litter scan.
+    match grain {
+        Some(g) => super::grain::rise_and_soak_buoyant_litter_cfg(world, g),
+        None => super::grain::rise_and_soak_buoyant_litter(world),
     }
 
     // Geotech: roof / overhang collapse after grain has seated.
     crate::failure::apply_failure(world, failure, geotech);
+
+    // Reset network sym "last" before field + later organism plant trade
+    // share one inspector window (organism step clears plant lasts only).
+    crate::symbiosis::clear_sym_net_flow_lasts(world);
+
+    // Mycelium field: lives in Organic independently of fruiting bodies.
+    match fungi {
+        Some(f) => crate::fungi::step_mycelium_field_cfg(world, f),
+        None => crate::fungi::step_mycelium_field(world),
+    }
 
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {

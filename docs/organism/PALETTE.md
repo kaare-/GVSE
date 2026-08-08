@@ -40,7 +40,7 @@ not committed a job to.
 | ID | Name | Hex | Job |
 |----|------|-----|-----|
 | `0x00` | Nucleus | `#000000` | Always on. Genome home. Emits life stats (energy, health, clock phase). Baseline upkeep. |
-| `0x01` | Photosystem | `#2ECC40` | Light + water/air → energy. Emits `production` signal. |
+| `0x01` | Photosystem | `#2ECC40` | Light + water/air → energy. Emits `production` signal. Draw tints toward dim olive (`#3A4E22`) from raw sky × canopy at the posed cell (land and water) — visual light diagnostic; not harvest-remapped. |
 | `0x02` | Chemosystem | `#B58900` | Consume one `ChemType` → energy. Alternate / add-on to photosystem. |
 | `0x03` | ChemoSensor | `#0A6C74` | Reads a gene-chosen `ChemType` local level or gradient → neural input. |
 | `0x04` | ChemoEmitter | `#39CCCC` | Releases a gene-chosen `ChemType` into the water at a controlled rate. |
@@ -55,12 +55,13 @@ not committed a job to.
 | `0x0D` | Root | `#7A4B2A` | Sienna. Anchors, drinks moisture, elongates down a moisture gradient. |
 | `0x0E` | Stem | `#556B2F` | Olive. Stacks upward, holds leaves into the light column, casts shade. Substrate for epiphytes. |
 | `0x0F` | Holdfast | `#FF3D9A` | Pink. Grips another organism's olive stem (rock later). No ground root required. |
+| `0x10` | ReproSpore | `#D0B0FF` | Lilac dispersal packet. Wind-biased spores for ferns (land plants) and fruiting bodies. |
+| `0x16` | Symbiont | `#3DBE9A` | Opt-in plant↔fungus partnership organ. Genome `(sym_water, sym_energy)` is the mutable agreed deal; both partners need the module. Assortative match; moisture-directed supply/harvest trade; lopsided same vector = parasitism. |
 
 ### Reserved (frozen slots, no code yet)
 
 | ID | Name | Hex | Note |
 |----|------|-----|------|
-| `0x10` | ReproSpore | `#D0B0FF` | Dispersal packet (seed / spore). Draft; may fold into `Nucleus` behaviour. |
 | `0x11` | Fruit | `#E85D75` | Reproductive body, animal-attractant vector for Phase 7+. |
 | `0x12` | Bark | `#3E2E1F` | Woody protective sheath; requires stem integrity work first. |
 | `0x13` | Skin | `#FFDBAC` | Placeholder for animal outer layer. |
@@ -81,6 +82,8 @@ For editor palette drawer layout (see [`EDITOR.md`](EDITOR.md)):
 - **Physiology / niche** — Buoyancy, TempTolerance, Motility.
 - **Detritus loop** — Digest, Hypha.
 - **Land body** — Root, Stem, Holdfast.
+- **Dispersal** — ReproSpore.
+- **Symbiosis** — Symbiont.
 
 Colour choices were picked to be readable at 1× zoom on a mid-gray
 world background, distinguish adjacent categories (green / olive not

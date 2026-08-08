@@ -32,7 +32,8 @@ impl Default for CreatureEditor {
             blueprint: Blueprint::atom(),
             tool: EditorTool::Paint,
             brush: ModuleId::Photosystem,
-            status: "Paint Atom / Plant / Fungus, then Enter + click to spawn".into(),
+            status: "Paint Atom / Plant / seaweed / fungus, then Enter + click to plant"
+                .into(),
             spawn_picker: false,
             was_paused: true,
             name_buf: "atom".into(),
@@ -50,7 +51,7 @@ impl CreatureEditor {
             self.was_paused = currently_paused;
             self.spawn_picker = false;
             self.status =
-                "1-6 modules | A Atom  T Plant  F Fungus | Enter then click spawn site"
+                "1-8 modules | A Atom  T Plant  W seaweed  F fungus | Enter then click plant"
                     .into();
         }
     }
@@ -83,6 +84,45 @@ impl CreatureEditor {
             self.brush = ModuleId::Hypha;
             self.tool = EditorTool::Paint;
         }
+        if is_key_pressed(KeyCode::Key7) {
+            self.brush = ModuleId::ReproSpore;
+            self.tool = EditorTool::Paint;
+        }
+        if is_key_pressed(KeyCode::Key8) {
+            self.brush = ModuleId::Symbiont;
+            self.tool = EditorTool::Paint;
+        }
+        // Mutable Symbiont treaty (W, E) on the blueprint genome.
+        if is_key_pressed(KeyCode::Comma) {
+            self.blueprint.genome.sym_water = self.blueprint.genome.sym_water.saturating_sub(8);
+            self.status = format!(
+                "Symbiont treaty W={} E={}  (,/. W  -/= E)",
+                self.blueprint.genome.sym_water, self.blueprint.genome.sym_energy
+            );
+        }
+        if is_key_pressed(KeyCode::Period) {
+            self.blueprint.genome.sym_water =
+                self.blueprint.genome.sym_water.saturating_add(8).min(255);
+            self.status = format!(
+                "Symbiont treaty W={} E={}  (,/. W  -/= E)",
+                self.blueprint.genome.sym_water, self.blueprint.genome.sym_energy
+            );
+        }
+        if is_key_pressed(KeyCode::Minus) {
+            self.blueprint.genome.sym_energy = self.blueprint.genome.sym_energy.saturating_sub(8);
+            self.status = format!(
+                "Symbiont treaty W={} E={}  (,/. W  -/= E)",
+                self.blueprint.genome.sym_water, self.blueprint.genome.sym_energy
+            );
+        }
+        if is_key_pressed(KeyCode::Equal) {
+            self.blueprint.genome.sym_energy =
+                self.blueprint.genome.sym_energy.saturating_add(8).min(255);
+            self.status = format!(
+                "Symbiont treaty W={} E={}  (,/. W  -/= E)",
+                self.blueprint.genome.sym_water, self.blueprint.genome.sym_energy
+            );
+        }
         if is_key_pressed(KeyCode::E) {
             self.tool = EditorTool::Erase;
         }
@@ -99,11 +139,18 @@ impl CreatureEditor {
             self.name_buf = "plant".into();
             self.status = "Minimal plant template (spawn on moist sand/soil)".into();
         }
+        if is_key_pressed(KeyCode::W) {
+            self.blueprint = Blueprint::minimal_seaweed();
+            self.name_buf = "seaweed".into();
+            self.status =
+                "Seaweed — stemless leaf ribbon; one Root holdfast; thrives submerged".into();
+        }
         if is_key_pressed(KeyCode::F) {
             self.blueprint = Blueprint::minimal_fungus();
-            self.name_buf = "fungus".into();
+            self.name_buf = "fruiting body".into();
             self.status =
-                "Minimal fungus template (spawn on Organic / wet sand / any solid)".into();
+                "Fungus — Enter inoculates cream (Organic + mineral corridors); stalk emerges later matching this design"
+                    .into();
         }
         if is_key_pressed(KeyCode::S) && !is_key_down(KeyCode::LeftControl) {
             self.blueprint.name = self.name_buf.clone();
@@ -143,8 +190,37 @@ impl CreatureEditor {
         if !self.spawn_picker && is_mouse_button_down(MouseButton::Left) {
             if let Some((cx, cy)) = self.mouse_to_cell() {
                 self.apply_tool(cx, cy);
+            } else if let Some(brush) = self.mouse_to_palette_brush() {
+                self.brush = brush;
+                self.tool = EditorTool::Paint;
             }
         }
+    }
+
+    /// Palette swatches drawn to the right of the canvas (same layout as [`draw`]).
+    fn mouse_to_palette_brush(&self) -> Option<ModuleId> {
+        let (mx, my) = mouse_position();
+        let (ox, oy) = CANVAS_ORIGIN;
+        let cw = self.blueprint.canvas_w as f32 * CELL_PX;
+        let px = ox + cw + 24.0;
+        let sy = oy + 168.0;
+        let brushes = [
+            ModuleId::Nucleus,
+            ModuleId::Photosystem,
+            ModuleId::Root,
+            ModuleId::Stem,
+            ModuleId::Digest,
+            ModuleId::Hypha,
+            ModuleId::ReproSpore,
+            ModuleId::Symbiont,
+        ];
+        for (i, mid) in brushes.iter().enumerate() {
+            let sx = px + i as f32 * 36.0;
+            if mx >= sx && mx < sx + 28.0 && my >= sy && my < sy + 28.0 {
+                return Some(*mid);
+            }
+        }
+        None
     }
 
     fn mouse_to_cell(&self) -> Option<(i16, i16)> {
@@ -246,7 +322,7 @@ impl CreatureEditor {
 
         let px = ox + cw + 24.0;
         let kind = if self.blueprint.is_valid_fungus() {
-            "Set E fungus"
+            "Set E fungus (inoculate)"
         } else if self.blueprint.is_valid_plant() {
             "Set D plant"
         } else if self.blueprint.is_valid_atom() {
@@ -263,18 +339,28 @@ impl CreatureEditor {
             LIGHTGRAY,
         );
         draw_text(
-            "1 Nucleus  2 Photo  3 Root  4 Stem  5 Digest  6 Hypha  | E erase  P paint",
+            "1 Nucleus  2 Photo  3 Root  4 Stem  5 Digest  6 Hypha  7 Spore  8 Symbiont",
             px,
             oy + 52.0,
             14.0,
             GRAY,
         );
         draw_text(
-            "A Atom  T Plant  F Fungus  | S save  L load  | Enter spawn",
+            "A Atom  T Plant  W seaweed  F fungus  | S save  L load  | Enter plant",
             px,
             oy + 72.0,
             14.0,
             GRAY,
+        );
+        draw_text(
+            &format!(
+                "treaty W={} E={}  (,/. water  -/= energy)  | E erase  P paint",
+                self.blueprint.genome.sym_water, self.blueprint.genome.sym_energy
+            ),
+            px,
+            oy + 92.0,
+            14.0,
+            Color::from_rgba(0x3D, 0xBE, 0x9A, 255),
         );
         draw_text(
             &format!(
@@ -284,11 +370,11 @@ impl CreatureEditor {
                 self.name_buf
             ),
             px,
-            oy + 100.0,
+            oy + 114.0,
             14.0,
             WHITE,
         );
-        draw_text(&self.status, px, oy + 130.0, 14.0, YELLOW);
+        draw_text(&self.status, px, oy + 138.0, 14.0, YELLOW);
 
         for (i, mid) in [
             ModuleId::Nucleus,
@@ -297,13 +383,15 @@ impl CreatureEditor {
             ModuleId::Stem,
             ModuleId::Digest,
             ModuleId::Hypha,
+            ModuleId::ReproSpore,
+            ModuleId::Symbiont,
         ]
         .iter()
         .enumerate()
         {
             let (r, g, b) = mid.rgb();
             let sx = px + i as f32 * 36.0;
-            let sy = oy + 160.0;
+            let sy = oy + 168.0;
             draw_rectangle(sx, sy, 28.0, 28.0, Color::from_rgba(r, g, b, 255));
             if *mid == self.brush {
                 draw_rectangle_lines(sx, sy, 28.0, 28.0, 2.0, WHITE);

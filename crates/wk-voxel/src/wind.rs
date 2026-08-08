@@ -2,24 +2,35 @@
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
-//! Coarse wind field for cloud / humidity advection.
+//! Coarse wind field for cloud / humidity advection and raft drift.
 //!
-//! Climate wind is mostly a horizontal prevailing flow; orographic
-//! lift adds a small upward component where the free surface rises
-//! in the wind direction (tall mountains).
+//! Climate wind is a horizontal prevailing mean; **natural variance**
+//! modulates instantaneous force and direction over gust / breeze /
+//! weather timescales so the push is not constant. Orographic lift still
+//! adds a small upward component where terrain rises downwind.
 
 use serde::{Deserialize, Serialize};
 
 use crate::humidity::TileBounds;
 use crate::worldgen::continental_surface_y;
 
-/// Tile-scale wind used to advect atmospheric water.
+fn default_variance() -> f32 {
+    0.55
+}
+
+/// Tile-scale wind used to advect atmospheric water and shove rafts.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Wind {
-    /// Prevailing horizontal speed in **tiles per tick** (positive = +x).
+    /// Mean prevailing horizontal speed in **tiles per tick** (positive = +x).
     pub climate_vx: f32,
     /// Base vertical drift (usually ~0).
     pub climate_vy: f32,
+    /// Natural variance 0..1 — how much force and heading wander around the mean.
+    ///
+    /// `0` = perfectly steady. Mid values breathe in strength and gently
+    /// swing heading. Near `1` the wind can lull, gust, and reverse.
+    #[serde(default = "default_variance")]
+    pub variance: f32,
     /// Fractional advection residual (shared; climate is uniform).
     pub residual_x: f32,
     pub residual_y: f32,
@@ -44,9 +55,10 @@ impl Wind {
         sky_ceiling_y: i32,
         wrap_x: bool,
     ) -> Self {
-        let mut w = Self {
+        Self {
             climate_vx,
             climate_vy: 0.0,
+            variance: default_variance(),
             residual_x: 0.0,
             residual_y: 0.0,
             tile_cols: tile_cols.max(1),
@@ -61,12 +73,52 @@ impl Wind {
             seed,
             width_cols: width_cols.max(1),
             sea_level_y,
-        };
-        let _ = &mut w;
-        w
+        }
+    }
+
+    /// Instantaneous horizontal wind (tiles / tick) at sim `tick`.
+    ///
+    /// Applies multi-timescale natural variance from [`Self::variance`]
+    /// around the Tab mean (`climate_vx`). Seeded phases keep each world
+    /// from sharing the same weather clock.
+    pub fn effective_vx(&self, tick: u64) -> f32 {
+        let v = self.variance.clamp(0.0, 1.0);
+        if v < 1e-4 {
+            return self.climate_vx.clamp(-1.0, 1.0);
+        }
+        let t = tick as f32;
+        // Stable per-world phase so two seeds don't lockstep.
+        let phase = (self.seed as f32) * 1.0e-9 + (self.seed.rotate_left(13) as f32) * 1.0e-10;
+
+        // Force envelope: gusts + breeze pulses + slow weather strength.
+        let force = 1.0
+            + v * (0.48 * (t * 0.021 + phase).sin()
+                + 0.28 * (t * 0.055 + phase * 2.3).sin()
+                + 0.24 * (t * 0.0085 + phase * 0.6).sin());
+
+        // Heading wander: slow weather turn + quicker breeze swings.
+        // At high variance the blend can cross zero (reverse).
+        let dir = (0.70 * (t * 0.0026 + phase * 1.4).sin()
+            + 0.30 * (t * 0.0074 + phase * 0.5).sin())
+            .clamp(-1.0, 1.0);
+        let heading = (1.0 - v) + v * dir;
+
+        (self.climate_vx * force * heading).clamp(-1.0, 1.0)
+    }
+
+    /// Instantaneous vertical climate drift (tiles / tick). Mild variance wobble.
+    pub fn effective_vy(&self, tick: u64) -> f32 {
+        let v = self.variance.clamp(0.0, 1.0);
+        let t = tick as f32;
+        let phase = (self.seed as f32) * 1.0e-9;
+        let wobble = v * 0.018 * (t * 0.019 + phase + 0.8).sin();
+        self.climate_vy + wobble
     }
 
     /// Horizontal wind at a humidity tile (tiles / tick).
+    ///
+    /// Uses the mean climate value for orographic geometry; callers that
+    /// advect mass should prefer [`Self::effective_vx`].
     pub fn vx_at(&self, _hx: i32, _hy: i32) -> f32 {
         self.climate_vx
     }
@@ -134,7 +186,6 @@ mod tests {
             p.sky_ceiling_y,
             true,
         );
-        // Scan for a tile with clear upslope; mountains sit mid-ring.
         let mut max_ascent = 0.0f32;
         for hx in 0..(p.width_cols / 4) {
             max_ascent = max_ascent.max(wind.ascent_cells(hx));
@@ -142,6 +193,62 @@ mod tests {
         assert!(
             max_ascent > 5.0,
             "expected some orographic ascent across the ring, got {max_ascent}"
+        );
+    }
+
+    #[test]
+    fn zero_variance_is_steady_mean() {
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.08,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.variance = 0.0;
+        for tick in [0u64, 17, 100, 9999] {
+            assert!(
+                (wind.effective_vx(tick) - 0.08).abs() < 1e-5,
+                "tick={tick} got {}",
+                wind.effective_vx(tick)
+            );
+        }
+    }
+
+    #[test]
+    fn natural_variance_changes_force_and_direction() {
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.10,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.variance = 0.9;
+        let samples: Vec<f32> = (0..3000).map(|t| wind.effective_vx(t)).collect();
+        let min = samples.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = samples.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max - min > 0.08,
+            "natural variance should change force (range={})",
+            max - min
+        );
+        assert!(
+            samples.iter().any(|&v| v < 0.0),
+            "high variance should reverse heading (min={min} max={max})"
+        );
+        // Strength should sometimes rise well above the mean magnitude.
+        assert!(
+            samples.iter().any(|&v| v.abs() > 0.12),
+            "gusts should exceed the mean |vx|"
         );
     }
 }
