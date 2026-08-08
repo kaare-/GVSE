@@ -492,6 +492,52 @@ pub fn corpse_rgb((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     )
 }
 
+/// Per-tick organism bookkeeping for [`crate::event_log::SimLog`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OrganismStepStats {
+    pub births_plant: u32,
+    pub births_fungus: u32,
+    pub births_atom: u32,
+    pub deaths_plant: u32,
+    pub deaths_fungus: u32,
+    pub deaths_atom: u32,
+    /// Newly tipped woody plants this step (`fallen` false → true).
+    pub tips: u32,
+    /// Spore release FX events (wind / inoculum / bank wake trails).
+    pub spores: u32,
+    pub emergent_fruiting: u32,
+    pub spore_bank_wakes: u32,
+}
+
+impl OrganismStepStats {
+    fn bump_birth(&mut self, atom: &Atom) {
+        if is_land_plant(atom) {
+            self.births_plant += 1;
+        } else if is_fungus(atom) {
+            self.births_fungus += 1;
+        } else {
+            self.births_atom += 1;
+        }
+    }
+
+    fn bump_death(&mut self, atom: &Atom) {
+        if is_land_plant(atom) {
+            self.deaths_plant += 1;
+        } else if is_fungus(atom) {
+            self.deaths_fungus += 1;
+        } else {
+            self.deaths_atom += 1;
+        }
+    }
+}
+
+/// Outcome of one organism step (spores for FX + stats for the sim log).
+#[derive(Debug, Clone, Default)]
+pub struct OrganismStepOutcome {
+    pub spores: Vec<SporeRelease>,
+    pub stats: OrganismStepStats,
+}
+
 /// Population of Set A Atoms (no `hecs` — keep the crate tiny).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrganismStore {
@@ -804,7 +850,7 @@ impl OrganismStore {
         climate: &ClimateConfig,
         humidity: Option<&mut Humidity>,
         wind_vx: f32,
-    ) -> Vec<SporeRelease> {
+    ) -> OrganismStepOutcome {
         self.step_with_climate_wind_temp(world, tick, climate, humidity, wind_vx, None)
     }
 
@@ -818,7 +864,7 @@ impl OrganismStore {
         humidity: Option<&mut Humidity>,
         wind_vx: f32,
         temperature: Option<&Temperature>,
-    ) -> Vec<SporeRelease> {
+    ) -> OrganismStepOutcome {
         self.step_with_carbon(
             world,
             tick,
@@ -842,7 +888,7 @@ impl OrganismStore {
         temperature: Option<&Temperature>,
         mut carbon: Option<&mut CarbonBudget>,
         carbon_cfg: &CarbonConfig,
-    ) -> Vec<SporeRelease> {
+    ) -> OrganismStepOutcome {
         let day = day_factor_cfg(tick, climate);
         let phase = phase_fraction_cfg(tick, climate);
         // Posed draw cells (flop + pile) feed canopy shade so dry mats and
@@ -857,6 +903,8 @@ impl OrganismStore {
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let mut spore_releases: Vec<SporeRelease> = Vec::new();
+        let mut stats = OrganismStepStats::default();
+        let fallen_before: Vec<bool> = self.atoms.iter().map(|a| a.fallen).collect();
         let pop = self.atoms.len();
         let atom_cap = self.atom_cap();
         let growth_caps = self.growth_caps.clamp();
@@ -898,16 +946,26 @@ impl OrganismStore {
                 if let Some(child) =
                     try_emergent_fruiting(world, &fungus_cols, tick, room)
                 {
+                    stats.bump_birth(&child);
+                    stats.emergent_fruiting += 1;
                     self.atoms.push(child);
                 }
-                return spore_releases;
+                return OrganismStepOutcome {
+                    spores: spore_releases,
+                    stats,
+                };
             }
             self.step_corpses(world, tick, wind_vx);
             let room = self.atoms.len() < atom_cap;
             if let Some(child) = try_emergent_fruiting(world, &[], tick, room) {
+                stats.bump_birth(&child);
+                stats.emergent_fruiting += 1;
                 self.atoms.push(child);
             }
-            return spore_releases;
+            return OrganismStepOutcome {
+                spores: spore_releases,
+                stats,
+            };
         }
 
         for (i, atom) in self.atoms.iter_mut().enumerate() {
@@ -1086,8 +1144,15 @@ impl OrganismStore {
 
         deaths.sort_unstable();
         deaths.dedup();
+        // Tips: woody plants that acquired `fallen` this step (before removals).
+        for (i, atom) in self.atoms.iter().enumerate() {
+            if atom.fallen && !fallen_before.get(i).copied().unwrap_or(false) {
+                stats.tips += 1;
+            }
+        }
         for &i in deaths.iter().rev() {
             if let Some(dead) = self.atoms.get(i).cloned() {
+                stats.bump_death(&dead);
                 // Land plants: roots stay as Organic in soil; leaves drop
                 // as falling Organic; stems linger grey until dissolve.
                 if is_land_plant(&dead) {
@@ -1099,6 +1164,9 @@ impl OrganismStore {
             if i < self.atoms.len() {
                 self.atoms.swap_remove(i);
             }
+        }
+        for child in &births {
+            stats.bump_birth(child);
         }
         self.atoms.extend(births);
         // Cream network → new fruiting body (may later shed spores).
@@ -1113,6 +1181,8 @@ impl OrganismStore {
                 try_emergent_fruiting(world, &fungus_cols_now, tick, true)
             {
                 fungus_cols_now.push(child.gx);
+                stats.bump_birth(&child);
+                stats.emergent_fruiting += 1;
                 self.atoms.push(child);
             }
         }
@@ -1141,7 +1211,9 @@ impl OrganismStore {
             room,
         );
         world.spore_bank = bank;
+        stats.spore_bank_wakes = woken.len() as u32;
         for child in woken {
+            stats.bump_birth(&child);
             spore_releases.push(SporeRelease {
                 from_gx: child.gx,
                 from_gy: child.gy,
@@ -1164,7 +1236,11 @@ impl OrganismStore {
                 }
             }
         }
-        spore_releases
+        stats.spores = spore_releases.len() as u32;
+        OrganismStepOutcome {
+            spores: spore_releases,
+            stats,
+        }
     }
 
     fn push_corpse(&mut self, world: &mut World, corpse: Corpse) {

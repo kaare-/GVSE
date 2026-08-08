@@ -932,7 +932,7 @@ async fn main() {
             } else {
                 None
             };
-            tick_with_life(
+            let _ = tick_with_life(
                 &mut scene.world,
                 &settings.perf,
                 &settings.failure,
@@ -1003,7 +1003,7 @@ async fn main() {
             apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
             if organisms_on {
                 let tick_no = scene.world.tick;
-                let releases = scene.organisms.step_with_carbon(
+                let outcome = scene.organisms.step_with_carbon(
                     &mut scene.world,
                     tick_no,
                     &settings.climate,
@@ -1013,7 +1013,7 @@ async fn main() {
                     Some(&mut scene.carbon),
                     &settings.carbon,
                 );
-                spore_fx.burst_all(&releases, wind_vx);
+                spore_fx.burst_all(&outcome.spores, wind_vx);
             }
         }
 

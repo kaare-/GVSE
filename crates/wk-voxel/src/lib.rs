@@ -16,6 +16,7 @@ pub mod cell;
 pub mod chunk;
 pub mod climate;
 pub mod clouds;
+pub mod event_log;
 pub mod failure;
 pub mod fungi;
 pub mod geotech_map;
@@ -59,11 +60,15 @@ pub use climate::{
 pub use clouds::{
     cloud_floor_y, CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS,
 };
+pub use event_log::{
+    habit_label, SimEvent, SimEventKind, SimLog, SimSample, SIM_LOG_DEFAULT_CAP,
+    SIM_LOG_DEFAULT_SAMPLE_PERIOD,
+};
 pub use failure::{
     apply_compaction, apply_failure, apply_roof_collapse, apply_shear_weaken, compaction_load_ok,
     effective_cohesion, face_shear_demand, grain_repose_max_step, pore_wetness, pore_wetness_with,
     roof_collapse_debris, roof_span_cells, roof_span_limit_cells, shear_weaken_debris,
-    wet_repose_loosens, FailureConfig,
+    wet_repose_loosens, FailureConfig, FailureStats,
     COMPACTION_SIGMA_MIN,
 };
 pub use carbon::{
@@ -95,9 +100,10 @@ pub use grid::World;
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
     bake_tip_into_body, column_sky_light, fallen_body_offset, rigid_tip_offset, Atom, BodyModule,
-    Corpse, ModuleId, OrganismStore, SpawnFail, SporeRelease, CORPSE_SETTLE_LAND_TICKS,
-    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT,
-    SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
+    Corpse, ModuleId, OrganismStepOutcome, OrganismStepStats, OrganismStore, SpawnFail,
+    SporeRelease, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
+    MAX_FALLEN_WATERLINE_EXTENT, SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT,
+    WATER_SURFACE_TRANSMIT,
 };
 pub use symbiosis::{
     body_has_symbiont, clear_plant_sym_flow_lasts, clear_sym_net_flow_lasts,

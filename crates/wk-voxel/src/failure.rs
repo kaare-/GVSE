@@ -357,12 +357,12 @@ fn regions_for_failure(world: &World) -> Vec<ActiveChunk> {
 /// Compute-then-apply. Converts roof rock to fallable debris and swaps
 /// it into the Air below (one cell) so the drop is visible this tick.
 /// Event count capped by [`FailureConfig::max_roof_events`].
-pub fn apply_roof_collapse(world: &mut World, cfg: &FailureConfig) {
+pub fn apply_roof_collapse(world: &mut World, cfg: &FailureConfig) -> u32 {
     if !cfg.enable_roof_collapse || cfg.max_roof_events == 0 {
-        return;
+        return 0;
     }
     let regions = regions_for_failure(world);
-    apply_roof_collapse_regions(world, &regions, cfg);
+    apply_roof_collapse_regions(world, &regions, cfg)
 }
 
 /// Roof collapse restricted to a pre-planned active set.
@@ -370,9 +370,9 @@ pub fn apply_roof_collapse_regions(
     world: &mut World,
     active: &[ActiveChunk],
     cfg: &FailureConfig,
-) {
+) -> u32 {
     if !cfg.enable_roof_collapse || cfg.max_roof_events == 0 || active.is_empty() {
-        return;
+        return 0;
     }
 
     // (gy, gx) — lowest ceilings first, then x for determinism.
@@ -434,6 +434,7 @@ pub fn apply_roof_collapse_regions(
             applied += 1;
         }
     }
+    applied
 }
 
 /// Swap one failing roof cell into the Air below as debris.
@@ -583,12 +584,12 @@ pub fn apply_shear_weaken(
     world: &mut World,
     cfg: &FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
-) {
+) -> u32 {
     if !cfg.enable_shear_weaken || cfg.max_shear_events == 0 {
-        return;
+        return 0;
     }
     let regions = regions_for_failure(world);
-    apply_shear_weaken_regions(world, &regions, cfg, geotech);
+    apply_shear_weaken_regions(world, &regions, cfg, geotech)
 }
 
 /// Shear weaken restricted to a pre-planned active set.
@@ -597,9 +598,9 @@ pub fn apply_shear_weaken_regions(
     active: &[ActiveChunk],
     cfg: &FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
-) {
+) -> u32 {
     if !cfg.enable_shear_weaken || cfg.max_shear_events == 0 || active.is_empty() {
-        return;
+        return 0;
     }
 
     let use_map = cfg.use_geotech_map && geotech.is_some();
@@ -644,6 +645,7 @@ pub fn apply_shear_weaken_regions(
             applied += 1;
         }
     }
+    applied
 }
 
 /// True when this competent face should convert under current rules.
@@ -788,12 +790,12 @@ pub fn apply_compaction(
     world: &mut World,
     cfg: &FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
-) {
+) -> u32 {
     if !cfg.enable_compaction || cfg.max_compaction_events == 0 {
-        return;
+        return 0;
     }
     let regions = regions_for_failure(world);
-    apply_compaction_regions(world, &regions, cfg, geotech);
+    apply_compaction_regions(world, &regions, cfg, geotech)
 }
 
 /// Compaction restricted to a pre-planned active set.
@@ -802,9 +804,9 @@ pub fn apply_compaction_regions(
     active: &[ActiveChunk],
     cfg: &FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
-) {
+) -> u32 {
     if !cfg.enable_compaction || cfg.max_compaction_events == 0 || active.is_empty() {
-        return;
+        return 0;
     }
     let use_map = cfg.use_geotech_map && geotech.is_some();
     let mut candidates: Vec<(i32, i32)> = Vec::new();
@@ -847,6 +849,7 @@ pub fn apply_compaction_regions(
             applied += 1;
         }
     }
+    applied
 }
 
 fn compact_one(
@@ -905,21 +908,37 @@ fn compact_one(
     true
 }
 
+/// Counts from one [`apply_failure`] pulse.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct FailureStats {
+    pub roof: u32,
+    pub shear: u32,
+    pub compaction: u32,
+}
+
+impl FailureStats {
+    pub fn total(self) -> u32 {
+        self.roof + self.shear + self.compaction
+    }
+}
+
 /// Run enabled failure passes (F1 roof, F2b shear, F3 compaction).
 pub fn apply_failure(
     world: &mut World,
     cfg: &FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
-) {
+) -> FailureStats {
+    let mut stats = FailureStats::default();
     if cfg.enable_roof_collapse {
-        apply_roof_collapse(world, cfg);
+        stats.roof = apply_roof_collapse(world, cfg);
     }
     if cfg.enable_shear_weaken {
-        apply_shear_weaken(world, cfg, geotech);
+        stats.shear = apply_shear_weaken(world, cfg, geotech);
     }
     if cfg.enable_compaction {
-        apply_compaction(world, cfg, geotech);
+        stats.compaction = apply_compaction(world, cfg, geotech);
     }
+    stats
 }
 
 #[cfg(test)]
