@@ -18,6 +18,7 @@
 //! F3 — overburden compaction: deep wet Clay/Organic exude pore water
 //! upward when σᵥ (or solid-cell count) exceeds a threshold.
 
+use serde::{Deserialize, Serialize};
 use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
 
 use crate::active::ActiveChunk;
@@ -57,7 +58,7 @@ pub const SHEAR_C_THRESH_DEMAND_1: f32 = 40.0;
 pub const SHEAR_C_THRESH_DEMAND_2: f32 = 100.0;
 
 /// Live-tunable geotech knobs (Tab → Geotech).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FailureConfig {
     /// Drop ceilings when cavity span exceeds `roof_span_max_m`.
     pub enable_roof_collapse: bool,

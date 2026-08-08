@@ -4,6 +4,8 @@
 //!
 //! Humidity condensation drizzle (+ orographic boost).
 
+use serde::{Deserialize, Serialize};
+
 use crate::grid::World;
 
 use super::util::hash_prob;
@@ -14,7 +16,7 @@ use super::util::hash_prob;
 /// tile is wet enough to precipitate. Rain empties a bounded mass
 /// from the tile, and the droplet's sat is proportional to the mass
 /// removed (clamped by [`u8::MAX`]).
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct CondensationConfig {
     /// World-y row where droplets condense.
     pub top_y: i32,
@@ -47,7 +49,7 @@ impl Default for CondensationConfig {
 }
 
 /// Orographic rain boost — moist air dumps when climbing tall land.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct OrographicConfig {
     pub seed: u64,
     pub width_cols: i32,

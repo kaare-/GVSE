@@ -38,8 +38,12 @@ GVSE_SIM_LOG=/tmp/gvse-soak.ndjson GVSE_SOAK_TICKS=1000000 GVSE_SIM_LOG_PERIOD=2
 ```
 
 Fixture: moist beach grove + deep lake, woody plants (Symbiont), seaweed,
-mycelium lineage inoculum. Climate loop mirrors Tab: evap (period 8) →
-closed-loop rain → humidity → clouds (`coag_rate=0.14`) → condensation →
-physics → carbon → organisms. Checkpoint notes include woody/wet/dry cohorts.
+mycelium lineage inoculum. Climate loop mirrors Tab: evap (period 5) →
+humidity → clouds (`coag_rate=0.12`) → condensation → physics → carbon →
+organisms. Checkpoint notes include woody/wet/dry cohorts.
+
+To replay the Tab-side knobs from a successful soak locally: open Settings
+(Tab) → **Named presets** → load `soak-survival` (built-in, also shipped as
+`presets/soak-survival.json`). Save your own setups the same way.
 
 Format is **NDJSON** (`type: event|sample` per line).

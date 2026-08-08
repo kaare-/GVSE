@@ -6,10 +6,12 @@ use macroquad::prelude::*;
 use macroquad::ui::{hash, root_ui, widgets};
 use wk_material::{MaterialId, MaterialRegistry, MATERIAL_COUNT};
 use wk_voxel::{
-    CarbonBudget, CarbonConfig, ClimateConfig, CloudConfig, CondensationConfig, EvapConfig,
-    FailureConfig, FungiConfig, Genome, GrainConfig, KarstConfig, OrographicConfig, PerfConfig,
-    PhaseConfig, PlantGrowthCaps, RainConfig, SporeBankConfig, TempConfig, World, WorldgenParams,
+    list_all_presets, load_preset, save_preset, sanitize_preset_name, CarbonBudget, CarbonConfig,
+    ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, Genome,
+    GrainConfig, KarstConfig, OrographicConfig, PerfConfig, PhaseConfig, PlantGenePreset,
+    PlantGrowthCaps, RainConfig, SimPreset, SporeBankConfig, TempConfig, World, WorldgenParams,
     CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
+    PRESET_DIR,
 };
 
 /// Top-level Tab settings pages (keeps the long menu navigable).
@@ -62,6 +64,32 @@ impl PlantGeneSettings {
             digest_rate: self.digest_rate.clamp(0.05, 2.0),
             clone_fidelity: self.clone_fidelity.clamp(0.05, 1.0),
             ..Genome::default()
+        }
+    }
+
+    pub fn to_preset(&self) -> PlantGenePreset {
+        PlantGenePreset {
+            alloc_stem: self.alloc_stem,
+            alloc_leaf: self.alloc_leaf,
+            alloc_root: self.alloc_root,
+            root_depth_bias: self.root_depth_bias,
+            leaf_absorb: self.leaf_absorb,
+            shade_efficiency: self.shade_efficiency,
+            digest_rate: self.digest_rate,
+            clone_fidelity: self.clone_fidelity,
+        }
+    }
+
+    pub fn from_preset(p: &PlantGenePreset) -> Self {
+        Self {
+            alloc_stem: p.alloc_stem,
+            alloc_leaf: p.alloc_leaf,
+            alloc_root: p.alloc_root,
+            root_depth_bias: p.root_depth_bias,
+            leaf_absorb: p.leaf_absorb,
+            shade_efficiency: p.shade_efficiency,
+            digest_rate: p.digest_rate,
+            clone_fidelity: p.clone_fidelity,
         }
     }
 }
@@ -125,6 +153,10 @@ pub struct SimSettings {
     pub world_sky_ceiling: f32,
     /// Set by UI when user clicks "Regenerate world with size".
     pub request_regen: bool,
+    /// Draft name for Save under `presets/<name>.json`.
+    pub preset_name: String,
+    /// Last save/load status line for the presets UI.
+    pub preset_status: String,
 }
 
 impl SimSettings {
@@ -224,7 +256,95 @@ impl SimSettings {
             world_sea_level: params.sea_level_y as f32,
             world_sky_ceiling: params.sky_ceiling_y as f32,
             request_regen: false,
+            preset_name: "soak-survival".into(),
+            preset_status: String::new(),
         }
+    }
+
+    /// Snapshot live Tab knobs (excludes worldgen size / regen).
+    pub fn to_preset(&self) -> SimPreset {
+        SimPreset {
+            schema_version: wk_voxel::PRESET_SCHEMA_VERSION,
+            notes: String::new(),
+            rain: self.rain,
+            evap: self.evap,
+            cond: self.cond,
+            oro: self.oro,
+            karst: self.karst,
+            cloud: self.cloud,
+            climate: self.climate,
+            temp: self.temp,
+            phase: self.phase,
+            grain: self.grain.clone(),
+            fungi: self.fungi,
+            carbon: self.carbon,
+            spore_bank: self.spore_bank,
+            perf: self.perf,
+            failure: self.failure,
+            wind_vx: self.wind_vx,
+            wind_variance: self.wind_variance,
+            humidity_diffusion_alpha: self.humidity_diffusion_alpha,
+            plant_genes: self.plant_genes.to_preset(),
+            max_atoms: self.max_atoms,
+            max_corpses: self.max_corpses,
+            max_roots: self.max_roots,
+            max_stems: self.max_stems,
+            max_photos: self.max_photos,
+            mat_perm: self.mat_perm,
+            mat_poro: self.mat_poro,
+        }
+    }
+
+    /// Apply a preset without regenerating the world.
+    ///
+    /// World-bound rain/cond/oro extents (`top_y`, `x_range`, sea/seed/width)
+    /// stay on the live world so a preset from another map still fits.
+    pub fn apply_preset(&mut self, p: &SimPreset) {
+        let rain_top = self.rain.top_y;
+        let rain_range = self.rain.x_range;
+        let rain_sea = self.rain.sea_level_y;
+        let cond_top = self.cond.top_y;
+        let oro_seed = self.oro.seed;
+        let oro_w = self.oro.width_cols;
+        let oro_sea = self.oro.sea_level_y;
+
+        self.rain = p.rain;
+        self.rain.top_y = rain_top;
+        self.rain.x_range = rain_range;
+        self.rain.sea_level_y = rain_sea;
+        self.evap = p.evap;
+        self.cond = p.cond;
+        self.cond.top_y = cond_top;
+        self.oro = p.oro;
+        self.oro.seed = oro_seed;
+        self.oro.width_cols = oro_w;
+        self.oro.sea_level_y = oro_sea;
+        self.karst = p.karst;
+        self.cloud = p.cloud;
+        self.climate = p.climate;
+        self.temp = p.temp;
+        self.phase = p.phase;
+        self.grain = p.grain.clone();
+        self.fungi = p.fungi;
+        self.carbon = p.carbon;
+        self.spore_bank = p.spore_bank;
+        self.perf = p.perf;
+        self.failure = p.failure;
+        self.max_roof_events = self.failure.max_roof_events as f32;
+        self.max_shear_events = self.failure.max_shear_events as f32;
+        self.max_compaction_events = self.failure.max_compaction_events as f32;
+        self.shear_chance_pct = self.failure.shear_chance_per_mille as f32 / 10.0;
+        self.wind_vx = p.wind_vx;
+        self.wind_variance = p.wind_variance;
+        self.humidity_diffusion_alpha = p.humidity_diffusion_alpha;
+        self.plant_genes = PlantGeneSettings::from_preset(&p.plant_genes);
+        self.max_atoms = p.max_atoms;
+        self.max_corpses = p.max_corpses;
+        self.max_roots = p.max_roots;
+        self.max_stems = p.max_stems;
+        self.max_photos = p.max_photos;
+        self.mat_perm = p.mat_perm;
+        self.mat_poro = p.mat_poro;
     }
 
     pub fn on_world_reseed(&mut self, params: &WorldgenParams) {
@@ -362,6 +482,86 @@ impl SimSettings {
                         }
                     },
                 );
+                ui.separator();
+
+                ui.tree_node(hash!(), "Named presets", |ui| {
+                    ui.label(
+                        None,
+                        &format!(
+                            "Save / load Tab knobs as {PRESET_DIR}/<name>.json \
+                             (world size needs Regenerate; not included)."
+                        ),
+                    );
+                    ui.input_text(hash!(), "name", &mut self.preset_name);
+                    if ui.button(None, "Save preset") {
+                        match sanitize_preset_name(&self.preset_name) {
+                            None => {
+                                self.preset_status =
+                                    "Name must be 1..=48 chars of [a-z0-9_-]".into();
+                            }
+                            Some(name) => {
+                                self.preset_name = name.clone();
+                                let mut preset = self.to_preset();
+                                if preset.notes.is_empty() {
+                                    preset.notes = format!("saved as {name}");
+                                }
+                                match save_preset(&name, &preset) {
+                                    Ok(path) => {
+                                        self.preset_status =
+                                            format!("Saved {}", path.display());
+                                    }
+                                    Err(e) => {
+                                        self.preset_status = format!("Save failed: {e}");
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    ui.same_line(0.0);
+                    if ui.button(None, "Load named") {
+                        match load_preset(&self.preset_name) {
+                            Ok(p) => {
+                                self.apply_preset(&p);
+                                self.apply_material_overrides(world);
+                                let note = if p.notes.is_empty() {
+                                    String::new()
+                                } else {
+                                    format!(" — {}", p.notes)
+                                };
+                                self.preset_status =
+                                    format!("Loaded {}{note}", self.preset_name.trim());
+                            }
+                            Err(e) => {
+                                self.preset_status = format!("Load failed: {e}");
+                            }
+                        }
+                    }
+                    ui.label(None, "Quick load:");
+                    for name in list_all_presets() {
+                        let label = format!("> {name}");
+                        if ui.button(None, label.as_str()) {
+                            match load_preset(&name) {
+                                Ok(p) => {
+                                    self.apply_preset(&p);
+                                    self.apply_material_overrides(world);
+                                    self.preset_name = name.clone();
+                                    let note = if p.notes.is_empty() {
+                                        String::new()
+                                    } else {
+                                        format!(" — {}", p.notes)
+                                    };
+                                    self.preset_status = format!("Loaded {name}{note}");
+                                }
+                                Err(e) => {
+                                    self.preset_status = format!("Load {name} failed: {e}");
+                                }
+                            }
+                        }
+                    }
+                    if !self.preset_status.is_empty() {
+                        ui.label(None, &self.preset_status.clone());
+                    }
+                });
                 ui.separator();
 
                 if self.page == SettingsPage::World {

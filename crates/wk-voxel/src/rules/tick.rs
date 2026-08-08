@@ -6,6 +6,8 @@
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
+
 use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
 use crate::grid::World;
 
@@ -30,7 +32,7 @@ pub const FLOW_QUIET_AREA: usize = 512;
 
 /// Live-tunable physics trade-offs (Tab → Performance). Defaults keep
 /// the full water-feel path; opt-ins trade some leveling speed for ms.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerfConfig {
     /// Run surface water flow only on odd substeps (gravity still every
     /// substep). Default **off** — same feel as the tuned ×12 path.

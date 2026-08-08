@@ -7,6 +7,7 @@
 use std::collections::HashSet;
 use std::sync::Mutex;
 
+use serde::{Deserialize, Serialize};
 use wk_material::{HydroOverrides, MaterialId};
 
 use crate::active::{partition_checkerboard, plan_active, ActiveChunk};
@@ -1979,7 +1980,7 @@ fn avalanche_source_ok(mat: MaterialId, below_src: Option<Cell>, cold_mode: bool
 /// Angle-of-repose slides always run inside [`tick`]; flow erosion is
 /// gated by [`Self::enabled`]. Floating-litter soak / raft bind also
 /// live here so Tab can tune shore stickiness live.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct GrainConfig {
     /// When false, [`apply_flow_erosion`] is a no-op.
     pub enabled: bool,

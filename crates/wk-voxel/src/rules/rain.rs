@@ -4,6 +4,7 @@
 //!
 //! Climatic rain injection and surface deposit helpers.
 
+use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::cell::{Cell, Sat};
@@ -12,7 +13,7 @@ use crate::grid::World;
 use super::util::hash_prob;
 
 /// Rain source parameters for [`apply_rain`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct RainConfig {
     /// World-y row where droplets appear.
     pub top_y: i32,

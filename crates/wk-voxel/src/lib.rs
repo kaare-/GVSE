@@ -30,6 +30,7 @@ pub mod plant;
 pub mod rules;
 pub mod save;
 pub mod shade;
+pub mod sim_preset;
 pub mod spore_bank;
 pub mod symbiosis;
 pub mod temperature;
@@ -158,5 +159,10 @@ pub use temperature::{
 };
 pub use wind::Wind;
 pub use save::{SimSnapshot, SIM_SAVE_DIR, SIM_SAVE_EXT, SIM_SCHEMA_VERSION};
+pub use sim_preset::{
+    builtin_preset_names, list_all_presets, list_disk_presets, load_builtin_preset, load_preset,
+    preset_path, save_preset, sanitize_preset_name, PlantGenePreset, SimPreset, PRESET_DIR,
+    PRESET_EXT, PRESET_SCHEMA_VERSION,
+};
 pub use worldgen::is_karst_zone_x;
 pub use worldgen::{continental_surface_y, stamp_world, WorldgenParams};
