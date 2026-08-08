@@ -19,10 +19,16 @@ sat free/pore, mycelium cream/sugar, carbon buckets, optional mean T.
 cargo test -p wk-voxel --test sim_log_soak --release short_logged_life_run -- --nocapture
 
 # Long soak (writes NDJSON when GVSE_SIM_LOG is set)
-GVSE_SIM_LOG=/tmp/gvse-soak.ndjson GVSE_SOAK_TICKS=50000 GVSE_SIM_LOG_PERIOD=120 \
+GVSE_SIM_LOG=/tmp/gvse-soak.ndjson GVSE_SOAK_TICKS=1000000 GVSE_SIM_LOG_PERIOD=2000 \
   cargo test -p wk-voxel --test sim_log_soak --release long_sim_log_soak \
   -- --ignored --nocapture
 ```
+
+Fixture seeds a moist beach grove + deep lake with **land plants**,
+**seaweed**, and **mycelium inoculum** (designed fruiting body stamped as
+lineage — no living stalk until the network emerges). The harness also
+runs the water→humidity→cloud loop with raised `coag_rate` and
+`cloud_alt_above_sea`.
 
 Format is **NDJSON** (`type: event|sample` per line). Summary also prints
 to stderr for cloud agent logs.
