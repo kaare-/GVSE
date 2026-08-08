@@ -24,7 +24,8 @@ use wk_voxel::{
     apply_condensation_rain_phased, apply_evaporation_into_humidity, humidity_diffuse_due,
     infect_mycelium_with_lineage, tick_with_life, Blueprint, CarbonBudget, CarbonConfig, Cell,
     ChunkCoord, ClimateConfig, CloudConfig, CloudStore, CondensationConfig, EvapConfig,
-    FailureConfig, Humidity, OrganismStore, PerfConfig, Sat, SimEventKind, SimLog, Wind, World,
+    FailureConfig, Humidity, ModuleId, OrganismStore, PerfConfig, Sat, SimEventKind, SimLog, Wind,
+    World,
 };
 
 const WIDTH: i32 = 112;
@@ -99,10 +100,14 @@ fn complex_life_world(seed: u64) -> (World, OrganismStore, CarbonBudget, Humidit
     let mut store = OrganismStore::new();
 
     // Land plants on the cream grove (Air crown above Organic).
+    // Symbiont painted so cream can gift water when the bed dries out.
     let plant = Blueprint::minimal_plant();
-    let plant_body = plant.modules_relative_to_nucleus();
+    let mut plant_body = plant.modules_relative_to_nucleus();
+    plant_body.push((1, 0, ModuleId::Symbiont));
     let mut plant_g = plant.genome;
     plant_g.clone_fidelity = 0.88;
+    plant_g.sym_water = 140;
+    plant_g.sym_energy = 120;
     for x in [14i32, 18, 24, 30, 36, 20, 28] {
         let ok = store.spawn_blueprint(&world, x, 3, plant_body.clone(), 48.0, plant_g);
         assert!(ok, "land plant should seat at x={x}");
@@ -119,12 +124,16 @@ fn complex_life_world(seed: u64) -> (World, OrganismStore, CarbonBudget, Humidit
     }
 
     // Fungi: design fruiting body → infect Organic. No living stalk until
-    // the network emerges and fruits on its own.
+    // the network emerges and fruits on its own. Symbiont on the lineage
+    // so emergent stalks / cream trades can support dry plants.
     let fungus = Blueprint::minimal_fungus();
-    let fungus_body = fungus.modules_relative_to_nucleus();
+    let mut fungus_body = fungus.modules_relative_to_nucleus();
+    fungus_body.push((0, 1, ModuleId::Symbiont));
     let mut fungus_g = fungus.genome;
     fungus_g.digest_rate = 1.15;
     fungus_g.clone_fidelity = 0.82;
+    fungus_g.sym_water = 150;
+    fungus_g.sym_energy = 110;
     let lineage = Some((fungus_g, fungus_body));
     for x in [16i32, 24, 34, 46] {
         let hit = infect_mycelium_with_lineage(&mut world, x, 3, lineage.clone());
@@ -256,11 +265,21 @@ fn run_logged(ticks: u64, sample_period: u64, label: &str) -> SimLog {
         // Progress breadcrumbs + checkpoint flush on long soaks.
         if ticks >= 10_000 && tick_no > 0 && tick_no % 25_000 == 0 {
             let (p, f, a) = store.habit_counts();
-            let cream = log.samples.last().map(|s| s.cream_cells).unwrap_or(0);
-            let sugar = log.samples.last().map(|s| s.sugar_sum).unwrap_or(0);
+            let s = log.samples.last();
+            let cream = s.map(|s| s.cream_cells).unwrap_or(0);
+            let sugar = s.map(|s| s.sugar_sum).unwrap_or(0);
+            let dry_sym = s.map(|s| s.plants_dry_sym_recv).unwrap_or(0);
+            let drought = s.map(|s| s.plants_drought).unwrap_or(0);
+            let moist = s.map(|s| s.mean_root_moist).unwrap_or(0.0);
+            let org_d = s.map(|s| s.mean_organic_depth).unwrap_or(0.0);
+            let alloc_r = s.map(|s| s.mean_alloc_root).unwrap_or(0.0);
+            let depth_b = s.map(|s| s.mean_root_depth_bias).unwrap_or(0.0);
+            let fid = s.map(|s| s.mean_clone_fidelity).unwrap_or(0.0);
             let msg = format!(
                 "{label} @{tick_no} p/f/a={p}/{f}/{a} \
-                 cream={cream} sugar={sugar} clouds={} hum={:.0}",
+                 cream={cream} sugar={sugar} clouds={} hum={:.0} \
+                 dry_sym={dry_sym}/{drought} moist={moist:.3} org_d={org_d:.1} \
+                 alloc_r={alloc_r:.2} depth_b={depth_b:.2} fid={fid:.2}",
                 clouds.len(),
                 humidity.total_mass(),
             );
@@ -307,6 +326,12 @@ fn short_logged_life_run() {
     assert_eq!(first.fungi, 0, "init must be inoculum-only (no living stalk)");
     assert!(first.plants >= 10, "grove + seaweed should be present");
     assert!(first.cream_cells > 0, "mycelium inoculum should seed cream");
+    assert!(
+        first.plants_with_symbiont >= 7,
+        "grove plants should paint Symbiont for cream water support"
+    );
+    assert!(first.mean_organic_depth > 0.0, "grove sits on Organic");
+    assert!(first.mean_alloc_root > 0.0, "evolution means should be live");
 
     let last = log.samples.last().expect("sample");
     assert!(
@@ -319,6 +344,8 @@ fn short_logged_life_run() {
     );
     let nd = log.to_ndjson();
     assert!(nd.contains("\"type\":\"sample\""));
+    assert!(nd.contains("\"plants_dry_sym_recv\""));
+    assert!(nd.contains("\"mean_root_depth_bias\""));
     assert!(nd.lines().count() >= 3);
     assert!(
         log_path.is_file(),

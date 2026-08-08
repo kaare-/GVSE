@@ -13,14 +13,17 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+use wk_material::MaterialId;
+
 use crate::audit::sat_totals;
 use crate::carbon::CarbonBudget;
 use crate::cell::hosts_mycelium;
 use crate::failure::FailureStats;
 use crate::fungi::is_fungus;
 use crate::grid::World;
-use crate::organism::{OrganismStepStats, OrganismStore};
-use crate::plant::is_land_plant;
+use crate::organism::{ModuleId, OrganismStepStats, OrganismStore};
+use crate::plant::{is_land_plant, plant_moisture_frac, DROUGHT_DORMANT_FRAC, DROUGHT_STRESS_FRAC};
+use crate::symbiosis::body_has_symbiont;
 
 /// Default ring capacity (~a few minutes of dense events at 60 Hz).
 pub const SIM_LOG_DEFAULT_CAP: usize = 50_000;
@@ -90,6 +93,46 @@ pub struct SimSample {
     pub carbon_atm: f32,
     pub carbon_dissolved: f32,
     pub mean_temp: Option<f32>,
+
+    // --- Mycelium water support (plant↔cream Symbiont trade) ---
+    /// Pore-sat units plants received from cream this tick (sum of lasts).
+    pub sym_water_recv_tick: u32,
+    /// Pore-sat units plants sent to cream this tick.
+    pub sym_water_sent_tick: u32,
+    /// Network-sugar units plants paid cream this tick.
+    pub sym_sugar_paid_tick: u32,
+    /// Network-sugar units plants received this tick.
+    pub sym_sugar_recv_tick: u32,
+    /// Living plants with any sym flow this tick.
+    pub plants_sym_linked: u32,
+    /// Living plants currently drought-stressed / dormant.
+    pub plants_drought: u32,
+    /// Drought plants that still received cream water this tick — desert support.
+    pub plants_dry_sym_recv: u32,
+    /// Plants whose body paints Symbiont.
+    pub plants_with_symbiont: u32,
+    /// Mean root/leaf moisture fraction across living plants (0..1).
+    pub mean_root_moist: f32,
+    /// Mean Organic stack depth under plant crowns (cream-buildup signal).
+    pub mean_organic_depth: f32,
+    /// Max Organic stack depth under any living plant crown.
+    pub max_organic_depth: u32,
+
+    // --- Plant evolution (means over living Root-bearing plants) ---
+    pub stemless_plants: u32,
+    pub mean_body_modules: f32,
+    pub mean_roots: f32,
+    pub mean_stems: f32,
+    pub mean_photos: f32,
+    pub mean_alloc_stem: f32,
+    pub mean_alloc_leaf: f32,
+    pub mean_alloc_root: f32,
+    pub mean_root_depth_bias: f32,
+    pub mean_clone_fidelity: f32,
+    pub mean_leaf_absorb: f32,
+    pub mean_shade_efficiency: f32,
+    pub mean_sym_water: f32,
+    pub mean_sym_energy: f32,
 }
 
 /// In-memory ring of events + samples.
@@ -256,6 +299,7 @@ impl SimLog {
             .count() as u32;
         let sat = sat_totals(world);
         let myc = mycelium_totals(world);
+        let life = plant_life_totals(world, organisms);
         let (atm, dissolved) = carbon
             .map(|c| (c.atmosphere, c.dissolved))
             .unwrap_or((0.0, 0.0));
@@ -277,6 +321,31 @@ impl SimLog {
             carbon_atm: atm,
             carbon_dissolved: dissolved,
             mean_temp,
+            sym_water_recv_tick: life.sym_water_recv_tick,
+            sym_water_sent_tick: life.sym_water_sent_tick,
+            sym_sugar_paid_tick: life.sym_sugar_paid_tick,
+            sym_sugar_recv_tick: life.sym_sugar_recv_tick,
+            plants_sym_linked: life.plants_sym_linked,
+            plants_drought: life.plants_drought,
+            plants_dry_sym_recv: life.plants_dry_sym_recv,
+            plants_with_symbiont: life.plants_with_symbiont,
+            mean_root_moist: life.mean_root_moist,
+            mean_organic_depth: life.mean_organic_depth,
+            max_organic_depth: life.max_organic_depth,
+            stemless_plants: life.stemless_plants,
+            mean_body_modules: life.mean_body_modules,
+            mean_roots: life.mean_roots,
+            mean_stems: life.mean_stems,
+            mean_photos: life.mean_photos,
+            mean_alloc_stem: life.mean_alloc_stem,
+            mean_alloc_leaf: life.mean_alloc_leaf,
+            mean_alloc_root: life.mean_alloc_root,
+            mean_root_depth_bias: life.mean_root_depth_bias,
+            mean_clone_fidelity: life.mean_clone_fidelity,
+            mean_leaf_absorb: life.mean_leaf_absorb,
+            mean_shade_efficiency: life.mean_shade_efficiency,
+            mean_sym_water: life.mean_sym_water,
+            mean_sym_energy: life.mean_sym_energy,
         });
         if self.samples.len() > self.cap / 4 {
             let drop = self.samples.len() - self.cap / 4;
@@ -309,7 +378,10 @@ impl SimLog {
         }
         let last = self.samples.last();
         format!(
-            "sim_log: events={} samples={} births={} deaths={} tips={} spores+={} geotech={} | last_pop p/f/a={}/{}/{} sat={} cream_cells={}",
+            "sim_log: events={} samples={} births={} deaths={} tips={} spores+={} geotech={} | \
+             last_pop p/f/a={}/{}/{} sat={} cream_cells={} \
+             dry_sym={}/{} moist={:.3} org_depth={:.1} \
+             alloc_r={:.2} depth_bias={:.2} fidelity={:.2} symbiont={}",
             self.events.len(),
             self.samples.len(),
             births,
@@ -322,6 +394,14 @@ impl SimLog {
             last.map(|s| s.atoms).unwrap_or(0),
             last.map(|s| s.sat_total).unwrap_or(0),
             last.map(|s| s.cream_cells).unwrap_or(0),
+            last.map(|s| s.plants_dry_sym_recv).unwrap_or(0),
+            last.map(|s| s.plants_drought).unwrap_or(0),
+            last.map(|s| s.mean_root_moist).unwrap_or(0.0),
+            last.map(|s| s.mean_organic_depth).unwrap_or(0.0),
+            last.map(|s| s.mean_alloc_root).unwrap_or(0.0),
+            last.map(|s| s.mean_root_depth_bias).unwrap_or(0.0),
+            last.map(|s| s.mean_clone_fidelity).unwrap_or(0.0),
+            last.map(|s| s.plants_with_symbiont).unwrap_or(0),
         )
     }
 
@@ -386,6 +466,159 @@ struct MycTotals {
     cream_sum: u64,
     sugar_sum: u64,
     strain_cells: u32,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct PlantLifeTotals {
+    sym_water_recv_tick: u32,
+    sym_water_sent_tick: u32,
+    sym_sugar_paid_tick: u32,
+    sym_sugar_recv_tick: u32,
+    plants_sym_linked: u32,
+    plants_drought: u32,
+    plants_dry_sym_recv: u32,
+    plants_with_symbiont: u32,
+    mean_root_moist: f32,
+    mean_organic_depth: f32,
+    max_organic_depth: u32,
+    stemless_plants: u32,
+    mean_body_modules: f32,
+    mean_roots: f32,
+    mean_stems: f32,
+    mean_photos: f32,
+    mean_alloc_stem: f32,
+    mean_alloc_leaf: f32,
+    mean_alloc_root: f32,
+    mean_root_depth_bias: f32,
+    mean_clone_fidelity: f32,
+    mean_leaf_absorb: f32,
+    mean_shade_efficiency: f32,
+    mean_sym_water: f32,
+    mean_sym_energy: f32,
+}
+
+/// Consecutive Organic cells downward from the solid under the crown.
+fn organic_stack_depth(world: &World, gx: i32, crown_y: i32) -> u32 {
+    let mut depth = 0u32;
+    let mut y = crown_y - 1;
+    for _ in 0..64 {
+        let Some(c) = world.get_cell(gx, y) else {
+            break;
+        };
+        if c.material != MaterialId::Organic {
+            break;
+        }
+        depth += 1;
+        y -= 1;
+    }
+    depth
+}
+
+fn plant_life_totals(world: &World, organisms: &OrganismStore) -> PlantLifeTotals {
+    let mut t = PlantLifeTotals::default();
+    let mut n = 0u32;
+    let mut moist_sum = 0.0f32;
+    let mut org_sum = 0u32;
+    let mut body_sum = 0u32;
+    let mut root_sum = 0u32;
+    let mut stem_sum = 0u32;
+    let mut photo_sum = 0u32;
+    let mut alloc_s = 0.0f32;
+    let mut alloc_l = 0.0f32;
+    let mut alloc_r = 0.0f32;
+    let mut depth_bias = 0.0f32;
+    let mut fidelity = 0.0f32;
+    let mut leaf_abs = 0.0f32;
+    let mut shade = 0.0f32;
+    let mut sym_w = 0.0f32;
+    let mut sym_e = 0.0f32;
+
+    for atom in &organisms.atoms {
+        if !is_land_plant(atom) {
+            continue;
+        }
+        n += 1;
+        let recv = u32::from(atom.sym_water_recv_last);
+        let sent = u32::from(atom.sym_water_sent_last);
+        let paid = u32::from(atom.sym_sugar_paid_last);
+        let got = u32::from(atom.sym_sugar_recv_last);
+        t.sym_water_recv_tick += recv;
+        t.sym_water_sent_tick += sent;
+        t.sym_sugar_paid_tick += paid;
+        t.sym_sugar_recv_tick += got;
+        if recv + sent + paid + got > 0 {
+            t.plants_sym_linked += 1;
+        }
+        let moist = plant_moisture_frac(world, atom);
+        moist_sum += moist;
+        // Soft stress + hard dormancy (dormancy alone misses brief dry dips).
+        let dry = moist < DROUGHT_STRESS_FRAC
+            || moist < DROUGHT_DORMANT_FRAC
+            || atom.drought_ticks > 0;
+        if dry {
+            t.plants_drought += 1;
+            if recv > 0 {
+                t.plants_dry_sym_recv += 1;
+            }
+        }
+        if body_has_symbiont(&atom.body) {
+            t.plants_with_symbiont += 1;
+        }
+        let stemless = !atom.body.iter().any(|(_, _, m)| *m == ModuleId::Stem);
+        if stemless {
+            t.stemless_plants += 1;
+        }
+        let org = organic_stack_depth(world, atom.gx, atom.gy);
+        org_sum += org;
+        t.max_organic_depth = t.max_organic_depth.max(org);
+
+        let mut roots = 0u32;
+        let mut stems = 0u32;
+        let mut photos = 0u32;
+        for &(_, _, m) in &atom.body {
+            match m {
+                ModuleId::Root => roots += 1,
+                ModuleId::Stem => stems += 1,
+                ModuleId::Photosystem => photos += 1,
+                _ => {}
+            }
+        }
+        body_sum += atom.body.len() as u32;
+        root_sum += roots;
+        stem_sum += stems;
+        photo_sum += photos;
+
+        let (as_, al, ar) = atom.genome.alloc_weights();
+        alloc_s += as_;
+        alloc_l += al;
+        alloc_r += ar;
+        depth_bias += atom.genome.root_depth_bias;
+        fidelity += atom.genome.clone_fidelity;
+        leaf_abs += atom.genome.leaf_absorb;
+        shade += atom.genome.shade_efficiency;
+        sym_w += f32::from(atom.genome.sym_water);
+        sym_e += f32::from(atom.genome.sym_energy);
+    }
+
+    if n > 0 {
+        let nf = n as f32;
+        t.mean_root_moist = moist_sum / nf;
+        t.mean_organic_depth = org_sum as f32 / nf;
+        t.mean_body_modules = body_sum as f32 / nf;
+        t.mean_roots = root_sum as f32 / nf;
+        t.mean_stems = stem_sum as f32 / nf;
+        t.mean_photos = photo_sum as f32 / nf;
+        t.mean_alloc_stem = alloc_s / nf;
+        t.mean_alloc_leaf = alloc_l / nf;
+        t.mean_alloc_root = alloc_r / nf;
+        t.mean_root_depth_bias = depth_bias / nf;
+        t.mean_clone_fidelity = fidelity / nf;
+        t.mean_leaf_absorb = leaf_abs / nf;
+        t.mean_shade_efficiency = shade / nf;
+        t.mean_sym_water = sym_w / nf;
+        t.mean_sym_energy = sym_e / nf;
+    }
+    t
 }
 
 fn mycelium_totals(world: &World) -> MycTotals {
@@ -473,10 +706,16 @@ mod tests {
         assert_eq!(log.events.len(), 3); // note + birth + tip
         assert_eq!(log.samples.len(), 1);
         assert!(log.summary().contains("births=1"));
+        let s = &log.samples[0];
+        assert!(s.mean_body_modules >= 1.0);
+        assert!(s.mean_roots >= 1.0);
+        assert!(s.mean_clone_fidelity > 0.0);
         let nd = log.to_ndjson();
         assert!(nd.contains("\"type\":\"event\""));
         assert!(nd.contains("\"type\":\"sample\""));
         assert!(nd.contains("\"plants\":1"));
+        assert!(nd.contains("\"plants_dry_sym_recv\""));
+        assert!(nd.contains("\"mean_alloc_root\""));
     }
 
     #[test]
