@@ -22,7 +22,10 @@ use crate::failure::FailureStats;
 use crate::fungi::is_fungus;
 use crate::grid::World;
 use crate::organism::{ModuleId, OrganismStepStats, OrganismStore};
-use crate::plant::{is_land_plant, plant_moisture_frac, DROUGHT_DORMANT_FRAC, DROUGHT_STRESS_FRAC};
+use crate::plant::{
+    is_land_plant, leaves_bathing, plant_moisture_frac, stem_count, DROUGHT_DORMANT_FRAC,
+    DROUGHT_STRESS_FRAC,
+};
 use crate::symbiosis::body_has_symbiont;
 
 /// Default ring capacity (~a few minutes of dense events at 60 Hz).
@@ -133,6 +136,28 @@ pub struct SimSample {
     pub mean_shade_efficiency: f32,
     pub mean_sym_water: f32,
     pub mean_sym_energy: f32,
+
+    // --- Habit cohorts (woody vs submerged seaweed vs stranded seaweed) ---
+    /// Living plants with at least one Stem (true land/woody habit).
+    pub woody_plants: u32,
+    /// Stemless plants with leaves bathing in standing water (aquatic ribbons).
+    pub stemless_wet: u32,
+    /// Stemless plants not bathing — usually stranded seaweed on drying land,
+    /// often sprouting long roots through dry periods.
+    pub stemless_dry: u32,
+    pub mean_roots_woody: f32,
+    pub mean_roots_stemless_wet: f32,
+    pub mean_roots_stemless_dry: f32,
+    pub mean_moist_woody: f32,
+    pub mean_moist_stemless_wet: f32,
+    pub mean_moist_stemless_dry: f32,
+    pub drought_woody: u32,
+    pub drought_stemless_dry: u32,
+    /// Mean root-depth bias of stranded stemless plants (dive signal).
+    pub mean_depth_bias_stemless_dry: f32,
+    pub fallen_woody: u32,
+    pub fallen_stemless: u32,
+    pub mean_org_depth_woody: f32,
 }
 
 /// In-memory ring of events + samples.
@@ -346,6 +371,21 @@ impl SimLog {
             mean_shade_efficiency: life.mean_shade_efficiency,
             mean_sym_water: life.mean_sym_water,
             mean_sym_energy: life.mean_sym_energy,
+            woody_plants: life.woody_plants,
+            stemless_wet: life.stemless_wet,
+            stemless_dry: life.stemless_dry,
+            mean_roots_woody: life.mean_roots_woody,
+            mean_roots_stemless_wet: life.mean_roots_stemless_wet,
+            mean_roots_stemless_dry: life.mean_roots_stemless_dry,
+            mean_moist_woody: life.mean_moist_woody,
+            mean_moist_stemless_wet: life.mean_moist_stemless_wet,
+            mean_moist_stemless_dry: life.mean_moist_stemless_dry,
+            drought_woody: life.drought_woody,
+            drought_stemless_dry: life.drought_stemless_dry,
+            mean_depth_bias_stemless_dry: life.mean_depth_bias_stemless_dry,
+            fallen_woody: life.fallen_woody,
+            fallen_stemless: life.fallen_stemless,
+            mean_org_depth_woody: life.mean_org_depth_woody,
         });
         if self.samples.len() > self.cap / 4 {
             let drop = self.samples.len() - self.cap / 4;
@@ -379,9 +419,9 @@ impl SimLog {
         let last = self.samples.last();
         format!(
             "sim_log: events={} samples={} births={} deaths={} tips={} spores+={} geotech={} | \
-             last_pop p/f/a={}/{}/{} sat={} cream_cells={} \
-             dry_sym={}/{} moist={:.3} org_depth={:.1} \
-             alloc_r={:.2} depth_bias={:.2} fidelity={:.2} symbiont={}",
+             last_pop p/f/a={}/{}/{} woody/wet/dry={}/{}/{} sat={} cream={} \
+             dry_sym={}/{} moist_w/d={:.2}/{:.2} stranded_roots={:.1} \
+             alloc_r={:.2} fid={:.2}",
             self.events.len(),
             self.samples.len(),
             births,
@@ -392,16 +432,18 @@ impl SimLog {
             last.map(|s| s.plants).unwrap_or(0),
             last.map(|s| s.fungi).unwrap_or(0),
             last.map(|s| s.atoms).unwrap_or(0),
+            last.map(|s| s.woody_plants).unwrap_or(0),
+            last.map(|s| s.stemless_wet).unwrap_or(0),
+            last.map(|s| s.stemless_dry).unwrap_or(0),
             last.map(|s| s.sat_total).unwrap_or(0),
             last.map(|s| s.cream_cells).unwrap_or(0),
             last.map(|s| s.plants_dry_sym_recv).unwrap_or(0),
             last.map(|s| s.plants_drought).unwrap_or(0),
-            last.map(|s| s.mean_root_moist).unwrap_or(0.0),
-            last.map(|s| s.mean_organic_depth).unwrap_or(0.0),
+            last.map(|s| s.mean_moist_woody).unwrap_or(0.0),
+            last.map(|s| s.mean_moist_stemless_dry).unwrap_or(0.0),
+            last.map(|s| s.mean_roots_stemless_dry).unwrap_or(0.0),
             last.map(|s| s.mean_alloc_root).unwrap_or(0.0),
-            last.map(|s| s.mean_root_depth_bias).unwrap_or(0.0),
             last.map(|s| s.mean_clone_fidelity).unwrap_or(0.0),
-            last.map(|s| s.plants_with_symbiont).unwrap_or(0),
         )
     }
 
@@ -469,6 +511,65 @@ struct MycTotals {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+struct CohortAcc {
+    n: u32,
+    roots: u32,
+    moist: f32,
+    drought: u32,
+    org: u32,
+    depth_bias: f32,
+    fallen: u32,
+}
+
+impl CohortAcc {
+    fn push(&mut self, roots: u32, moist: f32, drought: bool, org: u32, depth_bias: f32, fallen: bool) {
+        self.n += 1;
+        self.roots += roots;
+        self.moist += moist;
+        if drought {
+            self.drought += 1;
+        }
+        self.org += org;
+        self.depth_bias += depth_bias;
+        if fallen {
+            self.fallen += 1;
+        }
+    }
+
+    fn mean_roots(&self) -> f32 {
+        if self.n == 0 {
+            0.0
+        } else {
+            self.roots as f32 / self.n as f32
+        }
+    }
+
+    fn mean_moist(&self) -> f32 {
+        if self.n == 0 {
+            0.0
+        } else {
+            self.moist / self.n as f32
+        }
+    }
+
+    fn mean_org(&self) -> f32 {
+        if self.n == 0 {
+            0.0
+        } else {
+            self.org as f32 / self.n as f32
+        }
+    }
+
+    fn mean_depth_bias(&self) -> f32 {
+        if self.n == 0 {
+            0.0
+        } else {
+            self.depth_bias / self.n as f32
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 struct PlantLifeTotals {
     sym_water_recv_tick: u32,
     sym_water_sent_tick: u32,
@@ -495,6 +596,21 @@ struct PlantLifeTotals {
     mean_shade_efficiency: f32,
     mean_sym_water: f32,
     mean_sym_energy: f32,
+    woody_plants: u32,
+    stemless_wet: u32,
+    stemless_dry: u32,
+    mean_roots_woody: f32,
+    mean_roots_stemless_wet: f32,
+    mean_roots_stemless_dry: f32,
+    mean_moist_woody: f32,
+    mean_moist_stemless_wet: f32,
+    mean_moist_stemless_dry: f32,
+    drought_woody: u32,
+    drought_stemless_dry: u32,
+    mean_depth_bias_stemless_dry: f32,
+    fallen_woody: u32,
+    fallen_stemless: u32,
+    mean_org_depth_woody: f32,
 }
 
 /// Consecutive Organic cells downward from the solid under the crown.
@@ -532,6 +648,9 @@ fn plant_life_totals(world: &World, organisms: &OrganismStore) -> PlantLifeTotal
     let mut shade = 0.0f32;
     let mut sym_w = 0.0f32;
     let mut sym_e = 0.0f32;
+    let mut woody = CohortAcc::default();
+    let mut wet = CohortAcc::default();
+    let mut dry_stemless = CohortAcc::default();
 
     for atom in &organisms.atoms {
         if !is_land_plant(atom) {
@@ -552,10 +671,10 @@ fn plant_life_totals(world: &World, organisms: &OrganismStore) -> PlantLifeTotal
         let moist = plant_moisture_frac(world, atom);
         moist_sum += moist;
         // Soft stress + hard dormancy (dormancy alone misses brief dry dips).
-        let dry = moist < DROUGHT_STRESS_FRAC
+        let drought = moist < DROUGHT_STRESS_FRAC
             || moist < DROUGHT_DORMANT_FRAC
             || atom.drought_ticks > 0;
-        if dry {
+        if drought {
             t.plants_drought += 1;
             if recv > 0 {
                 t.plants_dry_sym_recv += 1;
@@ -564,7 +683,8 @@ fn plant_life_totals(world: &World, organisms: &OrganismStore) -> PlantLifeTotal
         if body_has_symbiont(&atom.body) {
             t.plants_with_symbiont += 1;
         }
-        let stemless = !atom.body.iter().any(|(_, _, m)| *m == ModuleId::Stem);
+        let stems_n = stem_count(atom) as u32;
+        let stemless = stems_n == 0;
         if stemless {
             t.stemless_plants += 1;
         }
@@ -573,19 +693,17 @@ fn plant_life_totals(world: &World, organisms: &OrganismStore) -> PlantLifeTotal
         t.max_organic_depth = t.max_organic_depth.max(org);
 
         let mut roots = 0u32;
-        let mut stems = 0u32;
         let mut photos = 0u32;
         for &(_, _, m) in &atom.body {
             match m {
                 ModuleId::Root => roots += 1,
-                ModuleId::Stem => stems += 1,
                 ModuleId::Photosystem => photos += 1,
                 _ => {}
             }
         }
         body_sum += atom.body.len() as u32;
         root_sum += roots;
-        stem_sum += stems;
+        stem_sum += stems_n;
         photo_sum += photos;
 
         let (as_, al, ar) = atom.genome.alloc_weights();
@@ -598,7 +716,53 @@ fn plant_life_totals(world: &World, organisms: &OrganismStore) -> PlantLifeTotal
         shade += atom.genome.shade_efficiency;
         sym_w += f32::from(atom.genome.sym_water);
         sym_e += f32::from(atom.genome.sym_energy);
+
+        // Cohort split: woody trunk vs bathing seaweed vs stranded seaweed.
+        if !stemless {
+            woody.push(
+                roots,
+                moist,
+                drought,
+                org,
+                atom.genome.root_depth_bias,
+                atom.fallen,
+            );
+        } else if leaves_bathing(world, atom) {
+            wet.push(
+                roots,
+                moist,
+                drought,
+                org,
+                atom.genome.root_depth_bias,
+                atom.fallen,
+            );
+        } else {
+            dry_stemless.push(
+                roots,
+                moist,
+                drought,
+                org,
+                atom.genome.root_depth_bias,
+                atom.fallen,
+            );
+        }
     }
+
+    t.woody_plants = woody.n;
+    t.stemless_wet = wet.n;
+    t.stemless_dry = dry_stemless.n;
+    t.mean_roots_woody = woody.mean_roots();
+    t.mean_roots_stemless_wet = wet.mean_roots();
+    t.mean_roots_stemless_dry = dry_stemless.mean_roots();
+    t.mean_moist_woody = woody.mean_moist();
+    t.mean_moist_stemless_wet = wet.mean_moist();
+    t.mean_moist_stemless_dry = dry_stemless.mean_moist();
+    t.drought_woody = woody.drought;
+    t.drought_stemless_dry = dry_stemless.drought;
+    t.mean_depth_bias_stemless_dry = dry_stemless.mean_depth_bias();
+    t.fallen_woody = woody.fallen;
+    t.fallen_stemless = wet.fallen + dry_stemless.fallen;
+    t.mean_org_depth_woody = woody.mean_org();
 
     if n > 0 {
         let nf = n as f32;
@@ -710,12 +874,16 @@ mod tests {
         assert!(s.mean_body_modules >= 1.0);
         assert!(s.mean_roots >= 1.0);
         assert!(s.mean_clone_fidelity > 0.0);
+        assert_eq!(s.woody_plants, 1, "minimal_plant is woody");
+        assert_eq!(s.stemless_wet + s.stemless_dry, 0);
         let nd = log.to_ndjson();
         assert!(nd.contains("\"type\":\"event\""));
         assert!(nd.contains("\"type\":\"sample\""));
         assert!(nd.contains("\"plants\":1"));
         assert!(nd.contains("\"plants_dry_sym_recv\""));
         assert!(nd.contains("\"mean_alloc_root\""));
+        assert!(nd.contains("\"stemless_dry\""));
+        assert!(nd.contains("\"woody_plants\""));
     }
 
     #[test]

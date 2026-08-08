@@ -173,14 +173,34 @@ impl SimSettings {
                 ..OrographicConfig::default()
             },
             karst: KarstConfig::default(),
-            cloud: CloudConfig::default(),
+            cloud: {
+                // Slightly wetter sky defaults so lakes refill overnight
+                // without requiring Tab fiddling on every new world.
+                let mut c = CloudConfig::default();
+                c.coag_rate = 0.08;
+                c.coag_max_take = 18.0;
+                c.cloud_alt_above_sea = 48;
+                c.coag_min_above_sea = 22;
+                c.buoyant_rise = 0.10;
+                c.rain_cells_per_tick = 3;
+                c
+            },
             climate: ClimateConfig::default(),
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
             grain: GrainConfig::default(),
-            fungi: FungiConfig::default(),
+            fungi: FungiConfig {
+                // Slower than crate default so Organic cream beds linger
+                // under living roots (Tab can still speed compost up).
+                soil_mycelium_threshold: 160,
+                soil_convert_odds: 1_600,
+            },
             carbon: CarbonConfig::default(),
-            spore_bank: SporeBankConfig::default(),
+            spore_bank: SporeBankConfig {
+                germinate_odds: 4,
+                max_age_ticks: 320_000,
+                ..SporeBankConfig::default()
+            },
             page: SettingsPage::World,
             perf: PerfConfig::default(),
             failure: FailureConfig::default(),
