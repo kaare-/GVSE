@@ -4794,8 +4794,10 @@ mod tests {
         store.atoms.push(atom);
         store.step(&mut w, 0);
         assert!(!store.atoms[0].fallen, "sand-rooted plant starts upright");
-        // Erode the sand under the crown columns — no water yet.
-        for x in 4..=6 {
+        // Erode a wide corridor so the rigid tip's +x trunk (stems become
+        // horizontal) lands in Air — a one-crown undercut leaves neighbour
+        // sand that `prune_fallen_canopy_in_solid` correctly sheds.
+        for x in 2..=12 {
             w.set_cell(x, 1, Cell::air());
             w.set_cell(x, 2, Cell::air());
         }

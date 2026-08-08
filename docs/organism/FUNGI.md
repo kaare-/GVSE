@@ -291,8 +291,8 @@ Ghost-root Void fill remains a column-kernel / later voxel goal.
 
 ## What is deliberately not here
 
-- True mycorrhizae (mutualist hypha↔root sugar/water exchange). The
-  cream-line-to-live-sienna slot is drawn but unused in Core.
+- Same-cell multi-share strain barter (rainbow dither on one cell is
+  visual blend only — peer trade stays on dominant-strain edges).
 - Dedicated fruiting-body *geometry* modules — surface fruiting is still
   Digest + Hypha + `ReproSpore` on a Nucleus chassis (palette `Fruit` /
   bark stay reserved). Land plants share `ReproSpore` for fern-style
@@ -301,3 +301,5 @@ Ghost-root Void fill remains a column-kernel / later voxel goal.
   makes sense.
 - Full geotechnical fill mechanics. One tick per loose-collapse
   step is enough.
+- Separate plant vs peer ledgers on `SymNetFlow` (one strain ledger for
+  now).

@@ -222,13 +222,15 @@ Features:
 - After settle ticks, remaining body → Organic + soft litter
 - Fungi feed on that residue (not on instant despawn)
 
-### Plant tune *(this PR)*
+### Plant tune *(landed)*
 
 - Root drink only touches pore sat (never free Air water); slow sip + return to humidity.
   Land roots stop sipping once pore fill is above `ROOT_DRINK_COMFORT_FRAC`
   so growing plants do not flash-dry moist sand into drought dormancy.
 - Stronger moisture tropism for root elongation
 - Softer upkeep / longer plant life; Tab → Plants/fungi gene knobs
+- Inspector: Symbiont treaty / link / last+total ledgers; `sym frontier`
+  for strain↔strain edges; F4 creature list; **`M`** strain overlay
 
 ### E2 — Epiphytes + topple *(later)*
 

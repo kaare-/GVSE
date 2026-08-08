@@ -117,7 +117,15 @@ Rules:
 - Dead roots → organic → fungal cavity → loose fill → preferential
   re-root path (`PreferentialRootPath`).
 
-Genes: `DigestRate`, `AttachPrefer`, `HostLeaveFraction`.
+Genes: `DigestRate`, `AttachPrefer`, `HostLeaveFraction`, plus opt-in
+`sym_water` / `sym_energy` when both partners paint `Symbiont`.
+
+**Landed on voxel (E1):** litter → Organic, cream mycelium field +
+network sugar, multi-strain shares, fruiting / spores, and moisture-
+directed Symbiont trade (plant↔cream and strain↔strain). See
+[`FUNGI.md`](FUNGI.md) and [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md).
+
+**Still later (E2):** epiphytes, stem integrity topple, ghost-root fill.
 
 Scenarios: E39 litter bloom, E40 epiphyte free-ride, E41 allocation
 trap, E42 smother → rot → topple, E43 gentle wins long game, E44
@@ -143,8 +151,8 @@ The kernel arc **does not** include:
   design constraint for when they arrive in Phase 7.)
 - Learned neural nets (plastic training loops). Weights are genes.
 - Active predation / chasing. `Digest` of *living* tissue can wait.
-- True mycorrhizae (mutualist hypha↔root sugar/water exchange).
-  Plausible follow-on, slot reserved.
+- Same-cell multi-share strain barter; kind-swap body morph
+  (Stem→leaf). Symbiont plant↔cream trade is landed — see Set E.
 - Real compressive / shear tensors, wind throw, or Bezier falling
   animation. One `integrity` scalar + collapse event is enough.
 - True wood rings, branching morphogenesis, seasonal leaf drop.

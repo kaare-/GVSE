@@ -109,6 +109,11 @@ new kernel genes append.
 | `AttachPrefer` | `f32 in 0..1` | Seek olive host stems (epiphyte establishment). | Ignores hosts; needs its own root. |
 | `HostLeaveFraction` | `f32 in 0..1` | Gentle rider: passes X of light through own stack to host below. | Smotherer: takes everything. |
 | `DigestRate` | `f32 ≥ 0` | Fast litter clearing; boom-crash cycles. | Starves when litter is scarce. |
+| `sym_water` | `u8` | Treaty water side of opt-in Symbiont deal (editor `,` / `.`). | Low W / high E skews parasitism toward the fungus. |
+| `sym_energy` | `u8` | Treaty sugar side (editor `-` / `=`). | High W / low E skews toward the plant. |
+
+Both partners need painted `ModuleId::Symbiont`. Match is assortative
+similarity of `(sym_water, sym_energy)`; see [`FUNGI.md`](FUNGI.md).
 
 ### Reserved gene slots
 
@@ -116,7 +121,7 @@ Kept named for editor readability, not yet used by any subsystem:
 
 - `LocomotionSpeed`, `BrowseRate`, `BrowseEfficiency` (Phase 7).
 - `Woodiness` (`Bark` slot in [`PALETTE.md`](PALETTE.md), Phase 6+).
-- `MutualistDrive` (mycorrhizae, deferred).
+- `MutualistDrive` — superseded by `sym_water` / `sym_energy` + Symbiont.
 
 ## Merge and rename plan
 

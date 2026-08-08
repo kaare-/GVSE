@@ -1527,17 +1527,10 @@ fn step_land_plant(
             }
         }
         pin_plant_pose(atom);
-    } else if let Some(solid_y) = holdfast_solid.filter(|_| !woody_castaway) {
-        // Local ground under the crown (no sand purchase yet). Stemless
-        // seaweed drops a stale tip once the holdfast is back; woody plants
-        // stay tipped so only upright_growth shoots stand up after re-root.
-        if stemless {
-            atom.fallen = false;
-            atom.upright_growth.clear();
-        }
-        atom.gy = solid_y + 1;
-        pin_plant_pose(atom);
     } else if on_float_raft {
+        // Floating-Organic holdfast wins over "see through litter to mineral"
+        // — otherwise a thin raft over a deep lake teleports the crown to the
+        // bedrock seat under the water column and never runs tip checks.
         let water_top = column_standing_surface(world, atom.gx, atom.gy);
         apply_raft_tip(world, atom, float_columns);
         if atom.fallen {
@@ -1550,6 +1543,16 @@ fn step_land_plant(
         } else {
             pin_plant_pose(atom);
         }
+    } else if let Some(solid_y) = holdfast_solid.filter(|_| !woody_castaway) {
+        // Local ground under the crown (no sand purchase yet). Stemless
+        // seaweed drops a stale tip once the holdfast is back; woody plants
+        // stay tipped so only upright_growth shoots stand up after re-root.
+        if stemless {
+            atom.fallen = false;
+            atom.upright_growth.clear();
+        }
+        atom.gy = solid_y + 1;
+        pin_plant_pose(atom);
     } else if let Some(top) = column_standing_surface(world, atom.gx, atom.gy) {
         if stemless {
             // Detached seaweed: ride the surface; keep ribbon body offsets.
@@ -2823,6 +2826,9 @@ fn crown_holdfast_solid_y(
 }
 
 /// Highest non-Air, non-Organic solid at or below `start_y` within `max_down`.
+///
+/// Stops at standing / pore-wet Air — a lake under floating litter is not a
+/// compost lid you can seat through to bedrock.
 fn mineral_solid_below(world: &World, gx: i32, start_y: i32, max_down: i32) -> Option<i32> {
     let gx = world.wrap_x(gx);
     let mut best: Option<i32> = None;
@@ -2832,6 +2838,9 @@ fn mineral_solid_below(world: &World, gx: i32, start_y: i32, max_down: i32) -> O
             break;
         };
         if c.material == MaterialId::Air {
+            if !c.sat.is_empty() {
+                break;
+            }
             continue;
         }
         if c.material == MaterialId::Organic {
@@ -5218,7 +5227,20 @@ mod tests {
 
     #[test]
     fn plant_drinks_pore_water_over_time() {
-        let mut w = moist_sand_plot();
+        // Comfort-gated drink skips beds already above ROOT_DRINK_COMFORT_FRAC
+        // (moist_sand_plot sat=120 never sips). Use a dry-ish bed that still
+        // has pore water to pull.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(18);
+            w.set_cell(x, 1, sand);
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
         let sat0 = w.get_cell(4, 1).unwrap().sat.0;
         let mut store = OrganismStore::new();
         assert!(store.spawn_blueprint(
@@ -6228,19 +6250,28 @@ mod tests {
 
     #[test]
     fn woody_understory_leaf_drops_after_sustained_shade() {
+        use crate::plant::{
+            shed_unproductive_woody_leaves, WOODY_LEAF_DROP_PERIOD, WOODY_LEAF_STARVE_LIGHT,
+            WOODY_LEAF_STARVE_TICKS,
+        };
+        use crate::shade::{build_canopy_index, shade_transmit};
+
         let mut w = moist_sand_plot();
         let mut short_g = Genome::default();
         short_g.leaf_absorb = 0.35;
         short_g.shade_efficiency = 0.15;
-        short_g.alloc_stem = 0.05;
-        short_g.alloc_leaf = 0.05;
-        short_g.alloc_root = 0.9;
+        short_g.alloc_stem = 0.0;
+        short_g.alloc_leaf = 0.0;
+        short_g.alloc_root = 1.0;
         let mut tall_g = Genome::default();
+        // Dense vertical Photosystem stack so lateral Beer–Lambert actually
+        // drops neighbour transmit below WOODY_LEAF_STARVE_LIGHT (a lone tip
+        // leaf on a stem pole is not enough optical depth).
         tall_g.leaf_absorb = 0.95;
         tall_g.shade_efficiency = 0.05;
-        tall_g.alloc_stem = 0.05;
-        tall_g.alloc_leaf = 0.05;
-        tall_g.alloc_root = 0.9;
+        tall_g.alloc_stem = 0.0;
+        tall_g.alloc_leaf = 0.0;
+        tall_g.alloc_root = 1.0;
 
         let short_body = vec![
             (0, -1, ModuleId::Root),
@@ -6250,34 +6281,37 @@ mod tests {
             (0, 3, ModuleId::Photosystem),
             (0, 4, ModuleId::Photosystem),
         ];
-        let mut tall_body = minimal_plant_body();
-        for s in 3..=8 {
-            tall_body.push((0, s, ModuleId::Stem));
+        let mut tall_body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+        ];
+        for y in 3..=12 {
+            tall_body.push((0, y, ModuleId::Photosystem));
         }
-        tall_body.push((0, 9, ModuleId::Photosystem));
 
-        let mut store = OrganismStore::new();
-        assert!(store.spawn_blueprint(&w, 3, 2, short_body, 40.0, short_g));
-        assert!(store.spawn_blueprint(&w, 4, 2, tall_body, 40.0, tall_g));
-        let n0 = store.atoms[0].photosystem_count();
+        // Flank the short plant so both lateral columns cast shade.
+        let mut short = Atom::from_body(3, 2, 40.0, short_body);
+        apply_genome(&mut short, short_g);
+        let mut left = Atom::from_body(2, 2, 40.0, tall_body.clone());
+        apply_genome(&mut left, tall_g);
+        let mut right = Atom::from_body(4, 2, 40.0, tall_body);
+        apply_genome(&mut right, tall_g);
+        let mut atoms = vec![short, left, right];
+        let canopy = build_canopy_index(&atoms);
+        let lit = shade_transmit(&canopy, 3, 4);
+        assert!(
+            lit < WOODY_LEAF_STARVE_LIGHT,
+            "fixture must shade understory below starve threshold (lit={lit})"
+        );
+        let n0 = atoms[0].photosystem_count();
         assert!(n0 >= 3);
-        for t in 0..(crate::plant::WOODY_LEAF_STARVE_TICKS as u64 + 120) {
-            store.atoms[0].energy = 30.0;
-            if let Some(a) = store.atoms.get_mut(1) {
-                a.energy = 30.0;
-            }
-            // Lock shoot growth so the short plant can't replace dropped leaves.
-            store.atoms[0].genome.alloc_leaf = 0.0;
-            store.atoms[0].genome.alloc_stem = 0.0;
-            store.step(&mut w, t);
-            // Keep age off LAND_GROW_PERIOD (step increments age_ticks).
-            if let Some(a) = store.atoms.get_mut(0) {
-                a.age_ticks = 1;
-                a.genome.alloc_leaf = 0.0;
-                a.genome.alloc_stem = 0.0;
-            }
+        for t in 0..(WOODY_LEAF_STARVE_TICKS as u64 + WOODY_LEAF_DROP_PERIOD * 2) {
+            let canopy = build_canopy_index(&atoms);
+            let _ = shed_unproductive_woody_leaves(&mut w, &mut atoms[0], &canopy, 1.0, t);
         }
-        let n1 = store.atoms[0].photosystem_count();
+        let n1 = atoms[0].photosystem_count();
         assert!(
             n1 < n0,
             "chronically shaded woody leaves should abscise (had {n0}, now {n1})"
