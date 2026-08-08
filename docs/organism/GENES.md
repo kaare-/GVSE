@@ -142,9 +142,12 @@ mechanical plan is:
 5. **Blueprint / body mutation** (`mutate_body`) runs on the same
    `clone_fidelity` knob: **double** an existing tissue block into a
    free neighbour, **add** a new module from the habit palette, or
-   **delete** a non-essential module. `clone_fidelity = 1.0` is an
-   identical chassis; default (~0.9) applies at least one morph edit
-   so spore/sapling kids diverge on `Atom::growth_target` before they
+   **delete** a non-essential module. After each edit the body is
+   repaired to stay **Moore-contiguous** from the Nucleus — a deleted
+   trunk gap collapses (canopy lowers / roots raise) so kids never
+   inherit floating tissue. `clone_fidelity = 1.0` is an identical
+   chassis; default (~0.9) applies at least one morph edit so
+   spore/sapling kids diverge on `Atom::growth_target` before they
    grow out. Habit never flips (plants keep Root+Photosystem; fungi
    keep Digest and never gain Root/Stem). Kind-swap (Stem→leaf, etc.)
    is deferred. Wired into rhizome sprouts, plant wind spores, fungal

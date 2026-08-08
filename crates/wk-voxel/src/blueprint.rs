@@ -330,8 +330,11 @@ pub fn ensure_symbiont_inherited(
 /// applies at least one morph edit (default `0.9` → one edit). Lower
 /// fidelity → up to [`BODY_MUTATION_MAX_EDITS`]. Never removes the last
 /// Nucleus or breaks the parent's habit class (Atom / plant / fungus).
-/// Does **not** treat Symbiont as required — callers that care about
-/// opt-in symbiosis should run [`ensure_symbiont_inherited`] afterward.
+/// After every edit, [`repair_body_continuity`] keeps the blueprint one
+/// Moore-connected piece (deleted trunk gaps collapse — canopy lowers /
+/// roots raise). Does **not** treat Symbiont as required — callers that
+/// care about opt-in symbiosis should run [`ensure_symbiont_inherited`]
+/// afterward.
 pub fn mutate_body(
     parent_body: &[(i16, i16, ModuleId)],
     fidelity: f32,
@@ -380,12 +383,221 @@ pub fn mutate_body(
             3 | 4 => try_add_module(&mut body, habit, palette, world_seed, salt_base, edit_i),
             _ => try_delete_module(&mut body, habit, world_seed, salt_base, edit_i),
         }
+        repair_body_continuity(&mut body);
     }
     // Safety net — should already hold if helpers refuse bad edits.
     if !body_still_valid_habit(habit, &body) {
         return parent_body.to_vec();
     }
+    repair_body_continuity(&mut body);
     body
+}
+
+/// True when every module is Moore-reachable from the Nucleus.
+pub fn body_is_contiguous(body: &[(i16, i16, ModuleId)]) -> bool {
+    let Some(n) = nucleus_pos(body) else {
+        return body.is_empty();
+    };
+    let connected = flood_moore(body, n);
+    let cells: std::collections::HashSet<(i16, i16)> =
+        body.iter().map(|&(x, y, _)| (x, y)).collect();
+    connected.len() == cells.len()
+}
+
+fn nucleus_pos(body: &[(i16, i16, ModuleId)]) -> Option<(i16, i16)> {
+    body.iter()
+        .find(|(_, _, m)| *m == ModuleId::Nucleus)
+        .map(|&(x, y, _)| (x, y))
+}
+
+const MOORE: [(i16, i16); 8] = [
+    (1, 0),
+    (-1, 0),
+    (0, 1),
+    (0, -1),
+    (1, 1),
+    (1, -1),
+    (-1, 1),
+    (-1, -1),
+];
+
+fn flood_moore(
+    body: &[(i16, i16, ModuleId)],
+    start: (i16, i16),
+) -> std::collections::HashSet<(i16, i16)> {
+    use std::collections::{HashSet, VecDeque};
+    let cells: HashSet<(i16, i16)> = body.iter().map(|&(x, y, _)| (x, y)).collect();
+    let mut seen = HashSet::new();
+    let mut q = VecDeque::new();
+    if !cells.contains(&start) {
+        return seen;
+    }
+    q.push_back(start);
+    seen.insert(start);
+    while let Some((x, y)) = q.pop_front() {
+        for (dx, dy) in MOORE {
+            let n = (x + dx, y + dy);
+            if cells.contains(&n) && seen.insert(n) {
+                q.push_back(n);
+            }
+        }
+    }
+    seen
+}
+
+/// Collapse gaps so the blueprint stays one contiguous organism.
+///
+/// Disconnected scraps (e.g. canopy above a deleted trunk cell) are
+/// translated toward the Nucleus component: pieces above lower, pieces
+/// below raise, lateral scraps slide inward. Last resort drops modules
+/// that still cannot reconnect without overlapping.
+fn repair_body_continuity(body: &mut Vec<(i16, i16, ModuleId)>) {
+    if body.len() <= 1 {
+        recenter_nucleus(body);
+        return;
+    }
+    for _ in 0..48 {
+        recenter_nucleus(body);
+        let Some(n) = nucleus_pos(body) else {
+            return;
+        };
+        let connected = flood_moore(body, n);
+        let cells: std::collections::HashSet<(i16, i16)> =
+            body.iter().map(|&(x, y, _)| (x, y)).collect();
+        if connected.len() == cells.len() {
+            return;
+        }
+        // One orphan component per pass (flood from any unvisited cell).
+        let Some(&seed) = cells.iter().find(|c| !connected.contains(c)) else {
+            return;
+        };
+        let orphan = flood_moore(body, seed);
+        if !translate_component_to_touch(body, &orphan, &connected) {
+            // Cannot slide without collision — drop the orphan scrap.
+            body.retain(|&(x, y, _)| !orphan.contains(&(x, y)));
+        }
+    }
+    recenter_nucleus(body);
+}
+
+fn recenter_nucleus(body: &mut Vec<(i16, i16, ModuleId)>) {
+    let Some((nx, ny)) = nucleus_pos(body) else {
+        return;
+    };
+    if nx == 0 && ny == 0 {
+        return;
+    }
+    for (x, y, _) in body.iter_mut() {
+        *x -= nx;
+        *y -= ny;
+    }
+}
+
+/// Translate every cell in `orphan` by the smallest vector that Moore-touches
+/// `connected` without overlapping existing tissue. Prefers vertical collapse
+/// toward the nucleus (lower canopy / raise roots).
+fn translate_component_to_touch(
+    body: &mut Vec<(i16, i16, ModuleId)>,
+    orphan: &std::collections::HashSet<(i16, i16)>,
+    connected: &std::collections::HashSet<(i16, i16)>,
+) -> bool {
+    if orphan.is_empty() || connected.is_empty() {
+        return false;
+    }
+    let (cx, cy) = {
+        let mut sx = 0i32;
+        let mut sy = 0i32;
+        for &(x, y) in orphan {
+            sx += i32::from(x);
+            sy += i32::from(y);
+        }
+        let n = orphan.len() as i32;
+        (sx / n, sy / n)
+    };
+    let (nx, ny) = {
+        let mut sx = 0i32;
+        let mut sy = 0i32;
+        for &(x, y) in connected {
+            sx += i32::from(x);
+            sy += i32::from(y);
+        }
+        let n = connected.len() as i32;
+        (sx / n, sy / n)
+    };
+
+    let mut candidates: Vec<(i32, i16, i16)> = Vec::new();
+    for dist in 1..=24i16 {
+        for dy in -dist..=dist {
+            for dx in -dist..=dist {
+                if dx.abs() + dy.abs() != dist {
+                    continue;
+                }
+                // Prefer collapsing toward nucleus centroid.
+                let toward_y = if cy > ny {
+                    dy < 0
+                } else if cy < ny {
+                    dy > 0
+                } else {
+                    true
+                };
+                let toward_x = if cx > nx {
+                    dx <= 0
+                } else if cx < nx {
+                    dx >= 0
+                } else {
+                    true
+                };
+                let prefer = i32::from(!(toward_y && toward_x));
+                // Prefer pure vertical / horizontal over diagonal.
+                let axis = i32::from(dx != 0 && dy != 0);
+                let score = prefer * 1_000 + axis * 100 + i32::from(dist);
+                candidates.push((score, dx, dy));
+            }
+        }
+    }
+    candidates.sort_unstable_by_key(|&(s, _, _)| s);
+
+    let occupied_other: std::collections::HashSet<(i16, i16)> = body
+        .iter()
+        .map(|&(x, y, _)| (x, y))
+        .filter(|p| !orphan.contains(p))
+        .collect();
+
+    for (_, dx, dy) in candidates {
+        // Collision with tissue outside the orphan.
+        let mut overlap = false;
+        for &(x, y) in orphan {
+            let np = (x + dx, y + dy);
+            if occupied_other.contains(&np) {
+                overlap = true;
+                break;
+            }
+        }
+        if overlap {
+            continue;
+        }
+        // Must Moore-touch the connected component (or land adjacent).
+        let touches = orphan.iter().any(|&(x, y)| {
+            let np = (x + dx, y + dy);
+            if connected.contains(&np) {
+                return true;
+            }
+            MOORE
+                .iter()
+                .any(|&(ox, oy)| connected.contains(&(np.0 + ox, np.1 + oy)))
+        });
+        if !touches {
+            continue;
+        }
+        for (x, y, _) in body.iter_mut() {
+            if orphan.contains(&(*x, *y)) {
+                *x += dx;
+                *y += dy;
+            }
+        }
+        return true;
+    }
+    false
 }
 
 /// Copy an existing tissue block into a free neighbour (stem/leaf/root fan-out).
@@ -1106,6 +1318,92 @@ mod tests {
                 m,
                 ModuleId::Root | ModuleId::Stem
             )));
+        }
+    }
+
+    #[test]
+    fn deleting_mid_trunk_collapses_canopy_onto_gap() {
+        // Tall trunk with a mid-stem hole after delete — canopy must lower.
+        let mut body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Stem),
+            (0, 4, ModuleId::Stem),
+            (0, 5, ModuleId::Photosystem),
+            (1, 5, ModuleId::Photosystem),
+        ];
+        // Remove mid trunk (0,2) — leaves a gap; upper stem+leaves float.
+        body.retain(|&(x, y, _)| !(x == 0 && y == 2));
+        assert!(
+            !body_is_contiguous(&body),
+            "fixture must start disconnected after mid-trunk delete"
+        );
+        repair_body_continuity(&mut body);
+        assert!(
+            body_is_contiguous(&body),
+            "repair must reconnect canopy; body={body:?}"
+        );
+        assert!(
+            body.iter().any(|&(_, _, m)| m == ModuleId::Photosystem),
+            "canopy leaves survive the collapse"
+        );
+        let max_stem_y = body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Stem)
+            .map(|(_, y, _)| *y)
+            .max()
+            .unwrap_or(0);
+        assert!(
+            max_stem_y <= 3,
+            "upper stems should drop into the gap (max stem y={max_stem_y})"
+        );
+    }
+
+    #[test]
+    fn deleting_root_pipe_raises_orphan_roots() {
+        let mut body = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, -2, ModuleId::Root),
+            (0, -3, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Photosystem),
+        ];
+        // Cut the mid root — deepest root floats below.
+        body.retain(|&(x, y, _)| !(x == 0 && y == -2));
+        assert!(!body_is_contiguous(&body));
+        repair_body_continuity(&mut body);
+        assert!(
+            body_is_contiguous(&body),
+            "orphan roots must raise to reattach; body={body:?}"
+        );
+        assert!(body.iter().any(|&(_, _, m)| m == ModuleId::Root));
+    }
+
+    #[test]
+    fn mutate_body_kids_stay_contiguous() {
+        let parent = vec![
+            (0, 0, ModuleId::Nucleus),
+            (0, -1, ModuleId::Root),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+            (0, 3, ModuleId::Stem),
+            (0, 4, ModuleId::Stem),
+            (-1, 4, ModuleId::Photosystem),
+            (1, 4, ModuleId::Photosystem),
+        ];
+        assert!(body_is_contiguous(&parent));
+        for tick in 0..200u64 {
+            let child = mutate_body(&parent, 0.05, 13, tick, 5);
+            assert!(
+                body_is_contiguous(&child),
+                "mutated growth target must stay contiguous (tick={tick}, body={child:?})"
+            );
+            assert!(child.iter().any(|&(_, _, m)| m == ModuleId::Nucleus));
+            assert!(child.iter().any(|&(_, _, m)| m == ModuleId::Root));
+            assert!(child.iter().any(|&(_, _, m)| m == ModuleId::Photosystem));
         }
     }
 
