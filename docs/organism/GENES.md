@@ -135,11 +135,15 @@ mechanical plan is:
    keeps growing but each gene has its own `trait_i` so mutation is
    stable across additions.
 5. **Blueprint / body mutation** (`mutate_body`) runs on the same
-   `clone_fidelity` knob: module **swap**, **add**, or **delete**
-   within the parent's habit palette (Atom / plant / fungus). Habit
-   never flips (plants keep Root+Photosystem; fungi keep Digest and
-   never gain Root/Stem). Wired into rhizome sprouts, plant wind
-   spores, fungal spores, and Atom fission.
+   `clone_fidelity` knob: **double** an existing tissue block into a
+   free neighbour, **add** a new module from the habit palette, or
+   **delete** a non-essential module. `clone_fidelity = 1.0` is an
+   identical chassis; default (~0.9) applies at least one morph edit
+   so spore/sapling kids diverge on `Atom::growth_target` before they
+   grow out. Habit never flips (plants keep Root+Photosystem; fungi
+   keep Digest and never gain Root/Stem). Kind-swap (Stem→leaf, etc.)
+   is deferred. Wired into rhizome sprouts, plant wind spores, fungal
+   spores, and Atom fission.
 
 ## What is deliberately not here
 

@@ -109,8 +109,10 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 - Child **births as a short sapling**; the mutated upright parent plan is
   stored on `Atom::growth_target`. Growth fills missing target cells first
   (stem scaffold → roots → leaves → organs) under local sun / water /
-  spacing gates, then free-elongates as today. `mutate_body` +
-  `Genome::mutate` use `clone_fidelity` (stemless cannot invent a trunk)
+  spacing gates, then free-elongates as today. `mutate_body` **doubles**
+  familiar tissue / **adds** new palette modules / **deletes** extras
+  (default fidelity still morphs once) + `Genome::mutate`; stemless
+  cannot invent a trunk
 - Soft pop cap shared with Atoms
 - Root elongation biases sideways when banking for a sprout
 - **Anti-flood / spacing:** long sprout period (~0.6 demo day), higher
