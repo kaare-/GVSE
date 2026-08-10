@@ -238,6 +238,28 @@ impl Humidity {
         *self.cells.get(&(hx, hy)).unwrap_or(&0.0)
     }
 
+    /// Bilinear sample in world-cell space (smooth haze; no tile facets).
+    ///
+    /// Tile centres sit at `(hx + 0.5, hy + 0.5) * tile_cols`. Horizontal
+    /// samples wrap when [`Self::wrap_x`] is set.
+    pub fn sample_bilinear(&self, gx: f32, gy: f32) -> f32 {
+        let tc = self.tile_cols.max(1) as f32;
+        let fx = gx / tc - 0.5;
+        let fy = gy / tc - 0.5;
+        let x0 = fx.floor() as i32;
+        let y0 = fy.floor() as i32;
+        let tx = (fx - x0 as f32).clamp(0.0, 1.0);
+        let ty = (fy - y0 as f32).clamp(0.0, 1.0);
+        let hx = |x: i32| self.wrap_hx(x).unwrap_or(x);
+        let m00 = self.at_tile(hx(x0), y0);
+        let m10 = self.at_tile(hx(x0 + 1), y0);
+        let m01 = self.at_tile(hx(x0), y0 + 1);
+        let m11 = self.at_tile(hx(x0 + 1), y0 + 1);
+        let a = m00 + (m10 - m00) * tx;
+        let b = m01 + (m11 - m01) * tx;
+        a + (b - a) * ty
+    }
+
     /// Total humidity mass across all tiles. Useful for
     /// mass-conservation assertions in tests and for HUD summaries.
     pub fn total_mass(&self) -> f32 {
@@ -432,6 +454,21 @@ mod tests {
         h.add(0, 0, 10.0);
         h.add(1, 3, 5.0); // same tile as (0,0)
         assert_eq!(h.at_cell(2, 2), 15.0);
+    }
+
+    #[test]
+    fn sample_bilinear_smooths_between_tiles() {
+        let mut h = Humidity::new(4);
+        h.cells.insert((0, 0), 0.0);
+        h.cells.insert((1, 0), 100.0);
+        // Midway between tile centres (2,2) and (6,2) → x=4.
+        let mid = h.sample_bilinear(4.0, 2.0);
+        assert!(
+            (mid - 50.0).abs() < 1e-3,
+            "expected ~50 at midpoint, got {mid}"
+        );
+        assert!(h.sample_bilinear(2.0, 2.0) < mid);
+        assert!(h.sample_bilinear(6.0, 2.0) > mid);
     }
 
     #[test]

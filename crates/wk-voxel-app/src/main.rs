@@ -53,12 +53,12 @@ use macroquad::prelude::*;
 use wk_voxel::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
-    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
+    celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, continental_surface_y,
+    day_night_factor_cfg, geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
     precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, sky_rgb_at_height,
-    temperature_step_due,
-    step_carbon_budget, tick_with_life, wake_unsupported_grains, wake_unstable_slopes,
-    ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
+    temperature_step_due, step_carbon_budget, tick_with_life, wake_unsupported_grains,
+    wake_unstable_slopes, ClimateConfig, GeotechOverlayMode, Humidity, SimSnapshot, Wind, World,
+    WorldgenParams,
 };
 
 use crate::creature_list::CreatureList;
@@ -112,18 +112,187 @@ fn fps_smoothed() -> f32 {
     })
 }
 
-/// Soft white vapor haze alpha — quiet on purpose so cartoon clouds
-/// stay the main atmospheric read.
-fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
+/// Soft vapor colour for a bilinear-sampled humidity mass.
+///
+/// Thin mist stays translucent. Denser mid-altitude banks go **opaque**
+/// with a sky-tinted fog colour so they read as soft volume without
+/// letting the sun / far ridges show through (tile-rect alpha looked like
+/// a chessboard and punched holes in the middle banks).
+fn humidity_haze_color(mass: f32, max_mass: f32, sky: [u8; 3]) -> Option<Color> {
     if mass <= 0.0 {
-        return 0;
+        return None;
     }
     let norm = (mass / max_mass.max(1.0)).clamp(0.0, 1.0);
-    // Floor so thin air isn't a speckled field; cap so it never washes out.
-    if norm < 0.12 {
-        return 0;
+    if norm < 0.08 {
+        return None;
     }
-    (18.0 + norm * 42.0) as u8
+    let fog = [
+        lerp_u8(232, sky[0], 0.35),
+        lerp_u8(236, sky[1], 0.35),
+        lerp_u8(242, sky[2], 0.35),
+    ];
+    if norm < 0.40 {
+        let t = (norm - 0.08) / 0.32;
+        let a = (12.0 + t * 48.0) as u8;
+        Some(Color::from_rgba(fog[0], fog[1], fog[2], a))
+    } else {
+        let t = ((norm - 0.40) / 0.60).clamp(0.0, 1.0);
+        let body = [
+            lerp_u8(fog[0], 248, t * 0.5),
+            lerp_u8(fog[1], 250, t * 0.5),
+            lerp_u8(fog[2], 252, t * 0.5),
+        ];
+        let a = if norm < 0.48 {
+            (160.0 + (norm - 0.40) / 0.08 * 95.0) as u8
+        } else {
+            255
+        };
+        Some(Color::from_rgba(body[0], body[1], body[2], a))
+    }
+}
+
+fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
+    (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8
+}
+
+/// Parallax ridge silhouettes behind the playable strip.
+///
+/// Mid layer is **opaque** but sky-faded (atmospheric perspective without
+/// see-through). Far layer may stay translucent — only sky sits behind it.
+fn draw_distance_ridges(
+    tick: u64,
+    sw: f32,
+    sh: f32,
+    climate: &ClimateConfig,
+    origin_x: f32,
+    origin_y: f32,
+    cell_px: f32,
+    params: &WorldgenParams,
+    cam_x: f32,
+) {
+    if cell_px <= 0.0 || params.width_cols <= 0 {
+        return;
+    }
+    let dn = day_night_factor_cfg(tick, climate);
+    let sky = sky_rgb_at_height(dn, 0.55);
+    let rock = [110u8, 108, 102];
+
+    // (parallax, height_scale, y_bias_cells, sky_blend, alpha, seed_salt)
+    let layers: [(f32, f32, f32, f32, u8, u64); 2] = [
+        (0.20, 0.58, 14.0, 0.78, 155, 0xFA20_01D6),
+        (0.45, 0.78, 4.0, 0.50, 255, 0x41D0_B1D6),
+    ];
+
+    let x0 = ((-origin_x) / cell_px).floor() as i32 - 2;
+    let x1 = ((sw - origin_x) / cell_px).ceil() as i32 + 2;
+    let baseline = params.sea_level_y as f32 - 6.0;
+
+    for (parallax, h_scale, y_bias, sky_blend, alpha, salt) in layers {
+        let col = [
+            lerp_u8(rock[0], sky[0], sky_blend),
+            lerp_u8(rock[1], sky[1], sky_blend),
+            lerp_u8(rock[2], sky[2], sky_blend),
+        ];
+        let color = Color::from_rgba(col[0], col[1], col[2], alpha);
+        let scroll_cells = (cam_x / cell_px) * parallax;
+
+        for gx in x0..=x1 {
+            let sample_x = gx as f32 + scroll_cells;
+            let surf = continental_surface_y(
+                params.seed ^ salt,
+                sample_x.round() as i32,
+                params.sea_level_y,
+                params.width_cols,
+            ) as f32;
+            let peak = baseline + (surf - baseline).max(0.0) * h_scale + y_bias;
+            if peak <= baseline + 2.0 {
+                continue;
+            }
+            let sx = origin_x + gx as f32 * cell_px;
+            if sx + cell_px < 0.0 || sx > sw {
+                continue;
+            }
+            let top_sy = origin_y - (peak - params.bedrock_floor_y as f32) * cell_px;
+            let bot_sy = origin_y - (baseline - params.bedrock_floor_y as f32) * cell_px;
+            let h = (bot_sy - top_sy).max(cell_px);
+            if top_sy > sh || top_sy + h < 0.0 {
+                continue;
+            }
+            draw_rectangle(sx, top_sy, cell_px, h, color);
+        }
+    }
+}
+
+/// Paint smooth humidity haze (bilinear) into Air / empty sky cells only.
+fn draw_humidity_haze(
+    humidity: &Humidity,
+    world: &World,
+    origin_x: f32,
+    origin_y: f32,
+    cell_px: f32,
+    bedrock_floor_y: i32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+    sh: f32,
+    sky_hy_min_world_y: i32,
+    sky: [u8; 3],
+) {
+    if humidity.cells.is_empty() || cell_px <= 0.0 {
+        return;
+    }
+    let max_mass = humidity
+        .cells
+        .values()
+        .copied()
+        .fold(0.0f32, f32::max)
+        .max(1.0);
+    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
+    let tc = humidity.tile_cols.max(1);
+
+    let mut seeds: Vec<(i32, i32)> = Vec::with_capacity(humidity.cells.len() * 2);
+    for &(hx, hy) in humidity.cells.keys() {
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                seeds.push((hx + dx, hy + dy));
+            }
+        }
+    }
+    seeds.sort_unstable();
+    seeds.dedup();
+
+    for (hx, hy) in seeds {
+        let base_gx = hx * tc;
+        let base_gy = hy * tc;
+        for ly in 0..tc {
+            for lx in 0..tc {
+                let gx = base_gx + lx;
+                let gy = base_gy + ly;
+                if gy < sky_hy_min_world_y {
+                    continue;
+                }
+                if let Some(cell) = world.get_cell(gx, gy) {
+                    if cell.material != wk_material::MaterialId::Air {
+                        continue;
+                    }
+                } else {
+                    continue;
+                }
+                let mass = humidity.sample_bilinear(gx as f32 + 0.5, gy as f32 + 0.5);
+                let Some(color) = humidity_haze_color(mass, max_mass, sky) else {
+                    continue;
+                };
+                for &x_copy in x_copies {
+                    let sx = origin_x + (gx + x_copy * width_cols) as f32 * cell_px;
+                    let sy = origin_y - (gy - bedrock_floor_y) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw || sy < 0.0 || sy - cell_px > sh {
+                        continue;
+                    }
+                    draw_rectangle(sx, sy - cell_px, cell_px, cell_px, color);
+                }
+            }
+        }
+    }
 }
 
 /// Day/night sky gradient + round sun/moon built from world-sized pixels.
@@ -536,15 +705,21 @@ fn stamp_pixel_cloud_mask(
 
 #[cfg(test)]
 mod overlay_tests {
-    use super::{humidity_haze_alpha, stamp_pixel_cloud_mask};
+    use super::{humidity_haze_color, stamp_pixel_cloud_mask};
     use std::collections::HashMap;
 
     #[test]
-    fn haze_ignores_thin_vapor_and_stays_soft() {
-        assert_eq!(humidity_haze_alpha(0.0, 100.0), 0);
-        assert_eq!(humidity_haze_alpha(5.0, 100.0), 0); // below 12% floor
-        assert!(humidity_haze_alpha(50.0, 100.0) >= 18);
-        assert!(humidity_haze_alpha(100.0, 100.0) <= 70);
+    fn haze_ignores_thin_vapor_and_densifies_opaque() {
+        let sky = [120, 160, 200];
+        assert!(humidity_haze_color(0.0, 100.0, sky).is_none());
+        assert!(humidity_haze_color(5.0, 100.0, sky).is_none()); // below floor
+        let thin = humidity_haze_color(25.0, 100.0, sky).expect("thin mist");
+        assert!(thin.a < 0.35, "thin mist stays translucent");
+        let dense = humidity_haze_color(80.0, 100.0, sky).expect("dense bank");
+        assert!(
+            (dense.a - 1.0).abs() < 1e-3,
+            "dense mid bank must be opaque so sun/far ridges don't show through"
+        );
     }
 
     #[test]
@@ -1056,6 +1231,18 @@ async fn main() {
         // Screen +y is down. World +y is up. Flip when placing rows.
         let origin_y = (sh + world_h_px) * 0.5 + cam_y;
 
+        draw_distance_ridges(
+            scene.world.tick,
+            sw,
+            sh,
+            &settings.climate,
+            origin_x,
+            origin_y,
+            cell_px,
+            &scene.params,
+            cam_x,
+        );
+
         // Creature list (F4) — before world clicks so rows steal the mouse.
         if !quit_dialog.open {
             if let Some(at) = creature_list.handle_input(&scene.organisms) {
@@ -1265,40 +1452,24 @@ async fn main() {
             }
         }
 
-        // Soft white vapor haze (optional) — clouds remain the main read.
+        // Soft vapor haze (optional) — bilinear, Air-only; dense banks occlude.
         if humidity_overlay {
-            let tile_px = scene.humidity.tile_cols as f32 * cell_px;
-            let max_mass = scene
-                .humidity
-                .cells
-                .values()
-                .copied()
-                .fold(0.0f32, f32::max)
-                .max(1.0);
-            let sky_hy_min = (scene.params.sea_level_y + 4).div_euclid(scene.humidity.tile_cols);
-            for (&(hx, hy), &mass) in &scene.humidity.cells {
-                if mass <= 0.0 || hy < sky_hy_min {
-                    continue;
-                }
-                let alpha = humidity_haze_alpha(mass, max_mass);
-                if alpha == 0 {
-                    continue;
-                }
-                let base_gx = hx * scene.humidity.tile_cols;
-                let base_gy = hy * scene.humidity.tile_cols;
-                for &x_copy in x_copies {
-                    let sx = origin_x
-                        + (base_gx + x_copy * scene.params.width_cols) as f32 * cell_px;
-                    let sy = origin_y
-                        - (base_gy - scene.params.bedrock_floor_y + scene.humidity.tile_cols)
-                            as f32
-                            * cell_px;
-                    if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
-                        continue;
-                    }
-                    draw_rectangle(sx, sy, tile_px, tile_px, Color::from_rgba(255, 255, 255, alpha));
-                }
-            }
+            let dn = day_night_factor_cfg(scene.world.tick, &settings.climate);
+            let sky = sky_rgb_at_height(dn, 0.45);
+            draw_humidity_haze(
+                &scene.humidity,
+                &scene.world,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+                sh,
+                scene.params.sea_level_y + 4,
+                sky,
+            );
         }
 
         // Coagulated cloud parcels — the atmospheric story.
