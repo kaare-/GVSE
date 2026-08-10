@@ -83,6 +83,32 @@ fn active_cell_area(active: &[crate::active::ActiveChunk]) -> usize {
         .sum()
 }
 
+/// Keep only active regions whose chunk sticky-flag says loose material
+/// may be present. Bootstrap (no flags set yet) keeps the full list.
+fn filter_loose_regions(
+    world: &crate::grid::World,
+    active: &[crate::active::ActiveChunk],
+) -> Vec<crate::active::ActiveChunk> {
+    if active.is_empty() {
+        return Vec::new();
+    }
+    let any_flag = world.chunks.values().any(|c| c.has_loose);
+    if !any_flag {
+        return active.to_vec();
+    }
+    active
+        .iter()
+        .copied()
+        .filter(|ac| {
+            world
+                .chunks
+                .get(&ac.coord)
+                .map(|c| c.has_loose)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 /// Advance the sim by one tick.
 ///
 /// Runs the sub-passes in a fixed order:
@@ -175,7 +201,14 @@ pub fn tick_with_life(
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
     let mut start_area: usize = 0;
-    for step in 0..FLOW_SUBSTEPS {
+    // FPS knobs on → cap at 8 substeps (gravity dominates the mirror at
+    // ~0.6 ms × 12). full_feel keeps the full ×12 path.
+    let max_steps = if perf.flow_every_other_substep && perf.flow_quiet_early_out {
+        FLOW_SUBSTEPS_MIN + 2 // 8
+    } else {
+        FLOW_SUBSTEPS
+    };
+    for step in 0..max_steps {
         let active = plan_active(world);
         clear_all_dirty(world);
         if active.is_empty() {
@@ -214,6 +247,12 @@ pub fn tick_with_life(
             if start_area > 0 && next_area * 3 <= start_area * 2 {
                 break;
             }
+            // Steady busy halo (closed-loop rain): area barely moved —
+            // further substeps are polish. Super-Server demo sat at
+            // ~9k cells for all ×12; this exits after the minimum.
+            if start_area > FLOW_QUIET_AREA && next_area * 10 >= start_area * 9 {
+                break;
+            }
         }
     }
 
@@ -249,11 +288,14 @@ pub fn tick_with_life(
     }
     let grain_active = {
         let dirty = plan_active(world);
-        if dirty.is_empty() {
+        let src = if dirty.is_empty() {
             flow_active
         } else {
             dirty
-        }
+        };
+        // Water-dirty ocean/sky chunks have no sand/litter — settle was
+        // still walking them every tick (~physics gap on Super-Server).
+        filter_loose_regions(world, &src)
     };
     if !grain_active.is_empty() {
         settle_loose_grains_regions(world, &grain_active, rooted, GRAIN_SETTLE_PASSES);
@@ -268,7 +310,7 @@ pub fn tick_with_life(
         && super::grain::punch_through_floating_rafts(world) > 0
     {
         super::grain::wake_grains_for_settle(world);
-        let sink = plan_active(world);
+        let sink = filter_loose_regions(world, &plan_active(world));
         if !sink.is_empty() {
             settle_loose_grains_regions(world, &sink, rooted, GRAIN_SETTLE_PASSES);
         }

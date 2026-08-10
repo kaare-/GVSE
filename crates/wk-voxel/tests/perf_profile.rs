@@ -469,7 +469,13 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
 /// Timed mirror of [`tick_with_perf`] — keep in sync with `rules`.
 fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum) {
     set_parallel_enabled(perf.parallel_physics);
-    for step in 0..FLOW_SUBSTEPS {
+    let max_steps = if perf.flow_every_other_substep && perf.flow_quiet_early_out {
+        FLOW_SUBSTEPS_MIN + 2
+    } else {
+        FLOW_SUBSTEPS
+    };
+    let mut start_area = 0usize;
+    for step in 0..max_steps {
         let t0 = Instant::now();
         let active = plan_active(world);
         clear_all_dirty(world);
@@ -479,7 +485,11 @@ fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum
         }
         a.substeps_ran += 1;
         a.active_regions += active.len() as u64;
-        a.active_area += region_area(&active) as u64;
+        let area = region_area(&active);
+        a.active_area += area as u64;
+        if step == 0 {
+            start_area = area;
+        }
 
         let passes = partition_checkerboard(&active);
         let t0 = Instant::now();
@@ -498,8 +508,14 @@ fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum
 
         if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_MIN {
             let next = plan_active(world);
-            let area = region_area(&next);
-            if next.is_empty() || area <= FLOW_QUIET_AREA {
+            let next_area = region_area(&next);
+            if next.is_empty() || next_area <= FLOW_QUIET_AREA {
+                break;
+            }
+            if start_area > 0 && next_area * 3 <= start_area * 2 {
+                break;
+            }
+            if start_area > FLOW_QUIET_AREA && next_area * 10 >= start_area * 9 {
                 break;
             }
         }

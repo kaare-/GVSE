@@ -963,11 +963,11 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Performance", |ui| {
                     ui.label(
                         None,
-                        "Defaults favour FPS (every-other flow + quiet early-out; rayon off).",
+                        "Defaults favour FPS (every-other + quiet EO → max 8 substeps; rayon off).",
                     );
                     ui.label(
                         None,
-                        "Uncheck flow knobs for full ×12 feel. Parallel helps only on fat dirty plans.",
+                        "Uncheck both flow knobs for full ×12 feel. Parallel helps only on fat dirty plans.",
                     );
                     ui.checkbox(
                         hash!(),
