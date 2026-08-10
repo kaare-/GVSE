@@ -15,15 +15,16 @@ use std::time::{Duration, Instant};
 
 use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
-    apply_flow_erosion, apply_grain_fall_regions, apply_grain_repose_regions,
-    apply_gravity_fall_regions, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    apply_seepage_regions, apply_water_flow_regions, clear_all_dirty, find_plant_slot,
-    humidity_diffuse_due, partition_checkerboard, plan_active, set_parallel_enabled,
-    stamp_world, temperature_step_due, tick_with_perf, Blueprint, ClimateConfig, CloudConfig,
-    CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity, KarstConfig,
-    OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, RainConfig, Temperature, Wind,
-    World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_QUIET_AREA, FLOW_SUBSTEPS,
-    FLOW_SUBSTEPS_MIN,
+    apply_failure, apply_flow_erosion, apply_gravity_fall_regions, apply_karst_dissolution,
+    apply_phase, apply_rain_with_temp, apply_seepage_regions, apply_water_flow_regions,
+    clear_all_dirty, find_plant_slot, humidity_diffuse_due, partition_checkerboard, plan_active,
+    punch_through_floating_rafts, rise_and_soak_buoyant_litter, set_parallel_enabled,
+    settle_loose_grains_regions, stamp_world, step_mycelium_field, temperature_step_due,
+    tick_with_perf, wake_confined_head, wake_grains_for_settle, Blueprint, ClimateConfig,
+    CloudConfig, CloudStore, CondensationConfig, EvapConfig, FailureConfig, Genome, GrainConfig,
+    Humidity, KarstConfig, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, RainConfig,
+    Temperature, Wind, World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_QUIET_AREA,
+    FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN, GRAIN_SETTLE_PASSES_SHALLOW,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -95,8 +96,13 @@ struct PhysicsAccum {
     gravity: Duration,
     water_flow: Duration,
     seepage: Duration,
-    grain_fall: Duration,
-    grain_repose: Duration,
+    settle: Duration,
+    wake_grains: Duration,
+    punch: Duration,
+    rise_soak: Duration,
+    failure: Duration,
+    confined: Duration,
+    mycelium: Duration,
     substeps_ran: u64,
     active_regions: u64,
     active_area: u64,
@@ -109,8 +115,13 @@ impl PhysicsAccum {
             gravity: Duration::ZERO,
             water_flow: Duration::ZERO,
             seepage: Duration::ZERO,
-            grain_fall: Duration::ZERO,
-            grain_repose: Duration::ZERO,
+            settle: Duration::ZERO,
+            wake_grains: Duration::ZERO,
+            punch: Duration::ZERO,
+            rise_soak: Duration::ZERO,
+            failure: Duration::ZERO,
+            confined: Duration::ZERO,
+            mycelium: Duration::ZERO,
             substeps_ran: 0,
             active_regions: 0,
             active_area: 0,
@@ -122,8 +133,13 @@ impl PhysicsAccum {
             + self.gravity
             + self.water_flow
             + self.seepage
-            + self.grain_fall
-            + self.grain_repose
+            + self.settle
+            + self.wake_grains
+            + self.punch
+            + self.rise_soak
+            + self.failure
+            + self.confined
+            + self.mycelium
     }
 }
 
@@ -522,32 +538,76 @@ fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum
     }
 
     let t0 = Instant::now();
+    wake_confined_head(world);
+    a.confined += t0.elapsed();
+
+    let t0 = Instant::now();
     let active = plan_active(world);
     a.plan_clear += t0.elapsed();
     if !active.is_empty() {
         let t0 = Instant::now();
         apply_seepage_regions(world, &active);
         a.seepage += t0.elapsed();
+    }
 
-        let passes = partition_checkerboard(&active);
+    // Mirror tick.rs grain wake / settle / punch cadence (simplified: full wake).
+    if world.tick % 4 == 0 {
         let t0 = Instant::now();
-        for pass in &passes {
-            apply_grain_fall_regions(world, pass);
-        }
-        a.grain_fall += t0.elapsed();
-
+        let _ = wake_grains_for_settle(world);
+        a.wake_grains += t0.elapsed();
+    }
+    let t0 = Instant::now();
+    let grain_active = plan_active(world);
+    let grain_active: Vec<_> = if grain_active.is_empty() {
+        active
+    } else {
+        grain_active
+    }
+    .into_iter()
+    .filter(|ac| {
+        world
+            .chunks
+            .get(&ac.coord)
+            .map(|c| c.has_loose)
+            .unwrap_or(true)
+    })
+    .collect();
+    a.plan_clear += t0.elapsed();
+    if !grain_active.is_empty() {
         let t0 = Instant::now();
-        let repose_active = plan_active(world);
-        a.plan_clear += t0.elapsed();
-        if !repose_active.is_empty() {
-            let repose_passes = partition_checkerboard(&repose_active);
+        settle_loose_grains_regions(world, &grain_active, None, GRAIN_SETTLE_PASSES_SHALLOW);
+        a.settle += t0.elapsed();
+    }
+    if world.tick % 4 == 0 {
+        let t0 = Instant::now();
+        let n = punch_through_floating_rafts(world);
+        a.punch += t0.elapsed();
+        if n > 0 {
             let t0 = Instant::now();
-            for pass in &repose_passes {
-                apply_grain_repose_regions(world, pass, None);
+            let _ = wake_grains_for_settle(world);
+            a.wake_grains += t0.elapsed();
+            let sink = plan_active(world);
+            if !sink.is_empty() {
+                let t0 = Instant::now();
+                settle_loose_grains_regions(world, &sink, None, GRAIN_SETTLE_PASSES_SHALLOW);
+                a.settle += t0.elapsed();
             }
-            a.grain_repose += t0.elapsed();
         }
     }
+
+    let t0 = Instant::now();
+    rise_and_soak_buoyant_litter(world);
+    a.rise_soak += t0.elapsed();
+
+    if world.tick % 2 == 0 {
+        let t0 = Instant::now();
+        let _ = apply_failure(world, &FailureConfig::default(), None);
+        a.failure += t0.elapsed();
+    }
+
+    let t0 = Instant::now();
+    step_mycelium_field(world);
+    a.mycelium += t0.elapsed();
 
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {
@@ -625,12 +685,26 @@ fn print_physics_table(phys: &PhysicsAccum, n: u64) {
     );
     eprintln!("  seepage              {:>8.3} ms/tick", ms_per(phys.seepage, n));
     eprintln!(
-        "  grain fall           {:>8.3} ms/tick",
-        ms_per(phys.grain_fall, n)
+        "  wake grains          {:>8.3} ms/tick",
+        ms_per(phys.wake_grains, n)
     );
     eprintln!(
-        "  grain repose         {:>8.3} ms/tick",
-        ms_per(phys.grain_repose, n)
+        "  settle grains        {:>8.3} ms/tick",
+        ms_per(phys.settle, n)
+    );
+    eprintln!("  punch rafts          {:>8.3} ms/tick", ms_per(phys.punch, n));
+    eprintln!(
+        "  rise+soak            {:>8.3} ms/tick",
+        ms_per(phys.rise_soak, n)
+    );
+    eprintln!("  failure              {:>8.3} ms/tick", ms_per(phys.failure, n));
+    eprintln!(
+        "  confined wake        {:>8.3} ms/tick",
+        ms_per(phys.confined, n)
+    );
+    eprintln!(
+        "  mycelium field       {:>8.3} ms/tick",
+        ms_per(phys.mycelium, n)
     );
     eprintln!(
         "  sum(physics)         {:>8.3} ms/tick  (avg {:.2} flow substeps/tick)",

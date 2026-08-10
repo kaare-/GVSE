@@ -101,7 +101,7 @@ fn profile_physics_tail_passes() {
         confined += t0.elapsed();
 
         let t0 = Instant::now();
-        wake_grains_for_settle(&mut world);
+        let _ = wake_grains_for_settle(&mut world);
         wake_settle += t0.elapsed();
 
         let t0 = Instant::now();
@@ -115,7 +115,7 @@ fn profile_physics_tail_passes() {
         punch += t0.elapsed();
         if n > 0 {
             let t0 = Instant::now();
-            wake_grains_for_settle(&mut world);
+            let _ = wake_grains_for_settle(&mut world);
             wake_after_punch += t0.elapsed();
         }
 

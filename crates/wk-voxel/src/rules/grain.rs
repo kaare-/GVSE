@@ -60,6 +60,11 @@ const MYCELIUM_WATERLOG_MIN_SCALE: f32 = 0.12;
 /// litter does not take hundreds of ticks to land.
 pub const GRAIN_SETTLE_PASSES: u32 = 1024;
 
+/// Repose / polish settle when nothing is freefalling. Busy shores used
+/// to run up toward [`GRAIN_SETTLE_PASSES`] on micro-moves (organic /
+/// bank fidget) and dominate the physics tick on Super-Server.
+pub const GRAIN_SETTLE_PASSES_SHALLOW: u32 = 8;
+
 /// Repose `max_step` bonus from mycelium intensity on Organic (0..=2).
 #[inline]
 pub fn mycelium_repose_bonus(cell: Cell) -> i32 {
@@ -393,17 +398,25 @@ fn loose_chunk_coords(world: &World) -> Vec<ChunkCoord> {
     coords
 }
 
-/// Re-dirty freefall seats **and** over-steep repose faces in one grid scan.
+/// Re-dirty freefall seats **and** over-steep repose faces.
 ///
-/// Used by the physics tick instead of calling [`wake_unsupported_grains`]
-/// then [`wake_unstable_slopes`] (two full-world walks). Skips chunks
-/// without sticky [`Chunk::has_loose`] and clears the flag when a scan
-/// finds none left.
-pub fn wake_grains_for_settle(world: &mut World) {
+/// Returns how many **freefall** seats were woken (unsupported grain /
+/// litter over Air). Slope-only wakes do not count — callers use this
+/// to choose deep vs shallow [`settle_loose_grains_regions`] budgets.
+///
+/// `only_coords = None` scans every sticky-loose chunk (periodic full
+/// insurance). `Some(…)` restricts to those coords (dirty-halo wake).
+pub fn wake_grains_for_settle(world: &mut World) -> u32 {
     let coords = loose_chunk_coords(world);
+    wake_grains_for_settle_coords(world, &coords)
+}
+
+/// [`wake_grains_for_settle`] restricted to an explicit chunk list.
+pub fn wake_grains_for_settle_coords(world: &mut World, coords: &[ChunkCoord]) -> u32 {
     let mut dirty: Vec<(i32, i32)> = Vec::new();
     let mut clear_loose: Vec<ChunkCoord> = Vec::new();
-    for coord in coords {
+    let mut freefall = 0u32;
+    for &coord in coords {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
         let Some(chunk) = world.chunks.get(&coord) else {
@@ -425,12 +438,14 @@ pub fn wake_grains_for_settle(world: &mut World) {
                 // --- unsupported / freefall ---
                 let Some(below) = world.get_cell(gx, gy - 1) else {
                     dirty.push((gx, gy));
+                    freefall += 1;
                     continue;
                 };
                 if is_grain(cell.material) && falls_through_empty_air(below.material) {
                     if raft_rests_on_float_water_world(world, gx, gy - 1) {
                         dirty.push((gx, gy));
                         dirty.push((gx, gy - 1));
+                        freefall += 1;
                         let mut y = gy - 2;
                         while let Some(c) = world.get_cell(gx, y) {
                             if falls_through_empty_air(c.material) {
@@ -455,11 +470,13 @@ pub fn wake_grains_for_settle(world: &mut World) {
                             if floats_on_air_seat_world(world, above, gx, gy + 1) {
                                 dirty.push((gx, gy));
                                 dirty.push((gx, gy + 1));
+                                // Floating raft stack — not freefall into void.
                             }
                         }
                     } else {
                         dirty.push((gx, gy));
                         dirty.push((gx, gy - 1));
+                        freefall += 1;
                     }
                     continue;
                 }
@@ -563,6 +580,7 @@ pub fn wake_grains_for_settle(world: &mut World) {
             chunk.has_loose = false;
         }
     }
+    freefall
 }
 
 /// Re-dirty every grain / litter cell that has empty (or non-supporting)
@@ -570,7 +588,7 @@ pub fn wake_grains_for_settle(world: &mut World) {
 ///
 /// Prefer [`wake_grains_for_settle`] in the hot tick (one scan).
 pub fn wake_unsupported_grains(world: &mut World) {
-    wake_grains_for_settle(world);
+    let _ = wake_grains_for_settle(world);
 }
 
 /// Re-dirty supported grains whose diagonal-down seat is steeper than
@@ -580,7 +598,7 @@ pub fn wake_unsupported_grains(world: &mut World) {
 ///
 /// Prefer [`wake_grains_for_settle`] in the hot tick (one scan).
 pub fn wake_unstable_slopes(world: &mut World) {
-    wake_grains_for_settle(world);
+    let _ = wake_grains_for_settle(world);
 }
 
 fn diag_drop_exceeds_world(

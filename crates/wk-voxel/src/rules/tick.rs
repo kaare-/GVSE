@@ -11,7 +11,9 @@ use serde::{Deserialize, Serialize};
 use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
 use crate::grid::World;
 
-use super::grain::{settle_loose_grains_regions, GRAIN_SETTLE_PASSES};
+use super::grain::{
+    settle_loose_grains_regions, GRAIN_SETTLE_PASSES, GRAIN_SETTLE_PASSES_SHALLOW,
+};
 use super::gravity::apply_gravity_fall_regions;
 use super::seepage::apply_seepage_regions;
 use super::water_flow::apply_water_flow_regions;
@@ -273,18 +275,20 @@ pub fn tick_with_life(
         apply_seepage_regions(world, &flow_active);
     }
 
-    // Re-wake unsupported grains and steep cliff faces — lakes often
-    // leave a non-empty dirty plan far from F3 paint, and seated
-    // Organic/sand walls have solid under them so fall-wake alone
-    // never sees them. Cadence-gated: this is a full-grid safety scan
-    // that only matters when a grain was orphaned mid-air; running
-    // every tick was ~1.6 ms of pure insurance. Every 4 ticks trades
-    // a ≤4-tick delay before a stranded grain drops for that budget.
-    // Also runs on tick 0 (fresh world / after save-load) so painted
-    // mid-air grains fall on the first tick.
+    // Re-wake unsupported grains and steep cliff faces. Cadence-gated:
+    // full sticky-loose scan every 16 ticks; dirty-halo wake every 4.
+    // Tick 0 always full-scans so save-load / first frame catch orphans.
     const GRAIN_WAKE_EVERY: u64 = 4;
+    const GRAIN_WAKE_FULL_EVERY: u64 = 16;
+    let mut freefall_woken = 0u32;
     if world.tick % GRAIN_WAKE_EVERY == 0 {
-        super::grain::wake_grains_for_settle(world);
+        if world.tick % GRAIN_WAKE_FULL_EVERY == 0 {
+            freefall_woken = super::grain::wake_grains_for_settle(world);
+        } else {
+            let halo = filter_loose_regions(world, &flow_active);
+            let coords: Vec<_> = halo.iter().map(|ac| ac.coord).collect();
+            freefall_woken = super::grain::wake_grains_for_settle_coords(world, &coords);
+        }
     }
     let grain_active = {
         let dirty = plan_active(world);
@@ -298,18 +302,24 @@ pub fn tick_with_life(
         filter_loose_regions(world, &src)
     };
     if !grain_active.is_empty() {
-        settle_loose_grains_regions(world, &grain_active, rooted, GRAIN_SETTLE_PASSES);
+        // Deep settle only for freefall / small paint dirty; busy shores
+        // get a shallow repose polish (was burning toward ×1024 passes).
+        let area = active_cell_area(&grain_active);
+        let passes = if freefall_woken > 0 || area <= 1024 {
+            GRAIN_SETTLE_PASSES
+        } else {
+            GRAIN_SETTLE_PASSES_SHALLOW
+        };
+        settle_loose_grains_regions(world, &grain_active, rooted, passes);
     }
 
     // Dense cargo cannot ride floating Organic/Snow/Ice. Full-grid punch
-    // once per tick (not per settle pass — that re-scanned oceans to death),
-    // then a short re-settle so punched grains sink through the water seat.
-    // Cadence-gated with grain wake to share the "no fresh grain paint"
-    // quiet path (~0.7 ms/tick).
+    // once per wake cadence, then a short re-settle so punched grains
+    // sink through the water seat.
     if world.tick % GRAIN_WAKE_EVERY == 0
         && super::grain::punch_through_floating_rafts(world) > 0
     {
-        super::grain::wake_grains_for_settle(world);
+        let _ = super::grain::wake_grains_for_settle(world);
         let sink = filter_loose_regions(world, &plan_active(world));
         if !sink.is_empty() {
             settle_loose_grains_regions(world, &sink, rooted, GRAIN_SETTLE_PASSES);
