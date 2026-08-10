@@ -9,6 +9,7 @@
 //! (material IDs + property tables — pure data with no coupling).
 
 pub mod active;
+pub mod atmosphere_metrics;
 pub mod audit;
 pub mod blueprint;
 pub mod carbon;
@@ -51,8 +52,16 @@ pub use blueprint::{
     BODY_MUTATION_MAX_EDITS,
     BODY_MUTATION_MAX_MODULES,
 };
+pub use atmosphere_metrics::{
+    apply_weather_rgb, carbon_ratio, cloud_sky_transmit, column_surface_lee, humidity_mean_norm,
+    humidity_norm_at, lit_sky_at, precip_cover_fraction, sky_rgb_at_height_weather, sky_transmit,
+    sky_transmit_at, sun_sky_transmit, SkyWeatherParams, CLOUD_COVER_MAX, CLOUD_TRANSMIT_FLOOR,
+    HUMIDITY_SKY_ATTEN, SUN_TRANSMIT_FLOOR,
+};
 pub use climate::{
-    celestial_local, celestial_local_cfg, celestial_screen_pos, celestial_screen_pos_cfg, day_factor,
+    celestial_local, celestial_local_cfg, celestial_moon_local_cfg, celestial_moon_screen_pos_cfg,
+    celestial_screen_pos, celestial_screen_pos_cfg, celestial_sun_local_cfg,
+    celestial_sun_screen_pos_cfg, day_factor,
     day_factor_cfg, day_night_factor, day_night_factor_cfg, is_daytime, is_daytime_cfg, phase_fraction,
     phase_fraction_cfg, sky_rgb, sky_rgb_at_height, ClimateConfig, DEMO_DAY_TICKS,
 };
@@ -94,10 +103,11 @@ pub use grid::World;
 // HydroOverrides is defined in wk-material; re-export for app convenience.
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
-    bake_tip_into_body, column_sky_light, fallen_body_offset, rigid_tip_offset, Atom, BodyModule,
-    Corpse, ModuleId, OrganismStore, SpawnFail, SporeRelease, CORPSE_SETTLE_LAND_TICKS,
-    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT,
-    SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
+    bake_tip_into_body, column_sky_light, fallen_body_offset, resolve_organism_draw_cells,
+    rigid_tip_offset, Atom, BodyModule, Corpse, ModuleId, OrganismStore, SpawnFail, SporeRelease,
+    CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES,
+    MAX_FALLEN_WATERLINE_EXTENT, SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT,
+    WATER_SURFACE_TRANSMIT,
 };
 pub use symbiosis::{
     body_has_symbiont, clear_plant_sym_flow_lasts, clear_sym_net_flow_lasts,
@@ -115,6 +125,7 @@ pub use plant::{
 };
 pub use shade::{
     build_canopy_index, build_canopy_index_posed, effective_photo_light, shade_transmit,
+    shade_transmit_column,
     sum_posed_photo_light, CanopyIndex, PosedModule,
 };
 pub use heatmap::Heatmap;

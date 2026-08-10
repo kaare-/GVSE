@@ -95,53 +95,123 @@ pub fn celestial_local(tick: u64) -> f32 {
 }
 
 pub fn celestial_local_cfg(tick: u64, cfg: &ClimateConfig) -> f32 {
-    let phase = phase_fraction_cfg(tick, cfg);
-    let day_frac = cfg.day_ticks.max(1) as f32 / cfg.total_ticks() as f32;
-    let half_day = (day_frac * 0.5).clamp(1e-4, 0.499);
     if is_daytime_cfg(tick, cfg) {
-        if phase >= 1.0 - half_day {
-            // dawn → noon: 0 → 0.5
-            let t = (phase - (1.0 - half_day)) / half_day;
-            (t * 0.5).clamp(0.0, 0.5)
-        } else {
-            // noon → dusk: 0.5 → 1
-            let t = phase / half_day;
-            (0.5 + t * 0.5).clamp(0.5, 1.0)
-        }
+        celestial_sun_local_cfg(tick, cfg)
     } else {
-        let night_len = (1.0 - 2.0 * half_day).max(1e-4);
-        let u = ((phase - half_day) / night_len).clamp(0.0, 1.0);
-        u
+        celestial_moon_local_cfg(tick, cfg)
     }
 }
 
+/// Sun arc local 0→1 (dawn→dusk). Outside daytime clamps to the nearest horizon.
+pub fn celestial_sun_local_cfg(tick: u64, cfg: &ClimateConfig) -> f32 {
+    let phase = phase_fraction_cfg(tick, cfg);
+    let day_frac = cfg.day_ticks.max(1) as f32 / cfg.total_ticks() as f32;
+    let half_day = (day_frac * 0.5).clamp(1e-4, 0.499);
+    if phase >= 1.0 - half_day {
+        // dawn → noon: 0 → 0.5
+        let t = (phase - (1.0 - half_day)) / half_day;
+        (t * 0.5).clamp(0.0, 0.5)
+    } else if phase <= half_day {
+        // noon → dusk: 0.5 → 1
+        let t = phase / half_day;
+        (0.5 + t * 0.5).clamp(0.5, 1.0)
+    } else {
+        // Night — sun stays set on the dusk side.
+        1.0
+    }
+}
+
+/// Moon arc local 0→1 (dusk→dawn). Outside nighttime clamps to horizons.
+pub fn celestial_moon_local_cfg(tick: u64, cfg: &ClimateConfig) -> f32 {
+    let phase = phase_fraction_cfg(tick, cfg);
+    let day_frac = cfg.day_ticks.max(1) as f32 / cfg.total_ticks() as f32;
+    let half_day = (day_frac * 0.5).clamp(1e-4, 0.499);
+    if phase > half_day && phase < 1.0 - half_day {
+        let night_len = (1.0 - 2.0 * half_day).max(1e-4);
+        ((phase - half_day) / night_len).clamp(0.0, 1.0)
+    } else if phase <= half_day {
+        // Still day afternoon — moon not up yet (pre-rise).
+        0.0
+    } else {
+        // Past dawn — moon has set.
+        1.0
+    }
+}
+
+fn celestial_pos_from_local(local: f32, sw: f32, sh: f32) -> (f32, f32) {
+    let local = local.clamp(0.0, 1.0);
+    let x = 0.06 * sw + local * 0.88 * sw;
+    // Apex ~8% from top; rise/set ~72% down the frame (horizon band).
+    let y = 0.08 * sh + 0.64 * sh * (1.0 - (local * std::f32::consts::PI).sin());
+    (x, y)
+}
+
 /// Screen-space arc for the active celestial body.
+///
+/// Rise/set sit low (near the horizon band) so the body can set behind
+/// ridges instead of vanishing mid-sky when day/night flips.
 pub fn celestial_screen_pos(tick: u64, sw: f32, sh: f32) -> (f32, f32) {
     celestial_screen_pos_cfg(tick, sw, sh, &ClimateConfig::default())
 }
 
 pub fn celestial_screen_pos_cfg(tick: u64, sw: f32, sh: f32, cfg: &ClimateConfig) -> (f32, f32) {
-    let local = celestial_local_cfg(tick, cfg);
-    let x = 0.08 * sw + local * 0.84 * sw;
-    let y = 0.10 * sh + 0.26 * sh * (1.0 - (local * std::f32::consts::PI).sin());
-    (x, y)
+    celestial_pos_from_local(celestial_local_cfg(tick, cfg), sw, sh)
+}
+
+pub fn celestial_sun_screen_pos_cfg(
+    tick: u64,
+    sw: f32,
+    sh: f32,
+    cfg: &ClimateConfig,
+) -> (f32, f32) {
+    celestial_pos_from_local(celestial_sun_local_cfg(tick, cfg), sw, sh)
+}
+
+pub fn celestial_moon_screen_pos_cfg(
+    tick: u64,
+    sw: f32,
+    sh: f32,
+    cfg: &ClimateConfig,
+) -> (f32, f32) {
+    celestial_pos_from_local(celestial_moon_local_cfg(tick, cfg), sw, sh)
+}
+
+fn smooth01(t: f32) -> f32 {
+    let t = t.clamp(0.0, 1.0);
+    t * t * (3.0 - 2.0 * t)
 }
 
 /// Sky RGB for a day/night factor in `[-1, 1]`.
+///
+/// Smooth shoulders: night → dusk/dawn → morning/evening → day.
+/// Day is a soft pale blue (not saturated “underwater” cyan).
 pub fn sky_rgb(day_night: f32) -> [u8; 3] {
-    let day = [0x87u8, 0xCE, 0xEB];
+    let day = [0xA6u8, 0xC2, 0xD0]; // pale daylight
+    let morning = [0xB4u8, 0xC0, 0xC4]; // soft morning grey-blue
     let dusk = [0xC4u8, 0x6A, 0x3A];
+    let evening = [0xD8u8, 0x8E, 0x58];
     let night_edge = [0x1Au8, 0x22, 0x44];
     let night = [0x06u8, 0x08, 0x18];
     let t = day_night.clamp(-1.0, 1.0);
-    if t >= 0.2 {
-        let u = ((t - 0.2) / 0.8).clamp(0.0, 1.0);
-        lerp_rgb(dusk, day, 0.35 + 0.65 * u)
-    } else if t >= -0.15 {
-        let u = ((t + 0.15) / 0.35).clamp(0.0, 1.0);
-        lerp_rgb(dusk, day, u)
+    if t >= 0.55 {
+        // Full day ← morning
+        let u = smooth01((t - 0.55) / 0.45);
+        lerp_rgb(morning, day, u)
+    } else if t >= 0.12 {
+        // Morning/evening shoulder ← dusk warmth
+        let u = smooth01((t - 0.12) / 0.43);
+        lerp_rgb(evening, morning, u)
+    } else if t >= -0.12 {
+        // Dawn / dusk core
+        let u = smooth01((t + 0.12) / 0.24);
+        lerp_rgb(dusk, evening, u)
+    } else if t >= -0.45 {
+        // Dusk → night edge
+        let u = smooth01((-t - 0.12) / 0.33);
+        lerp_rgb(dusk, night_edge, u)
     } else {
-        let u = ((-t - 0.15) / 0.85).clamp(0.0, 1.0);
+        // Deep night
+        let u = smooth01((-t - 0.45) / 0.55);
         lerp_rgb(night_edge, night, u)
     }
 }

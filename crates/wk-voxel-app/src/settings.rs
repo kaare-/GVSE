@@ -12,6 +12,8 @@ use wk_voxel::{
     CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 
+use crate::atmosphere::AtmosphereLookConfig;
+
 /// Top-level Tab settings pages (keeps the long menu navigable).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SettingsPage {
@@ -77,6 +79,8 @@ pub struct SimSettings {
     pub karst: KarstConfig,
     pub cloud: CloudConfig,
     pub climate: ClimateConfig,
+    /// Sky / ridge / sun-moon cosmetics (Tab → Climate → Sky look).
+    pub atmosphere: AtmosphereLookConfig,
     pub temp: TempConfig,
     pub phase: PhaseConfig,
     pub grain: GrainConfig,
@@ -175,6 +179,7 @@ impl SimSettings {
             karst: KarstConfig::default(),
             cloud: CloudConfig::default(),
             climate: ClimateConfig::default(),
+            atmosphere: AtmosphereLookConfig::default(),
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
             grain: GrainConfig::default(),
@@ -385,6 +390,140 @@ impl SimSettings {
                 });
                 } // World page (size); materials/karst further below
                 if self.page == SettingsPage::Climate {
+                ui.separator();
+
+                ui.tree_node(hash!(), "Sky look / atmosphere", |ui| {
+                    ui.label(None, "Cosmetics only — tweak live, no regen needed.");
+                    ui.label(None, "Sun/moon radii are screen pixels (finer than voxels).");
+                    labeled_slider(ui, hash!(), "Sun radius (px)", 12.0..80.0, &mut self.atmosphere.sun_radius);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Sun glow radius (px)",
+                        24.0..140.0,
+                        &mut self.atmosphere.sun_glow_radius,
+                    );
+                    labeled_slider(ui, hash!(), "Moon radius (px)", 10.0..72.0, &mut self.atmosphere.moon_radius);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Moon bite offset (px)",
+                        4.0..40.0,
+                        &mut self.atmosphere.moon_bite_offset,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Moon bite radius (px)",
+                        8.0..64.0,
+                        &mut self.atmosphere.moon_bite_radius,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Cloud whiteness",
+                        0.0..1.0,
+                        &mut self.atmosphere.cloud_whiteness,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Cloud far (depth)",
+                        0.0..1.0,
+                        &mut self.atmosphere.vapour_far,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Cloud mid (depth)",
+                        0.0..1.0,
+                        &mut self.atmosphere.vapour_mid,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Cloud active",
+                        0.0..1.0,
+                        &mut self.atmosphere.vapour_active,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Cloud front (depth)",
+                        0.0..1.0,
+                        &mut self.atmosphere.vapour_front,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Ridge sky mix (near)",
+                        0.0..1.0,
+                        &mut self.atmosphere.ridge_sky_mix_near,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Ridge sky mix (far)",
+                        0.0..1.0,
+                        &mut self.atmosphere.ridge_sky_mix_far,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Ridge desat (near)",
+                        0.0..1.0,
+                        &mut self.atmosphere.ridge_desat_near,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Ridge desat (far)",
+                        0.0..1.0,
+                        &mut self.atmosphere.ridge_desat_far,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Ridge feather (near)",
+                        2.0..10.0,
+                        &mut self.atmosphere.ridge_feather_near,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Ridge feather (far)",
+                        2.0..10.0,
+                        &mut self.atmosphere.ridge_feather_far,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Ridge crest blend",
+                        0.0..1.0,
+                        &mut self.atmosphere.ridge_crest_blend,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Far into mid crest",
+                        0.0..1.0,
+                        &mut self.atmosphere.ridge_far_into_crest,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Cast shadow strength",
+                        0.0..1.0,
+                        &mut self.atmosphere.cast_shadow_strength,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Cloud shade (visual)",
+                        0.0..1.0,
+                        &mut self.atmosphere.cloud_shade_strength,
+                    );
+                });
                 ui.separator();
 
                 ui.tree_node(hash!(), "Day / night / temperature", |ui| {

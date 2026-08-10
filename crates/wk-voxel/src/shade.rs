@@ -127,11 +127,30 @@ fn lateral_weight(dx: i32) -> f32 {
     }
 }
 
+/// Column-only transmit (no lateral bleed) — for sharp under-plant visual dim.
+pub fn shade_transmit_column(index: &CanopyIndex, wx: i32, sample_y: i32) -> f32 {
+    if index.is_empty() {
+        return 1.0;
+    }
+    let Some(col) = index.cols.get(&wx) else {
+        return 1.0;
+    };
+    let mut transmit = 1.0_f32;
+    for (&_y, &optical) in col.range((sample_y + 1)..) {
+        let optical = optical.min(MAX_CELL_ABSORB);
+        if optical > 0.0 {
+            transmit *= (1.0 - optical).clamp(0.0, 1.0);
+        }
+    }
+    transmit.clamp(SHADE_AMBIENT_FLOOR, 1.0)
+}
+
 /// Fraction of overhead sky remaining at `(wx, sample_y)` after Beer–Lambert
 /// through foliage **above** this cell, plus soft lateral bleed.
 ///
 /// Own-cell absorb does not shade the sample (light arrives, then the leaf
 /// harvests). Same-height neighbours still compete via peer lateral.
+/// Used by plant growth; visuals prefer [`shade_transmit_column`] + cast rays.
 pub fn shade_transmit(index: &CanopyIndex, wx: i32, sample_y: i32) -> f32 {
     if index.is_empty() {
         return 1.0;

@@ -25,6 +25,8 @@ Cell-sat inventory: `wk_voxel::sat_totals` (see `docs/VOXEL_WATER.md`
 
 Design notes: [`docs/README.md`](docs/README.md) (start with
 `VOXEL_WATER.md`, `VOXEL_FAILURE.md`, `VOXEL_GEOTECH_MAP.md`).
+Peer positioning (games + scientific tools):
+[`docs/COMPARISON.md`](docs/COMPARISON.md).
 
 ## Run
 
