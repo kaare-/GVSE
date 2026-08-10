@@ -481,7 +481,8 @@ fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum
         }
         a.gravity += t0.elapsed();
 
-        let run_flow = !perf.flow_every_other_substep || (step % 2 == 1);
+        // Keep in sync with `rules/tick.rs` (even substeps when every-other).
+        let run_flow = !perf.flow_every_other_substep || (step % 2 == 0);
         if run_flow {
             let t0 = Instant::now();
             apply_water_flow_regions(world, &active);
@@ -674,20 +675,21 @@ fn run_profile(label: &str, params: WorldgenParams, with_plants: bool) {
 
 fn run_perf_knob_ab(params: WorldgenParams) {
     eprintln!("=== PerfConfig A/B (demo stack, no plants) ===");
-    let variants: [(&str, PerfConfig); 3] = [
-        ("defaults (full flow)", PerfConfig::default()),
+    let variants: [(&str, PerfConfig); 4] = [
+        ("defaults (FPS knobs)", PerfConfig::default()),
+        ("full_feel (×12 flow)", PerfConfig::full_feel()),
         (
-            "every-other flow",
+            "defaults + parallel OFF",
             PerfConfig {
-                flow_every_other_substep: true,
+                parallel_physics: false,
                 ..PerfConfig::default()
             },
         ),
         (
-            "parallel OFF",
+            "full_feel + parallel OFF",
             PerfConfig {
                 parallel_physics: false,
-                ..PerfConfig::default()
+                ..PerfConfig::full_feel()
             },
         ),
     ];

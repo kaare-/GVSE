@@ -71,11 +71,11 @@ fn build() -> (World, RainConfig, Temperature, PhaseConfig) {
 #[ignore]
 fn water_flow_decomposition() {
     let (mut world, rain, temperature, phase) = build();
-    let perf = PerfConfig::default();
+    let full = PerfConfig::full_feel();
 
     for _ in 0..WARM {
         apply_rain_with_temp(&mut world, &rain, Some(&temperature), Some(&phase), None);
-        tick_with_perf(&mut world, &perf);
+        tick_with_perf(&mut world, &full);
     }
 
     // Snapshot active area distribution over MEAS ticks under closed_loop.
@@ -88,7 +88,7 @@ fn water_flow_decomposition() {
         areas.push(active_area(&plan));
         regions_ct.push(plan.len());
         let t0 = Instant::now();
-        tick_with_perf(&mut world, &perf);
+        tick_with_perf(&mut world, &full);
         ticks += t0.elapsed();
     }
     areas.sort_unstable();
@@ -101,19 +101,15 @@ fn water_flow_decomposition() {
     eprintln!(
         "  active plan (per-tick, pre-tick):  p50={p50:>7} cells  p95={p95:>7} cells   regions p50={p50r} p95={p95r}"
     );
-    eprintln!("  full tick_with_perf                {:>7.2} ms/tick", ms(ticks, MEAS));
+    eprintln!("  full_feel tick_with_perf           {:>7.2} ms/tick", ms(ticks, MEAS));
 
-    // A/B on FLOW_SUBSTEPS approximation: every-other flow halves the flow
-    // work (gravity keeps ×12).
+    // A/B: FPS-biased defaults (every-other + quiet early-out).
     let (mut w2, _, _, _) = build();
     for _ in 0..WARM {
         apply_rain_with_temp(&mut w2, &rain, Some(&temperature), Some(&phase), None);
-        tick_with_perf(&mut w2, &perf);
+        tick_with_perf(&mut w2, &full);
     }
-    let alt = PerfConfig {
-        flow_every_other_substep: true,
-        ..PerfConfig::default()
-    };
+    let alt = PerfConfig::default();
     let mut alt_t = Duration::ZERO;
     for _ in 0..MEAS {
         apply_rain_with_temp(&mut w2, &rain, Some(&temperature), Some(&phase), None);
@@ -121,9 +117,9 @@ fn water_flow_decomposition() {
         tick_with_perf(&mut w2, &alt);
         alt_t += t0.elapsed();
     }
-    eprintln!("  every-other flow tick              {:>7.2} ms/tick", ms(alt_t, MEAS));
+    eprintln!("  default FPS knobs tick             {:>7.2} ms/tick", ms(alt_t, MEAS));
     eprintln!(
-        "  Δ from ×12→×6 flow substeps:       {:>7.2} ms/tick  (water_flow slice)",
+        "  Δ full_feel → defaults:            {:>7.2} ms/tick",
         ms(ticks, MEAS) - ms(alt_t, MEAS)
     );
 }

@@ -963,7 +963,11 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Performance", |ui| {
                     ui.label(
                         None,
-                        "Defaults = full water feel. Toggle to A/B cost vs cascade/leveling.",
+                        "Defaults favour FPS (every-other flow + quiet early-out + rayon).",
+                    );
+                    ui.label(
+                        None,
+                        "Uncheck flow knobs to A/B full ×12 cascade / shelf leveling feel.",
                     );
                     ui.checkbox(
                         hash!(),
@@ -972,20 +976,20 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "  Off = tuned feel. On ≈ half surface-flow work — watch shores.",
+                        "  On ≈ half surface-flow work. Off = tuned full-feel path.",
                     );
                     ui.checkbox(
                         hash!(),
-                        "Quiet flow early-out (tiny dirty halo)",
+                        "Quiet flow early-out (tiny / shrinking dirty halo)",
                         &mut self.perf.flow_quiet_early_out,
                     );
                     ui.label(
                         None,
-                        "  Can stall hill drains / shelf cascades — compare carefully.",
+                        "  On skips polishing substeps. Off if hill drains look stalled.",
                     );
                     ui.checkbox(
                         hash!(),
-                        "Parallel physics (rayon checkerboard)",
+                        "Parallel physics (rayon + tiled flow scans)",
                         &mut self.perf.parallel_physics,
                     );
                 });

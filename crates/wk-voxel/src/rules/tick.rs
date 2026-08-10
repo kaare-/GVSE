@@ -30,14 +30,18 @@ pub const FLOW_SUBSTEPS_MIN: usize = 6;
 /// don't need the full ×12. Busy rain / cascades stay at max.
 pub const FLOW_QUIET_AREA: usize = 512;
 
-/// Live-tunable physics trade-offs (Tab → Performance). Defaults keep
-/// the full water-feel path; opt-ins trade some leveling speed for ms.
+/// Live-tunable physics trade-offs (Tab → Performance).
+///
+/// Defaults favour interactive FPS on many-core boxes (every-other
+/// surface flow + quiet early-out + rayon). Turn the flow knobs off in
+/// Tab when A/B'ing full ×12 cascade / shelf leveling feel.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerfConfig {
-    /// Run surface water flow only on odd substeps (gravity still every
-    /// substep). Default **off** — same feel as the tuned ×12 path.
+    /// Run surface water flow only on even substeps (gravity still every
+    /// substep). Default **on** — ~half the surface-flow scan work.
     pub flow_every_other_substep: bool,
-    /// After [`FLOW_SUBSTEPS_MIN`], stop when the dirty halo is tiny.
+    /// After [`FLOW_SUBSTEPS_MIN`], stop when the dirty halo is tiny or
+    /// has shrunk enough. Default **on** for settled films / quiet ponds.
     pub flow_quiet_early_out: bool,
     /// Rayon checkerboard parallelism for gravity / grain / flow scan.
     pub parallel_physics: bool,
@@ -46,10 +50,19 @@ pub struct PerfConfig {
 impl Default for PerfConfig {
     fn default() -> Self {
         Self {
+            flow_every_other_substep: true,
+            flow_quiet_early_out: true,
+            parallel_physics: true,
+        }
+    }
+}
+
+impl PerfConfig {
+    /// Full ×12 surface-flow path with no early-out — scenario / unit
+    /// tests and Tab A/B against the FPS-biased [`Default`].
+    pub const fn full_feel() -> Self {
+        Self {
             flow_every_other_substep: false,
-            // Off by default — early-out can stall hill drains / shelf
-            // cascades when the dirty halo shrinks mid-leveling. Opt in
-            // via Tab → Performance after eyeballing water feel.
             flow_quiet_early_out: false,
             parallel_physics: true,
         }
@@ -97,7 +110,9 @@ fn active_cell_area(active: &[crate::active::ActiveChunk]) -> usize {
 /// parallel per colour) but apply from one snapshot so edges are not
 /// re-solved mid-rule.
 pub fn tick(world: &mut World) {
-    tick_with_perf(world, &PerfConfig::default());
+    // Full feel — scenario / unit water suites. Interactive demo uses
+    // [`PerfConfig::default`] (FPS-biased) via `tick_with_perf`.
+    tick_with_perf(world, &PerfConfig::full_feel());
 }
 
 /// [`tick`] with live [`PerfConfig`] knobs (demo Tab → Performance).

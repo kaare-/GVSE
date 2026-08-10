@@ -213,30 +213,26 @@ fn expert_perf_snapshot() {
         PerfConfig::default(),
     );
     run_variant(
-        "every-other flow closed",
+        "full_feel closed",
+        true,
+        true,
+        PerfConfig::full_feel(),
+    );
+    run_variant(
+        "defaults every-other only",
         true,
         true,
         PerfConfig {
-            flow_every_other_substep: true,
+            flow_quiet_early_out: false,
             ..PerfConfig::default()
         },
     );
     run_variant(
-        "quiet early-out closed",
+        "defaults quiet EO only",
         true,
         true,
         PerfConfig {
-            flow_quiet_early_out: true,
-            ..PerfConfig::default()
-        },
-    );
-    run_variant(
-        "both flow knobs closed",
-        true,
-        true,
-        PerfConfig {
-            flow_every_other_substep: true,
-            flow_quiet_early_out: true,
+            flow_every_other_substep: false,
             ..PerfConfig::default()
         },
     );
