@@ -32,9 +32,11 @@ pub const FLOW_QUIET_AREA: usize = 512;
 
 /// Live-tunable physics trade-offs (Tab → Performance).
 ///
-/// Defaults favour interactive FPS on many-core boxes (every-other
-/// surface flow + quiet early-out + rayon). Turn the flow knobs off in
-/// Tab when A/B'ing full ×12 cascade / shelf leveling feel.
+/// Defaults favour interactive FPS: every-other surface flow + quiet
+/// early-out, with **rayon off**. Demo dirty plans stay ~6 regions /
+/// ~9k cells — too narrow for rayon to win (32-core Super-Server:
+/// parallel ON was ~1.6× slower than OFF). Opt parallel back on in Tab
+/// for wide dirty worlds once the active plan is fat.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerfConfig {
     /// Run surface water flow only on even substeps (gravity still every
@@ -44,6 +46,7 @@ pub struct PerfConfig {
     /// has shrunk enough. Default **on** for settled films / quiet ponds.
     pub flow_quiet_early_out: bool,
     /// Rayon checkerboard parallelism for gravity / grain / flow scan.
+    /// Default **off** — wins only when many chunks are dirty at once.
     pub parallel_physics: bool,
 }
 
@@ -52,7 +55,7 @@ impl Default for PerfConfig {
         Self {
             flow_every_other_substep: true,
             flow_quiet_early_out: true,
-            parallel_physics: true,
+            parallel_physics: false,
         }
     }
 }
@@ -64,7 +67,7 @@ impl PerfConfig {
         Self {
             flow_every_other_substep: false,
             flow_quiet_early_out: false,
-            parallel_physics: true,
+            parallel_physics: false,
         }
     }
 }

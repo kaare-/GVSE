@@ -963,11 +963,11 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Performance", |ui| {
                     ui.label(
                         None,
-                        "Defaults favour FPS (every-other flow + quiet early-out + rayon).",
+                        "Defaults favour FPS (every-other flow + quiet early-out; rayon off).",
                     );
                     ui.label(
                         None,
-                        "Uncheck flow knobs to A/B full ×12 cascade / shelf leveling feel.",
+                        "Uncheck flow knobs for full ×12 feel. Parallel helps only on fat dirty plans.",
                     );
                     ui.checkbox(
                         hash!(),
@@ -989,8 +989,12 @@ impl SimSettings {
                     );
                     ui.checkbox(
                         hash!(),
-                        "Parallel physics (rayon + tiled flow scans)",
+                        "Parallel physics (rayon checkerboard)",
                         &mut self.perf.parallel_physics,
+                    );
+                    ui.label(
+                        None,
+                        "  Off by default — demo ~6 dirty regions; rayon was slower on 32 cores.",
                     );
                 });
                 ui.separator();

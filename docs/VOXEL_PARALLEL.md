@@ -12,10 +12,9 @@ do next and what not to do. Companion to [`VOXEL_MIGRATION.md`](VOXEL_MIGRATION.
 | Rayon within a colour | `crates/wk-voxel/src/parallel.rs` |
 | Parallel gravity / grain fall / repose (in-place) | `rules.rs` |
 | Parallel water-flow + seepage **scans**; serial apply | `rules.rs` |
-| Tiled flow/seepage/spill scans (8×8 jobs) | `parallel::expand_scan_tiles` |
 | Frame-shell scans (evap / karst / erosion) | `map_chunk_coords_parallel` |
-| Toggle `PerfConfig.parallel_physics` (default on) | Tab → Performance |
-| FPS-biased `PerfConfig` defaults (every-other + quiet EO) | Tab → Performance |
+| Toggle `PerfConfig.parallel_physics` (**default off**) | Tab → Performance |
+| FPS-biased defaults (every-other + quiet EO; rayon off) | Tab → Performance |
 | Determinism: parallel ≡ serial multi-chunk fixture | `rules` / `perf_profile` tests |
 
 Contract: pull passes write only **own chunk + `cy + 1`**. Flow /
@@ -23,11 +22,11 @@ seepage stay **compute-then-apply** (one snapshot → one apply) so
 mass stays conserved. Wrap-x worlds need an **even** chunk span so
 seam neighbours stay opposite colours.
 
-Checkerboard colours often hold only a handful of active chunks; when a
-colour has fewer regions than `rayon` threads, dirty rects are tiled into
-8×8 scan jobs so fat hosts are not stuck at ~2–3 tasks. Apply is still
-serial. Small hosts that already have ≥ threads regions keep whole-chunk
-jobs (tiling was a net loss on a 4-core profile).
+**Measured (32-core Super-Server, demo ~6 regions / ~9k cells):**
+rayon ON ≈ 71 ms/tick, OFF ≈ 45 ms/tick with the same FPS flow knobs.
+Intra-chunk 8×8 tiling made that worse (too many tiny HashMap-read
+jobs). Parallel stays opt-in until the active plan is wide enough that
+whole-chunk jobs saturate the machine.
 
 ## Phase 0 — Measure first
 
@@ -47,8 +46,8 @@ Harness notes live in `crates/wk-voxel/tests/perf_profile.rs`.
 
 1. ~~`apply_flow_erosion`~~ **landed** (`rules/grain.rs`)
 2. ~~Evaporation / karst~~ **landed** (`rules/evap.rs`, `rules/karst.rs`)
-3. ~~Tiled water-flow / seepage / spill scans~~ **landed** (`expand_scan_tiles`)
-4. Rain / condensation column or tile scans *(still open)*
+3. Rain / condensation column or tile scans *(still open)*
+4. ~~Intra-chunk flow tiling~~ **reverted** — regressed on 32-core demo
 
 App wires `set_parallel_enabled(settings.perf.parallel_physics)` before the
 frame shell so Tab → Performance covers these scans too.
@@ -57,10 +56,11 @@ Low risk: no new write-set proofs.
 
 ## Phase 1b — Cadence (landed defaults)
 
-`PerfConfig::default` now turns on `flow_every_other_substep` and
-`flow_quiet_early_out` for interactive FPS. Unit/scenario `tick()` still
-uses [`PerfConfig::full_feel`] (×12, no early-out). Uncheck the Tab knobs
-to A/B full cascade / shelf leveling.
+`PerfConfig::default`: every-other flow + quiet early-out **on**,
+`parallel_physics` **off**. Unit/scenario `tick()` uses
+[`PerfConfig::full_feel`] (×12, no early-out, parallel off). Next FPS
+work is the post-flow physics tail (grain settle / confined wake /
+failure) — `physics tick` ≫ timed sub-pass sum on the demo.
 
 ## Phase 2 — Fields outside the CA
 

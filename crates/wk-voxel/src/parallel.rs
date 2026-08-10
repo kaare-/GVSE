@@ -20,7 +20,7 @@ use rayon::prelude::*;
 
 use crate::active::ActiveChunk;
 use crate::cell::Cell;
-use crate::chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{Chunk, ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
 /// Global switch — default on. Tests that need a pure serial path
@@ -228,70 +228,14 @@ pub(crate) fn for_each_region_serial_moore(
     }
 }
 
-/// Soft target cells per compute-then-apply scan job after banding.
+/// Parallel spill/seepage/flow scans: each region produces a local
+/// result, then results are concatenated in stable `(cy, cx)` order.
 ///
-/// Checkerboard colours often only hold ~2–3 active chunks; without
-/// splitting, rayon starves on a 32–128 core box. 8×8 tiles turn one
-/// full chunk into 64 jobs while keeping enough work per task.
-const SCAN_TILE_CELLS: u8 = 8;
-
-/// Split active rects into stable `(cy, cx, y0, x0)` scan tiles.
-///
-/// Used only for **read-only** compute-then-apply scans (flow / seepage /
-/// spill). Apply stays serial. Tile order matches a serial y-major,
-/// x-major walk of each region so transfer lists stay deterministic.
-pub(crate) fn expand_scan_tiles(active: &[ActiveChunk]) -> Vec<ActiveChunk> {
-    if active.is_empty() {
-        return Vec::new();
-    }
-    let mut regions: Vec<&ActiveChunk> = active.iter().collect();
-    regions.sort_by(|a, b| {
-        a.coord
-            .cy
-            .cmp(&b.coord.cy)
-            .then(a.coord.cx.cmp(&b.coord.cx))
-    });
-    let tile = SCAN_TILE_CELLS.max(1);
-    let mut out = Vec::with_capacity(regions.len() * 4);
-    for ac in regions {
-        let mut y = ac.rect.y0;
-        loop {
-            let y1 = ac.rect.y1.min(y.saturating_add(tile - 1));
-            let mut x = ac.rect.x0;
-            loop {
-                let x1 = ac.rect.x1.min(x.saturating_add(tile - 1));
-                out.push(ActiveChunk {
-                    coord: ac.coord,
-                    rect: Rect {
-                        x0: x,
-                        y0: y,
-                        x1,
-                        y1,
-                    },
-                });
-                if x1 >= ac.rect.x1 {
-                    break;
-                }
-                x = x1.saturating_add(1);
-            }
-            if y1 >= ac.rect.y1 {
-                break;
-            }
-            y = y1.saturating_add(1);
-        }
-    }
-    out
-}
-
-/// Parallel spill/seepage/flow scans: each region (or scan tile) produces
-/// a local result, then results are concatenated in stable
-/// `(cy, cx, y0, x0)` order.
-///
-/// When rayon is on and a colour has fewer regions than host threads,
-/// tall/wide dirty rects are split into [`SCAN_TILE_CELLS`] tiles so
-/// many-core boxes are not stuck at ~2–3 tasks/colour. When regions
-/// already cover the pool, keep whole chunks (less rayon overhead on
-/// small hosts). Serial path never tiles.
+/// **No intra-chunk tiling.** On a 32-core Super-Server demo
+/// (~6 regions / ~9k dirty cells) 8×8 tiling made parallel ~1.6×
+/// *slower* than serial — too many tiny jobs hammering shared chunk
+/// HashMap reads. Whole-chunk jobs only; turn the Tab toggle off when
+/// the active plan stays this narrow (default is off for that reason).
 pub(crate) fn map_regions_parallel<T, F>(active: &[ActiveChunk], f: F) -> Vec<T>
 where
     T: Send,
@@ -307,21 +251,7 @@ where
             .cmp(&b.coord.cy)
             .then(a.coord.cx.cmp(&b.coord.cx))
     });
-    if !parallel_enabled() {
-        return regions.iter().map(|ac| f(ac)).collect();
-    }
-    let threads = rayon::current_num_threads().max(1);
-    // Tile only when the colour is narrower than the pool — otherwise
-    // whole-chunk jobs already saturate small hosts without the extra
-    // split/join tax measured on 4-core VMs.
-    if regions.len() < threads {
-        let tiles = expand_scan_tiles(active);
-        if tiles.len() >= PARALLEL_MIN_REGIONS {
-            return tiles.par_iter().map(|ac| f(ac)).collect();
-        }
-        return tiles.iter().map(|ac| f(ac)).collect();
-    }
-    if regions.len() >= PARALLEL_MIN_REGIONS {
+    if should_parallelize(active) {
         regions.par_iter().map(|ac| f(ac)).collect()
     } else {
         regions.iter().map(|ac| f(ac)).collect()
@@ -361,38 +291,6 @@ mod tests {
         let coords = pull_write_coords(&active);
         assert!(coords.contains(&ChunkCoord::new(0, 0)));
         assert!(coords.contains(&ChunkCoord::new(0, 1)));
-    }
-
-    #[test]
-    fn expand_scan_tiles_covers_full_chunk_in_stable_order() {
-        let active = [ActiveChunk {
-            coord: ChunkCoord::new(1, 2),
-            rect: Rect::full(),
-        }];
-        let tiles = expand_scan_tiles(&active);
-        let expect = (CHUNK_CELLS_W / SCAN_TILE_CELLS as usize)
-            * (CHUNK_CELLS_H / SCAN_TILE_CELLS as usize);
-        assert_eq!(tiles.len(), expect);
-        assert_eq!(tiles[0].rect.x0, 0);
-        assert_eq!(tiles[0].rect.y0, 0);
-        assert_eq!(tiles[0].rect.x1, SCAN_TILE_CELLS - 1);
-        assert_eq!(tiles[0].rect.y1, SCAN_TILE_CELLS - 1);
-        // y-major, then x within a row of tiles
-        assert_eq!(tiles[1].rect.x0, SCAN_TILE_CELLS);
-        assert_eq!(tiles[1].rect.y0, 0);
-        let last = tiles.last().unwrap();
-        assert_eq!(last.rect.x1, (CHUNK_CELLS_W - 1) as u8);
-        assert_eq!(last.rect.y1, (CHUNK_CELLS_H - 1) as u8);
-        // No gaps / overlaps: cell count matches.
-        let cells: usize = tiles
-            .iter()
-            .map(|t| {
-                let w = (t.rect.x1 as usize) - (t.rect.x0 as usize) + 1;
-                let h = (t.rect.y1 as usize) - (t.rect.y0 as usize) + 1;
-                w * h
-            })
-            .sum();
-        assert_eq!(cells, CHUNK_CELLS_W * CHUNK_CELLS_H);
     }
 
     #[test]

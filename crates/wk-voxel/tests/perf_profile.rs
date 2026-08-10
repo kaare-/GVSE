@@ -676,19 +676,19 @@ fn run_profile(label: &str, params: WorldgenParams, with_plants: bool) {
 fn run_perf_knob_ab(params: WorldgenParams) {
     eprintln!("=== PerfConfig A/B (demo stack, no plants) ===");
     let variants: [(&str, PerfConfig); 4] = [
-        ("defaults (FPS knobs)", PerfConfig::default()),
-        ("full_feel (×12 flow)", PerfConfig::full_feel()),
+        ("defaults (FPS, par OFF)", PerfConfig::default()),
+        ("full_feel (×12, par OFF)", PerfConfig::full_feel()),
         (
-            "defaults + parallel OFF",
+            "defaults + parallel ON",
             PerfConfig {
-                parallel_physics: false,
+                parallel_physics: true,
                 ..PerfConfig::default()
             },
         ),
         (
-            "full_feel + parallel OFF",
+            "full_feel + parallel ON",
             PerfConfig {
-                parallel_physics: false,
+                parallel_physics: true,
                 ..PerfConfig::full_feel()
             },
         ),
