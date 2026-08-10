@@ -18,7 +18,9 @@ use crate::cell::{
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fungi::{move_mycelium_meta, swap_cells_preserving_mycelium, swap_mycelium_meta};
 use crate::grid::World;
-use crate::parallel::{self, for_each_region_parallel, for_each_region_serial_moore};
+use crate::parallel::{
+    self, for_each_region_parallel, for_each_region_serial_moore, map_chunk_coords_parallel,
+};
 use crate::temperature::Temperature;
 
 use super::gravity::apply_gravity_fall;
@@ -2054,6 +2056,8 @@ fn cell_is_flow_erodible(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
 /// waterlogged Organic is included; floating rafts are not.
 ///
 /// Compute-then-apply; deterministic given `(seed, tick, cfg.seed_salt)`.
+/// Chunk scans use rayon when [`crate::parallel::parallel_enabled`]
+/// (frame-shell Phase 1); apply stays serial.
 pub fn apply_flow_erosion(world: &mut World, cfg: &GrainConfig) {
     apply_flow_erosion_bound(world, cfg, None);
 }
@@ -2070,7 +2074,6 @@ pub fn apply_flow_erosion_bound(
 
     let seed = world.seed.0;
     let tick_no = world.tick;
-    let mut events: Vec<ErosionEvent> = Vec::new();
     // Skip dry chunks — same sticky flag evaporation uses. Still pools
     // without flow bias remain no-ops inside the scan.
     let mut coords: Vec<ChunkCoord> = world
@@ -2081,7 +2084,8 @@ pub fn apply_flow_erosion_bound(
         .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
 
-    for coord in coords {
+    let per_chunk = map_chunk_coords_parallel(&coords, |coord| {
+        let mut local: Vec<ErosionEvent> = Vec::new();
         for y in 0..CHUNK_CELLS_H {
             let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
             for x in 0..CHUNK_CELLS_W {
@@ -2119,7 +2123,7 @@ pub fn apply_flow_erosion_bound(
                             flow_dx,
                             true,
                             rooted,
-                            &mut events,
+                            &mut local,
                         );
                     }
                 }
@@ -2143,11 +2147,17 @@ pub fn apply_flow_erosion_bound(
                         flow_dx,
                         false,
                         rooted,
-                        &mut events,
+                        &mut local,
                     );
                 }
             }
         }
+        local
+    });
+
+    let mut events: Vec<ErosionEvent> = Vec::new();
+    for local in per_chunk {
+        events.extend(local);
     }
 
     events.sort_by(|a, b| {

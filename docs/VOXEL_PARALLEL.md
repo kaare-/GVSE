@@ -34,11 +34,14 @@ Harness notes live in `crates/wk-voxel/tests/perf_profile.rs`.
 
 ## Phase 1 — Easy wins (same pattern as seepage)
 
-`map_regions_parallel` scan + **serial** apply:
+`map_chunk_coords_parallel` / `map_regions_parallel` scan + **serial** apply:
 
-1. `apply_flow_erosion`
-2. Evaporation / karst (already skip dry / non-limestone chunks)
-3. Rain / condensation column or tile scans
+1. ~~`apply_flow_erosion`~~ **landed** (`rules/grain.rs`)
+2. ~~Evaporation / karst~~ **landed** (`rules/evap.rs`, `rules/karst.rs`)
+3. Rain / condensation column or tile scans *(still open)*
+
+App wires `set_parallel_enabled(settings.perf.parallel_physics)` before the
+frame shell so Tab → Performance covers these scans too.
 
 Low risk: no new write-set proofs.
 

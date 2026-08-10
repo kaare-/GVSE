@@ -58,9 +58,9 @@ use wk_voxel::{
     apply_weather_rgb, celestial_local_cfg, celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, step_carbon_budget,
-    temperature_step_due, tick_with_life, wake_unsupported_grains, wake_unstable_slopes,
-    GeotechOverlayMode, SimSnapshot, WorldgenParams,
+    precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, set_parallel_enabled,
+    step_carbon_budget, temperature_step_due, tick_with_life, wake_unsupported_grains,
+    wake_unstable_slopes, GeotechOverlayMode, SimSnapshot, WorldgenParams,
 };
 
 use crate::atmosphere::{
@@ -471,6 +471,8 @@ async fn main() {
             || terrain.open
             || quit_dialog.open;
         if !sim_paused {
+            // Frame-shell scans (evap/karst/erosion) + CA share this toggle.
+            set_parallel_enabled(settings.perf.parallel_physics);
             if rain_on {
                 apply_rain_with_temp(
                     &mut scene.world,

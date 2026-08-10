@@ -10,6 +10,7 @@ use wk_material::MaterialId;
 use crate::cell::Cell;
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
+use crate::parallel::map_chunk_coords_parallel;
 
 use super::util::hash_prob;
 
@@ -50,12 +51,13 @@ impl Default for KarstConfig {
 /// cfg.seed_salt)`.
 ///
 /// Compute-then-apply so the sweep order doesn't affect the outcome.
+/// Chunk scans use rayon when [`crate::parallel::parallel_enabled`]
+/// (frame-shell Phase 1).
 ///
 /// Chunks without [`Chunk::has_limestone`] are skipped; the flag is
 /// sticky on write and cleared here when a scan finds no limestone
 /// left (empty sky / pure-stone slabs stay cheap).
 pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
-    let mut converts: Vec<(i32, i32, Cell)> = Vec::new();
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
@@ -66,7 +68,8 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
     let seed = world.seed.0;
     let tick_no = world.tick;
 
-    for coord in coords {
+    let per_chunk = map_chunk_coords_parallel(&coords, |coord| {
+        let mut converts: Vec<(i32, i32, Cell)> = Vec::new();
         let mut still_lime = false;
         for y in 0..CHUNK_CELLS_H {
             let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
@@ -118,12 +121,21 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
                 ));
             }
         }
+        (coord, still_lime, converts)
+    });
+
+    let mut converts = Vec::new();
+    for (coord, still_lime, local) in per_chunk {
         if !still_lime {
             if let Some(chunk) = world.chunks.get_mut(&coord) {
                 chunk.has_limestone = false;
             }
         }
+        converts.extend(local);
     }
+    // Stable apply order (parallel scan may return per-chunk vecs already
+    // in cy/cx order; sort cells so outcome matches serial history).
+    converts.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
     for (gx, gy, cell) in converts {
         world.set_cell(gx, gy, cell);
     }

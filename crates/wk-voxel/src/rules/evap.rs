@@ -12,6 +12,7 @@ use wk_material::MaterialId;
 use crate::cell::{water_capacity_with, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
+use crate::parallel::map_chunk_coords_parallel;
 
 /// Surface-evaporation parameters for [`apply_evaporation`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,13 +48,15 @@ impl Default for EvapConfig {
 ///   (so mid-air rain / falling droplets are not re-evaporated before
 ///   they can reach the ground).
 ///
-/// Compute-then-apply so evap is order-independent.
+/// Compute-then-apply so evap is order-independent. Chunk scans use
+/// rayon when [`crate::parallel::parallel_enabled`] (frame-shell Phase 1).
 pub fn apply_evaporation(world: &mut World, cfg: &EvapConfig) {
     let period = cfg.period_ticks.max(1);
     if world.tick % period != 0 {
         return;
     }
-    let deltas = collect_evap_deltas(world, cfg);
+    let (deltas, clear_wet) = collect_evap_deltas(world, cfg);
+    clear_dry_wet_air_flags(world, &clear_wet);
     apply_evap_deltas(world, deltas, None);
 }
 
@@ -69,7 +72,8 @@ pub fn apply_evaporation_into_humidity(
     if world.tick % period != 0 {
         return;
     }
-    let deltas = collect_evap_deltas(world, cfg);
+    let (deltas, clear_wet) = collect_evap_deltas(world, cfg);
+    clear_dry_wet_air_flags(world, &clear_wet);
     apply_evap_deltas(world, deltas, Some(humidity));
 }
 
@@ -83,8 +87,11 @@ fn rests_on_evap_surface(world: &World, gx: i32, gy: i32, cfg: &EvapConfig) -> b
     }
 }
 
-fn collect_evap_deltas(world: &mut World, cfg: &EvapConfig) -> HashMap<(i32, i32), i32> {
-    let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
+/// Per-chunk scan result: local sat deltas + whether any wet Air remains.
+fn collect_evap_deltas(
+    world: &World,
+    cfg: &EvapConfig,
+) -> (HashMap<(i32, i32), i32>, Vec<ChunkCoord>) {
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
@@ -92,7 +99,9 @@ fn collect_evap_deltas(world: &mut World, cfg: &EvapConfig) -> HashMap<(i32, i32
         .map(|(&coord, _)| coord)
         .collect();
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
-    for coord in coords {
+
+    let per_chunk = map_chunk_coords_parallel(&coords, |coord| {
+        let mut local: Vec<((i32, i32), i32)> = Vec::new();
         let mut still_wet = false;
         for y in 0..CHUNK_CELLS_H {
             let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
@@ -121,16 +130,31 @@ fn collect_evap_deltas(world: &mut World, cfg: &EvapConfig) -> HashMap<(i32, i32
                 if is_orphan_surface_film(world, gx, gy) {
                     rate = (rate * 8).max(4);
                 }
-                *deltas.entry((gx, gy)).or_insert(0) -= rate;
+                local.push(((gx, gy), -rate));
             }
         }
+        (coord, still_wet, local)
+    });
+
+    let mut deltas: HashMap<(i32, i32), i32> = HashMap::new();
+    let mut clear_wet = Vec::new();
+    for (coord, still_wet, local) in per_chunk {
         if !still_wet {
-            if let Some(chunk) = world.chunks.get_mut(&coord) {
-                chunk.has_wet_air = false;
-            }
+            clear_wet.push(coord);
+        }
+        for (key, delta) in local {
+            *deltas.entry(key).or_insert(0) += delta;
         }
     }
-    deltas
+    (deltas, clear_wet)
+}
+
+fn clear_dry_wet_air_flags(world: &mut World, clear: &[ChunkCoord]) {
+    for &coord in clear {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_wet_air = false;
+        }
+    }
 }
 
 /// True when a wet Air cell on solid has no Air neighbour on any of the

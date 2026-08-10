@@ -252,6 +252,24 @@ where
     }
 }
 
+/// Parallel frame-shell scans over sticky-flag chunk lists (evap / karst /
+/// flow erosion). `coords` must already be sorted `(cy, cx)` for stable
+/// concatenation order. Apply stays serial in the caller.
+pub(crate) fn map_chunk_coords_parallel<T, F>(coords: &[ChunkCoord], f: F) -> Vec<T>
+where
+    T: Send,
+    F: Fn(ChunkCoord) -> T + Sync + Send,
+{
+    if coords.is_empty() {
+        return Vec::new();
+    }
+    if parallel_enabled() && coords.len() >= PARALLEL_MIN_REGIONS {
+        coords.par_iter().copied().map(f).collect()
+    } else {
+        coords.iter().copied().map(f).collect()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

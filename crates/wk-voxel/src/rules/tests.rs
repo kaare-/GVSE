@@ -3604,6 +3604,70 @@ fn karst_is_deterministic_for_seed_and_tick() {
 }
 
 #[test]
+fn shell_scans_match_with_parallel_on_or_off() {
+    use crate::parallel::set_parallel_enabled;
+    // Multi-chunk limestone + standing water so rayon actually engages.
+    let build = || {
+        let mut w = World::new(99);
+        w.wrap_width = Some(CHUNK_CELLS_W as i32 * 4);
+        for cx in 0..4 {
+            for cy in 0..2 {
+                w.ensure_chunk(ChunkCoord::new(cx, cy));
+            }
+        }
+        let width = 4 * CHUNK_CELLS_W as i32;
+        for x in 0..width {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Limestone));
+            }
+            w.set_cell(x, 9, Cell::water());
+        }
+        w
+    };
+    let karst = KarstConfig {
+        prob_per_wet_neighbour: 0.35,
+        min_wet_neighbour_sat: 200,
+        seed_salt: 11,
+    };
+    let evap = EvapConfig {
+        rate_per_tick: 2,
+        dry_above_max: 200,
+        period_ticks: 1,
+    };
+
+    set_parallel_enabled(false);
+    let mut serial = build();
+    for _ in 0..6 {
+        apply_karst_dissolution(&mut serial, &karst);
+        apply_evaporation(&mut serial, &evap);
+        serial.tick = serial.tick.wrapping_add(1);
+    }
+
+    set_parallel_enabled(true);
+    let mut parallel = build();
+    for _ in 0..6 {
+        apply_karst_dissolution(&mut parallel, &karst);
+        apply_evaporation(&mut parallel, &evap);
+        parallel.tick = parallel.tick.wrapping_add(1);
+    }
+
+    let width = 4 * CHUNK_CELLS_W as i32;
+    for x in 0..width {
+        for y in 0..=10 {
+            let a = serial.get_cell(x, y);
+            let b = parallel.get_cell(x, y);
+            assert_eq!(
+                a.map(|c| (c.material, c.sat.0)),
+                b.map(|c| (c.material, c.sat.0)),
+                "parallel≠serial at ({x},{y})"
+            );
+        }
+    }
+    set_parallel_enabled(true);
+}
+
+#[test]
 fn karst_ignores_non_limestone_solids() {
     // Stone cell adjacent to water — should never dissolve.
     let mut w = World::new(1);
