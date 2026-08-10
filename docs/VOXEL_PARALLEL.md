@@ -23,9 +23,11 @@ seepage stay **compute-then-apply** (one snapshot → one apply) so
 mass stays conserved. Wrap-x worlds need an **even** chunk span so
 seam neighbours stay opposite colours.
 
-Checkerboard colours often hold only a handful of active chunks; tiling
-dirty rects into 8×8 scan jobs is what feeds many-core boxes. Apply is
-still serial.
+Checkerboard colours often hold only a handful of active chunks; when a
+colour has fewer regions than `rayon` threads, dirty rects are tiled into
+8×8 scan jobs so fat hosts are not stuck at ~2–3 tasks. Apply is still
+serial. Small hosts that already have ≥ threads regions keep whole-chunk
+jobs (tiling was a net loss on a 4-core profile).
 
 ## Phase 0 — Measure first
 

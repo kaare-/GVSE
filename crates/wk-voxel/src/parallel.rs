@@ -287,10 +287,11 @@ pub(crate) fn expand_scan_tiles(active: &[ActiveChunk]) -> Vec<ActiveChunk> {
 /// a local result, then results are concatenated in stable
 /// `(cy, cx, y0, x0)` order.
 ///
-/// When rayon is on, tall/wide dirty rects are split into
-/// [`SCAN_TILE_CELLS`] tiles so a colour with few chunks still feeds
-/// many cores. Serial path keeps whole regions (same cell walk order
-/// as tiled concat) to avoid extra allocs in tests.
+/// When rayon is on and a colour has fewer regions than host threads,
+/// tall/wide dirty rects are split into [`SCAN_TILE_CELLS`] tiles so
+/// many-core boxes are not stuck at ~2–3 tasks/colour. When regions
+/// already cover the pool, keep whole chunks (less rayon overhead on
+/// small hosts). Serial path never tiles.
 pub(crate) fn map_regions_parallel<T, F>(active: &[ActiveChunk], f: F) -> Vec<T>
 where
     T: Send,
@@ -299,13 +300,6 @@ where
     if active.is_empty() {
         return Vec::new();
     }
-    if parallel_enabled() {
-        let tiles = expand_scan_tiles(active);
-        if tiles.len() >= PARALLEL_MIN_REGIONS {
-            return tiles.par_iter().map(|ac| f(ac)).collect();
-        }
-        return tiles.iter().map(|ac| f(ac)).collect();
-    }
     let mut regions: Vec<&ActiveChunk> = active.iter().collect();
     regions.sort_by(|a, b| {
         a.coord
@@ -313,7 +307,25 @@ where
             .cmp(&b.coord.cy)
             .then(a.coord.cx.cmp(&b.coord.cx))
     });
-    regions.iter().map(|ac| f(ac)).collect()
+    if !parallel_enabled() {
+        return regions.iter().map(|ac| f(ac)).collect();
+    }
+    let threads = rayon::current_num_threads().max(1);
+    // Tile only when the colour is narrower than the pool — otherwise
+    // whole-chunk jobs already saturate small hosts without the extra
+    // split/join tax measured on 4-core VMs.
+    if regions.len() < threads {
+        let tiles = expand_scan_tiles(active);
+        if tiles.len() >= PARALLEL_MIN_REGIONS {
+            return tiles.par_iter().map(|ac| f(ac)).collect();
+        }
+        return tiles.iter().map(|ac| f(ac)).collect();
+    }
+    if regions.len() >= PARALLEL_MIN_REGIONS {
+        regions.par_iter().map(|ac| f(ac)).collect()
+    } else {
+        regions.iter().map(|ac| f(ac)).collect()
+    }
 }
 
 /// Parallel frame-shell scans over sticky-flag chunk lists (evap / karst /
