@@ -422,15 +422,16 @@ impl CloudStore {
 
             if p.fy < min_fy {
                 let lift = min_fy - p.fy;
-                // Soft deform: ease up instead of hard snapping.
-                let blend = (0.25 + lift * 0.04).clamp(0.18, 0.55);
+                // Scrape → climb: stronger blend so parcels visibly bump up
+                // and hold the new cruise instead of lingering inside ridges.
+                let blend = (0.40 + lift * 0.06).clamp(0.32, 0.72);
                 p.fy = p.fy * (1.0 - blend) + min_fy * blend;
-                p.deform = (p.deform + lift * 0.08).clamp(0.0, 1.0);
+                p.deform = (p.deform + lift * 0.12).clamp(0.0, 1.0);
                 if land {
                     p.on_ridge = true;
                     // Keep the higher path after the crest.
                     p.cruise_fy = p.cruise_fy.max(min_fy);
-                    p.fx += wind_sign * (0.15 + lift * 0.025).min(0.55);
+                    p.fx += wind_sign * (0.20 + lift * 0.035).min(0.75);
                     if wind.wrap_x {
                         p.fx = p.fx.rem_euclid(width);
                     }
@@ -595,6 +596,16 @@ impl CloudStore {
                     continue;
                 }
                 p.mass -= pay;
+                // Heavy liquid downpour: wake surface sand / organic so
+                // grains can splash / repose (visual + sim read).
+                if !snowing && pay >= 18.0 && p.wetness_with(cfg.downpour_mass) > 0.55 {
+                    splash_surface_grains(
+                        world,
+                        gx,
+                        p.fy.round() as i32,
+                        tick.wrapping_add(k as u64),
+                    );
+                }
                 // Snow-cell retries may exceed this tick's drain slice.
                 remaining = (remaining - pay.min(remaining)).max(0.0);
             }
@@ -677,6 +688,51 @@ fn deposit_rain_column(
 ) -> f32 {
     let jx = world.wrap_x(gx + ((tick as i32 + salt * 3) % 3) - 1);
     deposit_precip_on_surface(world, jx, start_y, budget, temp, phase)
+}
+
+/// Dirty surface sand / organic / soil under a hard rain hit so repose
+/// can rearrange a few grains (splash). Cheap: one column + neighbours.
+fn splash_surface_grains(world: &mut World, gx: i32, from_y: i32, salt: u64) {
+    use crate::cell::is_grain;
+    let gx = world.wrap_x(gx);
+    let y0 = from_y.clamp(0, 512);
+    let mut top = None;
+    for y in (0..=y0).rev() {
+        match world.get_cell(gx, y) {
+            Some(c) if c.material != MaterialId::Air => {
+                top = Some(y);
+                break;
+            }
+            Some(c) if !c.sat.is_empty() => break, // lake — skip
+            _ => {}
+        }
+    }
+    let Some(sy) = top else {
+        return;
+    };
+    for dx in -1i32..=1 {
+        let x = world.wrap_x(gx + dx);
+        for dy in 0i32..=2 {
+            let y = sy - dy;
+            let Some(c) = world.get_cell(x, y) else {
+                continue;
+            };
+            if !is_grain(c.material) {
+                continue;
+            }
+            let h = salt
+                .wrapping_mul(0x9E37_79B9)
+                .wrapping_add((x as u64).wrapping_mul(0x85EB_CA6B))
+                .wrapping_add(y as u64);
+            if h % 5 != 0 {
+                continue;
+            }
+            world.touch_dirty(x, y);
+            if y > 0 {
+                world.touch_dirty(x, y - 1);
+            }
+        }
+    }
 }
 
 #[cfg(test)]

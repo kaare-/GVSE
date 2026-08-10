@@ -21,7 +21,12 @@ use wk_material::MaterialId;
 
 use crate::blueprint::Genome;
 use crate::carbon::{gate_algae_photo, gate_plant_photo, CarbonBudget, CarbonConfig};
-use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
+use crate::atmosphere_metrics::lit_sky_at;
+use crate::climate::{
+    celestial_local_cfg, day_factor_cfg, is_daytime_cfg, phase_fraction_cfg, ClimateConfig,
+    DEMO_DAY_TICKS,
+};
+use crate::clouds::{CloudStore, DOWNPOUR_MASS};
 use crate::fungi::{
     colonize_and_compost_cfg, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
     FungiConfig,
@@ -492,6 +497,52 @@ pub fn corpse_rgb((r, g, b): (u8, u8, u8)) -> (u8, u8, u8) {
     )
 }
 
+/// Per-tick organism bookkeeping for [`crate::event_log::SimLog`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct OrganismStepStats {
+    pub births_plant: u32,
+    pub births_fungus: u32,
+    pub births_atom: u32,
+    pub deaths_plant: u32,
+    pub deaths_fungus: u32,
+    pub deaths_atom: u32,
+    /// Newly tipped woody plants this step (`fallen` false → true).
+    pub tips: u32,
+    /// Spore release FX events (wind / inoculum / bank wake trails).
+    pub spores: u32,
+    pub emergent_fruiting: u32,
+    pub spore_bank_wakes: u32,
+}
+
+impl OrganismStepStats {
+    fn bump_birth(&mut self, atom: &Atom) {
+        if is_land_plant(atom) {
+            self.births_plant += 1;
+        } else if is_fungus(atom) {
+            self.births_fungus += 1;
+        } else {
+            self.births_atom += 1;
+        }
+    }
+
+    fn bump_death(&mut self, atom: &Atom) {
+        if is_land_plant(atom) {
+            self.deaths_plant += 1;
+        } else if is_fungus(atom) {
+            self.deaths_fungus += 1;
+        } else {
+            self.deaths_atom += 1;
+        }
+    }
+}
+
+/// Outcome of one organism step (spores for FX + stats for the sim log).
+#[derive(Debug, Clone, Default)]
+pub struct OrganismStepOutcome {
+    pub spores: Vec<SporeRelease>,
+    pub stats: OrganismStepStats,
+}
+
 /// Population of Set A Atoms (no `hecs` — keep the crate tiny).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrganismStore {
@@ -804,7 +855,7 @@ impl OrganismStore {
         climate: &ClimateConfig,
         humidity: Option<&mut Humidity>,
         wind_vx: f32,
-    ) -> Vec<SporeRelease> {
+    ) -> OrganismStepOutcome {
         self.step_with_climate_wind_temp(world, tick, climate, humidity, wind_vx, None)
     }
 
@@ -818,7 +869,7 @@ impl OrganismStore {
         humidity: Option<&mut Humidity>,
         wind_vx: f32,
         temperature: Option<&Temperature>,
-    ) -> Vec<SporeRelease> {
+    ) -> OrganismStepOutcome {
         self.step_with_carbon(
             world,
             tick,
@@ -840,11 +891,42 @@ impl OrganismStore {
         humidity: Option<&mut Humidity>,
         wind_vx: f32,
         temperature: Option<&Temperature>,
+        carbon: Option<&mut CarbonBudget>,
+        carbon_cfg: &CarbonConfig,
+    ) -> OrganismStepOutcome {
+        self.step_with_weather(
+            world,
+            tick,
+            climate,
+            humidity,
+            wind_vx,
+            temperature,
+            carbon,
+            carbon_cfg,
+            None,
+            DOWNPOUR_MASS,
+        )
+    }
+
+    /// [`Self::step_with_carbon`] plus cloud parcels for [`sky_transmit_at`] light.
+    pub fn step_with_weather(
+        &mut self,
+        world: &mut World,
+        tick: u64,
+        climate: &ClimateConfig,
+        humidity: Option<&mut Humidity>,
+        wind_vx: f32,
+        temperature: Option<&Temperature>,
         mut carbon: Option<&mut CarbonBudget>,
         carbon_cfg: &CarbonConfig,
-    ) -> Vec<SporeRelease> {
+        clouds: Option<&CloudStore>,
+        downpour_mass: f32,
+    ) -> OrganismStepOutcome {
         let day = day_factor_cfg(tick, climate);
+        let wrap_w = world.wrap_width;
         let phase = phase_fraction_cfg(tick, climate);
+        let sun_local = celestial_local_cfg(tick, climate);
+        let is_day = is_daytime_cfg(tick, climate);
         // Posed draw cells (flop + pile) feed canopy shade so dry mats and
         // equal-height meadows compete for light where they actually sit.
         let posed = resolve_organism_draw_cells(world, &self.atoms, tick, wind_vx);
@@ -857,6 +939,8 @@ impl OrganismStore {
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let mut spore_releases: Vec<SporeRelease> = Vec::new();
+        let mut stats = OrganismStepStats::default();
+        let fallen_before: Vec<bool> = self.atoms.iter().map(|a| a.fallen).collect();
         let pop = self.atoms.len();
         let atom_cap = self.atom_cap();
         let growth_caps = self.growth_caps.clamp();
@@ -898,16 +982,26 @@ impl OrganismStore {
                 if let Some(child) =
                     try_emergent_fruiting(world, &fungus_cols, tick, room)
                 {
+                    stats.bump_birth(&child);
+                    stats.emergent_fruiting += 1;
                     self.atoms.push(child);
                 }
-                return spore_releases;
+                return OrganismStepOutcome {
+                    spores: spore_releases,
+                    stats,
+                };
             }
             self.step_corpses(world, tick, wind_vx);
             let room = self.atoms.len() < atom_cap;
             if let Some(child) = try_emergent_fruiting(world, &[], tick, room) {
+                stats.bump_birth(&child);
+                stats.emergent_fruiting += 1;
                 self.atoms.push(child);
             }
-            return spore_releases;
+            return OrganismStepOutcome {
+                spores: spore_releases,
+                stats,
+            };
         }
 
         for (i, atom) in self.atoms.iter_mut().enumerate() {
@@ -944,6 +1038,12 @@ impl OrganismStore {
                     &bank_cfg,
                     carbon.as_deref_mut(),
                     carbon_cfg,
+                    clouds,
+                    humidity.as_deref(),
+                    wrap_w,
+                    downpour_mass,
+                    sun_local,
+                    is_day,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -1055,7 +1155,19 @@ impl OrganismStore {
 
             let n_photo = atom.photosystem_count().max(1) as f32;
             let n_mod = atom.body.len().max(1) as f32;
-            let light = column_light(world, atom.gx, atom.gy) * day;
+            let light = lit_sky_at(
+                world,
+                atom.gx,
+                atom.gy,
+                day,
+                clouds,
+                humidity.as_deref(),
+                wrap_w,
+                downpour_mass,
+                sun_local,
+                is_day,
+                column_light(world, atom.gx, atom.gy),
+            );
             let raw_harvest = PHOTON_RATE * light * n_photo;
             // Set A algae: bloom rate gated by dissolved C bucket.
             let harvest = match carbon.as_deref_mut() {
@@ -1086,8 +1198,15 @@ impl OrganismStore {
 
         deaths.sort_unstable();
         deaths.dedup();
+        // Tips: woody plants that acquired `fallen` this step (before removals).
+        for (i, atom) in self.atoms.iter().enumerate() {
+            if atom.fallen && !fallen_before.get(i).copied().unwrap_or(false) {
+                stats.tips += 1;
+            }
+        }
         for &i in deaths.iter().rev() {
             if let Some(dead) = self.atoms.get(i).cloned() {
+                stats.bump_death(&dead);
                 // Land plants: roots stay as Organic in soil; leaves drop
                 // as falling Organic; stems linger grey until dissolve.
                 if is_land_plant(&dead) {
@@ -1099,6 +1218,9 @@ impl OrganismStore {
             if i < self.atoms.len() {
                 self.atoms.swap_remove(i);
             }
+        }
+        for child in &births {
+            stats.bump_birth(child);
         }
         self.atoms.extend(births);
         // Cream network → new fruiting body (may later shed spores).
@@ -1113,6 +1235,8 @@ impl OrganismStore {
                 try_emergent_fruiting(world, &fungus_cols_now, tick, true)
             {
                 fungus_cols_now.push(child.gx);
+                stats.bump_birth(&child);
+                stats.emergent_fruiting += 1;
                 self.atoms.push(child);
             }
         }
@@ -1141,7 +1265,9 @@ impl OrganismStore {
             room,
         );
         world.spore_bank = bank;
+        stats.spore_bank_wakes = woken.len() as u32;
         for child in woken {
+            stats.bump_birth(&child);
             spore_releases.push(SporeRelease {
                 from_gx: child.gx,
                 from_gy: child.gy,
@@ -1164,7 +1290,11 @@ impl OrganismStore {
                 }
             }
         }
-        spore_releases
+        stats.spores = spore_releases.len() as u32;
+        OrganismStepOutcome {
+            spores: spore_releases,
+            stats,
+        }
     }
 
     fn push_corpse(&mut self, world: &mut World, corpse: Corpse) {
@@ -1489,6 +1619,12 @@ fn step_land_plant(
     bank_cfg: &SporeBankConfig,
     carbon: Option<&mut CarbonBudget>,
     carbon_cfg: &CarbonConfig,
+    clouds: Option<&CloudStore>,
+    humidity: Option<&Humidity>,
+    wrap_w: Option<i32>,
+    downpour_mass: f32,
+    sun_local: f32,
+    is_day: bool,
 ) -> PlantStep {
     // Pose / seat:
     // - Sand/rock purchase wins: once grounded, organics and water never
@@ -1527,17 +1663,10 @@ fn step_land_plant(
             }
         }
         pin_plant_pose(atom);
-    } else if let Some(solid_y) = holdfast_solid.filter(|_| !woody_castaway) {
-        // Local ground under the crown (no sand purchase yet). Stemless
-        // seaweed drops a stale tip once the holdfast is back; woody plants
-        // stay tipped so only upright_growth shoots stand up after re-root.
-        if stemless {
-            atom.fallen = false;
-            atom.upright_growth.clear();
-        }
-        atom.gy = solid_y + 1;
-        pin_plant_pose(atom);
     } else if on_float_raft {
+        // Floating-Organic holdfast wins over "see through litter to mineral"
+        // — otherwise a thin raft over a deep lake teleports the crown to the
+        // bedrock seat under the water column and never runs tip checks.
         let water_top = column_standing_surface(world, atom.gx, atom.gy);
         apply_raft_tip(world, atom, float_columns);
         if atom.fallen {
@@ -1550,6 +1679,16 @@ fn step_land_plant(
         } else {
             pin_plant_pose(atom);
         }
+    } else if let Some(solid_y) = holdfast_solid.filter(|_| !woody_castaway) {
+        // Local ground under the crown (no sand purchase yet). Stemless
+        // seaweed drops a stale tip once the holdfast is back; woody plants
+        // stay tipped so only upright_growth shoots stand up after re-root.
+        if stemless {
+            atom.fallen = false;
+            atom.upright_growth.clear();
+        }
+        atom.gy = solid_y + 1;
+        pin_plant_pose(atom);
     } else if let Some(top) = column_standing_surface(world, atom.gx, atom.gy) {
         if stemless {
             // Detached seaweed: ride the surface; keep ribbon body offsets.
@@ -1660,12 +1799,39 @@ fn step_land_plant(
         canopy,
         posed,
         atom_idx,
-        &|wx, wy| column_light(world, world.wrap_x(wx), wy) * day,
+        &|wx, wy| {
+            let gx = world.wrap_x(wx);
+            lit_sky_at(
+                world,
+                gx,
+                wy,
+                day,
+                clouds,
+                humidity,
+                wrap_w,
+                downpour_mass,
+                sun_local,
+                is_day,
+                column_light(world, gx, wy),
+            )
+        },
         &atom.genome,
     );
     // Fallback when pose missed leaves: tip sample × count (pre-pose path).
     if light_sum <= 0.0 && n_photo > 0 {
-        let sky = column_light(world, tip_x, tip_y) * day;
+        let sky = lit_sky_at(
+            world,
+            tip_x,
+            tip_y,
+            day,
+            clouds,
+            humidity,
+            wrap_w,
+            downpour_mass,
+            sun_local,
+            is_day,
+            column_light(world, tip_x, tip_y),
+        );
         let tip = crate::shade::effective_photo_light(canopy, tip_x, tip_y, sky, &atom.genome);
         light_sum = tip * n_photo as f32;
     }
@@ -2823,6 +2989,9 @@ fn crown_holdfast_solid_y(
 }
 
 /// Highest non-Air, non-Organic solid at or below `start_y` within `max_down`.
+///
+/// Stops at standing / pore-wet Air — a lake under floating litter is not a
+/// compost lid you can seat through to bedrock.
 fn mineral_solid_below(world: &World, gx: i32, start_y: i32, max_down: i32) -> Option<i32> {
     let gx = world.wrap_x(gx);
     let mut best: Option<i32> = None;
@@ -2832,6 +3001,9 @@ fn mineral_solid_below(world: &World, gx: i32, start_y: i32, max_down: i32) -> O
             break;
         };
         if c.material == MaterialId::Air {
+            if !c.sat.is_empty() {
+                break;
+            }
             continue;
         }
         if c.material == MaterialId::Organic {
@@ -4386,6 +4558,7 @@ mod tests {
         let climate = ClimateConfig {
             day_ticks: 6_000,
             night_ticks: 600,
+            ..ClimateConfig::default()
         };
         let cap = super::life_ticks(&climate, true);
         assert_eq!(cap, climate.total_ticks() * 16);
@@ -5218,7 +5391,20 @@ mod tests {
 
     #[test]
     fn plant_drinks_pore_water_over_time() {
-        let mut w = moist_sand_plot();
+        // Comfort-gated drink skips beds already above ROOT_DRINK_COMFORT_FRAC
+        // (moist_sand_plot sat=120 never sips). Use a dry-ish bed that still
+        // has pore water to pull.
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..12 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(18);
+            w.set_cell(x, 1, sand);
+            for y in 2..10 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
         let sat0 = w.get_cell(4, 1).unwrap().sat.0;
         let mut store = OrganismStore::new();
         assert!(store.spawn_blueprint(
@@ -6228,19 +6414,28 @@ mod tests {
 
     #[test]
     fn woody_understory_leaf_drops_after_sustained_shade() {
+        use crate::plant::{
+            shed_unproductive_woody_leaves, WOODY_LEAF_DROP_PERIOD, WOODY_LEAF_STARVE_LIGHT,
+            WOODY_LEAF_STARVE_TICKS,
+        };
+        use crate::shade::{build_canopy_index, shade_transmit};
+
         let mut w = moist_sand_plot();
         let mut short_g = Genome::default();
         short_g.leaf_absorb = 0.35;
         short_g.shade_efficiency = 0.15;
-        short_g.alloc_stem = 0.05;
-        short_g.alloc_leaf = 0.05;
-        short_g.alloc_root = 0.9;
+        short_g.alloc_stem = 0.0;
+        short_g.alloc_leaf = 0.0;
+        short_g.alloc_root = 1.0;
         let mut tall_g = Genome::default();
+        // Dense vertical Photosystem stack so lateral Beer–Lambert actually
+        // drops neighbour transmit below WOODY_LEAF_STARVE_LIGHT (a lone tip
+        // leaf on a stem pole is not enough optical depth).
         tall_g.leaf_absorb = 0.95;
         tall_g.shade_efficiency = 0.05;
-        tall_g.alloc_stem = 0.05;
-        tall_g.alloc_leaf = 0.05;
-        tall_g.alloc_root = 0.9;
+        tall_g.alloc_stem = 0.0;
+        tall_g.alloc_leaf = 0.0;
+        tall_g.alloc_root = 1.0;
 
         let short_body = vec![
             (0, -1, ModuleId::Root),
@@ -6250,34 +6445,37 @@ mod tests {
             (0, 3, ModuleId::Photosystem),
             (0, 4, ModuleId::Photosystem),
         ];
-        let mut tall_body = minimal_plant_body();
-        for s in 3..=8 {
-            tall_body.push((0, s, ModuleId::Stem));
+        let mut tall_body = vec![
+            (0, -1, ModuleId::Root),
+            (0, 0, ModuleId::Nucleus),
+            (0, 1, ModuleId::Stem),
+            (0, 2, ModuleId::Stem),
+        ];
+        for y in 3..=12 {
+            tall_body.push((0, y, ModuleId::Photosystem));
         }
-        tall_body.push((0, 9, ModuleId::Photosystem));
 
-        let mut store = OrganismStore::new();
-        assert!(store.spawn_blueprint(&w, 3, 2, short_body, 40.0, short_g));
-        assert!(store.spawn_blueprint(&w, 4, 2, tall_body, 40.0, tall_g));
-        let n0 = store.atoms[0].photosystem_count();
+        // Flank the short plant so both lateral columns cast shade.
+        let mut short = Atom::from_body(3, 2, 40.0, short_body);
+        apply_genome(&mut short, short_g);
+        let mut left = Atom::from_body(2, 2, 40.0, tall_body.clone());
+        apply_genome(&mut left, tall_g);
+        let mut right = Atom::from_body(4, 2, 40.0, tall_body);
+        apply_genome(&mut right, tall_g);
+        let mut atoms = vec![short, left, right];
+        let canopy = build_canopy_index(&atoms);
+        let lit = shade_transmit(&canopy, 3, 4);
+        assert!(
+            lit < WOODY_LEAF_STARVE_LIGHT,
+            "fixture must shade understory below starve threshold (lit={lit})"
+        );
+        let n0 = atoms[0].photosystem_count();
         assert!(n0 >= 3);
-        for t in 0..(crate::plant::WOODY_LEAF_STARVE_TICKS as u64 + 120) {
-            store.atoms[0].energy = 30.0;
-            if let Some(a) = store.atoms.get_mut(1) {
-                a.energy = 30.0;
-            }
-            // Lock shoot growth so the short plant can't replace dropped leaves.
-            store.atoms[0].genome.alloc_leaf = 0.0;
-            store.atoms[0].genome.alloc_stem = 0.0;
-            store.step(&mut w, t);
-            // Keep age off LAND_GROW_PERIOD (step increments age_ticks).
-            if let Some(a) = store.atoms.get_mut(0) {
-                a.age_ticks = 1;
-                a.genome.alloc_leaf = 0.0;
-                a.genome.alloc_stem = 0.0;
-            }
+        for t in 0..(WOODY_LEAF_STARVE_TICKS as u64 + WOODY_LEAF_DROP_PERIOD * 2) {
+            let canopy = build_canopy_index(&atoms);
+            let _ = shed_unproductive_woody_leaves(&mut w, &mut atoms[0], &canopy, 1.0, t);
         }
-        let n1 = store.atoms[0].photosystem_count();
+        let n1 = atoms[0].photosystem_count();
         assert!(
             n1 < n0,
             "chronically shaded woody leaves should abscise (had {n0}, now {n1})"

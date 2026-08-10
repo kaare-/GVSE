@@ -19,8 +19,8 @@
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
 //! - `O` — toggle Set A organisms (Atom step)
-//! - `H` — toggle soft white humidity haze (vapor hint; clouds carry the look)
-//! - `N` — toggle cloud drawing (coagulated parcels; darker = wetter)
+//! - `H` — toggle humidity tile diagnostic + wind streaks (default on)
+//! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
 //! - `T` — toggle temperature heatmap overlay
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
 //! - `G` — cycle geotech overlay (shear → σᵥ → wet → off)
@@ -38,7 +38,9 @@
 //!
 //! Sky follows the shared climate clock (pixel sun by day, pixel moon by night).
 //! Temperature tiles warm with sun, cool at night, and shade under pixel clouds.
+//! Atmosphere stack: `docs/SKY.md` / [`atmosphere`].
 
+mod atmosphere;
 mod creature_list;
 mod editor;
 mod inspector;
@@ -53,14 +55,21 @@ use macroquad::prelude::*;
 use wk_voxel::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, day_night_factor_cfg,
+    apply_weather_rgb, celestial_local_cfg, celestial_moon_screen_pos_cfg,
+    celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, sky_rgb_at_height,
-    temperature_step_due,
-    step_carbon_budget, tick_with_life, wake_unsupported_grains, wake_unstable_slopes,
-    ClimateConfig, GeotechOverlayMode, SimSnapshot, Wind, World, WorldgenParams,
+    precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, step_carbon_budget,
+    temperature_step_due, tick_with_life, wake_unsupported_grains, wake_unstable_slopes,
+    GeotechOverlayMode, SimSnapshot, WorldgenParams,
 };
 
+use crate::atmosphere::{
+    apply_celestial_key_rgb, apply_organism_celestial_key_rgb, draw_canopy_air_dim,
+    draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, CloudDepthLayer,
+    draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_organism_aboveground,
+    organism_celestial_rim, sky_weather_for_scene, terrain_celestial_key_strength,
+    toward_light_celestial, RidgeSilhouette,
+};
 use crate::creature_list::CreatureList;
 use crate::editor::CreatureEditor;
 use crate::inspector::{draw_block_inspector, draw_selection_outline, screen_to_world};
@@ -112,119 +121,6 @@ fn fps_smoothed() -> f32 {
     })
 }
 
-/// Soft white vapor haze alpha — quiet on purpose so cartoon clouds
-/// stay the main atmospheric read.
-fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
-    if mass <= 0.0 {
-        return 0;
-    }
-    let norm = (mass / max_mass.max(1.0)).clamp(0.0, 1.0);
-    // Floor so thin air isn't a speckled field; cap so it never washes out.
-    if norm < 0.12 {
-        return 0;
-    }
-    (18.0 + norm * 42.0) as u8
-}
-
-/// Day/night sky gradient + round sun/moon built from world-sized pixels.
-fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
-    let dn = day_night_factor_cfg(tick, climate);
-    const BANDS: i32 = 28;
-    for i in 0..BANDS {
-        let y0 = sh * (i as f32) / BANDS as f32;
-        let h = y0 + sh / BANDS as f32;
-        let height_01 = (i as f32 + 0.5) / BANDS as f32;
-        let [r, g, b] = sky_rgb_at_height(dn, height_01);
-        draw_rectangle(
-            0.0,
-            y0,
-            sw,
-            h - y0 + 1.0,
-            Color::from_rgba(r, g, b, 255),
-        );
-    }
-    let (cx, cy) = celestial_screen_pos_cfg(tick, sw, sh, climate);
-    let px = PX_PER_CELL;
-    if is_daytime_cfg(tick, climate) {
-        // Round silhouette (radius in cells), square pixels only as the fill.
-        draw_pixel_disk_cells(cx, cy, 8, px, Color::from_rgba(255, 190, 60, 85));
-        draw_pixel_disk_cells(cx, cy, 6, px, Color::from_rgba(255, 215, 70, 255));
-        draw_pixel_disk_cells(cx, cy, 4, px, Color::from_rgba(255, 238, 150, 255));
-        draw_pixel_disk_cells(cx, cy, 2, px, Color::from_rgba(255, 252, 220, 255));
-    } else {
-        // Round crescent: moon disk minus offset bite (still cell lattice).
-        draw_pixel_crescent_cells(
-            cx,
-            cy,
-            6,
-            2,
-            -1,
-            5,
-            px,
-            Color::from_rgba(220, 226, 238, 255),
-        );
-    }
-}
-
-/// Round disk centered on `(cx, cy)`, filled with `pixel`-sized squares.
-/// Lattice is body-centered so the silhouette stays circular as it moves.
-fn draw_pixel_disk_cells(cx: f32, cy: f32, radius_cells: i32, pixel: f32, color: Color) {
-    if radius_cells <= 0 || pixel <= 0.0 {
-        return;
-    }
-    // Slight expand so staircase edges still read as a circle, not a diamond.
-    let r2 = (radius_cells as f32 + 0.35).powi(2);
-    for dy in -radius_cells..=radius_cells {
-        for dx in -radius_cells..=radius_cells {
-            let fx = dx as f32;
-            let fy = dy as f32;
-            if fx * fx + fy * fy > r2 {
-                continue;
-            }
-            let x = cx + fx * pixel - pixel * 0.5;
-            let y = cy + fy * pixel - pixel * 0.5;
-            draw_rectangle(x, y, pixel, pixel, color);
-        }
-    }
-}
-
-/// Round crescent: moon disk minus a circular bite, body-centered cells.
-fn draw_pixel_crescent_cells(
-    cx: f32,
-    cy: f32,
-    radius_cells: i32,
-    bite_dx: i32,
-    bite_dy: i32,
-    bite_radius: i32,
-    pixel: f32,
-    color: Color,
-) {
-    if radius_cells <= 0 || pixel <= 0.0 {
-        return;
-    }
-    let r2 = (radius_cells as f32 + 0.35).powi(2);
-    let b2 = (bite_radius as f32 + 0.15).powi(2);
-    let bcx = bite_dx as f32;
-    let bcy = bite_dy as f32;
-    for dy in -radius_cells..=radius_cells {
-        for dx in -radius_cells..=radius_cells {
-            let fx = dx as f32;
-            let fy = dy as f32;
-            if fx * fx + fy * fy > r2 {
-                continue;
-            }
-            let bx = fx - bcx;
-            let by = fy - bcy;
-            if bx * bx + by * by <= b2 {
-                continue;
-            }
-            let x = cx + fx * pixel - pixel * 0.5;
-            let y = cy + fy * pixel - pixel * 0.5;
-            draw_rectangle(x, y, pixel, pixel, color);
-        }
-    }
-}
-
 /// Cool cyan → hot amber for geotech shear score on face cells.
 fn geotech_overlay_color(score: f32, s_max: f32) -> Color {
     let t = if s_max > 0.0 {
@@ -239,10 +135,8 @@ fn geotech_overlay_color(score: f32, s_max: f32) -> Color {
     Color::from_rgba(r, g, b, a)
 }
 
-
 fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
     let u = ((temp_c - t_min) / (t_max - t_min).max(0.5)).clamp(0.0, 1.0);
-    // Cold blue → mild cyan → warm yellow → hot red.
     let (r, g, b) = if u < 0.33 {
         let t = u / 0.33;
         (
@@ -268,305 +162,6 @@ fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
     Color::from_rgba(r, g, b, 120)
 }
 
-/// Cartoon → pixel clouds from coagulated [`wk_voxel::CloudStore`] parcels.
-///
-/// Overlapping parcels stamp into one occupancy mask and paint each
-/// world-cell once, so close blobs read as a single bank (and neck /
-/// split when physics drifts them apart). Rain streaks stay per-parcel.
-fn draw_clouds(
-    clouds: &wk_voxel::CloudStore,
-    world: &World,
-    wind: &Wind,
-    origin_x: f32,
-    origin_y: f32,
-    cell_px: f32,
-    bedrock_floor_y: i32,
-    wrap_x: bool,
-    width_cols: i32,
-    sw: f32,
-    sh: f32,
-    downpour_mass: f32,
-    snowing: impl Fn(f32, f32) -> bool,
-) {
-    if clouds.is_empty() || cell_px <= 0.0 {
-        return;
-    }
-    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-
-    // Screen-cell occupancy: max wetness wins (no alpha-stack rings).
-    let mut mask: std::collections::HashMap<(i32, i32), f32> =
-        std::collections::HashMap::with_capacity(clouds.parcels.len() * 96);
-
-    for p in &clouds.parcels {
-        let wet = p.wetness_with(downpour_mass);
-        let r = p.radius() * cell_px;
-        for &x_copy in x_copies {
-            let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px;
-            let sy = origin_y - (p.fy - bedrock_floor_y as f32) * cell_px;
-            if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
-                continue;
-            }
-            stamp_pixel_cloud_mask(&mut mask, sx, sy, r, wet, p.shape_seed, p.deform, cell_px);
-        }
-    }
-
-    // Paint the union once. Lighten only the top silhouette edge — no
-    // circular hilite lobes (those read as holes against the sky).
-    for (&(ix, iy), &wet) in &mask {
-        let shade = (228.0 - wet * 95.0) as u8;
-        let alpha = (190.0 + wet * 50.0).min(235.0) as u8;
-        let top_edge = !mask.contains_key(&(ix, iy - 1));
-        let color = if top_edge {
-            Color::from_rgba(
-                shade.saturating_add(22),
-                shade.saturating_add(22),
-                shade.saturating_add(28),
-                alpha,
-            )
-        } else {
-            Color::from_rgba(shade, shade, shade.saturating_add(6), alpha)
-        };
-        draw_rectangle(
-            ix as f32 * cell_px,
-            iy as f32 * cell_px,
-            cell_px,
-            cell_px,
-            color,
-        );
-    }
-
-    // Cosmetic precip under each raining parcel (physics is separate).
-    for p in &clouds.parcels {
-        if !p.raining {
-            continue;
-        }
-        let wet = p.wetness_with(downpour_mass);
-        let r = p.radius() * cell_px;
-        let r_cells = p.radius();
-        let floor = [-0.85_f32, -0.4, 0.0, 0.4, 0.85]
-            .iter()
-            .map(|t| cloud_floor_y(world, wind, p.fx + t * r_cells))
-            .fold(f32::NEG_INFINITY, f32::max);
-        let ground_sy = origin_y - (floor - bedrock_floor_y as f32) * cell_px;
-        let as_snow = snowing(p.fx, p.fy);
-        for &x_copy in x_copies {
-            let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px;
-            let sy = origin_y - (p.fy - bedrock_floor_y as f32) * cell_px;
-            if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
-                continue;
-            }
-            if as_snow {
-                draw_falling_snow(sx, sy, r, ground_sy, wet, sw, sh, cell_px);
-            } else {
-                draw_falling_rain(sx, sy, r, ground_sy, wet, sw, sh, cell_px);
-            }
-        }
-    }
-}
-
-/// Cosmetic falling drops under a raining parcel (physics is separate).
-fn draw_falling_rain(
-    sx: f32,
-    sy: f32,
-    r: f32,
-    ground_sy: f32,
-    wetness: f32,
-    sw: f32,
-    sh: f32,
-    cell_px: f32,
-) {
-    let t = get_time() as f32;
-    let top = sy + r * 0.35;
-    let bottom = ground_sy.clamp(top + 12.0, sh - 4.0);
-    let left = (sx - r * 0.85).max(-12.0);
-    let right = (sx + r * 0.85).min(sw + 12.0);
-    let band = (right - left).max(1.0);
-    let n = ((band / 7.0) * (0.7 + wetness)).ceil().clamp(10.0, 48.0) as usize;
-    let drop_len = (2.0 + wetness).ceil().clamp(2.0, 4.0) * cell_px;
-    let fall_speed = 380.0 + wetness * 160.0;
-    let cycle = (bottom - top + drop_len).max(drop_len + 1.0);
-    for i in 0..n {
-        let seed = i as f32;
-        let x = ((left + ((seed * 97.371) % band)) / cell_px).floor() * cell_px;
-        let phase = (seed * 0.6180339) % 1.0;
-        let y = top + ((t * fall_speed + phase * cycle) % cycle) - drop_len;
-        if y + drop_len < top || y > bottom {
-            continue;
-        }
-        let alpha = (100.0 + wetness * 50.0) as u8;
-        // Blocky rain streak (1 cell wide).
-        draw_rectangle(
-            x,
-            y,
-            cell_px,
-            drop_len,
-            Color::from_rgba(195, 215, 240, alpha),
-        );
-    }
-}
-
-/// Soft flakes when the column is at/below freeze — pairs with snow precip.
-fn draw_falling_snow(
-    sx: f32,
-    sy: f32,
-    r: f32,
-    ground_sy: f32,
-    wetness: f32,
-    sw: f32,
-    sh: f32,
-    cell_px: f32,
-) {
-    let t = get_time() as f32;
-    let top = sy + r * 0.35;
-    let bottom = ground_sy.clamp(top + 12.0, sh - 4.0);
-    let left = (sx - r * 0.9).max(-12.0);
-    let right = (sx + r * 0.9).min(sw + 12.0);
-    let band = (right - left).max(1.0);
-    let n = ((band / 9.0) * (0.65 + wetness * 0.85))
-        .ceil()
-        .clamp(8.0, 40.0) as usize;
-    let flake = cell_px;
-    let fall_speed = 95.0 + wetness * 55.0;
-    let cycle = (bottom - top + flake * 4.0).max(flake * 4.0 + 1.0);
-    for i in 0..n {
-        let seed = i as f32;
-        let drift = ((t * 18.0 + seed * 11.3).sin()) * 6.0;
-        let x = ((left + ((seed * 97.371) % band) + drift) / cell_px).floor() * cell_px;
-        let phase = (seed * 0.6180339) % 1.0;
-        let y = top + ((t * fall_speed + phase * cycle) % cycle) - flake;
-        if y + flake < top || y > bottom {
-            continue;
-        }
-        let alpha = (130.0 + wetness * 60.0) as u8;
-        let c = Color::from_rgba(235, 242, 255, alpha);
-        // 2×2 block flake.
-        draw_rectangle(x, y, flake, flake, c);
-        if wetness > 0.45 {
-            draw_rectangle(x + flake, y, flake, flake, c);
-        }
-    }
-}
-
-/// Soft lobe offsets for one parcel silhouette (normalized cloud space).
-fn cloud_lobe_layout(shape_seed: u32, deform: f32) -> (f32, f32, Vec<(f32, f32, f32)>) {
-    let d = deform.clamp(0.0, 1.0);
-    let sx = 1.0 + d * 0.22;
-    let sy = 1.0 - d * 0.28;
-    let s = |n: u32| {
-        ((shape_seed
-            .wrapping_mul(0x9E37_79B9)
-            .wrapping_add(n.wrapping_mul(0x85EB_CA6B)))
-            >> 8) as f32
-            / 16_777_216.0
-    };
-    let jx = |n: u32| (s(n) - 0.5) * 0.28;
-    let jr = |n: u32| 0.88 + s(n.wrapping_add(31)) * 0.28;
-    let mut lobes: Vec<(f32, f32, f32)> = vec![
-        (0.0, 0.02, 0.95 * jr(1)),
-        (-0.72, 0.08, 0.70 * jr(2)),
-        (0.78, 0.06, 0.68 * jr(3)),
-        (-0.32 + jx(4) * 0.4, -0.42, 0.60 * jr(4)),
-        (0.28 + jx(5) * 0.4, -0.52, 0.66 * jr(5)),
-    ];
-    if shape_seed & 1 == 0 {
-        lobes.push((0.82, -0.22, 0.52 * jr(6)));
-    }
-    if shape_seed & 2 == 0 {
-        lobes.push((-0.88, -0.12, 0.48 * jr(7)));
-    }
-    if shape_seed % 5 < 3 {
-        lobes.push((jx(8) * 0.5, -0.68, 0.42 * jr(8)));
-    }
-    (sx, sy, lobes)
-}
-
-/// Stamp one parcel's lobe mask into the shared sky occupancy map.
-fn stamp_pixel_cloud_mask(
-    mask: &mut std::collections::HashMap<(i32, i32), f32>,
-    cx: f32,
-    cy: f32,
-    r: f32,
-    wet: f32,
-    shape_seed: u32,
-    deform: f32,
-    cell_px: f32,
-) {
-    if r <= 0.0 || cell_px <= 0.0 {
-        return;
-    }
-    let (sx, sy, lobes) = cloud_lobe_layout(shape_seed, deform);
-    let jx1 = {
-        let s = ((shape_seed.wrapping_mul(0x9E37_79B9).wrapping_add(0x85EB_CA6B)) >> 8) as f32
-            / 16_777_216.0;
-        (s - 0.5) * 0.28
-    };
-    let half_w = r * sx * 1.35;
-    let half_h = r * sy * 1.15;
-    let min_x = ((cx - half_w) / cell_px).floor() as i32;
-    let max_x = ((cx + half_w) / cell_px).ceil() as i32;
-    let min_y = ((cy - half_h) / cell_px).floor() as i32;
-    let max_y = ((cy + half_h) / cell_px).ceil() as i32;
-    let inv_rx = 1.0 / (r * sx).max(1e-3);
-    let inv_ry = 1.0 / (r * sy).max(1e-3);
-
-    for iy in min_y..=max_y {
-        for ix in min_x..=max_x {
-            let px = (ix as f32 + 0.5) * cell_px;
-            let py = (iy as f32 + 0.5) * cell_px;
-            let nx = (px - cx) * inv_rx;
-            let ny = (py - cy) * inv_ry;
-            let mut inside = false;
-            for &(ox, oy, rr) in &lobes {
-                let dx = nx - (ox + jx1 * 0.05);
-                let dy = ny - oy;
-                if dx * dx + dy * dy <= rr * rr {
-                    inside = true;
-                    break;
-                }
-            }
-            if !inside {
-                continue;
-            }
-            mask.entry((ix, iy))
-                .and_modify(|w| *w = (*w).max(wet))
-                .or_insert(wet);
-        }
-    }
-}
-
-#[cfg(test)]
-mod overlay_tests {
-    use super::{humidity_haze_alpha, stamp_pixel_cloud_mask};
-    use std::collections::HashMap;
-
-    #[test]
-    fn haze_ignores_thin_vapor_and_stays_soft() {
-        assert_eq!(humidity_haze_alpha(0.0, 100.0), 0);
-        assert_eq!(humidity_haze_alpha(5.0, 100.0), 0); // below 12% floor
-        assert!(humidity_haze_alpha(50.0, 100.0) >= 18);
-        assert!(humidity_haze_alpha(100.0, 100.0) <= 70);
-    }
-
-    #[test]
-    fn overlapping_parcels_union_into_one_mask() {
-        let cell = 3.0_f32;
-        let mut mask = HashMap::new();
-        // Two nearby parcels — silhouettes overlap in screen space.
-        stamp_pixel_cloud_mask(&mut mask, 100.0, 80.0, 36.0, 0.4, 1, 0.0, cell);
-        let alone = mask.len();
-        stamp_pixel_cloud_mask(&mut mask, 118.0, 82.0, 36.0, 0.9, 2, 0.0, cell);
-        assert!(alone > 20, "first parcel should stamp a real footprint");
-        assert!(
-            mask.len() < alone * 2,
-            "overlap must share cells (alone={alone} union={})",
-            mask.len()
-        );
-        // Max wetness wins in the overlap (no additive alpha stack).
-        let wet_max = mask.values().cloned().fold(0.0_f32, f32::max);
-        assert!((wet_max - 0.9).abs() < 1e-5);
-    }
-}
-
 #[macroquad::main(window_conf)]
 async fn main() {
     let params = WorldgenParams::default();
@@ -583,7 +178,8 @@ async fn main() {
     let mut evap_on = true;
     let mut karst_on = true;
     let mut organisms_on = true;
-    let mut humidity_overlay = false;
+    // Humidity diagnostic default on (`H`); soft clouds default on (`N`).
+    let mut humidity_overlay = true;
     let mut clouds_on = true;
     let mut temp_overlay = false;
     let mut mycelium_overlay = false;
@@ -597,6 +193,7 @@ async fn main() {
     let mut cam_x = 0.0f32;
     let mut cam_y = 0.0f32;
     let mut should_quit = false;
+    let mut ridges = RidgeSilhouette::default();
 
     loop {
         if should_quit {
@@ -932,7 +529,7 @@ async fn main() {
             } else {
                 None
             };
-            tick_with_life(
+            let _ = tick_with_life(
                 &mut scene.world,
                 &settings.perf,
                 &settings.failure,
@@ -1003,7 +600,7 @@ async fn main() {
             apply_phase(&mut scene.world, &scene.temperature, &settings.phase);
             if organisms_on {
                 let tick_no = scene.world.tick;
-                let releases = scene.organisms.step_with_carbon(
+                let outcome = scene.organisms.step_with_weather(
                     &mut scene.world,
                     tick_no,
                     &settings.climate,
@@ -1012,8 +609,10 @@ async fn main() {
                     Some(&scene.temperature),
                     Some(&mut scene.carbon),
                     &settings.carbon,
+                    Some(&scene.clouds),
+                    settings.cloud.downpour_mass,
                 );
-                spore_fx.burst_all(&releases, wind_vx);
+                spore_fx.burst_all(&outcome.spores, wind_vx);
             }
         }
 
@@ -1032,7 +631,6 @@ async fn main() {
         // Render.
         let sw = screen_width();
         let sh = screen_height();
-        draw_sky(scene.world.tick, sw, sh, &settings.climate);
         let cell_px = PX_PER_CELL;
         let hud_h = hud_height(show_hud);
         // Convert screen space to world cell range, centred on the
@@ -1216,6 +814,176 @@ async fn main() {
             }
         }
 
+        // Atmosphere: sky → far clouds → ridges → mid clouds → active clouds → terrain.
+        let phase = &settings.phase;
+        let temp = &scene.temperature;
+        let snow_bias = estimate_snow_bias(&scene.clouds, |fx, fy| {
+            let gx = scene.world.wrap_x(fx.round() as i32);
+            let air_y = fy.round() as i32;
+            precip_forms_snow_at_air(temp, gx, air_y, phase)
+        });
+        let sky_weather = sky_weather_for_scene(
+            scene.world.tick,
+            &settings.climate,
+            &scene.clouds,
+            &scene.humidity,
+            &scene.temperature,
+            &scene.carbon,
+            scene.params.width_cols,
+            scene.params.wrap_x,
+            scene.params.sea_level_y,
+            settings.cloud.downpour_mass,
+            snow_bias,
+        );
+        draw_sky(
+            scene.world.tick,
+            sw,
+            sh,
+            &settings.climate,
+            &sky_weather,
+            &settings.atmosphere,
+        );
+
+        ridges.ensure(
+            &scene.world,
+            scene.params.width_cols,
+            scene.params.bedrock_floor_y,
+            scene.params.sky_ceiling_y,
+            scene.params.sea_level_y,
+            scene.world.tick,
+            scene.params.seed,
+        );
+        let dn_fg = day_night_factor_cfg(scene.world.tick, &settings.climate);
+        let sun_local = celestial_local_cfg(scene.world.tick, &settings.climate);
+        let sun_day = is_daytime_cfg(scene.world.tick, &settings.climate);
+        let (celestial_sx, celestial_sy) = if sun_day {
+            celestial_sun_screen_pos_cfg(
+                scene.world.tick,
+                sw,
+                sh,
+                &settings.climate,
+            )
+        } else {
+            celestial_moon_screen_pos_cfg(
+                scene.world.tick,
+                sw,
+                sh,
+                &settings.climate,
+            )
+        };
+
+        // Sun/moon behind the far ridge — soft reveal as they clear the crest.
+        draw_celestials(
+            scene.world.tick,
+            sw,
+            sh,
+            &settings.climate,
+            &sky_weather,
+            &settings.atmosphere,
+            &ridges,
+            cam_x,
+            cam_y,
+            origin_x,
+            origin_y,
+            cell_px,
+            scene.params.bedrock_floor_y,
+            scene.params.wrap_x,
+            scene.params.width_cols,
+        );
+
+        // Soft clouds (N): far echoes → ridges → mid echoes → active parcels + precip.
+        if clouds_on {
+            draw_depth_cloud_layer(
+                &scene.clouds,
+                &scene.humidity,
+                &scene.wind,
+                scene.world.tick,
+                CloudDepthLayer::Far,
+                &settings.atmosphere,
+                scene.params.seed,
+                scene.params.sea_level_y,
+                settings.cloud.downpour_mass,
+                cam_x,
+                cam_y,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+                sh,
+            );
+        }
+
+        draw_ridge_silhouettes(
+            &ridges,
+            dn_fg,
+            &sky_weather,
+            &settings.atmosphere,
+            cam_x,
+            cam_y,
+            origin_x,
+            origin_y,
+            cell_px,
+            scene.params.bedrock_floor_y,
+            scene.params.sea_level_y,
+            scene.params.wrap_x,
+            scene.params.width_cols,
+            sw,
+            sh,
+        );
+
+        if clouds_on {
+            draw_depth_cloud_layer(
+                &scene.clouds,
+                &scene.humidity,
+                &scene.wind,
+                scene.world.tick,
+                CloudDepthLayer::Mid,
+                &settings.atmosphere,
+                scene.params.seed,
+                scene.params.sea_level_y,
+                settings.cloud.downpour_mass,
+                cam_x,
+                cam_y,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+                sh,
+            );
+            draw_clouds(
+                &scene.clouds,
+                &scene.humidity,
+                &scene.world,
+                &scene.wind,
+                scene.world.tick,
+                cam_x,
+                cam_y,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.sea_level_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+                sh,
+                settings.cloud.downpour_mass,
+                &settings.atmosphere,
+                scene.params.seed,
+                |fx, fy| {
+                    let gx = scene.world.wrap_x(fx.round() as i32);
+                    let air_y = fy.round() as i32;
+                    precip_forms_snow_at_air(temp, gx, air_y, phase)
+                },
+            );
+        }
+
         // Draw the ring once, plus ±1 world-width copies so the seam
         // never shows a gap while panning. Y range is pre-clamped to
         // the visible frustum so we don't iterate hidden sky rows.
@@ -1231,6 +999,7 @@ async fn main() {
             let y = scene.params.bedrock_floor_y as f32 + (origin_y - sh) / cell_px;
             (y.floor() as i32).max(scene.params.bedrock_floor_y)
         };
+
         for &x_copy in x_copies {
             let x_shift = x_copy * scene.params.width_cols;
             for x in 0..scene.params.width_cols {
@@ -1250,8 +1019,14 @@ async fn main() {
                     // Only draw standing water (pools / ocean film / land
                     // puddles). Mid-air sat stays invisible — falling rain
                     // is the cosmetic streak under raining clouds.
+                    // Thin wet-air films (condensation residual / haze sat)
+                    // must not paint as a bright blue-white ground outline.
                     if cell.material == wk_material::MaterialId::Air {
                         if cell.sat.is_empty() {
+                            continue;
+                        }
+                        // Match grain haze band: ≤32 is atmospheric film, not puddle.
+                        if cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX {
                             continue;
                         }
                         let below_sea = y <= scene.params.sea_level_y;
@@ -1259,56 +1034,76 @@ async fn main() {
                             continue;
                         }
                     }
-                    let [r, g, b] = cell_color(cell);
-                    draw_rectangle(sx, sy - cell_px, cell_px, cell_px, Color::from_rgba(r, g, b, 255));
-                }
-            }
-        }
-
-        // Soft white vapor haze (optional) — clouds remain the main read.
-        if humidity_overlay {
-            let tile_px = scene.humidity.tile_cols as f32 * cell_px;
-            let max_mass = scene
-                .humidity
-                .cells
-                .values()
-                .copied()
-                .fold(0.0f32, f32::max)
-                .max(1.0);
-            let sky_hy_min = (scene.params.sea_level_y + 4).div_euclid(scene.humidity.tile_cols);
-            for (&(hx, hy), &mass) in &scene.humidity.cells {
-                if mass <= 0.0 || hy < sky_hy_min {
-                    continue;
-                }
-                let alpha = humidity_haze_alpha(mass, max_mass);
-                if alpha == 0 {
-                    continue;
-                }
-                let base_gx = hx * scene.humidity.tile_cols;
-                let base_gy = hy * scene.humidity.tile_cols;
-                for &x_copy in x_copies {
-                    let sx = origin_x
-                        + (base_gx + x_copy * scene.params.width_cols) as f32 * cell_px;
-                    let sy = origin_y
-                        - (base_gy - scene.params.bedrock_floor_y + scene.humidity.tile_cols)
-                            as f32
-                            * cell_px;
-                    if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
-                        continue;
+                    let [r0, g0, b0] = cell_color(cell);
+                    let [mut r, mut g, mut b] =
+                        apply_weather_rgb([r0, g0, b0], dn_fg, &sky_weather);
+                    // Crest key + soft bleed into subsurface / water.
+                    let key = terrain_celestial_key_strength(
+                        &scene.world,
+                        x,
+                        y,
+                        sun_local,
+                        sun_day,
+                    );
+                    if key > 0.03 {
+                        let lit = apply_celestial_key_rgb([r, g, b], key, sun_local, sun_day);
+                        r = lit[0];
+                        g = lit[1];
+                        b = lit[2];
                     }
-                    draw_rectangle(sx, sy, tile_px, tile_px, Color::from_rgba(255, 255, 255, alpha));
+                    draw_rectangle(
+                        sx,
+                        sy - cell_px,
+                        cell_px,
+                        cell_px,
+                        Color::from_rgba(r, g, b, 255),
+                    );
                 }
             }
         }
 
-        // Coagulated cloud parcels — the atmospheric story.
-        if clouds_on {
-            let phase = &settings.phase;
-            let temp = &scene.temperature;
-            draw_clouds(
-                &scene.clouds,
+        // Day sun cast / under-canopy / cloud dim — after terrain, before front vapour.
+        // Night moon cast is drawn after organisms so lee covers bodies.
+        if organisms_on && sun_day {
+            draw_canopy_air_dim(
                 &scene.world,
+                &scene.organisms,
+                &scene.clouds,
+                scene.world.tick,
+                draw_wind_vx,
+                sun_local,
+                celestial_sx,
+                celestial_sy,
+                true,
+                settings.cloud.downpour_mass,
+                &settings.atmosphere,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                y_min_vis,
+                y_max_vis,
+                sw,
+                sh,
+            );
+        }
+
+        // Front soft cloud echoes (N) — ahead of land for scale; plants stay readable.
+        if clouds_on {
+            draw_depth_cloud_layer(
+                &scene.clouds,
+                &scene.humidity,
                 &scene.wind,
+                scene.world.tick,
+                CloudDepthLayer::Front,
+                &settings.atmosphere,
+                scene.params.seed,
+                scene.params.sea_level_y,
+                settings.cloud.downpour_mass,
+                cam_x,
+                cam_y,
                 origin_x,
                 origin_y,
                 cell_px,
@@ -1317,12 +1112,25 @@ async fn main() {
                 scene.params.width_cols,
                 sw,
                 sh,
-                settings.cloud.downpour_mass,
-                |fx, fy| {
-                    let gx = scene.world.wrap_x(fx.round() as i32);
-                    let air_y = fy.round() as i32;
-                    precip_forms_snow_at_air(temp, gx, air_y, phase)
-                },
+            );
+        }
+
+        // Humidity tile diagnostic (H) — not clouds.
+        if humidity_overlay {
+            draw_haze_and_wind(
+                &scene.humidity,
+                &scene.world,
+                &scene.wind,
+                scene.world.tick,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.sea_level_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+                sh,
             );
         }
 
@@ -1482,12 +1290,39 @@ async fn main() {
         // menu input on dense meadows). Spawn-picker keeps the world
         // visible, so draw then.
         let editor_covers_world = editor.open && !editor.spawn_picker;
+        // Body dimness at night; sun/moon key only on the lit rim (not whole body).
+        let body_lit = ((dn_fg + 1.0) * 0.5).clamp(0.20, 1.0);
         if !editor_covers_world && !settings.open {
-            for &(gx, gy, (r, g, b)) in &scene.organisms.draw_list(
+            let draw_cells = scene.organisms.draw_list(
                 &scene.world,
                 scene.world.tick,
                 draw_wind_vx,
-            ) {
+            );
+            let occupied: std::collections::HashSet<(i32, i32)> =
+                draw_cells.iter().map(|&(x, y, _)| (x, y)).collect();
+            for &(gx, gy, (r, g, b)) in &draw_cells {
+                let r = (r as f32 * body_lit) as u8;
+                let g = (g as f32 * body_lit) as u8;
+                let b = (b as f32 * body_lit) as u8;
+                // Roots / buried modules stay dark — no sun/moon key underground.
+                let [r, g, b] = if is_organism_aboveground(&scene.world, gx, gy) {
+                    let toward = toward_light_celestial(sun_local);
+                    let rim = organism_celestial_rim(
+                        &occupied,
+                        gx,
+                        gy,
+                        toward,
+                        sun_local,
+                        sun_day,
+                    );
+                    if rim > 0.0 {
+                        apply_organism_celestial_key_rgb([r, g, b], rim, sun_local, sun_day)
+                    } else {
+                        [r, g, b]
+                    }
+                } else {
+                    [r, g, b]
+                };
                 for &x_copy in x_copies {
                     let sx = origin_x + (gx + x_copy * scene.params.width_cols) as f32 * cell_px;
                     let sy = origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;
@@ -1503,6 +1338,33 @@ async fn main() {
                     );
                 }
             }
+        }
+
+        // Night moon cast — after organisms so plants/creatures in lee go dark.
+        if organisms_on && !sun_day {
+            draw_canopy_air_dim(
+                &scene.world,
+                &scene.organisms,
+                &scene.clouds,
+                scene.world.tick,
+                draw_wind_vx,
+                sun_local,
+                celestial_sx,
+                celestial_sy,
+                false,
+                settings.cloud.downpour_mass,
+                &settings.atmosphere,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                y_min_vis,
+                y_max_vis,
+                sw,
+                sh,
+            );
         }
 
         spore_fx.draw(

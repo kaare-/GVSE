@@ -26,6 +26,7 @@
 //! [`crate::rules::apply_cold_avalanche`]; thin lake ice that cannot
 //! carry the debris breaks here ([`PhaseConfig::enable_ice_load_break`]).
 
+use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::cell::{is_grain, Cell, Sat};
@@ -35,7 +36,7 @@ use crate::rules::{deposit_water_on_surface, is_standing_water};
 use crate::temperature::Temperature;
 
 /// Freeze / thaw knobs.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PhaseConfig {
     /// Free water freezes at or below this skin temperature (°C).
     /// Ice/Snow thaw when warmer than this.

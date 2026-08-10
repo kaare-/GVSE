@@ -6,6 +6,8 @@ notes intended to survive re-reads of the codebase.
 
 | Doc | Subject |
 |-----|---------|
+| [`COMPARISON.md`](COMPARISON.md) | Peer positioning vs game CA / eco sims and scientific hydro-geo tools. |
+| [`SKY.md`](SKY.md) | Sim-linked sky / ridges / multi-depth clouds (`N`) + humidity diagnostic (`H`). |
 | [`VOXEL_WATER.md`](VOXEL_WATER.md) | Working voxel water CA: gravity, surface flow, seepage, material capacities. |
 | [`VOXEL_PARALLEL.md`](VOXEL_PARALLEL.md) | Multithreading: what landed, next phases, what to avoid. |
 | [`VOXEL_FIELDS.md`](VOXEL_FIELDS.md) | Fields / heatmaps for richer material physics (future plan). |
@@ -22,8 +24,10 @@ notes intended to survive re-reads of the codebase.
 
 Read order for the **active voxel stack:** `VOXEL_WATER.md` →
 `VOXEL_FAILURE.md` / `VOXEL_GEOTECH_MAP.md` → `VOXEL_FIELDS.md`.
-World shape: `WORLDGEN.md` → `STRATA.md`. Life specs: `organism/`
-(studio in `wk-voxel-app`).
+World shape: `WORLDGEN.md` → `STRATA.md`. Presentation / atmosphere:
+`SKY.md`. Life specs: `organism/` (studio in `wk-voxel-app`). Peer map
+(games + science ceilings): `COMPARISON.md` — useful after
+water/migration, before expanding scope.
 
 Column-stack crates and the archive docs above live under
 [`crates/legacy/`](../crates/legacy/); product work is on `wk-voxel`.

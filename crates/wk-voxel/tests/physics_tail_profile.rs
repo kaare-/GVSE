@@ -110,7 +110,7 @@ fn profile_physics_tail_passes() {
         rise_soak += t0.elapsed();
 
         let t0 = Instant::now();
-        apply_failure(&mut world, &failure, None);
+        let _ = apply_failure(&mut world, &failure, None);
         failure_t += t0.elapsed();
 
         let t0 = Instant::now();

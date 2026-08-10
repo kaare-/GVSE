@@ -6,6 +6,8 @@
 
 use std::collections::HashSet;
 
+use serde::{Deserialize, Serialize};
+
 use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
 use crate::grid::World;
 
@@ -30,7 +32,7 @@ pub const FLOW_QUIET_AREA: usize = 512;
 
 /// Live-tunable physics trade-offs (Tab → Performance). Defaults keep
 /// the full water-feel path; opt-ins trade some leveling speed for ms.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerfConfig {
     /// Run surface water flow only on odd substeps (gravity still every
     /// substep). Default **off** — same feel as the tuned ×12 path.
@@ -122,7 +124,7 @@ pub fn tick_with_configs_and_geotech(
     failure: &crate::failure::FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
 ) {
-    tick_with_life(world, perf, failure, geotech, None, None, None);
+    let _ = tick_with_life(world, perf, failure, geotech, None, None, None);
 }
 
 /// [`tick_with_configs_and_geotech`] plus optional living-root cells for
@@ -140,7 +142,7 @@ pub fn tick_with_life(
     rooted: Option<&HashSet<(i32, i32)>>,
     grain: Option<&super::grain::GrainConfig>,
     fungi: Option<&crate::fungi::FungiConfig>,
-) {
+) -> crate::failure::FailureStats {
     // Opt-in cell-sat inventory (debug only). Atmosphere stores are
     // outside this tick — see `audit::tracked_totals`.
     #[cfg(debug_assertions)]
@@ -260,7 +262,7 @@ pub fn tick_with_life(
     }
 
     // Geotech: roof / overhang collapse after grain has seated.
-    crate::failure::apply_failure(world, failure, geotech);
+    let failure_stats = crate::failure::apply_failure(world, failure, geotech);
 
     // Reset network sym "last" before field + later organism plant trade
     // share one inspector window (organism step clears plant lasts only).
@@ -282,4 +284,6 @@ pub fn tick_with_life(
         let after = crate::audit::sat_totals(world);
         crate::audit::assert_cell_sat_conserved(&before, &after, "tick_with_life");
     }
+
+    failure_stats
 }

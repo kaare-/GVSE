@@ -4,6 +4,7 @@
 //!
 //! Limestone dissolution.
 
+use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::cell::Cell;
@@ -13,7 +14,7 @@ use crate::grid::World;
 use super::util::hash_prob;
 
 /// Karst dissolution parameters for [`apply_karst_dissolution`].
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct KarstConfig {
     /// Base probability per tick that a Limestone cell dissolves
     /// *per* wet neighbour it has. Effective probability is

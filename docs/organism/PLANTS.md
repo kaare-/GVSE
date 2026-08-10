@@ -4,6 +4,11 @@
 `StemVsLeafVsRoot` allocation gene; stem integrity and the topple
 pipeline. `land-plant` in the Organism Kernel plan.*
 
+> **Voxel status:** this file is the design reference. What ships on
+> `wk-voxel` (saplings, tip bake, shade, sprouts/spores, Symbiont) is
+> tracked in [`VOXEL_PLANTS.md`](VOXEL_PLANTS.md). Prefer that doc when
+> asking “is this live?”.
+
 ## Modules used
 
 Only the palette entries from [`PALETTE.md`](PALETTE.md); nothing new

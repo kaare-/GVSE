@@ -6,15 +6,15 @@
 //! Maps a [`wk_voxel::Cell`] to an RGB triple using
 //! [`wk_material::MaterialRegistry::colour_rgb`] as the ground truth.
 //! Water is `Air + sat` in the voxel model. Dry Air keeps the sky colour;
-//! any non-zero sat blends from a faint blue-white film toward the
-//! `Water` palette entry so even 1/255 fill reads on screen.
+//! meaningful sat blends from a soft film toward the `Water` palette.
+//! Sub-haze films (≤ [`wk_voxel::GRAIN_REPOSE_HAZE_MAX`]) are not drawn
+//! by the app — they stay atmospheric, not a bright ground outline.
 
 use wk_material::{MaterialId, MaterialRegistry};
-use wk_voxel::Cell;
+use wk_voxel::{Cell, GRAIN_REPOSE_HAZE_MAX};
 
-/// Faint blue-white film for the tiniest wet Air fill (sat = 1/255).
-/// Distinct from dry sky blue so trickle cells don't disappear.
-const WATER_FILM_RGB: [u8; 3] = [0xB8, 0xD4, 0xEE];
+/// Soft film colour once sat clears the atmospheric haze band.
+const WATER_FILM_RGB: [u8; 3] = [0x9A, 0xC0, 0xD8];
 
 fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     (a as f32 + (b as f32 - a as f32) * t.clamp(0.0, 1.0)).round() as u8
@@ -46,16 +46,19 @@ pub fn cell_color(cell: Cell) -> [u8; 3] {
     let base = MaterialRegistry::colour_rgb(cell.material);
     let t = cell.sat.as_f32();
     if cell.material == MaterialId::Air {
-        if cell.sat.is_empty() {
+        if cell.sat.is_empty() || cell.sat.0 <= GRAIN_REPOSE_HAZE_MAX {
+            // Dry or atmospheric film — sky (app skips drawing these).
             return base;
         }
         let water = MaterialRegistry::colour_rgb(MaterialId::Water);
-        // Floor at the film colour (never sky). Ramp toward lake blue;
-        // snap once mostly full so pools read as real water.
-        let blend = if t >= 0.55 {
-            (0.55 + (t - 0.55) * 1.8).clamp(0.75, 1.0)
+        // Remap sat above haze band onto 0..1 for the film→lake ramp.
+        let t_vis = ((cell.sat.0 - GRAIN_REPOSE_HAZE_MAX) as f32
+            / (255 - GRAIN_REPOSE_HAZE_MAX) as f32)
+            .clamp(0.0, 1.0);
+        let blend = if t_vis >= 0.55 {
+            (0.55 + (t_vis - 0.55) * 1.8).clamp(0.75, 1.0)
         } else {
-            (t / 0.55) * 0.75
+            t_vis / 0.55 * 0.75
         };
         [
             lerp_u8(WATER_FILM_RGB[0], water[0], blend),
@@ -121,17 +124,27 @@ mod tests {
     }
 
     #[test]
-    fn one_sat_air_is_faint_blue_white_not_sky() {
+    fn haze_band_sat_reads_as_sky_not_film() {
         let mut c = Cell::air();
         c.sat = Sat(1);
         let rgb = cell_color(c);
         let sky = MaterialRegistry::colour_rgb(MaterialId::Air);
-        assert_ne!(rgb, sky, "1/255 fill must not match dry sky");
-        // Within a few steps of the film colour (tiny blend toward water).
-        for i in 0..3 {
-            let d = (rgb[i] as i16 - WATER_FILM_RGB[i] as i16).unsigned_abs();
-            assert!(d <= 4, "component {i}: rgb={} film={}", rgb[i], WATER_FILM_RGB[i]);
-        }
+        assert_eq!(rgb, sky, "1/255 wet-air film must not paint as water");
+        c.sat = Sat(GRAIN_REPOSE_HAZE_MAX);
+        assert_eq!(
+            cell_color(c),
+            sky,
+            "haze-band sat must stay sky-coloured"
+        );
+    }
+
+    #[test]
+    fn just_above_haze_band_is_film_not_sky() {
+        let mut c = Cell::air();
+        c.sat = Sat(GRAIN_REPOSE_HAZE_MAX.saturating_add(1));
+        let rgb = cell_color(c);
+        let sky = MaterialRegistry::colour_rgb(MaterialId::Air);
+        assert_ne!(rgb, sky, "puddle-threshold sat should leave the sky colour");
     }
 
     #[test]

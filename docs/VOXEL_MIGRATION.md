@@ -516,9 +516,11 @@ parallelism within each colour**, **chunk occupancy skips** for
 evap / karst, and **Set A Atoms** (`OrganismStore` — isolated, no
 `wk-agents` import) are landed in `wk-voxel`, plus **Set D plants**
 (D1–D4 plants + E1 litter/fungi + lingering corpses → Organic — see
-`plant.rs`, `fungi.rs`, `organism.rs`, and
-`docs/organism/VOXEL_PLANTS.md`). Remaining organism focus is Set E2
-(epiphytes / topple).
+`plant.rs`, `fungi.rs`, `symbiosis.rs`, `organism.rs`, and
+`docs/organism/VOXEL_PLANTS.md`). E1 also covers mycelium network sugar,
+multi-strain cream, Symbiont treaty trade, sapling `growth_target`
+inheritance, and morph edits (double / add / delete). Remaining
+organism focus is Set E2 (epiphytes / topple / ghost roots).
 
 Each PR keeps the isolation contract and passes headless tests
 before touching rendering.

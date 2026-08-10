@@ -109,8 +109,11 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 - Child **births as a short sapling**; the mutated upright parent plan is
   stored on `Atom::growth_target`. Growth fills missing target cells first
   (stem scaffold → roots → leaves → organs) under local sun / water /
-  spacing gates, then free-elongates as today. `mutate_body` +
-  `Genome::mutate` use `clone_fidelity` (stemless cannot invent a trunk)
+  spacing gates, then free-elongates as today. `mutate_body` **doubles**
+  familiar tissue / **adds** new palette modules / **deletes** extras
+  (default fidelity still morphs once), then **collapses gaps** so the
+  growth target stays contiguous (no floating canopy after a trunk
+  delete) + `Genome::mutate`; stemless cannot invent a trunk
 - Soft pop cap shared with Atoms
 - Root elongation biases sideways when banking for a sprout
 - **Anti-flood / spacing:** long sprout period (~0.6 demo day), higher
@@ -220,13 +223,15 @@ Features:
 - After settle ticks, remaining body → Organic + soft litter
 - Fungi feed on that residue (not on instant despawn)
 
-### Plant tune *(this PR)*
+### Plant tune *(landed)*
 
 - Root drink only touches pore sat (never free Air water); slow sip + return to humidity.
   Land roots stop sipping once pore fill is above `ROOT_DRINK_COMFORT_FRAC`
   so growing plants do not flash-dry moist sand into drought dormancy.
 - Stronger moisture tropism for root elongation
 - Softer upkeep / longer plant life; Tab → Plants/fungi gene knobs
+- Inspector: Symbiont treaty / link / last+total ledgers; `sym frontier`
+  for strain↔strain edges; F4 creature list; **`M`** strain overlay
 
 ### E2 — Epiphytes + topple *(later)*
 
