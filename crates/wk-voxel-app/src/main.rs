@@ -55,10 +55,11 @@ use wk_voxel::{
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     celestial_screen_pos_cfg, cloud_floor_y, collect_live_root_world_cells, continental_surface_y,
     day_night_factor_cfg, geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, sky_rgb_at_height,
-    temperature_step_due, step_carbon_budget, tick_with_life, wake_unsupported_grains,
-    wake_unstable_slopes, ClimateConfig, GeotechOverlayMode, Humidity, SimSnapshot, Wind, World,
-    WorldgenParams,
+    lunar_fraction_cfg, moon_apparent_scale, moon_illumination, precip_forms_snow_at_air,
+    sail_plants_on_wind_rafts_cfg, season_fraction_cfg, season_name, sky_rgb_at_height_cfg,
+    sky_rgb_cfg, sun_apparent_scale, temperature_step_due, step_carbon_budget, tick_with_life,
+    wake_unsupported_grains, wake_unstable_slopes, ClimateConfig, GeotechOverlayMode, Humidity,
+    SimSnapshot, Wind, World, WorldgenParams,
 };
 
 use crate::creature_list::CreatureList;
@@ -174,7 +175,8 @@ fn draw_distance_ridges(
         return;
     }
     let dn = day_night_factor_cfg(tick, climate);
-    let sky = sky_rgb_at_height(dn, 0.55);
+    let season = season_fraction_cfg(tick, climate);
+    let sky = sky_rgb_at_height_cfg(dn, 0.55, season, climate.season_sky_tint);
     let rock = [110u8, 108, 102];
 
     // (parallax, height_scale, y_bias_cells, sky_blend, alpha, seed_salt)
@@ -295,15 +297,18 @@ fn draw_humidity_haze(
     }
 }
 
-/// Day/night sky gradient + round sun/moon built from world-sized pixels.
+/// Day/night sky gradient + seasonal wash, stars, sun/moon with
+/// distance-driven size and lunar phase (shadow matches local sky).
 fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
     let dn = day_night_factor_cfg(tick, climate);
-    const BANDS: i32 = 28;
+    let season = season_fraction_cfg(tick, climate);
+    let tint = climate.season_sky_tint;
+    const BANDS: i32 = 36;
     for i in 0..BANDS {
         let y0 = sh * (i as f32) / BANDS as f32;
         let h = y0 + sh / BANDS as f32;
         let height_01 = (i as f32 + 0.5) / BANDS as f32;
-        let [r, g, b] = sky_rgb_at_height(dn, height_01);
+        let [r, g, b] = sky_rgb_at_height_cfg(dn, height_01, season, tint);
         draw_rectangle(
             0.0,
             y0,
@@ -312,86 +317,111 @@ fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
             Color::from_rgba(r, g, b, 255),
         );
     }
-    let (cx, cy) = celestial_screen_pos_cfg(tick, sw, sh, climate);
-    let px = PX_PER_CELL;
-    if is_daytime_cfg(tick, climate) {
-        // Round silhouette (radius in cells), square pixels only as the fill.
-        draw_pixel_disk_cells(cx, cy, 8, px, Color::from_rgba(255, 190, 60, 85));
-        draw_pixel_disk_cells(cx, cy, 6, px, Color::from_rgba(255, 215, 70, 255));
-        draw_pixel_disk_cells(cx, cy, 4, px, Color::from_rgba(255, 238, 150, 255));
-        draw_pixel_disk_cells(cx, cy, 2, px, Color::from_rgba(255, 252, 220, 255));
-    } else {
-        // Round crescent: moon disk minus offset bite (still cell lattice).
-        draw_pixel_crescent_cells(
-            cx,
-            cy,
-            6,
-            2,
-            -1,
-            5,
-            px,
-            Color::from_rgba(220, 226, 238, 255),
+
+    // Soft horizon haze strip (dusk/dawn + mild daytime).
+    if dn > -0.55 {
+        let glow = if dn >= 0.0 {
+            0.12 + 0.10 * (1.0 - dn)
+        } else {
+            0.22 * (1.0 + dn / 0.55)
+        };
+        let haze_h = sh * (0.10 + 0.06 * glow);
+        let [hr, hg, hb] = sky_rgb_cfg(dn.max(-0.1), season, tint);
+        draw_rectangle(
+            0.0,
+            sh - haze_h,
+            sw,
+            haze_h,
+            Color::from_rgba(hr, hg, hb, (40.0 + 90.0 * glow) as u8),
         );
     }
+
+    let star_alpha = climate.star_strength.clamp(0.0, 1.0) * ((-dn).clamp(0.0, 1.0)).powf(1.4);
+    if star_alpha > 0.04 {
+        draw_starfield(tick, sw, sh, star_alpha);
+    }
+
+    let (cx, cy) = celestial_screen_pos_cfg(tick, sw, sh, climate);
+    if is_daytime_cfg(tick, climate) {
+        let scale = sun_apparent_scale(tick, climate);
+        let r = climate.sun_base_radius * scale;
+        draw_circle(cx, cy, r * 1.55, Color::from_rgba(255, 200, 70, 50));
+        draw_circle(cx, cy, r * 1.15, Color::from_rgba(255, 210, 80, 90));
+        draw_circle(cx, cy, r, Color::from_rgba(255, 220, 90, 255));
+        draw_circle(cx, cy, r * 0.62, Color::from_rgba(255, 245, 180, 255));
+    } else {
+        let scale = moon_apparent_scale(tick, climate);
+        let r = climate.moon_base_radius * scale;
+        let illum = moon_illumination(tick, climate);
+        let phase = lunar_fraction_cfg(tick, climate);
+        // Match shadow to the sky band behind the moon (not zenith).
+        let height_01 = (cy / sh).clamp(0.0, 1.0);
+        let [sr, sg, sb] = sky_rgb_at_height_cfg(dn, height_01, season, tint);
+        draw_moon(cx, cy, r, phase, illum, sr, sg, sb);
+    }
 }
 
-/// Round disk centered on `(cx, cy)`, filled with `pixel`-sized squares.
-/// Lattice is body-centered so the silhouette stays circular as it moves.
-fn draw_pixel_disk_cells(cx: f32, cy: f32, radius_cells: i32, pixel: f32, color: Color) {
-    if radius_cells <= 0 || pixel <= 0.0 {
-        return;
-    }
-    // Slight expand so staircase edges still read as a circle, not a diamond.
-    let r2 = (radius_cells as f32 + 0.35).powi(2);
-    for dy in -radius_cells..=radius_cells {
-        for dx in -radius_cells..=radius_cells {
-            let fx = dx as f32;
-            let fy = dy as f32;
-            if fx * fx + fy * fy > r2 {
-                continue;
-            }
-            let x = cx + fx * pixel - pixel * 0.5;
-            let y = cy + fy * pixel - pixel * 0.5;
-            draw_rectangle(x, y, pixel, pixel, color);
-        }
+fn draw_starfield(tick: u64, sw: f32, sh: f32, alpha: f32) {
+    let drift = (tick as f32 * 0.002) % sw;
+    let mut s: u32 = 0xC0FF_EE42;
+    for _ in 0..90 {
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let x = ((s >> 8) as f32 / u32::MAX as f32) * sw + drift;
+        let x = if x >= sw { x - sw } else { x };
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let y = ((s >> 8) as f32 / u32::MAX as f32) * sh * 0.72;
+        s = s.wrapping_mul(1664525).wrapping_add(1013904223);
+        let bright = 0.45 + 0.55 * (((s >> 16) & 0xFFFF) as f32 / 65535.0);
+        let a = (alpha * bright * 255.0) as u8;
+        let rad = if s & 7 == 0 { 1.6 } else { 1.0 };
+        draw_circle(x, y, rad, Color::from_rgba(220, 230, 255, a));
     }
 }
 
-/// Round crescent: moon disk minus a circular bite, body-centered cells.
-fn draw_pixel_crescent_cells(
+/// Two-circle moon: bright disk + sky-coloured shadow disk.
+///
+/// `phase` 0 = new → 0.5 = full → 1 = new. Shadow uses the local sky
+/// sample so the unlit limb disappears into the background.
+fn draw_moon(
     cx: f32,
     cy: f32,
-    radius_cells: i32,
-    bite_dx: i32,
-    bite_dy: i32,
-    bite_radius: i32,
-    pixel: f32,
-    color: Color,
+    r: f32,
+    phase: f32,
+    illum: f32,
+    sky_r: u8,
+    sky_g: u8,
+    sky_b: u8,
 ) {
-    if radius_cells <= 0 || pixel <= 0.0 {
+    let r = r.max(4.0);
+    let lit = Color::from_rgba(232, 236, 245, 255);
+    let shade = Color::from_rgba(sky_r, sky_g, sky_b, 255);
+
+    if illum > 0.55 {
+        let a = ((illum - 0.55) / 0.45 * 40.0) as u8;
+        draw_circle(cx, cy, r * 1.35, Color::from_rgba(200, 210, 230, a));
+    }
+
+    if illum < 0.03 {
         return;
     }
-    let r2 = (radius_cells as f32 + 0.35).powi(2);
-    let b2 = (bite_radius as f32 + 0.15).powi(2);
-    let bcx = bite_dx as f32;
-    let bcy = bite_dy as f32;
-    for dy in -radius_cells..=radius_cells {
-        for dx in -radius_cells..=radius_cells {
-            let fx = dx as f32;
-            let fy = dy as f32;
-            if fx * fx + fy * fy > r2 {
-                continue;
-            }
-            let bx = fx - bcx;
-            let by = fy - bcy;
-            if bx * bx + by * by <= b2 {
-                continue;
-            }
-            let x = cx + fx * pixel - pixel * 0.5;
-            let y = cy + fy * pixel - pixel * 0.5;
-            draw_rectangle(x, y, pixel, pixel, color);
-        }
-    }
+
+    draw_circle(cx, cy, r, lit);
+    draw_circle(
+        cx - r * 0.22,
+        cy - r * 0.12,
+        r * 0.22,
+        Color::from_rgba(200, 205, 220, 70),
+    );
+    draw_circle(
+        cx + r * 0.28,
+        cy + r * 0.18,
+        r * 0.14,
+        Color::from_rgba(195, 200, 215, 55),
+    );
+
+    let sign = if phase <= 0.5 { -1.0 } else { 1.0 };
+    let offset = sign * illum * 2.0 * r;
+    draw_circle(cx + offset, cy, r, shade);
 }
 
 /// Cool cyan → hot amber for geotech shear score on face cells.
@@ -1455,7 +1485,13 @@ async fn main() {
         // Soft vapor haze (optional) — bilinear, Air-only; dense banks occlude.
         if humidity_overlay {
             let dn = day_night_factor_cfg(scene.world.tick, &settings.climate);
-            let sky = sky_rgb_at_height(dn, 0.45);
+            let season = season_fraction_cfg(scene.world.tick, &settings.climate);
+            let sky = sky_rgb_at_height_cfg(
+                dn,
+                0.45,
+                season,
+                settings.climate.season_sky_tint,
+            );
             draw_humidity_haze(
                 &scene.humidity,
                 &scene.world,
@@ -1740,6 +1776,7 @@ async fn main() {
             } else {
                 "night"
             };
+            let season = season_name(season_fraction_cfg(scene.world.tick, &settings.climate));
             let rain_tag = if !rain_on {
                 "off"
             } else if settings.rain.closed_loop {
@@ -1748,10 +1785,11 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
+                season,
                 scene.temperature.mean(),
                 rain_tag,
                 if evap_on { "on" } else { "off" },

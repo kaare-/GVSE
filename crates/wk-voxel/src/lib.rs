@@ -55,8 +55,11 @@ pub use blueprint::{
 };
 pub use climate::{
     celestial_local, celestial_local_cfg, celestial_screen_pos, celestial_screen_pos_cfg, day_factor,
-    day_factor_cfg, day_night_factor, day_night_factor_cfg, is_daytime, is_daytime_cfg, phase_fraction,
-    phase_fraction_cfg, sky_rgb, sky_rgb_at_height, ClimateConfig, DEMO_DAY_TICKS,
+    day_factor_cfg, day_night_factor, day_night_factor_cfg, effective_day_night_ticks, is_daytime,
+    is_daytime_cfg, lunar_fraction, lunar_fraction_cfg, moon_apparent_scale, moon_illumination,
+    phase_fraction, phase_fraction_cfg, season_fraction, season_fraction_cfg, season_name,
+    sky_rgb, sky_rgb_at_height, sky_rgb_at_height_cfg, sky_rgb_cfg, sun_apparent_scale,
+    ClimateConfig, DEMO_DAY_TICKS, DEMO_LUNAR_TICKS, DEMO_SEASON_TICKS,
 };
 pub use clouds::{
     cloud_floor_y, CloudConfig, CloudParcel, CloudStore, DOWNPOUR_MASS, MAX_CLOUD_PARCELS,

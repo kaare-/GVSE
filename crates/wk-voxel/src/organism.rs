@@ -4471,6 +4471,7 @@ mod tests {
         let climate = ClimateConfig {
             day_ticks: 6_000,
             night_ticks: 600,
+            ..ClimateConfig::default()
         };
         let cap = super::life_ticks(&climate, true);
         assert_eq!(cap, climate.total_ticks() * 16);
