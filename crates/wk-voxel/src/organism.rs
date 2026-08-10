@@ -21,7 +21,12 @@ use wk_material::MaterialId;
 
 use crate::blueprint::Genome;
 use crate::carbon::{gate_algae_photo, gate_plant_photo, CarbonBudget, CarbonConfig};
-use crate::climate::{day_factor_cfg, phase_fraction_cfg, ClimateConfig, DEMO_DAY_TICKS};
+use crate::atmosphere_metrics::lit_sky_at;
+use crate::climate::{
+    celestial_local_cfg, day_factor_cfg, is_daytime_cfg, phase_fraction_cfg, ClimateConfig,
+    DEMO_DAY_TICKS,
+};
+use crate::clouds::{CloudStore, DOWNPOUR_MASS};
 use crate::fungi::{
     colonize_and_compost_cfg, digest_budget_units, digest_labile, dissolve_corpse_to_organic,
     FungiConfig,
@@ -886,11 +891,42 @@ impl OrganismStore {
         humidity: Option<&mut Humidity>,
         wind_vx: f32,
         temperature: Option<&Temperature>,
-        mut carbon: Option<&mut CarbonBudget>,
+        carbon: Option<&mut CarbonBudget>,
         carbon_cfg: &CarbonConfig,
     ) -> OrganismStepOutcome {
+        self.step_with_weather(
+            world,
+            tick,
+            climate,
+            humidity,
+            wind_vx,
+            temperature,
+            carbon,
+            carbon_cfg,
+            None,
+            DOWNPOUR_MASS,
+        )
+    }
+
+    /// [`Self::step_with_carbon`] plus cloud parcels for [`sky_transmit_at`] light.
+    pub fn step_with_weather(
+        &mut self,
+        world: &mut World,
+        tick: u64,
+        climate: &ClimateConfig,
+        humidity: Option<&mut Humidity>,
+        wind_vx: f32,
+        temperature: Option<&Temperature>,
+        mut carbon: Option<&mut CarbonBudget>,
+        carbon_cfg: &CarbonConfig,
+        clouds: Option<&CloudStore>,
+        downpour_mass: f32,
+    ) -> OrganismStepOutcome {
         let day = day_factor_cfg(tick, climate);
+        let wrap_w = world.wrap_width;
         let phase = phase_fraction_cfg(tick, climate);
+        let sun_local = celestial_local_cfg(tick, climate);
+        let is_day = is_daytime_cfg(tick, climate);
         // Posed draw cells (flop + pile) feed canopy shade so dry mats and
         // equal-height meadows compete for light where they actually sit.
         let posed = resolve_organism_draw_cells(world, &self.atoms, tick, wind_vx);
@@ -1002,6 +1038,12 @@ impl OrganismStore {
                     &bank_cfg,
                     carbon.as_deref_mut(),
                     carbon_cfg,
+                    clouds,
+                    humidity.as_deref(),
+                    wrap_w,
+                    downpour_mass,
+                    sun_local,
+                    is_day,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -1113,7 +1155,19 @@ impl OrganismStore {
 
             let n_photo = atom.photosystem_count().max(1) as f32;
             let n_mod = atom.body.len().max(1) as f32;
-            let light = column_light(world, atom.gx, atom.gy) * day;
+            let light = lit_sky_at(
+                world,
+                atom.gx,
+                atom.gy,
+                day,
+                clouds,
+                humidity.as_deref(),
+                wrap_w,
+                downpour_mass,
+                sun_local,
+                is_day,
+                column_light(world, atom.gx, atom.gy),
+            );
             let raw_harvest = PHOTON_RATE * light * n_photo;
             // Set A algae: bloom rate gated by dissolved C bucket.
             let harvest = match carbon.as_deref_mut() {
@@ -1565,6 +1619,12 @@ fn step_land_plant(
     bank_cfg: &SporeBankConfig,
     carbon: Option<&mut CarbonBudget>,
     carbon_cfg: &CarbonConfig,
+    clouds: Option<&CloudStore>,
+    humidity: Option<&Humidity>,
+    wrap_w: Option<i32>,
+    downpour_mass: f32,
+    sun_local: f32,
+    is_day: bool,
 ) -> PlantStep {
     // Pose / seat:
     // - Sand/rock purchase wins: once grounded, organics and water never
@@ -1739,12 +1799,39 @@ fn step_land_plant(
         canopy,
         posed,
         atom_idx,
-        &|wx, wy| column_light(world, world.wrap_x(wx), wy) * day,
+        &|wx, wy| {
+            let gx = world.wrap_x(wx);
+            lit_sky_at(
+                world,
+                gx,
+                wy,
+                day,
+                clouds,
+                humidity,
+                wrap_w,
+                downpour_mass,
+                sun_local,
+                is_day,
+                column_light(world, gx, wy),
+            )
+        },
         &atom.genome,
     );
     // Fallback when pose missed leaves: tip sample × count (pre-pose path).
     if light_sum <= 0.0 && n_photo > 0 {
-        let sky = column_light(world, tip_x, tip_y) * day;
+        let sky = lit_sky_at(
+            world,
+            tip_x,
+            tip_y,
+            day,
+            clouds,
+            humidity,
+            wrap_w,
+            downpour_mass,
+            sun_local,
+            is_day,
+            column_light(world, tip_x, tip_y),
+        );
         let tip = crate::shade::effective_photo_light(canopy, tip_x, tip_y, sky, &atom.genome);
         light_sum = tip * n_photo as f32;
     }
