@@ -280,7 +280,14 @@ pub fn tick_with_life(
     }
 
     // Geotech: roof / overhang collapse after grain has seated.
-    let failure_stats = crate::failure::apply_failure(world, failure, geotech);
+    // Cadence-gated — Super-Server tail profile ~1.3 ms/full-grid call;
+    // every other tick keeps cliffs responding within 2 frames.
+    const FAILURE_EVERY: u64 = 2;
+    let failure_stats = if world.tick % FAILURE_EVERY == 0 {
+        crate::failure::apply_failure(world, failure, geotech)
+    } else {
+        crate::failure::FailureStats::default()
+    };
 
     // Reset network sym "last" before field + later organism plant trade
     // share one inspector window (organism step clears plant lasts only).

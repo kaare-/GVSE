@@ -28,6 +28,11 @@ Intra-chunk 8×8 tiling made that worse (too many tiny HashMap-read
 jobs). Parallel stays opt-in until the active plan is wide enough that
 whole-chunk jobs saturate the machine.
 
+**Frame shell vs CA:** the app always enables rayon for evap / karst /
+erosion (many sticky chunks), then restores `parallel_physics` for the
+CA tick. Tail insurance scans use sticky `has_loose` / `has_wet_air`
+filters; failure runs every other tick.
+
 ## Phase 0 — Measure first
 
 Before adding threads, profile a real save (terrace water + high

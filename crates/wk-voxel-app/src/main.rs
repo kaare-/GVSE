@@ -471,8 +471,10 @@ async fn main() {
             || terrain.open
             || quit_dialog.open;
         if !sim_paused {
-            // Frame-shell scans (evap/karst/erosion) + CA share this toggle.
-            set_parallel_enabled(settings.perf.parallel_physics);
+            // Frame-shell scans touch many loaded chunks — always worth
+            // rayon. CA physics stays on the Tab toggle (demo dirty plans
+            // are too narrow for parallel to win).
+            set_parallel_enabled(true);
             if rain_on {
                 apply_rain_with_temp(
                     &mut scene.world,
@@ -531,6 +533,7 @@ async fn main() {
             } else {
                 None
             };
+            set_parallel_enabled(settings.perf.parallel_physics);
             let _ = tick_with_life(
                 &mut scene.world,
                 &settings.perf,
@@ -540,6 +543,7 @@ async fn main() {
                 Some(&settings.grain),
                 Some(&settings.fungi),
             );
+            set_parallel_enabled(true);
             // Crude CO₂ buckets: surface Organic oxidation + atm↔lake exchange.
             step_carbon_budget(&mut scene.carbon, &mut scene.world, &settings.carbon);
             // Floating Organic drifts with the wind; root-bound mats sail plants.

@@ -308,7 +308,8 @@ pub fn punch_through_floating_rafts(world: &mut World) -> u32 {
     let mut total = 0u32;
     for _ in 0..FLOAT_PUNCH_MAX {
         let mut swaps: Vec<(i32, i32)> = Vec::new();
-        for &coord in world.chunks.keys() {
+        let coords = loose_chunk_coords(world);
+        for coord in coords {
             let x0 = coord.cx * CHUNK_CELLS_W as i32;
             let y0 = coord.cy * CHUNK_CELLS_H as i32;
             let Some(chunk) = world.chunks.get(&coord) else {
@@ -375,19 +376,40 @@ pub fn punch_through_floating_rafts(world: &mut World) -> u32 {
     total
 }
 
+/// Chunks that may hold grain / litter (sticky [`Chunk::has_loose`]).
+///
+/// Falls back to every loaded chunk when no flag is set yet (old saves).
+fn loose_chunk_coords(world: &World) -> Vec<ChunkCoord> {
+    let mut coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_loose)
+        .map(|(&coord, _)| coord)
+        .collect();
+    if coords.is_empty() && !world.chunks.is_empty() {
+        coords = world.chunks.keys().copied().collect();
+    }
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    coords
+}
+
 /// Re-dirty freefall seats **and** over-steep repose faces in one grid scan.
 ///
 /// Used by the physics tick instead of calling [`wake_unsupported_grains`]
-/// then [`wake_unstable_slopes`] (two full-world walks).
+/// then [`wake_unstable_slopes`] (two full-world walks). Skips chunks
+/// without sticky [`Chunk::has_loose`] and clears the flag when a scan
+/// finds none left.
 pub fn wake_grains_for_settle(world: &mut World) {
-    let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+    let coords = loose_chunk_coords(world);
     let mut dirty: Vec<(i32, i32)> = Vec::new();
+    let mut clear_loose: Vec<ChunkCoord> = Vec::new();
     for coord in coords {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
+        let mut saw_loose = false;
         for ly in 0..CHUNK_CELLS_H {
             for lx in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(lx, ly);
@@ -399,6 +421,7 @@ pub fn wake_grains_for_settle(world: &mut World) {
                 if !loose {
                     continue;
                 }
+                saw_loose = true;
                 // --- unsupported / freefall ---
                 let Some(below) = world.get_cell(gx, gy - 1) else {
                     dirty.push((gx, gy));
@@ -528,9 +551,17 @@ pub fn wake_grains_for_settle(world: &mut World) {
                 }
             }
         }
+        if !saw_loose {
+            clear_loose.push(coord);
+        }
     }
     for (gx, gy) in dirty {
         world.touch_dirty(gx, gy);
+    }
+    for coord in clear_loose {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_loose = false;
+        }
     }
 }
 
@@ -741,7 +772,7 @@ const BUOYANT_RISE_MAX: i32 = 16;
 
 fn collect_buoyant_litter(world: &World) -> Vec<(i32, i32)> {
     let mut litter = Vec::new();
-    for &coord in world.chunks.keys() {
+    for coord in loose_chunk_coords(world) {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
         let Some(chunk) = world.chunks.get(&coord) else {

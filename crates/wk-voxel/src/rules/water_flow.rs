@@ -18,7 +18,7 @@ use super::head::{
     hydraulic_head, is_porous_solid_with, plan_same_y_pairwise_edge_in, same_y_cascade_pull,
     seepage_rate_with,
 };
-use super::plan::{regions_all_loaded, regions_for_standalone};
+use super::plan::{regions_for_standalone, regions_wet_loaded};
 
 /// Priority water flow.
 ///
@@ -78,7 +78,8 @@ pub fn wake_confined_head(world: &mut World) {
     if world.tick % CONFINED_HEAD_WAKE_EVERY != 0 {
         return;
     }
-    let regions = regions_all_loaded(world);
+    // Wet-air sticky chunks only — dry sky/stone cannot host a pipe.
+    let regions = regions_wet_loaded(world);
     apply_confined_upward_regions(world, &regions);
 }
 

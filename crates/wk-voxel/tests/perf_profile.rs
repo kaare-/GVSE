@@ -298,6 +298,8 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
     let tick_no = scene.world.tick;
     match accum {
         None => {
+            // Match app: shell scans always parallel; CA follows PerfConfig.
+            set_parallel_enabled(true);
             apply_rain_with_temp(
                 &mut scene.world,
                 &scene.rain,
@@ -329,7 +331,9 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
                 Some(&scene.phase),
             );
             apply_karst_dissolution(&mut scene.world, &scene.karst);
+            set_parallel_enabled(scene.perf.parallel_physics);
             tick_with_perf(&mut scene.world, &scene.perf);
+            set_parallel_enabled(true);
             apply_flow_erosion(&mut scene.world, &scene.grain);
             if humidity_diffuse_due(scene.world.tick) {
                 scene.humidity.diffuse(HUMIDITY_DIFFUSION_ALPHA);
@@ -359,6 +363,7 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
             }
         }
         Some(a) => {
+            set_parallel_enabled(true);
             let t0 = Instant::now();
             apply_rain_with_temp(
                 &mut scene.world,
@@ -408,10 +413,12 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
             apply_karst_dissolution(&mut scene.world, &scene.karst);
             a.karst += t0.elapsed();
 
+            set_parallel_enabled(scene.perf.parallel_physics);
             let t0 = Instant::now();
             tick_with_perf(&mut scene.world, &scene.perf);
             a.physics_tick += t0.elapsed();
 
+            set_parallel_enabled(true);
             let t0 = Instant::now();
             apply_flow_erosion(&mut scene.world, &scene.grain);
             a.erosion += t0.elapsed();
