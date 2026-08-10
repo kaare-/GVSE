@@ -297,8 +297,8 @@ fn draw_humidity_haze(
     }
 }
 
-/// Day/night sky gradient + seasonal wash, stars, sun/moon with
-/// distance-driven size and lunar phase (shadow matches local sky).
+/// Day/night sky gradient + seasonal wash, stars, and pixel-art sun/moon
+/// (cell lattice + nested highlights; moon phase shadow matches local sky).
 fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
     let dn = day_night_factor_cfg(tick, climate);
     let season = season_fraction_cfg(tick, climate);
@@ -342,22 +342,37 @@ fn draw_sky(tick: u64, sw: f32, sh: f32, climate: &ClimateConfig) {
     }
 
     let (cx, cy) = celestial_screen_pos_cfg(tick, sw, sh, climate);
+    let px = PX_PER_CELL;
     if is_daytime_cfg(tick, climate) {
         let scale = sun_apparent_scale(tick, climate);
-        let r = climate.sun_base_radius * scale;
-        draw_circle(cx, cy, r * 1.55, Color::from_rgba(255, 200, 70, 50));
-        draw_circle(cx, cy, r * 1.15, Color::from_rgba(255, 210, 80, 90));
-        draw_circle(cx, cy, r, Color::from_rgba(255, 220, 90, 255));
-        draw_circle(cx, cy, r * 0.62, Color::from_rgba(255, 245, 180, 255));
+        let r_px = (climate.sun_base_radius * scale).max(px * 2.0);
+        let r = ((r_px / px).round() as i32).clamp(2, 20);
+        // Nested pixel disks: soft corona → body → warm mid → bright core.
+        draw_pixel_disk_cells(cx, cy, r + 2, px, Color::from_rgba(255, 190, 60, 85));
+        draw_pixel_disk_cells(cx, cy, r, px, Color::from_rgba(255, 215, 70, 255));
+        draw_pixel_disk_cells(
+            cx,
+            cy,
+            (r * 2 / 3).max(1),
+            px,
+            Color::from_rgba(255, 238, 150, 255),
+        );
+        draw_pixel_disk_cells(
+            cx,
+            cy,
+            (r / 3).max(1),
+            px,
+            Color::from_rgba(255, 252, 220, 255),
+        );
     } else {
         let scale = moon_apparent_scale(tick, climate);
-        let r = climate.moon_base_radius * scale;
+        let r_px = (climate.moon_base_radius * scale).max(px * 2.0);
         let illum = moon_illumination(tick, climate);
         let phase = lunar_fraction_cfg(tick, climate);
         // Match shadow to the sky band behind the moon (not zenith).
         let height_01 = (cy / sh).clamp(0.0, 1.0);
         let [sr, sg, sb] = sky_rgb_at_height_cfg(dn, height_01, season, tint);
-        draw_moon(cx, cy, r, phase, illum, sr, sg, sb);
+        draw_pixel_moon(cx, cy, r_px, px, phase, illum, sr, sg, sb);
     }
 }
 
@@ -373,55 +388,103 @@ fn draw_starfield(tick: u64, sw: f32, sh: f32, alpha: f32) {
         s = s.wrapping_mul(1664525).wrapping_add(1013904223);
         let bright = 0.45 + 0.55 * (((s >> 16) & 0xFFFF) as f32 / 65535.0);
         let a = (alpha * bright * 255.0) as u8;
-        let rad = if s & 7 == 0 { 1.6 } else { 1.0 };
-        draw_circle(x, y, rad, Color::from_rgba(220, 230, 255, a));
+        // Tiny pixel dots (not smooth circles) so stars match the sky lattice.
+        let rad = if s & 7 == 0 { 2 } else { 1 };
+        draw_pixel_disk_cells(x, y, rad, PX_PER_CELL, Color::from_rgba(220, 230, 255, a));
     }
 }
 
-/// Two-circle moon: bright disk + sky-coloured shadow disk.
+/// Round disk centered on `(cx, cy)`, filled with `pixel`-sized squares.
+/// Lattice is body-centered so the silhouette stays circular as it moves.
+fn draw_pixel_disk_cells(cx: f32, cy: f32, radius_cells: i32, pixel: f32, color: Color) {
+    if radius_cells <= 0 || pixel <= 0.0 {
+        return;
+    }
+    // Slight expand so staircase edges still read as a circle, not a diamond.
+    let r2 = (radius_cells as f32 + 0.35).powi(2);
+    for dy in -radius_cells..=radius_cells {
+        for dx in -radius_cells..=radius_cells {
+            let fx = dx as f32;
+            let fy = dy as f32;
+            if fx * fx + fy * fy > r2 {
+                continue;
+            }
+            let x = cx + fx * pixel - pixel * 0.5;
+            let y = cy + fy * pixel - pixel * 0.5;
+            draw_rectangle(x, y, pixel, pixel, color);
+        }
+    }
+}
+
+/// Pixel moon: lit disk + local-sky shadow disk (phase), plus rim/mare highlights.
 ///
-/// `phase` 0 = new → 0.5 = full → 1 = new. Shadow uses the local sky
-/// sample so the unlit limb disappears into the background.
-fn draw_moon(
+/// `phase` 0 = new → 0.5 = full → 1 = new. Shadow uses the local sky sample
+/// so the unlit limb disappears into the background.
+fn draw_pixel_moon(
     cx: f32,
     cy: f32,
-    r: f32,
+    r_px: f32,
+    pixel: f32,
     phase: f32,
     illum: f32,
     sky_r: u8,
     sky_g: u8,
     sky_b: u8,
 ) {
-    let r = r.max(4.0);
+    let r = ((r_px / pixel).round() as i32).clamp(2, 18);
     let lit = Color::from_rgba(232, 236, 245, 255);
     let shade = Color::from_rgba(sky_r, sky_g, sky_b, 255);
 
+    // Soft bloom only when mostly full (avoids a ring around crescents).
     if illum > 0.55 {
         let a = ((illum - 0.55) / 0.45 * 40.0) as u8;
-        draw_circle(cx, cy, r * 1.35, Color::from_rgba(200, 210, 230, a));
+        draw_pixel_disk_cells(cx, cy, r + 2, pixel, Color::from_rgba(200, 210, 230, a));
     }
 
     if illum < 0.03 {
+        // New moon — nearly invisible against the sky.
         return;
     }
 
-    draw_circle(cx, cy, r, lit);
-    draw_circle(
-        cx - r * 0.22,
-        cy - r * 0.12,
-        r * 0.22,
+    // Bright body, then mare spots, then sky disk that slides across.
+    draw_pixel_disk_cells(cx, cy, r, pixel, lit);
+
+    // Soft mare / crater marks (drawn under the shadow so they only show when lit).
+    let mare = ((r as f32 * 0.35).round() as i32).max(1);
+    let crater = ((r as f32 * 0.22).round() as i32).max(1);
+    draw_pixel_disk_cells(
+        cx - r as f32 * pixel * 0.22,
+        cy - r as f32 * pixel * 0.12,
+        mare,
+        pixel,
         Color::from_rgba(200, 205, 220, 70),
     );
-    draw_circle(
-        cx + r * 0.28,
-        cy + r * 0.18,
-        r * 0.14,
+    draw_pixel_disk_cells(
+        cx + r as f32 * pixel * 0.28,
+        cy + r as f32 * pixel * 0.18,
+        crater,
+        pixel,
         Color::from_rgba(195, 200, 215, 55),
     );
 
+    // Lit-limb rim highlight (bright side opposite the shadow).
+    if illum > 0.15 {
+        let sign = if phase <= 0.5 { 1.0 } else { -1.0 };
+        let hx = cx + sign * r as f32 * pixel * 0.45;
+        let ha = (28.0 + 40.0 * illum) as u8;
+        draw_pixel_disk_cells(
+            hx,
+            cy - r as f32 * pixel * 0.08,
+            crater.max(1),
+            pixel,
+            Color::from_rgba(245, 248, 255, ha),
+        );
+    }
+
+    // illum 0 → shadow centred (new); illum 1 → shadow parked ~2r off (full).
     let sign = if phase <= 0.5 { -1.0 } else { 1.0 };
-    let offset = sign * illum * 2.0 * r;
-    draw_circle(cx + offset, cy, r, shade);
+    let offset = sign * illum * 2.0 * r as f32 * pixel;
+    draw_pixel_disk_cells(cx + offset, cy, r, pixel, shade);
 }
 
 /// Cool cyan → hot amber for geotech shear score on face cells.
