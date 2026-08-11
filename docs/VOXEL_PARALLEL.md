@@ -66,15 +66,11 @@ Low risk: no new write-set proofs.
 **off**. Unit/scenario `tick()` uses [`PerfConfig::full_feel`] (×12,
 no early-out, parallel off).
 
-Super-Server demo **~10.8 ms wall** (~93 FPS; +plants ~11.1). Physics
-~5.9 ms. Chunk-local gravity ~1.2; settle ~0.19 (wake cadence); mycelium
-~0.12 (strain ledger); seepage ~1.25; flow ~1.8. Cold avalanche ~0.1
-(warm empty-dirty + `period_ticks`). Stress ~12.1 ms wall, EO at 4
-substeps. Parallel still slower on narrow dirty — leave off.
-
-Further shaves: karst `period_ticks` (default 32); FPS throughflow +
-confined once/tick; punch skip when wake sees no raft cargo; temp props
-refresh 4→8.
+Super-Server demo **~8.3 ms wall** (~120 FPS; +plants ~8.8). Physics
+~4.6 ms. Flow ~0.46 (throughflow/confined once/tick); karst ~0.04
+(`period_ticks=32`); punch ~0; gravity ~1.1; seepage ~1.2; settle ~0.18;
+mycelium ~0.12. Stress ~9.0 ms, EO at 4 substeps. Parallel still slower
+on narrow dirty — leave off.
 
 **Rejected:** pair away odd-step gravity; solid-centric seepage
 (1.22→1.60 on rainy beaches).
