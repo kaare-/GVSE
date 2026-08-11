@@ -509,6 +509,20 @@ fn accumulate_water_flow_xfers(
                     Some(b) => b.material != MaterialId::Air || b.sat.is_full(),
                 };
 
+                // Calm free surface: full sat on full water/solid below
+                // with full-sat Air on both sides — no cascade, equalise,
+                // or throughflow work. Open-lake tops after the buried skip.
+                if cur.sat.is_full() && on_surface {
+                    let left = read(lx - 1, ly, world.wrap_x(gx - 1), gy);
+                    let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
+                    let calm = |c: Option<Cell>| {
+                        matches!(c, Some(n) if n.material == MaterialId::Air && n.sat.is_full())
+                    };
+                    if calm(left) && calm(right) {
+                        continue;
+                    }
+                }
+
                 // Dry standing Air still owns the +x equalise edge so a
                 // wet neighbour can pour into it (otherwise wet→dry
                 // never ran when the dry cell was the left endpoint).

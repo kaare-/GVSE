@@ -71,6 +71,10 @@ gravity cut CA ~6→~1.2 ms. Cold avalanche warm empty-dirty early-out +
 `period_ticks` (stress ~4.4→~0.02). Flow erosion every other tick.
 Stress wall ~13.5 ms. Parallel still slower on narrow dirty — leave off.
 
+Follow-up (this branch): FPS early-out after 4 substeps (was swallowed by
+max=6), solid-centric seepage, calm free-surface flow skip, mycelium
+collect from strain ledger, FPS settle on wake cadence only.
+
 **Rejected:** pairing away odd-step gravity (fatter dirty halo → net
 regress). Flow / seepage single-pass + chunk-local; open ocean tops
 skip confined BFS.

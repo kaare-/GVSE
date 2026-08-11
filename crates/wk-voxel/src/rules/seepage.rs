@@ -88,7 +88,9 @@ fn accumulate_seepage_xfers(
     active: &[ActiveChunk],
     xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) {
-    const OFFSETS: [(i32, i32); 2] = [(1, 0), (0, 1)];
+    // Solid-centric scan: +x/+y undirected edges owned by the solid;
+    // −x/−y only into Air so puddles left/below of sand still soak.
+    const SOLID_OFFSETS: [(i32, i32); 4] = [(1, 0), (0, 1), (-1, 0), (0, -1)];
     let hydro = world.hydro;
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
@@ -114,15 +116,15 @@ fn accumulate_seepage_xfers(
                 let lx = x as i32;
                 let gx = world.wrap_x(base_gx + lx);
                 let a = chunk.get(x as usize, y as usize);
+                // Skip Air / impermeable — rainy shore halos are Air-heavy.
+                if !is_porous_solid_with(a.material, &hydro) {
+                    continue;
+                }
                 let cap_a = water_capacity_with(a.material, &hydro);
                 if cap_a == 0 {
                     continue;
                 }
-                let a_solid = is_porous_solid_with(a.material, &hydro);
-                // Air–Air / impermeable–impermeable edges are no-ops —
-                // check materials before head math. Dominates rainy
-                // ocean shore halos.
-                for (dx, dy) in OFFSETS {
+                for (dx, dy) in SOLID_OFFSETS {
                     let nx = world.wrap_x(gx + dx);
                     let ny = gy + dy;
                     if dx != 0 && nx == gx {
@@ -132,7 +134,8 @@ fn accumulate_seepage_xfers(
                         continue;
                     };
                     let b_solid = is_porous_solid_with(b.material, &hydro);
-                    if !a_solid && !b_solid {
+                    // −x/−y: only non-solid seats; solid–solid owned by +x/+y.
+                    if (dx < 0 || dy < 0) && b_solid {
                         continue;
                     }
                     let cap_b = water_capacity_with(b.material, &hydro);
@@ -145,26 +148,19 @@ fn accumulate_seepage_xfers(
                     if move_amt == 0 {
                         continue;
                     }
-                    let rate = if a_solid && b_solid {
+                    let rate = if b_solid {
                         seepage_rate_with(a.material, &hydro)
                             .min(seepage_rate_with(b.material, &hydro))
-                    } else if a_solid {
-                        seepage_rate_with(a.material, &hydro)
                     } else {
-                        seepage_rate_with(b.material, &hydro)
+                        seepage_rate_with(a.material, &hydro)
                     };
                     // Fully saturated faces weep faster into open Air
                     // (cliff springs) — still permeability-capped, but
                     // not stuck at 1 sat/tick for tight stone.
-                    let rate = {
-                        let a_full = a_solid && a.sat.0 >= cap_a;
-                        let b_full = b_solid && b.sat.0 >= cap_b;
-                        let into_air = (a_full && !b_solid) || (b_full && !a_solid);
-                        if into_air {
-                            (rate * 3).clamp(1, 16)
-                        } else {
-                            rate
-                        }
+                    let rate = if a.sat.0 >= cap_a && !b_solid {
+                        (rate * 3).clamp(1, 16)
+                    } else {
+                        rate
                     };
                     if rate <= 0 {
                         continue;

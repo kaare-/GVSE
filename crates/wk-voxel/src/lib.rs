@@ -165,7 +165,7 @@ pub use rules::{
     CondensationConfig, EvapConfig, GrainConfig,
     KarstConfig,
     OrographicConfig, PerfConfig, PhysicsTimings, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS,
-    FLOW_SUBSTEPS_MIN,
+    FLOW_SUBSTEPS_EO_AFTER, FLOW_SUBSTEPS_MIN,
     GRAIN_REPOSE_HAZE_MAX, GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES,
     GRAIN_SETTLE_PASSES_SHALLOW, MYCELIUM_EROSION_BIND,
     MYCELIUM_RAFT_BIND_MIN,

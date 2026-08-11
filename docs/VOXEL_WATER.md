@@ -44,7 +44,8 @@ cells so the following tick re-enters the loop.
 
 Optional early-out (`PerfConfig::flow_quiet_early_out`, default **off**)
 may stop the ×12 loop sooner when the dirty halo shrinks below
-`FLOW_QUIET_AREA` after `FLOW_SUBSTEPS_MIN` passes.
+`FLOW_QUIET_AREA` after `FLOW_SUBSTEPS_EO_AFTER` passes (FPS cap is
+`FLOW_SUBSTEPS_MIN`).
 
 ### Gravity fall
 

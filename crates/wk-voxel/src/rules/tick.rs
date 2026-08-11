@@ -92,10 +92,14 @@ impl PhysicsTimings {
 /// edges are 5-10 cells away, half-gap propagates at ~1 cell/substep,
 /// so we need enough substeps to keep up with steady rain.
 pub const FLOW_SUBSTEPS: usize = 12;
-/// Minimum flow substeps before a quiet dirty halo may early-out.
+/// Cap on flow substeps for the FPS path (`PerfConfig` defaults).
 pub const FLOW_SUBSTEPS_MIN: usize = 6;
+/// After this many substeps, a quiet / steady dirty halo may early-out.
+/// Must be **below** [`FLOW_SUBSTEPS_MIN`] so the FPS cap does not
+/// swallow the adaptive exit (was equal → EO never shortened the loop).
+pub const FLOW_SUBSTEPS_EO_AFTER: usize = 4;
 /// If the planned dirty area (cells) drops to this or below after
-/// [`FLOW_SUBSTEPS_MIN`], stop the flow loop early — settled films
+/// [`FLOW_SUBSTEPS_EO_AFTER`], stop the flow loop early — settled films
 /// don't need the full ×12. Busy rain / cascades stay at max.
 pub const FLOW_QUIET_AREA: usize = 512;
 
@@ -118,8 +122,9 @@ pub struct PerfConfig {
     /// Odd-step gravity keeps shore columns seated so the next flow
     /// halo stays narrow.
     pub flow_every_other_substep: bool,
-    /// After [`FLOW_SUBSTEPS_MIN`], stop when the dirty halo is tiny or
-    /// has shrunk enough. Default **on** for settled films / quiet ponds.
+    /// After [`FLOW_SUBSTEPS_EO_AFTER`], stop when the dirty halo is tiny
+    /// or has shrunk / steadied. Default **on** for settled films /
+    /// quiet ponds / closed-loop rain polish.
     pub flow_quiet_early_out: bool,
     /// Rayon checkerboard parallelism for gravity / grain / flow scan.
     /// Default **off** — wins only when many chunks are dirty at once.
@@ -334,11 +339,9 @@ fn tick_with_life_inner(
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
     let mut start_area: usize = 0;
-    // FPS knobs on → cap at [`FLOW_SUBSTEPS_MIN`] (6). Was 8 when flow
-    // owned the tick; after open-lake confined skip, gravity dominates
-    // (~7 ms) and the extra 2 substeps were mostly polish. full_feel
-    // keeps ×12. Odd-step gravity stays — pairing it away fattened the
-    // dirty halo.
+    // FPS knobs on → cap at [`FLOW_SUBSTEPS_MIN`] (6); early-out may
+    // fire after [`FLOW_SUBSTEPS_EO_AFTER`] (4). full_feel keeps ×12.
+    // Odd-step gravity stays — pairing it away fattened the dirty halo.
     let max_steps = if perf.flow_every_other_substep && perf.flow_quiet_early_out {
         FLOW_SUBSTEPS_MIN // 6
     } else {
@@ -386,12 +389,10 @@ fn tick_with_life_inner(
                 local.water_flow += t0.elapsed();
             }
         }
-        // Quiet early-out: after the minimum passes, peek at dirty
-        // written by this substep — a tiny halo means water settled.
-        // Absolute threshold catches truly settled worlds; a *shrink*
-        // check catches busy shores that started large but have since
-        // fallen off (adaptive substeps for the tuned feel path).
-        if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_MIN {
+        // Quiet early-out: after [`FLOW_SUBSTEPS_EO_AFTER`], peek at
+        // dirty written by this substep — a tiny / shrunk / steady halo
+        // means remaining substeps are polish (closed-loop rain).
+        if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_EO_AFTER {
             let next = plan_active(world);
             let next_area = active_cell_area(&next);
             if next.is_empty() || next_area <= FLOW_QUIET_AREA {
@@ -404,7 +405,7 @@ fn tick_with_life_inner(
             }
             // Steady busy halo (closed-loop rain): area barely moved —
             // further substeps are polish. Super-Server demo sat at
-            // ~9–13k cells for all ×12; this exits after the minimum.
+            // ~13k cells for all 6; this exits after EO_AFTER (4).
             if start_area > FLOW_QUIET_AREA && next_area * 10 >= start_area * 9 {
                 break;
             }
@@ -483,21 +484,26 @@ fn tick_with_life_inner(
         // empty/haze Air under a grain — not wet shore seats (those were
         // forcing ×1024 every rainy tick).
         let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
-        let deep = !fps_path
-            || freefall_woken > 0
-            || active_has_unsupported_grain(world, &grain_active);
-        let passes = if deep {
-            GRAIN_SETTLE_PASSES
-        } else {
-            GRAIN_SETTLE_PASSES_SHALLOW
-        };
-        if profile && deep {
-            local.deep_settle_ticks += 1;
-        }
-        let t0 = profile.then(Instant::now);
-        settle_loose_grains_regions(world, &grain_active, rooted, passes);
-        if let (true, Some(t0)) = (profile, t0) {
-            local.settle += t0.elapsed();
+        let unsupported = active_has_unsupported_grain(world, &grain_active);
+        let deep = !fps_path || freefall_woken > 0 || unsupported;
+        // FPS shallow polish: only on wake cadence or when something is
+        // mid-air. Quiet rainy shores were paying ×8 settle every tick
+        // (~0.7 ms) with deep_settle_ticks=0 / punch_hits=0.
+        let run_settle = deep || world.tick % GRAIN_WAKE_EVERY == 0;
+        if run_settle {
+            let passes = if deep {
+                GRAIN_SETTLE_PASSES
+            } else {
+                GRAIN_SETTLE_PASSES_SHALLOW
+            };
+            if profile && deep {
+                local.deep_settle_ticks += 1;
+            }
+            let t0 = profile.then(Instant::now);
+            settle_loose_grains_regions(world, &grain_active, rooted, passes);
+            if let (true, Some(t0)) = (profile, t0) {
+                local.settle += t0.elapsed();
+            }
         }
     }
 

@@ -1190,6 +1190,11 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
     if tick % (MYCELIUM_FIELD_PERIOD * 4) == 0 {
         heal_orphan_mycelium_pads(world);
     }
+    // Plantless / quiet demos: no strain ledger → nothing to grow.
+    // Avoid the old full-grid cream scan (~0.5 ms/tick amortized).
+    if world.mycelium_strains.is_empty() {
+        return;
+    }
     let colonized = collect_mycelium_field_cells(world, tick, seed, MYCELIUM_FIELD_MAX_CELLS);
     if colonized.is_empty() {
         return;
@@ -2696,53 +2701,48 @@ fn hash_u64(a: u64, b: u64, c: u64, salt: u64) -> u64 {
     x
 }
 
-/// Scan every cream cell, then pick up to `max` for this pulse.
+/// Sample cream cells from the strain ledger, then pick up to `max`.
 ///
 /// ~¾ of the budget prefers frontier cells (`myc < 80`) so networks keep
 /// climbing / seeking Organic; the rest rotates through dense hubs so they
 /// still thicken, compost, and push outward. Without this, a fixed
 /// first-N scan froze growth once hubs filled the old 256-cell cap.
+///
+/// Uses [`World::mycelium_strains`] keys instead of a full-grid walk —
+/// Super-Server demo paid ~0.5 ms/tick amortized scanning empty worlds.
 fn collect_mycelium_field_cells(
     world: &World,
     tick: u64,
     seed: u64,
     max: usize,
 ) -> Vec<(i32, i32, u8, MaterialId)> {
-    use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
-
     let mut frontier: Vec<(i32, i32, u8, MaterialId)> = Vec::new();
     let mut core: Vec<(i32, i32, u8, MaterialId)> = Vec::new();
-    let mut coords: Vec<_> = world.chunks.keys().copied().collect();
-    if coords.is_empty() || max == 0 {
+    if world.mycelium_strains.is_empty() || max == 0 {
         return Vec::new();
     }
-    coords.sort_by_key(|c| (c.cy, c.cx));
-    // Rotate chunk visit order each pulse so no region is permanently last.
+    let mut keys: Vec<(i32, i32)> = world.mycelium_strains.keys().copied().collect();
+    keys.sort_by_key(|(gx, gy)| (*gy, *gx));
+    // Rotate visit order each pulse so no region is permanently last.
     let pulse = (tick / MYCELIUM_FIELD_PERIOD.max(1)) as usize;
-    let start = pulse % coords.len();
-    coords.rotate_left(start);
+    let start = pulse % keys.len();
+    keys.rotate_left(start);
 
-    for coord in coords {
-        for ly in 0..CHUNK_CELLS_H {
-            for lx in 0..CHUNK_CELLS_W {
-                let gx = coord.cx * CHUNK_CELLS_W as i32 + lx as i32;
-                let gy = coord.cy * CHUNK_CELLS_H as i32 + ly as i32;
-                let Some(c) = world.get_cell(gx, gy) else {
-                    continue;
-                };
-                if !hosts_mycelium(c.material) {
-                    continue;
-                }
-                let myc = c.mycelium();
-                if myc == 0 {
-                    continue;
-                }
-                if myc < 80 {
-                    frontier.push((gx, gy, myc, c.material));
-                } else {
-                    core.push((gx, gy, myc, c.material));
-                }
-            }
+    for (gx, gy) in keys {
+        let Some(c) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if !hosts_mycelium(c.material) {
+            continue;
+        }
+        let myc = c.mycelium();
+        if myc == 0 {
+            continue;
+        }
+        if myc < 80 {
+            frontier.push((gx, gy, myc, c.material));
+        } else {
+            core.push((gx, gy, myc, c.material));
         }
     }
 
