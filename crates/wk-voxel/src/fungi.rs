@@ -3013,7 +3013,8 @@ mod tests {
         w.set_cell(8, 1, hub);
         let strain = alloc_mycelium_strain(&mut w);
         w.mycelium_strains.insert((8, 1), vec![(strain, 80)]);
-        w.tick = MYCELIUM_FIELD_PERIOD;
+        // Orphan heal runs every 4th field pulse (see step_mycelium_field_cfg).
+        w.tick = MYCELIUM_FIELD_PERIOD * 4;
         step_mycelium_field(&mut w);
         assert_eq!(
             w.get_cell(4, 2).map(|c| c.mycelium()),
@@ -3041,7 +3042,7 @@ mod tests {
                 w.mycelium_strains.insert((x, y), vec![(s, 200)]);
             }
         }
-        w.tick = MYCELIUM_FIELD_PERIOD;
+        w.tick = MYCELIUM_FIELD_PERIOD * 4;
         step_mycelium_field(&mut w);
         assert_eq!(
             w.get_cell(4, 2).map(|c| c.mycelium()),
@@ -3064,7 +3065,7 @@ mod tests {
         orphan.sat = Sat(40);
         orphan.set_mycelium(28);
         w.set_cell(5, 2, orphan);
-        w.tick = MYCELIUM_FIELD_PERIOD;
+        w.tick = MYCELIUM_FIELD_PERIOD * 4;
         step_mycelium_field(&mut w);
         assert_eq!(w.get_cell(5, 2).map(|c| c.mycelium()), Some(28));
         assert!(
