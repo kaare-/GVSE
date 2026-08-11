@@ -72,8 +72,10 @@ gravity cut CA ~6→~1.2 ms. Cold avalanche warm empty-dirty early-out +
 Stress wall ~13.5 ms. Parallel still slower on narrow dirty — leave off.
 
 Follow-up (this branch): FPS early-out after 4 substeps (was swallowed by
-max=6), solid-centric seepage, calm free-surface flow skip, mycelium
-collect from strain ledger, FPS settle on wake cadence only.
+max=6), calm free-surface flow skip, mycelium collect from strain ledger,
+FPS settle on wake cadence only. **Rejected:** solid-centric seepage
+(−x/−y into Air) — Super-Server demo 1.22→1.60 ms (beach solids + edge
+HashMap reads).
 
 **Rejected:** pairing away odd-step gravity (fatter dirty halo → net
 regress). Flow / seepage single-pass + chunk-local; open ocean tops
