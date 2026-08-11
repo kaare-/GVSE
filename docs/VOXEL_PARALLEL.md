@@ -66,13 +66,14 @@ Low risk: no new write-set proofs.
 **off**. Unit/scenario `tick()` uses [`PerfConfig::full_feel`] (×12,
 no early-out, parallel off).
 
-After open-lake confined skip, Super-Server demo is ~23 ms wall /
-~14 ms physics (water flow ~2 ms; **gravity ~7 ms** dominates CA).
+Super-Server demo ~22 ms wall / ~13 ms physics (water flow ~2 ms;
+gravity ~6 ms). Outside CA: temperature props refresh was a full-height
+column walk — now early-outs Air/Buried from rock estimate and scans
+only the surface band.
 
 **Rejected:** pairing away odd-step gravity (fatter dirty halo → net
-regress). Flow / seepage single-pass; open ocean tops skip confined
-BFS; cascade look-ahead chunk-local; gravity skips columns with no
-mobile sat in-range.
+regress). Flow / seepage single-pass + chunk-local; open ocean tops
+skip confined BFS; gravity skips columns with no free+sat pull.
 
 ## Phase 2 — Fields outside the CA
 
