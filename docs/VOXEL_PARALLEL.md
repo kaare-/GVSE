@@ -61,12 +61,16 @@ Low risk: no new write-set proofs.
 
 ## Phase 1b — Cadence (landed defaults)
 
-`PerfConfig::default`: half-rate **paired** gravity+flow + quiet
-early-out **on** (max 3 pairs), `parallel_physics` **off**. Unit /
-scenario `tick()` uses [`PerfConfig::full_feel`] (×12, no early-out,
-parallel off). In-tick `PhysicsTimings` show demo cost is **water flow
-+ gravity** (grain deep-settle / punch ~0 on the rainy shore). Flow /
-seepage scans are single-pass (compute-then-apply; no checkerboard).
+`PerfConfig::default`: every-other surface flow + quiet early-out
+**on** (max 8 substeps; gravity every step), `parallel_physics`
+**off**. Unit/scenario `tick()` uses [`PerfConfig::full_feel`] (×12,
+no early-out, parallel off). In-tick `PhysicsTimings` show demo cost
+is **water flow + gravity** (grain deep-settle / punch ~0).
+
+**Rejected:** pairing away odd-step gravity (fewer flow passes but
+fatter dirty halo → each flow call ~2× slower; net regress on
+Super-Server). Flow / seepage scans stay single-pass
+(compute-then-apply; checkerboard not required).
 
 ## Phase 2 — Fields outside the CA
 
