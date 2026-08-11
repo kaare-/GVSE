@@ -14,6 +14,10 @@ use crate::parallel::map_chunk_coords_parallel;
 
 use super::util::hash_prob;
 
+fn default_karst_period_ticks() -> u64 {
+    32
+}
+
 /// Karst dissolution parameters for [`apply_karst_dissolution`].
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct KarstConfig {
@@ -28,6 +32,10 @@ pub struct KarstConfig {
     /// Salt mixed into the per-cell tick hash so callers can run
     /// different karst regimes side-by-side.
     pub seed_salt: u64,
+    /// Only run when `world.tick % period_ticks == 0`. Geology is slow —
+    /// Super-Server demo paid ~1 ms/tick scanning limestone every frame.
+    #[serde(default = "default_karst_period_ticks")]
+    pub period_ticks: u64,
 }
 
 impl Default for KarstConfig {
@@ -39,6 +47,7 @@ impl Default for KarstConfig {
             prob_per_wet_neighbour: 0.001,
             min_wet_neighbour_sat: 200,
             seed_salt: 0xCAFE_D155_01F0_D000_u64,
+            period_ticks: default_karst_period_ticks(),
         }
     }
 }
@@ -58,6 +67,10 @@ impl Default for KarstConfig {
 /// sticky on write and cleared here when a scan finds no limestone
 /// left (empty sky / pure-stone slabs stay cheap).
 pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
+    let period = cfg.period_ticks.max(1);
+    if world.tick % period != 0 {
+        return;
+    }
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()

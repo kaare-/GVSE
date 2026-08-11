@@ -18,7 +18,9 @@ use super::grain::{
 };
 use super::gravity::apply_gravity_fall_regions;
 use super::seepage::apply_seepage_regions;
-use super::water_flow::apply_water_flow_regions;
+use super::water_flow::{
+    apply_confined_upward_regions, apply_throughflow_regions, apply_water_flow_regions,
+};
 
 /// Re-settle budget after a raft punch — enough to sink punched cargo
 /// through a water seat without the full ×1024 freefall path.
@@ -382,9 +384,16 @@ fn tick_with_life_inner(
         // Odd-step gravity is load-bearing: without it the dirty halo
         // fattens and each flow call costs more than the gravity saved.
         let run_flow = !perf.flow_every_other_substep || (step % 2 == 0);
+        // FPS: surface priorities only; throughflow/confined once after loop.
+        // full_feel: keep throughflow+confined every flow substep (pipe tests).
+        let fps_flow = perf.flow_every_other_substep && perf.flow_quiet_early_out;
         if run_flow {
             let t0 = profile.then(Instant::now);
-            apply_water_flow_regions(world, &active);
+            if fps_flow {
+                super::water_flow::apply_water_flow_regions_ex(world, &active, false);
+            } else {
+                apply_water_flow_regions(world, &active);
+            }
             if let (true, Some(t0)) = (profile, t0) {
                 local.water_flow += t0.elapsed();
             }
@@ -412,6 +421,22 @@ fn tick_with_life_inner(
         }
     }
 
+    // FPS path: throughflow + confined once per tick (not every even
+    // substep) — rainy beaches paid Priority-4 deep walks and confined
+    // BFS ×3. full_feel already ran them inside each flow substep.
+    let fps_flow = perf.flow_every_other_substep && perf.flow_quiet_early_out;
+    if fps_flow && !flow_halo.is_empty() {
+        let t0 = profile.then(Instant::now);
+        apply_throughflow_regions(world, &flow_halo);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.water_flow += t0.elapsed();
+        }
+        let t0 = profile.then(Instant::now);
+        apply_confined_upward_regions(world, &flow_halo);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.confined += t0.elapsed();
+        }
+    }
     // Communicating vessels: a filled pipe can go locally quiet while the
     // reservoir head is still higher. Periodic full-chunk confined scan.
     {
@@ -449,15 +474,20 @@ fn tick_with_life_inner(
     const GRAIN_WAKE_EVERY: u64 = 4;
     const GRAIN_WAKE_FULL_EVERY: u64 = 16;
     let mut freefall_woken = 0u32;
+    let mut raft_cargo_seen = 0u32;
+    let mut did_wake = false;
     if world.tick % GRAIN_WAKE_EVERY == 0 {
         let t0 = profile.then(Instant::now);
-        if world.tick % GRAIN_WAKE_FULL_EVERY == 0 {
-            freefall_woken = super::grain::wake_grains_for_settle(world);
+        let wake = if world.tick % GRAIN_WAKE_FULL_EVERY == 0 {
+            super::grain::wake_grains_for_settle(world)
         } else {
             let halo = filter_loose_regions(world, &flow_active);
             let coords: Vec<_> = halo.iter().map(|ac| ac.coord).collect();
-            freefall_woken = super::grain::wake_grains_for_settle_coords(world, &coords);
-        }
+            super::grain::wake_grains_for_settle_coords(world, &coords)
+        };
+        freefall_woken = wake.freefall;
+        raft_cargo_seen = wake.raft_cargo;
+        did_wake = true;
         if let (true, Some(t0)) = (profile, t0) {
             local.wake_grains += t0.elapsed();
         }
@@ -507,10 +537,11 @@ fn tick_with_life_inner(
         }
     }
 
-    // Dense cargo cannot ride floating Organic/Snow/Ice. Full-grid punch
-    // once per wake cadence, then a short re-settle so punched grains
-    // sink through the water seat (capped — not the ×1024 freefall path).
-    if world.tick % GRAIN_WAKE_EVERY == 0 {
+    // Dense cargo cannot ride floating Organic/Snow/Ice. Skip the full
+    // loose punch scan when wake saw no raft cargo (demo: 0/200 hits but
+    // still ~0.19 ms empty scan). Full wake every 16 still finds cargo
+    // outside the halo and sets `raft_cargo_seen`.
+    if did_wake && raft_cargo_seen > 0 {
         let t0 = profile.then(Instant::now);
         let punched = super::grain::punch_through_floating_rafts(world);
         if let (true, Some(t0)) = (profile, t0) {

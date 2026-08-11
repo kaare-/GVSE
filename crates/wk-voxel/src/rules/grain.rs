@@ -445,24 +445,33 @@ fn loose_chunk_coords(world: &World) -> Vec<ChunkCoord> {
     coords
 }
 
+/// Freefall / raft-cargo counts from a grain wake scan.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GrainWake {
+    /// Unsupported grain / litter over empty/haze Air.
+    pub freefall: u32,
+    /// Dense grain sitting on a floating Organic/Snow/Ice raft.
+    pub raft_cargo: u32,
+}
+
 /// Re-dirty freefall seats **and** over-steep repose faces.
 ///
-/// Returns how many **freefall** seats were woken (unsupported grain /
-/// litter over Air). Slope-only wakes do not count — callers use this
-/// to choose deep vs shallow [`settle_loose_grains_regions`] budgets.
+/// Returns [`GrainWake`] — freefall counts drive deep vs shallow settle;
+/// `raft_cargo` lets callers skip empty [`punch_through_floating_rafts`].
 ///
 /// `only_coords = None` scans every sticky-loose chunk (periodic full
 /// insurance). `Some(…)` restricts to those coords (dirty-halo wake).
-pub fn wake_grains_for_settle(world: &mut World) -> u32 {
+pub fn wake_grains_for_settle(world: &mut World) -> GrainWake {
     let coords = loose_chunk_coords(world);
     wake_grains_for_settle_coords(world, &coords)
 }
 
 /// [`wake_grains_for_settle`] restricted to an explicit chunk list.
-pub fn wake_grains_for_settle_coords(world: &mut World, coords: &[ChunkCoord]) -> u32 {
+pub fn wake_grains_for_settle_coords(world: &mut World, coords: &[ChunkCoord]) -> GrainWake {
     let mut dirty: Vec<(i32, i32)> = Vec::new();
     let mut clear_loose: Vec<ChunkCoord> = Vec::new();
     let mut freefall = 0u32;
+    let mut raft_cargo = 0u32;
     for &coord in coords {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
@@ -492,6 +501,7 @@ pub fn wake_grains_for_settle_coords(world: &mut World, coords: &[ChunkCoord]) -
                     if raft_rests_on_float_water_world(world, gx, gy - 1) {
                         // Cargo on a float raft — punch handles this; not a
                         // sky freefall (must not trip deep ×1024 settle).
+                        raft_cargo = raft_cargo.saturating_add(1);
                         dirty.push((gx, gy));
                         dirty.push((gx, gy - 1));
                         let mut y = gy - 2;
@@ -633,7 +643,10 @@ pub fn wake_grains_for_settle_coords(world: &mut World, coords: &[ChunkCoord]) -
             chunk.has_loose = false;
         }
     }
-    freefall
+    GrainWake {
+        freefall,
+        raft_cargo,
+    }
 }
 
 /// Re-dirty every grain / litter cell that has empty (or non-supporting)

@@ -41,6 +41,7 @@ pub use grain::{
     rise_and_soak_buoyant_litter, rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter,
     soak_floating_litter, soak_floating_litter_cfg,
     active_has_unsupported_grain, wake_grains_for_settle, wake_grains_for_settle_coords,
+    GrainWake,
     wake_unsupported_grains, wake_unstable_slopes, GrainConfig, GRAIN_REPOSE_HAZE_MAX,
     GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES, GRAIN_SETTLE_PASSES_SHALLOW,
     MYCELIUM_EROSION_BIND,

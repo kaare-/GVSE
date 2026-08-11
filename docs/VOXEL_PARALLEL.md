@@ -72,6 +72,10 @@ Super-Server demo **~10.8 ms wall** (~93 FPS; +plants ~11.1). Physics
 (warm empty-dirty + `period_ticks`). Stress ~12.1 ms wall, EO at 4
 substeps. Parallel still slower on narrow dirty — leave off.
 
+Further shaves: karst `period_ticks` (default 32); FPS throughflow +
+confined once/tick; punch skip when wake sees no raft cargo; temp props
+refresh 4→8.
+
 **Rejected:** pair away odd-step gravity; solid-centric seepage
 (1.22→1.60 on rainy beaches).
 

@@ -32,7 +32,9 @@ pub const TEMP_STEP_PHASE: u64 = 0;
 /// Rebuild cached per-tile surface props every N temperature steps.
 /// World scans dominate `step`; stale props for a few steps are fine
 /// (materials change slowly vs the thermal field).
-pub const TEMP_PROPS_REFRESH_STEPS: u32 = 4;
+/// Was 4; 8 halves props world scans with little thermal lag (materials
+/// change slowly vs the field). Super-Server temp ~17 ms/call.
+pub const TEMP_PROPS_REFRESH_STEPS: u32 = 8;
 
 pub fn temperature_step_due(tick: u64) -> bool {
     tick % TEMP_STEP_PERIOD == TEMP_STEP_PHASE

@@ -160,7 +160,7 @@ pub use rules::{
     soak_floating_litter_cfg,
     tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life,
     tick_with_life_profiled, tick_with_perf, tick_with_perf_profiled,
-    wake_confined_head, wake_grains_for_settle, wake_grains_for_settle_coords,
+    wake_confined_head, wake_grains_for_settle, wake_grains_for_settle_coords, GrainWake,
     wake_unsupported_grains, wake_unstable_slopes,
     CondensationConfig, EvapConfig, GrainConfig,
     KarstConfig,
