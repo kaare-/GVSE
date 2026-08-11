@@ -24,7 +24,7 @@ use crate::parallel::{
 use crate::temperature::Temperature;
 
 use super::gravity::apply_gravity_fall;
-use super::plan::regions_for_standalone;
+use super::plan::{regions_for_standalone, regions_loose_moore};
 use super::util::hash_prob;
 
 /// Extra `max_step` cells when a living Root occupies the grain cell.
@@ -1484,7 +1484,31 @@ pub fn apply_cold_avalanche_bound(
     freeze_point_c: f32,
     rooted: Option<&HashSet<(i32, i32)>>,
 ) {
-    let regions = regions_for_standalone(world);
+    // Prefer the dirty halo when present, but never fall back to a full
+    // world scan — Super-Server stress paid ~8 ms/tick when post-physics
+    // dirty was empty and `regions_for_standalone` expanded to all chunks.
+    // Loose + Moore covers snow/ice/sand sources and Air seats next door.
+    let planned = plan_active(world);
+    let regions = if planned.is_empty() {
+        regions_loose_moore(world)
+    } else {
+        let loose = regions_loose_moore(world);
+        if loose.is_empty() {
+            planned
+        } else {
+            let loose_coords: HashSet<ChunkCoord> =
+                loose.iter().map(|ac| ac.coord).collect();
+            let filtered: Vec<_> = planned
+                .into_iter()
+                .filter(|ac| loose_coords.contains(&ac.coord))
+                .collect();
+            if filtered.is_empty() {
+                loose
+            } else {
+                filtered
+            }
+        }
+    };
     for pass in partition_checkerboard(&regions) {
         apply_repose_pass(world, &pass, Some(temp), freeze_point_c, rooted);
     }
@@ -2171,6 +2195,12 @@ pub fn apply_flow_erosion_bound(
     rooted: Option<&HashSet<(i32, i32)>>,
 ) {
     if !cfg.enabled || cfg.erosion_rate <= 0.0 {
+        return;
+    }
+    // Every other tick — Super-Server demo ~1.25 ms/tick; half-rate keeps
+    // bedload feel while freeing ~0.6 ms toward 60 FPS. Unit tests that
+    // call this without advancing `world.tick` still run (tick 0).
+    if world.tick % 2 != 0 {
         return;
     }
 

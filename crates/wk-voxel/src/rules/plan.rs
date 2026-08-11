@@ -60,3 +60,39 @@ pub(crate) fn regions_wet_loaded(world: &World) -> Vec<ActiveChunk> {
         })
         .collect()
 }
+
+/// Loaded chunks with sticky [`crate::chunk::Chunk::has_loose`], plus
+/// Moore neighbours (repose / cold-avalanche write into adjacent Air).
+///
+/// Bootstrap (no flag ever set) falls back to all loaded chunks.
+pub(crate) fn regions_loose_moore(world: &World) -> Vec<ActiveChunk> {
+    use std::collections::HashSet;
+    let mut coords: HashSet<ChunkCoord> = HashSet::new();
+    let mut any = false;
+    for (&coord, c) in &world.chunks {
+        if !c.has_loose {
+            continue;
+        }
+        any = true;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let n = ChunkCoord::new(coord.cx + dx, coord.cy + dy);
+                if world.chunks.contains_key(&n) {
+                    coords.insert(n);
+                }
+            }
+        }
+    }
+    if !any {
+        return regions_all_loaded(world);
+    }
+    let mut coords: Vec<ChunkCoord> = coords.into_iter().collect();
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    coords
+        .into_iter()
+        .map(|coord| ActiveChunk {
+            coord,
+            rect: crate::chunk::Rect::full(),
+        })
+        .collect()
+}

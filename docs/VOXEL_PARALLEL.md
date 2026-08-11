@@ -66,10 +66,10 @@ Low risk: no new write-set proofs.
 **off**. Unit/scenario `tick()` uses [`PerfConfig::full_feel`] (×12,
 no early-out, parallel off).
 
-Super-Server demo ~20 ms wall after temp surface-band props (~17 ms/call)
-and seepage chunk-local. Gravity stays on the any-sat column skip
-(stricter free+sat probe regressed). Mycelium orphan heal every 4th
-field pulse; phase column gate starts near rock∪sea not sky ceiling.
+Super-Server demo ~17 ms wall (~58 FPS). Gravity ~5.8 ms still leads
+CA. Phase rock∪sea gate and mycelium orphan cadence landed. Cold
+avalanche no longer full-world-falls-back (loose+Moore); flow erosion
+runs every other tick.
 
 **Rejected:** pairing away odd-step gravity (fatter dirty halo → net
 regress). Flow / seepage single-pass + chunk-local; open ocean tops
