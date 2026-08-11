@@ -3538,6 +3538,7 @@ fn dry_limestone_never_dissolves() {
         prob_per_wet_neighbour: 1.0,
         min_wet_neighbour_sat: 200,
         seed_salt: 1,
+        period_ticks: 1,
     };
     for _ in 0..50 {
         apply_karst_dissolution(&mut w, &cfg);
@@ -3564,12 +3565,39 @@ fn wet_limestone_eventually_dissolves() {
         prob_per_wet_neighbour: 1.0,
         min_wet_neighbour_sat: 200,
         seed_salt: 42,
+        period_ticks: 1,
     };
     // With prob 1.0 the top-most limestone under the puddle
     // should convert on the first tick.
     apply_karst_dissolution(&mut w, &cfg);
     let after = w.get_cell(10, 10).unwrap();
     assert_eq!(after.material, MaterialId::Air, "wet limestone must dissolve");
+}
+
+#[test]
+fn karst_respects_period_ticks() {
+    let mut w = setup_limestone_world();
+    w.set_cell(10, 11, Cell::water());
+    let cfg = KarstConfig {
+        prob_per_wet_neighbour: 1.0,
+        min_wet_neighbour_sat: 200,
+        seed_salt: 42,
+        period_ticks: 4,
+    };
+    w.tick = 1;
+    apply_karst_dissolution(&mut w, &cfg);
+    assert_eq!(
+        w.get_cell(10, 10).unwrap().material,
+        MaterialId::Limestone,
+        "off-period must no-op"
+    );
+    w.tick = 4;
+    apply_karst_dissolution(&mut w, &cfg);
+    assert_eq!(
+        w.get_cell(10, 10).unwrap().material,
+        MaterialId::Air,
+        "on-period must dissolve"
+    );
 }
 
 #[test]
@@ -3585,6 +3613,7 @@ fn karst_is_deterministic_for_seed_and_tick() {
         prob_per_wet_neighbour: 0.5,
         min_wet_neighbour_sat: 200,
         seed_salt: 7,
+        period_ticks: 1,
     };
     for _ in 0..10 {
         apply_karst_dissolution(&mut a, &cfg);
@@ -3629,6 +3658,7 @@ fn shell_scans_match_with_parallel_on_or_off() {
         prob_per_wet_neighbour: 0.35,
         min_wet_neighbour_sat: 200,
         seed_salt: 11,
+        period_ticks: 1,
     };
     let evap = EvapConfig {
         rate_per_tick: 2,
@@ -3678,6 +3708,7 @@ fn karst_ignores_non_limestone_solids() {
         prob_per_wet_neighbour: 1.0,
         min_wet_neighbour_sat: 200,
         seed_salt: 3,
+        period_ticks: 1,
     };
     for _ in 0..20 {
         apply_karst_dissolution(&mut w, &cfg);
@@ -3992,6 +4023,7 @@ fn karst_low_sat_neighbour_does_not_dissolve() {
         prob_per_wet_neighbour: 1.0,
         min_wet_neighbour_sat: 200,
         seed_salt: 4,
+        period_ticks: 1,
     };
     for _ in 0..10 {
         apply_karst_dissolution(&mut w, &cfg);
@@ -4105,6 +4137,7 @@ fn karst_skips_chunks_without_limestone_flag() {
         prob_per_wet_neighbour: 1.0,
         min_wet_neighbour_sat: 1,
         seed_salt: 1,
+        period_ticks: 1,
     };
     apply_karst_dissolution(&mut w, &cfg);
     assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Air);

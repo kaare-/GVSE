@@ -12,13 +12,26 @@ do next and what not to do. Companion to [`VOXEL_MIGRATION.md`](VOXEL_MIGRATION.
 | Rayon within a colour | `crates/wk-voxel/src/parallel.rs` |
 | Parallel gravity / grain fall / repose (in-place) | `rules.rs` |
 | Parallel water-flow + seepage **scans**; serial apply | `rules.rs` |
-| Toggle `PerfConfig.parallel_physics` (default on) | Tab → Performance |
+| Frame-shell scans (evap / karst / erosion) | `map_chunk_coords_parallel` |
+| Toggle `PerfConfig.parallel_physics` (**default off**) | Tab → Performance |
+| FPS-biased defaults (every-other + quiet EO; rayon off) | Tab → Performance |
 | Determinism: parallel ≡ serial multi-chunk fixture | `rules` / `perf_profile` tests |
 
 Contract: pull passes write only **own chunk + `cy + 1`**. Flow /
 seepage stay **compute-then-apply** (one snapshot → one apply) so
 mass stays conserved. Wrap-x worlds need an **even** chunk span so
 seam neighbours stay opposite colours.
+
+**Measured (32-core Super-Server, demo ~6 regions / ~9k cells):**
+rayon ON ≈ 71 ms/tick, OFF ≈ 45 ms/tick with the same FPS flow knobs.
+Intra-chunk 8×8 tiling made that worse (too many tiny HashMap-read
+jobs). Parallel stays opt-in until the active plan is wide enough that
+whole-chunk jobs saturate the machine.
+
+**Frame shell vs CA:** the app always enables rayon for evap / karst /
+erosion (many sticky chunks), then restores `parallel_physics` for the
+CA tick. Tail insurance scans use sticky `has_loose` / `has_wet_air`
+filters; failure runs every other tick.
 
 ## Phase 0 — Measure first
 
@@ -39,11 +52,32 @@ Harness notes live in `crates/wk-voxel/tests/perf_profile.rs`.
 1. ~~`apply_flow_erosion`~~ **landed** (`rules/grain.rs`)
 2. ~~Evaporation / karst~~ **landed** (`rules/evap.rs`, `rules/karst.rs`)
 3. Rain / condensation column or tile scans *(still open)*
+4. ~~Intra-chunk flow tiling~~ **reverted** — regressed on 32-core demo
 
 App wires `set_parallel_enabled(settings.perf.parallel_physics)` before the
 frame shell so Tab → Performance covers these scans too.
 
 Low risk: no new write-set proofs.
+
+## Phase 1b — Cadence (landed defaults)
+
+`PerfConfig::default`: every-other surface flow + quiet early-out
+**on** (max 6 substeps; gravity every step), `parallel_physics`
+**off**. Unit/scenario `tick()` uses [`PerfConfig::full_feel`] (×12,
+no early-out, parallel off).
+
+Super-Server demo **~8.3 ms wall** (~120 FPS; +plants ~8.8). Physics
+~4.6 ms. Flow ~0.46 (throughflow/confined once/tick); karst ~0.04
+(`period_ticks=32`); punch ~0; gravity ~1.1; seepage ~1.2; settle ~0.18;
+mycelium ~0.12. Stress ~9.0 ms, EO at 4 substeps. Parallel still slower
+on narrow dirty — leave off.
+
+**Rejected:** pair away odd-step gravity; solid-centric seepage
+(1.22→1.60 on rainy beaches).
+
+**Rejected:** pairing away odd-step gravity (fatter dirty halo → net
+regress). Flow / seepage single-pass + chunk-local; open ocean tops
+skip confined BFS.
 
 ## Phase 2 — Fields outside the CA
 

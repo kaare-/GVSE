@@ -34,6 +34,7 @@ use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::rules::{deposit_water_on_surface, is_standing_water};
 use crate::temperature::Temperature;
+use crate::worldgen::continental_surface_y;
 
 /// Freeze / thaw knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -184,8 +185,17 @@ fn column_may_phase(world: &World, gx: i32, temp: &Temperature, cfg: &PhaseConfi
     };
     // Drop through empty sky to the first non-empty cell, then peek a
     // short band — avoids full-height walks on tropical daytime land.
+    // Start near rock∪sea (+margin), not world y_hi — Super-Server stress
+    // paid ~4 ms walking empty sky from the ceiling.
     const BAND: i32 = 12;
-    for y in (y0..=y1).rev() {
+    const SKY_SLACK: i32 = 32;
+    let rock = continental_surface_y(temp.seed, gx, temp.sea_level_y, temp.width_cols);
+    let start = rock
+        .max(temp.sea_level_y)
+        .saturating_add(SKY_SLACK)
+        .min(y1)
+        .max(y0);
+    for y in (y0..=start).rev() {
         let Some(cell) = world.get_cell(gx, y) else {
             continue;
         };

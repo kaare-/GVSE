@@ -174,8 +174,34 @@ pub(crate) fn same_y_cascade_pull(
     dir: i32,
     cur_sat: u8,
 ) -> Option<i32> {
+    same_y_cascade_pull_in(world, None, gx, gy, 0, 0, dir, cur_sat)
+}
+
+/// [`same_y_cascade_pull`] with an optional chunk-local read cache
+/// (same contract as [`plan_same_y_pairwise_edge_in`]).
+pub(crate) fn same_y_cascade_pull_in(
+    world: &World,
+    chunk: Option<(&Chunk, i32, i32)>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+    dir: i32,
+    cur_sat: u8,
+) -> Option<i32> {
+    let cw = CHUNK_CELLS_W as i32;
+    let ch = CHUNK_CELLS_H as i32;
+    let read = |ax: i32, ay: i32, cx: i32, cy: i32| -> Option<Cell> {
+        if let Some((chunk, _bx, _by)) = chunk {
+            if cx >= 0 && cx < cw && cy >= 0 && cy < ch {
+                return Some(chunk.get(cx as usize, cy as usize));
+            }
+        }
+        world.get_cell(ax, ay)
+    };
+
     let immediate = world.wrap_x(gx + dir);
-    let Some(side) = world.get_cell(immediate, gy) else {
+    let Some(side) = read(immediate, gy, lx + dir, ly) else {
         return None;
     };
     if side.material != MaterialId::Air {
@@ -194,7 +220,7 @@ pub(crate) fn same_y_cascade_pull(
 
     // Immediate cascade is priority 2 — skip duplicate dump here.
     let immediate_cascade = matches!(
-        world.get_cell(immediate, gy - 1),
+        read(immediate, gy - 1, lx + dir, ly - 1),
         Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
     );
     if immediate_cascade {
@@ -202,20 +228,27 @@ pub(crate) fn same_y_cascade_pull(
     }
 
     let mut x = immediate;
+    let mut clx = lx + dir;
     for _ in 1..SAME_Y_SURFACE_SCAN {
         x = world.wrap_x(x + dir);
+        clx += dir;
         if x == gx {
             break;
         }
-        let Some(cell) = world.get_cell(x, gy) else {
+        let Some(cell) = read(x, gy, clx, ly) else {
             break;
         };
         if cell.material != MaterialId::Air {
             break;
         }
-        if !is_surface_support(world, x, gy) {
+        let below = read(x, gy - 1, clx, ly - 1);
+        let supported = matches!(
+            below,
+            Some(b) if b.material != MaterialId::Air || b.sat.is_full()
+        );
+        if !supported {
             if matches!(
-                world.get_cell(x, gy - 1),
+                below,
                 Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
             ) {
                 return Some(free_imm.min(pull).min(cur_sat as i32));

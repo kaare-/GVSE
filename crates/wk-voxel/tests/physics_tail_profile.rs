@@ -8,10 +8,11 @@
 use std::time::{Duration, Instant};
 
 use wk_voxel::{
-    apply_failure, apply_rain_with_temp, punch_through_floating_rafts,
-    rise_and_soak_buoyant_litter, stamp_world, step_mycelium_field, tick_with_perf,
-    wake_confined_head, wake_grains_for_settle, FailureConfig, PerfConfig, PhaseConfig,
-    RainConfig, Temperature, World, WorldgenParams,
+    apply_failure, apply_rain_with_temp, clear_all_dirty, plan_active,
+    punch_through_floating_rafts, rise_and_soak_buoyant_litter, settle_loose_grains_regions,
+    stamp_world, step_mycelium_field, tick_with_perf, wake_confined_head, wake_grains_for_settle,
+    FailureConfig, PerfConfig, PhaseConfig, RainConfig, Temperature, World, WorldgenParams,
+    GRAIN_SETTLE_PASSES,
 };
 
 const WARMUP: u64 = 30;
@@ -67,10 +68,13 @@ fn profile_physics_tail_passes() {
     let mut wake_settle = Duration::ZERO;
     let mut punch = Duration::ZERO;
     let mut wake_after_punch = Duration::ZERO;
+    let mut settle = Duration::ZERO;
     let mut rise_soak = Duration::ZERO;
     let mut failure_t = Duration::ZERO;
     let mut mycelium = Duration::ZERO;
     let mut full_tick = Duration::ZERO;
+    let mut loose_chunks = 0u64;
+    let mut loaded_chunks = 0u64;
 
     for _ in 0..MEASURE {
         apply_rain_with_temp(
@@ -85,23 +89,33 @@ fn profile_physics_tail_passes() {
         tick_with_perf(&mut world, &perf);
         full_tick += t0.elapsed();
 
+        loaded_chunks += world.chunks.len() as u64;
+        loose_chunks += world.chunks.values().filter(|c| c.has_loose).count() as u64;
+
         // Isolate tail costs on a second world snapshot path: re-run each
         // pass on the post-tick world (slightly optimistic vs mid-tick, but
-        // ranks relative cost of full-grid scans).
+        // ranks relative cost of full-grid scans). Cadence gates inside
+        // some helpers still apply (confined / mycelium).
         let t0 = Instant::now();
         wake_confined_head(&mut world);
         confined += t0.elapsed();
 
         let t0 = Instant::now();
-        wake_grains_for_settle(&mut world);
+        let _ = wake_grains_for_settle(&mut world);
         wake_settle += t0.elapsed();
+
+        let t0 = Instant::now();
+        let active = plan_active(&world);
+        settle_loose_grains_regions(&mut world, &active, None, GRAIN_SETTLE_PASSES);
+        clear_all_dirty(&mut world);
+        settle += t0.elapsed();
 
         let t0 = Instant::now();
         let n = punch_through_floating_rafts(&mut world);
         punch += t0.elapsed();
         if n > 0 {
             let t0 = Instant::now();
-            wake_grains_for_settle(&mut world);
+            let _ = wake_grains_for_settle(&mut world);
             wake_after_punch += t0.elapsed();
         }
 
@@ -120,8 +134,14 @@ fn profile_physics_tail_passes() {
 
     eprintln!("=== Physics tail (closed_loop rain, demo world) ===");
     eprintln!("  full tick_with_perf   {:>8.3} ms/tick", ms(full_tick, MEASURE));
+    eprintln!(
+        "  loose chunks           {:>5.1} / {:>5.1} avg (has_loose sticky)",
+        loose_chunks as f32 / MEASURE as f32,
+        loaded_chunks as f32 / MEASURE as f32
+    );
     eprintln!("  wake_confined_head    {:>8.3} ms/call (extra)", ms(confined, MEASURE));
     eprintln!("  wake_grains_for_settle{:>8.3} ms/call (extra)", ms(wake_settle, MEASURE));
+    eprintln!("  settle_loose_grains   {:>8.3} ms/call (extra, post-wake)", ms(settle, MEASURE));
     eprintln!("  punch_through_rafts   {:>8.3} ms/call (extra)", ms(punch, MEASURE));
     eprintln!("  wake after punch      {:>8.3} ms/call (extra)", ms(wake_after_punch, MEASURE));
     eprintln!("  rise_and_soak         {:>8.3} ms/call (extra)", ms(rise_soak, MEASURE));
@@ -129,10 +149,12 @@ fn profile_physics_tail_passes() {
     eprintln!("  step_mycelium_field   {:>8.3} ms/call (extra)", ms(mycelium, MEASURE));
     let tail = confined
         + wake_settle
+        + settle
         + punch
         + wake_after_punch
         + rise_soak
         + failure_t
         + mycelium;
     eprintln!("  sum(tail extras)      {:>8.3} ms/tick", ms(tail, MEASURE));
+    eprintln!("  note: confined/wake/punch are cadence-gated inside tick; these extras force the call.");
 }

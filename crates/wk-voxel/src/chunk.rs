@@ -93,6 +93,29 @@ pub struct Chunk {
     /// held limestone.
     #[serde(default)]
     pub has_limestone: bool,
+    /// Sticky occupancy: at least one loose / buoyant cell (sand, soil,
+    /// gravel, clay, loose rock/limestone, snow, ice, organic) was
+    /// written since the flag was last cleared. Grain wake / punch /
+    /// litter scans skip pure water / sky / stone chunks.
+    #[serde(default)]
+    pub has_loose: bool,
+}
+
+/// Materials that participate in grain settle / float / punch passes.
+#[inline]
+pub fn material_is_loose(material: MaterialId) -> bool {
+    matches!(
+        material,
+        MaterialId::Sand
+            | MaterialId::Gravel
+            | MaterialId::Clay
+            | MaterialId::Soil
+            | MaterialId::LooseRock
+            | MaterialId::LooseLimestone
+            | MaterialId::Snow
+            | MaterialId::Ice
+            | MaterialId::Organic
+    )
 }
 
 impl Chunk {
@@ -104,6 +127,7 @@ impl Chunk {
             tick: 0,
             has_wet_air: false,
             has_limestone: false,
+            has_loose: false,
         }
     }
 
@@ -147,6 +171,9 @@ impl Chunk {
         }
         if cell.material == MaterialId::Limestone {
             self.has_limestone = true;
+        }
+        if material_is_loose(cell.material) {
+            self.has_loose = true;
         }
     }
 
@@ -214,13 +241,18 @@ mod tests {
         let mut c = Chunk::new(ChunkCoord::new(0, 0));
         assert!(!c.has_wet_air);
         assert!(!c.has_limestone);
+        assert!(!c.has_loose);
         c.set(1, 1, Cell::water());
         assert!(c.has_wet_air);
         c.set(2, 2, Cell::solid(MaterialId::Limestone));
         assert!(c.has_limestone);
+        c.set(3, 3, Cell::solid(MaterialId::Sand));
+        assert!(c.has_loose);
         // Dry air / stone do not clear sticky flags.
         c.set(1, 1, Cell::air());
         assert!(c.has_wet_air);
+        c.set(3, 3, Cell::air());
+        assert!(c.has_loose);
     }
 
     #[test]

@@ -4,11 +4,11 @@
 //!
 //! Permeability-limited pore soak.
 
-use crate::active::{partition_checkerboard, ActiveChunk};
+use crate::active::ActiveChunk;
 use crate::cell::{water_capacity_with, Cell, Sat};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
-use crate::parallel::{map_regions_parallel};
+use crate::parallel::map_regions_parallel;
 
 use super::head::{is_porous_solid_with, sat_move_to_equalize_heads, seepage_rate_with};
 use super::plan::regions_for_standalone;
@@ -30,16 +30,15 @@ pub fn apply_seepage(world: &mut World) {
 
 /// Seepage restricted to a pre-planned active set.
 ///
-/// Checkerboard scan + single apply (same snapshot rule as spill).
+/// Single compute-then-apply scan (same snapshot rule as spill / flow —
+/// checkerboard is not required for a read-only accumulate).
 pub fn apply_seepage_regions(world: &mut World, active: &[ActiveChunk]) {
     if active.is_empty() {
         return;
     }
     // (from, to, amt) with amt > 0.
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
-    for pass in partition_checkerboard(active) {
-        accumulate_seepage_xfers(world, &pass, &mut xfers);
-    }
+    accumulate_seepage_xfers(world, active, &mut xfers);
 
     // Apply in a stable order. Each transfer re-reads live sat so a
     // source drained by an earlier xfer simply sends less — every
@@ -91,35 +90,53 @@ fn accumulate_seepage_xfers(
 ) {
     const OFFSETS: [(i32, i32); 2] = [(1, 0), (0, 1)];
     let hydro = world.hydro;
+    let cw = CHUNK_CELLS_W as i32;
+    let ch = CHUNK_CELLS_H as i32;
     let local = map_regions_parallel(active, |ac| {
         let mut local: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
+        // Chunk-local reads — same pattern as water_flow (~10× vs HashMap).
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            return local;
+        };
+        let base_gx = ac.coord.cx * cw;
+        let base_gy = ac.coord.cy * ch;
+        let read = |lx: i32, ly: i32, gx: i32, gy: i32| -> Option<Cell> {
+            if lx >= 0 && lx < cw && ly >= 0 && ly < ch {
+                Some(chunk.get(lx as usize, ly as usize))
+            } else {
+                world.get_cell(gx, gy)
+            }
+        };
         for y in ac.rect.y0..=ac.rect.y1 {
-            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            let ly = y as i32;
+            let gy = base_gy + ly;
             for x in ac.rect.x0..=ac.rect.x1 {
-                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
-                let Some(a) = world.get_cell(gx, gy) else {
-                    continue;
-                };
+                let lx = x as i32;
+                let gx = world.wrap_x(base_gx + lx);
+                let a = chunk.get(x as usize, y as usize);
                 let cap_a = water_capacity_with(a.material, &hydro);
                 if cap_a == 0 {
                     continue;
                 }
+                let a_solid = is_porous_solid_with(a.material, &hydro);
+                // Air–Air / impermeable–impermeable edges are no-ops —
+                // check materials before head math. Dominates rainy
+                // ocean shore halos.
                 for (dx, dy) in OFFSETS {
                     let nx = world.wrap_x(gx + dx);
                     let ny = gy + dy;
                     if dx != 0 && nx == gx {
                         continue;
                     }
-                    let Some(b) = world.get_cell(nx, ny) else {
+                    let Some(b) = read(lx + dx, ly + dy, nx, ny) else {
                         continue;
                     };
-                    let cap_b = water_capacity_with(b.material, &hydro);
-                    if cap_b == 0 {
-                        continue;
-                    }
-                    let a_solid = is_porous_solid_with(a.material, &hydro);
                     let b_solid = is_porous_solid_with(b.material, &hydro);
                     if !a_solid && !b_solid {
+                        continue;
+                    }
+                    let cap_b = water_capacity_with(b.material, &hydro);
+                    if cap_b == 0 {
                         continue;
                     }
                     let move_amt = sat_move_to_equalize_heads(
@@ -129,7 +146,8 @@ fn accumulate_seepage_xfers(
                         continue;
                     }
                     let rate = if a_solid && b_solid {
-                        seepage_rate_with(a.material, &hydro).min(seepage_rate_with(b.material, &hydro))
+                        seepage_rate_with(a.material, &hydro)
+                            .min(seepage_rate_with(b.material, &hydro))
                     } else if a_solid {
                         seepage_rate_with(a.material, &hydro)
                     } else {

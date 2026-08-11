@@ -8,22 +8,21 @@
 //!
 //! Matches `wk-voxel-app` frame order (rain → evap → humidity advect →
 //! clouds → condensation → karst → physics tick → erosion → humidity /
-//! temp cadence → phase → organisms). Also prints a physics sub-pass
-//! breakdown and a rayon on/off A/B on the demo world.
+//! temp cadence → phase → organisms). Physics sub-pass times come from
+//! the real [`tick_with_perf_profiled`] path (not a post-hoc mirror).
+//! Also prints a rayon on/off A/B on the demo world.
 
 use std::time::{Duration, Instant};
 
 use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
-    apply_flow_erosion, apply_grain_fall_regions, apply_grain_repose_regions,
-    apply_gravity_fall_regions, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    apply_seepage_regions, apply_water_flow_regions, clear_all_dirty, find_plant_slot,
-    humidity_diffuse_due, partition_checkerboard, plan_active, set_parallel_enabled,
-    stamp_world, temperature_step_due, tick_with_perf, Blueprint, ClimateConfig, CloudConfig,
-    CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity, KarstConfig,
-    OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, RainConfig, Temperature, Wind,
-    World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_QUIET_AREA, FLOW_SUBSTEPS,
-    FLOW_SUBSTEPS_MIN,
+    apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
+    find_plant_slot, humidity_diffuse_due, set_parallel_enabled, stamp_world,
+    temperature_step_due, tick_with_perf, tick_with_perf_profiled, Blueprint, ClimateConfig,
+    CloudConfig, CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity,
+    KarstConfig, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, PhysicsTimings,
+    RainConfig, Temperature, Wind, World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W,
+    FLOW_SUBSTEPS,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -31,7 +30,6 @@ const HUMIDITY_DIFFUSION_ALPHA: f32 = 0.15;
 const CLIMATE_WIND_VX: f32 = 0.05;
 const WARMUP_TICKS: u64 = 40;
 const MEASURE_TICKS: u64 = 200;
-const PHYSICS_BREAKDOWN_TICKS: u64 = 80;
 const PLANT_COUNT: usize = 48;
 
 struct PassAccum {
@@ -88,54 +86,6 @@ impl PassAccum {
             + self.phase
             + self.organisms
     }
-}
-
-struct PhysicsAccum {
-    plan_clear: Duration,
-    gravity: Duration,
-    water_flow: Duration,
-    seepage: Duration,
-    grain_fall: Duration,
-    grain_repose: Duration,
-    substeps_ran: u64,
-    active_regions: u64,
-    active_area: u64,
-}
-
-impl PhysicsAccum {
-    fn zero() -> Self {
-        Self {
-            plan_clear: Duration::ZERO,
-            gravity: Duration::ZERO,
-            water_flow: Duration::ZERO,
-            seepage: Duration::ZERO,
-            grain_fall: Duration::ZERO,
-            grain_repose: Duration::ZERO,
-            substeps_ran: 0,
-            active_regions: 0,
-            active_area: 0,
-        }
-    }
-
-    fn total(&self) -> Duration {
-        self.plan_clear
-            + self.gravity
-            + self.water_flow
-            + self.seepage
-            + self.grain_fall
-            + self.grain_repose
-    }
-}
-
-fn region_area(active: &[wk_voxel::ActiveChunk]) -> usize {
-    active
-        .iter()
-        .map(|ac| {
-            let w = (ac.rect.x1 as usize).saturating_sub(ac.rect.x0 as usize) + 1;
-            let h = (ac.rect.y1 as usize).saturating_sub(ac.rect.y0 as usize) + 1;
-            w.saturating_mul(h)
-        })
-        .sum()
 }
 
 struct Scene {
@@ -294,10 +244,16 @@ fn profile_label(label: &str, params: &WorldgenParams, chunks: usize) {
     );
 }
 
-fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
+fn one_stack_tick(
+    scene: &mut Scene,
+    accum: Option<&mut PassAccum>,
+    phys: Option<&mut PhysicsTimings>,
+) {
     let tick_no = scene.world.tick;
     match accum {
         None => {
+            // Match app: shell scans always parallel; CA follows PerfConfig.
+            set_parallel_enabled(true);
             apply_rain_with_temp(
                 &mut scene.world,
                 &scene.rain,
@@ -329,7 +285,14 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
                 Some(&scene.phase),
             );
             apply_karst_dissolution(&mut scene.world, &scene.karst);
-            tick_with_perf(&mut scene.world, &scene.perf);
+            set_parallel_enabled(scene.perf.parallel_physics);
+            match phys {
+                Some(t) => {
+                    let _ = tick_with_perf_profiled(&mut scene.world, &scene.perf, t);
+                }
+                None => tick_with_perf(&mut scene.world, &scene.perf),
+            }
+            set_parallel_enabled(true);
             apply_flow_erosion(&mut scene.world, &scene.grain);
             if humidity_diffuse_due(scene.world.tick) {
                 scene.humidity.diffuse(HUMIDITY_DIFFUSION_ALPHA);
@@ -340,7 +303,10 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
                     .temperature
                     .step(Some(&scene.world), &scene.humidity, t);
             }
-            if scene.phase.enabled && scene.phase.enable_cold_avalanche {
+            if scene.phase.enabled
+                && scene.phase.enable_cold_avalanche
+                && scene.world.tick % scene.phase.period_ticks.max(1) == 0
+            {
                 apply_cold_avalanche(
                     &mut scene.world,
                     &scene.temperature,
@@ -359,6 +325,7 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
             }
         }
         Some(a) => {
+            set_parallel_enabled(true);
             let t0 = Instant::now();
             apply_rain_with_temp(
                 &mut scene.world,
@@ -408,10 +375,17 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
             apply_karst_dissolution(&mut scene.world, &scene.karst);
             a.karst += t0.elapsed();
 
+            set_parallel_enabled(scene.perf.parallel_physics);
             let t0 = Instant::now();
-            tick_with_perf(&mut scene.world, &scene.perf);
+            match phys {
+                Some(t) => {
+                    let _ = tick_with_perf_profiled(&mut scene.world, &scene.perf, t);
+                }
+                None => tick_with_perf(&mut scene.world, &scene.perf),
+            }
             a.physics_tick += t0.elapsed();
 
+            set_parallel_enabled(true);
             let t0 = Instant::now();
             apply_flow_erosion(&mut scene.world, &scene.grain);
             a.erosion += t0.elapsed();
@@ -431,7 +405,10 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
                 a.temperature += t0.elapsed();
                 a.temperature_calls += 1;
             }
-            if scene.phase.enabled && scene.phase.enable_cold_avalanche {
+            if scene.phase.enabled
+                && scene.phase.enable_cold_avalanche
+                && scene.world.tick % scene.phase.period_ticks.max(1) == 0
+            {
                 let t0 = Instant::now();
                 apply_cold_avalanche(
                     &mut scene.world,
@@ -456,78 +433,6 @@ fn one_stack_tick(scene: &mut Scene, accum: Option<&mut PassAccum>) {
                 a.organisms += t0.elapsed();
             }
         }
-    }
-}
-
-/// Timed mirror of [`tick_with_perf`] — keep in sync with `rules`.
-fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum) {
-    set_parallel_enabled(perf.parallel_physics);
-    for step in 0..FLOW_SUBSTEPS {
-        let t0 = Instant::now();
-        let active = plan_active(world);
-        clear_all_dirty(world);
-        a.plan_clear += t0.elapsed();
-        if active.is_empty() {
-            break;
-        }
-        a.substeps_ran += 1;
-        a.active_regions += active.len() as u64;
-        a.active_area += region_area(&active) as u64;
-
-        let passes = partition_checkerboard(&active);
-        let t0 = Instant::now();
-        for pass in &passes {
-            apply_gravity_fall_regions(world, pass);
-        }
-        a.gravity += t0.elapsed();
-
-        let run_flow = !perf.flow_every_other_substep || (step % 2 == 1);
-        if run_flow {
-            let t0 = Instant::now();
-            apply_water_flow_regions(world, &active);
-            a.water_flow += t0.elapsed();
-        }
-
-        if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_MIN {
-            let next = plan_active(world);
-            let area = region_area(&next);
-            if next.is_empty() || area <= FLOW_QUIET_AREA {
-                break;
-            }
-        }
-    }
-
-    let t0 = Instant::now();
-    let active = plan_active(world);
-    a.plan_clear += t0.elapsed();
-    if !active.is_empty() {
-        let t0 = Instant::now();
-        apply_seepage_regions(world, &active);
-        a.seepage += t0.elapsed();
-
-        let passes = partition_checkerboard(&active);
-        let t0 = Instant::now();
-        for pass in &passes {
-            apply_grain_fall_regions(world, pass);
-        }
-        a.grain_fall += t0.elapsed();
-
-        let t0 = Instant::now();
-        let repose_active = plan_active(world);
-        a.plan_clear += t0.elapsed();
-        if !repose_active.is_empty() {
-            let repose_passes = partition_checkerboard(&repose_active);
-            let t0 = Instant::now();
-            for pass in &repose_passes {
-                apply_grain_repose_regions(world, pass, None);
-            }
-            a.grain_repose += t0.elapsed();
-        }
-    }
-
-    world.tick = world.tick.wrapping_add(1);
-    for chunk in world.chunks.values_mut() {
-        chunk.tick = chunk.tick.wrapping_add(1);
     }
 }
 
@@ -585,8 +490,8 @@ fn print_pass_table(accum: &PassAccum, n: u64, wall: Duration) {
     );
 }
 
-fn print_physics_table(phys: &PhysicsAccum, n: u64) {
-    eprintln!("  --- physics sub-pass (timed mirror of tick, {n} ticks) ---");
+fn print_physics_table(phys: &PhysicsTimings, n: u64) {
+    eprintln!("  --- physics sub-pass (in-tick, {n} measure ticks) ---");
     eprintln!(
         "  plan+clear dirty     {:>8.3} ms/tick",
         ms_per(phys.plan_clear, n)
@@ -601,12 +506,26 @@ fn print_physics_table(phys: &PhysicsAccum, n: u64) {
     );
     eprintln!("  seepage              {:>8.3} ms/tick", ms_per(phys.seepage, n));
     eprintln!(
-        "  grain fall           {:>8.3} ms/tick",
-        ms_per(phys.grain_fall, n)
+        "  wake grains          {:>8.3} ms/tick",
+        ms_per(phys.wake_grains, n)
     );
     eprintln!(
-        "  grain repose         {:>8.3} ms/tick",
-        ms_per(phys.grain_repose, n)
+        "  settle grains        {:>8.3} ms/tick",
+        ms_per(phys.settle, n)
+    );
+    eprintln!("  punch rafts          {:>8.3} ms/tick", ms_per(phys.punch, n));
+    eprintln!(
+        "  rise+soak            {:>8.3} ms/tick",
+        ms_per(phys.rise_soak, n)
+    );
+    eprintln!("  failure              {:>8.3} ms/tick", ms_per(phys.failure, n));
+    eprintln!(
+        "  confined wake        {:>8.3} ms/tick",
+        ms_per(phys.confined, n)
+    );
+    eprintln!(
+        "  mycelium field       {:>8.3} ms/tick",
+        ms_per(phys.mycelium, n)
     );
     eprintln!(
         "  sum(physics)         {:>8.3} ms/tick  (avg {:.2} flow substeps/tick)",
@@ -620,6 +539,10 @@ fn print_physics_table(phys: &PhysicsAccum, n: u64) {
             phys.active_area as f32 / phys.substeps_ran as f32
         );
     }
+    eprintln!(
+        "  deep settle ticks    {:>8} / {n}   punch hits {:>8} / {n}",
+        phys.deep_settle_ticks, phys.punch_hits
+    );
 }
 
 fn run_profile(label: &str, params: WorldgenParams, with_plants: bool) {
@@ -631,31 +554,18 @@ fn run_profile(label: &str, params: WorldgenParams, with_plants: bool) {
     profile_label(label, &scene.params, chunks);
 
     for _ in 0..WARMUP_TICKS {
-        one_stack_tick(&mut scene, None);
+        one_stack_tick(&mut scene, None, None);
     }
 
     let mut accum = PassAccum::zero();
+    let mut phys = PhysicsTimings::default();
     let wall = Instant::now();
     for _ in 0..MEASURE_TICKS {
-        one_stack_tick(&mut scene, Some(&mut accum));
+        one_stack_tick(&mut scene, Some(&mut accum), Some(&mut phys));
     }
     let wall = wall.elapsed();
     print_pass_table(&accum, MEASURE_TICKS, wall);
-
-    // Fresh physics breakdown on the already-warmed world (rain keeps
-    // water active so flow stays representative).
-    let mut phys = PhysicsAccum::zero();
-    for _ in 0..PHYSICS_BREAKDOWN_TICKS {
-        apply_rain_with_temp(
-            &mut scene.world,
-            &scene.rain,
-            Some(&scene.temperature),
-            Some(&scene.phase),
-            Some(&mut scene.humidity),
-        );
-        timed_physics_tick(&mut scene.world, &scene.perf, &mut phys);
-    }
-    print_physics_table(&phys, PHYSICS_BREAKDOWN_TICKS);
+    print_physics_table(&phys, MEASURE_TICKS);
 
     let cap = scene
         .humidity
@@ -674,20 +584,21 @@ fn run_profile(label: &str, params: WorldgenParams, with_plants: bool) {
 
 fn run_perf_knob_ab(params: WorldgenParams) {
     eprintln!("=== PerfConfig A/B (demo stack, no plants) ===");
-    let variants: [(&str, PerfConfig); 3] = [
-        ("defaults (full flow)", PerfConfig::default()),
+    let variants: [(&str, PerfConfig); 4] = [
+        ("defaults (FPS, par OFF)", PerfConfig::default()),
+        ("full_feel (×12, par OFF)", PerfConfig::full_feel()),
         (
-            "every-other flow",
+            "defaults + parallel ON",
             PerfConfig {
-                flow_every_other_substep: true,
+                parallel_physics: true,
                 ..PerfConfig::default()
             },
         ),
         (
-            "parallel OFF",
+            "full_feel + parallel ON",
             PerfConfig {
-                parallel_physics: false,
-                ..PerfConfig::default()
+                parallel_physics: true,
+                ..PerfConfig::full_feel()
             },
         ),
     ];
@@ -695,12 +606,12 @@ fn run_perf_knob_ab(params: WorldgenParams) {
         let mut scene = stamp_scene(params);
         scene.perf = perf;
         for _ in 0..WARMUP_TICKS {
-            one_stack_tick(&mut scene, None);
+            one_stack_tick(&mut scene, None, None);
         }
         let mut accum = PassAccum::zero();
         let wall = Instant::now();
         for _ in 0..MEASURE_TICKS {
-            one_stack_tick(&mut scene, Some(&mut accum));
+            one_stack_tick(&mut scene, Some(&mut accum), None);
         }
         let wall = wall.elapsed();
         eprintln!(

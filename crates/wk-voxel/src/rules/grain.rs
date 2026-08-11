@@ -24,7 +24,7 @@ use crate::parallel::{
 use crate::temperature::Temperature;
 
 use super::gravity::apply_gravity_fall;
-use super::plan::regions_for_standalone;
+use super::plan::{regions_for_standalone, regions_loose_moore};
 use super::util::hash_prob;
 
 /// Extra `max_step` cells when a living Root occupies the grain cell.
@@ -59,6 +59,58 @@ const MYCELIUM_WATERLOG_MIN_SCALE: f32 = 0.12;
 /// call. Default sky is ~5 chunks tall (`64×5`); cover that so F3
 /// litter does not take hundreds of ticks to land.
 pub const GRAIN_SETTLE_PASSES: u32 = 1024;
+
+/// Repose / polish settle when nothing is freefalling. Busy shores used
+/// to run up toward [`GRAIN_SETTLE_PASSES`] on micro-moves (organic /
+/// bank fidget) and dominate the physics tick on Super-Server.
+pub const GRAIN_SETTLE_PASSES_SHALLOW: u32 = 8;
+
+/// True when any cell in `active` is mid-air over **empty/haze** Air
+/// (F3 sky paint / real freefall).
+///
+/// Must **not** treat sand over wet/lake Air as unsupported — dense grains
+/// sink through any sat, and shores under closed-loop rain would otherwise
+/// force deep ×1024 settle every tick (Super-Server: physics tick ~25 ms
+/// while a no-rain mirror showed ~12 ms).
+pub fn active_has_unsupported_grain(world: &World, active: &[ActiveChunk]) -> bool {
+    for ac in active {
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            continue;
+        };
+        let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
+        let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
+        for y in ac.rect.y0..=ac.rect.y1 {
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let cell = chunk.get(x as usize, y as usize);
+                let loose = is_grain(cell.material) || falls_through_empty_air(cell.material);
+                if !loose {
+                    continue;
+                }
+                let gx = world.wrap_x(base_gx + x as i32);
+                let gy = base_gy + y as i32;
+                let Some(below) = world.get_cell(gx, gy - 1) else {
+                    return true;
+                };
+                if below.material != MaterialId::Air {
+                    continue;
+                }
+                // Wet film / lake under a grain is a shore seat, not sky.
+                if below.sat.0 > GRAIN_REPOSE_HAZE_MAX {
+                    continue;
+                }
+                // Buoyant litter on a grounded float column is seated.
+                if falls_through_empty_air(cell.material)
+                    && !cell.is_waterlogged_organic()
+                    && floats_on_air_seat_world(world, below, gx, gy - 1)
+                {
+                    continue;
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
 
 /// Repose `max_step` bonus from mycelium intensity on Organic (0..=2).
 #[inline]
@@ -308,7 +360,8 @@ pub fn punch_through_floating_rafts(world: &mut World) -> u32 {
     let mut total = 0u32;
     for _ in 0..FLOAT_PUNCH_MAX {
         let mut swaps: Vec<(i32, i32)> = Vec::new();
-        for &coord in world.chunks.keys() {
+        let coords = loose_chunk_coords(world);
+        for coord in coords {
             let x0 = coord.cx * CHUNK_CELLS_W as i32;
             let y0 = coord.cy * CHUNK_CELLS_H as i32;
             let Some(chunk) = world.chunks.get(&coord) else {
@@ -375,19 +428,57 @@ pub fn punch_through_floating_rafts(world: &mut World) -> u32 {
     total
 }
 
-/// Re-dirty freefall seats **and** over-steep repose faces in one grid scan.
+/// Chunks that may hold grain / litter (sticky [`Chunk::has_loose`]).
 ///
-/// Used by the physics tick instead of calling [`wake_unsupported_grains`]
-/// then [`wake_unstable_slopes`] (two full-world walks).
-pub fn wake_grains_for_settle(world: &mut World) {
-    let coords: Vec<ChunkCoord> = world.chunks.keys().copied().collect();
+/// Falls back to every loaded chunk when no flag is set yet (old saves).
+fn loose_chunk_coords(world: &World) -> Vec<ChunkCoord> {
+    let mut coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_loose)
+        .map(|(&coord, _)| coord)
+        .collect();
+    if coords.is_empty() && !world.chunks.is_empty() {
+        coords = world.chunks.keys().copied().collect();
+    }
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    coords
+}
+
+/// Freefall / raft-cargo counts from a grain wake scan.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct GrainWake {
+    /// Unsupported grain / litter over empty/haze Air.
+    pub freefall: u32,
+    /// Dense grain sitting on a floating Organic/Snow/Ice raft.
+    pub raft_cargo: u32,
+}
+
+/// Re-dirty freefall seats **and** over-steep repose faces.
+///
+/// Returns [`GrainWake`] — freefall counts drive deep vs shallow settle;
+/// `raft_cargo` lets callers skip empty [`punch_through_floating_rafts`].
+///
+/// `only_coords = None` scans every sticky-loose chunk (periodic full
+/// insurance). `Some(…)` restricts to those coords (dirty-halo wake).
+pub fn wake_grains_for_settle(world: &mut World) -> GrainWake {
+    let coords = loose_chunk_coords(world);
+    wake_grains_for_settle_coords(world, &coords)
+}
+
+/// [`wake_grains_for_settle`] restricted to an explicit chunk list.
+pub fn wake_grains_for_settle_coords(world: &mut World, coords: &[ChunkCoord]) -> GrainWake {
     let mut dirty: Vec<(i32, i32)> = Vec::new();
-    for coord in coords {
+    let mut clear_loose: Vec<ChunkCoord> = Vec::new();
+    let mut freefall = 0u32;
+    let mut raft_cargo = 0u32;
+    for &coord in coords {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
+        let mut saw_loose = false;
         for ly in 0..CHUNK_CELLS_H {
             for lx in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(lx, ly);
@@ -399,13 +490,18 @@ pub fn wake_grains_for_settle(world: &mut World) {
                 if !loose {
                     continue;
                 }
+                saw_loose = true;
                 // --- unsupported / freefall ---
                 let Some(below) = world.get_cell(gx, gy - 1) else {
                     dirty.push((gx, gy));
+                    freefall += 1;
                     continue;
                 };
                 if is_grain(cell.material) && falls_through_empty_air(below.material) {
                     if raft_rests_on_float_water_world(world, gx, gy - 1) {
+                        // Cargo on a float raft — punch handles this; not a
+                        // sky freefall (must not trip deep ×1024 settle).
+                        raft_cargo = raft_cargo.saturating_add(1);
                         dirty.push((gx, gy));
                         dirty.push((gx, gy - 1));
                         let mut y = gy - 2;
@@ -432,11 +528,18 @@ pub fn wake_grains_for_settle(world: &mut World) {
                             if floats_on_air_seat_world(world, above, gx, gy + 1) {
                                 dirty.push((gx, gy));
                                 dirty.push((gx, gy + 1));
+                                // Floating raft stack — not freefall into void.
                             }
                         }
                     } else {
                         dirty.push((gx, gy));
                         dirty.push((gx, gy - 1));
+                        // Only empty/haze Air is sky freefall. Wet/lake Air
+                        // under sand is a shore seat — counting it forced
+                        // deep settle every wake on rainy demos.
+                        if below.sat.0 <= GRAIN_REPOSE_HAZE_MAX {
+                            freefall += 1;
+                        }
                     }
                     continue;
                 }
@@ -528,9 +631,21 @@ pub fn wake_grains_for_settle(world: &mut World) {
                 }
             }
         }
+        if !saw_loose {
+            clear_loose.push(coord);
+        }
     }
     for (gx, gy) in dirty {
         world.touch_dirty(gx, gy);
+    }
+    for coord in clear_loose {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_loose = false;
+        }
+    }
+    GrainWake {
+        freefall,
+        raft_cargo,
     }
 }
 
@@ -539,7 +654,7 @@ pub fn wake_grains_for_settle(world: &mut World) {
 ///
 /// Prefer [`wake_grains_for_settle`] in the hot tick (one scan).
 pub fn wake_unsupported_grains(world: &mut World) {
-    wake_grains_for_settle(world);
+    let _ = wake_grains_for_settle(world);
 }
 
 /// Re-dirty supported grains whose diagonal-down seat is steeper than
@@ -549,7 +664,7 @@ pub fn wake_unsupported_grains(world: &mut World) {
 ///
 /// Prefer [`wake_grains_for_settle`] in the hot tick (one scan).
 pub fn wake_unstable_slopes(world: &mut World) {
-    wake_grains_for_settle(world);
+    let _ = wake_grains_for_settle(world);
 }
 
 fn diag_drop_exceeds_world(
@@ -741,7 +856,7 @@ const BUOYANT_RISE_MAX: i32 = 16;
 
 fn collect_buoyant_litter(world: &World) -> Vec<(i32, i32)> {
     let mut litter = Vec::new();
-    for &coord in world.chunks.keys() {
+    for coord in loose_chunk_coords(world) {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
         let Some(chunk) = world.chunks.get(&coord) else {
@@ -1382,7 +1497,42 @@ pub fn apply_cold_avalanche_bound(
     freeze_point_c: f32,
     rooted: Option<&HashSet<(i32, i32)>>,
 ) {
-    let regions = regions_for_standalone(world);
+    // Prefer the dirty halo when present, but never fall back to a full
+    // world scan — Super-Server stress paid ~8 ms/tick when post-physics
+    // dirty was empty and `regions_for_standalone` expanded to all chunks.
+    // Loose + Moore covers snow/ice/sand sources and Air seats next door.
+    //
+    // Warm empty-dirty: skip the Moore insurance entirely. Ambient repose
+    // already handles snow/sand; this pass only adds cold wet-sand, ice
+    // glaze, and snow→ice-lid seats. Stress (mean ~25°C, snow=0) was
+    // still paying ~4 ms walking ~100 full loose chunks.
+    let planned = plan_active(world);
+    let regions = if planned.is_empty() {
+        if temp.mean() > freeze_point_c {
+            return;
+        }
+        regions_loose_moore(world)
+    } else {
+        let loose = regions_loose_moore(world);
+        if loose.is_empty() {
+            planned
+        } else {
+            let loose_coords: HashSet<ChunkCoord> =
+                loose.iter().map(|ac| ac.coord).collect();
+            let filtered: Vec<_> = planned
+                .into_iter()
+                .filter(|ac| loose_coords.contains(&ac.coord))
+                .collect();
+            if filtered.is_empty() {
+                if temp.mean() > freeze_point_c {
+                    return;
+                }
+                loose
+            } else {
+                filtered
+            }
+        }
+    };
     for pass in partition_checkerboard(&regions) {
         apply_repose_pass(world, &pass, Some(temp), freeze_point_c, rooted);
     }
@@ -2069,6 +2219,12 @@ pub fn apply_flow_erosion_bound(
     rooted: Option<&HashSet<(i32, i32)>>,
 ) {
     if !cfg.enabled || cfg.erosion_rate <= 0.0 {
+        return;
+    }
+    // Every other tick — Super-Server demo ~1.25 ms/tick; half-rate keeps
+    // bedload feel while freeing ~0.6 ms toward 60 FPS. Unit tests that
+    // call this without advancing `world.tick` still run (tick 0).
+    if world.tick % 2 != 0 {
         return;
     }
 

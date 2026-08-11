@@ -40,8 +40,10 @@ pub use grain::{
     punch_through_floating_rafts,
     rise_and_soak_buoyant_litter, rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter,
     soak_floating_litter, soak_floating_litter_cfg,
-    wake_grains_for_settle, wake_unsupported_grains, wake_unstable_slopes,
-    GrainConfig, GRAIN_REPOSE_HAZE_MAX, GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES,
+    active_has_unsupported_grain, wake_grains_for_settle, wake_grains_for_settle_coords,
+    GrainWake,
+    wake_unsupported_grains, wake_unstable_slopes, GrainConfig, GRAIN_REPOSE_HAZE_MAX,
+    GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES, GRAIN_SETTLE_PASSES_SHALLOW,
     MYCELIUM_EROSION_BIND,
     MYCELIUM_RAFT_BIND_MIN, MYCELIUM_REPOSE_STEP_BONUS, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };
@@ -52,7 +54,8 @@ pub use rain::{apply_rain, apply_rain_with_temp, is_standing_water, RainConfig};
 pub use seepage::{apply_seepage, apply_seepage_regions};
 pub use spill::{apply_lateral_spill, apply_lateral_spill_regions};
 pub use tick::{
-    tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life, tick_with_perf,
-    PerfConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
+    tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life,
+    tick_with_life_profiled, tick_with_perf, tick_with_perf_profiled, PerfConfig, PhysicsTimings,
+    FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_EO_AFTER, FLOW_SUBSTEPS_MIN,
 };
 pub use water_flow::{apply_water_flow, apply_water_flow_regions, wake_confined_head};

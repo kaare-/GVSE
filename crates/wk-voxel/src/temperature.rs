@@ -32,7 +32,9 @@ pub const TEMP_STEP_PHASE: u64 = 0;
 /// Rebuild cached per-tile surface props every N temperature steps.
 /// World scans dominate `step`; stale props for a few steps are fine
 /// (materials change slowly vs the thermal field).
-pub const TEMP_PROPS_REFRESH_STEPS: u32 = 4;
+/// Was 4; 8 halves props world scans with little thermal lag (materials
+/// change slowly vs the field). Super-Server temp ~17 ms/call.
+pub const TEMP_PROPS_REFRESH_STEPS: u32 = 8;
 
 pub fn temperature_step_due(tick: u64) -> bool {
     tick % TEMP_STEP_PERIOD == TEMP_STEP_PHASE
@@ -431,14 +433,40 @@ fn tile_thermal_props(
             albedo: air.albedo,
         };
     };
-    let (y_lo, y_hi) = match temp.bounds {
+    // Rock estimate at tile centre. Anchor the cheap band to both rock
+    // and sea level so painted lakes/snow at sea still sit in-scan when
+    // continental_surface_y differs (unit fixtures + flat shelves).
+    let gx_mid = world.wrap_x(hx * tc + tc / 2);
+    let rock_mid =
+        continental_surface_y(temp.seed, gx_mid, temp.sea_level_y, temp.width_cols);
+    let anchor_lo = rock_mid.min(temp.sea_level_y);
+    let anchor_hi = rock_mid.max(temp.sea_level_y);
+    // Margin covers tall packs / carved relief above the free surface.
+    const AIR_MARGIN: i32 = 24;
+    const BURIED_MARGIN: i32 = 8;
+    if tile_mid_y > anchor_hi + AIR_MARGIN {
+        return TileThermal {
+            layer: TileLayer::Air,
+            capacity: air.heat_capacity,
+            albedo: air.albedo,
+        };
+    }
+    if tile_mid_y + tc < anchor_lo - BURIED_MARGIN {
+        let bedrock = MaterialRegistry::props(MaterialId::Bedrock);
+        let depth = (rock_mid - tile_mid_y) as f32;
+        return TileThermal {
+            layer: TileLayer::Buried { depth_cells: depth },
+            capacity: bedrock.heat_capacity * 1.25,
+            albedo: 0.0,
+        };
+    }
+    // Surface band only — not full sky↔bedrock (~320 cells/column before).
+    let (bound_lo, bound_hi) = match temp.bounds {
         Some(b) => (b.hy_min * tc - 2, b.hy_max * tc + tc + 2),
-        None => {
-            let gx0 = world.wrap_x(hx * tc);
-            let rock = continental_surface_y(temp.seed, gx0, temp.sea_level_y, temp.width_cols);
-            (rock - 8, rock + 64)
-        }
+        None => (anchor_lo - 8, anchor_hi + 64),
     };
+    let y_lo = (anchor_lo - 8).max(bound_lo);
+    let y_hi = (anchor_hi + 64).min(bound_hi);
     let mut cap_sum = 0.0;
     let mut alb_sum = 0.0;
     let mut surf_sum = 0.0;
@@ -447,8 +475,10 @@ fn tile_thermal_props(
     for lx in 0..tc {
         let gx = world.wrap_x(hx * tc + lx);
         let rock = continental_surface_y(temp.seed, gx, temp.sea_level_y, temp.width_cols);
+        let col_lo = (rock.min(temp.sea_level_y) - 8).max(y_lo);
+        let col_hi = (rock.max(temp.sea_level_y) + 64).min(y_hi);
         let (surf_y, cap, albedo, watery) =
-            column_surface_thermal(world, gx, y_lo, y_hi, rock, &temp.config);
+            column_surface_thermal(world, gx, col_lo, col_hi, rock, &temp.config);
         cap_sum += cap;
         alb_sum += albedo;
         surf_sum += surf_y as f32;

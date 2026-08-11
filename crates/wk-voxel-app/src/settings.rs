@@ -963,30 +963,38 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Performance", |ui| {
                     ui.label(
                         None,
-                        "Defaults = full water feel. Toggle to A/B cost vs cascade/leveling.",
+                        "Defaults favour FPS (every-other + quiet EO → max 6 substeps; rayon off).",
+                    );
+                    ui.label(
+                        None,
+                        "Uncheck both flow knobs for full ×12 feel. Parallel helps only on fat dirty plans.",
                     );
                     ui.checkbox(
                         hash!(),
-                        "Flow every other substep (gravity still ×12)",
+                        "Flow every other substep (gravity still every step)",
                         &mut self.perf.flow_every_other_substep,
                     );
                     ui.label(
                         None,
-                        "  Off = tuned feel. On ≈ half surface-flow work — watch shores.",
+                        "  On ≈ half surface-flow work. Odd-step gravity keeps the dirty halo narrow.",
                     );
                     ui.checkbox(
                         hash!(),
-                        "Quiet flow early-out (tiny dirty halo)",
+                        "Quiet flow early-out (tiny / shrinking dirty halo)",
                         &mut self.perf.flow_quiet_early_out,
                     );
                     ui.label(
                         None,
-                        "  Can stall hill drains / shelf cascades — compare carefully.",
+                        "  On skips polishing substeps. Off if hill drains look stalled.",
                     );
                     ui.checkbox(
                         hash!(),
                         "Parallel physics (rayon checkerboard)",
                         &mut self.perf.parallel_physics,
+                    );
+                    ui.label(
+                        None,
+                        "  Off by default — demo ~6 dirty regions; rayon was slower on 32 cores.",
                     );
                 });
                 ui.separator();

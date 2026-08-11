@@ -48,7 +48,9 @@ pub use cell::{
     falls_through_empty_air, grain_max_stable_step, hosts_mycelium, is_flow_erodible, is_grain,
     is_repose_grain, water_capacity, water_capacity_with, Cell, CellFlags, Sat,
 };
-pub use chunk::{Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
+pub use chunk::{
+    material_is_loose, Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W,
+};
 pub use blueprint::{
     ensure_symbiont_inherited, mutate_body, Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR,
     BODY_MUTATION_MAX_EDITS,
@@ -152,15 +154,20 @@ pub use rules::{
     apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
     collect_floating_organic_columns, drift_floating_organic, drift_floating_organic_cfg,
     drift_floating_organic_columns, drift_floating_organic_columns_cfg,
-    is_standing_water, punch_through_floating_rafts, rise_and_soak_buoyant_litter,
-    rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter, settle_loose_grains,
-    settle_loose_grains_regions, soak_floating_litter, soak_floating_litter_cfg,
-    tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life, tick_with_perf,
-    wake_confined_head, wake_grains_for_settle, wake_unsupported_grains, wake_unstable_slopes,
+    active_has_unsupported_grain, is_standing_water, punch_through_floating_rafts,
+    rise_and_soak_buoyant_litter, rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter,
+    settle_loose_grains, settle_loose_grains_regions, soak_floating_litter,
+    soak_floating_litter_cfg,
+    tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life,
+    tick_with_life_profiled, tick_with_perf, tick_with_perf_profiled,
+    wake_confined_head, wake_grains_for_settle, wake_grains_for_settle_coords, GrainWake,
+    wake_unsupported_grains, wake_unstable_slopes,
     CondensationConfig, EvapConfig, GrainConfig,
     KarstConfig,
-    OrographicConfig, PerfConfig, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN,
-    GRAIN_REPOSE_HAZE_MAX, GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES, MYCELIUM_EROSION_BIND,
+    OrographicConfig, PerfConfig, PhysicsTimings, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS,
+    FLOW_SUBSTEPS_EO_AFTER, FLOW_SUBSTEPS_MIN,
+    GRAIN_REPOSE_HAZE_MAX, GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES,
+    GRAIN_SETTLE_PASSES_SHALLOW, MYCELIUM_EROSION_BIND,
     MYCELIUM_RAFT_BIND_MIN,
     MYCELIUM_REPOSE_STEP_BONUS, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };

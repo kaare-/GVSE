@@ -152,7 +152,10 @@ fn stack_tick(s: &mut Scene) -> (Duration, Duration, Duration) {
         let t = s.world.tick;
         s.temperature.step(Some(&s.world), &s.humidity, t);
     }
-    if s.phase.enabled && s.phase.enable_cold_avalanche {
+    if s.phase.enabled
+        && s.phase.enable_cold_avalanche
+        && s.world.tick % s.phase.period_ticks.max(1) == 0
+    {
         apply_cold_avalanche(&mut s.world, &s.temperature, s.phase.freeze_point_c);
     }
     apply_phase(&mut s.world, &s.temperature, &s.phase);
@@ -213,30 +216,26 @@ fn expert_perf_snapshot() {
         PerfConfig::default(),
     );
     run_variant(
-        "every-other flow closed",
+        "full_feel closed",
+        true,
+        true,
+        PerfConfig::full_feel(),
+    );
+    run_variant(
+        "defaults every-other only",
         true,
         true,
         PerfConfig {
-            flow_every_other_substep: true,
+            flow_quiet_early_out: false,
             ..PerfConfig::default()
         },
     );
     run_variant(
-        "quiet early-out closed",
+        "defaults quiet EO only",
         true,
         true,
         PerfConfig {
-            flow_quiet_early_out: true,
-            ..PerfConfig::default()
-        },
-    );
-    run_variant(
-        "both flow knobs closed",
-        true,
-        true,
-        PerfConfig {
-            flow_every_other_substep: true,
-            flow_quiet_early_out: true,
+            flow_every_other_substep: false,
             ..PerfConfig::default()
         },
     );

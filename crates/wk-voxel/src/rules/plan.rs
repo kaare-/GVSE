@@ -35,3 +35,64 @@ pub(crate) fn regions_all_loaded(world: &World) -> Vec<ActiveChunk> {
         })
         .collect()
 }
+
+/// Loaded chunks with sticky [`crate::chunk::Chunk::has_wet_air`].
+///
+/// Confined-head wake only needs wet Air columns — skipping dry stone /
+/// empty sky cuts the full-grid insurance scan a lot on demos.
+pub(crate) fn regions_wet_loaded(world: &World) -> Vec<ActiveChunk> {
+    let mut coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_wet_air)
+        .map(|(&coord, _)| coord)
+        .collect();
+    // Bootstrap: old saves / stamps that never raised the flag.
+    if coords.is_empty() && !world.chunks.is_empty() {
+        return regions_all_loaded(world);
+    }
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    coords
+        .into_iter()
+        .map(|coord| ActiveChunk {
+            coord,
+            rect: crate::chunk::Rect::full(),
+        })
+        .collect()
+}
+
+/// Loaded chunks with sticky [`crate::chunk::Chunk::has_loose`], plus
+/// Moore neighbours (repose / cold-avalanche write into adjacent Air).
+///
+/// Bootstrap (no flag ever set) falls back to all loaded chunks.
+pub(crate) fn regions_loose_moore(world: &World) -> Vec<ActiveChunk> {
+    use std::collections::HashSet;
+    let mut coords: HashSet<ChunkCoord> = HashSet::new();
+    let mut any = false;
+    for (&coord, c) in &world.chunks {
+        if !c.has_loose {
+            continue;
+        }
+        any = true;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let n = ChunkCoord::new(coord.cx + dx, coord.cy + dy);
+                if world.chunks.contains_key(&n) {
+                    coords.insert(n);
+                }
+            }
+        }
+    }
+    if !any {
+        return regions_all_loaded(world);
+    }
+    let mut coords: Vec<ChunkCoord> = coords.into_iter().collect();
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    coords
+        .into_iter()
+        .map(|coord| ActiveChunk {
+            coord,
+            rect: crate::chunk::Rect::full(),
+        })
+        .collect()
+}

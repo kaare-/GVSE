@@ -228,8 +228,14 @@ pub(crate) fn for_each_region_serial_moore(
     }
 }
 
-/// Parallel spill/seepage scans: each region produces a local result,
-/// then results are concatenated in stable `(cy, cx)` region order.
+/// Parallel spill/seepage/flow scans: each region produces a local
+/// result, then results are concatenated in stable `(cy, cx)` order.
+///
+/// **No intra-chunk tiling.** On a 32-core Super-Server demo
+/// (~6 regions / ~9k dirty cells) 8×8 tiling made parallel ~1.6×
+/// *slower* than serial — too many tiny jobs hammering shared chunk
+/// HashMap reads. Whole-chunk jobs only; turn the Tab toggle off when
+/// the active plan stays this narrow (default is off for that reason).
 pub(crate) fn map_regions_parallel<T, F>(active: &[ActiveChunk], f: F) -> Vec<T>
 where
     T: Send,
