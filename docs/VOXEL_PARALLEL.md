@@ -66,16 +66,14 @@ Low risk: no new write-set proofs.
 **off**. Unit/scenario `tick()` uses [`PerfConfig::full_feel`] (×12,
 no early-out, parallel off).
 
-Super-Server demo **~11.7 ms wall** (~85 FPS; +plants ~12.5). Chunk-local
-gravity cut CA ~6→~1.2 ms. Cold avalanche warm empty-dirty early-out +
-`period_ticks` (stress ~4.4→~0.02). Flow erosion every other tick.
-Stress wall ~13.5 ms. Parallel still slower on narrow dirty — leave off.
+Super-Server demo **~10.8 ms wall** (~93 FPS; +plants ~11.1). Physics
+~5.9 ms. Chunk-local gravity ~1.2; settle ~0.19 (wake cadence); mycelium
+~0.12 (strain ledger); seepage ~1.25; flow ~1.8. Cold avalanche ~0.1
+(warm empty-dirty + `period_ticks`). Stress ~12.1 ms wall, EO at 4
+substeps. Parallel still slower on narrow dirty — leave off.
 
-Follow-up (this branch): FPS early-out after 4 substeps (was swallowed by
-max=6), calm free-surface flow skip, mycelium collect from strain ledger,
-FPS settle on wake cadence only. **Rejected:** solid-centric seepage
-(−x/−y into Air) — Super-Server demo 1.22→1.60 ms (beach solids + edge
-HashMap reads).
+**Rejected:** pair away odd-step gravity; solid-centric seepage
+(1.22→1.60 on rainy beaches).
 
 **Rejected:** pairing away odd-step gravity (fatter dirty halo → net
 regress). Flow / seepage single-pass + chunk-local; open ocean tops
