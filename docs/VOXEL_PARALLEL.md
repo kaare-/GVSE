@@ -61,11 +61,12 @@ Low risk: no new write-set proofs.
 
 ## Phase 1b — Cadence (landed defaults)
 
-`PerfConfig::default`: every-other flow + quiet early-out **on**,
-`parallel_physics` **off**. Unit/scenario `tick()` uses
-[`PerfConfig::full_feel`] (×12, no early-out, parallel off). Next FPS
-work is the post-flow physics tail (grain settle / confined wake /
-failure) — `physics tick` ≫ timed sub-pass sum on the demo.
+`PerfConfig::default`: half-rate **paired** gravity+flow + quiet
+early-out **on** (max 3 pairs), `parallel_physics` **off**. Unit /
+scenario `tick()` uses [`PerfConfig::full_feel`] (×12, no early-out,
+parallel off). In-tick `PhysicsTimings` show demo cost is **water flow
++ gravity** (grain deep-settle / punch ~0 on the rainy shore). Flow /
+seepage scans are single-pass (compute-then-apply; no checkerboard).
 
 ## Phase 2 — Fields outside the CA
 

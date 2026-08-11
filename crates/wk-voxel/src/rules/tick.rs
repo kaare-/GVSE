@@ -101,17 +101,18 @@ pub const FLOW_QUIET_AREA: usize = 512;
 
 /// Live-tunable physics trade-offs (Tab → Performance).
 ///
-/// Defaults favour interactive FPS: every-other surface flow + quiet
-/// early-out, with **rayon off**. Demo dirty plans stay ~6 regions /
-/// ~9k cells — too narrow for rayon to win (32-core Super-Server:
+/// Defaults favour interactive FPS: half-rate paired gravity+flow + quiet
+/// early-out, with **rayon off**. Demo dirty plans stay ~6–12 regions /
+/// ~10–13k cells — too narrow for rayon to win (32-core Super-Server:
 /// parallel ON was ~1.6× slower than OFF). Opt parallel back on in Tab
 /// for wide dirty worlds once the active plan is fat.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerfConfig {
-    /// Run surface water flow only on even substeps (gravity still every
-    /// substep). Default **on** — ~half the surface-flow scan work.
+    /// Pair gravity with surface flow at half rate (each iteration runs
+    /// both). Default **on** — cuts odd-step gravity that used to run
+    /// while flow was skipped. Off restores gravity+flow every substep.
     pub flow_every_other_substep: bool,
-    /// After [`FLOW_SUBSTEPS_MIN`], stop when the dirty halo is tiny or
+    /// After the FPS pair minimum, stop when the dirty halo is tiny or
     /// has shrunk enough. Default **on** for settled films / quiet ponds.
     pub flow_quiet_early_out: bool,
     /// Rayon checkerboard parallelism for gravity / grain / flow scan.
@@ -327,12 +328,18 @@ fn tick_with_life_inner(
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
     let mut start_area: usize = 0;
-    // FPS knobs on → cap at 8 substeps (gravity dominates the mirror at
-    // ~0.6 ms × 12). full_feel keeps the full ×12 path.
-    let max_steps = if perf.flow_every_other_substep && perf.flow_quiet_early_out {
-        FLOW_SUBSTEPS_MIN + 2 // 8
+    // FPS every-other → paired gravity+flow iterations (no empty odd
+    // steps). Cap at 3 pairs when quiet-EO is also on — Super-Server
+    // demo sat at ~7.8/8 wall steps (~4 flow + ~8 gravity); pairing
+    // and the tighter cap cut both hot passes. full_feel keeps ×12.
+    let (max_steps, eo_after) = if perf.flow_every_other_substep {
+        if perf.flow_quiet_early_out {
+            (3, 3)
+        } else {
+            (FLOW_SUBSTEPS / 2, FLOW_SUBSTEPS_MIN / 2)
+        }
     } else {
-        FLOW_SUBSTEPS
+        (FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN)
     };
     for step in 0..max_steps {
         let t0 = profile.then(Instant::now);
@@ -362,24 +369,20 @@ fn tick_with_life_inner(
         if let (true, Some(t0)) = (profile, t0) {
             local.gravity += t0.elapsed();
         }
-        // Every-other flow: gravity still runs every pass; surface
-        // leveling runs on even substeps when opted in. (Must include
-        // step 0 — odd-only skipped flow after clear_all_dirty, then
-        // step 1 saw an empty plan and broke before any leveling.)
-        let run_flow = !perf.flow_every_other_substep || (step % 2 == 0);
-        if run_flow {
-            let t0 = profile.then(Instant::now);
-            apply_water_flow_regions(world, &active);
-            if let (true, Some(t0)) = (profile, t0) {
-                local.water_flow += t0.elapsed();
-            }
+        // Paired path (every-other on): flow every iteration. Full-feel
+        // path: flow every substep too. (Historical odd-only every-other
+        // stalled lakes — see flow_every_other_substep_* test.)
+        let t0 = profile.then(Instant::now);
+        apply_water_flow_regions(world, &active);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.water_flow += t0.elapsed();
         }
         // Quiet early-out: after the minimum passes, peek at dirty
         // written by this substep — a tiny halo means water settled.
         // Absolute threshold catches truly settled worlds; a *shrink*
         // check catches busy shores that started large but have since
         // fallen off (adaptive substeps for the tuned feel path).
-        if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_MIN {
+        if perf.flow_quiet_early_out && step + 1 >= eo_after {
             let next = plan_active(world);
             let next_area = active_cell_area(&next);
             if next.is_empty() || next_area <= FLOW_QUIET_AREA {
@@ -391,9 +394,10 @@ fn tick_with_life_inner(
                 break;
             }
             // Steady busy halo (closed-loop rain): area barely moved —
-            // further substeps are polish. Super-Server demo sat at
-            // ~9k cells for all ×12; this exits after the minimum.
-            if start_area > FLOW_QUIET_AREA && next_area * 10 >= start_area * 9 {
+            // further substeps are polish. Looser than 90% so rainy
+            // shores exit at the FPS pair minimum instead of riding the
+            // cap (Super-Server demo was ~7.8/8 before pairing).
+            if start_area > FLOW_QUIET_AREA && next_area * 5 >= start_area * 4 {
                 break;
             }
         }

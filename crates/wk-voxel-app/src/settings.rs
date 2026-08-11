@@ -963,7 +963,7 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Performance", |ui| {
                     ui.label(
                         None,
-                        "Defaults favour FPS (every-other + quiet EO → max 8 substeps; rayon off).",
+                        "Defaults favour FPS (paired gravity+flow ×3; rayon off).",
                     );
                     ui.label(
                         None,
@@ -971,12 +971,12 @@ impl SimSettings {
                     );
                     ui.checkbox(
                         hash!(),
-                        "Flow every other substep (gravity still ×12)",
+                        "Half-rate paired gravity+flow",
                         &mut self.perf.flow_every_other_substep,
                     );
                     ui.label(
                         None,
-                        "  On ≈ half surface-flow work. Off = tuned full-feel path.",
+                        "  On ≈ 3–6 gravity+flow pairs/tick. Off = gravity+flow every substep.",
                     );
                     ui.checkbox(
                         hash!(),
@@ -985,7 +985,7 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "  On skips polishing substeps. Off if hill drains look stalled.",
+                        "  On + half-rate → max 3 pairs. Off if hill drains look stalled.",
                     );
                     ui.checkbox(
                         hash!(),

@@ -8,7 +8,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 
 use wk_material::MaterialId;
 
-use crate::active::{partition_checkerboard, ActiveChunk};
+use crate::active::ActiveChunk;
 use crate::cell::{water_capacity_with, Cell, Sat};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
@@ -58,14 +58,16 @@ const CONFINED_HEAD_RATE: i32 = 32;
 const CONFINED_HEAD_BFS_LIMIT: usize = 8192;
 
 /// Priority water flow restricted to a pre-planned active set.
+///
+/// Single compute-then-apply scan over the whole active set — checkerboard
+/// is unnecessary for a read-only snapshot (it only sharded rayon work and
+/// cost four sort/setup passes on the narrow demo plan).
 pub fn apply_water_flow_regions(world: &mut World, active: &[ActiveChunk]) {
     if active.is_empty() {
         return;
     }
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
-    for pass in partition_checkerboard(active) {
-        accumulate_water_flow_xfers(world, &pass, &mut xfers);
-    }
+    accumulate_water_flow_xfers(world, active, &mut xfers);
     // Confined upward equalisation after surface flow so cascade / same-Y
     // keep source-budget priority on shared cells.
     accumulate_confined_upward_xfers(world, active, &mut xfers);

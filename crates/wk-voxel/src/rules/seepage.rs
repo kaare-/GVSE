@@ -4,11 +4,11 @@
 //!
 //! Permeability-limited pore soak.
 
-use crate::active::{partition_checkerboard, ActiveChunk};
+use crate::active::ActiveChunk;
 use crate::cell::{water_capacity_with, Cell, Sat};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
-use crate::parallel::{map_regions_parallel};
+use crate::parallel::map_regions_parallel;
 
 use super::head::{is_porous_solid_with, sat_move_to_equalize_heads, seepage_rate_with};
 use super::plan::regions_for_standalone;
@@ -30,16 +30,15 @@ pub fn apply_seepage(world: &mut World) {
 
 /// Seepage restricted to a pre-planned active set.
 ///
-/// Checkerboard scan + single apply (same snapshot rule as spill).
+/// Single compute-then-apply scan (same snapshot rule as spill / flow —
+/// checkerboard is not required for a read-only accumulate).
 pub fn apply_seepage_regions(world: &mut World, active: &[ActiveChunk]) {
     if active.is_empty() {
         return;
     }
     // (from, to, amt) with amt > 0.
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
-    for pass in partition_checkerboard(active) {
-        accumulate_seepage_xfers(world, &pass, &mut xfers);
-    }
+    accumulate_seepage_xfers(world, active, &mut xfers);
 
     // Apply in a stable order. Each transfer re-reads live sat so a
     // source drained by an earlier xfer simply sends less — every
