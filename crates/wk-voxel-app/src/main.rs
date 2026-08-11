@@ -198,6 +198,10 @@ async fn main() {
     // Last unpaused sim stack wall time (ms) — HUD `sim=` vs `fps=`
     // (frame includes draw).
     let mut last_sim_ms = 0.0f32;
+    // 1px/cell terrain atlas — one GPU upload + few textured quads
+    // instead of O(visible cells) draw_rectangle (fullscreen killer).
+    let mut terrain_img: Option<Image> = None;
+    let mut terrain_tex: Option<Texture2D> = None;
 
     loop {
         if should_quit {
@@ -1000,13 +1004,10 @@ async fn main() {
             );
         }
 
-        // Draw the ring once, plus ±1 world-width copies so the seam
-        // never shows a gap while panning. Y range is pre-clamped to
-        // the visible frustum so we don't iterate hidden sky rows.
+        // Terrain atlas: 1 px/cell → Nearest-scaled quad(s). Fullscreen used
+        // to pay O(visible cells) CPU draw calls; cost now tracks cell count
+        // for fill + one upload, not screen resolution.
         let x_copies: &[i32] = if scene.params.wrap_x { &[-1, 0, 1] } else { &[0] };
-        // Solve sy = origin_y - (y - bedrock_floor_y) * cell_px for the
-        // visible strip. draw_rectangle uses (sx, sy - cell_px) as top-
-        // left, so a cell is visible when [sy - cell_px, sy] ⊂ [0, sh].
         let y_max_vis = {
             let y = scene.params.bedrock_floor_y as f32 + (origin_y + cell_px) / cell_px;
             (y.ceil() as i32).min(scene.params.sky_ceiling_y)
@@ -1015,63 +1016,61 @@ async fn main() {
             let y = scene.params.bedrock_floor_y as f32 + (origin_y - sh) / cell_px;
             (y.floor() as i32).max(scene.params.bedrock_floor_y)
         };
-
-        for &x_copy in x_copies {
-            let x_shift = x_copy * scene.params.width_cols;
+        let atlas_h = (y_max_vis - y_min_vis).max(0) as u16;
+        let atlas_w = scene.params.width_cols.max(0) as u16;
+        if atlas_w > 0 && atlas_h > 0 {
+            let need_new = match &terrain_img {
+                Some(img) => img.width != atlas_w || img.height != atlas_h,
+                None => true,
+            };
+            if need_new {
+                let img = Image::gen_image_color(
+                    atlas_w,
+                    atlas_h,
+                    Color::from_rgba(0, 0, 0, 0),
+                );
+                let tex = Texture2D::from_image(&img);
+                tex.set_filter(FilterMode::Nearest);
+                terrain_img = Some(img);
+                terrain_tex = Some(tex);
+            }
+            let img = terrain_img.as_mut().unwrap();
+            // Clear to transparent (sky / layers underneath show through).
+            img.bytes.fill(0);
+            let pixels = img.get_image_data_mut();
+            let w_u = atlas_w as usize;
+            let h_u = atlas_h as usize;
+            // Only paint columns that land on-screen in some wrap copy.
+            let mut col_needed = vec![false; w_u];
+            for &x_copy in x_copies {
+                let x_shift = x_copy * scene.params.width_cols;
+                for x in 0..scene.params.width_cols {
+                    let sx = origin_x + (x + x_shift) as f32 * cell_px;
+                    if sx + cell_px >= 0.0 && sx <= sw {
+                        col_needed[x as usize] = true;
+                    }
+                }
+            }
             for x in 0..scene.params.width_cols {
-                let sx0 = origin_x + (x + x_shift) as f32 * cell_px;
-                if sx0 + cell_px < 0.0 || sx0 > sw {
+                if !col_needed[x as usize] {
                     continue;
                 }
-                // Top → bottom: one celestial probe per exposed crest, then
-                // bleed by depth (was O(cells × climb) and dominated FPS).
-                // Merge vertical runs of the same RGB into one rectangle.
-                let mut run_sy = 0.0f32;
-                let mut run_h = 0.0f32;
-                let mut run_rgb: Option<[u8; 3]> = None;
-                let flush_run = |sy: f32, h: f32, rgb: Option<[u8; 3]>| {
-                    if h <= 0.0 {
-                        return;
-                    }
-                    let Some([r, g, b]) = rgb else {
-                        return;
-                    };
-                    draw_rectangle(
-                        sx0,
-                        sy - h,
-                        cell_px,
-                        h,
-                        Color::from_rgba(r, g, b, 255),
-                    );
-                };
                 let mut stack_exposure = 0.0f32;
-                let mut stack_depth = -1i32; // -1 = no active lit/unlit stack
+                let mut stack_depth = -1i32;
                 let mut stack_water = false;
+                // Top → bottom in world y (high → low); image row 0 is top.
                 for y in (y_min_vis..y_max_vis).rev() {
-                    let sy = origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
-                    if sy + cell_px < 0.0 || sy > sh {
-                        flush_run(run_sy, run_h, run_rgb.take());
-                        run_h = 0.0;
-                        stack_depth = -1;
-                        continue;
-                    }
+                    let img_y = (y_max_vis - 1 - y) as usize;
                     let Some(cell) = scene.world.get_cell(x, y) else {
-                        flush_run(run_sy, run_h, run_rgb.take());
-                        run_h = 0.0;
                         stack_depth = -1;
                         continue;
                     };
-                    // Only draw standing water (pools / ocean film / land
-                    // puddles). Mid-air sat stays invisible — falling rain
-                    // is the cosmetic streak under raining clouds.
                     if cell.material == wk_material::MaterialId::Air {
                         if cell.sat.is_empty()
                             || cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX
                             || (y > scene.params.sea_level_y
                                 && !is_standing_water(&scene.world, x, y))
                         {
-                            flush_run(run_sy, run_h, run_rgb.take());
-                            run_h = 0.0;
                             stack_depth = -1;
                             continue;
                         }
@@ -1105,19 +1104,34 @@ async fn main() {
                         g = lit[1];
                         b = lit[2];
                     }
-                    let rgb = [r, g, b];
-                    // Contiguous below previous cell (top-down): sy grows by cell_px.
-                    if run_rgb == Some(rgb) && (sy - run_sy - cell_px).abs() < 0.01 {
-                        run_sy = sy;
-                        run_h += cell_px;
-                    } else {
-                        flush_run(run_sy, run_h, run_rgb.take());
-                        run_sy = sy;
-                        run_h = cell_px;
-                        run_rgb = Some(rgb);
+                    if img_y < h_u {
+                        pixels[img_y * w_u + x as usize] = [r, g, b, 255];
                     }
                 }
-                flush_run(run_sy, run_h, run_rgb.take());
+            }
+            let tex = terrain_tex.as_ref().unwrap();
+            tex.update(img);
+            let dest_w = atlas_w as f32 * cell_px;
+            let dest_h = atlas_h as f32 * cell_px;
+            // Top of atlas = top of cell (y_max_vis - 1).
+            let atlas_top = origin_y
+                - (y_max_vis - scene.params.bedrock_floor_y) as f32 * cell_px;
+            for &x_copy in x_copies {
+                let x_shift = x_copy * scene.params.width_cols;
+                let dx = origin_x + x_shift as f32 * cell_px;
+                if dx + dest_w < 0.0 || dx > sw {
+                    continue;
+                }
+                draw_texture_ex(
+                    tex,
+                    dx,
+                    atlas_top,
+                    WHITE,
+                    DrawTextureParams {
+                        dest_size: Some(vec2(dest_w, dest_h)),
+                        ..Default::default()
+                    },
+                );
             }
         }
 
