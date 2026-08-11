@@ -15,7 +15,7 @@ use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
 use super::head::{
-    hydraulic_head, is_porous_solid_with, plan_same_y_pairwise_edge_in, same_y_cascade_pull,
+    hydraulic_head, is_porous_solid_with, plan_same_y_pairwise_edge_in, same_y_cascade_pull_in,
     seepage_rate_with,
 };
 use super::plan::{regions_for_standalone, regions_wet_loaded};
@@ -69,7 +69,8 @@ pub fn apply_water_flow_regions(world: &mut World, active: &[ActiveChunk]) {
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_water_flow_xfers(world, active, &mut xfers);
     // Confined upward equalisation after surface flow so cascade / same-Y
-    // keep source-budget priority on shared cells.
+    // keep source-budget priority on shared cells. Open ocean/lake tops
+    // skip the confined BFS (see [`accumulate_confined_upward_xfers`]).
     accumulate_confined_upward_xfers(world, active, &mut xfers);
     commit_air_sat_xfers(world, &mut xfers);
 }
@@ -179,6 +180,18 @@ fn is_walled_column(world: &World, gx: i32, gy: i32) -> bool {
         Some(c) => c.material != MaterialId::Air,
     };
     wall(gx - 1) && wall(gx + 1)
+}
+
+/// True when both horizontal neighbours are Air (open lake / ocean top).
+/// 1-wide and 2-wide shafts have at least one solid side and return false.
+fn open_air_both_sides(world: &World, gx: i32, gy: i32) -> bool {
+    let air = |x: i32| {
+        matches!(
+            world.get_cell(world.wrap_x(x), gy),
+            Some(c) if c.material == MaterialId::Air
+        )
+    };
+    air(gx - 1) && air(gx + 1)
 }
 
 /// Whether a rising cell may pull from a connected free-surface donor.
@@ -391,6 +404,14 @@ fn accumulate_confined_upward_xfers(
                 if below.material != MaterialId::Air || !below.sat.is_full() {
                     continue;
                 }
+                // Open ocean/lake tops: both lateral neighbours are Air and
+                // the cell is already a free surface. Confined same-Y is a
+                // no-op (`allows_confined_rise`), but `pressure_body_from_full`
+                // still BFS-climbs the body — dominant cost on rainy shores.
+                // Keep shafts (any solid side) and buried/lid cells.
+                if is_air_free_surface(world, gx, gy) && open_air_both_sides(world, gx, gy) {
+                    continue;
+                }
                 let Some(body) =
                     pressure_body_from_full(world, gx, gy - 1, &mut cache)
                 else {
@@ -571,17 +592,27 @@ fn accumulate_water_flow_xfers(
                     // --- Priority 3a: same-Y cascade pull ---
                     // If a cascade outlet sits further along the surface
                     // band, push toward it so lake terraces fall into the
-                    // lower reach.
+                    // lower reach. Chunk-local look-ahead (same cache as
+                    // pairwise equalise) — up to SAME_Y_SURFACE_SCAN
+                    // world.get_cell calls was hot on shore bands.
                     for dx in dirs {
                         if remaining == 0 {
                             break;
                         }
-                        let Some(want) =
-                            same_y_cascade_pull(world, gx, gy, dx, cur.sat.0) else {
+                        let Some(want) = same_y_cascade_pull_in(
+                            world,
+                            Some((chunk, base_gx, base_gy)),
+                            gx,
+                            gy,
+                            lx,
+                            ly,
+                            dx,
+                            cur.sat.0,
+                        ) else {
                             continue;
                         };
                         let tx = world.wrap_x(gx + dx);
-                        let Some(side) = world.get_cell(tx, gy) else {
+                        let Some(side) = read(lx + dx, ly, tx, gy) else {
                             continue;
                         };
                         if side.material != MaterialId::Air {

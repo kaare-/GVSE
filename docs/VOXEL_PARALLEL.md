@@ -70,7 +70,8 @@ is **water flow + gravity** (grain deep-settle / punch ~0).
 **Rejected:** pairing away odd-step gravity (fewer flow passes but
 fatter dirty halo → each flow call ~2× slower; net regress on
 Super-Server). Flow / seepage scans stay single-pass
-(compute-then-apply; checkerboard not required).
+(compute-then-apply; checkerboard not required). Open ocean/lake tops
+skip the confined BFS; cascade look-ahead is chunk-local.
 
 ## Phase 2 — Fields outside the CA
 
