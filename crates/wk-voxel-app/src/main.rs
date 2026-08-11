@@ -19,7 +19,7 @@
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
 //! - `O` — toggle Set A organisms (Atom step)
-//! - `H` — toggle humidity tile diagnostic + wind streaks (default on)
+//! - `H` — toggle humidity tile diagnostic + wind streaks (default off)
 //! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
 //! - `T` — toggle temperature heatmap overlay
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
@@ -64,10 +64,10 @@ use wk_voxel::{
 };
 
 use crate::atmosphere::{
-    apply_celestial_key_rgb, apply_organism_celestial_key_rgb, draw_canopy_air_dim,
-    draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, CloudDepthLayer,
-    draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_organism_aboveground,
-    organism_celestial_rim, sky_weather_for_scene, terrain_celestial_key_strength,
+    apply_celestial_key_rgb, apply_organism_celestial_key_rgb, celestial_exposure,
+    draw_canopy_air_dim, draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind,
+    CloudDepthLayer, draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_exposed_surface_top,
+    is_organism_aboveground, organism_celestial_rim, sky_weather_for_scene, terrain_key_falloff,
     toward_light_celestial, RidgeSilhouette,
 };
 use crate::creature_list::CreatureList;
@@ -178,8 +178,9 @@ async fn main() {
     let mut evap_on = true;
     let mut karst_on = true;
     let mut organisms_on = true;
-    // Humidity diagnostic default on (`H`); soft clouds default on (`N`).
-    let mut humidity_overlay = true;
+    // Humidity diagnostic default off (`H`) — tile haze was a big draw
+    // cost on top of per-cell terrain. Soft clouds default on (`N`).
+    let mut humidity_overlay = false;
     let mut clouds_on = true;
     let mut temp_overlay = false;
     let mut mycelium_overlay = false;
@@ -194,6 +195,9 @@ async fn main() {
     let mut cam_y = 0.0f32;
     let mut should_quit = false;
     let mut ridges = RidgeSilhouette::default();
+    // Last unpaused sim stack wall time (ms) — HUD `sim=` vs `fps=`
+    // (frame includes draw).
+    let mut last_sim_ms = 0.0f32;
 
     loop {
         if should_quit {
@@ -471,6 +475,7 @@ async fn main() {
             || terrain.open
             || quit_dialog.open;
         if !sim_paused {
+            let sim_t0 = std::time::Instant::now();
             // Frame-shell scans touch many loaded chunks — always worth
             // rayon. CA physics stays on the Tab toggle (demo dirty plans
             // are too narrow for parallel to win).
@@ -624,6 +629,7 @@ async fn main() {
                 );
                 spore_fx.burst_all(&outcome.spores, wind_vx);
             }
+            last_sim_ms = sim_t0.elapsed().as_secs_f32() * 1000.0;
         }
 
         // Spore puffs keep drifting while paused so the wind trail stays readable.
@@ -1013,62 +1019,105 @@ async fn main() {
         for &x_copy in x_copies {
             let x_shift = x_copy * scene.params.width_cols;
             for x in 0..scene.params.width_cols {
-                let sx = origin_x + (x + x_shift) as f32 * cell_px;
-                if sx + cell_px < 0.0 || sx > sw {
+                let sx0 = origin_x + (x + x_shift) as f32 * cell_px;
+                if sx0 + cell_px < 0.0 || sx0 > sw {
                     continue;
                 }
-                for y in y_min_vis..y_max_vis {
+                // Top → bottom: one celestial probe per exposed crest, then
+                // bleed by depth (was O(cells × climb) and dominated FPS).
+                // Merge vertical runs of the same RGB into one rectangle.
+                let mut run_sy = 0.0f32;
+                let mut run_h = 0.0f32;
+                let mut run_rgb: Option<[u8; 3]> = None;
+                let flush_run = |sy: f32, h: f32, rgb: Option<[u8; 3]>| {
+                    if h <= 0.0 {
+                        return;
+                    }
+                    let Some([r, g, b]) = rgb else {
+                        return;
+                    };
+                    draw_rectangle(
+                        sx0,
+                        sy - h,
+                        cell_px,
+                        h,
+                        Color::from_rgba(r, g, b, 255),
+                    );
+                };
+                let mut stack_exposure = 0.0f32;
+                let mut stack_depth = -1i32; // -1 = no active lit/unlit stack
+                let mut stack_water = false;
+                for y in (y_min_vis..y_max_vis).rev() {
                     let sy = origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
-                    // Guard for the rounding slop on the frustum bounds.
                     if sy + cell_px < 0.0 || sy > sh {
+                        flush_run(run_sy, run_h, run_rgb.take());
+                        run_h = 0.0;
+                        stack_depth = -1;
                         continue;
                     }
                     let Some(cell) = scene.world.get_cell(x, y) else {
+                        flush_run(run_sy, run_h, run_rgb.take());
+                        run_h = 0.0;
+                        stack_depth = -1;
                         continue;
                     };
                     // Only draw standing water (pools / ocean film / land
                     // puddles). Mid-air sat stays invisible — falling rain
                     // is the cosmetic streak under raining clouds.
-                    // Thin wet-air films (condensation residual / haze sat)
-                    // must not paint as a bright blue-white ground outline.
                     if cell.material == wk_material::MaterialId::Air {
-                        if cell.sat.is_empty() {
+                        if cell.sat.is_empty()
+                            || cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX
+                            || (y > scene.params.sea_level_y
+                                && !is_standing_water(&scene.world, x, y))
+                        {
+                            flush_run(run_sy, run_h, run_rgb.take());
+                            run_h = 0.0;
+                            stack_depth = -1;
                             continue;
                         }
-                        // Match grain haze band: ≤32 is atmospheric film, not puddle.
-                        if cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX {
-                            continue;
+                    }
+                    let waterish = cell.material == wk_material::MaterialId::Water
+                        || (cell.material == wk_material::MaterialId::Air
+                            && is_standing_water(&scene.world, x, y));
+                    if stack_depth < 0 {
+                        if is_exposed_surface_top(&scene.world, x, y) {
+                            stack_exposure =
+                                celestial_exposure(&scene.world, x, y, sun_local);
+                            stack_water = waterish;
+                            stack_depth = 0;
+                        } else {
+                            stack_exposure = 0.0;
+                            stack_water = waterish;
+                            stack_depth = 0;
                         }
-                        let below_sea = y <= scene.params.sea_level_y;
-                        if !below_sea && !is_standing_water(&scene.world, x, y) {
-                            continue;
-                        }
+                    } else {
+                        stack_depth += 1;
+                        stack_water = stack_water || waterish;
                     }
                     let [r0, g0, b0] = cell_color(cell);
                     let [mut r, mut g, mut b] =
                         apply_weather_rgb([r0, g0, b0], dn_fg, &sky_weather);
-                    // Crest key + soft bleed into subsurface / water.
-                    let key = terrain_celestial_key_strength(
-                        &scene.world,
-                        x,
-                        y,
-                        sun_local,
-                        sun_day,
-                    );
+                    let falloff = terrain_key_falloff(stack_depth, stack_water, sun_day);
+                    let key = stack_exposure * falloff;
                     if key > 0.03 {
                         let lit = apply_celestial_key_rgb([r, g, b], key, sun_local, sun_day);
                         r = lit[0];
                         g = lit[1];
                         b = lit[2];
                     }
-                    draw_rectangle(
-                        sx,
-                        sy - cell_px,
-                        cell_px,
-                        cell_px,
-                        Color::from_rgba(r, g, b, 255),
-                    );
+                    let rgb = [r, g, b];
+                    // Contiguous below previous cell (top-down): sy grows by cell_px.
+                    if run_rgb == Some(rgb) && (sy - run_sy - cell_px).abs() < 0.01 {
+                        run_sy = sy;
+                        run_h += cell_px;
+                    } else {
+                        flush_run(run_sy, run_h, run_rgb.take());
+                        run_sy = sy;
+                        run_h = cell_px;
+                        run_rgb = Some(rgb);
+                    }
                 }
+                flush_run(run_sy, run_h, run_rgb.take());
             }
         }
 
@@ -1449,8 +1498,9 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0} sim={:.1}ms  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
+                last_sim_ms,
                 scene.world.tick,
                 tod,
                 scene.temperature.mean(),

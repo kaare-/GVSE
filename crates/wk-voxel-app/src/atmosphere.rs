@@ -1244,8 +1244,52 @@ fn is_waterish(world: &World, x: i32, y: i32) -> bool {
     cell.material == MaterialId::Water || is_standing_water(world, x, y)
 }
 
+/// Soft key falloff by depth below an exposed crest (water bleeds deeper).
+pub fn terrain_key_falloff(depth: i32, water: bool, is_day: bool) -> f32 {
+    let max_bleed = if water {
+        if is_day {
+            2
+        } else {
+            3
+        }
+    } else if is_day {
+        1
+    } else {
+        2
+    };
+    if depth < 0 || depth > max_bleed {
+        return 0.0;
+    }
+    if water {
+        match depth {
+            0 => 1.0,
+            1 => 0.55,
+            2 => 0.30,
+            3 => 0.14,
+            _ => 0.0,
+        }
+    } else {
+        match depth {
+            0 => 1.0,
+            1 => {
+                if is_day {
+                    0.32
+                } else {
+                    0.48
+                }
+            }
+            2 => 0.20,
+            _ => 0.0,
+        }
+    }
+}
+
 /// Key strength for terrain/water: full on the lit crest, soft bleed a few
 /// cells into the layer beneath (deeper into water than rock).
+///
+/// Prefer column-top-down lighting in the app draw loop (one exposure
+/// probe per crest). Climbing variant kept for tooling / overlays.
+#[allow(dead_code)]
 pub fn terrain_celestial_key_strength(
     world: &World,
     x: i32,
@@ -1270,42 +1314,10 @@ pub fn terrain_celestial_key_strength(
     }
     let depth = top - y;
     let water = is_waterish(world, x, top) || is_waterish(world, x, y);
-    let max_bleed = if water {
-        if is_day {
-            2
-        } else {
-            3
-        }
-    } else if is_day {
-        1
-    } else {
-        2
-    };
-    if depth < 0 || depth > max_bleed {
+    let falloff = terrain_key_falloff(depth, water, is_day);
+    if falloff <= 0.0 {
         return 0.0;
     }
-    let falloff = if water {
-        match depth {
-            0 => 1.0,
-            1 => 0.55,
-            2 => 0.30,
-            3 => 0.14,
-            _ => 0.0,
-        }
-    } else {
-        match depth {
-            0 => 1.0,
-            1 => {
-                if is_day {
-                    0.32
-                } else {
-                    0.48
-                }
-            }
-            2 => 0.20,
-            _ => 0.0,
-        }
-    };
     celestial_exposure(world, x, top, celestial_local) * falloff
 }
 
