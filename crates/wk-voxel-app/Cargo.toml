@@ -15,6 +15,7 @@ license.workspace = true
 wk-voxel = { path = "../wk-voxel" }
 wk-material = { path = "../wk-material" }
 macroquad = { workspace = true }
+rayon = { workspace = true }
 
 [[bin]]
 name = "wk-voxel-app"

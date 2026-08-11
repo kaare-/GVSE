@@ -2,18 +2,66 @@
 //!
 //! Design: `docs/SKY.md`. Isolation: wk-voxel + wk-material + macroquad only.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 
 use macroquad::prelude::*;
 use wk_material::MaterialId;
 use wk_voxel::{
     build_canopy_index_posed, carbon_ratio, celestial_moon_screen_pos_cfg,
-    celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, day_night_factor_cfg,
-    humidity_mean_norm, is_standing_water, precip_cover_fraction, resolve_organism_draw_cells,
-    shade_transmit_column, sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig,
-    CloudStore, Humidity, ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature,
-    Wind, World,
+    celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
+    day_night_factor_cfg, humidity_mean_norm, is_standing_water, precip_cover_fraction,
+    resolve_organism_draw_cells, shade_transmit_column, sky_rgb_at_height_weather, CanopyIndex,
+    CarbonBudget, ChunkCoord, ClimateConfig, CloudStore, Humidity, ModuleId, OrganismStore,
+    PosedModule, SkyWeatherParams, Temperature, Wind, World, CHUNK_CELLS_H, CHUNK_CELLS_W,
 };
+
+/// Reusable 1 px/cell atlas — fill on CPU, one Nearest upload + draw.
+struct PixelAtlas {
+    img: Image,
+    tex: Texture2D,
+}
+
+impl PixelAtlas {
+    fn new(w: u16, h: u16) -> Self {
+        let img = Image::gen_image_color(w.max(1), h.max(1), Color::from_rgba(0, 0, 0, 0));
+        let tex = Texture2D::from_image(&img);
+        tex.set_filter(FilterMode::Nearest);
+        Self { img, tex }
+    }
+
+    fn ensure(&mut self, w: u16, h: u16) {
+        let w = w.max(1);
+        let h = h.max(1);
+        if self.img.width != w || self.img.height != h {
+            *self = Self::new(w, h);
+        }
+    }
+
+    fn clear(&mut self) {
+        self.img.bytes.fill(0);
+    }
+
+    fn draw_scaled(&mut self, dx: f32, dy: f32, dest_w: f32, dest_h: f32) {
+        self.tex.update(&self.img);
+        draw_texture_ex(
+            &self.tex,
+            dx,
+            dy,
+            WHITE,
+            DrawTextureParams {
+                dest_size: Some(vec2(dest_w, dest_h)),
+                ..Default::default()
+            },
+        );
+    }
+}
+
+thread_local! {
+    static SKY_ATLAS: RefCell<Option<PixelAtlas>> = const { RefCell::new(None) };
+    static RIDGE_ATLAS: RefCell<Option<PixelAtlas>> = const { RefCell::new(None) };
+    static CLOUD_ATLAS: RefCell<Option<PixelAtlas>> = const { RefCell::new(None) };
+}
 
 /// Active-layer parcel parallax (1 = locked to terrain; lower = farther).
 pub const CLOUD_PARALLAX: f32 = 0.78;
@@ -144,6 +192,7 @@ impl RidgeSilhouette {
             raw.push(column_surface_y(
                 world,
                 x,
+                width_cols,
                 bedrock_floor_y,
                 sky_ceiling_y,
                 sea_level_y,
@@ -160,13 +209,33 @@ impl RidgeSilhouette {
 fn column_surface_y(
     world: &World,
     gx: i32,
+    width_cols: i32,
     bedrock: i32,
     sky_ceiling: i32,
     sea_level: i32,
 ) -> i32 {
-    let mut y = sky_ceiling - 1;
-    while y >= bedrock {
-        if let Some(c) = world.get_cell(gx, y) {
+    // Hint near the worldgen crest — never walk the whole sky column.
+    let width = width_cols.max(1);
+    let hint = continental_surface_y(world.seed.0, gx, sea_level, width)
+        .max(sea_level)
+        .clamp(bedrock, sky_ceiling.saturating_sub(1));
+    let ch = CHUNK_CELLS_H as i32;
+    let cw = CHUNK_CELLS_W as i32;
+    let cx = gx.div_euclid(cw);
+    let lx = gx.rem_euclid(cw) as usize;
+    // Scan upward a short band for towers / water, then down to bedrock.
+    let y_up = (hint + 48).min(sky_ceiling - 1);
+    let cy_hi = y_up.div_euclid(ch);
+    let cy_lo = bedrock.div_euclid(ch);
+    for cy in (cy_lo..=cy_hi).rev() {
+        let Some(chunk) = world.chunks.get(&ChunkCoord::new(cx, cy)) else {
+            continue;
+        };
+        let chunk_y0 = cy * ch;
+        let y_hi = (chunk_y0 + ch).min(y_up + 1);
+        let y_lo = chunk_y0.max(bedrock);
+        for y in (y_lo..y_hi).rev() {
+            let c = chunk.get(lx, (y - chunk_y0) as usize);
             if c.material != MaterialId::Air {
                 return y;
             }
@@ -174,9 +243,8 @@ fn column_surface_y(
                 return y;
             }
         }
-        y -= 1;
     }
-    sea_level.max(bedrock)
+    hint.max(bedrock)
 }
 
 fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
@@ -280,48 +348,80 @@ fn paint_soft_cloud_mask(
     alpha_scale: f32,
 ) {
     let alpha_scale = alpha_scale.clamp(0.0, 1.0);
-    if alpha_scale < 0.02 || mask.is_empty() {
+    if alpha_scale < 0.02 || mask.is_empty() || cell_px <= 0.0 {
         return;
     }
     let white = look.cloud_whiteness.clamp(0.0, 1.0);
-    for (&(ix, iy), &wet) in mask {
-        let mut n = 0u8;
-        for (dx, dy) in [
-            (-1, 0),
-            (1, 0),
-            (0, -1),
-            (0, 1),
-            (-1, -1),
-            (1, -1),
-            (-1, 1),
-            (1, 1),
-        ] {
-            if mask.contains_key(&(ix + dx, iy + dy)) {
-                n += 1;
+    let mut min_x = i32::MAX;
+    let mut max_x = i32::MIN;
+    let mut min_y = i32::MAX;
+    let mut max_y = i32::MIN;
+    for &(ix, iy) in mask.keys() {
+        min_x = min_x.min(ix);
+        max_x = max_x.max(ix);
+        min_y = min_y.min(iy);
+        max_y = max_y.max(iy);
+    }
+    let atlas_w = (max_x - min_x + 1).max(1) as u16;
+    let atlas_h = (max_y - min_y + 1).max(1) as u16;
+    // Cap runaway masks (shouldn't happen for on-screen stamps).
+    if atlas_w as i32 > 4096 || atlas_h as i32 > 4096 {
+        return;
+    }
+    CLOUD_ATLAS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(PixelAtlas::new(atlas_w, atlas_h));
+        }
+        let atlas = slot.as_mut().unwrap();
+        atlas.ensure(atlas_w, atlas_h);
+        atlas.clear();
+        let w_u = atlas_w as usize;
+        let h_u = atlas_h as usize;
+        let pixels = atlas.img.get_image_data_mut();
+        for (&(ix, iy), &wet) in mask {
+            let mut n = 0u8;
+            for (dx, dy) in [
+                (-1, 0),
+                (1, 0),
+                (0, -1),
+                (0, 1),
+                (-1, -1),
+                (1, -1),
+                (-1, 1),
+                (1, 1),
+            ] {
+                if mask.contains_key(&(ix + dx, iy + dy)) {
+                    n += 1;
+                }
+            }
+            let edge = (n as f32 / 8.0).clamp(0.0, 1.0);
+            let base = 165.0 + white * 70.0;
+            let shade = (base - wet * (28.0 + white * 12.0)) as u8;
+            let alpha =
+                ((120.0 + wet * 70.0) * (0.22 + 0.78 * edge) * alpha_scale).min(210.0) as u8;
+            if alpha < 10 {
+                continue;
+            }
+            let lift = (4.0 + white * 10.0) as u8;
+            let px = (ix - min_x) as usize;
+            let py = (iy - min_y) as usize;
+            if px < w_u && py < h_u {
+                pixels[py * w_u + px] = [
+                    shade.saturating_add(lift),
+                    shade.saturating_add(lift.saturating_add(2)),
+                    shade.saturating_add(lift.saturating_add(4)),
+                    alpha,
+                ];
             }
         }
-        let edge = (n as f32 / 8.0).clamp(0.0, 1.0);
-        let base = 165.0 + white * 70.0;
-        let shade = (base - wet * (28.0 + white * 12.0)) as u8;
-        let alpha =
-            ((120.0 + wet * 70.0) * (0.22 + 0.78 * edge) * alpha_scale).min(210.0) as u8;
-        if alpha < 10 {
-            continue;
-        }
-        let lift = (4.0 + white * 10.0) as u8;
-        draw_rectangle(
-            ix as f32 * cell_px,
-            iy as f32 * cell_px,
-            cell_px,
-            cell_px,
-            Color::from_rgba(
-                shade.saturating_add(lift),
-                shade.saturating_add(lift.saturating_add(2)),
-                shade.saturating_add(lift.saturating_add(4)),
-                alpha,
-            ),
+        atlas.draw_scaled(
+            min_x as f32 * cell_px,
+            min_y as f32 * cell_px,
+            atlas_w as f32 * cell_px,
+            atlas_h as f32 * cell_px,
         );
-    }
+    });
 }
 
 /// Soft lobe cloud banks for one depth layer (never paints the humidity tile raster).
@@ -484,11 +584,13 @@ fn sample_sky_weather(
     let precip_cover = precip_cover_fraction(clouds, 0, width_cols, wrap, downpour_mass);
     let sky_hy_min = (sea_level_y + 4).div_euclid(humidity.tile_cols.max(1));
     let humidity_mean = humidity_mean_norm(humidity, sky_hy_min);
+    // Stride sky-band temp samples — full tile walk is O(width×sky) at max size.
     let mut t_sum = 0.0f32;
     let mut t_n = 0u32;
     let hy_min = sky_hy_min;
-    for (&(_hx, hy), &temp_c) in &temperature.cells {
-        if hy < hy_min {
+    let stride = (temperature.cells.len() / 64).max(1);
+    for (i, (&(_hx, hy), &temp_c)) in temperature.cells.iter().enumerate() {
+        if i % stride != 0 || hy < hy_min {
             continue;
         }
         t_sum += temp_c;
@@ -518,14 +620,23 @@ pub fn draw_sky(
     _look: &AtmosphereLookConfig,
 ) {
     let dn = day_night_factor_cfg(tick, climate);
-    const BANDS: i32 = 36;
-    for i in 0..BANDS {
-        let y0 = sh * (i as f32) / BANDS as f32;
-        let h = y0 + sh / BANDS as f32;
-        let height_01 = (i as f32 + 0.5) / BANDS as f32;
-        let [r, g, b] = sky_rgb_at_height_weather(dn, height_01, weather);
-        draw_rectangle(0.0, y0, sw, h - y0 + 1.0, Color::from_rgba(r, g, b, 255));
-    }
+    const BANDS: u16 = 36;
+    // 1×N gradient stretched once — avoids O(bands) fullscreen rects.
+    SKY_ATLAS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(PixelAtlas::new(1, BANDS));
+        }
+        let atlas = slot.as_mut().unwrap();
+        atlas.ensure(1, BANDS);
+        let pixels = atlas.img.get_image_data_mut();
+        for i in 0..BANDS {
+            let height_01 = (i as f32 + 0.5) / BANDS as f32;
+            let [r, g, b] = sky_rgb_at_height_weather(dn, height_01, weather);
+            pixels[i as usize] = [r, g, b, 255];
+        }
+        atlas.draw_scaled(0.0, 0.0, sw, sh);
+    });
 
     // Soft vapour veil — humidity-led mood wash (kept light to avoid blue cast).
     let veil = (weather.humidity_mean * 0.45 + weather.precip_cover * 0.18).clamp(0.0, 0.50);
@@ -872,46 +983,72 @@ fn draw_ridge_band(
     // Lag opposite camera so distant layers move slower in X and Y.
     let lag_x = cam_x * (1.0 - parallax);
     let lag_y = cam_y * (1.0 - parallax);
-    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-    let _ = sea_level_y;
+    let _ = (sea_level_y, wrap_x, width_cols);
     let n = profile.len() as i32;
-    if n <= 0 {
+    if n <= 0 || cell_px <= 0.0 {
         return;
     }
     let feather = feather_cells.max(2);
     let feather_px = feather as f32 * cell_px;
     let crest_w = crest_blend.clamp(0.0, 1.0);
     let far_w = far_into_crest.clamp(0.0, 1.0);
+    let fr = (fill.r * 255.0) as u8;
+    let fg = (fill.g * 255.0) as u8;
+    let fb = (fill.b * 255.0) as u8;
 
-    for &x_copy in x_copies {
-        for (i, &surf_y) in profile.iter().enumerate() {
-            let x = i as i32 + x_copy * width_cols;
-            let sx = origin_x + x as f32 * cell_px + lag_x;
-            if sx + cell_px < 0.0 || sx > sw {
-                continue;
-            }
-            // Neighbour blend softens the jagged crest line.
-            let i0 = i as i32;
+    // Viewport unwrapped columns only — world width must not size the atlas.
+    let x0_vis = ((0.0 - origin_x - lag_x) / cell_px).floor() as i32;
+    let x1_vis = ((sw - origin_x - lag_x) / cell_px).ceil() as i32 + 1;
+    if x1_vis <= x0_vis {
+        return;
+    }
+
+    // Screen-visible visual-y band (cell top at origin_y - (y-bedrock)*cell_px + lag_y).
+    let y_lo = bedrock_floor_y + ((origin_y + lag_y - sh) / cell_px).floor() as i32 - 1;
+    let y_hi = bedrock_floor_y + ((origin_y + lag_y) / cell_px).ceil() as i32 + feather + 1;
+
+    let mut y_max = y_lo + 1;
+    let mut y_min = y_hi;
+    for x_unwrapped in x0_vis..x1_vis {
+        let i0 = x_unwrapped.rem_euclid(n);
+        let surf_y = profile[i0 as usize];
+        let yl = profile[((i0 - 1).rem_euclid(n)) as usize];
+        let yr = profile[((i0 + 1).rem_euclid(n)) as usize];
+        let surf_soft = ((surf_y as i64 + yl as i64 + yr as i64) / 3) as i32;
+        let y_vis = bedrock_floor_y
+            + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
+        y_max = y_max.max(y_vis + 1);
+        y_min = y_min.min(y_vis - feather);
+    }
+    y_min = y_min.max(y_lo).max(bedrock_floor_y);
+    y_max = y_max.min(y_hi).max(y_min + 1);
+
+    let atlas_w = (x1_vis - x0_vis).clamp(1, 4096) as u16;
+    let atlas_h = (y_max - y_min).clamp(1, 4096) as u16;
+
+    RIDGE_ATLAS.with(|slot| {
+        let mut slot = slot.borrow_mut();
+        if slot.is_none() {
+            *slot = Some(PixelAtlas::new(atlas_w, atlas_h));
+        }
+        let atlas = slot.as_mut().unwrap();
+        atlas.ensure(atlas_w, atlas_h);
+        atlas.clear();
+        let w_u = atlas_w as usize;
+        let h_u = atlas_h as usize;
+        let pixels = atlas.img.get_image_data_mut();
+
+        for ax in 0..w_u {
+            let x_unwrapped = x0_vis + ax as i32;
+            let i0 = x_unwrapped.rem_euclid(n);
+            let surf_y = profile[i0 as usize];
             let yl = profile[((i0 - 1).rem_euclid(n)) as usize];
             let yr = profile[((i0 + 1).rem_euclid(n)) as usize];
             let surf_soft = ((surf_y as i64 + yl as i64 + yr as i64) / 3) as i32;
             let y_vis = bedrock_floor_y
                 + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
             let top_sy = origin_y - (y_vis - bedrock_floor_y) as f32 * cell_px + lag_y;
-            let bottom_sy = origin_y + lag_y;
-            let h = (bottom_sy - top_sy).max(cell_px);
-            if top_sy > sh || top_sy + h < 0.0 {
-                continue;
-            }
 
-            // Opaque body below the feather zone (mid-ground stays solid).
-            let body_top = (top_sy + feather_px).min(bottom_sy);
-            let body_h = (bottom_sy - body_top).max(0.0);
-            if body_h > 0.5 {
-                draw_rectangle(sx, body_top, cell_px + 0.5, body_h, fill);
-            }
-
-            // Crest target: sky, or far-plate color when that plate rises behind us.
             let mut edge_rgb = sky_rgb;
             if let Some(ref b) = behind {
                 let bn = b.profile.len() as i32;
@@ -922,7 +1059,6 @@ fn draw_ridge_band(
                         + ((b_surf - bedrock_floor_y) as f32 * b.y_squash) as i32;
                     let b_lag_y = cam_y * (1.0 - b.parallax);
                     let b_top = origin_y - (b_y - bedrock_floor_y) as f32 * cell_px + b_lag_y;
-                    // Far crest higher on screen (smaller sy) → far body is behind mid tip.
                     if b_top + cell_px < top_sy + feather_px {
                         edge_rgb = [
                             lerp_u8(sky_rgb[0], b.fill_rgb[0], far_w),
@@ -933,31 +1069,47 @@ fn draw_ridge_band(
                 }
             }
 
-            let fr = (fill.r * 255.0) as u8;
-            let fg = (fill.g * 255.0) as u8;
-            let fb = (fill.b * 255.0) as u8;
             for k in 0..feather {
-                let t = (k as f32 + 0.5) / feather as f32; // 0 tip → 1 body
+                let wy = y_vis - k;
+                if wy < y_min || wy >= y_max {
+                    continue;
+                }
+                let t = (k as f32 + 0.5) / feather as f32;
                 let w = (1.0 - t) * crest_w;
                 let rgb = [
                     lerp_u8(fr, edge_rgb[0], w),
                     lerp_u8(fg, edge_rgb[1], w),
                     lerp_u8(fb, edge_rgb[2], w),
                 ];
-                let y0 = top_sy + k as f32 * cell_px;
-                if y0 > sh || y0 + cell_px < 0.0 {
-                    continue;
+                let img_y = (y_max - 1 - wy) as usize;
+                if img_y < h_u {
+                    pixels[img_y * w_u + ax] = [rgb[0], rgb[1], rgb[2], 255];
                 }
-                draw_rectangle(
-                    sx,
-                    y0,
-                    cell_px + 0.5,
-                    cell_px + 0.5,
-                    Color::from_rgba(rgb[0], rgb[1], rgb[2], 255),
-                );
+            }
+            let body_top_y = (y_vis - feather).min(y_max - 1);
+            if body_top_y >= y_min {
+                for wy in y_min..=body_top_y {
+                    let img_y = (y_max - 1 - wy) as usize;
+                    if img_y < h_u {
+                        pixels[img_y * w_u + ax] = [fr, fg, fb, 255];
+                    }
+                }
             }
         }
-    }
+
+        let dest_w = atlas_w as f32 * cell_px;
+        let dest_h = atlas_h as f32 * cell_px;
+        let atlas_top = origin_y - (y_max - bedrock_floor_y) as f32 * cell_px + lag_y;
+        let atlas_left = origin_x + x0_vis as f32 * cell_px + lag_x;
+        if atlas_left + dest_w < 0.0
+            || atlas_left > sw
+            || atlas_top > sh
+            || atlas_top + dest_h < 0.0
+        {
+            return;
+        }
+        atlas.draw_scaled(atlas_left, atlas_top, dest_w, dest_h);
+    });
 }
 
 /// Humidity tile diagnostic (front of terrain) + sparse wind streaks.
@@ -1083,8 +1235,20 @@ pub fn draw_canopy_air_dim(
     let mut shade: HashMap<(i32, i32), f32> = HashMap::new();
 
     // 1) Day: mild ground/water dim under foliage.
-    if is_day && !canopy.is_empty() {
-        stamp_under_canopy_surface(world, &canopy, width_cols, y_min_vis, y_max_vis, &mut shade);
+    if is_day && !canopy.is_empty() && cell_px > 0.0 {
+        let x0 = ((0.0 - origin_x) / cell_px).floor() as i32;
+        let x1 = ((sw - origin_x) / cell_px).ceil() as i32 + 1;
+        stamp_under_canopy_surface(
+            world,
+            &canopy,
+            width_cols,
+            x0,
+            x1,
+            wrap_x,
+            y_min_vis,
+            y_max_vis,
+            &mut shade,
+        );
     }
 
     // 2) Time-of-day cast (pan-invariant): soft air corridor + exposed ground.
@@ -1107,9 +1271,18 @@ pub fn draw_canopy_air_dim(
         );
     }
 
-    // 3) Mild cloud dim on exposed surface (day + night).
-    if cloud_k > 0.02 && !clouds.is_empty() {
-        for x in 0..width_cols {
+    // 3) Mild cloud dim on exposed surface (day + night) — viewport cols only.
+    if cloud_k > 0.02 && !clouds.is_empty() && cell_px > 0.0 {
+        let x0 = ((0.0 - origin_x) / cell_px).floor() as i32;
+        let x1 = ((sw - origin_x) / cell_px).ceil() as i32 + 1;
+        for x_u in x0..x1 {
+            let x = if wrap_x {
+                x_u.rem_euclid(width_cols.max(1))
+            } else if x_u < 0 || x_u >= width_cols {
+                continue;
+            } else {
+                x_u
+            };
             let ct = cloud_sky_transmit(clouds, x, wrap, downpour_mass);
             let dim = ((1.0 - ct) * cloud_k * 0.50).clamp(0.0, 0.35);
             if dim < 0.04 {
@@ -1244,8 +1417,52 @@ fn is_waterish(world: &World, x: i32, y: i32) -> bool {
     cell.material == MaterialId::Water || is_standing_water(world, x, y)
 }
 
+/// Soft key falloff by depth below an exposed crest (water bleeds deeper).
+pub fn terrain_key_falloff(depth: i32, water: bool, is_day: bool) -> f32 {
+    let max_bleed = if water {
+        if is_day {
+            2
+        } else {
+            3
+        }
+    } else if is_day {
+        1
+    } else {
+        2
+    };
+    if depth < 0 || depth > max_bleed {
+        return 0.0;
+    }
+    if water {
+        match depth {
+            0 => 1.0,
+            1 => 0.55,
+            2 => 0.30,
+            3 => 0.14,
+            _ => 0.0,
+        }
+    } else {
+        match depth {
+            0 => 1.0,
+            1 => {
+                if is_day {
+                    0.32
+                } else {
+                    0.48
+                }
+            }
+            2 => 0.20,
+            _ => 0.0,
+        }
+    }
+}
+
 /// Key strength for terrain/water: full on the lit crest, soft bleed a few
 /// cells into the layer beneath (deeper into water than rock).
+///
+/// Prefer column-top-down lighting in the app draw loop (one exposure
+/// probe per crest). Climbing variant kept for tooling / overlays.
+#[allow(dead_code)]
 pub fn terrain_celestial_key_strength(
     world: &World,
     x: i32,
@@ -1270,42 +1487,10 @@ pub fn terrain_celestial_key_strength(
     }
     let depth = top - y;
     let water = is_waterish(world, x, top) || is_waterish(world, x, y);
-    let max_bleed = if water {
-        if is_day {
-            2
-        } else {
-            3
-        }
-    } else if is_day {
-        1
-    } else {
-        2
-    };
-    if depth < 0 || depth > max_bleed {
+    let falloff = terrain_key_falloff(depth, water, is_day);
+    if falloff <= 0.0 {
         return 0.0;
     }
-    let falloff = if water {
-        match depth {
-            0 => 1.0,
-            1 => 0.55,
-            2 => 0.30,
-            3 => 0.14,
-            _ => 0.0,
-        }
-    } else {
-        match depth {
-            0 => 1.0,
-            1 => {
-                if is_day {
-                    0.32
-                } else {
-                    0.48
-                }
-            }
-            2 => 0.20,
-            _ => 0.0,
-        }
-    };
     celestial_exposure(world, x, top, celestial_local) * falloff
 }
 
@@ -1425,16 +1610,26 @@ fn top_shadow_receiver_y(world: &World, x: i32, y_min: i32, y_max: i32) -> Optio
     None
 }
 
-/// Dim terrain/water directly under canopy columns.
+/// Dim terrain/water directly under canopy columns (viewport x span only).
 fn stamp_under_canopy_surface(
     world: &World,
     canopy: &CanopyIndex,
     width_cols: i32,
+    x_min: i32,
+    x_max: i32,
+    wrap_x: bool,
     y_min_vis: i32,
     y_max_vis: i32,
     shade: &mut HashMap<(i32, i32), f32>,
 ) {
-    for x in 0..width_cols {
+    for x_u in x_min..x_max {
+        let x = if wrap_x {
+            x_u.rem_euclid(width_cols.max(1))
+        } else if x_u < 0 || x_u >= width_cols {
+            continue;
+        } else {
+            x_u
+        };
         let Some(y) = top_shadow_receiver_y(world, x, y_min_vis, y_max_vis) else {
             continue;
         };

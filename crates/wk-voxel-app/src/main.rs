@@ -19,7 +19,7 @@
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution
 //! - `O` — toggle Set A organisms (Atom step)
-//! - `H` — toggle humidity tile diagnostic + wind streaks (default on)
+//! - `H` — toggle humidity tile diagnostic + wind streaks (default off)
 //! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
 //! - `T` — toggle temperature heatmap overlay
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
@@ -50,30 +50,28 @@ mod scene;
 mod settings;
 mod spore_fx;
 mod terrain;
+mod terrain_atlas;
 
 use macroquad::prelude::*;
 use wk_voxel::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    apply_weather_rgb, celestial_local_cfg, celestial_moon_screen_pos_cfg,
-    celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
-    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, set_parallel_enabled,
+    celestial_local_cfg, celestial_moon_screen_pos_cfg, celestial_sun_screen_pos_cfg,
+    collect_live_root_world_cells, day_night_factor_cfg, geotech_map_due, humidity_diffuse_due,
+    is_daytime_cfg, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, set_parallel_enabled,
     step_carbon_budget, temperature_step_due, tick_with_life, wake_unsupported_grains,
     wake_unstable_slopes, GeotechOverlayMode, SimSnapshot, WorldgenParams,
 };
 
 use crate::atmosphere::{
-    apply_celestial_key_rgb, apply_organism_celestial_key_rgb, draw_canopy_air_dim,
-    draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, CloudDepthLayer,
-    draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_organism_aboveground,
-    organism_celestial_rim, sky_weather_for_scene, terrain_celestial_key_strength,
+    apply_organism_celestial_key_rgb, draw_canopy_air_dim, draw_celestials, draw_clouds,
+    draw_depth_cloud_layer, draw_haze_and_wind, CloudDepthLayer, draw_ridge_silhouettes, draw_sky,
+    estimate_snow_bias, is_organism_aboveground, organism_celestial_rim, sky_weather_for_scene,
     toward_light_celestial, RidgeSilhouette,
 };
 use crate::creature_list::CreatureList;
 use crate::editor::CreatureEditor;
 use crate::inspector::{draw_block_inspector, draw_selection_outline, screen_to_world};
-use crate::palette::cell_color;
 use crate::quit::{QuitChoice, QuitDialog};
 use crate::scene::Scene;
 use crate::settings::SimSettings;
@@ -85,7 +83,9 @@ fn window_conf() -> Conf {
         window_title: "wk-voxel demo".into(),
         window_width: 1280,
         window_height: 720,
-        high_dpi: true,
+        // Logical pixels only — HiDPI doubled fill + frustum cell count and
+        // cut fullscreen FPS roughly in half vs the same windowed view.
+        high_dpi: false,
         ..Default::default()
     }
 }
@@ -178,8 +178,9 @@ async fn main() {
     let mut evap_on = true;
     let mut karst_on = true;
     let mut organisms_on = true;
-    // Humidity diagnostic default on (`H`); soft clouds default on (`N`).
-    let mut humidity_overlay = true;
+    // Humidity diagnostic default off (`H`) — tile haze was a big draw
+    // cost on top of per-cell terrain. Soft clouds default on (`N`).
+    let mut humidity_overlay = false;
     let mut clouds_on = true;
     let mut temp_overlay = false;
     let mut mycelium_overlay = false;
@@ -194,6 +195,14 @@ async fn main() {
     let mut cam_y = 0.0f32;
     let mut should_quit = false;
     let mut ridges = RidgeSilhouette::default();
+    // Last unpaused sim stack wall time (ms) — HUD `sim=` vs `fps=`
+    // (frame includes draw). `atlas=` is terrain fill+upload only.
+    let mut last_sim_ms = 0.0f32;
+    let mut last_atlas_ms = 0.0f32;
+    // 1px/cell terrain atlas — one GPU upload + few textured quads
+    // instead of O(visible cells) draw_rectangle (fullscreen killer).
+    let mut terrain_img: Option<Image> = None;
+    let mut terrain_tex: Option<Texture2D> = None;
 
     loop {
         if should_quit {
@@ -471,6 +480,7 @@ async fn main() {
             || terrain.open
             || quit_dialog.open;
         if !sim_paused {
+            let sim_t0 = std::time::Instant::now();
             // Frame-shell scans touch many loaded chunks — always worth
             // rayon. CA physics stays on the Tab toggle (demo dirty plans
             // are too narrow for parallel to win).
@@ -624,6 +634,7 @@ async fn main() {
                 );
                 spore_fx.burst_all(&outcome.spores, wind_vx);
             }
+            last_sim_ms = sim_t0.elapsed().as_secs_f32() * 1000.0;
         }
 
         // Spore puffs keep drifting while paused so the wind trail stays readable.
@@ -994,13 +1005,10 @@ async fn main() {
             );
         }
 
-        // Draw the ring once, plus ±1 world-width copies so the seam
-        // never shows a gap while panning. Y range is pre-clamped to
-        // the visible frustum so we don't iterate hidden sky rows.
+        // Terrain atlas: viewport columns only (not full world width). Cost
+        // tracks on-screen cells — world size / wrap copies must not inflate
+        // clear+upload. Unwrapped x0..x1 maps through wrap_x into one quad.
         let x_copies: &[i32] = if scene.params.wrap_x { &[-1, 0, 1] } else { &[0] };
-        // Solve sy = origin_y - (y - bedrock_floor_y) * cell_px for the
-        // visible strip. draw_rectangle uses (sx, sy - cell_px) as top-
-        // left, so a cell is visible when [sy - cell_px, sy] ⊂ [0, sh].
         let y_max_vis = {
             let y = scene.params.bedrock_floor_y as f32 + (origin_y + cell_px) / cell_px;
             (y.ceil() as i32).min(scene.params.sky_ceiling_y)
@@ -1009,67 +1017,64 @@ async fn main() {
             let y = scene.params.bedrock_floor_y as f32 + (origin_y - sh) / cell_px;
             (y.floor() as i32).max(scene.params.bedrock_floor_y)
         };
-
-        for &x_copy in x_copies {
-            let x_shift = x_copy * scene.params.width_cols;
-            for x in 0..scene.params.width_cols {
-                let sx = origin_x + (x + x_shift) as f32 * cell_px;
-                if sx + cell_px < 0.0 || sx > sw {
-                    continue;
-                }
-                for y in y_min_vis..y_max_vis {
-                    let sy = origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
-                    // Guard for the rounding slop on the frustum bounds.
-                    if sy + cell_px < 0.0 || sy > sh {
-                        continue;
-                    }
-                    let Some(cell) = scene.world.get_cell(x, y) else {
-                        continue;
-                    };
-                    // Only draw standing water (pools / ocean film / land
-                    // puddles). Mid-air sat stays invisible — falling rain
-                    // is the cosmetic streak under raining clouds.
-                    // Thin wet-air films (condensation residual / haze sat)
-                    // must not paint as a bright blue-white ground outline.
-                    if cell.material == wk_material::MaterialId::Air {
-                        if cell.sat.is_empty() {
-                            continue;
-                        }
-                        // Match grain haze band: ≤32 is atmospheric film, not puddle.
-                        if cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX {
-                            continue;
-                        }
-                        let below_sea = y <= scene.params.sea_level_y;
-                        if !below_sea && !is_standing_water(&scene.world, x, y) {
-                            continue;
-                        }
-                    }
-                    let [r0, g0, b0] = cell_color(cell);
-                    let [mut r, mut g, mut b] =
-                        apply_weather_rgb([r0, g0, b0], dn_fg, &sky_weather);
-                    // Crest key + soft bleed into subsurface / water.
-                    let key = terrain_celestial_key_strength(
-                        &scene.world,
-                        x,
-                        y,
-                        sun_local,
-                        sun_day,
-                    );
-                    if key > 0.03 {
-                        let lit = apply_celestial_key_rgb([r, g, b], key, sun_local, sun_day);
-                        r = lit[0];
-                        g = lit[1];
-                        b = lit[2];
-                    }
-                    draw_rectangle(
-                        sx,
-                        sy - cell_px,
-                        cell_px,
-                        cell_px,
-                        Color::from_rgba(r, g, b, 255),
-                    );
-                }
+        let x0_vis = ((0.0 - origin_x) / cell_px).floor() as i32;
+        let x1_vis = ((sw - origin_x) / cell_px).ceil() as i32 + 1;
+        let atlas_w = (x1_vis - x0_vis).clamp(0, 4096) as u16;
+        let atlas_h = (y_max_vis - y_min_vis).clamp(0, 4096) as u16;
+        if atlas_w > 0 && atlas_h > 0 {
+            let need_new = match &terrain_img {
+                Some(img) => img.width != atlas_w || img.height != atlas_h,
+                None => true,
+            };
+            if need_new {
+                let img = Image::gen_image_color(
+                    atlas_w,
+                    atlas_h,
+                    Color::from_rgba(0, 0, 0, 0),
+                );
+                let tex = Texture2D::from_image(&img);
+                tex.set_filter(FilterMode::Nearest);
+                terrain_img = Some(img);
+                terrain_tex = Some(tex);
             }
+            let atlas_t0 = std::time::Instant::now();
+            let img = terrain_img.as_mut().unwrap();
+            let pixels = img.get_image_data_mut();
+            terrain_atlas::fill_terrain_atlas(
+                pixels,
+                atlas_w as usize,
+                atlas_h as usize,
+                &scene.world,
+                x0_vis,
+                y_min_vis,
+                y_max_vis,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                scene.params.sea_level_y,
+                dn_fg,
+                &sky_weather,
+                sun_local,
+                sun_day,
+            );
+            let tex = terrain_tex.as_ref().unwrap();
+            tex.update(img);
+            let dest_w = atlas_w as f32 * cell_px;
+            let dest_h = atlas_h as f32 * cell_px;
+            // Top of atlas = top of cell (y_max_vis - 1); left = x0_vis.
+            let atlas_top = origin_y
+                - (y_max_vis - scene.params.bedrock_floor_y) as f32 * cell_px;
+            let atlas_left = origin_x + x0_vis as f32 * cell_px;
+            draw_texture_ex(
+                tex,
+                atlas_left,
+                atlas_top,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(vec2(dest_w, dest_h)),
+                    ..Default::default()
+                },
+            );
+            last_atlas_ms = atlas_t0.elapsed().as_secs_f32() * 1000.0;
         }
 
         // Day sun cast / under-canopy / cloud dim — after terrain, before front vapour.
@@ -1449,8 +1454,10 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0} sim={:.1}ms atlas={:.1}ms  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
+                last_sim_ms,
+                last_atlas_ms,
                 scene.world.tick,
                 tod,
                 scene.temperature.mean(),

@@ -661,6 +661,7 @@ name = "wk-voxel-app"
 version = "0.1.0"
 dependencies = [
  "macroquad",
+ "rayon",
  "wk-material",
  "wk-voxel",
 ]
