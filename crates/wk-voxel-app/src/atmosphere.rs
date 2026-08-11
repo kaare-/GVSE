@@ -209,12 +209,13 @@ impl RidgeSilhouette {
 fn column_surface_y(
     world: &World,
     gx: i32,
+    width_cols: i32,
     bedrock: i32,
     sky_ceiling: i32,
     sea_level: i32,
 ) -> i32 {
     // Hint near the worldgen crest — never walk the whole sky column.
-    let width = world.wrap_width.unwrap_or(0).max(1);
+    let width = width_cols.max(1);
     let hint = continental_surface_y(world.seed.0, gx, sea_level, width)
         .max(sea_level)
         .clamp(bedrock, sky_ceiling.saturating_sub(1));
