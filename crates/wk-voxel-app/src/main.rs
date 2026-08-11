@@ -85,7 +85,9 @@ fn window_conf() -> Conf {
         window_title: "wk-voxel demo".into(),
         window_width: 1280,
         window_height: 720,
-        high_dpi: true,
+        // Logical pixels only — HiDPI doubled fill + frustum cell count and
+        // cut fullscreen FPS roughly in half vs the same windowed view.
+        high_dpi: false,
         ..Default::default()
     }
 }
