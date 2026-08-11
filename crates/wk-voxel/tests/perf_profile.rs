@@ -303,7 +303,10 @@ fn one_stack_tick(
                     .temperature
                     .step(Some(&scene.world), &scene.humidity, t);
             }
-            if scene.phase.enabled && scene.phase.enable_cold_avalanche {
+            if scene.phase.enabled
+                && scene.phase.enable_cold_avalanche
+                && scene.world.tick % scene.phase.period_ticks.max(1) == 0
+            {
                 apply_cold_avalanche(
                     &mut scene.world,
                     &scene.temperature,
@@ -402,7 +405,10 @@ fn one_stack_tick(
                 a.temperature += t0.elapsed();
                 a.temperature_calls += 1;
             }
-            if scene.phase.enabled && scene.phase.enable_cold_avalanche {
+            if scene.phase.enabled
+                && scene.phase.enable_cold_avalanche
+                && scene.world.tick % scene.phase.period_ticks.max(1) == 0
+            {
                 let t0 = Instant::now();
                 apply_cold_avalanche(
                     &mut scene.world,

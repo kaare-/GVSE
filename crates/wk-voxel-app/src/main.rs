@@ -587,7 +587,11 @@ async fn main() {
             }
             // Cold wet-sand / snow / hillside ice spill onto lake ice
             // after the thermal step, then phase may break thin lids.
-            if settings.phase.enabled && settings.phase.enable_cold_avalanche {
+            // Same `period_ticks` cadence as [`apply_phase`].
+            if settings.phase.enabled
+                && settings.phase.enable_cold_avalanche
+                && scene.world.tick % settings.phase.period_ticks.max(1) == 0
+            {
                 let rooted = if organisms_on {
                     Some(collect_live_root_world_cells(&scene.organisms.atoms))
                 } else {

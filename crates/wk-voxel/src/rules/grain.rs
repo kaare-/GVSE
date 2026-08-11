@@ -1488,8 +1488,16 @@ pub fn apply_cold_avalanche_bound(
     // world scan — Super-Server stress paid ~8 ms/tick when post-physics
     // dirty was empty and `regions_for_standalone` expanded to all chunks.
     // Loose + Moore covers snow/ice/sand sources and Air seats next door.
+    //
+    // Warm empty-dirty: skip the Moore insurance entirely. Ambient repose
+    // already handles snow/sand; this pass only adds cold wet-sand, ice
+    // glaze, and snow→ice-lid seats. Stress (mean ~25°C, snow=0) was
+    // still paying ~4 ms walking ~100 full loose chunks.
     let planned = plan_active(world);
     let regions = if planned.is_empty() {
+        if temp.mean() > freeze_point_c {
+            return;
+        }
         regions_loose_moore(world)
     } else {
         let loose = regions_loose_moore(world);
@@ -1503,6 +1511,9 @@ pub fn apply_cold_avalanche_bound(
                 .filter(|ac| loose_coords.contains(&ac.coord))
                 .collect();
             if filtered.is_empty() {
+                if temp.mean() > freeze_point_c {
+                    return;
+                }
                 loose
             } else {
                 filtered
