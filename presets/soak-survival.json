@@ -156,9 +156,9 @@
     "plant_min_moist": 0.02
   },
   "perf": {
-    "flow_every_other_substep": false,
-    "flow_quiet_early_out": false,
-    "parallel_physics": true
+    "flow_every_other_substep": true,
+    "flow_quiet_early_out": true,
+    "parallel_physics": false
   },
   "failure": {
     "enable_roof_collapse": true,
