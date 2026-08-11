@@ -5,6 +5,7 @@
 //! Physics tick orchestration and performance knobs.
 
 use std::collections::HashSet;
+use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
@@ -18,6 +19,71 @@ use super::grain::{
 use super::gravity::apply_gravity_fall_regions;
 use super::seepage::apply_seepage_regions;
 use super::water_flow::apply_water_flow_regions;
+
+/// Re-settle budget after a raft punch — enough to sink punched cargo
+/// through a water seat without the full ×1024 freefall path.
+const GRAIN_SETTLE_PASSES_PUNCH: u32 = 32;
+
+/// Accumulated wall time for sub-passes inside [`tick_with_life`].
+///
+/// Used by `perf_profile` so the printed breakdown matches the real
+/// physics tick (the old post-hoc mirror diverged on settle / punch).
+#[derive(Debug, Default, Clone)]
+pub struct PhysicsTimings {
+    pub plan_clear: Duration,
+    pub gravity: Duration,
+    pub water_flow: Duration,
+    pub seepage: Duration,
+    pub wake_grains: Duration,
+    pub settle: Duration,
+    pub punch: Duration,
+    pub rise_soak: Duration,
+    pub failure: Duration,
+    pub confined: Duration,
+    pub mycelium: Duration,
+    pub substeps_ran: u64,
+    pub active_regions: u64,
+    pub active_area: u64,
+    /// Ticks that took the deep ([`GRAIN_SETTLE_PASSES`]) settle path.
+    pub deep_settle_ticks: u64,
+    /// Ticks where [`super::grain::punch_through_floating_rafts`] moved mass.
+    pub punch_hits: u64,
+}
+
+impl PhysicsTimings {
+    pub fn total(&self) -> Duration {
+        self.plan_clear
+            + self.gravity
+            + self.water_flow
+            + self.seepage
+            + self.wake_grains
+            + self.settle
+            + self.punch
+            + self.rise_soak
+            + self.failure
+            + self.confined
+            + self.mycelium
+    }
+
+    fn merge_from(&mut self, other: &Self) {
+        self.plan_clear += other.plan_clear;
+        self.gravity += other.gravity;
+        self.water_flow += other.water_flow;
+        self.seepage += other.seepage;
+        self.wake_grains += other.wake_grains;
+        self.settle += other.settle;
+        self.punch += other.punch;
+        self.rise_soak += other.rise_soak;
+        self.failure += other.failure;
+        self.confined += other.confined;
+        self.mycelium += other.mycelium;
+        self.substeps_ran += other.substeps_ran;
+        self.active_regions += other.active_regions;
+        self.active_area += other.active_area;
+        self.deep_settle_ticks += other.deep_settle_ticks;
+        self.punch_hits += other.punch_hits;
+    }
+}
 
 /// How many gravity→surface-flow cycles run inside one [`tick`].
 ///
@@ -190,6 +256,60 @@ pub fn tick_with_life(
     grain: Option<&super::grain::GrainConfig>,
     fungi: Option<&crate::fungi::FungiConfig>,
 ) -> crate::failure::FailureStats {
+    tick_with_life_inner(world, perf, failure, geotech, rooted, grain, fungi, None)
+}
+
+/// [`tick_with_life`] while accumulating [`PhysicsTimings`].
+pub fn tick_with_life_profiled(
+    world: &mut World,
+    perf: &PerfConfig,
+    failure: &crate::failure::FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+    rooted: Option<&HashSet<(i32, i32)>>,
+    grain: Option<&super::grain::GrainConfig>,
+    fungi: Option<&crate::fungi::FungiConfig>,
+    timings: &mut PhysicsTimings,
+) -> crate::failure::FailureStats {
+    tick_with_life_inner(
+        world,
+        perf,
+        failure,
+        geotech,
+        rooted,
+        grain,
+        fungi,
+        Some(timings),
+    )
+}
+
+/// [`tick_with_perf`] while accumulating [`PhysicsTimings`].
+pub fn tick_with_perf_profiled(
+    world: &mut World,
+    perf: &PerfConfig,
+    timings: &mut PhysicsTimings,
+) -> crate::failure::FailureStats {
+    tick_with_life_profiled(
+        world,
+        perf,
+        &crate::failure::FailureConfig::default(),
+        None,
+        None,
+        None,
+        None,
+        timings,
+    )
+}
+
+fn tick_with_life_inner(
+    world: &mut World,
+    perf: &PerfConfig,
+    failure: &crate::failure::FailureConfig,
+    geotech: Option<&crate::geotech_map::GeotechMap>,
+    rooted: Option<&HashSet<(i32, i32)>>,
+    grain: Option<&super::grain::GrainConfig>,
+    fungi: Option<&crate::fungi::FungiConfig>,
+    mut timings: Option<&mut PhysicsTimings>,
+) -> crate::failure::FailureStats {
     // Opt-in cell-sat inventory (debug only). Atmosphere stores are
     // outside this tick — see `audit::tracked_totals`.
     #[cfg(debug_assertions)]
@@ -198,6 +318,9 @@ pub fn tick_with_life(
     } else {
         None
     };
+
+    let profile = timings.is_some();
+    let mut local = PhysicsTimings::default();
 
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
     // Last non-empty flow plan — grain/seepage fall back to this when
@@ -212,10 +335,19 @@ pub fn tick_with_life(
         FLOW_SUBSTEPS
     };
     for step in 0..max_steps {
+        let t0 = profile.then(Instant::now);
         let active = plan_active(world);
         clear_all_dirty(world);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.plan_clear += t0.elapsed();
+        }
         if active.is_empty() {
             break;
+        }
+        if profile {
+            local.substeps_ran += 1;
+            local.active_regions += active.len() as u64;
+            local.active_area += active_cell_area(&active) as u64;
         }
         flow_halo = active.clone();
         let this_area = active_cell_area(&active);
@@ -223,8 +355,12 @@ pub fn tick_with_life(
             start_area = this_area;
         }
         let passes = partition_checkerboard(&active);
+        let t0 = profile.then(Instant::now);
         for pass in &passes {
             apply_gravity_fall_regions(world, pass);
+        }
+        if let (true, Some(t0)) = (profile, t0) {
+            local.gravity += t0.elapsed();
         }
         // Every-other flow: gravity still runs every pass; surface
         // leveling runs on even substeps when opted in. (Must include
@@ -232,7 +368,11 @@ pub fn tick_with_life(
         // step 1 saw an empty plan and broke before any leveling.)
         let run_flow = !perf.flow_every_other_substep || (step % 2 == 0);
         if run_flow {
+            let t0 = profile.then(Instant::now);
             apply_water_flow_regions(world, &active);
+            if let (true, Some(t0)) = (profile, t0) {
+                local.water_flow += t0.elapsed();
+            }
         }
         // Quiet early-out: after the minimum passes, peek at dirty
         // written by this substep — a tiny halo means water settled.
@@ -261,11 +401,21 @@ pub fn tick_with_life(
 
     // Communicating vessels: a filled pipe can go locally quiet while the
     // reservoir head is still higher. Periodic full-chunk confined scan.
-    super::water_flow::wake_confined_head(world);
+    {
+        let t0 = profile.then(Instant::now);
+        super::water_flow::wake_confined_head(world);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.confined += t0.elapsed();
+        }
+    }
 
     // Seepage follows the water dirty / flow halo.
     let flow_active = {
+        let t0 = profile.then(Instant::now);
         let dirty = plan_active(world);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.plan_clear += t0.elapsed();
+        }
         if dirty.is_empty() {
             flow_halo
         } else {
@@ -273,7 +423,11 @@ pub fn tick_with_life(
         }
     };
     if !flow_active.is_empty() {
+        let t0 = profile.then(Instant::now);
         apply_seepage_regions(world, &flow_active);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.seepage += t0.elapsed();
+        }
     }
 
     // Re-wake unsupported grains and steep cliff faces. Cadence-gated:
@@ -283,6 +437,7 @@ pub fn tick_with_life(
     const GRAIN_WAKE_FULL_EVERY: u64 = 16;
     let mut freefall_woken = 0u32;
     if world.tick % GRAIN_WAKE_EVERY == 0 {
+        let t0 = profile.then(Instant::now);
         if world.tick % GRAIN_WAKE_FULL_EVERY == 0 {
             freefall_woken = super::grain::wake_grains_for_settle(world);
         } else {
@@ -290,8 +445,12 @@ pub fn tick_with_life(
             let coords: Vec<_> = halo.iter().map(|ac| ac.coord).collect();
             freefall_woken = super::grain::wake_grains_for_settle_coords(world, &coords);
         }
+        if let (true, Some(t0)) = (profile, t0) {
+            local.wake_grains += t0.elapsed();
+        }
     }
     let grain_active = {
+        let t0 = profile.then(Instant::now);
         let dirty = plan_active(world);
         let src = if dirty.is_empty() {
             flow_active
@@ -300,7 +459,11 @@ pub fn tick_with_life(
         };
         // Water-dirty ocean/sky chunks have no sand/litter — settle was
         // still walking them every tick (~physics gap on Super-Server).
-        filter_loose_regions(world, &src)
+        let out = filter_loose_regions(world, &src);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.plan_clear += t0.elapsed();
+        }
+        out
     };
     if !grain_active.is_empty() {
         // Deep settle for sky freefall / mid-air paint, and for full-feel
@@ -316,25 +479,54 @@ pub fn tick_with_life(
         } else {
             GRAIN_SETTLE_PASSES_SHALLOW
         };
+        if profile && deep {
+            local.deep_settle_ticks += 1;
+        }
+        let t0 = profile.then(Instant::now);
         settle_loose_grains_regions(world, &grain_active, rooted, passes);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.settle += t0.elapsed();
+        }
     }
 
     // Dense cargo cannot ride floating Organic/Snow/Ice. Full-grid punch
     // once per wake cadence, then a short re-settle so punched grains
-    // sink through the water seat.
-    if world.tick % GRAIN_WAKE_EVERY == 0
-        && super::grain::punch_through_floating_rafts(world) > 0
-    {
-        let _ = super::grain::wake_grains_for_settle(world);
-        let sink = filter_loose_regions(world, &plan_active(world));
-        if !sink.is_empty() {
-            settle_loose_grains_regions(world, &sink, rooted, GRAIN_SETTLE_PASSES);
+    // sink through the water seat (capped — not the ×1024 freefall path).
+    if world.tick % GRAIN_WAKE_EVERY == 0 {
+        let t0 = profile.then(Instant::now);
+        let punched = super::grain::punch_through_floating_rafts(world);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.punch += t0.elapsed();
+        }
+        if punched > 0 {
+            if profile {
+                local.punch_hits += 1;
+            }
+            let t0 = profile.then(Instant::now);
+            let _ = super::grain::wake_grains_for_settle(world);
+            if let (true, Some(t0)) = (profile, t0) {
+                local.wake_grains += t0.elapsed();
+            }
+            let sink = filter_loose_regions(world, &plan_active(world));
+            if !sink.is_empty() {
+                let t0 = profile.then(Instant::now);
+                settle_loose_grains_regions(world, &sink, rooted, GRAIN_SETTLE_PASSES_PUNCH);
+                if let (true, Some(t0)) = (profile, t0) {
+                    local.settle += t0.elapsed();
+                }
+            }
         }
     }
     // Clear submerged litter lines, then let rafts drink — shared litter scan.
-    match grain {
-        Some(g) => super::grain::rise_and_soak_buoyant_litter_cfg(world, g),
-        None => super::grain::rise_and_soak_buoyant_litter(world),
+    {
+        let t0 = profile.then(Instant::now);
+        match grain {
+            Some(g) => super::grain::rise_and_soak_buoyant_litter_cfg(world, g),
+            None => super::grain::rise_and_soak_buoyant_litter(world),
+        }
+        if let (true, Some(t0)) = (profile, t0) {
+            local.rise_soak += t0.elapsed();
+        }
     }
 
     // Geotech: roof / overhang collapse after grain has seated.
@@ -342,7 +534,12 @@ pub fn tick_with_life(
     // ticks keeps cliffs responding without owning the quiet-world budget.
     const FAILURE_EVERY: u64 = 4;
     let failure_stats = if world.tick % FAILURE_EVERY == 0 {
-        crate::failure::apply_failure(world, failure, geotech)
+        let t0 = profile.then(Instant::now);
+        let stats = crate::failure::apply_failure(world, failure, geotech);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.failure += t0.elapsed();
+        }
+        stats
     } else {
         crate::failure::FailureStats::default()
     };
@@ -352,14 +549,24 @@ pub fn tick_with_life(
     crate::symbiosis::clear_sym_net_flow_lasts(world);
 
     // Mycelium field: lives in Organic independently of fruiting bodies.
-    match fungi {
-        Some(f) => crate::fungi::step_mycelium_field_cfg(world, f),
-        None => crate::fungi::step_mycelium_field(world),
+    {
+        let t0 = profile.then(Instant::now);
+        match fungi {
+            Some(f) => crate::fungi::step_mycelium_field_cfg(world, f),
+            None => crate::fungi::step_mycelium_field(world),
+        }
+        if let (true, Some(t0)) = (profile, t0) {
+            local.mycelium += t0.elapsed();
+        }
     }
 
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {
         chunk.tick = chunk.tick.wrapping_add(1);
+    }
+
+    if let Some(t) = timings.as_mut() {
+        t.merge_from(&local);
     }
 
     #[cfg(debug_assertions)]
