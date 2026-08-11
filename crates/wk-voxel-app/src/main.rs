@@ -1006,9 +1006,9 @@ async fn main() {
             );
         }
 
-        // Terrain atlas: 1 px/cell → Nearest-scaled quad(s). Fullscreen used
-        // to pay O(visible cells) CPU draw calls; cost now tracks cell count
-        // for fill + one upload, not screen resolution.
+        // Terrain atlas: viewport columns only (not full world width). Cost
+        // tracks on-screen cells — world size / wrap copies must not inflate
+        // clear+upload. Unwrapped x0..x1 maps through wrap_x into one quad.
         let x_copies: &[i32] = if scene.params.wrap_x { &[-1, 0, 1] } else { &[0] };
         let y_max_vis = {
             let y = scene.params.bedrock_floor_y as f32 + (origin_y + cell_px) / cell_px;
@@ -1018,8 +1018,10 @@ async fn main() {
             let y = scene.params.bedrock_floor_y as f32 + (origin_y - sh) / cell_px;
             (y.floor() as i32).max(scene.params.bedrock_floor_y)
         };
-        let atlas_h = (y_max_vis - y_min_vis).max(0) as u16;
-        let atlas_w = scene.params.width_cols.max(0) as u16;
+        let x0_vis = ((0.0 - origin_x) / cell_px).floor() as i32;
+        let x1_vis = ((sw - origin_x) / cell_px).ceil() as i32 + 1;
+        let atlas_w = (x1_vis - x0_vis).clamp(0, 4096) as u16;
+        let atlas_h = (y_max_vis - y_min_vis).clamp(0, 4096) as u16;
         if atlas_w > 0 && atlas_h > 0 {
             let need_new = match &terrain_img {
                 Some(img) => img.width != atlas_w || img.height != atlas_h,
@@ -1042,21 +1044,16 @@ async fn main() {
             let pixels = img.get_image_data_mut();
             let w_u = atlas_w as usize;
             let h_u = atlas_h as usize;
-            // Only paint columns that land on-screen in some wrap copy.
-            let mut col_needed = vec![false; w_u];
-            for &x_copy in x_copies {
-                let x_shift = x_copy * scene.params.width_cols;
-                for x in 0..scene.params.width_cols {
-                    let sx = origin_x + (x + x_shift) as f32 * cell_px;
-                    if sx + cell_px >= 0.0 && sx <= sw {
-                        col_needed[x as usize] = true;
-                    }
-                }
-            }
-            for x in 0..scene.params.width_cols {
-                if !col_needed[x as usize] {
+            let width_cols = scene.params.width_cols;
+            for ax in 0..w_u {
+                let x_unwrapped = x0_vis + ax as i32;
+                let x = if scene.params.wrap_x {
+                    scene.world.wrap_x(x_unwrapped)
+                } else if x_unwrapped < 0 || x_unwrapped >= width_cols {
                     continue;
-                }
+                } else {
+                    x_unwrapped
+                };
                 let mut stack_exposure = 0.0f32;
                 let mut stack_depth = -1i32;
                 let mut stack_water = false;
@@ -1107,7 +1104,7 @@ async fn main() {
                         b = lit[2];
                     }
                     if img_y < h_u {
-                        pixels[img_y * w_u + x as usize] = [r, g, b, 255];
+                        pixels[img_y * w_u + ax] = [r, g, b, 255];
                     }
                 }
             }
@@ -1115,26 +1112,20 @@ async fn main() {
             tex.update(img);
             let dest_w = atlas_w as f32 * cell_px;
             let dest_h = atlas_h as f32 * cell_px;
-            // Top of atlas = top of cell (y_max_vis - 1).
+            // Top of atlas = top of cell (y_max_vis - 1); left = x0_vis.
             let atlas_top = origin_y
                 - (y_max_vis - scene.params.bedrock_floor_y) as f32 * cell_px;
-            for &x_copy in x_copies {
-                let x_shift = x_copy * scene.params.width_cols;
-                let dx = origin_x + x_shift as f32 * cell_px;
-                if dx + dest_w < 0.0 || dx > sw {
-                    continue;
-                }
-                draw_texture_ex(
-                    tex,
-                    dx,
-                    atlas_top,
-                    WHITE,
-                    DrawTextureParams {
-                        dest_size: Some(vec2(dest_w, dest_h)),
-                        ..Default::default()
-                    },
-                );
-            }
+            let atlas_left = origin_x + x0_vis as f32 * cell_px;
+            draw_texture_ex(
+                tex,
+                atlas_left,
+                atlas_top,
+                WHITE,
+                DrawTextureParams {
+                    dest_size: Some(vec2(dest_w, dest_h)),
+                    ..Default::default()
+                },
+            );
         }
 
         // Day sun cast / under-canopy / cloud dim — after terrain, before front vapour.

@@ -961,10 +961,9 @@ fn draw_ridge_band(
     // Lag opposite camera so distant layers move slower in X and Y.
     let lag_x = cam_x * (1.0 - parallax);
     let lag_y = cam_y * (1.0 - parallax);
-    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-    let _ = sea_level_y;
+    let _ = (sea_level_y, wrap_x, width_cols);
     let n = profile.len() as i32;
-    if n <= 0 || cell_px <= 0.0 || width_cols <= 0 {
+    if n <= 0 || cell_px <= 0.0 {
         return;
     }
     let feather = feather_cells.max(2);
@@ -975,20 +974,35 @@ fn draw_ridge_band(
     let fg = (fill.g * 255.0) as u8;
     let fb = (fill.b * 255.0) as u8;
 
-    // Visual crest span (squashed) → one atlas, then wrap draws.
-    let mut y_max = bedrock_floor_y + 1;
-    for (i, &surf_y) in profile.iter().enumerate() {
-        let i0 = i as i32;
+    // Viewport unwrapped columns only — world width must not size the atlas.
+    let x0_vis = ((0.0 - origin_x - lag_x) / cell_px).floor() as i32;
+    let x1_vis = ((sw - origin_x - lag_x) / cell_px).ceil() as i32 + 1;
+    if x1_vis <= x0_vis {
+        return;
+    }
+
+    // Screen-visible visual-y band (cell top at origin_y - (y-bedrock)*cell_px + lag_y).
+    let y_lo = bedrock_floor_y + ((origin_y + lag_y - sh) / cell_px).floor() as i32 - 1;
+    let y_hi = bedrock_floor_y + ((origin_y + lag_y) / cell_px).ceil() as i32 + feather + 1;
+
+    let mut y_max = y_lo + 1;
+    let mut y_min = y_hi;
+    for x_unwrapped in x0_vis..x1_vis {
+        let i0 = x_unwrapped.rem_euclid(n);
+        let surf_y = profile[i0 as usize];
         let yl = profile[((i0 - 1).rem_euclid(n)) as usize];
         let yr = profile[((i0 + 1).rem_euclid(n)) as usize];
         let surf_soft = ((surf_y as i64 + yl as i64 + yr as i64) / 3) as i32;
         let y_vis = bedrock_floor_y
             + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
         y_max = y_max.max(y_vis + 1);
+        y_min = y_min.min(y_vis - feather);
     }
-    let y_min = bedrock_floor_y;
-    let atlas_h = (y_max - y_min).max(1) as u16;
-    let atlas_w = width_cols as u16;
+    y_min = y_min.max(y_lo).max(bedrock_floor_y);
+    y_max = y_max.min(y_hi).max(y_min + 1);
+
+    let atlas_w = (x1_vis - x0_vis).clamp(1, 4096) as u16;
+    let atlas_h = (y_max - y_min).clamp(1, 4096) as u16;
 
     RIDGE_ATLAS.with(|slot| {
         let mut slot = slot.borrow_mut();
@@ -1002,8 +1016,10 @@ fn draw_ridge_band(
         let h_u = atlas_h as usize;
         let pixels = atlas.img.get_image_data_mut();
 
-        for (i, &surf_y) in profile.iter().enumerate() {
-            let i0 = i as i32;
+        for ax in 0..w_u {
+            let x_unwrapped = x0_vis + ax as i32;
+            let i0 = x_unwrapped.rem_euclid(n);
+            let surf_y = profile[i0 as usize];
             let yl = profile[((i0 - 1).rem_euclid(n)) as usize];
             let yr = profile[((i0 + 1).rem_euclid(n)) as usize];
             let surf_soft = ((surf_y as i64 + yl as i64 + yr as i64) / 3) as i32;
@@ -1011,7 +1027,6 @@ fn draw_ridge_band(
                 + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
             let top_sy = origin_y - (y_vis - bedrock_floor_y) as f32 * cell_px + lag_y;
 
-            // Crest target: sky, or far-plate color when that plate rises behind us.
             let mut edge_rgb = sky_rgb;
             if let Some(ref b) = behind {
                 let bn = b.profile.len() as i32;
@@ -1037,7 +1052,7 @@ fn draw_ridge_band(
                 if wy < y_min || wy >= y_max {
                     continue;
                 }
-                let t = (k as f32 + 0.5) / feather as f32; // 0 tip → 1 body
+                let t = (k as f32 + 0.5) / feather as f32;
                 let w = (1.0 - t) * crest_w;
                 let rgb = [
                     lerp_u8(fr, edge_rgb[0], w),
@@ -1046,16 +1061,15 @@ fn draw_ridge_band(
                 ];
                 let img_y = (y_max - 1 - wy) as usize;
                 if img_y < h_u {
-                    pixels[img_y * w_u + i] = [rgb[0], rgb[1], rgb[2], 255];
+                    pixels[img_y * w_u + ax] = [rgb[0], rgb[1], rgb[2], 255];
                 }
             }
-            // Opaque body below the feather zone down to bedrock.
-            let body_top_y = y_vis - feather;
+            let body_top_y = (y_vis - feather).min(y_max - 1);
             if body_top_y >= y_min {
                 for wy in y_min..=body_top_y {
                     let img_y = (y_max - 1 - wy) as usize;
                     if img_y < h_u {
-                        pixels[img_y * w_u + i] = [fr, fg, fb, 255];
+                        pixels[img_y * w_u + ax] = [fr, fg, fb, 255];
                     }
                 }
             }
@@ -1063,29 +1077,16 @@ fn draw_ridge_band(
 
         let dest_w = atlas_w as f32 * cell_px;
         let dest_h = atlas_h as f32 * cell_px;
-        let atlas_top =
-            origin_y - (y_max - bedrock_floor_y) as f32 * cell_px + lag_y;
-        // Upload once; wrap copies only change dest x.
-        atlas.tex.update(&atlas.img);
-        for &x_copy in x_copies {
-            let dx = origin_x + (x_copy * width_cols) as f32 * cell_px + lag_x;
-            if dx + dest_w < 0.0 || dx > sw {
-                continue;
-            }
-            if atlas_top > sh || atlas_top + dest_h < 0.0 {
-                continue;
-            }
-            draw_texture_ex(
-                &atlas.tex,
-                dx,
-                atlas_top,
-                WHITE,
-                DrawTextureParams {
-                    dest_size: Some(vec2(dest_w, dest_h)),
-                    ..Default::default()
-                },
-            );
+        let atlas_top = origin_y - (y_max - bedrock_floor_y) as f32 * cell_px + lag_y;
+        let atlas_left = origin_x + x0_vis as f32 * cell_px + lag_x;
+        if atlas_left + dest_w < 0.0
+            || atlas_left > sw
+            || atlas_top > sh
+            || atlas_top + dest_h < 0.0
+        {
+            return;
         }
+        atlas.draw_scaled(atlas_left, atlas_top, dest_w, dest_h);
     });
 }
 
@@ -1212,8 +1213,20 @@ pub fn draw_canopy_air_dim(
     let mut shade: HashMap<(i32, i32), f32> = HashMap::new();
 
     // 1) Day: mild ground/water dim under foliage.
-    if is_day && !canopy.is_empty() {
-        stamp_under_canopy_surface(world, &canopy, width_cols, y_min_vis, y_max_vis, &mut shade);
+    if is_day && !canopy.is_empty() && cell_px > 0.0 {
+        let x0 = ((0.0 - origin_x) / cell_px).floor() as i32;
+        let x1 = ((sw - origin_x) / cell_px).ceil() as i32 + 1;
+        stamp_under_canopy_surface(
+            world,
+            &canopy,
+            width_cols,
+            x0,
+            x1,
+            wrap_x,
+            y_min_vis,
+            y_max_vis,
+            &mut shade,
+        );
     }
 
     // 2) Time-of-day cast (pan-invariant): soft air corridor + exposed ground.
@@ -1236,9 +1249,18 @@ pub fn draw_canopy_air_dim(
         );
     }
 
-    // 3) Mild cloud dim on exposed surface (day + night).
-    if cloud_k > 0.02 && !clouds.is_empty() {
-        for x in 0..width_cols {
+    // 3) Mild cloud dim on exposed surface (day + night) — viewport cols only.
+    if cloud_k > 0.02 && !clouds.is_empty() && cell_px > 0.0 {
+        let x0 = ((0.0 - origin_x) / cell_px).floor() as i32;
+        let x1 = ((sw - origin_x) / cell_px).ceil() as i32 + 1;
+        for x_u in x0..x1 {
+            let x = if wrap_x {
+                x_u.rem_euclid(width_cols.max(1))
+            } else if x_u < 0 || x_u >= width_cols {
+                continue;
+            } else {
+                x_u
+            };
             let ct = cloud_sky_transmit(clouds, x, wrap, downpour_mass);
             let dim = ((1.0 - ct) * cloud_k * 0.50).clamp(0.0, 0.35);
             if dim < 0.04 {
@@ -1566,16 +1588,26 @@ fn top_shadow_receiver_y(world: &World, x: i32, y_min: i32, y_max: i32) -> Optio
     None
 }
 
-/// Dim terrain/water directly under canopy columns.
+/// Dim terrain/water directly under canopy columns (viewport x span only).
 fn stamp_under_canopy_surface(
     world: &World,
     canopy: &CanopyIndex,
     width_cols: i32,
+    x_min: i32,
+    x_max: i32,
+    wrap_x: bool,
     y_min_vis: i32,
     y_max_vis: i32,
     shade: &mut HashMap<(i32, i32), f32>,
 ) {
-    for x in 0..width_cols {
+    for x_u in x_min..x_max {
+        let x = if wrap_x {
+            x_u.rem_euclid(width_cols.max(1))
+        } else if x_u < 0 || x_u >= width_cols {
+            continue;
+        } else {
+            x_u
+        };
         let Some(y) = top_shadow_receiver_y(world, x, y_min_vis, y_max_vis) else {
             continue;
         };
