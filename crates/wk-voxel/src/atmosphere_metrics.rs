@@ -186,6 +186,9 @@ pub fn sky_transmit_at(
 }
 
 /// Fraction of `[x0, x1)` columns under meaningful cloud cover.
+///
+/// Samples a fixed column budget (not every world column) so max-width
+/// worlds stay O(samples × parcels) instead of O(width × parcels).
 pub fn precip_cover_fraction(
     clouds: &CloudStore,
     x0: i32,
@@ -194,20 +197,33 @@ pub fn precip_cover_fraction(
     downpour_mass: f32,
 ) -> f32 {
     let width = (x1 - x0).max(1);
+    if clouds.is_empty() {
+        return 0.0;
+    }
+    // ≤64 probes across the span — enough for sky tint, cheap at width=4096.
+    const MAX_SAMPLES: i32 = 64;
+    let samples = width.min(MAX_SAMPLES);
     let mut sum = 0.0f32;
-    for gx in x0..x1 {
+    for i in 0..samples {
+        let gx = x0 + (i * width) / samples;
         let t = cloud_sky_transmit(clouds, gx, wrap_width, downpour_mass);
         sum += (1.0 - t) / (1.0 - CLOUD_TRANSMIT_FLOOR).max(1e-3);
     }
-    (sum / width as f32).clamp(0.0, 1.0)
+    (sum / samples as f32).clamp(0.0, 1.0)
 }
 
 /// Mean humidity norm in tiles with `hy >= sky_hy_min`.
+///
+/// Strides large sparse maps so max-width × tall-sky worlds stay cheap.
 pub fn humidity_mean_norm(humidity: &Humidity, sky_hy_min: i32) -> f32 {
+    if humidity.cells.is_empty() {
+        return 0.0;
+    }
+    let stride = (humidity.cells.len() / 96).max(1);
     let mut sum = 0.0f32;
     let mut n = 0u32;
-    for (&(_hx, hy), &mass) in &humidity.cells {
-        if hy < sky_hy_min || mass <= 0.0 {
+    for (i, (&(_hx, hy), &mass)) in humidity.cells.iter().enumerate() {
+        if i % stride != 0 || hy < sky_hy_min || mass <= 0.0 {
             continue;
         }
         sum += (mass / Humidity::MAX_MASS_PER_TILE).clamp(0.0, 1.0);

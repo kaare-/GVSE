@@ -6,8 +6,8 @@
 use rayon::prelude::*;
 use wk_material::MaterialId;
 use wk_voxel::{
-    apply_weather_rgb, is_standing_water, ChunkCoord, SkyWeatherParams, World, CHUNK_CELLS_H,
-    CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX,
+    apply_weather_rgb, continental_surface_y, is_standing_water, ChunkCoord, SkyWeatherParams,
+    World, CHUNK_CELLS_H, CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX,
 };
 
 use crate::atmosphere::{
@@ -87,6 +87,7 @@ pub fn fill_terrain_atlas(
             x,
             y_min,
             y_max,
+            width_cols,
             sea_level_y,
             dn_fg,
             &weather,
@@ -103,17 +104,29 @@ fn fill_column(
     x: i32,
     y_min: i32,
     y_max: i32,
+    width_cols: i32,
     sea_level_y: i32,
     dn_fg: f32,
     sky_weather: &SkyWeatherParams,
     sun_local: f32,
     sun_day: bool,
 ) {
+    // Stamped sky is full of Air chunks — don't walk empty sky above the
+    // worldgen crest / sea (tall sky_ceiling used to dominate fill cost).
+    let width = width_cols.max(1);
+    let paint_ceiling = continental_surface_y(world.seed.0, x, sea_level_y, width)
+        .max(sea_level_y)
+        + 6;
+    let y_scan_max = y_max.min(paint_ceiling + 1);
+    if y_scan_max <= y_min {
+        return;
+    }
+
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
     let cx = x.div_euclid(cw);
     let lx = x.rem_euclid(cw) as usize;
-    let cy_max = (y_max - 1).div_euclid(ch);
+    let cy_max = (y_scan_max - 1).div_euclid(ch);
     let cy_min = y_min.div_euclid(ch);
 
     let mut stack_exposure = 0.0f32;
@@ -127,7 +140,7 @@ fn fill_column(
             continue;
         };
         let chunk_y0 = cy * ch;
-        let y_hi = (chunk_y0 + ch).min(y_max);
+        let y_hi = (chunk_y0 + ch).min(y_scan_max);
         let y_lo = chunk_y0.max(y_min);
         if y_hi <= y_lo {
             continue;

@@ -9,11 +9,11 @@ use macroquad::prelude::*;
 use wk_material::MaterialId;
 use wk_voxel::{
     build_canopy_index_posed, carbon_ratio, celestial_moon_screen_pos_cfg,
-    celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, day_night_factor_cfg,
-    humidity_mean_norm, is_standing_water, precip_cover_fraction, resolve_organism_draw_cells,
-    shade_transmit_column, sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig,
-    CloudStore, Humidity, ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature,
-    Wind, World,
+    celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
+    day_night_factor_cfg, humidity_mean_norm, is_standing_water, precip_cover_fraction,
+    resolve_organism_draw_cells, shade_transmit_column, sky_rgb_at_height_weather, CanopyIndex,
+    CarbonBudget, ChunkCoord, ClimateConfig, CloudStore, Humidity, ModuleId, OrganismStore,
+    PosedModule, SkyWeatherParams, Temperature, Wind, World, CHUNK_CELLS_H, CHUNK_CELLS_W,
 };
 
 /// Reusable 1 px/cell atlas — fill on CPU, one Nearest upload + draw.
@@ -192,6 +192,7 @@ impl RidgeSilhouette {
             raw.push(column_surface_y(
                 world,
                 x,
+                width_cols,
                 bedrock_floor_y,
                 sky_ceiling_y,
                 sea_level_y,
@@ -212,9 +213,28 @@ fn column_surface_y(
     sky_ceiling: i32,
     sea_level: i32,
 ) -> i32 {
-    let mut y = sky_ceiling - 1;
-    while y >= bedrock {
-        if let Some(c) = world.get_cell(gx, y) {
+    // Hint near the worldgen crest — never walk the whole sky column.
+    let width = world.wrap_width.unwrap_or(0).max(1);
+    let hint = continental_surface_y(world.seed.0, gx, sea_level, width)
+        .max(sea_level)
+        .clamp(bedrock, sky_ceiling.saturating_sub(1));
+    let ch = CHUNK_CELLS_H as i32;
+    let cw = CHUNK_CELLS_W as i32;
+    let cx = gx.div_euclid(cw);
+    let lx = gx.rem_euclid(cw) as usize;
+    // Scan upward a short band for towers / water, then down to bedrock.
+    let y_up = (hint + 48).min(sky_ceiling - 1);
+    let cy_hi = y_up.div_euclid(ch);
+    let cy_lo = bedrock.div_euclid(ch);
+    for cy in (cy_lo..=cy_hi).rev() {
+        let Some(chunk) = world.chunks.get(&ChunkCoord::new(cx, cy)) else {
+            continue;
+        };
+        let chunk_y0 = cy * ch;
+        let y_hi = (chunk_y0 + ch).min(y_up + 1);
+        let y_lo = chunk_y0.max(bedrock);
+        for y in (y_lo..y_hi).rev() {
+            let c = chunk.get(lx, (y - chunk_y0) as usize);
             if c.material != MaterialId::Air {
                 return y;
             }
@@ -222,9 +242,8 @@ fn column_surface_y(
                 return y;
             }
         }
-        y -= 1;
     }
-    sea_level.max(bedrock)
+    hint.max(bedrock)
 }
 
 fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
@@ -564,11 +583,13 @@ fn sample_sky_weather(
     let precip_cover = precip_cover_fraction(clouds, 0, width_cols, wrap, downpour_mass);
     let sky_hy_min = (sea_level_y + 4).div_euclid(humidity.tile_cols.max(1));
     let humidity_mean = humidity_mean_norm(humidity, sky_hy_min);
+    // Stride sky-band temp samples — full tile walk is O(width×sky) at max size.
     let mut t_sum = 0.0f32;
     let mut t_n = 0u32;
     let hy_min = sky_hy_min;
-    for (&(_hx, hy), &temp_c) in &temperature.cells {
-        if hy < hy_min {
+    let stride = (temperature.cells.len() / 64).max(1);
+    for (i, (&(_hx, hy), &temp_c)) in temperature.cells.iter().enumerate() {
+        if i % stride != 0 || hy < hy_min {
             continue;
         }
         t_sum += temp_c;
