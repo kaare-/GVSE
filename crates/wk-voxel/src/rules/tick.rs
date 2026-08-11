@@ -303,10 +303,10 @@ pub fn tick_with_life(
         filter_loose_regions(world, &src)
     };
     if !grain_active.is_empty() {
-        // Deep settle for freefall / mid-air paint, and for the full-feel
-        // path (unit tests / Tab A/B). FPS defaults (every-other + quiet EO)
-        // stay on shallow repose polish — deep ×1024 on busy shores was the
-        // Super-Server physics gap (tick ~26 ms vs mirror ~13 ms).
+        // Deep settle for sky freefall / mid-air paint, and for full-feel
+        // (unit tests / Tab A/B). FPS defaults stay shallow unless wake or
+        // empty/haze Air under a grain — not wet shore seats (those were
+        // forcing ×1024 every rainy tick).
         let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
         let deep = !fps_path
             || freefall_woken > 0

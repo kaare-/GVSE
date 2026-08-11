@@ -65,8 +65,13 @@ pub const GRAIN_SETTLE_PASSES: u32 = 1024;
 /// bank fidget) and dominate the physics tick on Super-Server.
 pub const GRAIN_SETTLE_PASSES_SHALLOW: u32 = 8;
 
-/// True when any cell in `active` is a grain/litter with empty-ish Air
-/// under it (real freefall / F3 mid-air paint) — not a float-raft seat.
+/// True when any cell in `active` is mid-air over **empty/haze** Air
+/// (F3 sky paint / real freefall).
+///
+/// Must **not** treat sand over wet/lake Air as unsupported — dense grains
+/// sink through any sat, and shores under closed-loop rain would otherwise
+/// force deep ×1024 settle every tick (Super-Server: physics tick ~25 ms
+/// while a no-rain mirror showed ~12 ms).
 pub fn active_has_unsupported_grain(world: &World, active: &[ActiveChunk]) -> bool {
     for ac in active {
         let Some(chunk) = world.chunks.get(&ac.coord) else {
@@ -77,7 +82,8 @@ pub fn active_has_unsupported_grain(world: &World, active: &[ActiveChunk]) -> bo
         for y in ac.rect.y0..=ac.rect.y1 {
             for x in ac.rect.x0..=ac.rect.x1 {
                 let cell = chunk.get(x as usize, y as usize);
-                if !is_grain(cell.material) && !falls_through_empty_air(cell.material) {
+                let loose = is_grain(cell.material) || falls_through_empty_air(cell.material);
+                if !loose {
                     continue;
                 }
                 let gx = world.wrap_x(base_gx + x as i32);
@@ -88,7 +94,11 @@ pub fn active_has_unsupported_grain(world: &World, active: &[ActiveChunk]) -> bo
                 if below.material != MaterialId::Air {
                     continue;
                 }
-                // Float seats are supported for buoyant litter.
+                // Wet film / lake under a grain is a shore seat, not sky.
+                if below.sat.0 > GRAIN_REPOSE_HAZE_MAX {
+                    continue;
+                }
+                // Buoyant litter on a grounded float column is seated.
                 if falls_through_empty_air(cell.material)
                     && !cell.is_waterlogged_organic()
                     && floats_on_air_seat_world(world, below, gx, gy - 1)
@@ -514,7 +524,12 @@ pub fn wake_grains_for_settle_coords(world: &mut World, coords: &[ChunkCoord]) -
                     } else {
                         dirty.push((gx, gy));
                         dirty.push((gx, gy - 1));
-                        freefall += 1;
+                        // Only empty/haze Air is sky freefall. Wet/lake Air
+                        // under sand is a shore seat — counting it forced
+                        // deep settle every wake on rainy demos.
+                        if below.sat.0 <= GRAIN_REPOSE_HAZE_MAX {
+                            freefall += 1;
+                        }
                     }
                     continue;
                 }
