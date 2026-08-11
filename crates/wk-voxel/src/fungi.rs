@@ -1185,7 +1185,11 @@ pub fn step_mycelium_field_cfg(world: &mut World, cfg: &FungiConfig) {
     // Full-world orphan pass (not sample-capped): cream without shares either
     // inherits a neighbouring strain or clears. Roof-collapse / old oxidation
     // ghosts used to linger as red `M` dots when hubs filled the process budget.
-    heal_orphan_mycelium_pads(world);
+    // Every 4th field pulse (~64 ticks) — Super-Server demo paid ~1 ms/tick
+    // amortized when this ran every pulse over all chunks.
+    if tick % (MYCELIUM_FIELD_PERIOD * 4) == 0 {
+        heal_orphan_mycelium_pads(world);
+    }
     let colonized = collect_mycelium_field_cells(world, tick, seed, MYCELIUM_FIELD_MAX_CELLS);
     if colonized.is_empty() {
         return;

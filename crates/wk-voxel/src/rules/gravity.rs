@@ -46,9 +46,9 @@ pub fn apply_gravity_fall(world: &mut World) {
 /// full plan should wrap with [`partition_checkerboard`]. Regions in
 /// the same colour run on rayon when [`parallel::parallel_enabled`].
 ///
-/// Per-column pull probe: skip if no destination in `[y0, y1]` has free
-/// capacity **and** mobile sat above. Full-ocean columns are all-full
-/// (old "any sat above" probe false-fired and paid a second walk).
+/// Per-column source probe: if no mobile sat sits in `(y0, y1+1]` the
+/// column cannot pull this pass — skip it. (A stricter "free+sat" probe
+/// regressed on Super-Server shores — more probe reads, little skip.)
 /// Odd-step gravity cadence is unchanged.
 pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
     let hydro = world.hydro;
@@ -57,17 +57,10 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
         let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
         for x in ac.rect.x0..=ac.rect.x1 {
             let gx = base_gx + x as i32;
-            let mut any_pull = false;
+            let mut any_mobile = false;
             for y in ac.rect.y0..=ac.rect.y1 {
                 let gy = base_gy + y as i32;
                 // SAFETY: ptrs cover own + cy+1; see [`crate::parallel`].
-                let Some(cur) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy) }) else {
-                    continue;
-                };
-                let cap = water_capacity_with(cur.material, &hydro);
-                if cap == 0 || cur.sat.0 >= cap {
-                    continue;
-                }
                 let Some(above) =
                     (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy + 1) })
                 else {
@@ -79,10 +72,10 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 if water_capacity_with(above.material, &hydro) == 0 {
                     continue;
                 }
-                any_pull = true;
+                any_mobile = true;
                 break;
             }
-            if !any_pull {
+            if !any_mobile {
                 continue;
             }
             for y in ac.rect.y0..=ac.rect.y1 {

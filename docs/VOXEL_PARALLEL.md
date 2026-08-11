@@ -66,14 +66,14 @@ Low risk: no new write-set proofs.
 **off**. Unit/scenario `tick()` uses [`PerfConfig::full_feel`] (×12,
 no early-out, parallel off).
 
-Super-Server demo ~22 ms wall / ~13 ms physics (water flow ~2 ms;
-gravity ~6 ms). Outside CA: temperature props refresh was a full-height
-column walk — now early-outs Air/Buried from rock estimate and scans
-only the surface band.
+Super-Server demo ~20 ms wall after temp surface-band props (~17 ms/call)
+and seepage chunk-local. Gravity stays on the any-sat column skip
+(stricter free+sat probe regressed). Mycelium orphan heal every 4th
+field pulse; phase column gate starts near rock∪sea not sky ceiling.
 
 **Rejected:** pairing away odd-step gravity (fatter dirty halo → net
 regress). Flow / seepage single-pass + chunk-local; open ocean tops
-skip confined BFS; gravity skips columns with no free+sat pull.
+skip confined BFS.
 
 ## Phase 2 — Fields outside the CA
 
