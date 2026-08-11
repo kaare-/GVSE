@@ -49,7 +49,9 @@ pub fn apply_water_flow(world: &mut World) {
 }
 
 /// How often a quiet world re-scans confined head across loaded chunks.
-const CONFINED_HEAD_WAKE_EVERY: u64 = 8;
+/// Was 8 (~1–2 ms amortized on Super-Server); 16 keeps pipes honest
+/// enough without eating the quiet-world physics budget.
+const CONFINED_HEAD_WAKE_EVERY: u64 = 16;
 /// Max sat moved per confined free-surface → rising-column transfer.
 const CONFINED_HEAD_RATE: i32 = 32;
 /// Cap BFS size when walking a pressure-connected wet-Air body.

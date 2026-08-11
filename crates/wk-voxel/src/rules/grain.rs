@@ -65,6 +65,43 @@ pub const GRAIN_SETTLE_PASSES: u32 = 1024;
 /// bank fidget) and dominate the physics tick on Super-Server.
 pub const GRAIN_SETTLE_PASSES_SHALLOW: u32 = 8;
 
+/// True when any cell in `active` is a grain/litter with empty-ish Air
+/// under it (real freefall / F3 mid-air paint) — not a float-raft seat.
+pub fn active_has_unsupported_grain(world: &World, active: &[ActiveChunk]) -> bool {
+    for ac in active {
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            continue;
+        };
+        let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
+        let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
+        for y in ac.rect.y0..=ac.rect.y1 {
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let cell = chunk.get(x as usize, y as usize);
+                if !is_grain(cell.material) && !falls_through_empty_air(cell.material) {
+                    continue;
+                }
+                let gx = world.wrap_x(base_gx + x as i32);
+                let gy = base_gy + y as i32;
+                let Some(below) = world.get_cell(gx, gy - 1) else {
+                    return true;
+                };
+                if below.material != MaterialId::Air {
+                    continue;
+                }
+                // Float seats are supported for buoyant litter.
+                if falls_through_empty_air(cell.material)
+                    && !cell.is_waterlogged_organic()
+                    && floats_on_air_seat_world(world, below, gx, gy - 1)
+                {
+                    continue;
+                }
+                return true;
+            }
+        }
+    }
+    false
+}
+
 /// Repose `max_step` bonus from mycelium intensity on Organic (0..=2).
 #[inline]
 pub fn mycelium_repose_bonus(cell: Cell) -> i32 {
@@ -443,9 +480,10 @@ pub fn wake_grains_for_settle_coords(world: &mut World, coords: &[ChunkCoord]) -
                 };
                 if is_grain(cell.material) && falls_through_empty_air(below.material) {
                     if raft_rests_on_float_water_world(world, gx, gy - 1) {
+                        // Cargo on a float raft — punch handles this; not a
+                        // sky freefall (must not trip deep ×1024 settle).
                         dirty.push((gx, gy));
                         dirty.push((gx, gy - 1));
-                        freefall += 1;
                         let mut y = gy - 2;
                         while let Some(c) = world.get_cell(gx, y) {
                             if falls_through_empty_air(c.material) {

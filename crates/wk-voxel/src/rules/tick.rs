@@ -12,7 +12,8 @@ use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
 use crate::grid::World;
 
 use super::grain::{
-    settle_loose_grains_regions, GRAIN_SETTLE_PASSES, GRAIN_SETTLE_PASSES_SHALLOW,
+    active_has_unsupported_grain, settle_loose_grains_regions, GRAIN_SETTLE_PASSES,
+    GRAIN_SETTLE_PASSES_SHALLOW,
 };
 use super::gravity::apply_gravity_fall_regions;
 use super::seepage::apply_seepage_regions;
@@ -302,10 +303,15 @@ pub fn tick_with_life(
         filter_loose_regions(world, &src)
     };
     if !grain_active.is_empty() {
-        // Deep settle only for freefall / small paint dirty; busy shores
-        // get a shallow repose polish (was burning toward ×1024 passes).
-        let area = active_cell_area(&grain_active);
-        let passes = if freefall_woken > 0 || area <= 1024 {
+        // Deep settle for freefall / mid-air paint, and for the full-feel
+        // path (unit tests / Tab A/B). FPS defaults (every-other + quiet EO)
+        // stay on shallow repose polish — deep ×1024 on busy shores was the
+        // Super-Server physics gap (tick ~26 ms vs mirror ~13 ms).
+        let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
+        let deep = !fps_path
+            || freefall_woken > 0
+            || active_has_unsupported_grain(world, &grain_active);
+        let passes = if deep {
             GRAIN_SETTLE_PASSES
         } else {
             GRAIN_SETTLE_PASSES_SHALLOW
@@ -332,9 +338,9 @@ pub fn tick_with_life(
     }
 
     // Geotech: roof / overhang collapse after grain has seated.
-    // Cadence-gated — Super-Server tail profile ~1.3 ms/full-grid call;
-    // every other tick keeps cliffs responding within 2 frames.
-    const FAILURE_EVERY: u64 = 2;
+    // Cadence-gated — full-grid ~1.3 ms/call on Super-Server; every 4
+    // ticks keeps cliffs responding without owning the quiet-world budget.
+    const FAILURE_EVERY: u64 = 4;
     let failure_stats = if world.tick % FAILURE_EVERY == 0 {
         crate::failure::apply_failure(world, failure, geotech)
     } else {

@@ -15,16 +15,17 @@ use std::time::{Duration, Instant};
 
 use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
-    apply_failure, apply_flow_erosion, apply_gravity_fall_regions, apply_karst_dissolution,
-    apply_phase, apply_rain_with_temp, apply_seepage_regions, apply_water_flow_regions,
-    clear_all_dirty, find_plant_slot, humidity_diffuse_due, partition_checkerboard, plan_active,
-    punch_through_floating_rafts, rise_and_soak_buoyant_litter, set_parallel_enabled,
-    settle_loose_grains_regions, stamp_world, step_mycelium_field, temperature_step_due,
-    tick_with_perf, wake_confined_head, wake_grains_for_settle, Blueprint, ClimateConfig,
-    CloudConfig, CloudStore, CondensationConfig, EvapConfig, FailureConfig, Genome, GrainConfig,
-    Humidity, KarstConfig, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, RainConfig,
-    Temperature, Wind, World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_QUIET_AREA,
-    FLOW_SUBSTEPS, FLOW_SUBSTEPS_MIN, GRAIN_SETTLE_PASSES_SHALLOW,
+    active_has_unsupported_grain, apply_failure, apply_flow_erosion,
+    apply_gravity_fall_regions, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
+    apply_seepage_regions, apply_water_flow_regions, clear_all_dirty, find_plant_slot,
+    humidity_diffuse_due, partition_checkerboard, plan_active, punch_through_floating_rafts,
+    rise_and_soak_buoyant_litter, set_parallel_enabled, settle_loose_grains_regions, stamp_world,
+    step_mycelium_field, temperature_step_due, tick_with_perf, wake_confined_head,
+    wake_grains_for_settle, Blueprint, ClimateConfig, CloudConfig, CloudStore, CondensationConfig,
+    EvapConfig, FailureConfig, Genome, GrainConfig, Humidity, KarstConfig, OrganismStore,
+    OrographicConfig, PerfConfig, PhaseConfig, RainConfig, Temperature, Wind, World,
+    WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W, FLOW_QUIET_AREA, FLOW_SUBSTEPS,
+    FLOW_SUBSTEPS_MIN, GRAIN_SETTLE_PASSES, GRAIN_SETTLE_PASSES_SHALLOW,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -574,8 +575,14 @@ fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum
     .collect();
     a.plan_clear += t0.elapsed();
     if !grain_active.is_empty() {
+        let deep = active_has_unsupported_grain(world, &grain_active);
+        let passes = if deep {
+            GRAIN_SETTLE_PASSES
+        } else {
+            GRAIN_SETTLE_PASSES_SHALLOW
+        };
         let t0 = Instant::now();
-        settle_loose_grains_regions(world, &grain_active, None, GRAIN_SETTLE_PASSES_SHALLOW);
+        settle_loose_grains_regions(world, &grain_active, None, passes);
         a.settle += t0.elapsed();
     }
     if world.tick % 4 == 0 {
@@ -589,7 +596,7 @@ fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum
             let sink = plan_active(world);
             if !sink.is_empty() {
                 let t0 = Instant::now();
-                settle_loose_grains_regions(world, &sink, None, GRAIN_SETTLE_PASSES_SHALLOW);
+                settle_loose_grains_regions(world, &sink, None, GRAIN_SETTLE_PASSES);
                 a.settle += t0.elapsed();
             }
         }
@@ -599,7 +606,7 @@ fn timed_physics_tick(world: &mut World, perf: &PerfConfig, a: &mut PhysicsAccum
     rise_and_soak_buoyant_litter(world);
     a.rise_soak += t0.elapsed();
 
-    if world.tick % 2 == 0 {
+    if world.tick % 4 == 0 {
         let t0 = Instant::now();
         let _ = apply_failure(world, &FailureConfig::default(), None);
         a.failure += t0.elapsed();
