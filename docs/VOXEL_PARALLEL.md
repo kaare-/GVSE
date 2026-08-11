@@ -66,10 +66,10 @@ Low risk: no new write-set proofs.
 **off**. Unit/scenario `tick()` uses [`PerfConfig::full_feel`] (×12,
 no early-out, parallel off).
 
-Super-Server demo ~16.8 ms wall. Gravity uses chunk-local own+cy+1
-indexing (flow/seepage pattern). Cold avalanche: warm empty-dirty
-early-out + `period_ticks` cadence with phase; flow erosion every
-other tick.
+Super-Server demo **~11.7 ms wall** (~85 FPS; +plants ~12.5). Chunk-local
+gravity cut CA ~6→~1.2 ms. Cold avalanche warm empty-dirty early-out +
+`period_ticks` (stress ~4.4→~0.02). Flow erosion every other tick.
+Stress wall ~13.5 ms. Parallel still slower on narrow dirty — leave off.
 
 **Rejected:** pairing away odd-step gravity (fatter dirty halo → net
 regress). Flow / seepage single-pass + chunk-local; open ocean tops
