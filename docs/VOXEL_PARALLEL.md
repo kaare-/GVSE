@@ -62,16 +62,17 @@ Low risk: no new write-set proofs.
 ## Phase 1b — Cadence (landed defaults)
 
 `PerfConfig::default`: every-other surface flow + quiet early-out
-**on** (max 8 substeps; gravity every step), `parallel_physics`
+**on** (max 6 substeps; gravity every step), `parallel_physics`
 **off**. Unit/scenario `tick()` uses [`PerfConfig::full_feel`] (×12,
-no early-out, parallel off). In-tick `PhysicsTimings` show demo cost
-is **water flow + gravity** (grain deep-settle / punch ~0).
+no early-out, parallel off).
 
-**Rejected:** pairing away odd-step gravity (fewer flow passes but
-fatter dirty halo → each flow call ~2× slower; net regress on
-Super-Server). Flow / seepage scans stay single-pass
-(compute-then-apply; checkerboard not required). Open ocean/lake tops
-skip the confined BFS; cascade look-ahead is chunk-local.
+After open-lake confined skip, Super-Server demo is ~23 ms wall /
+~14 ms physics (water flow ~2 ms; **gravity ~7 ms** dominates CA).
+
+**Rejected:** pairing away odd-step gravity (fatter dirty halo → net
+regress). Flow / seepage single-pass; open ocean tops skip confined
+BFS; cascade look-ahead chunk-local; gravity skips columns with no
+mobile sat in-range.
 
 ## Phase 2 — Fields outside the CA
 

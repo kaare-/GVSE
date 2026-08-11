@@ -334,10 +334,13 @@ fn tick_with_life_inner(
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
     let mut start_area: usize = 0;
-    // FPS knobs on → cap at 8 substeps. Gravity runs every step;
-    // surface flow is every-other. full_feel keeps the full ×12 path.
+    // FPS knobs on → cap at [`FLOW_SUBSTEPS_MIN`] (6). Was 8 when flow
+    // owned the tick; after open-lake confined skip, gravity dominates
+    // (~7 ms) and the extra 2 substeps were mostly polish. full_feel
+    // keeps ×12. Odd-step gravity stays — pairing it away fattened the
+    // dirty halo.
     let max_steps = if perf.flow_every_other_substep && perf.flow_quiet_early_out {
-        FLOW_SUBSTEPS_MIN + 2 // 8
+        FLOW_SUBSTEPS_MIN // 6
     } else {
         FLOW_SUBSTEPS
     };

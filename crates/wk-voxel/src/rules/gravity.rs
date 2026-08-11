@@ -45,15 +45,42 @@ pub fn apply_gravity_fall(world: &mut World) {
 /// One checkerboard colour at a time — callers that already hold a
 /// full plan should wrap with [`partition_checkerboard`]. Regions in
 /// the same colour run on rayon when [`parallel::parallel_enabled`].
+///
+/// Per-column source probe: if no mobile sat sits in `(y0, y1+1]` the
+/// column cannot pull this pass — skip it. Dirty shore halos are mostly
+/// empty sky / full ocean; this avoids the empty→empty two-read path on
+/// dry columns without changing odd-step gravity cadence.
 pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
     let hydro = world.hydro;
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
-        for y in ac.rect.y0..=ac.rect.y1 {
-            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
-            for x in ac.rect.x0..=ac.rect.x1 {
-                let gx = ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32;
-                // SAFETY: ptrs cover this region's pull write-set; see
-                // [`crate::parallel`].
+        let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
+        let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
+        for x in ac.rect.x0..=ac.rect.x1 {
+            let gx = base_gx + x as i32;
+            // Any porous sat that a destination in [y0, y1] could pull?
+            let mut any_mobile = false;
+            for y in ac.rect.y0..=ac.rect.y1 {
+                let gy = base_gy + y as i32;
+                // SAFETY: ptrs cover own + cy+1; see [`crate::parallel`].
+                let Some(above) =
+                    (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy + 1) })
+                else {
+                    continue;
+                };
+                if above.sat.is_empty() {
+                    continue;
+                }
+                if water_capacity_with(above.material, &hydro) == 0 {
+                    continue;
+                }
+                any_mobile = true;
+                break;
+            }
+            if !any_mobile {
+                continue;
+            }
+            for y in ac.rect.y0..=ac.rect.y1 {
+                let gy = base_gy + y as i32;
                 let Some(cur) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy) }) else {
                     continue;
                 };

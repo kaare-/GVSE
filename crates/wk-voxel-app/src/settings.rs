@@ -963,7 +963,7 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Performance", |ui| {
                     ui.label(
                         None,
-                        "Defaults favour FPS (every-other + quiet EO → max 8 substeps; rayon off).",
+                        "Defaults favour FPS (every-other + quiet EO → max 6 substeps; rayon off).",
                     );
                     ui.label(
                         None,
