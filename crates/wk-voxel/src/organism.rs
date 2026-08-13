@@ -1933,7 +1933,8 @@ fn step_land_plant(
         };
     }
 
-    let (drink_e, sat_taken, drink_at) = drink_plant_with_moist(world, atom, moist);
+    let (drink_e, sat_taken, drink_at) =
+        drink_plant_with_moist(world, atom, moist, bathing);
     // Per-leaf column Beer–Lambert at posed cells (flop/pile). Lower leaves
     // and plants under taller neighbours harvest less than open tips.
     // `posed_indices` is this plant's slice of the tick's posed list — not a

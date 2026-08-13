@@ -562,17 +562,24 @@ pub fn drink_leaves(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32)
 /// bed is comfortably moist, stop stripping pores. Fallen / lake plants
 /// still sip through dangling roots (standing water regenerates).
 pub fn drink_plant(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32)) {
-    let moist = plant_moisture_frac(world, atom);
-    drink_plant_with_moist(world, atom, moist)
+    let root_m = root_moisture_frac(world, atom);
+    let leaf_b = leaf_bathing_frac(world, atom);
+    drink_plant_with_moist(world, atom, root_m.max(leaf_b), leaf_b >= 0.12)
 }
 
-/// [`drink_plant`] when the caller already sampled [`plant_moisture_frac`].
+/// [`drink_plant`] when the caller already sampled moisture / bathing.
 pub fn drink_plant_with_moist(
     world: &mut World,
     atom: &mut Atom,
     moist: f32,
+    bathing: bool,
 ) -> (f32, u32, (i32, i32)) {
-    let (e_l, s_l, at_l) = drink_leaves(world, atom);
+    // Dry upright leaves never sip — skip the Photosystem standing-water walk.
+    let (e_l, s_l, at_l) = if bathing || atom.fallen {
+        drink_leaves(world, atom)
+    } else {
+        (0.0, 0, (atom.gx, atom.gy))
+    };
     let need_root_sip = atom.fallen || moist < ROOT_DRINK_COMFORT_FRAC;
     let (e_r, s_r, at_r) = if need_root_sip {
         drink_roots(world, atom)
