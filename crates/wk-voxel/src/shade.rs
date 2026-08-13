@@ -267,6 +267,38 @@ pub fn effective_photo_light(
     shade_harvest_light(attenuated, genome.shade_efficiency)
 }
 
+/// [`shade_transmit`] memoized for one organism tick (`(wx, wy)` → transmit).
+pub fn cached_shade_transmit(
+    index: &CanopyIndex,
+    cache: &mut HashMap<(i32, i32), f32>,
+    wx: i32,
+    sample_y: i32,
+) -> f32 {
+    if let Some(&t) = cache.get(&(wx, sample_y)) {
+        return t;
+    }
+    let t = shade_transmit(index, wx, sample_y);
+    cache.insert((wx, sample_y), t);
+    t
+}
+
+/// [`effective_photo_light`] with a shared transmit cache for the tick.
+pub fn effective_photo_light_cached(
+    index: &CanopyIndex,
+    cache: &mut HashMap<(i32, i32), f32>,
+    wx: i32,
+    sample_y: i32,
+    sky_l0: f32,
+    genome: &Genome,
+) -> f32 {
+    if sky_l0 <= 0.01 {
+        return 0.0;
+    }
+    let transmit = cached_shade_transmit(index, cache, wx, sample_y);
+    let attenuated = (sky_l0 * transmit).clamp(0.0, 1.0);
+    shade_harvest_light(attenuated, genome.shade_efficiency)
+}
+
 /// Sum harvest-remapped light over posed Photosystems listed in `indices`.
 ///
 /// Each leaf samples its own column exposure — lower leaves self-shade.
@@ -276,6 +308,18 @@ pub fn sum_posed_photo_light_of(
     indices: &[usize],
     sky_at: &mut dyn FnMut(i32, i32) -> f32,
     genome: &Genome,
+) -> f32 {
+    sum_posed_photo_light_of_cached(index, posed, indices, sky_at, genome, None)
+}
+
+/// [`sum_posed_photo_light_of`] with optional per-tick shade transmit cache.
+pub fn sum_posed_photo_light_of_cached(
+    index: &CanopyIndex,
+    posed: &[PosedModule],
+    indices: &[usize],
+    sky_at: &mut dyn FnMut(i32, i32) -> f32,
+    genome: &Genome,
+    mut shade_cache: Option<&mut HashMap<(i32, i32), f32>>,
 ) -> f32 {
     let mut sum = 0.0_f32;
     let mut any = false;
@@ -288,7 +332,12 @@ pub fn sum_posed_photo_light_of(
         }
         any = true;
         let sky = sky_at(p.wx, p.wy);
-        sum += effective_photo_light(index, p.wx, p.wy, sky, genome);
+        sum += match shade_cache.as_mut() {
+            Some(cache) => {
+                effective_photo_light_cached(index, cache, p.wx, p.wy, sky, genome)
+            }
+            None => effective_photo_light(index, p.wx, p.wy, sky, genome),
+        };
     }
     if any {
         sum

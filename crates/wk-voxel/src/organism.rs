@@ -52,8 +52,9 @@ use crate::plant::{
     PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
 };
 use crate::shade::{
-    build_canopy_index_posed, canopy_top_y, group_posed_by_atom, posed_canopy_sample_of,
-    shade_transmit, sum_posed_photo_light_of, CanopyIndex, PosedModule,
+    build_canopy_index_posed, canopy_top_y, effective_photo_light_cached, group_posed_by_atom,
+    posed_canopy_sample_of, shade_transmit, sum_posed_photo_light_of_cached, CanopyIndex,
+    PosedModule,
 };
 
 /// Default **entity** ceiling (Tab → Creatures can raise/lower).
@@ -1023,8 +1024,9 @@ impl OrganismStore {
             crate::rules::collect_floating_organic_columns_near(world, &plant_cols, 6)
         };
         pass.float_cols = t0.elapsed();
-        // Per-tick (gx, gy) → lit_sky cache. Many leaves / plants share columns.
+        // Per-tick caches. Many leaves / plants share columns.
         let mut lit_cache: HashMap<(i32, i32), f32> = HashMap::new();
+        let mut shade_cache: HashMap<(i32, i32), f32> = HashMap::new();
 
         // Empty store: still allow mycelium field → fruiting body emergence
         // (and corpse settle). Spores need a living body afterward.
@@ -1088,6 +1090,7 @@ impl OrganismStore {
                     &posed,
                     posed_indices,
                     &mut lit_cache,
+                    &mut shade_cache,
                     &trunks,
                     &live_roots,
                     &live_photos,
@@ -1718,6 +1721,7 @@ fn step_land_plant(
     posed: &[PosedModule],
     posed_indices: &[usize],
     lit_cache: &mut HashMap<(i32, i32), f32>,
+    shade_cache: &mut HashMap<(i32, i32), f32>,
     trunks: &std::collections::HashSet<(i32, i32)>,
     live_roots: &std::collections::HashSet<(i32, i32)>,
     live_photos: &std::collections::HashSet<(i32, i32)>,
@@ -1938,7 +1942,7 @@ fn step_land_plant(
         posed_canopy_sample_of(posed, posed_indices, (atom.gx, canopy_top_y(atom)));
     let tip_x = world.wrap_x(tip_x);
     let submerged = is_wet_air(world, tip_x, tip_y);
-    let mut light_sum = sum_posed_photo_light_of(
+    let mut light_sum = sum_posed_photo_light_of_cached(
         canopy,
         posed,
         posed_indices,
@@ -1958,6 +1962,7 @@ fn step_land_plant(
             )
         },
         &atom.genome,
+        Some(shade_cache),
     );
     // Fallback when pose missed leaves: tip sample × count (pre-pose path).
     if light_sum <= 0.0 && n_photo > 0 {
@@ -1974,7 +1979,8 @@ fn step_land_plant(
             sun_local,
             is_day,
         );
-        let tip = crate::shade::effective_photo_light(canopy, tip_x, tip_y, sky, &atom.genome);
+        let tip =
+            effective_photo_light_cached(canopy, shade_cache, tip_x, tip_y, sky, &atom.genome);
         light_sum = tip * n_photo as f32;
     }
     // Mean leaf light for submerged stem-urge threshold.
