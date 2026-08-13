@@ -292,6 +292,9 @@ pub struct Atom {
     /// Symbiont harvest: sugar received on the latest organism tick.
     #[serde(default)]
     pub sym_sugar_recv_last: u8,
+    /// Last sampled pore/leaf moisture frac (land plants; staggered resample).
+    #[serde(default)]
+    pub moist_frac_cache: f32,
 }
 
 impl Atom {
@@ -329,6 +332,7 @@ impl Atom {
             sym_sugar_paid_last: 0,
             sym_water_sent_last: 0,
             sym_sugar_recv_last: 0,
+            moist_frac_cache: 0.0,
         }
     }
 
@@ -1936,11 +1940,23 @@ fn step_land_plant(
     // Roots bank surplus above the spawn tank (starch analogy).
     sync_root_storage(atom);
     // Pore moisture under roots, or free standing water on leaves.
-    // One scan feeds drought, bathing, and drink (drink used to rescan).
-    let root_moist = crate::plant::root_moisture_frac(world, atom);
-    let leaf_bath = crate::plant::leaf_bathing_frac(world, atom);
-    let moist = root_moist.max(leaf_bath);
-    let bathing = leaf_bath >= 0.12;
+    // Grounded upright plants skip leaf-bathing scans (shore leaves don't
+    // drink). Root moisture is resampled every other tick and cached.
+    let (moist, bathing) = if atom.fallen || !grounded {
+        let root_moist = crate::plant::root_moisture_frac(world, atom);
+        let leaf_bath = crate::plant::leaf_bathing_frac(world, atom);
+        let moist = root_moist.max(leaf_bath);
+        atom.moist_frac_cache = moist;
+        (moist, leaf_bath >= 0.12)
+    } else if atom.age_ticks < 2
+        || (atom.age_ticks.wrapping_add(entity_id as u64)) % 2 == 0
+    {
+        let root_moist = crate::plant::root_moisture_frac(world, atom);
+        atom.moist_frac_cache = root_moist;
+        (root_moist, false)
+    } else {
+        (atom.moist_frac_cache, false)
+    };
     let drought = drought_band(moist);
     let dormant = matches!(drought, DroughtBand::Dormant);
     if dormant {
