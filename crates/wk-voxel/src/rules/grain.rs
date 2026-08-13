@@ -1061,18 +1061,73 @@ fn drift_move_column(world: &mut World, gx: i32, bottom_y: i32, height: i32, nx:
     }
 }
 
+/// One floating Organic column at `gx`, if present: `(bottom_y, height)`.
+pub fn floating_organic_column_at(world: &World, gx: i32) -> Option<(i32, i32)> {
+    let gx = world.wrap_x(gx);
+    let cx = gx.div_euclid(CHUNK_CELLS_W as i32);
+    let lx = gx.rem_euclid(CHUNK_CELLS_W as i32) as usize;
+    let mut best: Option<(i32, i32)> = None;
+    for &coord in world.chunks.keys() {
+        if coord.cx != cx {
+            continue;
+        }
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        if !chunk.has_organic {
+            continue;
+        }
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        for ly in 0..CHUNK_CELLS_H {
+            let cell = chunk.get(lx, ly);
+            if cell.material != MaterialId::Organic || cell.is_waterlogged_organic() {
+                continue;
+            }
+            let gy = y0 + ly as i32;
+            if let Some(below_org) = world.get_cell(gx, gy - 1) {
+                if below_org.material == MaterialId::Organic {
+                    continue;
+                }
+            }
+            let Some(seat) = world.get_cell(gx, gy - 1) else {
+                continue;
+            };
+            if !drift_float_seat(seat) {
+                continue;
+            }
+            let mut height = 1i32;
+            while let Some(above) = world.get_cell(gx, gy + height) {
+                if above.material != MaterialId::Organic {
+                    break;
+                }
+                height += 1;
+                if height > 48 {
+                    break;
+                }
+            }
+            best = Some((gy, height));
+        }
+    }
+    best
+}
+
 /// Floating Organic columns: `gx → (waterline_y, stack_height)`.
+///
+/// Skips chunks that never held Organic (`has_organic`).
 pub fn collect_floating_organic_columns(
     world: &World,
 ) -> std::collections::HashMap<i32, (i32, i32)> {
     let mut columns: std::collections::HashMap<i32, (i32, i32)> =
         std::collections::HashMap::new();
     for &coord in world.chunks.keys() {
-        let x0 = coord.cx * CHUNK_CELLS_W as i32;
-        let y0 = coord.cy * CHUNK_CELLS_H as i32;
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
+        if !chunk.has_organic {
+            continue;
+        }
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
         for ly in 0..CHUNK_CELLS_H {
             for lx in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(lx, ly);
@@ -1106,6 +1161,37 @@ pub fn collect_floating_organic_columns(
                     }
                 }
                 columns.insert(gx, (gy, height));
+            }
+        }
+    }
+    columns
+}
+
+/// Float columns near plant crowns (`xs` ± `pad`) — organism tick path.
+pub fn collect_floating_organic_columns_near(
+    world: &World,
+    xs: &[i32],
+    pad: i32,
+) -> std::collections::HashMap<i32, (i32, i32)> {
+    let mut columns: std::collections::HashMap<i32, (i32, i32)> =
+        std::collections::HashMap::new();
+    if xs.is_empty() {
+        return columns;
+    }
+    // No Organic anywhere → free.
+    if !world.chunks.values().any(|c| c.has_organic) {
+        return columns;
+    }
+    let pad = pad.max(0);
+    let mut seen = std::collections::HashSet::new();
+    for &x in xs {
+        for dx in -pad..=pad {
+            let gx = world.wrap_x(x + dx);
+            if !seen.insert(gx) {
+                continue;
+            }
+            if let Some(col) = floating_organic_column_at(world, gx) {
+                columns.insert(gx, col);
             }
         }
     }

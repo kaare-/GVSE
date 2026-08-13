@@ -99,6 +99,11 @@ pub struct Chunk {
     /// litter scans skip pure water / sky / stone chunks.
     #[serde(default)]
     pub has_loose: bool,
+    /// Sticky occupancy: at least one `Organic` cell was written since
+    /// the flag was last cleared. Float-column / raft scans skip chunks
+    /// that never held litter.
+    #[serde(default)]
+    pub has_organic: bool,
 }
 
 /// Materials that participate in grain settle / float / punch passes.
@@ -128,6 +133,7 @@ impl Chunk {
             has_wet_air: false,
             has_limestone: false,
             has_loose: false,
+            has_organic: false,
         }
     }
 
@@ -174,6 +180,9 @@ impl Chunk {
         }
         if material_is_loose(cell.material) {
             self.has_loose = true;
+        }
+        if cell.material == MaterialId::Organic {
+            self.has_organic = true;
         }
     }
 

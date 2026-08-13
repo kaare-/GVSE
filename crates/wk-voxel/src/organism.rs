@@ -965,13 +965,12 @@ impl OrganismStore {
             .collect();
         // Transpiration return: (gx, gy, sat_units) → humidity mass.
         let mut transpired: Vec<(i32, i32, u32)> = Vec::new();
-        // Floating-Organic raft columns: once per organism tick. Seat / tip /
-        // holdfast helpers used to re-scan the whole world per plant (and
-        // several times each) — that was O(plants × cells) and crushed FPS.
+        // Floating-Organic raft columns near living crowns only. Full-world
+        // scans were O(chunks×cells) every tick even with zero Organic.
         let float_columns = if plant_cols.is_empty() {
             std::collections::HashMap::new()
         } else {
-            crate::rules::collect_floating_organic_columns(world)
+            crate::rules::collect_floating_organic_columns_near(world, &plant_cols, 6)
         };
 
         // Empty store: still allow mycelium field → fruiting body emergence
@@ -1506,6 +1505,36 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
         .collect();
     if land_idx.len() < 2 {
         return;
+    }
+    // Fast path: unique columns with clearance already satisfied → skip sort/walk.
+    {
+        use std::collections::HashSet;
+        let mut cols: HashSet<i32> = HashSet::with_capacity(land_idx.len());
+        let mut crowded = false;
+        for &i in &land_idx {
+            let gx = atoms[i].gx;
+            if !cols.insert(gx) {
+                crowded = true;
+                break;
+            }
+        }
+        if !crowded {
+            for &gx in &cols {
+                for d in 1..=SPROUT_CROWN_CLEARANCE {
+                    let n = world.wrap_x(gx + d);
+                    if cols.contains(&n) {
+                        crowded = true;
+                        break;
+                    }
+                }
+                if crowded {
+                    break;
+                }
+            }
+        }
+        if !crowded {
+            return;
+        }
     }
     // Oldest first — they claim space.
     land_idx.sort_by_key(|&i| std::cmp::Reverse(atoms[i].age_ticks));
@@ -2126,13 +2155,33 @@ pub fn resolve_organism_draw_cells(
     use std::collections::HashSet;
     let mut occupied: HashSet<(i32, i32)> = HashSet::new();
     let mut out = Vec::with_capacity(atoms.iter().map(|a| a.body.len()).sum());
+    let any_fallen = atoms.iter().any(|a| a.fallen);
+    let any_stemless = atoms.iter().any(|a| {
+        a.body.iter().any(|(_, _, m)| *m == ModuleId::Photosystem)
+            && crate::plant::stem_count(a) == 0
+    });
     for (atom_idx, atom) in atoms.iter().enumerate() {
         for &(dx0, dy0, mid) in &atom.body {
             let (dx, dy) = atom.fallen_draw_offset(dx0, dy0);
             if atom.fallen && fallen_pose_past_extent(mid, dx) {
                 continue;
             }
-            let (wx0, wy0) = frond_draw_cell(world, atom, dx, dy, mid, tick, wind_vx);
+            // Upright woody grove: body cells are the draw pose (no water probes).
+            let (wx0, wy0) = if !any_fallen
+                && !any_stemless
+                && (mid != ModuleId::Photosystem
+                    || atom.body.iter().any(|(_, _, m)| *m == ModuleId::Stem))
+            {
+                let nod = if mid == ModuleId::Photosystem {
+                    let cant = leaf_cantilever(atom, dx, dy);
+                    (cant - LEAF_SUPPORT_WOODY).max(0).min(2)
+                } else {
+                    0
+                };
+                (atom.gx + dx as i32, atom.gy + dy as i32 - nod)
+            } else {
+                frond_draw_cell(world, atom, dx, dy, mid, tick, wind_vx)
+            };
             // Keep unwrapped draw X for the renderer (it paints wrap copies).
             // World queries use wrap_x.
             let wx = wx0;
@@ -2605,6 +2654,21 @@ pub fn frond_draw_cell(
         return (base_x, base_y);
     }
 
+    let cant = leaf_cantilever(atom, dx, dy);
+    let on_wood = atom
+        .body
+        .iter()
+        .any(|(_, _, m)| *m == ModuleId::Stem);
+
+    // Leaves attached to a trunk/branch stay in the canopy (no flow lean).
+    // Check before wet_band / water-drive probes — those dominate pose cost
+    // on dense woody groves.
+    if on_wood {
+        let nod = (cant - LEAF_SUPPORT_WOODY).max(0).min(2);
+        let wy = base_y - nod;
+        return (base_x, wy);
+    }
+
     let flow = local_water_drive(world, base_x, base_y);
     let wind = wind_vx.abs();
     // Emerged tissue feels air wind; submerged tissue only follows water flow
@@ -2624,18 +2688,6 @@ pub fn frond_draw_cell(
         -1
     };
     let lean_dir = if drive < FROND_STILL_WIND { 1 } else { dir };
-    let cant = leaf_cantilever(atom, dx, dy);
-    let on_wood = atom
-        .body
-        .iter()
-        .any(|(_, _, m)| *m == ModuleId::Stem);
-
-    // Leaves attached to a trunk/branch stay in the canopy (no flow lean).
-    if on_wood {
-        let nod = (cant - LEAF_SUPPORT_WOODY).max(0).min(2);
-        let wy = base_y - nod;
-        return (base_x, wy);
-    }
 
     let outward = if dx == 0 {
         lean_dir
