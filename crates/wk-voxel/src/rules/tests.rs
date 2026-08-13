@@ -1855,24 +1855,33 @@ fn flowing_water_scours_grounded_organic_bed_downhill() {
 
 #[test]
 fn floating_organic_raft_is_not_flow_eroded() {
-    // Lake surface Organic raft beside a cascade lip — wind owns this mat.
+    // Tall / mycelium-bound lake raft beside a cascade lip — wind owns this mat.
+    // (Thin unbound film may scour — see thin_floating_organic_scours_at_cascade.)
+    use super::grain::MYCELIUM_RAFT_BIND_MIN;
     let mut w = setup_column_world();
     for x in 3..=6 {
         // Deep water column so Organic floats (not grounded bed).
         for y in 1..=4 {
             w.set_cell(x, y, Cell::water());
         }
-        w.set_cell(x, 5, Cell::solid(MaterialId::Organic));
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.set_mycelium(MYCELIUM_RAFT_BIND_MIN.saturating_add(20));
+        w.set_cell(x, 5, org);
+        w.set_cell(x, 6, Cell::solid(MaterialId::Organic));
     }
     // Cascade lip at x=7 (empty below water surface height).
-    for y in 1..=5 {
+    for y in 1..=6 {
         w.set_cell(7, y, Cell::air());
     }
     // Give the lip a thin water sheet at the raft height so flow_bias sees
     // a cascade from the raft-side water under the Organic? Actually bed
     // scour looks under water cells — put water next to raft at surface.
     w.set_cell(6, 5, Cell::water()); // replace one Organic with water for bias
-    w.set_cell(5, 5, Cell::solid(MaterialId::Organic));
+    w.set_cell(6, 6, Cell::air());
+    let mut org = Cell::solid(MaterialId::Organic);
+    org.set_mycelium(MYCELIUM_RAFT_BIND_MIN.saturating_add(20));
+    w.set_cell(5, 5, org);
+    w.set_cell(5, 6, Cell::solid(MaterialId::Organic));
     let cfg = GrainConfig {
         erosion_rate: 1.0,
         max_events_per_tick: 64,
@@ -1880,7 +1889,7 @@ fn floating_organic_raft_is_not_flow_eroded() {
     };
     let org_before: Vec<(i32, i32)> = (3..=6)
         .flat_map(|x| {
-            (1..=6)
+            (1..=7)
                 .filter(|&y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
                 .map(|y| (x, y))
                 .collect::<Vec<_>>()
@@ -1895,9 +1904,59 @@ fn floating_organic_raft_is_not_flow_eroded() {
         assert_eq!(
             w.get_cell(x, y).map(|c| c.material),
             Some(MaterialId::Organic),
-            "floating raft Organic at ({x},{y}) must not be flow-scoured"
+            "bound floating raft Organic at ({x},{y}) must not be flow-scoured"
         );
     }
+}
+
+#[test]
+fn thin_floating_organic_scours_at_cascade() {
+    // Unbound 1-cell film at a cascade lip must wash away — otherwise
+    // shore mats seal water into sticky rings that never leave.
+    let mut w = setup_column_world();
+    for x in 3..=6 {
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+        w.set_cell(x, 5, Cell::solid(MaterialId::Organic));
+    }
+    for y in 1..=5 {
+        w.set_cell(7, y, Cell::air());
+    }
+    // Surface water at the lip contact so flow_bias sees a cascade.
+    w.set_cell(6, 5, Cell::water());
+    w.set_cell(5, 5, Cell::solid(MaterialId::Organic));
+    let cfg = GrainConfig {
+        erosion_rate: 1.0,
+        max_events_per_tick: 64,
+        ..GrainConfig::default()
+    };
+    let mut scoured = false;
+    for t in 0..80 {
+        w.tick = t;
+        apply_flow_erosion(&mut w, &cfg);
+        let remaining = (3..=6)
+            .filter(|&x| {
+                (4..=6).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+            })
+            .count();
+        if remaining < 3 {
+            scoured = true;
+            break;
+        }
+        // Deposits may land downstream of the lip.
+        let downstream = (7..=12).any(|x| {
+            (1..=6).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+        });
+        if downstream {
+            scoured = true;
+            break;
+        }
+    }
+    assert!(
+        scoured,
+        "thin unbound floating Organic must scour / wash at cascade lip"
+    );
 }
 
 #[test]
@@ -4608,6 +4667,110 @@ fn floating_organic_drifts_with_stream_without_wind() {
     assert!(
         xs.iter().any(|&x| x > x0),
         "stream drift should carry Organic down-gradient ({xs:?})"
+    );
+}
+
+#[test]
+fn river_organic_drifts_despite_still_lake_mats() {
+    // Global-mean stream push used to dilute river current with still-lake
+    // litter into a near-zero — mats looked glued. Per-column push must
+    // still carry the river film +x while lake mats stay put.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(30, y, Cell::solid(MaterialId::Bedrock));
+    }
+    // Still pond on the left (many floating mats, no gradient).
+    for x in 1..=10 {
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+        w.set_cell(x, 5, Cell::water());
+        if x % 2 == 0 {
+            w.set_cell(x, 6, Cell::solid(MaterialId::Organic));
+        }
+    }
+    // Streaming freeboard on the right.
+    for x in 12..=28 {
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+        let mut surface = Cell::air();
+        let sat = (255i32 - (x - 12) * 5).clamp(200, 255) as u8;
+        surface.sat = Sat(sat);
+        w.set_cell(x, 5, surface);
+    }
+    w.set_cell(15, 6, Cell::solid(MaterialId::Organic));
+    let x0 = 15;
+    let mut river_moved = false;
+    for tick in 0..700u64 {
+        w.tick = tick;
+        let (n, _, _) = drift_floating_organic(&mut w, 0.0, 4, None, None);
+        if n == 0 {
+            continue;
+        }
+        if (16..=28).any(|x| w.get_cell(x, 6).map(|c| c.material) == Some(MaterialId::Organic))
+        {
+            river_moved = true;
+            break;
+        }
+        // Also accept if the original cell vacated toward +x.
+        if w.get_cell(x0, 6).map(|c| c.material) != Some(MaterialId::Organic)
+            && (x0 + 1..=x0 + 4)
+                .any(|x| w.get_cell(x, 6).map(|c| c.material) == Some(MaterialId::Organic))
+        {
+            river_moved = true;
+            break;
+        }
+    }
+    assert!(
+        river_moved,
+        "river Organic must drift even when still-lake mats dominate column count"
+    );
+}
+
+#[test]
+fn thin_floating_organic_washes_over_cascade_lip() {
+    // Drift used to require a near-full float seat at the destination —
+    // cascade lips are empty Air, so shore film sealed into a sticky ring.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(1, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(14, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 2..=8 {
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+        let mut surface = Cell::air();
+        // Strong upstream sat → stream push toward +x (the lip).
+        let sat = (255i32 - (x - 2) * 8).clamp(200, 255) as u8;
+        surface.sat = Sat(sat);
+        w.set_cell(x, 5, surface);
+    }
+    // Cascade lip / empty freeboard just downstream of the film.
+    for y in 1..=6 {
+        w.set_cell(9, y, Cell::air());
+        w.set_cell(10, y, Cell::air());
+    }
+    w.set_cell(8, 6, Cell::solid(MaterialId::Organic));
+    let mut washed = false;
+    for tick in 0..800u64 {
+        w.tick = tick;
+        let _ = drift_floating_organic(&mut w, 0.0, 4, None, None);
+        // Washed onto the lip (or further) — left the float seat at x=8.
+        if w.get_cell(8, 6).map(|c| c.material) != Some(MaterialId::Organic)
+            && (9..=12).any(|x| {
+                (1..=7).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+            })
+        {
+            washed = true;
+            break;
+        }
+    }
+    assert!(
+        washed,
+        "thin unbound Organic must wash over cascade lip with stream push"
     );
 }
 

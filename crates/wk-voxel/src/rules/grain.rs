@@ -1038,7 +1038,8 @@ fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)], waterlog_
 /// `|wind|·tile_cols ≈ 0.2` (typical mean climate). Tall sails multiply this.
 const RAFT_DRIFT_BASE: f32 = 0.06;
 /// Stream/cascade contribution blended into raft push (with wind).
-const RAFT_DRIFT_FLOW_BASE: f32 = 0.14;
+/// Higher than wind-only base so river mats leave shore rings.
+const RAFT_DRIFT_FLOW_BASE: f32 = 0.22;
 /// Extra sail from each Organic cell stacked above the waterline.
 const RAFT_DRIFT_ORGANIC_SAIL: f32 = 0.35;
 /// Extra sail per cell of living plant height above the raft top.
@@ -1142,6 +1143,43 @@ fn drift_dest_clear(world: &World, nx: i32, bottom_y: i32, height: i32) -> bool 
         }
     }
     true
+}
+
+/// Thin unbound film may wash onto a cascade lip / empty freeboard — then
+/// fall or scour carries it downstream instead of sealing a shore ring.
+fn drift_dest_wash_lip(world: &World, nx: i32, bottom_y: i32, height: i32) -> bool {
+    if height > 1 {
+        return false;
+    }
+    let Some(dest_seat) = world.get_cell(nx, bottom_y - 1) else {
+        return false;
+    };
+    // Still need Air below (not solid bank). Float seats use the normal path.
+    if dest_seat.material != MaterialId::Air || drift_float_seat(dest_seat) {
+        return false;
+    }
+    let Some(dest) = world.get_cell(nx, bottom_y) else {
+        return false;
+    };
+    dest.material == MaterialId::Air && !dest.sat.is_full()
+}
+
+fn drift_dest_ok(world: &World, nx: i32, bottom_y: i32, height: i32, allow_lip: bool) -> bool {
+    if drift_dest_clear(world, nx, bottom_y, height) {
+        return true;
+    }
+    allow_lip && drift_dest_wash_lip(world, nx, bottom_y, height)
+}
+
+/// Blend local stream push with climate wind for one raft column.
+fn raft_column_push(world: &World, gx: i32, waterline_y: i32, wind_push: f32) -> f32 {
+    let (dir, strength) = raft_stream_push(world, gx, waterline_y);
+    let flow_push = dir as f32 * strength;
+    if strength > 0.12 && flow_push.abs() > wind_push.abs() * 0.45 {
+        flow_push + wind_push * 0.20
+    } else {
+        wind_push * 0.90 + flow_push * 0.95
+    }
 }
 
 fn drift_move_column(world: &mut World, gx: i32, bottom_y: i32, height: i32, nx: i32) {
@@ -1374,42 +1412,8 @@ pub fn drift_floating_organic_columns_cfg(
         return (0, 0, HashSet::new());
     }
 
-    // Mean stream push under rafts (wind alone left mats glued in rivers).
-    let mut flow_pos = 0.0f32;
-    let mut flow_neg = 0.0f32;
-    let mut flow_n = 0u32;
-    for (&gx, &(bottom, _)) in columns {
-        let (dir, strength) = raft_stream_push(world, gx, bottom - 1);
-        if strength < 0.04 {
-            continue;
-        }
-        flow_n += 1;
-        if dir > 0 {
-            flow_pos += strength;
-        } else {
-            flow_neg += strength;
-        }
-    }
-    let flow_dir = if flow_pos >= flow_neg { 1 } else { -1 };
-    let flow = if flow_n > 0 {
-        flow_pos.max(flow_neg) / flow_n as f32
-    } else {
-        0.0
-    };
     let wind = wind_vx_tiles * tile_cols.max(1) as f32;
     let wind_push = wind.clamp(-1.5, 1.5);
-    let flow_push = flow_dir as f32 * flow;
-    // Steep current outranks a mild breeze (same idea as corpse drift).
-    let push = if flow > 0.18 && flow_push.abs() > wind_push.abs() * 0.55 {
-        flow_push + wind_push * 0.25
-    } else {
-        wind_push * 0.90 + flow_push * 0.85
-    };
-    if push.abs() < 1e-4 {
-        return (0, 0, HashSet::new());
-    }
-    let sign: i32 = if push >= 0.0 { 1 } else { -1 };
-    let speed = push.abs();
 
     let bind_radius = grain.raft_root_bind_radius.max(0);
 
@@ -1490,11 +1494,33 @@ pub fn drift_floating_organic_columns_cfg(
 
     let mut moved_cols: HashSet<i32> = HashSet::new();
     let mut moved = 0u32;
+    // Report dominant sign for HUD / tests (mean of successful moves).
+    let mut sign_acc = 0i32;
 
     // 1) Root-bound rafts — one roll, whole component moves or none.
+    //    Push is local to the component (still-lake mats must not dilute
+    //    river current into a global near-zero mean).
     let mut comp_list: Vec<Vec<i32>> = components.into_values().collect();
     for comp in &mut comp_list {
         comp.sort_unstable();
+        let mut push_sum = 0.0f32;
+        let mut flow_abs = 0.0f32;
+        for &gx in comp.iter() {
+            let Some(&(bottom, _)) = columns.get(&gx) else {
+                continue;
+            };
+            let p = raft_column_push(world, gx, bottom - 1, wind_push);
+            push_sum += p;
+            flow_abs += p.abs();
+        }
+        let n = comp.len().max(1) as f32;
+        let push = push_sum / n;
+        if push.abs() < 1e-4 {
+            continue;
+        }
+        let sign: i32 = if push >= 0.0 { 1 } else { -1 };
+        let speed = push.abs();
+        let flow = (flow_abs / n).min(1.45);
         if sign > 0 {
             comp.reverse(); // downwind first within the mat
         }
@@ -1534,6 +1560,7 @@ pub fn drift_floating_organic_columns_cfg(
             if comp.iter().any(|&c| c == nx) {
                 continue;
             }
+            // Bound mats stay on float seats (no lip wash — keep holdfasts).
             if !drift_dest_clear(world, nx, bottom, height) {
                 all_clear = false;
                 break;
@@ -1554,6 +1581,7 @@ pub fn drift_floating_organic_columns_cfg(
             drift_move_column(world, gx, bottom, height, nx);
             moved_cols.insert(gx);
             moved += 1;
+            sign_acc += sign;
         }
         // Second phase: columns whose dest was in-component (convoy).
         // Process again downwind→upwind into seats freed above.
@@ -1571,25 +1599,46 @@ pub fn drift_floating_organic_columns_cfg(
             drift_move_column(world, gx, bottom, height, nx);
             moved_cols.insert(gx);
             moved += 1;
+            sign_acc += sign;
         }
     }
 
-    // 2) Loose (unbound) litter — may blow apart column by column.
+    // 2) Loose (unbound) litter — may blow apart / wash over lips column by column.
     let mut loose: Vec<i32> = columns
         .keys()
         .copied()
         .filter(|x| !bound.contains(x))
         .collect();
     loose.sort_unstable();
-    if sign > 0 {
-        loose.reverse();
-    }
+    // Prefer processing +push first so convoy into freed seats works; when
+    // signs differ we sort by |x| after computing push per column.
+    loose.sort_by_key(|&gx| {
+        let Some(&(bottom, _)) = columns.get(&gx) else {
+            return 0i32;
+        };
+        let push = raft_column_push(world, gx, bottom - 1, wind_push);
+        // Negative push → process low x first; positive → high x first.
+        if push >= 0.0 {
+            -gx
+        } else {
+            gx
+        }
+    });
     for gx in loose {
         let Some(&(bottom_y, height)) = columns.get(&gx) else {
             continue;
         };
+        let push = raft_column_push(world, gx, bottom_y - 1, wind_push);
+        if push.abs() < 1e-4 {
+            continue;
+        }
+        let sign: i32 = if push >= 0.0 { 1 } else { -1 };
+        let speed = push.abs();
+        let (_, flow_strength) = raft_stream_push(world, gx, bottom_y - 1);
         let nx = world.wrap_x(gx + sign);
-        if !drift_dest_clear(world, nx, bottom_y, height) {
+        // Thin unbound film may wash onto cascade lips when current is strong.
+        let allow_lip = height <= 1 && flow_strength >= 0.35;
+        if !drift_dest_ok(world, nx, bottom_y, height, allow_lip) {
             continue;
         }
         let plant_h = plant_tops
@@ -1599,17 +1648,21 @@ pub fn drift_floating_organic_columns_cfg(
         let sail = 1.0
             + RAFT_DRIFT_ORGANIC_SAIL * (height - 1) as f32
             + RAFT_DRIFT_PLANT_SAIL * plant_h as f32;
-        let p = (speed * (RAFT_DRIFT_BASE + RAFT_DRIFT_FLOW_BASE * flow.min(1.0)) * sail)
-            .clamp(0.0, 0.85);
+        let p = (speed
+            * (RAFT_DRIFT_BASE + RAFT_DRIFT_FLOW_BASE * flow_strength.min(1.0))
+            * sail)
+            .clamp(0.0, 0.90);
         if hash_prob(world.seed.0, gx, world.tick, 0xD61F_1005) >= p {
             continue;
         }
         drift_move_column(world, gx, bottom_y, height, nx);
         moved_cols.insert(gx);
         moved += 1;
+        sign_acc += sign;
     }
 
-    (moved, sign, moved_cols)
+    let report_sign = if sign_acc >= 0 { 1 } else { -1 };
+    (moved, report_sign, moved_cols)
 }
 
 /// Lift submerged Snow/Ice/Organic through grounded full water, and pop
@@ -2406,8 +2459,9 @@ impl Default for GrainConfig {
 ///
 /// Dense grains use [`is_flow_erodible`]. Grounded or waterlogged Organic
 /// also scours (beach litter / sunk mats) so current can drag compost
-/// downhill like sand. Floating raft Organic is skipped — wind drift
-/// owns surface mats; chewing them would dissolve plant holdfasts.
+/// downhill like sand. Thick / mycelium-bound floating rafts stay
+/// wind-owned (holdfasts). Thin unbound floating film may scour under
+/// cascade so shore rings do not seal water into sticky bubbles.
 fn cell_is_flow_erodible(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
     if is_flow_erodible(cell.material) {
         return true;
@@ -2419,8 +2473,24 @@ fn cell_is_flow_erodible(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
     if MaterialRegistry::erosion_rank(MaterialId::Organic) >= 150 {
         return false;
     }
-    // Floating (or stacked on a raft) — leave for wind / soak / waterlog.
-    if raft_rests_on_float_water_world(world, gx, gy) {
+    if !raft_rests_on_float_water_world(world, gx, gy) {
+        // Grounded beach / waterlogged bedload.
+        return true;
+    }
+    // Floating: only thin unbound surface film is scourable.
+    if cell.mycelium() >= MYCELIUM_RAFT_BIND_MIN {
+        return false;
+    }
+    if matches!(
+        world.get_cell(gx, gy + 1),
+        Some(a) if a.material == MaterialId::Organic
+    ) {
+        return false;
+    }
+    if matches!(
+        world.get_cell(gx, gy - 1),
+        Some(b) if b.material == MaterialId::Organic
+    ) {
         return false;
     }
     true
