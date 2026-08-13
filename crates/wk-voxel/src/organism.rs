@@ -606,6 +606,10 @@ pub struct OrganismStore {
     /// Latest organism-pass breakdown (see [`OrganismPassTimings`]).
     #[serde(skip)]
     pub last_pass: OrganismPassTimings,
+    /// Skip expensive land reseat while crowns are overcrowded but stable
+    /// (nobody could move last attempt). Cleared on births.
+    #[serde(skip)]
+    land_reseat_cooldown: u8,
 }
 
 impl Default for OrganismStore {
@@ -619,6 +623,7 @@ impl Default for OrganismStore {
             fungi: FungiConfig::default(),
             spore_bank: SporeBankConfig::default(),
             last_pass: OrganismPassTimings::default(),
+            land_reseat_cooldown: 0,
         }
     }
 }
@@ -995,8 +1000,19 @@ impl OrganismStore {
         let fungi_cfg = self.fungi;
         let bank_cfg = self.spore_bank;
         // One crown per column: destack any pre-existing overlaps first.
+        // When the world is denser than clearance allows, reseat finds no
+        // seats — cooldown skips repeating that search every tick.
         let t0 = Instant::now();
-        reseat_stacked_land_plants(world, &mut self.atoms);
+        if self.land_reseat_cooldown == 0 {
+            match reseat_stacked_land_plants(world, &mut self.atoms) {
+                LandReseat::Quiet | LandReseat::Moved => {}
+                LandReseat::Stuck => {
+                    self.land_reseat_cooldown = LAND_RESEAT_STUCK_COOLDOWN;
+                }
+            }
+        } else {
+            self.land_reseat_cooldown = self.land_reseat_cooldown.saturating_sub(1);
+        }
         reseat_stacked_fungi(world, &mut self.atoms);
         pass.reseat = t0.elapsed();
         // Crown columns of living land plants — density + occupancy gate.
@@ -1298,6 +1314,10 @@ impl OrganismStore {
         for child in &births {
             stats.bump_birth(child);
         }
+        if !births.is_empty() {
+            // New crowns may violate clearance — force a reseat next tick.
+            self.land_reseat_cooldown = 0;
+        }
         self.atoms.extend(births);
         // Cream network → new fruiting body (may later shed spores).
         let mut fungus_cols_now: Vec<i32> = self
@@ -1570,10 +1590,23 @@ pub struct SporeRelease {
     pub to_gy: i32,
 }
 
+/// How many ticks to skip land reseat after a stuck overcrowded pass.
+const LAND_RESEAT_STUCK_COOLDOWN: u8 = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LandReseat {
+    /// Clearance already ok — no work.
+    Quiet,
+    /// At least one crown moved.
+    Moved,
+    /// Crowded, but no legal empty seat (dense pack) — caller may cooldown.
+    Stuck,
+}
+
 /// Oldest land plant keeps its column; younger neighbours that violate
 /// [`crate::plant::SPROUT_CROWN_CLEARANCE`] (or share a column) reseat nearby.
 /// Keeps T-canopies readable instead of a solid green bar.
-fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
+fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) -> LandReseat {
     use crate::plant::SPROUT_CROWN_CLEARANCE;
     use std::collections::HashSet;
 
@@ -1584,7 +1617,7 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
         .map(|(i, _)| i)
         .collect();
     if land_idx.len() < 2 {
-        return;
+        return LandReseat::Quiet;
     }
     // Fast path: unique columns with clearance already satisfied → skip sort/walk.
     {
@@ -1612,12 +1645,12 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
             }
         }
         if !crowded {
-            return;
+            return LandReseat::Quiet;
         }
     }
     // Oldest first — they claim space. Claimed set → O(clearance) neighbour
-    // probes instead of O(n) scans of a growing claimed Vec (was ~0.3 ms at
-    // 256 when a few crowns sat inside clearance of each other).
+    // probes. `Stuck` (no moves) lets the caller cooldown so dense packs do
+    // not re-run find_plant_slot walks every tick.
     land_idx.sort_by_key(|&i| std::cmp::Reverse(atoms[i].age_ticks));
     let mut claimed: HashSet<i32> = HashSet::with_capacity(land_idx.len());
     let clear_of_claimed = |claimed: &HashSet<i32>, nx: i32| {
@@ -1628,6 +1661,7 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
         }
         true
     };
+    let mut any_moved = false;
     for i in land_idx {
         let gx = atoms[i].gx;
         if clear_of_claimed(&claimed, gx) {
@@ -1650,6 +1684,7 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
                 pin_plant_pose(&mut atoms[i]);
                 claimed.insert(nx);
                 moved = true;
+                any_moved = true;
                 break;
             }
             if moved {
@@ -1660,6 +1695,11 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
             // No clear seat — keep the plant; don't despawn for spacing.
             claimed.insert(gx);
         }
+    }
+    if any_moved {
+        LandReseat::Moved
+    } else {
+        LandReseat::Stuck
     }
 }
 
@@ -1943,45 +1983,52 @@ fn step_land_plant(
         posed_canopy_sample_of(posed, posed_indices, (atom.gx, canopy_top_y(atom)));
     let tip_x = world.wrap_x(tip_x);
     let submerged = is_wet_air(world, tip_x, tip_y);
-    let mut light_sum = sum_posed_photo_light_of_cached(
-        canopy,
-        posed,
-        posed_indices,
-        &mut |wx, wy| {
-            cached_lit_sky(
-                lit_cache,
-                world,
-                wx,
-                wy,
-                day,
-                clouds,
-                humidity,
-                wrap_w,
-                downpour_mass,
-                sun_local,
-                is_day,
-            )
-        },
-        &atom.genome,
-        Some(shade_cache),
+    let tip_sky = cached_lit_sky(
+        lit_cache,
+        world,
+        tip_x,
+        tip_y,
+        day,
+        clouds,
+        humidity,
+        wrap_w,
+        downpour_mass,
+        sun_local,
+        is_day,
     );
+    // Single-leaf / near-dark: tip sample × count (skip per-leaf shade walks).
+    let mut light_sum = if n_photo <= 1 || tip_sky <= 0.02 {
+        let tip =
+            effective_photo_light_cached(canopy, shade_cache, tip_x, tip_y, tip_sky, &atom.genome);
+        tip * n_photo as f32
+    } else {
+        sum_posed_photo_light_of_cached(
+            canopy,
+            posed,
+            posed_indices,
+            &mut |wx, wy| {
+                cached_lit_sky(
+                    lit_cache,
+                    world,
+                    wx,
+                    wy,
+                    day,
+                    clouds,
+                    humidity,
+                    wrap_w,
+                    downpour_mass,
+                    sun_local,
+                    is_day,
+                )
+            },
+            &atom.genome,
+            Some(shade_cache),
+        )
+    };
     // Fallback when pose missed leaves: tip sample × count (pre-pose path).
     if light_sum <= 0.0 && n_photo > 0 {
-        let sky = cached_lit_sky(
-            lit_cache,
-            world,
-            tip_x,
-            tip_y,
-            day,
-            clouds,
-            humidity,
-            wrap_w,
-            downpour_mass,
-            sun_local,
-            is_day,
-        );
         let tip =
-            effective_photo_light_cached(canopy, shade_cache, tip_x, tip_y, sky, &atom.genome);
+            effective_photo_light_cached(canopy, shade_cache, tip_x, tip_y, tip_sky, &atom.genome);
         light_sum = tip * n_photo as f32;
     }
     // Mean leaf light for submerged stem-urge threshold.
@@ -2015,8 +2062,11 @@ fn step_land_plant(
     let t_grow = Instant::now();
     // Drop midair flecks that no longer touch the trunk, then dim-shade shed.
     // Seaweed ribbons keep their frond — no abscission on stemless bodies.
-    let _ = prune_detached_woody_leaves(atom);
-    let _ = shed_unproductive_woody_leaves(world, atom, canopy, day, tick);
+    // Single-leaf plants have nothing to prune/shed.
+    if n_photo > 1 {
+        let _ = prune_detached_woody_leaves(atom);
+        let _ = shed_unproductive_woody_leaves(world, atom, canopy, day, tick);
+    }
     // Surplus → tissue. Submerged + dim light: race toward brighter water.
     // Stemmed plants urge olive upward; stemless seaweed elongates the
     // Photosystem ribbon instead (no trunk invent). When leaves bathe in
