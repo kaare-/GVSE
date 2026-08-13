@@ -2012,11 +2012,21 @@ fn step_land_plant(
         sun_local,
         is_day,
     );
-    // Single-leaf / near-dark: tip sample × count (skip per-leaf shade walks).
-    let mut light_sum = if n_photo <= 1 || tip_sky <= 0.02 {
+    // Single-leaf / near-dark / staggered multi-leaf: tip×count (skip
+    // per-leaf shade walks). Full leaf sum every other tick per plant.
+    let full_leaves = n_photo > 1
+        && tip_sky > 0.02
+        && (atom.age_ticks.wrapping_add(entity_id as u64)) % 2 == 0;
+    let mut light_sum = if !full_leaves {
         let tip =
             effective_photo_light_cached(canopy, shade_cache, tip_x, tip_y, tip_sky, &atom.genome);
-        tip * n_photo as f32
+        // Tip overestimates shaded lower leaves slightly on skip ticks.
+        let scale = if n_photo > 1 && tip_sky > 0.02 {
+            0.82
+        } else {
+            1.0
+        };
+        tip * n_photo as f32 * scale
     } else {
         sum_posed_photo_light_of_cached(
             canopy,
@@ -2976,7 +2986,9 @@ fn air_sat(world: &World, gx: i32, gy: i32) -> i16 {
 ///
 /// Steep cascades register strongly even when neighbour sat is also high
 /// (ponded against the lip), so corpses / fronds follow the fall.
-fn local_water_drive(world: &World, gx: i32, gy: i32) -> f32 {
+/// Local current strength (sat shear + head drop / cascade). Used by
+/// corpse drift and floating Organic rafts.
+pub(crate) fn local_water_drive(world: &World, gx: i32, gy: i32) -> f32 {
     let mut best = 0i16;
     for y in [gy - 1, gy, gy + 1] {
         let l = air_sat(world, gx - 1, y);
@@ -3016,7 +3028,8 @@ fn local_water_drive(world: &World, gx: i32, gy: i32) -> f32 {
 ///
 /// Old "toward higher sat" pointed *upstream* on steep terrain where water
 /// piles against the drop — corpses looked like they swam uphill.
-fn local_water_dir(world: &World, gx: i32, gy: i32) -> i32 {
+/// Horizontal current direction (downhill / cascade exit).
+pub(crate) fn local_water_dir(world: &World, gx: i32, gy: i32) -> i32 {
     let top_here = wet_band(world, gx, gy).map(|(t, _)| t);
     let mut score_pos = 0.0f32; // +x
     let mut score_neg = 0.0f32; // -x

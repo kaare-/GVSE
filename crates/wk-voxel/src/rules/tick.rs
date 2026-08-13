@@ -508,6 +508,21 @@ fn tick_with_life_inner(
         }
         out
     };
+    // Float litter to freeboard BEFORE deep settle. Flooding dry Organic
+    // used to bubble one cell/pass inside ×1024 settle (grounded-column
+    // walks × wet Air × passes → ~1 FPS). Teleport rise clears the column
+    // first; settle then handles sand / true freefall.
+    {
+        let t0 = profile.then(Instant::now);
+        match grain {
+            Some(g) => super::grain::rise_and_soak_buoyant_litter_cfg(world, g),
+            None => super::grain::rise_and_soak_buoyant_litter(world),
+        }
+        if let (true, Some(t0)) = (profile, t0) {
+            local.rise_soak += t0.elapsed();
+        }
+    }
+
     if !grain_active.is_empty() {
         // Deep settle for sky freefall / mid-air paint, and for full-feel
         // (unit tests / Tab A/B). FPS defaults stay shallow unless wake or
@@ -564,17 +579,6 @@ fn tick_with_life_inner(
                     local.settle += t0.elapsed();
                 }
             }
-        }
-    }
-    // Clear submerged litter lines, then let rafts drink — shared litter scan.
-    {
-        let t0 = profile.then(Instant::now);
-        match grain {
-            Some(g) => super::grain::rise_and_soak_buoyant_litter_cfg(world, g),
-            None => super::grain::rise_and_soak_buoyant_litter(world),
-        }
-        if let (true, Some(t0)) = (profile, t0) {
-            local.rise_soak += t0.elapsed();
         }
     }
 

@@ -104,6 +104,10 @@ pub struct Chunk {
     /// that never held litter.
     #[serde(default)]
     pub has_organic: bool,
+    /// Sticky occupancy: Organic / Snow / Ice (buoyant litter). Rise/soak
+    /// scans skip sand-only loose chunks.
+    #[serde(default)]
+    pub has_buoyant: bool,
 }
 
 /// Materials that participate in grain settle / float / punch passes.
@@ -134,6 +138,7 @@ impl Chunk {
             has_limestone: false,
             has_loose: false,
             has_organic: false,
+            has_buoyant: false,
         }
     }
 
@@ -183,6 +188,12 @@ impl Chunk {
         }
         if cell.material == MaterialId::Organic {
             self.has_organic = true;
+        }
+        if matches!(
+            cell.material,
+            MaterialId::Organic | MaterialId::Snow | MaterialId::Ice
+        ) {
+            self.has_buoyant = true;
         }
     }
 
