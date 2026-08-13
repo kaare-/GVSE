@@ -4573,6 +4573,67 @@ fn floating_organic_drifts_with_wind() {
 }
 
 #[test]
+fn floating_organic_drifts_with_stream_without_wind() {
+    // Flat freeboard with a sat gradient toward +x (wind calm).
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(1, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(14, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 2..=13 {
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+        // Surface film: fuller upstream (−x) → current pushes +x.
+        let mut surface = Cell::air();
+        let sat = (255i32 - (x - 2) * 6).clamp(200, 255) as u8;
+        surface.sat = Sat(sat);
+        w.set_cell(x, 5, surface);
+    }
+    w.set_cell(6, 6, Cell::solid(MaterialId::Organic));
+    let x0 = 6;
+    let mut moved = false;
+    for tick in 0..600u64 {
+        w.tick = tick;
+        let (n, _, _) = drift_floating_organic(&mut w, 0.0, 4, None, None);
+        if n > 0 {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "Organic raft should drift with stream when wind is calm");
+    let xs: Vec<_> = (2..=13)
+        .filter(|&x| w.get_cell(x, 6).map(|c| c.material) == Some(MaterialId::Organic))
+        .collect();
+    assert!(
+        xs.iter().any(|&x| x > x0),
+        "stream drift should carry Organic down-gradient ({xs:?})"
+    );
+}
+
+#[test]
+fn submerged_organic_teleports_to_freeboard_in_one_rise() {
+    // Flooded dry litter: one rise_and_soak should clear a deep water column
+    // without needing ×1024 settle bubbling.
+    let mut w = setup_column_world();
+    for y in 1..=2 {
+        w.set_cell(4, y, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(4, 3, Cell::solid(MaterialId::Organic));
+    for y in 4..=20 {
+        w.set_cell(4, y, Cell::water());
+    }
+    rise_and_soak_buoyant_litter(&mut w);
+    let gy = (3..=22)
+        .find(|&y| w.get_cell(4, y).map(|c| c.material) == Some(MaterialId::Organic))
+        .expect("Organic still present");
+    assert!(
+        gy >= 20,
+        "Organic should teleport near freeboard in one rise (gy={gy})"
+    );
+}
+
+#[test]
 fn rooted_organic_raft_stays_together_in_wind() {
     // Living roots stitch neighbouring floating Organic so the island
     // sails as one instead of blowing into scattered flecks.
