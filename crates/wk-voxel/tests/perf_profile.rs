@@ -20,9 +20,9 @@ use wk_voxel::{
     find_plant_slot, humidity_diffuse_due, set_parallel_enabled, stamp_world,
     temperature_step_due, tick_with_perf, tick_with_perf_profiled, Blueprint, ClimateConfig,
     CloudConfig, CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity,
-    KarstConfig, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, PhysicsTimings,
-    RainConfig, Temperature, Wind, World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W,
-    FLOW_SUBSTEPS,
+    KarstConfig, OrganismPassTimings, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig,
+    PhysicsTimings, RainConfig, Temperature, Wind, World, WorldgenParams, CHUNK_CELLS_H,
+    CHUNK_CELLS_W, FLOW_SUBSTEPS,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -608,9 +608,18 @@ fn run_creature_count_sweep(params: WorldgenParams) {
             one_stack_tick(&mut scene, None, None);
         }
         let mut accum = PassAccum::zero();
+        let mut pass = OrganismPassTimings::default();
         let wall = Instant::now();
         for _ in 0..MEASURE_TICKS {
             one_stack_tick(&mut scene, Some(&mut accum), None);
+            let p = scene.organisms.last_pass;
+            pass.pose += p.pose;
+            pass.canopy += p.canopy;
+            pass.reseat += p.reseat;
+            pass.float_cols += p.float_cols;
+            pass.land_plants += p.land_plants;
+            pass.other_creatures += p.other_creatures;
+            pass.post += p.post;
         }
         let wall = wall.elapsed();
         let wall_ms = ms_per(wall, MEASURE_TICKS);
@@ -624,6 +633,19 @@ fn run_creature_count_sweep(params: WorldgenParams) {
         eprintln!(
             "  {n:>5}  {wall_ms:>7.3}  {org_ms:>7.3}  {share:>5.1}%  {living}"
         );
+        if n > 0 {
+            let n_ticks = MEASURE_TICKS;
+            eprintln!(
+                "         org splits ms/tick: pose {:.3}  canopy {:.3}  reseat {:.3}  float {:.3}  land {:.3}  other {:.3}  post {:.3}",
+                ms_per(pass.pose, n_ticks),
+                ms_per(pass.canopy, n_ticks),
+                ms_per(pass.reseat, n_ticks),
+                ms_per(pass.float_cols, n_ticks),
+                ms_per(pass.land_plants, n_ticks),
+                ms_per(pass.other_creatures, n_ticks),
+                ms_per(pass.post, n_ticks),
+            );
+        }
     }
     eprintln!();
 }

@@ -16,6 +16,9 @@
 //!
 //! Palette hex is frozen (`docs/organism/PALETTE.md`).
 
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
@@ -50,8 +53,8 @@ use crate::plant::{
     PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
 };
 use crate::shade::{
-    build_canopy_index_posed, canopy_top_y, posed_canopy_sample, shade_transmit,
-    sum_posed_photo_light, CanopyIndex, PosedModule,
+    build_canopy_index_posed, canopy_top_y, group_posed_by_atom, posed_canopy_sample_of,
+    shade_transmit, sum_posed_photo_light_of, CanopyIndex, PosedModule,
 };
 
 /// Default **entity** ceiling (Tab → Creatures can raise/lower).
@@ -543,6 +546,33 @@ pub struct OrganismStepOutcome {
     pub stats: OrganismStepStats,
 }
 
+/// Per-pass wall times from the latest [`OrganismStore::step_with_weather`].
+///
+/// Filled every tick (cheap `Instant` brackets). Used by `perf_profile` for
+/// land-plant review; not serialized.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OrganismPassTimings {
+    pub pose: Duration,
+    pub canopy: Duration,
+    pub reseat: Duration,
+    pub float_cols: Duration,
+    pub land_plants: Duration,
+    pub other_creatures: Duration,
+    pub post: Duration,
+}
+
+impl OrganismPassTimings {
+    pub fn total(self) -> Duration {
+        self.pose
+            + self.canopy
+            + self.reseat
+            + self.float_cols
+            + self.land_plants
+            + self.other_creatures
+            + self.post
+    }
+}
+
 /// Population of Set A Atoms (no `hecs` — keep the crate tiny).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrganismStore {
@@ -565,6 +595,9 @@ pub struct OrganismStore {
     /// Hibernating spore bank knobs (Tab → Life). Synced from settings.
     #[serde(skip)]
     pub spore_bank: SporeBankConfig,
+    /// Latest organism-pass breakdown (see [`OrganismPassTimings`]).
+    #[serde(skip)]
+    pub last_pass: OrganismPassTimings,
 }
 
 impl Default for OrganismStore {
@@ -577,6 +610,7 @@ impl Default for OrganismStore {
             growth_caps: PlantGrowthCaps::default(),
             fungi: FungiConfig::default(),
             spore_bank: SporeBankConfig::default(),
+            last_pass: OrganismPassTimings::default(),
         }
     }
 }
@@ -927,15 +961,21 @@ impl OrganismStore {
         let phase = phase_fraction_cfg(tick, climate);
         let sun_local = celestial_local_cfg(tick, climate);
         let is_day = is_daytime_cfg(tick, climate);
+        let mut pass = OrganismPassTimings::default();
         // Posed draw cells (flop + pile) feed canopy shade so dry mats and
         // equal-height meadows compete for light where they actually sit.
+        let t0 = Instant::now();
         let posed = resolve_organism_draw_cells(world, &self.atoms, tick, wind_vx);
+        let posed_by_atom = group_posed_by_atom(&posed, self.atoms.len());
+        pass.pose = t0.elapsed();
+        let t0 = Instant::now();
         let canopy = build_canopy_index_posed(&self.atoms, &posed);
         // Live + grey-corpse Stem cells — shoot growth keeps a trunk gap.
         let trunks = collect_trunk_world_cells(&self.atoms, &self.corpses);
         // All living Root / Photosystem cells — Moore spacing across plants.
         let live_roots = collect_live_root_world_cells(&self.atoms);
         let live_photos = collect_live_photo_world_cells(&self.atoms);
+        pass.canopy = t0.elapsed();
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let mut spore_releases: Vec<SporeRelease> = Vec::new();
@@ -947,8 +987,10 @@ impl OrganismStore {
         let fungi_cfg = self.fungi;
         let bank_cfg = self.spore_bank;
         // One crown per column: destack any pre-existing overlaps first.
+        let t0 = Instant::now();
         reseat_stacked_land_plants(world, &mut self.atoms);
         reseat_stacked_fungi(world, &mut self.atoms);
+        pass.reseat = t0.elapsed();
         // Crown columns of living land plants — density + occupancy gate.
         // Mutated as sprouts birth so same-tick siblings can't share a seat.
         let mut plant_cols: Vec<i32> = self
@@ -967,11 +1009,15 @@ impl OrganismStore {
         let mut transpired: Vec<(i32, i32, u32)> = Vec::new();
         // Floating-Organic raft columns near living crowns only. Full-world
         // scans were O(chunks×cells) every tick even with zero Organic.
+        let t0 = Instant::now();
         let float_columns = if plant_cols.is_empty() {
-            std::collections::HashMap::new()
+            HashMap::new()
         } else {
             crate::rules::collect_floating_organic_columns_near(world, &plant_cols, 6)
         };
+        pass.float_cols = t0.elapsed();
+        // Per-tick (gx, gy) → lit_sky cache. Many leaves / plants share columns.
+        let mut lit_cache: HashMap<(i32, i32), f32> = HashMap::new();
 
         // Empty store: still allow mycelium field → fruiting body emergence
         // (and corpse settle). Spores need a living body afterward.
@@ -985,11 +1031,13 @@ impl OrganismStore {
                     stats.emergent_fruiting += 1;
                     self.atoms.push(child);
                 }
+                self.last_pass = pass;
                 return OrganismStepOutcome {
                     spores: spore_releases,
                     stats,
                 };
             }
+            let t0 = Instant::now();
             self.step_corpses(world, tick, wind_vx);
             let room = self.atoms.len() < atom_cap;
             if let Some(child) = try_emergent_fruiting(world, &[], tick, room) {
@@ -997,12 +1045,16 @@ impl OrganismStore {
                 stats.emergent_fruiting += 1;
                 self.atoms.push(child);
             }
+            pass.post = t0.elapsed();
+            self.last_pass = pass;
             return OrganismStepOutcome {
                 spores: spore_releases,
                 stats,
             };
         }
 
+        let mut land_ns = Duration::ZERO;
+        let mut other_ns = Duration::ZERO;
         for (i, atom) in self.atoms.iter_mut().enumerate() {
             atom.age_ticks = atom.age_ticks.saturating_add(1);
             atom.cooldown = atom.cooldown.saturating_sub(1);
@@ -1014,9 +1066,12 @@ impl OrganismStore {
             }
 
             if is_land_plant(atom) {
+                let t_land = Instant::now();
                 let room = pop + births.len() < atom_cap;
                 let parent_gx = atom.gx;
                 let parent_gy = atom.gy;
+                let empty: [usize; 0] = [];
+                let posed_indices = posed_by_atom.get(i).map(|v| v.as_slice()).unwrap_or(&empty);
                 match step_land_plant(
                     world,
                     atom,
@@ -1024,7 +1079,8 @@ impl OrganismStore {
                     tick,
                     &canopy,
                     &posed,
-                    i,
+                    posed_indices,
+                    &mut lit_cache,
                     &trunks,
                     &live_roots,
                     &live_photos,
@@ -1076,9 +1132,11 @@ impl OrganismStore {
                         // Plants never inoculate mycelium.
                     }
                 }
+                land_ns += t_land.elapsed();
                 continue;
             }
 
+            let t_other = Instant::now();
             if is_fungus(atom) {
                 let room = pop + births.len() < atom_cap;
                 let parent_gx = atom.gx;
@@ -1131,12 +1189,14 @@ impl OrganismStore {
                         }
                     }
                 }
+                other_ns += t_other.elapsed();
                 continue;
             }
 
             // Plankton drought gate: must still have a wet band nearby.
             if wet_band(world, atom.gx, atom.gy).is_none() {
                 if !ensure_in_water(world, atom) {
+                    other_ns += t_other.elapsed();
                     deaths.push(i);
                     continue;
                 }
@@ -1147,6 +1207,7 @@ impl OrganismStore {
 
             if !is_wet_air(world, atom.gx, atom.gy) {
                 if !ensure_in_water(world, atom) {
+                    other_ns += t_other.elapsed();
                     deaths.push(i);
                     continue;
                 }
@@ -1154,7 +1215,8 @@ impl OrganismStore {
 
             let n_photo = atom.photosystem_count().max(1) as f32;
             let n_mod = atom.body.len().max(1) as f32;
-            let light = lit_sky_at(
+            let light = cached_lit_sky(
+                &mut lit_cache,
                 world,
                 atom.gx,
                 atom.gy,
@@ -1165,7 +1227,6 @@ impl OrganismStore {
                 downpour_mass,
                 sun_local,
                 is_day,
-                column_light(world, atom.gx, atom.gy),
             );
             let raw_harvest = PHOTON_RATE * light * n_photo;
             // Set A algae: bloom rate gated by dissolved C bucket.
@@ -1176,6 +1237,7 @@ impl OrganismStore {
             let upkeep = UPKEEP_PER_MODULE * n_mod * (0.45 + 0.55 * day);
             atom.energy = (atom.energy + harvest - upkeep).clamp(0.0, atom.energy_max);
             if atom.energy <= 0.0 {
+                other_ns += t_other.elapsed();
                 deaths.push(i);
                 continue;
             }
@@ -1193,8 +1255,12 @@ impl OrganismStore {
                     atom.energy += cost;
                 }
             }
+            other_ns += t_other.elapsed();
         }
+        pass.land_plants = land_ns;
+        pass.other_creatures = other_ns;
 
+        let t_post = Instant::now();
         deaths.sort_unstable();
         deaths.dedup();
         // Tips: woody plants that acquired `fallen` this step (before removals).
@@ -1289,6 +1355,8 @@ impl OrganismStore {
                 }
             }
         }
+        pass.post = t_post.elapsed();
+        self.last_pass = pass;
         stats.spores = spore_releases.len() as u32;
         OrganismStepOutcome {
             spores: spore_releases,
@@ -1635,7 +1703,8 @@ fn step_land_plant(
     tick: u64,
     canopy: &CanopyIndex,
     posed: &[PosedModule],
-    atom_idx: usize,
+    posed_indices: &[usize],
+    lit_cache: &mut HashMap<(i32, i32), f32>,
     trunks: &std::collections::HashSet<(i32, i32)>,
     live_roots: &std::collections::HashSet<(i32, i32)>,
     live_photos: &std::collections::HashSet<(i32, i32)>,
@@ -1644,7 +1713,7 @@ fn step_land_plant(
     growth_caps: &PlantGrowthCaps,
     plant_cols: &[i32],
     wind_vx: f32,
-    float_columns: &std::collections::HashMap<i32, (i32, i32)>,
+    float_columns: &HashMap<i32, (i32, i32)>,
     bank_cfg: &SporeBankConfig,
     carbon: Option<&mut CarbonBudget>,
     carbon_cfg: &CarbonConfig,
@@ -1821,18 +1890,21 @@ fn step_land_plant(
     let (drink_e, sat_taken, drink_at) = drink_plant(world, atom);
     // Per-leaf column Beer–Lambert at posed cells (flop/pile). Lower leaves
     // and plants under taller neighbours harvest less than open tips.
-    let (tip_x, tip_y) = posed_canopy_sample(posed, atom_idx, (atom.gx, canopy_top_y(atom)));
+    // `posed_indices` is this plant's slice of the tick's posed list — not a
+    // full-pop scan per plant.
+    let (tip_x, tip_y) =
+        posed_canopy_sample_of(posed, posed_indices, (atom.gx, canopy_top_y(atom)));
     let tip_x = world.wrap_x(tip_x);
     let submerged = is_wet_air(world, tip_x, tip_y);
-    let mut light_sum = sum_posed_photo_light(
+    let mut light_sum = sum_posed_photo_light_of(
         canopy,
         posed,
-        atom_idx,
-        &|wx, wy| {
-            let gx = world.wrap_x(wx);
-            lit_sky_at(
+        posed_indices,
+        &mut |wx, wy| {
+            cached_lit_sky(
+                lit_cache,
                 world,
-                gx,
+                wx,
                 wy,
                 day,
                 clouds,
@@ -1841,14 +1913,14 @@ fn step_land_plant(
                 downpour_mass,
                 sun_local,
                 is_day,
-                column_light(world, gx, wy),
             )
         },
         &atom.genome,
     );
     // Fallback when pose missed leaves: tip sample × count (pre-pose path).
     if light_sum <= 0.0 && n_photo > 0 {
-        let sky = lit_sky_at(
+        let sky = cached_lit_sky(
+            lit_cache,
             world,
             tip_x,
             tip_y,
@@ -1859,7 +1931,6 @@ fn step_land_plant(
             downpour_mass,
             sun_local,
             is_day,
-            column_light(world, tip_x, tip_y),
         );
         let tip = crate::shade::effective_photo_light(canopy, tip_x, tip_y, sky, &atom.genome);
         light_sum = tip * n_photo as f32;
@@ -3591,6 +3662,41 @@ pub fn column_sky_light(world: &World, gx: i32, gy: i32) -> f32 {
 
 fn column_light(world: &World, gx: i32, gy: i32) -> f32 {
     column_sky_light(world, gx, gy)
+}
+
+/// Memoize [`lit_sky_at`] for one organism tick (`(wrap_x, gy)` → light).
+fn cached_lit_sky(
+    cache: &mut HashMap<(i32, i32), f32>,
+    world: &World,
+    gx: i32,
+    gy: i32,
+    day: f32,
+    clouds: Option<&CloudStore>,
+    humidity: Option<&Humidity>,
+    wrap_w: Option<i32>,
+    downpour_mass: f32,
+    sun_local: f32,
+    is_day: bool,
+) -> f32 {
+    let gx = world.wrap_x(gx);
+    if let Some(&v) = cache.get(&(gx, gy)) {
+        return v;
+    }
+    let v = lit_sky_at(
+        world,
+        gx,
+        gy,
+        day,
+        clouds,
+        humidity,
+        wrap_w,
+        downpour_mass,
+        sun_local,
+        is_day,
+        column_light(world, gx, gy),
+    );
+    cache.insert((gx, gy), v);
+    v
 }
 
 fn is_wet_air(world: &World, gx: i32, gy: i32) -> bool {

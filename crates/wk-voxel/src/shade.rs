@@ -95,7 +95,48 @@ pub fn canopy_top_y(atom: &Atom) -> i32 {
     }
 }
 
+/// Group posed-module indices by `atom_idx` (one build per organism tick).
+///
+/// Hot path: [`posed_canopy_sample_of`] / [`sum_posed_photo_light_of`] walk
+/// only this plant's modules instead of scanning the full posed list.
+pub fn group_posed_by_atom(posed: &[PosedModule], n_atoms: usize) -> Vec<Vec<usize>> {
+    let mut by = vec![Vec::new(); n_atoms];
+    for (i, p) in posed.iter().enumerate() {
+        if p.atom_idx < n_atoms {
+            by[p.atom_idx].push(i);
+        }
+    }
+    by
+}
+
+/// Highest Photosystem/Stem draw cell among `indices` into `posed`.
+pub fn posed_canopy_sample_of(
+    posed: &[PosedModule],
+    indices: &[usize],
+    fallback: (i32, i32),
+) -> (i32, i32) {
+    let mut best: Option<(i32, i32)> = None;
+    for &i in indices {
+        let Some(p) = posed.get(i) else {
+            continue;
+        };
+        if !matches!(p.mid, ModuleId::Photosystem | ModuleId::Stem) {
+            continue;
+        }
+        let replace = best
+            .map(|(_, by)| p.wy > by || (p.wy == by && p.mid == ModuleId::Photosystem))
+            .unwrap_or(true);
+        if replace {
+            best = Some((p.wx, p.wy));
+        }
+    }
+    best.unwrap_or(fallback)
+}
+
 /// Highest Photosystem/Stem draw cell for a plant (fallback sample).
+///
+/// Prefers [`posed_canopy_sample_of`] with a prebuilt [`group_posed_by_atom`]
+/// index when stepping many plants.
 pub fn posed_canopy_sample(
     posed: &[PosedModule],
     atom_idx: usize,
@@ -226,14 +267,45 @@ pub fn effective_photo_light(
     shade_harvest_light(attenuated, genome.shade_efficiency)
 }
 
-/// Sum harvest-remapped light over every posed Photosystem of one plant.
+/// Sum harvest-remapped light over posed Photosystems listed in `indices`.
 ///
 /// Each leaf samples its own column exposure — lower leaves self-shade.
+pub fn sum_posed_photo_light_of(
+    index: &CanopyIndex,
+    posed: &[PosedModule],
+    indices: &[usize],
+    sky_at: &mut dyn FnMut(i32, i32) -> f32,
+    genome: &Genome,
+) -> f32 {
+    let mut sum = 0.0_f32;
+    let mut any = false;
+    for &i in indices {
+        let Some(p) = posed.get(i) else {
+            continue;
+        };
+        if p.mid != ModuleId::Photosystem {
+            continue;
+        }
+        any = true;
+        let sky = sky_at(p.wx, p.wy);
+        sum += effective_photo_light(index, p.wx, p.wy, sky, genome);
+    }
+    if any {
+        sum
+    } else {
+        0.0
+    }
+}
+
+/// Sum harvest-remapped light over every posed Photosystem of one plant.
+///
+/// Prefer [`sum_posed_photo_light_of`] with [`group_posed_by_atom`] in the
+/// full-pop hot path.
 pub fn sum_posed_photo_light(
     index: &CanopyIndex,
     posed: &[PosedModule],
     atom_idx: usize,
-    sky_at: &dyn Fn(i32, i32) -> f32,
+    sky_at: &mut dyn FnMut(i32, i32) -> f32,
     genome: &Genome,
 ) -> f32 {
     let mut sum = 0.0_f32;
@@ -413,6 +485,37 @@ mod tests {
     }
 
     #[test]
+    fn group_posed_sample_matches_scan() {
+        let posed = vec![
+            PosedModule {
+                atom_idx: 0,
+                wx: 1,
+                wy: 4,
+                mid: ModuleId::Stem,
+            },
+            PosedModule {
+                atom_idx: 1,
+                wx: 5,
+                wy: 8,
+                mid: ModuleId::Photosystem,
+            },
+            PosedModule {
+                atom_idx: 0,
+                wx: 1,
+                wy: 6,
+                mid: ModuleId::Photosystem,
+            },
+        ];
+        let by = group_posed_by_atom(&posed, 2);
+        let a0 = posed_canopy_sample_of(&posed, &by[0], (0, 0));
+        let a1 = posed_canopy_sample_of(&posed, &by[1], (0, 0));
+        assert_eq!(a0, posed_canopy_sample(&posed, 0, (0, 0)));
+        assert_eq!(a1, posed_canopy_sample(&posed, 1, (0, 0)));
+        assert_eq!(a0, (1, 6));
+        assert_eq!(a1, (5, 8));
+    }
+
+    #[test]
     fn sum_posed_counts_self_shade() {
         let mut g = Genome::default();
         g.leaf_absorb = 0.5;
@@ -430,7 +533,7 @@ mod tests {
                 mid,
             })
             .collect();
-        let sum = sum_posed_photo_light(&index, &posed, 0, &|_, _| 1.0, &g);
+        let sum = sum_posed_photo_light(&index, &posed, 0, &mut |_, _| 1.0, &g);
         // Tip ~1, mid ~(1-a), low ~(1-a)^2 → sum < 3
         assert!(sum < 2.6, "stacked leaves should self-shade (sum={sum})");
         assert!(sum > 1.5, "still some harvest (sum={sum})");

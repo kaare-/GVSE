@@ -112,10 +112,10 @@ pub use grid::World;
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
     bake_tip_into_body, column_sky_light, fallen_body_offset, resolve_organism_draw_cells,
-    rigid_tip_offset, Atom, BodyModule, Corpse, ModuleId, OrganismStepOutcome, OrganismStepStats,
-    OrganismStore, SpawnFail, SporeRelease, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS,
-    MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT, SUBMERGED_STEM_URGE_LIGHT,
-    WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
+    rigid_tip_offset, Atom, BodyModule, Corpse, ModuleId, OrganismPassTimings, OrganismStepOutcome,
+    OrganismStepStats, OrganismStore, SpawnFail, SporeRelease, CORPSE_SETTLE_LAND_TICKS,
+    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT,
+    SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
 pub use symbiosis::{
     body_has_symbiont, clear_plant_sym_flow_lasts, clear_sym_net_flow_lasts,
@@ -132,9 +132,9 @@ pub use plant::{
     MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use shade::{
-    build_canopy_index, build_canopy_index_posed, effective_photo_light, shade_transmit,
-    shade_transmit_column,
-    sum_posed_photo_light, CanopyIndex, PosedModule,
+    build_canopy_index, build_canopy_index_posed, effective_photo_light, group_posed_by_atom,
+    posed_canopy_sample, posed_canopy_sample_of, shade_transmit, shade_transmit_column,
+    sum_posed_photo_light, sum_posed_photo_light_of, CanopyIndex, PosedModule,
 };
 pub use heatmap::Heatmap;
 pub use humidity::{
