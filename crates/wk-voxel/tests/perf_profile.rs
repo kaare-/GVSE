@@ -618,6 +618,10 @@ fn run_creature_count_sweep(params: WorldgenParams) {
             pass.reseat += p.reseat;
             pass.float_cols += p.float_cols;
             pass.land_plants += p.land_plants;
+            pass.land_seat += p.land_seat;
+            pass.land_metab += p.land_metab;
+            pass.land_grow += p.land_grow;
+            pass.land_disperse += p.land_disperse;
             pass.other_creatures += p.other_creatures;
             pass.post += p.post;
         }
@@ -644,6 +648,13 @@ fn run_creature_count_sweep(params: WorldgenParams) {
                 ms_per(pass.land_plants, n_ticks),
                 ms_per(pass.other_creatures, n_ticks),
                 ms_per(pass.post, n_ticks),
+            );
+            eprintln!(
+                "         land splits ms/tick: seat {:.3}  metab {:.3}  grow {:.3}  disperse {:.3}",
+                ms_per(pass.land_seat, n_ticks),
+                ms_per(pass.land_metab, n_ticks),
+                ms_per(pass.land_grow, n_ticks),
+                ms_per(pass.land_disperse, n_ticks),
             );
         }
     }

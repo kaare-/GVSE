@@ -560,6 +560,15 @@ pub fn drink_leaves(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32)
 /// still sip through dangling roots (standing water regenerates).
 pub fn drink_plant(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32)) {
     let moist = plant_moisture_frac(world, atom);
+    drink_plant_with_moist(world, atom, moist)
+}
+
+/// [`drink_plant`] when the caller already sampled [`plant_moisture_frac`].
+pub fn drink_plant_with_moist(
+    world: &mut World,
+    atom: &mut Atom,
+    moist: f32,
+) -> (f32, u32, (i32, i32)) {
     let (e_l, s_l, at_l) = drink_leaves(world, atom);
     let need_root_sip = atom.fallen || moist < ROOT_DRINK_COMFORT_FRAC;
     let (e_r, s_r, at_r) = if need_root_sip {

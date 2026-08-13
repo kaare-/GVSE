@@ -43,12 +43,11 @@ use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::plant::{
     apply_genome, collect_live_photo_world_cells, collect_live_root_world_cells,
-    collect_trunk_world_cells, drink_plant, drought_band, drop_dead_leaves, find_fungus_slot,
-    find_plant_slot, find_surface_air_slot, is_anchored, is_land_plant,
-    leave_dead_roots_in_place, leaves_bathing, pin_plant_pose, plant_moisture_frac,
-    prune_detached_woody_leaves, shed_unproductive_woody_leaves, sync_root_storage,
-    try_grow_plant, try_plant_wind_spore, try_vegetative_sprout, DroughtBand, PlantGrowthCaps,
-    DROUGHT_DORMANT_UPKEEP,
+    collect_trunk_world_cells, drink_plant_with_moist, drought_band, drop_dead_leaves,
+    find_fungus_slot, find_plant_slot, find_surface_air_slot, is_anchored, is_land_plant,
+    leave_dead_roots_in_place, pin_plant_pose, prune_detached_woody_leaves,
+    shed_unproductive_woody_leaves, sync_root_storage, try_grow_plant, try_plant_wind_spore,
+    try_vegetative_sprout, DroughtBand, PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP,
     DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_GROW_MIN_DAY,
     PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
 };
@@ -557,6 +556,14 @@ pub struct OrganismPassTimings {
     pub reseat: Duration,
     pub float_cols: Duration,
     pub land_plants: Duration,
+    /// Seat / tip / prune inside [`step_land_plant`].
+    pub land_seat: Duration,
+    /// Moisture, drink, shade harvest, energy.
+    pub land_metab: Duration,
+    /// Abscission + tissue growth.
+    pub land_grow: Duration,
+    /// Wind spore + vegetative sprout.
+    pub land_disperse: Duration,
     pub other_creatures: Duration,
     pub post: Duration,
 }
@@ -1099,6 +1106,7 @@ impl OrganismStore {
                     downpour_mass,
                     sun_local,
                     is_day,
+                    &mut pass,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -1728,6 +1736,7 @@ fn step_land_plant(
     downpour_mass: f32,
     sun_local: f32,
     is_day: bool,
+    pass: &mut OrganismPassTimings,
 ) -> PlantStep {
     // Pose / seat:
     // - Sand/rock purchase wins: once grounded, organics and water never
@@ -1743,11 +1752,28 @@ fn step_land_plant(
     //   bed/shore/neighbour substrate must NOT teleport `gy` to the bed.
     //   Open-water = uprooted (short wet keel, no mineral pierce). Shore
     //   tips resting on mineral may elongate into the beach while tipped.
-    let on_float_raft = rooted_in_floating_organic(world, atom, float_columns);
-    let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
+    let t_seat = Instant::now();
     let stemless = crate::plant::stem_count(atom) == 0;
-    let grounded = grounded_substrate_anchor(world, atom, float_columns);
     let woody_castaway = atom.fallen && !stemless;
+    // Near-crown purchase first (no standing-water column walk). Most land
+    // plants leave before float / waterline work. Deep roots alone still
+    // need the over-water gate below.
+    let near_grounded = near_crown_substrate_anchor(world, atom, float_columns);
+    let (grounded, holdfast_solid, standing_top) = if near_grounded && !woody_castaway {
+        let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
+        (true, holdfast_solid, None)
+    } else {
+        let standing_top = column_standing_surface(world, atom.gx, atom.gy);
+        let grounded = near_grounded
+            || grounded_substrate_anchor_over_water(
+                world,
+                atom,
+                float_columns,
+                standing_top.is_some(),
+            );
+        let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
+        (grounded, holdfast_solid, standing_top)
+    };
     // Tipped woody shoots must all draw upright — unmarked dy>0 stem/leaf
     // cells flatten to the waterline and leave mid-mast holes.
     heal_fallen_upright_marks(atom);
@@ -1766,11 +1792,12 @@ fn step_land_plant(
             }
         }
         pin_plant_pose(atom);
-    } else if on_float_raft {
+    } else if rooted_in_floating_organic(world, atom, float_columns) {
         // Floating-Organic holdfast wins over "see through litter to mineral"
         // — otherwise a thin raft over a deep lake teleports the crown to the
         // bedrock seat under the water column and never runs tip checks.
-        let water_top = column_standing_surface(world, atom.gx, atom.gy);
+        let water_top =
+            standing_top.or_else(|| column_standing_surface(world, atom.gx, atom.gy));
         apply_raft_tip(world, atom, float_columns);
         if atom.fallen {
             if let Some(top) = water_top {
@@ -1792,7 +1819,9 @@ fn step_land_plant(
         }
         atom.gy = solid_y + 1;
         pin_plant_pose(atom);
-    } else if let Some(top) = column_standing_surface(world, atom.gx, atom.gy) {
+    } else if let Some(top) =
+        standing_top.or_else(|| column_standing_surface(world, atom.gx, atom.gy))
+    {
         if stemless {
             // Detached seaweed: ride the surface; keep ribbon body offsets.
             atom.fallen = true;
@@ -1857,16 +1886,23 @@ fn step_land_plant(
         prune_fallen_canopy_in_solid(world, atom);
         prune_uprooted_woody_roots(world, atom);
     }
+    pass.land_seat += t_seat.elapsed();
+
+    let t_metab = Instant::now();
     // Roots bank surplus above the spawn tank (starch analogy).
     sync_root_storage(atom);
     // Pore moisture under roots, or free standing water on leaves.
-    let moist = plant_moisture_frac(world, atom);
-    let bathing = leaves_bathing(world, atom);
+    // One scan feeds drought, bathing, and drink (drink used to rescan).
+    let root_moist = crate::plant::root_moisture_frac(world, atom);
+    let leaf_bath = crate::plant::leaf_bathing_frac(world, atom);
+    let moist = root_moist.max(leaf_bath);
+    let bathing = leaf_bath >= 0.12;
     let drought = drought_band(moist);
     let dormant = matches!(drought, DroughtBand::Dormant);
     if dormant {
         atom.drought_ticks = atom.drought_ticks.saturating_add(1);
         if atom.drought_ticks >= DROUGHT_HIBERNATE_MAX_TICKS {
+            pass.land_metab += t_metab.elapsed();
             return PlantStep::Dead;
         }
     } else {
@@ -1882,6 +1918,7 @@ fn step_land_plant(
     if dormant {
         upkeep *= DROUGHT_DORMANT_UPKEEP;
         atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);
+        pass.land_metab += t_metab.elapsed();
         return if atom.energy <= 0.0 {
             PlantStep::Dead
         } else {
@@ -1892,7 +1929,7 @@ fn step_land_plant(
         };
     }
 
-    let (drink_e, sat_taken, drink_at) = drink_plant(world, atom);
+    let (drink_e, sat_taken, drink_at) = drink_plant_with_moist(world, atom, moist);
     // Per-leaf column Beer–Lambert at posed cells (flop/pile). Lower leaves
     // and plants under taller neighbours harvest less than open tips.
     // `posed_indices` is this plant's slice of the tick's posed list — not a
@@ -1963,8 +2000,12 @@ fn step_land_plant(
     };
     atom.energy = (atom.energy + harvest + drink_e - upkeep - stress).clamp(0.0, atom.energy_max);
     if atom.energy <= 0.0 {
+        pass.land_metab += t_metab.elapsed();
         return PlantStep::Dead;
     }
+    pass.land_metab += t_metab.elapsed();
+
+    let t_grow = Instant::now();
     // Drop midair flecks that no longer touch the trunk, then dim-shade shed.
     // Seaweed ribbons keep their frond — no abscission on stemless bodies.
     let _ = prune_detached_woody_leaves(atom);
@@ -1974,7 +2015,11 @@ fn step_land_plant(
     // Photosystem ribbon instead (no trunk invent). When leaves bathe in
     // standing water, root urge collapses — holdfast is enough.
     let genome_save = atom.genome;
-    let lake_surface = column_standing_surface(world, atom.gx, atom.gy);
+    let lake_surface = if atom.fallen {
+        standing_top.or_else(|| column_standing_surface(world, atom.gx, atom.gy))
+    } else {
+        None
+    };
     if atom.fallen {
         if lake_surface.is_some() {
             // Lake float: elongate dangling roots into wet void / raft, and
@@ -1989,7 +2034,7 @@ fn step_land_plant(
         }
     } else if bathing {
         atom.genome.alloc_root = atom.genome.alloc_root.min(0.06);
-        if crate::plant::stem_count(atom) == 0 && n_photo > 0 {
+        if stemless && n_photo > 0 {
             atom.genome.alloc_leaf = (atom.genome.alloc_leaf + 0.20).min(1.0);
             atom.genome.alloc_stem = 0.0;
         }
@@ -1998,7 +2043,7 @@ fn step_land_plant(
     // force trunk growth all night and empty the tank in a river.
     let grow_day = day >= PLANT_GROW_MIN_DAY;
     if grow_day && !atom.fallen && submerged && light < SUBMERGED_STEM_URGE_LIGHT {
-        if crate::plant::stem_count(atom) > 0 {
+        if !stemless {
             atom.genome.alloc_stem = (atom.genome.alloc_stem + 0.40).min(1.0);
             atom.genome.alloc_root = (atom.genome.alloc_root * 0.55).max(0.05);
             atom.genome.alloc_leaf = (atom.genome.alloc_leaf * 0.85).max(0.05);
@@ -2023,6 +2068,9 @@ fn step_land_plant(
     }
     atom.genome = genome_save;
     sync_root_storage(atom);
+    pass.land_grow += t_grow.elapsed();
+
+    let t_disp = Instant::now();
     // Fern-style wind spores before local rhizome (longer range, needs ReproSpore).
     match try_plant_wind_spore(
         world,
@@ -2034,16 +2082,24 @@ fn step_land_plant(
         wind_vx,
         bank_cfg,
     ) {
-        DispersalResult::Germinated(child) => return PlantStep::Spore(child),
-        DispersalResult::Banked { gx, gy } => return PlantStep::SporeBanked { gx, gy },
+        DispersalResult::Germinated(child) => {
+            pass.land_disperse += t_disp.elapsed();
+            return PlantStep::Spore(child);
+        }
+        DispersalResult::Banked { gx, gy } => {
+            pass.land_disperse += t_disp.elapsed();
+            return PlantStep::SporeBanked { gx, gy };
+        }
         DispersalResult::Inoculated { .. } => {}
         DispersalResult::None => {}
     }
     if let Some(child) =
         try_vegetative_sprout(world, atom, tick, entity_id, pop_room, plant_cols)
     {
+        pass.land_disperse += t_disp.elapsed();
         return PlantStep::Sprout(child);
     }
+    pass.land_disperse += t_disp.elapsed();
     PlantStep::Alive {
         sat: sat_taken,
         at: drink_at,
@@ -2231,23 +2287,17 @@ pub fn resolve_organism_draw_cells(
     use std::collections::HashSet;
     let mut occupied: HashSet<(i32, i32)> = HashSet::new();
     let mut out = Vec::with_capacity(atoms.iter().map(|a| a.body.len()).sum());
-    let any_fallen = atoms.iter().any(|a| a.fallen);
-    let any_stemless = atoms.iter().any(|a| {
-        a.body.iter().any(|(_, _, m)| *m == ModuleId::Photosystem)
-            && crate::plant::stem_count(a) == 0
-    });
     for (atom_idx, atom) in atoms.iter().enumerate() {
+        // Per-atom upright woody fast-path. A single tipped/stemless neighbour
+        // must not force wet-band probes on every grove plant.
+        let woody_upright = !atom.fallen && crate::plant::stem_count(atom) > 0;
         for &(dx0, dy0, mid) in &atom.body {
             let (dx, dy) = atom.fallen_draw_offset(dx0, dy0);
             if atom.fallen && fallen_pose_past_extent(mid, dx) {
                 continue;
             }
-            // Upright woody grove: body cells are the draw pose (no water probes).
-            let (wx0, wy0) = if !any_fallen
-                && !any_stemless
-                && (mid != ModuleId::Photosystem
-                    || atom.body.iter().any(|(_, _, m)| *m == ModuleId::Stem))
-            {
+            // Upright woody: body cells are the draw pose (no water probes).
+            let (wx0, wy0) = if woody_upright {
                 let nod = if mid == ModuleId::Photosystem {
                     let cant = leaf_cantilever(atom, dx, dy);
                     (cant - LEAF_SUPPORT_WOODY).max(0).min(2)
@@ -3030,10 +3080,44 @@ fn organic_in_floating_column(
 fn grounded_substrate_anchor(
     world: &World,
     atom: &Atom,
-    columns: &std::collections::HashMap<i32, (i32, i32)>,
+    columns: &HashMap<i32, (i32, i32)>,
 ) -> bool {
-    const NEAR_CROWN: i16 = 6;
     let over_water = column_standing_surface(world, atom.gx, atom.gy).is_some();
+    grounded_substrate_anchor_over_water(world, atom, columns, over_water)
+}
+
+const GROUND_NEAR_CROWN: i16 = 6;
+
+/// Near-crown root purchase only (`dy >= -6`). Safe without a standing-water
+/// probe — deep lake-bed scrapes are ignored here on purpose.
+fn near_crown_substrate_anchor(
+    world: &World,
+    atom: &Atom,
+    columns: &HashMap<i32, (i32, i32)>,
+) -> bool {
+    for &(dx, dy, m) in &atom.body {
+        if m != ModuleId::Root || dy < -GROUND_NEAR_CROWN {
+            continue;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        if substrate_purchase_at(world, columns, wx, wy)
+            || substrate_purchase_at(world, columns, wx, wy - 1)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Like [`grounded_substrate_anchor`] when the caller already knows whether
+/// the crown column has standing water (avoids a second column scan).
+fn grounded_substrate_anchor_over_water(
+    world: &World,
+    atom: &Atom,
+    columns: &HashMap<i32, (i32, i32)>,
+    over_water: bool,
+) -> bool {
     for &(dx, dy, m) in &atom.body {
         if m != ModuleId::Root {
             continue;
@@ -3041,11 +3125,11 @@ fn grounded_substrate_anchor(
         let wx = world.wrap_x(atom.gx + dx as i32);
         let wy = atom.gy + dy as i32;
         if substrate_purchase_at(world, columns, wx, wy) {
-            if dy >= -NEAR_CROWN || !over_water {
+            if dy >= -GROUND_NEAR_CROWN || !over_water {
                 return true;
             }
         }
-        if dy >= -NEAR_CROWN && substrate_purchase_at(world, columns, wx, wy - 1) {
+        if dy >= -GROUND_NEAR_CROWN && substrate_purchase_at(world, columns, wx, wy - 1) {
             return true;
         }
     }
