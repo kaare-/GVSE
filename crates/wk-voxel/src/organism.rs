@@ -1563,7 +1563,8 @@ pub struct SporeRelease {
 /// [`crate::plant::SPROUT_CROWN_CLEARANCE`] (or share a column) reseat nearby.
 /// Keeps T-canopies readable instead of a solid green bar.
 fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
-    use crate::plant::{column_dist, SPROUT_CROWN_CLEARANCE};
+    use crate::plant::SPROUT_CROWN_CLEARANCE;
+    use std::collections::HashSet;
 
     let mut land_idx: Vec<usize> = atoms
         .iter()
@@ -1576,7 +1577,6 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
     }
     // Fast path: unique columns with clearance already satisfied → skip sort/walk.
     {
-        use std::collections::HashSet;
         let mut cols: HashSet<i32> = HashSet::with_capacity(land_idx.len());
         let mut crowded = false;
         for &i in &land_idx {
@@ -1604,18 +1604,23 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
             return;
         }
     }
-    // Oldest first — they claim space.
+    // Oldest first — they claim space. Claimed set → O(clearance) neighbour
+    // probes instead of O(n) scans of a growing claimed Vec (was ~0.3 ms at
+    // 256 when a few crowns sat inside clearance of each other).
     land_idx.sort_by_key(|&i| std::cmp::Reverse(atoms[i].age_ticks));
-    let mut claimed: Vec<i32> = Vec::new();
-    let clear_of_claimed = |claimed: &[i32], nx: i32| {
-        !claimed.iter().any(|&c| {
-            column_dist(c, nx, world.wrap_width) <= SPROUT_CROWN_CLEARANCE
-        })
+    let mut claimed: HashSet<i32> = HashSet::with_capacity(land_idx.len());
+    let clear_of_claimed = |claimed: &HashSet<i32>, nx: i32| {
+        for d in -SPROUT_CROWN_CLEARANCE..=SPROUT_CROWN_CLEARANCE {
+            if claimed.contains(&world.wrap_x(nx + d)) {
+                return false;
+            }
+        }
+        true
     };
     for i in land_idx {
         let gx = atoms[i].gx;
         if clear_of_claimed(&claimed, gx) {
-            claimed.push(gx);
+            claimed.insert(gx);
             continue;
         }
         let gy = atoms[i].gy;
@@ -1632,7 +1637,7 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
                 atoms[i].gx = nx;
                 atoms[i].gy = ny;
                 pin_plant_pose(&mut atoms[i]);
-                claimed.push(nx);
+                claimed.insert(nx);
                 moved = true;
                 break;
             }
@@ -1642,7 +1647,7 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
         }
         if !moved {
             // No clear seat — keep the plant; don't despawn for spacing.
-            claimed.push(gx);
+            claimed.insert(gx);
         }
     }
 }
