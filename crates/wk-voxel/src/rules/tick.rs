@@ -13,8 +13,8 @@ use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
 use crate::grid::World;
 
 use super::grain::{
-    active_has_unsupported_grain, settle_loose_grains_regions, GRAIN_SETTLE_PASSES,
-    GRAIN_SETTLE_PASSES_SHALLOW,
+    active_has_unsupported_grain, settle_loose_grains_regions_ex, GRAIN_SETTLE_PASSES,
+    GRAIN_SETTLE_PASSES_FPS_DEEP, GRAIN_SETTLE_PASSES_SHALLOW,
 };
 use super::gravity::apply_gravity_fall_regions;
 use super::seepage::apply_seepage_regions;
@@ -473,7 +473,6 @@ fn tick_with_life_inner(
     // Tick 0 always full-scans so save-load / first frame catch orphans.
     const GRAIN_WAKE_EVERY: u64 = 4;
     const GRAIN_WAKE_FULL_EVERY: u64 = 16;
-    let mut freefall_woken = 0u32;
     let mut raft_cargo_seen = 0u32;
     let mut did_wake = false;
     if world.tick % GRAIN_WAKE_EVERY == 0 {
@@ -485,7 +484,8 @@ fn tick_with_life_inner(
             let coords: Vec<_> = halo.iter().map(|ac| ac.coord).collect();
             super::grain::wake_grains_for_settle_coords(world, &coords)
         };
-        freefall_woken = wake.freefall;
+        // freefall count no longer trips FPS deep settle — rise runs first
+        // and unsupported is rechecked after. Cargo still gates punch.
         raft_cargo_seen = wake.raft_cargo;
         did_wake = true;
         if let (true, Some(t0)) = (profile, t0) {
@@ -525,19 +525,23 @@ fn tick_with_life_inner(
 
     if !grain_active.is_empty() {
         // Deep settle for sky freefall / mid-air paint, and for full-feel
-        // (unit tests / Tab A/B). FPS defaults stay shallow unless wake or
-        // empty/haze Air under a grain — not wet shore seats (those were
-        // forcing ×1024 every rainy tick).
+        // (unit tests / Tab A/B). FPS defaults stay shallow unless something
+        // is still unsupported *after* rise — pre-rise freefall_woken from
+        // submerged Organic used to force ×1024 every flood tick.
         let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
         let unsupported = active_has_unsupported_grain(world, &grain_active);
-        let deep = !fps_path || freefall_woken > 0 || unsupported;
+        let deep = !fps_path || unsupported;
         // FPS shallow polish: only on wake cadence or when something is
         // mid-air. Quiet rainy shores were paying ×8 settle every tick
         // (~0.7 ms) with deep_settle_ticks=0 / punch_hits=0.
         let run_settle = deep || world.tick % GRAIN_WAKE_EVERY == 0;
         if run_settle {
             let passes = if deep {
-                GRAIN_SETTLE_PASSES
+                if fps_path {
+                    GRAIN_SETTLE_PASSES_FPS_DEEP
+                } else {
+                    GRAIN_SETTLE_PASSES
+                }
             } else {
                 GRAIN_SETTLE_PASSES_SHALLOW
             };
@@ -545,7 +549,9 @@ fn tick_with_life_inner(
                 local.deep_settle_ticks += 1;
             }
             let t0 = profile.then(Instant::now);
-            settle_loose_grains_regions(world, &grain_active, rooted, passes);
+            // Rise already teleported buoyant litter — do not one-cell
+            // bob through wet Air inside settle (Organic flood FPS spike).
+            settle_loose_grains_regions_ex(world, &grain_active, rooted, passes, false);
             if let (true, Some(t0)) = (profile, t0) {
                 local.settle += t0.elapsed();
             }
@@ -574,7 +580,13 @@ fn tick_with_life_inner(
             let sink = filter_loose_regions(world, &plan_active(world));
             if !sink.is_empty() {
                 let t0 = profile.then(Instant::now);
-                settle_loose_grains_regions(world, &sink, rooted, GRAIN_SETTLE_PASSES_PUNCH);
+                settle_loose_grains_regions_ex(
+                    world,
+                    &sink,
+                    rooted,
+                    GRAIN_SETTLE_PASSES_PUNCH,
+                    false,
+                );
                 if let (true, Some(t0)) = (profile, t0) {
                     local.settle += t0.elapsed();
                 }

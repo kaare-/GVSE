@@ -35,6 +35,7 @@ pub use grain::{
     apply_cold_avalanche, apply_cold_avalanche_bound, apply_flow_erosion, apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
     apply_grain_repose_regions, settle_loose_grains, settle_loose_grains_regions,
+    settle_loose_grains_regions_ex,
     collect_floating_organic_columns, collect_floating_organic_columns_near,
     floating_organic_column_at, drift_floating_organic, drift_floating_organic_cfg,
     drift_floating_organic_columns, drift_floating_organic_columns_cfg,
@@ -44,7 +45,8 @@ pub use grain::{
     active_has_unsupported_grain, wake_grains_for_settle, wake_grains_for_settle_coords,
     GrainWake,
     wake_unsupported_grains, wake_unstable_slopes, GrainConfig, GRAIN_REPOSE_HAZE_MAX,
-    GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES, GRAIN_SETTLE_PASSES_SHALLOW,
+    GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES, GRAIN_SETTLE_PASSES_FPS_DEEP,
+    GRAIN_SETTLE_PASSES_SHALLOW,
     MYCELIUM_EROSION_BIND,
     MYCELIUM_RAFT_BIND_MIN, MYCELIUM_REPOSE_STEP_BONUS, ROOT_EROSION_BIND, ROOT_REPOSE_STEP_BONUS,
 };

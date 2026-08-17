@@ -4730,6 +4730,48 @@ fn river_organic_drifts_despite_still_lake_mats() {
 }
 
 #[test]
+fn floating_organic_drifts_with_cascade_flow_bias() {
+    // Organic beside a cascade lip must ride flow_bias (not only sat gradients).
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(1, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(14, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 2..=8 {
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+        w.set_cell(x, 5, Cell::water());
+    }
+    // Cascade lip at x=9 — empty column so flow_bias on x=8 points +x.
+    for y in 1..=6 {
+        w.set_cell(9, y, Cell::air());
+        w.set_cell(10, y, Cell::air());
+    }
+    w.set_cell(7, 6, Cell::solid(MaterialId::Organic));
+    let x0 = 7;
+    let mut moved = false;
+    for tick in 0..500u64 {
+        w.tick = tick;
+        let (n, _, _) = drift_floating_organic(&mut w, 0.0, 4, None, None);
+        if n > 0 {
+            moved = true;
+            break;
+        }
+    }
+    assert!(moved, "Organic must drift with cascade flow_bias when wind is calm");
+    let xs: Vec<_> = (2..=12)
+        .filter(|&x| {
+            (5..=7).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic))
+        })
+        .collect();
+    assert!(
+        xs.iter().any(|&x| x > x0),
+        "cascade flow should carry Organic toward / over the lip ({xs:?})"
+    );
+}
+
+#[test]
 fn thin_floating_organic_washes_over_cascade_lip() {
     // Drift used to require a near-full float seat at the destination —
     // cascade lips are empty Air, so shore film sealed into a sticky ring.
@@ -4771,6 +4813,31 @@ fn thin_floating_organic_washes_over_cascade_lip() {
     assert!(
         washed,
         "thin unbound Organic must wash over cascade lip with stream push"
+    );
+}
+
+#[test]
+fn fps_path_organic_flood_does_not_deep_settle_forever() {
+    // Flooded Organic used to force ×1024 settle every tick on the FPS path.
+    use crate::rules::{tick_with_perf_profiled, PerfConfig, PhysicsTimings};
+    let mut w = setup_column_world();
+    for x in 2..=12 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+        w.set_cell(x, 4, Cell::solid(MaterialId::Organic));
+    }
+    let perf = PerfConfig::default(); // FPS path
+    let mut accum = PhysicsTimings::default();
+    for _ in 0..24 {
+        let _ = tick_with_perf_profiled(&mut w, &perf, &mut accum);
+    }
+    // Landing may deep-settle a few ticks; must not stay on deep every frame.
+    assert!(
+        accum.deep_settle_ticks <= 12,
+        "FPS organic flood deep_settle_ticks too high: {}",
+        accum.deep_settle_ticks
     );
 }
 
