@@ -238,6 +238,20 @@ pub(crate) fn same_y_cascade_pull_in(
         let Some(cell) = read(x, gy, clx, ly) else {
             break;
         };
+        // Thin floating Organic is a soft lid — look past it so cascade
+        // pull still levels water around shore mats (otherwise free
+        // surfaces comb against organic dams).
+        if cell.material == MaterialId::Organic {
+            let soft_lid = !cell.is_waterlogged_organic()
+                && matches!(
+                    read(x, gy - 1, clx, ly - 1),
+                    Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
+                );
+            if soft_lid {
+                continue;
+            }
+            break;
+        }
         if cell.material != MaterialId::Air {
             break;
         }

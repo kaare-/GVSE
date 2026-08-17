@@ -155,6 +155,7 @@ pub use rules::{
     collect_floating_organic_columns, collect_floating_organic_columns_near,
     floating_organic_column_at, drift_floating_organic, drift_floating_organic_cfg,
     drift_floating_organic_columns, drift_floating_organic_columns_cfg,
+    shove_floating_organic_with_current,
     active_has_unsupported_grain, is_standing_water, punch_through_floating_rafts,
     rise_and_soak_buoyant_litter, rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter,
     settle_loose_grains, settle_loose_grains_regions, soak_floating_litter,

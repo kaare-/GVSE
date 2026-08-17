@@ -565,6 +565,8 @@ async fn main() {
                     &settings.grain,
                 );
             }
+            // Current shoves unbound film so mats don't dam / comb the lake.
+            let _ = wk_voxel::shove_floating_organic_with_current(&mut scene.world);
             // Bedload / bank transport after water has moved this tick.
             apply_flow_erosion_bound(&mut scene.world, &settings.grain, rooted.as_ref());
             if geotech_due {

@@ -4730,6 +4730,35 @@ fn river_organic_drifts_despite_still_lake_mats() {
 }
 
 #[test]
+fn shove_floating_organic_with_current_clears_cascade_dam() {
+    use super::grain::shove_floating_organic_with_current;
+    // Unbound film at a cascade lip must move in one shove — dams comb water.
+    let mut w = setup_column_world();
+    for y in 1..=6 {
+        w.set_cell(1, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(14, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 2..=8 {
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+        w.set_cell(x, 5, Cell::water());
+    }
+    for y in 1..=6 {
+        w.set_cell(9, y, Cell::air());
+        w.set_cell(10, y, Cell::air());
+    }
+    w.set_cell(8, 6, Cell::solid(MaterialId::Organic));
+    let n = shove_floating_organic_with_current(&mut w);
+    assert!(n >= 1, "current shove must move unbound film at cascade (n={n})");
+    assert_ne!(
+        w.get_cell(8, 6).map(|c| c.material),
+        Some(MaterialId::Organic),
+        "Organic must leave the cascade dam seat"
+    );
+}
+
+#[test]
 fn floating_organic_drifts_with_cascade_flow_bias() {
     // Organic beside a cascade lip must ride flow_bias (not only sat gradients).
     let mut w = setup_column_world();

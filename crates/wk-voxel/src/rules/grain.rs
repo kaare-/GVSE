@@ -1691,7 +1691,7 @@ pub fn drift_floating_organic_columns_cfg(
         let (_, flow_strength) = raft_stream_push(world, gx, bottom_y - 1);
         let nx = world.wrap_x(gx + sign);
         // Thin unbound film may wash onto cascade lips when current is strong.
-        let allow_lip = height <= 1 && flow_strength >= 0.20;
+        let allow_lip = height <= 1 && flow_strength >= 0.15;
         if !drift_dest_ok(world, nx, bottom_y, height, allow_lip) {
             continue;
         }
@@ -1702,11 +1702,20 @@ pub fn drift_floating_organic_columns_cfg(
         let sail = 1.0
             + RAFT_DRIFT_ORGANIC_SAIL * (height - 1) as f32
             + RAFT_DRIFT_PLANT_SAIL * plant_h as f32;
-        let p = (speed
-            * (RAFT_DRIFT_BASE + RAFT_DRIFT_FLOW_BASE * flow_strength.min(1.0))
-            * sail)
-            .clamp(0.0, 0.90);
-        if hash_prob(world.seed.0, gx, world.tick, 0xD61F_1005) >= p {
+        // Unbound film in a real current always rides it — probabilistic
+        // drift left mats damming lakes and combing the free surface.
+        let unbound_current = height <= 2
+            && flow_strength >= 0.20
+            && column_max_mycelium(world, gx, bottom_y, height) < MYCELIUM_RAFT_BIND_MIN;
+        let p = if unbound_current {
+            1.0
+        } else {
+            (speed
+                * (RAFT_DRIFT_BASE + RAFT_DRIFT_FLOW_BASE * flow_strength.min(1.0))
+                * sail)
+                .clamp(0.0, 0.90)
+        };
+        if !unbound_current && hash_prob(world.seed.0, gx, world.tick, 0xD61F_1005) >= p {
             continue;
         }
         drift_move_column(world, gx, bottom_y, height, nx);
@@ -1717,6 +1726,83 @@ pub fn drift_floating_organic_columns_cfg(
 
     let report_sign = if sign_acc >= 0 { 1 } else { -1 };
     (moved, report_sign, moved_cols)
+}
+
+/// Current shoves thin unbound floating Organic blocking a cascade /
+/// head-drop so mats do not dam lakes into comb teeth.
+///
+/// Call after wind/stream drift. Deterministic: if water beside the mat
+/// has [`flow_bias`] into/along the film and the down-current seat is
+/// clear (or a lip), the film moves one column.
+pub fn shove_floating_organic_with_current(world: &mut World) -> u32 {
+    let columns = collect_floating_organic_columns(world);
+    if columns.is_empty() {
+        return 0;
+    }
+    let mut keys: Vec<i32> = columns.keys().copied().collect();
+    keys.sort_unstable();
+    let mut moved = 0u32;
+    // Snapshot dest occupancy so two mats don't swap into each other.
+    let mut claimed: HashSet<i32> = HashSet::new();
+    for gx in keys {
+        let Some(&(bottom, height)) = columns.get(&gx) else {
+            continue;
+        };
+        if height > 2 {
+            continue;
+        }
+        if column_max_mycelium(world, gx, bottom, height) >= MYCELIUM_RAFT_BIND_MIN {
+            continue;
+        }
+        let waterline = bottom - 1;
+        let mut sign = 0i32;
+        // Bias under the mat, then from wet neighbours pointing at us.
+        for y in [waterline, waterline - 1] {
+            let Some(seat) = world.get_cell(gx, y) else {
+                continue;
+            };
+            if seat.material != MaterialId::Air || seat.sat.0 < 180 {
+                continue;
+            }
+            if let Some(dx) = flow_bias(world, gx, y, seat.sat) {
+                sign = dx;
+                break;
+            }
+        }
+        if sign == 0 {
+            for dx in [-1_i32, 1] {
+                let nx = world.wrap_x(gx + dx);
+                let Some(n) = world.get_cell(nx, waterline) else {
+                    continue;
+                };
+                if n.material != MaterialId::Air || n.sat.0 < 180 {
+                    continue;
+                }
+                if let Some(bdx) = flow_bias(world, nx, waterline, n.sat) {
+                    // Neighbour current toward the mat or continuing past it.
+                    if bdx == -dx || bdx == dx {
+                        sign = bdx;
+                        break;
+                    }
+                }
+            }
+        }
+        if sign == 0 {
+            continue;
+        }
+        let nx = world.wrap_x(gx + sign);
+        if claimed.contains(&nx) || columns.contains_key(&nx) {
+            continue;
+        }
+        let allow_lip = height <= 1;
+        if !drift_dest_ok(world, nx, bottom, height, allow_lip) {
+            continue;
+        }
+        drift_move_column(world, gx, bottom, height, nx);
+        claimed.insert(nx);
+        moved = moved.saturating_add(1);
+    }
+    moved
 }
 
 /// Lift submerged Snow/Ice/Organic through grounded full water, and pop
