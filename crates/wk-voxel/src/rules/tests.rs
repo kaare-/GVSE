@@ -2270,6 +2270,51 @@ fn rain_still_refuses_hillside_wedge() {
 }
 
 #[test]
+fn rain_from_sky_ceiling_reaches_sea_level_lake() {
+    // Demo sky is 320 tall; ceiling clouds sit ~240 cells above sea.
+    // A 128-cell deposit walk never reached the lake — looking at the
+    // ground only made evaporation win faster (higher FPS).
+    let mut w = World::new(11);
+    let sky: i32 = 300;
+    let floor: i32 = 70;
+    for cy in (floor.div_euclid(CHUNK_CELLS_H as i32))..=(sky.div_euclid(CHUNK_CELLS_H as i32)) {
+        w.ensure_chunk(ChunkCoord::new(0, cy));
+    }
+    for x in 3..=7 {
+        w.set_cell(x, floor, Cell::solid(MaterialId::Sand));
+        w.set_cell(x, floor + 1, Cell::water());
+        for y in (floor + 2)..=sky {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    for y in floor..=(floor + 3) {
+        w.set_cell(2, y, Cell::solid(MaterialId::Stone));
+        w.set_cell(8, y, Cell::solid(MaterialId::Stone));
+    }
+    let cfg = RainConfig {
+        top_y: sky,
+        x_range: (5, 5),
+        prob_per_col_per_tick: 1.0,
+        droplet_sat: 80,
+        seed_salt: 2,
+        closed_loop: false,
+        ..RainConfig::default()
+    };
+    apply_rain(&mut w, &cfg);
+    assert_eq!(w.get_cell(5, floor + 1).unwrap().sat.0, u8::MAX);
+    assert!(
+        w.get_cell(5, floor + 2).unwrap().sat.0 > 0,
+        "ceiling rain must pond a sea-level basin (got sat={})",
+        w.get_cell(5, floor + 2).unwrap().sat.0
+    );
+    assert_eq!(
+        w.get_cell(5, sky).unwrap().sat.0,
+        0,
+        "rain must not hang at the sky ceiling"
+    );
+}
+
+#[test]
 fn rain_skips_non_air_cells() {
     let mut w = setup_sky_row(30);
     // Buried column of stone — no free air above a solid landing.

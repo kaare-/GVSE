@@ -546,8 +546,9 @@ fn deposit_frozen_lid_on_surface(
     let jx = world.wrap_x(gx);
     let mut y = start_y;
     let mut last_empty_air_y: Option<i32> = None;
-    for _ in 0..256 {
+    for _ in 0..512 {
         let Some(cell) = world.get_cell(jx, y) else {
+            last_empty_air_y = None;
             y -= 1;
             continue;
         };

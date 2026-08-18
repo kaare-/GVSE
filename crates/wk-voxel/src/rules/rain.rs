@@ -209,6 +209,12 @@ fn film_has_outlet(world: &World, gx: i32, gy: i32) -> bool {
     false
 }
 
+/// Max cells to walk down from a precip origin. Demo sky is 5 chunks
+/// tall (320); ceiling clouds must still reach sea-level lakes (~80).
+/// A short 128-cell walk used to miss the ground entirely — rain kept
+/// looking heavy while basins only evaporated.
+const SURFACE_DEPOSIT_SCAN: i32 = 512;
+
 /// Deposit atmospheric water onto the free-air surface under `start_y`.
 ///
 /// Lands just above solid ground or standing water. Deepens existing
@@ -223,8 +229,12 @@ pub(crate) fn deposit_water_on_surface(world: &mut World, gx: i32, start_y: i32,
     let jx = world.wrap_x(gx);
     let mut y = start_y;
     let mut last_free_air_y: Option<i32> = None;
-    for _ in 0..128 {
+    let floor_y = start_y - SURFACE_DEPOSIT_SCAN;
+    while y >= floor_y {
         let Some(cell) = world.get_cell(jx, y) else {
+            // Unloaded gap — forget the air seat so we never fill far
+            // above the next solid/film we meet.
+            last_free_air_y = None;
             y -= 1;
             continue;
         };
@@ -249,8 +259,10 @@ pub(crate) fn deposit_water_on_surface(world: &mut World, gx: i32, start_y: i32,
             );
             if below_is_water {
                 if let Some(ay) = last_free_air_y {
-                    if let Some(ac) = world.get_cell(jx, ay) {
-                        return fill_air_sat(world, jx, ay, ac, budget);
+                    if ay == y + 1 {
+                        if let Some(ac) = world.get_cell(jx, ay) {
+                            return fill_air_sat(world, jx, ay, ac, budget);
+                        }
                     }
                 }
             }
@@ -258,8 +270,10 @@ pub(crate) fn deposit_water_on_surface(world: &mut World, gx: i32, start_y: i32,
             // must be allowed to pond. Hillside films still wait.
             if !film_has_outlet(world, jx, y) {
                 if let Some(ay) = last_free_air_y {
-                    if let Some(ac) = world.get_cell(jx, ay) {
-                        return fill_air_sat(world, jx, ay, ac, budget);
+                    if ay == y + 1 {
+                        if let Some(ac) = world.get_cell(jx, ay) {
+                            return fill_air_sat(world, jx, ay, ac, budget);
+                        }
                     }
                 }
             }

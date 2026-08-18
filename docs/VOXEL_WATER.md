@@ -221,6 +221,10 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   basin of full films (dry lake bed) *does* pond — otherwise a long
   soak rains forever while lakes stay empty, because clouds cannot
   dump once every column wears a full film.
+  Surface deposit walks up to 512 cells down from the precip origin
+  (demo sky is 320 tall). A shorter 128-cell walk left ceiling clouds
+  unable to reach sea-level lakes — looking at the ground only made
+  evaporation win faster (higher FPS), which felt like a viewport cull.
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
   the blanket. Cloud downpour uses a wider footprint when snowing.
