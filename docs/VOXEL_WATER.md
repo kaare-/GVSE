@@ -208,6 +208,14 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   faucet (`closed_loop` off) for experiments; prefer clouds +
   condensation for weather. Atmosphere also has soft caps
   (`Humidity::MAX_MASS_PER_TILE`, `CloudConfig::max_total_mass`).
+  Evap also refuses a near-saturated vapor column
+  (`Humidity::column_near_saturated`) and stops entirely when
+  `Humidity::atmosphere_overfull` — buoyant rise used to empty the
+  surface tile so the per-tile cap never tripped, and a multi-million
+  tick soak filled the whole sky grid. Condensation then walked every
+  wet column (demo `max_prob_per_tick = 0.10`) and collapsed to ~7 FPS.
+  Drizzle is now capped at `CondensationConfig::max_events_per_tick`
+  (default 48; `0` = unlimited).
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
   the blanket. Cloud downpour uses a wider footprint when snowing.

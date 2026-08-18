@@ -3978,6 +3978,39 @@ fn condensation_skips_non_air_landing_cell() {
 }
 
 #[test]
+fn condensation_caps_events_per_tick_on_a_full_sky() {
+    // Long-soak bug: every wet tile walked a column from the sky
+    // ceiling. Cap drizzle so a filled atmosphere cannot rain thousands
+    // of columns in one tick.
+    let (mut w, mut h) = setup_cloud_world();
+    for hx in 0..8 {
+        h.cells.insert((hx, 7), 200.0 + hx as f32 * 80.0);
+    }
+    let mass_before = h.total_mass();
+    let cfg = CondensationConfig {
+        top_y: 30,
+        max_prob_per_tick: 1.0,
+        mass_per_droplet: 40.0,
+        max_events_per_tick: 3,
+        ..CondensationConfig::default()
+    };
+    apply_condensation_rain(&mut w, &mut h, &cfg);
+    let lost = mass_before - h.total_mass();
+    assert!(
+        lost <= 40.0 * 3.0 + 1.5,
+        "event cap must limit drizzle mass (lost={lost})"
+    );
+    assert!(lost > 0.0, "heaviest tiles should still rain");
+    // Heaviest three tiles (hx 5/6/7) drain; lighter ones stay full.
+    for hx in 0..5 {
+        assert!(
+            (h.at_tile(hx, 7) - (200.0 + hx as f32 * 80.0)).abs() < 1e-3,
+            "tile hx={hx} should be skipped by the event cap"
+        );
+    }
+}
+
+#[test]
 fn orographic_boost_rains_thinner_clouds_over_tall_land() {
     use crate::worldgen::WorldgenParams;
     let p = WorldgenParams::default();
@@ -4184,6 +4217,64 @@ fn quiescent_lake_still_evaporates() {
         "surface water must evaporate even when physics is quiescent"
     );
     assert!(h.total_mass() > 0.0);
+}
+
+#[test]
+fn evap_refuses_near_saturated_vapor_column() {
+    // Buoyant rise empties the surface tile, so the per-tile cap never
+    // trips at sea level. Column saturation must stop the ocean pump.
+    use crate::humidity::Humidity;
+    let mut w = setup_column_world();
+    w.set_cell(4, 1, Cell::water());
+    let mut h = Humidity::new(4);
+    for i in 0..Humidity::VAPOR_COLUMN_TILES {
+        h.add(4, 1 + i * 4, Humidity::MAX_MASS_PER_TILE);
+    }
+    let sat_before = w.get_cell(4, 1).unwrap().sat.0;
+    let hum_before = h.total_mass();
+    apply_evaporation_into_humidity(
+        &mut w,
+        &mut h,
+        &EvapConfig {
+            rate_per_tick: 8,
+            dry_above_max: 200,
+            period_ticks: 1,
+        },
+    );
+    assert_eq!(
+        w.get_cell(4, 1).unwrap().sat.0,
+        sat_before,
+        "saturated column must not take more ocean water"
+    );
+    assert!(
+        (h.total_mass() - hum_before).abs() < 1e-3,
+        "humidity must stay put when the column is already wet"
+    );
+}
+
+#[test]
+fn evap_stops_when_atmosphere_overfull() {
+    use crate::humidity::Humidity;
+    let mut w = setup_column_world();
+    w.set_cell(4, 1, Cell::water());
+    // Wide/tall bounds so the surface column stays dry while a high
+    // cloud deck exceeds the thin-atmosphere budget.
+    let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 256);
+    for hx in 0..16 {
+        for hy in 20..28 {
+            h.cells.insert((hx, hy), Humidity::MAX_MASS_PER_TILE);
+        }
+    }
+    assert!(h.atmosphere_overfull());
+    assert!(!h.column_near_saturated(4, 1));
+    let sat_before = w.get_cell(4, 1).unwrap().sat.0;
+    let hum_before = h.total_mass();
+    apply_evaporation_into_humidity(&mut w, &mut h, &EvapConfig::default());
+    assert_eq!(w.get_cell(4, 1).unwrap().sat.0, sat_before);
+    assert!(
+        (h.total_mass() - hum_before).abs() < 1e-3,
+        "overfull sky must skip the evap pump"
+    );
 }
 
 #[test]

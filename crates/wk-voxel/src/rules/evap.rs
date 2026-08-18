@@ -72,6 +72,11 @@ pub fn apply_evaporation_into_humidity(
     if world.tick % period != 0 {
         return;
     }
+    // Skip the ocean-surface scan once the sky is already over budget —
+    // otherwise a long soak keeps walking every wet chunk for no gain.
+    if humidity.atmosphere_overfull() {
+        return;
+    }
     let (deltas, clear_wet) = collect_evap_deltas(world, cfg);
     clear_dry_wet_air_flags(world, &clear_wet);
     apply_evap_deltas(world, deltas, Some(humidity));
@@ -190,7 +195,11 @@ fn apply_evap_deltas(
         }
         // Only lift what the atmosphere can still hold (per-tile cap).
         let accepted = if let Some(h) = humidity.as_deref_mut() {
-            h.try_add(gx, gy, want_removed as f32).round() as i32
+            if h.column_near_saturated(gx, gy) {
+                0
+            } else {
+                h.try_add(gx, gy, want_removed as f32).round() as i32
+            }
         } else {
             want_removed
         };

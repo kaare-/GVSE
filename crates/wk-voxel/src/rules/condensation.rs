@@ -33,6 +33,14 @@ pub struct CondensationConfig {
     pub mass_per_droplet: f32,
     /// Salt mixed into the per-tile tick hash.
     pub seed_salt: u64,
+    /// Cap drizzle events per tick (`0` = unlimited). A filled sky
+    /// used to rain from every tile (~thousands of column walks → 7 FPS).
+    #[serde(default = "default_cond_max_events")]
+    pub max_events_per_tick: u32,
+}
+
+fn default_cond_max_events() -> u32 {
+    48
 }
 
 impl Default for CondensationConfig {
@@ -44,6 +52,7 @@ impl Default for CondensationConfig {
             full_mass: 512.0,
             mass_per_droplet: 96.0,
             seed_salt: 0xC10D_BA5E,
+            max_events_per_tick: default_cond_max_events(),
         }
     }
 }
@@ -134,6 +143,9 @@ pub fn apply_condensation_rain_phased(
     let tile_cols = humidity.tile_cols;
     // Snapshot tile keys so we can mutate humidity as we go.
     let tiles: Vec<(i32, i32)> = humidity.cells.keys().copied().collect();
+    // Collect first, then apply the heaviest hits so a saturated sky
+    // cannot walk every column every tick (~thousands → 7 FPS).
+    let mut hits: Vec<(f32, i32, i32, f32)> = Vec::new(); // mass, hx, hy, take_mass
     for (hx, hy) in tiles {
         let mass = humidity.at_tile(hx, hy);
         let (prob_mult, mass_mult, min_mass) = match oro {
@@ -156,12 +168,29 @@ pub fn apply_condensation_rain_phased(
         if roll >= effective_prob {
             continue;
         }
-        // Rain / frost lands on the ground / ocean under the tile centre.
-        let centre_gx = hx * tile_cols + tile_cols / 2;
         let take_mass = (cfg.mass_per_droplet * mass_mult).min(mass);
         if take_mass <= 0.0 {
             continue;
         }
+        hits.push((mass, hx, hy, take_mass));
+    }
+    if hits.is_empty() {
+        return;
+    }
+    hits.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let limit = if cfg.max_events_per_tick == 0 {
+        hits.len()
+    } else {
+        hits.len().min(cfg.max_events_per_tick as usize)
+    };
+    for &(_mass, hx, hy, take_mass) in hits.iter().take(limit) {
+        let mass = humidity.at_tile(hx, hy);
+        if mass <= 0.0 {
+            continue;
+        }
+        let take_mass = take_mass.min(mass);
+        // Rain / frost lands on the ground / ocean under the tile centre.
+        let centre_gx = hx * tile_cols + tile_cols / 2;
         let mut landed = crate::phase::deposit_condensate_on_surface(
             world,
             centre_gx,

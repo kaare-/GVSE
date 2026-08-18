@@ -238,6 +238,59 @@ impl Humidity {
         *self.cells.get(&(hx, hy)).unwrap_or(&0.0)
     }
 
+    /// Tiles above a surface cell that count as its vapor column.
+    pub const VAPOR_COLUMN_TILES: i32 = 12;
+
+    /// True when the air column above `(gx, gy)` is already wet enough
+    /// that more evaporation would only stockpile sky haze.
+    ///
+    /// Buoyant rise empties the surface tile every tick, so the per-tile
+    /// cap at sea level never trips — a long soak used to fill the whole
+    /// sky grid, then condensation walked every column (~7 FPS).
+    pub fn column_near_saturated(&self, gx: i32, gy: i32) -> bool {
+        let (hx, hy0) = self.tile_of(gx, gy);
+        let mut sum = 0.0f32;
+        let mut n = 0i32;
+        let mut peak = 0.0f32;
+        for i in 0..Self::VAPOR_COLUMN_TILES {
+            let hy = hy0 + i;
+            if !self.accepts(hx, hy) {
+                break;
+            }
+            let m = self.at_tile(hx, hy);
+            sum += m;
+            peak = peak.max(m);
+            n += 1;
+        }
+        if n == 0 {
+            return false;
+        }
+        peak >= Self::MAX_MASS_PER_TILE * 0.92
+            || (sum / n as f32) >= Self::MAX_MASS_PER_TILE * 0.50
+    }
+
+    /// True when total vapor exceeds a thin cloud-deck budget (not the
+    /// entire sky rectangle). Long soaks used to saturate every tile.
+    pub fn atmosphere_overfull(&self) -> bool {
+        let width = match self.bounds {
+            Some(b) => (b.hx_max - b.hx_min + 1).max(1) as f32,
+            None => {
+                let mut min_hx = i32::MAX;
+                let mut max_hx = i32::MIN;
+                for &(hx, _) in self.cells.keys() {
+                    min_hx = min_hx.min(hx);
+                    max_hx = max_hx.max(hx);
+                }
+                if min_hx > max_hx {
+                    return false;
+                }
+                (max_hx - min_hx + 1).max(1) as f32
+            }
+        };
+        let budget = width * 8.0 * (Self::MAX_MASS_PER_TILE * 0.45);
+        self.total_mass() > budget
+    }
+
     /// Bilinear sample in world-cell space (smooth haze; no tile facets).
     ///
     /// Tile centres sit at `(hx + 0.5, hy + 0.5) * tile_cols`. Horizontal
@@ -607,6 +660,37 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn column_near_saturated_when_deck_is_wet() {
+        let mut h = Humidity::new(4);
+        assert!(!h.column_near_saturated(2, 0));
+        h.add(2, 8, Humidity::MAX_MASS_PER_TILE);
+        assert!(
+            h.column_near_saturated(2, 0),
+            "a near-full tile in the vapor column must block more evap"
+        );
+    }
+
+    #[test]
+    fn atmosphere_overfull_uses_thin_deck_budget() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 256);
+        assert!(!h.atmosphere_overfull());
+        // width tiles = 16 → budget = 16 * 8 * MAX * 0.45
+        for hx in 0..16 {
+            for hy in 20..28 {
+                h.cells.insert((hx, hy), Humidity::MAX_MASS_PER_TILE * 0.50);
+            }
+        }
+        assert!(
+            h.atmosphere_overfull(),
+            "a filled 8-tile cloud deck must trip the soak budget"
+        );
+        assert!(
+            h.cells.len() < h.bounds.unwrap().tile_capacity(),
+            "budget is a thin deck, not the whole sky rectangle"
+        );
+    }
+
     fn humidity_diffuse_due_matches_column_schedule() {
         assert!(!humidity_diffuse_due(0));
         assert!(!humidity_diffuse_due(1));
