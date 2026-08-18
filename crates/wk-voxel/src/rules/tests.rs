@@ -4730,6 +4730,86 @@ fn river_organic_drifts_despite_still_lake_mats() {
 }
 
 #[test]
+fn water_washes_through_organic_dam() {
+    // High water behind a 2-cell Organic wall must punch through to the lee.
+    let mut w = setup_column_world();
+    for x in 0..16 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 1..=5 {
+        w.set_cell(1, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(14, y, Cell::solid(MaterialId::Bedrock));
+    }
+    // Left reservoir.
+    for x in 2..=5 {
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    // Organic dam.
+    for y in 1..=4 {
+        w.set_cell(6, y, Cell::solid(MaterialId::Organic));
+        w.set_cell(7, y, Cell::solid(MaterialId::Organic));
+    }
+    // Right lee starts dry.
+    for x in 8..=12 {
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    for _ in 0..40 {
+        tick(&mut w);
+    }
+    let lee = (8..=12)
+        .map(|x| {
+            (1..=5)
+                .filter(|&y| {
+                    w.get_cell(x, y)
+                        .map(|c| c.material == MaterialId::Air && c.sat.0 > 32)
+                        .unwrap_or(false)
+                })
+                .count()
+        })
+        .sum::<usize>();
+    assert!(
+        lee >= 2,
+        "water must wash through Organic dam into the lee (wet cells={lee})"
+    );
+}
+
+#[test]
+fn wash_wet_organic_does_not_hold_mycelium_cliff() {
+    use super::grain::MYCELIUM_RAFT_BIND_MIN;
+    // Cream Organic next to a lake must sprawl, not hold a vertical dam.
+    let mut w = setup_column_world();
+    for x in 0..12 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 2..=5 {
+        for y in 1..=3 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for y in 1..=4 {
+        let mut org = Cell::solid(MaterialId::Organic);
+        org.set_mycelium(MYCELIUM_RAFT_BIND_MIN.saturating_add(80));
+        w.set_cell(6, y, org);
+    }
+    w.set_cell(6, 0, Cell::solid(MaterialId::Stone));
+    for _ in 0..30 {
+        apply_grain_fall(&mut w);
+        apply_grain_repose(&mut w);
+    }
+    let cliff = (1..=4)
+        .filter(|&y| w.get_cell(6, y).map(|c| c.material) == Some(MaterialId::Organic))
+        .count();
+    assert!(
+        cliff <= 2,
+        "wash-wet mycelium Organic must not hold a 4-cell dam (cliff={cliff})"
+    );
+}
+
+#[test]
 fn shove_floating_organic_with_current_clears_cascade_dam() {
     use super::grain::shove_floating_organic_with_current;
     // Unbound film at a cascade lip must move in one shove — dams comb water.

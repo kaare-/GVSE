@@ -2047,7 +2047,13 @@ fn apply_repose_pass(
                         max_step = max_step.saturating_add(ROOT_REPOSE_STEP_BONUS);
                     }
                     // Cream mycelium felts Organic — same 0..=255 intensity.
-                    max_step = max_step.saturating_add(mycelium_repose_bonus(src));
+                    // Wash-wet Organic (standing water neighbour) sheds the
+                    // felt so mats cannot hold vertical dams in a lake.
+                    if !(src.material == MaterialId::Organic
+                        && organic_wash_wet_ptrs(ptrs, wrap_width, sx, sy))
+                    {
+                        max_step = max_step.saturating_add(mycelium_repose_bonus(src));
+                    }
                     let gap = repose_gap_mode(src, surface_organic);
                     if !diag_drop_exceeds(ptrs, wrap_width, gx, sy, max_step, gap) {
                         continue;
@@ -2105,7 +2111,11 @@ fn apply_repose_pass(
                         if rooted.is_some_and(|r| r.contains(&(sx, sy))) {
                             step = step.saturating_add(ROOT_REPOSE_STEP_BONUS);
                         }
-                        step = step.saturating_add(mycelium_repose_bonus(src));
+                        if !(src.material == MaterialId::Organic
+                            && organic_wash_wet_ptrs(ptrs, wrap_width, sx, sy))
+                        {
+                            step = step.saturating_add(mycelium_repose_bonus(src));
+                        }
                         // Rooted sand / plastic clay can hold short stairs —
                         // don't walk off. Colonized Organic likewise.
                         if step > 0 {
@@ -2392,6 +2402,25 @@ fn repose_gap_mode(src: Cell, surface_organic: bool) -> ReposeGapMode {
         MaterialId::Organic | MaterialId::Soil => ReposeGapMode::Soil,
         _ => ReposeGapMode::Dense,
     }
+}
+
+/// True when Organic sits next to standing water — mycelium felt must
+/// not hold a vertical dam; water washes the mat loose.
+fn organic_wash_wet_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    for (dx, dy) in [(0, -1), (-1, 0), (1, 0), (0, 1), (-1, -1), (1, -1)] {
+        let Some(n) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx + dx, gy + dy) }) else {
+            continue;
+        };
+        if n.material == MaterialId::Air && n.sat.0 >= GRAIN_REPOSE_LAKE_MIN {
+            return true;
+        }
+    }
+    false
 }
 
 /// True when Organic is still a surface mat / beach litter (not under a

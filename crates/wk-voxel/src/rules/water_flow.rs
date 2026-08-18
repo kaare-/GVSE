@@ -32,7 +32,8 @@ use super::plan::{regions_for_standalone, regions_wet_loaded};
 /// 3. **Same-Y surface equalise** — scan up to [`SAME_Y_SURFACE_SCAN`]
 ///    standing cells for a cascade outlet and push toward it; then
 ///    pairwise head-equalise each +x standing edge so wide lake tops
-///    level instead of terracing / checkerboarding.
+///    level instead of terracing / checkerboarding. **Organic wash-through**
+///    punches standing water through Organic mats into Air beyond.
 /// 4. **Throughflow** — if below is a stack of saturated porous cells,
 ///    weep at seepage rate to the nearest opening: a **side Air face**
 ///    (cliff / spring) or Air below the stack.
@@ -667,6 +668,23 @@ fn accumulate_water_flow_xfers(
                             remaining -= move_amt;
                         }
                     }
+
+                    // --- Priority 3b: wash through Organic dams ---
+                    // Organic is a sponge — standing water punches through
+                    // to Air beyond instead of pooling forever behind mats.
+                    if remaining > 0 {
+                        remaining = plan_organic_wash_through(
+                            world,
+                            &read,
+                            gx,
+                            gy,
+                            lx,
+                            ly,
+                            dirs,
+                            remaining,
+                            &mut local,
+                        );
+                    }
                 }
 
                 // --- Priority 3b: pairwise +x standing equalise ---
@@ -785,6 +803,99 @@ fn accumulate_throughflow_xfers(
     for mut v in local {
         xfers.append(&mut v);
     }
+}
+
+/// Max Organic cells water may punch through in one wash.
+const ORGANIC_WASH_SPAN: i32 = 8;
+/// Cap sat moved through Organic per source cell per pass (still aggressive).
+const ORGANIC_WASH_RATE: i32 = 96;
+
+/// Standing water washes through a span of Organic into Air beyond.
+///
+/// Organic is a sponge / mat, not a masonry dam — without this, shore
+/// mounds seal basins into sticky perched pools.
+fn plan_organic_wash_through(
+    world: &World,
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+    dirs: [i32; 2],
+    mut remaining: i32,
+    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
+) -> i32 {
+    for dx in dirs {
+        if remaining <= 0 {
+            break;
+        }
+        let mut x = world.wrap_x(gx + dx);
+        let mut clx = lx + dx;
+        let Some(first) = read(clx, ly, x, gy) else {
+            continue;
+        };
+        if first.material != MaterialId::Organic {
+            continue;
+        }
+        let mut span = 0i32;
+        let mut exit: Option<(i32, i32, i32, i32)> = None; // nx, ny, free, prefer
+        loop {
+            span += 1;
+            if span > ORGANIC_WASH_SPAN {
+                break;
+            }
+            let nx = world.wrap_x(x + dx);
+            let nlx = clx + dx;
+            let Some(c) = read(nlx, ly, nx, gy) else {
+                break;
+            };
+            if c.material == MaterialId::Organic {
+                x = nx;
+                clx = nlx;
+                continue;
+            }
+            if c.material != MaterialId::Air {
+                break;
+            }
+            let free = u8::MAX.saturating_sub(c.sat.0) as i32;
+            let below = read(nlx, ly - 1, nx, gy - 1);
+            let cascade = matches!(
+                below,
+                Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
+            );
+            if free > 0 {
+                let prefer = if cascade { 2 } else { 1 };
+                exit = Some((nx, gy, free, prefer));
+            }
+            // Also allow dumping into Air directly below the far Organic
+            // face (wash down the lee side).
+            if let Some(b) = below {
+                if b.material == MaterialId::Air {
+                    let bfree = u8::MAX.saturating_sub(b.sat.0) as i32;
+                    if bfree > 0 {
+                        let bp = if !b.sat.is_full() { 3 } else { 1 };
+                        if exit.map(|e| bp > e.3).unwrap_or(true) {
+                            exit = Some((nx, gy - 1, bfree, bp));
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        if let Some((tx, ty, free, prefer)) = exit {
+            let rate = if prefer >= 2 {
+                remaining
+            } else {
+                ORGANIC_WASH_RATE
+            };
+            let amt = remaining.min(free).min(rate);
+            if amt > 0 {
+                local.push(((gx, gy), (tx, ty), amt));
+                remaining -= amt;
+            }
+        }
+    }
+    remaining
 }
 
 fn plan_throughflow_from_cell(
