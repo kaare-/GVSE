@@ -925,6 +925,51 @@ mod tests {
     }
 
     #[test]
+    fn heavy_cloud_ponds_enclosed_full_films() {
+        let p = WorldgenParams::default();
+        let wind = wind_for(&p);
+        let mut world = World::new(p.seed);
+        let gx: i32 = 20;
+        let top: i32 = 40;
+        let floor: i32 = 5;
+        for y in [floor, top] {
+            world.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(CHUNK_CELLS_W as i32),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        for x in (gx - 3)..=(gx + 3) {
+            world.set_cell(x, floor, Cell::solid(MaterialId::Stone));
+            world.set_cell(x, floor + 1, Cell::water());
+            for y in (floor + 2)..=top {
+                world.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut clouds = CloudStore::new();
+        clouds.parcels.push(CloudParcel {
+            fx: gx as f32,
+            fy: top as f32,
+            mass: DOWNPOUR_MASS * 1.5,
+            raining: true,
+            on_ridge: false,
+            shape_seed: 2,
+            cruise_fy: top as f32,
+            vis_mass: DOWNPOUR_MASS * 1.5,
+            deform: 0.0,
+        });
+        let mass_before = clouds.total_mass();
+        clouds.downpour(&mut world, &wind, 0, &CloudConfig::default(), None, None);
+        assert!(
+            clouds.total_mass() < mass_before,
+            "parcel must drain into an enclosed full-film basin"
+        );
+        assert!(
+            world.get_cell(gx, floor + 2).map(|c| c.sat.0).unwrap_or(0) > 0,
+            "dry-lake films must pond under a raining cloud"
+        );
+    }
+
+    #[test]
     fn wind_moves_parcels() {
         let p = WorldgenParams::default();
         let wind = wind_for(&p);

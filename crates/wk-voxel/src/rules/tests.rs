@@ -2210,9 +2210,63 @@ fn rain_droplet_saturates_at_full() {
         ..RainConfig::default()
     };
     apply_rain(&mut w, &cfg);
-    // Full film on bare rock does not stack into a wedge.
+    // Isolated film can still spread into empty neighbours — do not stack.
     assert_eq!(w.get_cell(3, 1).unwrap().sat.0, u8::MAX);
     assert_eq!(w.get_cell(3, 2).unwrap().sat.0, 0);
+}
+
+#[test]
+fn rain_refills_enclosed_dry_basin() {
+    // Long-soak bug: every column wore a full 1-cell film, rain refused
+    // to stack (hill-wedge guard), clouds never drained, lakes stayed dry.
+    let mut w = setup_sky_row(30);
+    for y in 1..=3 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Stone));
+        w.set_cell(8, y, Cell::solid(MaterialId::Stone));
+    }
+    for x in 3..=7 {
+        w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+        w.set_cell(x, 2, Cell::water());
+    }
+    let cfg = RainConfig {
+        top_y: 30,
+        x_range: (5, 5),
+        prob_per_col_per_tick: 1.0,
+        droplet_sat: 80,
+        seed_salt: 2,
+        closed_loop: false,
+        ..RainConfig::default()
+    };
+    apply_rain(&mut w, &cfg);
+    assert_eq!(w.get_cell(5, 2).unwrap().sat.0, u8::MAX);
+    assert!(
+        w.get_cell(5, 3).unwrap().sat.0 > 0,
+        "enclosed dry-lake films must pond instead of refusing rain"
+    );
+}
+
+#[test]
+fn rain_still_refuses_hillside_wedge() {
+    let mut w = setup_sky_row(30);
+    w.set_cell(4, 1, Cell::solid(MaterialId::Stone));
+    w.set_cell(4, 2, Cell::solid(MaterialId::Stone));
+    w.set_cell(4, 3, Cell::water());
+    let cfg = RainConfig {
+        top_y: 30,
+        x_range: (4, 4),
+        prob_per_col_per_tick: 1.0,
+        droplet_sat: 80,
+        seed_salt: 2,
+        closed_loop: false,
+        ..RainConfig::default()
+    };
+    apply_rain(&mut w, &cfg);
+    assert_eq!(w.get_cell(4, 3).unwrap().sat.0, u8::MAX);
+    assert_eq!(
+        w.get_cell(4, 4).unwrap().sat.0,
+        0,
+        "hill film with a downhill outlet must not stack into a wedge"
+    );
 }
 
 #[test]

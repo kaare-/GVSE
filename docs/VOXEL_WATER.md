@@ -216,6 +216,11 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   wet column (demo `max_prob_per_tick = 0.10`) and collapsed to ~7 FPS.
   Drizzle is now capped at `CondensationConfig::max_events_per_tick`
   (default 48; `0` = unlimited).
+  Rain / condensation will **not** stack a full one-cell film on a
+  hillside that can still spread or cascade (wedge guard). A closed
+  basin of full films (dry lake bed) *does* pond — otherwise a long
+  soak rains forever while lakes stay empty, because clouds cannot
+  dump once every column wears a full film.
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
   the blanket. Cloud downpour uses a wider footprint when snowing.
