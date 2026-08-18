@@ -660,7 +660,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn column_near_saturated_when_deck_is_wet() {
         let mut h = Humidity::new(4);
         assert!(!h.column_near_saturated(2, 0));
@@ -691,6 +690,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn humidity_diffuse_due_matches_column_schedule() {
         assert!(!humidity_diffuse_due(0));
         assert!(!humidity_diffuse_due(1));
