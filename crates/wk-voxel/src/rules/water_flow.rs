@@ -701,9 +701,26 @@ fn accumulate_water_flow_xfers(
 
                     // --- Priority 3c: sheet / tsunami overtop ---
                     // Trickles still soak a dry berm. A full film or a
-                    // stacked surge climbs onto (and wets) the bump.
+                    // stacked surge climbs onto (and wets) the bump,
+                    // or skates Air over an unsaturated bed.
                     if remaining > 0 {
                         remaining = plan_overtop_dry_ground(
+                            world,
+                            &read,
+                            gx,
+                            gy,
+                            lx,
+                            ly,
+                            dirs,
+                            depth,
+                            cur.sat.0,
+                            remaining,
+                            step,
+                            &mut local,
+                        );
+                    }
+                    if remaining > 0 {
+                        remaining = plan_sheet_over_dry_bed(
                             world,
                             &read,
                             gx,
@@ -943,6 +960,73 @@ fn plan_overtop_dry_ground(
         }
         // Stacked surge can skip the one-cell berm into Air beyond.
         if !can_skip {
+            continue;
+        }
+        let bx = world.wrap_x(nx + dx);
+        if let Some(beyond) = read(lx + dx * 2, ly, bx, gy) {
+            if beyond.material == MaterialId::Air {
+                let free = u8::MAX.saturating_sub(beyond.sat.0) as i32;
+                let amt = remaining.min(free).min(step);
+                if amt > 0 {
+                    local.push(((gx, gy), (bx, gy), amt));
+                    remaining -= amt;
+                }
+            }
+        }
+    }
+    remaining
+}
+
+/// Full sheet / surge skates onto Air over an unsaturated solid bed.
+///
+/// Pairwise equalise already leaks a little into that Air, but gravity
+/// used to drink it into the pore column. Push a real step so the
+/// front advances without waiting for the whole stack to fill.
+fn plan_sheet_over_dry_bed(
+    world: &World,
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+    dirs: [i32; 2],
+    depth: i32,
+    sat: u8,
+    mut remaining: i32,
+    step: i32,
+    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
+) -> i32 {
+    if depth < 2 && sat < SHEET_CLIMB_SAT {
+        return remaining;
+    }
+    for dx in dirs {
+        if remaining <= 0 {
+            break;
+        }
+        let nx = world.wrap_x(gx + dx);
+        let Some(side) = read(lx + dx, ly, nx, gy) else {
+            continue;
+        };
+        if side.material != MaterialId::Air {
+            continue;
+        }
+        let Some(bed) = read(lx + dx, ly - 1, nx, gy - 1) else {
+            continue;
+        };
+        if bed.material == MaterialId::Air {
+            continue;
+        }
+        let cap = water_capacity_with(bed.material, &world.hydro) as i32;
+        if cap <= 0 || bed.sat.0 as i32 >= cap {
+            continue;
+        }
+        let free = u8::MAX.saturating_sub(side.sat.0) as i32;
+        let amt = remaining.min(free).min(step);
+        if amt > 0 {
+            local.push(((gx, gy), (nx, gy), amt));
+            remaining -= amt;
+        }
+        if depth < 2 || remaining <= 0 {
             continue;
         }
         let bx = world.wrap_x(nx + dx);

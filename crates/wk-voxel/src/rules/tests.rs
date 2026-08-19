@@ -159,9 +159,12 @@ fn deep_stone_stack_keeps_wetting_after_surface_quiesces() {
 #[test]
 fn water_saturates_porous_solid_up_to_capacity() {
     let mut w = setup_column_world();
-    // Sand cell sits above bedrock at y=1; water above at y=2.
+    // Sand cell sits above bedrock at y=1; ponded water above at y=2
+    // (walled so gravity still soaks the bed in one pull).
     w.set_cell(3, 1, Cell::solid(MaterialId::Sand));
     w.set_cell(3, 2, Cell::water());
+    w.set_cell(2, 2, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(4, 2, Cell::solid(MaterialId::Bedrock));
 
     // One pass: as much as fits transfers into the sand up to its
     // porosity capacity.
@@ -191,6 +194,8 @@ fn does_not_leak_through_stone() {
     }
     w.set_cell(5, 1, Cell::solid(MaterialId::Stone));
     w.set_cell(5, 2, Cell::water());
+    w.set_cell(4, 2, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(6, 2, Cell::solid(MaterialId::Bedrock));
     let cap = water_capacity(MaterialId::Stone);
     let start_mass: i32 =
         w.get_cell(5, 2).unwrap().sat.0 as i32 + w.get_cell(5, 1).unwrap().sat.0 as i32;
@@ -2489,6 +2494,35 @@ fn thin_film_does_not_overtop_dry_berm() {
 }
 
 #[test]
+fn open_sheet_does_not_gravity_fill_dry_soil() {
+    // Leading-edge film over dry soil — gravity must not drink it
+    // into the pore column (that stalled hillside flow).
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..10 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        w.set_cell(x, 2, Cell::air());
+    }
+    w.set_cell(4, 2, {
+        let mut c = Cell::air();
+        c.sat = Sat(80);
+        c
+    });
+    apply_gravity_fall(&mut w);
+    assert_eq!(
+        w.get_cell(4, 2).unwrap().sat.0,
+        80,
+        "open-slope film must stay in Air"
+    );
+    assert_eq!(
+        w.get_cell(4, 1).unwrap().sat.0,
+        0,
+        "dry soil under a flowing film is seepage's job"
+    );
+}
+
+#[test]
 fn hillside_film_climbs_dry_terrace() {
     // A full blob on a soil step must splash over instead of sitting
     // until the terrace saturates.
@@ -2507,6 +2541,42 @@ fn hillside_film_climbs_dry_terrace() {
     assert!(
         over > 0 || soak > 0,
         "full hillside film must climb or wet the dry terrace (over={over} soak={soak})"
+    );
+}
+
+#[test]
+fn surge_crosses_dry_soil_without_filling_column() {
+    // Stacked water on a soil shelf; next column is dry soil with Air
+    // on top. After a few ticks the sheet must sit on that Air — the
+    // dry column does not have to fill first.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..12 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        for y in 2..=4 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    for x in 3..=5 {
+        w.set_cell(x, 2, Cell::water());
+        w.set_cell(x, 3, Cell::water());
+    }
+    for _ in 0..6 {
+        tick(&mut w);
+    }
+    let front = (6..=8)
+        .map(|x| w.get_cell(x, 2).map(|c| c.sat.0).unwrap_or(0) as i32)
+        .sum::<i32>();
+    let soil_cap = water_capacity(MaterialId::Soil);
+    let col = w.get_cell(6, 1).unwrap().sat.0;
+    assert!(
+        front > 0,
+        "surge must occupy Air over the dry column (front={front})"
+    );
+    assert!(
+        col < soil_cap,
+        "dry column must not need to fill before the sheet passes (sat={col} cap={soil_cap})"
     );
 }
 
