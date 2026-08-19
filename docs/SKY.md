@@ -32,9 +32,11 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 | **N** | Soft clouds at **all depths**: far / mid / active / front + precip |
 | **H** | Humidity **tile raster** diagnostic + wind streaks |
 
-Humidity still **drives** the weather: rise → coagulate into parcels → precip.
-Far / mid / front banks are parallax **echoes of those parcels** for scale and
-distance — not a second humidity paint pass.
+Humidity still **drives** the weather, now with temperature/wind:
+evap(T, wind) → thermal rise → drizzle when vapor meets colder air /
+ground → parcels only clump from near-saturated tiles. Far / mid / front
+banks are parallax **echoes of those parcels** — not a second humidity
+paint pass, and not a per-cell atmosphere (CPU stays on 4×4 tiles).
 
 ## Signal → visual map
 

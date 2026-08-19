@@ -253,9 +253,9 @@ impl CloudStore {
         // Let ocean vapor climb into the cloud deck before clumping.
         let tc = humidity.tile_cols.max(1);
         let deck_hy = (sea_level_y + cfg.cloud_alt_above_sea).div_euclid(tc);
-        humidity.buoyant_rise(cfg.buoyant_rise, deck_hy);
+        humidity.buoyant_rise_thermal(cfg.buoyant_rise, deck_hy, temp);
 
-        self.coagulate(humidity, wind, sea_level_y, sky_ceiling_y, cfg);
+        self.coagulate(humidity, wind, sea_level_y, sky_ceiling_y, cfg, temp);
         self.advect_and_collide(world, wind, sea_level_y, sky_ceiling_y, tick, cfg);
         self.merge(cfg);
         self.downpour(world, wind, tick, cfg, temp, phase);
@@ -273,6 +273,7 @@ impl CloudStore {
         sea_level_y: i32,
         sky_ceiling_y: i32,
         cfg: &CloudConfig,
+        temp: Option<&Temperature>,
     ) {
         let tc = humidity.tile_cols.max(1);
         let sky_hy_min = (sea_level_y + cfg.coag_min_above_sea).div_euclid(tc);
@@ -294,7 +295,13 @@ impl CloudStore {
                 break;
             }
             let mass = humidity.at_tile(hx, hy);
-            if mass < cfg.coag_min_hum {
+            let min_hum = if let Some(t) = temp {
+                let sat = Humidity::saturation_mass_at_temp(t.at_tile(hx, hy));
+                cfg.coag_min_hum.max(sat * 0.10)
+            } else {
+                cfg.coag_min_hum
+            };
+            if mass < min_hum {
                 continue;
             }
             let cx = hx * tc + tc / 2;

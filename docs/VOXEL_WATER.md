@@ -230,6 +230,14 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   surface ±64, then climbs while the column is still rock / ice / wet
   so editor towers above that band (inland ~y 263) still bump the
   field instead of letting it pass through the stone.
+- **Physics-leaning weather (still coarse tiles):** evap rate scales
+  with surface temperature, wind, and local humidity deficit (same
+  wet-chunk scan). Vapor rises harder when the lapse is unstable
+  (warm under cold). Condensation prefers cold / supersaturated tiles
+  and dew when a colder tile sits below. Visible cloud parcels only
+  clump from air that is already ~10% of thermal saturation — leftover
+  vapor rains as drizzle instead of cartoon blobs. Event caps and the
+  atmosphere budget stay in place so this cannot refill the 7 FPS soak.
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
   the blanket. Cloud downpour uses a wider footprint when snowing.

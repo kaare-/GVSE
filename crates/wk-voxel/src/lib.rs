@@ -147,7 +147,8 @@ pub use phase::{
 pub use rules::{
     apply_cold_avalanche, apply_cold_avalanche_bound, apply_condensation_rain,
     apply_condensation_rain_phased, apply_condensation_rain_with_orographic, apply_evaporation,
-    apply_evaporation_into_humidity, apply_flow_erosion, apply_flow_erosion_bound,
+    apply_evaporation_into_humidity, apply_evaporation_into_humidity_climate, apply_flow_erosion,
+    apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
     apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,

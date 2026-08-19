@@ -4376,6 +4376,76 @@ fn evap_stops_when_atmosphere_overfull() {
     );
 }
 
+fn uniform_temp_field(temp_c: f32) -> Temperature {
+    let mut t = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
+    t.config.base_temp_c = temp_c;
+    for v in t.cells.values_mut() {
+        *v = temp_c;
+    }
+    t
+}
+
+#[test]
+fn evap_pumps_faster_when_warm_and_windy() {
+    let cfg = EvapConfig {
+        rate_per_tick: 2,
+        dry_above_max: 200,
+        period_ticks: 1,
+    };
+    let run = |temp_c: f32, wind: f32| {
+        let mut w = setup_column_world();
+        w.set_cell(4, 1, Cell::water());
+        let mut h = Humidity::new(4);
+        let t = uniform_temp_field(temp_c);
+        apply_evaporation_into_humidity_climate(&mut w, &mut h, &cfg, Some(&t), wind);
+        h.total_mass()
+    };
+    let cold_still = run(-4.0, 0.0);
+    let warm_breeze = run(28.0, 0.12);
+    assert!(
+        warm_breeze > cold_still + 0.5,
+        "warm windy evap ({warm_breeze}) must beat a cold still night ({cold_still})"
+    );
+}
+
+#[test]
+fn condensation_rains_when_warm_vapor_hits_cold_air() {
+    let (mut cold_w, mut cold_h) = setup_cloud_world();
+    let (mut warm_w, mut warm_h) = setup_cloud_world();
+    cold_h.add(1, 30, 70.0);
+    warm_h.add(1, 30, 70.0);
+    let mut cold = uniform_temp_field(-8.0);
+    let warm = uniform_temp_field(26.0);
+    // Colder tile below the vapor — dew on a cold ridge / night skin.
+    for ((hx, hy), v) in cold.cells.iter_mut() {
+        if *hy < 7 {
+            *v = -14.0;
+        }
+        let _ = hx;
+    }
+    let cfg = CondensationConfig {
+        top_y: 30,
+        max_prob_per_tick: 1.0,
+        min_mass_to_rain: 64.0,
+        full_mass: 512.0,
+        mass_per_droplet: 40.0,
+        max_events_per_tick: 8,
+        ..CondensationConfig::default()
+    };
+    apply_condensation_rain_phased(&mut cold_w, &mut cold_h, &cfg, None, Some(&cold), None);
+    apply_condensation_rain_phased(&mut warm_w, &mut warm_h, &cfg, None, Some(&warm), None);
+    assert!(
+        cold_h.total_mass() < 70.0,
+        "cold supersaturated air should rain (left {})",
+        cold_h.total_mass()
+    );
+    assert!(
+        (warm_h.total_mass() - 70.0).abs() < 1e-3,
+        "the same thin vapor must stay aloft in warm air (left {})",
+        warm_h.total_mass()
+    );
+}
+
 #[test]
 fn karst_skips_chunks_without_limestone_flag() {
     let mut w = setup_column_world();

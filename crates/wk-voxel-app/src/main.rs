@@ -53,7 +53,8 @@ mod terrain;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity,
+    apply_cold_avalanche_bound, apply_condensation_rain_phased,
+    apply_evaporation_into_humidity_climate,
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     apply_weather_rgb, celestial_local_cfg, celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
@@ -485,14 +486,16 @@ async fn main() {
                 );
             }
             if evap_on {
-                apply_evaporation_into_humidity(
+                apply_evaporation_into_humidity_climate(
                     &mut scene.world,
                     &mut scene.humidity,
                     &settings.evap,
+                    Some(&scene.temperature),
+                    wind_vx.abs().max(wind_vy.abs()),
                 );
             }
-            // Vapor drifts with the wind, then coagulates into cloud
-            // parcels that rain hard when heavy enough.
+            // Vapor drifts with the wind, then warm air rises and
+            // condenses where it meets colder air / ground.
             scene.humidity.advect(wind_vx, wind_vy);
             let tick_no = scene.world.tick;
             scene.clouds.step_with_precip(

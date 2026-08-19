@@ -161,6 +161,15 @@ impl Humidity {
     /// when rain / coagulation cannot keep up (overnight flood safety).
     pub const MAX_MASS_PER_TILE: f32 = 2_500.0;
 
+    /// Saturation mass at air temperature (Clausius-lite, cheap).
+    ///
+    /// ~[`Self::MAX_MASS_PER_TILE`] near 18 °C. Cold air holds less, so
+    /// the same vapor is closer to rain / visible cloud.
+    pub fn saturation_mass_at_temp(temp_c: f32) -> f32 {
+        let scale = ((temp_c + 8.0) / 26.0).clamp(0.16, 1.55);
+        Self::MAX_MASS_PER_TILE * scale
+    }
+
     pub fn add(&mut self, gx: i32, gy: i32, mass: f32) {
         let _ = self.try_add(gx, gy, mass);
     }
@@ -417,6 +426,18 @@ impl Humidity {
     /// so vapor from ocean evaporation rises before it can coagulate
     /// into clouds. Mass-conserving; stops at `max_hy` (cloud deck).
     pub fn buoyant_rise(&mut self, fraction: f32, max_hy: i32) {
+        self.buoyant_rise_thermal(fraction, max_hy, None);
+    }
+
+    /// [`Self::buoyant_rise`] scaled by the local lapse: warm air under
+    /// colder air lifts harder; a stable inversion almost sits still.
+    /// Same tile walk as the uniform rise — no extra world scans.
+    pub fn buoyant_rise_thermal(
+        &mut self,
+        fraction: f32,
+        max_hy: i32,
+        temp: Option<&crate::temperature::Temperature>,
+    ) {
         let fraction = fraction.clamp(0.0, 0.45);
         if fraction == 0.0 || self.cells.is_empty() {
             return;
@@ -431,7 +452,15 @@ impl Humidity {
             if !self.accepts(hx, dest) {
                 continue;
             }
-            let lift = mass * fraction;
+            let lift_f = if let Some(t) = temp {
+                let here = t.at_tile(hx, hy);
+                let above = t.at_tile(hx, dest);
+                let lapse = (here - above).clamp(-5.0, 10.0);
+                (fraction * (0.40 + lapse * 0.11)).clamp(0.0, 0.45)
+            } else {
+                fraction
+            };
+            let lift = mass * lift_f;
             if lift < 1e-6 {
                 continue;
             }
@@ -657,6 +686,40 @@ mod tests {
                 "created oob key ({hx},{hy})"
             );
         }
+    }
+
+    #[test]
+    fn saturation_mass_shrinks_in_the_cold() {
+        let warm = Humidity::saturation_mass_at_temp(20.0);
+        let cold = Humidity::saturation_mass_at_temp(-8.0);
+        assert!(warm > cold * 1.8, "cold air must hold much less vapor");
+        assert!(warm <= Humidity::MAX_MASS_PER_TILE * 1.55);
+    }
+
+    #[test]
+    fn buoyant_rise_lifts_more_when_lapse_is_unstable() {
+        let mut unstable = Humidity::new(4);
+        unstable.add(2, 0, 100.0);
+        let mut stable = Humidity::new(4);
+        stable.add(2, 0, 100.0);
+        let mut t_up = crate::temperature::Temperature::with_world_bounds(
+            4, 0, 0, 16, 16, 1, 16, 4, false,
+        );
+        let mut t_st = t_up.clone();
+        for ((_, hy), v) in t_up.cells.iter_mut() {
+            *v = if *hy <= 0 { 24.0 } else { 8.0 };
+        }
+        for v in t_st.cells.values_mut() {
+            *v = 12.0;
+        }
+        unstable.buoyant_rise_thermal(0.10, 4, Some(&t_up));
+        stable.buoyant_rise_thermal(0.10, 4, Some(&t_st));
+        assert!(
+            unstable.at_tile(0, 1) > stable.at_tile(0, 1) + 2.0,
+            "warm-under-cold should lift more ({} vs {})",
+            unstable.at_tile(0, 1),
+            stable.at_tile(0, 1)
+        );
     }
 
     #[test]
