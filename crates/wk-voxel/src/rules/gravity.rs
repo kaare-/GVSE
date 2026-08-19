@@ -115,18 +115,19 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
         // the pore column or the front stalls until the whole stack
         // saturates.
         let ponded_air = |lx: u8, ly_src: i32| -> bool {
-            let blocks = |nlx: i32| -> bool {
+            // Escape = dry Air a sheet can run into. Partial leftover
+            // after a neighbour soaked (e.g. 255−180) is not an escape
+            // or checkerboard rain-on-sand would stop mid-row.
+            let escape = |nlx: i32| -> bool {
                 if nlx < 0 || nlx >= CHUNK_CELLS_W as i32 {
-                    return true;
+                    return false;
                 }
-                match read_xy(nlx as u8, ly_src) {
-                    None => true,
-                    Some(c) if c.material != MaterialId::Air => true,
-                    Some(c) if c.sat.0 >= 200 => true,
-                    _ => false,
-                }
+                matches!(
+                    read_xy(nlx as u8, ly_src),
+                    Some(c) if c.material == MaterialId::Air && c.sat.0 < 32
+                )
             };
-            blocks(lx as i32 - 1) && blocks(lx as i32 + 1)
+            !escape(lx as i32 - 1) && !escape(lx as i32 + 1)
         };
 
         for x in ac.rect.x0..=ac.rect.x1 {
