@@ -1636,7 +1636,7 @@ impl SimSettings {
                 ui.separator();
                 ui.label(
                     None,
-                    "Tip: Tab closes · pages above · F2 creatures · F3 terrain · F5/F9 save/load",
+                    "Tip: Tab closes · F6 glossary · F2 creatures · F3 terrain · F5/F9 save/load",
                 );
             });
 

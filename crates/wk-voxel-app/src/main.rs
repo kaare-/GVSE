@@ -30,6 +30,7 @@
 //! - `F3` — terrain editor (paint / erase block types; world stays visible)
 //! - `F4` — creature list (living / dead roster; click row to inspect)
 //! - `F5` / `F9` — save / load simulation (`saves/*.gvsesim`)
+//! - `F6` — glossary / how-it-works (keys, water, sky, HUD words)
 //! - `Tab` — live settings (world size, materials, wind, clouds, …)
 //! - click — block / organism inspector (hidden while F1 HUD is off)
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
@@ -43,6 +44,7 @@
 mod atmosphere;
 mod creature_list;
 mod editor;
+mod glossary;
 mod inspector;
 mod palette;
 mod quit;
@@ -73,6 +75,7 @@ use crate::atmosphere::{
 };
 use crate::creature_list::CreatureList;
 use crate::editor::CreatureEditor;
+use crate::glossary::Glossary;
 use crate::inspector::{draw_block_inspector, draw_selection_outline, screen_to_world};
 use crate::palette::cell_color;
 use crate::quit::{QuitChoice, QuitDialog};
@@ -182,6 +185,7 @@ async fn main() {
     let mut editor = CreatureEditor::default();
     let mut terrain = TerrainEditor::default();
     let mut creature_list = CreatureList::default();
+    let mut glossary = Glossary::default();
     let mut quit_dialog = QuitDialog::default();
     let mut inspect: Option<(i32, i32)> = None;
     let mut cam_x = 0.0f32;
@@ -235,6 +239,8 @@ async fn main() {
                 // unsupported sand/Organic so the next tick seats them.
                 wake_unsupported_grains(&mut scene.world);
                 wake_unstable_slopes(&mut scene.world);
+            } else if glossary.open {
+                glossary.close();
             } else if creature_list.open {
                 creature_list.open = false;
             } else if settings.open {
@@ -252,6 +258,9 @@ async fn main() {
         if !quit_dialog.open && is_key_pressed(KeyCode::F4) {
             creature_list.toggle();
         }
+        if !quit_dialog.open && is_key_pressed(KeyCode::F6) {
+            glossary.toggle();
+        }
         // Editor is F2 only — `C` is condensation in the voxel demo
         // (column-GVSE can use C/F2 because it has no condensation toggle).
         if !quit_dialog.open && is_key_pressed(KeyCode::F2) {
@@ -262,6 +271,7 @@ async fn main() {
                 terrain.open = false;
                 // F4 list panel overlaps the paint canvas — close it.
                 creature_list.open = false;
+                glossary.close();
                 paused = true;
             } else {
                 paused = editor.was_paused;
@@ -274,6 +284,7 @@ async fn main() {
                 settings.open = false;
                 editor.open = false;
                 editor.spawn_picker = false;
+                glossary.close();
                 paused = true;
             } else {
                 paused = terrain.was_paused;
@@ -662,12 +673,13 @@ async fn main() {
         // Screen +y is down. World +y is up. Flip when placing rows.
         let origin_y = (sh + world_h_px) * 0.5 + cam_y;
 
-        // Creature list (F4) — before world clicks so rows steal the mouse.
+        // Creature list (F4) / glossary (F6) — before world clicks.
         if !quit_dialog.open {
             if let Some(at) = creature_list.handle_input(&scene.organisms) {
                 inspect = Some(at);
                 show_hud = true;
             }
+            glossary.handle_input();
         }
 
         // World clicks: terrain paint, spawn picker, or block inspector.
@@ -676,6 +688,7 @@ async fn main() {
             && terrain.open
             && !terrain.hits_panel(mx, my)
             && !creature_list.hits_panel(mx, my)
+            && !glossary.hits_panel(mx, my)
             && !terrain.blocks_world_paint()
         {
             let paint = is_mouse_button_down(MouseButton::Left);
@@ -707,6 +720,7 @@ async fn main() {
             && !terrain.open
             && !settings.open
             && !creature_list.hits_panel(mx, my)
+            && !glossary.hits_panel(mx, my)
         {
             if let Some((gx, gy)) = screen_to_world(
                 mx,
@@ -1430,6 +1444,7 @@ async fn main() {
         terrain.draw();
         creature_list.draw(&scene.organisms);
         settings.draw(&mut scene.world, &scene.carbon);
+        glossary.draw();
         quit_dialog.draw();
 
         // HUD chrome (info + hotkeys + inspector) toggled with F1.
@@ -1474,7 +1489,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/H/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|Esc quit",
+                "Tab|Space|R|W/C/E/K/O|I|N/T/H/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,
