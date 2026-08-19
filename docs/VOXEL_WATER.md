@@ -225,6 +225,11 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   (demo sky is 320 tall). A shorter 128-cell walk left ceiling clouds
   unable to reach sea-level lakes — looking at the ground only made
   evaporation win faster (higher FPS), which felt like a viewport cull.
+- **Cloud / humidity floor:** `cloud_floor_y` clips haze, parcels, and
+  precip streaks to the occupied column top. It starts at the worldgen
+  surface ±64, then climbs while the column is still rock / ice / wet
+  so editor towers above that band (inland ~y 263) still bump the
+  field instead of letting it pass through the stone.
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
   the blanket. Cloud downpour uses a wider footprint when snowing.

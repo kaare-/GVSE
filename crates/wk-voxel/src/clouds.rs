@@ -626,21 +626,45 @@ fn surface_y(wind: &Wind, fx: f32) -> f32 {
     ) as f32
 }
 
+/// How far above worldgen surface we always scan. Taller player /
+/// editor stacks continue the walk while the column stays occupied.
+const CLOUD_FLOOR_SCAN_ABOVE: i32 = 64;
+
+fn occupies_cloud_floor(c: crate::cell::Cell) -> bool {
+    c.material != MaterialId::Air || !c.sat.is_empty()
+}
+
+/// Inclusive top cell of the wind/humidity bounds (sky ceiling − 1).
+fn sky_top_cell(wind: &Wind) -> i32 {
+    match wind.bounds {
+        Some(b) => (b.hy_max + 1) * wind.tile_cols.max(1) - 1,
+        None => 512,
+    }
+}
+
 /// Occupied column top (rock / ice / snow / standing water) for cloud
-/// collision and precip drawing — top-down so streaks stop on the true
-/// surface instead of punching through slopes.
+/// collision, humidity haze clip, and precip drawing.
+///
+/// Starts from the worldgen surface band, then **climbs** while the
+/// column is still solid or wet so a player tower above
+/// `surface + 64` (the old hard cap — ~y 263 on inland hills) still
+/// bumps humidity and clouds instead of letting them pass through.
 pub fn cloud_floor_y(world: &World, wind: &Wind, fx: f32) -> f32 {
     let rock = surface_y(wind, fx);
     let gx = world.wrap_x(fx.round() as i32);
     let rock_i = rock as i32;
-    let y_hi = rock_i + 64;
+    let sky = sky_top_cell(wind).max(rock_i);
+    let mut y_hi = (rock_i + CLOUD_FLOOR_SCAN_ABOVE).clamp(rock_i, sky);
+    while y_hi < sky {
+        match world.get_cell(gx, y_hi + 1) {
+            Some(c) if occupies_cloud_floor(c) => y_hi += 1,
+            _ => break,
+        }
+    }
     let y_lo = rock_i - 12;
     for y in (y_lo..=y_hi).rev() {
         match world.get_cell(gx, y) {
-            Some(c) if c.material != MaterialId::Air => {
-                return (y as f32).max(rock);
-            }
-            Some(c) if !c.sat.is_empty() => {
+            Some(c) if occupies_cloud_floor(c) => {
                 return (y as f32).max(rock);
             }
             _ => {}
@@ -827,6 +851,35 @@ mod tests {
         assert!(
             floor >= ice_top as f32,
             "cloud floor {floor} must clear ice lid at {ice_top} (rock was {rock})"
+        );
+    }
+
+    #[test]
+    fn tall_editor_tower_raises_cloud_floor_above_worldgen_band() {
+        // Humidity / clouds used to stop scanning 64 cells above the
+        // generated surface, so a player pillar (y > ~263 inland)
+        // let the haze pass through the rock.
+        let p = WorldgenParams::default();
+        let wind = wind_for(&p);
+        let mut world = World::new(p.seed);
+        let gx = 20i32;
+        let rock = continental_surface_y(p.seed, gx, p.sea_level_y, p.width_cols);
+        let top = rock + 80;
+        assert!(
+            top > rock + 64,
+            "fixture must stick above the old +64 scan cap"
+        );
+        for y in rock..=top {
+            world.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(CHUNK_CELLS_W as i32),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+            world.set_cell(gx, y, Cell::solid(MaterialId::Stone));
+        }
+        let floor = cloud_floor_y(&world, &wind, gx as f32);
+        assert!(
+            floor >= top as f32,
+            "cloud/humidity floor {floor} must sit on the tower top {top} (worldgen rock {rock})"
         );
     }
 
