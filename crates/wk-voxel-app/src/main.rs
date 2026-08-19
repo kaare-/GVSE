@@ -171,13 +171,6 @@ async fn main() {
     settings.apply_material_overrides(&mut scene.world);
     let mut spore_fx = SporeFx::new();
     let mut paused = false;
-    // Climatic drizzle is physics-only by default — sky pixels hide thin
-    // wet Air so the old rain-streak look doesn't paint over the sky.
-    // Clouds do the visible weather.
-    let mut rain_on = false;
-    let mut cond_rain_on = true;
-    let mut evap_on = true;
-    let mut karst_on = true;
     let mut organisms_on = true;
     // Humidity diagnostic default on (`H`); soft clouds default on (`N`).
     let mut humidity_overlay = true;
@@ -381,16 +374,16 @@ async fn main() {
                 inspect = None;
             }
             if is_key_pressed(KeyCode::W) {
-                rain_on = !rain_on;
+                settings.climatic_rain_on = !settings.climatic_rain_on;
             }
             if is_key_pressed(KeyCode::C) {
-                cond_rain_on = !cond_rain_on;
+                settings.cond_rain_on = !settings.cond_rain_on;
             }
             if is_key_pressed(KeyCode::E) {
-                evap_on = !evap_on;
+                settings.evap_on = !settings.evap_on;
             }
             if is_key_pressed(KeyCode::K) {
-                karst_on = !karst_on;
+                settings.karst_on = !settings.karst_on;
             }
             if is_key_pressed(KeyCode::H) {
                 humidity_overlay = !humidity_overlay;
@@ -476,7 +469,7 @@ async fn main() {
             // rayon. CA physics stays on the Tab toggle (demo dirty plans
             // are too narrow for parallel to win).
             set_parallel_enabled(true);
-            if rain_on {
+            if settings.climatic_rain_on {
                 apply_rain_with_temp(
                     &mut scene.world,
                     &settings.rain,
@@ -485,7 +478,7 @@ async fn main() {
                     Some(&mut scene.humidity),
                 );
             }
-            if evap_on {
+            if settings.evap_on {
                 apply_evaporation_into_humidity_climate(
                     &mut scene.world,
                     &mut scene.humidity,
@@ -510,8 +503,8 @@ async fn main() {
                 Some(&settings.phase),
             );
             // Leftover vapor: liquid drizzle when warm, thin ice frost
-            // when cold. Snow packs still come from clouds (flakes).
-            if cond_rain_on {
+            // when cold. Packed snow still comes from the W faucet.
+            if settings.cond_rain_on {
                 apply_condensation_rain_phased(
                     &mut scene.world,
                     &mut scene.humidity,
@@ -521,7 +514,7 @@ async fn main() {
                     Some(&settings.phase),
                 );
             }
-            if karst_on {
+            if settings.karst_on {
                 apply_karst_dissolution(&mut scene.world, &settings.karst);
             }
             // Period-20 stress map: refresh before failure (S3 gate), then
@@ -1446,7 +1439,7 @@ async fn main() {
             } else {
                 "night"
             };
-            let rain_tag = if !rain_on {
+            let rain_tag = if !settings.climatic_rain_on {
                 "off"
             } else if settings.rain.closed_loop {
                 "on/closed"
@@ -1454,13 +1447,14 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} echo={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} drizzle={} evap={} phase={} nimbus={} echo={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
                 scene.temperature.mean(),
                 rain_tag,
-                if evap_on { "on" } else { "off" },
+                if settings.cond_rain_on { "on" } else { "off" },
+                if settings.evap_on { "on" } else { "off" },
                 if settings.phase.enabled { "on" } else { "off" },
                 scene.clouds.len(),
                 scene.clouds.visual_mass(),
