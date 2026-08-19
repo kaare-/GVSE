@@ -31,6 +31,7 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 |-----|------|
 | **N** | Soft clouds at **all depths**: far / mid / active / front + precip |
 | **H** | Humidity **tile raster** diagnostic + wind streaks |
+| **F6** | Glossary — keys, water/sky words, HUD tags |
 
 Humidity still **drives** the weather, now with temperature/wind:
 evap(T, wind) → thermal rise → drizzle when vapor meets colder air /
