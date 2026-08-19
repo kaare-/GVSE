@@ -51,22 +51,22 @@ fn rain_row_saturates_sand_over_one_tick() {
         assert_eq!(above.material, MaterialId::Air);
     }
 
-    // After a full tick the bed is quiescent: the last flow substep
-    // cleared dirty and saw an empty plan, so nothing is scheduled.
-    assert!(
-        plan_active(&w).is_empty(),
-        "settled sand+film should leave no active plan"
-    );
     assert_eq!(w.tick, 1);
 
     // A second tick doesn't change anything — sand is at capacity,
     // the water above has nowhere left to go (bedrock check would
-    // otherwise apply; sand already full).
+    // otherwise apply; sand already full). Tick 0 grain-wake may
+    // still have touched the wet sand row; after polish the halo
+    // must go quiet.
     tick(&mut w);
     for x in 0..64 {
         assert_eq!(w.get_cell(x, 0).unwrap().sat.0, sand_cap);
         assert_eq!(w.get_cell(x, 1).unwrap().sat.0, u8::MAX - sand_cap);
     }
+    assert!(
+        plan_active(&w).is_empty(),
+        "settled sand+film should leave no active plan"
+    );
 }
 
 #[test]
