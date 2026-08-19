@@ -158,7 +158,7 @@ impl Humidity {
     /// Deposits outside [`Self::bounds`] are dropped (the cell grid
     /// should not evaporate outside the stamped world).
     /// Soft per-tile ceiling so evaporation cannot stockpile unboundedly
-    /// when rain / coagulation cannot keep up (overnight flood safety).
+    /// when rain / condensation cannot keep up (overnight flood safety).
     pub const MAX_MASS_PER_TILE: f32 = 2_500.0;
 
     /// Saturation mass at air temperature (Clausius-lite, cheap).
@@ -423,8 +423,8 @@ impl Humidity {
     }
 
     /// Buoyant lift: a fraction of each tile's mass moves one tile up,
-    /// so vapor from ocean evaporation rises before it can coagulate
-    /// into clouds. Mass-conserving; stops at `max_hy` (cloud deck).
+    /// so vapor from ocean evaporation rises toward the cloud deck.
+    /// Mass-conserving; stops at `max_hy`.
     pub fn buoyant_rise(&mut self, fraction: f32, max_hy: i32) {
         self.buoyant_rise_thermal(fraction, max_hy, None);
     }

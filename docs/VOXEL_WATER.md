@@ -186,7 +186,7 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   `apply_grain_fall` (float on full water; drop through empty/haze Air).
   Phase break does **not** melt packs over empty or haze — fall owns those
   seats (melting haze used to fight freeze and pump flakes at the surface).
-- **Snow precip:** cloud downpour and climatic rain call
+- **Snow precip:** climatic rain and condensation call
   `deposit_precip_on_surface`. **Air temp at precip origin** (`start_y` /
   cloud height) chooses flake vs drop. Snow that hits **warm ground**
   melts to liquid; cold air + cold ground → solid `Snow` pack (never
@@ -198,16 +198,14 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   ground → thin `Ice` frost / rime (≤ `frost_coat_depth`, default 1;
   lateral `frost_spread_radius`, default 3), also paid as a full cell
   from the humidity tile. Never places `Snow` packs or ice towers —
-  clouds own real snow. Tab exposes both frost knobs.
-- **Cloud snow footprint (Tab → Clouds):** `snow_footprint_mult` /
-  `snow_span_mult` widen the column fan vs rain; `snow_cells_per_tick`
-  caps full-cell snow seats per parcel per tick.
+  climatic rain (`W`) owns packed snow. Tab exposes both frost knobs.
 - **Climatic rain (`W`):** **closed-loop by default** — deposits only what
   humidity can pay, and refuses columns already flooded above
   `sea_level + max_flood_above_sea`. Tab can reopen the legacy open
-  faucet (`closed_loop` off) for experiments; prefer clouds +
-  condensation for weather. Atmosphere also has soft caps
-  (`Humidity::MAX_MASS_PER_TILE`, `CloudConfig::max_total_mass`).
+  faucet (`closed_loop` off) for experiments; prefer condensation (`C`)
+  for weather. Atmosphere also has a soft per-tile cap
+  (`Humidity::MAX_MASS_PER_TILE`). Cloud parcels are a visual echo
+  only (`CloudConfig::max_parcels`) and are not a second water store.
   Evap also refuses a near-saturated vapor column
   (`Humidity::column_near_saturated`) and stops entirely when
   `Humidity::atmosphere_overfull` — buoyant rise used to empty the
@@ -219,12 +217,13 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   Rain / condensation will **not** stack a full one-cell film on a
   hillside that can still spread or cascade (wedge guard). A closed
   basin of full films (dry lake bed) *does* pond — otherwise a long
-  soak rains forever while lakes stay empty, because clouds cannot
-  dump once every column wears a full film.
+  soak rains forever while lakes stay empty, because condensation
+  cannot land once every column wears a full film.
   Surface deposit walks up to 512 cells down from the precip origin
-  (demo sky is 320 tall). A shorter 128-cell walk left ceiling clouds
-  unable to reach sea-level lakes — looking at the ground only made
-  evaporation win faster (higher FPS), which felt like a viewport cull.
+  (demo sky is 320 tall). A shorter 128-cell walk left ceiling
+  condensation unable to reach sea-level lakes — looking at the ground
+  only made evaporation win faster (higher FPS), which felt like a
+  viewport cull.
 - **Cloud / humidity floor:** `cloud_floor_y` clips haze, parcels, and
   precip streaks to the occupied column top. It starts at the worldgen
   surface ±64, then climbs while the column is still rock / ice / wet
@@ -234,13 +233,13 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   with surface temperature, wind, and local humidity deficit (same
   wet-chunk scan). Vapor rises harder when the lapse is unstable
   (warm under cold). Condensation prefers cold / supersaturated tiles
-  and dew when a colder tile sits below. Visible cloud parcels only
-  clump from air that is already ~10% of thermal saturation — leftover
-  vapor rains as drizzle instead of cartoon blobs. Event caps and the
-  atmosphere budget stay in place so this cannot refill the 7 FPS soak.
+  and dew when a colder tile sits below. `N` rebuilds a small visual
+  echo from the wettest sky tiles; leftover parcel mass from old saves
+  returns to humidity. Event caps and the atmosphere budget stay in
+  place so this cannot refill the 7 FPS soak.
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
-  the blanket. Cloud downpour uses a wider footprint when snowing.
+  the blanket. Climatic rain uses a wider footprint when snowing.
 - **Snow pack:** solid lid, no pore soak. Falls through empty Air; cold
   avalanche can spill onto lake ice (see Grain / cold avalanche sections).
 - **Slush:** Snow on water — warm melts snow; cold freezes the water film

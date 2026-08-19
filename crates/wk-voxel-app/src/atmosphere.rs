@@ -30,7 +30,7 @@ const MILD_TEMP_C: f32 = 18.0;
 pub enum CloudDepthLayer {
     Far,
     Mid,
-    /// Authoritative coagulated parcels on the playfield.
+    /// Visual humidity echo on the playfield.
     Active,
     Front,
 }
@@ -221,10 +221,10 @@ fn cloud_layer_strength(look: &AtmosphereLookConfig, layer: CloudDepthLayer) -> 
     .clamp(0.0, 1.0)
 }
 
-/// Gather soft lobe sources from active coagulated parcels.
+/// Gather soft lobe sources from the visual humidity echo.
 ///
 /// Far / mid / front are parallax echoes of the same `CloudStore` — humidity
-/// already drove coagulate/rain; we do not paint the humidity tile raster here.
+/// already owns the water; we do not paint the humidity tile raster here.
 fn gather_soft_cloud_srcs(
     clouds: &CloudStore,
     _humidity: &Humidity,
@@ -1569,7 +1569,7 @@ fn stamp_celestial_cast_shadows(
     }
 }
 
-/// Active-layer soft parcel banks + precip (humidity coagulated into CloudStore).
+/// Active-layer soft parcel banks + precip streaks (humidity echo in CloudStore).
 ///
 /// Banks use lobe masks; precip streaks are world-aligned so they clip on ground.
 pub fn draw_clouds(

@@ -2519,7 +2519,7 @@ fn beach_film_drains_into_ocean_not_inland() {
 // `clear_all_dirty` and expected water to still drain. That was
 // testing the retired `remount_unbalanced_surface_water` bandaid.
 // In practice, physics only quiesces when no cell has moved for a
-// full tick; any new write (rain, cloud downpour, editor spawn)
+// full tick; any new write (rain, condensation, editor spawn)
 // rebuilds the dirty rect and re-wakes flow. The artificial
 // clear-then-idle case is intentionally not supported.
 

@@ -213,12 +213,9 @@ impl SimSettings {
                 // Slightly wetter sky defaults so lakes refill overnight
                 // without requiring Tab fiddling on every new world.
                 let mut c = CloudConfig::default();
-                c.coag_rate = 0.08;
-                c.coag_max_take = 18.0;
                 c.cloud_alt_above_sea = 48;
                 c.coag_min_above_sea = 22;
                 c.buoyant_rise = 0.10;
-                c.rain_cells_per_tick = 3;
                 c
             },
             climate: ClimateConfig::default(),
@@ -1143,24 +1140,16 @@ impl SimSettings {
                 });
                 ui.separator();
 
-                ui.tree_node(hash!(), "Clouds", |ui| {
-                    labeled_slider(ui, hash!(), "Max parcels", 1.0..64.0, &mut max_parcels);
-                    labeled_slider(ui, hash!(), "Coag min humidity", 1.0..120.0, &mut self.cloud.coag_min_hum);
-                    labeled_slider(ui, hash!(), "Coag rate", 0.005..0.25, &mut self.cloud.coag_rate);
-                    labeled_slider(ui, hash!(), "Coag max take", 1.0..80.0, &mut self.cloud.coag_max_take);
-                    labeled_slider(ui, hash!(), "Spawn radius", 4.0..48.0, &mut self.cloud.spawn_radius);
-                    labeled_slider(ui, hash!(), "Merge distance", 2.0..30.0, &mut self.cloud.merge_dist);
-                    labeled_slider(ui, hash!(), "Downpour mass", 40.0..500.0, &mut self.cloud.downpour_mass);
-                    labeled_slider(ui, hash!(), "Downpour drain", 4.0..120.0, &mut self.cloud.downpour_drain);
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Parcel wind scale",
-                        0.05..1.5,
-                        &mut self.cloud.parcel_wind_scale,
+                ui.tree_node(hash!(), "Clouds (N visual echo)", |ui| {
+                    ui.label(
+                        None,
+                        "Parcels copy wet humidity tiles for N / shade / streaks. Rain is condensation (C).",
                     );
+                    labeled_slider(ui, hash!(), "Max parcels", 1.0..64.0, &mut max_parcels);
+                    labeled_slider(ui, hash!(), "Visual min humidity", 1.0..120.0, &mut self.cloud.coag_min_hum);
+                    labeled_slider(ui, hash!(), "Visual wetness mass", 40.0..500.0, &mut self.cloud.downpour_mass);
                     labeled_slider(ui, hash!(), "Cloud alt above sea", 8.0..160.0, &mut cloud_alt);
-                    labeled_slider(ui, hash!(), "Coag min above sea", 4.0..120.0, &mut coag_min_alt);
+                    labeled_slider(ui, hash!(), "Visual min above sea", 4.0..120.0, &mut coag_min_alt);
                     labeled_slider(
                         ui,
                         hash!(),
@@ -1168,52 +1157,6 @@ impl SimSettings {
                         0.0..36.0,
                         &mut self.cloud.ridge_clearance,
                     );
-                    let mut snow_cells = self.cloud.snow_cells_per_tick as f32;
-                    let mut rain_cells = self.cloud.rain_cells_per_tick as f32;
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Snow footprint × radius",
-                        0.5..4.0,
-                        &mut self.cloud.snow_footprint_mult,
-                    );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Rain footprint × radius",
-                        0.5..3.0,
-                        &mut self.cloud.rain_footprint_mult,
-                    );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Snow landing span × radius",
-                        0.2..3.0,
-                        &mut self.cloud.snow_span_mult,
-                    );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Rain landing span × radius",
-                        0.2..2.0,
-                        &mut self.cloud.rain_span_mult,
-                    );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Snow cells / parcel / tick",
-                        1.0..12.0,
-                        &mut snow_cells,
-                    );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Rain cell retries / parcel / tick",
-                        1.0..8.0,
-                        &mut rain_cells,
-                    );
-                    self.cloud.snow_cells_per_tick = snow_cells.round().clamp(1.0, 24.0) as u8;
-                    self.cloud.rain_cells_per_tick = rain_cells.round().clamp(1.0, 16.0) as u8;
                 });
                 ui.separator();
 

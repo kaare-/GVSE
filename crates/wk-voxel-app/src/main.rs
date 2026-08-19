@@ -1454,7 +1454,7 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} echo={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
@@ -1463,7 +1463,7 @@ async fn main() {
                 if evap_on { "on" } else { "off" },
                 if settings.phase.enabled { "on" } else { "off" },
                 scene.clouds.len(),
-                scene.clouds.total_mass(),
+                scene.clouds.visual_mass(),
                 scene.humidity.total_mass(),
                 scene.carbon.atmosphere,
                 scene.carbon.dissolved,
