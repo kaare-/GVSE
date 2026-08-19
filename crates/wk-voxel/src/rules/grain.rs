@@ -2933,6 +2933,10 @@ fn maybe_queue_erosion(
     if grain.sat.0 >= 40 {
         sus *= 1.4; // wet grains loosen (column sim saturation collapse)
     }
+    if grain.material == MaterialId::Organic {
+        // Dead stems / litter should leave a current instead of damming it.
+        sus *= 2.2;
+    }
     if rooted.is_some_and(|r| r.contains(&(ex, ey))) {
         sus /= ROOT_EROSION_BIND;
     }
@@ -2988,7 +2992,7 @@ fn flow_bias(world: &World, gx: i32, gy: i32, sat: Sat) -> Option<i32> {
             Some(b) if b.material != MaterialId::Air => {
                 // Lower neighbor column surface (thin-sheet downhill).
                 if n.sat.is_empty() {
-                    score += 0.35;
+                    score += 0.40;
                 }
             }
             _ => {}
@@ -2998,7 +3002,7 @@ fn flow_bias(world: &World, gx: i32, gy: i32, sat: Sat) -> Option<i32> {
             best_dx = dx;
         }
     }
-    if best_score >= 0.5 {
+    if best_score >= 0.34 {
         Some(best_dx)
     } else {
         None

@@ -2439,6 +2439,78 @@ fn surface_flow_drains_hill_film_diagonally() {
 }
 
 #[test]
+fn stacked_water_overtops_dry_soil_berm() {
+    // Tsunami / surge: two wet cells stacked must climb a dry soil bump
+    // instead of waiting until the berm saturates.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..12 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=4 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    w.set_cell(6, 1, Cell::solid(MaterialId::Soil));
+    for x in 3..=5 {
+        w.set_cell(x, 1, Cell::water());
+        w.set_cell(x, 2, Cell::water());
+    }
+    apply_water_flow(&mut w);
+    let over = w.get_cell(6, 2).map(|c| c.sat.0).unwrap_or(0);
+    let skip = w.get_cell(7, 1).map(|c| c.sat.0).unwrap_or(0);
+    assert!(
+        over > 0 || skip > 0,
+        "stacked water must overtop or skip the dry berm (over={over} skip={skip})"
+    );
+}
+
+#[test]
+fn thin_film_does_not_overtop_dry_berm() {
+    // Trickle still stops at dry ground — soak / seepage owns that path.
+    let mut w = World::new(32);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..12 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::air());
+        w.set_cell(x, 2, Cell::air());
+    }
+    w.set_cell(6, 1, Cell::solid(MaterialId::Soil));
+    w.set_cell(5, 1, {
+        let mut c = Cell::air();
+        c.sat = Sat(80);
+        c
+    });
+    apply_water_flow(&mut w);
+    assert_eq!(
+        w.get_cell(6, 2).map(|c| c.sat.0).unwrap_or(0),
+        0,
+        "a thin trickle must not climb the dry berm"
+    );
+}
+
+#[test]
+fn hillside_film_climbs_dry_terrace() {
+    // A full blob on a soil step must splash over instead of sitting
+    // until the terrace saturates.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..12 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::air());
+        w.set_cell(x, 2, Cell::air());
+    }
+    w.set_cell(6, 1, Cell::solid(MaterialId::Soil));
+    w.set_cell(5, 1, Cell::water());
+    apply_water_flow(&mut w);
+    let over = w.get_cell(6, 2).map(|c| c.sat.0).unwrap_or(0);
+    let soak = w.get_cell(6, 1).map(|c| c.sat.0).unwrap_or(0);
+    assert!(
+        over > 0 || soak > 0,
+        "full hillside film must climb or wet the dry terrace (over={over} soak={soak})"
+    );
+}
+
+#[test]
 fn surface_flow_levels_diagonal_slope_wedge() {
     // Packed staircase wedge — the "gaffa tape" failure mode.
     // Head equalisation across diagonals must flatten it downhill.

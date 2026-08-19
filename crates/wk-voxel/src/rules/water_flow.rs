@@ -164,10 +164,18 @@ fn commit_air_sat_xfers(
         let Some(dst) = world.get_cell(to.0, to.1) else {
             continue;
         };
-        if src.material != MaterialId::Air || dst.material != MaterialId::Air {
+        if src.material != MaterialId::Air {
             continue;
         }
-        let free = u8::MAX as i32 - dst.sat.0 as i32;
+        let free = if dst.material == MaterialId::Air {
+            u8::MAX as i32 - dst.sat.0 as i32
+        } else {
+            let cap = water_capacity_with(dst.material, &world.hydro) as i32;
+            if cap == 0 {
+                continue;
+            }
+            cap - dst.sat.0 as i32
+        };
         let amt = amt.min(src.sat.0 as i32).min(free.max(0));
         if amt <= 0 {
             continue;
@@ -576,6 +584,11 @@ fn accumulate_water_flow_xfers(
                 // Randomize L/R per cell so water doesn't bias one way.
                 let flip = tick_flip ^ (((gx + gy) & 1) == 0);
                 let dirs = if flip { [-1_i32, 1] } else { [1_i32, -1] };
+                let depth = wet_stack_depth(&read, gx, gy, lx, ly, cur.sat.0);
+                // Films crawl sideways; downhill drain stays a bit faster
+                // so hillside blobs empty instead of sitting a full tick.
+                let step = sheet_step_cap(depth);
+                let drain = drain_step_cap(depth);
 
                 // --- Priority 1: diagonal-down into Air with room ---
                 // Shelf edge: (dx, y-1) is Air, so water can fall there.
@@ -595,7 +608,7 @@ fn accumulate_water_flow_xfers(
                     if free == 0 {
                         continue;
                     }
-                    let move_amt = remaining.min(free);
+                    let move_amt = remaining.min(free).min(drain);
                     local.push(((gx, gy), (nx, ny), move_amt));
                     remaining -= move_amt;
                 }
@@ -627,7 +640,7 @@ fn accumulate_water_flow_xfers(
                         if free == 0 {
                             continue;
                         }
-                        let move_amt = remaining.min(free);
+                        let move_amt = remaining.min(free).min(step);
                         local.push(((gx, gy), (nx, gy), move_amt));
                         remaining -= move_amt;
                     }
@@ -682,6 +695,26 @@ fn accumulate_water_flow_xfers(
                             ly,
                             dirs,
                             remaining,
+                            &mut local,
+                        );
+                    }
+
+                    // --- Priority 3c: sheet / tsunami overtop ---
+                    // Trickles still soak a dry berm. A full film or a
+                    // stacked surge climbs onto (and wets) the bump.
+                    if remaining > 0 {
+                        remaining = plan_overtop_dry_ground(
+                            world,
+                            &read,
+                            gx,
+                            gy,
+                            lx,
+                            ly,
+                            dirs,
+                            depth,
+                            cur.sat.0,
+                            remaining,
+                            step,
                             &mut local,
                         );
                     }
@@ -803,6 +836,128 @@ fn accumulate_throughflow_xfers(
     for mut v in local {
         xfers.append(&mut v);
     }
+}
+
+/// How many stacked wet-Air cells sit at/above this source (1 = a film).
+fn wet_stack_depth(
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+    sat: u8,
+) -> i32 {
+    if sat < 96 {
+        return 0;
+    }
+    let mut d = 1;
+    for dy in 1..=5 {
+        match read(lx, ly + dy, gx, gy + dy) {
+            Some(c) if c.material == MaterialId::Air && c.sat.0 >= 160 => d += 1,
+            _ => break,
+        }
+    }
+    d
+}
+
+/// Per-pass sat cap for same-Y / overtop. Thin films crawl; a stacked
+/// surge still dumps hard.
+fn sheet_step_cap(depth: i32) -> i32 {
+    match depth {
+        0 | 1 => 40,
+        2 => 96,
+        _ => 200,
+    }
+}
+
+/// Per-pass sat cap for diagonal-down drain. Faster than lateral so a
+/// hillside blob does not sit a full tick waiting to empty.
+fn drain_step_cap(depth: i32) -> i32 {
+    match depth {
+        0 | 1 => 80,
+        2 => 128,
+        _ => 200,
+    }
+}
+
+/// How much sat a passing sheet soaks into the dry berm it climbs.
+const OVERTOP_BERM_SOAK: i32 = 24;
+/// A full-ish film can climb a one-cell dry step; thinner trickles soak.
+const SHEET_CLIMB_SAT: u8 = 160;
+
+/// Sheet / surge climbs a dry solid berm, wets it, or skips into Air beyond.
+fn plan_overtop_dry_ground(
+    world: &World,
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+    dirs: [i32; 2],
+    depth: i32,
+    sat: u8,
+    mut remaining: i32,
+    step: i32,
+    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
+) -> i32 {
+    let can_climb = depth >= 2 || sat >= SHEET_CLIMB_SAT;
+    let can_skip = depth >= 2;
+    if !can_climb {
+        return remaining;
+    }
+    for dx in dirs {
+        if remaining <= 0 {
+            break;
+        }
+        let nx = world.wrap_x(gx + dx);
+        let Some(side) = read(lx + dx, ly, nx, gy) else {
+            continue;
+        };
+        if side.material == MaterialId::Air {
+            continue;
+        }
+        // Splash-wet the berm (partial saturate) then flow on.
+        let cap = water_capacity_with(side.material, &world.hydro) as i32;
+        if cap > 0 {
+            let free = cap - side.sat.0 as i32;
+            let soak = remaining.min(free.max(0)).min(OVERTOP_BERM_SOAK);
+            if soak > 0 {
+                local.push(((gx, gy), (nx, gy), soak));
+                remaining -= soak;
+            }
+        }
+        if remaining <= 0 {
+            break;
+        }
+        // Climb onto the berm (sheet flow over dry ground).
+        if let Some(above) = read(lx + dx, ly + 1, nx, gy + 1) {
+            if above.material == MaterialId::Air {
+                let free = u8::MAX.saturating_sub(above.sat.0) as i32;
+                let amt = remaining.min(free).min(step);
+                if amt > 0 {
+                    local.push(((gx, gy), (nx, gy + 1), amt));
+                    remaining -= amt;
+                    continue;
+                }
+            }
+        }
+        // Stacked surge can skip the one-cell berm into Air beyond.
+        if !can_skip {
+            continue;
+        }
+        let bx = world.wrap_x(nx + dx);
+        if let Some(beyond) = read(lx + dx * 2, ly, bx, gy) {
+            if beyond.material == MaterialId::Air {
+                let free = u8::MAX.saturating_sub(beyond.sat.0) as i32;
+                let amt = remaining.min(free).min(step);
+                if amt > 0 {
+                    local.push(((gx, gy), (bx, gy), amt));
+                    remaining -= amt;
+                }
+            }
+        }
+    }
+    remaining
 }
 
 /// Max Organic cells water may punch through in one wash.
