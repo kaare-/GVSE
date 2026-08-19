@@ -224,9 +224,13 @@ impl CloudStore {
         self.parcels.iter().map(|p| p.mass).sum()
     }
 
-    /// Same as [`Self::total_mass`] — visual echo only, not a water store.
+    /// Display mass for HUD / N banks. Visual echoes keep this in
+    /// `vis_mass` so leftover `mass` is only real water from old saves.
     pub fn visual_mass(&self) -> f32 {
-        self.total_mass()
+        self.parcels
+            .iter()
+            .map(|p| if p.vis_mass > 0.0 { p.vis_mass } else { p.mass })
+            .sum()
     }
 
     /// Atmosphere step: return any leftover parcel mass to humidity,
@@ -328,10 +332,13 @@ impl CloudStore {
             let mut fy = cy as f32;
             let floor = cloud_floor_y(world, wind, cx as f32);
             fy = fy.max(floor + cfg.ridge_clearance);
+            // `mass` stays 0 — the next tick's leftover-release would
+            // otherwise pour this humidity copy back into the sky
+            // (mint vapor → condensation mints rain).
             self.parcels.push(CloudParcel {
                 fx: cx as f32,
                 fy,
-                mass,
+                mass: 0.0,
                 raining: wet >= 0.42,
                 on_ridge: fy > cy as f32 + 1.0,
                 shape_seed: seed,
@@ -468,6 +475,10 @@ mod tests {
         assert!(!clouds.is_empty(), "wet sky tiles should spawn a visual echo");
         assert!(clouds.visual_mass() > 0.0);
         assert!(
+            clouds.total_mass() < 1e-3,
+            "echo parcels must not hold water or the next tick remints it"
+        );
+        assert!(
             (h.total_mass() - hum_before).abs() < 1e-3,
             "visual rebuild must not steal humidity (was {hum_before} now {})",
             h.total_mass()
@@ -525,6 +536,56 @@ mod tests {
         assert!(
             (h.total_mass() - 4.0).abs() < 1e-3,
             "old parcel mass should land in humidity, got {}",
+            h.total_mass()
+        );
+    }
+
+    #[test]
+    fn visual_echo_does_not_remint_humidity() {
+        let p = WorldgenParams::default();
+        let wind = wind_for(&p);
+        let mut h = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        h.wrap_x = true;
+        let sky_y = p.sea_level_y + 40;
+        for x in 40..56 {
+            h.add(x, sky_y, 80.0);
+        }
+        let mut clouds = CloudStore::new();
+        let mut world = World::new(p.seed);
+        let cfg = CloudConfig {
+            coag_min_hum: 20.0,
+            max_parcels: 16,
+            ..CloudConfig::default()
+        };
+        clouds.step(
+            &mut world,
+            &mut h,
+            &wind,
+            p.sea_level_y,
+            p.sky_ceiling_y,
+            1,
+            &cfg,
+        );
+        let after_one = h.total_mass();
+        clouds.step(
+            &mut world,
+            &mut h,
+            &wind,
+            p.sea_level_y,
+            p.sky_ceiling_y,
+            2,
+            &cfg,
+        );
+        assert!(
+            (h.total_mass() - after_one).abs() < 1e-3,
+            "second step reminted humidity ({} → {})",
+            after_one,
             h.total_mass()
         );
     }
