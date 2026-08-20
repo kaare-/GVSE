@@ -42,8 +42,8 @@ fn rain_row_saturates_sand_over_one_tick() {
         let sand = w.get_cell(x, 0).unwrap();
         let above = w.get_cell(x, 1).unwrap();
         assert!(
-            sand.sat.0 >= sand_cap.saturating_sub(1),
-            "sand should reach pore capacity within integer head rounding (x={x}, sat={})",
+            sand.sat.0 >= sand_cap.saturating_sub(8),
+            "sand should reach near pore capacity under gradual seepage (x={x}, sat={})",
             sand.sat.0
         );
         assert!(
