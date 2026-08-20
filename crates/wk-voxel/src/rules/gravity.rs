@@ -32,9 +32,9 @@ use super::plan::regions_for_standalone;
 /// - **Cross-chunk**: own + `cy + 1` via chunk-local indexing (same
 ///   write-set as [`parallel::pull_write_coords`]). Missing above
 ///   chunks yield no move.
-/// - **Air → porous solid** for a laterally walled pond or the interior
-///   of a stacked lake. A stacked column near a dry lateral escape is a
-///   moving surge and stays in Air; seepage only splash-wets its bed.
+/// - **Air → porous solid** for a walled pond, or a stacked lake column
+///   with full wet Air on both sides. Shore / weir / open-surge faces
+///   stay in Air; seepage splash-wets those beds.
 ///
 /// This is intentionally the simplest possible fall model — one cell
 /// per invocation, no lateral spread, no density swap. Free-fall
@@ -108,8 +108,8 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 water_capacity_with(m, &hydro)
             }
         };
-        // A stacked column is lake-like only away from a dry lateral face.
-        // Depth by itself cannot distinguish a lake from a moving surge.
+        // Walled pond, or stacked lake away from an immediate dry face.
+        // An 8-cell escape scan left dry beds under most of a pond shore.
         let walled_air = |lx: u8, ly_src: i32| -> bool {
             let solid = |nlx: i32| -> bool {
                 if nlx < 0 || nlx >= CHUNK_CELLS_W as i32 {
@@ -128,25 +128,21 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 Some(c) if c.material == MaterialId::Air && c.sat.0 >= 160
             )
         };
-        let has_dry_lateral_escape = |lx: u8, ly_src: i32| -> bool {
-            const ESCAPE_SCAN: i32 = 8;
-            for dx in [-1_i32, 1] {
-                for n in 1..=ESCAPE_SCAN {
-                    let nx = lx as i32 + dx * n;
-                    // Horizontal neighbour chunks are outside gravity's
-                    // write-pointer set. Treat an unknown seam as open so
-                    // a surge is never accidentally bucketed at a seam.
-                    if nx < 0 || nx >= CHUNK_CELLS_W as i32 {
-                        return true;
-                    }
-                    match read_xy(nx as u8, ly_src) {
-                        Some(c) if c.material == MaterialId::Air && c.sat.0 < 32 => return true,
-                        Some(c) if c.material == MaterialId::Air => {}
-                        _ => break,
-                    }
+        let open_surge_face = |lx: u8, ly_src: i32| -> bool {
+            // Lake interior = full wet Air on both sides. Anything else
+            // (dry Air, partial film, or a solid weir face) is a surge /
+            // shore column and must not gravity-drink its bed.
+            let full_wet = |nlx: i32| -> bool {
+                if nlx < 0 || nlx >= CHUNK_CELLS_W as i32 {
+                    // Unknown chunk seam: do not invent a dry face.
+                    return true;
                 }
-            }
-            false
+                matches!(
+                    read_xy(nlx as u8, ly_src),
+                    Some(c) if c.material == MaterialId::Air && c.sat.is_full()
+                )
+            };
+            !full_wet(lx as i32 - 1) || !full_wet(lx as i32 + 1)
         };
         for x in ac.rect.x0..=ac.rect.x1 {
             let mut any_mobile = false;
@@ -192,13 +188,11 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     next_cur = Some(above);
                     continue;
                 }
-                // Walled ponds and stacked lake interiors may fill pores
-                // directly. A stack near dry Air is an advancing surge:
-                // keep its mass free for lateral flow.
+                // Walled ponds and stacked lake interiors fill pores.
+                // An open surge face (dry Air beside the stack) stays free.
                 if cur.material != MaterialId::Air && above.material == MaterialId::Air {
                     let src_y = y as i32 + 1;
-                    let settled_stack =
-                        stacked_air(x, src_y) && !has_dry_lateral_escape(x, src_y);
+                    let settled_stack = stacked_air(x, src_y) && !open_surge_face(x, src_y);
                     if !walled_air(x, src_y) && !settled_stack {
                         next_cur = Some(above);
                         continue;

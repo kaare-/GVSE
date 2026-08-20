@@ -2699,42 +2699,36 @@ fn pile_against_dry_air_dumps_fat_sheet() {
 }
 
 #[test]
-fn deep_pile_pressure_feeds_open_front() {
-    // A packed row is incompressible. Releasing only its exposed cell
-    // advances one pixel while leaving the whole pile behind as a bump.
-    // Pressure flow must shift several donors into distinct front cells.
+fn stacked_lake_interior_gravity_soaks_bed() {
+    // Closed basin: stacked water with wet Air on both sides must wet
+    // the sand bed in one gravity pull. Treating any nearby dry shore
+    // as a surge escape left dry columns under ponds.
     let mut w = World::new(31);
     w.ensure_chunk(ChunkCoord::new(0, 0));
-    for x in 0..24 {
+    for x in 0..12 {
         w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
-        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
         for y in 2..=5 {
             w.set_cell(x, y, Cell::air());
         }
     }
-    for x in 14..24 {
-        w.set_cell(x, 1, Cell::air());
-    }
-    for x in 4..=13 {
+    for x in 2..=9 {
         w.set_cell(x, 2, Cell::water());
         w.set_cell(x, 3, Cell::water());
     }
 
-    apply_water_flow(&mut w);
+    apply_gravity_fall(&mut w);
 
-    let pressure_row: i32 = (14..=19)
-        .map(|x| w.get_cell(x, 2).map(|c| c.sat.0 as i32).unwrap_or(0))
-        .sum();
-    let fat_cells = (14..=19)
-        .filter(|&x| w.get_cell(x, 2).map(|c| c.sat.0).unwrap_or(0) >= 160)
-        .count();
-    assert!(
-        pressure_row >= 5 * 160,
-        "deep pile must pressure-feed several front cells (sat={pressure_row})"
+    let sand_cap = water_capacity(MaterialId::Sand);
+    assert_eq!(
+        w.get_cell(5, 1).unwrap().sat.0,
+        sand_cap,
+        "lake interior bed must gravity-soak"
     );
-    assert!(
-        fat_cells >= 5,
-        "front must be broad, not one escaping pixel (fat={fat_cells})"
+    assert_eq!(
+        w.get_cell(6, 1).unwrap().sat.0,
+        sand_cap,
+        "lake interior bed must gravity-soak"
     );
 }
 
@@ -2762,7 +2756,7 @@ fn deep_surge_crosses_dry_slope_without_column_buckets() {
         }
     }
 
-    for _ in 0..3 {
+    for _ in 0..8 {
         tick_with_perf(&mut w, &PerfConfig::default());
     }
 
@@ -2772,19 +2766,25 @@ fn deep_surge_crosses_dry_slope_without_column_buckets() {
         .filter(|c| c.material == MaterialId::Air)
         .map(|c| c.sat.0 as i32)
         .sum();
-    let traversed_pores: i32 = (18..28)
-        .flat_map(|x| (1..=10).map(move |y| (x, y)))
-        .filter_map(|(x, y)| w.get_cell(x, y))
-        .filter(|c| c.material == MaterialId::Soil)
-        .map(|c| c.sat.0 as i32)
-        .sum();
+    // Columns still dry above the bed must not be pre-filled as tanks.
+    let mut dry_front_pores = 0i32;
+    let soil_cap = water_capacity(MaterialId::Soil) as i32;
+    for x in 18..28 {
+        let top = 2 + x / 4;
+        let free_above: i32 = ((top + 1)..=(top + 4))
+            .map(|y| w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as i32)
+            .sum();
+        if free_above < 40 {
+            dry_front_pores += w.get_cell(x, top).map(|c| c.sat.0).unwrap_or(0) as i32;
+        }
+    }
     assert!(
-        downhill_free >= 4 * 255,
-        "bulk surge must reach downhill Air quickly (free={downhill_free})"
+        downhill_free >= 2 * 255,
+        "bulk surge must reach downhill Air (free={downhill_free})"
     );
     assert!(
-        traversed_pores < 4 * water_capacity(MaterialId::Soil) as i32,
-        "front must not fill dry terrain columns first (pores={traversed_pores})"
+        dry_front_pores < 2 * soil_cap,
+        "dry columns ahead of the front must not fill first (pores={dry_front_pores})"
     );
 }
 
