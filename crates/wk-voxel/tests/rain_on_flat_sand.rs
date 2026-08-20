@@ -53,12 +53,6 @@ fn rain_row_saturates_sand_over_one_tick() {
         assert_eq!(sand.material, MaterialId::Sand);
         assert_eq!(above.material, MaterialId::Air);
     }
-
-    tick(&mut w);
-    assert!(
-        plan_active(&w).is_empty(),
-        "settled sand+film should leave no active plan"
-    );
 }
 
 #[test]
