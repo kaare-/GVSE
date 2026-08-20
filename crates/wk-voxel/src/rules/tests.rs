@@ -2625,16 +2625,25 @@ fn weir_dumps_stack_over_dry_column() {
             w.set_cell(x, y, Cell::water());
         }
     }
-    let pile_before: i32 = (4..=7)
-        .flat_map(|x| (2..=7).map(move |y| w.get_cell(x, y).unwrap().sat.0 as i32))
-        .sum();
+    let mut pile_before = 0i32;
+    for x in 4..=7 {
+        for y in 2..=7 {
+            pile_before += w.get_cell(x, y).unwrap().sat.0 as i32;
+        }
+    }
     apply_water_flow(&mut w);
-    let over: i32 = (8..=11)
-        .flat_map(|x| (6..=10).map(move |y| w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as i32))
-        .sum();
-    let pile_after: i32 = (4..=7)
-        .flat_map(|x| (2..=7).map(move |y| w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as i32))
-        .sum();
+    let mut over = 0i32;
+    for x in 8..=11 {
+        for y in 6..=10 {
+            over += w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as i32;
+        }
+    }
+    let mut pile_after = 0i32;
+    for x in 4..=7 {
+        for y in 2..=7 {
+            pile_after += w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as i32;
+        }
+    }
     assert!(
         over >= 400,
         "weir must dump a fat front over the wall (over={over})"
