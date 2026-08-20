@@ -2617,8 +2617,8 @@ fn hilltop_dump_front_stays_fat() {
 
 #[test]
 fn hillside_film_climbs_dry_terrace() {
-    // A full blob on a soil step must splash over instead of sitting
-    // until the terrace saturates.
+    // A lone film only splash-wets the berm; climbing upward is reserved
+    // for stacked surges so pond shores do not creep uphill.
     let mut w = World::new(31);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     for x in 0..12 {
@@ -2631,13 +2631,48 @@ fn hillside_film_climbs_dry_terrace() {
     apply_water_flow(&mut w);
     let over = w.get_cell(6, 2).map(|c| c.sat.0).unwrap_or(0);
     let soak = w.get_cell(6, 1).map(|c| c.sat.0).unwrap_or(0);
-    let beyond = (7..=8)
-        .flat_map(|x| (1..=4).map(move |y| (x, y)))
-        .map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as i32)
-        .sum::<i32>();
-    assert!(
-        over > 0 || soak > 0 || beyond > 0,
-        "full hillside film must climb or wet the dry terrace (over={over} soak={soak} beyond={beyond})"
+    assert_eq!(over, 0, "lone film must not climb onto the berm crest");
+    assert!(soak > 0, "lone film should splash-wet the dry terrace (soak={soak})");
+}
+
+#[test]
+fn pond_shore_does_not_creep_uphill() {
+    // Standing pond against a rising dry hill. Free-surface films must
+    // not overtop onto the hillside — that looked like antsy upward creep.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        for y in 2..=8 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    // Rising dry hill from x=8.
+    for x in 8..16 {
+        let top = 2 + (x - 8);
+        for y in 2..=top {
+            w.set_cell(x, y, Cell::solid(MaterialId::Soil));
+        }
+    }
+    // Pond body x=1..=7, surface at y=4.
+    for x in 1..=7 {
+        for y in 2..=4 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for _ in 0..12 {
+        tick(&mut w);
+    }
+    let mut hill_water = 0i32;
+    for x in 8..16 {
+        for y in 5..=8 {
+            hill_water += w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as i32;
+        }
+    }
+    assert_eq!(
+        hill_water, 0,
+        "pond free surface must not creep onto the hillside (sat={hill_water})"
     );
 }
 

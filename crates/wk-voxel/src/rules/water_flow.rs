@@ -925,8 +925,6 @@ fn drain_step_cap(depth: i32) -> i32 {
 
 /// How much sat a passing sheet soaks into the dry berm it climbs.
 const OVERTOP_BERM_SOAK: i32 = 24;
-/// A full-ish film can climb a one-cell dry step; thinner trickles soak.
-const SHEET_CLIMB_SAT: u8 = 160;
 
 /// Push `remaining` into Air dests until the source is empty or dests are full.
 fn dump_into_air_dests(
@@ -964,8 +962,10 @@ fn dump_into_air_dests(
 /// Sheet / surge climbs a dry solid berm and dumps over the weir
 /// into several Air cells (crest, stacked overflow, beyond, downhill).
 ///
-/// Funneling the whole pile through one crest cell left a huge bump
-/// and a hairline trickle — dest free is 255, so one cell escaped.
+/// Only a **stacked** body (`depth >= 2`) may climb upward. A lone full
+/// film on a pond shore used to overtop every dry hillside step, so the
+/// lake surface thrashed and crept uphill. Lone films only splash-wet
+/// the contact face.
 fn plan_overtop_dry_ground(
     world: &World,
     read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
@@ -975,18 +975,12 @@ fn plan_overtop_dry_ground(
     ly: i32,
     dirs: [i32; 2],
     depth: i32,
-    sat: u8,
+    _sat: u8,
     mut remaining: i32,
-    step: i32,
+    _step: i32,
     local: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) -> i32 {
-    let can_climb = depth >= 2 || sat >= SHEET_CLIMB_SAT;
-    if !can_climb {
-        return remaining;
-    }
-    // A stacked dump empties the source cell over the weir; a lone
-    // full film still uses the sheet step so trickles stay trickles.
-    let dump = if depth >= 2 { remaining } else { remaining.min(step) };
+    let can_climb = depth >= 2;
     for dx in dirs {
         if remaining <= 0 {
             break;
@@ -998,48 +992,43 @@ fn plan_overtop_dry_ground(
         if side.material == MaterialId::Air {
             continue;
         }
-        let mut dests: Vec<(i32, i32, i32, i32)> = Vec::new();
-        let mut crest: Option<i32> = None;
-        for dy in 1..=10 {
-            let Some(above) = read(lx + dx, ly + dy, nx, gy + dy) else {
-                break;
-            };
-            if above.material != MaterialId::Air {
-                continue;
+        if can_climb {
+            let mut dests: Vec<(i32, i32, i32, i32)> = Vec::new();
+            let mut crest: Option<i32> = None;
+            for dy in 1..=10 {
+                let Some(above) = read(lx + dx, ly + dy, nx, gy + dy) else {
+                    break;
+                };
+                if above.material != MaterialId::Air {
+                    continue;
+                }
+                if crest.is_none() {
+                    crest = Some(gy + dy);
+                }
+                dests.push((nx, gy + dy, lx + dx, ly + dy));
+                if dests.len() >= 4 {
+                    break;
+                }
             }
-            if crest.is_none() {
-                crest = Some(gy + dy);
+            if let Some(cy) = crest {
+                let bx = world.wrap_x(nx + dx);
+                for dy in 0..=3 {
+                    dests.push((bx, cy + dy, lx + dx * 2, ly + (cy - gy) + dy));
+                }
+                dests.push((bx, cy - 1, lx + dx * 2, ly + (cy - gy) - 1));
+                if gy > cy {
+                    dests.push((nx, gy, lx + dx, ly));
+                    dests.push((bx, gy, lx + dx * 2, ly));
+                }
             }
-            dests.push((nx, gy + dy, lx + dx, ly + dy));
-            if dests.len() >= 4 {
-                break;
-            }
-        }
-        if let Some(cy) = crest {
-            let bx = world.wrap_x(nx + dx);
-            for dy in 0..=3 {
-                dests.push((bx, cy + dy, lx + dx * 2, ly + (cy - gy) + dy));
-            }
-            dests.push((bx, cy - 1, lx + dx * 2, ly + (cy - gy) - 1));
-            if gy > cy {
-                dests.push((nx, gy, lx + dx, ly));
-                dests.push((bx, gy, lx + dx * 2, ly));
-            }
-        }
-        if dests.is_empty() {
-            // fall through to splash
-        } else {
-            // Stacked rows would all hit the same crest cell; rotate
-            // those. A lone film keeps crest-first order so it does
-            // not skip the berm and look like a hairline.
-            if depth >= 2 {
+            if !dests.is_empty() {
                 let rot = (gy.unsigned_abs() as usize) % dests.len();
                 dests.rotate_left(rot);
-            }
-            let before = remaining;
-            remaining = dump_into_air_dests(read, (gx, gy), &dests, remaining.min(dump), local);
-            if remaining < before {
-                continue;
+                let before = remaining;
+                remaining = dump_into_air_dests(read, (gx, gy), &dests, remaining, local);
+                if remaining < before {
+                    continue;
+                }
             }
         }
         // Could not get over — splash the contact face only.
@@ -1070,12 +1059,14 @@ fn plan_sheet_over_dry_bed(
     ly: i32,
     dirs: [i32; 2],
     depth: i32,
-    sat: u8,
+    _sat: u8,
     mut remaining: i32,
-    step: i32,
+    _step: i32,
     local: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) -> i32 {
-    if depth < 2 && sat < SHEET_CLIMB_SAT {
+    // Lone pond films must not skate onto dry shelves (and especially
+    // not into gy+1), or the free surface creeps uphill every tick.
+    if depth < 2 {
         return remaining;
     }
     for dx in dirs {
@@ -1099,14 +1090,14 @@ fn plan_sheet_over_dry_bed(
         if cap <= 0 || bed.sat.0 as i32 >= cap {
             continue;
         }
-        let dump = if depth >= 2 { remaining } else { remaining.min(step) };
+        let dump = remaining;
         let bx = world.wrap_x(nx + dx);
+        // Same-Y / downhill only — never gy+1 (uphill creep).
         let dests = [
             (nx, gy, lx + dx, ly),
-            (nx, gy + 1, lx + dx, ly + 1),
             (bx, gy, lx + dx * 2, ly),
-            (bx, gy + 1, lx + dx * 2, ly + 1),
             (bx, gy - 1, lx + dx * 2, ly - 1),
+            (nx, gy - 1, lx + dx, ly - 1),
         ];
         remaining = dump_into_air_dests(read, (gx, gy), &dests, dump, local);
     }
@@ -1127,12 +1118,12 @@ fn plan_skip_porous_column(
     ly: i32,
     dirs: [i32; 2],
     depth: i32,
-    sat: u8,
+    _sat: u8,
     mut remaining: i32,
     step: i32,
     local: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) -> i32 {
-    if depth < 2 && sat < SHEET_CLIMB_SAT {
+    if depth < 2 {
         return remaining;
     }
     for dx in dirs {

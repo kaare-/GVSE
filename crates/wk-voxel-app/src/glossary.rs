@@ -329,6 +329,7 @@ const WATER: &[(&str, LineKind)] = &[
     ("C already pays from humidity. N clouds do not hold water.", LineKind::Body),
     ("Thin films crawl. A piled dump goes over a dry column as a weir", LineKind::Body),
     ("into several cells — not a hairline trickle in front of a bump.", LineKind::Body),
+    ("Pond shores do not climb dry hillsides; only a stacked surge does.", LineKind::Body),
     ("Lake interiors still soak their beds; open surge faces do not", LineKind::Body),
     ("drink the column under them before the sheet moves.", LineKind::Body),
     ("Current washes dead stems and loose Organic downhill.", LineKind::Body),
