@@ -141,9 +141,28 @@ fn accumulate_seepage_xfers(
                     if cap_b == 0 {
                         continue;
                     }
-                    let move_amt = sat_move_to_equalize_heads(
+                    let mut move_amt = sat_move_to_equalize_heads(
                         a.sat.0, cap_a, gy, b.sat.0, cap_b, ny,
                     );
+                    // A persistent water column keeps infiltrating its bed
+                    // toward pore capacity. The pairwise head formula alone
+                    // stalls partially wet (~1/3 full in worldgen lakes).
+                    // Keep this in seepage so a moving deep surge only wets
+                    // the bed at the material permeability rate; gravity must
+                    // never empty the whole pore capacity in one pull.
+                    if dy == 1
+                        && a_solid
+                        && b.material == MaterialId::Air
+                        && !b.sat.is_empty()
+                        && matches!(
+                            read(lx + dx, ly + dy + 1, nx, ny + 1),
+                            Some(above)
+                                if above.material == MaterialId::Air && above.sat.0 >= 160
+                        )
+                    {
+                        let free = cap_a.saturating_sub(a.sat.0) as i32;
+                        move_amt = -(b.sat.0 as i32).min(free);
+                    }
                     if move_amt == 0 {
                         continue;
                     }

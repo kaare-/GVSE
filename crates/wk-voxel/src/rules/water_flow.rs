@@ -596,6 +596,27 @@ fn accumulate_water_flow_xfers(
                 let step = sheet_step_cap(depth);
                 let drain = drain_step_cap(depth);
 
+                // A deep pile needs pressure transport, not just a faster
+                // contour pixel. Pull several full donors from behind an
+                // exposed face into distinct dry Air cells ahead. Without
+                // this, only the boundary cell moved; the vacancy propagated
+                // backward one cell per later pass and left a giant wedge.
+                if depth >= 2
+                    && plan_pressure_fed_open_face(
+                        world,
+                        &read,
+                        gx,
+                        gy,
+                        lx,
+                        ly,
+                        dirs,
+                        depth,
+                        &mut local,
+                    )
+                {
+                    continue;
+                }
+
                 // --- Priority 1: diagonal-down into Air with room ---
                 // Shelf edge: (dx, y-1) is Air, so water can fall there.
                 for dx in dirs {
@@ -921,6 +942,104 @@ fn drain_step_cap(depth: i32) -> i32 {
         2 => 240,
         _ => 255,
     }
+}
+
+/// Number of full cells a deep exposed row can release in one pass.
+///
+/// This is a pressure shortcut for the snapshot transfer model. An
+/// incompressible row cannot otherwise shift into its newly opened face
+/// until the next scan, so a large body drains at one pixel per pass.
+const PRESSURE_FACE_SPAN: i32 = 6;
+
+/// Release a stacked row through an open lateral Air face.
+///
+/// Each donor behind the face gets a distinct destination ahead. This is
+/// equivalent to shifting the packed row toward its vacancy, but avoids
+/// ordering transfers through destinations that are full in the snapshot.
+fn plan_pressure_fed_open_face(
+    world: &World,
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+    dirs: [i32; 2],
+    depth: i32,
+    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
+) -> bool {
+    if depth < 2 {
+        return false;
+    }
+    for dx in dirs {
+        let side_x = world.wrap_x(gx + dx);
+        let Some(side) = read(lx + dx, ly, side_x, gy) else {
+            continue;
+        };
+        if side.material != MaterialId::Air || side.sat.is_full() {
+            continue;
+        }
+        let back_x = world.wrap_x(gx - dx);
+        if !matches!(
+            read(lx - dx, ly, back_x, gy),
+            Some(back) if back.material == MaterialId::Air && back.sat.0 >= 160
+        ) {
+            continue;
+        }
+
+        // If the row is open at both ends, each face owns its half.
+        // Otherwise both faces can claim the same donors from the read
+        // snapshot and whichever transfer commits first steals the whole
+        // body. For a long row the bounded scan simply takes SPAN.
+        let mut run = Vec::new();
+        let mut found_back_edge = false;
+        for n in 0..(PRESSURE_FACE_SPAN * 2) {
+            let sx = world.wrap_x(gx - dx * n);
+            let slx = lx - dx * n;
+            let Some(src) = read(slx, ly, sx, gy) else {
+                found_back_edge = true;
+                break;
+            };
+            if src.material != MaterialId::Air || src.sat.0 < 160 {
+                found_back_edge = true;
+                break;
+            }
+            run.push((sx, gy, src.sat.0 as i32));
+        }
+        let donor_limit = if found_back_edge {
+            (run.len() + 1) / 2
+        } else {
+            PRESSURE_FACE_SPAN as usize
+        };
+        let donors = &run[..run.len().min(donor_limit).min(PRESSURE_FACE_SPAN as usize)];
+
+        let mut dests = Vec::new();
+        for n in 1..=PRESSURE_FACE_SPAN {
+            let tx = world.wrap_x(gx + dx * n);
+            let tlx = lx + dx * n;
+            let Some(dst) = read(tlx, ly, tx, gy) else {
+                break;
+            };
+            if dst.material != MaterialId::Air {
+                break;
+            }
+            let free = u8::MAX.saturating_sub(dst.sat.0) as i32;
+            if free > 0 {
+                dests.push((tx, gy, free));
+            }
+        }
+
+        let count = donors.len().min(dests.len());
+        if count < 2 {
+            continue;
+        }
+        for i in 0..count {
+            let (sx, sy, available) = donors[i];
+            let (tx, ty, free) = dests[i];
+            local.push(((sx, sy), (tx, ty), available.min(free)));
+        }
+        return true;
+    }
+    false
 }
 
 /// How much sat a passing sheet soaks into the dry berm it climbs.

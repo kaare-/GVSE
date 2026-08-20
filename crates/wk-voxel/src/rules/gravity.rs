@@ -10,7 +10,7 @@ use crate::active::{partition_checkerboard, ActiveChunk};
 use crate::cell::{water_capacity_with, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
-use crate::parallel::{self, for_each_region_parallel};
+use crate::parallel::for_each_region_parallel;
 
 use super::plan::regions_for_standalone;
 
@@ -32,9 +32,10 @@ use super::plan::regions_for_standalone;
 /// - **Cross-chunk**: own + `cy + 1` via chunk-local indexing (same
 ///   write-set as [`parallel::pull_write_coords`]). Missing above
 ///   chunks yield no move.
-/// - **Air → porous solid** only for a walled pond or a stacked lake.
-///   A one-cell hillside sheet stays in Air; seepage splash-wets
-///   the bed. Instant pore-fill used the column ahead as a bucket.
+/// - **Air → porous solid** only for a laterally walled pond. Open
+///   surface water — including a deep surge — stays in Air; seepage
+///   wets the bed at the material's permeability rate. Treating any
+///   two-cell stack as a lake used every new hillside column as a bucket.
 ///
 /// This is intentionally the simplest possible fall model — one cell
 /// per invocation, no lateral spread, no density swap. Free-fall
@@ -108,8 +109,8 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 water_capacity_with(m, &hydro)
             }
         };
-        // Walled pond = solid on both sides. Stacked = another wet-Air
-        // cell above (a lake). A one-cell hillside sheet is neither.
+        // Only a genuinely walled pond gravity-fills pores. Depth cannot
+        // distinguish a settled lake from a moving surge: both are stacked.
         let walled_air = |lx: u8, ly_src: i32| -> bool {
             let solid = |nlx: i32| -> bool {
                 if nlx < 0 || nlx >= CHUNK_CELLS_W as i32 {
@@ -122,13 +123,6 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
             };
             solid(lx as i32 - 1) && solid(lx as i32 + 1)
         };
-        let stacked_air = |lx: u8, ly_src: i32| -> bool {
-            matches!(
-                read_xy(lx, ly_src + 1),
-                Some(c) if c.material == MaterialId::Air && c.sat.0 >= 160
-            )
-        };
-
         for x in ac.rect.x0..=ac.rect.x1 {
             let mut any_mobile = false;
             for y in ac.rect.y0..=ac.rect.y1 {
@@ -173,11 +167,11 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     next_cur = Some(above);
                     continue;
                 }
-                // Free water with a lateral Air neighbour stays in Air
-                // unless it is a walled pond or a stacked lake.
+                // Open free water stays in Air regardless of depth.
+                // Seepage owns gradual bed wetting.
                 if cur.material != MaterialId::Air && above.material == MaterialId::Air {
                     let src_y = y as i32 + 1;
-                    if !walled_air(x, src_y) && !stacked_air(x, src_y) {
+                    if !walled_air(x, src_y) {
                         next_cur = Some(above);
                         continue;
                     }

@@ -2523,6 +2523,39 @@ fn wide_sheet_does_not_gravity_fill_soil_bed() {
 }
 
 #[test]
+fn deep_surge_does_not_gravity_fill_soil_bed() {
+    // Depth is not proof of a settled lake. A tsunami has stacked Air
+    // too; gravity-filling its bed makes every dry column a tank that
+    // must fill before the front advances.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..10 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        for y in 2..=4 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    w.set_cell(4, 2, Cell::water());
+    w.set_cell(4, 3, Cell::water());
+    // Open downhill side: this is a moving surge, not a walled pond.
+    w.set_cell(3, 2, Cell::water());
+
+    apply_gravity_fall(&mut w);
+
+    assert_eq!(
+        w.get_cell(4, 1).unwrap().sat.0,
+        0,
+        "stacked open water must not gravity-fill the soil column"
+    );
+    assert_eq!(
+        w.get_cell(4, 2).unwrap().sat.0,
+        u8::MAX,
+        "surge mass must remain in free water for surface flow"
+    );
+}
+
+#[test]
 fn open_sheet_does_not_gravity_fill_dry_soil() {
     // Leading-edge film over dry soil — gravity must not drink it
     // into the pore column (that stalled hillside flow).
@@ -2662,6 +2695,93 @@ fn pile_against_dry_air_dumps_fat_sheet() {
     assert!(
         pile_after + 400 < pile_before,
         "pile must lose more than the top film (before={pile_before} after={pile_after})"
+    );
+}
+
+#[test]
+fn deep_pile_pressure_feeds_open_front() {
+    // A packed row is incompressible. Releasing only its exposed cell
+    // advances one pixel while leaving the whole pile behind as a bump.
+    // Pressure flow must shift several donors into distinct front cells.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..24 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        for y in 2..=5 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    for x in 4..=13 {
+        w.set_cell(x, 2, Cell::water());
+        w.set_cell(x, 3, Cell::water());
+    }
+
+    apply_water_flow(&mut w);
+
+    let pressure_row: i32 = (14..=19)
+        .map(|x| w.get_cell(x, 2).map(|c| c.sat.0 as i32).unwrap_or(0))
+        .sum();
+    let fat_cells = (14..=19)
+        .filter(|&x| w.get_cell(x, 2).map(|c| c.sat.0).unwrap_or(0) >= 160)
+        .count();
+    assert!(
+        pressure_row >= 5 * 160,
+        "deep pile must pressure-feed several front cells (sat={pressure_row})"
+    );
+    assert!(
+        fat_cells >= 5,
+        "front must be broad, not one escaping pixel (fat={fat_cells})"
+    );
+}
+
+#[test]
+fn deep_surge_crosses_dry_slope_without_column_buckets() {
+    // Interactive geometry: a deep dump lands on a dry porous ramp.
+    // Within a few FPS-biased ticks, bulk free water must move downhill
+    // while the traversed soil is only partially splash-wet.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..52 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        let top = 2 + x / 4;
+        for y in 1..=top {
+            w.set_cell(x, y, Cell::solid(MaterialId::Soil));
+        }
+        for y in (top + 1)..=24 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    for x in 28..=35 {
+        let top = 2 + x / 4;
+        for y in (top + 1)..=(top + 8) {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+
+    for _ in 0..3 {
+        tick_with_perf(&mut w, &PerfConfig::default());
+    }
+
+    let downhill_free: i32 = (18..28)
+        .flat_map(|x| (1..=24).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y))
+        .filter(|c| c.material == MaterialId::Air)
+        .map(|c| c.sat.0 as i32)
+        .sum();
+    let traversed_pores: i32 = (18..28)
+        .flat_map(|x| (1..=10).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y))
+        .filter(|c| c.material == MaterialId::Soil)
+        .map(|c| c.sat.0 as i32)
+        .sum();
+    assert!(
+        downhill_free >= 4 * 255,
+        "bulk surge must reach downhill Air quickly (free={downhill_free})"
+    );
+    assert!(
+        traversed_pores < 4 * water_capacity(MaterialId::Soil) as i32,
+        "front must not fill dry terrain columns first (pores={traversed_pores})"
     );
 }
 
