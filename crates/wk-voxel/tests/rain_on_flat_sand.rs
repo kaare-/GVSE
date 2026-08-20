@@ -38,7 +38,9 @@ fn rain_row_saturates_sand_over_one_tick() {
     }
 
     let sand_cap = water_capacity(MaterialId::Sand);
-    for x in 8..56 {
+    // Exclude the 8-cell dry-face classification halo at both ends in
+    // addition to the original edge margin.
+    for x in 16..48 {
         let sand = w.get_cell(x, 0).unwrap();
         let above = w.get_cell(x, 1).unwrap();
         assert!(
