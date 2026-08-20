@@ -2712,6 +2712,9 @@ fn deep_pile_pressure_feeds_open_front() {
             w.set_cell(x, y, Cell::air());
         }
     }
+    for x in 14..24 {
+        w.set_cell(x, 1, Cell::air());
+    }
     for x in 4..=13 {
         w.set_cell(x, 2, Cell::water());
         w.set_cell(x, 3, Cell::water());
@@ -2971,7 +2974,10 @@ fn beach_film_drains_into_ocean_not_inland() {
         w.set_cell(x, 3, Cell::solid(MaterialId::Sand));
     }
     w.set_cell(6, 3, Cell::water());
-    for _ in 0..8 {
+    // Open surge beds now wet through permeability-limited seepage
+    // instead of instant stacked gravity, so the receiving ocean row
+    // opens capacity gradually.
+    for _ in 0..16 {
         tick(&mut w);
     }
     assert_eq!(

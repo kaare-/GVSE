@@ -32,10 +32,9 @@ use super::plan::regions_for_standalone;
 /// - **Cross-chunk**: own + `cy + 1` via chunk-local indexing (same
 ///   write-set as [`parallel::pull_write_coords`]). Missing above
 ///   chunks yield no move.
-/// - **Air → porous solid** only for a laterally walled pond. Open
-///   surface water — including a deep surge — stays in Air; seepage
-///   wets the bed at the material's permeability rate. Treating any
-///   two-cell stack as a lake used every new hillside column as a bucket.
+/// - **Air → porous solid** for a laterally walled pond or the interior
+///   of a stacked lake. A stacked column near a dry lateral escape is a
+///   moving surge and stays in Air; seepage only splash-wets its bed.
 ///
 /// This is intentionally the simplest possible fall model — one cell
 /// per invocation, no lateral spread, no density swap. Free-fall
@@ -109,8 +108,8 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 water_capacity_with(m, &hydro)
             }
         };
-        // Only a genuinely walled pond gravity-fills pores. Depth cannot
-        // distinguish a settled lake from a moving surge: both are stacked.
+        // A stacked column is lake-like only away from a dry lateral face.
+        // Depth by itself cannot distinguish a lake from a moving surge.
         let walled_air = |lx: u8, ly_src: i32| -> bool {
             let solid = |nlx: i32| -> bool {
                 if nlx < 0 || nlx >= CHUNK_CELLS_W as i32 {
@@ -122,6 +121,32 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 }
             };
             solid(lx as i32 - 1) && solid(lx as i32 + 1)
+        };
+        let stacked_air = |lx: u8, ly_src: i32| -> bool {
+            matches!(
+                read_xy(lx, ly_src + 1),
+                Some(c) if c.material == MaterialId::Air && c.sat.0 >= 160
+            )
+        };
+        let has_dry_lateral_escape = |lx: u8, ly_src: i32| -> bool {
+            const ESCAPE_SCAN: i32 = 8;
+            for dx in [-1_i32, 1] {
+                for n in 1..=ESCAPE_SCAN {
+                    let nx = lx as i32 + dx * n;
+                    // Horizontal neighbour chunks are outside gravity's
+                    // write-pointer set. Treat an unknown seam as open so
+                    // a surge is never accidentally bucketed at a seam.
+                    if nx < 0 || nx >= CHUNK_CELLS_W as i32 {
+                        return true;
+                    }
+                    match read_xy(nx as u8, ly_src) {
+                        Some(c) if c.material == MaterialId::Air && c.sat.0 < 32 => return true,
+                        Some(c) if c.material == MaterialId::Air => {}
+                        _ => break,
+                    }
+                }
+            }
+            false
         };
         for x in ac.rect.x0..=ac.rect.x1 {
             let mut any_mobile = false;
@@ -167,11 +192,14 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     next_cur = Some(above);
                     continue;
                 }
-                // Open free water stays in Air regardless of depth.
-                // Seepage owns gradual bed wetting.
+                // Walled ponds and stacked lake interiors may fill pores
+                // directly. A stack near dry Air is an advancing surge:
+                // keep its mass free for lateral flow.
                 if cur.material != MaterialId::Air && above.material == MaterialId::Air {
                     let src_y = y as i32 + 1;
-                    if !walled_air(x, src_y) {
+                    let settled_stack =
+                        stacked_air(x, src_y) && !has_dry_lateral_escape(x, src_y);
+                    if !walled_air(x, src_y) && !settled_stack {
                         next_cur = Some(above);
                         continue;
                     }

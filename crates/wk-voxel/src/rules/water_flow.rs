@@ -978,6 +978,31 @@ fn plan_pressure_fed_open_face(
         if side.material != MaterialId::Air || side.sat.is_full() {
             continue;
         }
+        // Pressure-release only through a downhill / freefall face.
+        // Horizontal dry pockets also occur in closed basins, pipes,
+        // and communicating vessels; treating those as surge fronts
+        // pumps settled water out of its container.
+        if !matches!(
+            read(lx + dx, ly - 1, side_x, gy - 1),
+            Some(below) if below.material == MaterialId::Air && !below.sat.is_full()
+        ) {
+            continue;
+        }
+        // Require a genuinely open downhill runway, not a one/two-cell
+        // shaft or pipe cavity.
+        let open_runway = (1..=3).all(|n| {
+            let tx = world.wrap_x(gx + dx * n);
+            matches!(
+                read(lx + dx * n, ly, tx, gy),
+                Some(c) if c.material == MaterialId::Air && !c.sat.is_full()
+            ) && matches!(
+                read(lx + dx * n, ly - 1, tx, gy - 1),
+                Some(c) if c.material == MaterialId::Air && !c.sat.is_full()
+            )
+        });
+        if !open_runway {
+            continue;
+        }
         let back_x = world.wrap_x(gx - dx);
         if !matches!(
             read(lx - dx, ly, back_x, gy),
