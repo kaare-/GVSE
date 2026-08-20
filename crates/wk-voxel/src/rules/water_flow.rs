@@ -705,12 +705,13 @@ fn accumulate_water_flow_xfers(
                         );
                     }
 
-                    // --- Priority 3c: sheet / tsunami overtop ---
-                    // Trickles still soak a dry berm. A full film or a
-                    // stacked surge climbs onto (and wets) the bump,
-                    // or skates Air over an unsaturated bed.
+                    // --- Priority 3c: porous-face dividend ---
+                    // Facing a dry/porous column: absorb a material-rate
+                    // share into the contact cell; any leftover may spill
+                    // over the crest only when this column already has
+                    // water at/above that crest height (hydraulic head).
                     if remaining > 0 {
-                        remaining = plan_overtop_dry_ground(
+                        remaining = plan_porous_face_dividend(
                             world,
                             &read,
                             gx,
@@ -718,40 +719,6 @@ fn accumulate_water_flow_xfers(
                             lx,
                             ly,
                             dirs,
-                            depth,
-                            cur.sat.0,
-                            remaining,
-                            step,
-                            &mut local,
-                        );
-                    }
-                    if remaining > 0 {
-                        remaining = plan_sheet_over_dry_bed(
-                            world,
-                            &read,
-                            gx,
-                            gy,
-                            lx,
-                            ly,
-                            dirs,
-                            depth,
-                            cur.sat.0,
-                            remaining,
-                            step,
-                            &mut local,
-                        );
-                    }
-                    if remaining > 0 {
-                        remaining = plan_skip_porous_column(
-                            world,
-                            &read,
-                            gx,
-                            gy,
-                            lx,
-                            ly,
-                            dirs,
-                            depth,
-                            cur.sat.0,
                             remaining,
                             step,
                             &mut local,
@@ -923,50 +890,15 @@ fn drain_step_cap(depth: i32) -> i32 {
     }
 }
 
-/// How much sat a passing sheet soaks into the dry berm it climbs.
-const OVERTOP_BERM_SOAK: i32 = 24;
-
-/// Push `remaining` into Air dests until the source is empty or dests are full.
-fn dump_into_air_dests(
-    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
-    from: (i32, i32),
-    dests: &[(i32, i32, i32, i32)], // nx, ny, nlx, nly
-    mut remaining: i32,
-    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
-) -> i32 {
-    let mut seen: Vec<(i32, i32)> = Vec::new();
-    for &(nx, ny, nlx, nly) in dests {
-        if remaining <= 0 {
-            break;
-        }
-        if seen.contains(&(nx, ny)) {
-            continue;
-        }
-        seen.push((nx, ny));
-        let Some(c) = read(nlx, nly, nx, ny) else {
-            continue;
-        };
-        if c.material != MaterialId::Air {
-            continue;
-        }
-        let free = u8::MAX.saturating_sub(c.sat.0) as i32;
-        let amt = remaining.min(free);
-        if amt > 0 {
-            local.push((from, (nx, ny), amt));
-            remaining -= amt;
-        }
-    }
-    remaining
-}
-
-/// Sheet / surge climbs a dry solid berm and dumps over the weir
-/// into several Air cells (crest, stacked overflow, beyond, downhill).
+/// Porous-face dividend: soak by material, spill leftover only with head.
 ///
-/// Only a **stacked** body (`depth >= 2`) may climb upward. A lone full
-/// film on a pond shore used to overtop every dry hillside step, so the
-/// lake surface thrashed and crept uphill. Lone films only splash-wet
-/// the contact face.
-fn plan_overtop_dry_ground(
+/// Facing a dry/porous solid (not Air/Organic):
+/// 1. Absorb up to the material seepage rate into the contact cell.
+/// 2. Leftover may spill into Air at the column crest — only when *this*
+///    source cell sits at or above that crest (`gy >= crest_y`). Mass and
+///    `step` (speed proxy) cap how much passes; a pond film below a berm
+///    never invents head to climb the hillside.
+fn plan_porous_face_dividend(
     world: &World,
     read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
     gx: i32,
@@ -974,205 +906,69 @@ fn plan_overtop_dry_ground(
     lx: i32,
     ly: i32,
     dirs: [i32; 2],
-    depth: i32,
-    _sat: u8,
-    mut remaining: i32,
-    _step: i32,
-    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
-) -> i32 {
-    let can_climb = depth >= 2;
-    for dx in dirs {
-        if remaining <= 0 {
-            break;
-        }
-        let nx = world.wrap_x(gx + dx);
-        let Some(side) = read(lx + dx, ly, nx, gy) else {
-            continue;
-        };
-        if side.material == MaterialId::Air {
-            continue;
-        }
-        if can_climb {
-            let mut dests: Vec<(i32, i32, i32, i32)> = Vec::new();
-            let mut crest: Option<i32> = None;
-            for dy in 1..=10 {
-                let Some(above) = read(lx + dx, ly + dy, nx, gy + dy) else {
-                    break;
-                };
-                if above.material != MaterialId::Air {
-                    continue;
-                }
-                if crest.is_none() {
-                    crest = Some(gy + dy);
-                }
-                dests.push((nx, gy + dy, lx + dx, ly + dy));
-                if dests.len() >= 4 {
-                    break;
-                }
-            }
-            if let Some(cy) = crest {
-                let bx = world.wrap_x(nx + dx);
-                for dy in 0..=3 {
-                    dests.push((bx, cy + dy, lx + dx * 2, ly + (cy - gy) + dy));
-                }
-                dests.push((bx, cy - 1, lx + dx * 2, ly + (cy - gy) - 1));
-                if gy > cy {
-                    dests.push((nx, gy, lx + dx, ly));
-                    dests.push((bx, gy, lx + dx * 2, ly));
-                }
-            }
-            if !dests.is_empty() {
-                let rot = (gy.unsigned_abs() as usize) % dests.len();
-                dests.rotate_left(rot);
-                let before = remaining;
-                remaining = dump_into_air_dests(read, (gx, gy), &dests, remaining, local);
-                if remaining < before {
-                    continue;
-                }
-            }
-        }
-        // Could not get over — splash the contact face only.
-        let cap = water_capacity_with(side.material, &world.hydro) as i32;
-        if cap > 0 {
-            let free = cap - side.sat.0 as i32;
-            let soak = remaining.min(free.max(0)).min(OVERTOP_BERM_SOAK);
-            if soak > 0 {
-                local.push(((gx, gy), (nx, gy), soak));
-                remaining -= soak;
-            }
-        }
-    }
-    remaining
-}
-
-/// Full sheet / surge skates onto Air over an unsaturated solid bed.
-///
-/// Pairwise equalise already leaks a little into that Air, but gravity
-/// used to drink it into the pore column. Push a real step so the
-/// front advances without waiting for the whole stack to fill.
-fn plan_sheet_over_dry_bed(
-    world: &World,
-    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
-    gx: i32,
-    gy: i32,
-    lx: i32,
-    ly: i32,
-    dirs: [i32; 2],
-    depth: i32,
-    _sat: u8,
-    mut remaining: i32,
-    _step: i32,
-    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
-) -> i32 {
-    // Lone pond films must not skate onto dry shelves (and especially
-    // not into gy+1), or the free surface creeps uphill every tick.
-    if depth < 2 {
-        return remaining;
-    }
-    for dx in dirs {
-        if remaining <= 0 {
-            break;
-        }
-        let nx = world.wrap_x(gx + dx);
-        let Some(side) = read(lx + dx, ly, nx, gy) else {
-            continue;
-        };
-        if side.material != MaterialId::Air {
-            continue;
-        }
-        let Some(bed) = read(lx + dx, ly - 1, nx, gy - 1) else {
-            continue;
-        };
-        if bed.material == MaterialId::Air {
-            continue;
-        }
-        let cap = water_capacity_with(bed.material, &world.hydro) as i32;
-        if cap <= 0 || bed.sat.0 as i32 >= cap {
-            continue;
-        }
-        let dump = remaining;
-        let bx = world.wrap_x(nx + dx);
-        // Same-Y / downhill only — never gy+1 (uphill creep).
-        let dests = [
-            (nx, gy, lx + dx, ly),
-            (bx, gy, lx + dx * 2, ly),
-            (bx, gy - 1, lx + dx * 2, ly - 1),
-            (nx, gy - 1, lx + dx, ly - 1),
-        ];
-        remaining = dump_into_air_dests(read, (gx, gy), &dests, dump, local);
-    }
-    remaining
-}
-
-/// How far a surge may skip through dry porous cells in one pass.
-const POROUS_SKIP_SPAN: i32 = 4;
-
-/// Surge punches through a short dry soil/sand stack into Air beyond
-/// without filling the stack.
-fn plan_skip_porous_column(
-    world: &World,
-    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
-    gx: i32,
-    gy: i32,
-    lx: i32,
-    ly: i32,
-    dirs: [i32; 2],
-    depth: i32,
-    _sat: u8,
     mut remaining: i32,
     step: i32,
     local: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) -> i32 {
-    if depth < 2 {
-        return remaining;
-    }
     for dx in dirs {
         if remaining <= 0 {
             break;
         }
-        let mut x = world.wrap_x(gx + dx);
-        let mut clx = lx + dx;
-        let Some(first) = read(clx, ly, x, gy) else {
+        let nx = world.wrap_x(gx + dx);
+        let Some(side) = read(lx + dx, ly, nx, gy) else {
             continue;
         };
-        if first.material == MaterialId::Air || first.material == MaterialId::Organic {
+        if side.material == MaterialId::Air || side.material == MaterialId::Organic {
             continue;
         }
-        if water_capacity_with(first.material, &world.hydro) == 0 {
+        let cap = water_capacity_with(side.material, &world.hydro) as i32;
+        if cap <= 0 {
             continue;
         }
-        let mut span = 0i32;
-        let mut exit: Option<(i32, i32, i32)> = None;
-        loop {
-            span += 1;
-            if span > POROUS_SKIP_SPAN {
-                break;
-            }
-            let nx = world.wrap_x(x + dx);
-            let nlx = clx + dx;
-            let Some(c) = read(nlx, ly, nx, gy) else {
-                break;
-            };
-            if c.material != MaterialId::Air {
-                if water_capacity_with(c.material, &world.hydro) == 0 {
-                    break;
-                }
-                x = nx;
-                clx = nlx;
-                continue;
-            }
-            let free = u8::MAX.saturating_sub(c.sat.0) as i32;
-            if free > 0 {
-                exit = Some((nx, gy, free));
-            }
+
+        // 1) Material dividend — absorb this much into the column per tick.
+        let soak_rate = seepage_rate_with(side.material, &world.hydro);
+        let free = (cap - side.sat.0 as i32).max(0);
+        let soak = remaining.min(free).min(soak_rate);
+        if soak > 0 {
+            local.push(((gx, gy), (nx, gy), soak));
+            remaining -= soak;
+        }
+        if remaining <= 0 {
             break;
         }
-        if let Some((tx, ty, free)) = exit {
-            let amt = remaining.min(free).min(step);
-            if amt > 0 {
-                local.push(((gx, gy), (tx, ty), amt));
-                remaining -= amt;
+
+        // 2) Crest Air above the solid face in that column.
+        let mut crest: Option<(i32, i32, i32, i32)> = None; // nx, ny, nlx, nly
+        for dy in 1..=8 {
+            let Some(above) = read(lx + dx, ly + dy, nx, gy + dy) else {
+                break;
+            };
+            if above.material != MaterialId::Air {
+                continue;
             }
+            crest = Some((nx, gy + dy, lx + dx, ly + dy));
+            break;
+        }
+        let Some((cx, cy, clx, cly)) = crest else {
+            continue;
+        };
+
+        // Head: only water that is already at/above the crest overflows.
+        // (Do not use free-surface scan — that lets ponds stair-climb.)
+        if gy < cy {
+            continue;
+        }
+
+        let Some(crest_cell) = read(clx, cly, cx, cy) else {
+            continue;
+        };
+        let free_air = u8::MAX.saturating_sub(crest_cell.sat.0) as i32;
+        // Overflow share: leftover mass, capped by step (speed).
+        let overflow = remaining.min(free_air).min(step.max(soak_rate));
+        if overflow > 0 {
+            local.push(((gx, gy), (cx, cy), overflow));
+            remaining -= overflow;
         }
     }
     remaining
