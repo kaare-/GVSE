@@ -527,15 +527,21 @@ fn accumulate_water_flow_xfers(
                 let gx = world.wrap_x(base_gx + lx);
                 // Ocean-body fast path: a full-sat Air with a full-sat Air
                 // directly above is a **buried** water cell, not a free
-                // surface. Priorities 1–4 are all no-ops in that geometry
-                // (diagonal, cascade, equalise, throughflow neighbours are
-                // all full water / non-porous). Skipping avoids ~10 reads
-                // and up-to-12-cell same-Y look-ahead per ocean interior
-                // cell × 12 substeps.
+                // surface — unless it sits against a solid face (weir).
+                // Skipping those dam-face cells left a huge bump with
+                // only the top film trickling over.
                 if cur.sat.is_full() {
                     let above = read(lx, ly + 1, gx, gy + 1);
-                    if matches!(above, Some(a) if a.material == MaterialId::Air && a.sat.is_full()) {
-                        continue;
+                    if matches!(above, Some(a) if a.material == MaterialId::Air && a.sat.is_full())
+                    {
+                        let left = read(lx - 1, ly, world.wrap_x(gx - 1), gy);
+                        let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
+                        let against_solid = |c: Option<Cell>| {
+                            matches!(c, Some(n) if n.material != MaterialId::Air)
+                        };
+                        if !against_solid(left) && !against_solid(right) {
+                            continue;
+                        }
                     }
                 }
                 // Below tells us whether we're on a "surface" (below is
