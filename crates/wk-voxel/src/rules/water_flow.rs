@@ -527,19 +527,20 @@ fn accumulate_water_flow_xfers(
                 let gx = world.wrap_x(base_gx + lx);
                 // Ocean-body fast path: a full-sat Air with a full-sat Air
                 // directly above is a **buried** water cell, not a free
-                // surface — unless it sits against a solid face (weir).
-                // Skipping those dam-face cells left a huge bump with
-                // only the top film trickling over.
+                // surface — unless it has an open face. A solid weir or
+                // dry / partial Air (the next hillside column) must run:
+                // treating only solids as faces left a huge bump against
+                // dry Air with a hairline film on top.
                 if cur.sat.is_full() {
                     let above = read(lx, ly + 1, gx, gy + 1);
                     if matches!(above, Some(a) if a.material == MaterialId::Air && a.sat.is_full())
                     {
                         let left = read(lx - 1, ly, world.wrap_x(gx - 1), gy);
                         let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
-                        let against_solid = |c: Option<Cell>| {
-                            matches!(c, Some(n) if n.material != MaterialId::Air)
+                        let closed = |c: Option<Cell>| {
+                            matches!(c, Some(n) if n.material == MaterialId::Air && n.sat.is_full())
                         };
-                        if !against_solid(left) && !against_solid(right) {
+                        if closed(left) && closed(right) {
                             continue;
                         }
                     }
@@ -1028,10 +1029,13 @@ fn plan_overtop_dry_ground(
         if dests.is_empty() {
             // fall through to splash
         } else {
-            // Spread sources across dests so the whole pile does not
-            // funnel into one 255-sat crest cell.
-            let rot = (gy.unsigned_abs() as usize) % dests.len();
-            dests.rotate_left(rot);
+            // Stacked rows would all hit the same crest cell; rotate
+            // those. A lone film keeps crest-first order so it does
+            // not skip the berm and look like a hairline.
+            if depth >= 2 {
+                let rot = (gy.unsigned_abs() as usize) % dests.len();
+                dests.rotate_left(rot);
+            }
             let before = remaining;
             remaining = dump_into_air_dests(read, (gx, gy), &dests, remaining.min(dump), local);
             if remaining < before {

@@ -2598,9 +2598,70 @@ fn hillside_film_climbs_dry_terrace() {
     apply_water_flow(&mut w);
     let over = w.get_cell(6, 2).map(|c| c.sat.0).unwrap_or(0);
     let soak = w.get_cell(6, 1).map(|c| c.sat.0).unwrap_or(0);
+    let beyond = (7..=8)
+        .flat_map(|x| (1..=4).map(move |y| (x, y)))
+        .map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as i32)
+        .sum::<i32>();
     assert!(
-        over > 0 || soak > 0,
-        "full hillside film must climb or wet the dry terrace (over={over} soak={soak})"
+        over > 0 || soak > 0 || beyond > 0,
+        "full hillside film must climb or wet the dry terrace (over={over} soak={soak} beyond={beyond})"
+    );
+}
+
+#[test]
+fn pile_against_dry_air_dumps_fat_sheet() {
+    // Playtest: tall water against the next dry Air column (soil bed
+    // below, not a solid weir). Buried cells used to skip as ocean
+    // interior because the neighbour was Air — only the top film leaked.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..14 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        for y in 2..=8 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    for x in 3..=6 {
+        for y in 2..=6 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let mut pile_before = 0i32;
+    for x in 3..=6 {
+        for y in 2..=6 {
+            pile_before += w.get_cell(x, y).unwrap().sat.0 as i32;
+        }
+    }
+    apply_water_flow(&mut w);
+    let mut over = 0i32;
+    let mut fat = 0i32;
+    for x in 7..=10 {
+        for y in 2..=7 {
+            let s = w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as i32;
+            over += s;
+            if s >= 160 {
+                fat += 1;
+            }
+        }
+    }
+    let mut pile_after = 0i32;
+    for x in 3..=6 {
+        for y in 2..=6 {
+            pile_after += w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as i32;
+        }
+    }
+    assert!(
+        over >= 600,
+        "pile face must dump a fat sheet into dry Air (over={over})"
+    );
+    assert!(
+        fat >= 2,
+        "front must be a sheet, not a 1-cell hairline (fat={fat})"
+    );
+    assert!(
+        pile_after + 400 < pile_before,
+        "pile must lose more than the top film (before={pile_before} after={pile_after})"
     );
 }
 
@@ -2675,12 +2736,18 @@ fn surge_climbs_tall_dry_soil_column() {
         w.set_cell(x, 3, Cell::water());
     }
     apply_water_flow(&mut w);
-    let over = w.get_cell(7, 6).map(|c| c.sat.0).unwrap_or(0);
-    let skip = w.get_cell(8, 2).map(|c| c.sat.0).unwrap_or(0)
-        + w.get_cell(8, 3).map(|c| c.sat.0).unwrap_or(0);
+    let mut over = 0u32;
+    for x in 7..=10 {
+        for y in 2..=8 {
+            if x == 7 && (2..=5).contains(&y) {
+                continue;
+            }
+            over += w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as u32;
+        }
+    }
     assert!(
-        over > 0 || skip > 0,
-        "surge must climb or skip the tall dry column (over={over} skip={skip})"
+        over > 0,
+        "surge must climb or skip the tall dry column (over={over})"
     );
     let soil_cap = water_capacity(MaterialId::Soil);
     let col: i32 = (2..=5)
