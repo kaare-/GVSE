@@ -328,7 +328,7 @@ const WATER: &[(&str, LineKind)] = &[
     ("that were not in the ocean or the air. Keep W closed-loop.", LineKind::Body),
     ("C already pays from humidity. N clouds do not hold water.", LineKind::Body),
     ("Thin films crawl and soak dry ground. A full sheet or stacked", LineKind::Body),
-    ("surge skates over a dry column, splash-wets it, and keeps going.", LineKind::Body),
+    ("surge climbs or skips a dry column — it does not fill it first.", LineKind::Body),
     ("Current washes dead stems and loose Organic downhill.", LineKind::Body),
     ("", LineKind::Blank),
     ("Words", LineKind::Head),

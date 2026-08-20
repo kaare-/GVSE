@@ -32,11 +32,10 @@ use super::plan::regions_for_standalone;
 /// - **Cross-chunk**: own + `cy + 1` via chunk-local indexing (same
 ///   write-set as [`parallel::pull_write_coords`]). Missing above
 ///   chunks yield no move.
-/// - **Air → porous solid** only when the source water is ponded
-///   (walled or beside more standing water). An open-slope sheet
-///   stays in Air; seepage splash-wets the bed. Instant
-///   pore-fill used to drink a hillside front into the dry column
-///   before it could flow on.
+/// - **Air → porous solid** only when the source water is walled
+///   (solid on both sides). A sheet of wet Air stays in Air;
+///   seepage splash-wets the bed. Instant pore-fill used the
+///   column ahead as a bucket.
 ///
 /// This is intentionally the simplest possible fall model — one cell
 /// per invocation, no lateral spread, no density swap. Free-fall
@@ -110,24 +109,20 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 water_capacity_with(m, &hydro)
             }
         };
-        // Ponded = no lateral escape at the source row (wall or more
-        // standing water). Open-slope sheets must not be drunk into
-        // the pore column or the front stalls until the whole stack
-        // saturates.
-        let ponded_air = |lx: u8, ly_src: i32| -> bool {
-            // Escape = dry Air a sheet can run into. Partial leftover
-            // after a neighbour soaked (e.g. 255−180) is not an escape
-            // or checkerboard rain-on-sand would stop mid-row.
-            let escape = |nlx: i32| -> bool {
+        // Walled pond = solid on both sides. A sheet of wet Air is
+        // not a pond — treating it as one dumped the middle of a
+        // hillside front into the dry column (the "bucket").
+        let walled_air = |lx: u8, ly_src: i32| -> bool {
+            let solid = |nlx: i32| -> bool {
                 if nlx < 0 || nlx >= CHUNK_CELLS_W as i32 {
-                    return false;
+                    return true;
                 }
-                matches!(
-                    read_xy(nlx as u8, ly_src),
-                    Some(c) if c.material == MaterialId::Air && c.sat.0 < 32
-                )
+                match read_xy(nlx as u8, ly_src) {
+                    None => true,
+                    Some(c) => c.material != MaterialId::Air,
+                }
             };
-            !escape(lx as i32 - 1) && !escape(lx as i32 + 1)
+            solid(lx as i32 - 1) && solid(lx as i32 + 1)
         };
 
         for x in ac.rect.x0..=ac.rect.x1 {
@@ -174,13 +169,11 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     next_cur = Some(above);
                     continue;
                 }
-                // Free water on an open slope stays in Air. Instant
-                // pore-fill made a hillside sheet vanish into the dry
-                // column ahead. Ponded water (walled / beside more
-                // water) still soaks the bed in one pull.
+                // Free water with a lateral Air neighbour stays in Air.
+                // Only a walled pond soaks the bed in one pull.
                 if cur.material != MaterialId::Air
                     && above.material == MaterialId::Air
-                    && !ponded_air(x, y as i32 + 1)
+                    && !walled_air(x, y as i32 + 1)
                 {
                     next_cur = Some(above);
                     continue;

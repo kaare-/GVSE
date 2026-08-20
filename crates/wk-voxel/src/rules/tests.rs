@@ -2494,6 +2494,35 @@ fn thin_film_does_not_overtop_dry_berm() {
 }
 
 #[test]
+fn wide_sheet_does_not_gravity_fill_soil_bed() {
+    // Three full water cells on dry soil — the middle used to count as
+    // ponded and dump into the bed (column-as-bucket).
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..10 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        w.set_cell(x, 2, Cell::air());
+    }
+    for x in 3..=5 {
+        w.set_cell(x, 2, Cell::water());
+    }
+    apply_gravity_fall(&mut w);
+    for x in 3..=5 {
+        assert_eq!(
+            w.get_cell(x, 2).unwrap().sat.0,
+            u8::MAX,
+            "sheet cell x={x} must stay in Air"
+        );
+        assert_eq!(
+            w.get_cell(x, 1).unwrap().sat.0,
+            0,
+            "soil under a wet-Air sheet must not gravity-fill (x={x})"
+        );
+    }
+}
+
+#[test]
 fn open_sheet_does_not_gravity_fill_dry_soil() {
     // Leading-edge film over dry soil — gravity must not drink it
     // into the pore column (that stalled hillside flow).
@@ -2541,6 +2570,44 @@ fn hillside_film_climbs_dry_terrace() {
     assert!(
         over > 0 || soak > 0,
         "full hillside film must climb or wet the dry terrace (over={over} soak={soak})"
+    );
+}
+
+#[test]
+fn surge_climbs_tall_dry_soil_column() {
+    // Stacked water against a tall dry soil stack. Must climb to Air
+    // above the stack, not fill the stack like a bucket.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..12 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        for y in 2..=7 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    for y in 2..=5 {
+        w.set_cell(7, y, Cell::solid(MaterialId::Soil));
+    }
+    for x in 4..=6 {
+        w.set_cell(x, 2, Cell::water());
+        w.set_cell(x, 3, Cell::water());
+    }
+    apply_water_flow(&mut w);
+    let over = w.get_cell(7, 6).map(|c| c.sat.0).unwrap_or(0);
+    let skip = w.get_cell(8, 2).map(|c| c.sat.0).unwrap_or(0)
+        + w.get_cell(8, 3).map(|c| c.sat.0).unwrap_or(0);
+    assert!(
+        over > 0 || skip > 0,
+        "surge must climb or skip the tall dry column (over={over} skip={skip})"
+    );
+    let soil_cap = water_capacity(MaterialId::Soil);
+    let col: i32 = (2..=5)
+        .map(|y| w.get_cell(7, y).map(|c| c.sat.0).unwrap_or(0) as i32)
+        .sum();
+    assert!(
+        col < soil_cap as i32 * 2,
+        "tall dry column must not fill before water passes (col={col})"
     );
 }
 

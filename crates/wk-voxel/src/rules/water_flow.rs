@@ -735,6 +735,22 @@ fn accumulate_water_flow_xfers(
                             &mut local,
                         );
                     }
+                    if remaining > 0 {
+                        remaining = plan_skip_porous_column(
+                            world,
+                            &read,
+                            gx,
+                            gy,
+                            lx,
+                            ly,
+                            dirs,
+                            depth,
+                            cur.sat.0,
+                            remaining,
+                            step,
+                            &mut local,
+                        );
+                    }
                 }
 
                 // --- Priority 3b: pairwise +x standing equalise ---
@@ -918,7 +934,7 @@ fn plan_overtop_dry_ground(
     local: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) -> i32 {
     let can_climb = depth >= 2 || sat >= SHEET_CLIMB_SAT;
-    let can_skip = depth >= 2;
+    let can_skip = depth >= 2 || sat >= SHEET_CLIMB_SAT;
     if !can_climb {
         return remaining;
     }
@@ -933,7 +949,29 @@ fn plan_overtop_dry_ground(
         if side.material == MaterialId::Air {
             continue;
         }
-        // Splash-wet the berm (partial saturate) then flow on.
+        // Climb the solid face to the first Air — a tall dry column
+        // is a hillside, not a bucket to fill.
+        let mut climbed = false;
+        for dy in 1..=8 {
+            let Some(above) = read(lx + dx, ly + dy, nx, gy + dy) else {
+                break;
+            };
+            if above.material != MaterialId::Air {
+                continue;
+            }
+            let free = u8::MAX.saturating_sub(above.sat.0) as i32;
+            let amt = remaining.min(free).min(step);
+            if amt > 0 {
+                local.push(((gx, gy), (nx, gy + dy), amt));
+                remaining -= amt;
+                climbed = true;
+            }
+            break;
+        }
+        if climbed {
+            continue;
+        }
+        // Could not get over — splash the contact face only.
         let cap = water_capacity_with(side.material, &world.hydro) as i32;
         if cap > 0 {
             let free = cap - side.sat.0 as i32;
@@ -943,25 +981,10 @@ fn plan_overtop_dry_ground(
                 remaining -= soak;
             }
         }
-        if remaining <= 0 {
-            break;
-        }
-        // Climb onto the berm (sheet flow over dry ground).
-        if let Some(above) = read(lx + dx, ly + 1, nx, gy + 1) {
-            if above.material == MaterialId::Air {
-                let free = u8::MAX.saturating_sub(above.sat.0) as i32;
-                let amt = remaining.min(free).min(step);
-                if amt > 0 {
-                    local.push(((gx, gy), (nx, gy + 1), amt));
-                    remaining -= amt;
-                    continue;
-                }
-            }
-        }
-        // Stacked surge can skip the one-cell berm into Air beyond.
-        if !can_skip {
+        if remaining <= 0 || !can_skip {
             continue;
         }
+        // Stacked surge can skip the one-cell berm into Air beyond.
         let bx = world.wrap_x(nx + dx);
         if let Some(beyond) = read(lx + dx * 2, ly, bx, gy) {
             if beyond.material == MaterialId::Air {
@@ -1038,6 +1061,80 @@ fn plan_sheet_over_dry_bed(
                     local.push(((gx, gy), (bx, gy), amt));
                     remaining -= amt;
                 }
+            }
+        }
+    }
+    remaining
+}
+
+/// How far a surge may skip through dry porous cells in one pass.
+const POROUS_SKIP_SPAN: i32 = 4;
+
+/// Surge punches through a short dry soil/sand stack into Air beyond
+/// without filling the stack.
+fn plan_skip_porous_column(
+    world: &World,
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+    dirs: [i32; 2],
+    depth: i32,
+    sat: u8,
+    mut remaining: i32,
+    step: i32,
+    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
+) -> i32 {
+    if depth < 2 && sat < SHEET_CLIMB_SAT {
+        return remaining;
+    }
+    for dx in dirs {
+        if remaining <= 0 {
+            break;
+        }
+        let mut x = world.wrap_x(gx + dx);
+        let mut clx = lx + dx;
+        let Some(first) = read(clx, ly, x, gy) else {
+            continue;
+        };
+        if first.material == MaterialId::Air || first.material == MaterialId::Organic {
+            continue;
+        }
+        if water_capacity_with(first.material, &world.hydro) == 0 {
+            continue;
+        }
+        let mut span = 0i32;
+        let mut exit: Option<(i32, i32, i32)> = None;
+        loop {
+            span += 1;
+            if span > POROUS_SKIP_SPAN {
+                break;
+            }
+            let nx = world.wrap_x(x + dx);
+            let nlx = clx + dx;
+            let Some(c) = read(nlx, ly, nx, gy) else {
+                break;
+            };
+            if c.material != MaterialId::Air {
+                if water_capacity_with(c.material, &world.hydro) == 0 {
+                    break;
+                }
+                x = nx;
+                clx = nlx;
+                continue;
+            }
+            let free = u8::MAX.saturating_sub(c.sat.0) as i32;
+            if free > 0 {
+                exit = Some((nx, gy, free));
+            }
+            break;
+        }
+        if let Some((tx, ty, free)) = exit {
+            let amt = remaining.min(free).min(step);
+            if amt > 0 {
+                local.push(((gx, gy), (tx, ty), amt));
+                remaining -= amt;
             }
         }
     }

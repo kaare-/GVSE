@@ -4,6 +4,8 @@
 //!
 //! Permeability-limited pore soak.
 
+use wk_material::MaterialId;
+
 use crate::active::ActiveChunk;
 use crate::cell::{water_capacity_with, Cell, Sat};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
@@ -166,6 +168,31 @@ fn accumulate_seepage_xfers(
                             rate
                         }
                     };
+                    // A column face is not a bucket. Lateral Air→solid
+                    // (and a flowing sheet on a bed) only splash-wet.
+                    let rate = {
+                        let air_solid = a_solid != b_solid;
+                        if !air_solid {
+                            rate
+                        } else if dx != 0 {
+                            rate.min(SHEET_FACE_SPLASH)
+                        } else {
+                            let air = if a_solid { &b } else { &a };
+                            let air_lx = if a_solid { lx + dx } else { lx };
+                            let air_gx = if a_solid { nx } else { gx };
+                            let air_gy = if a_solid { ny } else { gy };
+                            let air_ly = if a_solid { ly + dy } else { ly };
+                            if air.material == MaterialId::Air
+                                && air_has_dry_escape(
+                                    world, &read, air_gx, air_gy, air_lx, air_ly,
+                                )
+                            {
+                                rate.min(SHEET_FACE_SPLASH)
+                            } else {
+                                rate
+                            }
+                        }
+                    };
                     if rate <= 0 {
                         continue;
                     }
@@ -182,4 +209,25 @@ fn accumulate_seepage_xfers(
     for mut v in local {
         xfers.append(&mut v);
     }
+}
+
+/// Splash into a column face / flowing bed — not a full pore fill.
+const SHEET_FACE_SPLASH: i32 = 4;
+
+fn air_has_dry_escape(
+    world: &World,
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+) -> bool {
+    for dx in [-1_i32, 1] {
+        let nx = world.wrap_x(gx + dx);
+        match read(lx + dx, ly, nx, gy) {
+            Some(c) if c.material == MaterialId::Air && c.sat.0 < 32 => return true,
+            _ => {}
+        }
+    }
+    false
 }
