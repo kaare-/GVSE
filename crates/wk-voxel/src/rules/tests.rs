@@ -2552,6 +2552,37 @@ fn open_sheet_does_not_gravity_fill_dry_soil() {
 }
 
 #[test]
+fn hilltop_dump_front_stays_fat() {
+    // A stacked dump on a soil crest must push a fat sheet onto the
+    // dry bed — not a 40-sat hairline that then crawls.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..12 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        for y in 2..=4 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    for x in 2..=5 {
+        w.set_cell(x, 2, Cell::water());
+        w.set_cell(x, 3, Cell::water());
+    }
+    apply_water_flow(&mut w);
+    let hop1 = w.get_cell(6, 2).map(|c| c.sat.0).unwrap_or(0);
+    assert!(
+        hop1 >= 160,
+        "first hop of a hilltop dump must be a sheet (sat={hop1})"
+    );
+    apply_water_flow(&mut w);
+    let hop2 = w.get_cell(7, 2).map(|c| c.sat.0).unwrap_or(0);
+    assert!(
+        hop2 >= 120,
+        "second hop must stay fat, not decay to a trickle (sat={hop2})"
+    );
+}
+
+#[test]
 fn hillside_film_climbs_dry_terrace() {
     // A full blob on a soil step must splash over instead of sitting
     // until the terrace saturates.

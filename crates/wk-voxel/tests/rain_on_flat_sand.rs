@@ -11,7 +11,7 @@
 //! tests and documented in `docs/VOXEL_WATER.md`.
 
 use wk_material::MaterialId;
-use wk_voxel::{apply_gravity_fall, is_grain, plan_active, tick, water_capacity, Cell, World};
+use wk_voxel::{apply_gravity_fall, is_grain, tick, water_capacity, Cell, World};
 
 #[test]
 fn rain_row_saturates_sand_over_one_tick() {

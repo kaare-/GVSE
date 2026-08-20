@@ -585,8 +585,7 @@ fn accumulate_water_flow_xfers(
                 let flip = tick_flip ^ (((gx + gy) & 1) == 0);
                 let dirs = if flip { [-1_i32, 1] } else { [1_i32, -1] };
                 let depth = wet_stack_depth(&read, gx, gy, lx, ly, cur.sat.0);
-                // Films crawl sideways; downhill drain stays a bit faster
-                // so hillside blobs empty instead of sitting a full tick.
+                // Trickles crawl; a full film / stacked dump keeps a fat front.
                 let step = sheet_step_cap(depth);
                 let drain = drain_step_cap(depth);
 
@@ -893,23 +892,27 @@ fn wet_stack_depth(
     d
 }
 
-/// Per-pass sat cap for same-Y / overtop. Thin films crawl; a stacked
-/// surge still dumps hard.
+/// Per-pass sat cap for same-Y / overtop / skate-over-dry.
+///
+/// Depth 0 is a trickle (`sat < 96`) and crawls. A full film or a
+/// stacked dump must keep a fat front — a 40-sat cap turned a
+/// hilltop dump into a hairline over dry ground.
 fn sheet_step_cap(depth: i32) -> i32 {
     match depth {
-        0 | 1 => 40,
-        2 => 96,
-        _ => 200,
+        0 => 40,
+        1 => 180,
+        2 => 220,
+        _ => 255,
     }
 }
 
-/// Per-pass sat cap for diagonal-down drain. Faster than lateral so a
-/// hillside blob does not sit a full tick waiting to empty.
+/// Per-pass sat cap for diagonal-down drain.
 fn drain_step_cap(depth: i32) -> i32 {
     match depth {
-        0 | 1 => 80,
-        2 => 128,
-        _ => 200,
+        0 => 64,
+        1 => 200,
+        2 => 240,
+        _ => 255,
     }
 }
 
