@@ -921,7 +921,44 @@ const OVERTOP_BERM_SOAK: i32 = 24;
 /// A full-ish film can climb a one-cell dry step; thinner trickles soak.
 const SHEET_CLIMB_SAT: u8 = 160;
 
-/// Sheet / surge climbs a dry solid berm, wets it, or skips into Air beyond.
+/// Push `remaining` into Air dests until the source is empty or dests are full.
+fn dump_into_air_dests(
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    from: (i32, i32),
+    dests: &[(i32, i32, i32, i32)], // nx, ny, nlx, nly
+    mut remaining: i32,
+    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
+) -> i32 {
+    let mut seen: Vec<(i32, i32)> = Vec::new();
+    for &(nx, ny, nlx, nly) in dests {
+        if remaining <= 0 {
+            break;
+        }
+        if seen.contains(&(nx, ny)) {
+            continue;
+        }
+        seen.push((nx, ny));
+        let Some(c) = read(nlx, nly, nx, ny) else {
+            continue;
+        };
+        if c.material != MaterialId::Air {
+            continue;
+        }
+        let free = u8::MAX.saturating_sub(c.sat.0) as i32;
+        let amt = remaining.min(free);
+        if amt > 0 {
+            local.push((from, (nx, ny), amt));
+            remaining -= amt;
+        }
+    }
+    remaining
+}
+
+/// Sheet / surge climbs a dry solid berm and dumps over the weir
+/// into several Air cells (crest, stacked overflow, beyond, downhill).
+///
+/// Funneling the whole pile through one crest cell left a huge bump
+/// and a hairline trickle — dest free is 255, so one cell escaped.
 fn plan_overtop_dry_ground(
     world: &World,
     read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
@@ -937,10 +974,12 @@ fn plan_overtop_dry_ground(
     local: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) -> i32 {
     let can_climb = depth >= 2 || sat >= SHEET_CLIMB_SAT;
-    let can_skip = depth >= 2 || sat >= SHEET_CLIMB_SAT;
     if !can_climb {
         return remaining;
     }
+    // A stacked dump empties the source cell over the weir; a lone
+    // full film still uses the sheet step so trickles stay trickles.
+    let dump = if depth >= 2 { remaining } else { remaining.min(step) };
     for dx in dirs {
         if remaining <= 0 {
             break;
@@ -952,27 +991,46 @@ fn plan_overtop_dry_ground(
         if side.material == MaterialId::Air {
             continue;
         }
-        // Climb the solid face to the first Air — a tall dry column
-        // is a hillside, not a bucket to fill.
-        let mut climbed = false;
-        for dy in 1..=8 {
+        let mut dests: Vec<(i32, i32, i32, i32)> = Vec::new();
+        let mut crest: Option<i32> = None;
+        for dy in 1..=10 {
             let Some(above) = read(lx + dx, ly + dy, nx, gy + dy) else {
                 break;
             };
             if above.material != MaterialId::Air {
                 continue;
             }
-            let free = u8::MAX.saturating_sub(above.sat.0) as i32;
-            let amt = remaining.min(free).min(step);
-            if amt > 0 {
-                local.push(((gx, gy), (nx, gy + dy), amt));
-                remaining -= amt;
-                climbed = true;
+            if crest.is_none() {
+                crest = Some(gy + dy);
             }
-            break;
+            dests.push((nx, gy + dy, lx + dx, ly + dy));
+            if dests.len() >= 4 {
+                break;
+            }
         }
-        if climbed {
-            continue;
+        if let Some(cy) = crest {
+            let bx = world.wrap_x(nx + dx);
+            for dy in 0..=3 {
+                dests.push((bx, cy + dy, lx + dx * 2, ly + (cy - gy) + dy));
+            }
+            dests.push((bx, cy - 1, lx + dx * 2, ly + (cy - gy) - 1));
+            if gy > cy {
+                dests.push((nx, gy, lx + dx, ly));
+                dests.push((bx, gy, lx + dx * 2, ly));
+            }
+        }
+        if dests.is_empty() {
+            // fall through to splash
+        } else {
+            // Spread sources across dests so the whole pile does not
+            // funnel into one 255-sat crest cell.
+            let rot = (gy.unsigned_abs() as usize) % dests.len();
+            dests.rotate_left(rot);
+            let before = remaining;
+            remaining = dump_into_air_dests(read, (gx, gy), &dests, remaining.min(dump), local);
+            if remaining < before {
+                continue;
+            }
         }
         // Could not get over — splash the contact face only.
         let cap = water_capacity_with(side.material, &world.hydro) as i32;
@@ -982,21 +1040,6 @@ fn plan_overtop_dry_ground(
             if soak > 0 {
                 local.push(((gx, gy), (nx, gy), soak));
                 remaining -= soak;
-            }
-        }
-        if remaining <= 0 || !can_skip {
-            continue;
-        }
-        // Stacked surge can skip the one-cell berm into Air beyond.
-        let bx = world.wrap_x(nx + dx);
-        if let Some(beyond) = read(lx + dx * 2, ly, bx, gy) {
-            if beyond.material == MaterialId::Air {
-                let free = u8::MAX.saturating_sub(beyond.sat.0) as i32;
-                let amt = remaining.min(free).min(step);
-                if amt > 0 {
-                    local.push(((gx, gy), (bx, gy), amt));
-                    remaining -= amt;
-                }
             }
         }
     }
@@ -1046,26 +1089,16 @@ fn plan_sheet_over_dry_bed(
         if cap <= 0 || bed.sat.0 as i32 >= cap {
             continue;
         }
-        let free = u8::MAX.saturating_sub(side.sat.0) as i32;
-        let amt = remaining.min(free).min(step);
-        if amt > 0 {
-            local.push(((gx, gy), (nx, gy), amt));
-            remaining -= amt;
-        }
-        if depth < 2 || remaining <= 0 {
-            continue;
-        }
+        let dump = if depth >= 2 { remaining } else { remaining.min(step) };
         let bx = world.wrap_x(nx + dx);
-        if let Some(beyond) = read(lx + dx * 2, ly, bx, gy) {
-            if beyond.material == MaterialId::Air {
-                let free = u8::MAX.saturating_sub(beyond.sat.0) as i32;
-                let amt = remaining.min(free).min(step);
-                if amt > 0 {
-                    local.push(((gx, gy), (bx, gy), amt));
-                    remaining -= amt;
-                }
-            }
-        }
+        let dests = [
+            (nx, gy, lx + dx, ly),
+            (nx, gy + 1, lx + dx, ly + 1),
+            (bx, gy, lx + dx * 2, ly),
+            (bx, gy + 1, lx + dx * 2, ly + 1),
+            (bx, gy - 1, lx + dx * 2, ly - 1),
+        ];
+        remaining = dump_into_air_dests(read, (gx, gy), &dests, dump, local);
     }
     remaining
 }

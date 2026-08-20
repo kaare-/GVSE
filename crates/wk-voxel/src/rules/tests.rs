@@ -2605,6 +2605,47 @@ fn hillside_film_climbs_dry_terrace() {
 }
 
 #[test]
+fn weir_dumps_stack_over_dry_column() {
+    // Tall water pile against a dry soil wall. The whole stack must
+    // go over the weir into several Air cells — not one 255-sat film.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..14 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        for y in 2..=10 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    for y in 2..=5 {
+        w.set_cell(8, y, Cell::solid(MaterialId::Soil));
+    }
+    for x in 4..=7 {
+        for y in 2..=7 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let pile_before: i32 = (4..=7)
+        .flat_map(|x| (2..=7).map(move |y| w.get_cell(x, y).unwrap().sat.0 as i32))
+        .sum();
+    apply_water_flow(&mut w);
+    let over: i32 = (8..=11)
+        .flat_map(|x| (6..=10).map(move |y| w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as i32))
+        .sum();
+    let pile_after: i32 = (4..=7)
+        .flat_map(|x| (2..=7).map(move |y| w.get_cell(x, y).map(|c| c.sat.0).unwrap_or(0) as i32))
+        .sum();
+    assert!(
+        over >= 400,
+        "weir must dump a fat front over the wall (over={over})"
+    );
+    assert!(
+        pile_after + 300 < pile_before,
+        "pile must lose more than a trickle (before={pile_before} after={pile_after})"
+    );
+}
+
+#[test]
 fn surge_climbs_tall_dry_soil_column() {
     // Stacked water against a tall dry soil stack. Must climb to Air
     // above the stack, not fill the stack like a bucket.
