@@ -32,10 +32,9 @@ use super::plan::regions_for_standalone;
 /// - **Cross-chunk**: own + `cy + 1` via chunk-local indexing (same
 ///   write-set as [`parallel::pull_write_coords`]). Missing above
 ///   chunks yield no move.
-/// - **Air → porous solid** only when the source water is walled
-///   (solid on both sides). A sheet of wet Air stays in Air;
-///   seepage splash-wets the bed. Instant pore-fill used the
-///   column ahead as a bucket.
+/// - **Air → porous solid** only for a walled pond or a stacked lake.
+///   A one-cell hillside sheet stays in Air; seepage splash-wets
+///   the bed. Instant pore-fill used the column ahead as a bucket.
 ///
 /// This is intentionally the simplest possible fall model — one cell
 /// per invocation, no lateral spread, no density swap. Free-fall
@@ -109,9 +108,8 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 water_capacity_with(m, &hydro)
             }
         };
-        // Walled pond = solid on both sides. A sheet of wet Air is
-        // not a pond — treating it as one dumped the middle of a
-        // hillside front into the dry column (the "bucket").
+        // Walled pond = solid on both sides. Stacked = another wet-Air
+        // cell above (a lake). A one-cell hillside sheet is neither.
         let walled_air = |lx: u8, ly_src: i32| -> bool {
             let solid = |nlx: i32| -> bool {
                 if nlx < 0 || nlx >= CHUNK_CELLS_W as i32 {
@@ -123,6 +121,12 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 }
             };
             solid(lx as i32 - 1) && solid(lx as i32 + 1)
+        };
+        let stacked_air = |lx: u8, ly_src: i32| -> bool {
+            matches!(
+                read_xy(lx, ly_src + 1),
+                Some(c) if c.material == MaterialId::Air && c.sat.0 >= 160
+            )
         };
 
         for x in ac.rect.x0..=ac.rect.x1 {
@@ -169,14 +173,14 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     next_cur = Some(above);
                     continue;
                 }
-                // Free water with a lateral Air neighbour stays in Air.
-                // Only a walled pond soaks the bed in one pull.
-                if cur.material != MaterialId::Air
-                    && above.material == MaterialId::Air
-                    && !walled_air(x, y as i32 + 1)
-                {
-                    next_cur = Some(above);
-                    continue;
+                // Free water with a lateral Air neighbour stays in Air
+                // unless it is a walled pond or a stacked lake.
+                if cur.material != MaterialId::Air && above.material == MaterialId::Air {
+                    let src_y = y as i32 + 1;
+                    if !walled_air(x, src_y) && !stacked_air(x, src_y) {
+                        next_cur = Some(above);
+                        continue;
+                    }
                 }
                 let move_amt = above.sat.0.min(free);
                 if move_amt == 0 {
