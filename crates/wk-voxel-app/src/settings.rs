@@ -989,11 +989,11 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Performance", |ui| {
                     ui.label(
                         None,
-                        "Defaults favour FPS (every-other + quiet EO → max 6 substeps; rayon off).",
+                        "Defaults favour fast surface flow (every substep, quiet EO → max 8; seepage every 4 ticks).",
                     );
                     ui.label(
                         None,
-                        "Uncheck both flow knobs for full ×12 feel. Parallel helps only on fat dirty plans.",
+                        "Uncheck quiet EO for full ×12 feel. Enable every-other for thrift A/B.",
                     );
                     ui.checkbox(
                         hash!(),
@@ -1002,7 +1002,7 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "  On ≈ half surface-flow work. Odd-step gravity keeps the dirty halo narrow.",
+                        "  Off by default — hillside runoff needs every pass. On ≈ half surface-flow work.",
                     );
                     ui.checkbox(
                         hash!(),
@@ -1011,7 +1011,7 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "  On skips polishing substeps. Off if hill drains look stalled.",
+                        "  On skips polish when the halo shrinks. Also cadence-gates pore seepage (beds still wake every tick).",
                     );
                     ui.checkbox(
                         hash!(),

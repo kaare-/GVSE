@@ -58,8 +58,13 @@ fn add_region(map: &mut HashMap<ChunkCoord, Rect>, coord: ChunkCoord, rect: Rect
         .or_insert(rect);
 }
 
-/// Inflate `rect` by one cell and merge into `map`, waking neighbour
-/// chunks when the halo crosses a chunk seam.
+/// Inflate `rect` by a neighbour halo and merge into `map`, waking
+/// abutting chunks when the halo crosses a seam.
+///
+/// Horizontal halo is 1 cell. Vertical halo is **2** cells so water at
+/// the cy seam (world y=64 ↔ y=63) can still plan cascade/soak into
+/// y=62 in the same dirty generation — a 1-cell vertical wake left a
+/// persistent shelf / dry line at y≈62/63 in playtest.
 fn inflate_wake(
     map: &mut HashMap<ChunkCoord, Rect>,
     coord: ChunkCoord,
@@ -68,10 +73,12 @@ fn inflate_wake(
 ) {
     let w = CHUNK_CELLS_W as i32;
     let h = CHUNK_CELLS_H as i32;
-    let x0 = rect.x0 as i32 - 1;
-    let y0 = rect.y0 as i32 - 1;
-    let x1 = rect.x1 as i32 + 1;
-    let y1 = rect.y1 as i32 + 1;
+    const HALO_X: i32 = 1;
+    const HALO_Y: i32 = 2;
+    let x0 = rect.x0 as i32 - HALO_X;
+    let y0 = rect.y0 as i32 - HALO_Y;
+    let x1 = rect.x1 as i32 + HALO_X;
+    let y1 = rect.y1 as i32 + HALO_Y;
 
     // Home chunk (clamped).
     add_region(
@@ -117,20 +124,24 @@ fn inflate_wake(
         );
     }
     if y0 < 0 {
+        // Overlap into cy-1: rows [h+y0, h-1] (e.g. y0=-2 → h-2..=h-1).
         let n = ChunkCoord::new(coord.cx, coord.cy - 1);
+        let below_y0 = (h + y0).max(0).min(h - 1) as u8;
         add_region(
             map,
             n,
             Rect {
                 x0: x0c,
-                y0: (h - 1) as u8,
+                y0: below_y0,
                 x1: x1c,
                 y1: (h - 1) as u8,
             },
         );
     }
     if y1 >= h {
+        // Overlap into cy+1: rows [0, y1-h].
         let n = ChunkCoord::new(coord.cx, coord.cy + 1);
+        let above_y1 = (y1 - h).max(0).min(h - 1) as u8;
         add_region(
             map,
             n,
@@ -138,36 +149,39 @@ fn inflate_wake(
                 x0: x0c,
                 y0: 0,
                 x1: x1c,
-                y1: 0,
+                y1: above_y1,
             },
         );
     }
     // Diagonals — water can fall/spill across a corner seam.
     if x0 < 0 && y0 < 0 {
+        let below_y0 = (h + y0).max(0).min(h - 1) as u8;
         add_region(
             map,
             ChunkCoord::new(wrap_cx(coord.cx - 1, span_x), coord.cy - 1),
             Rect {
                 x0: (w - 1) as u8,
-                y0: (h - 1) as u8,
+                y0: below_y0,
                 x1: (w - 1) as u8,
                 y1: (h - 1) as u8,
             },
         );
     }
     if x1 >= w && y0 < 0 {
+        let below_y0 = (h + y0).max(0).min(h - 1) as u8;
         add_region(
             map,
             ChunkCoord::new(wrap_cx(coord.cx + 1, span_x), coord.cy - 1),
             Rect {
                 x0: 0,
-                y0: (h - 1) as u8,
+                y0: below_y0,
                 x1: 0,
                 y1: (h - 1) as u8,
             },
         );
     }
     if x0 < 0 && y1 >= h {
+        let above_y1 = (y1 - h).max(0).min(h - 1) as u8;
         add_region(
             map,
             ChunkCoord::new(wrap_cx(coord.cx - 1, span_x), coord.cy + 1),
@@ -175,11 +189,12 @@ fn inflate_wake(
                 x0: (w - 1) as u8,
                 y0: 0,
                 x1: (w - 1) as u8,
-                y1: 0,
+                y1: above_y1,
             },
         );
     }
     if x1 >= w && y1 >= h {
+        let above_y1 = (y1 - h).max(0).min(h - 1) as u8;
         add_region(
             map,
             ChunkCoord::new(wrap_cx(coord.cx + 1, span_x), coord.cy + 1),
@@ -187,7 +202,7 @@ fn inflate_wake(
                 x0: 0,
                 y0: 0,
                 x1: 0,
-                y1: 0,
+                y1: above_y1,
             },
         );
     }
@@ -307,6 +322,29 @@ mod tests {
         assert!(
             plan.iter().any(|a| a.coord == ChunkCoord::new(1, 0)),
             "neighbour chunk must wake"
+        );
+    }
+
+    #[test]
+    fn vertical_seam_write_wakes_two_rows_below() {
+        let mut w = World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        clear_all_dirty(&mut w);
+        // Bottom row of cy=1 (world y=64).
+        w.set_cell(7, CHUNK_CELLS_H as i32, Cell::water());
+        let plan = plan_active(&w);
+        let below = plan
+            .iter()
+            .find(|a| a.coord == ChunkCoord::new(0, 0))
+            .expect("cy-1 must wake");
+        assert!(
+            below.rect.contains(7, (CHUNK_CELLS_H - 1) as u8),
+            "must wake y=63"
+        );
+        assert!(
+            below.rect.contains(7, (CHUNK_CELLS_H - 2) as u8),
+            "must wake y=62 (2-cell vertical halo across seam)"
         );
     }
 

@@ -875,26 +875,24 @@ fn wet_stack_depth(
 
 /// Per-pass sat cap for same-Y / cascade / crest spill.
 ///
-/// Kept modest so free surfaces spread as a gradient instead of dumping
-/// a whole cell each hop (the "fat front" 180–255 caps looked jagged).
-/// Trickles crawl; stacked water still moves faster, but not all at once.
+/// Thin films stay softer so lakes beside a filled catch don't thrash;
+/// stacked hillside water still moves hard each pass (was jelly at 4k+).
 fn sheet_step_cap(depth: i32) -> i32 {
     match depth {
-        0 | 1 => 48,
-        2 => 120,
-        _ => 200,
+        0 | 1 => 72,
+        2 => 180,
+        _ => 240,
     }
 }
 
 /// Per-pass sat cap for diagonal-down drain.
 ///
-/// Deep hillside blobs need a strong drain so they empty instead of
-/// sitting as jelly; still soft enough that shelf edges don't sawtooth.
+/// Diagonal drain is the hillside empty path — deep stacks dump hard.
 fn drain_step_cap(depth: i32) -> i32 {
     match depth {
-        0 | 1 => 96,
-        2 => 160,
-        _ => 220,
+        0 | 1 => 160,
+        2 => 240,
+        _ => 255,
     }
 }
 

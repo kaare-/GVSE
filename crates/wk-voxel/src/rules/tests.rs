@@ -6690,6 +6690,7 @@ fn deep_sand_stack_under_open_lake_wets_vertically() {
 fn seepage_crosses_vertical_chunk_seam_via_tick() {
     // Demo report: sharp dry line at y≈62/63 — limestone under water in
     // the next chunk never soaked. CHUNK_CELLS_H=64 seams at y=63|64.
+    // Interactive defaults cadence-gate seepage — budget enough ticks.
     let mut w = World::new(9);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     w.ensure_chunk(ChunkCoord::new(0, 1));
@@ -6706,7 +6707,7 @@ fn seepage_crosses_vertical_chunk_seam_via_tick() {
     }
     clear_all_dirty(&mut w);
     let perf = PerfConfig::default();
-    for _ in 0..800 {
+    for _ in 0..3200 {
         tick_with_perf(&mut w, &perf);
     }
     let cap = water_capacity(MaterialId::Limestone);
@@ -6727,9 +6728,179 @@ fn seepage_crosses_vertical_chunk_seam_via_tick() {
     );
 }
 
+
+#[test]
+fn surface_runoff_crosses_vertical_chunk_seam() {
+    // Impermeable stairs: high on the right (above seam), descending left
+    // across y=63|64. Water must cascade below the seam into a foot basin —
+    // not sit as a horizontal shelf on the chunk border.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..28 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        // top rises with x: x=8 → 50, x=20 → 62, x=24 → 66 (crosses seam)
+        let top = 42 + x;
+        for y in 1..=top.min(80) {
+            w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+        }
+    }
+    // Foot basin on the left below the seam.
+    for x in 0..8 {
+        for y in 1..=40 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+        }
+    }
+    for y in 0..=50 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+    }
+    // Dump water on the upper stairs (above the seam).
+    for y in 68..=72 {
+        for x in 24..=26 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let mass0: i32 = (24..=26)
+        .flat_map(|x| (68..=72).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+        .sum();
+    let perf = PerfConfig::default();
+    for _ in 0..100 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let below_seam: i32 = (1..20)
+        .flat_map(|x| (41..=63).map(move |y| (x, y)))
+        .filter_map(|(x, y)| {
+            w.get_cell(x, y).and_then(|c| {
+                (c.material == MaterialId::Air).then_some(c.sat.0 as i32)
+            })
+        })
+        .sum();
+    let shelf: i32 = (20..28)
+        .flat_map(|x| (64..=66).map(move |y| (x, y)))
+        .filter_map(|(x, y)| {
+            w.get_cell(x, y).and_then(|c| {
+                (c.material == MaterialId::Air).then_some(c.sat.0 as i32)
+            })
+        })
+        .sum();
+    assert!(
+        below_seam > mass0 / 4,
+        "runoff must cross y=63|64 seam (below={below_seam} shelf={shelf} mass0={mass0})"
+    );
+    assert!(
+        shelf < mass0 / 2,
+        "must not remain shelved at chunk border (shelf={shelf} below={below_seam} mass0={mass0})"
+    );
+}
+
+#[test]
+fn porous_hill_sat_crosses_chunk_seam_under_runoff() {
+    // Porous stone stairs across the seam with standing/runoff water above.
+    // Saturation must advance through y=63 into y=62 — no permanent dry
+    // shelf at the chunk border (playtest y≈62/63 line).
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 3..=8 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=70 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    for y in 0..=72 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+    }
+    // Ponded water straddling the seam so beds below must drink.
+    for y in 64..=68 {
+        for x in 4..=7 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let perf = PerfConfig::default();
+    for _ in 0..400 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let cap = water_capacity(MaterialId::Stone);
+    let s63 = w.get_cell(5, 63).unwrap().sat.0;
+    let s62 = w.get_cell(5, 62).unwrap().sat.0;
+    let s50 = w.get_cell(5, 50).unwrap().sat.0;
+    assert!(
+        s63 + 1 >= cap,
+        "stone at y=63 must wet under seam water (sat={s63}/{cap})"
+    );
+    assert!(
+        s62 >= cap / 2,
+        "stone at y=62 must not stay dry at chunk border (sat={s62}/{cap}, s63={s63}, s50={s50})"
+    );
+}
+
+
+#[test]
+fn sheet_does_not_shelf_on_stone_cap_at_chunk_seam() {
+    // Stone fills every column up to y=63 (top of cy=0). Free water sits
+    // on that cap at y=64 and must drain left into open air below the
+    // seam — not equalise into a permanent horizontal shelf on y=64.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..30 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Plateau: stone to y=63 for x=10..25 (exactly the chunk seam).
+    for x in 10..26 {
+        for y in 1..=63 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    // Downslope left: stone only to y=50 so water can fall below the seam.
+    for x in 0..10 {
+        for y in 1..=50 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    for y in 0..=70 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(29, y, Cell::solid(MaterialId::Bedrock));
+    }
+    // Sheet on the seam cap.
+    for x in 12..24 {
+        w.set_cell(x, 64, Cell::water());
+    }
+    let mass0: i32 = (12..24)
+        .filter_map(|x| w.get_cell(x, 64).map(|c| c.sat.0 as i32))
+        .sum();
+    let perf = PerfConfig::default();
+    for _ in 0..60 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let still_on_cap: i32 = (12..24)
+        .filter_map(|x| w.get_cell(x, 64).map(|c| c.sat.0 as i32))
+        .sum();
+    let below: i32 = (1..12)
+        .flat_map(|x| (51..=63).map(move |y| (x, y)))
+        .filter_map(|(x, y)| {
+            w.get_cell(x, y).and_then(|c| {
+                (c.material == MaterialId::Air).then_some(c.sat.0 as i32)
+            })
+        })
+        .sum();
+    assert!(
+        still_on_cap < mass0 / 3,
+        "seam-cap sheet must drain (still={still_on_cap} below={below} mass0={mass0})"
+    );
+    assert!(
+        below > mass0 / 4,
+        "seam-cap sheet must reach air below y=63 (below={below} still={still_on_cap} mass0={mass0})"
+    );
+}
+
 #[test]
 fn hillside_blob_drains_downslope_instead_of_jelly() {
     // Stepped impermeable slope — water must cascade, not only soak.
+    // Interactive defaults must empty the blob in tens of ticks, not
+    // thousands (playtest jelly at tick 4k+).
     let mut w = World::new(9);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     for x in 0..20 {
@@ -6738,6 +6909,14 @@ fn hillside_blob_drains_downslope_instead_of_jelly() {
         for y in 1..=top {
             w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
         }
+    }
+    // Catch basin at the foot so fast runoff does not shoot into void.
+    for x in 16..28 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 0..=8 {
+        w.set_cell(27, y, Cell::solid(MaterialId::Bedrock));
     }
     for y in 11..=14 {
         for x in 2..=5 {
@@ -6749,20 +6928,9 @@ fn hillside_blob_drains_downslope_instead_of_jelly() {
         .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
         .sum();
     let perf = PerfConfig::default();
-    for _ in 0..100 {
+    for _ in 0..40 {
         tick_with_perf(&mut w, &perf);
     }
-    let down: i32 = (10..=18)
-        .map(|x| {
-            (1..=16)
-                .filter_map(|y| {
-                    w.get_cell(x, y).and_then(|c| {
-                        (c.material == MaterialId::Air).then_some(c.sat.0 as i32)
-                    })
-                })
-                .sum::<i32>()
-        })
-        .sum();
     let still_up: i32 = (2..=5)
         .map(|x| {
             (11..=16)
@@ -6774,13 +6942,21 @@ fn hillside_blob_drains_downslope_instead_of_jelly() {
                 .sum::<i32>()
         })
         .sum();
+    let basin: i32 = (16..27)
+        .flat_map(|x| (2..=8).map(move |y| (x, y)))
+        .filter_map(|(x, y)| {
+            w.get_cell(x, y).and_then(|c| {
+                (c.material == MaterialId::Air).then_some(c.sat.0 as i32)
+            })
+        })
+        .sum();
     assert!(
-        down > mass0 / 5,
-        "hill blob must drain downslope (down={down} still_up={still_up} mass0={mass0})"
+        still_up < mass0 / 4,
+        "hill blob must not remain as jelly (still_up={still_up} mass0={mass0})"
     );
     assert!(
-        still_up < mass0 * 2 / 3,
-        "hill blob must not remain as jelly (still_up={still_up} mass0={mass0})"
+        basin > mass0 / 2,
+        "hill blob must reach the foot basin fast (basin={basin} still_up={still_up} mass0={mass0})"
     );
 }
 
