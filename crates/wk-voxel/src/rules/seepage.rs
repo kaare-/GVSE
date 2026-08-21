@@ -25,11 +25,13 @@ use super::plan::{regions_for_standalone, regions_wet_loaded};
 ///
 /// Runs every tick: cost is only the wet-chunk scan, and once beds are
 /// saturated the touch set is empty (steady lakes stay quiet).
+///
+/// Also walks **down from standing wet Air** so beds that live in the
+/// chunk below (y=63 under water at y=64) are woken — `has_wet_air` alone
+/// never visits that dry cy-1 chunk.
 pub fn wake_lake_bed_pores(world: &mut World) {
     let hydro = world.hydro;
     let regions = regions_wet_loaded(world);
-    // Collect touches first — `touch_dirty` needs `&mut World` while we also
-    // read neighbour cells across chunk seams.
     let mut touches: Vec<(i32, i32)> = Vec::new();
     for ac in &regions {
         let Some(chunk) = world.chunks.get(&ac.coord) else {
@@ -43,6 +45,43 @@ pub fn wake_lake_bed_pores(world: &mut World) {
             for x in ac.rect.x0..=ac.rect.x1 {
                 let lx = x as usize;
                 let cell = chunk.get(lx, ly);
+                let gx = world.wrap_x(base_gx + x as i32);
+
+                // Standing water → touch unsaturated porous below / beside
+                // (crosses the horizontal chunk seam into cy-1). Walk down
+                // through already-wet pores so the wetting front under a
+                // saturated cap keeps moving (y=63 wet, y=50 still dry).
+                if cell.material == MaterialId::Air && cell.sat.0 >= 160 {
+                    let mut yy = gy - 1;
+                    for _ in 0..(CHUNK_CELLS_H * 2) {
+                        let Some(below) = world.get_cell(gx, yy) else {
+                            break;
+                        };
+                        if !is_porous_solid_with(below.material, &hydro) {
+                            break;
+                        }
+                        let cap = water_capacity_with(below.material, &hydro);
+                        if cap == 0 {
+                            break;
+                        }
+                        if below.sat.0 < cap {
+                            touches.push((gx, yy));
+                        }
+                        yy -= 1;
+                    }
+                    for dx in [-1_i32, 1] {
+                        let nx = world.wrap_x(gx + dx);
+                        if let Some(n) = world.get_cell(nx, gy) {
+                            if is_porous_solid_with(n.material, &hydro) {
+                                let cap = water_capacity_with(n.material, &hydro);
+                                if cap > 0 && n.sat.0 < cap {
+                                    touches.push((nx, gy));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 if !is_porous_solid_with(cell.material, &hydro) {
                     continue;
                 }
@@ -50,7 +89,6 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                 if cap == 0 || cell.sat.0 >= cap {
                     continue;
                 }
-                let gx = world.wrap_x(base_gx + x as i32);
                 let mut feed = false;
                 if let Some(above) = world.get_cell(gx, gy + 1) {
                     if above.material == MaterialId::Air && above.sat.0 >= 160 {
@@ -58,8 +96,6 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                     } else if is_porous_solid_with(above.material, &hydro)
                         && above.sat.0 > cell.sat.0
                     {
-                        // Wetting front advancing down a saturated sand cap
-                        // into deeper stone / clay.
                         feed = true;
                     }
                 }

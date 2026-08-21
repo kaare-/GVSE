@@ -6683,3 +6683,46 @@ fn deep_sand_stack_under_open_lake_wets_vertically() {
         deep.sat.0
     );
 }
+
+
+
+#[test]
+fn seepage_crosses_vertical_chunk_seam_via_tick() {
+    // Demo report: sharp dry line at y≈62/63 — limestone under water in
+    // the next chunk never soaked. CHUNK_CELLS_H=64 seams at y=63|64.
+    let mut w = World::new(9);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+    for y in 1..=63 {
+        w.set_cell(4, y, Cell::solid(MaterialId::Limestone));
+    }
+    for y in 64..=80 {
+        w.set_cell(4, y, Cell::water());
+    }
+    for y in 0..=80 {
+        w.set_cell(3, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(5, y, Cell::solid(MaterialId::Bedrock));
+    }
+    clear_all_dirty(&mut w);
+    let perf = PerfConfig::default();
+    for _ in 0..500 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let cap = water_capacity(MaterialId::Limestone);
+    let s63 = w.get_cell(4, 63).unwrap();
+    let s50 = w.get_cell(4, 50).unwrap();
+    assert_eq!(s63.material, MaterialId::Limestone);
+    assert!(
+        s63.sat.0 + 1 >= cap,
+        "limestone at y=63 must soak across chunk seam (sat={}/{})",
+        s63.sat.0,
+        cap
+    );
+    assert!(
+        s50.sat.0 + 1 >= cap,
+        "limestone below seam must wet (sat={}/{})",
+        s50.sat.0,
+        cap
+    );
+}

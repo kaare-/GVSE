@@ -83,9 +83,17 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
             let ly_u = ly as usize;
             if ly_u < CHUNK_CELLS_H {
                 Some(unsafe { (*own).get(lx as usize, ly_u) })
-            } else if ly_u == CHUNK_CELLS_H {
-                let p = above_ptr?;
-                Some(unsafe { (*p).get(lx as usize, 0) })
+            } else if let Some(p) = above_ptr {
+                // Read into cy+1 (not only the seam cell). stacked_air /
+                // open_surge at a bed contact on y=CHUNK_CELLS_H-1 need
+                // neighbours in the chunk above; returning None there
+                // made every seam lake look like an open surge.
+                let local = ly_u - CHUNK_CELLS_H;
+                if local < CHUNK_CELLS_H {
+                    Some(unsafe { (*p).get(lx as usize, local) })
+                } else {
+                    None
+                }
             } else {
                 None
             }
@@ -100,6 +108,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     (*own).set(lx as usize, ly_u, cell);
                 }
             } else if ly_u == CHUNK_CELLS_H {
+                // Gravity only pulls one cell; seam write stays at local y=0.
                 if let Some(p) = above_ptr {
                     unsafe {
                         (*p).set(lx as usize, 0, cell);
@@ -196,7 +205,9 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 }
                 // Walled ponds and stacked lake interiors infiltrate the
                 // bed. Open surge / sheet faces stay in Air — seepage
-                // splash-wets those. Standing water uses full permeability.
+                // splash-wets those. `read_xy` must see into cy+1 so a
+                // bed at y=63 under water at y=64 can detect stacked
+                // water at y=65 (chunk seam).
                 if cur.material != MaterialId::Air && above.material == MaterialId::Air {
                     let src_y = y as i32 + 1;
                     let settled_stack = stacked_air(x, src_y) && !open_surge_face(x, src_y);
