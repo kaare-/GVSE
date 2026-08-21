@@ -898,9 +898,12 @@ fn draw_ridge_band(
             let y_vis = bedrock_floor_y
                 + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
             let top_sy = origin_y - (y_vis - bedrock_floor_y) as f32 * cell_px + lag_y;
-            let bottom_sy = origin_y + lag_y;
-            let h = (bottom_sy - top_sy).max(cell_px);
-            if top_sy > sh || top_sy + h < 0.0 {
+            // Extend solid fill to the bottom of the viewport. Stopping at
+            // `origin_y + lag_y` (parallax-lagged bedrock line) left a hard
+            // transparency shelf — visible through dug holes, a dropped
+            // ocean, or heatmap-only / no-landscape.
+            let bottom_sy = sh;
+            if top_sy > sh {
                 continue;
             }
 
