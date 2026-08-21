@@ -190,8 +190,8 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     continue;
                 }
                 // Walled ponds and stacked lake interiors infiltrate the
-                // bed at the permeability × free-pore rate — not a one-pull
-                // sponge fill of the whole column.
+                // bed on a wetting curve — bone-dry beds take a trickle so
+                // free water can still move; wet beds drink faster.
                 if cur.material != MaterialId::Air && above.material == MaterialId::Air {
                     let src_y = y as i32 + 1;
                     let settled_stack = stacked_air(x, src_y) && !open_surge_face(x, src_y);

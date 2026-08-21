@@ -70,11 +70,15 @@ pub(crate) fn seepage_rate_with(material: MaterialId, hydro: &HydroOverrides) ->
     ((p as i32 * 32) / 255).max(1)
 }
 
-/// Infiltration into a porous cell this step: permeability × free pores.
+/// Surface / top-layer infiltration into a porous cell this step.
 ///
-/// Dry ground drinks at the full [`seepage_rate_with`]; as saturation
-/// rises the rate falls toward 1 sat/tick so columns do not sponge-fill
-/// in a single pass (gradual groundwater recharge).
+/// Bone-dry ground takes only a trickle so most free water can run past
+/// (overland / sheet flow). As the contact cell wets, uptake climbs toward
+/// the full [`seepage_rate_with`] — like a wetting front opening pores.
+/// Full cells take nothing more (`free == 0`).
+///
+/// Peer solid↔solid seepage still uses the raw permeability rate; this
+/// curve is for Air→solid recharge of the top of a column.
 pub(crate) fn seepage_uptake_rate_with(
     material: MaterialId,
     hydro: &HydroOverrides,
@@ -89,7 +93,13 @@ pub(crate) fn seepage_uptake_rate_with(
     if free <= 0 {
         return 0;
     }
-    let scaled = (base * free) / (cap as i32);
+    // Wetness fraction with a small dry kick so sat=0 still seeps ~1/8 rate
+    // instead of stalling forever as a perfect seal.
+    //   sat=0     → ~base/8
+    //   sat=cap/2 → ~base/2
+    //   sat→cap   → →base (clamped by free)
+    let kick = (cap as i32 / 8).max(1);
+    let scaled = (base * (sat as i32 + kick)) / (cap as i32 + kick);
     scaled.max(1).min(free).min(base)
 }
 

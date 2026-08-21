@@ -901,8 +901,8 @@ fn drain_step_cap(depth: i32) -> i32 {
 /// Porous-face dividend: soak by permeability, spill leftover only with head.
 ///
 /// Facing a dry/porous solid (not Air/Organic):
-/// 1. Absorb up to [`seepage_uptake_rate_with`] (permeability × free
-///    pores) into the contact cell — slows as the face saturates.
+/// 1. Absorb up to [`seepage_uptake_rate_with`] (slow when bone-dry so
+///    water can run past; faster as the face wets) into the contact cell.
 /// 2. Leftover may spill into Air at the column crest — only when *this*
 ///    source cell sits at or above that crest (`gy >= crest_y`). Mass and
 ///    `step` (speed proxy) cap how much passes; a pond film below a berm
@@ -935,7 +935,7 @@ fn plan_porous_face_dividend(
             continue;
         }
 
-        // 1) Permeability × free-pore dividend — slows as the face wets.
+        // 1) Wetting-front dividend — bone-dry sheds; wet faces drink.
         let soak_rate = seepage_uptake_rate_with(
             side.material,
             &world.hydro,

@@ -31,7 +31,7 @@ fn rain_row_saturates_sand_over_one_tick() {
         "set_cell should dirty the chunk before tick"
     );
 
-    // Open one-cell sheet: seepage soaks the bed gradually as pores fill.
+    // Open one-cell sheet: bed soaks on a wetting curve (slow when dry).
     for _ in 0..64 {
         tick(&mut w);
     }

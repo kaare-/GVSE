@@ -2619,22 +2619,25 @@ fn full_film_lateral_hop_stays_partial() {
 }
 
 #[test]
-fn seepage_uptake_slows_as_pores_fill() {
+fn seepage_uptake_speeds_as_surface_wets() {
     let hydro = HydroOverrides::default();
     let cap = water_capacity(MaterialId::Sand);
+    let base = seepage_rate_with(MaterialId::Sand, &hydro);
     let dry = seepage_uptake_rate_with(MaterialId::Sand, &hydro, 0, cap);
     let half = seepage_uptake_rate_with(MaterialId::Sand, &hydro, cap / 2, cap);
     let almost = seepage_uptake_rate_with(MaterialId::Sand, &hydro, cap.saturating_sub(1), cap);
     let full = seepage_uptake_rate_with(MaterialId::Sand, &hydro, cap, cap);
-    assert!(dry > 0, "dry sand must infiltrate");
+    assert!(dry > 0, "bone-dry sand must still take a trickle");
     assert!(
-        half < dry,
-        "half-full sand must drink slower (dry={dry} half={half})"
+        dry < base / 4,
+        "bone-dry must shed most water (dry={dry} base={base})"
     );
     assert!(
-        almost <= half && almost >= 1,
-        "near-full sand must crawl (almost={almost} half={half})"
+        half > dry,
+        "half-wet sand must drink faster than bone-dry (dry={dry} half={half})"
     );
+    // Near-full is free-limited to 1 even though the wetness fraction is high.
+    assert_eq!(almost, 1, "last free pore crawls in at 1 (almost={almost})");
     assert_eq!(full, 0, "full sand takes nothing more");
 }
 
@@ -2791,8 +2794,8 @@ fn pile_against_dry_air_dumps_sheet() {
 #[test]
 fn stacked_lake_interior_gravity_soaks_bed() {
     // Closed basin: stacked water with wet Air on both sides must wet
-    // the sand bed gradually (permeability × free pores), not sponge
-    // the whole column in one gravity pull.
+    // the sand bed on a wetting curve (bone-dry trickle → faster when wet),
+    // not a one-pull sponge of the whole column.
     let mut w = World::new(31);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     for x in 0..12 {
