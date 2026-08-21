@@ -973,16 +973,14 @@ async fn main() {
             );
         }
 
-        // Ridges behind terrain. Skip when a heatmap owns the view —
-        // mid/far fills used to stamp hard horizontal shelves through
-        // semi-transparent sat/temp overlays (playtest y≈36 + floor line).
+        // Ridges behind terrain. Skip whenever a sat/temp/myc/geotech
+        // heatmap is on — mid/far fills stamp hard horizontal shelves
+        // through even a moderate landscape blend (playtest y≈36 line).
         let heatmap_on_early = sat_overlay
             || temp_overlay
             || mycelium_overlay
             || geotech_mode != GeotechOverlayMode::Off;
-        let hide_ridges_for_heatmap =
-            heatmap_on_early && settings.heatmap_blend >= 0.45;
-        if !hide_ridges_for_heatmap {
+        if !heatmap_on_early {
             draw_ridge_silhouettes(
                 &ridges,
                 dn_fg,

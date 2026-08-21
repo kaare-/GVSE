@@ -7096,3 +7096,114 @@ fn hill_dump_does_not_teleport_sat_past_dry_gap() {
         "bottom sat must not outrun mid (sand={sand} mid={mid} bottom={bottom})"
     );
 }
+
+#[test]
+fn wetting_front_advances_past_quarter_capacity() {
+    // Playtest U-heatmap shelf tip: stone sat=5/20 stuck. The old ~30%
+    // downward plug froze the front at ≈cap/4; residual-only must crawl.
+    let mut w = World::new(9);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    let cap = water_capacity(MaterialId::Stone);
+    assert!(cap >= 16, "expected stone-like porosity, got {cap}");
+    let stall = (cap / 4).max(1);
+    for y in 0..=6 {
+        w.set_cell(3, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(5, y, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(4, 1, Cell::solid(MaterialId::Stone));
+    w.set_cell(
+        4,
+        2,
+        Cell {
+            material: MaterialId::Stone,
+            sat: Sat(stall),
+            ..Cell::default()
+        },
+    );
+    w.set_cell(4, 3, Cell::solid(MaterialId::Bedrock));
+    for _ in 0..12 {
+        apply_seepage(&mut w);
+    }
+    let below = w.get_cell(4, 1).unwrap().sat.0;
+    assert!(
+        below > 0,
+        "donor at sat={stall}/{cap} must still wet the cell below (below={below})"
+    );
+}
+
+#[test]
+fn residual_film_still_blocked_from_downward_pipe() {
+    // Residual film (sat≤2) must not pipe to bedrock while the mid column
+    // stays dry — keep the old teleport guard after loosening the 30% plug.
+    let mut w = World::new(9);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for y in 0..=5 {
+        w.set_cell(3, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(5, y, Cell::solid(MaterialId::Bedrock));
+    }
+    w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(4, 1, Cell::solid(MaterialId::Stone));
+    w.set_cell(
+        4,
+        2,
+        Cell {
+            material: MaterialId::Stone,
+            sat: Sat(2),
+            ..Cell::default()
+        },
+    );
+    w.set_cell(4, 3, Cell::solid(MaterialId::Bedrock));
+    for _ in 0..20 {
+        apply_seepage(&mut w);
+    }
+    let below = w.get_cell(4, 1).unwrap().sat.0;
+    assert_eq!(
+        below, 0,
+        "residual donor must not advance the wetting front (below={below})"
+    );
+}
+
+#[test]
+fn calm_lake_soaks_porous_bank() {
+    // Closed basin: standing water against dry stone. Same-Y open Air used
+    // to mark the lake as runoff and skip bank force-fill → sawtooth
+    // fingers on the U heatmap. Calm shore must soak the bank.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..=8 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 0..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 1..=4 {
+        for y in 1..=6 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 5..=6 {
+        for y in 1..=6 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    let perf = PerfConfig::default();
+    for _ in 0..120 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let cap = water_capacity(MaterialId::Stone);
+    let bank: u8 = (1..=6)
+        .map(|y| w.get_cell(5, y).map(|c| c.sat.0).unwrap_or(0))
+        .max()
+        .unwrap_or(0);
+    let mid = w.get_cell(5, 3).unwrap().sat.0;
+    assert!(
+        bank > cap / 4,
+        "calm lake must soak bank past shelf stall (bank_max={bank} mid={mid} cap={cap})"
+    );
+    assert!(
+        mid > 0,
+        "bank mid-height must wet (mid={mid} bank_max={bank})"
+    );
+}

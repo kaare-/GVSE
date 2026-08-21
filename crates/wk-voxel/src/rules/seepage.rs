@@ -130,7 +130,8 @@ pub fn wake_lake_bed_pores(world: &mut World) {
 /// Underground sat can equilibrate inside each chunk then go quiet while
 /// a sharp step remains on the cy boundary — the sat heatmap shows that
 /// as a horizontal shelf. Wet-air wake never visits dry cy neighbours
-/// that only hold pore water, so we couple the seam rows explicitly.
+/// that only hold pore water, so we couple a **band** of seam rows
+/// explicitly (not only the two face cells).
 pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
     let hydro = world.hydro;
     let ch = CHUNK_CELLS_H as i32;
@@ -142,8 +143,11 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
         if !world.chunks.contains_key(&above) {
             continue;
         }
+        // Face at top of this chunk / bottom of cy+1, plus one row of halo
+        // so lateral shore fronts crossing the seam stay coupled.
         let y_lo = coord.cy * ch + (ch - 1);
         let y_hi = y_lo + 1;
+        let band = [y_lo - 1, y_lo, y_hi, y_hi + 1];
         let base_gx = coord.cx * cw;
         for lx in 0..cw {
             let gx = world.wrap_x(base_gx + lx);
@@ -160,19 +164,30 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
             if !((lo_pore || lo_air) && (hi_pore || hi_air)) {
                 continue;
             }
-            // Any cross-seam moisture that can still move.
             let lo_cap = water_capacity_with(lo.material, &hydro);
             let hi_cap = water_capacity_with(hi.material, &hydro);
             let lo_room = lo_pore && lo_cap > 0 && lo.sat.0 < lo_cap;
             let hi_room = hi_pore && hi_cap > 0 && hi.sat.0 < hi_cap;
             let lo_wet = lo.sat.0 > 0;
             let hi_wet = hi.sat.0 > 0;
-            if (lo_wet || hi_wet || lo_air || hi_air) && (lo_room || hi_room) {
-                if lo_room {
-                    touches.push((gx, y_lo));
+            if !((lo_wet || hi_wet || lo_air || hi_air) && (lo_room || hi_room || lo_air || hi_air))
+            {
+                continue;
+            }
+            for &yy in &band {
+                if yy < 0 {
+                    continue;
                 }
-                if hi_room {
-                    touches.push((gx, y_hi));
+                let Some(c) = world.get_cell(gx, yy) else {
+                    continue;
+                };
+                if is_porous_solid_with(c.material, &hydro) {
+                    let cap = water_capacity_with(c.material, &hydro);
+                    if cap > 0 && (c.sat.0 < cap || c.sat.0 > 0) {
+                        touches.push((gx, yy));
+                    }
+                } else if c.material == MaterialId::Air && c.sat.0 > 0 {
+                    touches.push((gx, yy));
                 }
             }
         }
@@ -312,9 +327,9 @@ fn accumulate_seepage_xfers(
                         a.sat.0, cap_a, gy, b.sat.0, cap_b, ny,
                     );
                     // Wetting-front plug: pore water may only drive *down*
-                    // into a drier neighbour when the donor is meaningfully
-                    // wet. Otherwise a residual film pipes to bedrock and
-                    // pools there while the mid-column stays "dry".
+                    // into a drier neighbour when the donor is more than a
+                    // residual film. A 30% gate left shore shelves stuck at
+                    // sat≈cap/4 on the U heatmap (playtest stone 5/20).
                     if a_solid && b_solid && move_amt != 0 {
                         let downward = if move_amt > 0 {
                             gy > ny // a → b and a is higher
@@ -327,8 +342,12 @@ fn accumulate_seepage_xfers(
                             } else {
                                 (b.sat.0, cap_b)
                             };
-                            // Donor must be ≥ ~30% full to advance the front.
-                            if cap_d == 0 || (sat_d as i32) * 10 < (cap_d as i32) * 3 {
+                            // Residual film only (≤10% / sat≤2) — blocks the
+                            // old bedrock pipe, still lets groundwater crawl.
+                            if cap_d == 0
+                                || sat_d <= 2
+                                || (sat_d as i32) * 10 < (cap_d as i32)
+                            {
                                 move_amt = 0;
                             }
                         }
@@ -506,9 +525,12 @@ fn accumulate_seepage_xfers(
 /// Splash into a column face / flowing bed — not a full pore fill.
 const SHEET_FACE_SPLASH: i32 = 4;
 
-/// True when standing Air still has a runoff path: open (non-full) Air
-/// neighbour, or diagonal/cascade downhill Air with room. Hillside blobs
-/// must shed along the slope instead of soaking their seat at full perm.
+/// True when standing Air can still cascade / drain as overland flow.
+///
+/// Only cascade edges and diagonal-down Air count. A same-Y open Air
+/// neighbour used to mark calm lake-shore cells as "runoff", which
+/// skipped bank force-fill and left sawtooth seepage fingers into the
+/// hill on the U heatmap.
 fn standing_air_is_runoff(
     world: &World,
     read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
@@ -520,10 +542,17 @@ fn standing_air_is_runoff(
     for dx in [-1_i32, 1] {
         let nx = world.wrap_x(gx + dx);
         let nlx = lx + dx;
-        match read(nlx, ly, nx, gy) {
-            Some(c) if c.material == MaterialId::Air && !c.sat.is_full() => return true,
-            _ => {}
+        // Cascade edge: side Air sitting above Air with room.
+        if let Some(side) = read(nlx, ly, nx, gy) {
+            if side.material == MaterialId::Air {
+                if let Some(below) = read(nlx, ly - 1, nx, gy - 1) {
+                    if below.material == MaterialId::Air && !below.sat.is_full() {
+                        return true;
+                    }
+                }
+            }
         }
+        // Diagonal-down into Air with room (shelf / slope drain).
         match read(nlx, ly - 1, nx, gy - 1) {
             Some(c) if c.material == MaterialId::Air && !c.sat.is_full() => return true,
             _ => {}
@@ -595,8 +624,8 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
                     continue;
                 }
                 let cap = water_capacity_with(cell.material, &hydro);
-                // Need a meaningful donor — matches wetting-front plug (~30%).
-                if cap == 0 || (cell.sat.0 as i32) * 10 < (cap as i32) * 3 {
+                // Need a meaningful donor — residual film only skipped.
+                if cap == 0 || cell.sat.0 <= 2 {
                     continue;
                 }
                 let gx = world.wrap_x(base_gx + x as i32);
