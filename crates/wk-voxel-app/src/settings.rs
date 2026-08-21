@@ -1011,7 +1011,7 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "  On skips polish when the halo shrinks. Also cadence-gates underground seepage.",
+                        "  On skips polish when the halo shrinks. Also cadence-gates pore seepage (beds still wake every tick).",
                     );
                     ui.checkbox(
                         hash!(),
