@@ -166,32 +166,57 @@ fn accumulate_seepage_xfers(
                         let free = cap_a.saturating_sub(a.sat.0) as i32;
                         move_amt = -(b.sat.0 as i32).min(free);
                     }
+                    // Standing pond / lake side face → bank soak (same idea).
+                    if dx != 0 {
+                        if a_solid
+                            && b.material == MaterialId::Air
+                            && b.sat.0 >= 160
+                        {
+                            let free = cap_a.saturating_sub(a.sat.0) as i32;
+                            if free > 0 {
+                                move_amt = -(b.sat.0 as i32).min(free);
+                            }
+                        } else if !a_solid
+                            && a.material == MaterialId::Air
+                            && a.sat.0 >= 160
+                            && b_solid
+                        {
+                            let free = cap_b.saturating_sub(b.sat.0) as i32;
+                            if free > 0 {
+                                move_amt = (a.sat.0 as i32).min(free);
+                            }
+                        }
+                    }
                     if move_amt == 0 {
                         continue;
                     }
                     let rate = if a_solid && b_solid {
                         // Peer pores: drier side limits conduction.
-                        // Vertical edges crawl a bit slower so lateral
-                        // aquifer spread can compete with downhill drain
-                        // (avoids a single wet column punching straight down).
-                        let mut rate = seepage_conduct_rate_with(
+                        seepage_conduct_rate_with(
                             a.material, &hydro, a.sat.0, cap_a, b.material, b.sat.0, cap_b,
-                        );
-                        if dx == 0 && dy != 0 {
-                            rate = ((rate * 2) / 3).max(1).min(rate);
-                        }
-                        rate
+                        )
                     } else if move_amt > 0 {
                         // A → B: infiltrating into B, or A weeping into Air.
                         if b_solid {
-                            seepage_uptake_rate_with(b.material, &hydro, b.sat.0, cap_b)
+                            // Standing pond/lake face: full permeability into
+                            // the bank/bed. Thin films still use the wetting
+                            // curve so dry ground sheds runoff.
+                            if a.material == MaterialId::Air && a.sat.0 >= 160 {
+                                seepage_rate_with(b.material, &hydro)
+                            } else {
+                                seepage_uptake_rate_with(b.material, &hydro, b.sat.0, cap_b)
+                            }
                         } else {
                             seepage_rate_with(a.material, &hydro)
                         }
                     } else {
                         // B → A: infiltrating into A, or B weeping into Air.
                         if a_solid {
-                            seepage_uptake_rate_with(a.material, &hydro, a.sat.0, cap_a)
+                            if b.material == MaterialId::Air && b.sat.0 >= 160 {
+                                seepage_rate_with(a.material, &hydro)
+                            } else {
+                                seepage_uptake_rate_with(a.material, &hydro, a.sat.0, cap_a)
+                            }
                         } else {
                             seepage_rate_with(b.material, &hydro)
                         }
@@ -209,28 +234,35 @@ fn accumulate_seepage_xfers(
                             rate
                         }
                     };
-                    // A column face is not a bucket. Lateral Air→solid
-                    // (and a flowing sheet on a bed) only splash-wet.
+                    // Open flowing films only splash-wet a dry bank so the
+                    // leading edge does not vanish into pores. Standing
+                    // pond / lake faces (and settled beds) soak at the
+                    // full uptake rate — sides and bottoms both recharge.
                     let rate = {
                         let air_solid = a_solid != b_solid;
                         if !air_solid {
                             rate
-                        } else if dx != 0 {
-                            rate.min(SHEET_FACE_SPLASH)
                         } else {
                             let air = if a_solid { &b } else { &a };
-                            let air_lx = if a_solid { lx + dx } else { lx };
-                            let air_gx = if a_solid { nx } else { gx };
-                            let air_gy = if a_solid { ny } else { gy };
-                            let air_ly = if a_solid { ly + dy } else { ly };
-                            if air.material == MaterialId::Air
-                                && air_has_dry_escape(
-                                    world, &read, air_gx, air_gy, air_lx, air_ly,
-                                )
-                            {
+                            let standing_face = air.material == MaterialId::Air && air.sat.0 >= 160;
+                            if standing_face {
+                                rate
+                            } else if dx != 0 {
                                 rate.min(SHEET_FACE_SPLASH)
                             } else {
-                                rate
+                                let air_lx = if a_solid { lx + dx } else { lx };
+                                let air_gx = if a_solid { nx } else { gx };
+                                let air_gy = if a_solid { ny } else { gy };
+                                let air_ly = if a_solid { ly + dy } else { ly };
+                                if air.material == MaterialId::Air
+                                    && air_has_dry_escape(
+                                        world, &read, air_gx, air_gy, air_lx, air_ly,
+                                    )
+                                {
+                                    rate.min(SHEET_FACE_SPLASH)
+                                } else {
+                                    rate
+                                }
                             }
                         }
                     };

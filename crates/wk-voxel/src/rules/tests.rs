@@ -457,6 +457,46 @@ fn underground_seepage_moves_laterally_through_soil() {
 }
 
 #[test]
+fn underground_seepage_drains_downward_through_soil() {
+    // Wet soil above dry soil — seepage must move pore water down.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for y in 0..=4 {
+        w.set_cell(4, y, Cell::solid(MaterialId::Soil));
+    }
+    let cap = water_capacity(MaterialId::Soil);
+    w.set_cell(4, 3, {
+        let mut c = Cell::solid(MaterialId::Soil);
+        c.sat = Sat(cap);
+        c
+    });
+    apply_seepage(&mut w);
+    let below = w.get_cell(4, 2).unwrap().sat.0;
+    let above = w.get_cell(4, 3).unwrap().sat.0;
+    assert!(below > 0, "dry soil below must take pore water (below={below})");
+    assert!(above < cap, "upper cell must lose sat downward (above={above})");
+}
+
+#[test]
+fn standing_pond_side_seeps_into_bank() {
+    // Full pond film against a soil bank — soak at uptake rate, not splash-4.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..10 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+    }
+    w.set_cell(3, 2, Cell::water());
+    w.set_cell(4, 2, Cell::solid(MaterialId::Soil));
+    apply_seepage(&mut w);
+    let bank = w.get_cell(4, 2).unwrap().sat.0;
+    assert!(
+        bank > 4,
+        "standing pond side must soak the bank beyond a splash (bank={bank})"
+    );
+}
+
+#[test]
 fn seepage_wets_adjacent_sand_from_air_water() {
     let mut w = World::new(42);
     w.ensure_chunk(ChunkCoord::new(0, 0));

@@ -12,7 +12,7 @@ use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::for_each_region_parallel;
 
-use super::head::seepage_uptake_rate_with;
+use super::head::{seepage_rate_with, seepage_uptake_rate_with};
 use super::plan::regions_for_standalone;
 
 /// Bottom-up single-step gravity fall for water saturation.
@@ -203,7 +203,13 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                         next_cur = Some(above);
                         continue;
                     }
-                    let rate = seepage_uptake_rate_with(cur.material, &hydro, cur.sat.0, cap);
+                    // Settled / walled free water infiltrates at full
+                    // permeability; thin films still use the wetting curve.
+                    let rate = if above.sat.0 >= 160 {
+                        seepage_rate_with(cur.material, &hydro)
+                    } else {
+                        seepage_uptake_rate_with(cur.material, &hydro, cur.sat.0, cap)
+                    };
                     if rate <= 0 {
                         next_cur = Some(above);
                         continue;
