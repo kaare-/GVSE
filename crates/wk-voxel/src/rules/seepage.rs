@@ -16,7 +16,75 @@ use super::head::{
     is_porous_solid_with, sat_move_to_equalize_heads, seepage_conduct_rate_with, seepage_rate_with,
     seepage_uptake_rate_with,
 };
-use super::plan::regions_for_standalone;
+use super::plan::{regions_for_standalone, regions_wet_loaded};
+
+/// Quiet free-surface lakes stop dirty-tracking once water looks settled,
+/// leaving beds (and deep pore stacks under a wet sand cap) bone-dry.
+/// Re-dirty unsaturated porous cells that still have a standing-water or
+/// wetter-pore neighbour so seepage keeps infiltrating.
+///
+/// Runs every tick: cost is only the wet-chunk scan, and once beds are
+/// saturated the touch set is empty (steady lakes stay quiet).
+pub fn wake_lake_bed_pores(world: &mut World) {
+    let hydro = world.hydro;
+    let regions = regions_wet_loaded(world);
+    // Collect touches first — `touch_dirty` needs `&mut World` while we also
+    // read neighbour cells across chunk seams.
+    let mut touches: Vec<(i32, i32)> = Vec::new();
+    for ac in &regions {
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            continue;
+        };
+        let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
+        let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
+        for y in ac.rect.y0..=ac.rect.y1 {
+            let ly = y as usize;
+            let gy = base_gy + y as i32;
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let lx = x as usize;
+                let cell = chunk.get(lx, ly);
+                if !is_porous_solid_with(cell.material, &hydro) {
+                    continue;
+                }
+                let cap = water_capacity_with(cell.material, &hydro);
+                if cap == 0 || cell.sat.0 >= cap {
+                    continue;
+                }
+                let gx = world.wrap_x(base_gx + x as i32);
+                let mut feed = false;
+                if let Some(above) = world.get_cell(gx, gy + 1) {
+                    if above.material == MaterialId::Air && above.sat.0 >= 160 {
+                        feed = true;
+                    } else if is_porous_solid_with(above.material, &hydro)
+                        && above.sat.0 > cell.sat.0
+                    {
+                        // Wetting front advancing down a saturated sand cap
+                        // into deeper stone / clay.
+                        feed = true;
+                    }
+                }
+                if !feed {
+                    for dx in [-1_i32, 1] {
+                        let nx = world.wrap_x(gx + dx);
+                        if matches!(
+                            world.get_cell(nx, gy),
+                            Some(n) if n.material == MaterialId::Air && n.sat.0 >= 160
+                        ) {
+                            feed = true;
+                            break;
+                        }
+                    }
+                }
+                if feed {
+                    touches.push((gx, gy));
+                }
+            }
+        }
+    }
+    for (gx, gy) in touches {
+        world.touch_dirty(gx, gy);
+    }
+}
 
 /// Permeability-limited soak: water moves from wet cells into
 /// adjacent porous solids (and between porous solids) down the

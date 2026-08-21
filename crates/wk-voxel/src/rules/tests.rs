@@ -94,7 +94,7 @@ fn lake_bed_sand_wets_clay_and_stone_below_via_tick() {
     w.set_cell(4, 4, Cell::water());
     w.set_cell(4, 5, Cell::water());
 
-    for _ in 0..30 {
+    for _ in 0..200 {
         tick(&mut w);
     }
 
@@ -104,9 +104,11 @@ fn lake_bed_sand_wets_clay_and_stone_below_via_tick() {
     let sand_cap = water_capacity(MaterialId::Sand);
     let clay_cap = water_capacity(MaterialId::Clay);
     let stone_cap = water_capacity(MaterialId::Stone);
-    assert_eq!(sand.sat.0, sand_cap, "sand should saturate");
     assert_eq!(clay.sat.0, clay_cap, "clay under sand must saturate");
     assert_eq!(stone.sat.0, stone_cap, "stone under clay must saturate");
+    // Once the stack below is full, sand is no longer a conduit and
+    // must sit at capacity (mid-wetting it can oscillate cap-1).
+    assert_eq!(sand.sat.0, sand_cap, "sand should saturate");
 }
 
 #[test]
@@ -140,9 +142,16 @@ fn deep_stone_stack_keeps_wetting_after_surface_quiesces() {
     }
     let sand = w.get_cell(4, 18).unwrap().sat.0;
     let sand_cap = water_capacity(MaterialId::Sand);
-    assert_eq!(sand, sand_cap, "sand cap should be saturated early");
+    // While stone below is still drinking, sand can sit at cap-1 after
+    // the seepage drain half of the tick; it must still be nearly full.
+    assert!(
+        sand + 1 >= sand_cap,
+        "sand cap should be nearly saturated early (sat={sand}/{sand_cap})"
+    );
 
-    for _ in 0..40 {
+    // Stone conduction is permeability-limited (~1 sat/tick) and must
+    // percolate cell-by-cell — budget for a wetting front, not freefall.
+    for _ in 0..500 {
         tick(&mut w);
     }
     let stone_cap = water_capacity(MaterialId::Stone);
@@ -155,6 +164,49 @@ fn deep_stone_stack_keeps_wetting_after_surface_quiesces() {
     assert_eq!(
         deep, stone_cap,
         "deep stone under the lake bed should saturate (deep={deep})"
+    );
+    assert_eq!(
+        w.get_cell(4, 18).unwrap().sat.0,
+        sand_cap,
+        "sand returns to full once the stone stack is saturated"
+    );
+}
+
+#[test]
+fn quiet_deep_lake_bed_keeps_soaking_after_dirty_clears() {
+    // User report: deep lake sand stuck at sat~2 after ~1800 ticks because
+    // the free surface went quiet and dirty planning never revisited the bed.
+    let mut w = World::new(9);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 2..=6 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Broad basin — water neighbours on both sides (not a walled shaft).
+    for x in 2..=6 {
+        w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+    }
+    for y in 2..=12 {
+        for x in 2..=6 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    clear_all_dirty(&mut w);
+    assert!(
+        plan_active(&w).is_empty(),
+        "precondition: lake must start fully quiet"
+    );
+
+    for _ in 0..80 {
+        tick(&mut w);
+    }
+
+    let sand_cap = water_capacity(MaterialId::Sand);
+    let bed = w.get_cell(4, 1).unwrap();
+    assert_eq!(bed.material, MaterialId::Sand);
+    assert_eq!(
+        bed.sat.0, sand_cap,
+        "quiet deep-lake bed must still soak to capacity (sat={})",
+        bed.sat.0
     );
 }
 
