@@ -973,23 +973,32 @@ async fn main() {
             );
         }
 
-        draw_ridge_silhouettes(
-            &ridges,
-            dn_fg,
-            &sky_weather,
-            &settings.atmosphere,
-            cam_x,
-            cam_y,
-            origin_x,
-            origin_y,
-            cell_px,
-            scene.params.bedrock_floor_y,
-            scene.params.sea_level_y,
-            scene.params.wrap_x,
-            scene.params.width_cols,
-            sw,
-            sh,
-        );
+        // Ridges behind terrain. Skip whenever a sat/temp/myc/geotech
+        // heatmap is on — mid/far fills stamp hard horizontal shelves
+        // through even a moderate landscape blend (playtest y≈36 line).
+        let heatmap_on_early = sat_overlay
+            || temp_overlay
+            || mycelium_overlay
+            || geotech_mode != GeotechOverlayMode::Off;
+        if !heatmap_on_early {
+            draw_ridge_silhouettes(
+                &ridges,
+                dn_fg,
+                &sky_weather,
+                &settings.atmosphere,
+                cam_x,
+                cam_y,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.sea_level_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+                sh,
+            );
+        }
 
         if clouds_on {
             draw_depth_cloud_layer(
