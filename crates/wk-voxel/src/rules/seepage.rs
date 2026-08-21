@@ -21,7 +21,7 @@ use super::plan::{regions_for_standalone, regions_wet_loaded};
 /// Quiet free-surface lakes stop dirty-tracking once water looks settled,
 /// leaving beds (and deep pore stacks under a wet sand cap) bone-dry.
 /// Re-dirty unsaturated porous cells that still have a standing-water or
-/// wetter-pore neighbour so seepage keeps infiltrating.
+/// wetter-pore neighbour so seepage / gravity keep infiltrating.
 ///
 /// Runs every tick: cost is only the wet-chunk scan, and once beds are
 /// saturated the touch set is empty (steady lakes stay quiet).
@@ -215,21 +215,15 @@ fn accumulate_seepage_xfers(
                     let mut move_amt = sat_move_to_equalize_heads(
                         a.sat.0, cap_a, gy, b.sat.0, cap_b, ny,
                     );
-                    // A persistent water column keeps infiltrating its bed
-                    // toward pore capacity. The pairwise head formula alone
-                    // stalls partially wet (~1/3 full in worldgen lakes).
-                    // Keep this in seepage so a moving deep surge only wets
-                    // the bed at the material permeability rate; gravity must
-                    // never empty the whole pore capacity in one pull.
+                    // Standing free water on a bed keeps infiltrating toward
+                    // pore capacity. Do not require a second stacked water
+                    // cell above — single-cell pond depth and open basins
+                    // must still soak. Head equalise alone stalls near-dry
+                    // beds (~sat 2) under deep lakes.
                     if dy == 1
                         && a_solid
                         && b.material == MaterialId::Air
-                        && !b.sat.is_empty()
-                        && matches!(
-                            read(lx + dx, ly + dy + 1, nx, ny + 1),
-                            Some(above)
-                                if above.material == MaterialId::Air && above.sat.0 >= 160
-                        )
+                        && b.sat.0 >= 160
                     {
                         let free = cap_a.saturating_sub(a.sat.0) as i32;
                         move_amt = -(b.sat.0 as i32).min(free);
@@ -259,10 +253,19 @@ fn accumulate_seepage_xfers(
                         continue;
                     }
                     let rate = if a_solid && b_solid {
-                        // Peer pores: drier side limits conduction.
-                        seepage_conduct_rate_with(
-                            a.material, &hydro, a.sat.0, cap_a, b.material, b.sat.0, cap_b,
-                        )
+                        if dy == 1 {
+                            // Vertical pore column: full min-permeability.
+                            // The dry-kick conduct curve was starving lake
+                            // beds and buried sand under standing water
+                            // (demo sat stuck ~2/110 for thousands of ticks).
+                            // Lateral peers still use the wetness bottleneck.
+                            seepage_rate_with(a.material, &hydro)
+                                .min(seepage_rate_with(b.material, &hydro))
+                        } else {
+                            seepage_conduct_rate_with(
+                                a.material, &hydro, a.sat.0, cap_a, b.material, b.sat.0, cap_b,
+                            )
+                        }
                     } else if move_amt > 0 {
                         // A → B: infiltrating into B, or A weeping into Air.
                         if b_solid {

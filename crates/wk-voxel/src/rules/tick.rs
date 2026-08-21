@@ -365,6 +365,16 @@ fn tick_with_life_inner(
     let mut local = PhysicsTimings::default();
 
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
+    // Re-dirty unsaturated beds under standing water *before* gravity so
+    // a quiet lake still drinks on this tick (wake used to run only after
+    // the flow loop, when gravity had already skipped the bed).
+    {
+        let t0 = profile.then(Instant::now);
+        super::seepage::wake_lake_bed_pores(world);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.seepage += t0.elapsed();
+        }
+    }
     // Last non-empty flow plan — grain/seepage fall back to this when
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();

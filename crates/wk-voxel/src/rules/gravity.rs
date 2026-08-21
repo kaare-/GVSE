@@ -34,8 +34,9 @@ use super::plan::regions_for_standalone;
 ///   write-set as [`parallel::pull_write_coords`]). Missing above
 ///   chunks yield no move.
 /// - **Air → porous solid** for a walled pond, or a stacked lake column
-///   with full wet Air on both sides. Shore / weir / open-surge faces
-///   stay in Air; seepage splash-wets those beds.
+///   with standing wet Air (`sat ≥ 160`) on both sides. Shore / weir /
+///   open-surge faces stay in Air; seepage soaks those beds. (Requiring
+///   neighbours to be `sat == 255` left near-full open basins dry.)
 /// - **Pore water in solids never freefalls.** Solid→solid and solid→Air
 ///   sat moves belong to seepage (Darcy). Dumping a full cell of pore
 ///   water down a soil column each gravity pass looked like powder
@@ -134,20 +135,20 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
             )
         };
         let open_surge_face = |lx: u8, ly_src: i32| -> bool {
-            // Lake interior = full wet Air on both sides. Anything else
-            // (dry Air, partial film, or a solid weir face) is a surge /
-            // shore column and must not gravity-drink its bed.
-            let full_wet = |nlx: i32| -> bool {
+            // Lake interior = standing wet Air on both sides. Requiring
+            // sat==255 treated near-full open basins as surge and left
+            // beds dry; sat≥160 matches the standing-water threshold.
+            let standing = |nlx: i32| -> bool {
                 if nlx < 0 || nlx >= CHUNK_CELLS_W as i32 {
                     // Unknown chunk seam: do not invent a dry face.
                     return true;
                 }
                 matches!(
                     read_xy(nlx as u8, ly_src),
-                    Some(c) if c.material == MaterialId::Air && c.sat.is_full()
+                    Some(c) if c.material == MaterialId::Air && c.sat.0 >= 160
                 )
             };
-            !full_wet(lx as i32 - 1) || !full_wet(lx as i32 + 1)
+            !standing(lx as i32 - 1) || !standing(lx as i32 + 1)
         };
         for x in ac.rect.x0..=ac.rect.x1 {
             let mut any_mobile = false;
@@ -194,8 +195,8 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     continue;
                 }
                 // Walled ponds and stacked lake interiors infiltrate the
-                // bed on a wetting curve — bone-dry beds take a trickle so
-                // free water can still move; wet beds drink faster.
+                // bed. Open surge / sheet faces stay in Air — seepage
+                // splash-wets those. Standing water uses full permeability.
                 if cur.material != MaterialId::Air && above.material == MaterialId::Air {
                     let src_y = y as i32 + 1;
                     let settled_stack = stacked_air(x, src_y) && !open_surge_face(x, src_y);
@@ -203,8 +204,6 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                         next_cur = Some(above);
                         continue;
                     }
-                    // Settled / walled free water infiltrates at full
-                    // permeability; thin films still use the wetting curve.
                     let rate = if above.sat.0 >= 160 {
                         seepage_rate_with(cur.material, &hydro)
                     } else {
