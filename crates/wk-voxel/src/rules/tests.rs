@@ -6729,6 +6729,55 @@ fn seepage_crosses_vertical_chunk_seam_via_tick() {
 }
 
 
+
+#[test]
+fn pore_sat_does_not_shelf_across_vertical_chunk_seam() {
+    // Fully buried stone column across y=63|64 with standing water above.
+    // Pore water must keep crossing the seam — no permanent sat step that
+    // reads as a horizontal shelf on the U heatmap.
+    let mut w = World::new(9);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 3..=5 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=70 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    for y in 0..=72 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(6, y, Cell::solid(MaterialId::Bedrock));
+    }
+    // Free water pond above the stone stack (feeds the column).
+    for y in 71..=74 {
+        for x in 3..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let perf = PerfConfig::default();
+    for _ in 0..800 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let cap = water_capacity(MaterialId::Stone);
+    let s70 = w.get_cell(4, 70).unwrap().sat.0 as i32;
+    let s64 = w.get_cell(4, 64).unwrap().sat.0 as i32;
+    let s63 = w.get_cell(4, 63).unwrap().sat.0 as i32;
+    let s62 = w.get_cell(4, 62).unwrap().sat.0 as i32;
+    assert!(
+        s70 >= cap as i32 / 2,
+        "bed under the pond should wet (s70={s70} cap={cap})"
+    );
+    assert!(
+        (s64 - s63).abs() <= 4,
+        "seam must not hold a sharp dry step (s64={s64} s63={s63} s62={s62} s70={s70})"
+    );
+    assert!(
+        (s63 - s62).abs() <= 4,
+        "no shelf just below the seam (s64={s64} s63={s63} s62={s62})"
+    );
+}
+
+
 #[test]
 fn surface_runoff_crosses_vertical_chunk_seam() {
     // Impermeable stairs: high on the right (above seam), descending left

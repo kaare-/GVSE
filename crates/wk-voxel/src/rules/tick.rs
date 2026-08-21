@@ -375,6 +375,7 @@ fn tick_with_life_inner(
     {
         let t0 = profile.then(Instant::now);
         super::seepage::wake_lake_bed_pores(world);
+        super::seepage::wake_vertical_chunk_seam_pores(world);
         if let (true, Some(t0)) = (profile, t0) {
             local.seepage += t0.elapsed();
         }
@@ -488,6 +489,7 @@ fn tick_with_life_inner(
     {
         let t0 = profile.then(Instant::now);
         super::seepage::wake_lake_bed_pores(world);
+        super::seepage::wake_vertical_chunk_seam_pores(world);
         if let (true, Some(t0)) = (profile, t0) {
             local.seepage += t0.elapsed();
         }

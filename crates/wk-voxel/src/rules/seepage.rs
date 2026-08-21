@@ -8,7 +8,7 @@ use wk_material::MaterialId;
 
 use crate::active::ActiveChunk;
 use crate::cell::{water_capacity_with, Cell, Sat};
-use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
@@ -116,6 +116,63 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                 }
                 if feed {
                     touches.push((gx, gy));
+                }
+            }
+        }
+    }
+    for (gx, gy) in touches {
+        world.touch_dirty(gx, gy);
+    }
+}
+
+/// Re-dirty pore faces across vertical chunk seams (y=63|64, 127|128, …).
+///
+/// Underground sat can equilibrate inside each chunk then go quiet while
+/// a sharp step remains on the cy boundary — the sat heatmap shows that
+/// as a horizontal shelf. Wet-air wake never visits dry cy neighbours
+/// that only hold pore water, so we couple the seam rows explicitly.
+pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
+    let hydro = world.hydro;
+    let ch = CHUNK_CELLS_H as i32;
+    let cw = CHUNK_CELLS_W as i32;
+    let mut touches: Vec<(i32, i32)> = Vec::new();
+    let coords: Vec<_> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        let above = ChunkCoord::new(coord.cx, coord.cy + 1);
+        if !world.chunks.contains_key(&above) {
+            continue;
+        }
+        let y_lo = coord.cy * ch + (ch - 1);
+        let y_hi = y_lo + 1;
+        let base_gx = coord.cx * cw;
+        for lx in 0..cw {
+            let gx = world.wrap_x(base_gx + lx);
+            let Some(lo) = world.get_cell(gx, y_lo) else {
+                continue;
+            };
+            let Some(hi) = world.get_cell(gx, y_hi) else {
+                continue;
+            };
+            let lo_pore = is_porous_solid_with(lo.material, &hydro);
+            let hi_pore = is_porous_solid_with(hi.material, &hydro);
+            let lo_air = lo.material == MaterialId::Air && lo.sat.0 >= 160;
+            let hi_air = hi.material == MaterialId::Air && hi.sat.0 >= 160;
+            if !((lo_pore || lo_air) && (hi_pore || hi_air)) {
+                continue;
+            }
+            // Any cross-seam moisture that can still move.
+            let lo_cap = water_capacity_with(lo.material, &hydro);
+            let hi_cap = water_capacity_with(hi.material, &hydro);
+            let lo_room = lo_pore && lo_cap > 0 && lo.sat.0 < lo_cap;
+            let hi_room = hi_pore && hi_cap > 0 && hi.sat.0 < hi_cap;
+            let lo_wet = lo.sat.0 > 0;
+            let hi_wet = hi.sat.0 > 0;
+            if (lo_wet || hi_wet || lo_air || hi_air) && (lo_room || hi_room) {
+                if lo_room {
+                    touches.push((gx, y_lo));
+                }
+                if hi_room {
+                    touches.push((gx, y_hi));
                 }
             }
         }
