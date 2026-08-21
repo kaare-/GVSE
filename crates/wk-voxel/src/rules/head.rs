@@ -77,8 +77,7 @@ pub(crate) fn seepage_rate_with(material: MaterialId, hydro: &HydroOverrides) ->
 /// the full [`seepage_rate_with`] — like a wetting front opening pores.
 /// Full cells take nothing more (`free == 0`).
 ///
-/// Peer solid↔solid seepage still uses the raw permeability rate; this
-/// curve is for Air→solid recharge of the top of a column.
+/// Peer solid↔solid flow uses [`seepage_conduct_rate_with`] instead.
 pub(crate) fn seepage_uptake_rate_with(
     material: MaterialId,
     hydro: &HydroOverrides,
@@ -101,6 +100,38 @@ pub(crate) fn seepage_uptake_rate_with(
     let kick = (cap as i32 / 8).max(1);
     let scaled = (base * (sat as i32 + kick)) / (cap as i32 + kick);
     scaled.max(1).min(free).min(base)
+}
+
+/// Solid↔solid pore conduction: permeability × relative wetness.
+///
+/// The drier neighbour is the bottleneck — bone-dry underground paths
+/// crawl, while a saturated pair runs at the slower material's full
+/// [`seepage_rate_with`]. Same dry-kick curve as surface uptake so dry
+/// sand does not flash-equalise an aquifer next to wet sand.
+pub(crate) fn seepage_conduct_rate_with(
+    mat_a: MaterialId,
+    hydro: &HydroOverrides,
+    sat_a: u8,
+    cap_a: u8,
+    mat_b: MaterialId,
+    sat_b: u8,
+    cap_b: u8,
+) -> i32 {
+    let base = seepage_rate_with(mat_a, hydro).min(seepage_rate_with(mat_b, hydro));
+    if base <= 0 || cap_a == 0 || cap_b == 0 {
+        return 0;
+    }
+    let kick_a = (cap_a as i32 / 8).max(1);
+    let kick_b = (cap_b as i32 / 8).max(1);
+    let wa = sat_a as i32 + kick_a;
+    let wb = sat_b as i32 + kick_b;
+    let ca = cap_a as i32 + kick_a;
+    let cb = cap_b as i32 + kick_b;
+    // base * min(wa/ca, wb/cb)
+    let num = (wa * cb).min(wb * ca);
+    let den = ca * cb;
+    let scaled = (base * num) / den;
+    scaled.max(1).min(base)
 }
 
 pub(crate) fn is_porous_solid_with(material: MaterialId, hydro: &HydroOverrides) -> bool {

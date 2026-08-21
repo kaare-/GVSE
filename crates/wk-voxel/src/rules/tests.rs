@@ -14,7 +14,9 @@ use crate::phase::PhaseConfig;
 use crate::temperature::Temperature;
 use wk_material::{HydroOverrides, MaterialId};
 
-use super::head::{hydraulic_head, seepage_rate_with, seepage_uptake_rate_with};
+use super::head::{
+    hydraulic_head, seepage_conduct_rate_with, seepage_rate_with, seepage_uptake_rate_with,
+};
 
 fn setup_column_world() -> World {
     // One chunk. Row y=0 is a solid Bedrock floor; every other
@@ -2639,6 +2641,32 @@ fn seepage_uptake_speeds_as_surface_wets() {
     // Near-full is free-limited to 1 even though the wetness fraction is high.
     assert_eq!(almost, 1, "last free pore crawls in at 1 (almost={almost})");
     assert_eq!(full, 0, "full sand takes nothing more");
+}
+
+#[test]
+fn seepage_conduct_slows_when_underground_is_dry() {
+    let hydro = HydroOverrides::default();
+    let cap = water_capacity(MaterialId::Sand);
+    let base = seepage_rate_with(MaterialId::Sand, &hydro);
+    let both_dry = seepage_conduct_rate_with(
+        MaterialId::Sand, &hydro, 0, cap, MaterialId::Sand, 0, cap,
+    );
+    let both_full = seepage_conduct_rate_with(
+        MaterialId::Sand, &hydro, cap, cap, MaterialId::Sand, cap, cap,
+    );
+    let wet_dry = seepage_conduct_rate_with(
+        MaterialId::Sand, &hydro, cap, cap, MaterialId::Sand, 0, cap,
+    );
+    assert!(both_dry > 0, "dry path must still trickle");
+    assert!(
+        both_dry < base / 4,
+        "both-dry must crawl (both_dry={both_dry} base={base})"
+    );
+    assert_eq!(both_full, base, "saturated pair runs at full permeability");
+    assert!(
+        wet_dry <= both_dry * 2,
+        "wet|dry bottleneck stays slow (wet_dry={wet_dry} both_dry={both_dry})"
+    );
 }
 
 #[test]
