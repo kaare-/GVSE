@@ -368,13 +368,11 @@ fn tick_with_life_inner(
     let mut local = PhysicsTimings::default();
 
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
-    // Interactive path: cadence-gate lake-bed wake + seepage so the
-    // budget goes to surface runoff. full_feel wakes every tick.
+    // Lake-bed wake every tick so gravity can keep infiltrating quiet
+    // ponds (including across the y=63|64 seam). Full pore seepage stays
+    // cadence-gated on the interactive path — underground is lower priority.
     let run_seepage = !perf.flow_quiet_early_out || world.tick % SEEPAGE_EVERY == 0;
-    // Re-dirty unsaturated beds under standing water *before* gravity so
-    // a quiet lake still drinks on seepage ticks (wake used to run only
-    // after the flow loop, when gravity had already skipped the bed).
-    if run_seepage {
+    {
         let t0 = profile.then(Instant::now);
         super::seepage::wake_lake_bed_pores(world);
         if let (true, Some(t0)) = (profile, t0) {
@@ -487,7 +485,7 @@ fn tick_with_life_inner(
     }
     // Deep lakes go quiet once free water looks settled — beds and pore
     // stacks under a wet cap would stay dry forever without a re-wake.
-    if run_seepage {
+    {
         let t0 = profile.then(Instant::now);
         super::seepage::wake_lake_bed_pores(world);
         if let (true, Some(t0)) = (profile, t0) {
