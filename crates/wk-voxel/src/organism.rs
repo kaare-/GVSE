@@ -119,7 +119,7 @@ pub const CORPSE_SETTLE_LAND_TICKS: u32 = 900;
 pub const CORPSE_SETTLE_WATER_TICKS: u32 = 2_400;
 /// Base chance for a floating corpse to drift one cell when `|push| ≈ 1`.
 /// Tuned so wind ~0.2 or modest sat-shear current visibly slides dead stems.
-const CORPSE_DRIFT_BASE: f32 = 0.55;
+const CORPSE_DRIFT_BASE: f32 = 0.75;
 const CORPSE_DRIFT_SALT: u64 = 0xC0B5_E0FF_DEAD_u64;
 /// Max |body dx| for a tipped waterline log (stem/leaf). Stops re-tip folds
 /// from growing absurd floaters that pierce shore terrain.
@@ -1447,7 +1447,18 @@ impl OrganismStore {
                     if let Some(slot) = find_surface_air_slot(world, corpse.gx, corpse.gy) {
                         corpse.gy = slot;
                     }
-                    pin_corpse_land(corpse);
+                    if corpse_adjacent_stream(world, corpse) {
+                        // Stream / hillside film — step into the current so
+                        // grey stems don't pin on the bank for a full settle.
+                        corpse.fallen = true;
+                        wash_land_corpse_into_stream(world, corpse, tick, wind_vx);
+                        if let Some(slot) = find_surface_air_slot(world, corpse.gx, corpse.gy) {
+                            corpse.gy = slot;
+                            corpse.fy = slot as f32;
+                        }
+                    } else {
+                        pin_corpse_land(corpse);
+                    }
                     clamp_fallen_body_extent(
                         corpse.fallen,
                         &mut corpse.body,
@@ -1455,7 +1466,10 @@ impl OrganismStore {
                     );
                     prune_fallen_corpse_canopy_in_solid(world, corpse);
                 }
-                corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
+                let in_stream = wet_band(world, corpse.gx, corpse.gy).is_some()
+                    || corpse_adjacent_stream(world, corpse);
+                let settle_step = if in_stream { 5 } else { 1 };
+                corpse.settled_ticks = corpse.settled_ticks.saturating_add(settle_step);
                 if corpse.settled_ticks >= CORPSE_SETTLE_LAND_TICKS {
                     dissolve.push(i);
                 }
@@ -1498,6 +1512,52 @@ impl OrganismStore {
     }
 }
 
+/// True when a hillside / bank corpse is touching flowing wet Air.
+fn corpse_adjacent_stream(world: &World, corpse: &Corpse) -> bool {
+    adjacent_stream_cell(world, corpse).is_some()
+}
+
+/// Wettest neighbouring Air cell touching the corpse body (`sat >= 140`).
+fn adjacent_stream_cell(world: &World, corpse: &Corpse) -> Option<(i32, i32)> {
+    let mut best: Option<(i32, i32, i16)> = None;
+    for &(dx, dy, _) in &corpse.body {
+        let gx = world.wrap_x(corpse.gx + dx as i32);
+        let gy = corpse.gy + dy as i32;
+        for (ox, oy) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let nx = world.wrap_x(gx + ox);
+            let ny = gy + oy;
+            let sat = air_sat(world, nx, ny);
+            if sat >= 140 {
+                let better = match best {
+                    Some((_, _, s)) => sat > s,
+                    None => true,
+                };
+                if better {
+                    best = Some((nx, ny, sat));
+                }
+            }
+        }
+    }
+    best.map(|(x, y, _)| (x, y))
+}
+
+/// Pick a bank corpse up into the film, then ride current.
+fn wash_land_corpse_into_stream(world: &World, corpse: &mut Corpse, tick: u64, wind_vx: f32) {
+    if let Some((sx, sy)) = adjacent_stream_cell(world, corpse) {
+        if (sx, sy) != (corpse.gx, corpse.gy) {
+            let chance = 0.62;
+            let salt = CORPSE_DRIFT_SALT.wrapping_add(17);
+            if crate::rules::hash_prob(world.seed.0, corpse.gx, tick, salt) < chance {
+                corpse.gx = sx;
+                corpse.gy = sy;
+                corpse.fy = sy as f32;
+                corpse.vel_y = 0.0;
+            }
+        }
+    }
+    drift_floating_corpse(world, corpse, tick, wind_vx);
+}
+
 fn pin_corpse_land(corpse: &mut Corpse) {
     corpse.fy = corpse.gy as f32;
     corpse.vel_y = 0.0;
@@ -1533,11 +1593,12 @@ fn drift_floating_corpse(world: &World, corpse: &mut Corpse, tick: u64, wind_vx:
     // Sample flow at the free-surface top when floating — sat shear at the
     // nucleus row on steep drops often points *upstream* (water piles high
     // against the cascade), which looked like logs swimming uphill.
-    let sample_y = wet_band(world, corpse.gx, corpse.gy)
-        .map(|(top, _)| top)
-        .unwrap_or(corpse.gy);
-    let flow = local_water_drive(world, corpse.gx, sample_y);
-    let flow_dir = local_water_dir(world, corpse.gx, sample_y) as f32;
+    let (sample_x, sample_y) = wet_band(world, corpse.gx, corpse.gy)
+        .map(|(top, _)| (corpse.gx, top))
+        .or_else(|| adjacent_stream_cell(world, corpse))
+        .unwrap_or((corpse.gx, corpse.gy));
+    let flow = local_water_drive(world, sample_x, sample_y);
+    let flow_dir = local_water_dir(world, sample_x, sample_y) as f32;
     let wind = wind_vx.clamp(-1.5, 1.5);
     let at_surface = wet_band(world, corpse.gx, corpse.gy)
         .map(|(top, _)| (corpse.gy - top).abs() <= 1)
@@ -5136,6 +5197,54 @@ mod tests {
         assert!(
             moved_downhill,
             "cascade head drop must carry the corpse downhill (+x); stayed at {gx0}"
+        );
+    }
+
+    #[test]
+    fn hillside_corpse_washes_with_adjacent_stream() {
+        // Grey stem planted on soil next to a film — must slide, not pin.
+        let mut w = World::new(41);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..20 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+            w.set_cell(x, 2, Cell::air());
+            w.set_cell(x, 3, Cell::air());
+        }
+        for x in 4..=10 {
+            w.set_cell(x, 2, Cell::water());
+        }
+        let mut store = OrganismStore::new();
+        let mut corpse = Corpse::from_atom(&Atom::from_body(
+            6,
+            3,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+            ],
+        ));
+        corpse.land = true;
+        corpse.fallen = false;
+        store.corpses.push(corpse);
+        let gx0 = store.corpses[0].gx;
+        let climate = ClimateConfig::default();
+        let mut moved = false;
+        for t in 0..200u64 {
+            let _ = store.step_with_climate_wind(&mut w, t, &climate, None, 0.20);
+            if store.corpse_count() == 0 {
+                moved = true;
+                break;
+            }
+            if store.corpses[0].gx != gx0 {
+                moved = true;
+                break;
+            }
+        }
+        assert!(
+            moved,
+            "stream-side land corpse must wash or compost (stayed at {gx0})"
         );
     }
 

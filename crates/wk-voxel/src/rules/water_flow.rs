@@ -16,7 +16,7 @@ use crate::parallel::map_regions_parallel;
 
 use super::head::{
     hydraulic_head, is_porous_solid_with, plan_same_y_pairwise_edge_in, same_y_cascade_pull_in,
-    seepage_rate_with,
+    seepage_rate_with, seepage_uptake_rate_with,
 };
 use super::plan::{regions_for_standalone, regions_wet_loaded};
 
@@ -32,7 +32,8 @@ use super::plan::{regions_for_standalone, regions_wet_loaded};
 /// 3. **Same-Y surface equalise** — scan up to [`SAME_Y_SURFACE_SCAN`]
 ///    standing cells for a cascade outlet and push toward it; then
 ///    pairwise head-equalise each +x standing edge so wide lake tops
-///    level instead of terracing / checkerboarding.
+///    level instead of terracing / checkerboarding. **Organic wash-through**
+///    punches standing water through Organic mats into Air beyond.
 /// 4. **Throughflow** — if below is a stack of saturated porous cells,
 ///    weep at seepage rate to the nearest opening: a **side Air face**
 ///    (cliff / spring) or Air below the stack.
@@ -163,10 +164,18 @@ fn commit_air_sat_xfers(
         let Some(dst) = world.get_cell(to.0, to.1) else {
             continue;
         };
-        if src.material != MaterialId::Air || dst.material != MaterialId::Air {
+        if src.material != MaterialId::Air {
             continue;
         }
-        let free = u8::MAX as i32 - dst.sat.0 as i32;
+        let free = if dst.material == MaterialId::Air {
+            u8::MAX as i32 - dst.sat.0 as i32
+        } else {
+            let cap = water_capacity_with(dst.material, &world.hydro) as i32;
+            if cap == 0 {
+                continue;
+            }
+            cap - dst.sat.0 as i32
+        };
         let amt = amt.min(src.sat.0 as i32).min(free.max(0));
         if amt <= 0 {
             continue;
@@ -518,15 +527,22 @@ fn accumulate_water_flow_xfers(
                 let gx = world.wrap_x(base_gx + lx);
                 // Ocean-body fast path: a full-sat Air with a full-sat Air
                 // directly above is a **buried** water cell, not a free
-                // surface. Priorities 1–4 are all no-ops in that geometry
-                // (diagonal, cascade, equalise, throughflow neighbours are
-                // all full water / non-porous). Skipping avoids ~10 reads
-                // and up-to-12-cell same-Y look-ahead per ocean interior
-                // cell × 12 substeps.
+                // surface — unless it has an open face. A solid weir or
+                // dry / partial Air (the next hillside column) must run:
+                // treating only solids as faces left a huge bump against
+                // dry Air with a hairline film on top.
                 if cur.sat.is_full() {
                     let above = read(lx, ly + 1, gx, gy + 1);
-                    if matches!(above, Some(a) if a.material == MaterialId::Air && a.sat.is_full()) {
-                        continue;
+                    if matches!(above, Some(a) if a.material == MaterialId::Air && a.sat.is_full())
+                    {
+                        let left = read(lx - 1, ly, world.wrap_x(gx - 1), gy);
+                        let right = read(lx + 1, ly, world.wrap_x(gx + 1), gy);
+                        let closed = |c: Option<Cell>| {
+                            matches!(c, Some(n) if n.material == MaterialId::Air && n.sat.is_full())
+                        };
+                        if closed(left) && closed(right) {
+                            continue;
+                        }
                     }
                 }
                 // Below tells us whether we're on a "surface" (below is
@@ -558,6 +574,8 @@ fn accumulate_water_flow_xfers(
                 // / hill-drain feel in the water suite.
                 if cur.sat.is_empty() {
                     if on_surface {
+                        // Soft rate: dry-owned edges must not yank a full
+                        // neighbour cell across in one hop.
                         plan_same_y_pairwise_edge_in(
                             world,
                             Some((chunk, base_gx, base_gy)),
@@ -565,6 +583,7 @@ fn accumulate_water_flow_xfers(
                             gy,
                             lx,
                             ly,
+                            sheet_step_cap(1),
                             &mut local,
                         );
                     }
@@ -575,6 +594,10 @@ fn accumulate_water_flow_xfers(
                 // Randomize L/R per cell so water doesn't bias one way.
                 let flip = tick_flip ^ (((gx + gy) & 1) == 0);
                 let dirs = if flip { [-1_i32, 1] } else { [1_i32, -1] };
+                let depth = wet_stack_depth(&read, gx, gy, lx, ly, cur.sat.0);
+                // Soft lateral / drain caps — fat 180–255 hops looked jagged.
+                let step = sheet_step_cap(depth);
+                let drain = drain_step_cap(depth);
 
                 // --- Priority 1: diagonal-down into Air with room ---
                 // Shelf edge: (dx, y-1) is Air, so water can fall there.
@@ -594,7 +617,7 @@ fn accumulate_water_flow_xfers(
                     if free == 0 {
                         continue;
                     }
-                    let move_amt = remaining.min(free);
+                    let move_amt = remaining.min(free).min(drain);
                     local.push(((gx, gy), (nx, ny), move_amt));
                     remaining -= move_amt;
                 }
@@ -626,7 +649,7 @@ fn accumulate_water_flow_xfers(
                         if free == 0 {
                             continue;
                         }
-                        let move_amt = remaining.min(free);
+                        let move_amt = remaining.min(free).min(step);
                         local.push(((gx, gy), (nx, gy), move_amt));
                         remaining -= move_amt;
                     }
@@ -661,17 +684,57 @@ fn accumulate_water_flow_xfers(
                             continue;
                         }
                         let free = u8::MAX.saturating_sub(side.sat.0) as i32;
-                        let move_amt = remaining.min(free).min(want);
+                        // Soft-cap like cascade edge — uncapped pull + equalise
+                        // double-dumped nearly a full cell each hop (jagged).
+                        let move_amt = remaining.min(free).min(want).min(step);
                         if move_amt > 0 {
                             local.push(((gx, gy), (tx, gy), move_amt));
                             remaining -= move_amt;
                         }
+                    }
+
+                    // --- Priority 3b: wash through Organic dams ---
+                    // Organic is a sponge — standing water punches through
+                    // to Air beyond instead of pooling forever behind mats.
+                    if remaining > 0 {
+                        remaining = plan_organic_wash_through(
+                            world,
+                            &read,
+                            gx,
+                            gy,
+                            lx,
+                            ly,
+                            dirs,
+                            remaining,
+                            &mut local,
+                        );
+                    }
+
+                    // --- Priority 3c: porous-face dividend ---
+                    // Facing a dry/porous column: absorb by material
+                    // permeability; leftover may spill over the crest
+                    // only when this cell already sits at that height.
+                    if remaining > 0 {
+                        remaining = plan_porous_face_dividend(
+                            world,
+                            &read,
+                            gx,
+                            gy,
+                            lx,
+                            ly,
+                            dirs,
+                            remaining,
+                            step,
+                            &mut local,
+                        );
                     }
                 }
 
                 // --- Priority 3b: pairwise +x standing equalise ---
                 // Always, even if cascade dumped everything — the edge
                 // may still need the reverse transfer from a wetter +x.
+                // Soft-capped to `step` so this does not re-dump what
+                // cascade pull already moved (same-neighbour double hit).
                 if on_surface {
                     plan_same_y_pairwise_edge_in(
                         world,
@@ -680,6 +743,7 @@ fn accumulate_water_flow_xfers(
                         gy,
                         lx,
                         ly,
+                        step,
                         &mut local,
                     );
                 }
@@ -785,6 +849,236 @@ fn accumulate_throughflow_xfers(
     for mut v in local {
         xfers.append(&mut v);
     }
+}
+
+/// How many stacked wet-Air cells sit at/above this source (1 = a film).
+fn wet_stack_depth(
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+    sat: u8,
+) -> i32 {
+    if sat < 96 {
+        return 0;
+    }
+    let mut d = 1;
+    for dy in 1..=5 {
+        match read(lx, ly + dy, gx, gy + dy) {
+            Some(c) if c.material == MaterialId::Air && c.sat.0 >= 160 => d += 1,
+            _ => break,
+        }
+    }
+    d
+}
+
+/// Per-pass sat cap for same-Y / cascade / crest spill.
+///
+/// Kept modest so free surfaces spread as a gradient instead of dumping
+/// a whole cell each hop (the "fat front" 180–255 caps looked jagged).
+/// Trickles crawl; stacked water still moves faster, but not all at once.
+fn sheet_step_cap(depth: i32) -> i32 {
+    match depth {
+        0 | 1 => 40,
+        2 => 96,
+        _ => 160,
+    }
+}
+
+/// Per-pass sat cap for diagonal-down drain.
+///
+/// Slightly faster than lateral so hillside blobs empty, still soft
+/// enough that shelf edges don't stair-step into a sawtooth front.
+fn drain_step_cap(depth: i32) -> i32 {
+    match depth {
+        0 | 1 => 80,
+        2 => 128,
+        _ => 180,
+    }
+}
+
+/// Porous-face dividend: soak by permeability, spill leftover only with head.
+///
+/// Facing a dry/porous solid (not Air/Organic):
+/// 1. Absorb up to [`seepage_uptake_rate_with`] (slow when bone-dry so
+///    water can run past; faster as the face wets) into the contact cell.
+/// 2. Leftover may spill into Air at the column crest — only when *this*
+///    source cell sits at or above that crest (`gy >= crest_y`). Mass and
+///    `step` (speed proxy) cap how much passes; a pond film below a berm
+///    never invents head to climb the hillside.
+fn plan_porous_face_dividend(
+    world: &World,
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+    dirs: [i32; 2],
+    mut remaining: i32,
+    step: i32,
+    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
+) -> i32 {
+    for dx in dirs {
+        if remaining <= 0 {
+            break;
+        }
+        let nx = world.wrap_x(gx + dx);
+        let Some(side) = read(lx + dx, ly, nx, gy) else {
+            continue;
+        };
+        if side.material == MaterialId::Air || side.material == MaterialId::Organic {
+            continue;
+        }
+        let cap = water_capacity_with(side.material, &world.hydro) as i32;
+        if cap <= 0 {
+            continue;
+        }
+
+        // 1) Wetting-front dividend — bone-dry sheds; wet faces drink.
+        let soak_rate = seepage_uptake_rate_with(
+            side.material,
+            &world.hydro,
+            side.sat.0,
+            cap as u8,
+        );
+        let free = (cap - side.sat.0 as i32).max(0);
+        let soak = remaining.min(free).min(soak_rate);
+        if soak > 0 {
+            local.push(((gx, gy), (nx, gy), soak));
+            remaining -= soak;
+        }
+        if remaining <= 0 {
+            break;
+        }
+
+        // 2) Crest Air above the solid face in that column.
+        let mut crest: Option<(i32, i32, i32, i32)> = None; // nx, ny, nlx, nly
+        for dy in 1..=8 {
+            let Some(above) = read(lx + dx, ly + dy, nx, gy + dy) else {
+                break;
+            };
+            if above.material != MaterialId::Air {
+                continue;
+            }
+            crest = Some((nx, gy + dy, lx + dx, ly + dy));
+            break;
+        }
+        let Some((cx, cy, clx, cly)) = crest else {
+            continue;
+        };
+
+        // Head: only water that is already at/above the crest overflows.
+        // (Do not use free-surface scan — that lets ponds stair-climb.)
+        if gy < cy {
+            continue;
+        }
+
+        let Some(crest_cell) = read(clx, cly, cx, cy) else {
+            continue;
+        };
+        let free_air = u8::MAX.saturating_sub(crest_cell.sat.0) as i32;
+        // Overflow share: leftover mass, capped by lateral step.
+        let overflow = remaining.min(free_air).min(step);
+        if overflow > 0 {
+            local.push(((gx, gy), (cx, cy), overflow));
+            remaining -= overflow;
+        }
+    }
+    remaining
+}
+
+/// Max Organic cells water may punch through in one wash.
+const ORGANIC_WASH_SPAN: i32 = 8;
+/// Cap sat moved through Organic per source cell per pass (still aggressive).
+const ORGANIC_WASH_RATE: i32 = 96;
+
+/// Standing water washes through a span of Organic into Air beyond.
+///
+/// Organic is a sponge / mat, not a masonry dam — without this, shore
+/// mounds seal basins into sticky perched pools.
+fn plan_organic_wash_through(
+    world: &World,
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+    dirs: [i32; 2],
+    mut remaining: i32,
+    local: &mut Vec<((i32, i32), (i32, i32), i32)>,
+) -> i32 {
+    for dx in dirs {
+        if remaining <= 0 {
+            break;
+        }
+        let mut x = world.wrap_x(gx + dx);
+        let mut clx = lx + dx;
+        let Some(first) = read(clx, ly, x, gy) else {
+            continue;
+        };
+        if first.material != MaterialId::Organic {
+            continue;
+        }
+        let mut span = 0i32;
+        let mut exit: Option<(i32, i32, i32, i32)> = None; // nx, ny, free, prefer
+        loop {
+            span += 1;
+            if span > ORGANIC_WASH_SPAN {
+                break;
+            }
+            let nx = world.wrap_x(x + dx);
+            let nlx = clx + dx;
+            let Some(c) = read(nlx, ly, nx, gy) else {
+                break;
+            };
+            if c.material == MaterialId::Organic {
+                x = nx;
+                clx = nlx;
+                continue;
+            }
+            if c.material != MaterialId::Air {
+                break;
+            }
+            let free = u8::MAX.saturating_sub(c.sat.0) as i32;
+            let below = read(nlx, ly - 1, nx, gy - 1);
+            let cascade = matches!(
+                below,
+                Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
+            );
+            if free > 0 {
+                let prefer = if cascade { 2 } else { 1 };
+                exit = Some((nx, gy, free, prefer));
+            }
+            // Also allow dumping into Air directly below the far Organic
+            // face (wash down the lee side).
+            if let Some(b) = below {
+                if b.material == MaterialId::Air {
+                    let bfree = u8::MAX.saturating_sub(b.sat.0) as i32;
+                    if bfree > 0 {
+                        let bp = if !b.sat.is_full() { 3 } else { 1 };
+                        if exit.map(|e| bp > e.3).unwrap_or(true) {
+                            exit = Some((nx, gy - 1, bfree, bp));
+                        }
+                    }
+                }
+            }
+            break;
+        }
+        if let Some((tx, ty, free, prefer)) = exit {
+            let rate = if prefer >= 2 {
+                remaining
+            } else {
+                ORGANIC_WASH_RATE
+            };
+            let amt = remaining.min(free).min(rate);
+            if amt > 0 {
+                local.push(((gx, gy), (tx, ty), amt));
+                remaining -= amt;
+            }
+        }
+    }
+    remaining
 }
 
 fn plan_throughflow_from_cell(

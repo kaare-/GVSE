@@ -55,7 +55,7 @@ pub fn apply_evaporation(world: &mut World, cfg: &EvapConfig) {
     if world.tick % period != 0 {
         return;
     }
-    let (deltas, clear_wet) = collect_evap_deltas(world, cfg);
+    let (deltas, clear_wet) = collect_evap_deltas(world, cfg, None);
     clear_dry_wet_air_flags(world, &clear_wet);
     apply_evap_deltas(world, deltas, None);
 }
@@ -68,13 +68,56 @@ pub fn apply_evaporation_into_humidity(
     humidity: &mut crate::humidity::Humidity,
     cfg: &EvapConfig,
 ) {
+    apply_evaporation_into_humidity_climate(world, humidity, cfg, None, 0.0);
+}
+
+/// [`apply_evaporation_into_humidity`] with temperature + wind.
+///
+/// Same wet-chunk scan (CPU-safe). Rate scales with warm air, wind,
+/// and local humidity deficit so a cold still night barely pumps and
+/// a hot breeze dries films. `wind_speed` is |tiles/tick|.
+pub fn apply_evaporation_into_humidity_climate(
+    world: &mut World,
+    humidity: &mut crate::humidity::Humidity,
+    cfg: &EvapConfig,
+    temp: Option<&crate::temperature::Temperature>,
+    wind_speed: f32,
+) {
     let period = cfg.period_ticks.max(1);
     if world.tick % period != 0 {
         return;
     }
-    let (deltas, clear_wet) = collect_evap_deltas(world, cfg);
+    // Skip the ocean-surface scan once the sky is already over budget —
+    // otherwise a long soak keeps walking every wet chunk for no gain.
+    if humidity.atmosphere_overfull() {
+        return;
+    }
+    let (deltas, clear_wet) = {
+        let climate = temp.map(|t| (t, wind_speed.abs(), humidity as &crate::humidity::Humidity));
+        collect_evap_deltas(world, cfg, climate)
+    };
     clear_dry_wet_air_flags(world, &clear_wet);
     apply_evap_deltas(world, deltas, Some(humidity));
+}
+
+/// Reference `rate_per_tick` is ~18 °C, light breeze, dry air.
+pub(crate) fn evap_climate_rate(
+    base: i32,
+    temp_c: f32,
+    wind_abs: f32,
+    humidity_mass: f32,
+) -> i32 {
+    if base <= 0 {
+        return 0;
+    }
+    let t_scale = ((temp_c + 8.0) / 26.0).clamp(0.12, 2.4);
+    let w_scale = (0.62 + wind_abs * 10.0).clamp(0.50, 2.0);
+    let rh = (humidity_mass / crate::humidity::Humidity::MAX_MASS_PER_TILE).clamp(0.0, 1.0);
+    let deficit = (1.0 - rh).clamp(0.20, 1.0);
+    let cap = (base * 4).max(1);
+    ((base as f32) * t_scale * w_scale * deficit)
+        .round()
+        .clamp(0.0, cap as f32) as i32
 }
 
 /// True when wet Air is a free surface of a pool / ocean / land film,
@@ -91,6 +134,7 @@ fn rests_on_evap_surface(world: &World, gx: i32, gy: i32, cfg: &EvapConfig) -> b
 fn collect_evap_deltas(
     world: &World,
     cfg: &EvapConfig,
+    climate: Option<(&crate::temperature::Temperature, f32, &crate::humidity::Humidity)>,
 ) -> (HashMap<(i32, i32), i32>, Vec<ChunkCoord>) {
     let mut coords: Vec<ChunkCoord> = world
         .chunks
@@ -124,11 +168,17 @@ fn collect_evap_deltas(
                     continue;
                 }
                 let mut rate = cfg.rate_per_tick as i32;
+                if let Some((temp, wind_abs, hum)) = climate {
+                    rate = evap_climate_rate(rate, temp.at_cell(gx, gy), wind_abs, hum.at_cell(gx, gy));
+                }
                 // Orphaned crest film: no Air neighbour anywhere on the
                 // surface (same-y or diagonal-down) → evaporate hard so
                 // a single ridge pixel doesn't linger for hours.
                 if is_orphan_surface_film(world, gx, gy) {
                     rate = (rate * 8).max(4);
+                }
+                if rate <= 0 {
+                    continue;
                 }
                 local.push(((gx, gy), -rate));
             }
@@ -190,7 +240,11 @@ fn apply_evap_deltas(
         }
         // Only lift what the atmosphere can still hold (per-tile cap).
         let accepted = if let Some(h) = humidity.as_deref_mut() {
-            h.try_add(gx, gy, want_removed as f32).round() as i32
+            if h.column_near_saturated(gx, gy) {
+                0
+            } else {
+                h.try_add(gx, gy, want_removed as f32).round() as i32
+            }
         } else {
             want_removed
         };

@@ -147,7 +147,8 @@ pub use phase::{
 pub use rules::{
     apply_cold_avalanche, apply_cold_avalanche_bound, apply_condensation_rain,
     apply_condensation_rain_phased, apply_condensation_rain_with_orographic, apply_evaporation,
-    apply_evaporation_into_humidity, apply_flow_erosion, apply_flow_erosion_bound,
+    apply_evaporation_into_humidity, apply_evaporation_into_humidity_climate, apply_flow_erosion,
+    apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
     apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
@@ -155,6 +156,7 @@ pub use rules::{
     collect_floating_organic_columns, collect_floating_organic_columns_near,
     floating_organic_column_at, drift_floating_organic, drift_floating_organic_cfg,
     drift_floating_organic_columns, drift_floating_organic_columns_cfg,
+    shove_floating_organic_with_current,
     active_has_unsupported_grain, is_standing_water, punch_through_floating_rafts,
     rise_and_soak_buoyant_litter, rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter,
     settle_loose_grains, settle_loose_grains_regions, soak_floating_litter,

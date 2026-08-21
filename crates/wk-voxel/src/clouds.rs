@@ -2,54 +2,68 @@
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
-//! Discrete cloud parcels: humidity rises, then coagulates into blobs;
-//! wind carries them; they ride above the terrain (no clipping through
-//! mountains or ice/water columns) and dump rain sooner when scraping ridges.
+//! Cloud **visuals** derived from the humidity field.
+//!
+//! Atmospheric water lives on [`Humidity`] tiles. Rain is condensation /
+//! dew from that field. [`CloudStore`] parcels are a bounded display
+//! echo (N banks, shade, streaks) rebuilt each step from the wettest
+//! sky tiles — not a second water store and not a rain engine.
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::grid::World;
 use crate::humidity::Humidity;
-use crate::phase::{deposit_precip_on_surface, PhaseConfig};
+use crate::phase::PhaseConfig;
 use crate::temperature::Temperature;
 use crate::wind::Wind;
 use crate::worldgen::continental_surface_y;
 
 /// Soft cap so cartoon skies stay readable (default for [`CloudConfig`]).
 pub const MAX_CLOUD_PARCELS: usize = 36;
-/// Default mass at which a parcel starts dumping rain.
+/// Default visual wetness scale (draw / shade, not a rain trigger).
 pub const DOWNPOUR_MASS: f32 = 200.0;
-/// Default ceiling on summed parcel mass (overnight flood safety).
+/// Save-compat ceiling (parcels no longer store water).
 pub const MAX_CLOUD_TOTAL_MASS: f32 = 80_000.0;
-/// Soft per-parcel ceiling so one blob cannot absorb the whole sky.
+/// Save-compat per-parcel ceiling.
 pub const MAX_CLOUD_PARCEL_MASS: f32 = 8_000.0;
 
-/// Live-tunable cloud / coagulation / downpour knobs.
+/// Live-tunable visual-cloud knobs.
+///
+/// Rain is condensation / dew from [`Humidity`]. Parcel fields that used
+/// to drive coagulate/downpour are kept for save compatibility and for
+/// draw wetness (`downpour_mass`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
 pub struct CloudConfig {
     pub max_parcels: usize,
-    /// Refuse further coagulation once `total_mass` reaches this.
+    /// Unused by physics (save compat).
     #[serde(default = "default_max_total_mass")]
     pub max_total_mass: f32,
-    /// Soft ceiling on a single parcel's mass.
+    /// Unused by physics (save compat).
     #[serde(default = "default_max_parcel_mass")]
     pub max_parcel_mass: f32,
+    /// Skip sky tiles drier than this when picking visual echoes.
     pub coag_min_hum: f32,
+    /// Unused by physics (save compat).
     pub coag_rate: f32,
+    /// Unused by physics (save compat).
     pub coag_max_take: f32,
+    /// Unused by physics (save compat).
     pub spawn_radius: f32,
+    /// Unused by physics (save compat).
     pub merge_dist: f32,
+    /// Draw / shade wetness scale (not a rain trigger).
     pub downpour_mass: f32,
+    /// Unused by physics (save compat).
     pub downpour_drain: f32,
+    /// Unused by physics (save compat).
     pub downpour_stop_frac: f32,
     pub cloud_alt_above_sea: i32,
     pub coag_min_above_sea: i32,
     pub ridge_clearance: f32,
     pub parcel_wind_scale: f32,
     pub buoyant_rise: f32,
-    /// Column fan width as a multiple of parcel radius when snowing.
-    /// Default `2.2` (wider blanket than rain).
+    /// Unused by physics (save compat).
     #[serde(default = "default_snow_footprint_mult")]
     pub snow_footprint_mult: f32,
     /// Column fan width multiplier for liquid rain. Default `1.25`.
@@ -187,7 +201,7 @@ impl CloudParcel {
     }
 }
 
-/// Population of coagulated clouds.
+/// Bounded visual echo of wet humidity tiles.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct CloudStore {
     pub parcels: Vec<CloudParcel>,
@@ -210,9 +224,17 @@ impl CloudStore {
         self.parcels.iter().map(|p| p.mass).sum()
     }
 
-    /// Full atmosphere step for clouds:
-    /// rise is done on humidity first; then coagulate, advect+collide,
-    /// merge, downpour.
+    /// Display mass for HUD / N banks. Visual echoes keep this in
+    /// `vis_mass` so leftover `mass` is only real water from old saves.
+    pub fn visual_mass(&self) -> f32 {
+        self.parcels
+            .iter()
+            .map(|p| if p.vis_mass > 0.0 { p.vis_mass } else { p.mass })
+            .sum()
+    }
+
+    /// Atmosphere step: return any leftover parcel mass to humidity,
+    /// lift vapor, rebuild a small visual echo. Does **not** rain.
     pub fn step(
         &mut self,
         world: &mut World,
@@ -236,8 +258,8 @@ impl CloudStore {
         );
     }
 
-    /// Like [`Self::step`], but cold columns receive **snow** when
-    /// `temp` / `phase` are provided.
+    /// Like [`Self::step`]. `temp` scales thermal rise and visual wetness;
+    /// `phase` is unused (rain is condensation).
     pub fn step_with_precip(
         &mut self,
         world: &mut World,
@@ -250,369 +272,80 @@ impl CloudStore {
         temp: Option<&Temperature>,
         phase: Option<&PhaseConfig>,
     ) {
-        // Let ocean vapor climb into the cloud deck before clumping.
+        let _ = (sky_ceiling_y, tick, phase);
+        self.release_parcels_into_humidity(humidity);
         let tc = humidity.tile_cols.max(1);
         let deck_hy = (sea_level_y + cfg.cloud_alt_above_sea).div_euclid(tc);
-        humidity.buoyant_rise(cfg.buoyant_rise, deck_hy);
-
-        self.coagulate(humidity, wind, sea_level_y, sky_ceiling_y, cfg);
-        self.advect_and_collide(world, wind, sea_level_y, sky_ceiling_y, tick, cfg);
-        self.merge(cfg);
-        self.downpour(world, wind, tick, cfg, temp, phase);
-        for p in &mut self.parcels {
-            p.smooth_visuals();
-        }
-        self.parcels.retain(|p| p.mass > 1.0);
+        humidity.buoyant_rise_thermal(cfg.buoyant_rise, deck_hy, temp);
+        self.rebuild_visuals_from_humidity(humidity, world, wind, sea_level_y, cfg, temp);
     }
 
-    /// Pull humidity only from risen sky tiles into parcels.
-    fn coagulate(
-        &mut self,
-        humidity: &mut Humidity,
-        wind: &Wind,
-        sea_level_y: i32,
-        sky_ceiling_y: i32,
-        cfg: &CloudConfig,
-    ) {
-        let tc = humidity.tile_cols.max(1);
-        let sky_hy_min = (sea_level_y + cfg.coag_min_above_sea).div_euclid(tc);
-        let sky_hy_max = (sky_ceiling_y - 2).div_euclid(tc);
-        let preferred_alt = (sea_level_y + cfg.cloud_alt_above_sea)
-            .min(sky_ceiling_y - 4)
-            .max(sea_level_y + cfg.coag_min_above_sea) as f32;
-        let max_total = cfg.max_total_mass.max(0.0);
-        let max_parcel = cfg.max_parcel_mass.max(cfg.downpour_mass);
-        if max_total > 0.0 && self.total_mass() >= max_total {
+    /// Move blob mass back onto humidity tiles (old saves / leftover coag).
+    pub fn release_parcels_into_humidity(&mut self, humidity: &mut Humidity) {
+        if self.parcels.is_empty() {
             return;
         }
-        let keys: Vec<(i32, i32)> = humidity.cells.keys().copied().collect();
-        for (hx, hy) in keys {
-            if hy < sky_hy_min || hy > sky_hy_max {
-                continue;
+        let leftover = std::mem::take(&mut self.parcels);
+        for p in leftover {
+            if p.mass > 1e-3 {
+                humidity.add(p.fx.round() as i32, p.fy.round() as i32, p.mass);
             }
-            if max_total > 0.0 && self.total_mass() >= max_total {
-                break;
-            }
-            let mass = humidity.at_tile(hx, hy);
-            if mass < cfg.coag_min_hum {
-                continue;
-            }
-            let cx = hx * tc + tc / 2;
-            let cy = hy * tc + tc / 2;
-            let mut take = (mass * cfg.coag_rate).min(cfg.coag_max_take).min(mass);
-            if take <= 0.0 {
-                continue;
-            }
-
-            let idx = self.nearest_parcel(cx as f32, cy as f32, cfg.spawn_radius);
-            let idx = match idx {
-                Some(i) => i,
-                None if self.parcels.len() < cfg.max_parcels.max(1) => {
-                    let seed = parcel_shape_seed(cx, cy);
-                    // Spread spawn altitudes so the sky isn't one flat deck.
-                    let elev_jitter = ((seed >> 8) & 31) as f32 - 8.0; // -8..+23
-                    let fy = (cy as f32).max(preferred_alt) + elev_jitter;
-                    self.parcels.push(CloudParcel {
-                        fx: cx as f32,
-                        fy,
-                        mass: 0.0,
-                        raining: false,
-                        on_ridge: false,
-                        shape_seed: seed,
-                        cruise_fy: fy,
-                        vis_mass: 0.0,
-                        deform: 0.0,
-                    });
-                    self.parcels.len() - 1
-                }
-                None => continue,
-            };
-
-            let room_parcel = (max_parcel - self.parcels[idx].mass).max(0.0);
-            let room_total = if max_total > 0.0 {
-                (max_total - self.total_mass()).max(0.0)
-            } else {
-                take
-            };
-            take = take.min(room_parcel).min(room_total);
-            if take <= 0.0 {
-                continue;
-            }
-
-            if let Some(entry) = humidity.cells.get_mut(&(hx, hy)) {
-                *entry -= take;
-                if *entry < 1e-3 {
-                    humidity.cells.remove(&(hx, hy));
-                }
-            }
-            let p = &mut self.parcels[idx];
-            p.mass += take;
-            // Do NOT pull parcels horizontally toward vapor sources.
-            // Only ease y up toward vapor when below the parcel's cruise.
-            let target_y = (cy as f32)
-                .max(preferred_alt * 0.85)
-                .max(p.cruise_fy * 0.9);
-            if target_y + 1.0 >= p.fy && p.fy + 2.0 < p.cruise_fy.max(target_y) {
-                p.fy = p.fy * 0.985 + target_y * 0.015;
-            }
-            let _ = wind;
         }
     }
 
-    fn nearest_parcel(&self, x: f32, y: f32, max_dist: f32) -> Option<usize> {
-        let mut best = None;
-        let mut best_d = max_dist;
-        for (i, p) in self.parcels.iter().enumerate() {
-            let dx = p.fx - x;
-            let dy = p.fy - y;
-            let d = (dx * dx + dy * dy).sqrt();
-            if d < best_d {
-                best_d = d;
-                best = Some(i);
-            }
-        }
-        best
-    }
-
-    /// Wind drift, then soft collision with the land / ice / water column
-    /// top so clouds crest peaks and ride above lake lids (not through them).
-    fn advect_and_collide(
+    /// Bounded N-bank / shade / streak echoes from the wettest sky tiles.
+    pub fn rebuild_visuals_from_humidity(
         &mut self,
+        humidity: &Humidity,
         world: &World,
         wind: &Wind,
         sea_level_y: i32,
-        sky_ceiling_y: i32,
-        tick: u64,
-        cfg: &CloudConfig,
-    ) {
-        let tc = wind.tile_cols.max(1) as f32;
-        let eff_vx = wind.effective_vx(tick);
-        let vx = eff_vx * tc * cfg.parcel_wind_scale;
-        let y_lo = (sea_level_y + cfg.coag_min_above_sea) as f32;
-        let y_hi = (sky_ceiling_y - 3) as f32;
-        let width = wind.width_cols.max(1) as f32;
-        let wind_sign = if eff_vx >= 0.0 { 1.0 } else { -1.0 };
-        let deck = preferred_deck(sea_level_y, sky_ceiling_y, cfg);
-        for p in &mut self.parcels {
-            p.on_ridge = false;
-            if p.cruise_fy <= 0.0 {
-                p.cruise_fy = p.fy.max(deck);
-            }
-            let hx = (p.fx / tc).floor() as i32;
-            let vy = wind.vy_at(hx, 0) * tc * cfg.parcel_wind_scale;
-            p.fx += vx;
-            p.fy += vy * 0.35;
-            if wind.wrap_x {
-                p.fx = p.fx.rem_euclid(width);
-            } else {
-                p.fx = p.fx.clamp(0.0, width - 1.0);
-            }
-
-            let r = p.radius();
-            // Soft sample under centre + leading edge (windward).
-            let sample_x = p.fx + wind_sign * r * 0.35;
-            let floor = cloud_floor_y(world, wind, p.fx)
-                .max(cloud_floor_y(world, wind, sample_x));
-            let land = floor > sea_level_y as f32 + 1.0;
-            let min_fy = if land {
-                floor + cfg.ridge_clearance + (r * 0.12).min(3.5)
-            } else {
-                y_lo.max(sea_level_y as f32 + cfg.cloud_alt_above_sea as f32 * 0.45)
-            };
-
-            if p.fy < min_fy {
-                let lift = min_fy - p.fy;
-                // Scrape → climb: stronger blend so parcels visibly bump up
-                // and hold the new cruise instead of lingering inside ridges.
-                let blend = (0.40 + lift * 0.06).clamp(0.32, 0.72);
-                p.fy = p.fy * (1.0 - blend) + min_fy * blend;
-                p.deform = (p.deform + lift * 0.12).clamp(0.0, 1.0);
-                if land {
-                    p.on_ridge = true;
-                    // Keep the higher path after the crest.
-                    p.cruise_fy = p.cruise_fy.max(min_fy);
-                    p.fx += wind_sign * (0.20 + lift * 0.035).min(0.75);
-                    if wind.wrap_x {
-                        p.fx = p.fx.rem_euclid(width);
-                    }
-                }
-            }
-
-            // Hold cruise altitude (slow ease up if below; never yank down
-            // to the free-air deck after a ridge lift).
-            if p.fy + 0.5 < p.cruise_fy {
-                p.fy = p.fy * 0.96 + p.cruise_fy * 0.04;
-            }
-            // Over open ocean only, very slowly forget extreme cruise.
-            if !land && p.cruise_fy > deck + 6.0 {
-                p.cruise_fy = p.cruise_fy * 0.9985 + deck * 0.0015;
-            }
-
-            p.fy = p.fy.clamp(y_lo.min(min_fy), y_hi);
-            p.cruise_fy = p.cruise_fy.clamp(y_lo, y_hi);
-        }
-    }
-
-    fn merge(&mut self, cfg: &CloudConfig) {
-        let mut i = 0;
-        while i < self.parcels.len() {
-            let mut j = i + 1;
-            while j < self.parcels.len() {
-                let dx = self.parcels[i].fx - self.parcels[j].fx;
-                let dy = self.parcels[i].fy - self.parcels[j].fy;
-                if (dx * dx + dy * dy).sqrt() < cfg.merge_dist {
-                    let other = self.parcels.swap_remove(j);
-                    let a = &mut self.parcels[i];
-                    let total = a.mass + other.mass;
-                    if total > 0.0 {
-                        a.fx = (a.fx * a.mass + other.fx * other.mass) / total;
-                        a.fy = (a.fy * a.mass + other.fy * other.mass) / total;
-                    }
-                    let other_mass = other.mass;
-                    let keep_other_shape = other_mass > a.mass;
-                    a.mass = total;
-                    a.vis_mass = (a.vis_mass + other.vis_mass) * 0.5;
-                    a.raining = a.raining || other.raining;
-                    a.on_ridge = a.on_ridge || other.on_ridge;
-                    a.cruise_fy = a.cruise_fy.max(other.cruise_fy);
-                    a.deform = a.deform.max(other.deform);
-                    // Keep the heavier parcel's silhouette.
-                    if keep_other_shape {
-                        a.shape_seed = other.shape_seed;
-                    }
-                } else {
-                    j += 1;
-                }
-            }
-            i += 1;
-        }
-    }
-
-    /// Heavy parcels dump sat into Air cells beneath them.
-    fn downpour(
-        &mut self,
-        world: &mut World,
-        wind: &Wind,
-        tick: u64,
         cfg: &CloudConfig,
         temp: Option<&Temperature>,
-        phase: Option<&PhaseConfig>,
     ) {
-        for p in &mut self.parcels {
-            let mut oro = orographic_boost(wind, p.fx);
-            if p.on_ridge {
-                // Gentle orographic nudge — not a dump-to-death on peaks.
-                oro = (oro + 0.25).min(1.6);
-            }
-            let trigger = cfg.downpour_mass / oro;
-            if !p.raining {
-                if p.mass >= trigger {
-                    p.raining = true;
-                } else {
-                    continue;
+        self.parcels.clear();
+        let tc = humidity.tile_cols.max(1);
+        let sky_hy_min = (sea_level_y + cfg.coag_min_above_sea).div_euclid(tc);
+        let mut hits: Vec<(f32, i32, i32)> = humidity
+            .cells
+            .iter()
+            .filter_map(|(&(hx, hy), &mass)| {
+                if hy < sky_hy_min || mass < cfg.coag_min_hum {
+                    return None;
                 }
-            }
-            if p.mass < cfg.downpour_mass * cfg.downpour_stop_frac {
-                p.raining = false;
-                continue;
-            }
-
-            let drain = (cfg.downpour_drain * oro).min(p.mass);
-            let radius = p.radius();
-            // Wider footprint when the *air at the parcel* is cold enough
-            // to form snow (ground melt is decided per landing column).
-            let air_y = p.fy.round() as i32;
-            let snowing = match (temp, phase) {
-                (Some(t), Some(ph)) => {
-                    let gx = world.wrap_x(p.fx.round() as i32);
-                    crate::phase::precip_forms_snow_at_air(t, gx, air_y, ph)
-                }
-                _ => false,
-            };
-            let cols = if snowing {
-                ((radius * cfg.snow_footprint_mult.max(0.1)) as i32).clamp(4, 18)
-            } else {
-                ((radius * cfg.rain_footprint_mult.max(0.1)) as i32).clamp(2, 10)
-            };
-            let mut remaining = drain;
-            // Fractional column shares are << one Snow cell (255). Cold
-            // columns retry a full cell from parcel mass — never soak.
-            let snow_cell = phase
-                .map(|ph| ph.min_budget_to_snow.max(u8::MAX as f32))
-                .unwrap_or(0.0);
-            let mut snow_cells_this_tick = 0u8;
-            let snow_cell_cap = if snowing {
-                cfg.snow_cells_per_tick.max(1)
-            } else {
-                cfg.rain_cells_per_tick.max(1)
-            };
-            for k in 0..cols {
-                if remaining <= 0.0 || p.mass <= 0.0 {
-                    break;
-                }
-                let t = if cols == 1 {
-                    0.0
-                } else {
-                    k as f32 / (cols - 1) as f32 * 2.0 - 1.0
-                };
-                let span = if snowing {
-                    radius * cfg.snow_span_mult.max(0.05)
-                } else {
-                    radius * cfg.rain_span_mult.max(0.05)
-                };
-                let gx = world.wrap_x((p.fx + t * span).round() as i32);
-                let share = (drain / cols as f32) * (1.15 - 0.3 * t.abs());
-                let mut dropped = deposit_rain_column(
-                    world,
-                    gx,
-                    p.fy.round() as i32,
-                    share.min(remaining),
-                    tick,
-                    k,
-                    temp,
-                    phase,
-                );
-                if dropped <= 0.0
-                    && snow_cell > 0.0
-                    && snow_cells_this_tick < snow_cell_cap
-                    && p.mass >= snow_cell
-                {
-                    dropped = deposit_rain_column(
-                        world,
-                        gx,
-                        p.fy.round() as i32,
-                        snow_cell,
-                        tick,
-                        k,
-                        temp,
-                        phase,
-                    );
-                    if dropped > 0.0 {
-                        snow_cells_this_tick = snow_cells_this_tick.saturating_add(1);
-                    }
-                }
-                let pay = dropped.min(p.mass);
-                if pay <= 0.0 {
-                    continue;
-                }
-                p.mass -= pay;
-                // Heavy liquid downpour: wake surface sand / organic so
-                // grains can splash / repose (visual + sim read).
-                if !snowing && pay >= 18.0 && p.wetness_with(cfg.downpour_mass) > 0.55 {
-                    splash_surface_grains(
-                        world,
-                        gx,
-                        p.fy.round() as i32,
-                        tick.wrapping_add(k as u64),
-                    );
-                }
-                // Snow-cell retries may exceed this tick's drain slice.
-                remaining = (remaining - pay.min(remaining)).max(0.0);
-            }
-            if p.mass < 1.0 {
-                p.mass = 0.0;
-                p.raining = false;
-            }
+                Some((mass, hx, hy))
+            })
+            .collect();
+        if hits.is_empty() {
+            return;
+        }
+        hits.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let cap = cfg.max_parcels.max(1);
+        for &(mass, hx, hy) in hits.iter().take(cap) {
+            let sat = temp
+                .map(|t| Humidity::saturation_mass_at_temp(t.at_tile(hx, hy)))
+                .unwrap_or(Humidity::MAX_MASS_PER_TILE);
+            let wet = (mass / sat.max(1.0)).clamp(0.0, 1.5) / 1.5;
+            let cx = hx * tc + tc / 2;
+            let cy = hy * tc + tc / 2;
+            let seed = parcel_shape_seed(cx, cy);
+            let mut fy = cy as f32;
+            let floor = cloud_floor_y(world, wind, cx as f32);
+            fy = fy.max(floor + cfg.ridge_clearance);
+            // `mass` stays 0 — the next tick's leftover-release would
+            // otherwise pour this humidity copy back into the sky
+            // (mint vapor → condensation mints rain).
+            self.parcels.push(CloudParcel {
+                fx: cx as f32,
+                fy,
+                mass: 0.0,
+                raining: wet >= 0.42,
+                on_ridge: fy > cy as f32 + 1.0,
+                shape_seed: seed,
+                cruise_fy: fy,
+                vis_mass: mass,
+                deform: if fy > cy as f32 + 1.0 { 0.25 } else { 0.0 },
+            });
         }
     }
 }
@@ -626,33 +359,51 @@ fn surface_y(wind: &Wind, fx: f32) -> f32 {
     ) as f32
 }
 
+/// How far above worldgen surface we always scan. Taller player /
+/// editor stacks continue the walk while the column stays occupied.
+const CLOUD_FLOOR_SCAN_ABOVE: i32 = 64;
+
+fn occupies_cloud_floor(c: crate::cell::Cell) -> bool {
+    c.material != MaterialId::Air || !c.sat.is_empty()
+}
+
+/// Inclusive top cell of the wind/humidity bounds (sky ceiling − 1).
+fn sky_top_cell(wind: &Wind) -> i32 {
+    match wind.bounds {
+        Some(b) => (b.hy_max + 1) * wind.tile_cols.max(1) - 1,
+        None => 512,
+    }
+}
+
 /// Occupied column top (rock / ice / snow / standing water) for cloud
-/// collision and precip drawing — top-down so streaks stop on the true
-/// surface instead of punching through slopes.
+/// collision, humidity haze clip, and precip drawing.
+///
+/// Starts from the worldgen surface band, then **climbs** while the
+/// column is still solid or wet so a player tower above
+/// `surface + 64` (the old hard cap — ~y 263 on inland hills) still
+/// bumps humidity and clouds instead of letting them pass through.
 pub fn cloud_floor_y(world: &World, wind: &Wind, fx: f32) -> f32 {
     let rock = surface_y(wind, fx);
     let gx = world.wrap_x(fx.round() as i32);
     let rock_i = rock as i32;
-    let y_hi = rock_i + 64;
+    let sky = sky_top_cell(wind).max(rock_i);
+    let mut y_hi = (rock_i + CLOUD_FLOOR_SCAN_ABOVE).clamp(rock_i, sky);
+    while y_hi < sky {
+        match world.get_cell(gx, y_hi + 1) {
+            Some(c) if occupies_cloud_floor(c) => y_hi += 1,
+            _ => break,
+        }
+    }
     let y_lo = rock_i - 12;
     for y in (y_lo..=y_hi).rev() {
         match world.get_cell(gx, y) {
-            Some(c) if c.material != MaterialId::Air => {
-                return (y as f32).max(rock);
-            }
-            Some(c) if !c.sat.is_empty() => {
+            Some(c) if occupies_cloud_floor(c) => {
                 return (y as f32).max(rock);
             }
             _ => {}
         }
     }
     rock
-}
-
-fn preferred_deck(sea_level_y: i32, sky_ceiling_y: i32, cfg: &CloudConfig) -> f32 {
-    (sea_level_y + cfg.cloud_alt_above_sea)
-        .min(sky_ceiling_y - 4)
-        .max(sea_level_y + cfg.coag_min_above_sea) as f32
 }
 
 fn parcel_shape_seed(cx: i32, cy: i32) -> u32 {
@@ -662,77 +413,6 @@ fn parcel_shape_seed(cx: i32, cy: i32) -> u32 {
     h = h.wrapping_mul(0xC2B2_AE3D);
     h ^= h >> 13;
     h
-}
-
-fn orographic_boost(wind: &Wind, fx: f32) -> f32 {
-    let hx = (fx / wind.tile_cols.max(1) as f32).floor() as i32;
-    let ascent = wind.ascent_cells(hx);
-    let s = surface_y(wind, fx);
-    let tall = s >= wind.sea_level_y as f32 + 22.0;
-    let mut boost = 1.0 + (ascent / 55.0).clamp(0.0, 1.0) * 0.45;
-    if tall {
-        boost += 0.15;
-    }
-    boost.clamp(1.0, 1.55)
-}
-
-fn deposit_rain_column(
-    world: &mut World,
-    gx: i32,
-    start_y: i32,
-    budget: f32,
-    tick: u64,
-    salt: i32,
-    temp: Option<&Temperature>,
-    phase: Option<&PhaseConfig>,
-) -> f32 {
-    let jx = world.wrap_x(gx + ((tick as i32 + salt * 3) % 3) - 1);
-    deposit_precip_on_surface(world, jx, start_y, budget, temp, phase)
-}
-
-/// Dirty surface sand / organic / soil under a hard rain hit so repose
-/// can rearrange a few grains (splash). Cheap: one column + neighbours.
-fn splash_surface_grains(world: &mut World, gx: i32, from_y: i32, salt: u64) {
-    use crate::cell::is_grain;
-    let gx = world.wrap_x(gx);
-    let y0 = from_y.clamp(0, 512);
-    let mut top = None;
-    for y in (0..=y0).rev() {
-        match world.get_cell(gx, y) {
-            Some(c) if c.material != MaterialId::Air => {
-                top = Some(y);
-                break;
-            }
-            Some(c) if !c.sat.is_empty() => break, // lake — skip
-            _ => {}
-        }
-    }
-    let Some(sy) = top else {
-        return;
-    };
-    for dx in -1i32..=1 {
-        let x = world.wrap_x(gx + dx);
-        for dy in 0i32..=2 {
-            let y = sy - dy;
-            let Some(c) = world.get_cell(x, y) else {
-                continue;
-            };
-            if !is_grain(c.material) {
-                continue;
-            }
-            let h = salt
-                .wrapping_mul(0x9E37_79B9)
-                .wrapping_add((x as u64).wrapping_mul(0x85EB_CA6B))
-                .wrapping_add(y as u64);
-            if h % 5 != 0 {
-                continue;
-            }
-            world.touch_dirty(x, y);
-            if y > 0 {
-                world.touch_dirty(x, y - 1);
-            }
-        }
-    }
 }
 
 #[cfg(test)]
@@ -760,7 +440,7 @@ mod tests {
     }
 
     #[test]
-    fn humidity_coagulates_into_parcels() {
+    fn humidity_rebuilds_visual_echo() {
         let p = WorldgenParams::default();
         let wind = wind_for(&p);
         let mut h = Humidity::with_world_bounds(
@@ -771,30 +451,38 @@ mod tests {
             p.sky_ceiling_y,
         );
         h.wrap_x = true;
-        // Seed vapor low (ocean film), then steps should lift + coagulate.
-        let film_y = p.sea_level_y + 2;
+        let sky_y = p.sea_level_y + 40;
         for x in 40..56 {
-            h.add(x, film_y, 120.0);
+            h.add(x, sky_y, 80.0);
         }
         let hum_before = h.total_mass();
         let mut clouds = CloudStore::new();
         let mut world = World::new(p.seed);
-        let cfg = CloudConfig::default();
-        for t in 0..200 {
-            clouds.step(
-                &mut world,
-                &mut h,
-                &wind,
-                p.sea_level_y,
-                p.sky_ceiling_y,
-                t,
-                &cfg,
-            );
-        }
-        assert!(!clouds.is_empty(), "should form at least one parcel");
-        assert!(clouds.total_mass() > 0.0);
-        assert!(h.total_mass() < hum_before);
-        // Parcels should sit well above the sea film.
+        let cfg = CloudConfig {
+            coag_min_hum: 20.0,
+            max_parcels: 16,
+            ..CloudConfig::default()
+        };
+        clouds.step(
+            &mut world,
+            &mut h,
+            &wind,
+            p.sea_level_y,
+            p.sky_ceiling_y,
+            1,
+            &cfg,
+        );
+        assert!(!clouds.is_empty(), "wet sky tiles should spawn a visual echo");
+        assert!(clouds.visual_mass() > 0.0);
+        assert!(
+            clouds.total_mass() < 1e-3,
+            "echo parcels must not hold water or the next tick remints it"
+        );
+        assert!(
+            (h.total_mass() - hum_before).abs() < 1e-3,
+            "visual rebuild must not steal humidity (was {hum_before} now {})",
+            h.total_mass()
+        );
         for pcloud in &clouds.parcels {
             assert!(
                 pcloud.fy > p.sea_level_y as f32 + cfg.coag_min_above_sea as f32 * 0.5,
@@ -803,6 +491,103 @@ mod tests {
                 p.sea_level_y
             );
         }
+    }
+
+    #[test]
+    fn leftover_parcels_return_to_humidity() {
+        let p = WorldgenParams::default();
+        let wind = wind_for(&p);
+        let mut h = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        h.wrap_x = true;
+        let mut clouds = CloudStore::new();
+        let fy = (p.sea_level_y + 40) as f32;
+        clouds.parcels.push(CloudParcel {
+            fx: 48.0,
+            fy,
+            mass: 4.0,
+            raining: false,
+            on_ridge: false,
+            shape_seed: 1,
+            cruise_fy: fy,
+            vis_mass: 4.0,
+            deform: 0.0,
+        });
+        let mut world = World::new(p.seed);
+        let cfg = CloudConfig {
+            coag_min_hum: 10_000.0,
+            max_parcels: 8,
+            ..CloudConfig::default()
+        };
+        clouds.step(
+            &mut world,
+            &mut h,
+            &wind,
+            p.sea_level_y,
+            p.sky_ceiling_y,
+            1,
+            &cfg,
+        );
+        assert!(
+            (h.total_mass() - 4.0).abs() < 1e-3,
+            "old parcel mass should land in humidity, got {}",
+            h.total_mass()
+        );
+    }
+
+    #[test]
+    fn visual_echo_does_not_remint_humidity() {
+        let p = WorldgenParams::default();
+        let wind = wind_for(&p);
+        let mut h = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        h.wrap_x = true;
+        let sky_y = p.sea_level_y + 40;
+        for x in 40..56 {
+            h.add(x, sky_y, 80.0);
+        }
+        let mut clouds = CloudStore::new();
+        let mut world = World::new(p.seed);
+        let cfg = CloudConfig {
+            coag_min_hum: 20.0,
+            max_parcels: 16,
+            ..CloudConfig::default()
+        };
+        clouds.step(
+            &mut world,
+            &mut h,
+            &wind,
+            p.sea_level_y,
+            p.sky_ceiling_y,
+            1,
+            &cfg,
+        );
+        let after_one = h.total_mass();
+        clouds.step(
+            &mut world,
+            &mut h,
+            &wind,
+            p.sea_level_y,
+            p.sky_ceiling_y,
+            2,
+            &cfg,
+        );
+        assert!(
+            (h.total_mass() - after_one).abs() < 1e-3,
+            "second step reminted humidity ({} → {})",
+            after_one,
+            h.total_mass()
+        );
     }
 
     #[test]
@@ -831,10 +616,38 @@ mod tests {
     }
 
     #[test]
-    fn ridge_collision_lifts_parcel_above_surface() {
+    fn tall_editor_tower_raises_cloud_floor_above_worldgen_band() {
+        // Humidity / clouds used to stop scanning 64 cells above the
+        // generated surface, so a player pillar (y > ~263 inland)
+        // let the haze pass through the rock.
         let p = WorldgenParams::default();
         let wind = wind_for(&p);
-        // Find a tall inland column.
+        let mut world = World::new(p.seed);
+        let gx = 20i32;
+        let rock = continental_surface_y(p.seed, gx, p.sea_level_y, p.width_cols);
+        let top = rock + 80;
+        assert!(
+            top > rock + 64,
+            "fixture must stick above the old +64 scan cap"
+        );
+        for y in rock..=top {
+            world.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(CHUNK_CELLS_W as i32),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+            world.set_cell(gx, y, Cell::solid(MaterialId::Stone));
+        }
+        let floor = cloud_floor_y(&world, &wind, gx as f32);
+        assert!(
+            floor >= top as f32,
+            "cloud/humidity floor {floor} must sit on the tower top {top} (worldgen rock {rock})"
+        );
+    }
+
+    #[test]
+    fn ridge_rebuild_lifts_echo_above_surface() {
+        let p = WorldgenParams::default();
+        let wind = wind_for(&p);
         let mut peak_x = None;
         for x in 0..p.width_cols {
             let s = continental_surface_y(p.seed, x, p.sea_level_y, p.width_cols);
@@ -845,24 +658,23 @@ mod tests {
         }
         let peak_x = peak_x.expect("need a mountain column");
         let surface = continental_surface_y(p.seed, peak_x, p.sea_level_y, p.width_cols) as f32;
+        let mut h = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        h.wrap_x = true;
+        h.add(peak_x, (surface as i32) + 2, 80.0);
         let mut clouds = CloudStore::new();
-        let cfg = CloudConfig::default();
-        clouds.parcels.push(CloudParcel {
-            fx: peak_x as f32,
-            fy: surface - 5.0, // intentionally inside the mountain
-            mass: 80.0,
-            raining: false,
-            on_ridge: false,
-            shape_seed: 1,
-            cruise_fy: surface - 5.0,
-            vis_mass: 80.0,
-            deform: 0.0,
-        });
-        // Soft blend needs a few ticks to clear the ridge floor.
+        let cfg = CloudConfig {
+            coag_min_hum: 10.0,
+            ..CloudConfig::default()
+        };
         let world = World::new(p.seed);
-        for _ in 0..8 {
-            clouds.advect_and_collide(&world, &wind, p.sea_level_y, p.sky_ceiling_y, 0, &cfg);
-        }
+        clouds.rebuild_visuals_from_humidity(&h, &world, &wind, p.sea_level_y, &cfg, None);
+        assert!(!clouds.is_empty());
         let c = &clouds.parcels[0];
         let min_clear = surface + cfg.ridge_clearance * 0.5;
         assert!(
@@ -870,86 +682,6 @@ mod tests {
             "cloud fy={} must sit above surface+clearance {}",
             c.fy,
             min_clear
-        );
-        assert!(
-            c.cruise_fy >= min_clear,
-            "cruise altitude should stick after ridge lift (cruise={})",
-            c.cruise_fy
-        );
-    }
-
-    #[test]
-    fn heavy_cloud_downpours_into_air() {
-        let p = WorldgenParams::default();
-        let wind = wind_for(&p);
-        let mut world = World::new(p.seed);
-        let gx: i32 = 20;
-        let top: i32 = 40;
-        let floor: i32 = 5;
-        // Ensure chunks covering cloud → ground.
-        for y in [floor, top] {
-            world.ensure_chunk(ChunkCoord::new(
-                gx.div_euclid(CHUNK_CELLS_W as i32),
-                y.div_euclid(CHUNK_CELLS_H as i32),
-            ));
-        }
-        for x in (gx - 3)..=(gx + 3) {
-            world.set_cell(x, floor, Cell::solid(MaterialId::Stone));
-            for y in (floor + 1)..=top {
-                world.set_cell(x, y, Cell::air());
-            }
-        }
-        let mut clouds = CloudStore::new();
-        clouds.parcels.push(CloudParcel {
-            fx: gx as f32,
-            fy: top as f32,
-            mass: DOWNPOUR_MASS * 1.5,
-            raining: false,
-            on_ridge: false,
-            shape_seed: 2,
-            cruise_fy: top as f32,
-            vis_mass: DOWNPOUR_MASS * 1.5,
-            deform: 0.0,
-        });
-        let mass_before = clouds.total_mass();
-        clouds.downpour(&mut world, &wind, 0, &CloudConfig::default(), None, None);
-        assert!(clouds.total_mass() < mass_before);
-        // Rain should land just above the stone floor, not hang at cloud height.
-        let landed = world.get_cell(gx, floor + 1).map(|c| c.sat.0).unwrap_or(0);
-        assert!(
-            landed > 0,
-            "downpour should deposit on the ground (got sat={landed})"
-        );
-        let high = world.get_cell(gx, top).map(|c| c.sat.0).unwrap_or(0);
-        assert_eq!(high, 0, "rain must not hang in the sky at cloud height");
-    }
-
-    #[test]
-    fn wind_moves_parcels() {
-        let p = WorldgenParams::default();
-        let wind = wind_for(&p);
-        let mut clouds = CloudStore::new();
-        let cfg = CloudConfig::default();
-        let fy = (p.sea_level_y + cfg.cloud_alt_above_sea) as f32;
-        clouds.parcels.push(CloudParcel {
-            fx: 50.0,
-            fy,
-            mass: 40.0,
-            raining: false,
-            on_ridge: false,
-            shape_seed: 3,
-            cruise_fy: fy,
-            vis_mass: 40.0,
-            deform: 0.0,
-        });
-        let x0 = clouds.parcels[0].fx;
-        let world = World::new(p.seed);
-        for _ in 0..80 {
-            clouds.advect_and_collide(&world, &wind, p.sea_level_y, p.sky_ceiling_y, 0, &cfg);
-        }
-        assert!(
-            clouds.parcels[0].fx > x0,
-            "parcels should drift with prevailing wind"
         );
     }
 }

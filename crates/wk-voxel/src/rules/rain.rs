@@ -177,12 +177,51 @@ pub fn is_standing_water(world: &World, gx: i32, gy: i32) -> bool {
     }
 }
 
+/// True when a full surface film at `(gx, gy)` can still spread or
+/// cascade — rain must wait, or hills grow wedges. A dry lake bed of
+/// full films has no outlet, so rain is allowed to stack and pond.
+fn film_has_outlet(world: &World, gx: i32, gy: i32) -> bool {
+    for dx in [-1_i32, 1] {
+        let nx = world.wrap_x(gx + dx);
+        match world.get_cell(nx, gy) {
+            None => return true,
+            Some(side) if side.material == MaterialId::Air && !side.sat.is_full() => {
+                return true;
+            }
+            Some(side) if side.material == MaterialId::Air => {
+                if matches!(
+                    world.get_cell(nx, gy - 1),
+                    Some(b) if b.material == MaterialId::Air && !b.sat.is_full()
+                ) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+        match world.get_cell(nx, gy - 1) {
+            None => return true,
+            Some(c) if c.material == MaterialId::Air && !c.sat.is_full() => {
+                return true;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+/// Max cells to walk down from a precip origin. Demo sky is 5 chunks
+/// tall (320); ceiling clouds must still reach sea-level lakes (~80).
+/// A short 128-cell walk used to miss the ground entirely — rain kept
+/// looking heavy while basins only evaporated.
+const SURFACE_DEPOSIT_SCAN: i32 = 512;
+
 /// Deposit atmospheric water onto the free-air surface under `start_y`.
 ///
 /// Lands just above solid ground or standing water. Deepens existing
-/// water columns, but will **not** grow a one-cell film on bare rock
-/// into a tall slope wedge (returns 0 when that film is already full
-/// so runoff can clear the hillside first).
+/// water columns. A full one-cell film on bare rock does **not** stack
+/// into a hillside wedge while it can still spread or cascade — but a
+/// closed basin of full films (dry lake) *does* pond, otherwise long
+/// soaks rain forever and never refill.
 pub(crate) fn deposit_water_on_surface(world: &mut World, gx: i32, start_y: i32, budget: f32) -> f32 {
     if budget <= 0.0 {
         return 0.0;
@@ -190,8 +229,12 @@ pub(crate) fn deposit_water_on_surface(world: &mut World, gx: i32, start_y: i32,
     let jx = world.wrap_x(gx);
     let mut y = start_y;
     let mut last_free_air_y: Option<i32> = None;
-    for _ in 0..128 {
+    let floor_y = start_y - SURFACE_DEPOSIT_SCAN;
+    while y >= floor_y {
         let Some(cell) = world.get_cell(jx, y) else {
+            // Unloaded gap — forget the air seat so we never fill far
+            // above the next solid/film we meet.
+            last_free_air_y = None;
             y -= 1;
             continue;
         };
@@ -216,8 +259,21 @@ pub(crate) fn deposit_water_on_surface(world: &mut World, gx: i32, start_y: i32,
             );
             if below_is_water {
                 if let Some(ay) = last_free_air_y {
-                    if let Some(ac) = world.get_cell(jx, ay) {
-                        return fill_air_sat(world, jx, ay, ac, budget);
+                    if ay == y + 1 {
+                        if let Some(ac) = world.get_cell(jx, ay) {
+                            return fill_air_sat(world, jx, ay, ac, budget);
+                        }
+                    }
+                }
+            }
+            // Enclosed full films (dry lake / puddle with no outlet)
+            // must be allowed to pond. Hillside films still wait.
+            if !film_has_outlet(world, jx, y) {
+                if let Some(ay) = last_free_air_y {
+                    if ay == y + 1 {
+                        if let Some(ac) = world.get_cell(jx, ay) {
+                            return fill_air_sat(world, jx, ay, ac, budget);
+                        }
                     }
                 }
             }

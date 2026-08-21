@@ -158,8 +158,17 @@ impl Humidity {
     /// Deposits outside [`Self::bounds`] are dropped (the cell grid
     /// should not evaporate outside the stamped world).
     /// Soft per-tile ceiling so evaporation cannot stockpile unboundedly
-    /// when rain / coagulation cannot keep up (overnight flood safety).
+    /// when rain / condensation cannot keep up (overnight flood safety).
     pub const MAX_MASS_PER_TILE: f32 = 2_500.0;
+
+    /// Saturation mass at air temperature (Clausius-lite, cheap).
+    ///
+    /// ~[`Self::MAX_MASS_PER_TILE`] near 18 °C. Cold air holds less, so
+    /// the same vapor is closer to rain / visible cloud.
+    pub fn saturation_mass_at_temp(temp_c: f32) -> f32 {
+        let scale = ((temp_c + 8.0) / 26.0).clamp(0.16, 1.55);
+        Self::MAX_MASS_PER_TILE * scale
+    }
 
     pub fn add(&mut self, gx: i32, gy: i32, mass: f32) {
         let _ = self.try_add(gx, gy, mass);
@@ -236,6 +245,59 @@ impl Humidity {
     /// Humidity mass at tile coord `(hx, hy)`. Missing → 0.
     pub fn at_tile(&self, hx: i32, hy: i32) -> f32 {
         *self.cells.get(&(hx, hy)).unwrap_or(&0.0)
+    }
+
+    /// Tiles above a surface cell that count as its vapor column.
+    pub const VAPOR_COLUMN_TILES: i32 = 12;
+
+    /// True when the air column above `(gx, gy)` is already wet enough
+    /// that more evaporation would only stockpile sky haze.
+    ///
+    /// Buoyant rise empties the surface tile every tick, so the per-tile
+    /// cap at sea level never trips — a long soak used to fill the whole
+    /// sky grid, then condensation walked every column (~7 FPS).
+    pub fn column_near_saturated(&self, gx: i32, gy: i32) -> bool {
+        let (hx, hy0) = self.tile_of(gx, gy);
+        let mut sum = 0.0f32;
+        let mut n = 0i32;
+        let mut peak = 0.0f32;
+        for i in 0..Self::VAPOR_COLUMN_TILES {
+            let hy = hy0 + i;
+            if !self.accepts(hx, hy) {
+                break;
+            }
+            let m = self.at_tile(hx, hy);
+            sum += m;
+            peak = peak.max(m);
+            n += 1;
+        }
+        if n == 0 {
+            return false;
+        }
+        peak >= Self::MAX_MASS_PER_TILE * 0.92
+            || (sum / n as f32) >= Self::MAX_MASS_PER_TILE * 0.50
+    }
+
+    /// True when total vapor exceeds a thin cloud-deck budget (not the
+    /// entire sky rectangle). Long soaks used to saturate every tile.
+    pub fn atmosphere_overfull(&self) -> bool {
+        let width = match self.bounds {
+            Some(b) => (b.hx_max - b.hx_min + 1).max(1) as f32,
+            None => {
+                let mut min_hx = i32::MAX;
+                let mut max_hx = i32::MIN;
+                for &(hx, _) in self.cells.keys() {
+                    min_hx = min_hx.min(hx);
+                    max_hx = max_hx.max(hx);
+                }
+                if min_hx > max_hx {
+                    return false;
+                }
+                (max_hx - min_hx + 1).max(1) as f32
+            }
+        };
+        let budget = width * 8.0 * (Self::MAX_MASS_PER_TILE * 0.45);
+        self.total_mass() > budget
     }
 
     /// Bilinear sample in world-cell space (smooth haze; no tile facets).
@@ -361,9 +423,21 @@ impl Humidity {
     }
 
     /// Buoyant lift: a fraction of each tile's mass moves one tile up,
-    /// so vapor from ocean evaporation rises before it can coagulate
-    /// into clouds. Mass-conserving; stops at `max_hy` (cloud deck).
+    /// so vapor from ocean evaporation rises toward the cloud deck.
+    /// Mass-conserving; stops at `max_hy`.
     pub fn buoyant_rise(&mut self, fraction: f32, max_hy: i32) {
+        self.buoyant_rise_thermal(fraction, max_hy, None);
+    }
+
+    /// [`Self::buoyant_rise`] scaled by the local lapse: warm air under
+    /// colder air lifts harder; a stable inversion almost sits still.
+    /// Same tile walk as the uniform rise — no extra world scans.
+    pub fn buoyant_rise_thermal(
+        &mut self,
+        fraction: f32,
+        max_hy: i32,
+        temp: Option<&crate::temperature::Temperature>,
+    ) {
         let fraction = fraction.clamp(0.0, 0.45);
         if fraction == 0.0 || self.cells.is_empty() {
             return;
@@ -378,7 +452,15 @@ impl Humidity {
             if !self.accepts(hx, dest) {
                 continue;
             }
-            let lift = mass * fraction;
+            let lift_f = if let Some(t) = temp {
+                let here = t.at_tile(hx, hy);
+                let above = t.at_tile(hx, dest);
+                let lapse = (here - above).clamp(-5.0, 10.0);
+                (fraction * (0.40 + lapse * 0.11)).clamp(0.0, 0.45)
+            } else {
+                fraction
+            };
+            let lift = mass * lift_f;
             if lift < 1e-6 {
                 continue;
             }
@@ -604,6 +686,71 @@ mod tests {
                 "created oob key ({hx},{hy})"
             );
         }
+    }
+
+    #[test]
+    fn saturation_mass_shrinks_in_the_cold() {
+        let warm = Humidity::saturation_mass_at_temp(20.0);
+        let cold = Humidity::saturation_mass_at_temp(-8.0);
+        assert!(warm > cold * 1.8, "cold air must hold much less vapor");
+        assert!(warm <= Humidity::MAX_MASS_PER_TILE * 1.55);
+    }
+
+    #[test]
+    fn buoyant_rise_lifts_more_when_lapse_is_unstable() {
+        let mut unstable = Humidity::new(4);
+        unstable.add(2, 0, 100.0);
+        let mut stable = Humidity::new(4);
+        stable.add(2, 0, 100.0);
+        let mut t_up = crate::temperature::Temperature::with_world_bounds(
+            4, 0, 0, 16, 16, 1, 16, 4, false,
+        );
+        let mut t_st = t_up.clone();
+        for ((_, hy), v) in t_up.cells.iter_mut() {
+            *v = if *hy <= 0 { 24.0 } else { 8.0 };
+        }
+        for v in t_st.cells.values_mut() {
+            *v = 12.0;
+        }
+        unstable.buoyant_rise_thermal(0.10, 4, Some(&t_up));
+        stable.buoyant_rise_thermal(0.10, 4, Some(&t_st));
+        assert!(
+            unstable.at_tile(0, 1) > stable.at_tile(0, 1) + 2.0,
+            "warm-under-cold should lift more ({} vs {})",
+            unstable.at_tile(0, 1),
+            stable.at_tile(0, 1)
+        );
+    }
+
+    #[test]
+    fn column_near_saturated_when_deck_is_wet() {
+        let mut h = Humidity::new(4);
+        assert!(!h.column_near_saturated(2, 0));
+        h.add(2, 8, Humidity::MAX_MASS_PER_TILE);
+        assert!(
+            h.column_near_saturated(2, 0),
+            "a near-full tile in the vapor column must block more evap"
+        );
+    }
+
+    #[test]
+    fn atmosphere_overfull_uses_thin_deck_budget() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 256);
+        assert!(!h.atmosphere_overfull());
+        // width tiles = 16 → budget = 16 * 8 * MAX * 0.45
+        for hx in 0..16 {
+            for hy in 20..28 {
+                h.cells.insert((hx, hy), Humidity::MAX_MASS_PER_TILE * 0.50);
+            }
+        }
+        assert!(
+            h.atmosphere_overfull(),
+            "a filled 8-tile cloud deck must trip the soak budget"
+        );
+        assert!(
+            h.cells.len() < h.bounds.unwrap().tile_capacity(),
+            "budget is a thin deck, not the whole sky rectangle"
+        );
     }
 
     #[test]
