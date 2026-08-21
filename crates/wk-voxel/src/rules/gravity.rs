@@ -36,6 +36,10 @@ use super::plan::regions_for_standalone;
 /// - **Air → porous solid** for a walled pond, or a stacked lake column
 ///   with full wet Air on both sides. Shore / weir / open-surge faces
 ///   stay in Air; seepage splash-wets those beds.
+/// - **Pore water in solids never freefalls.** Solid→solid and solid→Air
+///   sat moves belong to seepage (Darcy). Dumping a full cell of pore
+///   water down a soil column each gravity pass looked like powder
+///   draining through the mountain.
 ///
 /// This is intentionally the simplest possible fall model — one cell
 /// per invocation, no lateral spread, no density swap. Free-fall
@@ -222,6 +226,16 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     next_cur = Some(new_above);
                     continue;
                 }
+
+                // Free water falls only through Air. Pore water in solids
+                // is seepage's job — otherwise a wet soil cell dumps its
+                // entire sat into the cell below every gravity pass
+                // (powder freefall through the mountain).
+                if cur.material != MaterialId::Air || above.material != MaterialId::Air {
+                    next_cur = Some(above);
+                    continue;
+                }
+
                 let move_amt = above.sat.0.min(free);
                 if move_amt == 0 {
                     next_cur = Some(above);

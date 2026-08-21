@@ -402,6 +402,61 @@ fn spill_propagates_one_cell_per_tick() {
 // ------------ seepage ------------
 
 #[test]
+fn pore_water_does_not_freefall_through_soil_column() {
+    // Wet soil above dry soil — gravity must not dump the upper cell's
+    // entire pore sat into the cell below (powder freefall).
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for y in 0..=6 {
+        w.set_cell(4, y, Cell::solid(MaterialId::Soil));
+    }
+    let cap = water_capacity(MaterialId::Soil);
+    w.set_cell(4, 5, {
+        let mut c = Cell::solid(MaterialId::Soil);
+        c.sat = Sat(cap);
+        c
+    });
+    apply_gravity_fall(&mut w);
+    assert_eq!(
+        w.get_cell(4, 5).unwrap().sat.0,
+        cap,
+        "wet soil must keep its pore water under gravity"
+    );
+    assert_eq!(
+        w.get_cell(4, 4).unwrap().sat.0,
+        0,
+        "dry soil below must not freefall-fill from above"
+    );
+}
+
+#[test]
+fn underground_seepage_moves_laterally_through_soil() {
+    // Full wet soil beside dry soil — seepage must conduct sideways.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..8 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+    }
+    let cap = water_capacity(MaterialId::Soil);
+    w.set_cell(3, 1, {
+        let mut c = Cell::solid(MaterialId::Soil);
+        c.sat = Sat(cap);
+        c
+    });
+    apply_seepage(&mut w);
+    let right = w.get_cell(4, 1).unwrap().sat.0;
+    let left = w.get_cell(3, 1).unwrap().sat.0;
+    assert!(right > 0, "dry neighbour must take pore water laterally");
+    assert!(left < cap, "wet cell must lose some sat sideways");
+    let pair = left as i32 + right as i32;
+    assert!(
+        pair >= cap as i32 - 2 && pair <= cap as i32,
+        "lateral seepage nearly conserves the pair (left={left} right={right} cap={cap})"
+    );
+}
+
+#[test]
 fn seepage_wets_adjacent_sand_from_air_water() {
     let mut w = World::new(42);
     w.ensure_chunk(ChunkCoord::new(0, 0));

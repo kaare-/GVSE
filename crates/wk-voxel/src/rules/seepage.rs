@@ -171,9 +171,16 @@ fn accumulate_seepage_xfers(
                     }
                     let rate = if a_solid && b_solid {
                         // Peer pores: drier side limits conduction.
-                        seepage_conduct_rate_with(
+                        // Vertical edges crawl a bit slower so lateral
+                        // aquifer spread can compete with downhill drain
+                        // (avoids a single wet column punching straight down).
+                        let mut rate = seepage_conduct_rate_with(
                             a.material, &hydro, a.sat.0, cap_a, b.material, b.sat.0, cap_b,
-                        )
+                        );
+                        if dx == 0 && dy != 0 {
+                            rate = ((rate * 2) / 3).max(1).min(rate);
+                        }
+                        rate
                     } else if move_amt > 0 {
                         // A → B: infiltrating into B, or A weeping into Air.
                         if b_solid {

@@ -314,15 +314,12 @@ impl MaterialRegistry {
             },
             MaterialId::Sand => MaterialProps {
                 density: 1600,
-                // Sand is permeable in reality but the previous 220
-                // (out of 255) made a puddle of ~100 kg drain into the
-                // ground in ~100 ticks — visibly instant. Modest cut so
-                // pools linger for a few seconds and shallow dams have
-                // a chance to fill up before their body seeps away.
-                permeability: 160,
+                // Keep sand open enough to wet, but not so open that a
+                // painted lake sinks a freefall plume through the hill.
+                permeability: 96,
                 erosion_resistance: 30,
                 cohesion: 20,
-                porosity: 180,
+                porosity: 110,
                 phase_change: None,
                 render_alpha: 255,
                 // ~31° angle of repose over a 0.25 m column width.
@@ -369,10 +366,10 @@ impl MaterialRegistry {
             },
             MaterialId::Gravel => MaterialProps {
                 density: 2000,
-                permeability: 240,
+                permeability: 160,
                 erosion_resistance: 60,
                 cohesion: 40,
-                porosity: 120,
+                porosity: 90,
                 phase_change: None,
                 render_alpha: 255,
                 // ~40° — larger, more interlocking grains than sand.
@@ -420,14 +417,13 @@ impl MaterialRegistry {
                 roof_span_max_m: 0.0,
             },
             MaterialId::Soil => MaterialProps {
-                // Humus-rich soil: denser and slightly less porous than
-                // fresh Organic (mycelium compaction), still holds a lot
-                // of water so composting does not flash-dry the bed.
+                // Humus-rich loam — holds water, conducts slowly so recharge
+                // spreads instead of punching a vertical plume.
                 density: 1350,
-                permeability: 90,
+                permeability: 48,
                 erosion_resistance: 55,
                 cohesion: 110,
-                porosity: 160,
+                porosity: 100,
                 phase_change: None,
                 render_alpha: 255,
                 repose_rise_m: 0.14,

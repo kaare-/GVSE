@@ -332,6 +332,8 @@ const WATER: &[(&str, LineKind)] = &[
     ("Bone-dry ground takes a trickle so sheets can run past; uptake", LineKind::Body),
     ("climbs as the top cell wets. Underground peer flow is the same", LineKind::Body),
     ("idea — dry paths crawl, saturated pairs run at full permeability.", LineKind::Body),
+    ("Pore water never freefalls through solids — only seepage moves it,", LineKind::Body),
+    ("including sideways through soil and sand.", LineKind::Body),
     ("Leftover overflows the crest only when the source cell is already", LineKind::Body),
     ("at that height — ponds do not invent head to climb hillsides.", LineKind::Body),
     ("Surface hops stay soft so sheets spread as a gradient, not a", LineKind::Body),
