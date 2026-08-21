@@ -369,6 +369,36 @@ fn accumulate_seepage_xfers(
                             }
                         }
                     }
+                    // Pore spring into buried / enclosed Air. Head equalise
+                    // alone stalls once cavity air is a bit wetter (fraction)
+                    // than a depleted wall — dug voids stayed empty inside
+                    // blue groundwater. Surface sheet films stay splash-capped
+                    // below; here we force wet pores to keep weeping.
+                    if a_solid
+                        && b.material == MaterialId::Air
+                        && !b.sat.is_full()
+                        && a.sat.0 > 0
+                        && !is_surface_sheet_air(
+                            world, &read, nx, ny, lx + dx, ly + dy, &b,
+                        )
+                    {
+                        let free = u8::MAX.saturating_sub(b.sat.0) as i32;
+                        let weep = (a.sat.0 as i32).min(free);
+                        if weep > 0 {
+                            move_amt = move_amt.max(weep);
+                        }
+                    } else if b_solid
+                        && a.material == MaterialId::Air
+                        && !a.sat.is_full()
+                        && b.sat.0 > 0
+                        && !is_surface_sheet_air(world, &read, gx, gy, lx, ly, &a)
+                    {
+                        let free = u8::MAX.saturating_sub(a.sat.0) as i32;
+                        let weep = (b.sat.0 as i32).min(free);
+                        if weep > 0 {
+                            move_amt = -weep;
+                        }
+                    }
                     if move_amt == 0 {
                         continue;
                     }
@@ -425,10 +455,10 @@ fn accumulate_seepage_xfers(
                             rate
                         }
                     };
-                    // Open flowing films only splash-wet a dry bank so the
-                    // leading edge does not vanish into pores. Standing
-                    // pond / lake faces (and settled beds) soak at the
-                    // full uptake rate — sides and bottoms both recharge.
+                    // Open surface sheet films only splash-wet a dry bank so
+                    // overland flow does not vanish into pores. Enclosed /
+                    // buried Air (cavities, caves) takes a full pore weep —
+                    // otherwise groundwater never fills dug voids.
                     let rate = {
                         let air_solid = a_solid != b_solid;
                         if !air_solid {
@@ -438,16 +468,14 @@ fn accumulate_seepage_xfers(
                             let standing_face = air.material == MaterialId::Air && air.sat.0 >= 160;
                             if standing_face {
                                 rate
-                            } else if dx != 0 {
-                                rate.min(SHEET_FACE_SPLASH)
                             } else {
                                 let air_lx = if a_solid { lx + dx } else { lx };
+                                let air_ly = if a_solid { ly + dy } else { ly };
                                 let air_gx = if a_solid { nx } else { gx };
                                 let air_gy = if a_solid { ny } else { gy };
-                                let air_ly = if a_solid { ly + dy } else { ly };
                                 if air.material == MaterialId::Air
-                                    && air_has_dry_escape(
-                                        world, &read, air_gx, air_gy, air_lx, air_ly,
+                                    && is_surface_sheet_air(
+                                        world, &read, air_gx, air_gy, air_lx, air_ly, air,
                                     )
                                 {
                                     rate.min(SHEET_FACE_SPLASH)
@@ -520,4 +548,90 @@ fn air_has_dry_escape(
         }
     }
     false
+}
+
+/// Surface overland film: thin Air resting on solid/full water with a dry
+/// side escape. Buried cavity Air (open space under a roof) is **not** a
+/// sheet — pores must weep into it at full rate.
+fn is_surface_sheet_air(
+    world: &World,
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+    air: &Cell,
+) -> bool {
+    if air.material != MaterialId::Air || air.sat.0 >= 160 {
+        return false;
+    }
+    let on_support = matches!(
+        read(lx, ly - 1, gx, gy - 1),
+        Some(b) if b.material != MaterialId::Air || b.sat.is_full()
+    );
+    if !on_support {
+        return false;
+    }
+    air_has_dry_escape(world, read, gx, gy, lx, ly)
+}
+
+/// Re-dirty wet porous faces that can still weep into Air with room.
+///
+/// Quiet groundwater next to a dug cavity otherwise drops out of dirty
+/// tracking and never fills the void (playtest: empty circle in blue sat).
+pub fn wake_pore_weep_into_air(world: &mut World) {
+    let hydro = world.hydro;
+    let ch = CHUNK_CELLS_H as i32;
+    let cw = CHUNK_CELLS_W as i32;
+    let mut touches: Vec<(i32, i32)> = Vec::new();
+    const DIRS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
+    for (&coord, chunk) in &world.chunks {
+        let base_gx = coord.cx * cw;
+        let base_gy = coord.cy * ch;
+        for y in 0..CHUNK_CELLS_H {
+            for x in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(x, y);
+                if !is_porous_solid_with(cell.material, &hydro) {
+                    continue;
+                }
+                let cap = water_capacity_with(cell.material, &hydro);
+                // Need a meaningful donor — matches wetting-front plug (~30%).
+                if cap == 0 || (cell.sat.0 as i32) * 10 < (cap as i32) * 3 {
+                    continue;
+                }
+                let gx = world.wrap_x(base_gx + x as i32);
+                let gy = base_gy + y as i32;
+                let mut face = false;
+                for (dx, dy) in DIRS {
+                    let nx = world.wrap_x(gx + dx);
+                    let ny = gy + dy;
+                    let Some(n) = world.get_cell(nx, ny) else {
+                        continue;
+                    };
+                    if n.material == MaterialId::Air && !n.sat.is_full() {
+                        touches.push((nx, ny));
+                        face = true;
+                    }
+                }
+                if face {
+                    touches.push((gx, gy));
+                    // Recharge halo: wake wet pore neighbours so the
+                    // aquifer can keep feeding the spring face.
+                    for (dx, dy) in DIRS {
+                        let nx = world.wrap_x(gx + dx);
+                        let ny = gy + dy;
+                        let Some(n) = world.get_cell(nx, ny) else {
+                            continue;
+                        };
+                        if is_porous_solid_with(n.material, &hydro) && n.sat.0 > 0 {
+                            touches.push((nx, ny));
+                        }
+                    }
+                }
+            }
+        }
+    }
+    for (gx, gy) in touches {
+        world.touch_dirty(gx, gy);
+    }
 }

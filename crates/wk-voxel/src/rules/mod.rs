@@ -59,7 +59,8 @@ pub use karst::{apply_karst_dissolution, KarstConfig};
 pub(crate) use rain::deposit_water_on_surface;
 pub use rain::{apply_rain, apply_rain_with_temp, is_standing_water, RainConfig};
 pub use seepage::{
-    apply_seepage, apply_seepage_regions, wake_lake_bed_pores, wake_vertical_chunk_seam_pores,
+    apply_seepage, apply_seepage_regions, wake_lake_bed_pores, wake_pore_weep_into_air,
+    wake_vertical_chunk_seam_pores,
 };
 pub use spill::{apply_lateral_spill, apply_lateral_spill_regions};
 pub use tick::{

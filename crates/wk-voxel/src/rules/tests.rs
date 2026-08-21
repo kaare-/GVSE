@@ -649,6 +649,58 @@ fn saturated_stone_weeps_into_side_air() {
     );
 }
 
+
+#[test]
+fn groundwater_fills_buried_air_cavity() {
+    // Saturated stone surrounds a sealed Air pocket. Groundwater must weep
+    // in and pool — playtest dug cavities stayed empty inside blue sat.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    let cap = water_capacity(MaterialId::Stone);
+    for x in 0..16 {
+        for y in 0..16 {
+            w.set_cell(
+                x,
+                y,
+                Cell {
+                    material: MaterialId::Stone,
+                    sat: Sat(cap),
+                    ..Cell::default()
+                },
+            );
+        }
+    }
+    // Sealed cavity centred at (8,8).
+    for x in 6..=10 {
+        for y in 6..=10 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    let perf = PerfConfig::default();
+    for _ in 0..200 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let cavity: i32 = (6..=10)
+        .flat_map(|x| (6..=10).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+        .sum();
+    let floor: i32 = (6..=10)
+        .map(|x| w.get_cell(x, 6).map(|c| c.sat.0 as i32).unwrap_or(0))
+        .sum();
+    let mid: i32 = (6..=10)
+        .map(|x| w.get_cell(x, 8).map(|c| c.sat.0 as i32).unwrap_or(0))
+        .sum();
+    assert!(
+        cavity > 500,
+        "buried cavity must take groundwater (cavity_sat={cavity} floor={floor} mid={mid})"
+    );
+    assert!(
+        floor > 400,
+        "water should pool on the cavity floor (floor={floor} cavity={cavity})"
+    );
+}
+
+
 #[test]
 fn throughflow_exits_side_face_before_deep_toe() {
     // Terrace pool over saturated stone with an open cliff mid-face.
