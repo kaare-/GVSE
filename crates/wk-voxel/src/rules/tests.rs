@@ -14,7 +14,7 @@ use crate::phase::PhaseConfig;
 use crate::temperature::Temperature;
 use wk_material::{HydroOverrides, MaterialId};
 
-use super::head::{hydraulic_head, seepage_rate_with};
+use super::head::{hydraulic_head, seepage_rate_with, seepage_uptake_rate_with};
 
 fn setup_column_world() -> World {
     // One chunk. Row y=0 is a solid Bedrock floor; every other
@@ -160,22 +160,29 @@ fn deep_stone_stack_keeps_wetting_after_surface_quiesces() {
 fn water_saturates_porous_solid_up_to_capacity() {
     let mut w = setup_column_world();
     // Sand cell sits above bedrock at y=1; ponded water above at y=2
-    // (walled so gravity still soaks the bed in one pull).
+    // (walled so gravity infiltrates the bed).
     w.set_cell(3, 1, Cell::solid(MaterialId::Sand));
     w.set_cell(3, 2, Cell::water());
     w.set_cell(2, 2, Cell::solid(MaterialId::Bedrock));
     w.set_cell(4, 2, Cell::solid(MaterialId::Bedrock));
 
-    // One pass: as much as fits transfers into the sand up to its
-    // porosity capacity.
+    let sand_cap = water_capacity(MaterialId::Sand);
     apply_gravity_fall(&mut w);
+    let first = w.get_cell(3, 1).unwrap().sat.0;
+    assert!(
+        first > 0 && first < sand_cap,
+        "first pull must be a partial recharge (sat={first} cap={sand_cap})"
+    );
+
+    for _ in 0..128 {
+        apply_gravity_fall(&mut w);
+    }
     let sand = w.get_cell(3, 1).unwrap();
     let above = w.get_cell(3, 2).unwrap();
-    let sand_cap = water_capacity(MaterialId::Sand);
     assert_eq!(sand.sat.0, sand_cap);
     assert_eq!(above.sat.0, u8::MAX - sand_cap);
 
-    // A second pass: sand is at capacity → no more water moves in.
+    // A further pass: sand is at capacity → no more water moves in.
     apply_gravity_fall(&mut w);
     let sand2 = w.get_cell(3, 1).unwrap();
     let above2 = w.get_cell(3, 2).unwrap();
@@ -200,7 +207,9 @@ fn does_not_leak_through_stone() {
     let start_mass: i32 =
         w.get_cell(5, 2).unwrap().sat.0 as i32 + w.get_cell(5, 1).unwrap().sat.0 as i32;
 
-    apply_gravity_fall(&mut w);
+    for _ in 0..64 {
+        apply_gravity_fall(&mut w);
+    }
 
     let stone = w.get_cell(5, 1).unwrap();
     let above = w.get_cell(5, 2).unwrap();
@@ -2610,6 +2619,26 @@ fn full_film_lateral_hop_stays_partial() {
 }
 
 #[test]
+fn seepage_uptake_slows_as_pores_fill() {
+    let hydro = HydroOverrides::default();
+    let cap = water_capacity(MaterialId::Sand);
+    let dry = seepage_uptake_rate_with(MaterialId::Sand, &hydro, 0, cap);
+    let half = seepage_uptake_rate_with(MaterialId::Sand, &hydro, cap / 2, cap);
+    let almost = seepage_uptake_rate_with(MaterialId::Sand, &hydro, cap.saturating_sub(1), cap);
+    let full = seepage_uptake_rate_with(MaterialId::Sand, &hydro, cap, cap);
+    assert!(dry > 0, "dry sand must infiltrate");
+    assert!(
+        half < dry,
+        "half-full sand must drink slower (dry={dry} half={half})"
+    );
+    assert!(
+        almost <= half && almost >= 1,
+        "near-full sand must crawl (almost={almost} half={half})"
+    );
+    assert_eq!(full, 0, "full sand takes nothing more");
+}
+
+#[test]
 fn seepage_rate_scales_with_permeability() {
     let hydro = HydroOverrides::default();
     let sand = seepage_rate_with(MaterialId::Sand, &hydro);
@@ -2762,8 +2791,8 @@ fn pile_against_dry_air_dumps_sheet() {
 #[test]
 fn stacked_lake_interior_gravity_soaks_bed() {
     // Closed basin: stacked water with wet Air on both sides must wet
-    // the sand bed in one gravity pull. Treating any nearby dry shore
-    // as a surge escape left dry columns under ponds.
+    // the sand bed gradually (permeability × free pores), not sponge
+    // the whole column in one gravity pull.
     let mut w = World::new(31);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     for x in 0..12 {
@@ -2779,17 +2808,26 @@ fn stacked_lake_interior_gravity_soaks_bed() {
     }
 
     apply_gravity_fall(&mut w);
-
+    let after_one = w.get_cell(5, 1).unwrap().sat.0;
     let sand_cap = water_capacity(MaterialId::Sand);
+    assert!(
+        after_one > 0 && after_one < sand_cap,
+        "first gravity pull must be a partial recharge (sat={after_one} cap={sand_cap})"
+    );
+
+    for _ in 0..256 {
+        apply_gravity_fall(&mut w);
+        apply_seepage(&mut w);
+    }
     assert_eq!(
         w.get_cell(5, 1).unwrap().sat.0,
         sand_cap,
-        "lake interior bed must gravity-soak"
+        "lake interior bed must eventually recharge"
     );
     assert_eq!(
         w.get_cell(6, 1).unwrap().sat.0,
         sand_cap,
-        "lake interior bed must gravity-soak"
+        "lake interior bed must eventually recharge"
     );
 }
 

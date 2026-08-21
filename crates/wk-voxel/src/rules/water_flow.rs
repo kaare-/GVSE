@@ -16,7 +16,7 @@ use crate::parallel::map_regions_parallel;
 
 use super::head::{
     hydraulic_head, is_porous_solid_with, plan_same_y_pairwise_edge_in, same_y_cascade_pull_in,
-    seepage_rate_with,
+    seepage_rate_with, seepage_uptake_rate_with,
 };
 use super::plan::{regions_for_standalone, regions_wet_loaded};
 
@@ -901,8 +901,8 @@ fn drain_step_cap(depth: i32) -> i32 {
 /// Porous-face dividend: soak by permeability, spill leftover only with head.
 ///
 /// Facing a dry/porous solid (not Air/Organic):
-/// 1. Absorb up to [`seepage_rate_with`] (material **permeability**) into
-///    the contact cell.
+/// 1. Absorb up to [`seepage_uptake_rate_with`] (permeability × free
+///    pores) into the contact cell — slows as the face saturates.
 /// 2. Leftover may spill into Air at the column crest — only when *this*
 ///    source cell sits at or above that crest (`gy >= crest_y`). Mass and
 ///    `step` (speed proxy) cap how much passes; a pond film below a berm
@@ -935,8 +935,13 @@ fn plan_porous_face_dividend(
             continue;
         }
 
-        // 1) Permeability dividend — absorb this much into the column.
-        let soak_rate = seepage_rate_with(side.material, &world.hydro);
+        // 1) Permeability × free-pore dividend — slows as the face wets.
+        let soak_rate = seepage_uptake_rate_with(
+            side.material,
+            &world.hydro,
+            side.sat.0,
+            cap as u8,
+        );
         let free = (cap - side.sat.0 as i32).max(0);
         let soak = remaining.min(free).min(soak_rate);
         if soak > 0 {

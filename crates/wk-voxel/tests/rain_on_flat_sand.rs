@@ -31,9 +31,8 @@ fn rain_row_saturates_sand_over_one_tick() {
         "set_cell should dirty the chunk before tick"
     );
 
-    // Open one-cell sheet: seepage soaks the bed. Give the row time to
-    // settle; lateral equalise can leave a few columns a little short.
-    for _ in 0..24 {
+    // Open one-cell sheet: seepage soaks the bed gradually as pores fill.
+    for _ in 0..64 {
         tick(&mut w);
     }
 
@@ -50,9 +49,9 @@ fn rain_row_saturates_sand_over_one_tick() {
     }
     let n = 48i32;
     assert!(
-        sand_mass >= n * (sand_cap as i32 - 12),
+        sand_mass >= n * (sand_cap as i32 - 20),
         "sand bed should mostly saturate (mass={sand_mass}, need>={})",
-        n * (sand_cap as i32 - 12)
+        n * (sand_cap as i32 - 20)
     );
     assert!(
         above_mass > 0,

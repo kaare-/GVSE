@@ -12,6 +12,7 @@ use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::for_each_region_parallel;
 
+use super::head::seepage_uptake_rate_with;
 use super::plan::regions_for_standalone;
 
 /// Bottom-up single-step gravity fall for water saturation.
@@ -188,8 +189,9 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     next_cur = Some(above);
                     continue;
                 }
-                // Walled ponds and stacked lake interiors fill pores.
-                // An open surge face (dry Air beside the stack) stays free.
+                // Walled ponds and stacked lake interiors infiltrate the
+                // bed at the permeability × free-pore rate — not a one-pull
+                // sponge fill of the whole column.
                 if cur.material != MaterialId::Air && above.material == MaterialId::Air {
                     let src_y = y as i32 + 1;
                     let settled_stack = stacked_air(x, src_y) && !open_surge_face(x, src_y);
@@ -197,6 +199,28 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                         next_cur = Some(above);
                         continue;
                     }
+                    let rate = seepage_uptake_rate_with(cur.material, &hydro, cur.sat.0, cap);
+                    if rate <= 0 {
+                        next_cur = Some(above);
+                        continue;
+                    }
+                    let move_amt = (above.sat.0 as i32).min(free as i32).min(rate) as u8;
+                    if move_amt == 0 {
+                        next_cur = Some(above);
+                        continue;
+                    }
+                    let new_above = Cell {
+                        sat: Sat(above.sat.0 - move_amt),
+                        ..above
+                    };
+                    let new_cur = Cell {
+                        sat: Sat(cur.sat.0 + move_amt),
+                        ..cur
+                    };
+                    write_xy(x, y as i32 + 1, new_above);
+                    write_xy(x, y as i32, new_cur);
+                    next_cur = Some(new_above);
+                    continue;
                 }
                 let move_amt = above.sat.0.min(free);
                 if move_amt == 0 {

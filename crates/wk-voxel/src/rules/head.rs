@@ -70,6 +70,29 @@ pub(crate) fn seepage_rate_with(material: MaterialId, hydro: &HydroOverrides) ->
     ((p as i32 * 32) / 255).max(1)
 }
 
+/// Infiltration into a porous cell this step: permeability × free pores.
+///
+/// Dry ground drinks at the full [`seepage_rate_with`]; as saturation
+/// rises the rate falls toward 1 sat/tick so columns do not sponge-fill
+/// in a single pass (gradual groundwater recharge).
+pub(crate) fn seepage_uptake_rate_with(
+    material: MaterialId,
+    hydro: &HydroOverrides,
+    sat: u8,
+    cap: u8,
+) -> i32 {
+    let base = seepage_rate_with(material, hydro);
+    if base <= 0 || cap == 0 {
+        return 0;
+    }
+    let free = cap.saturating_sub(sat) as i32;
+    if free <= 0 {
+        return 0;
+    }
+    let scaled = (base * free) / (cap as i32);
+    scaled.max(1).min(free).min(base)
+}
+
 pub(crate) fn is_porous_solid_with(material: MaterialId, hydro: &HydroOverrides) -> bool {
     material != MaterialId::Air && water_capacity_with(material, hydro) > 0
 }

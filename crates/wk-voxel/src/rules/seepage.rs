@@ -12,7 +12,9 @@ use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
-use super::head::{is_porous_solid_with, sat_move_to_equalize_heads, seepage_rate_with};
+use super::head::{
+    is_porous_solid_with, sat_move_to_equalize_heads, seepage_rate_with, seepage_uptake_rate_with,
+};
 use super::plan::regions_for_standalone;
 
 /// Permeability-limited soak: water moves from wet cells into
@@ -167,12 +169,23 @@ fn accumulate_seepage_xfers(
                         continue;
                     }
                     let rate = if a_solid && b_solid {
+                        // Peer pore exchange: slower of the two base rates.
                         seepage_rate_with(a.material, &hydro)
                             .min(seepage_rate_with(b.material, &hydro))
-                    } else if a_solid {
-                        seepage_rate_with(a.material, &hydro)
+                    } else if move_amt > 0 {
+                        // A → B: infiltrating into B, or A weeping into Air.
+                        if b_solid {
+                            seepage_uptake_rate_with(b.material, &hydro, b.sat.0, cap_b)
+                        } else {
+                            seepage_rate_with(a.material, &hydro)
+                        }
                     } else {
-                        seepage_rate_with(b.material, &hydro)
+                        // B → A: infiltrating into A, or B weeping into Air.
+                        if a_solid {
+                            seepage_uptake_rate_with(a.material, &hydro, a.sat.0, cap_a)
+                        } else {
+                            seepage_rate_with(b.material, &hydro)
+                        }
                     };
                     // Fully saturated faces weep faster into open Air
                     // (cliff springs) — still permeability-capped, but
