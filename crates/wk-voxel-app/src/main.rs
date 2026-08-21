@@ -22,6 +22,7 @@
 //! - `H` — toggle humidity tile diagnostic + wind streaks (default on)
 //! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
 //! - `T` — toggle temperature heatmap overlay
+//! - `U` — toggle ground saturation heatmap (pores + free water)
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
 //! - `G` — cycle geotech overlay (shear → σᵥ → wet → off)
 //! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
@@ -61,7 +62,7 @@ use wk_voxel::{
     apply_weather_rgb, celestial_local_cfg, celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, set_parallel_enabled,
+    pore_wetness_with, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, set_parallel_enabled,
     step_carbon_budget, temperature_step_due, tick_with_life, wake_unsupported_grains,
     wake_unstable_slopes, GeotechOverlayMode, SimSnapshot, WorldgenParams,
 };
@@ -166,6 +167,36 @@ fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
     Color::from_rgba(r, g, b, 120)
 }
 
+/// Dry tan → wet deep blue for ground pore / free-water saturation.
+fn sat_overlay_color(wet: f32) -> Color {
+    let t = wet.clamp(0.0, 1.0);
+    let (r, g, b) = if t < 0.5 {
+        let u = t / 0.5;
+        (
+            (190.0 - u * 130.0) as u8,
+            (155.0 - u * 45.0) as u8,
+            (95.0 + u * 85.0) as u8,
+        )
+    } else {
+        let u = (t - 0.5) / 0.5;
+        (
+            (60.0 - u * 45.0) as u8,
+            (110.0 - u * 55.0) as u8,
+            (180.0 + u * 55.0) as u8,
+        )
+    };
+    let a = (75.0 + t * 155.0) as u8;
+    Color::from_rgba(r, g, b, a)
+}
+
+fn scale_color_alpha(c: Color, k: f32) -> Color {
+    let k = k.clamp(0.0, 1.0);
+    Color {
+        a: c.a * k,
+        ..c
+    }
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let params = WorldgenParams::default();
@@ -179,6 +210,7 @@ async fn main() {
     let mut humidity_overlay = true;
     let mut clouds_on = true;
     let mut temp_overlay = false;
+    let mut sat_overlay = false;
     let mut mycelium_overlay = false;
     let mut geotech_mode = GeotechOverlayMode::Off;
     let mut show_hud = true;
@@ -404,6 +436,9 @@ async fn main() {
             }
             if is_key_pressed(KeyCode::T) {
                 temp_overlay = !temp_overlay;
+            }
+            if is_key_pressed(KeyCode::U) {
+                sat_overlay = !sat_overlay;
             }
             if is_key_pressed(KeyCode::M) {
                 mycelium_overlay = !mycelium_overlay;
@@ -1022,6 +1057,19 @@ async fn main() {
             (y.floor() as i32).max(scene.params.bedrock_floor_y)
         };
 
+        // Heatmap blend: 0 = landscape only, 1 = heatmap only (Tab slider).
+        let heatmap_on = sat_overlay
+            || temp_overlay
+            || mycelium_overlay
+            || geotech_mode != GeotechOverlayMode::Off;
+        let blend = settings.heatmap_blend.clamp(0.0, 1.0);
+        let terrain_alpha = if heatmap_on {
+            ((1.0 - blend) * 255.0).round() as u8
+        } else {
+            255
+        };
+        let overlay_k = if heatmap_on { blend } else { 1.0 };
+
         for &x_copy in x_copies {
             let x_shift = x_copy * scene.params.width_cols;
             for x in 0..scene.params.width_cols {
@@ -1078,7 +1126,7 @@ async fn main() {
                         sy - cell_px,
                         cell_px,
                         cell_px,
-                        Color::from_rgba(r, g, b, 255),
+                        Color::from_rgba(r, g, b, terrain_alpha),
                     );
                 }
             }
@@ -1157,7 +1205,7 @@ async fn main() {
         }
 
         // Temperature heatmap overlay (blue cold → red hot).
-        if temp_overlay {
+        if temp_overlay && overlay_k > 0.01 {
             let tile_px = scene.temperature.tile_cols as f32 * cell_px;
             let (t_min, t_max) = scene
                 .temperature
@@ -1180,13 +1228,63 @@ async fn main() {
                     if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
                         continue;
                     }
-                    draw_rectangle(sx, sy, tile_px, tile_px, temp_overlay_color(temp_c, t_min, t_max));
+                    draw_rectangle(
+                        sx,
+                        sy,
+                        tile_px,
+                        tile_px,
+                        scale_color_alpha(temp_overlay_color(temp_c, t_min, t_max), overlay_k),
+                    );
+                }
+            }
+        }
+
+        // Ground saturation heatmap (U): pore fill + free water.
+        if sat_overlay && overlay_k > 0.01 {
+            for &x_copy in x_copies {
+                let x_shift = x_copy * scene.params.width_cols;
+                for x in 0..scene.params.width_cols {
+                    let sx = origin_x + (x + x_shift) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw {
+                        continue;
+                    }
+                    for y in y_min_vis..y_max_vis {
+                        let sy =
+                            origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
+                        if sy + cell_px < 0.0 || sy > sh {
+                            continue;
+                        }
+                        let Some(cell) = scene.world.get_cell(x, y) else {
+                            continue;
+                        };
+                        let wet = if cell.material == wk_material::MaterialId::Air {
+                            if cell.sat.is_empty()
+                                || cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX
+                            {
+                                continue;
+                            }
+                            cell.sat.as_f32()
+                        } else {
+                            let cap = scene.world.water_capacity(cell.material);
+                            if cap == 0 {
+                                continue;
+                            }
+                            pore_wetness_with(cell, &scene.world.hydro)
+                        };
+                        draw_rectangle(
+                            sx,
+                            sy - cell_px,
+                            cell_px,
+                            cell_px,
+                            scale_color_alpha(sat_overlay_color(wet), overlay_k),
+                        );
+                    }
                 }
             }
         }
 
         // Mycelium strain overlay: bright per-network colors by cream intensity.
-        if mycelium_overlay {
+        if mycelium_overlay && overlay_k > 0.01 {
             for &x_copy in x_copies {
                 let x_shift = x_copy * scene.params.width_cols;
                 for x in 0..scene.params.width_cols {
@@ -1226,7 +1324,10 @@ async fn main() {
                             sy - cell_px,
                             cell_px,
                             cell_px,
-                            Color::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
+                            scale_color_alpha(
+                                Color::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
+                                overlay_k,
+                            ),
                         );
                     }
                 }
@@ -1234,7 +1335,7 @@ async fn main() {
         }
 
         // Geotech overlay: G cycles shear → σᵥ → wet → off.
-        if geotech_mode != GeotechOverlayMode::Off {
+        if geotech_mode != GeotechOverlayMode::Off && overlay_k > 0.01 {
             match geotech_mode {
                 GeotechOverlayMode::Shear | GeotechOverlayMode::Wetness => {
                     let s_max = match geotech_mode {
@@ -1268,7 +1369,7 @@ async fn main() {
                                 sy,
                                 cell_px,
                                 cell_px,
-                                geotech_overlay_color(value, s_max),
+                                scale_color_alpha(geotech_overlay_color(value, s_max), overlay_k),
                             );
                         }
                     }
@@ -1298,7 +1399,7 @@ async fn main() {
                                 sy,
                                 cell_px,
                                 cell_px,
-                                geotech_overlay_color(sigma, s_max),
+                                scale_color_alpha(geotech_overlay_color(sigma, s_max), overlay_k),
                             );
                         }
                     }
@@ -1489,7 +1590,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/H/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
+                "Tab|Space|R|W/C/E/K/O|I|N/T/U/H/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

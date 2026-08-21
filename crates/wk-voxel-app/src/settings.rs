@@ -117,6 +117,8 @@ pub struct SimSettings {
     pub climate: ClimateConfig,
     /// Sky / ridge / sun-moon cosmetics (Tab → Climate → Sky look).
     pub atmosphere: AtmosphereLookConfig,
+    /// 0 = landscape only, 1 = heatmap only (when U/T/M/G overlays are on).
+    pub heatmap_blend: f32,
     pub temp: TempConfig,
     pub phase: PhaseConfig,
     pub grain: GrainConfig,
@@ -232,6 +234,7 @@ impl SimSettings {
             },
             climate: ClimateConfig::default(),
             atmosphere: AtmosphereLookConfig::default(),
+            heatmap_blend: 0.55,
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
             grain: GrainConfig::default(),
@@ -622,6 +625,18 @@ impl SimSettings {
                 } // World page (size); materials/karst further below
                 if self.page == SettingsPage::Climate {
                 ui.separator();
+
+                ui.tree_node(hash!(), "Heatmap overlays", |ui| {
+                    ui.label(None, "U = ground saturation. T/M/G also use this blend.");
+                    ui.label(None, "0 = landscape only · 1 = heatmap only");
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Landscape ↔ heatmap",
+                        0.0..1.0,
+                        &mut self.heatmap_blend,
+                    );
+                });
 
                 ui.tree_node(hash!(), "Sky look / atmosphere", |ui| {
                     ui.label(None, "Cosmetics only — tweak live, no regen needed.");
