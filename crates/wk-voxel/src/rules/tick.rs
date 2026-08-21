@@ -94,9 +94,10 @@ impl PhysicsTimings {
 /// edges are 5-10 cells away, half-gap propagates at ~1 cell/substep,
 /// so we need enough substeps to keep up with steady rain.
 pub const FLOW_SUBSTEPS: usize = 12;
-/// Cap on flow substeps for the FPS path (`PerfConfig` defaults).
-pub const FLOW_SUBSTEPS_MIN: usize = 6;
-/// After this many substeps, a quiet / steady dirty halo may early-out.
+/// Cap on flow substeps for the interactive path (`PerfConfig` defaults).
+/// High enough that hillside blobs empty in tens of ticks, not thousands.
+pub const FLOW_SUBSTEPS_MIN: usize = 8;
+/// After this many substeps, a quiet / shrunk dirty halo may early-out.
 /// Must be **below** [`FLOW_SUBSTEPS_MIN`] so the FPS cap does not
 /// swallow the adaptive exit (was equal → EO never shortened the loop).
 pub const FLOW_SUBSTEPS_EO_AFTER: usize = 4;
@@ -105,28 +106,30 @@ pub const FLOW_SUBSTEPS_EO_AFTER: usize = 4;
 /// don't need the full ×12. Busy rain / cascades stay at max.
 pub const FLOW_QUIET_AREA: usize = 512;
 
+/// Pore seepage + lake-bed wake cadence (ticks). Surface gravity/flow
+/// still run every tick; underground is lower priority and expensive.
+pub const SEEPAGE_EVERY: u64 = 4;
+
 /// Live-tunable physics trade-offs (Tab → Performance).
 ///
-/// Defaults favour interactive FPS: every-other surface flow + quiet
-/// early-out, with **rayon off**. Demo dirty plans stay ~6–12 regions /
-/// ~10–13k cells — too narrow for rayon to win (32-core Super-Server:
-/// parallel ON was ~1.6× slower than OFF). Opt parallel back on in Tab
-/// for wide dirty worlds once the active plan is fat.
+/// Defaults favour **fast surface flow**: every substep levels/cascades,
+/// quiet early-out for calm lakes, **rayon off**. Underground seepage is
+/// cadence-gated ([`SEEPAGE_EVERY`]) so the FPS budget goes to runoff.
+/// Opt every-other flow / parallel on in Tab for A/B.
 ///
-/// **Do not pair away odd-step gravity.** Super-Server A/B showed that
-/// skipping interstitial gravity fattens the dirty halo (~13k → ~17k
-/// cells) and makes each flow call ~2× slower — net regression despite
-/// fewer flow passes.
+/// **Do not pair away odd-step gravity** when every-other flow is on.
+/// Super-Server A/B showed skipping interstitial gravity fattens the
+/// dirty halo (~13k → ~17k cells) and makes each flow call ~2× slower.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerfConfig {
     /// Run surface water flow only on even substeps (gravity still every
-    /// substep). Default **on** — ~half the surface-flow scan work.
-    /// Odd-step gravity keeps shore columns seated so the next flow
-    /// halo stays narrow.
+    /// substep). Default **off** — hillside runoff needs every pass.
+    /// Tab may enable for half the surface-flow scan work.
     pub flow_every_other_substep: bool,
     /// After [`FLOW_SUBSTEPS_EO_AFTER`], stop when the dirty halo is tiny
-    /// or has shrunk / steadied. Default **on** for settled films /
-    /// quiet ponds / closed-loop rain polish.
+    /// or has shrunk. Default **on** for settled films / quiet ponds.
+    /// Does **not** early-out on a merely steady large halo — that left
+    /// hillside jelly stuck for thousands of ticks.
     pub flow_quiet_early_out: bool,
     /// Rayon checkerboard parallelism for gravity / grain / flow scan.
     /// Default **off** — wins only when many chunks are dirty at once.
@@ -136,7 +139,7 @@ pub struct PerfConfig {
 impl Default for PerfConfig {
     fn default() -> Self {
         Self {
-            flow_every_other_substep: true,
+            flow_every_other_substep: false,
             flow_quiet_early_out: true,
             parallel_physics: false,
         }
@@ -145,7 +148,7 @@ impl Default for PerfConfig {
 
 impl PerfConfig {
     /// Full ×12 surface-flow path with no early-out — scenario / unit
-    /// tests and Tab A/B against the FPS-biased [`Default`].
+    /// tests and Tab A/B against the interactive [`Default`].
     pub const fn full_feel() -> Self {
         Self {
             flow_every_other_substep: false,
@@ -365,10 +368,13 @@ fn tick_with_life_inner(
     let mut local = PhysicsTimings::default();
 
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
+    // Interactive path: cadence-gate lake-bed wake + seepage so the
+    // budget goes to surface runoff. full_feel wakes every tick.
+    let run_seepage = !perf.flow_quiet_early_out || world.tick % SEEPAGE_EVERY == 0;
     // Re-dirty unsaturated beds under standing water *before* gravity so
-    // a quiet lake still drinks on this tick (wake used to run only after
-    // the flow loop, when gravity had already skipped the bed).
-    {
+    // a quiet lake still drinks on seepage ticks (wake used to run only
+    // after the flow loop, when gravity had already skipped the bed).
+    if run_seepage {
         let t0 = profile.then(Instant::now);
         super::seepage::wake_lake_bed_pores(world);
         if let (true, Some(t0)) = (profile, t0) {
@@ -379,11 +385,11 @@ fn tick_with_life_inner(
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
     let mut start_area: usize = 0;
-    // FPS knobs on → cap at [`FLOW_SUBSTEPS_MIN`] (6); early-out may
-    // fire after [`FLOW_SUBSTEPS_EO_AFTER`] (4). full_feel keeps ×12.
-    // Odd-step gravity stays — pairing it away fattened the dirty halo.
-    let max_steps = if perf.flow_every_other_substep && perf.flow_quiet_early_out {
-        FLOW_SUBSTEPS_MIN // 6
+    // Quiet early-out on → [`FLOW_SUBSTEPS_MIN`] (8); full_feel keeps ×12.
+    // Every-other flow is optional Tab thrift — defaults run flow every
+    // substep so hillside blobs empty quickly.
+    let max_steps = if perf.flow_quiet_early_out {
+        FLOW_SUBSTEPS_MIN // 8
     } else {
         FLOW_SUBSTEPS
     };
@@ -422,12 +428,12 @@ fn tick_with_life_inner(
         // Odd-step gravity is load-bearing: without it the dirty halo
         // fattens and each flow call costs more than the gravity saved.
         let run_flow = !perf.flow_every_other_substep || (step % 2 == 0);
-        // FPS: surface priorities only; throughflow/confined once after loop.
-        // full_feel: keep throughflow+confined every flow substep (pipe tests).
-        let fps_flow = perf.flow_every_other_substep && perf.flow_quiet_early_out;
+        // Interactive: surface priorities only; throughflow/confined once
+        // after the loop. full_feel: throughflow+confined every substep.
+        let interactive = perf.flow_quiet_early_out;
         if run_flow {
             let t0 = profile.then(Instant::now);
-            if fps_flow {
+            if interactive {
                 super::water_flow::apply_water_flow_regions_ex(world, &active, false);
             } else {
                 apply_water_flow_regions(world, &active);
@@ -437,8 +443,9 @@ fn tick_with_life_inner(
             }
         }
         // Quiet early-out: after [`FLOW_SUBSTEPS_EO_AFTER`], peek at
-        // dirty written by this substep — a tiny / shrunk / steady halo
-        // means remaining substeps are polish (closed-loop rain).
+        // dirty written by this substep — a tiny / shrunk halo means
+        // remaining substeps are polish. Do **not** exit just because a
+        // large halo is steady — hillside jelly stays dirty and stuck.
         if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_EO_AFTER {
             let next = plan_active(world);
             let next_area = active_cell_area(&next);
@@ -450,20 +457,14 @@ fn tick_with_life_inner(
             if start_area > 0 && next_area * 3 <= start_area * 2 {
                 break;
             }
-            // Steady busy halo (closed-loop rain): area barely moved —
-            // further substeps are polish. Super-Server demo sat at
-            // ~13k cells for all 6; this exits after EO_AFTER (4).
-            if start_area > FLOW_QUIET_AREA && next_area * 10 >= start_area * 9 {
-                break;
-            }
         }
     }
 
-    // FPS path: throughflow + confined once per tick (not every even
+    // Interactive path: throughflow + confined once per tick (not every
     // substep) — rainy beaches paid Priority-4 deep walks and confined
-    // BFS ×3. full_feel already ran them inside each flow substep.
-    let fps_flow = perf.flow_every_other_substep && perf.flow_quiet_early_out;
-    if fps_flow && !flow_halo.is_empty() {
+    // BFS ×N. full_feel already ran them inside each flow substep.
+    let interactive = perf.flow_quiet_early_out;
+    if interactive && !flow_halo.is_empty() {
         let t0 = profile.then(Instant::now);
         apply_throughflow_regions(world, &flow_halo);
         if let (true, Some(t0)) = (profile, t0) {
@@ -486,7 +487,7 @@ fn tick_with_life_inner(
     }
     // Deep lakes go quiet once free water looks settled — beds and pore
     // stacks under a wet cap would stay dry forever without a re-wake.
-    {
+    if run_seepage {
         let t0 = profile.then(Instant::now);
         super::seepage::wake_lake_bed_pores(world);
         if let (true, Some(t0)) = (profile, t0) {
@@ -511,7 +512,7 @@ fn tick_with_life_inner(
             (false, false) => merge_active_regions(dirty, flow_halo),
         }
     };
-    if !flow_active.is_empty() {
+    if run_seepage && !flow_active.is_empty() {
         let t0 = profile.then(Instant::now);
         apply_seepage_regions(world, &flow_active);
         if let (true, Some(t0)) = (profile, t0) {
@@ -579,16 +580,16 @@ fn tick_with_life_inner(
         // (unit tests / Tab A/B). FPS defaults stay shallow unless something
         // is still unsupported *after* rise — pre-rise freefall_woken from
         // submerged Organic used to force ×1024 every flood tick.
-        let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
+        let interactive = perf.flow_quiet_early_out;
         let unsupported = active_has_unsupported_grain(world, &grain_active);
-        let deep = !fps_path || unsupported;
+        let deep = !interactive || unsupported;
         // FPS shallow polish: only on wake cadence or when something is
         // mid-air. Quiet rainy shores were paying ×8 settle every tick
         // (~0.7 ms) with deep_settle_ticks=0 / punch_hits=0.
         let run_settle = deep || world.tick % GRAIN_WAKE_EVERY == 0;
         if run_settle {
             let passes = if deep {
-                if fps_path {
+                if interactive {
                     GRAIN_SETTLE_PASSES_FPS_DEEP
                 } else {
                     GRAIN_SETTLE_PASSES

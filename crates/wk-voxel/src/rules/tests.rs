@@ -6690,6 +6690,7 @@ fn deep_sand_stack_under_open_lake_wets_vertically() {
 fn seepage_crosses_vertical_chunk_seam_via_tick() {
     // Demo report: sharp dry line at y≈62/63 — limestone under water in
     // the next chunk never soaked. CHUNK_CELLS_H=64 seams at y=63|64.
+    // Interactive defaults cadence-gate seepage — budget enough ticks.
     let mut w = World::new(9);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     w.ensure_chunk(ChunkCoord::new(0, 1));
@@ -6706,7 +6707,7 @@ fn seepage_crosses_vertical_chunk_seam_via_tick() {
     }
     clear_all_dirty(&mut w);
     let perf = PerfConfig::default();
-    for _ in 0..800 {
+    for _ in 0..3200 {
         tick_with_perf(&mut w, &perf);
     }
     let cap = water_capacity(MaterialId::Limestone);
@@ -6730,6 +6731,8 @@ fn seepage_crosses_vertical_chunk_seam_via_tick() {
 #[test]
 fn hillside_blob_drains_downslope_instead_of_jelly() {
     // Stepped impermeable slope — water must cascade, not only soak.
+    // Interactive defaults must empty the blob in tens of ticks, not
+    // thousands (playtest jelly at tick 4k+).
     let mut w = World::new(9);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     for x in 0..20 {
@@ -6738,6 +6741,14 @@ fn hillside_blob_drains_downslope_instead_of_jelly() {
         for y in 1..=top {
             w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
         }
+    }
+    // Catch basin at the foot so fast runoff does not shoot into void.
+    for x in 16..28 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 0..=8 {
+        w.set_cell(27, y, Cell::solid(MaterialId::Bedrock));
     }
     for y in 11..=14 {
         for x in 2..=5 {
@@ -6749,20 +6760,9 @@ fn hillside_blob_drains_downslope_instead_of_jelly() {
         .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
         .sum();
     let perf = PerfConfig::default();
-    for _ in 0..100 {
+    for _ in 0..40 {
         tick_with_perf(&mut w, &perf);
     }
-    let down: i32 = (10..=18)
-        .map(|x| {
-            (1..=16)
-                .filter_map(|y| {
-                    w.get_cell(x, y).and_then(|c| {
-                        (c.material == MaterialId::Air).then_some(c.sat.0 as i32)
-                    })
-                })
-                .sum::<i32>()
-        })
-        .sum();
     let still_up: i32 = (2..=5)
         .map(|x| {
             (11..=16)
@@ -6774,13 +6774,21 @@ fn hillside_blob_drains_downslope_instead_of_jelly() {
                 .sum::<i32>()
         })
         .sum();
+    let basin: i32 = (16..27)
+        .flat_map(|x| (2..=8).map(move |y| (x, y)))
+        .filter_map(|(x, y)| {
+            w.get_cell(x, y).and_then(|c| {
+                (c.material == MaterialId::Air).then_some(c.sat.0 as i32)
+            })
+        })
+        .sum();
     assert!(
-        down > mass0 / 5,
-        "hill blob must drain downslope (down={down} still_up={still_up} mass0={mass0})"
+        still_up < mass0 / 4,
+        "hill blob must not remain as jelly (still_up={still_up} mass0={mass0})"
     );
     assert!(
-        still_up < mass0 * 2 / 3,
-        "hill blob must not remain as jelly (still_up={still_up} mass0={mass0})"
+        basin > mass0 / 2,
+        "hill blob must reach the foot basin fast (basin={basin} still_up={still_up} mass0={mass0})"
     );
 }
 
