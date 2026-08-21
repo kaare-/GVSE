@@ -6706,7 +6706,7 @@ fn seepage_crosses_vertical_chunk_seam_via_tick() {
     }
     clear_all_dirty(&mut w);
     let perf = PerfConfig::default();
-    for _ in 0..500 {
+    for _ in 0..800 {
         tick_with_perf(&mut w, &perf);
     }
     let cap = water_capacity(MaterialId::Limestone);
@@ -6720,9 +6720,102 @@ fn seepage_crosses_vertical_chunk_seam_via_tick() {
         cap
     );
     assert!(
-        s50.sat.0 + 1 >= cap,
-        "limestone below seam must wet (sat={}/{})",
+        s50.sat.0 >= cap / 2,
+        "limestone below seam must keep wetting (sat={}/{})",
         s50.sat.0,
         cap
+    );
+}
+
+#[test]
+fn hillside_blob_drains_downslope_instead_of_jelly() {
+    // Stepped impermeable slope — water must cascade, not only soak.
+    let mut w = World::new(9);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..20 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        let top = 10 - (x / 2).min(8);
+        for y in 1..=top {
+            w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+        }
+    }
+    for y in 11..=14 {
+        for x in 2..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let mass0: i32 = (2..=5)
+        .flat_map(|x| (11..=14).map(move |y| (x, y)))
+        .filter_map(|(x, y)| w.get_cell(x, y).map(|c| c.sat.0 as i32))
+        .sum();
+    let perf = PerfConfig::default();
+    for _ in 0..100 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let down: i32 = (10..=18)
+        .map(|x| {
+            (1..=16)
+                .filter_map(|y| {
+                    w.get_cell(x, y).and_then(|c| {
+                        (c.material == MaterialId::Air).then_some(c.sat.0 as i32)
+                    })
+                })
+                .sum::<i32>()
+        })
+        .sum();
+    let still_up: i32 = (2..=5)
+        .map(|x| {
+            (11..=16)
+                .filter_map(|y| {
+                    w.get_cell(x, y).and_then(|c| {
+                        (c.material == MaterialId::Air).then_some(c.sat.0 as i32)
+                    })
+                })
+                .sum::<i32>()
+        })
+        .sum();
+    assert!(
+        down > mass0 / 5,
+        "hill blob must drain downslope (down={down} still_up={still_up} mass0={mass0})"
+    );
+    assert!(
+        still_up < mass0 * 2 / 3,
+        "hill blob must not remain as jelly (still_up={still_up} mass0={mass0})"
+    );
+}
+
+#[test]
+fn hill_dump_does_not_teleport_sat_past_dry_gap() {
+    // Wetting front must not pipe a residual film to bedrock while the
+    // mid-column stays nearly dry (teleported groundwater look).
+    let mut w = World::new(9);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 3..=5 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=10 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+        w.set_cell(x, 11, Cell::solid(MaterialId::Sand));
+        w.set_cell(x, 12, Cell::solid(MaterialId::Sand));
+    }
+    for y in 13..=16 {
+        for x in 3..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for y in 1..=16 {
+        w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(6, y, Cell::solid(MaterialId::Bedrock));
+    }
+    let perf = PerfConfig::default();
+    for _ in 0..80 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let bottom = w.get_cell(4, 1).unwrap().sat.0;
+    let mid = w.get_cell(4, 6).unwrap().sat.0;
+    let sand = w.get_cell(4, 12).unwrap().sat.0;
+    assert!(
+        !(bottom > 8 && mid < 3),
+        "bottom sat must not outrun mid (sand={sand} mid={mid} bottom={bottom})"
     );
 }

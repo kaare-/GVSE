@@ -159,6 +159,36 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
             };
             !standing(lx as i32 - 1) || !standing(lx as i32 + 1)
         };
+        // Slope runoff: if free water can still fall diagonal-down or
+        // cascade off an edge, do not gravity-drink the bed. Thick
+        // blobs on hillsides look "settled" (wet neighbours + stack)
+        // and used to soak in place like jelly instead of draining.
+        let downhill_air_escape = |lx: u8, ly_src: i32| -> bool {
+            for dx in [-1_i32, 1] {
+                let nlx = lx as i32 + dx;
+                if nlx < 0 || nlx >= CHUNK_CELLS_W as i32 {
+                    continue;
+                }
+                let n = nlx as u8;
+                // Diagonal-down into Air with room.
+                if let Some(diag) = read_xy(n, ly_src - 1) {
+                    if diag.material == MaterialId::Air && !diag.sat.is_full() {
+                        return true;
+                    }
+                }
+                // Side Air sitting above Air with room (cascade edge).
+                if let Some(side) = read_xy(n, ly_src) {
+                    if side.material == MaterialId::Air {
+                        if let Some(below) = read_xy(n, ly_src - 1) {
+                            if below.material == MaterialId::Air && !below.sat.is_full() {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            false
+        };
         for x in ac.rect.x0..=ac.rect.x1 {
             let mut any_mobile = false;
             for y in ac.rect.y0..=ac.rect.y1 {
@@ -207,10 +237,15 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 // bed. Open surge / sheet faces stay in Air — seepage
                 // splash-wets those. `read_xy` must see into cy+1 so a
                 // bed at y=63 under water at y=64 can detect stacked
-                // water at y=65 (chunk seam).
+                // water at y=65 (chunk seam). Slope blobs that can still
+                // cascade downhill must not gravity-drink their seat.
                 if cur.material != MaterialId::Air && above.material == MaterialId::Air {
                     let src_y = y as i32 + 1;
                     let settled_stack = stacked_air(x, src_y) && !open_surge_face(x, src_y);
+                    if downhill_air_escape(x, src_y) {
+                        next_cur = Some(above);
+                        continue;
+                    }
                     if !walled_air(x, src_y) && !settled_stack {
                         next_cur = Some(above);
                         continue;

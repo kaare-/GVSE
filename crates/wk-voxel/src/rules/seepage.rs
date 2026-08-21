@@ -48,9 +48,11 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                 let gx = world.wrap_x(base_gx + x as i32);
 
                 // Standing water → touch unsaturated porous below / beside
-                // (crosses the horizontal chunk seam into cy-1). Walk down
-                // through already-wet pores so the wetting front under a
-                // saturated cap keeps moving (y=63 wet, y=50 still dry).
+                // (crosses the horizontal chunk seam into cy-1).
+                // Walk only through *saturated* pores; stop at the first
+                // unsaturated cell (the wetting front). Walking through dry
+                // cells marked the whole crust dirty and looked like
+                // groundwater "teleporting" under a dry gap.
                 if cell.material == MaterialId::Air && cell.sat.0 >= 160 {
                     let mut yy = gy - 1;
                     for _ in 0..(CHUNK_CELLS_H * 2) {
@@ -66,6 +68,7 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                         }
                         if below.sat.0 < cap {
                             touches.push((gx, yy));
+                            break;
                         }
                         yy -= 1;
                     }
@@ -251,15 +254,37 @@ fn accumulate_seepage_xfers(
                     let mut move_amt = sat_move_to_equalize_heads(
                         a.sat.0, cap_a, gy, b.sat.0, cap_b, ny,
                     );
-                    // Standing free water on a bed keeps infiltrating toward
-                    // pore capacity. Do not require a second stacked water
-                    // cell above — single-cell pond depth and open basins
-                    // must still soak. Head equalise alone stalls near-dry
-                    // beds (~sat 2) under deep lakes.
+                    // Wetting-front plug: pore water may only drive *down*
+                    // into a drier neighbour when the donor is meaningfully
+                    // wet. Otherwise a residual film pipes to bedrock and
+                    // pools there while the mid-column stays "dry".
+                    if a_solid && b_solid && move_amt != 0 {
+                        let downward = if move_amt > 0 {
+                            gy > ny // a → b and a is higher
+                        } else {
+                            ny > gy // b → a and b is higher
+                        };
+                        if downward {
+                            let (sat_d, cap_d) = if move_amt > 0 {
+                                (a.sat.0, cap_a)
+                            } else {
+                                (b.sat.0, cap_b)
+                            };
+                            // Donor must be ≥ ~30% full to advance the front.
+                            if cap_d == 0 || (sat_d as i32) * 10 < (cap_d as i32) * 3 {
+                                move_amt = 0;
+                            }
+                        }
+                    }
+                    // Standing free water on a settled bed keeps infiltrating.
+                    // Skip the force-fill when the Air is still runoff (open
+                    // face / downhill escape) so hillside blobs drain instead
+                    // of vanishing into the seat like jelly.
                     if dy == 1
                         && a_solid
                         && b.material == MaterialId::Air
                         && b.sat.0 >= 160
+                        && !standing_air_is_runoff(world, &read, nx, ny, lx + dx, ly + dy)
                     {
                         let free = cap_a.saturating_sub(a.sat.0) as i32;
                         move_amt = -(b.sat.0 as i32).min(free);
@@ -269,6 +294,7 @@ fn accumulate_seepage_xfers(
                         if a_solid
                             && b.material == MaterialId::Air
                             && b.sat.0 >= 160
+                            && !standing_air_is_runoff(world, &read, nx, ny, lx + dx, ly + dy)
                         {
                             let free = cap_a.saturating_sub(a.sat.0) as i32;
                             if free > 0 {
@@ -278,6 +304,7 @@ fn accumulate_seepage_xfers(
                             && a.material == MaterialId::Air
                             && a.sat.0 >= 160
                             && b_solid
+                            && !standing_air_is_runoff(world, &read, gx, gy, lx, ly)
                         {
                             let free = cap_b.saturating_sub(b.sat.0) as i32;
                             if free > 0 {
@@ -289,27 +316,22 @@ fn accumulate_seepage_xfers(
                         continue;
                     }
                     let rate = if a_solid && b_solid {
-                        if dy == 1 {
-                            // Vertical pore column: full min-permeability.
-                            // The dry-kick conduct curve was starving lake
-                            // beds and buried sand under standing water
-                            // (demo sat stuck ~2/110 for thousands of ticks).
-                            // Lateral peers still use the wetness bottleneck.
-                            seepage_rate_with(a.material, &hydro)
-                                .min(seepage_rate_with(b.material, &hydro))
-                        } else {
-                            seepage_conduct_rate_with(
-                                a.material, &hydro, a.sat.0, cap_a, b.material, b.sat.0, cap_b,
-                            )
-                        }
+                        // Peer pores: drier side limits conduction (wetting
+                        // front). Full vertical min-perm piped a residual
+                        // film to bedrock and left a "dry" mid gap under
+                        // hill dumps — looked like teleported groundwater.
+                        seepage_conduct_rate_with(
+                            a.material, &hydro, a.sat.0, cap_a, b.material, b.sat.0, cap_b,
+                        )
                     } else if move_amt > 0 {
                         // A → B: infiltrating into B, or A weeping into Air.
                         if b_solid {
-                            // Standing pond/lake face: full permeability into
-                            // the bank/bed. Thin films still use the wetting
-                            // curve so dry ground sheds runoff.
                             if a.material == MaterialId::Air && a.sat.0 >= 160 {
-                                seepage_rate_with(b.material, &hydro)
+                                if standing_air_is_runoff(world, &read, gx, gy, lx, ly) {
+                                    seepage_uptake_rate_with(b.material, &hydro, b.sat.0, cap_b)
+                                } else {
+                                    seepage_rate_with(b.material, &hydro)
+                                }
                             } else {
                                 seepage_uptake_rate_with(b.material, &hydro, b.sat.0, cap_b)
                             }
@@ -320,7 +342,12 @@ fn accumulate_seepage_xfers(
                         // B → A: infiltrating into A, or B weeping into Air.
                         if a_solid {
                             if b.material == MaterialId::Air && b.sat.0 >= 160 {
-                                seepage_rate_with(a.material, &hydro)
+                                if standing_air_is_runoff(world, &read, nx, ny, lx + dx, ly + dy)
+                                {
+                                    seepage_uptake_rate_with(a.material, &hydro, a.sat.0, cap_a)
+                                } else {
+                                    seepage_rate_with(a.material, &hydro)
+                                }
                             } else {
                                 seepage_uptake_rate_with(a.material, &hydro, a.sat.0, cap_a)
                             }
@@ -393,6 +420,32 @@ fn accumulate_seepage_xfers(
 
 /// Splash into a column face / flowing bed — not a full pore fill.
 const SHEET_FACE_SPLASH: i32 = 4;
+
+/// True when standing Air still has a runoff path: open (non-full) Air
+/// neighbour, or diagonal/cascade downhill Air with room. Hillside blobs
+/// must shed along the slope instead of soaking their seat at full perm.
+fn standing_air_is_runoff(
+    world: &World,
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+) -> bool {
+    for dx in [-1_i32, 1] {
+        let nx = world.wrap_x(gx + dx);
+        let nlx = lx + dx;
+        match read(nlx, ly, nx, gy) {
+            Some(c) if c.material == MaterialId::Air && !c.sat.is_full() => return true,
+            _ => {}
+        }
+        match read(nlx, ly - 1, nx, gy - 1) {
+            Some(c) if c.material == MaterialId::Air && !c.sat.is_full() => return true,
+            _ => {}
+        }
+    }
+    false
+}
 
 fn air_has_dry_escape(
     world: &World,

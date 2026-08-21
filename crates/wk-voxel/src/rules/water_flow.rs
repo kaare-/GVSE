@@ -880,21 +880,21 @@ fn wet_stack_depth(
 /// Trickles crawl; stacked water still moves faster, but not all at once.
 fn sheet_step_cap(depth: i32) -> i32 {
     match depth {
-        0 | 1 => 40,
-        2 => 96,
-        _ => 160,
+        0 | 1 => 48,
+        2 => 120,
+        _ => 200,
     }
 }
 
 /// Per-pass sat cap for diagonal-down drain.
 ///
-/// Slightly faster than lateral so hillside blobs empty, still soft
-/// enough that shelf edges don't stair-step into a sawtooth front.
+/// Deep hillside blobs need a strong drain so they empty instead of
+/// sitting as jelly; still soft enough that shelf edges don't sawtooth.
 fn drain_step_cap(depth: i32) -> i32 {
     match depth {
-        0 | 1 => 80,
-        2 => 128,
-        _ => 180,
+        0 | 1 => 96,
+        2 => 160,
+        _ => 220,
     }
 }
 
