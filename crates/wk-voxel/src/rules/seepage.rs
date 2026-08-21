@@ -16,7 +16,114 @@ use super::head::{
     is_porous_solid_with, sat_move_to_equalize_heads, seepage_conduct_rate_with, seepage_rate_with,
     seepage_uptake_rate_with,
 };
-use super::plan::regions_for_standalone;
+use super::plan::{regions_for_standalone, regions_wet_loaded};
+
+/// Quiet free-surface lakes stop dirty-tracking once water looks settled,
+/// leaving beds (and deep pore stacks under a wet sand cap) bone-dry.
+/// Re-dirty unsaturated porous cells that still have a standing-water or
+/// wetter-pore neighbour so seepage / gravity keep infiltrating.
+///
+/// Runs every tick: cost is only the wet-chunk scan, and once beds are
+/// saturated the touch set is empty (steady lakes stay quiet).
+///
+/// Also walks **down from standing wet Air** so beds that live in the
+/// chunk below (y=63 under water at y=64) are woken — `has_wet_air` alone
+/// never visits that dry cy-1 chunk.
+pub fn wake_lake_bed_pores(world: &mut World) {
+    let hydro = world.hydro;
+    let regions = regions_wet_loaded(world);
+    let mut touches: Vec<(i32, i32)> = Vec::new();
+    for ac in &regions {
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            continue;
+        };
+        let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
+        let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
+        for y in ac.rect.y0..=ac.rect.y1 {
+            let ly = y as usize;
+            let gy = base_gy + y as i32;
+            for x in ac.rect.x0..=ac.rect.x1 {
+                let lx = x as usize;
+                let cell = chunk.get(lx, ly);
+                let gx = world.wrap_x(base_gx + x as i32);
+
+                // Standing water → touch unsaturated porous below / beside
+                // (crosses the horizontal chunk seam into cy-1).
+                // Walk only through *saturated* pores; stop at the first
+                // unsaturated cell (the wetting front). Walking through dry
+                // cells marked the whole crust dirty and looked like
+                // groundwater "teleporting" under a dry gap.
+                if cell.material == MaterialId::Air && cell.sat.0 >= 160 {
+                    let mut yy = gy - 1;
+                    for _ in 0..(CHUNK_CELLS_H * 2) {
+                        let Some(below) = world.get_cell(gx, yy) else {
+                            break;
+                        };
+                        if !is_porous_solid_with(below.material, &hydro) {
+                            break;
+                        }
+                        let cap = water_capacity_with(below.material, &hydro);
+                        if cap == 0 {
+                            break;
+                        }
+                        if below.sat.0 < cap {
+                            touches.push((gx, yy));
+                            break;
+                        }
+                        yy -= 1;
+                    }
+                    for dx in [-1_i32, 1] {
+                        let nx = world.wrap_x(gx + dx);
+                        if let Some(n) = world.get_cell(nx, gy) {
+                            if is_porous_solid_with(n.material, &hydro) {
+                                let cap = water_capacity_with(n.material, &hydro);
+                                if cap > 0 && n.sat.0 < cap {
+                                    touches.push((nx, gy));
+                                }
+                            }
+                        }
+                    }
+                }
+
+                if !is_porous_solid_with(cell.material, &hydro) {
+                    continue;
+                }
+                let cap = water_capacity_with(cell.material, &hydro);
+                if cap == 0 || cell.sat.0 >= cap {
+                    continue;
+                }
+                let mut feed = false;
+                if let Some(above) = world.get_cell(gx, gy + 1) {
+                    if above.material == MaterialId::Air && above.sat.0 >= 160 {
+                        feed = true;
+                    } else if is_porous_solid_with(above.material, &hydro)
+                        && above.sat.0 > cell.sat.0
+                    {
+                        feed = true;
+                    }
+                }
+                if !feed {
+                    for dx in [-1_i32, 1] {
+                        let nx = world.wrap_x(gx + dx);
+                        if matches!(
+                            world.get_cell(nx, gy),
+                            Some(n) if n.material == MaterialId::Air && n.sat.0 >= 160
+                        ) {
+                            feed = true;
+                            break;
+                        }
+                    }
+                }
+                if feed {
+                    touches.push((gx, gy));
+                }
+            }
+        }
+    }
+    for (gx, gy) in touches {
+        world.touch_dirty(gx, gy);
+    }
+}
 
 /// Permeability-limited soak: water moves from wet cells into
 /// adjacent porous solids (and between porous solids) down the
@@ -147,21 +254,37 @@ fn accumulate_seepage_xfers(
                     let mut move_amt = sat_move_to_equalize_heads(
                         a.sat.0, cap_a, gy, b.sat.0, cap_b, ny,
                     );
-                    // A persistent water column keeps infiltrating its bed
-                    // toward pore capacity. The pairwise head formula alone
-                    // stalls partially wet (~1/3 full in worldgen lakes).
-                    // Keep this in seepage so a moving deep surge only wets
-                    // the bed at the material permeability rate; gravity must
-                    // never empty the whole pore capacity in one pull.
+                    // Wetting-front plug: pore water may only drive *down*
+                    // into a drier neighbour when the donor is meaningfully
+                    // wet. Otherwise a residual film pipes to bedrock and
+                    // pools there while the mid-column stays "dry".
+                    if a_solid && b_solid && move_amt != 0 {
+                        let downward = if move_amt > 0 {
+                            gy > ny // a → b and a is higher
+                        } else {
+                            ny > gy // b → a and b is higher
+                        };
+                        if downward {
+                            let (sat_d, cap_d) = if move_amt > 0 {
+                                (a.sat.0, cap_a)
+                            } else {
+                                (b.sat.0, cap_b)
+                            };
+                            // Donor must be ≥ ~30% full to advance the front.
+                            if cap_d == 0 || (sat_d as i32) * 10 < (cap_d as i32) * 3 {
+                                move_amt = 0;
+                            }
+                        }
+                    }
+                    // Standing free water on a settled bed keeps infiltrating.
+                    // Skip the force-fill when the Air is still runoff (open
+                    // face / downhill escape) so hillside blobs drain instead
+                    // of vanishing into the seat like jelly.
                     if dy == 1
                         && a_solid
                         && b.material == MaterialId::Air
-                        && !b.sat.is_empty()
-                        && matches!(
-                            read(lx + dx, ly + dy + 1, nx, ny + 1),
-                            Some(above)
-                                if above.material == MaterialId::Air && above.sat.0 >= 160
-                        )
+                        && b.sat.0 >= 160
+                        && !standing_air_is_runoff(world, &read, nx, ny, lx + dx, ly + dy)
                     {
                         let free = cap_a.saturating_sub(a.sat.0) as i32;
                         move_amt = -(b.sat.0 as i32).min(free);
@@ -171,6 +294,7 @@ fn accumulate_seepage_xfers(
                         if a_solid
                             && b.material == MaterialId::Air
                             && b.sat.0 >= 160
+                            && !standing_air_is_runoff(world, &read, nx, ny, lx + dx, ly + dy)
                         {
                             let free = cap_a.saturating_sub(a.sat.0) as i32;
                             if free > 0 {
@@ -180,6 +304,7 @@ fn accumulate_seepage_xfers(
                             && a.material == MaterialId::Air
                             && a.sat.0 >= 160
                             && b_solid
+                            && !standing_air_is_runoff(world, &read, gx, gy, lx, ly)
                         {
                             let free = cap_b.saturating_sub(b.sat.0) as i32;
                             if free > 0 {
@@ -191,18 +316,22 @@ fn accumulate_seepage_xfers(
                         continue;
                     }
                     let rate = if a_solid && b_solid {
-                        // Peer pores: drier side limits conduction.
+                        // Peer pores: drier side limits conduction (wetting
+                        // front). Full vertical min-perm piped a residual
+                        // film to bedrock and left a "dry" mid gap under
+                        // hill dumps — looked like teleported groundwater.
                         seepage_conduct_rate_with(
                             a.material, &hydro, a.sat.0, cap_a, b.material, b.sat.0, cap_b,
                         )
                     } else if move_amt > 0 {
                         // A → B: infiltrating into B, or A weeping into Air.
                         if b_solid {
-                            // Standing pond/lake face: full permeability into
-                            // the bank/bed. Thin films still use the wetting
-                            // curve so dry ground sheds runoff.
                             if a.material == MaterialId::Air && a.sat.0 >= 160 {
-                                seepage_rate_with(b.material, &hydro)
+                                if standing_air_is_runoff(world, &read, gx, gy, lx, ly) {
+                                    seepage_uptake_rate_with(b.material, &hydro, b.sat.0, cap_b)
+                                } else {
+                                    seepage_rate_with(b.material, &hydro)
+                                }
                             } else {
                                 seepage_uptake_rate_with(b.material, &hydro, b.sat.0, cap_b)
                             }
@@ -213,7 +342,12 @@ fn accumulate_seepage_xfers(
                         // B → A: infiltrating into A, or B weeping into Air.
                         if a_solid {
                             if b.material == MaterialId::Air && b.sat.0 >= 160 {
-                                seepage_rate_with(a.material, &hydro)
+                                if standing_air_is_runoff(world, &read, nx, ny, lx + dx, ly + dy)
+                                {
+                                    seepage_uptake_rate_with(a.material, &hydro, a.sat.0, cap_a)
+                                } else {
+                                    seepage_rate_with(a.material, &hydro)
+                                }
                             } else {
                                 seepage_uptake_rate_with(a.material, &hydro, a.sat.0, cap_a)
                             }
@@ -286,6 +420,32 @@ fn accumulate_seepage_xfers(
 
 /// Splash into a column face / flowing bed — not a full pore fill.
 const SHEET_FACE_SPLASH: i32 = 4;
+
+/// True when standing Air still has a runoff path: open (non-full) Air
+/// neighbour, or diagonal/cascade downhill Air with room. Hillside blobs
+/// must shed along the slope instead of soaking their seat at full perm.
+fn standing_air_is_runoff(
+    world: &World,
+    read: &dyn Fn(i32, i32, i32, i32) -> Option<Cell>,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+) -> bool {
+    for dx in [-1_i32, 1] {
+        let nx = world.wrap_x(gx + dx);
+        let nlx = lx + dx;
+        match read(nlx, ly, nx, gy) {
+            Some(c) if c.material == MaterialId::Air && !c.sat.is_full() => return true,
+            _ => {}
+        }
+        match read(nlx, ly - 1, nx, gy - 1) {
+            Some(c) if c.material == MaterialId::Air && !c.sat.is_full() => return true,
+            _ => {}
+        }
+    }
+    false
+}
 
 fn air_has_dry_escape(
     world: &World,

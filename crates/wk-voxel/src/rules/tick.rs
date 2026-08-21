@@ -314,6 +314,34 @@ pub fn tick_with_perf_profiled(
     )
 }
 
+fn merge_active_regions(
+    a: Vec<crate::active::ActiveChunk>,
+    b: Vec<crate::active::ActiveChunk>,
+) -> Vec<crate::active::ActiveChunk> {
+    use crate::active::ActiveChunk;
+    use crate::chunk::{ChunkCoord, Rect};
+    use std::collections::HashMap;
+    let mut map: HashMap<ChunkCoord, Rect> = HashMap::new();
+    for ac in a.into_iter().chain(b) {
+        map.entry(ac.coord)
+            .and_modify(|r| {
+                *r = Rect {
+                    x0: r.x0.min(ac.rect.x0),
+                    y0: r.y0.min(ac.rect.y0),
+                    x1: r.x1.max(ac.rect.x1),
+                    y1: r.y1.max(ac.rect.y1),
+                };
+            })
+            .or_insert(ac.rect);
+    }
+    let mut out: Vec<ActiveChunk> = map
+        .into_iter()
+        .map(|(coord, rect)| ActiveChunk { coord, rect })
+        .collect();
+    out.sort_by(|x, y| x.coord.cy.cmp(&y.coord.cy).then(x.coord.cx.cmp(&y.coord.cx)));
+    out
+}
+
 fn tick_with_life_inner(
     world: &mut World,
     perf: &PerfConfig,
@@ -337,6 +365,16 @@ fn tick_with_life_inner(
     let mut local = PhysicsTimings::default();
 
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
+    // Re-dirty unsaturated beds under standing water *before* gravity so
+    // a quiet lake still drinks on this tick (wake used to run only after
+    // the flow loop, when gravity had already skipped the bed).
+    {
+        let t0 = profile.then(Instant::now);
+        super::seepage::wake_lake_bed_pores(world);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.seepage += t0.elapsed();
+        }
+    }
     // Last non-empty flow plan — grain/seepage fall back to this when
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
@@ -446,18 +484,31 @@ fn tick_with_life_inner(
             local.confined += t0.elapsed();
         }
     }
+    // Deep lakes go quiet once free water looks settled — beds and pore
+    // stacks under a wet cap would stay dry forever without a re-wake.
+    {
+        let t0 = profile.then(Instant::now);
+        super::seepage::wake_lake_bed_pores(world);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.seepage += t0.elapsed();
+        }
+    }
 
-    // Seepage follows the water dirty / flow halo.
+    // Seepage follows water dirty ∪ the last flow halo. Preferring only
+    // post-flow dirty drops underground pore fronts: surface equalise
+    // rewrites dirty near the free surface while seepage edges are owned
+    // by the *lower* cell (must be in the scan rect to drink).
     let flow_active = {
         let t0 = profile.then(Instant::now);
         let dirty = plan_active(world);
         if let (true, Some(t0)) = (profile, t0) {
             local.plan_clear += t0.elapsed();
         }
-        if dirty.is_empty() {
-            flow_halo
-        } else {
-            dirty
+        match (dirty.is_empty(), flow_halo.is_empty()) {
+            (true, true) => Vec::new(),
+            (true, false) => flow_halo,
+            (false, true) => dirty,
+            (false, false) => merge_active_regions(dirty, flow_halo),
         }
     };
     if !flow_active.is_empty() {
