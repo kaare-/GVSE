@@ -91,6 +91,9 @@ pub(crate) fn is_surface_support(world: &World, gx: i32, gy: i32) -> bool {
 /// `(gx,gy) — (gx+1,gy)`. Emits at most one transfer, owned by the
 /// left endpoint so each edge is solved once per pass.
 ///
+/// `max_move` soft-caps the transfer so cascade-pull + equalise cannot
+/// empty a cell into its neighbour in one hop (jagged 255|0 fronts).
+///
 /// `chunk`/`(lx,ly)` are an optional chunk-local read cache; when set,
 /// neighbour probes that fall inside the chunk skip `world.get_cell`
 /// (~10× cheaper) — see `get_cell_microbench`.
@@ -101,8 +104,12 @@ pub(crate) fn plan_same_y_pairwise_edge_in(
     gy: i32,
     lx: i32,
     ly: i32,
+    max_move: i32,
     local: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) {
+    if max_move <= 0 {
+        return;
+    }
     let nx = world.wrap_x(gx + 1);
     if nx == gx {
         return;
@@ -145,13 +152,13 @@ pub(crate) fn plan_same_y_pairwise_edge_in(
     let move_amt = sat_move_to_equalize_heads(left.sat.0, cap, gy, right.sat.0, cap, gy);
     if move_amt > 0 {
         let free = u8::MAX.saturating_sub(right.sat.0) as i32;
-        let amt = move_amt.min(left.sat.0 as i32).min(free);
+        let amt = move_amt.min(left.sat.0 as i32).min(free).min(max_move);
         if amt > 0 {
             local.push(((gx, gy), (nx, gy), amt));
         }
     } else if move_amt < 0 {
         let free = u8::MAX.saturating_sub(left.sat.0) as i32;
-        let amt = (-move_amt).min(right.sat.0 as i32).min(free);
+        let amt = (-move_amt).min(right.sat.0 as i32).min(free).min(max_move);
         if amt > 0 {
             local.push(((nx, gy), (gx, gy), amt));
         }

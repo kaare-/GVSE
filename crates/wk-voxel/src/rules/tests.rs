@@ -2586,6 +2586,47 @@ fn open_sheet_does_not_gravity_fill_dry_soil() {
 }
 
 #[test]
+fn full_film_lateral_hop_stays_partial() {
+    // Fat cascade + equalise used to empty a cell into one neighbour
+    // (255|0 cliffs). Soft caps leave a gradient after one pass.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..20 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        w.set_cell(x, 2, Cell::air());
+    }
+    w.set_cell(3, 2, Cell::solid(MaterialId::Bedrock));
+    w.set_cell(4, 2, Cell::water());
+    apply_water_flow(&mut w);
+    let src = w.get_cell(4, 2).map(|c| c.sat.0).unwrap_or(0);
+    let hop = w.get_cell(5, 2).map(|c| c.sat.0).unwrap_or(0);
+    assert!(hop > 0, "film must spread sideways (hop={hop})");
+    assert!(src > 0, "source must not empty in one hop (src={src})");
+    assert!(
+        hop <= 96,
+        "one-sided hop must stay soft, not dump the cell (hop={hop})"
+    );
+}
+
+#[test]
+fn seepage_rate_scales_with_permeability() {
+    let hydro = HydroOverrides::default();
+    let sand = seepage_rate_with(MaterialId::Sand, &hydro);
+    let clay = seepage_rate_with(MaterialId::Clay, &hydro);
+    let gravel = seepage_rate_with(MaterialId::Gravel, &hydro);
+    assert!(sand > 0, "sand must seep");
+    assert!(
+        clay < sand,
+        "clay must soak slower than sand (clay={clay} sand={sand})"
+    );
+    assert!(
+        gravel >= sand,
+        "gravel must soak at least as fast as sand (gravel={gravel} sand={sand})"
+    );
+}
+
+#[test]
 fn hilltop_dump_spreads_into_dry_air() {
     // Stacked water on a soil shelf next to open Air — cascade/equalise
     // must move mass sideways (no solid weir to climb).

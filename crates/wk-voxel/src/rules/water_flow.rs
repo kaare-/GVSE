@@ -574,6 +574,8 @@ fn accumulate_water_flow_xfers(
                 // / hill-drain feel in the water suite.
                 if cur.sat.is_empty() {
                     if on_surface {
+                        // Soft rate: dry-owned edges must not yank a full
+                        // neighbour cell across in one hop.
                         plan_same_y_pairwise_edge_in(
                             world,
                             Some((chunk, base_gx, base_gy)),
@@ -581,6 +583,7 @@ fn accumulate_water_flow_xfers(
                             gy,
                             lx,
                             ly,
+                            sheet_step_cap(1),
                             &mut local,
                         );
                     }
@@ -592,7 +595,7 @@ fn accumulate_water_flow_xfers(
                 let flip = tick_flip ^ (((gx + gy) & 1) == 0);
                 let dirs = if flip { [-1_i32, 1] } else { [1_i32, -1] };
                 let depth = wet_stack_depth(&read, gx, gy, lx, ly, cur.sat.0);
-                // Trickles crawl; a full film / stacked dump keeps a fat front.
+                // Soft lateral / drain caps — fat 180–255 hops looked jagged.
                 let step = sheet_step_cap(depth);
                 let drain = drain_step_cap(depth);
 
@@ -681,7 +684,9 @@ fn accumulate_water_flow_xfers(
                             continue;
                         }
                         let free = u8::MAX.saturating_sub(side.sat.0) as i32;
-                        let move_amt = remaining.min(free).min(want);
+                        // Soft-cap like cascade edge — uncapped pull + equalise
+                        // double-dumped nearly a full cell each hop (jagged).
+                        let move_amt = remaining.min(free).min(want).min(step);
                         if move_amt > 0 {
                             local.push(((gx, gy), (tx, gy), move_amt));
                             remaining -= move_amt;
@@ -706,10 +711,9 @@ fn accumulate_water_flow_xfers(
                     }
 
                     // --- Priority 3c: porous-face dividend ---
-                    // Facing a dry/porous column: absorb a material-rate
-                    // share into the contact cell; any leftover may spill
-                    // over the crest only when this column already has
-                    // water at/above that crest height (hydraulic head).
+                    // Facing a dry/porous column: absorb by material
+                    // permeability; leftover may spill over the crest
+                    // only when this cell already sits at that height.
                     if remaining > 0 {
                         remaining = plan_porous_face_dividend(
                             world,
@@ -729,6 +733,8 @@ fn accumulate_water_flow_xfers(
                 // --- Priority 3b: pairwise +x standing equalise ---
                 // Always, even if cascade dumped everything — the edge
                 // may still need the reverse transfer from a wetter +x.
+                // Soft-capped to `step` so this does not re-dump what
+                // cascade pull already moved (same-neighbour double hit).
                 if on_surface {
                     plan_same_y_pairwise_edge_in(
                         world,
@@ -737,6 +743,7 @@ fn accumulate_water_flow_xfers(
                         gy,
                         lx,
                         ly,
+                        step,
                         &mut local,
                     );
                 }
@@ -866,34 +873,36 @@ fn wet_stack_depth(
     d
 }
 
-/// Per-pass sat cap for same-Y / overtop / skate-over-dry.
+/// Per-pass sat cap for same-Y / cascade / crest spill.
 ///
-/// Depth 0 is a trickle (`sat < 96`) and crawls. A full film or a
-/// stacked dump must keep a fat front — a 40-sat cap turned a
-/// hilltop dump into a hairline over dry ground.
+/// Kept modest so free surfaces spread as a gradient instead of dumping
+/// a whole cell each hop (the "fat front" 180–255 caps looked jagged).
+/// Trickles crawl; stacked water still moves faster, but not all at once.
 fn sheet_step_cap(depth: i32) -> i32 {
     match depth {
-        0 => 40,
-        1 => 180,
-        2 => 220,
-        _ => 255,
+        0 | 1 => 40,
+        2 => 96,
+        _ => 160,
     }
 }
 
 /// Per-pass sat cap for diagonal-down drain.
+///
+/// Slightly faster than lateral so hillside blobs empty, still soft
+/// enough that shelf edges don't stair-step into a sawtooth front.
 fn drain_step_cap(depth: i32) -> i32 {
     match depth {
-        0 => 64,
-        1 => 200,
-        2 => 240,
-        _ => 255,
+        0 | 1 => 80,
+        2 => 128,
+        _ => 180,
     }
 }
 
-/// Porous-face dividend: soak by material, spill leftover only with head.
+/// Porous-face dividend: soak by permeability, spill leftover only with head.
 ///
 /// Facing a dry/porous solid (not Air/Organic):
-/// 1. Absorb up to the material seepage rate into the contact cell.
+/// 1. Absorb up to [`seepage_rate_with`] (material **permeability**) into
+///    the contact cell.
 /// 2. Leftover may spill into Air at the column crest — only when *this*
 ///    source cell sits at or above that crest (`gy >= crest_y`). Mass and
 ///    `step` (speed proxy) cap how much passes; a pond film below a berm
@@ -926,7 +935,7 @@ fn plan_porous_face_dividend(
             continue;
         }
 
-        // 1) Material dividend — absorb this much into the column per tick.
+        // 1) Permeability dividend — absorb this much into the column.
         let soak_rate = seepage_rate_with(side.material, &world.hydro);
         let free = (cap - side.sat.0 as i32).max(0);
         let soak = remaining.min(free).min(soak_rate);
@@ -964,8 +973,8 @@ fn plan_porous_face_dividend(
             continue;
         };
         let free_air = u8::MAX.saturating_sub(crest_cell.sat.0) as i32;
-        // Overflow share: leftover mass, capped by step (speed).
-        let overflow = remaining.min(free_air).min(step.max(soak_rate));
+        // Overflow share: leftover mass, capped by lateral step.
+        let overflow = remaining.min(free_air).min(step);
         if overflow > 0 {
             local.push(((gx, gy), (cx, cy), overflow));
             remaining -= overflow;
