@@ -18,6 +18,13 @@ use super::head::{
 };
 use super::plan::{regions_for_standalone, regions_wet_loaded};
 
+/// Rows of seam-coupled seepage on the **lower** chunk (below the face).
+/// A shallow strip left saturated shelves (y=62|63 full, y=61 dry).
+const SEAM_SEEPAGE_DEPTH_LO: i32 = 16;
+/// Upper-chunk strip stays shallow — a deep strip pulled pond water
+/// sideways at y=70 and stalled infiltration in unit tests.
+const SEAM_SEEPAGE_DEPTH_HI: i32 = 4;
+
 /// Walk down a porous column from `start_y` through saturated cells and
 /// re-dirty the first unsaturated pore (the wetting front). Stops at
 /// impermeable / void. Mirrors the standing-water lake-bed walk.
@@ -209,8 +216,12 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
             let hi_room = hi_pore && hi_cap > 0 && hi.sat.0 < hi_cap;
             let lo_wet = lo.sat.0 > 0;
             let hi_wet = hi.sat.0 > 0;
-            if !((lo_wet || hi_wet || lo_air || hi_air) && (lo_room || hi_room || lo_air || hi_air))
-            {
+            let lo_full = lo_pore && lo_cap > 0 && lo.sat.0 >= lo_cap;
+            let hi_full = hi_pore && hi_cap > 0 && hi.sat.0 >= hi_cap;
+            if !(lo_wet || hi_wet || lo_air || hi_air) {
+                continue;
+            }
+            if !(lo_room || hi_room || lo_air || hi_air || lo_full || hi_full) {
                 continue;
             }
             for &yy in &band {
@@ -231,7 +242,7 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
             }
             // Moisture above the seam must keep driving the column below —
             // horizontal equalisation along y=63|64 stalls without this.
-            if (hi_wet || hi_air) && lo_pore {
+            if lo_pore && (hi_wet || hi_air || lo_full) {
                 touch_downward_pore_front(world, &hydro, gx, y_lo, &mut touches);
             } else if lo_wet && lo_pore {
                 touch_downward_pore_front(world, &hydro, gx, y_lo - 1, &mut touches);
@@ -243,7 +254,7 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
     }
 }
 
-/// Minimal active regions covering vertical chunk seams (four-row band).
+/// Minimal active regions covering vertical chunk seams.
 ///
 /// Used every tick so quiet-EO seepage cadence does not leave pore water
 /// shelved at y=63|64 for thousands of ticks while the row above keeps
@@ -252,6 +263,8 @@ pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
     use std::collections::HashMap;
     let ch = CHUNK_CELLS_H as i32;
     let cw = CHUNK_CELLS_W as i32;
+    let depth_lo = SEAM_SEEPAGE_DEPTH_LO.min(ch);
+    let depth_hi = SEAM_SEEPAGE_DEPTH_HI.min(ch);
     let mut map: HashMap<ChunkCoord, Rect> = HashMap::new();
     let coords: Vec<_> = world.chunks.keys().copied().collect();
     for coord in coords {
@@ -261,7 +274,7 @@ pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
         }
         let strip_lo = Rect {
             x0: 0,
-            y0: (ch - 2).max(0) as u8,
+            y0: (ch - depth_lo).max(0) as u8,
             x1: (cw - 1) as u8,
             y1: (ch - 1) as u8,
         };
@@ -269,7 +282,7 @@ pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
             x0: 0,
             y0: 0,
             x1: (cw - 1) as u8,
-            y1: 1.min(ch - 1) as u8,
+            y1: (depth_hi - 1).min(ch - 1) as u8,
         };
         map.entry(coord)
             .and_modify(|r| *r = merge_seam_rect(*r, strip_lo))
