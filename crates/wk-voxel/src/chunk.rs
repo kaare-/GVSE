@@ -88,6 +88,12 @@ pub struct Chunk {
     /// (which dirty-rects alone would miss).
     #[serde(default)]
     pub has_wet_air: bool,
+    /// Sticky occupancy: at least one permeable solid with `sat > 0`.
+    /// Lake-bed / seam wakes use this so underground pore columns keep
+    /// visiting after the free surface goes quiet (`has_wet_air` alone
+    /// never marks pure groundwater chunks).
+    #[serde(default)]
+    pub has_wet_pores: bool,
     /// Sticky occupancy: at least one `Limestone` cell was written
     /// since the flag was last cleared. Karst skips chunks that never
     /// held limestone.
@@ -135,6 +141,7 @@ impl Chunk {
             dirty: None,
             tick: 0,
             has_wet_air: false,
+            has_wet_pores: false,
             has_limestone: false,
             has_loose: false,
             has_organic: false,
@@ -179,6 +186,12 @@ impl Chunk {
         }
         if cell.material == MaterialId::Air && !cell.sat.is_empty() {
             self.has_wet_air = true;
+        }
+        if cell.material != MaterialId::Air
+            && !cell.sat.is_empty()
+            && wk_material::MaterialRegistry::props(cell.material).permeability > 0
+        {
+            self.has_wet_pores = true;
         }
         if cell.material == MaterialId::Limestone {
             self.has_limestone = true;

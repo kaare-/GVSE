@@ -8,7 +8,7 @@ use wk_material::MaterialId;
 
 use crate::active::ActiveChunk;
 use crate::cell::{water_capacity_with, Cell, Sat};
-use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
@@ -17,6 +17,39 @@ use super::head::{
     seepage_uptake_rate_with,
 };
 use super::plan::{regions_for_standalone, regions_wet_loaded};
+
+/// Walk down a porous column from `start_y` through saturated cells and
+/// re-dirty the first unsaturated pore (the wetting front). Stops at
+/// impermeable / void. Mirrors the standing-water lake-bed walk.
+fn touch_downward_pore_front(
+    world: &World,
+    hydro: &wk_material::HydroOverrides,
+    gx: i32,
+    start_y: i32,
+    touches: &mut Vec<(i32, i32)>,
+) {
+    let mut yy = start_y;
+    for _ in 0..(CHUNK_CELLS_H * 2) {
+        if yy < 0 {
+            break;
+        }
+        let Some(cell) = world.get_cell(gx, yy) else {
+            break;
+        };
+        if !is_porous_solid_with(cell.material, hydro) {
+            break;
+        }
+        let cap = water_capacity_with(cell.material, hydro);
+        if cap == 0 {
+            break;
+        }
+        if cell.sat.0 < cap {
+            touches.push((gx, yy));
+            break;
+        }
+        yy -= 1;
+    }
+}
 
 /// Quiet free-surface lakes stop dirty-tracking once water looks settled,
 /// leaving beds (and deep pore stacks under a wet sand cap) bone-dry.
@@ -116,6 +149,12 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                 }
                 if feed {
                     touches.push((gx, gy));
+                    // Keep the wetting front below this cell awake — seam
+                    // rows that only equalise horizontally never nudged the
+                    // chunk under (playtest 160k tick shelf).
+                    if gy > 0 {
+                        touch_downward_pore_front(world, &hydro, gx, gy - 1, &mut touches);
+                    }
                 }
             }
         }
@@ -190,11 +229,79 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
                     touches.push((gx, yy));
                 }
             }
+            // Moisture above the seam must keep driving the column below —
+            // horizontal equalisation along y=63|64 stalls without this.
+            if (hi_wet || hi_air) && lo_pore {
+                touch_downward_pore_front(world, &hydro, gx, y_lo, &mut touches);
+            } else if lo_wet && lo_pore {
+                touch_downward_pore_front(world, &hydro, gx, y_lo - 1, &mut touches);
+            }
         }
     }
     for (gx, gy) in touches {
         world.touch_dirty(gx, gy);
     }
+}
+
+/// Minimal active regions covering vertical chunk seams (four-row band).
+///
+/// Used every tick so quiet-EO seepage cadence does not leave pore water
+/// shelved at y=63|64 for thousands of ticks while the row above keeps
+/// equalising horizontally.
+pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
+    use std::collections::HashMap;
+    let ch = CHUNK_CELLS_H as i32;
+    let cw = CHUNK_CELLS_W as i32;
+    let mut map: HashMap<ChunkCoord, Rect> = HashMap::new();
+    let coords: Vec<_> = world.chunks.keys().copied().collect();
+    for coord in coords {
+        let above = ChunkCoord::new(coord.cx, coord.cy + 1);
+        if !world.chunks.contains_key(&above) {
+            continue;
+        }
+        let strip_lo = Rect {
+            x0: 0,
+            y0: (ch - 2).max(0) as u8,
+            x1: (cw - 1) as u8,
+            y1: (ch - 1) as u8,
+        };
+        let strip_hi = Rect {
+            x0: 0,
+            y0: 0,
+            x1: (cw - 1) as u8,
+            y1: 1.min(ch - 1) as u8,
+        };
+        map.entry(coord)
+            .and_modify(|r| *r = merge_seam_rect(*r, strip_lo))
+            .or_insert(strip_lo);
+        map.entry(above)
+            .and_modify(|r| *r = merge_seam_rect(*r, strip_hi))
+            .or_insert(strip_hi);
+    }
+    let mut out: Vec<ActiveChunk> = map
+        .into_iter()
+        .map(|(coord, rect)| ActiveChunk { coord, rect })
+        .collect();
+    out.sort_by(|a, b| a.coord.cy.cmp(&b.coord.cy).then(a.coord.cx.cmp(&b.coord.cx)));
+    out
+}
+
+fn merge_seam_rect(a: Rect, b: Rect) -> Rect {
+    Rect {
+        x0: a.x0.min(b.x0),
+        y0: a.y0.min(b.y0),
+        x1: a.x1.max(b.x1),
+        y1: a.y1.max(b.y1),
+    }
+}
+
+/// Cross-seam pore coupling every tick (not cadence-gated).
+pub fn apply_seepage_seam_coupling(world: &mut World) {
+    let regions = seam_seepage_regions(world);
+    if regions.is_empty() {
+        return;
+    }
+    apply_seepage_regions(world, &regions);
 }
 
 /// Permeability-limited soak: water moves from wet cells into

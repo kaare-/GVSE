@@ -522,6 +522,17 @@ fn tick_with_life_inner(
             local.seepage += t0.elapsed();
         }
     }
+    // Vertical chunk seams must couple every tick — quiet EO only runs
+    // full seepage every [`SEEPAGE_EVERY`] ticks, which left pore rows
+    // at y=63|64 equalising horizontally for 160k+ ticks without
+    // waking the chunk below (playtest shelf).
+    {
+        let t0 = profile.then(Instant::now);
+        super::seepage::apply_seepage_seam_coupling(world);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.seepage += t0.elapsed();
+        }
+    }
 
     // Re-wake unsupported grains and steep cliff faces. Cadence-gated:
     // full sticky-loose scan every 16 ticks; dirty-halo wake every 4.
