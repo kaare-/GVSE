@@ -23,8 +23,8 @@ use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
 
 use crate::active::ActiveChunk;
 use crate::cell::{
-    falls_through_empty_air, grain_max_stable_step, is_grain, water_capacity, water_capacity_with,
-    Cell, CellFlags, Sat,
+    falls_through_empty_air, grain_max_stable_step, is_competent_rock, is_grain, water_capacity,
+    water_capacity_with, Cell, CellFlags, Sat,
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fungi::move_mycelium_meta;
@@ -79,6 +79,13 @@ pub struct FailureConfig {
     /// F2b gates on map `shear_score` + hydro wetting (S3);
     /// F3 gates on map σᵥ (S4).
     pub use_geotech_map: bool,
+    /// Stone / Limestone rigid-body fall (replaces roof-peel on floating blobs).
+    #[serde(default = "default_true")]
+    pub enable_competent_fall: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 impl Default for FailureConfig {
@@ -93,6 +100,7 @@ impl Default for FailureConfig {
             max_compaction_events: 16,
             shear_chance_per_mille: 250,
             use_geotech_map: true,
+            enable_competent_fall: true,
         }
     }
 }
@@ -406,6 +414,9 @@ pub fn apply_roof_collapse_regions(
                     )
                 };
                 if below_ok {
+                    if cfg.enable_competent_fall && is_competent_rock(roof.material) {
+                        continue;
+                    }
                     probes.push((gy, gx));
                 }
             }

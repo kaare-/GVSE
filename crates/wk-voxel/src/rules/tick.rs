@@ -496,7 +496,7 @@ fn tick_with_life_inner(
         let t0 = profile.then(Instant::now);
         let dirty = plan_active(world);
         let src = if dirty.is_empty() {
-            flow_active
+            flow_active.clone()
         } else {
             dirty
         };
@@ -575,6 +575,43 @@ fn tick_with_life_inner(
         }
         if let (true, Some(t0)) = (profile, t0) {
             local.rise_soak += t0.elapsed();
+        }
+    }
+
+    // Competent rock bodies: fall, impact shatter, slope roll (every tick).
+    if failure.enable_competent_fall {
+        if world.tick % GRAIN_WAKE_EVERY == 0 {
+            if world.tick % GRAIN_WAKE_FULL_EVERY == 0 {
+                super::competent_fall::wake_competent_bodies_all(world);
+            } else {
+                let dirty = plan_active(world);
+                let coords: Vec<_> = if dirty.is_empty() {
+                    flow_active.iter().map(|ac| ac.coord).collect()
+                } else {
+                    dirty.iter().map(|ac| ac.coord).collect()
+                };
+                super::competent_fall::wake_competent_bodies(world, &coords);
+            }
+        }
+        let t0 = profile.then(Instant::now);
+        let body_active = {
+            let dirty = plan_active(world);
+            if dirty.is_empty() {
+                flow_active.clone()
+            } else {
+                dirty
+            }
+        };
+        let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
+        let competent_cfg = super::competent_fall::CompetentFallConfig::default();
+        let _ = super::competent_fall::apply_competent_fall_regions(
+            world,
+            &body_active,
+            &competent_cfg,
+            fps_path,
+        );
+        if let (true, Some(t0)) = (profile, t0) {
+            local.settle += t0.elapsed();
         }
     }
 

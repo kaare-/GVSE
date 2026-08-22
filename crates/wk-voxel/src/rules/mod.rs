@@ -16,6 +16,7 @@ mod gravity;
 mod water_flow;
 mod spill;
 mod seepage;
+mod competent_fall;
 mod grain;
 mod rain;
 mod evap;
@@ -31,6 +32,10 @@ pub use condensation::{
     apply_condensation_rain_with_orographic, CondensationConfig, OrographicConfig,
 };
 pub use evap::{apply_evaporation, apply_evaporation_into_humidity, EvapConfig};
+pub use competent_fall::{
+  apply_competent_fall_regions, wake_competent_bodies, wake_competent_bodies_all,
+  CompetentFallConfig, CompetentFallStats, COMPETENT_FALL_PASSES, COMPETENT_FALL_PASSES_FPS,
+};
 pub use grain::{
     apply_cold_avalanche, apply_cold_avalanche_bound, apply_flow_erosion, apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,

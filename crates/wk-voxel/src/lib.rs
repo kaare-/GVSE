@@ -162,6 +162,8 @@ pub use rules::{
     tick_with_life_profiled, tick_with_perf, tick_with_perf_profiled,
     wake_confined_head, wake_grains_for_settle, wake_grains_for_settle_coords, GrainWake,
     wake_unsupported_grains, wake_unstable_slopes,
+    apply_competent_fall_regions, wake_competent_bodies, wake_competent_bodies_all,
+    CompetentFallConfig, CompetentFallStats, COMPETENT_FALL_PASSES, COMPETENT_FALL_PASSES_FPS,
     CondensationConfig, EvapConfig, GrainConfig,
     KarstConfig,
     OrographicConfig, PerfConfig, PhysicsTimings, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS,

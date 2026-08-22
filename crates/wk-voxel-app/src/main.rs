@@ -59,7 +59,8 @@ use wk_voxel::{
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
     precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, set_parallel_enabled,
-    step_carbon_budget, temperature_step_due, tick_with_life, wake_unsupported_grains,
+    step_carbon_budget, temperature_step_due, tick_with_life, wake_competent_bodies_all,
+    wake_unsupported_grains,
     wake_unstable_slopes, GeotechOverlayMode, SimSnapshot, WorldgenParams,
 };
 
@@ -240,6 +241,7 @@ async fn main() {
                 // Mid-air F3 paint can lose its dirty wake; re-dirty
                 // unsupported sand/Organic so the next tick seats them.
                 wake_unsupported_grains(&mut scene.world);
+                wake_competent_bodies_all(&mut scene.world);
                 wake_unstable_slopes(&mut scene.world);
             } else if creature_list.open {
                 creature_list.open = false;
@@ -284,6 +286,7 @@ async fn main() {
             } else {
                 paused = terrain.was_paused;
                 wake_unsupported_grains(&mut scene.world);
+                wake_competent_bodies_all(&mut scene.world);
                 wake_unstable_slopes(&mut scene.world);
             }
         }
@@ -367,6 +370,7 @@ async fn main() {
                 if was && !paused {
                     // Same stranded-grain wake as F3 close.
                     wake_unsupported_grains(&mut scene.world);
+                wake_competent_bodies_all(&mut scene.world);
                     wake_unstable_slopes(&mut scene.world);
                 }
             }

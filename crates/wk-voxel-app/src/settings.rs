@@ -1013,6 +1013,15 @@ impl SimSettings {
                         "Roof / overhang collapse",
                         &mut self.failure.enable_roof_collapse,
                     );
+                    ui.checkbox(
+                        hash!(),
+                        "Competent rock rigid fall",
+                        &mut self.failure.enable_competent_fall,
+                    );
+                    ui.label(
+                        None,
+                        "Stone / limestone fall as connected bodies; impact → debris; roll on slopes.",
+                    );
                     labeled_slider(
                         ui,
                         hash!(),

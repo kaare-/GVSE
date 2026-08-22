@@ -210,6 +210,11 @@ pub fn is_repose_grain(material: MaterialId) -> bool {
         || matches!(material, MaterialId::Snow | MaterialId::Organic)
 }
 
+/// Competent bedrock-class solids that can move as rigid bodies (not Bedrock).
+pub fn is_competent_rock(material: MaterialId) -> bool {
+    matches!(material, MaterialId::Stone | MaterialId::Limestone)
+}
+
 /// Dense grains soft enough for flow bedload / bank undercut.
 /// Matches the column sim's `erosion_resistance < 150` cut (excludes
 /// Stone / Limestone / Ice). Snow uses repose + phase, not bedload.
