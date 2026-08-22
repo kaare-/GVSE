@@ -112,10 +112,10 @@ pub use grid::World;
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{
     bake_tip_into_body, column_sky_light, fallen_body_offset, resolve_organism_draw_cells,
-    rigid_tip_offset, Atom, BodyModule, Corpse, ModuleId, OrganismStepOutcome, OrganismStepStats,
-    OrganismStore, SpawnFail, SporeRelease, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS,
-    MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT, SUBMERGED_STEM_URGE_LIGHT,
-    WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
+    rigid_tip_offset, Atom, BodyModule, Corpse, ModuleId, OrganismPassTimings, OrganismStepOutcome,
+    OrganismStepStats, OrganismStore, SpawnFail, SporeRelease, CORPSE_SETTLE_LAND_TICKS,
+    CORPSE_SETTLE_WATER_TICKS, MAX_ATOMS, MAX_CORPSES, MAX_FALLEN_WATERLINE_EXTENT,
+    SUBMERGED_STEM_URGE_LIGHT, WATER_LIGHT_TRANSMIT, WATER_SURFACE_TRANSMIT,
 };
 pub use symbiosis::{
     body_has_symbiont, clear_plant_sym_flow_lasts, clear_sym_net_flow_lasts,
@@ -132,9 +132,9 @@ pub use plant::{
     MAX_ROOT_MODULES, MAX_STEM_MODULES,
 };
 pub use shade::{
-    build_canopy_index, build_canopy_index_posed, effective_photo_light, shade_transmit,
-    shade_transmit_column,
-    sum_posed_photo_light, CanopyIndex, PosedModule,
+    build_canopy_index, build_canopy_index_posed, effective_photo_light, group_posed_by_atom,
+    posed_canopy_sample, posed_canopy_sample_of, shade_transmit, shade_transmit_column,
+    sum_posed_photo_light, sum_posed_photo_light_of, CanopyIndex, PosedModule,
 };
 pub use heatmap::Heatmap;
 pub use humidity::{
@@ -147,27 +147,32 @@ pub use phase::{
 pub use rules::{
     apply_cold_avalanche, apply_cold_avalanche_bound, apply_condensation_rain,
     apply_condensation_rain_phased, apply_condensation_rain_with_orographic, apply_evaporation,
-    apply_evaporation_into_humidity, apply_flow_erosion, apply_flow_erosion_bound,
+    apply_evaporation_into_humidity, apply_evaporation_into_humidity_climate, apply_flow_erosion,
+    apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
     apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
     apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
-    collect_floating_organic_columns, drift_floating_organic, drift_floating_organic_cfg,
+    collect_floating_organic_columns, collect_floating_organic_columns_near,
+    floating_organic_column_at, drift_floating_organic, drift_floating_organic_cfg,
     drift_floating_organic_columns, drift_floating_organic_columns_cfg,
+    shove_floating_organic_with_current,
     active_has_unsupported_grain, is_standing_water, punch_through_floating_rafts,
     rise_and_soak_buoyant_litter, rise_and_soak_buoyant_litter_cfg, rise_buoyant_litter,
     settle_loose_grains, settle_loose_grains_regions, soak_floating_litter,
     soak_floating_litter_cfg,
     tick, tick_with_configs, tick_with_configs_and_geotech, tick_with_life,
     tick_with_life_profiled, tick_with_perf, tick_with_perf_profiled,
-    wake_confined_head, wake_grains_for_settle, wake_grains_for_settle_coords, GrainWake,
+    wake_confined_head, wake_lake_bed_pores, wake_pore_weep_into_air,
+    wake_vertical_chunk_seam_pores, apply_seepage_seam_coupling, wake_grains_for_settle, wake_grains_for_settle_coords,
+    GrainWake,
     wake_unsupported_grains, wake_unstable_slopes,
     apply_competent_fall_regions, wake_competent_bodies, wake_competent_bodies_all,
     CompetentFallConfig, CompetentFallStats, COMPETENT_FALL_PASSES, COMPETENT_FALL_PASSES_FPS,
     CondensationConfig, EvapConfig, GrainConfig,
     KarstConfig,
     OrographicConfig, PerfConfig, PhysicsTimings, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS,
-    FLOW_SUBSTEPS_EO_AFTER, FLOW_SUBSTEPS_MIN,
+    FLOW_SUBSTEPS_EO_AFTER, FLOW_SUBSTEPS_MIN, SEEPAGE_EVERY,
     GRAIN_REPOSE_HAZE_MAX, GRAIN_REPOSE_LAKE_MIN, GRAIN_SETTLE_PASSES,
     GRAIN_SETTLE_PASSES_SHALLOW, MYCELIUM_EROSION_BIND,
     MYCELIUM_RAFT_BIND_MIN,

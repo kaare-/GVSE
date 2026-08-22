@@ -22,6 +22,7 @@
 //! - `H` — toggle humidity tile diagnostic + wind streaks (default on)
 //! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
 //! - `T` — toggle temperature heatmap overlay
+//! - `U` — toggle ground saturation heatmap (pores + free water)
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
 //! - `G` — cycle geotech overlay (shear → σᵥ → wet → off)
 //! - `I` — toggle phase change master (freeze / thaw / snow / slush; also in Tab)
@@ -30,6 +31,7 @@
 //! - `F3` — terrain editor (paint / erase block types; world stays visible)
 //! - `F4` — creature list (living / dead roster; click row to inspect)
 //! - `F5` / `F9` — save / load simulation (`saves/*.gvsesim`)
+//! - `F6` — glossary / how-it-works (keys, water, sky, HUD words)
 //! - `Tab` — live settings (world size, materials, wind, clouds, …)
 //! - click — block / organism inspector (hidden while F1 HUD is off)
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
@@ -43,6 +45,7 @@
 mod atmosphere;
 mod creature_list;
 mod editor;
+mod glossary;
 mod inspector;
 mod palette;
 mod quit;
@@ -53,14 +56,15 @@ mod terrain;
 
 use macroquad::prelude::*;
 use wk_voxel::{
-    apply_cold_avalanche_bound, apply_condensation_rain_phased, apply_evaporation_into_humidity,
+    apply_cold_avalanche_bound, apply_condensation_rain_phased,
+    apply_evaporation_into_humidity_climate,
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     apply_weather_rgb, celestial_local_cfg, celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
-    precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg, set_parallel_enabled,
-    step_carbon_budget, temperature_step_due, tick_with_life, wake_competent_bodies_all,
-    wake_unsupported_grains,
+    pore_wetness_with, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg,
+    set_parallel_enabled, step_carbon_budget, temperature_step_due, tick_with_life,
+    wake_competent_bodies_all, wake_unsupported_grains,
     wake_unstable_slopes, GeotechOverlayMode, SimSnapshot, WorldgenParams,
 };
 
@@ -73,6 +77,7 @@ use crate::atmosphere::{
 };
 use crate::creature_list::CreatureList;
 use crate::editor::CreatureEditor;
+use crate::glossary::Glossary;
 use crate::inspector::{draw_block_inspector, draw_selection_outline, screen_to_world};
 use crate::palette::cell_color;
 use crate::quit::{QuitChoice, QuitDialog};
@@ -163,6 +168,36 @@ fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
     Color::from_rgba(r, g, b, 120)
 }
 
+/// Dry tan → wet deep blue for ground pore / free-water saturation.
+fn sat_overlay_color(wet: f32) -> Color {
+    let t = wet.clamp(0.0, 1.0);
+    let (r, g, b) = if t < 0.5 {
+        let u = t / 0.5;
+        (
+            (190.0 - u * 130.0) as u8,
+            (155.0 - u * 45.0) as u8,
+            (95.0 + u * 85.0) as u8,
+        )
+    } else {
+        let u = (t - 0.5) / 0.5;
+        (
+            (60.0 - u * 45.0) as u8,
+            (110.0 - u * 55.0) as u8,
+            (180.0 + u * 55.0) as u8,
+        )
+    };
+    let a = (75.0 + t * 155.0) as u8;
+    Color::from_rgba(r, g, b, a)
+}
+
+fn scale_color_alpha(c: Color, k: f32) -> Color {
+    let k = k.clamp(0.0, 1.0);
+    Color {
+        a: c.a * k,
+        ..c
+    }
+}
+
 #[macroquad::main(window_conf)]
 async fn main() {
     let params = WorldgenParams::default();
@@ -171,24 +206,19 @@ async fn main() {
     settings.apply_material_overrides(&mut scene.world);
     let mut spore_fx = SporeFx::new();
     let mut paused = false;
-    // Climatic drizzle is physics-only by default — sky pixels hide thin
-    // wet Air so the old rain-streak look doesn't paint over the sky.
-    // Clouds do the visible weather.
-    let mut rain_on = false;
-    let mut cond_rain_on = true;
-    let mut evap_on = true;
-    let mut karst_on = true;
     let mut organisms_on = true;
     // Humidity diagnostic default on (`H`); soft clouds default on (`N`).
     let mut humidity_overlay = true;
     let mut clouds_on = true;
     let mut temp_overlay = false;
+    let mut sat_overlay = false;
     let mut mycelium_overlay = false;
     let mut geotech_mode = GeotechOverlayMode::Off;
     let mut show_hud = true;
     let mut editor = CreatureEditor::default();
     let mut terrain = TerrainEditor::default();
     let mut creature_list = CreatureList::default();
+    let mut glossary = Glossary::default();
     let mut quit_dialog = QuitDialog::default();
     let mut inspect: Option<(i32, i32)> = None;
     let mut cam_x = 0.0f32;
@@ -243,6 +273,8 @@ async fn main() {
                 wake_unsupported_grains(&mut scene.world);
                 wake_competent_bodies_all(&mut scene.world);
                 wake_unstable_slopes(&mut scene.world);
+            } else if glossary.open {
+                glossary.close();
             } else if creature_list.open {
                 creature_list.open = false;
             } else if settings.open {
@@ -260,6 +292,9 @@ async fn main() {
         if !quit_dialog.open && is_key_pressed(KeyCode::F4) {
             creature_list.toggle();
         }
+        if !quit_dialog.open && is_key_pressed(KeyCode::F6) {
+            glossary.toggle();
+        }
         // Editor is F2 only — `C` is condensation in the voxel demo
         // (column-GVSE can use C/F2 because it has no condensation toggle).
         if !quit_dialog.open && is_key_pressed(KeyCode::F2) {
@@ -270,6 +305,7 @@ async fn main() {
                 terrain.open = false;
                 // F4 list panel overlaps the paint canvas — close it.
                 creature_list.open = false;
+                glossary.close();
                 paused = true;
             } else {
                 paused = editor.was_paused;
@@ -282,6 +318,7 @@ async fn main() {
                 settings.open = false;
                 editor.open = false;
                 editor.spawn_picker = false;
+                glossary.close();
                 paused = true;
             } else {
                 paused = terrain.was_paused;
@@ -384,16 +421,16 @@ async fn main() {
                 inspect = None;
             }
             if is_key_pressed(KeyCode::W) {
-                rain_on = !rain_on;
+                settings.climatic_rain_on = !settings.climatic_rain_on;
             }
             if is_key_pressed(KeyCode::C) {
-                cond_rain_on = !cond_rain_on;
+                settings.cond_rain_on = !settings.cond_rain_on;
             }
             if is_key_pressed(KeyCode::E) {
-                evap_on = !evap_on;
+                settings.evap_on = !settings.evap_on;
             }
             if is_key_pressed(KeyCode::K) {
-                karst_on = !karst_on;
+                settings.karst_on = !settings.karst_on;
             }
             if is_key_pressed(KeyCode::H) {
                 humidity_overlay = !humidity_overlay;
@@ -403,6 +440,9 @@ async fn main() {
             }
             if is_key_pressed(KeyCode::T) {
                 temp_overlay = !temp_overlay;
+            }
+            if is_key_pressed(KeyCode::U) {
+                sat_overlay = !sat_overlay;
             }
             if is_key_pressed(KeyCode::M) {
                 mycelium_overlay = !mycelium_overlay;
@@ -479,7 +519,7 @@ async fn main() {
             // rayon. CA physics stays on the Tab toggle (demo dirty plans
             // are too narrow for parallel to win).
             set_parallel_enabled(true);
-            if rain_on {
+            if settings.climatic_rain_on {
                 apply_rain_with_temp(
                     &mut scene.world,
                     &settings.rain,
@@ -488,15 +528,17 @@ async fn main() {
                     Some(&mut scene.humidity),
                 );
             }
-            if evap_on {
-                apply_evaporation_into_humidity(
+            if settings.evap_on {
+                apply_evaporation_into_humidity_climate(
                     &mut scene.world,
                     &mut scene.humidity,
                     &settings.evap,
+                    Some(&scene.temperature),
+                    wind_vx.abs().max(wind_vy.abs()),
                 );
             }
-            // Vapor drifts with the wind, then coagulates into cloud
-            // parcels that rain hard when heavy enough.
+            // Vapor drifts with the wind, then warm air rises and
+            // condenses where it meets colder air / ground.
             scene.humidity.advect(wind_vx, wind_vy);
             let tick_no = scene.world.tick;
             scene.clouds.step_with_precip(
@@ -511,8 +553,8 @@ async fn main() {
                 Some(&settings.phase),
             );
             // Leftover vapor: liquid drizzle when warm, thin ice frost
-            // when cold. Snow packs still come from clouds (flakes).
-            if cond_rain_on {
+            // when cold. Packed snow still comes from the W faucet.
+            if settings.cond_rain_on {
                 apply_condensation_rain_phased(
                     &mut scene.world,
                     &mut scene.humidity,
@@ -522,7 +564,7 @@ async fn main() {
                     Some(&settings.phase),
                 );
             }
-            if karst_on {
+            if settings.karst_on {
                 apply_karst_dissolution(&mut scene.world, &settings.karst);
             }
             // Period-20 stress map: refresh before failure (S3 gate), then
@@ -569,6 +611,8 @@ async fn main() {
                     &settings.grain,
                 );
             }
+            // Current shoves unbound film so mats don't dam / comb the lake.
+            let _ = wk_voxel::shove_floating_organic_with_current(&mut scene.world);
             // Bedload / bank transport after water has moved this tick.
             apply_flow_erosion_bound(&mut scene.world, &settings.grain, rooted.as_ref());
             if geotech_due {
@@ -668,12 +712,13 @@ async fn main() {
         // Screen +y is down. World +y is up. Flip when placing rows.
         let origin_y = (sh + world_h_px) * 0.5 + cam_y;
 
-        // Creature list (F4) — before world clicks so rows steal the mouse.
+        // Creature list (F4) / glossary (F6) — before world clicks.
         if !quit_dialog.open {
             if let Some(at) = creature_list.handle_input(&scene.organisms) {
                 inspect = Some(at);
                 show_hud = true;
             }
+            glossary.handle_input();
         }
 
         // World clicks: terrain paint, spawn picker, or block inspector.
@@ -682,6 +727,7 @@ async fn main() {
             && terrain.open
             && !terrain.hits_panel(mx, my)
             && !creature_list.hits_panel(mx, my)
+            && !glossary.hits_panel(mx, my)
             && !terrain.blocks_world_paint()
         {
             let paint = is_mouse_button_down(MouseButton::Left);
@@ -713,6 +759,7 @@ async fn main() {
             && !terrain.open
             && !settings.open
             && !creature_list.hits_panel(mx, my)
+            && !glossary.hits_panel(mx, my)
         {
             if let Some((gx, gy)) = screen_to_world(
                 mx,
@@ -930,23 +977,32 @@ async fn main() {
             );
         }
 
-        draw_ridge_silhouettes(
-            &ridges,
-            dn_fg,
-            &sky_weather,
-            &settings.atmosphere,
-            cam_x,
-            cam_y,
-            origin_x,
-            origin_y,
-            cell_px,
-            scene.params.bedrock_floor_y,
-            scene.params.sea_level_y,
-            scene.params.wrap_x,
-            scene.params.width_cols,
-            sw,
-            sh,
-        );
+        // Ridges behind terrain. Skip whenever a sat/temp/myc/geotech
+        // heatmap is on — mid/far fills stamp hard horizontal shelves
+        // through even a moderate landscape blend (playtest y≈36 line).
+        let heatmap_on_early = sat_overlay
+            || temp_overlay
+            || mycelium_overlay
+            || geotech_mode != GeotechOverlayMode::Off;
+        if !heatmap_on_early {
+            draw_ridge_silhouettes(
+                &ridges,
+                dn_fg,
+                &sky_weather,
+                &settings.atmosphere,
+                cam_x,
+                cam_y,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.sea_level_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+                sh,
+            );
+        }
 
         if clouds_on {
             draw_depth_cloud_layer(
@@ -1014,6 +1070,19 @@ async fn main() {
             (y.floor() as i32).max(scene.params.bedrock_floor_y)
         };
 
+        // Heatmap blend: 0 = landscape only, 1 = heatmap only (Tab slider).
+        let heatmap_on = sat_overlay
+            || temp_overlay
+            || mycelium_overlay
+            || geotech_mode != GeotechOverlayMode::Off;
+        let blend = settings.heatmap_blend.clamp(0.0, 1.0);
+        let terrain_alpha = if heatmap_on {
+            ((1.0 - blend) * 255.0).round() as u8
+        } else {
+            255
+        };
+        let overlay_k = if heatmap_on { blend } else { 1.0 };
+
         for &x_copy in x_copies {
             let x_shift = x_copy * scene.params.width_cols;
             for x in 0..scene.params.width_cols {
@@ -1070,7 +1139,7 @@ async fn main() {
                         sy - cell_px,
                         cell_px,
                         cell_px,
-                        Color::from_rgba(r, g, b, 255),
+                        Color::from_rgba(r, g, b, terrain_alpha),
                     );
                 }
             }
@@ -1149,7 +1218,7 @@ async fn main() {
         }
 
         // Temperature heatmap overlay (blue cold → red hot).
-        if temp_overlay {
+        if temp_overlay && overlay_k > 0.01 {
             let tile_px = scene.temperature.tile_cols as f32 * cell_px;
             let (t_min, t_max) = scene
                 .temperature
@@ -1172,13 +1241,63 @@ async fn main() {
                     if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
                         continue;
                     }
-                    draw_rectangle(sx, sy, tile_px, tile_px, temp_overlay_color(temp_c, t_min, t_max));
+                    draw_rectangle(
+                        sx,
+                        sy,
+                        tile_px,
+                        tile_px,
+                        scale_color_alpha(temp_overlay_color(temp_c, t_min, t_max), overlay_k),
+                    );
+                }
+            }
+        }
+
+        // Ground saturation heatmap (U): pore fill + free water.
+        if sat_overlay && overlay_k > 0.01 {
+            for &x_copy in x_copies {
+                let x_shift = x_copy * scene.params.width_cols;
+                for x in 0..scene.params.width_cols {
+                    let sx = origin_x + (x + x_shift) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw {
+                        continue;
+                    }
+                    for y in y_min_vis..y_max_vis {
+                        let sy =
+                            origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
+                        if sy + cell_px < 0.0 || sy > sh {
+                            continue;
+                        }
+                        let Some(cell) = scene.world.get_cell(x, y) else {
+                            continue;
+                        };
+                        let wet = if cell.material == wk_material::MaterialId::Air {
+                            if cell.sat.is_empty()
+                                || cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX
+                            {
+                                continue;
+                            }
+                            cell.sat.as_f32()
+                        } else {
+                            let cap = scene.world.water_capacity(cell.material);
+                            if cap == 0 {
+                                continue;
+                            }
+                            pore_wetness_with(cell, &scene.world.hydro)
+                        };
+                        draw_rectangle(
+                            sx,
+                            sy - cell_px,
+                            cell_px,
+                            cell_px,
+                            scale_color_alpha(sat_overlay_color(wet), overlay_k),
+                        );
+                    }
                 }
             }
         }
 
         // Mycelium strain overlay: bright per-network colors by cream intensity.
-        if mycelium_overlay {
+        if mycelium_overlay && overlay_k > 0.01 {
             for &x_copy in x_copies {
                 let x_shift = x_copy * scene.params.width_cols;
                 for x in 0..scene.params.width_cols {
@@ -1218,7 +1337,10 @@ async fn main() {
                             sy - cell_px,
                             cell_px,
                             cell_px,
-                            Color::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
+                            scale_color_alpha(
+                                Color::from_rgba(rgba[0], rgba[1], rgba[2], rgba[3]),
+                                overlay_k,
+                            ),
                         );
                     }
                 }
@@ -1226,7 +1348,7 @@ async fn main() {
         }
 
         // Geotech overlay: G cycles shear → σᵥ → wet → off.
-        if geotech_mode != GeotechOverlayMode::Off {
+        if geotech_mode != GeotechOverlayMode::Off && overlay_k > 0.01 {
             match geotech_mode {
                 GeotechOverlayMode::Shear | GeotechOverlayMode::Wetness => {
                     let s_max = match geotech_mode {
@@ -1260,7 +1382,7 @@ async fn main() {
                                 sy,
                                 cell_px,
                                 cell_px,
-                                geotech_overlay_color(value, s_max),
+                                scale_color_alpha(geotech_overlay_color(value, s_max), overlay_k),
                             );
                         }
                     }
@@ -1290,7 +1412,7 @@ async fn main() {
                                 sy,
                                 cell_px,
                                 cell_px,
-                                geotech_overlay_color(sigma, s_max),
+                                scale_color_alpha(geotech_overlay_color(sigma, s_max), overlay_k),
                             );
                         }
                     }
@@ -1436,6 +1558,7 @@ async fn main() {
         terrain.draw();
         creature_list.draw(&scene.organisms);
         settings.draw(&mut scene.world, &scene.carbon);
+        glossary.draw();
         quit_dialog.draw();
 
         // HUD chrome (info + hotkeys + inspector) toggled with F1.
@@ -1445,7 +1568,7 @@ async fn main() {
             } else {
                 "night"
             };
-            let rain_tag = if !rain_on {
+            let rain_tag = if !settings.climatic_rain_on {
                 "off"
             } else if settings.rain.closed_loop {
                 "on/closed"
@@ -1453,16 +1576,17 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} evap={} phase={} nimbus={} cloud_m={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} drizzle={} evap={} phase={} nimbus={} echo={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
                 scene.temperature.mean(),
                 rain_tag,
-                if evap_on { "on" } else { "off" },
+                if settings.cond_rain_on { "on" } else { "off" },
+                if settings.evap_on { "on" } else { "off" },
                 if settings.phase.enabled { "on" } else { "off" },
                 scene.clouds.len(),
-                scene.clouds.total_mass(),
+                scene.clouds.visual_mass(),
                 scene.humidity.total_mass(),
                 scene.carbon.atmosphere,
                 scene.carbon.dissolved,
@@ -1479,7 +1603,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/H/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|Esc quit",
+                "Tab|Space|R|W/C/E/K/O|I|N/T/U/H/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

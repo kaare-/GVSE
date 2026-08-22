@@ -30,7 +30,7 @@ const MILD_TEMP_C: f32 = 18.0;
 pub enum CloudDepthLayer {
     Far,
     Mid,
-    /// Authoritative coagulated parcels on the playfield.
+    /// Visual humidity echo on the playfield.
     Active,
     Front,
 }
@@ -221,10 +221,10 @@ fn cloud_layer_strength(look: &AtmosphereLookConfig, layer: CloudDepthLayer) -> 
     .clamp(0.0, 1.0)
 }
 
-/// Gather soft lobe sources from active coagulated parcels.
+/// Gather soft lobe sources from the visual humidity echo.
 ///
 /// Far / mid / front are parallax echoes of the same `CloudStore` — humidity
-/// already drove coagulate/rain; we do not paint the humidity tile raster here.
+/// already owns the water; we do not paint the humidity tile raster here.
 fn gather_soft_cloud_srcs(
     clouds: &CloudStore,
     _humidity: &Humidity,
@@ -898,9 +898,12 @@ fn draw_ridge_band(
             let y_vis = bedrock_floor_y
                 + ((surf_soft - bedrock_floor_y) as f32 * y_squash) as i32;
             let top_sy = origin_y - (y_vis - bedrock_floor_y) as f32 * cell_px + lag_y;
-            let bottom_sy = origin_y + lag_y;
-            let h = (bottom_sy - top_sy).max(cell_px);
-            if top_sy > sh || top_sy + h < 0.0 {
+            // Extend solid fill to the bottom of the viewport. Stopping at
+            // `origin_y + lag_y` (parallax-lagged bedrock line) left a hard
+            // transparency shelf — visible through dug holes, a dropped
+            // ocean, or heatmap-only / no-landscape.
+            let bottom_sy = sh;
+            if top_sy > sh {
                 continue;
             }
 
@@ -1569,7 +1572,7 @@ fn stamp_celestial_cast_shadows(
     }
 }
 
-/// Active-layer soft parcel banks + precip (humidity coagulated into CloudStore).
+/// Active-layer soft parcel banks + precip streaks (humidity echo in CloudStore).
 ///
 /// Banks use lobe masks; precip streaks are world-aligned so they clip on ground.
 pub fn draw_clouds(
