@@ -7207,3 +7207,122 @@ fn calm_lake_soaks_porous_bank() {
         "bank mid-height must wet (mid={mid} bank_max={bank})"
     );
 }
+
+#[test]
+fn groundwater_column_penetrates_chunk_below_after_long_quiet_soak() {
+    // Playtest: 160k ticks — pore row at y=127|128 equalised horizontally
+    // while y=126 stayed dry. Start with a saturated seam band and a
+    // quiet pond above so the regression targets vertical wake, not slow
+    // stone uptake from scratch.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    w.ensure_chunk(ChunkCoord::new(0, 2));
+    for x in 4..=7 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=190 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    for y in 0..=195 {
+        w.set_cell(3, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(8, y, Cell::solid(MaterialId::Bedrock));
+    }
+    let cap = water_capacity(MaterialId::Stone);
+    for x in 4..=7 {
+        for y in 126..=128 {
+            w.set_cell(
+                x,
+                y,
+                Cell {
+                    material: MaterialId::Stone,
+                    sat: Sat(cap),
+                    ..Cell::default()
+                },
+            );
+        }
+    }
+    for y in 129..=135 {
+        for x in 4..=7 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    clear_all_dirty(&mut w);
+    let perf = PerfConfig::default();
+    for _ in 0..800 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let s126 = w.get_cell(5, 126).unwrap().sat.0;
+    let s125 = w.get_cell(5, 125).unwrap().sat.0;
+    let s120 = w.get_cell(5, 120).unwrap().sat.0;
+    assert!(
+        s126 >= cap / 2,
+        "chunk below seam must wet vertically, not only along the seam row (s126={s126}/{cap})"
+    );
+    assert!(
+        s125 >= 2,
+        "wetting front must advance into lower chunk (s125={s125}/{cap} s126={s126})"
+    );
+    assert!(
+        s120 > 0 || s125 >= cap / 4,
+        "deep column must keep creeping (s120={s120} s125={s125})"
+    );
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 1)].has_wet_pores,
+        "lower chunk must stay on wet-pore wake list"
+    );
+}
+
+#[test]
+fn saturated_seam_band_does_not_shelf_above_dry_row_below() {
+    // Playtest: fully saturated stone shelves at y=63|64 with y=62 still
+    // dry — water got past eventually but left visible horizontal bands.
+    let mut w = World::new(9);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    let cap = water_capacity(MaterialId::Stone);
+    for x in 4..=5 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=70 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    for y in 0..=72 {
+        w.set_cell(3, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(6, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 4..=5 {
+        for y in 62..=64 {
+            w.set_cell(
+                x,
+                y,
+                Cell {
+                    material: MaterialId::Stone,
+                    sat: Sat(cap),
+                    ..Cell::default()
+                },
+            );
+        }
+    }
+    for y in 65..=68 {
+        for x in 4..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    clear_all_dirty(&mut w);
+    let perf = PerfConfig::default();
+    for _ in 0..200 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let s61 = w.get_cell(4, 61).unwrap().sat.0;
+    let s62 = w.get_cell(4, 62).unwrap().sat.0;
+    let s63 = w.get_cell(4, 63).unwrap().sat.0;
+    assert!(
+        s61 >= 2,
+        "saturated seam band must keep driving the row below (s61={s61} s62={s62} s63={s63})"
+    );
+    assert!(
+        !(s63 >= cap && s62 >= cap && s61 == 0),
+        "must not leave a full shelf over dry stone (s61={s61} s62={s62} s63={s63})"
+    );
+}

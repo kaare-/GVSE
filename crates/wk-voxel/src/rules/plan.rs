@@ -36,15 +36,15 @@ pub(crate) fn regions_all_loaded(world: &World) -> Vec<ActiveChunk> {
         .collect()
 }
 
-/// Loaded chunks with sticky [`crate::chunk::Chunk::has_wet_air`].
+/// Loaded chunks with sticky wet occupancy (surface Air and/or pore fill).
 ///
-/// Confined-head wake only needs wet Air columns — skipping dry stone /
-/// empty sky cuts the full-grid insurance scan a lot on demos.
+/// Skipping dry stone / empty sky cuts the insurance scan on demos while
+/// still visiting quiet groundwater columns after lakes settle.
 pub(crate) fn regions_wet_loaded(world: &World) -> Vec<ActiveChunk> {
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_wet_air)
+        .filter(|(_, c)| c.has_wet_air || c.has_wet_pores)
         .map(|(&coord, _)| coord)
         .collect();
     // Bootstrap: old saves / stamps that never raised the flag.
