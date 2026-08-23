@@ -47,6 +47,8 @@ pub const CRUSH_SPEC_MAX: usize = 6;
 pub const THIN_FRACTURE_SPAN: i32 = 7;
 /// Long-thin fracture: max thickness (bbox short side) to count as a stick/slab.
 pub const THIN_FRACTURE_THICK: i32 = 2;
+/// Bedrock-rooted pillar columns this tall stay static (cantilever legs).
+pub const PILLAR_COLUMN_MIN_HEIGHT: i32 = 4;
 
 /// Live-tunable competent-body knobs (Tab → Geotech).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -352,6 +354,136 @@ fn externally_supported(world: &World, set: &HashSet<(i32, i32)>, x: i32, y: i32
   }
 }
 
+/// Thin bedrock-rooted columns (cantilever legs) that must not peel with a roof span.
+fn pillar_column_xs(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<i32> {
+  let mut ymin_by_x: HashMap<i32, i32> = HashMap::new();
+  for &(x, y) in set {
+    ymin_by_x
+      .entry(x)
+      .and_modify(|ymin| *ymin = (*ymin).min(y))
+      .or_insert(y);
+  }
+  let mut xs = HashSet::new();
+  for (&x, &ymin) in &ymin_by_x {
+    if !externally_supported(world, set, x, ymin) {
+      continue;
+    }
+    let ymax = set
+      .iter()
+      .filter(|(sx, _)| *sx == x)
+      .map(|(_, y)| *y)
+      .max()
+      .unwrap_or(ymin);
+    if ymax - ymin + 1 < PILLAR_COLUMN_MIN_HEIGHT {
+      continue;
+    }
+    if !(ymin..=ymax).all(|y| set.contains(&(x, y))) {
+      continue;
+    }
+    let mut min_x = x;
+    let mut max_x = x;
+    while set.contains(&(min_x - 1, ymin)) {
+      min_x -= 1;
+    }
+    while set.contains(&(max_x + 1, ymin)) {
+      max_x += 1;
+    }
+    if max_x - min_x + 1 <= 2 {
+      xs.insert(x);
+    }
+  }
+  xs
+}
+
+fn cluster_needs_hang_peel(
+  world: &World,
+  set: &HashSet<(i32, i32)>,
+  welded_cells: usize,
+) -> bool {
+  if !cluster_has_passable_below(world, set) {
+    return cell_set_floating(world, set);
+  }
+  if set.len() > MAX_DYNAMIC_BODY_CELLS {
+    return true;
+  }
+  // Slope toes and ball chains already split; hang-peel when morphological open
+  // leaves most of the cluster static (cavern roof / hill arch shells).
+  welded_cells * 2 < set.len()
+}
+
+fn hang_horizontal_closure(
+  set: &HashSet<(i32, i32)>,
+  seeds: &HashSet<(i32, i32)>,
+  pillar_xs: &HashSet<i32>,
+  void_columns: Option<&HashMap<i32, i32>>,
+) -> HashSet<(i32, i32)> {
+  let mut hang = seeds.clone();
+  let mut q: VecDeque<_> = seeds.iter().copied().collect();
+  while let Some((x, y)) = q.pop_front() {
+    for (dx, dy) in [(1, 0), (-1, 0), (0, 1)] {
+      let nx = x + dx;
+      let ny = y + dy;
+      if pillar_xs.contains(&nx) {
+        continue;
+      }
+      if let Some(floors) = void_columns {
+        if !floors.contains_key(&nx) {
+          continue;
+        }
+        if let Some(&floor) = floors.get(&nx) {
+          if ny < floor {
+            continue;
+          }
+        }
+      }
+      if set.contains(&(nx, ny)) && hang.insert((nx, ny)) {
+        q.push_back((nx, ny));
+      }
+    }
+  }
+  hang
+}
+
+/// Cells at or above the lowest void-supported floor in each column (cavern roof slab).
+fn void_ceiling_hang_mass(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
+  let pillar_xs = pillar_column_xs(world, set);
+  let mut floor_by_x: HashMap<i32, i32> = HashMap::new();
+  for &(x, y) in set {
+    if pillar_xs.contains(&x) {
+      continue;
+    }
+    if set.contains(&(x, y - 1)) {
+      continue;
+    }
+    let void_below = match world.get_cell(x, y - 1) {
+      None => true,
+      Some(c) => body_passable_at(world, x, y - 1, &c),
+    };
+    if !void_below {
+      continue;
+    }
+    floor_by_x
+      .entry(x)
+      .and_modify(|floor| *floor = (*floor).min(y))
+      .or_insert(y);
+  }
+  if floor_by_x.is_empty() {
+    return HashSet::new();
+  }
+  let mut seeds = HashSet::new();
+  for &(x, y) in set {
+    if pillar_xs.contains(&x) {
+      continue;
+    }
+    if let Some(&floor) = floor_by_x.get(&x) {
+      if y >= floor {
+        seeds.insert((x, y));
+      }
+    }
+  }
+  hang_horizontal_closure(set, &seeds, &pillar_xs, Some(&floor_by_x))
+}
+
 /// Flood the whole competent mass above a carved void (not just the bottom row).
 fn void_anchored_hang_mass(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
   let mut hang = HashSet::new();
@@ -516,18 +648,33 @@ fn extract_hanging_pieces(
   if !cluster_has_passable_below(world, &set) {
     return Vec::new();
   }
+  let pillar_xs = pillar_column_xs(world, &set);
   let hanging: HashSet<(i32, i32)> = if cell_set_floating(world, &set) {
-    set.clone()
+    set.iter()
+      .filter(|(x, _)| !pillar_xs.contains(x))
+      .copied()
+      .collect()
   } else {
-    let void_mass = void_anchored_hang_mass(world, &set);
-    if !void_mass.is_empty() {
-      void_mass
+    let ceiling = void_ceiling_hang_mass(world, &set);
+    if !ceiling.is_empty() {
+      ceiling
     } else {
-      let supported = vertically_supported_cells(world, &set);
-      if supported.is_empty() {
-        set.clone()
+      let void_mass = void_anchored_hang_mass(world, &set);
+      if !void_mass.is_empty() {
+        void_mass
       } else {
-        set.difference(&supported).copied().collect()
+        let supported = vertically_supported_cells(world, &set);
+        if supported.is_empty() {
+          set.iter()
+            .filter(|(x, _)| !pillar_xs.contains(x))
+            .copied()
+            .collect()
+        } else {
+          set.difference(&supported)
+            .filter(|(x, _)| !pillar_xs.contains(x))
+            .copied()
+            .collect()
+        }
       }
     }
   };
@@ -564,6 +711,9 @@ fn push_component_pieces(
       continue;
     }
     let set: HashSet<_> = piece.iter().map(|(x, y, _)| (*x, *y)).collect();
+    if !hanging && is_bedrock_rooted_pillar(world, &set) {
+      continue;
+    }
     let exposed = if hanging {
       piece
         .iter()
@@ -602,6 +752,23 @@ fn push_component_pieces(
   }
 }
 
+fn is_bedrock_rooted_pillar(world: &World, set: &HashSet<(i32, i32)>) -> bool {
+  let pillars = pillar_column_xs(world, set);
+  if pillars.is_empty() {
+    return false;
+  }
+  set.len() >= PILLAR_COLUMN_MIN_HEIGHT as usize
+    && set.iter().all(|(x, _)| pillars.contains(x))
+}
+
+#[inline]
+fn void_below_seed(world: &World, gx: i32, gy: i32) -> bool {
+  match world.get_cell(gx, gy - 1) {
+    None => true,
+    Some(c) => body_passable_at(world, gx, gy - 1, &c),
+  }
+}
+
 /// Extract boulder-sized dynamic bodies only (CCRB). Strata larger than
 /// [`MAX_DYNAMIC_BODY_CELLS`] stay static. Touching boulders are separated by
 /// morphological opening so simulation contact never welds a ball chain into
@@ -610,26 +777,34 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
   let mut visited: HashSet<(i32, i32)> = HashSet::new();
   let mut out: Vec<Component> = Vec::new();
   let mut hanging_count = 0usize;
-  for ac in active {
-    let Some(chunk) = world.chunks.get(&ac.coord) else {
-      continue;
-    };
-    let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
-    let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
-    for y in ac.rect.y0..=ac.rect.y1 {
-      for x in ac.rect.x0..=ac.rect.x1 {
-        let cell = chunk.get(x as usize, y as usize);
-        if !is_competent_rock(cell.material) {
-          continue;
-        }
-        let gx = world.wrap_x(base_gx + x as i32);
-        let gy = base_gy + y as i32;
-        if visited.contains(&(gx, gy)) {
-          continue;
-        }
-        if !has_free_neighbor(world, gx, gy) {
-          continue;
-        }
+  for void_pass in [true, false] {
+    for ac in active {
+      let Some(chunk) = world.chunks.get(&ac.coord) else {
+        continue;
+      };
+      let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
+      let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
+      for y in ac.rect.y0..=ac.rect.y1 {
+        for x in ac.rect.x0..=ac.rect.x1 {
+          let cell = chunk.get(x as usize, y as usize);
+          if !is_competent_rock(cell.material) {
+            continue;
+          }
+          let gx = world.wrap_x(base_gx + x as i32);
+          let gy = base_gy + y as i32;
+          if visited.contains(&(gx, gy)) {
+            continue;
+          }
+          if !has_free_neighbor(world, gx, gy) {
+            continue;
+          }
+          let below_void = void_below_seed(world, gx, gy);
+          if void_pass && !below_void {
+            continue;
+          }
+          if !void_pass && below_void {
+            continue;
+          }
         let material = cell.material;
         let seed_mobile = is_mobile_rock(&cell);
         let mut queue = VecDeque::new();
@@ -695,20 +870,23 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
           continue;
         }
         let set = cells_to_set(&cells);
-        let oversize_floating =
-          set.len() > MAX_DYNAMIC_BODY_CELLS && cluster_has_passable_below(world, &set);
-        let mut pieces = split_welded_contacts(cells);
+        let mut pieces = split_welded_contacts(cells.clone());
+        let welded_cells: usize = pieces.iter().map(|p| p.len()).sum();
         let mut hanging = false;
-        if oversize_floating {
-          let hang = extract_hanging_pieces(world, &set.iter().filter_map(|p| {
-            world.get_cell(p.0, p.1).map(|c| (p.0, p.1, c))
-          }).collect::<Vec<_>>());
-          if !hang.is_empty() {
+        if cluster_needs_hang_peel(world, &set, welded_cells) {
+          let hang = extract_hanging_pieces(world, &cells);
+          let hang_cells: usize = hang.iter().map(|p| p.len()).sum();
+          if !hang.is_empty()
+            && (hang_cells > welded_cells
+              || hang.len() > pieces.len()
+              || welded_cells * 2 < set.len())
+          {
             pieces = hang;
             hanging = true;
           }
         }
         push_component_pieces(world, &mut out, pieces, hanging, &mut hanging_count);
+        }
       }
     }
   }
@@ -2205,6 +2383,8 @@ pub fn apply_competent_fall_regions(
   cfg: &CompetentFallConfig,
   fps_path: bool,
 ) -> CompetentFallStats {
+  #[cfg(test)]
+  crate::parallel::set_parallel_enabled(false);
   if !cfg.enable {
     return CompetentFallStats::default();
   }
@@ -3128,6 +3308,45 @@ mod tests {
     assert!(
       !center_still,
       "peeled cavern roof must fall away from mid-air perch"
+    );
+  }
+
+  #[test]
+  fn carved_arch_slab_crashes() {
+    let mut w = World::new(40);
+    for cx in 0..3 {
+      w.ensure_chunk(ChunkCoord::new(cx, 0));
+    }
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 1..=30 {
+      w.set_cell(10, y, Cell::solid(MaterialId::Stone));
+      w.set_cell(30, y, Cell::solid(MaterialId::Stone));
+    }
+    for x in 10..31 {
+      for y in 20..23 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+      w.set_cell(x, 23, Cell::solid(MaterialId::Sand));
+    }
+    for x in 11..30 {
+      for y in 5..20 {
+        w.set_cell(x, y, Cell::air());
+      }
+    }
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 48,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..16 {
+      wake_floating_competent(&mut w);
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    assert!(
+      w.get_cell(20, 22).map(|c| c.material) != Some(MaterialId::Stone),
+      "isolated carved arch must fall"
     );
   }
 

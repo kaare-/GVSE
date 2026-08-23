@@ -170,6 +170,7 @@ pub use rules::{
     apply_competent_fall_regions, wake_competent_bodies, wake_competent_bodies_all,
     wake_floating_competent,
     CompetentFallConfig, CompetentFallStats, COMPETENT_FALL_PASSES, COMPETENT_FALL_PASSES_FPS,
+    COMPETENT_TOPOLOGY_PASSES,
     CondensationConfig, EvapConfig, GrainConfig,
     KarstConfig,
     OrographicConfig, PerfConfig, PhysicsTimings, RainConfig, FLOW_QUIET_AREA, FLOW_SUBSTEPS,

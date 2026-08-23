@@ -66,7 +66,8 @@ use wk_voxel::{
     pore_wetness_with, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg,
     set_parallel_enabled, step_carbon_budget, temperature_step_due, tick_with_life,
     wake_competent_bodies_all, wake_unsupported_grains,
-    wake_unstable_slopes, GeotechOverlayMode, SimSnapshot, WorldgenParams,
+    wake_unstable_slopes, COMPETENT_TOPOLOGY_PASSES, GeotechOverlayMode,
+    SimSnapshot, WorldgenParams,
 };
 
 use crate::atmosphere::{
@@ -323,22 +324,24 @@ async fn main() {
                 paused = true;
             } else {
                 paused = terrain.was_paused;
-                wake_unsupported_grains(&mut scene.world);
-                wake_competent_bodies_all(&mut scene.world);
-                wake_unstable_slopes(&mut scene.world);
-                let active = plan_active(&scene.world);
-                let _ = apply_competent_fall_regions(
-                    &mut scene.world,
-                    &active,
-                    &settings.competent_fall,
-                    false,
-                );
-                if organisms_on && !scene.world.competent_cell_moves.is_empty() {
-                    scene.organisms.shift_atoms_with_moved_cells(
-                        &scene.world,
-                        &scene.world.competent_cell_moves,
+                for _ in 0..COMPETENT_TOPOLOGY_PASSES as usize {
+                    wake_competent_bodies_all(&mut scene.world);
+                    wake_unsupported_grains(&mut scene.world);
+                    wake_unstable_slopes(&mut scene.world);
+                    let active = plan_active(&scene.world);
+                    let _ = apply_competent_fall_regions(
+                        &mut scene.world,
+                        &active,
+                        &settings.competent_fall,
+                        false,
                     );
-                    scene.world.competent_cell_moves.clear();
+                    if organisms_on && !scene.world.competent_cell_moves.is_empty() {
+                        scene.organisms.shift_atoms_with_moved_cells(
+                            &scene.world,
+                            &scene.world.competent_cell_moves,
+                        );
+                        scene.world.competent_cell_moves.clear();
+                    }
                 }
             }
         }

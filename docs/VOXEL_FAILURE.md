@@ -192,9 +192,10 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 - **Mobile mark** — fallen / tipped / slid rock sets `CellFlags::MOBILE_ROCK`.
   Flood-fill only merges same mobility class, so a boulder cannot glue into
   unmarked painted strata or gain mass by contact.
-- **Hanging peel** — oversize / strata floods peel the whole void-anchored mass
-  above a carved cavern (not row-by-row), split into a few large chunks that
-  crash down together in one tick.
+- **Hanging peel** — void-ceiling slabs above carved caverns peel as whole
+  chunks (not row-by-row), excluding bedrock-rooted pillar columns; void-below
+  seeds are processed before other competent floods so hill-sized strata cannot
+  starve arch floaters.
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
