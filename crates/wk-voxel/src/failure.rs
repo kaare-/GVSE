@@ -1062,6 +1062,7 @@ mod tests {
         w.set_cell(x1 + 1, 1, Cell::solid(MaterialId::Limestone));
         let cfg = FailureConfig {
             max_roof_events: 64,
+            enable_competent_fall: false,
             ..FailureConfig::default()
         };
         apply_roof_collapse(&mut w, &cfg);
@@ -1101,6 +1102,7 @@ mod tests {
         w.set_cell(x1 + 1, 1, Cell::solid(MaterialId::Limestone));
         let cfg = FailureConfig {
             max_roof_events: 64,
+            enable_competent_fall: false,
             ..FailureConfig::default()
         };
         apply_roof_collapse(&mut w, &cfg);

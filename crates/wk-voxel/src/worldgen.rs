@@ -705,6 +705,7 @@ mod tests {
             enable_roof_collapse: false,
             enable_shear_weaken: false,
             enable_compaction: false,
+            enable_competent_fall: false,
             ..FailureConfig::default()
         };
         let perf = PerfConfig {
