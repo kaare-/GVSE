@@ -188,7 +188,7 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 - **Crush specs** — large movers pulverize tiny competent clusters
   (`≤ CRUSH_SPEC_MAX`) instead of welding or getting stuck on them.
 - **Thin fracture** — long thin sticks/slabs snap at 1-cell necks into debris.
-- **Cargo** — soft/loose cells with ≥2 neighbours on the body ride with tip/slide.
+- **Cargo** — soft/loose caps and embedded cells ride with fall, tip, and slide.
 - **Mobile mark** — fallen / tipped / slid rock sets `CellFlags::MOBILE_ROCK`.
   Flood-fill only merges same mobility class, so a boulder cannot glue into
   unmarked painted strata or gain mass by contact.

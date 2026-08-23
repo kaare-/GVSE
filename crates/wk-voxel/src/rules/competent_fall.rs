@@ -944,14 +944,19 @@ fn bottom_face(comp: &Component) -> Vec<(i32, i32, Cell)> {
 }
 
 fn can_translate(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
+  let cargo = gather_cargo(world, comp);
+  let mut moving: HashSet<(i32, i32)> = comp.set.clone();
+  for (x, y, _) in &cargo {
+    moving.insert((*x, *y));
+  }
   let n = comp.cells.len();
-  for (gx, gy, _) in &comp.cells {
+  for (gx, gy, _) in comp.cells.iter().chain(cargo.iter()) {
     let tx = world.wrap_x(gx + dx);
     let ty = gy + dy;
     if ty < 0 {
       return false;
     }
-    if comp.set.contains(&(tx, ty)) {
+    if moving.contains(&(tx, ty)) {
       continue;
     }
     let Some(dst) = world.get_cell(tx, ty) else {
@@ -993,11 +998,17 @@ fn translate_component(world: &mut World, comp: &Component, dx: i32, dy: i32) ->
   if !can_translate(world, comp, dx, dy) {
     return false;
   }
-  let moves: Vec<(i32, i32, Cell)> = comp
+  let cargo = gather_cargo(world, comp);
+  let mut moves: Vec<(i32, i32, Cell)> = comp
     .cells
     .iter()
     .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, with_mobile_rock(*c)))
     .collect();
+  let mut sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
+  for (x, y, c) in &cargo {
+    moves.push((world.wrap_x(x + dx), y + dy, *c));
+    sources.push((*x, *y));
+  }
   let n = comp.cells.len();
   for (tx, ty, _) in &moves {
     if comp.set.contains(&(*tx, *ty)) {
@@ -1009,13 +1020,7 @@ fn translate_component(world: &mut World, comp: &Component, dx: i32, dy: i32) ->
       }
     }
   }
-  for (x, y, _) in &comp.cells {
-    world.set_cell(*x, *y, Cell::air());
-  }
-  for (tx, ty, cell) in moves {
-    world.set_cell(tx, ty, cell);
-    world.touch_dirty(tx, ty);
-  }
+  write_roll_cells(world, &sources, moves);
   true
 }
 
@@ -1332,6 +1337,13 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
       }
     }
   }
+  for (i, &(sx, sy)) in sources.iter().enumerate() {
+    if let Some((tx, ty, _)) = moves.get(i) {
+      if (sx, sy) != (*tx, *ty) {
+        world.competent_cell_moves.push((sx, sy, *tx, *ty));
+      }
+    }
+  }
   for (x, y) in sources {
     world.set_cell(*x, *y, Cell::air());
   }
@@ -1341,15 +1353,16 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
   }
 }
 
-/// Loose / soft cells nested against the rock (≥2 body neighbours) ride with it.
+/// Loose / soft cells on top or nested against the rock ride with it.
 fn gather_cargo(world: &World, comp: &Component) -> Vec<(i32, i32, Cell)> {
+  const MAX_CARGO: usize = 512;
   let mut cargo = Vec::new();
   let mut seen = HashSet::new();
   for &(gx, gy, _) in &comp.cells {
     for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
       let nx = world.wrap_x(gx + dx);
       let ny = gy + dy;
-      if comp.set.contains(&(nx, ny)) || !seen.insert((nx, ny)) {
+      if comp.set.contains(&(nx, ny)) || seen.contains(&(nx, ny)) {
         continue;
       }
       let Some(c) = world.get_cell(nx, ny) else {
@@ -1365,7 +1378,47 @@ fn gather_cargo(world: &World, comp: &Component) -> Vec<(i32, i32, Cell)> {
         }
       }
       if body_n >= 2 {
+        seen.insert((nx, ny));
         cargo.push((nx, ny, c));
+      }
+    }
+  }
+  // Surface stack: flood up and sideways through soft / organic caps.
+  let mut q = VecDeque::new();
+  for &(gx, gy, _) in &comp.cells {
+    let nx = world.wrap_x(gx);
+    let ny = gy + 1;
+    if comp.set.contains(&(nx, ny)) || seen.contains(&(nx, ny)) {
+      continue;
+    }
+    if let Some(c) = world.get_cell(nx, ny) {
+      if is_roll_displaceable(c.material) && seen.insert((nx, ny)) {
+        q.push_back((nx, ny));
+      }
+    }
+  }
+  while let Some((cx, cy)) = q.pop_front() {
+    if cargo.len() >= MAX_CARGO {
+      break;
+    }
+    let Some(c) = world.get_cell(cx, cy) else {
+      continue;
+    };
+    cargo.push((cx, cy, c));
+    for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+      let nx = world.wrap_x(cx + dx);
+      let ny = cy + dy;
+      if comp.set.contains(&(nx, ny)) || !seen.insert((nx, ny)) {
+        continue;
+      }
+      if let Some(nc) = world.get_cell(nx, ny) {
+        if is_roll_displaceable(nc.material) {
+          q.push_back((nx, ny));
+        } else {
+          seen.remove(&(nx, ny));
+        }
+      } else {
+        seen.remove(&(nx, ny));
       }
     }
   }
@@ -2079,6 +2132,7 @@ pub fn apply_competent_fall_regions(
   if regions.is_empty() {
     return CompetentFallStats::default();
   }
+  world.competent_cell_moves.clear();
   let mut stats = CompetentFallStats::default();
   let mut fall_streak: HashMap<(i32, i32), u32> = HashMap::new();
   // Free-fall jumps once (binary-searched distance), then impact/roll rebuilds —
@@ -2938,6 +2992,57 @@ mod tests {
       "peeled island must fall and seat on sand (min_y={min_y}, max_y={max_y}, n={})",
       stone_ys.len()
     );
+  }
+
+  #[test]
+  fn sand_cap_rides_falling_rock() {
+    let mut w = World::new(9);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..12 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    stamp_blob(&mut w, 4, 30, 3, 3);
+    for x in 4..7 {
+      for y in 33..36 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 32,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..8 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let stone_top = (4..7)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .map(|(_, y)| y)
+      .max()
+      .unwrap_or(0);
+    let sand_min = (4..7)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+      .map(|(_, y)| y)
+      .min()
+      .unwrap_or(99);
+    assert!(
+      stone_top < 20,
+      "rock must fall (stone_top={stone_top})"
+    );
+    assert!(
+      sand_min <= stone_top + 4,
+      "sand cap must stay on the rock column (sand_min={sand_min}, stone_top={stone_top})"
+    );
+    for x in 4..7 {
+      let sand_here = w.get_cell(x, sand_min).map(|c| c.material) == Some(MaterialId::Sand);
+      let stone_below = w.get_cell(x, sand_min - 1).map(|c| c.material) == Some(MaterialId::Stone);
+      assert!(
+        sand_here && stone_below,
+        "sand at ({x},{sand_min}) must sit directly on stone"
+      );
+    }
   }
 
   #[test]

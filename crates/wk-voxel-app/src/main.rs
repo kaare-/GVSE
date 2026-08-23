@@ -590,6 +590,13 @@ async fn main() {
                 Some(&settings.fungi),
                 Some(&settings.competent_fall),
             );
+            if organisms_on && !scene.world.competent_cell_moves.is_empty() {
+                scene.organisms.shift_atoms_with_moved_cells(
+                    &scene.world,
+                    &scene.world.competent_cell_moves,
+                );
+                scene.world.competent_cell_moves.clear();
+            }
             set_parallel_enabled(true);
             // Crude CO₂ buckets: surface Organic oxidation + atm↔lake exchange.
             step_carbon_budget(&mut scene.carbon, &mut scene.world, &settings.carbon);
