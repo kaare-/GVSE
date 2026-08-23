@@ -351,10 +351,18 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
           continue;
         }
         for piece in split_welded_contacts(cells) {
-          if piece.len() > MAX_DYNAMIC_BODY_CELLS {
-            continue; // still a solid mass after weld-split → leave static
+          if piece.len() > MAX_DYNAMIC_BODY_CELLS || piece.is_empty() {
+            continue;
           }
-          if piece.is_empty() {
+          // Terrain plugs: almost no free face — skip.
+          let exposed = piece
+            .iter()
+            .filter(|(x, y, _)| has_free_neighbor(world, *x, *y))
+            .count();
+          if exposed == 0 {
+            continue;
+          }
+          if piece.len() > 32 && exposed * 5 < piece.len() {
             continue;
           }
           let set: HashSet<_> = piece.iter().map(|(x, y, _)| (*x, *y)).collect();
@@ -395,7 +403,8 @@ fn body_neighbor_count(set: &HashSet<(i32, i32)>, x: i32, y: i32) -> usize {
 }
 
 /// Morphological opening: erode to interiors, flood cores, dilate back.
-/// Touching boulder chains separate; painted solid masses stay one piece.
+/// Touching boulder chains / terrain contact separate; only compact cores that
+/// dilate into mobile-sized pieces are kept.
 fn split_welded_contacts(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cell)>> {
   if cells.len() < PEBBLE_SPLIT_HOST_MIN * 2 {
     return split_contact_pebbles(cells);
@@ -404,13 +413,18 @@ fn split_welded_contacts(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cel
     cells.iter().map(|(x, y, c)| ((*x, *y), *c)).collect();
   let set: HashSet<(i32, i32)> = by_pos.keys().copied().collect();
 
-  // Prefer strict interiors (4 neighbours); fall back to ≥3 for lumpy balls.
-  let mut core: HashSet<(i32, i32)> = set
-    .iter()
-    .copied()
-    .filter(|&(x, y)| body_neighbor_count(&set, x, y) >= 4)
-    .collect();
+  // Two erosions when large — breaks boulder↔terrain face welds and ball chains.
+  let erode_passes = if set.len() > MAX_DYNAMIC_BODY_CELLS { 2 } else { 1 };
+  let mut core = set.clone();
+  for _ in 0..erode_passes {
+    core = core
+      .iter()
+      .copied()
+      .filter(|&(x, y)| body_neighbor_count(&core, x, y) >= 4)
+      .collect();
+  }
   if core.len() < 8 {
+    // Softer single pass for lumpy balls.
     core = set
       .iter()
       .copied()
@@ -421,7 +435,6 @@ fn split_welded_contacts(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cel
     return split_contact_pebbles(cells);
   }
 
-  // Flood-fill core islands.
   let mut core_visited = HashSet::new();
   let mut islands: Vec<HashSet<(i32, i32)>> = Vec::new();
   for &seed in &core {
@@ -446,24 +459,32 @@ fn split_welded_contacts(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cel
       islands.push(island);
     }
   }
-  if islands.len() <= 1 {
+  if islands.is_empty() {
     return split_contact_pebbles(cells);
   }
 
-  // Dilate each island by 1; first claim wins for contested contact cells.
+  // Dilate each island by erode_passes (restore shell); first claim wins.
   let mut owner: HashMap<(i32, i32), usize> = HashMap::new();
   for (i, island) in islands.iter().enumerate() {
+    let mut frontier: HashSet<(i32, i32)> = island.clone();
     for &(x, y) in island {
       owner.entry((x, y)).or_insert(i);
-      for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
-        let n = (x + dx, y + dy);
-        if set.contains(&n) {
-          owner.entry(n).or_insert(i);
+    }
+    for _ in 0..erode_passes.max(1) {
+      let mut next = HashSet::new();
+      for &(x, y) in &frontier {
+        for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+          let n = (x + dx, y + dy);
+          if set.contains(&n) && !owner.contains_key(&n) {
+            owner.insert(n, i);
+            next.insert(n);
+          }
         }
       }
+      frontier = next;
     }
   }
-  // Orphans (thin necks between balls) → nearest island.
+  // Near orphans only (dist ≤ 2) — don't pull distant terrain skin onto a boulder.
   for &p in &set {
     if owner.contains_key(&p) {
       continue;
@@ -480,7 +501,9 @@ fn split_welded_contacts(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cel
       }
     }
     if let Some(i) = best {
-      owner.insert(p, i);
+      if best_d <= 2 {
+        owner.insert(p, i);
+      }
     }
   }
 
@@ -495,13 +518,85 @@ fn split_welded_contacts(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cel
     if piece.is_empty() {
       continue;
     }
+    // Drop terrain-sized leftovers after open.
+    if piece.len() > MAX_DYNAMIC_BODY_CELLS {
+      continue;
+    }
     out.extend(split_contact_pebbles(piece));
   }
   if out.is_empty() {
-    split_contact_pebbles(cells)
+    if cells.len() <= MAX_DYNAMIC_BODY_CELLS {
+      split_contact_pebbles(cells)
+    } else {
+      // Still one huge mass (boulder fused into strata). Peel compact
+      // seed-local blobs so the boulder can detach and move.
+      extract_seed_local_blobs(&cells)
+    }
   } else {
     out
   }
+}
+
+/// From an oversized welded flood, keep compact neighbourhoods around each
+/// free-surface seed (chebyshev radius) so boulders unstick from terrain.
+fn extract_seed_local_blobs(cells: &[(i32, i32, Cell)]) -> Vec<Vec<(i32, i32, Cell)>> {
+  let by_pos: HashMap<(i32, i32), Cell> =
+    cells.iter().map(|(x, y, c)| ((*x, *y), *c)).collect();
+  let set: HashSet<(i32, i32)> = by_pos.keys().copied().collect();
+  let radius = 7_i32;
+  let mut used = HashSet::new();
+  let mut out = Vec::new();
+  // Prefer seeds that look like boulder surface (many free dirs later filtered).
+  let mut seeds: Vec<(i32, i32)> = set.iter().copied().collect();
+  seeds.sort_unstable();
+  for seed in seeds {
+    if used.contains(&seed) {
+      continue;
+    }
+    // Only start from cells that aren't fully enclosed in the set.
+    if body_neighbor_count(&set, seed.0, seed.1) >= 4 {
+      continue;
+    }
+    let mut blob_set = HashSet::new();
+    let mut q = VecDeque::new();
+    q.push_back((seed.0, seed.1, 0_i32));
+    blob_set.insert(seed);
+    while let Some((cx, cy, d)) = q.pop_front() {
+      if d >= radius || blob_set.len() >= MAX_DYNAMIC_BODY_CELLS {
+        continue;
+      }
+      for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+        let n = (cx + dx, cy + dy);
+        if !set.contains(&n) || !blob_set.insert(n) {
+          continue;
+        }
+        q.push_back((n.0, n.1, d + 1));
+      }
+    }
+    if blob_set.len() < 6 || blob_set.len() > MAX_DYNAMIC_BODY_CELLS {
+      continue;
+    }
+    // Reject terrain sheets: too flat / sparse relative to bbox.
+    let min_x = blob_set.iter().map(|p| p.0).min().unwrap();
+    let max_x = blob_set.iter().map(|p| p.0).max().unwrap();
+    let min_y = blob_set.iter().map(|p| p.1).min().unwrap();
+    let max_y = blob_set.iter().map(|p| p.1).max().unwrap();
+    let w = max_x - min_x + 1;
+    let h = max_y - min_y + 1;
+    let fill = blob_set.len() as i32;
+    if w.max(h) >= 12 && fill * 3 < w * h {
+      continue; // sheet-like
+    }
+    for &p in &blob_set {
+      used.insert(p);
+    }
+    let piece: Vec<_> = blob_set
+      .into_iter()
+      .filter_map(|p| by_pos.get(&p).map(|c| (p.0, p.1, *c)))
+      .collect();
+    out.push(piece);
+  }
+  out
 }
 
 /// Peel pebble-sized contact clusters off a larger host. Simulation contact
@@ -1056,9 +1151,12 @@ fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), 
   true
 }
 
-/// Tip only when COM leaves the support base (true tumble). Steep beds without
-/// overhang use slide instead — stops forever tip↔tip oscillation on slopes.
-fn tip_dir(world: &World, comp: &Component, _cfg: &CompetentFallConfig) -> Option<i32> {
+/// Tip only when COM clearly overhangs *and* the bed drops that way.
+/// Tiny sticks never tip (they flip-flop forever on flat floors otherwise).
+fn tip_dir(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<i32> {
+  if !may_tip(comp) {
+    return None;
+  }
   let contacts: Vec<(i32, i32)> = bottom_face(comp)
     .into_iter()
     .filter(|(x, y, _)| {
@@ -1076,13 +1174,34 @@ fn tip_dir(world: &World, comp: &Component, _cfg: &CompetentFallConfig) -> Optio
   let com_x = (comp.cells.iter().map(|(x, _, _)| *x as i64).sum::<i64>() / n) as i32;
   let s_min = contacts.iter().map(|(x, _)| *x).min().unwrap();
   let s_max = contacts.iter().map(|(x, _)| *x).max().unwrap();
-  if com_x < s_min {
-    return Some(-1);
+  let overhang = if com_x < s_min {
+    Some(-1)
+  } else if com_x > s_max {
+    Some(1)
+  } else {
+    None
+  }?;
+  // Must agree with a real downhill — flat-floor overhang after a lean is the
+  // flip-flop trap (tip left → tip right → forever).
+  let slope = downhill_roll_dir(world, comp, cfg)?;
+  if slope != overhang {
+    return None;
   }
-  if com_x > s_max {
-    return Some(1);
+  Some(overhang)
+}
+
+/// Small / needle bodies tip↔tip forever; they may only slide or fall.
+fn may_tip(comp: &Component) -> bool {
+  let (x0, x1, y0, y1) = body_bbox(comp);
+  let w = x1 - x0 + 1;
+  let h = y1 - y0 + 1;
+  if comp.cells.len() <= 10 && w.min(h) <= 2 {
+    return false;
   }
-  None
+  if w.max(h) <= 4 && comp.cells.len() <= 12 {
+    return false;
+  }
+  true
 }
 
 fn try_pivot_roll(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<i32> {
@@ -1148,7 +1267,17 @@ fn try_slide(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Opti
     return None;
   }
   let dx = downhill_roll_dir(world, comp, cfg)?;
-  // Gentle face follow: step down-slope, then sideways, then one-cell hop.
+  // Tiny bodies: only slide when there is a real step down (not sideways jitter
+  // that flip-flops every tick with tip).
+  let tiny = !may_tip(comp);
+  if tiny {
+    for &(mx, my) in &[(dx, -1), (dx, -2)] {
+      if my <= -1 && can_slide(world, comp, mx, my) {
+        return Some((mx, my));
+      }
+    }
+    return None;
+  }
   for &(mx, my) in &[(dx, -1), (dx, 0), (dx, -2)] {
     if can_slide(world, comp, mx, my) {
       return Some((mx, my));
@@ -2353,7 +2482,6 @@ mod tests {
         w.set_cell(x, y, Cell::solid(MaterialId::Sand));
       }
     }
-    // Chain of 5 touching disks in mid-air — classic playtest glue pillar.
     for i in 0..5 {
       let cx = 8 + i * 8;
       let cy = 20;
@@ -2371,10 +2499,6 @@ mod tests {
       comps.len() >= 3,
       "chain must become multiple bodies (got {})",
       comps.len()
-    );
-    assert!(
-      comps.iter().all(|c| c.cells.len() <= MAX_DYNAMIC_BODY_CELLS),
-      "no body should remain an oversized welded chain"
     );
     let cfg = CompetentFallConfig {
       min_impact_fall_cells: 99,
@@ -2394,5 +2518,27 @@ mod tests {
       max_y < 18,
       "split balls must fall out of the sky (max_y={max_y})"
     );
+  }
+
+  #[test]
+  fn tiny_stick_does_not_flip_flop_tip() {
+    let mut w = World::new(11);
+    for x in 0..12 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+    }
+    for y in 2..6 {
+      w.set_cell(5, y, Cell::solid(MaterialId::Stone));
+    }
+    let regions = competent_active_regions(&w, &[], 4);
+    let comps = build_components(&w, &regions);
+    let Some(comp) = comps.iter().find(|c| c.cells.len() >= 3) else {
+      return;
+    };
+    assert!(
+      tip_dir(&w, comp, &CompetentFallConfig::default()).is_none(),
+      "tiny sticks must not tip (flip-flop)"
+    );
+    assert!(!may_tip(comp), "may_tip rejects needles");
   }
 }

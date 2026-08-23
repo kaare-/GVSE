@@ -182,8 +182,9 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
   Residual pebble necks are peeled; only editor paint / geology should weld.
 - **Free fall** — multi-cell drop through Air (rocks sink in lakes).
 - **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds.
-- **Tip vs slide** — 90° pivot only when COM leaves the support base; otherwise
-  slide down-slope. Stops forever tip↔tip oscillation on steep seats.
+- **Tip vs slide** — 90° pivot only when COM overhangs *and* the bed drops the
+  same way; tiny/needle bodies never tip (kills flat-floor flip-flop). Otherwise
+  slide down-slope (tiny bodies only with a real step down).
 - **Crush specs** — large movers pulverize tiny competent clusters
   (`≤ CRUSH_SPEC_MAX`) instead of welding or getting stuck on them.
 - **Thin fracture** — long thin sticks/slabs snap at 1-cell necks into debris.
