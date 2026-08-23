@@ -235,14 +235,24 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
           min_y,
           max_y,
         });
-        if out.len() >= MAX_BODIES_PER_TICK {
-          out.sort_by_key(|c| c.min_y);
-          return out;
-        }
       }
     }
   }
-  out.sort_by_key(|c| c.min_y);
+  // Floating bodies first (must fall), then lower seats — then FPS cap.
+  out.sort_by(|a, b| {
+    let air_below = |c: &Component| {
+      c.cells.iter().any(|(x, y, _)| match world.get_cell(*x, y - 1) {
+        None => true,
+        Some(cell) => cell.material == MaterialId::Air,
+      })
+    };
+    match (air_below(a), air_below(b)) {
+      (true, false) => std::cmp::Ordering::Less,
+      (false, true) => std::cmp::Ordering::Greater,
+      _ => a.min_y.cmp(&b.min_y),
+    }
+  });
+  out.truncate(MAX_BODIES_PER_TICK);
   out
 }
 
@@ -782,8 +792,45 @@ pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
   }
 }
 
+/// Cheap floating-only wake across loaded chunks. Air-below competent rock is
+/// always dynamic — without this, F1 defers to competent fall and quiet chunks
+/// never dirty, so sky-painted boulders hang forever.
+pub fn wake_floating_competent(world: &mut World) {
+  let cw = CHUNK_CELLS_W as i32;
+  let ch = CHUNK_CELLS_H as i32;
+  let coords: Vec<_> = world.chunks.keys().copied().collect();
+  let mut touches: Vec<(i32, i32)> = Vec::new();
+  for coord in coords {
+    let Some(chunk) = world.chunks.get(&coord) else {
+      continue;
+    };
+    let base_gx = coord.cx * cw;
+    let base_gy = coord.cy * ch;
+    for ly in 0..CHUNK_CELLS_H {
+      for lx in 0..CHUNK_CELLS_W {
+        let cell = chunk.get(lx, ly);
+        if !is_competent_rock(cell.material) {
+          continue;
+        }
+        let gx = world.wrap_x(base_gx + lx as i32);
+        let gy = base_gy + ly as i32;
+        match world.get_cell(gx, gy - 1) {
+          None => touches.push((gx, gy)),
+          Some(b) if body_passable_at(world, gx, gy - 1, &b) => touches.push((gx, gy)),
+          _ => {}
+        }
+      }
+    }
+  }
+  for (gx, gy) in touches {
+    world.touch_dirty(gx, gy);
+  }
+}
+
 /// Wake every loaded chunk (F3 mid-air paint insurance).
 pub fn wake_competent_bodies_all(world: &mut World) {
+  // Floating first (sky paint), then slope tips on all chunks.
+  wake_floating_competent(world);
   let coords: Vec<_> = world.chunks.keys().copied().collect();
   wake_competent_bodies(world, &coords);
 }
@@ -1492,6 +1539,36 @@ mod tests {
       x1 < x0,
       "disk should tumble left on limestone (start~{x0}, end_min_x={x1}, n={})",
       stones.len()
+    );
+  }
+
+  #[test]
+  fn floating_boulder_falls_after_dirty_cleared() {
+    use crate::active::{clear_all_dirty, plan_active};
+    let mut w = World::new(9);
+    stamp_blob(&mut w, 4, 60, 3, 3);
+    clear_all_dirty(&mut w);
+    assert!(plan_active(&w).is_empty(), "precondition: quiet after clear");
+    // Simulate the playtest trap: F1 defers, dirty empty, only floating wake saves us.
+    for _ in 0..8 {
+      wake_floating_competent(&mut w);
+      let active = plan_active(&w);
+      assert!(!active.is_empty(), "floating wake must dirty sky stone");
+      apply_competent_fall_regions(
+        &mut w,
+        &active,
+        &CompetentFallConfig::default(),
+        true,
+      );
+      clear_all_dirty(&mut w);
+    }
+    let y_top = (0..128)
+      .filter(|&y| w.get_cell(5, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .max()
+      .unwrap_or(128);
+    assert!(
+      y_top < 55,
+      "floating boulder must fall after wake (top y={y_top})"
     );
   }
 }
