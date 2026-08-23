@@ -446,76 +446,106 @@ fn column_top_support_y(world: &World, gx: i32, body: &HashSet<(i32, i32)>) -> O
   top
 }
 
-fn try_roll_downhill(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<(i32, i32)> {
+/// Uphill bottom-corner pivot for a 90° tumble (dx > 0 → roll right / CW).
+fn roll_pivot(comp: &Component, dx: i32) -> (i32, i32) {
+  let face = bottom_face(comp);
+  if face.is_empty() {
+    return comp_anchor(comp);
+  }
+  if dx > 0 {
+    face
+      .iter()
+      .min_by_key(|(x, y, _)| (*x, *y))
+      .map(|(x, y, _)| (*x, *y))
+      .unwrap_or(comp_anchor(comp))
+  } else {
+    face
+      .iter()
+      .max_by_key(|(x, y, _)| (*x, *y))
+      .map(|(x, y, _)| (*x, *y))
+      .unwrap_or(comp_anchor(comp))
+  }
+}
+
+fn rotate_pos(px: i32, py: i32, gx: i32, gy: i32, dx: i32) -> (i32, i32) {
+  let rx = gx - px;
+  let ry = gy - py;
+  if dx > 0 {
+    // Clockwise tumble downhill to the right.
+    (px + ry, py - rx)
+  } else {
+    // Counter-clockwise tumble downhill to the left.
+    (px - ry, py + rx)
+  }
+}
+
+fn can_pivot_roll(world: &World, comp: &Component, pivot: (i32, i32), dx: i32) -> bool {
+  for (gx, gy, _) in &comp.cells {
+    let (tx, ty) = rotate_pos(pivot.0, pivot.1, *gx, *gy, dx);
+    if ty < 0 {
+      return false;
+    }
+    let tx = world.wrap_x(tx);
+    if comp.set.contains(&(tx, ty)) {
+      continue;
+    }
+    let Some(dst) = world.get_cell(tx, ty) else {
+      return false;
+    };
+    if !body_passable_at(world, tx, ty, &dst) {
+      return false;
+    }
+  }
+  true
+}
+
+fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), dx: i32) -> bool {
+  if !can_pivot_roll(world, comp, pivot, dx) {
+    return false;
+  }
+  let moves: Vec<(i32, i32, Cell)> = comp
+    .cells
+    .iter()
+    .map(|(gx, gy, c)| {
+      let (tx, ty) = rotate_pos(pivot.0, pivot.1, *gx, *gy, dx);
+      (world.wrap_x(tx), ty, *c)
+    })
+    .collect();
+  for (x, y, _) in &comp.cells {
+    world.set_cell(*x, *y, Cell::air());
+  }
+  for (tx, ty, cell) in moves {
+    world.set_cell(tx, ty, cell);
+    world.touch_dirty(tx, ty);
+  }
+  true
+}
+
+fn try_pivot_roll(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<i32> {
   if is_floating(world, comp) {
     return None;
   }
   let dx = downhill_roll_dir(world, comp, cfg)?;
-  // Prefer tumbling down the face, then sliding sideways, then a steeper tumble.
-  for &(mx, my) in &[(dx, -1), (dx, -2), (dx, 0)] {
+  let pivot = roll_pivot(comp, dx);
+  if can_pivot_roll(world, comp, pivot, dx) {
+    Some(dx)
+  } else {
+    None
+  }
+}
+
+fn try_roll_translate(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<(i32, i32)> {
+  if is_floating(world, comp) {
+    return None;
+  }
+  let dx = downhill_roll_dir(world, comp, cfg)?;
+  // Diagonal step down the face after a failed pivot (steep slope).
+  for &(mx, my) in &[(dx, -1), (dx, -2)] {
     if can_translate(world, comp, mx, my) {
       return Some((mx, my));
     }
   }
   None
-}
-
-/// When the whole body can't tumble, peel the downhill toe into debris so
-/// grain settle can carry rock downslope (visible roll for large blobs).
-fn peel_downhill_toe(world: &mut World, comp: &Component, cfg: &CompetentFallConfig) -> u32 {
-  let Some(dx) = downhill_roll_dir(world, comp, cfg) else {
-    return 0;
-  };
-  let mut face = bottom_face(comp);
-  // Prefer the downhill-edge column of the bottom face.
-  face.sort_by_key(|(x, y, _)| (*y, if dx > 0 { -*x } else { *x }));
-  let Some((gx, gy, cell)) = face.into_iter().next() else {
-    return 0;
-  };
-  let debris = roof_collapse_debris(cell.material);
-  // Prefer spilling into downhill air if present.
-  let nx = world.wrap_x(gx + dx);
-  if matches!(world.get_cell(nx, gy - 1), Some(c) if c.material == MaterialId::Air) {
-    world.set_cell(
-      nx,
-      gy - 1,
-      Cell {
-        material: debris,
-        sat: Sat(cell.sat.0 / 2),
-        ..Cell::default()
-      },
-    );
-    world.set_cell(gx, gy, Cell::air());
-    world.touch_dirty(nx, gy - 1);
-    world.touch_dirty(gx, gy);
-    return 1;
-  }
-  if matches!(world.get_cell(nx, gy), Some(c) if c.material == MaterialId::Air) {
-    world.set_cell(
-      nx,
-      gy,
-      Cell {
-        material: debris,
-        sat: Sat(cell.sat.0 / 2),
-        ..Cell::default()
-      },
-    );
-    world.set_cell(gx, gy, Cell::air());
-    world.touch_dirty(nx, gy);
-    world.touch_dirty(gx, gy);
-    return 1;
-  }
-  world.set_cell(
-    gx,
-    gy,
-    Cell {
-      material: debris,
-      sat: cell.sat,
-      ..cell
-    },
-  );
-  world.touch_dirty(gx, gy);
-  1
 }
 
 /// True when a seated body still has a downhill neighbor and should stay awake.
@@ -806,7 +836,7 @@ fn advance_streak(
   fall_streak.insert((from.0 + dx, from.1 + dy), streak + gained);
 }
 
-fn apply_roll_or_peel(
+fn apply_roll(
   world: &mut World,
   regions: &[ActiveChunk],
   comp: &Component,
@@ -815,29 +845,28 @@ fn apply_roll_or_peel(
   fall_streak: &mut HashMap<(i32, i32), u32>,
   stats: &mut CompetentFallStats,
 ) -> bool {
-  if stats.roll_moves < cfg.max_roll_events {
-    if let Some((dx, dy)) = try_roll_downhill(world, comp, cfg) {
-      if translate_component(world, comp, dx, dy) {
-        stats.roll_moves += 1;
-        let new_anchor = (anchor.0 + dx, anchor.1 + dy);
-        advance_streak(fall_streak, anchor, dx, dy);
-        if dy == 0 {
-          let post = build_components(world, regions);
-          if let Some(refreshed) = post.iter().find(|c| c.set.contains(&new_anchor)) {
-            if translate_component(world, refreshed, 0, -1) {
-              stats.fall_moves += 1;
-              advance_streak(fall_streak, new_anchor, 0, -1);
-            }
-          }
+  if stats.roll_moves >= cfg.max_roll_events {
+    return false;
+  }
+  // Pivot tumble first — whole body rotates around the uphill toe.
+  if let Some(dx) = try_pivot_roll(world, comp, cfg) {
+    let pivot = roll_pivot(comp, dx);
+    if pivot_roll_component(world, comp, pivot, dx) {
+      stats.roll_moves += 1;
+      let post = build_components(world, regions);
+      if let Some(refreshed) = post.iter().find(|c| c.set.contains(&pivot)) {
+        if is_floating(world, refreshed) && translate_component(world, refreshed, 0, -1) {
+          stats.fall_moves += 1;
+          advance_streak(fall_streak, pivot, 0, -1);
         }
-        return true;
       }
+      return true;
     }
   }
-  if downhill_roll_dir(world, comp, cfg).is_some() {
-    let peeled = peel_downhill_toe(world, comp, cfg);
-    if peeled > 0 {
-      stats.roll_moves = stats.roll_moves.saturating_add(1);
+  if let Some((dx, dy)) = try_roll_translate(world, comp, cfg) {
+    if translate_component(world, comp, dx, dy) {
+      stats.roll_moves += 1;
+      advance_streak(fall_streak, anchor, dx, dy);
       return true;
     }
   }
@@ -898,7 +927,7 @@ pub fn apply_competent_fall_regions(
       // Wait until every bottom cell has support — avoids uneven per-column
       // embed/shatter while the body is still bridging a slope or gap.
       if !is_fully_supported(world, &comp) {
-        if apply_roll_or_peel(
+        if apply_roll(
           world,
           &regions,
           &comp,
@@ -913,7 +942,7 @@ pub fn apply_competent_fall_regions(
       }
       let streak = *fall_streak.get(&anchor).unwrap_or(&0);
       if rests_on_soft_bed(world, &comp) {
-        if apply_roll_or_peel(
+        if apply_roll(
           world,
           &regions,
           &comp,
@@ -941,7 +970,7 @@ pub fn apply_competent_fall_regions(
           continue;
         }
       }
-      if apply_roll_or_peel(
+      if apply_roll(
         world,
         &regions,
         &comp,
@@ -1158,17 +1187,22 @@ mod tests {
     }
     let rock_xs: Vec<i32> = (0..12)
       .filter(|&x| {
-        (6..=18).any(|y| {
-          matches!(
-            w.get_cell(x, y).map(|c| c.material),
-            Some(MaterialId::Stone) | Some(MaterialId::LooseRock)
-          )
+        (3..=18).any(|y| {
+          w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone)
         })
       })
       .collect();
+    let loose = (0..12)
+      .flat_map(|x| (3..=18).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::LooseRock))
+      .count();
     assert!(
       rock_xs.iter().any(|&x| x > 6),
       "body should roll right down the sand slope (rock cols={rock_xs:?})"
+    );
+    assert!(
+      loose <= 2,
+      "slope tumble should stay mostly intact stone (loose={loose})"
     );
   }
 }

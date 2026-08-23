@@ -179,9 +179,9 @@ Connected bodies (8-neighbour union) fall as rigid clusters:
    rocks sink).
 2. **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds when
    fall distance ≥ `min_impact_fall_cells`.
-3. **Slope roll + embed** — rigid tumble when clearance allows; otherwise peel
-   downhill toe to debris. Soft embed only on flat beds (not while a slope
-   exists).
+3. **Slope roll + embed** — 90° pivot tumble around the uphill bottom corner
+   when downhill air allows; diagonal step if pivot blocked. Soft embed only on
+   flat beds (not while a slope exists). No toe-peel debris shedding.
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
