@@ -359,7 +359,9 @@ mod tests {
         }
         let (x, surf) = col.expect("ocean sand column");
 
-        for _ in 0..80 {
+        // Bed wetting is permeability-limited seepage, not an instant
+        // gravity pore-fill. Give the lake time to saturate the profile.
+        for _ in 0..240 {
             tick(&mut w);
         }
 
@@ -703,6 +705,7 @@ mod tests {
             enable_roof_collapse: false,
             enable_shear_weaken: false,
             enable_compaction: false,
+            enable_competent_fall: false,
             ..FailureConfig::default()
         };
         let perf = PerfConfig {

@@ -107,6 +107,9 @@ pub const WOODY_LEAF_MIN_LIGHT: f32 = 0.34;
 /// Sky×shade (no day clock) below which a woody leaf accrues starve ticks.
 /// Night alone must not strip the canopy — only chronic dim sites.
 pub const WOODY_LEAF_STARVE_LIGHT: f32 = 0.22;
+/// Re-sample leaf light every N ticks; starve counters advance by N so
+/// wall-clock time to abscission stays ~[`WOODY_LEAF_STARVE_TICKS`].
+pub const WOODY_LEAF_STARVE_SAMPLE: u64 = 8;
 /// Consecutive starve ticks before a woody Photosystem abscises (~8 s @ 60 Hz).
 pub const WOODY_LEAF_STARVE_TICKS: u16 = 480;
 /// At most one woody leaf drop every this many ticks (spread litter).
@@ -559,8 +562,24 @@ pub fn drink_leaves(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32)
 /// bed is comfortably moist, stop stripping pores. Fallen / lake plants
 /// still sip through dangling roots (standing water regenerates).
 pub fn drink_plant(world: &mut World, atom: &mut Atom) -> (f32, u32, (i32, i32)) {
-    let moist = plant_moisture_frac(world, atom);
-    let (e_l, s_l, at_l) = drink_leaves(world, atom);
+    let root_m = root_moisture_frac(world, atom);
+    let leaf_b = leaf_bathing_frac(world, atom);
+    drink_plant_with_moist(world, atom, root_m.max(leaf_b), leaf_b >= 0.12)
+}
+
+/// [`drink_plant`] when the caller already sampled moisture / bathing.
+pub fn drink_plant_with_moist(
+    world: &mut World,
+    atom: &mut Atom,
+    moist: f32,
+    bathing: bool,
+) -> (f32, u32, (i32, i32)) {
+    // Dry upright leaves never sip — skip the Photosystem standing-water walk.
+    let (e_l, s_l, at_l) = if bathing || atom.fallen {
+        drink_leaves(world, atom)
+    } else {
+        (0.0, 0, (atom.gx, atom.gy))
+    };
     let need_root_sip = atom.fallen || moist < ROOT_DRINK_COMFORT_FRAC;
     let (e_r, s_r, at_r) = if need_root_sip {
         drink_roots(world, atom)
@@ -707,30 +726,34 @@ pub fn shed_unproductive_woody_leaves(
         return 0;
     }
 
-    // Refresh starve counters from current column light (no day factor).
-    let mut next: Vec<(i16, i16, u16)> = Vec::with_capacity(photos.len());
-    for &(lx, ly) in &photos {
-        let wx = world.wrap_x(atom.gx + lx as i32);
-        let wy = atom.gy + ly as i32;
-        let sky = column_sky_light(world, wx, wy);
-        // Raw sky × transmit — same diagnostic axis as draw tint.
-        let lit = (sky * shade_transmit(canopy, wx, wy)).clamp(0.0, 1.0);
-        let prev = atom
-            .leaf_starve
-            .iter()
-            .find(|&&(x, y, _)| x == lx && y == ly)
-            .map(|&(_, _, t)| t)
-            .unwrap_or(0);
-        let ticks = if lit < WOODY_LEAF_STARVE_LIGHT {
-            prev.saturating_add(1)
-        } else {
-            0
-        };
-        if ticks > 0 {
-            next.push((lx, ly, ticks));
+    // Refresh starve counters on a sample cadence (shade × sky is not free
+    // at full pop). Advance by SAMPLE so ~WOODY_LEAF_STARVE_TICKS wall time.
+    if tick % WOODY_LEAF_STARVE_SAMPLE == 0 {
+        let step = WOODY_LEAF_STARVE_SAMPLE as u16;
+        let mut next: Vec<(i16, i16, u16)> = Vec::with_capacity(photos.len());
+        for &(lx, ly) in &photos {
+            let wx = world.wrap_x(atom.gx + lx as i32);
+            let wy = atom.gy + ly as i32;
+            let sky = column_sky_light(world, wx, wy);
+            // Raw sky × transmit — same diagnostic axis as draw tint.
+            let lit = (sky * shade_transmit(canopy, wx, wy)).clamp(0.0, 1.0);
+            let prev = atom
+                .leaf_starve
+                .iter()
+                .find(|&&(x, y, _)| x == lx && y == ly)
+                .map(|&(_, _, t)| t)
+                .unwrap_or(0);
+            let ticks = if lit < WOODY_LEAF_STARVE_LIGHT {
+                prev.saturating_add(step)
+            } else {
+                0
+            };
+            if ticks > 0 {
+                next.push((lx, ly, ticks));
+            }
         }
+        atom.leaf_starve = next;
     }
-    atom.leaf_starve = next;
 
     if tick % WOODY_LEAF_DROP_PERIOD != 0 {
         return 0;
@@ -5769,13 +5792,13 @@ mod tests {
             ],
         );
         atom.leaf_starve = vec![(0, 2, 100), (1, 2, 100)];
-        // Open sky canopy — both leaves productive.
+        // Open sky canopy — both leaves productive (sample cadence tick).
         let _ = shed_unproductive_woody_leaves(
             &mut w,
             &mut atom,
             &CanopyIndex::default(),
             1.0,
-            1,
+            0,
         );
         assert!(
             atom.leaf_starve.is_empty(),

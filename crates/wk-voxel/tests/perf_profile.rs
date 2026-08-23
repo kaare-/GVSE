@@ -20,9 +20,9 @@ use wk_voxel::{
     find_plant_slot, humidity_diffuse_due, set_parallel_enabled, stamp_world,
     temperature_step_due, tick_with_perf, tick_with_perf_profiled, Blueprint, ClimateConfig,
     CloudConfig, CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity,
-    KarstConfig, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig, PhysicsTimings,
-    RainConfig, Temperature, Wind, World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W,
-    FLOW_SUBSTEPS,
+    KarstConfig, OrganismPassTimings, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig,
+    PhysicsTimings, RainConfig, Temperature, Wind, World, WorldgenParams, CHUNK_CELLS_H,
+    CHUNK_CELLS_W, FLOW_SUBSTEPS,
 };
 
 const HUMIDITY_TILE_COLS: i32 = 4;
@@ -31,6 +31,8 @@ const CLIMATE_WIND_VX: f32 = 0.05;
 const WARMUP_TICKS: u64 = 40;
 const MEASURE_TICKS: u64 = 200;
 const PLANT_COUNT: usize = 48;
+/// Creature-count sweep for pop-cap pressure (includes [`wk_voxel::MAX_ATOMS`]).
+const CREATURE_SWEEP: &[usize] = &[0, 48, 128, 256];
 
 struct PassAccum {
     rain: Duration,
@@ -191,19 +193,23 @@ fn stamp_scene(params: WorldgenParams) -> Scene {
 }
 
 fn seed_plants(scene: &mut Scene, count: usize) {
+    if count == 0 {
+        eprintln!("  seeded 0/0 land plants");
+        return;
+    }
+    scene.organisms.max_atoms = count.max(scene.organisms.atom_cap()).max(1);
     let body = Blueprint::minimal_plant().modules_relative_to_nucleus();
     let mut g = Genome::default();
     wk_voxel::sync_alloc_to_body(&mut g, &body);
-    let w = scene.params.width_cols;
+    let w = scene.params.width_cols.max(1);
     let mut placed = 0usize;
-    // Prefer coastal / mid-land columns so crowns are plantable.
-    let start = (w as f32 * 0.35) as i32;
-    let step = ((w as f32 * 0.45) / count.max(1) as f32).max(1.0) as i32;
-    for i in 0..count * 3 {
-        if placed >= count {
-            break;
-        }
-        let gx = start + (i as i32) * step / 3;
+    // Sweep the full ring with a prime-ish stride so dense caps still seat.
+    let stride = ((w as usize).max(1) / count.max(1)).max(1);
+    let mut attempts = 0usize;
+    let max_attempts = count.saturating_mul(8).max(w as usize * 2);
+    while placed < count && attempts < max_attempts {
+        let gx = ((attempts * stride) as i32 + (attempts as i32 / 3)) % w;
+        attempts += 1;
         let guess_y = scene.params.sea_level_y + 2;
         let Some(gy) = find_plant_slot(&scene.world, gx, guess_y) else {
             continue;
@@ -215,7 +221,10 @@ fn seed_plants(scene: &mut Scene, count: usize) {
             placed += 1;
         }
     }
-    eprintln!("  seeded {placed}/{count} land plants");
+    eprintln!(
+        "  seeded {placed}/{count} land plants  (cap={}  attempts={attempts})",
+        scene.organisms.atom_cap()
+    );
 }
 
 fn cell_count(params: &WorldgenParams) -> i64 {
@@ -545,11 +554,9 @@ fn print_physics_table(phys: &PhysicsTimings, n: u64) {
     );
 }
 
-fn run_profile(label: &str, params: WorldgenParams, with_plants: bool) {
+fn run_profile(label: &str, params: WorldgenParams, plant_count: usize) -> f32 {
     let mut scene = stamp_scene(params);
-    if with_plants {
-        seed_plants(&mut scene, PLANT_COUNT);
-    }
+    seed_plants(&mut scene, plant_count);
     let chunks = scene.world.chunks.len();
     profile_label(label, &scene.params, chunks);
 
@@ -572,13 +579,85 @@ fn run_profile(label: &str, params: WorldgenParams, with_plants: bool) {
         .bounds
         .map(|b| b.tile_capacity())
         .unwrap_or(0);
+    let wall_ms = ms_per(wall, MEASURE_TICKS);
+    let org_ms = ms_per(accum.organisms, MEASURE_TICKS);
     eprintln!(
-        "  humidity tiles={}/{}  humidity_mass={:.1}  organisms={}",
+        "  humidity tiles={}/{}  humidity_mass={:.1}  organisms={}  org_share={:.0}%",
         scene.humidity.cells.len(),
         cap,
         scene.humidity.total_mass(),
-        scene.organisms.len()
+        scene.organisms.len(),
+        if wall_ms > 0.0 {
+            100.0 * org_ms / wall_ms
+        } else {
+            0.0
+        }
     );
+    eprintln!();
+    org_ms
+}
+
+/// Demo world, same stack, plant count 0 → max. Prints a compact summary table.
+fn run_creature_count_sweep(params: WorldgenParams) {
+    eprintln!("=== creature-count sweep (demo world, FPS PerfConfig) ===");
+    eprintln!("  count   wall_ms  org_ms   org%   living");
+    for &n in CREATURE_SWEEP {
+        let mut scene = stamp_scene(params);
+        seed_plants(&mut scene, n);
+        for _ in 0..WARMUP_TICKS {
+            one_stack_tick(&mut scene, None, None);
+        }
+        let mut accum = PassAccum::zero();
+        let mut pass = OrganismPassTimings::default();
+        let wall = Instant::now();
+        for _ in 0..MEASURE_TICKS {
+            one_stack_tick(&mut scene, Some(&mut accum), None);
+            let p = scene.organisms.last_pass;
+            pass.pose += p.pose;
+            pass.canopy += p.canopy;
+            pass.reseat += p.reseat;
+            pass.float_cols += p.float_cols;
+            pass.land_plants += p.land_plants;
+            pass.land_seat += p.land_seat;
+            pass.land_metab += p.land_metab;
+            pass.land_grow += p.land_grow;
+            pass.land_disperse += p.land_disperse;
+            pass.other_creatures += p.other_creatures;
+            pass.post += p.post;
+        }
+        let wall = wall.elapsed();
+        let wall_ms = ms_per(wall, MEASURE_TICKS);
+        let org_ms = ms_per(accum.organisms, MEASURE_TICKS);
+        let living = scene.organisms.len();
+        let share = if wall_ms > 0.0 {
+            100.0 * org_ms / wall_ms
+        } else {
+            0.0
+        };
+        eprintln!(
+            "  {n:>5}  {wall_ms:>7.3}  {org_ms:>7.3}  {share:>5.1}%  {living}"
+        );
+        if n > 0 {
+            let n_ticks = MEASURE_TICKS;
+            eprintln!(
+                "         org splits ms/tick: pose {:.3}  canopy {:.3}  reseat {:.3}  float {:.3}  land {:.3}  other {:.3}  post {:.3}",
+                ms_per(pass.pose, n_ticks),
+                ms_per(pass.canopy, n_ticks),
+                ms_per(pass.reseat, n_ticks),
+                ms_per(pass.float_cols, n_ticks),
+                ms_per(pass.land_plants, n_ticks),
+                ms_per(pass.other_creatures, n_ticks),
+                ms_per(pass.post, n_ticks),
+            );
+            eprintln!(
+                "         land splits ms/tick: seat {:.3}  metab {:.3}  grow {:.3}  disperse {:.3}",
+                ms_per(pass.land_seat, n_ticks),
+                ms_per(pass.land_metab, n_ticks),
+                ms_per(pass.land_grow, n_ticks),
+                ms_per(pass.land_disperse, n_ticks),
+            );
+        }
+    }
     eprintln!();
 }
 
@@ -628,12 +707,23 @@ fn run_perf_knob_ab(params: WorldgenParams) {
 #[ignore]
 fn perf_profile_demo_and_stress() {
     set_parallel_enabled(true);
-    run_profile("demo (WorldgenParams::default)", demo_params(), false);
+    run_creature_count_sweep(demo_params());
+    run_profile("demo (0 plants)", demo_params(), 0);
     run_profile(
-        "demo + 48 plants",
+        &format!("demo + {PLANT_COUNT} plants"),
         demo_params(),
-        true,
+        PLANT_COUNT,
+    );
+    run_profile(
+        &format!("demo + {} plants (MAX_ATOMS)", wk_voxel::MAX_ATOMS),
+        demo_params(),
+        wk_voxel::MAX_ATOMS,
     );
     run_perf_knob_ab(demo_params());
-    run_profile("stress (32×6 chunks)", stress_params(), false);
+    run_profile("stress (32×6 chunks, 0 plants)", stress_params(), 0);
+    run_profile(
+        &format!("stress + {} plants", wk_voxel::MAX_ATOMS),
+        stress_params(),
+        wk_voxel::MAX_ATOMS,
+    );
 }

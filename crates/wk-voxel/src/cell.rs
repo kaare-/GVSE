@@ -61,6 +61,10 @@ impl CellFlags {
     /// Fully soaked Organic that has waterlogged — no longer floats;
     /// sinks through standing water like a dense grain.
     pub const WATERLOGGED: CellFlags = CellFlags(0b0000_0100);
+    /// Detached competent rock (fallen / tipped / slid). Flood-fill keeps
+    /// mobile and unmarked strata in separate components — contact cannot
+    /// grow a boulder by welding into painted terrain.
+    pub const MOBILE_ROCK: CellFlags = CellFlags(0b0000_1000);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -208,6 +212,11 @@ pub fn falls_through_empty_air(material: MaterialId) -> bool {
 pub fn is_repose_grain(material: MaterialId) -> bool {
     is_grain(material)
         || matches!(material, MaterialId::Snow | MaterialId::Organic)
+}
+
+/// Competent bedrock-class solids that can move as rigid bodies (not Bedrock).
+pub fn is_competent_rock(material: MaterialId) -> bool {
+    matches!(material, MaterialId::Stone | MaterialId::Limestone)
 }
 
 /// Dense grains soft enough for flow bedload / bank undercut.

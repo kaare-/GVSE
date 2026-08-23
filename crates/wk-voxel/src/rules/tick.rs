@@ -13,8 +13,8 @@ use crate::active::{clear_all_dirty, partition_checkerboard, plan_active};
 use crate::grid::World;
 
 use super::grain::{
-    active_has_unsupported_grain, settle_loose_grains_regions, GRAIN_SETTLE_PASSES,
-    GRAIN_SETTLE_PASSES_SHALLOW,
+    active_has_unsupported_grain, settle_loose_grains_regions_ex, GRAIN_SETTLE_PASSES,
+    GRAIN_SETTLE_PASSES_FPS_DEEP, GRAIN_SETTLE_PASSES_SHALLOW,
 };
 use super::gravity::apply_gravity_fall_regions;
 use super::seepage::apply_seepage_regions;
@@ -94,9 +94,10 @@ impl PhysicsTimings {
 /// edges are 5-10 cells away, half-gap propagates at ~1 cell/substep,
 /// so we need enough substeps to keep up with steady rain.
 pub const FLOW_SUBSTEPS: usize = 12;
-/// Cap on flow substeps for the FPS path (`PerfConfig` defaults).
-pub const FLOW_SUBSTEPS_MIN: usize = 6;
-/// After this many substeps, a quiet / steady dirty halo may early-out.
+/// Cap on flow substeps for the interactive path (`PerfConfig` defaults).
+/// High enough that hillside blobs empty in tens of ticks, not thousands.
+pub const FLOW_SUBSTEPS_MIN: usize = 8;
+/// After this many substeps, a quiet / shrunk dirty halo may early-out.
 /// Must be **below** [`FLOW_SUBSTEPS_MIN`] so the FPS cap does not
 /// swallow the adaptive exit (was equal → EO never shortened the loop).
 pub const FLOW_SUBSTEPS_EO_AFTER: usize = 4;
@@ -105,28 +106,30 @@ pub const FLOW_SUBSTEPS_EO_AFTER: usize = 4;
 /// don't need the full ×12. Busy rain / cascades stay at max.
 pub const FLOW_QUIET_AREA: usize = 512;
 
+/// Pore seepage + lake-bed wake cadence (ticks). Surface gravity/flow
+/// still run every tick; underground is lower priority and expensive.
+pub const SEEPAGE_EVERY: u64 = 4;
+
 /// Live-tunable physics trade-offs (Tab → Performance).
 ///
-/// Defaults favour interactive FPS: every-other surface flow + quiet
-/// early-out, with **rayon off**. Demo dirty plans stay ~6–12 regions /
-/// ~10–13k cells — too narrow for rayon to win (32-core Super-Server:
-/// parallel ON was ~1.6× slower than OFF). Opt parallel back on in Tab
-/// for wide dirty worlds once the active plan is fat.
+/// Defaults favour **fast surface flow**: every substep levels/cascades,
+/// quiet early-out for calm lakes, **rayon off**. Underground seepage is
+/// cadence-gated ([`SEEPAGE_EVERY`]) so the FPS budget goes to runoff.
+/// Opt every-other flow / parallel on in Tab for A/B.
 ///
-/// **Do not pair away odd-step gravity.** Super-Server A/B showed that
-/// skipping interstitial gravity fattens the dirty halo (~13k → ~17k
-/// cells) and makes each flow call ~2× slower — net regression despite
-/// fewer flow passes.
+/// **Do not pair away odd-step gravity** when every-other flow is on.
+/// Super-Server A/B showed skipping interstitial gravity fattens the
+/// dirty halo (~13k → ~17k cells) and makes each flow call ~2× slower.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PerfConfig {
     /// Run surface water flow only on even substeps (gravity still every
-    /// substep). Default **on** — ~half the surface-flow scan work.
-    /// Odd-step gravity keeps shore columns seated so the next flow
-    /// halo stays narrow.
+    /// substep). Default **off** — hillside runoff needs every pass.
+    /// Tab may enable for half the surface-flow scan work.
     pub flow_every_other_substep: bool,
     /// After [`FLOW_SUBSTEPS_EO_AFTER`], stop when the dirty halo is tiny
-    /// or has shrunk / steadied. Default **on** for settled films /
-    /// quiet ponds / closed-loop rain polish.
+    /// or has shrunk. Default **on** for settled films / quiet ponds.
+    /// Does **not** early-out on a merely steady large halo — that left
+    /// hillside jelly stuck for thousands of ticks.
     pub flow_quiet_early_out: bool,
     /// Rayon checkerboard parallelism for gravity / grain / flow scan.
     /// Default **off** — wins only when many chunks are dirty at once.
@@ -136,7 +139,7 @@ pub struct PerfConfig {
 impl Default for PerfConfig {
     fn default() -> Self {
         Self {
-            flow_every_other_substep: true,
+            flow_every_other_substep: false,
             flow_quiet_early_out: true,
             parallel_physics: false,
         }
@@ -145,7 +148,7 @@ impl Default for PerfConfig {
 
 impl PerfConfig {
     /// Full ×12 surface-flow path with no early-out — scenario / unit
-    /// tests and Tab A/B against the FPS-biased [`Default`].
+    /// tests and Tab A/B against the interactive [`Default`].
     pub const fn full_feel() -> Self {
         Self {
             flow_every_other_substep: false,
@@ -251,7 +254,7 @@ pub fn tick_with_configs_and_geotech(
     failure: &crate::failure::FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
 ) {
-    let _ = tick_with_life(world, perf, failure, geotech, None, None, None);
+    let _ = tick_with_life(world, perf, failure, geotech, None, None, None, None);
 }
 
 /// [`tick_with_configs_and_geotech`] plus optional living-root cells for
@@ -269,8 +272,9 @@ pub fn tick_with_life(
     rooted: Option<&HashSet<(i32, i32)>>,
     grain: Option<&super::grain::GrainConfig>,
     fungi: Option<&crate::fungi::FungiConfig>,
+    competent: Option<&super::competent_fall::CompetentFallConfig>,
 ) -> crate::failure::FailureStats {
-    tick_with_life_inner(world, perf, failure, geotech, rooted, grain, fungi, None)
+    tick_with_life_inner(world, perf, failure, geotech, rooted, grain, fungi, competent, None)
 }
 
 /// [`tick_with_life`] while accumulating [`PhysicsTimings`].
@@ -282,6 +286,7 @@ pub fn tick_with_life_profiled(
     rooted: Option<&HashSet<(i32, i32)>>,
     grain: Option<&super::grain::GrainConfig>,
     fungi: Option<&crate::fungi::FungiConfig>,
+    competent: Option<&super::competent_fall::CompetentFallConfig>,
     timings: &mut PhysicsTimings,
 ) -> crate::failure::FailureStats {
     tick_with_life_inner(
@@ -292,6 +297,7 @@ pub fn tick_with_life_profiled(
         rooted,
         grain,
         fungi,
+        competent,
         Some(timings),
     )
 }
@@ -310,8 +316,37 @@ pub fn tick_with_perf_profiled(
         None,
         None,
         None,
+        None,
         timings,
     )
+}
+
+fn merge_active_regions(
+    a: Vec<crate::active::ActiveChunk>,
+    b: Vec<crate::active::ActiveChunk>,
+) -> Vec<crate::active::ActiveChunk> {
+    use crate::active::ActiveChunk;
+    use crate::chunk::{ChunkCoord, Rect};
+    use std::collections::HashMap;
+    let mut map: HashMap<ChunkCoord, Rect> = HashMap::new();
+    for ac in a.into_iter().chain(b) {
+        map.entry(ac.coord)
+            .and_modify(|r| {
+                *r = Rect {
+                    x0: r.x0.min(ac.rect.x0),
+                    y0: r.y0.min(ac.rect.y0),
+                    x1: r.x1.max(ac.rect.x1),
+                    y1: r.y1.max(ac.rect.y1),
+                };
+            })
+            .or_insert(ac.rect);
+    }
+    let mut out: Vec<ActiveChunk> = map
+        .into_iter()
+        .map(|(coord, rect)| ActiveChunk { coord, rect })
+        .collect();
+    out.sort_by(|x, y| x.coord.cy.cmp(&y.coord.cy).then(x.coord.cx.cmp(&y.coord.cx)));
+    out
 }
 
 fn tick_with_life_inner(
@@ -322,6 +357,7 @@ fn tick_with_life_inner(
     rooted: Option<&HashSet<(i32, i32)>>,
     grain: Option<&super::grain::GrainConfig>,
     fungi: Option<&crate::fungi::FungiConfig>,
+    competent: Option<&super::competent_fall::CompetentFallConfig>,
     mut timings: Option<&mut PhysicsTimings>,
 ) -> crate::failure::FailureStats {
     // Opt-in cell-sat inventory (debug only). Atmosphere stores are
@@ -337,15 +373,27 @@ fn tick_with_life_inner(
     let mut local = PhysicsTimings::default();
 
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
+    // Lake-bed wake every tick so gravity can keep infiltrating quiet
+    // ponds (including across the y=63|64 seam). Full pore seepage stays
+    // cadence-gated on the interactive path — underground is lower priority.
+    let run_seepage = !perf.flow_quiet_early_out || world.tick % SEEPAGE_EVERY == 0;
+    {
+        let t0 = profile.then(Instant::now);
+        super::seepage::wake_lake_bed_pores(world);
+        super::seepage::wake_vertical_chunk_seam_pores(world);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.seepage += t0.elapsed();
+        }
+    }
     // Last non-empty flow plan — grain/seepage fall back to this when
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
     let mut start_area: usize = 0;
-    // FPS knobs on → cap at [`FLOW_SUBSTEPS_MIN`] (6); early-out may
-    // fire after [`FLOW_SUBSTEPS_EO_AFTER`] (4). full_feel keeps ×12.
-    // Odd-step gravity stays — pairing it away fattened the dirty halo.
-    let max_steps = if perf.flow_every_other_substep && perf.flow_quiet_early_out {
-        FLOW_SUBSTEPS_MIN // 6
+    // Quiet early-out on → [`FLOW_SUBSTEPS_MIN`] (8); full_feel keeps ×12.
+    // Every-other flow is optional Tab thrift — defaults run flow every
+    // substep so hillside blobs empty quickly.
+    let max_steps = if perf.flow_quiet_early_out {
+        FLOW_SUBSTEPS_MIN // 8
     } else {
         FLOW_SUBSTEPS
     };
@@ -384,12 +432,12 @@ fn tick_with_life_inner(
         // Odd-step gravity is load-bearing: without it the dirty halo
         // fattens and each flow call costs more than the gravity saved.
         let run_flow = !perf.flow_every_other_substep || (step % 2 == 0);
-        // FPS: surface priorities only; throughflow/confined once after loop.
-        // full_feel: keep throughflow+confined every flow substep (pipe tests).
-        let fps_flow = perf.flow_every_other_substep && perf.flow_quiet_early_out;
+        // Interactive: surface priorities only; throughflow/confined once
+        // after the loop. full_feel: throughflow+confined every substep.
+        let interactive = perf.flow_quiet_early_out;
         if run_flow {
             let t0 = profile.then(Instant::now);
-            if fps_flow {
+            if interactive {
                 super::water_flow::apply_water_flow_regions_ex(world, &active, false);
             } else {
                 apply_water_flow_regions(world, &active);
@@ -399,8 +447,9 @@ fn tick_with_life_inner(
             }
         }
         // Quiet early-out: after [`FLOW_SUBSTEPS_EO_AFTER`], peek at
-        // dirty written by this substep — a tiny / shrunk / steady halo
-        // means remaining substeps are polish (closed-loop rain).
+        // dirty written by this substep — a tiny / shrunk halo means
+        // remaining substeps are polish. Do **not** exit just because a
+        // large halo is steady — hillside jelly stays dirty and stuck.
         if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_EO_AFTER {
             let next = plan_active(world);
             let next_area = active_cell_area(&next);
@@ -412,20 +461,14 @@ fn tick_with_life_inner(
             if start_area > 0 && next_area * 3 <= start_area * 2 {
                 break;
             }
-            // Steady busy halo (closed-loop rain): area barely moved —
-            // further substeps are polish. Super-Server demo sat at
-            // ~13k cells for all 6; this exits after EO_AFTER (4).
-            if start_area > FLOW_QUIET_AREA && next_area * 10 >= start_area * 9 {
-                break;
-            }
         }
     }
 
-    // FPS path: throughflow + confined once per tick (not every even
+    // Interactive path: throughflow + confined once per tick (not every
     // substep) — rainy beaches paid Priority-4 deep walks and confined
-    // BFS ×3. full_feel already ran them inside each flow substep.
-    let fps_flow = perf.flow_every_other_substep && perf.flow_quiet_early_out;
-    if fps_flow && !flow_halo.is_empty() {
+    // BFS ×N. full_feel already ran them inside each flow substep.
+    let interactive = perf.flow_quiet_early_out;
+    if interactive && !flow_halo.is_empty() {
         let t0 = profile.then(Instant::now);
         apply_throughflow_regions(world, &flow_halo);
         if let (true, Some(t0)) = (profile, t0) {
@@ -446,23 +489,51 @@ fn tick_with_life_inner(
             local.confined += t0.elapsed();
         }
     }
+    // Deep lakes go quiet once free water looks settled — beds and pore
+    // stacks under a wet cap would stay dry forever without a re-wake.
+    {
+        let t0 = profile.then(Instant::now);
+        super::seepage::wake_lake_bed_pores(world);
+        super::seepage::wake_vertical_chunk_seam_pores(world);
+        if run_seepage {
+            super::seepage::wake_pore_weep_into_air(world);
+        }
+        if let (true, Some(t0)) = (profile, t0) {
+            local.seepage += t0.elapsed();
+        }
+    }
 
-    // Seepage follows the water dirty / flow halo.
+    // Seepage follows water dirty ∪ the last flow halo. Preferring only
+    // post-flow dirty drops underground pore fronts: surface equalise
+    // rewrites dirty near the free surface while seepage edges are owned
+    // by the *lower* cell (must be in the scan rect to drink).
     let flow_active = {
         let t0 = profile.then(Instant::now);
         let dirty = plan_active(world);
         if let (true, Some(t0)) = (profile, t0) {
             local.plan_clear += t0.elapsed();
         }
-        if dirty.is_empty() {
-            flow_halo
-        } else {
-            dirty
+        match (dirty.is_empty(), flow_halo.is_empty()) {
+            (true, true) => Vec::new(),
+            (true, false) => flow_halo,
+            (false, true) => dirty,
+            (false, false) => merge_active_regions(dirty, flow_halo),
         }
     };
-    if !flow_active.is_empty() {
+    if run_seepage && !flow_active.is_empty() {
         let t0 = profile.then(Instant::now);
         apply_seepage_regions(world, &flow_active);
+        if let (true, Some(t0)) = (profile, t0) {
+            local.seepage += t0.elapsed();
+        }
+    }
+    // Vertical chunk seams must couple every tick — quiet EO only runs
+    // full seepage every [`SEEPAGE_EVERY`] ticks, which left pore rows
+    // at y=63|64 equalising horizontally for 160k+ ticks without
+    // waking the chunk below (playtest shelf).
+    {
+        let t0 = profile.then(Instant::now);
+        super::seepage::apply_seepage_seam_coupling(world);
         if let (true, Some(t0)) = (profile, t0) {
             local.seepage += t0.elapsed();
         }
@@ -473,7 +544,6 @@ fn tick_with_life_inner(
     // Tick 0 always full-scans so save-load / first frame catch orphans.
     const GRAIN_WAKE_EVERY: u64 = 4;
     const GRAIN_WAKE_FULL_EVERY: u64 = 16;
-    let mut freefall_woken = 0u32;
     let mut raft_cargo_seen = 0u32;
     let mut did_wake = false;
     if world.tick % GRAIN_WAKE_EVERY == 0 {
@@ -485,7 +555,8 @@ fn tick_with_life_inner(
             let coords: Vec<_> = halo.iter().map(|ac| ac.coord).collect();
             super::grain::wake_grains_for_settle_coords(world, &coords)
         };
-        freefall_woken = wake.freefall;
+        // freefall count no longer trips FPS deep settle — rise runs first
+        // and unsupported is rechecked after. Cargo still gates punch.
         raft_cargo_seen = wake.raft_cargo;
         did_wake = true;
         if let (true, Some(t0)) = (profile, t0) {
@@ -496,7 +567,7 @@ fn tick_with_life_inner(
         let t0 = profile.then(Instant::now);
         let dirty = plan_active(world);
         let src = if dirty.is_empty() {
-            flow_active
+            flow_active.clone()
         } else {
             dirty
         };
@@ -508,21 +579,40 @@ fn tick_with_life_inner(
         }
         out
     };
+    // Float litter to freeboard BEFORE deep settle. Flooding dry Organic
+    // used to bubble one cell/pass inside ×1024 settle (grounded-column
+    // walks × wet Air × passes → ~1 FPS). Teleport rise clears the column
+    // first; settle then handles sand / true freefall.
+    {
+        let t0 = profile.then(Instant::now);
+        match grain {
+            Some(g) => super::grain::rise_and_soak_buoyant_litter_cfg(world, g),
+            None => super::grain::rise_and_soak_buoyant_litter(world),
+        }
+        if let (true, Some(t0)) = (profile, t0) {
+            local.rise_soak += t0.elapsed();
+        }
+    }
+
     if !grain_active.is_empty() {
         // Deep settle for sky freefall / mid-air paint, and for full-feel
-        // (unit tests / Tab A/B). FPS defaults stay shallow unless wake or
-        // empty/haze Air under a grain — not wet shore seats (those were
-        // forcing ×1024 every rainy tick).
-        let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
+        // (unit tests / Tab A/B). FPS defaults stay shallow unless something
+        // is still unsupported *after* rise — pre-rise freefall_woken from
+        // submerged Organic used to force ×1024 every flood tick.
+        let interactive = perf.flow_quiet_early_out;
         let unsupported = active_has_unsupported_grain(world, &grain_active);
-        let deep = !fps_path || freefall_woken > 0 || unsupported;
+        let deep = !interactive || unsupported;
         // FPS shallow polish: only on wake cadence or when something is
         // mid-air. Quiet rainy shores were paying ×8 settle every tick
         // (~0.7 ms) with deep_settle_ticks=0 / punch_hits=0.
         let run_settle = deep || world.tick % GRAIN_WAKE_EVERY == 0;
         if run_settle {
             let passes = if deep {
-                GRAIN_SETTLE_PASSES
+                if interactive {
+                    GRAIN_SETTLE_PASSES_FPS_DEEP
+                } else {
+                    GRAIN_SETTLE_PASSES
+                }
             } else {
                 GRAIN_SETTLE_PASSES_SHALLOW
             };
@@ -530,7 +620,9 @@ fn tick_with_life_inner(
                 local.deep_settle_ticks += 1;
             }
             let t0 = profile.then(Instant::now);
-            settle_loose_grains_regions(world, &grain_active, rooted, passes);
+            // Rise already teleported buoyant litter — do not one-cell
+            // bob through wet Air inside settle (Organic flood FPS spike).
+            settle_loose_grains_regions_ex(world, &grain_active, rooted, passes, false);
             if let (true, Some(t0)) = (profile, t0) {
                 local.settle += t0.elapsed();
             }
@@ -559,22 +651,52 @@ fn tick_with_life_inner(
             let sink = filter_loose_regions(world, &plan_active(world));
             if !sink.is_empty() {
                 let t0 = profile.then(Instant::now);
-                settle_loose_grains_regions(world, &sink, rooted, GRAIN_SETTLE_PASSES_PUNCH);
+                settle_loose_grains_regions_ex(
+                    world,
+                    &sink,
+                    rooted,
+                    GRAIN_SETTLE_PASSES_PUNCH,
+                    false,
+                );
                 if let (true, Some(t0)) = (profile, t0) {
                     local.settle += t0.elapsed();
                 }
             }
         }
     }
-    // Clear submerged litter lines, then let rafts drink — shared litter scan.
-    {
-        let t0 = profile.then(Instant::now);
-        match grain {
-            Some(g) => super::grain::rise_and_soak_buoyant_litter_cfg(world, g),
-            None => super::grain::rise_and_soak_buoyant_litter(world),
+
+    // Competent rock bodies: fall, impact shatter, COM tip.
+    // Floating wake is mandatory — F1 defers competent rock to this pass, so
+    // sky boulders hang forever if they are never re-dirtied.
+    if failure.enable_competent_fall {
+        if world.tick % GRAIN_WAKE_EVERY == 0 {
+            super::competent_fall::wake_floating_competent(world);
+            let dirty = plan_active(world);
+            let coords: Vec<_> = if dirty.is_empty() {
+                flow_active.iter().map(|ac| ac.coord).collect()
+            } else {
+                dirty.iter().map(|ac| ac.coord).collect()
+            };
+            if !coords.is_empty() {
+                super::competent_fall::wake_competent_bodies(world, &coords);
+            }
         }
-        if let (true, Some(t0)) = (profile, t0) {
-            local.rise_soak += t0.elapsed();
+        let body_active = plan_active(world);
+        if !body_active.is_empty() {
+            let t0 = profile.then(Instant::now);
+            let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
+            let competent_cfg = competent
+                .copied()
+                .unwrap_or_else(super::competent_fall::CompetentFallConfig::default);
+            let _ = super::competent_fall::apply_competent_fall_regions(
+                world,
+                &body_active,
+                &competent_cfg,
+                fps_path,
+            );
+            if let (true, Some(t0)) = (profile, t0) {
+                local.settle += t0.elapsed();
+            }
         }
     }
 

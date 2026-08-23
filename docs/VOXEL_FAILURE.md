@@ -170,6 +170,34 @@ side Air):
 - ✅ Dry inland Stone cliffs stay scenic; wet demand-2 lips can F2b → LooseRock.
 - Rock-face shear is **off by default** (Tab → Geotech); chance + event cap tune melt rate.
 
+### F2c — Competent rock rigid fall (implemented)
+
+Industry-style **connected-component rigid bodies** on the voxel grid:
+
+- **Static vs dynamic** — only air/soft-adjacent competent clusters up to
+  `MAX_DYNAMIC_BODY_CELLS` are simulated; larger same-material masses stay
+  as static strata. Flood gathers up to `FLOOD_GATHER_CAP` then applies a
+  **morphological open** (erode→label→dilate) so touching boulder chains
+  split into separate bodies instead of freezing as one welded pillar.
+  Residual pebble necks are peeled; only editor paint / geology should weld.
+- **Free fall** — multi-cell drop through Air (rocks sink in lakes).
+- **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds.
+- **Tip vs slide** — 90° pivot only when COM overhangs *and* the bed drops the
+  same way; tiny/needle bodies never tip (kills flat-floor flip-flop). Otherwise
+  slide down-slope (tiny bodies only with a real step down).
+- **Crush specs** — large movers pulverize tiny competent clusters
+  (`≤ CRUSH_SPEC_MAX`) instead of welding or getting stuck on them.
+- **Thin fracture** — long thin sticks/slabs snap at 1-cell necks into debris.
+- **Cargo** — soft/loose cells with ≥2 neighbours on the body ride with tip/slide.
+- **Mobile mark** — fallen / tipped / slid rock sets `CellFlags::MOBILE_ROCK`.
+  Flood-fill only merges same mobility class, so a boulder cannot glue into
+  unmarked painted strata or gain mass by contact.
+
+Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
+F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
+A cheap **floating wake** (air-below only) re-dirties sky boulders every few
+ticks so they cannot hang when the dirty set is empty.
+
 ---
 
 ## Phase F3 — Overburden compaction (compression + water)
