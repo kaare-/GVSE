@@ -175,7 +175,8 @@ side Air):
 Stone / Limestone over Air no longer peel via F1 bottom-up roof collapse.
 Connected bodies (8-neighbour union) fall as rigid clusters:
 
-1. **Free fall** — multi-cell drop per tick through Air (including lake water).
+1. **Free fall** — multi-cell drop per tick through dry Air; standing water
+   films block descent (bodies rest on lakes).
 2. **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds when
    fall distance ≥ `min_impact_fall_cells`.
 3. **Slope roll + embed** — roll on sand/soil when fully supported; whole bottom
