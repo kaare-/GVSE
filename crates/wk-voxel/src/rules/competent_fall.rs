@@ -82,6 +82,7 @@ struct Component {
   cells: Vec<(i32, i32, Cell)>,
   set: HashSet<(i32, i32)>,
   min_y: i32,
+  max_y: i32,
 }
 
 fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
@@ -135,7 +136,7 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
 
   for i in 0..cells.len() {
     let (gx, gy, _) = cells[i];
-    for (dx, dy) in [(0_i32, 1), (1, 0), (0, -1), (-1, 0)] {
+    for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
       let nx = world.wrap_x(gx + dx);
       let ny = gy + dy;
       if let Some(&j) = index.get(&(nx, ny)) {
@@ -158,7 +159,13 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
     .map(|cells| {
       let set: HashSet<_> = cells.iter().map(|(x, y, _)| (*x, *y)).collect();
       let min_y = cells.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
-      Component { cells, set, min_y }
+      let max_y = cells.iter().map(|(_, y, _)| *y).max().unwrap_or(0);
+      Component {
+        cells,
+        set,
+        min_y,
+        max_y,
+      }
     })
     .collect();
   out.sort_by_key(|c| c.min_y);
@@ -218,17 +225,13 @@ fn translate_component(world: &mut World, comp: &Component, dx: i32, dy: i32) ->
   if !can_translate(world, comp, dx, dy) {
     return false;
   }
-  let mut moves: Vec<(i32, i32, Cell)> = comp
+  let moves: Vec<(i32, i32, Cell)> = comp
     .cells
     .iter()
     .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, *c))
     .collect();
-  // Clear top-first when falling so overlapping destination cells stay free.
-  if dy < 0 {
-    moves.sort_by_key(|(_, y, _)| std::cmp::Reverse(*y));
-  } else {
-    moves.sort_by_key(|(_, y, _)| *y);
-  }
+  // Snapshot destinations, then clear sources, then write — never read a cell
+  // we just cleared while the body is mid-move (fixes top-row separation).
   for (x, y, _) in &comp.cells {
     world.set_cell(*x, *y, Cell::air());
   }
@@ -245,6 +248,21 @@ fn is_floating(world: &World, comp: &Component) -> bool {
     && face.iter().all(|(x, y, _)| match world.get_cell(*x, y - 1) {
       None => true,
       Some(c) => passable_for_body(&c),
+    })
+}
+
+/// Every bottom-face cell rests on solid support (body landed as a unit).
+fn is_fully_supported(world: &World, comp: &Component) -> bool {
+  let face = bottom_face(comp);
+  !face.is_empty()
+    && face.iter().all(|(x, y, _)| {
+      matches!(
+        support_below(world, *x, *y),
+        Some((bed, _)) if !passable_for_body(&Cell {
+          material: bed,
+          ..Cell::default()
+        })
+      )
     })
 }
 
@@ -342,7 +360,10 @@ fn impact_shatter(
   applied
 }
 
-fn soft_embed(world: &mut World, comp: &Component, cfg: &CompetentFallConfig) -> u32 {
+fn soft_embed(world: &mut World, comp: &Component) -> u32 {
+  if !is_fully_supported(world, comp) || !rests_on_soft_bed(world, comp) {
+    return 0;
+  }
   let mut applied = 0u32;
   let mut cols: HashSet<i32> = HashSet::new();
   for (gx, gy, cell) in bottom_face(comp) {
@@ -371,9 +392,6 @@ fn soft_embed(world: &mut World, comp: &Component, cfg: &CompetentFallConfig) ->
     );
     world.touch_dirty(gx, gy);
     applied += 1;
-    if applied >= cfg.max_impact_cells {
-      break;
-    }
   }
   applied
 }
@@ -526,7 +544,7 @@ fn expand_competent_regions(active: &[ActiveChunk], drop_budget: i32) -> Vec<Act
     let x0 = ac.rect.x0 as i32 - pad_x;
     let x1 = ac.rect.x1 as i32 + pad_x;
     let y0 = ac.rect.y0 as i32 - drop;
-    let y1 = ac.rect.y1 as i32 + 1;
+    let y1 = ac.rect.y1 as i32 + 3;
     // Home chunk.
     absorb(&mut map, ac.coord, x0, y0, x1, y1);
     // Neighbours when the inflate crosses a seam.
@@ -592,6 +610,48 @@ fn expand_competent_regions(active: &[ActiveChunk], drop_budget: i32) -> Vec<Act
       .then(a.coord.cx.cmp(&b.coord.cx))
   });
   out
+}
+
+fn expand_regions_to_components(
+  world: &World,
+  components: &[Component],
+  drop_budget: i32,
+) -> Vec<ActiveChunk> {
+  if components.is_empty() {
+    return Vec::new();
+  }
+  let w = CHUNK_CELLS_W as i32;
+  let h = CHUNK_CELLS_H as i32;
+  let mut by_chunk: HashMap<ChunkCoord, Rect> = HashMap::new();
+  for comp in components {
+    for (gx, gy, _) in &comp.cells {
+      let cx = gx.div_euclid(w);
+      let cy = gy.div_euclid(h);
+      let lx = gx.rem_euclid(w) as u8;
+      let ly = gy.rem_euclid(h) as u8;
+      let coord = ChunkCoord::new(cx, cy);
+      by_chunk
+        .entry(coord)
+        .and_modify(|r| {
+          r.expand_to_include(lx, ly);
+        })
+        .or_insert(Rect {
+          x0: lx,
+          y0: ly,
+          x1: lx,
+          y1: ly,
+        });
+    }
+  }
+  let seeds: Vec<ActiveChunk> = by_chunk
+    .into_iter()
+    .map(|(coord, rect)| ActiveChunk { coord, rect })
+    .collect();
+  let expanded = expand_competent_regions(&seeds, drop_budget);
+  expanded
+    .into_iter()
+    .filter(|ac| world.chunks.contains_key(&ac.coord))
+    .collect()
 }
 
 fn competent_active_regions(world: &World, active: &[ActiveChunk], drop_budget: i32) -> Vec<ActiveChunk> {
@@ -670,7 +730,7 @@ pub fn apply_competent_fall_regions(
   } else {
     cfg.max_passes.max(COMPETENT_FALL_PASSES_FPS)
   } as i32;
-  let regions = competent_active_regions(world, active, max_drop);
+  let mut regions = competent_active_regions(world, active, max_drop);
   if regions.is_empty() {
     return CompetentFallStats::default();
   }
@@ -703,6 +763,20 @@ pub fn apply_competent_fall_regions(
       if is_floating(world, &comp) {
         continue;
       }
+      // Wait until every bottom cell has support — avoids uneven per-column
+      // embed/shatter while the body is still bridging a slope or gap.
+      if !is_fully_supported(world, &comp) {
+        if stats.roll_moves < cfg.max_roll_events {
+          if let Some((dx, dy)) = try_roll_downhill(world, &comp, cfg) {
+            if translate_component(world, &comp, dx, dy) {
+              stats.roll_moves += 1;
+              advance_streak(&mut fall_streak, anchor, dx, dy);
+              moved = true;
+            }
+          }
+        }
+        continue;
+      }
       let streak = *fall_streak.get(&anchor).unwrap_or(&0);
       if rests_on_soft_bed(world, &comp) {
         if stats.roll_moves < cfg.max_roll_events {
@@ -715,7 +789,7 @@ pub fn apply_competent_fall_regions(
             }
           }
         }
-        let embedded = soft_embed(world, &comp, cfg);
+        let embedded = soft_embed(world, &comp);
         if embedded > 0 {
           stats.embed_cells += embedded;
           moved = true;
@@ -741,7 +815,12 @@ pub fn apply_competent_fall_regions(
         }
       }
     }
-    if !moved {
+    if moved {
+      let refreshed = expand_regions_to_components(world, &build_components(world, &regions), max_drop);
+      if !refreshed.is_empty() {
+        regions = refreshed;
+      }
+    } else {
       break;
     }
   }
@@ -771,6 +850,36 @@ mod tests {
       for y in y0..y0 + hgt {
         w.set_cell(x, y, Cell::solid(MaterialId::Stone));
       }
+    }
+  }
+
+  #[test]
+  fn tall_blob_stays_connected_after_fall() {
+    let mut w = World::new(9);
+    stamp_blob(&mut w, 4, 50, 3, 5);
+    let cfg = CompetentFallConfig {
+      max_passes: 48,
+      ..CompetentFallConfig::default()
+    };
+    apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    let stones: Vec<(i32, i32)> = (4..7)
+      .flat_map(|x| (0..60).map(move |y| (x, y)))
+      .filter(|&(x, y)| {
+        w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone)
+      })
+      .collect();
+    assert_eq!(stones.len(), 15, "all 15 stone cells must survive the fall");
+    for x in 4..7 {
+      let ys: Vec<i32> = stones.iter().filter(|(sx, _)| *sx == x).map(|(_, y)| *y).collect();
+      if ys.len() < 2 {
+        continue;
+      }
+      let span = ys.iter().max().unwrap() - ys.iter().min().unwrap() + 1;
+      assert_eq!(
+        span as usize,
+        ys.len(),
+        "column {x} must not have internal air gaps (ys={ys:?})"
+      );
     }
   }
 
