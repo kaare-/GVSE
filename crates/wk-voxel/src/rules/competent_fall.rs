@@ -31,6 +31,10 @@ pub const COMPETENT_TOPOLOGY_PASSES: u32 = 3;
 pub const MAX_DYNAMIC_BODY_CELLS: usize = 384;
 /// Hard cap on bodies processed per tick (FPS guard).
 pub const MAX_BODIES_PER_TICK: usize = 8;
+/// Contact "pebbles" this small never glue onto a larger body (editor/geology only).
+pub const PEBBLE_SPLIT_MAX: usize = 4;
+/// Main mass must be at least this big before pebble necks are split off.
+pub const PEBBLE_SPLIT_HOST_MIN: usize = 12;
 
 /// Live-tunable competent-body knobs (Tab → Geotech).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -138,7 +142,8 @@ fn has_free_neighbor(world: &World, gx: i32, gy: i32) -> bool {
 }
 
 /// Extract boulder-sized dynamic bodies only (CCRB). Strata larger than
-/// [`MAX_DYNAMIC_BODY_CELLS`] stay static and are never simulated.
+/// [`MAX_DYNAMIC_BODY_CELLS`] stay static. Contact with stray pebbles does
+/// **not** glue — weak necks are split (only paint / geology should weld).
 fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
   let mut visited: HashSet<(i32, i32)> = HashSet::new();
   let mut out: Vec<Component> = Vec::new();
@@ -169,6 +174,7 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
         queue.push_back((gx, gy));
         visited.insert((gx, gy));
         let mut oversized = false;
+        // 4-connected only — diagonal touch must not weld separate rocks.
         while let Some((cx, cy)) = queue.pop_front() {
           let Some(cur) = world.get_cell(cx, cy) else {
             continue;
@@ -181,16 +187,7 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
             oversized = true;
             break;
           }
-          for (dx, dy) in [
-            (1, 0),
-            (0, 1),
-            (-1, 0),
-            (0, -1),
-            (1, 1),
-            (1, -1),
-            (-1, 1),
-            (-1, -1),
-          ] {
+          for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
             let nx = world.wrap_x(cx + dx);
             let ny = cy + dy;
             if !visited.insert((nx, ny)) {
@@ -205,7 +202,6 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
           }
         }
         if oversized {
-          // Finish marking the strata so we don't restart from every seed.
           while let Some((cx, cy)) = queue.pop_front() {
             for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
               let nx = world.wrap_x(cx + dx);
@@ -226,19 +222,20 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
         if cells.is_empty() {
           continue;
         }
-        let set: HashSet<_> = cells.iter().map(|(x, y, _)| (*x, *y)).collect();
-        let min_y = cells.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
-        let max_y = cells.iter().map(|(_, y, _)| *y).max().unwrap_or(0);
-        out.push(Component {
-          cells,
-          set,
-          min_y,
-          max_y,
-        });
+        for piece in split_contact_pebbles(cells) {
+          let set: HashSet<_> = piece.iter().map(|(x, y, _)| (*x, *y)).collect();
+          let min_y = piece.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
+          let max_y = piece.iter().map(|(_, y, _)| *y).max().unwrap_or(0);
+          out.push(Component {
+            cells: piece,
+            set,
+            min_y,
+            max_y,
+          });
+        }
       }
     }
   }
-  // Floating bodies first (must fall), then lower seats — then FPS cap.
   out.sort_by(|a, b| {
     let air_below = |c: &Component| {
       c.cells.iter().any(|(x, y, _)| match world.get_cell(*x, y - 1) {
@@ -253,6 +250,88 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
     }
   });
   out.truncate(MAX_BODIES_PER_TICK);
+  out
+}
+
+/// Peel pebble-sized contact clusters off a larger host. Simulation contact
+/// must not weld rocks; only editor paint / geology should.
+fn split_contact_pebbles(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cell)>> {
+  if cells.len() < PEBBLE_SPLIT_HOST_MIN + 1 {
+    return vec![cells];
+  }
+  let mut by_pos: HashMap<(i32, i32), Cell> = cells.into_iter().map(|(x, y, c)| ((x, y), c)).collect();
+  let mut remaining: HashSet<(i32, i32)> = by_pos.keys().copied().collect();
+  let mut peeled: Vec<Vec<(i32, i32, Cell)>> = Vec::new();
+
+  loop {
+    if remaining.len() < PEBBLE_SPLIT_HOST_MIN + 1 {
+      break;
+    }
+    let adj = |p: (i32, i32)| {
+      [(1, 0), (0, 1), (-1, 0), (0, -1)]
+        .into_iter()
+        .map(|(dx, dy)| (p.0 + dx, p.1 + dy))
+        .filter(|n| remaining.contains(n))
+        .collect::<Vec<_>>()
+    };
+    // Find a degree-1 neck: small side flood size <= PEBBLE_SPLIT_MAX.
+    let mut split_at: Option<(i32, i32)> = None;
+    let mut small_side: Vec<(i32, i32)> = Vec::new();
+    for &p in &remaining {
+      let ns = adj(p);
+      if ns.len() != 1 {
+        continue;
+      }
+      let bridge = ns[0];
+      // Flood from p without crossing back through bridge first step already done.
+      let mut seen = HashSet::new();
+      let mut q = VecDeque::new();
+      q.push_back(p);
+      seen.insert(p);
+      while let Some(c) = q.pop_front() {
+        for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+          let n = (c.0 + dx, c.1 + dy);
+          if n == bridge && c == p {
+            continue;
+          }
+          if !remaining.contains(&n) || !seen.insert(n) {
+            continue;
+          }
+          q.push_back(n);
+        }
+      }
+      if seen.len() <= PEBBLE_SPLIT_MAX && remaining.len() - seen.len() >= PEBBLE_SPLIT_HOST_MIN {
+        split_at = Some(p);
+        small_side = seen.into_iter().collect();
+        break;
+      }
+    }
+    let Some(_) = split_at else {
+      break;
+    };
+    let mut piece = Vec::new();
+    for p in small_side {
+      remaining.remove(&p);
+      if let Some(c) = by_pos.remove(&p) {
+        piece.push((p.0, p.1, c));
+      }
+    }
+    if !piece.is_empty() {
+      peeled.push(piece);
+    }
+  }
+
+  let mut host = Vec::new();
+  for p in remaining {
+    if let Some(c) = by_pos.remove(&p) {
+      host.push((p.0, p.1, c));
+    }
+  }
+  let mut out = Vec::new();
+  if !host.is_empty() {
+    out.push(host);
+  }
+  out.extend(peeled);
   out
 }
 
@@ -584,6 +663,10 @@ fn can_pivot_roll(world: &World, comp: &Component, pivot: (i32, i32), dx: i32) -
     let Some(dst) = world.get_cell(tx, ty) else {
       return false;
     };
+    // Never rotate into other competent rock (contact ≠ weld).
+    if is_competent_rock(dst.material) {
+      return false;
+    }
     if !roll_destination_ok(world, tx, ty, &dst, &comp.set) {
       return false;
     }
@@ -641,11 +724,44 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
   }
 }
 
+/// Loose / soft cells nested against the rock (≥2 body neighbours) ride with it.
+fn gather_cargo(world: &World, comp: &Component) -> Vec<(i32, i32, Cell)> {
+  let mut cargo = Vec::new();
+  let mut seen = HashSet::new();
+  for &(gx, gy, _) in &comp.cells {
+    for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+      let nx = world.wrap_x(gx + dx);
+      let ny = gy + dy;
+      if comp.set.contains(&(nx, ny)) || !seen.insert((nx, ny)) {
+        continue;
+      }
+      let Some(c) = world.get_cell(nx, ny) else {
+        continue;
+      };
+      if !is_roll_displaceable(c.material) {
+        continue;
+      }
+      let mut body_n = 0;
+      for (ox, oy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+        if comp.set.contains(&(world.wrap_x(nx + ox), ny + oy)) {
+          body_n += 1;
+        }
+      }
+      if body_n >= 2 {
+        cargo.push((nx, ny, c));
+      }
+    }
+  }
+  cargo
+}
+
 fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), dx: i32) -> bool {
   if !can_pivot_roll(world, comp, pivot, dx) {
     return false;
   }
-  let moves: Vec<(i32, i32, Cell)> = comp
+  let cargo = gather_cargo(world, comp);
+  let cargo_set: HashSet<(i32, i32)> = cargo.iter().map(|(x, y, _)| (*x, *y)).collect();
+  let mut moves: Vec<(i32, i32, Cell)> = comp
     .cells
     .iter()
     .map(|(gx, gy, c)| {
@@ -653,13 +769,36 @@ fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), 
       (world.wrap_x(tx), ty, *c)
     })
     .collect();
-  let sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
+  let mut sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
+  for (gx, gy, c) in &cargo {
+    let (tx, ty) = rotate_pos(pivot.0, pivot.1, *gx, *gy, dx);
+    if ty < 0 {
+      continue; // leave cargo behind
+    }
+    let tx = world.wrap_x(tx);
+    if comp.set.contains(&(tx, ty)) || cargo_set.contains(&(tx, ty)) {
+      moves.push((tx, ty, *c));
+      sources.push((*gx, *gy));
+      continue;
+    }
+    match world.get_cell(tx, ty) {
+      Some(dst)
+        if !is_competent_rock(dst.material)
+          && roll_destination_ok(world, tx, ty, &dst, &comp.set) =>
+      {
+        moves.push((tx, ty, *c));
+        sources.push((*gx, *gy));
+      }
+      _ => {} // leave behind — powder settle will handle it
+    }
+  }
   write_roll_cells(world, &sources, moves);
   true
 }
 
-/// Industry CCRB tip direction: COM outside support base, else steep downhill.
-fn tip_dir(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<i32> {
+/// Tip only when COM leaves the support base (true tumble). Steep beds without
+/// overhang use slide instead — stops forever tip↔tip oscillation on slopes.
+fn tip_dir(world: &World, comp: &Component, _cfg: &CompetentFallConfig) -> Option<i32> {
   let contacts: Vec<(i32, i32)> = bottom_face(comp)
     .into_iter()
     .filter(|(x, y, _)| {
@@ -677,15 +816,13 @@ fn tip_dir(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option
   let com_x = (comp.cells.iter().map(|(x, _, _)| *x as i64).sum::<i64>() / n) as i32;
   let s_min = contacts.iter().map(|(x, _)| *x).min().unwrap();
   let s_max = contacts.iter().map(|(x, _)| *x).max().unwrap();
-  // Classic overhang: centre of mass past the support edge → tip that way.
   if com_x < s_min {
     return Some(-1);
   }
   if com_x > s_max {
     return Some(1);
   }
-  // Steep bed under the contact patch (slope tumble even when COM is inside).
-  downhill_roll_dir(world, comp, cfg)
+  None
 }
 
 fn try_pivot_roll(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<i32> {
@@ -699,6 +836,68 @@ fn try_pivot_roll(world: &World, comp: &Component, cfg: &CompetentFallConfig) ->
   } else {
     None
   }
+}
+
+fn can_slide(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
+  let cargo = gather_cargo(world, comp);
+  let mut moving: HashSet<(i32, i32)> = comp.set.clone();
+  for (x, y, _) in &cargo {
+    moving.insert((*x, *y));
+  }
+  for (gx, gy, _) in comp.cells.iter().chain(cargo.iter()) {
+    let tx = world.wrap_x(gx + dx);
+    let ty = gy + dy;
+    if ty < 0 {
+      return false;
+    }
+    if moving.contains(&(tx, ty)) {
+      continue;
+    }
+    let Some(dst) = world.get_cell(tx, ty) else {
+      return false;
+    };
+    // Other competent rock is a solid obstacle — never glue by sliding into it.
+    if is_competent_rock(dst.material) {
+      return false;
+    }
+    if !roll_destination_ok(world, tx, ty, &dst, &comp.set) {
+      return false;
+    }
+  }
+  true
+}
+
+fn slide_component(world: &mut World, comp: &Component, dx: i32, dy: i32) -> bool {
+  if !can_slide(world, comp, dx, dy) {
+    return false;
+  }
+  let cargo = gather_cargo(world, comp);
+  let mut moves: Vec<(i32, i32, Cell)> = comp
+    .cells
+    .iter()
+    .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, *c))
+    .collect();
+  for (x, y, c) in &cargo {
+    moves.push((world.wrap_x(x + dx), y + dy, *c));
+  }
+  let mut sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
+  sources.extend(cargo.iter().map(|(x, y, _)| (*x, *y)));
+  write_roll_cells(world, &sources, moves);
+  true
+}
+
+fn try_slide(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<(i32, i32)> {
+  if is_floating(world, comp) {
+    return None;
+  }
+  let dx = downhill_roll_dir(world, comp, cfg)?;
+  // Gentle face follow: step down-slope, then sideways, then one-cell hop.
+  for &(mx, my) in &[(dx, -1), (dx, 0), (dx, -2)] {
+    if can_slide(world, comp, mx, my) {
+      return Some((mx, my));
+    }
+  }
+  None
 }
 
 /// True when a seated body still has a downhill neighbor and should stay awake.
@@ -1046,7 +1245,7 @@ fn apply_roll(
   world: &mut World,
   regions: &[ActiveChunk],
   comp: &Component,
-  _anchor: (i32, i32),
+  anchor: (i32, i32),
   cfg: &CompetentFallConfig,
   fall_streak: &mut HashMap<(i32, i32), u32>,
   stats: &mut CompetentFallStats,
@@ -1054,17 +1253,26 @@ fn apply_roll(
   if stats.roll_moves >= cfg.max_roll_events {
     return false;
   }
-  // Pivot tip only — no rigid slide (that reads as cheese-grater scraping).
-  let Some(dx) = try_pivot_roll(world, comp, cfg) else {
-    return false;
-  };
-  let pivot = roll_pivot(comp, dx);
-  if !pivot_roll_component(world, comp, pivot, dx) {
-    return false;
+  // 1) Tip when COM overhangs the support base (true rotation).
+  if let Some(dx) = try_pivot_roll(world, comp, cfg) {
+    let pivot = roll_pivot(comp, dx);
+    if pivot_roll_component(world, comp, pivot, dx) {
+      stats.roll_moves += 1;
+      settle_after_roll(world, regions, pivot, fall_streak, stats);
+      return true;
+    }
   }
-  stats.roll_moves += 1;
-  settle_after_roll(world, regions, pivot, fall_streak, stats);
-  true
+  // 2) Otherwise slide down-slope (with embedded loose cargo).
+  if let Some((dx, dy)) = try_slide(world, comp, cfg) {
+    if slide_component(world, comp, dx, dy) {
+      stats.roll_moves += 1;
+      let new_anchor = (anchor.0 + dx, anchor.1 + dy);
+      advance_streak(fall_streak, anchor, dx, dy);
+      settle_after_roll(world, regions, new_anchor, fall_streak, stats);
+      return true;
+    }
+  }
+  false
 }
 
 fn settle_after_roll(
@@ -1157,9 +1365,9 @@ pub fn apply_competent_fall_regions(
         }
         continue;
       }
-      // Terrain-scale masses are already filtered in build_components.
+      // Tip on COM overhang; slide on slope without overhang.
       let streak = *fall_streak.get(&anchor).unwrap_or(&0);
-      if tip_dir(world, &comp, cfg).is_some() {
+      if tip_dir(world, &comp, cfg).is_some() || downhill_roll_dir(world, &comp, cfg).is_some() {
         if apply_roll(
           world,
           &regions,
@@ -1570,5 +1778,82 @@ mod tests {
       y_top < 55,
       "floating boulder must fall after wake (top y={y_top})"
     );
+  }
+
+  #[test]
+  fn contact_pebble_does_not_weld_to_boulder() {
+    let cells: Vec<(i32, i32, Cell)> = {
+      let mut v = Vec::new();
+      for x in 0..5 {
+        for y in 0..5 {
+          v.push((x, y, Cell::solid(MaterialId::Stone)));
+        }
+      }
+      // Single-cell neck to a 2-cell pebble.
+      v.push((5, 2, Cell::solid(MaterialId::Stone)));
+      v.push((6, 2, Cell::solid(MaterialId::Stone)));
+      v.push((7, 2, Cell::solid(MaterialId::Stone)));
+      v
+    };
+    let pieces = split_contact_pebbles(cells);
+    assert!(
+      pieces.len() >= 2,
+      "pebble neck must split off (pieces={})",
+      pieces.len()
+    );
+    let sizes: Vec<usize> = pieces.iter().map(|p| p.len()).collect();
+    assert!(
+      sizes.iter().any(|&s| s <= PEBBLE_SPLIT_MAX + 1),
+      "expected a small peeled piece, sizes={sizes:?}"
+    );
+    assert!(
+      sizes.iter().any(|&s| s >= PEBBLE_SPLIT_HOST_MIN),
+      "expected host mass to remain, sizes={sizes:?}"
+    );
+  }
+
+  #[test]
+  fn tip_requires_com_overhang_not_slope_alone() {
+    let mut w = World::new(11);
+    for x in 0..12 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      let h = 4 + (11 - x).min(6);
+      for y in 1..=h {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    // 3×3 seated fully on sand — COM inside support even on a slope.
+    stamp_blob(&mut w, 5, 11, 3, 3);
+    // Drop it onto the bed.
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_roll_events: 0,
+      ..CompetentFallConfig::default()
+    };
+    apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    let regions = competent_active_regions(&w, &[], 8);
+    let comps = build_components(&w, &regions);
+    let Some(comp) = comps.iter().find(|c| c.cells.len() >= 9) else {
+      // May have slid; just ensure tip_dir is conservative when supported.
+      return;
+    };
+    if is_fully_supported(&w, comp) {
+      let tip = tip_dir(&w, comp, &CompetentFallConfig::default());
+      // Slope may exist, but without COM overhang tip must be None.
+      if tip.is_some() {
+        let contacts: Vec<_> = bottom_face(comp)
+          .into_iter()
+          .filter(|(x, y, _)| support_below(&w, *x, *y).is_some())
+          .collect();
+        let n = comp.cells.len() as i64;
+        let com_x = (comp.cells.iter().map(|(x, _, _)| *x as i64).sum::<i64>() / n) as i32;
+        let s_min = contacts.iter().map(|(x, _, _)| *x).min().unwrap();
+        let s_max = contacts.iter().map(|(x, _, _)| *x).max().unwrap();
+        assert!(
+          com_x < s_min || com_x > s_max,
+          "tip only with COM overhang (com={com_x}, support={s_min}..{s_max})"
+        );
+      }
+    }
   }
 }

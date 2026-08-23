@@ -176,15 +176,19 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 
 - **Static vs dynamic** — only air/soft-adjacent competent clusters up to
   `MAX_DYNAMIC_BODY_CELLS` are simulated; larger same-material masses stay
-  as static strata (same material union, so stone boulders do not glue into
-  limestone).
+  as static strata. Flood is **4-connected**; pebble-sized contact necks are
+  split off so simulation touch never welds rocks (only editor paint / deep
+  geology should).
 - **Free fall** — multi-cell drop through Air (rocks sink in lakes).
 - **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds.
-- **Tip** — 90° pivot when COM leaves the support base or the bed drops
-  downhill. No slide-shred / soft-embed (those were the cheese-grater look).
+- **Tip vs slide** — 90° pivot only when COM leaves the support base; otherwise
+  slide down-slope. Stops forever tip↔tip oscillation on steep seats.
+- **Cargo** — soft/loose cells with ≥2 neighbours on the body ride with tip/slide.
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
+A cheap **floating wake** (air-below only) re-dirties sky boulders every few
+ticks so they cannot hang when the dirty set is empty.
 
 ---
 
