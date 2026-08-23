@@ -746,9 +746,12 @@ pub fn apply_competent_fall_regions(
     let mut moved = false;
     for comp in components {
       let anchor = comp_anchor(&comp);
-      // Only the first pass does a long free-fall jump (scan rect is sized for it).
+      // Pass 0: long free-fall jump; later passes: shorter jumps while still
+      // fully airborne (very tall sky paint without waiting extra ticks).
       let drop = if pass == 0 {
         max_drop_distance(world, &comp, max_drop)
+      } else if is_floating(world, &comp) {
+        max_drop_distance(world, &comp, 16.min(max_drop))
       } else {
         0
       };

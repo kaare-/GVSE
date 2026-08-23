@@ -588,6 +588,7 @@ async fn main() {
                 rooted.as_ref(),
                 Some(&settings.grain),
                 Some(&settings.fungi),
+                Some(&settings.competent_fall),
             );
             set_parallel_enabled(true);
             // Crude CO₂ buckets: surface Organic oxidation + atm↔lake exchange.

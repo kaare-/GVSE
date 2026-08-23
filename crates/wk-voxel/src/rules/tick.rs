@@ -254,7 +254,7 @@ pub fn tick_with_configs_and_geotech(
     failure: &crate::failure::FailureConfig,
     geotech: Option<&crate::geotech_map::GeotechMap>,
 ) {
-    let _ = tick_with_life(world, perf, failure, geotech, None, None, None);
+    let _ = tick_with_life(world, perf, failure, geotech, None, None, None, None);
 }
 
 /// [`tick_with_configs_and_geotech`] plus optional living-root cells for
@@ -272,8 +272,9 @@ pub fn tick_with_life(
     rooted: Option<&HashSet<(i32, i32)>>,
     grain: Option<&super::grain::GrainConfig>,
     fungi: Option<&crate::fungi::FungiConfig>,
+    competent: Option<&super::competent_fall::CompetentFallConfig>,
 ) -> crate::failure::FailureStats {
-    tick_with_life_inner(world, perf, failure, geotech, rooted, grain, fungi, None)
+    tick_with_life_inner(world, perf, failure, geotech, rooted, grain, fungi, competent, None)
 }
 
 /// [`tick_with_life`] while accumulating [`PhysicsTimings`].
@@ -285,6 +286,7 @@ pub fn tick_with_life_profiled(
     rooted: Option<&HashSet<(i32, i32)>>,
     grain: Option<&super::grain::GrainConfig>,
     fungi: Option<&crate::fungi::FungiConfig>,
+    competent: Option<&super::competent_fall::CompetentFallConfig>,
     timings: &mut PhysicsTimings,
 ) -> crate::failure::FailureStats {
     tick_with_life_inner(
@@ -295,6 +297,7 @@ pub fn tick_with_life_profiled(
         rooted,
         grain,
         fungi,
+        competent,
         Some(timings),
     )
 }
@@ -309,6 +312,7 @@ pub fn tick_with_perf_profiled(
         world,
         perf,
         &crate::failure::FailureConfig::default(),
+        None,
         None,
         None,
         None,
@@ -353,6 +357,7 @@ fn tick_with_life_inner(
     rooted: Option<&HashSet<(i32, i32)>>,
     grain: Option<&super::grain::GrainConfig>,
     fungi: Option<&crate::fungi::FungiConfig>,
+    competent: Option<&super::competent_fall::CompetentFallConfig>,
     mut timings: Option<&mut PhysicsTimings>,
 ) -> crate::failure::FailureStats {
     // Opt-in cell-sat inventory (debug only). Atmosphere stores are
@@ -681,7 +686,9 @@ fn tick_with_life_inner(
         if !body_active.is_empty() {
             let t0 = profile.then(Instant::now);
             let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
-            let competent_cfg = super::competent_fall::CompetentFallConfig::default();
+            let competent_cfg = competent
+                .copied()
+                .unwrap_or_else(super::competent_fall::CompetentFallConfig::default);
             let _ = super::competent_fall::apply_competent_fall_regions(
                 world,
                 &body_active,

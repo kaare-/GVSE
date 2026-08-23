@@ -7,7 +7,7 @@ use macroquad::ui::{hash, root_ui, widgets};
 use wk_material::{MaterialId, MaterialRegistry, MATERIAL_COUNT};
 use wk_voxel::{
     list_all_presets, load_preset, save_preset, sanitize_preset_name, CarbonBudget, CarbonConfig,
-    ClimateConfig, CloudConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, Genome,
+    ClimateConfig, CloudConfig, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, Genome,
     GrainConfig, KarstConfig, OrographicConfig, PerfConfig, PhaseConfig, PlantGenePreset,
     PlantGrowthCaps, RainConfig, SimPreset, SporeBankConfig, TempConfig, World, WorldgenParams,
     CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
@@ -134,6 +134,8 @@ pub struct SimSettings {
     pub perf: PerfConfig,
     /// Geotech failure (Tab → Geotech). Roof collapse on by default.
     pub failure: FailureConfig,
+    /// Competent rock rigid-body knobs (Tab → Geotech).
+    pub competent_fall: CompetentFallConfig,
     /// Scratch f32 for max roof events slider.
     pub max_roof_events: f32,
     /// Scratch f32 for max shear events slider.
@@ -142,6 +144,12 @@ pub struct SimSettings {
     pub max_compaction_events: f32,
     /// Scratch f32 for shear chance (percent UI → per-mille).
     pub shear_chance_pct: f32,
+    /// Scratch f32 for competent fall max drop / tick.
+    pub competent_max_drop: f32,
+    /// Scratch f32 for competent impact threshold (fall cells).
+    pub competent_min_impact: f32,
+    /// Scratch f32 for max slope rolls / tick.
+    pub competent_max_rolls: f32,
     pub wind_vx: f32,
     /// Natural variance 0..1 — wind force and direction wander around the mean.
     pub wind_variance: f32,
@@ -253,10 +261,14 @@ impl SimSettings {
             page: SettingsPage::World,
             perf: PerfConfig::default(),
             failure: FailureConfig::default(),
+            competent_fall: CompetentFallConfig::default(),
             max_roof_events: FailureConfig::default().max_roof_events as f32,
             max_shear_events: FailureConfig::default().max_shear_events as f32,
             max_compaction_events: FailureConfig::default().max_compaction_events as f32,
             shear_chance_pct: FailureConfig::default().shear_chance_per_mille as f32 / 10.0,
+            competent_max_drop: CompetentFallConfig::default().max_passes as f32,
+            competent_min_impact: CompetentFallConfig::default().min_impact_fall_cells as f32,
+            competent_max_rolls: CompetentFallConfig::default().max_roll_events as f32,
             wind_vx: 0.05,
             wind_variance: 0.55,
             humidity_diffusion_alpha: 0.15,
@@ -351,6 +363,9 @@ impl SimSettings {
         self.max_shear_events = self.failure.max_shear_events as f32;
         self.max_compaction_events = self.failure.max_compaction_events as f32;
         self.shear_chance_pct = self.failure.shear_chance_per_mille as f32 / 10.0;
+        self.competent_max_drop = self.competent_fall.max_passes as f32;
+        self.competent_min_impact = self.competent_fall.min_impact_fall_cells as f32;
+        self.competent_max_rolls = self.competent_fall.max_roll_events as f32;
         self.wind_vx = p.wind_vx;
         self.wind_variance = p.wind_variance;
         self.humidity_diffusion_alpha = p.humidity_diffusion_alpha;
@@ -1051,6 +1066,27 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
+                        "Max fall cells / tick",
+                        8.0..128.0,
+                        &mut self.competent_max_drop,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Min impact fall cells",
+                        0.0..32.0,
+                        &mut self.competent_min_impact,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Max slope rolls / tick",
+                        0.0..16.0,
+                        &mut self.competent_max_rolls,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
                         "Max roof events / tick",
                         1.0..128.0,
                         &mut self.max_roof_events,
@@ -1699,6 +1735,13 @@ impl SimSettings {
         self.failure.max_compaction_events = self.max_compaction_events as u32;
         self.shear_chance_pct = self.shear_chance_pct.round().clamp(1.0, 100.0);
         self.failure.shear_chance_per_mille = (self.shear_chance_pct * 10.0) as u32;
+        self.competent_max_drop = self.competent_max_drop.round().clamp(8.0, 128.0);
+        self.competent_min_impact = self.competent_min_impact.round().clamp(0.0, 32.0);
+        self.competent_max_rolls = self.competent_max_rolls.round().clamp(0.0, 16.0);
+        self.competent_fall.max_passes = self.competent_max_drop as u32;
+        self.competent_fall.min_impact_fall_cells = self.competent_min_impact as u32;
+        self.competent_fall.max_roll_events = self.competent_max_rolls as u32;
+        self.competent_fall.enable = self.failure.enable_competent_fall;
     }
 
     /// Push population ceilings onto the live organism store.

@@ -170,6 +170,20 @@ side Air):
 - ✅ Dry inland Stone cliffs stay scenic; wet demand-2 lips can F2b → LooseRock.
 - Rock-face shear is **off by default** (Tab → Geotech); chance + event cap tune melt rate.
 
+### F2c — Competent rock rigid fall (implemented)
+
+Stone / Limestone over Air no longer peel via F1 bottom-up roof collapse.
+Connected bodies (8-neighbour union) fall as rigid clusters:
+
+1. **Free fall** — multi-cell drop per tick through Air (including lake water).
+2. **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds when
+   fall distance ≥ `min_impact_fall_cells`.
+3. **Slope roll + embed** — roll on sand/soil when fully supported; whole bottom
+   face embeds to debris on soft beds (no per-column gluing mid-air).
+
+Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
+F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
+
 ---
 
 ## Phase F3 — Overburden compaction (compression + water)
