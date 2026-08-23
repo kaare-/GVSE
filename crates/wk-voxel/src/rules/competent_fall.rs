@@ -13,20 +13,23 @@ use serde::{Deserialize, Serialize};
 use wk_material::{MaterialId, MaterialRegistry};
 
 use crate::active::ActiveChunk;
-use crate::cell::{is_competent_rock, is_grain, Cell, Sat};
-use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::cell::{is_competent_rock, Cell, Sat};
+use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::failure::roof_collapse_debris;
 use crate::grid::World;
 
-/// Max vertical cells per tick (sky paint → ground in one frame on FPS path).
-pub const COMPETENT_FALL_PASSES: u32 = 64;
-pub const COMPETENT_FALL_PASSES_FPS: u32 = 32;
+/// Max vertical drop (cells) per body per tick on the full-feel path.
+pub const COMPETENT_FALL_PASSES: u32 = 96;
+/// FPS path: one rigid drop of this many cells (sky → ground in ~1–2 frames).
+pub const COMPETENT_FALL_PASSES_FPS: u32 = 64;
+/// Rebuild / impact / roll loops after the free-fall jump.
+pub const COMPETENT_TOPOLOGY_PASSES: u32 = 4;
 
 /// Live-tunable competent-body knobs (Tab → Geotech).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CompetentFallConfig {
   pub enable: bool,
-  /// Vertical fall attempts per tick.
+  /// Max vertical cells a body may fall in one tick.
   pub max_passes: u32,
   /// Bottom-face cells convert after at least this many fall cells.
   pub min_impact_fall_cells: u32,
@@ -45,11 +48,11 @@ impl Default for CompetentFallConfig {
     Self {
       enable: true,
       max_passes: COMPETENT_FALL_PASSES_FPS,
-      min_impact_fall_cells: 2,
+      min_impact_fall_cells: 1,
       heavy_impact_fall_cells: 12,
       max_impact_cells: 48,
       roll_drop_cells: 1,
-      max_roll_events: 8,
+      max_roll_events: 4,
     }
   }
 }
@@ -190,7 +193,28 @@ fn can_translate(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
   true
 }
 
+/// Largest `drop` in `1..=max_drop` where the body can jump down that far.
+fn max_drop_distance(world: &World, comp: &Component, max_drop: i32) -> i32 {
+  if max_drop <= 0 || !can_translate(world, comp, 0, -1) {
+    return 0;
+  }
+  let mut lo = 1;
+  let mut hi = max_drop;
+  while lo < hi {
+    let mid = (lo + hi + 1) / 2;
+    if can_translate(world, comp, 0, -mid) {
+      lo = mid;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  lo
+}
+
 fn translate_component(world: &mut World, comp: &Component, dx: i32, dy: i32) -> bool {
+  if dx == 0 && dy == 0 {
+    return false;
+  }
   if !can_translate(world, comp, dx, dy) {
     return false;
   }
@@ -199,7 +223,12 @@ fn translate_component(world: &mut World, comp: &Component, dx: i32, dy: i32) ->
     .iter()
     .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, *c))
     .collect();
-  moves.sort_by_key(|(_, y, _)| *y);
+  // Clear top-first when falling so overlapping destination cells stay free.
+  if dy < 0 {
+    moves.sort_by_key(|(_, y, _)| std::cmp::Reverse(*y));
+  } else {
+    moves.sort_by_key(|(_, y, _)| *y);
+  }
   for (x, y, _) in &comp.cells {
     world.set_cell(*x, *y, Cell::air());
   }
@@ -449,26 +478,113 @@ pub fn wake_competent_bodies_all(world: &mut World) {
   wake_competent_bodies(world, &coords);
 }
 
-fn expand_competent_regions(active: &[ActiveChunk]) -> Vec<ActiveChunk> {
-  use std::collections::HashMap;
+fn region_has_competent(world: &World, ac: &ActiveChunk) -> bool {
+  let Some(chunk) = world.chunks.get(&ac.coord) else {
+    return false;
+  };
+  for y in ac.rect.y0..=ac.rect.y1 {
+    for x in ac.rect.x0..=ac.rect.x1 {
+      if is_competent_rock(chunk.get(x as usize, y as usize).material) {
+        return true;
+      }
+    }
+  }
+  false
+}
+
+/// Inflate dirty rects downward for free-fall and sideways for roll — not full chunks.
+fn expand_competent_regions(active: &[ActiveChunk], drop_budget: i32) -> Vec<ActiveChunk> {
   if active.is_empty() {
     return Vec::new();
   }
-  let full = crate::chunk::Rect::full();
-  let mut map: HashMap<ChunkCoord, ActiveChunk> = HashMap::new();
+  let w = CHUNK_CELLS_W as i32;
+  let h = CHUNK_CELLS_H as i32;
+  let pad_x = 2_i32;
+  let drop = drop_budget.max(4);
+  let mut map: HashMap<ChunkCoord, Rect> = HashMap::new();
+  let absorb = |map: &mut HashMap<ChunkCoord, Rect>, coord: ChunkCoord, x0: i32, y0: i32, x1: i32, y1: i32| {
+    if x1 < 0 || y1 < 0 || x0 >= w || y0 >= h {
+      return;
+    }
+    let rx0 = x0.clamp(0, w - 1) as u8;
+    let ry0 = y0.clamp(0, h - 1) as u8;
+    let rx1 = x1.clamp(0, w - 1) as u8;
+    let ry1 = y1.clamp(0, h - 1) as u8;
+    map.entry(coord)
+      .and_modify(|r| {
+        r.expand_to_include(rx0, ry0);
+        r.expand_to_include(rx1, ry1);
+      })
+      .or_insert(Rect {
+        x0: rx0,
+        y0: ry0,
+        x1: rx1,
+        y1: ry1,
+      });
+  };
   for ac in active {
-    map.insert(ac.coord, ActiveChunk {
-      coord: ac.coord,
-      rect: full,
-    });
-    // Bodies can fall across the chunk seam into the slab below.
-    let below = ChunkCoord::new(ac.coord.cx, ac.coord.cy - 1);
-    map.entry(below).or_insert(ActiveChunk {
-      coord: below,
-      rect: full,
-    });
+    let x0 = ac.rect.x0 as i32 - pad_x;
+    let x1 = ac.rect.x1 as i32 + pad_x;
+    let y0 = ac.rect.y0 as i32 - drop;
+    let y1 = ac.rect.y1 as i32 + 1;
+    // Home chunk.
+    absorb(&mut map, ac.coord, x0, y0, x1, y1);
+    // Neighbours when the inflate crosses a seam.
+    if x0 < 0 {
+      absorb(
+        &mut map,
+        ChunkCoord::new(ac.coord.cx - 1, ac.coord.cy),
+        w + x0,
+        y0,
+        w - 1,
+        y1,
+      );
+    }
+    if x1 >= w {
+      absorb(
+        &mut map,
+        ChunkCoord::new(ac.coord.cx + 1, ac.coord.cy),
+        0,
+        y0,
+        x1 - w,
+        y1,
+      );
+    }
+    if y0 < 0 {
+      absorb(
+        &mut map,
+        ChunkCoord::new(ac.coord.cx, ac.coord.cy - 1),
+        x0,
+        h + y0,
+        x1,
+        h - 1,
+      );
+    }
+    if x0 < 0 && y0 < 0 {
+      absorb(
+        &mut map,
+        ChunkCoord::new(ac.coord.cx - 1, ac.coord.cy - 1),
+        w + x0,
+        h + y0,
+        w - 1,
+        h - 1,
+      );
+    }
+    if x1 >= w && y0 < 0 {
+      absorb(
+        &mut map,
+        ChunkCoord::new(ac.coord.cx + 1, ac.coord.cy - 1),
+        0,
+        h + y0,
+        x1 - w,
+        h - 1,
+      );
+    }
   }
-  let mut out: Vec<_> = map.into_values().collect();
+  let mut out: Vec<ActiveChunk> = map
+    .into_iter()
+    .map(|(coord, rect)| ActiveChunk { coord, rect })
+    .collect();
   out.sort_by(|a, b| {
     a.coord
       .cy
@@ -478,19 +594,33 @@ fn expand_competent_regions(active: &[ActiveChunk]) -> Vec<ActiveChunk> {
   out
 }
 
-fn competent_active_regions(world: &World, active: &[ActiveChunk]) -> Vec<ActiveChunk> {
-  if active.is_empty() {
-    return world
+fn competent_active_regions(world: &World, active: &[ActiveChunk], drop_budget: i32) -> Vec<ActiveChunk> {
+  let seed = if active.is_empty() {
+    world
       .chunks
       .keys()
       .copied()
       .map(|coord| ActiveChunk {
         coord,
-        rect: crate::chunk::Rect::full(),
+        rect: Rect::full(),
       })
-      .collect();
+      .collect()
+  } else {
+    active
+      .iter()
+      .filter(|ac| region_has_competent(world, ac))
+      .cloned()
+      .collect::<Vec<_>>()
+  };
+  if seed.is_empty() {
+    return Vec::new();
   }
-  expand_competent_regions(active)
+  let expanded = expand_competent_regions(&seed, drop_budget);
+  // Keep only loaded chunks.
+  expanded
+    .into_iter()
+    .filter(|ac| world.chunks.contains_key(&ac.coord))
+    .collect()
 }
 
 fn rests_on_soft_bed(world: &World, comp: &Component) -> bool {
@@ -521,7 +651,7 @@ fn advance_streak(
   dy: i32,
 ) {
   let streak = fall_streak.remove(&from).unwrap_or(0);
-  let gained = if dy < 0 { 1 } else { 0 };
+  let gained = if dy < 0 { (-dy) as u32 } else { 0 };
   fall_streak.insert((from.0 + dx, from.1 + dy), streak + gained);
 }
 
@@ -535,15 +665,20 @@ pub fn apply_competent_fall_regions(
   if !cfg.enable {
     return CompetentFallStats::default();
   }
-  let max_passes = if fps_path {
+  let max_drop = if fps_path {
     cfg.max_passes.min(COMPETENT_FALL_PASSES_FPS)
   } else {
     cfg.max_passes.max(COMPETENT_FALL_PASSES_FPS)
-  };
-  let regions = competent_active_regions(world, active);
+  } as i32;
+  let regions = competent_active_regions(world, active, max_drop);
+  if regions.is_empty() {
+    return CompetentFallStats::default();
+  }
   let mut stats = CompetentFallStats::default();
   let mut fall_streak: HashMap<(i32, i32), u32> = HashMap::new();
-  for _ in 0..max_passes {
+  // Free-fall jumps once (binary-searched distance), then impact/roll rebuilds —
+  // not one rebuild per cell of drop.
+  for pass in 0..COMPETENT_TOPOLOGY_PASSES {
     let components = build_components(world, &regions);
     if components.is_empty() {
       break;
@@ -551,10 +686,16 @@ pub fn apply_competent_fall_regions(
     let mut moved = false;
     for comp in components {
       let anchor = comp_anchor(&comp);
-      if can_translate(world, &comp, 0, -1) {
-        if translate_component(world, &comp, 0, -1) {
+      // Only the first pass does a long free-fall jump (scan rect is sized for it).
+      let drop = if pass == 0 {
+        max_drop_distance(world, &comp, max_drop)
+      } else {
+        0
+      };
+      if drop > 0 {
+        if translate_component(world, &comp, 0, -drop) {
           stats.fall_moves += 1;
-          advance_streak(&mut fall_streak, anchor, 0, -1);
+          advance_streak(&mut fall_streak, anchor, 0, -drop);
           moved = true;
         }
         continue;

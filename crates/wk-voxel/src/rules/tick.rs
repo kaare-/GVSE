@@ -660,7 +660,9 @@ fn tick_with_life_inner(
         }
     }
 
-    // Competent rock bodies: fall, impact shatter, slope roll (every tick).
+    // Competent rock bodies: fall, impact shatter, slope roll.
+    // Only scan dirty (or wake-dirtied) regions — never the water flow halo,
+    // which would full-scan ocean/sky chunks every tick.
     if failure.enable_competent_fall {
         if world.tick % GRAIN_WAKE_EVERY == 0 {
             if world.tick % GRAIN_WAKE_FULL_EVERY == 0 {
@@ -675,25 +677,20 @@ fn tick_with_life_inner(
                 super::competent_fall::wake_competent_bodies(world, &coords);
             }
         }
-        let t0 = profile.then(Instant::now);
-        let body_active = {
-            let dirty = plan_active(world);
-            if dirty.is_empty() {
-                flow_active.clone()
-            } else {
-                dirty
+        let body_active = plan_active(world);
+        if !body_active.is_empty() {
+            let t0 = profile.then(Instant::now);
+            let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
+            let competent_cfg = super::competent_fall::CompetentFallConfig::default();
+            let _ = super::competent_fall::apply_competent_fall_regions(
+                world,
+                &body_active,
+                &competent_cfg,
+                fps_path,
+            );
+            if let (true, Some(t0)) = (profile, t0) {
+                local.settle += t0.elapsed();
             }
-        };
-        let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
-        let competent_cfg = super::competent_fall::CompetentFallConfig::default();
-        let _ = super::competent_fall::apply_competent_fall_regions(
-            world,
-            &body_active,
-            &competent_cfg,
-            fps_path,
-        );
-        if let (true, Some(t0)) = (profile, t0) {
-            local.settle += t0.elapsed();
         }
     }
 
