@@ -26,7 +26,7 @@ pub const COMPETENT_FALL_PASSES: u32 = 96;
 /// FPS path: one rigid drop of this many cells (sky → ground in ~1–2 frames).
 pub const COMPETENT_FALL_PASSES_FPS: u32 = 64;
 /// Seated tip / impact rebuilds per tick (keep low — each rebuild is O(body)).
-pub const COMPETENT_TOPOLOGY_PASSES: u32 = 3;
+pub const COMPETENT_TOPOLOGY_PASSES: u32 = 6;
 /// Connected competent larger than this is treated as static terrain
 /// *after* contact-weld splitting.
 pub const MAX_DYNAMIC_BODY_CELLS: usize = 384;
@@ -35,6 +35,8 @@ pub const MAX_DYNAMIC_BODY_CELLS: usize = 384;
 pub const FLOOD_GATHER_CAP: usize = 2048;
 /// Hard cap on bodies processed per tick (FPS guard).
 pub const MAX_BODIES_PER_TICK: usize = 16;
+/// Hanging peel may spawn more bodies in one tick so a slab crashes together.
+pub const MAX_HANGING_BODIES_PER_TICK: usize = 48;
 /// Contact "pebbles" this small never glue onto a larger body (editor/geology only).
 pub const PEBBLE_SPLIT_MAX: usize = 4;
 /// Main mass must be at least this big before pebble necks are split off.
@@ -340,26 +342,47 @@ fn cluster_has_passable_below(world: &World, set: &HashSet<(i32, i32)>) -> bool 
   })
 }
 
-fn column_hangs(world: &World, set: &HashSet<(i32, i32)>, x: i32, y: i32) -> bool {
-  let mut cy = y - 1;
-  loop {
-    let wx = world.wrap_x(x);
-    if set.contains(&(wx, cy)) {
-      cy -= 1;
-      continue;
-    }
-    return match world.get_cell(wx, cy) {
-      None => true,
-      Some(c) => body_passable_at(world, wx, cy, &c),
-    };
+/// Cell rests on solid terrain outside the cluster (pillar / bed contact).
+fn externally_supported(world: &World, set: &HashSet<(i32, i32)>, x: i32, y: i32) -> bool {
+  let wx = world.wrap_x(x);
+  let by = y - 1;
+  match world.get_cell(wx, by) {
+    Some(b) if !body_passable_at(world, wx, by, &b) && !set.contains(&(wx, by)) => true,
+    _ => false,
   }
 }
 
-fn column_hanging_cells(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
-  set.iter()
-    .filter(|&&(x, y)| column_hangs(world, set, x, y))
-    .copied()
-    .collect()
+/// Flood the whole competent mass above a carved void (not just the bottom row).
+fn void_anchored_hang_mass(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
+  let mut hang = HashSet::new();
+  let mut q = VecDeque::new();
+  for &(x, y) in set {
+    if set.contains(&(world.wrap_x(x), y - 1)) {
+      continue;
+    }
+    match world.get_cell(world.wrap_x(x), y - 1) {
+      None => {}
+      Some(c) if body_passable_at(world, world.wrap_x(x), y - 1, &c) => {}
+      _ => continue,
+    }
+    let wx = world.wrap_x(x);
+    if hang.insert((wx, y)) {
+      q.push_back((wx, y));
+    }
+  }
+  while let Some((x, y)) = q.pop_front() {
+    for (dx, dy) in [(1, 0), (-1, 0), (0, 1)] {
+      let nx = world.wrap_x(x + dx);
+      let ny = y + dy;
+      if !set.contains(&(nx, ny)) || externally_supported(world, set, nx, ny) {
+        continue;
+      }
+      if hang.insert((nx, ny)) {
+        q.push_back((nx, ny));
+      }
+    }
+  }
+  hang
 }
 
 fn vertically_supported_cells(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
@@ -414,11 +437,12 @@ fn flood_positions(set: &HashSet<(i32, i32)>) -> Vec<HashSet<(i32, i32)>> {
 fn peel_floating_grid(
   set: &HashSet<(i32, i32)>,
   by_pos: &HashMap<(i32, i32), Cell>,
+  tile: i32,
+  min_cells: usize,
 ) -> Vec<Vec<(i32, i32, Cell)>> {
   if set.is_empty() {
     return Vec::new();
   }
-  const TILE: i32 = 16;
   let min_x = set.iter().map(|p| p.0).min().unwrap();
   let max_x = set.iter().map(|p| p.0).max().unwrap();
   let min_y = set.iter().map(|p| p.1).min().unwrap();
@@ -429,8 +453,8 @@ fn peel_floating_grid(
     let mut tx = min_x;
     while tx <= max_x {
       let mut piece = Vec::new();
-      for y in ty..ty + TILE {
-        for x in tx..tx + TILE {
+      for y in ty..ty + tile {
+        for x in tx..tx + tile {
           if set.contains(&(x, y)) {
             if let Some(c) = by_pos.get(&(x, y)) {
               piece.push((x, y, *c));
@@ -438,12 +462,12 @@ fn peel_floating_grid(
           }
         }
       }
-      if piece.len() >= 6 && piece.len() <= MAX_DYNAMIC_BODY_CELLS {
+      if piece.len() >= min_cells && piece.len() <= MAX_DYNAMIC_BODY_CELLS {
         out.push(piece);
       }
-      tx += TILE;
+      tx += tile;
     }
-    ty += TILE;
+    ty += tile;
   }
   out
 }
@@ -457,7 +481,26 @@ fn peel_oversize_floating(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Ce
   }
   let by_pos: HashMap<(i32, i32), Cell> =
     cells.iter().map(|(x, y, c)| ((*x, *y), *c)).collect();
-  peel_floating_grid(&cells_to_set(&cells), &by_pos)
+  let set = cells_to_set(&cells);
+  let n = set.len();
+  let min_x = set.iter().map(|p| p.0).min().unwrap();
+  let max_x = set.iter().map(|p| p.0).max().unwrap();
+  let min_y = set.iter().map(|p| p.1).min().unwrap();
+  let max_y = set.iter().map(|p| p.1).max().unwrap();
+  let w = max_x - min_x + 1;
+  let h = max_y - min_y + 1;
+  let pieces_needed = (n + MAX_DYNAMIC_BODY_CELLS - 1) / MAX_DYNAMIC_BODY_CELLS;
+  let mut tile = 16_i32;
+  while tile <= 32 {
+    let tiles_x = (w + tile - 1) / tile;
+    let tiles_y = (h + tile - 1) / tile;
+    let count = (tiles_x * tiles_y) as usize;
+    if count <= pieces_needed.max(2) + 2 && (tile * tile) as usize <= MAX_DYNAMIC_BODY_CELLS {
+      break;
+    }
+    tile += 4;
+  }
+  peel_floating_grid(&set, &by_pos, tile, 4)
 }
 
 fn extract_hanging_pieces(
@@ -476,9 +519,9 @@ fn extract_hanging_pieces(
   let hanging: HashSet<(i32, i32)> = if cell_set_floating(world, &set) {
     set.clone()
   } else {
-    let column = column_hanging_cells(world, &set);
-    if !column.is_empty() {
-      column
+    let void_mass = void_anchored_hang_mass(world, &set);
+    if !void_mass.is_empty() {
+      void_mass
     } else {
       let supported = vertically_supported_cells(world, &set);
       if supported.is_empty() {
@@ -514,6 +557,7 @@ fn push_component_pieces(
   out: &mut Vec<Component>,
   pieces: Vec<Vec<(i32, i32, Cell)>>,
   hanging: bool,
+  hanging_count: &mut usize,
 ) {
   for piece in pieces {
     if piece.len() > MAX_DYNAMIC_BODY_CELLS || piece.is_empty() {
@@ -552,6 +596,9 @@ fn push_component_pieces(
       min_y,
       max_y,
     });
+    if hanging {
+      *hanging_count += 1;
+    }
   }
 }
 
@@ -562,6 +609,7 @@ fn push_component_pieces(
 fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
   let mut visited: HashSet<(i32, i32)> = HashSet::new();
   let mut out: Vec<Component> = Vec::new();
+  let mut hanging_count = 0usize;
   for ac in active {
     let Some(chunk) = world.chunks.get(&ac.coord) else {
       continue;
@@ -621,6 +669,7 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
             &mut out,
             extract_hanging_pieces(world, &cells),
             true,
+            &mut hanging_count,
           );
           // True continuous strata — finish marking so we don't restart.
           while let Some((cx, cy)) = queue.pop_front() {
@@ -659,7 +708,7 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
             hanging = true;
           }
         }
-        push_component_pieces(world, &mut out, pieces, hanging);
+        push_component_pieces(world, &mut out, pieces, hanging, &mut hanging_count);
       }
     }
   }
@@ -676,7 +725,12 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
       _ => a.min_y.cmp(&b.min_y),
     }
   });
-  out.truncate(MAX_BODIES_PER_TICK);
+  let cap = if hanging_count > 0 {
+    MAX_HANGING_BODIES_PER_TICK
+  } else {
+    MAX_BODIES_PER_TICK
+  };
+  out.truncate(cap);
   out
 }
 
@@ -3050,6 +3104,11 @@ mod tests {
     assert!(
       total >= 150,
       "cavern roof must peel as dynamic bodies (cells={total}, comps={})",
+      comps.len()
+    );
+    assert!(
+      comps.len() <= 4,
+      "cavern roof should crash in a few large chunks, not many tiny peels (comps={})",
       comps.len()
     );
     assert!(
