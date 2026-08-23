@@ -84,6 +84,20 @@ fn is_soft_embed_bed(material: MaterialId) -> bool {
   )
 }
 
+/// Soft beds can be crushed aside during a tumble (not hard rock / bedrock).
+#[inline]
+fn is_roll_displaceable(material: MaterialId) -> bool {
+  is_soft_embed_bed(material)
+}
+
+#[inline]
+fn roll_destination_ok(world: &World, gx: i32, gy: i32, cell: &Cell, body: &HashSet<(i32, i32)>) -> bool {
+  if body.contains(&(gx, gy)) {
+    return true;
+  }
+  body_passable_at(world, gx, gy, cell) || is_roll_displaceable(cell.material)
+}
+
 struct Component {
   cells: Vec<(i32, i32, Cell)>,
   set: HashSet<(i32, i32)>,
@@ -402,20 +416,34 @@ fn soft_embed(world: &mut World, comp: &Component, cfg: &CompetentFallConfig) ->
 }
 
 fn downhill_roll_dir(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<i32> {
+  // Only sample bottom-face columns — overhang cells have no support and must
+  // not abort the whole search with `?`.
   let mut cols: HashSet<i32> = HashSet::new();
-  for (gx, _, _) in &comp.cells {
-    cols.insert(*gx);
+  for (gx, _, _) in bottom_face(comp) {
+    cols.insert(gx);
+  }
+  if cols.is_empty() {
+    return None;
   }
   let mut best_dx = 0_i32;
   let mut best_drop = 0_i32;
   for &gx in &cols {
-    let center = column_top_support_y(world, gx, &comp.set)?;
+    let Some(center) = column_top_support_y(world, gx, &comp.set) else {
+      continue;
+    };
     for dx in [-1_i32, 1] {
       let nx = world.wrap_x(gx + dx);
       if cols.contains(&nx) {
         continue;
       }
-      let side = column_top_support_y(world, nx, &HashSet::new())?;
+      let Some(side) = column_top_support_y(world, nx, &HashSet::new()) else {
+        // Open void / unloaded beside us counts as a deep drop.
+        if best_drop < 8 {
+          best_drop = 8;
+          best_dx = dx;
+        }
+        continue;
+      };
       let drop = center - side;
       if drop > best_drop {
         best_drop = drop;
@@ -446,22 +474,24 @@ fn column_top_support_y(world: &World, gx: i32, body: &HashSet<(i32, i32)>) -> O
   top
 }
 
-/// Uphill bottom-corner pivot for a 90° tumble (dx > 0 → roll right / CW).
+/// Downhill bottom-corner pivot — tip the body *over* the edge into air.
 fn roll_pivot(comp: &Component, dx: i32) -> (i32, i32) {
   let face = bottom_face(comp);
   if face.is_empty() {
     return comp_anchor(comp);
   }
   if dx > 0 {
+    // Roll right: tip over the right (downhill) toe.
     face
       .iter()
-      .min_by_key(|(x, y, _)| (*x, *y))
+      .max_by_key(|(x, y, _)| (*x, -*y))
       .map(|(x, y, _)| (*x, *y))
       .unwrap_or(comp_anchor(comp))
   } else {
+    // Roll left: tip over the left (downhill) toe.
     face
       .iter()
-      .max_by_key(|(x, y, _)| (*x, *y))
+      .min_by_key(|(x, y, _)| (*x, *y))
       .map(|(x, y, _)| (*x, *y))
       .unwrap_or(comp_anchor(comp))
   }
@@ -471,10 +501,10 @@ fn rotate_pos(px: i32, py: i32, gx: i32, gy: i32, dx: i32) -> (i32, i32) {
   let rx = gx - px;
   let ry = gy - py;
   if dx > 0 {
-    // Clockwise tumble downhill to the right.
+    // Clockwise tip over the right downhill edge.
     (px + ry, py - rx)
   } else {
-    // Counter-clockwise tumble downhill to the left.
+    // Counter-clockwise tip over the left downhill edge.
     (px - ry, py + rx)
   }
 }
@@ -492,11 +522,61 @@ fn can_pivot_roll(world: &World, comp: &Component, pivot: (i32, i32), dx: i32) -
     let Some(dst) = world.get_cell(tx, ty) else {
       return false;
     };
-    if !body_passable_at(world, tx, ty, &dst) {
+    if !roll_destination_ok(world, tx, ty, &dst, &comp.set) {
       return false;
     }
   }
   true
+}
+
+/// Push soft bed out of a roll destination into nearby air, else crush it.
+fn displace_soft_at(world: &mut World, gx: i32, gy: i32) {
+  let Some(cur) = world.get_cell(gx, gy) else {
+    return;
+  };
+  if !is_roll_displaceable(cur.material) {
+    return;
+  }
+  // Prefer spilling downhill / down into air.
+  for (dx, dy) in [(0, -1), (1, -1), (-1, -1), (1, 0), (-1, 0)] {
+    let nx = world.wrap_x(gx + dx);
+    let ny = gy + dy;
+    if ny < 0 {
+      continue;
+    }
+    if matches!(world.get_cell(nx, ny), Some(c) if c.material == MaterialId::Air) {
+      world.set_cell(nx, ny, cur);
+      world.touch_dirty(nx, ny);
+      world.set_cell(gx, gy, Cell::air());
+      world.touch_dirty(gx, gy);
+      return;
+    }
+  }
+  world.set_cell(gx, gy, Cell::air());
+  world.touch_dirty(gx, gy);
+}
+
+fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, i32, Cell)>) {
+  // Clear soft beds that occupy destinations before clearing sources,
+  // so displaced soft can use vacated body cells if needed.
+  let src_set: HashSet<(i32, i32)> = sources.iter().copied().collect();
+  for (tx, ty, _) in &moves {
+    if src_set.contains(&(*tx, *ty)) {
+      continue;
+    }
+    if let Some(dst) = world.get_cell(*tx, *ty) {
+      if is_roll_displaceable(dst.material) {
+        displace_soft_at(world, *tx, *ty);
+      }
+    }
+  }
+  for (x, y) in sources {
+    world.set_cell(*x, *y, Cell::air());
+  }
+  for (tx, ty, cell) in moves {
+    world.set_cell(tx, ty, cell);
+    world.touch_dirty(tx, ty);
+  }
 }
 
 fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), dx: i32) -> bool {
@@ -511,13 +591,8 @@ fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), 
       (world.wrap_x(tx), ty, *c)
     })
     .collect();
-  for (x, y, _) in &comp.cells {
-    world.set_cell(*x, *y, Cell::air());
-  }
-  for (tx, ty, cell) in moves {
-    world.set_cell(tx, ty, cell);
-    world.touch_dirty(tx, ty);
-  }
+  let sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
+  write_roll_cells(world, &sources, moves);
   true
 }
 
@@ -534,14 +609,51 @@ fn try_pivot_roll(world: &World, comp: &Component, cfg: &CompetentFallConfig) ->
   }
 }
 
+fn can_translate_roll(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
+  for (gx, gy, _) in &comp.cells {
+    let tx = world.wrap_x(gx + dx);
+    let ty = gy + dy;
+    if ty < 0 {
+      return false;
+    }
+    if comp.set.contains(&(tx, ty)) {
+      continue;
+    }
+    let Some(dst) = world.get_cell(tx, ty) else {
+      return false;
+    };
+    if !roll_destination_ok(world, tx, ty, &dst, &comp.set) {
+      return false;
+    }
+  }
+  true
+}
+
+fn translate_roll_component(world: &mut World, comp: &Component, dx: i32, dy: i32) -> bool {
+  if dx == 0 && dy == 0 {
+    return false;
+  }
+  if !can_translate_roll(world, comp, dx, dy) {
+    return false;
+  }
+  let moves: Vec<(i32, i32, Cell)> = comp
+    .cells
+    .iter()
+    .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, *c))
+    .collect();
+  let sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
+  write_roll_cells(world, &sources, moves);
+  true
+}
+
 fn try_roll_translate(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<(i32, i32)> {
   if is_floating(world, comp) {
     return None;
   }
   let dx = downhill_roll_dir(world, comp, cfg)?;
-  // Diagonal step down the face after a failed pivot (steep slope).
-  for &(mx, my) in &[(dx, -1), (dx, -2)] {
-    if can_translate(world, comp, mx, my) {
+  // Tip-step down the face; sideways slide last (shallow slopes).
+  for &(mx, my) in &[(dx, -1), (dx, -2), (dx, 0)] {
+    if can_translate_roll(world, comp, mx, my) {
       return Some((mx, my));
     }
   }
@@ -556,19 +668,32 @@ fn body_has_downhill(world: &World, gx: i32, gy: i32) -> bool {
   if below.material == MaterialId::Air {
     return true;
   }
+  // Only contact cells (bed under us, not another rock cell of the same body).
+  if is_competent_rock(below.material) {
+    return false;
+  }
   let seat_y = gy - 1;
   for dx in [-1_i32, 1] {
     let nx = world.wrap_x(gx + dx);
     // Air beside / below-beside → can tumble that way.
     if matches!(world.get_cell(nx, gy), Some(c) if c.material == MaterialId::Air)
-      && matches!(world.get_cell(nx, gy - 1), Some(c) if c.material == MaterialId::Air)
+      && matches!(
+        world.get_cell(nx, gy - 1),
+        Some(c) if c.material == MaterialId::Air || is_roll_displaceable(c.material)
+      )
     {
       return true;
     }
-    // Soft bed lower than our seat.
+    // Neighbor bed surface lower than our seat.
+    if let Some(side_top) = column_top_support_y(world, nx, &HashSet::new()) {
+      if seat_y - side_top >= 1 {
+        return true;
+      }
+    } else {
+      return true;
+    }
     if let Some(side) = world.get_cell(nx, seat_y - 1) {
       if side.material != MaterialId::Air {
-        // Neighbor column surface is lower.
         if matches!(world.get_cell(nx, seat_y), Some(c) if c.material == MaterialId::Air) {
           return true;
         }
@@ -864,9 +989,19 @@ fn apply_roll(
     }
   }
   if let Some((dx, dy)) = try_roll_translate(world, comp, cfg) {
-    if translate_component(world, comp, dx, dy) {
+    if translate_roll_component(world, comp, dx, dy) {
       stats.roll_moves += 1;
       advance_streak(fall_streak, anchor, dx, dy);
+      let new_anchor = (anchor.0 + dx, anchor.1 + dy);
+      if dy == 0 {
+        let post = build_components(world, regions);
+        if let Some(refreshed) = post.iter().find(|c| c.set.contains(&new_anchor)) {
+          if is_floating(world, refreshed) && translate_component(world, refreshed, 0, -1) {
+            stats.fall_moves += 1;
+            advance_streak(fall_streak, new_anchor, 0, -1);
+          }
+        }
+      }
       return true;
     }
   }
@@ -1128,10 +1263,13 @@ mod tests {
   #[test]
   fn stone_blob_sinks_through_lake() {
     let mut w = World::new(9);
-    for x in 3..=7 {
+    // Wide sand floor so landing does not tip off a tiny pad edge.
+    for x in 0..16 {
       for y in 0..=2 {
         w.set_cell(x, y, Cell::solid(MaterialId::Sand));
       }
+    }
+    for x in 3..=7 {
       for y in 3..=12 {
         w.set_cell(
           x,
@@ -1148,10 +1286,11 @@ mod tests {
     let cfg = CompetentFallConfig {
       max_passes: 24,
       min_impact_fall_cells: 99,
+      max_roll_events: 0, // sink test only — no tip after landing
       ..CompetentFallConfig::default()
     };
     apply_competent_fall_regions(&mut w, &[], &cfg, false);
-    let min_stone_y = (4..7)
+    let min_stone_y = (0..16)
       .flat_map(|x| (0..20).map(move |y| (x, y)))
       .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
       .map(|(_, y)| y)
@@ -1204,5 +1343,45 @@ mod tests {
       loose <= 2,
       "slope tumble should stay mostly intact stone (loose={loose})"
     );
+  }
+
+  #[test]
+  fn overhang_blob_still_detects_downhill() {
+    let mut w = World::new(11);
+    // Stair slope down to the left.
+    for x in 0..10 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      let h = 2 + x;
+      for y in 1..=h {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    // 3×3 with a corner overhang so some columns lack support under the body.
+    stamp_blob(&mut w, 5, 8, 3, 3);
+    let regions = competent_active_regions(&w, &[], 8);
+    let comps = build_components(&w, &regions);
+    assert!(!comps.is_empty());
+    let cfg = CompetentFallConfig::default();
+    let dir = downhill_roll_dir(&w, &comps[0], &cfg);
+    assert_eq!(dir, Some(-1), "overhang must not abort downhill detection");
+  }
+
+  #[test]
+  fn tip_pivot_is_downhill_toe() {
+    let cells = vec![
+      (5, 5, Cell::solid(MaterialId::Stone)),
+      (6, 5, Cell::solid(MaterialId::Stone)),
+      (5, 6, Cell::solid(MaterialId::Stone)),
+      (6, 6, Cell::solid(MaterialId::Stone)),
+    ];
+    let set: HashSet<_> = cells.iter().map(|(x, y, _)| (*x, *y)).collect();
+    let comp = Component {
+      cells,
+      set,
+      min_y: 5,
+      max_y: 6,
+    };
+    assert_eq!(roll_pivot(&comp, 1), (6, 5), "right roll pivots on right toe");
+    assert_eq!(roll_pivot(&comp, -1), (5, 5), "left roll pivots on left toe");
   }
 }
