@@ -308,6 +308,222 @@ fn flood_compatible(seed_mobile: bool, neighbor: &Cell, material: MaterialId) ->
   neighbor.material == material && is_mobile_rock(neighbor) == seed_mobile
 }
 
+fn cells_to_set(cells: &[(i32, i32, Cell)]) -> HashSet<(i32, i32)> {
+  cells.iter().map(|(x, y, _)| (*x, *y)).collect()
+}
+
+fn cell_set_floating(world: &World, set: &HashSet<(i32, i32)>) -> bool {
+  let mut face = false;
+  for &(x, y) in set {
+    if set.contains(&(x, y - 1)) {
+      continue;
+    }
+    face = true;
+    match world.get_cell(x, y - 1) {
+      None => return true,
+      Some(c) if body_passable_at(world, x, y - 1, &c) => return true,
+      _ => return false,
+    }
+  }
+  face
+}
+
+fn cluster_has_passable_below(world: &World, set: &HashSet<(i32, i32)>) -> bool {
+  set.iter().any(|&(x, y)| {
+    if set.contains(&(x, y - 1)) {
+      return false;
+    }
+    match world.get_cell(x, y - 1) {
+      None => true,
+      Some(c) => body_passable_at(world, x, y - 1, &c),
+    }
+  })
+}
+
+fn vertically_supported_cells(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
+  let mut supported = HashSet::new();
+  let mut q = VecDeque::new();
+  for &(x, y) in set {
+    match world.get_cell(x, y - 1) {
+      Some(b) if !body_passable_at(world, x, y - 1, &b) && !set.contains(&(x, y - 1)) => {
+        supported.insert((x, y));
+        q.push_back((x, y));
+      }
+      _ => {}
+    }
+  }
+  while let Some((x, y)) = q.pop_front() {
+    for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+      let n = (x + dx, y + dy);
+      if set.contains(&n) && supported.insert(n) {
+        q.push_back(n);
+      }
+    }
+  }
+  supported
+}
+
+fn flood_positions(set: &HashSet<(i32, i32)>) -> Vec<HashSet<(i32, i32)>> {
+  let mut seen = HashSet::new();
+  let mut out = Vec::new();
+  for &seed in set {
+    if !seen.insert(seed) {
+      continue;
+    }
+    let mut comp = HashSet::new();
+    let mut q = VecDeque::new();
+    q.push_back(seed);
+    comp.insert(seed);
+    while let Some((cx, cy)) = q.pop_front() {
+      for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+        let n = (cx + dx, cy + dy);
+        if !set.contains(&n) || !seen.insert(n) {
+          continue;
+        }
+        comp.insert(n);
+        q.push_back(n);
+      }
+    }
+    out.push(comp);
+  }
+  out
+}
+
+fn peel_floating_grid(
+  set: &HashSet<(i32, i32)>,
+  by_pos: &HashMap<(i32, i32), Cell>,
+) -> Vec<Vec<(i32, i32, Cell)>> {
+  if set.is_empty() {
+    return Vec::new();
+  }
+  const TILE: i32 = 16;
+  let min_x = set.iter().map(|p| p.0).min().unwrap();
+  let max_x = set.iter().map(|p| p.0).max().unwrap();
+  let min_y = set.iter().map(|p| p.1).min().unwrap();
+  let max_y = set.iter().map(|p| p.1).max().unwrap();
+  let mut out = Vec::new();
+  let mut ty = min_y;
+  while ty <= max_y {
+    let mut tx = min_x;
+    while tx <= max_x {
+      let mut piece = Vec::new();
+      for y in ty..ty + TILE {
+        for x in tx..tx + TILE {
+          if set.contains(&(x, y)) {
+            if let Some(c) = by_pos.get(&(x, y)) {
+              piece.push((x, y, *c));
+            }
+          }
+        }
+      }
+      if piece.len() >= 6 && piece.len() <= MAX_DYNAMIC_BODY_CELLS {
+        out.push(piece);
+      }
+      tx += TILE;
+    }
+    ty += TILE;
+  }
+  out
+}
+
+fn peel_oversize_floating(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cell)>> {
+  if cells.is_empty() {
+    return Vec::new();
+  }
+  if cells.len() <= MAX_DYNAMIC_BODY_CELLS {
+    return vec![cells];
+  }
+  let by_pos: HashMap<(i32, i32), Cell> =
+    cells.iter().map(|(x, y, c)| ((*x, *y), *c)).collect();
+  peel_floating_grid(&cells_to_set(&cells), &by_pos)
+}
+
+fn extract_hanging_pieces(
+  world: &World,
+  cells: &[(i32, i32, Cell)],
+) -> Vec<Vec<(i32, i32, Cell)>> {
+  if cells.is_empty() {
+    return Vec::new();
+  }
+  let by_pos: HashMap<(i32, i32), Cell> =
+    cells.iter().map(|(x, y, c)| ((*x, *y), *c)).collect();
+  let set = cells_to_set(cells);
+  if !cluster_has_passable_below(world, &set) {
+    return Vec::new();
+  }
+  let supported = vertically_supported_cells(world, &set);
+  let hanging: HashSet<(i32, i32)> = if supported.is_empty() || cell_set_floating(world, &set) {
+    set.clone()
+  } else {
+    set.difference(&supported).copied().collect()
+  };
+  if hanging.is_empty() {
+    return Vec::new();
+  }
+  let mut out = Vec::new();
+  for comp in flood_positions(&hanging) {
+    let sub: Vec<_> = comp
+      .iter()
+      .filter_map(|p| by_pos.get(p).map(|c| (p.0, p.1, *c)))
+      .collect();
+    if sub.is_empty() {
+      continue;
+    }
+    if sub.len() <= MAX_DYNAMIC_BODY_CELLS {
+      out.push(sub);
+    } else {
+      out.extend(peel_oversize_floating(sub));
+    }
+  }
+  out
+}
+
+fn push_component_pieces(
+  world: &World,
+  out: &mut Vec<Component>,
+  pieces: Vec<Vec<(i32, i32, Cell)>>,
+  hanging: bool,
+) {
+  for piece in pieces {
+    if piece.len() > MAX_DYNAMIC_BODY_CELLS || piece.is_empty() {
+      continue;
+    }
+    let set: HashSet<_> = piece.iter().map(|(x, y, _)| (*x, *y)).collect();
+    let exposed = if hanging {
+      piece
+        .iter()
+        .filter(|(x, y, _)| {
+          if has_free_neighbor(world, *x, *y) {
+            return true;
+          }
+          [(1, 0), (0, 1), (-1, 0), (0, -1)]
+            .iter()
+            .any(|(dx, dy)| !set.contains(&(x + dx, y + dy)))
+        })
+        .count()
+    } else {
+      piece
+        .iter()
+        .filter(|(x, y, _)| has_free_neighbor(world, *x, *y))
+        .count()
+    };
+    if exposed == 0 {
+      continue;
+    }
+    if !hanging && piece.len() > 32 && exposed * 5 < piece.len() {
+      continue;
+    }
+    let min_y = piece.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
+    let max_y = piece.iter().map(|(_, y, _)| *y).max().unwrap_or(0);
+    out.push(Component {
+      cells: piece,
+      set,
+      min_y,
+      max_y,
+    });
+  }
+}
+
 /// Extract boulder-sized dynamic bodies only (CCRB). Strata larger than
 /// [`MAX_DYNAMIC_BODY_CELLS`] stay static. Touching boulders are separated by
 /// morphological opening so simulation contact never welds a ball chain into
@@ -369,6 +585,12 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
           }
         }
         if strata {
+          push_component_pieces(
+            world,
+            &mut out,
+            extract_hanging_pieces(world, &cells),
+            true,
+          );
           // True continuous strata — finish marking so we don't restart.
           while let Some((cx, cy)) = queue.pop_front() {
             for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
@@ -392,31 +614,21 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
         if cells.is_empty() {
           continue;
         }
-        for piece in split_welded_contacts(cells) {
-          if piece.len() > MAX_DYNAMIC_BODY_CELLS || piece.is_empty() {
-            continue;
+        let set = cells_to_set(&cells);
+        let oversize_floating =
+          set.len() > MAX_DYNAMIC_BODY_CELLS && cluster_has_passable_below(world, &set);
+        let mut pieces = split_welded_contacts(cells);
+        let mut hanging = false;
+        if oversize_floating {
+          let hang = extract_hanging_pieces(world, &set.iter().filter_map(|p| {
+            world.get_cell(p.0, p.1).map(|c| (p.0, p.1, c))
+          }).collect::<Vec<_>>());
+          if !hang.is_empty() {
+            pieces = hang;
+            hanging = true;
           }
-          // Terrain plugs: almost no free face — skip.
-          let exposed = piece
-            .iter()
-            .filter(|(x, y, _)| has_free_neighbor(world, *x, *y))
-            .count();
-          if exposed == 0 {
-            continue;
-          }
-          if piece.len() > 32 && exposed * 5 < piece.len() {
-            continue;
-          }
-          let set: HashSet<_> = piece.iter().map(|(x, y, _)| (*x, *y)).collect();
-          let min_y = piece.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
-          let max_y = piece.iter().map(|(_, y, _)| *y).max().unwrap_or(0);
-          out.push(Component {
-            cells: piece,
-            set,
-            min_y,
-            max_y,
-          });
         }
+        push_component_pieces(world, &mut out, pieces, hanging);
       }
     }
   }
@@ -2631,6 +2843,100 @@ mod tests {
         .iter()
         .all(|(_, _, c)| c.flags.contains(CellFlags::MOBILE_ROCK)),
       "extracted cells stay mobile-marked"
+    );
+  }
+
+  #[test]
+  fn medium_floating_slab_falls() {
+    let mut w = World::new(20);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..16 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // 15×15 competent slab with air below — under MAX_DYNAMIC_BODY_CELLS.
+    for x in 2..17 {
+      for y in 30..45 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 24,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..12 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let max_y = (0..20)
+      .flat_map(|x| (0..50).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .map(|(_, y)| y)
+      .max()
+      .unwrap_or(0);
+    assert!(
+      max_y < 20,
+      "medium floating slab must fall to bed (max_y={max_y})"
+    );
+  }
+
+  #[test]
+  fn large_floating_island_peels_and_falls() {
+    let mut w = World::new(24);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..24 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      for y in 1..=3 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    // 20×20 island (400 cells) — oversize, must grid-peel and fall.
+    for x in 2..22 {
+      for y in 40..60 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let cells: Vec<_> = (2..22)
+      .flat_map(|x| (40..60).map(move |y| (x, y)))
+      .filter_map(|(x, y)| w.get_cell(x, y).map(|c| (x, y, c)))
+      .collect();
+    assert_eq!(cells.len(), 400, "precondition");
+    let hang = extract_hanging_pieces(&w, &cells);
+    let hang_cells: usize = hang.iter().map(|p| p.len()).sum();
+    assert!(
+      hang_cells >= 300,
+      "extract_hanging must grid-peel the island (cells={hang_cells}, pieces={})",
+      hang.len()
+    );
+    let regions = competent_active_regions(&w, &[], 8);
+    let comps = build_components(&w, &regions);
+    let total: usize = comps.iter().map(|c| c.cells.len()).sum();
+    assert!(
+      total >= 300,
+      "oversize floating island must peel into dynamic bodies (cells={total}, comps={})",
+      comps.len()
+    );
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 48,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..48 {
+      wake_floating_competent(&mut w);
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let stone_ys: Vec<i32> = (0..24)
+      .flat_map(|x| (0..70).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .map(|(_, y)| y)
+      .collect();
+    let max_y = stone_ys.iter().copied().max().unwrap_or(0);
+    let min_y = stone_ys.iter().copied().min().unwrap_or(0);
+    assert!(
+      max_y < 40 && min_y <= 5,
+      "peeled island must fall and seat on sand (min_y={min_y}, max_y={max_y}, n={})",
+      stone_ys.len()
     );
   }
 

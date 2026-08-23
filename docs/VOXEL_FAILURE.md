@@ -192,6 +192,9 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 - **Mobile mark** — fallen / tipped / slid rock sets `CellFlags::MOBILE_ROCK`.
   Flood-fill only merges same mobility class, so a boulder cannot glue into
   unmarked painted strata or gain mass by contact.
+- **Hanging peel** — oversize / strata floods still peel unsupported or
+  fully floating competent islands into ≤`MAX_DYNAMIC_BODY_CELLS` bodies
+  that fall over subsequent ticks (disconnected landscape drops).
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
