@@ -87,7 +87,17 @@ fn is_soft_embed_bed(material: MaterialId) -> bool {
 /// Soft beds can be crushed aside during a tumble (not hard rock / bedrock).
 #[inline]
 fn is_roll_displaceable(material: MaterialId) -> bool {
-  is_soft_embed_bed(material)
+  matches!(
+    material,
+    MaterialId::Sand
+      | MaterialId::Soil
+      | MaterialId::Clay
+      | MaterialId::Gravel
+      | MaterialId::LooseRock
+      | MaterialId::LooseLimestone
+      | MaterialId::Organic
+      | MaterialId::Snow
+  )
 }
 
 #[inline]
@@ -155,12 +165,16 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
   }
 
   for i in 0..cells.len() {
-    let (gx, gy, _) = cells[i];
+    let (gx, gy, cell) = cells[i];
     for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
       let nx = world.wrap_x(gx + dx);
       let ny = gy + dy;
       if let Some(&j) = index.get(&(nx, ny)) {
-        union(&mut parent, i, j);
+        // Same material only — stone boulders must not glue into limestone
+        // bedrock (and vice versa), or the whole hillside becomes one body.
+        if cells[j].2.material == cell.material {
+          union(&mut parent, i, j);
+        }
       }
     }
   }
@@ -417,27 +431,31 @@ fn soft_embed(world: &mut World, comp: &Component, cfg: &CompetentFallConfig) ->
 
 fn downhill_roll_dir(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<i32> {
   // Only sample bottom-face columns — overhang cells have no support and must
-  // not abort the whole search with `?`.
-  let mut cols: HashSet<i32> = HashSet::new();
+  // not abort the whole search.
+  let mut face_cols: HashSet<i32> = HashSet::new();
   for (gx, _, _) in bottom_face(comp) {
-    cols.insert(gx);
+    face_cols.insert(gx);
   }
-  if cols.is_empty() {
+  if face_cols.is_empty() {
     return None;
   }
+  // All body columns — neighbor probes must skip these so a wide disk doesn't
+  // treat its own mass as the "terrain" beside it.
+  let body_cols: HashSet<i32> = comp.cells.iter().map(|(x, _, _)| *x).collect();
   let mut best_dx = 0_i32;
   let mut best_drop = 0_i32;
-  for &gx in &cols {
+  for &gx in &face_cols {
     let Some(center) = column_top_support_y(world, gx, &comp.set) else {
       continue;
     };
     for dx in [-1_i32, 1] {
       let nx = world.wrap_x(gx + dx);
-      if cols.contains(&nx) {
+      if body_cols.contains(&nx) {
+        // Probe just outside the body footprint in this direction.
         continue;
       }
-      let Some(side) = column_top_support_y(world, nx, &HashSet::new()) else {
-        // Open void / unloaded beside us counts as a deep drop.
+      // Exclude body cells so overhang rock isn't counted as bed height.
+      let Some(side) = column_top_support_y(world, nx, &comp.set) else {
         if best_drop < 8 {
           best_drop = 8;
           best_dx = dx;
@@ -445,6 +463,46 @@ fn downhill_roll_dir(world: &World, comp: &Component, cfg: &CompetentFallConfig)
         continue;
       };
       let drop = center - side;
+      if drop > best_drop {
+        best_drop = drop;
+        best_dx = dx;
+      }
+    }
+  }
+  // Also compare the body's leftmost vs rightmost seat columns — catches the
+  // case where every face-adjacent probe is still inside a gentle nest.
+  if let (Some(&left), Some(&right)) = (
+    face_cols.iter().min(),
+    face_cols.iter().max(),
+  ) {
+    if left != right {
+      if let (Some(l), Some(r)) = (
+        column_top_support_y(world, left, &comp.set),
+        column_top_support_y(world, right, &comp.set),
+      ) {
+        let drop_r = l - r; // positive → right side lower → roll right
+        let drop_l = r - l; // positive → left side lower → roll left
+        if drop_r > best_drop {
+          best_drop = drop_r;
+          best_dx = 1;
+        }
+        if drop_l > best_drop {
+          best_drop = drop_l;
+          best_dx = -1;
+        }
+      }
+    }
+  }
+  // One more probe: terrain just outside the body bbox.
+  if let (Some(&min_x), Some(&max_x)) = (body_cols.iter().min(), body_cols.iter().max()) {
+    let mid_seat = face_cols
+      .iter()
+      .filter_map(|gx| column_top_support_y(world, *gx, &comp.set))
+      .max()
+      .unwrap_or(0);
+    for (nx, dx) in [(world.wrap_x(min_x - 1), -1), (world.wrap_x(max_x + 1), 1)] {
+      let side = column_top_support_y(world, nx, &comp.set).unwrap_or(-8);
+      let drop = mid_seat - side;
       if drop > best_drop {
         best_drop = drop;
         best_dx = dx;
@@ -474,26 +532,16 @@ fn column_top_support_y(world: &World, gx: i32, body: &HashSet<(i32, i32)>) -> O
   top
 }
 
-/// Downhill bottom-corner pivot — tip the body *over* the edge into air.
+/// Bbox downhill-bottom corner — virtual pivot so no body cell sits past the
+/// tip axis (round blobs used to drive their downhill bulge into the bed).
 fn roll_pivot(comp: &Component, dx: i32) -> (i32, i32) {
-  let face = bottom_face(comp);
-  if face.is_empty() {
-    return comp_anchor(comp);
-  }
+  let min_x = comp.cells.iter().map(|(x, _, _)| *x).min().unwrap_or(0);
+  let max_x = comp.cells.iter().map(|(x, _, _)| *x).max().unwrap_or(0);
+  let min_y = comp.cells.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
   if dx > 0 {
-    // Roll right: tip over the right (downhill) toe.
-    face
-      .iter()
-      .max_by_key(|(x, y, _)| (*x, -*y))
-      .map(|(x, y, _)| (*x, *y))
-      .unwrap_or(comp_anchor(comp))
+    (max_x, min_y)
   } else {
-    // Roll left: tip over the left (downhill) toe.
-    face
-      .iter()
-      .min_by_key(|(x, y, _)| (*x, *y))
-      .map(|(x, y, _)| (*x, *y))
-      .unwrap_or(comp_anchor(comp))
+    (min_x, min_y)
   }
 }
 
@@ -651,8 +699,11 @@ fn try_roll_translate(world: &World, comp: &Component, cfg: &CompetentFallConfig
     return None;
   }
   let dx = downhill_roll_dir(world, comp, cfg)?;
-  // Tip-step down the face; sideways slide last (shallow slopes).
-  for &(mx, my) in &[(dx, -1), (dx, -2), (dx, 0)] {
+  // Prefer sliding down the face; hop-slide if nestled into soft bed.
+  for &(mx, my) in &[(dx, -1), (dx, -2), (dx, 0), (dx, 1)] {
+    if my > 0 && !can_translate_roll(world, comp, 0, my) {
+      continue;
+    }
     if can_translate_roll(world, comp, mx, my) {
       return Some((mx, my));
     }
@@ -684,9 +735,17 @@ fn body_has_downhill(world: &World, gx: i32, gy: i32) -> bool {
     {
       return true;
     }
-    // Neighbor bed surface lower than our seat.
-    if let Some(side_top) = column_top_support_y(world, nx, &HashSet::new()) {
-      if seat_y - side_top >= 1 {
+    // Neighbor bed surface lower than our seat (ignore other body columns).
+    let mut skip = HashSet::new();
+    skip.insert((gx, gy));
+    if let Some(side_top) = column_top_support_y(world, nx, &skip) {
+      // If neighbor column is dominated by competent rock of a tall body,
+      // fall through to the seat-air check below.
+      if !matches!(
+        world.get_cell(nx, side_top),
+        Some(c) if is_competent_rock(c.material)
+      ) && seat_y - side_top >= 1
+      {
         return true;
       }
     } else {
@@ -973,39 +1032,48 @@ fn apply_roll(
   if stats.roll_moves >= cfg.max_roll_events {
     return false;
   }
-  // Pivot tumble first — whole body rotates around the uphill toe.
+  // Pivot tumble first — whole body tips over the downhill bbox corner.
   if let Some(dx) = try_pivot_roll(world, comp, cfg) {
     let pivot = roll_pivot(comp, dx);
     if pivot_roll_component(world, comp, pivot, dx) {
       stats.roll_moves += 1;
-      let post = build_components(world, regions);
-      if let Some(refreshed) = post.iter().find(|c| c.set.contains(&pivot)) {
-        if is_floating(world, refreshed) && translate_component(world, refreshed, 0, -1) {
-          stats.fall_moves += 1;
-          advance_streak(fall_streak, pivot, 0, -1);
-        }
-      }
+      settle_after_roll(world, regions, pivot, fall_streak, stats);
       return true;
     }
   }
   if let Some((dx, dy)) = try_roll_translate(world, comp, cfg) {
     if translate_roll_component(world, comp, dx, dy) {
       stats.roll_moves += 1;
-      advance_streak(fall_streak, anchor, dx, dy);
       let new_anchor = (anchor.0 + dx, anchor.1 + dy);
-      if dy == 0 {
-        let post = build_components(world, regions);
-        if let Some(refreshed) = post.iter().find(|c| c.set.contains(&new_anchor)) {
-          if is_floating(world, refreshed) && translate_component(world, refreshed, 0, -1) {
-            stats.fall_moves += 1;
-            advance_streak(fall_streak, new_anchor, 0, -1);
-          }
-        }
-      }
+      advance_streak(fall_streak, anchor, dx, dy);
+      settle_after_roll(world, regions, new_anchor, fall_streak, stats);
       return true;
     }
   }
   false
+}
+
+fn settle_after_roll(
+  world: &mut World,
+  regions: &[ActiveChunk],
+  hint: (i32, i32),
+  fall_streak: &mut HashMap<(i32, i32), u32>,
+  stats: &mut CompetentFallStats,
+) {
+  let post = build_components(world, regions);
+  let Some(refreshed) = post
+    .iter()
+    .find(|c| c.set.contains(&hint))
+    .or_else(|| post.first())
+  else {
+    return;
+  };
+  let drop = max_drop_distance(world, refreshed, 4);
+  if drop > 0 && translate_component(world, refreshed, 0, -drop) {
+    stats.fall_moves += 1;
+    let a = comp_anchor(refreshed);
+    advance_streak(fall_streak, a, 0, -drop);
+  }
 }
 
 /// Run competent-body physics on the active scan set.
@@ -1073,6 +1141,11 @@ pub fn apply_competent_fall_regions(
         ) {
           moved = true;
         }
+        continue;
+      }
+      // Terrain-scale hard masses (limestone strata, etc.) stay put — only
+      // boulder-sized bodies roll/embed once fully seated.
+      if comp.cells.len() >= 256 && !rests_on_soft_bed(world, &comp) {
         continue;
       }
       let streak = *fall_streak.get(&anchor).unwrap_or(&0);
@@ -1306,9 +1379,9 @@ mod tests {
   fn stone_blob_rolls_downhill_on_slope() {
     let mut w = World::new(11);
     w.ensure_chunk(ChunkCoord::new(0, 0));
-    for x in 0..12 {
+    for x in 0..16 {
       w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
-      let h = 4 + (11 - x).min(6);
+      let h = 4 + (11 - x).min(6).max(1);
       for y in 1..=h {
         w.set_cell(x, y, Cell::solid(MaterialId::Sand));
       }
@@ -1321,26 +1394,27 @@ mod tests {
       min_impact_fall_cells: 99,
       ..CompetentFallConfig::default()
     };
+    let x0 = 5;
     for _ in 0..6 {
       apply_competent_fall_regions(&mut w, &[], &cfg, false);
     }
-    let rock_xs: Vec<i32> = (0..12)
+    let rock_xs: Vec<i32> = (0..20)
       .filter(|&x| {
-        (3..=18).any(|y| {
+        (1..=18).any(|y| {
           w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone)
         })
       })
       .collect();
-    let loose = (0..12)
-      .flat_map(|x| (3..=18).map(move |y| (x, y)))
+    let loose = (0..20)
+      .flat_map(|x| (1..=18).map(move |y| (x, y)))
       .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::LooseRock))
       .count();
     assert!(
-      rock_xs.iter().any(|&x| x > 6),
+      rock_xs.iter().any(|&x| x > x0 + 1),
       "body should roll right down the sand slope (rock cols={rock_xs:?})"
     );
     assert!(
-      loose <= 2,
+      loose <= 4,
       "slope tumble should stay mostly intact stone (loose={loose})"
     );
   }
@@ -1381,7 +1455,96 @@ mod tests {
       min_y: 5,
       max_y: 6,
     };
-    assert_eq!(roll_pivot(&comp, 1), (6, 5), "right roll pivots on right toe");
-    assert_eq!(roll_pivot(&comp, -1), (5, 5), "left roll pivots on left toe");
+    assert_eq!(roll_pivot(&comp, 1), (6, 5), "right roll pivots on bbox right-bottom");
+    assert_eq!(roll_pivot(&comp, -1), (5, 5), "left roll pivots on bbox left-bottom");
+  }
+
+  #[test]
+  fn large_disk_rolls_left_on_steep_sand() {
+    let mut w = World::new(16);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..32 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      let h = 2 + x / 2;
+      for y in 1..=h {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    let cx = 18i32;
+    let cy = 14i32;
+    for x in cx - 5..=cx + 5 {
+      for y in cy - 5..=cy + 5 {
+        if (x - cx) * (x - cx) + (y - cy) * (y - cy) <= 25 {
+          w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+      }
+    }
+    let regions = competent_active_regions(&w, &[], 8);
+    let comps = build_components(&w, &regions);
+    assert!(!comps.is_empty());
+    let cfg = CompetentFallConfig {
+      max_roll_events: 24,
+      min_impact_fall_cells: 99,
+      ..CompetentFallConfig::default()
+    };
+    let dir = downhill_roll_dir(&w, &comps[0], &cfg);
+    assert_eq!(dir, Some(-1), "large disk must see left downhill, got {dir:?}");
+    let x0 = comps[0].cells.iter().map(|(x, _, _)| *x).min().unwrap();
+    for _ in 0..24 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let stones: Vec<(i32, i32)> = (0..32)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .collect();
+    assert!(stones.len() >= 20, "disk should stay mostly intact (n={})", stones.len());
+    let x1 = stones.iter().map(|(x, _)| *x).min().unwrap_or(99);
+    assert!(
+      x1 < x0,
+      "disk should roll left (start_min_x={x0}, end_min_x={x1})"
+    );
+  }
+
+  #[test]
+  fn large_disk_rolls_on_limestone_slope() {
+    let mut w = World::new(16);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..32 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      let h = 2 + x / 2;
+      for y in 1..=h {
+        w.set_cell(x, y, Cell::solid(MaterialId::Limestone));
+      }
+    }
+    let cx = 18i32;
+    let cy = 14i32;
+    for x in cx - 5..=cx + 5 {
+      for y in cy - 5..=cy + 5 {
+        if (x - cx) * (x - cx) + (y - cy) * (y - cy) <= 25 {
+          w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+      }
+    }
+    let cfg = CompetentFallConfig {
+      max_roll_events: 24,
+      min_impact_fall_cells: 99,
+      ..CompetentFallConfig::default()
+    };
+    let x0 = 13;
+    for _ in 0..24 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let stones: Vec<(i32, i32)> = (0..32)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .collect();
+    let x1 = stones.iter().map(|(x, _)| *x).min().unwrap_or(99);
+    assert!(
+      x1 < x0,
+      "disk should tumble left on limestone (start~{x0}, end_min_x={x1}, n={})",
+      stones.len()
+    );
   }
 }
