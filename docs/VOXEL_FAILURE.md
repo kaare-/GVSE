@@ -175,12 +175,13 @@ side Air):
 Stone / Limestone over Air no longer peel via F1 bottom-up roof collapse.
 Connected bodies (8-neighbour union) fall as rigid clusters:
 
-1. **Free fall** — multi-cell drop per tick through dry Air; standing water
-   films block descent (bodies rest on lakes).
+1. **Free fall** — multi-cell drop per tick through Air (including lake water —
+   rocks sink).
 2. **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds when
    fall distance ≥ `min_impact_fall_cells`.
-3. **Slope roll + embed** — roll on sand/soil when fully supported; whole bottom
-   face embeds to debris on soft beds (no per-column gluing mid-air).
+3. **Slope roll + embed** — rigid tumble when clearance allows; otherwise peel
+   downhill toe to debris. Soft embed only on flat beds (not while a slope
+   exists).
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.

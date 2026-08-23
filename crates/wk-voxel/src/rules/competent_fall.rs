@@ -3,7 +3,7 @@
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
 //! Competent rock (Stone / Limestone) falls as connected rigid bodies:
-//! 1. Vertical drop through dry Air (standing water blocks — bodies land on lakes).
+//! 1. Vertical drop through Air (including lake water — rocks sink).
 //! 2. Impact shatter — bottom face converts to fallable debris.
 //! 3. Slope roll + soft-bed embed on sand / soil / clay.
 
@@ -17,14 +17,13 @@ use crate::cell::{is_competent_rock, Cell, Sat};
 use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::failure::roof_collapse_debris;
 use crate::grid::World;
-use crate::rules::is_standing_water;
 
 /// Max vertical drop (cells) per body per tick on the full-feel path.
 pub const COMPETENT_FALL_PASSES: u32 = 96;
 /// FPS path: one rigid drop of this many cells (sky → ground in ~1–2 frames).
 pub const COMPETENT_FALL_PASSES_FPS: u32 = 64;
 /// Rebuild / impact / roll loops after the free-fall jump.
-pub const COMPETENT_TOPOLOGY_PASSES: u32 = 4;
+pub const COMPETENT_TOPOLOGY_PASSES: u32 = 8;
 
 /// Live-tunable competent-body knobs (Tab → Geotech).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -53,7 +52,7 @@ impl Default for CompetentFallConfig {
       heavy_impact_fall_cells: 12,
       max_impact_cells: 48,
       roll_drop_cells: 1,
-      max_roll_events: 4,
+      max_roll_events: 12,
     }
   }
 }
@@ -66,16 +65,10 @@ pub struct CompetentFallStats {
   pub embed_cells: u32,
 }
 
-/// Dry Air and mid-air haze; standing lake/ocean films block rigid motion.
-fn body_passable_at(world: &World, gx: i32, gy: i32, cell: &Cell) -> bool {
-  cell.material == MaterialId::Air && !is_standing_water(world, gx, gy)
-}
-
-fn body_passable(world: &World, gx: i32, gy: i32) -> bool {
-  match world.get_cell(gx, gy) {
-    Some(c) => body_passable_at(world, gx, gy, &c),
-    None => false,
-  }
+/// Dry Air (including wet lake films) — rocks sink through water.
+#[inline]
+fn body_passable_at(_world: &World, _gx: i32, _gy: i32, cell: &Cell) -> bool {
+  cell.material == MaterialId::Air
 }
 
 #[inline]
@@ -282,9 +275,6 @@ fn support_below(world: &World, gx: i32, gy: i32) -> Option<(MaterialId, i32)> {
     return None;
   };
   if below.material == MaterialId::Air {
-    if is_standing_water(world, gx, by) {
-      return Some((MaterialId::Air, by));
-    }
     return None;
   }
   Some((below.material, by))
@@ -371,7 +361,11 @@ fn impact_shatter(
   applied
 }
 
-fn soft_embed(world: &mut World, comp: &Component) -> u32 {
+fn soft_embed(world: &mut World, comp: &Component, cfg: &CompetentFallConfig) -> u32 {
+  // Prefer rolling on any slope — only glue when the bed is flat.
+  if downhill_roll_dir(world, comp, cfg).is_some() {
+    return 0;
+  }
   if !is_fully_supported(world, comp) || !rests_on_soft_bed(world, comp) {
     return 0;
   }
@@ -457,13 +451,101 @@ fn try_roll_downhill(world: &World, comp: &Component, cfg: &CompetentFallConfig)
     return None;
   }
   let dx = downhill_roll_dir(world, comp, cfg)?;
-  if can_translate(world, comp, dx, -1) {
-    return Some((dx, -1));
-  }
-  if can_translate(world, comp, dx, 0) {
-    return Some((dx, 0));
+  // Prefer tumbling down the face, then sliding sideways, then a steeper tumble.
+  for &(mx, my) in &[(dx, -1), (dx, -2), (dx, 0)] {
+    if can_translate(world, comp, mx, my) {
+      return Some((mx, my));
+    }
   }
   None
+}
+
+/// When the whole body can't tumble, peel the downhill toe into debris so
+/// grain settle can carry rock downslope (visible roll for large blobs).
+fn peel_downhill_toe(world: &mut World, comp: &Component, cfg: &CompetentFallConfig) -> u32 {
+  let Some(dx) = downhill_roll_dir(world, comp, cfg) else {
+    return 0;
+  };
+  let mut face = bottom_face(comp);
+  // Prefer the downhill-edge column of the bottom face.
+  face.sort_by_key(|(x, y, _)| (*y, if dx > 0 { -*x } else { *x }));
+  let Some((gx, gy, cell)) = face.into_iter().next() else {
+    return 0;
+  };
+  let debris = roof_collapse_debris(cell.material);
+  // Prefer spilling into downhill air if present.
+  let nx = world.wrap_x(gx + dx);
+  if matches!(world.get_cell(nx, gy - 1), Some(c) if c.material == MaterialId::Air) {
+    world.set_cell(
+      nx,
+      gy - 1,
+      Cell {
+        material: debris,
+        sat: Sat(cell.sat.0 / 2),
+        ..Cell::default()
+      },
+    );
+    world.set_cell(gx, gy, Cell::air());
+    world.touch_dirty(nx, gy - 1);
+    world.touch_dirty(gx, gy);
+    return 1;
+  }
+  if matches!(world.get_cell(nx, gy), Some(c) if c.material == MaterialId::Air) {
+    world.set_cell(
+      nx,
+      gy,
+      Cell {
+        material: debris,
+        sat: Sat(cell.sat.0 / 2),
+        ..Cell::default()
+      },
+    );
+    world.set_cell(gx, gy, Cell::air());
+    world.touch_dirty(nx, gy);
+    world.touch_dirty(gx, gy);
+    return 1;
+  }
+  world.set_cell(
+    gx,
+    gy,
+    Cell {
+      material: debris,
+      sat: cell.sat,
+      ..cell
+    },
+  );
+  world.touch_dirty(gx, gy);
+  1
+}
+
+/// True when a seated body still has a downhill neighbor and should stay awake.
+fn body_has_downhill(world: &World, gx: i32, gy: i32) -> bool {
+  let Some(below) = world.get_cell(gx, gy - 1) else {
+    return true;
+  };
+  if below.material == MaterialId::Air {
+    return true;
+  }
+  let seat_y = gy - 1;
+  for dx in [-1_i32, 1] {
+    let nx = world.wrap_x(gx + dx);
+    // Air beside / below-beside → can tumble that way.
+    if matches!(world.get_cell(nx, gy), Some(c) if c.material == MaterialId::Air)
+      && matches!(world.get_cell(nx, gy - 1), Some(c) if c.material == MaterialId::Air)
+    {
+      return true;
+    }
+    // Soft bed lower than our seat.
+    if let Some(side) = world.get_cell(nx, seat_y - 1) {
+      if side.material != MaterialId::Air {
+        // Neighbor column surface is lower.
+        if matches!(world.get_cell(nx, seat_y), Some(c) if c.material == MaterialId::Air) {
+          return true;
+        }
+      }
+    }
+  }
+  false
 }
 
 /// Re-dirty competent bodies that can still fall or roll.
@@ -488,6 +570,7 @@ pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
         let wake = match world.get_cell(gx, gy - 1) {
           None => true,
           Some(b) if body_passable_at(world, gx, gy - 1, &b) => true,
+          Some(_) if body_has_downhill(world, gx, gy) => true,
           _ => false,
         };
         if wake {
@@ -723,6 +806,44 @@ fn advance_streak(
   fall_streak.insert((from.0 + dx, from.1 + dy), streak + gained);
 }
 
+fn apply_roll_or_peel(
+  world: &mut World,
+  regions: &[ActiveChunk],
+  comp: &Component,
+  anchor: (i32, i32),
+  cfg: &CompetentFallConfig,
+  fall_streak: &mut HashMap<(i32, i32), u32>,
+  stats: &mut CompetentFallStats,
+) -> bool {
+  if stats.roll_moves < cfg.max_roll_events {
+    if let Some((dx, dy)) = try_roll_downhill(world, comp, cfg) {
+      if translate_component(world, comp, dx, dy) {
+        stats.roll_moves += 1;
+        let new_anchor = (anchor.0 + dx, anchor.1 + dy);
+        advance_streak(fall_streak, anchor, dx, dy);
+        if dy == 0 {
+          let post = build_components(world, regions);
+          if let Some(refreshed) = post.iter().find(|c| c.set.contains(&new_anchor)) {
+            if translate_component(world, refreshed, 0, -1) {
+              stats.fall_moves += 1;
+              advance_streak(fall_streak, new_anchor, 0, -1);
+            }
+          }
+        }
+        return true;
+      }
+    }
+  }
+  if downhill_roll_dir(world, comp, cfg).is_some() {
+    let peeled = peel_downhill_toe(world, comp, cfg);
+    if peeled > 0 {
+      stats.roll_moves = stats.roll_moves.saturating_add(1);
+      return true;
+    }
+  }
+  false
+}
+
 /// Run competent-body physics on the active scan set.
 pub fn apply_competent_fall_regions(
   world: &mut World,
@@ -777,50 +898,34 @@ pub fn apply_competent_fall_regions(
       // Wait until every bottom cell has support — avoids uneven per-column
       // embed/shatter while the body is still bridging a slope or gap.
       if !is_fully_supported(world, &comp) {
-        if stats.roll_moves < cfg.max_roll_events {
-          if let Some((dx, dy)) = try_roll_downhill(world, &comp, cfg) {
-            if translate_component(world, &comp, dx, dy) {
-              stats.roll_moves += 1;
-              let new_anchor = (anchor.0 + dx, anchor.1 + dy);
-              advance_streak(&mut fall_streak, anchor, dx, dy);
-              if dy == 0 {
-                let post = build_components(world, &regions);
-                if let Some(refreshed) = post.iter().find(|c| c.set.contains(&new_anchor)) {
-                  if translate_component(world, refreshed, 0, -1) {
-                    stats.fall_moves += 1;
-                    advance_streak(&mut fall_streak, new_anchor, 0, -1);
-                  }
-                }
-              }
-              moved = true;
-            }
-          }
+        if apply_roll_or_peel(
+          world,
+          &regions,
+          &comp,
+          anchor,
+          cfg,
+          &mut fall_streak,
+          &mut stats,
+        ) {
+          moved = true;
         }
         continue;
       }
       let streak = *fall_streak.get(&anchor).unwrap_or(&0);
       if rests_on_soft_bed(world, &comp) {
-        if stats.roll_moves < cfg.max_roll_events {
-          if let Some((dx, dy)) = try_roll_downhill(world, &comp, cfg) {
-            if translate_component(world, &comp, dx, dy) {
-              stats.roll_moves += 1;
-              let new_anchor = (anchor.0 + dx, anchor.1 + dy);
-              advance_streak(&mut fall_streak, anchor, dx, dy);
-              if dy == 0 {
-                let post = build_components(world, &regions);
-                if let Some(refreshed) = post.iter().find(|c| c.set.contains(&new_anchor)) {
-                  if translate_component(world, refreshed, 0, -1) {
-                    stats.fall_moves += 1;
-                    advance_streak(&mut fall_streak, new_anchor, 0, -1);
-                  }
-                }
-              }
-              moved = true;
-              continue;
-            }
-          }
+        if apply_roll_or_peel(
+          world,
+          &regions,
+          &comp,
+          anchor,
+          cfg,
+          &mut fall_streak,
+          &mut stats,
+        ) {
+          moved = true;
+          continue;
         }
-        let embedded = soft_embed(world, &comp);
+        let embedded = soft_embed(world, &comp, cfg);
         if embedded > 0 {
           stats.embed_cells += embedded;
           moved = true;
@@ -836,24 +941,16 @@ pub fn apply_competent_fall_regions(
           continue;
         }
       }
-      if stats.roll_moves < cfg.max_roll_events {
-        if let Some((dx, dy)) = try_roll_downhill(world, &comp, cfg) {
-          if translate_component(world, &comp, dx, dy) {
-            stats.roll_moves += 1;
-            let new_anchor = (anchor.0 + dx, anchor.1 + dy);
-            advance_streak(&mut fall_streak, anchor, dx, dy);
-            if dy == 0 {
-              let post = build_components(world, &regions);
-              if let Some(refreshed) = post.iter().find(|c| c.set.contains(&new_anchor)) {
-                if translate_component(world, refreshed, 0, -1) {
-                  stats.fall_moves += 1;
-                  advance_streak(&mut fall_streak, new_anchor, 0, -1);
-                }
-              }
-            }
-            moved = true;
-          }
-        }
+      if apply_roll_or_peel(
+        world,
+        &regions,
+        &comp,
+        anchor,
+        cfg,
+        &mut fall_streak,
+        &mut stats,
+      ) {
+        moved = true;
       }
     }
     if moved {
@@ -1000,13 +1097,13 @@ mod tests {
   }
 
   #[test]
-  fn stone_blob_lands_on_lake_surface() {
+  fn stone_blob_sinks_through_lake() {
     let mut w = World::new(9);
     for x in 3..=7 {
-      for y in 0..=5 {
+      for y in 0..=2 {
         w.set_cell(x, y, Cell::solid(MaterialId::Sand));
       }
-      for y in 6..=10 {
+      for y in 3..=12 {
         w.set_cell(
           x,
           y,
@@ -1032,13 +1129,9 @@ mod tests {
       .min()
       .unwrap_or(99);
     assert!(
-      min_stone_y >= 11,
-      "stone must rest on lake surface, not sink (min_stone_y={min_stone_y})"
+      min_stone_y <= 5,
+      "stone must sink through lake water onto sand (min_stone_y={min_stone_y})"
     );
-    let inside_water = (4..7).any(|x| {
-      (6..=10).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
-    });
-    assert!(!inside_water, "stone must not occupy standing water cells");
   }
 
   #[test]
