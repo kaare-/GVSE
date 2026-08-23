@@ -340,6 +340,28 @@ fn cluster_has_passable_below(world: &World, set: &HashSet<(i32, i32)>) -> bool 
   })
 }
 
+fn column_hangs(world: &World, set: &HashSet<(i32, i32)>, x: i32, y: i32) -> bool {
+  let mut cy = y - 1;
+  loop {
+    let wx = world.wrap_x(x);
+    if set.contains(&(wx, cy)) {
+      cy -= 1;
+      continue;
+    }
+    return match world.get_cell(wx, cy) {
+      None => true,
+      Some(c) => body_passable_at(world, wx, cy, &c),
+    };
+  }
+}
+
+fn column_hanging_cells(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
+  set.iter()
+    .filter(|&&(x, y)| column_hangs(world, set, x, y))
+    .copied()
+    .collect()
+}
+
 fn vertically_supported_cells(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
   let mut supported = HashSet::new();
   let mut q = VecDeque::new();
@@ -451,11 +473,20 @@ fn extract_hanging_pieces(
   if !cluster_has_passable_below(world, &set) {
     return Vec::new();
   }
-  let supported = vertically_supported_cells(world, &set);
-  let hanging: HashSet<(i32, i32)> = if supported.is_empty() || cell_set_floating(world, &set) {
+  let hanging: HashSet<(i32, i32)> = if cell_set_floating(world, &set) {
     set.clone()
   } else {
-    set.difference(&supported).copied().collect()
+    let column = column_hanging_cells(world, &set);
+    if !column.is_empty() {
+      column
+    } else {
+      let supported = vertically_supported_cells(world, &set);
+      if supported.is_empty() {
+        set.clone()
+      } else {
+        set.difference(&supported).copied().collect()
+      }
+    }
   };
   if hanging.is_empty() {
     return Vec::new();
@@ -2991,6 +3022,53 @@ mod tests {
       max_y < 40 && min_y <= 5,
       "peeled island must fall and seat on sand (min_y={min_y}, max_y={max_y}, n={})",
       stone_ys.len()
+    );
+  }
+
+  #[test]
+  fn cantilever_span_peels_over_cavern_while_pillars_stay() {
+    let mut w = World::new(40);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 1..=15 {
+      w.set_cell(5, y, Cell::solid(MaterialId::Stone));
+      w.set_cell(34, y, Cell::solid(MaterialId::Stone));
+    }
+    for x in 5..35 {
+      w.set_cell(x, 15, Cell::solid(MaterialId::Stone));
+    }
+    for x in 10..30 {
+      for y in 16..=25 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let regions = competent_active_regions(&w, &[], 8);
+    let comps = build_components(&w, &regions);
+    let total: usize = comps.iter().map(|c| c.cells.len()).sum();
+    assert!(
+      total >= 150,
+      "cavern roof must peel as dynamic bodies (cells={total}, comps={})",
+      comps.len()
+    );
+    assert!(
+      !comps.iter().any(|c| c.set.contains(&(5, 8))),
+      "bedrock-rooted pillar must stay static"
+    );
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 48,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..24 {
+      wake_floating_competent(&mut w);
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let center_still = w.get_cell(20, 20).map(|c| c.material) == Some(MaterialId::Stone);
+    assert!(
+      !center_still,
+      "peeled cavern roof must fall away from mid-air perch"
     );
   }
 

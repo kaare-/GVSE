@@ -168,6 +168,7 @@ pub use rules::{
     GrainWake,
     wake_unsupported_grains, wake_unstable_slopes,
     apply_competent_fall_regions, wake_competent_bodies, wake_competent_bodies_all,
+    wake_floating_competent,
     CompetentFallConfig, CompetentFallStats, COMPETENT_FALL_PASSES, COMPETENT_FALL_PASSES_FPS,
     CondensationConfig, EvapConfig, GrainConfig,
     KarstConfig,
