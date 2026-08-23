@@ -183,6 +183,9 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 - **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds.
 - **Tip vs slide** — 90° pivot only when COM leaves the support base; otherwise
   slide down-slope. Stops forever tip↔tip oscillation on steep seats.
+- **Crush specs** — large movers pulverize tiny competent clusters
+  (`≤ CRUSH_SPEC_MAX`) instead of welding or getting stuck on them.
+- **Thin fracture** — long thin sticks/slabs snap at 1-cell necks into debris.
 - **Cargo** — soft/loose cells with ≥2 neighbours on the body ride with tip/slide.
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.

@@ -35,6 +35,12 @@ pub const MAX_BODIES_PER_TICK: usize = 8;
 pub const PEBBLE_SPLIT_MAX: usize = 4;
 /// Main mass must be at least this big before pebble necks are split off.
 pub const PEBBLE_SPLIT_HOST_MIN: usize = 12;
+/// Tiny competent specs this size are crushed by larger moving bodies (not blockers).
+pub const CRUSH_SPEC_MAX: usize = 6;
+/// Long-thin fracture: span (cells) along the long axis.
+pub const THIN_FRACTURE_SPAN: i32 = 7;
+/// Long-thin fracture: max thickness (bbox short side) to count as a stick/slab.
+pub const THIN_FRACTURE_THICK: i32 = 2;
 
 /// Live-tunable competent-body knobs (Tab → Geotech).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -117,6 +123,124 @@ fn roll_destination_ok(world: &World, gx: i32, gy: i32, cell: &Cell, body: &Hash
     return true;
   }
   body_passable_at(world, gx, gy, cell) || is_roll_displaceable(cell.material)
+}
+
+/// Size of the 4-connected same-material competent cluster at (gx,gy), capped.
+fn competent_cluster_size(world: &World, gx: i32, gy: i32, limit: usize) -> usize {
+  let Some(seed) = world.get_cell(gx, gy) else {
+    return 0;
+  };
+  if !is_competent_rock(seed.material) {
+    return 0;
+  }
+  let mat = seed.material;
+  let mut seen = HashSet::new();
+  let mut q = VecDeque::new();
+  q.push_back((gx, gy));
+  seen.insert((gx, gy));
+  while let Some((cx, cy)) = q.pop_front() {
+    if seen.len() > limit {
+      return seen.len();
+    }
+    for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+      let nx = world.wrap_x(cx + dx);
+      let ny = cy + dy;
+      if !seen.insert((nx, ny)) {
+        continue;
+      }
+      match world.get_cell(nx, ny) {
+        Some(n) if n.material == mat => q.push_back((nx, ny)),
+        _ => {
+          seen.remove(&(nx, ny));
+        }
+      }
+    }
+  }
+  seen.len()
+}
+
+/// Large movers crush tiny competent specs instead of welding / getting stuck.
+fn can_crush_spec(world: &World, gx: i32, gy: i32, mover_cells: usize) -> bool {
+  if mover_cells < CRUSH_SPEC_MAX * 2 {
+    return false;
+  }
+  let Some(c) = world.get_cell(gx, gy) else {
+    return false;
+  };
+  if !is_competent_rock(c.material) {
+    return false;
+  }
+  let sz = competent_cluster_size(world, gx, gy, CRUSH_SPEC_MAX + 1);
+  sz > 0 && sz <= CRUSH_SPEC_MAX && mover_cells >= sz * 3
+}
+
+fn crush_spec_at(world: &mut World, gx: i32, gy: i32) -> u32 {
+  let Some(seed) = world.get_cell(gx, gy) else {
+    return 0;
+  };
+  if !is_competent_rock(seed.material) {
+    return 0;
+  }
+  let mat = seed.material;
+  let debris = roof_collapse_debris(mat);
+  let mut seen = HashSet::new();
+  let mut q = VecDeque::new();
+  q.push_back((gx, gy));
+  seen.insert((gx, gy));
+  let mut crushed = 0u32;
+  while let Some((cx, cy)) = q.pop_front() {
+    if seen.len() > CRUSH_SPEC_MAX + 2 {
+      break;
+    }
+    let Some(cur) = world.get_cell(cx, cy) else {
+      continue;
+    };
+    if cur.material != mat {
+      continue;
+    }
+    world.set_cell(
+      cx,
+      cy,
+      Cell {
+        material: debris,
+        sat: cur.sat,
+        ..cur
+      },
+    );
+    world.touch_dirty(cx, cy);
+    crushed += 1;
+    for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+      let nx = world.wrap_x(cx + dx);
+      let ny = cy + dy;
+      if !seen.insert((nx, ny)) {
+        continue;
+      }
+      match world.get_cell(nx, ny) {
+        Some(n) if n.material == mat => q.push_back((nx, ny)),
+        _ => {
+          seen.remove(&(nx, ny));
+        }
+      }
+    }
+  }
+  crushed
+}
+
+fn motion_destination_ok(
+  world: &World,
+  gx: i32,
+  gy: i32,
+  cell: &Cell,
+  body: &HashSet<(i32, i32)>,
+  mover_cells: usize,
+) -> bool {
+  if roll_destination_ok(world, gx, gy, cell, body) {
+    return true;
+  }
+  if is_competent_rock(cell.material) && can_crush_spec(world, gx, gy, mover_cells) {
+    return true;
+  }
+  false
 }
 
 struct Component {
@@ -344,6 +468,7 @@ fn bottom_face(comp: &Component) -> Vec<(i32, i32, Cell)> {
 }
 
 fn can_translate(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
+  let n = comp.cells.len();
   for (gx, gy, _) in &comp.cells {
     let tx = world.wrap_x(gx + dx);
     let ty = gy + dy;
@@ -356,9 +481,13 @@ fn can_translate(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
     let Some(dst) = world.get_cell(tx, ty) else {
       return false;
     };
-    if !body_passable_at(world, tx, ty, &dst) {
-      return false;
+    if body_passable_at(world, tx, ty, &dst) {
+      continue;
     }
+    if can_crush_spec(world, tx, ty, n) {
+      continue;
+    }
+    return false;
   }
   true
 }
@@ -393,8 +522,17 @@ fn translate_component(world: &mut World, comp: &Component, dx: i32, dy: i32) ->
     .iter()
     .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, *c))
     .collect();
-  // Snapshot destinations, then clear sources, then write — never read a cell
-  // we just cleared while the body is mid-move (fixes top-row separation).
+  let n = comp.cells.len();
+  for (tx, ty, _) in &moves {
+    if comp.set.contains(&(*tx, *ty)) {
+      continue;
+    }
+    if let Some(dst) = world.get_cell(*tx, *ty) {
+      if is_competent_rock(dst.material) && can_crush_spec(world, *tx, *ty, n) {
+        crush_spec_at(world, *tx, *ty);
+      }
+    }
+  }
   for (x, y, _) in &comp.cells {
     world.set_cell(*x, *y, Cell::air());
   }
@@ -651,6 +789,7 @@ fn rotate_pos(px: i32, py: i32, gx: i32, gy: i32, dx: i32) -> (i32, i32) {
 }
 
 fn can_pivot_roll(world: &World, comp: &Component, pivot: (i32, i32), dx: i32) -> bool {
+  let n = comp.cells.len();
   for (gx, gy, _) in &comp.cells {
     let (tx, ty) = rotate_pos(pivot.0, pivot.1, *gx, *gy, dx);
     if ty < 0 {
@@ -663,11 +802,7 @@ fn can_pivot_roll(world: &World, comp: &Component, pivot: (i32, i32), dx: i32) -
     let Some(dst) = world.get_cell(tx, ty) else {
       return false;
     };
-    // Never rotate into other competent rock (contact ≠ weld).
-    if is_competent_rock(dst.material) {
-      return false;
-    }
-    if !roll_destination_ok(world, tx, ty, &dst, &comp.set) {
+    if !motion_destination_ok(world, tx, ty, &dst, &comp.set, n) {
       return false;
     }
   }
@@ -702,9 +837,8 @@ fn displace_soft_at(world: &mut World, gx: i32, gy: i32) {
 }
 
 fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, i32, Cell)>) {
-  // Clear soft beds that occupy destinations before clearing sources,
-  // so displaced soft can use vacated body cells if needed.
   let src_set: HashSet<(i32, i32)> = sources.iter().copied().collect();
+  let mover_n = sources.len();
   for (tx, ty, _) in &moves {
     if src_set.contains(&(*tx, *ty)) {
       continue;
@@ -712,6 +846,8 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
     if let Some(dst) = world.get_cell(*tx, *ty) {
       if is_roll_displaceable(dst.material) {
         displace_soft_at(world, *tx, *ty);
+      } else if is_competent_rock(dst.material) && can_crush_spec(world, *tx, *ty, mover_n) {
+        crush_spec_at(world, *tx, *ty);
       }
     }
   }
@@ -782,10 +918,7 @@ fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), 
       continue;
     }
     match world.get_cell(tx, ty) {
-      Some(dst)
-        if !is_competent_rock(dst.material)
-          && roll_destination_ok(world, tx, ty, &dst, &comp.set) =>
-      {
+      Some(dst) if motion_destination_ok(world, tx, ty, &dst, &comp.set, comp.cells.len()) => {
         moves.push((tx, ty, *c));
         sources.push((*gx, *gy));
       }
@@ -844,6 +977,7 @@ fn can_slide(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
   for (x, y, _) in &cargo {
     moving.insert((*x, *y));
   }
+  let n = comp.cells.len();
   for (gx, gy, _) in comp.cells.iter().chain(cargo.iter()) {
     let tx = world.wrap_x(gx + dx);
     let ty = gy + dy;
@@ -856,11 +990,7 @@ fn can_slide(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
     let Some(dst) = world.get_cell(tx, ty) else {
       return false;
     };
-    // Other competent rock is a solid obstacle — never glue by sliding into it.
-    if is_competent_rock(dst.material) {
-      return false;
-    }
-    if !roll_destination_ok(world, tx, ty, &dst, &comp.set) {
+    if !motion_destination_ok(world, tx, ty, &dst, &comp.set, n) {
       return false;
     }
   }
@@ -1230,6 +1360,123 @@ fn rests_on_hard_bed(world: &World, comp: &Component) -> bool {
   })
 }
 
+fn body_bbox(comp: &Component) -> (i32, i32, i32, i32) {
+  let min_x = comp.cells.iter().map(|(x, _, _)| *x).min().unwrap_or(0);
+  let max_x = comp.cells.iter().map(|(x, _, _)| *x).max().unwrap_or(0);
+  let min_y = comp.cells.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
+  let max_y = comp.cells.iter().map(|(_, y, _)| *y).max().unwrap_or(0);
+  (min_x, max_x, min_y, max_y)
+}
+
+fn is_long_thin(comp: &Component) -> bool {
+  if comp.cells.len() < THIN_FRACTURE_SPAN as usize {
+    return false;
+  }
+  let (x0, x1, y0, y1) = body_bbox(comp);
+  let w = x1 - x0 + 1;
+  let h = y1 - y0 + 1;
+  let long = w.max(h);
+  let short = w.min(h);
+  if long < THIN_FRACTURE_SPAN {
+    return false;
+  }
+  if short <= THIN_FRACTURE_THICK {
+    return true;
+  }
+  // Sparse stick/slab filling little of its bbox.
+  (comp.cells.len() as i32) * 2 <= long * short.min(3)
+}
+
+/// Break long-thin rock at a 1-cell neck (beams/slabs snapping).
+fn fracture_thin_necks(world: &mut World, comp: &Component) -> u32 {
+  if !is_long_thin(comp) {
+    return 0;
+  }
+  let (x0, x1, y0, y1) = body_bbox(comp);
+  let w = x1 - x0 + 1;
+  let h = y1 - y0 + 1;
+  let horizontal = w >= h;
+  let margin = if horizontal {
+    (w / 5).max(1)
+  } else {
+    (h / 5).max(1)
+  };
+
+  let mut candidates: Vec<(i32, i32, Cell)> = Vec::new();
+  if horizontal {
+    for x in (x0 + margin)..=(x1 - margin) {
+      let col: Vec<_> = comp
+        .cells
+        .iter()
+        .filter(|(cx, _, _)| *cx == x)
+        .copied()
+        .collect();
+      if col.len() != 1 {
+        continue;
+      }
+      let (gx, gy, cell) = col[0];
+      let left = comp
+        .set
+        .iter()
+        .any(|(sx, sy)| *sx == gx - 1 && (*sy - gy).abs() <= 1);
+      let right = comp
+        .set
+        .iter()
+        .any(|(sx, sy)| *sx == gx + 1 && (*sy - gy).abs() <= 1);
+      if left && right {
+        candidates.push((gx, gy, cell));
+      }
+    }
+  } else {
+    for y in (y0 + margin)..=(y1 - margin) {
+      let row: Vec<_> = comp
+        .cells
+        .iter()
+        .filter(|(_, cy, _)| *cy == y)
+        .copied()
+        .collect();
+      if row.len() != 1 {
+        continue;
+      }
+      let (gx, gy, cell) = row[0];
+      let below = comp
+        .set
+        .iter()
+        .any(|(sx, sy)| *sy == gy - 1 && (*sx - gx).abs() <= 1);
+      let above = comp
+        .set
+        .iter()
+        .any(|(sx, sy)| *sy == gy + 1 && (*sx - gx).abs() <= 1);
+      if below && above {
+        candidates.push((gx, gy, cell));
+      }
+    }
+  }
+  // Prefer an unsupported neck (hanging beam), else any mid neck.
+  candidates.sort_by_key(|(x, y, _)| {
+    let supported = matches!(
+      support_below(world, *x, *y),
+      Some((bed, _)) if bed != MaterialId::Air
+    );
+    (supported, *x + *y)
+  });
+  let Some((gx, gy, cell)) = candidates.into_iter().next() else {
+    return 0;
+  };
+  let debris = roof_collapse_debris(cell.material);
+  world.set_cell(
+    gx,
+    gy,
+    Cell {
+      material: debris,
+      sat: cell.sat,
+      ..cell
+    },
+  );
+  world.touch_dirty(gx, gy);
+  1
+}
+
 fn advance_streak(
   fall_streak: &mut HashMap<(i32, i32), u32>,
   from: (i32, i32),
@@ -1349,6 +1596,15 @@ pub fn apply_competent_fall_regions(
       if is_floating(world, &comp) {
         continue;
       }
+      // Long thin sticks / slabs snap at 1-cell necks instead of tipping as one beam.
+      if is_long_thin(&comp) {
+        let snapped = fracture_thin_necks(world, &comp);
+        if snapped > 0 {
+          stats.impacts = stats.impacts.saturating_add(1);
+          moved = true;
+          continue;
+        }
+      }
       // Wait until every bottom cell has support — avoids uneven per-column
       // embed/shatter while the body is still bridging a slope or gap.
       if !is_fully_supported(world, &comp) {
@@ -1387,6 +1643,10 @@ pub fn apply_competent_fall_regions(
           stats.impacts += 1;
           fall_streak.remove(&anchor);
           moved = true;
+          // Thin remnants often need a second snap after face shatter.
+          if is_long_thin(&comp) {
+            let _ = fracture_thin_necks(world, &comp);
+          }
           continue;
         }
       }
@@ -1855,5 +2115,69 @@ mod tests {
         );
       }
     }
+  }
+
+  #[test]
+  fn large_body_crushes_tiny_rock_spec() {
+    let mut w = World::new(11);
+    for x in 0..16 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      for y in 1..=3 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    stamp_blob(&mut w, 4, 4, 4, 4); // 16-cell boulder
+    w.set_cell(9, 4, Cell::solid(MaterialId::Stone)); // tiny spec downhill
+    let regions = competent_active_regions(&w, &[], 8);
+    let comps = build_components(&w, &regions);
+    let boulder = comps.iter().find(|c| c.cells.len() >= 12).expect("boulder");
+    assert!(
+      can_crush_spec(&w, 9, 4, boulder.cells.len()),
+      "16-cell body must be allowed to crush a 1-cell spec"
+    );
+    assert!(
+      can_slide(&w, boulder, 1, 0) || can_slide(&w, boulder, 1, -1),
+      "boulder must not be hard-blocked by the spec"
+    );
+    let _ = crush_spec_at(&mut w, 9, 4);
+    assert_eq!(
+      w.get_cell(9, 4).map(|c| c.material),
+      Some(MaterialId::LooseRock),
+      "crushed spec becomes LooseRock"
+    );
+  }
+
+  #[test]
+  fn long_thin_stick_fractures_at_neck() {
+    let mut w = World::new(11);
+    for x in 0..16 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+    }
+    // 10×1 stick with supports only at the ends — mid should snap.
+    for x in 3..13 {
+      w.set_cell(x, 3, Cell::solid(MaterialId::Stone));
+    }
+    w.set_cell(3, 2, Cell::solid(MaterialId::Sand));
+    w.set_cell(12, 2, Cell::solid(MaterialId::Sand));
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_roll_events: 4,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..6 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let stone: usize = (3..13)
+      .filter(|&x| w.get_cell(x, 3).map(|c| c.material) == Some(MaterialId::Stone))
+      .count();
+    let loose: usize = (0..16)
+      .flat_map(|x| (1..=5).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::LooseRock))
+      .count();
+    assert!(
+      stone < 10 || loose > 0,
+      "thin stick should snap (stone_mid={stone}, loose={loose})"
+    );
   }
 }
