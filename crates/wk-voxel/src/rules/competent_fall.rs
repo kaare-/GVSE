@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::active::ActiveChunk;
-use crate::cell::{is_competent_rock, Cell, Sat};
+use crate::cell::{is_competent_rock, Cell, CellFlags, Sat};
 use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::failure::roof_collapse_debris;
 use crate::grid::World;
@@ -129,7 +129,7 @@ fn roll_destination_ok(world: &World, gx: i32, gy: i32, cell: &Cell, body: &Hash
   body_passable_at(world, gx, gy, cell) || is_roll_displaceable(cell.material)
 }
 
-/// Size of the 4-connected same-material competent cluster at (gx,gy), capped.
+/// Size of the 4-connected same-material / same-mobility competent cluster.
 fn competent_cluster_size(world: &World, gx: i32, gy: i32, limit: usize) -> usize {
   let Some(seed) = world.get_cell(gx, gy) else {
     return 0;
@@ -138,6 +138,7 @@ fn competent_cluster_size(world: &World, gx: i32, gy: i32, limit: usize) -> usiz
     return 0;
   }
   let mat = seed.material;
+  let seed_mobile = is_mobile_rock(&seed);
   let mut seen = HashSet::new();
   let mut q = VecDeque::new();
   q.push_back((gx, gy));
@@ -153,7 +154,7 @@ fn competent_cluster_size(world: &World, gx: i32, gy: i32, limit: usize) -> usiz
         continue;
       }
       match world.get_cell(nx, ny) {
-        Some(n) if n.material == mat => q.push_back((nx, ny)),
+        Some(n) if flood_compatible(seed_mobile, &n, mat) => q.push_back((nx, ny)),
         _ => {
           seen.remove(&(nx, ny));
         }
@@ -186,6 +187,7 @@ fn crush_spec_at(world: &mut World, gx: i32, gy: i32) -> u32 {
     return 0;
   }
   let mat = seed.material;
+  let seed_mobile = is_mobile_rock(&seed);
   let debris = roof_collapse_debris(mat);
   let mut seen = HashSet::new();
   let mut q = VecDeque::new();
@@ -199,18 +201,16 @@ fn crush_spec_at(world: &mut World, gx: i32, gy: i32) -> u32 {
     let Some(cur) = world.get_cell(cx, cy) else {
       continue;
     };
-    if cur.material != mat {
+    if !flood_compatible(seed_mobile, &cur, mat) {
       continue;
     }
-    world.set_cell(
-      cx,
-      cy,
-      Cell {
-        material: debris,
-        sat: cur.sat,
-        ..cur
-      },
-    );
+    let mut next = Cell {
+      material: debris,
+      sat: cur.sat,
+      ..cur
+    };
+    next.flags.clear(CellFlags::MOBILE_ROCK);
+    world.set_cell(cx, cy, next);
     world.touch_dirty(cx, cy);
     crushed += 1;
     for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
@@ -220,7 +220,7 @@ fn crush_spec_at(world: &mut World, gx: i32, gy: i32) -> u32 {
         continue;
       }
       match world.get_cell(nx, ny) {
-        Some(n) if n.material == mat => q.push_back((nx, ny)),
+        Some(n) if flood_compatible(seed_mobile, &n, mat) => q.push_back((nx, ny)),
         _ => {
           seen.remove(&(nx, ny));
         }
@@ -254,19 +254,43 @@ struct Component {
   max_y: i32,
 }
 
-fn has_free_neighbor(world: &World, gx: i32, gy: i32) -> bool {
-  for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-    let nx = world.wrap_x(gx + dx);
-    let ny = gy + dy;
-    match world.get_cell(nx, ny) {
-      None => return true,
-      Some(c) if c.material == MaterialId::Air || is_roll_displaceable(c.material) => {
-        return true;
-      }
-      _ => {}
+#[inline]
+fn is_mobile_rock(cell: &Cell) -> bool {
+  cell.flags.contains(CellFlags::MOBILE_ROCK)
+}
+
+/// Mark every cell in the body as a detached mobile rock — flood will no
+/// longer absorb unmarked terrain or grow the mass by contact welding.
+fn mark_component_mobile(world: &mut World, comp: &Component) {
+  for &(gx, gy, _) in &comp.cells {
+    let Some(mut cell) = world.get_cell(gx, gy) else {
+      continue;
+    };
+    if !is_competent_rock(cell.material) {
+      continue;
     }
+    if cell.flags.contains(CellFlags::MOBILE_ROCK) {
+      continue;
+    }
+    cell.flags.set(CellFlags::MOBILE_ROCK);
+    world.set_cell(gx, gy, cell);
+    world.touch_dirty(gx, gy);
   }
-  false
+}
+
+/// Stamp MOBILE_ROCK onto a competent cell before writing a moved body.
+#[inline]
+fn with_mobile_rock(mut cell: Cell) -> Cell {
+  if is_competent_rock(cell.material) {
+    cell.flags.set(CellFlags::MOBILE_ROCK);
+  }
+  cell
+}
+
+/// Same material and same mobility class (mobile↔mobile or strata↔strata).
+#[inline]
+fn flood_compatible(seed_mobile: bool, neighbor: &Cell, material: MaterialId) -> bool {
+  neighbor.material == material && is_mobile_rock(neighbor) == seed_mobile
 }
 
 /// Extract boulder-sized dynamic bodies only (CCRB). Strata larger than
@@ -297,6 +321,7 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
           continue;
         }
         let material = cell.material;
+        let seed_mobile = is_mobile_rock(&cell);
         let mut queue = VecDeque::new();
         let mut cells: Vec<(i32, i32, Cell)> = Vec::new();
         queue.push_back((gx, gy));
@@ -306,7 +331,7 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
           let Some(cur) = world.get_cell(cx, cy) else {
             continue;
           };
-          if cur.material != material {
+          if !flood_compatible(seed_mobile, &cur, material) {
             continue;
           }
           cells.push((cx, cy, cur));
@@ -321,7 +346,7 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
               continue;
             }
             match world.get_cell(nx, ny) {
-              Some(n) if n.material == material => queue.push_back((nx, ny)),
+              Some(n) if flood_compatible(seed_mobile, &n, material) => queue.push_back((nx, ny)),
               _ => {
                 visited.remove(&(nx, ny));
               }
@@ -338,7 +363,9 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
                 continue;
               }
               match world.get_cell(nx, ny) {
-                Some(n) if n.material == material => queue.push_back((nx, ny)),
+                Some(n) if flood_compatible(seed_mobile, &n, material) => {
+                  queue.push_back((nx, ny))
+                }
                 _ => {
                   visited.remove(&(nx, ny));
                 }
@@ -742,7 +769,7 @@ fn translate_component(world: &mut World, comp: &Component, dx: i32, dy: i32) ->
   let moves: Vec<(i32, i32, Cell)> = comp
     .cells
     .iter()
-    .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, *c))
+    .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, with_mobile_rock(*c)))
     .collect();
   let n = comp.cells.len();
   for (tx, ty, _) in &moves {
@@ -865,7 +892,12 @@ fn impact_shatter(
         Cell {
           material: debris,
           sat: cur.sat,
-          ..cur
+          flags: {
+            let mut f = cur.flags;
+            f.clear(CellFlags::MOBILE_ROCK);
+            f
+          },
+          _pad: cur._pad,
         },
       );
       applied += 1;
@@ -1124,7 +1156,7 @@ fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), 
     .iter()
     .map(|(gx, gy, c)| {
       let (tx, ty) = rotate_pos(pivot.0, pivot.1, *gx, *gy, dx);
-      (world.wrap_x(tx), ty, *c)
+      (world.wrap_x(tx), ty, with_mobile_rock(*c))
     })
     .collect();
   let mut sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
@@ -1251,7 +1283,7 @@ fn slide_component(world: &mut World, comp: &Component, dx: i32, dy: i32) -> boo
   let mut moves: Vec<(i32, i32, Cell)> = comp
     .cells
     .iter()
-    .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, *c))
+    .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, with_mobile_rock(*c)))
     .collect();
   for (x, y, c) in &cargo {
     moves.push((world.wrap_x(x + dx), y + dy, *c));
@@ -1850,6 +1882,9 @@ pub fn apply_competent_fall_regions(
         continue;
       }
       if is_floating(world, &comp) {
+        // Airborne before a blocked drop — still mark so mid-air contact
+        // cannot weld into unmarked cliff face and grow the body.
+        mark_component_mobile(world, &comp);
         continue;
       }
       // Long thin sticks / slabs snap at 1-cell necks instead of tipping as one beam.
@@ -2540,5 +2575,72 @@ mod tests {
       "tiny sticks must not tip (flip-flop)"
     );
     assert!(!may_tip(comp), "may_tip rejects needles");
+  }
+
+  #[test]
+  fn mobile_boulder_does_not_absorb_unmarked_terrain() {
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Unmarked stone wall (painted strata).
+    for y in 1..=12 {
+      for x in 0..4 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    // Mobile boulder pressed against the wall.
+    for x in 4..7 {
+      for y in 1..=3 {
+        let mut c = Cell::solid(MaterialId::Stone);
+        c.flags.set(CellFlags::MOBILE_ROCK);
+        w.set_cell(x, y, c);
+      }
+    }
+    let regions = competent_active_regions(&w, &[], 4);
+    let comps = build_components(&w, &regions);
+    let boulder = comps
+      .iter()
+      .find(|c| c.cells.iter().any(|(x, _, _)| *x >= 4))
+      .expect("mobile boulder must be extracted");
+    assert_eq!(
+      boulder.cells.len(),
+      9,
+      "mobile body must not weld into unmarked wall (got {})",
+      boulder.cells.len()
+    );
+    assert!(
+      boulder
+        .cells
+        .iter()
+        .all(|(_, _, c)| c.flags.contains(CellFlags::MOBILE_ROCK)),
+      "extracted cells stay mobile-marked"
+    );
+  }
+
+  #[test]
+  fn falling_stone_is_marked_mobile() {
+    let mut w = World::new(9);
+    stamp_blob(&mut w, 4, 40, 3, 3);
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      ..CompetentFallConfig::default()
+    };
+    apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    let stones: Vec<_> = (0..20)
+      .flat_map(|x| (0..50).map(move |y| (x, y)))
+      .filter(|&(x, y)| {
+        w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone)
+      })
+      .collect();
+    assert_eq!(stones.len(), 9, "3x3 blob survives fall");
+    for (x, y) in stones {
+      let c = w.get_cell(x, y).unwrap();
+      assert!(
+        c.flags.contains(CellFlags::MOBILE_ROCK),
+        "fallen stone at ({x},{y}) must be MOBILE_ROCK"
+      );
+    }
   }
 }
