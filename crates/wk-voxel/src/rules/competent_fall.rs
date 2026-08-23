@@ -254,6 +254,21 @@ struct Component {
   max_y: i32,
 }
 
+fn has_free_neighbor(world: &World, gx: i32, gy: i32) -> bool {
+  for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+    let nx = world.wrap_x(gx + dx);
+    let ny = gy + dy;
+    match world.get_cell(nx, ny) {
+      None => return true,
+      Some(c) if c.material == MaterialId::Air || is_roll_displaceable(c.material) => {
+        return true;
+      }
+      _ => {}
+    }
+  }
+  false
+}
+
 #[inline]
 fn is_mobile_rock(cell: &Cell) -> bool {
   cell.flags.contains(CellFlags::MOBILE_ROCK)
