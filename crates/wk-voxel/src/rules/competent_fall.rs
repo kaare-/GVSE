@@ -2,15 +2,18 @@
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
-//! Competent rock (Stone / Limestone) falls as connected rigid bodies:
-//! 1. Vertical drop through Air (including lake water — rocks sink).
-//! 2. Impact shatter — bottom face converts to fallable debris.
-//! 3. Slope roll + soft-bed embed on sand / soil / clay.
+//! Competent rock (Stone / Limestone) as **dynamic rigid bodies** (grid CCRB):
+//! static strata stay in the grid; only boulder-sized air-adjacent components
+//! are simulated — industry-standard for falling-sand / voxel CA engines.
+//!
+//! 1. Free fall through Air (rocks sink in lakes).
+//! 2. Impact shatter on hard beds after a fall.
+//! 3. COM / support tip — 90° pivot when unstable; no slide-shred.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 use serde::{Deserialize, Serialize};
-use wk_material::{MaterialId, MaterialRegistry};
+use wk_material::MaterialId;
 
 use crate::active::ActiveChunk;
 use crate::cell::{is_competent_rock, Cell, Sat};
@@ -22,8 +25,12 @@ use crate::grid::World;
 pub const COMPETENT_FALL_PASSES: u32 = 96;
 /// FPS path: one rigid drop of this many cells (sky → ground in ~1–2 frames).
 pub const COMPETENT_FALL_PASSES_FPS: u32 = 64;
-/// Rebuild / impact / roll loops after the free-fall jump.
-pub const COMPETENT_TOPOLOGY_PASSES: u32 = 8;
+/// Seated tip / impact rebuilds per tick (keep low — each rebuild is O(body)).
+pub const COMPETENT_TOPOLOGY_PASSES: u32 = 3;
+/// Connected competent larger than this is treated as static terrain.
+pub const MAX_DYNAMIC_BODY_CELLS: usize = 384;
+/// Hard cap on bodies processed per tick (FPS guard).
+pub const MAX_BODIES_PER_TICK: usize = 8;
 
 /// Live-tunable competent-body knobs (Tab → Geotech).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -37,9 +44,9 @@ pub struct CompetentFallConfig {
   pub heavy_impact_fall_cells: u32,
   /// Max bottom-face cells shattered per impact.
   pub max_impact_cells: u32,
-  /// Slope roll when downhill drop ≥ this many cells.
+  /// Tip when support drop / COM overhang ≥ this many cells.
   pub roll_drop_cells: i32,
-  /// Max whole-body diagonal rolls per tick.
+  /// Max whole-body tip events per tick.
   pub max_roll_events: u32,
 }
 
@@ -52,7 +59,7 @@ impl Default for CompetentFallConfig {
       heavy_impact_fall_cells: 12,
       max_impact_cells: 48,
       roll_drop_cells: 1,
-      max_roll_events: 12,
+      max_roll_events: 4,
     }
   }
 }
@@ -115,9 +122,26 @@ struct Component {
   max_y: i32,
 }
 
+fn has_free_neighbor(world: &World, gx: i32, gy: i32) -> bool {
+  for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+    let nx = world.wrap_x(gx + dx);
+    let ny = gy + dy;
+    match world.get_cell(nx, ny) {
+      None => return true,
+      Some(c) if c.material == MaterialId::Air || is_roll_displaceable(c.material) => {
+        return true;
+      }
+      _ => {}
+    }
+  }
+  false
+}
+
+/// Extract boulder-sized dynamic bodies only (CCRB). Strata larger than
+/// [`MAX_DYNAMIC_BODY_CELLS`] stay static and are never simulated.
 fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
-  let mut index: HashMap<(i32, i32), usize> = HashMap::new();
-  let mut cells: Vec<(i32, i32, Cell)> = Vec::new();
+  let mut visited: HashSet<(i32, i32)> = HashSet::new();
+  let mut out: Vec<Component> = Vec::new();
   for ac in active {
     let Some(chunk) = world.chunks.get(&ac.coord) else {
       continue;
@@ -132,76 +156,92 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
         }
         let gx = world.wrap_x(base_gx + x as i32);
         let gy = base_gy + y as i32;
-        let key = (gx, gy);
-        if index.contains_key(&key) {
+        if visited.contains(&(gx, gy)) {
           continue;
         }
-        let idx = cells.len();
-        index.insert(key, idx);
-        cells.push((gx, gy, cell));
-      }
-    }
-  }
-  if cells.is_empty() {
-    return Vec::new();
-  }
-
-  let mut parent: Vec<usize> = (0..cells.len()).collect();
-  fn find(parent: &mut [usize], i: usize) -> usize {
-    let mut v = i;
-    while parent[v] != v {
-      let p = parent[v];
-      parent[v] = parent[p];
-      v = p;
-    }
-    v
-  }
-  fn union(parent: &mut [usize], a: usize, b: usize) {
-    let ra = find(parent, a);
-    let rb = find(parent, b);
-    if ra != rb {
-      parent[ra] = rb;
-    }
-  }
-
-  for i in 0..cells.len() {
-    let (gx, gy, cell) = cells[i];
-    for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1)] {
-      let nx = world.wrap_x(gx + dx);
-      let ny = gy + dy;
-      if let Some(&j) = index.get(&(nx, ny)) {
-        // Same material only — stone boulders must not glue into limestone
-        // bedrock (and vice versa), or the whole hillside becomes one body.
-        if cells[j].2.material == cell.material {
-          union(&mut parent, i, j);
+        // Seeds must touch air/soft — buried strata interiors are skipped.
+        if !has_free_neighbor(world, gx, gy) {
+          continue;
+        }
+        let material = cell.material;
+        let mut queue = VecDeque::new();
+        let mut cells: Vec<(i32, i32, Cell)> = Vec::new();
+        queue.push_back((gx, gy));
+        visited.insert((gx, gy));
+        let mut oversized = false;
+        while let Some((cx, cy)) = queue.pop_front() {
+          let Some(cur) = world.get_cell(cx, cy) else {
+            continue;
+          };
+          if cur.material != material {
+            continue;
+          }
+          cells.push((cx, cy, cur));
+          if cells.len() > MAX_DYNAMIC_BODY_CELLS {
+            oversized = true;
+            break;
+          }
+          for (dx, dy) in [
+            (1, 0),
+            (0, 1),
+            (-1, 0),
+            (0, -1),
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
+          ] {
+            let nx = world.wrap_x(cx + dx);
+            let ny = cy + dy;
+            if !visited.insert((nx, ny)) {
+              continue;
+            }
+            match world.get_cell(nx, ny) {
+              Some(n) if n.material == material => queue.push_back((nx, ny)),
+              _ => {
+                visited.remove(&(nx, ny));
+              }
+            }
+          }
+        }
+        if oversized {
+          // Finish marking the strata so we don't restart from every seed.
+          while let Some((cx, cy)) = queue.pop_front() {
+            for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+              let nx = world.wrap_x(cx + dx);
+              let ny = cy + dy;
+              if !visited.insert((nx, ny)) {
+                continue;
+              }
+              match world.get_cell(nx, ny) {
+                Some(n) if n.material == material => queue.push_back((nx, ny)),
+                _ => {
+                  visited.remove(&(nx, ny));
+                }
+              }
+            }
+          }
+          continue;
+        }
+        if cells.is_empty() {
+          continue;
+        }
+        let set: HashSet<_> = cells.iter().map(|(x, y, _)| (*x, *y)).collect();
+        let min_y = cells.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
+        let max_y = cells.iter().map(|(_, y, _)| *y).max().unwrap_or(0);
+        out.push(Component {
+          cells,
+          set,
+          min_y,
+          max_y,
+        });
+        if out.len() >= MAX_BODIES_PER_TICK {
+          out.sort_by_key(|c| c.min_y);
+          return out;
         }
       }
     }
   }
-
-  let mut buckets: HashMap<usize, Vec<(i32, i32, Cell)>> = HashMap::new();
-  for i in 0..cells.len() {
-    let r = find(&mut parent, i);
-    buckets
-      .entry(r)
-      .or_default()
-      .push(cells[i]);
-  }
-
-  let mut out: Vec<Component> = buckets
-    .into_values()
-    .map(|cells| {
-      let set: HashSet<_> = cells.iter().map(|(x, y, _)| (*x, *y)).collect();
-      let min_y = cells.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
-      let max_y = cells.iter().map(|(_, y, _)| *y).max().unwrap_or(0);
-      Component {
-        cells,
-        set,
-        min_y,
-        max_y,
-      }
-    })
-    .collect();
   out.sort_by_key(|c| c.min_y);
   out
 }
@@ -389,44 +429,8 @@ fn impact_shatter(
   applied
 }
 
-fn soft_embed(world: &mut World, comp: &Component, cfg: &CompetentFallConfig) -> u32 {
-  // Prefer rolling on any slope — only glue when the bed is flat.
-  if downhill_roll_dir(world, comp, cfg).is_some() {
-    return 0;
-  }
-  if !is_fully_supported(world, comp) || !rests_on_soft_bed(world, comp) {
-    return 0;
-  }
-  let mut applied = 0u32;
-  let mut cols: HashSet<i32> = HashSet::new();
-  for (gx, gy, cell) in bottom_face(comp) {
-    if !cols.insert(gx) {
-      continue;
-    }
-    let Some((bed, _)) = support_below(world, gx, gy) else {
-      continue;
-    };
-    if !is_soft_embed_bed(bed) {
-      continue;
-    }
-    let cohesion = MaterialRegistry::props(bed).cohesion;
-    if cohesion > 60 {
-      continue;
-    }
-    let debris = roof_collapse_debris(cell.material);
-    world.set_cell(
-      gx,
-      gy,
-      Cell {
-        material: debris,
-        sat: Sat(cell.sat.0.saturating_sub(2)),
-        ..cell
-      },
-    );
-    world.touch_dirty(gx, gy);
-    applied += 1;
-  }
-  applied
+fn soft_embed(_world: &mut World, _comp: &Component, _cfg: &CompetentFallConfig) -> u32 {
+  0
 }
 
 fn downhill_roll_dir(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<i32> {
@@ -644,71 +648,47 @@ fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), 
   true
 }
 
+/// Industry CCRB tip direction: COM outside support base, else steep downhill.
+fn tip_dir(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<i32> {
+  let contacts: Vec<(i32, i32)> = bottom_face(comp)
+    .into_iter()
+    .filter(|(x, y, _)| {
+      matches!(
+        support_below(world, *x, *y),
+        Some((bed, _)) if bed != MaterialId::Air
+      )
+    })
+    .map(|(x, y, _)| (x, y))
+    .collect();
+  if contacts.is_empty() {
+    return None;
+  }
+  let n = comp.cells.len() as i64;
+  let com_x = (comp.cells.iter().map(|(x, _, _)| *x as i64).sum::<i64>() / n) as i32;
+  let s_min = contacts.iter().map(|(x, _)| *x).min().unwrap();
+  let s_max = contacts.iter().map(|(x, _)| *x).max().unwrap();
+  // Classic overhang: centre of mass past the support edge → tip that way.
+  if com_x < s_min {
+    return Some(-1);
+  }
+  if com_x > s_max {
+    return Some(1);
+  }
+  // Steep bed under the contact patch (slope tumble even when COM is inside).
+  downhill_roll_dir(world, comp, cfg)
+}
+
 fn try_pivot_roll(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<i32> {
   if is_floating(world, comp) {
     return None;
   }
-  let dx = downhill_roll_dir(world, comp, cfg)?;
+  let dx = tip_dir(world, comp, cfg)?;
   let pivot = roll_pivot(comp, dx);
   if can_pivot_roll(world, comp, pivot, dx) {
     Some(dx)
   } else {
     None
   }
-}
-
-fn can_translate_roll(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
-  for (gx, gy, _) in &comp.cells {
-    let tx = world.wrap_x(gx + dx);
-    let ty = gy + dy;
-    if ty < 0 {
-      return false;
-    }
-    if comp.set.contains(&(tx, ty)) {
-      continue;
-    }
-    let Some(dst) = world.get_cell(tx, ty) else {
-      return false;
-    };
-    if !roll_destination_ok(world, tx, ty, &dst, &comp.set) {
-      return false;
-    }
-  }
-  true
-}
-
-fn translate_roll_component(world: &mut World, comp: &Component, dx: i32, dy: i32) -> bool {
-  if dx == 0 && dy == 0 {
-    return false;
-  }
-  if !can_translate_roll(world, comp, dx, dy) {
-    return false;
-  }
-  let moves: Vec<(i32, i32, Cell)> = comp
-    .cells
-    .iter()
-    .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, *c))
-    .collect();
-  let sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
-  write_roll_cells(world, &sources, moves);
-  true
-}
-
-fn try_roll_translate(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<(i32, i32)> {
-  if is_floating(world, comp) {
-    return None;
-  }
-  let dx = downhill_roll_dir(world, comp, cfg)?;
-  // Prefer sliding down the face; hop-slide if nestled into soft bed.
-  for &(mx, my) in &[(dx, -1), (dx, -2), (dx, 0), (dx, 1)] {
-    if my > 0 && !can_translate_roll(world, comp, 0, my) {
-      continue;
-    }
-    if can_translate_roll(world, comp, mx, my) {
-      return Some((mx, my));
-    }
-  }
-  None
 }
 
 /// True when a seated body still has a downhill neighbor and should stay awake.
@@ -762,7 +742,7 @@ fn body_has_downhill(world: &World, gx: i32, gy: i32) -> bool {
   false
 }
 
-/// Re-dirty competent bodies that can still fall or roll.
+/// Re-dirty dynamic competent bodies that can still fall or tip.
 pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
   let cw = CHUNK_CELLS_W as i32;
   let ch = CHUNK_CELLS_H as i32;
@@ -781,6 +761,10 @@ pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
         }
         let gx = world.wrap_x(base_gx + lx as i32);
         let gy = base_gy + ly as i32;
+        // Skip buried strata — only skin / overhang cells wake bodies.
+        if !has_free_neighbor(world, gx, gy) {
+          continue;
+        }
         let wake = match world.get_cell(gx, gy - 1) {
           None => true,
           Some(b) if body_passable_at(world, gx, gy - 1, &b) => true,
@@ -991,15 +975,6 @@ fn competent_active_regions(world: &World, active: &[ActiveChunk], drop_budget: 
     .collect()
 }
 
-fn rests_on_soft_bed(world: &World, comp: &Component) -> bool {
-  bottom_face(comp).iter().any(|(x, y, _)| {
-    matches!(
-      support_below(world, *x, *y),
-      Some((bed, _)) if is_soft_embed_bed(bed)
-    )
-  })
-}
-
 fn rests_on_hard_bed(world: &World, comp: &Component) -> bool {
   bottom_face(comp).iter().any(|(x, y, _)| {
     matches!(
@@ -1024,7 +999,7 @@ fn apply_roll(
   world: &mut World,
   regions: &[ActiveChunk],
   comp: &Component,
-  anchor: (i32, i32),
+  _anchor: (i32, i32),
   cfg: &CompetentFallConfig,
   fall_streak: &mut HashMap<(i32, i32), u32>,
   stats: &mut CompetentFallStats,
@@ -1032,25 +1007,17 @@ fn apply_roll(
   if stats.roll_moves >= cfg.max_roll_events {
     return false;
   }
-  // Pivot tumble first — whole body tips over the downhill bbox corner.
-  if let Some(dx) = try_pivot_roll(world, comp, cfg) {
-    let pivot = roll_pivot(comp, dx);
-    if pivot_roll_component(world, comp, pivot, dx) {
-      stats.roll_moves += 1;
-      settle_after_roll(world, regions, pivot, fall_streak, stats);
-      return true;
-    }
+  // Pivot tip only — no rigid slide (that reads as cheese-grater scraping).
+  let Some(dx) = try_pivot_roll(world, comp, cfg) else {
+    return false;
+  };
+  let pivot = roll_pivot(comp, dx);
+  if !pivot_roll_component(world, comp, pivot, dx) {
+    return false;
   }
-  if let Some((dx, dy)) = try_roll_translate(world, comp, cfg) {
-    if translate_roll_component(world, comp, dx, dy) {
-      stats.roll_moves += 1;
-      let new_anchor = (anchor.0 + dx, anchor.1 + dy);
-      advance_streak(fall_streak, anchor, dx, dy);
-      settle_after_roll(world, regions, new_anchor, fall_streak, stats);
-      return true;
-    }
-  }
-  false
+  stats.roll_moves += 1;
+  settle_after_roll(world, regions, pivot, fall_streak, stats);
+  true
 }
 
 fn settle_after_roll(
@@ -1143,13 +1110,9 @@ pub fn apply_competent_fall_regions(
         }
         continue;
       }
-      // Terrain-scale hard masses (limestone strata, etc.) stay put — only
-      // boulder-sized bodies roll/embed once fully seated.
-      if comp.cells.len() >= 256 && !rests_on_soft_bed(world, &comp) {
-        continue;
-      }
+      // Terrain-scale masses are already filtered in build_components.
       let streak = *fall_streak.get(&anchor).unwrap_or(&0);
-      if rests_on_soft_bed(world, &comp) {
+      if tip_dir(world, &comp, cfg).is_some() {
         if apply_roll(
           world,
           &regions,
@@ -1162,12 +1125,6 @@ pub fn apply_competent_fall_regions(
           moved = true;
           continue;
         }
-        let embedded = soft_embed(world, &comp, cfg);
-        if embedded > 0 {
-          stats.embed_cells += embedded;
-          moved = true;
-        }
-        continue;
       }
       if rests_on_hard_bed(world, &comp) {
         let shattered = impact_shatter(world, &comp, streak, cfg);
@@ -1178,17 +1135,7 @@ pub fn apply_competent_fall_regions(
           continue;
         }
       }
-      if apply_roll(
-        world,
-        &regions,
-        &comp,
-        anchor,
-        cfg,
-        &mut fall_streak,
-        &mut stats,
-      ) {
-        moved = true;
-      }
+      // Soft embed disabled (cheese-grater). Flat soft beds just rest.
     }
     if moved {
       let refreshed = expand_regions_to_components(world, &build_components(world, &regions), max_drop);

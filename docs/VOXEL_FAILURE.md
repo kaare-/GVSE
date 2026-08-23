@@ -172,18 +172,16 @@ side Air):
 
 ### F2c — Competent rock rigid fall (implemented)
 
-Stone / Limestone over Air no longer peel via F1 bottom-up roof collapse.
-Connected bodies (8-neighbour union, **same material only** so stone
-boulders do not glue into limestone strata) fall as rigid clusters:
+Industry-style **connected-component rigid bodies** on the voxel grid:
 
-1. **Free fall** — multi-cell drop per tick through Air (including lake water —
-   rocks sink).
-2. **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds when
-   fall distance ≥ `min_impact_fall_cells`.
-3. **Slope roll + embed** — tip 90° around the downhill bbox corner (so round
-   blobs don't drive their bulge into the bed); soft / loose beds at the
-   landing are displaced. Diagonal / hop-slide is fallback. Soft embed only on
-   flat beds (not while a slope exists).
+- **Static vs dynamic** — only air/soft-adjacent competent clusters up to
+  `MAX_DYNAMIC_BODY_CELLS` are simulated; larger same-material masses stay
+  as static strata (same material union, so stone boulders do not glue into
+  limestone).
+- **Free fall** — multi-cell drop through Air (rocks sink in lakes).
+- **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds.
+- **Tip** — 90° pivot when COM leaves the support base or the bed drops
+  downhill. No slide-shred / soft-embed (those were the cheese-grater look).
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
