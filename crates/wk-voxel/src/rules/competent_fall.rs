@@ -27,10 +27,14 @@ pub const COMPETENT_FALL_PASSES: u32 = 96;
 pub const COMPETENT_FALL_PASSES_FPS: u32 = 64;
 /// Seated tip / impact rebuilds per tick (keep low — each rebuild is O(body)).
 pub const COMPETENT_TOPOLOGY_PASSES: u32 = 3;
-/// Connected competent larger than this is treated as static terrain.
+/// Connected competent larger than this is treated as static terrain
+/// *after* contact-weld splitting.
 pub const MAX_DYNAMIC_BODY_CELLS: usize = 384;
+/// Gather this many cells before giving up — long boulder chains need room
+/// to be split apart; beyond this is real strata.
+pub const FLOOD_GATHER_CAP: usize = 2048;
 /// Hard cap on bodies processed per tick (FPS guard).
-pub const MAX_BODIES_PER_TICK: usize = 8;
+pub const MAX_BODIES_PER_TICK: usize = 16;
 /// Contact "pebbles" this small never glue onto a larger body (editor/geology only).
 pub const PEBBLE_SPLIT_MAX: usize = 4;
 /// Main mass must be at least this big before pebble necks are split off.
@@ -266,8 +270,9 @@ fn has_free_neighbor(world: &World, gx: i32, gy: i32) -> bool {
 }
 
 /// Extract boulder-sized dynamic bodies only (CCRB). Strata larger than
-/// [`MAX_DYNAMIC_BODY_CELLS`] stay static. Contact with stray pebbles does
-/// **not** glue — weak necks are split (only paint / geology should weld).
+/// [`MAX_DYNAMIC_BODY_CELLS`] stay static. Touching boulders are separated by
+/// morphological opening so simulation contact never welds a ball chain into
+/// one frozen “terrain” pillar.
 fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
   let mut visited: HashSet<(i32, i32)> = HashSet::new();
   let mut out: Vec<Component> = Vec::new();
@@ -288,7 +293,6 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
         if visited.contains(&(gx, gy)) {
           continue;
         }
-        // Seeds must touch air/soft — buried strata interiors are skipped.
         if !has_free_neighbor(world, gx, gy) {
           continue;
         }
@@ -297,8 +301,7 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
         let mut cells: Vec<(i32, i32, Cell)> = Vec::new();
         queue.push_back((gx, gy));
         visited.insert((gx, gy));
-        let mut oversized = false;
-        // 4-connected only — diagonal touch must not weld separate rocks.
+        let mut strata = false;
         while let Some((cx, cy)) = queue.pop_front() {
           let Some(cur) = world.get_cell(cx, cy) else {
             continue;
@@ -307,8 +310,8 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
             continue;
           }
           cells.push((cx, cy, cur));
-          if cells.len() > MAX_DYNAMIC_BODY_CELLS {
-            oversized = true;
+          if cells.len() > FLOOD_GATHER_CAP {
+            strata = true;
             break;
           }
           for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
@@ -325,7 +328,8 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
             }
           }
         }
-        if oversized {
+        if strata {
+          // True continuous strata — finish marking so we don't restart.
           while let Some((cx, cy)) = queue.pop_front() {
             for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
               let nx = world.wrap_x(cx + dx);
@@ -346,7 +350,13 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
         if cells.is_empty() {
           continue;
         }
-        for piece in split_contact_pebbles(cells) {
+        for piece in split_welded_contacts(cells) {
+          if piece.len() > MAX_DYNAMIC_BODY_CELLS {
+            continue; // still a solid mass after weld-split → leave static
+          }
+          if piece.is_empty() {
+            continue;
+          }
           let set: HashSet<_> = piece.iter().map(|(x, y, _)| (*x, *y)).collect();
           let min_y = piece.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
           let max_y = piece.iter().map(|(_, y, _)| *y).max().unwrap_or(0);
@@ -375,6 +385,123 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
   });
   out.truncate(MAX_BODIES_PER_TICK);
   out
+}
+
+fn body_neighbor_count(set: &HashSet<(i32, i32)>, x: i32, y: i32) -> usize {
+  [(1, 0), (0, 1), (-1, 0), (0, -1)]
+    .iter()
+    .filter(|(dx, dy)| set.contains(&(x + dx, y + dy)))
+    .count()
+}
+
+/// Morphological opening: erode to interiors, flood cores, dilate back.
+/// Touching boulder chains separate; painted solid masses stay one piece.
+fn split_welded_contacts(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cell)>> {
+  if cells.len() < PEBBLE_SPLIT_HOST_MIN * 2 {
+    return split_contact_pebbles(cells);
+  }
+  let by_pos: HashMap<(i32, i32), Cell> =
+    cells.iter().map(|(x, y, c)| ((*x, *y), *c)).collect();
+  let set: HashSet<(i32, i32)> = by_pos.keys().copied().collect();
+
+  // Prefer strict interiors (4 neighbours); fall back to ≥3 for lumpy balls.
+  let mut core: HashSet<(i32, i32)> = set
+    .iter()
+    .copied()
+    .filter(|&(x, y)| body_neighbor_count(&set, x, y) >= 4)
+    .collect();
+  if core.len() < 8 {
+    core = set
+      .iter()
+      .copied()
+      .filter(|&(x, y)| body_neighbor_count(&set, x, y) >= 3)
+      .collect();
+  }
+  if core.len() < 8 {
+    return split_contact_pebbles(cells);
+  }
+
+  // Flood-fill core islands.
+  let mut core_visited = HashSet::new();
+  let mut islands: Vec<HashSet<(i32, i32)>> = Vec::new();
+  for &seed in &core {
+    if !core_visited.insert(seed) {
+      continue;
+    }
+    let mut island = HashSet::new();
+    let mut q = VecDeque::new();
+    q.push_back(seed);
+    island.insert(seed);
+    while let Some((cx, cy)) = q.pop_front() {
+      for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+        let n = (cx + dx, cy + dy);
+        if !core.contains(&n) || !core_visited.insert(n) {
+          continue;
+        }
+        island.insert(n);
+        q.push_back(n);
+      }
+    }
+    if island.len() >= 4 {
+      islands.push(island);
+    }
+  }
+  if islands.len() <= 1 {
+    return split_contact_pebbles(cells);
+  }
+
+  // Dilate each island by 1; first claim wins for contested contact cells.
+  let mut owner: HashMap<(i32, i32), usize> = HashMap::new();
+  for (i, island) in islands.iter().enumerate() {
+    for &(x, y) in island {
+      owner.entry((x, y)).or_insert(i);
+      for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+        let n = (x + dx, y + dy);
+        if set.contains(&n) {
+          owner.entry(n).or_insert(i);
+        }
+      }
+    }
+  }
+  // Orphans (thin necks between balls) → nearest island.
+  for &p in &set {
+    if owner.contains_key(&p) {
+      continue;
+    }
+    let mut best = None;
+    let mut best_d = i32::MAX;
+    for (i, island) in islands.iter().enumerate() {
+      for &c in island {
+        let d = (p.0 - c.0).abs() + (p.1 - c.1).abs();
+        if d < best_d {
+          best_d = d;
+          best = Some(i);
+        }
+      }
+    }
+    if let Some(i) = best {
+      owner.insert(p, i);
+    }
+  }
+
+  let mut pieces: Vec<Vec<(i32, i32, Cell)>> = vec![Vec::new(); islands.len()];
+  for (p, i) in owner {
+    if let Some(c) = by_pos.get(&p) {
+      pieces[i].push((p.0, p.1, *c));
+    }
+  }
+  let mut out: Vec<Vec<(i32, i32, Cell)>> = Vec::new();
+  for piece in pieces {
+    if piece.is_empty() {
+      continue;
+    }
+    out.extend(split_contact_pebbles(piece));
+  }
+  if out.is_empty() {
+    split_contact_pebbles(cells)
+  } else {
+    out
+  }
 }
 
 /// Peel pebble-sized contact clusters off a larger host. Simulation contact
@@ -2178,6 +2305,94 @@ mod tests {
     assert!(
       stone < 10 || loose > 0,
       "thin stick should snap (stone_mid={stone}, loose={loose})"
+    );
+  }
+
+  #[test]
+  fn touching_disks_do_not_weld_into_one_body() {
+    // Two r=4 disks touching at one column — must split, not one rigid dumbbell.
+    let mut cells = Vec::new();
+    let stamp = |cells: &mut Vec<(i32, i32, Cell)>, cx: i32, cy: i32| {
+      for x in cx - 4..=cx + 4 {
+        for y in cy - 4..=cy + 4 {
+          if (x - cx) * (x - cx) + (y - cy) * (y - cy) <= 16 {
+            cells.push((x, y, Cell::solid(MaterialId::Stone)));
+          }
+        }
+      }
+    };
+    stamp(&mut cells, 10, 10);
+    stamp(&mut cells, 18, 10); // centers 8 apart, r=4 → touch
+    // Dedup overlap at the contact.
+    let mut uniq: HashMap<(i32, i32), Cell> = HashMap::new();
+    for (x, y, c) in cells {
+      uniq.insert((x, y), c);
+    }
+    let cells: Vec<_> = uniq.into_iter().map(|((x, y), c)| (x, y, c)).collect();
+    let n = cells.len();
+    let pieces = split_welded_contacts(cells);
+    assert!(
+      pieces.len() >= 2,
+      "touching disks must split (pieces={}, n={n})",
+      pieces.len()
+    );
+    assert!(
+      pieces.iter().all(|p| p.len() < n),
+      "no piece should keep the whole welded chain"
+    );
+  }
+
+  #[test]
+  fn welded_ball_chain_falls_apart_instead_of_freezing() {
+    let mut w = World::new(16);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      for y in 1..=2 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    // Chain of 5 touching disks in mid-air — classic playtest glue pillar.
+    for i in 0..5 {
+      let cx = 8 + i * 8;
+      let cy = 20;
+      for x in cx - 4..=cx + 4 {
+        for y in cy - 4..=cy + 4 {
+          if (x - cx) * (x - cx) + (y - cy) * (y - cy) <= 16 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+          }
+        }
+      }
+    }
+    let regions = competent_active_regions(&w, &[], 8);
+    let comps = build_components(&w, &regions);
+    assert!(
+      comps.len() >= 3,
+      "chain must become multiple bodies (got {})",
+      comps.len()
+    );
+    assert!(
+      comps.iter().all(|c| c.cells.len() <= MAX_DYNAMIC_BODY_CELLS),
+      "no body should remain an oversized welded chain"
+    );
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_roll_events: 8,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..10 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let max_y = (0..40)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .map(|(_, y)| y)
+      .max()
+      .unwrap_or(0);
+    assert!(
+      max_y < 18,
+      "split balls must fall out of the sky (max_y={max_y})"
     );
   }
 }

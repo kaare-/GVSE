@@ -176,9 +176,10 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 
 - **Static vs dynamic** — only air/soft-adjacent competent clusters up to
   `MAX_DYNAMIC_BODY_CELLS` are simulated; larger same-material masses stay
-  as static strata. Flood is **4-connected**; pebble-sized contact necks are
-  split off so simulation touch never welds rocks (only editor paint / deep
-  geology should).
+  as static strata. Flood gathers up to `FLOOD_GATHER_CAP` then applies a
+  **morphological open** (erode→label→dilate) so touching boulder chains
+  split into separate bodies instead of freezing as one welded pillar.
+  Residual pebble necks are peeled; only editor paint / geology should weld.
 - **Free fall** — multi-cell drop through Air (rocks sink in lakes).
 - **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds.
 - **Tip vs slide** — 90° pivot only when COM leaves the support base; otherwise
