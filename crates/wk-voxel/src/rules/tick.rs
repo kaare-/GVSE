@@ -669,8 +669,8 @@ fn tick_with_life_inner(
     // Floating wake is mandatory — F1 defers competent rock to this pass, so
     // sky boulders hang forever if they are never re-dirtied.
     if failure.enable_competent_fall {
-        // Cadence-gated full wake — leftovers from the body cap stay dirty and
-        // keep plan_active hot without a full-world scan every tick.
+        // Cadence-gated full wake. Truncated floaters stay dirty from the body
+        // cap so they keep moving between wakes; priority puts air-below first.
         if world.tick % GRAIN_WAKE_EVERY == 0 {
             super::competent_fall::wake_floating_competent(world);
             let dirty = plan_active(world);

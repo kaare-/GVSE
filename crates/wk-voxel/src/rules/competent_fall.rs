@@ -35,11 +35,13 @@ pub const MAX_DYNAMIC_BODY_CELLS: usize = 384;
 /// Gather this many cells before giving up — long boulder chains need room
 /// to be split apart; beyond this is real strata.
 pub const FLOOD_GATHER_CAP: usize = 2048;
-/// Hard cap on bodies processed per tick (FPS guard).
+/// Hard cap on seated tip/roll bodies per tick (FPS guard).
 pub const MAX_BODIES_PER_TICK: usize = 16;
-/// Hanging peel budget per tick. Truncated leftovers stay dirty and finish
-/// on later ticks — keep this modest so one carve cannot tank FPS.
-pub const MAX_HANGING_BODIES_PER_TICK: usize = 48;
+/// Free-falling / hanging bodies processed per tick — must stay high enough
+/// that dozens of floaters don't wait ~100 ticks for a turn.
+pub const MAX_HANGING_BODIES_PER_TICK: usize = 96;
+/// Extra free-fall slots beyond the hanging budget when many are airborne.
+pub const MAX_FLOATING_BODIES_PER_TICK: usize = 128;
 /// Contact "pebbles" this small never glue onto a larger body (editor/geology only).
 pub const PEBBLE_SPLIT_MAX: usize = 4;
 /// Main mass must be at least this big before pebble necks are split off.
@@ -925,37 +927,52 @@ fn build_components(
       Some(cell) => cell.material == MaterialId::Air,
     })
   };
-  out.sort_by(|a, b| {
-    match (air_below(a), air_below(b)) {
-      (true, false) => std::cmp::Ordering::Less,
-      (false, true) => std::cmp::Ordering::Greater,
-      _ => a.min_y.cmp(&b.min_y).then_with(|| {
-        let ax = a.cells.first().map(|(x, _, _)| *x).unwrap_or(0);
-        let bx = b.cells.first().map(|(x, _, _)| *x).unwrap_or(0);
-        ax.cmp(&bx)
-      }),
+  // Split floating vs seated so fairness rotate cannot bury sky bodies behind
+  // tip/roll work (that was ~1 cell move per hundred ticks with many floaters).
+  let mut floating: Vec<Component> = Vec::new();
+  let mut seated: Vec<Component> = Vec::new();
+  for c in out {
+    if air_below(&c) {
+      floating.push(c);
+    } else {
+      seated.push(c);
     }
-  });
-  // Fairness: rotate so a stuck prefix cannot starve later bodies forever.
-  if out.len() > 1 {
-    let rot = (world.tick as usize).wrapping_mul(17) % out.len();
-    out.rotate_left(rot);
   }
-  let floating_n = out.iter().filter(|c| air_below(c)).count();
-  let cap = if hanging_count > 0 || floating_n > MAX_BODIES_PER_TICK {
-    MAX_HANGING_BODIES_PER_TICK
+  floating.sort_by(|a, b| a.min_y.cmp(&b.min_y));
+  seated.sort_by(|a, b| a.min_y.cmp(&b.min_y));
+  if floating.len() > 1 {
+    let rot = (world.tick as usize).wrapping_mul(17) % floating.len();
+    floating.rotate_left(rot);
+  }
+  if seated.len() > 1 {
+    let rot = (world.tick as usize).wrapping_mul(13) % seated.len();
+    seated.rotate_left(rot);
+  }
+  let float_cap = if hanging_count > 0 {
+    MAX_HANGING_BODIES_PER_TICK.max(MAX_FLOATING_BODIES_PER_TICK)
+  } else if floating.len() > MAX_BODIES_PER_TICK {
+    MAX_FLOATING_BODIES_PER_TICK
   } else {
     MAX_BODIES_PER_TICK
   };
+  let seat_cap = MAX_BODIES_PER_TICK;
   let mut leftovers = Vec::new();
-  if out.len() > cap {
-    for dropped in out.drain(cap..) {
+  if floating.len() > float_cap {
+    for dropped in floating.drain(float_cap..) {
       for (x, y, _) in dropped.cells {
         leftovers.push((x, y));
       }
     }
   }
-  (out, leftovers)
+  if seated.len() > seat_cap {
+    for dropped in seated.drain(seat_cap..) {
+      for (x, y, _) in dropped.cells {
+        leftovers.push((x, y));
+      }
+    }
+  }
+  floating.append(&mut seated);
+  (floating, leftovers)
 }
 
 fn body_neighbor_count(set: &HashSet<(i32, i32)>, x: i32, y: i32) -> usize {
@@ -2472,12 +2489,13 @@ pub fn apply_competent_fall_regions(
     let mut moved = false;
     for comp in components {
       let anchor = comp_anchor(&comp);
-      // Pass 0: long free-fall jump; later passes: shorter jumps while still
-      // fully airborne (very tall sky paint without waiting extra ticks).
-      let drop = if pass == 0 {
+      // Free-falling bodies always take the full drop budget — never 1-cell
+      // drip while waiting for a later topology pass.
+      let floating = is_floating(world, &comp);
+      let drop = if floating {
         max_drop_distance(world, &comp, max_drop)
-      } else if is_floating(world, &comp) {
-        max_drop_distance(world, &comp, 16.min(max_drop))
+      } else if pass == 0 {
+        max_drop_distance(world, &comp, max_drop)
       } else {
         0
       };
@@ -2489,9 +2507,8 @@ pub fn apply_competent_fall_regions(
         }
         continue;
       }
-      if is_floating(world, &comp) {
-        // Airborne before a blocked drop — still mark so mid-air contact
-        // cannot weld into unmarked cliff face and grow the body.
+      if floating {
+        // Airborne but blocked — mark mobile and skip tip/roll this pass.
         mark_component_mobile(world, &comp);
         continue;
       }
@@ -3405,8 +3422,8 @@ mod tests {
       }
     }
     assert!(
-      tiles > MAX_HANGING_BODIES_PER_TICK,
-      "precondition: more tiles than hanging cap ({tiles})"
+      tiles > MAX_FLOATING_BODIES_PER_TICK,
+      "precondition: more tiles than floating cap ({tiles})"
     );
     let regions = competent_active_regions(&w, &[], 8);
     let (comps, leftovers) = build_components(&w, &regions);
@@ -3433,6 +3450,48 @@ mod tests {
     assert!(
       high == 0,
       "all truncated floating tiles must eventually fall (remaining={high})"
+    );
+  }
+
+  #[test]
+  fn many_floaters_drop_fast_not_one_cell_per_hundred_ticks() {
+    // ~80 sky pebbles — with old fair-rotate+16 cap each waited ~5 ticks;
+    // with hundreds of debris it was ~100. After priority+budget they should
+    // clear the sky band in a handful of ticks via multi-cell drops.
+    let mut w = World::new(64);
+    for cx in 0..4 {
+      for cy in 0..2 {
+        w.ensure_chunk(ChunkCoord::new(cx, cy));
+      }
+    }
+    for x in 0..64 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for i in 0..80 {
+      let x = 2 + (i % 20) * 3;
+      let y = 50 + (i / 20) * 3;
+      w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      w.set_cell(x + 1, y, Cell::solid(MaterialId::Stone));
+      w.set_cell(x, y + 1, Cell::solid(MaterialId::Stone));
+      w.set_cell(x + 1, y + 1, Cell::solid(MaterialId::Stone));
+    }
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 64,
+      ..CompetentFallConfig::default()
+    };
+    for t in 0..12u64 {
+      w.tick = t;
+      wake_floating_competent(&mut w);
+      apply_competent_fall_regions(&mut w, &[], &cfg, true);
+    }
+    let high = (0..64)
+      .flat_map(|x| (30..70).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .count();
+    assert_eq!(
+      high, 0,
+      "floaters must clear sky within ~12 ticks via full drops (remaining={high})"
     );
   }
 
