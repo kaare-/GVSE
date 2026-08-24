@@ -888,10 +888,16 @@ fn sheet_step_cap(depth: i32) -> i32 {
 /// Per-pass sat cap for diagonal-down drain.
 ///
 /// Diagonal drain is the hillside empty path — deep stacks dump hard.
-/// Thin films stay well under a full cell so fingers don't spike empty.
+///
+/// Films drain at 160, not 96. The sim is CPU-bound elsewhere (measured:
+/// grain settle ~32 ms/tick and seepage ~24 ms/tick vs water flow ~3.5 ms
+/// on the 2048×384 stress world), so ticks are expensive and water has to
+/// make more progress *per pass* rather than get more passes. Drain is the
+/// downhill path — raising it speeds up runoff and cascades. The lateral
+/// `sheet_step_cap` stays soft, since that is what looked spiky.
 fn drain_step_cap(depth: i32) -> i32 {
     match depth {
-        0 | 1 => 96,
+        0 | 1 => 160,
         2 => 240,
         _ => 255,
     }
