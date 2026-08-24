@@ -16,7 +16,7 @@
 //!
 //! Palette hex is frozen (`docs/organism/PALETTE.md`).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
@@ -45,6 +45,7 @@ use crate::plant::{
     apply_genome, collect_live_photo_world_cells, collect_live_root_world_cells,
     collect_trunk_world_cells, drink_plant_with_moist, drought_band, drop_dead_leaves,
     find_fungus_slot, find_plant_slot, find_surface_air_slot, is_anchored, is_land_plant,
+    paint_leaf_litter, plant_resists_rock_shove, stem_count,
     leave_dead_roots_in_place, pin_plant_pose, prune_detached_woody_leaves,
     shed_unproductive_woody_leaves, sync_root_storage, try_grow_plant, try_plant_wind_spore,
     try_vegetative_sprout, DroughtBand, PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP,
@@ -632,46 +633,219 @@ impl Default for OrganismStore {
     }
 }
 
+fn atom_module_at(atom: &Atom, gx: i32, gy: i32) -> bool {
+    if atom.gx == gx && atom.gy == gy {
+        return true;
+    }
+    atom.body.iter().any(|&(lx, ly, m)| {
+        let (ddx, ddy) = atom.fallen_draw_offset(lx, ly);
+        if atom.gx + ddx as i32 == gx && atom.gy + ddy as i32 == gy {
+            return true;
+        }
+        m == ModuleId::Root && atom.gx + lx as i32 == gx && atom.gy + ly as i32 == gy
+    })
+}
+
+fn translate_atom(world: &World, atom: &mut Atom, dx: i32, dy: i32) {
+    atom.gx = world.wrap_x(atom.gx + dx);
+    atom.gy += dy;
+    atom.fy += dy as f32;
+    if let Some(wt) = atom.last_water_top {
+        atom.last_water_top = Some(wt + dy);
+    }
+}
+
+/// Bend canopy off a rock dest, or snap it and drop Organic litter.
+fn apply_rock_canopy_strike(
+    world: &mut World,
+    atom: &mut Atom,
+    dests: &HashSet<(i32, i32)>,
+    bend_dx: i32,
+) {
+    let lean = if bend_dx == 0 { 1 } else { bend_dx.signum() } as i16;
+    let mut occupied: HashSet<(i16, i16)> = atom.body.iter().map(|&(x, y, _)| (x, y)).collect();
+    let mut moves: Vec<(usize, i16, i16)> = Vec::new();
+    let mut remove: Vec<usize> = Vec::new();
+    for (i, &(lx, ly, m)) in atom.body.iter().enumerate() {
+        if matches!(
+            m,
+            ModuleId::Nucleus
+                | ModuleId::Root
+                | ModuleId::Digest
+                | ModuleId::Hypha
+                | ModuleId::Symbiont
+        ) {
+            continue;
+        }
+        let (ddx, ddy) = atom.fallen_draw_offset(lx, ly);
+        let wx = world.wrap_x(atom.gx + ddx as i32);
+        let wy = atom.gy + ddy as i32;
+        let in_dest = dests.contains(&(wx, wy));
+        let occluded = match world.get_cell(wx, wy) {
+            Some(c) if terrain_occludes_module(m, c.material) => true,
+            _ => false,
+        };
+        if !in_dest && !occluded {
+            continue;
+        }
+        let candidates = [(lx + lean, ly), (lx + lean, ly - 1), (lx - lean, ly)];
+        let mut bent = false;
+        for (nx, ny) in candidates {
+            if occupied.contains(&(nx, ny)) {
+                continue;
+            }
+            let twx = world.wrap_x(atom.gx + nx as i32);
+            let twy = atom.gy + ny as i32;
+            if dests.contains(&(twx, twy)) {
+                continue;
+            }
+            if !matches!(
+                world.get_cell(twx, twy),
+                Some(c) if c.material == MaterialId::Air
+            ) {
+                continue;
+            }
+            moves.push((i, nx, ny));
+            occupied.remove(&(lx, ly));
+            occupied.insert((nx, ny));
+            bent = true;
+            break;
+        }
+        if !bent {
+            remove.push(i);
+        }
+    }
+    for &(i, nx, ny) in &moves {
+        atom.body[i].0 = nx;
+        atom.body[i].1 = ny;
+    }
+    let mut dumped: Vec<BodyModule> = Vec::new();
+    for i in remove.into_iter().rev() {
+        dumped.push(atom.body.remove(i));
+    }
+    prune_body_disconnected_from_nucleus(atom, &mut dumped);
+    for &(dx, dy, m) in &dumped {
+        if matches!(
+            m,
+            ModuleId::Stem | ModuleId::Photosystem | ModuleId::ReproSpore
+        ) {
+            let (odx, ody) = fallen_draw_offset(
+                atom.fallen,
+                &atom.upright_growth,
+                &atom.body,
+                dx,
+                dy,
+            );
+            let _ = paint_leaf_litter(world, atom.gx + odx as i32, atom.gy + ody as i32);
+        }
+    }
+    atom.sync_upright_growth();
+    atom.leaf_starve.retain(|&(x, y, _)| {
+        atom.body
+            .iter()
+            .any(|&(bx, by, m)| m == ModuleId::Photosystem && bx == x && by == y)
+    });
+}
+
+fn prune_body_disconnected_from_nucleus(atom: &mut Atom, dumped: &mut Vec<BodyModule>) {
+    let set: HashSet<(i16, i16)> = atom.body.iter().map(|&(x, y, _)| (x, y)).collect();
+    let mut seen: HashSet<(i16, i16)> = HashSet::new();
+    let mut q = VecDeque::new();
+    if set.contains(&(0, 0)) {
+        seen.insert((0, 0));
+        q.push_back((0, 0));
+    }
+    while let Some((x, y)) = q.pop_front() {
+        for (ox, oy) in [
+            (1, 0),
+            (-1, 0),
+            (0, 1),
+            (0, -1),
+            (1, 1),
+            (1, -1),
+            (-1, 1),
+            (-1, -1),
+        ] {
+            let n = (x + ox, y + oy);
+            if set.contains(&n) && seen.insert(n) {
+                q.push_back(n);
+            }
+        }
+    }
+    atom.body.retain(|&(x, y, m)| {
+        if m == ModuleId::Nucleus || seen.contains(&(x, y)) {
+            true
+        } else {
+            dumped.push((x, y, m));
+            false
+        }
+    });
+    if !atom.body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus) {
+        atom.body.insert(0, (0, 0, ModuleId::Nucleus));
+    }
+}
+
 impl OrganismStore {
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// After competent-fall cargo moved world cells, shift any organisms
-    /// whose nucleus or body modules sat on those cells.
+    /// After competent-fall cargo moved world cells, resolve organisms that
+    /// sat on those cells.
+    ///
+    /// Deep-rooted plants stay pinned: canopy modules in the rock's path
+    /// bend aside or snap (litter) so the boulder can roll through. A
+    /// barely-attached sapling or already-loose log still rides the shove.
     pub fn shift_atoms_with_moved_cells(
         &mut self,
-        world: &crate::grid::World,
+        world: &mut crate::grid::World,
         moves: &[(i32, i32, i32, i32)],
     ) {
         if moves.is_empty() {
             return;
         }
+        let dests: HashSet<(i32, i32)> = moves
+            .iter()
+            .flat_map(|&(fx, fy, tx, ty)| [(world.wrap_x(fx), fy), (world.wrap_x(tx), ty)])
+            .collect();
         for atom in &mut self.atoms {
             let mut dx = 0i32;
             let mut dy = 0i32;
-            let mut hit = false;
+            let mut from_hit = false;
             for &(fx, fy, tx, ty) in moves {
-                let nucleus = atom.gx == fx && atom.gy == fy;
-                let module_hit = atom.body.iter().any(|(lx, ly, _)| {
-                    atom.gx + *lx as i32 == fx && atom.gy + *ly as i32 == fy
-                });
-                if nucleus || module_hit {
+                if atom_module_at(atom, fx, fy) {
                     dx = tx - fx;
                     dy = ty - fy;
-                    hit = true;
+                    from_hit = true;
                     break;
                 }
             }
-            if !hit || (dx == 0 && dy == 0) {
+            let to_hit = atom.body.iter().any(|&(lx, ly, m)| {
+                if m == ModuleId::Root {
+                    return false;
+                }
+                let (ddx, ddy) = atom.fallen_draw_offset(lx, ly);
+                dests.contains(&(world.wrap_x(atom.gx + ddx as i32), atom.gy + ddy as i32))
+            });
+            if is_land_plant(atom) && plant_resists_rock_shove(world, atom) {
+                if from_hit || to_hit {
+                    apply_rock_canopy_strike(world, atom, &dests, dx);
+                }
                 continue;
             }
-            atom.gx = world.wrap_x(atom.gx + dx);
-            atom.gy += dy;
-            atom.fy += dy as f32;
-            if let Some(wt) = atom.last_water_top {
-                atom.last_water_top = Some(wt + dy);
+            if is_land_plant(atom) && from_hit {
+                if !atom.fallen && stem_count(atom) > 0 {
+                    bake_tip_into_body(atom);
+                }
+                if dx != 0 || dy != 0 {
+                    translate_atom(world, atom, dx, dy);
+                }
+                continue;
             }
+            if !from_hit || (dx == 0 && dy == 0) {
+                continue;
+            }
+            translate_atom(world, atom, dx, dy);
         }
     }
 
@@ -7161,5 +7335,126 @@ mod tests {
             }),
             "tipped canopy must not paint through the sand hill: {posed:?}"
         );
+    }
+
+    fn sand_plot() -> World {
+        let mut w = World::new(9);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..24 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            for y in 1..=3 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+            }
+            for y in 4..20 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        w
+    }
+
+    fn deep_tree(gx: i32, gy: i32) -> Atom {
+        Atom::from_body(
+            gx,
+            gy,
+            80.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, -2, ModuleId::Root),
+                (0, -3, ModuleId::Root),
+                (1, -2, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Stem),
+                (0, 3, ModuleId::Stem),
+                (1, 3, ModuleId::Photosystem),
+                (-1, 3, ModuleId::Photosystem),
+            ],
+        )
+    }
+
+    fn shallow_sapling(gx: i32, gy: i32) -> Atom {
+        Atom::from_body(
+            gx,
+            gy,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+                (0, 2, ModuleId::Photosystem),
+            ],
+        )
+    }
+
+    #[test]
+    fn deep_rooted_tree_stays_when_rock_rolls_through_stem() {
+        let mut w = sand_plot();
+        let mut store = OrganismStore::new();
+        store.atoms.push(deep_tree(10, 4));
+        assert!(
+            plant_resists_rock_shove(&w, &store.atoms[0]),
+            "four deep roots must resist a shove"
+        );
+        // Rock occupied the mid-stem, then rolled one cell right.
+        w.set_cell(11, 6, Cell::solid(MaterialId::Stone));
+        store.shift_atoms_with_moved_cells(&mut w, &[(10, 6, 11, 6)]);
+        let a = &store.atoms[0];
+        assert_eq!(a.gx, 10, "crown must not ride the rock");
+        assert_eq!(a.gy, 4);
+        assert!(!a.fallen, "deep roots must not tip-bake");
+        let roots: Vec<_> = a
+            .body
+            .iter()
+            .filter(|(_, _, m)| *m == ModuleId::Root)
+            .copied()
+            .collect();
+        assert_eq!(roots.len(), 4, "roots stay in the soil ({roots:?})");
+        let mid_stem = a
+            .body
+            .iter()
+            .any(|&(x, y, m)| m == ModuleId::Stem && x == 0 && y == 2);
+        let mid_at_dest = a
+            .body
+            .iter()
+            .any(|&(x, y, m)| m == ModuleId::Stem && x == 1 && y == 2);
+        assert!(
+            !mid_stem || mid_at_dest,
+            "stem in the rock path should bend or snap (body={:?})",
+            a.body
+        );
+    }
+
+    #[test]
+    fn shallow_sapling_uproots_when_rock_hits_stem() {
+        let mut w = sand_plot();
+        let mut store = OrganismStore::new();
+        store.atoms.push(shallow_sapling(10, 4));
+        assert!(
+            !plant_resists_rock_shove(&w, &store.atoms[0]),
+            "one surface root is a loose holdfast"
+        );
+        store.shift_atoms_with_moved_cells(&mut w, &[(10, 5, 12, 5)]);
+        let a = &store.atoms[0];
+        assert!(a.fallen, "loose sapling should tip when struck");
+        assert_eq!(a.gx, 12, "loose crown rides the shove (gx={})", a.gx);
+    }
+
+    #[test]
+    fn fallen_log_still_shifts_with_rock() {
+        let mut w = sand_plot();
+        let mut store = OrganismStore::new();
+        let mut log = deep_tree(10, 4);
+        log.fallen = true;
+        // No mineral under the nucleus — open-water castaway.
+        w.set_cell(10, 3, Cell::air());
+        w.set_cell(10, 2, Cell::air());
+        w.set_cell(10, 1, Cell::air());
+        store.atoms.push(log);
+        assert!(
+            !plant_resists_rock_shove(&w, &store.atoms[0]),
+            "uprooted log should be shoveable"
+        );
+        store.shift_atoms_with_moved_cells(&mut w, &[(10, 4, 13, 4)]);
+        assert_eq!(store.atoms[0].gx, 13);
     }
 }

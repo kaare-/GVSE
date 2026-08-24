@@ -438,6 +438,37 @@ pub fn is_anchored(world: &World, atom: &Atom) -> bool {
     false
 }
 
+/// A rolling rock may shove this plant only when it is already loose.
+///
+/// Deep-rooted, anchored plants stay put — the stem/leaves should bend or
+/// snap instead. A one- or two-root surface holdfast, an unanchored crown,
+/// or an open-water woody castaway can be knocked over and carried.
+pub fn plant_resists_rock_shove(world: &World, atom: &Atom) -> bool {
+    if !is_land_plant(atom) {
+        return false;
+    }
+    if !is_anchored(world, atom) {
+        return false;
+    }
+    // Floating log with only a wet keel — already uprooted.
+    if woody_uprooted(atom) && !crate::organism::nucleus_rests_on_mineral(world, atom) {
+        return false;
+    }
+    let n = root_count(atom);
+    let min_dy = atom
+        .body
+        .iter()
+        .filter(|(_, _, m)| *m == ModuleId::Root)
+        .map(|(_, dy, _)| *dy)
+        .min()
+        .unwrap_or(0);
+    // Barely attached sapling: one or two roots hugging the crown.
+    if n <= 2 && min_dy >= -1 {
+        return false;
+    }
+    true
+}
+
 /// Woody plant that has tipped — one rigid chassis (stem + roots baked together).
 ///
 /// Distinct from upright substrate purchase (`!fallen`). Open-water castaways
@@ -682,7 +713,7 @@ pub fn drop_dead_leaves(world: &mut World, atom: &Atom) -> u32 {
     painted
 }
 
-fn paint_leaf_litter(world: &mut World, wx: i32, wy: i32) -> bool {
+pub(crate) fn paint_leaf_litter(world: &mut World, wx: i32, wy: i32) -> bool {
     use crate::cell::Cell;
     let wx = world.wrap_x(wx);
     let Some(c) = world.get_cell(wx, wy) else {

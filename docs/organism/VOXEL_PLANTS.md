@@ -32,6 +32,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | Pore-`sat` drink + drought stress | Done |
 | Spawn on Air above porous solid | Done |
 | Editor brushes + `T` minimal plant + `W` seaweed | Done |
+| Rolling rock bends/snaps canopy; deep roots stay; loose saplings uproot | Done |
 
 ## Roadmap
 
@@ -130,6 +131,15 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 - Gene + blueprint mutation on the same `clone_fidelity` knob
 - App draws lilac spore puffs drifting on climate wind (`SporeFx`)
 - Rhizome sprout still works without spore modules (local clone only)
+
+### Rolling rock vs plants
+
+Competent bodies used to treat every overlapping plant module as cargo and
+translate the whole atom (roots included). Deep-rooted, anchored plants now
+**stay pinned**: stem / leaf pixels in the rock's path lean aside or snap and
+drop Organic litter so the boulder can roll through. A one- or two-root
+surface sapling, an unanchored crown, or an open-water woody castaway can
+still be knocked over (`fallen` + tip-bake) and shoved.
 
 ### Floating / tipped woody castaways
 
