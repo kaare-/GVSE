@@ -97,17 +97,21 @@ pub const FLOW_SUBSTEPS: usize = 12;
 /// Cap on flow substeps for the interactive path (`PerfConfig` defaults).
 /// High enough that hillside blobs empty in tens of ticks, not thousands.
 pub const FLOW_SUBSTEPS_MIN: usize = 8;
-/// After this many substeps, a quiet / shrunk dirty halo may early-out.
+/// After this many substeps, a *tiny* dirty halo may early-out.
 /// Must be **below** [`FLOW_SUBSTEPS_MIN`] so the FPS cap does not
 /// swallow the adaptive exit (was equal → EO never shortened the loop).
+/// Quiet ponds still stop here; large streams do not — a 1/3-shrink
+/// abort used to stutter runnels (4 hops, pause a tick, 4 hops) and
+/// also let open basins keep enough substeps to soak their beds.
 pub const FLOW_SUBSTEPS_EO_AFTER: usize = 4;
 /// If the planned dirty area (cells) drops to this or below after
 /// [`FLOW_SUBSTEPS_EO_AFTER`], stop the flow loop early — settled films
-/// don't need the full ×12. Busy rain / cascades stay at max.
+/// don't need the full ×8. Busy rain / cascades stay at max.
 pub const FLOW_QUIET_AREA: usize = 512;
 
 /// Pore seepage + lake-bed wake cadence (ticks). Surface gravity/flow
-/// still run every tick; underground is lower priority and expensive.
+/// still run every tick; underground stays cadence-gated. Dropping this
+/// to 2 smeared stone wetting fronts (contact sat never ponded).
 pub const SEEPAGE_EVERY: u64 = 4;
 
 /// Live-tunable physics trade-offs (Tab → Performance).
@@ -126,9 +130,10 @@ pub struct PerfConfig {
     /// substep). Default **off** — hillside runoff needs every pass.
     /// Tab may enable for half the surface-flow scan work.
     pub flow_every_other_substep: bool,
-    /// After [`FLOW_SUBSTEPS_EO_AFTER`], stop when the dirty halo is tiny
-    /// or has shrunk. Default **on** for settled films / quiet ponds.
-    /// Does **not** early-out on a merely steady large halo — that left
+    /// After [`FLOW_SUBSTEPS_EO_AFTER`], stop when the dirty halo is tiny.
+    /// Default **on** for settled films / quiet ponds.
+    /// Does **not** early-out on a merely steady or shrinking large halo —
+    /// a 1/3-shrink exit stuttered streams, and a steady large halo left
     /// hillside jelly stuck for thousands of ticks.
     pub flow_quiet_early_out: bool,
     /// Rayon checkerboard parallelism for gravity / grain / flow scan.
@@ -388,7 +393,6 @@ fn tick_with_life_inner(
     // Last non-empty flow plan — grain/seepage fall back to this when
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
-    let mut start_area: usize = 0;
     // Quiet early-out on → [`FLOW_SUBSTEPS_MIN`] (8); full_feel keeps ×12.
     // Every-other flow is optional Tab thrift — defaults run flow every
     // substep so hillside blobs empty quickly.
@@ -413,10 +417,6 @@ fn tick_with_life_inner(
             local.active_area += active_cell_area(&active) as u64;
         }
         flow_halo = active.clone();
-        let this_area = active_cell_area(&active);
-        if step == 0 {
-            start_area = this_area;
-        }
         let passes = partition_checkerboard(&active);
         let t0 = profile.then(Instant::now);
         for pass in &passes {
@@ -447,18 +447,13 @@ fn tick_with_life_inner(
             }
         }
         // Quiet early-out: after [`FLOW_SUBSTEPS_EO_AFTER`], peek at
-        // dirty written by this substep — a tiny / shrunk halo means
-        // remaining substeps are polish. Do **not** exit just because a
-        // large halo is steady — hillside jelly stays dirty and stuck.
+        // dirty written by this substep — a *tiny* halo means remaining
+        // substeps are polish. Do **not** exit because a large halo is
+        // steady (hillside jelly) or merely shrinking (stream stutter).
         if perf.flow_quiet_early_out && step + 1 >= FLOW_SUBSTEPS_EO_AFTER {
             let next = plan_active(world);
             let next_area = active_cell_area(&next);
             if next.is_empty() || next_area <= FLOW_QUIET_AREA {
-                break;
-            }
-            // Adaptive: halo shrunk by ≥ 1/3 relative to start-of-tick —
-            // remaining flow is polishing, not cascading.
-            if start_area > 0 && next_area * 3 <= start_area * 2 {
                 break;
             }
         }

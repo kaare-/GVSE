@@ -67,10 +67,12 @@ Low risk: no new write-set proofs.
 
 ## Phase 1b — Cadence (landed defaults)
 
-`PerfConfig::default`: every-other surface flow + quiet early-out
-**on** (max 6 substeps; gravity every step), `parallel_physics`
-**off**. Unit/scenario `tick()` uses [`PerfConfig::full_feel`] (×12,
-no early-out, parallel off).
+`PerfConfig::default`: every-other surface flow **off**, quiet early-out
+**on** (max 8 substeps; tiny-halo EO after 4; gravity every step),
+`parallel_physics` **off**. Unit/scenario `tick()` uses
+[`PerfConfig::full_feel`] (×12, no early-out, parallel off).
+Seepage on the interactive path stays every 4 ticks. Do not EO just
+because a large halo shrank.
 
 Super-Server demo **~8.3 ms wall** (~120 FPS; +plants ~8.8). Physics
 ~4.6 ms. Flow ~0.46 (throughflow/confined once/tick); karst ~0.04

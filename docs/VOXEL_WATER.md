@@ -42,10 +42,19 @@ the next tick. That is intentional (idle water should not rescan the
 world), not a missed wake. Setup / rain / editor writes must dirty
 cells so the following tick re-enters the loop.
 
-Optional early-out (`PerfConfig::flow_quiet_early_out`, default **off**)
-may stop the ×12 loop sooner when the dirty halo shrinks below
-`FLOW_QUIET_AREA` after `FLOW_SUBSTEPS_EO_AFTER` passes (FPS cap is
-`FLOW_SUBSTEPS_MIN`).
+Interactive default (`PerfConfig::flow_quiet_early_out`, **on**) caps
+the loop at `FLOW_SUBSTEPS_MIN` (8) and may stop after
+`FLOW_SUBSTEPS_EO_AFTER` (4) when the dirty halo is empty or at most
+`FLOW_QUIET_AREA` (512 cells). Do **not** early-out just because a large
+halo shrank — that stuttered streams (a few hops, then a tick of rest)
+while still letting quiet ponds and open basins park. `full_feel()`
+keeps the full ×12 with no early-out. Underground seepage stays
+cadence-gated (`SEEPAGE_EVERY` = 4 ticks) — every-other-tick smeared
+stone wetting fronts instead of advancing them.
+
+Thin-film hops stay soft (`sheet` 48 / `drain` 96 sat per pass at stack
+depth 0–1) so runnels don't spike empty; stacked hillside water still
+dumps hard (240–255).
 
 ### Gravity fall
 
