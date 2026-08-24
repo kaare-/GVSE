@@ -879,7 +879,7 @@ fn wet_stack_depth(
 /// stacked hillside water still moves hard each pass (was jelly at 4k+).
 fn sheet_step_cap(depth: i32) -> i32 {
     match depth {
-        0 | 1 => 72,
+        0 | 1 => 48,
         2 => 180,
         _ => 240,
     }
@@ -888,9 +888,10 @@ fn sheet_step_cap(depth: i32) -> i32 {
 /// Per-pass sat cap for diagonal-down drain.
 ///
 /// Diagonal drain is the hillside empty path — deep stacks dump hard.
+/// Thin films stay well under a full cell so fingers don't spike empty.
 fn drain_step_cap(depth: i32) -> i32 {
     match depth {
-        0 | 1 => 160,
+        0 | 1 => 96,
         2 => 240,
         _ => 255,
     }

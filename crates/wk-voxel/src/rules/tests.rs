@@ -7087,6 +7087,63 @@ fn hillside_blob_drains_downslope_instead_of_jelly() {
 }
 
 #[test]
+fn shrinking_hill_stream_keeps_six_flow_substeps() {
+    // Interactive EO used to abort at 4 once the halo shrank by 1/3 —
+    // streams hopped, then sat idle until the next tick (spiky + slow).
+    use crate::rules::{tick_with_perf_profiled, PhysicsTimings};
+    let mut w = World::new(9);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..20 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        let top = 10 - (x / 2).min(8);
+        for y in 1..=top {
+            w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+        }
+    }
+    for y in 11..=14 {
+        for x in 2..=5 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    let perf = PerfConfig::default();
+    let mut timings = PhysicsTimings::default();
+    let _ = tick_with_perf_profiled(&mut w, &perf, &mut timings);
+    assert!(
+        timings.substeps_ran >= FLOW_SUBSTEPS_EO_AFTER as u64,
+        "shrinking runoff must keep flowing past 4 substeps (ran={})",
+        timings.substeps_ran
+    );
+}
+
+#[test]
+fn buried_soil_wets_laterally_on_interactive_cadence() {
+    // Underground front used to wait 4 ticks between seepage passes.
+    let mut w = World::new(31);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..10 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+        w.set_cell(x, 2, Cell::solid(MaterialId::Soil));
+        w.set_cell(x, 3, Cell::solid(MaterialId::Soil));
+    }
+    let cap = water_capacity(MaterialId::Soil);
+    w.set_cell(3, 2, {
+        let mut c = Cell::solid(MaterialId::Soil);
+        c.sat = Sat(cap);
+        c
+    });
+    let perf = PerfConfig::default();
+    for _ in 0..8 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let far = w.get_cell(5, 2).unwrap().sat.0;
+    assert!(
+        far > 0,
+        "pore front must advance two cells in 8 interactive ticks (sat={far})"
+    );
+}
+
+#[test]
 fn hill_dump_does_not_teleport_sat_past_dry_gap() {
     // Wetting front must not pipe a residual film to bedrock while the
     // mid-column stays nearly dry (teleported groundwater look).
