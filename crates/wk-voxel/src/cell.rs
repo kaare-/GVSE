@@ -65,6 +65,8 @@ impl CellFlags {
     /// mobile and unmarked strata in separate components — contact cannot
     /// grow a boulder by welding into painted terrain.
     pub const MOBILE_ROCK: CellFlags = CellFlags(0b0000_1000);
+    /// High nibble: **rock body tag** (see [`Cell::rock_body_tag`]).
+    pub const ROCK_BODY_TAG: CellFlags = CellFlags(0b1111_0000);
 
     pub const fn empty() -> Self {
         Self(0)
@@ -144,6 +146,34 @@ impl Cell {
     #[inline]
     pub fn is_waterlogged_organic(self) -> bool {
         self.material == MaterialId::Organic && self.flags.contains(CellFlags::WATERLOGGED)
+    }
+
+    /// Which loose rock body this competent cell belongs to, `0` = none.
+    ///
+    /// `0` means the cell is **deliberately joined** rock: world generation
+    /// strata, editor paint, or (future) geological compaction. Those merge with
+    /// each other, which is what makes continuous terrain behave as one mass.
+    ///
+    /// `1..=15` identifies a distinct detached body. Flood-fill only merges
+    /// equal tags, so a rolling boulder cannot glue itself to another rock it
+    /// happens to touch on the way past. Four bits is plenty because the tag
+    /// only has to separate bodies that are *adjacent*; see `pick_body_tag`.
+    #[inline]
+    pub fn rock_body_tag(self) -> u8 {
+        (self.flags.0 & CellFlags::ROCK_BODY_TAG.0) >> 4
+    }
+
+    /// Set the loose-body tag (low 4 bits of `tag` are used).
+    #[inline]
+    pub fn set_rock_body_tag(&mut self, tag: u8) {
+        self.flags.0 =
+            (self.flags.0 & !CellFlags::ROCK_BODY_TAG.0) | ((tag & 0x0F) << 4);
+    }
+
+    /// Drop the loose-body tag (rock rejoining strata, or becoming debris).
+    #[inline]
+    pub fn clear_rock_body_tag(&mut self) {
+        self.flags.0 &= !CellFlags::ROCK_BODY_TAG.0;
     }
 
     /// Convenience: an Air cell already fully saturated with water.

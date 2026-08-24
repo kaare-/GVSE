@@ -153,7 +153,7 @@ fn competent_cluster_size(world: &World, gx: i32, gy: i32, limit: usize) -> usiz
     return 0;
   }
   let mat = seed.material;
-  let seed_mobile = is_mobile_rock(&seed);
+  let seed_tag = seed.rock_body_tag();
   let mut seen = HashSet::default();
   let mut q = VecDeque::new();
   q.push_back((gx, gy));
@@ -169,7 +169,7 @@ fn competent_cluster_size(world: &World, gx: i32, gy: i32, limit: usize) -> usiz
         continue;
       }
       match world.get_cell(nx, ny) {
-        Some(n) if flood_compatible(seed_mobile, &n, mat) => q.push_back((nx, ny)),
+        Some(n) if flood_compatible(seed_tag, &n, mat) => q.push_back((nx, ny)),
         _ => {
           seen.remove(&(nx, ny));
         }
@@ -202,7 +202,7 @@ fn crush_spec_at(world: &mut World, gx: i32, gy: i32) -> u32 {
     return 0;
   }
   let mat = seed.material;
-  let seed_mobile = is_mobile_rock(&seed);
+  let seed_tag = seed.rock_body_tag();
   let debris = roof_collapse_debris(mat);
   let mut seen = HashSet::default();
   let mut q = VecDeque::new();
@@ -216,7 +216,7 @@ fn crush_spec_at(world: &mut World, gx: i32, gy: i32) -> u32 {
     let Some(cur) = world.get_cell(cx, cy) else {
       continue;
     };
-    if !flood_compatible(seed_mobile, &cur, mat) {
+    if !flood_compatible(seed_tag, &cur, mat) {
       continue;
     }
     let mut next = Cell {
@@ -225,6 +225,7 @@ fn crush_spec_at(world: &mut World, gx: i32, gy: i32) -> u32 {
       ..cur
     };
     next.flags.clear(CellFlags::MOBILE_ROCK);
+    next.clear_rock_body_tag();
     world.set_cell(cx, cy, next);
     world.touch_dirty(cx, cy);
     crushed += 1;
@@ -235,7 +236,7 @@ fn crush_spec_at(world: &mut World, gx: i32, gy: i32) -> u32 {
         continue;
       }
       match world.get_cell(nx, ny) {
-        Some(n) if flood_compatible(seed_mobile, &n, mat) => q.push_back((nx, ny)),
+        Some(n) if flood_compatible(seed_tag, &n, mat) => q.push_back((nx, ny)),
         _ => {
           seen.remove(&(nx, ny));
         }
@@ -267,6 +268,8 @@ struct Component {
   set: HashSet<(i32, i32)>,
   min_y: i32,
   max_y: i32,
+  /// Loose-body tag stamped on every cell when this body moves (never 0).
+  tag: u8,
 }
 
 /// Cheap "could this cell ever start moving?" gate used to seed body floods.
@@ -357,6 +360,15 @@ fn mark_component_mobile(world: &mut World, comp: &Component) {
     if !is_competent_rock(cell.material) {
       continue;
     }
+    // Stamp identity as well as mobility, so a body airborne beside another
+    // rock cannot be flooded together with it next tick.
+    if cell.rock_body_tag() != comp.tag {
+      cell.set_rock_body_tag(comp.tag);
+      cell.flags.set(CellFlags::MOBILE_ROCK);
+      world.set_cell(gx, gy, cell);
+      world.touch_dirty(gx, gy);
+      continue;
+    }
     if cell.flags.contains(CellFlags::MOBILE_ROCK) {
       continue;
     }
@@ -366,19 +378,60 @@ fn mark_component_mobile(world: &mut World, comp: &Component) {
   }
 }
 
-/// Stamp MOBILE_ROCK onto a competent cell before writing a moved body.
+/// Stamp mobility plus this body's identity tag onto a moving cell.
+///
+/// Identity lives in the tag, not in `MOBILE_ROCK`: the flag only records "this
+/// rock has been detached at some point", so it can never distinguish two loose
+/// bodies from each other. Every write of a moving body goes through here.
 #[inline]
-fn with_mobile_rock(mut cell: Cell) -> Cell {
+fn with_body_tag(mut cell: Cell, tag: u8) -> Cell {
   if is_competent_rock(cell.material) {
     cell.flags.set(CellFlags::MOBILE_ROCK);
+    cell.set_rock_body_tag(tag);
   }
   cell
 }
 
-/// Same material and same mobility class (mobile↔mobile or strata↔strata).
+/// Same material **and** same body tag.
+///
+/// Tag 0 is deliberately-joined rock (worldgen strata, editor paint, future
+/// geological compaction) and merges freely, so continuous terrain still acts as
+/// one mass. Distinct tags never merge, which is what stops a rolling boulder
+/// from gluing itself to rocks it brushes past.
 #[inline]
-fn flood_compatible(seed_mobile: bool, neighbor: &Cell, material: MaterialId) -> bool {
-  neighbor.material == material && is_mobile_rock(neighbor) == seed_mobile
+fn flood_compatible(seed_tag: u8, neighbor: &Cell, material: MaterialId) -> bool {
+  neighbor.material == material && neighbor.rock_body_tag() == seed_tag
+}
+
+/// Pick a body tag that no rock touching this body already uses.
+///
+/// Only adjacency matters, so 15 tags are plenty: two distant bodies may share a
+/// tag safely, and if they ever meet, the one that moves is re-tagged.
+fn pick_body_tag(world: &World, cells: &[(i32, i32, Cell)], set: &HashSet<(i32, i32)>) -> u8 {
+  let mut used = 0u16;
+  for &(gx, gy, _) in cells {
+    for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+      let nx = world.wrap_x(gx + dx);
+      let ny = gy + dy;
+      if set.contains(&(nx, ny)) {
+        continue;
+      }
+      if let Some(c) = world.get_cell(nx, ny) {
+        if is_competent_rock(c.material) {
+          used |= 1u16 << c.rock_body_tag();
+        }
+      }
+    }
+  }
+  // Rotate the starting point by tick so repeated detaches vary.
+  let start = (world.tick as u8 % 15) + 1;
+  for i in 0..15u8 {
+    let tag = ((start + i - 1) % 15) + 1;
+    if used & (1u16 << tag) == 0 {
+      return tag;
+    }
+  }
+  start
 }
 
 fn cells_to_set(cells: &[(i32, i32, Cell)]) -> HashSet<(i32, i32)> {
@@ -809,11 +862,19 @@ fn push_component_pieces(
       continue;
     }
     probe::bump(&probe::components);
+    // Keep an existing loose tag so a body stays itself across ticks; mint a
+    // fresh one (distinct from touching rock) when strata first breaks loose.
+    let existing = piece
+      .iter()
+      .map(|(_, _, c)| c.rock_body_tag())
+      .find(|t| *t != 0);
+    let tag = existing.unwrap_or_else(|| pick_body_tag(world, &piece, &set));
     let min_y = piece.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
     let max_y = piece.iter().map(|(_, y, _)| *y).max().unwrap_or(0);
     out.push(Component {
       cells: piece,
       set,
+      tag,
       min_y,
       max_y,
     });
@@ -896,7 +957,7 @@ fn build_components(
             continue;
           }
         let material = cell.material;
-        let seed_mobile = is_mobile_rock(&cell);
+        let seed_tag = cell.rock_body_tag();
         let mut queue = VecDeque::new();
         let mut cells: Vec<(i32, i32, Cell)> = Vec::new();
         queue.push_back((gx, gy));
@@ -907,7 +968,7 @@ fn build_components(
           let Some(cur) = world.get_cell(cx, cy) else {
             continue;
           };
-          if !flood_compatible(seed_mobile, &cur, material) {
+          if !flood_compatible(seed_tag, &cur, material) {
             continue;
           }
           cells.push((cx, cy, cur));
@@ -924,7 +985,7 @@ fn build_components(
               continue;
             }
             match world.get_cell(nx, ny) {
-              Some(n) if flood_compatible(seed_mobile, &n, material) => queue.push_back((nx, ny)),
+              Some(n) if flood_compatible(seed_tag, &n, material) => queue.push_back((nx, ny)),
               _ => {
                 visited.remove(&(nx, ny));
               }
@@ -957,7 +1018,7 @@ fn build_components(
                   continue;
                 }
                 match world.get_cell(nx, ny) {
-                  Some(n) if flood_compatible(seed_mobile, &n, material) => {
+                  Some(n) if flood_compatible(seed_tag, &n, material) => {
                     queue.push_back((nx, ny))
                   }
                   _ => {
@@ -982,9 +1043,16 @@ fn build_components(
         if cells.is_empty() {
           continue;
         }
-        let set = cells_to_set(&cells);
-        let mut pieces = split_welded_contacts(cells.clone());
-        let welded_cells: usize = pieces.iter().map(|p| p.len()).sum();
+          let set = cells_to_set(&cells);
+          // A tagged cluster is already exactly one loose body — the flood
+          // could not have merged anything else into it — so the expensive
+          // morphological weld-split only applies to tag-0 strata.
+          let mut pieces = if seed_tag != 0 {
+            vec![cells.clone()]
+          } else {
+            split_welded_contacts(cells.clone())
+          };
+          let welded_cells: usize = pieces.iter().map(|p| p.len()).sum();
         let mut hanging = false;
         if cluster_needs_hang_peel(world, &set, welded_cells) {
           let hang = extract_hanging_pieces(world, &cells);
@@ -1431,7 +1499,7 @@ fn translate_component(world: &mut World, comp: &Component, dx: i32, dy: i32) ->
   let mut moves: Vec<(i32, i32, Cell)> = comp
     .cells
     .iter()
-    .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, with_mobile_rock(*c)))
+    .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, with_body_tag(*c, comp.tag)))
     .collect();
   let mut sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
   for (x, y, c) in &cargo {
@@ -1568,6 +1636,7 @@ fn impact_shatter(
           flags: {
             let mut f = cur.flags;
             f.clear(CellFlags::MOBILE_ROCK);
+            f.clear(CellFlags::ROCK_BODY_TAG);
             f
           },
           _pad: cur._pad,
@@ -1924,7 +1993,7 @@ fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), 
     .iter()
     .map(|(gx, gy, c)| {
       let (tx, ty) = rotate_pos(pivot.0, pivot.1, *gx, *gy, dx);
-      (world.wrap_x(tx), ty, with_mobile_rock(*c))
+      (world.wrap_x(tx), ty, with_body_tag(*c, comp.tag))
     })
     .collect();
   let mut sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
@@ -2051,7 +2120,7 @@ fn slide_component(world: &mut World, comp: &Component, dx: i32, dy: i32) -> boo
   let mut moves: Vec<(i32, i32, Cell)> = comp
     .cells
     .iter()
-    .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, with_mobile_rock(*c)))
+    .map(|(x, y, c)| (world.wrap_x(x + dx), y + dy, with_body_tag(*c, comp.tag)))
     .collect();
   for (x, y, c) in &cargo {
     moves.push((world.wrap_x(x + dx), y + dy, *c));
@@ -3052,6 +3121,7 @@ mod tests {
     let comp = Component {
       cells,
       set,
+      tag: 1,
       min_y: 5,
       max_y: 6,
     };
@@ -3431,18 +3501,16 @@ mod tests {
     for x in 0..16 {
       w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
     }
-    // Unmarked stone wall (painted strata).
+    // Unmarked stone wall (painted strata → tag 0).
     for y in 1..=12 {
       for x in 0..4 {
         w.set_cell(x, y, Cell::solid(MaterialId::Stone));
       }
     }
-    // Mobile boulder pressed against the wall.
+    // Loose boulder pressed against the wall — identity comes from its tag.
     for x in 4..7 {
       for y in 1..=3 {
-        let mut c = Cell::solid(MaterialId::Stone);
-        c.flags.set(CellFlags::MOBILE_ROCK);
-        w.set_cell(x, y, c);
+        w.set_cell(x, y, loose_rock(1));
       }
     }
     let regions = competent_active_regions(&w, &[], 4);
@@ -3724,6 +3792,129 @@ mod tests {
       }
     }
     n
+  }
+
+  fn loose_rock(tag: u8) -> Cell {
+    let mut c = Cell::solid(MaterialId::Stone);
+    c.flags.set(CellFlags::MOBILE_ROCK);
+    c.set_rock_body_tag(tag);
+    c
+  }
+
+  #[test]
+  fn touching_loose_rocks_with_different_tags_stay_separate() {
+    let mut w = World::new(20);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..20 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Two loose 3x3 boulders pressed flat against each other.
+    for x in 4..7 {
+      for y in 1..4 {
+        w.set_cell(x, y, loose_rock(1));
+      }
+    }
+    for x in 7..10 {
+      for y in 1..4 {
+        w.set_cell(x, y, loose_rock(2));
+      }
+    }
+    let regions = competent_active_regions(&w, &[], 4);
+    let (comps, _) = build_components(&w, &regions);
+    let touching: Vec<_> = comps
+      .iter()
+      .filter(|c| c.cells.iter().any(|(x, _, _)| *x >= 4 && *x < 10))
+      .collect();
+    assert!(
+      touching.len() >= 2,
+      "differently tagged loose rocks must not glue (comps={})",
+      touching.len()
+    );
+    assert!(
+      touching.iter().all(|c| c.cells.len() <= 9),
+      "no body may span both boulders (sizes={:?})",
+      touching.iter().map(|c| c.cells.len()).collect::<Vec<_>>()
+    );
+  }
+
+  #[test]
+  fn rolling_rock_does_not_glue_to_rock_it_passes() {
+    let mut w = World::new(40);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      // Slope descending to the left so a boulder tumbles.
+      let h = 1 + x / 2;
+      for y in 1..=h {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    // Parked loose rock partway down the slope.
+    let park_x = 12;
+    let park_y = 1 + park_x / 2 + 1;
+    for x in park_x..park_x + 3 {
+      for y in park_y..park_y + 3 {
+        w.set_cell(x, y, loose_rock(3));
+      }
+    }
+    // Roller starts upslope of it.
+    let roll_x = 24;
+    let roll_y = 1 + roll_x / 2 + 1;
+    for x in roll_x..roll_x + 4 {
+      for y in roll_y..roll_y + 4 {
+        w.set_cell(x, y, loose_rock(4));
+      }
+    }
+    let cfg = CompetentFallConfig {
+      max_roll_events: 32,
+      min_impact_fall_cells: 99,
+      ..CompetentFallConfig::default()
+    };
+    for t in 0..40u64 {
+      w.tick = t;
+      wake_competent_bodies_all(&mut w);
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    // However they ended up, no single rigid body may contain both rocks'
+    // worth of stone (9 + 16 = 25 cells).
+    let regions = competent_active_regions(&w, &[], 8);
+    let (comps, _) = build_components(&w, &regions);
+    let biggest = comps.iter().map(|c| c.cells.len()).max().unwrap_or(0);
+    assert!(
+      biggest < 25,
+      "a rolling rock must not weld to rock it passes (biggest body={biggest})"
+    );
+  }
+
+  #[test]
+  fn painted_and_worldgen_rock_still_forms_one_mass() {
+    // Tag 0 is deliberately joined rock: editor paint and worldgen strata must
+    // keep behaving as continuous terrain.
+    let mut w = World::new(20);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..20 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 4..10 {
+      for y in 30..34 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let cells: Vec<_> = (4..10)
+      .flat_map(|x| (30..34).map(move |y| (x, y)))
+      .filter_map(|(x, y)| w.get_cell(x, y).map(|c| (x, y, c)))
+      .collect();
+    assert!(
+      cells.iter().all(|(_, _, c)| c.rock_body_tag() == 0),
+      "painted rock must be untagged"
+    );
+    let regions = competent_active_regions(&w, &[], 8);
+    let (comps, _) = build_components(&w, &regions);
+    let biggest = comps.iter().map(|c| c.cells.len()).max().unwrap_or(0);
+    assert_eq!(
+      biggest, 24,
+      "a painted 6x4 block must stay one 24-cell mass (biggest={biggest})"
+    );
   }
 
   #[test]
