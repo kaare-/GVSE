@@ -225,7 +225,9 @@ cells (material, sat) ──derive──► wetness / head overlays
 ## Suggested first slices
 
 1. **Wetness heatmap** — derive, overlay key, optional plant bias.  
-2. **Thermal diffusivity** — material-weighted `Temperature::step`.  
+2. **Thermal diffusivity** — material-weighted `Temperature::step`.
+   Climate coupling already live: evap × T/wind/deficit, thermal
+   buoyant rise, condensation/dew vs saturation-at-T (still 4×4 tiles).  
 3. **Roof-span compressive collapse** — voxel cavities use
    `roof_span_max_m` (readable caves / overhangs).  
 4. **Wet cohesion shear** — pore fill weakens banks / cliffs via

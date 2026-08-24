@@ -170,6 +170,121 @@ side Air):
 - ✅ Dry inland Stone cliffs stay scenic; wet demand-2 lips can F2b → LooseRock.
 - Rock-face shear is **off by default** (Tab → Geotech); chance + event cap tune melt rate.
 
+### F2c — Competent rock rigid fall (implemented)
+
+Industry-style **connected-component rigid bodies** on the voxel grid:
+
+- **Static vs dynamic** — only air/soft-adjacent competent clusters up to
+  `MAX_DYNAMIC_BODY_CELLS` are simulated; larger same-material masses stay
+  as static strata. Flood gathers up to `FLOOD_GATHER_CAP` then applies a
+  **morphological open** (erode→label→dilate) so touching boulder chains
+  split into separate bodies instead of freezing as one welded pillar.
+  Residual pebble necks are peeled; only editor paint / geology should weld.
+- **Free fall** — multi-cell drop through Air (rocks sink in lakes).
+- **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds.
+- **Tip vs slide** — 90° pivot only when COM overhangs *and* the bed drops the
+  same way; tiny/needle bodies never tip (kills flat-floor flip-flop). Otherwise
+  slide down-slope (tiny bodies only with a real step down).
+- **Crush specs** — large movers pulverize tiny competent clusters
+  (`≤ CRUSH_SPEC_MAX`) instead of welding or getting stuck on them.
+- **Thin fracture** — long thin sticks/slabs snap at 1-cell necks into debris.
+- **Cargo** — soft/loose caps and embedded cells ride with fall, tip, and slide.
+- **Mobile mark** — fallen / tipped / slid rock sets `CellFlags::MOBILE_ROCK`.
+  Flood-fill only merges same mobility class, so a boulder cannot glue into
+  unmarked painted strata or gain mass by contact.
+- **F2d — Landscape rigid entities** — only **≥200** competent rock cells
+  detach as a temporary `LandscapeBody` and translate straight down. Boulder-
+  sized and mid chunks stay on F2c competent CA tip/roll so rocks tumble
+  instead of falling as columns or shattering into sand. Soft cargo still
+  rides huge slabs; stuck slabs force-stamp after a few ticks.
+
+### Cost model (why the rock pass is cheap when nothing moves)
+
+Measured with `cargo test -p wk-voxel --release --test rock_fall_profile`,
+which A/Bs `enable_competent_fall` over a real `tick_with_life` loop.
+
+- **Seed gate** (`body_can_seed`) — rock only seeds a body flood when it has
+  somewhere to descend: open/soft directly below, or an open side whose floor is
+  *lower*. Rock whose only opening is the sky can never move. Without this the
+  whole ridge surface seeded a flood plus a morphological weld-split every tick.
+- **Sleeping rock** (`World::competent_settled`) — one bit per cell, per chunk.
+  A body that is fully supported with no tip or slide direction sleeps.
+  `World::set_cell` wakes a cell and its 4 neighbours **only when solidity
+  changes**, so lakes changing saturation never wake the ridge, while digging
+  support away always does. Transient refusals (roll budget, a sibling body in
+  the way, a blocked translate) never sleep.
+- **Seed pad** (`SEED_PAD_Y`) — dirty rects inflate by a few rows for seeding
+  rather than the full 64-cell drop budget. Falling bodies write their new cells,
+  which dirties them for the next tick.
+- **Cargo hoisting** — `gather_cargo` is a flood; it is computed once per move
+  and reused across the drop binary search instead of ~8 times.
+- **Fast hashing** (`crate::fasthash`) — coordinate sets use an FxHash-style
+  hasher; SipHash cost more than the lookups it guarded.
+- **Thin fracture is gated on support** — running it on seated strata shredded
+  thousands of cells of untouched terrain into rubble.
+
+### Rock body identity (why rocks stop gluing)
+
+Flood-fill used to merge any two competent cells sharing material and mobility
+class, so two rocks that touched became **one rigid body** — a rolling boulder
+welded itself to every rock it brushed past.
+
+Identity lives in a 4-bit **body tag** in the spare `CellFlags` nibble
+([`Cell::rock_body_tag`]):
+
+| Tag | Meaning |
+|-----|---------|
+| `0` | Deliberately joined rock: worldgen strata, editor paint, future geological compaction. Merges freely, so continuous terrain acts as one mass. |
+| `1..=15` | A distinct detached body. Different tags never merge. |
+
+Four bits suffice because the tag only has to separate bodies that are
+*adjacent*; `pick_body_tag` picks one no touching rock is using. `MOBILE_ROCK`
+remains the "has been detached" marker but no longer implies identity.
+
+Two payoffs: contact welding is impossible by construction, and a tagged cluster
+is already exactly one body, so the expensive morphological weld-split only runs
+on tag-0 strata.
+
+Guarded by `touching_loose_rocks_with_different_tags_stay_separate`,
+`rolling_rock_does_not_glue_to_rock_it_passes`, and
+`painted_and_worldgen_rock_still_forms_one_mass`.
+
+### Displacement (`crate::displace`) — moving rock shifts, never consumes
+
+A body that overwrites an occupied cell destroys whatever was there. Two kinds
+of mass need carrying over, and both use the same shape:
+
+**take** from every cell the body will occupy → **write** the body → **deposit**
+into the cells the body *vacated*. A body vacates exactly as many cells as it
+occupies, so the swapped-out volume always has room.
+
+| Content | Helpers | Why it leaks without care |
+|---|---|---|
+| Free water (`sat` on `Air`) | `take_free_water` / `deposit_free_water` | Rock in a lake must raise the level, not drink it |
+| Loose cells (sand, soil, clay, gravel, loose rock, snow, litter) | `take_soft_cell` / `deposit_shifted_cells` | A slab ploughing a bank must shove it aside, not delete it |
+
+Deposits prefer the vacated volume, then search outward **biased upward** —
+material shoved by a sinking rock heaps up beside and above it, and grain
+settling relaxes the pile on later ticks. Wet destination cells let a relocated
+grain soak up what it can hold, so water is not stranded.
+
+Covered paths: competent body translate / tip / slide (`write_roll_cells`),
+impact debris drop, landscape entity fall (`apply_drop`) and rematerialize
+(`stamp_cells`).
+
+Guarded by `rock_dropped_in_lake_displaces_water_instead_of_eating_it`,
+`rock_sliding_through_wet_sand_conserves_water`,
+`landscape_slab_dropped_in_lake_displaces_water`,
+`falling_rock_shifts_sand_instead_of_eating_it`,
+`rolling_rock_shifts_mixed_loose_materials`, and
+`landscape_slab_shifts_loose_beds_instead_of_eating_them` — the last one caught
+a slab deleting 250 cells of loose bed per drop.
+
+Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
+F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
+A cheap **floating wake** (air-below only) re-dirties sky boulders every few
+ticks so they cannot hang when the dirty set is empty.
+
 ---
 
 ## Phase F3 — Overburden compaction (compression + water)

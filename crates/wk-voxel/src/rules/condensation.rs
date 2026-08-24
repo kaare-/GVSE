@@ -33,6 +33,14 @@ pub struct CondensationConfig {
     pub mass_per_droplet: f32,
     /// Salt mixed into the per-tile tick hash.
     pub seed_salt: u64,
+    /// Cap drizzle events per tick (`0` = unlimited). A filled sky
+    /// used to rain from every tile (~thousands of column walks → 7 FPS).
+    #[serde(default = "default_cond_max_events")]
+    pub max_events_per_tick: u32,
+}
+
+fn default_cond_max_events() -> u32 {
+    48
 }
 
 impl Default for CondensationConfig {
@@ -44,6 +52,7 @@ impl Default for CondensationConfig {
             full_mass: 512.0,
             mass_per_droplet: 96.0,
             seed_salt: 0xC10D_BA5E,
+            max_events_per_tick: default_cond_max_events(),
         }
     }
 }
@@ -83,7 +92,8 @@ impl Default for OrographicConfig {
 }
 
 /// Precipitation feedback: humidity tiles that hold enough
-/// atmospheric water probabilistically drop droplets back into the
+/// atmospheric water (especially when colder than the vapor, or
+/// when a colder tile sits below — dew) drop droplets back into the
 /// cell grid, draining the tile as they do.
 ///
 /// Rain lands at the tile's centre column, in the cell at
@@ -134,17 +144,28 @@ pub fn apply_condensation_rain_phased(
     let tile_cols = humidity.tile_cols;
     // Snapshot tile keys so we can mutate humidity as we go.
     let tiles: Vec<(i32, i32)> = humidity.cells.keys().copied().collect();
+    // Collect first, then apply the heaviest hits so a saturated sky
+    // cannot walk every column every tick (~thousands → 7 FPS).
+    let mut hits: Vec<(f32, i32, i32, f32)> = Vec::new(); // mass, hx, hy, take_mass
     for (hx, hy) in tiles {
         let mass = humidity.at_tile(hx, hy);
-        let (prob_mult, mass_mult, min_mass) = match oro {
+        let (mut prob_mult, mut mass_mult, mut min_mass) = match oro {
             Some(o) => orographic_factors(o, hx, tile_cols, cfg.min_mass_to_rain),
             None => (1.0, 1.0, cfg.min_mass_to_rain),
         };
+        let mut full_mass = cfg.full_mass;
+        if let Some(th) = temp {
+            let (tp, tm, tmin, sat) = thermal_rain_factors(th, hx, hy, tile_cols, cfg);
+            prob_mult *= tp;
+            mass_mult *= tm;
+            min_mass = min_mass.min(tmin);
+            full_mass = sat.max(min_mass + 1.0);
+        }
         if mass < min_mass {
             continue;
         }
-        // Linear scale from 0 at min_mass to max at full_mass.
-        let t = ((mass - min_mass) / (cfg.full_mass - min_mass)).clamp(0.0, 1.0);
+        // Linear scale from 0 at min_mass to max at thermal/orographic full.
+        let t = ((mass - min_mass) / (full_mass - min_mass)).clamp(0.0, 1.0);
         let effective_prob = (cfg.max_prob_per_tick * t * prob_mult).clamp(0.0, 0.95);
         // Hash uses tile coord + tick + salt for per-tile determinism.
         let roll = hash_prob(
@@ -156,12 +177,29 @@ pub fn apply_condensation_rain_phased(
         if roll >= effective_prob {
             continue;
         }
-        // Rain / frost lands on the ground / ocean under the tile centre.
-        let centre_gx = hx * tile_cols + tile_cols / 2;
         let take_mass = (cfg.mass_per_droplet * mass_mult).min(mass);
         if take_mass <= 0.0 {
             continue;
         }
+        hits.push((mass, hx, hy, take_mass));
+    }
+    if hits.is_empty() {
+        return;
+    }
+    hits.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    let limit = if cfg.max_events_per_tick == 0 {
+        hits.len()
+    } else {
+        hits.len().min(cfg.max_events_per_tick as usize)
+    };
+    for &(_mass, hx, hy, take_mass) in hits.iter().take(limit) {
+        let mass = humidity.at_tile(hx, hy);
+        if mass <= 0.0 {
+            continue;
+        }
+        let take_mass = take_mass.min(mass);
+        // Rain / frost lands on the ground / ocean under the tile centre.
+        let centre_gx = hx * tile_cols + tile_cols / 2;
         let mut landed = crate::phase::deposit_condensate_on_surface(
             world,
             centre_gx,
@@ -222,4 +260,34 @@ fn orographic_factors(
     // Tall / climbing air rains from thinner clouds too.
     let min_mass = base_min_mass * (1.0 - 0.55 * strength);
     (prob_mult, mass_mult, min_mass)
+}
+
+/// Warm moist air raining when it hits colder air / material.
+///
+/// Uses the existing temperature tiles only (no extra world walk).
+/// Cold air holds less vapor, so the same mass is closer to rain;
+/// a colder tile below (ridge, lake, night skin) adds dew.
+fn thermal_rain_factors(
+    temp: &crate::temperature::Temperature,
+    hx: i32,
+    hy: i32,
+    tile_cols: i32,
+    cfg: &CondensationConfig,
+) -> (f32, f32, f32, f32) {
+    let air = temp.at_tile(hx, hy);
+    let sat = crate::humidity::Humidity::saturation_mass_at_temp(air)
+        * (cfg.full_mass / crate::humidity::Humidity::MAX_MASS_PER_TILE).clamp(0.15, 1.0);
+    let sat = sat.max(12.0);
+    let min_mass = cfg.min_mass_to_rain * (sat / cfg.full_mass.max(1.0)).clamp(0.30, 1.35);
+    let gx = hx * tile_cols + tile_cols / 2;
+    let gy_below = hy * tile_cols - tile_cols;
+    let below = temp.at_cell(gx, gy_below);
+    let mut prob_mult = 1.0;
+    let mut mass_mult = 1.0;
+    if below < air - 1.5 {
+        let d = ((air - below) / 10.0).clamp(0.0, 1.6);
+        prob_mult += 0.65 * d;
+        mass_mult += 0.30 * d;
+    }
+    (prob_mult, mass_mult, min_mass, sat)
 }

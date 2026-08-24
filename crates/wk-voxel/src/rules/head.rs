@@ -70,6 +70,70 @@ pub(crate) fn seepage_rate_with(material: MaterialId, hydro: &HydroOverrides) ->
     ((p as i32 * 32) / 255).max(1)
 }
 
+/// Surface / top-layer infiltration into a porous cell this step.
+///
+/// Bone-dry ground takes only a trickle so most free water can run past
+/// (overland / sheet flow). As the contact cell wets, uptake climbs toward
+/// the full [`seepage_rate_with`] — like a wetting front opening pores.
+/// Full cells take nothing more (`free == 0`).
+///
+/// Peer solid↔solid flow uses [`seepage_conduct_rate_with`] instead.
+pub(crate) fn seepage_uptake_rate_with(
+    material: MaterialId,
+    hydro: &HydroOverrides,
+    sat: u8,
+    cap: u8,
+) -> i32 {
+    let base = seepage_rate_with(material, hydro);
+    if base <= 0 || cap == 0 {
+        return 0;
+    }
+    let free = cap.saturating_sub(sat) as i32;
+    if free <= 0 {
+        return 0;
+    }
+    // Wetness fraction with a small dry kick so sat=0 still seeps ~1/8 rate
+    // instead of stalling forever as a perfect seal.
+    //   sat=0     → ~base/8
+    //   sat=cap/2 → ~base/2
+    //   sat→cap   → →base (clamped by free)
+    let kick = (cap as i32 / 8).max(1);
+    let scaled = (base * (sat as i32 + kick)) / (cap as i32 + kick);
+    scaled.max(1).min(free).min(base)
+}
+
+/// Solid↔solid pore conduction: permeability × relative wetness.
+///
+/// The drier neighbour is the bottleneck — bone-dry underground paths
+/// crawl, while a saturated pair runs at the slower material's full
+/// [`seepage_rate_with`]. Same dry-kick curve as surface uptake so dry
+/// sand does not flash-equalise an aquifer next to wet sand.
+pub(crate) fn seepage_conduct_rate_with(
+    mat_a: MaterialId,
+    hydro: &HydroOverrides,
+    sat_a: u8,
+    cap_a: u8,
+    mat_b: MaterialId,
+    sat_b: u8,
+    cap_b: u8,
+) -> i32 {
+    let base = seepage_rate_with(mat_a, hydro).min(seepage_rate_with(mat_b, hydro));
+    if base <= 0 || cap_a == 0 || cap_b == 0 {
+        return 0;
+    }
+    let kick_a = (cap_a as i32 / 8).max(1);
+    let kick_b = (cap_b as i32 / 8).max(1);
+    let wa = sat_a as i32 + kick_a;
+    let wb = sat_b as i32 + kick_b;
+    let ca = cap_a as i32 + kick_a;
+    let cb = cap_b as i32 + kick_b;
+    // base * min(wa/ca, wb/cb)
+    let num = (wa * cb).min(wb * ca);
+    let den = ca * cb;
+    let scaled = (base * num) / den;
+    scaled.max(1).min(base)
+}
+
 pub(crate) fn is_porous_solid_with(material: MaterialId, hydro: &HydroOverrides) -> bool {
     material != MaterialId::Air && water_capacity_with(material, hydro) > 0
 }
@@ -91,6 +155,9 @@ pub(crate) fn is_surface_support(world: &World, gx: i32, gy: i32) -> bool {
 /// `(gx,gy) — (gx+1,gy)`. Emits at most one transfer, owned by the
 /// left endpoint so each edge is solved once per pass.
 ///
+/// `max_move` soft-caps the transfer so cascade-pull + equalise cannot
+/// empty a cell into its neighbour in one hop (jagged 255|0 fronts).
+///
 /// `chunk`/`(lx,ly)` are an optional chunk-local read cache; when set,
 /// neighbour probes that fall inside the chunk skip `world.get_cell`
 /// (~10× cheaper) — see `get_cell_microbench`.
@@ -101,8 +168,12 @@ pub(crate) fn plan_same_y_pairwise_edge_in(
     gy: i32,
     lx: i32,
     ly: i32,
+    max_move: i32,
     local: &mut Vec<((i32, i32), (i32, i32), i32)>,
 ) {
+    if max_move <= 0 {
+        return;
+    }
     let nx = world.wrap_x(gx + 1);
     if nx == gx {
         return;
@@ -145,13 +216,13 @@ pub(crate) fn plan_same_y_pairwise_edge_in(
     let move_amt = sat_move_to_equalize_heads(left.sat.0, cap, gy, right.sat.0, cap, gy);
     if move_amt > 0 {
         let free = u8::MAX.saturating_sub(right.sat.0) as i32;
-        let amt = move_amt.min(left.sat.0 as i32).min(free);
+        let amt = move_amt.min(left.sat.0 as i32).min(free).min(max_move);
         if amt > 0 {
             local.push(((gx, gy), (nx, gy), amt));
         }
     } else if move_amt < 0 {
         let free = u8::MAX.saturating_sub(left.sat.0) as i32;
-        let amt = (-move_amt).min(right.sat.0 as i32).min(free);
+        let amt = (-move_amt).min(right.sat.0 as i32).min(free).min(max_move);
         if amt > 0 {
             local.push(((nx, gy), (gx, gy), amt));
         }
@@ -238,6 +309,20 @@ pub(crate) fn same_y_cascade_pull_in(
         let Some(cell) = read(x, gy, clx, ly) else {
             break;
         };
+        // Thin floating Organic is a soft lid — look past it so cascade
+        // pull still levels water around shore mats (otherwise free
+        // surfaces comb against organic dams).
+        if cell.material == MaterialId::Organic {
+            let soft_lid = !cell.is_waterlogged_organic()
+                && matches!(
+                    read(x, gy - 1, clx, ly - 1),
+                    Some(b) if b.material == MaterialId::Air && b.sat.0 >= 200
+                );
+            if soft_lid {
+                continue;
+            }
+            break;
+        }
         if cell.material != MaterialId::Air {
             break;
         }

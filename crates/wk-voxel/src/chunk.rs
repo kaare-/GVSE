@@ -88,6 +88,12 @@ pub struct Chunk {
     /// (which dirty-rects alone would miss).
     #[serde(default)]
     pub has_wet_air: bool,
+    /// Sticky occupancy: at least one permeable solid with `sat > 0`.
+    /// Lake-bed / seam wakes use this so underground pore columns keep
+    /// visiting after the free surface goes quiet (`has_wet_air` alone
+    /// never marks pure groundwater chunks).
+    #[serde(default)]
+    pub has_wet_pores: bool,
     /// Sticky occupancy: at least one `Limestone` cell was written
     /// since the flag was last cleared. Karst skips chunks that never
     /// held limestone.
@@ -99,6 +105,15 @@ pub struct Chunk {
     /// litter scans skip pure water / sky / stone chunks.
     #[serde(default)]
     pub has_loose: bool,
+    /// Sticky occupancy: at least one `Organic` cell was written since
+    /// the flag was last cleared. Float-column / raft scans skip chunks
+    /// that never held litter.
+    #[serde(default)]
+    pub has_organic: bool,
+    /// Sticky occupancy: Organic / Snow / Ice (buoyant litter). Rise/soak
+    /// scans skip sand-only loose chunks.
+    #[serde(default)]
+    pub has_buoyant: bool,
 }
 
 /// Materials that participate in grain settle / float / punch passes.
@@ -126,8 +141,11 @@ impl Chunk {
             dirty: None,
             tick: 0,
             has_wet_air: false,
+            has_wet_pores: false,
             has_limestone: false,
             has_loose: false,
+            has_organic: false,
+            has_buoyant: false,
         }
     }
 
@@ -169,11 +187,26 @@ impl Chunk {
         if cell.material == MaterialId::Air && !cell.sat.is_empty() {
             self.has_wet_air = true;
         }
+        if cell.material != MaterialId::Air
+            && !cell.sat.is_empty()
+            && wk_material::MaterialRegistry::props(cell.material).permeability > 0
+        {
+            self.has_wet_pores = true;
+        }
         if cell.material == MaterialId::Limestone {
             self.has_limestone = true;
         }
         if material_is_loose(cell.material) {
             self.has_loose = true;
+        }
+        if cell.material == MaterialId::Organic {
+            self.has_organic = true;
+        }
+        if matches!(
+            cell.material,
+            MaterialId::Organic | MaterialId::Snow | MaterialId::Ice
+        ) {
+            self.has_buoyant = true;
         }
     }
 

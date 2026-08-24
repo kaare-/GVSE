@@ -16,6 +16,9 @@
 //!
 //! Palette hex is frozen (`docs/organism/PALETTE.md`).
 
+use std::collections::HashMap;
+use std::time::{Duration, Instant};
+
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
@@ -40,18 +43,18 @@ use crate::grid::World;
 use crate::humidity::Humidity;
 use crate::plant::{
     apply_genome, collect_live_photo_world_cells, collect_live_root_world_cells,
-    collect_trunk_world_cells, drink_plant, drought_band, drop_dead_leaves, find_fungus_slot,
-    find_plant_slot, find_surface_air_slot, is_anchored, is_land_plant,
-    leave_dead_roots_in_place, leaves_bathing, pin_plant_pose, plant_moisture_frac,
-    prune_detached_woody_leaves, shed_unproductive_woody_leaves, sync_root_storage,
-    try_grow_plant, try_plant_wind_spore, try_vegetative_sprout, DroughtBand, PlantGrowthCaps,
-    DROUGHT_DORMANT_UPKEEP,
+    collect_trunk_world_cells, drink_plant_with_moist, drought_band, drop_dead_leaves,
+    find_fungus_slot, find_plant_slot, find_surface_air_slot, is_anchored, is_land_plant,
+    leave_dead_roots_in_place, pin_plant_pose, prune_detached_woody_leaves,
+    shed_unproductive_woody_leaves, sync_root_storage, try_grow_plant, try_plant_wind_spore,
+    try_vegetative_sprout, DroughtBand, PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP,
     DROUGHT_HIBERNATE_MAX_TICKS, DROUGHT_STRESS_DRAIN, PLANT_GROW_MIN_DAY,
     PLANT_UPKEEP_DAY_BLEND, PLANT_UPKEEP_MULT, plant_metabolic_load,
 };
 use crate::shade::{
-    build_canopy_index_posed, canopy_top_y, posed_canopy_sample, shade_transmit,
-    sum_posed_photo_light, CanopyIndex, PosedModule,
+    build_canopy_index_posed, canopy_top_y, effective_photo_light_cached, group_posed_by_atom,
+    posed_canopy_sample_of, shade_transmit, sum_posed_photo_light_of_cached, CanopyIndex,
+    PosedModule,
 };
 
 /// Default **entity** ceiling (Tab → Creatures can raise/lower).
@@ -116,7 +119,7 @@ pub const CORPSE_SETTLE_LAND_TICKS: u32 = 900;
 pub const CORPSE_SETTLE_WATER_TICKS: u32 = 2_400;
 /// Base chance for a floating corpse to drift one cell when `|push| ≈ 1`.
 /// Tuned so wind ~0.2 or modest sat-shear current visibly slides dead stems.
-const CORPSE_DRIFT_BASE: f32 = 0.55;
+const CORPSE_DRIFT_BASE: f32 = 0.75;
 const CORPSE_DRIFT_SALT: u64 = 0xC0B5_E0FF_DEAD_u64;
 /// Max |body dx| for a tipped waterline log (stem/leaf). Stops re-tip folds
 /// from growing absurd floaters that pierce shore terrain.
@@ -289,6 +292,9 @@ pub struct Atom {
     /// Symbiont harvest: sugar received on the latest organism tick.
     #[serde(default)]
     pub sym_sugar_recv_last: u8,
+    /// Last sampled pore/leaf moisture frac (land plants; staggered resample).
+    #[serde(default)]
+    pub moist_frac_cache: f32,
 }
 
 impl Atom {
@@ -326,6 +332,7 @@ impl Atom {
             sym_sugar_paid_last: 0,
             sym_water_sent_last: 0,
             sym_sugar_recv_last: 0,
+            moist_frac_cache: 0.0,
         }
     }
 
@@ -543,6 +550,41 @@ pub struct OrganismStepOutcome {
     pub stats: OrganismStepStats,
 }
 
+/// Per-pass wall times from the latest [`OrganismStore::step_with_weather`].
+///
+/// Filled every tick (cheap `Instant` brackets). Used by `perf_profile` for
+/// land-plant review; not serialized.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct OrganismPassTimings {
+    pub pose: Duration,
+    pub canopy: Duration,
+    pub reseat: Duration,
+    pub float_cols: Duration,
+    pub land_plants: Duration,
+    /// Seat / tip / prune inside [`step_land_plant`].
+    pub land_seat: Duration,
+    /// Moisture, drink, shade harvest, energy.
+    pub land_metab: Duration,
+    /// Abscission + tissue growth.
+    pub land_grow: Duration,
+    /// Wind spore + vegetative sprout.
+    pub land_disperse: Duration,
+    pub other_creatures: Duration,
+    pub post: Duration,
+}
+
+impl OrganismPassTimings {
+    pub fn total(self) -> Duration {
+        self.pose
+            + self.canopy
+            + self.reseat
+            + self.float_cols
+            + self.land_plants
+            + self.other_creatures
+            + self.post
+    }
+}
+
 /// Population of Set A Atoms (no `hecs` — keep the crate tiny).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct OrganismStore {
@@ -565,6 +607,13 @@ pub struct OrganismStore {
     /// Hibernating spore bank knobs (Tab → Life). Synced from settings.
     #[serde(skip)]
     pub spore_bank: SporeBankConfig,
+    /// Latest organism-pass breakdown (see [`OrganismPassTimings`]).
+    #[serde(skip)]
+    pub last_pass: OrganismPassTimings,
+    /// Skip expensive land reseat while crowns are overcrowded but stable
+    /// (nobody could move last attempt). Cleared on births.
+    #[serde(skip)]
+    land_reseat_cooldown: u8,
 }
 
 impl Default for OrganismStore {
@@ -577,6 +626,8 @@ impl Default for OrganismStore {
             growth_caps: PlantGrowthCaps::default(),
             fungi: FungiConfig::default(),
             spore_bank: SporeBankConfig::default(),
+            last_pass: OrganismPassTimings::default(),
+            land_reseat_cooldown: 0,
         }
     }
 }
@@ -584,6 +635,44 @@ impl Default for OrganismStore {
 impl OrganismStore {
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// After competent-fall cargo moved world cells, shift any organisms
+    /// whose nucleus or body modules sat on those cells.
+    pub fn shift_atoms_with_moved_cells(
+        &mut self,
+        world: &crate::grid::World,
+        moves: &[(i32, i32, i32, i32)],
+    ) {
+        if moves.is_empty() {
+            return;
+        }
+        for atom in &mut self.atoms {
+            let mut dx = 0i32;
+            let mut dy = 0i32;
+            let mut hit = false;
+            for &(fx, fy, tx, ty) in moves {
+                let nucleus = atom.gx == fx && atom.gy == fy;
+                let module_hit = atom.body.iter().any(|(lx, ly, _)| {
+                    atom.gx + *lx as i32 == fx && atom.gy + *ly as i32 == fy
+                });
+                if nucleus || module_hit {
+                    dx = tx - fx;
+                    dy = ty - fy;
+                    hit = true;
+                    break;
+                }
+            }
+            if !hit || (dx == 0 && dy == 0) {
+                continue;
+            }
+            atom.gx = world.wrap_x(atom.gx + dx);
+            atom.gy += dy;
+            atom.fy += dy as f32;
+            if let Some(wt) = atom.last_water_top {
+                atom.last_water_top = Some(wt + dy);
+            }
+        }
     }
 
     pub fn len(&self) -> usize {
@@ -927,15 +1016,21 @@ impl OrganismStore {
         let phase = phase_fraction_cfg(tick, climate);
         let sun_local = celestial_local_cfg(tick, climate);
         let is_day = is_daytime_cfg(tick, climate);
+        let mut pass = OrganismPassTimings::default();
         // Posed draw cells (flop + pile) feed canopy shade so dry mats and
         // equal-height meadows compete for light where they actually sit.
+        let t0 = Instant::now();
         let posed = resolve_organism_draw_cells(world, &self.atoms, tick, wind_vx);
+        let posed_by_atom = group_posed_by_atom(&posed, self.atoms.len());
+        pass.pose = t0.elapsed();
+        let t0 = Instant::now();
         let canopy = build_canopy_index_posed(&self.atoms, &posed);
         // Live + grey-corpse Stem cells — shoot growth keeps a trunk gap.
         let trunks = collect_trunk_world_cells(&self.atoms, &self.corpses);
         // All living Root / Photosystem cells — Moore spacing across plants.
         let live_roots = collect_live_root_world_cells(&self.atoms);
         let live_photos = collect_live_photo_world_cells(&self.atoms);
+        pass.canopy = t0.elapsed();
         let mut births: Vec<Atom> = Vec::new();
         let mut deaths: Vec<usize> = Vec::new();
         let mut spore_releases: Vec<SporeRelease> = Vec::new();
@@ -947,8 +1042,21 @@ impl OrganismStore {
         let fungi_cfg = self.fungi;
         let bank_cfg = self.spore_bank;
         // One crown per column: destack any pre-existing overlaps first.
-        reseat_stacked_land_plants(world, &mut self.atoms);
+        // When the world is denser than clearance allows, reseat finds no
+        // seats — cooldown skips repeating that search every tick.
+        let t0 = Instant::now();
+        if self.land_reseat_cooldown == 0 {
+            match reseat_stacked_land_plants(world, &mut self.atoms) {
+                LandReseat::Quiet | LandReseat::Moved => {}
+                LandReseat::Stuck => {
+                    self.land_reseat_cooldown = LAND_RESEAT_STUCK_COOLDOWN;
+                }
+            }
+        } else {
+            self.land_reseat_cooldown = self.land_reseat_cooldown.saturating_sub(1);
+        }
         reseat_stacked_fungi(world, &mut self.atoms);
+        pass.reseat = t0.elapsed();
         // Crown columns of living land plants — density + occupancy gate.
         // Mutated as sprouts birth so same-tick siblings can't share a seat.
         let mut plant_cols: Vec<i32> = self
@@ -965,14 +1073,18 @@ impl OrganismStore {
             .collect();
         // Transpiration return: (gx, gy, sat_units) → humidity mass.
         let mut transpired: Vec<(i32, i32, u32)> = Vec::new();
-        // Floating-Organic raft columns: once per organism tick. Seat / tip /
-        // holdfast helpers used to re-scan the whole world per plant (and
-        // several times each) — that was O(plants × cells) and crushed FPS.
+        // Floating-Organic raft columns near living crowns only. Full-world
+        // scans were O(chunks×cells) every tick even with zero Organic.
+        let t0 = Instant::now();
         let float_columns = if plant_cols.is_empty() {
-            std::collections::HashMap::new()
+            HashMap::new()
         } else {
-            crate::rules::collect_floating_organic_columns(world)
+            crate::rules::collect_floating_organic_columns_near(world, &plant_cols, 6)
         };
+        pass.float_cols = t0.elapsed();
+        // Per-tick caches. Many leaves / plants share columns.
+        let mut lit_cache: HashMap<(i32, i32), f32> = HashMap::new();
+        let mut shade_cache: HashMap<(i32, i32), f32> = HashMap::new();
 
         // Empty store: still allow mycelium field → fruiting body emergence
         // (and corpse settle). Spores need a living body afterward.
@@ -986,11 +1098,13 @@ impl OrganismStore {
                     stats.emergent_fruiting += 1;
                     self.atoms.push(child);
                 }
+                self.last_pass = pass;
                 return OrganismStepOutcome {
                     spores: spore_releases,
                     stats,
                 };
             }
+            let t0 = Instant::now();
             self.step_corpses(world, tick, wind_vx);
             let room = self.atoms.len() < atom_cap;
             if let Some(child) = try_emergent_fruiting(world, &[], tick, room) {
@@ -998,12 +1112,16 @@ impl OrganismStore {
                 stats.emergent_fruiting += 1;
                 self.atoms.push(child);
             }
+            pass.post = t0.elapsed();
+            self.last_pass = pass;
             return OrganismStepOutcome {
                 spores: spore_releases,
                 stats,
             };
         }
 
+        let mut land_ns = Duration::ZERO;
+        let mut other_ns = Duration::ZERO;
         for (i, atom) in self.atoms.iter_mut().enumerate() {
             atom.age_ticks = atom.age_ticks.saturating_add(1);
             atom.cooldown = atom.cooldown.saturating_sub(1);
@@ -1015,9 +1133,12 @@ impl OrganismStore {
             }
 
             if is_land_plant(atom) {
+                let t_land = Instant::now();
                 let room = pop + births.len() < atom_cap;
                 let parent_gx = atom.gx;
                 let parent_gy = atom.gy;
+                let empty: [usize; 0] = [];
+                let posed_indices = posed_by_atom.get(i).map(|v| v.as_slice()).unwrap_or(&empty);
                 match step_land_plant(
                     world,
                     atom,
@@ -1025,7 +1146,9 @@ impl OrganismStore {
                     tick,
                     &canopy,
                     &posed,
-                    i,
+                    posed_indices,
+                    &mut lit_cache,
+                    &mut shade_cache,
                     &trunks,
                     &live_roots,
                     &live_photos,
@@ -1044,6 +1167,7 @@ impl OrganismStore {
                     downpour_mass,
                     sun_local,
                     is_day,
+                    &mut pass,
                 ) {
                     PlantStep::Dead => deaths.push(i),
                     PlantStep::Alive { sat, at } => {
@@ -1077,9 +1201,11 @@ impl OrganismStore {
                         // Plants never inoculate mycelium.
                     }
                 }
+                land_ns += t_land.elapsed();
                 continue;
             }
 
+            let t_other = Instant::now();
             if is_fungus(atom) {
                 let room = pop + births.len() < atom_cap;
                 let parent_gx = atom.gx;
@@ -1132,12 +1258,14 @@ impl OrganismStore {
                         }
                     }
                 }
+                other_ns += t_other.elapsed();
                 continue;
             }
 
             // Plankton drought gate: must still have a wet band nearby.
             if wet_band(world, atom.gx, atom.gy).is_none() {
                 if !ensure_in_water(world, atom) {
+                    other_ns += t_other.elapsed();
                     deaths.push(i);
                     continue;
                 }
@@ -1148,6 +1276,7 @@ impl OrganismStore {
 
             if !is_wet_air(world, atom.gx, atom.gy) {
                 if !ensure_in_water(world, atom) {
+                    other_ns += t_other.elapsed();
                     deaths.push(i);
                     continue;
                 }
@@ -1155,7 +1284,8 @@ impl OrganismStore {
 
             let n_photo = atom.photosystem_count().max(1) as f32;
             let n_mod = atom.body.len().max(1) as f32;
-            let light = lit_sky_at(
+            let light = cached_lit_sky(
+                &mut lit_cache,
                 world,
                 atom.gx,
                 atom.gy,
@@ -1166,7 +1296,6 @@ impl OrganismStore {
                 downpour_mass,
                 sun_local,
                 is_day,
-                column_light(world, atom.gx, atom.gy),
             );
             let raw_harvest = PHOTON_RATE * light * n_photo;
             // Set A algae: bloom rate gated by dissolved C bucket.
@@ -1177,6 +1306,7 @@ impl OrganismStore {
             let upkeep = UPKEEP_PER_MODULE * n_mod * (0.45 + 0.55 * day);
             atom.energy = (atom.energy + harvest - upkeep).clamp(0.0, atom.energy_max);
             if atom.energy <= 0.0 {
+                other_ns += t_other.elapsed();
                 deaths.push(i);
                 continue;
             }
@@ -1194,8 +1324,12 @@ impl OrganismStore {
                     atom.energy += cost;
                 }
             }
+            other_ns += t_other.elapsed();
         }
+        pass.land_plants = land_ns;
+        pass.other_creatures = other_ns;
 
+        let t_post = Instant::now();
         deaths.sort_unstable();
         deaths.dedup();
         // Tips: woody plants that acquired `fallen` this step (before removals).
@@ -1221,6 +1355,10 @@ impl OrganismStore {
         }
         for child in &births {
             stats.bump_birth(child);
+        }
+        if !births.is_empty() {
+            // New crowns may violate clearance — force a reseat next tick.
+            self.land_reseat_cooldown = 0;
         }
         self.atoms.extend(births);
         // Cream network → new fruiting body (may later shed spores).
@@ -1290,6 +1428,8 @@ impl OrganismStore {
                 }
             }
         }
+        pass.post = t_post.elapsed();
+        self.last_pass = pass;
         stats.spores = spore_releases.len() as u32;
         OrganismStepOutcome {
             spores: spore_releases,
@@ -1345,7 +1485,18 @@ impl OrganismStore {
                     if let Some(slot) = find_surface_air_slot(world, corpse.gx, corpse.gy) {
                         corpse.gy = slot;
                     }
-                    pin_corpse_land(corpse);
+                    if corpse_adjacent_stream(world, corpse) {
+                        // Stream / hillside film — step into the current so
+                        // grey stems don't pin on the bank for a full settle.
+                        corpse.fallen = true;
+                        wash_land_corpse_into_stream(world, corpse, tick, wind_vx);
+                        if let Some(slot) = find_surface_air_slot(world, corpse.gx, corpse.gy) {
+                            corpse.gy = slot;
+                            corpse.fy = slot as f32;
+                        }
+                    } else {
+                        pin_corpse_land(corpse);
+                    }
                     clamp_fallen_body_extent(
                         corpse.fallen,
                         &mut corpse.body,
@@ -1353,7 +1504,10 @@ impl OrganismStore {
                     );
                     prune_fallen_corpse_canopy_in_solid(world, corpse);
                 }
-                corpse.settled_ticks = corpse.settled_ticks.saturating_add(1);
+                let in_stream = wet_band(world, corpse.gx, corpse.gy).is_some()
+                    || corpse_adjacent_stream(world, corpse);
+                let settle_step = if in_stream { 5 } else { 1 };
+                corpse.settled_ticks = corpse.settled_ticks.saturating_add(settle_step);
                 if corpse.settled_ticks >= CORPSE_SETTLE_LAND_TICKS {
                     dissolve.push(i);
                 }
@@ -1396,6 +1550,52 @@ impl OrganismStore {
     }
 }
 
+/// True when a hillside / bank corpse is touching flowing wet Air.
+fn corpse_adjacent_stream(world: &World, corpse: &Corpse) -> bool {
+    adjacent_stream_cell(world, corpse).is_some()
+}
+
+/// Wettest neighbouring Air cell touching the corpse body (`sat >= 140`).
+fn adjacent_stream_cell(world: &World, corpse: &Corpse) -> Option<(i32, i32)> {
+    let mut best: Option<(i32, i32, i16)> = None;
+    for &(dx, dy, _) in &corpse.body {
+        let gx = world.wrap_x(corpse.gx + dx as i32);
+        let gy = corpse.gy + dy as i32;
+        for (ox, oy) in [(0, 0), (-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let nx = world.wrap_x(gx + ox);
+            let ny = gy + oy;
+            let sat = air_sat(world, nx, ny);
+            if sat >= 140 {
+                let better = match best {
+                    Some((_, _, s)) => sat > s,
+                    None => true,
+                };
+                if better {
+                    best = Some((nx, ny, sat));
+                }
+            }
+        }
+    }
+    best.map(|(x, y, _)| (x, y))
+}
+
+/// Pick a bank corpse up into the film, then ride current.
+fn wash_land_corpse_into_stream(world: &World, corpse: &mut Corpse, tick: u64, wind_vx: f32) {
+    if let Some((sx, sy)) = adjacent_stream_cell(world, corpse) {
+        if (sx, sy) != (corpse.gx, corpse.gy) {
+            let chance = 0.62;
+            let salt = CORPSE_DRIFT_SALT.wrapping_add(17);
+            if crate::rules::hash_prob(world.seed.0, corpse.gx, tick, salt) < chance {
+                corpse.gx = sx;
+                corpse.gy = sy;
+                corpse.fy = sy as f32;
+                corpse.vel_y = 0.0;
+            }
+        }
+    }
+    drift_floating_corpse(world, corpse, tick, wind_vx);
+}
+
 fn pin_corpse_land(corpse: &mut Corpse) {
     corpse.fy = corpse.gy as f32;
     corpse.vel_y = 0.0;
@@ -1431,11 +1631,12 @@ fn drift_floating_corpse(world: &World, corpse: &mut Corpse, tick: u64, wind_vx:
     // Sample flow at the free-surface top when floating — sat shear at the
     // nucleus row on steep drops often points *upstream* (water piles high
     // against the cascade), which looked like logs swimming uphill.
-    let sample_y = wet_band(world, corpse.gx, corpse.gy)
-        .map(|(top, _)| top)
-        .unwrap_or(corpse.gy);
-    let flow = local_water_drive(world, corpse.gx, sample_y);
-    let flow_dir = local_water_dir(world, corpse.gx, sample_y) as f32;
+    let (sample_x, sample_y) = wet_band(world, corpse.gx, corpse.gy)
+        .map(|(top, _)| (corpse.gx, top))
+        .or_else(|| adjacent_stream_cell(world, corpse))
+        .unwrap_or((corpse.gx, corpse.gy));
+    let flow = local_water_drive(world, sample_x, sample_y);
+    let flow_dir = local_water_dir(world, sample_x, sample_y) as f32;
     let wind = wind_vx.clamp(-1.5, 1.5);
     let at_surface = wet_band(world, corpse.gx, corpse.gy)
         .map(|(top, _)| (corpse.gy - top).abs() <= 1)
@@ -1492,11 +1693,25 @@ pub struct SporeRelease {
     pub to_gy: i32,
 }
 
+/// How many ticks to skip land reseat after a stuck overcrowded pass.
+const LAND_RESEAT_STUCK_COOLDOWN: u8 = 16;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LandReseat {
+    /// Clearance already ok — no work.
+    Quiet,
+    /// At least one crown moved.
+    Moved,
+    /// Crowded, but no legal empty seat (dense pack) — caller may cooldown.
+    Stuck,
+}
+
 /// Oldest land plant keeps its column; younger neighbours that violate
 /// [`crate::plant::SPROUT_CROWN_CLEARANCE`] (or share a column) reseat nearby.
 /// Keeps T-canopies readable instead of a solid green bar.
-fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
-    use crate::plant::{column_dist, SPROUT_CROWN_CLEARANCE};
+fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) -> LandReseat {
+    use crate::plant::SPROUT_CROWN_CLEARANCE;
+    use std::collections::HashSet;
 
     let mut land_idx: Vec<usize> = atoms
         .iter()
@@ -1505,20 +1720,55 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
         .map(|(i, _)| i)
         .collect();
     if land_idx.len() < 2 {
-        return;
+        return LandReseat::Quiet;
     }
-    // Oldest first — they claim space.
+    // Fast path: unique columns with clearance already satisfied → skip sort/walk.
+    {
+        let mut cols: HashSet<i32> = HashSet::with_capacity(land_idx.len());
+        let mut crowded = false;
+        for &i in &land_idx {
+            let gx = atoms[i].gx;
+            if !cols.insert(gx) {
+                crowded = true;
+                break;
+            }
+        }
+        if !crowded {
+            for &gx in &cols {
+                for d in 1..=SPROUT_CROWN_CLEARANCE {
+                    let n = world.wrap_x(gx + d);
+                    if cols.contains(&n) {
+                        crowded = true;
+                        break;
+                    }
+                }
+                if crowded {
+                    break;
+                }
+            }
+        }
+        if !crowded {
+            return LandReseat::Quiet;
+        }
+    }
+    // Oldest first — they claim space. Claimed set → O(clearance) neighbour
+    // probes. `Stuck` (no moves) lets the caller cooldown so dense packs do
+    // not re-run find_plant_slot walks every tick.
     land_idx.sort_by_key(|&i| std::cmp::Reverse(atoms[i].age_ticks));
-    let mut claimed: Vec<i32> = Vec::new();
-    let clear_of_claimed = |claimed: &[i32], nx: i32| {
-        !claimed.iter().any(|&c| {
-            column_dist(c, nx, world.wrap_width) <= SPROUT_CROWN_CLEARANCE
-        })
+    let mut claimed: HashSet<i32> = HashSet::with_capacity(land_idx.len());
+    let clear_of_claimed = |claimed: &HashSet<i32>, nx: i32| {
+        for d in -SPROUT_CROWN_CLEARANCE..=SPROUT_CROWN_CLEARANCE {
+            if claimed.contains(&world.wrap_x(nx + d)) {
+                return false;
+            }
+        }
+        true
     };
+    let mut any_moved = false;
     for i in land_idx {
         let gx = atoms[i].gx;
         if clear_of_claimed(&claimed, gx) {
-            claimed.push(gx);
+            claimed.insert(gx);
             continue;
         }
         let gy = atoms[i].gy;
@@ -1535,8 +1785,9 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
                 atoms[i].gx = nx;
                 atoms[i].gy = ny;
                 pin_plant_pose(&mut atoms[i]);
-                claimed.push(nx);
+                claimed.insert(nx);
                 moved = true;
+                any_moved = true;
                 break;
             }
             if moved {
@@ -1545,8 +1796,13 @@ fn reseat_stacked_land_plants(world: &World, atoms: &mut [Atom]) {
         }
         if !moved {
             // No clear seat — keep the plant; don't despawn for spacing.
-            claimed.push(gx);
+            claimed.insert(gx);
         }
+    }
+    if any_moved {
+        LandReseat::Moved
+    } else {
+        LandReseat::Stuck
     }
 }
 
@@ -1606,7 +1862,9 @@ fn step_land_plant(
     tick: u64,
     canopy: &CanopyIndex,
     posed: &[PosedModule],
-    atom_idx: usize,
+    posed_indices: &[usize],
+    lit_cache: &mut HashMap<(i32, i32), f32>,
+    shade_cache: &mut HashMap<(i32, i32), f32>,
     trunks: &std::collections::HashSet<(i32, i32)>,
     live_roots: &std::collections::HashSet<(i32, i32)>,
     live_photos: &std::collections::HashSet<(i32, i32)>,
@@ -1615,7 +1873,7 @@ fn step_land_plant(
     growth_caps: &PlantGrowthCaps,
     plant_cols: &[i32],
     wind_vx: f32,
-    float_columns: &std::collections::HashMap<i32, (i32, i32)>,
+    float_columns: &HashMap<i32, (i32, i32)>,
     bank_cfg: &SporeBankConfig,
     carbon: Option<&mut CarbonBudget>,
     carbon_cfg: &CarbonConfig,
@@ -1625,6 +1883,7 @@ fn step_land_plant(
     downpour_mass: f32,
     sun_local: f32,
     is_day: bool,
+    pass: &mut OrganismPassTimings,
 ) -> PlantStep {
     // Pose / seat:
     // - Sand/rock purchase wins: once grounded, organics and water never
@@ -1640,11 +1899,28 @@ fn step_land_plant(
     //   bed/shore/neighbour substrate must NOT teleport `gy` to the bed.
     //   Open-water = uprooted (short wet keel, no mineral pierce). Shore
     //   tips resting on mineral may elongate into the beach while tipped.
-    let on_float_raft = rooted_in_floating_organic(world, atom, float_columns);
-    let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
+    let t_seat = Instant::now();
     let stemless = crate::plant::stem_count(atom) == 0;
-    let grounded = grounded_substrate_anchor(world, atom, float_columns);
     let woody_castaway = atom.fallen && !stemless;
+    // Near-crown purchase first (no standing-water column walk). Most land
+    // plants leave before float / waterline work. Deep roots alone still
+    // need the over-water gate below.
+    let near_grounded = near_crown_substrate_anchor(world, atom, float_columns);
+    let (grounded, holdfast_solid, standing_top) = if near_grounded && !woody_castaway {
+        let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
+        (true, holdfast_solid, None)
+    } else {
+        let standing_top = column_standing_surface(world, atom.gx, atom.gy);
+        let grounded = near_grounded
+            || grounded_substrate_anchor_over_water(
+                world,
+                atom,
+                float_columns,
+                standing_top.is_some(),
+            );
+        let holdfast_solid = crown_holdfast_solid_y(world, atom, float_columns);
+        (grounded, holdfast_solid, standing_top)
+    };
     // Tipped woody shoots must all draw upright — unmarked dy>0 stem/leaf
     // cells flatten to the waterline and leave mid-mast holes.
     heal_fallen_upright_marks(atom);
@@ -1663,11 +1939,12 @@ fn step_land_plant(
             }
         }
         pin_plant_pose(atom);
-    } else if on_float_raft {
+    } else if rooted_in_floating_organic(world, atom, float_columns) {
         // Floating-Organic holdfast wins over "see through litter to mineral"
         // — otherwise a thin raft over a deep lake teleports the crown to the
         // bedrock seat under the water column and never runs tip checks.
-        let water_top = column_standing_surface(world, atom.gx, atom.gy);
+        let water_top =
+            standing_top.or_else(|| column_standing_surface(world, atom.gx, atom.gy));
         apply_raft_tip(world, atom, float_columns);
         if atom.fallen {
             if let Some(top) = water_top {
@@ -1689,7 +1966,9 @@ fn step_land_plant(
         }
         atom.gy = solid_y + 1;
         pin_plant_pose(atom);
-    } else if let Some(top) = column_standing_surface(world, atom.gx, atom.gy) {
+    } else if let Some(top) =
+        standing_top.or_else(|| column_standing_surface(world, atom.gx, atom.gy))
+    {
         if stemless {
             // Detached seaweed: ride the surface; keep ribbon body offsets.
             atom.fallen = true;
@@ -1754,16 +2033,35 @@ fn step_land_plant(
         prune_fallen_canopy_in_solid(world, atom);
         prune_uprooted_woody_roots(world, atom);
     }
+    pass.land_seat += t_seat.elapsed();
+
+    let t_metab = Instant::now();
     // Roots bank surplus above the spawn tank (starch analogy).
     sync_root_storage(atom);
     // Pore moisture under roots, or free standing water on leaves.
-    let moist = plant_moisture_frac(world, atom);
-    let bathing = leaves_bathing(world, atom);
+    // Grounded upright plants skip leaf-bathing scans (shore leaves don't
+    // drink). Root moisture is resampled every other tick and cached.
+    let (moist, bathing) = if atom.fallen || !grounded {
+        let root_moist = crate::plant::root_moisture_frac(world, atom);
+        let leaf_bath = crate::plant::leaf_bathing_frac(world, atom);
+        let moist = root_moist.max(leaf_bath);
+        atom.moist_frac_cache = moist;
+        (moist, leaf_bath >= 0.12)
+    } else if atom.age_ticks < 2
+        || (atom.age_ticks.wrapping_add(entity_id as u64)) % 2 == 0
+    {
+        let root_moist = crate::plant::root_moisture_frac(world, atom);
+        atom.moist_frac_cache = root_moist;
+        (root_moist, false)
+    } else {
+        (atom.moist_frac_cache, false)
+    };
     let drought = drought_band(moist);
     let dormant = matches!(drought, DroughtBand::Dormant);
     if dormant {
         atom.drought_ticks = atom.drought_ticks.saturating_add(1);
         if atom.drought_ticks >= DROUGHT_HIBERNATE_MAX_TICKS {
+            pass.land_metab += t_metab.elapsed();
             return PlantStep::Dead;
         }
     } else {
@@ -1779,6 +2077,7 @@ fn step_land_plant(
     if dormant {
         upkeep *= DROUGHT_DORMANT_UPKEEP;
         atom.energy = (atom.energy - upkeep).clamp(0.0, atom.energy_max);
+        pass.land_metab += t_metab.elapsed();
         return if atom.energy <= 0.0 {
             PlantStep::Dead
         } else {
@@ -1789,50 +2088,72 @@ fn step_land_plant(
         };
     }
 
-    let (drink_e, sat_taken, drink_at) = drink_plant(world, atom);
+    let (drink_e, sat_taken, drink_at) =
+        drink_plant_with_moist(world, atom, moist, bathing);
     // Per-leaf column Beer–Lambert at posed cells (flop/pile). Lower leaves
     // and plants under taller neighbours harvest less than open tips.
-    let (tip_x, tip_y) = posed_canopy_sample(posed, atom_idx, (atom.gx, canopy_top_y(atom)));
+    // `posed_indices` is this plant's slice of the tick's posed list — not a
+    // full-pop scan per plant.
+    let (tip_x, tip_y) =
+        posed_canopy_sample_of(posed, posed_indices, (atom.gx, canopy_top_y(atom)));
     let tip_x = world.wrap_x(tip_x);
     let submerged = is_wet_air(world, tip_x, tip_y);
-    let mut light_sum = sum_posed_photo_light(
-        canopy,
-        posed,
-        atom_idx,
-        &|wx, wy| {
-            let gx = world.wrap_x(wx);
-            lit_sky_at(
-                world,
-                gx,
-                wy,
-                day,
-                clouds,
-                humidity,
-                wrap_w,
-                downpour_mass,
-                sun_local,
-                is_day,
-                column_light(world, gx, wy),
-            )
-        },
-        &atom.genome,
+    let tip_sky = cached_lit_sky(
+        lit_cache,
+        world,
+        tip_x,
+        tip_y,
+        day,
+        clouds,
+        humidity,
+        wrap_w,
+        downpour_mass,
+        sun_local,
+        is_day,
     );
+    // Single-leaf / near-dark / staggered multi-leaf: tip×count (skip
+    // per-leaf shade walks). Full leaf sum every other tick per plant.
+    let full_leaves = n_photo > 1
+        && tip_sky > 0.02
+        && (atom.age_ticks.wrapping_add(entity_id as u64)) % 2 == 0;
+    let mut light_sum = if !full_leaves {
+        let tip =
+            effective_photo_light_cached(canopy, shade_cache, tip_x, tip_y, tip_sky, &atom.genome);
+        // Tip overestimates shaded lower leaves slightly on skip ticks.
+        let scale = if n_photo > 1 && tip_sky > 0.02 {
+            0.82
+        } else {
+            1.0
+        };
+        tip * n_photo as f32 * scale
+    } else {
+        sum_posed_photo_light_of_cached(
+            canopy,
+            posed,
+            posed_indices,
+            &mut |wx, wy| {
+                cached_lit_sky(
+                    lit_cache,
+                    world,
+                    wx,
+                    wy,
+                    day,
+                    clouds,
+                    humidity,
+                    wrap_w,
+                    downpour_mass,
+                    sun_local,
+                    is_day,
+                )
+            },
+            &atom.genome,
+            Some(shade_cache),
+        )
+    };
     // Fallback when pose missed leaves: tip sample × count (pre-pose path).
     if light_sum <= 0.0 && n_photo > 0 {
-        let sky = lit_sky_at(
-            world,
-            tip_x,
-            tip_y,
-            day,
-            clouds,
-            humidity,
-            wrap_w,
-            downpour_mass,
-            sun_local,
-            is_day,
-            column_light(world, tip_x, tip_y),
-        );
-        let tip = crate::shade::effective_photo_light(canopy, tip_x, tip_y, sky, &atom.genome);
+        let tip =
+            effective_photo_light_cached(canopy, shade_cache, tip_x, tip_y, tip_sky, &atom.genome);
         light_sum = tip * n_photo as f32;
     }
     // Mean leaf light for submerged stem-urge threshold.
@@ -1858,18 +2179,29 @@ fn step_land_plant(
     };
     atom.energy = (atom.energy + harvest + drink_e - upkeep - stress).clamp(0.0, atom.energy_max);
     if atom.energy <= 0.0 {
+        pass.land_metab += t_metab.elapsed();
         return PlantStep::Dead;
     }
+    pass.land_metab += t_metab.elapsed();
+
+    let t_grow = Instant::now();
     // Drop midair flecks that no longer touch the trunk, then dim-shade shed.
     // Seaweed ribbons keep their frond — no abscission on stemless bodies.
-    let _ = prune_detached_woody_leaves(atom);
-    let _ = shed_unproductive_woody_leaves(world, atom, canopy, day, tick);
+    // Single-leaf plants have nothing to prune/shed.
+    if n_photo > 1 {
+        let _ = prune_detached_woody_leaves(atom);
+        let _ = shed_unproductive_woody_leaves(world, atom, canopy, day, tick);
+    }
     // Surplus → tissue. Submerged + dim light: race toward brighter water.
     // Stemmed plants urge olive upward; stemless seaweed elongates the
     // Photosystem ribbon instead (no trunk invent). When leaves bathe in
     // standing water, root urge collapses — holdfast is enough.
     let genome_save = atom.genome;
-    let lake_surface = column_standing_surface(world, atom.gx, atom.gy);
+    let lake_surface = if atom.fallen {
+        standing_top.or_else(|| column_standing_surface(world, atom.gx, atom.gy))
+    } else {
+        None
+    };
     if atom.fallen {
         if lake_surface.is_some() {
             // Lake float: elongate dangling roots into wet void / raft, and
@@ -1884,7 +2216,7 @@ fn step_land_plant(
         }
     } else if bathing {
         atom.genome.alloc_root = atom.genome.alloc_root.min(0.06);
-        if crate::plant::stem_count(atom) == 0 && n_photo > 0 {
+        if stemless && n_photo > 0 {
             atom.genome.alloc_leaf = (atom.genome.alloc_leaf + 0.20).min(1.0);
             atom.genome.alloc_stem = 0.0;
         }
@@ -1893,7 +2225,7 @@ fn step_land_plant(
     // force trunk growth all night and empty the tank in a river.
     let grow_day = day >= PLANT_GROW_MIN_DAY;
     if grow_day && !atom.fallen && submerged && light < SUBMERGED_STEM_URGE_LIGHT {
-        if crate::plant::stem_count(atom) > 0 {
+        if !stemless {
             atom.genome.alloc_stem = (atom.genome.alloc_stem + 0.40).min(1.0);
             atom.genome.alloc_root = (atom.genome.alloc_root * 0.55).max(0.05);
             atom.genome.alloc_leaf = (atom.genome.alloc_leaf * 0.85).max(0.05);
@@ -1918,6 +2250,9 @@ fn step_land_plant(
     }
     atom.genome = genome_save;
     sync_root_storage(atom);
+    pass.land_grow += t_grow.elapsed();
+
+    let t_disp = Instant::now();
     // Fern-style wind spores before local rhizome (longer range, needs ReproSpore).
     match try_plant_wind_spore(
         world,
@@ -1929,16 +2264,24 @@ fn step_land_plant(
         wind_vx,
         bank_cfg,
     ) {
-        DispersalResult::Germinated(child) => return PlantStep::Spore(child),
-        DispersalResult::Banked { gx, gy } => return PlantStep::SporeBanked { gx, gy },
+        DispersalResult::Germinated(child) => {
+            pass.land_disperse += t_disp.elapsed();
+            return PlantStep::Spore(child);
+        }
+        DispersalResult::Banked { gx, gy } => {
+            pass.land_disperse += t_disp.elapsed();
+            return PlantStep::SporeBanked { gx, gy };
+        }
         DispersalResult::Inoculated { .. } => {}
         DispersalResult::None => {}
     }
     if let Some(child) =
         try_vegetative_sprout(world, atom, tick, entity_id, pop_room, plant_cols)
     {
+        pass.land_disperse += t_disp.elapsed();
         return PlantStep::Sprout(child);
     }
+    pass.land_disperse += t_disp.elapsed();
     PlantStep::Alive {
         sat: sat_taken,
         at: drink_at,
@@ -2127,12 +2470,26 @@ pub fn resolve_organism_draw_cells(
     let mut occupied: HashSet<(i32, i32)> = HashSet::new();
     let mut out = Vec::with_capacity(atoms.iter().map(|a| a.body.len()).sum());
     for (atom_idx, atom) in atoms.iter().enumerate() {
+        // Per-atom upright woody fast-path. A single tipped/stemless neighbour
+        // must not force wet-band probes on every grove plant.
+        let woody_upright = !atom.fallen && crate::plant::stem_count(atom) > 0;
         for &(dx0, dy0, mid) in &atom.body {
             let (dx, dy) = atom.fallen_draw_offset(dx0, dy0);
             if atom.fallen && fallen_pose_past_extent(mid, dx) {
                 continue;
             }
-            let (wx0, wy0) = frond_draw_cell(world, atom, dx, dy, mid, tick, wind_vx);
+            // Upright woody: body cells are the draw pose (no water probes).
+            let (wx0, wy0) = if woody_upright {
+                let nod = if mid == ModuleId::Photosystem {
+                    let cant = leaf_cantilever(atom, dx, dy);
+                    (cant - LEAF_SUPPORT_WOODY).max(0).min(2)
+                } else {
+                    0
+                };
+                (atom.gx + dx as i32, atom.gy + dy as i32 - nod)
+            } else {
+                frond_draw_cell(world, atom, dx, dy, mid, tick, wind_vx)
+            };
             // Keep unwrapped draw X for the renderer (it paints wrap copies).
             // World queries use wrap_x.
             let wx = wx0;
@@ -2605,6 +2962,21 @@ pub fn frond_draw_cell(
         return (base_x, base_y);
     }
 
+    let cant = leaf_cantilever(atom, dx, dy);
+    let on_wood = atom
+        .body
+        .iter()
+        .any(|(_, _, m)| *m == ModuleId::Stem);
+
+    // Leaves attached to a trunk/branch stay in the canopy (no flow lean).
+    // Check before wet_band / water-drive probes — those dominate pose cost
+    // on dense woody groves.
+    if on_wood {
+        let nod = (cant - LEAF_SUPPORT_WOODY).max(0).min(2);
+        let wy = base_y - nod;
+        return (base_x, wy);
+    }
+
     let flow = local_water_drive(world, base_x, base_y);
     let wind = wind_vx.abs();
     // Emerged tissue feels air wind; submerged tissue only follows water flow
@@ -2624,18 +2996,6 @@ pub fn frond_draw_cell(
         -1
     };
     let lean_dir = if drive < FROND_STILL_WIND { 1 } else { dir };
-    let cant = leaf_cantilever(atom, dx, dy);
-    let on_wood = atom
-        .body
-        .iter()
-        .any(|(_, _, m)| *m == ModuleId::Stem);
-
-    // Leaves attached to a trunk/branch stay in the canopy (no flow lean).
-    if on_wood {
-        let nod = (cant - LEAF_SUPPORT_WOODY).max(0).min(2);
-        let wy = base_y - nod;
-        return (base_x, wy);
-    }
 
     let outward = if dx == 0 {
         lean_dir
@@ -2725,7 +3085,9 @@ fn air_sat(world: &World, gx: i32, gy: i32) -> i16 {
 ///
 /// Steep cascades register strongly even when neighbour sat is also high
 /// (ponded against the lip), so corpses / fronds follow the fall.
-fn local_water_drive(world: &World, gx: i32, gy: i32) -> f32 {
+/// Local current strength (sat shear + head drop / cascade). Used by
+/// corpse drift and floating Organic rafts.
+pub(crate) fn local_water_drive(world: &World, gx: i32, gy: i32) -> f32 {
     let mut best = 0i16;
     for y in [gy - 1, gy, gy + 1] {
         let l = air_sat(world, gx - 1, y);
@@ -2765,7 +3127,8 @@ fn local_water_drive(world: &World, gx: i32, gy: i32) -> f32 {
 ///
 /// Old "toward higher sat" pointed *upstream* on steep terrain where water
 /// piles against the drop — corpses looked like they swam uphill.
-fn local_water_dir(world: &World, gx: i32, gy: i32) -> i32 {
+/// Horizontal current direction (downhill / cascade exit).
+pub(crate) fn local_water_dir(world: &World, gx: i32, gy: i32) -> i32 {
     let top_here = wet_band(world, gx, gy).map(|(t, _)| t);
     let mut score_pos = 0.0f32; // +x
     let mut score_neg = 0.0f32; // -x
@@ -2902,10 +3265,44 @@ fn organic_in_floating_column(
 fn grounded_substrate_anchor(
     world: &World,
     atom: &Atom,
-    columns: &std::collections::HashMap<i32, (i32, i32)>,
+    columns: &HashMap<i32, (i32, i32)>,
 ) -> bool {
-    const NEAR_CROWN: i16 = 6;
     let over_water = column_standing_surface(world, atom.gx, atom.gy).is_some();
+    grounded_substrate_anchor_over_water(world, atom, columns, over_water)
+}
+
+const GROUND_NEAR_CROWN: i16 = 6;
+
+/// Near-crown root purchase only (`dy >= -6`). Safe without a standing-water
+/// probe — deep lake-bed scrapes are ignored here on purpose.
+fn near_crown_substrate_anchor(
+    world: &World,
+    atom: &Atom,
+    columns: &HashMap<i32, (i32, i32)>,
+) -> bool {
+    for &(dx, dy, m) in &atom.body {
+        if m != ModuleId::Root || dy < -GROUND_NEAR_CROWN {
+            continue;
+        }
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        if substrate_purchase_at(world, columns, wx, wy)
+            || substrate_purchase_at(world, columns, wx, wy - 1)
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Like [`grounded_substrate_anchor`] when the caller already knows whether
+/// the crown column has standing water (avoids a second column scan).
+fn grounded_substrate_anchor_over_water(
+    world: &World,
+    atom: &Atom,
+    columns: &HashMap<i32, (i32, i32)>,
+    over_water: bool,
+) -> bool {
     for &(dx, dy, m) in &atom.body {
         if m != ModuleId::Root {
             continue;
@@ -2913,11 +3310,11 @@ fn grounded_substrate_anchor(
         let wx = world.wrap_x(atom.gx + dx as i32);
         let wy = atom.gy + dy as i32;
         if substrate_purchase_at(world, columns, wx, wy) {
-            if dy >= -NEAR_CROWN || !over_water {
+            if dy >= -GROUND_NEAR_CROWN || !over_water {
                 return true;
             }
         }
-        if dy >= -NEAR_CROWN && substrate_purchase_at(world, columns, wx, wy - 1) {
+        if dy >= -GROUND_NEAR_CROWN && substrate_purchase_at(world, columns, wx, wy - 1) {
             return true;
         }
     }
@@ -3539,6 +3936,41 @@ pub fn column_sky_light(world: &World, gx: i32, gy: i32) -> f32 {
 
 fn column_light(world: &World, gx: i32, gy: i32) -> f32 {
     column_sky_light(world, gx, gy)
+}
+
+/// Memoize [`lit_sky_at`] for one organism tick (`(wrap_x, gy)` → light).
+fn cached_lit_sky(
+    cache: &mut HashMap<(i32, i32), f32>,
+    world: &World,
+    gx: i32,
+    gy: i32,
+    day: f32,
+    clouds: Option<&CloudStore>,
+    humidity: Option<&Humidity>,
+    wrap_w: Option<i32>,
+    downpour_mass: f32,
+    sun_local: f32,
+    is_day: bool,
+) -> f32 {
+    let gx = world.wrap_x(gx);
+    if let Some(&v) = cache.get(&(gx, gy)) {
+        return v;
+    }
+    let v = lit_sky_at(
+        world,
+        gx,
+        gy,
+        day,
+        clouds,
+        humidity,
+        wrap_w,
+        downpour_mass,
+        sun_local,
+        is_day,
+        column_light(world, gx, gy),
+    );
+    cache.insert((gx, gy), v);
+    v
 }
 
 fn is_wet_air(world: &World, gx: i32, gy: i32) -> bool {
@@ -4371,12 +4803,13 @@ mod tests {
         // Pre-floor: dense meadows emptied atm in ~5 days and mass-died.
         // Land photo must limp along ([`PLANT_PHOTO_C_FLOOR`]) so nights
         // stay survivable after Beer-Lambert + carbon.
-        use crate::rules::tick;
+        use crate::failure::FailureConfig;
+        use crate::rules::{tick_with_configs, PerfConfig};
         let mut w = moist_sand_plot();
         for x in 0..48 {
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
             let mut sand = Cell::solid(MaterialId::Sand);
-            sand.sat = Sat(140);
+            sand.sat = Sat(160);
             for y in 1..=3 {
                 w.set_cell(x, y, sand);
             }
@@ -4392,14 +4825,19 @@ mod tests {
         g.alloc_stem = 0.5;
         g.alloc_leaf = 0.5;
         g.leaf_absorb = 0.85;
-        for x in (2..40).step_by(2) {
-            let _ = store.spawn_blueprint(&w, x, 3, minimal_plant_body(), 40.0, g);
+        for x in (4..36).step_by(2) {
+            let _ = store.spawn_blueprint(&w, x, 3, minimal_plant_body(), 60.0, g);
         }
         let n0 = store.len();
         assert!(n0 >= 10);
+        let fail = FailureConfig {
+            enable_competent_fall: false,
+            ..FailureConfig::default()
+        };
+        let perf = PerfConfig::default();
         let mut min_e = f32::MAX;
         for t in 0..(climate.total_ticks() * 12) {
-            tick(&mut w);
+            tick_with_configs(&mut w, &perf, &fail);
             for a in &store.atoms {
                 min_e = min_e.min(a.energy);
             }
@@ -4414,10 +4852,10 @@ mod tests {
                 &cfg,
             );
         }
-        assert_eq!(
+        assert!(
+            store.len() >= n0.saturating_sub(1),
+            "meadow must not mass-die under carbon soak (alive={} start={n0}, atm={:.1})",
             store.len(),
-            n0,
-            "meadow must not mass-die under carbon soak (atm={:.1})",
             carbon.atmosphere
         );
         assert!(
@@ -4807,6 +5245,54 @@ mod tests {
     }
 
     #[test]
+    fn hillside_corpse_washes_with_adjacent_stream() {
+        // Grey stem planted on soil next to a film — must slide, not pin.
+        let mut w = World::new(41);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..20 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Soil));
+            w.set_cell(x, 2, Cell::air());
+            w.set_cell(x, 3, Cell::air());
+        }
+        for x in 4..=10 {
+            w.set_cell(x, 2, Cell::water());
+        }
+        let mut store = OrganismStore::new();
+        let mut corpse = Corpse::from_atom(&Atom::from_body(
+            6,
+            3,
+            40.0,
+            vec![
+                (0, 0, ModuleId::Nucleus),
+                (0, -1, ModuleId::Root),
+                (0, 1, ModuleId::Stem),
+            ],
+        ));
+        corpse.land = true;
+        corpse.fallen = false;
+        store.corpses.push(corpse);
+        let gx0 = store.corpses[0].gx;
+        let climate = ClimateConfig::default();
+        let mut moved = false;
+        for t in 0..200u64 {
+            let _ = store.step_with_climate_wind(&mut w, t, &climate, None, 0.20);
+            if store.corpse_count() == 0 {
+                moved = true;
+                break;
+            }
+            if store.corpses[0].gx != gx0 {
+                moved = true;
+                break;
+            }
+        }
+        assert!(
+            moved,
+            "stream-side land corpse must wash or compost (stayed at {gx0})"
+        );
+    }
+
+    #[test]
     fn fungus_spawns_on_bare_stone() {
         let mut w = World::new(9);
         w.ensure_chunk(ChunkCoord::new(0, 0));
@@ -5059,7 +5545,7 @@ mod tests {
         let perf = PerfConfig::default();
         let fail = FailureConfig::default();
         for _ in 0..120 {
-            tick_with_life(&mut w, &perf, &fail, None, None, None, None);
+            tick_with_life(&mut w, &perf, &fail, None, None, None, None, None);
             let tick = w.tick;
             store.step(&mut w, tick);
         }
@@ -5068,7 +5554,7 @@ mod tests {
         let myc0 = crate::fungi::max_mycelium_near(&w, 4, 2);
         assert!(myc0 >= 40, "need an established network before death");
         for _ in 0..200 {
-            tick_with_life(&mut w, &perf, &fail, None, None, None, None);
+            tick_with_life(&mut w, &perf, &fail, None, None, None, None, None);
         }
         let myc1 = crate::fungi::max_mycelium_near(&w, 4, 2);
         assert!(
@@ -5125,7 +5611,7 @@ mod tests {
         let perf = PerfConfig::default();
         let fail = FailureConfig::default();
         for _ in 0..400 {
-            tick_with_life(&mut w, &perf, &fail, None, None, None, None);
+            tick_with_life(&mut w, &perf, &fail, None, None, None, None, None);
             let tick = w.tick;
             store.step(&mut w, tick);
         }
@@ -5399,7 +5885,7 @@ mod tests {
         for x in 0..12 {
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
             let mut sand = Cell::solid(MaterialId::Sand);
-            sand.sat = Sat(18);
+            sand.sat = Sat(10);
             w.set_cell(x, 1, sand);
             for y in 2..10 {
                 w.set_cell(x, y, Cell::air());

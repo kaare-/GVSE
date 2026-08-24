@@ -4,10 +4,11 @@
 //!
 //! Mass inventory for the product question: no unexplained water drift.
 //!
-//! Cell sat is summed from the grid (free Air vs pore). Humidity and
-//! cloud parcels are separate stores — include them via [`tracked_totals`]
-//! when auditing a full atmosphere step. The default physics [`tick`](crate::tick)
-//! only moves cell sat, so the in-tick debug check compares [`SatTotals::cell_total`].
+//! Cell sat is summed from the grid (free Air vs pore). Humidity is the
+//! atmosphere store — include it via [`tracked_totals`] when auditing a
+//! full atmosphere step. Cloud parcels are a visual echo and are not
+//! counted. The default physics [`tick`](crate::tick) only moves cell sat,
+//! so the in-tick debug check compares [`SatTotals::cell_total`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -64,7 +65,7 @@ pub struct SatTotals {
     pub cell_total: i64,
     /// [`Humidity::total_mass`] (same sat units as f32).
     pub humidity: f32,
-    /// [`CloudStore::total_mass`].
+    /// Always 0 in [`tracked_totals`] — parcels echo humidity.
     pub clouds: f32,
 }
 
@@ -124,11 +125,12 @@ pub fn sat_totals(world: &World) -> SatTotals {
     }
 }
 
-/// [`sat_totals`] plus humidity and cloud parcel mass.
-pub fn tracked_totals(world: &World, humidity: &Humidity, clouds: &CloudStore) -> SatTotals {
+/// [`sat_totals`] plus humidity (parcels are not a second water store).
+pub fn tracked_totals(world: &World, humidity: &Humidity, _clouds: &CloudStore) -> SatTotals {
     let mut t = sat_totals(world);
     t.humidity = humidity.total_mass();
-    t.clouds = clouds.total_mass();
+    // Parcels are a visual echo of humidity — do not double-count.
+    t.clouds = 0.0;
     t
 }
 

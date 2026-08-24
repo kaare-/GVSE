@@ -361,6 +361,9 @@ impl TerrainEditor {
                 world.set_cell(gx + dx, gy + dy, cell);
             }
         }
+        if matches!(self.tool, TerrainTool::Erase) {
+            wk_voxel::wake_floating_competent(world);
+        }
     }
 
     pub fn draw(&self) {

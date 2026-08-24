@@ -271,6 +271,7 @@ fn run_logged(ticks: u64, sample_period: u64, label: &str) -> SimLog {
             None,
             None,
             Some(&store.fungi),
+            None,
         );
         log.record_geotech(tick_no, fail);
         step_carbon_budget(&mut carbon, &mut world, &carbon_cfg);

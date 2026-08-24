@@ -4,7 +4,7 @@
 //!
 //! Grain fall, repose, cold avalanche, and flow erosion.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::Mutex;
 
 use serde::{Deserialize, Serialize};
@@ -65,6 +65,12 @@ pub const GRAIN_SETTLE_PASSES: u32 = 1024;
 /// bank fidget) and dominate the physics tick on Super-Server.
 pub const GRAIN_SETTLE_PASSES_SHALLOW: u32 = 8;
 
+/// FPS-path deep settle cap. Organic+water shores used to trip the full
+/// ×1024 freefall budget every tick (Super-Server → ~1 FPS) via buoyancy
+/// fidget and grounded-column walks. Full-feel / unit tests still use
+/// [`GRAIN_SETTLE_PASSES`].
+pub const GRAIN_SETTLE_PASSES_FPS_DEEP: u32 = 64;
+
 /// True when any cell in `active` is mid-air over **empty/haze** Air
 /// (F3 sky paint / real freefall).
 ///
@@ -72,6 +78,11 @@ pub const GRAIN_SETTLE_PASSES_SHALLOW: u32 = 8;
 /// sink through any sat, and shores under closed-loop rain would otherwise
 /// force deep ×1024 settle every tick (Super-Server: physics tick ~25 ms
 /// while a no-rain mirror showed ~12 ms).
+///
+/// Buoyant litter on **full** standing water is treated as seated here
+/// without a 512-deep grounded walk — this gate only chooses settle depth.
+/// Mid-air full-sat blobs are rare after condensation fixes; rise+fall
+/// still use the grounded check.
 pub fn active_has_unsupported_grain(world: &World, active: &[ActiveChunk]) -> bool {
     for ac in active {
         let Some(chunk) = world.chunks.get(&ac.coord) else {
@@ -98,10 +109,10 @@ pub fn active_has_unsupported_grain(world: &World, active: &[ActiveChunk]) -> bo
                 if below.sat.0 > GRAIN_REPOSE_HAZE_MAX {
                     continue;
                 }
-                // Buoyant litter on a grounded float column is seated.
+                // Buoyant litter on full standing water — seated for depth gate.
                 if falls_through_empty_air(cell.material)
                     && !cell.is_waterlogged_organic()
-                    && floats_on_air_seat_world(world, below, gx, gy - 1)
+                    && below.sat.is_full()
                 {
                     continue;
                 }
@@ -346,84 +357,78 @@ fn raft_rests_on_float_water_ptrs(
 }
 
 /// Max punch swaps per call — tall piles on thick rafts need several
-/// grain↔litter steps before cargo reaches the water seat.
-const FLOAT_PUNCH_MAX: u32 = 64;
+/// grain↔litter steps before cargo reaches the water seat. Kept modest
+/// so Organic floods do not rescan every loose chunk ×64 times.
+const FLOAT_PUNCH_MAX: u32 = 16;
 
 /// Dense grains cannot ride a floating Organic / Snow / Ice raft.
 ///
-/// Scans the whole grid (like [`rise_buoyant_litter`]) so punch still
-/// runs when only the pile was dirtied and the water seat is quiet.
-/// Each pass swaps a grain with the litter cell immediately below it
-/// when that litter column rests on a grounded lake; settle/tick then
-/// sinks the grain through water.
+/// Collects punch candidates once, then applies up to [`FLOAT_PUNCH_MAX`]
+/// swaps (re-validating each). Settle/tick then sinks the grain through water.
 pub fn punch_through_floating_rafts(world: &mut World) -> u32 {
+    let mut swaps: Vec<(i32, i32)> = Vec::new();
+    let coords = loose_chunk_coords(world);
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(lx, ly);
+                if !is_grain(cell.material) {
+                    continue;
+                }
+                let gx = x0 + lx as i32;
+                let gy = y0 + ly as i32;
+                let Some(below) = world.get_cell(gx, gy - 1) else {
+                    continue;
+                };
+                if !falls_through_empty_air(below.material) {
+                    continue;
+                }
+                if !raft_rests_on_float_water_world(world, gx, gy - 1) {
+                    continue;
+                }
+                swaps.push((gx, gy));
+            }
+        }
+    }
+    if swaps.is_empty() {
+        return 0;
+    }
+    // Bottom grains first so Soil under LooseRock punches before rock.
+    swaps.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
     let mut total = 0u32;
-    for _ in 0..FLOAT_PUNCH_MAX {
-        let mut swaps: Vec<(i32, i32)> = Vec::new();
-        let coords = loose_chunk_coords(world);
-        for coord in coords {
-            let x0 = coord.cx * CHUNK_CELLS_W as i32;
-            let y0 = coord.cy * CHUNK_CELLS_H as i32;
-            let Some(chunk) = world.chunks.get(&coord) else {
-                continue;
-            };
-            for ly in 0..CHUNK_CELLS_H {
-                for lx in 0..CHUNK_CELLS_W {
-                    let cell = chunk.get(lx, ly);
-                    if !is_grain(cell.material) {
-                        continue;
-                    }
-                    let gx = x0 + lx as i32;
-                    let gy = y0 + ly as i32;
-                    let Some(below) = world.get_cell(gx, gy - 1) else {
-                        continue;
-                    };
-                    if !falls_through_empty_air(below.material) {
-                        continue;
-                    }
-                    if !raft_rests_on_float_water_world(world, gx, gy - 1) {
-                        continue;
-                    }
-                    swaps.push((gx, gy));
-                }
-            }
-        }
-        if swaps.is_empty() {
+    for (gx, gy) in swaps {
+        if total >= FLOAT_PUNCH_MAX {
             break;
         }
-        // Bottom grains first so Soil under LooseRock punches before rock.
-        swaps.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
-        let mut moved = 0u32;
-        for (gx, gy) in swaps {
-            let Some(grain) = world.get_cell(gx, gy) else {
-                continue;
-            };
-            if !is_grain(grain.material) {
-                continue;
-            }
-            let Some(litter) = world.get_cell(gx, gy - 1) else {
-                continue;
-            };
-            if !falls_through_empty_air(litter.material) {
-                continue;
-            }
-            if !raft_rests_on_float_water_world(world, gx, gy - 1) {
-                continue;
-            }
-            // Grain ↔ litter — cream + strain shares ride with each host.
-            swap_cells_preserving_mycelium(world, gx, gy - 1, gx, gy);
-            // Keep the water seat awake so the next fall pass sinks cargo.
-            if let Some(seat) = world.get_cell(gx, gy - 2) {
-                if seat.material == MaterialId::Air {
-                    world.touch_dirty(gx, gy - 2);
-                }
-            }
-            moved += 1;
+        let Some(grain) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        if !is_grain(grain.material) {
+            continue;
         }
-        total += moved;
-        if moved == 0 {
-            break;
+        let Some(litter) = world.get_cell(gx, gy - 1) else {
+            continue;
+        };
+        if !falls_through_empty_air(litter.material) {
+            continue;
         }
+        if !raft_rests_on_float_water_world(world, gx, gy - 1) {
+            continue;
+        }
+        // Grain ↔ litter — cream + strain shares ride with each host.
+        swap_cells_preserving_mycelium(world, gx, gy - 1, gx, gy);
+        // Keep the water seat awake so the next fall pass sinks cargo.
+        if let Some(seat) = world.get_cell(gx, gy - 2) {
+            if seat.material == MaterialId::Air {
+                world.touch_dirty(gx, gy - 2);
+            }
+        }
+        total = total.saturating_add(1);
     }
     total
 }
@@ -706,6 +711,21 @@ pub fn settle_loose_grains_regions(
     rooted: Option<&HashSet<(i32, i32)>>,
     max_passes: u32,
 ) {
+    settle_loose_grains_regions_ex(world, initial, rooted, max_passes, true);
+}
+
+/// Like [`settle_loose_grains_regions`] with optional in-fall buoyancy.
+///
+/// After [`rise_and_soak_buoyant_litter`], tick settles with
+/// `allow_buoyancy = false` so Organic does not one-cell bob through
+/// wet Air for dozens of passes (FPS spike).
+pub fn settle_loose_grains_regions_ex(
+    world: &mut World,
+    initial: &[ActiveChunk],
+    rooted: Option<&HashSet<(i32, i32)>>,
+    max_passes: u32,
+    allow_buoyancy: bool,
+) {
     let mut cur: Vec<ActiveChunk> = initial.to_vec();
     for _ in 0..max_passes {
         if cur.is_empty() {
@@ -718,7 +738,7 @@ pub fn settle_loose_grains_regions(
         // is outside this colour's ptr map.
         for pass in &partition_checkerboard(&cur) {
             if !pass.is_empty() {
-                moved += apply_grain_fall_regions(world, pass);
+                moved += apply_grain_fall_regions_ex(world, pass, allow_buoyancy);
             }
         }
         let after_fall = plan_active(world);
@@ -746,6 +766,15 @@ pub fn settle_loose_grains_regions(
 ///
 /// Returns how many Air↔grain swaps this pass performed.
 pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u32 {
+    apply_grain_fall_regions_ex(world, active, true)
+}
+
+/// [`apply_grain_fall_regions`] with optional buoyancy pull.
+pub fn apply_grain_fall_regions_ex(
+    world: &mut World,
+    active: &[ActiveChunk],
+    allow_buoyancy: bool,
+) -> u32 {
     let moves = std::sync::atomic::AtomicU32::new(0);
     // Parallel cell writes can't touch `World::mycelium_strains`; replay
     // share/lineage swaps after the pass so cream stays color-keyed.
@@ -805,12 +834,12 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                         }
                         continue;
                     }
-                } else {
+                } else if allow_buoyancy {
                     // Buoyancy: only pull litter up through grounded full
                     // water. (Freeboard pop into empty Air was removed —
                     // on an uneven ocean surface it swapped Organic up
                     // then immediately fell back, burning 1024 settle
-                    // passes per tick.)
+                    // passes per tick.) Skipped when rise already ran.
                     let Some(below) =
                         (unsafe { parallel::get_cell(ptrs, wrap_width, gx, gy - 1) })
                     else {
@@ -832,6 +861,8 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
                     share_swaps.lock().unwrap().push((gx, gy, gx, gy - 1));
                     moves.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                     continue;
+                } else {
+                    continue;
                 }
                 unsafe {
                     parallel::set_cell(ptrs, wrap_width, gx, gy, above);
@@ -851,12 +882,33 @@ pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u3
 /// Max pore sat absorbed per tick from the water column under a floating
 /// Organic / Soil raft. Keeps the surface cell full so the raft still floats.
 const FLOAT_SOAK_RATE: u8 = 16;
-/// Max cells a submerged litter grain may rise in one tick.
-const BUOYANT_RISE_MAX: i32 = 16;
+/// Max cells a submerged litter grain may rise in one tick (column teleport).
+const BUOYANT_RISE_MAX: i32 = 48;
+
+/// Chunks that may hold Organic / Snow / Ice (sticky [`Chunk::has_buoyant`]).
+fn buoyant_chunk_coords(world: &World) -> Vec<ChunkCoord> {
+    world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_buoyant)
+        .map(|(&coord, _)| coord)
+        .collect()
+}
 
 fn collect_buoyant_litter(world: &World) -> Vec<(i32, i32)> {
     let mut litter = Vec::new();
-    for coord in loose_chunk_coords(world) {
+    // Prefer buoyant sticky flag — sand-only shores used to scan every
+    // `has_loose` chunk for litter that was never there.
+    let coords = {
+        let buoyant = buoyant_chunk_coords(world);
+        if buoyant.is_empty() {
+            // Legacy worlds / snow before has_buoyant was sticky.
+            loose_chunk_coords(world)
+        } else {
+            buoyant
+        }
+    };
+    for coord in coords {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
         let Some(chunk) = world.chunks.get(&coord) else {
@@ -922,7 +974,9 @@ fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)], waterlog_
         let Some(surface) = world.get_cell(gx, gy - 1) else {
             continue;
         };
-        if !floats_on_air_seat_world(world, surface, gx, gy - 1) {
+        // Cheap float seat: full standing water. Skip 512-deep grounded
+        // walks — rise already seats litter, and mid-air full-sat is rare.
+        if surface.material != MaterialId::Air || !surface.sat.is_full() {
             continue;
         }
         let cap = water_capacity_with(raft.material, &world.hydro);
@@ -960,7 +1014,7 @@ fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)], waterlog_
         // Drain deepest water first so mid-column stays full for longer
         // (float seats remain grounded full-sat at the surface).
         let mut donors: Vec<i32> = Vec::new();
-        for dy in 2..=64 {
+        for dy in 2..=24 {
             let y = gy - dy;
             let Some(donor) = world.get_cell(gx, y) else {
                 break;
@@ -1015,19 +1069,113 @@ fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)], waterlog_
 
 /// Base chance for a 1-cell Organic film to drift one column when
 /// `|wind|·tile_cols ≈ 0.2` (typical mean climate). Tall sails multiply this.
-const RAFT_DRIFT_BASE: f32 = 0.06;
+const RAFT_DRIFT_BASE: f32 = 0.08;
+/// Stream/cascade contribution blended into raft push (with wind).
+/// Organic must visibly ride current instead of crusting the free surface.
+const RAFT_DRIFT_FLOW_BASE: f32 = 0.32;
 /// Extra sail from each Organic cell stacked above the waterline.
 const RAFT_DRIFT_ORGANIC_SAIL: f32 = 0.35;
 /// Extra sail per cell of living plant height above the raft top.
 const RAFT_DRIFT_PLANT_SAIL: f32 = 0.55;
 
+#[inline]
+fn raft_air_sat(world: &World, gx: i32, gy: i32) -> i16 {
+    match world.get_cell(gx, gy) {
+        Some(c) if c.material == MaterialId::Air => c.sat.0 as i16,
+        _ => 0,
+    }
+}
+
+/// Local stream push under a floating raft: `(dir ±1, strength)`.
+///
+/// Combines sat-gradient heuristics with real [`flow_bias`] under the
+/// mat so Organic rides the same current the water uses (shore crusts
+/// used to ignore cascade lips and look glued).
+fn raft_stream_push(world: &World, gx: i32, waterline_y: i32) -> (i32, f32) {
+    let mut score_pos = 0.0f32;
+    let mut score_neg = 0.0f32;
+
+    // Primary: CA flow bias on the water seat(s) under / at the free surface.
+    for y in [waterline_y, waterline_y - 1] {
+        let Some(seat) = world.get_cell(gx, y) else {
+            continue;
+        };
+        if seat.material != MaterialId::Air || seat.sat.0 < 180 {
+            continue;
+        }
+        if let Some(dx) = flow_bias(world, gx, y, seat.sat) {
+            let w = if y == waterline_y { 1.15 } else { 0.85 };
+            if dx > 0 {
+                score_pos += w;
+            } else {
+                score_neg += w;
+            }
+        }
+    }
+
+    let here = raft_air_sat(world, gx, waterline_y)
+        .max(raft_air_sat(world, gx, waterline_y - 1));
+    for dx in [-2_i32, -1, 1, 2] {
+        let nx = world.wrap_x(gx + dx);
+        let falloff = 1.0 / (dx.abs() as f32);
+        let n = raft_air_sat(world, nx, waterline_y)
+            .max(raft_air_sat(world, nx, waterline_y - 1));
+        let mut score = 0.0f32;
+        if here > n.saturating_add(24) {
+            score += 0.45 * falloff;
+        } else if n > here.saturating_add(24) {
+            score -= 0.35 * falloff;
+        }
+        match world.get_cell(nx, waterline_y) {
+            Some(c) if c.material == MaterialId::Air && !c.sat.is_full() => {
+                if here > 64 {
+                    score += 0.55 * falloff;
+                }
+            }
+            None => {
+                score += 0.25 * falloff;
+            }
+            _ => {}
+        }
+        let mut top_n = None;
+        for dy in 0..8 {
+            let y = waterline_y + dy;
+            match world.get_cell(nx, y) {
+                Some(c) if c.material == MaterialId::Air && c.sat.is_full() => {
+                    top_n = Some(y);
+                }
+                Some(c) if c.material == MaterialId::Air => break,
+                _ => break,
+            }
+        }
+        if let Some(tn) = top_n {
+            if waterline_y > tn {
+                score += ((waterline_y - tn) as f32 / 5.0).min(0.5) * falloff;
+            }
+        } else if here > 64 {
+            score += 0.40 * falloff;
+        }
+        if dx > 0 {
+            score_pos += score.max(0.0);
+            score_neg += (-score).max(0.0);
+        } else {
+            score_neg += score.max(0.0);
+            score_pos += (-score).max(0.0);
+        }
+    }
+    let dir = if score_pos >= score_neg { 1 } else { -1 };
+    let strength = score_pos.max(score_neg).clamp(0.0, 1.65);
+    (dir, strength)
+}
+
 /// Cheap float-seat check for raft drift (no 512-deep grounded walk).
 ///
 /// Full [`floats_on_air_seat_world`] is correct for fall/buoyancy but too
-/// expensive to re-run on every Organic cell every tick. Drift only needs
-/// "full standing water immediately below."
+/// expensive to re-run on every Organic cell every tick. Drift accepts
+/// near-full standing water so mats can follow stream sat gradients (strict
+/// `is_full()` left them glued on quiet rivers).
 pub(crate) fn drift_float_seat(seat: Cell) -> bool {
-    seat.material == MaterialId::Air && seat.sat.is_full()
+    seat.material == MaterialId::Air && seat.sat.0 >= 200
 }
 
 fn drift_dest_clear(world: &World, nx: i32, bottom_y: i32, height: i32) -> bool {
@@ -1051,6 +1199,43 @@ fn drift_dest_clear(world: &World, nx: i32, bottom_y: i32, height: i32) -> bool 
     true
 }
 
+/// Thin unbound film may wash onto a cascade lip / empty freeboard — then
+/// fall or scour carries it downstream instead of sealing a shore ring.
+fn drift_dest_wash_lip(world: &World, nx: i32, bottom_y: i32, height: i32) -> bool {
+    if height > 1 {
+        return false;
+    }
+    let Some(dest_seat) = world.get_cell(nx, bottom_y - 1) else {
+        return false;
+    };
+    // Still need Air below (not solid bank). Float seats use the normal path.
+    if dest_seat.material != MaterialId::Air || drift_float_seat(dest_seat) {
+        return false;
+    }
+    let Some(dest) = world.get_cell(nx, bottom_y) else {
+        return false;
+    };
+    dest.material == MaterialId::Air && !dest.sat.is_full()
+}
+
+fn drift_dest_ok(world: &World, nx: i32, bottom_y: i32, height: i32, allow_lip: bool) -> bool {
+    if drift_dest_clear(world, nx, bottom_y, height) {
+        return true;
+    }
+    allow_lip && drift_dest_wash_lip(world, nx, bottom_y, height)
+}
+
+/// Blend local stream push with climate wind for one raft column.
+fn raft_column_push(world: &World, gx: i32, waterline_y: i32, wind_push: f32) -> f32 {
+    let (dir, strength) = raft_stream_push(world, gx, waterline_y);
+    let flow_push = dir as f32 * strength;
+    if strength > 0.12 && flow_push.abs() > wind_push.abs() * 0.45 {
+        flow_push + wind_push * 0.20
+    } else {
+        wind_push * 0.90 + flow_push * 0.95
+    }
+}
+
 fn drift_move_column(world: &mut World, gx: i32, bottom_y: i32, height: i32, nx: i32) {
     for dy in (0..height).rev() {
         let y = bottom_y + dy;
@@ -1061,18 +1246,73 @@ fn drift_move_column(world: &mut World, gx: i32, bottom_y: i32, height: i32, nx:
     }
 }
 
+/// One floating Organic column at `gx`, if present: `(bottom_y, height)`.
+pub fn floating_organic_column_at(world: &World, gx: i32) -> Option<(i32, i32)> {
+    let gx = world.wrap_x(gx);
+    let cx = gx.div_euclid(CHUNK_CELLS_W as i32);
+    let lx = gx.rem_euclid(CHUNK_CELLS_W as i32) as usize;
+    let mut best: Option<(i32, i32)> = None;
+    for &coord in world.chunks.keys() {
+        if coord.cx != cx {
+            continue;
+        }
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        if !chunk.has_organic {
+            continue;
+        }
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        for ly in 0..CHUNK_CELLS_H {
+            let cell = chunk.get(lx, ly);
+            if cell.material != MaterialId::Organic || cell.is_waterlogged_organic() {
+                continue;
+            }
+            let gy = y0 + ly as i32;
+            if let Some(below_org) = world.get_cell(gx, gy - 1) {
+                if below_org.material == MaterialId::Organic {
+                    continue;
+                }
+            }
+            let Some(seat) = world.get_cell(gx, gy - 1) else {
+                continue;
+            };
+            if !drift_float_seat(seat) {
+                continue;
+            }
+            let mut height = 1i32;
+            while let Some(above) = world.get_cell(gx, gy + height) {
+                if above.material != MaterialId::Organic {
+                    break;
+                }
+                height += 1;
+                if height > 48 {
+                    break;
+                }
+            }
+            best = Some((gy, height));
+        }
+    }
+    best
+}
+
 /// Floating Organic columns: `gx → (waterline_y, stack_height)`.
+///
+/// Skips chunks that never held Organic (`has_organic`).
 pub fn collect_floating_organic_columns(
     world: &World,
 ) -> std::collections::HashMap<i32, (i32, i32)> {
     let mut columns: std::collections::HashMap<i32, (i32, i32)> =
         std::collections::HashMap::new();
     for &coord in world.chunks.keys() {
-        let x0 = coord.cx * CHUNK_CELLS_W as i32;
-        let y0 = coord.cy * CHUNK_CELLS_H as i32;
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
+        if !chunk.has_organic {
+            continue;
+        }
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
         for ly in 0..CHUNK_CELLS_H {
             for lx in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(lx, ly);
@@ -1106,6 +1346,37 @@ pub fn collect_floating_organic_columns(
                     }
                 }
                 columns.insert(gx, (gy, height));
+            }
+        }
+    }
+    columns
+}
+
+/// Float columns near plant crowns (`xs` ± `pad`) — organism tick path.
+pub fn collect_floating_organic_columns_near(
+    world: &World,
+    xs: &[i32],
+    pad: i32,
+) -> std::collections::HashMap<i32, (i32, i32)> {
+    let mut columns: std::collections::HashMap<i32, (i32, i32)> =
+        std::collections::HashMap::new();
+    if xs.is_empty() {
+        return columns;
+    }
+    // No Organic anywhere → free.
+    if !world.chunks.values().any(|c| c.has_organic) {
+        return columns;
+    }
+    let pad = pad.max(0);
+    let mut seen = std::collections::HashSet::new();
+    for &x in xs {
+        for dx in -pad..=pad {
+            let gx = world.wrap_x(x + dx);
+            if !seen.insert(gx) {
+                continue;
+            }
+            if let Some(col) = floating_organic_column_at(world, gx) {
+                columns.insert(gx, col);
             }
         }
     }
@@ -1191,15 +1462,12 @@ pub fn drift_floating_organic_columns_cfg(
     root_bound_columns: Option<&HashSet<i32>>,
     grain: &GrainConfig,
 ) -> (u32, i32, HashSet<i32>) {
-    if wind_vx_tiles.abs() < 1e-5 {
+    if columns.is_empty() {
         return (0, 0, HashSet::new());
     }
-    let sign: i32 = if wind_vx_tiles >= 0.0 { 1 } else { -1 };
-    let speed = wind_vx_tiles.abs() * tile_cols.max(1) as f32;
 
-    if columns.is_empty() {
-        return (0, sign, HashSet::new());
-    }
+    let wind = wind_vx_tiles * tile_cols.max(1) as f32;
+    let wind_push = wind.clamp(-1.5, 1.5);
 
     let bind_radius = grain.raft_root_bind_radius.max(0);
 
@@ -1280,11 +1548,33 @@ pub fn drift_floating_organic_columns_cfg(
 
     let mut moved_cols: HashSet<i32> = HashSet::new();
     let mut moved = 0u32;
+    // Report dominant sign for HUD / tests (mean of successful moves).
+    let mut sign_acc = 0i32;
 
     // 1) Root-bound rafts — one roll, whole component moves or none.
+    //    Push is local to the component (still-lake mats must not dilute
+    //    river current into a global near-zero mean).
     let mut comp_list: Vec<Vec<i32>> = components.into_values().collect();
     for comp in &mut comp_list {
         comp.sort_unstable();
+        let mut push_sum = 0.0f32;
+        let mut flow_abs = 0.0f32;
+        for &gx in comp.iter() {
+            let Some(&(bottom, _)) = columns.get(&gx) else {
+                continue;
+            };
+            let p = raft_column_push(world, gx, bottom - 1, wind_push);
+            push_sum += p;
+            flow_abs += p.abs();
+        }
+        let n = comp.len().max(1) as f32;
+        let push = push_sum / n;
+        if push.abs() < 1e-4 {
+            continue;
+        }
+        let sign: i32 = if push >= 0.0 { 1 } else { -1 };
+        let speed = push.abs();
+        let flow = (flow_abs / n).min(1.45);
         if sign > 0 {
             comp.reverse(); // downwind first within the mat
         }
@@ -1306,7 +1596,8 @@ pub fn drift_floating_organic_columns_cfg(
         }
         // Bound mats get a small cohesion bonus (harder to strand, easier sail).
         sail += 0.25 * (comp.len() as f32).sqrt();
-        let p = (speed * RAFT_DRIFT_BASE * sail).clamp(0.0, 0.9);
+        let p = (speed * (RAFT_DRIFT_BASE + RAFT_DRIFT_FLOW_BASE * flow.min(1.0)) * sail)
+            .clamp(0.0, 0.9);
         let key = comp.first().copied().unwrap_or(0);
         if hash_prob(world.seed.0, key, world.tick, 0xD61F_4AF7) >= p {
             continue;
@@ -1323,6 +1614,7 @@ pub fn drift_floating_organic_columns_cfg(
             if comp.iter().any(|&c| c == nx) {
                 continue;
             }
+            // Bound mats stay on float seats (no lip wash — keep holdfasts).
             if !drift_dest_clear(world, nx, bottom, height) {
                 all_clear = false;
                 break;
@@ -1343,6 +1635,7 @@ pub fn drift_floating_organic_columns_cfg(
             drift_move_column(world, gx, bottom, height, nx);
             moved_cols.insert(gx);
             moved += 1;
+            sign_acc += sign;
         }
         // Second phase: columns whose dest was in-component (convoy).
         // Process again downwind→upwind into seats freed above.
@@ -1360,25 +1653,46 @@ pub fn drift_floating_organic_columns_cfg(
             drift_move_column(world, gx, bottom, height, nx);
             moved_cols.insert(gx);
             moved += 1;
+            sign_acc += sign;
         }
     }
 
-    // 2) Loose (unbound) litter — may blow apart column by column.
+    // 2) Loose (unbound) litter — may blow apart / wash over lips column by column.
     let mut loose: Vec<i32> = columns
         .keys()
         .copied()
         .filter(|x| !bound.contains(x))
         .collect();
     loose.sort_unstable();
-    if sign > 0 {
-        loose.reverse();
-    }
+    // Prefer processing +push first so convoy into freed seats works; when
+    // signs differ we sort by |x| after computing push per column.
+    loose.sort_by_key(|&gx| {
+        let Some(&(bottom, _)) = columns.get(&gx) else {
+            return 0i32;
+        };
+        let push = raft_column_push(world, gx, bottom - 1, wind_push);
+        // Negative push → process low x first; positive → high x first.
+        if push >= 0.0 {
+            -gx
+        } else {
+            gx
+        }
+    });
     for gx in loose {
         let Some(&(bottom_y, height)) = columns.get(&gx) else {
             continue;
         };
+        let push = raft_column_push(world, gx, bottom_y - 1, wind_push);
+        if push.abs() < 1e-4 {
+            continue;
+        }
+        let sign: i32 = if push >= 0.0 { 1 } else { -1 };
+        let speed = push.abs();
+        let (_, flow_strength) = raft_stream_push(world, gx, bottom_y - 1);
         let nx = world.wrap_x(gx + sign);
-        if !drift_dest_clear(world, nx, bottom_y, height) {
+        // Thin unbound film may wash onto cascade lips when current is strong.
+        let allow_lip = height <= 1 && flow_strength >= 0.15;
+        if !drift_dest_ok(world, nx, bottom_y, height, allow_lip) {
             continue;
         }
         let plant_h = plant_tops
@@ -1388,16 +1702,107 @@ pub fn drift_floating_organic_columns_cfg(
         let sail = 1.0
             + RAFT_DRIFT_ORGANIC_SAIL * (height - 1) as f32
             + RAFT_DRIFT_PLANT_SAIL * plant_h as f32;
-        let p = (speed * RAFT_DRIFT_BASE * sail).clamp(0.0, 0.85);
-        if hash_prob(world.seed.0, gx, world.tick, 0xD61F_1005) >= p {
+        // Unbound film in a real current always rides it — probabilistic
+        // drift left mats damming lakes and combing the free surface.
+        let unbound_current = height <= 2
+            && flow_strength >= 0.20
+            && column_max_mycelium(world, gx, bottom_y, height) < MYCELIUM_RAFT_BIND_MIN;
+        let p = if unbound_current {
+            1.0
+        } else {
+            (speed
+                * (RAFT_DRIFT_BASE + RAFT_DRIFT_FLOW_BASE * flow_strength.min(1.0))
+                * sail)
+                .clamp(0.0, 0.90)
+        };
+        if !unbound_current && hash_prob(world.seed.0, gx, world.tick, 0xD61F_1005) >= p {
             continue;
         }
         drift_move_column(world, gx, bottom_y, height, nx);
         moved_cols.insert(gx);
         moved += 1;
+        sign_acc += sign;
     }
 
-    (moved, sign, moved_cols)
+    let report_sign = if sign_acc >= 0 { 1 } else { -1 };
+    (moved, report_sign, moved_cols)
+}
+
+/// Current shoves thin unbound floating Organic blocking a cascade /
+/// head-drop so mats do not dam lakes into comb teeth.
+///
+/// Call after wind/stream drift. Deterministic: if water beside the mat
+/// has [`flow_bias`] into/along the film and the down-current seat is
+/// clear (or a lip), the film moves one column.
+pub fn shove_floating_organic_with_current(world: &mut World) -> u32 {
+    let columns = collect_floating_organic_columns(world);
+    if columns.is_empty() {
+        return 0;
+    }
+    let mut keys: Vec<i32> = columns.keys().copied().collect();
+    keys.sort_unstable();
+    let mut moved = 0u32;
+    // Snapshot dest occupancy so two mats don't swap into each other.
+    let mut claimed: HashSet<i32> = HashSet::new();
+    for gx in keys {
+        let Some(&(bottom, height)) = columns.get(&gx) else {
+            continue;
+        };
+        if height > 2 {
+            continue;
+        }
+        if column_max_mycelium(world, gx, bottom, height) >= MYCELIUM_RAFT_BIND_MIN {
+            continue;
+        }
+        let waterline = bottom - 1;
+        let mut sign = 0i32;
+        // Bias under the mat, then from wet neighbours pointing at us.
+        for y in [waterline, waterline - 1] {
+            let Some(seat) = world.get_cell(gx, y) else {
+                continue;
+            };
+            if seat.material != MaterialId::Air || seat.sat.0 < 180 {
+                continue;
+            }
+            if let Some(dx) = flow_bias(world, gx, y, seat.sat) {
+                sign = dx;
+                break;
+            }
+        }
+        if sign == 0 {
+            for dx in [-1_i32, 1] {
+                let nx = world.wrap_x(gx + dx);
+                let Some(n) = world.get_cell(nx, waterline) else {
+                    continue;
+                };
+                if n.material != MaterialId::Air || n.sat.0 < 180 {
+                    continue;
+                }
+                if let Some(bdx) = flow_bias(world, nx, waterline, n.sat) {
+                    // Neighbour current toward the mat or continuing past it.
+                    if bdx == -dx || bdx == dx {
+                        sign = bdx;
+                        break;
+                    }
+                }
+            }
+        }
+        if sign == 0 {
+            continue;
+        }
+        let nx = world.wrap_x(gx + sign);
+        if claimed.contains(&nx) || columns.contains_key(&nx) {
+            continue;
+        }
+        let allow_lip = height <= 1;
+        if !drift_dest_ok(world, nx, bottom, height, allow_lip) {
+            continue;
+        }
+        drift_move_column(world, gx, bottom, height, nx);
+        claimed.insert(nx);
+        moved = moved.saturating_add(1);
+    }
+    moved
 }
 
 /// Lift submerged Snow/Ice/Organic through grounded full water, and pop
@@ -1414,34 +1819,51 @@ fn rise_buoyant_litter_list(world: &mut World, litter: &mut [(i32, i32)]) {
     if litter.is_empty() {
         return;
     }
+    // Memoize grounded lake seats for this rise pass (flooded Organic used
+    // to re-walk ≤512 cells per step × rise max).
+    let mut grounded: HashMap<(i32, i32), bool> = HashMap::new();
+    let mut float_seat = |world: &World, seat: Cell, gx: i32, gy: i32| -> bool {
+        if seat.material != MaterialId::Air || !seat.sat.is_full() {
+            return false;
+        }
+        if let Some(&g) = grounded.get(&(gx, gy)) {
+            return g;
+        }
+        let g = water_column_grounded_world(world, gx, gy);
+        grounded.insert((gx, gy), g);
+        g
+    };
     // Bottom-up so lower cells rise before upper ones in the same column.
     litter.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
     for entry in litter.iter_mut() {
         let gx = entry.0;
-        let mut gy = entry.1;
-        for _ in 0..BUOYANT_RISE_MAX {
-            let Some(here) = world.get_cell(gx, gy) else {
-                break;
-            };
-            if !falls_through_empty_air(here.material) {
-                break;
-            }
-            if here.is_waterlogged_organic() {
-                break;
-            }
-            let Some(above) = world.get_cell(gx, gy + 1) else {
+        let gy0 = entry.1;
+        let Some(here) = world.get_cell(gx, gy0) else {
+            continue;
+        };
+        if !falls_through_empty_air(here.material) || here.is_waterlogged_organic() {
+            continue;
+        }
+        // Find freeboard in one pass, then teleport (endpoint swap) instead
+        // of bubbling one cell at a time through settle.
+        let mut top = gy0;
+        for step in 1..=BUOYANT_RISE_MAX {
+            let y = gy0 + step;
+            let Some(above) = world.get_cell(gx, y) else {
                 break;
             };
             if above.material != MaterialId::Air {
                 break;
             }
-            if !floats_on_air_seat_world(world, above, gx, gy + 1) {
+            if !float_seat(world, above, gx, y) {
                 break;
             }
-            swap_cells_preserving_mycelium(world, gx, gy, gx, gy + 1);
-            gy += 1;
+            top = y;
         }
-        entry.1 = gy;
+        if top > gy0 {
+            swap_cells_preserving_mycelium(world, gx, gy0, gx, top);
+            entry.1 = top;
+        }
     }
 }
 
@@ -1625,7 +2047,13 @@ fn apply_repose_pass(
                         max_step = max_step.saturating_add(ROOT_REPOSE_STEP_BONUS);
                     }
                     // Cream mycelium felts Organic — same 0..=255 intensity.
-                    max_step = max_step.saturating_add(mycelium_repose_bonus(src));
+                    // Wash-wet Organic (standing water neighbour) sheds the
+                    // felt so mats cannot hold vertical dams in a lake.
+                    if !(src.material == MaterialId::Organic
+                        && organic_wash_wet_ptrs(ptrs, wrap_width, sx, sy))
+                    {
+                        max_step = max_step.saturating_add(mycelium_repose_bonus(src));
+                    }
                     let gap = repose_gap_mode(src, surface_organic);
                     if !diag_drop_exceeds(ptrs, wrap_width, gx, sy, max_step, gap) {
                         continue;
@@ -1683,7 +2111,11 @@ fn apply_repose_pass(
                         if rooted.is_some_and(|r| r.contains(&(sx, sy))) {
                             step = step.saturating_add(ROOT_REPOSE_STEP_BONUS);
                         }
-                        step = step.saturating_add(mycelium_repose_bonus(src));
+                        if !(src.material == MaterialId::Organic
+                            && organic_wash_wet_ptrs(ptrs, wrap_width, sx, sy))
+                        {
+                            step = step.saturating_add(mycelium_repose_bonus(src));
+                        }
                         // Rooted sand / plastic clay can hold short stairs —
                         // don't walk off. Colonized Organic likewise.
                         if step > 0 {
@@ -1972,6 +2404,25 @@ fn repose_gap_mode(src: Cell, surface_organic: bool) -> ReposeGapMode {
     }
 }
 
+/// True when Organic sits next to standing water — mycelium felt must
+/// not hold a vertical dam; water washes the mat loose.
+fn organic_wash_wet_ptrs(
+    ptrs: &parallel::ChunkPtrMap,
+    wrap_width: Option<i32>,
+    gx: i32,
+    gy: i32,
+) -> bool {
+    for (dx, dy) in [(0, -1), (-1, 0), (1, 0), (0, 1), (-1, -1), (1, -1)] {
+        let Some(n) = (unsafe { parallel::get_cell(ptrs, wrap_width, gx + dx, gy + dy) }) else {
+            continue;
+        };
+        if n.material == MaterialId::Air && n.sat.0 >= GRAIN_REPOSE_LAKE_MIN {
+            return true;
+        }
+    }
+    false
+}
+
 /// True when Organic is still a surface mat / beach litter (not under a
 /// water column). Waterlogged cells and piles with standing water above
 /// count as settled ooze for underwater repose.
@@ -2177,8 +2628,9 @@ impl Default for GrainConfig {
 ///
 /// Dense grains use [`is_flow_erodible`]. Grounded or waterlogged Organic
 /// also scours (beach litter / sunk mats) so current can drag compost
-/// downhill like sand. Floating raft Organic is skipped — wind drift
-/// owns surface mats; chewing them would dissolve plant holdfasts.
+/// downhill like sand. Thick / mycelium-bound floating rafts stay
+/// wind-owned (holdfasts). Thin unbound floating film may scour under
+/// cascade so shore rings do not seal water into sticky bubbles.
 fn cell_is_flow_erodible(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
     if is_flow_erodible(cell.material) {
         return true;
@@ -2190,8 +2642,24 @@ fn cell_is_flow_erodible(world: &World, gx: i32, gy: i32, cell: Cell) -> bool {
     if MaterialRegistry::erosion_rank(MaterialId::Organic) >= 150 {
         return false;
     }
-    // Floating (or stacked on a raft) — leave for wind / soak / waterlog.
-    if raft_rests_on_float_water_world(world, gx, gy) {
+    if !raft_rests_on_float_water_world(world, gx, gy) {
+        // Grounded beach / waterlogged bedload.
+        return true;
+    }
+    // Floating: only thin unbound surface film is scourable.
+    if cell.mycelium() >= MYCELIUM_RAFT_BIND_MIN {
+        return false;
+    }
+    if matches!(
+        world.get_cell(gx, gy + 1),
+        Some(a) if a.material == MaterialId::Organic
+    ) {
+        return false;
+    }
+    if matches!(
+        world.get_cell(gx, gy - 1),
+        Some(b) if b.material == MaterialId::Organic
+    ) {
         return false;
     }
     true
@@ -2465,6 +2933,10 @@ fn maybe_queue_erosion(
     if grain.sat.0 >= 40 {
         sus *= 1.4; // wet grains loosen (column sim saturation collapse)
     }
+    if grain.material == MaterialId::Organic {
+        // Dead stems / litter should leave a current instead of damming it.
+        sus *= 2.2;
+    }
     if rooted.is_some_and(|r| r.contains(&(ex, ey))) {
         sus /= ROOT_EROSION_BIND;
     }
@@ -2520,7 +2992,7 @@ fn flow_bias(world: &World, gx: i32, gy: i32, sat: Sat) -> Option<i32> {
             Some(b) if b.material != MaterialId::Air => {
                 // Lower neighbor column surface (thin-sheet downhill).
                 if n.sat.is_empty() {
-                    score += 0.35;
+                    score += 0.40;
                 }
             }
             _ => {}
@@ -2530,7 +3002,7 @@ fn flow_bias(world: &World, gx: i32, gy: i32, sat: Sat) -> Option<i32> {
             best_dx = dx;
         }
     }
-    if best_score >= 0.5 {
+    if best_score >= 0.34 {
         Some(best_dx)
     } else {
         None
