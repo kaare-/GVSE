@@ -223,6 +223,32 @@ which A/Bs `enable_competent_fall` over a real `tick_with_life` loop.
 - **Thin fracture is gated on support** — running it on seated strata shredded
   thousands of cells of untouched terrain into rubble.
 
+### Rock body identity (why rocks stop gluing)
+
+Flood-fill used to merge any two competent cells sharing material and mobility
+class, so two rocks that touched became **one rigid body** — a rolling boulder
+welded itself to every rock it brushed past.
+
+Identity lives in a 4-bit **body tag** in the spare `CellFlags` nibble
+([`Cell::rock_body_tag`]):
+
+| Tag | Meaning |
+|-----|---------|
+| `0` | Deliberately joined rock: worldgen strata, editor paint, future geological compaction. Merges freely, so continuous terrain acts as one mass. |
+| `1..=15` | A distinct detached body. Different tags never merge. |
+
+Four bits suffice because the tag only has to separate bodies that are
+*adjacent*; `pick_body_tag` picks one no touching rock is using. `MOBILE_ROCK`
+remains the "has been detached" marker but no longer implies identity.
+
+Two payoffs: contact welding is impossible by construction, and a tagged cluster
+is already exactly one body, so the expensive morphological weld-split only runs
+on tag-0 strata.
+
+Guarded by `touching_loose_rocks_with_different_tags_stay_separate`,
+`rolling_rock_does_not_glue_to_rock_it_passes`, and
+`painted_and_worldgen_rock_still_forms_one_mass`.
+
 ### Water displacement (`crate::water_displace`)
 
 Free water is `sat` on `Air` cells, so **any** rule that writes a solid over an
