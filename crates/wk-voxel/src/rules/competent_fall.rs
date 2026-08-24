@@ -121,6 +121,38 @@ fn body_passable_at(_world: &World, _gx: i32, _gy: i32, cell: &Cell) -> bool {
   cell.material == MaterialId::Air
 }
 
+/// Standing-water floor for body drag (matches `GRAIN_REPOSE_LAKE_MIN`).
+const WATER_DRAG_MIN_SAT: u8 = 200;
+/// Cells a **submerged** body may sink per pass.
+///
+/// Water is not vacuum. Passability ignores `sat`, so without this a
+/// boulder plunged a whole lake column per pass at dry free-fall speed,
+/// and because dense grains treat standing water as an avalanchable seat
+/// ([`super::grain::GRAIN_REPOSE_LAKE_MIN`]) the bed under it kept
+/// sliding — so it also kept re-falling and outran the same rock on a dry
+/// slope of identical geometry.
+const WATER_SINK_MAX_DROP: i32 = 2;
+
+/// True when this body is in contact with standing water (drag applies).
+///
+/// Any near-full wet Air face counts. A "majority of the top face is wet"
+/// test missed the common case: a boulder half-embedded in a submerged
+/// slope has sand above most of its top row, yet is plainly underwater.
+fn body_submerged(world: &World, comp: &Component) -> bool {
+  comp.cells.iter().any(|(x, y, _)| {
+    [(0, 1), (1, 0), (-1, 0), (0, -1)].iter().any(|(dx, dy)| {
+      let (nx, ny) = (world.wrap_x(x + dx), y + dy);
+      if comp.set.contains(&(nx, ny)) {
+        return false;
+      }
+      matches!(
+        world.get_cell(nx, ny),
+        Some(c) if c.material == MaterialId::Air && c.sat.0 >= WATER_DRAG_MIN_SAT
+      )
+    })
+  })
+}
+
 #[inline]
 fn passable_for_body_material(material: MaterialId) -> bool {
   material == MaterialId::Air
@@ -2711,8 +2743,12 @@ fn apply_roll(
   cfg: &CompetentFallConfig,
   fall_streak: &mut HashMap<(i32, i32), u32>,
   stats: &mut CompetentFallStats,
+  // Rolls allowed this call (halved for submerged bodies) and the cells
+  // the post-roll settle may sink.
+  roll_budget: u32,
+  sink_budget: i32,
 ) -> bool {
-  if stats.roll_moves >= cfg.max_roll_events {
+  if stats.roll_moves >= roll_budget {
     return false;
   }
   // 1) Tip when COM overhangs the support base (true rotation).
@@ -2720,7 +2756,7 @@ fn apply_roll(
     let pivot = roll_pivot(comp, dx);
     if pivot_roll_component(world, comp, pivot, dx) {
       stats.roll_moves += 1;
-      settle_after_roll(world, regions, pivot, fall_streak, stats);
+      settle_after_roll(world, regions, pivot, fall_streak, stats, sink_budget);
       return true;
     }
   }
@@ -2730,7 +2766,14 @@ fn apply_roll(
       stats.roll_moves += 1;
       let new_anchor = (anchor.0 + dx, anchor.1 + dy);
       advance_streak(fall_streak, anchor, dx, dy);
-      settle_after_roll(world, regions, new_anchor, fall_streak, stats);
+      settle_after_roll(
+        world,
+        regions,
+        new_anchor,
+        fall_streak,
+        stats,
+        sink_budget,
+      );
       return true;
     }
   }
@@ -2743,6 +2786,7 @@ fn settle_after_roll(
   hint: (i32, i32),
   fall_streak: &mut HashMap<(i32, i32), u32>,
   stats: &mut CompetentFallStats,
+  sink_budget: i32,
 ) {
   let (post, _, _) = build_components(world, regions);
   let Some(refreshed) = post
@@ -2752,7 +2796,7 @@ fn settle_after_roll(
   else {
     return;
   };
-  let drop = max_drop_distance(world, refreshed, 4);
+  let drop = max_drop_distance(world, refreshed, sink_budget.min(4));
   if drop > 0 && translate_component(world, refreshed, 0, -drop) {
     stats.fall_moves += 1;
     let a = comp_anchor(refreshed);
@@ -2820,10 +2864,22 @@ pub fn apply_competent_fall_regions(
       // Free-falling bodies always take the full drop budget — never 1-cell
       // drip while waiting for a later topology pass.
       let floating = is_floating(world, &comp);
-      let drop = if floating {
-        max_drop_distance(world, &comp, max_drop)
-      } else if pass == 0 {
-        max_drop_distance(world, &comp, max_drop)
+      // Water drag: a submerged body sinks a couple of cells per pass
+      // instead of taking the whole dry free-fall budget.
+      let submerged = body_submerged(world, &comp);
+      let budget = if submerged {
+        max_drop.min(WATER_SINK_MAX_DROP)
+      } else {
+        max_drop
+      };
+      // Drag also halves how often a submerged body may tip / slide.
+      let roll_budget = if submerged {
+        (cfg.max_roll_events / 2).max(1)
+      } else {
+        cfg.max_roll_events
+      };
+      let drop = if floating || pass == 0 {
+        max_drop_distance(world, &comp, budget)
       } else {
         0
       };
@@ -2866,6 +2922,8 @@ pub fn apply_competent_fall_regions(
           cfg,
           &mut fall_streak,
           &mut stats,
+          roll_budget,
+          budget,
         ) {
           moved = true;
           comp_moved = true;
@@ -2886,6 +2944,8 @@ pub fn apply_competent_fall_regions(
           cfg,
           &mut fall_streak,
           &mut stats,
+          roll_budget,
+          budget,
         ) {
           moved = true;
           comp_moved = true;
@@ -2969,6 +3029,181 @@ mod tests {
         w.set_cell(x, y, Cell::solid(MaterialId::Stone));
       }
     }
+  }
+
+  /// Sand ramp descending to the right; optional lake filling the air.
+  fn slope_world(flood_to: Option<i32>) -> World {
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..48 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      let h = 20 - (x / 2).min(14);
+      for y in 1..=h {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+      if let Some(top) = flood_to {
+        for y in (h + 1)..=top {
+          w.set_cell(
+            x,
+            y,
+            Cell {
+              material: MaterialId::Air,
+              sat: Sat(255),
+              ..Cell::default()
+            },
+          );
+        }
+      }
+    }
+    w
+  }
+
+  fn rock_centroid(w: &World) -> (f32, f32) {
+    let cells: Vec<(i32, i32)> = (0..48)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .collect();
+    if cells.is_empty() {
+      return (0.0, 0.0);
+    }
+    let n = cells.len() as f32;
+    (
+      cells.iter().map(|&(x, _)| x as f32).sum::<f32>() / n,
+      cells.iter().map(|&(_, y)| y as f32).sum::<f32>() / n,
+    )
+  }
+
+  #[test]
+  fn submerged_body_sinks_slower_than_one_falling_through_air() {
+    // Water used to be vacuum to a body: passability only looks at
+    // `material == Air`, so a boulder plunged a whole lake column per pass
+    // at dry free-fall speed.
+    let mut air = World::new(9);
+    let mut lake = World::new(9);
+    for w in [&mut air, &mut lake] {
+      w.ensure_chunk(ChunkCoord::new(0, 0));
+      for x in 0..16 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      }
+    }
+    for x in 0..16 {
+      for y in 1..=30 {
+        lake.set_cell(
+          x,
+          y,
+          Cell {
+            material: MaterialId::Air,
+            sat: Sat(255),
+            ..Cell::default()
+          },
+        );
+      }
+    }
+    stamp_blob(&mut air, 5, 28, 3, 3);
+    stamp_blob(&mut lake, 5, 28, 3, 3);
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_roll_events: 0,
+      ..CompetentFallConfig::default()
+    };
+    apply_competent_fall_regions(&mut air, &[], &cfg, false);
+    apply_competent_fall_regions(&mut lake, &[], &cfg, false);
+    let low = |w: &World| -> i32 {
+      (0..16)
+        .flat_map(|x| (0..40).map(move |y| (x, y)))
+        .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+        .map(|(_, y)| y)
+        .min()
+        .unwrap_or(99)
+    };
+    let air_y = low(&air);
+    let lake_y = low(&lake);
+    assert!(
+      air_y <= 2,
+      "rock in air must free-fall to the floor in one pass (y={air_y})"
+    );
+    assert!(
+      lake_y > air_y + 4,
+      "submerged rock must sink slowly, not at dry free-fall speed \
+       (lake_y={lake_y} air_y={air_y})"
+    );
+  }
+
+  #[test]
+  #[ignore = "diagnostic: prints dry vs submerged travel per tick"]
+  fn submerged_rock_does_not_outrun_a_dry_one() {
+    // Playtest: boulders skate along a lake bed much faster than the same
+    // rock on a dry slope of identical geometry.
+    let perf = PerfConfig::default();
+    let mut dry = slope_world(None);
+    stamp_blob(&mut dry, 6, 24, 3, 3);
+    let (dx0, _) = rock_centroid(&dry);
+    for _ in 0..40 {
+      tick_with_perf(&mut dry, &perf);
+    }
+    let (dx1, dy1) = rock_centroid(&dry);
+
+    let mut wet = slope_world(Some(30));
+    stamp_blob(&mut wet, 6, 24, 3, 3);
+    let (wx0, _) = rock_centroid(&wet);
+    for _ in 0..40 {
+      tick_with_perf(&mut wet, &perf);
+    }
+    let (wx1, wy1) = rock_centroid(&wet);
+
+    // Per-tick trajectory: the 40-tick totals saturate at the slope foot,
+    // so sample the early ticks to compare actual rate.
+    let mut a = slope_world(None);
+    stamp_blob(&mut a, 6, 24, 3, 3);
+    let mut b = slope_world(Some(30));
+    stamp_blob(&mut b, 6, 24, 3, 3);
+    let mut traj = String::new();
+    for t in 0..8 {
+      tick_with_perf(&mut a, &perf);
+      tick_with_perf(&mut b, &perf);
+      let (ax, ay) = rock_centroid(&a);
+      let (bx, by) = rock_centroid(&b);
+      // Water actually touching the wet rock (max sat in its Moore ring).
+      let mut ring_max = 0u8;
+      let mut above = 0u8;
+      for (x, y) in (0..48).flat_map(|x| (0..40).map(move |y| (x, y))) {
+        if b.get_cell(x, y).map(|c| c.material) != Some(MaterialId::Stone) {
+          continue;
+        }
+        for (dx, dy) in [(0, 1), (1, 0), (-1, 0), (0, -1)] {
+          if let Some(c) = b.get_cell(x + dx, y + dy) {
+            if c.material == MaterialId::Air {
+              ring_max = ring_max.max(c.sat.0);
+              if (dx, dy) == (0, 1) {
+                above = above.max(c.sat.0);
+              }
+            }
+          }
+        }
+      }
+      let count = |w: &World, m: MaterialId| -> usize {
+        (0..48)
+          .flat_map(|x| (0..40).map(move |y| (x, y)))
+          .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(m))
+          .count()
+      };
+      traj.push_str(&format!(
+        "  t{t}: dry({ax:.1},{ay:.1}) wet({bx:.1},{by:.1}) \
+         ring_sat={ring_max} above={above} \
+         dry[stone={} loose={}] wet[stone={} loose={}]\n",
+        count(&a, MaterialId::Stone),
+        count(&a, MaterialId::LooseRock),
+        count(&b, MaterialId::Stone),
+        count(&b, MaterialId::LooseRock),
+      ));
+    }
+    eprintln!("trajectory\n{traj}");
+
+    eprintln!(
+      "rock travel over 40 ticks: dry dx={:.2} (y={dy1:.2})  wet dx={:.2} (y={wy1:.2})",
+      dx1 - dx0,
+      wx1 - wx0
+    );
   }
 
   #[test]

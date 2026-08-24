@@ -181,6 +181,16 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
   split into separate bodies instead of freezing as one welded pillar.
   Residual pebble necks are peeled; only editor paint / geology should weld.
 - **Free fall** — multi-cell drop through Air (rocks sink in lakes).
+- **Water drag** — passability only looks at `material == Air`, so `sat` is
+  invisible to a body and water was effectively vacuum: a boulder plunged a
+  whole lake column per pass at dry free-fall speed. A body touching
+  near-full standing water (`WATER_DRAG_MIN_SAT`) now sinks at most
+  `WATER_SINK_MAX_DROP` cells per pass and gets half the tip/slide budget.
+  Note the *other* half of "rocks are fast underwater" is the bed, not the
+  rock: wet grains loosen a repose step and dense grains treat standing
+  water as an avalanchable seat (`GRAIN_REPOSE_LAKE_MIN`), so a submerged
+  slope keeps failing under a boulder while the same dry slope holds it.
+  That is deliberate (gentler underwater banks) and is left alone.
 - **Impact** — bottom face → `LooseRock` / `LooseLimestone` on hard beds.
 - **Tip vs slide** — 90° pivot only when COM overhangs *and* the bed drops the
   same way; tiny/needle bodies never tip (kills flat-floor flip-flop). Otherwise

@@ -778,11 +778,20 @@ fn cell_is_air(world: &World, gx: i32, gy: i32) -> bool {
 }
 
 /// Air under or beside the boulder — never the surface *on top* of it.
-fn find_squash_seat(world: &World, gx: i32, rock_min_y: i32, prefer_dx: i32) -> (i32, i32) {
+///
+/// `None` means the plant is entombed: every candidate is solid, so the
+/// caller must not seat it (an unchecked fallback used to drop the
+/// nucleus straight back into the rock).
+fn find_squash_seat(
+    world: &World,
+    gx: i32,
+    rock_min_y: i32,
+    prefer_dx: i32,
+) -> Option<(i32, i32)> {
     let prefer = if prefer_dx == 0 { 1 } else { prefer_dx.signum() };
     let floor = rock_min_y - 1;
     if cell_is_air(world, gx, floor) {
-        return (world.wrap_x(gx), floor);
+        return Some((world.wrap_x(gx), floor));
     }
     // Walk out from the stem: floor first (true "under"), then the
     // boulder row (beside, when the rock sits on soil).
@@ -790,14 +799,25 @@ fn find_squash_seat(world: &World, gx: i32, rock_min_y: i32, prefer_dx: i32) -> 
         for &sign in &[prefer, -prefer] {
             let nx = gx + sign * dist;
             if cell_is_air(world, nx, floor) {
-                return (world.wrap_x(nx), floor);
+                return Some((world.wrap_x(nx), floor));
             }
             if cell_is_air(world, nx, rock_min_y) {
-                return (world.wrap_x(nx), rock_min_y);
+                return Some((world.wrap_x(nx), rock_min_y));
             }
         }
     }
-    (world.wrap_x(gx + prefer), floor.max(0))
+    // Last resort: any free Air just under the boulder's footprint.
+    for dy in 2..=6 {
+        for dist in 0..=8 {
+            for &sign in &[prefer, -prefer] {
+                let nx = gx + sign * dist;
+                if cell_is_air(world, nx, floor - dy + 1) {
+                    return Some((world.wrap_x(nx), floor - dy + 1));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Fold the plant under a boulder: roots keep their soil cells, canopy
@@ -852,7 +872,10 @@ fn squash_plant_under_rock(
         evict_plant_from_competent_rock(world, atom, shove_dx);
         return;
     }
-    let (nx, ny) = find_squash_seat(world, atom.gx, rock_min_y, shove_dx);
+    let Some((nx, ny)) = find_squash_seat(world, atom.gx, rock_min_y, shove_dx) else {
+        // Entombed — no Air anywhere under or beside the boulder.
+        return;
+    };
     let ogx = atom.gx;
     let ogy = atom.gy;
     let ddx = nx - ogx;
@@ -1004,6 +1027,20 @@ fn evict_plant_from_competent_rock(world: &mut World, atom: &mut Atom, shove_dx:
         // Force-drop anything still painted through stone (including roots
         // that share a boulder cell).
         snap_modules_in_competent_rock(world, atom);
+    }
+}
+
+/// A plant a boulder fully entombed: drop what litter still fits in Air.
+fn crush_plant_to_litter(world: &mut World, atom: &Atom) {
+    for &(lx, ly, m) in &atom.body {
+        if !matches!(
+            m,
+            ModuleId::Stem | ModuleId::Photosystem | ModuleId::ReproSpore
+        ) {
+            continue;
+        }
+        let (wx, wy) = draw_world(atom, world, lx, ly, m);
+        let _ = paint_leaf_litter(world, wx, wy);
     }
 }
 
@@ -1208,10 +1245,24 @@ impl OrganismStore {
     /// painted through the rock.
     pub fn squash_plants_lodged_in_rock(&mut self, world: &mut crate::grid::World) {
         let dests = HashSet::new();
-        for atom in &mut self.atoms {
-            if is_land_plant(atom) && plant_draw_in_competent_rock(world, atom) {
-                squash_plant_under_rock(world, atom, 0, &dests);
+        let mut entombed: Vec<usize> = Vec::new();
+        for (i, atom) in self.atoms.iter_mut().enumerate() {
+            if !is_land_plant(atom) || !plant_draw_in_competent_rock(world, atom) {
+                continue;
             }
+            squash_plant_under_rock(world, atom, 0, &dests);
+            // Last resort: a boulder filled every seat around it. Better a
+            // crushed plant than one painted inside the rock forever.
+            if plant_draw_in_competent_rock(world, atom) {
+                evict_plant_from_competent_rock(world, atom, 0);
+            }
+            if plant_draw_in_competent_rock(world, atom) {
+                entombed.push(i);
+            }
+        }
+        for &i in entombed.iter().rev() {
+            let atom = self.atoms.remove(i);
+            crush_plant_to_litter(world, &atom);
         }
     }
 
@@ -8005,6 +8056,26 @@ mod tests {
             a.gy <= 4,
             "crushed crown must sit under/beside the boulder (gy={})",
             a.gy
+        );
+    }
+
+    #[test]
+    fn fully_entombed_plant_is_crushed_not_left_in_rock() {
+        // Solid stone block over the whole plot: no seat exists, so the
+        // plant must die rather than stay painted inside the rock.
+        let mut w = sand_plot();
+        let mut store = OrganismStore::new();
+        store.atoms.push(deep_tree(10, 4));
+        for x in 0..20 {
+            for y in 1..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        store.squash_plants_lodged_in_rock(&mut w);
+        assert!(
+            store.atoms.is_empty(),
+            "entombed plant must not survive inside stone ({:?})",
+            store.atoms.first().map(|a| (a.gx, a.gy))
         );
     }
 
