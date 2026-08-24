@@ -17,7 +17,8 @@ use crate::cell::{is_competent_rock, Cell, CellFlags};
 use crate::chunk::ChunkCoord;
 use crate::grid::World;
 use crate::support_map::{
-  hanging_landscape_cluster, void_below_competent_seeds, SupportMap,
+  hanging_landscape_cluster, hanging_landscape_cluster_with, void_below_competent_seeds,
+  void_below_competent_seeds_with, SupportMap,
 };
 
 /// Only truly massive hang clusters become landscape entities.
@@ -306,10 +307,23 @@ pub fn detach_landscape_bodies(
   store: &mut LandscapeBodyStore,
   coords: &[ChunkCoord],
 ) -> u32 {
+  detach_landscape_bodies_with(world, store, None, coords)
+}
+
+/// [`detach_landscape_bodies`] using a prebuilt support map when available.
+pub fn detach_landscape_bodies_with(
+  world: &mut World,
+  store: &mut LandscapeBodyStore,
+  support: Option<&SupportMap>,
+  coords: &[ChunkCoord],
+) -> u32 {
   if store.len() >= MAX_LANDSCAPE_BODIES {
     return 0;
   }
-  let seeds = void_below_competent_seeds(world, coords);
+  let seeds = void_below_competent_seeds_with(world, support, coords);
+  if seeds.is_empty() {
+    return 0;
+  }
   let mut detached = 0u32;
   let mut used = HashSet::new();
   for (sx, sy) in seeds {
@@ -322,7 +336,8 @@ pub fn detach_landscape_bodies(
     if used.contains(&(sx, sy)) {
       continue;
     }
-    let cluster = hanging_landscape_cluster(world, sx, sy, MAX_LANDSCAPE_BODY_CELLS);
+    let cluster =
+      hanging_landscape_cluster_with(world, support, sx, sy, MAX_LANDSCAPE_BODY_CELLS);
     if cluster.len() < MIN_LANDSCAPE_BODY_CELLS {
       continue;
     }
@@ -437,11 +452,11 @@ pub fn step_landscape_bodies(
 pub fn apply_landscape_fall(
   world: &mut World,
   store: &mut LandscapeBodyStore,
-  _support: &SupportMap,
+  support: &SupportMap,
   coords: &[ChunkCoord],
 ) -> LandscapeFallStats {
   let mut stats = LandscapeFallStats::default();
-  stats.detached = detach_landscape_bodies(world, store, coords);
+  stats.detached = detach_landscape_bodies_with(world, store, Some(support), coords);
   let step = step_landscape_bodies(world, store);
   stats.fall_moves = step.fall_moves;
   stats.tips = step.tips;

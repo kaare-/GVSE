@@ -17,6 +17,7 @@ use wk_material::MaterialId;
 
 use crate::active::ActiveChunk;
 use crate::cell::{is_competent_rock, Cell, CellFlags, Sat};
+use crate::competent_probe as probe;
 use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::failure::roof_collapse_debris;
 use crate::grid::World;
@@ -261,6 +262,64 @@ struct Component {
   set: HashSet<(i32, i32)>,
   min_y: i32,
   max_y: i32,
+}
+
+/// Cheap "could this cell ever start moving?" gate used to seed body floods.
+///
+/// A buried or flat-seated cell whose only open neighbour is **above** can
+/// never fall, tip, or slide, so it must not seed a rigid-body flood. Without
+/// this, every surface cell of a natural ridge seeds a flood + morphological
+/// open every tick — that alone cost ~60 ms/tick on the demo world.
+///
+/// Deliberately a *superset* of the truly movable set: it only needs somewhere
+/// to go down (below, or a side with room below it).
+#[inline]
+fn body_can_seed(world: &World, gx: i32, gy: i32, _cell: &Cell) -> bool {
+  // NOTE: deliberately does *not* short-circuit on MOBILE_ROCK. That flag is a
+  // permanent flood-compatibility class, so treating it as "live" kept every
+  // cell that ever moved seeding (and dirtying) itself forever.
+  //
+  // Room directly below → free fall / sink.
+  match world.get_cell(gx, gy - 1) {
+    None => return true,
+    Some(b) if b.material == MaterialId::Air || is_roll_displaceable(b.material) => {
+      return true;
+    }
+    _ => {}
+  }
+  // Room to a side *and* a lower floor on that side → tumble / slide candidate.
+  //
+  // Requiring the *side floor to be lower* (not merely "a side is open") is
+  // what keeps flat and stepped terrain out of the seed set: a rock resting on
+  // level ground with air beside it has nowhere to descend, and `try_slide`
+  // would reject it anyway after a full flood.
+  for dx in [-1_i32, 1] {
+    let nx = world.wrap_x(gx + dx);
+    let side_open = match world.get_cell(nx, gy) {
+      None => true,
+      Some(c) => c.material == MaterialId::Air || is_roll_displaceable(c.material),
+    };
+    if !side_open {
+      continue;
+    }
+    match world.get_cell(nx, gy - 1) {
+      None => return true,
+      Some(d) if d.material == MaterialId::Air || is_roll_displaceable(d.material) => {
+        return true;
+      }
+      _ => {}
+    }
+  }
+  false
+}
+
+/// Public form of the seed gate so wake passes agree with body building.
+#[inline]
+pub fn competent_cell_can_move(world: &World, gx: i32, gy: i32) -> bool {
+  match world.get_cell(gx, gy) {
+    Some(c) if is_competent_rock(c.material) => body_can_seed(world, gx, gy, &c),
+    _ => false,
+  }
 }
 
 fn has_free_neighbor(world: &World, gx: i32, gy: i32) -> bool {
@@ -644,6 +703,7 @@ fn extract_hanging_pieces(
   world: &World,
   cells: &[(i32, i32, Cell)],
 ) -> Vec<Vec<(i32, i32, Cell)>> {
+  probe::bump(&probe::hang_calls);
   if cells.is_empty() {
     return Vec::new();
   }
@@ -743,6 +803,7 @@ fn push_component_pieces(
     if !hanging && piece.len() > 32 && exposed * 5 < piece.len() {
       continue;
     }
+    probe::bump(&probe::components);
     let min_y = piece.iter().map(|(_, y, _)| *y).min().unwrap_or(0);
     let max_y = piece.iter().map(|(_, y, _)| *y).max().unwrap_or(0);
     out.push(Component {
@@ -785,6 +846,7 @@ fn build_components(
   world: &World,
   active: &[ActiveChunk],
 ) -> (Vec<Component>, Vec<(i32, i32)>) {
+  probe::bump(&probe::build_calls);
   let mut visited: HashSet<(i32, i32)> = HashSet::new();
   let mut out: Vec<Component> = Vec::new();
   let mut hanging_count = 0usize;
@@ -806,9 +868,21 @@ fn build_components(
           if visited.contains(&(gx, gy)) {
             continue;
           }
+          // Sleeping rock: already evaluated and immobile, and nothing near it
+          // has been written since. Cheapest possible rejection.
+          if world.competent_is_settled(gx, gy) {
+            continue;
+          }
+          probe::bump(&probe::seed_candidates);
+          // Cheap movability gate before any flood — buried / flat-seated rock
+          // whose only opening is the sky can never move.
+          if !body_can_seed(world, gx, gy, &cell) {
+            continue;
+          }
           if !has_free_neighbor(world, gx, gy) {
             continue;
           }
+          probe::bump(&probe::seeds_passed);
           let below_void = void_below_seed(world, gx, gy);
           if void_pass && !below_void {
             continue;
@@ -823,6 +897,7 @@ fn build_components(
         queue.push_back((gx, gy));
         visited.insert((gx, gy));
         let mut strata = false;
+        probe::bump(&probe::floods);
         while let Some((cx, cy)) = queue.pop_front() {
           let Some(cur) = world.get_cell(cx, cy) else {
             continue;
@@ -831,8 +906,10 @@ fn build_components(
             continue;
           }
           cells.push((cx, cy, cur));
+          probe::bump(&probe::flood_cells);
           if cells.len() > FLOOD_GATHER_CAP {
             strata = true;
+            probe::bump(&probe::strata_bailouts);
             break;
           }
           for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
@@ -986,6 +1063,8 @@ fn body_neighbor_count(set: &HashSet<(i32, i32)>, x: i32, y: i32) -> usize {
 /// Touching boulder chains / terrain contact separate; only compact cores that
 /// dilate into mobile-sized pieces are kept.
 fn split_welded_contacts(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cell)>> {
+  probe::bump(&probe::split_calls);
+  probe::add(&probe::split_cells, cells.len() as u64);
   if cells.len() < PEBBLE_SPLIT_HOST_MIN * 2 {
     return split_contact_pebbles(cells);
   }
@@ -1269,12 +1348,18 @@ fn bottom_face(comp: &Component) -> Vec<(i32, i32, Cell)> {
     .collect()
 }
 
-fn can_translate(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
-  let cargo = gather_cargo(world, comp);
-  let mut moving: HashSet<(i32, i32)> = comp.set.clone();
-  for (x, y, _) in &cargo {
-    moving.insert((*x, *y));
-  }
+/// Collision test against a **precomputed** cargo set.
+///
+/// Cargo gathering is a flood; recomputing it inside the drop binary search
+/// meant ~8 floods per body per move. Callers hoist it out and reuse.
+fn can_translate_with(
+  world: &World,
+  comp: &Component,
+  cargo: &[(i32, i32, Cell)],
+  cargo_set: &HashSet<(i32, i32)>,
+  dx: i32,
+  dy: i32,
+) -> bool {
   let n = comp.cells.len();
   for (gx, gy, _) in comp.cells.iter().chain(cargo.iter()) {
     let tx = world.wrap_x(gx + dx);
@@ -1282,7 +1367,8 @@ fn can_translate(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
     if ty < 0 {
       return false;
     }
-    if moving.contains(&(tx, ty)) {
+    // Moving set = body ∪ cargo; no clone/merge allocation per call.
+    if comp.set.contains(&(tx, ty)) || cargo_set.contains(&(tx, ty)) {
       continue;
     }
     let Some(dst) = world.get_cell(tx, ty) else {
@@ -1299,16 +1385,28 @@ fn can_translate(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
   true
 }
 
+fn can_translate(world: &World, comp: &Component, dx: i32, dy: i32) -> bool {
+  let cargo = gather_cargo(world, comp);
+  let cargo_set: HashSet<(i32, i32)> = cargo.iter().map(|(x, y, _)| (*x, *y)).collect();
+  can_translate_with(world, comp, &cargo, &cargo_set, dx, dy)
+}
+
 /// Largest `drop` in `1..=max_drop` where the body can jump down that far.
+/// Gathers cargo once and reuses it for every probe.
 fn max_drop_distance(world: &World, comp: &Component, max_drop: i32) -> i32 {
-  if max_drop <= 0 || !can_translate(world, comp, 0, -1) {
+  if max_drop <= 0 {
+    return 0;
+  }
+  let cargo = gather_cargo(world, comp);
+  let cargo_set: HashSet<(i32, i32)> = cargo.iter().map(|(x, y, _)| (*x, *y)).collect();
+  if !can_translate_with(world, comp, &cargo, &cargo_set, 0, -1) {
     return 0;
   }
   let mut lo = 1;
   let mut hi = max_drop;
   while lo < hi {
     let mid = (lo + hi + 1) / 2;
-    if can_translate(world, comp, 0, -mid) {
+    if can_translate_with(world, comp, &cargo, &cargo_set, 0, -mid) {
       lo = mid;
     } else {
       hi = mid - 1;
@@ -1681,6 +1779,8 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
 
 /// Loose / soft cells on top or nested against the rock ride with it.
 fn gather_cargo(world: &World, comp: &Component) -> Vec<(i32, i32, Cell)> {
+  probe::bump(&probe::cargo_calls);
+  probe::add(&probe::cargo_cells, comp.cells.len() as u64);
   const MAX_CARGO: usize = 512;
   let mut cargo = Vec::new();
   let mut seen = HashSet::new();
@@ -1994,17 +2094,14 @@ pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
         }
         let gx = world.wrap_x(base_gx + lx as i32);
         let gy = base_gy + ly as i32;
-        // Skip buried strata — only skin / overhang cells wake bodies.
-        if !has_free_neighbor(world, gx, gy) {
+        // Same gate `build_components` seeds with — waking cells the body pass
+        // will immediately reject just re-dirties the whole ridge every cadence
+        // (that alone cost ~40 ms/tick on a settled demo world). Also avoids
+        // `body_has_downhill`, which allocates a HashSet per cell.
+        if world.competent_is_settled(gx, gy) {
           continue;
         }
-        let wake = match world.get_cell(gx, gy - 1) {
-          None => true,
-          Some(b) if body_passable_at(world, gx, gy - 1, &b) => true,
-          Some(_) if body_has_downhill(world, gx, gy) => true,
-          _ => false,
-        };
-        if wake {
+        if body_can_seed(world, gx, gy, &cell) {
           touches.push((gx, gy));
         }
       }
@@ -2037,6 +2134,12 @@ pub fn wake_floating_competent(world: &mut World) {
         }
         let gx = world.wrap_x(base_gx + lx as i32);
         let gy = base_gy + ly as i32;
+        // Sleeping rock has already been evaluated as immobile and nothing near
+        // it has changed; re-dirtying it here would cancel its sleep flag and
+        // make the whole overhang set churn every cadence.
+        if world.competent_is_settled(gx, gy) {
+          continue;
+        }
         match world.get_cell(gx, gy - 1) {
           None => touches.push((gx, gy)),
           Some(b) if body_passable_at(world, gx, gy - 1, &b) => touches.push((gx, gy)),
@@ -2052,6 +2155,8 @@ pub fn wake_floating_competent(world: &mut World) {
 
 /// Wake every loaded chunk (F3 mid-air paint insurance).
 pub fn wake_competent_bodies_all(world: &mut World) {
+  // Editor paint can change support anywhere — drop all sleep state.
+  world.competent_wake_all();
   // Floating first (sky paint), then slope tips on all chunks.
   wake_floating_competent(world);
   let coords: Vec<_> = world.chunks.keys().copied().collect();
@@ -2174,47 +2279,54 @@ fn expand_competent_regions(active: &[ActiveChunk], drop_budget: i32) -> Vec<Act
   out
 }
 
-fn expand_regions_to_components(
+/// Expand the active scan set to cover a set of world cells (moved bodies).
+fn expand_regions_to_cells(
   world: &World,
-  components: &[Component],
+  cells: &[(i32, i32)],
   drop_budget: i32,
 ) -> Vec<ActiveChunk> {
-  if components.is_empty() {
+  if cells.is_empty() {
     return Vec::new();
   }
   let w = CHUNK_CELLS_W as i32;
   let h = CHUNK_CELLS_H as i32;
   let mut by_chunk: HashMap<ChunkCoord, Rect> = HashMap::new();
-  for comp in components {
-    for (gx, gy, _) in &comp.cells {
-      let cx = gx.div_euclid(w);
-      let cy = gy.div_euclid(h);
-      let lx = gx.rem_euclid(w) as u8;
-      let ly = gy.rem_euclid(h) as u8;
-      let coord = ChunkCoord::new(cx, cy);
-      by_chunk
-        .entry(coord)
-        .and_modify(|r| {
-          r.expand_to_include(lx, ly);
-        })
-        .or_insert(Rect {
-          x0: lx,
-          y0: ly,
-          x1: lx,
-          y1: ly,
-        });
-    }
+  for &(gx, gy) in cells {
+    let cx = gx.div_euclid(w);
+    let cy = gy.div_euclid(h);
+    let lx = gx.rem_euclid(w) as u8;
+    let ly = gy.rem_euclid(h) as u8;
+    let coord = ChunkCoord::new(cx, cy);
+    by_chunk
+      .entry(coord)
+      .and_modify(|r| {
+        r.expand_to_include(lx, ly);
+      })
+      .or_insert(Rect {
+        x0: lx,
+        y0: ly,
+        x1: lx,
+        y1: ly,
+      });
   }
   let seeds: Vec<ActiveChunk> = by_chunk
     .into_iter()
     .map(|(coord, rect)| ActiveChunk { coord, rect })
     .collect();
-  let expanded = expand_competent_regions(&seeds, drop_budget);
-  expanded
+  expand_competent_regions(&seeds, drop_budget)
     .into_iter()
     .filter(|ac| world.chunks.contains_key(&ac.coord))
     .collect()
 }
+
+/// Vertical pad (cells) added to dirty rects when choosing **seed** rows.
+///
+/// Seeding does not need the full drop budget: a body that moves writes its new
+/// cells, which dirties them for the next tick, and `expand_regions_to_cells`
+/// re-covers bodies that moved mid-tick. Inflating seeds by the whole 64-cell
+/// drop budget made every dirty water splash scan thousands of buried terrain
+/// cells (~105 k seed candidates/tick on the demo world).
+pub const SEED_PAD_Y: i32 = 6;
 
 fn competent_active_regions(world: &World, active: &[ActiveChunk], drop_budget: i32) -> Vec<ActiveChunk> {
   let seed = if active.is_empty() {
@@ -2237,7 +2349,14 @@ fn competent_active_regions(world: &World, active: &[ActiveChunk], drop_budget: 
   if seed.is_empty() {
     return Vec::new();
   }
-  let expanded = expand_competent_regions(&seed, drop_budget);
+  // Explicit whole-world requests (tests / F3 close) keep the full budget;
+  // incremental dirty scans use the tight seed pad.
+  let pad = if active.is_empty() {
+    drop_budget
+  } else {
+    SEED_PAD_Y.min(drop_budget.max(1))
+  };
+  let expanded = expand_competent_regions(&seed, pad);
   // Keep only loaded chunks.
   expanded
     .into_iter()
@@ -2439,6 +2558,35 @@ fn settle_after_roll(
   }
 }
 
+/// Clear sleep flags around every dirty rect in the scan set.
+fn wake_settled_near_dirty(world: &mut World, regions: &[ActiveChunk]) {
+  if world.competent_settled.is_empty() {
+    return;
+  }
+  let cw = CHUNK_CELLS_W as i32;
+  let ch = CHUNK_CELLS_H as i32;
+  let mut rects: Vec<(i32, i32, i32, i32)> = Vec::new();
+  for ac in regions {
+    let Some(chunk) = world.chunks.get(&ac.coord) else {
+      continue;
+    };
+    let Some(d) = chunk.dirty else {
+      continue;
+    };
+    let base_gx = ac.coord.cx * cw;
+    let base_gy = ac.coord.cy * ch;
+    rects.push((
+      base_gx + d.x0 as i32 - 1,
+      base_gy + d.y0 as i32 - 1,
+      base_gx + d.x1 as i32 + 1,
+      base_gy + d.y1 as i32 + 1,
+    ));
+  }
+  for (x0, y0, x1, y1) in rects {
+    world.competent_wake_rect(x0, y0, x1, y1);
+  }
+}
+
 /// Run competent-body physics on the active scan set.
 pub fn apply_competent_fall_regions(
   world: &mut World,
@@ -2460,6 +2608,10 @@ pub fn apply_competent_fall_regions(
   if regions.is_empty() {
     return CompetentFallStats::default();
   }
+  // Anything written since the last pass wakes the rock around it — support is
+  // transmitted cell to cell, so a one-cell halo around each dirty rect is
+  // enough to re-examine the bodies a write could have destabilised.
+  wake_settled_near_dirty(world, &regions);
   world.competent_cell_moves.clear();
   let mut stats = CompetentFallStats::default();
   let mut fall_streak: HashMap<(i32, i32), u32> = HashMap::new();
@@ -2487,8 +2639,12 @@ pub fn apply_competent_fall_regions(
       components.rotate_left((pass as usize) % n);
     }
     let mut moved = false;
+    // Bodies that finish a pass without moving go to sleep (see
+    // `World::competent_settled`). Collected first so the borrow ends.
+    let mut to_sleep: Vec<(i32, i32)> = Vec::new();
     for comp in components {
       let anchor = comp_anchor(&comp);
+      let mut comp_moved = false;
       // Free-falling bodies always take the full drop budget — never 1-cell
       // drip while waiting for a later topology pass.
       let floating = is_floating(world, &comp);
@@ -2504,26 +2660,36 @@ pub fn apply_competent_fall_regions(
           stats.fall_moves += 1;
           advance_streak(&mut fall_streak, anchor, 0, -drop);
           moved = true;
+          comp_moved = true;
+        }
+        if !comp_moved {
+          for &(x, y, _) in &comp.cells {
+            to_sleep.push((x, y));
+          }
         }
         continue;
       }
       if floating {
         // Airborne but blocked — mark mobile and skip tip/roll this pass.
+        // Do not sleep: it is mid-air and must retry.
         mark_component_mobile(world, &comp);
         continue;
-      }
-      // Long thin sticks / slabs snap at 1-cell necks instead of tipping as one beam.
-      if is_long_thin(&comp) {
-        let snapped = fracture_thin_necks(world, &comp);
-        if snapped > 0 {
-          stats.impacts = stats.impacts.saturating_add(1);
-          moved = true;
-          continue;
-        }
       }
       // Wait until every bottom cell has support — avoids uneven per-column
       // embed/shatter while the body is still bridging a slope or gap.
       if !is_fully_supported(world, &comp) {
+        // Long thin sticks / slabs snap at 1-cell necks instead of tipping as
+        // one beam. Only for *unsupported* spans: running this on seated strata
+        // shredded ~5 k cells of untouched terrain into rubble on the first
+        // pass and re-dirtied the whole ridge every tick.
+        if is_long_thin(&comp) {
+          let snapped = fracture_thin_necks(world, &comp);
+          if snapped > 0 {
+            stats.impacts = stats.impacts.saturating_add(1);
+            moved = true;
+            continue;
+          }
+        }
         if apply_roll(
           world,
           &regions,
@@ -2534,6 +2700,12 @@ pub fn apply_competent_fall_regions(
           &mut stats,
         ) {
           moved = true;
+          comp_moved = true;
+        }
+        if !comp_moved {
+          for &(x, y, _) in &comp.cells {
+            to_sleep.push((x, y));
+          }
         }
         continue;
       }
@@ -2559,6 +2731,7 @@ pub fn apply_competent_fall_regions(
           stats.impacts += 1;
           fall_streak.remove(&anchor);
           moved = true;
+          comp_moved = true;
           // Thin remnants often need a second snap after face shatter.
           if is_long_thin(&comp) {
             let _ = fracture_thin_necks(world, &comp);
@@ -2567,15 +2740,28 @@ pub fn apply_competent_fall_regions(
         }
       }
       // Soft embed disabled (cheese-grater). Flat soft beds just rest.
+      if !comp_moved {
+        for &(x, y, _) in &comp.cells {
+          to_sleep.push((x, y));
+        }
+      }
+    }
+    for (x, y) in to_sleep {
+      world.competent_set_settled(x, y);
     }
     if moved {
-      let (next, next_left) = build_components(world, &regions);
-      for &(x, y) in &next_left {
-        world.touch_dirty(x, y);
-      }
-      let refreshed = expand_regions_to_components(world, &next, max_drop);
-      if !refreshed.is_empty() {
-        regions = refreshed;
+      // Follow the bodies that actually moved using the recorded move list —
+      // a second full build_components here doubled topology cost per pass.
+      let moved_to: Vec<(i32, i32)> = world
+        .competent_cell_moves
+        .iter()
+        .map(|&(_, _, tx, ty)| (tx, ty))
+        .collect();
+      if !moved_to.is_empty() {
+        let refreshed = expand_regions_to_cells(world, &moved_to, max_drop);
+        if !refreshed.is_empty() {
+          regions = refreshed;
+        }
       }
     } else {
       break;
@@ -3492,6 +3678,100 @@ mod tests {
     assert_eq!(
       high, 0,
       "floaters must clear sky within ~12 ticks via full drops (remaining={high})"
+    );
+  }
+
+  #[test]
+  fn seated_strata_does_not_disintegrate_into_rubble() {
+    // Thin horizontal layers used to hit `fracture_thin_necks` while fully
+    // seated, shredding untouched terrain into LooseRock on the first pass.
+    let mut w = World::new(64);
+    for cx in 0..2 {
+      w.ensure_chunk(ChunkCoord::new(cx, 0));
+    }
+    for x in 0..128 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      // Interleaved thin strata, all resting on solid support.
+      for y in 1..=6 {
+        let mat = if y % 2 == 0 {
+          MaterialId::Limestone
+        } else {
+          MaterialId::Stone
+        };
+        w.set_cell(x, y, Cell::solid(mat));
+      }
+    }
+    let cfg = CompetentFallConfig::default();
+    for _ in 0..12 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    // Interior only: the outermost columns border unloaded chunks, which read
+    // as open space and are a legitimate cliff edge that may shed rock.
+    const LO: i32 = 8;
+    const HI: i32 = 120;
+    let loose = (LO..HI)
+      .flat_map(|x| (0..10).map(move |y| (x, y)))
+      .filter(|&(x, y)| {
+        matches!(
+          w.get_cell(x, y).map(|c| c.material),
+          Some(MaterialId::LooseRock) | Some(MaterialId::LooseLimestone)
+        )
+      })
+      .count();
+    assert_eq!(
+      loose, 0,
+      "seated strata must not fracture into rubble (loose={loose})"
+    );
+    let stone = (LO..HI)
+      .flat_map(|x| (1..=6).map(move |y| (x, y)))
+      .filter(|&(x, y)| {
+        matches!(
+          w.get_cell(x, y).map(|c| c.material),
+          Some(MaterialId::Stone) | Some(MaterialId::Limestone)
+        )
+      })
+      .count();
+    assert_eq!(
+      stone,
+      (HI - LO) as usize * 6,
+      "every interior strata cell must survive intact"
+    );
+  }
+
+  #[test]
+  fn settled_terrain_stops_being_reseeded() {
+    // Sleeping-rock guard: a flat seated ridge must stop producing bodies
+    // once evaluated, so a quiet world costs nothing.
+    let mut w = World::new(64);
+    for cx in 0..2 {
+      w.ensure_chunk(ChunkCoord::new(cx, 0));
+    }
+    for x in 0..64 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      for y in 1..=8 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let cfg = CompetentFallConfig::default();
+    // First pass evaluates and sleeps.
+    apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    let regions = competent_active_regions(&w, &[], 8);
+    let (comps, _) = build_components(&w, &regions);
+    assert!(
+      comps.is_empty(),
+      "settled ridge must not rebuild bodies (got {})",
+      comps.len()
+    );
+    // Carving support must wake the rock above again.
+    for x in 20..30 {
+      w.set_cell(x, 1, Cell::air());
+    }
+    wake_competent_bodies_all(&mut w);
+    let regions2 = competent_active_regions(&w, &[], 8);
+    let (comps2, _) = build_components(&w, &regions2);
+    assert!(
+      !comps2.is_empty(),
+      "carving under the ridge must wake bodies again"
     );
   }
 

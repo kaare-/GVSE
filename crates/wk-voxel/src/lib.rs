@@ -17,6 +17,7 @@ pub mod cell;
 pub mod chunk;
 pub mod climate;
 pub mod clouds;
+pub mod competent_probe;
 pub mod event_log;
 pub mod failure;
 pub mod fungi;
@@ -110,13 +111,14 @@ pub use geotech_map::{
     GEOTECH_MAP_PHASE,
 };
 pub use support_map::{
-    hanging_landscape_cluster, support_map_due, void_below_competent_seeds, SupportMap,
-    SUPPORT_MAP_PERIOD, SUPPORT_MAP_PHASE,
+    column_supported, hanging_landscape_cluster, hanging_landscape_cluster_with, support_map_due,
+    void_below_competent_seeds, void_below_competent_seeds_with, ChunkMask, SupportMap,
+    COLUMN_SUPPORT_MAX_WALK, SUPPORT_MAP_PERIOD, SUPPORT_MAP_PHASE,
 };
 pub use landscape_body::{
-    apply_landscape_fall, detach_landscape_bodies, force_stamp_all, step_landscape_bodies,
-    LandscapeBody, LandscapeBodyStore, LandscapeFallStats, LANDSCAPE_GRAVITY_ONLY_MIN,
-    MAX_LANDSCAPE_BODIES, MIN_LANDSCAPE_BODY_CELLS,
+    apply_landscape_fall, detach_landscape_bodies, detach_landscape_bodies_with, force_stamp_all,
+    step_landscape_bodies, LandscapeBody, LandscapeBodyStore, LandscapeFallStats,
+    LANDSCAPE_GRAVITY_ONLY_MIN, MAX_LANDSCAPE_BODIES, MIN_LANDSCAPE_BODY_CELLS,
 };
 pub use grid::World;
 // HydroOverrides is defined in wk-material; re-export for app convenience.

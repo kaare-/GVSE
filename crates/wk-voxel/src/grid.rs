@@ -76,6 +76,12 @@ pub struct World {
     /// Competent-fall cargo moves this tick — sync organisms after physics.
     #[serde(skip, default)]
     pub competent_cell_moves: Vec<(i32, i32, i32, i32)>,
+    /// **Sleeping rock.** Competent cells already evaluated by the body pass
+    /// that could not move. Skipped when seeding until something near them is
+    /// written, which is what stops a settled ridge from being re-floodfilled
+    /// every tick. Derived state — never saved.
+    #[serde(skip, default)]
+    pub competent_settled: HashMap<ChunkCoord, crate::support_map::ChunkMask>,
 }
 
 impl World {
@@ -95,7 +101,47 @@ impl World {
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
+            competent_settled: HashMap::new(),
         }
+    }
+
+    /// True when this competent cell is asleep (evaluated, could not move).
+    #[inline]
+    pub fn competent_is_settled(&self, gx: i32, gy: i32) -> bool {
+        let (coord, lx, ly) = Self::split(self.wrap_x(gx), gy);
+        self.competent_settled
+            .get(&coord)
+            .is_some_and(|m| m.get(lx, ly))
+    }
+
+    /// Put a competent cell to sleep.
+    #[inline]
+    pub fn competent_set_settled(&mut self, gx: i32, gy: i32) {
+        let (coord, lx, ly) = Self::split(self.wrap_x(gx), gy);
+        self.competent_settled
+            .entry(coord)
+            .or_default()
+            .set(lx, ly);
+    }
+
+    /// Wake every settled cell inside a world-space rectangle (inclusive).
+    pub fn competent_wake_rect(&mut self, x0: i32, y0: i32, x1: i32, y1: i32) {
+        if self.competent_settled.is_empty() {
+            return;
+        }
+        for gy in y0..=y1 {
+            for gx in x0..=x1 {
+                let (coord, lx, ly) = Self::split(self.wrap_x(gx), gy);
+                if let Some(m) = self.competent_settled.get_mut(&coord) {
+                    m.unset(lx, ly);
+                }
+            }
+        }
+    }
+
+    /// Drop all sleep state (editor paint / load / teardown).
+    pub fn competent_wake_all(&mut self) {
+        self.competent_settled.clear();
     }
 
     /// Water capacity for `material` under this world's hydro overrides.
