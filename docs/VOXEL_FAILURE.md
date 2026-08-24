@@ -195,7 +195,9 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 - **Hanging peel** — void-ceiling slabs above carved caverns peel as whole
   chunks (not row-by-row), excluding bedrock-rooted pillar columns; void-below
   seeds are processed before other competent floods so hill-sized strata cannot
-  starve arch floaters.
+  starve arch floaters. Per-tick body caps truncate excess work but **re-dirty
+  leftovers** and wake air-below rock every tick so large collapses finish
+  across subsequent ticks instead of hanging forever.
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.

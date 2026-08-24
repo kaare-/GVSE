@@ -36,7 +36,8 @@ pub const FLOOD_GATHER_CAP: usize = 2048;
 /// Hard cap on bodies processed per tick (FPS guard).
 pub const MAX_BODIES_PER_TICK: usize = 16;
 /// Hanging peel may spawn more bodies in one tick so a slab crashes together.
-pub const MAX_HANGING_BODIES_PER_TICK: usize = 48;
+/// Truncated leftovers are re-dirtied so later ticks finish the job.
+pub const MAX_HANGING_BODIES_PER_TICK: usize = 192;
 /// Contact "pebbles" this small never glue onto a larger body (editor/geology only).
 pub const PEBBLE_SPLIT_MAX: usize = 4;
 /// Main mass must be at least this big before pebble necks are split off.
@@ -773,7 +774,13 @@ fn void_below_seed(world: &World, gx: i32, gy: i32) -> bool {
 /// [`MAX_DYNAMIC_BODY_CELLS`] stay static. Touching boulders are separated by
 /// morphological opening so simulation contact never welds a ball chain into
 /// one frozen “terrain” pillar.
-fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
+///
+/// Second return is cells from bodies truncated by the per-tick cap — caller
+/// must dirty them so a later tick finishes the fall.
+fn build_components(
+  world: &World,
+  active: &[ActiveChunk],
+) -> (Vec<Component>, Vec<(i32, i32)>) {
   let mut visited: HashSet<(i32, i32)> = HashSet::new();
   let mut out: Vec<Component> = Vec::new();
   let mut hanging_count = 0usize;
@@ -839,29 +846,49 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
           }
         }
         if strata {
+          let hang = extract_hanging_pieces(world, &cells);
+          let before = out.len();
           push_component_pieces(
             world,
             &mut out,
-            extract_hanging_pieces(world, &cells),
+            hang,
             true,
             &mut hanging_count,
           );
-          // True continuous strata — finish marking so we don't restart.
-          while let Some((cx, cy)) = queue.pop_front() {
-            for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
-              let nx = world.wrap_x(cx + dx);
-              let ny = cy + dy;
-              if !visited.insert((nx, ny)) {
-                continue;
-              }
-              match world.get_cell(nx, ny) {
-                Some(n) if flood_compatible(seed_mobile, &n, material) => {
-                  queue.push_back((nx, ny))
+          let mut pushed: HashSet<(i32, i32)> = HashSet::new();
+          for comp in &out[before..] {
+            for (x, y, _) in &comp.cells {
+              pushed.insert((*x, *y));
+            }
+          }
+          if pushed.is_empty() {
+            // True continuous strata (or peel rejected) — finish marking.
+            while let Some((cx, cy)) = queue.pop_front() {
+              for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
+                let nx = world.wrap_x(cx + dx);
+                let ny = cy + dy;
+                if !visited.insert((nx, ny)) {
+                  continue;
                 }
-                _ => {
-                  visited.remove(&(nx, ny));
+                match world.get_cell(nx, ny) {
+                  Some(n) if flood_compatible(seed_mobile, &n, material) => {
+                    queue.push_back((nx, ny))
+                  }
+                  _ => {
+                    visited.remove(&(nx, ny));
+                  }
                 }
               }
+            }
+          } else {
+            // Leave unpushed flood + queue remainder for later seeds.
+            for (x, y, _) in &cells {
+              if !pushed.contains(&(*x, *y)) {
+                visited.remove(&(*x, *y));
+              }
+            }
+            while let Some((cx, cy)) = queue.pop_front() {
+              visited.remove(&(cx, cy));
             }
           }
           continue;
@@ -890,26 +917,43 @@ fn build_components(world: &World, active: &[ActiveChunk]) -> Vec<Component> {
       }
     }
   }
+  let air_below = |c: &Component| {
+    c.cells.iter().any(|(x, y, _)| match world.get_cell(*x, y - 1) {
+      None => true,
+      Some(cell) => cell.material == MaterialId::Air,
+    })
+  };
   out.sort_by(|a, b| {
-    let air_below = |c: &Component| {
-      c.cells.iter().any(|(x, y, _)| match world.get_cell(*x, y - 1) {
-        None => true,
-        Some(cell) => cell.material == MaterialId::Air,
-      })
-    };
     match (air_below(a), air_below(b)) {
       (true, false) => std::cmp::Ordering::Less,
       (false, true) => std::cmp::Ordering::Greater,
-      _ => a.min_y.cmp(&b.min_y),
+      _ => a.min_y.cmp(&b.min_y).then_with(|| {
+        let ax = a.cells.first().map(|(x, _, _)| *x).unwrap_or(0);
+        let bx = b.cells.first().map(|(x, _, _)| *x).unwrap_or(0);
+        ax.cmp(&bx)
+      }),
     }
   });
-  let cap = if hanging_count > 0 {
+  // Fairness: rotate so a stuck prefix cannot starve later bodies forever.
+  if out.len() > 1 {
+    let rot = (world.tick as usize).wrapping_mul(17) % out.len();
+    out.rotate_left(rot);
+  }
+  let floating_n = out.iter().filter(|c| air_below(c)).count();
+  let cap = if hanging_count > 0 || floating_n > MAX_BODIES_PER_TICK {
     MAX_HANGING_BODIES_PER_TICK
   } else {
     MAX_BODIES_PER_TICK
   };
-  out.truncate(cap);
-  out
+  let mut leftovers = Vec::new();
+  if out.len() > cap {
+    for dropped in out.drain(cap..) {
+      for (x, y, _) in dropped.cells {
+        leftovers.push((x, y));
+      }
+    }
+  }
+  (out, leftovers)
 }
 
 fn body_neighbor_count(set: &HashSet<(i32, i32)>, x: i32, y: i32) -> usize {
@@ -2111,6 +2155,45 @@ fn expand_competent_regions(active: &[ActiveChunk], drop_budget: i32) -> Vec<Act
   out
 }
 
+fn expand_regions_to_cells(
+  world: &World,
+  cells: &[(i32, i32)],
+  drop_budget: i32,
+) -> Vec<ActiveChunk> {
+  if cells.is_empty() {
+    return Vec::new();
+  }
+  let w = CHUNK_CELLS_W as i32;
+  let h = CHUNK_CELLS_H as i32;
+  let mut by_chunk: HashMap<ChunkCoord, Rect> = HashMap::new();
+  for &(gx, gy) in cells {
+    let cx = gx.div_euclid(w);
+    let cy = gy.div_euclid(h);
+    let lx = gx.rem_euclid(w) as u8;
+    let ly = gy.rem_euclid(h) as u8;
+    let coord = ChunkCoord::new(cx, cy);
+    by_chunk
+      .entry(coord)
+      .and_modify(|r| {
+        r.expand_to_include(lx, ly);
+      })
+      .or_insert(Rect {
+        x0: lx,
+        y0: ly,
+        x1: lx,
+        y1: ly,
+      });
+  }
+  let seeds: Vec<ActiveChunk> = by_chunk
+    .into_iter()
+    .map(|(coord, rect)| ActiveChunk { coord, rect })
+    .collect();
+  expand_competent_regions(&seeds, drop_budget)
+    .into_iter()
+    .filter(|ac| world.chunks.contains_key(&ac.coord))
+    .collect()
+}
+
 fn expand_regions_to_components(
   world: &World,
   components: &[Component],
@@ -2360,7 +2443,7 @@ fn settle_after_roll(
   fall_streak: &mut HashMap<(i32, i32), u32>,
   stats: &mut CompetentFallStats,
 ) {
-  let post = build_components(world, regions);
+  let (post, _) = build_components(world, regions);
   let Some(refreshed) = post
     .iter()
     .find(|c| c.set.contains(&hint))
@@ -2403,11 +2486,27 @@ pub fn apply_competent_fall_regions(
   // Free-fall jumps once (binary-searched distance), then impact/roll rebuilds —
   // not one rebuild per cell of drop.
   for pass in 0..COMPETENT_TOPOLOGY_PASSES {
-    let components = build_components(world, &regions);
+    let (mut components, leftovers) = build_components(world, &regions);
+    if !leftovers.is_empty() {
+      for &(x, y) in &leftovers {
+        world.touch_dirty(x, y);
+      }
+      let more = expand_regions_to_cells(world, &leftovers, max_drop);
+      if !more.is_empty() {
+        // Merge leftover coverage into the active scan set.
+        regions.extend(more);
+      }
+    }
     if components.is_empty() {
       break;
     }
+    // Within-tick fairness when leftovers forced another pass.
+    if pass > 0 && components.len() > 1 {
+      let n = components.len();
+      components.rotate_left((pass as usize) % n);
+    }
     let mut moved = false;
+    let had_leftovers = !leftovers.is_empty();
     for comp in components {
       let anchor = comp_anchor(&comp);
       // Pass 0: long free-fall jump; later passes: shorter jumps while still
@@ -2489,10 +2588,15 @@ pub fn apply_competent_fall_regions(
       }
       // Soft embed disabled (cheese-grater). Flat soft beds just rest.
     }
-    if moved {
-      let refreshed = expand_regions_to_components(world, &build_components(world, &regions), max_drop);
+    if moved || had_leftovers {
+      let (next, _) = build_components(world, &regions);
+      let refreshed = expand_regions_to_components(world, &next, max_drop);
       if !refreshed.is_empty() {
         regions = refreshed;
+      }
+      // Cap truncated work — keep going so leftovers get a pass this tick.
+      if had_leftovers && !moved {
+        continue;
       }
     } else {
       break;
@@ -2732,7 +2836,7 @@ mod tests {
     // 3×3 with a corner overhang so some columns lack support under the body.
     stamp_blob(&mut w, 5, 8, 3, 3);
     let regions = competent_active_regions(&w, &[], 8);
-    let comps = build_components(&w, &regions);
+    let (comps, _) = build_components(&w, &regions);
     assert!(!comps.is_empty());
     let cfg = CompetentFallConfig::default();
     let dir = downhill_roll_dir(&w, &comps[0], &cfg);
@@ -2780,7 +2884,7 @@ mod tests {
       }
     }
     let regions = competent_active_regions(&w, &[], 8);
-    let comps = build_components(&w, &regions);
+    let (comps, _) = build_components(&w, &regions);
     assert!(!comps.is_empty());
     let cfg = CompetentFallConfig {
       max_roll_events: 24,
@@ -2929,7 +3033,7 @@ mod tests {
     };
     apply_competent_fall_regions(&mut w, &[], &cfg, false);
     let regions = competent_active_regions(&w, &[], 8);
-    let comps = build_components(&w, &regions);
+    let (comps, _) = build_components(&w, &regions);
     let Some(comp) = comps.iter().find(|c| c.cells.len() >= 9) else {
       // May have slid; just ensure tip_dir is conservative when supported.
       return;
@@ -2966,7 +3070,7 @@ mod tests {
     stamp_blob(&mut w, 4, 4, 4, 4); // 16-cell boulder
     w.set_cell(9, 4, Cell::solid(MaterialId::Stone)); // tiny spec downhill
     let regions = competent_active_regions(&w, &[], 8);
-    let comps = build_components(&w, &regions);
+    let (comps, _) = build_components(&w, &regions);
     let boulder = comps.iter().find(|c| c.cells.len() >= 12).expect("boulder");
     assert!(
       can_crush_spec(&w, 9, 4, boulder.cells.len()),
@@ -3075,7 +3179,7 @@ mod tests {
       }
     }
     let regions = competent_active_regions(&w, &[], 8);
-    let comps = build_components(&w, &regions);
+    let (comps, _) = build_components(&w, &regions);
     assert!(
       comps.len() >= 3,
       "chain must become multiple bodies (got {})",
@@ -3112,7 +3216,7 @@ mod tests {
       w.set_cell(5, y, Cell::solid(MaterialId::Stone));
     }
     let regions = competent_active_regions(&w, &[], 4);
-    let comps = build_components(&w, &regions);
+    let (comps, _) = build_components(&w, &regions);
     let Some(comp) = comps.iter().find(|c| c.cells.len() >= 3) else {
       return;
     };
@@ -3145,7 +3249,7 @@ mod tests {
       }
     }
     let regions = competent_active_regions(&w, &[], 4);
-    let comps = build_components(&w, &regions);
+    let (comps, _) = build_components(&w, &regions);
     let boulder = comps
       .iter()
       .find(|c| c.cells.iter().any(|(x, _, _)| *x >= 4))
@@ -3229,7 +3333,7 @@ mod tests {
       hang.len()
     );
     let regions = competent_active_regions(&w, &[], 8);
-    let comps = build_components(&w, &regions);
+    let (comps, _) = build_components(&w, &regions);
     let total: usize = comps.iter().map(|c| c.cells.len()).sum();
     assert!(
       total >= 300,
@@ -3279,7 +3383,7 @@ mod tests {
       }
     }
     let regions = competent_active_regions(&w, &[], 8);
-    let comps = build_components(&w, &regions);
+    let (comps, _) = build_components(&w, &regions);
     let total: usize = comps.iter().map(|c| c.cells.len()).sum();
     assert!(
       total >= 150,
@@ -3308,6 +3412,65 @@ mod tests {
     assert!(
       !center_still,
       "peeled cavern roof must fall away from mid-air perch"
+    );
+  }
+
+  #[test]
+  fn truncated_hanging_bodies_are_redirtied_and_finish() {
+    // Many small floating tiles — over the hanging body cap — must all fall
+    // across ticks because truncated leftovers stay dirty.
+    let mut w = World::new(128);
+    for cx in 0..8 {
+      for cy in 0..4 {
+        w.ensure_chunk(ChunkCoord::new(cx, cy));
+      }
+    }
+    for x in 0..128 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // 20×12 tiles of 3×3 stone with 1-cell air gaps — over hanging cap.
+    let mut tiles = 0usize;
+    for ty in 0..12 {
+      for tx in 0..20 {
+        let ox = 2 + tx * 4;
+        let oy = 40 + ty * 4;
+        for x in ox..ox + 3 {
+          for y in oy..oy + 3 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+          }
+        }
+        tiles += 1;
+      }
+    }
+    assert!(
+      tiles > MAX_HANGING_BODIES_PER_TICK,
+      "precondition: more tiles than hanging cap ({tiles})"
+    );
+    let regions = competent_active_regions(&w, &[], 8);
+    let (comps, leftovers) = build_components(&w, &regions);
+    assert!(
+      !leftovers.is_empty(),
+      "cap must truncate (comps={}, leftovers={})",
+      comps.len(),
+      leftovers.len()
+    );
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 48,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..300 {
+      wake_floating_competent(&mut w);
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+      w.tick = w.tick.wrapping_add(1);
+    }
+    let high = (0..100)
+      .flat_map(|x| (38..100).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .count();
+    assert!(
+      high == 0,
+      "all truncated floating tiles must eventually fall (remaining={high})"
     );
   }
 
