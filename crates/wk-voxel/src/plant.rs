@@ -440,9 +440,10 @@ pub fn is_anchored(world: &World, atom: &Atom) -> bool {
 
 /// A rolling rock may shove this plant only when it is already loose.
 ///
-/// Deep-rooted, anchored plants stay put — the stem/leaves should bend or
-/// snap instead. A one- or two-root surface holdfast, an unanchored crown,
-/// or an open-water woody castaway can be knocked over and carried.
+/// Deep-rooted, anchored plants stay put — the stem/leaves squash under
+/// the boulder instead of riding it. A one- or two-root surface holdfast,
+/// an unanchored crown, or an open-water woody castaway can be knocked
+/// over and carried when the dest is not stone.
 pub fn plant_resists_rock_shove(world: &World, atom: &Atom) -> bool {
     if !is_land_plant(atom) {
         return false;
@@ -471,8 +472,9 @@ pub fn plant_resists_rock_shove(world: &World, atom: &Atom) -> bool {
 
 /// True when most roots sit in sand / soil / clay / gravel / compost.
 ///
-/// A boulder can shove these a cell or two; mineral-rooted plants stay
-/// pinned and only the canopy should give.
+/// A boulder can shove these a cell or two when it only glances; once it
+/// occupies the plant the canopy is crushed under it. Mineral-rooted
+/// plants stay pinned and only the canopy folds.
 pub fn plant_rooted_in_loose(world: &World, atom: &Atom) -> bool {
     let mut n = 0usize;
     let mut loose = 0usize;
