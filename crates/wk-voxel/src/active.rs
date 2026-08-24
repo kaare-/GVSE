@@ -10,7 +10,7 @@
 //! seams. Rules then only visit planned cells; writes during the tick
 //! rebuild dirty for the *next* tick.
 
-use std::collections::HashMap;
+use crate::fasthash::FxHashMap as HashMap;
 
 use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
@@ -215,7 +215,7 @@ fn inflate_wake(
 /// are retained — waking a neighbour that was never stamped is a no-op.
 pub fn plan_active(world: &World) -> Vec<ActiveChunk> {
     let span_x = wrap_chunk_span_x(world);
-    let mut map: HashMap<ChunkCoord, Rect> = HashMap::new();
+    let mut map: HashMap<ChunkCoord, Rect> = HashMap::default();
     for (coord, chunk) in &world.chunks {
         if let Some(rect) = chunk.dirty {
             inflate_wake(&mut map, *coord, rect, span_x);

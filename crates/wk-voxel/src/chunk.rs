@@ -8,6 +8,8 @@
 //! thread to own during a checkerboard sub-tick and keeps the dirty
 //! rectangle cheap.
 
+use std::hash::{Hash, Hasher};
+
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
@@ -22,7 +24,7 @@ pub const CHUNK_CELLS: usize = CHUNK_CELLS_W * CHUNK_CELLS_H;
 
 /// Chunk coordinate in world-chunk space. `(cx, cy)` — positive `cy`
 /// is up (sky), negative `cy` is down (bedrock).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChunkCoord {
     pub cx: i32,
     pub cy: i32,
@@ -31,6 +33,19 @@ pub struct ChunkCoord {
 impl ChunkCoord {
     pub fn new(cx: i32, cy: i32) -> Self {
         Self { cx, cy }
+    }
+
+    /// Pack into one word so HashMaps hash a single `u64` instead of two `i32`s.
+    #[inline]
+    pub fn pack(self) -> u64 {
+        ((self.cx as u32 as u64) << 32) | (self.cy as u32 as u64)
+    }
+}
+
+impl Hash for ChunkCoord {
+    #[inline]
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        state.write_u64(self.pack());
     }
 }
 

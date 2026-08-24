@@ -14,7 +14,7 @@
 //! per cell (512 B per 64×64 chunk) turns a per-cell hash into a chunk lookup
 //! plus a bit test, which is what makes a full rebuild affordable.
 
-use std::collections::HashMap;
+use crate::fasthash::FxHashMap as HashMap;
 
 use wk_material::MaterialId;
 
@@ -108,8 +108,8 @@ pub struct SupportMap {
 impl SupportMap {
   pub fn new() -> Self {
     Self {
-      surface: HashMap::new(),
-      grounded: HashMap::new(),
+      surface: HashMap::default(),
+      grounded: HashMap::default(),
       last_rebuild_tick: u64::MAX,
     }
   }
@@ -372,12 +372,12 @@ pub fn void_below_competent_seeds_with(
   let cw = CHUNK_CELLS_W as i32;
   let ch = CHUNK_CELLS_H as i32;
   let mut seeds = Vec::new();
-  let scan: Vec<ChunkCoord> = if coords.is_empty() {
-    world.chunks.keys().copied().collect()
-  } else {
-    coords.to_vec()
-  };
-  for coord in scan {
+  // Empty coords means "do not detach" — callers that want a full
+  // sweep must pass the loaded chunk keys explicitly.
+  if coords.is_empty() {
+    return seeds;
+  }
+  for &coord in coords {
     let Some(chunk) = world.chunks.get(&coord) else {
       continue;
     };
@@ -423,6 +423,26 @@ mod tests {
   use super::*;
   use crate::cell::Cell;
   use crate::chunk::ChunkCoord;
+
+  #[test]
+  fn empty_seed_coords_do_not_scan_the_world() {
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..8 {
+      for y in 70..80 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    assert!(
+      void_below_competent_seeds(&w, &[]).is_empty(),
+      "empty coords must not imply a full-world hanger scan"
+    );
+    let all: Vec<_> = w.chunks.keys().copied().collect();
+    assert!(
+      !void_below_competent_seeds(&w, &all).is_empty(),
+      "explicit full sweep still finds the sky slab"
+    );
+  }
 
   #[test]
   fn bedrock_column_is_grounded_and_floating_slab_is_not() {

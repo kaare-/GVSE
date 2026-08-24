@@ -195,14 +195,16 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
         let y_hi = y_lo + 1;
         let band = [y_lo - 1, y_lo, y_hi, y_hi + 1];
         let base_gx = coord.cx * cw;
+        let Some(lo_chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        let Some(hi_chunk) = world.chunks.get(&above) else {
+            continue;
+        };
         for lx in 0..cw {
             let gx = world.wrap_x(base_gx + lx);
-            let Some(lo) = world.get_cell(gx, y_lo) else {
-                continue;
-            };
-            let Some(hi) = world.get_cell(gx, y_hi) else {
-                continue;
-            };
+            let lo = lo_chunk.get(lx as usize, (ch - 1) as usize);
+            let hi = hi_chunk.get(lx as usize, 0);
             let lo_pore = is_porous_solid_with(lo.material, &hydro);
             let hi_pore = is_porous_solid_with(hi.material, &hydro);
             let lo_air = lo.material == MaterialId::Air && lo.sat.0 >= 160;

@@ -120,16 +120,6 @@ pub(crate) fn evap_climate_rate(
         .clamp(0.0, cap as f32) as i32
 }
 
-/// True when wet Air is a free surface of a pool / ocean / land film,
-/// not a suspended rain droplet with empty sky below it.
-fn rests_on_evap_surface(world: &World, gx: i32, gy: i32, cfg: &EvapConfig) -> bool {
-    match world.get_cell(gx, gy - 1) {
-        None => false,
-        Some(below) if below.material != MaterialId::Air => true,
-        Some(below) => below.sat.0 > cfg.dry_above_max,
-    }
-}
-
 /// Per-chunk scan result: local sat deltas + whether any wet Air remains.
 fn collect_evap_deltas(
     world: &World,
@@ -145,26 +135,53 @@ fn collect_evap_deltas(
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
 
     let per_chunk = map_chunk_coords_parallel(&coords, |coord| {
+        let Some(chunk) = world.chunks.get(&coord) else {
+            return (coord, false, Vec::new());
+        };
+        let above = world
+            .chunks
+            .get(&ChunkCoord::new(coord.cx, coord.cy + 1));
+        let below = world
+            .chunks
+            .get(&ChunkCoord::new(coord.cx, coord.cy - 1));
+        let base_gx = coord.cx * CHUNK_CELLS_W as i32;
+        let base_gy = coord.cy * CHUNK_CELLS_H as i32;
         let mut local: Vec<((i32, i32), i32)> = Vec::new();
         let mut still_wet = false;
         for y in 0..CHUNK_CELLS_H {
-            let gy = coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            let gy = base_gy + y as i32;
             for x in 0..CHUNK_CELLS_W {
-                let gx = coord.cx * CHUNK_CELLS_W as i32 + x as i32;
-                let Some(cur) = world.get_cell(gx, gy) else {
-                    continue;
-                };
+                let gx = world.wrap_x(base_gx + x as i32);
+                let cur = chunk.get(x, y);
                 if cur.material != MaterialId::Air || cur.sat.is_empty() {
                     continue;
                 }
                 still_wet = true;
-                let sky_above = match world.get_cell(gx, gy + 1) {
-                    None => true, // above chunk absent → open sky
-                    Some(above) => {
-                        above.material == MaterialId::Air && above.sat.0 <= cfg.dry_above_max
+                let sky_above = if y + 1 < CHUNK_CELLS_H {
+                    let above_c = chunk.get(x, y + 1);
+                    above_c.material == MaterialId::Air && above_c.sat.0 <= cfg.dry_above_max
+                } else {
+                    match above {
+                        None => true, // above chunk absent → open sky
+                        Some(c) => {
+                            let a = c.get(x, 0);
+                            a.material == MaterialId::Air && a.sat.0 <= cfg.dry_above_max
+                        }
                     }
                 };
-                if !sky_above || !rests_on_evap_surface(world, gx, gy, cfg) {
+                let rests = if y > 0 {
+                    let below_c = chunk.get(x, y - 1);
+                    below_c.material != MaterialId::Air || below_c.sat.0 > cfg.dry_above_max
+                } else {
+                    match below {
+                        None => false,
+                        Some(c) => {
+                            let b = c.get(x, CHUNK_CELLS_H - 1);
+                            b.material != MaterialId::Air || b.sat.0 > cfg.dry_above_max
+                        }
+                    }
+                };
+                if !sky_above || !rests {
                     continue;
                 }
                 let mut rate = cfg.rate_per_tick as i32;

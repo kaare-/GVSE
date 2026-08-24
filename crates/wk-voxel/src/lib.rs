@@ -56,6 +56,7 @@ pub use cell::{
 pub use chunk::{
     material_is_loose, Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W,
 };
+pub use fasthash::{FxBuildHasher, FxHashMap, FxHashSet, FxHasher};
 pub use blueprint::{
     ensure_symbiont_inherited, mutate_body, Blueprint, Genome, LaneId, PlacedModule, BLUEPRINT_DIR,
     BODY_MUTATION_MAX_EDITS,
@@ -122,7 +123,7 @@ pub use landscape_body::{
     step_landscape_bodies, LandscapeBody, LandscapeBodyStore, LandscapeFallStats,
     LANDSCAPE_GRAVITY_ONLY_MIN, MAX_LANDSCAPE_BODIES, MIN_LANDSCAPE_BODY_CELLS,
 };
-pub use grid::World;
+pub use grid::{ChunkMap, World};
 // HydroOverrides is defined in wk-material; re-export for app convenience.
 pub use wk_material::{HydroOverrides, HydroSlot};
 pub use organism::{

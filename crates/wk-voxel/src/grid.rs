@@ -6,13 +6,54 @@
 //! only unit of storage; the world is thin glue for lookup and
 //! iteration.
 
+use std::cell::Cell as StdCell;
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use wk_material::HydroOverrides;
 
 use crate::cell::Cell;
 use crate::chunk::{Chunk, ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::fasthash::FxHashMap;
+
+/// Live chunk table. FxHash — the hot `get_cell` / `set_cell` path never sees
+/// untrusted keys, so SipHash would only add cost.
+pub type ChunkMap = FxHashMap<ChunkCoord, Chunk>;
+
+static NEXT_CHUNK_CACHE_ID: AtomicU64 = AtomicU64::new(1);
+
+fn next_chunk_cache_id() -> u64 {
+    NEXT_CHUNK_CACHE_ID.fetch_add(1, Ordering::Relaxed)
+}
+
+/// Per-instance id so the thread-local last-chunk cache cannot follow a
+/// cloned or deserialized world (or a reused heap address after drop).
+#[derive(Debug)]
+pub(crate) struct ChunkCacheId(u64);
+
+impl Default for ChunkCacheId {
+    fn default() -> Self {
+        Self(next_chunk_cache_id())
+    }
+}
+
+impl Clone for ChunkCacheId {
+    fn clone(&self) -> Self {
+        Self(next_chunk_cache_id())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct LastChunk {
+    id: u64,
+    coord: ChunkCoord,
+    ptr: *const Chunk,
+}
+
+thread_local! {
+    static LAST_CHUNK: StdCell<Option<LastChunk>> = const { StdCell::new(None) };
+}
 
 /// Deterministic world seed used to salt per-chunk / per-tick RNG.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -28,7 +69,7 @@ impl Default for WorldSeed {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct World {
     pub seed: WorldSeed,
-    pub chunks: HashMap<ChunkCoord, Chunk>,
+    pub chunks: ChunkMap,
     /// Global tick counter across the whole sim. Chunk local `tick`
     /// counters are kept for RNG salting; this one drives rule
     /// scheduling.
@@ -81,14 +122,17 @@ pub struct World {
     /// written, which is what stops a settled ridge from being re-floodfilled
     /// every tick. Derived state — never saved.
     #[serde(skip, default)]
-    pub competent_settled: HashMap<ChunkCoord, crate::support_map::ChunkMask>,
+    pub competent_settled: FxHashMap<ChunkCoord, crate::support_map::ChunkMask>,
+    /// Invalidates the thread-local last-chunk pointer after clone / insert.
+    #[serde(skip, default)]
+    pub(crate) chunk_cache_id: ChunkCacheId,
 }
 
 impl World {
     pub fn new(seed: u64) -> Self {
         Self {
             seed: WorldSeed(seed),
-            chunks: HashMap::new(),
+            chunks: FxHashMap::default(),
             tick: 0,
             wrap_width: None,
             soft_litter: HashMap::new(),
@@ -101,7 +145,8 @@ impl World {
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
-            competent_settled: HashMap::new(),
+            competent_settled: FxHashMap::default(),
+            chunk_cache_id: ChunkCacheId::default(),
         }
     }
 
@@ -170,10 +215,46 @@ impl World {
         (ChunkCoord::new(cx, cy), lx, ly)
     }
 
+    /// Bump the last-chunk cache id. Required whenever `chunks` may
+    /// reallocate (new key) so cached pointers cannot dangle.
+    #[inline]
+    fn invalidate_chunk_cache(&mut self) {
+        self.chunk_cache_id = ChunkCacheId::default();
+    }
+
+    #[inline]
+    fn remember_chunk_ptr(id: u64, coord: ChunkCoord, chunk: &Chunk) {
+        let ptr = chunk as *const Chunk;
+        LAST_CHUNK.with(|slot| {
+            slot.set(Some(LastChunk { id, coord, ptr }));
+        });
+    }
+
+    #[inline]
+    fn cached_chunk(&self, coord: ChunkCoord) -> Option<*const Chunk> {
+        let id = self.chunk_cache_id.0;
+        LAST_CHUNK.with(|slot| {
+            slot.get().and_then(|last| {
+                if last.id == id && last.coord == coord {
+                    Some(last.ptr)
+                } else {
+                    None
+                }
+            })
+        })
+    }
+
     pub fn get_cell(&self, gx: i32, gy: i32) -> Option<Cell> {
         let gx = self.wrap_x(gx);
         let (coord, lx, ly) = Self::split(gx, gy);
-        self.chunks.get(&coord).map(|c| c.get(lx, ly))
+        if let Some(ptr) = self.cached_chunk(coord) {
+            // SAFETY: pointer is from this world's map; `chunk_cache_id`
+            // is bumped on any insert that could reallocate the table.
+            return Some(unsafe { (*ptr).get(lx, ly) });
+        }
+        let chunk = self.chunks.get(&coord)?;
+        Self::remember_chunk_ptr(self.chunk_cache_id.0, coord, chunk);
+        Some(chunk.get(lx, ly))
     }
 
     /// Write a cell at world coordinates, creating the containing
@@ -187,6 +268,24 @@ impl World {
         // changing saturation inside an Air cell must not, or sloshing lakes
         // would wake the whole ridge every tick.
         let track_sleep = !self.competent_settled.is_empty();
+        if let Some(ptr) = self.cached_chunk(coord) {
+            // SAFETY: exclusive `&mut self`; cached pointer matches this
+            // world's current table generation.
+            let chunk = unsafe { &mut *(ptr as *mut Chunk) };
+            let prev_solid = if track_sleep {
+                Some(chunk.get(lx, ly).material.is_solid())
+            } else {
+                None
+            };
+            chunk.set(lx, ly, cell);
+            if track_sleep && prev_solid != Some(cell.material.is_solid()) {
+                self.competent_wake_around(gx, gy);
+            }
+            return;
+        }
+        if !self.chunks.contains_key(&coord) {
+            self.invalidate_chunk_cache();
+        }
         let prev_solid = if track_sleep {
             self.chunks
                 .get(&coord)
@@ -196,6 +295,7 @@ impl World {
         };
         let chunk = self.chunks.entry(coord).or_insert_with(|| Chunk::new(coord));
         chunk.set(lx, ly, cell);
+        Self::remember_chunk_ptr(self.chunk_cache_id.0, coord, chunk);
         if track_sleep && prev_solid != Some(cell.material.is_solid()) {
             self.competent_wake_around(gx, gy);
         }
@@ -222,6 +322,9 @@ impl World {
     }
 
     pub fn ensure_chunk(&mut self, coord: ChunkCoord) -> &mut Chunk {
+        if !self.chunks.contains_key(&coord) {
+            self.invalidate_chunk_cache();
+        }
         self.chunks.entry(coord).or_insert_with(|| Chunk::new(coord))
     }
 }
@@ -259,5 +362,44 @@ mod tests {
         // through to the default (Air).
         w.ensure_chunk(ChunkCoord::new(0, 0));
         assert_eq!(w.get_cell(0, 0).map(|c| c.material), Some(MaterialId::Air));
+    }
+
+    #[test]
+    fn last_chunk_cache_survives_sequential_reads_and_clone() {
+        let mut w = World::new(3);
+        w.wrap_width = Some(128);
+        for x in 0..128 {
+            for y in 0..8 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+            }
+        }
+        for x in 0..128 {
+            for y in 0..8 {
+                assert_eq!(
+                    w.get_cell(x, y).map(|c| c.material),
+                    Some(MaterialId::Sand),
+                    "seq ({x},{y})"
+                );
+            }
+        }
+        // Wrap: x=128 is x=0. Cache must not return the unwrapped chunk.
+        assert_eq!(
+            w.get_cell(128, 3).map(|c| c.material),
+            Some(MaterialId::Sand)
+        );
+        let cloned = w.clone();
+        cloned
+            .get_cell(10, 2)
+            .expect("clone must read through its own table");
+        w.set_cell(10, 2, Cell::solid(MaterialId::Stone));
+        assert_eq!(
+            cloned.get_cell(10, 2).map(|c| c.material),
+            Some(MaterialId::Sand),
+            "clone must not share the live world's last-chunk pointer"
+        );
+        assert_eq!(
+            w.get_cell(10, 2).map(|c| c.material),
+            Some(MaterialId::Stone)
+        );
     }
 }

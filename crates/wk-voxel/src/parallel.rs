@@ -13,7 +13,7 @@
 //! only through raw pointers gathered **before** the parallel region
 //! (same idea as `slice::split_at_mut`).
 
-use std::collections::HashMap;
+use crate::fasthash::FxHashMap as HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use rayon::prelude::*;
@@ -67,7 +67,7 @@ impl ChunkPtrMap {
 /// Gather `*mut Chunk` for every coordinate that a pull-pass may write.
 pub(crate) fn chunk_ptrs_mut(world: &mut World, coords: &[ChunkCoord]) -> ChunkPtrMap {
     let map = &mut world.chunks as *mut HashMap<ChunkCoord, Chunk>;
-    let mut out = HashMap::with_capacity(coords.len());
+    let mut out = HashMap::with_capacity_and_hasher(coords.len(), Default::default());
     for &coord in coords {
         // Sequential get_mut: each &mut is turned into a raw pointer
         // and dropped before the next borrow.
@@ -119,7 +119,7 @@ pub(crate) fn moore_write_coords(active: &[ActiveChunk]) -> Vec<ChunkCoord> {
 /// Required for [`ChunkPtrMap`]'s `Sync` contract under rayon. Callers pass
 /// one checkerboard colour; overlapping sets mean a data race in parallel.
 pub(crate) fn pull_write_coords_disjoint(active: &[ActiveChunk]) -> bool {
-    let mut claimed: HashMap<ChunkCoord, ChunkCoord> = HashMap::new();
+    let mut claimed: HashMap<ChunkCoord, ChunkCoord> = HashMap::default();
     for ac in active {
         for c in [
             ac.coord,

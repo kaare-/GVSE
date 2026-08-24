@@ -33,6 +33,12 @@ erosion (many sticky chunks), then restores `parallel_physics` for the
 CA tick. Tail insurance scans use sticky `has_loose` / `has_wet_air`
 filters; failure runs every other tick.
 
+**`get_cell` last-chunk cache:** sequential scans (evap, phase, seepage
+wakes, organisms walking a column) hit a thread-local pointer into the
+current chunk so they skip the `HashMap` probe. `World.chunks` itself
+uses FxHash. Evap's wet-chunk walk is chunk-local (own / above / below).
+Idle landscape hanger scans are skipped except on the support-map cadence.
+
 ## Phase 0 — Measure first
 
 Before adding threads, profile a real save (terrace water + high
