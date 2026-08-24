@@ -249,24 +249,36 @@ Guarded by `touching_loose_rocks_with_different_tags_stay_separate`,
 `rolling_rock_does_not_glue_to_rock_it_passes`, and
 `painted_and_worldgen_rock_still_forms_one_mass`.
 
-### Water displacement (`crate::water_displace`)
+### Displacement (`crate::displace`) — moving rock shifts, never consumes
 
-Free water is `sat` on `Air` cells, so **any** rule that writes a solid over an
-Air cell destroys that water unless the units are carried over. Rock dropped in
-a lake must raise the level, not drink it.
+A body that overwrites an occupied cell destroys whatever was there. Two kinds
+of mass need carrying over, and both use the same shape:
 
-Every mover therefore does: `take_free_water` on each cell it will occupy →
-write → `deposit_free_water`, preferring the cells it vacated (that is exactly
-the volume it swapped out of the lake), then spreading upward and outward.
+**take** from every cell the body will occupy → **write** the body → **deposit**
+into the cells the body *vacated*. A body vacates exactly as many cells as it
+occupies, so the swapped-out volume always has room.
 
-Covered paths: competent body translate / tip / slide (`write_roll_cells`), soft
-bed displacement (`displace_soft_at`), impact debris drop, landscape entity fall
-(`apply_drop`) and rematerialize (`stamp_cells`). Crushed soft beds release
-their pore water as free water rather than vanishing with the grain.
+| Content | Helpers | Why it leaks without care |
+|---|---|---|
+| Free water (`sat` on `Air`) | `take_free_water` / `deposit_free_water` | Rock in a lake must raise the level, not drink it |
+| Loose cells (sand, soil, clay, gravel, loose rock, snow, litter) | `take_soft_cell` / `deposit_shifted_cells` | A slab ploughing a bank must shove it aside, not delete it |
+
+Deposits prefer the vacated volume, then search outward **biased upward** —
+material shoved by a sinking rock heaps up beside and above it, and grain
+settling relaxes the pile on later ticks. Wet destination cells let a relocated
+grain soak up what it can hold, so water is not stranded.
+
+Covered paths: competent body translate / tip / slide (`write_roll_cells`),
+impact debris drop, landscape entity fall (`apply_drop`) and rematerialize
+(`stamp_cells`).
 
 Guarded by `rock_dropped_in_lake_displaces_water_instead_of_eating_it`,
-`rock_sliding_through_wet_sand_conserves_water`, and
-`landscape_slab_dropped_in_lake_displaces_water`.
+`rock_sliding_through_wet_sand_conserves_water`,
+`landscape_slab_dropped_in_lake_displaces_water`,
+`falling_rock_shifts_sand_instead_of_eating_it`,
+`rolling_rock_shifts_mixed_loose_materials`, and
+`landscape_slab_shifts_loose_beds_instead_of_eating_them` — the last one caught
+a slab deleting 250 cells of loose bed per drop.
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.

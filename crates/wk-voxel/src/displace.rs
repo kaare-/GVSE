@@ -1,15 +1,20 @@
 //! wk-voxel is an isolated greenfield sim. It MUST NOT import from
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app.
 //!
-//! Water displacement bookkeeping for solids that move into wet cells.
+//! Displacement bookkeeping for solids that move into occupied cells.
 //!
-//! Free water lives as `sat` on `Air` cells, so any rule that overwrites an Air
-//! cell with a solid **destroys** that water unless the units are carried over.
-//! Rock dropped in a lake must raise the level, not drink it.
+//! A moving body must **shift** what is in its way, never consume it:
 //!
-//! Usage: [`take_free_water`] every cell the body will occupy, then
-//! [`deposit_free_water`] once the write is done, preferring the cells the body
-//! vacated.
+//! - Free water lives as `sat` on `Air` cells, so overwriting an Air cell with a
+//!   solid destroys that water unless the units are carried over. Rock dropped
+//!   in a lake raises the level, it does not drink it.
+//! - Loose material (sand, soil, clay, gravel, loose rock, snow, litter) is a
+//!   whole cell. Overwriting it deletes real mass, so it is relocated instead.
+//!
+//! Both follow the same shape: take from every cell the body will occupy, write
+//! the body, then deposit into the cells the body **vacated**. A body vacates
+//! exactly as many cells as it occupies, so the volume it swaps out always has
+//! room for what it pushed aside.
 
 use std::collections::VecDeque;
 
@@ -130,6 +135,134 @@ pub fn deposit_free_water(
     }
   }
   units
+}
+
+/// A loose cell lifted out of a body's path, waiting to be re-homed.
+#[derive(Debug, Clone, Copy)]
+pub struct ShiftedCell {
+  pub cell: Cell,
+  /// Where it came from, so deposits can prefer staying nearby.
+  pub from: (i32, i32),
+}
+
+/// Remove a loose cell from a body's path, keeping its material and pore water.
+///
+/// Leaves behind any free water that was sharing the space (there is none for a
+/// solid, but the destination swap in [`deposit_shifted_cells`] relies on the
+/// same convention).
+pub fn take_soft_cell(
+  world: &mut World,
+  gx: i32,
+  gy: i32,
+  is_soft: impl Fn(MaterialId) -> bool,
+) -> Option<ShiftedCell> {
+  let wx = world.wrap_x(gx);
+  let cur = world.get_cell(wx, gy)?;
+  if !is_soft(cur.material) {
+    return None;
+  }
+  world.set_cell(wx, gy, Cell::air());
+  Some(ShiftedCell {
+    cell: cur,
+    from: (wx, gy),
+  })
+}
+
+/// Re-home loose cells the body shoved aside.
+///
+/// Tries `prefer` first (normally the cells the body vacated), then a bounded
+/// search outward from each cell's origin, biased upward — material shoved by a
+/// sinking rock piles up beside and above it. Returns any cells that found no
+/// space; grain settling will tidy the resulting heap on later ticks.
+pub fn deposit_shifted_cells(
+  world: &mut World,
+  mut shifted: Vec<ShiftedCell>,
+  prefer: &[(i32, i32)],
+  blocked: &HashSet<(i32, i32)>,
+) -> Vec<ShiftedCell> {
+  if shifted.is_empty() {
+    return shifted;
+  }
+  let mut open: VecDeque<(i32, i32)> = prefer
+    .iter()
+    .map(|&(x, y)| (world.wrap_x(x), y))
+    .filter(|p| !blocked.contains(p))
+    .collect();
+  let mut leftover = Vec::new();
+
+  while let Some(item) = shifted.pop() {
+    // Preferred (vacated) slots first — they are guaranteed-sized for the swap.
+    let mut placed = false;
+    while let Some((x, y)) = open.pop_front() {
+      if matches!(world.get_cell(x, y), Some(c) if c.material == MaterialId::Air) {
+        place_soft(world, x, y, item.cell);
+        placed = true;
+        break;
+      }
+    }
+    if placed {
+      continue;
+    }
+    if let Some((x, y)) = find_open_near(world, item.from, blocked) {
+      place_soft(world, x, y, item.cell);
+    } else {
+      leftover.push(item);
+    }
+  }
+  leftover
+}
+
+/// Write a loose cell into an Air slot, keeping any free water that was there.
+fn place_soft(world: &mut World, x: i32, y: i32, mut cell: Cell) {
+  if let Some(dst) = world.get_cell(x, y) {
+    if dst.sat.0 > 0 && crate::cell::water_capacity(cell.material) > 0 {
+      // Wet slot: let the grain soak up what it can hold.
+      let cap = crate::cell::water_capacity(cell.material) as u32;
+      let take = cap.saturating_sub(cell.sat.0 as u32).min(dst.sat.0 as u32);
+      cell.sat = Sat((cell.sat.0 as u32 + take) as u8);
+    }
+  }
+  world.set_cell(x, y, cell);
+  world.touch_dirty(x, y);
+}
+
+/// Nearest Air cell to `from`, searched upward-first within a bounded radius.
+fn find_open_near(
+  world: &World,
+  from: (i32, i32),
+  blocked: &HashSet<(i32, i32)>,
+) -> Option<(i32, i32)> {
+  const MAX_VISIT: usize = 512;
+  let mut seen: HashSet<(i32, i32)> = HashSet::default();
+  let mut q = VecDeque::new();
+  seen.insert(from);
+  q.push_back(from);
+  let mut visited = 0usize;
+  while let Some((x, y)) = q.pop_front() {
+    if visited >= MAX_VISIT {
+      break;
+    }
+    visited += 1;
+    // Up first, then sideways, then down: shoved material heaps upward.
+    for (dx, dy) in [(0, 1), (1, 0), (-1, 0), (0, -1)] {
+      let nx = world.wrap_x(x + dx);
+      let ny = y + dy;
+      if ny < 0 || !seen.insert((nx, ny)) {
+        continue;
+      }
+      match world.get_cell(nx, ny) {
+        Some(c) if c.material == MaterialId::Air => {
+          if !blocked.contains(&(nx, ny)) {
+            return Some((nx, ny));
+          }
+          q.push_back((nx, ny));
+        }
+        Some(_) => q.push_back((nx, ny)),
+        None => {}
+      }
+    }
+  }
+  None
 }
 
 #[cfg(test)]

@@ -12,7 +12,9 @@
 use std::collections::VecDeque;
 
 use crate::fasthash::FxHashSet as HashSet;
-use crate::water_displace::{deposit_free_water, pore_water_of, take_free_water};
+use crate::displace::{
+  deposit_free_water, deposit_shifted_cells, take_free_water, take_soft_cell, ShiftedCell,
+};
 
 use wk_material::MaterialId;
 
@@ -20,8 +22,7 @@ use crate::cell::{is_competent_rock, Cell, CellFlags};
 use crate::chunk::ChunkCoord;
 use crate::grid::World;
 use crate::support_map::{
-  hanging_landscape_cluster, hanging_landscape_cluster_with, void_below_competent_seeds,
-  void_below_competent_seeds_with, SupportMap,
+  hanging_landscape_cluster_with, void_below_competent_seeds_with, SupportMap,
 };
 
 /// Only truly massive hang clusters become landscape entities.
@@ -253,22 +254,19 @@ fn translate_body(body: &mut LandscapeBody, dx: i32, dy: i32) {
   body.oy += dy;
 }
 
-/// Pulverize soft beds in the body's path. Their pore water survives as free
-/// water so a slab crashing through a wet bank cannot delete the water.
-/// Returns water units needing a home.
-fn crush_obstacles(world: &mut World, cells: &[(i32, i32, Cell)]) -> u32 {
-  let mut water = 0u32;
+/// Lift soft beds out of the slab's path so they can be re-homed after the move.
+///
+/// A landscape slab shoves sand, soil, gravel and loose rock aside; it must not
+/// delete them. The cells come back in [`apply_drop`], preferring the volume the
+/// slab vacates.
+fn take_obstacles(world: &mut World, cells: &[(i32, i32, Cell)]) -> Vec<ShiftedCell> {
+  let mut out = Vec::new();
   for &(x, y, _) in cells {
-    let wx = world.wrap_x(x);
-    let Some(c) = world.get_cell(wx, y) else {
-      continue;
-    };
-    if is_crushable_bed(c.material) {
-      water += pore_water_of(&c);
-      world.set_cell(wx, y, Cell::air());
+    if let Some(taken) = take_soft_cell(world, x, y, is_crushable_bed) {
+      out.push(taken);
     }
   }
-  water
+  out
 }
 
 fn bottom_face(body: &LandscapeBody) -> Vec<(i32, i32)> {
@@ -320,25 +318,28 @@ fn apply_drop(world: &mut World, body: &mut LandscapeBody, drop: i32) {
     .iter()
     .map(|(x, y, c)| (world.wrap_x(*x), *y - drop, *c))
     .collect();
-  // Everything the body sweeps through: soft beds are pulverized and lake water
-  // is displaced upward, never consumed.
-  let mut water = crush_obstacles(world, &shifted);
+  // Everything the slab sweeps through is shifted, never consumed: loose beds
+  // are lifted out and lake water is displaced upward.
+  let moved_beds = take_obstacles(world, &shifted);
+  let mut water = 0u32;
   for &(x, y, _) in &shifted {
     water += take_free_water(world, x, y);
   }
   translate_body(body, 0, -drop);
-  if water > 0 {
-    let occupied: HashSet<(i32, i32)> = shifted
-      .iter()
-      .map(|&(x, y, _)| (x, y))
-      .collect();
-    // Prefer the column the body just left — that is the volume it swapped.
+  if water > 0 || !moved_beds.is_empty() {
+    let occupied: HashSet<(i32, i32)> = shifted.iter().map(|&(x, y, _)| (x, y)).collect();
+    // Prefer the column the slab just left — that is the volume it swapped.
     let vacated: Vec<(i32, i32)> = cells
       .iter()
       .map(|&(x, y, _)| (world.wrap_x(x), y))
       .filter(|p| !occupied.contains(p))
       .collect();
-    let _ = deposit_free_water(world, water, &vacated, &occupied);
+    if !moved_beds.is_empty() {
+      let _ = deposit_shifted_cells(world, moved_beds, &vacated, &occupied);
+    }
+    if water > 0 {
+      let _ = deposit_free_water(world, water, &vacated, &occupied);
+    }
   }
 }
 
@@ -689,6 +690,64 @@ mod tests {
     }
     let mut store = LandscapeBodyStore::new();
     assert_eq!(detach_landscape_bodies(&mut w, &mut store, &[]), 0);
+  }
+
+  #[test]
+  fn landscape_slab_shifts_loose_beds_instead_of_eating_them() {
+    let mut w = World::new(40);
+    for cy in 0..2 {
+      w.ensure_chunk(ChunkCoord::new(0, cy));
+    }
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Thick mixed loose bed the slab ploughs straight through.
+    for x in 0..40 {
+      for y in 1..14 {
+        let mat = match y % 4 {
+          0 => MaterialId::Sand,
+          1 => MaterialId::Soil,
+          2 => MaterialId::Gravel,
+          _ => MaterialId::Clay,
+        };
+        w.set_cell(x, y, Cell::solid(mat));
+      }
+    }
+    // Landscape-sized slab (25x10 = 250 cells) above the bed.
+    for x in 5..30 {
+      for y in 45..55 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let mats = [
+      MaterialId::Sand,
+      MaterialId::Soil,
+      MaterialId::Gravel,
+      MaterialId::Clay,
+    ];
+    let count = |w: &World| -> Vec<usize> {
+      mats
+        .iter()
+        .map(|&m| {
+          (0..40)
+            .flat_map(|x| (0..70).map(move |y| (x, y)))
+            .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(m))
+            .count()
+        })
+        .collect()
+    };
+    let before = count(&w);
+    let mut store = LandscapeBodyStore::new();
+    assert_eq!(detach_landscape_bodies(&mut w, &mut store, &[]), 1);
+    for _ in 0..24 {
+      step_landscape_bodies(&mut w, &mut store);
+    }
+    let after = count(&w);
+    assert_eq!(
+      after, before,
+      "slab must shove loose beds aside, not consume them \
+       (before={before:?}, after={after:?})"
+    );
   }
 
   #[test]

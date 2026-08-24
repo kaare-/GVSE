@@ -18,7 +18,9 @@ use wk_material::MaterialId;
 // Coordinate sets here are hashed millions of times per second and never see
 // untrusted input, so they use the fast hasher rather than SipHash.
 use crate::fasthash::{FxHashMap as HashMap, FxHashSet as HashSet};
-use crate::water_displace::{deposit_free_water, take_free_water};
+use crate::displace::{
+  deposit_free_water, deposit_shifted_cells, take_free_water, take_soft_cell,
+};
 
 use crate::active::ActiveChunk;
 use crate::cell::{is_competent_rock, Cell, CellFlags, Sat};
@@ -326,15 +328,6 @@ fn body_can_seed(world: &World, gx: i32, gy: i32, _cell: &Cell) -> bool {
     }
   }
   false
-}
-
-/// Public form of the seed gate so wake passes agree with body building.
-#[inline]
-pub fn competent_cell_can_move(world: &World, gx: i32, gy: i32) -> bool {
-  match world.get_cell(gx, gy) {
-    Some(c) if is_competent_rock(c.material) => body_can_seed(world, gx, gy, &c),
-    _ => false,
-  }
 }
 
 fn has_free_neighbor(world: &World, gx: i32, gy: i32) -> bool {
@@ -1838,56 +1831,6 @@ fn can_pivot_roll(world: &World, comp: &Component, pivot: (i32, i32), dx: i32) -
 }
 
 /// Push soft bed out of a roll destination into nearby air, else crush it.
-/// Push a soft cell aside, conserving any water involved.
-fn displace_soft_at(world: &mut World, gx: i32, gy: i32) {
-  let Some(cur) = world.get_cell(gx, gy) else {
-    return;
-  };
-  if !is_roll_displaceable(cur.material) {
-    return;
-  }
-  // Prefer spilling downhill / down into air.
-  for (dx, dy) in [(0, -1), (1, -1), (-1, -1), (1, 0), (-1, 0)] {
-    let nx = world.wrap_x(gx + dx);
-    let ny = gy + dy;
-    if ny < 0 {
-      continue;
-    }
-    if let Some(dst) = world.get_cell(nx, ny) {
-      if dst.material == MaterialId::Air {
-        // Swap: the soft cell (with its pore water) moves, and any free water
-        // that was in the way lands where the soft cell used to be.
-        let freed = dst.sat.0 as u32;
-        world.set_cell(nx, ny, cur);
-        world.touch_dirty(nx, ny);
-        world.set_cell(
-          gx,
-          gy,
-          Cell {
-            material: MaterialId::Air,
-            sat: Sat(freed.min(255) as u8),
-            ..Cell::default()
-          },
-        );
-        world.touch_dirty(gx, gy);
-        return;
-      }
-    }
-  }
-  // Nowhere to spill: the soft cell is crushed away, but keep its pore water as
-  // free water so the lake volume is conserved.
-  world.set_cell(
-    gx,
-    gy,
-    Cell {
-      material: MaterialId::Air,
-      sat: cur.sat,
-      ..Cell::default()
-    },
-  );
-  world.touch_dirty(gx, gy);
-}
-
 fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, i32, Cell)>) {
   let src_set: HashSet<(i32, i32)> = sources.iter().copied().collect();
   let target_set: HashSet<(i32, i32)> = moves
@@ -1899,6 +1842,9 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
   // write into the cells the body vacates — a rock displaces a lake, it must
   // never delete it.
   let mut displaced_water = 0u32;
+  // Loose material in the way is lifted out and re-homed after the write —
+  // deleting it would let rock eat sand, soil, gravel and loose rock.
+  let mut shifted: Vec<crate::displace::ShiftedCell> = Vec::new();
   for (tx, ty, _) in &moves {
     if src_set.contains(&(*tx, *ty)) {
       continue;
@@ -1907,8 +1853,9 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
       if dst.material == MaterialId::Air {
         displaced_water += take_free_water(world, *tx, *ty);
       } else if is_roll_displaceable(dst.material) {
-        displace_soft_at(world, *tx, *ty);
-        // Whatever ended up in that cell may itself be water now.
+        if let Some(taken) = take_soft_cell(world, *tx, *ty, is_roll_displaceable) {
+          shifted.push(taken);
+        }
         displaced_water += take_free_water(world, *tx, *ty);
       } else if is_competent_rock(dst.material) && can_crush_spec(world, *tx, *ty, mover_n) {
         crush_spec_at(world, *tx, *ty);
@@ -1929,14 +1876,20 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
     world.set_cell(tx, ty, cell);
     world.touch_dirty(tx, ty);
   }
-  if displaced_water > 0 {
+  if displaced_water > 0 || !shifted.is_empty() {
     // Vacated cells first (the volume the body used to fill), then outward.
     let vacated: Vec<(i32, i32)> = sources
       .iter()
       .map(|&(x, y)| (world.wrap_x(x), y))
       .filter(|p| !target_set.contains(p))
       .collect();
-    let _ = deposit_free_water(world, displaced_water, &vacated, &target_set);
+    // Grain before water: the solid needs a whole cell, water only needs room.
+    if !shifted.is_empty() {
+      let _ = deposit_shifted_cells(world, shifted, &vacated, &target_set);
+    }
+    if displaced_water > 0 {
+      let _ = deposit_free_water(world, displaced_water, &vacated, &target_set);
+    }
   }
 }
 
@@ -3831,6 +3784,111 @@ mod tests {
     c.flags.set(CellFlags::MOBILE_ROCK);
     c.set_rock_body_tag(tag);
     c
+  }
+
+  /// Count cells of a given material in a region.
+  fn count_mat(w: &World, mat: MaterialId, x0: i32, x1: i32, y0: i32, y1: i32) -> usize {
+    (x0..x1)
+      .flat_map(|x| (y0..y1).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(mat))
+      .count()
+  }
+
+  #[test]
+  fn falling_rock_shifts_sand_instead_of_eating_it() {
+    let mut w = World::new(20);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..20 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Deep sand bed the boulder will plough into.
+    for x in 0..20 {
+      for y in 1..10 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    stamp_blob(&mut w, 8, 30, 4, 4);
+    let sand0 = count_mat(&w, MaterialId::Sand, 0, 20, 0, 60);
+    let stone0 = count_mat(&w, MaterialId::Stone, 0, 20, 0, 60);
+    assert!(sand0 > 0 && stone0 > 0, "precondition");
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 48,
+      ..CompetentFallConfig::default()
+    };
+    for t in 0..24u64 {
+      w.tick = t;
+      wake_competent_bodies_all(&mut w);
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let sand1 = count_mat(&w, MaterialId::Sand, 0, 20, 0, 60);
+    assert_eq!(
+      sand1, sand0,
+      "sand must be shifted aside, not eaten (before={sand0}, after={sand1})"
+    );
+  }
+
+  #[test]
+  fn rolling_rock_shifts_mixed_loose_materials() {
+    let mut w = World::new(40);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Slope of assorted loose material for a boulder to tumble across.
+    for x in 0..36 {
+      let h = 1 + x / 2;
+      for y in 1..=h {
+        let mat = match x % 4 {
+          0 => MaterialId::Sand,
+          1 => MaterialId::Clay,
+          2 => MaterialId::Gravel,
+          _ => MaterialId::LooseRock,
+        };
+        w.set_cell(x, y, Cell::solid(mat));
+      }
+    }
+    let before: Vec<usize> = [
+      MaterialId::Sand,
+      MaterialId::Clay,
+      MaterialId::Gravel,
+      MaterialId::LooseRock,
+    ]
+    .iter()
+    .map(|&m| count_mat(&w, m, 0, 40, 0, 60))
+    .collect();
+    let cx = 26i32;
+    let cy = 1 + cx / 2 + 4;
+    for x in cx..cx + 4 {
+      for y in cy..cy + 4 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let cfg = CompetentFallConfig {
+      max_roll_events: 32,
+      min_impact_fall_cells: 99,
+      ..CompetentFallConfig::default()
+    };
+    for t in 0..40u64 {
+      w.tick = t;
+      wake_competent_bodies_all(&mut w);
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let after: Vec<usize> = [
+      MaterialId::Sand,
+      MaterialId::Clay,
+      MaterialId::Gravel,
+      MaterialId::LooseRock,
+    ]
+    .iter()
+    .map(|&m| count_mat(&w, m, 0, 40, 0, 60))
+    .collect();
+    assert_eq!(
+      after, before,
+      "sand / clay / gravel / loose rock must all be shifted, not consumed \
+       (before={before:?}, after={after:?})"
+    );
   }
 
   #[test]
