@@ -100,20 +100,19 @@ pub const FLOW_SUBSTEPS_MIN: usize = 8;
 /// After this many substeps, a *tiny* dirty halo may early-out.
 /// Must be **below** [`FLOW_SUBSTEPS_MIN`] so the FPS cap does not
 /// swallow the adaptive exit (was equal → EO never shortened the loop).
-/// Held at 6 so a shrinking stream still gets several leveling passes
-/// before we consider stopping — exiting at 4 plus a 1/3-shrink rule
-/// stuttered runnels (4 hops, pause a tick, 4 hops).
-pub const FLOW_SUBSTEPS_EO_AFTER: usize = 6;
+/// Quiet ponds still stop here; large streams do not — a 1/3-shrink
+/// abort used to stutter runnels (4 hops, pause a tick, 4 hops) and
+/// also let open basins keep enough substeps to soak their beds.
+pub const FLOW_SUBSTEPS_EO_AFTER: usize = 4;
 /// If the planned dirty area (cells) drops to this or below after
 /// [`FLOW_SUBSTEPS_EO_AFTER`], stop the flow loop early — settled films
 /// don't need the full ×8. Busy rain / cascades stay at max.
-/// 256 (was 512) so a modest stream keeps flowing instead of parking.
-pub const FLOW_QUIET_AREA: usize = 256;
+pub const FLOW_QUIET_AREA: usize = 512;
 
 /// Pore seepage + lake-bed wake cadence (ticks). Surface gravity/flow
-/// still run every tick; underground is still cheaper than runoff but
-/// every-other-tick (was 4) so pore fronts keep up with the surface.
-pub const SEEPAGE_EVERY: u64 = 2;
+/// still run every tick; underground stays cadence-gated. Dropping this
+/// to 2 smeared stone wetting fronts (contact sat never ponded).
+pub const SEEPAGE_EVERY: u64 = 4;
 
 /// Live-tunable physics trade-offs (Tab → Performance).
 ///

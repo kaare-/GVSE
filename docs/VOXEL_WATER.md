@@ -44,11 +44,13 @@ cells so the following tick re-enters the loop.
 
 Interactive default (`PerfConfig::flow_quiet_early_out`, **on**) caps
 the loop at `FLOW_SUBSTEPS_MIN` (8) and may stop after
-`FLOW_SUBSTEPS_EO_AFTER` (6) when the dirty halo is empty or at most
-`FLOW_QUIET_AREA` (256 cells). Do **not** early-out just because a large
-halo shrank — that stuttered streams (a few hops, then a tick of rest).
-`full_feel()` keeps the full ×12 with no early-out. Underground seepage
-is cadence-gated (`SEEPAGE_EVERY` = 2 ticks) on the interactive path.
+`FLOW_SUBSTEPS_EO_AFTER` (4) when the dirty halo is empty or at most
+`FLOW_QUIET_AREA` (512 cells). Do **not** early-out just because a large
+halo shrank — that stuttered streams (a few hops, then a tick of rest)
+while still letting quiet ponds and open basins park. `full_feel()`
+keeps the full ×12 with no early-out. Underground seepage stays
+cadence-gated (`SEEPAGE_EVERY` = 4 ticks) — every-other-tick smeared
+stone wetting fronts instead of advancing them.
 
 Thin-film hops stay soft (`sheet` 48 / `drain` 96 sat per pass at stack
 depth 0–1) so runnels don't spike empty; stacked hillside water still
