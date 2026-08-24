@@ -59,13 +59,15 @@ use wk_voxel::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased,
     apply_evaporation_into_humidity_climate,
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    apply_weather_rgb, celestial_local_cfg, celestial_moon_screen_pos_cfg,
+    apply_weather_rgb, apply_competent_fall_regions, celestial_local_cfg,
+    celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
-    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water,
+    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water, plan_active,
     pore_wetness_with, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg,
     set_parallel_enabled, step_carbon_budget, temperature_step_due, tick_with_life,
     wake_competent_bodies_all, wake_unsupported_grains,
-    wake_unstable_slopes, GeotechOverlayMode, SimSnapshot, WorldgenParams,
+    wake_unstable_slopes, GeotechOverlayMode,
+    SimSnapshot, WorldgenParams,
 };
 
 use crate::atmosphere::{
@@ -322,9 +324,25 @@ async fn main() {
                 paused = true;
             } else {
                 paused = terrain.was_paused;
-                wake_unsupported_grains(&mut scene.world);
+                // One fps-path pass — leftovers stay dirty and finish over
+                // subsequent frames instead of stalling the editor close.
                 wake_competent_bodies_all(&mut scene.world);
+                wake_unsupported_grains(&mut scene.world);
                 wake_unstable_slopes(&mut scene.world);
+                let active = plan_active(&scene.world);
+                let _ = apply_competent_fall_regions(
+                    &mut scene.world,
+                    &active,
+                    &settings.competent_fall,
+                    true,
+                );
+                if organisms_on && !scene.world.competent_cell_moves.is_empty() {
+                    scene.organisms.shift_atoms_with_moved_cells(
+                        &scene.world,
+                        &scene.world.competent_cell_moves,
+                    );
+                    scene.world.competent_cell_moves.clear();
+                }
             }
         }
         if !quit_dialog.open && editor.open {
@@ -590,6 +608,13 @@ async fn main() {
                 Some(&settings.fungi),
                 Some(&settings.competent_fall),
             );
+            if organisms_on && !scene.world.competent_cell_moves.is_empty() {
+                scene.organisms.shift_atoms_with_moved_cells(
+                    &scene.world,
+                    &scene.world.competent_cell_moves,
+                );
+                scene.world.competent_cell_moves.clear();
+            }
             set_parallel_enabled(true);
             // Crude CO₂ buckets: surface Organic oxidation + atm↔lake exchange.
             step_carbon_budget(&mut scene.carbon, &mut scene.world, &settings.carbon);

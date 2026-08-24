@@ -96,6 +96,7 @@ impl WorldV5 {
             mycelium_energy: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
+            competent_cell_moves: Vec::new(),
         }
     }
 }
@@ -133,6 +134,7 @@ impl WorldV6 {
             mycelium_energy: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
+            competent_cell_moves: Vec::new(),
         }
     }
 }
@@ -175,6 +177,7 @@ impl WorldV7 {
             mycelium_energy: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
+            competent_cell_moves: Vec::new(),
         };
         // Promote sole ownership → one share matching current `_pad`.
         for ((gx, gy), strain) in sole {
@@ -228,6 +231,7 @@ impl WorldV8 {
             mycelium_energy: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
+            competent_cell_moves: Vec::new(),
         }
     }
 }
@@ -273,6 +277,7 @@ impl WorldV11 {
             mycelium_energy: self.mycelium_energy,
             sym_net_flow: self.sym_net_flow,
             mycelium_strain_lineage: HashMap::new(),
+            competent_cell_moves: Vec::new(),
         }
     }
 }
@@ -363,6 +368,7 @@ impl WorldV10 {
                 .map(|(k, v)| (k, v.into_current()))
                 .collect(),
             mycelium_strain_lineage: HashMap::new(),
+            competent_cell_moves: Vec::new(),
         }
     }
 }
@@ -421,6 +427,7 @@ impl WorldV9 {
             mycelium_energy: self.mycelium_energy,
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
+            competent_cell_moves: Vec::new(),
         }
     }
 }

@@ -6936,9 +6936,13 @@ fn porous_hill_sat_crosses_chunk_seam_under_runoff() {
             w.set_cell(x, y, Cell::water());
         }
     }
+    let failure = crate::failure::FailureConfig {
+        enable_competent_fall: false,
+        ..crate::failure::FailureConfig::default()
+    };
     let perf = PerfConfig::default();
     for _ in 0..400 {
-        tick_with_perf(&mut w, &perf);
+        tick_with_configs(&mut w, &perf, &failure);
     }
     let cap = water_capacity(MaterialId::Stone);
     let s63 = w.get_cell(5, 63).unwrap().sat.0;
@@ -6989,9 +6993,13 @@ fn sheet_does_not_shelf_on_stone_cap_at_chunk_seam() {
     let mass0: i32 = (12..24)
         .filter_map(|x| w.get_cell(x, 64).map(|c| c.sat.0 as i32))
         .sum();
+    let failure = crate::failure::FailureConfig {
+        enable_competent_fall: false,
+        ..crate::failure::FailureConfig::default()
+    };
     let perf = PerfConfig::full_feel();
     for _ in 0..100 {
-        tick_with_perf(&mut w, &perf);
+        tick_with_configs(&mut w, &perf, &failure);
     }
     let still_on_cap: i32 = (12..24)
         .filter_map(|x| w.get_cell(x, 64).map(|c| c.sat.0 as i32))

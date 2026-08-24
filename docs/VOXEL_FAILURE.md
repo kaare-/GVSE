@@ -188,10 +188,16 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 - **Crush specs** — large movers pulverize tiny competent clusters
   (`≤ CRUSH_SPEC_MAX`) instead of welding or getting stuck on them.
 - **Thin fracture** — long thin sticks/slabs snap at 1-cell necks into debris.
-- **Cargo** — soft/loose cells with ≥2 neighbours on the body ride with tip/slide.
+- **Cargo** — soft/loose caps and embedded cells ride with fall, tip, and slide.
 - **Mobile mark** — fallen / tipped / slid rock sets `CellFlags::MOBILE_ROCK`.
   Flood-fill only merges same mobility class, so a boulder cannot glue into
   unmarked painted strata or gain mass by contact.
+- **Hanging peel** — void-ceiling slabs above carved caverns peel as whole
+  chunks (not row-by-row), excluding bedrock-rooted pillar columns; void-below
+  seeds are processed before other competent floods so hill-sized strata cannot
+  starve arch floaters. Per-tick body caps truncate excess work but **re-dirty
+  leftovers** so large collapses finish across subsequent ticks. FPS path uses
+  fewer topology passes; full-world floating wake stays cadence-gated.
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.

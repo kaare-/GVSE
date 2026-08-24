@@ -73,6 +73,9 @@ pub struct World {
     /// Stamped on inoculum; survives cream spread far from the spatial stamp.
     #[serde(default)]
     pub mycelium_strain_lineage: HashMap<u32, crate::fungi::MyceliumLineage>,
+    /// Competent-fall cargo moves this tick — sync organisms after physics.
+    #[serde(skip, default)]
+    pub competent_cell_moves: Vec<(i32, i32, i32, i32)>,
 }
 
 impl World {
@@ -91,6 +94,7 @@ impl World {
             mycelium_energy: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
+            competent_cell_moves: Vec::new(),
         }
     }
 

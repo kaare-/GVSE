@@ -637,6 +637,44 @@ impl OrganismStore {
         Self::default()
     }
 
+    /// After competent-fall cargo moved world cells, shift any organisms
+    /// whose nucleus or body modules sat on those cells.
+    pub fn shift_atoms_with_moved_cells(
+        &mut self,
+        world: &crate::grid::World,
+        moves: &[(i32, i32, i32, i32)],
+    ) {
+        if moves.is_empty() {
+            return;
+        }
+        for atom in &mut self.atoms {
+            let mut dx = 0i32;
+            let mut dy = 0i32;
+            let mut hit = false;
+            for &(fx, fy, tx, ty) in moves {
+                let nucleus = atom.gx == fx && atom.gy == fy;
+                let module_hit = atom.body.iter().any(|(lx, ly, _)| {
+                    atom.gx + *lx as i32 == fx && atom.gy + *ly as i32 == fy
+                });
+                if nucleus || module_hit {
+                    dx = tx - fx;
+                    dy = ty - fy;
+                    hit = true;
+                    break;
+                }
+            }
+            if !hit || (dx == 0 && dy == 0) {
+                continue;
+            }
+            atom.gx = world.wrap_x(atom.gx + dx);
+            atom.gy += dy;
+            atom.fy += dy as f32;
+            if let Some(wt) = atom.last_water_top {
+                atom.last_water_top = Some(wt + dy);
+            }
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.atoms.len()
     }
