@@ -3,8 +3,8 @@
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
 //! Landscape falling bodies: detach an ungrounded competent cluster from
-//! the grid into a temporary rigid entity, translate / tip / slide it as
-//! one piece, then rematerialize into cells on seat or impact.
+//! the grid into a temporary rigid entity, translate straight down under
+//! gravity, then rematerialize into cells on seat or impact.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -27,8 +27,8 @@ pub const MAX_LANDSCAPE_BODIES: usize = 8;
 pub const MAX_LANDSCAPE_DETACH_PER_TICK: usize = 2;
 /// Max free-fall cells per body per tick.
 pub const LANDSCAPE_FALL_CELLS: i32 = 48;
-/// Tip when COM overhangs support by this many cells.
-pub const LANDSCAPE_TIP_OVERHANG: i32 = 2;
+/// Ticks with zero drop while still airborne before forced impact stamp.
+pub const LANDSCAPE_STUCK_STAMP_TICKS: u32 = 6;
 
 #[derive(Debug, Clone)]
 pub struct LandscapeBody {
@@ -42,8 +42,8 @@ pub struct LandscapeBody {
   pub oy: i32,
   /// Accumulated free-fall cells since last seat.
   pub fall_streak: u32,
-  /// 0 = upright; ±1 = tipped 90° (swap / flip local axes).
-  pub tip_quarter: i8,
+  /// Consecutive ticks with no downward motion while airborne.
+  pub stuck_ticks: u32,
 }
 
 impl LandscapeBody {
@@ -61,12 +61,7 @@ impl LandscapeBody {
   }
 
   fn local_to_world(&self, lx: i32, ly: i32) -> (i32, i32) {
-    match self.tip_quarter.rem_euclid(4) {
-      0 => (self.ox + lx, self.oy + ly),
-      1 => (self.ox + ly, self.oy - lx),
-      2 => (self.ox - lx, self.oy - ly),
-      _ => (self.ox - ly, self.oy + lx),
-    }
+    (self.ox + lx, self.oy + ly)
   }
 
   fn occupied_set(&self) -> HashSet<(i32, i32)> {
@@ -169,7 +164,40 @@ fn stamp_cells(world: &mut World, cells: &[(i32, i32, Cell)]) {
   }
 }
 
-fn can_place(world: &World, cells: &[(i32, i32, Cell)], self_set: &HashSet<(i32, i32)>) -> bool {
+fn is_crushable_bed(material: MaterialId) -> bool {
+  matches!(
+    material,
+    MaterialId::Sand
+      | MaterialId::Soil
+      | MaterialId::Clay
+      | MaterialId::Gravel
+      | MaterialId::Organic
+      | MaterialId::Snow
+      | MaterialId::LooseRock
+      | MaterialId::LooseLimestone
+  )
+}
+
+fn blocks_fall(_world: &World, gx: i32, gy: i32, mover_cells: usize) -> bool {
+  let Some(c) = _world.get_cell(gx, gy) else {
+    return true;
+  };
+  if c.material == MaterialId::Air {
+    return false;
+  }
+  if is_crushable_bed(c.material) {
+    return false;
+  }
+  let _ = (gx, gy, mover_cells);
+  true
+}
+
+fn can_place_fall(
+  world: &World,
+  cells: &[(i32, i32, Cell)],
+  self_set: &HashSet<(i32, i32)>,
+) -> bool {
+  let n = cells.len();
   for &(x, y, _) in cells {
     if y < 0 {
       return false;
@@ -178,10 +206,8 @@ fn can_place(world: &World, cells: &[(i32, i32, Cell)], self_set: &HashSet<(i32,
     if self_set.contains(&(wx, y)) {
       continue;
     }
-    match world.get_cell(wx, y) {
-      None => return false,
-      Some(c) if c.material == MaterialId::Air => {}
-      Some(_) => return false,
+    if blocks_fall(world, wx, y, n) {
+      return false;
     }
   }
   true
@@ -192,15 +218,16 @@ fn translate_body(body: &mut LandscapeBody, dx: i32, dy: i32) {
   body.oy += dy;
 }
 
-fn body_com(body: &LandscapeBody) -> (i32, i32) {
-  let cells = body.all_world_cells();
-  if cells.is_empty() {
-    return (body.ox, body.oy);
+fn crush_obstacles(world: &mut World, cells: &[(i32, i32, Cell)]) {
+  for &(x, y, _) in cells {
+    let wx = world.wrap_x(x);
+    let Some(c) = world.get_cell(wx, y) else {
+      continue;
+    };
+    if is_crushable_bed(c.material) {
+      world.set_cell(wx, y, Cell::air());
+    }
   }
-  let n = cells.len() as i64;
-  let sx: i64 = cells.iter().map(|(x, _, _)| *x as i64).sum();
-  let sy: i64 = cells.iter().map(|(_, y, _)| *y as i64).sum();
-  ((sx / n) as i32, (sy / n) as i32)
 }
 
 fn bottom_face(body: &LandscapeBody) -> Vec<(i32, i32)> {
@@ -220,52 +247,6 @@ fn is_fully_airborne(world: &World, body: &LandscapeBody) -> bool {
     })
 }
 
-fn support_drop(world: &World, body: &LandscapeBody) -> Option<(i32, i32)> {
-  // Returns (pivot_x, drop) of deepest unsupported overhang sense.
-  let face = bottom_face(body);
-  if face.is_empty() {
-    return None;
-  }
-  let (cx, _) = body_com(body);
-  let mut left_support = i32::MAX;
-  let mut right_support = i32::MIN;
-  let mut any = false;
-  for &(x, y) in &face {
-    match world.get_cell(world.wrap_x(x), y - 1) {
-      Some(c) if c.material != MaterialId::Air => {
-        any = true;
-        left_support = left_support.min(x);
-        right_support = right_support.max(x);
-      }
-      _ => {}
-    }
-  }
-  if !any {
-    return None;
-  }
-  if cx > right_support + LANDSCAPE_TIP_OVERHANG {
-    Some((right_support, 1))
-  } else if cx < left_support - LANDSCAPE_TIP_OVERHANG {
-    Some((left_support, -1))
-  } else {
-    None
-  }
-}
-
-fn try_tip(world: &World, body: &mut LandscapeBody, dir: i8) -> bool {
-  let old = body.tip_quarter;
-  body.tip_quarter = body.tip_quarter.wrapping_add(dir);
-  let cells = body.all_world_cells();
-  // Collision check against world (body cells are already absent from grid).
-  let empty = HashSet::new();
-  if can_place(world, &cells, &empty) {
-    true
-  } else {
-    body.tip_quarter = old;
-    false
-  }
-}
-
 fn max_drop(world: &World, body: &LandscapeBody, max_dy: i32) -> i32 {
   if max_dy <= 0 {
     return 0;
@@ -278,15 +259,28 @@ fn max_drop(world: &World, body: &LandscapeBody, max_dy: i32) -> i32 {
     let mid = (lo + hi + 1) / 2;
     let shifted: Vec<_> = cells
       .iter()
-      .map(|(x, y, c)| (*x, *y - mid, *c))
+      .map(|(x, y, c)| (world.wrap_x(*x), *y - mid, *c))
       .collect();
-    if can_place(world, &shifted, &empty) {
+    if can_place_fall(world, &shifted, &empty) {
       lo = mid;
     } else {
       hi = mid - 1;
     }
   }
   lo
+}
+
+fn apply_drop(world: &mut World, body: &mut LandscapeBody, drop: i32) {
+  if drop <= 0 {
+    return;
+  }
+  let cells = body.all_world_cells();
+  let shifted: Vec<_> = cells
+    .iter()
+    .map(|(x, y, c)| (world.wrap_x(*x), *y - drop, *c))
+    .collect();
+  crush_obstacles(world, &shifted);
+  translate_body(body, 0, -drop);
 }
 
 fn footprint_overlaps_store(store: &LandscapeBodyStore, cells: &[(i32, i32)]) -> bool {
@@ -360,14 +354,14 @@ pub fn detach_landscape_bodies(
       ox: min_x,
       oy: min_y,
       fall_streak: 0,
-      tip_quarter: 0,
+      stuck_ticks: 0,
     });
     detached += 1;
   }
   detached
 }
 
-/// Step all landscape bodies: fall, tip, stamp when seated.
+/// Step all landscape bodies: gravity fall, stamp when seated or jammed.
 pub fn step_landscape_bodies(
   world: &mut World,
   store: &mut LandscapeBodyStore,
@@ -375,38 +369,31 @@ pub fn step_landscape_bodies(
   let mut stats = LandscapeFallStats::default();
   let mut stamped = Vec::new();
   for (i, body) in store.bodies.iter_mut().enumerate() {
-    // Free fall.
     let drop = max_drop(world, body, LANDSCAPE_FALL_CELLS);
     if drop > 0 {
-      translate_body(body, 0, -drop);
+      apply_drop(world, body, drop);
       body.fall_streak = body.fall_streak.saturating_add(drop as u32);
+      body.stuck_ticks = 0;
       stats.fall_moves += 1;
       continue;
     }
-    // Tip when COM overhangs.
-    if let Some((_, dir)) = support_drop(world, body) {
-      if try_tip(world, body, dir as i8) {
-        stats.tips += 1;
-        // Small settle after tip.
-        let d2 = max_drop(world, body, 4);
-        if d2 > 0 {
-          translate_body(body, 0, -d2);
-          body.fall_streak = body.fall_streak.saturating_add(d2 as u32);
-          stats.fall_moves += 1;
-        }
-        continue;
-      }
+    let airborne = is_fully_airborne(world, body);
+    if airborne {
+      body.stuck_ticks = body.stuck_ticks.saturating_add(1);
+    } else {
+      body.stuck_ticks = 0;
     }
-    // Seated (or jammed) — rematerialize.
-    if !is_fully_airborne(world, body) {
+    let force_impact = airborne && body.stuck_ticks >= LANDSCAPE_STUCK_STAMP_TICKS;
+    // Seated, wedged, or stuck-in-air too long — rematerialize.
+    if !airborne || force_impact {
       let cells = body.all_world_cells();
       stamp_cells(world, &cells);
-      // Impact shatter: convert a few bottom-face competent cells after a fall.
-      if body.fall_streak >= 4 {
+      let shatter = body.fall_streak >= 4 || force_impact;
+      if shatter {
         let set: HashSet<_> = cells.iter().map(|(x, y, _)| (*x, *y)).collect();
         let mut shattered = 0u32;
         for &(x, y, c) in &cells {
-          if shattered >= 24 {
+          if shattered >= 48 {
             break;
           }
           if !is_competent_rock(c.material) {
@@ -415,18 +402,13 @@ pub fn step_landscape_bodies(
           if set.contains(&(x, y - 1)) {
             continue;
           }
-          match world.get_cell(world.wrap_x(x), y - 1) {
-            Some(b) if b.material != MaterialId::Air && b.material.is_solid() => {
-              let loose = if c.material == MaterialId::Limestone {
-                MaterialId::LooseLimestone
-              } else {
-                MaterialId::LooseRock
-              };
-              world.set_cell(x, y, Cell::solid(loose));
-              shattered += 1;
-            }
-            _ => {}
-          }
+          let loose = if c.material == MaterialId::Limestone {
+            MaterialId::LooseLimestone
+          } else {
+            MaterialId::LooseRock
+          };
+          world.set_cell(x, y, Cell::solid(loose));
+          shattered += 1;
         }
       }
       stamped.push(i);
@@ -544,6 +526,27 @@ mod tests {
     );
     let mid_air = w.get_cell(20, 20).map(|c| c.material) == Some(MaterialId::Stone);
     assert!(!mid_air, "fallen span must leave the arch perch");
+  }
+
+  #[test]
+  fn landscape_body_falls_straight_without_tip() {
+    let mut w = World::new(40);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 8..28 {
+      for y in 40..48 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let mut store = LandscapeBodyStore::new();
+    assert!(detach_landscape_bodies(&mut w, &mut store, &[]) >= 1);
+    for _ in 0..16 {
+      step_landscape_bodies(&mut w, &mut store);
+    }
+    assert!(store.is_empty(), "body must fall straight down and stamp");
   }
 
   #[test]

@@ -195,8 +195,9 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 - **F2d — Landscape rigid entities** — canonical `SupportMap` (surface +
   grounded) detects hanging competent clusters that sit on void and are not
   column-supported to Bedrock. Those detach into a temporary `LandscapeBody`,
-  fall / tip as one piece, then rematerialize (with sand/soil cargo + light
-  impact shatter). Small leftovers still use F2c competent CA bodies.
+  fall straight down under gravity (no COM tip / rotation), crush soft cargo
+  beds in the path, then rematerialize with impact shatter. Stuck airborne
+  bodies force-stamp after a few ticks so nothing hangs forever.
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
