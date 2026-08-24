@@ -344,7 +344,7 @@ async fn main() {
                     &settings.competent_fall,
                     true,
                 );
-                if organisms_on && !scene.world.competent_cell_moves.is_empty() {
+                if organisms_on {
                     let moves = std::mem::take(&mut scene.world.competent_cell_moves);
                     scene
                         .organisms
@@ -641,7 +641,7 @@ async fn main() {
                 Some(&settings.fungi),
                 Some(&settings.competent_fall),
             );
-            if organisms_on && !scene.world.competent_cell_moves.is_empty() {
+            if organisms_on {
                 let moves = std::mem::take(&mut scene.world.competent_cell_moves);
                 scene
                     .organisms

@@ -678,6 +678,9 @@ fn tick_with_life_inner(
                 super::competent_fall::wake_competent_bodies(world, &coords);
             }
         }
+        // Bodies in flight re-dirty themselves every tick (cheap, O(moves)),
+        // so fall speed does not depend on the wake cadence above.
+        super::competent_fall::wake_moved_competent(world);
         let body_active = plan_active(world);
         if !body_active.is_empty() {
             let t0 = profile.then(Instant::now);

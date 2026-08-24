@@ -142,7 +142,16 @@ it: the crown folds into Air under or beside the boulder (Organic litter
 if there is no room), `fallen` so it stays crushed, and roots keep their
 soil cells. Glancing hits on loose beds may still slide a cell. A loose
 sapling or already-uprooted log can tip and ride only when the dest is
-not stone. **No living draw module is left inside Stone / Limestone.**
+not stone. Landscape stamps and already-settled boulders never emit
+cell-moves — a sweep still crushes anything drawn inside the rock.
+**No living draw module is left inside Stone / Limestone** (draw skips
+those cells even if a frame misses the squash).
+
+The sweep is a three-step ladder, so there is no "lodged" fallthrough:
+squash under the boulder → evict to nearby Air → if a rock filled every
+seat, the plant is **entombed and dies** (litter where it fits). The old
+seat search had an unchecked fallback that could drop the nucleus back
+into the rock.
 
 ### Floating / tipped woody castaways
 

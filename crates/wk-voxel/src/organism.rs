@@ -674,17 +674,39 @@ fn posed_world(atom: &Atom, world: &World, lx: i16, ly: i16) -> (i32, i32) {
     (world.wrap_x(atom.gx + ddx as i32), atom.gy + ddy as i32)
 }
 
+/// World cell where this module is *painted* (woody leaf nod included).
+fn draw_world(atom: &Atom, world: &World, lx: i16, ly: i16, mid: ModuleId) -> (i32, i32) {
+    let (dx, dy) = atom.fallen_draw_offset(lx, ly);
+    let nod = if !atom.fallen && mid == ModuleId::Photosystem {
+        let cant = leaf_cantilever(atom, dx, dy);
+        (cant - LEAF_SUPPORT_WOODY).max(0).min(2)
+    } else {
+        0
+    };
+    (
+        world.wrap_x(atom.gx + dx as i32),
+        atom.gy + dy as i32 - nod,
+    )
+}
+
 fn module_in_competent_rock(world: &World, atom: &Atom, lx: i16, ly: i16) -> bool {
     let (wx, wy) = posed_world(atom, world, lx, ly);
     matches!(world.get_cell(wx, wy), Some(c) if is_competent_rock(c.material))
 }
 
 fn plant_draw_in_competent_rock(world: &World, atom: &Atom) -> bool {
+    if matches!(
+        world.get_cell(world.wrap_x(atom.gx), atom.gy),
+        Some(c) if is_competent_rock(c.material)
+    ) {
+        return true;
+    }
     atom.body.iter().any(|&(lx, ly, m)| {
         if m == ModuleId::Root {
             return false;
         }
-        module_in_competent_rock(world, atom, lx, ly)
+        let (wx, wy) = draw_world(atom, world, lx, ly, m);
+        matches!(world.get_cell(wx, wy), Some(c) if is_competent_rock(c.material))
     })
 }
 
@@ -756,11 +778,20 @@ fn cell_is_air(world: &World, gx: i32, gy: i32) -> bool {
 }
 
 /// Air under or beside the boulder — never the surface *on top* of it.
-fn find_squash_seat(world: &World, gx: i32, rock_min_y: i32, prefer_dx: i32) -> (i32, i32) {
+///
+/// `None` means the plant is entombed: every candidate is solid, so the
+/// caller must not seat it (an unchecked fallback used to drop the
+/// nucleus straight back into the rock).
+fn find_squash_seat(
+    world: &World,
+    gx: i32,
+    rock_min_y: i32,
+    prefer_dx: i32,
+) -> Option<(i32, i32)> {
     let prefer = if prefer_dx == 0 { 1 } else { prefer_dx.signum() };
     let floor = rock_min_y - 1;
     if cell_is_air(world, gx, floor) {
-        return (world.wrap_x(gx), floor);
+        return Some((world.wrap_x(gx), floor));
     }
     // Walk out from the stem: floor first (true "under"), then the
     // boulder row (beside, when the rock sits on soil).
@@ -768,14 +799,25 @@ fn find_squash_seat(world: &World, gx: i32, rock_min_y: i32, prefer_dx: i32) -> 
         for &sign in &[prefer, -prefer] {
             let nx = gx + sign * dist;
             if cell_is_air(world, nx, floor) {
-                return (world.wrap_x(nx), floor);
+                return Some((world.wrap_x(nx), floor));
             }
             if cell_is_air(world, nx, rock_min_y) {
-                return (world.wrap_x(nx), rock_min_y);
+                return Some((world.wrap_x(nx), rock_min_y));
             }
         }
     }
-    (world.wrap_x(gx + prefer), floor.max(0))
+    // Last resort: any free Air just under the boulder's footprint.
+    for dy in 2..=6 {
+        for dist in 0..=8 {
+            for &sign in &[prefer, -prefer] {
+                let nx = gx + sign * dist;
+                if cell_is_air(world, nx, floor - dy + 1) {
+                    return Some((world.wrap_x(nx), floor - dy + 1));
+                }
+            }
+        }
+    }
+    None
 }
 
 /// Fold the plant under a boulder: roots keep their soil cells, canopy
@@ -830,7 +872,10 @@ fn squash_plant_under_rock(
         evict_plant_from_competent_rock(world, atom, shove_dx);
         return;
     }
-    let (nx, ny) = find_squash_seat(world, atom.gx, rock_min_y, shove_dx);
+    let Some((nx, ny)) = find_squash_seat(world, atom.gx, rock_min_y, shove_dx) else {
+        // Entombed — no Air anywhere under or beside the boulder.
+        return;
+    };
     let ogx = atom.gx;
     let ogy = atom.gy;
     let ddx = nx - ogx;
@@ -921,6 +966,9 @@ fn squash_plant_under_rock(
         }
     }
     snap_modules_in_competent_rock(world, atom);
+    if crown_in_competent_rock(world, atom) || plant_draw_in_competent_rock(world, atom) {
+        evict_plant_from_competent_rock(world, atom, shove_dx);
+    }
     atom.sync_upright_growth();
 }
 
@@ -979,6 +1027,20 @@ fn evict_plant_from_competent_rock(world: &mut World, atom: &mut Atom, shove_dx:
         // Force-drop anything still painted through stone (including roots
         // that share a boulder cell).
         snap_modules_in_competent_rock(world, atom);
+    }
+}
+
+/// A plant a boulder fully entombed: drop what litter still fits in Air.
+fn crush_plant_to_litter(world: &mut World, atom: &Atom) {
+    for &(lx, ly, m) in &atom.body {
+        if !matches!(
+            m,
+            ModuleId::Stem | ModuleId::Photosystem | ModuleId::ReproSpore
+        ) {
+            continue;
+        }
+        let (wx, wy) = draw_world(atom, world, lx, ly, m);
+        let _ = paint_leaf_litter(world, wx, wy);
     }
 }
 
@@ -1176,14 +1238,40 @@ impl OrganismStore {
     /// under the boulder (litter if there is no Air left). Roots in soil
     /// stay put. Glancing hits on loose beds may slide a cell. Nothing
     /// living is left drawn inside Stone / Limestone.
+    /// Crush any land plant whose draw cells sit inside Stone / Limestone.
+    ///
+    /// Landscape stamps and already-settled boulders never write
+    /// [`World::competent_cell_moves`], so a move-only hook leaves stems
+    /// painted through the rock.
+    pub fn squash_plants_lodged_in_rock(&mut self, world: &mut crate::grid::World) {
+        let dests = HashSet::new();
+        let mut entombed: Vec<usize> = Vec::new();
+        for (i, atom) in self.atoms.iter_mut().enumerate() {
+            if !is_land_plant(atom) || !plant_draw_in_competent_rock(world, atom) {
+                continue;
+            }
+            squash_plant_under_rock(world, atom, 0, &dests);
+            // Last resort: a boulder filled every seat around it. Better a
+            // crushed plant than one painted inside the rock forever.
+            if plant_draw_in_competent_rock(world, atom) {
+                evict_plant_from_competent_rock(world, atom, 0);
+            }
+            if plant_draw_in_competent_rock(world, atom) {
+                entombed.push(i);
+            }
+        }
+        for &i in entombed.iter().rev() {
+            let atom = self.atoms.remove(i);
+            crush_plant_to_litter(world, &atom);
+        }
+    }
+
     pub fn shift_atoms_with_moved_cells(
         &mut self,
         world: &mut crate::grid::World,
         moves: &[(i32, i32, i32, i32)],
     ) {
-        if moves.is_empty() {
-            return;
-        }
+        if !moves.is_empty() {
         let dests: HashSet<(i32, i32)> = moves
             .iter()
             .flat_map(|&(fx, fy, tx, ty)| [(world.wrap_x(fx), fy), (world.wrap_x(tx), ty)])
@@ -1256,6 +1344,8 @@ impl OrganismStore {
             }
             translate_atom(world, atom, dx, dy);
         }
+        }
+        self.squash_plants_lodged_in_rock(world);
     }
 
     pub fn len(&self) -> usize {
@@ -2012,6 +2102,7 @@ impl OrganismStore {
             }
         }
         pass.post = t_post.elapsed();
+        self.squash_plants_lodged_in_rock(world);
         self.last_pass = pass;
         stats.spores = spore_releases.len() as u32;
         OrganismStepOutcome {
@@ -3078,12 +3169,15 @@ pub fn resolve_organism_draw_cells(
             let wx = wx0;
             let mut wy = wy0;
             let qx = world.wrap_x(wx);
-            // Tipped canopy must not paint through solid hillside / beach.
-            if atom.fallen {
-                if let Some(c) = world.get_cell(qx, wy) {
-                    if terrain_occludes_module(mid, c.material) {
-                        continue;
-                    }
+            // Canopy must not paint through Stone / Limestone (upright or
+            // tipped). Tipped plants also skip any other solid hillside.
+            if let Some(c) = world.get_cell(qx, wy) {
+                let rock = is_competent_rock(c.material);
+                if rock && terrain_occludes_module(mid, c.material) {
+                    continue;
+                }
+                if atom.fallen && terrain_occludes_module(mid, c.material) {
+                    continue;
                 }
             }
             // Stemless soft mats pile in free Air so flopped greens don't
@@ -7942,5 +8036,62 @@ mod tests {
         );
         store.shift_atoms_with_moved_cells(&mut w, &[(10, 4, 13, 4)]);
         assert_eq!(store.atoms[0].gx, 13);
+    }
+
+    #[test]
+    fn stationary_boulder_squashes_lodged_tree_without_moves() {
+        let mut w = sand_plot();
+        let mut store = OrganismStore::new();
+        store.atoms.push(deep_tree(10, 4));
+        for x in 9..12 {
+            for y in 4..7 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        store.shift_atoms_with_moved_cells(&mut w, &[]);
+        let a = &store.atoms[0];
+        assert!(a.fallen, "already-settled boulder must still crush the plant");
+        assert_no_draw_in_rock(&w, a);
+        assert!(
+            a.gy <= 4,
+            "crushed crown must sit under/beside the boulder (gy={})",
+            a.gy
+        );
+    }
+
+    #[test]
+    fn fully_entombed_plant_is_crushed_not_left_in_rock() {
+        // Solid stone block over the whole plot: no seat exists, so the
+        // plant must die rather than stay painted inside the rock.
+        let mut w = sand_plot();
+        let mut store = OrganismStore::new();
+        store.atoms.push(deep_tree(10, 4));
+        for x in 0..20 {
+            for y in 1..12 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        store.squash_plants_lodged_in_rock(&mut w);
+        assert!(
+            store.atoms.is_empty(),
+            "entombed plant must not survive inside stone ({:?})",
+            store.atoms.first().map(|a| (a.gx, a.gy))
+        );
+    }
+
+    #[test]
+    fn upright_stem_is_not_drawn_inside_stone() {
+        let mut w = sand_plot();
+        let atom = deep_tree(10, 4);
+        w.set_cell(10, 6, Cell::solid(MaterialId::Stone));
+        let posed = resolve_organism_draw_cells(&w, &[atom], 0, 0.0);
+        assert!(
+            !posed.iter().any(|p| p.wx == 10 && p.wy == 6),
+            "upright stem must not paint through stone ({posed:?})"
+        );
+        assert!(
+            posed.iter().any(|p| p.mid == ModuleId::Nucleus),
+            "nucleus outside the rock still draws"
+        );
     }
 }
