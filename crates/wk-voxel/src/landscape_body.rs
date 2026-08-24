@@ -9,7 +9,9 @@
 //! Boulder-sized and mid chunks stay in the grid and use competent CA
 //! tip / roll — landscape entities must not steal tumble from rocks.
 
-use std::collections::{HashSet, VecDeque};
+use std::collections::VecDeque;
+
+use crate::fasthash::FxHashSet as HashSet;
 
 use wk_material::MaterialId;
 
@@ -124,7 +126,7 @@ fn is_cargo_material(mat: MaterialId) -> bool {
 
 fn gather_cargo(world: &World, rock: &HashSet<(i32, i32)>) -> Vec<(i32, i32, Cell)> {
   let mut cargo = Vec::new();
-  let mut seen = HashSet::new();
+  let mut seen = HashSet::default();
   let mut q = VecDeque::new();
   for &(x, y) in rock {
     let above = (world.wrap_x(x), y + 1);
@@ -260,7 +262,7 @@ fn max_drop(world: &World, body: &LandscapeBody, max_dy: i32) -> i32 {
     return 0;
   }
   let cells = body.all_world_cells();
-  let empty = HashSet::new();
+  let empty = HashSet::default();
   let mut lo = 0;
   let mut hi = max_dy;
   while lo < hi {
@@ -292,7 +294,7 @@ fn apply_drop(world: &mut World, body: &mut LandscapeBody, drop: i32) {
 }
 
 fn footprint_overlaps_store(store: &LandscapeBodyStore, cells: &[(i32, i32)]) -> bool {
-  let mut claimed = HashSet::new();
+  let mut claimed = HashSet::default();
   for b in &store.bodies {
     for p in b.occupied_set() {
       claimed.insert(p);
@@ -325,7 +327,7 @@ pub fn detach_landscape_bodies_with(
     return 0;
   }
   let mut detached = 0u32;
-  let mut used = HashSet::new();
+  let mut used = HashSet::default();
   for (sx, sy) in seeds {
     if detached as usize >= MAX_LANDSCAPE_DETACH_PER_TICK {
       break;

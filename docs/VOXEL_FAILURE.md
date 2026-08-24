@@ -198,6 +198,31 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
   instead of falling as columns or shattering into sand. Soft cargo still
   rides huge slabs; stuck slabs force-stamp after a few ticks.
 
+### Cost model (why the rock pass is cheap when nothing moves)
+
+Measured with `cargo test -p wk-voxel --release --test rock_fall_profile`,
+which A/Bs `enable_competent_fall` over a real `tick_with_life` loop.
+
+- **Seed gate** (`body_can_seed`) — rock only seeds a body flood when it has
+  somewhere to descend: open/soft directly below, or an open side whose floor is
+  *lower*. Rock whose only opening is the sky can never move. Without this the
+  whole ridge surface seeded a flood plus a morphological weld-split every tick.
+- **Sleeping rock** (`World::competent_settled`) — one bit per cell, per chunk.
+  A body that is fully supported with no tip or slide direction sleeps.
+  `World::set_cell` wakes a cell and its 4 neighbours **only when solidity
+  changes**, so lakes changing saturation never wake the ridge, while digging
+  support away always does. Transient refusals (roll budget, a sibling body in
+  the way, a blocked translate) never sleep.
+- **Seed pad** (`SEED_PAD_Y`) — dirty rects inflate by a few rows for seeding
+  rather than the full 64-cell drop budget. Falling bodies write their new cells,
+  which dirties them for the next tick.
+- **Cargo hoisting** — `gather_cargo` is a flood; it is computed once per move
+  and reused across the drop binary search instead of ~8 times.
+- **Fast hashing** (`crate::fasthash`) — coordinate sets use an FxHash-style
+  hasher; SipHash cost more than the lookups it guarded.
+- **Thin fracture is gated on support** — running it on seated strata shredded
+  thousands of cells of untouched terrain into rubble.
+
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
 A cheap **floating wake** (air-below only) re-dirties sky boulders every few

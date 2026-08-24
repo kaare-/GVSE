@@ -10,10 +10,14 @@
 //! 2. Impact shatter on hard beds after a fall.
 //! 3. COM / support tip — 90° pivot when unstable; no slide-shred.
 
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::VecDeque;
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
+
+// Coordinate sets here are hashed millions of times per second and never see
+// untrusted input, so they use the fast hasher rather than SipHash.
+use crate::fasthash::{FxHashMap as HashMap, FxHashSet as HashSet};
 
 use crate::active::ActiveChunk;
 use crate::cell::{is_competent_rock, Cell, CellFlags, Sat};
@@ -149,7 +153,7 @@ fn competent_cluster_size(world: &World, gx: i32, gy: i32, limit: usize) -> usiz
   }
   let mat = seed.material;
   let seed_mobile = is_mobile_rock(&seed);
-  let mut seen = HashSet::new();
+  let mut seen = HashSet::default();
   let mut q = VecDeque::new();
   q.push_back((gx, gy));
   seen.insert((gx, gy));
@@ -199,7 +203,7 @@ fn crush_spec_at(world: &mut World, gx: i32, gy: i32) -> u32 {
   let mat = seed.material;
   let seed_mobile = is_mobile_rock(&seed);
   let debris = roof_collapse_debris(mat);
-  let mut seen = HashSet::new();
+  let mut seen = HashSet::default();
   let mut q = VecDeque::new();
   q.push_back((gx, gy));
   seen.insert((gx, gy));
@@ -420,14 +424,14 @@ fn externally_supported(world: &World, set: &HashSet<(i32, i32)>, x: i32, y: i32
 
 /// Thin bedrock-rooted columns (cantilever legs) that must not peel with a roof span.
 fn pillar_column_xs(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<i32> {
-  let mut ymin_by_x: HashMap<i32, i32> = HashMap::new();
+  let mut ymin_by_x: HashMap<i32, i32> = HashMap::default();
   for &(x, y) in set {
     ymin_by_x
       .entry(x)
       .and_modify(|ymin| *ymin = (*ymin).min(y))
       .or_insert(y);
   }
-  let mut xs = HashSet::new();
+  let mut xs = HashSet::default();
   for (&x, &ymin) in &ymin_by_x {
     if !externally_supported(world, set, x, ymin) {
       continue;
@@ -511,7 +515,7 @@ fn hang_horizontal_closure(
 /// Cells at or above the lowest void-supported floor in each column (cavern roof slab).
 fn void_ceiling_hang_mass(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
   let pillar_xs = pillar_column_xs(world, set);
-  let mut floor_by_x: HashMap<i32, i32> = HashMap::new();
+  let mut floor_by_x: HashMap<i32, i32> = HashMap::default();
   for &(x, y) in set {
     if pillar_xs.contains(&x) {
       continue;
@@ -532,9 +536,9 @@ fn void_ceiling_hang_mass(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(
       .or_insert(y);
   }
   if floor_by_x.is_empty() {
-    return HashSet::new();
+    return HashSet::default();
   }
-  let mut seeds = HashSet::new();
+  let mut seeds = HashSet::default();
   for &(x, y) in set {
     if pillar_xs.contains(&x) {
       continue;
@@ -550,7 +554,7 @@ fn void_ceiling_hang_mass(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(
 
 /// Flood the whole competent mass above a carved void (not just the bottom row).
 fn void_anchored_hang_mass(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
-  let mut hang = HashSet::new();
+  let mut hang = HashSet::default();
   let mut q = VecDeque::new();
   for &(x, y) in set {
     if set.contains(&(world.wrap_x(x), y - 1)) {
@@ -582,7 +586,7 @@ fn void_anchored_hang_mass(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<
 }
 
 fn vertically_supported_cells(world: &World, set: &HashSet<(i32, i32)>) -> HashSet<(i32, i32)> {
-  let mut supported = HashSet::new();
+  let mut supported = HashSet::default();
   let mut q = VecDeque::new();
   for &(x, y) in set {
     match world.get_cell(x, y - 1) {
@@ -605,13 +609,13 @@ fn vertically_supported_cells(world: &World, set: &HashSet<(i32, i32)>) -> HashS
 }
 
 fn flood_positions(set: &HashSet<(i32, i32)>) -> Vec<HashSet<(i32, i32)>> {
-  let mut seen = HashSet::new();
+  let mut seen = HashSet::default();
   let mut out = Vec::new();
   for &seed in set {
     if !seen.insert(seed) {
       continue;
     }
-    let mut comp = HashSet::new();
+    let mut comp = HashSet::default();
     let mut q = VecDeque::new();
     q.push_back(seed);
     comp.insert(seed);
@@ -847,7 +851,7 @@ fn build_components(
   active: &[ActiveChunk],
 ) -> (Vec<Component>, Vec<(i32, i32)>) {
   probe::bump(&probe::build_calls);
-  let mut visited: HashSet<(i32, i32)> = HashSet::new();
+  let mut visited: HashSet<(i32, i32)> = HashSet::default();
   let mut out: Vec<Component> = Vec::new();
   let mut hanging_count = 0usize;
   for void_pass in [true, false] {
@@ -936,7 +940,7 @@ fn build_components(
             true,
             &mut hanging_count,
           );
-          let mut pushed: HashSet<(i32, i32)> = HashSet::new();
+          let mut pushed: HashSet<(i32, i32)> = HashSet::default();
           for comp in &out[before..] {
             for (x, y, _) in &comp.cells {
               pushed.insert((*x, *y));
@@ -1094,13 +1098,13 @@ fn split_welded_contacts(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cel
     return split_contact_pebbles(cells);
   }
 
-  let mut core_visited = HashSet::new();
+  let mut core_visited = HashSet::default();
   let mut islands: Vec<HashSet<(i32, i32)>> = Vec::new();
   for &seed in &core {
     if !core_visited.insert(seed) {
       continue;
     }
-    let mut island = HashSet::new();
+    let mut island = HashSet::default();
     let mut q = VecDeque::new();
     q.push_back(seed);
     island.insert(seed);
@@ -1123,14 +1127,14 @@ fn split_welded_contacts(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cel
   }
 
   // Dilate each island by erode_passes (restore shell); first claim wins.
-  let mut owner: HashMap<(i32, i32), usize> = HashMap::new();
+  let mut owner: HashMap<(i32, i32), usize> = HashMap::default();
   for (i, island) in islands.iter().enumerate() {
     let mut frontier: HashSet<(i32, i32)> = island.clone();
     for &(x, y) in island {
       owner.entry((x, y)).or_insert(i);
     }
     for _ in 0..erode_passes.max(1) {
-      let mut next = HashSet::new();
+      let mut next = HashSet::default();
       for &(x, y) in &frontier {
         for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
           let n = (x + dx, y + dy);
@@ -1203,7 +1207,7 @@ fn extract_seed_local_blobs(cells: &[(i32, i32, Cell)]) -> Vec<Vec<(i32, i32, Ce
     cells.iter().map(|(x, y, c)| ((*x, *y), *c)).collect();
   let set: HashSet<(i32, i32)> = by_pos.keys().copied().collect();
   let radius = 7_i32;
-  let mut used = HashSet::new();
+  let mut used = HashSet::default();
   let mut out = Vec::new();
   // Prefer seeds that look like boulder surface (many free dirs later filtered).
   let mut seeds: Vec<(i32, i32)> = set.iter().copied().collect();
@@ -1216,7 +1220,7 @@ fn extract_seed_local_blobs(cells: &[(i32, i32, Cell)]) -> Vec<Vec<(i32, i32, Ce
     if body_neighbor_count(&set, seed.0, seed.1) >= 4 {
       continue;
     }
-    let mut blob_set = HashSet::new();
+    let mut blob_set = HashSet::default();
     let mut q = VecDeque::new();
     q.push_back((seed.0, seed.1, 0_i32));
     blob_set.insert(seed);
@@ -1289,7 +1293,7 @@ fn split_contact_pebbles(cells: Vec<(i32, i32, Cell)>) -> Vec<Vec<(i32, i32, Cel
       }
       let bridge = ns[0];
       // Flood from p without crossing back through bridge first step already done.
-      let mut seen = HashSet::new();
+      let mut seen = HashSet::default();
       let mut q = VecDeque::new();
       q.push_back(p);
       seen.insert(p);
@@ -1503,7 +1507,7 @@ fn impact_shatter(
   let mut face = bottom_face(comp);
   face.sort_by_key(|(_, y, _)| *y);
   let mut applied = 0u32;
-  let mut hit_cols: HashSet<i32> = HashSet::new();
+  let mut hit_cols: HashSet<i32> = HashSet::default();
   for (gx, gy, cell) in face {
     if applied >= cfg.max_impact_cells {
       break;
@@ -1573,7 +1577,7 @@ fn soft_embed(_world: &mut World, _comp: &Component, _cfg: &CompetentFallConfig)
 fn downhill_roll_dir(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Option<i32> {
   // Only sample bottom-face columns — overhang cells have no support and must
   // not abort the whole search.
-  let mut face_cols: HashSet<i32> = HashSet::new();
+  let mut face_cols: HashSet<i32> = HashSet::default();
   for (gx, _, _) in bottom_face(comp) {
     face_cols.insert(gx);
   }
@@ -1783,7 +1787,7 @@ fn gather_cargo(world: &World, comp: &Component) -> Vec<(i32, i32, Cell)> {
   probe::add(&probe::cargo_cells, comp.cells.len() as u64);
   const MAX_CARGO: usize = 512;
   let mut cargo = Vec::new();
-  let mut seen = HashSet::new();
+  let mut seen = HashSet::default();
   for &(gx, gy, _) in &comp.cells {
     for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
       let nx = world.wrap_x(gx + dx);
@@ -2049,7 +2053,7 @@ fn body_has_downhill(world: &World, gx: i32, gy: i32) -> bool {
       return true;
     }
     // Neighbor bed surface lower than our seat (ignore other body columns).
-    let mut skip = HashSet::new();
+    let mut skip = HashSet::default();
     skip.insert((gx, gy));
     if let Some(side_top) = column_top_support_y(world, nx, &skip) {
       // If neighbor column is dominated by competent rock of a tall body,
@@ -2186,7 +2190,7 @@ fn expand_competent_regions(active: &[ActiveChunk], drop_budget: i32) -> Vec<Act
   let h = CHUNK_CELLS_H as i32;
   let pad_x = 2_i32;
   let drop = drop_budget.max(4);
-  let mut map: HashMap<ChunkCoord, Rect> = HashMap::new();
+  let mut map: HashMap<ChunkCoord, Rect> = HashMap::default();
   let absorb = |map: &mut HashMap<ChunkCoord, Rect>, coord: ChunkCoord, x0: i32, y0: i32, x1: i32, y1: i32| {
     if x1 < 0 || y1 < 0 || x0 >= w || y0 >= h {
       return;
@@ -2290,7 +2294,7 @@ fn expand_regions_to_cells(
   }
   let w = CHUNK_CELLS_W as i32;
   let h = CHUNK_CELLS_H as i32;
-  let mut by_chunk: HashMap<ChunkCoord, Rect> = HashMap::new();
+  let mut by_chunk: HashMap<ChunkCoord, Rect> = HashMap::default();
   for &(gx, gy) in cells {
     let cx = gx.div_euclid(w);
     let cy = gy.div_euclid(h);
@@ -2558,35 +2562,6 @@ fn settle_after_roll(
   }
 }
 
-/// Clear sleep flags around every dirty rect in the scan set.
-fn wake_settled_near_dirty(world: &mut World, regions: &[ActiveChunk]) {
-  if world.competent_settled.is_empty() {
-    return;
-  }
-  let cw = CHUNK_CELLS_W as i32;
-  let ch = CHUNK_CELLS_H as i32;
-  let mut rects: Vec<(i32, i32, i32, i32)> = Vec::new();
-  for ac in regions {
-    let Some(chunk) = world.chunks.get(&ac.coord) else {
-      continue;
-    };
-    let Some(d) = chunk.dirty else {
-      continue;
-    };
-    let base_gx = ac.coord.cx * cw;
-    let base_gy = ac.coord.cy * ch;
-    rects.push((
-      base_gx + d.x0 as i32 - 1,
-      base_gy + d.y0 as i32 - 1,
-      base_gx + d.x1 as i32 + 1,
-      base_gy + d.y1 as i32 + 1,
-    ));
-  }
-  for (x0, y0, x1, y1) in rects {
-    world.competent_wake_rect(x0, y0, x1, y1);
-  }
-}
-
 /// Run competent-body physics on the active scan set.
 pub fn apply_competent_fall_regions(
   world: &mut World,
@@ -2608,13 +2583,9 @@ pub fn apply_competent_fall_regions(
   if regions.is_empty() {
     return CompetentFallStats::default();
   }
-  // Anything written since the last pass wakes the rock around it — support is
-  // transmitted cell to cell, so a one-cell halo around each dirty rect is
-  // enough to re-examine the bodies a write could have destabilised.
-  wake_settled_near_dirty(world, &regions);
   world.competent_cell_moves.clear();
   let mut stats = CompetentFallStats::default();
-  let mut fall_streak: HashMap<(i32, i32), u32> = HashMap::new();
+  let mut fall_streak: HashMap<(i32, i32), u32> = HashMap::default();
   // Free-fall jumps once (binary-searched distance), then impact/roll rebuilds —
   // not one rebuild per cell of drop.
   let topology_passes = if fps_path {
@@ -2662,11 +2633,7 @@ pub fn apply_competent_fall_regions(
           moved = true;
           comp_moved = true;
         }
-        if !comp_moved {
-          for &(x, y, _) in &comp.cells {
-            to_sleep.push((x, y));
-          }
-        }
+        // A refused translate is transient (usually another body in the way).
         continue;
       }
       if floating {
@@ -2702,16 +2669,14 @@ pub fn apply_competent_fall_regions(
           moved = true;
           comp_moved = true;
         }
-        if !comp_moved {
-          for &(x, y, _) in &comp.cells {
-            to_sleep.push((x, y));
-          }
-        }
+        // Unsupported: bridging a gap, or out of roll budget. Stays awake.
         continue;
       }
       // Tip on COM overhang; slide on slope without overhang.
       let streak = *fall_streak.get(&anchor).unwrap_or(&0);
-      if tip_dir(world, &comp, cfg).is_some() || downhill_roll_dir(world, &comp, cfg).is_some() {
+      let wants_motion =
+        tip_dir(world, &comp, cfg).is_some() || downhill_roll_dir(world, &comp, cfg).is_some();
+      if wants_motion {
         if apply_roll(
           world,
           &regions,
@@ -2722,6 +2687,7 @@ pub fn apply_competent_fall_regions(
           &mut stats,
         ) {
           moved = true;
+          comp_moved = true;
           continue;
         }
       }
@@ -2740,12 +2706,20 @@ pub fn apply_competent_fall_regions(
         }
       }
       // Soft embed disabled (cheese-grater). Flat soft beds just rest.
-      if !comp_moved {
+      //
+      // Only this terminal branch sleeps: the body is fully supported, cannot
+      // free-fall, has no tip or slide direction, and did not shatter. Those
+      // are stable geometry verdicts. Every other rejection above can flip on a
+      // later pass (roll budget, a sibling body in the way, multi-pass settle),
+      // so those bodies stay awake.
+      if !comp_moved && !wants_motion {
         for &(x, y, _) in &comp.cells {
           to_sleep.push((x, y));
         }
       }
     }
+    // A sleeping body wakes when a solidity change lands next to it — see
+    // `World::set_cell`, which is also what covers support being dug away.
     for (x, y) in to_sleep {
       world.competent_set_settled(x, y);
     }
@@ -3303,7 +3277,7 @@ mod tests {
     stamp(&mut cells, 10, 10);
     stamp(&mut cells, 18, 10); // centers 8 apart, r=4 → touch
     // Dedup overlap at the contact.
-    let mut uniq: HashMap<(i32, i32), Cell> = HashMap::new();
+    let mut uniq: HashMap<(i32, i32), Cell> = HashMap::default();
     for (x, y, c) in cells {
       uniq.insert((x, y), c);
     }
@@ -3753,25 +3727,35 @@ mod tests {
       }
     }
     let cfg = CompetentFallConfig::default();
-    // First pass evaluates and sleeps.
-    apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    // Run until the world stops moving; the pass with no motion sleeps the rock.
+    for _ in 0..16 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    // Sleep must actually engage on a settled ridge.
+    let asleep: usize = w.competent_settled.values().map(|m| m.count()).sum();
+    assert!(
+      asleep > 100,
+      "settled ridge must put rock to sleep (asleep={asleep})"
+    );
+    assert!(
+      w.competent_is_settled(30, 4),
+      "a mid-ridge cell should be asleep"
+    );
+    // Carving support must wake the rock above it again.
+    for x in 20..30 {
+      w.set_cell(x, 2, Cell::air());
+    }
+    assert!(
+      !w.competent_is_settled(25, 3),
+      "removing support must wake the rock directly above"
+    );
     let regions = competent_active_regions(&w, &[], 8);
     let (comps, _) = build_components(&w, &regions);
     assert!(
-      comps.is_empty(),
-      "settled ridge must not rebuild bodies (got {})",
-      comps.len()
-    );
-    // Carving support must wake the rock above again.
-    for x in 20..30 {
-      w.set_cell(x, 1, Cell::air());
-    }
-    wake_competent_bodies_all(&mut w);
-    let regions2 = competent_active_regions(&w, &[], 8);
-    let (comps2, _) = build_components(&w, &regions2);
-    assert!(
-      !comps2.is_empty(),
-      "carving under the ridge must wake bodies again"
+      comps
+        .iter()
+        .any(|c| c.cells.iter().any(|(x, _, _)| *x >= 20 && *x < 30)),
+      "carving under the ridge must rebuild bodies at the carve site"
     );
   }
 

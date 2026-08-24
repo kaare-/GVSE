@@ -20,6 +20,7 @@ pub mod clouds;
 pub mod competent_probe;
 pub mod event_log;
 pub mod failure;
+pub mod fasthash;
 pub mod fungi;
 pub mod geotech_map;
 pub mod grid;

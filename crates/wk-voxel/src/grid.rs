@@ -182,8 +182,34 @@ impl World {
     pub fn set_cell(&mut self, gx: i32, gy: i32, cell: Cell) {
         let gx = self.wrap_x(gx);
         let (coord, lx, ly) = Self::split(gx, gy);
+        // Only a change in *solidity* can destabilise neighbouring competent
+        // rock, so that (not every write) is what wakes sleeping bodies. Water
+        // changing saturation inside an Air cell must not, or sloshing lakes
+        // would wake the whole ridge every tick.
+        let track_sleep = !self.competent_settled.is_empty();
+        let prev_solid = if track_sleep {
+            self.chunks
+                .get(&coord)
+                .map(|c| c.get(lx, ly).material.is_solid())
+        } else {
+            None
+        };
         let chunk = self.chunks.entry(coord).or_insert_with(|| Chunk::new(coord));
         chunk.set(lx, ly, cell);
+        if track_sleep && prev_solid != Some(cell.material.is_solid()) {
+            self.competent_wake_around(gx, gy);
+        }
+    }
+
+    /// Wake sleeping competent rock at and around a cell whose support changed.
+    #[inline]
+    pub fn competent_wake_around(&mut self, gx: i32, gy: i32) {
+        for (dx, dy) in [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)] {
+            let (coord, lx, ly) = Self::split(self.wrap_x(gx + dx), gy + dy);
+            if let Some(m) = self.competent_settled.get_mut(&coord) {
+                m.unset(lx, ly);
+            }
+        }
     }
 
     /// Dirty a cell without rewriting it (wake quiescent physics).
