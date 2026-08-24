@@ -27,6 +27,8 @@ pub const COMPETENT_FALL_PASSES: u32 = 96;
 pub const COMPETENT_FALL_PASSES_FPS: u32 = 64;
 /// Seated tip / impact rebuilds per tick (keep low — each rebuild is O(body)).
 pub const COMPETENT_TOPOLOGY_PASSES: u32 = 6;
+/// FPS path: fewer rebuilds so hanging peel cannot tank frame time.
+pub const COMPETENT_TOPOLOGY_PASSES_FPS: u32 = 2;
 /// Connected competent larger than this is treated as static terrain
 /// *after* contact-weld splitting.
 pub const MAX_DYNAMIC_BODY_CELLS: usize = 384;
@@ -35,9 +37,9 @@ pub const MAX_DYNAMIC_BODY_CELLS: usize = 384;
 pub const FLOOD_GATHER_CAP: usize = 2048;
 /// Hard cap on bodies processed per tick (FPS guard).
 pub const MAX_BODIES_PER_TICK: usize = 16;
-/// Hanging peel may spawn more bodies in one tick so a slab crashes together.
-/// Truncated leftovers are re-dirtied so later ticks finish the job.
-pub const MAX_HANGING_BODIES_PER_TICK: usize = 192;
+/// Hanging peel budget per tick. Truncated leftovers stay dirty and finish
+/// on later ticks — keep this modest so one carve cannot tank FPS.
+pub const MAX_HANGING_BODIES_PER_TICK: usize = 48;
 /// Contact "pebbles" this small never glue onto a larger body (editor/geology only).
 pub const PEBBLE_SPLIT_MAX: usize = 4;
 /// Main mass must be at least this big before pebble necks are split off.
@@ -2155,45 +2157,6 @@ fn expand_competent_regions(active: &[ActiveChunk], drop_budget: i32) -> Vec<Act
   out
 }
 
-fn expand_regions_to_cells(
-  world: &World,
-  cells: &[(i32, i32)],
-  drop_budget: i32,
-) -> Vec<ActiveChunk> {
-  if cells.is_empty() {
-    return Vec::new();
-  }
-  let w = CHUNK_CELLS_W as i32;
-  let h = CHUNK_CELLS_H as i32;
-  let mut by_chunk: HashMap<ChunkCoord, Rect> = HashMap::new();
-  for &(gx, gy) in cells {
-    let cx = gx.div_euclid(w);
-    let cy = gy.div_euclid(h);
-    let lx = gx.rem_euclid(w) as u8;
-    let ly = gy.rem_euclid(h) as u8;
-    let coord = ChunkCoord::new(cx, cy);
-    by_chunk
-      .entry(coord)
-      .and_modify(|r| {
-        r.expand_to_include(lx, ly);
-      })
-      .or_insert(Rect {
-        x0: lx,
-        y0: ly,
-        x1: lx,
-        y1: ly,
-      });
-  }
-  let seeds: Vec<ActiveChunk> = by_chunk
-    .into_iter()
-    .map(|(coord, rect)| ActiveChunk { coord, rect })
-    .collect();
-  expand_competent_regions(&seeds, drop_budget)
-    .into_iter()
-    .filter(|ac| world.chunks.contains_key(&ac.coord))
-    .collect()
-}
-
 fn expand_regions_to_components(
   world: &World,
   components: &[Component],
@@ -2485,28 +2448,28 @@ pub fn apply_competent_fall_regions(
   let mut fall_streak: HashMap<(i32, i32), u32> = HashMap::new();
   // Free-fall jumps once (binary-searched distance), then impact/roll rebuilds —
   // not one rebuild per cell of drop.
-  for pass in 0..COMPETENT_TOPOLOGY_PASSES {
+  let topology_passes = if fps_path {
+    COMPETENT_TOPOLOGY_PASSES_FPS
+  } else {
+    COMPETENT_TOPOLOGY_PASSES
+  };
+  for pass in 0..topology_passes {
     let (mut components, leftovers) = build_components(world, &regions);
     if !leftovers.is_empty() {
+      // Hand unfinished hang work to later ticks — do not spin rebuilds here.
       for &(x, y) in &leftovers {
         world.touch_dirty(x, y);
-      }
-      let more = expand_regions_to_cells(world, &leftovers, max_drop);
-      if !more.is_empty() {
-        // Merge leftover coverage into the active scan set.
-        regions.extend(more);
       }
     }
     if components.is_empty() {
       break;
     }
-    // Within-tick fairness when leftovers forced another pass.
+    // Within-tick fairness when a stuck prefix burned the previous pass.
     if pass > 0 && components.len() > 1 {
       let n = components.len();
       components.rotate_left((pass as usize) % n);
     }
     let mut moved = false;
-    let had_leftovers = !leftovers.is_empty();
     for comp in components {
       let anchor = comp_anchor(&comp);
       // Pass 0: long free-fall jump; later passes: shorter jumps while still
@@ -2588,15 +2551,14 @@ pub fn apply_competent_fall_regions(
       }
       // Soft embed disabled (cheese-grater). Flat soft beds just rest.
     }
-    if moved || had_leftovers {
-      let (next, _) = build_components(world, &regions);
+    if moved {
+      let (next, next_left) = build_components(world, &regions);
+      for &(x, y) in &next_left {
+        world.touch_dirty(x, y);
+      }
       let refreshed = expand_regions_to_components(world, &next, max_drop);
       if !refreshed.is_empty() {
         regions = refreshed;
-      }
-      // Cap truncated work — keep going so leftovers get a pass this tick.
-      if had_leftovers && !moved {
-        continue;
       }
     } else {
       break;

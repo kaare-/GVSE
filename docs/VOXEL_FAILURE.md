@@ -196,8 +196,8 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
   chunks (not row-by-row), excluding bedrock-rooted pillar columns; void-below
   seeds are processed before other competent floods so hill-sized strata cannot
   starve arch floaters. Per-tick body caps truncate excess work but **re-dirty
-  leftovers** and wake air-below rock every tick so large collapses finish
-  across subsequent ticks instead of hanging forever.
+  leftovers** so large collapses finish across subsequent ticks. FPS path uses
+  fewer topology passes; full-world floating wake stays cadence-gated.
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
