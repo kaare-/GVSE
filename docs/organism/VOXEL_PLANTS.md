@@ -32,6 +32,7 @@ kernel. Spec sources: [`PLANTS.md`](PLANTS.md), [`GENES.md`](GENES.md),
 | Pore-`sat` drink + drought stress | Done |
 | Spawn on Air above porous solid | Done |
 | Editor brushes + `T` minimal plant + `W` seaweed | Done |
+| Rolling rock squashes canopy under the boulder; deep roots stay | Done |
 
 ## Roadmap
 
@@ -130,6 +131,18 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 - Gene + blueprint mutation on the same `clone_fidelity` knob
 - App draws lilac spore puffs drifting on climate wind (`SporeFx`)
 - Rhizome sprout still works without spore modules (local clone only)
+
+### Rolling rock vs plants
+
+Competent bodies used to treat every overlapping plant module as cargo and
+translate the whole atom (roots included), then later *lean* the canopy
+aside so the boulder passed through and sometimes settled with a stem
+still drawn inside stone. A rock that occupies the plant now **squashes**
+it: the crown folds into Air under or beside the boulder (Organic litter
+if there is no room), `fallen` so it stays crushed, and roots keep their
+soil cells. Glancing hits on loose beds may still slide a cell. A loose
+sapling or already-uprooted log can tip and ride only when the dest is
+not stone. **No living draw module is left inside Stone / Limestone.**
 
 ### Floating / tipped woody castaways
 

@@ -438,6 +438,73 @@ pub fn is_anchored(world: &World, atom: &Atom) -> bool {
     false
 }
 
+/// A rolling rock may shove this plant only when it is already loose.
+///
+/// Deep-rooted, anchored plants stay put — the stem/leaves squash under
+/// the boulder instead of riding it. A one- or two-root surface holdfast,
+/// an unanchored crown, or an open-water woody castaway can be knocked
+/// over and carried when the dest is not stone.
+pub fn plant_resists_rock_shove(world: &World, atom: &Atom) -> bool {
+    if !is_land_plant(atom) {
+        return false;
+    }
+    if !is_anchored(world, atom) {
+        return false;
+    }
+    // Floating log with only a wet keel — already uprooted.
+    if woody_uprooted(atom) && !crate::organism::nucleus_rests_on_mineral(world, atom) {
+        return false;
+    }
+    let n = root_count(atom);
+    let min_dy = atom
+        .body
+        .iter()
+        .filter(|(_, _, m)| *m == ModuleId::Root)
+        .map(|(_, dy, _)| *dy)
+        .min()
+        .unwrap_or(0);
+    // Barely attached sapling: one or two roots hugging the crown.
+    if n <= 2 && min_dy >= -1 {
+        return false;
+    }
+    true
+}
+
+/// True when most roots sit in sand / soil / clay / gravel / compost.
+///
+/// A boulder can shove these a cell or two when it only glances; once it
+/// occupies the plant the canopy is crushed under it. Mineral-rooted
+/// plants stay pinned and only the canopy folds.
+pub fn plant_rooted_in_loose(world: &World, atom: &Atom) -> bool {
+    let mut n = 0usize;
+    let mut loose = 0usize;
+    for &(dx, dy, mid) in &atom.body {
+        if mid != ModuleId::Root {
+            continue;
+        }
+        n += 1;
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        if cell_is_loose_bed(world, wx, wy) || cell_is_loose_bed(world, wx, wy - 1) {
+            loose += 1;
+        }
+    }
+    n > 0 && loose * 2 >= n
+}
+
+fn cell_is_loose_bed(world: &World, gx: i32, gy: i32) -> bool {
+    matches!(
+        world.get_cell(gx, gy).map(|c| c.material),
+        Some(
+            MaterialId::Sand
+                | MaterialId::Soil
+                | MaterialId::Clay
+                | MaterialId::Gravel
+                | MaterialId::Organic
+        )
+    )
+}
+
 /// Woody plant that has tipped — one rigid chassis (stem + roots baked together).
 ///
 /// Distinct from upright substrate purchase (`!fallen`). Open-water castaways
@@ -682,7 +749,7 @@ pub fn drop_dead_leaves(world: &mut World, atom: &Atom) -> u32 {
     painted
 }
 
-fn paint_leaf_litter(world: &mut World, wx: i32, wy: i32) -> bool {
+pub(crate) fn paint_leaf_litter(world: &mut World, wx: i32, wy: i32) -> bool {
     use crate::cell::Cell;
     let wx = world.wrap_x(wx);
     let Some(c) = world.get_cell(wx, wy) else {

@@ -345,11 +345,10 @@ async fn main() {
                     true,
                 );
                 if organisms_on && !scene.world.competent_cell_moves.is_empty() {
-                    scene.organisms.shift_atoms_with_moved_cells(
-                        &scene.world,
-                        &scene.world.competent_cell_moves,
-                    );
-                    scene.world.competent_cell_moves.clear();
+                    let moves = std::mem::take(&mut scene.world.competent_cell_moves);
+                    scene
+                        .organisms
+                        .shift_atoms_with_moved_cells(&mut scene.world, &moves);
                 }
             }
         }
@@ -643,11 +642,10 @@ async fn main() {
                 Some(&settings.competent_fall),
             );
             if organisms_on && !scene.world.competent_cell_moves.is_empty() {
-                scene.organisms.shift_atoms_with_moved_cells(
-                    &scene.world,
-                    &scene.world.competent_cell_moves,
-                );
-                scene.world.competent_cell_moves.clear();
+                let moves = std::mem::take(&mut scene.world.competent_cell_moves);
+                scene
+                    .organisms
+                    .shift_atoms_with_moved_cells(&mut scene.world, &moves);
             }
             set_parallel_enabled(true);
             // Crude CO₂ buckets: surface Organic oxidation + atm↔lake exchange.
