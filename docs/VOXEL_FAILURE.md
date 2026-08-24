@@ -189,6 +189,14 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
   (`≤ CRUSH_SPEC_MAX`) instead of welding or getting stuck on them.
 - **Thin fracture** — long thin sticks/slabs snap at 1-cell necks into debris.
 - **Cargo** — soft/loose caps and embedded cells ride with fall, tip, and slide.
+  The riding flood only follows cells that rest on the body or on cargo, so a
+  small rock tipping on a hill cannot rotate the whole loose fill 90°. Cargo
+  is also capped at `2 × body` (8..512) so a pebble cannot lift a hillside.
+- **Seated untagged chunks** — worldgen / painted fragments stay terrain when
+  they still rest on solid *and* they came from a strata-sized flood (the
+  morphological open of a hill dices it into 20–80 cell leftovers) or are
+  larger than 128 cells. Isolated boulders and disks (the whole flood, ≤128)
+  still tumble. Untagged strata seed only into Air, not into sand.
 - **Mobile mark** — fallen / tipped / slid rock sets `CellFlags::MOBILE_ROCK`.
   Flood-fill only merges same mobility class, so a boulder cannot glue into
   unmarked painted strata or gain mass by contact.

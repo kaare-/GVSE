@@ -63,6 +63,11 @@ pub const PEBBLE_SPLIT_MAX: usize = 4;
 pub const PEBBLE_SPLIT_HOST_MIN: usize = 12;
 /// Tiny competent specs this size are crushed by larger moving bodies (not blockers).
 pub const CRUSH_SPEC_MAX: usize = 6;
+/// Isolated seated untagged blobs larger than this stay terrain.
+/// Morphological opening of a sand-capped hill peels compact leftovers
+/// well under this size; those are rejected separately (proper subsets of
+/// a seated flood). Rolling disks on a slope stay under this (~80 cells).
+pub const MAX_UNTAGGED_SEATED_BODY: usize = 128;
 /// Long-thin fracture: span (cells) along the long axis.
 pub const THIN_FRACTURE_SPAN: i32 = 7;
 /// Long-thin fracture: max thickness (bbox short side) to count as a stick/slab.
@@ -291,15 +296,34 @@ struct Component {
 /// Deliberately a *superset* of the truly movable set: it only needs somewhere
 /// to go down (below, or a side with room below it).
 #[inline]
-fn body_can_seed(world: &World, gx: i32, gy: i32, _cell: &Cell) -> bool {
+/// True when `neighbor` is space this cell may move into.
+///
+/// Untagged strata only fall into **Air**. Treating sand/soil as void made
+/// every sand-capped slope seed a body flood; morphological split then
+/// peeled the plateau off and a 90° tip rotated the whole fill into powder.
+/// Detached (tagged / mobile) rock may still dig into loose beds.
+#[inline]
+fn seed_space_open(seed: &Cell, neighbor: &Cell) -> bool {
+  if neighbor.material == MaterialId::Air {
+    return true;
+  }
+  let detached = seed.rock_body_tag() != 0 || is_mobile_rock(seed);
+  detached && is_roll_displaceable(neighbor.material)
+}
+
+fn body_can_seed(world: &World, gx: i32, gy: i32, cell: &Cell) -> bool {
   // NOTE: deliberately does *not* short-circuit on MOBILE_ROCK. That flag is a
   // permanent flood-compatibility class, so treating it as "live" kept every
   // cell that ever moved seeding (and dirtying) itself forever.
   //
-  // Room directly below → free fall / sink.
+  // Room directly below → free fall / sink. Loose beds count here so a
+  // boulder can settle into sand; the sand-as-void mistake was the *side*
+  // check, which made every sand-capped slope seed.
   match world.get_cell(gx, gy - 1) {
     None => return true,
-    Some(b) if b.material == MaterialId::Air || is_roll_displaceable(b.material) => {
+    Some(b)
+      if b.material == MaterialId::Air || is_roll_displaceable(b.material) =>
+    {
       return true;
     }
     _ => {}
@@ -314,16 +338,14 @@ fn body_can_seed(world: &World, gx: i32, gy: i32, _cell: &Cell) -> bool {
     let nx = world.wrap_x(gx + dx);
     let side_open = match world.get_cell(nx, gy) {
       None => true,
-      Some(c) => c.material == MaterialId::Air || is_roll_displaceable(c.material),
+      Some(c) => seed_space_open(cell, &c),
     };
     if !side_open {
       continue;
     }
     match world.get_cell(nx, gy - 1) {
       None => return true,
-      Some(d) if d.material == MaterialId::Air || is_roll_displaceable(d.material) => {
-        return true;
-      }
+      Some(d) if seed_space_open(cell, &d) => return true,
       _ => {}
     }
   }
@@ -828,6 +850,9 @@ fn push_component_pieces(
   pieces: Vec<Vec<(i32, i32, Cell)>>,
   hanging: bool,
   hanging_count: &mut usize,
+  flood_len: usize,
+  flood_seated: bool,
+  settle: &mut Vec<(i32, i32)>,
 ) {
   for piece in pieces {
     if piece.len() > MAX_DYNAMIC_BODY_CELLS || piece.is_empty() {
@@ -835,6 +860,24 @@ fn push_component_pieces(
     }
     let set: HashSet<_> = piece.iter().map(|(x, y, _)| (*x, *y)).collect();
     if !hanging && is_bedrock_rooted_pillar(world, &set) {
+      continue;
+    }
+    // Intact hills are tag 0. A 2-pass morphological open dices them into
+    // compact seated leftovers (often 20–80 cells) that then tip 90° and
+    // rotate the loose cap into powder. Only refuse leftovers of a *seated
+    // parent flood* — interior tiles of a floating island sit on the rest
+    // of the slab and must still peel. Isolated disks (whole flood ≤128)
+    // still tumble.
+    if !hanging
+      && flood_seated
+      && piece.iter().all(|(_, _, c)| c.rock_body_tag() == 0)
+      && piece_seated_on_solid(world, &set)
+      && (piece.len() > MAX_UNTAGGED_SEATED_BODY
+        || (piece.len() < flood_len && flood_len > MAX_UNTAGGED_SEATED_BODY))
+    {
+      for &(x, y, _) in &piece {
+        settle.push((x, y));
+      }
       continue;
     }
     let exposed = if hanging {
@@ -884,6 +927,23 @@ fn push_component_pieces(
   }
 }
 
+/// True when every bottom-face cell rests on non-loose solid outside the piece.
+fn piece_seated_on_solid(world: &World, set: &HashSet<(i32, i32)>) -> bool {
+  let mut any = false;
+  for &(x, y) in set {
+    if set.contains(&(x, y - 1)) {
+      continue;
+    }
+    any = true;
+    match world.get_cell(x, y - 1) {
+      Some(c)
+        if c.material != MaterialId::Air && !is_roll_displaceable(c.material) => {}
+      _ => return false,
+    }
+  }
+  any
+}
+
 fn is_bedrock_rooted_pillar(world: &World, set: &HashSet<(i32, i32)>) -> bool {
   let pillars = pillar_column_xs(world, set);
   if pillars.is_empty() {
@@ -911,11 +971,12 @@ fn void_below_seed(world: &World, gx: i32, gy: i32) -> bool {
 fn build_components(
   world: &World,
   active: &[ActiveChunk],
-) -> (Vec<Component>, Vec<(i32, i32)>) {
+) -> (Vec<Component>, Vec<(i32, i32)>, Vec<(i32, i32)>) {
   probe::bump(&probe::build_calls);
   let mut visited: HashSet<(i32, i32)> = HashSet::default();
   let mut out: Vec<Component> = Vec::new();
   let mut hanging_count = 0usize;
+  let mut settle: Vec<(i32, i32)> = Vec::new();
   // Only incremental scans are capped; an explicit whole-world request must
   // stay exhaustive (tests, F3 close).
   let build_cap = if active.is_empty() {
@@ -1026,6 +1087,9 @@ fn build_components(
             hang,
             true,
             &mut hanging_count,
+            cells.len(),
+            false,
+            &mut settle,
           );
           let mut pushed: HashSet<(i32, i32)> = HashSet::default();
           for comp in &out[before..] {
@@ -1069,6 +1133,7 @@ fn build_components(
           continue;
         }
           let set = cells_to_set(&cells);
+          let flood_seated = seed_tag == 0 && piece_seated_on_solid(world, &set);
           // A tagged cluster is already exactly one loose body — the flood
           // could not have merged anything else into it — so the expensive
           // morphological weld-split only applies to tag-0 strata.
@@ -1091,7 +1156,16 @@ fn build_components(
             hanging = true;
           }
         }
-        push_component_pieces(world, &mut out, pieces, hanging, &mut hanging_count);
+        push_component_pieces(
+          world,
+          &mut out,
+          pieces,
+          hanging,
+          &mut hanging_count,
+          cells.len(),
+          flood_seated,
+          &mut settle,
+        );
         }
       }
     }
@@ -1147,7 +1221,7 @@ fn build_components(
     }
   }
   floating.append(&mut seated);
-  (floating, leftovers)
+  (floating, leftovers, settle)
 }
 
 fn body_neighbor_count(set: &HashSet<(i32, i32)>, x: i32, y: i32) -> usize {
@@ -1894,10 +1968,18 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
 }
 
 /// Loose / soft cells on top or nested against the rock ride with it.
+///
+/// The riding-cap flood used to walk every 4-connected loose neighbour.
+/// A small rock landing on a sand hill then swallowed the whole fill
+/// (up to [`MAX_CARGO`]) and a 90° tip rotated it into powder. Caps may
+/// only spread through cells that **rest on the body or on cargo** —
+/// hillside beds sitting on their own stone stay put.
 fn gather_cargo(world: &World, comp: &Component) -> Vec<(i32, i32, Cell)> {
   probe::bump(&probe::cargo_calls);
   probe::add(&probe::cargo_cells, comp.cells.len() as u64);
-  const MAX_CARGO: usize = 512;
+  const MAX_CARGO_ABS: usize = 512;
+  // A pebble must not lift a hillside; a big slab may still carry its cap.
+  let max_cargo = (comp.cells.len().saturating_mul(2)).clamp(8, MAX_CARGO_ABS);
   let mut cargo = Vec::new();
   let mut seen = HashSet::default();
   for &(gx, gy, _) in &comp.cells {
@@ -1925,7 +2007,12 @@ fn gather_cargo(world: &World, comp: &Component) -> Vec<(i32, i32, Cell)> {
       }
     }
   }
-  // Surface stack: flood up and sideways through soft / organic caps.
+  // Surface stack: only cells that rest on the body or on already-accepted
+  // cargo. Sideways walk across a hill cap is what rotated whole slopes.
+  let rides = |gx: i32, gy: i32, cargo_set: &HashSet<(i32, i32)>| -> bool {
+    let below = (world.wrap_x(gx), gy - 1);
+    comp.set.contains(&below) || cargo_set.contains(&below)
+  };
   let mut q = VecDeque::new();
   for &(gx, gy, _) in &comp.cells {
     let nx = world.wrap_x(gx);
@@ -1934,13 +2021,13 @@ fn gather_cargo(world: &World, comp: &Component) -> Vec<(i32, i32, Cell)> {
       continue;
     }
     if let Some(c) = world.get_cell(nx, ny) {
-      if is_roll_displaceable(c.material) && seen.insert((nx, ny)) {
+      if is_roll_displaceable(c.material) && rides(nx, ny, &seen) && seen.insert((nx, ny)) {
         q.push_back((nx, ny));
       }
     }
   }
   while let Some((cx, cy)) = q.pop_front() {
-    if cargo.len() >= MAX_CARGO {
+    if cargo.len() >= max_cargo {
       break;
     }
     let Some(c) = world.get_cell(cx, cy) else {
@@ -1950,17 +2037,16 @@ fn gather_cargo(world: &World, comp: &Component) -> Vec<(i32, i32, Cell)> {
     for (dx, dy) in [(1, 0), (0, 1), (-1, 0), (0, -1)] {
       let nx = world.wrap_x(cx + dx);
       let ny = cy + dy;
-      if comp.set.contains(&(nx, ny)) || !seen.insert((nx, ny)) {
+      if comp.set.contains(&(nx, ny)) || seen.contains(&(nx, ny)) {
+        continue;
+      }
+      if !rides(nx, ny, &seen) {
         continue;
       }
       if let Some(nc) = world.get_cell(nx, ny) {
-        if is_roll_displaceable(nc.material) {
+        if is_roll_displaceable(nc.material) && seen.insert((nx, ny)) {
           q.push_back((nx, ny));
-        } else {
-          seen.remove(&(nx, ny));
         }
-      } else {
-        seen.remove(&(nx, ny));
       }
     }
   }
@@ -2658,7 +2744,7 @@ fn settle_after_roll(
   fall_streak: &mut HashMap<(i32, i32), u32>,
   stats: &mut CompetentFallStats,
 ) {
-  let (post, _) = build_components(world, regions);
+  let (post, _, _) = build_components(world, regions);
   let Some(refreshed) = post
     .iter()
     .find(|c| c.set.contains(&hint))
@@ -2706,12 +2792,15 @@ pub fn apply_competent_fall_regions(
     COMPETENT_TOPOLOGY_PASSES
   };
   for pass in 0..topology_passes {
-    let (mut components, leftovers) = build_components(world, &regions);
+    let (mut components, leftovers, settle) = build_components(world, &regions);
     if !leftovers.is_empty() {
       // Hand unfinished hang work to later ticks — do not spin rebuilds here.
       for &(x, y) in &leftovers {
         world.touch_dirty(x, y);
       }
+    }
+    for (x, y) in settle {
+      world.competent_set_settled(x, y);
     }
     if components.is_empty() {
       break;
@@ -3087,7 +3176,7 @@ mod tests {
     // 3×3 with a corner overhang so some columns lack support under the body.
     stamp_blob(&mut w, 5, 8, 3, 3);
     let regions = competent_active_regions(&w, &[], 8);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     assert!(!comps.is_empty());
     let cfg = CompetentFallConfig::default();
     let dir = downhill_roll_dir(&w, &comps[0], &cfg);
@@ -3136,7 +3225,7 @@ mod tests {
       }
     }
     let regions = competent_active_regions(&w, &[], 8);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     assert!(!comps.is_empty());
     let cfg = CompetentFallConfig {
       max_roll_events: 24,
@@ -3285,7 +3374,7 @@ mod tests {
     };
     apply_competent_fall_regions(&mut w, &[], &cfg, false);
     let regions = competent_active_regions(&w, &[], 8);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     let Some(comp) = comps.iter().find(|c| c.cells.len() >= 9) else {
       // May have slid; just ensure tip_dir is conservative when supported.
       return;
@@ -3322,7 +3411,7 @@ mod tests {
     stamp_blob(&mut w, 4, 4, 4, 4); // 16-cell boulder
     w.set_cell(9, 4, Cell::solid(MaterialId::Stone)); // tiny spec downhill
     let regions = competent_active_regions(&w, &[], 8);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     let boulder = comps.iter().find(|c| c.cells.len() >= 12).expect("boulder");
     assert!(
       can_crush_spec(&w, 9, 4, boulder.cells.len()),
@@ -3431,7 +3520,7 @@ mod tests {
       }
     }
     let regions = competent_active_regions(&w, &[], 8);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     assert!(
       comps.len() >= 3,
       "chain must become multiple bodies (got {})",
@@ -3468,7 +3557,7 @@ mod tests {
       w.set_cell(5, y, Cell::solid(MaterialId::Stone));
     }
     let regions = competent_active_regions(&w, &[], 4);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     let Some(comp) = comps.iter().find(|c| c.cells.len() >= 3) else {
       return;
     };
@@ -3499,7 +3588,7 @@ mod tests {
       }
     }
     let regions = competent_active_regions(&w, &[], 4);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     let boulder = comps
       .iter()
       .find(|c| c.cells.iter().any(|(x, _, _)| *x >= 4))
@@ -3583,7 +3672,7 @@ mod tests {
       hang.len()
     );
     let regions = competent_active_regions(&w, &[], 8);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     let total: usize = comps.iter().map(|c| c.cells.len()).sum();
     assert!(
       total >= 300,
@@ -3633,7 +3722,7 @@ mod tests {
       }
     }
     let regions = competent_active_regions(&w, &[], 8);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     let total: usize = comps.iter().map(|c| c.cells.len()).sum();
     assert!(
       total >= 150,
@@ -3697,7 +3786,7 @@ mod tests {
       "precondition: more tiles than floating cap ({tiles})"
     );
     let regions = competent_active_regions(&w, &[], 8);
-    let (comps, leftovers) = build_components(&w, &regions);
+    let (comps, leftovers, _) = build_components(&w, &regions);
     assert!(
       !leftovers.is_empty(),
       "cap must truncate (comps={}, leftovers={})",
@@ -3910,7 +3999,7 @@ mod tests {
       }
     }
     let regions = competent_active_regions(&w, &[], 4);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     let touching: Vec<_> = comps
       .iter()
       .filter(|c| c.cells.iter().any(|(x, _, _)| *x >= 4 && *x < 10))
@@ -3968,7 +4057,7 @@ mod tests {
     // However they ended up, no single rigid body may contain both rocks'
     // worth of stone (9 + 16 = 25 cells).
     let regions = competent_active_regions(&w, &[], 8);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     let biggest = comps.iter().map(|c| c.cells.len()).max().unwrap_or(0);
     assert!(
       biggest < 25,
@@ -3999,7 +4088,7 @@ mod tests {
       "painted rock must be untagged"
     );
     let regions = competent_active_regions(&w, &[], 8);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     let biggest = comps.iter().map(|c| c.cells.len()).max().unwrap_or(0);
     assert_eq!(
       biggest, 24,
@@ -4199,7 +4288,7 @@ mod tests {
       "removing support must wake the rock directly above"
     );
     let regions = competent_active_regions(&w, &[], 8);
-    let (comps, _) = build_components(&w, &regions);
+    let (comps, ..) = build_components(&w, &regions);
     assert!(
       comps
         .iter()
@@ -4244,6 +4333,63 @@ mod tests {
     assert!(
       w.get_cell(20, 22).map(|c| c.material) != Some(MaterialId::Stone),
       "isolated carved arch must fall"
+    );
+  }
+
+  #[test]
+  fn hillside_sand_stays_put_when_small_rock_tips_on_slope() {
+    // Ramp of stone with a 2-cell sand cap. A small airborne rock lands
+    // on the left toe, where sand above the body is 4-connected to the
+    // whole fill. The old cargo flood then rotated that fill 90° with
+    // the tip and the far side fell as powder.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..48 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 10..46 {
+      let h = 2 + (x - 10).min(16);
+      for y in 1..=h {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+      w.set_cell(x, h + 1, Cell::solid(MaterialId::Sand));
+      w.set_cell(x, h + 2, Cell::solid(MaterialId::Sand));
+    }
+    let far_before: Vec<(i32, i32)> = (30..46)
+      .flat_map(|x| (1..30).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+      .collect();
+    assert!(
+      far_before.len() >= 20,
+      "need a real hillside cap (got {})",
+      far_before.len()
+    );
+    let stone_before = count_mat(&w, MaterialId::Stone, 30, 46, 1, 22);
+    stamp_blob(&mut w, 8, 28, 4, 3);
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 48,
+      max_roll_events: 24,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..20 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let far_after = far_before
+      .iter()
+      .filter(|&&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
+      .count();
+    assert!(
+      far_after * 4 >= far_before.len() * 3,
+      "far-side hill sand must stay seated (before={}, after={far_after}); \
+       cargo flood + a 90° plateau tip used to dump the fill as powder",
+      far_before.len()
+    );
+    let stone_after = count_mat(&w, MaterialId::Stone, 30, 46, 1, 22);
+    assert!(
+      stone_after + 8 >= stone_before,
+      "far-side hill stone must not tip away (before={stone_before}, after={stone_after})"
     );
   }
 
