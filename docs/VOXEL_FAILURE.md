@@ -181,11 +181,25 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
   split into separate bodies instead of freezing as one welded pillar.
   Residual pebble necks are peeled; only editor paint / geology should weld.
 - **Free fall** — multi-cell drop through Air (rocks sink in lakes).
+- **Terminal velocity** — `max_passes` is a per-tick *ceiling*, not a speed.
+  Pass 0 used to take the whole 48–64 cell budget in one hop, so a boulder
+  teleported sky→ground while a seated one crept a cell at a time (playtest:
+  "sometimes too fast and sometimes too slow"). The per-tick budget is now
+  `BODY_FALL_CELLS_PER_TICK` split evenly across the topology passes, so a
+  body holds a constant speed. `LANDSCAPE_FALL_CELLS` matches it.
 - **Water drag** — passability only looks at `material == Air`, so `sat` is
-  invisible to a body and water was effectively vacuum: a boulder plunged a
-  whole lake column per pass at dry free-fall speed. A body touching
-  near-full standing water (`WATER_DRAG_MIN_SAT`) now sinks at most
-  `WATER_SINK_MAX_DROP` cells per pass and gets half the tip/slide budget.
+  invisible to a body and water was effectively vacuum: a boulder fell
+  through a lake at dry free-fall speed. A body touching near-full standing
+  water (`WATER_DRAG_MIN_SAT`) now uses `BODY_FALL_CELLS_PER_TICK_WATER`
+  (half of air) and gets half the tip/slide budget.
+- **Bodies in flight stay awake** — an airborne body dirties its own cells,
+  but the flow substep loop runs first and clears dirty, so the body pass saw
+  nothing and had to wait for the every-4-ticks `wake_floating_competent`
+  scan; motion came in lumps. In a lake, water writes re-dirtied the region
+  every tick, so submerged rock moved *continuously* while airborne rock
+  stuttered — that is why water looked faster than air. `wake_moved_competent`
+  re-dirties last tick's move destinations in O(moves), no scan. It does not
+  clear sleep flags, or every landing would re-evaluate its ridge forever.
   Note the *other* half of "rocks are fast underwater" is the bed, not the
   rock: wet grains loosen a repose step and dense grains treat standing
   water as an avalanchable seat (`GRAIN_REPOSE_LAKE_MIN`), so a submerged

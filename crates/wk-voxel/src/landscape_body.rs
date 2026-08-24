@@ -37,7 +37,10 @@ pub const MAX_LANDSCAPE_BODIES: usize = 8;
 /// Detach attempts per tick.
 pub const MAX_LANDSCAPE_DETACH_PER_TICK: usize = 2;
 /// Max free-fall cells per body per tick.
-pub const LANDSCAPE_FALL_CELLS: i32 = 48;
+///
+/// Matches the competent-body terminal velocity so a big slab descends at
+/// the same readable speed as a boulder instead of teleporting 48 cells.
+pub const LANDSCAPE_FALL_CELLS: i32 = 12;
 /// Ticks with zero drop while still airborne before forced impact stamp.
 pub const LANDSCAPE_STUCK_STAMP_TICKS: u32 = 6;
 /// Max bottom-face cells converted to loose on hard impact.

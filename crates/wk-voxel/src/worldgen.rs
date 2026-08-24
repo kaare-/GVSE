@@ -365,12 +365,21 @@ mod tests {
             tick(&mut w);
         }
 
+        // The bed may have taken rock debris in those 240 ticks: bodies now
+        // hold a terminal velocity and are re-dirtied while in flight, so a
+        // hanging boulder finishes its fall into the sea and shatters. What
+        // matters here is that the lake bed is porous and saturates.
         let sand = w.get_cell(x, surf).unwrap();
-        assert_eq!(sand.material, MaterialId::Sand);
+        let bed_cap = water_capacity(sand.material);
+        assert!(
+            bed_cap > 0,
+            "lake bed must stay porous, got {:?}",
+            sand.material
+        );
         assert_eq!(
-            sand.sat.0,
-            water_capacity(MaterialId::Sand),
-            "lake-bed sand must saturate"
+            sand.sat.0, bed_cap,
+            "lake-bed {:?} must saturate (sat={})",
+            sand.material, sand.sat.0
         );
         // Body cell just under the sand cap.
         let under = w.get_cell(x, surf - p.sand_cap_thickness).unwrap();

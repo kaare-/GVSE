@@ -97,6 +97,7 @@ impl WorldV5 {
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
+            competent_moved_cells: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
         }
@@ -137,6 +138,7 @@ impl WorldV6 {
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
+            competent_moved_cells: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
         }
@@ -182,6 +184,7 @@ impl WorldV7 {
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
+            competent_moved_cells: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
         };
@@ -238,6 +241,7 @@ impl WorldV8 {
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
+            competent_moved_cells: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
         }
@@ -286,6 +290,7 @@ impl WorldV11 {
             sym_net_flow: self.sym_net_flow,
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
+            competent_moved_cells: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
         }
@@ -379,6 +384,7 @@ impl WorldV10 {
                 .collect(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
+            competent_moved_cells: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
         }
@@ -440,6 +446,7 @@ impl WorldV9 {
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
+            competent_moved_cells: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
         }

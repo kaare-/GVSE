@@ -33,6 +33,20 @@ use crate::grid::World;
 pub const COMPETENT_FALL_PASSES: u32 = 96;
 /// FPS path: one rigid drop of this many cells (sky → ground in ~1–2 frames).
 pub const COMPETENT_FALL_PASSES_FPS: u32 = 64;
+
+/// **Terminal velocity** — cells a body falls per tick in air.
+///
+/// `max_passes` is a per-tick *ceiling*, not a speed: pass 0 used to take
+/// the whole 48–64 cell budget in one hop, so a boulder teleported from
+/// sky to ground while a seated one crept a cell at a time. Playtest read
+/// that as jerky — "sometimes too fast and sometimes too slow".
+/// Split evenly across [`COMPETENT_TOPOLOGY_PASSES`], so keep it a
+/// multiple of that (drag needs a distinct whole cells-per-pass; skipping
+/// whole passes instead trips the "nothing moved" loop break).
+pub const BODY_FALL_CELLS_PER_TICK: i32 = 12;
+/// Terminal velocity in standing water (drag). Water must be *slower*
+/// than air; it used to be the same because passability ignores `sat`.
+pub const BODY_FALL_CELLS_PER_TICK_WATER: i32 = 6;
 /// Seated tip / impact rebuilds per tick (keep low — each rebuild is O(body)).
 pub const COMPETENT_TOPOLOGY_PASSES: u32 = 6;
 /// FPS path: fewer rebuilds so hanging peel cannot tank frame time.
@@ -123,15 +137,6 @@ fn body_passable_at(_world: &World, _gx: i32, _gy: i32, cell: &Cell) -> bool {
 
 /// Standing-water floor for body drag (matches `GRAIN_REPOSE_LAKE_MIN`).
 const WATER_DRAG_MIN_SAT: u8 = 200;
-/// Cells a **submerged** body may sink per pass.
-///
-/// Water is not vacuum. Passability ignores `sat`, so without this a
-/// boulder plunged a whole lake column per pass at dry free-fall speed,
-/// and because dense grains treat standing water as an avalanchable seat
-/// ([`super::grain::GRAIN_REPOSE_LAKE_MIN`]) the bed under it kept
-/// sliding — so it also kept re-falling and outran the same rock on a dry
-/// slope of identical geometry.
-const WATER_SINK_MAX_DROP: i32 = 2;
 
 /// True when this body is in contact with standing water (drag applies).
 ///
@@ -2387,6 +2392,24 @@ pub fn wake_floating_competent(world: &mut World) {
   }
 }
 
+/// Re-dirty bodies that moved last tick so they keep their speed.
+///
+/// O(cells moved) — no scan. Without it an airborne body only got a turn
+/// on the [`wake_floating_competent`] cadence (every 4 ticks), so it fell
+/// in lumps, while rock in a lake was re-dirtied every tick by water
+/// writes and therefore moved continuously.
+pub fn wake_moved_competent(world: &mut World) {
+  if world.competent_moved_cells.is_empty() {
+    return;
+  }
+  let cells = std::mem::take(&mut world.competent_moved_cells);
+  for (gx, gy) in cells {
+    // Dirty only — do **not** clear sleep flags. A body that came to rest
+    // must stay asleep, or every landing re-evaluates its ridge forever.
+    world.touch_dirty(gx, gy);
+  }
+}
+
 /// Wake every loaded chunk (F3 mid-air paint insurance).
 pub fn wake_competent_bodies_all(world: &mut World) {
   // Editor paint can change support anywhere — drop all sleep state.
@@ -2861,17 +2884,18 @@ pub fn apply_competent_fall_regions(
     for comp in components {
       let anchor = comp_anchor(&comp);
       let mut comp_moved = false;
-      // Free-falling bodies always take the full drop budget — never 1-cell
-      // drip while waiting for a later topology pass.
       let floating = is_floating(world, &comp);
-      // Water drag: a submerged body sinks a couple of cells per pass
-      // instead of taking the whole dry free-fall budget.
+      // Constant fall speed: split the per-tick terminal velocity across
+      // the topology passes so a body descends at a steady rate instead of
+      // taking the whole budget on pass 0 (teleport) and nothing after.
+      // Standing water drags it slower still.
       let submerged = body_submerged(world, &comp);
-      let budget = if submerged {
-        max_drop.min(WATER_SINK_MAX_DROP)
+      let per_tick = if submerged {
+        max_drop.min(BODY_FALL_CELLS_PER_TICK_WATER)
       } else {
-        max_drop
+        max_drop.min(BODY_FALL_CELLS_PER_TICK)
       };
+      let budget = (per_tick / topology_passes as i32).max(1);
       // Drag also halves how often a submerged body may tip / slide.
       let roll_budget = if submerged {
         (cfg.max_roll_events / 2).max(1)
@@ -3002,6 +3026,12 @@ pub fn apply_competent_fall_regions(
       break;
     }
   }
+  // Keep bodies that moved awake for next tick (see `wake_moved_competent`).
+  world.competent_moved_cells = world
+    .competent_cell_moves
+    .iter()
+    .map(|&(_, _, tx, ty)| (tx, ty))
+    .collect();
   stats
 }
 
@@ -3106,8 +3136,6 @@ mod tests {
       max_roll_events: 0,
       ..CompetentFallConfig::default()
     };
-    apply_competent_fall_regions(&mut air, &[], &cfg, false);
-    apply_competent_fall_regions(&mut lake, &[], &cfg, false);
     let low = |w: &World| -> i32 {
       (0..16)
         .flat_map(|x| (0..40).map(move |y| (x, y)))
@@ -3116,17 +3144,87 @@ mod tests {
         .min()
         .unwrap_or(99)
     };
-    let air_y = low(&air);
-    let lake_y = low(&lake);
-    assert!(
-      air_y <= 2,
-      "rock in air must free-fall to the floor in one pass (y={air_y})"
+    let start = low(&air);
+    apply_competent_fall_regions(&mut air, &[], &cfg, false);
+    apply_competent_fall_regions(&mut lake, &[], &cfg, false);
+    let air_fell = start - low(&air);
+    let lake_fell = start - low(&lake);
+    assert_eq!(
+      air_fell, BODY_FALL_CELLS_PER_TICK,
+      "air fall must hold terminal velocity, not teleport (fell={air_fell})"
+    );
+    assert_eq!(
+      lake_fell, BODY_FALL_CELLS_PER_TICK_WATER,
+      "submerged fall must be dragged to its own terminal velocity \
+       (fell={lake_fell})"
     );
     assert!(
-      lake_y > air_y + 4,
-      "submerged rock must sink slowly, not at dry free-fall speed \
-       (lake_y={lake_y} air_y={air_y})"
+      lake_fell < air_fell,
+      "water must be slower than air (lake={lake_fell} air={air_fell})"
     );
+  }
+
+  #[test]
+  #[ignore = "diagnostic: prints per-tick fall depth in air vs water"]
+  fn fall_rate_air_vs_water_per_tick() {
+    let build = |flood: bool| -> World {
+      let mut w = World::new(9);
+      w.ensure_chunk(ChunkCoord::new(0, 0));
+      w.ensure_chunk(ChunkCoord::new(0, 1));
+      for x in 0..16 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        // Walls so the lake cannot drain while we measure.
+        if x == 0 || x == 15 {
+          for y in 1..=60 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+          }
+        }
+      }
+      if flood {
+        for x in 1..15 {
+          for y in 1..=50 {
+            w.set_cell(
+              x,
+              y,
+              Cell {
+                material: MaterialId::Air,
+                sat: Sat(255),
+                ..Cell::default()
+              },
+            );
+          }
+        }
+      }
+      stamp_blob(&mut w, 6, 46, 3, 3);
+      w
+    };
+    let low = |w: &World| -> i32 {
+      (0..16)
+        .flat_map(|x| (0..60).map(move |y| (x, y)))
+        .filter(|&(x, y)| {
+          matches!(
+            w.get_cell(x, y).map(|c| c.material),
+            Some(MaterialId::Stone) | Some(MaterialId::LooseRock)
+          )
+        })
+        .map(|(_, y)| y)
+        .min()
+        .unwrap_or(99)
+    };
+    let perf = PerfConfig::default();
+    let mut air = build(false);
+    let mut lake = build(true);
+    let mut out = String::new();
+    for t in 0..10 {
+      tick_with_perf(&mut air, &perf);
+      tick_with_perf(&mut lake, &perf);
+      out.push_str(&format!(
+        "  t{t}: air_low_y={} lake_low_y={}\n",
+        low(&air),
+        low(&lake)
+      ));
+    }
+    eprintln!("fall depth per tick (start y=46)\n{out}");
   }
 
   #[test]
@@ -3340,7 +3438,10 @@ mod tests {
       max_roll_events: 0, // sink test only — no tip after landing
       ..CompetentFallConfig::default()
     };
-    apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    // Bodies hold a terminal velocity, so a deep lake takes a few ticks.
+    for _ in 0..6 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
     let min_stone_y = (0..16)
       .flat_map(|x| (0..20).map(move |y| (x, y)))
       .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))

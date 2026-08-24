@@ -123,6 +123,16 @@ pub struct World {
     /// every tick. Derived state — never saved.
     #[serde(skip, default)]
     pub competent_settled: FxHashMap<ChunkCoord, crate::support_map::ChunkMask>,
+    /// Cells a competent body moved into last tick.
+    ///
+    /// A body in flight marks its cells dirty, but the flow substep loop
+    /// runs first and clears dirty, so by the time the body pass runs the
+    /// mark is gone. In a lake, water writes keep re-dirtying the region
+    /// every tick, so submerged rock kept moving while an airborne one
+    /// waited for the every-4-ticks floating wake — the "water is faster
+    /// than air" playtest report. Re-dirtying these is O(moves).
+    #[serde(skip, default)]
+    pub competent_moved_cells: Vec<(i32, i32)>,
     /// Invalidates the thread-local last-chunk pointer after clone / insert.
     #[serde(skip, default)]
     pub(crate) chunk_cache_id: ChunkCacheId,
@@ -146,6 +156,7 @@ impl World {
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
             competent_settled: FxHashMap::default(),
+            competent_moved_cells: Vec::new(),
             chunk_cache_id: ChunkCacheId::default(),
         }
     }
