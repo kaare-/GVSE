@@ -19,6 +19,8 @@ use crate::support_map::{
 
 /// Smallest hang cluster promoted to a landscape entity (else CA path).
 pub const MIN_LANDSCAPE_BODY_CELLS: usize = 24;
+/// Bodies this large (competent rock cells) fall straight down — no COM tip.
+pub const LANDSCAPE_GRAVITY_ONLY_MIN: usize = 200;
 /// Hard cap on cells in one landscape body (FPS / stamp safety).
 pub const MAX_LANDSCAPE_BODY_CELLS: usize = 2048;
 /// Live landscape entities at once.
@@ -27,7 +29,9 @@ pub const MAX_LANDSCAPE_BODIES: usize = 8;
 pub const MAX_LANDSCAPE_DETACH_PER_TICK: usize = 2;
 /// Max free-fall cells per body per tick.
 pub const LANDSCAPE_FALL_CELLS: i32 = 48;
-/// Ticks with zero drop while still airborne before forced impact stamp.
+/// Tip when COM overhangs support by this many cells (tippable bodies only).
+pub const LANDSCAPE_TIP_OVERHANG: i32 = 2;
+/// Ticks with zero drop while still airborne before forced impact stamp (huge slabs).
 pub const LANDSCAPE_STUCK_STAMP_TICKS: u32 = 6;
 
 #[derive(Debug, Clone)]
@@ -44,9 +48,16 @@ pub struct LandscapeBody {
   pub fall_streak: u32,
   /// Consecutive ticks with no downward motion while airborne.
   pub stuck_ticks: u32,
+  /// Huge slabs (≥ [`LANDSCAPE_GRAVITY_ONLY_MIN`] rock cells) — no COM tip.
+  pub gravity_only: bool,
+  /// 90° tip steps for smaller bodies (0 = upright).
+  pub tip_quarter: i8,
 }
 
 impl LandscapeBody {
+  pub fn rock_cell_count(&self) -> usize {
+    self.cells.len()
+  }
   pub fn world_cells(&self) -> Vec<(i32, i32, Cell)> {
     self.all_world_cells()
   }
@@ -61,7 +72,15 @@ impl LandscapeBody {
   }
 
   fn local_to_world(&self, lx: i32, ly: i32) -> (i32, i32) {
-    (self.ox + lx, self.oy + ly)
+    if self.gravity_only {
+      return (self.ox + lx, self.oy + ly);
+    }
+    match self.tip_quarter.rem_euclid(4) {
+      0 => (self.ox + lx, self.oy + ly),
+      1 => (self.ox + ly, self.oy - lx),
+      2 => (self.ox - lx, self.oy - ly),
+      _ => (self.ox - ly, self.oy + lx),
+    }
   }
 
   fn occupied_set(&self) -> HashSet<(i32, i32)> {
@@ -247,6 +266,74 @@ fn is_fully_airborne(world: &World, body: &LandscapeBody) -> bool {
     })
 }
 
+fn body_com(body: &LandscapeBody) -> (i32, i32) {
+  let cells = body.all_world_cells();
+  if cells.is_empty() {
+    return (body.ox, body.oy);
+  }
+  let n = cells.len() as i64;
+  let sx: i64 = cells.iter().map(|(x, _, _)| *x as i64).sum();
+  let sy: i64 = cells.iter().map(|(_, y, _)| *y as i64).sum();
+  ((sx / n) as i32, (sy / n) as i32)
+}
+
+fn can_place_rigid(world: &World, cells: &[(i32, i32, Cell)]) -> bool {
+  for &(x, y, _) in cells {
+    if y < 0 {
+      return false;
+    }
+    let wx = world.wrap_x(x);
+    match world.get_cell(wx, y) {
+      None => return false,
+      Some(c) if c.material == MaterialId::Air => {}
+      Some(_) => return false,
+    }
+  }
+  true
+}
+
+fn support_drop(world: &World, body: &LandscapeBody) -> Option<i8> {
+  let face = bottom_face(body);
+  if face.is_empty() {
+    return None;
+  }
+  let (cx, _) = body_com(body);
+  let mut left_support = i32::MAX;
+  let mut right_support = i32::MIN;
+  let mut any = false;
+  for &(x, y) in &face {
+    match world.get_cell(world.wrap_x(x), y - 1) {
+      Some(c) if c.material != MaterialId::Air => {
+        any = true;
+        left_support = left_support.min(x);
+        right_support = right_support.max(x);
+      }
+      _ => {}
+    }
+  }
+  if !any {
+    return None;
+  }
+  if cx > right_support + LANDSCAPE_TIP_OVERHANG {
+    Some(1)
+  } else if cx < left_support - LANDSCAPE_TIP_OVERHANG {
+    Some(-1)
+  } else {
+    None
+  }
+}
+
+fn try_tip(body: &mut LandscapeBody, world: &World, dir: i8) -> bool {
+  let old = body.tip_quarter;
+  body.tip_quarter = body.tip_quarter.wrapping_add(dir);
+  if can_place_rigid(world, &body.all_world_cells()) {
+    true
+  } else {
+    body.tip_quarter = old;
+    false
+  }
+}
+
 fn max_drop(world: &World, body: &LandscapeBody, max_dy: i32) -> i32 {
   if max_dy <= 0 {
     return 0;
@@ -346,6 +433,7 @@ pub fn detach_landscape_bodies(
       .collect();
     clear_cells(world, &rock_cells);
     clear_cells(world, &cargo_world);
+    let gravity_only = rock_cells.len() >= LANDSCAPE_GRAVITY_ONLY_MIN;
     store.next_id = store.next_id.wrapping_add(1);
     store.bodies.push(LandscapeBody {
       id: store.next_id,
@@ -355,13 +443,15 @@ pub fn detach_landscape_bodies(
       oy: min_y,
       fall_streak: 0,
       stuck_ticks: 0,
+      gravity_only,
+      tip_quarter: 0,
     });
     detached += 1;
   }
   detached
 }
 
-/// Step all landscape bodies: gravity fall, stamp when seated or jammed.
+/// Step all landscape bodies: gravity fall, optional tip, stamp when seated.
 pub fn step_landscape_bodies(
   world: &mut World,
   store: &mut LandscapeBodyStore,
@@ -377,14 +467,32 @@ pub fn step_landscape_bodies(
       stats.fall_moves += 1;
       continue;
     }
+    // Smaller bodies (<200 rock cells) may tip on partial support.
+    if !body.gravity_only {
+      if let Some(dir) = support_drop(world, body) {
+        if try_tip(body, world, dir) {
+          stats.tips += 1;
+          let d2 = max_drop(world, body, 8);
+          if d2 > 0 {
+            apply_drop(world, body, d2);
+            body.fall_streak = body.fall_streak.saturating_add(d2 as u32);
+            body.stuck_ticks = 0;
+            stats.fall_moves += 1;
+          }
+          continue;
+        }
+      }
+    }
     let airborne = is_fully_airborne(world, body);
     if airborne {
       body.stuck_ticks = body.stuck_ticks.saturating_add(1);
     } else {
       body.stuck_ticks = 0;
     }
-    let force_impact = airborne && body.stuck_ticks >= LANDSCAPE_STUCK_STAMP_TICKS;
-    // Seated, wedged, or stuck-in-air too long — rematerialize.
+    let force_impact = body.gravity_only
+      && airborne
+      && body.stuck_ticks >= LANDSCAPE_STUCK_STAMP_TICKS;
+    // Seated, wedged, or huge slab stuck-in-air — rematerialize.
     if !airborne || force_impact {
       let cells = body.all_world_cells();
       stamp_cells(world, &cells);
@@ -529,24 +637,60 @@ mod tests {
   }
 
   #[test]
-  fn landscape_body_falls_straight_without_tip() {
+  fn huge_slab_is_gravity_only_small_chunk_can_tip() {
+    let mut w = World::new(60);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..60 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // 25×10 = 250 cells — gravity only.
+    for x in 10..35 {
+      for y in 50..60 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    // 8×8 = 64 cells — tippable.
+    for x in 40..48 {
+      for y in 45..53 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let mut store = LandscapeBodyStore::new();
+    let n = detach_landscape_bodies(&mut w, &mut store, &[]);
+    assert!(n >= 2, "both slabs detach (n={n})");
+    let huge = store.bodies.iter().find(|b| b.rock_cell_count() >= 200);
+    let small = store.bodies.iter().find(|b| b.rock_cell_count() < 200);
+    assert!(huge.is_some() && huge.unwrap().gravity_only);
+    assert!(small.is_some() && !small.unwrap().gravity_only);
+  }
+
+  #[test]
+  fn huge_slab_falls_without_tip() {
     let mut w = World::new(40);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     w.ensure_chunk(ChunkCoord::new(0, 1));
     for x in 0..40 {
       w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
     }
-    for x in 8..28 {
+    // 25×8 = 200 cells — gravity only.
+    for x in 5..30 {
       for y in 40..48 {
         w.set_cell(x, y, Cell::solid(MaterialId::Stone));
       }
     }
     let mut store = LandscapeBodyStore::new();
-    assert!(detach_landscape_bodies(&mut w, &mut store, &[]) >= 1);
+    assert_eq!(detach_landscape_bodies(&mut w, &mut store, &[]), 1);
+    assert!(store.bodies[0].gravity_only);
     for _ in 0..16 {
       step_landscape_bodies(&mut w, &mut store);
+      assert_eq!(
+        store.bodies.first().map(|b| b.tip_quarter).unwrap_or(0),
+        0,
+        "huge slab must not tip"
+      );
     }
-    assert!(store.is_empty(), "body must fall straight down and stamp");
+    assert!(store.is_empty(), "huge slab must fall and stamp");
   }
 
   #[test]

@@ -115,8 +115,8 @@ pub use support_map::{
 };
 pub use landscape_body::{
     apply_landscape_fall, detach_landscape_bodies, force_stamp_all, step_landscape_bodies,
-    LandscapeBody, LandscapeBodyStore, LandscapeFallStats, MAX_LANDSCAPE_BODIES,
-    MIN_LANDSCAPE_BODY_CELLS,
+    LandscapeBody, LandscapeBodyStore, LandscapeFallStats, LANDSCAPE_GRAVITY_ONLY_MIN,
+    MAX_LANDSCAPE_BODIES, MIN_LANDSCAPE_BODY_CELLS,
 };
 pub use grid::World;
 // HydroOverrides is defined in wk-material; re-export for app convenience.
