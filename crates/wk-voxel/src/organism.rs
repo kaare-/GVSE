@@ -41,11 +41,12 @@ use crate::spore_bank::{DispersalResult, SporeBankConfig};
 use crate::temperature::Temperature;
 use crate::grid::World;
 use crate::humidity::Humidity;
+use crate::cell::is_competent_rock;
 use crate::plant::{
     apply_genome, collect_live_photo_world_cells, collect_live_root_world_cells,
     collect_trunk_world_cells, drink_plant_with_moist, drought_band, drop_dead_leaves,
     find_fungus_slot, find_plant_slot, find_surface_air_slot, is_anchored, is_land_plant,
-    paint_leaf_litter, plant_resists_rock_shove, stem_count,
+    paint_leaf_litter, plant_resists_rock_shove, plant_rooted_in_loose, stem_count,
     leave_dead_roots_in_place, pin_plant_pose, prune_detached_woody_leaves,
     shed_unproductive_woody_leaves, sync_root_storage, try_grow_plant, try_plant_wind_spore,
     try_vegetative_sprout, DroughtBand, PlantGrowthCaps, DROUGHT_DORMANT_UPKEEP,
@@ -655,6 +656,183 @@ fn translate_atom(world: &World, atom: &mut Atom, dx: i32, dy: i32) {
     }
 }
 
+fn posed_world(atom: &Atom, world: &World, lx: i16, ly: i16) -> (i32, i32) {
+    let (ddx, ddy) = atom.fallen_draw_offset(lx, ly);
+    (world.wrap_x(atom.gx + ddx as i32), atom.gy + ddy as i32)
+}
+
+fn module_in_competent_rock(world: &World, atom: &Atom, lx: i16, ly: i16) -> bool {
+    let (wx, wy) = posed_world(atom, world, lx, ly);
+    matches!(world.get_cell(wx, wy), Some(c) if is_competent_rock(c.material))
+}
+
+fn plant_draw_in_competent_rock(world: &World, atom: &Atom) -> bool {
+    atom.body.iter().any(|&(lx, ly, m)| {
+        if m == ModuleId::Root {
+            return false;
+        }
+        module_in_competent_rock(world, atom, lx, ly)
+    })
+}
+
+fn crown_in_competent_rock(world: &World, atom: &Atom) -> bool {
+    matches!(
+        world.get_cell(world.wrap_x(atom.gx), atom.gy),
+        Some(c) if is_competent_rock(c.material)
+    )
+}
+
+/// Slide the crown a short way in the shove direction if that cell is free Air.
+fn try_nudge_atom(world: &World, atom: &mut Atom, dx: i32, dy: i32) -> bool {
+    if dx == 0 && dy == 0 {
+        return false;
+    }
+    let nx = world.wrap_x(atom.gx + dx);
+    let ny = atom.gy + dy;
+    if ny < 0 {
+        return false;
+    }
+    match world.get_cell(nx, ny) {
+        Some(c) if c.material == MaterialId::Air && !is_competent_rock(c.material) => {
+            translate_atom(world, atom, dx, dy);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Find a nearby Air cell that is not competent rock.
+fn find_clear_air_near(world: &World, gx: i32, gy: i32, prefer_dx: i32) -> Option<(i32, i32)> {
+    let prefer = if prefer_dx == 0 { 1 } else { prefer_dx.signum() };
+    let tries = [
+        (prefer, 0),
+        (prefer, 1),
+        (prefer, -1),
+        (prefer * 2, 0),
+        (-prefer, 0),
+        (0, 1),
+        (1, 0),
+        (-1, 0),
+        (0, -1),
+        (prefer * 2, 1),
+        (2, 0),
+        (-2, 0),
+        (3, 0),
+        (-3, 0),
+        (0, 2),
+    ];
+    for (dx, dy) in tries {
+        let nx = world.wrap_x(gx + dx);
+        let ny = gy + dy;
+        if ny < 0 {
+            continue;
+        }
+        if matches!(world.get_cell(nx, ny), Some(c) if c.material == MaterialId::Air) {
+            return Some((nx, ny));
+        }
+    }
+    None
+}
+
+/// No living draw module (nucleus / stem / leaf) may sit inside Stone.
+fn evict_plant_from_competent_rock(world: &mut World, atom: &mut Atom, shove_dx: i32) {
+    if !is_land_plant(atom) {
+        return;
+    }
+    let mut dests: HashSet<(i32, i32)> = HashSet::new();
+    for &(lx, ly, m) in &atom.body {
+        if m == ModuleId::Root {
+            continue;
+        }
+        let (wx, wy) = posed_world(atom, world, lx, ly);
+        if matches!(world.get_cell(wx, wy), Some(c) if is_competent_rock(c.material)) {
+            dests.insert((wx, wy));
+        }
+    }
+    if dests.is_empty() && !crown_in_competent_rock(world, atom) {
+        return;
+    }
+    if plant_rooted_in_loose(world, atom) || !plant_resists_rock_shove(world, atom) {
+        let step = if shove_dx == 0 { 0 } else { shove_dx.signum() };
+        if step != 0 {
+            let _ = try_nudge_atom(world, atom, step, 0);
+            if plant_draw_in_competent_rock(world, atom) {
+                let _ = try_nudge_atom(world, atom, step, 0);
+            }
+        }
+    }
+    if crown_in_competent_rock(world, atom) {
+        if let Some((nx, ny)) = find_clear_air_near(world, atom.gx, atom.gy, shove_dx) {
+            let dx = nx - atom.gx;
+            let dy = ny - atom.gy;
+            translate_atom(world, atom, dx, dy);
+        }
+    }
+    dests.clear();
+    for &(lx, ly, m) in &atom.body {
+        if m == ModuleId::Root {
+            // Roots that the boulder now occupies are crushed out.
+            let wx = world.wrap_x(atom.gx + lx as i32);
+            let wy = atom.gy + ly as i32;
+            if matches!(world.get_cell(wx, wy), Some(c) if is_competent_rock(c.material)) {
+                dests.insert((wx, wy));
+            }
+            continue;
+        }
+        let (wx, wy) = posed_world(atom, world, lx, ly);
+        if matches!(world.get_cell(wx, wy), Some(c) if is_competent_rock(c.material)) {
+            dests.insert((wx, wy));
+        }
+    }
+    if !dests.is_empty() {
+        apply_rock_canopy_strike(world, atom, &dests, shove_dx);
+        // Force-drop anything still painted through stone (including roots
+        // that share a boulder cell).
+        snap_modules_in_competent_rock(world, atom);
+    }
+}
+
+fn snap_modules_in_competent_rock(world: &mut World, atom: &mut Atom) {
+    let mut dumped: Vec<BodyModule> = Vec::new();
+    let kill: HashSet<(i16, i16)> = atom
+        .body
+        .iter()
+        .filter(|&&(lx, ly, m)| {
+            if m == ModuleId::Nucleus {
+                return false;
+            }
+            if m == ModuleId::Root {
+                return matches!(
+                    world.get_cell(world.wrap_x(atom.gx + lx as i32), atom.gy + ly as i32),
+                    Some(c) if is_competent_rock(c.material)
+                );
+            }
+            module_in_competent_rock(world, atom, lx, ly)
+        })
+        .map(|&(lx, ly, _)| (lx, ly))
+        .collect();
+    atom.body.retain(|&(lx, ly, m)| {
+        if kill.contains(&(lx, ly)) && m != ModuleId::Nucleus {
+            dumped.push((lx, ly, m));
+            false
+        } else {
+            true
+        }
+    });
+    prune_body_disconnected_from_nucleus(atom, &mut dumped);
+    for &(dx, dy, m) in &dumped {
+        if matches!(
+            m,
+            ModuleId::Stem | ModuleId::Photosystem | ModuleId::ReproSpore
+        ) {
+            let (odx, ody) =
+                fallen_draw_offset(atom.fallen, &atom.upright_growth, &atom.body, dx, dy);
+            let _ = paint_leaf_litter(world, atom.gx + odx as i32, atom.gy + ody as i32);
+        }
+    }
+    atom.sync_upright_growth();
+}
+
 /// Bend canopy off a rock dest, or snap it and drop Organic litter.
 fn apply_rock_canopy_strike(
     world: &mut World,
@@ -793,9 +971,10 @@ impl OrganismStore {
     /// After competent-fall cargo moved world cells, resolve organisms that
     /// sat on those cells.
     ///
-    /// Deep-rooted plants stay pinned: canopy modules in the rock's path
-    /// bend aside or snap (litter) so the boulder can roll through. A
-    /// barely-attached sapling or already-loose log still rides the shove.
+    /// Deep mineral-rooted plants stay pinned: canopy in the path leans or
+    /// snaps. Plants in loose beds may slide a cell or two. Nothing living
+    /// is left drawn inside Stone / Limestone. A barely-attached sapling or
+    /// already-uprooted log can tip and give more, but still evicts from rock.
     pub fn shift_atoms_with_moved_cells(
         &mut self,
         world: &mut crate::grid::World,
@@ -824,22 +1003,33 @@ impl OrganismStore {
                 if m == ModuleId::Root {
                     return false;
                 }
-                let (ddx, ddy) = atom.fallen_draw_offset(lx, ly);
-                dests.contains(&(world.wrap_x(atom.gx + ddx as i32), atom.gy + ddy as i32))
+                dests.contains(&posed_world(atom, world, lx, ly))
             });
-            if is_land_plant(atom) && plant_resists_rock_shove(world, atom) {
+            let in_rock = is_land_plant(atom) && plant_draw_in_competent_rock(world, atom);
+            if !from_hit && !to_hit && !in_rock {
+                continue;
+            }
+            if is_land_plant(atom) {
+                let resists = plant_resists_rock_shove(world, atom);
+                let loose_bed = plant_rooted_in_loose(world, atom);
+                if !resists && !atom.fallen && stem_count(atom) > 0 {
+                    bake_tip_into_body(atom);
+                }
+                if !resists && atom.fallen {
+                    // Loose / already-tipped: take the shove, then step off rock.
+                    if dx != 0 || dy != 0 {
+                        translate_atom(world, atom, dx, dy);
+                    }
+                } else if loose_bed {
+                    let step = if dx == 0 { 0 } else { dx.signum().clamp(-2, 2) };
+                    if step != 0 {
+                        let _ = try_nudge_atom(world, atom, step, 0);
+                    }
+                }
                 if from_hit || to_hit {
                     apply_rock_canopy_strike(world, atom, &dests, dx);
                 }
-                continue;
-            }
-            if is_land_plant(atom) && from_hit {
-                if !atom.fallen && stem_count(atom) > 0 {
-                    bake_tip_into_body(atom);
-                }
-                if dx != 0 || dy != 0 {
-                    translate_atom(world, atom, dx, dy);
-                }
+                evict_plant_from_competent_rock(world, atom, dx);
                 continue;
             }
             if !from_hit || (dx == 0 && dy == 0) {
@@ -7386,6 +7576,30 @@ mod tests {
         )
     }
 
+    fn assert_no_draw_in_rock(w: &World, a: &Atom) {
+        for &(lx, ly, m) in &a.body {
+            if m == ModuleId::Root {
+                continue;
+            }
+            let (wx, wy) = posed_world(a, w, lx, ly);
+            let mat = w.get_cell(wx, wy).map(|c| c.material);
+            assert!(
+                !matches!(mat, Some(MaterialId::Stone | MaterialId::Limestone)),
+                "{m:?} at ({wx},{wy}) must not sit inside rock (gx={}, gy={}, body={:?})",
+                a.gx,
+                a.gy,
+                a.body
+            );
+        }
+        let mat = w.get_cell(w.wrap_x(a.gx), a.gy).map(|c| c.material);
+        assert!(
+            !matches!(mat, Some(MaterialId::Stone | MaterialId::Limestone)),
+            "nucleus at ({},{}) must not sit inside rock",
+            a.gx,
+            a.gy
+        );
+    }
+
     #[test]
     fn deep_rooted_tree_stays_when_rock_rolls_through_stem() {
         let mut w = sand_plot();
@@ -7399,7 +7613,11 @@ mod tests {
         w.set_cell(11, 6, Cell::solid(MaterialId::Stone));
         store.shift_atoms_with_moved_cells(&mut w, &[(10, 6, 11, 6)]);
         let a = &store.atoms[0];
-        assert_eq!(a.gx, 10, "crown must not ride the rock");
+        assert!(
+            (a.gx - 10).abs() <= 2,
+            "sand-rooted crown may give a little, not ride away (gx={})",
+            a.gx
+        );
         assert_eq!(a.gy, 4);
         assert!(!a.fallen, "deep roots must not tip-bake");
         let roots: Vec<_> = a
@@ -7408,20 +7626,8 @@ mod tests {
             .filter(|(_, _, m)| *m == ModuleId::Root)
             .copied()
             .collect();
-        assert_eq!(roots.len(), 4, "roots stay in the soil ({roots:?})");
-        let mid_stem = a
-            .body
-            .iter()
-            .any(|&(x, y, m)| m == ModuleId::Stem && x == 0 && y == 2);
-        let mid_at_dest = a
-            .body
-            .iter()
-            .any(|&(x, y, m)| m == ModuleId::Stem && x == 1 && y == 2);
-        assert!(
-            !mid_stem || mid_at_dest,
-            "stem in the rock path should bend or snap (body={:?})",
-            a.body
-        );
+        assert!(roots.len() >= 3, "most roots stay in the soil ({roots:?})");
+        assert_no_draw_in_rock(&w, a);
     }
 
     #[test]
@@ -7433,10 +7639,35 @@ mod tests {
             !plant_resists_rock_shove(&w, &store.atoms[0]),
             "one surface root is a loose holdfast"
         );
+        w.set_cell(12, 5, Cell::solid(MaterialId::Stone));
+        w.set_cell(11, 5, Cell::solid(MaterialId::Stone));
         store.shift_atoms_with_moved_cells(&mut w, &[(10, 5, 12, 5)]);
         let a = &store.atoms[0];
         assert!(a.fallen, "loose sapling should tip when struck");
-        assert_eq!(a.gx, 12, "loose crown rides the shove (gx={})", a.gx);
+        assert_ne!(a.gx, 10, "loose crown should give (gx={})", a.gx);
+        assert_no_draw_in_rock(&w, a);
+    }
+
+    #[test]
+    fn rock_covering_trunk_does_not_leave_plant_inside() {
+        let mut w = sand_plot();
+        let mut store = OrganismStore::new();
+        store.atoms.push(deep_tree(10, 4));
+        // 3×3 boulder sitting on the trunk / crown.
+        let mut moves = Vec::new();
+        for x in 9..12 {
+            for y in 4..7 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+                moves.push((x - 3, y, x, y));
+            }
+        }
+        store.shift_atoms_with_moved_cells(&mut w, &moves);
+        let a = &store.atoms[0];
+        assert_no_draw_in_rock(&w, a);
+        assert!(
+            a.body.iter().any(|(_, _, m)| *m == ModuleId::Nucleus),
+            "nucleus survives eviction"
+        );
     }
 
     #[test]

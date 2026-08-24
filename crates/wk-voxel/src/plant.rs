@@ -469,6 +469,40 @@ pub fn plant_resists_rock_shove(world: &World, atom: &Atom) -> bool {
     true
 }
 
+/// True when most roots sit in sand / soil / clay / gravel / compost.
+///
+/// A boulder can shove these a cell or two; mineral-rooted plants stay
+/// pinned and only the canopy should give.
+pub fn plant_rooted_in_loose(world: &World, atom: &Atom) -> bool {
+    let mut n = 0usize;
+    let mut loose = 0usize;
+    for &(dx, dy, mid) in &atom.body {
+        if mid != ModuleId::Root {
+            continue;
+        }
+        n += 1;
+        let wx = world.wrap_x(atom.gx + dx as i32);
+        let wy = atom.gy + dy as i32;
+        if cell_is_loose_bed(world, wx, wy) || cell_is_loose_bed(world, wx, wy - 1) {
+            loose += 1;
+        }
+    }
+    n > 0 && loose * 2 >= n
+}
+
+fn cell_is_loose_bed(world: &World, gx: i32, gy: i32) -> bool {
+    matches!(
+        world.get_cell(gx, gy).map(|c| c.material),
+        Some(
+            MaterialId::Sand
+                | MaterialId::Soil
+                | MaterialId::Clay
+                | MaterialId::Gravel
+                | MaterialId::Organic
+        )
+    )
+}
+
 /// Woody plant that has tipped — one rigid chassis (stem + roots baked together).
 ///
 /// Distinct from upright substrate purchase (`!fallen`). Open-water castaways

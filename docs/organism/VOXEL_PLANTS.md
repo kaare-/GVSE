@@ -135,11 +135,12 @@ Photosystem ribbon, or they fail the cost/benefit. E36/E37 spirit.
 ### Rolling rock vs plants
 
 Competent bodies used to treat every overlapping plant module as cargo and
-translate the whole atom (roots included). Deep-rooted, anchored plants now
-**stay pinned**: stem / leaf pixels in the rock's path lean aside or snap and
-drop Organic litter so the boulder can roll through. A one- or two-root
-surface sapling, an unanchored crown, or an open-water woody castaway can
-still be knocked over (`fallen` + tip-bake) and shoved.
+translate the whole atom (roots included). Deep mineral-rooted plants stay
+**pinned**: stem / leaf pixels in the rock's path lean aside or snap and
+drop Organic litter. Plants rooted in loose beds may slide a cell or two.
+A one- or two-root sapling or already-uprooted log can tip and give more.
+**No living draw module is left inside Stone / Limestone** — the crown
+steps into free Air if the boulder occupies it.
 
 ### Floating / tipped woody castaways
 
