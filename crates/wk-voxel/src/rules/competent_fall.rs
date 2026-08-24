@@ -18,6 +18,7 @@ use wk_material::MaterialId;
 // Coordinate sets here are hashed millions of times per second and never see
 // untrusted input, so they use the fast hasher rather than SipHash.
 use crate::fasthash::{FxHashMap as HashMap, FxHashSet as HashSet};
+use crate::water_displace::{deposit_free_water, take_free_water};
 
 use crate::active::ActiveChunk;
 use crate::cell::{is_competent_rock, Cell, CellFlags, Sat};
@@ -1532,16 +1533,28 @@ fn impact_shatter(
       }
       if let Some(below) = world.get_cell(gx, yy - 1) {
         if below.material == MaterialId::Air {
+          // Debris drops one cell. Carry its pore water, and leave whatever
+          // free water was below in the cell it came from — halving the sat
+          // here used to silently destroy water.
+          let freed = below.sat.0;
           world.set_cell(
             gx,
             yy - 1,
             Cell {
               material: debris,
-              sat: Sat(cur.sat.0 / 2),
+              sat: cur.sat,
               ..Cell::default()
             },
           );
-          world.set_cell(gx, yy, Cell::air());
+          world.set_cell(
+            gx,
+            yy,
+            Cell {
+              material: MaterialId::Air,
+              sat: Sat(freed),
+              ..Cell::default()
+            },
+          );
           applied += 1;
           break;
         }
@@ -1724,6 +1737,7 @@ fn can_pivot_roll(world: &World, comp: &Component, pivot: (i32, i32), dx: i32) -
 }
 
 /// Push soft bed out of a roll destination into nearby air, else crush it.
+/// Push a soft cell aside, conserving any water involved.
 fn displace_soft_at(world: &mut World, gx: i32, gy: i32) {
   let Some(cur) = world.get_cell(gx, gy) else {
     return;
@@ -1738,28 +1752,63 @@ fn displace_soft_at(world: &mut World, gx: i32, gy: i32) {
     if ny < 0 {
       continue;
     }
-    if matches!(world.get_cell(nx, ny), Some(c) if c.material == MaterialId::Air) {
-      world.set_cell(nx, ny, cur);
-      world.touch_dirty(nx, ny);
-      world.set_cell(gx, gy, Cell::air());
-      world.touch_dirty(gx, gy);
-      return;
+    if let Some(dst) = world.get_cell(nx, ny) {
+      if dst.material == MaterialId::Air {
+        // Swap: the soft cell (with its pore water) moves, and any free water
+        // that was in the way lands where the soft cell used to be.
+        let freed = dst.sat.0 as u32;
+        world.set_cell(nx, ny, cur);
+        world.touch_dirty(nx, ny);
+        world.set_cell(
+          gx,
+          gy,
+          Cell {
+            material: MaterialId::Air,
+            sat: Sat(freed.min(255) as u8),
+            ..Cell::default()
+          },
+        );
+        world.touch_dirty(gx, gy);
+        return;
+      }
     }
   }
-  world.set_cell(gx, gy, Cell::air());
+  // Nowhere to spill: the soft cell is crushed away, but keep its pore water as
+  // free water so the lake volume is conserved.
+  world.set_cell(
+    gx,
+    gy,
+    Cell {
+      material: MaterialId::Air,
+      sat: cur.sat,
+      ..Cell::default()
+    },
+  );
   world.touch_dirty(gx, gy);
 }
 
 fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, i32, Cell)>) {
   let src_set: HashSet<(i32, i32)> = sources.iter().copied().collect();
+  let target_set: HashSet<(i32, i32)> = moves
+    .iter()
+    .map(|(x, y, _)| (world.wrap_x(*x), *y))
+    .collect();
   let mover_n = sources.len();
+  // Water the body is about to sink into. Collected now, poured back after the
+  // write into the cells the body vacates — a rock displaces a lake, it must
+  // never delete it.
+  let mut displaced_water = 0u32;
   for (tx, ty, _) in &moves {
     if src_set.contains(&(*tx, *ty)) {
       continue;
     }
     if let Some(dst) = world.get_cell(*tx, *ty) {
-      if is_roll_displaceable(dst.material) {
+      if dst.material == MaterialId::Air {
+        displaced_water += take_free_water(world, *tx, *ty);
+      } else if is_roll_displaceable(dst.material) {
         displace_soft_at(world, *tx, *ty);
+        // Whatever ended up in that cell may itself be water now.
+        displaced_water += take_free_water(world, *tx, *ty);
       } else if is_competent_rock(dst.material) && can_crush_spec(world, *tx, *ty, mover_n) {
         crush_spec_at(world, *tx, *ty);
       }
@@ -1778,6 +1827,15 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
   for (tx, ty, cell) in moves {
     world.set_cell(tx, ty, cell);
     world.touch_dirty(tx, ty);
+  }
+  if displaced_water > 0 {
+    // Vacated cells first (the volume the body used to fill), then outward.
+    let vacated: Vec<(i32, i32)> = sources
+      .iter()
+      .map(|&(x, y)| (world.wrap_x(x), y))
+      .filter(|p| !target_set.contains(p))
+      .collect();
+    let _ = deposit_free_water(world, displaced_water, &vacated, &target_set);
   }
 }
 
@@ -3652,6 +3710,116 @@ mod tests {
     assert_eq!(
       high, 0,
       "floaters must clear sky within ~12 ticks via full drops (remaining={high})"
+    );
+  }
+
+  /// Total free + pore water over a region.
+  fn water_total(w: &World, x0: i32, x1: i32, y0: i32, y1: i32) -> u32 {
+    let mut n = 0u32;
+    for x in x0..x1 {
+      for y in y0..y1 {
+        if let Some(c) = w.get_cell(x, y) {
+          n += c.sat.0 as u32;
+        }
+      }
+    }
+    n
+  }
+
+  #[test]
+  fn rock_dropped_in_lake_displaces_water_instead_of_eating_it() {
+    let mut w = World::new(24);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..24 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Lake: full water cells y=1..12 across the basin.
+    for x in 0..24 {
+      for y in 1..12 {
+        w.set_cell(
+          x,
+          y,
+          Cell {
+            material: MaterialId::Air,
+            sat: Sat(255),
+            ..Cell::default()
+          },
+        );
+      }
+    }
+    // Boulder in the sky above the lake.
+    stamp_blob(&mut w, 8, 40, 4, 4);
+    let before = water_total(&w, 0, 24, 0, 70);
+    assert!(before > 0, "precondition: lake has water");
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 48,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..24 {
+      wake_floating_competent(&mut w);
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let after = water_total(&w, 0, 24, 0, 70);
+    // The rock must have actually entered the lake.
+    let rock_in_lake = (0..24)
+      .flat_map(|x| (1..12).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .count();
+    assert!(
+      rock_in_lake > 0,
+      "boulder must sink into the lake for this test to mean anything"
+    );
+    assert_eq!(
+      after, before,
+      "water must be displaced, not destroyed (before={before}, after={after}, \
+       rock cells in lake={rock_in_lake})"
+    );
+  }
+
+  #[test]
+  fn rock_sliding_through_wet_sand_conserves_water() {
+    let mut w = World::new(20);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..20 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Saturated sand bank plus standing water on top.
+    let cap = w.water_capacity(MaterialId::Sand);
+    for x in 0..20 {
+      for y in 1..6 {
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(cap);
+        w.set_cell(x, y, sand);
+      }
+      for y in 6..9 {
+        w.set_cell(
+          x,
+          y,
+          Cell {
+            material: MaterialId::Air,
+            sat: Sat(255),
+            ..Cell::default()
+          },
+        );
+      }
+    }
+    stamp_blob(&mut w, 8, 30, 3, 3);
+    let before = water_total(&w, 0, 20, 0, 60);
+    let cfg = CompetentFallConfig {
+      max_passes: 48,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..24 {
+      wake_floating_competent(&mut w);
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let after = water_total(&w, 0, 20, 0, 60);
+    assert_eq!(
+      after, before,
+      "crushing through wet sand must conserve water (before={before}, after={after})"
     );
   }
 

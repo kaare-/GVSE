@@ -223,6 +223,25 @@ which A/Bs `enable_competent_fall` over a real `tick_with_life` loop.
 - **Thin fracture is gated on support** — running it on seated strata shredded
   thousands of cells of untouched terrain into rubble.
 
+### Water displacement (`crate::water_displace`)
+
+Free water is `sat` on `Air` cells, so **any** rule that writes a solid over an
+Air cell destroys that water unless the units are carried over. Rock dropped in
+a lake must raise the level, not drink it.
+
+Every mover therefore does: `take_free_water` on each cell it will occupy →
+write → `deposit_free_water`, preferring the cells it vacated (that is exactly
+the volume it swapped out of the lake), then spreading upward and outward.
+
+Covered paths: competent body translate / tip / slide (`write_roll_cells`), soft
+bed displacement (`displace_soft_at`), impact debris drop, landscape entity fall
+(`apply_drop`) and rematerialize (`stamp_cells`). Crushed soft beds release
+their pore water as free water rather than vanishing with the grain.
+
+Guarded by `rock_dropped_in_lake_displaces_water_instead_of_eating_it`,
+`rock_sliding_through_wet_sand_conserves_water`, and
+`landscape_slab_dropped_in_lake_displaces_water`.
+
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.
 A cheap **floating wake** (air-below only) re-dirties sky boulders every few

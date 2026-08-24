@@ -36,6 +36,7 @@ pub mod shade;
 pub mod sim_preset;
 pub mod spore_bank;
 pub mod support_map;
+pub mod water_displace;
 pub mod landscape_body;
 pub mod symbiosis;
 pub mod temperature;

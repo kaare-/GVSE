@@ -12,6 +12,7 @@
 use std::collections::VecDeque;
 
 use crate::fasthash::FxHashSet as HashSet;
+use crate::water_displace::{deposit_free_water, pore_water_of, take_free_water};
 
 use wk_material::MaterialId;
 
@@ -165,12 +166,36 @@ fn clear_cells(world: &mut World, cells: &[(i32, i32, Cell)]) {
   }
 }
 
-fn stamp_cells(world: &mut World, cells: &[(i32, i32, Cell)]) {
+/// Write body cells back into the grid, displacing (never deleting) any water
+/// they land in. Returns water units that need re-homing.
+fn stamp_cells_displacing(world: &mut World, cells: &[(i32, i32, Cell)]) -> u32 {
+  let mut water = 0u32;
+  for &(x, y, _) in cells {
+    water += take_free_water(world, x, y);
+  }
   for &(x, y, mut c) in cells {
     if is_competent_rock(c.material) {
       c.flags.set(CellFlags::MOBILE_ROCK);
     }
     world.set_cell(x, y, c);
+  }
+  water
+}
+
+fn stamp_cells(world: &mut World, cells: &[(i32, i32, Cell)]) {
+  let water = stamp_cells_displacing(world, cells);
+  if water > 0 {
+    let occupied: HashSet<(i32, i32)> = cells
+      .iter()
+      .map(|&(x, y, _)| (world.wrap_x(x), y))
+      .collect();
+    // Push the lake up around the body rather than through it.
+    let above: Vec<(i32, i32)> = cells
+      .iter()
+      .map(|&(x, y, _)| (world.wrap_x(x), y + 1))
+      .filter(|p| !occupied.contains(p))
+      .collect();
+    let _ = deposit_free_water(world, water, &above, &occupied);
   }
 }
 
@@ -228,16 +253,22 @@ fn translate_body(body: &mut LandscapeBody, dx: i32, dy: i32) {
   body.oy += dy;
 }
 
-fn crush_obstacles(world: &mut World, cells: &[(i32, i32, Cell)]) {
+/// Pulverize soft beds in the body's path. Their pore water survives as free
+/// water so a slab crashing through a wet bank cannot delete the water.
+/// Returns water units needing a home.
+fn crush_obstacles(world: &mut World, cells: &[(i32, i32, Cell)]) -> u32 {
+  let mut water = 0u32;
   for &(x, y, _) in cells {
     let wx = world.wrap_x(x);
     let Some(c) = world.get_cell(wx, y) else {
       continue;
     };
     if is_crushable_bed(c.material) {
+      water += pore_water_of(&c);
       world.set_cell(wx, y, Cell::air());
     }
   }
+  water
 }
 
 fn bottom_face(body: &LandscapeBody) -> Vec<(i32, i32)> {
@@ -289,8 +320,26 @@ fn apply_drop(world: &mut World, body: &mut LandscapeBody, drop: i32) {
     .iter()
     .map(|(x, y, c)| (world.wrap_x(*x), *y - drop, *c))
     .collect();
-  crush_obstacles(world, &shifted);
+  // Everything the body sweeps through: soft beds are pulverized and lake water
+  // is displaced upward, never consumed.
+  let mut water = crush_obstacles(world, &shifted);
+  for &(x, y, _) in &shifted {
+    water += take_free_water(world, x, y);
+  }
   translate_body(body, 0, -drop);
+  if water > 0 {
+    let occupied: HashSet<(i32, i32)> = shifted
+      .iter()
+      .map(|&(x, y, _)| (x, y))
+      .collect();
+    // Prefer the column the body just left — that is the volume it swapped.
+    let vacated: Vec<(i32, i32)> = cells
+      .iter()
+      .map(|&(x, y, _)| (world.wrap_x(x), y))
+      .filter(|p| !occupied.contains(p))
+      .collect();
+    let _ = deposit_free_water(world, water, &vacated, &occupied);
+  }
 }
 
 fn footprint_overlaps_store(store: &LandscapeBodyStore, cells: &[(i32, i32)]) -> bool {
@@ -640,6 +689,69 @@ mod tests {
     }
     let mut store = LandscapeBodyStore::new();
     assert_eq!(detach_landscape_bodies(&mut w, &mut store, &[]), 0);
+  }
+
+  #[test]
+  fn landscape_slab_dropped_in_lake_displaces_water() {
+    let mut w = World::new(40);
+    for cx in 0..1 {
+      for cy in 0..2 {
+        w.ensure_chunk(ChunkCoord::new(cx, cy));
+      }
+    }
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // Deep lake.
+    for x in 0..40 {
+      for y in 1..20 {
+        w.set_cell(
+          x,
+          y,
+          Cell {
+            material: MaterialId::Air,
+            sat: crate::cell::Sat(255),
+            ..Cell::default()
+          },
+        );
+      }
+    }
+    // Landscape-sized slab (25x10 = 250 cells) above the lake.
+    for x in 5..30 {
+      for y in 45..55 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    let water = |w: &World| -> u32 {
+      let mut n = 0;
+      for x in 0..40 {
+        for y in 0..70 {
+          if let Some(c) = w.get_cell(x, y) {
+            n += c.sat.0 as u32;
+          }
+        }
+      }
+      n
+    };
+    let before = water(&w);
+    let mut store = LandscapeBodyStore::new();
+    assert_eq!(detach_landscape_bodies(&mut w, &mut store, &[]), 1);
+    for _ in 0..24 {
+      step_landscape_bodies(&mut w, &mut store);
+    }
+    let submerged = (5..30)
+      .flat_map(|x| (1..20).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .count();
+    assert!(
+      submerged > 0,
+      "slab must end up in the lake for this test to mean anything"
+    );
+    assert_eq!(
+      water(&w),
+      before,
+      "landscape slab must displace lake water, not consume it (submerged={submerged})"
+    );
   }
 
   #[test]
