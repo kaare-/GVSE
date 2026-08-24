@@ -59,12 +59,12 @@ use wk_voxel::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased,
     apply_evaporation_into_humidity_climate,
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    apply_weather_rgb, apply_competent_fall_regions, celestial_local_cfg,
+    apply_weather_rgb, apply_competent_fall_regions, apply_landscape_fall, celestial_local_cfg,
     celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water, plan_active,
     pore_wetness_with, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg,
-    set_parallel_enabled, step_carbon_budget, temperature_step_due, tick_with_life,
+    set_parallel_enabled, step_carbon_budget, support_map_due, temperature_step_due, tick_with_life,
     wake_competent_bodies_all, wake_unsupported_grains,
     wake_unstable_slopes, GeotechOverlayMode,
     SimSnapshot, WorldgenParams,
@@ -324,8 +324,16 @@ async fn main() {
                 paused = true;
             } else {
                 paused = terrain.was_paused;
-                // One fps-path pass — leftovers stay dirty and finish over
-                // subsequent frames instead of stalling the editor close.
+                // Landscape entities first (whole hanging slabs), then CA competent.
+                scene.support.rebuild(&scene.world);
+                let active = plan_active(&scene.world);
+                let coords: Vec<_> = active.iter().map(|a| a.coord).collect();
+                let _ = apply_landscape_fall(
+                    &mut scene.world,
+                    &mut scene.landscape,
+                    &scene.support,
+                    &coords,
+                );
                 wake_competent_bodies_all(&mut scene.world);
                 wake_unsupported_grains(&mut scene.world);
                 wake_unstable_slopes(&mut scene.world);
@@ -360,6 +368,7 @@ async fn main() {
         terrain.request_save = false;
         terrain.request_load = false;
         if want_save {
+            wk_voxel::force_stamp_all(&mut scene.world, &mut scene.landscape);
             match scene.to_snapshot().save_to_disk(&terrain.save_name) {
                 Ok(p) => {
                     let msg = format!("Saved {}", p.display());
@@ -590,6 +599,24 @@ async fn main() {
             let geotech_due = geotech_map_due(scene.world.tick);
             if geotech_due {
                 scene.geotech.rebuild_smart(&scene.world);
+            }
+            // Surface / grounded maps + landscape rigid bodies (whole-slab fall).
+            if support_map_due(scene.world.tick) || !scene.landscape.is_empty() {
+                scene.support.rebuild(&scene.world);
+            }
+            {
+                let dirty = plan_active(&scene.world);
+                let coords: Vec<_> = if dirty.is_empty() {
+                    scene.world.chunks.keys().copied().collect()
+                } else {
+                    dirty.iter().map(|a| a.coord).collect()
+                };
+                let _ = apply_landscape_fall(
+                    &mut scene.world,
+                    &mut scene.landscape,
+                    &scene.support,
+                    &coords,
+                );
             }
             // Living roots bind grain repose / bedload (legacy E15).
             let rooted = if organisms_on {
@@ -1171,6 +1198,30 @@ async fn main() {
             }
         }
 
+        // Detached landscape bodies (in-flight rigid pieces).
+        for body in &scene.landscape.bodies {
+            for &(gx, gy, cell) in &body.world_cells() {
+                for &x_copy in x_copies {
+                    let x = scene.world.wrap_x(gx) + x_copy * scene.params.width_cols;
+                    let sx = origin_x + x as f32 * cell_px;
+                    let sy =
+                        origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw || sy + cell_px < 0.0 || sy > sh {
+                        continue;
+                    }
+                    let [r0, g0, b0] = cell_color(cell);
+                    let [r, g, b] = apply_weather_rgb([r0, g0, b0], dn_fg, &sky_weather);
+                    draw_rectangle(
+                        sx,
+                        sy - cell_px,
+                        cell_px,
+                        cell_px,
+                        Color::from_rgba(r, g, b, terrain_alpha),
+                    );
+                }
+            }
+        }
+
         // Day sun cast / under-canopy / cloud dim — after terrain, before front vapour.
         // Night moon cast is drawn after organisms so lee covers bodies.
         if organisms_on && sun_day {
@@ -1273,6 +1324,29 @@ async fn main() {
                         tile_px,
                         tile_px,
                         scale_color_alpha(temp_overlay_color(temp_c, t_min, t_max), overlay_k),
+                    );
+                }
+            }
+        }
+
+        // Detached landscape bodies (in-flight rigid pieces).
+        for body in &scene.landscape.bodies {
+            for &(gx, gy, cell) in &body.world_cells() {
+                for &x_copy in x_copies {
+                    let x = scene.world.wrap_x(gx) + x_copy * scene.params.width_cols;
+                    let sx = origin_x + x as f32 * cell_px;
+                    let sy = origin_y - (gy - scene.params.bedrock_floor_y) as f32 * cell_px;
+                    if sx + cell_px < 0.0 || sx > sw || sy + cell_px < 0.0 || sy > sh {
+                        continue;
+                    }
+                    let [r0, g0, b0] = cell_color(cell);
+                    let [r, g, b] = apply_weather_rgb([r0, g0, b0], dn_fg, &sky_weather);
+                    draw_rectangle(
+                        sx,
+                        sy - cell_px,
+                        cell_px,
+                        cell_px,
+                        Color::from_rgba(r, g, b, terrain_alpha),
                     );
                 }
             }
@@ -1602,7 +1676,7 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} drizzle={} evap={} phase={} nimbus={} echo={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} drizzle={} evap={} phase={} nimbus={} echo={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
@@ -1618,6 +1692,7 @@ async fn main() {
                 scene.carbon.dissolved,
                 scene.world.spore_bank.len(),
                 draw_wind_vx,
+                scene.landscape.len(),
                 scene.organisms.len(),
                 scene.organisms.atom_cap(),
                 {

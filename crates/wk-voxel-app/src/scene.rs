@@ -4,8 +4,8 @@
 //! stack imports.
 
 use wk_voxel::{
-    stamp_world, CarbonBudget, CloudStore, GeotechMap, Humidity, OrganismStore, SimSnapshot,
-    Temperature, Wind, World, WorldgenParams,
+    stamp_world, CarbonBudget, CloudStore, GeotechMap, Humidity, LandscapeBodyStore, OrganismStore,
+    SimSnapshot, SupportMap, Temperature, Wind, World, WorldgenParams,
 };
 
 /// Humidity / wind / temp tile side (world cells per sample).
@@ -26,6 +26,10 @@ pub struct Scene {
     pub carbon: CarbonBudget,
     /// Slow derived shear/wet/hydro face map (not saved — rebuilds).
     pub geotech: GeotechMap,
+    /// Canonical surface + grounded maps (not saved — rebuilds).
+    pub support: SupportMap,
+    /// Detached landscape rigid bodies falling as whole pieces.
+    pub landscape: LandscapeBodyStore,
 }
 
 impl Scene {
@@ -71,6 +75,8 @@ impl Scene {
         let carbon = CarbonBudget::default();
         let mut geotech = GeotechMap::new();
         geotech.rebuild(&world);
+        let mut support = SupportMap::new();
+        support.rebuild(&world);
         Self {
             world,
             params,
@@ -81,6 +87,8 @@ impl Scene {
             organisms,
             carbon,
             geotech,
+            support,
+            landscape: LandscapeBodyStore::new(),
         }
     }
 
@@ -100,6 +108,8 @@ impl Scene {
     pub fn from_snapshot(snap: SimSnapshot) -> Self {
         let mut geotech = GeotechMap::new();
         geotech.rebuild(&snap.world);
+        let mut support = SupportMap::new();
+        support.rebuild(&snap.world);
         Self {
             world: snap.world,
             params: snap.params,
@@ -110,6 +120,8 @@ impl Scene {
             organisms: snap.organisms,
             carbon: snap.carbon,
             geotech,
+            support,
+            landscape: LandscapeBodyStore::new(),
         }
     }
 }

@@ -33,6 +33,8 @@ pub mod save;
 pub mod shade;
 pub mod sim_preset;
 pub mod spore_bank;
+pub mod support_map;
+pub mod landscape_body;
 pub mod symbiosis;
 pub mod temperature;
 pub mod wind;
@@ -106,6 +108,15 @@ pub use geotech_map::{
     face_strength_wetness, geotech_map_due, relative_overburden, shear_score_c_threshold,
     wet_air_column_beside, FaceStress, GeotechMap, GeotechOverlayMode, GEOTECH_MAP_PERIOD,
     GEOTECH_MAP_PHASE,
+};
+pub use support_map::{
+    hanging_landscape_cluster, support_map_due, void_below_competent_seeds, SupportMap,
+    SUPPORT_MAP_PERIOD, SUPPORT_MAP_PHASE,
+};
+pub use landscape_body::{
+    apply_landscape_fall, detach_landscape_bodies, force_stamp_all, step_landscape_bodies,
+    LandscapeBody, LandscapeBodyStore, LandscapeFallStats, MAX_LANDSCAPE_BODIES,
+    MIN_LANDSCAPE_BODY_CELLS,
 };
 pub use grid::World;
 // HydroOverrides is defined in wk-material; re-export for app convenience.
