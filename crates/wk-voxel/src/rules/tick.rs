@@ -327,8 +327,8 @@ fn merge_active_regions(
 ) -> Vec<crate::active::ActiveChunk> {
     use crate::active::ActiveChunk;
     use crate::chunk::{ChunkCoord, Rect};
-    use std::collections::HashMap;
-    let mut map: HashMap<ChunkCoord, Rect> = HashMap::new();
+    use crate::fasthash::FxHashMap;
+    let mut map: FxHashMap<ChunkCoord, Rect> = FxHashMap::default();
     for ac in a.into_iter().chain(b) {
         map.entry(ac.coord)
             .and_modify(|r| {

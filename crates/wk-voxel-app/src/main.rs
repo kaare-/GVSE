@@ -601,22 +601,29 @@ async fn main() {
                 scene.geotech.rebuild_smart(&scene.world);
             }
             // Surface / grounded maps + landscape rigid bodies (whole-slab fall).
-            if support_map_due(scene.world.tick) || !scene.landscape.is_empty() {
+            // Quiet ticks skip the full-world hanger scan — that used to walk
+            // every loaded chunk looking for air-below rock. Periodic rebuild
+            // still catches missed floaters; live bodies still step.
+            let support_due = support_map_due(scene.world.tick);
+            let landscape_busy = !scene.landscape.is_empty();
+            if support_due || landscape_busy {
                 scene.support.rebuild(&scene.world);
             }
             {
                 let dirty = plan_active(&scene.world);
-                let coords: Vec<_> = if dirty.is_empty() {
-                    scene.world.chunks.keys().copied().collect()
-                } else {
-                    dirty.iter().map(|a| a.coord).collect()
-                };
-                let _ = apply_landscape_fall(
-                    &mut scene.world,
-                    &mut scene.landscape,
-                    &scene.support,
-                    &coords,
-                );
+                if landscape_busy || !dirty.is_empty() || support_due {
+                    let coords: Vec<_> = if dirty.is_empty() && support_due {
+                        scene.world.chunks.keys().copied().collect()
+                    } else {
+                        dirty.iter().map(|a| a.coord).collect()
+                    };
+                    let _ = apply_landscape_fall(
+                        &mut scene.world,
+                        &mut scene.landscape,
+                        &scene.support,
+                        &coords,
+                    );
+                }
             }
             // Living roots bind grain repose / bedload (legacy E15).
             let rooted = if organisms_on {

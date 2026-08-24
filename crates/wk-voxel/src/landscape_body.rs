@@ -501,6 +501,9 @@ pub fn step_landscape_bodies(
 }
 
 /// Detach + step in one call (tick integration).
+///
+/// `coords` is the detach scan. **Empty means skip detach** (still step
+/// any live bodies). Pass loaded chunk keys for a full hanger sweep.
 pub fn apply_landscape_fall(
   world: &mut World,
   store: &mut LandscapeBodyStore,
@@ -530,6 +533,11 @@ mod tests {
   use crate::chunk::ChunkCoord;
   use crate::rules::{apply_competent_fall_regions, CompetentFallConfig};
 
+  fn detach_all(w: &mut World, store: &mut LandscapeBodyStore) -> u32 {
+    let coords: Vec<_> = w.chunks.keys().copied().collect();
+    detach_landscape_bodies(w, store, &coords)
+  }
+
   #[test]
   fn floating_slab_detaches_and_falls() {
     let mut w = World::new(40);
@@ -545,7 +553,7 @@ mod tests {
       }
     }
     let mut store = LandscapeBodyStore::new();
-    let n = detach_landscape_bodies(&mut w, &mut store, &[]);
+    let n = detach_all(&mut w, &mut store);
     assert_eq!(n, 1, "slab must detach as one body");
     assert_eq!(store.len(), 1);
     assert!(
@@ -588,7 +596,7 @@ mod tests {
       }
     }
     let mut store = LandscapeBodyStore::new();
-    let n = detach_landscape_bodies(&mut w, &mut store, &[]);
+    let n = detach_all(&mut w, &mut store);
     assert_eq!(n, 1, "arch span must detach");
     assert!(
       w.get_cell(5, 10).map(|c| c.material) == Some(MaterialId::Stone),
@@ -632,7 +640,7 @@ mod tests {
     }
     let mut store = LandscapeBodyStore::new();
     assert_eq!(
-      detach_landscape_bodies(&mut w, &mut store, &[]),
+      detach_all(&mut w, &mut store),
       0,
       "boulder must not become a landscape entity"
     );
@@ -689,7 +697,7 @@ mod tests {
       }
     }
     let mut store = LandscapeBodyStore::new();
-    assert_eq!(detach_landscape_bodies(&mut w, &mut store, &[]), 0);
+    assert_eq!(detach_all(&mut w, &mut store), 0);
   }
 
   #[test]
@@ -738,7 +746,7 @@ mod tests {
     };
     let before = count(&w);
     let mut store = LandscapeBodyStore::new();
-    assert_eq!(detach_landscape_bodies(&mut w, &mut store, &[]), 1);
+    assert_eq!(detach_all(&mut w, &mut store), 1);
     for _ in 0..24 {
       step_landscape_bodies(&mut w, &mut store);
     }
@@ -794,7 +802,7 @@ mod tests {
     };
     let before = water(&w);
     let mut store = LandscapeBodyStore::new();
-    assert_eq!(detach_landscape_bodies(&mut w, &mut store, &[]), 1);
+    assert_eq!(detach_all(&mut w, &mut store), 1);
     for _ in 0..24 {
       step_landscape_bodies(&mut w, &mut store);
     }
@@ -830,7 +838,7 @@ mod tests {
       }
     }
     let mut store = LandscapeBodyStore::new();
-    assert_eq!(detach_landscape_bodies(&mut w, &mut store, &[]), 1);
+    assert_eq!(detach_all(&mut w, &mut store), 1);
     assert!(!store.bodies[0].cargo.is_empty(), "sand must ride");
     for _ in 0..16 {
       step_landscape_bodies(&mut w, &mut store);

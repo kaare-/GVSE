@@ -84,7 +84,7 @@ impl WorldV5 {
     fn into_world(self) -> World {
         World {
             seed: self.seed,
-            chunks: self.chunks,
+            chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
             soft_litter: self.soft_litter,
@@ -97,7 +97,8 @@ impl WorldV5 {
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
-            competent_settled: std::collections::HashMap::new(),
+            competent_settled: Default::default(),
+            chunk_cache_id: Default::default(),
         }
     }
 }
@@ -123,7 +124,7 @@ impl WorldV6 {
     fn into_world(self) -> World {
         World {
             seed: self.seed,
-            chunks: self.chunks,
+            chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
             soft_litter: self.soft_litter,
@@ -136,7 +137,8 @@ impl WorldV6 {
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
-            competent_settled: std::collections::HashMap::new(),
+            competent_settled: Default::default(),
+            chunk_cache_id: Default::default(),
         }
     }
 }
@@ -167,7 +169,7 @@ impl WorldV7 {
         let sole = self.mycelium_strains;
         let mut world = World {
             seed: self.seed,
-            chunks: self.chunks,
+            chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
             soft_litter: self.soft_litter,
@@ -180,7 +182,8 @@ impl WorldV7 {
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
-            competent_settled: std::collections::HashMap::new(),
+            competent_settled: Default::default(),
+            chunk_cache_id: Default::default(),
         };
         // Promote sole ownership → one share matching current `_pad`.
         for ((gx, gy), strain) in sole {
@@ -222,7 +225,7 @@ impl WorldV8 {
     fn into_world(self) -> World {
         World {
             seed: self.seed,
-            chunks: self.chunks,
+            chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
             soft_litter: self.soft_litter,
@@ -235,7 +238,8 @@ impl WorldV8 {
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
-            competent_settled: std::collections::HashMap::new(),
+            competent_settled: Default::default(),
+            chunk_cache_id: Default::default(),
         }
     }
 }
@@ -269,7 +273,7 @@ impl WorldV11 {
     fn into_world(self) -> World {
         World {
             seed: self.seed,
-            chunks: self.chunks,
+            chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
             soft_litter: self.soft_litter,
@@ -282,7 +286,8 @@ impl WorldV11 {
             sym_net_flow: self.sym_net_flow,
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
-            competent_settled: std::collections::HashMap::new(),
+            competent_settled: Default::default(),
+            chunk_cache_id: Default::default(),
         }
     }
 }
@@ -357,7 +362,7 @@ impl WorldV10 {
     fn into_world(self) -> World {
         World {
             seed: self.seed,
-            chunks: self.chunks,
+            chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
             soft_litter: self.soft_litter,
@@ -374,7 +379,8 @@ impl WorldV10 {
                 .collect(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
-            competent_settled: std::collections::HashMap::new(),
+            competent_settled: Default::default(),
+            chunk_cache_id: Default::default(),
         }
     }
 }
@@ -421,7 +427,7 @@ impl WorldV9 {
     fn into_world(self) -> World {
         World {
             seed: self.seed,
-            chunks: self.chunks,
+            chunks: self.chunks.into_iter().collect(),
             tick: self.tick,
             wrap_width: self.wrap_width,
             soft_litter: self.soft_litter,
@@ -434,7 +440,8 @@ impl WorldV9 {
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
-            competent_settled: std::collections::HashMap::new(),
+            competent_settled: Default::default(),
+            chunk_cache_id: Default::default(),
         }
     }
 }
@@ -838,7 +845,7 @@ mod tests {
             params,
             world: WorldOut {
                 seed: world.seed,
-                chunks: world.chunks,
+                chunks: world.chunks.into_iter().collect(),
                 tick: world.tick,
                 wrap_width: world.wrap_width,
                 soft_litter: world.soft_litter,
@@ -897,7 +904,7 @@ mod tests {
             params,
             world: WorldOut {
                 seed: world.seed,
-                chunks: world.chunks,
+                chunks: world.chunks.into_iter().collect(),
                 tick: world.tick,
                 wrap_width: world.wrap_width,
                 soft_litter: world.soft_litter,
