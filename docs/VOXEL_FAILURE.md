@@ -192,11 +192,11 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 - **Mobile mark** — fallen / tipped / slid rock sets `CellFlags::MOBILE_ROCK`.
   Flood-fill only merges same mobility class, so a boulder cannot glue into
   unmarked painted strata or gain mass by contact.
-- **F2d — Landscape rigid entities** — canonical `SupportMap` detects hanging
-  competent clusters. Bodies with **≥200** competent rock cells detach as huge
-  slabs that fall straight down (no COM tip). Smaller landscape bodies (<200)
-  and boulder-sized leftovers still use competent CA tip/roll. Soft cargo rides
-  along; stuck huge slabs force-stamp after a few ticks.
+- **F2d — Landscape rigid entities** — only **≥200** competent rock cells
+  detach as a temporary `LandscapeBody` and translate straight down. Boulder-
+  sized and mid chunks stay on F2c competent CA tip/roll so rocks tumble
+  instead of falling as columns or shattering into sand. Soft cargo still
+  rides huge slabs; stuck slabs force-stamp after a few ticks.
 
 Tab → Geotech: **Competent rock rigid fall** + fall cells / impact / roll sliders.
 F1 defers when `enable_competent_fall` and material is Stone/Limestone over Air.

@@ -2,9 +2,12 @@
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
-//! Landscape falling bodies: detach an ungrounded competent cluster from
-//! the grid into a temporary rigid entity, translate straight down under
-//! gravity, then rematerialize into cells on seat or impact.
+//! Landscape falling bodies: detach an **massive** ungrounded competent
+//! cluster (≥ [`MIN_LANDSCAPE_BODY_CELLS`]) from the grid into a temporary
+//! rigid entity, translate **straight down** under gravity, then rematerialize.
+//!
+//! Boulder-sized and mid chunks stay in the grid and use competent CA
+//! tip / roll — landscape entities must not steal tumble from rocks.
 
 use std::collections::{HashSet, VecDeque};
 
@@ -17,10 +20,11 @@ use crate::support_map::{
   hanging_landscape_cluster, void_below_competent_seeds, SupportMap,
 };
 
-/// Smallest hang cluster promoted to a landscape entity (else CA path).
-pub const MIN_LANDSCAPE_BODY_CELLS: usize = 24;
-/// Bodies this large (competent rock cells) fall straight down — no COM tip.
-pub const LANDSCAPE_GRAVITY_ONLY_MIN: usize = 200;
+/// Only truly massive hang clusters become landscape entities.
+/// Everything smaller stays on competent CA (tip / roll / shatter).
+pub const MIN_LANDSCAPE_BODY_CELLS: usize = 200;
+/// All landscape bodies are gravity-only (alias of min size).
+pub const LANDSCAPE_GRAVITY_ONLY_MIN: usize = MIN_LANDSCAPE_BODY_CELLS;
 /// Hard cap on cells in one landscape body (FPS / stamp safety).
 pub const MAX_LANDSCAPE_BODY_CELLS: usize = 2048;
 /// Live landscape entities at once.
@@ -29,10 +33,10 @@ pub const MAX_LANDSCAPE_BODIES: usize = 8;
 pub const MAX_LANDSCAPE_DETACH_PER_TICK: usize = 2;
 /// Max free-fall cells per body per tick.
 pub const LANDSCAPE_FALL_CELLS: i32 = 48;
-/// Tip when COM overhangs support by this many cells (tippable bodies only).
-pub const LANDSCAPE_TIP_OVERHANG: i32 = 2;
-/// Ticks with zero drop while still airborne before forced impact stamp (huge slabs).
+/// Ticks with zero drop while still airborne before forced impact stamp.
 pub const LANDSCAPE_STUCK_STAMP_TICKS: u32 = 6;
+/// Max bottom-face cells converted to loose on hard impact.
+pub const LANDSCAPE_IMPACT_SHATTER_MAX: u32 = 16;
 
 #[derive(Debug, Clone)]
 pub struct LandscapeBody {
@@ -48,16 +52,13 @@ pub struct LandscapeBody {
   pub fall_streak: u32,
   /// Consecutive ticks with no downward motion while airborne.
   pub stuck_ticks: u32,
-  /// Huge slabs (≥ [`LANDSCAPE_GRAVITY_ONLY_MIN`] rock cells) — no COM tip.
-  pub gravity_only: bool,
-  /// 90° tip steps for smaller bodies (0 = upright).
-  pub tip_quarter: i8,
 }
 
 impl LandscapeBody {
   pub fn rock_cell_count(&self) -> usize {
     self.cells.len()
   }
+
   pub fn world_cells(&self) -> Vec<(i32, i32, Cell)> {
     self.all_world_cells()
   }
@@ -65,22 +66,9 @@ impl LandscapeBody {
   fn all_world_cells(&self) -> Vec<(i32, i32, Cell)> {
     let mut out = Vec::with_capacity(self.cells.len() + self.cargo.len());
     for &(lx, ly, c) in self.cells.iter().chain(self.cargo.iter()) {
-      let (wx, wy) = self.local_to_world(lx, ly);
-      out.push((wx, wy, c));
+      out.push((self.ox + lx, self.oy + ly, c));
     }
     out
-  }
-
-  fn local_to_world(&self, lx: i32, ly: i32) -> (i32, i32) {
-    if self.gravity_only {
-      return (self.ox + lx, self.oy + ly);
-    }
-    match self.tip_quarter.rem_euclid(4) {
-      0 => (self.ox + lx, self.oy + ly),
-      1 => (self.ox + ly, self.oy - lx),
-      2 => (self.ox - lx, self.oy - ly),
-      _ => (self.ox - ly, self.oy + lx),
-    }
   }
 
   fn occupied_set(&self) -> HashSet<(i32, i32)> {
@@ -266,74 +254,6 @@ fn is_fully_airborne(world: &World, body: &LandscapeBody) -> bool {
     })
 }
 
-fn body_com(body: &LandscapeBody) -> (i32, i32) {
-  let cells = body.all_world_cells();
-  if cells.is_empty() {
-    return (body.ox, body.oy);
-  }
-  let n = cells.len() as i64;
-  let sx: i64 = cells.iter().map(|(x, _, _)| *x as i64).sum();
-  let sy: i64 = cells.iter().map(|(_, y, _)| *y as i64).sum();
-  ((sx / n) as i32, (sy / n) as i32)
-}
-
-fn can_place_rigid(world: &World, cells: &[(i32, i32, Cell)]) -> bool {
-  for &(x, y, _) in cells {
-    if y < 0 {
-      return false;
-    }
-    let wx = world.wrap_x(x);
-    match world.get_cell(wx, y) {
-      None => return false,
-      Some(c) if c.material == MaterialId::Air => {}
-      Some(_) => return false,
-    }
-  }
-  true
-}
-
-fn support_drop(world: &World, body: &LandscapeBody) -> Option<i8> {
-  let face = bottom_face(body);
-  if face.is_empty() {
-    return None;
-  }
-  let (cx, _) = body_com(body);
-  let mut left_support = i32::MAX;
-  let mut right_support = i32::MIN;
-  let mut any = false;
-  for &(x, y) in &face {
-    match world.get_cell(world.wrap_x(x), y - 1) {
-      Some(c) if c.material != MaterialId::Air => {
-        any = true;
-        left_support = left_support.min(x);
-        right_support = right_support.max(x);
-      }
-      _ => {}
-    }
-  }
-  if !any {
-    return None;
-  }
-  if cx > right_support + LANDSCAPE_TIP_OVERHANG {
-    Some(1)
-  } else if cx < left_support - LANDSCAPE_TIP_OVERHANG {
-    Some(-1)
-  } else {
-    None
-  }
-}
-
-fn try_tip(body: &mut LandscapeBody, world: &World, dir: i8) -> bool {
-  let old = body.tip_quarter;
-  body.tip_quarter = body.tip_quarter.wrapping_add(dir);
-  if can_place_rigid(world, &body.all_world_cells()) {
-    true
-  } else {
-    body.tip_quarter = old;
-    false
-  }
-}
-
 fn max_drop(world: &World, body: &LandscapeBody, max_dy: i32) -> i32 {
   if max_dy <= 0 {
     return 0;
@@ -433,7 +353,6 @@ pub fn detach_landscape_bodies(
       .collect();
     clear_cells(world, &rock_cells);
     clear_cells(world, &cargo_world);
-    let gravity_only = rock_cells.len() >= LANDSCAPE_GRAVITY_ONLY_MIN;
     store.next_id = store.next_id.wrapping_add(1);
     store.bodies.push(LandscapeBody {
       id: store.next_id,
@@ -443,15 +362,13 @@ pub fn detach_landscape_bodies(
       oy: min_y,
       fall_streak: 0,
       stuck_ticks: 0,
-      gravity_only,
-      tip_quarter: 0,
     });
     detached += 1;
   }
   detached
 }
 
-/// Step all landscape bodies: gravity fall, optional tip, stamp when seated.
+/// Step all landscape bodies: gravity fall only, stamp when seated or jammed.
 pub fn step_landscape_bodies(
   world: &mut World,
   store: &mut LandscapeBodyStore,
@@ -467,41 +384,23 @@ pub fn step_landscape_bodies(
       stats.fall_moves += 1;
       continue;
     }
-    // Smaller bodies (<200 rock cells) may tip on partial support.
-    if !body.gravity_only {
-      if let Some(dir) = support_drop(world, body) {
-        if try_tip(body, world, dir) {
-          stats.tips += 1;
-          let d2 = max_drop(world, body, 8);
-          if d2 > 0 {
-            apply_drop(world, body, d2);
-            body.fall_streak = body.fall_streak.saturating_add(d2 as u32);
-            body.stuck_ticks = 0;
-            stats.fall_moves += 1;
-          }
-          continue;
-        }
-      }
-    }
     let airborne = is_fully_airborne(world, body);
     if airborne {
       body.stuck_ticks = body.stuck_ticks.saturating_add(1);
     } else {
       body.stuck_ticks = 0;
     }
-    let force_impact = body.gravity_only
-      && airborne
-      && body.stuck_ticks >= LANDSCAPE_STUCK_STAMP_TICKS;
-    // Seated, wedged, or huge slab stuck-in-air — rematerialize.
+    let force_impact = airborne && body.stuck_ticks >= LANDSCAPE_STUCK_STAMP_TICKS;
+    // Seated, wedged, or stuck-in-air too long — rematerialize.
     if !airborne || force_impact {
       let cells = body.all_world_cells();
       stamp_cells(world, &cells);
-      let shatter = body.fall_streak >= 4 || force_impact;
-      if shatter {
+      // Light impact shatter only after a real fall — keep the slab mostly rock.
+      if body.fall_streak >= 8 || force_impact {
         let set: HashSet<_> = cells.iter().map(|(x, y, _)| (*x, *y)).collect();
         let mut shattered = 0u32;
         for &(x, y, c) in &cells {
-          if shattered >= 48 {
+          if shattered >= LANDSCAPE_IMPACT_SHATTER_MAX {
             break;
           }
           if !is_competent_rock(c.material) {
@@ -510,13 +409,18 @@ pub fn step_landscape_bodies(
           if set.contains(&(x, y - 1)) {
             continue;
           }
-          let loose = if c.material == MaterialId::Limestone {
-            MaterialId::LooseLimestone
-          } else {
-            MaterialId::LooseRock
-          };
-          world.set_cell(x, y, Cell::solid(loose));
-          shattered += 1;
+          match world.get_cell(world.wrap_x(x), y - 1) {
+            Some(b) if b.material != MaterialId::Air && b.material.is_solid() => {
+              let loose = if c.material == MaterialId::Limestone {
+                MaterialId::LooseLimestone
+              } else {
+                MaterialId::LooseRock
+              };
+              world.set_cell(x, y, Cell::solid(loose));
+              shattered += 1;
+            }
+            _ => {}
+          }
         }
       }
       stamped.push(i);
@@ -557,6 +461,7 @@ mod tests {
   use super::*;
   use crate::cell::Cell;
   use crate::chunk::ChunkCoord;
+  use crate::rules::{apply_competent_fall_regions, CompetentFallConfig};
 
   #[test]
   fn floating_slab_detaches_and_falls() {
@@ -566,8 +471,9 @@ mod tests {
     for x in 0..40 {
       w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
     }
-    for x in 8..28 {
-      for y in 40..48 {
+    // 25×10 = 250 cells — landscape-sized.
+    for x in 5..30 {
+      for y in 40..50 {
         w.set_cell(x, y, Cell::solid(MaterialId::Stone));
       }
     }
@@ -584,7 +490,7 @@ mod tests {
     }
     assert!(store.is_empty(), "body must stamp after seating");
     let max_y = (0..40)
-      .flat_map(|x| (0..50).map(move |y| (x, y)))
+      .flat_map(|x| (0..55).map(move |y| (x, y)))
       .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
       .map(|(_, y)| y)
       .max()
@@ -594,22 +500,23 @@ mod tests {
 
   #[test]
   fn carved_arch_detaches_span_keeps_legs() {
-    let mut w = World::new(40);
+    let mut w = World::new(48);
     w.ensure_chunk(ChunkCoord::new(0, 0));
-    for x in 0..40 {
+    for x in 0..48 {
       w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
     }
-    for y in 1..=22 {
+    for y in 1..=28 {
       w.set_cell(5, y, Cell::solid(MaterialId::Stone));
-      w.set_cell(34, y, Cell::solid(MaterialId::Stone));
+      w.set_cell(42, y, Cell::solid(MaterialId::Stone));
     }
-    for x in 5..=34 {
-      for y in 18..=22 {
+    // Thick span ≥200 cells (38×6 = 228).
+    for x in 5..=42 {
+      for y in 22..=27 {
         w.set_cell(x, y, Cell::solid(MaterialId::Stone));
       }
     }
-    for x in 6..34 {
-      for y in 1..18 {
+    for x in 6..42 {
+      for y in 1..22 {
         w.set_cell(x, y, Cell::air());
       }
     }
@@ -621,91 +528,116 @@ mod tests {
       "legs stay in grid"
     );
     assert!(
-      w.get_cell(20, 20).map(|c| c.material) == Some(MaterialId::Air),
+      w.get_cell(24, 24).map(|c| c.material) == Some(MaterialId::Air),
       "span leaves the grid"
     );
     for _ in 0..20 {
       step_landscape_bodies(&mut w, &mut store);
     }
-    assert!(
-      w.get_cell(20, 20).map(|c| c.material) != Some(MaterialId::Stone)
-        || store.is_empty(),
-      "span must not remain mid-air in the grid"
-    );
-    let mid_air = w.get_cell(20, 20).map(|c| c.material) == Some(MaterialId::Stone);
+    let mid_air = w.get_cell(24, 24).map(|c| c.material) == Some(MaterialId::Stone);
     assert!(!mid_air, "fallen span must leave the arch perch");
   }
 
   #[test]
-  fn huge_slab_is_gravity_only_small_chunk_can_tip() {
-    let mut w = World::new(60);
-    w.ensure_chunk(ChunkCoord::new(0, 0));
-    w.ensure_chunk(ChunkCoord::new(0, 1));
-    for x in 0..60 {
-      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
-    }
-    // 25×10 = 250 cells — gravity only.
-    for x in 10..35 {
-      for y in 50..60 {
-        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
-      }
-    }
-    // 8×8 = 64 cells — tippable.
-    for x in 40..48 {
-      for y in 45..53 {
-        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
-      }
-    }
-    let mut store = LandscapeBodyStore::new();
-    let n = detach_landscape_bodies(&mut w, &mut store, &[]);
-    assert!(n >= 2, "both slabs detach (n={n})");
-    let huge = store.bodies.iter().find(|b| b.rock_cell_count() >= 200);
-    let small = store.bodies.iter().find(|b| b.rock_cell_count() < 200);
-    assert!(huge.is_some() && huge.unwrap().gravity_only);
-    assert!(small.is_some() && !small.unwrap().gravity_only);
-  }
-
-  #[test]
-  fn huge_slab_falls_without_tip() {
+  fn boulder_sized_chunk_stays_for_competent_tumble() {
     let mut w = World::new(40);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     w.ensure_chunk(ChunkCoord::new(0, 1));
     for x in 0..40 {
       w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
     }
-    // 25×8 = 200 cells — gravity only.
-    for x in 5..30 {
-      for y in 40..48 {
+    // Sand ramp for roll.
+    for x in 0..32 {
+      let h = 2 + x / 2;
+      for y in 1..=h {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    // Round-ish boulder ~r=5 → ~80 cells — under landscape min.
+    let cx = 20i32;
+    let cy = 28i32;
+    for x in cx - 5..=cx + 5 {
+      for y in cy - 5..=cy + 5 {
+        if (x - cx) * (x - cx) + (y - cy) * (y - cy) <= 25 {
+          w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+      }
+    }
+    let mut store = LandscapeBodyStore::new();
+    assert_eq!(
+      detach_landscape_bodies(&mut w, &mut store, &[]),
+      0,
+      "boulder must not become a landscape entity"
+    );
+    assert!(
+      w.get_cell(cx, cy).map(|c| c.material) == Some(MaterialId::Stone),
+      "boulder stays in the grid for CA tumble"
+    );
+    let cfg = CompetentFallConfig {
+      max_roll_events: 24,
+      min_impact_fall_cells: 99,
+      ..CompetentFallConfig::default()
+    };
+    let x0 = (cx - 5..=cx + 5)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .map(|(x, _)| x)
+      .min()
+      .unwrap_or(cx);
+    for _ in 0..24 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let x1 = (0..40)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .map(|(x, _)| x)
+      .min()
+      .unwrap_or(99);
+    let stone_n = (0..40)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
+      .count();
+    assert!(
+      stone_n >= 40,
+      "boulder must stay mostly rock, not disintegrate (n={stone_n})"
+    );
+    assert!(
+      x1 < x0,
+      "boulder should roll downhill (start_min_x={x0}, end_min_x={x1})"
+    );
+  }
+
+  #[test]
+  fn mid_chunk_under_200_does_not_detach() {
+    let mut w = World::new(40);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // 12×12 = 144 < 200.
+    for x in 10..22 {
+      for y in 40..52 {
         w.set_cell(x, y, Cell::solid(MaterialId::Stone));
       }
     }
     let mut store = LandscapeBodyStore::new();
-    assert_eq!(detach_landscape_bodies(&mut w, &mut store, &[]), 1);
-    assert!(store.bodies[0].gravity_only);
-    for _ in 0..16 {
-      step_landscape_bodies(&mut w, &mut store);
-      assert_eq!(
-        store.bodies.first().map(|b| b.tip_quarter).unwrap_or(0),
-        0,
-        "huge slab must not tip"
-      );
-    }
-    assert!(store.is_empty(), "huge slab must fall and stamp");
+    assert_eq!(detach_landscape_bodies(&mut w, &mut store, &[]), 0);
   }
 
   #[test]
-  fn sand_cap_rides_landscape_body() {
-    let mut w = World::new(24);
+  fn sand_cap_rides_massive_landscape_body() {
+    let mut w = World::new(40);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     w.ensure_chunk(ChunkCoord::new(0, 1));
-    for x in 0..24 {
+    for x in 0..40 {
       w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
     }
-    for x in 6..18 {
-      for y in 40..46 {
+    for x in 5..30 {
+      for y in 40..50 {
         w.set_cell(x, y, Cell::solid(MaterialId::Stone));
       }
-      for y in 46..49 {
+      for y in 50..53 {
         w.set_cell(x, y, Cell::solid(MaterialId::Sand));
       }
     }
@@ -715,14 +647,14 @@ mod tests {
     for _ in 0..16 {
       step_landscape_bodies(&mut w, &mut store);
     }
-    let sand_min = (6..18)
-      .flat_map(|x| (0..50).map(move |y| (x, y)))
+    let sand_min = (5..30)
+      .flat_map(|x| (0..55).map(move |y| (x, y)))
       .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Sand))
       .map(|(_, y)| y)
       .min()
       .unwrap_or(99);
-    let stone_max = (6..18)
-      .flat_map(|x| (0..50).map(move |y| (x, y)))
+    let stone_max = (5..30)
+      .flat_map(|x| (0..55).map(move |y| (x, y)))
       .filter(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Stone))
       .map(|(_, y)| y)
       .max()
