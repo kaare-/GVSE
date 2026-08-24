@@ -48,6 +48,13 @@ pub const MAX_BODIES_PER_TICK: usize = 16;
 pub const MAX_HANGING_BODIES_PER_TICK: usize = 96;
 /// Extra free-fall slots beyond the hanging budget when many are airborne.
 pub const MAX_FLOATING_BODIES_PER_TICK: usize = 128;
+/// Stop *building* bodies past this many on an incremental (dirty-driven) scan.
+///
+/// The per-tick budgets discard most of a large harvest anyway — a rockslide
+/// built ~3.7 k bodies and processed ~130 — so flooding and weld-splitting the
+/// rest was pure waste. Whatever is left unscanned is re-dirtied, so a later
+/// tick finishes it. Whole-world scans (`active` empty) are never capped.
+pub const MAX_BODIES_BUILT_PER_PASS: usize = 512;
 /// Contact "pebbles" this small never glue onto a larger body (editor/geology only).
 pub const PEBBLE_SPLIT_MAX: usize = 4;
 /// Main mass must be at least this big before pebble necks are split off.
@@ -916,15 +923,40 @@ fn build_components(
   let mut visited: HashSet<(i32, i32)> = HashSet::default();
   let mut out: Vec<Component> = Vec::new();
   let mut hanging_count = 0usize;
+  // Only incremental scans are capped; an explicit whole-world request must
+  // stay exhaustive (tests, F3 close).
+  let build_cap = if active.is_empty() {
+    usize::MAX
+  } else {
+    MAX_BODIES_BUILT_PER_PASS
+  };
+  let mut unscanned: Vec<(i32, i32)> = Vec::new();
+  let mut capped = false;
   for void_pass in [true, false] {
     for ac in active {
+      if capped {
+        // Dirtying the rect corners re-expands the chunk's dirty rect over the
+        // whole area, so no region is silently dropped.
+        let bx = ac.coord.cx * CHUNK_CELLS_W as i32;
+        let by = ac.coord.cy * CHUNK_CELLS_H as i32;
+        unscanned.push((bx + ac.rect.x0 as i32, by + ac.rect.y0 as i32));
+        unscanned.push((bx + ac.rect.x1 as i32, by + ac.rect.y1 as i32));
+        continue;
+      }
       let Some(chunk) = world.chunks.get(&ac.coord) else {
         continue;
       };
       let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
       let base_gy = ac.coord.cy * CHUNK_CELLS_H as i32;
       for y in ac.rect.y0..=ac.rect.y1 {
+        if capped {
+          break;
+        }
         for x in ac.rect.x0..=ac.rect.x1 {
+          if out.len() >= build_cap {
+            capped = true;
+            break;
+          }
           let cell = chunk.get(x as usize, y as usize);
           if !is_competent_rock(cell.material) {
             continue;
@@ -1106,7 +1138,7 @@ fn build_components(
     MAX_BODIES_PER_TICK
   };
   let seat_cap = MAX_BODIES_PER_TICK;
-  let mut leftovers = Vec::new();
+  let mut leftovers = unscanned;
   if floating.len() > float_cap {
     for dropped in floating.drain(float_cap..) {
       for (x, y, _) in dropped.cells {
