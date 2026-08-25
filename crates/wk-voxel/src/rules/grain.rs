@@ -719,6 +719,28 @@ pub fn settle_loose_grains_regions(
 /// After [`rise_and_soak_buoyant_litter`], tick settles with
 /// `allow_buoyancy = false` so Organic does not one-cell bob through
 /// wet Air for dozens of passes (FPS spike).
+/// Keep only regions whose chunk may hold loose material (sticky
+/// [`Chunk::has_loose`]). Bootstrap (no flags set yet) keeps everything.
+fn keep_loose_regions(world: &World, active: &[ActiveChunk]) -> Vec<ActiveChunk> {
+    if active.is_empty() {
+        return Vec::new();
+    }
+    if !world.chunks.values().any(|c| c.has_loose) {
+        return active.to_vec();
+    }
+    active
+        .iter()
+        .copied()
+        .filter(|ac| {
+            world
+                .chunks
+                .get(&ac.coord)
+                .map(|c| c.has_loose)
+                .unwrap_or(false)
+        })
+        .collect()
+}
+
 pub fn settle_loose_grains_regions_ex(
     world: &mut World,
     initial: &[ActiveChunk],
@@ -741,7 +763,11 @@ pub fn settle_loose_grains_regions_ex(
                 moved += apply_grain_fall_regions_ex(world, pass, allow_buoyancy);
             }
         }
-        let after_fall = plan_active(world);
+        // Re-plan is global dirty, which on a wet world is dominated by pore
+        // seepage in limestone / stone chunks. Repose can only move loose
+        // grains, so filter to sticky-loose chunks — otherwise every
+        // groundwater tick dragged the whole halo through the repose scan.
+        let after_fall = keep_loose_regions(world, &plan_active(world));
         let repose_src = if after_fall.is_empty() {
             cur.clone()
         } else {
