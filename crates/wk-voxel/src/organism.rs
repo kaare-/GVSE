@@ -267,6 +267,15 @@ pub struct Atom {
     /// Lost purchase / tippy raft — original body drawn tipped.
     #[serde(default)]
     pub fallen: bool,
+    /// Ticks before this plant may re-tip (rigid 90° re-bake).
+    ///
+    /// Tipping over is intended — root / leaf growth plus water movement
+    /// makes a raft unstable, which happens in nature too. But a floating
+    /// plant that stays "tippy" re-baked every step, so the whole chassis
+    /// span around and around: playtest water wheels, spinning far too fast
+    /// and burning work doing it. Rate-limited, not banned.
+    #[serde(default)]
+    pub tip_cooldown: u16,
     /// Body-local cells grown after tipping; drawn upright (new shoots).
     #[serde(default)]
     pub upright_growth: Vec<(i16, i16)>,
@@ -325,6 +334,7 @@ impl Atom {
             genome,
             leaf_starve: Vec::new(),
             fallen: false,
+            tip_cooldown: 0,
             upright_growth: Vec::new(),
             sym_water_recv_total: 0,
             sym_sugar_paid_total: 0,
@@ -1798,6 +1808,7 @@ impl OrganismStore {
         for (i, atom) in self.atoms.iter_mut().enumerate() {
             atom.age_ticks = atom.age_ticks.saturating_add(1);
             atom.cooldown = atom.cooldown.saturating_sub(1);
+            atom.tip_cooldown = atom.tip_cooldown.saturating_sub(1);
 
             let life_cap = life_ticks(climate, is_land_plant(atom) || is_fungus(atom));
             if atom.age_ticks >= life_cap {
@@ -2529,6 +2540,12 @@ fn reseat_stacked_fungi(world: &World, atoms: &mut [Atom]) {
 /// Land plant tick: drink, shade photo, grow, maybe rhizome sprout or
 /// wind spore (needs painted [`ModuleId::ReproSpore`], fern-style).
 /// D4: root starch tank + drought bands (stress / hibernate).
+/// Ticks a plant must settle before it may tip again ([`Atom::tip_cooldown`]).
+///
+/// Long enough that a raft cannot spin, short enough that a genuinely
+/// unstable plant still goes over while you watch it.
+pub const TIP_RECOVER_TICKS: u16 = 180;
+
 fn step_land_plant(
     world: &mut World,
     atom: &mut Atom,
@@ -2649,8 +2666,12 @@ fn step_land_plant(
             atom.upright_growth.clear();
         } else if !atom.fallen {
             bake_tip_into_body(atom);
-        } else if upright_mast_tippy(atom, 1) {
+            atom.tip_cooldown = TIP_RECOVER_TICKS;
+        } else if upright_mast_tippy(atom, 1) && atom.tip_cooldown == 0 {
+            // Re-tipping a mast rotates the whole chassis 90°. Unthrottled,
+            // a permanently tippy raft span like a water wheel.
             bake_tip_into_body(atom);
+            atom.tip_cooldown = TIP_RECOVER_TICKS;
         } else {
             atom.fallen = true;
         }
