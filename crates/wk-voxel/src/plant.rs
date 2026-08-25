@@ -1068,6 +1068,7 @@ fn crack_rock_for_root(world: &mut World, wx: i32, wy: i32) {
     next.sat = c.sat;
     next.flags = c.flags;
     next._pad = c._pad;
+    next.pore = c.pore;
     world.set_cell(wx, wy, next);
 }
 
@@ -4441,7 +4442,9 @@ mod tests {
         w.ensure_chunk(ChunkCoord::new(0, 0));
         for x in 0..12 {
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
-            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+            let mut stone = Cell::solid(MaterialId::Stone);
+            stone.pore = 207;
+            w.set_cell(x, 1, stone);
             let mut sand = Cell::solid(MaterialId::Sand);
             sand.sat = Sat(200);
             w.set_cell(x, 2, sand);
@@ -4519,6 +4522,13 @@ mod tests {
             cracked,
             "root wedging into Stone should open a LooseRock crack, body={:?}",
             grower.body
+        );
+        assert!(
+            (0..12).any(|x| matches!(
+                w.get_cell(x, 1),
+                Some(c) if c.material == MaterialId::LooseRock && c.pore == 207
+            )),
+            "root cracking must preserve the rock's pore texture"
         );
     }
 

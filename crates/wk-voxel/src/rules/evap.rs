@@ -9,7 +9,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
-use crate::cell::{water_capacity_with, Cell, Sat};
+use crate::cell::{water_capacity_cell, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::map_chunk_coords_parallel;
@@ -249,7 +249,7 @@ fn apply_evap_deltas(
         let Some(cell) = world.get_cell(gx, gy) else {
             continue;
         };
-        let cap = water_capacity_with(cell.material, &world.hydro) as i32;
+        let cap = water_capacity_cell(cell, &world.hydro) as i32;
         let want_new = (cell.sat.0 as i32 + delta).clamp(0, cap);
         let want_removed = cell.sat.0 as i32 - want_new;
         if want_removed <= 0 {

@@ -1383,7 +1383,7 @@ async fn main() {
                             }
                             cell.sat.as_f32()
                         } else {
-                            let cap = scene.world.water_capacity(cell.material);
+                            let cap = wk_voxel::water_capacity_cell(cell, &scene.world.hydro);
                             if cap == 0 {
                                 continue;
                             }

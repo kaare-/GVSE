@@ -486,7 +486,14 @@ pub fn step_landscape_bodies(
               } else {
                 MaterialId::LooseRock
               };
-              world.set_cell(x, y, Cell::solid(loose));
+              world.set_cell(
+                x,
+                y,
+                Cell {
+                  material: loose,
+                  ..c
+                },
+              );
               shattered += 1;
             }
             _ => {}

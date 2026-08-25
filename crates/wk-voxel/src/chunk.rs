@@ -202,10 +202,11 @@ impl Chunk {
         if cell.material == MaterialId::Air && !cell.sat.is_empty() {
             self.has_wet_air = true;
         }
-        if cell.material != MaterialId::Air
-            && !cell.sat.is_empty()
-            && wk_material::MaterialRegistry::props(cell.material).permeability > 0
-        {
+        // World hydrology overrides are not available at chunk level.
+        // Mark every wet solid so a material whose range is changed from
+        // 0–0 to permeable cannot miss quiet groundwater wakes. This may
+        // over-wake a rare wet impermeable cell, but never misses water.
+        if cell.material != MaterialId::Air && !cell.sat.is_empty() {
             self.has_wet_pores = true;
         }
         if cell.material == MaterialId::Limestone {
