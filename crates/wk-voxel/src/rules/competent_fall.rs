@@ -2094,9 +2094,14 @@ fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), 
   if !can_pivot_roll(world, comp, pivot, dx) {
     return false;
   }
-  let cargo = gather_cargo(world, comp);
-  let cargo_set: HashSet<(i32, i32)> = cargo.iter().map(|(x, y, _)| (*x, *y)).collect();
-  let mut moves: Vec<(i32, i32, Cell)> = comp
+  // Cargo does **not** rotate. Sand / gravel / litter resting on a boulder
+  // is granular: when the boulder tips it spills and avalanches, it does not
+  // rigidly swing through 90° with it. Rotating it flung whole hillside
+  // sections into the air and dropped them as powder (playtest: a 200-cell
+  // collapse, and a pebble that was cargo-connected to a sand+gravel bank).
+  // Riding along is still right for *translation* — see `translate_component`
+  // and `slide_component`, which keep carrying their cap.
+  let moves: Vec<(i32, i32, Cell)> = comp
     .cells
     .iter()
     .map(|(gx, gy, c)| {
@@ -2104,26 +2109,7 @@ fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), 
       (world.wrap_x(tx), ty, with_body_tag(*c, comp.tag))
     })
     .collect();
-  let mut sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
-  for (gx, gy, c) in &cargo {
-    let (tx, ty) = rotate_pos(pivot.0, pivot.1, *gx, *gy, dx);
-    if ty < 0 {
-      continue; // leave cargo behind
-    }
-    let tx = world.wrap_x(tx);
-    if comp.set.contains(&(tx, ty)) || cargo_set.contains(&(tx, ty)) {
-      moves.push((tx, ty, *c));
-      sources.push((*gx, *gy));
-      continue;
-    }
-    match world.get_cell(tx, ty) {
-      Some(dst) if motion_destination_ok(world, tx, ty, &dst, &comp.set, comp.cells.len()) => {
-        moves.push((tx, ty, *c));
-        sources.push((*gx, *gy));
-      }
-      _ => {} // leave behind — powder settle will handle it
-    }
-  }
+  let sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
   write_roll_cells(world, &sources, moves);
   true
 }
@@ -4686,6 +4672,72 @@ mod tests {
     assert!(
       w.get_cell(20, 22).map(|c| c.material) != Some(MaterialId::Stone),
       "isolated carved arch must fall"
+    );
+  }
+
+  #[test]
+  fn tipping_rock_does_not_fling_its_sand_bank_into_the_air() {
+    // Playtest: a pebble rolled downhill and a whole section of sand and
+    // gravel flipped 180° and fell as powder. Cargo used to be rotated
+    // around the pivot with the body.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      // Bank of sand over gravel, descending to the right.
+      let h = 12 - (x / 3).min(8);
+      for y in 1..=h {
+        w.set_cell(x, y, Cell::solid(MaterialId::Gravel));
+      }
+      for y in (h + 1)..=(h + 3) {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    let top_before: i32 = (0..40)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| {
+        matches!(
+          w.get_cell(x, y).map(|c| c.material),
+          Some(MaterialId::Sand) | Some(MaterialId::Gravel)
+        )
+      })
+      .map(|(_, y)| y)
+      .max()
+      .unwrap_or(0);
+    let loose_before = count_mat(&w, MaterialId::Sand, 0, 40, 0, 40)
+      + count_mat(&w, MaterialId::Gravel, 0, 40, 0, 40);
+    // Small rock seated on the bank, free to tip downhill.
+    stamp_blob(&mut w, 8, 17, 2, 2);
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 48,
+      max_roll_events: 24,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..24 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let top_after: i32 = (0..40)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| {
+        matches!(
+          w.get_cell(x, y).map(|c| c.material),
+          Some(MaterialId::Sand) | Some(MaterialId::Gravel)
+        )
+      })
+      .map(|(_, y)| y)
+      .max()
+      .unwrap_or(0);
+    let loose_after = count_mat(&w, MaterialId::Sand, 0, 40, 0, 40)
+      + count_mat(&w, MaterialId::Gravel, 0, 40, 0, 40);
+    assert!(
+      top_after <= top_before,
+      "a tipping rock must not lift the bank above its own surface \
+       (before={top_before} after={top_after})"
+    );
+    assert!(
+      loose_after + 4 >= loose_before,
+      "bank material must not be destroyed (before={loose_before} after={loose_after})"
     );
   }
 
