@@ -2348,6 +2348,7 @@ pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
   }
   for (gx, gy) in touches {
     world.touch_dirty(gx, gy);
+    world.competent_wake_push(gx, gy);
   }
 }
 
@@ -2389,6 +2390,7 @@ pub fn wake_floating_competent(world: &mut World) {
   }
   for (gx, gy) in touches {
     world.touch_dirty(gx, gy);
+    world.competent_wake_push(gx, gy);
   }
 }
 
@@ -2407,6 +2409,7 @@ pub fn wake_moved_competent(world: &mut World) {
     // Dirty only — do **not** clear sleep flags. A body that came to rest
     // must stay asleep, or every landing re-evaluates its ridge forever.
     world.touch_dirty(gx, gy);
+    world.competent_wake_push(gx, gy);
   }
 }
 
@@ -2584,6 +2587,20 @@ fn expand_regions_to_cells(
 /// drop budget made every dirty water splash scan thousands of buried terrain
 /// cells (~105 k seed candidates/tick on the demo world).
 pub const SEED_PAD_Y: i32 = 6;
+
+/// Scan regions for the body pass, from the rock wake list.
+///
+/// Empty means no rock needs looking at — which is the common case on a
+/// world where only water is moving.
+pub fn competent_wake_regions(world: &mut World, drop_budget: i32) -> Vec<ActiveChunk> {
+  if world.competent_wake.is_empty() {
+    return Vec::new();
+  }
+  let mut cells = std::mem::take(&mut world.competent_wake);
+  cells.sort_unstable();
+  cells.dedup();
+  expand_regions_to_cells(world, &cells, drop_budget)
+}
 
 fn competent_active_regions(world: &World, active: &[ActiveChunk], drop_budget: i32) -> Vec<ActiveChunk> {
   let seed = if active.is_empty() {

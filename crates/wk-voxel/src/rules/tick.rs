@@ -708,7 +708,13 @@ fn tick_with_life_inner(
         // Bodies in flight re-dirty themselves every tick (cheap, O(moves)),
         // so fall speed does not depend on the wake cadence above.
         super::competent_fall::wake_moved_competent(world);
-        let body_active = plan_active(world);
+        // Rock's own wake list, not the water halo: sloshing `sat` cannot
+        // destabilise rock, and solidity changes already queue a wake.
+        let body_active =
+            super::competent_fall::competent_wake_regions(
+                world,
+                super::competent_fall::SEED_PAD_Y,
+            );
         if !body_active.is_empty() {
             let t0 = profile.then(Instant::now);
             let fps_path = perf.flow_every_other_substep && perf.flow_quiet_early_out;
