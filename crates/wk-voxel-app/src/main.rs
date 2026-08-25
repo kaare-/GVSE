@@ -1141,6 +1141,26 @@ async fn main() {
         };
         let overlay_k = if heatmap_on { blend } else { 1.0 };
 
+        // Terrain is drawn as vertical runs, not one rectangle per cell.
+        //
+        // The inner loop walks `y` for a fixed column and strata are horizontal
+        // layers, so consecutive cells almost always resolve to the same colour
+        // — a buried column is one long run. One `draw_rectangle` per cell put
+        // hundreds of thousands of quads into the vertex buffer every frame on a
+        // demo-sized world. Merging is visually identical (it also removes the
+        // sub-pixel seams between stacked cells).
+        let bedrock_y = scene.params.bedrock_floor_y;
+        let draw_run = |sx: f32, y0: i32, y1: i32, rgb: [u8; 3]| {
+            let top = origin_y - (y1 - bedrock_y) as f32 * cell_px - cell_px;
+            let h = (y1 - y0 + 1) as f32 * cell_px;
+            draw_rectangle(
+                sx,
+                top,
+                cell_px,
+                h,
+                Color::from_rgba(rgb[0], rgb[1], rgb[2], terrain_alpha),
+            );
+        };
         for &x_copy in x_copies {
             let x_shift = x_copy * scene.params.width_cols;
             for x in 0..scene.params.width_cols {
@@ -1148,57 +1168,78 @@ async fn main() {
                 if sx + cell_px < 0.0 || sx > sw {
                     continue;
                 }
+                // Open run: first world-y, last world-y, colour.
+                let mut run: Option<(i32, i32, [u8; 3])> = None;
                 for y in y_min_vis..y_max_vis {
-                    let sy = origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
+                    let sy = origin_y - (y - bedrock_y) as f32 * cell_px;
                     // Guard for the rounding slop on the frustum bounds.
-                    if sy + cell_px < 0.0 || sy > sh {
-                        continue;
-                    }
-                    let Some(cell) = scene.world.get_cell(x, y) else {
-                        continue;
+                    let drawable = sy + cell_px >= 0.0 && sy <= sh;
+                    let rgb = if !drawable {
+                        None
+                    } else {
+                        scene.world.get_cell(x, y).and_then(|cell| {
+                            // Only draw standing water (pools / ocean film / land
+                            // puddles). Mid-air sat stays invisible — falling rain
+                            // is the cosmetic streak under raining clouds.
+                            // Thin wet-air films (condensation residual / haze sat)
+                            // must not paint as a bright blue-white ground outline.
+                            if cell.material == wk_material::MaterialId::Air {
+                                if cell.sat.is_empty() {
+                                    return None;
+                                }
+                                // Match grain haze band: ≤32 is atmospheric film, not puddle.
+                                if cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX {
+                                    return None;
+                                }
+                                let below_sea = y <= scene.params.sea_level_y;
+                                if !below_sea && !is_standing_water(&scene.world, x, y) {
+                                    return None;
+                                }
+                            }
+                            let [r0, g0, b0] = cell_color(cell);
+                            let [mut r, mut g, mut b] =
+                                apply_weather_rgb([r0, g0, b0], dn_fg, &sky_weather);
+                            // Crest key + soft bleed into subsurface / water.
+                            let key = terrain_celestial_key_strength(
+                                &scene.world,
+                                x,
+                                y,
+                                sun_local,
+                                sun_day,
+                            );
+                            if key > 0.03 {
+                                let lit =
+                                    apply_celestial_key_rgb([r, g, b], key, sun_local, sun_day);
+                                r = lit[0];
+                                g = lit[1];
+                                b = lit[2];
+                            }
+                            Some([r, g, b])
+                        })
                     };
-                    // Only draw standing water (pools / ocean film / land
-                    // puddles). Mid-air sat stays invisible — falling rain
-                    // is the cosmetic streak under raining clouds.
-                    // Thin wet-air films (condensation residual / haze sat)
-                    // must not paint as a bright blue-white ground outline.
-                    if cell.material == wk_material::MaterialId::Air {
-                        if cell.sat.is_empty() {
-                            continue;
+                    match (rgb, run) {
+                        // Extends the open run.
+                        (Some(c), Some((y0, y1, rc))) if c == rc && y == y1 + 1 => {
+                            run = Some((y0, y, rc));
                         }
-                        // Match grain haze band: ≤32 is atmospheric film, not puddle.
-                        if cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX {
-                            continue;
+                        // Starts a run, closing any previous one.
+                        (Some(c), prev) => {
+                            if let Some((y0, y1, rc)) = prev {
+                                draw_run(sx, y0, y1, rc);
+                            }
+                            run = Some((y, y, c));
                         }
-                        let below_sea = y <= scene.params.sea_level_y;
-                        if !below_sea && !is_standing_water(&scene.world, x, y) {
-                            continue;
+                        // Nothing to draw here — the run cannot continue past a gap.
+                        (None, prev) => {
+                            if let Some((y0, y1, rc)) = prev {
+                                draw_run(sx, y0, y1, rc);
+                            }
+                            run = None;
                         }
                     }
-                    let [r0, g0, b0] = cell_color(cell);
-                    let [mut r, mut g, mut b] =
-                        apply_weather_rgb([r0, g0, b0], dn_fg, &sky_weather);
-                    // Crest key + soft bleed into subsurface / water.
-                    let key = terrain_celestial_key_strength(
-                        &scene.world,
-                        x,
-                        y,
-                        sun_local,
-                        sun_day,
-                    );
-                    if key > 0.03 {
-                        let lit = apply_celestial_key_rgb([r, g, b], key, sun_local, sun_day);
-                        r = lit[0];
-                        g = lit[1];
-                        b = lit[2];
-                    }
-                    draw_rectangle(
-                        sx,
-                        sy - cell_px,
-                        cell_px,
-                        cell_px,
-                        Color::from_rgba(r, g, b, terrain_alpha),
-                    );
+                }
+                if let Some((y0, y1, rc)) = run {
+                    draw_run(sx, y0, y1, rc);
                 }
             }
         }
