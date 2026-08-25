@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "notes": "1M soak survival (wetter clouds, easier spore bank, Tab-like evap)",
   "rain": {
     "top_y": 0,

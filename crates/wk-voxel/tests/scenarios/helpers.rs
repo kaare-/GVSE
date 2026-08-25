@@ -82,11 +82,11 @@ pub fn setup_basin_world(seed: u64, x0: i32, x1: i32, wall_h: i32) -> World {
     w.ensure_chunk(ChunkCoord::new(0, 0));
     lay_bedrock_floor(&mut w, x1 + 4);
     for x in x0..=x1 {
-        w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+        w.set_cell(x, 1, Cell::solid(MaterialId::Bedrock));
     }
     for y in 2..=wall_h {
-        w.set_cell(x0, y, Cell::solid(MaterialId::Stone));
-        w.set_cell(x1, y, Cell::solid(MaterialId::Stone));
+        w.set_cell(x0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x1, y, Cell::solid(MaterialId::Bedrock));
     }
     w
 }

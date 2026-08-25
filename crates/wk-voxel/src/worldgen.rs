@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn stamped_lake_bed_pores_wet_under_water() {
-        use crate::cell::water_capacity;
+        use crate::cell::water_capacity_cell;
         use crate::rules::tick;
         use wk_material::MaterialId;
 
@@ -471,7 +471,7 @@ mod tests {
         // hanging boulder finishes its fall into the sea and shatters. What
         // matters here is that the lake bed is porous and saturates.
         let sand = w.get_cell(x, surf).unwrap();
-        let bed_cap = water_capacity(sand.material);
+        let bed_cap = water_capacity_cell(sand, &w.hydro);
         assert!(
             bed_cap > 0,
             "lake bed must stay porous, got {:?}",
@@ -489,7 +489,7 @@ mod tests {
             "expected porous body under sand, got {:?}",
             under.material
         );
-        let cap = water_capacity(under.material);
+        let cap = water_capacity_cell(under, &w.hydro);
         assert!(
             cap > 0,
             "under-sand material should be porous: {:?}",
