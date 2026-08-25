@@ -42,6 +42,13 @@ pub const PRECIPITATE_MAX_STEP: u16 = 8;
 /// Other materials open proportionally slower.
 const LIMESTONE_SOLUBILITY_REF: f32 = 40.0;
 
+/// How much less an artesian outlet can hold than water still at depth.
+///
+/// Water arriving under pressure gives up a share of its load as it
+/// depressurises, so a rising spring builds a mound instead of carrying its
+/// mineral away to wherever it eventually evaporates.
+const ARTESIAN_CEILING_DIVISOR: u16 = 4;
+
 /// Dissolved load carried by the water in this cell.
 #[inline]
 pub fn dissolved_at(world: &World, gx: i32, gy: i32) -> u16 {
@@ -232,6 +239,23 @@ pub fn is_soluble_rock(material: MaterialId) -> bool {
 /// cell's worth has accumulated in open Air, mints a [`DEPOSIT_MATERIAL`] cell.
 /// Returns units of load consumed into solid.
 pub fn precipitate_at(world: &mut World, gx: i32, gy: i32) -> u16 {
+    let ceiling = carrying_capacity(world, gx, gy);
+    precipitate_over(world, gx, gy, ceiling)
+}
+
+/// Precipitate on **depressurisation** at an artesian discharge.
+///
+/// Water forced up a confined path is under pressure; at the outlet it
+/// depressurises and can hold far less in solution, so a share of the load
+/// drops even though nothing evaporated. This is what puts a travertine mound
+/// at a rising spring rather than a flat stain where the water later dries.
+pub fn precipitate_artesian(world: &mut World, gx: i32, gy: i32) -> u16 {
+    let ceiling = carrying_capacity(world, gx, gy) / ARTESIAN_CEILING_DIVISOR;
+    precipitate_over(world, gx, gy, ceiling)
+}
+
+/// Shared core: drop whatever load exceeds `ceiling`.
+fn precipitate_over(world: &mut World, gx: i32, gy: i32, ceiling: u16) -> u16 {
     let gx = world.wrap_x(gx);
     let load = dissolved_at(world, gx, gy);
     if load == 0 {
@@ -240,7 +264,6 @@ pub fn precipitate_at(world: &mut World, gx: i32, gy: i32) -> u16 {
     let Some(cell) = world.get_cell(gx, gy) else {
         return 0;
     };
-    let ceiling = carrying_capacity(world, gx, gy);
     if load <= ceiling {
         return 0;
     }
@@ -268,29 +291,58 @@ pub fn precipitate_at(world: &mut World, gx: i32, gy: i32) -> u16 {
         }
     }
 
-    // Otherwise tighten this cell's own pore space (cements the aperture shut).
-    // One unit of load closes exactly one pore step — the reverse of
-    // `widen_aperture`, which is what lets a conduit seal again.
-    if cell.material != MaterialId::Air && cell.pore > 0 {
-        let step = excess.min(cell.pore as u16).min(PRECIPITATE_MAX_STEP) as u8;
-        if step == 0 {
-            return 0;
-        }
-        let used = take_dissolved(world, gx, gy, step as u16);
-        let mut next = cell;
-        next.pore = cell.pore.saturating_sub(step);
-        // Shrinking pore can drop capacity below current sat. Shed the excess
-        // upward rather than letting the audit see a loss.
-        let cap = water_capacity_cell(next, &world.hydro);
-        let spill = next.sat.0.saturating_sub(cap);
-        next.sat = Sat(next.sat.0.min(cap));
-        world.set_cell(gx, gy, next);
-        if spill > 0 {
-            push_water_up(world, gx, gy + 1, spill);
-        }
-        return used;
+    // Cement into this cell's own pore space. One unit of load closes exactly
+    // one pore step — the reverse of `widen_aperture`, which is what lets a
+    // conduit seal again.
+    if cell.material != MaterialId::Air {
+        return occlude_pore(world, gx, gy, excess);
     }
-    0
+    // An outlet is open Air, so there is no pore here to cement. Deposit onto
+    // the floor beneath instead — that is where travertine actually forms, and
+    // it means a discharge builds up immediately rather than banking a mobile
+    // load that the next transfer can carry away again.
+    occlude_pore(world, gx, gy - 1, excess)
+}
+
+/// Cement `excess` load into a soluble cell's pore space, one unit per step.
+///
+/// Only soluble rock qualifies: its mineral is what
+/// [`crate::audit::mineral_total`] counts, so occluding anything else would
+/// consume load without the solid gaining it.
+fn occlude_pore(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return 0;
+    };
+    if !is_soluble_rock(cell.material) || cell.pore == 0 {
+        return 0;
+    }
+    let step = excess.min(cell.pore as u16).min(PRECIPITATE_MAX_STEP) as u8;
+    if step == 0 {
+        return 0;
+    }
+    // Load is banked on the cell that held the water, which for a floor deposit
+    // is the cell above.
+    let used = take_dissolved(world, gx, gy, step as u16);
+    let used = if used == 0 {
+        take_dissolved(world, gx, gy + 1, step as u16)
+    } else {
+        used
+    };
+    if used == 0 {
+        return 0;
+    }
+    let mut next = cell;
+    next.pore = cell.pore.saturating_sub(used.min(u8::MAX as u16) as u8);
+    // Shrinking pore can drop capacity below current sat. Shed the excess
+    // upward rather than letting the audit see a loss.
+    let cap = water_capacity_cell(next, &world.hydro);
+    let spill = next.sat.0.saturating_sub(cap);
+    next.sat = Sat(next.sat.0.min(cap));
+    world.set_cell(gx, gy, next);
+    if spill > 0 {
+        push_water_up(world, gx, gy + 1, spill);
+    }
+    used
 }
 
 /// Park shed water in the first Air cell with room above `gy`.
@@ -505,6 +557,46 @@ mod tests {
             crate::audit::mineral_total(&w),
             before,
             "dissolving the last of a cell must conserve mineral"
+        );
+    }
+
+    #[test]
+    fn artesian_discharge_drops_load_that_would_otherwise_stay_dissolved() {
+        // Same cell, same load, same water: at depth it stays in solution, at a
+        // depressurised outlet it drops. That difference is the mound.
+        let build = || {
+            let mut w = bed(11);
+            // Soluble floor — travertine cements onto the rock at the outlet.
+            let mut floor = Cell::solid(MaterialId::Limestone);
+            floor.pore = 120;
+            w.set_cell(4, 1, floor);
+            let mut c = Cell::air();
+            c.sat = Sat(200);
+            w.set_cell(4, 2, c);
+            // Load just inside what pressurised water can carry.
+            let ceiling = (200u16 * SOLUBILITY_PER_SAT) / 16;
+            add_dissolved(&mut w, 4, 2, ceiling);
+            w
+        };
+        let mut confined = build();
+        let mut discharged = build();
+        assert_eq!(
+            precipitate_at(&mut confined, 4, 2),
+            0,
+            "water still under pressure holds its load"
+        );
+        assert!(
+            precipitate_artesian(&mut discharged, 4, 2) > 0,
+            "depressurising at an outlet must drop part of the load"
+        );
+        assert!(
+            discharged.get_cell(4, 1).unwrap().pore < 120,
+            "the mineral should cement onto the rock at the outlet"
+        );
+        assert_eq!(
+            crate::audit::mineral_total(&discharged),
+            crate::audit::mineral_total(&confined),
+            "artesian precipitation must conserve mineral"
         );
     }
 

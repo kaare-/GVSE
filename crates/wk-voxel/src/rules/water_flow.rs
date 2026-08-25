@@ -110,6 +110,17 @@ pub(crate) fn apply_confined_upward_regions(world: &mut World, active: &[ActiveC
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_confined_upward_xfers(world, active, &mut xfers);
     commit_air_sat_xfers(world, &mut xfers);
+    // Artesian discharge: water that just *rose* against gravity arrived under
+    // pressure and gives up part of its load as it depressurises. Without this
+    // a rising spring carries its mineral off to wherever it eventually dries,
+    // instead of building a mound at the outlet.
+    if !world.dissolved.is_empty() {
+        for &(from, to, amt) in xfers.iter() {
+            if amt > 0 && to.1 > from.1 {
+                crate::mineral::precipitate_artesian(world, to.0, to.1);
+            }
+        }
+    }
 }
 
 /// Periodic full-chunk confined-head wake (communicating vessels).

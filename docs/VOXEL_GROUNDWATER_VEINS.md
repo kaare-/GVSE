@@ -225,8 +225,21 @@ and "is the receiver even soluble" (from the cell already in hand). Without thos
 the demo tick regressed ~10%; with them the residual is ~0.7 ms, which is the
 aperture-growth roll itself.
 
-Not yet done: pressure-driven artesian discharge (needs the confined-head
-machinery in `water_flow.rs`).
+**Artesian discharge landed.** Confined upward flow already carried load (it
+shares `commit_air_sat_xfers`); what was missing was the pressure drop. Water
+that just *rose* against gravity arrived under pressure, so
+`mineral::precipitate_artesian` applies a ceiling `ARTESIAN_CEILING_DIVISOR`
+times lower and drops the difference. Without it a rising spring carried its
+mineral off to wherever it eventually dried instead of building a mound.
+
+An outlet is open Air with no pore to cement, so a sub-cell deposit goes into the
+**floor beneath** — which is where travertine actually forms, and which matters
+for more than realism: load banked in an Air cell stays *mobile* and the next
+transfer carries it away, so nothing would ever accumulate. Occlusion is
+restricted to soluble rock, since that is what `mineral_total` counts; cementing
+anything else would consume load with no solid gaining it.
+
+Nothing left open in this plan.
 
 ### Original design
 
