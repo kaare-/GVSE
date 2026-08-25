@@ -295,7 +295,47 @@ fn landscape_supported(world: &World, support: Option<&SupportMap>, x: i32, y: i
       return false;
     }
   }
-  column_supported(world, x, y)
+  column_supported(world, x, y) || roof_bridges_cavity(world, x, y)
+}
+
+/// Widest cavity (cells) a roof may bridge for landscape-detach purposes.
+///
+/// Caves and tunnels at this width or below stop being treated as hanging
+/// slabs. Deliberately well below F1's material span while the two rules
+/// are reconciled.
+pub const ROOF_BRIDGE_MAX_SPAN: i32 = 8;
+
+/// A roof over a cavity it can **span** is a bridge, not a hanging slab.
+///
+/// [`column_supported`] wants a strictly vertical load path, so every cave
+/// ceiling reads as unsupported and a ≥200-cell mass detached and fell
+/// straight down — that is what removed caves from the world. Compressive
+/// span is already modelled by F1 ([`crate::failure::roof_span_limit_cells`]),
+/// so defer to the same rule: F1 drops roofs that are too wide for their
+/// material, and only those become landscape bodies.
+fn roof_bridges_cavity(world: &World, x: i32, y: i32) -> bool {
+  let Some(below) = world.get_cell(x, y - 1) else {
+    return false;
+  };
+  if below.material != MaterialId::Air {
+    return false;
+  }
+  let Some(roof) = world.get_cell(x, y) else {
+    return false;
+  };
+  let limit = crate::failure::roof_span_limit_cells(roof.material);
+  if limit == i32::MAX {
+    return true; // Bedrock bridges arbitrarily.
+  }
+  // Conservative for now: only *narrow* cavities count as bridged, so
+  // tunnels and ordinary caves survive while a wide slab still detaches.
+  // F1's material span allows much more (24–36 cells of Stone), but two
+  // tests deliberately encode "a carved arch is hanging and must fall"
+  // (`carved_arch_detaches_span_keeps_legs`,
+  // `lateral_weld_to_hill_is_still_ungrounded_when_carved_under`).
+  // Reconciling those two rules fully is follow-up work.
+  let limit = limit.min(ROOF_BRIDGE_MAX_SPAN);
+  crate::failure::roof_span_cells(world, x, y - 1) <= limit
 }
 
 /// Flood a hanging competent mass that has no vertical load path to bedrock.
@@ -493,6 +533,37 @@ mod tests {
   }
 
   #[test]
+  fn narrow_cave_roof_is_not_a_hanging_slab() {
+    // Playtest: the ≥200-cell gravity collapse negated the roof function
+    // that allowed caves. `column_supported` wants a strictly vertical load
+    // path, so every ceiling read as hanging and the whole mass fell.
+    let mut w = World::new(7);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      for y in 1..=20 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    // Carve a 6-wide tunnel — within ROOF_BRIDGE_MAX_SPAN.
+    for x in 10..16 {
+      for y in 6..=9 {
+        w.set_cell(x, y, Cell::air());
+      }
+    }
+    assert!(
+      !column_supported(&w, 12, 10),
+      "precondition: the ceiling has no vertical load path"
+    );
+    let cluster = hanging_landscape_cluster(&w, 12, 10, 4096);
+    assert!(
+      cluster.is_empty(),
+      "a narrow cave roof must bridge, not detach as a slab (got {} cells)",
+      cluster.len()
+    );
+  }
+
+  #[test]
   fn lateral_weld_to_hill_is_still_ungrounded_when_carved_under() {
     let mut w = World::new(40);
     w.ensure_chunk(ChunkCoord::new(0, 0));
@@ -519,6 +590,8 @@ mod tests {
     assert!(map.is_grounded(18, 20), "span is welded to grounded legs");
     // Column walk (used for detach) treats it as hanging.
     assert!(!column_supported(&w, 18, 20));
+    // A *narrow* cavity under the same slab would bridge instead — see
+    // `ROOF_BRIDGE_MAX_SPAN` and `narrow_cave_roof_is_not_a_hanging_slab`.
     let cluster = hanging_landscape_cluster(&w, 18, 18, 4096);
     assert!(
       cluster.len() >= 40,

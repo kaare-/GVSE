@@ -212,7 +212,13 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 - **Crush specs** — large movers pulverize tiny competent clusters
   (`≤ CRUSH_SPEC_MAX`) instead of welding or getting stuck on them.
 - **Thin fracture** — long thin sticks/slabs snap at 1-cell necks into debris.
-- **Cargo** — soft/loose caps and embedded cells ride with fall, tip, and slide.
+- **Cargo does not rotate** — a loose cap rides *translation* (fall / slide) but
+  is left behind by a **pivot tip**. Sand on a tipping boulder is granular: it
+  spills and avalanches rather than swinging rigidly through 90°. Rotating it
+  flung whole hillside sections into the air and dropped them as powder
+  (playtest: a 200-cell collapse, and a pebble cargo-connected to a sand and
+  gravel bank). Guard: `pivot_roll_leaves_its_loose_cap_behind`.
+- **Cargo** — soft/loose caps and embedded cells ride with fall and slide.
   The riding flood only follows cells that rest on the body or on cargo, so a
   small rock tipping on a hill cannot rotate the whole loose fill 90°. Cargo
   is also capped at `2 × body` (8..512) so a pebble cannot lift a hillside.
@@ -224,6 +230,16 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 - **Mobile mark** — fallen / tipped / slid rock sets `CellFlags::MOBILE_ROCK`.
   Flood-fill only merges same mobility class, so a boulder cannot glue into
   unmarked painted strata or gain mass by contact.
+- **Cave roofs bridge** — landscape detach uses `column_supported`, a strictly
+  *vertical* load-path test, so every cave ceiling read as hanging and a
+  ≥200-cell mass detached and fell: caves stopped surviving. A roof over a
+  cavity no wider than `ROOF_BRIDGE_MAX_SPAN` now counts as supported.
+  Compressive span is F1's job (`roof_span_limit_cells`, which allows far
+  more — 24–36 cells of Stone); the two rules are not yet reconciled because
+  `carved_arch_detaches_span_keeps_legs` and
+  `lateral_weld_to_hill_is_still_ungrounded_when_carved_under` deliberately
+  encode "a carved arch is hanging and must fall". Guard:
+  `narrow_cave_roof_is_not_a_hanging_slab`.
 - **F2d — Landscape rigid entities** — only **≥200** competent rock cells
   detach as a temporary `LandscapeBody` and translate straight down. Boulder-
   sized and mid chunks stay on F2c competent CA tip/roll so rocks tumble

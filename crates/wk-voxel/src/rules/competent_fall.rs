@@ -86,6 +86,11 @@ pub const MAX_UNTAGGED_SEATED_BODY: usize = 128;
 pub const THIN_FRACTURE_SPAN: i32 = 7;
 /// Long-thin fracture: max thickness (bbox short side) to count as a stick/slab.
 pub const THIN_FRACTURE_THICK: i32 = 2;
+/// Cavity cells a roof may bridge per cell of its own thickness.
+///
+/// Bridging capacity scales with depth of section: a 1-cell beam snaps over
+/// a 9-cell void, a 2-cell cave roof holds a small chamber.
+pub const ROOF_SPAN_PER_THICKNESS: i32 = 4;
 /// Bedrock-rooted pillar columns this tall stay static (cantilever legs).
 pub const PILLAR_COLUMN_MIN_HEIGHT: i32 = 4;
 
@@ -1666,6 +1671,64 @@ fn is_floating(world: &World, comp: &Component) -> bool {
     })
 }
 
+/// True when this body is a **roof on abutments** over cavities it can span.
+///
+/// `is_fully_supported` wants solid under every bottom-face cell, so a cave
+/// ceiling always fails it and drops into the unsupported branch — where
+/// `fracture_thin_necks` snaps a thin roof into debris. That is why even a
+/// two-cell roof collapsed. F1 already owns compressive span
+/// ([`crate::failure::roof_span_limit_cells`] — 60 cells for Stone), so use
+/// the same limit here: if F1 is content the roof holds, the body pass must
+/// not shatter or tip it.
+fn body_bridges_cavity(world: &World, comp: &Component) -> bool {
+  let face = bottom_face(comp);
+  if face.is_empty() {
+    return false;
+  }
+  // A bridge is seated on **both** sides of the void. A boulder perched on a
+  // slope also has some solid under it, but only on one side — that must
+  // still be free to tip and roll.
+  let seated = |x: i32, y: i32| {
+    matches!(world.get_cell(x, y - 1), Some(b) if b.material != MaterialId::Air)
+  };
+  let min_x = face.iter().map(|(x, _, _)| *x).min().unwrap_or(0);
+  let max_x = face.iter().map(|(x, _, _)| *x).max().unwrap_or(0);
+  if min_x == max_x {
+    return false;
+  }
+  let left_ok = face
+    .iter()
+    .any(|(x, y, _)| *x == min_x && seated(*x, *y));
+  let right_ok = face
+    .iter()
+    .any(|(x, y, _)| *x == max_x && seated(*x, *y));
+  if !(left_ok && right_ok) {
+    return false;
+  }
+  for (x, y, c) in &face {
+    if seated(*x, *y) {
+      continue;
+    }
+    if world.get_cell(*x, y - 1).is_none() {
+      return false;
+    }
+    let mat_limit = crate::failure::roof_span_limit_cells(c.material);
+    if mat_limit == i32::MAX {
+      continue;
+    }
+    // Bridging capacity scales with how thick the roof is: a 1-cell beam
+    // cannot span 9 cells (`long_thin_stick_fractures_at_neck`) but a 2-cell
+    // cave roof easily spans a small chamber, and a 6-cell slab does not
+    // span 36 (`carved_arch_slab_crashes`).
+    let thickness = (comp.max_y - comp.min_y + 1).max(1);
+    let limit = mat_limit.min(thickness * ROOF_SPAN_PER_THICKNESS);
+    if crate::failure::roof_span_cells(world, *x, y - 1) > limit {
+      return false;
+    }
+  }
+  true
+}
+
 /// Every bottom-face cell rests on solid support (body landed as a unit).
 fn is_fully_supported(world: &World, comp: &Component) -> bool {
   let face = bottom_face(comp);
@@ -2094,9 +2157,14 @@ fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), 
   if !can_pivot_roll(world, comp, pivot, dx) {
     return false;
   }
-  let cargo = gather_cargo(world, comp);
-  let cargo_set: HashSet<(i32, i32)> = cargo.iter().map(|(x, y, _)| (*x, *y)).collect();
-  let mut moves: Vec<(i32, i32, Cell)> = comp
+  // Cargo does **not** rotate. Sand / gravel / litter resting on a boulder
+  // is granular: when the boulder tips it spills and avalanches, it does not
+  // rigidly swing through 90° with it. Rotating it flung whole hillside
+  // sections into the air and dropped them as powder (playtest: a 200-cell
+  // collapse, and a pebble that was cargo-connected to a sand+gravel bank).
+  // Riding along is still right for *translation* — see `translate_component`
+  // and `slide_component`, which keep carrying their cap.
+  let moves: Vec<(i32, i32, Cell)> = comp
     .cells
     .iter()
     .map(|(gx, gy, c)| {
@@ -2104,26 +2172,7 @@ fn pivot_roll_component(world: &mut World, comp: &Component, pivot: (i32, i32), 
       (world.wrap_x(tx), ty, with_body_tag(*c, comp.tag))
     })
     .collect();
-  let mut sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
-  for (gx, gy, c) in &cargo {
-    let (tx, ty) = rotate_pos(pivot.0, pivot.1, *gx, *gy, dx);
-    if ty < 0 {
-      continue; // leave cargo behind
-    }
-    let tx = world.wrap_x(tx);
-    if comp.set.contains(&(tx, ty)) || cargo_set.contains(&(tx, ty)) {
-      moves.push((tx, ty, *c));
-      sources.push((*gx, *gy));
-      continue;
-    }
-    match world.get_cell(tx, ty) {
-      Some(dst) if motion_destination_ok(world, tx, ty, &dst, &comp.set, comp.cells.len()) => {
-        moves.push((tx, ty, *c));
-        sources.push((*gx, *gy));
-      }
-      _ => {} // leave behind — powder settle will handle it
-    }
-  }
+  let sources: Vec<(i32, i32)> = comp.cells.iter().map(|(x, y, _)| (*x, *y)).collect();
   write_roll_cells(world, &sources, moves);
   true
 }
@@ -2943,6 +2992,15 @@ pub fn apply_competent_fall_regions(
       // Wait until every bottom cell has support — avoids uneven per-column
       // embed/shatter while the body is still bridging a slope or gap.
       if !is_fully_supported(world, &comp) {
+        // A roof seated on abutments over a spannable cavity is a bridge, not
+        // an unsupported span: it must not shatter or tip. Sleep it — digging
+        // the abutment away is a solidity change, which wakes it again.
+        if body_bridges_cavity(world, &comp) {
+          for &(x, y, _) in &comp.cells {
+            to_sleep.push((x, y));
+          }
+          continue;
+        }
         // Long thin sticks / slabs snap at 1-cell necks instead of tipping as
         // one beam. Only for *unsupported* spans: running this on seated strata
         // shredded ~5 k cells of untouched terrain into rubble on the first
@@ -4686,6 +4744,170 @@ mod tests {
     assert!(
       w.get_cell(20, 22).map(|c| c.material) != Some(MaterialId::Stone),
       "isolated carved arch must fall"
+    );
+  }
+
+  #[test]
+  #[ignore = "known open: the component splitter detaches the roof from its \
+              abutments, so it is judged `is_floating` before the bridge test \
+              is ever reached — see body_bridges_cavity"]
+  fn two_cell_cave_roof_holds_instead_of_shattering() {
+    // Playtest: "even a two pixel / block roof collapses".
+    //
+    // `body_bridges_cavity` fixes the *partially supported* case: a roof
+    // still flooded together with its abutments no longer shatters or tips.
+    // This scenario exposes a second, deeper cause. The morphological open in
+    // `build_components` dices the hill, so the roof becomes its **own**
+    // component whose entire bottom face is over the cavity — `is_floating`
+    // is then true and it free-falls before any span rule is consulted.
+    //
+    // Fixing that means teaching the splitter (or `is_floating`) that a piece
+    // wedged between solid abutments is not airborne, which collides with the
+    // deliberate "a carved arch is hanging and must fall" policy. That is a
+    // design call, not a patch.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..24 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      for y in 1..=6 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+      }
+    }
+    // 4-wide chamber leaving a 2-cell-thick roof at y=5..6.
+    for x in 8..12 {
+      for y in 3..=4 {
+        w.set_cell(x, y, Cell::air());
+      }
+    }
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_roll_events: 8,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..12 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    for x in 8..12 {
+      for y in 5..=6 {
+        assert_eq!(
+          w.get_cell(x, y).map(|c| c.material),
+          Some(MaterialId::Stone),
+          "2-cell cave roof at ({x},{y}) must hold"
+        );
+      }
+      assert_eq!(
+        w.get_cell(x, 3).map(|c| c.material),
+        Some(MaterialId::Air),
+        "chamber at ({x},3) must stay open"
+      );
+    }
+  }
+
+  #[test]
+  fn pivot_roll_leaves_its_loose_cap_behind() {
+    // Playtest: a whole section of sand and gravel flipped 90°/180° into the
+    // air when a body tipped. Cargo used to be rotated around the pivot with
+    // the body; granular material must spill instead. Verified to fail when
+    // the cargo rotation is put back.
+    let mut w = World::new(9);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+      w.set_cell(x, 4, Cell::solid(MaterialId::Bedrock));
+    }
+    let mut cells = Vec::new();
+    for x in 5..=6 {
+      for y in 5..=6 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        cells.push((x, y, w.get_cell(x, y).unwrap()));
+      }
+    }
+    // Loose cap riding on the body.
+    w.set_cell(5, 7, Cell::solid(MaterialId::Sand));
+    w.set_cell(6, 7, Cell::solid(MaterialId::Gravel));
+    let set: HashSet<(i32, i32)> = cells.iter().map(|(x, y, _)| (*x, *y)).collect();
+    let comp = Component {
+      cells,
+      set,
+      tag: 1,
+      min_y: 5,
+      max_y: 6,
+    };
+    assert!(
+      pivot_roll_component(&mut w, &comp, roll_pivot(&comp, 1), 1),
+      "precondition: the body must actually pivot"
+    );
+    for (x, y) in [(5, 7), (6, 7)] {
+      let mat = w.get_cell(x, y).map(|c| c.material);
+      assert!(
+        matches!(mat, Some(MaterialId::Sand) | Some(MaterialId::Gravel)),
+        "loose cap at ({x},{y}) must stay put when the body pivots, found {mat:?}"
+      );
+    }
+  }
+
+  #[test]
+  fn tipping_rock_does_not_fling_its_sand_bank_into_the_air() {
+    // Playtest: a pebble rolled downhill and a whole section of sand and
+    // gravel flipped 180° and fell as powder. Cargo used to be rotated
+    // around the pivot with the body.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..40 {
+      w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+      // Bank of sand over gravel, descending to the right.
+      let h = 12 - (x / 3).min(8);
+      for y in 1..=h {
+        w.set_cell(x, y, Cell::solid(MaterialId::Gravel));
+      }
+      for y in (h + 1)..=(h + 3) {
+        w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+      }
+    }
+    let top_before: i32 = (0..40)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| {
+        matches!(
+          w.get_cell(x, y).map(|c| c.material),
+          Some(MaterialId::Sand) | Some(MaterialId::Gravel)
+        )
+      })
+      .map(|(_, y)| y)
+      .max()
+      .unwrap_or(0);
+    let loose_before = count_mat(&w, MaterialId::Sand, 0, 40, 0, 40)
+      + count_mat(&w, MaterialId::Gravel, 0, 40, 0, 40);
+    // Small rock seated on the bank, free to tip downhill.
+    stamp_blob(&mut w, 8, 17, 2, 2);
+    let cfg = CompetentFallConfig {
+      min_impact_fall_cells: 99,
+      max_passes: 48,
+      max_roll_events: 24,
+      ..CompetentFallConfig::default()
+    };
+    for _ in 0..24 {
+      apply_competent_fall_regions(&mut w, &[], &cfg, false);
+    }
+    let top_after: i32 = (0..40)
+      .flat_map(|x| (0..40).map(move |y| (x, y)))
+      .filter(|&(x, y)| {
+        matches!(
+          w.get_cell(x, y).map(|c| c.material),
+          Some(MaterialId::Sand) | Some(MaterialId::Gravel)
+        )
+      })
+      .map(|(_, y)| y)
+      .max()
+      .unwrap_or(0);
+    let loose_after = count_mat(&w, MaterialId::Sand, 0, 40, 0, 40)
+      + count_mat(&w, MaterialId::Gravel, 0, 40, 0, 40);
+    assert!(
+      top_after <= top_before,
+      "a tipping rock must not lift the bank above its own surface \
+       (before={top_before} after={top_after})"
+    );
+    assert!(
+      loose_after + 4 >= loose_before,
+      "bank material must not be destroyed (before={loose_before} after={loose_after})"
     );
   }
 
