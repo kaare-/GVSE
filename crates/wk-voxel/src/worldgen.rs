@@ -199,6 +199,12 @@ fn body_material(seed: u64, x: i32, y: i32, surface_y: i32, bedrock_top: i32, p:
     let depth = (surface_y - y) as f32; // 0 at sand interface, grows downward
     let above_bedrock = y - bedrock_top;
     let n = hash_f32_2(seed, x as i64, y as i64, 0x57A7_A);
+    // Coherent lens noise: picks *regions*, not speckle, so permeable and
+    // porous material forms connected bodies. Groundwater then prefers those
+    // paths, and since wetter pores conduct faster that choice reinforces
+    // itself. Two octaves — broad lenses plus smaller pockets.
+    let lens = 0.65 * lens_noise(seed, x, y, 24, 10, 0x1E_1501)
+        + 0.35 * lens_noise(seed, x, y, 9, 4, 0x1E_1502);
     // Mild per-column warp so stratum contacts undulate a little.
     let warp = (hash_f32(seed, x as i64, 0x1A11_05) - 0.5) * 5.0;
     let d = depth + warp;
@@ -220,9 +226,9 @@ fn body_material(seed: u64, x: i32, y: i32, surface_y: i32, bedrock_top: i32, p:
 
     // Shallow regolith under the sand cap.
     if d < 3.5 {
-        return if n < 0.30 {
+        return if lens < 0.30 {
             MaterialId::Gravel
-        } else if n < 0.45 {
+        } else if lens < 0.45 {
             MaterialId::Clay
         } else {
             MaterialId::Stone
@@ -230,7 +236,7 @@ fn body_material(seed: u64, x: i32, y: i32, surface_y: i32, bedrock_top: i32, p:
     }
     // Clay bed.
     if d < 8.0 {
-        return if n < 0.75 {
+        return if lens < 0.75 {
             MaterialId::Clay
         } else {
             MaterialId::Stone
@@ -238,22 +244,73 @@ fn body_material(seed: u64, x: i32, y: i32, surface_y: i32, bedrock_top: i32, p:
     }
     // Limestone stratum (the pale band) — or stone when disabled.
     if lime_enabled && d >= lime_lo && d < lime_hi {
-        return if n < 0.07 {
+        return if lens < 0.07 {
             MaterialId::Stone
-        } else if n < 0.12 {
+        } else if lens < 0.12 {
             MaterialId::Clay
         } else {
             MaterialId::Limestone
         };
     }
-    // Deep stone with sparse fractures / gravel stringers.
-    if n < 0.07 {
+    // Deep stone cut by connected gravel / fractured stringers — the
+    // preferential flow paths for groundwater.
+    if lens < 0.14 {
         MaterialId::Gravel
-    } else if n < 0.12 {
+    } else if lens < 0.24 {
         MaterialId::LooseRock
     } else {
         MaterialId::Stone
     }
+}
+
+#[cfg(test)]
+mod lens_tests {
+    use super::*;
+
+    #[test]
+    fn lens_noise_is_coherent_not_speckle() {
+        // Neighbouring cells must agree far more than white noise does,
+        // otherwise permeable material is salt-and-pepper and groundwater has
+        // no connected path to prefer.
+        let seed = 12345u64;
+        let mut lens_delta = 0.0f32;
+        let mut white_delta = 0.0f32;
+        let n = 400;
+        for i in 0..n {
+            let (x, y) = (i % 40, i / 40);
+            lens_delta += (lens_noise(seed, x, y, 24, 10, 7)
+                - lens_noise(seed, x + 1, y, 24, 10, 7))
+            .abs();
+            white_delta += (hash_f32_2(seed, x as i64, y as i64, 7)
+                - hash_f32_2(seed, x as i64 + 1, y as i64, 7))
+            .abs();
+        }
+        assert!(
+            lens_delta * 4.0 < white_delta,
+            "lens noise must be much smoother than white noise \
+             (lens={lens_delta:.2} white={white_delta:.2})"
+        );
+    }
+}
+
+/// Coherent value noise in `0..1`, bilinear over a lattice of
+/// `period_x × period_y` cells. Cheap stand-in for Perlin: the hash is the
+/// same one worldgen already uses, just sampled at lattice corners and
+/// smoothstep-interpolated so neighbouring cells agree.
+fn lens_noise(seed: u64, x: i32, y: i32, period_x: i32, period_y: i32, salt: u64) -> f32 {
+    let px = period_x.max(1);
+    let py = period_y.max(1);
+    let x0 = x.div_euclid(px);
+    let y0 = y.div_euclid(py);
+    let fx = x.rem_euclid(px) as f32 / px as f32;
+    let fy = y.rem_euclid(py) as f32 / py as f32;
+    let corner = |ix: i32, iy: i32| hash_f32_2(seed, ix as i64, iy as i64, salt);
+    let ease = |t: f32| t * t * (3.0 - 2.0 * t);
+    let u = ease(fx);
+    let v = ease(fy);
+    let top = corner(x0, y0) + (corner(x0 + 1, y0) - corner(x0, y0)) * u;
+    let bot = corner(x0, y0 + 1) + (corner(x0 + 1, y0 + 1) - corner(x0, y0 + 1)) * u;
+    (top + (bot - top) * v).clamp(0.0, 1.0)
 }
 
 /// Stamp the full ring continental profile into `world`.
