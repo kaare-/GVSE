@@ -277,6 +277,61 @@ fn pore_pass_cost_split() {
     println!("    apply_seepage_regions          {:>7.2}", apply / n);
 }
 
+/// Split grain settle: fall vs repose, and how much of it is wasted.
+#[test]
+#[ignore]
+fn grain_pass_cost_split() {
+    use std::time::Instant;
+    use wk_voxel::{
+        active_has_unsupported_grain, apply_grain_fall_regions, apply_grain_repose_regions,
+        partition_checkerboard,
+    };
+
+    let mut s = scene(32);
+    for _ in 0..WARM {
+        frame(&mut s, true);
+    }
+    let n = 20;
+    let (mut fall, mut repose, mut unsup, mut plan_ms) = (0.0, 0.0, 0.0, 0.0);
+    let (mut fall_moves, mut repose_moves) = (0u64, 0u64);
+    let mut cells = 0usize;
+    for _ in 0..n {
+        frame(&mut s, true);
+        let t = Instant::now();
+        let plan = plan_active(&s.world);
+        plan_ms += t.elapsed().as_secs_f64() * 1000.0;
+        cells += active_cells(&plan);
+        let t = Instant::now();
+        let _ = active_has_unsupported_grain(&s.world, &plan);
+        unsup += t.elapsed().as_secs_f64() * 1000.0;
+        let passes = partition_checkerboard(&plan);
+        let t = Instant::now();
+        for p in &passes {
+            fall_moves += apply_grain_fall_regions(&mut s.world, p) as u64;
+        }
+        fall += t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        for p in &passes {
+            repose_moves += apply_grain_repose_regions(&mut s.world, p, None) as u64;
+        }
+        repose += t.elapsed().as_secs_f64() * 1000.0;
+    }
+    let d = n as f64;
+    println!("  per call, ms   (avg {} active cells/call)", cells / n);
+    println!("    plan_active                    {:>7.2}", plan_ms / d);
+    println!("    active_has_unsupported_grain   {:>7.2}", unsup / d);
+    println!(
+        "    apply_grain_fall_regions       {:>7.2}   moves/call {:.1}",
+        fall / d,
+        fall_moves as f64 / d
+    );
+    println!(
+        "    apply_grain_repose_regions     {:>7.2}   moves/call {:.1}",
+        repose / d,
+        repose_moves as f64 / d
+    );
+}
+
 /// Is the pore churn a moving front, or a ±1 ping-pong that never settles?
 #[test]
 #[ignore]

@@ -38,6 +38,10 @@ pub struct PhysicsTimings {
     pub seepage: Duration,
     pub wake_grains: Duration,
     pub settle: Duration,
+    /// Competent rock body pass. Was folded into [`Self::settle`], which
+    /// made "settle grains" read as the top cost while grain settle itself
+    /// is ~2.4 ms/run — the bodies were the expensive half.
+    pub bodies: Duration,
     pub punch: Duration,
     pub rise_soak: Duration,
     pub failure: Duration,
@@ -60,6 +64,7 @@ impl PhysicsTimings {
             + self.seepage
             + self.wake_grains
             + self.settle
+            + self.bodies
             + self.punch
             + self.rise_soak
             + self.failure
@@ -74,6 +79,7 @@ impl PhysicsTimings {
         self.seepage += other.seepage;
         self.wake_grains += other.wake_grains;
         self.settle += other.settle;
+        self.bodies += other.bodies;
         self.punch += other.punch;
         self.rise_soak += other.rise_soak;
         self.failure += other.failure;
@@ -716,7 +722,7 @@ fn tick_with_life_inner(
                 fps_path,
             );
             if let (true, Some(t0)) = (profile, t0) {
-                local.settle += t0.elapsed();
+                local.bodies += t0.elapsed();
             }
         }
     }
