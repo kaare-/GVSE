@@ -17,7 +17,7 @@
 //! - `W` — toggle background rain (climatic, always-on cloud row)
 //! - `C` — toggle condensation rain (feedback from humidity heatmap)
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
-//! - `K` — toggle karst dissolution
+//! - `K` — toggle karst dissolution (surface limestone + slow groundwater)
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle humidity tile diagnostic + wind streaks (default on)
 //! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)

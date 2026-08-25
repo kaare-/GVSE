@@ -146,6 +146,30 @@ impermeable lid — pore water will not enter the body below.
 - Lake bed: sand fills, then clay/stone/gravel/limestone under the cap fill to **their** capacity. Stone at `sat=20` with porosity 20 is **fully saturated**, not “barely wet”.
 - Inspector shows `sat/{capacity}` and porosity/permeability so pore fill is not confused with `/255`.
 
+### Karst (`apply_karst_dissolution`)
+
+Demo toggle: **`K`**. Period default 32 ticks (geology, not every frame).
+
+- **Surface** — limestone with a 4-connected wet Air neighbour
+  (`sat >= min_wet_neighbour_sat`, default 200). Probability
+  `prob_per_wet_neighbour × wet_count`. Unchanged cliff-face rule.
+- **Underground** — limestone *and* stone, much slower. A cell
+  dissolves when it is itself near-saturated (`sat / capacity >=
+  min / 255`), when a porous neighbour is, or when a *roofed* damp
+  cave Air cell (`0 < sat < min`, solid immediately above) sits next
+  to it. Open-sky drizzle does not count. Contact weight is scaled
+  by `pore_scale` (default 0.2 vs a surface wet-Air face) and again
+  by `stone_scale` (default 0.125) for stone. Dry stone next to a
+  lake film does **not** count — that stays mechanical flow erosion.
+- Dissolved cells become Air and keep their pore sat (mass conserved).
+  That leftover sat is usually below the surface threshold, so it
+  feeds the underground path and lets conduits enlarge where water
+  already is.
+- Chunks without `has_limestone` and without `has_wet_pores` are
+  skipped. Per-cell porosity/permeability ranges
+  ([`VOXEL_PORE_VARIATION.md`](VOXEL_PORE_VARIATION.md)) can later
+  scale the same contact weight.
+
 ## Draw notes (`wk-voxel-app`)
 
 - Standing / ocean wet Air paints at any `sat ≥ 1`.
@@ -164,6 +188,7 @@ impermeable lid — pore water will not enter the body below.
 - `lake_bed_sand_wets_clay_and_stone_below_via_tick`
 - `deep_stone_stack_keeps_wetting_after_surface_quiesces`
 - `stamped_lake_bed_pores_wet_under_water`
+- Karst: `wet_limestone_eventually_dissolves`, `saturated_buried_limestone_dissolves_without_air`, `saturated_buried_stone_dissolves_without_air`, `damp_cave_void_seeds_further_limestone_dissolve`, `karst_ignores_non_limestone_solids`
 - Shore / cascade suite (`impermeable_shore_*`, `continuous_rain_on_*`)
 - Grain repose: `sand_cliff_slides_diagonally`, `loose_rock_holds_single_step`, `snow_avalanches_off_cliff_but_not_into_water`, `sand_pile_flattens_over_ticks`
 

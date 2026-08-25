@@ -109,7 +109,7 @@ pub struct SimSettings {
     pub climatic_rain_on: bool,
     /// `E` — surface water → humidity. Default on.
     pub evap_on: bool,
-    /// `K` — limestone dissolve. Default on.
+    /// `K` — limestone + groundwater dissolve. Default on.
     pub karst_on: bool,
     pub oro: OrographicConfig,
     pub karst: KarstConfig,
@@ -1358,7 +1358,11 @@ impl SimSettings {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Karst", |ui| {
-                    ui.checkbox(hash!(), "K limestone dissolve (hotkey K)", &mut self.karst_on);
+                    ui.checkbox(
+                        hash!(),
+                        "K limestone / groundwater dissolve (hotkey K)",
+                        &mut self.karst_on,
+                    );
                     labeled_slider(
                         ui,
                         hash!(),
@@ -1368,6 +1372,20 @@ impl SimSettings {
                     );
                     labeled_slider(ui, hash!(), "Min wet neighbour sat", 1.0..255.0, &mut min_sat);
                     labeled_slider(ui, hash!(), "Karst period (ticks)", 1.0..128.0, &mut karst_period);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Pore / cave scale (vs surface)",
+                        0.0..1.0,
+                        &mut self.karst.pore_scale,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Stone scale (vs limestone, underground)",
+                        0.0..1.0,
+                        &mut self.karst.stone_scale,
+                    );
                 });
                 } // World (materials/karst)
                 if self.page == SettingsPage::Life {
@@ -1722,6 +1740,8 @@ impl SimSettings {
         self.cond.max_events_per_tick = cond_events.round().clamp(0.0, 512.0) as u32;
         self.cond.full_mass = self.cond.full_mass.clamp(8.0, 4_000.0);
         self.karst.period_ticks = karst_period.round().clamp(1.0, 256.0) as u64;
+        self.karst.pore_scale = self.karst.pore_scale.clamp(0.0, 1.0);
+        self.karst.stone_scale = self.karst.stone_scale.clamp(0.0, 1.0);
         self.max_atoms = self.max_atoms.round().clamp(1.0, 4096.0);
         self.max_corpses = self.max_corpses.round().clamp(1.0, 4096.0);
         self.max_roots = self.max_roots.round().clamp(1.0, 256.0);

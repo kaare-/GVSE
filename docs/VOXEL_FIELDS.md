@@ -66,8 +66,9 @@ reprecip or accelerates CA dissolve.
 Voxel sketch:
 
 - Coarse `Heatmap<f32>` or typed `Dissolved` tiles.
-- Source term from karst-wet faces × `solubility` (stop hard-coding
-  Limestone-only when props are ready).
+- Source term from karst-wet faces × `solubility` (voxel CA already
+  dissolves limestone on a surface film and limestone/stone on
+  groundwater; a dissolved field would modulate those rates).
 - Sink: reprecip onto stone / reduce humidity? Prefer **modulating**
   `apply_karst_dissolution` probability/rate from local dissolved
   concentration rather than deleting cells from the field alone.

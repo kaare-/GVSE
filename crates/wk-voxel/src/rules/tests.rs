@@ -4482,6 +4482,7 @@ fn dry_limestone_never_dissolves() {
         min_wet_neighbour_sat: 200,
         seed_salt: 1,
         period_ticks: 1,
+        ..Default::default()
     };
     for _ in 0..50 {
         apply_karst_dissolution(&mut w, &cfg);
@@ -4509,6 +4510,7 @@ fn wet_limestone_eventually_dissolves() {
         min_wet_neighbour_sat: 200,
         seed_salt: 42,
         period_ticks: 1,
+        ..Default::default()
     };
     // With prob 1.0 the top-most limestone under the puddle
     // should convert on the first tick.
@@ -4526,6 +4528,7 @@ fn karst_respects_period_ticks() {
         min_wet_neighbour_sat: 200,
         seed_salt: 42,
         period_ticks: 4,
+        ..Default::default()
     };
     w.tick = 1;
     apply_karst_dissolution(&mut w, &cfg);
@@ -4557,6 +4560,7 @@ fn karst_is_deterministic_for_seed_and_tick() {
         min_wet_neighbour_sat: 200,
         seed_salt: 7,
         period_ticks: 1,
+        ..Default::default()
     };
     for _ in 0..10 {
         apply_karst_dissolution(&mut a, &cfg);
@@ -4602,6 +4606,7 @@ fn shell_scans_match_with_parallel_on_or_off() {
         min_wet_neighbour_sat: 200,
         seed_salt: 11,
         period_ticks: 1,
+        ..Default::default()
     };
     let evap = EvapConfig {
         rate_per_tick: 2,
@@ -4642,7 +4647,8 @@ fn shell_scans_match_with_parallel_on_or_off() {
 
 #[test]
 fn karst_ignores_non_limestone_solids() {
-    // Stone cell adjacent to water — should never dissolve.
+    // Dry stone next to a lake film — surface path is limestone-only.
+    // Underground stone dissolve needs pore sat, not a cliff film.
     let mut w = World::new(1);
     w.ensure_chunk(ChunkCoord::new(0, 0));
     w.set_cell(5, 5, Cell::solid(MaterialId::Stone));
@@ -4652,12 +4658,19 @@ fn karst_ignores_non_limestone_solids() {
         min_wet_neighbour_sat: 200,
         seed_salt: 3,
         period_ticks: 1,
+        pore_scale: 1.0,
+        stone_scale: 1.0,
+        ..Default::default()
     };
     for _ in 0..20 {
         apply_karst_dissolution(&mut w, &cfg);
         w.tick = w.tick.wrapping_add(1);
     }
-    assert_eq!(w.get_cell(5, 5).unwrap().material, MaterialId::Stone);
+    assert_eq!(
+        w.get_cell(5, 5).unwrap().material,
+        MaterialId::Stone,
+        "dry stone next to a lake film must not dissolve"
+    );
 }
 
 // ------------ condensation rain ------------
@@ -5000,6 +5013,7 @@ fn karst_low_sat_neighbour_does_not_dissolve() {
         min_wet_neighbour_sat: 200,
         seed_salt: 4,
         period_ticks: 1,
+        ..Default::default()
     };
     for _ in 0..10 {
         apply_karst_dissolution(&mut w, &cfg);
@@ -5242,9 +5256,125 @@ fn karst_skips_chunks_without_limestone_flag() {
         min_wet_neighbour_sat: 1,
         seed_salt: 1,
         period_ticks: 1,
+        ..Default::default()
     };
     apply_karst_dissolution(&mut w, &cfg);
     assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Air);
+}
+
+fn saturate_cell(world: &mut World, gx: i32, gy: i32) {
+    let mut cell = world.get_cell(gx, gy).expect("cell");
+    cell.sat = Sat(water_capacity(cell.material));
+    world.set_cell(gx, gy, cell);
+}
+
+fn forced_pore_karst() -> KarstConfig {
+    KarstConfig {
+        prob_per_wet_neighbour: 1.0,
+        min_wet_neighbour_sat: 200,
+        seed_salt: 9,
+        period_ticks: 1,
+        pore_scale: 1.0,
+        stone_scale: 1.0,
+    }
+}
+
+fn buried_soluble_world(material: MaterialId) -> World {
+    // Cap the stack with stone so the target has no Air neighbour.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..CHUNK_CELLS_W as i32 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=5 {
+            w.set_cell(x, y, Cell::solid(material));
+        }
+        w.set_cell(x, 6, Cell::solid(MaterialId::Stone));
+    }
+    w
+}
+
+#[test]
+fn saturated_buried_limestone_dissolves_without_air() {
+    let mut w = buried_soluble_world(MaterialId::Limestone);
+    saturate_cell(&mut w, 10, 3);
+    let sat_before = w.get_cell(10, 3).unwrap().sat.0;
+    apply_karst_dissolution(&mut w, &forced_pore_karst());
+    let after = w.get_cell(10, 3).unwrap();
+    assert_eq!(
+        after.material,
+        MaterialId::Air,
+        "pore-saturated limestone must dissolve even when boxed in"
+    );
+    assert_eq!(
+        after.sat.0, sat_before,
+        "dissolve must keep the cell's water mass"
+    );
+    assert_eq!(
+        w.get_cell(12, 3).unwrap().material,
+        MaterialId::Limestone,
+        "dry neighbours must stay put"
+    );
+}
+
+#[test]
+fn dry_buried_limestone_does_not_dissolve() {
+    let mut w = buried_soluble_world(MaterialId::Limestone);
+    apply_karst_dissolution(&mut w, &forced_pore_karst());
+    assert_eq!(
+        w.get_cell(10, 3).unwrap().material,
+        MaterialId::Limestone,
+        "dry buried limestone has no contact weight"
+    );
+}
+
+#[test]
+fn saturated_buried_stone_dissolves_without_air() {
+    let mut w = buried_soluble_world(MaterialId::Stone);
+    saturate_cell(&mut w, 8, 2);
+    apply_karst_dissolution(&mut w, &forced_pore_karst());
+    assert_eq!(
+        w.get_cell(8, 2).unwrap().material,
+        MaterialId::Air,
+        "pore-saturated stone must dissolve on the underground path"
+    );
+    assert_eq!(
+        w.get_cell(12, 2).unwrap().material,
+        MaterialId::Stone,
+        "dry stone two cells away must stay put"
+    );
+}
+
+#[test]
+fn damp_cave_void_seeds_further_limestone_dissolve() {
+    // A just-opened conduit holds the freed pore sat (well below the
+    // surface wet-Air threshold) and should still enlarge on the
+    // underground path.
+    let mut w = buried_soluble_world(MaterialId::Limestone);
+    let mut void = Cell::air();
+    void.sat = Sat(water_capacity(MaterialId::Limestone));
+    w.set_cell(10, 3, void);
+    apply_karst_dissolution(&mut w, &forced_pore_karst());
+    let opened = [(9, 3), (11, 3), (10, 2), (10, 4)]
+        .into_iter()
+        .any(|(x, y)| w.get_cell(x, y).unwrap().material == MaterialId::Air);
+    assert!(
+        opened,
+        "damp cave Air must count as an underground contact"
+    );
+}
+
+#[test]
+fn faint_pore_sat_does_not_dissolve_buried_stone() {
+    let mut w = buried_soluble_world(MaterialId::Stone);
+    let mut damp = Cell::solid(MaterialId::Stone);
+    damp.sat = Sat(2);
+    w.set_cell(8, 2, damp);
+    apply_karst_dissolution(&mut w, &forced_pore_karst());
+    assert_eq!(
+        w.get_cell(8, 2).unwrap().material,
+        MaterialId::Stone,
+        "a couple of sat units is not a wet pore"
+    );
 }
 
 #[test]
