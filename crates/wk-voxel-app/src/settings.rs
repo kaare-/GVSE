@@ -119,6 +119,13 @@ pub struct SimSettings {
     pub atmosphere: AtmosphereLookConfig,
     /// 0 = landscape only, 1 = heatmap only (when U/T/M/G overlays are on).
     pub heatmap_blend: f32,
+    /// How dark a fully waterlogged cell renders (Tab → World → Look).
+    /// Measured against the cell's own capacity, quantized so merged terrain
+    /// runs survive.
+    pub wet_darken: f32,
+    /// Strength of the porous-rock stipple (0 = off). Only the upper pore
+    /// buckets are marked, which the fracture tail keeps rare.
+    pub pore_stipple: f32,
     pub temp: TempConfig,
     pub phase: PhaseConfig,
     pub grain: GrainConfig,
@@ -249,6 +256,8 @@ impl SimSettings {
             climate: ClimateConfig::default(),
             atmosphere: AtmosphereLookConfig::default(),
             heatmap_blend: 0.55,
+            wet_darken: crate::palette::WET_DARKEN_DEFAULT,
+            pore_stipple: 0.35,
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
             grain: GrainConfig::default(),
@@ -1347,6 +1356,29 @@ impl SimSettings {
                 });
                 } // Climate (wind/clouds/rain)
                 if self.page == SettingsPage::World {
+                ui.separator();
+
+                ui.tree_node(hash!(), "Ground look (wetness / porosity)", |ui| {
+                    ui.label(
+                        None,
+                        "Wet rock darkens (vs its own capacity, not /255).",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Waterlogged darkening",
+                        0.0..0.9,
+                        &mut self.wet_darken,
+                    );
+                    ui.label(None, "Porous rock is stippled — only open cells.");
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Pore stipple strength (0 = off)",
+                        0.0..0.9,
+                        &mut self.pore_stipple,
+                    );
+                });
                 ui.separator();
 
                 ui.tree_node(hash!(), "Material permeability / porosity", |ui| {

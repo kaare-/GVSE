@@ -42,9 +42,71 @@ fn mycelium_blend(material: MaterialId, intensity: u8) -> f32 {
     }
 }
 
+/// Wetness / porosity are quantized into this many levels.
+///
+/// Terrain draws as merged vertical runs keyed on colour, so a continuous tint
+/// would break almost every run and give back the batching win. Buckets keep
+/// neighbouring cells with similar values mergeable while still showing the
+/// structure.
+pub const TINT_LEVELS: u8 = 4;
+
+/// How dark a fully waterlogged cell goes (fraction toward the wet tone).
+pub const WET_DARKEN_DEFAULT: f32 = 0.45;
+
+/// Wetness bucket `0..TINT_LEVELS-1` from **pore saturation over capacity**.
+///
+/// Capacity, not 255. Stone holds ~20 sat when completely full, so a
+/// `sat / 255` ramp darkened saturated stone by under 3% — groundwater was
+/// effectively invisible in the terrain colour, which is exactly the structure
+/// the pore work needed to be able to see.
+pub fn wetness_bucket(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 {
+    let cap = wk_voxel::water_capacity_cell(cell, hydro);
+    if cap == 0 || cell.sat.0 == 0 {
+        return 0;
+    }
+    let frac = (cell.sat.0 as f32 / cap as f32).clamp(0.0, 1.0);
+    ((frac * TINT_LEVELS as f32).floor() as u8).min(TINT_LEVELS - 1)
+}
+
+/// Aperture bucket `0..TINT_LEVELS-1` from the stored pore coordinate.
+///
+/// Only the upper buckets are stippled by the app. The fracture tail makes high
+/// values genuinely rare, so marking just those is both cheap and points the eye
+/// at the conduits rather than at ordinary rock.
+pub fn pore_bucket(cell: Cell) -> u8 {
+    if cell.material == MaterialId::Air {
+        return 0;
+    }
+    ((cell.pore as u16 * TINT_LEVELS as u16) / 256) as u8
+}
+
+/// Pore coordinate at which a cell starts being drawn as porous.
+///
+/// Must sit clearly **above** the matrix boundary. `HydroRange::sample_fracture`
+/// treats everything up to 128 as the material's matrix value, so marking at or
+/// near 128 would stipple ordinary rock — including every `Cell::solid()`, which
+/// defaults to exactly 128.
+pub const PORE_STIPPLE_MIN: u8 = 176;
+
+/// True when this cell is open enough to be worth marking as porous.
+pub fn shows_pore_stipple(cell: Cell) -> bool {
+    !matches!(
+        cell.material,
+        MaterialId::Air | MaterialId::Water | MaterialId::Ice | MaterialId::Snow
+    ) && cell.pore >= PORE_STIPPLE_MIN
+}
+
 pub fn cell_color(cell: Cell) -> [u8; 3] {
+    cell_color_with(cell, &wk_material::HydroOverrides::default(), WET_DARKEN_DEFAULT)
+}
+
+/// [`cell_color`] with the world's hydrology and a wetness-darkening budget.
+pub fn cell_color_with(
+    cell: Cell,
+    hydro: &wk_material::HydroOverrides,
+    wet_darken: f32,
+) -> [u8; 3] {
     let base = MaterialRegistry::colour_rgb(cell.material);
-    let t = cell.sat.as_f32();
     if cell.material == MaterialId::Air {
         if cell.sat.is_empty() || cell.sat.0 <= GRAIN_REPOSE_HAZE_MAX {
             // Dry or atmospheric film — sky (app skips drawing these).
@@ -66,10 +128,12 @@ pub fn cell_color(cell: Cell) -> [u8; 3] {
             lerp_u8(WATER_FILM_RGB[2], water[2], blend),
         ]
     } else {
-        // Porous solid cells: nudge base color darker as pore
-        // moisture rises. Real palette work can come later; this
-        // gives instant visual feedback for infiltration.
-        let darken = 0.35 * t;
+        // Porous solids darken as pore water rises — the convention (wet rock
+        // is darker, not bluer). Quantized so merged runs survive, and measured
+        // against the cell's own capacity so a fully saturated stone actually
+        // reads as saturated.
+        let bucket = wetness_bucket(cell, hydro);
+        let darken = wet_darken.clamp(0.0, 1.0) * bucket as f32 / (TINT_LEVELS - 1) as f32;
         let mut rgb = [
             lerp_u8(base[0], 40, darken),
             lerp_u8(base[1], 55, darken),
@@ -93,6 +157,75 @@ pub fn cell_color(cell: Cell) -> [u8; 3] {
 mod tests {
     use super::*;
     use wk_voxel::{Sat, Cell};
+
+    #[test]
+    fn saturated_stone_reads_as_wet_not_dry() {
+        // Regression: wetness was measured against 255 rather than the cell's
+        // own capacity. Stone holds ~20 sat when completely full, so a fully
+        // saturated stone cell darkened by under 3% and groundwater was
+        // effectively invisible in the terrain colour.
+        let hydro = wk_material::HydroOverrides::default();
+        let dry = Cell::solid(MaterialId::Stone);
+        let mut full = dry;
+        full.sat = Sat(wk_voxel::water_capacity_cell(dry, &hydro));
+        assert!(full.sat.0 > 0 && full.sat.0 < 64, "precondition: stone's capacity is small");
+
+        assert_eq!(
+            wetness_bucket(full, &hydro),
+            TINT_LEVELS - 1,
+            "a cell at capacity must read as the wettest bucket"
+        );
+        let dry_rgb = cell_color_with(dry, &hydro, WET_DARKEN_DEFAULT);
+        let wet_rgb = cell_color_with(full, &hydro, WET_DARKEN_DEFAULT);
+        let lum = |c: [u8; 3]| c[0] as i32 + c[1] as i32 + c[2] as i32;
+        assert!(
+            lum(dry_rgb) - lum(wet_rgb) > 60,
+            "saturated stone must be visibly darker (dry {dry_rgb:?} wet {wet_rgb:?})"
+        );
+    }
+
+    #[test]
+    fn tints_are_quantized_so_runs_still_merge() {
+        // Terrain batches on colour equality. Neighbouring cells with slightly
+        // different sat must land on the same bucket, or the merged-run win goes
+        // away.
+        let hydro = wk_material::HydroOverrides::default();
+        let cap = wk_voxel::water_capacity_cell(Cell::solid(MaterialId::Sand), &hydro);
+        let at = |s: u8| {
+            let mut c = Cell::solid(MaterialId::Sand);
+            c.sat = Sat(s);
+            cell_color_with(c, &hydro, WET_DARKEN_DEFAULT)
+        };
+        // Two cells a single sat unit apart, mid-bucket.
+        let s = cap / 2;
+        assert_eq!(at(s), at(s + 1), "a one-unit difference must not split a run");
+    }
+
+    #[test]
+    fn only_open_cells_are_stippled() {
+        let mut dense = Cell::solid(MaterialId::Limestone);
+        dense.pore = 0;
+        let mut open = Cell::solid(MaterialId::Limestone);
+        open.pore = 230;
+        assert!(!shows_pore_stipple(dense), "dense rock stays clean");
+        assert!(shows_pore_stipple(open), "open rock is marked");
+        // A default-constructed cell sits exactly on the matrix boundary, so
+        // painted terrain and fresh precipitate must not read as porous.
+        assert!(
+            !shows_pore_stipple(Cell::solid(MaterialId::Limestone)),
+            "pore=128 is matrix, not a fracture"
+        );
+        let mut matrix_ish = Cell::solid(MaterialId::Limestone);
+        matrix_ish.pore = 140;
+        assert!(
+            !shows_pore_stipple(matrix_ish),
+            "just above matrix is not yet a conduit"
+        );
+        // Never mark non-porous media.
+        let mut air = Cell::air();
+        air.pore = 255;
+        assert!(!shows_pore_stipple(air));
+    }
 
     #[test]
     fn dry_air_stays_sky_blue() {

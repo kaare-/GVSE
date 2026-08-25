@@ -13,7 +13,11 @@
 use wk_material::MaterialId;
 use wk_voxel::{is_standing_water, stamp_world, World, WorldgenParams, CHUNK_CELLS_H, CHUNK_CELLS_W};
 
-/// Mirrors the app's "is this cell painted at all" rule.
+/// Mirrors the app's run key: what makes two stacked cells share a rectangle.
+///
+/// Solid wetness is **quantized** into four buckets by the palette, so cells a
+/// few sat apart still merge — the reason a continuous tint was rejected. Air
+/// keeps its full sat ramp (the water colour is continuous).
 fn visible(world: &World, params: &WorldgenParams, x: i32, y: i32) -> Option<(MaterialId, u8)> {
     let cell = world.get_cell(x, y)?;
     if cell.material == MaterialId::Air {
@@ -23,13 +27,44 @@ fn visible(world: &World, params: &WorldgenParams, x: i32, y: i32) -> Option<(Ma
         if y > params.sea_level_y && !is_standing_water(world, x, y) {
             return None;
         }
+        return Some((cell.material, cell.sat.0));
     }
-    Some((cell.material, cell.sat.0))
+    let cap = wk_voxel::water_capacity_cell(cell, &world.hydro);
+    let bucket = if cap == 0 || cell.sat.0 == 0 {
+        0
+    } else {
+        (((cell.sat.0 as f32 / cap as f32).clamp(0.0, 1.0) * 4.0).floor() as u8).min(3)
+    };
+    Some((cell.material, bucket))
 }
 
 fn measure(label: &str, params: WorldgenParams) {
     let mut world = World::new(params.seed);
     stamp_world(&mut world, &params);
+    // Wet the ground first: on a bone-dry world every cell is in wetness bucket
+    // 0 and the quantization cannot be observed. Sea beds and shores soaking is
+    // the representative case.
+    let perf = wk_voxel::PerfConfig::default();
+    for _ in 0..300 {
+        wk_voxel::tick_with_perf(&mut world, &perf);
+    }
+
+    // Same walk, keyed on raw sat instead of the bucket — what a continuous
+    // tint would have cost.
+    let mut unquantized_runs = 0u64;
+    for x in 0..params.width_cols {
+        let mut open: Option<(MaterialId, u8)> = None;
+        for y in params.bedrock_floor_y..params.sky_ceiling_y {
+            let key = world
+                .get_cell(x, y)
+                .filter(|c| visible(&world, &params, x, y).is_some())
+                .map(|c| (c.material, c.sat.0));
+            if key.is_some() && key != open {
+                unquantized_runs += 1;
+            }
+            open = key;
+        }
+    }
 
     let mut cells = 0u64;
     let mut runs = 0u64;
@@ -69,6 +104,10 @@ fn measure(label: &str, params: WorldgenParams) {
     println!("  merged runs   (draw calls after)   {runs:>10}");
     println!("  reduction                          {:>9.1}×", cells as f64 / runs.max(1) as f64);
     println!("  longest single run                 {longest:>10} cells");
+    println!(
+        "  unquantized (continuous tint)      {unquantized_runs:>10}  → only {:.1}×",
+        cells as f64 / unquantized_runs.max(1) as f64
+    );
 }
 
 #[test]
