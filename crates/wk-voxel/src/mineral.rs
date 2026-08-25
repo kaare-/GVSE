@@ -42,6 +42,13 @@ pub const PRECIPITATE_MAX_STEP: u16 = 8;
 /// Other materials open proportionally slower.
 const LIMESTONE_SOLUBILITY_REF: f32 = 40.0;
 
+/// Throughput a transfer must exceed before competent rock yields at all.
+///
+/// A critical-shear threshold: it is what makes continuous limestone and stone
+/// *hard*, so erosion happens only along the few paths that actually carry
+/// flow instead of everywhere the rock happens to be wet.
+pub const APERTURE_MIN_THROUGHPUT: u8 = 8;
+
 /// How much less an artesian outlet can hold than water still at depth.
 ///
 /// Water arriving under pressure gives up a share of its load as it
@@ -175,14 +182,20 @@ pub fn widen_aperture(
     if !is_soluble_rock(cell.material) || cell.pore == u8::MAX {
         return false;
     }
+    // Below a threshold flow, competent rock simply does not yield. Without a
+    // threshold every wetted cell erodes a little and the result is uniform
+    // widening — a slightly more porous aquifer rather than pipes.
+    if throughput <= APERTURE_MIN_THROUGHPUT {
+        return false;
+    }
     let solubility = MaterialRegistry::base_props(cell.material).solubility.max(1) as f32;
-    // `scale` is the odds for a *full* throughput through limestone, so the two
-    // multipliers are both fractions of a reference: how much water passed, and
-    // how soluble this rock is relative to limestone. Stone's solubility of 0
-    // floors to 1, making it ~40x slower than limestone rather than immune.
-    let p = scale
-        * (throughput as f32 / 255.0)
-        * (solubility / LIMESTONE_SOLUBILITY_REF);
+    let over = (throughput - APERTURE_MIN_THROUGHPUT) as f32
+        / (255 - APERTURE_MIN_THROUGHPUT) as f32;
+    // **Superlinear** in throughput. This is what channelizes: a cell carrying
+    // twice the water opens roughly four times faster, so a small head start
+    // compounds into a conduit while its neighbours stay effectively solid.
+    // A linear response spread the erosion evenly instead.
+    let p = scale * over * over * (solubility / LIMESTONE_SOLUBILITY_REF);
     if p <= 0.0 {
         return false;
     }
@@ -557,6 +570,53 @@ mod tests {
             crate::audit::mineral_total(&w),
             before,
             "dissolving the last of a cell must conserve mineral"
+        );
+    }
+
+    /// Fraction of attempts that open a cell, over many deterministic rolls.
+    fn open_rate(throughput: u8, scale: f32) -> f32 {
+        let mut hits = 0u32;
+        let trials = 400u32;
+        for t in 0..trials {
+            let mut w = bed(41);
+            let mut rock = Cell::solid(MaterialId::Limestone);
+            rock.pore = 100;
+            w.set_cell(4, 1, rock);
+            w.tick = t as u64;
+            if widen_aperture(&mut w, 4, 1, throughput, scale, 7) {
+                hits += 1;
+            } else if w.get_cell(4, 1).unwrap().pore > 100 {
+                hits += 1;
+            }
+        }
+        hits as f32 / trials as f32
+    }
+
+    #[test]
+    fn rock_does_not_yield_below_the_flow_threshold() {
+        // Continuous limestone must be *hard*: wetted rock that carries only a
+        // trickle stays solid, so erosion cannot spread out into a uniformly
+        // more porous aquifer.
+        assert_eq!(
+            open_rate(APERTURE_MIN_THROUGHPUT, 1000.0),
+            0.0,
+            "at or below the threshold nothing dissolves, however long it sits"
+        );
+        assert_eq!(open_rate(1, 1000.0), 0.0);
+    }
+
+    #[test]
+    fn erosion_is_superlinear_so_flow_focuses_into_channels() {
+        // The channelizing property: doubling the water through a cell must more
+        // than double how fast it opens, so a small head start compounds into a
+        // pipe while neighbours stay effectively solid. A linear response would
+        // widen everything evenly.
+        let lo = open_rate(40, 6.0);
+        let hi = open_rate(80, 6.0);
+        assert!(lo > 0.0, "precondition: the low rate is not zero");
+        assert!(
+            hi > lo * 3.0,
+            "2x throughput should open >3x faster (lo={lo:.3} hi={hi:.3})"
         );
     }
 

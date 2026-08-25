@@ -20,12 +20,14 @@ use super::plan::{regions_for_standalone, regions_wet_loaded};
 
 /// Odds a *full* throughput through limestone opens the aperture one step.
 ///
-/// Sets the geological pace: a well-fed limestone cell carrying a typical
-/// seepage step opens measurably over a few thousand ticks — the same order as
-/// [`super::KarstConfig`]'s surface dissolution — and stone takes ~40× longer
-/// because the odds scale with solubility. Feeds back on itself, so raising it
-/// far turns an aquifer into open void; precipitation is the only brake.
-const APERTURE_GROWTH_SCALE: f32 = 2.0;
+/// The response is **squared** in throughput above
+/// [`crate::mineral::APERTURE_MIN_THROUGHPUT`], so this number is not a uniform
+/// erosion rate — it sets how sharply flow focuses. At this value a cell
+/// carrying an ordinary seepage step opens slowly (rock feels hard), while one
+/// carrying several times that opens more than an order of magnitude faster and
+/// becomes a pipe. Raising it erodes everything and loses the channels; lowering
+/// it freezes the rock.
+const APERTURE_GROWTH_SCALE: f32 = 12.0;
 /// Salt for the deterministic aperture-growth roll.
 const APERTURE_SEED_SALT: u64 = 0xA9E5_7075_0BE0_1111;
 

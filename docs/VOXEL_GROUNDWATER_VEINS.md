@@ -239,7 +239,51 @@ transfer carries it away, so nothing would ever accumulate. Occlusion is
 restricted to soluble rock, since that is what `mineral_total` counts; cementing
 anything else would consume load with no solid gaining it.
 
-Nothing left open in this plan.
+## Hard rock, so channels can form
+
+Playtest: continuous limestone and stone need to be **harder**, or erosion
+spreads out and you get a slightly more porous aquifer instead of pipes.
+
+Two changes to `widen_aperture`:
+
+- **Flow threshold** (`APERTURE_MIN_THROUGHPUT`). Below it competent rock does
+  not yield at all. Wetted rock carrying a trickle stays solid.
+- **Superlinear response.** Odds scale with the *square* of throughput above the
+  threshold, so doubling the water through a cell opens it more than four times
+  faster. A small head start compounds into a conduit while neighbours stay
+  effectively solid. A linear response widened everything evenly.
+
+`APERTURE_GROWTH_SCALE` is therefore not a uniform erosion rate — it sets how
+sharply flow focuses. Raising it erodes everything and loses the channels.
+
+This retired an integration test that fed a *sealed* limestone shaft: such a
+shaft fills and flow stops, so it was passing on residual trickle — exactly the
+diffuse erosion the threshold exists to remove. Replaced by mechanism tests
+(`rock_does_not_yield_below_the_flow_threshold`,
+`erosion_is_superlinear_so_flow_focuses_into_channels`) which state the claim
+directly and do not depend on a long soak.
+
+## Open: artesian head through saturated rock
+
+A hand-dug well fills from the sides but shows **no upward pressure**, and that
+is expected with the current rules rather than a bug:
+
+- `apply_confined_upward_regions` walks pressure through **full wet Air** only —
+  water-filled voids, i.e. communicating vessels. It does not traverse saturated
+  pore space, so an aquifer cannot push water up a shaft.
+- Seepage cannot do it either, and the reason is structural:
+  `hydraulic_head = y + sat / capacity`, so the pressure term is capped at one
+  cell of elevation. For water to rise from `y` to `y+1` it would need
+  `frac_below > frac_above + 1`, which is impossible when `frac <= 1`. **A
+  saturated column can never push water above its own top.**
+
+Real artesian flow needs head that is not bounded by local saturation — the
+recharge area is higher than the outlet. The contained version is to let the
+existing confined-head walk traverse *fully saturated porous* cells as well as
+full wet Air: the machinery for "find the connected body's maximum head and
+compare it to the receiver" already exists, it simply refuses to cross rock.
+Hazard to respect: that walk must not invent water, so it stays a transfer from
+a real donor surface ([`VOXEL_FIELDS.md`](VOXEL_FIELDS.md) §4).
 
 ### Original design
 
