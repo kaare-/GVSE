@@ -42,7 +42,28 @@ Stone is the bulk of deep rock, and the default ±25% band (`centered_range`)
 lands entirely inside one rate bucket. Even where variation survives, a 1.6×
 contrast reads as a slightly ragged front, not a vein.
 
-### Fix: fracture-tailed permeability, not a symmetric band
+### Fix: fracture-tailed permeability — **landed**
+
+Permeability now widens **upward only** (`fracture_range`: floor at the table
+value, ceiling ~8× clamped) and is sampled through
+`HydroRange::sample_fracture`, which treats the whole lower half of the pore
+domain as matrix and ramps the upper half quadratically to the ceiling.
+
+Two properties that fell out of implementing it:
+
+- `pore = 128` — the `Cell::solid()` default — must land *exactly* on the matrix
+  value, or every painted and constructed cell silently becomes more permeable
+  when the range widens. A linear sample over an asymmetric range broke this;
+  the curve restores it. Guarded by
+  `fracture_sampling_keeps_the_default_cell_at_matrix`.
+- The **curve** carries the tail, so the pore *field* stays a readable coherent
+  lens pattern (and porosity stays centred on it). Cubing the field instead
+  worked but compressed the lens structure and coupled the two properties.
+
+Stone now spans rate 1 in the matrix to ~5 in a fracture; ~62% of the pore
+domain stays matrix-tight (`fracture_sampling_is_mostly_matrix`).
+
+### Original design
 
 Real rock does not have a ±25% spread around a mean — matrix permeability is
 tiny and flow concentrates in a **small fraction** of much more conductive

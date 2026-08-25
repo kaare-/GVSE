@@ -362,7 +362,7 @@ pub fn permeability_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 
     use wk_material::MaterialRegistry;
     MaterialRegistry::hydrology_with(cell.material, hydro)
         .permeability
-        .sample(cell.pore)
+        .sample_fracture(cell.pore)
 }
 
 #[cfg(test)]

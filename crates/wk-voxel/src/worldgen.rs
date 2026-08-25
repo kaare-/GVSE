@@ -351,6 +351,11 @@ fn pore_coordinate(seed: u64, x: i32, y: i32, surface_y: i32) -> u8 {
     let fine = lens_noise(seed, x, y, 11, 6, 0xA0_2E_1002);
     let depth = (surface_y - y).max(0) as f32;
     let compaction = (depth / 180.0).min(0.20);
+    // Left coherent and roughly centred on purpose. The fracture weighting
+    // lives in `HydroRange::sample_fracture`, which treats the lower half of
+    // this domain as matrix and ramps only the upper half — so the *field*
+    // stays a readable lens pattern (and porosity stays centred on it) while
+    // permeability still ends up tight almost everywhere.
     (((0.72 * broad + 0.28 * fine - compaction).clamp(0.0, 1.0) * 255.0).round()) as u8
 }
 

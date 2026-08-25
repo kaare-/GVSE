@@ -258,6 +258,31 @@ impl HydroRange {
         (self.min as u16 + (span * pore as u16 + 127) / 255) as u8
     }
 
+    /// Fracture sampling: `min` is the **matrix** value, reached by the whole
+    /// lower half of the pore domain; the upper half ramps quadratically to
+    /// `max`.
+    ///
+    /// Used for permeability. Two properties matter:
+    ///
+    /// - `pore = 128` (the constructor default) returns exactly `min`, so
+    ///   painted and constructed cells keep the authored matrix value. A linear
+    ///   sample over an upward-widened range would silently make every default
+    ///   cell far more permeable.
+    /// - Most of the domain is matrix and only a thin tail is conductive, which
+    ///   is how rock actually behaves — tight almost everywhere, with flow
+    ///   concentrated in sparse fractures.
+    #[inline]
+    pub fn sample_fracture(self, pore: u8) -> u8 {
+        if pore <= 128 || self.max <= self.min {
+            return self.min;
+        }
+        // Remap 129..=255 onto 0..=255, then square to weight the tail.
+        let t = ((pore as u32 - 128) * 255) / 127;
+        let sq = (t * t) / 255;
+        let span = (self.max - self.min) as u32;
+        (self.min as u32 + (span * sq) / 255).min(self.max as u32) as u8
+    }
+
     #[inline]
     pub fn midpoint(self) -> u8 {
         ((self.min as u16 + self.max as u16 + 1) / 2) as u8
@@ -269,6 +294,23 @@ impl HydroRange {
 pub struct MaterialHydrology {
     pub permeability: HydroRange,
     pub porosity: HydroRange,
+}
+
+/// Permeability range: matrix at the floor, fractures in the tail.
+///
+/// Keeps the table value as the *minimum* so typical rock is no leakier than
+/// before, and lifts the ceiling to roughly 8× (clamped) so the rare
+/// high-`pore` cell conducts like a fracture. For stone that is rate 1 in the
+/// matrix and ~5 in a fracture — the contrast a symmetric band could not reach.
+const fn fracture_range(matrix: u8) -> HydroRange {
+    if matrix == 0 {
+        return HydroRange::fixed(0);
+    }
+    // Saturating ×8 without overflow, with a floor so very tight rock still
+    // gets a usable spread rather than one rate bucket.
+    let ceiling = if matrix > 31 { 255 } else { matrix * 8 };
+    let ceiling = if ceiling < 40 { 40 } else { ceiling };
+    HydroRange::new(matrix, ceiling)
 }
 
 const fn centered_range(mid: u8) -> HydroRange {
@@ -368,13 +410,27 @@ impl MaterialRegistry {
         hydro.apply(material, Self::base_props(material))
     }
 
-    /// Default per-cell hydrology ranges. Midpoints preserve the old
-    /// fixed material table; range width is deliberately modest until
-    /// tuned from playtests. Zero remains exactly `0..0`.
+    /// Default per-cell hydrology ranges.
+    ///
+    /// **Porosity** stays a symmetric band around the table value: it controls
+    /// storage, not which path water takes, and several tests assert bed
+    /// saturation against it.
+    ///
+    /// **Permeability widens upward only** — floor at the table value, ceiling
+    /// well above it. Real rock is not a mean with a ±25% spread; the matrix is
+    /// tight and flow concentrates in a small fraction of much more conductive
+    /// fractures. Combined with a heavy-tailed pore field (worldgen puts most
+    /// cells near the low end) the median cell stays about as tight as before
+    /// while the thin tail becomes a genuine conduit.
+    ///
+    /// A symmetric band could not do this: `seepage_rate` quantizes to
+    /// `(permeability × 32) / 255` with a floor of 1, so stone's whole ±25%
+    /// band (1–9) collapsed into a single rate bucket and deep rock had *no*
+    /// usable variation at all.
     pub fn hydrology(material: MaterialId) -> MaterialHydrology {
         let p = Self::base_props(material);
         MaterialHydrology {
-            permeability: centered_range(p.permeability),
+            permeability: fracture_range(p.permeability),
             porosity: centered_range(p.porosity),
         }
     }
@@ -714,13 +770,84 @@ mod tests {
     }
 
     #[test]
-    fn default_hydrology_ranges_keep_old_value_at_midpoint() {
+    fn porosity_is_centred_but_permeability_only_widens_upward() {
         for material in MaterialId::ALL_SOLIDS {
             let props = MaterialRegistry::base_props(material);
             let hydro = MaterialRegistry::hydrology(material);
-            assert_eq!(hydro.permeability.sample(128), props.permeability);
-            assert_eq!(hydro.porosity.sample(128), props.porosity);
+            // Storage stays centred on the table value.
+            assert_eq!(
+                hydro.porosity.sample(128),
+                props.porosity,
+                "{material:?} porosity should keep the table value at its midpoint"
+            );
+            // Conductivity keeps the table value as its *floor*: the matrix is
+            // never leakier than before, and the tail reaches fracture rates.
+            assert_eq!(
+                hydro.permeability.min, props.permeability,
+                "{material:?} matrix permeability must stay at the table value"
+            );
+            if props.permeability > 0 {
+                assert!(
+                    hydro.permeability.max > props.permeability,
+                    "{material:?} needs headroom above the matrix for fractures"
+                );
+            } else {
+                assert_eq!(
+                    hydro.permeability,
+                    HydroRange::fixed(0),
+                    "impermeable stays exactly 0..0"
+                );
+            }
         }
+    }
+
+    #[test]
+    fn fracture_tail_gives_tight_rock_a_usable_rate_spread() {
+        // The bug this exists to prevent: seepage rate is
+        // `((permeability * 32) / 255).max(1)`, so a narrow band around a low
+        // permeability collapses to one bucket and rock cannot vary at all.
+        let rate = |p: u8| ((p as i32 * 32) / 255).max(1);
+        let stone = MaterialRegistry::hydrology(MaterialId::Stone).permeability;
+        assert!(
+            rate(stone.max) >= rate(stone.min) * 4,
+            "stone needs a 4x+ matrix-to-fracture rate contrast (min {} -> {}, max {} -> {})",
+            stone.min,
+            rate(stone.min),
+            stone.max,
+            rate(stone.max)
+        );
+    }
+
+    #[test]
+    fn fracture_sampling_keeps_the_default_cell_at_matrix() {
+        // `Cell::solid()` uses pore = 128. If that did not land exactly on the
+        // matrix value, every painted and constructed cell would silently
+        // change permeability when the range widened upward.
+        for material in MaterialId::ALL_SOLIDS {
+            let props = MaterialRegistry::base_props(material);
+            let perm = MaterialRegistry::hydrology(material).permeability;
+            assert_eq!(
+                perm.sample_fracture(128),
+                props.permeability,
+                "{material:?} default pore must sample the matrix value"
+            );
+            assert_eq!(perm.sample_fracture(0), props.permeability);
+            assert_eq!(perm.sample_fracture(255), perm.max);
+        }
+    }
+
+    #[test]
+    fn fracture_sampling_is_mostly_matrix() {
+        // A thin conductive tail, not uniformly leaky rock.
+        let perm = MaterialRegistry::hydrology(MaterialId::Stone).permeability;
+        let matrix = perm.min;
+        let at_matrix = (0..=255u16)
+            .filter(|&p| perm.sample_fracture(p as u8) <= matrix + 1)
+            .count();
+        assert!(
+            at_matrix > 150,
+            "most of the pore domain should stay matrix-tight (got {at_matrix}/256)"
+        );
     }
 
     #[test]
