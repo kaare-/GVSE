@@ -263,7 +263,33 @@ diffuse erosion the threshold exists to remove. Replaced by mechanism tests
 `erosion_is_superlinear_so_flow_focuses_into_channels`) which state the claim
 directly and do not depend on a long soak.
 
-## Open: artesian head through saturated rock
+## Artesian head through saturated rock (**landed**)
+
+`transmits_pressure` now treats **fully saturated pore space** as a pressure
+conductor alongside water-filled Air, in the confined-head walk *and* in the
+receiver's "what am I standing on" check. That second one was the blocker for a
+hand-dug well: the shaft bottoms on rock, so requiring Air below meant the
+aquifer it reached could never feed it.
+
+Partially saturated rock deliberately does **not** conduct — there is air in the
+pores, so there is no continuous column to push through. Donors are still
+free-surface wet Air, so the rise is a transfer from a real surface and cannot
+invent water.
+
+Two behaviours worth knowing, both correct:
+
+- An **uncased** hole does not rise past the confining layer. Confined rise is
+  refused where water could spread sideways instead
+  (`allows_confined_rise` / `open_air_both_sides`), so a bare hole in open ground
+  fills its sump and stops. A cased shaft climbs.
+- A well **draws its aquifer down**. If recharge cannot keep the path fully
+  saturated, the pressure chain breaks and the rise stops — which is what a real
+  over-pumped well does. Sustained rise needs sustained intake.
+
+Regression: `a_well_bottomed_in_a_confined_aquifer_rises`. Confined-pass cost is
+unchanged (~0.3–0.7 ms/tick).
+
+## Superseded notes on the original limitation
 
 A hand-dug well fills from the sides but shows **no upward pressure**, and that
 is expected with the current rules rather than a bug:

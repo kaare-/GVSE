@@ -5350,6 +5350,77 @@ fn a_stream_carries_mineral_downhill_and_conserves_it() {
 }
 
 #[test]
+fn a_well_bottomed_in_a_confined_aquifer_rises() {
+    // The playtest well: dug to rock, filled from the sides, no pressure.
+    // Confined head refused to cross saturated pore space, so an aquifer
+    // recharged from higher ground could never reach the shaft.
+    let mut w = World::new(77);
+    for cx in 0..2 {
+        w.ensure_chunk(ChunkCoord::new(cx, 0));
+    }
+    let cap_sand = water_capacity(MaterialId::Sand);
+    // Impermeable floor, a saturated sand aquifer, and a bedrock cap over it —
+    // a confined layer. The aquifer's recharge end stands higher than the well.
+    for x in 0..80 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(cap_sand);
+        w.set_cell(x, 1, sand);
+        w.set_cell(x, 2, sand);
+        // Confining cap.
+        w.set_cell(x, 3, Cell::solid(MaterialId::Bedrock));
+        for y in 4..14 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    // Recharge: standing water in an open column at the far end, well above the
+    // well head, connected to the aquifer through a gap in the cap.
+    w.set_cell(70, 3, Cell::air());
+    for y in 3..=10 {
+        w.set_cell(70, y, Cell::water());
+        w.set_cell(71, y, Cell::water());
+    }
+    // The well: a cased shaft punched through the cap down onto the aquifer.
+    // The casing matters — an uncased hole is just open ground, and confined
+    // rise is refused where water could spread sideways instead.
+    w.set_cell(10, 3, Cell::air());
+    for y in 4..12 {
+        w.set_cell(10, y, Cell::air());
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(11, y, Cell::solid(MaterialId::Bedrock));
+    }
+
+    let before: i32 = (3..12)
+        .filter_map(|y| w.get_cell(10, y).map(|c| c.sat.0 as i32))
+        .sum();
+    for _ in 0..400 {
+        // Sustained recharge: a real aquifer under head is fed from its intake.
+        // Without this the well simply draws the aquifer down and the pressure
+        // path breaks, which is also correct behaviour — just not a test of rise.
+        for y in 3..=10 {
+            w.set_cell(70, y, Cell::water());
+            w.set_cell(71, y, Cell::water());
+        }
+        tick(&mut w);
+    }
+    let after: i32 = (3..12)
+        .filter_map(|y| w.get_cell(10, y).map(|c| c.sat.0 as i32))
+        .sum();
+    assert!(
+        after > before,
+        "an aquifer under head should push water up the shaft ({before} -> {after})"
+    );
+    // Above the confining cap, not merely into the bottom of the hole.
+    let above_cap: i32 = (5..12)
+        .filter_map(|y| w.get_cell(10, y).map(|c| c.sat.0 as i32))
+        .sum();
+    assert!(
+        above_cap > 0,
+        "head should lift water above the confining layer, not just fill the sump"
+    );
+}
+
+#[test]
 fn clay_retains_water_that_gravel_lets_go() {
     // Field capacity is what gives a lens its character. Two identical columns
     // wetted to capacity and then left to drain: clay should still be holding

@@ -258,6 +258,25 @@ fn allows_confined_rise(world: &World, gx: i32, gy: i32, donor_y: i32) -> bool {
     is_walled_column(world, gx, gy)
 }
 
+/// True when a cell is water-filled enough to transmit confined pressure.
+///
+/// Water-filled Air (a pipe or flooded void) **or fully saturated pore space**.
+/// Restricting this to Air is why a hand-dug well filled from the sides but
+/// never rose: an aquifer could not reach the shaft, because pressure refused to
+/// cross rock. A saturated pore is a continuous water path just like a flooded
+/// void — slower, but it conducts head.
+///
+/// Partially saturated rock does not qualify: there is air in the pores, so
+/// there is no continuous column to push through.
+#[inline]
+fn transmits_pressure(world: &World, cell: &Cell) -> bool {
+    if cell.material == MaterialId::Air {
+        return cell.sat.is_full();
+    }
+    let cap = water_capacity_cell(*cell, &world.hydro);
+    cap > 0 && cell.sat.0 >= cap
+}
+
 #[derive(Clone, Copy)]
 struct PressureBody {
     max_head: f32,
@@ -298,7 +317,7 @@ fn climb_full_air_column(
         let Some(c) = world.get_cell(x, y) else {
             break;
         };
-        if c.material != MaterialId::Air || !c.sat.is_full() {
+        if !transmits_pressure(world, &c) {
             break;
         }
         if !visited.insert((x, y)) {
@@ -308,7 +327,7 @@ fn climb_full_air_column(
         for dx in [-1_i32, 1] {
             let nx = world.wrap_x(x + dx);
             if let Some(n) = world.get_cell(nx, y) {
-                if n.material == MaterialId::Air && n.sat.is_full() {
+                if transmits_pressure(world, &n) {
                     if !visited.contains(&(nx, y)) {
                         queue.push_back((nx, y));
                     }
@@ -352,7 +371,7 @@ fn pressure_body_from_full(
         return Some(body);
     }
     let seed = world.get_cell(seed_x, seed_y)?;
-    if seed.material != MaterialId::Air || !seed.sat.is_full() {
+    if !transmits_pressure(world, &seed) {
         return None;
     }
 
@@ -379,7 +398,7 @@ fn pressure_body_from_full(
         let Some(c) = world.get_cell(x, y) else {
             continue;
         };
-        if c.material != MaterialId::Air || !c.sat.is_full() {
+        if !transmits_pressure(world, &c) {
             continue;
         }
         // Climb this column for its free-surface head, then continue
@@ -396,7 +415,7 @@ fn pressure_body_from_full(
         );
         // Downward continuity (pipe floors / deeper basins).
         if let Some(below) = world.get_cell(x, y - 1) {
-            if below.material == MaterialId::Air && below.sat.is_full() {
+            if transmits_pressure(world, &below) {
                 if !visited.contains(&(x, y - 1)) {
                     queue.push_back((x, y - 1));
                 }
@@ -450,9 +469,11 @@ fn accumulate_confined_upward_xfers(
                 let Some(below) = world.get_cell(gx, gy - 1) else {
                     continue;
                 };
-                // Rising column: must sit on a full wet-Air cell that
-                // can transmit confined pressure.
-                if below.material != MaterialId::Air || !below.sat.is_full() {
+                // Rising column: must sit on something that transmits
+                // confined pressure — a flooded void *or* saturated pore space.
+                // Requiring Air here meant a shaft bottomed on rock (every
+                // hand-dug well) could never be fed by the aquifer it reached.
+                if !transmits_pressure(world, &below) {
                     continue;
                 }
                 // Open ocean/lake tops: both lateral neighbours are Air and
