@@ -18,6 +18,17 @@ use super::head::{
 };
 use super::plan::{regions_for_standalone, regions_wet_loaded};
 
+/// Odds a *full* throughput through limestone opens the aperture one step.
+///
+/// Sets the geological pace: a well-fed limestone cell carrying a typical
+/// seepage step opens measurably over a few thousand ticks — the same order as
+/// [`super::KarstConfig`]'s surface dissolution — and stone takes ~40× longer
+/// because the odds scale with solubility. Feeds back on itself, so raising it
+/// far turns an aquifer into open void; precipitation is the only brake.
+const APERTURE_GROWTH_SCALE: f32 = 2.0;
+/// Salt for the deterministic aperture-growth roll.
+const APERTURE_SEED_SALT: u64 = 0xA9E5_7075_0BE0_1111;
+
 /// Rows of seam-coupled seepage on the **lower** chunk (below the face).
 /// A shallow strip left saturated shelves (y=62|63 full, y=61 dry).
 const SEAM_SEEPAGE_DEPTH_LO: i32 = 16;
@@ -409,6 +420,17 @@ pub fn apply_seepage_regions_ex(
         // Dissolved mineral travels with the water that carries it, so karst
         // load reaches an outlet instead of sitting where the rock dissolved.
         crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
+        // Throughput widens the aperture it passed through. This is what turns
+        // a preferential path into a conduit: more flow opens the rock, opener
+        // rock carries more flow. Precipitation is the brake.
+        crate::mineral::widen_aperture(
+            world,
+            to.0,
+            to.1,
+            amt as u8,
+            APERTURE_GROWTH_SCALE,
+            APERTURE_SEED_SALT,
+        );
     }
 }
 

@@ -141,9 +141,7 @@ pub fn mineral_total(world: &World) -> i64 {
     let mut solid = 0i64;
     for chunk in world.chunks.values() {
         for cell in &chunk.cells {
-            if crate::mineral::is_soluble_rock(cell.material) {
-                solid += crate::mineral::MINERAL_PER_CELL as i64;
-            }
+            solid += crate::mineral::cell_mineral(*cell) as i64;
         }
     }
     let load: i64 = world.dissolved.values().map(|&v| v as i64).sum();

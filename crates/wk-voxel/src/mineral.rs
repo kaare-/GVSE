@@ -35,6 +35,13 @@ pub const SOLUBILITY_PER_SAT: u16 = 4;
 /// Precipitate that fills an Air cell once fully occluded.
 pub const DEPOSIT_MATERIAL: MaterialId = MaterialId::Limestone;
 
+/// Pore steps one precipitation event may close (keeps cementing gradual).
+pub const PRECIPITATE_MAX_STEP: u16 = 8;
+
+/// Solubility that [`widen_aperture`]'s scale is expressed against (limestone).
+/// Other materials open proportionally slower.
+const LIMESTONE_SOLUBILITY_REF: f32 = 40.0;
+
 /// Dissolved load carried by the water in this cell.
 #[inline]
 pub fn dissolved_at(world: &World, gx: i32, gy: i32) -> u16 {
@@ -103,15 +110,106 @@ pub fn carry_with_water(
     add_dissolved(world, to.0, to.1, taken);
 }
 
-/// Emit the mineral freed by dissolving one cell of `material` into its water.
+/// Mineral still held as solid in this cell.
 ///
-/// The caller has already converted the cell; this is the bookkeeping that
-/// keeps the mineral total flat.
-pub fn emit_from_dissolved_rock(world: &mut World, gx: i32, gy: i32, material: MaterialId) {
-    if !is_soluble_rock(material) {
+/// Scales with how open the cell is: `pore` is the aperture, so a porous rock
+/// cell genuinely contains less rock than a dense one. Because
+/// [`MINERAL_PER_CELL`] is 255, **one pore step is exactly one load unit** —
+/// widening releases 1, occluding consumes 1, and the audit balances without
+/// any scaling factor.
+#[inline]
+pub fn cell_mineral(cell: Cell) -> u16 {
+    if !is_soluble_rock(cell.material) {
+        return 0;
+    }
+    MINERAL_PER_CELL - cell.pore as u16
+}
+
+/// Emit the mineral freed by dissolving a cell of soluble rock into its water.
+///
+/// Takes the cell as it was *before* conversion: a cell already widened toward
+/// full aperture has released most of its mineral incrementally and must not
+/// emit a second full cell's worth.
+pub fn emit_from_dissolved_rock(world: &mut World, gx: i32, gy: i32, was: Cell) {
+    let remaining = cell_mineral(was);
+    if remaining == 0 {
         return;
     }
-    add_dissolved(world, gx, gy, MINERAL_PER_CELL);
+    add_dissolved(world, gx, gy, remaining);
+}
+
+/// Widen a soluble cell's aperture by the water passing through it.
+///
+/// This is the self-amplifying half of vein formation: throughput opens the
+/// aperture, a wider aperture conducts and stores more, so more water comes
+/// through. `pore` *is* the aperture state — no separate flux counter — and it
+/// only ever increases here, so it can never strand saturation above a
+/// shrinking capacity. Precipitation ([`precipitate_at`]) is the brake.
+///
+/// Deliberately probabilistic and slow: geology, not a frame-scale effect.
+/// Deterministic given `(seed, position, tick)` like the rest of karst.
+///
+/// Returns true when the cell opened fully and dissolved away.
+pub fn widen_aperture(
+    world: &mut World,
+    gx: i32,
+    gy: i32,
+    throughput: u8,
+    scale: f32,
+    seed_salt: u64,
+) -> bool {
+    if throughput == 0 || scale <= 0.0 {
+        return false;
+    }
+    let gx = world.wrap_x(gx);
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return false;
+    };
+    if !is_soluble_rock(cell.material) || cell.pore == u8::MAX {
+        return false;
+    }
+    let solubility = MaterialRegistry::base_props(cell.material).solubility.max(1) as f32;
+    // `scale` is the odds for a *full* throughput through limestone, so the two
+    // multipliers are both fractions of a reference: how much water passed, and
+    // how soluble this rock is relative to limestone. Stone's solubility of 0
+    // floors to 1, making it ~40x slower than limestone rather than immune.
+    let p = scale
+        * (throughput as f32 / 255.0)
+        * (solubility / LIMESTONE_SOLUBILITY_REF);
+    if p <= 0.0 {
+        return false;
+    }
+    let roll = crate::rules::hash_prob(
+        world.seed.0,
+        gx.wrapping_mul(73_856_093).wrapping_add(gy),
+        world.tick,
+        seed_salt,
+    );
+    if roll >= p.min(1.0) {
+        return false;
+    }
+    // One pore step releases exactly one unit of mineral.
+    let mut next = cell;
+    next.pore = cell.pore.saturating_add(1);
+    if next.pore == u8::MAX {
+        // Fully open: the rock is gone. Its last unit goes with the rest.
+        let freed = cell_mineral(cell);
+        let keep = cell.sat;
+        world.set_cell(
+            gx,
+            gy,
+            Cell {
+                material: MaterialId::Air,
+                sat: keep,
+                ..cell
+            },
+        );
+        add_dissolved(world, gx, gy, freed);
+        return true;
+    }
+    world.set_cell(gx, gy, next);
+    add_dissolved(world, gx, gy, 1);
+    false
 }
 
 /// Rock that carries mineral mass for the audit.
@@ -171,9 +269,14 @@ pub fn precipitate_at(world: &mut World, gx: i32, gy: i32) -> u16 {
     }
 
     // Otherwise tighten this cell's own pore space (cements the aperture shut).
+    // One unit of load closes exactly one pore step — the reverse of
+    // `widen_aperture`, which is what lets a conduit seal again.
     if cell.material != MaterialId::Air && cell.pore > 0 {
-        let step = ((excess / 16).max(1)).min(cell.pore as u16) as u8;
-        let used = take_dissolved(world, gx, gy, step as u16 * 16);
+        let step = excess.min(cell.pore as u16).min(PRECIPITATE_MAX_STEP) as u8;
+        if step == 0 {
+            return 0;
+        }
+        let used = take_dissolved(world, gx, gy, step as u16);
         let mut next = cell;
         next.pore = cell.pore.saturating_sub(step);
         // Shrinking pore can drop capacity below current sat. Shed the excess
@@ -327,10 +430,108 @@ mod tests {
     #[test]
     fn dissolving_rock_emits_its_mineral() {
         let mut w = bed(5);
-        w.set_cell(4, 1, Cell::solid(MaterialId::Limestone));
-        // Caller converts, then reports.
+        let rock = Cell::solid(MaterialId::Limestone);
+        w.set_cell(4, 1, rock);
+        // Caller converts, then reports the cell as it was.
         w.set_cell(4, 1, Cell::air());
-        emit_from_dissolved_rock(&mut w, 4, 1, MaterialId::Limestone);
-        assert_eq!(dissolved_at(&w, 4, 1), MINERAL_PER_CELL);
+        emit_from_dissolved_rock(&mut w, 4, 1, rock);
+        assert_eq!(dissolved_at(&w, 4, 1), cell_mineral(rock));
+    }
+
+    #[test]
+    fn a_widened_cell_does_not_emit_a_second_full_load() {
+        // A cell most of the way to full aperture has already released its
+        // mineral one step at a time; dissolving it must only free the rest.
+        let mut w = bed(6);
+        let mut worn = Cell::solid(MaterialId::Limestone);
+        worn.pore = 200;
+        w.set_cell(4, 1, worn);
+        w.set_cell(4, 1, Cell::air());
+        emit_from_dissolved_rock(&mut w, 4, 1, worn);
+        assert_eq!(
+            dissolved_at(&w, 4, 1),
+            MINERAL_PER_CELL - 200,
+            "only the mineral still held may be released"
+        );
+    }
+
+    #[test]
+    fn one_pore_step_is_one_mineral_unit() {
+        // The identity the whole ledger rests on: widening by a step releases
+        // exactly one unit, so total mineral is unchanged.
+        let mut w = bed(7);
+        let mut rock = Cell::solid(MaterialId::Limestone);
+        rock.pore = 100;
+        rock.sat = Sat(30);
+        w.set_cell(4, 1, rock);
+        let before = crate::audit::mineral_total(&w);
+        // Force the roll to pass with a certainty-scale call.
+        let opened = widen_aperture(&mut w, 4, 1, 255, 1000.0, 1);
+        assert!(!opened, "one step should not fully dissolve a fresh cell");
+        assert_eq!(
+            w.get_cell(4, 1).unwrap().pore,
+            101,
+            "aperture should open by one step"
+        );
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "widening must conserve mineral: rock lost 1, load gained 1"
+        );
+    }
+
+    #[test]
+    fn full_aperture_dissolves_the_cell_and_conserves() {
+        let mut w = bed(8);
+        let mut rock = Cell::solid(MaterialId::Limestone);
+        rock.pore = 253;
+        w.set_cell(4, 1, rock);
+        let before = crate::audit::mineral_total(&w);
+        let mut opened = false;
+        for _ in 0..8 {
+            if widen_aperture(&mut w, 4, 1, 255, 1000.0, 2) {
+                opened = true;
+                break;
+            }
+            w.tick += 1;
+        }
+        assert!(opened, "a nearly-open cell should dissolve away");
+        assert_eq!(
+            w.get_cell(4, 1).unwrap().material,
+            MaterialId::Air,
+            "fully opened rock becomes void"
+        );
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "dissolving the last of a cell must conserve mineral"
+        );
+    }
+
+    #[test]
+    fn precipitation_closes_the_aperture_it_opened() {
+        // Deposition is the brake on aperture growth: load cements pore shut,
+        // one unit per step, and the ledger stays flat.
+        let mut w = bed(9);
+        let mut rock = Cell::solid(MaterialId::Limestone);
+        rock.pore = 120;
+        rock.sat = Sat(4); // little water, so the load is over the ceiling
+        w.set_cell(4, 1, rock);
+        add_dissolved(&mut w, 4, 1, 64);
+        let before = crate::audit::mineral_total(&w);
+        let used = precipitate_at(&mut w, 4, 1);
+        assert!(used > 0, "excess load should cement into the pore space");
+        let after = w.get_cell(4, 1).unwrap();
+        assert!(
+            after.pore < 120,
+            "precipitation should tighten the aperture (pore {} -> {})",
+            120,
+            after.pore
+        );
+        assert_eq!(
+            crate::audit::mineral_total(&w),
+            before,
+            "precipitation must conserve mineral"
+        );
     }
 }

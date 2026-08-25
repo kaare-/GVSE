@@ -167,6 +167,36 @@ mineral as load.
 - **The feedback loop is the point.** More flow → more open → more flow. That is
   what turns a diffuse front into a conduit. Feature B is its brake.
 
+**Landed** as `mineral::widen_aperture`, called from the seepage apply loop on
+the receiving cell. `APERTURE_GROWTH_SCALE` (2.0) is the odds for a *full*
+throughput through limestone; the roll scales with how much water moved and with
+solubility relative to limestone, so stone opens ~40× slower. Deterministic given
+`(seed, position, tick)` like the rest of karst.
+
+### The mass identity this rests on
+
+`MINERAL_PER_CELL` is 255 and `pore` is a `u8`, so **one pore step is exactly one
+unit of mineral**. That makes the whole ledger exact with no scaling factor:
+
+- Widening by a step releases 1 unit of load; a rock cell's remaining mineral is
+  `255 - pore` (`mineral::cell_mineral`).
+- Occluding by a step consumes 1 unit.
+- Dissolution emits only `255 - pore`, not a full cell — a cell already widened
+  has released most of its mineral incrementally, and emitting a full load would
+  mint mineral. This is why `emit_from_dissolved_rock` takes the pre-dissolve
+  *cell* rather than just its material.
+
+It also means a porous rock cell genuinely contains less rock than a dense one,
+which is physically right and applies to worldgen porosity too, not just to
+dissolution.
+
+Regressions: `one_pore_step_is_one_mineral_unit`,
+`a_widened_cell_does_not_emit_a_second_full_load`,
+`full_aperture_dissolves_the_cell_and_conserves`,
+`precipitation_closes_the_aperture_it_opened`, and
+`throughput_widens_a_conduit_and_conserves_mineral` (a fed limestone shaft opens
+while an identical unfed one does not).
+
 Acceptance: a scenario where two adjacent columns start with slightly different
 pore values and, after a long soak, one has become a visibly faster conduit
 while the other has barely changed.
