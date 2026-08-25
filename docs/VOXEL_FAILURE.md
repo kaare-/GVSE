@@ -230,6 +230,16 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 - **Mobile mark** — fallen / tipped / slid rock sets `CellFlags::MOBILE_ROCK`.
   Flood-fill only merges same mobility class, so a boulder cannot glue into
   unmarked painted strata or gain mass by contact.
+- **Cave roofs bridge** — landscape detach uses `column_supported`, a strictly
+  *vertical* load-path test, so every cave ceiling read as hanging and a
+  ≥200-cell mass detached and fell: caves stopped surviving. A roof over a
+  cavity no wider than `ROOF_BRIDGE_MAX_SPAN` now counts as supported.
+  Compressive span is F1's job (`roof_span_limit_cells`, which allows far
+  more — 24–36 cells of Stone); the two rules are not yet reconciled because
+  `carved_arch_detaches_span_keeps_legs` and
+  `lateral_weld_to_hill_is_still_ungrounded_when_carved_under` deliberately
+  encode "a carved arch is hanging and must fall". Guard:
+  `narrow_cave_roof_is_not_a_hanging_slab`.
 - **F2d — Landscape rigid entities** — only **≥200** competent rock cells
   detach as a temporary `LandscapeBody` and translate straight down. Boulder-
   sized and mid chunks stay on F2c competent CA tip/roll so rocks tumble
