@@ -6941,7 +6941,10 @@ fn porous_hill_sat_crosses_chunk_seam_under_runoff() {
         ..crate::failure::FailureConfig::default()
     };
     let perf = PerfConfig::default();
-    for _ in 0..400 {
+    // Percolation inside rock is cadence-gated ([`SEEPAGE_EVERY`]) — it is a
+    // geological-timescale process, not a per-frame one. Budget ticks for
+    // that, then assert the profile still saturates (no permanent shelf).
+    for _ in 0..1600 {
         tick_with_configs(&mut w, &perf, &failure);
     }
     let cap = water_capacity(MaterialId::Stone);

@@ -522,6 +522,10 @@ fn print_physics_table(phys: &PhysicsTimings, n: u64) {
         "  settle grains        {:>8.3} ms/tick",
         ms_per(phys.settle, n)
     );
+    eprintln!(
+        "  rock bodies          {:>8.3} ms/tick",
+        ms_per(phys.bodies, n)
+    );
     eprintln!("  punch rafts          {:>8.3} ms/tick", ms_per(phys.punch, n));
     eprintln!(
         "  rise+soak            {:>8.3} ms/tick",

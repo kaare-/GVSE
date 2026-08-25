@@ -339,12 +339,32 @@ pub fn apply_seepage(world: &mut World) {
 /// Single compute-then-apply scan (same snapshot rule as spill / flow —
 /// checkerboard is not required for a read-only accumulate).
 pub fn apply_seepage_regions(world: &mut World, active: &[ActiveChunk]) {
+    apply_seepage_regions_ex(world, active, false)
+}
+
+/// Seepage restricted to the **surface contact** only (`contact_only`).
+///
+/// Percolation *inside* materials is a geological-timescale process and is
+/// cadence-gated, but the interface between fast surface water and slow
+/// groundwater must stay correct every tick or the top layers show the
+/// wrong saturation (and so the wrong deposition). This runs the
+/// `Air ↔ porous solid` faces — infiltration and pore weep — and skips
+/// peer `pore ↔ pore` conduction, which is the deep, slow part.
+pub fn apply_seepage_contact_regions(world: &mut World, active: &[ActiveChunk]) {
+    apply_seepage_regions_ex(world, active, true)
+}
+
+pub fn apply_seepage_regions_ex(
+    world: &mut World,
+    active: &[ActiveChunk],
+    contact_only: bool,
+) {
     if active.is_empty() {
         return;
     }
     // (from, to, amt) with amt > 0.
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
-    accumulate_seepage_xfers(world, active, &mut xfers);
+    accumulate_seepage_xfers_ex(world, active, &mut xfers, contact_only);
 
     // Apply in a stable order. Each transfer re-reads live sat so a
     // source drained by an earlier xfer simply sends less — every
@@ -389,10 +409,11 @@ pub fn apply_seepage_regions(world: &mut World, active: &[ActiveChunk]) {
     }
 }
 
-fn accumulate_seepage_xfers(
+fn accumulate_seepage_xfers_ex(
     world: &World,
     active: &[ActiveChunk],
     xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
+    contact_only: bool,
 ) {
     const OFFSETS: [(i32, i32); 2] = [(1, 0), (0, 1)];
     let hydro = world.hydro;
@@ -439,6 +460,11 @@ fn accumulate_seepage_xfers(
                     };
                     let b_solid = is_porous_solid_with(b.material, &hydro);
                     if !a_solid && !b_solid {
+                        continue;
+                    }
+                    // Contact pass: only the surface interface, not the slow
+                    // percolation between two buried pores.
+                    if contact_only && a_solid && b_solid {
                         continue;
                     }
                     let cap_b = water_capacity_with(b.material, &hydro);

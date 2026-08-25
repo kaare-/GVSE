@@ -123,6 +123,16 @@ pub struct World {
     /// every tick. Derived state — never saved.
     #[serde(skip, default)]
     pub competent_settled: FxHashMap<ChunkCoord, crate::support_map::ChunkMask>,
+    /// Cells the **rock body pass** should look at this tick.
+    ///
+    /// The body pass used to be handed `plan_active` — the whole water halo
+    /// (~69k cells on the stress world) — so it re-flooded settled ridges
+    /// every tick. Water `sat` changes cannot destabilise rock; only
+    /// solidity changes can, and those already call
+    /// [`Self::competent_wake_around`]. So rock keeps its own wake list,
+    /// fed by solidity changes, bodies in flight, and the cadence wakes.
+    #[serde(skip, default)]
+    pub competent_wake: Vec<(i32, i32)>,
     /// Cells a competent body moved into last tick.
     ///
     /// A body in flight marks its cells dirty, but the flow substep loop
@@ -156,6 +166,7 @@ impl World {
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
             competent_settled: FxHashMap::default(),
+            competent_wake: Vec::new(),
             competent_moved_cells: Vec::new(),
             chunk_cache_id: ChunkCacheId::default(),
         }
@@ -316,11 +327,20 @@ impl World {
     #[inline]
     pub fn competent_wake_around(&mut self, gx: i32, gy: i32) {
         for (dx, dy) in [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)] {
-            let (coord, lx, ly) = Self::split(self.wrap_x(gx + dx), gy + dy);
+            let wx = self.wrap_x(gx + dx);
+            let wy = gy + dy;
+            let (coord, lx, ly) = Self::split(wx, wy);
             if let Some(m) = self.competent_settled.get_mut(&coord) {
                 m.unset(lx, ly);
             }
+            self.competent_wake.push((wx, wy));
         }
+    }
+
+    /// Queue a cell for the next rock body pass.
+    #[inline]
+    pub fn competent_wake_push(&mut self, gx: i32, gy: i32) {
+        self.competent_wake.push((self.wrap_x(gx), gy));
     }
 
     /// Dirty a cell without rewriting it (wake quiescent physics).
