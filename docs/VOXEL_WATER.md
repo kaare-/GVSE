@@ -86,6 +86,10 @@ Head-driven, permeability-capped soak on **cardinal** edges (`+x`, `+y` owned on
 | Air ↔ Air | no (surface flow owns that) |
 
 Rate: `((permeability * 32) / 255).max(1)` when permeability &gt; 0, else 0.
+Permeability and porosity are currently **one fixed value per material** —
+two neighbouring limestone cells are hydrologically identical. Plan to vary
+them per cell within material ranges:
+[`VOXEL_PORE_VARIATION.md`](VOXEL_PORE_VARIATION.md).
 Fully saturated solid→Air faces get a ×3 spring boost (capped at 16) so cliff pores weep visibly.
 
 This is what wets a dry beach **sideways** from a puddle, equalises pore sat between sand and clay/stone, and lets saturated hillsides drip into open Air. Vertical fill under a lake is dominated by **gravity**, not seepage.
