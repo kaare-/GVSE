@@ -761,6 +761,13 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
     let mut touches: Vec<(i32, i32)> = Vec::new();
     const DIRS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
     for (&coord, chunk) in &world.chunks {
+        // A chunk that has never held a wet permeable solid has no donor face,
+        // so the whole 64×64 scan below can only fail. Every other wake pass
+        // filters on a sticky flag; this one walked every loaded cell (~786 k
+        // on the stress world) on each seepage cadence.
+        if !chunk.has_wet_pores {
+            continue;
+        }
         let base_gx = coord.cx * cw;
         let base_gy = coord.cy * ch;
         for y in 0..CHUNK_CELLS_H {
