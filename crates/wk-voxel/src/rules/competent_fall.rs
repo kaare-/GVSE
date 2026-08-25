@@ -19,7 +19,7 @@ use wk_material::MaterialId;
 // untrusted input, so they use the fast hasher rather than SipHash.
 use crate::fasthash::{FxHashMap as HashMap, FxHashSet as HashSet};
 use crate::displace::{
-  deposit_free_water, deposit_shifted_cells, take_free_water, take_soft_cell,
+  deposit_free_water, deposit_shifted_cells, pore_water_of, take_free_water, take_soft_cell,
 };
 
 use crate::active::ActiveChunk;
@@ -2007,6 +2007,8 @@ fn can_pivot_roll(world: &World, comp: &Component, pivot: (i32, i32), dx: i32) -
 
 /// Push soft bed out of a roll destination into nearby air, else crush it.
 fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, i32, Cell)>) {
+  #[cfg(debug_assertions)]
+  let mass_before = crate::audit::mass_audit_enabled().then(|| crate::audit::sat_totals(world));
   let src_set: HashSet<(i32, i32)> = sources.iter().copied().collect();
   let target_set: HashSet<(i32, i32)> = moves
     .iter()
@@ -2033,6 +2035,9 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
         }
         displaced_water += take_free_water(world, *tx, *ty);
       } else if is_competent_rock(dst.material) && can_crush_spec(world, *tx, *ty, mover_n) {
+        // The moving body replaces this crushed speck. Its solid mass becomes
+        // debris conceptually, but its pore water must be displaced first.
+        displaced_water += pore_water_of(&dst);
         crush_spec_at(world, *tx, *ty);
       }
     }
@@ -2051,20 +2056,29 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
     world.set_cell(tx, ty, cell);
     world.touch_dirty(tx, ty);
   }
+  // Vacated cells first (the volume the body used to fill), then outward.
+  let vacated: Vec<(i32, i32)> = sources
+    .iter()
+    .map(|&(x, y)| (world.wrap_x(x), y))
+    .filter(|p| !target_set.contains(p))
+    .collect();
   if displaced_water > 0 || !shifted.is_empty() {
-    // Vacated cells first (the volume the body used to fill), then outward.
-    let vacated: Vec<(i32, i32)> = sources
-      .iter()
-      .map(|&(x, y)| (world.wrap_x(x), y))
-      .filter(|p| !target_set.contains(p))
-      .collect();
     // Grain before water: the solid needs a whole cell, water only needs room.
     if !shifted.is_empty() {
       let _ = deposit_shifted_cells(world, shifted, &vacated, &target_set);
     }
     if displaced_water > 0 {
-      let _ = deposit_free_water(world, displaced_water, &vacated, &target_set);
+      let leftover = deposit_free_water(world, displaced_water, &vacated, &target_set);
+      debug_assert_eq!(
+        leftover, 0,
+        "competent roll could not redeposit {leftover}/{displaced_water} water; vacated={vacated:?}"
+      );
     }
+  }
+  #[cfg(debug_assertions)]
+  if let Some(before) = mass_before {
+    let after = crate::audit::sat_totals(world);
+    crate::audit::assert_cell_sat_conserved(&before, &after, "write_roll_cells");
   }
 }
 

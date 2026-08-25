@@ -389,6 +389,18 @@ fn tick_with_life_inner(
     } else {
         None
     };
+    #[cfg(debug_assertions)]
+    let mut mass_stage = mass_before;
+    macro_rules! mass_checkpoint {
+        ($name:literal) => {
+            #[cfg(debug_assertions)]
+            if let Some(before) = mass_stage {
+                let after = crate::audit::sat_totals(world);
+                crate::audit::assert_cell_sat_conserved(&before, &after, $name);
+                mass_stage = Some(after);
+            }
+        };
+    }
 
     let profile = timings.is_some();
     let mut local = PhysicsTimings::default();
@@ -476,6 +488,7 @@ fn tick_with_life_inner(
             }
         }
     }
+    mass_checkpoint!("surface flow");
 
     // Interactive path: throughflow + confined once per tick (not every
     // substep) — rainy beaches paid Priority-4 deep walks and confined
@@ -560,6 +573,7 @@ fn tick_with_life_inner(
             local.seepage += t0.elapsed();
         }
     }
+    mass_checkpoint!("seepage");
 
     // Re-wake unsupported grains and steep cliff faces. Cadence-gated:
     // full sticky-loose scan every 16 ticks; dirty-halo wake every 4.
@@ -615,6 +629,7 @@ fn tick_with_life_inner(
             local.rise_soak += t0.elapsed();
         }
     }
+    mass_checkpoint!("grain rise/soak");
 
     if !grain_active.is_empty() {
         // Deep settle for sky freefall / mid-air paint, and for full-feel
@@ -650,6 +665,7 @@ fn tick_with_life_inner(
             }
         }
     }
+    mass_checkpoint!("grain settle");
 
     // Dense cargo cannot ride floating Organic/Snow/Ice. Skip the full
     // loose punch scan when wake saw no raft cargo (demo: 0/200 hits but
@@ -686,6 +702,7 @@ fn tick_with_life_inner(
             }
         }
     }
+    mass_checkpoint!("grain punch");
 
     // Competent rock bodies: fall, impact shatter, COM tip.
     // Floating wake is mandatory — F1 defers competent rock to this pass, so
@@ -732,6 +749,7 @@ fn tick_with_life_inner(
             }
         }
     }
+    mass_checkpoint!("competent bodies");
 
     // Geotech: roof / overhang collapse after grain has seated.
     // Cadence-gated — full-grid ~1.3 ms/call on Super-Server; every 4
@@ -747,6 +765,7 @@ fn tick_with_life_inner(
     } else {
         crate::failure::FailureStats::default()
     };
+    mass_checkpoint!("geotech failure");
 
     // Reset network sym "last" before field + later organism plant trade
     // share one inspector window (organism step clears plant lasts only).
@@ -763,6 +782,9 @@ fn tick_with_life_inner(
             local.mycelium += t0.elapsed();
         }
     }
+    mass_checkpoint!("mycelium");
+    #[cfg(debug_assertions)]
+    let _ = mass_stage;
 
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {

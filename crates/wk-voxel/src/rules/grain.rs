@@ -2270,10 +2270,19 @@ fn write_repose_swap(
         let cap = water_capacity_cell(src, hydro);
         let room = cap.saturating_sub(src.sat.0);
         let into_pore = dest.sat.0.min(room);
+        let leftover_free = dest.sat.0.saturating_sub(into_pore);
         let mut placed = src;
         placed.sat = Sat(src.sat.0.saturating_add(into_pore));
         if let Some(fill) =
-            steal_standing_water_neighbor(ptrs, wrap_width, src_x, src_y, dest_x, dest_y)
+            steal_standing_water_neighbor(
+                ptrs,
+                wrap_width,
+                src_x,
+                src_y,
+                dest_x,
+                dest_y,
+                leftover_free,
+            )
         {
             unsafe {
                 parallel::set_cell(ptrs, wrap_width, dest_x, dest_y, placed);
@@ -2299,6 +2308,8 @@ fn write_repose_swap(
 }
 
 /// Move standing water from an adjacent Air cell into a fill cell.
+/// `extra_sat` is free water left in the grain's destination after its
+/// pore fills; overflow stays in the donor instead of being deleted.
 /// Prefer an upward donor first so dry bubbles rise into open water
 /// instead of sliding sideways along a sand face (perpetual cycling).
 /// Then prefer fuller cells. Leaves the donor empty. Skips `dest`.
@@ -2309,6 +2320,7 @@ fn steal_standing_water_neighbor(
     src_y: i32,
     dest_x: i32,
     dest_y: i32,
+    extra_sat: u8,
 ) -> Option<Cell> {
     // Rank: upward first, then fuller sat, then closer to vertical.
     let mut chosen: Option<(i32, i32, u8)> = None;
@@ -2332,12 +2344,17 @@ fn steal_standing_water_neighbor(
         }
     }
     let (nx, ny, sat) = chosen?;
+    let total = sat as u16 + extra_sat as u16;
+    let fill_sat = total.min(u8::MAX as u16) as u8;
+    let donor_remainder = total.saturating_sub(u8::MAX as u16) as u8;
     unsafe {
-        parallel::set_cell(ptrs, wrap_width, nx, ny, Cell::air());
+        let mut donor = Cell::air();
+        donor.sat = Sat(donor_remainder);
+        parallel::set_cell(ptrs, wrap_width, nx, ny, donor);
     }
     Some(Cell {
         material: MaterialId::Air,
-        sat: Sat(sat),
+        sat: Sat(fill_sat),
         flags: CellFlags::empty(),
         _pad: 0,
         pore: 128,
