@@ -43,6 +43,23 @@ counters!(
   components,
   cargo_calls,
   cargo_cells,
+  // Why the pass ran at all, and what each component decided. A settled
+  // world should drive all of these toward zero; anything that stays high
+  // is a body being re-evaluated forever instead of going to sleep.
+  wake_cells,
+  region_cells,
+  // Which source refilled the wake list.
+  wake_from_solidity,
+  wake_from_moved,
+  wake_from_cadence_float,
+  wake_from_cadence_seed,
+  comp_slept,
+  comp_floating,
+  comp_unsupported_stuck,
+  comp_fell,
+  comp_fall_refused,
+  comp_rolled,
+  comp_shattered,
 );
 
 #[inline]

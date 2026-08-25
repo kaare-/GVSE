@@ -324,15 +324,31 @@ impl World {
     }
 
     /// Wake sleeping competent rock at and around a cell whose support changed.
+    ///
+    /// Only positions that actually hold competent rock are queued. A solidity
+    /// change with no rock beside it — a sand grain settling mid-dune, litter
+    /// landing on a beach — cannot destabilise a body, and grains move
+    /// constantly. Queueing those anyway kept the body pass scanning settled
+    /// terrain every tick: the wake list becomes a per-chunk bounding rect, so
+    /// two unrelated grain moves in one chunk inflated the seed scan to the
+    /// whole chunk (~18.6 k seed candidates/tick on a world where no rock was
+    /// moving at all).
     #[inline]
     pub fn competent_wake_around(&mut self, gx: i32, gy: i32) {
         for (dx, dy) in [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)] {
             let wx = self.wrap_x(gx + dx);
             let wy = gy + dy;
+            let is_rock = self
+                .get_cell(wx, wy)
+                .is_some_and(|c| crate::cell::is_competent_rock(c.material));
+            if !is_rock {
+                continue;
+            }
             let (coord, lx, ly) = Self::split(wx, wy);
             if let Some(m) = self.competent_settled.get_mut(&coord) {
                 m.unset(lx, ly);
             }
+            crate::competent_probe::bump(&crate::competent_probe::wake_from_solidity);
             self.competent_wake.push((wx, wy));
         }
     }

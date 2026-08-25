@@ -896,12 +896,33 @@ fn push_component_pieces(
   flood_seated: bool,
   settle: &mut Vec<(i32, i32)>,
 ) {
+  // A *seated* piece rejected below is rejected on stable geometry: too massive
+  // to be dynamic, bedrock-rooted, or too buried to have a free face. None of
+  // that changes until a neighbouring cell is written, which already wakes the
+  // cells ([`World::competent_wake_around`]). Sleeping them is what stops the
+  // cadence wake from re-flooding the same static strata forever — that treadmill
+  // was ~163 wake cells and ~4.7 k re-flooded cells per tick on a quiet world.
+  //
+  // Hanging pieces are never slept here: they are airborne and must retry.
+  let mut sleep_piece = |piece: &Vec<(i32, i32, Cell)>, settle: &mut Vec<(i32, i32)>| {
+    if hanging {
+      return;
+    }
+    for &(x, y, _) in piece {
+      settle.push((x, y));
+    }
+  };
   for piece in pieces {
-    if piece.len() > MAX_DYNAMIC_BODY_CELLS || piece.is_empty() {
+    if piece.is_empty() {
+      continue;
+    }
+    if piece.len() > MAX_DYNAMIC_BODY_CELLS {
+      sleep_piece(&piece, settle);
       continue;
     }
     let set: HashSet<_> = piece.iter().map(|(x, y, _)| (*x, *y)).collect();
     if !hanging && is_bedrock_rooted_pillar(world, &set) {
+      sleep_piece(&piece, settle);
       continue;
     }
     // Intact hills are tag 0. A 2-pass morphological open dices them into
@@ -941,9 +962,11 @@ fn push_component_pieces(
         .count()
     };
     if exposed == 0 {
+      sleep_piece(&piece, settle);
       continue;
     }
     if !hanging && piece.len() > 32 && exposed * 5 < piece.len() {
+      sleep_piece(&piece, settle);
       continue;
     }
     probe::bump(&probe::components);
@@ -2006,7 +2029,17 @@ fn can_pivot_roll(world: &World, comp: &Component, pivot: (i32, i32), dx: i32) -
 }
 
 /// Push soft bed out of a roll destination into nearby air, else crush it.
-fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, i32, Cell)>) {
+fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], mut moves: Vec<(i32, i32, Cell)>) {
+  // `moves` carries cells captured when `build_components` ran. Another body
+  // moving earlier in the same pass can have crushed or drained those cells
+  // since, so writing the snapshot's `sat` back would resurrect water that no
+  // longer exists. A body carries the water it holds *now*. `sources[i]`
+  // corresponds to `moves[i]` in every caller.
+  for (i, &(sx, sy)) in sources.iter().enumerate() {
+    if let (Some(live), Some(mv)) = (world.get_cell(sx, sy), moves.get_mut(i)) {
+      mv.2.sat = live.sat;
+    }
+  }
   #[cfg(debug_assertions)]
   let mass_before = crate::audit::mass_audit_enabled().then(|| crate::audit::sat_totals(world));
   let src_set: HashSet<(i32, i32)> = sources.iter().copied().collect();
@@ -2035,10 +2068,18 @@ fn write_roll_cells(world: &mut World, sources: &[(i32, i32)], moves: Vec<(i32, 
         }
         displaced_water += take_free_water(world, *tx, *ty);
       } else if is_competent_rock(dst.material) && can_crush_spec(world, *tx, *ty, mover_n) {
-        // The moving body replaces this crushed speck. Its solid mass becomes
-        // debris conceptually, but its pore water must be displaced first.
-        displaced_water += pore_water_of(&dst);
         crush_spec_at(world, *tx, *ty);
+        // The body is about to overwrite this cell, so bank its pore water for
+        // redeposit and take it out of the cell in the same step — leaving it
+        // in place would either destroy it on the overwrite or, once banked,
+        // duplicate it.
+        if let Some(mut crushed) = world.get_cell(*tx, *ty) {
+          if crushed.sat.0 > 0 {
+            displaced_water += pore_water_of(&crushed);
+            crushed.sat = Sat(0);
+            world.set_cell(*tx, *ty, crushed);
+          }
+        }
       }
     }
   }
@@ -2410,6 +2451,7 @@ pub fn wake_competent_bodies(world: &mut World, coords: &[ChunkCoord]) {
       }
     }
   }
+  probe::add(&probe::wake_from_cadence_seed, touches.len() as u64);
   for (gx, gy) in touches {
     world.touch_dirty(gx, gy);
     world.competent_wake_push(gx, gy);
@@ -2452,6 +2494,7 @@ pub fn wake_floating_competent(world: &mut World) {
       }
     }
   }
+  probe::add(&probe::wake_from_cadence_float, touches.len() as u64);
   for (gx, gy) in touches {
     world.touch_dirty(gx, gy);
     world.competent_wake_push(gx, gy);
@@ -2469,6 +2512,7 @@ pub fn wake_moved_competent(world: &mut World) {
     return;
   }
   let cells = std::mem::take(&mut world.competent_moved_cells);
+  probe::add(&probe::wake_from_moved, cells.len() as u64);
   for (gx, gy) in cells {
     // Dirty only — do **not** clear sleep flags. A body that came to rest
     // must stay asleep, or every landing re-evaluates its ridge forever.
@@ -2503,6 +2547,19 @@ fn region_has_competent(world: &World, ac: &ActiveChunk) -> bool {
 
 /// Inflate dirty rects downward for free-fall and sideways for roll — not full chunks.
 fn expand_competent_regions(active: &[ActiveChunk], drop_budget: i32) -> Vec<ActiveChunk> {
+  expand_competent_regions_ex(active, drop_budget, true)
+}
+
+/// Pad seed rects by the drop budget.
+///
+/// `union_per_chunk` collapses everything in a chunk into one rect — right for
+/// a whole-world or dirty-rect driven scan, wrong for the precise wake list,
+/// where it would re-inflate carefully bucketed tiles back to chunk size.
+fn expand_competent_regions_ex(
+  active: &[ActiveChunk],
+  drop_budget: i32,
+  union_per_chunk: bool,
+) -> Vec<ActiveChunk> {
   if active.is_empty() {
     return Vec::new();
   }
@@ -2510,8 +2567,9 @@ fn expand_competent_regions(active: &[ActiveChunk], drop_budget: i32) -> Vec<Act
   let h = CHUNK_CELLS_H as i32;
   let pad_x = 2_i32;
   let drop = drop_budget.max(4);
+  let mut loose: Vec<ActiveChunk> = Vec::new();
   let mut map: HashMap<ChunkCoord, Rect> = HashMap::default();
-  let absorb = |map: &mut HashMap<ChunkCoord, Rect>, coord: ChunkCoord, x0: i32, y0: i32, x1: i32, y1: i32| {
+  let mut absorb = |map: &mut HashMap<ChunkCoord, Rect>, coord: ChunkCoord, x0: i32, y0: i32, x1: i32, y1: i32| {
     if x1 < 0 || y1 < 0 || x0 >= w || y0 >= h {
       return;
     }
@@ -2519,17 +2577,22 @@ fn expand_competent_regions(active: &[ActiveChunk], drop_budget: i32) -> Vec<Act
     let ry0 = y0.clamp(0, h - 1) as u8;
     let rx1 = x1.clamp(0, w - 1) as u8;
     let ry1 = y1.clamp(0, h - 1) as u8;
+    let rect = Rect {
+      x0: rx0,
+      y0: ry0,
+      x1: rx1,
+      y1: ry1,
+    };
+    if !union_per_chunk {
+      loose.push(ActiveChunk { coord, rect });
+      return;
+    }
     map.entry(coord)
       .and_modify(|r| {
         r.expand_to_include(rx0, ry0);
         r.expand_to_include(rx1, ry1);
       })
-      .or_insert(Rect {
-        x0: rx0,
-        y0: ry0,
-        x1: rx1,
-        y1: ry1,
-      });
+      .or_insert(rect);
   };
   for ac in active {
     let x0 = ac.rect.x0 as i32 - pad_x;
@@ -2594,16 +2657,32 @@ fn expand_competent_regions(active: &[ActiveChunk], drop_budget: i32) -> Vec<Act
     .into_iter()
     .map(|(coord, rect)| ActiveChunk { coord, rect })
     .collect();
+  out.extend(loose);
   out.sort_by(|a, b| {
     a.coord
       .cy
       .cmp(&b.coord.cy)
       .then(a.coord.cx.cmp(&b.coord.cx))
+      .then(a.rect.y0.cmp(&b.rect.y0))
+      .then(a.rect.x0.cmp(&b.rect.x0))
   });
   out
 }
 
 /// Expand the active scan set to cover a set of world cells (moved bodies).
+/// Wake cells are bucketed into tiles this wide before becoming scan rects.
+///
+/// One bounding rect per chunk is far too coarse: two unrelated wake cells in
+/// opposite corners of a chunk produced a rect covering all 4096 cells. On a
+/// quiet world where grains creep next to rock that turned ~180 exact wake
+/// cells into ~7.1 k scanned cells and ~12 k seed candidates every tick.
+/// Bucketing keeps a local change local while still merging dense clusters.
+const WAKE_TILE: i32 = 8;
+
+/// Occupied tiles past this many in one chunk fall back to a single union rect
+/// (a genuine chunk-wide rockslide should not emit hundreds of rects).
+const WAKE_TILES_BEFORE_UNION: usize = 12;
+
 fn expand_regions_to_cells(
   world: &World,
   cells: &[(i32, i32)],
@@ -2614,15 +2693,17 @@ fn expand_regions_to_cells(
   }
   let w = CHUNK_CELLS_W as i32;
   let h = CHUNK_CELLS_H as i32;
-  let mut by_chunk: HashMap<ChunkCoord, Rect> = HashMap::default();
+  // (chunk, tile) → rect covering just the wake cells in that tile.
+  let mut by_tile: HashMap<(ChunkCoord, i32, i32), Rect> = HashMap::default();
   for &(gx, gy) in cells {
     let cx = gx.div_euclid(w);
     let cy = gy.div_euclid(h);
     let lx = gx.rem_euclid(w) as u8;
     let ly = gy.rem_euclid(h) as u8;
     let coord = ChunkCoord::new(cx, cy);
-    by_chunk
-      .entry(coord)
+    let key = (coord, lx as i32 / WAKE_TILE, ly as i32 / WAKE_TILE);
+    by_tile
+      .entry(key)
       .and_modify(|r| {
         r.expand_to_include(lx, ly);
       })
@@ -2633,11 +2714,40 @@ fn expand_regions_to_cells(
         y1: ly,
       });
   }
-  let seeds: Vec<ActiveChunk> = by_chunk
-    .into_iter()
-    .map(|(coord, rect)| ActiveChunk { coord, rect })
-    .collect();
-  expand_competent_regions(&seeds, drop_budget)
+  // Collapse chunks that ended up with many scattered tiles.
+  let mut tiles_per_chunk: HashMap<ChunkCoord, usize> = HashMap::default();
+  for (coord, _, _) in by_tile.keys() {
+    *tiles_per_chunk.entry(*coord).or_insert(0) += 1;
+  }
+  let mut seeds: Vec<ActiveChunk> = Vec::new();
+  let mut unioned: HashMap<ChunkCoord, Rect> = HashMap::default();
+  for ((coord, _, _), rect) in by_tile {
+    if tiles_per_chunk.get(&coord).copied().unwrap_or(0) > WAKE_TILES_BEFORE_UNION {
+      unioned
+        .entry(coord)
+        .and_modify(|r| {
+          r.expand_to_include(rect.x0, rect.y0);
+          r.expand_to_include(rect.x1, rect.y1);
+        })
+        .or_insert(rect);
+      continue;
+    }
+    seeds.push(ActiveChunk { coord, rect });
+  }
+  seeds.extend(
+    unioned
+      .into_iter()
+      .map(|(coord, rect)| ActiveChunk { coord, rect }),
+  );
+  seeds.sort_by(|a, b| {
+    a.coord
+      .cy
+      .cmp(&b.coord.cy)
+      .then(a.coord.cx.cmp(&b.coord.cx))
+      .then(a.rect.y0.cmp(&b.rect.y0))
+      .then(a.rect.x0.cmp(&b.rect.x0))
+  });
+  expand_competent_regions_ex(&seeds, drop_budget, false)
     .into_iter()
     .filter(|ac| world.chunks.contains_key(&ac.coord))
     .collect()
@@ -2663,7 +2773,20 @@ pub fn competent_wake_regions(world: &mut World, drop_budget: i32) -> Vec<Active
   let mut cells = std::mem::take(&mut world.competent_wake);
   cells.sort_unstable();
   cells.dedup();
-  expand_regions_to_cells(world, &cells, drop_budget)
+  probe::add(&probe::wake_cells, cells.len() as u64);
+  let out = expand_regions_to_cells(world, &cells, drop_budget);
+  probe::add(
+    &probe::region_cells,
+    out
+      .iter()
+      .map(|ac| {
+        let w = ac.rect.x1 as u64 - ac.rect.x0 as u64 + 1;
+        let h = ac.rect.y1 as u64 - ac.rect.y0 as u64 + 1;
+        w * h
+      })
+      .sum(),
+  );
+  out
 }
 
 fn competent_active_regions(world: &World, active: &[ActiveChunk], drop_budget: i32) -> Vec<ActiveChunk> {
@@ -2839,6 +2962,25 @@ fn advance_streak(
   fall_streak.insert((from.0 + dx, from.1 + dy), streak + gained);
 }
 
+/// Why a tip / slide attempt did not move a body.
+///
+/// The distinction is what lets a body go to sleep. `Refused` is a *geometry*
+/// verdict — this shape cannot tip or slide from where it sits — and stays
+/// true until something near it is written, which already wakes it
+/// ([`World::competent_wake_around`]). `OutOfBudget` says nothing about the
+/// body at all, so it must be retried next tick.
+///
+/// Conflating the two kept every body past the per-tick roll budget awake
+/// forever: the demo world built ~169 bodies per tick and only ~4 of them
+/// ever reached a sleep decision, so the pass re-flooded settled ridges
+/// indefinitely while nothing moved.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum RollOutcome {
+  Moved,
+  Refused,
+  OutOfBudget,
+}
+
 fn apply_roll(
   world: &mut World,
   regions: &[ActiveChunk],
@@ -2851,9 +2993,9 @@ fn apply_roll(
   // the post-roll settle may sink.
   roll_budget: u32,
   sink_budget: i32,
-) -> bool {
+) -> RollOutcome {
   if stats.roll_moves >= roll_budget {
-    return false;
+    return RollOutcome::OutOfBudget;
   }
   // 1) Tip when COM overhangs the support base (true rotation).
   if let Some(dx) = try_pivot_roll(world, comp, cfg) {
@@ -2861,7 +3003,7 @@ fn apply_roll(
     if pivot_roll_component(world, comp, pivot, dx) {
       stats.roll_moves += 1;
       settle_after_roll(world, regions, pivot, fall_streak, stats, sink_budget);
-      return true;
+      return RollOutcome::Moved;
     }
   }
   // 2) Otherwise slide down-slope (with embedded loose cargo).
@@ -2878,10 +3020,10 @@ fn apply_roll(
         stats,
         sink_budget,
       );
-      return true;
+      return RollOutcome::Moved;
     }
   }
-  false
+  RollOutcome::Refused
 }
 
 fn settle_after_roll(
@@ -2892,7 +3034,13 @@ fn settle_after_roll(
   stats: &mut CompetentFallStats,
   sink_budget: i32,
 ) {
-  let (post, _, _) = build_components(world, regions);
+  // Rebuild around the body that just moved, not the whole active set. The
+  // full-set rebuild flooded and weld-split every other body in scan range and
+  // then threw all of them away — on a quiet demo world that was ~9 wasted
+  // components per roll, the single largest slice of the body pass.
+  let local = expand_regions_to_cells(world, &[hint], sink_budget.max(4));
+  let scope: &[ActiveChunk] = if local.is_empty() { regions } else { &local };
+  let (post, _, _) = build_components(world, scope);
   let Some(refreshed) = post
     .iter()
     .find(|c| c.set.contains(&hint))
@@ -2991,9 +3139,12 @@ pub fn apply_competent_fall_regions(
       if drop > 0 {
         if translate_component(world, &comp, 0, -drop) {
           stats.fall_moves += 1;
+          probe::bump(&probe::comp_fell);
           advance_streak(&mut fall_streak, anchor, 0, -drop);
           moved = true;
           comp_moved = true;
+        } else {
+          probe::bump(&probe::comp_fall_refused);
         }
         // A refused translate is transient (usually another body in the way).
         continue;
@@ -3001,6 +3152,7 @@ pub fn apply_competent_fall_regions(
       if floating {
         // Airborne but blocked — mark mobile and skip tip/roll this pass.
         // Do not sleep: it is mid-air and must retry.
+        probe::bump(&probe::comp_floating);
         mark_component_mobile(world, &comp);
         continue;
       }
@@ -3011,6 +3163,7 @@ pub fn apply_competent_fall_regions(
         // an unsupported span: it must not shatter or tip. Sleep it — digging
         // the abutment away is a solidity change, which wakes it again.
         if body_bridges_cavity(world, &comp) {
+          probe::bump(&probe::comp_slept);
           for &(x, y, _) in &comp.cells {
             to_sleep.push((x, y));
           }
@@ -3024,11 +3177,12 @@ pub fn apply_competent_fall_regions(
           let snapped = fracture_thin_necks(world, &comp);
           if snapped > 0 {
             stats.impacts = stats.impacts.saturating_add(1);
+            probe::bump(&probe::comp_shattered);
             moved = true;
             continue;
           }
         }
-        if apply_roll(
+        match apply_roll(
           world,
           &regions,
           &comp,
@@ -3039,18 +3193,33 @@ pub fn apply_competent_fall_regions(
           roll_budget,
           budget,
         ) {
-          moved = true;
-          comp_moved = true;
+          RollOutcome::Moved => {
+            probe::bump(&probe::comp_rolled);
+            moved = true;
+          }
+          RollOutcome::Refused => {
+            // Spanning a gap it cannot tip or slide out of. Stable until the
+            // terrain around it changes, which wakes it again.
+            probe::bump(&probe::comp_slept);
+            for &(x, y, _) in &comp.cells {
+              to_sleep.push((x, y));
+            }
+          }
+          RollOutcome::OutOfBudget => {
+            probe::bump(&probe::comp_unsupported_stuck);
+          }
         }
-        // Unsupported: bridging a gap, or out of roll budget. Stays awake.
         continue;
       }
       // Tip on COM overhang; slide on slope without overhang.
       let streak = *fall_streak.get(&anchor).unwrap_or(&0);
       let wants_motion =
         tip_dir(world, &comp, cfg).is_some() || downhill_roll_dir(world, &comp, cfg).is_some();
+      // A body that wants to move but has no budget left this tick must be
+      // retried, not slept — that is the one case where staying awake is right.
+      let mut starved = false;
       if wants_motion {
-        if apply_roll(
+        match apply_roll(
           world,
           &regions,
           &comp,
@@ -3061,9 +3230,17 @@ pub fn apply_competent_fall_regions(
           roll_budget,
           budget,
         ) {
-          moved = true;
-          comp_moved = true;
-          continue;
+          RollOutcome::Moved => {
+            probe::bump(&probe::comp_rolled);
+            moved = true;
+            comp_moved = true;
+            continue;
+          }
+          RollOutcome::OutOfBudget => {
+            probe::bump(&probe::comp_unsupported_stuck);
+            starved = true;
+          }
+          RollOutcome::Refused => {}
         }
       }
       if rests_on_hard_bed(world, &comp) {
@@ -3082,12 +3259,13 @@ pub fn apply_competent_fall_regions(
       }
       // Soft embed disabled (cheese-grater). Flat soft beds just rest.
       //
-      // Only this terminal branch sleeps: the body is fully supported, cannot
-      // free-fall, has no tip or slide direction, and did not shatter. Those
-      // are stable geometry verdicts. Every other rejection above can flip on a
-      // later pass (roll budget, a sibling body in the way, multi-pass settle),
-      // so those bodies stay awake.
-      if !comp_moved && !wants_motion {
+      // Sleep on a stable *geometry* verdict: the body is fully supported,
+      // cannot free-fall, did not shatter, and either has no tip/slide
+      // direction or was refused one. `starved` is the sole exception — it
+      // only means the per-tick roll budget ran out, which says nothing about
+      // this body, so it is retried next tick.
+      if !comp_moved && !starved {
+        probe::bump(&probe::comp_slept);
         for &(x, y, _) in &comp.cells {
           to_sleep.push((x, y));
         }
