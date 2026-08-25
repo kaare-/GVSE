@@ -114,6 +114,15 @@ all sat.
 - `perf_profile` seepage cost not materially worse; the lookups are on hot
   paths, so prefer arithmetic over branches and avoid re-reading the cell.
 
+## Playtest outcome
+
+Per-cell values alone did **not** produce veins: groundwater still advanced as a
+broad front draining to bedrock. Three causes — material-average infiltration,
+rate quantization that flattens rock variation to a single bucket, and no
+counterforce to gravity — are diagnosed in
+[`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md), along with the
+field-capacity, flux-erosion, and mineral-deposition work that follows from it.
+
 ## Follow-on
 
 **Underground karst** has a first cut in

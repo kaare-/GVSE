@@ -11,7 +11,8 @@ notes intended to survive re-reads of the codebase.
 | [`VOXEL_WATER.md`](VOXEL_WATER.md) | Working voxel water CA: gravity, surface flow, seepage, material capacities. |
 | [`VOXEL_PARALLEL.md`](VOXEL_PARALLEL.md) | Multithreading: what landed, next phases, what to avoid. |
 | [`VOXEL_FIELDS.md`](VOXEL_FIELDS.md) | Fields / heatmaps for richer material physics (future plan). |
-| [`VOXEL_PORE_VARIATION.md`](VOXEL_PORE_VARIATION.md) | Per-cell porosity / permeability within material ranges (plan). |
+| [`VOXEL_PORE_VARIATION.md`](VOXEL_PORE_VARIATION.md) | Per-cell porosity / permeability within material ranges. |
+| [`VOXEL_GROUNDWATER_VEINS.md`](VOXEL_GROUNDWATER_VEINS.md) | Why groundwater fronts stay uniform; field capacity, flux erosion, mineral deposition (plan). |
 | [`VOXEL_FAILURE.md`](VOXEL_FAILURE.md) | Shear + compressive failure: phased implementation plan. |
 | [`VOXEL_GEOTECH_MAP.md`](VOXEL_GEOTECH_MAP.md) | Slow shear/wetness/σᵥ stress maps; `G` overlay; dam hydro proxy. |
 | [`VOXEL_MIGRATION.md`](VOXEL_MIGRATION.md) | Greenfield voxel isolation, heatmaps, checkerboard, roadmap. |

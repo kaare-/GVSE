@@ -12,7 +12,7 @@ use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::for_each_region_parallel;
 
-use super::head::{seepage_rate_with, seepage_uptake_rate_with};
+use super::head::{seepage_rate_cell, seepage_uptake_rate_cell};
 use super::plan::regions_for_standalone;
 
 /// Bottom-up single-step gravity fall for water saturation.
@@ -250,10 +250,14 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                         next_cur = Some(above);
                         continue;
                     }
+                    // Cell-aware: infiltration under a lake is the dominant way
+                    // water enters the ground, so reading a material average
+                    // here made the wetting front uniform no matter how the
+                    // pore field varied underneath it.
                     let rate = if above.sat.0 >= 160 {
-                        seepage_rate_with(cur.material, &hydro)
+                        seepage_rate_cell(cur, &hydro)
                     } else {
-                        seepage_uptake_rate_with(cur.material, &hydro, cur.sat.0, cap)
+                        seepage_uptake_rate_cell(cur, &hydro, cap)
                     };
                     if rate <= 0 {
                         next_cur = Some(above);
