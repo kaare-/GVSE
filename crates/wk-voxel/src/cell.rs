@@ -3,7 +3,8 @@
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
 //! Per-cell data: material tag + water saturation + a few flag bits.
-//! Deliberately packed to 4 bytes so a 64×64 chunk fits in 16 KiB and
+//! Deliberately byte-packed; the stored pore coordinate makes this 5
+//! bytes so a 64×64 chunk's cell slab is 20 KiB.
 //! stays cache-friendly for the future 4-pass checkerboard update
 //! (Noita).
 
@@ -85,7 +86,8 @@ impl CellFlags {
     }
 }
 
-/// One cell in the 2D grid. 4 bytes exactly on a normal Rust target.
+/// One cell in the 2D grid. `pore` deliberately widens the old 4-byte
+/// layout; voxel saves are disposable across this schema change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     pub material: MaterialId,
@@ -93,8 +95,12 @@ pub struct Cell {
     pub flags: CellFlags,
     /// Mycelium thread intensity (0..=255) on porous hosts
     /// ([`hosts_mycelium`]). Cleared on material change / non-hosts.
-    /// Widening `Cell` past 4 bytes bumps [`crate::SIM_SCHEMA_VERSION`].
+    /// Mycelium storage (separate from the pore coordinate).
     pub _pad: u8,
+    /// Position inside this material's porosity / permeability ranges.
+    /// `0` selects both minima, `255` both maxima; constructors use the
+    /// midpoint and worldgen writes coherent spatial variation.
+    pub pore: u8,
 }
 
 impl Default for Cell {
@@ -104,6 +110,7 @@ impl Default for Cell {
             sat: Sat::EMPTY,
             flags: CellFlags::empty(),
             _pad: 0,
+            pore: 128,
         }
     }
 }
@@ -119,6 +126,7 @@ impl Cell {
             sat: Sat::EMPTY,
             flags: CellFlags::empty(),
             _pad: 0,
+            pore: 128,
         }
     }
 
@@ -166,8 +174,7 @@ impl Cell {
     /// Set the loose-body tag (low 4 bits of `tag` are used).
     #[inline]
     pub fn set_rock_body_tag(&mut self, tag: u8) {
-        self.flags.0 =
-            (self.flags.0 & !CellFlags::ROCK_BODY_TAG.0) | ((tag & 0x0F) << 4);
+        self.flags.0 = (self.flags.0 & !CellFlags::ROCK_BODY_TAG.0) | ((tag & 0x0F) << 4);
     }
 
     /// Drop the loose-body tag (rock rejoining strata, or becoming debris).
@@ -186,6 +193,7 @@ impl Cell {
             sat: Sat::FULL,
             flags: CellFlags::empty(),
             _pad: 0,
+            pore: 128,
         }
     }
 }
@@ -240,8 +248,7 @@ pub fn falls_through_empty_air(material: MaterialId) -> bool {
 /// Includes [`is_grain`] plus Snow and Organic litter (leaf piles
 /// should sprawl, not stack into 1-cell towers).
 pub fn is_repose_grain(material: MaterialId) -> bool {
-    is_grain(material)
-        || matches!(material, MaterialId::Snow | MaterialId::Organic)
+    is_grain(material) || matches!(material, MaterialId::Snow | MaterialId::Organic)
 }
 
 /// Competent bedrock-class solids that can move as rigid bodies (not Bedrock).
@@ -310,9 +317,37 @@ pub fn water_capacity_with(material: MaterialId, hydro: &wk_material::HydroOverr
     }
 }
 
+/// Cell-aware capacity. This is the authoritative lookup for every pass
+/// that reads, writes, clamps, or audits pore saturation.
+#[inline]
+pub fn water_capacity_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 {
+    use wk_material::MaterialRegistry;
+    match cell.material {
+        MaterialId::Air => u8::MAX,
+        MaterialId::Water | MaterialId::Ice | MaterialId::Snow => 0,
+        _ => MaterialRegistry::hydrology_with(cell.material, hydro)
+            .porosity
+            .sample(cell.pore),
+    }
+}
+
+/// Cell-aware permeability selected from the same stored pore coordinate.
+#[inline]
+pub fn permeability_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 {
+    use wk_material::MaterialRegistry;
+    MaterialRegistry::hydrology_with(cell.material, hydro)
+        .permeability
+        .sample(cell.pore)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cell_layout_includes_stored_pore_byte() {
+        assert_eq!(std::mem::size_of::<Cell>(), 5);
+    }
 
     #[test]
     fn air_holds_full_water() {
@@ -333,6 +368,28 @@ mod tests {
             water_capacity(MaterialId::Sand),
             wk_material::MaterialRegistry::props(MaterialId::Sand).porosity
         );
+    }
+
+    #[test]
+    fn pore_coordinate_selects_capacity_and_permeability_ranges() {
+        let hydro = wk_material::HydroOverrides::default();
+        let mut low = Cell::solid(MaterialId::Sand);
+        low.pore = 0;
+        let mut high = low;
+        high.pore = 255;
+        assert!(water_capacity_cell(low, &hydro) < water_capacity_cell(high, &hydro));
+        assert!(permeability_cell(low, &hydro) < permeability_cell(high, &hydro));
+    }
+
+    #[test]
+    fn zero_to_zero_override_seals_every_pore_coordinate() {
+        let mut hydro = wk_material::HydroOverrides::default();
+        hydro.set_permeability_range(MaterialId::Sand, 0, 0);
+        for pore in [0, 128, 255] {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.pore = pore;
+            assert_eq!(permeability_cell(sand, &hydro), 0);
+        }
     }
 
     #[test]
@@ -372,7 +429,10 @@ mod tests {
             assert!(is_repose_grain(m), "{m:?} should repose");
         }
         assert!(is_repose_grain(MaterialId::Snow));
-        assert!(!is_grain(MaterialId::Snow), "snow floats — not a dense grain");
+        assert!(
+            !is_grain(MaterialId::Snow),
+            "snow floats — not a dense grain"
+        );
         assert!(falls_through_empty_air(MaterialId::Snow));
         assert!(falls_through_empty_air(MaterialId::Ice));
         assert!(
@@ -406,8 +466,7 @@ mod tests {
         assert_eq!(grain_max_stable_step(MaterialId::Sand), 0);
         assert!(grain_max_stable_step(MaterialId::LooseRock) >= 1);
         assert!(
-            grain_max_stable_step(MaterialId::Sand)
-                < grain_max_stable_step(MaterialId::LooseRock)
+            grain_max_stable_step(MaterialId::Sand) < grain_max_stable_step(MaterialId::LooseRock)
         );
     }
 

@@ -284,6 +284,7 @@ fn ice_cell() -> Cell {
         sat: Sat::EMPTY,
         flags: Default::default(),
         _pad: 0,
+        pore: 128,
     }
 }
 
@@ -293,6 +294,7 @@ fn snow_cell() -> Cell {
         sat: Sat::EMPTY,
         flags: Default::default(),
         _pad: 0,
+        pore: 128,
     }
 }
 
@@ -971,6 +973,7 @@ mod tests {
                 sat: Sat(16),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         let temp = cold_temp(16, 16, -8.0);
@@ -1104,6 +1107,7 @@ mod tests {
                 sat: Sat(80),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         let temp = cold_temp(16, 16, -5.0);
@@ -1150,6 +1154,7 @@ mod tests {
                 sat: Sat(100),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         // Open-sky standing film on bedrock.
@@ -1180,6 +1185,7 @@ mod tests {
                 sat: Sat(100),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         let temp = cold_temp(16, 16, 4.0);
@@ -1279,6 +1285,7 @@ mod tests {
                 sat: Sat(80),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         let temp = cold_temp(16, 16, -8.0);
@@ -1575,6 +1582,7 @@ mod tests {
                 sat: Sat(80),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         let temp = cold_temp(16, 16, -12.0);
@@ -1638,6 +1646,7 @@ mod tests {
                 sat: Sat(128),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         w.set_cell(1, 2, Cell::solid(MaterialId::Ice));
@@ -1856,6 +1865,7 @@ mod tests {
                 sat: Sat(64),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         w.set_cell(3, 3, Cell::solid(MaterialId::Ice));

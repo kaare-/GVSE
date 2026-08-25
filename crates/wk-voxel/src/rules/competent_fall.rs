@@ -1839,6 +1839,7 @@ fn impact_shatter(
             f
           },
           _pad: cur._pad,
+          pore: cur.pore,
         },
       );
       applied += 1;

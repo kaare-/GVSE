@@ -1,8 +1,9 @@
-# Variable permeability and porosity (plan)
+# Variable permeability and porosity
 
-**Status:** planned. Nothing in this document is implemented yet. The
-prerequisite — coherent porous *lenses* in worldgen — has landed
-(`lens_noise` in [`worldgen.rs`](../crates/wk-voxel/src/worldgen.rs)).
+**Status:** implemented. Cells store a coherent `pore: u8`; all live
+voxel hydrology samples per-material porosity / permeability ranges.
+Old `.gvsesim` snapshots are intentionally rejected at schema v13 —
+F5 writes a fresh snapshot.
 
 ## Goal
 
@@ -18,43 +19,44 @@ wetness-gated) that preference **reinforces itself**. Flow concentrates into
 conduits instead of advancing as a uniform front. It also gives karst
 somewhere natural to start dissolving.
 
-## What already exists
+## Implementation
 
 | Piece | Where | Note |
 |---|---|---|
-| Fixed per-material `porosity` / `permeability` | `wk-material/src/lib.rs` (`MaterialProps`) | One value each. |
-| World-level per-material overrides | `HydroOverrides` | Global, not spatial. Tab-tunable. |
-| Coherent lens noise | `worldgen.rs::lens_noise` | Two-octave value noise; picks *which material* sits where. |
-| Capacity lookup | `cell.rs::water_capacity_with(material, hydro)` | No cell / coordinate awareness. |
-| Rate lookups | `head.rs::seepage_rate_with`, `seepage_uptake_rate_with`, `seepage_conduct_rate_with` | Same. |
+| Material ranges | `wk-material::MaterialHydrology` / `HydroRange` | Defaults are ±25% around the old fixed value (minimum width 4); zero stays `0..0`. |
+| Per-cell selector | `Cell::pore` | `0` selects both minima; `255` both maxima; constructors use `128`. |
+| World-level overrides | `HydroOverrides` | Tab sets min/max per material. `0..0` seals it. |
+| Coherent generation | `worldgen.rs::pore_coordinate` | Independent broad/fine noise plus mild depth compaction. |
+| Capacity | `cell.rs::water_capacity_cell` | Authoritative cell-aware lookup for movement, clamps and audit. |
+| Rates | `head.rs::*_cell` | Seepage samples cell permeability; material-only wrappers remain midpoint helpers for tests/legacy. |
 
-So today variation exists only as *material choice*. Two neighbouring
-limestone cells are hydrologically identical.
-
-## Plan
+The one stored coordinate intentionally correlates porosity and
+permeability: open fabric both holds and conducts more water. Material
+choice uses separate noise, so a limestone body has internal texture.
 
 ### 1. Material data — ranges
 
-Add to `MaterialProps`:
+Ranges are kept beside the legacy `MaterialProps` scalar table:
 
 ```rust
-pub porosity_range: (f32, f32),
-pub permeability_range: (u8, u8),
+pub struct MaterialHydrology {
+    pub porosity: HydroRange,
+    pub permeability: HydroRange,
+}
 ```
 
-Seed both so **today's fixed value is the midpoint**. Nothing changes
-behaviourally until step 4, which keeps steps 1–3 independently reviewable.
+The legacy scalar remains the midpoint for the archived column stack.
 
 ### 2. Per-cell value
 
-Add `pore: u8` to `Cell` — position within the material's range, `0..=255`.
+`pore: u8` is the position within the material's range, `0..=255`.
 
 - `CellFlags` has **no spare bits**: four low flags (`ACTIVE_HINT`,
   `COMPACTED`, `WATERLOGGED`, `MOBILE_ROCK`) plus a high-nibble rock body
   tag. This needs its own byte.
-- `Cell` is `material + sat + flags` today, so an extra `u8` should land in
-  existing padding — confirm with `size_of::<Cell>()` before and after.
-- `#[serde(default)]` so old saves load at the midpoint (`128`).
+- `_pad` already stores mycelium, so `Cell` grows from 4 to 5 bytes
+  (16 KiB → 20 KiB cell slab per 64×64 chunk).
+- Save schema v13 rejects old snapshots; there is no migration.
 
 **It must be stored, not recomputed.** If capacity can change under a cell
 that already holds `sat` — on a seed change, a tuning tweak, or a different
@@ -63,36 +65,22 @@ creation or loss. Storing it also makes porosity savegame-stable.
 
 ### 3. Worldgen fills it
 
-Set `pore` from `lens_noise` with a **different salt** from the material
+Worldgen sets `pore` from `lens_noise` with a **different salt** from the material
 choice, so a limestone lens can have a wetter core and drier edges rather
 than being uniformly permeable. Consider a slight depth trend (compaction
 reduces porosity with depth) — cheap and physically right.
 
 Painted / editor cells and `Cell::solid()` default to the midpoint.
 
-### 4. Make the consumers cell-aware
+### 4. Cell-aware consumers
 
-This is the invasive step and the reason the work is not a quick patch.
-
-Current call surface (measured):
-
-- **131** call sites of `water_capacity_with` / `water_capacity`
-- **47** call sites of the three `seepage_*_rate_with` functions
-
-Spread across `rules/seepage.rs`, `rules/water_flow.rs`, `rules/gravity.rs`,
-`rules/grain.rs`, `failure.rs`, `fungi.rs`, `plant.rs`, `symbiosis.rs`,
-`rules/spill.rs`, `audit.rs`, plus tests.
-
-Suggested shape: keep the material-only functions as thin wrappers at the
-midpoint (so tests and non-hydro callers need no edit) and add cell-aware
-variants used by every pass that moves water:
+Water movement, saturation clamps, wetness decisions and the mass
+inventory use cell-aware helpers:
 
 ```rust
-pub fn water_capacity_cell(cell: &Cell, hydro: &HydroOverrides) -> u8;
-pub fn seepage_rate_cell(cell: &Cell, hydro: &HydroOverrides) -> i32;
+pub fn water_capacity_cell(cell: Cell, hydro: &HydroOverrides) -> u8;
+pub fn seepage_rate_cell(cell: Cell, hydro: &HydroOverrides) -> i32;
 ```
-
-Most call sites already hold the `Cell`, so the edit is usually mechanical.
 
 ### 5. Hazard: mass conservation
 
@@ -111,15 +99,14 @@ cargo test -p wk-voxel --test mass_audit_smoke
 See [`VOXEL_WATER.md`](VOXEL_WATER.md) § Mass inventory. `audit.rs` sums pore
 sat against capacity, so it must be migrated in the same sweep.
 
-Also check: any place that *writes* `sat` and clamps to capacity. A cell
-whose stored `pore` implies a lower cap than its current `sat` (possible for
-saves written before step 2) must shed the excess into a neighbour or the
-audit will report a loss.
+Changing a range does not delete existing water. A temporarily
+over-capacity cell drains through normal rules; audit continues counting
+all sat.
 
 ### 6. Acceptance
 
-- `size_of::<Cell>()` unchanged, or the growth is understood and accepted.
-- Old saves load and keep their mass total flat.
+- `Cell` growth to 5 bytes is accepted.
+- Old saves are rejected; F5 overwrites with v13.
 - A scenario test showing a wetting front **preferring** a high-`pore` lens
   over adjacent low-`pore` rock (this is the whole point — assert the
   preference, not just that water moves).
@@ -133,7 +120,7 @@ audit will report a loss.
 [`apply_karst_dissolution`](../crates/wk-voxel/src/rules/karst.rs):
 pore-saturated limestone and stone dissolve slower than a surface
 film, and a damp cave void keeps the conduit growing. Rates are still
-one number per material (`KarstConfig::pore_scale` /
-`stone_scale`). Once per-cell `pore` exists, scale those contacts by
-the stored value so conduits widen where the rock is already the
-permeable path.
+one scale per material (`KarstConfig::pore_scale` / `stone_scale`).
+Water now reaches high-pore cells first through cell-aware seepage, so
+dissolution already follows preferential paths; a future chemistry
+field can additionally scale reaction rate by local permeability.

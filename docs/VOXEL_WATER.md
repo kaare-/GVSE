@@ -86,10 +86,10 @@ Head-driven, permeability-capped soak on **cardinal** edges (`+x`, `+y` owned on
 | Air ↔ Air | no (surface flow owns that) |
 
 Rate: `((permeability * 32) / 255).max(1)` when permeability &gt; 0, else 0.
-Permeability and porosity are currently **one fixed value per material** —
-two neighbouring limestone cells are hydrologically identical. Plan to vary
-them per cell within material ranges:
-[`VOXEL_PORE_VARIATION.md`](VOXEL_PORE_VARIATION.md).
+Each solid cell stores `pore: u8`, selecting both permeability and
+porosity inside its material ranges. Worldgen fills it with coherent
+noise plus mild depth compaction; editor / constructed cells use the
+midpoint. See [`VOXEL_PORE_VARIATION.md`](VOXEL_PORE_VARIATION.md).
 Fully saturated solid→Air faces get a ×3 spring boost (capped at 16) so cliff pores weep visibly.
 
 This is what wets a dry beach **sideways** from a puddle, equalises pore sat between sand and clay/stone, and lets saturated hillsides drip into open Air. Vertical fill under a lake is dominated by **gravity**, not seepage.
@@ -121,23 +121,24 @@ Demo order after `tick`: thermal step → **`apply_cold_avalanche`** → **`appl
 
 ## Material hydrology (defaults)
 
-| Material | porosity (capacity) | permeability | seepage rate / pass |
-|----------|--------------------:|-------------:|--------------------:|
-| Sand | 180 | 160 | 20 |
-| Gravel | 120 | 240 | 30 |
-| Organic | 200 | 120 | 15 |
-| Limestone | 40 | 140 | 17 |
-| LooseRock | 25 | 40 | 5 |
-| LooseLimestone | 30 | 50 | 5 |
-| Clay | 60 | 10 | 1 |
-| Stone | 20 | 5 | 1 |
+| Material | porosity range | permeability range | seepage rate range / pass |
+|----------|----------------:|-------------------:|--------------------------:|
+| Sand | 83–137 | 72–120 | 9–15 |
+| Gravel | 68–112 | 120–200 | 15–25 |
+| Organic | 150–250 | 90–150 | 11–18 |
+| Soil | 75–125 | 36–60 | 4–7 |
+| Limestone | 30–50 | 105–175 | 13–21 |
+| LooseRock | 19–31 | 30–50 | 3–6 |
+| LooseLimestone | 23–37 | 38–62 | 4–7 |
+| Clay | 45–75 | 6–14 | 1 |
+| Stone | 15–25 | 1–9 | 1 |
 | Bedrock | 0 | 0 | 0 |
 
-Tab → **Material permeability / porosity** writes into `World.hydro`
-(`HydroOverrides`). Physics reads that table through `props_with` /
-`water_capacity_with` — there is no process-global install step.
-Setting sand porosity **and** permeability to 0 makes the sand cap an
-impermeable lid — pore water will not enter the body below.
+Tab → **Material permeability / porosity** exposes min/max values and
+writes ranges into `World.hydro` (`HydroOverrides`). Physics samples
+them through `water_capacity_cell` / `permeability_cell`. Setting a
+range to **0–0** makes that property zero for every cell; sand
+porosity and permeability both at 0–0 make an impermeable lid.
 
 ## What “working” looks like
 

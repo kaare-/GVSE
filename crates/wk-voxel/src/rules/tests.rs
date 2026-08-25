@@ -30,6 +30,33 @@ fn setup_column_world() -> World {
 }
 
 #[test]
+fn seepage_prefers_high_pore_sand_over_low_pore_sand() {
+    let mut w = setup_column_world();
+    for &(x, pore) in &[(4, 0u8), (12, 255u8)] {
+        w.set_cell(x - 1, 1, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x + 1, 1, Cell::solid(MaterialId::Bedrock));
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.pore = pore;
+        w.set_cell(x, 1, sand);
+        w.set_cell(x, 2, Cell::water());
+    }
+    apply_seepage(&mut w);
+    let low = w.get_cell(4, 1).unwrap();
+    let high = w.get_cell(12, 1).unwrap();
+    assert!(
+        high.sat.0 > low.sat.0,
+        "high-pore lens should conduct faster (low={} high={})",
+        low.sat.0,
+        high.sat.0
+    );
+    assert!(
+        crate::cell::water_capacity_cell(high, &w.hydro)
+            > crate::cell::water_capacity_cell(low, &w.hydro),
+        "the same pore coordinate should also select higher capacity"
+    );
+}
+
+#[test]
 fn droplet_falls_one_cell_per_pass() {
     let mut w = setup_column_world();
     w.set_cell(4, 10, Cell::water());
@@ -867,6 +894,7 @@ fn ice_falls_through_empty_air_but_floats_on_water() {
             sat: Sat(128),
             flags: Default::default(),
             _pad: 0,
+            pore: 128,
         },
     );
     w3.set_cell(3, 2, Cell::solid(MaterialId::Ice));
@@ -4125,7 +4153,13 @@ fn solid_staircase_film_drains_left_into_lower_pool() {
     w.set_cell(1, 1, Cell::solid(MaterialId::Bedrock));
     // (1,2) and (0,2) are Air — the lower pool/drop level.
     // Seed a little water in the pool so it's "occupied" like the image.
-    w.set_cell(1, 2, Cell { material: MaterialId::Air, sat: Sat(200), flags: Default::default(), _pad: 0 });
+    w.set_cell(1, 2, Cell {
+        material: MaterialId::Air,
+        sat: Sat(200),
+        flags: Default::default(),
+        _pad: 0,
+        pore: 128,
+    });
     // The stuck higher film.
     w.set_cell(3, 3, Cell::water());
 

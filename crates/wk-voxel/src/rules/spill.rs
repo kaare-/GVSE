@@ -9,10 +9,10 @@ use std::collections::HashMap;
 use wk_material::MaterialId;
 
 use crate::active::{partition_checkerboard, ActiveChunk};
-use crate::cell::{water_capacity_with, Cell, Sat};
+use crate::cell::{water_capacity_cell, water_capacity_with, Cell, Sat};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
-use crate::parallel::{map_regions_parallel};
+use crate::parallel::map_regions_parallel;
 
 use super::head::sat_move_to_equalize_heads;
 use super::plan::regions_for_standalone;
@@ -40,7 +40,7 @@ pub fn apply_lateral_spill_regions(world: &mut World, active: &[ActiveChunk]) {
         let Some(cell) = world.get_cell(gx, gy) else {
             continue;
         };
-        let cap = water_capacity_with(cell.material, &world.hydro) as i32;
+        let cap = water_capacity_cell(cell, &world.hydro) as i32;
         let new_sat = (cell.sat.0 as i32 + delta).clamp(0, cap);
         world.set_cell(
             gx,
@@ -83,9 +83,8 @@ fn accumulate_lateral_spill_deltas(
                     continue;
                 }
                 let cap = water_capacity_with(MaterialId::Air, &hydro);
-                let move_amt = sat_move_to_equalize_heads(
-                    left.sat.0, cap, gy, right.sat.0, cap, gy,
-                );
+                let move_amt =
+                    sat_move_to_equalize_heads(left.sat.0, cap, gy, right.sat.0, cap, gy);
                 if move_amt == 0 {
                     continue;
                 }

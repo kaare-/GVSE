@@ -209,11 +209,64 @@ pub struct MaterialProps {
 
 pub struct MaterialRegistry;
 
-/// Per-material hydrology tuning (permeability / porosity).
+/// Inclusive `0..=255` material-property range. A cell's stored pore
+/// coordinate selects one value inside the range.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HydroRange {
+    pub min: u8,
+    pub max: u8,
+}
+
+impl HydroRange {
+    pub const fn new(min: u8, max: u8) -> Self {
+        if min <= max {
+            Self { min, max }
+        } else {
+            Self { min: max, max: min }
+        }
+    }
+
+    pub const fn fixed(value: u8) -> Self {
+        Self {
+            min: value,
+            max: value,
+        }
+    }
+
+    /// Select a value with `pore=0` at `min`, `255` at `max`.
+    #[inline]
+    pub fn sample(self, pore: u8) -> u8 {
+        let span = self.max as u16 - self.min as u16;
+        (self.min as u16 + (span * pore as u16 + 127) / 255) as u8
+    }
+
+    #[inline]
+    pub fn midpoint(self) -> u8 {
+        ((self.min as u16 + self.max as u16 + 1) / 2) as u8
+    }
+}
+
+/// Per-material hydrology ranges selected by each voxel's pore coordinate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterialHydrology {
+    pub permeability: HydroRange,
+    pub porosity: HydroRange,
+}
+
+const fn centered_range(mid: u8) -> HydroRange {
+    if mid == 0 {
+        return HydroRange::fixed(0);
+    }
+    // ±25%, with at least four points of texture for tight rock.
+    let half = if mid / 4 > 4 { mid / 4 } else { 4 };
+    HydroRange::new(mid.saturating_sub(half), mid.saturating_add(half))
+}
+
+/// Per-material hydrology tuning (permeability / porosity ranges).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HydroSlot {
-    pub permeability: Option<u8>,
-    pub porosity: Option<u8>,
+    pub permeability: Option<HydroRange>,
+    pub porosity: Option<HydroRange>,
 }
 
 /// Full material hydrology override table.
@@ -237,14 +290,22 @@ impl Default for HydroOverrides {
 
 impl HydroOverrides {
     pub fn set_permeability(&mut self, material: MaterialId, value: u8) {
+        self.set_permeability_range(material, value, value);
+    }
+
+    pub fn set_permeability_range(&mut self, material: MaterialId, min: u8, max: u8) {
         if let Some(slot) = self.slots.get_mut(material as usize) {
-            slot.permeability = Some(value);
+            slot.permeability = Some(HydroRange::new(min, max));
         }
     }
 
     pub fn set_porosity(&mut self, material: MaterialId, value: u8) {
+        self.set_porosity_range(material, value, value);
+    }
+
+    pub fn set_porosity_range(&mut self, material: MaterialId, min: u8, max: u8) {
         if let Some(slot) = self.slots.get_mut(material as usize) {
-            slot.porosity = Some(value);
+            slot.porosity = Some(HydroRange::new(min, max));
         }
     }
 
@@ -255,13 +316,23 @@ impl HydroOverrides {
     pub fn apply(self, material: MaterialId, mut p: MaterialProps) -> MaterialProps {
         if let Some(o) = self.slots.get(material as usize) {
             if let Some(v) = o.permeability {
-                p.permeability = v;
+                p.permeability = v.midpoint();
             }
             if let Some(v) = o.porosity {
-                p.porosity = v;
+                p.porosity = v.midpoint();
             }
         }
         p
+    }
+
+    pub fn hydrology(self, material: MaterialId, base: MaterialHydrology) -> MaterialHydrology {
+        let Some(slot) = self.slots.get(material as usize) else {
+            return base;
+        };
+        MaterialHydrology {
+            permeability: slot.permeability.unwrap_or(base.permeability),
+            porosity: slot.porosity.unwrap_or(base.porosity),
+        }
     }
 }
 
@@ -277,6 +348,21 @@ impl MaterialRegistry {
     /// Props with an explicit override table (voxel `World::hydro`).
     pub fn props_with(material: MaterialId, hydro: &HydroOverrides) -> MaterialProps {
         hydro.apply(material, Self::base_props(material))
+    }
+
+    /// Default per-cell hydrology ranges. Midpoints preserve the old
+    /// fixed material table; range width is deliberately modest until
+    /// tuned from playtests. Zero remains exactly `0..0`.
+    pub fn hydrology(material: MaterialId) -> MaterialHydrology {
+        let p = Self::base_props(material);
+        MaterialHydrology {
+            permeability: centered_range(p.permeability),
+            porosity: centered_range(p.porosity),
+        }
+    }
+
+    pub fn hydrology_with(material: MaterialId, hydro: &HydroOverrides) -> MaterialHydrology {
+        (*hydro).hydrology(material, Self::hydrology(material))
     }
 
     /// Compile-time material table (ignores runtime overrides).
@@ -571,6 +657,33 @@ impl MaterialRegistry {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn hydro_range_samples_endpoints_and_midpoint() {
+        let r = HydroRange::new(10, 30);
+        assert_eq!(r.sample(0), 10);
+        assert_eq!(r.sample(128), 20);
+        assert_eq!(r.sample(255), 30);
+        assert_eq!(r.midpoint(), 20);
+    }
+
+    #[test]
+    fn default_hydrology_ranges_keep_old_value_at_midpoint() {
+        for material in MaterialId::ALL_SOLIDS {
+            let props = MaterialRegistry::base_props(material);
+            let hydro = MaterialRegistry::hydrology(material);
+            assert_eq!(hydro.permeability.sample(128), props.permeability);
+            assert_eq!(hydro.porosity.sample(128), props.porosity);
+        }
+    }
+
+    #[test]
+    fn zero_override_is_zero_to_zero() {
+        let mut overrides = HydroOverrides::default();
+        overrides.set_permeability(MaterialId::Sand, 0);
+        let h = MaterialRegistry::hydrology_with(MaterialId::Sand, &overrides);
+        assert_eq!(h.permeability, HydroRange::fixed(0));
+    }
 
     #[test]
     fn erosion_order_sand_clay_stone() {

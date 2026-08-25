@@ -104,11 +104,7 @@ fn hash_f32(seed: u64, x: i64, salt: u64) -> f32 {
 }
 
 fn hash_f32_2(seed: u64, x: i64, y: i64, salt: u64) -> f32 {
-    hash_f32(
-        seed,
-        x.wrapping_add(y.wrapping_mul(0x9E37_79B9)),
-        salt,
-    )
+    hash_f32(seed, x.wrapping_add(y.wrapping_mul(0x9E37_79B9)), salt)
 }
 
 /// GVSE-style macro continental profile on a **ring**.
@@ -195,7 +191,14 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea: i32, width_cols: i32)
 ///
 /// Palette reminder: Stone is cool mid-grey, Limestone is warm pale
 /// tan, Clay is brown, Gravel is sandy-tan, LooseRock is dark cobble.
-fn body_material(seed: u64, x: i32, y: i32, surface_y: i32, bedrock_top: i32, p: &WorldgenParams) -> MaterialId {
+fn body_material(
+    seed: u64,
+    x: i32,
+    y: i32,
+    surface_y: i32,
+    bedrock_top: i32,
+    p: &WorldgenParams,
+) -> MaterialId {
     let depth = (surface_y - y) as f32; // 0 at sand interface, grows downward
     let above_bedrock = y - bedrock_top;
     let n = hash_f32_2(seed, x as i64, y as i64, 0x57A7_A);
@@ -278,9 +281,8 @@ mod lens_tests {
         let n = 400;
         for i in 0..n {
             let (x, y) = (i % 40, i / 40);
-            lens_delta += (lens_noise(seed, x, y, 24, 10, 7)
-                - lens_noise(seed, x + 1, y, 24, 10, 7))
-            .abs();
+            lens_delta +=
+                (lens_noise(seed, x, y, 24, 10, 7) - lens_noise(seed, x + 1, y, 24, 10, 7)).abs();
             white_delta += (hash_f32_2(seed, x as i64, y as i64, 7)
                 - hash_f32_2(seed, x as i64 + 1, y as i64, 7))
             .abs();
@@ -289,6 +291,33 @@ mod lens_tests {
             lens_delta * 4.0 < white_delta,
             "lens noise must be much smoother than white noise \
              (lens={lens_delta:.2} white={white_delta:.2})"
+        );
+    }
+
+    #[test]
+    fn pore_coordinate_is_coherent_and_not_material_noise() {
+        let seed = 12345u64;
+        let mut neighbour_delta = 0.0f32;
+        let mut broad_span = 0u8;
+        let mut min = u8::MAX;
+        let mut max = 0u8;
+        for y in 20..40 {
+            for x in 0..80 {
+                let a = pore_coordinate(seed, x, y, 100);
+                let b = pore_coordinate(seed, x + 1, y, 100);
+                neighbour_delta += (a as f32 - b as f32).abs();
+                min = min.min(a);
+                max = max.max(a);
+            }
+        }
+        broad_span = broad_span.max(max.saturating_sub(min));
+        assert!(
+            neighbour_delta / (20.0 * 80.0) < 12.0,
+            "neighbour pore values should vary smoothly"
+        );
+        assert!(
+            broad_span > 60,
+            "worldgen pore field needs useful variation"
         );
     }
 }
@@ -311,6 +340,18 @@ fn lens_noise(seed: u64, x: i32, y: i32, period_x: i32, period_y: i32, salt: u64
     let top = corner(x0, y0) + (corner(x0 + 1, y0) - corner(x0, y0)) * u;
     let bot = corner(x0, y0 + 1) + (corner(x0 + 1, y0 + 1) - corner(x0, y0 + 1)) * u;
     (top + (bot - top) * v).clamp(0.0, 1.0)
+}
+
+/// Stored position inside a material's hydrology ranges. Uses salts
+/// independent from material-choice lenses so one limestone body can
+/// contain a permeable core and tighter margins. Depth adds mild
+/// compaction without erasing the coherent pattern.
+fn pore_coordinate(seed: u64, x: i32, y: i32, surface_y: i32) -> u8 {
+    let broad = lens_noise(seed, x, y, 32, 14, 0xA0_2E_1001);
+    let fine = lens_noise(seed, x, y, 11, 6, 0xA0_2E_1002);
+    let depth = (surface_y - y).max(0) as f32;
+    let compaction = (depth / 180.0).min(0.20);
+    (((0.72 * broad + 0.28 * fine - compaction).clamp(0.0, 1.0) * 255.0).round()) as u8
 }
 
 /// Stamp the full ring continental profile into `world`.
@@ -344,7 +385,7 @@ pub fn stamp_world(world: &mut World, p: &WorldgenParams) {
         let stone_top = surface_y - p.sand_cap_thickness;
 
         for y in p.bedrock_floor_y..p.sky_ceiling_y {
-            let cell = if y < bedrock_top {
+            let mut cell = if y < bedrock_top {
                 Cell::solid(MaterialId::Bedrock)
             } else if y <= stone_top {
                 Cell::solid(body_material(p.seed, x, y, surface_y, bedrock_top, p))
@@ -355,6 +396,9 @@ pub fn stamp_world(world: &mut World, p: &WorldgenParams) {
             } else {
                 Cell::air()
             };
+            if cell.material.is_solid() {
+                cell.pore = pore_coordinate(p.seed, x, y, surface_y);
+            }
             world.set_cell(x, y, cell);
         }
     }
@@ -446,7 +490,11 @@ mod tests {
             under.material
         );
         let cap = water_capacity(under.material);
-        assert!(cap > 0, "under-sand material should be porous: {:?}", under.material);
+        assert!(
+            cap > 0,
+            "under-sand material should be porous: {:?}",
+            under.material
+        );
         assert_eq!(
             under.sat.0, cap,
             "porous {:?} under lake sand must reach capacity (sat={})",

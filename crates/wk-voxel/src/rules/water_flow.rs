@@ -9,14 +9,14 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use wk_material::MaterialId;
 
 use crate::active::ActiveChunk;
-use crate::cell::{water_capacity_with, Cell, Sat};
+use crate::cell::{water_capacity_cell, water_capacity_with, Cell, Sat};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
 use super::head::{
-    hydraulic_head, is_porous_solid_with, plan_same_y_pairwise_edge_in, same_y_cascade_pull_in,
-    seepage_rate_with, seepage_uptake_rate_with,
+    hydraulic_head, is_porous_cell, plan_same_y_pairwise_edge_in, same_y_cascade_pull_in,
+    seepage_rate_cell, seepage_uptake_rate_cell,
 };
 use super::plan::{regions_for_standalone, regions_wet_loaded};
 
@@ -170,7 +170,7 @@ fn commit_air_sat_xfers(
         let free = if dst.material == MaterialId::Air {
             u8::MAX as i32 - dst.sat.0 as i32
         } else {
-            let cap = water_capacity_with(dst.material, &world.hydro) as i32;
+            let cap = water_capacity_cell(dst, &world.hydro) as i32;
             if cap == 0 {
                 continue;
             }
@@ -935,18 +935,13 @@ fn plan_porous_face_dividend(
         if side.material == MaterialId::Air || side.material == MaterialId::Organic {
             continue;
         }
-        let cap = water_capacity_with(side.material, &world.hydro) as i32;
+        let cap = water_capacity_cell(side, &world.hydro) as i32;
         if cap <= 0 {
             continue;
         }
 
         // 1) Wetting-front dividend — bone-dry sheds; wet faces drink.
-        let soak_rate = seepage_uptake_rate_with(
-            side.material,
-            &world.hydro,
-            side.sat.0,
-            cap as u8,
-        );
+        let soak_rate = seepage_uptake_rate_cell(side, &world.hydro, cap as u8);
         let free = (cap - side.sat.0 as i32).max(0);
         let soak = remaining.min(free).min(soak_rate);
         if soak > 0 {
@@ -1111,14 +1106,14 @@ fn plan_throughflow_from_cell(
         let Some(below1) = read(lx + dx, ly - 1, nx, gy - 1) else {
             continue;
         };
-        if !is_porous_solid_with(below1.material, hydro) {
+        if !is_porous_cell(below1, hydro) {
             continue;
         }
-        let cap1 = water_capacity_with(below1.material, hydro);
+        let cap1 = water_capacity_cell(below1, hydro);
         if below1.sat.0 < cap1 {
             continue; // gravity + seepage handle unsaturated
         }
-        let mut rate = seepage_rate_with(below1.material, hydro);
+        let mut rate = seepage_rate_cell(below1, hydro);
         // Prefer the shallowest exit so mid-cliff springs beat a deep toe.
         let mut best: Option<(i32, i32, i32)> = None; // depth, tx, ty
         let mut depth = 1i32;
@@ -1137,14 +1132,14 @@ fn plan_throughflow_from_cell(
                 }
                 break;
             }
-            if !is_porous_solid_with(nb.material, hydro) {
+            if !is_porous_cell(nb, hydro) {
                 break;
             }
-            let cap = water_capacity_with(nb.material, hydro);
+            let cap = water_capacity_cell(nb, hydro);
             if nb.sat.0 < cap {
                 break;
             }
-            rate = rate.min(seepage_rate_with(nb.material, hydro));
+            rate = rate.min(seepage_rate_cell(nb, hydro));
             for sdx in [-1_i32, 1] {
                 let sx = world.wrap_x(nx + sdx);
                 if sx == nx {

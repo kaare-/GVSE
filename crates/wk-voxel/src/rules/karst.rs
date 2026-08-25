@@ -8,7 +8,9 @@
 use serde::{Deserialize, Serialize};
 use wk_material::{HydroOverrides, MaterialId};
 
-use crate::cell::{water_capacity_with, Cell};
+use crate::cell::{water_capacity_cell, Cell};
+#[cfg(test)]
+use crate::cell::water_capacity_with;
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::map_chunk_coords_parallel;
@@ -83,7 +85,7 @@ fn pore_is_wet(cell: Cell, hydro: &HydroOverrides, min_sat: u8) -> bool {
     if cell.material == MaterialId::Air || cell.sat.0 == 0 {
         return false;
     }
-    let cap = water_capacity_with(cell.material, hydro);
+    let cap = water_capacity_cell(cell, hydro);
     if cap == 0 {
         return false;
     }
@@ -202,8 +204,7 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
                 if weight <= 0.0 {
                     continue;
                 }
-                let effective_prob =
-                    (cfg.prob_per_wet_neighbour * weight).clamp(0.0, 1.0);
+                let effective_prob = (cfg.prob_per_wet_neighbour * weight).clamp(0.0, 1.0);
                 // Bake gy into the hash so cells at different y
                 // levels get independent rolls even though tick is
                 // shared.
@@ -225,6 +226,7 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
                         sat: cur.sat,
                         flags: cur.flags,
                         _pad: cur._pad,
+                        pore: cur.pore,
                     },
                 ));
             }

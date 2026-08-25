@@ -6,7 +6,7 @@
 
 use wk_material::{HydroOverrides, MaterialId, MaterialRegistry};
 
-use crate::cell::{water_capacity_with, Cell, Sat};
+use crate::cell::{permeability_cell, water_capacity_cell, water_capacity_with, Cell, Sat};
 use crate::chunk::{Chunk, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
@@ -70,6 +70,15 @@ pub(crate) fn seepage_rate_with(material: MaterialId, hydro: &HydroOverrides) ->
     ((p as i32 * 32) / 255).max(1)
 }
 
+#[inline]
+pub(crate) fn seepage_rate_cell(cell: Cell, hydro: &HydroOverrides) -> i32 {
+    let p = permeability_cell(cell, hydro);
+    if p == 0 {
+        return 0;
+    }
+    ((p as i32 * 32) / 255).max(1)
+}
+
 /// Surface / top-layer infiltration into a porous cell this step.
 ///
 /// Bone-dry ground takes only a trickle so most free water can run past
@@ -99,6 +108,20 @@ pub(crate) fn seepage_uptake_rate_with(
     //   sat→cap   → →base (clamped by free)
     let kick = (cap as i32 / 8).max(1);
     let scaled = (base * (sat as i32 + kick)) / (cap as i32 + kick);
+    scaled.max(1).min(free).min(base)
+}
+
+pub(crate) fn seepage_uptake_rate_cell(cell: Cell, hydro: &HydroOverrides, cap: u8) -> i32 {
+    let base = seepage_rate_cell(cell, hydro);
+    if base <= 0 || cap == 0 {
+        return 0;
+    }
+    let free = cap.saturating_sub(cell.sat.0) as i32;
+    if free <= 0 {
+        return 0;
+    }
+    let kick = (cap as i32 / 8).max(1);
+    let scaled = (base * (cell.sat.0 as i32 + kick)) / (cap as i32 + kick);
     scaled.max(1).min(free).min(base)
 }
 
@@ -134,8 +157,35 @@ pub(crate) fn seepage_conduct_rate_with(
     scaled.max(1).min(base)
 }
 
+pub(crate) fn seepage_conduct_rate_cells(
+    cell_a: Cell,
+    cap_a: u8,
+    cell_b: Cell,
+    cap_b: u8,
+    hydro: &HydroOverrides,
+) -> i32 {
+    let base = seepage_rate_cell(cell_a, hydro).min(seepage_rate_cell(cell_b, hydro));
+    if base <= 0 || cap_a == 0 || cap_b == 0 {
+        return 0;
+    }
+    let kick_a = (cap_a as i32 / 8).max(1);
+    let kick_b = (cap_b as i32 / 8).max(1);
+    let wa = cell_a.sat.0 as i32 + kick_a;
+    let wb = cell_b.sat.0 as i32 + kick_b;
+    let ca = cap_a as i32 + kick_a;
+    let cb = cap_b as i32 + kick_b;
+    let num = (wa * cb).min(wb * ca);
+    let den = ca * cb;
+    ((base * num) / den).max(1).min(base)
+}
+
 pub(crate) fn is_porous_solid_with(material: MaterialId, hydro: &HydroOverrides) -> bool {
     material != MaterialId::Air && water_capacity_with(material, hydro) > 0
+}
+
+#[inline]
+pub(crate) fn is_porous_cell(cell: Cell, hydro: &HydroOverrides) -> bool {
+    cell.material != MaterialId::Air && water_capacity_cell(cell, hydro) > 0
 }
 
 /// How far same-Y lake equalise looks for a drier surface cell / edge.

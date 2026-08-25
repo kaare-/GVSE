@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use wk_material::MaterialId;
 
+use crate::cell::water_capacity_cell;
+#[cfg(test)]
 use crate::cell::water_capacity;
 use crate::clouds::CloudStore;
 use crate::grid::World;
@@ -107,7 +109,7 @@ pub fn sat_totals(world: &World) -> SatTotals {
             }
             match cell.material {
                 MaterialId::Air => free_air += s,
-                m if water_capacity(m) > 0 => pore += s,
+                _ if water_capacity_cell(*cell, &world.hydro) > 0 => pore += s,
                 _ => {
                     // Impermeable with nonzero sat should be rare; still
                     // count it as pore-like so drift is visible.

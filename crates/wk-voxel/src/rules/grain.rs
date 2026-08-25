@@ -13,7 +13,7 @@ use wk_material::{HydroOverrides, MaterialId};
 use crate::active::{partition_checkerboard, plan_active, ActiveChunk};
 use crate::cell::{
     falls_through_empty_air, is_flow_erodible, is_grain, is_repose_grain,
-    water_capacity_with, Cell, CellFlags, Sat,
+    water_capacity_cell, Cell, CellFlags, Sat,
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fungi::{move_mycelium_meta, swap_cells_preserving_mycelium, swap_mycelium_meta};
@@ -1005,7 +1005,7 @@ fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)], waterlog_
         if surface.material != MaterialId::Air || !surface.sat.is_full() {
             continue;
         }
-        let cap = water_capacity_with(raft.material, &world.hydro);
+        let cap = water_capacity_cell(raft, &world.hydro);
         if cap == 0 {
             continue;
         }
@@ -2267,7 +2267,7 @@ fn write_repose_swap(
         || air_has_standing_water_neighbor(ptrs, wrap_width, dest_x, dest_y)
         || air_has_standing_water_neighbor(ptrs, wrap_width, src_x, src_y);
     if is_grain(src.material) && submerged && dest.sat.0 < 200 {
-        let cap = water_capacity_with(src.material, hydro);
+        let cap = water_capacity_cell(src, hydro);
         let room = cap.saturating_sub(src.sat.0);
         let into_pore = dest.sat.0.min(room);
         let mut placed = src;
@@ -2340,6 +2340,7 @@ fn steal_standing_water_neighbor(
         sat: Sat(sat),
         flags: CellFlags::empty(),
         _pad: 0,
+        pore: 128,
     })
 }
 
@@ -2874,6 +2875,7 @@ pub fn apply_flow_erosion_bound(
                 sat: leftover,
                 flags: CellFlags::empty(),
                 _pad: 0,
+                pore: cur.pore,
             },
         );
         applied = applied.wrapping_add(1);
@@ -2891,7 +2893,7 @@ fn absorb_free_water_into_grain(
     free: Sat,
     hydro: &HydroOverrides,
 ) -> (Cell, Sat) {
-    let cap = water_capacity_with(grain.material, hydro);
+    let cap = water_capacity_cell(grain, hydro);
     let room = cap.saturating_sub(grain.sat.0);
     let into_pore = free.0.min(room);
     let mut placed = grain;

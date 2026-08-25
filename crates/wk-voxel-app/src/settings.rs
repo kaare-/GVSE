@@ -6,12 +6,12 @@ use macroquad::prelude::*;
 use macroquad::ui::{hash, root_ui, widgets};
 use wk_material::{MaterialId, MaterialRegistry, MATERIAL_COUNT};
 use wk_voxel::{
-    list_all_presets, load_preset, save_preset, sanitize_preset_name, CarbonBudget, CarbonConfig,
-    ClimateConfig, CloudConfig, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, Genome,
-    GrainConfig, KarstConfig, OrographicConfig, PerfConfig, PhaseConfig, PlantGenePreset,
-    PlantGrowthCaps, RainConfig, SimPreset, SporeBankConfig, TempConfig, World, WorldgenParams,
-    CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
-    PRESET_DIR,
+    list_all_presets, load_preset, sanitize_preset_name, save_preset, CarbonBudget, CarbonConfig,
+    ClimateConfig, CloudConfig, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig,
+    FungiConfig, Genome, GrainConfig, KarstConfig, OrographicConfig, PerfConfig, PhaseConfig,
+    PlantGenePreset, PlantGrowthCaps, RainConfig, SimPreset, SporeBankConfig, TempConfig, World,
+    WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
+    MAX_STEM_MODULES, PRESET_DIR,
 };
 
 use crate::atmosphere::AtmosphereLookConfig;
@@ -154,9 +154,11 @@ pub struct SimSettings {
     /// Natural variance 0..1 — wind force and direction wander around the mean.
     pub wind_variance: f32,
     pub humidity_diffusion_alpha: f32,
-    /// Scratch f32s for material sliders (synced → world hydro overrides).
-    pub mat_perm: [f32; MATERIAL_COUNT],
-    pub mat_poro: [f32; MATERIAL_COUNT],
+    /// Scratch f32s for material range sliders (synced → world hydro overrides).
+    pub mat_perm_min: [f32; MATERIAL_COUNT],
+    pub mat_perm_max: [f32; MATERIAL_COUNT],
+    pub mat_poro_min: [f32; MATERIAL_COUNT],
+    pub mat_poro_max: [f32; MATERIAL_COUNT],
     /// Plant / fungus gene defaults (Tab → Plants).
     pub plant_genes: PlantGeneSettings,
     /// Set by UI when user clicks "Apply genes to living plants".
@@ -202,13 +204,17 @@ impl SimSettings {
         cond.max_prob_per_tick = 0.10;
         cond.mass_per_droplet = 40.0;
 
-        let mut mat_perm = [0.0f32; MATERIAL_COUNT];
-        let mut mat_poro = [0.0f32; MATERIAL_COUNT];
+        let mut mat_perm_min = [0.0f32; MATERIAL_COUNT];
+        let mut mat_perm_max = [0.0f32; MATERIAL_COUNT];
+        let mut mat_poro_min = [0.0f32; MATERIAL_COUNT];
+        let mut mat_poro_max = [0.0f32; MATERIAL_COUNT];
         for id in MaterialId::ALL_SOLIDS {
             let i = id as usize;
-            let base = MaterialRegistry::base_props(id);
-            mat_perm[i] = base.permeability as f32;
-            mat_poro[i] = base.porosity as f32;
+            let base = MaterialRegistry::hydrology(id);
+            mat_perm_min[i] = base.permeability.min as f32;
+            mat_perm_max[i] = base.permeability.max as f32;
+            mat_poro_min[i] = base.porosity.min as f32;
+            mat_poro_max[i] = base.porosity.max as f32;
         }
 
         Self {
@@ -272,8 +278,10 @@ impl SimSettings {
             wind_vx: 0.05,
             wind_variance: 0.55,
             humidity_diffusion_alpha: 0.15,
-            mat_perm,
-            mat_poro,
+            mat_perm_min,
+            mat_perm_max,
+            mat_poro_min,
+            mat_poro_max,
             plant_genes: PlantGeneSettings::default(),
             apply_genes_to_living: false,
             max_atoms: MAX_ATOMS as f32,
@@ -319,8 +327,10 @@ impl SimSettings {
             max_roots: self.max_roots,
             max_stems: self.max_stems,
             max_photos: self.max_photos,
-            mat_perm: self.mat_perm,
-            mat_poro: self.mat_poro,
+            mat_perm_min: self.mat_perm_min,
+            mat_perm_max: self.mat_perm_max,
+            mat_poro_min: self.mat_poro_min,
+            mat_poro_max: self.mat_poro_max,
         }
     }
 
@@ -375,8 +385,10 @@ impl SimSettings {
         self.max_roots = p.max_roots;
         self.max_stems = p.max_stems;
         self.max_photos = p.max_photos;
-        self.mat_perm = p.mat_perm;
-        self.mat_poro = p.mat_poro;
+        self.mat_perm_min = p.mat_perm_min;
+        self.mat_perm_max = p.mat_perm_max;
+        self.mat_poro_min = p.mat_poro_min;
+        self.mat_poro_max = p.mat_poro_max;
     }
 
     pub fn on_world_reseed(&mut self, params: &WorldgenParams) {
@@ -413,12 +425,16 @@ impl SimSettings {
         world.hydro.clear();
         for id in MaterialId::ALL_SOLIDS {
             let i = id as usize;
-            world
-                .hydro
-                .set_permeability(id, self.mat_perm[i].round() as u8);
-            world
-                .hydro
-                .set_porosity(id, self.mat_poro[i].round() as u8);
+            world.hydro.set_permeability_range(
+                id,
+                self.mat_perm_min[i].round() as u8,
+                self.mat_perm_max[i].round() as u8,
+            );
+            world.hydro.set_porosity_range(
+                id,
+                self.mat_poro_min[i].round() as u8,
+                self.mat_poro_max[i].round() as u8,
+            );
         }
     }
 
@@ -426,9 +442,11 @@ impl SimSettings {
         world.hydro.clear();
         for id in MaterialId::ALL_SOLIDS {
             let i = id as usize;
-            let base = MaterialRegistry::base_props(id);
-            self.mat_perm[i] = base.permeability as f32;
-            self.mat_poro[i] = base.porosity as f32;
+            let base = MaterialRegistry::hydrology(id);
+            self.mat_perm_min[i] = base.permeability.min as f32;
+            self.mat_perm_max[i] = base.permeability.max as f32;
+            self.mat_poro_min[i] = base.porosity.min as f32;
+            self.mat_poro_max[i] = base.porosity.max as f32;
         }
     }
 
@@ -1332,23 +1350,37 @@ impl SimSettings {
                 ui.separator();
 
                 ui.tree_node(hash!(), "Material permeability / porosity", |ui| {
-                    ui.label(None, "Affects seepage rate and water capacity.");
+                    ui.label(None, "Each cell samples inside these ranges; 0–0 is sealed.");
                     for id in MaterialId::ALL_SOLIDS {
                         let i = id as usize;
                         let name = material_short_name(id);
                         labeled_slider(
                             ui,
-                            hash!(name, "perm"),
-                            &format!("{name} permeability"),
+                            hash!(name, "perm_min"),
+                            &format!("{name} permeability min"),
                             0.0..255.0,
-                            &mut self.mat_perm[i],
+                            &mut self.mat_perm_min[i],
                         );
                         labeled_slider(
                             ui,
-                            hash!(name, "poro"),
-                            &format!("{name} porosity"),
+                            hash!(name, "perm_max"),
+                            &format!("{name} permeability max"),
                             0.0..255.0,
-                            &mut self.mat_poro[i],
+                            &mut self.mat_perm_max[i],
+                        );
+                        labeled_slider(
+                            ui,
+                            hash!(name, "poro_min"),
+                            &format!("{name} porosity min"),
+                            0.0..255.0,
+                            &mut self.mat_poro_min[i],
+                        );
+                        labeled_slider(
+                            ui,
+                            hash!(name, "poro_max"),
+                            &format!("{name} porosity max"),
+                            0.0..255.0,
+                            &mut self.mat_poro_max[i],
                         );
                     }
                     if ui.button(None, "Reset materials to defaults") {

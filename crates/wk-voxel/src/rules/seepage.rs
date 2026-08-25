@@ -7,14 +7,14 @@
 use wk_material::MaterialId;
 
 use crate::active::ActiveChunk;
-use crate::cell::{water_capacity_with, Cell, Sat};
+use crate::cell::{water_capacity_cell, Cell, Sat};
 use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
 use super::head::{
-    is_porous_solid_with, sat_move_to_equalize_heads, seepage_conduct_rate_with, seepage_rate_with,
-    seepage_uptake_rate_with,
+    is_porous_cell, sat_move_to_equalize_heads, seepage_conduct_rate_cells, seepage_rate_cell,
+    seepage_uptake_rate_cell,
 };
 use super::plan::{regions_for_standalone, regions_wet_loaded};
 
@@ -43,10 +43,10 @@ fn touch_downward_pore_front(
         let Some(cell) = world.get_cell(gx, yy) else {
             break;
         };
-        if !is_porous_solid_with(cell.material, hydro) {
+        if !is_porous_cell(cell, hydro) {
             break;
         }
-        let cap = water_capacity_with(cell.material, hydro);
+        let cap = water_capacity_cell(cell, hydro);
         if cap == 0 {
             break;
         }
@@ -99,10 +99,10 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                         let Some(below) = world.get_cell(gx, yy) else {
                             break;
                         };
-                        if !is_porous_solid_with(below.material, &hydro) {
+                        if !is_porous_cell(below, &hydro) {
                             break;
                         }
-                        let cap = water_capacity_with(below.material, &hydro);
+                        let cap = water_capacity_cell(below, &hydro);
                         if cap == 0 {
                             break;
                         }
@@ -115,8 +115,8 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                     for dx in [-1_i32, 1] {
                         let nx = world.wrap_x(gx + dx);
                         if let Some(n) = world.get_cell(nx, gy) {
-                            if is_porous_solid_with(n.material, &hydro) {
-                                let cap = water_capacity_with(n.material, &hydro);
+                            if is_porous_cell(n, &hydro) {
+                                let cap = water_capacity_cell(n, &hydro);
                                 if cap > 0 && n.sat.0 < cap {
                                     touches.push((nx, gy));
                                 }
@@ -125,10 +125,10 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                     }
                 }
 
-                if !is_porous_solid_with(cell.material, &hydro) {
+                if !is_porous_cell(cell, &hydro) {
                     continue;
                 }
-                let cap = water_capacity_with(cell.material, &hydro);
+                let cap = water_capacity_cell(cell, &hydro);
                 if cap == 0 || cell.sat.0 >= cap {
                     continue;
                 }
@@ -136,7 +136,7 @@ pub fn wake_lake_bed_pores(world: &mut World) {
                 if let Some(above) = world.get_cell(gx, gy + 1) {
                     if above.material == MaterialId::Air && above.sat.0 >= 160 {
                         feed = true;
-                    } else if is_porous_solid_with(above.material, &hydro)
+                    } else if is_porous_cell(above, &hydro)
                         && above.sat.0 > cell.sat.0
                     {
                         feed = true;
@@ -205,15 +205,15 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
             let gx = world.wrap_x(base_gx + lx);
             let lo = lo_chunk.get(lx as usize, (ch - 1) as usize);
             let hi = hi_chunk.get(lx as usize, 0);
-            let lo_pore = is_porous_solid_with(lo.material, &hydro);
-            let hi_pore = is_porous_solid_with(hi.material, &hydro);
+            let lo_pore = is_porous_cell(lo, &hydro);
+            let hi_pore = is_porous_cell(hi, &hydro);
             let lo_air = lo.material == MaterialId::Air && lo.sat.0 >= 160;
             let hi_air = hi.material == MaterialId::Air && hi.sat.0 >= 160;
             if !((lo_pore || lo_air) && (hi_pore || hi_air)) {
                 continue;
             }
-            let lo_cap = water_capacity_with(lo.material, &hydro);
-            let hi_cap = water_capacity_with(hi.material, &hydro);
+            let lo_cap = water_capacity_cell(lo, &hydro);
+            let hi_cap = water_capacity_cell(hi, &hydro);
             let lo_room = lo_pore && lo_cap > 0 && lo.sat.0 < lo_cap;
             let hi_room = hi_pore && hi_cap > 0 && hi.sat.0 < hi_cap;
             let lo_wet = lo.sat.0 > 0;
@@ -233,8 +233,8 @@ pub fn wake_vertical_chunk_seam_pores(world: &mut World) {
                 let Some(c) = world.get_cell(gx, yy) else {
                     continue;
                 };
-                if is_porous_solid_with(c.material, &hydro) {
-                    let cap = water_capacity_with(c.material, &hydro);
+                if is_porous_cell(c, &hydro) {
+                    let cap = water_capacity_cell(c, &hydro);
                     if cap > 0 && (c.sat.0 < cap || c.sat.0 > 0) {
                         touches.push((gx, yy));
                     }
@@ -381,7 +381,7 @@ pub fn apply_seepage_regions_ex(
         let Some(dst) = world.get_cell(to.0, to.1) else {
             continue;
         };
-        let cap_dst = water_capacity_with(dst.material, &world.hydro) as i32;
+        let cap_dst = water_capacity_cell(dst, &world.hydro) as i32;
         if cap_dst == 0 {
             continue;
         }
@@ -441,11 +441,11 @@ fn accumulate_seepage_xfers_ex(
                 let lx = x as i32;
                 let gx = world.wrap_x(base_gx + lx);
                 let a = chunk.get(x as usize, y as usize);
-                let cap_a = water_capacity_with(a.material, &hydro);
+                let cap_a = water_capacity_cell(a, &hydro);
                 if cap_a == 0 {
                     continue;
                 }
-                let a_solid = is_porous_solid_with(a.material, &hydro);
+                let a_solid = is_porous_cell(a, &hydro);
                 // Air–Air / impermeable–impermeable edges are no-ops —
                 // check materials before head math. Dominates rainy
                 // ocean shore halos.
@@ -458,7 +458,7 @@ fn accumulate_seepage_xfers_ex(
                     let Some(b) = read(lx + dx, ly + dy, nx, ny) else {
                         continue;
                     };
-                    let b_solid = is_porous_solid_with(b.material, &hydro);
+                    let b_solid = is_porous_cell(b, &hydro);
                     if !a_solid && !b_solid {
                         continue;
                     }
@@ -467,7 +467,7 @@ fn accumulate_seepage_xfers_ex(
                     if contact_only && a_solid && b_solid {
                         continue;
                     }
-                    let cap_b = water_capacity_with(b.material, &hydro);
+                    let cap_b = water_capacity_cell(b, &hydro);
                     if cap_b == 0 {
                         continue;
                     }
@@ -574,23 +574,21 @@ fn accumulate_seepage_xfers_ex(
                         // front). Full vertical min-perm piped a residual
                         // film to bedrock and left a "dry" mid gap under
                         // hill dumps — looked like teleported groundwater.
-                        seepage_conduct_rate_with(
-                            a.material, &hydro, a.sat.0, cap_a, b.material, b.sat.0, cap_b,
-                        )
+                        seepage_conduct_rate_cells(a, cap_a, b, cap_b, &hydro)
                     } else if move_amt > 0 {
                         // A → B: infiltrating into B, or A weeping into Air.
                         if b_solid {
                             if a.material == MaterialId::Air && a.sat.0 >= 160 {
                                 if standing_air_is_runoff(world, &read, gx, gy, lx, ly) {
-                                    seepage_uptake_rate_with(b.material, &hydro, b.sat.0, cap_b)
+                                    seepage_uptake_rate_cell(b, &hydro, cap_b)
                                 } else {
-                                    seepage_rate_with(b.material, &hydro)
+                                    seepage_rate_cell(b, &hydro)
                                 }
                             } else {
-                                seepage_uptake_rate_with(b.material, &hydro, b.sat.0, cap_b)
+                                seepage_uptake_rate_cell(b, &hydro, cap_b)
                             }
                         } else {
-                            seepage_rate_with(a.material, &hydro)
+                            seepage_rate_cell(a, &hydro)
                         }
                     } else {
                         // B → A: infiltrating into A, or B weeping into Air.
@@ -598,15 +596,15 @@ fn accumulate_seepage_xfers_ex(
                             if b.material == MaterialId::Air && b.sat.0 >= 160 {
                                 if standing_air_is_runoff(world, &read, nx, ny, lx + dx, ly + dy)
                                 {
-                                    seepage_uptake_rate_with(a.material, &hydro, a.sat.0, cap_a)
+                                    seepage_uptake_rate_cell(a, &hydro, cap_a)
                                 } else {
-                                    seepage_rate_with(a.material, &hydro)
+                                    seepage_rate_cell(a, &hydro)
                                 }
                             } else {
-                                seepage_uptake_rate_with(a.material, &hydro, a.sat.0, cap_a)
+                                seepage_uptake_rate_cell(a, &hydro, cap_a)
                             }
                         } else {
-                            seepage_rate_with(b.material, &hydro)
+                            seepage_rate_cell(b, &hydro)
                         }
                     };
                     // Fully saturated faces weep faster into open Air
@@ -768,10 +766,10 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
         for y in 0..CHUNK_CELLS_H {
             for x in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(x, y);
-                if !is_porous_solid_with(cell.material, &hydro) {
+                if !is_porous_cell(cell, &hydro) {
                     continue;
                 }
-                let cap = water_capacity_with(cell.material, &hydro);
+                let cap = water_capacity_cell(cell, &hydro);
                 // Need a meaningful donor — residual film only skipped.
                 if cap == 0 || cell.sat.0 <= 2 {
                     continue;
@@ -800,7 +798,7 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
                         let Some(n) = world.get_cell(nx, ny) else {
                             continue;
                         };
-                        if is_porous_solid_with(n.material, &hydro) && n.sat.0 > 0 {
+                        if is_porous_cell(n, &hydro) && n.sat.0 > 0 {
                             touches.push((nx, ny));
                         }
                     }

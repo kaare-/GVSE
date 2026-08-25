@@ -51,7 +51,8 @@ pub use audit::{
 pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{
     falls_through_empty_air, grain_max_stable_step, hosts_mycelium, is_flow_erodible, is_grain,
-    is_repose_grain, water_capacity, water_capacity_with, Cell, CellFlags, Sat,
+    is_repose_grain, permeability_cell, water_capacity, water_capacity_cell, water_capacity_with,
+    Cell, CellFlags, Sat,
 };
 pub use chunk::{
     material_is_loose, Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W,

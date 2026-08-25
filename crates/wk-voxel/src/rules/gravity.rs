@@ -7,7 +7,7 @@
 use wk_material::MaterialId;
 
 use crate::active::{partition_checkerboard, ActiveChunk};
-use crate::cell::{water_capacity_with, Cell, Sat};
+use crate::cell::{water_capacity_cell, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::for_each_region_parallel;
@@ -116,11 +116,11 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 }
             }
         };
-        let mobile_cap = |m: MaterialId| -> u8 {
-            if m == MaterialId::Air {
+        let mobile_cap = |cell: Cell| -> u8 {
+            if cell.material == MaterialId::Air {
                 u8::MAX
             } else {
-                water_capacity_with(m, &hydro)
+                water_capacity_cell(cell, &hydro)
             }
         };
         // Walled pond, or stacked lake away from an immediate dry face.
@@ -198,7 +198,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 if above.sat.is_empty() {
                     continue;
                 }
-                if mobile_cap(above.material) == 0 {
+                if mobile_cap(above) == 0 {
                     continue;
                 }
                 any_mobile = true;
@@ -218,7 +218,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                         None => continue,
                     },
                 };
-                let cap = mobile_cap(cur.material);
+                let cap = mobile_cap(cur);
                 if cap == 0 {
                     continue;
                 }
@@ -229,7 +229,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 let Some(above) = read_xy(x, y as i32 + 1) else {
                     continue;
                 };
-                if above.sat.is_empty() || mobile_cap(above.material) == 0 {
+                if above.sat.is_empty() || mobile_cap(above) == 0 {
                     next_cur = Some(above);
                     continue;
                 }

@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::blueprint::Genome;
+use crate::cell::water_capacity_cell;
+#[cfg(test)]
 use crate::cell::water_capacity;
 use crate::grid::World;
 use crate::organism::{
@@ -413,7 +415,7 @@ pub(crate) fn cell_moisture_frac(world: &World, gx: i32, gy: i32) -> f32 {
     if cell.material == MaterialId::Air {
         return 0.0;
     }
-    let cap = water_capacity(cell.material);
+    let cap = water_capacity_cell(cell, &world.hydro);
     if cap == 0 {
         return 0.0;
     }
@@ -669,7 +671,7 @@ fn sip_porous(world: &mut World, gx: i32, gy: i32, want: u8) -> Option<u8> {
     if cell.material == MaterialId::Air {
         return None;
     }
-    let cap = water_capacity(cell.material);
+    let cap = water_capacity_cell(cell, &world.hydro);
     if cap == 0 || cell.sat.0 == 0 {
         return None;
     }
@@ -716,7 +718,8 @@ pub fn leave_dead_roots_in_place(world: &mut World, atom: &Atom) -> u32 {
         match c.material {
             MaterialId::Sand | MaterialId::Clay | MaterialId::Soil => {
                 let mut org = Cell::solid(MaterialId::Organic);
-                let cap = water_capacity(MaterialId::Organic);
+                org.pore = c.pore;
+                let cap = water_capacity_cell(org, &world.hydro);
                 org.sat.0 = if cap > 0 { c.sat.0.min(cap) } else { 0 };
                 world.set_cell(wx, wy, org);
                 painted += 1;
@@ -974,7 +977,7 @@ fn plantable_crown(world: &World, gx: i32, nucleus_y: i32) -> bool {
     if below.material == MaterialId::Air {
         return false;
     }
-    water_capacity(below.material) > 0
+    water_capacity_cell(below, &world.hydro) > 0
 }
 
 fn fungus_crown(world: &World, gx: i32, nucleus_y: i32) -> bool {
@@ -1010,11 +1013,11 @@ fn fungus_seat_score(world: &World, gx: i32, nucleus_y: i32) -> i32 {
         MaterialId::Organic => 140 + (below.mycelium() as i32 / 4),
         MaterialId::Soil => 110,
         MaterialId::Sand => {
-            let cap = water_capacity(MaterialId::Sand).max(1);
+            let cap = water_capacity_cell(below, &world.hydro).max(1);
             40 + (below.sat.0 as i32 * 40) / cap as i32
         }
         MaterialId::Clay => 30,
-        _ if water_capacity(below.material) > 0 => 10,
+        _ if water_capacity_cell(below, &world.hydro) > 0 => 10,
         _ => 1, // bare rock / ice-adjacent solids — allowed but poor
     }
 }

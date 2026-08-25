@@ -23,9 +23,11 @@ use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
 
 use crate::active::ActiveChunk;
 use crate::cell::{
-    falls_through_empty_air, grain_max_stable_step, is_competent_rock, is_grain, water_capacity,
-    water_capacity_with, Cell, CellFlags, Sat,
+    falls_through_empty_air, grain_max_stable_step, is_competent_rock, is_grain,
+    water_capacity_cell, Cell, CellFlags, Sat,
 };
+#[cfg(test)]
+use crate::cell::water_capacity;
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fungi::move_mycelium_meta;
 use crate::grid::World;
@@ -115,7 +117,7 @@ pub fn pore_wetness(cell: Cell) -> f32 {
 
 /// [`pore_wetness`] with an explicit hydrology override table.
 pub fn pore_wetness_with(cell: Cell, hydro: &wk_material::HydroOverrides) -> f32 {
-    let cap = water_capacity_with(cell.material, hydro);
+    let cap = water_capacity_cell(cell, hydro);
     if cap == 0 {
         return 0.0;
     }
@@ -477,7 +479,8 @@ fn collapse_one_ceiling(world: &mut World, gx: i32, gy: i32) -> bool {
     }
 
     let debris_mat = roof_collapse_debris(roof.material);
-    let cap = water_capacity_with(debris_mat, &world.hydro);
+    let debris_template = Cell { material: debris_mat, ..roof };
+    let cap = water_capacity_cell(debris_template, &world.hydro);
     let mut debris_sat = roof.sat.0.min(cap);
     let mut leftover = below.sat.0.saturating_add(roof.sat.0.saturating_sub(debris_sat));
     if cap > debris_sat {
@@ -496,6 +499,7 @@ fn collapse_one_ceiling(world: &mut World, gx: i32, gy: i32) -> bool {
         sat: Sat(leftover),
         flags: Default::default(),
         _pad: 0,
+        pore: roof.pore,
     };
     world.set_cell(gx, gy - 1, debris);
     world.set_cell(gx, gy, vacated);
@@ -715,7 +719,8 @@ fn shear_one_face(
         return false;
     }
     let debris_mat = shear_weaken_debris(cell.material);
-    let cap = water_capacity_with(debris_mat, &world.hydro);
+    let debris_template = Cell { material: debris_mat, ..cell };
+    let cap = water_capacity_cell(debris_template, &world.hydro);
     let debris = Cell {
         material: debris_mat,
         sat: Sat(cell.sat.0.min(cap)),
@@ -734,13 +739,13 @@ fn is_compactable(material: MaterialId) -> bool {
 }
 
 /// Sand only compacts when already quite wet; Clay/Organic always eligible.
-fn compactable_sat_ok(material: MaterialId, sat: u8) -> bool {
-    if sat < COMPACTION_MIN_SAT {
+fn compactable_sat_ok(cell: Cell, hydro: &wk_material::HydroOverrides) -> bool {
+    if cell.sat.0 < COMPACTION_MIN_SAT {
         return false;
     }
-    if material == MaterialId::Sand {
-        let cap = water_capacity(MaterialId::Sand);
-        return cap > 0 && (sat as f32 / cap as f32) >= 0.5;
+    if cell.material == MaterialId::Sand {
+        let cap = water_capacity_cell(cell, hydro);
+        return cap > 0 && (cell.sat.0 as f32 / cap as f32) >= 0.5;
     }
     true
 }
@@ -782,7 +787,7 @@ fn find_exude_target(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
         let Some(c) = world.get_cell(gx, ty) else {
             break;
         };
-        let cap = water_capacity(c.material);
+        let cap = water_capacity_cell(c, &world.hydro);
         if cap == 0 {
             // Impermeable solid blocks the path (Bedrock / Ice).
             if c.material != MaterialId::Air {
@@ -836,7 +841,7 @@ pub fn apply_compaction_regions(
                 if !is_compactable(cell.material) {
                     continue;
                 }
-                if !compactable_sat_ok(cell.material, cell.sat.0) {
+                if !compactable_sat_ok(cell, &world.hydro) {
                     continue;
                 }
                 if !compaction_load_ok(world, gx, gy, use_map, geotech) {
@@ -876,7 +881,7 @@ fn compact_one(
         return false;
     };
     if !is_compactable(src.material)
-        || !compactable_sat_ok(src.material, src.sat.0)
+        || !compactable_sat_ok(src, &world.hydro)
         || !compaction_load_ok(world, gx, gy, use_map, geotech)
     {
         return false;
@@ -887,7 +892,7 @@ fn compact_one(
     let Some(dst) = world.get_cell(tx, ty) else {
         return false;
     };
-    let cap = water_capacity_with(dst.material, &world.hydro);
+    let cap = water_capacity_cell(dst, &world.hydro);
     let free = cap.saturating_sub(dst.sat.0);
     if free == 0 {
         return false;

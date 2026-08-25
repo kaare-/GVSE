@@ -28,7 +28,9 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::blueprint::{ensure_symbiont_inherited, mutate_body, Genome};
-use crate::cell::{hosts_mycelium, water_capacity, Cell, CellFlags};
+use crate::cell::{hosts_mycelium, water_capacity_cell, Cell, CellFlags};
+#[cfg(test)]
+use crate::cell::water_capacity;
 use crate::grid::World;
 use crate::organism::{Atom, BodyModule, ModuleId};
 use crate::plant::{apply_genome, find_fungus_slot_biased, pin_plant_pose};
@@ -334,7 +336,7 @@ pub fn fungus_moisture_frac(world: &World, atom: &Atom) -> f32 {
                 }
                 continue;
             }
-            let cap = water_capacity(c.material);
+            let cap = water_capacity_cell(c, &world.hydro);
             if cap > 0 {
                 best = best.max(c.sat.0 as f32 / cap as f32);
             }
@@ -1148,7 +1150,7 @@ fn organic_cell_moist_frac(world: &World, gx: i32, gy: i32) -> f32 {
     let mut best = 0.0f32;
     if let Some(c) = world.get_cell(gx, gy) {
         if c.material != MaterialId::Air {
-            let cap = water_capacity(c.material);
+            let cap = water_capacity_cell(c, &world.hydro);
             if cap > 0 {
                 best = best.max(c.sat.0 as f32 / cap as f32);
             }
@@ -1375,7 +1377,7 @@ pub fn pull_mycelium_cargo_to(
     if dst0.mycelium() == 0 || !hosts_mycelium(dst0.material) {
         return (0, 0);
     }
-    let dst_cap = water_capacity(dst0.material);
+    let dst_cap = water_capacity_cell(dst0, &world.hydro);
     let mut sugar_got = 0u8;
     let mut water_got = 0u8;
 
@@ -1440,7 +1442,7 @@ pub fn pull_mycelium_cargo_to(
                     if sc.mycelium() == 0 || !hosts_mycelium(sc.material) || sc.sat.0 == 0 {
                         continue;
                     }
-                    let scap = water_capacity(sc.material);
+                    let scap = water_capacity_cell(sc, &world.hydro);
                     if scap == 0 {
                         continue;
                     }
@@ -1497,7 +1499,7 @@ pub fn equalize_mycelium_cargo(world: &mut World, colonized: &[(i32, i32, u8, Ma
         let src_sat = world.get_cell(gx, gy).map(|c| c.sat.0).unwrap_or(0);
         let src_cap = world
             .get_cell(gx, gy)
-            .map(|c| water_capacity(c.material))
+            .map(|c| water_capacity_cell(c, &world.hydro))
             .unwrap_or(0);
         let moist = organic_cell_moist_frac(world, gx, gy);
         // Dry / broke tips request a network pull after adjacent bleed.
@@ -1528,7 +1530,7 @@ pub fn equalize_mycelium_cargo(world: &mut World, colonized: &[(i32, i32, u8, Ma
                     best_sugar = Some((nx, ny, ns));
                 }
             }
-            let ncap = water_capacity(nc.material);
+            let ncap = water_capacity_cell(nc, &world.hydro);
             if src_cap > 0 && ncap > 0 && nc.sat.0 < ncap && src_sat > nc.sat.0.saturating_add(1) {
                 if best_water
                     .map(|(_, _, s, _)| nc.sat.0 < s)
@@ -1564,7 +1566,7 @@ pub fn equalize_mycelium_cargo(world: &mut World, colonized: &[(i32, i32, u8, Ma
         let Some(mut dst) = world.get_cell(nx, ny) else {
             continue;
         };
-        let dcap = water_capacity(dst.material);
+        let dcap = water_capacity_cell(dst, &world.hydro);
         if dcap == 0 || src.sat.0 == 0 || dst.sat.0 >= dcap {
             continue;
         }
@@ -1682,7 +1684,7 @@ fn push_excess_sat(world: &mut World, gx: i32, gy: i32, mut excess: u8) {
         let Some(mut c) = world.get_cell(nx, ny) else {
             continue;
         };
-        let cap = world.water_capacity(c.material);
+        let cap = water_capacity_cell(c, &world.hydro);
         if cap == 0 || c.sat.0 >= cap {
             continue;
         }
@@ -1721,10 +1723,11 @@ pub fn compost_organic_to_soil(world: &mut World, gx: i32, gy: i32) -> bool {
     }
     let old_sat = c.sat.0;
     let prior_myc = c.mycelium();
-    let cap = world.water_capacity(MaterialId::Soil);
+    let mut soil = Cell::solid(MaterialId::Soil);
+    soil.pore = c.pore;
+    let cap = water_capacity_cell(soil, &world.hydro);
     let keep = if cap > 0 { old_sat.min(cap) } else { 0 };
     let excess = old_sat.saturating_sub(keep);
-    let mut soil = Cell::solid(MaterialId::Soil);
     soil.sat.0 = keep;
     soil.flags.set(CellFlags::COMPACTED);
     // Residual ≤ prior intensity — never invent cream on virgin Organic.
@@ -2658,7 +2661,8 @@ pub fn dissolve_corpse_to_organic(
                 // Sand / stone / clay / soil / Organic → Organic residue.
                 // Preserve pore sat so dissolve doesn't destroy water mass.
                 let mut org = Cell::solid(MaterialId::Organic);
-                let cap = water_capacity(MaterialId::Organic);
+                org.pore = c.pore;
+                let cap = water_capacity_cell(org, &world.hydro);
                 org.sat.0 = if cap > 0 { c.sat.0.min(cap) } else { 0 };
                 world.set_cell(wx, wy, org);
                 painted += 1;
