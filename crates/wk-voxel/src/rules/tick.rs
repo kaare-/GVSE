@@ -109,10 +109,20 @@ pub const FLOW_SUBSTEPS_EO_AFTER: usize = 4;
 /// don't need the full ×8. Busy rain / cascades stay at max.
 pub const FLOW_QUIET_AREA: usize = 512;
 
-/// Pore seepage + lake-bed wake cadence (ticks). Surface gravity/flow
-/// still run every tick; underground stays cadence-gated. Dropping this
-/// to 2 smeared stone wetting fronts (contact sat never ponded).
-pub const SEEPAGE_EVERY: u64 = 4;
+/// Pore seepage + lake-bed / seam wake cadence (ticks).
+///
+/// Surface gravity and flow run **every** tick; everything that only moves
+/// water *inside* materials is gated here. Once water has entered pore
+/// `sat` it is no longer time-critical, so it may lag the surface.
+/// Measured per call on the 2048×384 stress world:
+/// `apply_seepage_seam_coupling` 10.2 ms, `wake_pore_weep_into_air` 2.0,
+/// `wake_lake_bed_pores` 1.9, `apply_seepage_regions` 3.8,
+/// `wake_vertical_chunk_seam_pores` 0.1. The coupling pass alone used to
+/// run every tick.
+///
+/// Do not drop this to 2: that smeared stone wetting fronts (contact sat
+/// never ponded) and left open-basin beds short of capacity.
+pub const SEEPAGE_EVERY: u64 = 5;
 
 /// Live-tunable physics trade-offs (Tab → Performance).
 ///
@@ -378,11 +388,13 @@ fn tick_with_life_inner(
     let mut local = PhysicsTimings::default();
 
     crate::parallel::set_parallel_enabled(perf.parallel_physics);
-    // Lake-bed wake every tick so gravity can keep infiltrating quiet
-    // ponds (including across the y=63|64 seam). Full pore seepage stays
-    // cadence-gated on the interactive path — underground is lower priority.
+    // Underground is not time-critical: pore water that has already entered
+    // a material may lag the surface. The lake-bed / seam wakes ride the
+    // same cadence as seepage itself — they only exist to re-dirty pore
+    // fronts, and running them every tick also kept that halo (and so every
+    // other pass's scan) open on ticks where no seepage would follow.
     let run_seepage = !perf.flow_quiet_early_out || world.tick % SEEPAGE_EVERY == 0;
-    {
+    if run_seepage {
         let t0 = profile.then(Instant::now);
         super::seepage::wake_lake_bed_pores(world);
         super::seepage::wake_vertical_chunk_seam_pores(world);
@@ -515,18 +527,27 @@ fn tick_with_life_inner(
             (false, false) => merge_active_regions(dirty, flow_halo),
         }
     };
-    if run_seepage && !flow_active.is_empty() {
+    if !flow_active.is_empty() {
         let t0 = profile.then(Instant::now);
-        apply_seepage_regions(world, &flow_active);
+        if run_seepage {
+            // Deep pass: includes peer pore↔pore percolation.
+            apply_seepage_regions(world, &flow_active);
+        } else {
+            // Interface only. Percolation inside materials is geological,
+            // but the contact between fast surface water and slow
+            // groundwater must be resolved every tick, or the surface
+            // layers carry the wrong saturation (and deposition with it).
+            super::seepage::apply_seepage_contact_regions(world, &flow_active);
+        }
         if let (true, Some(t0)) = (profile, t0) {
             local.seepage += t0.elapsed();
         }
     }
-    // Vertical chunk seams must couple every tick — quiet EO only runs
-    // full seepage every [`SEEPAGE_EVERY`] ticks, which left pore rows
-    // at y=63|64 equalising horizontally for 160k+ ticks without
-    // waking the chunk below (playtest shelf).
-    {
+    // Vertical chunk seam coupling is pure underground conduction (measured
+    // 10.2 ms/call on the stress world) — it rides the seepage cadence.
+    // It must not be skipped *entirely*, or pore rows at y=63|64 equalise
+    // sideways forever without waking the chunk below (playtest shelf).
+    if run_seepage {
         let t0 = profile.then(Instant::now);
         super::seepage::apply_seepage_seam_coupling(world);
         if let (true, Some(t0)) = (profile, t0) {

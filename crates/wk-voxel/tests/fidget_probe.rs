@@ -225,6 +225,58 @@ fn report(label: &str, s: &mut Scene, weather: bool, ticks: u64) {
     }
 }
 
+/// Split the "seepage" bucket: which pore pass actually costs?
+///
+/// `SEEPAGE_EVERY` already gates `apply_seepage_regions` to every 4th tick,
+/// but the lake-bed / seam **wakes** and seam coupling run every tick and
+/// land in the same timing bucket.
+#[test]
+#[ignore]
+fn pore_pass_cost_split() {
+    use std::time::Instant;
+    use wk_voxel::{
+        apply_seepage_regions, apply_seepage_seam_coupling, wake_lake_bed_pores,
+        wake_pore_weep_into_air, wake_vertical_chunk_seam_pores,
+    };
+
+    let mut s = scene(32);
+    for _ in 0..WARM {
+        frame(&mut s, true);
+    }
+    let n = 20;
+    let mut lake = 0.0;
+    let mut seam_wake = 0.0;
+    let mut weep = 0.0;
+    let mut coupling = 0.0;
+    let mut apply = 0.0;
+    for _ in 0..n {
+        frame(&mut s, true);
+        let t = Instant::now();
+        wake_lake_bed_pores(&mut s.world);
+        lake += t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        wake_vertical_chunk_seam_pores(&mut s.world);
+        seam_wake += t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        wake_pore_weep_into_air(&mut s.world);
+        weep += t.elapsed().as_secs_f64() * 1000.0;
+        let t = Instant::now();
+        apply_seepage_seam_coupling(&mut s.world);
+        coupling += t.elapsed().as_secs_f64() * 1000.0;
+        let plan = plan_active(&s.world);
+        let t = Instant::now();
+        apply_seepage_regions(&mut s.world, &plan);
+        apply += t.elapsed().as_secs_f64() * 1000.0;
+    }
+    let n = n as f64;
+    println!("  per call, ms:");
+    println!("    wake_lake_bed_pores            {:>7.2}", lake / n);
+    println!("    wake_vertical_chunk_seam_pores {:>7.2}", seam_wake / n);
+    println!("    wake_pore_weep_into_air        {:>7.2}", weep / n);
+    println!("    apply_seepage_seam_coupling    {:>7.2}", coupling / n);
+    println!("    apply_seepage_regions          {:>7.2}", apply / n);
+}
+
 /// Is the pore churn a moving front, or a ±1 ping-pong that never settles?
 #[test]
 #[ignore]
