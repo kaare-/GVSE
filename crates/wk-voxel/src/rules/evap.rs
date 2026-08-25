@@ -277,5 +277,12 @@ fn apply_evap_deltas(
                 ..cell
             },
         );
+        // Vapour leaves its mineral behind. This is what builds a mound at an
+        // evaporating spring outlet: water arrives carrying load, departs
+        // without it. Concentration first, then the whole load once dry.
+        crate::mineral::precipitate_at(world, gx, gy);
+        if new_sat == 0 {
+            crate::mineral::precipitate_dry_cell(world, gx, gy);
+        }
     }
 }

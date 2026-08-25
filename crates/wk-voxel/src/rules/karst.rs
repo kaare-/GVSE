@@ -247,7 +247,13 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
     // in cy/cx order; sort cells so outcome matches serial history).
     converts.sort_by(|a, b| a.1.cmp(&b.1).then(a.0.cmp(&b.0)));
     for (gx, gy, cell) in converts {
+        // Rock does not vanish: record what it was so the mineral becomes
+        // dissolved load in the water now standing where it used to be.
+        let was = world.get_cell(gx, gy).map(|c| c.material);
         world.set_cell(gx, gy, cell);
+        if let Some(mat) = was {
+            crate::mineral::emit_from_dissolved_rock(world, gx, gy, mat);
+        }
     }
 }
 

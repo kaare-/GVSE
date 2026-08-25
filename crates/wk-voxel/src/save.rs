@@ -47,7 +47,8 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// v11: sym_net_flow gains harvest (water_in / sugar_out) ledger fields.
 /// v12: [`World::mycelium_strain_lineage`] strain→treaty map for strain trade.
 /// v13: `Cell::pore` + ranged `HydroOverrides`; no migration by design.
-pub const SIM_SCHEMA_VERSION: u32 = 13;
+/// v14: [`World::dissolved`] mineral load (karst became a transport loop).
+pub const SIM_SCHEMA_VERSION: u32 = 14;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,6 +95,7 @@ impl WorldV5 {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
+            dissolved: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
@@ -136,6 +138,7 @@ impl WorldV6 {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
+            dissolved: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
@@ -183,6 +186,7 @@ impl WorldV7 {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: HashMap::new(),
+            dissolved: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
@@ -239,6 +243,7 @@ impl WorldV8 {
             mycelium_strains: self.mycelium_strains,
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: HashMap::new(),
+            dissolved: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
@@ -289,6 +294,7 @@ impl WorldV11 {
             mycelium_strains: self.mycelium_strains,
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: self.mycelium_energy,
+            dissolved: HashMap::new(),
             sym_net_flow: self.sym_net_flow,
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
@@ -380,6 +386,7 @@ impl WorldV10 {
             mycelium_strains: self.mycelium_strains,
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: self.mycelium_energy,
+            dissolved: HashMap::new(),
             sym_net_flow: self
                 .sym_net_flow
                 .into_iter()
@@ -447,6 +454,7 @@ impl WorldV9 {
             mycelium_strains: self.mycelium_strains,
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: self.mycelium_energy,
+            dissolved: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),

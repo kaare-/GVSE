@@ -5296,6 +5296,57 @@ fn karst_skips_chunks_without_limestone_flag() {
     assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Air);
 }
 
+#[test]
+fn karst_dissolve_conserves_mineral_as_dissolved_load() {
+    // Rock must not simply cease to exist: what dissolves becomes load.
+    let mut w = setup_limestone_world();
+    w.set_cell(10, 11, Cell::water());
+    let before = crate::audit::mineral_total(&w);
+    let cfg = KarstConfig {
+        prob_per_wet_neighbour: 1.0,
+        min_wet_neighbour_sat: 200,
+        seed_salt: 42,
+        period_ticks: 1,
+        ..Default::default()
+    };
+    apply_karst_dissolution(&mut w, &cfg);
+    assert_eq!(
+        w.get_cell(10, 10).unwrap().material,
+        MaterialId::Air,
+        "precondition: the limestone dissolved"
+    );
+    assert!(
+        crate::mineral::dissolved_at(&w, 10, 10) > 0,
+        "dissolving rock must emit mineral load into its water"
+    );
+    assert_eq!(
+        crate::audit::mineral_total(&w),
+        before,
+        "dissolve must conserve total mineral (rock + load)"
+    );
+}
+
+#[test]
+fn evaporating_outlet_deposits_mineral_it_carried() {
+    // A dry cell holding a full cell's worth of load leaves a deposit, and the
+    // mineral total is unchanged across the precipitation.
+    let mut w = setup_column_world();
+    w.set_cell(4, 1, Cell::air());
+    crate::mineral::add_dissolved(&mut w, 4, 1, crate::mineral::MINERAL_PER_CELL);
+    let before = crate::audit::mineral_total(&w);
+    crate::mineral::precipitate_dry_cell(&mut w, 4, 1);
+    assert_eq!(
+        w.get_cell(4, 1).unwrap().material,
+        crate::mineral::DEPOSIT_MATERIAL,
+        "an evaporated outlet should build a mineral deposit"
+    );
+    assert_eq!(
+        crate::audit::mineral_total(&w),
+        before,
+        "precipitation must conserve total mineral"
+    );
+}
+
 fn saturate_cell(world: &mut World, gx: i32, gy: i32) {
     let mut cell = world.get_cell(gx, gy).expect("cell");
     cell.sat = Sat(water_capacity(cell.material));

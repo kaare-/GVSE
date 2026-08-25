@@ -103,29 +103,50 @@ wetness. Wetness is nearly uniform inside the front, so dissolution scatters —
 exactly the "random erosion events all over" being reported. Nothing rewards a
 cell for being on the path that actually carries water.
 
-**Model:** accumulate transported volume per cell, and make dissolution a
-function of accumulated flux rather than instantaneous wetness.
+**Model:** make dissolution a function of transported volume rather than
+instantaneous wetness — and use **`pore` itself as the aperture state** instead
+of a separate counter.
 
-- Storage: `Cell` has **no spare byte** (`material`, `sat`, `flags`,
-  `_pad` = mycelium, `pore`). Use a **sparse per-cell map on `World`**, exactly
-  like `mycelium_energy`: `pore_flux: HashMap<(i32, i32), u16>`. Only cells that
-  have carried water are stored, so a dry world costs nothing. Serialize it —
-  flux history is world state, and losing it on load would reset conduits.
-- Accrual: seepage and gravity already compute a per-edge `move_amt`. Add it to
-  the receiving (and/or donating) cell's flux. Saturating at `u16::MAX`.
-- Decay: a slow global decay so abandoned paths fade and the map stays sparse.
-- Dissolution: replace the wetness roll with a flux threshold plus rate, scaled
-  by material solubility. Limestone dissolves at a modest flux; stone needs far
-  more. Both slower than the surface path, which stays as-is.
-- **The feedback loop is the point.** Dissolving raises the cell's `pore`, which
-  raises permeability, which raises flux, which accelerates dissolution. That is
-  what turns a diffuse front into a conduit. It also needs a brake — see below.
+A dedicated `flux: HashMap<(i32, i32), u16>` (in the style of `mycelium_energy`)
+was the first sketch, but `pore` is the better accumulator:
+
+- **No third quantity and no new serialization.** `pore` already lives in `Cell`
+  and already saves.
+- Raising it raises capacity *and* permeability together, which is the physical
+  claim: a widened aperture both stores and conducts more. Conflating "how much
+  has flowed here" with "how open is this rock" is the model, not a bug.
+- It only ever **increases**, so it can never strand saturation above a
+  shrinking capacity. That was the main hazard in the original pore migration
+  ([`VOXEL_PORE_VARIATION.md`](VOXEL_PORE_VARIATION.md) §5) and this avoids it.
+- **Precipitation is the counter-process** (Feature B), so no decay heuristic is
+  needed: flux opens the aperture, deposition closes it.
+
+So: water passing through a soluble cell nudges `pore` up by a slow increment
+scaled by solubility (limestone readily, stone far slower, both much slower than
+the surface path). Once `pore` saturates, the cell dissolves to Air and emits its
+mineral as load.
+
+- **The feedback loop is the point.** More flow → more open → more flow. That is
+  what turns a diffuse front into a conduit. Feature B is its brake.
 
 Acceptance: a scenario where two adjacent columns start with slightly different
 pore values and, after a long soak, one has become a visibly faster conduit
 while the other has barely changed.
 
-## Feature B — dissolved load must come out of solution
+## Feature B — dissolved load must come out of solution (**first cut landed**)
+
+Implemented in [`mineral.rs`](../crates/wk-voxel/src/mineral.rs): dissolution
+emits load, load rides seepage transfers pro rata, and evaporation precipitates
+it — concentration ceiling first, whole load once the cell goes dry. Deposits
+seat only on solid ground (no mid-air flowstone) and mint `Limestone`.
+`audit::mineral_total` tracks rock + load so the loop is checkable, and the
+inspector reports the load on a clicked cell.
+
+Not yet done: transport through surface flow and the gravity paths (groundwater
+is wired, so the karst loop closes; surface streams still drop their load only
+where they evaporate), and pressure-driven artesian discharge.
+
+### Original design
 
 > Even more importantly, the dissolved rock or limestone needs to come out of
 > solution at some point. So we might need pressure and artesian springs with
@@ -167,17 +188,17 @@ same spirit as the water mass audit.
 ## Suggested order
 
 1. ~~Cell-aware infiltration~~ **landed**.
-2. Field capacity (Cause 3) — biggest single behavioural change, and it makes
-   the pore field legible before any erosion work.
-3. Fracture-tailed pore field + upward permeability widening (Cause 2) — cheap
+2. **Dissolved load + precipitation (Feature B)** — first, by decision. It is
+   what makes karst mass-conserving at all (today dissolved rock ceases to
+   exist), and it is the brake every later amplification needs.
+3. Field capacity (Cause 3) — biggest single behavioural change, and it makes
+   the pore field legible before erosion tuning.
+4. Fracture-tailed pore field + upward permeability widening (Cause 2) — cheap
    once field capacity exists, and needs a playtest to tune the tail.
-4. Flux counter + flux-driven dissolution (Feature A).
-5. Dissolved load + evaporative precipitation (Feature B), pressure-driven
-   springs last.
+5. Aperture growth from throughput (Feature A), now safe because deposition can
+   close conduits again.
 
-Steps 2–3 are tuning-heavy and want playtest feedback between each. Steps 4–5
-each add a serialized sparse map and a conservation audit, so they are naturally
-separate PRs.
+Steps 3–4 are tuning-heavy and want playtest feedback between each.
 
 ## Guards for all of it
 

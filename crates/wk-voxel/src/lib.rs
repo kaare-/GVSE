@@ -26,6 +26,7 @@ pub mod geotech_map;
 pub mod grid;
 pub mod heatmap;
 pub mod humidity;
+pub mod mineral;
 pub mod organism;
 pub mod parallel;
 pub mod phase;

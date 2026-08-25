@@ -406,6 +406,9 @@ pub fn apply_seepage_regions_ex(
                 ..dst
             },
         );
+        // Dissolved mineral travels with the water that carries it, so karst
+        // load reaches an outlet instead of sitting where the rock dissolved.
+        crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
     }
 }
 

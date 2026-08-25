@@ -127,6 +127,29 @@ pub fn sat_totals(world: &World) -> SatTotals {
     }
 }
 
+/// Total mineral in the world: rock still standing plus dissolved load.
+///
+/// Karst is now a transport loop rather than a delete, so this should stay flat
+/// across dissolve → carry → precipitate. Rock is counted in the same units a
+/// dissolved cell yields ([`crate::mineral::MINERAL_PER_CELL`]), so a cell that
+/// dissolves and later redeposits nets to zero.
+///
+/// Deliberately *not* tick-asserted like water: deposition legitimately mints a
+/// `Limestone` cell from banked load, and the intermediate states are only equal
+/// at cell granularity. Use it in tests and long soaks.
+pub fn mineral_total(world: &World) -> i64 {
+    let mut solid = 0i64;
+    for chunk in world.chunks.values() {
+        for cell in &chunk.cells {
+            if crate::mineral::is_soluble_rock(cell.material) {
+                solid += crate::mineral::MINERAL_PER_CELL as i64;
+            }
+        }
+    }
+    let load: i64 = world.dissolved.values().map(|&v| v as i64).sum();
+    solid + load
+}
+
 /// [`sat_totals`] plus humidity (parcels are not a second water store).
 pub fn tracked_totals(world: &World, humidity: &Humidity, _clouds: &CloudStore) -> SatTotals {
     let mut t = sat_totals(world);

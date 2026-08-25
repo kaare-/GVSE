@@ -233,6 +233,13 @@ pub fn draw_block_inspector(
                 ranges.permeability.min,
                 ranges.permeability.max
             ));
+            let load = wk_voxel::mineral::dissolved_at(world, gx, gy);
+            if load > 0 {
+                lines.push(format!(
+                    "dissolved mineral={load} (holds {})",
+                    wk_voxel::mineral::carrying_capacity(world, gx, gy)
+                ));
+            }
             lines.push(format!("flags=0x{:02X}", c.flags.0));
             if c.mycelium() > 0 {
                 let shares = wk_voxel::mycelium_shares_at(world, gx, gy);

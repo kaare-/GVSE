@@ -106,6 +106,18 @@ pub struct World {
     /// Cleared when cream hits 0; migrates with grain/raft moves.
     #[serde(default)]
     pub mycelium_energy: HashMap<(i32, i32), u8>,
+    /// **Dissolved mineral load** carried by the water in a cell, in the same
+    /// units as the rock removed to create it (see [`crate::mineral`]).
+    ///
+    /// Karst used to delete rock outright; the load is the other half of that
+    /// transport loop — carbonate dissolves here, rides the water, and
+    /// precipitates where the water can no longer hold it (evaporating spring,
+    /// or a concentration ceiling), which is what builds tufa / flowstone.
+    ///
+    /// Sparse and saved: only cells whose water carries load appear, and losing
+    /// it on load would silently destroy mineral mass.
+    #[serde(default)]
+    pub dissolved: HashMap<(i32, i32), u16>,
     /// Sparse actual symbiont exchange counters keyed by mycelium strain id.
     /// Same strain keeps one book across spatial split / reconnect.
     #[serde(default)]
@@ -162,6 +174,7 @@ impl World {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
+            dissolved: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
