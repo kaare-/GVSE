@@ -129,7 +129,11 @@ audit will report a loss.
 
 ## Follow-on
 
-Once per-cell pore values exist, **underground karst** becomes natural:
-dissolution rate scales with local permeability and saturation, so conduits
-widen where water already concentrates. That is the second half of the
-original playtest note and is deliberately left until this lands.
+**Underground karst** has a first cut in
+[`apply_karst_dissolution`](../crates/wk-voxel/src/rules/karst.rs):
+pore-saturated limestone and stone dissolve slower than a surface
+film, and a damp cave void keeps the conduit growing. Rates are still
+one number per material (`KarstConfig::pore_scale` /
+`stone_scale`). Once per-cell `pore` exists, scale those contacts by
+the stored value so conduits widen where the rock is already the
+permeable path.

@@ -197,8 +197,9 @@ pub struct MaterialProps {
     #[serde(default = "default_albedo")]
     pub albedo: f32,
     /// 0–255 mineral solubility in flowing water. Limestone is non-zero;
-    /// everything else is 0. Karst dissolution (`run_karst`) is driven by
-    /// lateral water flux through soluble layers, not moisture-in-place.
+    /// stone is a small hint for a future dissolved field. Voxel karst
+    /// (`apply_karst_dissolution`) uses its own surface / pore / stone
+    /// scales rather than reading this knob today.
     pub solubility: u8,
     /// Maximum horizontal void span (metres) this material can roof
     /// before collapse. 0 = collapses immediately (sand/clay);

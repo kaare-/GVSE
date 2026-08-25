@@ -291,7 +291,7 @@ const KEYS: &[(&str, LineKind)] = &[
     ("C        condensation drizzle — the real rain (default on)", LineKind::Body),
     ("E        evaporate standing water into humidity (default on)", LineKind::Body),
     ("W        climatic faucet — extra rain, off by default", LineKind::Body),
-    ("K        karst — wet limestone dissolves (default on)", LineKind::Body),
+    ("K        karst — wet limestone + slow groundwater stone (default on)", LineKind::Body),
     ("I        ice / snow / slush phase pass", LineKind::Body),
     ("", LineKind::Blank),
     ("Overlays", LineKind::Head),
