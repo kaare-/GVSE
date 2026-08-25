@@ -1260,18 +1260,29 @@ pub fn terrain_celestial_key_strength(
         return 0.0;
     }
     // Climb to the top of this solid/water stack.
+    //
+    // Stop one past the deepest bleed any material gets (`max_bleed` below is
+    // never more than 3): if the stack continues that far above, this cell is
+    // buried and the answer is 0 regardless of where the real top is. Buried
+    // cells are the overwhelming majority of a drawn frame, and this runs per
+    // cell per frame, so the old 10-cell climb plus surface/water probes was
+    // ~14 `get_cell` calls each to return 0.
+    const MAX_BLEED_ANY: i32 = 3;
     let mut top = y;
-    for _ in 0..10 {
+    for _ in 0..=MAX_BLEED_ANY {
         if is_shadow_receiver(world, x, top + 1) {
             top += 1;
         } else {
             break;
         }
     }
+    let depth = top - y;
+    if depth > MAX_BLEED_ANY {
+        return 0.0;
+    }
     if !is_exposed_surface_top(world, x, top) {
         return 0.0;
     }
-    let depth = top - y;
     let water = is_waterish(world, x, top) || is_waterish(world, x, y);
     let max_bleed = if water {
         if is_day {
