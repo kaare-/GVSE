@@ -196,6 +196,10 @@ fn commit_air_sat_xfers(
                 ..dst
             },
         );
+        // Surface water carries its dissolved mineral downstream, so a stream
+        // fed by a spring deposits where it finally dries rather than losing
+        // the load at the point it left the ground.
+        crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
     }
 }
 

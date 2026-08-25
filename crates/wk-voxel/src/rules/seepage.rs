@@ -376,6 +376,9 @@ pub fn apply_seepage_regions_ex(
     // (from, to, amt) with amt > 0.
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_seepage_xfers_ex(world, active, &mut xfers, contact_only);
+    // Nothing dissolved anywhere means load transport and precipitation have
+    // nothing to do; checked once rather than per transfer.
+    let track_load = !world.dissolved.is_empty();
 
     // Apply in a stable order. Each transfer re-reads live sat so a
     // source drained by an earlier xfer simply sends less — every
@@ -417,20 +420,32 @@ pub fn apply_seepage_regions_ex(
                 ..dst
             },
         );
-        // Dissolved mineral travels with the water that carries it, so karst
-        // load reaches an outlet instead of sitting where the rock dissolved.
-        crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
+        // Mineral bookkeeping. Both guards matter: these run per transfer on a
+        // hot path, and the checks the loop already has in hand (is there any
+        // load at all, is the receiver even soluble) skip the common case
+        // without a map lookup or a cell re-read.
+        if track_load {
+            // Dissolved mineral travels with the water that carries it, so karst
+            // load reaches an outlet instead of sitting where the rock dissolved.
+            crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
+            // The brake: load above what the receiving water can hold cements
+            // back into the pore space. A conduit that keeps flowing stays open;
+            // one that stalls or concentrates seals itself with flowstone.
+            crate::mineral::precipitate_at(world, to.0, to.1);
+        }
         // Throughput widens the aperture it passed through. This is what turns
         // a preferential path into a conduit: more flow opens the rock, opener
-        // rock carries more flow. Precipitation is the brake.
-        crate::mineral::widen_aperture(
-            world,
-            to.0,
-            to.1,
-            amt as u8,
-            APERTURE_GROWTH_SCALE,
-            APERTURE_SEED_SALT,
-        );
+        // rock carries more flow.
+        if crate::mineral::is_soluble_rock(dst.material) {
+            crate::mineral::widen_aperture(
+                world,
+                to.0,
+                to.1,
+                amt as u8,
+                APERTURE_GROWTH_SCALE,
+                APERTURE_SEED_SALT,
+            );
+        }
     }
 }
 

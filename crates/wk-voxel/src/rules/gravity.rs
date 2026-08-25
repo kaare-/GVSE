@@ -68,7 +68,20 @@ pub fn apply_gravity_fall(world: &mut World) {
 /// HashMap `get_cell`/`set_cell`.
 pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
     let hydro = world.hydro;
-    for_each_region_parallel(world, active, |ptrs, _wrap_width, ac| {
+    // Dissolved mineral has to ride these transfers too, but the hot loop runs
+    // over raw chunk pointers and cannot touch the sparse map. Collect the
+    // moves and apply them after. Skipped entirely when nothing is dissolved,
+    // which is the common case, so quiet worlds pay nothing.
+    let track_load = !world.dissolved.is_empty();
+    let load_moves: std::sync::Mutex<Vec<((i32, i32), (i32, i32), u8, u8)>> =
+        std::sync::Mutex::new(Vec::new());
+    for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
+        let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
+        let wrap = |gx: i32| match wrap_width {
+            Some(w) if w > 0 => gx.rem_euclid(w),
+            _ => gx,
+        };
+        let gx_of = |lx: u8| wrap(base_gx + lx as i32);
         let Some(own) = ptrs.get(&ac.coord) else {
             return;
         };
@@ -278,6 +291,15 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     };
                     write_xy(x, y as i32 + 1, new_above);
                     write_xy(x, y as i32, new_cur);
+                    // Infiltrating water takes its mineral load into the ground.
+                    if track_load {
+                        load_moves.lock().unwrap().push((
+                            (gx_of(x), y as i32 + 1),
+                            (gx_of(x), y as i32),
+                            move_amt,
+                            above.sat.0,
+                        ));
+                    }
                     next_cur = Some(new_above);
                     continue;
                 }
@@ -306,8 +328,21 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 };
                 write_xy(x, y as i32 + 1, new_above);
                 write_xy(x, y as i32, new_cur);
+                if track_load {
+                    load_moves.lock().unwrap().push((
+                        (gx_of(x), y as i32 + 1),
+                        (gx_of(x), y as i32),
+                        move_amt,
+                        above.sat.0,
+                    ));
+                }
                 next_cur = Some(new_above);
             }
         }
     });
+    if track_load {
+        for (from, to, moved, donor_before) in load_moves.into_inner().unwrap() {
+            crate::mineral::carry_with_water(world, from, to, moved, donor_before);
+        }
+    }
 }

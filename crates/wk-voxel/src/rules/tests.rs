@@ -5301,6 +5301,55 @@ fn karst_skips_chunks_without_limestone_flag() {
 }
 
 #[test]
+fn a_stream_carries_mineral_downhill_and_conserves_it() {
+    // Load must ride surface flow, not stop where it left the ground: a spring
+    // deposits its mineral where the water finally goes, which is what puts
+    // tufa at the outlet rather than inside the rock.
+    let mut w = World::new(37);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..24 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // A walled bedrock trough. All the water starts stacked at the left end, so
+    // there is a real head gradient driving it right.
+    for y in 1..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(20, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 1..=3 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    crate::mineral::add_dissolved(&mut w, 2, 4, 600);
+    let before = crate::audit::mineral_total(&w);
+    let upstream_before = crate::mineral::dissolved_at(&w, 2, 4);
+
+    for _ in 0..120 {
+        tick(&mut w);
+    }
+
+    let upstream_after = crate::mineral::dissolved_at(&w, 2, 4);
+    let downstream: u32 = (8..20)
+        .flat_map(|x| (1..10).map(move |y| (x, y)))
+        .map(|(x, y)| crate::mineral::dissolved_at(&w, x, y) as u32)
+        .sum();
+    assert!(
+        upstream_after < upstream_before,
+        "load must leave the source with the water ({upstream_before} -> {upstream_after})"
+    );
+    assert!(
+        downstream > 0,
+        "load should arrive downstream of where it started"
+    );
+    assert_eq!(
+        crate::audit::mineral_total(&w),
+        before,
+        "surface transport must conserve mineral"
+    );
+}
+
+#[test]
 fn throughput_widens_a_conduit_and_conserves_mineral() {
     // The self-amplifying half of vein formation: a limestone column carrying
     // groundwater should open up over time, while an identical column with no

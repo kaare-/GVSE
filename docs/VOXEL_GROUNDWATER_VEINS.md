@@ -210,9 +210,23 @@ seat only on solid ground (no mid-air flowstone) and mint `Limestone`.
 `audit::mineral_total` tracks rock + load so the loop is checkable, and the
 inspector reports the load on a clicked cell.
 
-Not yet done: transport through surface flow and the gravity paths (groundwater
-is wired, so the karst loop closes; surface streams still drop their load only
-where they evaporate), and pressure-driven artesian discharge.
+Transport now covers **seepage, surface flow, and both gravity paths**, so a
+spring's load runs downstream and deposits where the water finally dries rather
+than at the point it left the ground
+(`a_stream_carries_mineral_downhill_and_conserves_it`). The concentration brake
+also runs on seepage receivers, so a conduit that stalls cements itself shut.
+
+Gravity collects its load moves and applies them after the parallel section — the
+hot loop works over raw chunk pointers and cannot touch the sparse map.
+
+Cost: these hooks sit on a hot path, so both are guarded by checks the caller
+already has — "is anything dissolved at all" (once per pass, not per transfer)
+and "is the receiver even soluble" (from the cell already in hand). Without those
+the demo tick regressed ~10%; with them the residual is ~0.7 ms, which is the
+aperture-growth roll itself.
+
+Not yet done: pressure-driven artesian discharge (needs the confined-head
+machinery in `water_flow.rs`).
 
 ### Original design
 
