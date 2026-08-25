@@ -186,9 +186,9 @@
   },
   "max_atoms": 256.0,
   "max_corpses": 256.0,
-  "max_roots": 16.0,
-  "max_stems": 10.0,
-  "max_photos": 12.0,
+  "max_roots": 96.0,
+  "max_stems": 64.0,
+  "max_photos": 96.0,
   "mat_perm": [
     0.0,
     5.0,

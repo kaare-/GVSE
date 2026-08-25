@@ -1489,14 +1489,22 @@ impl SimSettings {
                 });
                 ui.separator();
 
-                ui.tree_node(hash!(), "Plant growth caps", |ui| {
+                ui.tree_node(hash!(), "Plant growth ceilings (safety)", |ui| {
                     ui.label(
                         None,
-                        "Per-plant tissue pixel ceilings (not entity pop).",
+                        "Size is meant to be capped by cost, not by these.",
                     );
                     ui.label(
                         None,
-                        "Raising these lets individuals grow denser; lowering only blocks new pixels.",
+                        "Upkeep rises per pixel while a self-shading canopy earns less,",
+                    );
+                    ui.label(
+                        None,
+                        "so plants settle at an energy-limited size on their own.",
+                    );
+                    ui.label(
+                        None,
+                        "These only stop a runaway. Lower them for the old tight look.",
                     );
                     labeled_slider(
                         ui,

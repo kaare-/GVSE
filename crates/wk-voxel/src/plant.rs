@@ -95,10 +95,27 @@ pub const ROOT_SAND_AFFINITY: f32 = 0.45;
 /// invented from a stemless body anymore; olive only elongates.
 pub const STEM_INVENT_MIN_ALLOC: f32 = 0.18;
 
-/// Soft caps so 1× bodies stay readable (defaults for [`PlantGrowthCaps`]).
-pub const MAX_ROOT_MODULES: usize = 16;
-pub const MAX_STEM_MODULES: usize = 10;
-pub const MAX_PHOTO_MODULES: usize = 12;
+/// **Safety ceilings, not design limits** (defaults for [`PlantGrowthCaps`]).
+///
+/// Growth is meant to be capped by *cost*, not by an arbitrary rule. Two
+/// mechanisms already do that, and they only bite once a plant is big:
+///
+/// - Upkeep rises linearly with tissue ([`plant_metabolic_load`]), while the
+///   energy tank tops out at [`ROOT_STORE_MAX_MULT`] × spawn size.
+/// - Harvest *saturates* as the canopy self-shades (Beer-Lambert in
+///   [`crate::shade`]), so a bushier plant earns less per new leaf.
+///
+/// Together those give a real equilibrium: a plant grows until upkeep eats the
+/// surplus that [`LAND_GROW_ENERGY_FRAC`] requires, then stops. The old values
+/// (16 / 10 / 12) cut in long before that, so shape was decided by the cap
+/// rather than by light, water and substrate.
+///
+/// These are kept only so a runaway cannot melt the frame budget — a plant that
+/// reaches them is a bug worth seeing, not an expected shape. Tab can lower them
+/// to recover the old tight look.
+pub const MAX_ROOT_MODULES: usize = 96;
+pub const MAX_STEM_MODULES: usize = 64;
+pub const MAX_PHOTO_MODULES: usize = 96;
 /// Max Chebyshev distance a woody canopy leaf may sit from a Stem
 /// (Moore neighbourhood). Distance 2 left empty cells between leaf and
 /// trunk — midair green flecks. Stemless seaweed ignores this.
