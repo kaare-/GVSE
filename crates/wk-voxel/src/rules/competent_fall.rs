@@ -4676,6 +4676,48 @@ mod tests {
   }
 
   #[test]
+  fn pivot_roll_leaves_its_loose_cap_behind() {
+    // Playtest: a whole section of sand and gravel flipped 90°/180° into the
+    // air when a body tipped. Cargo used to be rotated around the pivot with
+    // the body; granular material must spill instead. Verified to fail when
+    // the cargo rotation is put back.
+    let mut w = World::new(9);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..16 {
+      w.set_cell(x, 4, Cell::solid(MaterialId::Bedrock));
+    }
+    let mut cells = Vec::new();
+    for x in 5..=6 {
+      for y in 5..=6 {
+        w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        cells.push((x, y, w.get_cell(x, y).unwrap()));
+      }
+    }
+    // Loose cap riding on the body.
+    w.set_cell(5, 7, Cell::solid(MaterialId::Sand));
+    w.set_cell(6, 7, Cell::solid(MaterialId::Gravel));
+    let set: HashSet<(i32, i32)> = cells.iter().map(|(x, y, _)| (*x, *y)).collect();
+    let comp = Component {
+      cells,
+      set,
+      tag: 1,
+      min_y: 5,
+      max_y: 6,
+    };
+    assert!(
+      pivot_roll_component(&mut w, &comp, roll_pivot(&comp, 1), 1),
+      "precondition: the body must actually pivot"
+    );
+    for (x, y) in [(5, 7), (6, 7)] {
+      let mat = w.get_cell(x, y).map(|c| c.material);
+      assert!(
+        matches!(mat, Some(MaterialId::Sand) | Some(MaterialId::Gravel)),
+        "loose cap at ({x},{y}) must stay put when the body pivots, found {mat:?}"
+      );
+    }
+  }
+
+  #[test]
   fn tipping_rock_does_not_fling_its_sand_bank_into_the_air() {
     // Playtest: a pebble rolled downhill and a whole section of sand and
     // gravel flipped 180° and fell as powder. Cargo used to be rotated

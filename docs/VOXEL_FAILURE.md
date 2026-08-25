@@ -212,7 +212,13 @@ Industry-style **connected-component rigid bodies** on the voxel grid:
 - **Crush specs** — large movers pulverize tiny competent clusters
   (`≤ CRUSH_SPEC_MAX`) instead of welding or getting stuck on them.
 - **Thin fracture** — long thin sticks/slabs snap at 1-cell necks into debris.
-- **Cargo** — soft/loose caps and embedded cells ride with fall, tip, and slide.
+- **Cargo does not rotate** — a loose cap rides *translation* (fall / slide) but
+  is left behind by a **pivot tip**. Sand on a tipping boulder is granular: it
+  spills and avalanches rather than swinging rigidly through 90°. Rotating it
+  flung whole hillside sections into the air and dropped them as powder
+  (playtest: a 200-cell collapse, and a pebble cargo-connected to a sand and
+  gravel bank). Guard: `pivot_roll_leaves_its_loose_cap_behind`.
+- **Cargo** — soft/loose caps and embedded cells ride with fall and slide.
   The riding flood only follows cells that rest on the body or on cargo, so a
   small rock tipping on a hill cannot rotate the whole loose fill 90°. Cargo
   is also capped at `2 × body` (8..512) so a pebble cannot lift a hillside.
