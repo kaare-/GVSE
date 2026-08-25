@@ -9,6 +9,25 @@
 //! ```text
 //! cargo test -p wk-voxel --test fidget_probe --release -- --ignored --nocapture
 //! ```
+//!
+//! ## Result
+//!
+//! Per tick on the stress world: ~5–7k cells change `sat`, **0–25 change
+//! material**, and the active plan is 55–92k cells. 71–85% of the sat
+//! changes repeat next tick with |Δ| ≤ 3 — groundwater percolating through
+//! limestone, which converges only over a very long horizon.
+//!
+//! The cost is the **per-chunk bounding rect** (`Chunk::dirty` is one
+//! `Rect` per 64×64 chunk): scattered writes inflate it to nearly the whole
+//! chunk, so every pass rescans ~12× what changed.
+//!
+//! **Measured negative result:** giving pore-only `sat` writes their own
+//! dirty channel (so percolation could not wake grain settle / flow) moved
+//! the in-tick plan only 57k → 55k cells/substep and left settle at ~32.7
+//! ms and seepage at ~25 ms — within noise. Reason: the ~1300 *free-water*
+//! `sat` changes per tick are scattered across the same chunks and fill
+//! those rects on their own. Nothing short of **sub-chunk dirty
+//! granularity** will move this; splitting channels cannot.
 
 use std::collections::HashMap;
 
