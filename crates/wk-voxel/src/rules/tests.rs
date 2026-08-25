@@ -3307,10 +3307,14 @@ fn beach_film_drains_into_ocean_not_inland() {
         0,
         "beach film should leave the sand"
     );
-    assert_eq!(
-        w.get_cell(7, 3).unwrap().sat.0,
-        0,
-        "must not climb inland up the beach"
+    // Sand now retains water against gravity (field capacity), so a wet beach
+    // absorbs a film more slowly and sheds the rest sideways — real runoff.
+    // What must not happen is a *puddle* forming inland: stay under the
+    // threshold below which water is not even drawn.
+    assert!(
+        w.get_cell(7, 3).unwrap().sat.0 <= crate::rules::GRAIN_REPOSE_HAZE_MAX,
+        "must not pool inland up the beach (got {})",
+        w.get_cell(7, 3).unwrap().sat.0
     );
     // Film may sit one cell seaward or soak into sand — either is
     // fine; the failure mode was climbing inland.
@@ -5294,6 +5298,55 @@ fn karst_skips_chunks_without_limestone_flag() {
     };
     apply_karst_dissolution(&mut w, &cfg);
     assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Air);
+}
+
+#[test]
+fn clay_retains_water_that_gravel_lets_go() {
+    // Field capacity is what gives a lens its character. Two identical columns
+    // wetted to capacity and then left to drain: clay should still be holding
+    // most of its water when gravel has given nearly all of it up.
+    let drained_fraction = |material: MaterialId| -> f32 {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        // A tall column of the material over an open drain (dry sand below).
+        for y in 1..=6 {
+            w.set_cell(4, y, Cell::solid(MaterialId::Sand));
+        }
+        let cap = water_capacity(material);
+        for y in 7..=12 {
+            let mut c = Cell::solid(material);
+            c.sat = Sat(cap);
+            w.set_cell(4, y, c);
+        }
+        // Wall it so the only escape is downward.
+        for y in 1..=13 {
+            w.set_cell(3, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(5, y, Cell::solid(MaterialId::Bedrock));
+        }
+        let before: i32 = (7..=12)
+            .map(|y| w.get_cell(4, y).unwrap().sat.0 as i32)
+            .sum();
+        for _ in 0..400 {
+            tick(&mut w);
+        }
+        let after: i32 = (7..=12)
+            .map(|y| w.get_cell(4, y).unwrap().sat.0 as i32)
+            .sum();
+        (before - after) as f32 / before.max(1) as f32
+    };
+    let clay = drained_fraction(MaterialId::Clay);
+    let gravel = drained_fraction(MaterialId::Gravel);
+    assert!(
+        gravel > clay,
+        "gravel must drain more freely than clay (gravel={gravel:.2} clay={clay:.2})"
+    );
+    assert!(
+        clay < 0.55,
+        "clay should perch most of its water against gravity (drained {clay:.2})"
+    );
 }
 
 #[test]

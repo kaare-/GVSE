@@ -331,6 +331,31 @@ pub fn water_capacity_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u
     }
 }
 
+/// Saturation this cell holds against gravity (capillary retention).
+///
+/// Only sat **above** this drains downward — see
+/// [`wk_material::MaterialProps::field_capacity`]. Scales with the cell's own
+/// capacity, so a high-`pore` cell both stores and retains more.
+#[inline]
+pub fn retained_sat_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 {
+    use wk_material::MaterialRegistry;
+    if cell.material == MaterialId::Air {
+        return 0;
+    }
+    let cap = water_capacity_cell(cell, hydro) as u32;
+    if cap == 0 {
+        return 0;
+    }
+    let fc = MaterialRegistry::base_props(cell.material).field_capacity as u32;
+    ((cap * fc) / 255) as u8
+}
+
+/// Saturation in this cell that is free to drain downward.
+#[inline]
+pub fn drainable_sat_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 {
+    cell.sat.0.saturating_sub(retained_sat_cell(cell, hydro))
+}
+
 /// Cell-aware permeability selected from the same stored pore coordinate.
 #[inline]
 pub fn permeability_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 {

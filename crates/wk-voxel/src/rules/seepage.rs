@@ -477,10 +477,16 @@ fn accumulate_seepage_xfers_ex(
                     let mut move_amt = sat_move_to_equalize_heads(
                         a.sat.0, cap_a, gy, b.sat.0, cap_b, ny,
                     );
-                    // Wetting-front plug: pore water may only drive *down*
-                    // into a drier neighbour when the donor is more than a
-                    // residual film. A 30% gate left shore shelves stuck at
-                    // sat≈cap/4 on the U heatmap (playtest stone 5/20).
+                    // Capillary retention: pore water may only drive *down* by
+                    // the amount above the donor's field capacity. Below that
+                    // it is held against gravity and stays put.
+                    //
+                    // This replaces a flat 10% residual film. Retention is what
+                    // stops every cell draining into the one below, which was
+                    // making the only stable state a saturated wedge growing up
+                    // from bedrock regardless of the pore field. It also gives
+                    // each material its character: clay perches a table, gravel
+                    // lets water straight through.
                     if a_solid && b_solid && move_amt != 0 {
                         let downward = if move_amt > 0 {
                             gy > ny // a → b and a is higher
@@ -488,18 +494,14 @@ fn accumulate_seepage_xfers_ex(
                             ny > gy // b → a and b is higher
                         };
                         if downward {
-                            let (sat_d, cap_d) = if move_amt > 0 {
-                                (a.sat.0, cap_a)
-                            } else {
-                                (b.sat.0, cap_b)
-                            };
-                            // Residual film only (≤10% / sat≤2) — blocks the
-                            // old bedrock pipe, still lets groundwater crawl.
-                            if cap_d == 0
-                                || sat_d <= 2
-                                || (sat_d as i32) * 10 < (cap_d as i32)
-                            {
+                            let donor = if move_amt > 0 { a } else { b };
+                            let mobile = crate::cell::drainable_sat_cell(donor, &hydro) as i32;
+                            if mobile <= 0 {
                                 move_amt = 0;
+                            } else if move_amt > 0 {
+                                move_amt = move_amt.min(mobile);
+                            } else {
+                                move_amt = move_amt.max(-mobile);
                             }
                         }
                     }

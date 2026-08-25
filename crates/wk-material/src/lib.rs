@@ -205,6 +205,24 @@ pub struct MaterialProps {
     /// before collapse. 0 = collapses immediately (sand/clay);
     /// `f32::INFINITY` = never collapses as a roof (bedrock).
     pub roof_span_max_m: f32,
+    /// **Field capacity** — the share of pore space (0–255, as a fraction of
+    /// [`Self::porosity`]) held against gravity by capillary action.
+    ///
+    /// Only saturation *above* this drains downward; the rest stays put until
+    /// roots or evaporation take it. This is the counterforce to gravity: with
+    /// no retention the only stable state is a saturated wedge growing up from
+    /// bedrock, because every cell eventually drains into the one below.
+    ///
+    /// It is also what makes a lens behave like its material — clay perches
+    /// water, gravel lets it straight through — which is the visible difference
+    /// per-cell pore variation was supposed to produce.
+    #[serde(default = "default_field_capacity")]
+    pub field_capacity: u8,
+}
+
+/// Mid-range retention for materials predating the field (~20%).
+fn default_field_capacity() -> u8 {
+    51
 }
 
 pub struct MaterialRegistry;
@@ -382,6 +400,8 @@ impl MaterialRegistry {
                 albedo: 0.2,
                 solubility: 0,
                 roof_span_max_m: f32::INFINITY,
+                // no pore space to retain
+                field_capacity: 0,
             },
             MaterialId::Stone => MaterialProps {
                 density: 2600,
@@ -398,6 +418,8 @@ impl MaterialRegistry {
                 albedo: 0.25,
                 solubility: 0,
                 roof_span_max_m: 15.0,
+                // tight matrix holds a fifth of its little pore space
+                field_capacity: 51,
             },
             MaterialId::Sand => MaterialProps {
                 density: 1600,
@@ -416,6 +438,8 @@ impl MaterialRegistry {
                 albedo: 0.35,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // drains freely — classic sandy soil ~20%
+                field_capacity: 51,
             },
             MaterialId::LooseRock => MaterialProps {
                 density: 2500,
@@ -433,6 +457,8 @@ impl MaterialRegistry {
                 albedo: 0.3,
                 solubility: 0,
                 roof_span_max_m: 2.0,
+                // coarse talus barely retains
+                field_capacity: 38,
             },
             MaterialId::LooseLimestone => MaterialProps {
                 density: 2400,
@@ -450,6 +476,8 @@ impl MaterialRegistry {
                 albedo: 0.32,
                 solubility: 0,
                 roof_span_max_m: 1.5,
+                // coarse carbonate scree, as LooseRock
+                field_capacity: 38,
             },
             MaterialId::Gravel => MaterialProps {
                 density: 2000,
@@ -466,6 +494,8 @@ impl MaterialRegistry {
                 albedo: 0.3,
                 solubility: 0,
                 roof_span_max_m: 0.5,
+                // nearly free-draining; this is why a gravel lens conducts
+                field_capacity: 20,
             },
             MaterialId::Clay => MaterialProps {
                 density: 1900,
@@ -485,6 +515,8 @@ impl MaterialRegistry {
                 albedo: 0.22,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // holds most of its water — perches a water table above it
+                field_capacity: 188,
             },
             MaterialId::Organic => MaterialProps {
                 // > water so corpse ooze settles on the bed instead of
@@ -502,6 +534,8 @@ impl MaterialRegistry {
                 albedo: 0.18,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // peat / sapropel is a sponge
+                field_capacity: 166,
             },
             MaterialId::Soil => MaterialProps {
                 // Humus-rich loam — holds water, conducts slowly so recharge
@@ -519,6 +553,8 @@ impl MaterialRegistry {
                 albedo: 0.16,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // loam sits between sand and clay
+                field_capacity: 128,
             },
             MaterialId::Water => MaterialProps {
                 density: 1000,
@@ -544,6 +580,8 @@ impl MaterialRegistry {
                 albedo: 0.08,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // not a porous solid
+                field_capacity: 0,
             },
             MaterialId::Air => MaterialProps {
                 density: 0,
@@ -559,6 +597,8 @@ impl MaterialRegistry {
                 albedo: 0.0,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // not a porous solid
+                field_capacity: 0,
             },
             MaterialId::Snow => MaterialProps {
                 density: 900,
@@ -579,6 +619,8 @@ impl MaterialRegistry {
                 albedo: 0.75,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // impermeable in v1 rules
+                field_capacity: 0,
             },
             MaterialId::Ice => MaterialProps {
                 density: 917,
@@ -600,6 +642,8 @@ impl MaterialRegistry {
                 albedo: 0.55,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // impermeable in v1 rules
+                field_capacity: 0,
             },
             MaterialId::Limestone => MaterialProps {
                 density: 2500,
@@ -617,6 +661,8 @@ impl MaterialRegistry {
                 albedo: 0.28,
                 solubility: 40,
                 roof_span_max_m: 10.0,
+                // fractured carbonate drains through its conduits
+                field_capacity: 38,
             },
         }
     }

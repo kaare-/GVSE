@@ -70,7 +70,24 @@ stacks from bedrock upward. That *is* a water table and is physically right, but
 nothing holds water against gravity, so every cell eventually drains and the
 only stable state is a growing saturated wedge.
 
-### Fix: field capacity (capillary retention)
+### Fix: field capacity (capillary retention) — **landed**
+
+`MaterialProps::field_capacity` (0–255, a share of porosity) is the fraction
+held against gravity. Downward pore→pore seepage now moves only the amount
+*above* it (`cell::drainable_sat_cell`), replacing the flat 10% residual film.
+Retention scales with the cell's own capacity, so a high-`pore` cell both stores
+and retains more.
+
+Values: gravel 20 (nearly free-draining), sand and stone 51, soil 128,
+organic 166, clay 188 (perches), limestone and loose rock 38 (drain through
+their conduits). Regression: `clay_retains_water_that_gravel_lets_go`.
+
+Knock-on seen immediately: a wet beach absorbs a surface film more slowly and
+sheds the rest sideways, which is real runoff — `beach_film_drains_into_ocean_not_inland`
+now bounds the lateral trace below the visible-puddle threshold instead of
+demanding exactly zero.
+
+### Original design
 
 Give each material a **retained fraction** — the share of capacity held against
 gravity by capillary action. Only saturation *above* that threshold is mobile
