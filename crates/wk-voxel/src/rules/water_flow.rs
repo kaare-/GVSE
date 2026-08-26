@@ -211,6 +211,7 @@ fn commit_air_sat_xfers(
         // fed by a spring deposits where it finally dries rather than losing
         // the load at the point it left the ground.
         crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
+        crate::sediment::carry_with_water(world, from, to, amt as u8, src.sat.0);
     }
 }
 

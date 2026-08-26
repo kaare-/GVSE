@@ -343,6 +343,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
     if track_load {
         for (from, to, moved, donor_before) in load_moves.into_inner().unwrap() {
             crate::mineral::carry_with_water(world, from, to, moved, donor_before);
+            crate::sediment::carry_with_water(world, from, to, moved, donor_before);
         }
     }
 }

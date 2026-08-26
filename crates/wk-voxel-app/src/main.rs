@@ -673,6 +673,10 @@ async fn main() {
             let _ = wk_voxel::shove_floating_organic_with_current(&mut scene.world);
             // Bedload / bank transport after water has moved this tick.
             apply_flow_erosion_bound(&mut scene.world, &settings.grain, rooted.as_ref());
+            // The fine-grained half of the same process: clay too small to
+            // travel as bedload goes into suspension where the water moves, and
+            // settles back out as mud where it slows.
+            wk_voxel::sediment::apply_suspension(&mut scene.world);
             if geotech_due {
                 // Post-CA dirty halo → incremental column update (S5).
                 scene.geotech.rebuild_smart(&scene.world);

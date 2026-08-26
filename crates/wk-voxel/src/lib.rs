@@ -27,6 +27,7 @@ pub mod grid;
 pub mod heatmap;
 pub mod humidity;
 pub mod mineral;
+pub mod sediment;
 pub mod organism;
 pub mod parallel;
 pub mod phase;

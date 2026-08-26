@@ -148,6 +148,22 @@ pub fn mineral_total(world: &World) -> i64 {
     solid + load
 }
 
+/// Total fine sediment: clay in the ground plus what the water is carrying.
+///
+/// The suspended-load counterpart to [`mineral_total`]. Only clay-grade material
+/// participates, because only clay-grade material suspends — sand and gravel
+/// travel as bedload, which relocates cells and so cannot change this sum.
+pub fn sediment_total(world: &World) -> i64 {
+    let mut solid = 0i64;
+    for chunk in world.chunks.values() {
+        for cell in &chunk.cells {
+            solid += crate::sediment::cell_sediment(*cell) as i64;
+        }
+    }
+    let load: i64 = world.suspended.values().map(|&v| v as i64).sum();
+    solid + load
+}
+
 /// [`sat_totals`] plus humidity (parcels are not a second water store).
 pub fn tracked_totals(world: &World, humidity: &Humidity, _clouds: &CloudStore) -> SatTotals {
     let mut t = sat_totals(world);

@@ -17,7 +17,7 @@ mod water_flow;
 mod spill;
 mod seepage;
 mod competent_fall;
-mod grain;
+pub(crate) mod grain;
 mod rain;
 mod evap;
 mod condensation;

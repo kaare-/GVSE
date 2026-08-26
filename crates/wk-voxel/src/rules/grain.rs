@@ -3013,7 +3013,7 @@ fn maybe_queue_erosion(
 }
 
 /// Direction water wants to leave this cell, if any. `None` = still pool.
-fn flow_bias(world: &World, gx: i32, gy: i32, sat: Sat) -> Option<i32> {
+pub(crate) fn flow_bias(world: &World, gx: i32, gy: i32, sat: Sat) -> Option<i32> {
     let mut best_dx = 0i32;
     let mut best_score = 0.0f32;
     for dx in [-1_i32, 1] {

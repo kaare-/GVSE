@@ -118,6 +118,19 @@ pub struct World {
     /// it on load would silently destroy mineral mass.
     #[serde(default)]
     pub dissolved: HashMap<(i32, i32), u16>,
+    /// Suspended fine sediment carried by moving water, in the same units as
+    /// [`Self::dissolved`] but a different species with different physics.
+    ///
+    /// Clay is not *dissolved*, it is entrained: held up by turbulence rather
+    /// than chemistry. So it drops when the water **slows**, not when the water
+    /// leaves, and it is filtered out by pore space instead of soaking into it.
+    /// Modelling it as dissolved load would cement mud in place instead of
+    /// letting it settle in slack water, which is the opposite of what makes a
+    /// delta.
+    ///
+    /// Sparse and saved: losing it on load would silently destroy sediment mass.
+    #[serde(default)]
+    pub suspended: HashMap<(i32, i32), u16>,
     /// Sparse actual symbiont exchange counters keyed by mycelium strain id.
     /// Same strain keeps one book across spatial split / reconnect.
     #[serde(default)]
@@ -187,6 +200,7 @@ impl World {
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
             dissolved: HashMap::new(),
+            suspended: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),

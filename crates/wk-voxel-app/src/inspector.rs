@@ -244,6 +244,16 @@ pub fn draw_block_inspector(
                     wk_voxel::mineral::carrying_capacity(world, gx, gy)
                 ));
             }
+            let silt = wk_voxel::sediment::suspended_at(world, gx, gy);
+            if silt > 0 {
+                // Both ceilings, because which one applies is the whole point:
+                // the load drops when the water stops moving.
+                lines.push(format!(
+                    "suspended silt={silt} (moving holds {}, slack {})",
+                    wk_voxel::sediment::carrying_capacity(world, gx, gy, true),
+                    wk_voxel::sediment::carrying_capacity(world, gx, gy, false)
+                ));
+            }
             lines.push(format!("flags=0x{:02X}", c.flags.0));
             if c.mycelium() > 0 {
                 let shares = wk_voxel::mycelium_shares_at(world, gx, gy);
