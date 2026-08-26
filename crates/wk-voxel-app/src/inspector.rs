@@ -18,6 +18,8 @@ fn material_name(mat: MaterialId) -> &'static str {
         MaterialId::LooseLimestone => "looselimestone",
         MaterialId::Flowstone => "flowstone",
         MaterialId::Bentonite => "bentonite",
+        MaterialId::Sandstone => "sandstone",
+        MaterialId::Conglomerate => "conglomerate",
         MaterialId::Gravel => "gravel",
         MaterialId::Sand => "sand",
         MaterialId::Clay => "clay",

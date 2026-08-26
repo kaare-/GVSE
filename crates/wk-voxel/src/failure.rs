@@ -340,6 +340,9 @@ pub fn roof_collapse_debris(material: MaterialId) -> MaterialId {
         MaterialId::Limestone => MaterialId::LooseLimestone,
         // Broken flowstone is carbonate rubble like any other.
         MaterialId::Flowstone => MaterialId::LooseLimestone,
+        // A clastic rock breaks back into the sediment it was cemented from.
+        MaterialId::Sandstone => MaterialId::Sand,
+        MaterialId::Conglomerate => MaterialId::Gravel,
         MaterialId::Bedrock => MaterialId::LooseRock, // should not be selected (∞ span)
         other => other,
     }

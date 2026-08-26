@@ -244,14 +244,17 @@ pub fn widen_aperture(
     let mut next = cell;
     next.pore = cell.pore.saturating_add(1);
     if next.pore == u8::MAX {
-        // Fully open: the rock is gone. Its last unit goes with the rest.
+        // Fully open: the cement is gone. For a clastic rock that leaves the
+        // grains it was holding together, not a void — dissolving sandstone
+        // must not delete the sand.
         let freed = cell_mineral(cell);
         let keep = cell.sat;
+        let becomes = loose_parent(cell.material).unwrap_or(MaterialId::Air);
         world.set_cell(
             gx,
             gy,
             Cell {
-                material: MaterialId::Air,
+                material: becomes,
                 sat: keep,
                 ..cell
             },
@@ -266,6 +269,88 @@ pub fn widen_aperture(
         add_dissolved(world, gx, gy, 1);
     }
     false
+}
+
+/// The rock a loose sediment becomes when carbonate cements its grains.
+///
+/// Loose material cannot hold a channel: repose and grain settle destroy any
+/// void the moment it opens, so conduits could only ever form in competent rock
+/// and never in the near-surface layer where water actually runs. Cementing is
+/// what gives near-surface channels somewhere to persist, and it closes the loop
+/// — water deposits mineral, sediment sets, set rock holds a void, the void
+/// becomes a conduit, the conduit concentrates flow.
+///
+/// Carbonate rubble needs no new material: cemented limestone gravel *is*
+/// limestone. Soil and organics are deliberately absent — they rot rather than
+/// set, and the fungi and compost paths already cover that.
+#[inline]
+pub fn cemented_form(material: MaterialId) -> Option<MaterialId> {
+    match material {
+        MaterialId::Sand => Some(MaterialId::Sandstone),
+        MaterialId::Gravel | MaterialId::LooseRock => Some(MaterialId::Conglomerate),
+        MaterialId::LooseLimestone => Some(MaterialId::Limestone),
+        _ => None,
+    }
+}
+
+/// The sediment a cemented rock returns to when its cement dissolves away.
+///
+/// A clastic rock must not dissolve to a void: only the carbonate matrix is
+/// soluble, and the grains it was holding together stay exactly where they were.
+/// Without this, dissolving sandstone would delete the sand.
+#[inline]
+pub fn loose_parent(material: MaterialId) -> Option<MaterialId> {
+    match material {
+        MaterialId::Sandstone => Some(MaterialId::Sand),
+        MaterialId::Conglomerate => Some(MaterialId::Gravel),
+        _ => None,
+    }
+}
+
+/// Minimum load before precipitation sets a bed rather than just sitting in it.
+///
+/// Cementation is one atomic step because there is nowhere to bank a partial
+/// amount: an insoluble sediment carries no mineral in the ledger
+/// ([`cell_mineral`]), so there is no such thing as half-cemented sand. The
+/// resulting rock *is* soluble, so everything after the first step is ordinary
+/// pore occlusion.
+pub const CEMENT_MIN_LOAD: u16 = 32;
+
+/// Cement a loose sediment cell with the mineral its water is carrying.
+///
+/// Conserves exactly: the load taken becomes the new cell's mineral content,
+/// because `cell_mineral` of the cemented rock is `MINERAL_PER_CELL - pore` and
+/// `pore` is set to the complement of what was consumed. A lightly cemented bed
+/// is therefore genuinely porous, and further precipitation tightens it through
+/// the normal occlusion path.
+fn cement_cell(world: &mut World, gx: i32, gy: i32, excess: u16) -> u16 {
+    let Some(cell) = world.get_cell(gx, gy) else {
+        return 0;
+    };
+    let Some(into) = cemented_form(cell.material) else {
+        return 0;
+    };
+    if excess < CEMENT_MIN_LOAD {
+        return 0;
+    }
+    let want = excess.min(MINERAL_PER_CELL);
+    let used = take_dissolved(world, gx, gy, want);
+    if used == 0 {
+        return 0;
+    }
+    let mut next = cell;
+    next.material = into;
+    // Exact: mineral consumed == mineral now held as cement.
+    next.pore = (MINERAL_PER_CELL - used.min(MINERAL_PER_CELL)) as u8;
+    // Tightening pore can drop capacity below the water already present.
+    let cap = water_capacity_cell(next, &world.hydro);
+    let spill = next.sat.0.saturating_sub(cap);
+    next.sat = Sat(next.sat.0.min(cap));
+    world.set_cell(gx, gy, next);
+    if spill > 0 {
+        push_water_up(world, gx, gy + 1, spill);
+    }
+    used
 }
 
 /// Rock that carries mineral mass for the audit: **carbonate only**.
@@ -345,6 +430,13 @@ fn precipitate_over(world: &mut World, gx: i32, gy: i32, ceiling: u16) -> u16 {
             world.set_cell(gx, gy, deposit);
             return used;
         }
+    }
+
+    // Loose sediment: set the grains rather than trickling into a pore space
+    // the ledger cannot account for. `occlude_pore` refuses insoluble material,
+    // so without this the load simply stayed in solution forever.
+    if cemented_form(cell.material).is_some() {
+        return cement_cell(world, gx, gy, excess);
     }
 
     // Cement into this cell's own pore space. One unit of load closes exactly
@@ -728,5 +820,91 @@ mod tests {
             before,
             "precipitation must conserve mineral"
         );
+    }
+
+    /// Total mineral: what the audit counts, rock plus load.
+    fn mineral_here(w: &World, gx: i32, gy: i32) -> u16 {
+        cell_mineral(w.get_cell(gx, gy).unwrap()) + dissolved_at(w, gx, gy)
+    }
+
+    #[test]
+    fn cementing_sand_conserves_the_mineral_it_consumes() {
+        // Loose sediment carries no mineral in the ledger, so cementation has
+        // to be one atomic step: the load consumed becomes the new rock's
+        // cement content exactly, with `pore` set to the complement.
+        let mut w = bed(7);
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(crate::cell::water_capacity(MaterialId::Sand));
+        w.set_cell(4, 1, sand);
+        add_dissolved(&mut w, 4, 1, 120);
+        let before = mineral_here(&w, 4, 1);
+
+        let used = precipitate_over(&mut w, 4, 1, 0);
+        assert!(used > 0, "a loaded sand bed should cement");
+        let after = w.get_cell(4, 1).unwrap();
+        assert_eq!(
+            after.material,
+            MaterialId::Sandstone,
+            "cemented sand is sandstone"
+        );
+        assert_eq!(
+            mineral_here(&w, 4, 1),
+            before,
+            "cementation must conserve mineral"
+        );
+        // Lightly cemented means genuinely porous, so it still carries water.
+        assert!(
+            after.pore > 0,
+            "a partly cemented bed should keep pore space, got {}",
+            after.pore
+        );
+    }
+
+    #[test]
+    fn a_thin_load_leaves_sand_loose() {
+        let mut w = bed(8);
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(crate::cell::water_capacity(MaterialId::Sand));
+        w.set_cell(4, 1, sand);
+        add_dissolved(&mut w, 4, 1, CEMENT_MIN_LOAD - 1);
+        precipitate_over(&mut w, 4, 1, 0);
+        assert_eq!(
+            w.get_cell(4, 1).unwrap().material,
+            MaterialId::Sand,
+            "a trace of mineral should not set a whole cell of sand"
+        );
+    }
+
+    #[test]
+    fn dissolving_sandstone_returns_sand_not_a_void() {
+        // Only the carbonate matrix is soluble. If a clastic rock opened to Air
+        // the grains it was holding together would simply be deleted.
+        let mut w = bed(9);
+        let mut rock = Cell::solid(MaterialId::Sandstone);
+        rock.pore = u8::MAX - 1;
+        w.set_cell(4, 1, rock);
+        let opened = widen_aperture(&mut w, 4, 1, 255, 1000.0, 0);
+        assert!(opened, "a nearly-open cell should finish opening");
+        assert_eq!(
+            w.get_cell(4, 1).unwrap().material,
+            MaterialId::Sand,
+            "dissolved sandstone must leave its sand behind"
+        );
+    }
+
+    #[test]
+    fn cemented_rock_is_competent_so_it_can_hold_a_void() {
+        // The whole reason for cementing sediment: loose material cannot hold a
+        // channel, because repose destroys any void the moment it opens.
+        for m in [MaterialId::Sandstone, MaterialId::Conglomerate] {
+            assert!(
+                crate::cell::is_competent_rock(m),
+                "{m:?} must be competent or it cannot hold a conduit open"
+            );
+            assert!(
+                !crate::cell::is_grain(m),
+                "{m:?} must not repose like loose sediment"
+            );
+        }
     }
 }

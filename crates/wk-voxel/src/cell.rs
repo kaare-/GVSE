@@ -217,6 +217,8 @@ pub fn hosts_mycelium(material: MaterialId) -> bool {
             | MaterialId::Stone
             | MaterialId::Limestone
             | MaterialId::Flowstone
+            | MaterialId::Sandstone
+            | MaterialId::Conglomerate
     )
 }
 
@@ -259,7 +261,11 @@ pub fn is_competent_rock(material: MaterialId) -> bool {
     // Flowstone is a cemented deposit — structurally rock, like limestone.
     matches!(
         material,
-        MaterialId::Stone | MaterialId::Limestone | MaterialId::Flowstone
+        MaterialId::Stone
+            | MaterialId::Limestone
+            | MaterialId::Flowstone
+            | MaterialId::Sandstone
+            | MaterialId::Conglomerate
     )
 }
 

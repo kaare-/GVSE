@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Number of [`MaterialId`] variants (shared by both stacks).
-pub const MATERIAL_COUNT: usize = 16;
+pub const MATERIAL_COUNT: usize = 18;
 /// Horizontal cell / column width in metres (shared scale).
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
 
@@ -72,18 +72,37 @@ pub enum MaterialId {
     /// makes a confined aquifer confined, and so what makes artesian head and
     /// perched tables happen by design instead of by accident.
     Bentonite = 15,
+    /// **Sandstone** — [`Sand`] cemented by carbonate precipitated out of
+    /// groundwater.
+    ///
+    /// Exists to solve a structural problem, not for variety: loose sediment
+    /// cannot hold a channel, because repose and grain settle destroy any void
+    /// the moment it opens. Conduits could therefore only ever form in
+    /// competent rock — never in the near-surface layer where water actually
+    /// runs. Cementing sediment gives channels somewhere to persist.
+    ///
+    /// Clastic, so it stays a decent aquifer, unlike tight silicate stone. Its
+    /// cement is carbonate, so it dissolves back to [`Sand`] rather than to a
+    /// void: the grains do not go anywhere.
+    Sandstone = 16,
+    /// **Conglomerate** — cemented [`Gravel`] / [`LooseRock`]: coarse clasts in
+    /// a carbonate matrix. Same purpose and reversibility as [`Sandstone`],
+    /// coarser and more permeable.
+    Conglomerate = 17,
 }
 
 impl MaterialId {
     /// Ground-forming solids (never fluid, never phase-changes at the
     /// world's normal temperature range).
-    pub const ALL_SOLIDS: [MaterialId; 11] = [
+    pub const ALL_SOLIDS: [MaterialId; 13] = [
         MaterialId::Bedrock,
         MaterialId::Stone,
         MaterialId::Limestone,
         MaterialId::LooseRock,
         MaterialId::LooseLimestone,
         MaterialId::Flowstone,
+        MaterialId::Sandstone,
+        MaterialId::Conglomerate,
         MaterialId::Gravel,
         MaterialId::Sand,
         MaterialId::Clay,
@@ -109,6 +128,8 @@ impl MaterialId {
             13 => Some(MaterialId::LooseLimestone),
             14 => Some(MaterialId::Flowstone),
             15 => Some(MaterialId::Bentonite),
+            16 => Some(MaterialId::Sandstone),
+            17 => Some(MaterialId::Conglomerate),
             _ => None,
         }
     }
@@ -129,6 +150,8 @@ impl MaterialId {
                 | MaterialId::LooseRock
                 | MaterialId::LooseLimestone
                 | MaterialId::Flowstone
+                | MaterialId::Sandstone
+                | MaterialId::Conglomerate
                 | MaterialId::Gravel
                 | MaterialId::Sand
                 | MaterialId::Clay
@@ -576,6 +599,43 @@ impl MaterialRegistry {
                 // nearly free-draining; this is why a gravel lens conducts
                 field_capacity: 20,
             },
+            MaterialId::Sandstone => MaterialProps {
+                density: 2300,
+                // Clastic rocks are aquifers. Far more permeable than silicate
+                // stone (5), which is the point: a cemented bed still carries
+                // water, it just also holds a void open.
+                permeability: 60,
+                erosion_resistance: 130,
+                cohesion: 210,
+                porosity: 30,
+                phase_change: None,
+                render_alpha: 255,
+                repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0012,
+                heat_capacity: 4.5,
+                albedo: 0.32,
+                // The *cement* is carbonate, so it redissolves — at half
+                // limestone's rate, since only the matrix is soluble.
+                solubility: 20,
+                roof_span_max_m: 7.0,
+                field_capacity: 44,
+            },
+            MaterialId::Conglomerate => MaterialProps {
+                density: 2450,
+                permeability: 80,
+                erosion_resistance: 150,
+                cohesion: 200,
+                porosity: 25,
+                phase_change: None,
+                render_alpha: 255,
+                repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0013,
+                heat_capacity: 4.6,
+                albedo: 0.28,
+                solubility: 20,
+                roof_span_max_m: 6.0,
+                field_capacity: 38,
+            },
             MaterialId::Bentonite => MaterialProps {
                 density: 1800,
                 // The whole point: ~10x tighter than clay. Clay at 10 against
@@ -805,6 +865,12 @@ impl MaterialRegistry {
             // Mix of tan and grey (mixed-grain aggregate).
             MaterialId::Gravel => [0xB4, 0xA4, 0x80],
             MaterialId::Sand => [0xE8, 0xD6, 0x6B],
+            // Ochre: Sand's hue gone darker and redder, so a cemented bed reads
+            // as the same material set hard rather than as something new.
+            MaterialId::Sandstone => [0xC2, 0x9A, 0x52],
+            // Gravel's tan pulled toward LooseRock's grey — coarse clasts in a
+            // pale matrix.
+            MaterialId::Conglomerate => [0x94, 0x88, 0x70],
             // Cool dusty tan — far from living Root sienna `#7A4B2A`
             // (was `#804000`, which read as the same brown underground).
             MaterialId::Clay => [0xB8, 0xA4, 0x90],

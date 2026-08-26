@@ -231,11 +231,16 @@ pub fn apply_karst_dissolution(world: &mut World, cfg: &KarstConfig) {
                     continue;
                 }
                 // Dissolve — keep whatever pore water this cell held.
+                //
+                // A clastic rock leaves its grains behind: only the carbonate
+                // matrix is soluble, so sandstone becomes sand, not a void.
+                let becomes =
+                    crate::mineral::loose_parent(cur.material).unwrap_or(MaterialId::Air);
                 converts.push((
                     gx,
                     gy,
                     Cell {
-                        material: MaterialId::Air,
+                        material: becomes,
                         sat: cur.sat,
                         flags: cur.flags,
                         _pad: cur._pad,
