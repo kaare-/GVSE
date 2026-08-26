@@ -121,6 +121,7 @@ fn is_cargo_material(mat: MaterialId) -> bool {
     MaterialId::Sand
       | MaterialId::Soil
       | MaterialId::Clay
+      | MaterialId::Bentonite
       | MaterialId::Gravel
       | MaterialId::Organic
       | MaterialId::Snow
@@ -209,6 +210,7 @@ fn is_crushable_bed(material: MaterialId) -> bool {
     MaterialId::Sand
       | MaterialId::Soil
       | MaterialId::Clay
+      | MaterialId::Bentonite
       | MaterialId::Gravel
       | MaterialId::Organic
       | MaterialId::Snow

@@ -177,7 +177,11 @@ fn passable_for_body_material(material: MaterialId) -> bool {
 fn is_soft_embed_bed(material: MaterialId) -> bool {
   matches!(
     material,
-    MaterialId::Sand | MaterialId::Soil | MaterialId::Clay | MaterialId::Gravel
+    MaterialId::Sand
+      | MaterialId::Soil
+      | MaterialId::Clay
+      | MaterialId::Bentonite
+      | MaterialId::Gravel
   )
 }
 
@@ -189,6 +193,7 @@ fn is_roll_displaceable(material: MaterialId) -> bool {
     MaterialId::Sand
       | MaterialId::Soil
       | MaterialId::Clay
+      | MaterialId::Bentonite
       | MaterialId::Gravel
       | MaterialId::LooseRock
       | MaterialId::LooseLimestone

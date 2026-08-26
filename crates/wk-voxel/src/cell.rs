@@ -211,6 +211,7 @@ pub fn hosts_mycelium(material: MaterialId) -> bool {
             | MaterialId::Soil
             | MaterialId::Sand
             | MaterialId::Clay
+            | MaterialId::Bentonite
             | MaterialId::LooseRock
             | MaterialId::LooseLimestone
             | MaterialId::Stone
@@ -229,6 +230,7 @@ pub fn is_grain(material: MaterialId) -> bool {
         MaterialId::Sand
             | MaterialId::Gravel
             | MaterialId::Clay
+            | MaterialId::Bentonite
             | MaterialId::Soil
             | MaterialId::LooseRock
             | MaterialId::LooseLimestone

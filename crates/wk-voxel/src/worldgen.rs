@@ -237,6 +237,22 @@ fn body_material(
             MaterialId::Stone
         };
     }
+    // Bentonite aquitard capping the limestone aquifer.
+    //
+    // A confined aquifer needs a seal, and clay is not one: at permeability 10
+    // against limestone's 140 it is only ~14× tighter, which still equalises
+    // over a geological cadence. Without a real cap there is no confined head,
+    // which is why a hand-dug well found no pressure.
+    //
+    // Deliberately *not* continuous. A perfect seal would also block recharge
+    // and the aquifer beneath would never fill; real confined aquifers take
+    // their water where the aquitard is absent. The gaps are those windows.
+    if lime_enabled {
+        let cap_lo = (lime_lo - 2.0f32).max(3.5);
+        if d >= cap_lo && d < lime_lo && lens >= 0.15 {
+            return MaterialId::Bentonite;
+        }
+    }
     // Clay bed.
     if d < 8.0 {
         return if lens < 0.75 {

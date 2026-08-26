@@ -4,17 +4,17 @@
 //!
 //! Permeability-limited pore soak.
 
-use wk_material::MaterialId;
+use wk_material::{HydroOverrides, MaterialId};
 
 use crate::active::ActiveChunk;
-use crate::cell::{water_capacity_cell, Cell, Sat};
+use crate::cell::{permeability_cell, water_capacity_cell, Cell, Sat};
 use crate::chunk::{ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
 use super::head::{
     is_porous_cell, sat_move_to_equalize_heads, seepage_conduct_rate_cells, seepage_rate_cell,
-    seepage_uptake_rate_cell,
+    seepage_stride_cell, seepage_uptake_rate_cell,
 };
 use super::plan::{regions_for_standalone, regions_wet_loaded};
 
@@ -362,6 +362,52 @@ fn seam_coupled_span(world: &World, lower: ChunkCoord, upper: ChunkCoord) -> Opt
     Some((lo_x as u8, hi_x as u8))
 }
 
+/// True when a diagonal face is a genuine shortcut through tighter material —
+/// that is, when a vein runs diagonally.
+///
+/// Without diagonals a diagonal vein cannot conduct along its own axis: water
+/// has to zigzag through the two corner cells between, so the vein is throttled
+/// to *their* permeability and only grid-aligned veins conduct. That is a real
+/// artifact, but adding diagonal faces everywhere is not the fix — in
+/// homogeneous rock it just gives every cell eight faces instead of four and
+/// roughly doubles drainage, which is a global retune of the water model and
+/// works against water lingering in permeable layers at all.
+///
+/// So the face opens only where the anisotropy actually bites: both ends more
+/// permeable than either corner. In homogeneous material the corners match the
+/// ends and nothing opens, leaving tuned behaviour untouched.
+#[allow(clippy::too_many_arguments)]
+fn diagonal_is_a_shortcut(
+    world: &World,
+    read: &impl Fn(i32, i32, i32, i32) -> Option<Cell>,
+    hydro: &HydroOverrides,
+    gx: i32,
+    gy: i32,
+    lx: i32,
+    ly: i32,
+    dx: i32,
+    dy: i32,
+) -> bool {
+    let a = match read(lx, ly, gx, gy) {
+        Some(c) => c,
+        None => return false,
+    };
+    let bx = world.wrap_x(gx + dx);
+    let b = match read(lx + dx, ly + dy, bx, gy + dy) {
+        Some(c) => c,
+        None => return false,
+    };
+    // The two cells the orthogonal zigzag would have to pass through.
+    let corner_h = read(lx + dx, ly, bx, gy);
+    let corner_v = read(lx, ly + dy, gx, gy + dy);
+    let ends = permeability_cell(a, hydro).min(permeability_cell(b, hydro));
+    let corners = corner_h
+        .map(|c| permeability_cell(c, hydro))
+        .unwrap_or(0)
+        .max(corner_v.map(|c| permeability_cell(c, hydro)).unwrap_or(0));
+    ends > corners
+}
+
 fn merge_seam_rect(a: Rect, b: Rect) -> Rect {
     Rect {
         x0: a.x0.min(b.x0),
@@ -505,7 +551,20 @@ fn accumulate_seepage_xfers_ex(
     xfers: &mut Vec<((i32, i32), (i32, i32), i32)>,
     contact_only: bool,
 ) {
-    const OFFSETS: [(i32, i32); 2] = [(1, 0), (0, 1)];
+    // Right, up, and both diagonals. Every cell in the region is visited, so
+    // each face is handled exactly once from its lower-left end.
+    //
+    // The diagonals exist because without them a vein cannot conduct along its
+    // own axis: water had to zigzag through the matrix cells between, so a
+    // diagonal fracture was throttled to matrix permeability while a
+    // grid-aligned one ran at its own. Channels could only ever form along the
+    // world axes.
+    const OFFSETS: [(i32, i32); 4] = [(1, 0), (0, 1), (1, 1), (1, -1)];
+    // Diagonal faces are √2 further apart, so the same head drives less flux.
+    // 181/256 ≈ 1/√2. Without it diagonal conduction reads as *faster* than
+    // straight, which is worse than having no diagonals at all.
+    const DIAGONAL_NUM: i32 = 181;
+    const DIAGONAL_DEN: i32 = 256;
     let hydro = world.hydro;
     let cw = CHUNK_CELLS_W as i32;
     let ch = CHUNK_CELLS_H as i32;
@@ -540,6 +599,13 @@ fn accumulate_seepage_xfers_ex(
                 // check materials before head math. Dominates rainy
                 // ocean shore halos.
                 for (dx, dy) in OFFSETS {
+                    let diagonal = dx != 0 && dy != 0;
+                    // Diagonals only ever carry pore↔pore conduction, which the
+                    // contact pass skips by definition — discard them before
+                    // paying for the neighbour read.
+                    if contact_only && diagonal {
+                        continue;
+                    }
                     let nx = world.wrap_x(gx + dx);
                     let ny = gy + dy;
                     if dx != 0 && nx == gx {
@@ -556,6 +622,30 @@ fn accumulate_seepage_xfers_ex(
                     // percolation between two buried pores.
                     if contact_only && a_solid && b_solid {
                         continue;
+                    }
+                    // Diagonals only carry pore↔pore conduction, which is the
+                    // anisotropy they were added to fix. Surface infiltration
+                    // and weep keep their orthogonal faces: those rules are
+                    // tuned against a free surface, and giving a lake bed four
+                    // more faces to force-fill through would change how fast
+                    // ponds soak away, which is not what this is for.
+                    if diagonal
+                        && (!(a_solid && b_solid)
+                            || !diagonal_is_a_shortcut(world, &read, &hydro, gx, gy, lx, ly, dx, dy))
+                    {
+                        continue;
+                    }
+                    // Sub-unit conduction for material too tight for the rate
+                    // to express — see `seepage_stride_cell`.
+                    if a_solid && b_solid {
+                        let stride = seepage_stride_cell(a, &hydro)
+                            .max(seepage_stride_cell(b, &hydro));
+                        if stride > 1 {
+                            let phase = gx.wrapping_mul(7).wrapping_add(gy.wrapping_mul(13)) as u32;
+                            if (world.tick as u32).wrapping_add(phase) % stride != 0 {
+                                continue;
+                            }
+                        }
                     }
                     let cap_b = water_capacity_cell(b, &hydro);
                     if cap_b == 0 {
@@ -698,6 +788,12 @@ fn accumulate_seepage_xfers_ex(
                         } else {
                             seepage_rate_cell(b, &hydro)
                         }
+                    };
+                    // Longer path across a diagonal face.
+                    let rate = if diagonal {
+                        ((rate * DIAGONAL_NUM) / DIAGONAL_DEN).max(1)
+                    } else {
+                        rate
                     };
                     // Fully saturated faces weep faster into open Air
                     // (cliff springs) — still permeability-capped, but

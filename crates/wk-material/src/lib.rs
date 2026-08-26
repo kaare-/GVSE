@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Number of [`MaterialId`] variants (shared by both stacks).
-pub const MATERIAL_COUNT: usize = 15;
+pub const MATERIAL_COUNT: usize = 16;
 /// Horizontal cell / column width in metres (shared scale).
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
 
@@ -64,12 +64,20 @@ pub enum MaterialId {
     /// spring mounds and sealed conduits are readable rather than looking like
     /// native rock. Still soluble, so it can redissolve.
     Flowstone = 14,
+    /// **Bentonite** — swelling clay, effectively an aquitard.
+    ///
+    /// Mechanically a clay (plastic, reposes, slumps when wet), but roughly an
+    /// order of magnitude tighter than [`Clay`] and holding almost everything
+    /// it takes on. Its job is to *stop* water: a real confining layer is what
+    /// makes a confined aquifer confined, and so what makes artesian head and
+    /// perched tables happen by design instead of by accident.
+    Bentonite = 15,
 }
 
 impl MaterialId {
     /// Ground-forming solids (never fluid, never phase-changes at the
     /// world's normal temperature range).
-    pub const ALL_SOLIDS: [MaterialId; 10] = [
+    pub const ALL_SOLIDS: [MaterialId; 11] = [
         MaterialId::Bedrock,
         MaterialId::Stone,
         MaterialId::Limestone,
@@ -79,6 +87,7 @@ impl MaterialId {
         MaterialId::Gravel,
         MaterialId::Sand,
         MaterialId::Clay,
+        MaterialId::Bentonite,
         MaterialId::Soil,
     ];
 
@@ -99,6 +108,7 @@ impl MaterialId {
             12 => Some(MaterialId::Soil),
             13 => Some(MaterialId::LooseLimestone),
             14 => Some(MaterialId::Flowstone),
+            15 => Some(MaterialId::Bentonite),
             _ => None,
         }
     }
@@ -118,15 +128,18 @@ impl MaterialId {
                 | MaterialId::Limestone
                 | MaterialId::LooseRock
                 | MaterialId::LooseLimestone
+                | MaterialId::Flowstone
                 | MaterialId::Gravel
                 | MaterialId::Sand
                 | MaterialId::Clay
+                | MaterialId::Bentonite
                 | MaterialId::Soil
                 | MaterialId::Organic
                 | MaterialId::Snow
                 | MaterialId::Ice
         )
     }
+
 
     pub fn is_erodible(self) -> bool {
         !matches!(
@@ -563,6 +576,29 @@ impl MaterialRegistry {
                 // nearly free-draining; this is why a gravel lens conducts
                 field_capacity: 20,
             },
+            MaterialId::Bentonite => MaterialProps {
+                density: 1800,
+                // The whole point: ~10x tighter than clay. Clay at 10 against
+                // limestone's 140 is only ~14x, which still equalises over a
+                // geological cadence — not a seal.
+                permeability: 1,
+                erosion_resistance: 70,
+                cohesion: 200,
+                porosity: 65,
+                phase_change: None,
+                render_alpha: 255,
+                // Plastic like clay: holds a face until wet, then slumps.
+                repose_rise_m: 0.15,
+                thermal_diffusivity: 0.0012,
+                heat_capacity: 3.6,
+                albedo: 0.20,
+                // An aquitard that dissolves is not an aquitard.
+                solubility: 0,
+                roof_span_max_m: 0.0,
+                // Swelling clay gives up almost nothing to gravity, which is
+                // what perches a table on top of it.
+                field_capacity: 232,
+            },
             MaterialId::Clay => MaterialProps {
                 density: 1900,
                 permeability: 10,
@@ -785,6 +821,9 @@ impl MaterialRegistry {
             // Ivory with a faint blue cast — reads as wet mineral crust and
             // separates cleanly from Limestone's warm grey at a glance.
             MaterialId::Flowstone => [0xEC, 0xEC, 0xDE],
+            // Cool blue-green grey. Wants to be legible as a *band*, since
+            // reading where the seal sits is the point of drawing it at all.
+            MaterialId::Bentonite => [0x6E, 0x82, 0x7A],
         }
     }
 }
@@ -898,5 +937,37 @@ mod tests {
         let stone = MaterialRegistry::erosion_rank(MaterialId::Stone);
         assert!(sand < clay);
         assert!(clay < stone);
+    }
+
+    /// Every ground-forming solid must report [`MaterialId::is_solid`].
+    ///
+    /// It is not a label: `support_map` uses it to decide what holds weight,
+    /// and solidity changes are what wake the competent body pass. A solid
+    /// missing from the list silently supports nothing. Flowstone shipped that
+    /// way — the `is_solid` arm was the one edit that did not land with it.
+    #[test]
+    fn every_all_solids_entry_reports_solid() {
+        for m in MaterialId::ALL_SOLIDS {
+            assert!(m.is_solid(), "{m:?} is in ALL_SOLIDS but not is_solid()");
+        }
+    }
+
+    #[test]
+    fn bentonite_is_a_tighter_seal_than_clay() {
+        let clay = MaterialRegistry::base_props(MaterialId::Clay);
+        let bent = MaterialRegistry::base_props(MaterialId::Bentonite);
+        assert!(
+            bent.permeability * 4 < clay.permeability,
+            "bentonite must be far tighter than clay to confine an aquifer \
+             (clay {}, bentonite {})",
+            clay.permeability,
+            bent.permeability
+        );
+        assert!(
+            bent.field_capacity > clay.field_capacity,
+            "swelling clay should hold more against gravity than clay"
+        );
+        // An aquitard that dissolves is not an aquitard.
+        assert_eq!(bent.solubility, 0);
     }
 }

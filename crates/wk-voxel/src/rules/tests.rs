@@ -7213,6 +7213,109 @@ fn a_settled_boulder_field_stops_moving() {
 }
 
 #[test]
+fn a_diagonal_vein_conducts_along_its_own_axis() {
+    // Without diagonal faces, water in a diagonal vein has to zigzag through
+    // the corner cells between it, so the vein is throttled to *their*
+    // permeability and only grid-aligned veins conduct.
+    //
+    // The corners are bedrock, so the diagonal is the *only* path: a vein
+    // through merely tight rock still leaks through the corners and would carry
+    // water either way. Seepage is driven directly rather than through ticks,
+    // because a fully buried vein with no free surface never gets planned --
+    // that is the wake's business, not this rule's.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..12 {
+        for y in 0..12 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+        }
+    }
+    let vein: Vec<(i32, i32)> = (0..5).map(|i| (3 + i, 9 - i)).collect();
+    for &(x, y) in &vein {
+        w.set_cell(x, y, Cell::solid(MaterialId::Gravel));
+    }
+    let mut wet = Cell::solid(MaterialId::Gravel);
+    wet.sat.0 = water_capacity(MaterialId::Gravel);
+    w.set_cell(vein[0].0, vein[0].1, wet);
+
+    let region = crate::active::ActiveChunk {
+        coord: ChunkCoord::new(0, 0),
+        rect: crate::chunk::Rect {
+            x0: 0,
+            y0: 0,
+            x1: 15,
+            y1: 15,
+        },
+    };
+    for _ in 0..200 {
+        super::seepage::apply_seepage_regions(&mut w, std::slice::from_ref(&region));
+        w.tick += 1;
+    }
+    let far = vein[vein.len() - 1];
+    let far_sat = w.get_cell(far.0, far.1).unwrap().sat.0;
+    assert!(
+        far_sat > 0,
+        "water should reach the far end of a diagonal vein whose only \
+         connection is the diagonal face (sat={far_sat})"
+    );
+}
+
+#[test]
+fn bentonite_perches_water_that_clay_lets_through() {
+    // The point of adding bentonite: clay at permeability 10 against
+    // limestone's 140 is only ~14x tighter, which still equalises over a
+    // geological cadence, so there was no real aquitard and so no confined
+    // head. Same column twice, one capped with clay and one with bentonite.
+    fn drained_through(seal: MaterialId, ticks: u32) -> u32 {
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for y in 0..=20 {
+            w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(6, y, Cell::solid(MaterialId::Bedrock));
+        }
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+        // Gravel reservoir below, the seal, then saturated sand above it.
+        for x in 3..=5 {
+            for y in 1..=3 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Gravel));
+            }
+            for y in 4..=5 {
+                w.set_cell(x, y, Cell::solid(seal));
+            }
+            for y in 6..=9 {
+                let mut c = Cell::solid(MaterialId::Sand);
+                c.sat.0 = water_capacity(MaterialId::Sand);
+                w.set_cell(x, y, c);
+            }
+        }
+        let perf = PerfConfig::default();
+        for _ in 0..ticks {
+            tick_with_perf(&mut w, &perf);
+        }
+        // How much reached the reservoir under the seal.
+        (1..=3)
+            .map(|y| w.get_cell(4, y).unwrap().sat.0 as u32)
+            .sum::<u32>()
+    }
+    // Confinement is a *timescale* property, not an endpoint: given long
+    // enough, water equalises through anything with a non-zero permeability,
+    // and real confining layers are leaky. What matters is that leakage is slow
+    // next to recharge, so the comparison is made at a finite horizon.
+    for ticks in [800, 1600, 2400] {
+        let clay = drained_through(MaterialId::Clay, ticks);
+        let bent = drained_through(MaterialId::Bentonite, ticks);
+        assert!(clay > 0, "clay should leak at {ticks} ticks, passed {clay}");
+        assert!(
+            bent * 4 < clay,
+            "at {ticks} ticks bentonite should still be holding back far more \
+             than clay (clay passed {clay}, bentonite passed {bent})"
+        );
+    }
+}
+
+#[test]
 fn dry_seam_costs_nothing_but_a_wet_one_still_couples() {
     // The seam band used to be emitted for every chunk pair at full width,
     // which made cross-seam coupling the single most expensive pass in the

@@ -139,6 +139,7 @@ pub fn material_is_loose(material: MaterialId) -> bool {
         MaterialId::Sand
             | MaterialId::Gravel
             | MaterialId::Clay
+            | MaterialId::Bentonite
             | MaterialId::Soil
             | MaterialId::LooseRock
             | MaterialId::LooseLimestone

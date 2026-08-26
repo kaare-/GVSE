@@ -518,6 +518,7 @@ fn cell_is_loose_bed(world: &World, gx: i32, gy: i32) -> bool {
             MaterialId::Sand
                 | MaterialId::Soil
                 | MaterialId::Clay
+                | MaterialId::Bentonite
                 | MaterialId::Gravel
                 | MaterialId::Organic
         )
@@ -733,7 +734,7 @@ pub fn leave_dead_roots_in_place(world: &mut World, atom: &Atom) -> u32 {
             continue;
         };
         match c.material {
-            MaterialId::Sand | MaterialId::Clay | MaterialId::Soil => {
+            MaterialId::Sand | MaterialId::Clay | MaterialId::Bentonite | MaterialId::Soil => {
                 let mut org = Cell::solid(MaterialId::Organic);
                 org.pore = c.pore;
                 let cap = water_capacity_cell(org, &world.hydro);
@@ -1033,7 +1034,7 @@ fn fungus_seat_score(world: &World, gx: i32, nucleus_y: i32) -> i32 {
             let cap = water_capacity_cell(below, &world.hydro).max(1);
             40 + (below.sat.0 as i32 * 40) / cap as i32
         }
-        MaterialId::Clay => 30,
+        MaterialId::Clay | MaterialId::Bentonite => 30,
         _ if water_capacity_cell(below, &world.hydro) > 0 => 10,
         _ => 1, // bare rock / ice-adjacent solids — allowed but poor
     }
@@ -1062,7 +1063,7 @@ fn penetrate_cost(mat: MaterialId) -> Option<f32> {
     match mat {
         MaterialId::Bedrock | MaterialId::Ice | MaterialId::Snow | MaterialId::Water => None,
         MaterialId::Organic => Some(0.35),
-        MaterialId::Sand | MaterialId::Clay | MaterialId::Soil => Some(0.65),
+        MaterialId::Sand | MaterialId::Clay | MaterialId::Bentonite | MaterialId::Soil => Some(0.65),
         MaterialId::Stone | MaterialId::Limestone => Some(1.6),
         MaterialId::Air => Some(0.45), // gaps / rhizome air pockets
         _ => Some(1.0), // LooseRock, Gravel, …

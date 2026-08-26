@@ -1871,6 +1871,7 @@ fn material_short_name(id: MaterialId) -> &'static str {
         MaterialId::LooseRock => "LooseRock",
         MaterialId::LooseLimestone => "LooseLimestone",
         MaterialId::Flowstone => "Flowstone",
+        MaterialId::Bentonite => "Bentonite",
         MaterialId::Gravel => "Gravel",
         MaterialId::Limestone => "Limestone",
         _ => "?",

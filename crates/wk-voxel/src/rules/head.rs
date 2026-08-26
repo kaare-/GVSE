@@ -79,6 +79,35 @@ pub(crate) fn seepage_rate_cell(cell: Cell, hydro: &HydroOverrides) -> i32 {
     ((p as i32 * 32) / 255).max(1)
 }
 
+/// Permeability that yields exactly one sat-unit per pass in
+/// [`seepage_rate_cell`]. Below this the rate floors at 1 and stops resolving.
+pub(crate) const SEEPAGE_RATE_QUANTUM: i32 = 255 / 32 + 1;
+
+/// How many seepage passes a cell waits between transfers, for permeabilities
+/// too low for [`seepage_rate_cell`] to express.
+///
+/// That rate floors at one sat-unit per pass, so **every** material below
+/// permeability 8 conducted identically: clay (10), flowstone (12) and
+/// bentonite (1) all came out at 1. The whole tight end of the spectrum was
+/// quantised into a single value, which made a real aquitard impossible to
+/// express and flattened the pore variation on tight rock that the fracture
+/// tail is supposed to produce.
+///
+/// Striding recovers the resolution without fractional sat: permeability 1
+/// transfers one unit every 8 passes, which is exactly 1/8 of permeability 8.
+#[inline]
+pub(crate) fn seepage_stride_cell(cell: Cell, hydro: &HydroOverrides) -> u32 {
+    let p = permeability_cell(cell, hydro) as i32;
+    if p <= 0 {
+        return u32::MAX;
+    }
+    if p >= SEEPAGE_RATE_QUANTUM {
+        1
+    } else {
+        (SEEPAGE_RATE_QUANTUM / p).max(1) as u32
+    }
+}
+
 /// Surface / top-layer infiltration into a porous cell this step.
 ///
 /// Bone-dry ground takes only a trickle so most free water can run past

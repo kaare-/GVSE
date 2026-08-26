@@ -1060,7 +1060,7 @@ fn mycelium_host_cost(mat: MaterialId, moist: f32) -> Option<u32> {
     match mat {
         MaterialId::Organic => Some(0),
         MaterialId::Soil | MaterialId::Sand => Some(if wet { 2 } else { 6 }),
-        MaterialId::Clay => Some(if wet { 4 } else { 9 }),
+        MaterialId::Clay | MaterialId::Bentonite => Some(if wet { 4 } else { 9 }),
         MaterialId::LooseRock | MaterialId::LooseLimestone => Some(if wet { 10 } else { 18 }),
         MaterialId::Stone | MaterialId::Limestone => Some(if wet { 22 } else { 36 }),
         _ => None,

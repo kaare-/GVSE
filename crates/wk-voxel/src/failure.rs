@@ -133,7 +133,7 @@ pub fn effective_cohesion(material: MaterialId, wet: f32) -> f32 {
 /// F2a: wet grains with low `c_eff` lose one `max_step` of repose stability.
 /// Clay uses [`grain_repose_max_step`] instead (plasticity curve).
 pub fn wet_repose_loosens(material: MaterialId, wet: f32) -> bool {
-    if material == MaterialId::Clay {
+    if matches!(material, MaterialId::Clay | MaterialId::Bentonite) {
         return false;
     }
     if wet <= 0.0 {
@@ -148,7 +148,7 @@ pub fn wet_repose_loosens(material: MaterialId, wet: f32) -> bool {
 /// Clay: dry powder and near-saturated mud → 0 (sand-like); mid-wet
 /// plastic clay → [`CLAY_PLASTIC_MAX_STEP`] (holds shape).
 pub fn grain_repose_max_step(material: MaterialId, wet: f32) -> i32 {
-    if material == MaterialId::Clay {
+    if matches!(material, MaterialId::Clay | MaterialId::Bentonite) {
         return clay_plastic_max_step(wet);
     }
     let mut step = grain_max_stable_step(material);
@@ -736,7 +736,11 @@ fn shear_one_face(
 fn is_compactable(material: MaterialId) -> bool {
     matches!(
         material,
-        MaterialId::Clay | MaterialId::Soil | MaterialId::Organic | MaterialId::Sand
+        MaterialId::Clay
+        | MaterialId::Bentonite
+        | MaterialId::Soil
+        | MaterialId::Organic
+        | MaterialId::Sand
     )
 }
 
