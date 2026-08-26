@@ -488,7 +488,22 @@ fn surface_y(wind: &Wind, fx: f32) -> f32 {
 const CLOUD_FLOOR_SCAN_ABOVE: i32 = 64;
 
 fn occupies_cloud_floor(c: crate::cell::Cell) -> bool {
-    c.material != MaterialId::Air || !c.sat.is_empty()
+    if c.material != MaterialId::Air {
+        return true;
+    }
+    // Damp air is **not** a floor: rain falls straight through haze, and clouds
+    // are not held up by it either.
+    //
+    // Counting any trace of moisture meant that in a humid sky the floor climbed
+    // to wherever the topmost damp cell was — right up under the deck. Rain
+    // streaks clip against this, so `draw_falling_rain` found no vertical room
+    // and skipped every drop, which is why rain stayed invisible even after its
+    // size floor was fixed. It also let haze shove clouds around instead of
+    // terrain doing it.
+    //
+    // Same threshold the terrain renderer uses to tell a puddle from
+    // atmospheric film.
+    c.sat.0 > crate::GRAIN_REPOSE_HAZE_MAX
 }
 
 /// Inclusive top cell of the wind/humidity bounds (sky ceiling − 1).
@@ -968,6 +983,44 @@ mod tests {
         assert!(
             moist < middling && middling < dry,
             "cloud base should rise as air dries ({moist} < {middling} < {dry})"
+        );
+    }
+
+    #[test]
+    fn damp_air_is_not_a_cloud_floor() {
+        // A humid sky used to raise the "floor" to wherever the topmost damp cell
+        // was, because any non-empty sat counted. Rain streaks clip against this,
+        // so in a saturated world there was no vertical room between deck and
+        // floor and every drop was skipped — rain stayed invisible no matter how
+        // large the drops were drawn.
+        let mut w = World::new(5);
+        w.ensure_chunk(crate::chunk::ChunkCoord::new(0, 0));
+        let wind = Wind::climate(4, 0.05, 5u64, 64, 20, 0, 320, false);
+        let gx = 8;
+        // Solid ground low down...
+        for y in 0..=6 {
+            w.set_cell(gx, y, Cell::solid(MaterialId::Stone));
+        }
+        // ...and a tall column of merely damp air above it.
+        for y in 7..=60 {
+            let mut haze = Cell::air();
+            haze.sat = crate::cell::Sat(crate::GRAIN_REPOSE_HAZE_MAX);
+            w.set_cell(gx, y, haze);
+        }
+        let floor = cloud_floor_y(&w, &wind, gx as f32);
+        assert!(
+            floor < 20.0,
+            "haze must not act as a floor (got {floor}, damp air reached y=60)"
+        );
+
+        // Standing water, though, genuinely is a surface.
+        for y in 7..=12 {
+            w.set_cell(gx, y, Cell::water());
+        }
+        let wet_floor = cloud_floor_y(&w, &wind, gx as f32);
+        assert!(
+            wet_floor >= 12.0,
+            "standing water should raise the floor (got {wet_floor})"
         );
     }
 }
