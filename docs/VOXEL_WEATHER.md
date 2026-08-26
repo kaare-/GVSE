@@ -61,7 +61,10 @@ each of 36 bands, so any moist sky fills them all. It is not a weather signal an
 was misread as one for several rounds. Use `hum` (total humidity mass) as the
 dial instead: it fell from 183k to 95k in playtest once rain started landing.
 
-### Open: droplets fall too fast
+### Pinned: droplets fall too fast
+
+*Deliberately parked* — playtested and judged acceptable for now. Kept here
+because the analysis is done, not because it is blocking.
 
 Confirmed in playtest — rain is visible, and "very fast drops". A droplet is
 moved by `apply_gravity_fall` on every flow substep, and there are 8 substeps per
@@ -139,9 +142,30 @@ returns. Banding by world x (`pick_spread_across_x`) is what made it stable;
 without that, top-N selection by mass moves discontinuously. Keep a test that
 advecting the field moves the deck smoothly.
 
+## The diurnal cycle works — it needed headroom, not more forcing
+
+**Superseded conclusion.** Earlier measurements said the day/night swing was
+swamped (rain fraction day 80% vs night 76%) and read that as missing forcing,
+with convection as the fix. That was wrong about the cause.
+
+The forcing was fine; the sky had no room. An atmosphere pinned near saturation
+cannot express a swing in saturation mass, because it is above the ceiling either
+way. Once rain nucleated in the air and actually drained the sky (phase 1,
+equilibrium 360k → 200k), the *same* forcing started producing weather.
+
+Playtest, day 3000 / night 3000 with a 25 °C swing: a **dry night followed by
+morning rain**, and total humidity swinging from ~95k at night to ~363k in
+daylight — close to fourfold. That is a diurnal water cycle, not a rain rate.
+
+The general lesson is worth keeping: when a driver looks too weak, check whether
+the thing it drives is saturated before adding more driver.
+
 ## Then: convection
 
-The remaining reason it rains constantly rather than having weather. All the
+Not needed to fix constant rain any more — that is solved. Convection is now
+about **spatial** structure: fronts, and moisture organised by terrain and
+buoyancy rather than spread evenly. The remaining flatness is horizontal, not
+temporal. All the
 forcing exists — `day_amp_c`, `solar_heat_c`, `night_cool_c`, saturation mass
 varying with temperature, a 1200-tick day — and it is swamped: measured **rain
 fraction day 80% vs night 76%**.
