@@ -45,7 +45,7 @@ pub const MINERAL_PER_CELL: u16 = 255;
 pub const SOLUBILITY_PER_SAT: u16 = 24;
 
 /// Precipitate that fills an Air cell once fully occluded.
-pub const DEPOSIT_MATERIAL: MaterialId = MaterialId::Limestone;
+pub const DEPOSIT_MATERIAL: MaterialId = MaterialId::Flowstone;
 
 /// Pore steps one precipitation event may close (keeps cementing gradual).
 pub const PRECIPITATE_MAX_STEP: u16 = 8;

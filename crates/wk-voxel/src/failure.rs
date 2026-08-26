@@ -338,6 +338,8 @@ pub fn roof_collapse_debris(material: MaterialId) -> MaterialId {
     match material {
         MaterialId::Stone => MaterialId::LooseRock,
         MaterialId::Limestone => MaterialId::LooseLimestone,
+        // Broken flowstone is carbonate rubble like any other.
+        MaterialId::Flowstone => MaterialId::LooseLimestone,
         MaterialId::Bedrock => MaterialId::LooseRock, // should not be selected (∞ span)
         other => other,
     }

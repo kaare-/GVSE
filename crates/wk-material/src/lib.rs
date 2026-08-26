@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Number of [`MaterialId`] variants (shared by both stacks).
-pub const MATERIAL_COUNT: usize = 14;
+pub const MATERIAL_COUNT: usize = 15;
 /// Horizontal cell / column width in metres (shared scale).
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
 
@@ -56,17 +56,26 @@ pub enum MaterialId {
     /// [`Limestone`] roof collapse and face shear — distinct from
     /// [`LooseRock`] (silicate cobbles) so karst cliffs shed pale scree.
     LooseLimestone = 13,
+    /// **Flowstone** — carbonate precipitated back out of groundwater
+    /// (travertine / tufa / cave flowstone).
+    ///
+    /// Chemically the same family as [`Limestone`] but a *deposit*, not a bed:
+    /// dense and tight where it forms, and worth telling apart on sight so
+    /// spring mounds and sealed conduits are readable rather than looking like
+    /// native rock. Still soluble, so it can redissolve.
+    Flowstone = 14,
 }
 
 impl MaterialId {
     /// Ground-forming solids (never fluid, never phase-changes at the
     /// world's normal temperature range).
-    pub const ALL_SOLIDS: [MaterialId; 9] = [
+    pub const ALL_SOLIDS: [MaterialId; 10] = [
         MaterialId::Bedrock,
         MaterialId::Stone,
         MaterialId::Limestone,
         MaterialId::LooseRock,
         MaterialId::LooseLimestone,
+        MaterialId::Flowstone,
         MaterialId::Gravel,
         MaterialId::Sand,
         MaterialId::Clay,
@@ -89,6 +98,7 @@ impl MaterialId {
             11 => Some(MaterialId::Limestone),
             12 => Some(MaterialId::Soil),
             13 => Some(MaterialId::LooseLimestone),
+            14 => Some(MaterialId::Flowstone),
             _ => None,
         }
     }
@@ -701,6 +711,26 @@ impl MaterialRegistry {
                 // impermeable in v1 rules
                 field_capacity: 0,
             },
+            MaterialId::Flowstone => MaterialProps {
+                density: 2600,
+                // A deposit fills the space it forms in, so it is tighter than
+                // bedded limestone — this is what seals a conduit.
+                permeability: 12,
+                erosion_resistance: 170,
+                cohesion: 190,
+                porosity: 12,
+                phase_change: None,
+                render_alpha: 255,
+                repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0011,
+                heat_capacity: 5.0,
+                albedo: 0.34,
+                // Still carbonate: it can dissolve again.
+                solubility: 40,
+                roof_span_max_m: 10.0,
+                // Dense precipitate holds little, and lets little go.
+                field_capacity: 30,
+            },
             MaterialId::Limestone => MaterialProps {
                 density: 2500,
                 // Much higher than stone — water infiltrates and flows
@@ -752,6 +782,9 @@ impl MaterialRegistry {
             MaterialId::Ice => [0xC7, 0xE0, 0xF2],
             // Warm pale grey — distinct from cooler Stone.
             MaterialId::Limestone => [0xC8, 0xC2, 0xB0],
+            // Ivory with a faint blue cast — reads as wet mineral crust and
+            // separates cleanly from Limestone's warm grey at a glance.
+            MaterialId::Flowstone => [0xEC, 0xEC, 0xDE],
         }
     }
 }

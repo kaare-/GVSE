@@ -215,6 +215,7 @@ pub fn hosts_mycelium(material: MaterialId) -> bool {
             | MaterialId::LooseLimestone
             | MaterialId::Stone
             | MaterialId::Limestone
+            | MaterialId::Flowstone
     )
 }
 
@@ -253,7 +254,11 @@ pub fn is_repose_grain(material: MaterialId) -> bool {
 
 /// Competent bedrock-class solids that can move as rigid bodies (not Bedrock).
 pub fn is_competent_rock(material: MaterialId) -> bool {
-    matches!(material, MaterialId::Stone | MaterialId::Limestone)
+    // Flowstone is a cemented deposit — structurally rock, like limestone.
+    matches!(
+        material,
+        MaterialId::Stone | MaterialId::Limestone | MaterialId::Flowstone
+    )
 }
 
 /// Dense grains soft enough for flow bedload / bank undercut.
