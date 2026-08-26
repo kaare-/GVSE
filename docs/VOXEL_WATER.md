@@ -140,6 +140,30 @@ them through `water_capacity_cell` / `permeability_cell`. Setting a
 range to **0–0** makes that property zero for every cell; sand
 porosity and permeability both at 0–0 make an impermeable lid.
 
+## Seam coupling scans only wet seams
+
+`apply_seepage_seam_coupling` exists because dirty rects are per chunk and do
+not cross the `cy` boundary, so pore water would shelf at y=63|64.
+`seam_seepage_regions` used to emit a 20-row full-width band for **every**
+chunk pair unconditionally, which made it the most expensive pass in the
+simulation: 7.4 ms/call on demo, 17.2 ms on stress, ~85% of the seepage bucket
+while every other seepage component measured 1–3 ms.
+
+It now gates each seam on the sticky `has_wet_pores` / `has_wet_air` chunk
+flags and narrows the band to the local `x` span of columns where water could
+cross. The span predicate is deliberately looser than the per-column test in
+`wake_vertical_chunk_seam_pores` — both sides able to hold or pass water, one
+of them having some — so it cannot exclude a column the wake would couple.
+Result: 0.45 ms demo, 0.83 ms stress.
+
+The lake-bed and seam pore wakes were also being called twice per tick: once
+under the seepage cadence, and again unguarded just before the seepage plan.
+Only the later call site matters (its dirty is what the seepage plan consumes),
+so the early copy is gone and the wakes ride the cadence as intended.
+
+Use `tests/seepage_split_probe.rs` before tuning any of this. The profiler
+lumps five calls into one `seepage` bucket and the bucket cannot say which.
+
 ## What “working” looks like
 
 - Rain / cascade on impermeable sand: films drain off shelves into lower pools; lake tops level via same-Y equalise.
