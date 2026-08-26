@@ -1059,12 +1059,14 @@ mod tests {
 
     #[test]
     fn stone_collapses_wide_karst_room() {
-        // Limestone limit is 10m → 40 cells; easier to fit in one chunk.
+        // Limestone's limit is 15m → 60 cells, which no longer leaves room for
+        // an over-wide room inside a single 64-cell chunk, so this spans two.
         let mut w = World::new(1);
         w.ensure_chunk(ChunkCoord::new(0, 0));
-        bed(&mut w, 0, 63);
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        bed(&mut w, 0, CHUNK_CELLS_W as i32 * 2 - 1);
         let limit = roof_span_limit_cells(MaterialId::Limestone);
-        assert!(limit > 0 && limit + 4 < CHUNK_CELLS_W as i32);
+        assert!(limit > 0 && limit + 4 < CHUNK_CELLS_W as i32 * 2);
         let span = limit + 2;
         let x0 = 2;
         let x1 = x0 + span - 1;

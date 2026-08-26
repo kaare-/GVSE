@@ -842,7 +842,12 @@ impl MaterialRegistry {
                 heat_capacity: 5.0,
                 albedo: 0.28,
                 solubility: 40,
-                roof_span_max_m: 10.0,
+                // Matches Stone. Not a claim that limestone is stronger than
+                // granite -- it is not -- but limestone is the rock that gets
+                // caves, so a *shorter* span than generic stone made the one
+                // cave-forming material the worst at keeping a cave open.
+                // Karst dissolved a chamber and the roof came straight down.
+                roof_span_max_m: 15.0,
                 // fractured carbonate drains through its conduits
                 field_capacity: 38,
             },
