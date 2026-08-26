@@ -5586,19 +5586,35 @@ fn dry_buried_limestone_does_not_dissolve() {
 }
 
 #[test]
-fn saturated_buried_stone_dissolves_without_air() {
+fn saturated_buried_stone_does_not_dissolve() {
+    // Silicate stone used to dissolve on the underground path, feeding the same
+    // dissolved load that precipitates as flowstone — so the sim was quietly
+    // converting granite into carbonate. Stone widens *mechanically* under
+    // throughput instead (`mineral::widen_aperture`), and abrades to loose rock
+    // at the surface. Chemically it is inert.
     let mut w = buried_soluble_world(MaterialId::Stone);
     saturate_cell(&mut w, 8, 2);
     apply_karst_dissolution(&mut w, &forced_pore_karst());
     assert_eq!(
         w.get_cell(8, 2).unwrap().material,
-        MaterialId::Air,
-        "pore-saturated stone must dissolve on the underground path"
-    );
-    assert_eq!(
-        w.get_cell(12, 2).unwrap().material,
         MaterialId::Stone,
-        "dry stone two cells away must stay put"
+        "saturated stone must not dissolve: it is not carbonate"
+    );
+}
+
+#[test]
+fn saturated_buried_flowstone_dissolves_like_the_limestone_it_is() {
+    // Flowstone is the same carbonate as limestone, just precipitated rather
+    // than bedded, so a conduit it has sealed must be able to open again. It was
+    // missing from the old hardcoded soluble pair, which meant a sealed passage
+    // stayed sealed forever.
+    let mut w = buried_soluble_world(MaterialId::Flowstone);
+    saturate_cell(&mut w, 8, 2);
+    apply_karst_dissolution(&mut w, &forced_pore_karst());
+    assert_eq!(
+        w.get_cell(8, 2).unwrap().material,
+        MaterialId::Air,
+        "saturated flowstone must dissolve on the underground path"
     );
 }
 

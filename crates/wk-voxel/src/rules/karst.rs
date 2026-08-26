@@ -55,9 +55,12 @@ pub struct KarstConfig {
     /// Geology is slower than a waterfall on a cliff face.
     #[serde(default = "default_pore_scale")]
     pub pore_scale: f32,
-    /// Stone underground-rate multiplier on top of [`Self::pore_scale`].
-    /// Surface wet-Air still dissolves limestone only — stone weathers
-    /// from groundwater, not from a film on the cliff.
+    /// **Retired.** Silicate stone no longer dissolves: it fed the same
+    /// dissolved load that precipitates as flowstone, so the sim was turning
+    /// granite into carbonate. Stone widens mechanically under throughput
+    /// instead (`mineral::widen_aperture`).
+    ///
+    /// Kept so existing presets and saves still deserialize. Has no effect.
     #[serde(default = "default_stone_scale")]
     pub stone_scale: f32,
 }
@@ -101,10 +104,11 @@ fn air_is_roofed(world: &World, ax: i32, ay: i32) -> bool {
     }
 }
 
-/// Contact weight for one soluble cell. Surface wet-Air is limestone
-/// only and unscaled. Underground contacts (self-sat, wet solid
-/// neighbour, roofed damp cave Air) are scaled by `pore_scale`, and
-/// again by `stone_scale` for stone.
+/// Contact weight for one carbonate cell.
+///
+/// Surface wet-Air is unscaled; underground contacts (self-sat, wet solid
+/// neighbour, roofed damp cave Air) are scaled by `pore_scale`, because geology
+/// is slower than a waterfall on a cliff face.
 fn contact_weight(world: &World, gx: i32, gy: i32, cur: Cell, cfg: &KarstConfig) -> f32 {
     let hydro = &world.hydro;
     let mut wet_air = 0u32;
@@ -130,15 +134,24 @@ fn contact_weight(world: &World, gx: i32, gy: i32, cur: Cell, cfg: &KarstConfig)
     }
     let self_wet = u32::from(pore_is_wet(cur, hydro, cfg.min_wet_neighbour_sat));
     let underground = (wet_pore + damp_cave + self_wet) as f32 * cfg.pore_scale.max(0.0);
-    match cur.material {
-        MaterialId::Limestone => wet_air as f32 + underground,
-        MaterialId::Stone => underground * cfg.stone_scale.max(0.0),
-        _ => 0.0,
+    if is_soluble(cur.material) {
+        wet_air as f32 + underground
+    } else {
+        0.0
     }
 }
 
+/// Carbonate, and nothing else.
+///
+/// Silicate stone used to dissolve here at `stone_scale`, which fed the same
+/// dissolved load that precipitates as flowstone — the sim was converting
+/// granite into carbonate. Stone widens mechanically under throughput instead
+/// (`mineral::widen_aperture`) and erodes to loose rock at the surface.
+///
+/// Flowstone is included: it is the same carbonate, so a sealed passage can
+/// dissolve open again. It was missing from the old hardcoded pair.
 fn is_soluble(material: MaterialId) -> bool {
-    matches!(material, MaterialId::Limestone | MaterialId::Stone)
+    crate::mineral::is_soluble_rock(material)
 }
 
 /// Karst dissolution: soluble cells in contact with water become Air,

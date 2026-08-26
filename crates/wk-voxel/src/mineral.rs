@@ -54,6 +54,17 @@ pub const PRECIPITATE_MAX_STEP: u16 = 8;
 /// Other materials open proportionally slower.
 const LIMESTONE_SOLUBILITY_REF: f32 = 40.0;
 
+/// Yield of non-carbonate competent rock under throughput, on the same scale as
+/// carbonate `solubility`.
+///
+/// Abrasion, not dissolution. Silicate rock does widen a fracture that carries
+/// water, just far more slowly, and it releases **no dissolved load** because
+/// grinding rock produces *suspended* sediment — a species the sim does not
+/// model yet. Stone is outside the mineral ledger entirely
+/// ([`is_soluble_rock`]), so widening it unbalances nothing; the material it
+/// loses simply is not tracked until suspended load exists.
+const MECHANICAL_ABRASION_REF: f32 = 4.0;
+
 /// Throughput a transfer must exceed before competent rock yields at all.
 ///
 /// A critical-shear threshold: it is what makes continuous limestone and stone
@@ -191,7 +202,9 @@ pub fn widen_aperture(
     let Some(cell) = world.get_cell(gx, gy) else {
         return false;
     };
-    if !is_soluble_rock(cell.material) || cell.pore == u8::MAX {
+    // Carbonate dissolves and silicate abrades, but both widen under flow, so
+    // both belong here — only the rate and the ledger differ.
+    if !crate::cell::is_competent_rock(cell.material) || cell.pore == u8::MAX {
         return false;
     }
     // Below a threshold flow, competent rock simply does not yield. Without a
@@ -200,7 +213,14 @@ pub fn widen_aperture(
     if throughput <= APERTURE_MIN_THROUGHPUT {
         return false;
     }
-    let solubility = MaterialRegistry::base_props(cell.material).solubility.max(1) as f32;
+    let solubility = {
+        let s = MaterialRegistry::base_props(cell.material).solubility;
+        if s > 0 {
+            s as f32
+        } else {
+            MECHANICAL_ABRASION_REF
+        }
+    };
     let over = (throughput - APERTURE_MIN_THROUGHPUT) as f32
         / (255 - APERTURE_MIN_THROUGHPUT) as f32;
     // **Superlinear** in throughput. This is what channelizes: a cell carrying
@@ -240,15 +260,26 @@ pub fn widen_aperture(
         return true;
     }
     world.set_cell(gx, gy, next);
-    add_dissolved(world, gx, gy, 1);
+    // Only carbonate puts anything into solution. Abraded silicate releases
+    // nothing, which is consistent because it is not in the ledger either.
+    if cell_mineral(cell) > 0 {
+        add_dissolved(world, gx, gy, 1);
+    }
     false
 }
 
-/// Rock that carries mineral mass for the audit.
+/// Rock that carries mineral mass for the audit: **carbonate only**.
+///
+/// Driven purely by the material's `solubility`, which already says exactly
+/// this — limestone and flowstone at 40, silicate stone at 0. The hardcoded
+/// `| Stone` that used to be here was the whole problem: silicate rock
+/// dissolved into the same load that precipitates as flowstone, so the sim was
+/// quietly converting granite into carbonate. Stone erodes *mechanically*
+/// instead (see [`widen_aperture`] and surface flow erosion), which is both
+/// simpler and what actually happens.
 #[inline]
 pub fn is_soluble_rock(material: MaterialId) -> bool {
     MaterialRegistry::base_props(material).solubility > 0
-        || matches!(material, MaterialId::Limestone | MaterialId::Stone)
 }
 
 /// Precipitate load a cell's water can no longer hold.

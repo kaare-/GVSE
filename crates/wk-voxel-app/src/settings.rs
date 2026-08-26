@@ -1443,13 +1443,10 @@ impl SimSettings {
                         0.0..1.0,
                         &mut self.karst.pore_scale,
                     );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Stone scale (vs limestone, underground)",
-                        0.0..1.0,
-                        &mut self.karst.stone_scale,
-                    );
+                    // No "stone scale" slider: silicate stone no longer
+                    // dissolves at all (it fed the carbonate load that
+                    // precipitates as flowstone). It widens mechanically under
+                    // throughput instead, which this page does not control.
                 });
                 } // World (materials/karst)
                 if self.page == SettingsPage::Life {
