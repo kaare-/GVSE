@@ -80,6 +80,12 @@ fn main_scene() -> (
 #[test]
 #[ignore = "diagnostic; run with --release --ignored --nocapture"]
 fn does_it_rain() {
+    for cap in [48u32, 256, 1024] {
+        run_with_cap(cap);
+    }
+}
+
+fn run_with_cap(cap: u32) {
     let (mut world, params, mut humidity, wind, mut clouds, temperature) = main_scene();
     let evap = EvapConfig::default();
     // Exactly what the app builds in SimSettings::new. Using
@@ -90,6 +96,7 @@ fn does_it_rain() {
         min_mass_to_rain: 140.0,
         max_prob_per_tick: 0.10,
         mass_per_droplet: 40.0,
+        max_events_per_tick: cap,
         ..CondensationConfig::default()
     };
     let cloud = CloudConfig::default();
@@ -103,11 +110,9 @@ fn does_it_rain() {
     let mut peak_raining = 0usize;
     let mut peak_wet = 0.0f32;
     let mut ever_rained = 0u64;
+    let mut cond_time = std::time::Duration::ZERO;
 
-    println!(
-        "\n{:>7}  {:>11}  {:>11}  {:>12}  {:>7}  {:>7}",
-        "tick", "humidity", "world water", "humid+water", "parcels", "raining"
-    );
+    println!("\n=== max_events_per_tick = {cap} ===");
     for t in 0..TICKS {
         apply_evaporation_into_humidity_climate(
             &mut world,
@@ -128,6 +133,7 @@ fn does_it_rain() {
             Some(&temperature),
             Some(&phase),
         );
+        let t0 = std::time::Instant::now();
         apply_condensation_rain_phased(
             &mut world,
             &mut humidity,
@@ -136,6 +142,7 @@ fn does_it_rain() {
             Some(&temperature),
             Some(&phase),
         );
+        cond_time += t0.elapsed();
         tick_with_perf(&mut world, &perf);
 
         let parcels = clouds.parcels.len();
@@ -151,75 +158,26 @@ fn does_it_rain() {
         if raining > 0 {
             ever_rained += 1;
         }
-        if t % 300 == 0 {
-            let water = wk_voxel::audit::sat_totals(&world).cell_total as f64;
-            let humid = humidity.total_mass() as f64;
-            println!(
-                "{t:>7}  {humid:>11.0}  {water:>11.0}  {:>12.0}  {parcels:>7}  {raining:>7}",
-                humid + water
-            );
-        }
+        let _ = (parcels, wet);
     }
 
-    // Where do the raining parcels actually sit, relative to the ground they
-    // are supposed to be raining onto? The streak draw skips a drop when there
-    // is no vertical room between cloud and ground, so a cloud deck hugging the
-    // terrain would rain in the sim and draw nothing.
-    println!("\n  --- raining parcel geometry (fy vs the ground under it) ---");
-    println!(
-        "  sea_level_y={}  sky_ceiling_y={}",
-        params.sea_level_y, params.sky_ceiling_y
-    );
-    let mut shown = 0;
-    let mut no_room = 0;
-    for p in clouds.parcels.iter().filter(|p| p.raining) {
-        let floor = wk_voxel::cloud_floor_y(&world, &wind, p.fx);
-        let gap = p.fy - floor;
-        if gap < 2.0 {
-            no_room += 1;
-        }
-        if shown < 8 {
-            println!(
-                "  fx={:>7.1}  fy={:>6.1}  cloud_floor={:>6.1}  gap={:>6.1}  radius={:.1}",
-                p.fx,
-                p.fy,
-                floor,
-                gap,
-                p.radius()
-            );
-            shown += 1;
-        }
-    }
-    println!(
-        "  parcels with < 2 cells of room under them: {no_room} / {}",
-        clouds.parcels.iter().filter(|p| p.raining).count()
-    );
-
-    // How many tiles were *eligible* to be a cloud, against how many got to be
-    // one? Parcels are chosen as the globally wettest tiles, and wet tiles
-    // cluster, so a cap well below the eligible count concentrates every cloud
-    // in the world into one band.
-    let cfg_min = cloud.coag_min_hum;
-    let sky_hy_min = (params.sea_level_y + cloud.coag_min_above_sea).div_euclid(4);
-    let eligible = humidity
+    let wants_rain = humidity
         .cells
         .iter()
-        .filter(|((_, hy), &m)| *hy >= sky_hy_min && m >= cfg_min)
+        .filter(|(_, &m)| m >= cond.min_mass_to_rain)
         .count();
-    let xs: Vec<f32> = clouds.parcels.iter().map(|p| p.fx).collect();
-    let (lo, hi) = xs.iter().fold((f32::MAX, f32::MIN), |(l, h), &x| (l.min(x), h.max(x)));
-    println!("\n  --- cloud coverage ---");
-    println!("  eligible sky tiles      {eligible}");
-    println!("  parcels drawn           {} (cap {})", clouds.parcels.len(), cloud.max_parcels);
+    println!("  tiles wanting to rain         {wants_rain}");
     println!(
-        "  parcel x span           {lo:.0}..{hi:.0} of {} columns ({:.1}% of the world)",
-        params.width_cols,
-        100.0 * (hi - lo + 1.0) / params.width_cols as f32
+        "  oversubscribed by             {:.1}x",
+        wants_rain as f32 / cond.max_events_per_tick.max(1) as f32
     );
 
-    println!("\n  --- over {TICKS} ticks ---");
-    println!("  peak parcels        {peak_parcels}");
-    println!("  peak raining        {peak_raining}");
-    println!("  peak parcel wetness {peak_wet:.3}  (streaks need >= 0.42)");
-    println!("  ticks with rain     {ever_rained}");
+    println!("  equilibrium humidity          {:.0}", humidity.total_mass());
+    println!("  ticks raining                 {ever_rained} / {TICKS}");
+    println!("  peak raining parcels          {peak_raining} (of {peak_parcels})");
+    println!(
+        "  condensation cost             {:.3} ms/tick",
+        cond_time.as_secs_f32() * 1000.0 / TICKS as f32
+    );
+    let _ = peak_wet;
 }
