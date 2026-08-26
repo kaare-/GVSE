@@ -39,6 +39,14 @@ pub struct CondensationConfig {
     pub max_events_per_tick: u32,
 }
 
+/// How far past saturation the rain response keeps climbing, as a multiple of
+/// the min-to-saturation span.
+///
+/// Bounded rather than open-ended so a very wet tile cannot pin
+/// `max_prob_per_tick` at its ceiling every tick, but wide enough that the
+/// diurnal swing in saturation mass stays visible in the response.
+const SUPERSATURATION_HEADROOM: f32 = 4.0;
+
 fn default_cond_max_events() -> u32 {
     48
 }
@@ -167,8 +175,20 @@ pub fn apply_condensation_rain_phased(
         if mass < min_mass {
             continue;
         }
-        // Linear scale from 0 at min_mass to max at thermal/orographic full.
-        let t = ((mass - min_mass) / (full_mass - min_mass)).clamp(0.0, 1.0);
+        // Linear from 0 at min_mass to 1 at thermal/orographic full — and it
+        // keeps climbing past that, up to [`SUPERSATURATION_HEADROOM`].
+        //
+        // Clamping at 1.0 was why the world rained constantly instead of having
+        // weather. `full_mass` is the saturation mass, which is what the
+        // day/night cycle and orographic lift actually move; once humidity sat
+        // above it the clamp pinned this term and neither could change the
+        // answer. Measured before: 6 degrees of diurnal swing moved the rain
+        // rate by four points (day 80%, night 76%), and hill condensation had
+        // effectively stopped. Headroom above saturation gives both somewhere
+        // to act, and makes a supersaturated tile rain harder — which is also
+        // what pulls the equilibrium back down.
+        let t = ((mass - min_mass) / (full_mass - min_mass))
+            .clamp(0.0, SUPERSATURATION_HEADROOM);
         let effective_prob = (cfg.max_prob_per_tick * t * prob_mult).clamp(0.0, 0.95);
         // Hash uses tile coord + tick + salt for per-tile determinism.
         let roll = hash_prob(
