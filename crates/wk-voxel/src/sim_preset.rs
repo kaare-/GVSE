@@ -154,7 +154,8 @@ impl SimPreset {
         let mut cond = CondensationConfig::default();
         cond.min_mass_to_rain = 140.0;
         cond.max_prob_per_tick = 0.10;
-        cond.mass_per_droplet = 40.0;
+        // One full cell — a sub-cell droplet is refused and drains nothing.
+        cond.mass_per_droplet = 255.0;
 
         let mut cloud = CloudConfig::default();
         cloud.coag_rate = 0.08;
@@ -237,7 +238,9 @@ impl SimPreset {
         p.cloud.max_parcels = 40;
         p.cond.min_mass_to_rain = 72.0;
         p.cond.max_prob_per_tick = 0.25;
-        p.cond.mass_per_droplet = 72.0;
+        // One full cell: 72 was sub-cell, so most of this preset's rain events
+        // were refused and drained no humidity.
+        p.cond.mass_per_droplet = 255.0;
         p.spore_bank.germinate_odds = 3;
         p.spore_bank.max_age_ticks = 500_000;
         p.spore_bank.max_total = 640;

@@ -50,7 +50,10 @@ impl Default for CondensationConfig {
             min_mass_to_rain: 64.0,
             max_prob_per_tick: 0.4,
             full_mass: 512.0,
-            mass_per_droplet: 96.0,
+            // One full cell: a sub-cell budget is refused outright by
+            // `deposit_condensate_on_surface`, and a refused deposit drains no
+            // humidity, so small droplets quietly stall the water cycle.
+            mass_per_droplet: 255.0,
             seed_salt: 0xC10D_BA5E,
             max_events_per_tick: default_cond_max_events(),
         }
@@ -290,4 +293,40 @@ fn thermal_rain_factors(
         mass_mult += 0.30 * d;
     }
     (prob_mult, mass_mult, min_mass, sat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A rain budget smaller than one cell is *refused* by
+    /// `phase::deposit_condensate_on_surface`, and a refused deposit drains no
+    /// humidity at all — so small droplets do not make gentle drizzle, they
+    /// stall the water cycle and let the atmosphere fill up behind them.
+    ///
+    /// Measured on the demo world: 40.0 held equilibrium humidity at 666k where
+    /// 255.0 settles at 387k, and the bigger droplet is marginally *cheaper*
+    /// because fewer events are wasted.
+    #[test]
+    fn shipped_configs_use_whole_cell_droplets() {
+        let full = u8::MAX as f32;
+        for (name, cond) in [
+            ("default", CondensationConfig::default()),
+            (
+                "tab_defaults",
+                crate::sim_preset::SimPreset::tab_defaults().cond,
+            ),
+            (
+                "soak_survival",
+                crate::sim_preset::SimPreset::soak_survival().cond,
+            ),
+        ] {
+            assert!(
+                cond.mass_per_droplet >= full,
+                "{name}: mass_per_droplet {} is under one cell ({full}), so its \
+                 deposits are refused and drain no humidity",
+                cond.mass_per_droplet
+            );
+        }
+    }
 }

@@ -24,7 +24,7 @@
     "min_mass_to_rain": 72.0,
     "max_prob_per_tick": 0.25,
     "full_mass": 512.0,
-    "mass_per_droplet": 72.0,
+    "mass_per_droplet": 255.0,
     "seed_salt": 3238902366
   },
   "oro": {

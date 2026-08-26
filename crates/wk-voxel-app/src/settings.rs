@@ -206,10 +206,18 @@ impl SimSettings {
             top_y: params.sky_ceiling_y - 2,
             ..CondensationConfig::default()
         };
-        // Match previous demo drizzle defaults.
         cond.min_mass_to_rain = 140.0;
         cond.max_prob_per_tick = 0.10;
-        cond.mass_per_droplet = 40.0;
+        // One droplet delivers one full cell of water.
+        //
+        // A sub-cell budget is *refused* by
+        // `phase::deposit_condensate_on_surface` (frost needs a whole cell), and
+        // a refused deposit drains no humidity at all — so the old 40.0 drizzle
+        // spent most of its rain events achieving nothing and the atmosphere
+        // filled up behind them. Measured on the demo world, equilibrium
+        // humidity 666k -> 387k, and condensation got marginally *cheaper*
+        // (0.306 -> 0.283 ms/tick) because fewer events are wasted.
+        cond.mass_per_droplet = 255.0;
 
         let mut mat_perm_min = [0.0f32; MATERIAL_COUNT];
         let mut mat_perm_max = [0.0f32; MATERIAL_COUNT];

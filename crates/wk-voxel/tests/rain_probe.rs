@@ -80,12 +80,15 @@ fn main_scene() -> (
 #[test]
 #[ignore = "diagnostic; run with --release --ignored --nocapture"]
 fn does_it_rain() {
-    for cap in [48u32, 256, 1024] {
-        run_with_cap(cap);
+    // Cap sweep already showed the event cap is not binding (48 -> 1024 changed
+    // nothing). Sweep droplet size instead: a deposit that is refused for being
+    // too small drains no humidity at all, which would pin the equilibrium.
+    for drop in [40.0f32, 120.0, 255.0, 512.0] {
+        run_with_drop(drop);
     }
 }
 
-fn run_with_cap(cap: u32) {
+fn run_with_drop(drop: f32) {
     let (mut world, params, mut humidity, wind, mut clouds, temperature) = main_scene();
     let evap = EvapConfig::default();
     // Exactly what the app builds in SimSettings::new. Using
@@ -95,8 +98,7 @@ fn run_with_cap(cap: u32) {
         top_y: params.sky_ceiling_y - 2,
         min_mass_to_rain: 140.0,
         max_prob_per_tick: 0.10,
-        mass_per_droplet: 40.0,
-        max_events_per_tick: cap,
+        mass_per_droplet: drop,
         ..CondensationConfig::default()
     };
     let cloud = CloudConfig::default();
@@ -112,7 +114,7 @@ fn run_with_cap(cap: u32) {
     let mut ever_rained = 0u64;
     let mut cond_time = std::time::Duration::ZERO;
 
-    println!("\n=== max_events_per_tick = {cap} ===");
+    println!("\n=== mass_per_droplet = {drop} ===");
     for t in 0..TICKS {
         apply_evaporation_into_humidity_climate(
             &mut world,
