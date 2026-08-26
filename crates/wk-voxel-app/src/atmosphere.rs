@@ -1725,10 +1725,23 @@ fn draw_falling_rain(
     let left = (sx - r * 0.85).max(-12.0);
     let right = (sx + r * 0.85).min(sw + 12.0);
     let band = (right - left).max(1.0);
+    // Drop length has a **screen-space floor**, not just a cell-space size.
+    //
+    // Zoomed out to a whole 1024-column world, `cell_px` is under 1, so a drop
+    // scaled purely by it came out as a 1x1.6 pixel speck — roughly nine of them
+    // per cloud, faint blue, spread across the sky. The rain was being drawn the
+    // whole time and was simply too small to see, which reads exactly like a
+    // broken animation.
     let (n_div, drop_h, fall_speed, alpha_base, width_px) = match tier {
-        0 => (14.0, cell_px * 0.55, 90.0, 55u8, 1.0f32),           // mist
-        1 => (9.0, cell_px * 1.1, 220.0, 90u8, 1.0),                // soft rain
-        _ => (5.5, cell_px * 1.8, 420.0, 130u8, cell_px.max(1.0)), // downpour
+        0 => (14.0, (cell_px * 0.55).max(2.0), 90.0, 70u8, 1.0f32), // mist
+        1 => (9.0, (cell_px * 1.1).max(4.0), 220.0, 110u8, 1.0),    // soft rain
+        _ => (
+            5.5,
+            (cell_px * 1.8).max(6.0),
+            420.0,
+            150u8,
+            cell_px.max(1.0),
+        ), // downpour
     };
     let n = ((band / n_div) * (0.55 + wetness)).ceil().clamp(6.0, 40.0) as usize;
     for i in 0..n {
@@ -1786,7 +1799,9 @@ fn draw_falling_snow(
     let left = (sx - r * 0.9).max(-12.0);
     let right = (sx + r * 0.9).min(sw + 12.0);
     let band = (right - left).max(1.0);
-    let flake = (cell_px * 0.65).max(1.0);
+    // Same screen-space floor as rain: at whole-world zoom a 1px flake is not
+    // visible against an overcast sky.
+    let flake = (cell_px * 0.65).max(2.5);
     let n = ((band / 11.0) * (0.5 + wetness * 0.7))
         .ceil()
         .clamp(5.0, 28.0) as usize;
