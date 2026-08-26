@@ -421,6 +421,82 @@ impl CloudStore {
     }
 }
 
+/// One band of cloud, derived straight from the humidity field.
+///
+/// The end state for cloud drawing: a cloud is an *observation about the field*,
+/// not an object that has to be placed, persisted, drifted, lifted and
+/// dissipated. Each of those five has already been a bug, and all five stop
+/// existing here because the field already carries position, density and motion
+/// (`Humidity::advect` moves it).
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct CloudSample {
+    /// World x of the band centre.
+    pub fx: f32,
+    /// Condensation level for this band's air.
+    pub fy: f32,
+    /// Saturation ratio, 0..1.5 — how cloud-like this air is.
+    pub density: f32,
+    /// Wet enough to be precipitating.
+    pub raining: bool,
+}
+
+impl CloudStore {
+    /// Derive the visible deck from `(humidity, temperature)` with no stored
+    /// state at all.
+    ///
+    /// Banded across world x on purpose. Selecting the globally wettest tiles
+    /// clusters every cloud into a fraction of the map, and — because the winner
+    /// of a global top-N changes discontinuously — it also jitters. Banding is
+    /// what makes the derivation spatially stable, which is the precondition for
+    /// dropping persistence.
+    pub fn deck_from_field(
+        humidity: &Humidity,
+        world: &World,
+        wind: &Wind,
+        sea_level_y: i32,
+        cfg: &CloudConfig,
+        temp: Option<&Temperature>,
+    ) -> Vec<CloudSample> {
+        let tc = humidity.tile_cols.max(1);
+        let cap = cfg.max_parcels.max(1);
+        let width = wind.width_cols.max(1);
+        let sky_hy_min = (sea_level_y + cfg.coag_min_above_sea).div_euclid(tc);
+        let mut hits: Vec<(f32, i32, i32)> = humidity
+            .cells
+            .iter()
+            .filter_map(|(&(hx, hy), &mass)| {
+                if hy < sky_hy_min || mass < cfg.coag_min_hum {
+                    return None;
+                }
+                Some((mass, hx, hy))
+            })
+            .collect();
+        if hits.is_empty() {
+            return Vec::new();
+        }
+        hits.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+        let hits = pick_spread_across_x(&hits, cap, width, tc);
+        hits.into_iter()
+            .map(|(mass, hx, hy)| {
+                let sat = temp
+                    .map(|t| Humidity::saturation_mass_at_temp(t.at_tile(hx, hy)))
+                    .unwrap_or(Humidity::MAX_MASS_PER_TILE)
+                    .max(1.0);
+                let cx = (hx * tc + tc / 2) as f32;
+                let cruise = condensation_level(mass, sat, sea_level_y, cfg);
+                let floor = cloud_floor_y(world, wind, cx);
+                let density = (mass / sat).clamp(0.0, 1.5);
+                CloudSample {
+                    fx: cx,
+                    fy: cruise.max(floor + cfg.ridge_clearance),
+                    density,
+                    raining: density / 1.5 >= 0.42,
+                }
+            })
+            .collect()
+    }
+}
+
 /// Height at which rising air condenses, in world cells.
 ///
 /// The lifting condensation level rises with *dewpoint depression* — how far the
@@ -1022,5 +1098,45 @@ mod tests {
             wet_floor >= 12.0,
             "standing water should raise the floor (got {wet_floor})"
         );
+    }
+
+    #[test]
+    fn the_field_derived_deck_moves_smoothly_when_the_field_advects() {
+        // The precondition for deleting parcel persistence: the derivation has to
+        // be *spatially stable*. A global top-N by mass changes winner
+        // discontinuously, which is what made the old deck jitter; banding by
+        // world x is what fixes it. If this test goes, the jitter comes back.
+        let (world, wind, mut humidity, cfg, sea) = drift_scene();
+        let before = CloudStore::deck_from_field(&humidity, &world, &wind, sea, &cfg, None);
+        assert!(!before.is_empty(), "a moist sky should derive a deck");
+
+        // Nudge the field along and re-derive from scratch.
+        for _ in 0..4 {
+            humidity.advect(0.5, 0.0);
+        }
+        let after = CloudStore::deck_from_field(&humidity, &world, &wind, sea, &cfg, None);
+        assert_eq!(
+            before.len(),
+            after.len(),
+            "advecting the field should not change how many clouds there are"
+        );
+        // No sample should have leapt across the map.
+        let worst = before
+            .iter()
+            .zip(after.iter())
+            .map(|(a, b)| (a.fx - b.fx).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 32.0,
+            "the deck should follow the field, not jump ({worst} cells of movement)"
+        );
+    }
+
+    #[test]
+    fn a_dry_sky_derives_no_clouds() {
+        let (world, wind, mut humidity, cfg, sea) = drift_scene();
+        humidity.cells.clear();
+        let deck = CloudStore::deck_from_field(&humidity, &world, &wind, sea, &cfg, None);
+        assert!(deck.is_empty(), "no vapour, no cloud");
     }
 }
