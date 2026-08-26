@@ -281,19 +281,39 @@ impl CloudStore {
     }
 
     /// Move blob mass back onto humidity tiles (old saves / leftover coag).
+    ///
+    /// Only parcels that actually **hold mass** are released. Current parcels are
+    /// pure visuals with `mass == 0.0`, and taking the whole list would clear the
+    /// deck every tick — which is what parcel persistence needs not to happen, and
+    /// what silently made an earlier attempt at it a no-op.
     pub fn release_parcels_into_humidity(&mut self, humidity: &mut Humidity) {
         if self.parcels.is_empty() {
             return;
         }
-        let leftover = std::mem::take(&mut self.parcels);
-        for p in leftover {
+        let mut carried: Vec<CloudParcel> = Vec::new();
+        for p in std::mem::take(&mut self.parcels) {
             if p.mass > 1e-3 {
                 humidity.add(p.fx.round() as i32, p.fy.round() as i32, p.mass);
+            } else {
+                carried.push(p);
             }
         }
+        self.parcels = carried;
     }
 
-    /// Bounded N-bank / shade / streak echoes from the wettest sky tiles.
+    /// Advance the visual cloud deck: drift, grow, lift, dissipate, spawn.
+    ///
+    /// Parcels **persist across ticks**. They used to be cleared and rebuilt
+    /// from whatever the wettest tiles happened to be, which is why the deck
+    /// jittered: a parcel had no identity, so it could not drift, build or
+    /// clear, only blink to a new position. `vis_mass` was already documented as
+    /// an EMA "so size/shade don't pulse every tick" and never got to be one,
+    /// because the parcel holding it was replaced every tick.
+    ///
+    /// Parcels stay pure visuals — `mass` is always 0.0. They are an echo of the
+    /// humidity field, never a second store of it; giving them real mass would
+    /// let `release_parcels_into_humidity` pour a copy back into the sky and
+    /// mint vapour.
     pub fn rebuild_visuals_from_humidity(
         &mut self,
         humidity: &Humidity,
@@ -303,8 +323,49 @@ impl CloudStore {
         cfg: &CloudConfig,
         temp: Option<&Temperature>,
     ) {
-        self.parcels.clear();
         let tc = humidity.tile_cols.max(1);
+        let cap = cfg.max_parcels.max(1);
+        let width = wind.width_cols.max(1);
+        let sat_at = |hx: i32, hy: i32| -> f32 {
+            temp.map(|t| Humidity::saturation_mass_at_temp(t.at_tile(hx, hy)))
+                .unwrap_or(Humidity::MAX_MASS_PER_TILE)
+                .max(1.0)
+        };
+
+        // --- advance what is already up there ---
+        for p in &mut self.parcels {
+            // Drift downwind. This is what makes a deck move across the sky
+            // instead of re-materialising each tick.
+            p.fx += wind.climate_vx * CLOUD_DRIFT_SCALE;
+            if p.fx < 0.0 {
+                p.fx += width as f32;
+            } else if p.fx >= width as f32 {
+                p.fx -= width as f32;
+            }
+            let hx = (p.fx.round() as i32).div_euclid(tc);
+            let hy = (p.fy.round() as i32).div_euclid(tc);
+            let local = humidity.at_tile(hx, hy);
+            // Grow in moist air, thin out in dry air. The lag *is* the inertia.
+            p.vis_mass += (local - p.vis_mass) * CLOUD_MASS_RELAX;
+
+            let sat = sat_at(hx, hy);
+            let target = condensation_level(local, sat, sea_level_y, cfg);
+            p.cruise_fy += (target - p.cruise_fy) * CLOUD_LIFT_RELAX;
+            let floor = cloud_floor_y(world, wind, p.fx);
+            let lifted = p.cruise_fy.max(floor + cfg.ridge_clearance);
+            p.on_ridge = lifted > p.cruise_fy + 1.0;
+            p.deform = if p.on_ridge { 0.25 } else { 0.0 };
+            p.fy = lifted;
+            p.raining = (p.vis_mass / sat).clamp(0.0, 1.5) / 1.5 >= 0.42;
+        }
+        // Dissipated: too thin to be a cloud any more.
+        let keep = cfg.coag_min_hum * CLOUD_DISSIPATE_FRAC;
+        self.parcels.retain(|p| p.vis_mass >= keep);
+
+        // --- spawn into bands that have humidity but no cloud ---
+        if self.parcels.len() >= cap {
+            return;
+        }
         let sky_hy_min = (sea_level_y + cfg.coag_min_above_sea).div_euclid(tc);
         let mut hits: Vec<(f32, i32, i32)> = humidity
             .cells
@@ -320,47 +381,57 @@ impl CloudStore {
             return;
         }
         hits.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
-        let cap = cfg.max_parcels.max(1);
-        // Wettest **per region**, not wettest overall.
-        //
-        // Taking the global top `cap` looked reasonable and was the reason rain
-        // appeared to have stopped: wet sky tiles cluster, so on the demo world
-        // 716 tiles were eligible, 36 were drawn, and all 36 landed inside 17%
-        // of the map. The other 83% of the sky was permanently cloudless and so
-        // never showed a drop, even though condensation was raining on it —
-        // the mechanism was fine, the picture was not.
-        //
-        // Bucketing by x spends the same budget on coverage instead. A bucket
-        // whose wettest tile is still below `coag_min_hum` was already filtered
-        // out above, so genuinely dry regions stay clear.
-        let hits = pick_spread_across_x(&hits, cap, wind.width_cols, tc);
+        let hits = pick_spread_across_x(&hits, cap, width, tc);
+        // Do not stack a second parcel on a band that already has one.
+        let band_of = |fx: f32| -> usize {
+            (((fx.max(0.0) as i64) * cap as i64) / width as i64).min(cap as i64 - 1) as usize
+        };
+        let mut occupied: Vec<bool> = vec![false; cap];
+        for p in &self.parcels {
+            occupied[band_of(p.fx)] = true;
+        }
         for (mass, hx, hy) in hits {
-            let sat = temp
-                .map(|t| Humidity::saturation_mass_at_temp(t.at_tile(hx, hy)))
-                .unwrap_or(Humidity::MAX_MASS_PER_TILE);
-            let wet = (mass / sat.max(1.0)).clamp(0.0, 1.5) / 1.5;
+            if self.parcels.len() >= cap {
+                break;
+            }
             let cx = hx * tc + tc / 2;
             let cy = hy * tc + tc / 2;
-            let seed = parcel_shape_seed(cx, cy);
-            let mut fy = cy as f32;
+            if occupied[band_of(cx as f32)] {
+                continue;
+            }
+            occupied[band_of(cx as f32)] = true;
+            let sat = sat_at(hx, hy);
+            let cruise = condensation_level(mass, sat, sea_level_y, cfg);
             let floor = cloud_floor_y(world, wind, cx as f32);
-            fy = fy.max(floor + cfg.ridge_clearance);
-            // `mass` stays 0 — the next tick's leftover-release would
-            // otherwise pour this humidity copy back into the sky
-            // (mint vapor → condensation mints rain).
+            let fy = cruise.max(floor + cfg.ridge_clearance);
+            // Spawn at the local mass rather than ramping from zero, so a single
+            // call still produces a usable deck.
             self.parcels.push(CloudParcel {
                 fx: cx as f32,
                 fy,
                 mass: 0.0,
-                raining: wet >= 0.42,
-                on_ridge: fy > cy as f32 + 1.0,
-                shape_seed: seed,
-                cruise_fy: fy,
+                raining: (mass / sat).clamp(0.0, 1.5) / 1.5 >= 0.42,
+                on_ridge: fy > cruise + 1.0,
+                shape_seed: parcel_shape_seed(cx, cy),
+                cruise_fy: cruise,
                 vis_mass: mass,
-                deform: if fy > cy as f32 + 1.0 { 0.25 } else { 0.0 },
+                deform: if fy > cruise + 1.0 { 0.25 } else { 0.0 },
             });
         }
     }
+}
+
+/// Height at which rising air condenses, in world cells.
+///
+/// The lifting condensation level rises with *dewpoint depression* — how far the
+/// air is from saturation. Dry or warm air has to climb further before it cools
+/// to its dewpoint, so its cloud base sits higher; moist or cool air condenses
+/// low. Both temperature (through `sat`) and humidity feed in, which is what
+/// makes the deck height respond to weather instead of sitting pinned just above
+/// the terrain.
+fn condensation_level(mass: f32, sat: f32, sea_level_y: i32, cfg: &CloudConfig) -> f32 {
+    let deficit = (1.0 - mass / sat.max(1.0)).clamp(0.0, 1.0);
+    sea_level_y as f32 + cfg.cloud_alt_above_sea as f32 * (CLOUD_BASE_MIN_FRAC + CLOUD_BASE_SPAN_FRAC * deficit)
 }
 
 /// Keep the wettest candidate in each of `cap` bands across the world, so a
@@ -435,6 +506,34 @@ fn sky_top_cell(wind: &Wind) -> i32 {
 /// column is still solid or wet so a player tower above
 /// `surface + 64` (the old hard cap — ~y 263 on inland hills) still
 /// bumps humidity and clouds instead of letting them pass through.
+/// Wind speed multiplier for cloud drift, in cells per tick.
+///
+/// Clouds ride the climate wind faster than the vapour field advects: a deck
+/// that moved at exactly the humidity's pace looked static, because the humidity
+/// under it moved with it.
+const CLOUD_DRIFT_SCALE: f32 = 6.0;
+
+/// How fast a parcel's drawn size follows the humidity it is sitting in.
+///
+/// This lag is the inertia. Low enough that a cloud builds and thins over tens
+/// of ticks instead of snapping to whatever the field says this frame, which is
+/// what made the old deck jitter.
+const CLOUD_MASS_RELAX: f32 = 0.04;
+
+/// How fast a parcel climbs or sinks toward its condensation level.
+const CLOUD_LIFT_RELAX: f32 = 0.02;
+
+/// Fraction of `coag_min_hum` a parcel may thin to before it dissipates.
+///
+/// Below the spawn threshold, so a cloud that drifts into slightly drier air
+/// fades rather than popping out of existence the moment it crosses the line.
+const CLOUD_DISSIPATE_FRAC: f32 = 0.55;
+
+/// Cloud base as a fraction of `cloud_alt_above_sea`: saturated air condenses
+/// at the low end, dry air at the high end.
+const CLOUD_BASE_MIN_FRAC: f32 = 0.55;
+const CLOUD_BASE_SPAN_FRAC: f32 = 0.90;
+
 pub fn cloud_floor_y(world: &World, wind: &Wind, fx: f32) -> f32 {
     let rock = surface_y(wind, fx);
     let gx = world.wrap_x(fx.round() as i32);
@@ -782,5 +881,93 @@ mod tests {
         let hits: Vec<(f32, i32, i32)> = (0..20).map(|i| (500.0 - i as f32, 40 + i, 40)).collect();
         let picked = pick_spread_across_x(&hits, cap, 1024, 4);
         assert_eq!(picked.len(), cap);
+    }
+
+    /// Flat world with a steady wind and one moist sky tile.
+    fn drift_scene() -> (World, Wind, Humidity, CloudConfig, i32) {
+        let width = 256;
+        let sea = 40;
+        let mut world = World::new(3);
+        world.ensure_chunk(crate::chunk::ChunkCoord::new(0, 0));
+        let wind = Wind::climate(4, 0.05, 3u64, width, sea, 0, 320, true);
+        let mut humidity = Humidity::with_world_bounds(4, 0, 0, width, 320);
+        humidity.wrap_x = true;
+        let cfg = CloudConfig::default();
+        // Wet band across the whole sky so a drifting parcel stays fed.
+        let hy = (sea + cfg.coag_min_above_sea + 8) / 4;
+        for hx in 0..(width / 4) {
+            humidity.cells.insert((hx, hy), cfg.coag_min_hum * 6.0);
+        }
+        (world, wind, humidity, cfg, sea)
+    }
+
+    #[test]
+    fn a_cloud_persists_and_drifts_instead_of_blinking() {
+        // The deck used to be cleared and rebuilt every tick, so a parcel had no
+        // identity: it could not drift, build or clear, only jump to wherever
+        // humidity currently peaked. That rebuild is the "clouds jiggling about
+        // too fast" the playtest reported.
+        let (world, wind, humidity, cfg, sea) = drift_scene();
+        let mut store = CloudStore::default();
+        store.rebuild_visuals_from_humidity(&humidity, &world, &wind, sea, &cfg, None);
+        assert!(!store.parcels.is_empty(), "should seed a deck");
+        let seed_before = store.parcels[0].shape_seed;
+        let x_before = store.parcels[0].fx;
+
+        for _ in 0..8 {
+            store.rebuild_visuals_from_humidity(&humidity, &world, &wind, sea, &cfg, None);
+        }
+        // Same parcel, moved — not a fresh one at a new spot.
+        let same = store.parcels.iter().find(|p| p.shape_seed == seed_before);
+        let same = same.expect("the parcel should survive, not be replaced");
+        assert!(
+            (same.fx - x_before).abs() > 0.5,
+            "a persisting cloud should drift downwind (was {x_before}, now {})",
+            same.fx
+        );
+    }
+
+    #[test]
+    fn a_cloud_that_drifts_into_dry_air_thins_out_gradually() {
+        // Dissipation has to be gradual, or clouds pop in and out as they cross
+        // the spawn threshold. `vis_mass` is an EMA, which only works because the
+        // parcel holding it now survives between ticks.
+        let (world, wind, mut humidity, cfg, sea) = drift_scene();
+        let mut store = CloudStore::default();
+        store.rebuild_visuals_from_humidity(&humidity, &world, &wind, sea, &cfg, None);
+        let full = store.parcels[0].vis_mass;
+        // The sky dries out completely.
+        humidity.cells.clear();
+        store.rebuild_visuals_from_humidity(&humidity, &world, &wind, sea, &cfg, None);
+        let after_one = store.parcels.first().map(|p| p.vis_mass).unwrap_or(0.0);
+        assert!(
+            after_one < full && after_one > full * 0.5,
+            "one tick of dry air should thin the cloud, not delete it \
+             ({full} -> {after_one})"
+        );
+        // ...and it does eventually go.
+        for _ in 0..400 {
+            store.rebuild_visuals_from_humidity(&humidity, &world, &wind, sea, &cfg, None);
+        }
+        assert!(
+            store.parcels.is_empty(),
+            "a cloud in permanently dry air should dissipate"
+        );
+    }
+
+    #[test]
+    fn dry_air_condenses_higher_than_moist_air() {
+        // Cloud base tracks dewpoint depression: dry or warm air has to climb
+        // further before it reaches its dewpoint. This is what makes deck height
+        // respond to weather rather than sitting pinned above the terrain.
+        let cfg = CloudConfig::default();
+        let sat = 400.0;
+        let moist = condensation_level(sat * 0.95, sat, 80, &cfg);
+        let middling = condensation_level(sat * 0.5, sat, 80, &cfg);
+        let dry = condensation_level(sat * 0.1, sat, 80, &cfg);
+        assert!(
+            moist < middling && middling < dry,
+            "cloud base should rise as air dries ({moist} < {middling} < {dry})"
+        );
     }
 }
