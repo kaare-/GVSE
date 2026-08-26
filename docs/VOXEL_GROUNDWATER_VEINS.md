@@ -318,6 +318,75 @@ Two behaviours worth knowing, both correct:
 Regression: `a_well_bottomed_in_a_confined_aquifer_rises`. Confined-pass cost is
 unchanged (~0.3–0.7 ms/tick).
 
+## Two erosion chains, kept separate (**landed**)
+
+The material list was being asked to carry two independent processes at once,
+and conflating them meant silicate rock dissolved into the load that
+precipitates as flowstone — the sim was quietly converting granite into
+carbonate.
+
+**Chemical (carbonate only).** Limestone and flowstone dissolve, travel as
+dissolved load, and precipitate as flowstone. Membership is now read straight
+off `MaterialProps::solubility`, which already said exactly this (40 for both,
+0 for stone). The old hardcoded `| MaterialId::Stone` in `is_soluble_rock`, and
+a second hardcoded pair in karst, were the entire conflation. Removing them also
+fixed flowstone never dissolving, which had made a sealed conduit permanent.
+
+**Mechanical (everything competent).** A fracture carrying water does open in
+silicate rock, just far slower and by abrasion. `widen_aperture` is gated on
+`is_competent_rock` rather than solubility, with carbonate scaled by its
+solubility and silicate by `MECHANICAL_ABRASION_REF` (a tenth of limestone).
+Abrasion releases nothing into solution, which is self-consistent because stone
+is outside the mineral ledger — `cell_mineral` returns 0 for insoluble material.
+
+**Known gap:** abraded stone is therefore untracked. Grinding rock produces
+*suspended* sediment, and that species does not exist yet. This is the honest
+version of the gap rather than the hidden one (mineral appearing as carbonate).
+
+`KarstConfig::stone_scale` is retired, kept only so existing presets
+deserialize.
+
+## Cementation: why loose sediment could never hold a channel (**landed**)
+
+Repose and grain settle destroy any void in loose material the moment it opens.
+So conduits could only ever form in competent rock — never in the near-surface
+layer where water actually runs, which is why groundwater erosion produced no
+visible pipes near the surface however well the aperture growth worked.
+
+Cementing sediment gives near-surface channels somewhere to persist, and closes
+the loop: water deposits mineral → sediment sets → set rock holds a void → the
+void becomes a conduit → the conduit concentrates flow.
+
+Two materials, not one per loose type:
+
+| loose | cemented | note |
+|---|---|---|
+| `Sand` | `Sandstone` | |
+| `Gravel`, `LooseRock` | `Conglomerate` | |
+| `LooseLimestone` | `Limestone` | needs no new material |
+| `Soil`, `Organic` | — | they rot rather than set |
+
+Both are clastic, so unlike tight silicate stone they stay decent aquifers
+(permeability 60 and 80 against stone's 5) while still being competent enough to
+hold a roof. That combination is the point.
+
+**Conservation shaped the mechanism.** An insoluble sediment carries no mineral
+in the ledger, so there is nowhere to bank a partial amount — there is no such
+thing as half-cemented sand. Cementation is therefore one atomic step whose
+arithmetic is exact: the load consumed becomes the new cell's cement, with
+`pore` set to its complement. Everything after that first step is ordinary pore
+occlusion, because the resulting rock *is* soluble. `CEMENT_MIN_LOAD` keeps a
+trace of mineral from setting a whole cell.
+
+**Reversible in all three directions**, or the world monotonically petrifies:
+
+- the cement dissolves (solubility 20, half limestone's, since only the matrix
+  is soluble);
+- a dissolving clastic rock returns its **sediment, not a void** — both the karst
+  path and full aperture opening route through `loose_parent`, or dissolving
+  sandstone would delete the sand;
+- shattering breaks it back to the sediment it was cemented from.
+
 ## Superseded notes on the original limitation
 
 A hand-dug well fills from the sides but shows **no upward pressure**, and that
