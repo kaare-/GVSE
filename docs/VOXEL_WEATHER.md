@@ -76,7 +76,21 @@ current behaviour.
 **Do not simply slow gravity fall.** It is shared with waterfalls, column
 drainage and lake filling, all of which are tuned. The cap has to apply only to
 water that is isolated in air — no water directly above or below it — which is
-what distinguishes a droplet from a column.
+what distinguishes a droplet from a column. `apply_gravity_fall_regions` is a
+parallel region loop over raw chunk pointers with unsafe access and special cases
+for lake interior, surge and slope runoff, so this is not a drive-by edit.
+
+**Cheaper alternative worth trying first: nucleate smaller, more often.** The
+whole-cell droplet rule (`mass_per_droplet` 255) exists because
+`deposit_condensate_on_surface` *refuses* a sub-cell budget — frost needs a whole
+cell. That constraint is **surface-only**. `deposit_water_in_air` goes through
+`fill_air_sat`, which takes partial sat happily, so in-air nucleation has no such
+floor. A smaller in-air droplet at a higher rate would read as a continuous
+stream rather than fast-moving blobs, without touching gravity at all.
+
+Measure equilibrium humidity either way (`tests/rain_probe.rs`): drainage per
+event times event rate is what sets it, so smaller-and-more-often should be
+roughly neutral, but that is an assumption to check rather than assume.
 
 ## Per-cell vapour is *not* affordable (**measured, do not build**)
 
