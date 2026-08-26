@@ -321,7 +321,20 @@ impl CloudStore {
         }
         hits.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
         let cap = cfg.max_parcels.max(1);
-        for &(mass, hx, hy) in hits.iter().take(cap) {
+        // Wettest **per region**, not wettest overall.
+        //
+        // Taking the global top `cap` looked reasonable and was the reason rain
+        // appeared to have stopped: wet sky tiles cluster, so on the demo world
+        // 716 tiles were eligible, 36 were drawn, and all 36 landed inside 17%
+        // of the map. The other 83% of the sky was permanently cloudless and so
+        // never showed a drop, even though condensation was raining on it —
+        // the mechanism was fine, the picture was not.
+        //
+        // Bucketing by x spends the same budget on coverage instead. A bucket
+        // whose wettest tile is still below `coag_min_hum` was already filtered
+        // out above, so genuinely dry regions stay clear.
+        let hits = pick_spread_across_x(&hits, cap, wind.width_cols, tc);
+        for (mass, hx, hy) in hits {
             let sat = temp
                 .map(|t| Humidity::saturation_mass_at_temp(t.at_tile(hx, hy)))
                 .unwrap_or(Humidity::MAX_MASS_PER_TILE);
@@ -348,6 +361,46 @@ impl CloudStore {
             });
         }
     }
+}
+
+/// Keep the wettest candidate in each of `cap` bands across the world, so a
+/// fixed parcel budget buys coverage rather than a single dense clump.
+///
+/// `hits` must already be sorted by mass descending: the first candidate seen
+/// for a band wins it, which makes the choice deterministic and keeps the
+/// "wettest tile becomes the cloud" behaviour within each band.
+///
+/// Falls back to filling spare capacity with the next-wettest leftovers, so a
+/// world whose humidity really is confined to a few bands still draws `cap`
+/// parcels rather than going sparse.
+fn pick_spread_across_x(
+    hits: &[(f32, i32, i32)],
+    cap: usize,
+    width_cols: i32,
+    tile_cols: i32,
+) -> Vec<(f32, i32, i32)> {
+    if width_cols <= 0 || hits.len() <= cap {
+        return hits.iter().take(cap).copied().collect();
+    }
+    let mut taken: Vec<Option<(f32, i32, i32)>> = vec![None; cap];
+    let mut leftovers: Vec<(f32, i32, i32)> = Vec::new();
+    for &(mass, hx, hy) in hits {
+        // `hx` is a tile index, so it has to be scaled to world columns first —
+        // banding on the raw tile index would only ever reach a fraction of the
+        // bands and quietly reintroduce the clumping this exists to fix.
+        let world_x = hx.max(0) as i64 * tile_cols.max(1) as i64;
+        let band = ((world_x * cap as i64) / width_cols.max(1) as i64) as usize;
+        let band = band.min(cap - 1);
+        if taken[band].is_none() {
+            taken[band] = Some((mass, hx, hy));
+        } else {
+            leftovers.push((mass, hx, hy));
+        }
+    }
+    let mut out: Vec<(f32, i32, i32)> = taken.into_iter().flatten().collect();
+    let spare = cap.saturating_sub(out.len());
+    out.extend(leftovers.into_iter().take(spare));
+    out
 }
 
 fn surface_y(wind: &Wind, fx: f32) -> f32 {
@@ -683,5 +736,51 @@ mod tests {
             c.fy,
             min_clear
         );
+    }
+
+    #[test]
+    fn clouds_spread_across_the_world_instead_of_clumping() {
+        // Taking the globally wettest tiles put every cloud in the world inside
+        // 17% of the map on the demo world: 716 tiles were eligible, 36 were
+        // drawn, and wet tiles cluster. The other 83% of the sky never showed a
+        // drop even though condensation was raining on it, which is what "rain
+        // looks broken" actually was.
+        let cap = 8;
+        let width_cols = 1024;
+        let tile_cols = 4;
+        // Candidates heavily weighted toward one band: the wettest 6 are all in
+        // tiles 30..36 (world x 120..144), with drier ones spread out.
+        let mut hits: Vec<(f32, i32, i32)> = Vec::new();
+        for i in 0..6 {
+            hits.push((1000.0 - i as f32, 30 + i, 40));
+        }
+        for b in 1..8 {
+            hits.push((100.0, b * 32, 40));
+        }
+        hits.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap());
+
+        let picked = pick_spread_across_x(&hits, cap, width_cols, tile_cols);
+        let bands: std::collections::HashSet<usize> = picked
+            .iter()
+            .map(|&(_, hx, _)| {
+                ((hx as i64 * tile_cols as i64 * cap as i64) / width_cols as i64) as usize
+            })
+            .collect();
+        assert!(
+            bands.len() >= 6,
+            "picks should cover most bands, got {} distinct of {cap}",
+            bands.len()
+        );
+        assert_eq!(picked.len(), cap, "the parcel budget should still be spent");
+    }
+
+    #[test]
+    fn a_world_whose_weather_really_is_local_still_fills_the_budget() {
+        // Spreading must not make a genuinely localised storm draw fewer clouds:
+        // spare bands fall back to the next-wettest leftovers.
+        let cap = 8;
+        let hits: Vec<(f32, i32, i32)> = (0..20).map(|i| (500.0 - i as f32, 40 + i, 40)).collect();
+        let picked = pick_spread_across_x(&hits, cap, 1024, 4);
+        assert_eq!(picked.len(), cap);
     }
 }
