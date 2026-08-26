@@ -411,15 +411,10 @@ fn tick_with_life_inner(
     // same cadence as seepage itself — they only exist to re-dirty pore
     // fronts, and running them every tick also kept that halo (and so every
     // other pass's scan) open on ticks where no seepage would follow.
+    // They run once, just before the seepage plan that consumes their dirty —
+    // see the wake block below. Waking here as well only fed the *flow* plan,
+    // which does not move pore water, and cost a full scan of every wet chunk.
     let run_seepage = !perf.flow_quiet_early_out || world.tick % SEEPAGE_EVERY == 0;
-    if run_seepage {
-        let t0 = profile.then(Instant::now);
-        super::seepage::wake_lake_bed_pores(world);
-        super::seepage::wake_vertical_chunk_seam_pores(world);
-        if let (true, Some(t0)) = (profile, t0) {
-            local.seepage += t0.elapsed();
-        }
-    }
     // Last non-empty flow plan — grain/seepage fall back to this when
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
@@ -519,9 +514,9 @@ fn tick_with_life_inner(
     // stacks under a wet cap would stay dry forever without a re-wake.
     {
         let t0 = profile.then(Instant::now);
-        super::seepage::wake_lake_bed_pores(world);
-        super::seepage::wake_vertical_chunk_seam_pores(world);
         if run_seepage {
+            super::seepage::wake_lake_bed_pores(world);
+            super::seepage::wake_vertical_chunk_seam_pores(world);
             super::seepage::wake_pore_weep_into_air(world);
         }
         if let (true, Some(t0)) = (profile, t0) {
