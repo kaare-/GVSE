@@ -115,7 +115,38 @@ scale.
 The coarse tile field is therefore not a hack. For a diffuse quantity that
 changes everywhere at once, coarse tiles are the right abstraction. Keep it.
 
-## Next: clouds drawn from the field, parcels deleted
+## Decided: no cloud animation at all — render the vapour field
+
+**Design call (playtest, 2026-08-26).** Drop cloud parcels entirely rather than
+replacing them with a derived deck, and tune the *vapour field's own rendering*
+instead. The glitchy look of water condensing out of the field was judged
+visually interesting on its own and expected to improve with convection.
+
+This is "a cloud is just an air block with saturation" taken to its conclusion:
+if the field is the cloud, there is no reason to derive an intermediate object
+from it. What goes:
+
+- `CloudStore`'s visual half — parcels, persistence, drift, lift, dissipation
+- `draw_clouds` and the three `draw_depth_cloud_layer` call sites
+- quite possibly `deck_from_field` too (added just before this call — it derives a
+  banded deck, which is still an intermediate representation)
+
+What replaces it: draw humidity saturation directly as the sky's look, the way
+the `H` overlay already does but as the default presentation rather than a
+diagnostic.
+
+Consequences worth knowing before starting:
+
+- `pick_spread_across_x` and the banding exist to make a *parcel* selection
+  spatially stable. Rendering the field needs none of it — the field is already
+  spatially coherent everywhere. Banding can go with the parcels.
+- `CloudParcel::raining` and the `nimbus` HUD field lose their last purpose.
+- Cloud floor / ridge clearance (`cloud_floor_y`) exists to stop parcels sinking
+  into terrain. A field has no such problem, so that machinery may also go — which
+  would remove the function whose unbounded upward scan cost roughly two million
+  hashmap lookups per frame.
+
+## Superseded plan: clouds drawn from the field, parcels deleted
 
 "A cloud is just an air block with saturation" is a claim about where clouds
 *come from* — an observation about the field, not an object placed on top of it.
