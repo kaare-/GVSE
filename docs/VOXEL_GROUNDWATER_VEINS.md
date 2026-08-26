@@ -239,6 +239,35 @@ transfer carries it away, so nothing would ever accumulate. Occlusion is
 restricted to soluble rock, since that is what `mineral_total` counts; cementing
 anything else would consume load with no solid gaining it.
 
+## Soak finding: the brake was beating the growth
+
+A 160 k-tick soak showed no conduits and no cave development. The inspector on a
+water-bearing cell explained it:
+
+```
+material=looselimestone  sat=27/28
+pore=86  ->  pore=46      (over ~1800 ticks)
+dissolved mineral=15..24  (holds 6)
+```
+
+Load sat 2.5–4× over the carrying ceiling, so precipitation fired continuously
+and the aperture **closed**. Erosion needs throughput over a threshold and scales
+with its square (deliberately hard); cementing triggered on any excess at all.
+Every water-bearing cell was slowly sealing itself.
+
+Cause: `SOLUBILITY_PER_SAT` was 4. Pore water has small `sat`, so a near-saturated
+cell's ceiling was `27 × 4 / 16 = 6` — load precipitated the moment it entered
+rock instead of travelling. Raised to 24 (~40 for that cell), so load moves and
+drops only where water is genuinely lost. Deposits belong at discharge points,
+not spread through the aquifer.
+
+**Open:** flowstone is currently `Limestone` with `pore = 0`, indistinguishable
+from native limestone by material (only faintly, via the porosity stipple being
+absent). A dedicated material with its own name and colour is the right fix for
+readability — bounded work, but it moves `MATERIAL_COUNT` 14 → 15, which touches
+the `HydroOverrides` slot array, the preset `mat_*` arrays, ~5 exhaustive matches
+in the voxel stack, and the legacy stack's per-material tables.
+
 ## Hard rock, so channels can form
 
 Playtest: continuous limestone and stone need to be **harder**, or erosion

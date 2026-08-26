@@ -27,10 +27,22 @@ pub const MINERAL_PER_CELL: u16 = 255;
 /// Load one unit of water can hold before the excess precipitates.
 ///
 /// Sets the concentration ceiling: a cell with `sat` can carry
-/// `sat × SOLUBILITY_PER_SAT / 16` units. Deliberately generous — the intent is
-/// that load travels with flowing water and drops at an *outlet*, not that it
-/// precipitates a few cells from where it dissolved.
-pub const SOLUBILITY_PER_SAT: u16 = 4;
+/// `sat × SOLUBILITY_PER_SAT / 16` units.
+///
+/// This has to be generous, and 4 was far too tight. Pore water in rock has a
+/// small `sat` — a near-saturated LooseLimestone cell holds ~27 — so a ceiling
+/// of `27 × 4 / 16 = 6` meant load precipitated almost the instant it entered
+/// rock. A 160 k-tick soak showed cells carrying 15–24 units against a ceiling
+/// of 6, cementing their own aperture shut (`pore` 86 → 46 over ~1800 ticks).
+/// The brake was beating the growth everywhere, so no conduit could survive and
+/// caves never developed.
+///
+/// At 24 a pore cell of that wetness carries ~40, comfortably above what
+/// dissolution puts into it, so load **travels** and only drops where water is
+/// actually lost — evaporating at an outlet, or depressurising at a spring.
+/// That is the intended shape: deposits at discharge points, not cement in the
+/// aquifer.
+pub const SOLUBILITY_PER_SAT: u16 = 24;
 
 /// Precipitate that fills an Air cell once fully occluded.
 pub const DEPOSIT_MATERIAL: MaterialId = MaterialId::Limestone;
