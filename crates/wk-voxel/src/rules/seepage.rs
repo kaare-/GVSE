@@ -287,16 +287,23 @@ pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
         if !world.chunks.contains_key(&above) {
             continue;
         }
+        // Only the columns that are actually coupled across the face need the
+        // band. Emitting it for every chunk pair at full width made this the
+        // most expensive pass in the simulation (17 ms/call on the stress
+        // world) while most seams are dry sky or dry rock with nothing to move.
+        let Some(span) = seam_coupled_span(world, coord, above) else {
+            continue;
+        };
         let strip_lo = Rect {
-            x0: 0,
+            x0: span.0,
             y0: (ch - depth_lo).max(0) as u8,
-            x1: (cw - 1) as u8,
+            x1: span.1,
             y1: (ch - 1) as u8,
         };
         let strip_hi = Rect {
-            x0: 0,
+            x0: span.0,
             y0: 0,
-            x1: (cw - 1) as u8,
+            x1: span.1,
             y1: (depth_hi - 1).min(ch - 1) as u8,
         };
         map.entry(coord)
@@ -312,6 +319,47 @@ pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
         .collect();
     out.sort_by(|a, b| a.coord.cy.cmp(&b.coord.cy).then(a.coord.cx.cmp(&b.coord.cx)));
     out
+}
+
+/// Local `x` span of the columns where water could actually cross this seam,
+/// or `None` when the face is inert.
+///
+/// Deliberately more permissive than the per-column predicate in
+/// [`wake_vertical_chunk_seam_pores`]: it asks only that both sides can hold
+/// or pass water and that one of them has some, so it can never exclude a
+/// column that the wake would have coupled.
+fn seam_coupled_span(world: &World, lower: ChunkCoord, upper: ChunkCoord) -> Option<(u8, u8)> {
+    let ch = CHUNK_CELLS_H as i32;
+    let cw = CHUNK_CELLS_W as usize;
+    let lo_chunk = world.chunks.get(&lower)?;
+    let hi_chunk = world.chunks.get(&upper)?;
+    // Sticky occupancy: a seam with no water on either side has nothing to do.
+    let any_water = lo_chunk.has_wet_pores
+        || lo_chunk.has_wet_air
+        || hi_chunk.has_wet_pores
+        || hi_chunk.has_wet_air;
+    if !any_water {
+        return None;
+    }
+    let hydro = world.hydro;
+    let mut lo_x: Option<usize> = None;
+    let mut hi_x = 0usize;
+    for lx in 0..cw {
+        let lo = lo_chunk.get(lx, (ch - 1) as usize);
+        let hi = hi_chunk.get(lx, 0);
+        let lo_open = is_porous_cell(lo, &hydro) || lo.material == MaterialId::Air;
+        let hi_open = is_porous_cell(hi, &hydro) || hi.material == MaterialId::Air;
+        if !(lo_open && hi_open) {
+            continue;
+        }
+        if lo.sat.0 == 0 && hi.sat.0 == 0 {
+            continue;
+        }
+        lo_x = Some(lo_x.unwrap_or(lx));
+        hi_x = lx;
+    }
+    let lo_x = lo_x?;
+    Some((lo_x as u8, hi_x as u8))
 }
 
 fn merge_seam_rect(a: Rect, b: Rect) -> Rect {

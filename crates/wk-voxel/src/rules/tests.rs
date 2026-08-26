@@ -7188,6 +7188,54 @@ fn seepage_crosses_vertical_chunk_seam_via_tick() {
 
 
 #[test]
+fn dry_seam_costs_nothing_but_a_wet_one_still_couples() {
+    // The seam band used to be emitted for every chunk pair at full width,
+    // which made cross-seam coupling the single most expensive pass in the
+    // simulation while most seams have no water to move. Narrowing it must
+    // not cost the coupling itself.
+    let mut dry = World::new(9);
+    dry.ensure_chunk(ChunkCoord::new(0, 0));
+    dry.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..8 {
+        for y in 60..=67 {
+            dry.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    assert!(
+        super::seepage::seam_seepage_regions(&dry).is_empty(),
+        "a seam with no water anywhere should not be scanned at all"
+    );
+
+    // Same geometry, one wet column straddling the face.
+    let mut wet = World::new(9);
+    wet.ensure_chunk(ChunkCoord::new(0, 0));
+    wet.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..8 {
+        for y in 60..=67 {
+            wet.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    let mut soaked = Cell::solid(MaterialId::Stone);
+    soaked.sat.0 = water_capacity(MaterialId::Stone);
+    wet.set_cell(4, 63, soaked);
+    let regions = super::seepage::seam_seepage_regions(&wet);
+    assert!(
+        !regions.is_empty(),
+        "a wet column on the face must still be coupled"
+    );
+    // The band should cover the wet column and not the whole chunk width.
+    let covers = regions.iter().any(|a| {
+        a.coord == ChunkCoord::new(0, 0) && a.rect.x0 <= 4 && a.rect.x1 >= 4
+    });
+    assert!(covers, "band must cover the wet column, got {regions:?}");
+    let widest = regions.iter().map(|a| a.rect.x1 - a.rect.x0 + 1).max().unwrap();
+    assert!(
+        widest < CHUNK_CELLS_W as u8,
+        "one wet column should not scan the full chunk width, got {widest}"
+    );
+}
+
+#[test]
 fn pore_sat_does_not_shelf_across_vertical_chunk_seam() {
     // Fully buried stone column across y=63|64 with standing water above.
     // Pore water must keep crossing the seam — no permanent sat step that
