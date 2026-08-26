@@ -155,6 +155,18 @@ pub struct World {
     /// than air" playtest report. Re-dirtying these is O(moves).
     #[serde(skip, default)]
     pub competent_moved_cells: Vec<(i32, i32)>,
+    /// Cells vacated by a **level** (non-descending) body slide, and the tick
+    /// it happened.
+    ///
+    /// A level slide does no work against gravity, so a body can take one back
+    /// as soon as the downhill test reads the other way, and shuffle between
+    /// two columns forever. Each of those moves kept the topology loop running
+    /// another pass, so a single restless boulder cost six full component
+    /// rebuilds a tick. Consulted by the slide rule to refuse a rebound.
+    /// Transient physics state — not saved, and losing it on load costs at
+    /// most one extra shuffle.
+    #[serde(skip, default)]
+    pub competent_level_vacated: FxHashMap<(i32, i32), (u64, i32)>,
     /// Invalidates the thread-local last-chunk pointer after clone / insert.
     #[serde(skip, default)]
     pub(crate) chunk_cache_id: ChunkCacheId,
@@ -181,6 +193,7 @@ impl World {
             competent_settled: FxHashMap::default(),
             competent_wake: Vec::new(),
             competent_moved_cells: Vec::new(),
+            competent_level_vacated: FxHashMap::default(),
             chunk_cache_id: ChunkCacheId::default(),
         }
     }

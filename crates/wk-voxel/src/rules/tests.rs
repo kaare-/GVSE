@@ -7188,6 +7188,31 @@ fn seepage_crosses_vertical_chunk_seam_via_tick() {
 
 
 #[test]
+fn a_settled_boulder_field_stops_moving() {
+    // A boulder was shuffling between two columns forever: a level slide does
+    // no work against gravity, so the downhill test could send it straight
+    // back. Each of those moves kept the body pass's topology loop alive for
+    // another full component rebuild, so 3.4 rolls/tick cost ~12 ms/tick on an
+    // otherwise settled world. Nothing should still be moving here.
+    let params = crate::worldgen::WorldgenParams::default();
+    let mut w = World::new(params.seed);
+    crate::worldgen::stamp_world(&mut w, &params);
+    let perf = PerfConfig::default();
+    for _ in 0..1200 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let mut moves = 0usize;
+    for _ in 0..60 {
+        tick_with_perf(&mut w, &perf);
+        moves += w.competent_cell_moves.len();
+    }
+    assert_eq!(
+        moves, 0,
+        "settled rock should not keep rolling ({moves} cell moves over 60 ticks)"
+    );
+}
+
+#[test]
 fn dry_seam_costs_nothing_but_a_wet_one_still_couples() {
     // The seam band used to be emitted for every chunk pair at full width,
     // which made cross-seam coupling the single most expensive pass in the

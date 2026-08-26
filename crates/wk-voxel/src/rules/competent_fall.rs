@@ -49,6 +49,11 @@ pub const BODY_FALL_CELLS_PER_TICK: i32 = 12;
 pub const BODY_FALL_CELLS_PER_TICK_WATER: i32 = 6;
 /// Seated tip / impact rebuilds per tick (keep low — each rebuild is O(body)).
 pub const COMPETENT_TOPOLOGY_PASSES: u32 = 6;
+/// How long a level slide is remembered, in ticks, for rebound refusal.
+///
+/// Only needs to outlast the shuffle period. A body genuinely working its way
+/// along a ledge descends within this window and is never blocked.
+const SLIDE_REBOUND_TICKS: u64 = 6;
 /// FPS path: fewer rebuilds so hanging peel cannot tank frame time.
 pub const COMPETENT_TOPOLOGY_PASSES_FPS: u32 = 2;
 /// Connected competent larger than this is treated as static terrain
@@ -2361,11 +2366,39 @@ fn try_slide(world: &World, comp: &Component, cfg: &CompetentFallConfig) -> Opti
     return None;
   }
   for &(mx, my) in &[(dx, -1), (dx, 0), (dx, -2)] {
+    // A level step does no work against gravity, so nothing stops the body
+    // taking it straight back when `downhill_roll_dir` reads the other way.
+    // A settled world paid 3.4 rolls/tick forever to a boulder shuffling
+    // between two columns, and each of those kept the topology loop alive for
+    // another full component rebuild. Descending steps are self-limiting and
+    // stay unguarded; only the level one needs to prove it is not a rebound.
+    if my == 0 && slide_would_rebound(world, comp, mx) {
+      continue;
+    }
     if can_slide(world, comp, mx, my) {
       return Some((mx, my));
     }
   }
   None
+}
+
+/// True when a level step of `dx` reverses a level step this body just took.
+///
+/// Compares *direction*, not footprint overlap: a body wider than two cells
+/// overlaps its own previous position on every step, so overlap alone would
+/// also stop a body working steadily along a ledge (it did — the tumbling disk
+/// froze in place).
+fn slide_would_rebound(world: &World, comp: &Component, dx: i32) -> bool {
+  if world.competent_level_vacated.is_empty() {
+    return false;
+  }
+  let horizon = world.tick.saturating_sub(SLIDE_REBOUND_TICKS);
+  comp.cells.iter().any(|(gx, gy, _)| {
+    matches!(
+      world.competent_level_vacated.get(&(*gx, *gy)),
+      Some(&(t, prev)) if t >= horizon && prev == -dx
+    )
+  })
 }
 
 /// True when a seated body still has a downhill neighbor and should stay awake.
@@ -3010,6 +3043,13 @@ fn apply_roll(
   if let Some((dx, dy)) = try_slide(world, comp, cfg) {
     if slide_component(world, comp, dx, dy) {
       stats.roll_moves += 1;
+      if dy == 0 {
+        // Remember where a level step came from, so the return leg is refused.
+        let tick = world.tick;
+        for (gx, gy, _) in &comp.cells {
+          world.competent_level_vacated.insert((*gx, *gy), (tick, dx));
+        }
+      }
       let new_anchor = (anchor.0 + dx, anchor.1 + dy);
       advance_streak(fall_streak, anchor, dx, dy);
       settle_after_roll(
@@ -3293,6 +3333,14 @@ pub fn apply_competent_fall_regions(
     } else {
       break;
     }
+  }
+  // Only the last few ticks of level slides matter; drop the rest so the
+  // ledger stays proportional to what is actually moving.
+  if !world.competent_level_vacated.is_empty() {
+    let horizon = world.tick.saturating_sub(SLIDE_REBOUND_TICKS);
+    world
+      .competent_level_vacated
+      .retain(|_, &mut (t, _)| t >= horizon);
   }
   // Keep bodies that moved awake for next tick (see `wake_moved_competent`).
   world.competent_moved_cells = world

@@ -108,6 +108,34 @@ fn measure(label: &str, params: WorldgenParams) {
         "  unquantized (continuous tint)      {unquantized_runs:>10}  → only {:.1}×",
         cells as f64 / unquantized_runs.max(1) as f64
     );
+
+    // The pore stipple is one sub-cell dot per qualifying cell and cannot be
+    // merged into a run, so it is a draw call the run-batching cannot help.
+    // Counted separately because it lands on top of the merged terrain.
+    let mut stipples = 0u64;
+    for x in 0..params.width_cols {
+        for y in params.bedrock_floor_y..params.sky_ceiling_y {
+            if visible(&world, &params, x, y).is_none() {
+                continue;
+            }
+            let Some(cell) = world.get_cell(x, y) else {
+                continue;
+            };
+            let opaque = !matches!(
+                cell.material,
+                MaterialId::Air | MaterialId::Water | MaterialId::Ice | MaterialId::Snow
+            );
+            if opaque && cell.pore >= 176 {
+                stipples += 1;
+            }
+        }
+    }
+    println!("  pore stipple dots (unmergeable)    {stipples:>10}");
+    println!(
+        "  total draw calls                   {:>10}  ({:.0}% stipple)",
+        runs + stipples,
+        100.0 * stipples as f64 / (runs + stipples).max(1) as f64
+    );
 }
 
 #[test]
