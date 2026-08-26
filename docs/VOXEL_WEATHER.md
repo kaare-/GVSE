@@ -53,9 +53,30 @@ The atmosphere holds 44% less water because rain now lands and drains it. The
 0.7 ms is falling rain's churn, and it is affordable because rain is **sparse** —
 only columns under raining tiles activate.
 
-`CloudParcel::raining` is now only a HUD readout (`nimbus=N`); nothing draws from
-it, and it reads low because the sky is far drier than its threshold was tuned
-against.
+`CloudParcel::raining` is now only a HUD readout; nothing draws from it.
+
+**`nimbus` is the parcel *count*, not a rain count** — "how many N echo parcels
+are drawn (cap ~36)". It sits pinned at 36 because banding puts one parcel in
+each of 36 bands, so any moist sky fills them all. It is not a weather signal and
+was misread as one for several rounds. Use `hum` (total humidity mass) as the
+dial instead: it fell from 183k to 95k in playtest once rain started landing.
+
+### Open: droplets fall too fast
+
+Confirmed in playtest — rain is visible, and "very fast drops". A droplet is
+moved by `apply_gravity_fall` on every flow substep, and there are 8 substeps per
+tick, so it covers many cells per tick and reads as a flicker rather than a fall.
+
+That speed is *correct* for a column of water draining and wrong for a single
+droplet in air. The fix is the same shape as the one competent bodies already
+have (`BODY_FALL_CELLS_PER_TICK`): a terminal velocity for isolated mid-air
+water, so a droplet descends at a legible rate while a draining column keeps its
+current behaviour.
+
+**Do not simply slow gravity fall.** It is shared with waterfalls, column
+drainage and lake filling, all of which are tuned. The cap has to apply only to
+water that is isolated in air — no water directly above or below it — which is
+what distinguishes a droplet from a column.
 
 ## Per-cell vapour is *not* affordable (**measured, do not build**)
 
