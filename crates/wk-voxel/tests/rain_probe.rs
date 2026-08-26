@@ -83,12 +83,16 @@ fn does_it_rain() {
     // Cap sweep already showed the event cap is not binding (48 -> 1024 changed
     // nothing). Sweep droplet size instead: a deposit that is refused for being
     // too small drains no humidity at all, which would pin the equilibrium.
-    for drop in [40.0f32, 120.0, 255.0, 512.0] {
-        run_with_drop(drop);
-    }
+    // The app's own value. Sweeping this was tried and is not a tuning lever:
+    // equilibrium humidity moves non-monotonically (0.30 -> 331k but 0.60 ->
+    // 472k) and the eligible-tile count swings 425..1350 between runs, because
+    // evaporation, humidity and precipitation are mutually coupled and a
+    // 3000-tick run from a fresh stamp has too much variance to separate them.
+    run_with_prob(0.10);
 }
 
-fn run_with_drop(drop: f32) {
+fn run_with_prob(prob: f32) {
+    let drop = 255.0f32;
     let (mut world, params, mut humidity, wind, mut clouds, temperature) = main_scene();
     let evap = EvapConfig::default();
     // Exactly what the app builds in SimSettings::new. Using
@@ -97,7 +101,7 @@ fn run_with_drop(drop: f32) {
     let cond = CondensationConfig {
         top_y: params.sky_ceiling_y - 2,
         min_mass_to_rain: 140.0,
-        max_prob_per_tick: 0.10,
+        max_prob_per_tick: prob,
         mass_per_droplet: drop,
         ..CondensationConfig::default()
     };
@@ -113,8 +117,17 @@ fn run_with_drop(drop: f32) {
     let mut peak_wet = 0.0f32;
     let mut ever_rained = 0u64;
     let mut cond_time = std::time::Duration::ZERO;
+    // Rain against the day/night cycle. The diurnal machinery already exists
+    // (solar heat, night cool, saturation-vs-temperature), so the question is
+    // whether it actually modulates rain or is swamped.
+    let mut day_ticks = 0u64;
+    let mut day_rain = 0u64;
+    let mut night_ticks = 0u64;
+    let mut night_rain = 0u64;
+    let mut day_hum = 0.0f64;
+    let mut night_hum = 0.0f64;
 
-    println!("\n=== mass_per_droplet = {drop} ===");
+    println!("\n=== max_prob_per_tick = {prob} ===");
     for t in 0..TICKS {
         apply_evaporation_into_humidity_climate(
             &mut world,
@@ -160,6 +173,20 @@ fn run_with_drop(drop: f32) {
         if raining > 0 {
             ever_rained += 1;
         }
+        let dn = wk_voxel::day_night_factor(t);
+        if dn >= 0.0 {
+            day_ticks += 1;
+            day_hum += humidity.total_mass() as f64;
+            if raining > 0 {
+                day_rain += 1;
+            }
+        } else {
+            night_ticks += 1;
+            night_hum += humidity.total_mass() as f64;
+            if raining > 0 {
+                night_rain += 1;
+            }
+        }
         let _ = (parcels, wet);
     }
 
@@ -175,6 +202,16 @@ fn run_with_drop(drop: f32) {
     );
 
     println!("  equilibrium humidity          {:.0}", humidity.total_mass());
+    println!(
+        "  rain fraction: day {:.0}%  night {:.0}%",
+        100.0 * day_rain as f32 / day_ticks.max(1) as f32,
+        100.0 * night_rain as f32 / night_ticks.max(1) as f32
+    );
+    println!(
+        "  mean humidity: day {:.0}   night {:.0}",
+        day_hum / day_ticks.max(1) as f64,
+        night_hum / night_ticks.max(1) as f64
+    );
     println!("  ticks raining                 {ever_rained} / {TICKS}");
     println!("  peak raining parcels          {peak_raining} (of {peak_parcels})");
     println!(
