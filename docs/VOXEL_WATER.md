@@ -140,6 +140,72 @@ them through `water_capacity_cell` / `permeability_cell`. Setting a
 range to **0–0** makes that property zero for every cell; sand
 porosity and permeability both at 0–0 make an impermeable lid.
 
+## The tight end of the permeability spectrum
+
+`seepage_rate_cell` is `((p * 32) / 255).max(1)`, so **every material below
+permeability 8 floors to the same 1 sat-unit per pass**. Clay (10), flowstone
+(12) and bentonite (1) all conducted identically. This quantised the whole
+tight end of the spectrum into one value, and it is why:
+
+- a real aquitard could not be expressed, and so there was no confined head to
+  find with a well;
+- pore variation on tight rock did nothing, defeating the point of the fracture
+  tail (its whole range sits under the quantum);
+- the 1/√2 diagonal path weighting had no effect — `(1 * 181) / 256` floors
+  back to 1.
+
+`seepage_stride_cell` recovers the resolution without fractional sat: below the
+quantum a cell transfers one unit every `quantum / p` passes, so permeability 1
+runs at exactly 1/8 of permeability 8. Phase comes from cell position so a seal
+does not pulse in lockstep. Stride values (2, 4, 8) are coprime with the
+seepage cadence (5), so the gate samples every residue and the ratio holds.
+
+**Watch for this whenever tuning anything at the tight end.** A permeability
+change below 8 does nothing on its own; it only moves behaviour through the
+stride.
+
+## Bentonite: the aquitard
+
+Clay is not a seal. At permeability 10 against limestone's 140 it is only ~14×
+tighter, which still equalises over a geological cadence. `Bentonite`
+(permeability 1, field capacity 232, insoluble) is, and confinement is what
+makes artesian head and perched tables happen by design rather than by
+accident.
+
+Worldgen lays it as a 2-cell cap just above the limestone stratum, and
+deliberately **not** continuous (`lens >= 0.15`, ~85% coverage). A perfect seal
+would also block recharge and the aquifer beneath would never fill; real
+confined aquifers take their water where the aquitard is absent, and the gaps
+are those windows.
+
+Confinement is a *timescale* property, not an endpoint — given long enough,
+water equalises through anything with non-zero permeability, and real confining
+layers are leaky. Measured on a sealed reservoir, clay fully drains by 2000
+ticks while bentonite passes nothing through 3000.
+
+## Diagonal faces open only along veins
+
+The seepage stencil is four-neighbour, so water in a **diagonal** vein had to
+zigzag through the two corner cells between it. The vein was throttled to
+*their* permeability rather than its own, and only grid-aligned veins could
+conduct — channels could form along the world axes and nowhere else.
+
+Adding diagonal faces everywhere is not the fix: in homogeneous rock it gives
+every cell eight faces instead of four and roughly doubles vertical drainage.
+That is a global retune of the water model, and it pulls the wrong way — water
+should linger in permeable layers, not reach bedrock faster. Two seam tests
+caught it at once, both asserting a bed wets and both failing because the water
+had drained away.
+
+So `diagonal_is_a_shortcut` opens the face only where the anisotropy bites:
+both ends more permeable than either corner. In homogeneous material the
+corners match the ends, nothing opens, and tuned behaviour is untouched.
+Diagonals carry pore↔pore conduction only; infiltration and weep keep their
+orthogonal faces, since those rules are tuned against a free surface.
+
+Cost is roughly +0.3 ms/tick (demo) and +0.5 (stress) amortised over the
+cadence.
+
 ## Seam coupling scans only wet seams
 
 `apply_seepage_seam_coupling` exists because dirty rects are per chunk and do
