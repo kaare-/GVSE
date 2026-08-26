@@ -222,6 +222,28 @@ const SURFACE_DEPOSIT_SCAN: i32 = 512;
 /// into a hillside wedge while it can still spread or cascade — but a
 /// closed basin of full films (dry lake) *does* pond, otherwise long
 /// soaks rain forever and never refill.
+/// Nucleate atmospheric water **where the vapour is**, as falling rain.
+///
+/// The counterpart to [`deposit_water_on_surface`], which scans up to 512 cells
+/// down from the sky and lands water on the ground — rain that teleports rather
+/// than falls. Here the droplet appears in the air cell that held the vapour and
+/// gravity carries it down like any other water, so rain is a real thing in the
+/// world with a position and a fall time instead of a deposit with an animation
+/// drawn over it.
+pub(crate) fn deposit_water_in_air(world: &mut World, gx: i32, y: i32, budget: f32) -> f32 {
+    if budget <= 0.0 {
+        return 0.0;
+    }
+    let jx = world.wrap_x(gx);
+    let Some(cell) = world.get_cell(jx, y) else {
+        return 0.0;
+    };
+    if cell.material != MaterialId::Air {
+        return 0.0;
+    }
+    fill_air_sat(world, jx, y, cell, budget)
+}
+
 pub(crate) fn deposit_water_on_surface(world: &mut World, gx: i32, start_y: i32, budget: f32) -> f32 {
     if budget <= 0.0 {
         return 0.0;

@@ -4758,13 +4758,28 @@ fn condensation_rains_when_tile_is_wet() {
         ..CondensationConfig::default()
     };
     apply_condensation_rain(&mut w, &mut h, &cfg);
-    let landed = w.get_cell(2, 1).unwrap();
+    // Rain nucleates **in the air** where the vapour was, rather than appearing
+    // on the ground: it is real water with a position and a fall time now, not a
+    // deposit with an animation drawn over it.
+    let column_sat: u32 = (0..=31)
+        .map(|y| w.get_cell(2, y).map(|c| c.sat.0 as u32).unwrap_or(0))
+        .sum();
     assert!(
-        landed.sat.0 > 0,
-        "cloud with 1000 mass should have rained on the ground (got sat={})",
-        landed.sat.0
+        column_sat > 0,
+        "a cloud with 1000 mass should have produced water in the column"
     );
-    assert_eq!(w.get_cell(2, 30).unwrap().sat.0, 0, "sky row stays dry");
+    let on_ground = w.get_cell(2, 1).unwrap().sat.0;
+    assert_eq!(on_ground, 0, "it should not teleport to the ground");
+
+    // ...and gravity brings it down.
+    let perf = PerfConfig::default();
+    for _ in 0..200 {
+        tick_with_perf(&mut w, &perf);
+    }
+    assert!(
+        w.get_cell(2, 1).unwrap().sat.0 > 0,
+        "rain should reach the ground under gravity"
+    );
 }
 
 #[test]
@@ -4841,7 +4856,9 @@ fn condensation_is_mass_conservative() {
     h.add(6, 30, 300.0);
     h.add(11, 30, 250.0);
     let total_before = h.total_mass();
-    let world_sat_before = ground_sat_sum(&w);
+    // Whole world, not just the ground: rain nucleates in the air, so a
+    // ground-only sum reports conserved mass as lost.
+    let world_sat_before = crate::audit::sat_totals(&w).cell_total;
 
     let cfg = CondensationConfig {
         top_y: 30,
@@ -4854,7 +4871,7 @@ fn condensation_is_mass_conservative() {
     }
 
     let total_after = h.total_mass();
-    let world_sat_after = ground_sat_sum(&w);
+    let world_sat_after = crate::audit::sat_totals(&w).cell_total;
     let humidity_lost = total_before - total_after;
     let world_gained = (world_sat_after - world_sat_before) as f32;
     assert!(

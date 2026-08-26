@@ -221,16 +221,33 @@ pub fn apply_condensation_rain_phased(
             continue;
         }
         let take_mass = take_mass.min(mass);
-        // Rain / frost lands on the ground / ocean under the tile centre.
         let centre_gx = hx * tile_cols + tile_cols / 2;
-        let mut landed = crate::phase::deposit_condensate_on_surface(
-            world,
-            centre_gx,
-            cfg.top_y,
-            take_mass,
-            temp,
-            phase,
-        );
+        // Nucleate **where the vapour is** and let gravity have it.
+        //
+        // This used to deposit on the ground under the tile, scanning up to 512
+        // cells down from the sky ceiling — rain that teleported rather than
+        // fell, which is why the falling drops had to be a cosmetic overlay
+        // drawn over an event that had already finished. A droplet now appears in
+        // the air cell that held the vapour and descends like any other water.
+        let centre_gy = hy * tile_cols + tile_cols / 2;
+        let air_t = temp.map(|t| t.at_tile(hx, hy));
+        let freezing = match (air_t, phase) {
+            (Some(t), Some(ph)) => t <= ph.freeze_point_c,
+            _ => false,
+        };
+        // Rime forms *on* surfaces, not in mid-air, so frost keeps the old path.
+        let mut landed = if freezing {
+            crate::phase::deposit_condensate_on_surface(
+                world,
+                centre_gx,
+                cfg.top_y,
+                take_mass,
+                temp,
+                phase,
+            )
+        } else {
+            super::deposit_water_in_air(world, centre_gx, centre_gy, take_mass)
+        };
         // Cold frost needs a full cell (255). Small drizzle budgets refuse;
         // retry once from the tile so rime can still form without underpaying.
         if landed <= 0.0 && mass >= u8::MAX as f32 {

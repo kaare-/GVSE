@@ -62,7 +62,7 @@ use wk_voxel::{
     apply_weather_rgb, apply_competent_fall_regions, apply_landscape_fall, celestial_local_cfg,
     celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
-    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water, plan_active,
+    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, plan_active,
     pore_wetness_with, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg,
     set_parallel_enabled, step_carbon_budget, support_map_due, temperature_step_due, tick_with_life,
     wake_competent_bodies_all, wake_unsupported_grains,
@@ -1187,23 +1187,24 @@ async fn main() {
                         None
                     } else {
                         scene.world.get_cell(x, y).and_then(|cell| {
-                            // Only draw standing water (pools / ocean film / land
-                            // puddles). Mid-air sat stays invisible — falling rain
-                            // is the cosmetic streak under raining clouds.
+                            // Draw water in the air as well as on the ground.
+                            //
+                            // Mid-air sat used to be hidden, because rain
+                            // teleported to the surface and the falling part was a
+                            // cosmetic streak drawn over it. Rain now nucleates in
+                            // the air and descends, so what is up there is real
+                            // water and hiding it would make actual rainfall
+                            // invisible.
+                            //
                             // Thin wet-air films (condensation residual / haze sat)
-                            // must not paint as a bright blue-white ground outline.
-                            if cell.material == wk_material::MaterialId::Air {
-                                if cell.sat.is_empty() {
-                                    return None;
-                                }
-                                // Match grain haze band: ≤32 is atmospheric film, not puddle.
-                                if cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX {
-                                    return None;
-                                }
-                                let below_sea = y <= scene.params.sea_level_y;
-                                if !below_sea && !is_standing_water(&scene.world, x, y) {
-                                    return None;
-                                }
+                            // still must not paint as a bright ground outline, so
+                            // the haze band is unchanged: ≤32 is atmospheric film,
+                            // not a droplet.
+                            if cell.material == wk_material::MaterialId::Air
+                                && (cell.sat.is_empty()
+                                    || cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX)
+                            {
+                                return None;
                             }
                             let [r0, g0, b0] = crate::palette::cell_color_with(
                                 cell,
