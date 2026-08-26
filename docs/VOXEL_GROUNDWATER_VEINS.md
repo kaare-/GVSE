@@ -387,6 +387,57 @@ trace of mineral from setting a whole cell.
   sandstone would delete the sand;
 - shattering breaks it back to the sediment it was cemented from.
 
+## Three transport modes, kept apart (**suspension landed**)
+
+| mode | mechanism | drops out when |
+|------|-----------|----------------|
+| bedload | `grain::apply_flow_erosion` relocates whole cells | it stops being pushed |
+| dissolved | `mineral` — carbonate in solution | the water **leaves** or concentrates |
+| suspended | `sediment` — clay held up by turbulence | the water **slows** |
+
+Clay is not dissolved, it is entrained, and that single distinction determines
+everything about the module:
+
+- **It drops when the water slows, not when the water leaves.** Slack water holds
+  nothing at all (`SUSPEND_PER_SLACK_SAT` is 0); only moving water carries. This
+  is what puts mud where a river slows rather than where it dries.
+- **Pore space filters it out.** `sediment::carry_with_water` refuses a non-Air
+  destination, so fines strain out at a gravel bed instead of silting an aquifer.
+  Dissolved load has no such restriction, and should not.
+
+Modelling clay as dissolved load would have cemented mud in place instead of
+letting it settle — the opposite of a delta.
+
+**Only clay-grade material suspends.** Sand and gravel are too coarse and travel
+as bedload. Bentonite is excluded deliberately: an aquitard that washes away is
+not a seal. Restricting the species to one material is also what keeps
+`audit::sediment_total` exact — entrainment takes a cell and yields
+`SEDIMENT_PER_CELL`, settling spends `SEDIMENT_PER_CELL` and returns a cell.
+Atomic for the same reason cementation is: there is nowhere to bank a partial
+cell.
+
+### Cost, and the shape that got it down
+
+1.35 ms/tick on the demo world at its half-tick cadence, from 2.34 in the first
+version. Two changes did it, and both are worth preserving:
+
+- **Scan for the fines, not for the water.** An ocean world is overwhelmingly
+  water with nothing beneath it to lift, so iterating water cells does work
+  proportional to the sea rather than to the erodible bed. Chunks need both
+  `has_wet_air` and `has_loose`.
+- **Drive settling from the sparse load map**, not from a scan, so it costs what
+  is actually in transit.
+
+A clay-specific chunk flag would cut the remaining scan further.
+
+### Still open: abraded silicate
+
+Abrasion of silicate rock should produce suspension — that is the gap left by
+making dissolution carbonate-only. It is not wired up yet because the sediment
+ledger would first have to close over every silicate conversion
+(sand↔sandstone, stone↔looserock, gravel↔conglomerate). Adding the emission
+without that would turn an exact audit into a false one.
+
 ## Superseded notes on the original limitation
 
 A hand-dug well fills from the sides but shows **no upward pressure**, and that
