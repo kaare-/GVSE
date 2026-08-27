@@ -377,3 +377,8 @@ Do not re-walk these:
 - `tests/perf_profile.rs` — frame budget, including the active-cell count that
   gates any per-cell atmospheric work. Includes snow drift and clay
   suspension (those live outside `tick_with_perf` in the app).
+
+  Fresh-stamp demo (1024×320, 40 warm + 200 measure, 2026-08-27): wall
+  **32.9 ms/tick**. Physics is 27.7 of that. Top three: confined wake
+  7.7, seepage 7.4, rock bodies 6.3. Snow drift 0.001, suspension 0.09.
+  The older 3 ms/tick figure is an *aged quiet* world, not this soak.
