@@ -311,6 +311,46 @@ mod lens_tests {
     }
 
     #[test]
+    fn ridged_peaks_on_a_locus_not_at_the_extremes() {
+        // The property that turns blobs into veins: a ridged field is maximal
+        // where the underlying noise crosses its midpoint, and the level set of a
+        // continuous field is a *curve* — long, thin and connected. Ordinary noise
+        // peaks in patches, and a patch of permeable rock is a lens that water
+        // equalises through rather than a conduit it can deepen.
+        assert!((ridged(0.5) - 1.0).abs() < 1e-6, "crest at the midpoint");
+        assert!(ridged(0.0).abs() < 1e-6, "trough at the low extreme");
+        assert!(ridged(1.0).abs() < 1e-6, "trough at the high extreme");
+        // Symmetric about the crest.
+        assert!((ridged(0.3) - ridged(0.7)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_pore_field_has_narrow_high_veins_not_broad_lenses() {
+        // High-pore cells should be a small minority (crests, not regions) while
+        // still being present. A broad ridge would just be another lens.
+        let seed = 99u64;
+        let mut high = 0u32;
+        let mut total = 0u32;
+        for y in 10..70 {
+            for x in 0..400 {
+                if pore_coordinate(seed, x, y, 100) >= 200 {
+                    high += 1;
+                }
+                total += 1;
+            }
+        }
+        let frac = high as f32 / total as f32;
+        assert!(
+            frac > 0.001,
+            "veins must actually exist (high-pore fraction {frac})"
+        );
+        assert!(
+            frac < 0.30,
+            "veins must be narrow, not most of the rock (high-pore fraction {frac})"
+        );
+    }
+
+    #[test]
     fn pore_coordinate_is_coherent_and_not_material_noise() {
         let seed = 12345u64;
         let mut neighbour_delta = 0.0f32;
@@ -362,9 +402,27 @@ fn lens_noise(seed: u64, x: i32, y: i32, period_x: i32, period_y: i32, salt: u64
 /// independent from material-choice lenses so one limestone body can
 /// contain a permeable core and tighter margins. Depth adds mild
 /// compaction without erasing the coherent pattern.
+/// Fold a 0..1 field so its maximum lies along a **locus** rather than at its
+/// extremes: `1 - |2n - 1|`.
+///
+/// This is what turns blobs into veins. Ordinary noise peaks in patches, and a
+/// patch of permeable rock is a lens, not a conduit — water spreads through it
+/// and equalises. Ridged noise peaks where the underlying field crosses its
+/// midpoint, and a level set of a continuous field is a *curve*: long, thin and
+/// connected. That is the shape a channel needs before flow can find and deepen
+/// it.
+fn ridged(n: f32) -> f32 {
+    1.0 - (2.0 * n - 1.0).abs()
+}
+
 fn pore_coordinate(seed: u64, x: i32, y: i32, surface_y: i32) -> u8 {
     let broad = lens_noise(seed, x, y, 32, 14, 0xA0_2E_1001);
     let fine = lens_noise(seed, x, y, 11, 6, 0xA0_2E_1002);
+    // Veins: narrow, connected, and following their own contour rather than
+    // sitting in a blob. Anisotropic on purpose — stretched along x by sampling
+    // y at a shorter wavelength — because bedded rock fractures along its
+    // bedding, so a conduit should run with the strata rather than across them.
+    let vein = ridged(lens_noise(seed, x, y * 3, 24, 9, 0xA0_2E_1003)).powi(3);
     let depth = (surface_y - y).max(0) as f32;
     let compaction = (depth / 180.0).min(0.20);
     // Left coherent and roughly centred on purpose. The fracture weighting
@@ -372,7 +430,12 @@ fn pore_coordinate(seed: u64, x: i32, y: i32, surface_y: i32) -> u8 {
     // this domain as matrix and ramps only the upper half — so the *field*
     // stays a readable lens pattern (and porosity stays centred on it) while
     // permeability still ends up tight almost everywhere.
-    (((0.72 * broad + 0.28 * fine - compaction).clamp(0.0, 1.0) * 255.0).round()) as u8
+    // Veins *add* to the lens field rather than replacing it, so the readable
+    // lens pattern survives and conduits sit on top of it as the fast paths.
+    // Cubed above, so only the ridge crest reaches high pore and the flanks stay
+    // matrix — a wide soft ridge would be another lens.
+    let base = 0.72 * broad + 0.28 * fine - compaction;
+    (((base + 0.55 * vein).clamp(0.0, 1.0) * 255.0).round()) as u8
 }
 
 /// Stamp the full ring continental profile into `world`.
