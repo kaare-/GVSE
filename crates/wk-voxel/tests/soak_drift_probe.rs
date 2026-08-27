@@ -21,8 +21,8 @@ use wk_voxel::{
     PhysicsTimings, World, WorldgenParams,
 };
 
-const SEGMENT: u64 = 400;
-const SEGMENTS: usize = 12;
+const SEGMENT: u64 = 1000;
+const SEGMENTS: usize = 16;
 
 fn ms(d: Duration, n: u64) -> f32 {
     d.as_secs_f32() * 1000.0 / n.max(1) as f32
@@ -41,14 +41,21 @@ fn cost_versus_soak_age() {
 
     println!(
         "\n{:>7}  {:>9}  {:>9}  {:>9}  {:>9}  {:>10}  {:>9}",
-        "tick", "wall", "seepage", "bodies", "flow", "dissolved", "wet chunks"
+        "tick", "wall", "seepage", "bodies", "suspend", "susp map", "wet/chunks"
     );
     for _ in 0..SEGMENTS {
         competent_probe::reset();
         let mut phys = PhysicsTimings::default();
+        let mut susp = Duration::ZERO;
         let wall = Instant::now();
         for _ in 0..SEGMENT {
             tick_with_perf_profiled(&mut world, &perf, &mut phys);
+            // App-side passes the physics profile does not see. Suspension is a
+            // prime suspect: its chunk filter is `has_wet_air && has_loose`, and
+            // once the ground is uniformly wet that stops filtering anything.
+            let t = Instant::now();
+            wk_voxel::sediment::apply_suspension(&mut world);
+            susp += t.elapsed();
         }
         let wall = wall.elapsed();
         let wet = world
@@ -57,14 +64,15 @@ fn cost_versus_soak_age() {
             .filter(|c| c.has_wet_pores || c.has_wet_air)
             .count();
         println!(
-            "{:>7}  {:>7.3}ms  {:>7.3}ms  {:>7.3}ms  {:>7.3}ms  {:>10}  {:>9}",
+            "{:>7}  {:>7.3}ms  {:>7.3}ms  {:>7.3}ms  {:>7.3}ms  {:>8}  {:>7}/{:<4}",
             world.tick,
             ms(wall, SEGMENT),
             ms(phys.seepage, SEGMENT),
             ms(phys.bodies, SEGMENT),
-            ms(phys.water_flow, SEGMENT),
-            world.dissolved.len(),
+            ms(susp, SEGMENT),
+            world.suspended.len(),
             wet,
+            world.chunks.len(),
         );
     }
     // What is the body pass actually doing on an aged world? A settled world
