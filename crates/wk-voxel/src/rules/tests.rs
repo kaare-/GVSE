@@ -1023,16 +1023,19 @@ fn falling_snow_walks_a_downwind_stair() {
     // Interleave the production order: fall, then one drift, then advance
     // the tick. After enough steps the flake should be both lower and
     // downwind — a gentle diagonal, not a teleport.
+    //
+    // Default climate wind (0.05 tiles/tick × 4-cell tiles) is ~1 in 5,
+    // so eighty ticks lean the path without sprinting to the chunk edge.
     let mut w = setup_column_world();
     w.set_cell(2, 8, Cell::solid(MaterialId::Snow));
     let start_x = 2;
     let start_y = 8;
     for _ in 0..80 {
         apply_grain_fall(&mut w);
-        apply_snow_wind_drift(&mut w, 0.25, 4);
+        apply_snow_wind_drift(&mut w, 0.05, 4);
         w.tick += 1;
     }
-    let pos = (0..10)
+    let pos = (0..CHUNK_CELLS_W as i32)
         .flat_map(|x| (1..=start_y).map(move |y| (x, y)))
         .find(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Snow));
     let (x, y) = pos.expect("the flake should still exist");
