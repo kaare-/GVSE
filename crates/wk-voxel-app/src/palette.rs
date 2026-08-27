@@ -109,17 +109,15 @@ pub fn shows_pore_stipple(cell: Cell, hydro: &wk_material::HydroOverrides) -> bo
     ) {
         return false;
     }
-    // **Only** conglomerate, and on identity rather than any rate: *clasts in a
-    // matrix* is what the material is, and without the marks it reads as plain
-    // grey and is indistinguishable from stone.
+    // Nothing is stippled any more.
     //
-    // Permeability used to be stippled here and no longer is. Speckling sand said
-    // nothing — sand is visibly permeable already — and the marks competed with
-    // the thing that actually needed distinguishing: rock from rock. That job now
-    // belongs to [`permeability_tint`], which uses hue, leaving brightness free
-    // for water content.
-    let _ = hydro;
-    cell.material == MaterialId::Conglomerate
+    // Dots came to mean two different things — porosity on some materials and
+    // "this is conglomerate" on another — which broke the visual language. Both
+    // jobs moved to colour: permeability to a hue pull on stone, and conglomerate
+    // to its own red-leaning grey. Kept as a function because the render path asks
+    // the question, and a future overlay may want to answer it again.
+    let _ = (cell, hydro);
+    false
 }
 
 /// Hue pull toward ochre for conductive rock, quantized to keep runs mergeable.
@@ -135,11 +133,15 @@ pub fn shows_pore_stipple(cell: Cell, hydro: &wk_material::HydroOverrides) -> bo
 /// carbonate while leaving stone's 5..40 — the band the pore field actually
 /// varies — indistinguishable. The curve gives the tight end real resolution.
 fn permeability_tint(cell: Cell, hydro: &wk_material::HydroOverrides) -> f32 {
-    // **Stone only.** Stone is most of the map, so extra detail about it is worth
-    // spending a colour channel on. The other rocks arrive in narrow bands where
-    // their material colour already says enough, and tinting them too made the
-    // whole map warm and drowned out the one signal that mattered.
-    if cell.material != MaterialId::Stone {
+    // Stone and conglomerate. Stone is most of the map, so detail about it is worth
+    // a colour channel; conglomerate needs a signal of its own now that its
+    // speckle is gone, and varying it by pore says something true rather than just
+    // marking the material.
+    //
+    // The other rocks arrive in narrow bands where their material colour already
+    // says enough, and tinting them too made the whole map warm and drowned out
+    // the one signal that mattered.
+    if !matches!(cell.material, MaterialId::Stone | MaterialId::Conglomerate) {
         return 0.0;
     }
     // Normalised against stone's **own** permeability range, not the 0..255 byte.
@@ -155,9 +157,11 @@ fn permeability_tint(cell: Cell, hydro: &wk_material::HydroOverrides) -> f32 {
     step / (TINT_LEVELS - 1) as f32
 }
 
-/// Ochre: warm and desaturated, so it reads as a property of the rock rather than
-/// as a highlight, and stays distinguishable once the cell darkens with water.
-const PERMEABLE_ROCK_RGB: [u8; 3] = [0xD8, 0xC0, 0x60];
+/// Muted orange: warm enough to register, desaturated enough to read as a property
+/// of the rock rather than a highlight, and still distinguishable once the cell
+/// darkens with water. Pulled toward orange and away from chroma from an earlier
+/// ochre, which was louder than the signal warranted.
+const PERMEABLE_ROCK_RGB: [u8; 3] = [0xC0, 0x9A, 0x76];
 
 /// How far the ochre pull may go. Deliberately partial: this is a readable hint
 /// about the rock, not a heatmap replacing its material colour.
@@ -280,18 +284,13 @@ mod tests {
     }
 
     #[test]
-    fn only_conglomerate_is_stippled_now() {
-        // Speckling every permeable material said nothing — sand is visibly
-        // permeable already — and competed with the thing that needed
-        // distinguishing: rock from rock. Permeability moved to hue.
+    fn nothing_is_stippled_any_more() {
+        // Dots came to mean two different things — porosity on some materials and
+        // "this is conglomerate" on another — which broke the visual language.
+        // Both jobs moved to colour.
         let h = wk_material::HydroOverrides::default();
-        let mut congl = Cell::solid(MaterialId::Conglomerate);
-        congl.pore = 0;
-        assert!(
-            shows_pore_stipple(congl, &h),
-            "conglomerate is clasts in a matrix; that is what the marks say"
-        );
         for m in [
+            MaterialId::Conglomerate,
             MaterialId::Sand,
             MaterialId::Gravel,
             MaterialId::Limestone,
@@ -299,10 +298,7 @@ mod tests {
         ] {
             let mut c = Cell::solid(m);
             c.pore = u8::MAX;
-            assert!(
-                !shows_pore_stipple(c, &h),
-                "{m:?} should carry permeability in its tint, not in speckles"
-            );
+            assert!(!shows_pore_stipple(c, &h), "{m:?} should carry its story in colour");
         }
     }
 
@@ -326,7 +322,7 @@ mod tests {
     }
 
     #[test]
-    fn only_stone_carries_the_permeability_tint() {
+    fn narrow_band_rocks_carry_no_permeability_tint() {
         // Stone is most of the map, so detail there is worth a colour channel. The
         // other rocks arrive in narrow bands where their own colour says enough,
         // and tinting them made the whole map warm and drowned out the signal.
@@ -335,7 +331,6 @@ mod tests {
             MaterialId::Limestone,
             MaterialId::Flowstone,
             MaterialId::Sandstone,
-            MaterialId::Conglomerate,
         ] {
             let mut tight = Cell::solid(m);
             tight.pore = 0;
@@ -350,7 +345,7 @@ mod tests {
     }
 
     #[test]
-    fn stone_uses_the_whole_ochre_ramp() {
+    fn stone_spans_a_readable_permeability_range() {
         // Normalised against stone's own 5..40 range rather than the 0..255 byte:
         // a global scale would confine stone to the bottom sixth of the ramp and
         // waste the resolution exactly where it is wanted.
@@ -364,9 +359,12 @@ mod tests {
             rgb[0] as i32 - rgb[2] as i32
         };
         let spread = warm(open) - warm(tight);
+        // Deliberately modest: playtest asked for "not a large contrast, just
+        // enough to register", so this pins that the signal *exists* and is
+        // monotone, not that it shouts.
         assert!(
-            spread > 40,
-            "stone should span a wide ochre range, got {spread}"
+            spread > 25,
+            "stone should span a readable permeability range, got {spread}"
         );
     }
 

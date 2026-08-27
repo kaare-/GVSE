@@ -121,13 +121,12 @@ fn measure(label: &str, params: WorldgenParams) {
             let Some(cell) = world.get_cell(x, y) else {
                 continue;
             };
-            // Mirrors the app's `shows_pore_stipple`: conglomerate only, on
-            // identity. Permeability moved to a quantized hue tint, which merges
-            // into runs; speckling every permeable material cost 23k unmergeable
-            // draw calls to say something sand already says by being sand.
-            if cell.material == MaterialId::Conglomerate {
-                stipples += 1;
-            }
+            // Mirrors the app: **nothing** is stippled any more. Dots meant two
+            // different things (porosity, and "this is conglomerate"), which broke
+            // the visual language, so both moved to colour. Kept as a counter
+            // because unmergeable sub-cell marks are the expensive kind of
+            // drawing — permeability stippling alone cost 23k draw calls.
+            let _ = cell;
         }
     }
     println!("  pore stipple dots (unmergeable)    {stipples:>10}");

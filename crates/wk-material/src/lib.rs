@@ -869,13 +869,18 @@ impl MaterialRegistry {
             MaterialId::LooseLimestone => [0xB0, 0xA8, 0x96],
             // Mix of tan and grey (mixed-grain aggregate).
             MaterialId::Gravel => [0xB4, 0xA4, 0x80],
-            MaterialId::Sand => [0xE8, 0xD6, 0x6B],
+            // Less chroma than it had: a fully saturated yellow dominated every
+            // scene sand appeared in.
+            MaterialId::Sand => [0xDE, 0xD0, 0x92],
             // Ochre: Sand's hue gone darker and redder, so a cemented bed reads
             // as the same material set hard rather than as something new.
             MaterialId::Sandstone => [0xC2, 0x9A, 0x52],
             // Gravel's tan pulled toward LooseRock's grey — coarse clasts in a
             // pale matrix.
-            MaterialId::Conglomerate => [0x94, 0x88, 0x70],
+            // Grey pulled toward red. This *is* conglomerate's identity now: the
+            // speckle marked it but broke the visual language, since dots mean
+            // porosity everywhere else.
+            MaterialId::Conglomerate => [0x9C, 0x84, 0x7A],
             // Cool dusty tan — far from living Root sienna `#7A4B2A`
             // (was `#804000`, which read as the same brown underground).
             MaterialId::Clay => [0xB8, 0xA4, 0x90],
@@ -891,7 +896,10 @@ impl MaterialRegistry {
             MaterialId::Limestone => [0xC8, 0xC2, 0xB0],
             // Ivory with a faint blue cast — reads as wet mineral crust and
             // separates cleanly from Limestone's warm grey at a glance.
-            MaterialId::Flowstone => [0xEC, 0xEC, 0xDE],
+            // Mid-tone, deliberately *not* near-white. At 0xEC it read as a cave
+            // or cavity rather than a fill, because a light patch inside dark rock
+            // is the visual cue for an opening.
+            MaterialId::Flowstone => [0xCE, 0xC6, 0xB2],
             // Cool blue-green grey. Wants to be legible as a *band*, since
             // reading where the seal sits is the point of drawing it at all.
             MaterialId::Bentonite => [0x6E, 0x82, 0x7A],

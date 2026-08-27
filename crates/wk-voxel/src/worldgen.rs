@@ -307,7 +307,9 @@ fn body_material(
     // Flowstone lines fractures, so it follows the ridged vein locus rather than a
     // blob — the same field the pore veins use, thresholded near its crest.
     let vein = lens_noise(seed, x, y * 3, 24, 9, 0xA0_2E_1003);
-    if ridged(vein) > 0.94 {
+    // Rare. At 0.94 flowstone was everywhere, which both misrepresents it — it is
+    // a fracture lining, not a rock type — and, being pale, read as cavities.
+    if ridged(vein) > 0.988 {
         return MaterialId::Flowstone;
     }
     MaterialId::Stone
