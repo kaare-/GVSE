@@ -88,8 +88,21 @@ pub fn pore_bucket(cell: Cell) -> u8 {
 /// defaults to exactly 128.
 pub const PORE_STIPPLE_MIN: u8 = 176;
 
-/// True when this cell is open enough to be worth marking as porous.
-pub fn shows_pore_stipple(cell: Cell) -> bool {
+/// Permeability at or above which a cell is marked as a water path.
+///
+/// Absolute, unlike `pore`. Gravel sits at 160 and sand at 96, while even heavily
+/// fractured stone only reaches ~40 (matrix 5, fracture tail ~8x).
+pub const PATH_STIPPLE_MIN: u8 = 64;
+
+/// True when water can actually move through this cell fast enough to matter.
+///
+/// Keyed on **permeability**, not on raw `pore`. Those are different questions and
+/// stippling the wrong one was actively misleading: `pore` is *relative* to a
+/// material — "how fractured is this cell for the rock it is" — while water follows
+/// the absolute rate. A fractured stone vein (perm ~40) drew speckles while a
+/// plain gravel band (perm 160) drew none, so water appeared to avoid the marked
+/// rock and prefer the gaps. It was the overlay that had it backwards.
+pub fn shows_pore_stipple(cell: Cell, hydro: &wk_material::HydroOverrides) -> bool {
     if matches!(
         cell.material,
         MaterialId::Air | MaterialId::Water | MaterialId::Ice | MaterialId::Snow
@@ -103,7 +116,7 @@ pub fn shows_pore_stipple(cell: Cell) -> bool {
     if cell.material == MaterialId::Conglomerate {
         return true;
     }
-    cell.pore >= PORE_STIPPLE_MIN
+    wk_voxel::permeability_cell(cell, hydro) >= PATH_STIPPLE_MIN
 }
 
 pub fn cell_color(cell: Cell) -> [u8; 3] {
@@ -213,48 +226,62 @@ mod tests {
 
     #[test]
     fn conglomerate_reads_as_clasts_not_plain_grey() {
-        // Playtest: could not find conglomerate, because a cemented gravel with
-        // default pore drew as flat grey. Clasts in a matrix is what the material
-        // *is*, so it is stippled on identity rather than on porosity.
+        // Playtest could not find conglomerate: a cemented gravel drew as flat
+        // grey. Clasts in a matrix is what the material *is*, so it is marked on
+        // identity rather than on any rate.
+        let h = wk_material::HydroOverrides::default();
         let mut tight = Cell::solid(MaterialId::Conglomerate);
         tight.pore = 0;
         assert!(
-            shows_pore_stipple(tight),
+            shows_pore_stipple(tight, &h),
             "conglomerate should be speckled even when tightly cemented"
-        );
-        // Sandstone is fine-grained; it should not be speckled.
-        let mut sandstone = Cell::solid(MaterialId::Sandstone);
-        sandstone.pore = 0;
-        assert!(
-            !shows_pore_stipple(sandstone),
-            "sandstone grains are too fine to read as clasts"
         );
     }
 
     #[test]
-    fn only_open_cells_are_stippled() {
-        let mut dense = Cell::solid(MaterialId::Limestone);
-        dense.pore = 0;
-        let mut open = Cell::solid(MaterialId::Limestone);
-        open.pore = 230;
-        assert!(!shows_pore_stipple(dense), "dense rock stays clean");
-        assert!(shows_pore_stipple(open), "open rock is marked");
-        // A default-constructed cell sits exactly on the matrix boundary, so
-        // painted terrain and fresh precipitate must not read as porous.
+    fn the_stipple_marks_water_paths_not_relative_fracture() {
+        // `pore` is relative to a material; permeability is absolute. Stippling
+        // the former marked fractured stone (perm ~40) and left plain gravel
+        // (perm 160) clean, so water appeared to avoid the marked rock and prefer
+        // the gaps between it. Water was right; the overlay was backwards.
+        let h = wk_material::HydroOverrides::default();
+        let gravel = Cell::solid(MaterialId::Gravel);
+        let mut fractured_stone = Cell::solid(MaterialId::Stone);
+        fractured_stone.pore = u8::MAX;
         assert!(
-            !shows_pore_stipple(Cell::solid(MaterialId::Limestone)),
-            "pore=128 is matrix, not a fracture"
+            shows_pore_stipple(gravel, &h),
+            "a gravel band is a water path and must be marked"
         );
-        let mut matrix_ish = Cell::solid(MaterialId::Limestone);
-        matrix_ish.pore = 140;
         assert!(
-            !shows_pore_stipple(matrix_ish),
-            "just above matrix is not yet a conduit"
+            wk_voxel::permeability_cell(gravel, &h)
+                > wk_voxel::permeability_cell(fractured_stone, &h),
+            "plain gravel really is more conductive than fractured stone"
+        );
+    }
+
+    #[test]
+    fn only_water_paths_are_stippled() {
+        let h = wk_material::HydroOverrides::default();
+        // Tight silicate stone is not a path, however fractured: matrix 5, and the
+        // fracture tail only reaches ~40.
+        let mut fractured = Cell::solid(MaterialId::Stone);
+        fractured.pore = u8::MAX;
+        assert!(
+            !shows_pore_stipple(fractured, &h),
+            "fractured stone still does not conduct like a path"
+        );
+        // Limestone *is* permeable rock (matrix 140), so it is marked on its own
+        // merits rather than needing to be fractured first. That is the point of
+        // keying on permeability: the question is "can water move here", not "is
+        // this cell unusual for its material".
+        assert!(
+            shows_pore_stipple(Cell::solid(MaterialId::Limestone), &h),
+            "limestone conducts and should read as a path"
         );
         // Never mark non-porous media.
         let mut air = Cell::air();
         air.pore = 255;
-        assert!(!shows_pore_stipple(air));
+        assert!(!shows_pore_stipple(air, &h));
     }
 
     #[test]

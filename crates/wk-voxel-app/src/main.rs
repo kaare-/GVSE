@@ -1229,7 +1229,7 @@ async fn main() {
                                 b = lit[2];
                             }
                             if settings.pore_stipple > 0.0
-                                && crate::palette::shows_pore_stipple(cell)
+                                && crate::palette::shows_pore_stipple(cell, &scene.world.hydro)
                             {
                                 // Deterministic sub-cell position so a lens reads
                                 // as scattered grain, not a regular grid.
