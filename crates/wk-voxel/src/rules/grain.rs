@@ -791,6 +791,29 @@ pub fn settle_loose_grains_regions_ex(
 /// Grain fall restricted to a pre-planned active set.
 ///
 /// Returns how many Air↔grain swaps this pass performed.
+/// Odds a snowflake **stays put** on a given fall pass.
+///
+/// Grain fall takes one step per pass and runs several passes a tick, so an
+/// ungated flake covers the whole sky in a tick. Holding it most of the time
+/// spreads a single step across many passes: a gentle descent, and irregular
+/// enough to read as snow rather than as a falling block.
+///
+/// Deterministic per cell and pass, so replays match.
+fn snowflake_holds_position(seed: u64, tick: u64, gx: i32, gy: i32) -> bool {
+    let roll = super::hash_prob(
+        seed,
+        gx.wrapping_mul(73_856_093).wrapping_add(gy),
+        tick,
+        SNOWFALL_SALT,
+    );
+    roll >= SNOWFALL_STEP_ODDS
+}
+
+/// Chance a flake takes its step on any one pass. Low, because "gentle" is the
+/// whole point — a flake should be visible falling, not glimpsed.
+const SNOWFALL_STEP_ODDS: f32 = 0.10;
+const SNOWFALL_SALT: u64 = 0x5F04_FA11;
+
 pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u32 {
     apply_grain_fall_regions_ex(world, active, true)
 }
@@ -805,6 +828,8 @@ pub fn apply_grain_fall_regions_ex(
     // Parallel cell writes can't touch `World::mycelium_strains`; replay
     // share/lineage swaps after the pass so cream stays color-keyed.
     let share_swaps: Mutex<Vec<(i32, i32, i32, i32)>> = Mutex::new(Vec::new());
+    let seed = world.seed.0;
+    let tick_no = world.tick;
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
@@ -825,6 +850,22 @@ pub fn apply_grain_fall_regions_ex(
                 if is_grain(above.material) {
                     // Dense grains sink through any Air sat.
                 } else if falls_through_empty_air(above.material) {
+                    // A snowflake in open air descends *gently*.
+                    //
+                    // Grain fall moves a loose cell one step per pass and runs
+                    // several passes a tick, which is right for sand settling and
+                    // made snow appear in the sky and arrive on the ground in the
+                    // same breath. Rolling for it here spreads one step over many
+                    // passes, so a flake drifts down instead of dropping, and the
+                    // roll's irregularity is itself snow-like.
+                    //
+                    // Only while airborne: once it lands it is snowpack and behaves
+                    // as any other loose material, which is what lets drifts build.
+                    if above.material == MaterialId::Snow
+                        && snowflake_holds_position(seed, tick_no, gx, gy)
+                    {
+                        continue;
+                    }
                     // Snow / Ice / Organic: drop through empty Air, haze,
                     // and *suspended* full-sat blobs. Float only on
                     // grounded lake / puddle surfaces (unless waterlogged).

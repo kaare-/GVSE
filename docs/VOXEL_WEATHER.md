@@ -268,38 +268,36 @@ constants per half and ~89%.
 Convection proper — buoyancy from the ground-versus-air difference — is cheap on
 a tile field and is what would turn a steady rain rate into fronts.
 
-## Open regression: airborne snow teleports
+## Snow falls gently (**landed**), wind drift still open
 
-Introduced by the snow change itself — flakes now nucleate in the air
-(`phase::deposit_snow_in_air`) but nothing gives them a *fall behaviour*, so
-`apply_grain_fall_regions` picks them up as loose material and settles them to
-their resting place. Correct for sand; a snowflake should drift.
+Snow nucleates in the air (`phase::deposit_snow_in_air`) and now descends at a
+usable rate. The bug was that grain fall takes one step per pass and runs several
+passes a tick — right for sand settling, and it made flakes appear in the sky and
+arrive on the ground in the same breath.
 
-Playtest: "snow doesnt fall, it shows up as blocks in the sky and teleports to the
-ground, we want gentle fall affected by wind."
+Fixed by *odds* rather than a separate pass, which turned out much smaller than the
+plan above assumed: an airborne flake rolls to hold position most passes
+(`SNOWFALL_STEP_ODDS` 0.10), so one step is spread over many passes. The roll's
+irregularity is itself snow-like. Same technique as the fractional seepage rates,
+and it needs no new pass, so the hazard of "grain fall skips snow but the drift pass
+does not run" never arises.
 
-**Shape of the fix.** A snowfall pass distinct from grain settling, because the two
-want opposite things:
+Gated on **airborne** snow only. Once a flake lands it is snowpack and behaves as
+any other loose material, which is what lets drifts build and repose.
 
-- airborne snow descends **one cell per cadence**, not to rest
-- with a lateral offset from `Wind`, so flakes slant and drift
-- grain fall must *skip* airborne snow, or the two passes fight and grain wins
+Ice is deliberately not gated and serves as the test control: if both slow down,
+the gate is catching the wrong material.
 
-The state to distinguish is "airborne flake" from "snow pack": a `Snow` cell with
-air below is still falling; one resting on solid is pack and should behave as a
-normal grain from then on.
+**Still open: wind drift.** Flakes fall straight. Lateral movement is a real
+addition, because grain fall only ever pulls a cell *straight down* — there is no
+sideways step to bias. It wants either a dedicated drift pass or a lateral
+displacement in the fall step, and it needs `Wind`, which the physics tick does not
+currently receive.
 
-**Hazard.** If grain fall is taught to skip airborne snow and the drift pass does
-not run (it is opt-in from the app, like flow erosion), flakes hang in the sky
-forever. Either both land together or neither ships.
-
-**Cheap out if needed.** Reverting the `freezing` branch in
-`apply_condensation_rain_phased` to call `deposit_condensate_on_surface` restores
-surface frost and removes the visible bug in one line, at the cost of having no
-snowfall. Better than shipping flakes that teleport.
-
-Same class of gap as the pinned raindrop terminal velocity: nucleating something in
-the air is only half of making it fall.
+**Note on the tick.** The roll is hashed on `world.tick`, so any loop calling
+`apply_grain_fall` repeatedly without advancing the tick re-rolls the same answer
+forever. Production advances it; a test did not and now does. Same footgun as the
+fractional seepage gate.
 
 ## Open bug: weather reads a *static* surface map
 

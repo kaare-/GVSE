@@ -911,12 +911,53 @@ fn ice_falls_through_empty_air_but_floats_on_water() {
 }
 
 #[test]
+fn snow_falls_gently_and_ice_does_not() {
+    // The regression: snow nucleated in the air but had no fall behaviour, so grain
+    // fall settled it to rest immediately -- flakes appeared in the sky and arrived
+    // on the ground in the same breath. A flake should be visible falling.
+    //
+    // Ice is the control. Only snow is gated, so if both slow down the gate is
+    // catching the wrong material.
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    w.set_cell(3, 6, Cell::solid(MaterialId::Ice));
+    for _ in 0..12 {
+        apply_grain_fall(&mut w);
+        w.tick += 1;
+    }
+    assert_eq!(
+        w.get_cell(3, 1).unwrap().material,
+        MaterialId::Ice,
+        "ice should still settle promptly -- only snow is gated"
+    );
+    assert_ne!(
+        w.get_cell(2, 1).unwrap().material,
+        MaterialId::Snow,
+        "snow should still be on its way down after a dozen passes"
+    );
+    // ...and it is genuinely descending, not stuck.
+    let started_at = 6;
+    let snow_y = (1..=started_at)
+        .find(|&y| w.get_cell(2, y).map(|c| c.material) == Some(MaterialId::Snow));
+    let snow_y = snow_y.expect("the flake should still exist somewhere in the column");
+    assert!(
+        snow_y < started_at,
+        "the flake should have moved at all (still at {snow_y})"
+    );
+}
+
+#[test]
 fn hanging_snow_and_ice_settle_onto_bedrock() {
     let mut w = setup_column_world();
     w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
     w.set_cell(3, 6, Cell::solid(MaterialId::Ice));
-    for _ in 0..10 {
+    // Snow descends *gently* now — one step spread over many passes, so it needs
+    // both more passes and an advancing tick. The roll is hashed on the tick, so a
+    // loop that does not advance it re-rolls the same answer forever. Ice is
+    // unaffected and lands early.
+    for _ in 0..600 {
         apply_grain_fall(&mut w);
+        w.tick += 1;
     }
     assert_eq!(w.get_cell(2, 1).unwrap().material, MaterialId::Snow);
     assert_eq!(w.get_cell(3, 1).unwrap().material, MaterialId::Ice);
