@@ -1024,12 +1024,13 @@ fn falling_snow_walks_a_downwind_stair() {
     // the tick. After enough steps the flake should be both lower and
     // downwind — a gentle diagonal, not a teleport.
     //
-    // Default climate wind (0.05 × 4 × 0.25) is ~1 in 20. Two hundred
-    // ticks lean the path ~2:1 down:across without sprinting the chunk.
+    // Default climate wind (0.05 × 4 × 0.25) is ~1 in 20; fall is 0.15.
+    // Two hundred ticks from a high start lean the path ~3:1 without
+    // landing first or sprinting the chunk.
     let mut w = setup_column_world();
-    w.set_cell(2, 8, Cell::solid(MaterialId::Snow));
+    w.set_cell(2, 40, Cell::solid(MaterialId::Snow));
     let start_x = 2;
-    let start_y = 8;
+    let start_y = 40;
     for _ in 0..200 {
         apply_grain_fall(&mut w);
         apply_snow_wind_drift(&mut w, 0.05, 4);

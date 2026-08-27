@@ -195,10 +195,10 @@ pub fn apply_grain_fall(world: &mut World) {
 /// one cell downwind.
 ///
 /// `wind_vx` is tiles/tick (same units as [`crate::wind::Wind::climate_vx`]).
-/// `tile_cols` converts that to cells. Fall already fires on about 10% of
-/// ticks (`SNOWFALL_STEP_ODDS`); a 2-down-per-1-across path wants drift at
-/// half that, so the tile-scaled wind is multiplied by
-/// [`SNOWDRIFT_WIND_SCALE`] (default climate 0.05 × 4 × 0.25 = 0.05).
+/// `tile_cols` converts that to cells. Fall fires on about 15% of ticks
+/// (`SNOWFALL_STEP_ODDS`); default climate drift is 0.05, so the path is
+/// about **three down for each sideways**. The tile-scaled wind is
+/// multiplied by [`SNOWDRIFT_WIND_SCALE`] (0.05 × 4 × 0.25 = 0.05).
 ///
 /// Ice is the control: it falls, it does not drift. Landed snowpack is
 /// repose's problem, not the wind's.
@@ -301,10 +301,9 @@ fn snowflake_is_airborne(world: &World, gx: i32, gy: i32) -> bool {
 const SNOWDRIFT_SALT: u64 = 0x51DE_5417;
 /// How hard climate wind translates into a sideways step.
 ///
-/// Fall is gated at [`SNOWFALL_STEP_ODDS`] (~0.10 per tick). Playtest at
-/// the old `1.0` scale read as "blowing too well": flakes slid more than
-/// they dropped. `0.25` on 4-cell tiles makes default wind (~0.05) a 2:1
-/// down:across stair.
+/// Fall is gated at [`SNOWFALL_STEP_ODDS`] (0.15 per tick). Playtest at
+/// the old `1.0` scale read as "blowing too well"; `0.25` on 4-cell tiles
+/// plus this fall rate makes default wind (~0.05) a 3:1 down:across stair.
 const SNOWDRIFT_WIND_SCALE: f32 = 0.25;
 
 /// Drop unsupported grains / litter through Air until seated or the
@@ -930,8 +929,9 @@ fn snowflake_holds_position(seed: u64, tick: u64, gx: i32, gy: i32) -> bool {
 }
 
 /// Chance a flake takes its step on any one pass. Low, because "gentle" is the
-/// whole point — a flake should be visible falling, not glimpsed.
-const SNOWFALL_STEP_ODDS: f32 = 0.10;
+/// whole point — a flake should be visible falling, not glimpsed. 0.15 with
+/// default climate drift (0.05) is three down for each sideways.
+const SNOWFALL_STEP_ODDS: f32 = 0.15;
 const SNOWFALL_SALT: u64 = 0x5F04_FA11;
 
 pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u32 {

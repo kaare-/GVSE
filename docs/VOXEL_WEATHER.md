@@ -277,7 +277,7 @@ arrive on the ground in the same breath.
 
 Fixed by *odds* rather than a separate pass, which turned out much smaller than the
 plan above assumed: an airborne flake rolls to hold position most passes
-(`SNOWFALL_STEP_ODDS` 0.10), so one step is spread over many passes. The roll's
+(`SNOWFALL_STEP_ODDS` 0.15), so one step is spread over many passes. The roll's
 irregularity is itself snow-like. Same technique as the fractional seepage rates,
 and it needs no new pass, so the hazard of "grain fall skips snow but the drift pass
 does not run" never arises.
@@ -295,12 +295,12 @@ a flake cross the map in one tick. The drift pass:
 
 - runs **once** after physics (same place rafts already take the wind)
 - moves a flake **at most one cell** downwind
-- fires with odds `|wind_vx| * tile_cols * 0.25`, clamped to 1 (default 0.05 × 4 × 0.25 = 0.05 — about **two down for each sideways**)
+- fires with odds `|wind_vx| * tile_cols * 0.25`, clamped to 1 (default 0.05 × 4 × 0.25 = 0.05 — about **three down for each sideways** against fall 0.15)
 - ignores ice (control) and landed snowpack (repose owns piles)
 - refuses a solid or occupied destination
 - no-ops at zero wind, so every existing fall test stays honest
 
-A flake that falls and drifts therefore walks a stair: two down for each
+A flake that falls and drifts therefore walks a stair: three down for each
 sideways at default climate wind, never a teleport. The first playtest scale
 (`|wind| × tile_cols` with no 0.25) slid more than it dropped. Strong wind
 still caps at one cell across per tick.
