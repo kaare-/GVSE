@@ -268,6 +268,39 @@ constants per half and ~89%.
 Convection proper — buoyancy from the ground-versus-air difference — is cheap on
 a tile field and is what would turn a steady rain rate into fronts.
 
+## Open regression: airborne snow teleports
+
+Introduced by the snow change itself — flakes now nucleate in the air
+(`phase::deposit_snow_in_air`) but nothing gives them a *fall behaviour*, so
+`apply_grain_fall_regions` picks them up as loose material and settles them to
+their resting place. Correct for sand; a snowflake should drift.
+
+Playtest: "snow doesnt fall, it shows up as blocks in the sky and teleports to the
+ground, we want gentle fall affected by wind."
+
+**Shape of the fix.** A snowfall pass distinct from grain settling, because the two
+want opposite things:
+
+- airborne snow descends **one cell per cadence**, not to rest
+- with a lateral offset from `Wind`, so flakes slant and drift
+- grain fall must *skip* airborne snow, or the two passes fight and grain wins
+
+The state to distinguish is "airborne flake" from "snow pack": a `Snow` cell with
+air below is still falling; one resting on solid is pack and should behave as a
+normal grain from then on.
+
+**Hazard.** If grain fall is taught to skip airborne snow and the drift pass does
+not run (it is opt-in from the app, like flow erosion), flakes hang in the sky
+forever. Either both land together or neither ships.
+
+**Cheap out if needed.** Reverting the `freezing` branch in
+`apply_condensation_rain_phased` to call `deposit_condensate_on_surface` restores
+surface frost and removes the visible bug in one line, at the cost of having no
+snowfall. Better than shipping flakes that teleport.
+
+Same class of gap as the pinned raindrop terminal velocity: nucleating something in
+the air is only half of making it fall.
+
 ## Open bug: weather reads a *static* surface map
 
 `worldgen::continental_surface_y` recomputes the **original** procedural profile
