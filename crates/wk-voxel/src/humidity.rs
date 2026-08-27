@@ -452,6 +452,38 @@ const CONVECTION_MAX_GAIN: f32 = 2.0;
             return;
         }
         let snap = self.cells.clone();
+        // Mean temperature **per row**, computed once.
+        //
+        // Two mistakes to avoid here, both of which were made and measured. It has
+        // to be hoisted: calling `Temperature::mean()` inside the loop scans the
+        // whole field per tile and collapsed the frame rate. And it has to be
+        // per-row: against a *global* mean every high-altitude tile reads as cool,
+        // because temperature falls with altitude, so lift was suppressed aloft
+        // everywhere and vapour piled into a dense unmoving layer near the ground.
+        // The anomaly that means anything is horizontal — this column against other
+        // columns at the same height.
+        //
+        // Averaged across the **world's** tile row, not across the tiles that
+        // happen to hold vapour: keyed on occupancy, a lone cloud is its own mean
+        // and never convects at all, and the reference drifts with wherever the
+        // vapour currently is.
+        let row_mean: HashMap<i32, f32> = match (temp, self.bounds) {
+            (Some(t), Some(b)) => {
+                let rows: std::collections::HashSet<i32> = snap.keys().map(|&(_, hy)| hy).collect();
+                rows.into_iter()
+                    .map(|hy| {
+                        let mut sum = 0.0f32;
+                        let mut n = 0u32;
+                        for hx in b.hx_min..=b.hx_max {
+                            sum += t.at_tile(hx, hy);
+                            n += 1;
+                        }
+                        (hy, sum / n.max(1) as f32)
+                    })
+                    .collect()
+            }
+            _ => HashMap::new(),
+        };
         let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
         for (&(hx, hy), &mass) in &snap {
             if mass <= 0.0 || hy >= max_hy {
@@ -481,7 +513,9 @@ const CONVECTION_MAX_GAIN: f32 = 2.0;
                 // Warm land against cool sea, sunlit slope against shaded, and
                 // the diurnal swing all feed this for free, since they are
                 // already in the temperature field.
-                let anomaly = (here - t.mean()).clamp(-Self::CONVECTION_CLAMP_C, Self::CONVECTION_CLAMP_C);
+                let reference = row_mean.get(&hy).copied().unwrap_or(here);
+                let anomaly =
+                    (here - reference).clamp(-Self::CONVECTION_CLAMP_C, Self::CONVECTION_CLAMP_C);
                 let gain = (1.0 + anomaly * Self::CONVECTION_GAIN_PER_C)
                     .clamp(Self::CONVECTION_MIN_GAIN, Self::CONVECTION_MAX_GAIN);
                 (base * gain).clamp(0.0, 0.45)
