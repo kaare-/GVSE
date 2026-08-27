@@ -90,10 +90,20 @@ pub const PORE_STIPPLE_MIN: u8 = 176;
 
 /// True when this cell is open enough to be worth marking as porous.
 pub fn shows_pore_stipple(cell: Cell) -> bool {
-    !matches!(
+    if matches!(
         cell.material,
         MaterialId::Air | MaterialId::Water | MaterialId::Ice | MaterialId::Snow
-    ) && cell.pore >= PORE_STIPPLE_MIN
+    ) {
+        return false;
+    }
+    // Conglomerate is stippled regardless of pore, because *clasts in a matrix*
+    // is what the material is — coarse fragments cemented together. Without it
+    // the rock reads as plain grey and is indistinguishable from stone at a
+    // glance, which is the whole reason it was hard to find in a playtest.
+    if cell.material == MaterialId::Conglomerate {
+        return true;
+    }
+    cell.pore >= PORE_STIPPLE_MIN
 }
 
 pub fn cell_color(cell: Cell) -> [u8; 3] {
@@ -199,6 +209,26 @@ mod tests {
         // Two cells a single sat unit apart, mid-bucket.
         let s = cap / 2;
         assert_eq!(at(s), at(s + 1), "a one-unit difference must not split a run");
+    }
+
+    #[test]
+    fn conglomerate_reads_as_clasts_not_plain_grey() {
+        // Playtest: could not find conglomerate, because a cemented gravel with
+        // default pore drew as flat grey. Clasts in a matrix is what the material
+        // *is*, so it is stippled on identity rather than on porosity.
+        let mut tight = Cell::solid(MaterialId::Conglomerate);
+        tight.pore = 0;
+        assert!(
+            shows_pore_stipple(tight),
+            "conglomerate should be speckled even when tightly cemented"
+        );
+        // Sandstone is fine-grained; it should not be speckled.
+        let mut sandstone = Cell::solid(MaterialId::Sandstone);
+        sandstone.pore = 0;
+        assert!(
+            !shows_pore_stipple(sandstone),
+            "sandstone grains are too fine to read as clasts"
+        );
     }
 
     #[test]
