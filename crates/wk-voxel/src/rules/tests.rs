@@ -991,6 +991,24 @@ fn airborne_snow_drifts_downwind_and_ice_does_not() {
 }
 
 #[test]
+fn snow_drift_bootstraps_the_snow_flag_on_legacy_chunks() {
+    // Saves from before has_snow still have flakes, just no flag.
+    // The first pass must walk has_buoyant, stamp the flag, and still
+    // move the flake — otherwise a loaded winter world never drifts.
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    for chunk in w.chunks.values_mut() {
+        chunk.has_snow = false;
+    }
+    let moved = apply_snow_wind_drift(&mut w, 1.0, 4);
+    assert_eq!(moved, 1);
+    assert!(
+        w.chunks.values().any(|c| c.has_snow),
+        "the bootstrap pass must stamp has_snow so later ticks skip rafts"
+    );
+}
+
+#[test]
 fn landed_snow_does_not_drift() {
     let mut w = setup_column_world();
     w.set_cell(2, 1, Cell::solid(MaterialId::Snow));
@@ -1040,6 +1058,8 @@ fn falling_snow_walks_a_downwind_stair() {
         .flat_map(|x| (1..=start_y).map(move |y| (x, y)))
         .find(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Snow));
     let (x, y) = pos.expect("the flake should still exist");
+    let dy = start_y - y;
+    let dx = x - start_x;
     assert!(
         y < start_y,
         "the flake should have fallen (still at y={y})"
@@ -1049,9 +1069,15 @@ fn falling_snow_walks_a_downwind_stair() {
         "the flake should have drifted downwind (still at x={x})"
     );
     assert!(
-        x - start_x <= 80,
-        "one cell per tick is the cap; got Δx={}",
-        x - start_x
+        dx <= 80,
+        "one cell per tick is the cap; got Δx={dx}"
+    );
+    // The playtest number: more down than across. 0.15 / 0.05 is 3:1
+    // in expectation; hash noise is allowed to wander, but a path that
+    // slides more than it drops is the old "blows too well" bug.
+    assert!(
+        dy >= dx,
+        "fall should outrun drift (Δy={dy} Δx={dx})"
     );
 }
 

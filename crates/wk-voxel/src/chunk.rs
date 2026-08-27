@@ -129,6 +129,10 @@ pub struct Chunk {
     /// scans skip sand-only loose chunks.
     #[serde(default)]
     pub has_buoyant: bool,
+    /// Sticky occupancy: at least one `Snow` cell. Wind-drift skips
+    /// organic rafts and ice sheets that have never held a flake.
+    #[serde(default)]
+    pub has_snow: bool,
 }
 
 /// Materials that participate in grain settle / float / punch passes.
@@ -162,6 +166,7 @@ impl Chunk {
             has_loose: false,
             has_organic: false,
             has_buoyant: false,
+            has_snow: false,
         }
     }
 
@@ -224,6 +229,9 @@ impl Chunk {
             MaterialId::Organic | MaterialId::Snow | MaterialId::Ice
         ) {
             self.has_buoyant = true;
+        }
+        if cell.material == MaterialId::Snow {
+            self.has_snow = true;
         }
     }
 
@@ -292,12 +300,15 @@ mod tests {
         assert!(!c.has_wet_air);
         assert!(!c.has_limestone);
         assert!(!c.has_loose);
+        assert!(!c.has_snow);
         c.set(1, 1, Cell::water());
         assert!(c.has_wet_air);
         c.set(2, 2, Cell::solid(MaterialId::Limestone));
         assert!(c.has_limestone);
         c.set(3, 3, Cell::solid(MaterialId::Sand));
         assert!(c.has_loose);
+        c.set(4, 4, Cell::solid(MaterialId::Snow));
+        assert!(c.has_snow);
         // Dry air / stone do not clear sticky flags.
         c.set(1, 1, Cell::air());
         assert!(c.has_wet_air);

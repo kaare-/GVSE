@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
-use crate::cell::Cell;
+use crate::cell::{falls_through_empty_air, Cell};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
@@ -215,28 +215,70 @@ pub fn live_surface_y(world: &World, gx: i32, hint: i32, search: i32) -> i32 {
     if world.get_cell(jx, hint).is_none() {
         return hint;
     }
-    if solid_at(hint) {
+    let raw = if solid_at(hint) {
         // Ground has risen (deposition, landslide): climb to the top of the stack.
         let mut y = hint;
         for _ in 0..search {
             if !solid_at(y + 1) {
-                return y;
+                break;
             }
             y += 1;
         }
+        y
+    } else {
+        // Ground has fallen (erosion, dissolution): descend to the first solid.
+        let mut y = hint;
+        let mut found = None;
+        for _ in 0..search {
+            y -= 1;
+            if solid_at(y) {
+                found = Some(y);
+                break;
+            }
+        }
+        // Nothing found within the search window — keep the hint rather than inventing
+        // a surface far below, which would put weather underground.
+        found.unwrap_or(hint)
+    };
+    // Empty shafts and unloaded columns keep the hint. Peeling those
+    // would walk the search window of air and invent a surface.
+    if !solid_at(raw) {
+        return raw;
+    }
+    peel_airborne_loose(world, jx, raw, search)
+}
+
+/// Snow is a solid, so a walk that stops on the first solid treats a falling
+/// flake as the hill — the same needle the ridge plates used to draw. Seated
+/// pack stays: that *is* the surface weather should see.
+fn peel_airborne_loose(world: &World, gx: i32, start: i32, search: i32) -> i32 {
+    let mut y = start;
+    for _ in 0..search {
+        let Some(c) = world.get_cell(gx, y) else {
+            return y;
+        };
+        if c.material == MaterialId::Air || airborne_loose_at(world, gx, y, c) {
+            y -= 1;
+            continue;
+        }
         return y;
     }
-    // Ground has fallen (erosion, dissolution): descend to the first solid.
-    let mut y = hint;
-    for _ in 0..search {
-        y -= 1;
-        if solid_at(y) {
-            return y;
-        }
+    y
+}
+
+/// Loose pack (snow / ice / organic) with empty or haze air under it.
+///
+/// Full-sat air is a lake seat — floating ice and rafts stay a surface.
+/// Anything else under a flake is sky, so the flake is not the hill.
+pub fn airborne_loose_at(world: &World, gx: i32, y: i32, cell: Cell) -> bool {
+    if !falls_through_empty_air(cell.material) {
+        return false;
     }
-    // Nothing found within the search window — keep the hint rather than inventing
-    // a surface far below, which would put weather underground.
-    hint
+    match world.get_cell(gx, y - 1) {
+        Some(below) if below.material != MaterialId::Air => false,
+        Some(below) if below.sat.is_full() => false,
+        _ => true,
+    }
 }
 
 /// How far [`live_surface_y`] walks before giving up and trusting the hint.
@@ -526,6 +568,51 @@ mod lens_tests {
             w2.set_cell(5, y, Cell::air());
         }
         assert_eq!(live_surface_y(&w2, 5, 60, 8), 60);
+    }
+
+    #[test]
+    fn airborne_snow_is_not_the_live_surface() {
+        // Weather used the same "first solid" walk as the old ridge scan.
+        // A flake in the sky became the hill: orographic dump, cloud floor
+        // and frost all sat on needles that were gone a few ticks later.
+        // The tests that landed the helper never put snow in the column,
+        // so they could not catch it.
+        let p = WorldgenParams::default();
+        let mut w = World::new(p.seed);
+        let x = 8;
+        let hint = 20;
+        w.ensure_chunk(crate::chunk::ChunkCoord::new(0, 0));
+        w.set_cell(x, hint, Cell::solid(MaterialId::Stone));
+        w.set_cell(x, hint + 30, Cell::solid(MaterialId::Snow));
+        assert_eq!(
+            live_surface_y(&w, x, hint, LIVE_SURFACE_SEARCH),
+            hint,
+            "a flake above the stone is not the hill"
+        );
+        // Walking *down* from a high hint is the dangerous branch: the
+        // first solid is the flake.
+        assert_eq!(
+            live_surface_y(&w, x, hint + 40, LIVE_SURFACE_SEARCH),
+            hint,
+            "descending onto a flake must keep walking to the stone"
+        );
+    }
+
+    #[test]
+    fn seated_snowpack_is_the_live_surface() {
+        let p = WorldgenParams::default();
+        let mut w = World::new(p.seed);
+        let x = 8;
+        let hint = 20;
+        w.ensure_chunk(crate::chunk::ChunkCoord::new(0, 0));
+        w.set_cell(x, hint, Cell::solid(MaterialId::Stone));
+        w.set_cell(x, hint + 1, Cell::solid(MaterialId::Snow));
+        w.set_cell(x, hint + 2, Cell::solid(MaterialId::Snow));
+        assert_eq!(
+            live_surface_y(&w, x, hint, LIVE_SURFACE_SEARCH),
+            hint + 2,
+            "landed pack is the surface weather should see"
+        );
     }
 
     #[test]

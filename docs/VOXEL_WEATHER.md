@@ -316,7 +316,10 @@ fractional seepage gate. The drift roll uses the same clock.
 profile — worldgen needs that. Every weather consumer that asks where the ground
 *is* now goes through `live_surface_at`: same value as a hint, then a short walk
 of the live column (`LIVE_SURFACE_SEARCH` = 64). Unloaded columns keep the hint,
-so tests and HUD that have no grid yet degrade to today's behaviour.
+so tests and HUD that have no grid yet degrade to today's behaviour. A falling
+flake is a solid, so the walk used to stop on it — orographic dump, cloud floor
+and frost sat on needles. Airborne snow / ice / organic is now peeled; seated
+pack stays, because that *is* the surface.
 
 All five consumers flipped together. Partial would have been worse than stale:
 orographic rain on the live hill and wind lift on the seed hill would put rain
@@ -372,4 +375,5 @@ Do not re-walk these:
   delivered* from *parcels flagged raining*, reports cloud coverage against
   eligible tiles, day/night rain fraction, and the dead ends above.
 - `tests/perf_profile.rs` — frame budget, including the active-cell count that
-  gates any per-cell atmospheric work.
+  gates any per-cell atmospheric work. Includes snow drift and clay
+  suspension (those live outside `tick_with_perf` in the app).

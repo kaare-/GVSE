@@ -17,7 +17,7 @@ use crate::humidity::Humidity;
 use crate::phase::PhaseConfig;
 use crate::temperature::Temperature;
 use crate::wind::Wind;
-use crate::worldgen::{continental_surface_y, live_surface_at};
+use crate::worldgen::{airborne_loose_at, live_surface_at};
 
 /// Soft cap so cartoon skies stay readable (default for [`CloudConfig`]).
 pub const MAX_CLOUD_PARCELS: usize = 36;
@@ -564,7 +564,10 @@ fn surface_y(world: &World, wind: &Wind, fx: f32) -> f32 {
 /// editor stacks continue the walk while the column stays occupied.
 const CLOUD_FLOOR_SCAN_ABOVE: i32 = 64;
 
-fn occupies_cloud_floor(c: crate::cell::Cell) -> bool {
+fn occupies_cloud_floor(world: &World, gx: i32, y: i32, c: crate::cell::Cell) -> bool {
+    if airborne_loose_at(world, gx, y, c) {
+        return false;
+    }
     if c.material != MaterialId::Air {
         return true;
     }
@@ -634,14 +637,14 @@ pub fn cloud_floor_y(world: &World, wind: &Wind, fx: f32) -> f32 {
     let mut y_hi = (rock_i + CLOUD_FLOOR_SCAN_ABOVE).clamp(rock_i, sky);
     while y_hi < sky {
         match world.get_cell(gx, y_hi + 1) {
-            Some(c) if occupies_cloud_floor(c) => y_hi += 1,
+            Some(c) if occupies_cloud_floor(world, gx, y_hi + 1, c) => y_hi += 1,
             _ => break,
         }
     }
     let y_lo = rock_i - 12;
     for y in (y_lo..=y_hi).rev() {
         match world.get_cell(gx, y) {
-            Some(c) if occupies_cloud_floor(c) => {
+            Some(c) if occupies_cloud_floor(world, gx, y, c) => {
                 return (y as f32).max(rock);
             }
             _ => {}
@@ -664,7 +667,7 @@ mod tests {
     use super::*;
     use crate::cell::Cell;
     use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
-    use crate::worldgen::WorldgenParams;
+    use crate::worldgen::{continental_surface_y, WorldgenParams};
     use wk_material::MaterialId;
 
     fn wind_for(p: &WorldgenParams) -> Wind {
@@ -856,6 +859,31 @@ mod tests {
         assert!(
             floor >= ice_top as f32,
             "cloud floor {floor} must clear ice lid at {ice_top} (rock was {rock})"
+        );
+    }
+
+    #[test]
+    fn airborne_snow_does_not_raise_the_cloud_floor() {
+        // occupies_cloud_floor treated every non-Air as a floor, so a
+        // flake pulled the deck up to itself. Seated ice above still
+        // counts (see ice_lid_raises_cloud_floor_above_rock).
+        let p = WorldgenParams::default();
+        let wind = wind_for(&p);
+        let mut world = World::new(p.seed);
+        let gx = 20i32;
+        let rock = continental_surface_y(p.seed, gx, p.sea_level_y, p.width_cols);
+        for y in [rock, rock + 24] {
+            world.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(CHUNK_CELLS_W as i32),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        world.set_cell(gx, rock, Cell::solid(MaterialId::Stone));
+        world.set_cell(gx, rock + 24, Cell::solid(MaterialId::Snow));
+        let floor = cloud_floor_y(&world, &wind, gx as f32);
+        assert!(
+            (floor - rock as f32).abs() < 2.0,
+            "cloud floor {floor} must stay on the stone ({rock}), not the flake"
         );
     }
 

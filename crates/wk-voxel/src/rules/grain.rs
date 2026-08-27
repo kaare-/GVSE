@@ -212,10 +212,14 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
     let tick_no = world.tick;
 
     let mut candidates: Vec<(i32, i32)> = Vec::new();
+    // Prefer the snow flag so organic rafts and ice sheets are not
+    // scanned for flakes they never held. Legacy saves stamp the flag
+    // on the first pass that still has to walk `has_buoyant`.
+    let any_snow = world.chunks.values().any(|c| c.has_snow);
     let coords = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_buoyant)
+        .filter(|(_, c)| if any_snow { c.has_snow } else { c.has_buoyant })
         .map(|(&coord, _)| coord)
         .collect::<Vec<_>>();
     for coord in coords {
@@ -224,17 +228,36 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
+        let mut saw_snow = false;
         for ly in 0..CHUNK_CELLS_H {
             for lx in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(lx, ly);
                 if cell.material != MaterialId::Snow {
                     continue;
                 }
+                saw_snow = true;
                 let gx = x0 + lx as i32;
                 let gy = y0 + ly as i32;
+                // Same-chunk neighbour: skip the HashMap lookup for the
+                // common cases (landed pack, empty air under a flake).
+                if ly > 0 {
+                    let below = chunk.get(lx, ly - 1);
+                    if below.material != MaterialId::Air {
+                        continue;
+                    }
+                    if !below.sat.is_full() {
+                        candidates.push((gx, gy));
+                        continue;
+                    }
+                }
                 if snowflake_is_airborne(world, gx, gy) {
                     candidates.push((gx, gy));
                 }
+            }
+        }
+        if saw_snow && !any_snow {
+            if let Some(chunk) = world.chunks.get_mut(&coord) {
+                chunk.has_snow = true;
             }
         }
     }
@@ -294,6 +317,10 @@ fn snowflake_is_airborne(world: &World, gx: i32, gy: i32) -> bool {
     };
     if below.material != MaterialId::Air {
         return false;
+    }
+    // Empty / haze air is not a lake seat — skip the 512-cell grounding walk.
+    if !below.sat.is_full() {
+        return true;
     }
     !floats_on_air_seat_world(world, below, gx, gy - 1)
 }

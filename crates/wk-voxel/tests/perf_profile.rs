@@ -7,16 +7,21 @@
 //! ```
 //!
 //! Matches `wk-voxel-app` frame order (rain → evap → humidity advect →
-//! clouds → condensation → karst → physics tick → erosion → humidity /
-//! temp cadence → phase → organisms). Physics sub-pass times come from
-//! the real [`tick_with_perf_profiled`] path (not a post-hoc mirror).
-//! Also prints a rayon on/off A/B on the demo world.
+//! clouds → condensation → karst → physics tick → snow drift →
+//! suspension → erosion → humidity / temp cadence → phase → organisms).
+//! Physics sub-pass times come from the real [`tick_with_perf_profiled`]
+//! path (not a post-hoc mirror). Also prints a rayon on/off A/B on the
+//! demo world.
+//!
+//! Snow drift and clay suspension live *outside* `tick_with_perf` in the
+//! app. A profile that skipped them was not measuring the frame.
 
 use std::time::{Duration, Instant};
 
 use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
+    apply_snow_wind_drift,
     find_plant_slot, humidity_diffuse_due, set_parallel_enabled, stamp_world,
     temperature_step_due, tick_with_perf, tick_with_perf_profiled, Blueprint, ClimateConfig,
     CloudConfig, CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity,
@@ -42,6 +47,8 @@ struct PassAccum {
     condensation: Duration,
     karst: Duration,
     physics_tick: Duration,
+    snow_drift: Duration,
+    suspension: Duration,
     erosion: Duration,
     humidity_diffuse: Duration,
     humidity_diffuse_calls: u64,
@@ -62,6 +69,8 @@ impl PassAccum {
             condensation: Duration::ZERO,
             karst: Duration::ZERO,
             physics_tick: Duration::ZERO,
+            snow_drift: Duration::ZERO,
+            suspension: Duration::ZERO,
             erosion: Duration::ZERO,
             humidity_diffuse: Duration::ZERO,
             humidity_diffuse_calls: 0,
@@ -81,6 +90,8 @@ impl PassAccum {
             + self.condensation
             + self.karst
             + self.physics_tick
+            + self.snow_drift
+            + self.suspension
             + self.erosion
             + self.humidity_diffuse
             + self.temperature
@@ -302,7 +313,9 @@ fn one_stack_tick(
                 None => tick_with_perf(&mut scene.world, &scene.perf),
             }
             set_parallel_enabled(true);
+            apply_snow_wind_drift(&mut scene.world, CLIMATE_WIND_VX, HUMIDITY_TILE_COLS);
             apply_flow_erosion(&mut scene.world, &scene.grain);
+            wk_voxel::sediment::apply_suspension(&mut scene.world);
             if humidity_diffuse_due(scene.world.tick) {
                 scene.humidity.diffuse(HUMIDITY_DIFFUSION_ALPHA);
             }
@@ -396,8 +409,16 @@ fn one_stack_tick(
 
             set_parallel_enabled(true);
             let t0 = Instant::now();
+            apply_snow_wind_drift(&mut scene.world, CLIMATE_WIND_VX, HUMIDITY_TILE_COLS);
+            a.snow_drift += t0.elapsed();
+
+            let t0 = Instant::now();
             apply_flow_erosion(&mut scene.world, &scene.grain);
             a.erosion += t0.elapsed();
+
+            let t0 = Instant::now();
+            wk_voxel::sediment::apply_suspension(&mut scene.world);
+            a.suspension += t0.elapsed();
 
             if humidity_diffuse_due(scene.world.tick) {
                 let t0 = Instant::now();
@@ -473,8 +494,16 @@ fn print_pass_table(accum: &PassAccum, n: u64, wall: Duration) {
         ms_per(accum.physics_tick, n)
     );
     eprintln!(
+        "  snow drift           {:>8.3} ms/tick",
+        ms_per(accum.snow_drift, n)
+    );
+    eprintln!(
         "  flow erosion         {:>8.3} ms/tick",
         ms_per(accum.erosion, n)
+    );
+    eprintln!(
+        "  suspension           {:>8.3} ms/tick",
+        ms_per(accum.suspension, n)
     );
     eprintln!(
         "  humidity.diffuse     {:>8.3} ms/tick amortized  ({:.3} ms/call × {} calls)",
