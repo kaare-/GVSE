@@ -235,16 +235,23 @@ pub fn apply_condensation_rain_phased(
             (Some(t), Some(ph)) => t <= ph.freeze_point_c,
             _ => false,
         };
-        // Rime forms *on* surfaces, not in mid-air, so frost keeps the old path.
         let mut landed = if freezing {
-            crate::phase::deposit_condensate_on_surface(
-                world,
-                centre_gx,
-                cfg.top_y,
-                take_mass,
-                temp,
-                phase,
-            )
+            // Snowfall: nucleate in the air like rain, so it falls. Frost is the
+            // fallback — rime genuinely forms *on* surfaces, and a budget under a
+            // whole cell cannot pay for a snowflake.
+            let snowed = crate::phase::deposit_snow_in_air(world, centre_gx, centre_gy, take_mass);
+            if snowed > 0.0 {
+                snowed
+            } else {
+                crate::phase::deposit_condensate_on_surface(
+                    world,
+                    centre_gx,
+                    cfg.top_y,
+                    take_mass,
+                    temp,
+                    phase,
+                )
+            }
         } else {
             super::deposit_water_in_air(world, centre_gx, centre_gy, take_mass)
         };
@@ -335,6 +342,7 @@ fn thermal_rain_factors(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wk_material::MaterialId;
 
     /// A rain budget smaller than one cell is *refused* by
     /// `phase::deposit_condensate_on_surface`, and a refused deposit drains no
@@ -344,6 +352,68 @@ mod tests {
     /// Measured on the demo world: 40.0 held equilibrium humidity at 666k where
     /// 255.0 settles at 387k, and the bigger droplet is marginally *cheaper*
     /// because fewer events are wasted.
+    /// Cold condensation must make snow that *falls*, not rime on the ground.
+    ///
+    /// Snow is the frozen counterpart of the phase-1 change that stopped rain
+    /// teleporting to the surface. Before this, cold precipitation only had the
+    /// frost path, so nothing ever descended through the air.
+    #[test]
+    fn cold_precipitation_nucleates_snow_in_the_air() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        // A whole cell's worth of budget, into empty air.
+        let paid = crate::phase::deposit_snow_in_air(&mut w, 4, 20, u8::MAX as f32);
+        assert_eq!(paid, u8::MAX as f32, "a full cell of budget buys one flake");
+        assert_eq!(
+            w.get_cell(4, 20).unwrap().material,
+            MaterialId::Snow,
+            "snow should appear in the air, not on the ground"
+        );
+    }
+
+    #[test]
+    fn a_partial_budget_buys_no_snowflake() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // A frozen cell's water is its *material*, not its sat, so a flake costs a
+        // whole cell. Part-paying would drift the ledger.
+        let paid = crate::phase::deposit_snow_in_air(&mut w, 4, 20, 200.0);
+        assert_eq!(paid, 0.0, "under a whole cell must be refused, not part-paid");
+        assert_ne!(w.get_cell(4, 20).unwrap().material, MaterialId::Snow);
+        let _ = Cell::air();
+    }
+
+    #[test]
+    fn snow_does_not_seed_into_wet_air() {
+        use crate::cell::{Cell, Sat};
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+
+        let mut w = World::new(6);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::air();
+        wet.sat = Sat(200);
+        w.set_cell(4, 20, wet);
+        let paid = crate::phase::deposit_snow_in_air(&mut w, 4, 20, u8::MAX as f32);
+        assert_eq!(
+            paid, 0.0,
+            "seeding into wet air would strand that water inside a cell that does \
+             not carry sat"
+        );
+        assert_eq!(w.get_cell(4, 20).unwrap().sat.0, 200, "its water is untouched");
+    }
+
     #[test]
     fn shipped_configs_use_whole_cell_droplets() {
         let full = u8::MAX as f32;

@@ -535,6 +535,35 @@ fn deposit_snow_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f
 }
 
 /// Place one Ice cell as a surface glaze (condensation frost / rime).
+/// Nucleate a snowflake **in the air**, so it falls instead of appearing on the
+/// ground.
+///
+/// The counterpart to `rain::deposit_water_in_air`. Cold condensation previously
+/// only had the surface frost path, so snow never fell — it materialised as rime
+/// on whatever was underneath, which is right for frost and wrong for snowfall.
+/// `Snow` already falls through empty air and floats on water, so gravity takes it
+/// from here.
+///
+/// Pays a **whole cell**, matching the frost convention: a frozen cell's water is
+/// its material rather than its `sat`, so 255 of humidity buys exactly one cell.
+/// Anything less is refused rather than part-paid, or the ledger drifts.
+pub fn deposit_snow_in_air(world: &mut World, gx: i32, y: i32, budget: f32) -> f32 {
+    if budget < u8::MAX as f32 {
+        return 0.0;
+    }
+    let jx = world.wrap_x(gx);
+    let Some(cell) = world.get_cell(jx, y) else {
+        return 0.0;
+    };
+    // Empty air only: seeding into a wet cell would strand its water inside a
+    // frozen cell that does not carry sat.
+    if cell.material != MaterialId::Air || !cell.sat.is_empty() {
+        return 0.0;
+    }
+    world.set_cell(jx, y, snow_cell());
+    u8::MAX as f32
+}
+
 fn deposit_ice_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f32> {
     deposit_frozen_lid_on_surface(world, gx, start_y, ice_cell())
 }
