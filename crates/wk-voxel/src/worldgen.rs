@@ -342,6 +342,55 @@ mod lens_tests {
     }
 
     #[test]
+    fn a_groundwater_table_is_stamped_at_sea_level() {
+        // Soaking a dry world to a full table took a whole night to reach a state
+        // we already know the answer to: below the table, everything is saturated
+        // to capacity — that is what a water table *is*. The interesting behaviour
+        // is the vadose zone above it, so the soak should start there.
+        let p = WorldgenParams::default();
+        let mut w = World::new(p.seed);
+        stamp_world(&mut w, &p);
+
+        let mut below_full = 0u32;
+        let mut below_total = 0u32;
+        let mut above_wet = 0u32;
+        let mut above_total = 0u32;
+        for x in (0..p.width_cols).step_by(17) {
+            for y in (p.bedrock_floor_y + 4)..(p.sea_level_y + 30) {
+                let Some(c) = w.get_cell(x, y) else { continue };
+                if !c.material.is_solid() {
+                    continue;
+                }
+                let cap = crate::cell::water_capacity_cell(c, &w.hydro);
+                if cap == 0 {
+                    continue;
+                }
+                if y <= p.sea_level_y {
+                    below_total += 1;
+                    if c.sat.0 >= cap {
+                        below_full += 1;
+                    }
+                } else {
+                    above_total += 1;
+                    if c.sat.0 > 0 {
+                        above_wet += 1;
+                    }
+                }
+            }
+        }
+        assert!(below_total > 100 && above_total > 100, "fixture should span the table");
+        assert_eq!(
+            below_full, below_total,
+            "every porous cell below the table must start at capacity"
+        );
+        assert_eq!(
+            above_wet, 0,
+            "the vadose zone above the table must start dry — that is the part the \
+             soak is for"
+        );
+    }
+
+    #[test]
     fn rock_carries_scattered_clasts_and_the_new_rock_types() {
         // Playtest missed "the cake sprinkle of sand, loose rock and gravel
         // throughout the rock formations", and asked for conglomerate and flowstone
@@ -555,6 +604,25 @@ pub fn stamp_world(world: &mut World, p: &WorldgenParams) {
             };
             if cell.material.is_solid() {
                 cell.pore = pore_coordinate(p.seed, x, y, surface_y);
+                // Start with a groundwater table already in place.
+                //
+                // Below the table everything is saturated to capacity — that is
+                // what a water table *is* — and soaking there from dry took a
+                // whole night of simulation to reach a state we know the answer
+                // to. The interesting behaviour is the vadose zone *above* it:
+                // drainage capacity growing as apertures open, and conduits
+                // forming over long stretches of time. Starting dry spent the
+                // soak on the boring half.
+                //
+                // The table sits at sea level, which is where it belongs on a
+                // coastal world: hydrostatically continuous with the ocean, so it
+                // is a boundary condition rather than an arbitrary fill.
+                if y <= p.sea_level_y {
+                    cell.sat = crate::cell::Sat(crate::cell::water_capacity_cell(
+                        cell,
+                        &world.hydro,
+                    ));
+                }
             }
             world.set_cell(x, y, cell);
         }
