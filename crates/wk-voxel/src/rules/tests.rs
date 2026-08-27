@@ -601,9 +601,11 @@ fn seepage_wets_adjacent_sand_from_air_water() {
         before,
         "mass conserved"
     );
-    // Rate-limited: one tick can't dump the whole lake into sand.
+    // Rate-limited: one tick can't dump the whole lake into sand. The +1 is the
+    // per-fire round-up — the amount moved when an edge fires is the true rate
+    // rounded up, with the fraction taken back by firing less often.
     let rate = seepage_rate_with(MaterialId::Sand, &HydroOverrides::default());
-    assert!(sand.sat.0 as i32 <= rate);
+    assert!(sand.sat.0 as i32 <= rate + 1);
 }
 
 #[test]
@@ -7807,8 +7809,12 @@ fn wetting_front_advances_past_quarter_capacity() {
         },
     );
     w.set_cell(4, 3, Cell::solid(MaterialId::Bedrock));
+    // Tight rock fires with odds now, so the tick has to advance: the gate is
+    // hashed on it, and repeating a call at a fixed tick re-rolls the same
+    // answer forever.
     for _ in 0..12 {
         apply_seepage(&mut w);
+        w.tick += 1;
     }
     let below = w.get_cell(4, 1).unwrap().sat.0;
     assert!(

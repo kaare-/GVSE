@@ -14,7 +14,7 @@ use crate::parallel::map_regions_parallel;
 
 use super::head::{
     is_porous_cell, sat_move_to_equalize_heads, seepage_conduct_rate_cells, seepage_rate_cell,
-    seepage_stride_cell, seepage_uptake_rate_cell,
+    seepage_fire_odds_cell, seepage_uptake_rate_cell,
 };
 use super::plan::{regions_for_standalone, regions_wet_loaded};
 
@@ -589,6 +589,8 @@ fn accumulate_seepage_xfers_ex(
     // 181/256 ≈ 1/√2. Without it diagonal conduction reads as *faster* than
     // straight, which is worse than having no diagonals at all.
     const DIAGONAL_NUM: i32 = 181;
+    // Decorrelates the fractional-rate gate from other hashed decisions.
+    const SEEPAGE_FIRE_SALT: u64 = 0x5EE9_0DD5;
     const DIAGONAL_DEN: i32 = 256;
     let hydro = world.hydro;
     let cw = CHUNK_CELLS_W as i32;
@@ -660,14 +662,25 @@ fn accumulate_seepage_xfers_ex(
                     {
                         continue;
                     }
-                    // Sub-unit conduction for material too tight for the rate
-                    // to express — see `seepage_stride_cell`.
+                    // Fractional conduction: an edge fires with odds that make its
+                    // *average* rate exactly proportional to permeability. Integer
+                    // rates alone crushed stone's whole 5..40 range into 1..2, so
+                    // pore variation never reached the water — three stone cells at
+                    // permeability 5, 10 and 23 all held 5-6 sat in playtest.
                     if a_solid && b_solid {
-                        let stride = seepage_stride_cell(a, &hydro)
-                            .max(seepage_stride_cell(b, &hydro));
-                        if stride > 1 {
-                            let phase = gx.wrapping_mul(7).wrapping_add(gy.wrapping_mul(13)) as u32;
-                            if (world.tick as u32).wrapping_add(phase) % stride != 0 {
+                        let odds = seepage_fire_odds_cell(a, &hydro)
+                            .min(seepage_fire_odds_cell(b, &hydro));
+                        if odds <= 0.0 {
+                            continue;
+                        }
+                        if odds < 1.0 {
+                            let roll = crate::rules::hash_prob(
+                                world.seed.0,
+                                gx.wrapping_mul(73_856_093).wrapping_add(gy),
+                                world.tick,
+                                SEEPAGE_FIRE_SALT,
+                            );
+                            if roll >= odds {
                                 continue;
                             }
                         }
