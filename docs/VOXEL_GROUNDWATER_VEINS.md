@@ -318,6 +318,33 @@ Two behaviours worth knowing, both correct:
 Regression: `a_well_bottomed_in_a_confined_aquifer_rises`. Confined-pass cost is
 unchanged (~0.3–0.7 ms/tick).
 
+## Why rate fixes could never produce structure (**the root cause**)
+
+Everything aimed at the underground — pore variation, the fracture tail, ridged
+veins, competitive allocation, fractional rates — changed how *fast* a cell
+reached its endpoint. **The endpoint was uniform**, so given a night it all got
+there. Playtest, after all of it: "seepage doesnt seem to find our more permeable
+layer much interesting and it seems more like decoration at this point."
+
+The endpoint is retention, and it was inverted. `retained = capacity *
+field_capacity / 255`, and capacity *grows* with pore — so opening a cell bought
+capacity and retention in equal measure, and a fractured cell held **more**
+absolute water than a tight one. Conduits stored water instead of transmitting it,
+which is backwards: low storage and high flux is what a conduit *is*.
+
+Retention fraction now falls as pore opens (60% shed at fully open), so a vein
+drains nearly dry between flows while the matrix beside it perches. **Competent
+rock only** — shedding from fine sediment took open clay from 74% retention to
+29%, which is not a seal.
+
+Expect the visual to invert: veins read as the *dry* paths through wet rock, not
+wet paths through dry rock. Combined with the ochre permeability tint on stone, a
+conduit shows as ochre-and-dry inside grey-and-wet.
+
+**General lesson.** A diffusive process with a fixed uniform endpoint erases any
+structure its rates create, given time. If a soak keeps flattening, look at the
+equilibrium before tuning the rate.
+
 ## Two erosion chains, kept separate (**landed**)
 
 The material list was being asked to carry two independent processes at once,

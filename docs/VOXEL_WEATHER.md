@@ -173,6 +173,52 @@ returns. Banding by world x (`pick_spread_across_x`) is what made it stable;
 without that, top-N selection by mass moves discontinuously. Keep a test that
 advecting the field moves the deck smoothly.
 
+## It works (**playtest, full diurnal cycle**)
+
+Observed over one day once convection landed, unscripted:
+
+- humidity 200k before sunrise, **sunrise rain** off the overnight high band
+- dry morning as humidity climbs
+- after midday, clouds appear **first on the lee side of the hill**, then a second
+  formation over the lake/land boundary
+- afternoon **local** rain event on the lee side
+- evening rain as humidity passes 440k, continuing into the night as it cools
+- rain stops when air just above sea level reaches −2 °C, humidity 322k
+- overnight decline to 277k, a rise, then **morning rain** at sunrise driving it to
+  252k before climbing again
+
+Lee-side formation is the tell: the orographic rule was always there and could not
+express itself until the sky had both headroom (rain that lands) and horizontal
+structure (convection). Neither alone was enough.
+
+Still missing: **snow**. `precip_forms_snow_at_air` and the phase config exist, and
+the temperature range now genuinely reaches freezing, but cold condensation still
+takes the *surface* frost path — nothing falls. Extending phase 1 to nucleate snow
+in the air needs care about mass: a `Snow` cell has to carry the humidity mass it
+was made from or `audit::sat_totals` loses it, which is why `deposit_frost_coat`
+pays in full cells.
+
+## Convection is the *difference* between columns
+
+Buoyancy existed and was local, but keyed only on the **vertical** lapse — and
+temperature falls smoothly with altitude everywhere, so lift was near-identical
+over every column. Vapour rose uniformly, which spreads moisture rather than
+organising it, and no amount of extra diurnal forcing could change that.
+
+Lift now scales by each column's temperature anomaly against **the mean of its own
+row**. Two mistakes were made getting there, both measured in playtest within
+minutes:
+
+- `Temperature::mean()` called *inside* the per-tile loop — every humidity tile
+  scanning the whole field. Collapsed the frame rate.
+- The anomaly taken against a *global* mean, which mixes altitudes. Every high
+  tile reads as cool, lift was suppressed aloft, and vapour piled into a dense
+  unmoving layer near the ground — the opposite of convection.
+
+And a third caught by a test: averaging over the tiles that *hold vapour* makes a
+lone cloud its own mean, so it never convects, and the reference drifts with
+wherever the vapour is. Average across the world's tile row.
+
 ## The diurnal cycle works — it needed headroom, not more forcing
 
 **Superseded conclusion.** Earlier measurements said the day/night swing was
