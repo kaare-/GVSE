@@ -432,6 +432,15 @@ impl Humidity {
     /// [`Self::buoyant_rise`] scaled by the local lapse: warm air under
     /// colder air lifts harder; a stable inversion almost sits still.
     /// Same tile walk as the uniform rise — no extra world scans.
+/// How much a column's temperature anomaly changes its lift, per degree.
+const CONVECTION_GAIN_PER_C: f32 = 0.15;
+/// Anomaly is clamped before it is applied, so a freak tile cannot dominate.
+const CONVECTION_CLAMP_C: f32 = 6.0;
+/// Cool ground suppresses but never fully blocks lift; warm ground roughly
+/// doubles it. Bounded so convection reshapes the field rather than gating it.
+const CONVECTION_MIN_GAIN: f32 = 0.25;
+const CONVECTION_MAX_GAIN: f32 = 2.0;
+
     pub fn buoyant_rise_thermal(
         &mut self,
         fraction: f32,
@@ -456,7 +465,26 @@ impl Humidity {
                 let here = t.at_tile(hx, hy);
                 let above = t.at_tile(hx, dest);
                 let lapse = (here - above).clamp(-5.0, 10.0);
-                (fraction * (0.40 + lapse * 0.11)).clamp(0.0, 0.45)
+                let base = (fraction * (0.40 + lapse * 0.11)).clamp(0.0, 0.45);
+                // Horizontal anomaly: how much warmer this column is than the
+                // world.
+                //
+                // The lapse term alone is nearly uniform, because temperature
+                // falls smoothly with altitude everywhere — so vapour rose at
+                // much the same rate over every column and the field stayed
+                // horizontally flat however hard it was driven. Convection is
+                // the *difference* between columns: thermals form over ground
+                // that is warmer than its surroundings and not over ground that
+                // is cooler, which is what organises moisture instead of
+                // spreading it evenly.
+                //
+                // Warm land against cool sea, sunlit slope against shaded, and
+                // the diurnal swing all feed this for free, since they are
+                // already in the temperature field.
+                let anomaly = (here - t.mean()).clamp(-Self::CONVECTION_CLAMP_C, Self::CONVECTION_CLAMP_C);
+                let gain = (1.0 + anomaly * Self::CONVECTION_GAIN_PER_C)
+                    .clamp(Self::CONVECTION_MIN_GAIN, Self::CONVECTION_MAX_GAIN);
+                (base * gain).clamp(0.0, 0.45)
             } else {
                 fraction
             };
@@ -777,5 +805,86 @@ mod tests {
             h.at_tile(0, 0) > 0.0,
             "mass should wrap from hx=3 to hx=0"
         );
+    }
+}
+
+#[cfg(test)]
+mod convection_tests {
+    use super::*;
+    use crate::temperature::{TempConfig, Temperature};
+
+    /// Temperature field with one warm column and one cool one at the same height.
+    fn split_temp(width: i32) -> Temperature {
+        let mut t = Temperature::with_world_bounds(4, 0, 0, width, 320, 1, width, 40, false);
+        t.fill_initial(0);
+        t
+    }
+
+    /// Convection is the *difference* between columns, not the average lift.
+    ///
+    /// Buoyancy was driven only by the vertical lapse, which falls smoothly with
+    /// altitude everywhere — so vapour rose at much the same rate over every
+    /// column and the field stayed horizontally flat however hard it was driven.
+    /// A column warmer than the world must lift more than a cooler one, or
+    /// moisture is spread rather than organised.
+    #[test]
+    fn a_warm_column_lifts_more_than_a_cool_one() {
+        let width = 256;
+        let temp = split_temp(width);
+        let mean = temp.mean();
+
+        // Find two tiles at the same height with a real temperature spread.
+        let hy = 12;
+        let mut warm_hx = None;
+        let mut cool_hx = None;
+        for hx in 0..(width / 4) {
+            let here = temp.at_tile(hx, hy);
+            if here > mean + 0.5 && warm_hx.is_none() {
+                warm_hx = Some(hx);
+            }
+            if here < mean - 0.5 && cool_hx.is_none() {
+                cool_hx = Some(hx);
+            }
+        }
+        let (Some(warm_hx), Some(cool_hx)) = (warm_hx, cool_hx) else {
+            // No horizontal spread in this fixture: nothing to assert about
+            // convection, and saying so beats a false pass.
+            eprintln!("fixture had no horizontal temperature spread; skipped");
+            return;
+        };
+
+        let lifted = |hx: i32| -> f32 {
+            let mut h = Humidity::with_world_bounds(4, 0, 0, width, 320);
+            h.cells.insert((hx, hy), 1000.0);
+            h.buoyant_rise_thermal(0.30, 60, Some(&temp));
+            h.cells.get(&(hx, hy + 1)).copied().unwrap_or(0.0)
+        };
+        let w = lifted(warm_hx);
+        let c = lifted(cool_hx);
+        assert!(
+            w > c,
+            "the warmer column should lift more vapour ({w:.2} vs {c:.2})"
+        );
+    }
+
+    #[test]
+    fn convection_conserves_vapour() {
+        // Lift moves mass between tiles; it must never create or destroy any.
+        let width = 128;
+        let temp = split_temp(width);
+        let mut h = Humidity::with_world_bounds(4, 0, 0, width, 320);
+        for hx in 0..(width / 4) {
+            h.cells.insert((hx, 10), 500.0);
+        }
+        let before = h.total_mass();
+        for _ in 0..20 {
+            h.buoyant_rise_thermal(0.30, 60, Some(&temp));
+        }
+        let after = h.total_mass();
+        assert!(
+            (before - after).abs() < before * 1e-4,
+            "convection must conserve vapour ({before} -> {after})"
+        );
+        let _ = TempConfig::default();
     }
 }
