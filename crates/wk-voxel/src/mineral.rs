@@ -908,3 +908,82 @@ mod tests {
         }
     }
 }
+
+#[cfg(test)]
+mod mechanical_karst_tests {
+    use super::*;
+    use crate::chunk::ChunkCoord;
+
+    fn slab(material: MaterialId, pore: u8) -> (World, Cell) {
+        let mut w = World::new(31);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut c = Cell::solid(material);
+        c.pore = pore;
+        w.set_cell(4, 4, c);
+        (w, c)
+    }
+
+    /// Silicate rock must still abrade under throughput.
+    ///
+    /// Stone no longer dissolves (carbonate only), so its only underground erosion
+    /// path is mechanical widening. After the rework of solubility, the ledger and
+    /// the rate model, this is the check that it did not quietly become inert.
+    #[test]
+    fn stone_still_widens_under_throughput() {
+        let (mut w, _) = slab(MaterialId::Stone, 100);
+        let before = w.get_cell(4, 4).unwrap().pore;
+        // Strong flow, generous scale: this asks "can it ever", not "how fast".
+        for t in 0..4000 {
+            w.tick = t;
+            widen_aperture(&mut w, 4, 4, 255, 1.0, 0xABCD);
+        }
+        let after = w.get_cell(4, 4).unwrap().pore;
+        assert!(
+            after > before,
+            "silicate rock must abrade under throughput ({before} -> {after})"
+        );
+    }
+
+    /// ...but far slower than carbonate dissolves, and releasing nothing.
+    #[test]
+    fn abrasion_is_slower_than_dissolution_and_mints_no_load() {
+        let run = |m: MaterialId| -> (u8, u16) {
+            let (mut w, _) = slab(m, 100);
+            // Short enough that neither reaches the ceiling, or both saturate and
+            // the ratio is invisible.
+            for t in 0..300 {
+                w.tick = t;
+                widen_aperture(&mut w, 4, 4, 255, 1.0, 0xABCD);
+            }
+            let pore = w.get_cell(4, 4).unwrap().pore;
+            (pore, dissolved_at(&w, 4, 4))
+        };
+        let (stone_pore, stone_load) = run(MaterialId::Stone);
+        let (lime_pore, lime_load) = run(MaterialId::Limestone);
+        assert!(
+            lime_pore > stone_pore,
+            "carbonate should dissolve faster than silicate abrades \
+             ({lime_pore} vs {stone_pore})"
+        );
+        assert_eq!(
+            stone_load, 0,
+            "abrasion puts nothing into solution -- grinding rock makes suspended \
+             sediment, and stone is outside the mineral ledger"
+        );
+        assert!(
+            lime_load > 0,
+            "dissolving carbonate must release its mineral"
+        );
+    }
+
+    /// Bedrock is the world's floor and must never open.
+    #[test]
+    fn bedrock_never_abrades() {
+        let (mut w, _) = slab(MaterialId::Bedrock, 100);
+        for t in 0..2000 {
+            w.tick = t;
+            widen_aperture(&mut w, 4, 4, 255, 1.0, 0xABCD);
+        }
+        assert_eq!(w.get_cell(4, 4).unwrap().pore, 100, "bedrock must not open");
+    }
+}

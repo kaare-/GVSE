@@ -274,12 +274,43 @@ fn body_material(
     // Deep stone cut by connected gravel / fractured stringers — the
     // preferential flow paths for groundwater.
     if lens < 0.14 {
-        MaterialId::Gravel
-    } else if lens < 0.24 {
-        MaterialId::LooseRock
-    } else {
-        MaterialId::Stone
+        return MaterialId::Gravel;
     }
+    if lens < 0.24 {
+        return MaterialId::LooseRock;
+    }
+    // Scattered clasts through the rock mass.
+    //
+    // The lens stringers above are large and coherent by design, so they read as
+    // beds rather than as the sprinkle of loose material a real rock mass carries.
+    // A second, much finer noise adds isolated pockets — small enough to stay
+    // inclusions rather than becoming a second set of beds, and they matter
+    // hydraulically as well as visually: an isolated permeable pocket is a
+    // retention site, which is the counterpart to the conduits.
+    let speck = lens_noise(seed, x, y, 5, 3, 0xA0_2E_2001);
+    if speck < 0.055 {
+        return MaterialId::Sand;
+    }
+    if speck < 0.10 {
+        return MaterialId::Gravel;
+    }
+    if speck < 0.145 {
+        return MaterialId::LooseRock;
+    }
+    // Conglomerate and flowstone as *native* rock, not only as cementation and
+    // precipitate products. Both occur geologically without a simulated history,
+    // and seeding them means a fresh world already shows the materials the water
+    // cycle can otherwise only make over a long soak.
+    if speck > 0.955 {
+        return MaterialId::Conglomerate;
+    }
+    // Flowstone lines fractures, so it follows the ridged vein locus rather than a
+    // blob — the same field the pore veins use, thresholded near its crest.
+    let vein = lens_noise(seed, x, y * 3, 24, 9, 0xA0_2E_1003);
+    if ridged(vein) > 0.94 {
+        return MaterialId::Flowstone;
+    }
+    MaterialId::Stone
 }
 
 #[cfg(test)]
@@ -307,6 +338,48 @@ mod lens_tests {
             lens_delta * 4.0 < white_delta,
             "lens noise must be much smoother than white noise \
              (lens={lens_delta:.2} white={white_delta:.2})"
+        );
+    }
+
+    #[test]
+    fn rock_carries_scattered_clasts_and_the_new_rock_types() {
+        // Playtest missed "the cake sprinkle of sand, loose rock and gravel
+        // throughout the rock formations", and asked for conglomerate and flowstone
+        // to exist in a fresh world rather than only as products of a long soak.
+        let p = WorldgenParams::default();
+        let mut counts = std::collections::HashMap::new();
+        for x in 0..600 {
+            let surface = continental_surface_y(p.seed, x, p.sea_level_y, p.width_cols);
+            for y in (p.bedrock_floor_y + 6)..(surface - 12).max(p.bedrock_floor_y + 7) {
+                let m = body_material(p.seed, x, y, surface, p.bedrock_floor_y + p.bedrock_thickness, &p);
+                *counts.entry(m).or_insert(0u32) += 1;
+            }
+        }
+        let total: u32 = counts.values().sum();
+        assert!(total > 1000, "fixture should sample a real rock mass");
+        for m in [
+            MaterialId::Sand,
+            MaterialId::Gravel,
+            MaterialId::LooseRock,
+            MaterialId::Conglomerate,
+            MaterialId::Flowstone,
+        ] {
+            let n = counts.get(&m).copied().unwrap_or(0);
+            assert!(n > 0, "{m:?} should appear in the rock mass");
+            // Inclusions, not beds: each stays a small minority so the rock is
+            // still rock.
+            assert!(
+                (n as f32 / total as f32) < 0.25,
+                "{m:?} is {:.1}% of the mass — that is a stratum, not a sprinkle",
+                100.0 * n as f32 / total as f32
+            );
+        }
+        // Stone must still dominate.
+        let stone = counts.get(&MaterialId::Stone).copied().unwrap_or(0);
+        assert!(
+            stone as f32 / total as f32 > 0.35,
+            "stone should still be the rock mass ({:.1}%)",
+            100.0 * stone as f32 / total as f32
         );
     }
 
