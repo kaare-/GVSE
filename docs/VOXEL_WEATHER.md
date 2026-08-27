@@ -295,14 +295,15 @@ a flake cross the map in one tick. The drift pass:
 
 - runs **once** after physics (same place rafts already take the wind)
 - moves a flake **at most one cell** downwind
-- fires with odds `|wind_vx| * tile_cols`, clamped to 1 (default 0.05 × 4 = 0.20)
+- fires with odds `|wind_vx| * tile_cols * 0.25`, clamped to 1 (default 0.05 × 4 × 0.25 = 0.05 — about **two down for each sideways**)
 - ignores ice (control) and landed snowpack (repose owns piles)
 - refuses a solid or occupied destination
 - no-ops at zero wind, so every existing fall test stays honest
 
-A flake that falls and drifts therefore walks a stair: mostly down, sometimes
-sideways, never a teleport. Strong wind caps at 45° (one across per tick, and
-fall is itself gated). Weak wind just leans the path.
+A flake that falls and drifts therefore walks a stair: two down for each
+sideways at default climate wind, never a teleport. The first playtest scale
+(`|wind| × tile_cols` with no 0.25) slid more than it dropped. Strong wind
+still caps at one cell across per tick.
 
 **Note on the tick.** The fall roll is hashed on `world.tick`, so any loop calling
 `apply_grain_fall` repeatedly without advancing the tick re-rolls the same answer

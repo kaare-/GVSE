@@ -8,11 +8,12 @@ use macroquad::prelude::*;
 use wk_material::MaterialId;
 use wk_voxel::{
     build_canopy_index_posed, carbon_ratio, celestial_moon_screen_pos_cfg,
-    celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, day_night_factor_cfg,
-    humidity_mean_norm, is_standing_water, precip_cover_fraction, resolve_organism_draw_cells,
-    shade_transmit_column, sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig,
-    CloudStore, Humidity, ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature,
-    Wind, World,
+    celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
+    day_night_factor_cfg, falls_through_empty_air, humidity_mean_norm, is_standing_water,
+    precip_cover_fraction, resolve_organism_draw_cells, shade_transmit_column,
+    sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, CloudStore, Humidity,
+    ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World,
+    LIVE_SURFACE_SEARCH,
 };
 
 /// Active-layer parcel parallax (1 = locked to terrain; lower = farther).
@@ -147,6 +148,8 @@ impl RidgeSilhouette {
                 bedrock_floor_y,
                 sky_ceiling_y,
                 sea_level_y,
+                seed,
+                width_cols,
             ));
         }
         self.far = lowpass_wrap(&raw, 8);
@@ -163,20 +166,65 @@ fn column_surface_y(
     bedrock: i32,
     sky_ceiling: i32,
     sea_level: i32,
+    seed: u64,
+    width_cols: i32,
 ) -> i32 {
-    let mut y = sky_ceiling - 1;
-    while y >= bedrock {
-        if let Some(c) = world.get_cell(gx, y) {
-            if c.material != MaterialId::Air {
-                return y;
-            }
-            if !c.sat.is_empty() && (y <= sea_level || is_standing_water(world, gx, y)) {
-                return y;
-            }
-        }
-        y -= 1;
+    // Walk from the procedural profile, not from the sky ceiling.
+    // Snow is a solid, so a ceiling scan treats every falling flake as the
+    // crest — that is the needle-spike on the far/near plates. Humidity is
+    // a tile field and never lives in these cells; wet Air only counts when
+    // it is a lake or the sea.
+    let hint = continental_surface_y(seed, gx, sea_level, width_cols)
+        .clamp(bedrock, sky_ceiling.saturating_sub(1));
+    live_surface_y_ground(world, gx, hint, LIVE_SURFACE_SEARCH, sea_level)
+}
+
+fn ridge_ground_at(world: &World, gx: i32, y: i32, sea_level: i32) -> bool {
+    let Some(c) = world.get_cell(gx, y) else {
+        return false;
+    };
+    if falls_through_empty_air(c.material) {
+        return false;
     }
-    sea_level.max(bedrock)
+    if c.material != MaterialId::Air {
+        return true;
+    }
+    if c.sat.is_empty() {
+        return false;
+    }
+    y <= sea_level || is_standing_water(world, gx, y)
+}
+
+fn live_surface_y_ground(
+    world: &World,
+    gx: i32,
+    hint: i32,
+    search: i32,
+    sea_level: i32,
+) -> i32 {
+    let jx = world.wrap_x(gx);
+    let ground = |y: i32| ridge_ground_at(world, jx, y, sea_level);
+    if world.get_cell(jx, hint).is_none() {
+        return hint;
+    }
+    if ground(hint) {
+        let mut y = hint;
+        for _ in 0..search {
+            if !ground(y + 1) {
+                return y;
+            }
+            y += 1;
+        }
+        return y;
+    }
+    let mut y = hint;
+    for _ in 0..search {
+        y -= 1;
+        if ground(y) {
+            return y;
+        }
+    }
+    hint
 }
 
 fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
@@ -1793,6 +1841,80 @@ mod tests {
     };
     use std::collections::HashMap;
     use wk_voxel::{CloudStore, Humidity};
+
+    #[test]
+    fn airborne_snow_does_not_spike_the_ridge() {
+        // The old scan started at the sky ceiling and treated any non-Air
+        // as the crest. Snow is a solid, so a flake became a needle; the
+        // 30-tick cache then made the spike linger until the sky cleared.
+        use super::{column_surface_y, ridge_ground_at};
+        use wk_material::MaterialId;
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, CHUNK_CELLS_H, World};
+
+        let seed = 1u64;
+        let width = 64;
+        let sea = 8;
+        // Plains band (~0.30–0.40 of the ring). Abyss columns sit
+        // below y=0 and the clamp would hide the stone from the walk.
+        let gx = 22;
+        let hint = continental_surface_y(seed, gx, sea, width);
+        assert!(
+            hint > sea,
+            "test column should be land (hint={hint})"
+        );
+        let mut w = World::new(seed);
+        for y in [hint, hint + 30] {
+            w.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(64),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        w.set_cell(gx, hint, Cell::solid(MaterialId::Stone));
+        w.set_cell(gx, hint + 30, Cell::solid(MaterialId::Snow));
+        assert!(
+            !ridge_ground_at(&w, gx, hint + 30, sea),
+            "a flake in the sky is not ground"
+        );
+        let sky = hint + 64;
+        let y = column_surface_y(&w, gx, 0, sky, sea, seed, width);
+        assert_eq!(
+            y, hint,
+            "ridge crest must sit on the stone, not the flake (got {y})"
+        );
+    }
+
+    #[test]
+    fn wet_air_above_the_sea_is_not_a_ridge_crest() {
+        use super::column_surface_y;
+        use wk_material::MaterialId;
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, Sat, CHUNK_CELLS_H, World};
+
+        let seed = 1u64;
+        let width = 64;
+        let sea = 8;
+        let gx = 23;
+        let hint = continental_surface_y(seed, gx, sea, width);
+        assert!(
+            hint > sea,
+            "test column should be land (hint={hint})"
+        );
+        let mut w = World::new(seed);
+        w.ensure_chunk(ChunkCoord::new(
+            gx.div_euclid(64),
+            hint.div_euclid(CHUNK_CELLS_H as i32),
+        ));
+        w.ensure_chunk(ChunkCoord::new(
+            gx.div_euclid(64),
+            (hint + 24).div_euclid(CHUNK_CELLS_H as i32),
+        ));
+        w.set_cell(gx, hint, Cell::solid(MaterialId::Stone));
+        let mut haze = Cell::air();
+        haze.sat = Sat(200);
+        w.set_cell(gx, hint + 24, haze);
+        let sky = hint + 64;
+        let y = column_surface_y(&w, gx, 0, sky, sea, seed, width);
+        assert_eq!(y, hint, "mid-air wetness is not a mountain (got {y})");
+    }
 
     #[test]
     fn haze_ignores_thin_vapor_and_stays_soft() {

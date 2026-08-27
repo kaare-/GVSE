@@ -970,8 +970,8 @@ fn airborne_snow_drifts_downwind_and_ice_does_not() {
     let mut w = setup_column_world();
     w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
     w.set_cell(6, 6, Cell::solid(MaterialId::Ice));
-    // Odds = |0.5| * 4 = 1, so every airborne flake with a free dest moves.
-    let moved = apply_snow_wind_drift(&mut w, 0.5, 4);
+    // Scale 0.25: |1.0| * 4 * 0.25 = 1, so every airborne flake with a free dest moves.
+    let moved = apply_snow_wind_drift(&mut w, 1.0, 4);
     assert_eq!(moved, 1, "exactly one flake should take the step");
     assert_eq!(
         w.get_cell(3, 6).unwrap().material,
@@ -994,7 +994,7 @@ fn airborne_snow_drifts_downwind_and_ice_does_not() {
 fn landed_snow_does_not_drift() {
     let mut w = setup_column_world();
     w.set_cell(2, 1, Cell::solid(MaterialId::Snow));
-    let moved = apply_snow_wind_drift(&mut w, 0.5, 4);
+    let moved = apply_snow_wind_drift(&mut w, 1.0, 4);
     assert_eq!(moved, 0);
     assert_eq!(w.get_cell(2, 1).unwrap().material, MaterialId::Snow);
 }
@@ -1013,7 +1013,7 @@ fn snow_refuses_a_solid_neighbour() {
     let mut w = setup_column_world();
     w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
     w.set_cell(3, 6, Cell::solid(MaterialId::Stone));
-    let moved = apply_snow_wind_drift(&mut w, 0.5, 4);
+    let moved = apply_snow_wind_drift(&mut w, 1.0, 4);
     assert_eq!(moved, 0);
     assert_eq!(w.get_cell(2, 6).unwrap().material, MaterialId::Snow);
 }
@@ -1024,13 +1024,13 @@ fn falling_snow_walks_a_downwind_stair() {
     // the tick. After enough steps the flake should be both lower and
     // downwind — a gentle diagonal, not a teleport.
     //
-    // Default climate wind (0.05 tiles/tick × 4-cell tiles) is ~1 in 5,
-    // so eighty ticks lean the path without sprinting to the chunk edge.
+    // Default climate wind (0.05 × 4 × 0.25) is ~1 in 20. Two hundred
+    // ticks lean the path ~2:1 down:across without sprinting the chunk.
     let mut w = setup_column_world();
     w.set_cell(2, 8, Cell::solid(MaterialId::Snow));
     let start_x = 2;
     let start_y = 8;
-    for _ in 0..80 {
+    for _ in 0..200 {
         apply_grain_fall(&mut w);
         apply_snow_wind_drift(&mut w, 0.05, 4);
         w.tick += 1;

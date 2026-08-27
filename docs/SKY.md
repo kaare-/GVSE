@@ -48,8 +48,15 @@ and not a per-cell atmosphere (CPU stays on 4×4 tiles).
 | Humidity tiles | Diagnostic haze overlay (`H`) only |
 | Day/night | Sky lerp + sun/moon; night landscape darken |
 | Wind | Streaks on `H`; front cloud scroll |
-| Ridges | Dual parallax fills from surface height |
+| Ridges | Dual parallax fills from **ground** height (not falling snow, not mid-air wet Air) |
 | Cast / celestial key | See prior plant/terrain lighting notes |
+
+`RidgeSilhouette` walks from `continental_surface_y`, skipping anything
+that `falls_through_empty_air` (snow, ice, loose organic). The old
+ceiling scan treated a falling flake as the crest — a 1–2 px needle —
+and the 30-tick cache kept the spike up until the flake landed. Wet Air
+only counts at/below sea or as standing water; humidity tiles never live
+in these cells.
 
 ## `sky_transmit`
 
