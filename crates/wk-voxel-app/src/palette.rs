@@ -120,7 +120,7 @@ pub fn shows_pore_stipple(cell: Cell, hydro: &wk_material::HydroOverrides) -> bo
     false
 }
 
-/// Hue pull toward ochre for conductive rock, quantized to keep runs mergeable.
+/// Hue pull for conductive rock, quantized to keep runs mergeable.
 ///
 /// Rock is otherwise grey on grey, so a fractured vein is invisible next to its
 /// matrix even though water treats them completely differently. Hue is the right
@@ -128,25 +128,22 @@ pub fn shows_pore_stipple(cell: Cell, hydro: &wk_material::HydroOverrides) -> bo
 /// and tinting for permeability can then be read independently instead of
 /// fighting.
 ///
-/// Square-rooted on purpose. Permeability spans 5 (tight stone) to 255
-/// (fractured limestone), and a linear map spends almost all its range on
-/// carbonate while leaving stone's 5..40 — the band the pore field actually
-/// varies — indistinguishable. The curve gives the tight end real resolution.
+/// Each material is normalised against **its own** permeability range, not the
+/// 0..255 byte. Stone spans roughly 5..40; a global scale would confine it to
+/// the bottom sixth of the ramp. Limestone's fracture tail (140..255) gets the
+/// same treatment, then a different hue so the two rocks do not share a signal.
 fn permeability_tint(cell: Cell, hydro: &wk_material::HydroOverrides) -> f32 {
-    // Stone and conglomerate. Stone is most of the map, so detail about it is worth
-    // a colour channel; conglomerate needs a signal of its own now that its
-    // speckle is gone, and varying it by pore says something true rather than just
-    // marking the material.
-    //
-    // The other rocks arrive in narrow bands where their material colour already
-    // says enough, and tinting them too made the whole map warm and drowned out
+    // Stone, conglomerate, and limestone. Stone is most of the map; conglomerate
+    // lost its speckle and needs a pore-true signal; limestone is the karst
+    // rock, so open beds should read as open. Flowstone / sandstone stay put —
+    // their material colour already says enough, and pulling them too drowned
     // the one signal that mattered.
-    if !matches!(cell.material, MaterialId::Stone | MaterialId::Conglomerate) {
+    if !matches!(
+        cell.material,
+        MaterialId::Stone | MaterialId::Conglomerate | MaterialId::Limestone
+    ) {
         return 0.0;
     }
-    // Normalised against stone's **own** permeability range, not the 0..255 byte.
-    // Stone spans roughly 5..40, so a global scale would confine it to the bottom
-    // sixth of the ochre ramp and waste the resolution exactly where it is wanted.
     let range = MaterialRegistry::hydrology_with(cell.material, hydro).permeability;
     let (lo, hi) = (range.min as f32, range.max as f32);
     let span = (hi - lo).max(1.0);
@@ -163,9 +160,18 @@ fn permeability_tint(cell: Cell, hydro: &wk_material::HydroOverrides) -> f32 {
 /// ochre, which was louder than the signal warranted.
 const PERMEABLE_ROCK_RGB: [u8; 3] = [0xC0, 0x9A, 0x76];
 
+/// Sage on limestone. Same job as the ochre pull — high perm / porosity in the
+/// fracture tail — but a different hue so open carbonate does not look like
+/// open granite. Kept close to the warm pale matrix so it stays a hint.
+const PERMEABLE_LIMESTONE_RGB: [u8; 3] = [0xB0, 0xC4, 0xA4];
+
 /// How far the ochre pull may go. Deliberately partial: this is a readable hint
 /// about the rock, not a heatmap replacing its material colour.
 const PERM_TINT_STRENGTH: f32 = 0.55;
+
+/// Limestone's green is quieter than stone's ochre. The bed is already pale;
+/// a full-strength wash would read as moss, not as open rock.
+const PERM_LIME_TINT_STRENGTH: f32 = 0.40;
 
 pub fn cell_color(cell: Cell) -> [u8; 3] {
     cell_color_with(cell, &wk_material::HydroOverrides::default(), WET_DARKEN_DEFAULT)
@@ -210,15 +216,21 @@ pub fn cell_color_with(
             lerp_u8(base[1], 55, darken),
             lerp_u8(base[2], 85, darken),
         ];
-        // Conductive rock pulls toward ochre. After darkening so a wet permeable
-        // rock still reads as permeable, and hue-only so the two channels do not
-        // compete.
+        // Conductive rock pulls on hue. After darkening so a wet permeable
+        // cell still reads as permeable, and hue-only so the two channels do
+        // not compete. Stone / conglomerate go ochre; limestone goes sage.
         let perm = permeability_tint(cell, hydro);
         if perm > 0.0 {
+            let (target, strength) = if cell.material == MaterialId::Limestone {
+                (PERMEABLE_LIMESTONE_RGB, PERM_LIME_TINT_STRENGTH)
+            } else {
+                (PERMEABLE_ROCK_RGB, PERM_TINT_STRENGTH)
+            };
+            let w = perm * strength;
             rgb = [
-                lerp_u8(rgb[0], PERMEABLE_ROCK_RGB[0], perm * PERM_TINT_STRENGTH),
-                lerp_u8(rgb[1], PERMEABLE_ROCK_RGB[1], perm * PERM_TINT_STRENGTH),
-                lerp_u8(rgb[2], PERMEABLE_ROCK_RGB[2], perm * PERM_TINT_STRENGTH),
+                lerp_u8(rgb[0], target[0], w),
+                lerp_u8(rgb[1], target[1], w),
+                lerp_u8(rgb[2], target[2], w),
             ];
         }
         // Organic + mineral hosts with mycelium: cream wash (minerals
@@ -323,12 +335,11 @@ mod tests {
 
     #[test]
     fn narrow_band_rocks_carry_no_permeability_tint() {
-        // Stone is most of the map, so detail there is worth a colour channel. The
-        // other rocks arrive in narrow bands where their own colour says enough,
-        // and tinting them made the whole map warm and drowned out the signal.
+        // Stone / conglomerate / limestone carry the pore story in hue.
+        // Flowstone and sandstone arrive as deposits whose own colour says
+        // enough, and tinting them drowned out the bed signal.
         let h = wk_material::HydroOverrides::default();
         for m in [
-            MaterialId::Limestone,
             MaterialId::Flowstone,
             MaterialId::Sandstone,
         ] {
@@ -390,17 +401,43 @@ mod tests {
     #[test]
     fn permeability_tints_are_quantized_so_runs_still_merge() {
         let h = wk_material::HydroOverrides::default();
-        let mut seen = std::collections::HashSet::new();
-        for pore in 0..=255u8 {
-            let mut c = Cell::solid(MaterialId::Stone);
-            c.pore = pore;
-            seen.insert(cell_color_with(c, &h, 0.0));
+        for m in [MaterialId::Stone, MaterialId::Limestone] {
+            let mut seen = std::collections::HashSet::new();
+            for pore in 0..=255u8 {
+                let mut c = Cell::solid(m);
+                c.pore = pore;
+                seen.insert(cell_color_with(c, &h, 0.0));
+            }
+            assert!(
+                seen.len() <= TINT_LEVELS as usize,
+                "{m:?}: 256 pore values must collapse to at most {TINT_LEVELS} colours, got {}",
+                seen.len()
+            );
         }
+    }
+
+    #[test]
+    fn conductive_limestone_tints_greener_than_tight_limestone() {
+        // Same treatment as stone: the fracture tail shifts hue. Sage, not
+        // ochre, so open carbonate does not look like open granite.
+        let h = wk_material::HydroOverrides::default();
+        let mut tight = Cell::solid(MaterialId::Limestone);
+        tight.pore = 0;
+        let mut open = Cell::solid(MaterialId::Limestone);
+        open.pore = u8::MAX;
+        let a = cell_color_with(tight, &h, 0.0);
+        let b = cell_color_with(open, &h, 0.0);
+        let green = |c: [u8; 3]| c[1] as i32 - c[0] as i32;
         assert!(
-            seen.len() <= TINT_LEVELS as usize,
-            "256 pore values must collapse to at most {TINT_LEVELS} colours, got {}",
-            seen.len()
+            green(b) > green(a),
+            "open limestone should read greener than tight ({a:?} vs {b:?})"
         );
+        let warm = |c: [u8; 3]| c[0] as i32 - c[2] as i32;
+        assert!(
+            warm(b) <= warm(a),
+            "limestone must not pick up stone's ochre ({a:?} vs {b:?})"
+        );
+        assert_ne!(a, b, "the limestone span must be visible");
     }
 
     #[test]

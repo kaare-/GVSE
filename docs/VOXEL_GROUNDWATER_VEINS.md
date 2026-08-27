@@ -338,8 +338,9 @@ rock only** — shedding from fine sediment took open clay from 74% retention to
 29%, which is not a seal.
 
 Expect the visual to invert: veins read as the *dry* paths through wet rock, not
-wet paths through dry rock. Combined with the ochre permeability tint on stone, a
-conduit shows as ochre-and-dry inside grey-and-wet.
+wet paths through dry rock. Combined with the ochre permeability tint on stone
+(and a slight sage pull on open limestone), a conduit shows as tinted-and-dry
+inside matrix-and-wet.
 
 **General lesson.** A diffusive process with a fixed uniform endpoint erases any
 structure its rates create, given time. If a soak keeps flattening, look at the
