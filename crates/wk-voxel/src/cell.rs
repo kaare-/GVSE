@@ -360,8 +360,41 @@ pub fn retained_sat_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 
         return 0;
     }
     let fc = MaterialRegistry::base_props(cell.material).field_capacity as u32;
+    // Retention *fraction* falls as pore space opens.
+    //
+    // Without this, retention scaled with capacity, so a fractured cell held more
+    // absolute water than a tight one. Every cell then filled to its own retention
+    // and stopped, and a long soak ended with the whole rock wet and the veins
+    // slightly wetter — the underground read as uniform, and conduits stored water
+    // instead of transmitting it. Playtest called it "decoration".
+    //
+    // Open media genuinely drain better: it is why gravel retains 20/255 and clay
+    // 188/255. The same has to hold *within* a material, or opening a cell buys
+    // capacity and retention in equal measure and nothing changes character.
+    //
+    // With it, a vein drains nearly dry between flows while the matrix beside it
+    // perches — low storage and high flux, which is what a conduit is, and it
+    // makes the structure persistent rather than transient.
+    // Competent rock only. Conduits are a rock phenomenon: fine sediments are
+    // matrix, not channels, and shedding from clay turned the aquitard into a
+    // drain (open clay fell from 74% retention to 29%, which is not a seal).
+    if !is_competent_rock(cell.material) {
+        return ((cap * fc) / 255) as u8;
+    }
+    let open = (cell.pore as u32).saturating_sub(PORE_MATRIX_MID as u32);
+    let span = (u8::MAX - PORE_MATRIX_MID) as u32;
+    let shed = (DRAINAGE_SHED_NUM * open) / span.max(1);
+    let fc = fc.saturating_sub((fc * shed) / DRAINAGE_SHED_DEN);
     ((cap * fc) / 255) as u8
 }
+
+/// Pore value treated as a material's matrix: below it, retention is unchanged.
+const PORE_MATRIX_MID: u8 = 128;
+/// How much of the retention fraction a fully open cell sheds, as
+/// `NUM / DEN` — 60%, so an open vein holds well under half what its tight
+/// neighbour does once the larger capacity is accounted for.
+const DRAINAGE_SHED_NUM: u32 = 60;
+const DRAINAGE_SHED_DEN: u32 = 100;
 
 /// Saturation in this cell that is free to drain downward.
 #[inline]
@@ -376,6 +409,89 @@ pub fn permeability_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 
     MaterialRegistry::hydrology_with(cell.material, hydro)
         .permeability
         .sample_fracture(cell.pore)
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    /// A vein must end up *drier* than the matrix beside it, not wetter.
+    ///
+    /// Retention used to scale with capacity, so opening a cell bought capacity
+    /// and retention in equal measure: a fractured cell held more absolute water
+    /// than a tight one, every cell filled to its own retention and stopped, and a
+    /// long soak left the whole rock uniformly wet with conduits *storing* water.
+    /// Low storage and high flux is what makes a conduit a conduit.
+    #[test]
+    fn an_open_cell_retains_less_than_a_tight_one() {
+        let h = wk_material::HydroOverrides::default();
+        let mut tight = Cell::solid(MaterialId::Stone);
+        tight.pore = PORE_MATRIX_MID;
+        let mut open = Cell::solid(MaterialId::Stone);
+        open.pore = u8::MAX;
+        let (r_tight, r_open) = (retained_sat_cell(tight, &h), retained_sat_cell(open, &h));
+        assert!(
+            r_open < r_tight,
+            "an open vein should shed water a tight matrix holds ({r_open} vs {r_tight})"
+        );
+        // And it has more room, so the contrast is real rather than an artifact of
+        // a smaller container.
+        assert!(
+            water_capacity_cell(open, &h) > water_capacity_cell(tight, &h),
+            "the open cell should still hold more when full"
+        );
+    }
+
+    #[test]
+    fn matrix_pore_retention_is_unchanged() {
+        // Only *opening* sheds retention. A default cell must behave exactly as
+        // before, or every tuned material shifts underneath us.
+        let h = wk_material::HydroOverrides::default();
+        for m in [
+            MaterialId::Stone,
+            MaterialId::Clay,
+            MaterialId::Sand,
+            MaterialId::Limestone,
+        ] {
+            let mut c = Cell::solid(m);
+            c.pore = PORE_MATRIX_MID;
+            let cap = water_capacity_cell(c, &h) as u32;
+            let fc = wk_material::MaterialRegistry::base_props(m).field_capacity as u32;
+            assert_eq!(
+                retained_sat_cell(c, &h) as u32,
+                (cap * fc) / 255,
+                "{m:?} at matrix pore must retain exactly the material value"
+            );
+        }
+    }
+
+    #[test]
+    fn fine_sediment_sheds_nothing() {
+        // Conduits are a rock phenomenon. Shedding from clay turned the aquitard
+        // into a drain — open clay fell from 74% retention to 29%, which is not a
+        // seal — and sand and gravel are matrix, not channels.
+        let h = wk_material::HydroOverrides::default();
+        for m in [
+            MaterialId::Clay,
+            MaterialId::Bentonite,
+            MaterialId::Sand,
+            MaterialId::Gravel,
+        ] {
+            let mut tight = Cell::solid(m);
+            tight.pore = PORE_MATRIX_MID;
+            let mut open = Cell::solid(m);
+            open.pore = u8::MAX;
+            let fc = wk_material::MaterialRegistry::base_props(m).field_capacity as u32;
+            for c in [tight, open] {
+                let cap = water_capacity_cell(c, &h) as u32;
+                assert_eq!(
+                    retained_sat_cell(c, &h) as u32,
+                    (cap * fc) / 255,
+                    "{m:?} retention must not depend on pore"
+                );
+            }
+        }
+    }
 }
 
 #[cfg(test)]
