@@ -731,3 +731,59 @@ fn perf_profile_demo_and_stress() {
         wk_voxel::MAX_ATOMS,
     );
 }
+
+/// Does organism cost grow with soak age at a *constant* population?
+///
+/// Playtest FPS fell 33 → 3 over 121k ticks with 256 plants. Physics was ruled
+/// out — `soak_drift_probe` shows physics cost *falling* as a world settles, and
+/// suspension at 0.042 ms with a bounded map. Organisms are what that probe does
+/// not have.
+///
+/// Population size alone would not explain it: plants settled well under the old
+/// module caps, so nothing grew monstrous. Cost rising while `atoms` stays flat
+/// would mean **churn** — work per organism increasing over time — which is a bug
+/// rather than a consequence of lifting the caps.
+///
+/// ```text
+/// cargo test -p wk-voxel --release --test perf_profile -- --ignored --nocapture organism_cost_versus_soak_age
+/// ```
+#[test]
+#[ignore = "diagnostic; run with --release --ignored --nocapture"]
+fn organism_cost_versus_soak_age() {
+    const SEG: u64 = 1000;
+    const SEGS: usize = 14;
+
+    let mut scene = stamp_scene(demo_params());
+    seed_plants(&mut scene, 256);
+    for _ in 0..WARMUP_TICKS {
+        one_stack_tick(&mut scene, None, None);
+    }
+
+    println!(
+        "\n{:>8}  {:>10}  {:>11}  {:>7}  {:>9}",
+        "tick", "wall", "organisms", "atoms", "per atom"
+    );
+    for _ in 0..SEGS {
+        let mut accum = PassAccum::zero();
+        let mut phys = PhysicsTimings::default();
+        let wall = Instant::now();
+        for _ in 0..SEG {
+            one_stack_tick(&mut scene, Some(&mut accum), Some(&mut phys));
+        }
+        let wall = wall.elapsed();
+        let atoms = scene.organisms.len().max(1);
+        let org_ms = accum.organisms.as_secs_f32() * 1000.0 / SEG as f32;
+        println!(
+            "{:>8}  {:>8.3}ms  {:>9.3}ms  {:>7}  {:>7.4}ms",
+            scene.world.tick,
+            wall.as_secs_f32() * 1000.0 / SEG as f32,
+            org_ms,
+            atoms,
+            org_ms / atoms as f32,
+        );
+    }
+    println!(
+        "\n  Flat 'per atom' means cost tracks population (expected).\n  \
+         Rising 'per atom' means churn — work per organism growing with age."
+    );
+}
