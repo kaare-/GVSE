@@ -321,6 +321,35 @@ pub fn seam_seepage_regions(world: &World) -> Vec<ActiveChunk> {
     out
 }
 
+/// Order transfers so a donor feeds its **best-conducting** face first.
+///
+/// This is the competitive half of vein formation, and it was missing. Aperture
+/// growth amplifies whatever carries flow, but nothing starved the alternatives,
+/// so preference plus enough time still equalised: every path stayed viable and
+/// the front advanced as a broad uniform wedge no matter how strongly the
+/// permeable route was favoured. A real conduit captures its neighbours' water
+/// and they dry out — that is what makes the structure stable instead of
+/// transient.
+///
+/// The apply loop already clamps each transfer by the donor's *live* saturation,
+/// so a donor with limited water cannot satisfy every face. Which face loses was
+/// decided by neighbour coordinate, with ties serving the **smallest** transfer
+/// first — so the weakest face was fed and the conduit went hungry.
+///
+/// Serving the largest transfer first makes the conduit win, because `amt` is
+/// already conductance-limited: the best-conducting face is the largest one.
+/// Nothing about mass changes — the same water moves, it just goes down the
+/// path that can carry it.
+///
+/// Deterministic: the amount ordering is total, and destination breaks ties.
+fn serve_best_faces_first(xfers: &mut [((i32, i32), (i32, i32), i32)]) {
+    xfers.sort_by(|a, b| {
+        a.0.cmp(&b.0)
+            .then(b.2.cmp(&a.2))
+            .then(a.1.cmp(&b.1))
+    });
+}
+
 /// Local `x` span of the columns where water could actually cross this seam,
 /// or `None` when the face is inert.
 ///
@@ -479,11 +508,7 @@ pub fn apply_seepage_regions_ex(
     // Apply in a stable order. Each transfer re-reads live sat so a
     // source drained by an earlier xfer simply sends less — every
     // individual move conserves mass exactly.
-    xfers.sort_by(|a, b| {
-        a.0.cmp(&b.0)
-            .then(a.1.cmp(&b.1))
-            .then(a.2.cmp(&b.2))
-    });
+    serve_best_faces_first(&mut xfers);
     for (from, to, amt) in xfers {
         let Some(src) = world.get_cell(from.0, from.1) else {
             continue;
@@ -1003,5 +1028,65 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
     }
     for (gx, gy) in touches {
         world.touch_dirty(gx, gy);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A donor with limited water must feed its conduit, not its flanks.
+    ///
+    /// The apply loop clamps every transfer by the donor's live saturation, so
+    /// ordering *is* allocation: whatever is served last gets whatever is left,
+    /// which is often nothing. Before this, order came from neighbour coordinate
+    /// with ties serving the smallest transfer first — so a weak face could take
+    /// the water a well-conducting one needed, and no path ever starved.
+    #[test]
+    fn a_donor_feeds_its_best_conducting_face_first() {
+        let donor = (10, 5);
+        let weak = (9, 5);
+        let strong = (11, 5);
+        let mut xfers = vec![(donor, weak, 2), (donor, strong, 30)];
+        serve_best_faces_first(&mut xfers);
+        assert_eq!(
+            xfers[0].1, strong,
+            "the largest (best-conducting) transfer must be served first"
+        );
+
+        // Order of arrival must not matter.
+        let mut other = vec![(donor, strong, 30), (donor, weak, 2)];
+        serve_best_faces_first(&mut other);
+        assert_eq!(other, xfers, "allocation must not depend on insertion order");
+    }
+
+    #[test]
+    fn allocation_is_deterministic_when_faces_tie() {
+        // Equal conductance has to resolve the same way every run, or seepage
+        // stops being reproducible for a seed.
+        let donor = (4, 4);
+        let mut a = vec![(donor, (5, 4), 7), (donor, (4, 5), 7)];
+        let mut b = vec![(donor, (4, 5), 7), (donor, (5, 4), 7)];
+        serve_best_faces_first(&mut a);
+        serve_best_faces_first(&mut b);
+        assert_eq!(a, b, "tied faces must order deterministically");
+    }
+
+    #[test]
+    fn donors_stay_grouped() {
+        // The apply loop reads live saturation per transfer; grouping by donor is
+        // what makes "served first" mean anything.
+        let mut xfers = vec![
+            ((2, 2), (3, 2), 5),
+            ((1, 1), (2, 1), 9),
+            ((2, 2), (2, 3), 40),
+            ((1, 1), (1, 2), 1),
+        ];
+        serve_best_faces_first(&mut xfers);
+        assert_eq!(xfers[0].0, (1, 1));
+        assert_eq!(xfers[1].0, (1, 1));
+        assert_eq!(xfers[2].0, (2, 2));
+        assert_eq!(xfers[3].0, (2, 2));
+        assert_eq!(xfers[2].2, 40, "biggest first within a donor");
     }
 }
