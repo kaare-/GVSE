@@ -268,7 +268,7 @@ constants per half and ~89%.
 Convection proper — buoyancy from the ground-versus-air difference — is cheap on
 a tile field and is what would turn a steady rain rate into fronts.
 
-## Snow falls gently (**landed**), wind drift still open
+## Snow falls gently (**landed**), wind drift (**landed**, carefully)
 
 Snow nucleates in the air (`phase::deposit_snow_in_air`) and now descends at a
 usable rate. The bug was that grain fall takes one step per pass and runs several
@@ -288,16 +288,26 @@ any other loose material, which is what lets drifts build and repose.
 Ice is deliberately not gated and serves as the test control: if both slow down,
 the gate is catching the wrong material.
 
-**Still open: wind drift.** Flakes fall straight. Lateral movement is a real
-addition, because grain fall only ever pulls a cell *straight down* — there is no
-sideways step to bias. It wants either a dedicated drift pass or a lateral
-displacement in the fall step, and it needs `Wind`, which the physics tick does not
-currently receive.
+**Wind drift** is a second, once-per-tick pass (`apply_snow_wind_drift`), not a
+bias inside grain fall. Grain fall only ever pulls straight down, and it can run
+hundreds of passes on a deep settle — putting a sideways step in there would let
+a flake cross the map in one tick. The drift pass:
 
-**Note on the tick.** The roll is hashed on `world.tick`, so any loop calling
+- runs **once** after physics (same place rafts already take the wind)
+- moves a flake **at most one cell** downwind
+- fires with odds `|wind_vx| * tile_cols`, clamped to 1 (default 0.05 × 4 = 0.20)
+- ignores ice (control) and landed snowpack (repose owns piles)
+- refuses a solid or occupied destination
+- no-ops at zero wind, so every existing fall test stays honest
+
+A flake that falls and drifts therefore walks a stair: mostly down, sometimes
+sideways, never a teleport. Strong wind caps at 45° (one across per tick, and
+fall is itself gated). Weak wind just leans the path.
+
+**Note on the tick.** The fall roll is hashed on `world.tick`, so any loop calling
 `apply_grain_fall` repeatedly without advancing the tick re-rolls the same answer
 forever. Production advances it; a test did not and now does. Same footgun as the
-fractional seepage gate.
+fractional seepage gate. The drift roll uses the same clock.
 
 ## Weather reads the *live* surface (**landed**)
 

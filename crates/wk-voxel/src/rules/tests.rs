@@ -964,6 +964,94 @@ fn hanging_snow_and_ice_settle_onto_bedrock() {
 }
 
 #[test]
+fn airborne_snow_drifts_downwind_and_ice_does_not() {
+    // Wind on falling snow is a once-per-tick, one-cell slide. Ice is the
+    // control: if both move, the pass is catching the wrong material.
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    w.set_cell(6, 6, Cell::solid(MaterialId::Ice));
+    // Odds = |0.5| * 4 = 1, so every airborne flake with a free dest moves.
+    let moved = apply_snow_wind_drift(&mut w, 0.5, 4);
+    assert_eq!(moved, 1, "exactly one flake should take the step");
+    assert_eq!(
+        w.get_cell(3, 6).unwrap().material,
+        MaterialId::Snow,
+        "snow should step one cell downwind"
+    );
+    assert_eq!(
+        w.get_cell(2, 6).unwrap().material,
+        MaterialId::Air,
+        "the vacated cell should be air"
+    );
+    assert_eq!(
+        w.get_cell(6, 6).unwrap().material,
+        MaterialId::Ice,
+        "ice falls, it does not drift"
+    );
+}
+
+#[test]
+fn landed_snow_does_not_drift() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 1, Cell::solid(MaterialId::Snow));
+    let moved = apply_snow_wind_drift(&mut w, 0.5, 4);
+    assert_eq!(moved, 0);
+    assert_eq!(w.get_cell(2, 1).unwrap().material, MaterialId::Snow);
+}
+
+#[test]
+fn zero_wind_leaves_airborne_snow_put() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    let moved = apply_snow_wind_drift(&mut w, 0.0, 4);
+    assert_eq!(moved, 0);
+    assert_eq!(w.get_cell(2, 6).unwrap().material, MaterialId::Snow);
+}
+
+#[test]
+fn snow_refuses_a_solid_neighbour() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    w.set_cell(3, 6, Cell::solid(MaterialId::Stone));
+    let moved = apply_snow_wind_drift(&mut w, 0.5, 4);
+    assert_eq!(moved, 0);
+    assert_eq!(w.get_cell(2, 6).unwrap().material, MaterialId::Snow);
+}
+
+#[test]
+fn falling_snow_walks_a_downwind_stair() {
+    // Interleave the production order: fall, then one drift, then advance
+    // the tick. After enough steps the flake should be both lower and
+    // downwind — a gentle diagonal, not a teleport.
+    let mut w = setup_column_world();
+    w.set_cell(2, 8, Cell::solid(MaterialId::Snow));
+    let start_x = 2;
+    let start_y = 8;
+    for _ in 0..80 {
+        apply_grain_fall(&mut w);
+        apply_snow_wind_drift(&mut w, 0.25, 4);
+        w.tick += 1;
+    }
+    let pos = (0..10)
+        .flat_map(|x| (1..=start_y).map(move |y| (x, y)))
+        .find(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Snow));
+    let (x, y) = pos.expect("the flake should still exist");
+    assert!(
+        y < start_y,
+        "the flake should have fallen (still at y={y})"
+    );
+    assert!(
+        x > start_x,
+        "the flake should have drifted downwind (still at x={x})"
+    );
+    assert!(
+        x - start_x <= 80,
+        "one cell per tick is the cap; got Δx={}",
+        x - start_x
+    );
+}
+
+#[test]
 fn grain_falls_through_empty_air() {
     let mut w = setup_column_world();
     // Sand at y=5, everything below is empty Air, bedrock at y=0.

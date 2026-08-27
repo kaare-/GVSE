@@ -170,6 +170,7 @@ pub use rules::{
     apply_evaporation_into_humidity, apply_evaporation_into_humidity_climate, apply_flow_erosion,
     apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
+    apply_snow_wind_drift,
     apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
     apply_seepage, apply_seepage_contact_regions, apply_seepage_regions, apply_water_flow,

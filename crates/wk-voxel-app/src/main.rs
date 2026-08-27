@@ -648,6 +648,14 @@ async fn main() {
                     .shift_atoms_with_moved_cells(&mut scene.world, &moves);
             }
             set_parallel_enabled(true);
+            // Airborne snow takes at most one cell downwind per tick. Kept
+            // out of grain settle so a deep pass cannot blow flakes across
+            // the map; landed pack is repose's problem.
+            let _ = wk_voxel::apply_snow_wind_drift(
+                &mut scene.world,
+                wind_vx,
+                scene.wind.tile_cols,
+            );
             // Crude CO₂ buckets: surface Organic oxidation + atm↔lake exchange.
             step_carbon_budget(&mut scene.carbon, &mut scene.world, &settings.carbon);
             // Floating Organic drifts with the wind; root-bound mats sail plants.

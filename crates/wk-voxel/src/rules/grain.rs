@@ -187,6 +187,118 @@ pub fn apply_grain_fall(world: &mut World) {
     }
 }
 
+/// Once-per-tick lateral step for **airborne** snow.
+///
+/// Grain fall only pulls straight down, and it runs many passes a tick.
+/// Baking wind into that step would let a deep settle blow flakes across
+/// the map. This pass is separate, runs once, and moves a flake at most
+/// one cell downwind.
+///
+/// `wind_vx` is tiles/tick (same units as [`crate::wind::Wind::climate_vx`]).
+/// `tile_cols` converts that to cells. Odds are `|wind_vx| * tile_cols`,
+/// clamped to 1, so the default 0.05 climate wind on 4-cell tiles drifts
+/// about one flake in five each tick.
+///
+/// Ice is the control: it falls, it does not drift. Landed snowpack is
+/// repose's problem, not the wind's.
+pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) -> u32 {
+    if !wind_vx.is_finite() || wind_vx.abs() < 1e-4 {
+        return 0;
+    }
+    let dx = if wind_vx >= 0.0 { 1 } else { -1 };
+    let odds = (wind_vx.abs() * tile_cols.max(1) as f32).clamp(0.0, 1.0);
+    let seed = world.seed.0;
+    let tick_no = world.tick;
+
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    let coords = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_buoyant)
+        .map(|(&coord, _)| coord)
+        .collect::<Vec<_>>();
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(lx, ly);
+                if cell.material != MaterialId::Snow {
+                    continue;
+                }
+                let gx = x0 + lx as i32;
+                let gy = y0 + ly as i32;
+                if snowflake_is_airborne(world, gx, gy) {
+                    candidates.push((gx, gy));
+                }
+            }
+        }
+    }
+    if candidates.is_empty() {
+        return 0;
+    }
+    candidates.sort_unstable();
+
+    let mut claimed: std::collections::HashSet<(i32, i32)> =
+        std::collections::HashSet::new();
+    let mut planned: Vec<(i32, i32, i32)> = Vec::new();
+    for (gx, gy) in candidates {
+        let roll = super::hash_prob(
+            seed,
+            gx.wrapping_mul(73_856_093).wrapping_add(gy),
+            tick_no,
+            SNOWDRIFT_SALT,
+        );
+        if roll >= odds {
+            continue;
+        }
+        let nx = world.wrap_x(gx + dx);
+        if claimed.contains(&(nx, gy)) {
+            continue;
+        }
+        let Some(dest) = world.get_cell(nx, gy) else {
+            continue;
+        };
+        if dest.material != MaterialId::Air {
+            continue;
+        }
+        claimed.insert((nx, gy));
+        planned.push((gx, gy, nx));
+    }
+
+    let mut moved = 0u32;
+    for (gx, gy, nx) in planned {
+        let Some(flake) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        let Some(dest) = world.get_cell(nx, gy) else {
+            continue;
+        };
+        if flake.material != MaterialId::Snow || dest.material != MaterialId::Air {
+            continue;
+        }
+        world.set_cell(nx, gy, flake);
+        world.set_cell(gx, gy, dest);
+        moved += 1;
+    }
+    moved
+}
+
+fn snowflake_is_airborne(world: &World, gx: i32, gy: i32) -> bool {
+    let Some(below) = world.get_cell(gx, gy - 1) else {
+        return false;
+    };
+    if below.material != MaterialId::Air {
+        return false;
+    }
+    !floats_on_air_seat_world(world, below, gx, gy - 1)
+}
+
+const SNOWDRIFT_SALT: u64 = 0x51DE_5417;
+
 /// Drop unsupported grains / litter through Air until seated or the
 /// pass budget is spent. Starts from the world's current dirty wake
 /// (F3 paint, editor writes, prior CA).
