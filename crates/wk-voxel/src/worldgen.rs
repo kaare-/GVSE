@@ -191,6 +191,52 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea: i32, width_cols: i32)
 ///
 /// Palette reminder: Stone is cool mid-grey, Limestone is warm pale
 /// tan, Clay is brown, Gravel is sandy-tan, LooseRock is dark cobble.
+/// Fraction of the world occupied by the overturned block.
+const TECTONIC_BLOCK_FRAC: f32 = 0.16;
+/// Width of the blend at each edge of the block, as a fraction of its own width.
+/// Without it the contact is a razor line, which reads as a rendering seam rather
+/// than as geology.
+const TECTONIC_EDGE_FRAC: f32 = 0.22;
+/// How far the block's bands tilt, in cells of depth per cell of x.
+const TECTONIC_DIP: f32 = 0.35;
+
+/// The depth the strata sequence is indexed by.
+///
+/// Normally just the depth below the surface, so bands lie parallel to it. Inside
+/// one seed-placed block the coordinate is **tilted and mirrored**, so the same
+/// sequence appears dipping and overturned — deep rock carried up against shallow
+/// beds, which is what a fault block or an overturned fold looks like in section.
+///
+/// A transform rather than new geology: every stratum rule, every material and
+/// every contact behaves exactly as it does elsewhere, so the block gets limestone
+/// bands, bentonite caps and clast sprinkles for free, just at the wrong angle and
+/// in the wrong order. That is also why it stays honest — nothing here can produce
+/// a material combination the rest of the world could not.
+///
+/// Blended in at the edges, so the contacts are transitional. A hard boundary
+/// looked like a seam in the renderer rather than a fault.
+fn tectonic_depth(seed: u64, x: i32, depth: f32, column_thickness: i32, p: &WorldgenParams) -> f32 {
+    let w = p.width_cols.max(1) as f32;
+    let block_w = (w * TECTONIC_BLOCK_FRAC).max(8.0);
+    // Placed by seed, but away from the wrap seam so the block is not cut in half.
+    let start = 0.10 * w + (hash_f32(seed, 0, 0x7EC7_0111) * 0.55 * w);
+    let local = x as f32 - start;
+    if local < 0.0 || local > block_w {
+        return depth;
+    }
+    let edge = (block_w * TECTONIC_EDGE_FRAC).max(1.0);
+    let blend = (local / edge).min((block_w - local) / edge).clamp(0.0, 1.0);
+    if blend <= 0.0 {
+        return depth;
+    }
+    let thickness = column_thickness.max(1) as f32;
+    // Mirrored: the sequence runs the other way through the stack.
+    let flipped = (thickness - depth).max(0.0);
+    // ...and dipping, so the bands are not merely upside down but at an angle.
+    let dipped = flipped + (local - block_w * 0.5) * TECTONIC_DIP;
+    depth + (dipped - depth) * blend
+}
+
 fn body_material(
     seed: u64,
     x: i32,
@@ -206,17 +252,24 @@ fn body_material(
     // porous material forms connected bodies. Groundwater then prefers those
     // paths, and since wetter pores conduct faster that choice reinforces
     // itself. Two octaves — broad lenses plus smaller pockets.
-    let lens = 0.65 * lens_noise(seed, x, y, 24, 10, 0x1E_1501)
-        + 0.35 * lens_noise(seed, x, y, 9, 4, 0x1E_1502);
+    // Horizontally stretched: sampling y at a shorter wavelength than x makes the
+    // bodies long and flat, which is what a bed *is*. Isotropic noise gives round
+    // blobs, and blobs read as pockets rather than strata however large they are.
+    let lens = 0.65 * lens_noise(seed, x, y * 3, 40, 10, 0x1E_1501)
+        + 0.35 * lens_noise(seed, x, y * 2, 14, 4, 0x1E_1502);
     // Mild per-column warp so stratum contacts undulate a little.
     let warp = (hash_f32(seed, x as i64, 0x1A11_05) - 0.5) * 5.0;
-    let d = depth + warp;
+    let d = tectonic_depth(seed, x, depth + warp, surface_y - bedrock_top, p);
 
     let lime_enabled = p.limestone_in_shelf_and_coast;
     let karst = lime_enabled && is_karst_zone_x(x, p.width_cols);
     // Limestone bed: mid-stack stratum when enabled; thicker in karst
     // shelf bands. Toggle off → stone fills that depth instead.
-    let (lime_lo, lime_hi) = if karst { (5.0, 32.0) } else { (12.0, 22.0) };
+    // Thicker than it was (was 12..22 outside karst): playtest wanted more
+    // limestone, and a thin bed is also hydraulically uninteresting — the
+    // limestone/stone contact is where the best perching was observed, so a taller
+    // band gives more of it.
+    let (lime_lo, lime_hi) = if karst { (5.0, 38.0) } else { (10.0, 30.0) };
 
     // Basement rubble just above the bedrock barrier.
     if above_bedrock < 2 || (above_bedrock < 4 && n < 0.55) {
@@ -270,6 +323,12 @@ fn body_material(
         } else {
             MaterialId::Limestone
         };
+    }
+    // A second carbonate band well below the first, so the deep stack is not one
+    // uniform stone mass. Real sections repeat: sequences of beds, not a single
+    // sandwich. Its contacts give another perching horizon far from the surface.
+    if lime_enabled && d >= lime_hi + 22.0 && d < lime_hi + 40.0 && lens > 0.30 {
+        return MaterialId::Limestone;
     }
     // Deep stone cut by connected gravel / fractured stringers — the
     // preferential flow paths for groundwater.
@@ -340,6 +399,76 @@ mod lens_tests {
             lens_delta * 4.0 < white_delta,
             "lens noise must be much smoother than white noise \
              (lens={lens_delta:.2} white={white_delta:.2})"
+        );
+    }
+
+    #[test]
+    fn a_tectonic_block_overturns_the_strata() {
+        // Playtest asked for "a section where plate tectonics has flipped the
+        // stratas". Implemented as a coordinate transform, so every stratum rule,
+        // material and contact behaves as it does elsewhere — the block just gets
+        // them at the wrong angle and in the wrong order.
+        let p = WorldgenParams::default();
+        let thickness = 60;
+        // Find the block by scanning for columns whose structural depth departs
+        // from the plain depth.
+        let mut inside = Vec::new();
+        for x in 0..p.width_cols {
+            let d = tectonic_depth(p.seed, x, 20.0, thickness, &p);
+            if (d - 20.0).abs() > 1.0 {
+                inside.push(x);
+            }
+        }
+        assert!(
+            !inside.is_empty(),
+            "there should be an overturned block somewhere in the world"
+        );
+        let frac = inside.len() as f32 / p.width_cols as f32;
+        assert!(
+            frac < 0.35,
+            "the block is a section, not the world ({:.0}%)",
+            frac * 100.0
+        );
+
+        // Inside it, the sequence must actually differ at the same depth, or the
+        // transform is decoration.
+        let mid = inside[inside.len() / 2];
+        let outside = (0..p.width_cols)
+            .find(|x| (tectonic_depth(p.seed, *x, 20.0, thickness, &p) - 20.0).abs() < 0.01)
+            .expect("some column should be untransformed");
+        let surface_in = continental_surface_y(p.seed, mid, p.sea_level_y, p.width_cols);
+        let surface_out = continental_surface_y(p.seed, outside, p.sea_level_y, p.width_cols);
+        let bedrock_top = p.bedrock_floor_y + p.bedrock_thickness;
+        let mut differs = 0;
+        for d in 6..30 {
+            let a = body_material(p.seed, mid, surface_in - d, surface_in, bedrock_top, &p);
+            let b = body_material(p.seed, outside, surface_out - d, surface_out, bedrock_top, &p);
+            if a != b {
+                differs += 1;
+            }
+        }
+        assert!(
+            differs > 4,
+            "the overturned block should present a different sequence at the same \
+             depth (only {differs} of 24 depths differed)"
+        );
+    }
+
+    #[test]
+    fn the_tectonic_contact_is_gradual_not_a_seam() {
+        // A hard boundary read as a renderer seam rather than a fault.
+        let p = WorldgenParams::default();
+        let thickness = 60;
+        let ds: Vec<f32> = (0..p.width_cols)
+            .map(|x| tectonic_depth(p.seed, x, 20.0, thickness, &p))
+            .collect();
+        let worst = ds
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 6.0,
+            "structural depth should change smoothly between columns, worst jump {worst}"
         );
     }
 
