@@ -268,6 +268,38 @@ constants per half and ~89%.
 Convection proper — buoyancy from the ground-versus-air difference — is cheap on
 a tile field and is what would turn a steady rain rate into fronts.
 
+## Open bug: weather reads a *static* surface map
+
+`worldgen::continental_surface_y` recomputes the **original** procedural profile
+from the seed. It is not the current terrain, so erosion, collapse, karst
+dissolution and hand edits are all invisible to anything that asks it where the
+ground is.
+
+Consumers, in rough order of how much it matters:
+
+| site | uses it for | consequence |
+|---|---|---|
+| `condensation.rs` `orographic_factors` | elevation/slope for orographic rain | rain keeps falling on a hill that has eroded away, and not on one that has grown |
+| `wind.rs` (several) | upslope/downslope lift | lee and windward sides are fixed at worldgen |
+| `phase.rs` | ground sample | frost/melt decisions on stale ground |
+| `clouds.rs` `surface_y` | cloud floor *baseline* | least affected — `cloud_floor_y` then scans the real world upward from it |
+
+Note the observed lee-side cloud formation is therefore keyed to the **worldgen**
+hill, not the eroded one. It looks right today because the demo world's profile has
+not moved much.
+
+**Why it is not a quick fix.** The honest repair is a maintained live-surface cache
+on `World` — topmost solid per column, invalidated on solidity change, which the
+`competent_wake` plumbing already tracks — plus threading `&World` into
+`orographic_factors` and the `Wind` slope queries, none of which currently take it.
+
+**Do not fix it partially.** Making some consumers live and leaving others stale is
+worse than consistent staleness: orographic rain keyed to live terrain while wind
+lift is keyed to worldgen would put the rain and the lift on different hills.
+
+`cloud_floor_y` is the pattern to copy for the scan itself — procedural value as a
+starting hint, then walk the real column — which keeps the search short.
+
 ## Dead ends, recorded
 
 Do not re-walk these:
