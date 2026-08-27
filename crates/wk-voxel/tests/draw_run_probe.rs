@@ -121,11 +121,11 @@ fn measure(label: &str, params: WorldgenParams) {
             let Some(cell) = world.get_cell(x, y) else {
                 continue;
             };
-            let opaque = !matches!(
-                cell.material,
-                MaterialId::Air | MaterialId::Water | MaterialId::Ice | MaterialId::Snow
-            );
-            if opaque && cell.pore >= 176 {
+            // Mirrors the app's `shows_pore_stipple`: conglomerate only, on
+            // identity. Permeability moved to a quantized hue tint, which merges
+            // into runs; speckling every permeable material cost 23k unmergeable
+            // draw calls to say something sand already says by being sand.
+            if cell.material == MaterialId::Conglomerate {
                 stipples += 1;
             }
         }

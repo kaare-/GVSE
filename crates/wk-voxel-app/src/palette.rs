@@ -109,15 +109,49 @@ pub fn shows_pore_stipple(cell: Cell, hydro: &wk_material::HydroOverrides) -> bo
     ) {
         return false;
     }
-    // Conglomerate is stippled regardless of pore, because *clasts in a matrix*
-    // is what the material is — coarse fragments cemented together. Without it
-    // the rock reads as plain grey and is indistinguishable from stone at a
-    // glance, which is the whole reason it was hard to find in a playtest.
-    if cell.material == MaterialId::Conglomerate {
-        return true;
-    }
-    wk_voxel::permeability_cell(cell, hydro) >= PATH_STIPPLE_MIN
+    // **Only** conglomerate, and on identity rather than any rate: *clasts in a
+    // matrix* is what the material is, and without the marks it reads as plain
+    // grey and is indistinguishable from stone.
+    //
+    // Permeability used to be stippled here and no longer is. Speckling sand said
+    // nothing — sand is visibly permeable already — and the marks competed with
+    // the thing that actually needed distinguishing: rock from rock. That job now
+    // belongs to [`permeability_tint`], which uses hue, leaving brightness free
+    // for water content.
+    let _ = hydro;
+    cell.material == MaterialId::Conglomerate
 }
+
+/// Hue pull toward ochre for conductive rock, quantized to keep runs mergeable.
+///
+/// Rock is otherwise grey on grey, so a fractured vein is invisible next to its
+/// matrix even though water treats them completely differently. Hue is the right
+/// axis because **wetness already owns brightness** — darkening for water content
+/// and tinting for permeability can then be read independently instead of
+/// fighting.
+///
+/// Square-rooted on purpose. Permeability spans 5 (tight stone) to 255
+/// (fractured limestone), and a linear map spends almost all its range on
+/// carbonate while leaving stone's 5..40 — the band the pore field actually
+/// varies — indistinguishable. The curve gives the tight end real resolution.
+fn permeability_tint(cell: Cell, hydro: &wk_material::HydroOverrides) -> f32 {
+    if !wk_voxel::cell::is_competent_rock(cell.material) {
+        return 0.0;
+    }
+    let p = wk_voxel::permeability_cell(cell, hydro) as f32 / 255.0;
+    let t = p.sqrt().clamp(0.0, 1.0);
+    // Quantized like the wetness bucket, or every cell becomes its own draw call.
+    let step = (t * (TINT_LEVELS - 1) as f32).round();
+    step / (TINT_LEVELS - 1) as f32
+}
+
+/// Ochre: warm and desaturated, so it reads as a property of the rock rather than
+/// as a highlight, and stays distinguishable once the cell darkens with water.
+const PERMEABLE_ROCK_RGB: [u8; 3] = [0xD8, 0xC0, 0x60];
+
+/// How far the ochre pull may go. Deliberately partial: this is a readable hint
+/// about the rock, not a heatmap replacing its material colour.
+const PERM_TINT_STRENGTH: f32 = 0.55;
 
 pub fn cell_color(cell: Cell) -> [u8; 3] {
     cell_color_with(cell, &wk_material::HydroOverrides::default(), WET_DARKEN_DEFAULT)
@@ -162,6 +196,17 @@ pub fn cell_color_with(
             lerp_u8(base[1], 55, darken),
             lerp_u8(base[2], 85, darken),
         ];
+        // Conductive rock pulls toward ochre. After darkening so a wet permeable
+        // rock still reads as permeable, and hue-only so the two channels do not
+        // compete.
+        let perm = permeability_tint(cell, hydro);
+        if perm > 0.0 {
+            rgb = [
+                lerp_u8(rgb[0], PERMEABLE_ROCK_RGB[0], perm * PERM_TINT_STRENGTH),
+                lerp_u8(rgb[1], PERMEABLE_ROCK_RGB[1], perm * PERM_TINT_STRENGTH),
+                lerp_u8(rgb[2], PERMEABLE_ROCK_RGB[2], perm * PERM_TINT_STRENGTH),
+            ];
+        }
         // Organic + mineral hosts with mycelium: cream wash (minerals
         // get a stronger floor so Sand/Soil corridors are readable).
         let myc = mycelium_blend(cell.material, cell.mycelium());
@@ -225,63 +270,84 @@ mod tests {
     }
 
     #[test]
-    fn conglomerate_reads_as_clasts_not_plain_grey() {
-        // Playtest could not find conglomerate: a cemented gravel drew as flat
-        // grey. Clasts in a matrix is what the material *is*, so it is marked on
-        // identity rather than on any rate.
+    fn only_conglomerate_is_stippled_now() {
+        // Speckling every permeable material said nothing — sand is visibly
+        // permeable already — and competed with the thing that needed
+        // distinguishing: rock from rock. Permeability moved to hue.
         let h = wk_material::HydroOverrides::default();
-        let mut tight = Cell::solid(MaterialId::Conglomerate);
+        let mut congl = Cell::solid(MaterialId::Conglomerate);
+        congl.pore = 0;
+        assert!(
+            shows_pore_stipple(congl, &h),
+            "conglomerate is clasts in a matrix; that is what the marks say"
+        );
+        for m in [
+            MaterialId::Sand,
+            MaterialId::Gravel,
+            MaterialId::Limestone,
+            MaterialId::Stone,
+        ] {
+            let mut c = Cell::solid(m);
+            c.pore = u8::MAX;
+            assert!(
+                !shows_pore_stipple(c, &h),
+                "{m:?} should carry permeability in its tint, not in speckles"
+            );
+        }
+    }
+
+    #[test]
+    fn conductive_rock_tints_warmer_than_tight_rock() {
+        // Rock is grey on grey, so a fractured vein is invisible beside its matrix
+        // even though water treats them completely differently.
+        let h = wk_material::HydroOverrides::default();
+        let mut tight = Cell::solid(MaterialId::Stone);
         tight.pore = 0;
-        assert!(
-            shows_pore_stipple(tight, &h),
-            "conglomerate should be speckled even when tightly cemented"
-        );
-    }
-
-    #[test]
-    fn the_stipple_marks_water_paths_not_relative_fracture() {
-        // `pore` is relative to a material; permeability is absolute. Stippling
-        // the former marked fractured stone (perm ~40) and left plain gravel
-        // (perm 160) clean, so water appeared to avoid the marked rock and prefer
-        // the gaps between it. Water was right; the overlay was backwards.
-        let h = wk_material::HydroOverrides::default();
-        let gravel = Cell::solid(MaterialId::Gravel);
-        let mut fractured_stone = Cell::solid(MaterialId::Stone);
-        fractured_stone.pore = u8::MAX;
-        assert!(
-            shows_pore_stipple(gravel, &h),
-            "a gravel band is a water path and must be marked"
-        );
-        assert!(
-            wk_voxel::permeability_cell(gravel, &h)
-                > wk_voxel::permeability_cell(fractured_stone, &h),
-            "plain gravel really is more conductive than fractured stone"
-        );
-    }
-
-    #[test]
-    fn only_water_paths_are_stippled() {
-        let h = wk_material::HydroOverrides::default();
-        // Tight silicate stone is not a path, however fractured: matrix 5, and the
-        // fracture tail only reaches ~40.
         let mut fractured = Cell::solid(MaterialId::Stone);
         fractured.pore = u8::MAX;
+        let a = cell_color_with(tight, &h, WET_DARKEN_DEFAULT);
+        let b = cell_color_with(fractured, &h, WET_DARKEN_DEFAULT);
+        // Warmer means red rises faster than blue.
+        let warm = |c: [u8; 3]| c[0] as i32 - c[2] as i32;
         assert!(
-            !shows_pore_stipple(fractured, &h),
-            "fractured stone still does not conduct like a path"
+            warm(b) > warm(a),
+            "fractured stone should read warmer than tight stone ({a:?} vs {b:?})"
         );
-        // Limestone *is* permeable rock (matrix 140), so it is marked on its own
-        // merits rather than needing to be fractured first. That is the point of
-        // keying on permeability: the question is "can water move here", not "is
-        // this cell unusual for its material".
+    }
+
+    #[test]
+    fn the_permeability_tint_leaves_brightness_to_water() {
+        // The two channels must stay readable together: hue for permeability,
+        // brightness for water. If the tint also brightened, a dry tight rock and
+        // a wet permeable one would converge.
+        let h = wk_material::HydroOverrides::default();
+        let mut dry = Cell::solid(MaterialId::Limestone);
+        dry.pore = u8::MAX;
+        let mut wet = dry;
+        wet.sat = wk_voxel::Sat(wk_voxel::water_capacity_cell(wet, &h));
+        let d = cell_color_with(dry, &h, WET_DARKEN_DEFAULT);
+        let w = cell_color_with(wet, &h, WET_DARKEN_DEFAULT);
+        let lum = |c: [u8; 3]| c[0] as i32 + c[1] as i32 + c[2] as i32;
         assert!(
-            shows_pore_stipple(Cell::solid(MaterialId::Limestone), &h),
-            "limestone conducts and should read as a path"
+            lum(w) < lum(d),
+            "wet rock must still be darker than dry rock at the same permeability"
         );
-        // Never mark non-porous media.
-        let mut air = Cell::air();
-        air.pore = 255;
-        assert!(!shows_pore_stipple(air, &h));
+    }
+
+    #[test]
+    fn permeability_tints_are_quantized_so_runs_still_merge() {
+        let h = wk_material::HydroOverrides::default();
+        let mut seen = std::collections::HashSet::new();
+        for pore in 0..=255u8 {
+            let mut c = Cell::solid(MaterialId::Stone);
+            c.pore = pore;
+            seen.insert(cell_color_with(c, &h, 0.0));
+        }
+        assert!(
+            seen.len() <= TINT_LEVELS as usize,
+            "256 pore values must collapse to at most {TINT_LEVELS} colours, got {}",
+            seen.len()
+        );
     }
 
     #[test]
