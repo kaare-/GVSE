@@ -135,11 +135,21 @@ pub fn shows_pore_stipple(cell: Cell, hydro: &wk_material::HydroOverrides) -> bo
 /// carbonate while leaving stone's 5..40 — the band the pore field actually
 /// varies — indistinguishable. The curve gives the tight end real resolution.
 fn permeability_tint(cell: Cell, hydro: &wk_material::HydroOverrides) -> f32 {
-    if !wk_voxel::cell::is_competent_rock(cell.material) {
+    // **Stone only.** Stone is most of the map, so extra detail about it is worth
+    // spending a colour channel on. The other rocks arrive in narrow bands where
+    // their material colour already says enough, and tinting them too made the
+    // whole map warm and drowned out the one signal that mattered.
+    if cell.material != MaterialId::Stone {
         return 0.0;
     }
-    let p = wk_voxel::permeability_cell(cell, hydro) as f32 / 255.0;
-    let t = p.sqrt().clamp(0.0, 1.0);
+    // Normalised against stone's **own** permeability range, not the 0..255 byte.
+    // Stone spans roughly 5..40, so a global scale would confine it to the bottom
+    // sixth of the ochre ramp and waste the resolution exactly where it is wanted.
+    let range = MaterialRegistry::hydrology_with(cell.material, hydro).permeability;
+    let (lo, hi) = (range.min as f32, range.max as f32);
+    let span = (hi - lo).max(1.0);
+    let p = wk_voxel::permeability_cell(cell, hydro) as f32;
+    let t = ((p - lo) / span).clamp(0.0, 1.0);
     // Quantized like the wetness bucket, or every cell becomes its own draw call.
     let step = (t * (TINT_LEVELS - 1) as f32).round();
     step / (TINT_LEVELS - 1) as f32
@@ -316,12 +326,57 @@ mod tests {
     }
 
     #[test]
+    fn only_stone_carries_the_permeability_tint() {
+        // Stone is most of the map, so detail there is worth a colour channel. The
+        // other rocks arrive in narrow bands where their own colour says enough,
+        // and tinting them made the whole map warm and drowned out the signal.
+        let h = wk_material::HydroOverrides::default();
+        for m in [
+            MaterialId::Limestone,
+            MaterialId::Flowstone,
+            MaterialId::Sandstone,
+            MaterialId::Conglomerate,
+        ] {
+            let mut tight = Cell::solid(m);
+            tight.pore = 0;
+            let mut open = Cell::solid(m);
+            open.pore = u8::MAX;
+            assert_eq!(
+                cell_color_with(tight, &h, 0.0),
+                cell_color_with(open, &h, 0.0),
+                "{m:?} must not shift with permeability"
+            );
+        }
+    }
+
+    #[test]
+    fn stone_uses_the_whole_ochre_ramp() {
+        // Normalised against stone's own 5..40 range rather than the 0..255 byte:
+        // a global scale would confine stone to the bottom sixth of the ramp and
+        // waste the resolution exactly where it is wanted.
+        let h = wk_material::HydroOverrides::default();
+        let mut tight = Cell::solid(MaterialId::Stone);
+        tight.pore = 0;
+        let mut open = Cell::solid(MaterialId::Stone);
+        open.pore = u8::MAX;
+        let warm = |c: Cell| {
+            let rgb = cell_color_with(c, &h, 0.0);
+            rgb[0] as i32 - rgb[2] as i32
+        };
+        let spread = warm(open) - warm(tight);
+        assert!(
+            spread > 40,
+            "stone should span a wide ochre range, got {spread}"
+        );
+    }
+
+    #[test]
     fn the_permeability_tint_leaves_brightness_to_water() {
         // The two channels must stay readable together: hue for permeability,
         // brightness for water. If the tint also brightened, a dry tight rock and
         // a wet permeable one would converge.
         let h = wk_material::HydroOverrides::default();
-        let mut dry = Cell::solid(MaterialId::Limestone);
+        let mut dry = Cell::solid(MaterialId::Stone);
         dry.pore = u8::MAX;
         let mut wet = dry;
         wet.sat = wk_voxel::Sat(wk_voxel::water_capacity_cell(wet, &h));
