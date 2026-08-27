@@ -17,7 +17,7 @@ use crate::humidity::Humidity;
 use crate::phase::PhaseConfig;
 use crate::temperature::Temperature;
 use crate::wind::Wind;
-use crate::worldgen::continental_surface_y;
+use crate::worldgen::{continental_surface_y, live_surface_at};
 
 /// Soft cap so cartoon skies stay readable (default for [`CloudConfig`]).
 pub const MAX_CLOUD_PARCELS: usize = 36;
@@ -550,8 +550,9 @@ fn pick_spread_across_x(
     out
 }
 
-fn surface_y(wind: &Wind, fx: f32) -> f32 {
-    continental_surface_y(
+fn surface_y(world: &World, wind: &Wind, fx: f32) -> f32 {
+    live_surface_at(
+        world,
         wind.seed,
         fx.round() as i32,
         wind.sea_level_y,
@@ -626,7 +627,7 @@ const CLOUD_BASE_MIN_FRAC: f32 = 0.55;
 const CLOUD_BASE_SPAN_FRAC: f32 = 0.90;
 
 pub fn cloud_floor_y(world: &World, wind: &Wind, fx: f32) -> f32 {
-    let rock = surface_y(wind, fx);
+    let rock = surface_y(world, wind, fx);
     let gx = world.wrap_x(fx.round() as i32);
     let rock_i = rock as i32;
     let sky = sky_top_cell(wind).max(rock_i);
@@ -884,6 +885,50 @@ mod tests {
         assert!(
             floor >= top as f32,
             "cloud/humidity floor {floor} must sit on the tower top {top} (worldgen rock {rock})"
+        );
+    }
+
+    #[test]
+    fn cloud_floor_drops_when_the_hill_erodes() {
+        // surface_y used to return the seed profile, and cloud_floor_y then
+        // did `found.max(rock)`. Eroding a mountain left the floor sitting
+        // on the stale peak — clouds hovering over a hole.
+        let p = WorldgenParams::default();
+        let wind = wind_for(&p);
+        let mut gx = None;
+        let mut hint = 0;
+        for x in 0..p.width_cols {
+            let s = continental_surface_y(p.seed, x, p.sea_level_y, p.width_cols);
+            if s >= p.sea_level_y + 22 {
+                gx = Some(x);
+                hint = s;
+                break;
+            }
+        }
+        let gx = gx.expect("need a mountain column");
+        let mut world = World::new(p.seed);
+        for y in p.sea_level_y..=hint {
+            world.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(CHUNK_CELLS_W as i32),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+            world.set_cell(gx, y, Cell::solid(MaterialId::Stone));
+        }
+        let before = cloud_floor_y(&world, &wind, gx as f32);
+        assert!(
+            (before - hint as f32).abs() < 2.0,
+            "stacked hill should sit at the seed profile ({hint}), got {before}"
+        );
+
+        for y in (p.sea_level_y + 1)..=hint {
+            world.set_cell(gx, y, Cell::air());
+        }
+        world.set_cell(gx, p.sea_level_y, Cell::solid(MaterialId::Stone));
+        let after = cloud_floor_y(&world, &wind, gx as f32);
+        assert!(
+            after < before - 8.0,
+            "eroded hill must drop the cloud floor ({before} → {after}), \
+             not sit on the stale profile {hint}"
         );
     }
 

@@ -299,37 +299,35 @@ currently receive.
 forever. Production advances it; a test did not and now does. Same footgun as the
 fractional seepage gate.
 
-## Open bug: weather reads a *static* surface map
+## Weather reads the *live* surface (**landed**)
 
-`worldgen::continental_surface_y` recomputes the **original** procedural profile
-from the seed. It is not the current terrain, so erosion, collapse, karst
-dissolution and hand edits are all invisible to anything that asks it where the
-ground is.
+`worldgen::continental_surface_y` still recomputes the original procedural
+profile — worldgen needs that. Every weather consumer that asks where the ground
+*is* now goes through `live_surface_at`: same value as a hint, then a short walk
+of the live column (`LIVE_SURFACE_SEARCH` = 64). Unloaded columns keep the hint,
+so tests and HUD that have no grid yet degrade to today's behaviour.
 
-Consumers, in rough order of how much it matters:
+All five consumers flipped together. Partial would have been worse than stale:
+orographic rain on the live hill and wind lift on the seed hill would put rain
+and lift on different mountains.
 
-| site | uses it for | consequence |
-|---|---|---|
-| `condensation.rs` `orographic_factors` | elevation/slope for orographic rain | rain keeps falling on a hill that has eroded away, and not on one that has grown |
-| `wind.rs` (several) | upslope/downslope lift | lee and windward sides are fixed at worldgen |
-| `phase.rs` | ground sample | frost/melt decisions on stale ground |
-| `clouds.rs` `surface_y` | cloud floor *baseline* | least affected — `cloud_floor_y` then scans the real world upward from it |
+| site | uses it for |
+|---|---|
+| `condensation.rs` `orographic_factors` | elevation/slope for orographic rain |
+| `wind.rs` (`orographic_lift`, `ascent_cells`, `is_tall_terrain`) | upslope/downslope lift |
+| `phase.rs` `column_may_phase` | where to start the frost/melt scan |
+| `clouds.rs` `surface_y` | cloud floor baseline (the walk *up* from it already existed; `.max(rock)` was pinning the floor to a peak that had eroded away) |
+| `temperature.rs` skin / thermal-props window | lapse, land/sea bias, and the cheap scan band |
 
-Note the observed lee-side cloud formation is therefore keyed to the **worldgen**
-hill, not the eroded one. It looks right today because the demo world's profile has
-not moved much.
+A maintained per-column cache was the other honest option. It needs invalidation
+on every solidity change, and `set_cell` is hot enough that the extra write was
+not worth it: terrain moves locally, the procedural hint stays close, and the
+walk is a few cells.
 
-**Why it is not a quick fix.** The honest repair is a maintained live-surface cache
-on `World` — topmost solid per column, invalidated on solidity change, which the
-`competent_wake` plumbing already tracks — plus threading `&World` into
-`orographic_factors` and the `Wind` slope queries, none of which currently take it.
-
-**Do not fix it partially.** Making some consumers live and leaving others stale is
-worse than consistent staleness: orographic rain keyed to live terrain while wind
-lift is keyed to worldgen would put the rain and the lift on different hills.
-
-`cloud_floor_y` is the pattern to copy for the scan itself — procedural value as a
-starting hint, then walk the real column — which keeps the search short.
+**Still open: humidity advection is uniform.** `Humidity::advect` takes one
+`(vx, vy)` for the whole sky. `Wind::vy_at` now knows the live slope but nothing
+calls it on the advection path — lift methods are ready, the coupling is not.
+That is a behaviour change of its own, not this bug.
 
 ## Dead ends, recorded
 

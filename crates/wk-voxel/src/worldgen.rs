@@ -245,6 +245,17 @@ pub fn live_surface_y(world: &World, gx: i32, hint: i32, search: i32) -> i32 {
 /// cannot make a per-tile query expensive.
 pub const LIVE_SURFACE_SEARCH: i32 = 64;
 
+/// Live top-of-column: procedural profile as the hint, then walk the world.
+///
+/// This is what every weather consumer should call instead of
+/// [`continental_surface_y`]. An unloaded column degrades to the hint, so
+/// callers that used to read the seed profile keep working.
+#[inline]
+pub fn live_surface_at(world: &World, seed: u64, gx: i32, sea: i32, width_cols: i32) -> i32 {
+    let hint = continental_surface_y(seed, gx, sea, width_cols);
+    live_surface_y(world, gx, hint, LIVE_SURFACE_SEARCH)
+}
+
 /// Fraction of the world occupied by the overturned block.
 const TECTONIC_BLOCK_FRAC: f32 = 0.16;
 /// Width of the blend at each edge of the block, as a fraction of its own width.
@@ -470,6 +481,11 @@ mod lens_tests {
             live_surface_y(&w, x, hint, LIVE_SURFACE_SEARCH),
             hint,
             "an untouched column should agree with the procedural profile"
+        );
+        assert_eq!(
+            live_surface_at(&w, p.seed, x, p.sea_level_y, p.width_cols),
+            hint,
+            "live_surface_at is the hint-then-walk helper weather uses"
         );
 
         // Erode the top eight cells away.

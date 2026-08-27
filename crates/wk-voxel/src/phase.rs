@@ -34,7 +34,7 @@ use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::rules::{deposit_water_on_surface, is_standing_water};
 use crate::temperature::Temperature;
-use crate::worldgen::continental_surface_y;
+use crate::worldgen::live_surface_at;
 
 /// Freeze / thaw knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -189,7 +189,7 @@ fn column_may_phase(world: &World, gx: i32, temp: &Temperature, cfg: &PhaseConfi
     // paid ~4 ms walking empty sky from the ceiling.
     const BAND: i32 = 12;
     const SKY_SLACK: i32 = 32;
-    let rock = continental_surface_y(temp.seed, gx, temp.sea_level_y, temp.width_cols);
+    let rock = live_surface_at(world, temp.seed, gx, temp.sea_level_y, temp.width_cols);
     let start = rock
         .max(temp.sea_level_y)
         .saturating_add(SKY_SLACK)

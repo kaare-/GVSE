@@ -5099,6 +5099,106 @@ fn orographic_boost_rains_thinner_clouds_over_tall_land() {
 }
 
 #[test]
+fn orographic_boost_stops_when_the_hill_is_flattened() {
+    // The seed profile is still a mountain after we carve the live column
+    // down to sea. Rain must follow the live hill, or orographic dump keeps
+    // falling on a peak that is no longer there.
+    use crate::worldgen::WorldgenParams;
+    let p = WorldgenParams::default();
+    let tc = 4;
+    let mut tall_hx = None;
+    for hx in 0..(p.width_cols / tc) {
+        let gx = hx * tc + tc / 2;
+        let s = crate::worldgen::continental_surface_y(
+            p.seed,
+            gx,
+            p.sea_level_y,
+            p.width_cols,
+        );
+        if s >= p.sea_level_y + 22 {
+            tall_hx = Some(hx);
+            break;
+        }
+    }
+    let tall_hx = tall_hx.expect("worldgen should have tall land");
+    let centre_gx = tall_hx * tc + tc / 2;
+    let surface = crate::worldgen::continental_surface_y(
+        p.seed,
+        centre_gx,
+        p.sea_level_y,
+        p.width_cols,
+    );
+
+    let mut w = World::new(p.seed);
+    for y in p.sea_level_y..=surface {
+        w.ensure_chunk(ChunkCoord::new(
+            centre_gx.div_euclid(CHUNK_CELLS_W as i32),
+            y.div_euclid(CHUNK_CELLS_H as i32),
+        ));
+        w.set_cell(centre_gx, y, Cell::solid(MaterialId::Stone));
+    }
+    let sky = surface + 12;
+    for y in (surface + 1)..=sky {
+        w.ensure_chunk(ChunkCoord::new(
+            centre_gx.div_euclid(CHUNK_CELLS_W as i32),
+            y.div_euclid(CHUNK_CELLS_H as i32),
+        ));
+        w.set_cell(centre_gx, y, Cell::air());
+    }
+
+    let oro = OrographicConfig {
+        seed: p.seed,
+        width_cols: p.width_cols,
+        sea_level_y: p.sea_level_y,
+        tall_above_sea: 22,
+        wind_sign: 1,
+        ..OrographicConfig::default()
+    };
+    let cfg = CondensationConfig {
+        top_y: sky,
+        min_mass_to_rain: 64.0,
+        max_prob_per_tick: 1.0,
+        full_mass: 120.0,
+        mass_per_droplet: 24.0,
+        ..CondensationConfig::default()
+    };
+
+    let mut h_hill = crate::humidity::Humidity::new(tc);
+    h_hill.add(centre_gx, sky, 50.0);
+    let before_hill = h_hill.total_mass();
+    for _ in 0..40 {
+        apply_condensation_rain_with_orographic(&mut w, &mut h_hill, &cfg, Some(&oro));
+        w.tick = w.tick.wrapping_add(1);
+        if h_hill.total_mass() < before_hill {
+            break;
+        }
+    }
+    assert!(
+        h_hill.total_mass() < before_hill,
+        "thin cloud should still rain on the live hill"
+    );
+
+    for y in (p.sea_level_y + 1)..=surface {
+        w.set_cell(centre_gx, y, Cell::air());
+    }
+    w.set_cell(centre_gx, p.sea_level_y, Cell::solid(MaterialId::Stone));
+
+    let mut h_flat = crate::humidity::Humidity::new(tc);
+    h_flat.add(centre_gx, sky, 50.0);
+    let before_flat = h_flat.total_mass();
+    for _ in 0..40 {
+        apply_condensation_rain_with_orographic(&mut w, &mut h_flat, &cfg, Some(&oro));
+        w.tick = w.tick.wrapping_add(1);
+    }
+    assert_eq!(
+        h_flat.total_mass(),
+        before_flat,
+        "flattening the live hill must drop the orographic boost; \
+         the seed profile is still a mountain"
+    );
+}
+
+#[test]
 fn karst_low_sat_neighbour_does_not_dissolve() {
     // Air cell above limestone has sat below threshold → no
     // dissolution.

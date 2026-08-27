@@ -161,7 +161,7 @@ pub fn apply_condensation_rain_phased(
     for (hx, hy) in tiles {
         let mass = humidity.at_tile(hx, hy);
         let (mut prob_mult, mut mass_mult, mut min_mass) = match oro {
-            Some(o) => orographic_factors(o, hx, tile_cols, cfg.min_mass_to_rain),
+            Some(o) => orographic_factors(world, o, hx, tile_cols, cfg.min_mass_to_rain),
             None => (1.0, 1.0, cfg.min_mass_to_rain),
         };
         let mut full_mass = cfg.full_mass;
@@ -280,18 +280,19 @@ pub fn apply_condensation_rain_phased(
 }
 
 fn orographic_factors(
+    world: &crate::grid::World,
     oro: &OrographicConfig,
     hx: i32,
     tile_cols: i32,
     base_min_mass: f32,
 ) -> (f32, f32, f32) {
-    use crate::worldgen::continental_surface_y;
+    use crate::worldgen::live_surface_at;
     let tc = tile_cols.max(1);
     let gx = hx * tc + tc / 2;
     let sign = if oro.wind_sign >= 0 { 1 } else { -1 };
     let gx_up = gx - sign * tc;
-    let s_here = continental_surface_y(oro.seed, gx, oro.sea_level_y, oro.width_cols);
-    let s_up = continental_surface_y(oro.seed, gx_up, oro.sea_level_y, oro.width_cols);
+    let s_here = live_surface_at(world, oro.seed, gx, oro.sea_level_y, oro.width_cols);
+    let s_up = live_surface_at(world, oro.seed, gx_up, oro.sea_level_y, oro.width_cols);
     let ascent = (s_here - s_up) as f32;
     let tall = s_here >= oro.sea_level_y + oro.tall_above_sea;
     if !tall && ascent <= 2.0 {
