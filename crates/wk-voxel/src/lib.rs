@@ -212,4 +212,6 @@ pub use sim_preset::{
     PRESET_EXT, PRESET_SCHEMA_VERSION,
 };
 pub use worldgen::is_karst_zone_x;
-pub use worldgen::{continental_surface_y, stamp_world, WorldgenParams};
+pub use worldgen::{
+    continental_surface_y, live_surface_y, stamp_world, WorldgenParams, LIVE_SURFACE_SEARCH,
+};

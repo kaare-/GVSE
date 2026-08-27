@@ -191,6 +191,60 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea: i32, width_cols: i32)
 ///
 /// Palette reminder: Stone is cool mid-grey, Limestone is warm pale
 /// tan, Clay is brown, Gravel is sandy-tan, LooseRock is dark cobble.
+/// Topmost solid cell in a column of the **live** world, found by walking from a
+/// hint.
+///
+/// [`continental_surface_y`] recomputes the *original* procedural profile from the
+/// seed, so erosion, collapse, karst dissolution and hand edits are invisible to
+/// it. Every weather consumer that asks where the ground is has been reading that
+/// stale value.
+///
+/// Walking from a hint rather than caching is deliberate. A maintained cache needs
+/// invalidation on every solidity change, and `set_cell` is hot enough that the
+/// extra read was worth avoiding; terrain also moves *locally*, so the procedural
+/// value stays a good hint indefinitely and the walk is a few cells. Same pattern
+/// `clouds::cloud_floor_y` already uses.
+///
+/// Returns the hint unchanged when the column is not loaded, so callers degrade to
+/// today's behaviour rather than to zero.
+pub fn live_surface_y(world: &World, gx: i32, hint: i32, search: i32) -> i32 {
+    let jx = world.wrap_x(gx);
+    let solid_at = |y: i32| {
+        matches!(world.get_cell(jx, y), Some(c) if c.material.is_solid())
+    };
+    if world.get_cell(jx, hint).is_none() {
+        return hint;
+    }
+    if solid_at(hint) {
+        // Ground has risen (deposition, landslide): climb to the top of the stack.
+        let mut y = hint;
+        for _ in 0..search {
+            if !solid_at(y + 1) {
+                return y;
+            }
+            y += 1;
+        }
+        return y;
+    }
+    // Ground has fallen (erosion, dissolution): descend to the first solid.
+    let mut y = hint;
+    for _ in 0..search {
+        y -= 1;
+        if solid_at(y) {
+            return y;
+        }
+    }
+    // Nothing found within the search window — keep the hint rather than inventing
+    // a surface far below, which would put weather underground.
+    hint
+}
+
+/// How far [`live_surface_y`] walks before giving up and trusting the hint.
+///
+/// Generous enough for real erosion and collapse, bounded so a pathological column
+/// cannot make a per-tile query expensive.
+pub const LIVE_SURFACE_SEARCH: i32 = 64;
+
 /// Fraction of the world occupied by the overturned block.
 const TECTONIC_BLOCK_FRAC: f32 = 0.16;
 /// Width of the blend at each edge of the block, as a fraction of its own width.
@@ -400,6 +454,62 @@ mod lens_tests {
             "lens noise must be much smoother than white noise \
              (lens={lens_delta:.2} white={white_delta:.2})"
         );
+    }
+
+    #[test]
+    fn the_live_surface_follows_erosion_and_deposition() {
+        // continental_surface_y recomputes the *original* profile, so every weather
+        // consumer that asks where the ground is has been reading a map from
+        // worldgen. This is the replacement they need.
+        let p = WorldgenParams::default();
+        let mut w = World::new(p.seed);
+        stamp_world(&mut w, &p);
+        let x = 300;
+        let hint = continental_surface_y(p.seed, x, p.sea_level_y, p.width_cols);
+        assert_eq!(
+            live_surface_y(&w, x, hint, LIVE_SURFACE_SEARCH),
+            hint,
+            "an untouched column should agree with the procedural profile"
+        );
+
+        // Erode the top eight cells away.
+        for dy in 0..8 {
+            w.set_cell(x, hint - dy, Cell::air());
+        }
+        assert_eq!(
+            live_surface_y(&w, x, hint, LIVE_SURFACE_SEARCH),
+            hint - 8,
+            "the surface should descend with erosion"
+        );
+
+        // Pile five cells back on top of the original level.
+        for dy in 1..=5 {
+            w.set_cell(x, hint + dy, Cell::solid(MaterialId::Sand));
+        }
+        // The hint is now buried, so this exercises the climbing branch.
+        assert_eq!(
+            live_surface_y(&w, x, hint + 1, LIVE_SURFACE_SEARCH),
+            hint + 5,
+            "the surface should rise with deposition"
+        );
+    }
+
+    #[test]
+    fn the_live_surface_keeps_the_hint_when_it_cannot_do_better() {
+        // Degrading to today's behaviour beats inventing a surface: an unloaded
+        // column must not report the bottom of the search window, which would put
+        // weather underground.
+        let p = WorldgenParams::default();
+        let w = World::new(p.seed); // nothing stamped
+        assert_eq!(live_surface_y(&w, 10, 50, LIVE_SURFACE_SEARCH), 50);
+
+        // A deep air shaft with no solid inside the window also keeps the hint.
+        let mut w2 = World::new(p.seed);
+        w2.ensure_chunk(crate::chunk::ChunkCoord::new(0, 0));
+        for y in 0..64 {
+            w2.set_cell(5, y, Cell::air());
+        }
+        assert_eq!(live_surface_y(&w2, 5, 60, 8), 60);
     }
 
     #[test]
