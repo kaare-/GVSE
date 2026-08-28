@@ -271,8 +271,6 @@ pub fn apply_condensation_rain_phased(
             continue;
         }
         // Drain the humidity tile by the mass that landed (clamp to tile).
-        // The 4×4 overlay keeps painting this seat from a neighbour so
-        // only the 1-wide drop carves the field.
         let entry = humidity.cells.entry((hx, hy)).or_insert(0.0);
         *entry -= landed.min(*entry);
         if *entry < 1e-6 {

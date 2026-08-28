@@ -345,17 +345,21 @@ the *current* surface, not the seed profile. Flatten the downwind face and
 the loft stops.
 
 **The 4×4 field and the 1-wide path.** Humidity is a tile store. `H`
-paints occupied tiles only. A drop nucleates in the centre column;
-that column is left open from the drop downward — every haze block
-under it. Cells that remain may bilinear-sample the store (wrapped
-on the ring) so the wash has no tile facets. Resampling must not
-invent neighbour seats or paint under the drop; that was the 4-wide
-hole. Draw uses wrapped world-x so the ring seam is not stacked.
+paints each occupied tile as four column rects (the old overlay). A
+drop nucleates in the centre column. That column is left open from the
+drop downward — every haze block under it — so the field keeps its
+4-wide seats and the rain is a 1-wide shaft. Neighbour tiles are not
+resampled or refilled. Draw uses wrapped world-x so the ring seam is
+not painted twice.
 
 ## Dead ends, recorded
 
 Do not re-walk these:
 
+- **Bilinear haze overlay.** Sampling the 4×4 store per remaining cell after
+  the 1-wide shaft still punched 4-wide holes: an emptied nucleating tile
+  reads as zero, and the 12% alpha floor ate neighbour columns. Playtest
+  showed both streak widths at once. Keep column rects; do not resample `H`.
 - **Precipitation event cap.** 966 tiles competing for 48 slots looks like a 20×
   oversubscription and is not binding: sweeping `max_events_per_tick` 48 → 1024
   moved equilibrium humidity by *one unit*.
