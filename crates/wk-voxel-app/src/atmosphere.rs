@@ -13,7 +13,7 @@ use wk_voxel::{
     precip_cover_fraction, resolve_organism_draw_cells, shade_transmit_column,
     sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, CloudStore, Humidity,
     ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World,
-    GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_SEARCH,
+    CHUNK_CELLS_H, CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_SEARCH,
 };
 
 /// Active-layer parcel parallax (1 = locked to terrain; lower = farther).
@@ -247,58 +247,57 @@ fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
     out
 }
 
-/// 4×4 haze seats: every occupied tile, plus any empty horizontal
-/// neighbour so a drop that paid the whole tile does not leave a
-/// 4-wide hole. Neighbour keys wrap on a ring — raw `hx ± 1` plus
-/// `x_copies` painted the world seam twice.
-fn haze_seats(humidity: &Humidity, sky_hy_min: i32) -> HashMap<(i32, i32), f32> {
-    let mut seats: HashMap<(i32, i32), f32> = HashMap::new();
-    for (&(hx, hy), &mass) in &humidity.cells {
-        if mass <= 0.0 || hy < sky_hy_min {
-            continue;
-        }
-        seats.insert((hx, hy), mass);
+/// True when this cell is the falling drop (1-wide water / flake), not vapour.
+fn haze_cell_is_drop_cell(c: wk_voxel::Cell) -> bool {
+    if c.material == MaterialId::Air && c.sat.0 > GRAIN_REPOSE_HAZE_MAX {
+        return true;
     }
-    for (&(hx, hy), &mass) in &humidity.cells {
-        if mass <= 0.0 || hy < sky_hy_min {
-            continue;
-        }
-        for dx in [-1, 1] {
-            let Some(nhx) = humidity.wrap_tile_x(hx + dx) else {
-                continue;
-            };
-            if humidity.at_tile(nhx, hy) > 1e-3 {
-                continue;
-            }
-            seats
-                .entry((nhx, hy))
-                .and_modify(|m| *m = m.max(mass))
-                .or_insert(mass);
-        }
-    }
-    seats
+    falls_through_empty_air(c.material)
 }
 
-/// True when this cell is the falling drop (1-wide water / flake), not vapour.
 fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
     match world.get_cell(gx, gy) {
-        Some(c) if c.material == MaterialId::Air && c.sat.0 > GRAIN_REPOSE_HAZE_MAX => true,
-        Some(c) if falls_through_empty_air(c.material) => true,
-        _ => false,
+        Some(c) => haze_cell_is_drop_cell(c),
+        None => false,
     }
 }
 
-/// Soften a 4×4 seat with bilinear, but never undercut the seat mass.
-///
-/// Sampling the store on a tile a drop just emptied returns 0 and
-/// opens a 4-wide hole. The seat (occupied mass, or a neighbour's
-/// fill) is the 4×4 field; bilinear only blends wet tiles.
-fn haze_seat_sample(humidity: &Humidity, gx: f32, gy: f32, seat: f32) -> f32 {
-    let sampled = humidity.sample_bilinear(gx, gy);
-    if sampled >= seat * 0.45 {
-        sampled
+/// Highest drop in each column. Haze below that cell is the open path.
+fn collect_drop_tops(world: &World) -> HashMap<i32, i32> {
+    let mut tops: HashMap<i32, i32> = HashMap::new();
+    let cw = CHUNK_CELLS_W as i32;
+    let ch = CHUNK_CELLS_H as i32;
+    for chunk in world.chunks.values() {
+        if !chunk.has_wet_air && !chunk.has_snow && !chunk.has_buoyant {
+            continue;
+        }
+        let ox = chunk.coord.cx * cw;
+        let oy = chunk.coord.cy * ch;
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                if !haze_cell_is_drop_cell(chunk.get(lx, ly)) {
+                    continue;
+                }
+                let gx = world.wrap_x(ox + lx as i32);
+                let gy = oy + ly as i32;
+                tops.entry(gx).and_modify(|y| *y = (*y).max(gy)).or_insert(gy);
+            }
+        }
+    }
+    tops
+}
+
+/// Inclusive bottom of the 4×4 column still painted. Everything at or
+/// under the drop is left open — the 1-wide path through the field.
+fn haze_column_y0(y0: i32, y1: i32, drop_y: Option<i32>) -> Option<i32> {
+    let y0 = match drop_y {
+        Some(d) => (d + 1).max(y0),
+        None => y0,
+    };
+    if y0 >= y1 {
+        None
     } else {
-        seat
+        Some(y0)
     }
 }
 
@@ -1068,11 +1067,10 @@ fn draw_ridge_band(
 
 /// Humidity tile diagnostic (front of terrain) + sparse wind streaks.
 ///
-/// This is the `H` overlay — 4×4 seats clipped to ground. A drop is
-/// 1-wide water in the grid: skip those cells, and keep painting a
-/// seat a drop emptied from its neighbour. Bilinear may soften a wet
-/// seat; it must not replace an emptied seat with zero. Soft cloud
-/// banks are separate (`N` / [`draw_depth_cloud_layer`]).
+/// This is the `H` overlay — one rect per column of each occupied 4×4
+/// tile. A drop in the middle of the field opens that column from the
+/// drop downward, so the path under it is empty. Soft cloud banks are
+/// separate (`N` / [`draw_depth_cloud_layer`]).
 pub fn draw_haze_and_wind(
     humidity: &Humidity,
     world: &World,
@@ -1098,12 +1096,16 @@ pub fn draw_haze_and_wind(
             .max(1.0);
         let tc = humidity.tile_cols.max(1);
         let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
-        let seats = haze_seats(humidity, sky_hy_min);
+        let drop_tops = collect_drop_tops(world);
 
-        for ((hx, hy), seat) in seats {
-            let Some(hx) = humidity.wrap_tile_x(hx) else {
+        for (&(hx, hy), &mass) in &humidity.cells {
+            if mass <= 0.0 || hy < sky_hy_min {
                 continue;
-            };
+            }
+            let alpha = humidity_haze_alpha(mass, max_mass);
+            if alpha == 0 {
+                continue;
+            }
             let base_gx = hx * tc;
             let base_gy = hy * tc;
             let center_x = world.wrap_x(base_gx + tc / 2);
@@ -1115,51 +1117,25 @@ pub fn draw_haze_and_wind(
             }
             for col in 0..tc {
                 let wx = world.wrap_x(base_gx + col);
-                let mut run = y0;
-                while run < y1 {
-                    while run < y1 && haze_cell_is_drop(world, wx, run) {
-                        run += 1;
+                let Some(col_y0) = haze_column_y0(y0, y1, drop_tops.get(&wx).copied())
+                else {
+                    continue;
+                };
+                for &x_copy in x_copies {
+                    let sx = origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
+                    let top_sy = origin_y - (y1 - bedrock_floor_y) as f32 * cell_px;
+                    let bot_sy = origin_y - (col_y0 - bedrock_floor_y) as f32 * cell_px;
+                    let h = (bot_sy - top_sy).max(1.0);
+                    if sx + cell_px < 0.0 || sx > sw || top_sy > sh || top_sy + h < 0.0 {
+                        continue;
                     }
-                    if run >= y1 {
-                        break;
-                    }
-                    let mut end = run + 1;
-                    while end < y1 && !haze_cell_is_drop(world, wx, end) {
-                        end += 1;
-                    }
-                    for gy in run..end {
-                        let mass = haze_seat_sample(
-                            humidity,
-                            wx as f32 + 0.5,
-                            gy as f32 + 0.5,
-                            seat,
-                        );
-                        let alpha = humidity_haze_alpha(mass, max_mass);
-                        if alpha == 0 {
-                            continue;
-                        }
-                        for &x_copy in x_copies {
-                            let sx =
-                                origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
-                            let top_sy =
-                                origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
-                            if sx + cell_px < 0.0
-                                || sx > sw
-                                || top_sy > sh
-                                || top_sy + cell_px < 0.0
-                            {
-                                continue;
-                            }
-                            draw_rectangle(
-                                sx,
-                                top_sy,
-                                cell_px + 0.5,
-                                cell_px + 0.5,
-                                Color::from_rgba(255, 255, 255, alpha),
-                            );
-                        }
-                    }
-                    run = end;
+                    draw_rectangle(
+                        sx,
+                        top_sy,
+                        cell_px + 0.5,
+                        h,
+                        Color::from_rgba(255, 255, 255, alpha),
+                    );
                 }
             }
         }
@@ -1922,7 +1898,7 @@ pub fn estimate_snow_bias(
 #[cfg(test)]
 mod tests {
     use super::{
-        gather_soft_cloud_srcs, haze_cell_is_drop, haze_seat_sample, haze_seats,
+        collect_drop_tops, gather_soft_cloud_srcs, haze_cell_is_drop, haze_column_y0,
         humidity_haze_alpha, stamp_pixel_cloud_mask, CloudDepthLayer,
     };
     use std::collections::HashMap;
@@ -2011,39 +1987,6 @@ mod tests {
     }
 
     #[test]
-    fn haze_seats_wrap_and_fill_at_the_ring_seam() {
-        let mut h = Humidity::with_world_bounds(4, 0, 0, 1024, 256);
-        h.wrap_x = true;
-        h.add(0, 100, 50.0);
-        let seats = haze_seats(&h, 0);
-        assert!(
-            seats.keys().all(|&(hx, _)| (0..=255).contains(&hx)),
-            "ghost hx=-1/256 double-paints the seam via x_copies"
-        );
-        assert!((seats[&(0, 25)] - 50.0).abs() < 1e-3);
-        assert!(
-            seats.get(&(255, 25)).copied().unwrap_or(0.0) >= 50.0,
-            "empty wrapped neighbour must keep the 4×4 seat"
-        );
-        assert!(!seats.contains_key(&(-1, 25)));
-        assert!(!seats.contains_key(&(256, 25)));
-    }
-
-    #[test]
-    fn haze_seat_sample_keeps_an_emptied_tile() {
-        let mut h = Humidity::new(4);
-        h.cells.insert((0, 1), 80.0);
-        // Tile 1 paid for a drop and is gone from the store.
-        let emptied = haze_seat_sample(&h, 6.0, 6.0, 80.0);
-        assert!(
-            (emptied - 80.0).abs() < 1e-3,
-            "bilinear of an empty tile must not undercut the seat, got {emptied}"
-        );
-        let wet = haze_seat_sample(&h, 2.0, 6.0, 80.0);
-        assert!(wet > 40.0, "a wet seat may still resample, got {wet}");
-    }
-
-    #[test]
     fn haze_carves_only_the_drop_cell() {
         use wk_voxel::{Cell, ChunkCoord, Sat, GRAIN_REPOSE_HAZE_MAX};
 
@@ -2057,6 +2000,27 @@ mod tests {
         assert!(!haze_cell_is_drop(&w, 4, 10));
         assert!(haze_cell_is_drop(&w, 5, 10), "the droplet is one cell");
         assert!(!haze_cell_is_drop(&w, 6, 10));
+    }
+
+    #[test]
+    fn a_drop_opens_the_column_under_it() {
+        use wk_voxel::{Cell, ChunkCoord, Sat, GRAIN_REPOSE_HAZE_MAX};
+
+        let mut w = wk_voxel::World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut drop = Cell::air();
+        drop.sat = Sat(GRAIN_REPOSE_HAZE_MAX.saturating_add(8));
+        w.set_cell(5, 20, drop);
+        let tops = collect_drop_tops(&w);
+        assert_eq!(tops.get(&5).copied(), Some(20));
+        assert_eq!(haze_column_y0(8, 24, Some(20)), Some(21));
+        assert_eq!(haze_column_y0(8, 20, Some(20)), None);
+        assert_eq!(haze_column_y0(8, 24, None), Some(8));
+        assert_eq!(
+            haze_column_y0(8, 24, Some(20)),
+            Some(21),
+            "blocks at and under the drop stay open"
+        );
     }
 
     #[test]

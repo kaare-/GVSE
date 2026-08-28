@@ -45,7 +45,7 @@ and not a per-cell atmosphere (CPU stays on 4×4 tiles).
 | Signal | Visual |
 |--------|--------|
 | Humidity → parcels | Soft multi-depth cloud banks (`N`); streaks when tiles are wet |
-| Humidity tiles | Diagnostic haze overlay (`H`) — 4×4 seats; skip the 1-wide drop; refill an emptied seat from a wrapped neighbour; bilinear may soften a wet seat |
+| Humidity tiles | Diagnostic haze overlay (`H`) — 4×4 tile columns; a drop opens that column from itself downward |
 | Day/night | Sky lerp + sun/moon; night landscape darken |
 | Wind | Streaks on `H`; front cloud scroll |
 | Ridges | Dual parallax fills from **ground** height (not falling snow, not mid-air wet Air) |

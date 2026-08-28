@@ -344,20 +344,13 @@ the vapour field (`advect_with_surface`) so mass rises on columns that climb
 the *current* surface, not the seed profile. Flatten the downwind face and
 the loft stops.
 
-**The 4×4 field and the 1-wide drop.** Humidity is a tile store. `H`
-paints each occupied tile as a 4-column seat. Condensation still pays
-the tile that nucleated (one cell of water at the centre) and may
-remove that key. The overlay then:
-
-1. keeps that seat by borrowing mass from a horizontal neighbour
-2. skips only cells that *are* the falling drop (`sat` above haze, or
-   a flake)
-3. wraps those neighbour keys (`wrap_tile_x`) so `hx ± 1` is never
-   drawn as a ghost and `x_copies` cannot stack the world seam
-
-Bilinear may soften a **wet** seat. It must not replace an emptied
-seat with a sample of zero — that was the 4-wide hole. A resample
-below 45% of the seat mass is discarded and the seat is used.
+**The 4×4 field and the 1-wide path.** Humidity is a tile store. `H`
+paints each occupied tile as four column rects (the old overlay). A
+drop nucleates in the centre column. That column is left open from the
+drop downward — every haze block under it — so the field keeps its
+4-wide seats and the rain is a 1-wide shaft. Neighbour tiles are not
+resampled or refilled. Draw uses wrapped world-x so the ring seam is
+not painted twice.
 
 ## Dead ends, recorded
 
