@@ -61,6 +61,33 @@ pub(crate) fn regions_wet_loaded(world: &World) -> Vec<ActiveChunk> {
         .collect()
 }
 
+/// Loaded chunks that currently hold wet Air.
+///
+/// Confined-head insurance only needs standing water / pipe films.
+/// Groundwater-only chunks (`has_wet_pores` without wet Air) cannot
+/// host a rising column, and after a drizzle soak they are most of
+/// the map. Bootstrap (no flag ever set) falls back to
+/// [`regions_wet_loaded`].
+pub(crate) fn regions_wet_air_loaded(world: &World) -> Vec<ActiveChunk> {
+    let mut coords: Vec<ChunkCoord> = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| c.has_wet_air)
+        .map(|(&coord, _)| coord)
+        .collect();
+    if coords.is_empty() && !world.chunks.is_empty() {
+        return regions_wet_loaded(world);
+    }
+    coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
+    coords
+        .into_iter()
+        .map(|coord| ActiveChunk {
+            coord,
+            rect: crate::chunk::Rect::full(),
+        })
+        .collect()
+}
+
 /// Loaded chunks with sticky [`crate::chunk::Chunk::has_loose`], plus
 /// Moore neighbours (repose / cold-avalanche write into adjacent Air).
 ///

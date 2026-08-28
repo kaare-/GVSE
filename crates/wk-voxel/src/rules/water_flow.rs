@@ -10,7 +10,7 @@ use wk_material::MaterialId;
 
 use crate::active::ActiveChunk;
 use crate::cell::{water_capacity_cell, water_capacity_with, Cell, Sat};
-use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
@@ -18,7 +18,7 @@ use super::head::{
     hydraulic_head, is_porous_cell, plan_same_y_pairwise_edge_in, same_y_cascade_pull_in,
     seepage_rate_cell, seepage_uptake_rate_cell,
 };
-use super::plan::{regions_for_standalone, regions_wet_loaded};
+use super::plan::{regions_for_standalone, regions_wet_air_loaded};
 
 /// Priority water flow.
 ///
@@ -131,8 +131,10 @@ pub fn wake_confined_head(world: &mut World) {
     if world.tick % CONFINED_HEAD_WAKE_EVERY != 0 {
         return;
     }
-    // Wet-air sticky chunks only — dry sky/stone cannot host a pipe.
-    let regions = regions_wet_loaded(world);
+    // Standing water / pipe films only. Groundwater-only chunks cannot
+    // host a rising column; including them made the period-16 wake walk
+    // the whole wet bed after a drizzle soak.
+    let regions = regions_wet_air_loaded(world);
     apply_confined_upward_regions(world, &regions);
 }
 
@@ -463,20 +465,34 @@ fn accumulate_confined_upward_xfers(
     let mut cache: HashMap<(i32, i32), PressureBody> = HashMap::new();
     let cap = water_capacity_with(MaterialId::Air, &world.hydro);
     let head_eps = 1.0 / (cap as f32);
+    let cw = CHUNK_CELLS_W as i32;
+    let ch = CHUNK_CELLS_H as i32;
 
     for ac in active {
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            continue;
+        };
+        let below_chunk = world
+            .chunks
+            .get(&ChunkCoord::new(ac.coord.cx, ac.coord.cy - 1));
+        let base_gx = ac.coord.cx * cw;
+        let base_gy = ac.coord.cy * ch;
         for y in ac.rect.y0..=ac.rect.y1 {
-            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            let gy = base_gy + y as i32;
+            let ly = y as usize;
             for x in ac.rect.x0..=ac.rect.x1 {
-                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
-                let Some(dst) = world.get_cell(gx, gy) else {
-                    continue;
-                };
+                let dst = chunk.get(x as usize, ly);
                 if dst.material != MaterialId::Air || dst.sat.is_full() {
                     continue;
                 }
-                let Some(below) = world.get_cell(gx, gy - 1) else {
-                    continue;
+                let gx = world.wrap_x(base_gx + x as i32);
+                let below = if ly > 0 {
+                    chunk.get(x as usize, ly - 1)
+                } else {
+                    match below_chunk {
+                        Some(c) => c.get(x as usize, CHUNK_CELLS_H - 1),
+                        None => continue,
+                    }
                 };
                 // Rising column: must sit on something that transmits
                 // confined pressure — a flooded void *or* saturated pore space.
@@ -490,7 +506,20 @@ fn accumulate_confined_upward_xfers(
                 // no-op (`allows_confined_rise`), but `pressure_body_from_full`
                 // still BFS-climbs the body — dominant cost on rainy shores.
                 // Keep shafts (any solid side) and buried/lid cells.
-                if is_air_free_surface(world, gx, gy) && open_air_both_sides(world, gx, gy) {
+                let free_surface = is_air_free_surface(world, gx, gy);
+                if free_surface && open_air_both_sides(world, gx, gy) {
+                    continue;
+                }
+                // Drizzle / hillside film on wet ground: free-surface Air
+                // sitting on saturated pore, not cased into a shaft.
+                // `pressure_body_from_full` would BFS the aquifer (and a
+                // connected lake) for a rise that seepage already handles.
+                // A 1-wide well is walled; a 2-wide shaft sits on flooded
+                // Air, not on rock. An uncased hole is open ground.
+                if free_surface
+                    && below.material != MaterialId::Air
+                    && !is_walled_column(world, gx, gy)
+                {
                     continue;
                 }
                 let Some(body) =
