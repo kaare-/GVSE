@@ -541,14 +541,24 @@ fn accumulate_confined_upward_xfers(
                 // connected lake) for a rise that seepage already handles.
                 // A 1-wide well is walled; a 2-wide shaft sits on flooded
                 // Air, not on rock. An uncased hole is open ground.
-                if free_surface && !is_walled_column(world, gx, gy) {
-                    // Hillside drizzle film on wet ground (uncased hole).
-                    if below.material != MaterialId::Air {
-                        continue;
-                    }
-                    // Beach / puddle that opens into wider water. Same-Y
-                    // equalise handles these; the BFS was the rainy-shore cost.
-                    if opens_into_wide_water(world, gx, gy) {
+                if !is_walled_column(world, gx, gy) {
+                    if free_surface {
+                        // Hillside drizzle film on wet ground (uncased hole).
+                        if below.material != MaterialId::Air {
+                            continue;
+                        }
+                        // Beach / puddle that opens into wider water. Same-Y
+                        // equalise handles these; the BFS was the rainy-shore cost.
+                        if opens_into_wide_water(world, gx, gy) {
+                            continue;
+                        }
+                    } else if matches!(
+                        world.get_cell(gx, gy + 1),
+                        Some(c)
+                            if matches!(c.material, MaterialId::Ice | MaterialId::Snow)
+                    ) {
+                        // Frozen lake lid, not a cased pipe. A walled shaft
+                        // with an ice plug still rises.
                         continue;
                     }
                 }
