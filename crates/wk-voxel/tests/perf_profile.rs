@@ -848,9 +848,9 @@ fn soak_age_inventory() {
     }
 
     println!(
-        "\n{:>7} {:>7} {:>7} {:>7} {:>6} {:>6} {:>5} {:>6} {:>6} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6} {:>5}",
-        "tick", "wall", "phys", "org", "evap", "cond", "snow", "hum n", "hum t",
-        "diss", "susp", "myc", "sp", "snCh", "buoy", "pores", "mods"
+        "\n{:>7} {:>7} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>5} {:>5} {:>5}",
+        "tick", "wall", "phys", "grav", "flow", "seep", "conf", "body", "org",
+        "cond", "diss", "hum n", "buoy", "pores", "mods"
     );
     for _ in 0..SEGS {
         let mut accum = PassAccum::zero();
@@ -881,22 +881,20 @@ fn soak_age_inventory() {
             .map(|b| b.tile_capacity())
             .unwrap_or(0);
         println!(
-            "{:>7} {:>6.2} {:>6.2} {:>6.2} {:>5.2} {:>5.2} {:>5.2} {:>5}/{:<4} {:>6.0} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6}",
+            "{:>7} {:>6.2} {:>6.2} {:>6.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5} {:>5}/{:<4} {:>5} {:>5} {:>6}",
             scene.world.tick,
             wall.as_secs_f32() * 1000.0 / SEG as f32,
             accum.physics_tick.as_secs_f32() * 1000.0 / SEG as f32,
+            phys.gravity.as_secs_f32() * 1000.0 / SEG as f32,
+            phys.water_flow.as_secs_f32() * 1000.0 / SEG as f32,
+            phys.seepage.as_secs_f32() * 1000.0 / SEG as f32,
+            phys.confined.as_secs_f32() * 1000.0 / SEG as f32,
+            phys.bodies.as_secs_f32() * 1000.0 / SEG as f32,
             accum.organisms.as_secs_f32() * 1000.0 / SEG as f32,
-            accum.evap.as_secs_f32() * 1000.0 / SEG as f32,
             accum.condensation.as_secs_f32() * 1000.0 / SEG as f32,
-            accum.snow_drift.as_secs_f32() * 1000.0 / SEG as f32,
+            scene.world.dissolved.len(),
             scene.humidity.cells.len(),
             hum_cap,
-            scene.humidity.total_mass(),
-            scene.world.dissolved.len(),
-            scene.world.suspended.len(),
-            scene.world.mycelium_strains.len(),
-            spore_bank_len(&scene.world),
-            snow_ch,
             buoy_ch,
             pore_ch,
             mods,

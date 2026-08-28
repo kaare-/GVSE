@@ -545,7 +545,7 @@ pub fn apply_seepage_regions_ex(
         // hot path, and the checks the loop already has in hand (is there any
         // load at all, is the receiver even soluble) skip the common case
         // without a map lookup or a cell re-read.
-        if track_load {
+        if track_load && crate::mineral::dissolved_at(world, from.0, from.1) > 0 {
             // Dissolved mineral travels with the water that carries it, so karst
             // load reaches an outlet instead of sitting where the rock dissolved.
             crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);

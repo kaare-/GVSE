@@ -165,6 +165,8 @@ fn commit_air_sat_xfers(
         }
     }
     xfers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let track_mineral = !world.dissolved.is_empty();
+    let track_sediment = !world.suspended.is_empty();
     for (from, to, amt) in xfers.iter().copied() {
         if amt <= 0 {
             continue;
@@ -209,9 +211,15 @@ fn commit_air_sat_xfers(
         );
         // Surface water carries its dissolved mineral downstream, so a stream
         // fed by a spring deposits where it finally dries rather than losing
-        // the load at the point it left the ground.
-        crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
-        crate::sediment::carry_with_water(world, from, to, amt as u8, src.sat.0);
+        // the load at the point it left the ground. Skip the maps entirely
+        // until something is actually in them — once karst starts they stay
+        // non-empty, so also skip sources that are not carrying.
+        if track_mineral && crate::mineral::dissolved_at(world, from.0, from.1) > 0 {
+            crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
+        }
+        if track_sediment && crate::sediment::suspended_at(world, from.0, from.1) > 0 {
+            crate::sediment::carry_with_water(world, from, to, amt as u8, src.sat.0);
+        }
     }
 }
 

@@ -4,6 +4,8 @@
 //!
 //! Vertical gravity fall for free water.
 
+use std::collections::HashSet;
+
 use wk_material::MaterialId;
 
 use crate::active::{partition_checkerboard, ActiveChunk};
@@ -68,11 +70,25 @@ pub fn apply_gravity_fall(world: &mut World) {
 /// HashMap `get_cell`/`set_cell`.
 pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
     let hydro = world.hydro;
-    // Dissolved mineral has to ride these transfers too, but the hot loop runs
-    // over raw chunk pointers and cannot touch the sparse map. Collect the
-    // moves and apply them after. Skipped entirely when nothing is dissolved,
-    // which is the common case, so quiet worlds pay nothing.
-    let track_load = !world.dissolved.is_empty();
+    // Dissolved / suspended load has to ride these transfers, but the hot
+    // loop runs over raw chunk pointers and cannot touch the sparse maps.
+    // Collect the moves and apply them after. Once karst has emitted *any*
+    // load, `dissolved` stays non-empty for the rest of the soak — so the
+    // skip must be per-source, not "is the map empty". Otherwise every
+    // lake drip takes a mutex and two HashMap lookups forever.
+    let track_mineral = !world.dissolved.is_empty();
+    let track_sediment = !world.suspended.is_empty();
+    let track_load = track_mineral || track_sediment;
+    let loaded: HashSet<(i32, i32)> = if track_load {
+        world
+            .dissolved
+            .keys()
+            .copied()
+            .chain(world.suspended.keys().copied())
+            .collect()
+    } else {
+        HashSet::new()
+    };
     let load_moves: std::sync::Mutex<Vec<((i32, i32), (i32, i32), u8, u8)>> =
         std::sync::Mutex::new(Vec::new());
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
@@ -292,7 +308,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     write_xy(x, y as i32 + 1, new_above);
                     write_xy(x, y as i32, new_cur);
                     // Infiltrating water takes its mineral load into the ground.
-                    if track_load {
+                    if track_load && loaded.contains(&(gx_of(x), y as i32 + 1)) {
                         load_moves.lock().unwrap().push((
                             (gx_of(x), y as i32 + 1),
                             (gx_of(x), y as i32),
@@ -328,7 +344,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 };
                 write_xy(x, y as i32 + 1, new_above);
                 write_xy(x, y as i32, new_cur);
-                if track_load {
+                if track_load && loaded.contains(&(gx_of(x), y as i32 + 1)) {
                     load_moves.lock().unwrap().push((
                         (gx_of(x), y as i32 + 1),
                         (gx_of(x), y as i32),
