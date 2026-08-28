@@ -344,20 +344,20 @@ the vapour field (`advect_with_surface`) so mass rises on columns that climb
 the *current* surface, not the seed profile. Flatten the downwind face and
 the loft stops.
 
-**Ring seam.** Haze paint walks occupied tiles plus neighbours so the
-sheet sample can bleed off a tile centre. Those neighbours must wrap
-(`wrap_tile_x`); unwrapped `hx ± 1` is skipped, not drawn. Ghost tiles
-at −1 / `width` plus `x_copies` painted the real seam twice — a 4-wide
-bright column at x=0. Draw uses wrapped world-x. Same wrap on
-`sample_sheet` and `take_spread`.
+**The 4×4 field and the 1-wide drop.** Humidity is a tile store. `H`
+paints each occupied tile as a 4-column seat. Condensation still pays
+the tile that nucleated (one cell of water at the centre) and may
+remove that key. The overlay then:
 
-**A drop does not open a 4×4 hole.** Condensation still nucleates one
-cell of water (255) at the tile centre. Humidity pay is `take_spread`:
-a wet sheet only pays down to half the neighbourhood median, then a
-wider window if needed. Haze `sample_sheet` lerps horizontal neighbours
-when a tile is punched (<45% of them) so bilinear cannot open a 4-wide
-gap. The drop cell itself is skipped. A lone puff that cannot share
-still empties.
+1. keeps that seat by borrowing mass from a horizontal neighbour
+2. skips only cells that *are* the falling drop (`sat` above haze, or
+   a flake)
+3. wraps those neighbour keys (`wrap_tile_x`) so `hx ± 1` is never
+   drawn as a ghost and `x_copies` cannot stack the world seam
+
+Bilinear may soften a **wet** seat. It must not replace an emptied
+seat with a sample of zero — that was the 4-wide hole. A resample
+below 45% of the seat mass is discarded and the seat is used.
 
 ## Dead ends, recorded
 

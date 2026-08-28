@@ -2,7 +2,7 @@
 //!
 //! Design: `docs/SKY.md`. Isolation: wk-voxel + wk-material + macroquad only.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use macroquad::prelude::*;
 use wk_material::MaterialId;
@@ -247,29 +247,36 @@ fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
     out
 }
 
-/// Occupied tiles plus neighbours so the bilinear lobe can bleed off a
-/// tile centre. Horizontal neighbours wrap on a ring — inserting
-/// `hx ± 1` raw and then drawing `x_copies` painted the seam twice.
-fn haze_paint_tiles(humidity: &Humidity, sky_hy_min: i32) -> HashSet<(i32, i32)> {
-    let mut paint: HashSet<(i32, i32)> = HashSet::new();
-    for &(hx, hy) in humidity.cells.keys() {
-        if hy < sky_hy_min {
+/// 4×4 haze seats: every occupied tile, plus any empty horizontal
+/// neighbour so a drop that paid the whole tile does not leave a
+/// 4-wide hole. Neighbour keys wrap on a ring — raw `hx ± 1` plus
+/// `x_copies` painted the world seam twice.
+fn haze_seats(humidity: &Humidity, sky_hy_min: i32) -> HashMap<(i32, i32), f32> {
+    let mut seats: HashMap<(i32, i32), f32> = HashMap::new();
+    for (&(hx, hy), &mass) in &humidity.cells {
+        if mass <= 0.0 || hy < sky_hy_min {
             continue;
         }
-        for dx in -1..=1 {
-            for dy in -1..=1 {
-                let ny = hy + dy;
-                if ny < sky_hy_min {
-                    continue;
-                }
-                let Some(nx) = humidity.wrap_tile_x(hx + dx) else {
-                    continue;
-                };
-                paint.insert((nx, ny));
+        seats.insert((hx, hy), mass);
+    }
+    for (&(hx, hy), &mass) in &humidity.cells {
+        if mass <= 0.0 || hy < sky_hy_min {
+            continue;
+        }
+        for dx in [-1, 1] {
+            let Some(nhx) = humidity.wrap_tile_x(hx + dx) else {
+                continue;
+            };
+            if humidity.at_tile(nhx, hy) > 1e-3 {
+                continue;
             }
+            seats
+                .entry((nhx, hy))
+                .and_modify(|m| *m = m.max(mass))
+                .or_insert(mass);
         }
     }
-    paint
+    seats
 }
 
 /// True when this cell is the falling drop (1-wide water / flake), not vapour.
@@ -278,6 +285,20 @@ fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
         Some(c) if c.material == MaterialId::Air && c.sat.0 > GRAIN_REPOSE_HAZE_MAX => true,
         Some(c) if falls_through_empty_air(c.material) => true,
         _ => false,
+    }
+}
+
+/// Soften a 4×4 seat with bilinear, but never undercut the seat mass.
+///
+/// Sampling the store on a tile a drop just emptied returns 0 and
+/// opens a 4-wide hole. The seat (occupied mass, or a neighbour's
+/// fill) is the 4×4 field; bilinear only blends wet tiles.
+fn haze_seat_sample(humidity: &Humidity, gx: f32, gy: f32, seat: f32) -> f32 {
+    let sampled = humidity.sample_bilinear(gx, gy);
+    if sampled >= seat * 0.45 {
+        sampled
+    } else {
+        seat
     }
 }
 
@@ -1047,9 +1068,11 @@ fn draw_ridge_band(
 
 /// Humidity tile diagnostic (front of terrain) + sparse wind streaks.
 ///
-/// This is the `H` overlay — the 4×4 store, bilinear-sampled per cell so
-/// the wash has no tile facets. Physics is unchanged. Soft cloud banks
-/// are separate (`N` / [`draw_depth_cloud_layer`]).
+/// This is the `H` overlay — 4×4 seats clipped to ground. A drop is
+/// 1-wide water in the grid: skip those cells, and keep painting a
+/// seat a drop emptied from its neighbour. Bilinear may soften a wet
+/// seat; it must not replace an emptied seat with zero. Soft cloud
+/// banks are separate (`N` / [`draw_depth_cloud_layer`]).
 pub fn draw_haze_and_wind(
     humidity: &Humidity,
     world: &World,
@@ -1075,12 +1098,9 @@ pub fn draw_haze_and_wind(
             .max(1.0);
         let tc = humidity.tile_cols.max(1);
         let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
+        let seats = haze_seats(humidity, sky_hy_min);
 
-        // Occupied tiles plus wrapped neighbours so the bilinear lobe
-        // can bleed off a tile centre. Store stays 4×4.
-        let paint = haze_paint_tiles(humidity, sky_hy_min);
-
-        for (hx, hy) in paint {
+        for ((hx, hy), seat) in seats {
             let Some(hx) = humidity.wrap_tile_x(hx) else {
                 continue;
             };
@@ -1095,33 +1115,51 @@ pub fn draw_haze_and_wind(
             }
             for col in 0..tc {
                 let wx = world.wrap_x(base_gx + col);
-                for gy in y0..y1 {
-                    if haze_cell_is_drop(world, wx, gy) {
-                        continue;
+                let mut run = y0;
+                while run < y1 {
+                    while run < y1 && haze_cell_is_drop(world, wx, run) {
+                        run += 1;
                     }
-                    let mass = humidity.sample_sheet(wx as f32 + 0.5, gy as f32 + 0.5);
-                    let alpha = humidity_haze_alpha(mass, max_mass);
-                    if alpha == 0 {
-                        continue;
+                    if run >= y1 {
+                        break;
                     }
-                    for &x_copy in x_copies {
-                        let sx = origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
-                        let top_sy = origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
-                        if sx + cell_px < 0.0
-                            || sx > sw
-                            || top_sy > sh
-                            || top_sy + cell_px < 0.0
-                        {
+                    let mut end = run + 1;
+                    while end < y1 && !haze_cell_is_drop(world, wx, end) {
+                        end += 1;
+                    }
+                    for gy in run..end {
+                        let mass = haze_seat_sample(
+                            humidity,
+                            wx as f32 + 0.5,
+                            gy as f32 + 0.5,
+                            seat,
+                        );
+                        let alpha = humidity_haze_alpha(mass, max_mass);
+                        if alpha == 0 {
                             continue;
                         }
-                        draw_rectangle(
-                            sx,
-                            top_sy,
-                            cell_px + 0.5,
-                            cell_px + 0.5,
-                            Color::from_rgba(255, 255, 255, alpha),
-                        );
+                        for &x_copy in x_copies {
+                            let sx =
+                                origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
+                            let top_sy =
+                                origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
+                            if sx + cell_px < 0.0
+                                || sx > sw
+                                || top_sy > sh
+                                || top_sy + cell_px < 0.0
+                            {
+                                continue;
+                            }
+                            draw_rectangle(
+                                sx,
+                                top_sy,
+                                cell_px + 0.5,
+                                cell_px + 0.5,
+                                Color::from_rgba(255, 255, 255, alpha),
+                            );
+                        }
                     }
+                    run = end;
                 }
             }
         }
@@ -1884,8 +1922,8 @@ pub fn estimate_snow_bias(
 #[cfg(test)]
 mod tests {
     use super::{
-        gather_soft_cloud_srcs, haze_cell_is_drop, haze_paint_tiles, humidity_haze_alpha,
-        stamp_pixel_cloud_mask, CloudDepthLayer,
+        gather_soft_cloud_srcs, haze_cell_is_drop, haze_seat_sample, haze_seats,
+        humidity_haze_alpha, stamp_pixel_cloud_mask, CloudDepthLayer,
     };
     use std::collections::HashMap;
     use wk_voxel::{CloudStore, Humidity};
@@ -1973,20 +2011,36 @@ mod tests {
     }
 
     #[test]
-    fn haze_paint_tiles_wrap_at_the_ring_seam() {
+    fn haze_seats_wrap_and_fill_at_the_ring_seam() {
         let mut h = Humidity::with_world_bounds(4, 0, 0, 1024, 256);
         h.wrap_x = true;
         h.add(0, 100, 50.0);
-        h.add(1020, 100, 50.0);
-        let paint = haze_paint_tiles(&h, 0);
+        let seats = haze_seats(&h, 0);
         assert!(
-            paint.iter().all(|&(hx, _)| (0..=255).contains(&hx)),
+            seats.keys().all(|&(hx, _)| (0..=255).contains(&hx)),
             "ghost hx=-1/256 double-paints the seam via x_copies"
         );
-        assert!(paint.contains(&(0, 25)));
-        assert!(paint.contains(&(255, 25)));
-        assert!(!paint.contains(&(-1, 25)));
-        assert!(!paint.contains(&(256, 25)));
+        assert!((seats[&(0, 25)] - 50.0).abs() < 1e-3);
+        assert!(
+            seats.get(&(255, 25)).copied().unwrap_or(0.0) >= 50.0,
+            "empty wrapped neighbour must keep the 4×4 seat"
+        );
+        assert!(!seats.contains_key(&(-1, 25)));
+        assert!(!seats.contains_key(&(256, 25)));
+    }
+
+    #[test]
+    fn haze_seat_sample_keeps_an_emptied_tile() {
+        let mut h = Humidity::new(4);
+        h.cells.insert((0, 1), 80.0);
+        // Tile 1 paid for a drop and is gone from the store.
+        let emptied = haze_seat_sample(&h, 6.0, 6.0, 80.0);
+        assert!(
+            (emptied - 80.0).abs() < 1e-3,
+            "bilinear of an empty tile must not undercut the seat, got {emptied}"
+        );
+        let wet = haze_seat_sample(&h, 2.0, 6.0, 80.0);
+        assert!(wet > 40.0, "a wet seat may still resample, got {wet}");
     }
 
     #[test]

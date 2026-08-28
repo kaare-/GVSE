@@ -270,9 +270,14 @@ pub fn apply_condensation_rain_phased(
         if landed <= 0.0 {
             continue;
         }
-        // Pay from the neighbourhood so one drop does not punch a 4-wide
-        // hole in the vapour sheet. A lone tile still empties.
-        let _ = humidity.take_spread(centre_gx, centre_gy, landed);
+        // Drain the humidity tile by the mass that landed (clamp to tile).
+        // The 4×4 overlay keeps painting this seat from a neighbour so
+        // only the 1-wide drop carves the field.
+        let entry = humidity.cells.entry((hx, hy)).or_insert(0.0);
+        *entry -= landed.min(*entry);
+        if *entry < 1e-6 {
+            humidity.cells.remove(&(hx, hy));
+        }
     }
 }
 
