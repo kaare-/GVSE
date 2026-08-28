@@ -124,7 +124,10 @@ pub struct Chunk {
     pub has_loose: bool,
     /// Sticky occupancy: at least one `Organic` cell was written since
     /// the flag was last cleared. Float-column / raft scans skip chunks
-    /// that never held litter.
+    /// that never held litter. Cleared by
+    /// [`crate::rules::grain::rise_and_soak_buoyant_litter`] when a
+    /// buoyant collect finds no Organic left — a falling leaf otherwise
+    /// keeps every sky chunk it passed through in the raft walk.
     #[serde(default)]
     pub has_organic: bool,
     /// Sticky occupancy: Organic / Snow / Ice (buoyant litter). Rise/soak

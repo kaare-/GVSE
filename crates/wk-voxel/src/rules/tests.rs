@@ -1078,6 +1078,59 @@ fn buoyant_collect_clears_empty_sky_chunks() {
 }
 
 #[test]
+fn buoyant_collect_clears_empty_organic_flag() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Organic));
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_organic);
+    w.set_cell(2, 6, Cell::air());
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 0)].has_organic,
+        "writes do not clear sticky occupancy"
+    );
+    rise_and_soak_buoyant_litter(&mut w);
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 0)].has_organic,
+        "an empty scan must drop the chunk from later raft walks"
+    );
+}
+
+#[test]
+fn falling_leaf_does_not_leave_sky_chunks_in_the_raft_scan() {
+    // Same leak as falling snow: a leaf marks every chunk it falls
+    // through. After it lands, vacated sky must drop `has_organic`.
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..(CHUNK_CELLS_W as i32) {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    let start_y = CHUNK_CELLS_H as i32 + 8;
+    w.set_cell(4, start_y, Cell::solid(MaterialId::Organic));
+    assert!(w.chunks[&ChunkCoord::new(0, 1)].has_organic);
+    for _ in 0..80 {
+        apply_grain_fall(&mut w);
+        rise_and_soak_buoyant_litter(&mut w);
+        w.tick += 1;
+    }
+    let pos = (0..CHUNK_CELLS_W as i32)
+        .flat_map(|x| (1..=start_y).map(move |y| (x, y)))
+        .find(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic));
+    let (_, y) = pos.expect("the leaf should still exist");
+    assert!(
+        y < CHUNK_CELLS_H as i32,
+        "the leaf should have fallen into the ground chunk (y={y})"
+    );
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 1)].has_organic,
+        "the vacated sky chunk must leave the raft scan"
+    );
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 0)].has_organic,
+        "the chunk that still holds the leaf keeps the flag"
+    );
+}
+
+#[test]
 fn pore_weep_clears_dry_chunks() {
     let mut w = setup_column_world();
     let mut sand = Cell::solid(MaterialId::Sand);

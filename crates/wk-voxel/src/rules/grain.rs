@@ -1126,24 +1126,21 @@ const FLOAT_SOAK_RATE: u8 = 16;
 /// Max cells a submerged litter grain may rise in one tick (column teleport).
 const BUOYANT_RISE_MAX: i32 = 48;
 
-/// Chunks that may hold Organic / Snow / Ice (sticky [`Chunk::has_buoyant`]).
-fn buoyant_chunk_coords(world: &World) -> Vec<ChunkCoord> {
-    world
-        .chunks
-        .iter()
-        .filter(|(_, c)| c.has_buoyant)
-        .map(|(&coord, _)| coord)
-        .collect()
-}
-
 fn collect_buoyant_litter(world: &mut World) -> Vec<(i32, i32)> {
     let mut litter = Vec::new();
     // Prefer buoyant sticky flag — sand-only shores used to scan every
-    // `has_loose` chunk for litter that was never there.
-    let buoyant = buoyant_chunk_coords(world);
-    let any_buoyant = !buoyant.is_empty();
-    let coords = if any_buoyant {
-        buoyant
+    // `has_loose` chunk for litter that was never there. Also visit
+    // leftover `has_organic` (a falling leaf marks every sky chunk; after
+    // buoyant-clear those sit `has_organic && !has_buoyant`).
+    let any_buoyant = world.chunks.values().any(|c| c.has_buoyant);
+    let any_organic = world.chunks.values().any(|c| c.has_organic);
+    let coords = if any_buoyant || any_organic {
+        world
+            .chunks
+            .iter()
+            .filter(|(_, c)| c.has_buoyant || c.has_organic)
+            .map(|(&coord, _)| coord)
+            .collect()
     } else if !world.buoyant_flags_ready {
         // Legacy worlds / snow before has_buoyant was sticky.
         loose_chunk_coords(world)
@@ -1152,6 +1149,7 @@ fn collect_buoyant_litter(world: &mut World) -> Vec<(i32, i32)> {
     };
     let mut clear = Vec::new();
     let mut stamp = Vec::new();
+    let mut clear_organic = Vec::new();
     for coord in coords {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
@@ -1159,9 +1157,13 @@ fn collect_buoyant_litter(world: &mut World) -> Vec<(i32, i32)> {
             continue;
         };
         let mut saw = false;
+        let mut saw_organic = false;
         for ly in 0..CHUNK_CELLS_H {
             for lx in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(lx, ly);
+                if cell.material == MaterialId::Organic {
+                    saw_organic = true;
+                }
                 if falls_through_empty_air(cell.material) {
                     saw = true;
                     litter.push((x0 + lx as i32, y0 + ly as i32));
@@ -1173,6 +1175,9 @@ fn collect_buoyant_litter(world: &mut World) -> Vec<(i32, i32)> {
         } else if !saw && any_buoyant {
             clear.push(coord);
         }
+        if !saw_organic && chunk.has_organic {
+            clear_organic.push(coord);
+        }
     }
     for coord in stamp {
         if let Some(chunk) = world.chunks.get_mut(&coord) {
@@ -1182,6 +1187,11 @@ fn collect_buoyant_litter(world: &mut World) -> Vec<(i32, i32)> {
     for coord in clear {
         if let Some(chunk) = world.chunks.get_mut(&coord) {
             chunk.has_buoyant = false;
+        }
+    }
+    for coord in clear_organic {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_organic = false;
         }
     }
     world.buoyant_flags_ready = true;

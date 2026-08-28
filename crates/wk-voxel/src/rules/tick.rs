@@ -16,7 +16,7 @@ use super::grain::{
     active_has_unsupported_grain, settle_loose_grains_regions_ex, GRAIN_SETTLE_PASSES,
     GRAIN_SETTLE_PASSES_FPS_DEEP, GRAIN_SETTLE_PASSES_SHALLOW,
 };
-use super::gravity::apply_gravity_fall_regions;
+use super::gravity::{apply_gravity_fall_regions_loaded, water_load_index};
 use super::seepage::apply_seepage_regions;
 use super::water_flow::{
     apply_confined_upward_regions, apply_throughflow_regions, apply_water_flow_regions,
@@ -114,6 +114,12 @@ pub const FLOW_SUBSTEPS_EO_AFTER: usize = 4;
 /// [`FLOW_SUBSTEPS_EO_AFTER`], stop the flow loop early — settled films
 /// don't need the full ×8. Busy rain / cascades stay at max.
 pub const FLOW_QUIET_AREA: usize = 512;
+/// Interactive confined on the last flow halo is only for first-cell well
+/// rise. Condensation fattens dirty rects into chunk-scale boxes; walking
+/// those is the soak-age confined ramp. Skip when the halo is larger than
+/// a small edit / shaft. Period-16 wake still handles communicating vessels.
+/// A 1-cell well dirty inflates to ~3×5; a condensation-merged chunk is 1024.
+const CONFINED_HALO_MAX_AREA: usize = 256;
 
 /// Pore seepage + lake-bed / seam wake cadence (ticks).
 ///
@@ -426,6 +432,10 @@ fn tick_with_life_inner(
     } else {
         FLOW_SUBSTEPS
     };
+    // Snapshot once per tick. Rebuilding dissolved∪suspended keys on every
+    // checkerboard colour × substep was 16 HashSet walks/tick after karst,
+    // growing with soak age (1.2k → 12k keys on the demo inventory).
+    let gravity_load = water_load_index(world);
     for step in 0..max_steps {
         let t0 = profile.then(Instant::now);
         let active = plan_active(world);
@@ -445,7 +455,7 @@ fn tick_with_life_inner(
         let passes = partition_checkerboard(&active);
         let t0 = profile.then(Instant::now);
         for pass in &passes {
-            apply_gravity_fall_regions(world, pass);
+            apply_gravity_fall_regions_loaded(world, pass, &gravity_load);
         }
         if let (true, Some(t0)) = (profile, t0) {
             local.gravity += t0.elapsed();
@@ -495,10 +505,15 @@ fn tick_with_life_inner(
         if let (true, Some(t0)) = (profile, t0) {
             local.water_flow += t0.elapsed();
         }
-        let t0 = profile.then(Instant::now);
-        apply_confined_upward_regions(world, &flow_halo);
-        if let (true, Some(t0)) = (profile, t0) {
-            local.confined += t0.elapsed();
+        // Fat condensation / drizzle boxes: skip and let the period-16
+        // wake own communicating vessels. A 1-cell well dirty stays tiny
+        // after inflate (+1 x / +2 y) and still rises this tick.
+        if active_cell_area(&flow_halo) <= CONFINED_HALO_MAX_AREA {
+            let t0 = profile.then(Instant::now);
+            apply_confined_upward_regions(world, &flow_halo);
+            if let (true, Some(t0)) = (profile, t0) {
+                local.confined += t0.elapsed();
+            }
         }
     }
     // Communicating vessels: a filled pipe can go locally quiet while the

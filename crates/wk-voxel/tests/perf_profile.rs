@@ -848,9 +848,9 @@ fn soak_age_inventory() {
     }
 
     println!(
-        "\n{:>7} {:>7} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>5} {:>5} {:>5}",
+        "\n{:>7} {:>7} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>5} {:>5} {:>5} {:>5}",
         "tick", "wall", "phys", "grav", "flow", "seep", "conf", "body", "org",
-        "cond", "diss", "hum n", "buoy", "pores", "mods"
+        "cond", "halo", "diss", "hum n", "buoy", "orgc", "pores", "mods"
     );
     for _ in 0..SEGS {
         let mut accum = PassAccum::zero();
@@ -861,15 +861,24 @@ fn soak_age_inventory() {
         }
         let wall = wall.elapsed();
         let mut buoy_ch = 0usize;
+        let mut org_ch = 0usize;
         let mut pore_ch = 0usize;
         for c in scene.world.chunks.values() {
             if c.has_buoyant {
                 buoy_ch += 1;
             }
+            if c.has_organic {
+                org_ch += 1;
+            }
             if c.has_wet_pores {
                 pore_ch += 1;
             }
         }
+        let halo = if phys.substeps_ran > 0 {
+            phys.active_area as f32 / phys.substeps_ran as f32
+        } else {
+            0.0
+        };
         let mods: usize = scene.organisms.atoms.iter().map(|a| a.body.len()).sum();
         let hum_cap = scene
             .humidity
@@ -877,7 +886,7 @@ fn soak_age_inventory() {
             .map(|b| b.tile_capacity())
             .unwrap_or(0);
         println!(
-            "{:>7} {:>6.2} {:>6.2} {:>6.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5} {:>5}/{:<4} {:>5} {:>5} {:>6}",
+            "{:>7} {:>6.2} {:>6.2} {:>6.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>6.0} {:>5} {:>5}/{:<4} {:>5} {:>5} {:>5} {:>6}",
             scene.world.tick,
             wall.as_secs_f32() * 1000.0 / SEG as f32,
             accum.physics_tick.as_secs_f32() * 1000.0 / SEG as f32,
@@ -888,10 +897,12 @@ fn soak_age_inventory() {
             phys.bodies.as_secs_f32() * 1000.0 / SEG as f32,
             accum.organisms.as_secs_f32() * 1000.0 / SEG as f32,
             accum.condensation.as_secs_f32() * 1000.0 / SEG as f32,
+            halo,
             scene.world.dissolved.len(),
             scene.humidity.cells.len(),
             hum_cap,
             buoy_ch,
+            org_ch,
             pore_ch,
             mods,
         );

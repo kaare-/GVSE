@@ -49,9 +49,30 @@ use super::plan::regions_for_standalone;
 /// acceleration and the density-swap rule are follow-up PRs.
 pub fn apply_gravity_fall(world: &mut World) {
     let regions = regions_for_standalone(world);
+    // One snapshot for both checkerboard colours — rebuilding the key
+    // set per colour was 2× the HashSet walk on every standalone call.
+    let loaded = water_load_index(world);
     for pass in partition_checkerboard(&regions) {
-        apply_gravity_fall_regions(world, &pass);
+        apply_gravity_fall_regions_loaded(world, &pass, &loaded);
     }
+}
+
+/// Cells that currently carry dissolved mineral or suspended silt.
+///
+/// Gravity's hot loop cannot touch the sparse maps (raw chunk pointers),
+/// so callers snapshot this once and reuse it across checkerboard colours
+/// / flow substeps. Load that moves during the tick lags until the next
+/// snapshot — geology-OK; the stream mineral test runs 120 ticks.
+pub(crate) fn water_load_index(world: &World) -> HashSet<(i32, i32)> {
+    if world.dissolved.is_empty() && world.suspended.is_empty() {
+        return HashSet::new();
+    }
+    world
+        .dissolved
+        .keys()
+        .copied()
+        .chain(world.suspended.keys().copied())
+        .collect()
 }
 
 /// Gravity fall restricted to a pre-planned active set (see [`plan_active`]).
@@ -69,6 +90,16 @@ pub fn apply_gravity_fall(world: &mut World) {
 /// seam) by local index — same ~10× win as flow/seepage vs per-cell
 /// HashMap `get_cell`/`set_cell`.
 pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
+    let loaded = water_load_index(world);
+    apply_gravity_fall_regions_loaded(world, active, &loaded);
+}
+
+/// Gravity fall with a prebuilt load index — see [`water_load_index`].
+pub(crate) fn apply_gravity_fall_regions_loaded(
+    world: &mut World,
+    active: &[ActiveChunk],
+    loaded: &HashSet<(i32, i32)>,
+) {
     let hydro = world.hydro;
     // Dissolved / suspended load has to ride these transfers, but the hot
     // loop runs over raw chunk pointers and cannot touch the sparse maps.
@@ -76,19 +107,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
     // load, `dissolved` stays non-empty for the rest of the soak — so the
     // skip must be per-source, not "is the map empty". Otherwise every
     // lake drip takes a mutex and two HashMap lookups forever.
-    let track_mineral = !world.dissolved.is_empty();
-    let track_sediment = !world.suspended.is_empty();
-    let track_load = track_mineral || track_sediment;
-    let loaded: HashSet<(i32, i32)> = if track_load {
-        world
-            .dissolved
-            .keys()
-            .copied()
-            .chain(world.suspended.keys().copied())
-            .collect()
-    } else {
-        HashSet::new()
-    };
+    let track_load = !loaded.is_empty();
     let load_moves: std::sync::Mutex<Vec<((i32, i32), (i32, i32), u8, u8)>> =
         std::sync::Mutex::new(Vec::new());
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
