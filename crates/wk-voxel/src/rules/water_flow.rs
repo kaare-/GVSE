@@ -244,6 +244,31 @@ fn is_walled_column(world: &World, gx: i32, gy: i32) -> bool {
     wall(gx - 1) && wall(gx + 1)
 }
 
+/// True when an open side continues into a second Air cell.
+///
+/// A beach film is `land | film | lake | lake`. A 2-wide shaft is
+/// `wall | A | B | wall` — the open neighbour's far side is solid, so
+/// this stays false and the shaft can still rise.
+fn opens_into_wide_water(world: &World, gx: i32, gy: i32) -> bool {
+    for dx in [-1_i32, 1] {
+        let nx = world.wrap_x(gx + dx);
+        let Some(n) = world.get_cell(nx, gy) else {
+            continue;
+        };
+        if n.material != MaterialId::Air {
+            continue;
+        }
+        let far = world.wrap_x(nx + dx);
+        if matches!(
+            world.get_cell(far, gy),
+            Some(c) if c.material == MaterialId::Air
+        ) {
+            return true;
+        }
+    }
+    false
+}
+
 /// True when both horizontal neighbours are Air (open lake / ocean top).
 /// 1-wide and 2-wide shafts have at least one solid side and return false.
 fn open_air_both_sides(world: &World, gx: i32, gy: i32) -> bool {
@@ -516,11 +541,16 @@ fn accumulate_confined_upward_xfers(
                 // connected lake) for a rise that seepage already handles.
                 // A 1-wide well is walled; a 2-wide shaft sits on flooded
                 // Air, not on rock. An uncased hole is open ground.
-                if free_surface
-                    && below.material != MaterialId::Air
-                    && !is_walled_column(world, gx, gy)
-                {
-                    continue;
+                if free_surface && !is_walled_column(world, gx, gy) {
+                    // Hillside drizzle film on wet ground (uncased hole).
+                    if below.material != MaterialId::Air {
+                        continue;
+                    }
+                    // Beach / puddle that opens into wider water. Same-Y
+                    // equalise handles these; the BFS was the rainy-shore cost.
+                    if opens_into_wide_water(world, gx, gy) {
+                        continue;
+                    }
                 }
                 let Some(body) =
                     pressure_body_from_full(world, gx, gy - 1, &mut cache)
