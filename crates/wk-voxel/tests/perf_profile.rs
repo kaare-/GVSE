@@ -290,7 +290,12 @@ fn one_stack_tick(
             apply_evaporation_into_humidity(&mut scene.world, &mut scene.humidity, &scene.evap);
             scene
                 .humidity
-                .advect(scene.wind.climate_vx, scene.wind.climate_vy);
+                .advect_with_surface(
+                    scene.wind.climate_vx,
+                    scene.wind.climate_vy,
+                    &scene.wind,
+                    &scene.world,
+                );
             scene.clouds.step_with_precip(
                 &mut scene.world,
                 &mut scene.humidity,
@@ -373,7 +378,12 @@ fn one_stack_tick(
             let t0 = Instant::now();
             scene
                 .humidity
-                .advect(scene.wind.climate_vx, scene.wind.climate_vy);
+                .advect_with_surface(
+                    scene.wind.climate_vx,
+                    scene.wind.climate_vy,
+                    &scene.wind,
+                    &scene.world,
+                );
             a.humidity_advect += t0.elapsed();
 
             let t0 = Instant::now();

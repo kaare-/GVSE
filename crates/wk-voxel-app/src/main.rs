@@ -565,7 +565,9 @@ async fn main() {
             }
             // Vapor drifts with the wind, then warm air rises and
             // condenses where it meets colder air / ground.
-            scene.humidity.advect(wind_vx, wind_vy);
+            scene
+                .humidity
+                .advect_with_surface(wind_vx, wind_vy, &scene.wind, &scene.world);
             let tick_no = scene.world.tick;
             scene.clouds.step_with_precip(
                 &mut scene.world,

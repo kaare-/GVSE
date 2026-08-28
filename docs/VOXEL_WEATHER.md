@@ -338,10 +338,11 @@ on every solidity change, and `set_cell` is hot enough that the extra write was
 not worth it: terrain moves locally, the procedural hint stays close, and the
 walk is a few cells.
 
-**Still open: humidity advection is uniform.** `Humidity::advect` takes one
-`(vx, vy)` for the whole sky. `Wind::vy_at` now knows the live slope but nothing
-calls it on the advection path — lift methods are ready, the coupling is not.
-That is a behaviour change of its own, not this bug.
+**Humidity advection follows the live hill.** `Humidity::advect` is still the
+uniform `(vx, vy)` residual. The app then spends `Wind::orographic_lift` on
+the vapour field (`advect_with_surface`) so mass rises on columns that climb
+the *current* surface, not the seed profile. Flatten the downwind face and
+the loft stops.
 
 ## Dead ends, recorded
 

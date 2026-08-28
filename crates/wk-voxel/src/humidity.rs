@@ -586,6 +586,71 @@ const CONVECTION_MAX_GAIN: f32 = 2.0;
             v.abs() > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
         });
     }
+
+    /// [`Self::advect`] then lift on columns that climb the **live** hill.
+    ///
+    /// Uniform `(vx, vy)` cannot see slope. [`crate::wind::Wind::vy_at`]
+    /// already walks [`crate::worldgen::live_surface_at`]; this spends that
+    /// lift on the vapour field so an eroded ridge does not keep lofting
+    /// mass the seed profile invented.
+    pub fn advect_with_surface(
+        &mut self,
+        vx: f32,
+        vy: f32,
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+    ) {
+        self.advect(vx, vy);
+        self.apply_orographic_lift(wind, Some(world));
+    }
+
+    /// Move a lift-fraction of each tile one step up where the live
+    /// (or seed, if `world` is `None`) surface rises downwind.
+    pub fn apply_orographic_lift(
+        &mut self,
+        wind: &crate::wind::Wind,
+        world: Option<&crate::grid::World>,
+    ) {
+        if self.cells.is_empty() {
+            return;
+        }
+        let snap = self.cells.clone();
+        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        for (&(hx, hy), &mass) in &snap {
+            if mass <= 0.0 {
+                continue;
+            }
+            let lift = wind.orographic_lift(world, hx);
+            if lift <= 1e-5 {
+                continue;
+            }
+            let dest = hy + 1;
+            if !self.accepts(hx, dest) {
+                continue;
+            }
+            let take = mass * lift;
+            if take <= 1e-9 {
+                continue;
+            }
+            *deltas.entry((hx, hy)).or_insert(0.0) -= take;
+            *deltas.entry((hx, dest)).or_insert(0.0) += take;
+        }
+        for (k, d) in deltas {
+            if d < 0.0 {
+                if let Some(e) = self.cells.get_mut(&k) {
+                    *e += d;
+                }
+                continue;
+            }
+            if self.accepts(k.0, k.1) {
+                *self.cells.entry(k).or_insert(0.0) += d;
+            }
+        }
+        let bounds = self.bounds;
+        self.cells.retain(|&(hx, hy), v| {
+            *v > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
+        });
+    }
 }
 
 #[cfg(test)]
@@ -631,6 +696,98 @@ mod tests {
             h.at_tile(3, 2) > 50.0,
             "mass should have shifted +1 tile in x, got {}",
             h.at_tile(3, 2)
+        );
+    }
+
+    #[test]
+    fn orographic_lift_follows_the_live_hill() {
+        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use crate::worldgen::{continental_surface_y, WorldgenParams};
+        use wk_material::MaterialId;
+        use crate::cell::Cell;
+
+        let p = WorldgenParams::default();
+        let wind = Wind::climate(
+            4,
+            0.12,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        let mut hx_climb = 0;
+        let mut best = 0.0f32;
+        for hx in 0..(p.width_cols / 4) {
+            let l = wind.orographic_lift(None, hx);
+            if l > best {
+                best = l;
+                hx_climb = hx;
+            }
+        }
+        assert!(best > 1e-4, "seed profile should loft somewhere, got {best}");
+
+        let tc = 4;
+        let gx = hx_climb * tc + tc / 2;
+        let sign = if wind.climate_vx >= 0.0 { 1 } else { -1 };
+        let gx_dn = gx + sign * tc;
+        let hint_dn = continental_surface_y(p.seed, gx_dn, p.sea_level_y, p.width_cols);
+
+        let mut live = World::new(p.seed);
+        for x in [gx, gx_dn] {
+            let hint = continental_surface_y(p.seed, x, p.sea_level_y, p.width_cols);
+            for y in p.sea_level_y..=hint.max(hint_dn) {
+                live.ensure_chunk(ChunkCoord::new(
+                    x.div_euclid(CHUNK_CELLS_W as i32),
+                    y.div_euclid(CHUNK_CELLS_H as i32),
+                ));
+            }
+            live.set_cell(x, p.sea_level_y, Cell::solid(MaterialId::Stone));
+            for y in (p.sea_level_y + 1)..=hint {
+                live.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+
+        let gy = (p.sea_level_y + 8).max(0);
+        let mut on_hill = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        on_hill.wrap_x = true;
+        on_hill.add(gx, gy, 100.0);
+        let hy0 = on_hill.tile_of(gx, gy).1;
+        on_hill.apply_orographic_lift(&wind, Some(&live));
+        let rose_live = on_hill.at_tile(hx_climb, hy0 + 1);
+
+        for y in (p.sea_level_y + 1)..=hint_dn {
+            live.set_cell(gx_dn, y, Cell::air());
+        }
+        live.set_cell(gx_dn, p.sea_level_y, Cell::solid(MaterialId::Stone));
+
+        let mut flat = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        flat.wrap_x = true;
+        flat.add(gx, gy, 100.0);
+        flat.apply_orographic_lift(&wind, Some(&live));
+        let rose_flat = flat.at_tile(hx_climb, hy0 + 1);
+        assert!(
+            rose_live > rose_flat + 0.01,
+            "flattening the live downwind column should cut lift ({rose_live} vs {rose_flat})"
+        );
+        assert!(
+            (on_hill.total_mass() - 100.0).abs() < 1e-3,
+            "lift must conserve mass"
         );
     }
 
