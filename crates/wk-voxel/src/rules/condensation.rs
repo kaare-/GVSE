@@ -270,9 +270,12 @@ pub fn apply_condensation_rain_phased(
         if landed <= 0.0 {
             continue;
         }
-        // Pay from the vapour column so one droplet does not empty the
-        // whole 4×4 tile and open a square hole in the sheet.
-        let _ = humidity.take_spread(centre_gx, centre_gy, landed);
+        // Drain the humidity tile by the mass that landed (clamp to tile).
+        let entry = humidity.cells.entry((hx, hy)).or_insert(0.0);
+        *entry -= landed.min(*entry);
+        if *entry < 1e-6 {
+            humidity.cells.remove(&(hx, hy));
+        }
     }
 }
 

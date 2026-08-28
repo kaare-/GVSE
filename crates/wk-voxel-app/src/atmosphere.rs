@@ -10,7 +10,6 @@ use wk_voxel::{
     build_canopy_index_posed, carbon_ratio, celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
     day_night_factor_cfg, falls_through_empty_air, humidity_mean_norm, is_standing_water,
-    GRAIN_REPOSE_HAZE_MAX,
     precip_cover_fraction, resolve_organism_draw_cells, shade_transmit_column,
     sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, CloudStore, Humidity,
     ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World,
@@ -248,24 +247,12 @@ fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
     out
 }
 
-/// Tile mass that paints as a solid haze. Absolute — not the live field max
-/// and not [`Humidity::MAX_MASS_PER_TILE`] (the 2500 flood cap).
-///
-/// After buoyant rise, vapor is a thin sheet. Typical sky tiles sit in the
-/// tens, and drizzle starts at `CondensationConfig::min_mass_to_rain` (64).
-/// Scaling against the flood cap hid the whole field; remapping to the
-/// live max made a uniform sheet pump whenever the peak drifted.
-pub const HUMIDITY_HAZE_FULL_MASS: f32 = 64.0;
-
-/// Soft vapor haze alpha on an **absolute** scale vs [`HUMIDITY_HAZE_FULL_MASS`].
-///
-/// Do not pass the live field max. Relative normalization makes the whole
-/// overlay pump when the wettest tile rains, evaporates, or advects.
-pub fn humidity_haze_alpha(mass: f32, full_mass: f32) -> u8 {
+/// Soft white vapor haze alpha (legacy helper for tests / diagnostics).
+pub fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
     if mass <= 0.0 {
         return 0;
     }
-    let norm = (mass / full_mass.max(1.0)).clamp(0.0, 1.0);
+    let norm = (mass / max_mass.max(1.0)).clamp(0.0, 1.0);
     if norm < 0.12 {
         return 0;
     }
@@ -1024,80 +1011,10 @@ fn draw_ridge_band(
     }
 }
 
-/// True when this cell is the falling drop (1-wide water / flake), not vapour.
-fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
-    match world.get_cell(gx, gy) {
-        Some(c) if c.material == MaterialId::Air && c.sat.0 > GRAIN_REPOSE_HAZE_MAX => true,
-        Some(c) if falls_through_empty_air(c.material) => true,
-        _ => false,
-    }
-}
-
-fn draw_haze_tile(
-    world: &World,
-    wind: &Wind,
-    hx: i32,
-    hy: i32,
-    mass: f32,
-    sat: f32,
-    tc: i32,
-    x_copies: &[i32],
-    origin_x: f32,
-    origin_y: f32,
-    cell_px: f32,
-    bedrock_floor_y: i32,
-    width_cols: i32,
-    sw: f32,
-    sh: f32,
-) {
-    let alpha = humidity_haze_alpha(mass, sat);
-    if alpha == 0 {
-        return;
-    }
-    let base_gx = hx * tc;
-    let base_gy = hy * tc;
-    let center_x = world.wrap_x(base_gx + tc / 2);
-    let floor_y = cloud_floor_y(world, wind, center_x as f32).round() as i32;
-    let y0 = (floor_y + 1).max(base_gy);
-    let y1 = base_gy + tc;
-    if y0 >= y1 {
-        return;
-    }
-    let color = Color::from_rgba(255, 255, 255, alpha);
-    for col in 0..tc {
-        let gx = base_gx + col;
-        let wx = world.wrap_x(gx);
-        let mut run = y0;
-        while run < y1 {
-            while run < y1 && haze_cell_is_drop(world, wx, run) {
-                run += 1;
-            }
-            if run >= y1 {
-                break;
-            }
-            let mut end = run + 1;
-            while end < y1 && !haze_cell_is_drop(world, wx, end) {
-                end += 1;
-            }
-            for &x_copy in x_copies {
-                let sx = origin_x + (gx + x_copy * width_cols) as f32 * cell_px;
-                let top_sy = origin_y - (end - bedrock_floor_y) as f32 * cell_px;
-                let bot_sy = origin_y - (run - bedrock_floor_y) as f32 * cell_px;
-                let h = (bot_sy - top_sy).max(1.0);
-                if sx + cell_px < 0.0 || sx > sw || top_sy > sh || top_sy + h < 0.0 {
-                    continue;
-                }
-                draw_rectangle(sx, top_sy, cell_px + 0.5, h, color);
-            }
-            run = end;
-        }
-    }
-}
-
-/// Humidity field as the sky look (`H`) + sparse wind streaks.
+/// Humidity tile diagnostic (front of terrain) + sparse wind streaks.
 ///
-/// This is the vapour raster — the field *is* the cloud. Parcel banks on
-/// `N` are leftover animation and default off. Clipped to ground.
+/// This is the `H` overlay — soft white vapour tiles clipped to ground.
+/// Soft cloud banks are separate (`N` / [`draw_depth_cloud_layer`]).
 pub fn draw_haze_and_wind(
     humidity: &Humidity,
     world: &World,
@@ -1115,60 +1032,50 @@ pub fn draw_haze_and_wind(
 ) {
     if !humidity.cells.is_empty() && cell_px > 0.0 {
         let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-        // Rain-threshold scale — a tile of mass M always looks the same,
-        // whether or not a wetter tile exists this frame. Live-max
-        // remapping pumped; the 2500 flood cap hid typical vapor.
-        let sat = HUMIDITY_HAZE_FULL_MASS;
+        let max_mass = humidity
+            .cells
+            .values()
+            .copied()
+            .fold(0.0f32, f32::max)
+            .max(1.0);
         let tc = humidity.tile_cols.max(1);
         let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
 
-        // One rect per tile column. A drop is 1-wide water in the grid —
-        // skip those cells instead of dropping the whole 4-wide tile.
         for (&(hx, hy), &mass) in &humidity.cells {
             if mass <= 0.0 || hy < sky_hy_min {
                 continue;
             }
-            draw_haze_tile(
-                world,
-                wind,
-                hx,
-                hy,
-                mass,
-                sat,
-                tc,
-                x_copies,
-                origin_x,
-                origin_y,
-                cell_px,
-                bedrock_floor_y,
-                width_cols,
-                sw,
-                sh,
-            );
-            // Tile emptied by a drop is gone from `cells`. Keep painting its
-            // 4-wide seat from this neighbour so only the 1-wide water carves.
-            for nhx in [hx - 1, hx + 1] {
-                let ngx = world.wrap_x(nhx * tc);
-                if humidity.at_cell(ngx, hy * tc) > 1e-3 {
+            let alpha = humidity_haze_alpha(mass, max_mass);
+            if alpha == 0 {
+                continue;
+            }
+            let base_gx = hx * tc;
+            let base_gy = hy * tc;
+            for col in 0..tc {
+                let gx = base_gx + col;
+                let world_x = world.wrap_x(gx);
+                let floor_y = cloud_floor_y(world, wind, world_x as f32).round() as i32;
+                let y0 = (floor_y + 1).max(base_gy);
+                let y1 = base_gy + tc;
+                if y0 >= y1 {
                     continue;
                 }
-                draw_haze_tile(
-                    world,
-                    wind,
-                    nhx,
-                    hy,
-                    mass,
-                    sat,
-                    tc,
-                    x_copies,
-                    origin_x,
-                    origin_y,
-                    cell_px,
-                    bedrock_floor_y,
-                    width_cols,
-                    sw,
-                    sh,
-                );
+                for &x_copy in x_copies {
+                    let sx = origin_x + (gx + x_copy * width_cols) as f32 * cell_px;
+                    let top_sy = origin_y - (y1 - bedrock_floor_y) as f32 * cell_px;
+                    let bot_sy = origin_y - (y0 - bedrock_floor_y) as f32 * cell_px;
+                    let h = (bot_sy - top_sy).max(1.0);
+                    if sx + cell_px < 0.0 || sx > sw || top_sy > sh || top_sy + h < 0.0 {
+                        continue;
+                    }
+                    draw_rectangle(
+                        sx,
+                        top_sy,
+                        cell_px + 0.5,
+                        h,
+                        Color::from_rgba(255, 255, 255, alpha),
+                    );
+                }
             }
         }
     }
@@ -1930,8 +1837,7 @@ pub fn estimate_snow_bias(
 #[cfg(test)]
 mod tests {
     use super::{
-        gather_soft_cloud_srcs, haze_cell_is_drop, humidity_haze_alpha, stamp_pixel_cloud_mask,
-        CloudDepthLayer, HUMIDITY_HAZE_FULL_MASS,
+        gather_soft_cloud_srcs, humidity_haze_alpha, stamp_pixel_cloud_mask, CloudDepthLayer,
     };
     use std::collections::HashMap;
     use wk_voxel::{CloudStore, Humidity};
@@ -2016,44 +1922,6 @@ mod tests {
         assert_eq!(humidity_haze_alpha(5.0, 100.0), 0); // below 12% floor
         assert!(humidity_haze_alpha(50.0, 100.0) >= 18);
         assert!(humidity_haze_alpha(100.0, 100.0) <= 70);
-
-        // Visual scale is the drizzle threshold, not the 2500 flood cap.
-        // A mid tile must not brighten or vanish when a wetter neighbour appears.
-        let full = HUMIDITY_HAZE_FULL_MASS;
-        assert_eq!(humidity_haze_alpha(full * 0.05, full), 0);
-        let mid = humidity_haze_alpha(full * 0.25, full);
-        assert_eq!(mid, humidity_haze_alpha(full * 0.25, full));
-        assert!(mid > 0 && mid < 80, "haze should stay a faint wash, got {mid}");
-        assert!(
-            humidity_haze_alpha(full, full) > mid,
-            "wetter tiles must read denser than mid vapor"
-        );
-        assert!(
-            humidity_haze_alpha(20.0, full) > 0,
-            "typical sky vapor must be visible on the rain-threshold scale"
-        );
-        assert_eq!(
-            humidity_haze_alpha(20.0, Humidity::MAX_MASS_PER_TILE),
-            0,
-            "the flood cap hides the same tile — do not use it for draw"
-        );
-    }
-
-    #[test]
-    fn haze_carves_only_the_drop_cell() {
-        use wk_material::MaterialId;
-        use wk_voxel::{Cell, ChunkCoord, Sat, GRAIN_REPOSE_HAZE_MAX};
-
-        let mut w = wk_voxel::World::new(1);
-        w.ensure_chunk(ChunkCoord::new(0, 0));
-        w.set_cell(4, 10, Cell::air());
-        let mut drop = Cell::air();
-        drop.sat = Sat(GRAIN_REPOSE_HAZE_MAX.saturating_add(8));
-        w.set_cell(5, 10, drop);
-        w.set_cell(6, 10, Cell::air());
-        assert!(!haze_cell_is_drop(&w, 4, 10));
-        assert!(haze_cell_is_drop(&w, 5, 10), "the droplet is one cell");
-        assert!(!haze_cell_is_drop(&w, 6, 10));
     }
 
     #[test]
