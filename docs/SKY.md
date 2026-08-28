@@ -36,8 +36,10 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 Humidity still **drives** the weather, now with temperature/wind:
 evap(T, wind) → thermal rise → drizzle when vapor meets colder air /
 ground. `H` paints the 4×4 vapour field directly (absolute scale vs the
-drizzle threshold, not the live max and not the flood cap). `N` parcel
-banks are leftover animation and stay off unless you turn them on.
+drizzle threshold, not the live max and not the flood cap). Do not
+upsample the raster to cells — rain streaks are the 1-wide water in
+the grid. `N` parcel banks are leftover animation and stay off unless
+you turn them on.
 
 ## Signal → visual map
 

@@ -2,7 +2,7 @@
 //!
 //! Design: `docs/SKY.md`. Isolation: wk-voxel + wk-material + macroquad only.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use macroquad::prelude::*;
 use wk_material::MaterialId;
@@ -1051,28 +1051,18 @@ pub fn draw_haze_and_wind(
         let tc = humidity.tile_cols.max(1);
         let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
 
-        // Occupied tiles plus orthogonal neighbours so bilinear can bleed
-        // across a tile that just paid for a drop.
-        let mut paint: HashSet<(i32, i32)> = HashSet::new();
-        for &(hx, hy) in humidity.cells.keys() {
-            if hy < sky_hy_min {
+        // One rect per tile column. Do not bilinear-upsample to cells —
+        // the field is 4×4; rain streaks are the 1-wide water in the grid.
+        for (&(hx, hy), &mass) in &humidity.cells {
+            if mass <= 0.0 || hy < sky_hy_min {
                 continue;
             }
-            paint.insert((hx, hy));
-            for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
-                let ny = hy + dy;
-                if ny < sky_hy_min {
-                    continue;
-                }
-                paint.insert((hx + dx, ny));
+            let alpha = humidity_haze_alpha(mass, sat);
+            if alpha == 0 {
+                continue;
             }
-        }
-
-        for (hx, hy) in paint {
             let base_gx = hx * tc;
             let base_gy = hy * tc;
-            // One floor per tile (center column). Per-column cloud_floor_y
-            // follows local surface and draws comb-teeth that grow/shrink.
             let center_x = world.wrap_x(base_gx + tc / 2);
             let floor_y = cloud_floor_y(world, wind, center_x as f32).round() as i32;
             let y0 = (floor_y + 1).max(base_gy);
@@ -1082,31 +1072,21 @@ pub fn draw_haze_and_wind(
             }
             for col in 0..tc {
                 let gx = base_gx + col;
-                let world_x = world.wrap_x(gx);
-                for gy in y0..y1 {
-                    let mass = humidity.sample_bilinear(
-                        world_x as f32 + 0.5,
-                        gy as f32 + 0.5,
-                    );
-                    let alpha = humidity_haze_alpha(mass, sat);
-                    if alpha == 0 {
+                for &x_copy in x_copies {
+                    let sx = origin_x + (gx + x_copy * width_cols) as f32 * cell_px;
+                    let top_sy = origin_y - (y1 - bedrock_floor_y) as f32 * cell_px;
+                    let bot_sy = origin_y - (y0 - bedrock_floor_y) as f32 * cell_px;
+                    let h = (bot_sy - top_sy).max(1.0);
+                    if sx + cell_px < 0.0 || sx > sw || top_sy > sh || top_sy + h < 0.0 {
                         continue;
                     }
-                    for &x_copy in x_copies {
-                        let sx = origin_x + (gx + x_copy * width_cols) as f32 * cell_px;
-                        let top_sy = origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
-                        if sx + cell_px < 0.0 || sx > sw || top_sy > sh || top_sy + cell_px < 0.0
-                        {
-                            continue;
-                        }
-                        draw_rectangle(
-                            sx,
-                            top_sy,
-                            cell_px + 0.5,
-                            cell_px + 0.5,
-                            Color::from_rgba(255, 255, 255, alpha),
-                        );
-                    }
+                    draw_rectangle(
+                        sx,
+                        top_sy,
+                        cell_px + 0.5,
+                        h,
+                        Color::from_rgba(255, 255, 255, alpha),
+                    );
                 }
             }
         }
