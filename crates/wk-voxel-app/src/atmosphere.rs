@@ -2,7 +2,7 @@
 //!
 //! Design: `docs/SKY.md`. Isolation: wk-voxel + wk-material + macroquad only.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use macroquad::prelude::*;
 use wk_material::MaterialId;
@@ -1013,8 +1013,9 @@ fn draw_ridge_band(
 
 /// Humidity tile diagnostic (front of terrain) + sparse wind streaks.
 ///
-/// This is the `H` overlay — soft white vapour tiles clipped to ground.
-/// Soft cloud banks are separate (`N` / [`draw_depth_cloud_layer`]).
+/// This is the `H` overlay — the 4×4 store, bilinear-sampled per cell so
+/// the wash has no tile facets. Physics is unchanged. Soft cloud banks
+/// are separate (`N` / [`draw_depth_cloud_layer`]).
 pub fn draw_haze_and_wind(
     humidity: &Humidity,
     world: &World,
@@ -1041,40 +1042,60 @@ pub fn draw_haze_and_wind(
         let tc = humidity.tile_cols.max(1);
         let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
 
-        for (&(hx, hy), &mass) in &humidity.cells {
-            if mass <= 0.0 || hy < sky_hy_min {
+        // Occupied tiles plus neighbours so the bilinear lobe can bleed
+        // off a tile centre. Store stays 4×4.
+        let mut paint: HashSet<(i32, i32)> = HashSet::new();
+        for &(hx, hy) in humidity.cells.keys() {
+            if hy < sky_hy_min {
                 continue;
             }
-            let alpha = humidity_haze_alpha(mass, max_mass);
-            if alpha == 0 {
-                continue;
+            for dx in -1..=1 {
+                for dy in -1..=1 {
+                    let ny = hy + dy;
+                    if ny >= sky_hy_min {
+                        paint.insert((hx + dx, ny));
+                    }
+                }
             }
+        }
+
+        for (hx, hy) in paint {
             let base_gx = hx * tc;
             let base_gy = hy * tc;
+            let center_x = world.wrap_x(base_gx + tc / 2);
+            let floor_y = cloud_floor_y(world, wind, center_x as f32).round() as i32;
+            let y0 = (floor_y + 1).max(base_gy);
+            let y1 = base_gy + tc;
+            if y0 >= y1 {
+                continue;
+            }
             for col in 0..tc {
                 let gx = base_gx + col;
-                let world_x = world.wrap_x(gx);
-                let floor_y = cloud_floor_y(world, wind, world_x as f32).round() as i32;
-                let y0 = (floor_y + 1).max(base_gy);
-                let y1 = base_gy + tc;
-                if y0 >= y1 {
-                    continue;
-                }
-                for &x_copy in x_copies {
-                    let sx = origin_x + (gx + x_copy * width_cols) as f32 * cell_px;
-                    let top_sy = origin_y - (y1 - bedrock_floor_y) as f32 * cell_px;
-                    let bot_sy = origin_y - (y0 - bedrock_floor_y) as f32 * cell_px;
-                    let h = (bot_sy - top_sy).max(1.0);
-                    if sx + cell_px < 0.0 || sx > sw || top_sy > sh || top_sy + h < 0.0 {
+                let wx = world.wrap_x(gx);
+                for gy in y0..y1 {
+                    let mass = humidity.sample_bilinear(wx as f32 + 0.5, gy as f32 + 0.5);
+                    let alpha = humidity_haze_alpha(mass, max_mass);
+                    if alpha == 0 {
                         continue;
                     }
-                    draw_rectangle(
-                        sx,
-                        top_sy,
-                        cell_px + 0.5,
-                        h,
-                        Color::from_rgba(255, 255, 255, alpha),
-                    );
+                    for &x_copy in x_copies {
+                        let sx = origin_x + (gx + x_copy * width_cols) as f32 * cell_px;
+                        let top_sy = origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
+                        if sx + cell_px < 0.0
+                            || sx > sw
+                            || top_sy > sh
+                            || top_sy + cell_px < 0.0
+                        {
+                            continue;
+                        }
+                        draw_rectangle(
+                            sx,
+                            top_sy,
+                            cell_px + 0.5,
+                            cell_px + 0.5,
+                            Color::from_rgba(255, 255, 255, alpha),
+                        );
+                    }
                 }
             }
         }
