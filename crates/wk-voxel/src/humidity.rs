@@ -227,6 +227,51 @@ impl Humidity {
         got
     }
 
+    /// Drain `mass` down the vapour column around `(gx, gy)`.
+    ///
+    /// One condensation droplet costs a full cell (255). Taking that from a
+    /// single 4×4 tile punches a square hole in the vapour field. Spreading
+    /// the same mass up and down the column thins a streak; the falling drop
+    /// stays one cell wide. A lone tile that cannot pay still empties.
+    pub fn take_spread(&mut self, gx: i32, gy: i32, mass: f32) -> f32 {
+        if mass <= 0.0 {
+            return 0.0;
+        }
+        let (hx0, hy0) = self.tile_of(gx, gy);
+        let Some(hx0) = self.wrap_hx(hx0) else {
+            return 0.0;
+        };
+        let mut remaining = mass;
+        for _ in 0..4 {
+            if remaining <= 1e-3 {
+                break;
+            }
+            let mut keys: Vec<(i32, f32)> = Vec::new();
+            let mut sum = 0.0f32;
+            for dhy in -2..=2 {
+                let hy = hy0 + dhy;
+                if !self.accepts(hx0, hy) {
+                    continue;
+                }
+                let m = self.at_tile(hx0, hy);
+                if m > 1e-3 {
+                    keys.push((hy, m));
+                    sum += m;
+                }
+            }
+            if sum <= 1e-3 {
+                break;
+            }
+            let want = remaining;
+            for (hy, m) in keys {
+                let share = want * (m / sum);
+                let gy_t = hy * self.tile_cols;
+                remaining -= self.take(gx, gy_t, share);
+            }
+        }
+        mass - remaining
+    }
+
     /// Peek available vapor near `(gx, gy)` without removing it.
     pub fn peek_near(&self, gx: i32, gy: i32) -> f32 {
         let mut total = 0.0;
@@ -613,6 +658,29 @@ mod tests {
         );
         assert!(h.sample_bilinear(2.0, 2.0) < mid);
         assert!(h.sample_bilinear(6.0, 2.0) > mid);
+    }
+
+    #[test]
+    fn take_spread_does_not_zero_a_wet_column() {
+        let mut h = Humidity::new(4);
+        // Five stacked tiles at 80 — one full-cell droplet (255) used to empty
+        // the centre tile and punch a 4×4 hole in the H overlay.
+        for hy in 0..5 {
+            h.cells.insert((1, hy), 80.0);
+        }
+        let before = h.total_mass();
+        let took = h.take_spread(5, 9, 255.0);
+        assert!((took - 255.0).abs() < 1e-2, "got {took}");
+        assert!((before - h.total_mass() - 255.0).abs() < 1e-2);
+        for hy in 0..5 {
+            let left = h.at_tile(1, hy);
+            assert!(
+                left > 20.0,
+                "column tile hy={hy} should stay visible after a drop, left {left}"
+            );
+        }
+        assert_eq!(h.at_tile(0, 2), 0.0, "side columns must not pay");
+        assert_eq!(h.at_tile(2, 2), 0.0, "side columns must not pay");
     }
 
     #[test]
