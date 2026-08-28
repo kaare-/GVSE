@@ -247,12 +247,15 @@ fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
     out
 }
 
-/// Soft white vapor haze alpha (legacy helper for tests / diagnostics).
-pub fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
+/// Soft vapor haze alpha on an **absolute** scale vs tile saturation.
+///
+/// Do not pass the live field max. Relative normalization makes the whole
+/// overlay pump when the wettest tile rains, evaporates, or advects.
+pub fn humidity_haze_alpha(mass: f32, saturation_mass: f32) -> u8 {
     if mass <= 0.0 {
         return 0;
     }
-    let norm = (mass / max_mass.max(1.0)).clamp(0.0, 1.0);
+    let norm = (mass / saturation_mass.max(1.0)).clamp(0.0, 1.0);
     if norm < 0.12 {
         return 0;
     }
@@ -1032,12 +1035,10 @@ pub fn draw_haze_and_wind(
 ) {
     if !humidity.cells.is_empty() && cell_px > 0.0 {
         let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-        let max_mass = humidity
-            .cells
-            .values()
-            .copied()
-            .fold(0.0f32, f32::max)
-            .max(1.0);
+        // Fixed saturation scale — a tile of mass M always looks the same,
+        // whether or not a wetter tile exists this frame. Live-max
+        // remapping made the whole overlay pump as the peak drifted.
+        let sat = Humidity::MAX_MASS_PER_TILE;
         let tc = humidity.tile_cols.max(1);
         let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
 
@@ -1045,21 +1046,23 @@ pub fn draw_haze_and_wind(
             if mass <= 0.0 || hy < sky_hy_min {
                 continue;
             }
-            let alpha = humidity_haze_alpha(mass, max_mass);
+            let alpha = humidity_haze_alpha(mass, sat);
             if alpha == 0 {
                 continue;
             }
             let base_gx = hx * tc;
             let base_gy = hy * tc;
+            // One floor per tile (center column). Per-column cloud_floor_y
+            // follows local surface and draws comb-teeth that grow/shrink.
+            let center_x = world.wrap_x(base_gx + tc / 2);
+            let floor_y = cloud_floor_y(world, wind, center_x as f32).round() as i32;
+            let y0 = (floor_y + 1).max(base_gy);
+            let y1 = base_gy + tc;
+            if y0 >= y1 {
+                continue;
+            }
             for col in 0..tc {
                 let gx = base_gx + col;
-                let world_x = world.wrap_x(gx);
-                let floor_y = cloud_floor_y(world, wind, world_x as f32).round() as i32;
-                let y0 = (floor_y + 1).max(base_gy);
-                let y1 = base_gy + tc;
-                if y0 >= y1 {
-                    continue;
-                }
                 for &x_copy in x_copies {
                     let sx = origin_x + (gx + x_copy * width_cols) as f32 * cell_px;
                     let top_sy = origin_y - (y1 - bedrock_floor_y) as f32 * cell_px;
@@ -1922,6 +1925,17 @@ mod tests {
         assert_eq!(humidity_haze_alpha(5.0, 100.0), 0); // below 12% floor
         assert!(humidity_haze_alpha(50.0, 100.0) >= 18);
         assert!(humidity_haze_alpha(100.0, 100.0) <= 70);
+
+        // Overlay uses the per-tile cap, not the live field max. A mid
+        // tile must not brighten or vanish when a wetter neighbour appears.
+        let sat = Humidity::MAX_MASS_PER_TILE;
+        assert_eq!(humidity_haze_alpha(sat * 0.05, sat), 0);
+        let mid = humidity_haze_alpha(sat * 0.25, sat);
+        let mid_next_to_saturated = humidity_haze_alpha(sat * 0.25, sat);
+        assert_eq!(mid, mid_next_to_saturated);
+        assert!(mid > 0 && mid < 80, "haze should stay a faint wash, got {mid}");
+        let wet = humidity_haze_alpha(sat, sat);
+        assert!(wet > mid, "wetter tiles must read denser than mid vapor");
     }
 
     #[test]
