@@ -22,7 +22,7 @@ use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     apply_snow_wind_drift,
-    find_plant_slot, humidity_diffuse_due, set_parallel_enabled, spore_bank_len, stamp_world,
+    find_plant_slot, humidity_diffuse_due, set_parallel_enabled, stamp_world,
     temperature_step_due, tick_with_perf, tick_with_perf_profiled, Blueprint, ClimateConfig,
     CloudConfig, CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity,
     KarstConfig, OrganismPassTimings, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig,
@@ -860,13 +860,9 @@ fn soak_age_inventory() {
             one_stack_tick(&mut scene, Some(&mut accum), Some(&mut phys));
         }
         let wall = wall.elapsed();
-        let mut snow_ch = 0usize;
         let mut buoy_ch = 0usize;
         let mut pore_ch = 0usize;
         for c in scene.world.chunks.values() {
-            if c.has_snow {
-                snow_ch += 1;
-            }
             if c.has_buoyant {
                 buoy_ch += 1;
             }
