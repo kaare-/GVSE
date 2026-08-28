@@ -17,7 +17,7 @@ active parcel banks + precip     humidity echo CloudStore + cond streaks (N)
 terrain + standing water         night: deep cool darken + weak moon ambient
 day canopy shade                 under-surface dim + air corridor + sun cast
 front soft cloud banks           parcel echoes ahead of land (N)
-humidity tile diagnostic + wind  H overlay (diagnostics, not “clouds”)
+humidity vapour field + wind     H overlay (the field is the cloud)
 debug overlays → organisms
 night moon cast                  after organisms
 HUD
@@ -29,23 +29,22 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 
 | Key | What |
 |-----|------|
-| **N** | Soft clouds at **all depths**: far / mid / active / front + precip |
-| **H** | Humidity **tile raster** diagnostic + wind streaks |
+| **N** | Leftover parcel animation (off by default) |
+| **H** | Humidity **vapour field** — the sky water look + wind streaks |
 | **F6** | Glossary — keys, water/sky words, HUD tags |
 
 Humidity still **drives** the weather, now with temperature/wind:
 evap(T, wind) → thermal rise → drizzle when vapor meets colder air /
-ground. `N` draws a capped visual echo of the wettest sky tiles (not a
-second water store, and not a rain engine). Far / mid / front banks are
-parallax **echoes of those parcels** — not a second humidity paint pass,
-and not a per-cell atmosphere (CPU stays on 4×4 tiles).
+ground. `H` paints the 4×4 vapour field directly (absolute scale vs the
+drizzle threshold, not the live max and not the flood cap). `N` parcel
+banks are leftover animation and stay off unless you turn them on.
 
 ## Signal → visual map
 
 | Signal | Visual |
 |--------|--------|
-| Humidity → parcels | Soft multi-depth cloud banks (`N`); streaks when tiles are wet |
-| Humidity tiles | Diagnostic haze overlay (`H`) only — alpha vs `MAX_MASS_PER_TILE`, not the live field max |
+| Humidity tiles | Vapour field (`H`) — alpha vs drizzle-threshold mass (64), not the live max |
+| Humidity → leftover parcels | Soft banks (`N`), off by default |
 | Day/night | Sky lerp + sun/moon; night landscape darken |
 | Wind | Streaks on `H`; front cloud scroll |
 | Ridges | Dual parallax fills from **ground** height (not falling snow, not mid-air wet Air) |
@@ -67,6 +66,6 @@ lit = column_sky × day_factor × cloud_sky_transmit(x)
 
 ## Non-goals
 
-- Treating the humidity raster as decorative clouds
+- Treating leftover `N` parcels as the sky water look
 - Second weather sim for background layers
 - Volumetric sun beams

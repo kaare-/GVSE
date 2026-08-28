@@ -247,15 +247,24 @@ fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
     out
 }
 
-/// Soft vapor haze alpha on an **absolute** scale vs tile saturation.
+/// Tile mass that paints as a solid haze. Absolute — not the live field max
+/// and not [`Humidity::MAX_MASS_PER_TILE`] (the 2500 flood cap).
+///
+/// After buoyant rise, vapor is a thin sheet. Typical sky tiles sit in the
+/// tens, and drizzle starts at `CondensationConfig::min_mass_to_rain` (64).
+/// Scaling against the flood cap hid the whole field; remapping to the
+/// live max made a uniform sheet pump whenever the peak drifted.
+pub const HUMIDITY_HAZE_FULL_MASS: f32 = 64.0;
+
+/// Soft vapor haze alpha on an **absolute** scale vs [`HUMIDITY_HAZE_FULL_MASS`].
 ///
 /// Do not pass the live field max. Relative normalization makes the whole
 /// overlay pump when the wettest tile rains, evaporates, or advects.
-pub fn humidity_haze_alpha(mass: f32, saturation_mass: f32) -> u8 {
+pub fn humidity_haze_alpha(mass: f32, full_mass: f32) -> u8 {
     if mass <= 0.0 {
         return 0;
     }
-    let norm = (mass / saturation_mass.max(1.0)).clamp(0.0, 1.0);
+    let norm = (mass / full_mass.max(1.0)).clamp(0.0, 1.0);
     if norm < 0.12 {
         return 0;
     }
@@ -1014,10 +1023,10 @@ fn draw_ridge_band(
     }
 }
 
-/// Humidity tile diagnostic (front of terrain) + sparse wind streaks.
+/// Humidity field as the sky look (`H`) + sparse wind streaks.
 ///
-/// This is the `H` overlay — soft white vapour tiles clipped to ground.
-/// Soft cloud banks are separate (`N` / [`draw_depth_cloud_layer`]).
+/// This is the vapour raster — the field *is* the cloud. Parcel banks on
+/// `N` are leftover animation and default off. Clipped to ground.
 pub fn draw_haze_and_wind(
     humidity: &Humidity,
     world: &World,
@@ -1035,10 +1044,10 @@ pub fn draw_haze_and_wind(
 ) {
     if !humidity.cells.is_empty() && cell_px > 0.0 {
         let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-        // Fixed saturation scale — a tile of mass M always looks the same,
+        // Rain-threshold scale — a tile of mass M always looks the same,
         // whether or not a wetter tile exists this frame. Live-max
-        // remapping made the whole overlay pump as the peak drifted.
-        let sat = Humidity::MAX_MASS_PER_TILE;
+        // remapping pumped; the 2500 flood cap hid typical vapor.
+        let sat = HUMIDITY_HAZE_FULL_MASS;
         let tc = humidity.tile_cols.max(1);
         let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
 
@@ -1841,6 +1850,7 @@ pub fn estimate_snow_bias(
 mod tests {
     use super::{
         gather_soft_cloud_srcs, humidity_haze_alpha, stamp_pixel_cloud_mask, CloudDepthLayer,
+        HUMIDITY_HAZE_FULL_MASS,
     };
     use std::collections::HashMap;
     use wk_voxel::{CloudStore, Humidity};
@@ -1926,16 +1936,26 @@ mod tests {
         assert!(humidity_haze_alpha(50.0, 100.0) >= 18);
         assert!(humidity_haze_alpha(100.0, 100.0) <= 70);
 
-        // Overlay uses the per-tile cap, not the live field max. A mid
-        // tile must not brighten or vanish when a wetter neighbour appears.
-        let sat = Humidity::MAX_MASS_PER_TILE;
-        assert_eq!(humidity_haze_alpha(sat * 0.05, sat), 0);
-        let mid = humidity_haze_alpha(sat * 0.25, sat);
-        let mid_next_to_saturated = humidity_haze_alpha(sat * 0.25, sat);
-        assert_eq!(mid, mid_next_to_saturated);
+        // Visual scale is the drizzle threshold, not the 2500 flood cap.
+        // A mid tile must not brighten or vanish when a wetter neighbour appears.
+        let full = HUMIDITY_HAZE_FULL_MASS;
+        assert_eq!(humidity_haze_alpha(full * 0.05, full), 0);
+        let mid = humidity_haze_alpha(full * 0.25, full);
+        assert_eq!(mid, humidity_haze_alpha(full * 0.25, full));
         assert!(mid > 0 && mid < 80, "haze should stay a faint wash, got {mid}");
-        let wet = humidity_haze_alpha(sat, sat);
-        assert!(wet > mid, "wetter tiles must read denser than mid vapor");
+        assert!(
+            humidity_haze_alpha(full, full) > mid,
+            "wetter tiles must read denser than mid vapor"
+        );
+        assert!(
+            humidity_haze_alpha(20.0, full) > 0,
+            "typical sky vapor must be visible on the rain-threshold scale"
+        );
+        assert_eq!(
+            humidity_haze_alpha(20.0, Humidity::MAX_MASS_PER_TILE),
+            0,
+            "the flood cap hides the same tile — do not use it for draw"
+        );
     }
 
     #[test]

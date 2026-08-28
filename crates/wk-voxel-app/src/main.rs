@@ -19,8 +19,8 @@
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution (surface limestone + slow groundwater)
 //! - `O` — toggle Set A organisms (Atom step)
-//! - `H` — toggle humidity tile diagnostic + wind streaks (default on)
-//! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
+//! - `H` — toggle humidity vapour field + wind streaks (default on)
+//! - `N` — leftover parcel animation (off by default)
 //! - `T` — toggle temperature heatmap overlay
 //! - `U` — toggle ground saturation heatmap (pores + free water)
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
@@ -209,9 +209,9 @@ async fn main() {
     let mut spore_fx = SporeFx::new();
     let mut paused = false;
     let mut organisms_on = true;
-    // Humidity diagnostic default on (`H`); soft clouds default on (`N`).
+    // Vapour field is the sky look (`H`). Parcel animation on `N` is leftover.
     let mut humidity_overlay = true;
-    let mut clouds_on = true;
+    let mut clouds_on = false;
     let mut temp_overlay = false;
     let mut sat_overlay = false;
     let mut mycelium_overlay = false;
@@ -1022,7 +1022,7 @@ async fn main() {
             scene.params.width_cols,
         );
 
-        // Soft clouds (N): far echoes → ridges → mid echoes → active parcels + precip.
+        // Leftover parcel banks (N, off by default). The vapour field is `H`.
         if clouds_on {
             draw_depth_cloud_layer(
                 &scene.clouds,
