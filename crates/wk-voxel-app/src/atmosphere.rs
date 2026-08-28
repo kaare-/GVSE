@@ -262,7 +262,9 @@ fn haze_paint_tiles(humidity: &Humidity, sky_hy_min: i32) -> HashSet<(i32, i32)>
                 if ny < sky_hy_min {
                     continue;
                 }
-                let nx = humidity.wrap_tile_x(hx + dx).unwrap_or(hx + dx);
+                let Some(nx) = humidity.wrap_tile_x(hx + dx) else {
+                    continue;
+                };
                 paint.insert((nx, ny));
             }
         }
@@ -1079,6 +1081,9 @@ pub fn draw_haze_and_wind(
         let paint = haze_paint_tiles(humidity, sky_hy_min);
 
         for (hx, hy) in paint {
+            let Some(hx) = humidity.wrap_tile_x(hx) else {
+                continue;
+            };
             let base_gx = hx * tc;
             let base_gy = hy * tc;
             let center_x = world.wrap_x(base_gx + tc / 2);
@@ -1089,19 +1094,18 @@ pub fn draw_haze_and_wind(
                 continue;
             }
             for col in 0..tc {
-                let gx = base_gx + col;
-                let wx = world.wrap_x(gx);
+                let wx = world.wrap_x(base_gx + col);
                 for gy in y0..y1 {
                     if haze_cell_is_drop(world, wx, gy) {
                         continue;
                     }
-                    let mass = humidity.sample_bilinear(wx as f32 + 0.5, gy as f32 + 0.5);
+                    let mass = humidity.sample_sheet(wx as f32 + 0.5, gy as f32 + 0.5);
                     let alpha = humidity_haze_alpha(mass, max_mass);
                     if alpha == 0 {
                         continue;
                     }
                     for &x_copy in x_copies {
-                        let sx = origin_x + (gx + x_copy * width_cols) as f32 * cell_px;
+                        let sx = origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
                         let top_sy = origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
                         if sx + cell_px < 0.0
                             || sx > sw

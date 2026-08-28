@@ -344,17 +344,20 @@ the vapour field (`advect_with_surface`) so mass rises on columns that climb
 the *current* surface, not the seed profile. Flatten the downwind face and
 the loft stops.
 
-**Ring seam.** Haze paint walks occupied tiles plus neighbours so bilinear
-can bleed off a tile centre. Those neighbours must wrap (`wrap_tile_x`).
-Inserting raw `hx ± 1` produced ghost tiles at −1 / `width`, and
-`x_copies` then drew them on top of the real seam — a 4-wide bright
-column at x=0. Same wrap on `sample_bilinear` and `take_spread`.
+**Ring seam.** Haze paint walks occupied tiles plus neighbours so the
+sheet sample can bleed off a tile centre. Those neighbours must wrap
+(`wrap_tile_x`); unwrapped `hx ± 1` is skipped, not drawn. Ghost tiles
+at −1 / `width` plus `x_copies` painted the real seam twice — a 4-wide
+bright column at x=0. Draw uses wrapped world-x. Same wrap on
+`sample_sheet` and `take_spread`.
 
-**A drop does not empty a 4×4 tile.** Condensation still nucleates one
-cell of water (255) at the tile centre. The humidity pay is
-`take_spread` across a 3×5 neighbourhood (horizontal wrap) so a wet
-sheet stays visible and the falling drop is the 1-wide streak. A lone
-tile that cannot share still empties. Haze skips the drop cell itself.
+**A drop does not open a 4×4 hole.** Condensation still nucleates one
+cell of water (255) at the tile centre. Humidity pay is `take_spread`:
+a wet sheet only pays down to half the neighbourhood median, then a
+wider window if needed. Haze `sample_sheet` lerps horizontal neighbours
+when a tile is punched (<45% of them) so bilinear cannot open a 4-wide
+gap. The drop cell itself is skipped. A lone puff that cannot share
+still empties.
 
 ## Dead ends, recorded
 

@@ -232,13 +232,14 @@ impl Humidity {
         got
     }
 
-    /// Drain `mass` across the 3×5 tile neighbourhood around `(gx, gy)`.
+    /// Drain `mass` across a widening neighbourhood around `(gx, gy)`.
     ///
     /// A droplet costs a full cell (255). Taking that from one 4×4 tile
-    /// opens a 4-wide hole in the vapour sheet. Spreading the same mass
-    /// sideways (wrapping on a ring) and a little up/down thins the
-    /// sheet; the falling drop stays one cell wide. A lone tile that
-    /// cannot share still empties.
+    /// opens a 4-wide hole in the vapour sheet. Tiles in a wet sheet
+    /// only pay down to half the neighbourhood median so the sheet
+    /// stays visible; the falling drop is the 1-wide streak. A lone
+    /// puff that cannot share still empties. Horizontal wrap is the
+    /// ring seam.
     pub fn take_spread(&mut self, gx: i32, gy: i32, mass: f32) -> f32 {
         if mass <= 0.0 {
             return 0.0;
@@ -248,17 +249,17 @@ impl Humidity {
             return 0.0;
         };
         let mut remaining = mass;
-        for _ in 0..4 {
+        const WINDOWS: [(i32, i32); 3] = [(1, 2), (2, 4), (4, 6)];
+        for &(rad_x, rad_y) in &WINDOWS {
             if remaining <= 1e-3 {
                 break;
             }
             let mut keys: Vec<(i32, i32, f32)> = Vec::new();
-            let mut sum = 0.0f32;
-            for dhx in -1..=1 {
+            for dhx in -rad_x..=rad_x {
                 let Some(hx) = self.wrap_hx(hx0 + dhx) else {
                     continue;
                 };
-                for dhy in -2..=2 {
+                for dhy in -rad_y..=rad_y {
                     let hy = hy0 + dhy;
                     if !self.accepts(hx, hy) {
                         continue;
@@ -266,20 +267,41 @@ impl Humidity {
                     let m = self.at_tile(hx, hy);
                     if m > 1e-3 {
                         keys.push((hx, hy, m));
-                        sum += m;
                     }
                 }
             }
-            if sum <= 1e-3 {
-                break;
+            if keys.is_empty() {
+                continue;
+            }
+            let floor = if keys.len() >= 3 {
+                let mut ms: Vec<f32> = keys.iter().map(|k| k.2).collect();
+                ms.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+                ms[ms.len() / 2] * 0.50
+            } else {
+                0.0
+            };
+            let mut avail_sum = 0.0f32;
+            let mut avail: Vec<(i32, i32, f32)> = Vec::with_capacity(keys.len());
+            for (hx, hy, m) in keys {
+                let a = (m - floor).max(0.0);
+                if a > 1e-3 {
+                    avail.push((hx, hy, a));
+                    avail_sum += a;
+                }
+            }
+            if avail_sum <= 1e-3 {
+                continue;
             }
             let want = remaining;
-            for (hx, hy, m) in keys {
-                let share = want * (m / sum);
+            for (hx, hy, a) in avail {
+                let share = (want * (a / avail_sum)).min(a);
                 let gx_t = hx * self.tile_cols + self.tile_cols / 2;
                 let gy_t = hy * self.tile_cols + self.tile_cols / 2;
                 remaining -= self.take(gx_t, gy_t, share);
             }
+        }
+        if remaining > 1e-3 {
+            remaining -= self.take_near(gx, gy, remaining);
         }
         mass - remaining
     }
@@ -377,6 +399,35 @@ impl Humidity {
         let a = m00 + (m10 - m00) * tx;
         let b = m01 + (m11 - m01) * tx;
         a + (b - a) * ty
+    }
+
+    /// [`Self::sample_bilinear`], except a tile much drier than its
+    /// horizontal neighbours is treated as a punched hole.
+    ///
+    /// A drop still empties (or thins) one 4×4 store tile. Bilinear
+    /// through that dry key opens a 4-wide gap. Lerp the wet
+    /// neighbours instead so the sheet continues and only the 1-wide
+    /// drop cell is skipped at draw.
+    pub fn sample_sheet(&self, gx: f32, gy: f32) -> f32 {
+        let tc = self.tile_cols.max(1);
+        let hx = (gx.floor() as i32).div_euclid(tc);
+        let hy = (gy.floor() as i32).div_euclid(tc);
+        let here = self.at_tile(hx, hy);
+        let left = self.at_tile(self.wrap_hx(hx - 1).unwrap_or(hx - 1), hy);
+        let right = self.at_tile(self.wrap_hx(hx + 1).unwrap_or(hx + 1), hy);
+        let neighbor = if left > 1e-3 && right > 1e-3 {
+            (left + right) * 0.5
+        } else {
+            left.max(right)
+        };
+        if neighbor > 1e-3 && here < neighbor * 0.45 {
+            if left > 1e-3 && right > 1e-3 {
+                let t = ((gx - (hx * tc) as f32) / tc as f32).clamp(0.0, 1.0);
+                return left + (right - left) * t;
+            }
+            return neighbor;
+        }
+        self.sample_bilinear(gx, gy)
     }
 
     /// Total humidity mass across all tiles. Useful for
@@ -789,6 +840,52 @@ mod tests {
         assert!(h.at_tile(3, 1) > 1.0, "seam tile 3 should share, not dump");
         assert!(h.at_tile(0, 1) < 80.0);
         assert!(h.at_tile(3, 1) < 80.0);
+    }
+
+    #[test]
+    fn take_spread_leaves_residue_on_a_thin_deck() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 32, 16);
+        h.wrap_x = true;
+        for hx in 2..5 {
+            h.cells.insert((hx, 2), 80.0);
+        }
+        let took = h.take_spread(10, 9, 80.0);
+        assert!((took - 80.0).abs() < 1e-2, "got {took}");
+        for hx in 2..5 {
+            let left = h.at_tile(hx, 2);
+            assert!(
+                left > 30.0,
+                "thin-deck tile hx={hx} must stay visible, left {left}"
+            );
+        }
+    }
+
+    #[test]
+    fn sample_sheet_closes_a_punched_tile() {
+        let mut h = Humidity::new(4);
+        h.cells.insert((0, 1), 80.0);
+        h.cells.insert((1, 1), 0.0);
+        h.cells.insert((2, 1), 80.0);
+        let mid = h.sample_sheet(6.0, 6.0);
+        assert!(
+            mid > 50.0,
+            "punched tile should paint from neighbours, got {mid}"
+        );
+        assert!(h.sample_bilinear(6.0, 6.0) < 20.0);
+    }
+
+    #[test]
+    fn sample_sheet_closes_a_punched_ring_seam() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 16, 16);
+        h.wrap_x = true;
+        h.cells.insert((3, 1), 80.0);
+        h.cells.insert((0, 1), 0.0);
+        h.cells.insert((1, 1), 80.0);
+        let seam = h.sample_sheet(2.0, 6.0);
+        assert!(
+            seam > 50.0,
+            "empty seam tile should paint from wrapped neighbours, got {seam}"
+        );
     }
 
     #[test]
