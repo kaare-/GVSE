@@ -22,7 +22,7 @@ use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     apply_snow_wind_drift,
-    find_plant_slot, humidity_diffuse_due, set_parallel_enabled, stamp_world,
+    find_plant_slot, humidity_diffuse_due, set_parallel_enabled, spore_bank_len, stamp_world,
     temperature_step_due, tick_with_perf, tick_with_perf_profiled, Blueprint, ClimateConfig,
     CloudConfig, CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity,
     KarstConfig, OrganismPassTimings, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig,
@@ -119,6 +119,9 @@ struct Scene {
     phase: PhaseConfig,
     climate: ClimateConfig,
     perf: PerfConfig,
+    /// Match the app's W toggle. Nightly soak leaves climatic rain off
+    /// and lets drizzle / evap cycle the water.
+    climatic_rain: bool,
 }
 
 fn demo_params() -> WorldgenParams {
@@ -200,6 +203,7 @@ fn stamp_scene(params: WorldgenParams) -> Scene {
         phase: PhaseConfig::default(),
         climate: ClimateConfig::default(),
         perf: PerfConfig::default(),
+        climatic_rain: true,
     }
 }
 
@@ -274,13 +278,15 @@ fn one_stack_tick(
         None => {
             // Match app: shell scans always parallel; CA follows PerfConfig.
             set_parallel_enabled(true);
-            apply_rain_with_temp(
-                &mut scene.world,
-                &scene.rain,
-                Some(&scene.temperature),
-                Some(&scene.phase),
-                Some(&mut scene.humidity),
-            );
+            if scene.climatic_rain {
+                apply_rain_with_temp(
+                    &mut scene.world,
+                    &scene.rain,
+                    Some(&scene.temperature),
+                    Some(&scene.phase),
+                    Some(&mut scene.humidity),
+                );
+            }
             apply_evaporation_into_humidity(&mut scene.world, &mut scene.humidity, &scene.evap);
             scene
                 .humidity
@@ -349,13 +355,15 @@ fn one_stack_tick(
         Some(a) => {
             set_parallel_enabled(true);
             let t0 = Instant::now();
-            apply_rain_with_temp(
-                &mut scene.world,
-                &scene.rain,
-                Some(&scene.temperature),
-                Some(&scene.phase),
-                Some(&mut scene.humidity),
-            );
+            if scene.climatic_rain {
+                apply_rain_with_temp(
+                    &mut scene.world,
+                    &scene.rain,
+                    Some(&scene.temperature),
+                    Some(&scene.phase),
+                    Some(&mut scene.humidity),
+                );
+            }
             a.rain += t0.elapsed();
 
             let t0 = Instant::now();
@@ -815,4 +823,83 @@ fn organism_cost_versus_soak_age() {
         "\n  Flat 'per atom' means cost tracks population (expected).\n  \
          Rising 'per atom' means churn — work per organism growing with age."
     );
+}
+
+/// Nightly soak shape: climatic rain off, drizzle + evap on, a full plant
+/// cap. Prints pass cost next to the maps and sticky flags that can only
+/// grow. A rising `snow` / `buoy` chunk count with a quiet scene is the
+/// occupancy leak; rising `mods` with a flat atom count is plant growth;
+/// rising `hum n` toward tile capacity is a filled atmosphere, not a leak.
+///
+/// ```text
+/// cargo test -p wk-voxel --release --test perf_profile -- --ignored --nocapture soak_age_inventory
+/// ```
+#[test]
+#[ignore = "diagnostic; run with --release --ignored --nocapture"]
+fn soak_age_inventory() {
+    const SEG: u64 = 400;
+    const SEGS: usize = 8;
+
+    let mut scene = stamp_scene(demo_params());
+    scene.climatic_rain = false;
+    seed_plants(&mut scene, 256);
+    for _ in 0..WARMUP_TICKS {
+        one_stack_tick(&mut scene, None, None);
+    }
+
+    println!(
+        "\n{:>7} {:>7} {:>7} {:>7} {:>6} {:>6} {:>5} {:>6} {:>6} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6} {:>5}",
+        "tick", "wall", "phys", "org", "evap", "cond", "snow", "hum n", "hum t",
+        "diss", "susp", "myc", "sp", "snCh", "buoy", "pores", "mods"
+    );
+    for _ in 0..SEGS {
+        let mut accum = PassAccum::zero();
+        let mut phys = PhysicsTimings::default();
+        let wall = Instant::now();
+        for _ in 0..SEG {
+            one_stack_tick(&mut scene, Some(&mut accum), Some(&mut phys));
+        }
+        let wall = wall.elapsed();
+        let mut snow_ch = 0usize;
+        let mut buoy_ch = 0usize;
+        let mut pore_ch = 0usize;
+        for c in scene.world.chunks.values() {
+            if c.has_snow {
+                snow_ch += 1;
+            }
+            if c.has_buoyant {
+                buoy_ch += 1;
+            }
+            if c.has_wet_pores {
+                pore_ch += 1;
+            }
+        }
+        let mods: usize = scene.organisms.atoms.iter().map(|a| a.body.len()).sum();
+        let hum_cap = scene
+            .humidity
+            .bounds
+            .map(|b| b.tile_capacity())
+            .unwrap_or(0);
+        println!(
+            "{:>7} {:>6.2} {:>6.2} {:>6.2} {:>5.2} {:>5.2} {:>5.2} {:>5}/{:<4} {:>6.0} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>5} {:>6}",
+            scene.world.tick,
+            wall.as_secs_f32() * 1000.0 / SEG as f32,
+            accum.physics_tick.as_secs_f32() * 1000.0 / SEG as f32,
+            accum.organisms.as_secs_f32() * 1000.0 / SEG as f32,
+            accum.evap.as_secs_f32() * 1000.0 / SEG as f32,
+            accum.condensation.as_secs_f32() * 1000.0 / SEG as f32,
+            accum.snow_drift.as_secs_f32() * 1000.0 / SEG as f32,
+            scene.humidity.cells.len(),
+            hum_cap,
+            scene.humidity.total_mass(),
+            scene.world.dissolved.len(),
+            scene.world.suspended.len(),
+            scene.world.mycelium_strains.len(),
+            spore_bank_len(&scene.world),
+            snow_ch,
+            buoy_ch,
+            pore_ch,
+            mods,
+        );
+    }
 }

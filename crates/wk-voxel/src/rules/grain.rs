@@ -203,19 +203,36 @@ pub fn apply_grain_fall(world: &mut World) {
 /// Ice is the control: it falls, it does not drift. Landed snowpack is
 /// repose's problem, not the wind's.
 pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) -> u32 {
-    if !wind_vx.is_finite() || wind_vx.abs() < 1e-4 {
-        return 0;
-    }
-    let dx = if wind_vx >= 0.0 { 1 } else { -1 };
-    let odds = (wind_vx.abs() * tile_cols.max(1) as f32 * SNOWDRIFT_WIND_SCALE).clamp(0.0, 1.0);
-    let seed = world.seed.0;
-    let tick_no = world.tick;
-
-    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    let wind_on = wind_vx.is_finite() && wind_vx.abs() >= 1e-4;
     // Prefer the snow flag so organic rafts and ice sheets are not
     // scanned for flakes they never held. Legacy saves stamp the flag
     // on the first pass that still has to walk `has_buoyant`.
     let any_snow = world.chunks.values().any(|c| c.has_snow);
+    // Calm nights still have to drop empty sky chunks: a flake marks
+    // every column it falls through, and leaving `has_snow` set keeps
+    // those chunks in this scan forever.
+    if !any_snow && !wind_on {
+        return 0;
+    }
+    let dx = if wind_on {
+        if wind_vx >= 0.0 {
+            1
+        } else {
+            -1
+        }
+    } else {
+        0
+    };
+    let odds = if wind_on {
+        (wind_vx.abs() * tile_cols.max(1) as f32 * SNOWDRIFT_WIND_SCALE).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let seed = world.seed.0;
+    let tick_no = world.tick;
+
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    let mut clear_snow: Vec<ChunkCoord> = Vec::new();
     let coords = world
         .chunks
         .iter()
@@ -236,6 +253,9 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
                     continue;
                 }
                 saw_snow = true;
+                if !wind_on {
+                    continue;
+                }
                 let gx = x0 + lx as i32;
                 let gy = y0 + ly as i32;
                 // Same-chunk neighbour: skip the HashMap lookup for the
@@ -259,6 +279,13 @@ pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) ->
             if let Some(chunk) = world.chunks.get_mut(&coord) {
                 chunk.has_snow = true;
             }
+        } else if !saw_snow && any_snow {
+            clear_snow.push(coord);
+        }
+    }
+    for coord in clear_snow {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_snow = false;
         }
     }
     if candidates.is_empty() {
@@ -1109,34 +1136,55 @@ fn buoyant_chunk_coords(world: &World) -> Vec<ChunkCoord> {
         .collect()
 }
 
-fn collect_buoyant_litter(world: &World) -> Vec<(i32, i32)> {
+fn collect_buoyant_litter(world: &mut World) -> Vec<(i32, i32)> {
     let mut litter = Vec::new();
     // Prefer buoyant sticky flag — sand-only shores used to scan every
     // `has_loose` chunk for litter that was never there.
-    let coords = {
-        let buoyant = buoyant_chunk_coords(world);
-        if buoyant.is_empty() {
-            // Legacy worlds / snow before has_buoyant was sticky.
-            loose_chunk_coords(world)
-        } else {
-            buoyant
-        }
+    let buoyant = buoyant_chunk_coords(world);
+    let any_buoyant = !buoyant.is_empty();
+    let coords = if any_buoyant {
+        buoyant
+    } else if !world.buoyant_flags_ready {
+        // Legacy worlds / snow before has_buoyant was sticky.
+        loose_chunk_coords(world)
+    } else {
+        Vec::new()
     };
+    let mut clear = Vec::new();
+    let mut stamp = Vec::new();
     for coord in coords {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
+        let mut saw = false;
         for ly in 0..CHUNK_CELLS_H {
             for lx in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(lx, ly);
                 if falls_through_empty_air(cell.material) {
+                    saw = true;
                     litter.push((x0 + lx as i32, y0 + ly as i32));
                 }
             }
         }
+        if saw && !any_buoyant {
+            stamp.push(coord);
+        } else if !saw && any_buoyant {
+            clear.push(coord);
+        }
     }
+    for coord in stamp {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_buoyant = true;
+        }
+    }
+    for coord in clear {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_buoyant = false;
+        }
+    }
+    world.buoyant_flags_ready = true;
     litter
 }
 

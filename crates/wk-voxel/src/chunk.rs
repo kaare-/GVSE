@@ -106,7 +106,9 @@ pub struct Chunk {
     /// Sticky occupancy: at least one permeable solid with `sat > 0`.
     /// Lake-bed / seam wakes use this so underground pore columns keep
     /// visiting after the free surface goes quiet (`has_wet_air` alone
-    /// never marks pure groundwater chunks).
+    /// never marks pure groundwater chunks). Cleared by
+    /// [`crate::rules::seepage::wake_pore_weep_into_air`] when a scan
+    /// finds no wet solid left.
     #[serde(default)]
     pub has_wet_pores: bool,
     /// Sticky occupancy: at least one `Limestone` cell was written
@@ -126,11 +128,15 @@ pub struct Chunk {
     #[serde(default)]
     pub has_organic: bool,
     /// Sticky occupancy: Organic / Snow / Ice (buoyant litter). Rise/soak
-    /// scans skip sand-only loose chunks.
+    /// scans skip sand-only loose chunks. Cleared when a buoyant collect
+    /// finds none — otherwise a flake falling through the sky leaves those
+    /// chunks in the rise/soak walk forever.
     #[serde(default)]
     pub has_buoyant: bool,
     /// Sticky occupancy: at least one `Snow` cell. Wind-drift skips
     /// organic rafts and ice sheets that have never held a flake.
+    /// Cleared by [`crate::rules::grain::apply_snow_wind_drift`] when a
+    /// scan finds no flake left.
     #[serde(default)]
     pub has_snow: bool,
 }

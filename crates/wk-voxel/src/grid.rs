@@ -183,6 +183,14 @@ pub struct World {
     /// Invalidates the thread-local last-chunk pointer after clone / insert.
     #[serde(skip, default)]
     pub(crate) chunk_cache_id: ChunkCacheId,
+    /// True after a buoyant occupancy pass has run this session.
+    ///
+    /// Legacy saves predate [`Chunk::has_buoyant`]; the first collect
+    /// walks `has_loose` and stamps the flag. After that (and after a
+    /// total melt clears every buoyant chunk) we must not fall back to
+    /// scanning every sand chunk every tick.
+    #[serde(skip, default)]
+    pub(crate) buoyant_flags_ready: bool,
 }
 
 impl World {
@@ -209,6 +217,7 @@ impl World {
             competent_moved_cells: Vec::new(),
             competent_level_vacated: FxHashMap::default(),
             chunk_cache_id: ChunkCacheId::default(),
+            buoyant_flags_ready: false,
         }
     }
 

@@ -985,6 +985,7 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
     let ch = CHUNK_CELLS_H as i32;
     let cw = CHUNK_CELLS_W as i32;
     let mut touches: Vec<(i32, i32)> = Vec::new();
+    let mut clear_pores: Vec<ChunkCoord> = Vec::new();
     const DIRS: [(i32, i32); 4] = [(-1, 0), (1, 0), (0, -1), (0, 1)];
     for (&coord, chunk) in &world.chunks {
         // A chunk that has never held a wet permeable solid has no donor face,
@@ -996,11 +997,15 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
         }
         let base_gx = coord.cx * cw;
         let base_gy = coord.cy * ch;
+        let mut still_wet = false;
         for y in 0..CHUNK_CELLS_H {
             for x in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(x, y);
                 if !is_porous_cell(cell, &hydro) {
                     continue;
+                }
+                if cell.sat.0 > 0 {
+                    still_wet = true;
                 }
                 let cap = water_capacity_cell(cell, &hydro);
                 // Need a meaningful donor — residual film only skipped.
@@ -1038,9 +1043,17 @@ pub fn wake_pore_weep_into_air(world: &mut World) {
                 }
             }
         }
+        if !still_wet {
+            clear_pores.push(coord);
+        }
     }
     for (gx, gy) in touches {
         world.touch_dirty(gx, gy);
+    }
+    for coord in clear_pores {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_wet_pores = false;
+        }
     }
 }
 

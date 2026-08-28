@@ -1009,6 +1009,91 @@ fn snow_drift_bootstraps_the_snow_flag_on_legacy_chunks() {
 }
 
 #[test]
+fn snow_drift_clears_the_flag_when_the_chunk_is_empty() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_snow);
+    w.set_cell(2, 6, Cell::air());
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 0)].has_snow,
+        "writes do not clear sticky occupancy"
+    );
+    let moved = apply_snow_wind_drift(&mut w, 1.0, 4);
+    assert_eq!(moved, 0);
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 0)].has_snow,
+        "an empty scan must drop the chunk from later drift walks"
+    );
+}
+
+#[test]
+fn falling_snow_does_not_leave_sky_chunks_in_the_drift_scan() {
+    // A flake marks every chunk it falls through. After it lands, those
+    // empty sky chunks must drop out — otherwise a snowy night leaves
+    // the whole atmosphere in the drift / buoyant walks.
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..(CHUNK_CELLS_W as i32) {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    let start_y = CHUNK_CELLS_H as i32 + 8;
+    w.set_cell(4, start_y, Cell::solid(MaterialId::Snow));
+    assert!(w.chunks[&ChunkCoord::new(0, 1)].has_snow);
+    for _ in 0..80 {
+        apply_grain_fall(&mut w);
+        apply_snow_wind_drift(&mut w, 0.05, 4);
+        w.tick += 1;
+    }
+    let pos = (0..CHUNK_CELLS_W as i32)
+        .flat_map(|x| (1..=start_y).map(move |y| (x, y)))
+        .find(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Snow));
+    let (_, y) = pos.expect("the flake should still exist");
+    assert!(
+        y < CHUNK_CELLS_H as i32,
+        "the flake should have fallen into the ground chunk (y={y})"
+    );
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 1)].has_snow,
+        "the vacated sky chunk must leave the drift scan"
+    );
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 0)].has_snow,
+        "the chunk that still holds the flake keeps the flag"
+    );
+}
+
+#[test]
+fn buoyant_collect_clears_empty_sky_chunks() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Ice));
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_buoyant);
+    w.set_cell(2, 6, Cell::air());
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_buoyant);
+    rise_and_soak_buoyant_litter(&mut w);
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 0)].has_buoyant,
+        "melted ice must not keep the chunk in rise/soak walks"
+    );
+}
+
+#[test]
+fn pore_weep_clears_dry_chunks() {
+    let mut w = setup_column_world();
+    let mut sand = Cell::solid(MaterialId::Sand);
+    sand.sat = Sat(40);
+    w.set_cell(4, 1, sand);
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_wet_pores);
+    w.set_cell(4, 1, Cell::solid(MaterialId::Sand));
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_wet_pores);
+    wake_pore_weep_into_air(&mut w);
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 0)].has_wet_pores,
+        "a dry scan must drop the chunk from later weep walks"
+    );
+}
+
+#[test]
 fn landed_snow_does_not_drift() {
     let mut w = setup_column_world();
     w.set_cell(2, 1, Cell::solid(MaterialId::Snow));

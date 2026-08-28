@@ -106,6 +106,7 @@ impl WorldV5 {
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         }
     }
 }
@@ -151,6 +152,7 @@ impl WorldV6 {
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         }
     }
 }
@@ -201,6 +203,7 @@ impl WorldV7 {
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         };
         // Promote sole ownership → one share matching current `_pad`.
         for ((gx, gy), strain) in sole {
@@ -260,6 +263,7 @@ impl WorldV8 {
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         }
     }
 }
@@ -313,6 +317,7 @@ impl WorldV11 {
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         }
     }
 }
@@ -411,6 +416,7 @@ impl WorldV10 {
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         }
     }
 }
@@ -477,6 +483,7 @@ impl WorldV9 {
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         }
     }
 }
