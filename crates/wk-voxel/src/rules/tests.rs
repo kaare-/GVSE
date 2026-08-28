@@ -5306,8 +5306,9 @@ fn condensation_caps_events_per_tick_on_a_full_sky() {
         "event cap must limit drizzle mass (lost={lost})"
     );
     assert!(lost > 0.0, "heaviest tiles should still rain");
-    // Heaviest three tiles (hx 5/6/7) drain; lighter ones stay full.
-    for hx in 0..5 {
+    // Heaviest three tiles (hx 5/6/7) rain. `take_spread` may thin their
+    // horizontal neighbours; tiles two steps away must stay full.
+    for hx in 0..4 {
         assert!(
             (h.at_tile(hx, 7) - (200.0 + hx as f32 * 80.0)).abs() < 1e-3,
             "tile hx={hx} should be skipped by the event cap"

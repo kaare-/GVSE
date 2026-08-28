@@ -45,7 +45,7 @@ and not a per-cell atmosphere (CPU stays on 4×4 tiles).
 | Signal | Visual |
 |--------|--------|
 | Humidity → parcels | Soft multi-depth cloud banks (`N`); streaks when tiles are wet |
-| Humidity tiles | Diagnostic haze overlay (`H`) — 4×4 store, bilinear per cell |
+| Humidity tiles | Diagnostic haze overlay (`H`) — 4×4 store, bilinear per cell; ring neighbours wrap so the world seam is not painted twice |
 | Day/night | Sky lerp + sun/moon; night landscape darken |
 | Wind | Streaks on `H`; front cloud scroll |
 | Ridges | Dual parallax fills from **ground** height (not falling snow, not mid-air wet Air) |

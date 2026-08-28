@@ -13,7 +13,7 @@ use wk_voxel::{
     precip_cover_fraction, resolve_organism_draw_cells, shade_transmit_column,
     sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, CloudStore, Humidity,
     ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World,
-    LIVE_SURFACE_SEARCH,
+    GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_SEARCH,
 };
 
 /// Active-layer parcel parallax (1 = locked to terrain; lower = farther).
@@ -245,6 +245,38 @@ fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
         out.push((sum / count) as i32);
     }
     out
+}
+
+/// Occupied tiles plus neighbours so the bilinear lobe can bleed off a
+/// tile centre. Horizontal neighbours wrap on a ring — inserting
+/// `hx ± 1` raw and then drawing `x_copies` painted the seam twice.
+fn haze_paint_tiles(humidity: &Humidity, sky_hy_min: i32) -> HashSet<(i32, i32)> {
+    let mut paint: HashSet<(i32, i32)> = HashSet::new();
+    for &(hx, hy) in humidity.cells.keys() {
+        if hy < sky_hy_min {
+            continue;
+        }
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                let ny = hy + dy;
+                if ny < sky_hy_min {
+                    continue;
+                }
+                let nx = humidity.wrap_tile_x(hx + dx).unwrap_or(hx + dx);
+                paint.insert((nx, ny));
+            }
+        }
+    }
+    paint
+}
+
+/// True when this cell is the falling drop (1-wide water / flake), not vapour.
+fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
+    match world.get_cell(gx, gy) {
+        Some(c) if c.material == MaterialId::Air && c.sat.0 > GRAIN_REPOSE_HAZE_MAX => true,
+        Some(c) if falls_through_empty_air(c.material) => true,
+        _ => false,
+    }
 }
 
 /// Soft white vapor haze alpha (legacy helper for tests / diagnostics).
@@ -1042,22 +1074,9 @@ pub fn draw_haze_and_wind(
         let tc = humidity.tile_cols.max(1);
         let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
 
-        // Occupied tiles plus neighbours so the bilinear lobe can bleed
-        // off a tile centre. Store stays 4×4.
-        let mut paint: HashSet<(i32, i32)> = HashSet::new();
-        for &(hx, hy) in humidity.cells.keys() {
-            if hy < sky_hy_min {
-                continue;
-            }
-            for dx in -1..=1 {
-                for dy in -1..=1 {
-                    let ny = hy + dy;
-                    if ny >= sky_hy_min {
-                        paint.insert((hx + dx, ny));
-                    }
-                }
-            }
-        }
+        // Occupied tiles plus wrapped neighbours so the bilinear lobe
+        // can bleed off a tile centre. Store stays 4×4.
+        let paint = haze_paint_tiles(humidity, sky_hy_min);
 
         for (hx, hy) in paint {
             let base_gx = hx * tc;
@@ -1073,6 +1092,9 @@ pub fn draw_haze_and_wind(
                 let gx = base_gx + col;
                 let wx = world.wrap_x(gx);
                 for gy in y0..y1 {
+                    if haze_cell_is_drop(world, wx, gy) {
+                        continue;
+                    }
                     let mass = humidity.sample_bilinear(wx as f32 + 0.5, gy as f32 + 0.5);
                     let alpha = humidity_haze_alpha(mass, max_mass);
                     if alpha == 0 {
@@ -1858,7 +1880,8 @@ pub fn estimate_snow_bias(
 #[cfg(test)]
 mod tests {
     use super::{
-        gather_soft_cloud_srcs, humidity_haze_alpha, stamp_pixel_cloud_mask, CloudDepthLayer,
+        gather_soft_cloud_srcs, haze_cell_is_drop, haze_paint_tiles, humidity_haze_alpha,
+        stamp_pixel_cloud_mask, CloudDepthLayer,
     };
     use std::collections::HashMap;
     use wk_voxel::{CloudStore, Humidity};
@@ -1943,6 +1966,39 @@ mod tests {
         assert_eq!(humidity_haze_alpha(5.0, 100.0), 0); // below 12% floor
         assert!(humidity_haze_alpha(50.0, 100.0) >= 18);
         assert!(humidity_haze_alpha(100.0, 100.0) <= 70);
+    }
+
+    #[test]
+    fn haze_paint_tiles_wrap_at_the_ring_seam() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 1024, 256);
+        h.wrap_x = true;
+        h.add(0, 100, 50.0);
+        h.add(1020, 100, 50.0);
+        let paint = haze_paint_tiles(&h, 0);
+        assert!(
+            paint.iter().all(|&(hx, _)| (0..=255).contains(&hx)),
+            "ghost hx=-1/256 double-paints the seam via x_copies"
+        );
+        assert!(paint.contains(&(0, 25)));
+        assert!(paint.contains(&(255, 25)));
+        assert!(!paint.contains(&(-1, 25)));
+        assert!(!paint.contains(&(256, 25)));
+    }
+
+    #[test]
+    fn haze_carves_only_the_drop_cell() {
+        use wk_voxel::{Cell, ChunkCoord, Sat, GRAIN_REPOSE_HAZE_MAX};
+
+        let mut w = wk_voxel::World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(4, 10, Cell::air());
+        let mut drop = Cell::air();
+        drop.sat = Sat(GRAIN_REPOSE_HAZE_MAX.saturating_add(8));
+        w.set_cell(5, 10, drop);
+        w.set_cell(6, 10, Cell::air());
+        assert!(!haze_cell_is_drop(&w, 4, 10));
+        assert!(haze_cell_is_drop(&w, 5, 10), "the droplet is one cell");
+        assert!(!haze_cell_is_drop(&w, 6, 10));
     }
 
     #[test]

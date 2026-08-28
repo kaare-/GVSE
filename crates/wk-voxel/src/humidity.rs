@@ -133,6 +133,11 @@ impl Humidity {
     }
 
     /// Neighbour tile in +x / −x, wrapping horizontally on ring maps.
+    pub fn wrap_tile_x(&self, hx: i32) -> Option<i32> {
+        self.wrap_hx(hx)
+    }
+
+    /// Neighbour tile in +x / −x, wrapping horizontally on ring maps.
     fn wrap_hx(&self, hx: i32) -> Option<i32> {
         match self.bounds {
             Some(b) if self.wrap_x => {
@@ -225,6 +230,58 @@ impl Humidity {
             need -= took;
         }
         got
+    }
+
+    /// Drain `mass` across the 3×5 tile neighbourhood around `(gx, gy)`.
+    ///
+    /// A droplet costs a full cell (255). Taking that from one 4×4 tile
+    /// opens a 4-wide hole in the vapour sheet. Spreading the same mass
+    /// sideways (wrapping on a ring) and a little up/down thins the
+    /// sheet; the falling drop stays one cell wide. A lone tile that
+    /// cannot share still empties.
+    pub fn take_spread(&mut self, gx: i32, gy: i32, mass: f32) -> f32 {
+        if mass <= 0.0 {
+            return 0.0;
+        }
+        let (hx0, hy0) = self.tile_of(gx, gy);
+        let Some(hx0) = self.wrap_hx(hx0) else {
+            return 0.0;
+        };
+        let mut remaining = mass;
+        for _ in 0..4 {
+            if remaining <= 1e-3 {
+                break;
+            }
+            let mut keys: Vec<(i32, i32, f32)> = Vec::new();
+            let mut sum = 0.0f32;
+            for dhx in -1..=1 {
+                let Some(hx) = self.wrap_hx(hx0 + dhx) else {
+                    continue;
+                };
+                for dhy in -2..=2 {
+                    let hy = hy0 + dhy;
+                    if !self.accepts(hx, hy) {
+                        continue;
+                    }
+                    let m = self.at_tile(hx, hy);
+                    if m > 1e-3 {
+                        keys.push((hx, hy, m));
+                        sum += m;
+                    }
+                }
+            }
+            if sum <= 1e-3 {
+                break;
+            }
+            let want = remaining;
+            for (hx, hy, m) in keys {
+                let share = want * (m / sum);
+                let gx_t = hx * self.tile_cols + self.tile_cols / 2;
+                let gy_t = hy * self.tile_cols + self.tile_cols / 2;
+                remaining -= self.take(gx_t, gy_t, share);
+            }
+        }
+        mass - remaining
     }
 
     /// Peek available vapor near `(gx, gy)` without removing it.
@@ -678,6 +735,60 @@ mod tests {
         );
         assert!(h.sample_bilinear(2.0, 2.0) < mid);
         assert!(h.sample_bilinear(6.0, 2.0) > mid);
+    }
+
+    #[test]
+    fn sample_bilinear_wraps_at_the_ring_seam() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 16, 16);
+        h.wrap_x = true;
+        h.cells.insert((0, 0), 0.0);
+        h.cells.insert((3, 0), 100.0);
+        // Tile centres at x=2 (hx=0) and x=14 (hx=3). Mid-seam is x=0
+        // wrapping, or x=16. Must not read a missing hx=-1 as dry.
+        let seam = h.sample_bilinear(0.0, 2.0);
+        assert!(
+            (seam - 50.0).abs() < 1.0,
+            "ring seam should lerp 0↔100, got {seam}"
+        );
+        assert!((h.sample_bilinear(16.0, 2.0) - seam).abs() < 1e-3);
+    }
+
+    #[test]
+    fn take_spread_keeps_a_wet_sheet_visible() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 32, 32);
+        h.wrap_x = true;
+        for hx in 0..8 {
+            for hy in 0..5 {
+                h.cells.insert((hx, hy), 80.0);
+            }
+        }
+        let before = h.total_mass();
+        let took = h.take_spread(2, 9, 255.0);
+        assert!((took - 255.0).abs() < 1e-2, "got {took}");
+        assert!((before - h.total_mass() - 255.0).abs() < 1e-2);
+        for hx in 0..3 {
+            for hy in 0..5 {
+                let left = h.at_tile(hx, hy);
+                assert!(
+                    left > 20.0,
+                    "sheet tile ({hx},{hy}) should stay visible after a drop, left {left}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn take_spread_wraps_the_ring_seam() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 16, 16);
+        h.wrap_x = true;
+        h.cells.insert((0, 1), 80.0);
+        h.cells.insert((3, 1), 80.0);
+        let took = h.take_spread(0, 6, 80.0);
+        assert!((took - 80.0).abs() < 1e-2, "got {took}");
+        assert!(h.at_tile(0, 1) > 1.0, "seam tile 0 should share, not dump");
+        assert!(h.at_tile(3, 1) > 1.0, "seam tile 3 should share, not dump");
+        assert!(h.at_tile(0, 1) < 80.0);
+        assert!(h.at_tile(3, 1) < 80.0);
     }
 
     #[test]
