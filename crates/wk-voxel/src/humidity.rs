@@ -686,6 +686,20 @@ mod tests {
     }
 
     #[test]
+    fn sample_bilinear_smooths_the_tile_row_at_128() {
+        let mut h = Humidity::new(4);
+        h.cells.insert((45, 31), 40.0);
+        h.cells.insert((45, 32), 190.0);
+        let lo = h.sample_bilinear(181.5, 126.0);
+        let mid = h.sample_bilinear(181.5, 128.0);
+        let hi = h.sample_bilinear(181.5, 130.0);
+        assert!(
+            lo < mid && mid < hi,
+            "y=127/128 is a tile edge, not a clamp (lo={lo} mid={mid} hi={hi})"
+        );
+    }
+
+    #[test]
     fn sample_bilinear_wraps_at_the_ring_seam() {
         let mut h = Humidity::with_world_bounds(4, 0, 0, 16, 16);
         h.wrap_x = true;

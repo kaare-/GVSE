@@ -301,13 +301,84 @@ fn haze_column_y0(y0: i32, y1: i32, drop_y: Option<i32>) -> Option<i32> {
     }
 }
 
+/// Occupied tiles plus their cardinal neighbours (wrapped).
+///
+/// An emptied nucleating tile must stay a seat so bilinear can paint
+/// the three sibling columns. Skipping it is the 4-wide hole. Neighbour
+/// keys go through [`Humidity::wrap_tile_x`] — raw `hx-1` was the ring
+/// seam.
+fn haze_paint_seats(humidity: &Humidity, sky_hy_min: i32) -> Vec<(i32, i32)> {
+    let mut seats = std::collections::HashSet::new();
+    for (&(hx, hy), &mass) in &humidity.cells {
+        if mass <= 0.0 || hy < sky_hy_min {
+            continue;
+        }
+        seats.insert((hx, hy));
+        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let Some(nx) = humidity.wrap_tile_x(hx + dx) else {
+                continue;
+            };
+            let ny = hy + dy;
+            if ny < sky_hy_min {
+                continue;
+            }
+            if let Some(b) = humidity.bounds {
+                if !b.contains(nx, ny) {
+                    continue;
+                }
+            }
+            seats.insert((nx, ny));
+        }
+    }
+    let mut out: Vec<_> = seats.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
+/// Cells of one seat that still get haze after the shaft, with bilinear mass.
+///
+/// Shaft is the mask (1-wide). Resample is alpha only. Per-column floor
+/// so the clip does not step 4-wide at a tile edge (the 127/128 shelf).
+fn haze_resampled_cells(
+    humidity: &Humidity,
+    hx: i32,
+    hy: i32,
+    drop_tops: &HashMap<i32, i32>,
+    wrap_x: impl Fn(i32) -> i32,
+    mut floor_y: impl FnMut(i32) -> i32,
+) -> Vec<(i32, i32, f32)> {
+    let tc = humidity.tile_cols.max(1);
+    let base_gx = hx * tc;
+    let base_gy = hy * tc;
+    let y1 = base_gy + tc;
+    let mut out = Vec::new();
+    for col in 0..tc {
+        let wx = wrap_x(base_gx + col);
+        let y0 = (floor_y(wx) + 1).max(base_gy);
+        let Some(col_y0) = haze_column_y0(y0, y1, drop_tops.get(&wx).copied()) else {
+            continue;
+        };
+        for gy in col_y0..y1 {
+            let sampled = humidity.sample_bilinear(wx as f32 + 0.5, gy as f32 + 0.5);
+            out.push((wx, gy, sampled));
+        }
+    }
+    out
+}
+
 /// Soft white vapor haze alpha (legacy helper for tests / diagnostics).
 pub fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
+    humidity_haze_alpha_cell(mass, max_mass, 0.12)
+}
+
+/// Per-cell wash. Soft floor — the 12% live-max cut ate neighbour
+/// columns around an emptied tile and turned rain into a 4-wide hole.
+fn humidity_haze_alpha_cell(mass: f32, max_mass: f32, floor: f32) -> u8 {
     if mass <= 0.0 {
         return 0;
     }
     let norm = (mass / max_mass.max(1.0)).clamp(0.0, 1.0);
-    if norm < 0.12 {
+    if norm < floor {
         return 0;
     }
     (18.0 + norm * 42.0) as u8
@@ -1067,10 +1138,10 @@ fn draw_ridge_band(
 
 /// Humidity tile diagnostic (front of terrain) + sparse wind streaks.
 ///
-/// This is the `H` overlay — one rect per column of each occupied 4×4
-/// tile. A drop in the middle of the field opens that column from the
-/// drop downward, so the path under it is empty. Soft cloud banks are
-/// separate (`N` / [`draw_depth_cloud_layer`]).
+/// Occupied 4×4 seats plus a one-tile neighbour halo (wrapped). A drop
+/// masks that column from itself downward (1-wide). Cells that remain
+/// bilinear-sample the store so tile edges do not read as a clamp.
+/// Soft cloud banks are separate (`N` / [`draw_depth_cloud_layer`]).
 pub fn draw_haze_and_wind(
     humidity: &Humidity,
     world: &World,
@@ -1097,44 +1168,42 @@ pub fn draw_haze_and_wind(
         let tc = humidity.tile_cols.max(1);
         let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
         let drop_tops = collect_drop_tops(world);
+        let seats = haze_paint_seats(humidity, sky_hy_min);
+        let mut floor_cache: HashMap<i32, i32> = HashMap::new();
 
-        for (&(hx, hy), &mass) in &humidity.cells {
-            if mass <= 0.0 || hy < sky_hy_min {
-                continue;
-            }
-            let alpha = humidity_haze_alpha(mass, max_mass);
-            if alpha == 0 {
-                continue;
-            }
-            let base_gx = hx * tc;
-            let base_gy = hy * tc;
-            let center_x = world.wrap_x(base_gx + tc / 2);
-            let floor_y = cloud_floor_y(world, wind, center_x as f32).round() as i32;
-            let y0 = (floor_y + 1).max(base_gy);
-            let y1 = base_gy + tc;
-            if y0 >= y1 {
-                continue;
-            }
-            for col in 0..tc {
-                let wx = world.wrap_x(base_gx + col);
-                let Some(col_y0) = haze_column_y0(y0, y1, drop_tops.get(&wx).copied())
-                else {
+        for (hx, hy) in seats {
+            for (wx, gy, sampled) in haze_resampled_cells(
+                humidity,
+                hx,
+                hy,
+                &drop_tops,
+                |x| world.wrap_x(x),
+                |wx| {
+                    *floor_cache.entry(wx).or_insert_with(|| {
+                        cloud_floor_y(world, wind, wx as f32).round() as i32
+                    })
+                },
+            ) {
+                let cell_alpha = humidity_haze_alpha_cell(sampled, max_mass, 0.02);
+                if cell_alpha == 0 {
                     continue;
-                };
+                }
                 for &x_copy in x_copies {
                     let sx = origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
-                    let top_sy = origin_y - (y1 - bedrock_floor_y) as f32 * cell_px;
-                    let bot_sy = origin_y - (col_y0 - bedrock_floor_y) as f32 * cell_px;
-                    let h = (bot_sy - top_sy).max(1.0);
-                    if sx + cell_px < 0.0 || sx > sw || top_sy > sh || top_sy + h < 0.0 {
+                    let top_sy = origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
+                    if sx + cell_px < 0.0
+                        || sx > sw
+                        || top_sy > sh
+                        || top_sy + cell_px < 0.0
+                    {
                         continue;
                     }
                     draw_rectangle(
                         sx,
                         top_sy,
                         cell_px + 0.5,
-                        h,
-                        Color::from_rgba(255, 255, 255, alpha),
+                        cell_px + 0.5,
+                        Color::from_rgba(255, 255, 255, cell_alpha),
                     );
                 }
             }
@@ -1899,7 +1968,8 @@ pub fn estimate_snow_bias(
 mod tests {
     use super::{
         collect_drop_tops, gather_soft_cloud_srcs, haze_cell_is_drop, haze_column_y0,
-        humidity_haze_alpha, stamp_pixel_cloud_mask, CloudDepthLayer,
+        haze_paint_seats, haze_resampled_cells, humidity_haze_alpha, stamp_pixel_cloud_mask,
+        CloudDepthLayer,
     };
     use std::collections::HashMap;
     use wk_voxel::{CloudStore, Humidity};
@@ -2020,6 +2090,68 @@ mod tests {
             haze_column_y0(8, 24, Some(20)),
             Some(21),
             "blocks at and under the drop stay open"
+        );
+    }
+
+    #[test]
+    fn resample_keeps_a_one_wide_path_through_an_emptied_tile() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 32, 128);
+        h.cells.insert((1, 5), 400.0);
+        h.cells.insert((0, 4), 400.0);
+        h.cells.insert((0, 6), 400.0);
+        let seats = haze_paint_seats(&h, 0);
+        assert!(
+            seats.contains(&(0, 5)),
+            "emptied nucleating tile must stay a seat or rain is 4-wide"
+        );
+        assert!(
+            seats.iter().all(|&(hx, _)| hx >= 0),
+            "neighbour seats wrap; they must not use raw hx-1"
+        );
+
+        let mut drop_tops = HashMap::new();
+        drop_tops.insert(2, 21);
+        let painted: std::collections::HashSet<_> = seats
+            .iter()
+            .flat_map(|&(hx, hy)| {
+                haze_resampled_cells(&h, hx, hy, &drop_tops, |x| x, |_| 0)
+            })
+            .filter(|&(_, _, m)| m > 0.0)
+            .map(|(x, y, _)| (x, y))
+            .collect();
+
+        for gy in 16..=21 {
+            assert!(
+                !painted.contains(&(2, gy)),
+                "shaft must stay open under the drop (2,{gy})"
+            );
+        }
+        for gx in [0, 1, 3] {
+            assert!(
+                (20..24).any(|gy| painted.contains(&(gx, gy))),
+                "sibling column {gx} of the punched tile must still paint"
+            );
+        }
+        let open: Vec<i32> = (0..4)
+            .filter(|&gx| !(20..=21).any(|gy| painted.contains(&(gx, gy))))
+            .collect();
+        assert_eq!(
+            open,
+            vec![2],
+            "only the drop column stays open through the punched band ({open:?})"
+        );
+    }
+
+    #[test]
+    fn resample_wraps_neighbour_seats_at_the_ring() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 16, 64);
+        h.wrap_x = true;
+        h.cells.insert((0, 5), 400.0);
+        let seats = haze_paint_seats(&h, 0);
+        assert!(seats.contains(&(3, 5)), "left neighbour wraps to hx_max");
+        assert!(
+            !seats.iter().any(|&(hx, _)| hx < 0 || hx > 3),
+            "raw hx-1 at the ring was the bright seam"
         );
     }
 
