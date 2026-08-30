@@ -1288,10 +1288,10 @@ pub fn draw_haze_and_wind(
     }
 }
 
-/// Wind vector heatmap (`V` overlay): tile wash by |v|, arrows for direction.
+/// Wind vector heatmap (`V`): sparse horizontal streaks + thin direction ticks.
 ///
-/// Reads the rebuilt [`Wind::field`]; falls back to climate hairlines if empty.
-/// Screen Y matches haze / T overlays (`origin_y - (gy - bedrock)`).
+/// Wind is a horizontal field — wash uses `|vx|`, arrows are subsampled so the
+/// sky is not a clunky tile grid, and we skip solid per-tile fills.
 pub fn draw_wind_streaks(
     wind: &Wind,
     world: &World,
@@ -1311,14 +1311,14 @@ pub fn draw_wind_streaks(
             return;
         }
         let t = get_time() as f32;
-        let n = ((sw / 36.0).ceil() as i32).clamp(8, 28);
-        let drift = (t * vx * 40.0).rem_euclid(sw + 40.0);
+        let n = ((sw / 48.0).ceil() as i32).clamp(6, 18);
+        let drift = (t * vx * 28.0).rem_euclid(sw + 40.0);
         for i in 0..n {
             let base = (i as f32 / n as f32) * (sw + 40.0) - 20.0;
             let x = (base + drift).rem_euclid(sw + 40.0) - 20.0;
-            let y = sh * (0.14 + 0.32 * ((i as f32 * 0.37) % 1.0));
-            let len = 12.0 + (i % 5) as f32 * 4.0;
-            draw_rectangle(x, y, len, 2.0, Color::from_rgba(255, 220, 120, 90));
+            let y = sh * (0.18 + 0.28 * ((i as f32 * 0.37) % 1.0));
+            let len = 18.0 + (i % 4) as f32 * 6.0;
+            draw_line(x, y, x + len * vx.signum(), y, 1.0, Color::from_rgba(230, 236, 245, 55));
         }
         return;
     }
@@ -1326,65 +1326,105 @@ pub fn draw_wind_streaks(
     let tc = wind.tile_cols.max(1);
     let tile_px = tc as f32 * cell_px;
     let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-    let mut vmax = 0.04f32;
-    for &(vx, vy) in wind.field.values() {
-        vmax = vmax.max((vx * vx + vy * vy).sqrt());
-    }
-    vmax = vmax.max(0.04);
 
-    for (&(hx, hy), &(vx, vy)) in &wind.field {
-        let speed = (vx * vx + vy * vy).sqrt();
-        if speed < 0.006 {
+    // Horizontal strength scale (|vx|), not total |v| — matches the product.
+    let mut vmax = 0.03f32;
+    for &(vx, _) in wind.field.values() {
+        vmax = vmax.max(vx.abs());
+    }
+    vmax = vmax.max(0.03);
+
+    // Sparse sample: ~every other tile in x, every 2–3 in y so streaks read
+    // as horizontal bands instead of a dense picket fence.
+    let step_x = 2i32;
+    let step_y = 3i32;
+
+    let mut keys: Vec<(i32, i32)> = wind.field.keys().copied().collect();
+    keys.sort_unstable();
+
+    for &(hx, hy) in &keys {
+        if hx.rem_euclid(step_x) != 0 || hy.rem_euclid(step_y) != 0 {
+            continue;
+        }
+        let Some(&(vx, vy)) = wind.field.get(&(hx, hy)) else {
+            continue;
+        };
+        let speed_h = vx.abs();
+        if speed_h < 0.008 && vy.abs() < 0.01 {
             continue;
         }
         let surf = wind.surface_tile_hy(Some(world), hx);
-        // Free air + one tile into the surface band (near-ground shear).
-        if hy + 2 < surf {
+        if hy + 1 < surf {
+            continue;
+        }
+        // Prefer free-air band near surface → mid troposphere; skip deep sky clutter.
+        if hy > surf + 14 {
             continue;
         }
         let base_gx = hx * tc;
         let base_gy = hy * tc;
-        // Same vertical placement as the T overlay (tile top edge).
         let sy = origin_y - (base_gy - bedrock_floor_y + tc) as f32 * cell_px;
         if sy + tile_px < 0.0 || sy > sh {
             continue;
         }
-        let n = (speed / vmax).clamp(0.0, 1.0);
-        let r = (30.0 + 200.0 * n) as u8;
-        let g = (70.0 + 50.0 * (1.0 - n) + 40.0 * n) as u8;
-        let b = (180.0 - 140.0 * n) as u8;
-        let a = (55.0 + 100.0 * n) as u8;
+        let n = (speed_h / vmax).clamp(0.0, 1.0);
+        // Soft horizontal wash: a short translucent bar, not a full tile block.
+        let wash_a = (18.0 + 36.0 * n) as u8;
+        let wash_w = tile_px * (0.7 + 0.5 * n);
+        let wash_h = (tile_px * 0.22).max(2.0);
+        let (wr, wg, wb) = if vx >= 0.0 {
+            (
+                (70.0 + 90.0 * n) as u8,
+                (110.0 + 50.0 * n) as u8,
+                (160.0 + 40.0 * (1.0 - n)) as u8,
+            )
+        } else {
+            (
+                (120.0 + 60.0 * n) as u8,
+                (90.0 + 40.0 * n) as u8,
+                (140.0 + 50.0 * n) as u8,
+            )
+        };
+
+        let speed = (vx * vx + vy * vy).sqrt().max(1e-4);
+        // Emphasize horizontal: squash displayed vy so arrows stay breezy, not plumes.
+        let disp_vx = vx;
+        let disp_vy = vy * 0.35;
+        let dlen = (disp_vx * disp_vx + disp_vy * disp_vy).sqrt().max(1e-4);
+        let len = (tile_px * (0.55 + 0.9 * n)).clamp(tile_px * 0.4, tile_px * 1.6);
+        let dx = disp_vx / dlen * len;
+        let dy = -disp_vy / dlen * len;
+        let line_a = (50.0 + 90.0 * n).min(160.0) as u8;
 
         for &x_copy in x_copies {
             let sx = origin_x + (base_gx + x_copy * width_cols) as f32 * cell_px;
             if sx + tile_px < 0.0 || sx > sw {
                 continue;
             }
-            draw_rectangle(sx, sy, tile_px, tile_px, Color::from_rgba(r, g, b, a));
-
             let cx = sx + tile_px * 0.5;
             let cy = sy + tile_px * 0.5;
-            let len =
-                (tile_px * 0.22 + speed * tile_px * 3.2).clamp(tile_px * 0.28, tile_px * 0.92);
-            let dx = vx / speed * len;
-            let dy = -vy / speed * len; // world +y up → screen −y
-            let alpha = (90.0 + 140.0 * n).min(230.0) as u8;
-            for s in 0..6 {
-                let u = s as f32 / 5.0;
-                draw_rectangle(
-                    cx - dx * 0.5 + dx * u - 1.0,
-                    cy - dy * 0.5 + dy * u - 1.0,
-                    3.0,
-                    3.0,
-                    Color::from_rgba(255, 250, 235, alpha),
-                );
-            }
             draw_rectangle(
-                cx + dx * 0.5 - 1.5,
-                cy + dy * 0.5 - 1.5,
-                4.0,
-                4.0,
-                Color::from_rgba(255, 255, 255, alpha),
+                cx - wash_w * 0.5,
+                cy - wash_h * 0.5,
+                wash_w,
+                wash_h,
+                Color::from_rgba(wr, wg, wb, wash_a),
+            );
+            draw_line(
+                cx - dx * 0.5,
+                cy - dy * 0.5,
+                cx + dx * 0.5,
+                cy + dy * 0.5,
+                1.0,
+                Color::from_rgba(245, 248, 255, line_a),
+            );
+            // Small tip mark for direction.
+            draw_rectangle(
+                cx + dx * 0.5 - 1.0,
+                cy + dy * 0.5 - 1.0,
+                2.0,
+                2.0,
+                Color::from_rgba(255, 255, 255, line_a),
             );
         }
     }

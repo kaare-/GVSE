@@ -197,7 +197,9 @@ compaction → map-gated thin-dam shear.
 Powder Toy–style gas. Migration already flags Air as first-class;
 voxel wind is a **climate mean + natural variance**, then a rebuilt
 per-tile `(vx, vy)` heatmap (`Wind::rebuild_field`) driven by optional
-terrain, thermal gradients, swirl eddies, and canopy drag. Humidity
+terrain, thermal gradients, swirl eddies, and canopy drag. The product is
+**horizontal**: convection / oro lift feed lateral breezes; vertical
+residual is capped so the field does not read as column stripes. Humidity
 reads [`Wind::vector_at`]. Defer a full pressure-solved cell wind until
 hydro + thermal are further along — the stored field is the seam for
 later spore push / stem bend / shelter.

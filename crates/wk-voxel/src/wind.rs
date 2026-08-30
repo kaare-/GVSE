@@ -2,8 +2,8 @@
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
-//! Coarse wind vector field for humidity advection, raft drift, and
-//! (later) spore push / canopy bend / local dampening.
+//! Coarse **horizontal** wind vector field for humidity advection, raft drift,
+//! and (later) spore push / canopy bend / local dampening.
 //!
 //! **Layers**
 //! 1. Climate mean (`climate_vx`) + natural variance → tick force/heading
@@ -12,6 +12,10 @@
 //!    canopy drag (filled by the app from tall stems)
 //! 3. [`Self::vector_at`] reads the heatmap (falls back to procedural
 //!    [`Self::flow_at`] if empty)
+//!
+//! Wind is treated as a **horizontal** phenomenon: convection and oro lift
+//! drive lateral breezes / channeling; vertical residual is capped so the
+//! field does not read as vertical column stripes.
 //!
 //! No pressure solver yet — docs/VOXEL_FIELDS.md §7. Drivers are dials,
 //! not hard requirements.
@@ -217,14 +221,6 @@ impl Wind {
                 let (mut vx, mut vy) = self.compose_drivers(
                     world, temp, hx, hy, tick, evx, evy, &cfg,
                 );
-                if let Some(map) = drag {
-                    if let Some(&d) = map.get(&(hx, hy)) {
-                        let keep =
-                            1.0 - cfg.canopy_dampen.clamp(0.0, 1.0) * d.clamp(0.0, 1.0);
-                        vx *= keep;
-                        vy *= keep;
-                    }
-                }
                 vx = vx.clamp(-1.0, 1.0);
                 vy = vy.clamp(-1.0, 1.0);
                 if smooth > 1e-4 {
@@ -236,7 +232,82 @@ impl Wind {
                 next.insert((hx, hy), (vx, vy));
             }
         }
-        self.field = next;
+        // Oro / thermal are mostly per-column — without a spatial blend the
+        // field reads as vertical picket stripes. Two mild neighbour passes
+        // (heavier in x) keep local structure without washing out eddies.
+        let mut blended = Self::spatial_blend_field(next, bounds, self.wrap_x, 2);
+        // Canopy shelter applies *after* blend so neighbour bleed cannot
+        // refill a fully-damped stem tile.
+        if let Some(map) = drag {
+            let damp = cfg.canopy_dampen.clamp(0.0, 1.0);
+            if damp > 1e-4 {
+                for (&(hx, hy), &(vx, vy)) in blended.clone().iter() {
+                    if let Some(&d) = map.get(&(hx, hy)) {
+                        let keep = 1.0 - damp * d.clamp(0.0, 1.0);
+                        blended.insert((hx, hy), (vx * keep, vy * keep));
+                    }
+                }
+            }
+        }
+        self.field = blended;
+    }
+
+    /// Average each tile with its 4-neighbours (horizontal weight 2× vertical).
+    fn spatial_blend_field(
+        mut field: FxHashMap<(i32, i32), (f32, f32)>,
+        bounds: TileBounds,
+        wrap_x: bool,
+        passes: u32,
+    ) -> FxHashMap<(i32, i32), (f32, f32)> {
+        if field.is_empty() || passes == 0 {
+            return field;
+        }
+        let hx_span = (bounds.hx_max - bounds.hx_min + 1).max(1);
+        for _ in 0..passes {
+            let snap = field.clone();
+            let mut out = FxHashMap::default();
+            out.reserve(snap.len());
+            for (&(hx, hy), &(vx, vy)) in &snap {
+                let mut sx = vx * 2.0;
+                let mut sy = vy * 2.0;
+                let mut w = 2.0;
+                // Left / right — double weight so column seams dissolve first.
+                for dx in [-1, 1] {
+                    let nhx = if wrap_x {
+                        let mut x = hx + dx;
+                        if x < bounds.hx_min {
+                            x += hx_span;
+                        } else if x > bounds.hx_max {
+                            x -= hx_span;
+                        }
+                        x
+                    } else if hx + dx < bounds.hx_min || hx + dx > bounds.hx_max {
+                        continue;
+                    } else {
+                        hx + dx
+                    };
+                    if let Some(&(nvx, nvy)) = snap.get(&(nhx, hy)) {
+                        sx += nvx * 2.0;
+                        sy += nvy * 2.0;
+                        w += 2.0;
+                    }
+                }
+                for dy in [-1, 1] {
+                    let nhy = hy + dy;
+                    if nhy < bounds.hy_min || nhy > bounds.hy_max {
+                        continue;
+                    }
+                    if let Some(&(nvx, nvy)) = snap.get(&(hx, nhy)) {
+                        sx += nvx;
+                        sy += nvy;
+                        w += 1.0;
+                    }
+                }
+                out.insert((hx, hy), ((sx / w).clamp(-1.0, 1.0), (sy / w).clamp(-1.0, 1.0)));
+            }
+            field = out;
+        }
+        field
     }
 
     fn compose_drivers(
@@ -250,57 +321,100 @@ impl Wind {
         evy: f32,
         cfg: &WindConfig,
     ) -> (f32, f32) {
+        // Wind is a **horizontal** field. Height shear and mild lift exist, but
+        // convection / oro / swirl drive lateral flow — they must not paint
+        // vertical column stripes of |v|.
         let shear = self.height_shear(world, hx, hy);
         let mut vx = evx * shear;
-        let mut vy = evy;
+        // Climate vy stays tiny; vertical is a residual, not the product.
+        let mut vy = evy * 0.35;
 
         let td = cfg.terrain_drive.clamp(0.0, 2.0);
         if td > 1e-4 {
-            let speed = self.orographic_speed_factor(world, hx);
-            let lift = self.orographic_lift(world, hx);
-            let sink = self.lee_sink(world, hx, hy);
-            // Blend oro speed toward free-stream shear when drive is low.
+            let (speed, lift, sink) = self.orographic_soft(world, hx, hy);
             let sped = 1.0 + (speed - 1.0) * td.min(1.0);
             vx = (evx * shear * sped).clamp(-1.0, 1.0);
-            // Extra drive above 1.0 slightly exaggerates oro contrast.
-            let boost = if td > 1.0 { 1.0 + (td - 1.0) * 0.35 } else { 1.0 };
-            vy += (lift - sink) * td.min(1.0) * boost;
+            let boost = if td > 1.0 {
+                1.0 + (td - 1.0) * 0.35
+            } else {
+                1.0
+            };
+            // Upslope: divert a slice of horizontal into climb near the face;
+            // lee: decelerate horizontally and only a soft sink. Both fade aloft.
+            let height_fade = (1.0 - (shear - 0.2) * 0.7).clamp(0.2, 1.0);
+            let oro_v = (lift - sink) * td.min(1.0) * boost * height_fade;
+            vy += oro_v * 0.45;
+            // Continuity proxy: climb steals a little horizontal near the face.
+            vx *= 1.0 - (lift * td.min(1.0) * height_fade * 0.35).clamp(0.0, 0.25);
         }
 
         let th = cfg.thermal_drive.clamp(0.0, 2.0);
         if th > 1e-4 {
             if let Some(t) = temp {
                 let (dvx, dvy) = self.thermal_delta(t, hx, hy);
+                // Convection → mostly horizontal convergence / breeze.
                 vx += dvx * th;
-                vy += dvy * th;
+                vy += dvy * th * 0.35;
             }
         }
 
         let sw = cfg.swirl.clamp(0.0, 2.0);
         if sw > 1e-4 {
             let (sx, sy) = self.swirl_at(hx, hy, tick);
+            // Prefer horizontal eddies; keep a whisper of vertical curl.
             vx += sx * sw;
-            vy += sy * sw;
+            vy += sy * sw * 0.4;
         }
 
-        (vx, vy)
+        // Cap vertical so the product stays a horizontal wind with soft tilt.
+        let v_cap = (vx.abs() * 0.45 + 0.04).min(0.35);
+        vy = vy.clamp(-v_cap, v_cap);
+        (vx.clamp(-1.0, 1.0), vy.clamp(-1.0, 1.0))
     }
 
-    /// Sea-breeze style: air slides toward warmer neighbours; warm
-    /// anomalies relative to the row mean rise.
+    /// Neighbour-blended oro speed / lift / sink at `(hx, hy)`.
+    fn orographic_soft(
+        &self,
+        world: Option<&World>,
+        hx: i32,
+        hy: i32,
+    ) -> (f32, f32, f32) {
+        let mut speed = 0.0;
+        let mut lift = 0.0;
+        let mut sink = 0.0;
+        let mut w = 0.0;
+        for (dx, wt) in [(-1, 0.25f32), (0, 0.50), (1, 0.25)] {
+            let x = hx + dx;
+            speed += self.orographic_speed_factor(world, x) * wt;
+            lift += self.orographic_lift(world, x) * wt;
+            sink += self.lee_sink(world, x, hy) * wt;
+            w += wt;
+        }
+        (speed / w, lift / w, sink / w)
+    }
+
+    /// Sea-breeze style: warmer air draws a **horizontal** breeze; buoyancy
+    /// only weakly lifts (convection drives lateral inflow, not a vertical wind).
     fn thermal_delta(&self, temp: &Temperature, hx: i32, hy: i32) -> (f32, f32) {
         let t0 = temp.at_tile(hx, hy);
         let tx = (temp.at_tile(hx + 1, hy) - temp.at_tile(hx - 1, hy)) * 0.5;
         let ty = (temp.at_tile(hx, hy + 1) - temp.at_tile(hx, hy - 1)) * 0.5;
-        // Toward warm (daytime land breeze proxy).
-        let mut vx = tx * 0.018;
-        let mut vy = ty * 0.012;
-        // Column buoyancy from local anomaly vs left/right neighbours.
+        // Toward warm horizontally.
+        let mut vx = tx * 0.028;
+        // Vertical T gradient contributes little to wind — humidity buoyant
+        // rise already handles parcel loft.
+        let mut vy = ty * 0.004;
         let flank = (temp.at_tile(hx - 1, hy) + temp.at_tile(hx + 1, hy)) * 0.5;
         let anomaly = t0 - flank;
-        vy += (anomaly / 18.0).clamp(-0.12, 0.12);
-        // Buried / deep seats stay quiet.
+        // Warm column: horizontal convergence into the plume (sign toward centre
+        // is handled by ∇T); only a soft residual ascent.
+        vy += (anomaly / 28.0).clamp(-0.05, 0.05);
+        // Near-surface thermal breeze is stronger; aloft free stream is quieter.
         let surf = self.surface_tile_hy(None, hx);
+        let above = (hy - surf).max(0) as f32;
+        let near = (1.0 - above / 6.0).clamp(0.25, 1.0);
+        vx *= near;
+        vy *= near * 0.6;
         if hy + 1 < surf {
             vx *= 0.15;
             vy *= 0.15;
@@ -740,7 +854,51 @@ mod tests {
             .values()
             .map(|&(_, vy)| vy)
             .fold(0.0f32, |a, b| a.max(b.abs()));
-        assert!(vy_spread > 0.01, "swirl should tilt some tiles vertically");
+        assert!(vy_spread > 0.002, "swirl should leave a soft vertical residual");
+        // Product stays horizontally dominated.
+        let mut sum_vx = 0.0f32;
+        let mut sum_vy = 0.0f32;
+        for &(vx, vy) in wind.field.values() {
+            sum_vx += vx.abs();
+            sum_vy += vy.abs();
+        }
+        assert!(
+            sum_vx > sum_vy * 1.5,
+            "wind field should be horizontally dominated ({sum_vx} vs {sum_vy})"
+        );
+    }
+
+    #[test]
+    fn field_is_horizontally_coherent_not_column_stripes() {
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.12,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.variance = 0.0;
+        wind.config.terrain_drive = 1.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.2;
+        wind.config.field_smooth = 0.0;
+        wind.rebuild_field(None, None, 10, None);
+        // Same height band: neighbouring columns should not jump hard after blend.
+        let hy = wind.surface_tile_hy(None, 20) + 3;
+        let mut max_jump = 0.0f32;
+        for hx in 8..40 {
+            let (a, _) = wind.vector_at(None, hx, hy);
+            let (b, _) = wind.vector_at(None, hx + 1, hy);
+            max_jump = max_jump.max((a - b).abs());
+        }
+        assert!(
+            max_jump < 0.08,
+            "horizontal neighbour |vx| jumps should be soft after blend (max {max_jump})"
+        );
     }
 
     #[test]
