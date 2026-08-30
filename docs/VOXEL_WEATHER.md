@@ -295,6 +295,9 @@ It now:
 - **skips mass ≤ 25.5** (10% of that 255 scale) so thin vapor stays clear
 - eases the opacity reference with an asymmetric EMA
 - uses continuous alpha across 36–210 so bucket edges do not blink
+- draws **pixel-snapped, non-overlapping** cells (the old `cell_px + 0.5`
+  translucent overdraw stacked at every column edge into vertical
+  corduroy banding)
 
 ## Snow in warm air
 

@@ -1233,6 +1233,10 @@ pub fn draw_haze_and_wind(
     let seats = haze_paint_seats(humidity, sky_hy_min);
     let mut floor_cache: HashMap<i32, i32> = HashMap::new();
 
+    // Dedupe world cells first. Semi-transparent `cell_px + 0.5` overdraw
+    // used to stack at every column edge and read as vertical corduroy
+    // banding across an otherwise smooth field.
+    let mut cells: HashMap<(i32, i32), f32> = HashMap::new();
     for (hx, hy) in seats {
         for (wx, gy, sampled) in haze_resampled_cells(
             humidity,
@@ -1246,32 +1250,40 @@ pub fn draw_haze_and_wind(
                 })
             },
         ) {
-            let (hr, hg, hb, cell_alpha) = humidity_haze_style(
-                sampled,
-                ref_mass,
-                HAZE_MASS_FLOOR / HAZE_MASS_FULL,
-            );
-            if cell_alpha == 0 {
+            cells
+                .entry((wx, gy))
+                .and_modify(|m| *m = (*m).max(sampled))
+                .or_insert(sampled);
+        }
+    }
+
+    let floor = HAZE_MASS_FLOOR / HAZE_MASS_FULL;
+    for (&(wx, gy), &sampled) in &cells {
+        let (hr, hg, hb, cell_alpha) = humidity_haze_style(sampled, ref_mass, floor);
+        if cell_alpha == 0 {
+            continue;
+        }
+        for &x_copy in x_copies {
+            // Pixel-snapped edges so neighbouring cells share a boundary
+            // without translucent overlap (the corduroy bands).
+            let x0 = origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
+            let x1 = origin_x + (wx + 1 + x_copy * width_cols) as f32 * cell_px;
+            let y1 = origin_y - (gy - bedrock_floor_y) as f32 * cell_px;
+            let y0 = origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
+            let sx = x0.floor();
+            let sy = y0.floor();
+            let sw_cell = (x1.floor() - sx).max(1.0);
+            let sh_cell = (y1.floor() - sy).max(1.0);
+            if sx + sw_cell < 0.0 || sx > sw || sy > sh || sy + sh_cell < 0.0 {
                 continue;
             }
-            for &x_copy in x_copies {
-                let sx = origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
-                let top_sy = origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
-                if sx + cell_px < 0.0
-                    || sx > sw
-                    || top_sy > sh
-                    || top_sy + cell_px < 0.0
-                {
-                    continue;
-                }
-                draw_rectangle(
-                    sx,
-                    top_sy,
-                    cell_px + 0.5,
-                    cell_px + 0.5,
-                    Color::from_rgba(hr, hg, hb, cell_alpha),
-                );
-            }
+            draw_rectangle(
+                sx,
+                sy,
+                sw_cell,
+                sh_cell,
+                Color::from_rgba(hr, hg, hb, cell_alpha),
+            );
         }
     }
 }
