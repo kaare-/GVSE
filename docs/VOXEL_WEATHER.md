@@ -427,12 +427,21 @@ on every solidity change, and `set_cell` is hot enough that the extra write was
 not worth it: terrain moves locally, the procedural hint stays close, and the
 walk is a few cells.
 
-**Humidity advection follows the live hill.** Uniform `(vx, vy)` alone moves
-every seat by the same δ — fine over flat sea, but a near-surface vapor
-slab would tunnel through mountains and reappear in the lee. `advect_with_surface`
-lifts destination seats buried under the live crest into free air, then spends
-`Wind::orographic_lift` on the windward face so mass climbs rather than drifts
-behind the landscape.
+**Humidity advection follows the live hill — and local wind, not a sheet.**
+Uniform climate `(vx, vy)` used to move every seat by the same integer δ once
+a residual crossed 1, so the H overlay slid like a painted texture. Now:
+
+- **`Wind::flow_at`** shapes the tick's climate wind with height shear
+  (surface drag → free stream aloft), windward channeling, and lee
+  slow/sink.
+- **Fractional flux** moves a `|v|` fraction of each tile's mass every
+  tick (dimensional split) — no whole-field jump.
+- **`wind_mix`** adds vertical exchange + mild downward entrainment when
+  wind is strong, so vapour folds instead of only translating.
+
+`advect_with_surface` still lifts destination seats buried under the live
+crest into free air, then spends `Wind::orographic_lift` on the windward
+face.
 
 **The 4×4 field and the 1-wide path.** Humidity is a tile store. `H`
 paints occupied tiles plus a one-tile neighbour halo (so an emptied

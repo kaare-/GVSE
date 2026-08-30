@@ -664,24 +664,24 @@ impl Humidity {
         });
     }
 
-    /// Advect atmospheric mass by a uniform climate wind `(vx, vy)`
-    /// in tiles/tick. Fractional remainders accumulate in
-    /// [`Self::advect_rx`] / [`Self::advect_ry`] so motion stays smooth.
+    /// Advect atmospheric mass by climate wind `(vx, vy)` in tiles/tick.
     ///
-    /// Mass-conserving: every gram lands on an accepted tile (vertical
-    /// edges are Neumann — mass that would leave sticks at the rim).
+    /// Uses **per-tick fractional flux** (not an integer whole-field step).
+    /// The old residual/`trunc` path shifted every seat by the same δ once
+    /// the accumulator crossed 1 — the H overlay read as a painted sheet
+    /// sliding on the wind. Mass-conserving; vertical edges are Neumann.
     pub fn advect(&mut self, vx: f32, vy: f32) {
         self.advect_inner(vx, vy, None);
     }
 
-    /// [`Self::advect`] that **climbs the live hill** instead of tunneling
-    /// through it, then spends orographic lift on the windward face.
+    /// [`Self::advect`] shaped by local [`crate::wind::Wind::flow_at`]:
+    /// height shear, windward channeling, lee slow/sink — then orographic
+    /// lift and wind-driven vertical mixing.
     ///
     /// Uniform `(vx, vy)` alone moves every seat by the same δ — fine over
-    /// flat sea, but after near-surface vapor residuals returned, that slab
-    /// slid *through* mountains and reappeared in the lee ("drifts behind").
-    /// Destination seats buried under the live crest are lifted to free air
-    /// so the field bumps the landscape.
+    /// flat sea, but a near-surface vapor slab slid *through* mountains and
+    /// reappeared in the lee. Destination seats buried under the live crest
+    /// are lifted to free air so the field bumps the landscape.
     pub fn advect_with_surface(
         &mut self,
         vx: f32,
@@ -690,62 +690,189 @@ impl Humidity {
         world: &crate::grid::World,
     ) {
         self.advect_inner(vx, vy, Some((wind, world)));
+        self.wind_mix(wind.mix_strength(vx, vy), Some((wind, world)));
         self.apply_orographic_lift(wind, Some(world));
     }
 
     fn advect_inner(
         &mut self,
-        vx: f32,
-        vy: f32,
+        climate_vx: f32,
+        climate_vy: f32,
         surface: Option<(&crate::wind::Wind, &crate::grid::World)>,
     ) {
-        if self.cells.is_empty() || (vx == 0.0 && vy == 0.0) {
+        if self.cells.is_empty() {
             return;
         }
-        self.advect_rx += vx;
-        self.advect_ry += vy;
-        let dx = self.advect_rx.trunc() as i32;
-        let dy = self.advect_ry.trunc() as i32;
-        self.advect_rx -= dx as f32;
-        self.advect_ry -= dy as f32;
-        if dx == 0 && dy == 0 {
-            // Still purge buried seats when the residual has not stepped yet.
-            if let Some((wind, world)) = surface {
-                self.lift_buried_to_free_air(wind, world);
-            }
+        if climate_vx == 0.0 && climate_vy == 0.0 && surface.is_none() {
             return;
         }
-        let snap = self.cells.clone();
-        self.cells.clear();
-        for ((hx, hy), mass) in snap {
-            if mass.abs() < 1e-9 {
-                continue;
-            }
-            let nhx = match self.wrap_hx(hx + dx) {
-                Some(x) => x,
-                None => hx,
-            };
-            let mut nhy = hy + dy;
-            if !self.accepts(nhx, nhy) {
-                nhy = hy;
-                if !self.accepts(nhx, nhy) {
-                    *self.cells.entry((hx, hy)).or_insert(0.0) += mass;
-                    continue;
-                }
-            }
-            if let Some((wind, world)) = surface {
-                nhy = self.free_air_hy(wind, world, nhx).max(nhy);
-                if !self.accepts(nhx, nhy) {
-                    *self.cells.entry((hx, hy)).or_insert(0.0) += mass;
-                    continue;
-                }
-            }
-            *self.cells.entry((nhx, nhy)).or_insert(0.0) += mass;
+        // Legacy residuals unused — flux moves a fraction every tick.
+        self.advect_rx = 0.0;
+        self.advect_ry = 0.0;
+
+        // X then Y dimensional split from a snapshot each axis.
+        self.flux_axis(climate_vx, climate_vy, surface, true);
+        self.flux_axis(climate_vx, climate_vy, surface, false);
+
+        if let Some((wind, world)) = surface {
+            self.lift_buried_to_free_air(wind, world);
         }
         let bounds = self.bounds;
         self.cells.retain(|&(hx, hy), v| {
             v.abs() > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
         });
+    }
+
+    /// Donor-cell flux along one axis. `|v|` is the fraction of mass that
+    /// leaves toward the neighbour this tick (capped at 1).
+    fn flux_axis(
+        &mut self,
+        climate_vx: f32,
+        climate_vy: f32,
+        surface: Option<(&crate::wind::Wind, &crate::grid::World)>,
+        horizontal: bool,
+    ) {
+        let snap = self.cells.clone();
+        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        for (&(hx, hy), &mass) in &snap {
+            if mass.abs() < 1e-9 {
+                continue;
+            }
+            let (vx, vy) = match surface {
+                Some((wind, world)) => {
+                    wind.flow_at(Some(world), hx, hy, climate_vx, climate_vy)
+                }
+                None => (climate_vx, climate_vy),
+            };
+            let v = if horizontal { vx } else { vy };
+            let step = v.clamp(-1.0, 1.0);
+            if step.abs() < 1e-9 {
+                continue;
+            }
+            let leave = mass * step.abs();
+            if leave < 1e-12 {
+                continue;
+            }
+            let (tx, ty) = if horizontal {
+                let dir = if step > 0.0 { 1 } else { -1 };
+                let nhx = match self.wrap_hx(hx + dir) {
+                    Some(x) => x,
+                    None => {
+                        // Neumann wall — mass stays.
+                        continue;
+                    }
+                };
+                let mut nhy = hy;
+                if let Some((wind, world)) = surface {
+                    nhy = self.free_air_hy(wind, world, nhx).max(nhy);
+                    if !self.accepts(nhx, nhy) {
+                        continue;
+                    }
+                } else if !self.accepts(nhx, nhy) {
+                    continue;
+                }
+                (nhx, nhy)
+            } else {
+                let dir = if step > 0.0 { 1 } else { -1 };
+                let nhy = hy + dir;
+                let mut dest_hy = nhy;
+                if let Some((wind, world)) = surface {
+                    dest_hy = self.free_air_hy(wind, world, hx).max(nhy);
+                }
+                if !self.accepts(hx, dest_hy) {
+                    continue;
+                }
+                (hx, dest_hy)
+            };
+            *deltas.entry((hx, hy)).or_insert(0.0) -= leave;
+            *deltas.entry((tx, ty)).or_insert(0.0) += leave;
+        }
+        for (k, d) in deltas {
+            if d < 0.0 {
+                if let Some(e) = self.cells.get_mut(&k) {
+                    *e = (*e + d).max(0.0);
+                }
+                continue;
+            }
+            if self.accepts(k.0, k.1) {
+                *self.cells.entry(k).or_insert(0.0) += d;
+            }
+        }
+        self.cells.retain(|_, v| *v > 1e-6);
+    }
+
+    /// High wind mixes the column (vertical exchange + mild downward
+    /// entrainment) so vapour does not translate as a rigid slab.
+    pub fn wind_mix(
+        &mut self,
+        mix: f32,
+        surface: Option<(&crate::wind::Wind, &crate::grid::World)>,
+    ) {
+        let mix = mix.clamp(0.0, 1.0);
+        if mix < 1e-4 || self.cells.is_empty() {
+            return;
+        }
+        // Isotropic vertical share of the pairwise head difference.
+        let alpha = (0.04 + 0.14 * mix).clamp(0.0, 0.20);
+        let snap = self.cells.clone();
+        let mut keys: Vec<(i32, i32)> = snap.keys().copied().collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        for &(hx, hy) in &keys {
+            let val = *snap.get(&(hx, hy)).unwrap_or(&0.0);
+            let above = (hx, hy + 1);
+            if !self.accepts(above.0, above.1) {
+                continue;
+            }
+            if let Some((wind, world)) = surface {
+                let air = self.free_air_hy(wind, world, hx);
+                if hy < air || above.1 < air {
+                    continue;
+                }
+            }
+            let n_val = *snap.get(&above).unwrap_or(&0.0);
+            let flow = (val - n_val) * alpha;
+            if flow.abs() < 1e-9 {
+                continue;
+            }
+            *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
+            *deltas.entry(above).or_insert(0.0) += flow;
+        }
+        // Mild downward entrainment — high wind folds aloft vapour in.
+        let sink = 0.03 * mix;
+        if sink > 1e-5 {
+            for &(hx, hy) in &keys {
+                let val = *snap.get(&(hx, hy)).unwrap_or(&0.0);
+                if val <= 1e-9 {
+                    continue;
+                }
+                let below = hy - 1;
+                if !self.accepts(hx, below) {
+                    continue;
+                }
+                if let Some((wind, world)) = surface {
+                    if below < self.free_air_hy(wind, world, hx) {
+                        continue;
+                    }
+                }
+                let take = val * sink;
+                *deltas.entry((hx, hy)).or_insert(0.0) -= take;
+                *deltas.entry((hx, below)).or_insert(0.0) += take;
+            }
+        }
+        for (k, d) in deltas {
+            if d < 0.0 {
+                if let Some(e) = self.cells.get_mut(&k) {
+                    *e = (*e + d).max(0.0);
+                }
+                continue;
+            }
+            if self.accepts(k.0, k.1) {
+                *self.cells.entry(k).or_insert(0.0) += d;
+            }
+        }
+        self.cells.retain(|_, v| *v > 1e-6);
     }
 
     /// First tile row whose centre sits in free air above the live crest
@@ -932,15 +1059,40 @@ mod tests {
         h.wrap_x = true;
         h.add(8, 8, 100.0);
         let before = h.total_mass();
-        // Force a whole-tile step.
-        h.advect_rx = 0.0;
+        // Fractional flux: one full tile/tick moves everything.
         h.advect(1.0, 0.0);
         assert!((h.total_mass() - before).abs() < 1e-4);
-        assert!(h.at_tile(3, 2) > 0.0 || h.at_tile(2, 2) > 0.0);
         // Original tile centre was (8,8) → tile (2,2); +1 hx → (3,2).
         assert!(
             h.at_tile(3, 2) > 50.0,
             "mass should have shifted +1 tile in x, got {}",
+            h.at_tile(3, 2)
+        );
+        assert!(
+            h.at_tile(2, 2) < 1.0,
+            "donor tile should empty on a full step"
+        );
+    }
+
+    #[test]
+    fn fractional_advect_does_not_slide_the_whole_field() {
+        // The residual/trunc path waited until |rx|≥1 then moved every seat
+        // one tile — a painted sheet. Flux must leave mass behind each tick.
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        h.add(8, 8, 100.0);
+        h.advect(0.25, 0.0);
+        assert!(
+            (h.total_mass() - 100.0).abs() < 1e-3,
+            "mass must conserve"
+        );
+        assert!(
+            h.at_tile(2, 2) > 70.0,
+            "most mass should still sit on the donor (got {})",
+            h.at_tile(2, 2)
+        );
+        assert!(
+            h.at_tile(3, 2) > 20.0 && h.at_tile(3, 2) < 35.0,
+            "a quarter should have fluxed downwind (got {})",
             h.at_tile(3, 2)
         );
     }
@@ -975,8 +1127,10 @@ mod tests {
         let hx0 = 20 / 4;
         let hy0 = sea / 4;
         h.cells.insert((hx0, hy0), 100.0);
-        h.advect_rx = 0.0;
-        h.advect_with_surface(1.0, 0.0, &wind, &world);
+        // Near-surface shear slows local vx — several flux steps to climb.
+        for _ in 0..12 {
+            h.advect_with_surface(1.0, 0.0, &wind, &world);
+        }
         let hx1 = hx0 + 1;
         let buried = h.at_tile(hx1, hy0);
         let crest_air = h.free_air_hy(&wind, &world, hx1);
@@ -987,11 +1141,11 @@ mod tests {
         let above: f32 = h
             .cells
             .iter()
-            .filter(|(&(x, y), _)| x == hx1 && y >= crest_air)
+            .filter(|(&(x, y), _)| x >= hx0 && y >= crest_air)
             .map(|(_, &m)| m)
             .sum();
         assert!(
-            above > 90.0,
+            above > 50.0,
             "mass should land in free air above the crest (hy>={crest_air}, got {above:.1})"
         );
     }

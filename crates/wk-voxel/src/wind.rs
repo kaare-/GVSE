@@ -6,8 +6,10 @@
 //!
 //! Climate wind is a horizontal prevailing mean; **natural variance**
 //! modulates instantaneous force and direction over gust / breeze /
-//! weather timescales so the push is not constant. Orographic lift still
-//! adds a small upward component where terrain rises downwind.
+//! weather timescales so the push is not constant. Per-tile
+//! [`Self::flow_at`] then shapes that mean with height shear, windward
+//! channeling, and lee slowing/sinking — humidity must not slide as one
+//! rigid sheet under a uniform vector.
 
 use serde::{Deserialize, Serialize};
 
@@ -32,7 +34,7 @@ pub struct Wind {
     /// swing heading. Near `1` the wind can lull, gust, and reverse.
     #[serde(default = "default_variance")]
     pub variance: f32,
-    /// Fractional advection residual (shared; climate is uniform).
+    /// Fractional advection residual (legacy; vapour uses flux advection).
     pub residual_x: f32,
     pub residual_y: f32,
     /// Optional tile bounds (same as humidity) for orographic sampling.
@@ -116,10 +118,35 @@ impl Wind {
         self.climate_vy + wobble
     }
 
-    /// Horizontal wind at a humidity tile (tiles / tick).
+    /// Local vapour-carrying flow at humidity tile `(hx, hy)`.
     ///
-    /// Uses the mean climate value for orographic geometry; callers that
-    /// advect mass should prefer [`Self::effective_vx`].
+    /// `climate_vx` / `climate_vy` should already be the tick's
+    /// [`Self::effective_vx`] / [`Self::effective_vy`]. Spatial shaping:
+    /// - **height shear** — near-surface air is dragged; free stream aloft
+    /// - **windward channel** — climbs slightly faster onto rising terrain
+    /// - **lee slow + sink** — air decelerates and drops past a crest
+    ///
+    /// Without this, every tile shared one vector and the humidity field
+    /// slid like a painted sheet.
+    pub fn flow_at(
+        &self,
+        world: Option<&World>,
+        hx: i32,
+        hy: i32,
+        climate_vx: f32,
+        climate_vy: f32,
+    ) -> (f32, f32) {
+        let shear = self.height_shear(world, hx, hy);
+        let speed = self.orographic_speed_factor(world, hx);
+        let vx = (climate_vx * shear * speed).clamp(-1.0, 1.0);
+        let lift = self.orographic_lift(world, hx);
+        let sink = self.lee_sink(world, hx, hy);
+        let vy = (climate_vy + lift - sink).clamp(-1.0, 1.0);
+        (vx, vy)
+    }
+
+    /// Horizontal wind at a humidity tile (tiles / tick) — mean climate
+    /// only. Prefer [`Self::flow_at`] for vapour advection.
     pub fn vx_at(&self, _hx: i32, _hy: i32) -> f32 {
         self.climate_vx
     }
@@ -133,6 +160,46 @@ impl Wind {
     pub fn vy_at(&self, world: Option<&World>, hx: i32, _hy: i32) -> f32 {
         let lift = self.orographic_lift(world, hx);
         self.climate_vy + lift
+    }
+
+    /// 0.2 at the free surface → 1.0 several tiles aloft (rough log profile).
+    pub fn height_shear(&self, world: Option<&World>, hx: i32, hy: i32) -> f32 {
+        let surf_hy = self.surface_tile_hy(world, hx);
+        let above = (hy - surf_hy).max(0) as f32;
+        (0.20 + 0.80 * (above / 5.0).clamp(0.0, 1.0)).clamp(0.15, 1.15)
+    }
+
+    /// Windward speed-up / lee slow-down from live (or seed) terrain.
+    pub fn orographic_speed_factor(&self, world: Option<&World>, hx: i32) -> f32 {
+        let ascent = self.ascent_cells(world, hx); // climb *onto* this tile
+        let descent = self.descent_cells(world, hx); // drop *leaving* this tile
+        if ascent > descent && ascent > 1.5 {
+            (1.0 + (ascent / 48.0).clamp(0.0, 0.28)).clamp(0.5, 1.35)
+        } else if descent > 1.5 {
+            // Lee: decelerate — eddies / separation, not a free slide.
+            (0.52 + 0.35 * (1.0 - (descent / 40.0).clamp(0.0, 1.0))).clamp(0.4, 1.0)
+        } else {
+            1.0
+        }
+    }
+
+    /// Downward draught past a crest (tiles / tick contribution).
+    pub fn lee_sink(&self, world: Option<&World>, hx: i32, hy: i32) -> f32 {
+        let descent = self.descent_cells(world, hx);
+        if descent <= 1.0 {
+            return 0.0;
+        }
+        let shear = self.height_shear(world, hx, hy);
+        // Strongest in the mid wake, weaker at the ground and high aloft.
+        let wake = (1.0 - (shear - 0.45).abs() * 1.4).clamp(0.25, 1.0);
+        (descent / 55.0).clamp(0.0, 0.14) * wake
+    }
+
+    /// Mixing strength 0..1 from |climate wind| — high wind sinks/mixes
+    /// the column instead of only translating it.
+    pub fn mix_strength(&self, climate_vx: f32, climate_vy: f32) -> f32 {
+        let speed = climate_vx.abs().max(climate_vy.abs());
+        (speed / 0.22).clamp(0.0, 1.0)
     }
 
     /// Mean ascent (cells of surface gain) looking one tile downwind.
@@ -171,6 +238,24 @@ impl Wind {
         let s0 = self.surface_at(world, gx_up);
         let s1 = self.surface_at(world, gx);
         ((s1 - s0) as f32).max(0.0)
+    }
+
+    /// Surface drop looking one tile *downwind* (lee wake).
+    pub fn descent_cells(&self, world: Option<&World>, hx: i32) -> f32 {
+        let tc = self.tile_cols.max(1);
+        let gx = hx * tc + tc / 2;
+        let sign = if self.climate_vx >= 0.0 { 1 } else { -1 };
+        let gx_dn = gx + sign * tc;
+        let s0 = self.surface_at(world, gx);
+        let s1 = self.surface_at(world, gx_dn);
+        ((s0 - s1) as f32).max(0.0)
+    }
+
+    fn surface_tile_hy(&self, world: Option<&World>, hx: i32) -> i32 {
+        let tc = self.tile_cols.max(1);
+        let gx = hx * tc + tc / 2;
+        let y = self.surface_at(world, gx);
+        y.div_euclid(tc)
     }
 
     fn surface_at(&self, world: Option<&World>, gx: i32) -> i32 {
@@ -326,5 +411,65 @@ mod tests {
             samples.iter().any(|&v| v.abs() > 0.12),
             "gusts should exceed the mean |vx|"
         );
+    }
+
+    #[test]
+    fn flow_shears_with_height_and_slows_in_the_lee() {
+        let p = WorldgenParams::default();
+        let wind = Wind::climate(
+            4,
+            0.12,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        // Find a crest tile with real descent (lee).
+        let mut hx_lee = 0;
+        let mut best_desc = 0.0f32;
+        for hx in 0..(p.width_cols / 4) {
+            let d = wind.descent_cells(None, hx);
+            if d > best_desc {
+                best_desc = d;
+                hx_lee = hx;
+            }
+        }
+        assert!(best_desc > 3.0, "need a lee face, got {best_desc}");
+
+        let surf = wind.surface_tile_hy(None, hx_lee);
+        let (vx_low, _) = wind.flow_at(None, hx_lee, surf, 0.12, 0.0);
+        let (vx_high, vy_high) = wind.flow_at(None, hx_lee, surf + 6, 0.12, 0.0);
+        assert!(
+            vx_high.abs() > vx_low.abs() * 1.5,
+            "aloft wind must outrun the surface layer ({vx_high} vs {vx_low})"
+        );
+        assert!(
+            vx_high.abs() < 0.12 * 0.95,
+            "lee must not reach free-stream speed (got {vx_high})"
+        );
+        assert!(
+            vy_high < -0.01,
+            "lee wake should sink (got {vy_high})"
+        );
+    }
+
+    #[test]
+    fn mix_strength_tracks_wind_speed() {
+        let p = WorldgenParams::default();
+        let wind = Wind::climate(
+            4,
+            0.05,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        assert!(wind.mix_strength(0.0, 0.0) < 0.05);
+        assert!(wind.mix_strength(0.22, 0.0) > 0.95);
+        assert!(wind.mix_strength(0.05, 0.0) > wind.mix_strength(0.01, 0.0));
     }
 }

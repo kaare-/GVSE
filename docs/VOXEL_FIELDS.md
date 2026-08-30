@@ -195,9 +195,11 @@ compaction → map-gated thin-dam shear.
 ### 7. Air pressure (research)
 
 Powder Toy–style gas. Migration already flags Air as first-class;
-voxel wind is still climate-scale (mean + natural variance for force /
-direction; no pressure field yet). Defer cell wind until hydro + thermal are
-boring.
+voxel wind is a climate mean + natural variance, then **per-tile**
+`Wind::flow_at` (height shear, windward channel, lee slow/sink). Humidity
+uses fractional flux + wind mixing so the field does not slide as one sheet.
+Defer a full pressure-solved cell wind until hydro + thermal are
+further along.
 
 ## Architecture notes
 
