@@ -651,6 +651,34 @@ impl Humidity {
     /// Mass-conserving: every gram lands on an accepted tile (vertical
     /// edges are Neumann — mass that would leave sticks at the rim).
     pub fn advect(&mut self, vx: f32, vy: f32) {
+        self.advect_inner(vx, vy, None);
+    }
+
+    /// [`Self::advect`] that **climbs the live hill** instead of tunneling
+    /// through it, then spends orographic lift on the windward face.
+    ///
+    /// Uniform `(vx, vy)` alone moves every seat by the same δ — fine over
+    /// flat sea, but after near-surface vapor residuals returned, that slab
+    /// slid *through* mountains and reappeared in the lee ("drifts behind").
+    /// Destination seats buried under the live crest are lifted to free air
+    /// so the field bumps the landscape.
+    pub fn advect_with_surface(
+        &mut self,
+        vx: f32,
+        vy: f32,
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+    ) {
+        self.advect_inner(vx, vy, Some((wind, world)));
+        self.apply_orographic_lift(wind, Some(world));
+    }
+
+    fn advect_inner(
+        &mut self,
+        vx: f32,
+        vy: f32,
+        surface: Option<(&crate::wind::Wind, &crate::grid::World)>,
+    ) {
         if self.cells.is_empty() || (vx == 0.0 && vy == 0.0) {
             return;
         }
@@ -661,6 +689,10 @@ impl Humidity {
         self.advect_rx -= dx as f32;
         self.advect_ry -= dy as f32;
         if dx == 0 && dy == 0 {
+            // Still purge buried seats when the residual has not stepped yet.
+            if let Some((wind, world)) = surface {
+                self.lift_buried_to_free_air(wind, world);
+            }
             return;
         }
         let snap = self.cells.clone();
@@ -671,12 +703,18 @@ impl Humidity {
             }
             let nhx = match self.wrap_hx(hx + dx) {
                 Some(x) => x,
-                None => hx, // shouldn't happen with wrap helper
+                None => hx,
             };
             let mut nhy = hy + dy;
             if !self.accepts(nhx, nhy) {
-                // Vertical Neumann wall — keep y, still take wrapped x.
                 nhy = hy;
+                if !self.accepts(nhx, nhy) {
+                    *self.cells.entry((hx, hy)).or_insert(0.0) += mass;
+                    continue;
+                }
+            }
+            if let Some((wind, world)) = surface {
+                nhy = self.free_air_hy(wind, world, nhx).max(nhy);
                 if !self.accepts(nhx, nhy) {
                     *self.cells.entry((hx, hy)).or_insert(0.0) += mass;
                     continue;
@@ -690,21 +728,54 @@ impl Humidity {
         });
     }
 
-    /// [`Self::advect`] then lift on columns that climb the **live** hill.
-    ///
-    /// Uniform `(vx, vy)` cannot see slope. [`crate::wind::Wind::vy_at`]
-    /// already walks [`crate::worldgen::live_surface_at`]; this spends that
-    /// lift on the vapour field so an eroded ridge does not keep lofting
-    /// mass the seed profile invented.
-    pub fn advect_with_surface(
+    /// First tile row whose centre sits in free air above the live crest.
+    fn free_air_hy(
+        &self,
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+        hx: i32,
+    ) -> i32 {
+        let tc = self.tile_cols.max(1);
+        let gx = hx * tc + tc / 2;
+        let surf = crate::worldgen::live_surface_at(
+            world,
+            wind.seed,
+            gx,
+            wind.sea_level_y,
+            wind.width_cols,
+        );
+        // mid = hy*tc + tc/2 > surf  ⇒  hy >= ceil((surf+1 - tc/2) / tc)
+        ((surf + 1 - tc / 2).max(0) + tc - 1) / tc
+    }
+
+    /// Move any mass still parked inside the hill up to free air.
+    fn lift_buried_to_free_air(
         &mut self,
-        vx: f32,
-        vy: f32,
         wind: &crate::wind::Wind,
         world: &crate::grid::World,
     ) {
-        self.advect(vx, vy);
-        self.apply_orographic_lift(wind, Some(world));
+        let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
+        let mut moves: Vec<((i32, i32), (i32, i32), f32)> = Vec::new();
+        for (hx, hy) in keys {
+            let air = self.free_air_hy(wind, world, hx);
+            if hy >= air {
+                continue;
+            }
+            let Some(&mass) = self.cells.get(&(hx, hy)) else {
+                continue;
+            };
+            if mass <= 1e-9 || !self.accepts(hx, air) {
+                continue;
+            }
+            moves.push(((hx, hy), (hx, air), mass));
+        }
+        for (from, to, mass) in moves {
+            if let Some(e) = self.cells.get_mut(&from) {
+                *e -= mass;
+            }
+            *self.cells.entry(to).or_insert(0.0) += mass;
+        }
+        self.cells.retain(|_, v| v.abs() > 1e-6);
     }
 
     /// Move a lift-fraction of each tile one step up where the live
@@ -829,6 +900,57 @@ mod tests {
             h.at_tile(3, 2) > 50.0,
             "mass should have shifted +1 tile in x, got {}",
             h.at_tile(3, 2)
+        );
+    }
+
+    #[test]
+    fn advect_climbs_over_a_live_hill_instead_of_tunneling() {
+        use crate::cell::Cell;
+        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use wk_material::MaterialId;
+
+        let sea = 20;
+        let mut world = World::new(3);
+        // Flat approach, then a steep crest at x=24..31.
+        for x in 0i32..40 {
+            let top = if (24..32).contains(&x) { sea + 28 } else { sea };
+            for y in 0i32..=(top + 2) {
+                world.ensure_chunk(ChunkCoord::new(
+                    x.div_euclid(CHUNK_CELLS_W as i32),
+                    y.div_euclid(CHUNK_CELLS_H as i32),
+                ));
+            }
+            for y in 0i32..=top {
+                world.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            world.set_cell(x, top + 1, Cell::air());
+        }
+        let wind = Wind::climate(4, 1.0, 3, 64, sea, 0, 320, false);
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 320);
+        // Seat over the flat approach (hy ~ sea/4), about to step into the hill.
+        let hx0 = 20 / 4;
+        let hy0 = sea / 4;
+        h.cells.insert((hx0, hy0), 100.0);
+        h.advect_rx = 0.0;
+        h.advect_with_surface(1.0, 0.0, &wind, &world);
+        let hx1 = hx0 + 1;
+        let buried = h.at_tile(hx1, hy0);
+        let crest_air = h.free_air_hy(&wind, &world, hx1);
+        assert!(
+            buried < 1.0,
+            "mass must not sit inside the hill (got {buried:.1} at hy={hy0})"
+        );
+        let above: f32 = h
+            .cells
+            .iter()
+            .filter(|(&(x, y), _)| x == hx1 && y >= crest_air)
+            .map(|(_, &m)| m)
+            .sum();
+        assert!(
+            above > 90.0,
+            "mass should land in free air above the crest (hy>={crest_air}, got {above:.1})"
         );
     }
 

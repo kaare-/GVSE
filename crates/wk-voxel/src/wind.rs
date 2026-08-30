@@ -148,8 +148,9 @@ impl Wind {
         if ascent <= 0.0 {
             return 0.0;
         }
-        // Small upward drift — keeps clouds hugging lee slopes a bit.
-        (ascent / 80.0).clamp(0.0, 0.08)
+        // Windward loft — strong enough that near-surface vapor climbs the
+        // face instead of waiting for a horizontal step to tunnel through.
+        (ascent / 40.0).clamp(0.0, 0.22)
     }
 
     /// True when the tile centre sits over tall land (rain-prone).

@@ -404,11 +404,12 @@ on every solidity change, and `set_cell` is hot enough that the extra write was
 not worth it: terrain moves locally, the procedural hint stays close, and the
 walk is a few cells.
 
-**Humidity advection follows the live hill.** `Humidity::advect` is still the
-uniform `(vx, vy)` residual. The app then spends `Wind::orographic_lift` on
-the vapour field (`advect_with_surface`) so mass rises on columns that climb
-the *current* surface, not the seed profile. Flatten the downwind face and
-the loft stops.
+**Humidity advection follows the live hill.** Uniform `(vx, vy)` alone moves
+every seat by the same δ — fine over flat sea, but a near-surface vapor
+slab would tunnel through mountains and reappear in the lee. `advect_with_surface`
+lifts destination seats buried under the live crest into free air, then spends
+`Wind::orographic_lift` on the windward face so mass climbs rather than drifts
+behind the landscape.
 
 **The 4×4 field and the 1-wide path.** Humidity is a tile store. `H`
 paints occupied tiles plus a one-tile neighbour halo (so an emptied
