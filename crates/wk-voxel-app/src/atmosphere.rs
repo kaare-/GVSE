@@ -368,17 +368,20 @@ fn haze_resampled_cells(
 
 /// Soft white vapor haze alpha (legacy helper for tests / diagnostics).
 pub fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
-    humidity_haze_style(mass, max_mass, HAZE_RH_FLOOR).3
+    humidity_haze_style(mass, max_mass, HAZE_MASS_FLOOR / HAZE_MASS_FULL.max(1.0)).3
 }
 
-/// Do not paint RH at or below this fraction of the opacity reference.
-/// Thin vapor (0–~25%) stays clear; the wash starts just above 25.5%.
-pub const HAZE_RH_FLOOR: f32 = 0.255;
-/// Lowest painted alpha — the RH floor edge must read as haze, not a
-/// 4/255 speck that vanished into the sky.
+/// Absolute humidity mass below which the H wash stays clear.
+///
+/// This is **10% of the 255 humidity scale** (`0.10 × 255 = 25.5`), not
+/// 25.5% of saturation-at-T — that mistake wiped the whole field.
+pub const HAZE_MASS_FLOOR: f32 = 25.5;
+/// Humidity mass that paints as full wash opacity (the 255 cell scale).
+pub const HAZE_MASS_FULL: f32 = 255.0;
+/// Lowest painted alpha — the mass-floor edge must read as haze.
 pub const HAZE_ALPHA_MIN: u8 = 36;
 pub const HAZE_ALPHA_MAX: u8 = 210;
-/// `< 1` lifts mid-RH so moist air reads as a field, not a film.
+/// `< 1` lifts mid values so moist air reads as a field, not a film.
 const HAZE_ALPHA_GAMMA: f32 = 0.72;
 
 /// `(r, g, b, a)` for one haze cell. Wetter seats go denser *and* less
@@ -397,16 +400,19 @@ pub fn humidity_haze_style(mass: f32, max_mass: f32, floor: f32) -> (u8, u8, u8,
     (r, g, b, a)
 }
 
-/// Per-cell wash. Floor cuts dry air; the span above it remaps to the
-/// full alpha range so moist seats stay readable.
+/// Per-cell wash. Absolute mass floor cuts dry air; the span up to the
+/// opacity reference remaps to the full alpha range.
 ///
 /// Continuous alpha (not hard steps): step edges used to flicker every
 /// tick as mass crossed a bucket boundary under a pumping live-max.
 fn humidity_haze_alpha_cell(mass: f32, max_mass: f32, floor: f32) -> u8 {
-    if mass <= 0.0 {
+    if mass <= HAZE_MASS_FLOOR {
         return 0;
     }
-    let norm = (mass / max_mass.max(1.0)).clamp(0.0, 1.0);
+    let ref_mass = max_mass.max(HAZE_MASS_FULL);
+    let norm = (mass / ref_mass).clamp(0.0, 1.0);
+    // `floor` is the relative cut matching HAZE_MASS_FLOOR / ref when the
+    // caller passes that; also enforce the absolute mass gate above.
     if norm <= floor {
         return 0;
     }
@@ -418,13 +424,12 @@ fn humidity_haze_alpha_cell(mass: f32, max_mass: f32, floor: f32) -> u8 {
 
 /// Target opacity reference for the H overlay.
 ///
-/// Anchored on saturation-at-T so the wash reads **absolute RH**.
-/// Supersaturated peaks paint as full white — they must not raise the
-/// ceiling and flatten the rest of the sky into a thin film (that was
-/// the "invisible haze" after the live-max pump fix).
+/// Fixed **255 humidity scale** (where a 10% floor is mass 25.5). Using
+/// saturation-at-T (~2000–2500) as the ceiling made ordinary moist air
+/// look empty; live-max used to pump the whole sky when a peak drained.
 pub fn haze_alpha_ref_target(live_max: f32, temp_c: f32) -> f32 {
-    let _ = live_max;
-    wk_voxel::Humidity::saturation_mass_at_temp(temp_c).max(1.0)
+    let _ = (live_max, temp_c);
+    HAZE_MASS_FULL
 }
 
 /// Asymmetric EMA: follow rises quickly, falls slowly — a draining peak
@@ -1241,8 +1246,11 @@ pub fn draw_haze_and_wind(
                 })
             },
         ) {
-            let (hr, hg, hb, cell_alpha) =
-                humidity_haze_style(sampled, ref_mass, HAZE_RH_FLOOR);
+            let (hr, hg, hb, cell_alpha) = humidity_haze_style(
+                sampled,
+                ref_mass,
+                HAZE_MASS_FLOOR / HAZE_MASS_FULL,
+            );
             if cell_alpha == 0 {
                 continue;
             }
@@ -2033,7 +2041,7 @@ mod tests {
         collect_drop_tops, gather_soft_cloud_srcs, haze_cell_is_drop, haze_column_y0,
         haze_paint_seats, haze_resampled_cells, humidity_haze_alpha, humidity_haze_style,
         haze_alpha_ref_step, haze_alpha_ref_target, stamp_pixel_cloud_mask, HAZE_ALPHA_MAX,
-        HAZE_ALPHA_MIN, HAZE_RH_FLOOR,
+        HAZE_ALPHA_MIN, HAZE_MASS_FLOOR, HAZE_MASS_FULL,
         CloudDepthLayer,
     };
     use std::collections::HashMap;
@@ -2115,23 +2123,24 @@ mod tests {
 
     #[test]
     fn haze_ignores_thin_vapor_and_stays_soft() {
-        assert_eq!(humidity_haze_alpha(0.0, 100.0), 0);
-        assert_eq!(humidity_haze_alpha(20.0, 100.0), 0); // ≤25.5% floor
-        assert_eq!(humidity_haze_alpha(25.0, 100.0), 0);
-        assert!(humidity_haze_alpha(26.0, 100.0) >= HAZE_ALPHA_MIN);
-        assert_eq!(humidity_haze_alpha(100.0, 100.0), HAZE_ALPHA_MAX);
+        assert_eq!(humidity_haze_alpha(0.0, HAZE_MASS_FULL), 0);
+        assert_eq!(humidity_haze_alpha(10.0, HAZE_MASS_FULL), 0); // ≤25.5 mass floor
+        assert_eq!(humidity_haze_alpha(HAZE_MASS_FLOOR, HAZE_MASS_FULL), 0);
+        assert!(humidity_haze_alpha(26.0, HAZE_MASS_FULL) >= HAZE_ALPHA_MIN);
+        assert_eq!(humidity_haze_alpha(HAZE_MASS_FULL, HAZE_MASS_FULL), HAZE_ALPHA_MAX);
         // Remap above the floor: mid moisture readable, full near-opaque.
-        let lo = humidity_haze_alpha(30.0, 100.0);
-        let mid = humidity_haze_alpha(55.0, 100.0);
-        let hi = humidity_haze_alpha(100.0, 100.0);
+        let lo = humidity_haze_alpha(40.0, HAZE_MASS_FULL);
+        let mid = humidity_haze_alpha(120.0, HAZE_MASS_FULL);
+        let hi = humidity_haze_alpha(HAZE_MASS_FULL, HAZE_MASS_FULL);
         assert!(lo >= HAZE_ALPHA_MIN, "just-above-floor must paint (got {lo})");
-        assert!(hi >= 180, "saturated should read dense (got {hi})");
+        assert!(hi >= 180, "full-scale humidity should read dense (got {hi})");
         assert!(
             lo < mid && mid < hi,
             "haze alpha should rise with moisture ({lo} < {mid} < {hi})"
         );
-        let (_, _, b_lo, _) = humidity_haze_style(30.0, 100.0, HAZE_RH_FLOOR);
-        let (_, _, b_hi, _) = humidity_haze_style(100.0, 100.0, HAZE_RH_FLOOR);
+        let floor = HAZE_MASS_FLOOR / HAZE_MASS_FULL;
+        let (_, _, b_lo, _) = humidity_haze_style(40.0, HAZE_MASS_FULL, floor);
+        let (_, _, b_hi, _) = humidity_haze_style(HAZE_MASS_FULL, HAZE_MASS_FULL, floor);
         assert!(
             b_hi < b_lo,
             "wetter haze should be less blue-grey ({b_hi} vs {b_lo})"
@@ -2140,13 +2149,11 @@ mod tests {
 
     #[test]
     fn haze_ref_does_not_pump_when_a_peak_drains() {
-        // Live-max alone made the whole sky brighten when the wettest tile
-        // rained out. Saturation-anchored ref must stay put (and must not
-        // inflate when a supersat spike is present).
-        let sat = wk_voxel::Humidity::saturation_mass_at_temp(18.0);
-        let before = haze_alpha_ref_target(sat, 18.0);
-        let after = haze_alpha_ref_target(sat * 0.4, 18.0);
-        let spiked = haze_alpha_ref_target(sat * 3.0, 18.0);
+        // Fixed 255 display scale — draining a wet peak must not rescale
+        // the wash, and supersat must not raise the ceiling.
+        let before = haze_alpha_ref_target(400.0, 18.0);
+        let after = haze_alpha_ref_target(80.0, 18.0);
+        let spiked = haze_alpha_ref_target(3_000.0, 18.0);
         assert!(
             (before - after).abs() < 1.0,
             "draining the peak must not rescale the wash ({before} → {after})"
@@ -2155,11 +2162,14 @@ mod tests {
             (spiked - before).abs() < 1.0,
             "supersat must not raise the ceiling ({spiked} vs {before})"
         );
-        let mid = humidity_haze_alpha(sat * 0.4, before);
-        let mid2 = humidity_haze_alpha(sat * 0.4, after);
+        assert!(
+            (before - HAZE_MASS_FULL).abs() < 1.0,
+            "ref stays on the 255 humidity scale (got {before})"
+        );
+        let mid = humidity_haze_alpha(80.0, before);
+        let mid2 = humidity_haze_alpha(80.0, after);
         assert_eq!(mid, mid2, "same mass must keep the same alpha");
-        // EMA falls slowly so a one-tick drain cannot flash the field.
-        let stepped = haze_alpha_ref_step(before, sat * 0.4);
+        let stepped = haze_alpha_ref_step(before, 80.0);
         assert!(
             stepped > before * 0.9,
             "ref should fall slowly (got {stepped} from {before})"

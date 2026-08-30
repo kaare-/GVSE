@@ -285,19 +285,16 @@ Now:
 The `H` overlay used a continuous `18 + norm·42` alpha (~18–60) that
 collapsed to a handful of mid greys, then a wide stepped span that
 **flickered**: opacity was `mass / live_max`, so every time a wet peak
-rained out the whole sky pumped brighter. Saturation-anchored refs fixed
-the pump but (with a raised live-max ceiling and a 2% floor) flattened
-the wash into an almost-invisible film.
+rained out the whole sky pumped brighter. Saturation-at-T as the ceiling
+(~2000–2500) then flattened ordinary moist air into an empty wash.
 
 It now:
 
-- normalizes against **saturation-at-T** only (supersat clamps to full
-  white — no live-max ceiling inflate)
-- eases that reference with an asymmetric EMA (rises fast, falls slow)
+- paints on the **255 humidity scale** (full wash at mass 255; denser
+  tiles clamp white — no live-max / sat ceiling inflate)
+- **skips mass ≤ 25.5** (10% of that 255 scale) so thin vapor stays clear
+- eases the opacity reference with an asymmetric EMA
 - uses continuous alpha across 36–210 so bucket edges do not blink
-- **skips RH ≤ 25.5%** so dry air stays clear; just-above-floor seats
-  remap onto the full alpha span (gamma `< 1`) so moist air reads as a
-  field again
 
 ## Snow in warm air
 
