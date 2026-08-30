@@ -21,7 +21,8 @@ use std::path::PathBuf;
 
 use wk_material::MaterialId;
 use wk_voxel::{
-    apply_condensation_rain_phased, apply_evaporation_into_humidity, humidity_diffuse_due,
+    apply_condensation_rain_phased, apply_evaporation_into_humidity,
+    humidity_diffuse_alpha_per_tick,
     infect_mycelium_with_lineage, step_carbon_budget, tick_with_life, Blueprint, CarbonBudget,
     CarbonConfig, Cell, ChunkCoord, ClimateConfig, CloudConfig, CloudStore, CondensationConfig,
     EvapConfig, FailureConfig, FungiConfig, Humidity, ModuleId, OrganismStore, PerfConfig, Sat,
@@ -288,9 +289,7 @@ fn run_logged(ticks: u64, sample_period: u64, label: &str) -> SimLog {
         );
         log.record_organism(tick_no, &outcome.stats);
 
-        if humidity_diffuse_due(world.tick) {
-            humidity.diffuse(humidity_alpha);
-        }
+        humidity.diffuse(humidity_diffuse_alpha_per_tick(humidity_alpha));
 
         log.maybe_sample(tick_no, &world, &store, Some(&carbon), None);
 

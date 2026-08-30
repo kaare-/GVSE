@@ -69,12 +69,32 @@ impl TileBounds {
 
 /// Cadence for atmospheric diffusion — same numbers as column-GVSE
 /// `SubsystemId::HumidityField` (`period: 20`, `phase: 3`).
+///
+/// The demo no longer *pulses* diffusion on this schedule (that flashed the
+/// H overlay every 20 ticks). Prefer [`humidity_diffuse_alpha_per_tick`]
+/// every physics tick. These constants remain for soak/perf tooling that
+/// still samples the old phase.
 pub const HUMIDITY_DIFFUSE_PERIOD: u64 = 20;
 pub const HUMIDITY_DIFFUSE_PHASE: u64 = 3;
 
-/// True on ticks when humidity diffusion should run.
+/// True on ticks when a legacy period-20 humidity diffusion pulse would run.
 pub fn humidity_diffuse_due(tick: u64) -> bool {
     tick % HUMIDITY_DIFFUSE_PERIOD == HUMIDITY_DIFFUSE_PHASE
+}
+
+/// Per-tick diffusion alpha matching one pulse of `pulse_alpha` every
+/// [`HUMIDITY_DIFFUSE_PERIOD`] ticks.
+///
+/// `1 - (1 - a)^(1/N)` is the compound-equivalent rate, so spreading every
+/// tick does not change long-run mixing strength — it only removes the
+/// visible 20-tick flash.
+pub fn humidity_diffuse_alpha_per_tick(pulse_alpha: f32) -> f32 {
+    let a = pulse_alpha.clamp(0.0, 0.25);
+    if a <= 1e-9 {
+        return 0.0;
+    }
+    let n = HUMIDITY_DIFFUSE_PERIOD as f32;
+    (1.0 - (1.0 - a).powf(1.0 / n)).clamp(0.0, 0.25)
 }
 
 /// A sparse 2D heatmap keyed by tile coordinates. Each tile covers
@@ -1509,6 +1529,20 @@ mod tests {
         assert!(!humidity_diffuse_due(4));
         assert!(humidity_diffuse_due(23));
         assert!(humidity_diffuse_due(43));
+    }
+
+    #[test]
+    fn per_tick_diffuse_alpha_matches_period_pulse() {
+        let pulse = 0.15f32;
+        let per = humidity_diffuse_alpha_per_tick(pulse);
+        assert!(per > 0.0 && per < pulse);
+        // Compound of N small steps ≈ one pulse.
+        let compound = 1.0 - (1.0 - per).powi(HUMIDITY_DIFFUSE_PERIOD as i32);
+        assert!(
+            (compound - pulse).abs() < 1e-5,
+            "compound {compound} should match pulse {pulse}"
+        );
+        assert_eq!(humidity_diffuse_alpha_per_tick(0.0), 0.0);
     }
 
     #[test]

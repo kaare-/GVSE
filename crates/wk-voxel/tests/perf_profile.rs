@@ -22,7 +22,7 @@ use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     apply_snow_wind_drift,
-    find_plant_slot, humidity_diffuse_due, set_parallel_enabled, stamp_world,
+    find_plant_slot, humidity_diffuse_alpha_per_tick, set_parallel_enabled, stamp_world,
     temperature_step_due, tick_with_perf, tick_with_perf_profiled, Blueprint, ClimateConfig,
     CloudConfig, CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity,
     KarstConfig, OrganismPassTimings, OrganismStore, OrographicConfig, PerfConfig, PhaseConfig,
@@ -327,9 +327,7 @@ fn one_stack_tick(
             apply_snow_wind_drift(&mut scene.world, CLIMATE_WIND_VX, HUMIDITY_TILE_COLS);
             apply_flow_erosion(&mut scene.world, &scene.grain);
             wk_voxel::sediment::apply_suspension(&mut scene.world);
-            if humidity_diffuse_due(scene.world.tick) {
-                scene.humidity.diffuse(HUMIDITY_DIFFUSION_ALPHA);
-            }
+            scene.humidity.diffuse(humidity_diffuse_alpha_per_tick(HUMIDITY_DIFFUSION_ALPHA));
             if temperature_step_due(scene.world.tick) {
                 let t = scene.world.tick;
                 scene
@@ -438,9 +436,11 @@ fn one_stack_tick(
             wk_voxel::sediment::apply_suspension(&mut scene.world);
             a.suspension += t0.elapsed();
 
-            if humidity_diffuse_due(scene.world.tick) {
+            {
                 let t0 = Instant::now();
-                scene.humidity.diffuse(HUMIDITY_DIFFUSION_ALPHA);
+                scene
+                    .humidity
+                    .diffuse(humidity_diffuse_alpha_per_tick(HUMIDITY_DIFFUSION_ALPHA));
                 a.humidity_diffuse += t0.elapsed();
                 a.humidity_diffuse_calls += 1;
             }

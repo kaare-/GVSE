@@ -63,7 +63,7 @@ use wk_voxel::{
     apply_weather_rgb, apply_competent_fall_regions, apply_landscape_fall, celestial_local_cfg,
     celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
-    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, plan_active,
+    geotech_map_due, humidity_diffuse_alpha_per_tick, is_daytime_cfg, plan_active,
     pore_wetness_with, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg,
     set_parallel_enabled, step_carbon_budget, support_map_due, temperature_step_due, tick_with_life,
     wake_competent_bodies_all, wake_unsupported_grains,
@@ -703,14 +703,11 @@ async fn main() {
                 // Post-CA dirty halo → incremental column update (S5).
                 scene.geotech.rebuild_smart(&scene.world);
             }
-            // Atmospheric diffusion is periodic (column-GVSE
-            // HumidityField cadence: every 20 ticks). Evap still
-            // deposits every tick; only the spread step is throttled.
-            if humidity_diffuse_due(scene.world.tick) {
-                scene
-                    .humidity
-                    .diffuse(settings.humidity_diffusion_alpha);
-            }
+            // Atmospheric diffusion every tick at a rate equivalent to the
+            // old period-20 pulse — pulsing flashed the H overlay.
+            scene.humidity.diffuse(humidity_diffuse_alpha_per_tick(
+                settings.humidity_diffusion_alpha,
+            ));
             if temperature_step_due(scene.world.tick) {
                 let tick_no = scene.world.tick;
                 scene

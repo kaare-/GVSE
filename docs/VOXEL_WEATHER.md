@@ -298,6 +298,9 @@ It now:
 - draws **pixel-snapped, non-overlapping** cells (the old `cell_px + 0.5`
   translucent overdraw stacked at every column edge into vertical
   corduroy banding)
+- **diffuses every tick** at a compound-equivalent of the old period-20
+  pulse (`humidity_diffuse_alpha_per_tick`) so the field does not flash
+  once every 20 ticks
 
 ## Snow in warm air
 

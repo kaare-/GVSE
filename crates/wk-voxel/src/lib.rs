@@ -158,7 +158,8 @@ pub use shade::{
 };
 pub use heatmap::Heatmap;
 pub use humidity::{
-    humidity_diffuse_due, Humidity, TileBounds, HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,
+    humidity_diffuse_alpha_per_tick, humidity_diffuse_due, Humidity, TileBounds,
+    HUMIDITY_DIFFUSE_PHASE, HUMIDITY_DIFFUSE_PERIOD,
 };
 pub use phase::{
     apply_freeze, apply_phase, deposit_condensate_on_surface, deposit_precip_on_surface,

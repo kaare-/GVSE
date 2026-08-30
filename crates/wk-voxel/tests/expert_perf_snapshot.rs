@@ -9,7 +9,7 @@ use std::time::{Duration, Instant};
 use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
-    find_plant_slot, humidity_diffuse_due, set_parallel_enabled, stamp_world,
+    find_plant_slot, humidity_diffuse_alpha_per_tick, set_parallel_enabled, stamp_world,
     temperature_step_due, tick_with_perf, Blueprint, ClimateConfig, CloudConfig, CloudStore,
     CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity, KarstConfig, OrganismStore,
     OrographicConfig, PerfConfig, PhaseConfig, RainConfig, Temperature, Wind, World,
@@ -145,9 +145,7 @@ fn stack_tick(s: &mut Scene) -> (Duration, Duration, Duration) {
     tick_with_perf(&mut s.world, &s.perf);
     let phys = t_phys.elapsed();
     apply_flow_erosion(&mut s.world, &s.grain);
-    if humidity_diffuse_due(s.world.tick) {
-        s.humidity.diffuse(0.15);
-    }
+    s.humidity.diffuse(humidity_diffuse_alpha_per_tick(0.15));
     if temperature_step_due(s.world.tick) {
         let t = s.world.tick;
         s.temperature.step(Some(&s.world), &s.humidity, t);

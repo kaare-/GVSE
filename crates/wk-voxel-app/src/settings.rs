@@ -1249,7 +1249,7 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Humidity diffuse alpha",
+                        "Humidity diffuse alpha (smoothed / tick)",
                         0.0..0.25,
                         &mut self.humidity_diffusion_alpha,
                     );
