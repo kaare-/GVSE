@@ -248,9 +248,20 @@ Incremental fix (still 4×4 tiles):
    climate wind each tick (Surface/Buried stay put).
 5. **T overlay** — `air_display_range` spans Air+Surface only, padded around
    the mean (≥6 °C), so buried geothermal cannot flatten the sky.
+6. **Column humidity shade** — Surface (and near-ground air) solar is reduced
+   by the peak humidity in the vapor column overhead, not the emptied ground
+   seat. Saturated decks cool the land under them.
 
 Tab → Climate exposes air lapse and near-surface couple. Richer boundary-layer
 diffusivity can wait until these contrasts are playtested.
+
+## Humidity haze steps
+
+The `H` overlay used a continuous `18 + norm·42` alpha that collapsed to a
+handful of visible bands. It now quantizes moisture into **16** opacity steps
+(`HAZE_ALPHA_MIN`…`HAZE_ALPHA_MAX`) so dry air stays faintly readable and wet
+air denser, without resurrecting the hard 12% live-max floor that punched
+4-wide holes around rain.
 
 ## The diurnal cycle works — it needed headroom, not more forcing
 

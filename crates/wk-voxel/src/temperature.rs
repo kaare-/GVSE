@@ -425,8 +425,7 @@ impl Temperature {
                     let mid = hy * tc + tc / 2;
                     let height_above = (mid - surf).max(0);
                     let band = cfg.near_surface_tiles.max(1) * tc;
-                    let shade = (humidity.at_tile(hx, hy) / cfg.hum_shade_ref.max(1.0))
-                        .clamp(0.0, 1.0);
+                    let shade = humidity_shade_factor(humidity, hx, hy, &cfg);
                     // Solar / night cool on the lowest air band only —
                     // heating the whole sky erased near-ground plumes.
                     let in_solar_band = height_above <= tc;
@@ -458,8 +457,10 @@ impl Temperature {
                     n + (target - n) * relax
                 }
                 TileLayer::Surface { watery } => {
-                    let shade =
-                        (humidity.at_tile(hx, hy) / cfg.hum_shade_ref.max(1.0)).clamp(0.0, 1.0);
+                    // Shade from the wettest air *overhead*, not the surface
+                    // seat — rise empties that tile, so same-tile humidity
+                    // never cooled the ground under a saturated deck.
+                    let shade = humidity_shade_factor(humidity, hx, hy, &cfg);
                     let solar = cfg.solar_heat_c
                         * dn.max(0.0)
                         * (1.0 - cfg.cloud_shade * shade)
@@ -614,6 +615,11 @@ impl Temperature {
             }
         }
     }
+}
+
+/// Fraction of solar blocked by humidity in the vapor column above `(hx, hy)`.
+fn humidity_shade_factor(humidity: &Humidity, hx: i32, hy: i32, cfg: &TempConfig) -> f32 {
+    (humidity.column_peak_mass(hx, hy) / cfg.hum_shade_ref.max(1.0)).clamp(0.0, 1.0)
 }
 
 fn tile_thermal_props(
@@ -841,6 +847,47 @@ mod tests {
             "clear {:.1} should warm more than cloudy {:.1}",
             clear.mean(),
             cloudy.mean()
+        );
+    }
+
+    #[test]
+    fn saturated_air_overhead_shades_the_surface() {
+        // Rise empties the ground seat — shade must read the column above.
+        let p = WorldgenParams::default();
+        let sea = p.sea_level_y;
+        let x0: i32 = 8;
+        let mut world = World::new(3);
+        fill_tile_surface(&mut world, x0, sea, MaterialId::Sand, 0);
+        let mut clear = Temperature::with_world_bounds(
+            4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y, 1, 32, sea, false,
+        );
+        let mut shaded = clear.clone();
+        let h_clear = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y);
+        let mut h_wet = h_clear.clone();
+        let surf_hy = sea.div_euclid(4);
+        let hx = x0 / 4;
+        // Empty at the surface seat; wet deck a few tiles up.
+        h_wet.cells.insert((hx, surf_hy), 0.0);
+        h_wet
+            .cells
+            .insert((hx, surf_hy + 3), TempConfig::default().hum_shade_ref * 2.0);
+        clear.refresh_props_cache(
+            Some(&world),
+            &clear.cells.keys().copied().collect::<Vec<_>>(),
+        );
+        shaded.refresh_props_cache(
+            Some(&world),
+            &shaded.cells.keys().copied().collect::<Vec<_>>(),
+        );
+        for i in 0..6 {
+            clear.step(Some(&world), &h_clear, i * TEMP_STEP_PERIOD);
+            shaded.step(Some(&world), &h_wet, i * TEMP_STEP_PERIOD);
+        }
+        let t_clear = clear.at_tile(hx, surf_hy);
+        let t_shaded = shaded.at_tile(hx, surf_hy);
+        assert!(
+            t_clear > t_shaded + 0.2,
+            "wet air above should cool the land ({t_clear:.2} vs {t_shaded:.2})"
         );
     }
 

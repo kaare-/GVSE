@@ -255,6 +255,23 @@ impl Humidity {
     /// Tiles above a surface cell that count as its vapor column.
     pub const VAPOR_COLUMN_TILES: i32 = 12;
 
+    /// Peak humidity mass in the vapor column starting at tile `(hx, hy0)`.
+    ///
+    /// Buoyant rise empties the seat on the ground, so same-tile humidity
+    /// underestimates how wet the air overhead is. Thermal shade and the
+    /// evaporative budget both want this column peak.
+    pub fn column_peak_mass(&self, hx: i32, hy0: i32) -> f32 {
+        let mut peak = 0.0f32;
+        for i in 0..Self::VAPOR_COLUMN_TILES {
+            let hy = hy0 + i;
+            if !self.accepts(hx, hy) {
+                break;
+            }
+            peak = peak.max(self.at_tile(hx, hy));
+        }
+        peak
+    }
+
     /// True when the air column above `(gx, gy)` is already wet enough
     /// that more evaporation would only stockpile sky haze.
     ///

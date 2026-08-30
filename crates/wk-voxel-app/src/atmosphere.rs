@@ -371,6 +371,14 @@ pub fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
     humidity_haze_alpha_cell(mass, max_mass, 0.12)
 }
 
+/// Discrete opacity steps for the `H` humidity overlay.
+///
+/// Continuous float→u8 collapsed to a few visible bands on screen; sixteen
+/// steps keep dry air faintly readable and wet air distinctly denser.
+pub const HAZE_ALPHA_LEVELS: u8 = 16;
+pub const HAZE_ALPHA_MIN: u8 = 8;
+pub const HAZE_ALPHA_MAX: u8 = 110;
+
 /// Per-cell wash. Soft floor — the 12% live-max cut ate neighbour
 /// columns around an emptied tile and turned rain into a 4-wide hole.
 fn humidity_haze_alpha_cell(mass: f32, max_mass: f32, floor: f32) -> u8 {
@@ -381,7 +389,13 @@ fn humidity_haze_alpha_cell(mass: f32, max_mass: f32, floor: f32) -> u8 {
     if norm < floor {
         return 0;
     }
-    (18.0 + norm * 42.0) as u8
+    // Map floor..1 onto levels 1..=HAZE_ALPHA_LEVELS so low moisture still
+    // gets a step instead of jumping straight to mid-alpha.
+    let span = (1.0 - floor).max(1e-6);
+    let t = ((norm - floor) / span).clamp(0.0, 1.0);
+    let level = ((t * HAZE_ALPHA_LEVELS as f32).ceil() as u8).clamp(1, HAZE_ALPHA_LEVELS);
+    let u = level as f32 / HAZE_ALPHA_LEVELS as f32;
+    (HAZE_ALPHA_MIN as f32 + u * (HAZE_ALPHA_MAX - HAZE_ALPHA_MIN) as f32).round() as u8
 }
 
 fn cloud_layer_strength(look: &AtmosphereLookConfig, layer: CloudDepthLayer) -> f32 {
@@ -1976,6 +1990,7 @@ mod tests {
     use super::{
         collect_drop_tops, gather_soft_cloud_srcs, haze_cell_is_drop, haze_column_y0,
         haze_paint_seats, haze_resampled_cells, humidity_haze_alpha, stamp_pixel_cloud_mask,
+        HAZE_ALPHA_MAX, HAZE_ALPHA_MIN,
         CloudDepthLayer,
     };
     use std::collections::HashMap;
@@ -2059,8 +2074,14 @@ mod tests {
     fn haze_ignores_thin_vapor_and_stays_soft() {
         assert_eq!(humidity_haze_alpha(0.0, 100.0), 0);
         assert_eq!(humidity_haze_alpha(5.0, 100.0), 0); // below 12% floor
-        assert!(humidity_haze_alpha(50.0, 100.0) >= 18);
-        assert!(humidity_haze_alpha(100.0, 100.0) <= 70);
+        assert!(humidity_haze_alpha(50.0, 100.0) >= HAZE_ALPHA_MIN);
+        assert!(humidity_haze_alpha(100.0, 100.0) <= HAZE_ALPHA_MAX);
+        // Sixteen steps: mid moisture is clearly lighter than full.
+        assert!(
+            humidity_haze_alpha(30.0, 100.0) < humidity_haze_alpha(60.0, 100.0)
+                && humidity_haze_alpha(60.0, 100.0) < humidity_haze_alpha(100.0, 100.0),
+            "haze alpha should step with moisture"
+        );
     }
 
     #[test]
