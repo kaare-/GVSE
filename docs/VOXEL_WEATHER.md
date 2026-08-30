@@ -228,6 +228,30 @@ And a third caught by a test: averaging over the tiles that *hold vapour* makes 
 lone cloud its own mean, so it never convects, and the reference drifts with
 wherever the vapour is. Average across the world's tile row.
 
+## Thermal boundary layer (incremental)
+
+The T overlay used to look flat because air was a **climate skin extruded
+through the sky**: `skin_temp` ignored `hy`, every air tile got the same
+solar, and air never read the Surface tile's °C — only a weak diffuse leak
+from ground/water. Wind moved humidity, not heat. The overlay ranged the
+whole field (including hot buried rock) over ≥8–28 °C, washing out air's
+few degrees.
+
+Incremental fix (still 4×4 tiles):
+
+1. **Height lapse** — `air_lapse_c` cools the skin with height above the live
+   surface. Mountain `lapse_c` still cools whole columns by elevation.
+2. **Near-surface couple** — air within `near_surface_tiles` of the ground
+   blends toward the Surface tile under it (warm rock / cool water plumes).
+3. **Solar band** — only the lowest air tile gets full solar / night cool.
+4. **Wind advection** — `Temperature::advect_air` shifts Air tiles with
+   climate wind each tick (Surface/Buried stay put).
+5. **T overlay** — `air_display_range` spans Air+Surface only, padded around
+   the mean (≥6 °C), so buried geothermal cannot flatten the sky.
+
+Tab → Climate exposes air lapse and near-surface couple. Richer boundary-layer
+diffusivity can wait until these contrasts are playtested.
+
 ## The diurnal cycle works — it needed headroom, not more forcing
 
 **Superseded conclusion.** Earlier measurements said the day/night swing was

@@ -574,6 +574,12 @@ async fn main() {
             scene
                 .humidity
                 .advect_with_surface(wind_vx, wind_vy, &scene.wind, &scene.world);
+            scene.temperature.advect_air(
+                Some(&scene.world),
+                wind_vx,
+                wind_vy,
+                scene.world.tick,
+            );
             let tick_no = scene.world.tick;
             scene.clouds.step_with_precip(
                 &mut scene.world,
@@ -1404,26 +1410,25 @@ async fn main() {
         }
 
         // Temperature heatmap overlay (blue cold → red hot).
+        // Range Air+Surface only so buried geothermal does not flatten the sky.
         if temp_overlay && overlay_k > 0.01 {
             let tile_px = scene.temperature.tile_cols as f32 * cell_px;
-            let (t_min, t_max) = scene
-                .temperature
-                .cells
-                .values()
-                .copied()
-                .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
-            let t_min = t_min.min(8.0);
-            let t_max = t_max.max(t_min + 4.0).max(28.0);
+            let (t_min, t_max) = scene.temperature.air_display_range(Some(&scene.world));
             for (&(hx, hy), &temp_c) in &scene.temperature.cells {
-                let base_gx = hx * scene.temperature.tile_cols;
-                let base_gy = hy * scene.temperature.tile_cols;
+                if !scene
+                    .temperature
+                    .overlay_tile_visible(Some(&scene.world), hx, hy)
+                {
+                    continue;
+                }
+                let tc = scene.temperature.tile_cols;
+                let base_gx = hx * tc;
+                let base_gy = hy * tc;
                 for &x_copy in x_copies {
                     let sx =
                         origin_x + (base_gx + x_copy * scene.params.width_cols) as f32 * cell_px;
                     let sy = origin_y
-                        - (base_gy - scene.params.bedrock_floor_y + scene.temperature.tile_cols)
-                            as f32
-                            * cell_px;
+                        - (base_gy - scene.params.bedrock_floor_y + tc) as f32 * cell_px;
                     if sx + tile_px < 0.0 || sx > sw || sy + tile_px < 0.0 || sy > sh {
                         continue;
                     }
