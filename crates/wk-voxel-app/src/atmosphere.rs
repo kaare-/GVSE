@@ -28,6 +28,7 @@ const RIDGE_REFRESH_TICKS: u64 = 30;
 const MILD_TEMP_C: f32 = 18.0;
 /// Depth pass for soft cloud banks (see `docs/SKY.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[allow(dead_code)]
 pub enum CloudDepthLayer {
     Far,
     Mid,
