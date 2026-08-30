@@ -255,6 +255,13 @@ fn haze_cell_is_drop_cell(c: wk_voxel::Cell) -> bool {
     falls_through_empty_air(c.material)
 }
 
+fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
+    match world.get_cell(gx, gy) {
+        Some(c) => haze_cell_is_drop_cell(c),
+        None => false,
+    }
+}
+
 /// Highest drop in each column. Haze below that cell is the open path.
 fn collect_drop_tops(world: &World) -> HashMap<i32, i32> {
     let mut tops: HashMap<i32, i32> = HashMap::new();
