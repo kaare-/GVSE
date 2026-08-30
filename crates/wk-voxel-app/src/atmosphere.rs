@@ -692,7 +692,9 @@ fn sample_sky_weather(
 ) -> SkyWeatherParams {
     let wrap = if wrap_x { Some(width_cols) } else { None };
     let precip_cover = precip_cover_fraction(clouds, 0, width_cols, wrap, downpour_mass);
-    let sky_hy_min = sea_level_y.div_euclid(humidity.tile_cols.max(1));
+    // Sky stats: all free-air tiles, not "above sea" — dug basins count.
+    let sky_hy_min = humidity.bounds.map(|b| b.hy_min).unwrap_or(0);
+    let _ = sea_level_y;
     let humidity_mean = humidity_mean_norm(humidity, sky_hy_min);
     let mut t_sum = 0.0f32;
     let mut t_n = 0u32;
@@ -1205,7 +1207,11 @@ pub fn draw_haze_and_wind(
         .fold(0.0f32, f32::max)
         .max(1.0);
     let tc = humidity.tile_cols.max(1);
-    let sky_hy_min = sea_level_y.div_euclid(tc);
+    // Do **not** clamp seats to sea level — that painted a hard horizontal
+    // shelf and hid vapor over dug lakes below sea. Per-column cloud floor
+    // is the only bottom clip.
+    let sky_hy_min = humidity.bounds.map(|b| b.hy_min).unwrap_or(0);
+    let _ = (tc, sea_level_y);
     let drop_tops = collect_drop_tops(world);
     let seats = haze_paint_seats(humidity, sky_hy_min);
     let mut floor_cache: HashMap<i32, i32> = HashMap::new();
@@ -2114,6 +2120,18 @@ mod tests {
         assert!(
             b_hi < b_lo,
             "wetter haze should be less blue-grey ({b_hi} vs {b_lo})"
+        );
+    }
+
+    #[test]
+    fn haze_seats_include_tiles_below_sea_level() {
+        // A dug lake below sea must still paint. Sea was a hard sky_hy_min.
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 320);
+        h.cells.insert((2, 5), 80.0); // y~20 — well below default sea 80
+        let seats = haze_paint_seats(&h, 0);
+        assert!(
+            seats.iter().any(|&(hx, hy)| hx == 2 && hy == 5),
+            "below-sea vapor must remain a paint seat ({seats:?})"
         );
     }
 

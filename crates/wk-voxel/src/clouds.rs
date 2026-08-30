@@ -282,6 +282,8 @@ impl CloudStore {
             sea_level_y,
             cfg.cloud_alt_above_sea,
             temp,
+            Some(world),
+            Some(wind),
         );
         self.rebuild_visuals_from_humidity(humidity, world, wind, sea_level_y, cfg, temp);
     }
@@ -355,9 +357,9 @@ impl CloudStore {
             p.vis_mass += (local - p.vis_mass) * CLOUD_MASS_RELAX;
 
             let sat = sat_at(hx, hy);
-            let target = condensation_level(local, sat, sea_level_y, cfg);
-            p.cruise_fy += (target - p.cruise_fy) * CLOUD_LIFT_RELAX;
             let floor = cloud_floor_y(world, wind, p.fx);
+            let target = condensation_level(local, sat, floor.round() as i32, cfg);
+            p.cruise_fy += (target - p.cruise_fy) * CLOUD_LIFT_RELAX;
             let lifted = p.cruise_fy.max(floor + cfg.ridge_clearance);
             p.on_ridge = lifted > p.cruise_fy + 1.0;
             p.deform = if p.on_ridge { 0.25 } else { 0.0 };
@@ -372,12 +374,14 @@ impl CloudStore {
         if self.parcels.len() >= cap {
             return;
         }
-        let sky_hy_min = (sea_level_y + cfg.coag_min_above_sea).div_euclid(tc);
+        let _ = sea_level_y;
         let mut hits: Vec<(f32, i32, i32)> = humidity
             .cells
             .iter()
             .filter_map(|(&(hx, hy), &mass)| {
-                if hy < sky_hy_min || mass < cfg.coag_min_hum {
+                // No sea-level shelf: dug lakes below sea must still seed clouds.
+                // Floor clearance happens when the parcel is placed.
+                if mass < cfg.coag_min_hum {
                     return None;
                 }
                 Some((mass, hx, hy))
@@ -407,8 +411,8 @@ impl CloudStore {
             }
             occupied[band_of(cx as f32)] = true;
             let sat = sat_at(hx, hy);
-            let cruise = condensation_level(mass, sat, sea_level_y, cfg);
             let floor = cloud_floor_y(world, wind, cx as f32);
+            let cruise = condensation_level(mass, sat, floor.round() as i32, cfg);
             let fy = cruise.max(floor + cfg.ridge_clearance);
             // Spawn at the local mass rather than ramping from zero, so a single
             // call still produces a usable deck.
@@ -466,12 +470,12 @@ impl CloudStore {
         let tc = humidity.tile_cols.max(1);
         let cap = cfg.max_parcels.max(1);
         let width = wind.width_cols.max(1);
-        let sky_hy_min = (sea_level_y + cfg.coag_min_above_sea).div_euclid(tc);
+        let _ = sea_level_y;
         let mut hits: Vec<(f32, i32, i32)> = humidity
             .cells
             .iter()
             .filter_map(|(&(hx, hy), &mass)| {
-                if hy < sky_hy_min || mass < cfg.coag_min_hum {
+                if mass < cfg.coag_min_hum {
                     return None;
                 }
                 Some((mass, hx, hy))
@@ -489,8 +493,8 @@ impl CloudStore {
                     .unwrap_or(Humidity::MAX_MASS_PER_TILE)
                     .max(1.0);
                 let cx = (hx * tc + tc / 2) as f32;
-                let cruise = condensation_level(mass, sat, sea_level_y, cfg);
                 let floor = cloud_floor_y(world, wind, cx);
+                let cruise = condensation_level(mass, sat, floor.round() as i32, cfg);
                 let density = (mass / sat).clamp(0.0, 1.5);
                 CloudSample {
                     fx: cx,
@@ -507,11 +511,11 @@ impl CloudStore {
 ///
 /// See [`Humidity::lifting_condensation_y`] — shared with buoyant rise so the
 /// visual deck and the vapour field climb to the same weather-dependent base.
-fn condensation_level(mass: f32, sat: f32, sea_level_y: i32, cfg: &CloudConfig) -> f32 {
+fn condensation_level(mass: f32, sat: f32, base_y: i32, cfg: &CloudConfig) -> f32 {
     // Recover an equivalent temperature from sat so the shared helper agrees
     // with callers that already computed saturation mass.
     let temp_c = sat_to_temp_c(sat);
-    Humidity::lifting_condensation_y(mass, temp_c, sea_level_y, cfg.cloud_alt_above_sea)
+    Humidity::lifting_condensation_y(mass, temp_c, base_y, cfg.cloud_alt_above_sea)
 }
 
 /// Inverse of the cheap Clausius scale in [`Humidity::saturation_mass_at_temp`].

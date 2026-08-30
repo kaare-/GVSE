@@ -177,21 +177,20 @@ impl Humidity {
 
     /// Lifting condensation level (world-y): dewpoint depression → cloud base.
     ///
-    /// `cloud_alt_above_sea` is a **scale**, not a hard shelf. Moist/cool air
-    /// condenses low; dry/warm air climbs further. Used by buoyant rise and
-    /// the visual deck so rain is not pinned to `sea + alt`.
+    /// `base_y` is the local atmosphere floor (live land or water top) — not
+    /// necessarily sea level. `cloud_alt_above_sea` is a **scale** above that
+    /// floor. Moist/cool air condenses low; dry/warm air climbs further.
     pub fn lifting_condensation_y(
         mass: f32,
         temp_c: f32,
-        sea_level_y: i32,
+        base_y: i32,
         cloud_alt_above_sea: i32,
     ) -> f32 {
         let sat = Self::saturation_mass_at_temp(temp_c).max(1.0);
         let deficit = (1.0 - mass / sat).clamp(0.0, 1.0);
-        // Same span the visual deck used; kept here so physics and paint agree.
         const MIN_FRAC: f32 = 0.55;
         const SPAN_FRAC: f32 = 0.90;
-        sea_level_y as f32
+        base_y as f32
             + cloud_alt_above_sea.max(1) as f32 * (MIN_FRAC + SPAN_FRAC * deficit)
     }
 
@@ -493,20 +492,35 @@ impl Humidity {
     /// Weather-aware rise: stop at the per-column lifting condensation
     /// level and leave a near-saturation residual so the surface is not
     /// stripped into a hard empty band under a fixed `sea + alt` shelf.
+    ///
+    /// When `world` / `wind` are set, each column's LCL is measured above the
+    /// **live** land/water top — a dug lake gets vapor right above it instead
+    /// of being emptied toward a sea-level shelf.
     pub fn buoyant_rise_weather(
         &mut self,
         fraction: f32,
         sea_level_y: i32,
         cloud_alt_above_sea: i32,
         temp: Option<&crate::temperature::Temperature>,
+        world: Option<&crate::grid::World>,
+        wind: Option<&crate::wind::Wind>,
     ) {
         let tc = self.tile_cols.max(1);
-        // Dry-air LCL is the hard ceiling (same span as lifting_condensation_y).
-        let max_hy = ((sea_level_y as f32
-            + cloud_alt_above_sea.max(1) as f32 * 1.45)
-            / tc as f32)
-            .ceil() as i32;
-        self.buoyant_rise_thermal_inner(fraction, max_hy, temp, Some((sea_level_y, cloud_alt_above_sea)));
+        let max_hy = match self.bounds {
+            Some(b) => b.hy_max,
+            None => ((sea_level_y as f32
+                + cloud_alt_above_sea.max(1) as f32 * 1.45)
+                / tc as f32)
+                .ceil() as i32,
+        };
+        self.buoyant_rise_thermal_inner(
+            fraction,
+            max_hy,
+            temp,
+            Some((sea_level_y, cloud_alt_above_sea)),
+            world,
+            wind,
+        );
     }
 
     /// [`Self::buoyant_rise`] scaled by the local lapse: warm air under
@@ -531,7 +545,7 @@ impl Humidity {
         max_hy: i32,
         temp: Option<&crate::temperature::Temperature>,
     ) {
-        self.buoyant_rise_thermal_inner(fraction, max_hy, temp, None);
+        self.buoyant_rise_thermal_inner(fraction, max_hy, temp, None, None, None);
     }
 
     fn buoyant_rise_thermal_inner(
@@ -540,6 +554,8 @@ impl Humidity {
         max_hy: i32,
         temp: Option<&crate::temperature::Temperature>,
         lcl: Option<(i32, i32)>,
+        world: Option<&crate::grid::World>,
+        wind: Option<&crate::wind::Wind>,
     ) {
         let fraction = fraction.clamp(0.0, 0.45);
         if fraction == 0.0 || self.cells.is_empty() {
@@ -588,12 +604,16 @@ impl Humidity {
             if !self.accepts(hx, dest) {
                 continue;
             }
-            // Per-column LCL: moist air stops low, dry air may climb to max_hy.
+            // Per-column LCL above the local land/water top when known.
             if let Some((sea, alt)) = lcl {
                 let t_c = temp
                     .map(|t| t.at_tile(hx, hy))
                     .unwrap_or(18.0);
-                let lcl_y = Self::lifting_condensation_y(mass, t_c, sea, alt);
+                let base_y = match (world, wind) {
+                    (Some(w), Some(wn)) => self.atmosphere_base_y(w, wn, hx),
+                    _ => sea,
+                };
+                let lcl_y = Self::lifting_condensation_y(mass, t_c, base_y, alt);
                 let lcl_hy = (lcl_y / tc as f32).floor() as i32;
                 if hy >= lcl_hy {
                     continue;
@@ -728,7 +748,8 @@ impl Humidity {
         });
     }
 
-    /// First tile row whose centre sits in free air above the live crest.
+    /// First tile row whose centre sits in free air above the live crest
+    /// (rock or standing water — same idea as cloud floor).
     fn free_air_hy(
         &self,
         wind: &crate::wind::Wind,
@@ -736,16 +757,37 @@ impl Humidity {
         hx: i32,
     ) -> i32 {
         let tc = self.tile_cols.max(1);
-        let gx = hx * tc + tc / 2;
-        let surf = crate::worldgen::live_surface_at(
+        let base = self.atmosphere_base_y(world, wind, hx);
+        // mid = hy*tc + tc/2 > base  ⇒  hy >= ceil((base+1 - tc/2) / tc)
+        ((base + 1 - tc / 2).max(0) + tc - 1) / tc
+    }
+
+    /// Live land or water top for column `hx` (not sea level).
+    fn atmosphere_base_y(
+        &self,
+        world: &crate::grid::World,
+        wind: &crate::wind::Wind,
+        hx: i32,
+    ) -> i32 {
+        let tc = self.tile_cols.max(1);
+        let gx = world.wrap_x(hx * tc + tc / 2);
+        let mut y = crate::worldgen::live_surface_at(
             world,
             wind.seed,
             gx,
             wind.sea_level_y,
             wind.width_cols,
         );
-        // mid = hy*tc + tc/2 > surf  ⇒  hy >= ceil((surf+1 - tc/2) / tc)
-        ((surf + 1 - tc / 2).max(0) + tc - 1) / tc
+        // Climb standing water / ice so a dug lake's free air starts above
+        // the waterline, not at the rock bed under it.
+        for _ in 0..96 {
+            match world.get_cell(gx, y + 1) {
+                Some(c) if c.material != wk_material::MaterialId::Air => y += 1,
+                Some(c) if c.sat.0 > crate::GRAIN_REPOSE_HAZE_MAX => y += 1,
+                _ => break,
+            }
+        }
+        y
     }
 
     /// Move any mass still parked inside the hill up to free air.
@@ -1214,7 +1256,7 @@ mod tests {
             *v = 18.0;
         }
         for _ in 0..30 {
-            h.buoyant_rise_weather(0.12, sea, 48, Some(&t));
+            h.buoyant_rise_weather(0.12, sea, 48, Some(&t), None, None);
         }
         let left = h.at_tile(hx, surf_hy);
         assert!(
@@ -1250,8 +1292,8 @@ mod tests {
             *v = 18.0;
         }
         for _ in 0..80 {
-            moist.buoyant_rise_weather(0.20, sea, alt, Some(&t));
-            dry.buoyant_rise_weather(0.20, sea, alt, Some(&t));
+            moist.buoyant_rise_weather(0.20, sea, alt, Some(&t), None, None);
+            dry.buoyant_rise_weather(0.20, sea, alt, Some(&t), None, None);
         }
         let top = |h: &Humidity| {
             h.cells

@@ -264,6 +264,10 @@ Two artificial bands in the H overlay came from the same pump:
    humidity no matter how hard the ocean evaporated.
 2. **Rain shelf (~y225 when alt is large)** — that same fixed deck was where
    condensation nucleated. `cloud_alt` was a shelf height, not a weather scale.
+3. **Sea-level paint floor** — `H` skipped every tile below `sea`, so even when
+   vapor sat at the waterline (or over a dug lake) the overlay drew a hard
+   horizontal shelf. Bottom clip is per-column cloud floor only now; LCL / free
+   air are measured above the live land **or water** top.
 
 Now:
 
