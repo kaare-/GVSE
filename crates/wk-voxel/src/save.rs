@@ -30,9 +30,8 @@ pub const SIM_SAVE_DIR: &str = "saves";
 pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// Bump when the postcard shape changes incompatibly.
 ///
-/// `Cell` is a fixed 4-byte layout (`material`, `sat`, `flags`, `_pad`).
-/// Widening `_pad` or adding fields is a schema bump and needs a
-/// migration path for `.gvsesim` files on disk.
+/// `Cell` was widened by `pore` in v13. Old voxel saves are intentionally
+/// rejected; F5 overwrites the active slot with the new format.
 ///
 /// v2: `World.hydro` ([`wk_material::HydroOverrides`]) saved with the sim.
 /// v3: `MaterialId::Soil` + mycelium intensity in `Cell::_pad` on Organic
@@ -47,7 +46,10 @@ pub const SIM_SAVE_EXT: &str = "gvsesim";
 /// v10: [`World::sym_net_flow`] strain-keyed symbiont exchange counters.
 /// v11: sym_net_flow gains harvest (water_in / sugar_out) ledger fields.
 /// v12: [`World::mycelium_strain_lineage`] strain→treaty map for strain trade.
-pub const SIM_SCHEMA_VERSION: u32 = 12;
+/// v13: `Cell::pore` + ranged `HydroOverrides`; no migration by design.
+/// v14: [`World::dissolved`] mineral load (karst became a transport loop).
+/// v15: [`World::suspended`] fine sediment (clay travels as suspension).
+pub const SIM_SCHEMA_VERSION: u32 = 15;
 
 /// Serializable capture of a running voxel demo scene.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -94,13 +96,17 @@ impl WorldV5 {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
+            dissolved: HashMap::new(),
+            suspended: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
+            competent_level_vacated: Default::default(),
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         }
     }
 }
@@ -136,13 +142,17 @@ impl WorldV6 {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
+            dissolved: HashMap::new(),
+            suspended: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
+            competent_level_vacated: Default::default(),
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         }
     }
 }
@@ -183,13 +193,17 @@ impl WorldV7 {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: HashMap::new(),
+            dissolved: HashMap::new(),
+            suspended: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
+            competent_level_vacated: Default::default(),
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         };
         // Promote sole ownership → one share matching current `_pad`.
         for ((gx, gy), strain) in sole {
@@ -198,9 +212,7 @@ impl WorldV7 {
                 .map(|c| c.mycelium())
                 .unwrap_or(1)
                 .max(1);
-            world
-                .mycelium_strains
-                .insert((gx, gy), vec![(strain, amt)]);
+            world.mycelium_strains.insert((gx, gy), vec![(strain, amt)]);
         }
         world
     }
@@ -241,13 +253,17 @@ impl WorldV8 {
             mycelium_strains: self.mycelium_strains,
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: HashMap::new(),
+            dissolved: HashMap::new(),
+            suspended: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
+            competent_level_vacated: Default::default(),
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         }
     }
 }
@@ -291,13 +307,17 @@ impl WorldV11 {
             mycelium_strains: self.mycelium_strains,
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: self.mycelium_energy,
+            dissolved: HashMap::new(),
+            suspended: HashMap::new(),
             sym_net_flow: self.sym_net_flow,
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
+            competent_level_vacated: Default::default(),
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         }
     }
 }
@@ -382,6 +402,8 @@ impl WorldV10 {
             mycelium_strains: self.mycelium_strains,
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: self.mycelium_energy,
+            dissolved: HashMap::new(),
+            suspended: HashMap::new(),
             sym_net_flow: self
                 .sym_net_flow
                 .into_iter()
@@ -390,9 +412,11 @@ impl WorldV10 {
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
+            competent_level_vacated: Default::default(),
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         }
     }
 }
@@ -449,13 +473,17 @@ impl WorldV9 {
             mycelium_strains: self.mycelium_strains,
             next_mycelium_strain_id: self.next_mycelium_strain_id.max(1),
             mycelium_energy: self.mycelium_energy,
+            dissolved: HashMap::new(),
+            suspended: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
             competent_moved_cells: Vec::new(),
+            competent_level_vacated: Default::default(),
             competent_wake: Vec::new(),
             competent_settled: Default::default(),
             chunk_cache_id: Default::default(),
+            buoyant_flags_ready: false,
         }
     }
 }
@@ -678,8 +706,7 @@ impl SimSnapshot {
                 carbon: old.carbon,
             });
         }
-        let old: SimSnapshotV4 =
-            postcard::from_bytes(bytes).map_err(|e| e.to_string())?;
+        let old: SimSnapshotV4 = postcard::from_bytes(bytes).map_err(|e| e.to_string())?;
         Ok(Self {
             schema_version: SIM_SCHEMA_VERSION,
             params: old.params,
@@ -815,7 +842,7 @@ mod tests {
         assert!(loaded.world.get_cell(3, 5).unwrap().sat.is_full());
         assert_eq!(
             loaded.world.hydro.slots[MaterialId::Sand as usize].porosity,
-            Some(90)
+            Some(wk_material::HydroRange::fixed(90))
         );
         assert_eq!(loaded.carbon.atmosphere, 777.0);
         assert_eq!(loaded.carbon.dissolved, 88.0);

@@ -4,8 +4,9 @@
 use macroquad::prelude::*;
 use wk_material::{MaterialId, MaterialRegistry};
 use wk_voxel::{
-    is_fungus, is_land_plant, soft_litter_at, Atom, Cell, Corpse, GeotechMap, Humidity,
-    Temperature, World, CORPSE_SETTLE_LAND_TICKS, CORPSE_SETTLE_WATER_TICKS,
+    is_fungus, is_land_plant, permeability_cell, soft_litter_at, water_capacity_cell, Atom, Cell,
+    Corpse, GeotechMap, Humidity, Temperature, World, CORPSE_SETTLE_LAND_TICKS,
+    CORPSE_SETTLE_WATER_TICKS,
 };
 
 fn material_name(mat: MaterialId) -> &'static str {
@@ -15,6 +16,10 @@ fn material_name(mat: MaterialId) -> &'static str {
         MaterialId::Limestone => "limestone",
         MaterialId::LooseRock => "looserock",
         MaterialId::LooseLimestone => "looselimestone",
+        MaterialId::Flowstone => "flowstone",
+        MaterialId::Bentonite => "bentonite",
+        MaterialId::Sandstone => "sandstone",
+        MaterialId::Conglomerate => "conglomerate",
         MaterialId::Gravel => "gravel",
         MaterialId::Sand => "sand",
         MaterialId::Clay => "clay",
@@ -214,18 +219,41 @@ pub fn draw_block_inspector(
             // Pore fill is relative to material capacity (porosity for
             // solids, 255 for Air) — not always /255. Stone at sat=20
             // with porosity 20 is fully saturated, not "8% wet".
-            let cap = world.water_capacity(c.material);
+            let cap = water_capacity_cell(c, &world.hydro);
             let pct = if cap > 0 {
                 (c.sat.0 as f32 / cap as f32) * 100.0
             } else {
                 0.0
             };
             lines.push(format!("sat={}/{cap} ({pct:.0}% of capacity)", c.sat.0));
-            let props = MaterialRegistry::props_with(c.material, &world.hydro);
+            let ranges = MaterialRegistry::hydrology_with(c.material, &world.hydro);
             lines.push(format!(
-                "porosity={}  permeability={}",
-                props.porosity, props.permeability
+                "pore={}  porosity={} ({}–{})",
+                c.pore, cap, ranges.porosity.min, ranges.porosity.max
             ));
+            lines.push(format!(
+                "permeability={} ({}–{})",
+                permeability_cell(c, &world.hydro),
+                ranges.permeability.min,
+                ranges.permeability.max
+            ));
+            let load = wk_voxel::mineral::dissolved_at(world, gx, gy);
+            if load > 0 {
+                lines.push(format!(
+                    "dissolved mineral={load} (holds {})",
+                    wk_voxel::mineral::carrying_capacity(world, gx, gy)
+                ));
+            }
+            let silt = wk_voxel::sediment::suspended_at(world, gx, gy);
+            if silt > 0 {
+                // Both ceilings, because which one applies is the whole point:
+                // the load drops when the water stops moving.
+                lines.push(format!(
+                    "suspended silt={silt} (moving holds {}, slack {})",
+                    wk_voxel::sediment::carrying_capacity(world, gx, gy, true),
+                    wk_voxel::sediment::carrying_capacity(world, gx, gy, false)
+                ));
+            }
             lines.push(format!("flags=0x{:02X}", c.flags.0));
             if c.mycelium() > 0 {
                 let shares = wk_voxel::mycelium_shares_at(world, gx, gy);
@@ -295,7 +323,9 @@ pub fn draw_block_inspector(
         }
         None => lines.push("cell: (empty / unstamped)".into()),
     }
-    lines.push(format!("temp={temp_c:.1}C  humidity={hum:.1}  tile=({hx},{hy})"));
+    lines.push(format!(
+        "temp={temp_c:.1}C  humidity={hum:.1}  tile=({hx},{hy})"
+    ));
     if let Some(g) = geotech.at_cell(gx, gy) {
         lines.push(format!(
             "geotech demand={} hydro={} wet={:.0}% score={:.2} sv={:.1}",
@@ -410,7 +440,10 @@ pub fn draw_block_inspector(
     } else if let Some((id, corpse)) = corpse {
         lines.push("--- corpse ---".into());
         let habit = if corpse.land { "land" } else { "plankton" };
-        lines.push(format!("Corpse #{id}  habit={habit}  anchor=({}, {})", corpse.gx, corpse.gy));
+        lines.push(format!(
+            "Corpse #{id}  habit={habit}  anchor=({}, {})",
+            corpse.gx, corpse.gy
+        ));
         lines.push(format!(
             "ticks={}  settled={}/{}  mods={}",
             corpse.ticks,

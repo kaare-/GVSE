@@ -5632,6 +5632,85 @@ mod tests {
     }
 
     #[test]
+    fn plant_size_is_limited_by_cost_not_by_the_ceiling() {
+        // "Set plants free": the safety ceilings must not be what decides a
+        // plant's shape. A well-lit, well-watered river plant should settle at
+        // an energy-limited size — upkeep rises linearly with tissue while a
+        // self-shading canopy earns less per new leaf — and stop well short of
+        // the caps on its own.
+        use crate::rules::tick;
+        let mut w = World::new(7);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.sat = Sat(180);
+            w.set_cell(x, 1, sand);
+            w.set_cell(x, 2, sand);
+            for y in 3..=5 {
+                w.set_cell(x, y, Cell::water());
+            }
+            for y in 6..20 {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        let climate = ClimateConfig::default();
+        let mut carbon = CarbonBudget::default();
+        let carbon_cfg = CarbonConfig::default();
+        let mut g = Genome::default();
+        g.alloc_stem = 0.45;
+        g.alloc_leaf = 0.45;
+        g.alloc_root = 0.35;
+        let mut store = OrganismStore::new();
+        assert!(store.spawn_blueprint(&w, 4, 3, minimal_plant_body(), 40.0, g));
+
+        let caps = PlantGrowthCaps::default();
+        let mut roots = 0usize;
+        let mut stems = 0usize;
+        let mut photos = 0usize;
+        for t in 0..(climate.total_ticks() * 6) {
+            tick(&mut w);
+            let _ = store.step_with_carbon(
+                &mut w,
+                t,
+                &climate,
+                None,
+                0.2,
+                None,
+                Some(&mut carbon),
+                &carbon_cfg,
+            );
+            if let Some(a) = store.atoms.first() {
+                roots = roots.max(crate::plant::root_count(a));
+                stems = stems.max(
+                    a.body.iter().filter(|(_, _, m)| *m == ModuleId::Stem).count(),
+                );
+                photos = photos.max(a.photosystem_count());
+            }
+        }
+        assert!(!store.is_empty(), "the plant should survive the run");
+        // It must actually use the freedom — past the old 12-photo cap.
+        assert!(
+            photos > 12 || stems > 10 || roots > 16,
+            "with cost as the limit a river plant should outgrow the old caps \
+             (roots={roots} stems={stems} photos={photos})"
+        );
+        // ...but stop on its own account, not by hitting the ceiling.
+        assert!(
+            roots < caps.max_roots,
+            "roots hit the safety ceiling — cost is not limiting growth (roots={roots})"
+        );
+        assert!(
+            stems < caps.max_stems,
+            "stems hit the safety ceiling — cost is not limiting growth (stems={stems})"
+        );
+        assert!(
+            photos < caps.max_photos,
+            "photosystems hit the safety ceiling — cost is not limiting growth (photos={photos})"
+        );
+    }
+
+    #[test]
     fn plant_survives_several_days_on_moist_sand() {
         // Growing plants used to sip sand dry → dormancy → night energy death
         // within ~2 climate cycles. Comfort-gated root drink should keep a

@@ -215,9 +215,9 @@ pub fn deposit_shifted_cells(
 /// Write a loose cell into an Air slot, keeping any free water that was there.
 fn place_soft(world: &mut World, x: i32, y: i32, mut cell: Cell) {
   if let Some(dst) = world.get_cell(x, y) {
-    if dst.sat.0 > 0 && crate::cell::water_capacity(cell.material) > 0 {
+    if dst.sat.0 > 0 && crate::cell::water_capacity_cell(cell, &world.hydro) > 0 {
       // Wet slot: let the grain soak up what it can hold.
-      let cap = crate::cell::water_capacity(cell.material) as u32;
+      let cap = crate::cell::water_capacity_cell(cell, &world.hydro) as u32;
       let take = cap.saturating_sub(cell.sat.0 as u32).min(dst.sat.0 as u32);
       cell.sat = Sat((cell.sat.0 as u32 + take) as u8);
     }

@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 
 /// Number of [`MaterialId`] variants (shared by both stacks).
-pub const MATERIAL_COUNT: usize = 14;
+pub const MATERIAL_COUNT: usize = 18;
 /// Horizontal cell / column width in metres (shared scale).
 pub const SAMPLE_WIDTH_M: f32 = 0.25;
 
@@ -56,20 +56,57 @@ pub enum MaterialId {
     /// [`Limestone`] roof collapse and face shear — distinct from
     /// [`LooseRock`] (silicate cobbles) so karst cliffs shed pale scree.
     LooseLimestone = 13,
+    /// **Flowstone** — carbonate precipitated back out of groundwater
+    /// (travertine / tufa / cave flowstone).
+    ///
+    /// Chemically the same family as [`Limestone`] but a *deposit*, not a bed:
+    /// dense and tight where it forms, and worth telling apart on sight so
+    /// spring mounds and sealed conduits are readable rather than looking like
+    /// native rock. Still soluble, so it can redissolve.
+    Flowstone = 14,
+    /// **Bentonite** — swelling clay, effectively an aquitard.
+    ///
+    /// Mechanically a clay (plastic, reposes, slumps when wet), but roughly an
+    /// order of magnitude tighter than [`Clay`] and holding almost everything
+    /// it takes on. Its job is to *stop* water: a real confining layer is what
+    /// makes a confined aquifer confined, and so what makes artesian head and
+    /// perched tables happen by design instead of by accident.
+    Bentonite = 15,
+    /// **Sandstone** — [`Sand`] cemented by carbonate precipitated out of
+    /// groundwater.
+    ///
+    /// Exists to solve a structural problem, not for variety: loose sediment
+    /// cannot hold a channel, because repose and grain settle destroy any void
+    /// the moment it opens. Conduits could therefore only ever form in
+    /// competent rock — never in the near-surface layer where water actually
+    /// runs. Cementing sediment gives channels somewhere to persist.
+    ///
+    /// Clastic, so it stays a decent aquifer, unlike tight silicate stone. Its
+    /// cement is carbonate, so it dissolves back to [`Sand`] rather than to a
+    /// void: the grains do not go anywhere.
+    Sandstone = 16,
+    /// **Conglomerate** — cemented [`Gravel`] / [`LooseRock`]: coarse clasts in
+    /// a carbonate matrix. Same purpose and reversibility as [`Sandstone`],
+    /// coarser and more permeable.
+    Conglomerate = 17,
 }
 
 impl MaterialId {
     /// Ground-forming solids (never fluid, never phase-changes at the
     /// world's normal temperature range).
-    pub const ALL_SOLIDS: [MaterialId; 9] = [
+    pub const ALL_SOLIDS: [MaterialId; 13] = [
         MaterialId::Bedrock,
         MaterialId::Stone,
         MaterialId::Limestone,
         MaterialId::LooseRock,
         MaterialId::LooseLimestone,
+        MaterialId::Flowstone,
+        MaterialId::Sandstone,
+        MaterialId::Conglomerate,
         MaterialId::Gravel,
         MaterialId::Sand,
         MaterialId::Clay,
+        MaterialId::Bentonite,
         MaterialId::Soil,
     ];
 
@@ -89,6 +126,10 @@ impl MaterialId {
             11 => Some(MaterialId::Limestone),
             12 => Some(MaterialId::Soil),
             13 => Some(MaterialId::LooseLimestone),
+            14 => Some(MaterialId::Flowstone),
+            15 => Some(MaterialId::Bentonite),
+            16 => Some(MaterialId::Sandstone),
+            17 => Some(MaterialId::Conglomerate),
             _ => None,
         }
     }
@@ -108,15 +149,20 @@ impl MaterialId {
                 | MaterialId::Limestone
                 | MaterialId::LooseRock
                 | MaterialId::LooseLimestone
+                | MaterialId::Flowstone
+                | MaterialId::Sandstone
+                | MaterialId::Conglomerate
                 | MaterialId::Gravel
                 | MaterialId::Sand
                 | MaterialId::Clay
+                | MaterialId::Bentonite
                 | MaterialId::Soil
                 | MaterialId::Organic
                 | MaterialId::Snow
                 | MaterialId::Ice
         )
     }
+
 
     pub fn is_erodible(self) -> bool {
         !matches!(
@@ -205,15 +251,128 @@ pub struct MaterialProps {
     /// before collapse. 0 = collapses immediately (sand/clay);
     /// `f32::INFINITY` = never collapses as a roof (bedrock).
     pub roof_span_max_m: f32,
+    /// **Field capacity** — the share of pore space (0–255, as a fraction of
+    /// [`Self::porosity`]) held against gravity by capillary action.
+    ///
+    /// Only saturation *above* this drains downward; the rest stays put until
+    /// roots or evaporation take it. This is the counterforce to gravity: with
+    /// no retention the only stable state is a saturated wedge growing up from
+    /// bedrock, because every cell eventually drains into the one below.
+    ///
+    /// It is also what makes a lens behave like its material — clay perches
+    /// water, gravel lets it straight through — which is the visible difference
+    /// per-cell pore variation was supposed to produce.
+    #[serde(default = "default_field_capacity")]
+    pub field_capacity: u8,
+}
+
+/// Mid-range retention for materials predating the field (~20%).
+fn default_field_capacity() -> u8 {
+    51
 }
 
 pub struct MaterialRegistry;
 
-/// Per-material hydrology tuning (permeability / porosity).
+/// Inclusive `0..=255` material-property range. A cell's stored pore
+/// coordinate selects one value inside the range.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HydroRange {
+    pub min: u8,
+    pub max: u8,
+}
+
+impl HydroRange {
+    pub const fn new(min: u8, max: u8) -> Self {
+        if min <= max {
+            Self { min, max }
+        } else {
+            Self { min: max, max: min }
+        }
+    }
+
+    pub const fn fixed(value: u8) -> Self {
+        Self {
+            min: value,
+            max: value,
+        }
+    }
+
+    /// Select a value with `pore=0` at `min`, `255` at `max`.
+    #[inline]
+    pub fn sample(self, pore: u8) -> u8 {
+        let span = self.max as u16 - self.min as u16;
+        (self.min as u16 + (span * pore as u16 + 127) / 255) as u8
+    }
+
+    /// Fracture sampling: `min` is the **matrix** value, reached by the whole
+    /// lower half of the pore domain; the upper half ramps quadratically to
+    /// `max`.
+    ///
+    /// Used for permeability. Two properties matter:
+    ///
+    /// - `pore = 128` (the constructor default) returns exactly `min`, so
+    ///   painted and constructed cells keep the authored matrix value. A linear
+    ///   sample over an upward-widened range would silently make every default
+    ///   cell far more permeable.
+    /// - Most of the domain is matrix and only a thin tail is conductive, which
+    ///   is how rock actually behaves — tight almost everywhere, with flow
+    ///   concentrated in sparse fractures.
+    #[inline]
+    pub fn sample_fracture(self, pore: u8) -> u8 {
+        if pore <= 128 || self.max <= self.min {
+            return self.min;
+        }
+        // Remap 129..=255 onto 0..=255, then square to weight the tail.
+        let t = ((pore as u32 - 128) * 255) / 127;
+        let sq = (t * t) / 255;
+        let span = (self.max - self.min) as u32;
+        (self.min as u32 + (span * sq) / 255).min(self.max as u32) as u8
+    }
+
+    #[inline]
+    pub fn midpoint(self) -> u8 {
+        ((self.min as u16 + self.max as u16 + 1) / 2) as u8
+    }
+}
+
+/// Per-material hydrology ranges selected by each voxel's pore coordinate.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterialHydrology {
+    pub permeability: HydroRange,
+    pub porosity: HydroRange,
+}
+
+/// Permeability range: matrix at the floor, fractures in the tail.
+///
+/// Keeps the table value as the *minimum* so typical rock is no leakier than
+/// before, and lifts the ceiling to roughly 8× (clamped) so the rare
+/// high-`pore` cell conducts like a fracture. For stone that is rate 1 in the
+/// matrix and ~5 in a fracture — the contrast a symmetric band could not reach.
+const fn fracture_range(matrix: u8) -> HydroRange {
+    if matrix == 0 {
+        return HydroRange::fixed(0);
+    }
+    // Saturating ×8 without overflow, with a floor so very tight rock still
+    // gets a usable spread rather than one rate bucket.
+    let ceiling = if matrix > 31 { 255 } else { matrix * 8 };
+    let ceiling = if ceiling < 40 { 40 } else { ceiling };
+    HydroRange::new(matrix, ceiling)
+}
+
+const fn centered_range(mid: u8) -> HydroRange {
+    if mid == 0 {
+        return HydroRange::fixed(0);
+    }
+    // ±25%, with at least four points of texture for tight rock.
+    let half = if mid / 4 > 4 { mid / 4 } else { 4 };
+    HydroRange::new(mid.saturating_sub(half), mid.saturating_add(half))
+}
+
+/// Per-material hydrology tuning (permeability / porosity ranges).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HydroSlot {
-    pub permeability: Option<u8>,
-    pub porosity: Option<u8>,
+    pub permeability: Option<HydroRange>,
+    pub porosity: Option<HydroRange>,
 }
 
 /// Full material hydrology override table.
@@ -237,14 +396,22 @@ impl Default for HydroOverrides {
 
 impl HydroOverrides {
     pub fn set_permeability(&mut self, material: MaterialId, value: u8) {
+        self.set_permeability_range(material, value, value);
+    }
+
+    pub fn set_permeability_range(&mut self, material: MaterialId, min: u8, max: u8) {
         if let Some(slot) = self.slots.get_mut(material as usize) {
-            slot.permeability = Some(value);
+            slot.permeability = Some(HydroRange::new(min, max));
         }
     }
 
     pub fn set_porosity(&mut self, material: MaterialId, value: u8) {
+        self.set_porosity_range(material, value, value);
+    }
+
+    pub fn set_porosity_range(&mut self, material: MaterialId, min: u8, max: u8) {
         if let Some(slot) = self.slots.get_mut(material as usize) {
-            slot.porosity = Some(value);
+            slot.porosity = Some(HydroRange::new(min, max));
         }
     }
 
@@ -255,13 +422,23 @@ impl HydroOverrides {
     pub fn apply(self, material: MaterialId, mut p: MaterialProps) -> MaterialProps {
         if let Some(o) = self.slots.get(material as usize) {
             if let Some(v) = o.permeability {
-                p.permeability = v;
+                p.permeability = v.midpoint();
             }
             if let Some(v) = o.porosity {
-                p.porosity = v;
+                p.porosity = v.midpoint();
             }
         }
         p
+    }
+
+    pub fn hydrology(self, material: MaterialId, base: MaterialHydrology) -> MaterialHydrology {
+        let Some(slot) = self.slots.get(material as usize) else {
+            return base;
+        };
+        MaterialHydrology {
+            permeability: slot.permeability.unwrap_or(base.permeability),
+            porosity: slot.porosity.unwrap_or(base.porosity),
+        }
     }
 }
 
@@ -277,6 +454,35 @@ impl MaterialRegistry {
     /// Props with an explicit override table (voxel `World::hydro`).
     pub fn props_with(material: MaterialId, hydro: &HydroOverrides) -> MaterialProps {
         hydro.apply(material, Self::base_props(material))
+    }
+
+    /// Default per-cell hydrology ranges.
+    ///
+    /// **Porosity** stays a symmetric band around the table value: it controls
+    /// storage, not which path water takes, and several tests assert bed
+    /// saturation against it.
+    ///
+    /// **Permeability widens upward only** — floor at the table value, ceiling
+    /// well above it. Real rock is not a mean with a ±25% spread; the matrix is
+    /// tight and flow concentrates in a small fraction of much more conductive
+    /// fractures. Combined with a heavy-tailed pore field (worldgen puts most
+    /// cells near the low end) the median cell stays about as tight as before
+    /// while the thin tail becomes a genuine conduit.
+    ///
+    /// A symmetric band could not do this: `seepage_rate` quantizes to
+    /// `(permeability × 32) / 255` with a floor of 1, so stone's whole ±25%
+    /// band (1–9) collapsed into a single rate bucket and deep rock had *no*
+    /// usable variation at all.
+    pub fn hydrology(material: MaterialId) -> MaterialHydrology {
+        let p = Self::base_props(material);
+        MaterialHydrology {
+            permeability: fracture_range(p.permeability),
+            porosity: centered_range(p.porosity),
+        }
+    }
+
+    pub fn hydrology_with(material: MaterialId, hydro: &HydroOverrides) -> MaterialHydrology {
+        (*hydro).hydrology(material, Self::hydrology(material))
     }
 
     /// Compile-time material table (ignores runtime overrides).
@@ -296,6 +502,8 @@ impl MaterialRegistry {
                 albedo: 0.2,
                 solubility: 0,
                 roof_span_max_m: f32::INFINITY,
+                // no pore space to retain
+                field_capacity: 0,
             },
             MaterialId::Stone => MaterialProps {
                 density: 2600,
@@ -312,6 +520,8 @@ impl MaterialRegistry {
                 albedo: 0.25,
                 solubility: 0,
                 roof_span_max_m: 15.0,
+                // tight matrix holds a fifth of its little pore space
+                field_capacity: 51,
             },
             MaterialId::Sand => MaterialProps {
                 density: 1600,
@@ -330,6 +540,8 @@ impl MaterialRegistry {
                 albedo: 0.35,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // drains freely — classic sandy soil ~20%
+                field_capacity: 51,
             },
             MaterialId::LooseRock => MaterialProps {
                 density: 2500,
@@ -347,6 +559,8 @@ impl MaterialRegistry {
                 albedo: 0.3,
                 solubility: 0,
                 roof_span_max_m: 2.0,
+                // coarse talus barely retains
+                field_capacity: 38,
             },
             MaterialId::LooseLimestone => MaterialProps {
                 density: 2400,
@@ -364,6 +578,8 @@ impl MaterialRegistry {
                 albedo: 0.32,
                 solubility: 0,
                 roof_span_max_m: 1.5,
+                // coarse carbonate scree, as LooseRock
+                field_capacity: 38,
             },
             MaterialId::Gravel => MaterialProps {
                 density: 2000,
@@ -380,6 +596,68 @@ impl MaterialRegistry {
                 albedo: 0.3,
                 solubility: 0,
                 roof_span_max_m: 0.5,
+                // nearly free-draining; this is why a gravel lens conducts
+                field_capacity: 20,
+            },
+            MaterialId::Sandstone => MaterialProps {
+                density: 2300,
+                // Clastic rocks are aquifers. Far more permeable than silicate
+                // stone (5), which is the point: a cemented bed still carries
+                // water, it just also holds a void open.
+                permeability: 60,
+                erosion_resistance: 130,
+                cohesion: 210,
+                porosity: 30,
+                phase_change: None,
+                render_alpha: 255,
+                repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0012,
+                heat_capacity: 4.5,
+                albedo: 0.32,
+                // The *cement* is carbonate, so it redissolves — at half
+                // limestone's rate, since only the matrix is soluble.
+                solubility: 20,
+                roof_span_max_m: 7.0,
+                field_capacity: 44,
+            },
+            MaterialId::Conglomerate => MaterialProps {
+                density: 2450,
+                permeability: 80,
+                erosion_resistance: 150,
+                cohesion: 200,
+                porosity: 25,
+                phase_change: None,
+                render_alpha: 255,
+                repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0013,
+                heat_capacity: 4.6,
+                albedo: 0.28,
+                solubility: 20,
+                roof_span_max_m: 6.0,
+                field_capacity: 38,
+            },
+            MaterialId::Bentonite => MaterialProps {
+                density: 1800,
+                // The whole point: ~10x tighter than clay. Clay at 10 against
+                // limestone's 140 is only ~14x, which still equalises over a
+                // geological cadence — not a seal.
+                permeability: 1,
+                erosion_resistance: 70,
+                cohesion: 200,
+                porosity: 65,
+                phase_change: None,
+                render_alpha: 255,
+                // Plastic like clay: holds a face until wet, then slumps.
+                repose_rise_m: 0.15,
+                thermal_diffusivity: 0.0012,
+                heat_capacity: 3.6,
+                albedo: 0.20,
+                // An aquitard that dissolves is not an aquitard.
+                solubility: 0,
+                roof_span_max_m: 0.0,
+                // Swelling clay gives up almost nothing to gravity, which is
+                // what perches a table on top of it.
+                field_capacity: 232,
             },
             MaterialId::Clay => MaterialProps {
                 density: 1900,
@@ -399,6 +677,8 @@ impl MaterialRegistry {
                 albedo: 0.22,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // holds most of its water — perches a water table above it
+                field_capacity: 188,
             },
             MaterialId::Organic => MaterialProps {
                 // > water so corpse ooze settles on the bed instead of
@@ -416,6 +696,8 @@ impl MaterialRegistry {
                 albedo: 0.18,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // peat / sapropel is a sponge
+                field_capacity: 166,
             },
             MaterialId::Soil => MaterialProps {
                 // Humus-rich loam — holds water, conducts slowly so recharge
@@ -433,6 +715,8 @@ impl MaterialRegistry {
                 albedo: 0.16,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // loam sits between sand and clay
+                field_capacity: 128,
             },
             MaterialId::Water => MaterialProps {
                 density: 1000,
@@ -458,6 +742,8 @@ impl MaterialRegistry {
                 albedo: 0.08,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // not a porous solid
+                field_capacity: 0,
             },
             MaterialId::Air => MaterialProps {
                 density: 0,
@@ -473,6 +759,8 @@ impl MaterialRegistry {
                 albedo: 0.0,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // not a porous solid
+                field_capacity: 0,
             },
             MaterialId::Snow => MaterialProps {
                 density: 900,
@@ -493,6 +781,8 @@ impl MaterialRegistry {
                 albedo: 0.75,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // impermeable in v1 rules
+                field_capacity: 0,
             },
             MaterialId::Ice => MaterialProps {
                 density: 917,
@@ -514,6 +804,28 @@ impl MaterialRegistry {
                 albedo: 0.55,
                 solubility: 0,
                 roof_span_max_m: 0.0,
+                // impermeable in v1 rules
+                field_capacity: 0,
+            },
+            MaterialId::Flowstone => MaterialProps {
+                density: 2600,
+                // A deposit fills the space it forms in, so it is tighter than
+                // bedded limestone — this is what seals a conduit.
+                permeability: 12,
+                erosion_resistance: 170,
+                cohesion: 190,
+                porosity: 12,
+                phase_change: None,
+                render_alpha: 255,
+                repose_rise_m: f32::INFINITY,
+                thermal_diffusivity: 0.0011,
+                heat_capacity: 5.0,
+                albedo: 0.34,
+                // Still carbonate: it can dissolve again.
+                solubility: 40,
+                roof_span_max_m: 10.0,
+                // Dense precipitate holds little, and lets little go.
+                field_capacity: 30,
             },
             MaterialId::Limestone => MaterialProps {
                 density: 2500,
@@ -530,7 +842,14 @@ impl MaterialRegistry {
                 heat_capacity: 5.0,
                 albedo: 0.28,
                 solubility: 40,
-                roof_span_max_m: 10.0,
+                // Matches Stone. Not a claim that limestone is stronger than
+                // granite -- it is not -- but limestone is the rock that gets
+                // caves, so a *shorter* span than generic stone made the one
+                // cave-forming material the worst at keeping a cave open.
+                // Karst dissolved a chamber and the roof came straight down.
+                roof_span_max_m: 15.0,
+                // fractured carbonate drains through its conduits
+                field_capacity: 38,
             },
         }
     }
@@ -550,7 +869,18 @@ impl MaterialRegistry {
             MaterialId::LooseLimestone => [0xB0, 0xA8, 0x96],
             // Mix of tan and grey (mixed-grain aggregate).
             MaterialId::Gravel => [0xB4, 0xA4, 0x80],
-            MaterialId::Sand => [0xE8, 0xD6, 0x6B],
+            // Less chroma than it had: a fully saturated yellow dominated every
+            // scene sand appeared in.
+            MaterialId::Sand => [0xDE, 0xD0, 0x92],
+            // Ochre: Sand's hue gone darker and redder, so a cemented bed reads
+            // as the same material set hard rather than as something new.
+            MaterialId::Sandstone => [0xC2, 0x9A, 0x52],
+            // Gravel's tan pulled toward LooseRock's grey — coarse clasts in a
+            // pale matrix.
+            // Grey pulled toward red. This *is* conglomerate's identity now: the
+            // speckle marked it but broke the visual language, since dots mean
+            // porosity everywhere else.
+            MaterialId::Conglomerate => [0x9C, 0x84, 0x7A],
             // Cool dusty tan — far from living Root sienna `#7A4B2A`
             // (was `#804000`, which read as the same brown underground).
             MaterialId::Clay => [0xB8, 0xA4, 0x90],
@@ -564,6 +894,15 @@ impl MaterialRegistry {
             MaterialId::Ice => [0xC7, 0xE0, 0xF2],
             // Warm pale grey — distinct from cooler Stone.
             MaterialId::Limestone => [0xC8, 0xC2, 0xB0],
+            // Ivory with a faint blue cast — reads as wet mineral crust and
+            // separates cleanly from Limestone's warm grey at a glance.
+            // Mid-tone, deliberately *not* near-white. At 0xEC it read as a cave
+            // or cavity rather than a fill, because a light patch inside dark rock
+            // is the visual cue for an opening.
+            MaterialId::Flowstone => [0xCE, 0xC6, 0xB2],
+            // Cool blue-green grey. Wants to be legible as a *band*, since
+            // reading where the seal sits is the point of drawing it at all.
+            MaterialId::Bentonite => [0x6E, 0x82, 0x7A],
         }
     }
 }
@@ -573,11 +912,141 @@ mod tests {
     use super::*;
 
     #[test]
+    fn hydro_range_samples_endpoints_and_midpoint() {
+        let r = HydroRange::new(10, 30);
+        assert_eq!(r.sample(0), 10);
+        assert_eq!(r.sample(128), 20);
+        assert_eq!(r.sample(255), 30);
+        assert_eq!(r.midpoint(), 20);
+    }
+
+    #[test]
+    fn porosity_is_centred_but_permeability_only_widens_upward() {
+        for material in MaterialId::ALL_SOLIDS {
+            let props = MaterialRegistry::base_props(material);
+            let hydro = MaterialRegistry::hydrology(material);
+            // Storage stays centred on the table value.
+            assert_eq!(
+                hydro.porosity.sample(128),
+                props.porosity,
+                "{material:?} porosity should keep the table value at its midpoint"
+            );
+            // Conductivity keeps the table value as its *floor*: the matrix is
+            // never leakier than before, and the tail reaches fracture rates.
+            assert_eq!(
+                hydro.permeability.min, props.permeability,
+                "{material:?} matrix permeability must stay at the table value"
+            );
+            if props.permeability > 0 {
+                assert!(
+                    hydro.permeability.max > props.permeability,
+                    "{material:?} needs headroom above the matrix for fractures"
+                );
+            } else {
+                assert_eq!(
+                    hydro.permeability,
+                    HydroRange::fixed(0),
+                    "impermeable stays exactly 0..0"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn fracture_tail_gives_tight_rock_a_usable_rate_spread() {
+        // The bug this exists to prevent: seepage rate is
+        // `((permeability * 32) / 255).max(1)`, so a narrow band around a low
+        // permeability collapses to one bucket and rock cannot vary at all.
+        let rate = |p: u8| ((p as i32 * 32) / 255).max(1);
+        let stone = MaterialRegistry::hydrology(MaterialId::Stone).permeability;
+        assert!(
+            rate(stone.max) >= rate(stone.min) * 4,
+            "stone needs a 4x+ matrix-to-fracture rate contrast (min {} -> {}, max {} -> {})",
+            stone.min,
+            rate(stone.min),
+            stone.max,
+            rate(stone.max)
+        );
+    }
+
+    #[test]
+    fn fracture_sampling_keeps_the_default_cell_at_matrix() {
+        // `Cell::solid()` uses pore = 128. If that did not land exactly on the
+        // matrix value, every painted and constructed cell would silently
+        // change permeability when the range widened upward.
+        for material in MaterialId::ALL_SOLIDS {
+            let props = MaterialRegistry::base_props(material);
+            let perm = MaterialRegistry::hydrology(material).permeability;
+            assert_eq!(
+                perm.sample_fracture(128),
+                props.permeability,
+                "{material:?} default pore must sample the matrix value"
+            );
+            assert_eq!(perm.sample_fracture(0), props.permeability);
+            assert_eq!(perm.sample_fracture(255), perm.max);
+        }
+    }
+
+    #[test]
+    fn fracture_sampling_is_mostly_matrix() {
+        // A thin conductive tail, not uniformly leaky rock.
+        let perm = MaterialRegistry::hydrology(MaterialId::Stone).permeability;
+        let matrix = perm.min;
+        let at_matrix = (0..=255u16)
+            .filter(|&p| perm.sample_fracture(p as u8) <= matrix + 1)
+            .count();
+        assert!(
+            at_matrix > 150,
+            "most of the pore domain should stay matrix-tight (got {at_matrix}/256)"
+        );
+    }
+
+    #[test]
+    fn zero_override_is_zero_to_zero() {
+        let mut overrides = HydroOverrides::default();
+        overrides.set_permeability(MaterialId::Sand, 0);
+        let h = MaterialRegistry::hydrology_with(MaterialId::Sand, &overrides);
+        assert_eq!(h.permeability, HydroRange::fixed(0));
+    }
+
+    #[test]
     fn erosion_order_sand_clay_stone() {
         let sand = MaterialRegistry::erosion_rank(MaterialId::Sand);
         let clay = MaterialRegistry::erosion_rank(MaterialId::Clay);
         let stone = MaterialRegistry::erosion_rank(MaterialId::Stone);
         assert!(sand < clay);
         assert!(clay < stone);
+    }
+
+    /// Every ground-forming solid must report [`MaterialId::is_solid`].
+    ///
+    /// It is not a label: `support_map` uses it to decide what holds weight,
+    /// and solidity changes are what wake the competent body pass. A solid
+    /// missing from the list silently supports nothing. Flowstone shipped that
+    /// way — the `is_solid` arm was the one edit that did not land with it.
+    #[test]
+    fn every_all_solids_entry_reports_solid() {
+        for m in MaterialId::ALL_SOLIDS {
+            assert!(m.is_solid(), "{m:?} is in ALL_SOLIDS but not is_solid()");
+        }
+    }
+
+    #[test]
+    fn bentonite_is_a_tighter_seal_than_clay() {
+        let clay = MaterialRegistry::base_props(MaterialId::Clay);
+        let bent = MaterialRegistry::base_props(MaterialId::Bentonite);
+        assert!(
+            bent.permeability * 4 < clay.permeability,
+            "bentonite must be far tighter than clay to confine an aquifer \
+             (clay {}, bentonite {})",
+            clay.permeability,
+            bent.permeability
+        );
+        assert!(
+            bent.field_capacity > clay.field_capacity,
+            "swelling clay should hold more against gravity than clay"
+        );
+        // An aquitard that dissolves is not an aquitard.
+        assert_eq!(bent.solubility, 0);
     }
 }

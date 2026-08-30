@@ -14,6 +14,8 @@ use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
 use crate::blueprint::Genome;
+use crate::cell::water_capacity_cell;
+#[cfg(test)]
 use crate::cell::water_capacity;
 use crate::grid::World;
 use crate::organism::{
@@ -93,10 +95,27 @@ pub const ROOT_SAND_AFFINITY: f32 = 0.45;
 /// invented from a stemless body anymore; olive only elongates.
 pub const STEM_INVENT_MIN_ALLOC: f32 = 0.18;
 
-/// Soft caps so 1× bodies stay readable (defaults for [`PlantGrowthCaps`]).
-pub const MAX_ROOT_MODULES: usize = 16;
-pub const MAX_STEM_MODULES: usize = 10;
-pub const MAX_PHOTO_MODULES: usize = 12;
+/// **Safety ceilings, not design limits** (defaults for [`PlantGrowthCaps`]).
+///
+/// Growth is meant to be capped by *cost*, not by an arbitrary rule. Two
+/// mechanisms already do that, and they only bite once a plant is big:
+///
+/// - Upkeep rises linearly with tissue ([`plant_metabolic_load`]), while the
+///   energy tank tops out at [`ROOT_STORE_MAX_MULT`] × spawn size.
+/// - Harvest *saturates* as the canopy self-shades (Beer-Lambert in
+///   [`crate::shade`]), so a bushier plant earns less per new leaf.
+///
+/// Together those give a real equilibrium: a plant grows until upkeep eats the
+/// surplus that [`LAND_GROW_ENERGY_FRAC`] requires, then stops. The old values
+/// (16 / 10 / 12) cut in long before that, so shape was decided by the cap
+/// rather than by light, water and substrate.
+///
+/// These are kept only so a runaway cannot melt the frame budget — a plant that
+/// reaches them is a bug worth seeing, not an expected shape. Tab can lower them
+/// to recover the old tight look.
+pub const MAX_ROOT_MODULES: usize = 96;
+pub const MAX_STEM_MODULES: usize = 64;
+pub const MAX_PHOTO_MODULES: usize = 96;
 /// Max Chebyshev distance a woody canopy leaf may sit from a Stem
 /// (Moore neighbourhood). Distance 2 left empty cells between leaf and
 /// trunk — midair green flecks. Stemless seaweed ignores this.
@@ -413,7 +432,7 @@ pub(crate) fn cell_moisture_frac(world: &World, gx: i32, gy: i32) -> f32 {
     if cell.material == MaterialId::Air {
         return 0.0;
     }
-    let cap = water_capacity(cell.material);
+    let cap = water_capacity_cell(cell, &world.hydro);
     if cap == 0 {
         return 0.0;
     }
@@ -499,6 +518,7 @@ fn cell_is_loose_bed(world: &World, gx: i32, gy: i32) -> bool {
             MaterialId::Sand
                 | MaterialId::Soil
                 | MaterialId::Clay
+                | MaterialId::Bentonite
                 | MaterialId::Gravel
                 | MaterialId::Organic
         )
@@ -669,7 +689,7 @@ fn sip_porous(world: &mut World, gx: i32, gy: i32, want: u8) -> Option<u8> {
     if cell.material == MaterialId::Air {
         return None;
     }
-    let cap = water_capacity(cell.material);
+    let cap = water_capacity_cell(cell, &world.hydro);
     if cap == 0 || cell.sat.0 == 0 {
         return None;
     }
@@ -714,9 +734,10 @@ pub fn leave_dead_roots_in_place(world: &mut World, atom: &Atom) -> u32 {
             continue;
         };
         match c.material {
-            MaterialId::Sand | MaterialId::Clay | MaterialId::Soil => {
+            MaterialId::Sand | MaterialId::Clay | MaterialId::Bentonite | MaterialId::Soil => {
                 let mut org = Cell::solid(MaterialId::Organic);
-                let cap = water_capacity(MaterialId::Organic);
+                org.pore = c.pore;
+                let cap = water_capacity_cell(org, &world.hydro);
                 org.sat.0 = if cap > 0 { c.sat.0.min(cap) } else { 0 };
                 world.set_cell(wx, wy, org);
                 painted += 1;
@@ -974,7 +995,7 @@ fn plantable_crown(world: &World, gx: i32, nucleus_y: i32) -> bool {
     if below.material == MaterialId::Air {
         return false;
     }
-    water_capacity(below.material) > 0
+    water_capacity_cell(below, &world.hydro) > 0
 }
 
 fn fungus_crown(world: &World, gx: i32, nucleus_y: i32) -> bool {
@@ -1010,11 +1031,11 @@ fn fungus_seat_score(world: &World, gx: i32, nucleus_y: i32) -> i32 {
         MaterialId::Organic => 140 + (below.mycelium() as i32 / 4),
         MaterialId::Soil => 110,
         MaterialId::Sand => {
-            let cap = water_capacity(MaterialId::Sand).max(1);
+            let cap = water_capacity_cell(below, &world.hydro).max(1);
             40 + (below.sat.0 as i32 * 40) / cap as i32
         }
-        MaterialId::Clay => 30,
-        _ if water_capacity(below.material) > 0 => 10,
+        MaterialId::Clay | MaterialId::Bentonite => 30,
+        _ if water_capacity_cell(below, &world.hydro) > 0 => 10,
         _ => 1, // bare rock / ice-adjacent solids — allowed but poor
     }
 }
@@ -1042,7 +1063,7 @@ fn penetrate_cost(mat: MaterialId) -> Option<f32> {
     match mat {
         MaterialId::Bedrock | MaterialId::Ice | MaterialId::Snow | MaterialId::Water => None,
         MaterialId::Organic => Some(0.35),
-        MaterialId::Sand | MaterialId::Clay | MaterialId::Soil => Some(0.65),
+        MaterialId::Sand | MaterialId::Clay | MaterialId::Bentonite | MaterialId::Soil => Some(0.65),
         MaterialId::Stone | MaterialId::Limestone => Some(1.6),
         MaterialId::Air => Some(0.45), // gaps / rhizome air pockets
         _ => Some(1.0), // LooseRock, Gravel, …
@@ -1065,6 +1086,7 @@ fn crack_rock_for_root(world: &mut World, wx: i32, wy: i32) {
     next.sat = c.sat;
     next.flags = c.flags;
     next._pad = c._pad;
+    next.pore = c.pore;
     world.set_cell(wx, wy, next);
 }
 
@@ -4438,7 +4460,9 @@ mod tests {
         w.ensure_chunk(ChunkCoord::new(0, 0));
         for x in 0..12 {
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
-            w.set_cell(x, 1, Cell::solid(MaterialId::Stone));
+            let mut stone = Cell::solid(MaterialId::Stone);
+            stone.pore = 207;
+            w.set_cell(x, 1, stone);
             let mut sand = Cell::solid(MaterialId::Sand);
             sand.sat = Sat(200);
             w.set_cell(x, 2, sand);
@@ -4516,6 +4540,13 @@ mod tests {
             cracked,
             "root wedging into Stone should open a LooseRock crack, body={:?}",
             grower.body
+        );
+        assert!(
+            (0..12).any(|x| matches!(
+                w.get_cell(x, 1),
+                Some(c) if c.material == MaterialId::LooseRock && c.pore == 207
+            )),
+            "root cracking must preserve the rock's pore texture"
         );
     }
 

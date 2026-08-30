@@ -30,6 +30,33 @@ fn setup_column_world() -> World {
 }
 
 #[test]
+fn seepage_prefers_high_pore_sand_over_low_pore_sand() {
+    let mut w = setup_column_world();
+    for &(x, pore) in &[(4, 0u8), (12, 255u8)] {
+        w.set_cell(x - 1, 1, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(x + 1, 1, Cell::solid(MaterialId::Bedrock));
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.pore = pore;
+        w.set_cell(x, 1, sand);
+        w.set_cell(x, 2, Cell::water());
+    }
+    apply_seepage(&mut w);
+    let low = w.get_cell(4, 1).unwrap();
+    let high = w.get_cell(12, 1).unwrap();
+    assert!(
+        high.sat.0 > low.sat.0,
+        "high-pore lens should conduct faster (low={} high={})",
+        low.sat.0,
+        high.sat.0
+    );
+    assert!(
+        crate::cell::water_capacity_cell(high, &w.hydro)
+            > crate::cell::water_capacity_cell(low, &w.hydro),
+        "the same pore coordinate should also select higher capacity"
+    );
+}
+
+#[test]
 fn droplet_falls_one_cell_per_pass() {
     let mut w = setup_column_world();
     w.set_cell(4, 10, Cell::water());
@@ -574,9 +601,11 @@ fn seepage_wets_adjacent_sand_from_air_water() {
         before,
         "mass conserved"
     );
-    // Rate-limited: one tick can't dump the whole lake into sand.
+    // Rate-limited: one tick can't dump the whole lake into sand. The +1 is the
+    // per-fire round-up — the amount moved when an edge fires is the true rate
+    // rounded up, with the fraction taken back by firing less often.
     let rate = seepage_rate_with(MaterialId::Sand, &HydroOverrides::default());
-    assert!(sand.sat.0 as i32 <= rate);
+    assert!(sand.sat.0 as i32 <= rate + 1);
 }
 
 #[test]
@@ -867,6 +896,7 @@ fn ice_falls_through_empty_air_but_floats_on_water() {
             sat: Sat(128),
             flags: Default::default(),
             _pad: 0,
+            pore: 128,
         },
     );
     w3.set_cell(3, 2, Cell::solid(MaterialId::Ice));
@@ -881,15 +911,312 @@ fn ice_falls_through_empty_air_but_floats_on_water() {
 }
 
 #[test]
+fn snow_falls_gently_and_ice_does_not() {
+    // The regression: snow nucleated in the air but had no fall behaviour, so grain
+    // fall settled it to rest immediately -- flakes appeared in the sky and arrived
+    // on the ground in the same breath. A flake should be visible falling.
+    //
+    // Ice is the control. Only snow is gated, so if both slow down the gate is
+    // catching the wrong material.
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    w.set_cell(3, 6, Cell::solid(MaterialId::Ice));
+    for _ in 0..12 {
+        apply_grain_fall(&mut w);
+        w.tick += 1;
+    }
+    assert_eq!(
+        w.get_cell(3, 1).unwrap().material,
+        MaterialId::Ice,
+        "ice should still settle promptly -- only snow is gated"
+    );
+    assert_ne!(
+        w.get_cell(2, 1).unwrap().material,
+        MaterialId::Snow,
+        "snow should still be on its way down after a dozen passes"
+    );
+    // ...and it is genuinely descending, not stuck.
+    let started_at = 6;
+    let snow_y = (1..=started_at)
+        .find(|&y| w.get_cell(2, y).map(|c| c.material) == Some(MaterialId::Snow));
+    let snow_y = snow_y.expect("the flake should still exist somewhere in the column");
+    assert!(
+        snow_y < started_at,
+        "the flake should have moved at all (still at {snow_y})"
+    );
+}
+
+#[test]
 fn hanging_snow_and_ice_settle_onto_bedrock() {
     let mut w = setup_column_world();
     w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
     w.set_cell(3, 6, Cell::solid(MaterialId::Ice));
-    for _ in 0..10 {
+    // Snow descends *gently* now — one step spread over many passes, so it needs
+    // both more passes and an advancing tick. The roll is hashed on the tick, so a
+    // loop that does not advance it re-rolls the same answer forever. Ice is
+    // unaffected and lands early.
+    for _ in 0..600 {
         apply_grain_fall(&mut w);
+        w.tick += 1;
     }
     assert_eq!(w.get_cell(2, 1).unwrap().material, MaterialId::Snow);
     assert_eq!(w.get_cell(3, 1).unwrap().material, MaterialId::Ice);
+}
+
+#[test]
+fn airborne_snow_drifts_downwind_and_ice_does_not() {
+    // Wind on falling snow is a once-per-tick, one-cell slide. Ice is the
+    // control: if both move, the pass is catching the wrong material.
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    w.set_cell(6, 6, Cell::solid(MaterialId::Ice));
+    // Scale 0.25: |1.0| * 4 * 0.25 = 1, so every airborne flake with a free dest moves.
+    let moved = apply_snow_wind_drift(&mut w, 1.0, 4);
+    assert_eq!(moved, 1, "exactly one flake should take the step");
+    assert_eq!(
+        w.get_cell(3, 6).unwrap().material,
+        MaterialId::Snow,
+        "snow should step one cell downwind"
+    );
+    assert_eq!(
+        w.get_cell(2, 6).unwrap().material,
+        MaterialId::Air,
+        "the vacated cell should be air"
+    );
+    assert_eq!(
+        w.get_cell(6, 6).unwrap().material,
+        MaterialId::Ice,
+        "ice falls, it does not drift"
+    );
+}
+
+#[test]
+fn snow_drift_bootstraps_the_snow_flag_on_legacy_chunks() {
+    // Saves from before has_snow still have flakes, just no flag.
+    // The first pass must walk has_buoyant, stamp the flag, and still
+    // move the flake — otherwise a loaded winter world never drifts.
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    for chunk in w.chunks.values_mut() {
+        chunk.has_snow = false;
+    }
+    let moved = apply_snow_wind_drift(&mut w, 1.0, 4);
+    assert_eq!(moved, 1);
+    assert!(
+        w.chunks.values().any(|c| c.has_snow),
+        "the bootstrap pass must stamp has_snow so later ticks skip rafts"
+    );
+}
+
+#[test]
+fn snow_drift_clears_the_flag_when_the_chunk_is_empty() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_snow);
+    w.set_cell(2, 6, Cell::air());
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 0)].has_snow,
+        "writes do not clear sticky occupancy"
+    );
+    let moved = apply_snow_wind_drift(&mut w, 1.0, 4);
+    assert_eq!(moved, 0);
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 0)].has_snow,
+        "an empty scan must drop the chunk from later drift walks"
+    );
+}
+
+#[test]
+fn falling_snow_does_not_leave_sky_chunks_in_the_drift_scan() {
+    // A flake marks every chunk it falls through. After it lands, those
+    // empty sky chunks must drop out — otherwise a snowy night leaves
+    // the whole atmosphere in the drift / buoyant walks.
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..(CHUNK_CELLS_W as i32) {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    let start_y = CHUNK_CELLS_H as i32 + 8;
+    w.set_cell(4, start_y, Cell::solid(MaterialId::Snow));
+    assert!(w.chunks[&ChunkCoord::new(0, 1)].has_snow);
+    for _ in 0..80 {
+        apply_grain_fall(&mut w);
+        apply_snow_wind_drift(&mut w, 0.05, 4);
+        w.tick += 1;
+    }
+    let pos = (0..CHUNK_CELLS_W as i32)
+        .flat_map(|x| (1..=start_y).map(move |y| (x, y)))
+        .find(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Snow));
+    let (_, y) = pos.expect("the flake should still exist");
+    assert!(
+        y < CHUNK_CELLS_H as i32,
+        "the flake should have fallen into the ground chunk (y={y})"
+    );
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 1)].has_snow,
+        "the vacated sky chunk must leave the drift scan"
+    );
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 0)].has_snow,
+        "the chunk that still holds the flake keeps the flag"
+    );
+}
+
+#[test]
+fn buoyant_collect_clears_empty_sky_chunks() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Ice));
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_buoyant);
+    w.set_cell(2, 6, Cell::air());
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_buoyant);
+    rise_and_soak_buoyant_litter(&mut w);
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 0)].has_buoyant,
+        "melted ice must not keep the chunk in rise/soak walks"
+    );
+}
+
+#[test]
+fn buoyant_collect_clears_empty_organic_flag() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Organic));
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_organic);
+    w.set_cell(2, 6, Cell::air());
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 0)].has_organic,
+        "writes do not clear sticky occupancy"
+    );
+    rise_and_soak_buoyant_litter(&mut w);
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 0)].has_organic,
+        "an empty scan must drop the chunk from later raft walks"
+    );
+}
+
+#[test]
+fn falling_leaf_does_not_leave_sky_chunks_in_the_raft_scan() {
+    // Same leak as falling snow: a leaf marks every chunk it falls
+    // through. After it lands, vacated sky must drop `has_organic`.
+    let mut w = World::new(1);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    w.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..(CHUNK_CELLS_W as i32) {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    let start_y = CHUNK_CELLS_H as i32 + 8;
+    w.set_cell(4, start_y, Cell::solid(MaterialId::Organic));
+    assert!(w.chunks[&ChunkCoord::new(0, 1)].has_organic);
+    for _ in 0..80 {
+        apply_grain_fall(&mut w);
+        rise_and_soak_buoyant_litter(&mut w);
+        w.tick += 1;
+    }
+    let pos = (0..CHUNK_CELLS_W as i32)
+        .flat_map(|x| (1..=start_y).map(move |y| (x, y)))
+        .find(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Organic));
+    let (_, y) = pos.expect("the leaf should still exist");
+    assert!(
+        y < CHUNK_CELLS_H as i32,
+        "the leaf should have fallen into the ground chunk (y={y})"
+    );
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 1)].has_organic,
+        "the vacated sky chunk must leave the raft scan"
+    );
+    assert!(
+        w.chunks[&ChunkCoord::new(0, 0)].has_organic,
+        "the chunk that still holds the leaf keeps the flag"
+    );
+}
+
+#[test]
+fn pore_weep_clears_dry_chunks() {
+    let mut w = setup_column_world();
+    let mut sand = Cell::solid(MaterialId::Sand);
+    sand.sat = Sat(40);
+    w.set_cell(4, 1, sand);
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_wet_pores);
+    w.set_cell(4, 1, Cell::solid(MaterialId::Sand));
+    assert!(w.chunks[&ChunkCoord::new(0, 0)].has_wet_pores);
+    wake_pore_weep_into_air(&mut w);
+    assert!(
+        !w.chunks[&ChunkCoord::new(0, 0)].has_wet_pores,
+        "a dry scan must drop the chunk from later weep walks"
+    );
+}
+
+#[test]
+fn landed_snow_does_not_drift() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 1, Cell::solid(MaterialId::Snow));
+    let moved = apply_snow_wind_drift(&mut w, 1.0, 4);
+    assert_eq!(moved, 0);
+    assert_eq!(w.get_cell(2, 1).unwrap().material, MaterialId::Snow);
+}
+
+#[test]
+fn zero_wind_leaves_airborne_snow_put() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    let moved = apply_snow_wind_drift(&mut w, 0.0, 4);
+    assert_eq!(moved, 0);
+    assert_eq!(w.get_cell(2, 6).unwrap().material, MaterialId::Snow);
+}
+
+#[test]
+fn snow_refuses_a_solid_neighbour() {
+    let mut w = setup_column_world();
+    w.set_cell(2, 6, Cell::solid(MaterialId::Snow));
+    w.set_cell(3, 6, Cell::solid(MaterialId::Stone));
+    let moved = apply_snow_wind_drift(&mut w, 1.0, 4);
+    assert_eq!(moved, 0);
+    assert_eq!(w.get_cell(2, 6).unwrap().material, MaterialId::Snow);
+}
+
+#[test]
+fn falling_snow_walks_a_downwind_stair() {
+    // Interleave the production order: fall, then one drift, then advance
+    // the tick. After enough steps the flake should be both lower and
+    // downwind — a gentle diagonal, not a teleport.
+    //
+    // Default climate wind (0.05 × 4 × 0.25) is ~1 in 20; fall is 0.15.
+    // Two hundred ticks from a high start lean the path ~3:1 without
+    // landing first or sprinting the chunk.
+    let mut w = setup_column_world();
+    w.set_cell(2, 40, Cell::solid(MaterialId::Snow));
+    let start_x = 2;
+    let start_y = 40;
+    for _ in 0..200 {
+        apply_grain_fall(&mut w);
+        apply_snow_wind_drift(&mut w, 0.05, 4);
+        w.tick += 1;
+    }
+    let pos = (0..CHUNK_CELLS_W as i32)
+        .flat_map(|x| (1..=start_y).map(move |y| (x, y)))
+        .find(|&(x, y)| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Snow));
+    let (x, y) = pos.expect("the flake should still exist");
+    let dy = start_y - y;
+    let dx = x - start_x;
+    assert!(
+        y < start_y,
+        "the flake should have fallen (still at y={y})"
+    );
+    assert!(
+        x > start_x,
+        "the flake should have drifted downwind (still at x={x})"
+    );
+    assert!(
+        dx <= 80,
+        "one cell per tick is the cap; got Δx={dx}"
+    );
+    // The playtest number: more down than across. 0.15 / 0.05 is 3:1
+    // in expectation; hash noise is allowed to wander, but a path that
+    // slides more than it drops is the old "blows too well" bug.
+    assert!(
+        dy >= dx,
+        "fall should outrun drift (Δy={dy} Δx={dx})"
+    );
 }
 
 #[test]
@@ -3279,10 +3606,14 @@ fn beach_film_drains_into_ocean_not_inland() {
         0,
         "beach film should leave the sand"
     );
-    assert_eq!(
-        w.get_cell(7, 3).unwrap().sat.0,
-        0,
-        "must not climb inland up the beach"
+    // Sand now retains water against gravity (field capacity), so a wet beach
+    // absorbs a film more slowly and sheds the rest sideways — real runoff.
+    // What must not happen is a *puddle* forming inland: stay under the
+    // threshold below which water is not even drawn.
+    assert!(
+        w.get_cell(7, 3).unwrap().sat.0 <= crate::rules::GRAIN_REPOSE_HAZE_MAX,
+        "must not pool inland up the beach (got {})",
+        w.get_cell(7, 3).unwrap().sat.0
     );
     // Film may sit one cell seaward or soak into sand — either is
     // fine; the failure mode was climbing inland.
@@ -3993,6 +4324,60 @@ fn closed_basin_lake_does_not_fountain_upward() {
 }
 
 #[test]
+fn drizzle_film_on_wet_ground_does_not_confined_rise() {
+    // A saturated sand bench against a cliff, connected through the bed
+    // to a high lake. The film is an uncased hole: one solid side, open
+    // sky. Confined BFS used to walk the aquifer to the lake and loft
+    // that head onto the hillside — the soak-age cost, and the wrong
+    // rise. A cased well still uses the walled path.
+    let mut w = World::new(82);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    let cap = water_capacity(MaterialId::Sand);
+    for x in 0..40 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    for y in 1..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+    }
+    // Cliff face above the sand bench — the aquifer stays connected under it.
+    for y in 4..=10 {
+        w.set_cell(19, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 1..=8 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    for x in 10..=30 {
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(cap);
+        w.set_cell(x, 1, sand);
+        w.set_cell(x, 2, sand);
+        w.set_cell(x, 3, sand);
+    }
+    // Throat under the cliff so the bench shares the lake's aquifer.
+    let mut sand = Cell::solid(MaterialId::Sand);
+    sand.sat = Sat(cap);
+    w.set_cell(9, 1, sand);
+    let mut film = Cell::air();
+    film.sat = Sat(40);
+    w.set_cell(20, 4, film);
+
+    for _ in 0..80 {
+        tick(&mut w);
+    }
+
+    for y in 6..=10 {
+        let sat = w.get_cell(20, y).unwrap().sat.0;
+        assert_eq!(
+            sat, 0,
+            "hillside film must not loft lake head to y={y} (sat={sat})"
+        );
+    }
+}
+
+#[test]
 fn same_y_equalize_flattens_stepped_lake_surface() {
     // Free-surface terrace inside a closed basin (solid shores):
     //
@@ -4125,7 +4510,13 @@ fn solid_staircase_film_drains_left_into_lower_pool() {
     w.set_cell(1, 1, Cell::solid(MaterialId::Bedrock));
     // (1,2) and (0,2) are Air — the lower pool/drop level.
     // Seed a little water in the pool so it's "occupied" like the image.
-    w.set_cell(1, 2, Cell { material: MaterialId::Air, sat: Sat(200), flags: Default::default(), _pad: 0 });
+    w.set_cell(1, 2, Cell {
+        material: MaterialId::Air,
+        sat: Sat(200),
+        flags: Default::default(),
+        _pad: 0,
+        pore: 128,
+    });
     // The stuck higher film.
     w.set_cell(3, 3, Cell::water());
 
@@ -4720,13 +5111,28 @@ fn condensation_rains_when_tile_is_wet() {
         ..CondensationConfig::default()
     };
     apply_condensation_rain(&mut w, &mut h, &cfg);
-    let landed = w.get_cell(2, 1).unwrap();
+    // Rain nucleates **in the air** where the vapour was, rather than appearing
+    // on the ground: it is real water with a position and a fall time now, not a
+    // deposit with an animation drawn over it.
+    let column_sat: u32 = (0..=31)
+        .map(|y| w.get_cell(2, y).map(|c| c.sat.0 as u32).unwrap_or(0))
+        .sum();
     assert!(
-        landed.sat.0 > 0,
-        "cloud with 1000 mass should have rained on the ground (got sat={})",
-        landed.sat.0
+        column_sat > 0,
+        "a cloud with 1000 mass should have produced water in the column"
     );
-    assert_eq!(w.get_cell(2, 30).unwrap().sat.0, 0, "sky row stays dry");
+    let on_ground = w.get_cell(2, 1).unwrap().sat.0;
+    assert_eq!(on_ground, 0, "it should not teleport to the ground");
+
+    // ...and gravity brings it down.
+    let perf = PerfConfig::default();
+    for _ in 0..200 {
+        tick_with_perf(&mut w, &perf);
+    }
+    assert!(
+        w.get_cell(2, 1).unwrap().sat.0 > 0,
+        "rain should reach the ground under gravity"
+    );
 }
 
 #[test]
@@ -4803,7 +5209,9 @@ fn condensation_is_mass_conservative() {
     h.add(6, 30, 300.0);
     h.add(11, 30, 250.0);
     let total_before = h.total_mass();
-    let world_sat_before = ground_sat_sum(&w);
+    // Whole world, not just the ground: rain nucleates in the air, so a
+    // ground-only sum reports conserved mass as lost.
+    let world_sat_before = crate::audit::sat_totals(&w).cell_total;
 
     let cfg = CondensationConfig {
         top_y: 30,
@@ -4816,7 +5224,7 @@ fn condensation_is_mass_conservative() {
     }
 
     let total_after = h.total_mass();
-    let world_sat_after = ground_sat_sum(&w);
+    let world_sat_after = crate::audit::sat_totals(&w).cell_total;
     let humidity_lost = total_before - total_after;
     let world_gained = (world_sat_after - world_sat_before) as f32;
     assert!(
@@ -4997,6 +5405,106 @@ fn orographic_boost_rains_thinner_clouds_over_tall_land() {
         "orographic rain should drain thin mountain clouds (mass {} → {})",
         before,
         h.total_mass()
+    );
+}
+
+#[test]
+fn orographic_boost_stops_when_the_hill_is_flattened() {
+    // The seed profile is still a mountain after we carve the live column
+    // down to sea. Rain must follow the live hill, or orographic dump keeps
+    // falling on a peak that is no longer there.
+    use crate::worldgen::WorldgenParams;
+    let p = WorldgenParams::default();
+    let tc = 4;
+    let mut tall_hx = None;
+    for hx in 0..(p.width_cols / tc) {
+        let gx = hx * tc + tc / 2;
+        let s = crate::worldgen::continental_surface_y(
+            p.seed,
+            gx,
+            p.sea_level_y,
+            p.width_cols,
+        );
+        if s >= p.sea_level_y + 22 {
+            tall_hx = Some(hx);
+            break;
+        }
+    }
+    let tall_hx = tall_hx.expect("worldgen should have tall land");
+    let centre_gx = tall_hx * tc + tc / 2;
+    let surface = crate::worldgen::continental_surface_y(
+        p.seed,
+        centre_gx,
+        p.sea_level_y,
+        p.width_cols,
+    );
+
+    let mut w = World::new(p.seed);
+    for y in p.sea_level_y..=surface {
+        w.ensure_chunk(ChunkCoord::new(
+            centre_gx.div_euclid(CHUNK_CELLS_W as i32),
+            y.div_euclid(CHUNK_CELLS_H as i32),
+        ));
+        w.set_cell(centre_gx, y, Cell::solid(MaterialId::Stone));
+    }
+    let sky = surface + 12;
+    for y in (surface + 1)..=sky {
+        w.ensure_chunk(ChunkCoord::new(
+            centre_gx.div_euclid(CHUNK_CELLS_W as i32),
+            y.div_euclid(CHUNK_CELLS_H as i32),
+        ));
+        w.set_cell(centre_gx, y, Cell::air());
+    }
+
+    let oro = OrographicConfig {
+        seed: p.seed,
+        width_cols: p.width_cols,
+        sea_level_y: p.sea_level_y,
+        tall_above_sea: 22,
+        wind_sign: 1,
+        ..OrographicConfig::default()
+    };
+    let cfg = CondensationConfig {
+        top_y: sky,
+        min_mass_to_rain: 64.0,
+        max_prob_per_tick: 1.0,
+        full_mass: 120.0,
+        mass_per_droplet: 24.0,
+        ..CondensationConfig::default()
+    };
+
+    let mut h_hill = crate::humidity::Humidity::new(tc);
+    h_hill.add(centre_gx, sky, 50.0);
+    let before_hill = h_hill.total_mass();
+    for _ in 0..40 {
+        apply_condensation_rain_with_orographic(&mut w, &mut h_hill, &cfg, Some(&oro));
+        w.tick = w.tick.wrapping_add(1);
+        if h_hill.total_mass() < before_hill {
+            break;
+        }
+    }
+    assert!(
+        h_hill.total_mass() < before_hill,
+        "thin cloud should still rain on the live hill"
+    );
+
+    for y in (p.sea_level_y + 1)..=surface {
+        w.set_cell(centre_gx, y, Cell::air());
+    }
+    w.set_cell(centre_gx, p.sea_level_y, Cell::solid(MaterialId::Stone));
+
+    let mut h_flat = crate::humidity::Humidity::new(tc);
+    h_flat.add(centre_gx, sky, 50.0);
+    let before_flat = h_flat.total_mass();
+    for _ in 0..40 {
+        apply_condensation_rain_with_orographic(&mut w, &mut h_flat, &cfg, Some(&oro));
+        w.tick = w.tick.wrapping_add(1);
+    }
+    assert_eq!(
+        h_flat.total_mass(),
+        before_flat,
+        "flattening the live hill must drop the orographic boost; \
+         the seed profile is still a mountain"
     );
 }
 
@@ -5262,6 +5770,226 @@ fn karst_skips_chunks_without_limestone_flag() {
     assert_eq!(w.get_cell(4, 2).unwrap().material, MaterialId::Air);
 }
 
+#[test]
+fn a_stream_carries_mineral_downhill_and_conserves_it() {
+    // Load must ride surface flow, not stop where it left the ground: a spring
+    // deposits its mineral where the water finally goes, which is what puts
+    // tufa at the outlet rather than inside the rock.
+    let mut w = World::new(37);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..24 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+    }
+    // A walled bedrock trough. All the water starts stacked at the left end, so
+    // there is a real head gradient driving it right.
+    for y in 1..=10 {
+        w.set_cell(0, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(20, y, Cell::solid(MaterialId::Bedrock));
+    }
+    for x in 1..=3 {
+        for y in 1..=8 {
+            w.set_cell(x, y, Cell::water());
+        }
+    }
+    crate::mineral::add_dissolved(&mut w, 2, 4, 600);
+    let before = crate::audit::mineral_total(&w);
+    let upstream_before = crate::mineral::dissolved_at(&w, 2, 4);
+
+    for _ in 0..120 {
+        tick(&mut w);
+    }
+
+    let upstream_after = crate::mineral::dissolved_at(&w, 2, 4);
+    let downstream: u32 = (8..20)
+        .flat_map(|x| (1..10).map(move |y| (x, y)))
+        .map(|(x, y)| crate::mineral::dissolved_at(&w, x, y) as u32)
+        .sum();
+    assert!(
+        upstream_after < upstream_before,
+        "load must leave the source with the water ({upstream_before} -> {upstream_after})"
+    );
+    assert!(
+        downstream > 0,
+        "load should arrive downstream of where it started"
+    );
+    assert_eq!(
+        crate::audit::mineral_total(&w),
+        before,
+        "surface transport must conserve mineral"
+    );
+}
+
+#[test]
+fn a_well_bottomed_in_a_confined_aquifer_rises() {
+    // The playtest well: dug to rock, filled from the sides, no pressure.
+    // Confined head refused to cross saturated pore space, so an aquifer
+    // recharged from higher ground could never reach the shaft.
+    let mut w = World::new(77);
+    for cx in 0..2 {
+        w.ensure_chunk(ChunkCoord::new(cx, 0));
+    }
+    let cap_sand = water_capacity(MaterialId::Sand);
+    // Impermeable floor, a saturated sand aquifer, and a bedrock cap over it —
+    // a confined layer. The aquifer's recharge end stands higher than the well.
+    for x in 0..80 {
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        let mut sand = Cell::solid(MaterialId::Sand);
+        sand.sat = Sat(cap_sand);
+        w.set_cell(x, 1, sand);
+        w.set_cell(x, 2, sand);
+        // Confining cap.
+        w.set_cell(x, 3, Cell::solid(MaterialId::Bedrock));
+        for y in 4..14 {
+            w.set_cell(x, y, Cell::air());
+        }
+    }
+    // Recharge: standing water in an open column at the far end, well above the
+    // well head, connected to the aquifer through a gap in the cap.
+    w.set_cell(70, 3, Cell::air());
+    for y in 3..=10 {
+        w.set_cell(70, y, Cell::water());
+        w.set_cell(71, y, Cell::water());
+    }
+    // The well: a cased shaft punched through the cap down onto the aquifer.
+    // The casing matters — an uncased hole is just open ground, and confined
+    // rise is refused where water could spread sideways instead.
+    w.set_cell(10, 3, Cell::air());
+    for y in 4..12 {
+        w.set_cell(10, y, Cell::air());
+        w.set_cell(9, y, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(11, y, Cell::solid(MaterialId::Bedrock));
+    }
+
+    let before: i32 = (3..12)
+        .filter_map(|y| w.get_cell(10, y).map(|c| c.sat.0 as i32))
+        .sum();
+    for _ in 0..400 {
+        // Sustained recharge: a real aquifer under head is fed from its intake.
+        // Without this the well simply draws the aquifer down and the pressure
+        // path breaks, which is also correct behaviour — just not a test of rise.
+        for y in 3..=10 {
+            w.set_cell(70, y, Cell::water());
+            w.set_cell(71, y, Cell::water());
+        }
+        tick(&mut w);
+    }
+    let after: i32 = (3..12)
+        .filter_map(|y| w.get_cell(10, y).map(|c| c.sat.0 as i32))
+        .sum();
+    assert!(
+        after > before,
+        "an aquifer under head should push water up the shaft ({before} -> {after})"
+    );
+    // Above the confining cap, not merely into the bottom of the hole.
+    let above_cap: i32 = (5..12)
+        .filter_map(|y| w.get_cell(10, y).map(|c| c.sat.0 as i32))
+        .sum();
+    assert!(
+        above_cap > 0,
+        "head should lift water above the confining layer, not just fill the sump"
+    );
+}
+
+#[test]
+fn clay_retains_water_that_gravel_lets_go() {
+    // Field capacity is what gives a lens its character. Two identical columns
+    // wetted to capacity and then left to drain: clay should still be holding
+    // most of its water when gravel has given nearly all of it up.
+    let drained_fraction = |material: MaterialId| -> f32 {
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        // A tall column of the material over an open drain (dry sand below).
+        for y in 1..=6 {
+            w.set_cell(4, y, Cell::solid(MaterialId::Sand));
+        }
+        let cap = water_capacity(material);
+        for y in 7..=12 {
+            let mut c = Cell::solid(material);
+            c.sat = Sat(cap);
+            w.set_cell(4, y, c);
+        }
+        // Wall it so the only escape is downward.
+        for y in 1..=13 {
+            w.set_cell(3, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(5, y, Cell::solid(MaterialId::Bedrock));
+        }
+        let before: i32 = (7..=12)
+            .map(|y| w.get_cell(4, y).unwrap().sat.0 as i32)
+            .sum();
+        for _ in 0..400 {
+            tick(&mut w);
+        }
+        let after: i32 = (7..=12)
+            .map(|y| w.get_cell(4, y).unwrap().sat.0 as i32)
+            .sum();
+        (before - after) as f32 / before.max(1) as f32
+    };
+    let clay = drained_fraction(MaterialId::Clay);
+    let gravel = drained_fraction(MaterialId::Gravel);
+    assert!(
+        gravel > clay,
+        "gravel must drain more freely than clay (gravel={gravel:.2} clay={clay:.2})"
+    );
+    assert!(
+        clay < 0.55,
+        "clay should perch most of its water against gravity (drained {clay:.2})"
+    );
+}
+
+#[test]
+fn karst_dissolve_conserves_mineral_as_dissolved_load() {
+    // Rock must not simply cease to exist: what dissolves becomes load.
+    let mut w = setup_limestone_world();
+    w.set_cell(10, 11, Cell::water());
+    let before = crate::audit::mineral_total(&w);
+    let cfg = KarstConfig {
+        prob_per_wet_neighbour: 1.0,
+        min_wet_neighbour_sat: 200,
+        seed_salt: 42,
+        period_ticks: 1,
+        ..Default::default()
+    };
+    apply_karst_dissolution(&mut w, &cfg);
+    assert_eq!(
+        w.get_cell(10, 10).unwrap().material,
+        MaterialId::Air,
+        "precondition: the limestone dissolved"
+    );
+    assert!(
+        crate::mineral::dissolved_at(&w, 10, 10) > 0,
+        "dissolving rock must emit mineral load into its water"
+    );
+    assert_eq!(
+        crate::audit::mineral_total(&w),
+        before,
+        "dissolve must conserve total mineral (rock + load)"
+    );
+}
+
+#[test]
+fn evaporating_outlet_deposits_mineral_it_carried() {
+    // A dry cell holding a full cell's worth of load leaves a deposit, and the
+    // mineral total is unchanged across the precipitation.
+    let mut w = setup_column_world();
+    w.set_cell(4, 1, Cell::air());
+    crate::mineral::add_dissolved(&mut w, 4, 1, crate::mineral::MINERAL_PER_CELL);
+    let before = crate::audit::mineral_total(&w);
+    crate::mineral::precipitate_dry_cell(&mut w, 4, 1);
+    assert_eq!(
+        w.get_cell(4, 1).unwrap().material,
+        crate::mineral::DEPOSIT_MATERIAL,
+        "an evaporated outlet should build a mineral deposit"
+    );
+    assert_eq!(
+        crate::audit::mineral_total(&w),
+        before,
+        "precipitation must conserve total mineral"
+    );
+}
+
 fn saturate_cell(world: &mut World, gx: i32, gy: i32) {
     let mut cell = world.get_cell(gx, gy).expect("cell");
     cell.sat = Sat(water_capacity(cell.material));
@@ -5328,19 +6056,35 @@ fn dry_buried_limestone_does_not_dissolve() {
 }
 
 #[test]
-fn saturated_buried_stone_dissolves_without_air() {
+fn saturated_buried_stone_does_not_dissolve() {
+    // Silicate stone used to dissolve on the underground path, feeding the same
+    // dissolved load that precipitates as flowstone — so the sim was quietly
+    // converting granite into carbonate. Stone widens *mechanically* under
+    // throughput instead (`mineral::widen_aperture`), and abrades to loose rock
+    // at the surface. Chemically it is inert.
     let mut w = buried_soluble_world(MaterialId::Stone);
     saturate_cell(&mut w, 8, 2);
     apply_karst_dissolution(&mut w, &forced_pore_karst());
     assert_eq!(
         w.get_cell(8, 2).unwrap().material,
-        MaterialId::Air,
-        "pore-saturated stone must dissolve on the underground path"
-    );
-    assert_eq!(
-        w.get_cell(12, 2).unwrap().material,
         MaterialId::Stone,
-        "dry stone two cells away must stay put"
+        "saturated stone must not dissolve: it is not carbonate"
+    );
+}
+
+#[test]
+fn saturated_buried_flowstone_dissolves_like_the_limestone_it_is() {
+    // Flowstone is the same carbonate as limestone, just precipitated rather
+    // than bedded, so a conduit it has sealed must be able to open again. It was
+    // missing from the old hardcoded soluble pair, which meant a sealed passage
+    // stayed sealed forever.
+    let mut w = buried_soluble_world(MaterialId::Flowstone);
+    saturate_cell(&mut w, 8, 2);
+    apply_karst_dissolution(&mut w, &forced_pore_karst());
+    assert_eq!(
+        w.get_cell(8, 2).unwrap().material,
+        MaterialId::Air,
+        "saturated flowstone must dissolve on the underground path"
     );
 }
 
@@ -6930,6 +7674,182 @@ fn seepage_crosses_vertical_chunk_seam_via_tick() {
 
 
 #[test]
+fn a_settled_boulder_field_stops_moving() {
+    // A boulder was shuffling between two columns forever: a level slide does
+    // no work against gravity, so the downhill test could send it straight
+    // back. Each of those moves kept the body pass's topology loop alive for
+    // another full component rebuild, so 3.4 rolls/tick cost ~12 ms/tick on an
+    // otherwise settled world. Nothing should still be moving here.
+    let params = crate::worldgen::WorldgenParams::default();
+    let mut w = World::new(params.seed);
+    crate::worldgen::stamp_world(&mut w, &params);
+    let perf = PerfConfig::default();
+    for _ in 0..1200 {
+        tick_with_perf(&mut w, &perf);
+    }
+    let mut moves = 0usize;
+    for _ in 0..60 {
+        tick_with_perf(&mut w, &perf);
+        moves += w.competent_cell_moves.len();
+    }
+    assert_eq!(
+        moves, 0,
+        "settled rock should not keep rolling ({moves} cell moves over 60 ticks)"
+    );
+}
+
+#[test]
+fn a_diagonal_vein_conducts_along_its_own_axis() {
+    // Without diagonal faces, water in a diagonal vein has to zigzag through
+    // the corner cells between it, so the vein is throttled to *their*
+    // permeability and only grid-aligned veins conduct.
+    //
+    // The corners are bedrock, so the diagonal is the *only* path: a vein
+    // through merely tight rock still leaks through the corners and would carry
+    // water either way. Seepage is driven directly rather than through ticks,
+    // because a fully buried vein with no free surface never gets planned --
+    // that is the wake's business, not this rule's.
+    let mut w = World::new(11);
+    w.ensure_chunk(ChunkCoord::new(0, 0));
+    for x in 0..12 {
+        for y in 0..12 {
+            w.set_cell(x, y, Cell::solid(MaterialId::Bedrock));
+        }
+    }
+    let vein: Vec<(i32, i32)> = (0..5).map(|i| (3 + i, 9 - i)).collect();
+    for &(x, y) in &vein {
+        w.set_cell(x, y, Cell::solid(MaterialId::Gravel));
+    }
+    let mut wet = Cell::solid(MaterialId::Gravel);
+    wet.sat.0 = water_capacity(MaterialId::Gravel);
+    w.set_cell(vein[0].0, vein[0].1, wet);
+
+    let region = crate::active::ActiveChunk {
+        coord: ChunkCoord::new(0, 0),
+        rect: crate::chunk::Rect {
+            x0: 0,
+            y0: 0,
+            x1: 15,
+            y1: 15,
+        },
+    };
+    for _ in 0..200 {
+        super::seepage::apply_seepage_regions(&mut w, std::slice::from_ref(&region));
+        w.tick += 1;
+    }
+    let far = vein[vein.len() - 1];
+    let far_sat = w.get_cell(far.0, far.1).unwrap().sat.0;
+    assert!(
+        far_sat > 0,
+        "water should reach the far end of a diagonal vein whose only \
+         connection is the diagonal face (sat={far_sat})"
+    );
+}
+
+#[test]
+fn bentonite_perches_water_that_clay_lets_through() {
+    // The point of adding bentonite: clay at permeability 10 against
+    // limestone's 140 is only ~14x tighter, which still equalises over a
+    // geological cadence, so there was no real aquitard and so no confined
+    // head. Same column twice, one capped with clay and one with bentonite.
+    fn drained_through(seal: MaterialId, ticks: u32) -> u32 {
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for y in 0..=20 {
+            w.set_cell(2, y, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(6, y, Cell::solid(MaterialId::Bedrock));
+        }
+        w.set_cell(3, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(4, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(5, 0, Cell::solid(MaterialId::Bedrock));
+        // Gravel reservoir below, the seal, then saturated sand above it.
+        for x in 3..=5 {
+            for y in 1..=3 {
+                w.set_cell(x, y, Cell::solid(MaterialId::Gravel));
+            }
+            for y in 4..=5 {
+                w.set_cell(x, y, Cell::solid(seal));
+            }
+            for y in 6..=9 {
+                let mut c = Cell::solid(MaterialId::Sand);
+                c.sat.0 = water_capacity(MaterialId::Sand);
+                w.set_cell(x, y, c);
+            }
+        }
+        let perf = PerfConfig::default();
+        for _ in 0..ticks {
+            tick_with_perf(&mut w, &perf);
+        }
+        // How much reached the reservoir under the seal.
+        (1..=3)
+            .map(|y| w.get_cell(4, y).unwrap().sat.0 as u32)
+            .sum::<u32>()
+    }
+    // Confinement is a *timescale* property, not an endpoint: given long
+    // enough, water equalises through anything with a non-zero permeability,
+    // and real confining layers are leaky. What matters is that leakage is slow
+    // next to recharge, so the comparison is made at a finite horizon.
+    for ticks in [800, 1600, 2400] {
+        let clay = drained_through(MaterialId::Clay, ticks);
+        let bent = drained_through(MaterialId::Bentonite, ticks);
+        assert!(clay > 0, "clay should leak at {ticks} ticks, passed {clay}");
+        assert!(
+            bent * 4 < clay,
+            "at {ticks} ticks bentonite should still be holding back far more \
+             than clay (clay passed {clay}, bentonite passed {bent})"
+        );
+    }
+}
+
+#[test]
+fn dry_seam_costs_nothing_but_a_wet_one_still_couples() {
+    // The seam band used to be emitted for every chunk pair at full width,
+    // which made cross-seam coupling the single most expensive pass in the
+    // simulation while most seams have no water to move. Narrowing it must
+    // not cost the coupling itself.
+    let mut dry = World::new(9);
+    dry.ensure_chunk(ChunkCoord::new(0, 0));
+    dry.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..8 {
+        for y in 60..=67 {
+            dry.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    assert!(
+        super::seepage::seam_seepage_regions(&dry).is_empty(),
+        "a seam with no water anywhere should not be scanned at all"
+    );
+
+    // Same geometry, one wet column straddling the face.
+    let mut wet = World::new(9);
+    wet.ensure_chunk(ChunkCoord::new(0, 0));
+    wet.ensure_chunk(ChunkCoord::new(0, 1));
+    for x in 0..8 {
+        for y in 60..=67 {
+            wet.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+    }
+    let mut soaked = Cell::solid(MaterialId::Stone);
+    soaked.sat.0 = water_capacity(MaterialId::Stone);
+    wet.set_cell(4, 63, soaked);
+    let regions = super::seepage::seam_seepage_regions(&wet);
+    assert!(
+        !regions.is_empty(),
+        "a wet column on the face must still be coupled"
+    );
+    // The band should cover the wet column and not the whole chunk width.
+    let covers = regions.iter().any(|a| {
+        a.coord == ChunkCoord::new(0, 0) && a.rect.x0 <= 4 && a.rect.x1 >= 4
+    });
+    assert!(covers, "band must cover the wet column, got {regions:?}");
+    let widest = regions.iter().map(|a| a.rect.x1 - a.rect.x0 + 1).max().unwrap();
+    assert!(
+        widest < CHUNK_CELLS_W as u8,
+        "one wet column should not scan the full chunk width, got {widest}"
+    );
+}
+
+#[test]
 fn pore_sat_does_not_shelf_across_vertical_chunk_seam() {
     // Fully buried stone column across y=63|64 with standing water above.
     // Pore water must keep crossing the seam — no permanent sat step that
@@ -7340,8 +8260,12 @@ fn wetting_front_advances_past_quarter_capacity() {
         },
     );
     w.set_cell(4, 3, Cell::solid(MaterialId::Bedrock));
+    // Tight rock fires with odds now, so the tick has to advance: the gate is
+    // hashed on it, and repeating a call at a fixed tick re-rolls the same
+    // answer forever.
     for _ in 0..12 {
         apply_seepage(&mut w);
+        w.tick += 1;
     }
     let below = w.get_cell(4, 1).unwrap().sat.0;
     assert!(

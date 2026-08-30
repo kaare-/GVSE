@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "notes": "1M soak survival (wetter clouds, easier spore bank, Tab-like evap)",
   "rain": {
     "top_y": 0,
@@ -24,7 +24,7 @@
     "min_mass_to_rain": 72.0,
     "max_prob_per_tick": 0.25,
     "full_mass": 512.0,
-    "mass_per_droplet": 72.0,
+    "mass_per_droplet": 255.0,
     "seed_salt": 3238902366
   },
   "oro": {
@@ -186,9 +186,9 @@
   },
   "max_atoms": 256.0,
   "max_corpses": 256.0,
-  "max_roots": 16.0,
-  "max_stems": 10.0,
-  "max_photos": 12.0,
+  "max_roots": 96.0,
+  "max_stems": 64.0,
+  "max_photos": 96.0,
   "mat_perm": [
     0.0,
     5.0,

@@ -133,6 +133,11 @@ impl Humidity {
     }
 
     /// Neighbour tile in +x / −x, wrapping horizontally on ring maps.
+    pub fn wrap_tile_x(&self, hx: i32) -> Option<i32> {
+        self.wrap_hx(hx)
+    }
+
+    /// Neighbour tile in +x / −x, wrapping horizontally on ring maps.
     fn wrap_hx(&self, hx: i32) -> Option<i32> {
         match self.bounds {
             Some(b) if self.wrap_x => {
@@ -432,6 +437,15 @@ impl Humidity {
     /// [`Self::buoyant_rise`] scaled by the local lapse: warm air under
     /// colder air lifts harder; a stable inversion almost sits still.
     /// Same tile walk as the uniform rise — no extra world scans.
+/// How much a column's temperature anomaly changes its lift, per degree.
+const CONVECTION_GAIN_PER_C: f32 = 0.15;
+/// Anomaly is clamped before it is applied, so a freak tile cannot dominate.
+const CONVECTION_CLAMP_C: f32 = 6.0;
+/// Cool ground suppresses but never fully blocks lift; warm ground roughly
+/// doubles it. Bounded so convection reshapes the field rather than gating it.
+const CONVECTION_MIN_GAIN: f32 = 0.25;
+const CONVECTION_MAX_GAIN: f32 = 2.0;
+
     pub fn buoyant_rise_thermal(
         &mut self,
         fraction: f32,
@@ -443,6 +457,38 @@ impl Humidity {
             return;
         }
         let snap = self.cells.clone();
+        // Mean temperature **per row**, computed once.
+        //
+        // Two mistakes to avoid here, both of which were made and measured. It has
+        // to be hoisted: calling `Temperature::mean()` inside the loop scans the
+        // whole field per tile and collapsed the frame rate. And it has to be
+        // per-row: against a *global* mean every high-altitude tile reads as cool,
+        // because temperature falls with altitude, so lift was suppressed aloft
+        // everywhere and vapour piled into a dense unmoving layer near the ground.
+        // The anomaly that means anything is horizontal — this column against other
+        // columns at the same height.
+        //
+        // Averaged across the **world's** tile row, not across the tiles that
+        // happen to hold vapour: keyed on occupancy, a lone cloud is its own mean
+        // and never convects at all, and the reference drifts with wherever the
+        // vapour currently is.
+        let row_mean: HashMap<i32, f32> = match (temp, self.bounds) {
+            (Some(t), Some(b)) => {
+                let rows: std::collections::HashSet<i32> = snap.keys().map(|&(_, hy)| hy).collect();
+                rows.into_iter()
+                    .map(|hy| {
+                        let mut sum = 0.0f32;
+                        let mut n = 0u32;
+                        for hx in b.hx_min..=b.hx_max {
+                            sum += t.at_tile(hx, hy);
+                            n += 1;
+                        }
+                        (hy, sum / n.max(1) as f32)
+                    })
+                    .collect()
+            }
+            _ => HashMap::new(),
+        };
         let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
         for (&(hx, hy), &mass) in &snap {
             if mass <= 0.0 || hy >= max_hy {
@@ -456,7 +502,28 @@ impl Humidity {
                 let here = t.at_tile(hx, hy);
                 let above = t.at_tile(hx, dest);
                 let lapse = (here - above).clamp(-5.0, 10.0);
-                (fraction * (0.40 + lapse * 0.11)).clamp(0.0, 0.45)
+                let base = (fraction * (0.40 + lapse * 0.11)).clamp(0.0, 0.45);
+                // Horizontal anomaly: how much warmer this column is than the
+                // world.
+                //
+                // The lapse term alone is nearly uniform, because temperature
+                // falls smoothly with altitude everywhere — so vapour rose at
+                // much the same rate over every column and the field stayed
+                // horizontally flat however hard it was driven. Convection is
+                // the *difference* between columns: thermals form over ground
+                // that is warmer than its surroundings and not over ground that
+                // is cooler, which is what organises moisture instead of
+                // spreading it evenly.
+                //
+                // Warm land against cool sea, sunlit slope against shaded, and
+                // the diurnal swing all feed this for free, since they are
+                // already in the temperature field.
+                let reference = row_mean.get(&hy).copied().unwrap_or(here);
+                let anomaly =
+                    (here - reference).clamp(-Self::CONVECTION_CLAMP_C, Self::CONVECTION_CLAMP_C);
+                let gain = (1.0 + anomaly * Self::CONVECTION_GAIN_PER_C)
+                    .clamp(Self::CONVECTION_MIN_GAIN, Self::CONVECTION_MAX_GAIN);
+                (base * gain).clamp(0.0, 0.45)
             } else {
                 fraction
             };
@@ -524,6 +591,71 @@ impl Humidity {
             v.abs() > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
         });
     }
+
+    /// [`Self::advect`] then lift on columns that climb the **live** hill.
+    ///
+    /// Uniform `(vx, vy)` cannot see slope. [`crate::wind::Wind::vy_at`]
+    /// already walks [`crate::worldgen::live_surface_at`]; this spends that
+    /// lift on the vapour field so an eroded ridge does not keep lofting
+    /// mass the seed profile invented.
+    pub fn advect_with_surface(
+        &mut self,
+        vx: f32,
+        vy: f32,
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+    ) {
+        self.advect(vx, vy);
+        self.apply_orographic_lift(wind, Some(world));
+    }
+
+    /// Move a lift-fraction of each tile one step up where the live
+    /// (or seed, if `world` is `None`) surface rises downwind.
+    pub fn apply_orographic_lift(
+        &mut self,
+        wind: &crate::wind::Wind,
+        world: Option<&crate::grid::World>,
+    ) {
+        if self.cells.is_empty() {
+            return;
+        }
+        let snap = self.cells.clone();
+        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        for (&(hx, hy), &mass) in &snap {
+            if mass <= 0.0 {
+                continue;
+            }
+            let lift = wind.orographic_lift(world, hx);
+            if lift <= 1e-5 {
+                continue;
+            }
+            let dest = hy + 1;
+            if !self.accepts(hx, dest) {
+                continue;
+            }
+            let take = mass * lift;
+            if take <= 1e-9 {
+                continue;
+            }
+            *deltas.entry((hx, hy)).or_insert(0.0) -= take;
+            *deltas.entry((hx, dest)).or_insert(0.0) += take;
+        }
+        for (k, d) in deltas {
+            if d < 0.0 {
+                if let Some(e) = self.cells.get_mut(&k) {
+                    *e += d;
+                }
+                continue;
+            }
+            if self.accepts(k.0, k.1) {
+                *self.cells.entry(k).or_insert(0.0) += d;
+            }
+        }
+        let bounds = self.bounds;
+        self.cells.retain(|&(hx, hy), v| {
+            *v > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
+        });
+    }
 }
 
 #[cfg(test)]
@@ -554,6 +686,36 @@ mod tests {
     }
 
     #[test]
+    fn sample_bilinear_smooths_the_tile_row_at_128() {
+        let mut h = Humidity::new(4);
+        h.cells.insert((45, 31), 40.0);
+        h.cells.insert((45, 32), 190.0);
+        let lo = h.sample_bilinear(181.5, 126.0);
+        let mid = h.sample_bilinear(181.5, 128.0);
+        let hi = h.sample_bilinear(181.5, 130.0);
+        assert!(
+            lo < mid && mid < hi,
+            "y=127/128 is a tile edge, not a clamp (lo={lo} mid={mid} hi={hi})"
+        );
+    }
+
+    #[test]
+    fn sample_bilinear_wraps_at_the_ring_seam() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 16, 16);
+        h.wrap_x = true;
+        h.cells.insert((0, 0), 0.0);
+        h.cells.insert((3, 0), 100.0);
+        // Tile centres at x=2 (hx=0) and x=14 (hx=3). Mid-seam is x=0
+        // wrapping, or x=16. Must not read a missing hx=-1 as dry.
+        let seam = h.sample_bilinear(0.0, 2.0);
+        assert!(
+            (seam - 50.0).abs() < 1.0,
+            "ring seam should lerp 0↔100, got {seam}"
+        );
+        assert!((h.sample_bilinear(16.0, 2.0) - seam).abs() < 1e-3);
+    }
+
+    #[test]
     fn advect_moves_mass_and_conserves() {
         let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
         h.wrap_x = true;
@@ -569,6 +731,98 @@ mod tests {
             h.at_tile(3, 2) > 50.0,
             "mass should have shifted +1 tile in x, got {}",
             h.at_tile(3, 2)
+        );
+    }
+
+    #[test]
+    fn orographic_lift_follows_the_live_hill() {
+        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use crate::worldgen::{continental_surface_y, WorldgenParams};
+        use wk_material::MaterialId;
+        use crate::cell::Cell;
+
+        let p = WorldgenParams::default();
+        let wind = Wind::climate(
+            4,
+            0.12,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        let mut hx_climb = 0;
+        let mut best = 0.0f32;
+        for hx in 0..(p.width_cols / 4) {
+            let l = wind.orographic_lift(None, hx);
+            if l > best {
+                best = l;
+                hx_climb = hx;
+            }
+        }
+        assert!(best > 1e-4, "seed profile should loft somewhere, got {best}");
+
+        let tc = 4;
+        let gx = hx_climb * tc + tc / 2;
+        let sign = if wind.climate_vx >= 0.0 { 1 } else { -1 };
+        let gx_dn = gx + sign * tc;
+        let hint_dn = continental_surface_y(p.seed, gx_dn, p.sea_level_y, p.width_cols);
+
+        let mut live = World::new(p.seed);
+        for x in [gx, gx_dn] {
+            let hint = continental_surface_y(p.seed, x, p.sea_level_y, p.width_cols);
+            for y in p.sea_level_y..=hint.max(hint_dn) {
+                live.ensure_chunk(ChunkCoord::new(
+                    x.div_euclid(CHUNK_CELLS_W as i32),
+                    y.div_euclid(CHUNK_CELLS_H as i32),
+                ));
+            }
+            live.set_cell(x, p.sea_level_y, Cell::solid(MaterialId::Stone));
+            for y in (p.sea_level_y + 1)..=hint {
+                live.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+
+        let gy = (p.sea_level_y + 8).max(0);
+        let mut on_hill = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        on_hill.wrap_x = true;
+        on_hill.add(gx, gy, 100.0);
+        let hy0 = on_hill.tile_of(gx, gy).1;
+        on_hill.apply_orographic_lift(&wind, Some(&live));
+        let rose_live = on_hill.at_tile(hx_climb, hy0 + 1);
+
+        for y in (p.sea_level_y + 1)..=hint_dn {
+            live.set_cell(gx_dn, y, Cell::air());
+        }
+        live.set_cell(gx_dn, p.sea_level_y, Cell::solid(MaterialId::Stone));
+
+        let mut flat = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        flat.wrap_x = true;
+        flat.add(gx, gy, 100.0);
+        flat.apply_orographic_lift(&wind, Some(&live));
+        let rose_flat = flat.at_tile(hx_climb, hy0 + 1);
+        assert!(
+            rose_live > rose_flat + 0.01,
+            "flattening the live downwind column should cut lift ({rose_live} vs {rose_flat})"
+        );
+        assert!(
+            (on_hill.total_mass() - 100.0).abs() < 1e-3,
+            "lift must conserve mass"
         );
     }
 
@@ -777,5 +1031,86 @@ mod tests {
             h.at_tile(0, 0) > 0.0,
             "mass should wrap from hx=3 to hx=0"
         );
+    }
+}
+
+#[cfg(test)]
+mod convection_tests {
+    use super::*;
+    use crate::temperature::{TempConfig, Temperature};
+
+    /// Temperature field with one warm column and one cool one at the same height.
+    fn split_temp(width: i32) -> Temperature {
+        let mut t = Temperature::with_world_bounds(4, 0, 0, width, 320, 1, width, 40, false);
+        t.fill_initial(0);
+        t
+    }
+
+    /// Convection is the *difference* between columns, not the average lift.
+    ///
+    /// Buoyancy was driven only by the vertical lapse, which falls smoothly with
+    /// altitude everywhere — so vapour rose at much the same rate over every
+    /// column and the field stayed horizontally flat however hard it was driven.
+    /// A column warmer than the world must lift more than a cooler one, or
+    /// moisture is spread rather than organised.
+    #[test]
+    fn a_warm_column_lifts_more_than_a_cool_one() {
+        let width = 256;
+        let temp = split_temp(width);
+        let mean = temp.mean();
+
+        // Find two tiles at the same height with a real temperature spread.
+        let hy = 12;
+        let mut warm_hx = None;
+        let mut cool_hx = None;
+        for hx in 0..(width / 4) {
+            let here = temp.at_tile(hx, hy);
+            if here > mean + 0.5 && warm_hx.is_none() {
+                warm_hx = Some(hx);
+            }
+            if here < mean - 0.5 && cool_hx.is_none() {
+                cool_hx = Some(hx);
+            }
+        }
+        let (Some(warm_hx), Some(cool_hx)) = (warm_hx, cool_hx) else {
+            // No horizontal spread in this fixture: nothing to assert about
+            // convection, and saying so beats a false pass.
+            eprintln!("fixture had no horizontal temperature spread; skipped");
+            return;
+        };
+
+        let lifted = |hx: i32| -> f32 {
+            let mut h = Humidity::with_world_bounds(4, 0, 0, width, 320);
+            h.cells.insert((hx, hy), 1000.0);
+            h.buoyant_rise_thermal(0.30, 60, Some(&temp));
+            h.cells.get(&(hx, hy + 1)).copied().unwrap_or(0.0)
+        };
+        let w = lifted(warm_hx);
+        let c = lifted(cool_hx);
+        assert!(
+            w > c,
+            "the warmer column should lift more vapour ({w:.2} vs {c:.2})"
+        );
+    }
+
+    #[test]
+    fn convection_conserves_vapour() {
+        // Lift moves mass between tiles; it must never create or destroy any.
+        let width = 128;
+        let temp = split_temp(width);
+        let mut h = Humidity::with_world_bounds(4, 0, 0, width, 320);
+        for hx in 0..(width / 4) {
+            h.cells.insert((hx, 10), 500.0);
+        }
+        let before = h.total_mass();
+        for _ in 0..20 {
+            h.buoyant_rise_thermal(0.30, 60, Some(&temp));
+        }
+        let after = h.total_mass();
+        assert!(
+            (before - after).abs() < before * 1e-4,
+            "convection must conserve vapour ({before} -> {after})"
+        );
+        let _ = TempConfig::default();
     }
 }

@@ -19,7 +19,8 @@
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution (surface limestone + slow groundwater)
 //! - `O` — toggle Set A organisms (Atom step)
-//! - `H` — toggle humidity tile diagnostic + wind streaks (default on)
+//! - `H` — toggle humidity tile diagnostic (default on)
+//! - `V` — toggle wind streak overlay (default off; placeholder visual)
 //! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
 //! - `T` — toggle temperature heatmap overlay
 //! - `U` — toggle ground saturation heatmap (pores + free water)
@@ -62,7 +63,7 @@ use wk_voxel::{
     apply_weather_rgb, apply_competent_fall_regions, apply_landscape_fall, celestial_local_cfg,
     celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
-    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, is_standing_water, plan_active,
+    geotech_map_due, humidity_diffuse_due, is_daytime_cfg, plan_active,
     pore_wetness_with, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg,
     set_parallel_enabled, step_carbon_budget, support_map_due, temperature_step_due, tick_with_life,
     wake_competent_bodies_all, wake_unsupported_grains,
@@ -72,7 +73,8 @@ use wk_voxel::{
 
 use crate::atmosphere::{
     apply_celestial_key_rgb, apply_organism_celestial_key_rgb, draw_canopy_air_dim,
-    draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, CloudDepthLayer,
+    draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, draw_wind_streaks,
+    CloudDepthLayer,
     draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_organism_aboveground,
     organism_celestial_rim, sky_weather_for_scene, terrain_celestial_key_strength,
     toward_light_celestial, RidgeSilhouette,
@@ -211,6 +213,7 @@ async fn main() {
     let mut organisms_on = true;
     // Humidity diagnostic default on (`H`); soft clouds default on (`N`).
     let mut humidity_overlay = true;
+    let mut wind_streaks_overlay = false;
     let mut clouds_on = true;
     let mut temp_overlay = false;
     let mut sat_overlay = false;
@@ -461,6 +464,9 @@ async fn main() {
             if is_key_pressed(KeyCode::H) {
                 humidity_overlay = !humidity_overlay;
             }
+            if is_key_pressed(KeyCode::V) {
+                wind_streaks_overlay = !wind_streaks_overlay;
+            }
             if is_key_pressed(KeyCode::N) {
                 clouds_on = !clouds_on;
             }
@@ -565,7 +571,9 @@ async fn main() {
             }
             // Vapor drifts with the wind, then warm air rises and
             // condenses where it meets colder air / ground.
-            scene.humidity.advect(wind_vx, wind_vy);
+            scene
+                .humidity
+                .advect_with_surface(wind_vx, wind_vy, &scene.wind, &scene.world);
             let tick_no = scene.world.tick;
             scene.clouds.step_with_precip(
                 &mut scene.world,
@@ -648,6 +656,14 @@ async fn main() {
                     .shift_atoms_with_moved_cells(&mut scene.world, &moves);
             }
             set_parallel_enabled(true);
+            // Airborne snow takes at most one cell downwind per tick. Kept
+            // out of grain settle so a deep pass cannot blow flakes across
+            // the map; landed pack is repose's problem.
+            let _ = wk_voxel::apply_snow_wind_drift(
+                &mut scene.world,
+                wind_vx,
+                scene.wind.tile_cols,
+            );
             // Crude CO₂ buckets: surface Organic oxidation + atm↔lake exchange.
             step_carbon_budget(&mut scene.carbon, &mut scene.world, &settings.carbon);
             // Floating Organic drifts with the wind; root-bound mats sail plants.
@@ -673,6 +689,10 @@ async fn main() {
             let _ = wk_voxel::shove_floating_organic_with_current(&mut scene.world);
             // Bedload / bank transport after water has moved this tick.
             apply_flow_erosion_bound(&mut scene.world, &settings.grain, rooted.as_ref());
+            // The fine-grained half of the same process: clay too small to
+            // travel as bedload goes into suspension where the water moves, and
+            // settles back out as mud where it slows.
+            wk_voxel::sediment::apply_suspension(&mut scene.world);
             if geotech_due {
                 // Post-CA dirty halo → incremental column update (S5).
                 scene.geotech.rebuild_smart(&scene.world);
@@ -1141,6 +1161,31 @@ async fn main() {
         };
         let overlay_k = if heatmap_on { blend } else { 1.0 };
 
+        // Terrain is drawn as vertical runs, not one rectangle per cell.
+        //
+        // The inner loop walks `y` for a fixed column and strata are horizontal
+        // layers, so consecutive cells almost always resolve to the same colour
+        // — a buried column is one long run. One `draw_rectangle` per cell put
+        // hundreds of thousands of quads into the vertex buffer every frame on a
+        // demo-sized world. Merging is visually identical (it also removes the
+        // sub-pixel seams between stacked cells).
+        let bedrock_y = scene.params.bedrock_floor_y;
+        // Porous cells get a single dark pixel — a pore, not a hole. Collected
+        // during the terrain pass (the cell is already in hand) and drawn after,
+        // so the merged runs below are untouched. The fracture tail makes high
+        // pore values rare, so this stays a small list.
+        let mut stipples: Vec<(f32, f32, Color)> = Vec::new();
+        let draw_run = |sx: f32, y0: i32, y1: i32, rgb: [u8; 3]| {
+            let top = origin_y - (y1 - bedrock_y) as f32 * cell_px - cell_px;
+            let h = (y1 - y0 + 1) as f32 * cell_px;
+            draw_rectangle(
+                sx,
+                top,
+                cell_px,
+                h,
+                Color::from_rgba(rgb[0], rgb[1], rgb[2], terrain_alpha),
+            );
+        };
         for &x_copy in x_copies {
             let x_shift = x_copy * scene.params.width_cols;
             for x in 0..scene.params.width_cols {
@@ -1148,59 +1193,116 @@ async fn main() {
                 if sx + cell_px < 0.0 || sx > sw {
                     continue;
                 }
+                // Open run: first world-y, last world-y, colour.
+                let mut run: Option<(i32, i32, [u8; 3])> = None;
                 for y in y_min_vis..y_max_vis {
-                    let sy = origin_y - (y - scene.params.bedrock_floor_y) as f32 * cell_px;
+                    let sy = origin_y - (y - bedrock_y) as f32 * cell_px;
                     // Guard for the rounding slop on the frustum bounds.
-                    if sy + cell_px < 0.0 || sy > sh {
-                        continue;
-                    }
-                    let Some(cell) = scene.world.get_cell(x, y) else {
-                        continue;
+                    let drawable = sy + cell_px >= 0.0 && sy <= sh;
+                    let rgb = if !drawable {
+                        None
+                    } else {
+                        scene.world.get_cell(x, y).and_then(|cell| {
+                            // Draw water in the air as well as on the ground.
+                            //
+                            // Mid-air sat used to be hidden, because rain
+                            // teleported to the surface and the falling part was a
+                            // cosmetic streak drawn over it. Rain now nucleates in
+                            // the air and descends, so what is up there is real
+                            // water and hiding it would make actual rainfall
+                            // invisible.
+                            //
+                            // Thin wet-air films (condensation residual / haze sat)
+                            // still must not paint as a bright ground outline, so
+                            // the haze band is unchanged: ≤32 is atmospheric film,
+                            // not a droplet.
+                            if cell.material == wk_material::MaterialId::Air
+                                && (cell.sat.is_empty()
+                                    || cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX)
+                            {
+                                return None;
+                            }
+                            let [r0, g0, b0] = crate::palette::cell_color_with(
+                                cell,
+                                &scene.world.hydro,
+                                settings.wet_darken,
+                            );
+                            let [mut r, mut g, mut b] =
+                                apply_weather_rgb([r0, g0, b0], dn_fg, &sky_weather);
+                            // Crest key + soft bleed into subsurface / water.
+                            let key = terrain_celestial_key_strength(
+                                &scene.world,
+                                x,
+                                y,
+                                sun_local,
+                                sun_day,
+                            );
+                            if key > 0.03 {
+                                let lit =
+                                    apply_celestial_key_rgb([r, g, b], key, sun_local, sun_day);
+                                r = lit[0];
+                                g = lit[1];
+                                b = lit[2];
+                            }
+                            if settings.pore_stipple > 0.0
+                                && crate::palette::shows_pore_stipple(cell, &scene.world.hydro)
+                            {
+                                // Deterministic sub-cell position so a lens reads
+                                // as scattered grain, not a regular grid.
+                                let h = (x as u32)
+                                    .wrapping_mul(0x9E37_79B9)
+                                    .wrapping_add((y as u32).wrapping_mul(0x85EB_CA6B))
+                                    >> 11;
+                                let step = (cell_px / 3.0).max(1.0);
+                                let ox = (h % 3) as f32 * step;
+                                let oy = ((h / 3) % 3) as f32 * step;
+                                let k = settings.pore_stipple
+                                    * crate::palette::pore_bucket(cell) as f32
+                                    / (crate::palette::TINT_LEVELS - 1) as f32;
+                                stipples.push((
+                                    sx + ox,
+                                    sy - cell_px + oy,
+                                    Color::from_rgba(
+                                        (r as f32 * (1.0 - k)) as u8,
+                                        (g as f32 * (1.0 - k)) as u8,
+                                        (b as f32 * (1.0 - k)) as u8,
+                                        terrain_alpha,
+                                    ),
+                                ));
+                            }
+                            Some([r, g, b])
+                        })
                     };
-                    // Only draw standing water (pools / ocean film / land
-                    // puddles). Mid-air sat stays invisible — falling rain
-                    // is the cosmetic streak under raining clouds.
-                    // Thin wet-air films (condensation residual / haze sat)
-                    // must not paint as a bright blue-white ground outline.
-                    if cell.material == wk_material::MaterialId::Air {
-                        if cell.sat.is_empty() {
-                            continue;
+                    match (rgb, run) {
+                        // Extends the open run.
+                        (Some(c), Some((y0, y1, rc))) if c == rc && y == y1 + 1 => {
+                            run = Some((y0, y, rc));
                         }
-                        // Match grain haze band: ≤32 is atmospheric film, not puddle.
-                        if cell.sat.0 <= wk_voxel::GRAIN_REPOSE_HAZE_MAX {
-                            continue;
+                        // Starts a run, closing any previous one.
+                        (Some(c), prev) => {
+                            if let Some((y0, y1, rc)) = prev {
+                                draw_run(sx, y0, y1, rc);
+                            }
+                            run = Some((y, y, c));
                         }
-                        let below_sea = y <= scene.params.sea_level_y;
-                        if !below_sea && !is_standing_water(&scene.world, x, y) {
-                            continue;
+                        // Nothing to draw here — the run cannot continue past a gap.
+                        (None, prev) => {
+                            if let Some((y0, y1, rc)) = prev {
+                                draw_run(sx, y0, y1, rc);
+                            }
+                            run = None;
                         }
                     }
-                    let [r0, g0, b0] = cell_color(cell);
-                    let [mut r, mut g, mut b] =
-                        apply_weather_rgb([r0, g0, b0], dn_fg, &sky_weather);
-                    // Crest key + soft bleed into subsurface / water.
-                    let key = terrain_celestial_key_strength(
-                        &scene.world,
-                        x,
-                        y,
-                        sun_local,
-                        sun_day,
-                    );
-                    if key > 0.03 {
-                        let lit = apply_celestial_key_rgb([r, g, b], key, sun_local, sun_day);
-                        r = lit[0];
-                        g = lit[1];
-                        b = lit[2];
-                    }
-                    draw_rectangle(
-                        sx,
-                        sy - cell_px,
-                        cell_px,
-                        cell_px,
-                        Color::from_rgba(r, g, b, terrain_alpha),
-                    );
+                }
+                if let Some((y0, y1, rc)) = run {
+                    draw_run(sx, y0, y1, rc);
                 }
             }
+        }
+        // Pore stipple on top of the merged runs.
+        let dot = (cell_px / 3.0).max(1.0);
+        for (px, py, c) in stipples.drain(..) {
+            draw_rectangle(px, py, dot, dot, c);
         }
 
         // Detached landscape bodies (in-flight rigid pieces).
@@ -1286,7 +1388,6 @@ async fn main() {
                 &scene.humidity,
                 &scene.world,
                 &scene.wind,
-                scene.world.tick,
                 origin_x,
                 origin_y,
                 cell_px,
@@ -1297,6 +1398,9 @@ async fn main() {
                 sw,
                 sh,
             );
+        }
+        if wind_streaks_overlay {
+            draw_wind_streaks(&scene.wind, scene.world.tick, sw, sh);
         }
 
         // Temperature heatmap overlay (blue cold → red hot).
@@ -1383,7 +1487,7 @@ async fn main() {
                             }
                             cell.sat.as_f32()
                         } else {
-                            let cap = scene.world.water_capacity(cell.material);
+                            let cap = wk_voxel::water_capacity_cell(cell, &scene.world.hydro);
                             if cap == 0 {
                                 continue;
                             }
@@ -1709,7 +1813,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/U/H/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
+                "Tab|Space|R|W/C/E/K/O|I|N/T/U/H/V/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

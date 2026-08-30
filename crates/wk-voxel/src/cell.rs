@@ -3,7 +3,8 @@
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
 //! Per-cell data: material tag + water saturation + a few flag bits.
-//! Deliberately packed to 4 bytes so a 64×64 chunk fits in 16 KiB and
+//! Deliberately byte-packed; the stored pore coordinate makes this 5
+//! bytes so a 64×64 chunk's cell slab is 20 KiB.
 //! stays cache-friendly for the future 4-pass checkerboard update
 //! (Noita).
 
@@ -85,7 +86,8 @@ impl CellFlags {
     }
 }
 
-/// One cell in the 2D grid. 4 bytes exactly on a normal Rust target.
+/// One cell in the 2D grid. `pore` deliberately widens the old 4-byte
+/// layout; voxel saves are disposable across this schema change.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Cell {
     pub material: MaterialId,
@@ -93,8 +95,12 @@ pub struct Cell {
     pub flags: CellFlags,
     /// Mycelium thread intensity (0..=255) on porous hosts
     /// ([`hosts_mycelium`]). Cleared on material change / non-hosts.
-    /// Widening `Cell` past 4 bytes bumps [`crate::SIM_SCHEMA_VERSION`].
+    /// Mycelium storage (separate from the pore coordinate).
     pub _pad: u8,
+    /// Position inside this material's porosity / permeability ranges.
+    /// `0` selects both minima, `255` both maxima; constructors use the
+    /// midpoint and worldgen writes coherent spatial variation.
+    pub pore: u8,
 }
 
 impl Default for Cell {
@@ -104,6 +110,7 @@ impl Default for Cell {
             sat: Sat::EMPTY,
             flags: CellFlags::empty(),
             _pad: 0,
+            pore: 128,
         }
     }
 }
@@ -119,6 +126,7 @@ impl Cell {
             sat: Sat::EMPTY,
             flags: CellFlags::empty(),
             _pad: 0,
+            pore: 128,
         }
     }
 
@@ -166,8 +174,7 @@ impl Cell {
     /// Set the loose-body tag (low 4 bits of `tag` are used).
     #[inline]
     pub fn set_rock_body_tag(&mut self, tag: u8) {
-        self.flags.0 =
-            (self.flags.0 & !CellFlags::ROCK_BODY_TAG.0) | ((tag & 0x0F) << 4);
+        self.flags.0 = (self.flags.0 & !CellFlags::ROCK_BODY_TAG.0) | ((tag & 0x0F) << 4);
     }
 
     /// Drop the loose-body tag (rock rejoining strata, or becoming debris).
@@ -186,6 +193,7 @@ impl Cell {
             sat: Sat::FULL,
             flags: CellFlags::empty(),
             _pad: 0,
+            pore: 128,
         }
     }
 }
@@ -203,10 +211,14 @@ pub fn hosts_mycelium(material: MaterialId) -> bool {
             | MaterialId::Soil
             | MaterialId::Sand
             | MaterialId::Clay
+            | MaterialId::Bentonite
             | MaterialId::LooseRock
             | MaterialId::LooseLimestone
             | MaterialId::Stone
             | MaterialId::Limestone
+            | MaterialId::Flowstone
+            | MaterialId::Sandstone
+            | MaterialId::Conglomerate
     )
 }
 
@@ -220,6 +232,7 @@ pub fn is_grain(material: MaterialId) -> bool {
         MaterialId::Sand
             | MaterialId::Gravel
             | MaterialId::Clay
+            | MaterialId::Bentonite
             | MaterialId::Soil
             | MaterialId::LooseRock
             | MaterialId::LooseLimestone
@@ -240,13 +253,20 @@ pub fn falls_through_empty_air(material: MaterialId) -> bool {
 /// Includes [`is_grain`] plus Snow and Organic litter (leaf piles
 /// should sprawl, not stack into 1-cell towers).
 pub fn is_repose_grain(material: MaterialId) -> bool {
-    is_grain(material)
-        || matches!(material, MaterialId::Snow | MaterialId::Organic)
+    is_grain(material) || matches!(material, MaterialId::Snow | MaterialId::Organic)
 }
 
 /// Competent bedrock-class solids that can move as rigid bodies (not Bedrock).
 pub fn is_competent_rock(material: MaterialId) -> bool {
-    matches!(material, MaterialId::Stone | MaterialId::Limestone)
+    // Flowstone is a cemented deposit — structurally rock, like limestone.
+    matches!(
+        material,
+        MaterialId::Stone
+            | MaterialId::Limestone
+            | MaterialId::Flowstone
+            | MaterialId::Sandstone
+            | MaterialId::Conglomerate
+    )
 }
 
 /// Dense grains soft enough for flow bedload / bank undercut.
@@ -310,9 +330,178 @@ pub fn water_capacity_with(material: MaterialId, hydro: &wk_material::HydroOverr
     }
 }
 
+/// Cell-aware capacity. This is the authoritative lookup for every pass
+/// that reads, writes, clamps, or audits pore saturation.
+#[inline]
+pub fn water_capacity_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 {
+    use wk_material::MaterialRegistry;
+    match cell.material {
+        MaterialId::Air => u8::MAX,
+        MaterialId::Water | MaterialId::Ice | MaterialId::Snow => 0,
+        _ => MaterialRegistry::hydrology_with(cell.material, hydro)
+            .porosity
+            .sample(cell.pore),
+    }
+}
+
+/// Saturation this cell holds against gravity (capillary retention).
+///
+/// Only sat **above** this drains downward — see
+/// [`wk_material::MaterialProps::field_capacity`]. Scales with the cell's own
+/// capacity, so a high-`pore` cell both stores and retains more.
+#[inline]
+pub fn retained_sat_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 {
+    use wk_material::MaterialRegistry;
+    if cell.material == MaterialId::Air {
+        return 0;
+    }
+    let cap = water_capacity_cell(cell, hydro) as u32;
+    if cap == 0 {
+        return 0;
+    }
+    let fc = MaterialRegistry::base_props(cell.material).field_capacity as u32;
+    // Retention *fraction* falls as pore space opens.
+    //
+    // Without this, retention scaled with capacity, so a fractured cell held more
+    // absolute water than a tight one. Every cell then filled to its own retention
+    // and stopped, and a long soak ended with the whole rock wet and the veins
+    // slightly wetter — the underground read as uniform, and conduits stored water
+    // instead of transmitting it. Playtest called it "decoration".
+    //
+    // Open media genuinely drain better: it is why gravel retains 20/255 and clay
+    // 188/255. The same has to hold *within* a material, or opening a cell buys
+    // capacity and retention in equal measure and nothing changes character.
+    //
+    // With it, a vein drains nearly dry between flows while the matrix beside it
+    // perches — low storage and high flux, which is what a conduit is, and it
+    // makes the structure persistent rather than transient.
+    // Competent rock only. Conduits are a rock phenomenon: fine sediments are
+    // matrix, not channels, and shedding from clay turned the aquitard into a
+    // drain (open clay fell from 74% retention to 29%, which is not a seal).
+    if !is_competent_rock(cell.material) {
+        return ((cap * fc) / 255) as u8;
+    }
+    let open = (cell.pore as u32).saturating_sub(PORE_MATRIX_MID as u32);
+    let span = (u8::MAX - PORE_MATRIX_MID) as u32;
+    let shed = (DRAINAGE_SHED_NUM * open) / span.max(1);
+    let fc = fc.saturating_sub((fc * shed) / DRAINAGE_SHED_DEN);
+    ((cap * fc) / 255) as u8
+}
+
+/// Pore value treated as a material's matrix: below it, retention is unchanged.
+const PORE_MATRIX_MID: u8 = 128;
+/// How much of the retention fraction a fully open cell sheds, as
+/// `NUM / DEN` — 60%, so an open vein holds well under half what its tight
+/// neighbour does once the larger capacity is accounted for.
+const DRAINAGE_SHED_NUM: u32 = 60;
+const DRAINAGE_SHED_DEN: u32 = 100;
+
+/// Saturation in this cell that is free to drain downward.
+#[inline]
+pub fn drainable_sat_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 {
+    cell.sat.0.saturating_sub(retained_sat_cell(cell, hydro))
+}
+
+/// Cell-aware permeability selected from the same stored pore coordinate.
+#[inline]
+pub fn permeability_cell(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 {
+    use wk_material::MaterialRegistry;
+    MaterialRegistry::hydrology_with(cell.material, hydro)
+        .permeability
+        .sample_fracture(cell.pore)
+}
+
+#[cfg(test)]
+mod retention_tests {
+    use super::*;
+
+    /// A vein must end up *drier* than the matrix beside it, not wetter.
+    ///
+    /// Retention used to scale with capacity, so opening a cell bought capacity
+    /// and retention in equal measure: a fractured cell held more absolute water
+    /// than a tight one, every cell filled to its own retention and stopped, and a
+    /// long soak left the whole rock uniformly wet with conduits *storing* water.
+    /// Low storage and high flux is what makes a conduit a conduit.
+    #[test]
+    fn an_open_cell_retains_less_than_a_tight_one() {
+        let h = wk_material::HydroOverrides::default();
+        let mut tight = Cell::solid(MaterialId::Stone);
+        tight.pore = PORE_MATRIX_MID;
+        let mut open = Cell::solid(MaterialId::Stone);
+        open.pore = u8::MAX;
+        let (r_tight, r_open) = (retained_sat_cell(tight, &h), retained_sat_cell(open, &h));
+        assert!(
+            r_open < r_tight,
+            "an open vein should shed water a tight matrix holds ({r_open} vs {r_tight})"
+        );
+        // And it has more room, so the contrast is real rather than an artifact of
+        // a smaller container.
+        assert!(
+            water_capacity_cell(open, &h) > water_capacity_cell(tight, &h),
+            "the open cell should still hold more when full"
+        );
+    }
+
+    #[test]
+    fn matrix_pore_retention_is_unchanged() {
+        // Only *opening* sheds retention. A default cell must behave exactly as
+        // before, or every tuned material shifts underneath us.
+        let h = wk_material::HydroOverrides::default();
+        for m in [
+            MaterialId::Stone,
+            MaterialId::Clay,
+            MaterialId::Sand,
+            MaterialId::Limestone,
+        ] {
+            let mut c = Cell::solid(m);
+            c.pore = PORE_MATRIX_MID;
+            let cap = water_capacity_cell(c, &h) as u32;
+            let fc = wk_material::MaterialRegistry::base_props(m).field_capacity as u32;
+            assert_eq!(
+                retained_sat_cell(c, &h) as u32,
+                (cap * fc) / 255,
+                "{m:?} at matrix pore must retain exactly the material value"
+            );
+        }
+    }
+
+    #[test]
+    fn fine_sediment_sheds_nothing() {
+        // Conduits are a rock phenomenon. Shedding from clay turned the aquitard
+        // into a drain — open clay fell from 74% retention to 29%, which is not a
+        // seal — and sand and gravel are matrix, not channels.
+        let h = wk_material::HydroOverrides::default();
+        for m in [
+            MaterialId::Clay,
+            MaterialId::Bentonite,
+            MaterialId::Sand,
+            MaterialId::Gravel,
+        ] {
+            let mut tight = Cell::solid(m);
+            tight.pore = PORE_MATRIX_MID;
+            let mut open = Cell::solid(m);
+            open.pore = u8::MAX;
+            let fc = wk_material::MaterialRegistry::base_props(m).field_capacity as u32;
+            for c in [tight, open] {
+                let cap = water_capacity_cell(c, &h) as u32;
+                assert_eq!(
+                    retained_sat_cell(c, &h) as u32,
+                    (cap * fc) / 255,
+                    "{m:?} retention must not depend on pore"
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cell_layout_includes_stored_pore_byte() {
+        assert_eq!(std::mem::size_of::<Cell>(), 5);
+    }
 
     #[test]
     fn air_holds_full_water() {
@@ -333,6 +522,28 @@ mod tests {
             water_capacity(MaterialId::Sand),
             wk_material::MaterialRegistry::props(MaterialId::Sand).porosity
         );
+    }
+
+    #[test]
+    fn pore_coordinate_selects_capacity_and_permeability_ranges() {
+        let hydro = wk_material::HydroOverrides::default();
+        let mut low = Cell::solid(MaterialId::Sand);
+        low.pore = 0;
+        let mut high = low;
+        high.pore = 255;
+        assert!(water_capacity_cell(low, &hydro) < water_capacity_cell(high, &hydro));
+        assert!(permeability_cell(low, &hydro) < permeability_cell(high, &hydro));
+    }
+
+    #[test]
+    fn zero_to_zero_override_seals_every_pore_coordinate() {
+        let mut hydro = wk_material::HydroOverrides::default();
+        hydro.set_permeability_range(MaterialId::Sand, 0, 0);
+        for pore in [0, 128, 255] {
+            let mut sand = Cell::solid(MaterialId::Sand);
+            sand.pore = pore;
+            assert_eq!(permeability_cell(sand, &hydro), 0);
+        }
     }
 
     #[test]
@@ -372,7 +583,10 @@ mod tests {
             assert!(is_repose_grain(m), "{m:?} should repose");
         }
         assert!(is_repose_grain(MaterialId::Snow));
-        assert!(!is_grain(MaterialId::Snow), "snow floats — not a dense grain");
+        assert!(
+            !is_grain(MaterialId::Snow),
+            "snow floats — not a dense grain"
+        );
         assert!(falls_through_empty_air(MaterialId::Snow));
         assert!(falls_through_empty_air(MaterialId::Ice));
         assert!(
@@ -406,8 +620,7 @@ mod tests {
         assert_eq!(grain_max_stable_step(MaterialId::Sand), 0);
         assert!(grain_max_stable_step(MaterialId::LooseRock) >= 1);
         assert!(
-            grain_max_stable_step(MaterialId::Sand)
-                < grain_max_stable_step(MaterialId::LooseRock)
+            grain_max_stable_step(MaterialId::Sand) < grain_max_stable_step(MaterialId::LooseRock)
         );
     }
 

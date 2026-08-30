@@ -17,7 +17,8 @@ active parcel banks + precip     humidity echo CloudStore + cond streaks (N)
 terrain + standing water         night: deep cool darken + weak moon ambient
 day canopy shade                 under-surface dim + air corridor + sun cast
 front soft cloud banks           parcel echoes ahead of land (N)
-humidity tile diagnostic + wind  H overlay (diagnostics, not “clouds”)
+humidity tile diagnostic          H overlay (diagnostics, not “clouds”)
+wind streak placeholder           V overlay (off by default; needs work)
 debug overlays → organisms
 night moon cast                  after organisms
 HUD
@@ -30,7 +31,8 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 | Key | What |
 |-----|------|
 | **N** | Soft clouds at **all depths**: far / mid / active / front + precip |
-| **H** | Humidity **tile raster** diagnostic + wind streaks |
+| **H** | Humidity **tile raster** diagnostic |
+| **V** | Wind streak overlay (placeholder; default off) |
 | **F6** | Glossary — keys, water/sky words, HUD tags |
 
 Humidity still **drives** the weather, now with temperature/wind:
@@ -45,11 +47,18 @@ and not a per-cell atmosphere (CPU stays on 4×4 tiles).
 | Signal | Visual |
 |--------|--------|
 | Humidity → parcels | Soft multi-depth cloud banks (`N`); streaks when tiles are wet |
-| Humidity tiles | Diagnostic haze overlay (`H`) only |
+| Humidity tiles | Diagnostic haze overlay (`H`) — bilinear wash on 4×4 seats; a drop opens that column from itself downward |
 | Day/night | Sky lerp + sun/moon; night landscape darken |
-| Wind | Streaks on `H`; front cloud scroll |
-| Ridges | Dual parallax fills from surface height |
+| Wind | `V` placeholder streaks (needs work); front cloud scroll |
+| Ridges | Dual parallax fills from **ground** height (not falling snow, not mid-air wet Air) |
 | Cast / celestial key | See prior plant/terrain lighting notes |
+
+`RidgeSilhouette` walks from `continental_surface_y`, skipping anything
+that `falls_through_empty_air` (snow, ice, loose organic). The old
+ceiling scan treated a falling flake as the crest — a 1–2 px needle —
+and the 30-tick cache kept the spike up until the flake landed. Wet Air
+only counts at/below sea or as standing water; humidity tiles never live
+in these cells.
 
 ## `sky_transmit`
 

@@ -6,7 +6,7 @@
 
 use wk_material::{HydroOverrides, MaterialId, MaterialRegistry};
 
-use crate::cell::{water_capacity_with, Cell, Sat};
+use crate::cell::{permeability_cell, water_capacity_cell, water_capacity_with, Cell, Sat};
 use crate::chunk::{Chunk, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
@@ -70,6 +70,63 @@ pub(crate) fn seepage_rate_with(material: MaterialId, hydro: &HydroOverrides) ->
     ((p as i32 * 32) / 255).max(1)
 }
 
+/// Exact seepage rate in 1/256ths of a sat-unit per pass.
+///
+/// The integer rate alone cannot carry material variation. `(p * 32) / 255`
+/// truncates, so stone's entire fracture range (permeability 5..40) collapsed to
+/// rates of 1..5 with most of it at 1 or 2 — measured in playtest, three stone
+/// cells at permeability 5, 10 and 23 all held 5-6 sat, because a 4.6x spread had
+/// become 1, 1, 2. Water cannot express a preference it was never given a rate
+/// for, which is why pore variation, ridged veins and competitive allocation all
+/// underdelivered.
+#[inline]
+fn seepage_rate_fp(p: u8) -> i32 {
+    (p as i32 * 32 * RATE_FP_ONE) / 255
+}
+
+const RATE_FP_ONE: i32 = 256;
+
+/// Sat moved when an edge fires: the true rate rounded **up**.
+///
+/// Rounding up rather than truncating, because the fractional part is delivered
+/// by firing *less often* ([`seepage_fire_odds_cell`]) instead of being lost. The
+/// two together give an average that is exactly proportional to permeability:
+///
+/// | permeability | fires with amount | odds | average |
+/// |---|---|---|---|
+/// | 5 | 1 | 0.63 | 0.63 |
+/// | 10 | 2 | 0.63 | 1.25 |
+/// | 23 | 3 | 0.96 | 2.89 |
+///
+/// 5 : 10 : 23 delivers 1 : 2.0 : 4.6 — the permeability ratio, recovered.
+#[inline]
+pub(crate) fn seepage_rate_cell(cell: Cell, hydro: &HydroOverrides) -> i32 {
+    let p = permeability_cell(cell, hydro);
+    if p == 0 {
+        return 0;
+    }
+    ((seepage_rate_fp(p) + RATE_FP_ONE - 1) / RATE_FP_ONE).max(1)
+}
+
+/// Odds an edge fires this pass, so the average delivered rate is exact.
+///
+/// Replaces the old integer stride, which only engaged below permeability 8 and
+/// so stopped exactly where stone lives. Deterministic per cell and tick at the
+/// call site.
+#[inline]
+pub(crate) fn seepage_fire_odds_cell(cell: Cell, hydro: &HydroOverrides) -> f32 {
+    let p = permeability_cell(cell, hydro);
+    if p == 0 {
+        return 0.0;
+    }
+    let exact = seepage_rate_fp(p) as f32 / RATE_FP_ONE as f32;
+    let per_fire = seepage_rate_cell(cell, hydro) as f32;
+    if per_fire <= 0.0 {
+        return 0.0;
+    }
+    (exact / per_fire).clamp(0.0, 1.0)
+}
+
 /// Surface / top-layer infiltration into a porous cell this step.
 ///
 /// Bone-dry ground takes only a trickle so most free water can run past
@@ -99,6 +156,20 @@ pub(crate) fn seepage_uptake_rate_with(
     //   sat→cap   → →base (clamped by free)
     let kick = (cap as i32 / 8).max(1);
     let scaled = (base * (sat as i32 + kick)) / (cap as i32 + kick);
+    scaled.max(1).min(free).min(base)
+}
+
+pub(crate) fn seepage_uptake_rate_cell(cell: Cell, hydro: &HydroOverrides, cap: u8) -> i32 {
+    let base = seepage_rate_cell(cell, hydro);
+    if base <= 0 || cap == 0 {
+        return 0;
+    }
+    let free = cap.saturating_sub(cell.sat.0) as i32;
+    if free <= 0 {
+        return 0;
+    }
+    let kick = (cap as i32 / 8).max(1);
+    let scaled = (base * (cell.sat.0 as i32 + kick)) / (cap as i32 + kick);
     scaled.max(1).min(free).min(base)
 }
 
@@ -134,8 +205,35 @@ pub(crate) fn seepage_conduct_rate_with(
     scaled.max(1).min(base)
 }
 
+pub(crate) fn seepage_conduct_rate_cells(
+    cell_a: Cell,
+    cap_a: u8,
+    cell_b: Cell,
+    cap_b: u8,
+    hydro: &HydroOverrides,
+) -> i32 {
+    let base = seepage_rate_cell(cell_a, hydro).min(seepage_rate_cell(cell_b, hydro));
+    if base <= 0 || cap_a == 0 || cap_b == 0 {
+        return 0;
+    }
+    let kick_a = (cap_a as i32 / 8).max(1);
+    let kick_b = (cap_b as i32 / 8).max(1);
+    let wa = cell_a.sat.0 as i32 + kick_a;
+    let wb = cell_b.sat.0 as i32 + kick_b;
+    let ca = cap_a as i32 + kick_a;
+    let cb = cap_b as i32 + kick_b;
+    let num = (wa * cb).min(wb * ca);
+    let den = ca * cb;
+    ((base * num) / den).max(1).min(base)
+}
+
 pub(crate) fn is_porous_solid_with(material: MaterialId, hydro: &HydroOverrides) -> bool {
     material != MaterialId::Air && water_capacity_with(material, hydro) > 0
+}
+
+#[inline]
+pub(crate) fn is_porous_cell(cell: Cell, hydro: &HydroOverrides) -> bool {
+    cell.material != MaterialId::Air && water_capacity_cell(cell, hydro) > 0
 }
 
 /// How far same-Y lake equalise looks for a drier surface cell / edge.
@@ -342,4 +440,89 @@ pub(crate) fn same_y_cascade_pull_in(
         }
     }
     None
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wk_material::MaterialId;
+
+    /// Average delivered rate for a stone cell at the given pore.
+    fn avg_rate(pore: u8) -> f32 {
+        let h = HydroOverrides::default();
+        let mut c = Cell::solid(MaterialId::Stone);
+        c.pore = pore;
+        seepage_rate_cell(c, &h) as f32 * seepage_fire_odds_cell(c, &h)
+    }
+
+    /// The bug that made pore variation pointless: `(p * 32) / 255` truncates, so
+    /// stone's whole fracture range (permeability 5..40) collapsed to integer rates
+    /// of 1..5, mostly 1 or 2. Playtest found three stone cells at permeability 5,
+    /// 10 and 23 all holding 5-6 sat — a 4.6x spread delivering nothing.
+    ///
+    /// Firing with odds recovers proportionality: the *average* rate must track
+    /// permeability even where the per-fire amount cannot.
+    #[test]
+    fn average_rate_tracks_permeability_across_the_tight_range() {
+        let h = HydroOverrides::default();
+        let perm = |pore: u8| {
+            let mut c = Cell::solid(MaterialId::Stone);
+            c.pore = pore;
+            permeability_cell(c, &h) as f32
+        };
+        // Two pores far enough apart to have distinct permeability.
+        let (lo, hi) = (128u8, 255u8);
+        let (p_lo, p_hi) = (perm(lo), perm(hi));
+        assert!(p_hi > p_lo * 2.0, "fixture needs a real spread: {p_lo} vs {p_hi}");
+
+        let (r_lo, r_hi) = (avg_rate(lo), avg_rate(hi));
+        let perm_ratio = p_hi / p_lo;
+        let rate_ratio = r_hi / r_lo.max(1e-6);
+        assert!(
+            (rate_ratio - perm_ratio).abs() < perm_ratio * 0.15,
+            "average rate should track permeability: permeability x{perm_ratio:.2} \
+             but rate x{rate_ratio:.2} ({r_lo:.3} -> {r_hi:.3})"
+        );
+    }
+
+    #[test]
+    fn the_old_integer_rate_would_have_failed_that() {
+        // Guards the *reason* for the odds machinery. Truncating integer rates give
+        // 1 and 1 for these two, so a 2x permeability difference vanishes -- if this
+        // ever stops being true the fix has been undone.
+        let h = HydroOverrides::default();
+        let mut a = Cell::solid(MaterialId::Stone);
+        a.pore = 128;
+        let mut b = Cell::solid(MaterialId::Stone);
+        b.pore = 190;
+        let int_rate = |c: Cell| ((permeability_cell(c, &h) as i32 * 32) / 255).max(1);
+        assert_eq!(
+            int_rate(a),
+            int_rate(b),
+            "the integer rate really does flatten these two"
+        );
+        assert!(
+            avg_rate(190) > avg_rate(128) * 1.2,
+            "the average rate must not flatten them"
+        );
+    }
+
+    #[test]
+    fn odds_and_amount_never_exceed_the_true_rate() {
+        // Rounding the per-fire amount *up* only works if the odds pull the average
+        // back down. Overshooting would mint conduction out of nothing.
+        let h = HydroOverrides::default();
+        for pore in [0u8, 40, 128, 200, 255] {
+            for m in [MaterialId::Stone, MaterialId::Limestone, MaterialId::Gravel] {
+                let mut c = Cell::solid(m);
+                c.pore = pore;
+                let exact = permeability_cell(c, &h) as f32 * 32.0 / 255.0;
+                let avg = seepage_rate_cell(c, &h) as f32 * seepage_fire_odds_cell(c, &h);
+                assert!(
+                    (avg - exact).abs() < 0.02,
+                    "{m:?} pore={pore}: average {avg:.3} should match exact {exact:.3}"
+                );
+            }
+        }
+    }
 }

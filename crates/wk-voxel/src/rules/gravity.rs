@@ -4,15 +4,17 @@
 //!
 //! Vertical gravity fall for free water.
 
+use std::collections::HashSet;
+
 use wk_material::MaterialId;
 
 use crate::active::{partition_checkerboard, ActiveChunk};
-use crate::cell::{water_capacity_with, Cell, Sat};
+use crate::cell::{water_capacity_cell, Cell, Sat};
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::for_each_region_parallel;
 
-use super::head::{seepage_rate_with, seepage_uptake_rate_with};
+use super::head::{seepage_rate_cell, seepage_uptake_rate_cell};
 use super::plan::regions_for_standalone;
 
 /// Bottom-up single-step gravity fall for water saturation.
@@ -47,9 +49,30 @@ use super::plan::regions_for_standalone;
 /// acceleration and the density-swap rule are follow-up PRs.
 pub fn apply_gravity_fall(world: &mut World) {
     let regions = regions_for_standalone(world);
+    // One snapshot for both checkerboard colours — rebuilding the key
+    // set per colour was 2× the HashSet walk on every standalone call.
+    let loaded = water_load_index(world);
     for pass in partition_checkerboard(&regions) {
-        apply_gravity_fall_regions(world, &pass);
+        apply_gravity_fall_regions_loaded(world, &pass, &loaded);
     }
+}
+
+/// Cells that currently carry dissolved mineral or suspended silt.
+///
+/// Gravity's hot loop cannot touch the sparse maps (raw chunk pointers),
+/// so callers snapshot this once and reuse it across checkerboard colours
+/// / flow substeps. Load that moves during the tick lags until the next
+/// snapshot — geology-OK; the stream mineral test runs 120 ticks.
+pub(crate) fn water_load_index(world: &World) -> HashSet<(i32, i32)> {
+    if world.dissolved.is_empty() && world.suspended.is_empty() {
+        return HashSet::new();
+    }
+    world
+        .dissolved
+        .keys()
+        .copied()
+        .chain(world.suspended.keys().copied())
+        .collect()
 }
 
 /// Gravity fall restricted to a pre-planned active set (see [`plan_active`]).
@@ -67,8 +90,33 @@ pub fn apply_gravity_fall(world: &mut World) {
 /// seam) by local index — same ~10× win as flow/seepage vs per-cell
 /// HashMap `get_cell`/`set_cell`.
 pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
+    let loaded = water_load_index(world);
+    apply_gravity_fall_regions_loaded(world, active, &loaded);
+}
+
+/// Gravity fall with a prebuilt load index — see [`water_load_index`].
+pub(crate) fn apply_gravity_fall_regions_loaded(
+    world: &mut World,
+    active: &[ActiveChunk],
+    loaded: &HashSet<(i32, i32)>,
+) {
     let hydro = world.hydro;
-    for_each_region_parallel(world, active, |ptrs, _wrap_width, ac| {
+    // Dissolved / suspended load has to ride these transfers, but the hot
+    // loop runs over raw chunk pointers and cannot touch the sparse maps.
+    // Collect the moves and apply them after. Once karst has emitted *any*
+    // load, `dissolved` stays non-empty for the rest of the soak — so the
+    // skip must be per-source, not "is the map empty". Otherwise every
+    // lake drip takes a mutex and two HashMap lookups forever.
+    let track_load = !loaded.is_empty();
+    let load_moves: std::sync::Mutex<Vec<((i32, i32), (i32, i32), u8, u8)>> =
+        std::sync::Mutex::new(Vec::new());
+    for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
+        let base_gx = ac.coord.cx * CHUNK_CELLS_W as i32;
+        let wrap = |gx: i32| match wrap_width {
+            Some(w) if w > 0 => gx.rem_euclid(w),
+            _ => gx,
+        };
+        let gx_of = |lx: u8| wrap(base_gx + lx as i32);
         let Some(own) = ptrs.get(&ac.coord) else {
             return;
         };
@@ -116,11 +164,11 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 }
             }
         };
-        let mobile_cap = |m: MaterialId| -> u8 {
-            if m == MaterialId::Air {
+        let mobile_cap = |cell: Cell| -> u8 {
+            if cell.material == MaterialId::Air {
                 u8::MAX
             } else {
-                water_capacity_with(m, &hydro)
+                water_capacity_cell(cell, &hydro)
             }
         };
         // Walled pond, or stacked lake away from an immediate dry face.
@@ -198,7 +246,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 if above.sat.is_empty() {
                     continue;
                 }
-                if mobile_cap(above.material) == 0 {
+                if mobile_cap(above) == 0 {
                     continue;
                 }
                 any_mobile = true;
@@ -218,7 +266,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                         None => continue,
                     },
                 };
-                let cap = mobile_cap(cur.material);
+                let cap = mobile_cap(cur);
                 if cap == 0 {
                     continue;
                 }
@@ -229,7 +277,7 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 let Some(above) = read_xy(x, y as i32 + 1) else {
                     continue;
                 };
-                if above.sat.is_empty() || mobile_cap(above.material) == 0 {
+                if above.sat.is_empty() || mobile_cap(above) == 0 {
                     next_cur = Some(above);
                     continue;
                 }
@@ -250,10 +298,14 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                         next_cur = Some(above);
                         continue;
                     }
+                    // Cell-aware: infiltration under a lake is the dominant way
+                    // water enters the ground, so reading a material average
+                    // here made the wetting front uniform no matter how the
+                    // pore field varied underneath it.
                     let rate = if above.sat.0 >= 160 {
-                        seepage_rate_with(cur.material, &hydro)
+                        seepage_rate_cell(cur, &hydro)
                     } else {
-                        seepage_uptake_rate_with(cur.material, &hydro, cur.sat.0, cap)
+                        seepage_uptake_rate_cell(cur, &hydro, cap)
                     };
                     if rate <= 0 {
                         next_cur = Some(above);
@@ -274,6 +326,15 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                     };
                     write_xy(x, y as i32 + 1, new_above);
                     write_xy(x, y as i32, new_cur);
+                    // Infiltrating water takes its mineral load into the ground.
+                    if track_load && loaded.contains(&(gx_of(x), y as i32 + 1)) {
+                        load_moves.lock().unwrap().push((
+                            (gx_of(x), y as i32 + 1),
+                            (gx_of(x), y as i32),
+                            move_amt,
+                            above.sat.0,
+                        ));
+                    }
                     next_cur = Some(new_above);
                     continue;
                 }
@@ -302,8 +363,22 @@ pub fn apply_gravity_fall_regions(world: &mut World, active: &[ActiveChunk]) {
                 };
                 write_xy(x, y as i32 + 1, new_above);
                 write_xy(x, y as i32, new_cur);
+                if track_load && loaded.contains(&(gx_of(x), y as i32 + 1)) {
+                    load_moves.lock().unwrap().push((
+                        (gx_of(x), y as i32 + 1),
+                        (gx_of(x), y as i32),
+                        move_amt,
+                        above.sat.0,
+                    ));
+                }
                 next_cur = Some(new_above);
             }
         }
     });
+    if track_load {
+        for (from, to, moved, donor_before) in load_moves.into_inner().unwrap() {
+            crate::mineral::carry_with_water(world, from, to, moved, donor_before);
+            crate::sediment::carry_with_water(world, from, to, moved, donor_before);
+        }
+    }
 }

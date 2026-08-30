@@ -16,7 +16,7 @@ use super::grain::{
     active_has_unsupported_grain, settle_loose_grains_regions_ex, GRAIN_SETTLE_PASSES,
     GRAIN_SETTLE_PASSES_FPS_DEEP, GRAIN_SETTLE_PASSES_SHALLOW,
 };
-use super::gravity::apply_gravity_fall_regions;
+use super::gravity::{apply_gravity_fall_regions_loaded, water_load_index};
 use super::seepage::apply_seepage_regions;
 use super::water_flow::{
     apply_confined_upward_regions, apply_throughflow_regions, apply_water_flow_regions,
@@ -114,6 +114,12 @@ pub const FLOW_SUBSTEPS_EO_AFTER: usize = 4;
 /// [`FLOW_SUBSTEPS_EO_AFTER`], stop the flow loop early — settled films
 /// don't need the full ×8. Busy rain / cascades stay at max.
 pub const FLOW_QUIET_AREA: usize = 512;
+/// Interactive confined on the last flow halo is only for first-cell well
+/// rise. Condensation fattens dirty rects into chunk-scale boxes; walking
+/// those is the soak-age confined ramp. Skip when the halo is larger than
+/// a small edit / shaft. Period-16 wake still handles communicating vessels.
+/// A 1-cell well dirty inflates to ~3×5; a condensation-merged chunk is 1024.
+const CONFINED_HALO_MAX_AREA: usize = 256;
 
 /// Pore seepage + lake-bed / seam wake cadence (ticks).
 ///
@@ -389,6 +395,18 @@ fn tick_with_life_inner(
     } else {
         None
     };
+    #[cfg(debug_assertions)]
+    let mut mass_stage = mass_before;
+    macro_rules! mass_checkpoint {
+        ($name:literal) => {
+            #[cfg(debug_assertions)]
+            if let Some(before) = mass_stage {
+                let after = crate::audit::sat_totals(world);
+                crate::audit::assert_cell_sat_conserved(&before, &after, $name);
+                mass_stage = Some(after);
+            }
+        };
+    }
 
     let profile = timings.is_some();
     let mut local = PhysicsTimings::default();
@@ -399,15 +417,10 @@ fn tick_with_life_inner(
     // same cadence as seepage itself — they only exist to re-dirty pore
     // fronts, and running them every tick also kept that halo (and so every
     // other pass's scan) open on ticks where no seepage would follow.
+    // They run once, just before the seepage plan that consumes their dirty —
+    // see the wake block below. Waking here as well only fed the *flow* plan,
+    // which does not move pore water, and cost a full scan of every wet chunk.
     let run_seepage = !perf.flow_quiet_early_out || world.tick % SEEPAGE_EVERY == 0;
-    if run_seepage {
-        let t0 = profile.then(Instant::now);
-        super::seepage::wake_lake_bed_pores(world);
-        super::seepage::wake_vertical_chunk_seam_pores(world);
-        if let (true, Some(t0)) = (profile, t0) {
-            local.seepage += t0.elapsed();
-        }
-    }
     // Last non-empty flow plan — grain/seepage fall back to this when
     // water writes nothing (painted solids mid-air, dry edits, …).
     let mut flow_halo: Vec<crate::active::ActiveChunk> = Vec::new();
@@ -419,6 +432,10 @@ fn tick_with_life_inner(
     } else {
         FLOW_SUBSTEPS
     };
+    // Snapshot once per tick. Rebuilding dissolved∪suspended keys on every
+    // checkerboard colour × substep was 16 HashSet walks/tick after karst,
+    // growing with soak age (1.2k → 12k keys on the demo inventory).
+    let gravity_load = water_load_index(world);
     for step in 0..max_steps {
         let t0 = profile.then(Instant::now);
         let active = plan_active(world);
@@ -438,7 +455,7 @@ fn tick_with_life_inner(
         let passes = partition_checkerboard(&active);
         let t0 = profile.then(Instant::now);
         for pass in &passes {
-            apply_gravity_fall_regions(world, pass);
+            apply_gravity_fall_regions_loaded(world, pass, &gravity_load);
         }
         if let (true, Some(t0)) = (profile, t0) {
             local.gravity += t0.elapsed();
@@ -476,6 +493,7 @@ fn tick_with_life_inner(
             }
         }
     }
+    mass_checkpoint!("surface flow");
 
     // Interactive path: throughflow + confined once per tick (not every
     // substep) — rainy beaches paid Priority-4 deep walks and confined
@@ -487,10 +505,15 @@ fn tick_with_life_inner(
         if let (true, Some(t0)) = (profile, t0) {
             local.water_flow += t0.elapsed();
         }
-        let t0 = profile.then(Instant::now);
-        apply_confined_upward_regions(world, &flow_halo);
-        if let (true, Some(t0)) = (profile, t0) {
-            local.confined += t0.elapsed();
+        // Fat condensation / drizzle boxes: skip and let the period-16
+        // wake own communicating vessels. A 1-cell well dirty stays tiny
+        // after inflate (+1 x / +2 y) and still rises this tick.
+        if active_cell_area(&flow_halo) <= CONFINED_HALO_MAX_AREA {
+            let t0 = profile.then(Instant::now);
+            apply_confined_upward_regions(world, &flow_halo);
+            if let (true, Some(t0)) = (profile, t0) {
+                local.confined += t0.elapsed();
+            }
         }
     }
     // Communicating vessels: a filled pipe can go locally quiet while the
@@ -506,9 +529,9 @@ fn tick_with_life_inner(
     // stacks under a wet cap would stay dry forever without a re-wake.
     {
         let t0 = profile.then(Instant::now);
-        super::seepage::wake_lake_bed_pores(world);
-        super::seepage::wake_vertical_chunk_seam_pores(world);
         if run_seepage {
+            super::seepage::wake_lake_bed_pores(world);
+            super::seepage::wake_vertical_chunk_seam_pores(world);
             super::seepage::wake_pore_weep_into_air(world);
         }
         if let (true, Some(t0)) = (profile, t0) {
@@ -560,6 +583,7 @@ fn tick_with_life_inner(
             local.seepage += t0.elapsed();
         }
     }
+    mass_checkpoint!("seepage");
 
     // Re-wake unsupported grains and steep cliff faces. Cadence-gated:
     // full sticky-loose scan every 16 ticks; dirty-halo wake every 4.
@@ -615,6 +639,7 @@ fn tick_with_life_inner(
             local.rise_soak += t0.elapsed();
         }
     }
+    mass_checkpoint!("grain rise/soak");
 
     if !grain_active.is_empty() {
         // Deep settle for sky freefall / mid-air paint, and for full-feel
@@ -650,6 +675,7 @@ fn tick_with_life_inner(
             }
         }
     }
+    mass_checkpoint!("grain settle");
 
     // Dense cargo cannot ride floating Organic/Snow/Ice. Skip the full
     // loose punch scan when wake saw no raft cargo (demo: 0/200 hits but
@@ -686,6 +712,7 @@ fn tick_with_life_inner(
             }
         }
     }
+    mass_checkpoint!("grain punch");
 
     // Competent rock bodies: fall, impact shatter, COM tip.
     // Floating wake is mandatory — F1 defers competent rock to this pass, so
@@ -732,6 +759,7 @@ fn tick_with_life_inner(
             }
         }
     }
+    mass_checkpoint!("competent bodies");
 
     // Geotech: roof / overhang collapse after grain has seated.
     // Cadence-gated — full-grid ~1.3 ms/call on Super-Server; every 4
@@ -747,6 +775,7 @@ fn tick_with_life_inner(
     } else {
         crate::failure::FailureStats::default()
     };
+    mass_checkpoint!("geotech failure");
 
     // Reset network sym "last" before field + later organism plant trade
     // share one inspector window (organism step clears plant lasts only).
@@ -763,6 +792,9 @@ fn tick_with_life_inner(
             local.mycelium += t0.elapsed();
         }
     }
+    mass_checkpoint!("mycelium");
+    #[cfg(debug_assertions)]
+    let _ = mass_stage;
 
     world.tick = world.tick.wrapping_add(1);
     for chunk in world.chunks.values_mut() {

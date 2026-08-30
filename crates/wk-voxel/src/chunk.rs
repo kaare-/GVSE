@@ -106,7 +106,9 @@ pub struct Chunk {
     /// Sticky occupancy: at least one permeable solid with `sat > 0`.
     /// Lake-bed / seam wakes use this so underground pore columns keep
     /// visiting after the free surface goes quiet (`has_wet_air` alone
-    /// never marks pure groundwater chunks).
+    /// never marks pure groundwater chunks). Cleared by
+    /// [`crate::rules::seepage::wake_pore_weep_into_air`] when a scan
+    /// finds no wet solid left.
     #[serde(default)]
     pub has_wet_pores: bool,
     /// Sticky occupancy: at least one `Limestone` cell was written
@@ -122,13 +124,24 @@ pub struct Chunk {
     pub has_loose: bool,
     /// Sticky occupancy: at least one `Organic` cell was written since
     /// the flag was last cleared. Float-column / raft scans skip chunks
-    /// that never held litter.
+    /// that never held litter. Cleared by
+    /// [`crate::rules::grain::rise_and_soak_buoyant_litter`] when a
+    /// buoyant collect finds no Organic left — a falling leaf otherwise
+    /// keeps every sky chunk it passed through in the raft walk.
     #[serde(default)]
     pub has_organic: bool,
     /// Sticky occupancy: Organic / Snow / Ice (buoyant litter). Rise/soak
-    /// scans skip sand-only loose chunks.
+    /// scans skip sand-only loose chunks. Cleared when a buoyant collect
+    /// finds none — otherwise a flake falling through the sky leaves those
+    /// chunks in the rise/soak walk forever.
     #[serde(default)]
     pub has_buoyant: bool,
+    /// Sticky occupancy: at least one `Snow` cell. Wind-drift skips
+    /// organic rafts and ice sheets that have never held a flake.
+    /// Cleared by [`crate::rules::grain::apply_snow_wind_drift`] when a
+    /// scan finds no flake left.
+    #[serde(default)]
+    pub has_snow: bool,
 }
 
 /// Materials that participate in grain settle / float / punch passes.
@@ -139,6 +152,7 @@ pub fn material_is_loose(material: MaterialId) -> bool {
         MaterialId::Sand
             | MaterialId::Gravel
             | MaterialId::Clay
+            | MaterialId::Bentonite
             | MaterialId::Soil
             | MaterialId::LooseRock
             | MaterialId::LooseLimestone
@@ -161,6 +175,7 @@ impl Chunk {
             has_loose: false,
             has_organic: false,
             has_buoyant: false,
+            has_snow: false,
         }
     }
 
@@ -202,10 +217,11 @@ impl Chunk {
         if cell.material == MaterialId::Air && !cell.sat.is_empty() {
             self.has_wet_air = true;
         }
-        if cell.material != MaterialId::Air
-            && !cell.sat.is_empty()
-            && wk_material::MaterialRegistry::props(cell.material).permeability > 0
-        {
+        // World hydrology overrides are not available at chunk level.
+        // Mark every wet solid so a material whose range is changed from
+        // 0–0 to permeable cannot miss quiet groundwater wakes. This may
+        // over-wake a rare wet impermeable cell, but never misses water.
+        if cell.material != MaterialId::Air && !cell.sat.is_empty() {
             self.has_wet_pores = true;
         }
         if cell.material == MaterialId::Limestone {
@@ -222,6 +238,9 @@ impl Chunk {
             MaterialId::Organic | MaterialId::Snow | MaterialId::Ice
         ) {
             self.has_buoyant = true;
+        }
+        if cell.material == MaterialId::Snow {
+            self.has_snow = true;
         }
     }
 
@@ -290,12 +309,15 @@ mod tests {
         assert!(!c.has_wet_air);
         assert!(!c.has_limestone);
         assert!(!c.has_loose);
+        assert!(!c.has_snow);
         c.set(1, 1, Cell::water());
         assert!(c.has_wet_air);
         c.set(2, 2, Cell::solid(MaterialId::Limestone));
         assert!(c.has_limestone);
         c.set(3, 3, Cell::solid(MaterialId::Sand));
         assert!(c.has_loose);
+        c.set(4, 4, Cell::solid(MaterialId::Snow));
+        assert!(c.has_snow);
         // Dry air / stone do not clear sticky flags.
         c.set(1, 1, Cell::air());
         assert!(c.has_wet_air);

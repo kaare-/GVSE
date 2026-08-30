@@ -263,6 +263,34 @@ Features:
 
 Features: stem `integrity`, topple, Holdfast. Needs dead stems.
 
+## Open: the load-bearing symbiont join
+
+Observed in an overnight soak. Land trees evolved away their **lowest stem
+module** and now connect root to stem through a **diagonal symbiont module**.
+The symbiont is cheaper than a stem, so selection found it and used it as a
+free structural member.
+
+The cost-sensitivity is working as designed and is worth keeping — the
+complaint is only that a symbiont is being asked to do a stem's job for less
+than a stem's price, which reads as hacky.
+
+Note this is specifically about **load-bearing** symbiont joins on land, and
+not about stemless bodies in general. Seaweed — root with leaves directly on
+top, no stem at all — is legitimate and should stay legal: it is not
+cantilevering anything, the water carries it.
+
+Planned penalty, in preference order (nothing landed yet):
+
+1. **Restricted nutrient flow.** A symbiont is not vascular tissue. Water and
+   sugar crossing a symbiont join should be throttled relative to a
+   stem-to-stem join, so the saved stem costs throughput.
+2. **Prone to breaking.** Feed the join into the existing structural-load path
+   (stem `integrity` / topple, see E2) with a lower capacity than a stem, so
+   an over-tall body on a symbiont join eventually snaps and topples sideways.
+
+Deliberately *not* a rule that forbids the morphology. The point is to price
+it correctly and let selection re-decide.
+
 ## Explicitly out of Core for voxel
 
 - Branching morphogenesis, seasonal (calendar) leaf drop, wood rings

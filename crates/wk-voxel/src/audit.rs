@@ -14,6 +14,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use wk_material::MaterialId;
 
+use crate::cell::water_capacity_cell;
+#[cfg(test)]
 use crate::cell::water_capacity;
 use crate::clouds::CloudStore;
 use crate::grid::World;
@@ -107,7 +109,7 @@ pub fn sat_totals(world: &World) -> SatTotals {
             }
             match cell.material {
                 MaterialId::Air => free_air += s,
-                m if water_capacity(m) > 0 => pore += s,
+                _ if water_capacity_cell(*cell, &world.hydro) > 0 => pore += s,
                 _ => {
                     // Impermeable with nonzero sat should be rare; still
                     // count it as pore-like so drift is visible.
@@ -123,6 +125,43 @@ pub fn sat_totals(world: &World) -> SatTotals {
         humidity: 0.0,
         clouds: 0.0,
     }
+}
+
+/// Total mineral in the world: rock still standing plus dissolved load.
+///
+/// Karst is now a transport loop rather than a delete, so this should stay flat
+/// across dissolve → carry → precipitate. Rock is counted in the same units a
+/// dissolved cell yields ([`crate::mineral::MINERAL_PER_CELL`]), so a cell that
+/// dissolves and later redeposits nets to zero.
+///
+/// Deliberately *not* tick-asserted like water: deposition legitimately mints a
+/// `Limestone` cell from banked load, and the intermediate states are only equal
+/// at cell granularity. Use it in tests and long soaks.
+pub fn mineral_total(world: &World) -> i64 {
+    let mut solid = 0i64;
+    for chunk in world.chunks.values() {
+        for cell in &chunk.cells {
+            solid += crate::mineral::cell_mineral(*cell) as i64;
+        }
+    }
+    let load: i64 = world.dissolved.values().map(|&v| v as i64).sum();
+    solid + load
+}
+
+/// Total fine sediment: clay in the ground plus what the water is carrying.
+///
+/// The suspended-load counterpart to [`mineral_total`]. Only clay-grade material
+/// participates, because only clay-grade material suspends — sand and gravel
+/// travel as bedload, which relocates cells and so cannot change this sum.
+pub fn sediment_total(world: &World) -> i64 {
+    let mut solid = 0i64;
+    for chunk in world.chunks.values() {
+        for cell in &chunk.cells {
+            solid += crate::sediment::cell_sediment(*cell) as i64;
+        }
+    }
+    let load: i64 = world.suspended.values().map(|&v| v as i64).sum();
+    solid + load
 }
 
 /// [`sat_totals`] plus humidity (parcels are not a second water store).

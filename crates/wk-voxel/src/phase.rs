@@ -34,7 +34,7 @@ use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::rules::{deposit_water_on_surface, is_standing_water};
 use crate::temperature::Temperature;
-use crate::worldgen::continental_surface_y;
+use crate::worldgen::live_surface_at;
 
 /// Freeze / thaw knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
@@ -189,7 +189,7 @@ fn column_may_phase(world: &World, gx: i32, temp: &Temperature, cfg: &PhaseConfi
     // paid ~4 ms walking empty sky from the ceiling.
     const BAND: i32 = 12;
     const SKY_SLACK: i32 = 32;
-    let rock = continental_surface_y(temp.seed, gx, temp.sea_level_y, temp.width_cols);
+    let rock = live_surface_at(world, temp.seed, gx, temp.sea_level_y, temp.width_cols);
     let start = rock
         .max(temp.sea_level_y)
         .saturating_add(SKY_SLACK)
@@ -284,6 +284,7 @@ fn ice_cell() -> Cell {
         sat: Sat::EMPTY,
         flags: Default::default(),
         _pad: 0,
+        pore: 128,
     }
 }
 
@@ -293,6 +294,7 @@ fn snow_cell() -> Cell {
         sat: Sat::EMPTY,
         flags: Default::default(),
         _pad: 0,
+        pore: 128,
     }
 }
 
@@ -533,6 +535,35 @@ fn deposit_snow_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f
 }
 
 /// Place one Ice cell as a surface glaze (condensation frost / rime).
+/// Nucleate a snowflake **in the air**, so it falls instead of appearing on the
+/// ground.
+///
+/// The counterpart to `rain::deposit_water_in_air`. Cold condensation previously
+/// only had the surface frost path, so snow never fell — it materialised as rime
+/// on whatever was underneath, which is right for frost and wrong for snowfall.
+/// `Snow` already falls through empty air and floats on water, so gravity takes it
+/// from here.
+///
+/// Pays a **whole cell**, matching the frost convention: a frozen cell's water is
+/// its material rather than its `sat`, so 255 of humidity buys exactly one cell.
+/// Anything less is refused rather than part-paid, or the ledger drifts.
+pub fn deposit_snow_in_air(world: &mut World, gx: i32, y: i32, budget: f32) -> f32 {
+    if budget < u8::MAX as f32 {
+        return 0.0;
+    }
+    let jx = world.wrap_x(gx);
+    let Some(cell) = world.get_cell(jx, y) else {
+        return 0.0;
+    };
+    // Empty air only: seeding into a wet cell would strand its water inside a
+    // frozen cell that does not carry sat.
+    if cell.material != MaterialId::Air || !cell.sat.is_empty() {
+        return 0.0;
+    }
+    world.set_cell(jx, y, snow_cell());
+    u8::MAX as f32
+}
+
 fn deposit_ice_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f32> {
     deposit_frozen_lid_on_surface(world, gx, start_y, ice_cell())
 }
@@ -971,6 +1002,7 @@ mod tests {
                 sat: Sat(16),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         let temp = cold_temp(16, 16, -8.0);
@@ -1104,6 +1136,7 @@ mod tests {
                 sat: Sat(80),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         let temp = cold_temp(16, 16, -5.0);
@@ -1150,6 +1183,7 @@ mod tests {
                 sat: Sat(100),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         // Open-sky standing film on bedrock.
@@ -1180,6 +1214,7 @@ mod tests {
                 sat: Sat(100),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         let temp = cold_temp(16, 16, 4.0);
@@ -1279,6 +1314,7 @@ mod tests {
                 sat: Sat(80),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         let temp = cold_temp(16, 16, -8.0);
@@ -1575,6 +1611,7 @@ mod tests {
                 sat: Sat(80),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         let temp = cold_temp(16, 16, -12.0);
@@ -1638,6 +1675,7 @@ mod tests {
                 sat: Sat(128),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         w.set_cell(1, 2, Cell::solid(MaterialId::Ice));
@@ -1856,6 +1894,7 @@ mod tests {
                 sat: Sat(64),
                 flags: Default::default(),
                 _pad: 0,
+                pore: 128,
             },
         );
         w.set_cell(3, 3, Cell::solid(MaterialId::Ice));
