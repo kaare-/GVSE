@@ -1827,7 +1827,7 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} drizzle={} evap={} phase={} nimbus={} echo={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} drizzle={} evap={} phase={} nimbus={} echo={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} overlay={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
