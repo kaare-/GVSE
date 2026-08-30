@@ -295,7 +295,7 @@ const KEYS: &[(&str, LineKind)] = &[
     ("I        ice / snow / slush phase pass", LineKind::Body),
     ("", LineKind::Blank),
     ("Overlays", LineKind::Head),
-    ("N        soft clouds (picture of wet sky tiles)", LineKind::Body),
+    ("N        soft banks removed (use H for vapour)", LineKind::Body),
     ("H        humidity tile raster (default on)", LineKind::Body),
     ("V        wind heatmap — strength (wash) + direction (arrows)", LineKind::Body),
     ("T        temperature heatmap", LineKind::Body),

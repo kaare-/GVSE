@@ -5,10 +5,9 @@
 //! Cloud **visuals** derived from the humidity field.
 //!
 //! Atmospheric water lives on [`Humidity`] tiles. Rain is condensation /
-//! dew from that field. [`CloudStore`] parcels are a bounded display
-//! echo (N banks, shade) rebuilt each step from wet seats via
-//! [`CloudStore::deck_from_field`] — no wind-scroll animation, not a
-//! second water store, and not a rain engine.
+//! dew from that field. Soft `N` lobe banks are **not** rebuilt in the
+//! atmosphere step (FPS / no animation). [`CloudStore::rebuild_visuals_from_humidity`]
+//! remains for tests and tools; the playtest vapour look is the `H` overlay.
 
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
@@ -286,7 +285,11 @@ impl CloudStore {
             Some(world),
             Some(wind),
         );
-        self.rebuild_visuals_from_humidity(humidity, world, wind, sea_level_y, cfg, temp);
+        // Soft N banks (lobe masks + deck rebuild) are disabled — they cost
+        // multi-FPS and animated the sky. Visual echo is opt-in via
+        // [`Self::rebuild_visuals_from_humidity`] for tests / tools.
+        // Physics water stays on humidity (+ buoyant rise above).
+        self.parcels.clear();
     }
 
     /// Move blob mass back onto humidity tiles (old saves / leftover coag).
@@ -624,6 +627,8 @@ mod tests {
             1,
             &cfg,
         );
+        // Soft banks are not rebuilt in the atmosphere step (FPS); opt-in echo:
+        clouds.rebuild_visuals_from_humidity(&h, &world, &wind, p.sea_level_y, &cfg, None);
         assert!(!clouds.is_empty(), "wet sky tiles should spawn a visual echo");
         assert!(clouds.visual_mass() > 0.0);
         assert!(

@@ -21,7 +21,7 @@
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle humidity tile diagnostic (default on)
 //! - `V` — toggle wind vector heatmap (strength + direction; default off)
-//! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
+//! - `N` — soft cloud banks removed (FPS); humidity look is `H`
 //! - `T` — toggle temperature heatmap overlay
 //! - `U` — toggle ground saturation heatmap (pores + free water)
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
@@ -73,8 +73,8 @@ use wk_voxel::{
 
 use crate::atmosphere::{
     apply_celestial_key_rgb, apply_organism_celestial_key_rgb, canopy_wind_drag, draw_canopy_air_dim,
-    draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, draw_wind_streaks,
-    haze_alpha_ref_step, haze_alpha_ref_target, near_surface_wind_for_evap, CloudDepthLayer,
+    draw_celestials, draw_haze_and_wind, draw_wind_streaks,
+    haze_alpha_ref_step, haze_alpha_ref_target, near_surface_wind_for_evap,
     draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_organism_aboveground,
     organism_celestial_rim, sky_weather_for_scene, terrain_celestial_key_strength,
     toward_light_celestial, RidgeSilhouette,
@@ -211,10 +211,10 @@ async fn main() {
     let mut spore_fx = SporeFx::new();
     let mut paused = false;
     let mut organisms_on = true;
-    // Humidity diagnostic default on (`H`); soft clouds default on (`N`).
+    // Humidity diagnostic default on (`H`). Soft N banks removed (lobe stamps
+    // killed FPS); vapour look is `H`.
     let mut humidity_overlay = true;
     let mut wind_streaks_overlay = false;
-    let mut clouds_on = true;
     let mut temp_overlay = false;
     let mut sat_overlay = false;
     let mut mycelium_overlay = false;
@@ -472,7 +472,8 @@ async fn main() {
                 wind_streaks_overlay = !wind_streaks_overlay;
             }
             if is_key_pressed(KeyCode::N) {
-                clouds_on = !clouds_on;
+                // Soft lobe banks removed — they animated and tanked FPS.
+                // No-op; use H for the vapour field.
             }
             if is_key_pressed(KeyCode::T) {
                 temp_overlay = !temp_overlay;
@@ -1079,31 +1080,8 @@ async fn main() {
             scene.params.width_cols,
         );
 
-        // Soft cloud depth echoes (N): off by default (vapour_*=0). Tab can
-        // re-enable; Active banks are drawn after ridges via `draw_clouds`.
-        if clouds_on && settings.atmosphere.vapour_far > 0.02 {
-            draw_depth_cloud_layer(
-                &scene.clouds,
-                &scene.humidity,
-                &scene.wind,
-                scene.world.tick,
-                CloudDepthLayer::Far,
-                &settings.atmosphere,
-                scene.params.seed,
-                scene.params.sea_level_y,
-                settings.cloud.downpour_mass,
-                cam_x,
-                cam_y,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.wrap_x,
-                scene.params.width_cols,
-                sw,
-                sh,
-            );
-        }
+        // Soft N cloud banks removed (lobe-mask stamps animated + killed FPS).
+        // Vapour presentation is the H humidity overlay.
 
         // Ridges behind terrain. Skip whenever a sat/temp/myc/geotech
         // heatmap is on — mid/far fills stamp hard horizontal shelves
@@ -1129,58 +1107,6 @@ async fn main() {
                 scene.params.width_cols,
                 sw,
                 sh,
-            );
-        }
-
-        if clouds_on {
-            if settings.atmosphere.vapour_mid > 0.02 {
-                draw_depth_cloud_layer(
-                    &scene.clouds,
-                    &scene.humidity,
-                    &scene.wind,
-                    scene.world.tick,
-                    CloudDepthLayer::Mid,
-                    &settings.atmosphere,
-                    scene.params.seed,
-                    scene.params.sea_level_y,
-                    settings.cloud.downpour_mass,
-                    cam_x,
-                    cam_y,
-                    origin_x,
-                    origin_y,
-                    cell_px,
-                    scene.params.bedrock_floor_y,
-                    scene.params.wrap_x,
-                    scene.params.width_cols,
-                    sw,
-                    sh,
-                );
-            }
-            draw_clouds(
-                &scene.clouds,
-                &scene.humidity,
-                &scene.world,
-                &scene.wind,
-                scene.world.tick,
-                cam_x,
-                cam_y,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.sea_level_y,
-                scene.params.wrap_x,
-                scene.params.width_cols,
-                sw,
-                sh,
-                settings.cloud.downpour_mass,
-                &settings.atmosphere,
-                scene.params.seed,
-                |fx, fy| {
-                    let gx = scene.world.wrap_x(fx.round() as i32);
-                    let air_y = fy.round() as i32;
-                    precip_forms_snow_at_air(temp, gx, air_y, phase)
-                },
             );
         }
 
@@ -1404,31 +1330,6 @@ async fn main() {
                 scene.params.width_cols,
                 y_min_vis,
                 y_max_vis,
-                sw,
-                sh,
-            );
-        }
-
-        // Front soft cloud echoes (N) — optional; default off for FPS.
-        if clouds_on && settings.atmosphere.vapour_front > 0.02 {
-            draw_depth_cloud_layer(
-                &scene.clouds,
-                &scene.humidity,
-                &scene.wind,
-                scene.world.tick,
-                CloudDepthLayer::Front,
-                &settings.atmosphere,
-                scene.params.seed,
-                scene.params.sea_level_y,
-                settings.cloud.downpour_mass,
-                cam_x,
-                cam_y,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.wrap_x,
-                scene.params.width_cols,
                 sw,
                 sh,
             );

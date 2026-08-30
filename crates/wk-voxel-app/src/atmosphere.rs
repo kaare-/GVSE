@@ -557,6 +557,10 @@ fn paint_soft_cloud_mask(
 }
 
 /// Soft lobe cloud banks for one depth layer (never paints the humidity tile raster).
+///
+/// Parked: the app no longer calls this (FPS / no N animation). Kept for tests
+/// and a possible future vapour-field draw path.
+#[allow(dead_code)]
 pub fn draw_depth_cloud_layer(
     clouds: &CloudStore,
     humidity: &Humidity,
@@ -2011,7 +2015,8 @@ fn stamp_celestial_cast_shadows(
 
 /// Active-layer soft parcel banks + precip streaks (humidity echo in CloudStore).
 ///
-/// Banks use lobe masks; precip streaks are world-aligned so they clip on ground.
+/// Parked with [`draw_depth_cloud_layer`] — soft N banks are not drawn.
+#[allow(dead_code)]
 pub fn draw_clouds(
     clouds: &CloudStore,
     humidity: &Humidity,
@@ -2073,6 +2078,7 @@ pub fn draw_clouds(
 }
 
 
+#[allow(dead_code)]
 fn cloud_lobe_layout(shape_seed: u32, deform: f32) -> (f32, f32, Vec<(f32, f32, f32)>) {
     let d = deform.clamp(0.0, 1.0);
     // Ridge scrape: wider, flatter.
@@ -2107,6 +2113,7 @@ fn cloud_lobe_layout(shape_seed: u32, deform: f32) -> (f32, f32, Vec<(f32, f32, 
 }
 
 /// Stamp one parcel's lobe mask into the shared sky occupancy map.
+#[allow(dead_code)]
 pub fn stamp_pixel_cloud_mask(
     mask: &mut HashMap<(i32, i32), f32>,
     cx: f32,
