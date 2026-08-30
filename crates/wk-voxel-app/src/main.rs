@@ -1437,6 +1437,9 @@ async fn main() {
                 origin_x,
                 origin_y,
                 cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
                 scene.world.tick,
                 sw,
                 sh,
@@ -1848,6 +1851,7 @@ async fn main() {
                     format!("p={p} f={f} a={a}")
                 },
                 scene.organisms.corpse_count(),
+                if wind_streaks_overlay { "V" } else { "-" },
                 if sim_paused { "[paused]" } else { "" }
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
