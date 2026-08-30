@@ -14,7 +14,11 @@
 //!   +20 °C to −10 °C in one night.
 //! - **Buried** rock ignores solar/night air; it relaxes toward a
 //!   geothermal profile and slowly leaks heat upward by diffusion.
-//! - **Wind** advects Air tiles only ([`Temperature::advect_air`]).
+//! - **Wind** advects Air via the local vector field
+//!   ([`Temperature::advect_air_with_wind`]); wind also mixes air↔surface
+//!   and adds night chill when [`TempConfig::wind_mix`] > 0.
+//! - **Humidity** shades daytime solar and blankets night cooling
+//!   ([`TempConfig::cloud_shade`] / [`TempConfig::hum_night_blanket`]).
 //!
 //! Cadence: [`TEMP_STEP_PERIOD`] = 20 — not every physics tick.
 
@@ -53,6 +57,12 @@ fn default_near_surface_couple() -> f32 {
 fn default_near_surface_tiles() -> i32 {
     2
 }
+fn default_hum_night_blanket() -> f32 {
+    0.70
+}
+fn default_wind_mix() -> f32 {
+    0.45
+}
 
 /// Live-tunable temperature / solar / inertia / geothermal knobs.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -81,6 +91,14 @@ pub struct TempConfig {
     /// so ordinary moist air dims the sun without treating every tile as
     /// overcast.
     pub hum_shade_ref: f32,
+    /// How much humidity shade reduces **night** cooling (0 = clear nights
+    /// radiate fully; 1 = saturated air blankets like cloud cover).
+    #[serde(default = "default_hum_night_blanket")]
+    pub hum_night_blanket: f32,
+    /// How strongly local wind mixes air↔surface and boosts night chill
+    /// (0 = temperature ignores wind speed beyond advection).
+    #[serde(default = "default_wind_mix")]
+    pub wind_mix: f32,
     /// Base relax rate toward climate skin (air-like surfaces).
     pub sky_relax: f32,
     pub diffuse_alpha: f32,
@@ -122,6 +140,8 @@ impl Default for TempConfig {
             // any real vapor column fully shade the ground, so snow never
             // saw sun in +10 °C air.
             hum_shade_ref: 900.0,
+            hum_night_blanket: default_hum_night_blanket(),
+            wind_mix: default_wind_mix(),
             sky_relax: 0.12,
             diffuse_alpha: 0.10,
             inertia_scale: 1.6,
@@ -399,12 +419,23 @@ impl Temperature {
     /// One thermal step: layered forcing + inertia + diffusion.
     ///
     /// `world` supplies surface materials. Pass `None` only for air-only tests.
-    pub fn step(&mut self, world: Option<&World>, humidity: &Humidity, tick: u64) {
+    /// `wind` is optional local speed for air↔surface mixing and night chill.
+    pub fn step(
+        &mut self,
+        world: Option<&World>,
+        humidity: &Humidity,
+        tick: u64,
+        wind: Option<&crate::wind::Wind>,
+    ) {
         if self.cells.is_empty() {
             self.fill_initial(tick);
         }
         let dn = day_night_factor_cfg(tick, &self.climate);
         let cfg = self.config;
+        let wind_abs = wind
+            .map(|w| near_surface_wind_abs(w, world))
+            .unwrap_or(0.0);
+        let wind_k = (wind_abs / 0.14).clamp(0.0, 1.5) * cfg.wind_mix.clamp(0.0, 1.0);
         let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
         // Lowest world-y tile band (= deepest underground).
         let mut deepest_hy = i32::MAX;
@@ -443,10 +474,16 @@ impl Temperature {
                     } else {
                         0.0
                     };
+                    let night = (-dn).max(0.0);
+                    let blanket =
+                        (cfg.hum_night_blanket * cfg.cloud_shade * shade).clamp(0.0, 0.9);
+                    // Moist air holds heat at night; wind strips it unless blanketed.
+                    let cool_scale =
+                        (1.0 - blanket) * (1.0 + 0.40 * wind_k * (1.0 - blanket * 0.5));
                     let cool = if in_solar_band {
-                        cfg.night_cool_c * (-dn).max(0.0)
+                        cfg.night_cool_c * night * cool_scale
                     } else {
-                        cfg.night_cool_c * (-dn).max(0.0) * 0.25
+                        cfg.night_cool_c * night * 0.25 * cool_scale
                     };
                     let skin = self.skin_temp_on(world, hx, hy, tick);
                     let mut target = skin;
@@ -455,8 +492,9 @@ impl Temperature {
                         let surf_t = *snap.get(&(hx, surf_hy)).unwrap_or(&cfg.base_temp_c);
                         let falloff = 1.0
                             - (height_above as f32 / band as f32).clamp(0.0, 1.0);
-                        let couple =
-                            (cfg.near_surface_couple * falloff).clamp(0.0, 0.85);
+                        // Windy near-surface air tracks the ground harder.
+                        let couple = ((cfg.near_surface_couple + 0.25 * wind_k) * falloff)
+                            .clamp(0.0, 0.90);
                         target = skin * (1.0 - couple) + surf_t * couple;
                     }
                     let relax = cfg.sky_relax.clamp(cfg.min_relax, cfg.max_relax);
@@ -472,12 +510,18 @@ impl Temperature {
                         * dn.max(0.0)
                         * (1.0 - cfg.cloud_shade * shade)
                         * (1.0 - props.albedo.clamp(0.0, 0.95));
-                    let cool_scale = if watery {
+                    let water_scale = if watery {
                         cfg.water_night_cool_scale
                     } else {
                         1.0
                     };
-                    let cool = cfg.night_cool_c * (-dn).max(0.0) * cool_scale;
+                    let night = (-dn).max(0.0);
+                    let blanket =
+                        (cfg.hum_night_blanket * cfg.cloud_shade * shade).clamp(0.0, 0.9);
+                    let cool_scale = water_scale
+                        * (1.0 - blanket)
+                        * (1.0 + 0.45 * wind_k * (1.0 - blanket * 0.5));
+                    let cool = cfg.night_cool_c * night * cool_scale;
                     let skin = self.skin_temp_on(world, hx, hy, tick);
                     let relax = (cfg.sky_relax
                         / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale))
@@ -501,7 +545,9 @@ impl Temperature {
             };
             self.cells.insert((hx, hy), next);
         }
-        self.diffuse(cfg.diffuse_alpha);
+        // Wind also thickens horizontal air diffusion slightly.
+        let alpha = (cfg.diffuse_alpha * (1.0 + 0.5 * wind_k)).clamp(0.0, 0.25);
+        self.diffuse(alpha);
     }
 
     /// Shift **Air** temperatures with climate wind (tiles / tick).
@@ -509,6 +555,7 @@ impl Temperature {
     /// Surface and Buried stay put — only free air drifts. Destinations
     /// that are not air keep their parcel at the source. Vacated air
     /// tiles refill from the height-aware skin so the sky stays dense.
+    /// Prefer [`Self::advect_air_with_wind`] so local lee / breeze move heat.
     pub fn advect_air(&mut self, world: Option<&World>, vx: f32, vy: f32, tick: u64) {
         if self.cells.is_empty() || (vx == 0.0 && vy == 0.0) {
             return;
@@ -580,6 +627,58 @@ impl Temperature {
         }
     }
 
+    /// Advect air temperature with the local horizontal wind field.
+    ///
+    /// Upwind lerp each tick using [`crate::wind::Wind::vector_at`] — so lee
+    /// / breeze / canopy shelter move heat, not just the climate mean.
+    /// Vertical residual is soft (wind is a horizontal product).
+    pub fn advect_air_with_wind(
+        &mut self,
+        world: Option<&World>,
+        wind: &crate::wind::Wind,
+        tick: u64,
+    ) {
+        if self.cells.is_empty() {
+            return;
+        }
+        let snap = self.cells.clone();
+        let base = self.config.base_temp_c;
+        let mut next: HashMap<(i32, i32), f32> = HashMap::new();
+        for (&(hx, hy), &t) in &snap {
+            if !self.is_air_column_tile(world, hx, hy) {
+                next.insert((hx, hy), t);
+                continue;
+            }
+            let (vx, vy) = wind.vector_at(world, hx, hy);
+            // Horizontal-first advection.
+            let fx = vx.clamp(-1.0, 1.0);
+            let fy = (vy * 0.35).clamp(-0.5, 0.5);
+            let mut tn = t;
+            if fx.abs() > 1e-5 {
+                let dir = if fx > 0.0 { -1 } else { 1 }; // upwind
+                let uhx = self.wrap_hx(hx + dir).unwrap_or(hx);
+                if self.is_air_column_tile(world, uhx, hy) && self.accepts(uhx, hy) {
+                    let up = *snap.get(&(uhx, hy)).unwrap_or(&base);
+                    tn = tn * (1.0 - fx.abs()) + up * fx.abs();
+                }
+            }
+            if fy.abs() > 1e-5 {
+                let dir = if fy > 0.0 { -1 } else { 1 };
+                let uhy = hy + dir;
+                if self.is_air_column_tile(world, hx, uhy) && self.accepts(hx, uhy) {
+                    let up = *snap.get(&(hx, uhy)).unwrap_or(&base);
+                    tn = tn * (1.0 - fy.abs()) + up * fy.abs();
+                }
+            }
+            next.insert((hx, hy), tn);
+        }
+        // Keep non-air tiles from snap that we skipped above already copied.
+        for (k, v) in next {
+            self.cells.insert(k, v);
+        }
+        let _ = tick; // reserved if vacated seats need skin refill later
+    }
+
     /// Pairwise temperature diffusion. Vertical mix is gentle so night air
     /// cannot drain lakes, but warm bedrock still leaks heat upward.
     pub fn diffuse(&mut self, alpha: f32) {
@@ -627,6 +726,27 @@ impl Temperature {
 /// Fraction of solar blocked by humidity in the vapor column above `(hx, hy)`.
 fn humidity_shade_factor(humidity: &Humidity, hx: i32, hy: i32, cfg: &TempConfig) -> f32 {
     (humidity.column_peak_mass(hx, hy) / cfg.hum_shade_ref.max(1.0)).clamp(0.0, 1.0)
+}
+
+/// Mean |vx| in the near-surface air band — for wind chill / couple scaling.
+fn near_surface_wind_abs(wind: &crate::wind::Wind, world: Option<&World>) -> f32 {
+    if wind.field.is_empty() {
+        return wind.climate_vx.abs().max(wind.climate_vy.abs());
+    }
+    let mut sum = 0.0f32;
+    let mut n = 0u32;
+    for (&(hx, hy), &(vx, _)) in &wind.field {
+        let surf = wind.surface_tile_hy(world, hx);
+        if hy >= surf && hy <= surf + 3 {
+            sum += vx.abs();
+            n += 1;
+        }
+    }
+    if n == 0 {
+        wind.climate_vx.abs()
+    } else {
+        sum / n as f32
+    }
 }
 
 fn tile_thermal_props(
@@ -821,8 +941,8 @@ mod tests {
         let (mut day, h) = demo_temp();
         let (mut night, _) = demo_temp();
         for _ in 0..8 {
-            day.step(None, &h, 0);
-            night.step(None, &h, DEMO_DAY_TICKS / 2);
+            day.step(None, &h, 0, None);
+            night.step(None, &h, DEMO_DAY_TICKS / 2, None);
         }
         assert!(
             day.mean() > night.mean() + 1.0,
@@ -846,8 +966,8 @@ mod tests {
             }
         }
         for _ in 0..6 {
-            clear.step(None, &h_clear, 0);
-            cloudy.step(None, &h_cloud, 0);
+            clear.step(None, &h_clear, 0, None);
+            cloudy.step(None, &h_cloud, 0, None);
         }
         assert!(
             clear.mean() > cloudy.mean() + 0.15,
@@ -887,14 +1007,53 @@ mod tests {
             &shaded.cells.keys().copied().collect::<Vec<_>>(),
         );
         for i in 0..6 {
-            clear.step(Some(&world), &h_clear, i * TEMP_STEP_PERIOD);
-            shaded.step(Some(&world), &h_wet, i * TEMP_STEP_PERIOD);
+            clear.step(Some(&world), &h_clear, i * TEMP_STEP_PERIOD, None);
+            shaded.step(Some(&world), &h_wet, i * TEMP_STEP_PERIOD, None);
         }
         let t_clear = clear.at_tile(hx, surf_hy);
         let t_shaded = shaded.at_tile(hx, surf_hy);
         assert!(
             t_clear > t_shaded + 0.2,
             "wet air above should cool the land ({t_clear:.2} vs {t_shaded:.2})"
+        );
+    }
+
+    #[test]
+    fn humid_air_blankets_night_cooling() {
+        let p = WorldgenParams::default();
+        let sea = p.sea_level_y;
+        let x0: i32 = 8;
+        let mut world = World::new(3);
+        fill_tile_surface(&mut world, x0, sea, MaterialId::Sand, 0);
+        let mut clear = Temperature::with_world_bounds(
+            4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y, 1, 32, sea, false,
+        );
+        let mut humid = clear.clone();
+        clear.config.solar_heat_c = 0.0;
+        humid.config.solar_heat_c = 0.0;
+        clear.config.hum_night_blanket = 0.85;
+        humid.config.hum_night_blanket = 0.85;
+        clear.config.cloud_shade = 0.8;
+        humid.config.cloud_shade = 0.8;
+        clear.config.wind_mix = 0.0;
+        humid.config.wind_mix = 0.0;
+        let h_clear = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y);
+        let mut h_wet = h_clear.clone();
+        let surf_hy = sea.div_euclid(4);
+        let hx = x0 / 4;
+        h_wet
+            .cells
+            .insert((hx, surf_hy + 2), TempConfig::default().hum_shade_ref * 2.0);
+        let night = DEMO_DAY_TICKS / 2;
+        for i in 0..8 {
+            clear.step(Some(&world), &h_clear, night + i * TEMP_STEP_PERIOD, None);
+            humid.step(Some(&world), &h_wet, night + i * TEMP_STEP_PERIOD, None);
+        }
+        let t_clear = clear.at_tile(hx, surf_hy);
+        let t_humid = humid.at_tile(hx, surf_hy);
+        assert!(
+            t_humid > t_clear + 0.15,
+            "humid night should stay warmer ({t_humid:.2} vs clear {t_clear:.2})"
         );
     }
 
@@ -973,7 +1132,7 @@ mod tests {
             p.sky_ceiling_y,
         );
         for i in 0..5 {
-            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD);
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
         }
         let pond_t = t.at_cell(pond_x0 + 1, sea + 3);
         let dry_t = t.at_cell(dry_x0 + 1, sea + 1);
@@ -1013,7 +1172,7 @@ mod tests {
         let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y);
         // One climate "night" worth of thermal steps.
         for i in 0..8 {
-            t.step(Some(&world), &h, DEMO_DAY_TICKS / 2 + i * TEMP_STEP_PERIOD);
+            t.step(Some(&world), &h, DEMO_DAY_TICKS / 2 + i * TEMP_STEP_PERIOD, None);
         }
         let deep_y = sea - 16;
         let deep_t = t.at_cell(x0 + 1, deep_y);
@@ -1055,7 +1214,7 @@ mod tests {
         let deep_y = sea - 16;
         let before = t.at_cell(x0 + 1, deep_y);
         for i in 0..30 {
-            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD);
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
         }
         let after = t.at_cell(x0 + 1, deep_y);
         assert!(
@@ -1094,8 +1253,8 @@ mod tests {
         }
         let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y);
         for i in 0..6 {
-            t_snow.step(Some(&snow_w), &h, i * TEMP_STEP_PERIOD);
-            t_rock.step(Some(&rock_w), &h, i * TEMP_STEP_PERIOD);
+            t_snow.step(Some(&snow_w), &h, i * TEMP_STEP_PERIOD, None);
+            t_rock.step(Some(&rock_w), &h, i * TEMP_STEP_PERIOD, None);
         }
         let ts = t_snow.at_cell(x0 + 1, sea + 1);
         let tr = t_rock.at_cell(x0 + 1, sea + 1);
@@ -1158,7 +1317,7 @@ mod tests {
             &t.cells.keys().copied().collect::<Vec<_>>(),
         );
         for i in 0..4 {
-            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD);
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
         }
         let near = t.at_tile(x0 / 4, air_hy);
         let high = t.at_tile(x0 / 4, high_hy);
@@ -1227,6 +1386,60 @@ mod tests {
         assert!(
             vacated < 18.0,
             "source seat refills from cooler skin (got {vacated:.1})"
+        );
+    }
+
+    #[test]
+    fn advect_air_with_wind_moves_heat_along_local_vx() {
+        let p = WorldgenParams::default();
+        let sea = p.sea_level_y;
+        let sky = p.sky_ceiling_y;
+        let x0: i32 = 16;
+        let mut world = World::new(3);
+        for x in 0i32..64 {
+            for y in 0i32..sky {
+                world.ensure_chunk(ChunkCoord::new(
+                    x.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
+                    y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+                ));
+            }
+            for y in 0i32..=sea {
+                world.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            world.set_cell(x, sea + 1, Cell::solid(MaterialId::Sand));
+            for y in (sea + 2)..sky {
+                world.set_cell(x, y, Cell::air());
+            }
+        }
+        let mut t = Temperature::with_world_bounds(
+            4, 0, p.bedrock_floor_y, 64, p.sky_ceiling_y, 1, 64, sea, false,
+        );
+        let mut wind = crate::wind::Wind::climate(
+            4, 0.0, 1, 64, sea, p.bedrock_floor_y, sky, false,
+        );
+        wind.variance = 0.0;
+        wind.config.terrain_drive = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.field_smooth = 0.0;
+        let b = wind.bounds.unwrap();
+        for hy in b.hy_min..=b.hy_max {
+            for hx in b.hx_min..=b.hx_max {
+                wind.field.insert((hx, hy), (0.5, 0.0));
+            }
+        }
+        let surf = t.column_surface_y_estimate(Some(&world), x0 / 4);
+        let air_hy = (surf + 12).div_euclid(4);
+        let hx0 = x0 / 4;
+        for v in t.cells.values_mut() {
+            *v = 10.0;
+        }
+        t.cells.insert((hx0, air_hy), 30.0);
+        t.advect_air_with_wind(Some(&world), &wind, 0);
+        let moved = t.at_tile(hx0 + 1, air_hy);
+        assert!(
+            moved > 18.0,
+            "local wind should carry warmth downwind (got {moved:.1})"
         );
     }
 

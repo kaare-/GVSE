@@ -857,6 +857,20 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Solar heat / step", 0.0..1.5, &mut self.temp.solar_heat_c);
                     labeled_slider(ui, hash!(), "Night cool / step", 0.0..1.5, &mut self.temp.night_cool_c);
                     labeled_slider(ui, hash!(), "Cloud shade (thermal)", 0.0..1.0, &mut self.temp.cloud_shade);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Humidity night blanket",
+                        0.0..1.0,
+                        &mut self.temp.hum_night_blanket,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Wind ↔ temperature mix",
+                        0.0..1.0,
+                        &mut self.temp.wind_mix,
+                    );
                     labeled_slider(ui, hash!(), "Sea bias (C)", -10.0..5.0, &mut self.temp.sea_bias_c);
                     labeled_slider(
                         ui,

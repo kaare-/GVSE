@@ -74,7 +74,7 @@ use wk_voxel::{
 use crate::atmosphere::{
     apply_celestial_key_rgb, apply_organism_celestial_key_rgb, canopy_wind_drag, draw_canopy_air_dim,
     draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, draw_wind_streaks,
-    haze_alpha_ref_step, haze_alpha_ref_target, CloudDepthLayer,
+    haze_alpha_ref_step, haze_alpha_ref_target, near_surface_wind_for_evap, CloudDepthLayer,
     draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_organism_aboveground,
     organism_celestial_rim, sky_weather_for_scene, terrain_celestial_key_strength,
     toward_light_celestial, RidgeSilhouette,
@@ -577,12 +577,15 @@ async fn main() {
                 );
             }
             if settings.evap_on {
+                let evap_wind = near_surface_wind_for_evap(&scene.wind, &scene.world)
+                    .max(wind_vx.abs())
+                    .max(wind_vy.abs());
                 apply_evaporation_into_humidity_climate(
                     &mut scene.world,
                     &mut scene.humidity,
                     &settings.evap,
                     Some(&scene.temperature),
-                    wind_vx.abs().max(wind_vy.abs()),
+                    evap_wind,
                 );
             }
             // Vapor drifts with the wind, then warm air rises and
@@ -590,10 +593,9 @@ async fn main() {
             scene
                 .humidity
                 .advect_with_surface(wind_vx, wind_vy, &scene.wind, &scene.world);
-            scene.temperature.advect_air(
+            scene.temperature.advect_air_with_wind(
                 Some(&scene.world),
-                wind_vx,
-                wind_vy,
+                &scene.wind,
                 scene.world.tick,
             );
             let tick_no = scene.world.tick;
@@ -726,9 +728,12 @@ async fn main() {
             ));
             if temperature_step_due(scene.world.tick) {
                 let tick_no = scene.world.tick;
-                scene
-                    .temperature
-                    .step(Some(&scene.world), &scene.humidity, tick_no);
+                scene.temperature.step(
+                    Some(&scene.world),
+                    &scene.humidity,
+                    tick_no,
+                    Some(&scene.wind),
+                );
             }
             // Cold wet-sand / snow / hillside ice spill onto lake ice
             // after the thermal step, then phase may break thin lids.

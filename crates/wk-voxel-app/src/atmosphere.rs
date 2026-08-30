@@ -1288,6 +1288,27 @@ pub fn draw_haze_and_wind(
     }
 }
 
+/// Mean near-surface |vx| from the rebuilt wind field (evap / HUD).
+pub fn near_surface_wind_for_evap(wind: &Wind, world: &World) -> f32 {
+    if wind.field.is_empty() {
+        return wind.climate_vx.abs();
+    }
+    let mut sum = 0.0f32;
+    let mut n = 0u32;
+    for (&(hx, hy), &(vx, _)) in &wind.field {
+        let surf = wind.surface_tile_hy(Some(world), hx);
+        if hy >= surf && hy <= surf + 2 {
+            sum += vx.abs();
+            n += 1;
+        }
+    }
+    if n == 0 {
+        wind.climate_vx.abs()
+    } else {
+        sum / n as f32
+    }
+}
+
 /// Wind vector heatmap (`V`): sparse horizontal streaks + thin direction ticks.
 ///
 /// Wind is a horizontal field — wash uses `|vx|`, arrows are subsampled so the

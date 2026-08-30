@@ -332,7 +332,7 @@ fn one_stack_tick(
                 let t = scene.world.tick;
                 scene
                     .temperature
-                    .step(Some(&scene.world), &scene.humidity, t);
+                    .step(Some(&scene.world), &scene.humidity, t, Some(&scene.wind));
             }
             if scene.phase.enabled
                 && scene.phase.enable_cold_avalanche
@@ -449,7 +449,7 @@ fn one_stack_tick(
                 let t = scene.world.tick;
                 scene
                     .temperature
-                    .step(Some(&scene.world), &scene.humidity, t);
+                    .step(Some(&scene.world), &scene.humidity, t, Some(&scene.wind));
                 a.temperature += t0.elapsed();
                 a.temperature_calls += 1;
             }

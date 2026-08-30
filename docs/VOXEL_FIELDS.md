@@ -21,9 +21,9 @@ depend on `wk-field` / `wk-world`.
 | Overlay | Role today | Material coupling |
 |---------|------------|-------------------|
 | Cell `sat` | Free water + pore water | porosity → capacity; permeability → seepage |
-| `Humidity` | Atmospheric vapour tiles | Evap / rain / clouds / plant return |
-| `Temperature` | °C tiles (Air / Surface / Buried) | `heat_capacity`, `albedo`; drives phase + cold avalanche |
-| `Wind` | Climate mean + rebuilt `(vx,vy)` tile field | Humidity advection, oro rain, canopy drag hook |
+| `Humidity` | Atmospheric vapour tiles | Evap / rain / clouds; day shade + night blanket on temperature |
+| `Temperature` | °C tiles (Air / Surface / Buried) | Phase + cold avalanche; drives wind thermal; humidity shade/blanket |
+| `Wind` | Climate + rebuilt `(vx,vy)` tile field | Moves humidity + air heat; scales evap; canopy drag hook |
 | `Heatmap<T>` scaffold | Generic sparse patches | **Unused** by live climate (typed fields preferred so far) |
 | `World::soft_litter` | Per-column fungus food | Digested before Organic cells |
 
