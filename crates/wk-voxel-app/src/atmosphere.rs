@@ -359,7 +359,7 @@ fn haze_resampled_cells(
             continue;
         };
         for gy in col_y0..y1 {
-            let sampled = humidity.sample_bilinear(wx as f32 + 0.5, gy as f32 + 0.5);
+            let sampled = humidity.sample_haze(wx as f32 + 0.5, gy as f32 + 0.5);
             out.push((wx, gy, sampled));
         }
     }
@@ -1309,11 +1309,6 @@ pub fn draw_wind_streaks(wind: &Wind, tick: u64, sw: f32, sh: f32) {
     }
 }
 
-/// Surface dim under foliage + diagonal celestial cast on the lee (+ mild cloud dim).
-///
-/// Day: sun cast (call before organisms). Night: moon cast, near-black lee
-/// (call after organisms). Cast direction is **viewport-relative** to the
-/// on-screen sun/moon so shadows never fall toward the light.
 pub fn draw_canopy_air_dim(
     world: &World,
     organisms: &OrganismStore,

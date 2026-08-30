@@ -402,6 +402,20 @@ impl Humidity {
         a + (b - a) * ty
     }
 
+    /// Display sample with a short horizontal blur.
+    ///
+    /// Tile-scale humidity + a hard mass floor otherwise reads as vertical
+    /// picket-fence columns (especially the near-surface fog band). Physics
+    /// stays on the tile store; only the wash is softened.
+    pub fn sample_haze(&self, gx: f32, gy: f32) -> f32 {
+        let l2 = self.sample_bilinear(gx - 2.0, gy);
+        let l1 = self.sample_bilinear(gx - 1.0, gy);
+        let c = self.sample_bilinear(gx, gy);
+        let r1 = self.sample_bilinear(gx + 1.0, gy);
+        let r2 = self.sample_bilinear(gx + 2.0, gy);
+        0.10 * l2 + 0.20 * l1 + 0.40 * c + 0.20 * r1 + 0.10 * r2
+    }
+
     /// Total humidity mass across all tiles. Useful for
     /// mass-conservation assertions in tests and for HUD summaries.
     pub fn total_mass(&self) -> f32 {
