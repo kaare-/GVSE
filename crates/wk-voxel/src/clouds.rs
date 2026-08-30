@@ -740,11 +740,12 @@ mod tests {
             h.total_mass()
         );
         for pcloud in &clouds.parcels {
+            let floor = cloud_floor_y(&world, &wind, pcloud.fx);
             assert!(
-                pcloud.fy > p.sea_level_y as f32 + cfg.coag_min_above_sea as f32 * 0.5,
-                "cloud fy={} too low (sea={})",
+                pcloud.fy >= floor + cfg.ridge_clearance - 0.5,
+                "cloud fy={} should clear local floor {} (not a sea shelf)",
                 pcloud.fy,
-                p.sea_level_y
+                floor
             );
         }
     }
