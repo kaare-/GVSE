@@ -723,16 +723,57 @@ impl Humidity {
         wind: &crate::wind::Wind,
         world: &crate::grid::World,
     ) {
-        self.advect_inner(vx, vy, Some((wind, world)));
-        self.wind_mix(wind.mix_strength(vx, vy), Some((wind, world)));
+        // One free-air height per column for the whole pass — flux / mix /
+        // lift used to re-walk the live surface for every humidity tile
+        // (~16 ms/tick once the sky filled).
+        let free_air = self.build_free_air_cache(wind, world);
+        self.advect_inner(vx, vy, Some((wind, world, &free_air)));
+        self.wind_mix_inner(wind.mix_strength(vx, vy), Some((wind, world, &free_air)));
         self.apply_orographic_lift(wind, Some(world));
+    }
+
+    /// Precompute [`Self::free_air_hy`] for every occupied column (±1 neighbour).
+    fn build_free_air_cache(
+        &self,
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+    ) -> crate::fasthash::FxHashMap<i32, i32> {
+        let mut cache = crate::fasthash::FxHashMap::default();
+        for &(hx, _) in self.cells.keys() {
+            for dx in [-1, 0, 1] {
+                let Some(nx) = self.wrap_hx(hx + dx) else {
+                    continue;
+                };
+                cache
+                    .entry(nx)
+                    .or_insert_with(|| self.free_air_hy(wind, world, nx));
+            }
+        }
+        cache
+    }
+
+    fn free_air_cached(
+        &self,
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+        hx: i32,
+        cache: &crate::fasthash::FxHashMap<i32, i32>,
+    ) -> i32 {
+        cache
+            .get(&hx)
+            .copied()
+            .unwrap_or_else(|| self.free_air_hy(wind, world, hx))
     }
 
     fn advect_inner(
         &mut self,
         climate_vx: f32,
         climate_vy: f32,
-        surface: Option<(&crate::wind::Wind, &crate::grid::World)>,
+        surface: Option<(
+            &crate::wind::Wind,
+            &crate::grid::World,
+            &crate::fasthash::FxHashMap<i32, i32>,
+        )>,
     ) {
         if self.cells.is_empty() {
             return;
@@ -748,8 +789,8 @@ impl Humidity {
         self.flux_axis(climate_vx, climate_vy, surface, true);
         self.flux_axis(climate_vx, climate_vy, surface, false);
 
-        if let Some((wind, world)) = surface {
-            self.lift_buried_to_free_air(wind, world);
+        if let Some((wind, world, cache)) = surface {
+            self.lift_buried_to_free_air(wind, world, cache);
         }
         let bounds = self.bounds;
         self.cells.retain(|&(hx, hy), v| {
@@ -763,7 +804,11 @@ impl Humidity {
         &mut self,
         climate_vx: f32,
         climate_vy: f32,
-        surface: Option<(&crate::wind::Wind, &crate::grid::World)>,
+        surface: Option<(
+            &crate::wind::Wind,
+            &crate::grid::World,
+            &crate::fasthash::FxHashMap<i32, i32>,
+        )>,
         horizontal: bool,
     ) {
         let snap = self.cells.clone();
@@ -773,7 +818,7 @@ impl Humidity {
                 continue;
             }
             let (vx, vy) = match surface {
-                Some((wind, world)) => wind.vector_at(Some(world), hx, hy),
+                Some((wind, world, _)) => wind.vector_at(Some(world), hx, hy),
                 None => (climate_vx, climate_vy),
             };
             let v = if horizontal { vx } else { vy };
@@ -795,8 +840,8 @@ impl Humidity {
                     }
                 };
                 let mut nhy = hy;
-                if let Some((wind, world)) = surface {
-                    nhy = self.free_air_hy(wind, world, nhx).max(nhy);
+                if let Some((wind, world, cache)) = surface {
+                    nhy = self.free_air_cached(wind, world, nhx, cache).max(nhy);
                     if !self.accepts(nhx, nhy) {
                         continue;
                     }
@@ -808,8 +853,8 @@ impl Humidity {
                 let dir = if step > 0.0 { 1 } else { -1 };
                 let nhy = hy + dir;
                 let mut dest_hy = nhy;
-                if let Some((wind, world)) = surface {
-                    dest_hy = self.free_air_hy(wind, world, hx).max(nhy);
+                if let Some((wind, world, cache)) = surface {
+                    dest_hy = self.free_air_cached(wind, world, hx, cache).max(nhy);
                 }
                 if !self.accepts(hx, dest_hy) {
                     continue;
@@ -840,6 +885,24 @@ impl Humidity {
         mix: f32,
         surface: Option<(&crate::wind::Wind, &crate::grid::World)>,
     ) {
+        match surface {
+            Some((wind, world)) => {
+                let free_air = self.build_free_air_cache(wind, world);
+                self.wind_mix_inner(mix, Some((wind, world, &free_air)));
+            }
+            None => self.wind_mix_inner(mix, None),
+        }
+    }
+
+    fn wind_mix_inner(
+        &mut self,
+        mix: f32,
+        surface: Option<(
+            &crate::wind::Wind,
+            &crate::grid::World,
+            &crate::fasthash::FxHashMap<i32, i32>,
+        )>,
+    ) {
         let mix = mix.clamp(0.0, 1.0);
         if mix < 1e-4 || self.cells.is_empty() {
             return;
@@ -857,8 +920,8 @@ impl Humidity {
             if !self.accepts(above.0, above.1) {
                 continue;
             }
-            if let Some((wind, world)) = surface {
-                let air = self.free_air_hy(wind, world, hx);
+            if let Some((wind, world, cache)) = surface {
+                let air = self.free_air_cached(wind, world, hx, cache);
                 if hy < air || above.1 < air {
                     continue;
                 }
@@ -883,8 +946,8 @@ impl Humidity {
                 if !self.accepts(hx, below) {
                     continue;
                 }
-                if let Some((wind, world)) = surface {
-                    if below < self.free_air_hy(wind, world, hx) {
+                if let Some((wind, world, cache)) = surface {
+                    if below < self.free_air_cached(wind, world, hx, cache) {
                         continue;
                     }
                 }
@@ -954,11 +1017,12 @@ impl Humidity {
         &mut self,
         wind: &crate::wind::Wind,
         world: &crate::grid::World,
+        cache: &crate::fasthash::FxHashMap<i32, i32>,
     ) {
         let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
         let mut moves: Vec<((i32, i32), (i32, i32), f32)> = Vec::new();
         for (hx, hy) in keys {
-            let air = self.free_air_hy(wind, world, hx);
+            let air = self.free_air_cached(wind, world, hx, cache);
             if hy >= air {
                 continue;
             }

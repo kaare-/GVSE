@@ -19,7 +19,7 @@
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution (surface limestone + slow groundwater)
 //! - `O` — toggle Set A organisms (Atom step)
-//! - `H` — toggle humidity tile diagnostic (default on)
+//! - `H` — toggle humidity tile diagnostic (default off — expensive when sky fills)
 //! - `V` — toggle wind vector heatmap (strength + direction; default off)
 //! - `N` — soft cloud banks removed (FPS); humidity look is `H`
 //! - `T` — toggle temperature heatmap overlay
@@ -211,9 +211,9 @@ async fn main() {
     let mut spore_fx = SporeFx::new();
     let mut paused = false;
     let mut organisms_on = true;
-    // Humidity diagnostic default on (`H`). Soft N banks removed (lobe stamps
-    // killed FPS); vapour look is `H`.
-    let mut humidity_overlay = true;
+    // Soft N banks removed. H vapour diagnostic default **off** — once the
+    // sky fills (~10k humidity tiles) per-cell haze draws tank FPS.
+    let mut humidity_overlay = false;
     let mut wind_streaks_overlay = false;
     let mut temp_overlay = false;
     let mut sat_overlay = false;
@@ -553,11 +553,9 @@ async fn main() {
             || terrain.open
             || quit_dialog.open;
         frame_i = frame_i.wrapping_add(1);
-        // Local wind field: rebuild on alternate frames while sim runs (or
-        // when V needs a heatmap). Full-grid rebuild every frame was a major
-        // FPS hit after the climate coupling work.
+        // Local wind field: every 4th frame while sim runs (or when V is on).
         let rebuild_wind = scene.wind.field.is_empty()
-            || ((!sim_paused || wind_streaks_overlay) && frame_i % 2 == 0);
+            || ((!sim_paused || wind_streaks_overlay) && frame_i % 4 == 0);
         if rebuild_wind {
             let drag = if settings.wind.canopy_dampen > 1e-4 {
                 let age = if canopy_drag_tick == u64::MAX {
@@ -609,11 +607,16 @@ async fn main() {
             }
             // Vapor drifts with the wind, then warm air rises and
             // condenses where it meets colder air / ground.
-            scene
-                .humidity
-                .advect_with_surface(wind_vx, wind_vy, &scene.wind, &scene.world);
+            // Advect every other tick once the field is large — free-air
+            // caching helps, but cloning ~10k tiles twice/axis still costs.
+            if scene.world.tick % 2 == 0 || scene.humidity.cells.len() < 2_000 {
+                scene
+                    .humidity
+                    .advect_with_surface(wind_vx, wind_vy, &scene.wind, &scene.world);
+            }
             // Skip full-temp clone when wind↔temp mix is dialed off or calm.
             if settings.temp.wind_mix > 1e-4
+                && scene.world.tick % 2 == 0
                 && (wind_vx.abs() > 1e-4
                     || wind_vy.abs() > 1e-4
                     || !scene.wind.field.is_empty())

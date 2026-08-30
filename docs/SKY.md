@@ -27,7 +27,7 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 | Key | What |
 |-----|------|
 | **N** | Soft lobe cloud banks **removed** (animated + multi-FPS cost). No-op; use **H**. |
-| **H** | Humidity **tile raster** — the vapour look |
+| **H** | Humidity **tile raster** — vapour look (default **off**; costly once sky fills) |
 | **V** | Wind streak overlay (placeholder; default off) |
 | **F6** | Glossary — keys, water/sky words, HUD tags |
 

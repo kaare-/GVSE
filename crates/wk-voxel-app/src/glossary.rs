@@ -296,7 +296,7 @@ const KEYS: &[(&str, LineKind)] = &[
     ("", LineKind::Blank),
     ("Overlays", LineKind::Head),
     ("N        soft banks removed (use H for vapour)", LineKind::Body),
-    ("H        humidity tile raster (default on)", LineKind::Body),
+    ("H        humidity tile raster (default off — costly when sky fills)", LineKind::Body),
     ("V        wind heatmap — strength (wash) + direction (arrows)", LineKind::Body),
     ("T        temperature heatmap", LineKind::Body),
     ("U        ground saturation heatmap (pores + free water)", LineKind::Body),

@@ -1231,11 +1231,45 @@ pub fn draw_haze_and_wind(
     let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
     let ref_mass = alpha_ref.max(1.0);
     let tc = humidity.tile_cols.max(1);
-    // Do **not** clamp seats to sea level — that painted a hard horizontal
-    // shelf and hid vapor over dug lakes below sea. Per-column cloud floor
-    // is the only bottom clip.
     let sky_hy_min = humidity.bounds.map(|b| b.hy_min).unwrap_or(0);
-    let _ = (tc, sea_level_y);
+    let _ = sea_level_y;
+    let floor = HAZE_MASS_FLOOR / HAZE_MASS_FULL;
+
+    // Fast path once the sky fills: one rectangle per humidity tile.
+    // Per-cell bilinear + cloud_floor scans were O(tiles×16×wraps) draw
+    // calls and dropped the app to ~4–5 FPS with ~10k seats.
+    const FINE_SEAT_CAP: usize = 1_200;
+    if humidity.cells.len() > FINE_SEAT_CAP {
+        let tile_px = tc as f32 * cell_px;
+        for (&(hx, hy), &mass) in &humidity.cells {
+            if hy < sky_hy_min || mass <= 0.0 {
+                continue;
+            }
+            let (hr, hg, hb, cell_alpha) = humidity_haze_style(mass, ref_mass, floor);
+            if cell_alpha == 0 {
+                continue;
+            }
+            let gx0 = hx * tc;
+            let gy0 = hy * tc;
+            for &x_copy in x_copies {
+                let sx = (origin_x + (gx0 + x_copy * width_cols) as f32 * cell_px).floor();
+                let sy = (origin_y - (gy0 + tc - bedrock_floor_y) as f32 * cell_px).floor();
+                if sx + tile_px < 0.0 || sx > sw || sy > sh || sy + tile_px < 0.0 {
+                    continue;
+                }
+                draw_rectangle(
+                    sx,
+                    sy,
+                    tile_px.max(1.0),
+                    tile_px.max(1.0),
+                    Color::from_rgba(hr, hg, hb, cell_alpha),
+                );
+            }
+        }
+        let _ = (world, wind);
+        return;
+    }
+
     let drop_tops = collect_drop_tops(world);
     let seats = haze_paint_seats(humidity, sky_hy_min);
     let mut floor_cache: HashMap<i32, i32> = HashMap::new();
@@ -1264,7 +1298,6 @@ pub fn draw_haze_and_wind(
         }
     }
 
-    let floor = HAZE_MASS_FLOOR / HAZE_MASS_FULL;
     for (&(wx, gy), &sampled) in &cells {
         let (hr, hg, hb, cell_alpha) = humidity_haze_style(sampled, ref_mass, floor);
         if cell_alpha == 0 {
