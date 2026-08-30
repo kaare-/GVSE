@@ -304,6 +304,9 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   below — prevents a second skin above a fallen/submerged flake (shore
   “float up” after break/fall).
 - **Thaw:** top-of-stack Ice/Snow when `temp > freeze_point_c` → `Air+FULL`.
+  Warm snowpack (`> freeze + 2 °C`) peels a few cells per pass; ice lakes stay
+  at the configured rate limit. Condensation snowfall also needs **cold ground**
+  (not only cold air) so flakes do not keep landing on a +10 °C hillside.
 - **Rain on ice:** stays as a water film on top (no density-swap under the
   sheet — that lofted ice into the rain). Melts the ice when **warm** only
   (cold ponded rain no longer melts sheets — that churned ice towers).

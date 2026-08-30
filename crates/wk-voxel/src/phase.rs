@@ -315,7 +315,7 @@ fn frozen_count_in_column(world: &World, gx: i32) -> usize {
 
 /// Y used to sample temperature for precip phase — skips Ice/Snow so a
 /// growing pack cannot make the column read colder (column elev feedback).
-fn ground_sample_y(world: &World, gx: i32) -> i32 {
+pub(crate) fn ground_sample_y(world: &World, gx: i32) -> i32 {
     let Some((y0, y1)) = y_bounds(world) else {
         return 0;
     };
@@ -899,11 +899,27 @@ fn above_is_frozen(world: &World, gx: i32, gy: i32) -> bool {
 ///
 /// Top-down, rate-limited — a sudden warm snap cannot dump a whole
 /// ice cliff into the basin in one tick (mass stays one cell at a time).
+/// Soft snow melts faster than thick ice once air is clearly above
+/// freezing, so a spring pack does not sit through +10 °C days.
 fn thaw_column(world: &mut World, gx: i32, temp: &Temperature, cfg: &PhaseConfig) {
     let Some((y0, y1)) = y_bounds(world) else {
         return;
     };
     let mut thaws_left = cfg.max_thaw_cells_per_column_per_tick.max(1) as i32;
+    // Peek the exposed top: warm snowpack may peel a few cells / pass.
+    for y in (y0..=y1).rev() {
+        let Some(cell) = world.get_cell(gx, y) else {
+            continue;
+        };
+        if !is_frozen_solid(cell.material) {
+            continue;
+        }
+        let t_c = temp.at_cell(gx, y);
+        if cell.material == MaterialId::Snow && t_c > cfg.freeze_point_c + 2.0 {
+            thaws_left = thaws_left.saturating_add(2).min(4);
+        }
+        break;
+    }
     for y in (y0..=y1).rev() {
         if thaws_left <= 0 {
             break;
@@ -1083,6 +1099,33 @@ mod tests {
         let cell = w.get_cell(1, 1).unwrap();
         assert_eq!(cell.material, MaterialId::Air);
         assert!(cell.sat.is_full(), "thaw must yield a full water cell");
+    }
+
+    #[test]
+    fn snow_thaws_in_plus_ten_air() {
+        // Playtest: snowpack sat through +10 °C days because drizzle kept
+        // nucleating flakes onto warm ground and thaw was ice-slow.
+        let mut w = World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(1, 0, Cell::solid(MaterialId::Bedrock));
+        w.set_cell(1, 1, Cell::solid(MaterialId::Snow));
+        w.set_cell(1, 2, Cell::solid(MaterialId::Snow));
+        w.set_cell(1, 3, Cell::solid(MaterialId::Snow));
+        let temp = cold_temp(16, 16, 10.0);
+        let cfg = PhaseConfig {
+            period_ticks: 1,
+            ..PhaseConfig::default()
+        };
+        apply_phase(&mut w, &temp, &cfg);
+        let top = w.get_cell(1, 3).unwrap();
+        assert_eq!(top.material, MaterialId::Air);
+        assert!(top.sat.is_full(), "warm snow must thaw to water");
+        // Soft pack peels more than one cell when clearly above freeze.
+        assert_ne!(
+            w.get_cell(1, 2).unwrap().material,
+            MaterialId::Snow,
+            "warm snowpack should peel faster than lake ice"
+        );
     }
 
     #[test]

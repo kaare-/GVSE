@@ -285,15 +285,31 @@ Now:
 The `H` overlay used a continuous `18 + norm·42` alpha (~18–60) that
 collapsed to a handful of mid greys, then a wide stepped span that
 **flickered**: opacity was `mass / live_max`, so every time a wet peak
-rained out the whole sky pumped brighter. It now:
+rained out the whole sky pumped brighter. Saturation-anchored refs fixed
+the pump but (with a raised live-max ceiling and a 2% floor) flattened
+the wash into an almost-invisible film.
 
-- normalizes against **saturation-at-T** (absolute RH), with live max only
-  raising a supersat ceiling
+It now:
+
+- normalizes against **saturation-at-T** only (supersat clamps to full
+  white — no live-max ceiling inflate)
 - eases that reference with an asymmetric EMA (rises fast, falls slow)
-- uses continuous alpha across 4–200 so bucket edges do not blink
+- uses continuous alpha across 36–210 so bucket edges do not blink
+- **skips RH ≤ 25.5%** so dry air stays clear; just-above-floor seats
+  remap onto the full alpha span (gamma `< 1`) so moist air reads as a
+  field again
 
-Soft floor stays low (2% on the wash) so rain shafts are not punched into
-4-wide holes.
+## Snow in warm air
+
+Two bugs let snowpack sit through +10 °C days:
+
+1. **Condensation snowfall** nucleated whenever *air* was ≤ freeze, even
+   over warm ground — flakes kept landing while thaw peeled one cell at
+   a time. Drizzle now matches precip: cold air **and** cold ground, else
+   liquid rain.
+2. **`hum_shade_ref` was 80** against humidity masses ~2500, so any real
+   vapor column fully shaded the sun. Default is 900; warm snowpack also
+   peels a few cells per phase pass (ice lakes stay rate-limited).
 
 ## The diurnal cycle works — it needed headroom, not more forcing
 

@@ -231,8 +231,18 @@ pub fn apply_condensation_rain_phased(
         // the air cell that held the vapour and descends like any other water.
         let centre_gy = hy * tile_cols + tile_cols / 2;
         let air_t = temp.map(|t| t.at_tile(hx, hy));
-        let freezing = match (air_t, phase) {
-            (Some(t), Some(ph)) => t <= ph.freeze_point_c,
+        let ground_t = temp.map(|t| {
+            let gy = crate::phase::ground_sample_y(world, centre_gx);
+            t.at_cell(centre_gx, gy)
+        });
+        // Cold air alone is not enough — flakes that land on warm ground
+        // used to pile into a pack that barely thawed while drizzle kept
+        // nucleating more snow. Match precip: warm contact → liquid.
+        let freezing = match (air_t, ground_t, phase) {
+            (Some(air), Some(ground), Some(ph)) => {
+                air <= ph.freeze_point_c && ground <= ph.freeze_point_c
+            }
+            (Some(air), None, Some(ph)) => air <= ph.freeze_point_c,
             _ => false,
         };
         let mut landed = if freezing {
@@ -393,6 +403,59 @@ mod tests {
         assert_eq!(paid, 0.0, "under a whole cell must be refused, not part-paid");
         assert_ne!(w.get_cell(4, 20).unwrap().material, MaterialId::Snow);
         let _ = Cell::air();
+    }
+
+    #[test]
+    fn cold_air_over_warm_ground_drizzles_liquid_not_snow() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::phase::PhaseConfig;
+        use crate::temperature::Temperature;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        for x in 0..16 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+            w.set_cell(x, 1, Cell::solid(MaterialId::Sand));
+        }
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 16, 64);
+        // Plenty of mass in a cold air tile above warm ground.
+        h.cells.insert((1, 4), 2_000.0);
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 16, 64, 1, 16, 2, false);
+        for ((_, hy), v) in temp.cells.iter_mut() {
+            *v = if *hy >= 3 { -4.0 } else { 10.0 };
+        }
+        let cfg = CondensationConfig {
+            top_y: 48,
+            min_mass_to_rain: 1.0,
+            max_prob_per_tick: 1.0,
+            full_mass: 100.0,
+            mass_per_droplet: 255.0,
+            max_events_per_tick: 8,
+            ..CondensationConfig::default()
+        };
+        let phase = PhaseConfig::default();
+        for tick in 0..40 {
+            w.tick = tick;
+            apply_condensation_rain_phased(
+                &mut w,
+                &mut h,
+                &cfg,
+                None,
+                Some(&temp),
+                Some(&phase),
+            );
+        }
+        let any_snow = (0..16).any(|x| {
+            (0..48).any(|y| w.get_cell(x, y).map(|c| c.material) == Some(MaterialId::Snow))
+        });
+        assert!(
+            !any_snow,
+            "warm ground must force liquid drizzle, not snowfall"
+        );
     }
 
     #[test]

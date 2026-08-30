@@ -76,6 +76,10 @@ pub struct TempConfig {
     pub solar_heat_c: f32,
     pub night_cool_c: f32,
     pub cloud_shade: f32,
+    /// Humidity mass that counts as full solar shade. Should sit near
+    /// a sizable fraction of [`crate::humidity::Humidity::MAX_MASS_PER_TILE`]
+    /// so ordinary moist air dims the sun without treating every tile as
+    /// overcast.
     pub hum_shade_ref: f32,
     /// Base relax rate toward climate skin (air-like surfaces).
     pub sky_relax: f32,
@@ -114,7 +118,10 @@ impl Default for TempConfig {
             solar_heat_c: 0.40,
             night_cool_c: 0.30,
             cloud_shade: 0.55,
-            hum_shade_ref: 80.0,
+            // Match humidity mass units (~sat@18 ≈ 2500). The old 80 made
+            // any real vapor column fully shade the ground, so snow never
+            // saw sun in +10 °C air.
+            hum_shade_ref: 900.0,
             sky_relax: 0.12,
             diffuse_alpha: 0.10,
             inertia_scale: 1.6,
