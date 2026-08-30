@@ -175,6 +175,45 @@ impl Humidity {
         Self::MAX_MASS_PER_TILE * scale
     }
 
+    /// Lifting condensation level (world-y): dewpoint depression → cloud base.
+    ///
+    /// `cloud_alt_above_sea` is a **scale**, not a hard shelf. Moist/cool air
+    /// condenses low; dry/warm air climbs further. Used by buoyant rise and
+    /// the visual deck so rain is not pinned to `sea + alt`.
+    pub fn lifting_condensation_y(
+        mass: f32,
+        temp_c: f32,
+        sea_level_y: i32,
+        cloud_alt_above_sea: i32,
+    ) -> f32 {
+        let sat = Self::saturation_mass_at_temp(temp_c).max(1.0);
+        let deficit = (1.0 - mass / sat).clamp(0.0, 1.0);
+        // Same span the visual deck used; kept here so physics and paint agree.
+        const MIN_FRAC: f32 = 0.55;
+        const SPAN_FRAC: f32 = 0.90;
+        sea_level_y as f32
+            + cloud_alt_above_sea.max(1) as f32 * (MIN_FRAC + SPAN_FRAC * deficit)
+    }
+
+    /// Near-surface vapor for evaporation RH (first few tiles above the seat).
+    ///
+    /// Same-tile mass alone is useless once buoyant rise runs — the ground
+    /// seat empties every tick. A short column is the air the film actually
+    /// evaporates into.
+    pub const EVAP_COLUMN_TILES: i32 = 3;
+
+    pub fn near_surface_mass(&self, hx: i32, hy0: i32) -> f32 {
+        let mut peak = 0.0f32;
+        for i in 0..Self::EVAP_COLUMN_TILES {
+            let hy = hy0 + i;
+            if !self.accepts(hx, hy) {
+                break;
+            }
+            peak = peak.max(self.at_tile(hx, hy));
+        }
+        peak
+    }
+
     pub fn add(&mut self, gx: i32, gy: i32, mass: f32) {
         let _ = self.try_add(gx, gy, mass);
     }
@@ -451,17 +490,40 @@ impl Humidity {
         self.buoyant_rise_thermal(fraction, max_hy, None);
     }
 
+    /// Weather-aware rise: stop at the per-column lifting condensation
+    /// level and leave a near-saturation residual so the surface is not
+    /// stripped into a hard empty band under a fixed `sea + alt` shelf.
+    pub fn buoyant_rise_weather(
+        &mut self,
+        fraction: f32,
+        sea_level_y: i32,
+        cloud_alt_above_sea: i32,
+        temp: Option<&crate::temperature::Temperature>,
+    ) {
+        let tc = self.tile_cols.max(1);
+        // Dry-air LCL is the hard ceiling (same span as lifting_condensation_y).
+        let max_hy = ((sea_level_y as f32
+            + cloud_alt_above_sea.max(1) as f32 * 1.45)
+            / tc as f32)
+            .ceil() as i32;
+        self.buoyant_rise_thermal_inner(fraction, max_hy, temp, Some((sea_level_y, cloud_alt_above_sea)));
+    }
+
     /// [`Self::buoyant_rise`] scaled by the local lapse: warm air under
     /// colder air lifts harder; a stable inversion almost sits still.
     /// Same tile walk as the uniform rise — no extra world scans.
-/// How much a column's temperature anomaly changes its lift, per degree.
-const CONVECTION_GAIN_PER_C: f32 = 0.15;
-/// Anomaly is clamped before it is applied, so a freak tile cannot dominate.
-const CONVECTION_CLAMP_C: f32 = 6.0;
-/// Cool ground suppresses but never fully blocks lift; warm ground roughly
-/// doubles it. Bounded so convection reshapes the field rather than gating it.
-const CONVECTION_MIN_GAIN: f32 = 0.25;
-const CONVECTION_MAX_GAIN: f32 = 2.0;
+    /// How much a column's temperature anomaly changes its lift, per degree.
+    const CONVECTION_GAIN_PER_C: f32 = 0.15;
+    /// Anomaly is clamped before it is applied, so a freak tile cannot dominate.
+    const CONVECTION_CLAMP_C: f32 = 6.0;
+    /// Cool ground suppresses but never fully blocks lift; warm ground roughly
+    /// doubles it. Bounded so convection reshapes the field rather than gating it.
+    const CONVECTION_MIN_GAIN: f32 = 0.25;
+    const CONVECTION_MAX_GAIN: f32 = 2.0;
+    /// Retain this fraction of local saturation at each tile — only the
+    /// moist excess rises. Without it, every tick gutting the surface into
+    /// a zero-humidity shelf under the deck.
+    const RISE_KEEP_RH: f32 = 0.62;
 
     pub fn buoyant_rise_thermal(
         &mut self,
@@ -469,11 +531,22 @@ const CONVECTION_MAX_GAIN: f32 = 2.0;
         max_hy: i32,
         temp: Option<&crate::temperature::Temperature>,
     ) {
+        self.buoyant_rise_thermal_inner(fraction, max_hy, temp, None);
+    }
+
+    fn buoyant_rise_thermal_inner(
+        &mut self,
+        fraction: f32,
+        max_hy: i32,
+        temp: Option<&crate::temperature::Temperature>,
+        lcl: Option<(i32, i32)>,
+    ) {
         let fraction = fraction.clamp(0.0, 0.45);
         if fraction == 0.0 || self.cells.is_empty() {
             return;
         }
         let snap = self.cells.clone();
+        let tc = self.tile_cols.max(1);
         // Mean temperature **per row**, computed once.
         //
         // Two mistakes to avoid here, both of which were made and measured. It has
@@ -515,26 +588,22 @@ const CONVECTION_MAX_GAIN: f32 = 2.0;
             if !self.accepts(hx, dest) {
                 continue;
             }
+            // Per-column LCL: moist air stops low, dry air may climb to max_hy.
+            if let Some((sea, alt)) = lcl {
+                let t_c = temp
+                    .map(|t| t.at_tile(hx, hy))
+                    .unwrap_or(18.0);
+                let lcl_y = Self::lifting_condensation_y(mass, t_c, sea, alt);
+                let lcl_hy = (lcl_y / tc as f32).floor() as i32;
+                if hy >= lcl_hy {
+                    continue;
+                }
+            }
             let lift_f = if let Some(t) = temp {
                 let here = t.at_tile(hx, hy);
                 let above = t.at_tile(hx, dest);
                 let lapse = (here - above).clamp(-5.0, 10.0);
                 let base = (fraction * (0.40 + lapse * 0.11)).clamp(0.0, 0.45);
-                // Horizontal anomaly: how much warmer this column is than the
-                // world.
-                //
-                // The lapse term alone is nearly uniform, because temperature
-                // falls smoothly with altitude everywhere — so vapour rose at
-                // much the same rate over every column and the field stayed
-                // horizontally flat however hard it was driven. Convection is
-                // the *difference* between columns: thermals form over ground
-                // that is warmer than its surroundings and not over ground that
-                // is cooler, which is what organises moisture instead of
-                // spreading it evenly.
-                //
-                // Warm land against cool sea, sunlit slope against shaded, and
-                // the diurnal swing all feed this for free, since they are
-                // already in the temperature field.
                 let reference = row_mean.get(&hy).copied().unwrap_or(here);
                 let anomaly =
                     (here - reference).clamp(-Self::CONVECTION_CLAMP_C, Self::CONVECTION_CLAMP_C);
@@ -544,7 +613,19 @@ const CONVECTION_MAX_GAIN: f32 = 2.0;
             } else {
                 fraction
             };
-            let lift = mass * lift_f;
+            // Weather rise only: leave a near-sat residual so the water–air
+            // interface is not gutted every tick. Plain thermal rise (tests /
+            // callers without LCL) still moves the full parcel.
+            let liftable = if lcl.is_some() {
+                let t_c = temp
+                    .map(|t| t.at_tile(hx, hy))
+                    .unwrap_or(18.0);
+                let sat = Self::saturation_mass_at_temp(t_c);
+                (mass - sat * Self::RISE_KEEP_RH).max(0.0)
+            } else {
+                mass
+            };
+            let lift = liftable * lift_f;
             if lift < 1e-6 {
                 continue;
             }
@@ -990,6 +1071,84 @@ mod tests {
             "warm-under-cold should lift more ({} vs {})",
             unstable.at_tile(0, 1),
             stable.at_tile(0, 1)
+        );
+    }
+
+    #[test]
+    fn weather_rise_leaves_a_near_surface_residual() {
+        // Fixed-deck rise used to strip every tile below sea+alt, leaving a
+        // zero-humidity shelf over the water. Weather rise must keep a
+        // residual under local saturation.
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 320);
+        let sea = 80;
+        let hx = 2;
+        let surf_hy = sea / 4;
+        let sat = Humidity::saturation_mass_at_temp(18.0);
+        h.cells.insert((hx, surf_hy), sat * 0.90);
+        let mut t = crate::temperature::Temperature::with_world_bounds(
+            4, 0, 0, 64, 320, 1, 64, sea, false,
+        );
+        for v in t.cells.values_mut() {
+            *v = 18.0;
+        }
+        for _ in 0..30 {
+            h.buoyant_rise_weather(0.12, sea, 48, Some(&t));
+        }
+        let left = h.at_tile(hx, surf_hy);
+        assert!(
+            left > sat * Humidity::RISE_KEEP_RH * 0.85,
+            "surface seat should retain near-sat residual (got {left:.0}, sat={sat:.0})"
+        );
+    }
+
+    #[test]
+    fn moist_air_stops_rising_lower_than_dry_air() {
+        let sea = 80;
+        let alt = 100;
+        let sat = Humidity::saturation_mass_at_temp(18.0);
+        let moist_lcl = Humidity::lifting_condensation_y(sat * 0.95, 18.0, sea, alt);
+        let dry_lcl = Humidity::lifting_condensation_y(sat * 0.15, 18.0, sea, alt);
+        assert!(
+            moist_lcl + 8.0 < dry_lcl,
+            "LCL must rise as air dries ({moist_lcl} vs {dry_lcl})"
+        );
+
+        // Both start above the keep residual so excess can climb; moist
+        // should arrest lower.
+        let mut moist = Humidity::with_world_bounds(4, 0, 0, 64, 320);
+        let mut dry = moist.clone();
+        let hx = 3;
+        let hy0 = sea / 4;
+        moist.cells.insert((hx, hy0), sat * 0.95);
+        dry.cells.insert((hx, hy0), sat * 0.70);
+        let mut t = crate::temperature::Temperature::with_world_bounds(
+            4, 0, 0, 64, 320, 1, 64, sea, false,
+        );
+        for v in t.cells.values_mut() {
+            *v = 18.0;
+        }
+        for _ in 0..80 {
+            moist.buoyant_rise_weather(0.20, sea, alt, Some(&t));
+            dry.buoyant_rise_weather(0.20, sea, alt, Some(&t));
+        }
+        let top = |h: &Humidity| {
+            h.cells
+                .iter()
+                .filter(|(&(x, _), _)| x == hx)
+                .map(|(&(_, hy), _)| hy)
+                .max()
+                .unwrap_or(hy0)
+        };
+        let moist_top = top(&moist);
+        let dry_top = top(&dry);
+        assert!(
+            moist_top <= dry_top,
+            "moist column should not climb above dry ({moist_top} vs {dry_top})"
+        );
+        let moist_lcl_hy = (moist_lcl / 4.0).floor() as i32;
+        assert!(
+            moist_top <= moist_lcl_hy + 1,
+            "moist rise must arrest near its LCL ({moist_top} vs lcl_hy {moist_lcl_hy})"
         );
     }
 

@@ -274,9 +274,15 @@ impl CloudStore {
     ) {
         let _ = (sky_ceiling_y, tick, phase);
         self.release_parcels_into_humidity(humidity);
-        let tc = humidity.tile_cols.max(1);
-        let deck_hy = (sea_level_y + cfg.cloud_alt_above_sea).div_euclid(tc);
-        humidity.buoyant_rise_thermal(cfg.buoyant_rise, deck_hy, temp);
+        // Rise toward the lifting condensation level — not a hard shelf at
+        // `sea + cloud_alt`. That shelf emptied the water–air interface and
+        // pinned rain to one altitude (playtest ~y225 when alt was large).
+        humidity.buoyant_rise_weather(
+            cfg.buoyant_rise,
+            sea_level_y,
+            cfg.cloud_alt_above_sea,
+            temp,
+        );
         self.rebuild_visuals_from_humidity(humidity, world, wind, sea_level_y, cfg, temp);
     }
 
@@ -499,15 +505,19 @@ impl CloudStore {
 
 /// Height at which rising air condenses, in world cells.
 ///
-/// The lifting condensation level rises with *dewpoint depression* — how far the
-/// air is from saturation. Dry or warm air has to climb further before it cools
-/// to its dewpoint, so its cloud base sits higher; moist or cool air condenses
-/// low. Both temperature (through `sat`) and humidity feed in, which is what
-/// makes the deck height respond to weather instead of sitting pinned just above
-/// the terrain.
+/// See [`Humidity::lifting_condensation_y`] — shared with buoyant rise so the
+/// visual deck and the vapour field climb to the same weather-dependent base.
 fn condensation_level(mass: f32, sat: f32, sea_level_y: i32, cfg: &CloudConfig) -> f32 {
-    let deficit = (1.0 - mass / sat.max(1.0)).clamp(0.0, 1.0);
-    sea_level_y as f32 + cfg.cloud_alt_above_sea as f32 * (CLOUD_BASE_MIN_FRAC + CLOUD_BASE_SPAN_FRAC * deficit)
+    // Recover an equivalent temperature from sat so the shared helper agrees
+    // with callers that already computed saturation mass.
+    let temp_c = sat_to_temp_c(sat);
+    Humidity::lifting_condensation_y(mass, temp_c, sea_level_y, cfg.cloud_alt_above_sea)
+}
+
+/// Inverse of the cheap Clausius scale in [`Humidity::saturation_mass_at_temp`].
+fn sat_to_temp_c(sat: f32) -> f32 {
+    let scale = (sat / Humidity::MAX_MASS_PER_TILE).clamp(0.16, 1.55);
+    scale * 26.0 - 8.0
 }
 
 /// Keep the wettest candidate in each of `cap` bands across the world, so a
@@ -623,11 +633,6 @@ const CLOUD_LIFT_RELAX: f32 = 0.02;
 /// Below the spawn threshold, so a cloud that drifts into slightly drier air
 /// fades rather than popping out of existence the moment it crosses the line.
 const CLOUD_DISSIPATE_FRAC: f32 = 0.55;
-
-/// Cloud base as a fraction of `cloud_alt_above_sea`: saturated air condenses
-/// at the low end, dry air at the high end.
-const CLOUD_BASE_MIN_FRAC: f32 = 0.55;
-const CLOUD_BASE_SPAN_FRAC: f32 = 0.90;
 
 pub fn cloud_floor_y(world: &World, wind: &Wind, fx: f32) -> f32 {
     let rock = surface_y(world, wind, fx);

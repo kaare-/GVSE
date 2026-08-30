@@ -255,6 +255,27 @@ Incremental fix (still 4×4 tiles):
 Tab → Climate exposes air lapse and near-surface couple. Richer boundary-layer
 diffusivity can wait until these contrasts are playtested.
 
+## Evaporation interface + lifting condensation level
+
+Two artificial bands in the H overlay came from the same pump:
+
+1. **Empty shelf over water** — every cloud tick lifted *all* vapor below a
+   hard `sea + cloud_alt` deck, so the water–air interface stayed at zero
+   humidity no matter how hard the ocean evaporated.
+2. **Rain shelf (~y225 when alt is large)** — that same fixed deck was where
+   condensation nucleated. `cloud_alt` was a shelf height, not a weather scale.
+
+Now:
+
+- **Evap rate** scales with temperature, wind, and RH against
+  `saturation_mass_at_temp` using near-surface column vapor (not the emptied
+  ground seat).
+- **Buoyant rise** (`buoyant_rise_weather`) stops at the per-column lifting
+  condensation level and leaves a ~62% RH residual — moist air stays lower,
+  dry air may climb; the interface is no longer stripped bare.
+- **`cloud_alt_above_sea`** is the LCL *scale* (Climate tab: “Cloud-base scale
+  above sea”), shared by rise and the visual deck.
+
 ## Humidity haze steps
 
 The `H` overlay used a continuous `18 + norm·42` alpha (~18–60) that

@@ -101,6 +101,9 @@ pub fn apply_evaporation_into_humidity_climate(
 }
 
 /// Reference `rate_per_tick` is ~18 °C, light breeze, dry air.
+///
+/// `humidity_mass` is near-surface vapor (see [`Humidity::near_surface_mass`]);
+/// deficit is against saturation at `temp_c`, not a fixed tile cap.
 pub(crate) fn evap_climate_rate(
     base: i32,
     temp_c: f32,
@@ -112,8 +115,10 @@ pub(crate) fn evap_climate_rate(
     }
     let t_scale = ((temp_c + 8.0) / 26.0).clamp(0.12, 2.4);
     let w_scale = (0.62 + wind_abs * 10.0).clamp(0.50, 2.0);
-    let rh = (humidity_mass / crate::humidity::Humidity::MAX_MASS_PER_TILE).clamp(0.0, 1.0);
-    let deficit = (1.0 - rh).clamp(0.20, 1.0);
+    let sat = crate::humidity::Humidity::saturation_mass_at_temp(temp_c).max(1.0);
+    let rh = (humidity_mass / sat).clamp(0.0, 1.0);
+    // Near-saturated air barely pumps; dry air takes the full rate.
+    let deficit = (1.0 - rh).clamp(0.05, 1.0);
     let cap = (base * 4).max(1);
     ((base as f32) * t_scale * w_scale * deficit)
         .round()
@@ -186,7 +191,14 @@ fn collect_evap_deltas(
                 }
                 let mut rate = cfg.rate_per_tick as i32;
                 if let Some((temp, wind_abs, hum)) = climate {
-                    rate = evap_climate_rate(rate, temp.at_cell(gx, gy), wind_abs, hum.at_cell(gx, gy));
+                    let (hx, hy) = hum.tile_of(gx, gy);
+                    let vapor = hum.near_surface_mass(hx, hy);
+                    rate = evap_climate_rate(
+                        rate,
+                        temp.at_cell(gx, gy),
+                        wind_abs,
+                        vapor,
+                    );
                 }
                 // Orphaned crest film: no Air neighbour anywhere on the
                 // surface (same-y or diagonal-down) → evaporate hard so

@@ -5716,6 +5716,36 @@ fn evap_pumps_faster_when_warm_and_windy() {
 }
 
 #[test]
+fn evap_slows_when_near_surface_air_is_moist() {
+    // Deficit is against sat(T), using near-surface vapor — not the emptied
+    // ground seat and not a hardcoded tile-cap fraction.
+    let cfg = EvapConfig {
+        rate_per_tick: 4,
+        dry_above_max: 200,
+        period_ticks: 1,
+    };
+    let t = uniform_temp_field(22.0);
+    let run = |near_surface: f32| {
+        let mut w = setup_column_world();
+        w.set_cell(4, 1, Cell::water());
+        let mut h = Humidity::new(4);
+        let (hx, hy) = h.tile_of(4, 1);
+        h.cells.insert((hx, hy + 1), near_surface);
+        apply_evaporation_into_humidity_climate(&mut w, &mut h, &cfg, Some(&t), 0.05);
+        // Mass added this tick ≈ water removed (start from empty humidity
+        // except the seed vapor we inserted).
+        h.total_mass() - near_surface
+    };
+    let sat = Humidity::saturation_mass_at_temp(22.0);
+    let dry = run(0.0);
+    let moist = run(sat * 0.92);
+    assert!(
+        dry > moist + 1.0,
+        "dry air should take more ocean water than near-saturated ({dry} vs {moist})"
+    );
+}
+
+#[test]
 fn condensation_rains_when_warm_vapor_hits_cold_air() {
     let (mut cold_w, mut cold_h) = setup_cloud_world();
     let (mut warm_w, mut warm_h) = setup_cloud_world();

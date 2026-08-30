@@ -692,7 +692,7 @@ fn sample_sky_weather(
 ) -> SkyWeatherParams {
     let wrap = if wrap_x { Some(width_cols) } else { None };
     let precip_cover = precip_cover_fraction(clouds, 0, width_cols, wrap, downpour_mass);
-    let sky_hy_min = (sea_level_y + 4).div_euclid(humidity.tile_cols.max(1));
+    let sky_hy_min = sea_level_y.div_euclid(humidity.tile_cols.max(1));
     let humidity_mean = humidity_mean_norm(humidity, sky_hy_min);
     let mut t_sum = 0.0f32;
     let mut t_n = 0u32;
@@ -1205,7 +1205,7 @@ pub fn draw_haze_and_wind(
         .fold(0.0f32, f32::max)
         .max(1.0);
     let tc = humidity.tile_cols.max(1);
-    let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
+    let sky_hy_min = sea_level_y.div_euclid(tc);
     let drop_tops = collect_drop_tops(world);
     let seats = haze_paint_seats(humidity, sky_hy_min);
     let mut floor_cache: HashMap<i32, i32> = HashMap::new();
