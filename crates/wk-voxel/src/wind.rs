@@ -233,18 +233,20 @@ impl Wind {
             }
         }
         // Oro / thermal are mostly per-column — without a spatial blend the
-        // field reads as vertical picket stripes. Two mild neighbour passes
-        // (heavier in x) keep local structure without washing out eddies.
-        let mut blended = Self::spatial_blend_field(next, bounds, self.wrap_x, 2);
+        // field reads as vertical picket stripes. One mild neighbour pass
+        // (heavier in x) keeps local structure without washing out eddies.
+        let mut blended = Self::spatial_blend_field(next, bounds, self.wrap_x, 1);
         // Canopy shelter applies *after* blend so neighbour bleed cannot
-        // refill a fully-damped stem tile.
+        // refill a fully-damped stem tile. Iterate the sparse drag map —
+        // not a full-field clone.
         if let Some(map) = drag {
             let damp = cfg.canopy_dampen.clamp(0.0, 1.0);
             if damp > 1e-4 {
-                for (&(hx, hy), &(vx, vy)) in blended.clone().iter() {
-                    if let Some(&d) = map.get(&(hx, hy)) {
+                for (&(hx, hy), &d) in map.iter() {
+                    if let Some(entry) = blended.get_mut(&(hx, hy)) {
                         let keep = 1.0 - damp * d.clamp(0.0, 1.0);
-                        blended.insert((hx, hy), (vx * keep, vy * keep));
+                        entry.0 *= keep;
+                        entry.1 *= keep;
                     }
                 }
             }

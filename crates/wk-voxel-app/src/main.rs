@@ -67,7 +67,7 @@ use wk_voxel::{
     pore_wetness_with, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg,
     set_parallel_enabled, step_carbon_budget, support_map_due, temperature_step_due, tick_with_life,
     wake_competent_bodies_all, wake_unsupported_grains,
-    wake_unstable_slopes, GeotechOverlayMode,
+    wake_unstable_slopes, FxHashMap, GeotechOverlayMode,
     SimSnapshot, WorldgenParams,
 };
 
@@ -230,6 +230,10 @@ async fn main() {
     let mut cam_y = 0.0f32;
     let mut should_quit = false;
     let mut ridges = RidgeSilhouette::default();
+    // Canopy drag is sparse and changes slowly — refresh every few ticks.
+    let mut canopy_drag_cache: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+    let mut canopy_drag_tick: u64 = u64::MAX;
+    let mut frame_i: u64 = 0;
 
     loop {
         if should_quit {
@@ -518,21 +522,6 @@ async fn main() {
         scene.wind.config = settings.wind;
         let wind_vx = scene.wind.effective_vx(scene.world.tick);
         let wind_vy = scene.wind.effective_vy(scene.world.tick);
-        // Rebuild local vector heatmap before humidity / temp advection.
-        let drag = if settings.wind.canopy_dampen > 1e-4 {
-            Some(canopy_wind_drag(
-                &scene.organisms,
-                scene.wind.tile_cols,
-            ))
-        } else {
-            None
-        };
-        scene.wind.rebuild_field(
-            Some(&scene.world),
-            Some(&scene.temperature),
-            scene.world.tick,
-            drag.as_ref(),
-        );
         scene.temperature.config = settings.temp;
         scene.temperature.climate = settings.climate;
         settings.apply_pop_caps(&mut scene.organisms);
@@ -562,6 +551,35 @@ async fn main() {
             || (editor.open && !editor.spawn_picker)
             || terrain.open
             || quit_dialog.open;
+        frame_i = frame_i.wrapping_add(1);
+        // Local wind field: rebuild on alternate frames while sim runs (or
+        // when V needs a heatmap). Full-grid rebuild every frame was a major
+        // FPS hit after the climate coupling work.
+        let rebuild_wind = scene.wind.field.is_empty()
+            || ((!sim_paused || wind_streaks_overlay) && frame_i % 2 == 0);
+        if rebuild_wind {
+            let drag = if settings.wind.canopy_dampen > 1e-4 {
+                let age = if canopy_drag_tick == u64::MAX {
+                    u64::MAX
+                } else {
+                    scene.world.tick.wrapping_sub(canopy_drag_tick)
+                };
+                if age >= 8 {
+                    canopy_drag_cache =
+                        canopy_wind_drag(&scene.organisms, scene.wind.tile_cols);
+                    canopy_drag_tick = scene.world.tick;
+                }
+                Some(&canopy_drag_cache)
+            } else {
+                None
+            };
+            scene.wind.rebuild_field(
+                Some(&scene.world),
+                Some(&scene.temperature),
+                scene.world.tick,
+                drag,
+            );
+        }
         if !sim_paused {
             // Frame-shell scans touch many loaded chunks — always worth
             // rayon. CA physics stays on the Tab toggle (demo dirty plans
@@ -593,11 +611,18 @@ async fn main() {
             scene
                 .humidity
                 .advect_with_surface(wind_vx, wind_vy, &scene.wind, &scene.world);
-            scene.temperature.advect_air_with_wind(
-                Some(&scene.world),
-                &scene.wind,
-                scene.world.tick,
-            );
+            // Skip full-temp clone when wind↔temp mix is dialed off or calm.
+            if settings.temp.wind_mix > 1e-4
+                && (wind_vx.abs() > 1e-4
+                    || wind_vy.abs() > 1e-4
+                    || !scene.wind.field.is_empty())
+            {
+                scene.temperature.advect_air_with_wind(
+                    Some(&scene.world),
+                    &scene.wind,
+                    scene.world.tick,
+                );
+            }
             let tick_no = scene.world.tick;
             scene.clouds.step_with_precip(
                 &mut scene.world,
@@ -1054,8 +1079,9 @@ async fn main() {
             scene.params.width_cols,
         );
 
-        // Soft clouds (N): far echoes → ridges → mid echoes → active parcels + precip.
-        if clouds_on {
+        // Soft cloud depth echoes (N): off by default (vapour_*=0). Tab can
+        // re-enable; Active banks are drawn after ridges via `draw_clouds`.
+        if clouds_on && settings.atmosphere.vapour_far > 0.02 {
             draw_depth_cloud_layer(
                 &scene.clouds,
                 &scene.humidity,
@@ -1107,27 +1133,29 @@ async fn main() {
         }
 
         if clouds_on {
-            draw_depth_cloud_layer(
-                &scene.clouds,
-                &scene.humidity,
-                &scene.wind,
-                scene.world.tick,
-                CloudDepthLayer::Mid,
-                &settings.atmosphere,
-                scene.params.seed,
-                scene.params.sea_level_y,
-                settings.cloud.downpour_mass,
-                cam_x,
-                cam_y,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.wrap_x,
-                scene.params.width_cols,
-                sw,
-                sh,
-            );
+            if settings.atmosphere.vapour_mid > 0.02 {
+                draw_depth_cloud_layer(
+                    &scene.clouds,
+                    &scene.humidity,
+                    &scene.wind,
+                    scene.world.tick,
+                    CloudDepthLayer::Mid,
+                    &settings.atmosphere,
+                    scene.params.seed,
+                    scene.params.sea_level_y,
+                    settings.cloud.downpour_mass,
+                    cam_x,
+                    cam_y,
+                    origin_x,
+                    origin_y,
+                    cell_px,
+                    scene.params.bedrock_floor_y,
+                    scene.params.wrap_x,
+                    scene.params.width_cols,
+                    sw,
+                    sh,
+                );
+            }
             draw_clouds(
                 &scene.clouds,
                 &scene.humidity,
@@ -1381,8 +1409,8 @@ async fn main() {
             );
         }
 
-        // Front soft cloud echoes (N) — ahead of land for scale; plants stay readable.
-        if clouds_on {
+        // Front soft cloud echoes (N) — optional; default off for FPS.
+        if clouds_on && settings.atmosphere.vapour_front > 0.02 {
             draw_depth_cloud_layer(
                 &scene.clouds,
                 &scene.humidity,

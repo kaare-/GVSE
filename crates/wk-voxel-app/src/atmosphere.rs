@@ -104,10 +104,11 @@ impl Default for AtmosphereLookConfig {
             cloud_whiteness: 0.62,
             cast_shadow_strength: 0.85,
             cloud_shade_strength: 0.35,
-            vapour_far: 0.55,
-            vapour_mid: 0.70,
+            // Far / mid / front depth echoes default off (FPS). Active only for N.
+            vapour_far: 0.0,
+            vapour_mid: 0.0,
             vapour_active: 0.85,
-            vapour_front: 0.65,
+            vapour_front: 0.0,
         }
     }
 }
@@ -596,7 +597,8 @@ pub fn draw_depth_cloud_layer(
         CloudDepthLayer::Far => (CLOUD_FAR_PARALLAX, 0.40, 0.0),
         CloudDepthLayer::Mid => (CLOUD_MID_PARALLAX, 0.50, 0.0),
         CloudDepthLayer::Active => (CLOUD_PARALLAX, 0.55, 0.0),
-        CloudDepthLayer::Front => (CLOUD_FRONT_PARALLAX, 0.20, 0.18),
+        // No wall-clock scroll — N clouds stay sim-linked, not animated.
+        CloudDepthLayer::Front => (CLOUD_FRONT_PARALLAX, 0.20, 0.0),
     };
     let lag_x = cam_x * (1.0 - parallax);
     let lag_y = cam_y * (1.0 - parallax) * y_lag_scale;

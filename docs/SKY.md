@@ -10,15 +10,12 @@ computes.
 ```text
 sky gradient                     weather / temp / carbon; smooth day phases
 sun / moon (soft, fine px)       behind far ridge; soft crest reveal
-far soft cloud banks             parallax echoes of active parcels (N)
 far / near ridge fills           XY parallax; sky-washed; soft crest feather
-mid soft cloud banks             parcel echoes (N)
-active parcel banks + precip     humidity echo CloudStore + cond streaks (N)
+active parcel banks (N)          humidity echo CloudStore — no depth animation
 terrain + standing water         night: deep cool darken + weak moon ambient
 day canopy shade                 under-surface dim + air corridor + sun cast
-front soft cloud banks           parcel echoes ahead of land (N)
 humidity tile diagnostic          H overlay (diagnostics, not “clouds”)
-wind streak placeholder           V overlay (off by default; needs work)
+wind streak overlay               V overlay (off by default)
 debug overlays → organisms
 night moon cast                  after organisms
 HUD
@@ -30,7 +27,7 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 
 | Key | What |
 |-----|------|
-| **N** | Soft clouds at **all depths**: far / mid / active / front + precip |
+| **N** | Soft **active** cloud banks (parcel echo). Far/mid/front depth layers and wall-clock scroll are off by default for FPS; Tab can still raise vapour_far/mid/front if wanted. |
 | **H** | Humidity **tile raster** diagnostic |
 | **V** | Wind streak overlay (placeholder; default off) |
 | **F6** | Glossary — keys, water/sky words, HUD tags |
@@ -38,18 +35,17 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 Humidity still **drives** the weather, now with temperature/wind:
 evap(T, wind) → thermal rise → drizzle when vapor meets colder air /
 ground. `N` draws a capped visual echo of the wettest sky tiles (not a
-second water store, and not a rain engine). Far / mid / front banks are
-parallax **echoes of those parcels** — not a second humidity paint pass,
-and not a per-cell atmosphere (CPU stays on 4×4 tiles).
+second water store, and not a rain engine). Depth-echo banks used to
+triple the lobe-mask stamp cost every frame; they are optional now.
 
 ## Signal → visual map
 
 | Signal | Visual |
 |--------|--------|
-| Humidity → parcels | Soft multi-depth cloud banks (`N`); streaks when tiles are wet |
+| Humidity → parcels | Soft active cloud banks (`N`); depth echoes optional via Tab |
 | Humidity tiles | Diagnostic haze overlay (`H`) — bilinear wash on 4×4 seats with **16** opacity steps; a drop opens that column from itself downward |
 | Day/night | Sky lerp + sun/moon; night landscape darken |
-| Wind | `V` placeholder streaks (needs work); front cloud scroll |
+| Wind | `V` streaks from local field; no front-cloud wall-clock scroll |
 | Ridges | Dual parallax fills from **ground** height (not falling snow, not mid-air wet Air) |
 | Cast / celestial key | See prior plant/terrain lighting notes |
 

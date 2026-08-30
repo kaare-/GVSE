@@ -729,14 +729,14 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Cloud far (depth)",
+                        "Cloud far (depth, off=FPS)",
                         0.0..1.0,
                         &mut self.atmosphere.vapour_far,
                     );
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Cloud mid (depth)",
+                        "Cloud mid (depth, off=FPS)",
                         0.0..1.0,
                         &mut self.atmosphere.vapour_mid,
                     );
@@ -750,7 +750,7 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Cloud front (depth)",
+                        "Cloud front (depth, off=FPS)",
                         0.0..1.0,
                         &mut self.atmosphere.vapour_front,
                     );
