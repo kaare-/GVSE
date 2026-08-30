@@ -281,12 +281,11 @@ Initial overlays we plan to introduce, in rough order:
    `Humidity` map, `tile_cols = 4`). Evaporation deposits every
    tick; **diffusion runs every tick** at
    [`humidity_diffuse_alpha_per_tick`](../crates/wk-voxel/src/humidity.rs)
-   (compound-equivalent of the old period-20 pulse — pulsing flashed the H
-   overlay). Legacy `humidity_diffuse_due` remains for tooling that samples
-   that phase.
-   period 20 / phase 3 — same cadence as column-GVSE
-   `HumidityField`). The map is **clamped** to the stamped world
-   tile bounds; ring worlds also set `wrap_x` so the atmosphere
+   (compound-equivalent of the old period-20 / phase-3 `HumidityField`
+   pulse — pulsing flashed the H overlay). Legacy `humidity_diffuse_due`
+   remains for tooling that samples that phase. The map is **clamped** to
+   the stamped world tile bounds; ring worlds also set `wrap_x` so the
+   atmosphere
    joins at the seam.
 4. **Wind.** Vector `(vx, vy)` per tile. Drives cloud advection and
    surface stress.
