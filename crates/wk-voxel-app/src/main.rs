@@ -19,7 +19,8 @@
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution (surface limestone + slow groundwater)
 //! - `O` — toggle Set A organisms (Atom step)
-//! - `H` — toggle humidity tile diagnostic + wind streaks (default on)
+//! - `H` — toggle humidity tile diagnostic (default on)
+//! - `V` — toggle wind streak overlay (default off; placeholder visual)
 //! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
 //! - `T` — toggle temperature heatmap overlay
 //! - `U` — toggle ground saturation heatmap (pores + free water)
@@ -72,7 +73,8 @@ use wk_voxel::{
 
 use crate::atmosphere::{
     apply_celestial_key_rgb, apply_organism_celestial_key_rgb, draw_canopy_air_dim,
-    draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, CloudDepthLayer,
+    draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, draw_wind_streaks,
+    CloudDepthLayer,
     draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_organism_aboveground,
     organism_celestial_rim, sky_weather_for_scene, terrain_celestial_key_strength,
     toward_light_celestial, RidgeSilhouette,
@@ -211,6 +213,7 @@ async fn main() {
     let mut organisms_on = true;
     // Humidity diagnostic default on (`H`); soft clouds default on (`N`).
     let mut humidity_overlay = true;
+    let mut wind_streaks_overlay = false;
     let mut clouds_on = true;
     let mut temp_overlay = false;
     let mut sat_overlay = false;
@@ -460,6 +463,9 @@ async fn main() {
             }
             if is_key_pressed(KeyCode::H) {
                 humidity_overlay = !humidity_overlay;
+            }
+            if is_key_pressed(KeyCode::V) {
+                wind_streaks_overlay = !wind_streaks_overlay;
             }
             if is_key_pressed(KeyCode::N) {
                 clouds_on = !clouds_on;
@@ -1382,7 +1388,6 @@ async fn main() {
                 &scene.humidity,
                 &scene.world,
                 &scene.wind,
-                scene.world.tick,
                 origin_x,
                 origin_y,
                 cell_px,
@@ -1393,6 +1398,9 @@ async fn main() {
                 sw,
                 sh,
             );
+        }
+        if wind_streaks_overlay {
+            draw_wind_streaks(&scene.wind, scene.world.tick, sw, sh);
         }
 
         // Temperature heatmap overlay (blue cold → red hot).
@@ -1805,7 +1813,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/U/H/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
+                "Tab|Space|R|W/C/E/K/O|I|N/T/U/H/V/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

@@ -1136,17 +1136,17 @@ fn draw_ridge_band(
     }
 }
 
-/// Humidity tile diagnostic (front of terrain) + sparse wind streaks.
+/// Humidity tile diagnostic (front of terrain).
 ///
 /// Occupied 4×4 seats plus a one-tile neighbour halo (wrapped). A drop
 /// masks that column from itself downward (1-wide). Cells that remain
 /// bilinear-sample the store so tile edges do not read as a clamp.
 /// Soft cloud banks are separate (`N` / [`draw_depth_cloud_layer`]).
+/// Wind streaks are a separate overlay ([`draw_wind_streaks`], `V`).
 pub fn draw_haze_and_wind(
     humidity: &Humidity,
     world: &World,
     wind: &Wind,
-    tick: u64,
     origin_x: f32,
     origin_y: f32,
     cell_px: f32,
@@ -1157,59 +1157,66 @@ pub fn draw_haze_and_wind(
     sw: f32,
     sh: f32,
 ) {
-    if !humidity.cells.is_empty() && cell_px > 0.0 {
-        let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-        let max_mass = humidity
-            .cells
-            .values()
-            .copied()
-            .fold(0.0f32, f32::max)
-            .max(1.0);
-        let tc = humidity.tile_cols.max(1);
-        let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
-        let drop_tops = collect_drop_tops(world);
-        let seats = haze_paint_seats(humidity, sky_hy_min);
-        let mut floor_cache: HashMap<i32, i32> = HashMap::new();
+    if humidity.cells.is_empty() || cell_px <= 0.0 {
+        return;
+    }
+    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
+    let max_mass = humidity
+        .cells
+        .values()
+        .copied()
+        .fold(0.0f32, f32::max)
+        .max(1.0);
+    let tc = humidity.tile_cols.max(1);
+    let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
+    let drop_tops = collect_drop_tops(world);
+    let seats = haze_paint_seats(humidity, sky_hy_min);
+    let mut floor_cache: HashMap<i32, i32> = HashMap::new();
 
-        for (hx, hy) in seats {
-            for (wx, gy, sampled) in haze_resampled_cells(
-                humidity,
-                hx,
-                hy,
-                &drop_tops,
-                |x| world.wrap_x(x),
-                |wx| {
-                    *floor_cache.entry(wx).or_insert_with(|| {
-                        cloud_floor_y(world, wind, wx as f32).round() as i32
-                    })
-                },
-            ) {
-                let cell_alpha = humidity_haze_alpha_cell(sampled, max_mass, 0.02);
-                if cell_alpha == 0 {
+    for (hx, hy) in seats {
+        for (wx, gy, sampled) in haze_resampled_cells(
+            humidity,
+            hx,
+            hy,
+            &drop_tops,
+            |x| world.wrap_x(x),
+            |wx| {
+                *floor_cache.entry(wx).or_insert_with(|| {
+                    cloud_floor_y(world, wind, wx as f32).round() as i32
+                })
+            },
+        ) {
+            let cell_alpha = humidity_haze_alpha_cell(sampled, max_mass, 0.02);
+            if cell_alpha == 0 {
+                continue;
+            }
+            for &x_copy in x_copies {
+                let sx = origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
+                let top_sy = origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
+                if sx + cell_px < 0.0
+                    || sx > sw
+                    || top_sy > sh
+                    || top_sy + cell_px < 0.0
+                {
                     continue;
                 }
-                for &x_copy in x_copies {
-                    let sx = origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
-                    let top_sy = origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
-                    if sx + cell_px < 0.0
-                        || sx > sw
-                        || top_sy > sh
-                        || top_sy + cell_px < 0.0
-                    {
-                        continue;
-                    }
-                    draw_rectangle(
-                        sx,
-                        top_sy,
-                        cell_px + 0.5,
-                        cell_px + 0.5,
-                        Color::from_rgba(255, 255, 255, cell_alpha),
-                    );
-                }
+                draw_rectangle(
+                    sx,
+                    top_sy,
+                    cell_px + 0.5,
+                    cell_px + 0.5,
+                    Color::from_rgba(255, 255, 255, cell_alpha),
+                );
             }
         }
     }
+}
 
+/// Sparse screen-space wind strokes (`V` overlay).
+///
+/// Placeholder: 1-px hairlines that do not read speed or direction well.
+/// Kept off `H` so the humidity field stays clean. Needs a real visual.
+pub fn draw_wind_streaks(wind: &Wind, tick: u64, sw: f32, sh: f32) {
     let vx = wind.effective_vx(tick);
     if vx.abs() < 0.008 {
         return;

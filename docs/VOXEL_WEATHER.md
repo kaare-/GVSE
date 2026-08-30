@@ -61,6 +61,15 @@ each of 36 bands, so any moist sky fills them all. It is not a weather signal an
 was misread as one for several rounds. Use `hum` (total humidity mass) as the
 dial instead: it fell from 183k to 95k in playtest once rain started landing.
 
+### Pinned: wind streak overlay needs a real visual
+
+*Needs work.* The old `H` hairlines (1-px screen strokes drifting with
+`wind.effective_vx`) did not read speed or direction — they just speckled
+the humidity field. They now live on their own layer (`V`, default off,
+[`draw_wind_streaks`](../crates/wk-voxel-app/src/atmosphere.rs)). Replace
+with something that shows heading and force without looking like field
+noise (arrow field, lee streamlines, or a HUD needle — TBD).
+
 ### Pinned: droplets fall too fast
 
 *Deliberately parked* — playtested and judged acceptable for now. Kept here
