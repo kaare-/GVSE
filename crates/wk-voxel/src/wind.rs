@@ -2,23 +2,82 @@
 //! wk-world / wk-field / wk-agents / wk-sim / wk-io / wk-app. See
 //! docs/VOXEL_MIGRATION.md § "Isolation Guardrails".
 //!
-//! Coarse wind field for cloud / humidity advection and raft drift.
+//! Coarse wind vector field for humidity advection, raft drift, and
+//! (later) spore push / canopy bend / local dampening.
 //!
-//! Climate wind is a horizontal prevailing mean; **natural variance**
-//! modulates instantaneous force and direction over gust / breeze /
-//! weather timescales so the push is not constant. Per-tile
-//! [`Self::flow_at`] then shapes that mean with height shear, windward
-//! channeling, and lee slowing/sinking — humidity must not slide as one
-//! rigid sheet under a uniform vector.
+//! **Layers**
+//! 1. Climate mean (`climate_vx`) + natural variance → tick force/heading
+//! 2. Rebuilt per-tile `(vx, vy)` heatmap from pluggable drivers:
+//!    terrain (oro / lee), thermal gradients, swirl eddies, optional
+//!    canopy drag (filled by the app from tall stems)
+//! 3. [`Self::vector_at`] reads the heatmap (falls back to procedural
+//!    [`Self::flow_at`] if empty)
+//!
+//! No pressure solver yet — docs/VOXEL_FIELDS.md §7. Drivers are dials,
+//! not hard requirements.
 
 use serde::{Deserialize, Serialize};
 
+use crate::fasthash::FxHashMap;
 use crate::grid::World;
 use crate::humidity::TileBounds;
+use crate::temperature::Temperature;
 use crate::worldgen::{continental_surface_y, live_surface_y, LIVE_SURFACE_SEARCH};
 
 fn default_variance() -> f32 {
     0.55
+}
+
+fn default_terrain_drive() -> f32 {
+    1.0
+}
+
+fn default_thermal_drive() -> f32 {
+    0.35
+}
+
+fn default_swirl() -> f32 {
+    0.45
+}
+
+fn default_canopy_dampen() -> f32 {
+    0.55
+}
+
+fn default_field_smooth() -> f32 {
+    0.35
+}
+
+/// Live-tunable wind field drivers (Tab → Climate → Wind).
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct WindConfig {
+    /// How strongly orography shapes speed / lift / lee sink (0 = flat climate).
+    #[serde(default = "default_terrain_drive")]
+    pub terrain_drive: f32,
+    /// Horizontal −∇T breeze + warm-column lift scale.
+    #[serde(default = "default_thermal_drive")]
+    pub thermal_drive: f32,
+    /// Divergence-free eddy / swirl amplitude (local twirls).
+    #[serde(default = "default_swirl")]
+    pub swirl: f32,
+    /// How hard optional canopy drag (0..1 per tile) slows local wind.
+    #[serde(default = "default_canopy_dampen")]
+    pub canopy_dampen: f32,
+    /// Temporal EMA of the rebuilt field (0 = snap, ~0.9 = very sticky).
+    #[serde(default = "default_field_smooth")]
+    pub field_smooth: f32,
+}
+
+impl Default for WindConfig {
+    fn default() -> Self {
+        Self {
+            terrain_drive: default_terrain_drive(),
+            thermal_drive: default_thermal_drive(),
+            swirl: default_swirl(),
+            canopy_dampen: default_canopy_dampen(),
+            field_smooth: default_field_smooth(),
+        }
+    }
 }
 
 /// Tile-scale wind used to advect atmospheric water and shove rafts.
@@ -34,6 +93,9 @@ pub struct Wind {
     /// swing heading. Near `1` the wind can lull, gust, and reverse.
     #[serde(default = "default_variance")]
     pub variance: f32,
+    /// Driver dials for the rebuilt vector heatmap.
+    #[serde(default)]
+    pub config: WindConfig,
     /// Fractional advection residual (legacy; vapour uses flux advection).
     pub residual_x: f32,
     pub residual_y: f32,
@@ -45,6 +107,9 @@ pub struct Wind {
     pub seed: u64,
     pub width_cols: i32,
     pub sea_level_y: i32,
+    /// Rebuilt coarse `(vx, vy)` per humidity tile. Runtime only — not saved.
+    #[serde(skip)]
+    pub field: FxHashMap<(i32, i32), (f32, f32)>,
 }
 
 impl Wind {
@@ -62,6 +127,7 @@ impl Wind {
             climate_vx,
             climate_vy: 0.0,
             variance: default_variance(),
+            config: WindConfig::default(),
             residual_x: 0.0,
             residual_y: 0.0,
             tile_cols: tile_cols.max(1),
@@ -76,6 +142,7 @@ impl Wind {
             seed,
             width_cols: width_cols.max(1),
             sea_level_y,
+            field: FxHashMap::default(),
         }
     }
 
@@ -118,6 +185,167 @@ impl Wind {
         self.climate_vy + wobble
     }
 
+    /// Rebuild the coarse vector heatmap for this tick.
+    ///
+    /// `drag` is optional 0..1 per tile (1 = full stop when
+    /// [`WindConfig::canopy_dampen`] is 1). Tall plants / spores fill it later;
+    /// the app may already stamp stem occupancy.
+    pub fn rebuild_field(
+        &mut self,
+        world: Option<&World>,
+        temp: Option<&Temperature>,
+        tick: u64,
+        drag: Option<&FxHashMap<(i32, i32), f32>>,
+    ) {
+        let Some(bounds) = self.bounds else {
+            self.field.clear();
+            return;
+        };
+        let evx = self.effective_vx(tick);
+        let evy = self.effective_vy(tick);
+        let cfg = self.config;
+        let smooth = cfg.field_smooth.clamp(0.0, 0.95);
+        let prev = std::mem::take(&mut self.field);
+        let mut next = FxHashMap::default();
+        // Reserve roughly the tile grid.
+        let nx = (bounds.hx_max - bounds.hx_min + 1).max(1) as usize;
+        let ny = (bounds.hy_max - bounds.hy_min + 1).max(1) as usize;
+        next.reserve(nx.saturating_mul(ny));
+
+        for hy in bounds.hy_min..=bounds.hy_max {
+            for hx in bounds.hx_min..=bounds.hx_max {
+                let (mut vx, mut vy) = self.compose_drivers(
+                    world, temp, hx, hy, tick, evx, evy, &cfg,
+                );
+                if let Some(map) = drag {
+                    if let Some(&d) = map.get(&(hx, hy)) {
+                        let keep =
+                            1.0 - cfg.canopy_dampen.clamp(0.0, 1.0) * d.clamp(0.0, 1.0);
+                        vx *= keep;
+                        vy *= keep;
+                    }
+                }
+                vx = vx.clamp(-1.0, 1.0);
+                vy = vy.clamp(-1.0, 1.0);
+                if smooth > 1e-4 {
+                    if let Some(&(px, py)) = prev.get(&(hx, hy)) {
+                        vx = px * smooth + vx * (1.0 - smooth);
+                        vy = py * smooth + vy * (1.0 - smooth);
+                    }
+                }
+                next.insert((hx, hy), (vx, vy));
+            }
+        }
+        self.field = next;
+    }
+
+    fn compose_drivers(
+        &self,
+        world: Option<&World>,
+        temp: Option<&Temperature>,
+        hx: i32,
+        hy: i32,
+        tick: u64,
+        evx: f32,
+        evy: f32,
+        cfg: &WindConfig,
+    ) -> (f32, f32) {
+        let shear = self.height_shear(world, hx, hy);
+        let mut vx = evx * shear;
+        let mut vy = evy;
+
+        let td = cfg.terrain_drive.clamp(0.0, 2.0);
+        if td > 1e-4 {
+            let speed = self.orographic_speed_factor(world, hx);
+            let lift = self.orographic_lift(world, hx);
+            let sink = self.lee_sink(world, hx, hy);
+            // Blend oro speed toward free-stream shear when drive is low.
+            let sped = 1.0 + (speed - 1.0) * td.min(1.0);
+            vx = (evx * shear * sped).clamp(-1.0, 1.0);
+            // Extra drive above 1.0 slightly exaggerates oro contrast.
+            let boost = if td > 1.0 { 1.0 + (td - 1.0) * 0.35 } else { 1.0 };
+            vy += (lift - sink) * td.min(1.0) * boost;
+        }
+
+        let th = cfg.thermal_drive.clamp(0.0, 2.0);
+        if th > 1e-4 {
+            if let Some(t) = temp {
+                let (dvx, dvy) = self.thermal_delta(t, hx, hy);
+                vx += dvx * th;
+                vy += dvy * th;
+            }
+        }
+
+        let sw = cfg.swirl.clamp(0.0, 2.0);
+        if sw > 1e-4 {
+            let (sx, sy) = self.swirl_at(hx, hy, tick);
+            vx += sx * sw;
+            vy += sy * sw;
+        }
+
+        (vx, vy)
+    }
+
+    /// Sea-breeze style: air slides toward warmer neighbours; warm
+    /// anomalies relative to the row mean rise.
+    fn thermal_delta(&self, temp: &Temperature, hx: i32, hy: i32) -> (f32, f32) {
+        let t0 = temp.at_tile(hx, hy);
+        let tx = (temp.at_tile(hx + 1, hy) - temp.at_tile(hx - 1, hy)) * 0.5;
+        let ty = (temp.at_tile(hx, hy + 1) - temp.at_tile(hx, hy - 1)) * 0.5;
+        // Toward warm (daytime land breeze proxy).
+        let mut vx = tx * 0.018;
+        let mut vy = ty * 0.012;
+        // Column buoyancy from local anomaly vs left/right neighbours.
+        let flank = (temp.at_tile(hx - 1, hy) + temp.at_tile(hx + 1, hy)) * 0.5;
+        let anomaly = t0 - flank;
+        vy += (anomaly / 18.0).clamp(-0.12, 0.12);
+        // Buried / deep seats stay quiet.
+        let surf = self.surface_tile_hy(None, hx);
+        if hy + 1 < surf {
+            vx *= 0.15;
+            vy *= 0.15;
+        }
+        (vx, vy)
+    }
+
+    /// Divergence-free eddies from a pair of advected potentials.
+    fn swirl_at(&self, hx: i32, hy: i32, tick: u64) -> (f32, f32) {
+        let t = tick as f32;
+        let phase = (self.seed as f32) * 1.0e-9;
+        // Large gyre
+        let ax = hx as f32 * 0.31 + t * 0.017 + phase;
+        let ay = hy as f32 * 0.27 + t * 0.013 + phase * 1.7;
+        // ∂φ/∂y , −∂φ/∂x for φ = sin(ax)·cos(ay)
+        let dphi_dy = ax.sin() * (-ay.sin()) * 0.27 * 0.055;
+        let dphi_dx = ax.cos() * ay.cos() * 0.31 * 0.055;
+        let mut sx = dphi_dy;
+        let mut sy = -dphi_dx;
+        // Smaller counter-eddy
+        let bx = hx as f32 * 0.71 + t * 0.041 + phase * 2.1;
+        let by = hy as f32 * 0.63 - t * 0.029 + phase * 0.4;
+        let dpsi_dy = bx.sin() * (-by.sin()) * 0.63 * 0.028;
+        let dpsi_dx = bx.cos() * by.cos() * 0.71 * 0.028;
+        sx += dpsi_dy;
+        sy += -dpsi_dx;
+        (sx, sy)
+    }
+
+    /// Local flow for physics / HUD — heatmap if rebuilt, else procedural.
+    pub fn vector_at(&self, world: Option<&World>, hx: i32, hy: i32) -> (f32, f32) {
+        if let Some(&v) = self.field.get(&(hx, hy)) {
+            return v;
+        }
+        let vx = self.climate_vx;
+        let vy = self.climate_vy;
+        self.flow_at(world, hx, hy, vx, vy)
+    }
+
+    /// Speed |v| at a tile (tiles / tick).
+    pub fn speed_at(&self, world: Option<&World>, hx: i32, hy: i32) -> f32 {
+        let (vx, vy) = self.vector_at(world, hx, hy);
+        (vx * vx + vy * vy).sqrt()
+    }
+
     /// Local vapour-carrying flow at humidity tile `(hx, hy)`.
     ///
     /// `climate_vx` / `climate_vy` should already be the tick's
@@ -126,8 +354,7 @@ impl Wind {
     /// - **windward channel** — climbs slightly faster onto rising terrain
     /// - **lee slow + sink** — air decelerates and drops past a crest
     ///
-    /// Without this, every tile shared one vector and the humidity field
-    /// slid like a painted sheet.
+    /// Prefer [`Self::vector_at`] once [`Self::rebuild_field`] has run.
     pub fn flow_at(
         &self,
         world: Option<&World>,
@@ -146,7 +373,7 @@ impl Wind {
     }
 
     /// Horizontal wind at a humidity tile (tiles / tick) — mean climate
-    /// only. Prefer [`Self::flow_at`] for vapour advection.
+    /// only. Prefer [`Self::vector_at`] for vapour advection.
     pub fn vx_at(&self, _hx: i32, _hy: i32) -> f32 {
         self.climate_vx
     }
@@ -251,7 +478,7 @@ impl Wind {
         ((s0 - s1) as f32).max(0.0)
     }
 
-    fn surface_tile_hy(&self, world: Option<&World>, hx: i32) -> i32 {
+    pub fn surface_tile_hy(&self, world: Option<&World>, hx: i32) -> i32 {
         let tc = self.tile_cols.max(1);
         let gx = hx * tc + tc / 2;
         let y = self.surface_at(world, gx);
@@ -471,5 +698,84 @@ mod tests {
         assert!(wind.mix_strength(0.0, 0.0) < 0.05);
         assert!(wind.mix_strength(0.22, 0.0) > 0.95);
         assert!(wind.mix_strength(0.05, 0.0) > wind.mix_strength(0.01, 0.0));
+    }
+
+    #[test]
+    fn rebuild_field_varies_spatially_with_swirl() {
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.08,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.variance = 0.0;
+        wind.config = WindConfig {
+            terrain_drive: 0.0,
+            thermal_drive: 0.0,
+            swirl: 1.2,
+            canopy_dampen: 0.0,
+            field_smooth: 0.0,
+        };
+        wind.rebuild_field(None, None, 40, None);
+        assert!(!wind.field.is_empty());
+        let speeds: Vec<f32> = wind
+            .field
+            .values()
+            .map(|&(vx, vy)| (vx * vx + vy * vy).sqrt())
+            .collect();
+        let min = speeds.iter().cloned().fold(f32::INFINITY, f32::min);
+        let max = speeds.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+        assert!(
+            max - min > 0.02,
+            "swirl should create local speed differences ({min}..{max})"
+        );
+        // Directions should not all match the climate +x.
+        let vy_spread = wind
+            .field
+            .values()
+            .map(|&(_, vy)| vy)
+            .fold(0.0f32, |a, b| a.max(b.abs()));
+        assert!(vy_spread > 0.01, "swirl should tilt some tiles vertically");
+    }
+
+    #[test]
+    fn canopy_drag_slows_local_tiles() {
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.20,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.variance = 0.0;
+        wind.config.terrain_drive = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.field_smooth = 0.0;
+        wind.config.canopy_dampen = 1.0;
+        let hx = 10;
+        let hy = wind.surface_tile_hy(None, hx) + 2;
+        let mut drag = FxHashMap::default();
+        drag.insert((hx, hy), 1.0);
+        wind.rebuild_field(None, None, 0, Some(&drag));
+        let (vx, vy) = wind.vector_at(None, hx, hy);
+        assert!(
+            vx.abs() < 0.02 && vy.abs() < 0.02,
+            "full drag should calm the tile ({vx},{vy})"
+        );
+        let (ox, _) = wind.vector_at(None, hx + 3, hy);
+        assert!(
+            ox.abs() > 0.05,
+            "undragged neighbour should still blow ({ox})"
+        );
     }
 }

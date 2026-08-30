@@ -27,6 +27,7 @@ use crate::rules::{
 };
 use crate::spore_bank::SporeBankConfig;
 use crate::temperature::TempConfig;
+use crate::wind::WindConfig;
 
 /// Directory under the process cwd for named presets.
 pub const PRESET_DIR: &str = "presets";
@@ -89,6 +90,8 @@ pub struct SimPreset {
     pub failure: FailureConfig,
     pub wind_vx: f32,
     pub wind_variance: f32,
+    #[serde(default)]
+    pub wind: WindConfig,
     pub humidity_diffusion_alpha: f32,
     pub plant_genes: PlantGenePreset,
     pub max_atoms: f32,
@@ -202,6 +205,7 @@ impl SimPreset {
             failure: FailureConfig::default(),
             wind_vx: 0.05,
             wind_variance: 0.55,
+            wind: WindConfig::default(),
             humidity_diffusion_alpha: 0.15,
             plant_genes: PlantGenePreset::default(),
             max_atoms: crate::MAX_ATOMS as f32,

@@ -23,7 +23,7 @@ depend on `wk-field` / `wk-world`.
 | Cell `sat` | Free water + pore water | porosity → capacity; permeability → seepage |
 | `Humidity` | Atmospheric vapour tiles | Evap / rain / clouds / plant return |
 | `Temperature` | °C tiles (Air / Surface / Buried) | `heat_capacity`, `albedo`; drives phase + cold avalanche |
-| `Wind` | Climate + orographic helpers | Clouds / oro rain (not a pressure grid) |
+| `Wind` | Climate mean + rebuilt `(vx,vy)` tile field | Humidity advection, oro rain, canopy drag hook |
 | `Heatmap<T>` scaffold | Generic sparse patches | **Unused** by live climate (typed fields preferred so far) |
 | `World::soft_litter` | Per-column fungus food | Digested before Organic cells |
 
@@ -195,11 +195,12 @@ compaction → map-gated thin-dam shear.
 ### 7. Air pressure (research)
 
 Powder Toy–style gas. Migration already flags Air as first-class;
-voxel wind is a climate mean + natural variance, then **per-tile**
-`Wind::flow_at` (height shear, windward channel, lee slow/sink). Humidity
-uses fractional flux + wind mixing so the field does not slide as one sheet.
-Defer a full pressure-solved cell wind until hydro + thermal are
-further along.
+voxel wind is a **climate mean + natural variance**, then a rebuilt
+per-tile `(vx, vy)` heatmap (`Wind::rebuild_field`) driven by optional
+terrain, thermal gradients, swirl eddies, and canopy drag. Humidity
+reads [`Wind::vector_at`]. Defer a full pressure-solved cell wind until
+hydro + thermal are further along — the stored field is the seam for
+later spore push / stem bend / shelter.
 
 ## Architecture notes
 

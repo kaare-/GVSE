@@ -11,8 +11,8 @@ use wk_voxel::{
     celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
     day_night_factor_cfg, falls_through_empty_air, humidity_mean_norm, is_standing_water,
     precip_cover_fraction, resolve_organism_draw_cells, shade_transmit_column,
-    sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, CloudStore, Humidity,
-    ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World,
+    sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, CloudStore, FxHashMap,
+    Humidity, ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World,
     CHUNK_CELLS_H, CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_SEARCH,
 };
 
@@ -1288,25 +1288,115 @@ pub fn draw_haze_and_wind(
     }
 }
 
-/// Sparse screen-space wind strokes (`V` overlay).
+/// Wind vector heatmap (`V` overlay): tile wash by |v|, arrows for direction.
 ///
-/// Placeholder: 1-px hairlines that do not read speed or direction well.
-/// Kept off `H` so the humidity field stays clean. Needs a real visual.
-pub fn draw_wind_streaks(wind: &Wind, tick: u64, sw: f32, sh: f32) {
-    let vx = wind.effective_vx(tick);
-    if vx.abs() < 0.008 {
+/// Reads the rebuilt [`Wind::field`]; falls back to climate hairlines if empty.
+pub fn draw_wind_streaks(
+    wind: &Wind,
+    world: &World,
+    origin_x: f32,
+    origin_y: f32,
+    cell_px: f32,
+    tick: u64,
+    sw: f32,
+    sh: f32,
+) {
+    if wind.field.is_empty() {
+        let vx = wind.effective_vx(tick);
+        if vx.abs() < 0.008 {
+            return;
+        }
+        let t = get_time() as f32;
+        let n = ((sw / 36.0).ceil() as i32).clamp(8, 28);
+        let drift = (t * vx * 40.0).rem_euclid(sw + 40.0);
+        for i in 0..n {
+            let base = (i as f32 / n as f32) * (sw + 40.0) - 20.0;
+            let x = (base + drift).rem_euclid(sw + 40.0) - 20.0;
+            let y = sh * (0.14 + 0.32 * ((i as f32 * 0.37) % 1.0));
+            let len = 12.0 + (i % 5) as f32 * 4.0;
+            draw_rectangle(x, y, len, 1.0, Color::from_rgba(230, 236, 245, 16));
+        }
         return;
     }
-    let t = get_time() as f32;
-    let n = ((sw / 36.0).ceil() as i32).clamp(8, 28);
-    let drift = (t * vx * 40.0).rem_euclid(sw + 40.0);
-    for i in 0..n {
-        let base = (i as f32 / n as f32) * (sw + 40.0) - 20.0;
-        let x = (base + drift).rem_euclid(sw + 40.0) - 20.0;
-        let y = sh * (0.14 + 0.32 * ((i as f32 * 0.37) % 1.0));
-        let len = 12.0 + (i % 5) as f32 * 4.0;
-        draw_rectangle(x, y, len, 1.0, Color::from_rgba(230, 236, 245, 16));
+
+    let tc = wind.tile_cols.max(1);
+    let tile_px = tc as f32 * cell_px;
+    let mut vmax = 0.04f32;
+    for &(vx, vy) in wind.field.values() {
+        vmax = vmax.max((vx * vx + vy * vy).sqrt());
     }
+    vmax = vmax.max(0.04);
+
+    for (&(hx, hy), &(vx, vy)) in &wind.field {
+        let speed = (vx * vx + vy * vy).sqrt();
+        if speed < 0.008 {
+            continue;
+        }
+        let surf = wind.surface_tile_hy(Some(world), hx);
+        if hy + 1 < surf {
+            continue;
+        }
+        let gx = hx * tc;
+        let gy = hy * tc;
+        let px = origin_x + gx as f32 * cell_px;
+        let py = origin_y + gy as f32 * cell_px;
+        if px + tile_px < -tile_px
+            || px > sw + tile_px
+            || py + tile_px < -tile_px
+            || py > sh + tile_px
+        {
+            continue;
+        }
+        let n = (speed / vmax).clamp(0.0, 1.0);
+        let r = (40.0 + 180.0 * n) as u8;
+        let g = (90.0 + 90.0 * (1.0 - n)) as u8;
+        let b = (200.0 - 120.0 * n) as u8;
+        let a = (22.0 + 70.0 * n) as u8;
+        draw_rectangle(px, py, tile_px, tile_px, Color::from_rgba(r, g, b, a));
+
+        let cx = px + tile_px * 0.5;
+        let cy = py + tile_px * 0.5;
+        let len = (tile_px * 0.15 + speed * tile_px * 2.8).clamp(tile_px * 0.2, tile_px * 0.85);
+        let dx = vx / speed * len;
+        let dy = -vy / speed * len;
+        let alpha = (40.0 + 140.0 * n) as u8;
+        for s in 0..5 {
+            let u = s as f32 / 4.0;
+            draw_rectangle(
+                cx - dx * 0.5 + dx * u,
+                cy - dy * 0.5 + dy * u,
+                2.0,
+                2.0,
+                Color::from_rgba(245, 248, 255, alpha),
+            );
+        }
+    }
+}
+
+/// Per-tile canopy drag 0..1 from upright stem / leaf occupancy.
+///
+/// Hook for tall plants dampening local wind (and later spore shelter).
+pub fn canopy_wind_drag(organisms: &OrganismStore, tile_cols: i32) -> FxHashMap<(i32, i32), f32> {
+    let tc = tile_cols.max(1);
+    let mut drag: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+    for atom in &organisms.atoms {
+        if atom.fallen {
+            continue;
+        }
+        for &(lx, ly, mid) in &atom.body {
+            if mid != ModuleId::Stem && mid != ModuleId::Photosystem {
+                continue;
+            }
+            let gx = atom.gx + lx as i32;
+            let gy = atom.gy + ly as i32;
+            let hx = gx.div_euclid(tc);
+            let hy = gy.div_euclid(tc);
+            let bump = if mid == ModuleId::Stem { 0.12 } else { 0.06 };
+            let e = drag.entry((hx, hy)).or_insert(0.0);
+            *e = (*e + bump).min(1.0);
+        }
+    }
+    drag
 }
 
 pub fn draw_canopy_air_dim(

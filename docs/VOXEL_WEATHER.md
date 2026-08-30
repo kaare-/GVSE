@@ -437,9 +437,10 @@ walk is a few cells.
 Uniform climate `(vx, vy)` used to move every seat by the same integer δ once
 a residual crossed 1, so the H overlay slid like a painted texture. Now:
 
-- **`Wind::flow_at`** shapes the tick's climate wind with height shear
-  (surface drag → free stream aloft), windward channeling, and lee
-  slow/sink.
+- **`Wind::rebuild_field`** builds a per-tile `(vx, vy)` heatmap each tick from
+  the climate mean plus Tab drivers (terrain, thermal, swirl, canopy drag).
+- **`Wind::vector_at`** (via `advect_with_surface`) reads that field so local
+  lee / eddies / stem shelter actually move vapour.
 - **Fractional flux** moves a `|v|` fraction of each tile's mass every
   tick (dimensional split) — no whole-field jump.
 - **`wind_mix`** adds vertical exchange + mild downward entrainment when
@@ -447,7 +448,7 @@ a residual crossed 1, so the H overlay slid like a painted texture. Now:
 
 `advect_with_surface` still lifts destination seats buried under the live
 crest into free air, then spends `Wind::orographic_lift` on the windward
-face.
+face. Press **V** for the strength + direction heatmap.
 
 **The 4×4 field and the 1-wide path.** Humidity is a tile store. `H`
 paints occupied tiles plus a one-tile neighbour halo (so an emptied

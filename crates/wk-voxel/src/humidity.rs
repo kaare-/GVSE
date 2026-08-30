@@ -708,9 +708,9 @@ impl Humidity {
         self.advect_inner(vx, vy, None);
     }
 
-    /// [`Self::advect`] shaped by local [`crate::wind::Wind::flow_at`]:
-    /// height shear, windward channeling, lee slow/sink — then orographic
-    /// lift and wind-driven vertical mixing.
+    /// [`Self::advect`] shaped by the rebuilt local wind heatmap
+    /// ([`crate::wind::Wind::vector_at`]) — terrain, thermal, swirl, canopy
+    /// drag — then orographic lift and wind-driven vertical mixing.
     ///
     /// Uniform `(vx, vy)` alone moves every seat by the same δ — fine over
     /// flat sea, but a near-surface vapor slab slid *through* mountains and
@@ -773,9 +773,7 @@ impl Humidity {
                 continue;
             }
             let (vx, vy) = match surface {
-                Some((wind, world)) => {
-                    wind.flow_at(Some(world), hx, hy, climate_vx, climate_vy)
-                }
+                Some((wind, world)) => wind.vector_at(Some(world), hx, hy),
                 None => (climate_vx, climate_vy),
             };
             let v = if horizontal { vx } else { vy };

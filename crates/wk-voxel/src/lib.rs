@@ -206,7 +206,7 @@ pub use rules::{
 pub use temperature::{
     temperature_step_due, TempConfig, Temperature, TEMP_STEP_PERIOD, TEMP_STEP_PHASE,
 };
-pub use wind::Wind;
+pub use wind::{Wind, WindConfig};
 pub use save::{SimSnapshot, SIM_SAVE_DIR, SIM_SAVE_EXT, SIM_SCHEMA_VERSION};
 pub use sim_preset::{
     builtin_preset_names, list_all_presets, list_disk_presets, load_builtin_preset, load_preset,

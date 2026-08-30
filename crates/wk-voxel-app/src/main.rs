@@ -20,7 +20,7 @@
 //! - `K` — toggle karst dissolution (surface limestone + slow groundwater)
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle humidity tile diagnostic (default on)
-//! - `V` — toggle wind streak overlay (default off; placeholder visual)
+//! - `V` — toggle wind vector heatmap (strength + direction; default off)
 //! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
 //! - `T` — toggle temperature heatmap overlay
 //! - `U` — toggle ground saturation heatmap (pores + free water)
@@ -72,7 +72,7 @@ use wk_voxel::{
 };
 
 use crate::atmosphere::{
-    apply_celestial_key_rgb, apply_organism_celestial_key_rgb, draw_canopy_air_dim,
+    apply_celestial_key_rgb, apply_organism_celestial_key_rgb, canopy_wind_drag, draw_canopy_air_dim,
     draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, draw_wind_streaks,
     haze_alpha_ref_step, haze_alpha_ref_target, CloudDepthLayer,
     draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_organism_aboveground,
@@ -515,8 +515,24 @@ async fn main() {
         // Sync live settings into scene subsystems.
         scene.wind.climate_vx = settings.wind_vx;
         scene.wind.variance = settings.wind_variance;
+        scene.wind.config = settings.wind;
         let wind_vx = scene.wind.effective_vx(scene.world.tick);
         let wind_vy = scene.wind.effective_vy(scene.world.tick);
+        // Rebuild local vector heatmap before humidity / temp advection.
+        let drag = if settings.wind.canopy_dampen > 1e-4 {
+            Some(canopy_wind_drag(
+                &scene.organisms,
+                scene.wind.tile_cols,
+            ))
+        } else {
+            None
+        };
+        scene.wind.rebuild_field(
+            Some(&scene.world),
+            Some(&scene.temperature),
+            scene.world.tick,
+            drag.as_ref(),
+        );
         scene.temperature.config = settings.temp;
         scene.temperature.climate = settings.climate;
         settings.apply_pop_caps(&mut scene.organisms);
@@ -1415,7 +1431,16 @@ async fn main() {
             );
         }
         if wind_streaks_overlay {
-            draw_wind_streaks(&scene.wind, scene.world.tick, sw, sh);
+            draw_wind_streaks(
+                &scene.wind,
+                &scene.world,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.world.tick,
+                sw,
+                sh,
+            );
         }
 
         // Temperature heatmap overlay (blue cold → red hot).

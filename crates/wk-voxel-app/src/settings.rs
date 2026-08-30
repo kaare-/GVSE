@@ -9,9 +9,9 @@ use wk_voxel::{
     list_all_presets, load_preset, sanitize_preset_name, save_preset, CarbonBudget, CarbonConfig,
     ClimateConfig, CloudConfig, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig,
     FungiConfig, Genome, GrainConfig, KarstConfig, OrographicConfig, PerfConfig, PhaseConfig,
-    PlantGenePreset, PlantGrowthCaps, RainConfig, SimPreset, SporeBankConfig, TempConfig, World,
-    WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
-    MAX_STEM_MODULES, PRESET_DIR,
+    PlantGenePreset, PlantGrowthCaps, RainConfig, SimPreset, SporeBankConfig, TempConfig, WindConfig,
+    World, WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES,
+    MAX_ROOT_MODULES, MAX_STEM_MODULES, PRESET_DIR,
 };
 
 use crate::atmosphere::AtmosphereLookConfig;
@@ -160,6 +160,8 @@ pub struct SimSettings {
     pub wind_vx: f32,
     /// Natural variance 0..1 — wind force and direction wander around the mean.
     pub wind_variance: f32,
+    /// Local field drivers (terrain / thermal / swirl / canopy / smooth).
+    pub wind: WindConfig,
     pub humidity_diffusion_alpha: f32,
     /// Scratch f32s for material range sliders (synced → world hydro overrides).
     pub mat_perm_min: [f32; MATERIAL_COUNT],
@@ -294,6 +296,7 @@ impl SimSettings {
             competent_max_rolls: CompetentFallConfig::default().max_roll_events as f32,
             wind_vx: 0.05,
             wind_variance: 0.55,
+            wind: WindConfig::default(),
             humidity_diffusion_alpha: 0.15,
             mat_perm_min,
             mat_perm_max,
@@ -337,6 +340,7 @@ impl SimSettings {
             failure: self.failure,
             wind_vx: self.wind_vx,
             wind_variance: self.wind_variance,
+            wind: self.wind,
             humidity_diffusion_alpha: self.humidity_diffusion_alpha,
             plant_genes: self.plant_genes.to_preset(),
             max_atoms: self.max_atoms,
@@ -395,6 +399,7 @@ impl SimSettings {
         self.competent_max_rolls = self.competent_fall.max_roll_events as f32;
         self.wind_vx = p.wind_vx;
         self.wind_variance = p.wind_variance;
+        self.wind = p.wind;
         self.humidity_diffusion_alpha = p.humidity_diffusion_alpha;
         self.plant_genes = PlantGeneSettings::from_preset(&p.plant_genes);
         self.max_atoms = p.max_atoms;
@@ -1245,6 +1250,39 @@ impl SimSettings {
                         "Natural variance",
                         0.0..1.0,
                         &mut self.wind_variance,
+                    );
+                    ui.label(
+                        None,
+                        "Local field (V overlay): terrain / thermal / swirl reshape the climate mean. Canopy dampen uses tall stems when present.",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Terrain drive",
+                        0.0..2.0,
+                        &mut self.wind.terrain_drive,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Thermal drive",
+                        0.0..2.0,
+                        &mut self.wind.thermal_drive,
+                    );
+                    labeled_slider(ui, hash!(), "Swirl / eddies", 0.0..2.0, &mut self.wind.swirl);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Canopy dampen",
+                        0.0..1.0,
+                        &mut self.wind.canopy_dampen,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Field smooth",
+                        0.0..0.9,
+                        &mut self.wind.field_smooth,
                     );
                     labeled_slider(
                         ui,
