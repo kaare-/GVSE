@@ -30,6 +30,8 @@ pub struct Scene {
     pub support: SupportMap,
     /// Detached landscape rigid bodies falling as whole pieces.
     pub landscape: LandscapeBodyStore,
+    /// EMA opacity reference for the H overlay (runtime only — not saved).
+    pub haze_alpha_ref: f32,
 }
 
 impl Scene {
@@ -89,6 +91,7 @@ impl Scene {
             geotech,
             support,
             landscape: LandscapeBodyStore::new(),
+            haze_alpha_ref: 0.0,
         }
     }
 
@@ -122,6 +125,7 @@ impl Scene {
             geotech,
             support,
             landscape: LandscapeBodyStore::new(),
+            haze_alpha_ref: 0.0,
         }
     }
 }

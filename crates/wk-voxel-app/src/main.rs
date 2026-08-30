@@ -74,7 +74,7 @@ use wk_voxel::{
 use crate::atmosphere::{
     apply_celestial_key_rgb, apply_organism_celestial_key_rgb, draw_canopy_air_dim,
     draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, draw_wind_streaks,
-    CloudDepthLayer,
+    haze_alpha_ref_step, haze_alpha_ref_target, CloudDepthLayer,
     draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_organism_aboveground,
     organism_celestial_rim, sky_weather_for_scene, terrain_celestial_key_strength,
     toward_light_celestial, RidgeSilhouette,
@@ -1390,6 +1390,17 @@ async fn main() {
 
         // Humidity tile diagnostic (H) — not clouds.
         if humidity_overlay {
+            let live_max = scene
+                .humidity
+                .cells
+                .values()
+                .copied()
+                .fold(0.0f32, f32::max);
+            let target = haze_alpha_ref_target(
+                live_max,
+                scene.temperature.config.base_temp_c,
+            );
+            scene.haze_alpha_ref = haze_alpha_ref_step(scene.haze_alpha_ref, target);
             draw_haze_and_wind(
                 &scene.humidity,
                 &scene.world,
@@ -1403,6 +1414,7 @@ async fn main() {
                 scene.params.width_cols,
                 sw,
                 sh,
+                scene.haze_alpha_ref,
             );
         }
         if wind_streaks_overlay {

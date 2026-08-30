@@ -283,11 +283,17 @@ Now:
 ## Humidity haze steps
 
 The `H` overlay used a continuous `18 + norm·42` alpha (~18–60) that
-collapsed to a handful of mid greys. It now uses **16** steps across
-**alpha 4–200** with a gamma lift so thin vapor stays nearly clear and
-saturated decks read as dense (slightly warmer) white — not just extra
-midtones. Soft floor stays low (2% on the wash) so rain shafts are not
-punched into 4-wide holes.
+collapsed to a handful of mid greys, then a wide stepped span that
+**flickered**: opacity was `mass / live_max`, so every time a wet peak
+rained out the whole sky pumped brighter. It now:
+
+- normalizes against **saturation-at-T** (absolute RH), with live max only
+  raising a supersat ceiling
+- eases that reference with an asymmetric EMA (rises fast, falls slow)
+- uses continuous alpha across 4–200 so bucket edges do not blink
+
+Soft floor stays low (2% on the wash) so rain shafts are not punched into
+4-wide holes.
 
 ## The diurnal cycle works — it needed headroom, not more forcing
 
