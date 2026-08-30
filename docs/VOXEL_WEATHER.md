@@ -257,11 +257,12 @@ diffusivity can wait until these contrasts are playtested.
 
 ## Humidity haze steps
 
-The `H` overlay used a continuous `18 + norm·42` alpha that collapsed to a
-handful of visible bands. It now quantizes moisture into **16** opacity steps
-(`HAZE_ALPHA_MIN`…`HAZE_ALPHA_MAX`) so dry air stays faintly readable and wet
-air denser, without resurrecting the hard 12% live-max floor that punched
-4-wide holes around rain.
+The `H` overlay used a continuous `18 + norm·42` alpha (~18–60) that
+collapsed to a handful of mid greys. It now uses **16** steps across
+**alpha 4–200** with a gamma lift so thin vapor stays nearly clear and
+saturated decks read as dense (slightly warmer) white — not just extra
+midtones. Soft floor stays low (2% on the wash) so rain shafts are not
+punched into 4-wide holes.
 
 ## The diurnal cycle works — it needed headroom, not more forcing
 

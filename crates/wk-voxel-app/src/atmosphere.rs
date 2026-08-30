@@ -368,16 +368,37 @@ fn haze_resampled_cells(
 
 /// Soft white vapor haze alpha (legacy helper for tests / diagnostics).
 pub fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
-    humidity_haze_alpha_cell(mass, max_mass, 0.12)
+    humidity_haze_style(mass, max_mass, 0.12).3
 }
 
 /// Discrete opacity steps for the `H` humidity overlay.
 ///
-/// Continuous float→u8 collapsed to a few visible bands on screen; sixteen
-/// steps keep dry air faintly readable and wet air distinctly denser.
+/// Sixteen steps across a **wide** alpha span so thin vapor stays nearly
+/// clear and saturated decks read as dense white — not a handful of mid
+/// greys with extra in-between detail.
 pub const HAZE_ALPHA_LEVELS: u8 = 16;
-pub const HAZE_ALPHA_MIN: u8 = 8;
-pub const HAZE_ALPHA_MAX: u8 = 110;
+pub const HAZE_ALPHA_MIN: u8 = 4;
+pub const HAZE_ALPHA_MAX: u8 = 200;
+/// Stretch highs: `t.powf(HAZE_ALPHA_GAMMA)` keeps low moisture faint.
+const HAZE_ALPHA_GAMMA: f32 = 1.45;
+
+/// `(r, g, b, a)` for one haze cell. Wetter seats go denser *and* less
+/// blue-grey so high humidity reads as fuller white, not just another
+/// mid-alpha step.
+pub fn humidity_haze_style(mass: f32, max_mass: f32, floor: f32) -> (u8, u8, u8, u8) {
+    let a = humidity_haze_alpha_cell(mass, max_mass, floor);
+    if a == 0 {
+        return (255, 255, 255, 0);
+    }
+    let u = ((a as f32 - HAZE_ALPHA_MIN as f32)
+        / (HAZE_ALPHA_MAX - HAZE_ALPHA_MIN).max(1) as f32)
+        .clamp(0.0, 1.0);
+    // Dry: cool thin wash. Wet: warmer opaque white.
+    let r = (235.0 + u * 20.0).round() as u8;
+    let g = (240.0 + u * 15.0).round() as u8;
+    let b = (255.0 - u * 35.0).round() as u8;
+    (r, g, b, a)
+}
 
 /// Per-cell wash. Soft floor — the 12% live-max cut ate neighbour
 /// columns around an emptied tile and turned rain into a 4-wide hole.
@@ -393,7 +414,9 @@ fn humidity_haze_alpha_cell(mass: f32, max_mass: f32, floor: f32) -> u8 {
     // gets a step instead of jumping straight to mid-alpha.
     let span = (1.0 - floor).max(1e-6);
     let t = ((norm - floor) / span).clamp(0.0, 1.0);
-    let level = ((t * HAZE_ALPHA_LEVELS as f32).ceil() as u8).clamp(1, HAZE_ALPHA_LEVELS);
+    let shaped = t.powf(HAZE_ALPHA_GAMMA);
+    let level =
+        ((shaped * HAZE_ALPHA_LEVELS as f32).ceil() as u8).clamp(1, HAZE_ALPHA_LEVELS);
     let u = level as f32 / HAZE_ALPHA_LEVELS as f32;
     (HAZE_ALPHA_MIN as f32 + u * (HAZE_ALPHA_MAX - HAZE_ALPHA_MIN) as f32).round() as u8
 }
@@ -1200,7 +1223,7 @@ pub fn draw_haze_and_wind(
                 })
             },
         ) {
-            let cell_alpha = humidity_haze_alpha_cell(sampled, max_mass, 0.02);
+            let (hr, hg, hb, cell_alpha) = humidity_haze_style(sampled, max_mass, 0.02);
             if cell_alpha == 0 {
                 continue;
             }
@@ -1219,7 +1242,7 @@ pub fn draw_haze_and_wind(
                     top_sy,
                     cell_px + 0.5,
                     cell_px + 0.5,
-                    Color::from_rgba(255, 255, 255, cell_alpha),
+                    Color::from_rgba(hr, hg, hb, cell_alpha),
                 );
             }
         }
@@ -1989,8 +2012,8 @@ pub fn estimate_snow_bias(
 mod tests {
     use super::{
         collect_drop_tops, gather_soft_cloud_srcs, haze_cell_is_drop, haze_column_y0,
-        haze_paint_seats, haze_resampled_cells, humidity_haze_alpha, stamp_pixel_cloud_mask,
-        HAZE_ALPHA_MAX, HAZE_ALPHA_MIN,
+        haze_paint_seats, haze_resampled_cells, humidity_haze_alpha, humidity_haze_style,
+        stamp_pixel_cloud_mask, HAZE_ALPHA_MAX, HAZE_ALPHA_MIN,
         CloudDepthLayer,
     };
     use std::collections::HashMap;
@@ -2075,12 +2098,22 @@ mod tests {
         assert_eq!(humidity_haze_alpha(0.0, 100.0), 0);
         assert_eq!(humidity_haze_alpha(5.0, 100.0), 0); // below 12% floor
         assert!(humidity_haze_alpha(50.0, 100.0) >= HAZE_ALPHA_MIN);
-        assert!(humidity_haze_alpha(100.0, 100.0) <= HAZE_ALPHA_MAX);
-        // Sixteen steps: mid moisture is clearly lighter than full.
+        assert_eq!(humidity_haze_alpha(100.0, 100.0), HAZE_ALPHA_MAX);
+        // Wide span: low moisture stays faint, full is near-opaque.
+        let lo = humidity_haze_alpha(20.0, 100.0);
+        let mid = humidity_haze_alpha(55.0, 100.0);
+        let hi = humidity_haze_alpha(100.0, 100.0);
+        assert!(lo < 50, "thin vapor should stay faint (got {lo})");
+        assert!(hi >= 180, "saturated should read dense (got {hi})");
         assert!(
-            humidity_haze_alpha(30.0, 100.0) < humidity_haze_alpha(60.0, 100.0)
-                && humidity_haze_alpha(60.0, 100.0) < humidity_haze_alpha(100.0, 100.0),
-            "haze alpha should step with moisture"
+            lo < mid && mid < hi,
+            "haze alpha should step with moisture ({lo} < {mid} < {hi})"
+        );
+        let (_, _, b_lo, _) = humidity_haze_style(20.0, 100.0, 0.12);
+        let (_, _, b_hi, _) = humidity_haze_style(100.0, 100.0, 0.12);
+        assert!(
+            b_hi < b_lo,
+            "wetter haze should be less blue-grey ({b_hi} vs {b_lo})"
         );
     }
 
