@@ -1057,18 +1057,24 @@ mod convection_tests {
     fn a_warm_column_lifts_more_than_a_cool_one() {
         let width = 256;
         let temp = split_temp(width);
-        let mean = temp.mean();
+        let n_hx = width / 4;
 
-        // Find two tiles at the same height with a real temperature spread.
-        let hy = 12;
+        // Sample free air above fixture peaks (continental surf tops out
+        // ~159 with this seed/sea). Lower rows mix buried geothermal into
+        // the row mean, so a "warm" pick against the *global* mean can still
+        // be cold vs the row — both seats clamp to min gain and vertical
+        // air-lapse decides the race. Convection's reference is the row.
+        let hy = 40;
+        let row_mean: f32 = (0..n_hx).map(|hx| temp.at_tile(hx, hy)).sum::<f32>() / n_hx as f32;
+
         let mut warm_hx = None;
         let mut cool_hx = None;
-        for hx in 0..(width / 4) {
+        for hx in 0..n_hx {
             let here = temp.at_tile(hx, hy);
-            if here > mean + 0.5 && warm_hx.is_none() {
+            if here > row_mean + 0.5 && warm_hx.is_none() {
                 warm_hx = Some(hx);
             }
-            if here < mean - 0.5 && cool_hx.is_none() {
+            if here < row_mean - 0.5 && cool_hx.is_none() {
                 cool_hx = Some(hx);
             }
         }
