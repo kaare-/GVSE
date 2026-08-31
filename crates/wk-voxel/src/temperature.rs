@@ -892,6 +892,14 @@ mod tests {
                 }
             }
         }
+        // Isolate reflection: radiation is a separate humidity job
+        // (blanket). At noon those two used to be invisible because
+        // the leak only ran at night.
+        for t in [&mut clear, &mut cloudy] {
+            t.config.night_cool_c = 0.0;
+            t.config.hum_night_blanket = 0.0;
+            t.config.diffuse_alpha = 0.0;
+        }
         for _ in 0..8 {
             clear.step(Some(&w_clear), &h_clear, 0, None);
             cloudy.step(Some(&w_cloud), &h_cloud, 0, None);
