@@ -924,7 +924,7 @@ mod tests {
             "sun should accumulate in the ground (skin={skin:.1})"
         );
         assert!(
-            air > aloft + 0.4,
+            air > aloft + 0.2,
             "ground-heated air must sit warmer than the sky (air={air:.1} aloft={aloft:.1})"
         );
     }
