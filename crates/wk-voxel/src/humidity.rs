@@ -494,41 +494,16 @@ impl Humidity {
         if fraction == 0.0 || self.cells.is_empty() {
             return;
         }
-        let snap = self.cells.clone();
-        // Mean temperature **per row**, computed once.
+        // Read `cells` in place — a full clone every tick was an FPS sink
+        // once loft filled more than a fog film. Deltas apply after.
         //
-        // Two mistakes to avoid here, both of which were made and measured. It has
-        // to be hoisted: calling `Temperature::mean()` inside the loop scans the
-        // whole field per tile and collapsed the frame rate. And it has to be
-        // per-row: against a *global* mean every high-altitude tile reads as cool,
-        // because temperature falls with altitude, so lift was suppressed aloft
-        // everywhere and vapour piled into a dense unmoving layer near the ground.
-        // The anomaly that means anything is horizontal — this column against other
-        // columns at the same height.
-        //
-        // Averaged across the **world's** tile row, not across the tiles that
-        // happen to hold vapour: keyed on occupancy, a lone cloud is its own mean
-        // and never convects at all, and the reference drifts with wherever the
-        // vapour currently is.
-        let row_mean: HashMap<i32, f32> = match (temp, self.bounds) {
-            (Some(t), Some(b)) => {
-                let rows: std::collections::HashSet<i32> = snap.keys().map(|&(_, hy)| hy).collect();
-                rows.into_iter()
-                    .map(|hy| {
-                        let mut sum = 0.0f32;
-                        let mut n = 0u32;
-                        for hx in b.hx_min..=b.hx_max {
-                            sum += t.at_tile(hx, hy);
-                            n += 1;
-                        }
-                        (hy, sum / n.max(1) as f32)
-                    })
-                    .collect()
-            }
-            _ => HashMap::new(),
-        };
+        // Row means come from [`Temperature::row_mean_at`] (rebuilt on the
+        // period-20 thermal step). Scanning every hx of every wet hy here
+        // was the other cliff: more lofted rows → width × rows lookups.
         let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
-        for (&(hx, hy), &mass) in &snap {
+        let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
+        for (hx, hy) in keys {
+            let mass = *self.cells.get(&(hx, hy)).unwrap_or(&0.0);
             if mass <= 0.0 || hy >= max_hy {
                 continue;
             }
@@ -556,7 +531,7 @@ impl Humidity {
                 // Warm land against cool sea, sunlit slope against shaded, and
                 // the diurnal swing all feed this for free, since they are
                 // already in the temperature field.
-                let reference = row_mean.get(&hy).copied().unwrap_or(here);
+                let reference = t.row_mean_at(hy);
                 let anomaly =
                     (here - reference).clamp(-Self::CONVECTION_CLAMP_C, Self::CONVECTION_CLAMP_C);
                 let gain = (1.0 + anomaly * Self::CONVECTION_GAIN_PER_C)
@@ -1348,6 +1323,8 @@ mod tests {
         for v in t_st.cells.values_mut() {
             *v = 12.0;
         }
+        t_up.rebuild_row_means();
+        t_st.rebuild_row_means();
         unstable.buoyant_rise_thermal(0.10, 4, Some(&t_up));
         stable.buoyant_rise_thermal(0.10, 4, Some(&t_st));
         assert!(

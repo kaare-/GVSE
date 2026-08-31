@@ -161,6 +161,12 @@ the surface; air only couples to that skin. Warm humid air under the
 colder lapse rises (`buoyant_rise_thermal`); surplus condenses aloft
 and falls. That is the pipe — not a deck slider.
 
+Keep the loft cheap: row means live on the period-20 thermal step
+(never `width × wet-rows` lookups per tick), rise runs every other
+tick, and the condensation film floor walks down from the wet tile
+(not up from y=0 through the mountain). A lofted sky has more wet
+seats — do not pay a full-field scan for each of them.
+
 2. **Condensation wiped the film.** At a few degrees below zero the
    Clausius–Clapeyron sat is ~100–120 mass; `mass_per_droplet` is 255,
    so the first free-air tile rained itself empty every event and never

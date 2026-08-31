@@ -170,9 +170,17 @@ pub fn apply_condensation_rain_phased(
     // Collect first, then apply the heaviest hits so a saturated sky
     // cannot walk every column every tick (~thousands → 7 FPS).
     let mut hits: Vec<(f32, i32, i32, f32)> = Vec::new(); // mass, hx, hy, take_mass
+    let mut col_lo: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
+    for &(hx, hy) in &tiles {
+        col_lo
+            .entry(hx)
+            .and_modify(|m| *m = (*m).min(hy))
+            .or_insert(hy);
+    }
     let mut film_floor: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
     for (hx, hy) in tiles {
-        let floor = first_free_air_hy(world, tile_cols, hx, &mut film_floor);
+        let hint = col_lo.get(&hx).copied().unwrap_or(hy);
+        let floor = first_free_air_hy(world, tile_cols, hx, hint, &mut film_floor);
         if hy <= floor.saturating_add(SURFACE_FILM_SPARE_TILES) {
             continue;
         }
@@ -308,13 +316,14 @@ fn occupies_humidity_film(c: &crate::cell::Cell) -> bool {
 
 /// First humidity-tile row whose centre sits in free air above the live crest.
 ///
-/// Cached per `hx` so a wet sky does not walk the column once per tile.
-/// Unloaded columns return a sentinel below any real `hy` so we do not
-/// invent a floor and skip rain.
+/// Cached per `hx`. Walks **down** from the lowest wet tile in the column
+/// (a few cells) instead of up from y=0 through the mountain — that 192-cell
+/// climb per column was an FPS sink on a wet sky.
 fn first_free_air_hy(
     world: &World,
     tile_cols: i32,
     hx: i32,
+    hint_hy: i32,
     cache: &mut std::collections::HashMap<i32, i32>,
 ) -> i32 {
     if let Some(&hy) = cache.get(&hx) {
@@ -322,25 +331,21 @@ fn first_free_air_hy(
     }
     let tc = tile_cols.max(1);
     let gx = world.wrap_x(hx * tc + tc / 2);
-    let mut y = 0i32;
-    let mut saw = false;
-    for _ in 0..192 {
+    let mut y = hint_hy * tc + tc / 2;
+    let mut ground = None;
+    for _ in 0..24 {
         match world.get_cell(gx, y) {
             Some(c) if occupies_humidity_film(&c) => {
-                saw = true;
-                y += 1;
-            }
-            Some(_) => {
-                saw = true;
+                ground = Some(y);
                 break;
             }
+            Some(_) => y -= 1,
             None => break,
         }
     }
-    let hy = if saw {
-        ((y + 1 - tc / 2).max(0) + tc - 1) / tc
-    } else {
-        i32::MIN / 4
+    let hy = match ground {
+        Some(gy) => (gy + 1).div_euclid(tc),
+        None => i32::MIN / 4,
     };
     cache.insert(hx, hy);
     hy

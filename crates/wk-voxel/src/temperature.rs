@@ -178,6 +178,10 @@ pub struct Temperature {
     props_cache: HashMap<(i32, i32), TileThermal>,
     #[serde(skip)]
     props_cache_age: u32,
+    /// Per-row mean °C, rebuilt at the end of [`Self::step`]. Convection
+    /// reads this instead of scanning the whole tile row every humidity tick.
+    #[serde(skip)]
+    row_mean: HashMap<i32, f32>,
 }
 
 impl Temperature {
@@ -205,9 +209,38 @@ impl Temperature {
             climate: ClimateConfig::default(),
             props_cache: HashMap::new(),
             props_cache_age: TEMP_PROPS_REFRESH_STEPS,
+            row_mean: HashMap::new(),
         };
         t.fill_initial(0);
         t
+    }
+
+    /// Horizontal mean at tile row `hy` (world-wide, not occupancy-weighted).
+    ///
+    /// Cache miss returns [`TempConfig::base_temp_c`] — do not scan the
+    /// field here; that was the humidity-rise FPS cliff.
+    pub fn row_mean_at(&self, hy: i32) -> f32 {
+        self.row_mean
+            .get(&hy)
+            .copied()
+            .unwrap_or(self.config.base_temp_c)
+    }
+
+    pub fn rebuild_row_means(&mut self) {
+        self.row_mean.clear();
+        if self.cells.is_empty() {
+            return;
+        }
+        let mut acc: HashMap<i32, (f32, u32)> = HashMap::new();
+        for (&(_, hy), &v) in &self.cells {
+            let e = acc.entry(hy).or_insert((0.0, 0));
+            e.0 += v;
+            e.1 += 1;
+        }
+        self.row_mean = acc
+            .into_iter()
+            .map(|(hy, (sum, n))| (hy, sum / n.max(1) as f32))
+            .collect();
     }
 
     fn accepts(&self, hx: i32, hy: i32) -> bool {
@@ -286,6 +319,7 @@ impl Temperature {
                 self.cells.insert((hx, hy), t0);
             }
         }
+        self.rebuild_row_means();
     }
 
     fn refresh_props_cache(&mut self, world: Option<&World>, keys: &[(i32, i32)]) {
@@ -460,6 +494,7 @@ impl Temperature {
         if let Some(w) = wind {
             self.advect_air(world, w);
         }
+        self.rebuild_row_means();
     }
 
     /// Upwind mix of **air** tiles along the local wind. Period-20 only.

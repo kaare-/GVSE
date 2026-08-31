@@ -275,16 +275,22 @@ impl CloudStore {
         temp: Option<&Temperature>,
         phase: Option<&PhaseConfig>,
     ) {
-        let _ = (sea_level_y, tick, phase);
+        let _ = (sea_level_y, phase);
         self.release_parcels_into_humidity(humidity);
         // Rise until the sky box, not `sea + cloud_alt`. That deck cap
         // sat on mountain ridges (surface hy ≥ deck) and turned every
         // thermal into a fog film. Unstable lapse already stops the lift.
-        let max_hy = humidity
-            .bounds
-            .map(|b| b.hy_max)
-            .unwrap_or_else(|| sky_ceiling_y.div_euclid(humidity.tile_cols.max(1)));
-        humidity.buoyant_rise_thermal(cfg.buoyant_rise, max_hy, temp);
+        //
+        // Every other tick: the walk is the same, the loft rate is close
+        // enough, and doing it every physics tick was an FPS sink once
+        // vapour occupied more than a fog film.
+        if tick % 2 == 0 {
+            let max_hy = humidity
+                .bounds
+                .map(|b| b.hy_max)
+                .unwrap_or_else(|| sky_ceiling_y.div_euclid(humidity.tile_cols.max(1)));
+            humidity.buoyant_rise_thermal(cfg.buoyant_rise, max_hy, temp);
+        }
         self.rebuild_visuals_from_humidity(humidity, world, wind, sea_level_y, cfg, temp);
     }
 
@@ -751,7 +757,7 @@ mod tests {
             &wind,
             0,
             256,
-            1,
+            2,
             &cfg,
             None,
             None,
