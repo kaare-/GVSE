@@ -178,6 +178,12 @@ seats — do not pay a full-field scan for each of them.
    the lowest free-air row + one above it**, so the source layer can
    lift. Aloft surplus still rains.
 
+   Cold air holding less vapour is a **separate** path
+   (`precipitate_thermal_surplus`). Surplus above `saturation_mass_at_temp`
+   becomes water (or a snowflake) in that tile. It does not wait for the
+   drizzle lottery, and a refused deposit leaves the vapour — never a
+   clamp that deletes the mass.
+
 Do not add a sea-level humidity floor or a fixed "cloud row" teleport
 to get this look back. If the sky goes sheet-fog again, check those two
 gates first.

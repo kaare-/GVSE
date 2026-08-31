@@ -58,7 +58,7 @@ mod terrain;
 use macroquad::prelude::*;
 use wk_voxel::{
     apply_cold_avalanche_bound, apply_condensation_rain_phased,
-    apply_evaporation_into_humidity_climate,
+    apply_evaporation_into_humidity_climate, precipitate_thermal_surplus,
     apply_flow_erosion_bound, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
     apply_weather_rgb, apply_competent_fall_regions, apply_landscape_fall, celestial_local_cfg,
     celestial_moon_screen_pos_cfg,
@@ -605,6 +605,15 @@ async fn main() {
                 Some(&scene.temperature),
                 Some(&settings.phase),
             );
+            // Surplus the local air cannot hold becomes water here.
+            // The drizzle lottery below is a different gate — a missed
+            // roll must not be how we "solve" a cold snap.
+            precipitate_thermal_surplus(
+                &mut scene.world,
+                &mut scene.humidity,
+                &scene.temperature,
+                Some(&settings.phase),
+            );
             // Leftover vapor: liquid drizzle when warm, thin ice frost
             // when cold. Packed snow still comes from the W faucet.
             if settings.cond_rain_on {
@@ -734,6 +743,14 @@ async fn main() {
                         tick_no,
                         Some(&scene.wind),
                     );
+                // Hold just shrank. Dump the surplus now, not next
+                // tick's drizzle lottery.
+                precipitate_thermal_surplus(
+                    &mut scene.world,
+                    &mut scene.humidity,
+                    &scene.temperature,
+                    Some(&settings.phase),
+                );
             }
             // Cold wet-sand / snow / hillside ice spill onto lake ice
             // after the thermal step, then phase may break thin lids.

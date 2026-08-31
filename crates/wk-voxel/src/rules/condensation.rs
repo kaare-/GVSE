@@ -114,6 +114,74 @@ impl Default for OrographicConfig {
     }
 }
 
+/// How many oversaturated tiles may nucleate water in one surplus pass.
+///
+/// Leftover tiles keep their vapour — this is a rate limit, not a clamp.
+const THERMAL_SURPLUS_MAX_HITS: usize = 128;
+
+/// Turn vapour the local air can no longer hold into water.
+///
+/// Clausius–Clapeyron shrinks the hold when a tile cools. That surplus
+/// is rain (or a snowflake if the budget can pay for one). It is **not**
+/// deleted, and it does **not** wait for [`apply_condensation_rain_phased`]
+/// — that pass has its own min-mass / probability / event-cap gates, so
+/// a missed roll is not a license to drop the mass.
+///
+/// Only humidity that actually lands is drained. A refused deposit
+/// leaves the vapour where it is.
+pub fn precipitate_thermal_surplus(
+    world: &mut World,
+    humidity: &mut crate::humidity::Humidity,
+    temp: &crate::temperature::Temperature,
+    phase: Option<&crate::phase::PhaseConfig>,
+) {
+    let tile_cols = humidity.tile_cols.max(1);
+    let mut hits: Vec<(f32, i32, i32)> = Vec::new();
+    for (&(hx, hy), &mass) in &humidity.cells {
+        let sat = crate::humidity::Humidity::saturation_mass_at_temp(temp.at_tile(hx, hy));
+        let surplus = mass - sat;
+        if surplus >= 1.0 {
+            hits.push((surplus, hx, hy));
+        }
+    }
+    if hits.is_empty() {
+        return;
+    }
+    hits.sort_unstable_by(|a, b| b.0.partial_cmp(&a.0).unwrap_or(std::cmp::Ordering::Equal));
+    for &(_, hx, hy) in hits.iter().take(THERMAL_SURPLUS_MAX_HITS) {
+        let mass = humidity.at_tile(hx, hy);
+        let sat = crate::humidity::Humidity::saturation_mass_at_temp(temp.at_tile(hx, hy));
+        let take = (mass - sat).max(0.0);
+        if take < 1.0 {
+            continue;
+        }
+        let gx = hx * tile_cols + tile_cols / 2;
+        let gy = hy * tile_cols + tile_cols / 2;
+        let air_t = temp.at_tile(hx, hy);
+        let freezing = phase
+            .map(|ph| air_t <= ph.freeze_point_c)
+            .unwrap_or(false);
+        let landed = if freezing && take >= u8::MAX as f32 {
+            let snowed = crate::phase::deposit_snow_in_air(world, gx, gy, take);
+            if snowed > 0.0 {
+                snowed
+            } else {
+                super::deposit_water_in_air(world, gx, gy, take)
+            }
+        } else {
+            super::deposit_water_in_air(world, gx, gy, take)
+        };
+        if landed <= 0.0 {
+            continue;
+        }
+        let entry = humidity.cells.entry((hx, hy)).or_insert(0.0);
+        *entry -= landed.min(*entry);
+        if *entry < 1e-6 {
+            humidity.cells.remove(&(hx, hy));
+        }
+    }
+}
+
 /// Precipitation feedback: humidity tiles that hold enough
 /// atmospheric water (especially when colder than the vapor, or
 /// when a colder tile sits below — dew) drop droplets back into the
@@ -571,6 +639,95 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    fn cold_air_surplus_becomes_water_not_a_delete() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::temperature::Temperature;
+
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 1));
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        let mut h = Humidity::new(4);
+        // Tile (1, 8) → world (6, 34). Load that band of air.
+        for y in 32..40 {
+            w.ensure_chunk(ChunkCoord::new(0, y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32)));
+        }
+        let start = 400.0;
+        h.cells.insert((1, 8), start);
+        w.set_cell(6, 34, Cell::air());
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
+        for v in temp.cells.values_mut() {
+            *v = -20.0;
+        }
+        temp.rebuild_row_means();
+        let sat = Humidity::saturation_mass_at_temp(-20.0);
+        assert!(
+            start > sat + 50.0,
+            "precondition: tile is well over the cold hold (sat={sat:.1})"
+        );
+        let hum_before = h.total_mass();
+        precipitate_thermal_surplus(&mut w, &mut h, &temp, None);
+        let hum_after = h.total_mass();
+        let drained = hum_before - hum_after;
+        assert!(
+            drained > 1.0,
+            "oversaturated cold air must shed vapour (left {})",
+            h.at_tile(1, 8)
+        );
+        assert!(
+            h.at_tile(1, 8) + 1e-3 >= sat.min(hum_after),
+            "must not clamp below the hold (left {} sat={sat:.1})",
+            h.at_tile(1, 8)
+        );
+        let cell = w.get_cell(6, 34).expect("air seat");
+        assert!(
+            cell.material == MaterialId::Air && cell.sat.0 as f32 >= drained - 1.5,
+            "shed vapour must land as water (sat={} drained={drained:.1})",
+            cell.sat.0
+        );
+    }
+
+    #[test]
+    fn refused_thermal_surplus_stays_in_the_air() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::temperature::Temperature;
+
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Tile centre is solid — deposit_water_in_air refuses.
+        for x in 0..8 {
+            for y in 0..40 {
+                w.ensure_chunk(ChunkCoord::new(
+                    x.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
+                    y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+                ));
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut h = Humidity::new(4);
+        h.cells.insert((1, 8), 400.0);
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
+        for v in temp.cells.values_mut() {
+            *v = -20.0;
+        }
+        temp.rebuild_row_means();
+        precipitate_thermal_surplus(&mut w, &mut h, &temp, None);
+        assert!(
+            (h.at_tile(1, 8) - 400.0).abs() < 1e-3,
+            "a refused deposit must leave the vapour (left {})",
+            h.at_tile(1, 8)
+        );
+    }
+
     fn shipped_configs_use_whole_cell_droplets() {
         let full = u8::MAX as f32;
         for (name, cond) in [

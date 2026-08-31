@@ -29,7 +29,8 @@ mod tests;
 
 pub use condensation::{
     apply_condensation_rain, apply_condensation_rain_phased,
-    apply_condensation_rain_with_orographic, CondensationConfig, OrographicConfig,
+    apply_condensation_rain_with_orographic, precipitate_thermal_surplus, CondensationConfig,
+    OrographicConfig,
 };
 pub use evap::{
     apply_evaporation, apply_evaporation_into_humidity, apply_evaporation_into_humidity_climate,

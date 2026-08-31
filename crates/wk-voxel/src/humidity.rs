@@ -215,6 +215,10 @@ impl Humidity {
     }
 
     /// [`Self::try_add`] capped at [`Self::saturation_mass_at_temp`].
+    ///
+    /// Refuses *new* mass the air cannot hold. Does **not** clamp
+    /// vapour already in the tile — that surplus is rain
+    /// ([`crate::precipitate_thermal_surplus`]), not a delete.
     pub fn try_add_at_temp(&mut self, gx: i32, gy: i32, mass: f32, temp_c: f32) -> f32 {
         self.try_add_capped(gx, gy, mass, Self::saturation_mass_at_temp(temp_c))
     }
@@ -1305,6 +1309,14 @@ mod tests {
             "cold air should take its sat cap {cap:.1}, took {took:.1}"
         );
         assert!((h.at_cell(2, 2) - cap).abs() < 0.5);
+        // Already-present mass is not this function's job. A later
+        // cold snap must rain the surplus, not clamp this entry.
+        h.cells.insert((0, 0), 800.0);
+        let _ = h.try_add_at_temp(0, 0, 10.0, -15.0);
+        assert!(
+            (h.at_tile(0, 0) - 800.0).abs() < 1e-3,
+            "try_add_at_temp must not delete vapour already in the tile"
+        );
     }
 
     #[test]
