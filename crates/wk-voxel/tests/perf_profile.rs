@@ -304,7 +304,7 @@ fn one_stack_tick(
                 scene.params.sky_ceiling_y,
                 tick_no,
                 &scene.cloud,
-                Some(&scene.temperature),
+                Some(&mut scene.temperature),
                 Some(&scene.phase),
             );
             apply_condensation_rain_phased(
@@ -395,7 +395,7 @@ fn one_stack_tick(
                 scene.params.sky_ceiling_y,
                 tick_no,
                 &scene.cloud,
-                Some(&scene.temperature),
+                Some(&mut scene.temperature),
                 Some(&scene.phase),
             );
             a.clouds += t0.elapsed();

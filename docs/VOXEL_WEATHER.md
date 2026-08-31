@@ -162,8 +162,12 @@ ground always radiates. Night is the sun being off, not a second
 cool pulse, and there is no noon/midnight skin swing (`day_amp_c` is
 retired). Humidity in the column reflects incoming sun (daytime shade)
 and blankets the leak. Air only couples to that skin. Warm humid air
-under the colder lapse rises (`buoyant_rise_thermal`); surplus
-condenses aloft and falls. That is the pipe — not a deck slider.
+under the colder lapse rises (`buoyant_rise_thermal`) and carries heat
+with it — vapor's specific heat is ~1.9× dry air
+(`humid_heat_scale`, Tab “Humid air heat capacity”). Wet tiles relax
+toward climate more slowly, and each lift mixes source T into the
+tile above. Surplus condenses aloft and falls. That is the pipe —
+not a deck slider.
 
 Keep the loft cheap: row means live on the period-20 thermal step
 (never `width × wet-rows` lookups per tick), rise runs every other

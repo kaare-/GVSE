@@ -204,8 +204,10 @@ period 20. Sun and a standing radiate leak hit the **ground** (night
 is the sun off); humidity shades incoming sun and blankets the leak.
 Air sits on the climate lapse and couples to that skin (no day/night
 sky swap).
-Each air tile then upwind-mixes heat along the local wind. Warm
-humid skin under colder air is the draft that lofts vapour. The T overlay uses a fixed −40..36 °C ramp (ice-white through
+Each air tile then upwind-mixes heat along the local wind. Wet air
+has more thermal mass (vapor Cp ~1.9× dry; Tab `humid_heat_scale`)
+so a rising plume pulls that heat with it. Warm humid skin under
+colder air is the draft that lofts vapour. The T overlay uses a fixed −40..36 °C ramp (ice-white through
 yellow-green at 18 °C to red). Humidity hold follows
 Clausius–Clapeyron (Magnus): full tile at 40 °C, a few percent at
 0 °C, a trace at −100 °C. Cloud / haze floors follow the live

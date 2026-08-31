@@ -145,7 +145,7 @@ fn run_with_prob(prob: f32) {
             params.sky_ceiling_y,
             t,
             &cloud,
-            Some(&temperature),
+            Some(&mut temperature),
             Some(&phase),
         );
         let t0 = std::time::Instant::now();

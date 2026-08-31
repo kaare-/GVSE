@@ -602,7 +602,7 @@ async fn main() {
                 scene.params.sky_ceiling_y,
                 tick_no,
                 &settings.cloud,
-                Some(&scene.temperature),
+                Some(&mut scene.temperature),
                 Some(&settings.phase),
             );
             // Surplus the local air cannot hold becomes water here.

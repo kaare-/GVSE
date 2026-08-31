@@ -14,7 +14,9 @@
 //! - **Air** does **not** absorb solar or radiate to space. It sits on
 //!   the climate lapse and couples to the ground: warm skin loft, cold
 //!   skin inversion. That is the draft that carries humidity up to
-//!   condense. No noon/midnight skin snap on the sky.
+//!   condense. Wet air has more thermal mass (vapor Cp ~1.9× dry) so
+//!   it relaxes slower and a rising plume mixes that heat into the
+//!   tile above. No noon/midnight skin snap on the sky.
 //! - **Buried** rock ignores solar / sky radiation; it relaxes toward a
 //!   geothermal profile and slowly leaks heat upward by diffusion.
 //!
@@ -101,6 +103,10 @@ pub struct TempConfig {
     /// Wind chill / couple scale on the thermal step (0..1).
     #[serde(default = "default_wind_mix")]
     pub wind_mix: f32,
+    /// How much vapor raises air's heat capacity and how hard a
+    /// rising plume carries that heat (0 = dry air only).
+    #[serde(default = "default_humid_heat_scale")]
+    pub humid_heat_scale: f32,
 }
 
 fn default_near_surface_couple() -> f32 {
@@ -114,6 +120,9 @@ fn default_hum_night_blanket() -> f32 {
 }
 fn default_wind_mix() -> f32 {
     0.60
+}
+fn default_humid_heat_scale() -> f32 {
+    1.0
 }
 
 impl Default for TempConfig {
@@ -143,6 +152,7 @@ impl Default for TempConfig {
             near_surface_tiles: default_near_surface_tiles(),
             hum_night_blanket: default_hum_night_blanket(),
             wind_mix: default_wind_mix(),
+            humid_heat_scale: default_humid_heat_scale(),
         }
     }
 }
@@ -457,7 +467,9 @@ impl Temperature {
                         target = climate * (1.0 - couple) + surf_t * couple;
                     }
                     // Slow leak so ground-heated plumes persist.
-                    let relax = (cfg.sky_relax * 0.40).clamp(cfg.min_relax, 0.08);
+                    // Wet air has more thermal mass (vapor Cp ~1.9× dry).
+                    let cap = humid_air_capacity_scale(humidity, hx, hy, t, cfg.humid_heat_scale);
+                    let relax = (cfg.sky_relax * 0.40 / cap).clamp(cfg.min_relax, 0.08);
                     t + (target - t) * relax
                 }
                 TileLayer::Surface { watery } => {
@@ -553,6 +565,45 @@ impl Temperature {
         }
     }
 
+    /// Mix source-tile air heat into the tile above after vapor rose.
+    ///
+    /// A dry lift barely moves T. A wet plume carries the warmth it
+    /// loaded at the ground — that is the heat capacity of humid air
+    /// doing work, not a second solar term on the sky.
+    pub(crate) fn lift_heat_with_vapor(&mut self, lifts: &[(i32, i32, f32)]) {
+        let carry = self.config.humid_heat_scale.clamp(0.0, 1.5);
+        if carry < 1e-4 || lifts.is_empty() {
+            return;
+        }
+        // Snapshot sources so a hy → hy+1 → hy+2 chain in one pass
+        // does not use an already-warmed dest as the next src.
+        let mut moves: Vec<(i32, i32, f32, f32)> = Vec::with_capacity(lifts.len());
+        for &(hx, hy, frac) in lifts {
+            if frac < 1e-5 {
+                continue;
+            }
+            let dest_hy = hy + 1;
+            if !self.accepts(hx, dest_hy) {
+                continue;
+            }
+            if matches!(
+                self.props_cache.get(&(hx, dest_hy)).map(|p| p.layer),
+                Some(TileLayer::Buried { .. }) | Some(TileLayer::Surface { .. })
+            ) {
+                continue;
+            }
+            moves.push((hx, dest_hy, self.at_tile(hx, hy), frac));
+        }
+        for (hx, dest_hy, src, frac) in moves {
+            let dest = self.at_tile(hx, dest_hy);
+            let mix = (frac * (0.55 + 0.45 * carry)).clamp(0.0, 0.40);
+            if mix < 1e-5 {
+                continue;
+            }
+            self.cells.insert((hx, dest_hy), dest + (src - dest) * mix);
+        }
+    }
+
     /// Pairwise temperature diffusion. Vertical mix is gentle so night air
     /// cannot drain lakes, but warm bedrock still leaks heat upward.
     pub fn diffuse(&mut self, alpha: f32) {
@@ -595,6 +646,25 @@ impl Temperature {
             }
         }
     }
+}
+
+/// Vapor heat-capacity scale for an air tile (1 = dry).
+///
+/// Water vapor's specific heat is about 1.9× dry air. `scale` is the
+/// Tab knob; 1.0 reaches that ratio at saturation.
+fn humid_air_capacity_scale(
+    humidity: &Humidity,
+    hx: i32,
+    hy: i32,
+    temp_c: f32,
+    scale: f32,
+) -> f32 {
+    if scale <= 1e-4 {
+        return 1.0;
+    }
+    let sat = Humidity::saturation_mass_at_temp(temp_c).max(1.0);
+    let wet = (humidity.at_tile(hx, hy) / sat).clamp(0.0, 1.2);
+    1.0 + 0.85 * scale.clamp(0.0, 1.5) * wet
 }
 
 /// Peak vapour in the column above a surface tile.
@@ -1243,6 +1313,73 @@ mod tests {
         assert!(
             deep_t > air_t + 10.0,
             "deep {deep_t:.1} should stay far warmer than night air {air_t:.1}"
+        );
+    }
+
+    #[test]
+    fn wet_air_holds_heat_longer_than_dry() {
+        // world=None → every tile is Air. Climate wants 10 °C; start at 30.
+        let mut dry = Temperature::with_world_bounds(4, 0, 0, 32, 64, 1, 32, 16, false);
+        dry.config.base_temp_c = 10.0;
+        dry.config.lapse_c = 0.0;
+        dry.config.sea_bias_c = 0.0;
+        dry.config.near_surface_couple = 0.0;
+        dry.config.diffuse_alpha = 0.0;
+        dry.config.humid_heat_scale = 1.0;
+        dry.config.sky_relax = 0.12;
+        for v in dry.cells.values_mut() {
+            *v = 30.0;
+        }
+        let mut wet = dry.clone();
+        let empty = Humidity::with_world_bounds(4, 0, 0, 32, 64);
+        let mut humid = empty.clone();
+        let sat = Humidity::saturation_mass_at_temp(30.0);
+        // hx=2, hy=8
+        humid.add(8, 32, sat);
+        dry.step(None, &empty, 0, None);
+        wet.step(None, &humid, 0, None);
+        let dry_t = dry.at_tile(2, 8);
+        let wet_t = wet.at_tile(2, 8);
+        assert!(
+            wet_t > dry_t + 0.15,
+            "saturated air must cool slower than dry ({wet_t:.2} vs {dry_t:.2})"
+        );
+        assert!(
+            humid_air_capacity_scale(&humid, 2, 8, 30.0, 1.0) > 1.7,
+            "near-sat vapor should approach ~1.85× dry capacity"
+        );
+    }
+
+    #[test]
+    fn rising_humid_air_warms_the_tile_above() {
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 32, 64, 1, 32, 16, false);
+        t.config.humid_heat_scale = 1.0;
+        for ((_, hy), v) in t.cells.iter_mut() {
+            *v = if *hy <= 4 { 28.0 } else { 6.0 };
+        }
+        t.rebuild_row_means();
+        let mut dry = t.clone();
+        dry.config.humid_heat_scale = 0.0;
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 32, 64);
+        // hx=2, hy=4
+        h.add(8, 16, 400.0);
+        let mut h_dry = h.clone();
+        let before = t.at_tile(2, 5);
+        h.buoyant_rise_thermal(0.35, 20, Some(&mut t));
+        h_dry.buoyant_rise_thermal(0.35, 20, Some(&mut dry));
+        let after = t.at_tile(2, 5);
+        let dry_after = dry.at_tile(2, 5);
+        assert!(
+            after > before + 2.0,
+            "a wet plume must pull source heat into the tile above ({before:.2} → {after:.2})"
+        );
+        assert!(
+            (dry_after - before).abs() < 0.05,
+            "humid_heat_scale=0 must not mix heat on rise ({dry_after:.2})"
+        );
+        assert!(
+            h.at_tile(2, 5) > 0.0,
+            "vapour still has to actually lift"
         );
     }
 

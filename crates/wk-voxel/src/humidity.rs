@@ -487,12 +487,14 @@ impl Humidity {
 
     /// [`Self::buoyant_rise`] scaled by the local lapse: warm air under
     /// colder air lifts harder; a stable inversion almost sits still.
-    /// Same tile walk as the uniform rise — no extra world scans.
+    /// When `temp` is mutable, each lift also mixes source heat into
+    /// the tile above (humid-air heat capacity). Same tile walk as the
+    /// uniform rise — no extra world scans.
     pub fn buoyant_rise_thermal(
         &mut self,
         fraction: f32,
         max_hy: i32,
-        temp: Option<&crate::temperature::Temperature>,
+        mut temp: Option<&mut crate::temperature::Temperature>,
     ) {
         let fraction = fraction.clamp(0.0, 0.45);
         if fraction == 0.0 || self.cells.is_empty() {
@@ -505,6 +507,7 @@ impl Humidity {
         // period-20 thermal step). Scanning every hx of every wet hy here
         // was the other cliff: more lofted rows → width × rows lookups.
         let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        let mut heat_lifts: Vec<(i32, i32, f32)> = Vec::new();
         let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
         for (hx, hy) in keys {
             let mass = *self.cells.get(&(hx, hy)).unwrap_or(&0.0);
@@ -515,7 +518,7 @@ impl Humidity {
             if !self.accepts(hx, dest) {
                 continue;
             }
-            let lift_f = if let Some(t) = temp {
+            let lift_f = if let Some(t) = temp.as_deref() {
                 let here = t.at_tile(hx, hy);
                 let above = t.at_tile(hx, dest);
                 let lapse = (here - above).clamp(-5.0, 10.0);
@@ -550,6 +553,7 @@ impl Humidity {
             }
             *deltas.entry((hx, hy)).or_insert(0.0) -= lift;
             *deltas.entry((hx, dest)).or_insert(0.0) += lift;
+            heat_lifts.push((hx, hy, lift / mass));
         }
         for (k, d) in deltas {
             if !self.accepts(k.0, k.1) {
@@ -561,6 +565,9 @@ impl Humidity {
         self.cells.retain(|&(hx, hy), v| {
             *v > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
         });
+        if let Some(t) = temp.as_deref_mut() {
+            t.lift_heat_with_vapor(&heat_lifts);
+        }
     }
 
     /// Advect atmospheric mass by climate wind `(vx, vy)` in tiles/tick.
@@ -1337,8 +1344,8 @@ mod tests {
         }
         t_up.rebuild_row_means();
         t_st.rebuild_row_means();
-        unstable.buoyant_rise_thermal(0.10, 4, Some(&t_up));
-        stable.buoyant_rise_thermal(0.10, 4, Some(&t_st));
+        unstable.buoyant_rise_thermal(0.10, 4, Some(&mut t_up));
+        stable.buoyant_rise_thermal(0.10, 4, Some(&mut t_st));
         assert!(
             unstable.at_tile(0, 1) > stable.at_tile(0, 1) + 2.0,
             "warm-under-cold should lift more ({} vs {})",
@@ -1427,7 +1434,7 @@ mod convection_tests {
     #[test]
     fn a_warm_column_lifts_more_than_a_cool_one() {
         let width = 256;
-        let temp = split_temp(width);
+        let mut temp = split_temp(width);
         let mean = temp.mean();
 
         // Find two tiles at the same height with a real temperature spread.
@@ -1450,14 +1457,14 @@ mod convection_tests {
             return;
         };
 
-        let lifted = |hx: i32| -> f32 {
+        let lifted = |hx: i32, temp: &mut crate::temperature::Temperature| -> f32 {
             let mut h = Humidity::with_world_bounds(4, 0, 0, width, 320);
             h.cells.insert((hx, hy), 1000.0);
-            h.buoyant_rise_thermal(0.30, 60, Some(&temp));
+            h.buoyant_rise_thermal(0.30, 60, Some(temp));
             h.cells.get(&(hx, hy + 1)).copied().unwrap_or(0.0)
         };
-        let w = lifted(warm_hx);
-        let c = lifted(cool_hx);
+        let w = lifted(warm_hx, &mut temp);
+        let c = lifted(cool_hx, &mut temp);
         assert!(
             w > c,
             "the warmer column should lift more vapour ({w:.2} vs {c:.2})"
@@ -1468,14 +1475,14 @@ mod convection_tests {
     fn convection_conserves_vapour() {
         // Lift moves mass between tiles; it must never create or destroy any.
         let width = 128;
-        let temp = split_temp(width);
+        let mut temp = split_temp(width);
         let mut h = Humidity::with_world_bounds(4, 0, 0, width, 320);
         for hx in 0..(width / 4) {
             h.cells.insert((hx, 10), 500.0);
         }
         let before = h.total_mass();
         for _ in 0..20 {
-            h.buoyant_rise_thermal(0.30, 60, Some(&temp));
+            h.buoyant_rise_thermal(0.30, 60, Some(&mut temp));
         }
         let after = h.total_mass();
         assert!(

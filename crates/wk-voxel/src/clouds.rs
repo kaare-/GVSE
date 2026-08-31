@@ -261,8 +261,9 @@ impl CloudStore {
         );
     }
 
-    /// Like [`Self::step`]. `temp` scales thermal rise and visual wetness;
-    /// `phase` is unused (rain is condensation).
+    /// Like [`Self::step`]. `temp` scales thermal rise, lets a wet plume
+    /// carry heat upward, and sets visual wetness; `phase` is unused
+    /// (rain is condensation).
     pub fn step_with_precip(
         &mut self,
         world: &mut World,
@@ -272,7 +273,7 @@ impl CloudStore {
         sky_ceiling_y: i32,
         tick: u64,
         cfg: &CloudConfig,
-        temp: Option<&Temperature>,
+        mut temp: Option<&mut Temperature>,
         phase: Option<&PhaseConfig>,
     ) {
         let _ = (sea_level_y, phase);
@@ -289,9 +290,9 @@ impl CloudStore {
                 .bounds
                 .map(|b| b.hy_max)
                 .unwrap_or_else(|| sky_ceiling_y.div_euclid(humidity.tile_cols.max(1)));
-            humidity.buoyant_rise_thermal(cfg.buoyant_rise, max_hy, temp);
+            humidity.buoyant_rise_thermal(cfg.buoyant_rise, max_hy, temp.as_deref_mut());
         }
-        self.rebuild_visuals_from_humidity(humidity, world, wind, sea_level_y, cfg, temp);
+        self.rebuild_visuals_from_humidity(humidity, world, wind, sea_level_y, cfg, temp.as_deref());
     }
 
     /// Move blob mass back onto humidity tiles (old saves / leftover coag).

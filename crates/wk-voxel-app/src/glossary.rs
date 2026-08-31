@@ -356,6 +356,7 @@ const SKY: &[(&str, LineKind)] = &[
     ("1. E  standing water evaporates into the humidity tile above it.", LineKind::Body),
     ("      Warm, windy, dry air pumps faster; ice lids block evap.", LineKind::Body),
     ("2.    Vapor advects with wind and rises (warm under cold lifts).", LineKind::Body),
+    ("      Wet air holds more heat than dry; a rising plume pulls it up.", LineKind::Body),
     ("3. C  leftover vapor condenses: liquid drizzle, or thin frost", LineKind::Body),
     ("      when air and ground are both below freeze.", LineKind::Body),
     ("4. N  draws a few soft banks over the wettest sky tiles.", LineKind::Body),

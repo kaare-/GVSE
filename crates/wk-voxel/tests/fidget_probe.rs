@@ -129,7 +129,7 @@ fn frame(s: &mut Scene, weather: bool) {
             s.params.sky_ceiling_y,
             tick_no,
             &s.cloud,
-            Some(&s.temperature),
+            Some(&mut s.temperature),
             Some(&s.phase),
         );
         apply_condensation_rain_phased(
