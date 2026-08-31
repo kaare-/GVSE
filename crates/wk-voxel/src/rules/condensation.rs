@@ -639,7 +639,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     fn cold_air_surplus_becomes_water_not_a_delete() {
         use crate::cell::Cell;
         use crate::chunk::ChunkCoord;
@@ -655,7 +654,7 @@ mod tests {
         }
         let mut h = Humidity::new(4);
         // Tile (1, 8) → world (6, 34). Load that band of air.
-        for y in 32..40 {
+        for y in 32i32..40 {
             w.ensure_chunk(ChunkCoord::new(0, y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32)));
         }
         let start = 400.0;
@@ -704,8 +703,8 @@ mod tests {
         let mut w = World::new(4);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         // Tile centre is solid — deposit_water_in_air refuses.
-        for x in 0..8 {
-            for y in 0..40 {
+        for x in 0i32..8 {
+            for y in 0i32..40 {
                 w.ensure_chunk(ChunkCoord::new(
                     x.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
                     y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
@@ -728,6 +727,7 @@ mod tests {
         );
     }
 
+    #[test]
     fn shipped_configs_use_whole_cell_droplets() {
         let full = u8::MAX as f32;
         for (name, cond) in [
