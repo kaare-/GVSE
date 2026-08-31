@@ -844,8 +844,12 @@ impl SimSettings {
                         &mut self.temp.day_amp_c,
                     );
                     labeled_slider(ui, hash!(), "Lapse (C per cell elev)", 0.0..0.4, &mut self.temp.lapse_c);
-                    labeled_slider(ui, hash!(), "Solar heat / step", 0.0..1.5, &mut self.temp.solar_heat_c);
-                    labeled_slider(ui, hash!(), "Night cool / step", 0.0..1.5, &mut self.temp.night_cool_c);
+                    ui.label(
+                        None,
+                        "Sun heats the ground; the ground heats the air. Night radiates from the ground.",
+                    );
+                    labeled_slider(ui, hash!(), "Solar on ground / step", 0.0..1.5, &mut self.temp.solar_heat_c);
+                    labeled_slider(ui, hash!(), "Night radiate from ground / step", 0.0..1.5, &mut self.temp.night_cool_c);
                     labeled_slider(ui, hash!(), "Cloud shade (thermal)", 0.0..1.0, &mut self.temp.cloud_shade);
                     labeled_slider(
                         ui,

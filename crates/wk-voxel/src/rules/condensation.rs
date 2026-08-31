@@ -326,7 +326,7 @@ fn first_free_air_hy(
     let mut saw = false;
     for _ in 0..192 {
         match world.get_cell(gx, y) {
-            Some(c) if occupies_humidity_film(c) => {
+            Some(c) if occupies_humidity_film(&c) => {
                 saw = true;
                 y += 1;
             }

@@ -156,6 +156,11 @@ haze. Two mechanics did that, and neither is "add a pump to sea+N":
    Unstable lapse (warm under cold, plus the per-row T anomaly) is what
    organises loft — same walk, no teleport. `cloud_alt_above_sea` stays
    on the struct for save compat only.
+The draft itself is ground-heated air. Solar and night radiation hit
+the surface; air only couples to that skin. Warm humid air under the
+colder lapse rises (`buoyant_rise_thermal`); surplus condenses aloft
+and falls. That is the pipe — not a deck slider.
+
 2. **Condensation wiped the film.** At a few degrees below zero the
    Clausius–Clapeyron sat is ~100–120 mass; `mass_per_droplet` is 255,
    so the first free-air tile rained itself empty every event and never
