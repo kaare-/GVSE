@@ -83,6 +83,10 @@ pub struct AtmosphereLookConfig {
     pub vapour_mid: f32,
     pub vapour_active: f32,
     pub vapour_front: f32,
+    /// `H` overlay: bilinear per-cell sample (on) vs flat 4×4 tiles (off).
+    pub haze_resample: bool,
+    /// `H` overlay: seats / samples below this mass do not paint.
+    pub haze_min_mass: f32,
 }
 
 impl Default for AtmosphereLookConfig {
@@ -108,6 +112,8 @@ impl Default for AtmosphereLookConfig {
             vapour_mid: 0.70,
             vapour_active: 0.85,
             vapour_front: 0.65,
+            haze_resample: true,
+            haze_min_mass: 0.0,
         }
     }
 }
@@ -346,11 +352,13 @@ fn haze_resampled_cells(
     drop_tops: &HashMap<i32, i32>,
     wrap_x: impl Fn(i32) -> i32,
     mut floor_y: impl FnMut(i32) -> i32,
+    resample: bool,
 ) -> Vec<(i32, i32, f32)> {
     let tc = humidity.tile_cols.max(1);
     let base_gx = hx * tc;
     let base_gy = hy * tc;
     let y1 = base_gy + tc;
+    let tile_mass = humidity.at_tile(hx, hy);
     let mut out = Vec::new();
     for col in 0..tc {
         let wx = wrap_x(base_gx + col);
@@ -359,7 +367,11 @@ fn haze_resampled_cells(
             continue;
         };
         for gy in col_y0..y1 {
-            let sampled = humidity.sample_bilinear(wx as f32 + 0.5, gy as f32 + 0.5);
+            let sampled = if resample {
+                humidity.sample_bilinear(wx as f32 + 0.5, gy as f32 + 0.5)
+            } else {
+                tile_mass
+            };
             out.push((wx, gy, sampled));
         }
     }
@@ -382,6 +394,15 @@ fn humidity_haze_alpha_cell(mass: f32, max_mass: f32, floor: f32) -> u8 {
         return 0;
     }
     (18.0 + norm * 42.0) as u8
+}
+
+/// `H` wash after the Tab min-mass cutoff. `floor` is leftover live-max
+/// fraction (tests / thin-vapour helper); play uses `min_mass` as the gate.
+fn humidity_haze_alpha_gated(mass: f32, max_mass: f32, min_mass: f32) -> u8 {
+    if mass < min_mass.max(0.0) {
+        return 0;
+    }
+    humidity_haze_alpha_cell(mass, max_mass, 0.0)
 }
 
 fn cloud_layer_strength(look: &AtmosphereLookConfig, layer: CloudDepthLayer) -> f32 {
@@ -1147,6 +1168,7 @@ pub fn draw_haze_and_wind(
     humidity: &Humidity,
     world: &World,
     wind: &Wind,
+    look: &AtmosphereLookConfig,
     origin_x: f32,
     origin_y: f32,
     cell_px: f32,
@@ -1167,6 +1189,8 @@ pub fn draw_haze_and_wind(
         .copied()
         .fold(0.0f32, f32::max)
         .max(1.0);
+    let min_mass = look.haze_min_mass.max(0.0);
+    let resample = look.haze_resample;
     let tc = humidity.tile_cols.max(1);
     let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
     let drop_tops = collect_drop_tops(world);
@@ -1185,8 +1209,9 @@ pub fn draw_haze_and_wind(
                     cloud_floor_y(world, wind, wx as f32).round() as i32
                 })
             },
+            resample,
         ) {
-            let cell_alpha = humidity_haze_alpha_cell(sampled, max_mass, 0.02);
+            let cell_alpha = humidity_haze_alpha_gated(sampled, max_mass, min_mass);
             if cell_alpha == 0 {
                 continue;
             }
@@ -1975,8 +2000,8 @@ pub fn estimate_snow_bias(
 mod tests {
     use super::{
         collect_drop_tops, gather_soft_cloud_srcs, haze_cell_is_drop, haze_column_y0,
-        haze_paint_seats, haze_resampled_cells, humidity_haze_alpha, stamp_pixel_cloud_mask,
-        CloudDepthLayer,
+        haze_paint_seats, haze_resampled_cells, humidity_haze_alpha, humidity_haze_alpha_gated,
+        stamp_pixel_cloud_mask, CloudDepthLayer,
     };
     use std::collections::HashMap;
     use wk_voxel::{CloudStore, Humidity};
@@ -2064,6 +2089,26 @@ mod tests {
     }
 
     #[test]
+    fn haze_min_mass_slider_gates_the_wash() {
+        assert_eq!(humidity_haze_alpha_gated(10.0, 400.0, 50.0), 0);
+        assert!(humidity_haze_alpha_gated(80.0, 400.0, 50.0) > 0);
+    }
+
+    #[test]
+    fn haze_without_resample_paints_flat_tile_mass() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 32, 128);
+        h.cells.insert((1, 5), 200.0);
+        h.cells.insert((2, 5), 800.0);
+        let drop_tops = HashMap::new();
+        let cells = haze_resampled_cells(&h, 1, 5, &drop_tops, |x| x, |_| 0, false);
+        assert!(!cells.is_empty());
+        assert!(
+            cells.iter().all(|&(_, _, m)| (m - 200.0).abs() < 1e-3),
+            "off-resample must use the seat mass, not bilinear neighbours"
+        );
+    }
+
+    #[test]
     fn haze_carves_only_the_drop_cell() {
         use wk_voxel::{Cell, ChunkCoord, Sat, GRAIN_REPOSE_HAZE_MAX};
 
@@ -2121,7 +2166,7 @@ mod tests {
         let painted: std::collections::HashSet<_> = seats
             .iter()
             .flat_map(|&(hx, hy)| {
-                haze_resampled_cells(&h, hx, hy, &drop_tops, |x| x, |_| 0)
+                haze_resampled_cells(&h, hx, hy, &drop_tops, |x| x, |_| 0, true)
             })
             .filter(|&(_, _, m)| m > 0.0)
             .map(|(x, y, _)| (x, y))

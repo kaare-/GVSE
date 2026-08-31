@@ -31,7 +31,7 @@ Constants live in [`crates/wk-voxel-app/src/atmosphere.rs`](../crates/wk-voxel-a
 | Key | What |
 |-----|------|
 | **N** | Soft clouds at **all depths**: far / mid / active / front + precip |
-| **H** | Humidity **tile raster** diagnostic |
+| **H** | Humidity **tile raster** diagnostic. Tab → Climate → Wind + humidity: resample button (bilinear vs 4×4 tiles) and min-mass slider. |
 | **V** | Wind streak overlay (placeholder; default off) |
 | **F6** | Glossary — keys, water/sky words, HUD tags |
 
