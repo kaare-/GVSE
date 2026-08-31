@@ -261,12 +261,9 @@ rock instead of travelling. Raised to 24 (~40 for that cell), so load moves and
 drops only where water is genuinely lost. Deposits belong at discharge points,
 not spread through the aquifer.
 
-**Open:** flowstone is currently `Limestone` with `pore = 0`, indistinguishable
-from native limestone by material (only faintly, via the porosity stipple being
-absent). A dedicated material with its own name and colour is the right fix for
-readability — bounded work, but it moves `MATERIAL_COUNT` 14 → 15, which touches
-the `HydroOverrides` slot array, the preset `mat_*` arrays, ~5 exhaustive matches
-in the voxel stack, and the legacy stack's per-material tables.
+**Open (landed later):** flowstone is now its own material and colour. Limestone
+keeps a single material colour as karst opens it — a sage permeability wash used
+to step across the bed on the geology cadence and read as a blink.
 
 ## Hard rock, so channels can form
 
@@ -338,9 +335,9 @@ rock only** — shedding from fine sediment took open clay from 74% retention to
 29%, which is not a seal.
 
 Expect the visual to invert: veins read as the *dry* paths through wet rock, not
-wet paths through dry rock. Combined with the ochre permeability tint on stone
-(and a slight sage pull on open limestone), a conduit shows as tinted-and-dry
-inside matrix-and-wet.
+wet paths through dry rock. Combined with the ochre permeability tint on stone,
+a conduit shows as tinted-and-dry inside matrix-and-wet. Limestone is left on
+its material colour so karst opening the bed does not flash.
 
 **General lesson.** A diffusive process with a fixed uniform endpoint erases any
 structure its rates create, given time. If a soak keeps flattening, look at the

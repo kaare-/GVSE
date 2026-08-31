@@ -68,58 +68,6 @@ pub fn wetness_bucket(cell: Cell, hydro: &wk_material::HydroOverrides) -> u8 {
     ((frac * TINT_LEVELS as f32).floor() as u8).min(TINT_LEVELS - 1)
 }
 
-/// Aperture bucket `0..TINT_LEVELS-1` from the stored pore coordinate.
-///
-/// Only the upper buckets are stippled by the app. The fracture tail makes high
-/// values genuinely rare, so marking just those is both cheap and points the eye
-/// at the conduits rather than at ordinary rock.
-pub fn pore_bucket(cell: Cell) -> u8 {
-    if cell.material == MaterialId::Air {
-        return 0;
-    }
-    ((cell.pore as u16 * TINT_LEVELS as u16) / 256) as u8
-}
-
-/// Pore coordinate at which a cell starts being drawn as porous.
-///
-/// Must sit clearly **above** the matrix boundary. `HydroRange::sample_fracture`
-/// treats everything up to 128 as the material's matrix value, so marking at or
-/// near 128 would stipple ordinary rock — including every `Cell::solid()`, which
-/// defaults to exactly 128.
-pub const PORE_STIPPLE_MIN: u8 = 176;
-
-/// Permeability at or above which a cell is marked as a water path.
-///
-/// Absolute, unlike `pore`. Gravel sits at 160 and sand at 96, while even heavily
-/// fractured stone only reaches ~40 (matrix 5, fracture tail ~8x).
-pub const PATH_STIPPLE_MIN: u8 = 64;
-
-/// True when water can actually move through this cell fast enough to matter.
-///
-/// Keyed on **permeability**, not on raw `pore`. Those are different questions and
-/// stippling the wrong one was actively misleading: `pore` is *relative* to a
-/// material — "how fractured is this cell for the rock it is" — while water follows
-/// the absolute rate. A fractured stone vein (perm ~40) drew speckles while a
-/// plain gravel band (perm 160) drew none, so water appeared to avoid the marked
-/// rock and prefer the gaps. It was the overlay that had it backwards.
-pub fn shows_pore_stipple(cell: Cell, hydro: &wk_material::HydroOverrides) -> bool {
-    if matches!(
-        cell.material,
-        MaterialId::Air | MaterialId::Water | MaterialId::Ice | MaterialId::Snow
-    ) {
-        return false;
-    }
-    // Nothing is stippled any more.
-    //
-    // Dots came to mean two different things — porosity on some materials and
-    // "this is conglomerate" on another — which broke the visual language. Both
-    // jobs moved to colour: permeability to a hue pull on stone, and conglomerate
-    // to its own red-leaning grey. Kept as a function because the render path asks
-    // the question, and a future overlay may want to answer it again.
-    let _ = (cell, hydro);
-    false
-}
-
 /// Hue pull for conductive rock, quantized to keep runs mergeable.
 ///
 /// Rock is otherwise grey on grey, so a fractured vein is invisible next to its
@@ -130,18 +78,14 @@ pub fn shows_pore_stipple(cell: Cell, hydro: &wk_material::HydroOverrides) -> bo
 ///
 /// Each material is normalised against **its own** permeability range, not the
 /// 0..255 byte. Stone spans roughly 5..40; a global scale would confine it to
-/// the bottom sixth of the ramp. Limestone's fracture tail (140..255) gets the
-/// same treatment, then a different hue so the two rocks do not share a signal.
+/// the bottom sixth of the ramp.
 fn permeability_tint(cell: Cell, hydro: &wk_material::HydroOverrides) -> f32 {
-    // Stone, conglomerate, and limestone. Stone is most of the map; conglomerate
-    // lost its speckle and needs a pore-true signal; limestone is the karst
-    // rock, so open beds should read as open. Flowstone / sandstone stay put —
-    // their material colour already says enough, and pulling them too drowned
-    // the one signal that mattered.
-    if !matches!(
-        cell.material,
-        MaterialId::Stone | MaterialId::Conglomerate | MaterialId::Limestone
-    ) {
+    // Stone and conglomerate. Stone is most of the map; conglomerate lost its
+    // speckle and needs a pore-true signal. Limestone stays put — karst widens
+    // its pores on a geology cadence, and a hue pull quantized to a handful of
+    // steps read as a blink across the whole bed. Flowstone / sandstone already
+    // say enough in their own colour.
+    if !matches!(cell.material, MaterialId::Stone | MaterialId::Conglomerate) {
         return 0.0;
     }
     let range = MaterialRegistry::hydrology_with(cell.material, hydro).permeability;
@@ -160,18 +104,9 @@ fn permeability_tint(cell: Cell, hydro: &wk_material::HydroOverrides) -> f32 {
 /// ochre, which was louder than the signal warranted.
 const PERMEABLE_ROCK_RGB: [u8; 3] = [0xC0, 0x9A, 0x76];
 
-/// Sage on limestone. Same job as the ochre pull — high perm / porosity in the
-/// fracture tail — but a different hue so open carbonate does not look like
-/// open granite. Kept close to the warm pale matrix so it stays a hint.
-const PERMEABLE_LIMESTONE_RGB: [u8; 3] = [0xB0, 0xC4, 0xA4];
-
 /// How far the ochre pull may go. Deliberately partial: this is a readable hint
 /// about the rock, not a heatmap replacing its material colour.
 const PERM_TINT_STRENGTH: f32 = 0.55;
-
-/// Limestone's green is quieter than stone's ochre. The bed is already pale;
-/// a full-strength wash would read as moss, not as open rock.
-const PERM_LIME_TINT_STRENGTH: f32 = 0.40;
 
 pub fn cell_color(cell: Cell) -> [u8; 3] {
     cell_color_with(cell, &wk_material::HydroOverrides::default(), WET_DARKEN_DEFAULT)
@@ -218,19 +153,15 @@ pub fn cell_color_with(
         ];
         // Conductive rock pulls on hue. After darkening so a wet permeable
         // cell still reads as permeable, and hue-only so the two channels do
-        // not compete. Stone / conglomerate go ochre; limestone goes sage.
+        // not compete. Stone / conglomerate go ochre. Limestone keeps its
+        // material colour so karst opening the bed does not flash sage.
         let perm = permeability_tint(cell, hydro);
         if perm > 0.0 {
-            let (target, strength) = if cell.material == MaterialId::Limestone {
-                (PERMEABLE_LIMESTONE_RGB, PERM_LIME_TINT_STRENGTH)
-            } else {
-                (PERMEABLE_ROCK_RGB, PERM_TINT_STRENGTH)
-            };
-            let w = perm * strength;
+            let w = perm * PERM_TINT_STRENGTH;
             rgb = [
-                lerp_u8(rgb[0], target[0], w),
-                lerp_u8(rgb[1], target[1], w),
-                lerp_u8(rgb[2], target[2], w),
+                lerp_u8(rgb[0], PERMEABLE_ROCK_RGB[0], w),
+                lerp_u8(rgb[1], PERMEABLE_ROCK_RGB[1], w),
+                lerp_u8(rgb[2], PERMEABLE_ROCK_RGB[2], w),
             ];
         }
         // Organic + mineral hosts with mycelium: cream wash (minerals
@@ -296,25 +227,6 @@ mod tests {
     }
 
     #[test]
-    fn nothing_is_stippled_any_more() {
-        // Dots came to mean two different things — porosity on some materials and
-        // "this is conglomerate" on another — which broke the visual language.
-        // Both jobs moved to colour.
-        let h = wk_material::HydroOverrides::default();
-        for m in [
-            MaterialId::Conglomerate,
-            MaterialId::Sand,
-            MaterialId::Gravel,
-            MaterialId::Limestone,
-            MaterialId::Stone,
-        ] {
-            let mut c = Cell::solid(m);
-            c.pore = u8::MAX;
-            assert!(!shows_pore_stipple(c, &h), "{m:?} should carry its story in colour");
-        }
-    }
-
-    #[test]
     fn conductive_rock_tints_warmer_than_tight_rock() {
         // Rock is grey on grey, so a fractured vein is invisible beside its matrix
         // even though water treats them completely differently.
@@ -335,13 +247,15 @@ mod tests {
 
     #[test]
     fn narrow_band_rocks_carry_no_permeability_tint() {
-        // Stone / conglomerate / limestone carry the pore story in hue.
+        // Stone / conglomerate carry the pore story in hue. Limestone stays
+        // on its material colour — karst stepping a sage wash read as a blink.
         // Flowstone and sandstone arrive as deposits whose own colour says
         // enough, and tinting them drowned out the bed signal.
         let h = wk_material::HydroOverrides::default();
         for m in [
             MaterialId::Flowstone,
             MaterialId::Sandstone,
+            MaterialId::Limestone,
         ] {
             let mut tight = Cell::solid(m);
             tight.pore = 0;
@@ -401,7 +315,7 @@ mod tests {
     #[test]
     fn permeability_tints_are_quantized_so_runs_still_merge() {
         let h = wk_material::HydroOverrides::default();
-        for m in [MaterialId::Stone, MaterialId::Limestone] {
+        for m in [MaterialId::Stone, MaterialId::Conglomerate] {
             let mut seen = std::collections::HashSet::new();
             for pore in 0..=255u8 {
                 let mut c = Cell::solid(m);
@@ -417,27 +331,22 @@ mod tests {
     }
 
     #[test]
-    fn conductive_limestone_tints_greener_than_tight_limestone() {
-        // Same treatment as stone: the fracture tail shifts hue. Sage, not
-        // ochre, so open carbonate does not look like open granite.
+    fn limestone_keeps_its_material_colour() {
+        // Karst opens limestone pores on a geology cadence. A quantized sage
+        // pull made the whole bed step colour in lockstep — a blink, not a
+        // hint. Wetness still darkens; hue stays put.
         let h = wk_material::HydroOverrides::default();
         let mut tight = Cell::solid(MaterialId::Limestone);
         tight.pore = 0;
         let mut open = Cell::solid(MaterialId::Limestone);
         open.pore = u8::MAX;
-        let a = cell_color_with(tight, &h, 0.0);
-        let b = cell_color_with(open, &h, 0.0);
-        let green = |c: [u8; 3]| c[1] as i32 - c[0] as i32;
-        assert!(
-            green(b) > green(a),
-            "open limestone should read greener than tight ({a:?} vs {b:?})"
+        assert_eq!(
+            cell_color_with(tight, &h, 0.0),
+            cell_color_with(open, &h, 0.0),
+            "limestone must not shift with permeability"
         );
-        let warm = |c: [u8; 3]| c[0] as i32 - c[2] as i32;
-        assert!(
-            warm(b) <= warm(a),
-            "limestone must not pick up stone's ochre ({a:?} vs {b:?})"
-        );
-        assert_ne!(a, b, "the limestone span must be visible");
+        let base = MaterialRegistry::colour_rgb(MaterialId::Limestone);
+        assert_eq!(cell_color_with(tight, &h, 0.0), base);
     }
 
     #[test]

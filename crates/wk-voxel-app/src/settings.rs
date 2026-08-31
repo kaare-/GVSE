@@ -124,9 +124,6 @@ pub struct SimSettings {
     /// Measured against the cell's own capacity, quantized so merged terrain
     /// runs survive.
     pub wet_darken: f32,
-    /// Strength of the porous-rock stipple (0 = off). Only the upper pore
-    /// buckets are marked, which the fracture tail keeps rare.
-    pub pore_stipple: f32,
     pub temp: TempConfig,
     pub phase: PhaseConfig,
     pub grain: GrainConfig,
@@ -268,7 +265,6 @@ impl SimSettings {
             atmosphere: AtmosphereLookConfig::default(),
             heatmap_blend: 0.55,
             wet_darken: crate::palette::WET_DARKEN_DEFAULT,
-            pore_stipple: 0.35,
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
             grain: GrainConfig::default(),
@@ -1472,14 +1468,6 @@ impl SimSettings {
                         "Waterlogged darkening",
                         0.0..0.9,
                         &mut self.wet_darken,
-                    );
-                    ui.label(None, "Porous rock is stippled — only open cells.");
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Pore stipple strength (0 = off)",
-                        0.0..0.9,
-                        &mut self.pore_stipple,
                     );
                 });
                 ui.separator();

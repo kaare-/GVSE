@@ -1194,11 +1194,6 @@ async fn main() {
         // demo-sized world. Merging is visually identical (it also removes the
         // sub-pixel seams between stacked cells).
         let bedrock_y = scene.params.bedrock_floor_y;
-        // Porous cells get a single dark pixel — a pore, not a hole. Collected
-        // during the terrain pass (the cell is already in hand) and drawn after,
-        // so the merged runs below are untouched. The fracture tail makes high
-        // pore values rare, so this stays a small list.
-        let mut stipples: Vec<(f32, f32, Color)> = Vec::new();
         let draw_run = |sx: f32, y0: i32, y1: i32, rgb: [u8; 3]| {
             let top = origin_y - (y1 - bedrock_y) as f32 * cell_px - cell_px;
             let h = (y1 - y0 + 1) as f32 * cell_px;
@@ -1268,32 +1263,6 @@ async fn main() {
                                 g = lit[1];
                                 b = lit[2];
                             }
-                            if settings.pore_stipple > 0.0
-                                && crate::palette::shows_pore_stipple(cell, &scene.world.hydro)
-                            {
-                                // Deterministic sub-cell position so a lens reads
-                                // as scattered grain, not a regular grid.
-                                let h = (x as u32)
-                                    .wrapping_mul(0x9E37_79B9)
-                                    .wrapping_add((y as u32).wrapping_mul(0x85EB_CA6B))
-                                    >> 11;
-                                let step = (cell_px / 3.0).max(1.0);
-                                let ox = (h % 3) as f32 * step;
-                                let oy = ((h / 3) % 3) as f32 * step;
-                                let k = settings.pore_stipple
-                                    * crate::palette::pore_bucket(cell) as f32
-                                    / (crate::palette::TINT_LEVELS - 1) as f32;
-                                stipples.push((
-                                    sx + ox,
-                                    sy - cell_px + oy,
-                                    Color::from_rgba(
-                                        (r as f32 * (1.0 - k)) as u8,
-                                        (g as f32 * (1.0 - k)) as u8,
-                                        (b as f32 * (1.0 - k)) as u8,
-                                        terrain_alpha,
-                                    ),
-                                ));
-                            }
                             Some([r, g, b])
                         })
                     };
@@ -1322,11 +1291,6 @@ async fn main() {
                     draw_run(sx, y0, y1, rc);
                 }
             }
-        }
-        // Pore stipple on top of the merged runs.
-        let dot = (cell_px / 3.0).max(1.0);
-        for (px, py, c) in stipples.drain(..) {
-            draw_rectangle(px, py, dot, dot, c);
         }
 
         // Detached landscape bodies (in-flight rigid pieces).
