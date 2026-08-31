@@ -154,6 +154,16 @@ haze. Two mechanics did that, and neither is "add a pump to sea+N":
    surface tile already sits at or above that deck, so the rise no-ops
    and `lift_buried_to_free_air` dumps every buried seat onto the crest.
    The slider is gone; the cap is the humidity `hy_max` / sky box.
+
+   A second leftover Y pump survived that cut: horizontal advection
+   snapped dest `hy` to the neighbour's free-air crest, and lift-buried
+   hoisted any seat below that crest. Pond vapour that spread one tile
+   onto either bank teleported onto **both shores**, then humid-heat
+   and drizzle locked two hot rainy columns there. Horizontal flux now
+   stays at the same `hy`. Lift-buried only hoists seats deeper than
+   this column *and* both neighbours (truly inside a hill). Climate /
+   couple sit on the water skin (`live_skin_y`), not the excavated bed
+   — an inland pond is not a fake ocean hole.
    Unstable lapse (warm under cold, plus the per-row T anomaly) is what
    organises loft — same walk, no teleport. `cloud_alt_above_sea` stays
    on the struct for save compat only.

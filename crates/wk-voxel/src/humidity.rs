@@ -705,16 +705,15 @@ impl Humidity {
                     Some(x) => x,
                     None => continue,
                 };
-                let mut nhy = hy;
-                if let Some((wind, world, cache)) = surface {
-                    nhy = self.free_air_cached(wind, world, nhx, cache).max(nhy);
-                    if !self.accepts(nhx, nhy) {
-                        continue;
-                    }
-                } else if !self.accepts(nhx, nhy) {
+                // Stay at this hy. Snapping dest to the neighbour's
+                // free-air crest was a leftover Y pump: pond vapour
+                // that took one step onto either bank teleported onto
+                // both shores, then heat and rain locked there.
+                // Orographic + buoyant rise climb real hills.
+                if !self.accepts(nhx, hy) {
                     continue;
                 }
-                (nhx, nhy)
+                (nhx, hy)
             } else {
                 let dir = if step > 0.0 { 1 } else { -1 };
                 let nhy = hy + dir;
@@ -839,21 +838,14 @@ impl Humidity {
     ) -> i32 {
         let tc = self.tile_cols.max(1);
         let gx = world.wrap_x(hx * tc + tc / 2);
-        let mut y = crate::worldgen::live_surface_at(
+        let rock = crate::worldgen::live_surface_at(
             world,
             wind.seed,
             gx,
             wind.sea_level_y,
             wind.width_cols,
         );
-        for _ in 0..96 {
-            match world.get_cell(gx, y + 1) {
-                Some(c) if c.material != wk_material::MaterialId::Air => y += 1,
-                Some(c) if c.sat.0 > crate::GRAIN_REPOSE_HAZE_MAX => y += 1,
-                _ => break,
-            }
-        }
-        y
+        crate::worldgen::live_skin_y(world, gx, rock)
     }
 
     fn lift_buried_to_free_air(
@@ -867,6 +859,21 @@ impl Humidity {
         for (hx, hy) in keys {
             let air = self.free_air_cached(wind, world, hx, cache);
             if hy >= air {
+                continue;
+            }
+            // Valley air that crossed a bank sits at the neighbour's
+            // waterline. Hoisting that onto this crest is the leftover
+            // that pinned two hot, rainy columns on every pond shore.
+            // Only seats deeper than this column *and* both neighbours
+            // are truly inside a hill.
+            let mut valley = air;
+            if let Some(l) = self.wrap_hx(hx - 1) {
+                valley = valley.min(self.free_air_cached(wind, world, l, cache));
+            }
+            if let Some(r) = self.wrap_hx(hx + 1) {
+                valley = valley.min(self.free_air_cached(wind, world, r, cache));
+            }
+            if hy >= valley {
                 continue;
             }
             let Some(&mass) = self.cells.get(&(hx, hy)) else {
@@ -1168,6 +1175,76 @@ mod tests {
         assert!(
             (on_hill.total_mass() - 100.0).abs() < 1e-3,
             "lift must conserve mass"
+        );
+    }
+
+    #[test]
+    fn pond_bank_vapour_does_not_teleport_onto_both_shores() {
+        use crate::cell::Cell;
+        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use wk_material::MaterialId;
+
+        let width: i32 = 32;
+        let bed: i32 = 8;
+        let water_top: i32 = 12;
+        let bank: i32 = 16;
+        let mut world = World::new(1);
+        for x in 0..width {
+            let rock_top = if (8..16).contains(&x) { bed } else { bank };
+            for y in 0i32..=bank {
+                world.ensure_chunk(ChunkCoord::new(
+                    x.div_euclid(CHUNK_CELLS_W as i32),
+                    y.div_euclid(CHUNK_CELLS_H as i32),
+                ));
+            }
+            for y in 0..=rock_top {
+                world.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+            if (8..16).contains(&x) {
+                for y in (bed + 1)..=water_top {
+                    world.set_cell(x, y, Cell::water());
+                }
+            }
+        }
+
+        let mut wind = Wind::climate(4, 0.0, 1, width, bed, 0, 64, false);
+        wind.config.terrain_drive = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.0;
+        wind.variance = 0.0;
+
+        let mut h = Humidity::with_world_bounds(4, 0, 0, width, 64);
+        h.add(10, water_top, 80.0);
+        let pond = h.tile_of(10, water_top);
+        let left = h.tile_of(4, water_top);
+        let right = h.tile_of(18, water_top);
+        h.cells.insert((left.0, pond.1), 40.0);
+        h.cells.insert((right.0, pond.1), 40.0);
+        let crest_hy = h.tile_of(4, bank).1;
+        assert!(
+            crest_hy > pond.1,
+            "fixture: bank crest must sit a tile above the pond"
+        );
+
+        h.advect_with_surface(0.0, 0.0, &wind, &world);
+
+        assert!(
+            h.at_tile(left.0, crest_hy) < 5.0,
+            "left waterline must not hoist onto the crest ({})",
+            h.at_tile(left.0, crest_hy)
+        );
+        assert!(
+            h.at_tile(right.0, crest_hy) < 5.0,
+            "right waterline must not hoist onto the crest ({})",
+            h.at_tile(right.0, crest_hy)
+        );
+        assert!(
+            h.at_tile(left.0, pond.1) > 20.0 && h.at_tile(right.0, pond.1) > 20.0,
+            "leaked pond vapour should stay at the waterline (L={} R={})",
+            h.at_tile(left.0, pond.1),
+            h.at_tile(right.0, pond.1)
         );
     }
 

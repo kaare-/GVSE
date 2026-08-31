@@ -360,12 +360,17 @@ impl Temperature {
         let gx = hx * tc + tc / 2;
         let hint = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
         match world {
-            Some(w) => live_surface_y(w, gx, hint, LIVE_SURFACE_SEARCH),
+            Some(w) => {
+                let rock = live_surface_y(w, gx, hint, LIVE_SURFACE_SEARCH);
+                crate::worldgen::live_skin_y(w, gx, rock)
+            }
             None => hint,
         }
     }
 
     fn land_factor(&self, world: Option<&World>, hx: i32) -> f32 {
+        // Skin height vs sea — waterline, not the excavated bed.
+        // A pond at sea is half-sea climate, not a −2 °C hole with two coasts.
         let s = self.column_surface_y_estimate(world, hx);
         let d = (s - self.sea_level_y) as f32;
         ((d + 2.0) / 4.0).clamp(0.0, 1.0)

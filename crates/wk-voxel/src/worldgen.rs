@@ -298,6 +298,28 @@ pub fn live_surface_at(world: &World, seed: u64, gx: i32, sea: i32, width_cols: 
     live_surface_y(world, gx, hint, LIVE_SURFACE_SEARCH)
 }
 
+/// Skin the air actually sits on: rock bed, then standing water / ice.
+///
+/// [`live_surface_y`] stops on the first solid, so a pond reports its
+/// excavated floor. Climate, couple, and free-air must sit on the
+/// waterline — otherwise every inland lake is a fake ocean hole with
+/// two "coast" columns.
+///
+/// `32` matches [`crate::GRAIN_REPOSE_HAZE_MAX`] (haze vs standing film)
+/// without pulling `rules` into worldgen.
+pub fn live_skin_y(world: &World, gx: i32, rock_y: i32) -> i32 {
+    let jx = world.wrap_x(gx);
+    let mut y = rock_y;
+    for _ in 0..96 {
+        match world.get_cell(jx, y + 1) {
+            Some(c) if c.material != MaterialId::Air => y += 1,
+            Some(c) if c.sat.0 > 32 => y += 1,
+            _ => break,
+        }
+    }
+    y
+}
+
 /// Fraction of the world occupied by the overturned block.
 const TECTONIC_BLOCK_FRAC: f32 = 0.16;
 /// Width of the blend at each edge of the block, as a fraction of its own width.
@@ -550,6 +572,28 @@ mod lens_tests {
             hint + 5,
             "the surface should rise with deposition"
         );
+    }
+
+    #[test]
+    fn live_skin_sits_on_the_pond_not_the_excavated_bed() {
+        let mut w = World::new(1);
+        let x: i32 = 4;
+        for y in 0i32..=8 {
+            w.ensure_chunk(crate::chunk::ChunkCoord::new(
+                x.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+        for y in 9i32..=12 {
+            w.ensure_chunk(crate::chunk::ChunkCoord::new(
+                x.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
+            w.set_cell(x, y, Cell::water());
+        }
+        assert_eq!(live_surface_y(&w, x, 8, LIVE_SURFACE_SEARCH), 8);
+        assert_eq!(live_skin_y(&w, x, 8), 12, "air sits on the waterline");
     }
 
     #[test]

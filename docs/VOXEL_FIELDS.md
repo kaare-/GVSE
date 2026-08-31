@@ -207,7 +207,9 @@ sky swap).
 Each air tile then upwind-mixes heat along the local wind. Wet air
 has more thermal mass (vapor Cp ~1.9× dry; Tab `humid_heat_scale`)
 so a rising plume pulls that heat with it. Warm humid skin under
-colder air is the draft that lofts vapour. The T overlay uses a fixed −40..36 °C ramp (ice-white through
+colder air is the draft that lofts vapour. Pond vapour is not
+teleported onto both banks — horizontal flux stays level; only
+seats inside a hill hoist to the crest. The T overlay uses a fixed −40..36 °C ramp (ice-white through
 yellow-green at 18 °C to red). Humidity hold follows
 Clausius–Clapeyron (Magnus): full tile at 40 °C, a few percent at
 0 °C, a trace at −100 °C. Cloud / haze floors follow the live
