@@ -837,7 +837,13 @@ impl SimSettings {
                         ),
                     );
                     labeled_slider(ui, hash!(), "Base temp (C)", -20.0..40.0, &mut self.temp.base_temp_c);
-                    labeled_slider(ui, hash!(), "Day/night swing (C)", 0.0..20.0, &mut self.temp.day_amp_c);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Ground day/night swing (C)",
+                        0.0..20.0,
+                        &mut self.temp.day_amp_c,
+                    );
                     labeled_slider(ui, hash!(), "Lapse (C per cell elev)", 0.0..0.4, &mut self.temp.lapse_c);
                     labeled_slider(ui, hash!(), "Solar heat / step", 0.0..1.5, &mut self.temp.solar_heat_c);
                     labeled_slider(ui, hash!(), "Night cool / step", 0.0..1.5, &mut self.temp.night_cool_c);

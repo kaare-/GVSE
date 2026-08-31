@@ -146,31 +146,46 @@ fn geotech_overlay_color(score: f32, s_max: f32) -> Color {
     Color::from_rgba(r, g, b, a)
 }
 
-fn temp_overlay_color(temp_c: f32, t_min: f32, t_max: f32) -> Color {
-    let u = ((temp_c - t_min) / (t_max - t_min).max(0.5)).clamp(0.0, 1.0);
-    let (r, g, b) = if u < 0.33 {
-        let t = u / 0.33;
+/// Fixed comfort scale so mild sky is not all blue.
+///
+/// Auto-ranging off the full field (including hot deep rock) parked
+/// 12–20 °C air in the first third of a blue→red ramp.
+const TEMP_OVERLAY_LO_C: f32 = 6.0;
+const TEMP_OVERLAY_HI_C: f32 = 28.0;
+
+fn temp_overlay_color(temp_c: f32) -> Color {
+    let u = ((temp_c - TEMP_OVERLAY_LO_C) / (TEMP_OVERLAY_HI_C - TEMP_OVERLAY_LO_C)).clamp(0.0, 1.0);
+    // 6 deep blue · 12 cyan · 18 yellow-green · 24 orange · 28 red
+    let (r, g, b) = if u < 0.27 {
+        let t = u / 0.27;
         (
-            (20.0 + t * 40.0) as u8,
-            (80.0 + t * 120.0) as u8,
-            (200.0 - t * 40.0) as u8,
+            (15.0 + t * 20.0) as u8,
+            (40.0 + t * 140.0) as u8,
+            (160.0 + t * 50.0) as u8,
         )
-    } else if u < 0.66 {
-        let t = (u - 0.33) / 0.33;
+    } else if u < 0.55 {
+        let t = (u - 0.27) / 0.28;
         (
-            (60.0 + t * 180.0) as u8,
-            (200.0 - t * 40.0) as u8,
-            (160.0 - t * 140.0) as u8,
+            (35.0 + t * 185.0) as u8,
+            (180.0 + t * 40.0) as u8,
+            (210.0 - t * 150.0) as u8,
+        )
+    } else if u < 0.82 {
+        let t = (u - 0.55) / 0.27;
+        (
+            (220.0 + t * 25.0) as u8,
+            (220.0 - t * 90.0) as u8,
+            (60.0 - t * 35.0) as u8,
         )
     } else {
-        let t = (u - 0.66) / 0.34;
+        let t = (u - 0.82) / 0.18;
         (
-            (240.0 - t * 20.0) as u8,
-            (160.0 - t * 140.0) as u8,
-            (20.0 + t * 20.0) as u8,
+            (245.0 - t * 15.0) as u8,
+            (130.0 - t * 100.0) as u8,
+            (25.0 + t * 10.0) as u8,
         )
     };
-    Color::from_rgba(r, g, b, 120)
+    Color::from_rgba(r, g, b, 130)
 }
 
 /// Dry tan → wet deep blue for ground pore / free-water saturation.
@@ -1437,14 +1452,6 @@ async fn main() {
         // Temperature heatmap overlay (blue cold → red hot).
         if temp_overlay && overlay_k > 0.01 {
             let tile_px = scene.temperature.tile_cols as f32 * cell_px;
-            let (t_min, t_max) = scene
-                .temperature
-                .cells
-                .values()
-                .copied()
-                .fold((f32::MAX, f32::MIN), |(lo, hi), v| (lo.min(v), hi.max(v)));
-            let t_min = t_min.min(8.0);
-            let t_max = t_max.max(t_min + 4.0).max(28.0);
             for (&(hx, hy), &temp_c) in &scene.temperature.cells {
                 let base_gx = hx * scene.temperature.tile_cols;
                 let base_gy = hy * scene.temperature.tile_cols;
@@ -1463,7 +1470,7 @@ async fn main() {
                         sy,
                         tile_px,
                         tile_px,
-                        scale_color_alpha(temp_overlay_color(temp_c, t_min, t_max), overlay_k),
+                        scale_color_alpha(temp_overlay_color(temp_c), overlay_k),
                     );
                 }
             }

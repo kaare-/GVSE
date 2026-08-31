@@ -5,7 +5,8 @@
 //! Coarse **thermal field** (°C) on the same 4×4 tile grid as humidity /
 //! wind.
 //!
-//! - **Air** tiles track the climate skin (day/night, clouds).
+//! - **Air** tiles integrate solar / night-cool on a climate baseline
+//!   (lapse, sea/land). They do **not** snap to a noon/midnight skin.
 //! - **Surface** (rock / sand / lakes / snow) has high heat capacity and
 //!   only weakly couples to the skin — water and rock do not slam from
 //!   +20 °C to −10 °C in one night.
@@ -260,8 +261,9 @@ impl Temperature {
         cfg.geothermal_surface_c + cfg.geothermal_gradient_c_per_cell * depth_cells.max(0.0)
     }
 
-    /// Fill tiles: air/surface from climate skin; buried from geothermal.
+    /// Fill tiles: air/surface from the climate baseline; buried from geothermal.
     pub fn fill_initial(&mut self, tick: u64) {
+        let _ = tick;
         let Some(b) = self.bounds else {
             return;
         };
@@ -277,7 +279,7 @@ impl Temperature {
                 let t0 = if depth > tc as f32 {
                     self.geothermal_at_depth(depth)
                 } else {
-                    self.skin_temp(hx, hy, tick)
+                    self.climate_baseline(None, hx)
                 };
                 self.cells.insert((hx, hy), t0);
             }
@@ -323,11 +325,20 @@ impl Temperature {
         let _ = hy;
         let cfg = &self.config;
         let dn = day_night_factor_cfg(tick, &self.climate);
+        self.climate_baseline(world, hx) + cfg.day_amp_c * dn
+            + cfg.land_day_bump_c * self.land_factor(world, hx) * dn.max(0.0)
+    }
+
+    /// Elevation / sea-land climate with **no** day/night swap.
+    ///
+    /// Air integrates solar and night-cool on top of this. Pulling air
+    /// toward [`Self::skin_temp`] (which includes `day_amp_c * dn`) was
+    /// swapping the whole sky between noon and midnight skins.
+    fn climate_baseline(&self, world: Option<&World>, hx: i32) -> f32 {
+        let cfg = &self.config;
         let land = self.land_factor(world, hx);
         let elev = self.elev_cells(world, hx);
-        let sea_land =
-            cfg.sea_bias_c * (1.0 - land) + cfg.land_day_bump_c * land * dn.max(0.0);
-        cfg.base_temp_c + sea_land - cfg.lapse_c * elev + cfg.day_amp_c * dn
+        cfg.base_temp_c + cfg.sea_bias_c * (1.0 - land) - cfg.lapse_c * elev
     }
 
     /// One thermal step: layered forcing + inertia + diffusion.
@@ -404,8 +415,11 @@ impl Temperature {
                     } else {
                         cfg.night_cool_c * night * 0.25 * cool_scale
                     };
-                    let skin = self.skin_temp_on(world, hx, hy, tick);
-                    let mut target = skin;
+                    // Baseline only — not the noon/midnight skin. Diurnal
+                    // comes from solar / night-cool so a cloudy column can
+                    // stay cool and wind can carry that air.
+                    let climate = self.climate_baseline(world, hx);
+                    let mut target = climate;
                     if height_above <= band && cfg.near_surface_couple > 0.0 {
                         let surf_hy = surf.div_euclid(tc);
                         let surf_t = self.at_tile(hx, surf_hy);
@@ -413,9 +427,10 @@ impl Temperature {
                             - (height_above as f32 / band as f32).clamp(0.0, 1.0);
                         let couple = ((cfg.near_surface_couple + 0.25 * wind_k) * falloff)
                             .clamp(0.0, 0.90);
-                        target = skin * (1.0 - couple) + surf_t * couple;
+                        target = climate * (1.0 - couple) + surf_t * couple;
                     }
-                    let relax = cfg.sky_relax.clamp(cfg.min_relax, cfg.max_relax);
+                    // Slow leak so sun heat and wind plumes persist.
+                    let relax = (cfg.sky_relax * 0.40).clamp(cfg.min_relax, 0.08);
                     let n = t + solar - cool;
                     n + (target - n) * relax
                 }
@@ -482,8 +497,10 @@ impl Temperature {
                 _ => {}
             }
             let (vx, vy) = wind.vector_at(world, hx, hy);
-            let ax = (vx.abs() * 0.65 * mix).clamp(0.0, 0.50);
-            let ay = (vy.abs() * 0.40 * mix).clamp(0.0, 0.30);
+            // 0.05 tiles/tick is the Tab default; treat that as a real
+            // mix, not a 2% nudge that the overlay cannot see.
+            let ax = ((vx.abs() / 0.05) * 0.16 * mix).clamp(0.0, 0.50);
+            let ay = ((vy.abs() / 0.05) * 0.10 * mix).clamp(0.0, 0.35);
             if ax < 1e-5 && ay < 1e-5 {
                 continue;
             }
@@ -817,6 +834,50 @@ mod tests {
     }
 
     #[test]
+    fn air_does_not_snap_to_the_noon_skin() {
+        let (mut t, h) = demo_temp();
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.day_amp_c = 10.0;
+        t.config.diffuse_alpha = 0.0;
+        t.fill_initial(0);
+        for v in t.cells.values_mut() {
+            *v = 18.0;
+        }
+        for _ in 0..12 {
+            t.step(None, &h, 0, None);
+        }
+        assert!(
+            (t.mean() - 18.0).abs() < 1.5,
+            "with sun/night off, air must stay near the climate baseline, \
+             not climb toward noon skin 18+10 (mean={:.1})",
+            t.mean()
+        );
+    }
+
+    #[test]
+    fn sun_warms_air_without_a_day_amp_skin() {
+        let (mut t, h) = demo_temp();
+        t.config.day_amp_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.diffuse_alpha = 0.0;
+        t.config.solar_heat_c = 0.50;
+        t.fill_initial(0);
+        for v in t.cells.values_mut() {
+            *v = 18.0;
+        }
+        let before = t.mean();
+        for _ in 0..16 {
+            t.step(None, &h, 0, None);
+        }
+        assert!(
+            t.mean() > before + 0.8,
+            "sun should accumulate in the air (before={before:.1} after={:.1})",
+            t.mean()
+        );
+    }
+
+    #[test]
     fn wind_advects_air_heat_downwind() {
         let (mut t, h) = demo_temp();
         t.config.solar_heat_c = 0.0;
@@ -987,8 +1048,8 @@ mod tests {
             "buried bedrock must not drop with night air (deep={deep_t:.1})"
         );
         assert!(
-            deep_t > air_t + 15.0,
-            "deep {deep_t:.1} should stay far warmer than air {air_t:.1}"
+            deep_t > air_t + 10.0,
+            "deep {deep_t:.1} should stay far warmer than night air {air_t:.1}"
         );
     }
 
