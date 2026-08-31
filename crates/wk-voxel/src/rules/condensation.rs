@@ -47,6 +47,18 @@ pub struct CondensationConfig {
 /// diurnal swing in saturation mass stays visible in the response.
 const SUPERSATURATION_HEADROOM: f32 = 4.0;
 
+/// Fraction of local saturation left in a raining tile.
+///
+/// Wiping to zero is what turned the H wash into a terrain-hugging fog
+/// sheet: the first free-air tile hit sat, rained its whole mass, and
+/// never had a leftover deck that convection could loft. A cloudy
+/// remnant stays visible and keeps feeding rise.
+const CLOUD_REMNANT_SAT_FRAC: f32 = 0.82;
+
+/// Spare the first free-air tile and one row above it. Fog sits there
+/// so thermals can lift it; rain harder aloft where a real cloud is.
+const SURFACE_FILM_SPARE_TILES: i32 = 1;
+
 fn default_cond_max_events() -> u32 {
     48
 }
@@ -158,19 +170,26 @@ pub fn apply_condensation_rain_phased(
     // Collect first, then apply the heaviest hits so a saturated sky
     // cannot walk every column every tick (~thousands → 7 FPS).
     let mut hits: Vec<(f32, i32, i32, f32)> = Vec::new(); // mass, hx, hy, take_mass
+    let mut film_floor: std::collections::HashMap<i32, i32> = std::collections::HashMap::new();
     for (hx, hy) in tiles {
+        let floor = first_free_air_hy(world, tile_cols, hx, &mut film_floor);
+        if hy <= floor.saturating_add(SURFACE_FILM_SPARE_TILES) {
+            continue;
+        }
         let mass = humidity.at_tile(hx, hy);
         let (mut prob_mult, mut mass_mult, mut min_mass) = match oro {
             Some(o) => orographic_factors(world, o, hx, tile_cols, cfg.min_mass_to_rain),
             None => (1.0, 1.0, cfg.min_mass_to_rain),
         };
         let mut full_mass = cfg.full_mass;
+        let mut leftover = 0.0f32;
         if let Some(th) = temp {
             let (tp, tm, tmin, sat) = thermal_rain_factors(th, hx, hy, tile_cols, cfg);
             prob_mult *= tp;
             mass_mult *= tm;
             min_mass = min_mass.min(tmin);
             full_mass = sat.max(min_mass + 1.0);
+            leftover = (sat * CLOUD_REMNANT_SAT_FRAC).max(1.0);
         }
         if mass < min_mass {
             continue;
@@ -200,7 +219,8 @@ pub fn apply_condensation_rain_phased(
         if roll >= effective_prob {
             continue;
         }
-        let take_mass = (cfg.mass_per_droplet * mass_mult).min(mass);
+        let surplus = (mass - leftover).max(0.0);
+        let take_mass = (cfg.mass_per_droplet * mass_mult).min(mass).min(surplus);
         if take_mass <= 0.0 {
             continue;
         }
@@ -221,6 +241,9 @@ pub fn apply_condensation_rain_phased(
             continue;
         }
         let take_mass = take_mass.min(mass);
+        if take_mass <= 0.0 {
+            continue;
+        }
         let centre_gx = hx * tile_cols + tile_cols / 2;
         // Nucleate **where the vapour is** and let gravity have it.
         //
@@ -277,6 +300,50 @@ pub fn apply_condensation_rain_phased(
             humidity.cells.remove(&(hx, hy));
         }
     }
+}
+
+fn occupies_humidity_film(c: &crate::cell::Cell) -> bool {
+    c.material != wk_material::MaterialId::Air || c.sat.0 > crate::GRAIN_REPOSE_HAZE_MAX
+}
+
+/// First humidity-tile row whose centre sits in free air above the live crest.
+///
+/// Cached per `hx` so a wet sky does not walk the column once per tile.
+/// Unloaded columns return a sentinel below any real `hy` so we do not
+/// invent a floor and skip rain.
+fn first_free_air_hy(
+    world: &World,
+    tile_cols: i32,
+    hx: i32,
+    cache: &mut std::collections::HashMap<i32, i32>,
+) -> i32 {
+    if let Some(&hy) = cache.get(&hx) {
+        return hy;
+    }
+    let tc = tile_cols.max(1);
+    let gx = world.wrap_x(hx * tc + tc / 2);
+    let mut y = 0i32;
+    let mut saw = false;
+    for _ in 0..192 {
+        match world.get_cell(gx, y) {
+            Some(c) if occupies_humidity_film(c) => {
+                saw = true;
+                y += 1;
+            }
+            Some(_) => {
+                saw = true;
+                break;
+            }
+            None => break,
+        }
+    }
+    let hy = if saw {
+        ((y + 1 - tc / 2).max(0) + tc - 1) / tc
+    } else {
+        i32::MIN / 4
+    };
+    cache.insert(hx, hy);
+    hy
 }
 
 fn orographic_factors(
@@ -413,6 +480,89 @@ mod tests {
              not carry sat"
         );
         assert_eq!(w.get_cell(4, 20).unwrap().sat.0, 200, "its water is untouched");
+    }
+
+    #[test]
+    fn condensation_leaves_a_cloudy_remnant() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::temperature::Temperature;
+
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        let mut h = Humidity::new(4);
+        // Aloft of the spared surface film (hy 0–1).
+        h.cells.insert((1, 8), 160.0);
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
+        for v in temp.cells.values_mut() {
+            *v = 18.0;
+        }
+        let cfg = CondensationConfig {
+            top_y: 32,
+            max_prob_per_tick: 1.0,
+            min_mass_to_rain: 64.0,
+            full_mass: 512.0,
+            mass_per_droplet: 255.0,
+            max_events_per_tick: 8,
+            ..CondensationConfig::default()
+        };
+        for _ in 0..8 {
+            apply_condensation_rain_phased(&mut w, &mut h, &cfg, None, Some(&temp), None);
+            w.tick = w.tick.wrapping_add(1);
+            if h.at_tile(1, 8) < 160.0 - 1.0 {
+                break;
+            }
+        }
+        let left = h.at_tile(1, 8);
+        assert!(
+            left > 100.0,
+            "raining tile must keep a cloudy remnant, left {left}"
+        );
+        assert!(
+            left < 160.0 - 1.0,
+            "surplus above the remnant must still rain, left {left}"
+        );
+    }
+
+    #[test]
+    fn condensation_spares_the_surface_fog_film() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        let mut h = Humidity::new(4);
+        h.cells.insert((1, 0), 400.0);
+        h.cells.insert((1, 8), 400.0);
+        let cfg = CondensationConfig {
+            top_y: 32,
+            max_prob_per_tick: 1.0,
+            min_mass_to_rain: 64.0,
+            mass_per_droplet: 255.0,
+            max_events_per_tick: 8,
+            ..CondensationConfig::default()
+        };
+        apply_condensation_rain_phased(&mut w, &mut h, &cfg, None, None, None);
+        assert!(
+            (h.at_tile(1, 0) - 400.0).abs() < 1e-3,
+            "surface film must stay so thermals can loft it, left {}",
+            h.at_tile(1, 0)
+        );
+        assert!(
+            h.at_tile(1, 8) < 400.0 - 1.0,
+            "aloft surplus must still rain, left {}",
+            h.at_tile(1, 8)
+        );
     }
 
     #[test]

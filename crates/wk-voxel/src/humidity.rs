@@ -465,25 +465,25 @@ impl Humidity {
         });
     }
 
-    /// Buoyant lift: a fraction of each tile's mass moves one tile up,
-    /// so vapor from ocean evaporation rises toward the cloud deck.
-    /// Mass-conserving; stops at `max_hy`.
+    /// Buoyant lift: a fraction of each tile's mass moves one tile up
+    /// while the lapse is unstable. Mass-conserving; stops at `max_hy`
+    /// (the sky box, not a sea-level deck).
     pub fn buoyant_rise(&mut self, fraction: f32, max_hy: i32) {
         self.buoyant_rise_thermal(fraction, max_hy, None);
     }
 
+    /// How much a column's temperature anomaly changes its lift, per degree.
+    const CONVECTION_GAIN_PER_C: f32 = 0.15;
+    /// Anomaly is clamped before it is applied, so a freak tile cannot dominate.
+    const CONVECTION_CLAMP_C: f32 = 6.0;
+    /// Cool ground suppresses but never fully blocks lift; warm ground roughly
+    /// doubles it. Bounded so convection reshapes the field rather than gating it.
+    const CONVECTION_MIN_GAIN: f32 = 0.25;
+    const CONVECTION_MAX_GAIN: f32 = 2.0;
+
     /// [`Self::buoyant_rise`] scaled by the local lapse: warm air under
     /// colder air lifts harder; a stable inversion almost sits still.
     /// Same tile walk as the uniform rise — no extra world scans.
-/// How much a column's temperature anomaly changes its lift, per degree.
-const CONVECTION_GAIN_PER_C: f32 = 0.15;
-/// Anomaly is clamped before it is applied, so a freak tile cannot dominate.
-const CONVECTION_CLAMP_C: f32 = 6.0;
-/// Cool ground suppresses but never fully blocks lift; warm ground roughly
-/// doubles it. Bounded so convection reshapes the field rather than gating it.
-const CONVECTION_MIN_GAIN: f32 = 0.25;
-const CONVECTION_MAX_GAIN: f32 = 2.0;
-
     pub fn buoyant_rise_thermal(
         &mut self,
         fraction: f32,

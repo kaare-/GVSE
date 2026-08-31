@@ -142,6 +142,31 @@ Do **not** resurrect N lobe-mask cloud banks, H per-cell haze as the
 default draw, or a full-sky wind rebuild every frame. Those were the
 FPS cliff that forced the earlier revert.
 
+### Fog sheet vs lofted cloud (no hardcoded Y pump)
+
+Playtest on the climate-budget branch parked almost all visible vapour
+as a film on the live crest, with the sky above washed to a thin equal
+haze. Two mechanics did that, and neither is "add a pump to sea+N":
+
+1. **`buoyant_rise_thermal` was capped at `sea + cloud_alt`.** That is
+   the Tab “Vapor rise deck above ground” lever. On a mountain the
+   surface tile already sits at or above that deck, so the rise no-ops
+   and `lift_buried_to_free_air` dumps every buried seat onto the crest.
+   The slider is gone; the cap is the humidity `hy_max` / sky box.
+   Unstable lapse (warm under cold, plus the per-row T anomaly) is what
+   organises loft — same walk, no teleport. `cloud_alt_above_sea` stays
+   on the struct for save compat only.
+2. **Condensation wiped the film.** At a few degrees below zero the
+   Clausius–Clapeyron sat is ~100–120 mass; `mass_per_droplet` is 255,
+   so the first free-air tile rained itself empty every event and never
+   fed a column. Rain now leaves `~0.82 × sat` in the tile and **skips
+   the lowest free-air row + one above it**, so the source layer can
+   lift. Aloft surplus still rains.
+
+Do not add a sea-level humidity floor or a fixed "cloud row" teleport
+to get this look back. If the sky goes sheet-fog again, check those two
+gates first.
+
 ## Decided: no cloud animation at all — render the vapour field
 
 **Design call (playtest, 2026-08-26).** Drop cloud parcels entirely rather than

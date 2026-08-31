@@ -261,7 +261,7 @@ impl SimSettings {
                 let mut c = CloudConfig::default();
                 c.cloud_alt_above_sea = 48;
                 c.coag_min_above_sea = 22;
-                c.buoyant_rise = 0.10;
+                c.buoyant_rise = 0.14;
                 c
             },
             climate: ClimateConfig::default(),
@@ -487,7 +487,6 @@ impl SimSettings {
         let mut day_ticks = self.climate.day_ticks as f32;
         let mut night_ticks = self.climate.night_ticks as f32;
         let mut max_parcels = self.cloud.max_parcels as f32;
-        let mut cloud_alt = self.cloud.cloud_alt_above_sea as f32;
         let mut coag_min_alt = self.cloud.coag_min_above_sea as f32;
         let mut tall_above = self.oro.tall_above_sea as f32;
         let mut cond_events = self.cond.max_events_per_tick as f32;
@@ -1346,8 +1345,11 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Max parcels", 1.0..64.0, &mut max_parcels);
                     labeled_slider(ui, hash!(), "Visual min humidity", 1.0..120.0, &mut self.cloud.coag_min_hum);
                     labeled_slider(ui, hash!(), "N streak wetness scale", 40.0..500.0, &mut self.cloud.downpour_mass);
-                    labeled_slider(ui, hash!(), "Vapor rise deck above ground", 8.0..160.0, &mut cloud_alt);
-                    labeled_slider(ui, hash!(), "Visual min above ground", 4.0..120.0, &mut coag_min_alt);
+                    ui.label(
+                        None,
+                        "Vapour rise is lapse-driven (Buoyant rise / tick). No deck height.",
+                    );
+                    labeled_slider(ui, hash!(), "N spawn min above ground", 4.0..120.0, &mut coag_min_alt);
                     labeled_slider(
                         ui,
                         hash!(),
@@ -1899,7 +1901,6 @@ impl SimSettings {
         self.climate.day_ticks = day_ticks.round().clamp(30.0, 20_000.0) as u64;
         self.climate.night_ticks = night_ticks.round().clamp(30.0, 20_000.0) as u64;
         self.cloud.max_parcels = max_parcels.round().clamp(1.0, 96.0) as usize;
-        self.cloud.cloud_alt_above_sea = cloud_alt.round().clamp(4.0, 200.0) as i32;
         self.cloud.coag_min_above_sea = coag_min_alt.round().clamp(2.0, 160.0) as i32;
         self.cloud.ridge_clearance = self.cloud.ridge_clearance.clamp(0.0, 48.0);
         self.oro.tall_above_sea = tall_above.round().clamp(2.0, 100.0) as i32;

@@ -373,7 +373,7 @@ const SKY: &[(&str, LineKind)] = &[
     ("nimbus     how many N echo parcels are drawn (cap ~36)", LineKind::Body),
     ("echo       display mass of those parcels — not a water store", LineKind::Body),
     ("parcel     one soft cloud blob used for N, shade, and streaks", LineKind::Body),
-    ("deck       height vapor rises toward (Tab → vapor rise deck)", LineKind::Body),
+    ("deck       retired — vapour rise is lapse-driven, not a height lock", LineKind::Body),
 ];
 
 const GROUND: &[(&str, LineKind)] = &[

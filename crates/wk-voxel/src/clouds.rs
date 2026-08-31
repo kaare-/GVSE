@@ -58,10 +58,13 @@ pub struct CloudConfig {
     pub downpour_drain: f32,
     /// Unused by physics (save compat).
     pub downpour_stop_frac: f32,
+    /// Unused by physics (save compat). Was the Tab “vapor rise deck”
+    /// that parked every thermal at a fixed height above ground.
     pub cloud_alt_above_sea: i32,
     pub coag_min_above_sea: i32,
     pub ridge_clearance: f32,
     pub parcel_wind_scale: f32,
+    /// Fraction of each tile that convects one row up per tick.
     pub buoyant_rise: f32,
     /// Unused by physics (save compat).
     #[serde(default = "default_snow_footprint_mult")]
@@ -126,7 +129,7 @@ impl Default for CloudConfig {
             coag_min_above_sea: 18,
             ridge_clearance: 12.0,
             parcel_wind_scale: 0.28,
-            buoyant_rise: 0.08,
+            buoyant_rise: 0.14,
             snow_footprint_mult: default_snow_footprint_mult(),
             rain_footprint_mult: default_rain_footprint_mult(),
             snow_span_mult: default_snow_span_mult(),
@@ -272,11 +275,16 @@ impl CloudStore {
         temp: Option<&Temperature>,
         phase: Option<&PhaseConfig>,
     ) {
-        let _ = (sky_ceiling_y, tick, phase);
+        let _ = (sea_level_y, tick, phase);
         self.release_parcels_into_humidity(humidity);
-        let tc = humidity.tile_cols.max(1);
-        let deck_hy = (sea_level_y + cfg.cloud_alt_above_sea).div_euclid(tc);
-        humidity.buoyant_rise_thermal(cfg.buoyant_rise, deck_hy, temp);
+        // Rise until the sky box, not `sea + cloud_alt`. That deck cap
+        // sat on mountain ridges (surface hy ≥ deck) and turned every
+        // thermal into a fog film. Unstable lapse already stops the lift.
+        let max_hy = humidity
+            .bounds
+            .map(|b| b.hy_max)
+            .unwrap_or_else(|| sky_ceiling_y.div_euclid(humidity.tile_cols.max(1)));
+        humidity.buoyant_rise_thermal(cfg.buoyant_rise, max_hy, temp);
         self.rebuild_visuals_from_humidity(humidity, world, wind, sea_level_y, cfg, temp);
     }
 
@@ -351,7 +359,7 @@ impl CloudStore {
 
             let sat = sat_at(hx, hy);
             let floor = cloud_floor_y(world, wind, p.fx);
-            let target = condensation_level(local, sat, floor, cfg);
+            let target = condensation_level(local, sat, floor, sky_top_cell(wind) as f32);
             p.cruise_fy += (target - p.cruise_fy) * CLOUD_LIFT_RELAX;
             let lifted = p.cruise_fy.max(floor + cfg.ridge_clearance);
             p.on_ridge = lifted > p.cruise_fy + 1.0;
@@ -409,7 +417,7 @@ impl CloudStore {
             occupied[band_of(cx as f32)] = true;
             let sat = sat_at(hx, hy);
             let floor = cloud_floor_y(world, wind, cx as f32);
-            let cruise = condensation_level(mass, sat, floor, cfg);
+            let cruise = condensation_level(mass, sat, floor, sky_top_cell(wind) as f32);
             let fy = cruise.max(floor + cfg.ridge_clearance);
             // Spawn at the local mass rather than ramping from zero, so a single
             // call still produces a usable deck.
@@ -498,7 +506,7 @@ impl CloudStore {
                     .max(1.0);
                 let cx = (hx * tc + tc / 2) as f32;
                 let floor = cloud_floor_y(world, wind, cx);
-                let cruise = condensation_level(mass, sat, floor, cfg);
+                let cruise = condensation_level(mass, sat, floor, sky_top_cell(wind) as f32);
                 let density = (mass / sat).clamp(0.0, 1.5);
                 CloudSample {
                     fx: cx,
@@ -513,15 +521,14 @@ impl CloudStore {
 
 /// Height at which rising air condenses, in world cells.
 ///
-/// The lifting condensation level rises with *dewpoint depression* — how far the
-/// air is from saturation. Dry or warm air has to climb further before it cools
-/// to its dewpoint, so its cloud base sits higher; moist or cool air condenses
-/// low. Both temperature (through `sat`) and humidity feed in, which is what
-/// makes the deck height respond to weather instead of sitting pinned just above
-/// the terrain.
-fn condensation_level(mass: f32, sat: f32, floor_y: f32, cfg: &CloudConfig) -> f32 {
+/// Lifting condensation level from dewpoint depression, as a fraction of the
+/// **remaining column** (local floor → sky). Saturated air sits low; dry air
+/// can sit higher. There is no fixed cell-count deck — that Tab lever is
+/// what parked every thermal in one band.
+fn condensation_level(mass: f32, sat: f32, floor_y: f32, sky_y: f32) -> f32 {
     let deficit = (1.0 - mass / sat.max(1.0)).clamp(0.0, 1.0);
-    floor_y + cfg.cloud_alt_above_sea as f32 * (CLOUD_BASE_MIN_FRAC + CLOUD_BASE_SPAN_FRAC * deficit)
+    let room = (sky_y - floor_y).max(0.0);
+    floor_y + room * (CLOUD_BASE_MIN_FRAC + CLOUD_BASE_SPAN_FRAC * deficit)
 }
 
 /// First humidity tile row that sits `extra_cells` above the live column
@@ -654,10 +661,11 @@ const CLOUD_LIFT_RELAX: f32 = 0.02;
 /// fades rather than popping out of existence the moment it crosses the line.
 const CLOUD_DISSIPATE_FRAC: f32 = 0.55;
 
-/// Cloud base as a fraction of `cloud_alt_above_sea`: saturated air condenses
-/// at the low end, dry air at the high end.
-const CLOUD_BASE_MIN_FRAC: f32 = 0.55;
-const CLOUD_BASE_SPAN_FRAC: f32 = 0.90;
+/// Cloud base as a fraction of the remaining sky column (floor → ceiling).
+/// Saturated air condenses low; dry air a bit higher. Kept modest so this
+/// is not a second “deck above ground” in disguise.
+const CLOUD_BASE_MIN_FRAC: f32 = 0.08;
+const CLOUD_BASE_SPAN_FRAC: f32 = 0.32;
 
 pub fn cloud_floor_y(world: &World, wind: &Wind, fx: f32) -> f32 {
     let rock = surface_y(world, wind, fx);
@@ -714,6 +722,45 @@ mod tests {
         // Cloud unit tests want a steady prevailing push.
         w.variance = 0.0;
         w
+    }
+
+    #[test]
+    fn thermal_rise_lifts_ridge_fog_without_a_sea_deck_cap() {
+        let mut world = World::new(7);
+        world.ensure_chunk(ChunkCoord::new(0, 0));
+        // Crest at y=36 → tile hy=9. A sea+8 deck would be hy=2 and
+        // would no-op the rise; the sky box must be the cap.
+        for y in 0..=36 {
+            world.set_cell(6, y, Cell::solid(MaterialId::Stone));
+        }
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 256);
+        h.add(6, 38, 200.0);
+        let mut wind = Wind::climate(4, 0.0, 7, 64, 0, 0, 256, false);
+        wind.variance = 0.0;
+        let mut clouds = CloudStore::new();
+        let cfg = CloudConfig {
+            cloud_alt_above_sea: 8,
+            buoyant_rise: 0.30,
+            coag_min_hum: 20.0,
+            max_parcels: 4,
+            ..CloudConfig::default()
+        };
+        clouds.step_with_precip(
+            &mut world,
+            &mut h,
+            &wind,
+            0,
+            256,
+            1,
+            &cfg,
+            None,
+            None,
+        );
+        assert!(
+            h.at_tile(1, 10) > 20.0,
+            "ridge fog must climb toward the sky box, not park at sea+cloud_alt (hy10={})",
+            h.at_tile(1, 10)
+        );
     }
 
     #[test]
@@ -1156,11 +1203,11 @@ mod tests {
         // Cloud base tracks dewpoint depression: dry or warm air has to climb
         // further before it reaches its dewpoint. This is what makes deck height
         // respond to weather rather than sitting pinned above the terrain.
-        let cfg = CloudConfig::default();
         let sat = 400.0;
-        let moist = condensation_level(sat * 0.95, sat, 80.0, &cfg);
-        let middling = condensation_level(sat * 0.5, sat, 80.0, &cfg);
-        let dry = condensation_level(sat * 0.1, sat, 80.0, &cfg);
+        let sky = 320.0;
+        let moist = condensation_level(sat * 0.95, sat, 80.0, sky);
+        let middling = condensation_level(sat * 0.5, sat, 80.0, sky);
+        let dry = condensation_level(sat * 0.1, sat, 80.0, sky);
         assert!(
             moist < middling && middling < dry,
             "cloud base should rise as air dries ({moist} < {middling} < {dry})"
@@ -1168,13 +1215,33 @@ mod tests {
     }
 
     #[test]
-    fn condensation_level_follows_the_local_floor() {
-        let cfg = CloudConfig::default();
+    fn condensation_level_does_not_use_a_fixed_deck() {
+        // The retired Tab lever wrote `cloud_alt_above_sea`. Changing it
+        // must not move the LCL — remaining sky and saturation do.
         let sat = 400.0;
-        let lake = condensation_level(sat * 0.6, sat, 80.0, &cfg);
-        let alpine = condensation_level(sat * 0.6, sat, 140.0, &cfg);
+        let a = condensation_level(sat * 0.6, sat, 80.0, 320.0);
+        let mut cfg = CloudConfig::default();
+        cfg.cloud_alt_above_sea = 8;
+        let b = condensation_level(sat * 0.6, sat, 80.0, 320.0);
+        cfg.cloud_alt_above_sea = 160;
+        let c = condensation_level(sat * 0.6, sat, 80.0, 320.0);
+        let _ = cfg;
+        assert!((a - b).abs() < 1e-4 && (b - c).abs() < 1e-4);
+        let higher_sky = condensation_level(sat * 0.6, sat, 80.0, 480.0);
         assert!(
-            alpine > lake + 50.0,
+            higher_sky > a + 10.0,
+            "LCL must track remaining sky, not a cell-count deck ({a} vs {higher_sky})"
+        );
+    }
+
+    #[test]
+    fn condensation_level_follows_the_local_floor() {
+        let sat = 400.0;
+        let sky = 320.0;
+        let lake = condensation_level(sat * 0.6, sat, 80.0, sky);
+        let alpine = condensation_level(sat * 0.6, sat, 140.0, sky);
+        assert!(
+            alpine > lake + 30.0,
             "deck must sit on the local floor, not a global sea lock ({lake} vs {alpine})"
         );
     }
