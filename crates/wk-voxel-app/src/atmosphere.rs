@@ -1235,6 +1235,26 @@ pub fn draw_haze_and_wind(
     }
 }
 
+/// Map a climate-scale vector onto a readable overlay stroke.
+///
+/// Sim wind is ~0.05 tiles/tick by default. Using `vx` as a pixel delta
+/// made arrows sub-pixel until the Tab slider was cranked. Direction is
+/// unit-length; length and alpha encode speed with a floor so the default
+/// breeze still reads, including at whole-world zoom.
+fn wind_streak_geom(vx: f32, vy: f32, tile_px: f32) -> Option<(f32, f32, f32, u8)> {
+    let speed = vx.hypot(vy);
+    if speed < 0.0015 {
+        return None;
+    }
+    let ux = vx / speed;
+    let uy = vy / speed;
+    // 0.05 (Tab default) → vis 1.0. Gusts stretch; lulls keep a floor.
+    let vis = (speed / 0.05).clamp(0.40, 3.2);
+    let len = ((1.35 + 1.15 * vis) * tile_px).max(16.0);
+    let alpha = (150.0 + 90.0 * ((vis - 0.40) / 2.8).clamp(0.0, 1.0)) as u8;
+    Some((ux, uy, len, alpha))
+}
+
 /// World-space wind strokes (`V` overlay) from the local heatmap.
 ///
 /// Each rebuilt tile draws a short line along `(vx, vy)` so heading and
@@ -1267,14 +1287,11 @@ pub fn draw_wind_streaks(
             if stride > 1 && ((hx + hy) & 1) != 0 {
                 continue;
             }
-            if vx.abs() + vy.abs() < 0.012 {
-                continue;
-            }
             samples.push((hx, hy, vx, vy));
         }
     } else {
         // Field not rebuilt yet — still show climate wind on a viewport grid.
-        if evx.abs() + evy.abs() < 0.008 {
+        if evx.abs() + evy.abs() < 0.0015 {
             return;
         }
         let gx0 = ((-origin_x) / cell_px).floor() as i32 - tc;
@@ -1288,9 +1305,7 @@ pub fn draw_wind_streaks(
             let hy1 = gy_hi.div_euclid(tc);
             while hy <= hy1 {
                 let (vx, vy) = wind.vector_at(world, hx, hy);
-                if vx.abs() + vy.abs() >= 0.012 {
-                    samples.push((hx, hy, vx, vy));
-                }
+                samples.push((hx, hy, vx, vy));
                 hy += 2;
             }
             hx += 2;
@@ -1301,28 +1316,30 @@ pub fn draw_wind_streaks(
     for (hx, hy, vx, vy) in samples {
         let cx = hx * tc + tc / 2;
         let cy = hy * tc + tc / 2;
-        let speed = vx.hypot(vy).clamp(0.0, 1.2);
-        let len = (0.55 + 1.6 * speed) * tile_px;
-        let alpha = (48.0 + 140.0 * (speed / 0.22).clamp(0.0, 1.0)) as u8;
-        let color = Color::from_rgba(210, 226, 245, alpha);
+        let Some((ux, uy, len, alpha)) = wind_streak_geom(vx, vy, tile_px) else {
+            continue;
+        };
+        let color = Color::from_rgba(40, 72, 110, alpha);
+        let hi = Color::from_rgba(230, 242, 255, alpha);
         for &x_copy in x_copies {
             let sx = origin_x + (cx + x_copy * width_cols) as f32 * cell_px;
             let sy = origin_y - (cy as f32 + 0.5 - bedrock_floor_y as f32) * cell_px;
-            if sx < -tile_px || sx > sw + tile_px || sy < -tile_px || sy > sh + tile_px {
+            if sx < -len || sx > sw + len || sy < -len || sy > sh + len {
                 continue;
             }
-            let x2 = sx + vx * len;
-            let y2 = sy - vy * len;
-            draw_line(sx, sy, x2, y2, 1.4, color);
-            // Small head so reverse vs forward is readable.
-            let hx_n = vx * 0.22 * tile_px;
-            let hy_n = -vy * 0.22 * tile_px;
+            let x2 = sx + ux * len;
+            let y2 = sy - uy * len;
+            // Dark stem then a light edge so the stroke reads on haze and sky.
+            draw_line(sx, sy, x2, y2, 2.6, color);
+            draw_line(sx, sy, x2, y2, 1.3, hi);
+            let hx_n = ux * (0.28 * len).min(12.0);
+            let hy_n = -uy * (0.28 * len).min(12.0);
             draw_line(
                 x2,
                 y2,
                 x2 - hx_n + hy_n * 0.45,
                 y2 - hy_n - hx_n * 0.45,
-                1.2,
+                2.2,
                 color,
             );
             draw_line(
@@ -1330,8 +1347,24 @@ pub fn draw_wind_streaks(
                 y2,
                 x2 - hx_n - hy_n * 0.45,
                 y2 - hy_n + hx_n * 0.45,
-                1.2,
+                2.2,
                 color,
+            );
+            draw_line(
+                x2,
+                y2,
+                x2 - hx_n + hy_n * 0.45,
+                y2 - hy_n - hx_n * 0.45,
+                1.1,
+                hi,
+            );
+            draw_line(
+                x2,
+                y2,
+                x2 - hx_n - hy_n * 0.45,
+                y2 - hy_n + hx_n * 0.45,
+                1.1,
+                hi,
             );
         }
     }
@@ -2271,6 +2304,25 @@ mod tests {
             vec![2],
             "only the drop column stays open through the punched band ({open:?})"
         );
+    }
+
+    #[test]
+    fn default_climate_wind_makes_a_readable_streak() {
+        // Tab default is 0.05 tiles/tick. The first V overlay used vx as a
+        // pixel delta, so that breeze was ~0.3 px long.
+        let near_surface = 0.05 * 0.20; // height shear at the ground
+        let (ux, _uy, len, alpha) =
+            super::wind_streak_geom(near_surface, 0.0, 4.0).expect("default breeze");
+        assert!((ux - 1.0).abs() < 1e-5);
+        assert!(
+            len >= 16.0,
+            "default breeze must stay on-screen at world zoom (len={len})"
+        );
+        assert!(
+            alpha >= 140,
+            "default breeze must not be a 16-alpha hairline (alpha={alpha})"
+        );
+        assert!(super::wind_streak_geom(0.0, 0.0, 4.0).is_none());
     }
 
     #[test]

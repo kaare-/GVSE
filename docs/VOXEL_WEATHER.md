@@ -64,10 +64,10 @@ dial instead: it fell from 183k to 95k in playtest once rain started landing.
 ### Pinned: wind streak overlay needs a real visual
 
 `V` draws world-space strokes from the local wind heatmap (`vector_at`
-per rebuilt tile): length and a small head follow `(vx, vy)` so heading
-and force sit on the terrain. Default off. Humidity haze no longer uses
-a global `sea_level + 4` cut — the per-column live floor clips buried
-cells, so fog can sit on an alpine lake or a dug pond.
+per rebuilt tile). Direction is unit-length; length/alpha encode speed
+with a floor so the Tab default (~0.05 tiles/tick, weaker near the
+ground) still reads. Default off. Humidity haze no longer uses a global
+`sea_level + 4` cut — the per-column live floor clips buried cells.
 
 ### Pinned: droplets fall too fast
 
