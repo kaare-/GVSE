@@ -1240,7 +1240,8 @@ pub fn draw_haze_and_wind(
 /// Sim wind is ~0.05 tiles/tick by default. Using `vx` as a pixel delta
 /// made arrows sub-pixel until the Tab slider was cranked. Direction is
 /// unit-length; length and alpha encode speed with a floor so the default
-/// breeze still reads, including at whole-world zoom.
+/// breeze still reads. Kept short so neighbouring lattice points do not
+/// overlap into a scribble.
 fn wind_streak_geom(vx: f32, vy: f32, tile_px: f32) -> Option<(f32, f32, f32, u8)> {
     let speed = vx.hypot(vy);
     if speed < 0.0015 {
@@ -1248,17 +1249,32 @@ fn wind_streak_geom(vx: f32, vy: f32, tile_px: f32) -> Option<(f32, f32, f32, u8
     }
     let ux = vx / speed;
     let uy = vy / speed;
-    // 0.05 (Tab default) → vis 1.0. Gusts stretch; lulls keep a floor.
+    // 0.05 (Tab default) → vis 1.0. About one tile at the breeze; gusts ~2.
     let vis = (speed / 0.05).clamp(0.40, 3.2);
-    let len = ((1.35 + 1.15 * vis) * tile_px).max(16.0);
-    let alpha = (150.0 + 90.0 * ((vis - 0.40) / 2.8).clamp(0.0, 1.0)) as u8;
+    let len = ((0.55 + 0.40 * vis) * tile_px).max(6.0);
+    let alpha = (140.0 + 80.0 * ((vis - 0.40) / 2.8).clamp(0.0, 1.0)) as u8;
     Some((ux, uy, len, alpha))
+}
+
+/// Overlay lattice in tile coords. Zoomed-out views skip more so the
+/// screen does not fill with overlapping stems. The sim field is unchanged.
+fn wind_streak_stride(cell_px: f32) -> i32 {
+    if cell_px < 2.0 {
+        3
+    } else {
+        2
+    }
+}
+
+fn wind_streak_on_lattice(hx: i32, hy: i32, stride: i32) -> bool {
+    let s = stride.max(1);
+    hx.rem_euclid(s) == 0 && hy.rem_euclid(s) == 0
 }
 
 /// World-space wind strokes (`V` overlay) from the local heatmap.
 ///
-/// Each rebuilt tile draws a short line along `(vx, vy)` so heading and
-/// force read on the terrain, not as screen-space speckle in the sky.
+/// A coarse lattice of short arrows — not one stroke per rebuilt tile —
+/// so heading and force read on the terrain without a hair on every seat.
 pub fn draw_wind_streaks(
     wind: &Wind,
     world: Option<&World>,
@@ -1280,11 +1296,11 @@ pub fn draw_wind_streaks(
     let evy = wind.effective_vy(tick);
     let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
 
+    let stride = wind_streak_stride(cell_px);
     let mut samples: Vec<(i32, i32, f32, f32)> = Vec::new();
     if !wind.field.is_empty() {
-        let stride = if wind.field.len() > 1_200 { 2 } else { 1 };
         for (&(hx, hy), &(vx, vy)) in &wind.field {
-            if stride > 1 && ((hx + hy) & 1) != 0 {
+            if !wind_streak_on_lattice(hx, hy, stride) {
                 continue;
             }
             samples.push((hx, hy, vx, vy));
@@ -1304,11 +1320,13 @@ pub fn draw_wind_streaks(
             let mut hy = gy_lo.div_euclid(tc);
             let hy1 = gy_hi.div_euclid(tc);
             while hy <= hy1 {
-                let (vx, vy) = wind.vector_at(world, hx, hy);
-                samples.push((hx, hy, vx, vy));
-                hy += 2;
+                if wind_streak_on_lattice(hx, hy, stride) {
+                    let (vx, vy) = wind.vector_at(world, hx, hy);
+                    samples.push((hx, hy, vx, vy));
+                }
+                hy += stride;
             }
-            hx += 2;
+            hx += stride;
         }
     }
 
@@ -1319,8 +1337,7 @@ pub fn draw_wind_streaks(
         let Some((ux, uy, len, alpha)) = wind_streak_geom(vx, vy, tile_px) else {
             continue;
         };
-        let color = Color::from_rgba(40, 72, 110, alpha);
-        let hi = Color::from_rgba(230, 242, 255, alpha);
+        let color = Color::from_rgba(220, 234, 248, alpha);
         for &x_copy in x_copies {
             let sx = origin_x + (cx + x_copy * width_cols) as f32 * cell_px;
             let sy = origin_y - (cy as f32 + 0.5 - bedrock_floor_y as f32) * cell_px;
@@ -1329,17 +1346,17 @@ pub fn draw_wind_streaks(
             }
             let x2 = sx + ux * len;
             let y2 = sy - uy * len;
-            // Dark stem then a light edge so the stroke reads on haze and sky.
-            draw_line(sx, sy, x2, y2, 2.6, color);
-            draw_line(sx, sy, x2, y2, 1.3, hi);
-            let hx_n = ux * (0.28 * len).min(12.0);
-            let hy_n = -uy * (0.28 * len).min(12.0);
+            // One stroke + two barbs. The old dark/light pair was six
+            // draw_line calls per tile and read as a scribble once dense.
+            draw_line(sx, sy, x2, y2, 1.35, color);
+            let hx_n = ux * (0.22 * len).min(5.5);
+            let hy_n = -uy * (0.22 * len).min(5.5);
             draw_line(
                 x2,
                 y2,
                 x2 - hx_n + hy_n * 0.45,
                 y2 - hy_n - hx_n * 0.45,
-                2.2,
+                1.2,
                 color,
             );
             draw_line(
@@ -1347,24 +1364,8 @@ pub fn draw_wind_streaks(
                 y2,
                 x2 - hx_n - hy_n * 0.45,
                 y2 - hy_n + hx_n * 0.45,
-                2.2,
+                1.2,
                 color,
-            );
-            draw_line(
-                x2,
-                y2,
-                x2 - hx_n + hy_n * 0.45,
-                y2 - hy_n - hx_n * 0.45,
-                1.1,
-                hi,
-            );
-            draw_line(
-                x2,
-                y2,
-                x2 - hx_n - hy_n * 0.45,
-                y2 - hy_n + hx_n * 0.45,
-                1.1,
-                hi,
             );
         }
     }
@@ -2309,20 +2310,35 @@ mod tests {
     #[test]
     fn default_climate_wind_makes_a_readable_streak() {
         // Tab default is 0.05 tiles/tick. The first V overlay used vx as a
-        // pixel delta, so that breeze was ~0.3 px long.
+        // pixel delta, so that breeze was ~0.3 px long. The next pass made
+        // 16 px spears that overlapped into a scribble.
         let near_surface = 0.05 * 0.20; // height shear at the ground
         let (ux, _uy, len, alpha) =
             super::wind_streak_geom(near_surface, 0.0, 4.0).expect("default breeze");
         assert!((ux - 1.0).abs() < 1e-5);
         assert!(
-            len >= 16.0,
-            "default breeze must stay on-screen at world zoom (len={len})"
+            (6.0..14.0).contains(&len),
+            "default breeze is a short hatch, not a 16px spear (len={len})"
         );
         assert!(
-            alpha >= 140,
+            alpha >= 130,
             "default breeze must not be a 16-alpha hairline (alpha={alpha})"
         );
         assert!(super::wind_streak_geom(0.0, 0.0, 4.0).is_none());
+    }
+
+    #[test]
+    fn wind_overlay_skips_most_tiles() {
+        assert_eq!(super::wind_streak_stride(4.0), 2);
+        assert_eq!(super::wind_streak_stride(1.0), 3);
+        let stride = 2;
+        let keep = (0..8)
+            .flat_map(|hx| (0..8).map(move |hy| (hx, hy)))
+            .filter(|&(hx, hy)| super::wind_streak_on_lattice(hx, hy, stride))
+            .count();
+        assert_eq!(keep, 16, "2×2 lattice keeps a quarter of a 8×8 block");
+        assert!(super::wind_streak_on_lattice(-2, 0, 2));
+        assert!(!super::wind_streak_on_lattice(-1, 0, 2));
     }
 
     #[test]

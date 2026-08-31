@@ -1264,7 +1264,7 @@ impl SimSettings {
                     );
                     ui.label(
                         None,
-                        "Local field (V overlay): terrain / thermal / swirl reshape the climate mean. Rebuilt every 4 ticks on wet tiles + a thin surface band.",
+                        "Local field (V overlay): terrain / thermal / swirl reshape the climate mean. Rebuilt every 4 ticks on wet tiles + a thin surface band. Overlay draws a coarse lattice, not every tile.",
                     );
                     labeled_slider(
                         ui,

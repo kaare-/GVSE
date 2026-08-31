@@ -18,7 +18,7 @@ terrain + standing water         night: deep cool darken + weak moon ambient
 day canopy shade                 under-surface dim + air corridor + sun cast
 front soft cloud banks           parcel echoes ahead of land (N)
 humidity tile diagnostic          H overlay (diagnostics, not “clouds”)
-wind streak placeholder           V overlay (off by default; needs work)
+wind lattice arrows               V overlay (off by default; coarse, short)
 debug overlays → organisms
 night moon cast                  after organisms
 HUD
