@@ -31,7 +31,7 @@ fn default_terrain_drive() -> f32 {
 }
 
 fn default_thermal_drive() -> f32 {
-    0.35
+    0.70
 }
 
 fn default_swirl() -> f32 {
@@ -492,10 +492,10 @@ impl Wind {
         let t0 = temp.at_tile(hx, hy);
         let tx = (temp.at_tile(hx + 1, hy) - temp.at_tile(hx - 1, hy)) * 0.5;
         let ty = (temp.at_tile(hx, hy + 1) - temp.at_tile(hx, hy - 1)) * 0.5;
-        let mut vx = tx * 0.028;
-        let mut vy = ty * 0.004;
+        let mut vx = tx * 0.055;
+        let mut vy = ty * 0.012;
         let flank = (temp.at_tile(hx - 1, hy) + temp.at_tile(hx + 1, hy)) * 0.5;
-        vy += ((t0 - flank) / 28.0).clamp(-0.05, 0.05);
+        vy += ((t0 - flank) / 18.0).clamp(-0.10, 0.10);
         let surf = self.surface_tile_hy(None, hx);
         let above = (hy - surf).max(0) as f32;
         let near = (1.0 - above / 6.0).clamp(0.25, 1.0);

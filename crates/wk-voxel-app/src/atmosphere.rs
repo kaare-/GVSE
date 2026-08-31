@@ -313,10 +313,10 @@ fn haze_column_y0(y0: i32, y1: i32, drop_y: Option<i32>) -> Option<i32> {
 /// the three sibling columns. Skipping it is the 4-wide hole. Neighbour
 /// keys go through [`Humidity::wrap_tile_x`] — raw `hx-1` was the ring
 /// seam.
-fn haze_paint_seats(humidity: &Humidity, sky_hy_min: i32) -> Vec<(i32, i32)> {
+fn haze_paint_seats(humidity: &Humidity) -> Vec<(i32, i32)> {
     let mut seats = std::collections::HashSet::new();
     for (&(hx, hy), &mass) in &humidity.cells {
-        if mass <= 0.0 || hy < sky_hy_min {
+        if mass <= 0.0 {
             continue;
         }
         seats.insert((hx, hy));
@@ -325,9 +325,6 @@ fn haze_paint_seats(humidity: &Humidity, sky_hy_min: i32) -> Vec<(i32, i32)> {
                 continue;
             };
             let ny = hy + dy;
-            if ny < sky_hy_min {
-                continue;
-            }
             if let Some(b) = humidity.bounds {
                 if !b.contains(nx, ny) {
                     continue;
@@ -676,16 +673,17 @@ fn sample_sky_weather(
 ) -> SkyWeatherParams {
     let wrap = if wrap_x { Some(width_cols) } else { None };
     let precip_cover = precip_cover_fraction(clouds, 0, width_cols, wrap, downpour_mass);
-    let sky_hy_min = (sea_level_y + 4).div_euclid(humidity.tile_cols.max(1));
-    let humidity_mean = humidity_mean_norm(humidity, sky_hy_min);
+    let _ = sea_level_y;
+    // Mean the tiles that actually hold vapour — not a global sea+4 cut
+    // that pinned haze / sky tint to the lake line.
+    let humidity_mean = humidity_mean_norm(humidity, i32::MIN);
     let mut t_sum = 0.0f32;
     let mut t_n = 0u32;
-    let hy_min = sky_hy_min;
-    for (&(_hx, hy), &temp_c) in &temperature.cells {
-        if hy < hy_min {
+    for (&(hx, hy), &mass) in &humidity.cells {
+        if mass <= 0.0 {
             continue;
         }
-        t_sum += temp_c;
+        t_sum += temperature.at_tile(hx, hy);
         t_n += 1;
     }
     let mean_t = if t_n > 0 {
@@ -1191,10 +1189,10 @@ pub fn draw_haze_and_wind(
         .max(1.0);
     let min_mass = look.haze_min_mass.max(0.0);
     let resample = look.haze_resample;
-    let tc = humidity.tile_cols.max(1);
-    let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
+    let _ = sea_level_y;
     let drop_tops = collect_drop_tops(world);
-    let seats = haze_paint_seats(humidity, sky_hy_min);
+    // No global y-cut. Per-column `cloud_floor_y` already clips buried cells.
+    let seats = haze_paint_seats(humidity);
     let mut floor_cache: HashMap<i32, i32> = HashMap::new();
 
     for (hx, hy) in seats {
@@ -1237,24 +1235,105 @@ pub fn draw_haze_and_wind(
     }
 }
 
-/// Sparse screen-space wind strokes (`V` overlay).
+/// World-space wind strokes (`V` overlay) from the local heatmap.
 ///
-/// Placeholder: 1-px hairlines that do not read speed or direction well.
-/// Kept off `H` so the humidity field stays clean. Needs a real visual.
-pub fn draw_wind_streaks(wind: &Wind, tick: u64, sw: f32, sh: f32) {
-    let vx = wind.effective_vx(tick);
-    if vx.abs() < 0.008 {
+/// Each rebuilt tile draws a short line along `(vx, vy)` so heading and
+/// force read on the terrain, not as screen-space speckle in the sky.
+pub fn draw_wind_streaks(
+    wind: &Wind,
+    world: Option<&World>,
+    tick: u64,
+    origin_x: f32,
+    origin_y: f32,
+    cell_px: f32,
+    bedrock_floor_y: i32,
+    wrap_x: bool,
+    width_cols: i32,
+    sw: f32,
+    sh: f32,
+) {
+    if cell_px <= 0.0 {
         return;
     }
-    let t = get_time() as f32;
-    let n = ((sw / 36.0).ceil() as i32).clamp(8, 28);
-    let drift = (t * vx * 40.0).rem_euclid(sw + 40.0);
-    for i in 0..n {
-        let base = (i as f32 / n as f32) * (sw + 40.0) - 20.0;
-        let x = (base + drift).rem_euclid(sw + 40.0) - 20.0;
-        let y = sh * (0.14 + 0.32 * ((i as f32 * 0.37) % 1.0));
-        let len = 12.0 + (i % 5) as f32 * 4.0;
-        draw_rectangle(x, y, len, 1.0, Color::from_rgba(230, 236, 245, 16));
+    let tc = wind.tile_cols.max(1);
+    let evx = wind.effective_vx(tick);
+    let evy = wind.effective_vy(tick);
+    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
+
+    let mut samples: Vec<(i32, i32, f32, f32)> = Vec::new();
+    if !wind.field.is_empty() {
+        let stride = if wind.field.len() > 1_200 { 2 } else { 1 };
+        for (&(hx, hy), &(vx, vy)) in &wind.field {
+            if stride > 1 && ((hx + hy) & 1) != 0 {
+                continue;
+            }
+            if vx.abs() + vy.abs() < 0.012 {
+                continue;
+            }
+            samples.push((hx, hy, vx, vy));
+        }
+    } else {
+        // Field not rebuilt yet — still show climate wind on a viewport grid.
+        if evx.abs() + evy.abs() < 0.008 {
+            return;
+        }
+        let gx0 = ((-origin_x) / cell_px).floor() as i32 - tc;
+        let gx1 = gx0 + (sw / cell_px).ceil() as i32 + tc * 2;
+        let gy_hi = bedrock_floor_y + (origin_y / cell_px).ceil() as i32 + 2;
+        let gy_lo = gy_hi - (sh / cell_px).ceil() as i32 - 2;
+        let mut hx = gx0.div_euclid(tc);
+        let hx1 = gx1.div_euclid(tc);
+        while hx <= hx1 {
+            let mut hy = gy_lo.div_euclid(tc);
+            let hy1 = gy_hi.div_euclid(tc);
+            while hy <= hy1 {
+                let (vx, vy) = wind.vector_at(world, hx, hy);
+                if vx.abs() + vy.abs() >= 0.012 {
+                    samples.push((hx, hy, vx, vy));
+                }
+                hy += 2;
+            }
+            hx += 2;
+        }
+    }
+
+    let tile_px = tc as f32 * cell_px;
+    for (hx, hy, vx, vy) in samples {
+        let cx = hx * tc + tc / 2;
+        let cy = hy * tc + tc / 2;
+        let speed = vx.hypot(vy).clamp(0.0, 1.2);
+        let len = (0.55 + 1.6 * speed) * tile_px;
+        let alpha = (48.0 + 140.0 * (speed / 0.22).clamp(0.0, 1.0)) as u8;
+        let color = Color::from_rgba(210, 226, 245, alpha);
+        for &x_copy in x_copies {
+            let sx = origin_x + (cx + x_copy * width_cols) as f32 * cell_px;
+            let sy = origin_y - (cy as f32 + 0.5 - bedrock_floor_y as f32) * cell_px;
+            if sx < -tile_px || sx > sw + tile_px || sy < -tile_px || sy > sh + tile_px {
+                continue;
+            }
+            let x2 = sx + vx * len;
+            let y2 = sy - vy * len;
+            draw_line(sx, sy, x2, y2, 1.4, color);
+            // Small head so reverse vs forward is readable.
+            let hx_n = vx * 0.22 * tile_px;
+            let hy_n = -vy * 0.22 * tile_px;
+            draw_line(
+                x2,
+                y2,
+                x2 - hx_n + hy_n * 0.45,
+                y2 - hy_n - hx_n * 0.45,
+                1.2,
+                color,
+            );
+            draw_line(
+                x2,
+                y2,
+                x2 - hx_n - hy_n * 0.45,
+                y2 - hy_n + hx_n * 0.45,
+                1.2,
+                color,
+            );
+        }
     }
 }
 
@@ -2151,7 +2230,7 @@ mod tests {
         h.cells.insert((1, 5), 400.0);
         h.cells.insert((0, 4), 400.0);
         h.cells.insert((0, 6), 400.0);
-        let seats = haze_paint_seats(&h, 0);
+        let seats = haze_paint_seats(&h);
         assert!(
             seats.contains(&(0, 5)),
             "emptied nucleating tile must stay a seat or rain is 4-wide"
@@ -2195,11 +2274,24 @@ mod tests {
     }
 
     #[test]
+    fn haze_seats_include_lake_level_tiles() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 32, 128);
+        // Tile hy=20 → world y 80..84. A global sea+4 cut (sea=80 → hy>=21)
+        // used to drop this seat and lock the wash to a shelf above the lake.
+        h.cells.insert((2, 20), 180.0);
+        let seats = haze_paint_seats(&h);
+        assert!(
+            seats.contains(&(2, 20)),
+            "humidity on the live waterline must stay a seat"
+        );
+    }
+
+    #[test]
     fn resample_wraps_neighbour_seats_at_the_ring() {
         let mut h = Humidity::with_world_bounds(4, 0, 0, 16, 64);
         h.wrap_x = true;
         h.cells.insert((0, 5), 400.0);
-        let seats = haze_paint_seats(&h, 0);
+        let seats = haze_paint_seats(&h);
         assert!(seats.contains(&(3, 5)), "left neighbour wraps to hx_max");
         assert!(
             !seats.iter().any(|&(hx, _)| hx < 0 || hx > 3),

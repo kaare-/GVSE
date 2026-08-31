@@ -200,9 +200,10 @@ heatmap** (terrain / thermal ∇T / swirl) rebuilt every
 `WIND_FIELD_PERIOD` ticks on occupied humidity seats + a 1-tile halo + a
 thin near-surface band. Humidity uses per-tick fractional flux through
 `vector_at` (free-air height cached per column). Temperature stays on
-period 20; night blanket / wind mix / near-surface couple run inside
-that step. No pressure solver — defer cell wind until hydro + thermal
-are boring.
+period 20; each air tile uses the *local* wind for chill / couple, then
+upwind-mixes heat along that vector. Cloud / haze floors follow the live
+column (rock or standing water), not a global sea-level y. No pressure
+solver — defer cell wind until hydro + thermal are boring.
 
 ## Architecture notes
 

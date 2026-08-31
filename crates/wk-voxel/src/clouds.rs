@@ -323,6 +323,7 @@ impl CloudStore {
         cfg: &CloudConfig,
         temp: Option<&Temperature>,
     ) {
+        let _ = sea_level_y;
         let tc = humidity.tile_cols.max(1);
         let cap = cfg.max_parcels.max(1);
         let width = wind.width_cols.max(1);
@@ -349,9 +350,9 @@ impl CloudStore {
             p.vis_mass += (local - p.vis_mass) * CLOUD_MASS_RELAX;
 
             let sat = sat_at(hx, hy);
-            let target = condensation_level(local, sat, sea_level_y, cfg);
-            p.cruise_fy += (target - p.cruise_fy) * CLOUD_LIFT_RELAX;
             let floor = cloud_floor_y(world, wind, p.fx);
+            let target = condensation_level(local, sat, floor, cfg);
+            p.cruise_fy += (target - p.cruise_fy) * CLOUD_LIFT_RELAX;
             let lifted = p.cruise_fy.max(floor + cfg.ridge_clearance);
             p.on_ridge = lifted > p.cruise_fy + 1.0;
             p.deform = if p.on_ridge { 0.25 } else { 0.0 };
@@ -366,12 +367,18 @@ impl CloudStore {
         if self.parcels.len() >= cap {
             return;
         }
-        let sky_hy_min = (sea_level_y + cfg.coag_min_above_sea).div_euclid(tc);
+        let mut floor_hy = crate::fasthash::FxHashMap::default();
         let mut hits: Vec<(f32, i32, i32)> = humidity
             .cells
             .iter()
             .filter_map(|(&(hx, hy), &mass)| {
-                if hy < sky_hy_min || mass < cfg.coag_min_hum {
+                if mass < cfg.coag_min_hum {
+                    return None;
+                }
+                let min_hy = *floor_hy.entry(hx).or_insert_with(|| {
+                    local_sky_hy_min(world, wind, hx, tc, cfg.coag_min_above_sea)
+                });
+                if hy < min_hy {
                     return None;
                 }
                 Some((mass, hx, hy))
@@ -401,8 +408,8 @@ impl CloudStore {
             }
             occupied[band_of(cx as f32)] = true;
             let sat = sat_at(hx, hy);
-            let cruise = condensation_level(mass, sat, sea_level_y, cfg);
             let floor = cloud_floor_y(world, wind, cx as f32);
+            let cruise = condensation_level(mass, sat, floor, cfg);
             let fy = cruise.max(floor + cfg.ridge_clearance);
             // Spawn at the local mass rather than ramping from zero, so a single
             // call still produces a usable deck.
@@ -457,15 +464,22 @@ impl CloudStore {
         cfg: &CloudConfig,
         temp: Option<&Temperature>,
     ) -> Vec<CloudSample> {
+        let _ = sea_level_y;
         let tc = humidity.tile_cols.max(1);
         let cap = cfg.max_parcels.max(1);
         let width = wind.width_cols.max(1);
-        let sky_hy_min = (sea_level_y + cfg.coag_min_above_sea).div_euclid(tc);
+        let mut floor_hy = crate::fasthash::FxHashMap::default();
         let mut hits: Vec<(f32, i32, i32)> = humidity
             .cells
             .iter()
             .filter_map(|(&(hx, hy), &mass)| {
-                if hy < sky_hy_min || mass < cfg.coag_min_hum {
+                if mass < cfg.coag_min_hum {
+                    return None;
+                }
+                let min_hy = *floor_hy.entry(hx).or_insert_with(|| {
+                    local_sky_hy_min(world, wind, hx, tc, cfg.coag_min_above_sea)
+                });
+                if hy < min_hy {
                     return None;
                 }
                 Some((mass, hx, hy))
@@ -483,8 +497,8 @@ impl CloudStore {
                     .unwrap_or(Humidity::MAX_MASS_PER_TILE)
                     .max(1.0);
                 let cx = (hx * tc + tc / 2) as f32;
-                let cruise = condensation_level(mass, sat, sea_level_y, cfg);
                 let floor = cloud_floor_y(world, wind, cx);
+                let cruise = condensation_level(mass, sat, floor, cfg);
                 let density = (mass / sat).clamp(0.0, 1.5);
                 CloudSample {
                     fx: cx,
@@ -505,9 +519,25 @@ impl CloudStore {
 /// low. Both temperature (through `sat`) and humidity feed in, which is what
 /// makes the deck height respond to weather instead of sitting pinned just above
 /// the terrain.
-fn condensation_level(mass: f32, sat: f32, sea_level_y: i32, cfg: &CloudConfig) -> f32 {
+fn condensation_level(mass: f32, sat: f32, floor_y: f32, cfg: &CloudConfig) -> f32 {
     let deficit = (1.0 - mass / sat.max(1.0)).clamp(0.0, 1.0);
-    sea_level_y as f32 + cfg.cloud_alt_above_sea as f32 * (CLOUD_BASE_MIN_FRAC + CLOUD_BASE_SPAN_FRAC * deficit)
+    floor_y + cfg.cloud_alt_above_sea as f32 * (CLOUD_BASE_MIN_FRAC + CLOUD_BASE_SPAN_FRAC * deficit)
+}
+
+/// First humidity tile row that sits `extra_cells` above the live column
+/// floor (rock / standing water), not a global sea-level lock.
+fn local_sky_hy_min(
+    world: &World,
+    wind: &Wind,
+    hx: i32,
+    tc: i32,
+    extra_cells: i32,
+) -> i32 {
+    let tc = tc.max(1);
+    let gx = hx * tc + tc / 2;
+    let floor = cloud_floor_y(world, wind, gx as f32);
+    let cut = floor as i32 + extra_cells.max(0);
+    ((cut - tc / 2).max(0) + tc - 1) / tc
 }
 
 /// Keep the wettest candidate in each of `cap` bands across the world, so a
@@ -731,11 +761,11 @@ mod tests {
             h.total_mass()
         );
         for pcloud in &clouds.parcels {
+            let floor = cloud_floor_y(&world, &wind, pcloud.fx);
             assert!(
-                pcloud.fy > p.sea_level_y as f32 + cfg.coag_min_above_sea as f32 * 0.5,
-                "cloud fy={} too low (sea={})",
-                pcloud.fy,
-                p.sea_level_y
+                pcloud.fy + 0.5 >= floor,
+                "cloud fy={} must sit on the local floor {floor} (not a global sea lock)",
+                pcloud.fy
             );
         }
     }
@@ -986,6 +1016,8 @@ mod tests {
         let mut clouds = CloudStore::new();
         let cfg = CloudConfig {
             coag_min_hum: 10.0,
+            // Eligible against the *local* floor, not sea + 18.
+            coag_min_above_sea: 0,
             ..CloudConfig::default()
         };
         let world = World::new(p.seed);
@@ -1126,12 +1158,24 @@ mod tests {
         // respond to weather rather than sitting pinned above the terrain.
         let cfg = CloudConfig::default();
         let sat = 400.0;
-        let moist = condensation_level(sat * 0.95, sat, 80, &cfg);
-        let middling = condensation_level(sat * 0.5, sat, 80, &cfg);
-        let dry = condensation_level(sat * 0.1, sat, 80, &cfg);
+        let moist = condensation_level(sat * 0.95, sat, 80.0, &cfg);
+        let middling = condensation_level(sat * 0.5, sat, 80.0, &cfg);
+        let dry = condensation_level(sat * 0.1, sat, 80.0, &cfg);
         assert!(
             moist < middling && middling < dry,
             "cloud base should rise as air dries ({moist} < {middling} < {dry})"
+        );
+    }
+
+    #[test]
+    fn condensation_level_follows_the_local_floor() {
+        let cfg = CloudConfig::default();
+        let sat = 400.0;
+        let lake = condensation_level(sat * 0.6, sat, 80.0, &cfg);
+        let alpine = condensation_level(sat * 0.6, sat, 140.0, &cfg);
+        assert!(
+            alpine > lake + 50.0,
+            "deck must sit on the local floor, not a global sea lock ({lake} vs {alpine})"
         );
     }
 

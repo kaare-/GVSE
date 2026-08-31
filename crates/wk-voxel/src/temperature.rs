@@ -97,7 +97,7 @@ fn default_hum_night_blanket() -> f32 {
     0.55
 }
 fn default_wind_mix() -> f32 {
-    0.40
+    0.60
 }
 
 impl Default for TempConfig {
@@ -347,8 +347,9 @@ impl Temperature {
         }
         let dn = day_night_factor_cfg(tick, &self.climate);
         let cfg = self.config;
-        let wind_abs = wind.map(|w| w.near_surface_abs(world)).unwrap_or(0.0);
-        let wind_k = (wind_abs / 0.14).clamp(0.0, 1.5) * cfg.wind_mix.clamp(0.0, 1.0);
+        let climate_k = wind
+            .map(|w| (w.climate_vx.abs() / 0.14).clamp(0.0, 1.5) * cfg.wind_mix.clamp(0.0, 1.0))
+            .unwrap_or(0.0);
         let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
         // Lowest world-y tile band (= deepest underground).
         let mut deepest_hy = i32::MAX;
@@ -368,6 +369,11 @@ impl Temperature {
                 .copied()
                 .unwrap_or_else(|| tile_thermal_props(self, world, hx, hy));
             let t = self.at_tile(hx, hy);
+            let (lvx, lvy) = wind
+                .map(|w| w.vector_at(world, hx, hy))
+                .unwrap_or((0.0, 0.0));
+            let wind_k = (lvx.abs().max(lvy.abs()) / 0.14).clamp(0.0, 1.5)
+                * cfg.wind_mix.clamp(0.0, 1.0);
             let next = match props.layer {
                 TileLayer::Air => {
                     let tc = self.tile_cols.max(1);
@@ -454,8 +460,52 @@ impl Temperature {
             };
             self.cells.insert((hx, hy), next);
         }
-        let alpha = (cfg.diffuse_alpha * (1.0 + 0.5 * wind_k)).clamp(0.0, 0.25);
+        let alpha = (cfg.diffuse_alpha * (1.0 + 0.5 * climate_k)).clamp(0.0, 0.25);
         self.diffuse(alpha);
+        if let Some(w) = wind {
+            self.advect_air(world, w);
+        }
+    }
+
+    /// Upwind mix of **air** tiles along the local wind. Period-20 only.
+    /// Buried / surface heat stays put — wind should not drain a lake or
+    /// the geothermal profile.
+    pub(crate) fn advect_air(&mut self, world: Option<&World>, wind: &crate::wind::Wind) {
+        let mix = self.config.wind_mix.clamp(0.0, 1.0);
+        if mix < 1e-4 || self.cells.is_empty() {
+            return;
+        }
+        let snap = self.cells.clone();
+        for (&(hx, hy), &t) in &snap {
+            match self.props_cache.get(&(hx, hy)).map(|p| p.layer) {
+                Some(TileLayer::Buried { .. }) | Some(TileLayer::Surface { .. }) => continue,
+                _ => {}
+            }
+            let (vx, vy) = wind.vector_at(world, hx, hy);
+            let ax = (vx.abs() * 0.65 * mix).clamp(0.0, 0.50);
+            let ay = (vy.abs() * 0.40 * mix).clamp(0.0, 0.30);
+            if ax < 1e-5 && ay < 1e-5 {
+                continue;
+            }
+            let mut n = t;
+            if ax > 1e-5 {
+                let src = if vx > 0.0 { hx - 1 } else { hx + 1 };
+                if let Some(sx) = self.wrap_hx(src) {
+                    if self.accepts(sx, hy) {
+                        let up = *snap.get(&(sx, hy)).unwrap_or(&t);
+                        n = n * (1.0 - ax) + up * ax;
+                    }
+                }
+            }
+            if ay > 1e-5 {
+                let src_hy = if vy > 0.0 { hy - 1 } else { hy + 1 };
+                if self.accepts(hx, src_hy) {
+                    let up = *snap.get(&(hx, src_hy)).unwrap_or(&t);
+                    n = n * (1.0 - ay) + up * ay;
+                }
+            }
+            self.cells.insert((hx, hy), n);
+        }
     }
 
     /// Pairwise temperature diffusion. Vertical mix is gentle so night air
@@ -763,6 +813,46 @@ mod tests {
             "humid night {:.1} should stay warmer than dry {:.1}",
             wet.mean(),
             dry.mean()
+        );
+    }
+
+    #[test]
+    fn wind_advects_air_heat_downwind() {
+        let (mut t, h) = demo_temp();
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.day_amp_c = 0.0;
+        t.config.sky_relax = 0.0;
+        t.config.min_relax = 0.0;
+        t.config.diffuse_alpha = 0.0;
+        t.config.wind_mix = 1.0;
+        t.fill_initial(0);
+        let b = t.bounds.expect("demo bounds");
+        let hy = (b.hy_min + b.hy_max) / 2;
+        let mid = (b.hx_min + b.hx_max) / 2;
+        for hx in b.hx_min..=b.hx_max {
+            t.cells.insert((hx, hy), if hx < mid { 28.0 } else { 2.0 });
+        }
+        let p = WorldgenParams::default();
+        let mut wind = crate::wind::Wind::climate(
+            4,
+            0.0,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        for hx in b.hx_min..=b.hx_max {
+            wind.field.insert((hx, hy), (0.80, 0.0));
+        }
+        let before = t.at_tile(mid, hy);
+        t.step(None, &h, 0, Some(&wind));
+        let after = t.at_tile(mid, hy);
+        assert!(
+            after > before + 1.5,
+            "downwind air at hx={mid} should warm ({before:.1} → {after:.1})"
         );
     }
 

@@ -20,7 +20,7 @@
 //! - `K` — toggle karst dissolution (surface limestone + slow groundwater)
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle humidity tile diagnostic (default on)
-//! - `V` — toggle wind streak overlay (default off; placeholder visual)
+//! - `V` — toggle wind streak overlay (local field arrows; default off)
 //! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
 //! - `T` — toggle temperature heatmap overlay
 //! - `U` — toggle ground saturation heatmap (pores + free water)
@@ -1419,7 +1419,19 @@ async fn main() {
             );
         }
         if wind_streaks_overlay {
-            draw_wind_streaks(&scene.wind, scene.world.tick, sw, sh);
+            draw_wind_streaks(
+                &scene.wind,
+                Some(&scene.world),
+                scene.world.tick,
+                origin_x,
+                origin_y,
+                cell_px,
+                scene.params.bedrock_floor_y,
+                scene.params.wrap_x,
+                scene.params.width_cols,
+                sw,
+                sh,
+            );
         }
 
         // Temperature heatmap overlay (blue cold → red hot).

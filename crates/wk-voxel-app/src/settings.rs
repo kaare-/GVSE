@@ -1340,8 +1340,8 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Max parcels", 1.0..64.0, &mut max_parcels);
                     labeled_slider(ui, hash!(), "Visual min humidity", 1.0..120.0, &mut self.cloud.coag_min_hum);
                     labeled_slider(ui, hash!(), "N streak wetness scale", 40.0..500.0, &mut self.cloud.downpour_mass);
-                    labeled_slider(ui, hash!(), "Vapor rise deck above sea", 8.0..160.0, &mut cloud_alt);
-                    labeled_slider(ui, hash!(), "Visual min above sea", 4.0..120.0, &mut coag_min_alt);
+                    labeled_slider(ui, hash!(), "Vapor rise deck above ground", 8.0..160.0, &mut cloud_alt);
+                    labeled_slider(ui, hash!(), "Visual min above ground", 4.0..120.0, &mut coag_min_alt);
                     labeled_slider(
                         ui,
                         hash!(),
