@@ -73,6 +73,31 @@ pub struct TempConfig {
     /// Constant heat added each thermal step to the deepest buried band
     /// (slow upward leak once diffusion carries it).
     pub geothermal_flux_c: f32,
+    /// How hard near-surface air tracks the ground (0..1).
+    #[serde(default = "default_near_surface_couple")]
+    pub near_surface_couple: f32,
+    /// Air tiles (in tile units) that couple to the surface.
+    #[serde(default = "default_near_surface_tiles")]
+    pub near_surface_tiles: i32,
+    /// Night cooling held back by wet air (0..1).
+    #[serde(default = "default_hum_night_blanket")]
+    pub hum_night_blanket: f32,
+    /// Wind chill / couple scale on the thermal step (0..1).
+    #[serde(default = "default_wind_mix")]
+    pub wind_mix: f32,
+}
+
+fn default_near_surface_couple() -> f32 {
+    0.35
+}
+fn default_near_surface_tiles() -> i32 {
+    3
+}
+fn default_hum_night_blanket() -> f32 {
+    0.55
+}
+fn default_wind_mix() -> f32 {
+    0.40
 }
 
 impl Default for TempConfig {
@@ -98,6 +123,10 @@ impl Default for TempConfig {
             geothermal_gradient_c_per_cell: 0.35,
             geothermal_relax: 0.018,
             geothermal_flux_c: 0.04,
+            near_surface_couple: default_near_surface_couple(),
+            near_surface_tiles: default_near_surface_tiles(),
+            hum_night_blanket: default_hum_night_blanket(),
+            wind_mix: default_wind_mix(),
         }
     }
 }
@@ -304,12 +333,22 @@ impl Temperature {
     /// One thermal step: layered forcing + inertia + diffusion.
     ///
     /// `world` supplies surface materials. Pass `None` only for air-only tests.
-    pub fn step(&mut self, world: Option<&World>, humidity: &Humidity, tick: u64) {
+    /// `wind` is optional local speed for night chill / couple (read from
+    /// the rebuilt field; cheap if empty).
+    pub fn step(
+        &mut self,
+        world: Option<&World>,
+        humidity: &Humidity,
+        tick: u64,
+        wind: Option<&crate::wind::Wind>,
+    ) {
         if self.cells.is_empty() {
             self.fill_initial(tick);
         }
         let dn = day_night_factor_cfg(tick, &self.climate);
         let cfg = self.config;
+        let wind_abs = wind.map(|w| w.near_surface_abs(world)).unwrap_or(0.0);
+        let wind_k = (wind_abs / 0.14).clamp(0.0, 1.5) * cfg.wind_mix.clamp(0.0, 1.0);
         let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
         // Lowest world-y tile band (= deepest underground).
         let mut deepest_hy = i32::MAX;
@@ -331,30 +370,67 @@ impl Temperature {
             let t = self.at_tile(hx, hy);
             let next = match props.layer {
                 TileLayer::Air => {
-                    let shade =
-                        (humidity.at_tile(hx, hy) / cfg.hum_shade_ref.max(1.0)).clamp(0.0, 1.0);
-                    let solar = cfg.solar_heat_c
+                    let tc = self.tile_cols.max(1);
+                    let surf = self.column_surface_y_estimate(world, hx);
+                    let mid = hy * tc + tc / 2;
+                    let height_above = (mid - surf).max(0);
+                    let band = cfg.near_surface_tiles.max(1) * tc;
+                    let shade = humidity_shade_factor(humidity, hx, hy, &cfg);
+                    let in_solar_band = height_above <= tc;
+                    let solar_base = cfg.solar_heat_c
                         * dn.max(0.0)
                         * (1.0 - cfg.cloud_shade * shade);
-                    let cool = cfg.night_cool_c * (-dn).max(0.0);
+                    // Full insolation at the skin; a weaker, still-shaded
+                    // term aloft so a humid column actually cools the
+                    // field mean (clouds_shade test) without cooking the sky.
+                    let solar = if in_solar_band {
+                        solar_base
+                    } else {
+                        solar_base * 0.25
+                    };
+                    let night = (-dn).max(0.0);
+                    let blanket =
+                        (cfg.hum_night_blanket * cfg.cloud_shade * shade).clamp(0.0, 0.9);
+                    let cool_scale =
+                        (1.0 - blanket) * (1.0 + 0.40 * wind_k * (1.0 - blanket * 0.5));
+                    let cool = if in_solar_band {
+                        cfg.night_cool_c * night * cool_scale
+                    } else {
+                        cfg.night_cool_c * night * 0.25 * cool_scale
+                    };
                     let skin = self.skin_temp_on(world, hx, hy, tick);
+                    let mut target = skin;
+                    if height_above <= band && cfg.near_surface_couple > 0.0 {
+                        let surf_hy = surf.div_euclid(tc);
+                        let surf_t = self.at_tile(hx, surf_hy);
+                        let falloff = 1.0
+                            - (height_above as f32 / band as f32).clamp(0.0, 1.0);
+                        let couple = ((cfg.near_surface_couple + 0.25 * wind_k) * falloff)
+                            .clamp(0.0, 0.90);
+                        target = skin * (1.0 - couple) + surf_t * couple;
+                    }
                     let relax = cfg.sky_relax.clamp(cfg.min_relax, cfg.max_relax);
                     let n = t + solar - cool;
-                    n + (skin - n) * relax
+                    n + (target - n) * relax
                 }
                 TileLayer::Surface { watery } => {
-                    let shade =
-                        (humidity.at_tile(hx, hy) / cfg.hum_shade_ref.max(1.0)).clamp(0.0, 1.0);
+                    let shade = humidity_shade_factor(humidity, hx, hy, &cfg);
                     let solar = cfg.solar_heat_c
                         * dn.max(0.0)
                         * (1.0 - cfg.cloud_shade * shade)
                         * (1.0 - props.albedo.clamp(0.0, 0.95));
-                    let cool_scale = if watery {
+                    let water_scale = if watery {
                         cfg.water_night_cool_scale
                     } else {
                         1.0
                     };
-                    let cool = cfg.night_cool_c * (-dn).max(0.0) * cool_scale;
+                    let night = (-dn).max(0.0);
+                    let blanket =
+                        (cfg.hum_night_blanket * cfg.cloud_shade * shade).clamp(0.0, 0.9);
+                    let cool_scale = water_scale
+                        * (1.0 - blanket)
+                        * (1.0 + 0.45 * wind_k * (1.0 - blanket * 0.5));
+                    let cool = cfg.night_cool_c * night * cool_scale;
                     let skin = self.skin_temp_on(world, hx, hy, tick);
                     let relax = (cfg.sky_relax
                         / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale))
@@ -378,7 +454,8 @@ impl Temperature {
             };
             self.cells.insert((hx, hy), next);
         }
-        self.diffuse(cfg.diffuse_alpha);
+        let alpha = (cfg.diffuse_alpha * (1.0 + 0.5 * wind_k)).clamp(0.0, 0.25);
+        self.diffuse(alpha);
     }
 
     /// Pairwise temperature diffusion. Vertical mix is gentle so night air
@@ -423,6 +500,14 @@ impl Temperature {
             }
         }
     }
+}
+
+fn humidity_shade_factor(humidity: &Humidity, hx: i32, hy: i32, cfg: &TempConfig) -> f32 {
+    let mut peak = humidity.at_tile(hx, hy);
+    for i in 1..=4 {
+        peak = peak.max(humidity.at_tile(hx, hy + i));
+    }
+    (peak / cfg.hum_shade_ref.max(1.0)).clamp(0.0, 1.0)
 }
 
 fn tile_thermal_props(
@@ -617,8 +702,8 @@ mod tests {
         let (mut day, h) = demo_temp();
         let (mut night, _) = demo_temp();
         for _ in 0..8 {
-            day.step(None, &h, 0);
-            night.step(None, &h, DEMO_DAY_TICKS / 2);
+            day.step(None, &h, 0, None);
+            night.step(None, &h, DEMO_DAY_TICKS / 2, None);
         }
         assert!(
             day.mean() > night.mean() + 1.0,
@@ -642,14 +727,42 @@ mod tests {
             }
         }
         for _ in 0..6 {
-            clear.step(None, &h_clear, 0);
-            cloudy.step(None, &h_cloud, 0);
+            clear.step(None, &h_clear, 0, None);
+            cloudy.step(None, &h_cloud, 0, None);
         }
         assert!(
             clear.mean() > cloudy.mean() + 0.3,
             "clear {:.1} should warm more than cloudy {:.1}",
             clear.mean(),
             cloudy.mean()
+        );
+    }
+
+    #[test]
+    fn wet_air_blankets_night_cooling() {
+        let (mut dry, h_dry) = demo_temp();
+        let (mut wet, mut h_wet) = demo_temp();
+        if let Some(b) = h_wet.bounds {
+            for hy in b.hy_min..=b.hy_max {
+                for hx in b.hx_min..=b.hx_max {
+                    h_wet.cells.insert((hx, hy), 400.0);
+                }
+            }
+        }
+        for t in [&mut dry, &mut wet] {
+            t.config.hum_night_blanket = 0.85;
+            t.config.solar_heat_c = 0.0;
+            t.config.diffuse_alpha = 0.0;
+        }
+        for _ in 0..8 {
+            dry.step(None, &h_dry, DEMO_DAY_TICKS / 2, None);
+            wet.step(None, &h_wet, DEMO_DAY_TICKS / 2, None);
+        }
+        assert!(
+            wet.mean() > dry.mean() + 0.25,
+            "humid night {:.1} should stay warmer than dry {:.1}",
+            wet.mean(),
+            dry.mean()
         );
     }
 
@@ -728,7 +841,7 @@ mod tests {
             p.sky_ceiling_y,
         );
         for i in 0..5 {
-            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD);
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
         }
         let pond_t = t.at_cell(pond_x0 + 1, sea + 3);
         let dry_t = t.at_cell(dry_x0 + 1, sea + 1);
@@ -768,7 +881,12 @@ mod tests {
         let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y);
         // One climate "night" worth of thermal steps.
         for i in 0..8 {
-            t.step(Some(&world), &h, DEMO_DAY_TICKS / 2 + i * TEMP_STEP_PERIOD);
+            t.step(
+                Some(&world),
+                &h,
+                DEMO_DAY_TICKS / 2 + i * TEMP_STEP_PERIOD,
+                None,
+            );
         }
         let deep_y = sea - 16;
         let deep_t = t.at_cell(x0 + 1, deep_y);
@@ -810,7 +928,7 @@ mod tests {
         let deep_y = sea - 16;
         let before = t.at_cell(x0 + 1, deep_y);
         for i in 0..30 {
-            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD);
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
         }
         let after = t.at_cell(x0 + 1, deep_y);
         assert!(
@@ -849,8 +967,8 @@ mod tests {
         }
         let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y);
         for i in 0..6 {
-            t_snow.step(Some(&snow_w), &h, i * TEMP_STEP_PERIOD);
-            t_rock.step(Some(&rock_w), &h, i * TEMP_STEP_PERIOD);
+            t_snow.step(Some(&snow_w), &h, i * TEMP_STEP_PERIOD, None);
+            t_rock.step(Some(&rock_w), &h, i * TEMP_STEP_PERIOD, None);
         }
         let ts = t_snow.at_cell(x0 + 1, sea + 1);
         let tr = t_rock.at_cell(x0 + 1, sea + 1);

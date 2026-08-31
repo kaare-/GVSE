@@ -27,6 +27,8 @@ use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
 
+use crate::fasthash::FxHashMap;
+
 /// Inclusive tile-coordinate rectangle.
 ///
 /// When set on a [`Humidity`], diffusion stays inside the box.
@@ -95,8 +97,8 @@ pub struct Humidity {
     /// When true (and [`Self::bounds`] is set), horizontal diffusion
     /// wraps at `hx_min`/`hx_max` so the atmosphere joins on a ring.
     pub wrap_x: bool,
-    /// Sub-tile advection residual (shared climate wind). Used so
-    /// clouds crawl smoothly instead of jumping whole tiles.
+    /// Legacy residual from the integer-step advect path. Flux
+    /// advection keeps these at zero; field stays for old saves.
     #[serde(default)]
     pub advect_rx: f32,
     #[serde(default)]
@@ -546,58 +548,25 @@ const CONVECTION_MAX_GAIN: f32 = 2.0;
         });
     }
 
-    /// Advect atmospheric mass by a uniform climate wind `(vx, vy)`
-    /// in tiles/tick. Fractional remainders accumulate in
-    /// [`Self::advect_rx`] / [`Self::advect_ry`] so motion stays smooth.
+    /// Advect atmospheric mass by climate wind `(vx, vy)` in tiles/tick.
     ///
-    /// Mass-conserving: every gram lands on an accepted tile (vertical
-    /// edges are Neumann — mass that would leave sticks at the rim).
+    /// Per-tick **fractional flux** (not an integer whole-field step).
+    /// `|v|` is the share of mass that leaves toward the neighbour this
+    /// tick, capped at 1. Mass-conserving; vertical edges are Neumann.
+    ///
+    /// [`Self::advect_rx`] / [`Self::advect_ry`] are leftover from the
+    /// residual/`trunc` path and stay zero so old saves do not jump.
     pub fn advect(&mut self, vx: f32, vy: f32) {
-        if self.cells.is_empty() || (vx == 0.0 && vy == 0.0) {
-            return;
-        }
-        self.advect_rx += vx;
-        self.advect_ry += vy;
-        let dx = self.advect_rx.trunc() as i32;
-        let dy = self.advect_ry.trunc() as i32;
-        self.advect_rx -= dx as f32;
-        self.advect_ry -= dy as f32;
-        if dx == 0 && dy == 0 {
-            return;
-        }
-        let snap = self.cells.clone();
-        self.cells.clear();
-        for ((hx, hy), mass) in snap {
-            if mass.abs() < 1e-9 {
-                continue;
-            }
-            let nhx = match self.wrap_hx(hx + dx) {
-                Some(x) => x,
-                None => hx, // shouldn't happen with wrap helper
-            };
-            let mut nhy = hy + dy;
-            if !self.accepts(nhx, nhy) {
-                // Vertical Neumann wall — keep y, still take wrapped x.
-                nhy = hy;
-                if !self.accepts(nhx, nhy) {
-                    *self.cells.entry((hx, hy)).or_insert(0.0) += mass;
-                    continue;
-                }
-            }
-            *self.cells.entry((nhx, nhy)).or_insert(0.0) += mass;
-        }
-        let bounds = self.bounds;
-        self.cells.retain(|&(hx, hy), v| {
-            v.abs() > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
-        });
+        self.advect_inner(vx, vy, None);
     }
 
-    /// [`Self::advect`] then lift on columns that climb the **live** hill.
+    /// [`Self::advect`] shaped by the rebuilt local wind heatmap
+    /// ([`crate::wind::Wind::vector_at`]) — terrain, thermal, swirl —
+    /// then orographic lift and wind-driven vertical mixing.
     ///
-    /// Uniform `(vx, vy)` cannot see slope. [`crate::wind::Wind::vy_at`]
-    /// already walks [`crate::worldgen::live_surface_at`]; this spends that
-    /// lift on the vapour field so an eroded ridge does not keep lofting
-    /// mass the seed profile invented.
+    /// Free-air height is cached per occupied column so the flux pass
+    /// does not walk the live surface once per seat (that was the
+    /// humidity-advect FPS cliff).
     pub fn advect_with_surface(
         &mut self,
         vx: f32,
@@ -605,8 +574,294 @@ const CONVECTION_MAX_GAIN: f32 = 2.0;
         wind: &crate::wind::Wind,
         world: &crate::grid::World,
     ) {
-        self.advect(vx, vy);
+        let free_air = self.build_free_air_cache(wind, world);
+        self.advect_inner(vx, vy, Some((wind, world, &free_air)));
+        self.wind_mix(wind.mix_strength(vx, vy), Some((wind, world, &free_air)));
         self.apply_orographic_lift(wind, Some(world));
+    }
+
+    /// Precompute [`Self::free_air_hy`] for every occupied column (±1).
+    fn build_free_air_cache(
+        &self,
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+    ) -> FxHashMap<i32, i32> {
+        let mut cache = FxHashMap::default();
+        for &(hx, _) in self.cells.keys() {
+            for dx in -1..=1 {
+                let nx = match self.wrap_hx(hx + dx) {
+                    Some(x) => x,
+                    None => continue,
+                };
+                cache
+                    .entry(nx)
+                    .or_insert_with(|| self.free_air_hy(wind, world, nx));
+            }
+        }
+        cache
+    }
+
+    fn free_air_cached(
+        &self,
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+        hx: i32,
+        cache: &FxHashMap<i32, i32>,
+    ) -> i32 {
+        cache
+            .get(&hx)
+            .copied()
+            .unwrap_or_else(|| self.free_air_hy(wind, world, hx))
+    }
+
+    fn advect_inner(
+        &mut self,
+        climate_vx: f32,
+        climate_vy: f32,
+        surface: Option<(
+            &crate::wind::Wind,
+            &crate::grid::World,
+            &FxHashMap<i32, i32>,
+        )>,
+    ) {
+        if self.cells.is_empty() {
+            return;
+        }
+        if climate_vx == 0.0 && climate_vy == 0.0 && surface.is_none() {
+            return;
+        }
+        self.advect_rx = 0.0;
+        self.advect_ry = 0.0;
+
+        self.flux_axis(climate_vx, climate_vy, surface, true);
+        self.flux_axis(climate_vx, climate_vy, surface, false);
+
+        if let Some((wind, world, cache)) = surface {
+            self.lift_buried_to_free_air(wind, world, cache);
+        }
+        let bounds = self.bounds;
+        self.cells.retain(|&(hx, hy), v| {
+            v.abs() > 1e-6 && bounds.map(|b| b.contains(hx, hy)).unwrap_or(true)
+        });
+    }
+
+    /// Donor-cell flux along one axis. `|v|` is the fraction of mass that
+    /// leaves toward the neighbour this tick (capped at 1).
+    fn flux_axis(
+        &mut self,
+        climate_vx: f32,
+        climate_vy: f32,
+        surface: Option<(
+            &crate::wind::Wind,
+            &crate::grid::World,
+            &FxHashMap<i32, i32>,
+        )>,
+        horizontal: bool,
+    ) {
+        let snap = self.cells.clone();
+        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        for (&(hx, hy), &mass) in &snap {
+            if mass.abs() < 1e-9 {
+                continue;
+            }
+            let (vx, vy) = match surface {
+                Some((wind, world, _)) => wind.vector_at(Some(world), hx, hy),
+                None => (climate_vx, climate_vy),
+            };
+            let v = if horizontal { vx } else { vy };
+            let step = v.clamp(-1.0, 1.0);
+            if step.abs() < 1e-9 {
+                continue;
+            }
+            let leave = mass * step.abs();
+            if leave < 1e-12 {
+                continue;
+            }
+            let (tx, ty) = if horizontal {
+                let dir = if step > 0.0 { 1 } else { -1 };
+                let nhx = match self.wrap_hx(hx + dir) {
+                    Some(x) => x,
+                    None => continue,
+                };
+                let mut nhy = hy;
+                if let Some((wind, world, cache)) = surface {
+                    nhy = self.free_air_cached(wind, world, nhx, cache).max(nhy);
+                    if !self.accepts(nhx, nhy) {
+                        continue;
+                    }
+                } else if !self.accepts(nhx, nhy) {
+                    continue;
+                }
+                (nhx, nhy)
+            } else {
+                let dir = if step > 0.0 { 1 } else { -1 };
+                let nhy = hy + dir;
+                let mut dest_hy = nhy;
+                if let Some((wind, world, cache)) = surface {
+                    dest_hy = self.free_air_cached(wind, world, hx, cache).max(nhy);
+                }
+                if !self.accepts(hx, dest_hy) {
+                    continue;
+                }
+                (hx, dest_hy)
+            };
+            *deltas.entry((hx, hy)).or_insert(0.0) -= leave;
+            *deltas.entry((tx, ty)).or_insert(0.0) += leave;
+        }
+        for (k, d) in deltas {
+            if d < 0.0 {
+                if let Some(e) = self.cells.get_mut(&k) {
+                    *e = (*e + d).max(0.0);
+                }
+                continue;
+            }
+            if self.accepts(k.0, k.1) {
+                *self.cells.entry(k).or_insert(0.0) += d;
+            }
+        }
+        self.cells.retain(|_, v| *v > 1e-6);
+    }
+
+    /// High wind mixes the column so vapour does not translate as a slab.
+    pub fn wind_mix(
+        &mut self,
+        mix: f32,
+        surface: Option<(
+            &crate::wind::Wind,
+            &crate::grid::World,
+            &FxHashMap<i32, i32>,
+        )>,
+    ) {
+        let mix = mix.clamp(0.0, 1.0);
+        if mix < 1e-4 || self.cells.is_empty() {
+            return;
+        }
+        let alpha = (0.04 + 0.14 * mix).clamp(0.0, 0.20);
+        let snap = self.cells.clone();
+        let mut keys: Vec<(i32, i32)> = snap.keys().copied().collect();
+        keys.sort_unstable();
+        keys.dedup();
+        let mut deltas: HashMap<(i32, i32), f32> = HashMap::new();
+        for &(hx, hy) in &keys {
+            let val = *snap.get(&(hx, hy)).unwrap_or(&0.0);
+            let above = (hx, hy + 1);
+            if !self.accepts(above.0, above.1) {
+                continue;
+            }
+            if let Some((wind, world, cache)) = surface {
+                let air = self.free_air_cached(wind, world, hx, cache);
+                if hy < air || above.1 < air {
+                    continue;
+                }
+            }
+            let n_val = *snap.get(&above).unwrap_or(&0.0);
+            let flow = (val - n_val) * alpha;
+            if flow.abs() < 1e-9 {
+                continue;
+            }
+            *deltas.entry((hx, hy)).or_insert(0.0) -= flow;
+            *deltas.entry(above).or_insert(0.0) += flow;
+        }
+        let sink = 0.03 * mix;
+        if sink > 1e-5 {
+            for &(hx, hy) in &keys {
+                let val = *snap.get(&(hx, hy)).unwrap_or(&0.0);
+                if val <= 1e-9 {
+                    continue;
+                }
+                let below = hy - 1;
+                if !self.accepts(hx, below) {
+                    continue;
+                }
+                if let Some((wind, world, cache)) = surface {
+                    if below < self.free_air_cached(wind, world, hx, cache) {
+                        continue;
+                    }
+                }
+                let take = val * sink;
+                *deltas.entry((hx, hy)).or_insert(0.0) -= take;
+                *deltas.entry((hx, below)).or_insert(0.0) += take;
+            }
+        }
+        for (k, d) in deltas {
+            if d < 0.0 {
+                if let Some(e) = self.cells.get_mut(&k) {
+                    *e = (*e + d).max(0.0);
+                }
+                continue;
+            }
+            if self.accepts(k.0, k.1) {
+                *self.cells.entry(k).or_insert(0.0) += d;
+            }
+        }
+        self.cells.retain(|_, v| *v > 1e-6);
+    }
+
+    /// First tile row whose centre sits in free air above the live crest.
+    fn free_air_hy(
+        &self,
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+        hx: i32,
+    ) -> i32 {
+        let tc = self.tile_cols.max(1);
+        let base = self.atmosphere_base_y(world, wind, hx);
+        ((base + 1 - tc / 2).max(0) + tc - 1) / tc
+    }
+
+    fn atmosphere_base_y(
+        &self,
+        world: &crate::grid::World,
+        wind: &crate::wind::Wind,
+        hx: i32,
+    ) -> i32 {
+        let tc = self.tile_cols.max(1);
+        let gx = world.wrap_x(hx * tc + tc / 2);
+        let mut y = crate::worldgen::live_surface_at(
+            world,
+            wind.seed,
+            gx,
+            wind.sea_level_y,
+            wind.width_cols,
+        );
+        for _ in 0..96 {
+            match world.get_cell(gx, y + 1) {
+                Some(c) if c.material != wk_material::MaterialId::Air => y += 1,
+                Some(c) if c.sat.0 > crate::GRAIN_REPOSE_HAZE_MAX => y += 1,
+                _ => break,
+            }
+        }
+        y
+    }
+
+    fn lift_buried_to_free_air(
+        &mut self,
+        wind: &crate::wind::Wind,
+        world: &crate::grid::World,
+        cache: &FxHashMap<i32, i32>,
+    ) {
+        let keys: Vec<(i32, i32)> = self.cells.keys().copied().collect();
+        let mut moves: Vec<((i32, i32), (i32, i32), f32)> = Vec::new();
+        for (hx, hy) in keys {
+            let air = self.free_air_cached(wind, world, hx, cache);
+            if hy >= air {
+                continue;
+            }
+            let Some(&mass) = self.cells.get(&(hx, hy)) else {
+                continue;
+            };
+            if mass <= 1e-9 || !self.accepts(hx, air) {
+                continue;
+            }
+            moves.push(((hx, hy), (hx, air), mass));
+        }
+        for (from, to, mass) in moves {
+            if let Some(e) = self.cells.get_mut(&from) {
+                *e -= mass;
+            }
+            *self.cells.entry(to).or_insert(0.0) += mass;
+        }
+        self.cells.retain(|_, v| v.abs() > 1e-6);
     }
 
     /// Move a lift-fraction of each tile one step up where the live
@@ -731,6 +986,74 @@ mod tests {
             h.at_tile(3, 2) > 50.0,
             "mass should have shifted +1 tile in x, got {}",
             h.at_tile(3, 2)
+        );
+    }
+
+    #[test]
+    fn fractional_flux_moves_a_share_and_conserves() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        h.wrap_x = true;
+        h.add(8, 8, 100.0);
+        let before = h.total_mass();
+        h.advect(0.25, 0.0);
+        assert!((h.total_mass() - before).abs() < 1e-4);
+        let stay = h.at_tile(2, 2);
+        let moved = h.at_tile(3, 2);
+        assert!(
+            (stay - 75.0).abs() < 1e-3 && (moved - 25.0).abs() < 1e-3,
+            "0.25 flux should leave 75 / move 25 (stay={stay} moved={moved})"
+        );
+    }
+
+    #[test]
+    fn local_wind_field_steers_flux_off_the_climate_mean() {
+        use crate::wind::Wind;
+        use crate::worldgen::WorldgenParams;
+        use crate::grid::World;
+
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.20,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.config.terrain_drive = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.field_smooth = 0.0;
+        let world = World::new(p.seed);
+        let mut h = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        h.wrap_x = true;
+        // Sit in free air so lift-buried does not hoist the fixture.
+        let gy = p.sea_level_y + 24;
+        h.add(8, gy, 100.0);
+        let (hx, hy) = h.tile_of(8, gy);
+        wind.field.insert((hx, hy), (-0.50, 0.0));
+        let before = h.total_mass();
+        h.advect_with_surface(0.20, 0.0, &wind, &world);
+        assert!((h.total_mass() - before).abs() < 0.5);
+        let left = match h.wrap_tile_x(hx - 1) {
+            Some(x) => h.at_tile(x, hy),
+            None => 0.0,
+        };
+        let right = match h.wrap_tile_x(hx + 1) {
+            Some(x) => h.at_tile(x, hy),
+            None => 0.0,
+        };
+        assert!(
+            left > right,
+            "local −x field should send more mass left than climate +x (L={left} R={right})"
         );
     }
 

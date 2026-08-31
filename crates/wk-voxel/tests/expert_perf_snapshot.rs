@@ -150,7 +150,7 @@ fn stack_tick(s: &mut Scene) -> (Duration, Duration, Duration) {
     }
     if temperature_step_due(s.world.tick) {
         let t = s.world.tick;
-        s.temperature.step(Some(&s.world), &s.humidity, t);
+        s.temperature.step(Some(&s.world), &s.humidity, t, None);
     }
     if s.phase.enabled
         && s.phase.enable_cold_avalanche

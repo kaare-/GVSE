@@ -66,6 +66,7 @@ use wk_voxel::{
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, plan_active,
     pore_wetness_with, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg,
     set_parallel_enabled, step_carbon_budget, support_map_due, temperature_step_due, tick_with_life,
+    WIND_FIELD_PERIOD,
     wake_competent_bodies_all, wake_unsupported_grains,
     wake_unstable_slopes, GeotechOverlayMode,
     SimSnapshot, WorldgenParams,
@@ -515,8 +516,19 @@ async fn main() {
         // Sync live settings into scene subsystems.
         scene.wind.climate_vx = settings.wind_vx;
         scene.wind.variance = settings.wind_variance;
+        scene.wind.config = settings.wind;
         let wind_vx = scene.wind.effective_vx(scene.world.tick);
         let wind_vy = scene.wind.effective_vy(scene.world.tick);
+        if scene.world.tick % WIND_FIELD_PERIOD == 0 || scene.wind.field.is_empty() {
+            let occupied: Vec<(i32, i32)> = scene.humidity.cells.keys().copied().collect();
+            scene.wind.rebuild_field(
+                Some(&scene.world),
+                Some(&scene.temperature),
+                scene.world.tick,
+                &occupied,
+                None,
+            );
+        }
         scene.temperature.config = settings.temp;
         scene.temperature.climate = settings.climate;
         settings.apply_pop_caps(&mut scene.organisms);
@@ -561,12 +573,13 @@ async fn main() {
                 );
             }
             if settings.evap_on {
+                let evap_wind = scene.wind.near_surface_abs(Some(&scene.world));
                 apply_evaporation_into_humidity_climate(
                     &mut scene.world,
                     &mut scene.humidity,
                     &settings.evap,
                     Some(&scene.temperature),
-                    wind_vx.abs().max(wind_vy.abs()),
+                    evap_wind,
                 );
             }
             // Vapor drifts with the wind, then warm air rises and
@@ -709,7 +722,12 @@ async fn main() {
                 let tick_no = scene.world.tick;
                 scene
                     .temperature
-                    .step(Some(&scene.world), &scene.humidity, tick_no);
+                    .step(
+                        Some(&scene.world),
+                        &scene.humidity,
+                        tick_no,
+                        Some(&scene.wind),
+                    );
             }
             // Cold wet-sand / snow / hillside ice spill onto lake ice
             // after the thermal step, then phase may break thin lids.

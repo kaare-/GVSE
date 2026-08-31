@@ -124,6 +124,25 @@ scale.
 The coarse tile field is therefore not a hack. For a diffuse quantity that
 changes everywhere at once, coarse tiles are the right abstraction. Keep it.
 
+## Climate loop (wind × T × humidity) — budgeted
+
+The coupled weather stack is:
+
+- **Wind heatmap** — `Wind::rebuild_field` every `WIND_FIELD_PERIOD` (4)
+  ticks, only on wet seats + a 1-tile halo + a thin near-surface band.
+  Misses in `vector_at` return the climate mean (no live-surface walk).
+- **Humidity** — donor-cell fractional flux through that heatmap, with a
+  per-column free-air cache so buried seats lift over the crest without
+  scanning the hill once per tile. Convection stays `buoyant_rise_thermal`
+  (per-row T mean, never `Temperature::mean()` in the loop).
+- **Temperature** — still period 20. Night humidity blanket, wind mix,
+  and near-surface air↔ground couple live *inside* that step. Do not
+  run a full-field `advect_air_with_wind` every tick.
+
+Do **not** resurrect N lobe-mask cloud banks, H per-cell haze as the
+default draw, or a full-sky wind rebuild every frame. Those were the
+FPS cliff that forced the earlier revert.
+
 ## Decided: no cloud animation at all — render the vapour field
 
 **Design call (playtest, 2026-08-26).** Drop cloud parcels entirely rather than

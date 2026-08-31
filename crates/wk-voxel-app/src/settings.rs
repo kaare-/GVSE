@@ -9,7 +9,8 @@ use wk_voxel::{
     list_all_presets, load_preset, sanitize_preset_name, save_preset, CarbonBudget, CarbonConfig,
     ClimateConfig, CloudConfig, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig,
     FungiConfig, Genome, GrainConfig, KarstConfig, OrographicConfig, PerfConfig, PhaseConfig,
-    PlantGenePreset, PlantGrowthCaps, RainConfig, SimPreset, SporeBankConfig, TempConfig, World,
+    PlantGenePreset, PlantGrowthCaps, RainConfig, SimPreset, SporeBankConfig, TempConfig, WindConfig,
+    World,
     WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
     MAX_STEM_MODULES, PRESET_DIR,
 };
@@ -160,6 +161,8 @@ pub struct SimSettings {
     pub wind_vx: f32,
     /// Natural variance 0..1 — wind force and direction wander around the mean.
     pub wind_variance: f32,
+    /// Local field drivers (terrain / thermal / swirl / canopy / smooth).
+    pub wind: WindConfig,
     pub humidity_diffusion_alpha: f32,
     /// Scratch f32s for material range sliders (synced → world hydro overrides).
     pub mat_perm_min: [f32; MATERIAL_COUNT],
@@ -294,6 +297,7 @@ impl SimSettings {
             competent_max_rolls: CompetentFallConfig::default().max_roll_events as f32,
             wind_vx: 0.05,
             wind_variance: 0.55,
+            wind: WindConfig::default(),
             humidity_diffusion_alpha: 0.15,
             mat_perm_min,
             mat_perm_max,
@@ -838,6 +842,27 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Solar heat / step", 0.0..1.5, &mut self.temp.solar_heat_c);
                     labeled_slider(ui, hash!(), "Night cool / step", 0.0..1.5, &mut self.temp.night_cool_c);
                     labeled_slider(ui, hash!(), "Cloud shade (thermal)", 0.0..1.0, &mut self.temp.cloud_shade);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Near-surface air ↔ ground",
+                        0.0..0.85,
+                        &mut self.temp.near_surface_couple,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Humidity night blanket",
+                        0.0..1.0,
+                        &mut self.temp.hum_night_blanket,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Wind ↔ temperature mix",
+                        0.0..1.0,
+                        &mut self.temp.wind_mix,
+                    );
                     labeled_slider(ui, hash!(), "Sea bias (C)", -10.0..5.0, &mut self.temp.sea_bias_c);
                     labeled_slider(
                         ui,
@@ -1231,6 +1256,39 @@ impl SimSettings {
                         "Natural variance",
                         0.0..1.0,
                         &mut self.wind_variance,
+                    );
+                    ui.label(
+                        None,
+                        "Local field (V overlay): terrain / thermal / swirl reshape the climate mean. Rebuilt every 4 ticks on wet tiles + a thin surface band.",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Terrain drive",
+                        0.0..2.0,
+                        &mut self.wind.terrain_drive,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Thermal drive",
+                        0.0..2.0,
+                        &mut self.wind.thermal_drive,
+                    );
+                    labeled_slider(ui, hash!(), "Swirl / eddies", 0.0..2.0, &mut self.wind.swirl);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Canopy dampen",
+                        0.0..1.0,
+                        &mut self.wind.canopy_dampen,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Field smooth",
+                        0.0..0.9,
+                        &mut self.wind.field_smooth,
                     );
                     labeled_slider(
                         ui,
