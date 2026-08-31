@@ -166,15 +166,42 @@ impl Humidity {
     /// should not evaporate outside the stamped world).
     /// Soft per-tile ceiling so evaporation cannot stockpile unboundedly
     /// when rain / condensation cannot keep up (overnight flood safety).
+    /// This is the hold of **very warm** air ([`Self::SAT_FULL_TEMP_C`]).
     pub const MAX_MASS_PER_TILE: f32 = 2_500.0;
 
-    /// Saturation mass at air temperature (Clausius-lite, cheap).
+    /// Temperature at which a tile holds [`Self::MAX_MASS_PER_TILE`].
     ///
-    /// ~[`Self::MAX_MASS_PER_TILE`] near 18 °C. Cold air holds less, so
-    /// the same vapor is closer to rain / visible cloud.
+    /// 40 °C is "very warm" sky for this climate (hot desert). 100 °C is
+    /// boiling steam — if that were the top, 18 °C air would hold ~2 %
+    /// and the field would rain out constantly.
+    pub const SAT_FULL_TEMP_C: f32 = 40.0;
+    /// Curve is defined down to here; hold floors at a trace so cold
+    /// tiles do not divide-by-zero.
+    pub const SAT_MIN_TEMP_C: f32 = -100.0;
+
+    /// Saturation vapour pressure (hPa), Magnus / August-Roche-Magnus.
+    ///
+    /// Water above 0 °C, ice below. Exponential in T — the natural
+    /// Clausius–Clapeyron shape, not a linear ramp.
+    pub fn sat_vapor_pressure_hpa(temp_c: f32) -> f32 {
+        let t = temp_c.clamp(Self::SAT_MIN_TEMP_C, 100.0);
+        if t >= 0.0 {
+            6.112 * (17.62 * t / (t + 243.12)).exp()
+        } else {
+            6.112 * (22.46 * t / (t + 272.62)).exp()
+        }
+    }
+
+    /// How much vapor a humidity tile can hold at `temp_c`.
+    ///
+    /// Full at [`Self::SAT_FULL_TEMP_C`]. Same mass in colder air is
+    /// closer to rain / visible cloud. A 255-on-a-cell picture is the
+    /// same curve: 40 °C → 255, 0 °C → ~21, −20 °C → ~4, −100 °C → ~0.
     pub fn saturation_mass_at_temp(temp_c: f32) -> f32 {
-        let scale = ((temp_c + 8.0) / 26.0).clamp(0.16, 1.55);
-        Self::MAX_MASS_PER_TILE * scale
+        let full = Self::sat_vapor_pressure_hpa(Self::SAT_FULL_TEMP_C);
+        let here = Self::sat_vapor_pressure_hpa(temp_c);
+        let ratio = (here / full.max(1e-6)).clamp(0.0, 1.0);
+        (Self::MAX_MASS_PER_TILE * ratio).max(0.5)
     }
 
     pub fn add(&mut self, gx: i32, gy: i32, mass: f32) {
@@ -184,6 +211,15 @@ impl Humidity {
     /// Add mass; returns how much was actually accepted under the
     /// per-tile cap ([`Self::MAX_MASS_PER_TILE`]).
     pub fn try_add(&mut self, gx: i32, gy: i32, mass: f32) -> f32 {
+        self.try_add_capped(gx, gy, mass, Self::MAX_MASS_PER_TILE)
+    }
+
+    /// [`Self::try_add`] capped at [`Self::saturation_mass_at_temp`].
+    pub fn try_add_at_temp(&mut self, gx: i32, gy: i32, mass: f32, temp_c: f32) -> f32 {
+        self.try_add_capped(gx, gy, mass, Self::saturation_mass_at_temp(temp_c))
+    }
+
+    fn try_add_capped(&mut self, gx: i32, gy: i32, mass: f32, cap: f32) -> f32 {
         if mass <= 0.0 {
             return 0.0;
         }
@@ -192,7 +228,7 @@ impl Humidity {
             return 0.0;
         }
         let entry = self.cells.entry(key).or_insert(0.0);
-        let room = (Self::MAX_MASS_PER_TILE - *entry).max(0.0);
+        let room = (cap.max(0.5) - *entry).max(0.0);
         let take = mass.min(room);
         *entry += take;
         take
@@ -1267,10 +1303,33 @@ mod tests {
 
     #[test]
     fn saturation_mass_shrinks_in_the_cold() {
-        let warm = Humidity::saturation_mass_at_temp(20.0);
-        let cold = Humidity::saturation_mass_at_temp(-8.0);
-        assert!(warm > cold * 1.8, "cold air must hold much less vapor");
-        assert!(warm <= Humidity::MAX_MASS_PER_TILE * 1.55);
+        let hot = Humidity::saturation_mass_at_temp(Humidity::SAT_FULL_TEMP_C);
+        let mild = Humidity::saturation_mass_at_temp(18.0);
+        let freezing = Humidity::saturation_mass_at_temp(0.0);
+        let arctic = Humidity::saturation_mass_at_temp(-20.0);
+        let dead = Humidity::saturation_mass_at_temp(-100.0);
+        assert!((hot - Humidity::MAX_MASS_PER_TILE).abs() < 1.0);
+        assert!(
+            mild > freezing * 2.5 && freezing > arctic * 2.0,
+            "Clausius–Clapeyron must be steep (18={mild:.0} 0={freezing:.0} -20={arctic:.0})"
+        );
+        assert!(
+            arctic > dead && dead < Humidity::MAX_MASS_PER_TILE * 0.01,
+            "−100 °C holds only a trace (dead={dead:.2})"
+        );
+        assert!(hot > mild);
+    }
+
+    #[test]
+    fn try_add_at_temp_refuses_oversaturated_cold_air() {
+        let mut h = Humidity::new(4);
+        let cap = Humidity::saturation_mass_at_temp(-15.0);
+        let took = h.try_add_at_temp(2, 2, 2_000.0, -15.0);
+        assert!(
+            (took - cap).abs() < 0.5,
+            "cold air should take its sat cap {cap:.1}, took {took:.1}"
+        );
+        assert!((h.at_cell(2, 2) - cap).abs() < 0.5);
     }
 
     #[test]

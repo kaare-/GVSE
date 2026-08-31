@@ -57,7 +57,7 @@ pub fn apply_evaporation(world: &mut World, cfg: &EvapConfig) {
     }
     let (deltas, clear_wet) = collect_evap_deltas(world, cfg, None);
     clear_dry_wet_air_flags(world, &clear_wet);
-    apply_evap_deltas(world, deltas, None);
+    apply_evap_deltas(world, deltas, None, None);
 }
 
 /// Mass-conservative variant of [`apply_evaporation`]. Instead of
@@ -97,7 +97,7 @@ pub fn apply_evaporation_into_humidity_climate(
         collect_evap_deltas(world, cfg, climate)
     };
     clear_dry_wet_air_flags(world, &clear_wet);
-    apply_evap_deltas(world, deltas, Some(humidity));
+    apply_evap_deltas(world, deltas, Some(humidity), temp);
 }
 
 /// Reference `rate_per_tick` is ~18 °C, light breeze, dry air.
@@ -110,9 +110,12 @@ pub(crate) fn evap_climate_rate(
     if base <= 0 {
         return 0;
     }
-    let t_scale = ((temp_c + 8.0) / 26.0).clamp(0.12, 2.4);
+    let sat = crate::humidity::Humidity::saturation_mass_at_temp(temp_c);
+    let t_scale = (crate::humidity::Humidity::sat_vapor_pressure_hpa(temp_c)
+        / crate::humidity::Humidity::sat_vapor_pressure_hpa(18.0))
+    .clamp(0.08, 4.0);
     let w_scale = (0.62 + wind_abs * 10.0).clamp(0.50, 2.0);
-    let rh = (humidity_mass / crate::humidity::Humidity::MAX_MASS_PER_TILE).clamp(0.0, 1.0);
+    let rh = (humidity_mass / sat.max(1.0)).clamp(0.0, 1.0);
     let deficit = (1.0 - rh).clamp(0.20, 1.0);
     let cap = (base * 4).max(1);
     ((base as f32) * t_scale * w_scale * deficit)
@@ -244,6 +247,7 @@ fn apply_evap_deltas(
     world: &mut World,
     deltas: HashMap<(i32, i32), i32>,
     mut humidity: Option<&mut crate::humidity::Humidity>,
+    temp: Option<&crate::temperature::Temperature>,
 ) {
     for ((gx, gy), delta) in deltas {
         let Some(cell) = world.get_cell(gx, gy) else {
@@ -260,7 +264,12 @@ fn apply_evap_deltas(
             if h.column_near_saturated(gx, gy) {
                 0
             } else {
-                h.try_add(gx, gy, want_removed as f32).round() as i32
+                match temp {
+                    Some(t) => h
+                        .try_add_at_temp(gx, gy, want_removed as f32, t.at_cell(gx, gy))
+                        .round() as i32,
+                    None => h.try_add(gx, gy, want_removed as f32).round() as i32,
+                }
             }
         } else {
             want_removed

@@ -202,10 +202,12 @@ thin near-surface band. Humidity uses per-tick fractional flux through
 `vector_at` (free-air height cached per column). Temperature stays on
 period 20. Air integrates solar and night-cool on a climate baseline
 (no day/night skin swap); each air tile then upwind-mixes heat along
-the local wind. The T overlay uses a fixed 6–28 °C ramp so mild sky
-is not all blue. Cloud / haze floors follow the live column, not a
-global sea-level y. No pressure solver — defer cell wind until hydro
-+ thermal are boring.
+the local wind. The T overlay uses a fixed −40..36 °C ramp (ice-white through
+yellow-green at 18 °C to red). Humidity hold follows
+Clausius–Clapeyron (Magnus): full tile at 40 °C, a few percent at
+0 °C, a trace at −100 °C. Cloud / haze floors follow the live
+column, not a global sea-level y. No pressure solver — defer cell
+wind until hydro + thermal are boring.
 
 ## Architecture notes
 

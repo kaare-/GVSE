@@ -325,7 +325,7 @@ fn thermal_rain_factors(
     let air = temp.at_tile(hx, hy);
     let sat = crate::humidity::Humidity::saturation_mass_at_temp(air)
         * (cfg.full_mass / crate::humidity::Humidity::MAX_MASS_PER_TILE).clamp(0.15, 1.0);
-    let sat = sat.max(12.0);
+    let sat = sat.max(1.0);
     let min_mass = cfg.min_mass_to_rain * (sat / cfg.full_mass.max(1.0)).clamp(0.30, 1.35);
     let gx = hx * tile_cols + tile_cols / 2;
     let gy_below = hy * tile_cols - tile_cols;
