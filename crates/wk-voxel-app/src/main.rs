@@ -1388,6 +1388,7 @@ async fn main() {
                 &scene.humidity,
                 &scene.world,
                 &scene.wind,
+                &settings.atmosphere,
                 origin_x,
                 origin_y,
                 cell_px,

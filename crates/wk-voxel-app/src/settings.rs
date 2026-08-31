@@ -1246,6 +1246,31 @@ impl SimSettings {
                         0.0..0.4,
                         &mut self.cloud.buoyant_rise,
                     );
+                    ui.separator();
+                    ui.label(None, "H overlay (hotkey H) — humidity field look.");
+                    if ui.button(
+                        None,
+                        if self.atmosphere.haze_resample {
+                            "Haze resample: ON (bilinear)"
+                        } else {
+                            "Haze resample: OFF (4x4 tiles)"
+                        },
+                    ) {
+                        self.atmosphere.haze_resample = !self.atmosphere.haze_resample;
+                    }
+                    ui.label(
+                        None,
+                        "Min humidity mass painted on H (tile units, 0 = show all).",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Haze min humidity",
+                        0.0..2_500.0,
+                        &mut self.atmosphere.haze_min_mass,
+                    );
+                    self.atmosphere.haze_min_mass =
+                        self.atmosphere.haze_min_mass.clamp(0.0, 2_500.0);
                 });
                 ui.separator();
 
