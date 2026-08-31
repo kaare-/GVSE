@@ -422,7 +422,7 @@ const HUD: &[(&str, LineKind)] = &[
     ("Bottom status line", LineKind::Head),
     ("fps       frames per second (low often means a full sky or flood)", LineKind::Body),
     ("tick      physics steps since this world began", LineKind::Body),
-    ("day/night climate clock (Tab sets day + night lengths)", LineKind::Body),
+    ("day/night climate clock (sun on/off; Tab sets day + night lengths)", LineKind::Body),
     ("T̄        mean temperature of the thermal tiles (°C)", LineKind::Body),
     ("rain      W faucet: off · on/closed · on/MINT", LineKind::Body),
     ("drizzle   C condensation: on / off", LineKind::Body),

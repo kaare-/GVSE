@@ -73,9 +73,9 @@
   "temp": {
     "base_temp_c": 18.0,
     "sea_bias_c": -2.0,
-    "land_day_bump_c": 1.5,
+    "land_day_bump_c": 0.0,
     "lapse_c": 0.08,
-    "day_amp_c": 6.0,
+    "day_amp_c": 0.0,
     "solar_heat_c": 0.4,
     "night_cool_c": 0.3,
     "cloud_shade": 0.55,

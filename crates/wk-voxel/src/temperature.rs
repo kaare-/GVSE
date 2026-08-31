@@ -5,14 +5,17 @@
 //! Coarse **thermal field** (°C) on the same 4×4 tile grid as humidity /
 //! wind.
 //!
-//! - **Surface** takes the sun and radiates at night. That is the
-//!   diurnal engine — rock / sand / lakes / snow, with inertia so a
-//!   lake does not slam from +20 °C to −10 °C in one night.
+//! - **Surface** takes the sun and always radiates. Night is just the
+//!   sun being off — there is no separate night-cool pulse and no
+//!   noon/midnight skin swing. Humidity in the column above reflects
+//!   incoming sun (daytime shade) and blankets outgoing radiation.
+//!   Rock / sand / lakes / snow keep inertia so a lake does not slam
+//!   from +20 °C to −10 °C in one night.
 //! - **Air** does **not** absorb solar or radiate to space. It sits on
 //!   the climate lapse and couples to the ground: warm skin loft, cold
 //!   skin inversion. That is the draft that carries humidity up to
 //!   condense. No noon/midnight skin snap on the sky.
-//! - **Buried** rock ignores solar/night air; it relaxes toward a
+//! - **Buried** rock ignores solar / sky radiation; it relaxes toward a
 //!   geothermal profile and slowly leaks heat upward by diffusion.
 //!
 //! Cadence: [`TEMP_STEP_PERIOD`] = 20 — not every physics tick.
@@ -48,11 +51,21 @@ pub fn temperature_step_due(tick: u64) -> bool {
 pub struct TempConfig {
     pub base_temp_c: f32,
     pub sea_bias_c: f32,
+    /// **Retired.** Land used to get an extra noon bump on the climate
+    /// skin. The diurnal now comes from sun minus radiation. Kept so
+    /// saves still deserialize.
     pub land_day_bump_c: f32,
     pub lapse_c: f32,
+    /// **Retired.** Used to snap the surface toward a noon/midnight
+    /// skin. The swing is now sun strength vs radiation rate. Kept so
+    /// saves still deserialize; the stepper ignores it.
     pub day_amp_c: f32,
+    /// Heat added to the ground per thermal step at full sun.
     pub solar_heat_c: f32,
+    /// Heat the ground radiates per thermal step (day and night).
+    /// Night is this leak with the sun off, not a second forcing.
     pub night_cool_c: f32,
+    /// How hard column humidity reflects incoming sun (0..1).
     pub cloud_shade: f32,
     pub hum_shade_ref: f32,
     /// Base relax rate toward climate skin (air-like surfaces).
@@ -65,7 +78,7 @@ pub struct TempConfig {
     pub max_relax: f32,
     /// Extra capacity per standing-water / ice cell in the surface stack.
     pub water_stack_cap: f32,
-    /// Night radiative cool multiplier on surface water (<< rock/air).
+    /// Radiative leak multiplier on surface water (<< rock/air).
     pub water_night_cool_scale: f32,
     /// Deep-rock geothermal target at the surface interface (°C).
     pub geothermal_surface_c: f32,
@@ -82,7 +95,7 @@ pub struct TempConfig {
     /// Air tiles (in tile units) that couple to the surface.
     #[serde(default = "default_near_surface_tiles")]
     pub near_surface_tiles: i32,
-    /// Night cooling held back by wet air (0..1).
+    /// Outgoing radiation held back by wet air (0..1). Day and night.
     #[serde(default = "default_hum_night_blanket")]
     pub hum_night_blanket: f32,
     /// Wind chill / couple scale on the thermal step (0..1).
@@ -108,9 +121,9 @@ impl Default for TempConfig {
         Self {
             base_temp_c: 18.0,
             sea_bias_c: -2.0,
-            land_day_bump_c: 1.5,
+            land_day_bump_c: 0.0,
             lapse_c: 0.08,
-            day_amp_c: 6.0,
+            day_amp_c: 0.0,
             solar_heat_c: 0.40,
             night_cool_c: 0.30,
             cloud_shade: 0.55,
@@ -352,23 +365,23 @@ impl Temperature {
         (self.column_surface_y_estimate(world, hx) - self.sea_level_y).max(0) as f32
     }
 
-    /// Target skin temperature for air / surface coupling at `tick`.
+    /// Climate-mean skin for surface inertia (no noon/midnight swap).
     pub fn skin_temp(&self, hx: i32, hy: i32, tick: u64) -> f32 {
         self.skin_temp_on(None, hx, hy, tick)
     }
 
     fn skin_temp_on(&self, world: Option<&World>, hx: i32, hy: i32, tick: u64) -> f32 {
-        let _ = hy;
-        let cfg = &self.config;
-        let dn = day_night_factor_cfg(tick, &self.climate);
-        self.climate_baseline(world, hx) + cfg.day_amp_c * dn
-            + cfg.land_day_bump_c * self.land_factor(world, hx) * dn.max(0.0)
+        // `tick` / `hy` used to drive a `day_amp_c` noon/midnight skin.
+        // The diurnal is sun minus radiation now; this is just the
+        // elevation / sea-land climate the surface relaxes toward.
+        let _ = (hy, tick);
+        self.climate_baseline(world, hx)
     }
 
     /// Elevation / sea-land climate with **no** day/night swap.
     ///
     /// Air sits on this lapse and takes heat from the ground, not from
-    /// a noon/midnight skin (`day_amp_c` is surface-only).
+    /// a noon/midnight skin (`day_amp_c` is retired).
     fn climate_baseline(&self, world: Option<&World>, hx: i32) -> f32 {
         let cfg = &self.config;
         let land = self.land_factor(world, hx);
@@ -379,7 +392,7 @@ impl Temperature {
     /// One thermal step: layered forcing + inertia + diffusion.
     ///
     /// `world` supplies surface materials. Pass `None` only for air-only tests.
-    /// `wind` is optional local speed for night chill / couple (read from
+    /// `wind` is optional local speed for radiate chill / couple (read from
     /// the rebuilt field; cheap if empty).
     pub fn step(
         &mut self,
@@ -427,12 +440,11 @@ impl Temperature {
                     let mid = hy * tc + tc / 2;
                     let height_above = (mid - surf).max(0);
                     let band = cfg.near_surface_tiles.max(1) * tc;
-                    // Sun and night-sky radiation hit the ground, not
-                    // this tile. Air only warms or cools by sitting on
-                    // that skin — that lapse is the draft that lofts
-                    // humidity. Cooking the column with solar (even a
-                    // 25 % aloft leak) flattened the pipe and left the
-                    // sky equalised.
+                    // Sun and radiation hit the ground, not this tile.
+                    // Air only warms or cools by sitting on that skin —
+                    // that lapse is the draft that lofts humidity.
+                    // Cooking the column with solar (even a 25 % aloft
+                    // leak) flattened the pipe and left the sky equalised.
                     let climate = self.climate_baseline(world, hx);
                     let mut target = climate;
                     if height_above <= band && cfg.near_surface_couple > 0.0 {
@@ -449,9 +461,11 @@ impl Temperature {
                     t + (target - t) * relax
                 }
                 TileLayer::Surface { watery } => {
-                    let shade = humidity_shade_factor(humidity, hx, hy, &cfg);
+                    let shade = humidity_column_shade(humidity, hx, hy, &cfg);
+                    // Night is the sun being off — no extra night pulse.
+                    let sun = dn.max(0.0);
                     let solar = cfg.solar_heat_c
-                        * dn.max(0.0)
+                        * sun
                         * (1.0 - cfg.cloud_shade * shade)
                         * (1.0 - props.albedo.clamp(0.0, 0.95));
                     let water_scale = if watery {
@@ -459,22 +473,21 @@ impl Temperature {
                     } else {
                         1.0
                     };
-                    let night = (-dn).max(0.0);
-                    let blanket =
-                        (cfg.hum_night_blanket * cfg.cloud_shade * shade).clamp(0.0, 0.9);
+                    // Wet air blankets the leak day and night (greenhouse).
+                    let blanket = (cfg.hum_night_blanket * shade).clamp(0.0, 0.9);
                     let cool_scale = water_scale
                         * (1.0 - blanket)
                         * (1.0 + 0.45 * wind_k * (1.0 - blanket * 0.5));
-                    let cool = cfg.night_cool_c * night * cool_scale;
+                    let radiate = cfg.night_cool_c * cool_scale;
                     let skin = self.skin_temp_on(world, hx, hy, tick);
                     let relax = (cfg.sky_relax
                         / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale))
                         .clamp(cfg.min_relax, cfg.max_relax);
-                    let n = t + solar - cool;
+                    let n = t + solar - radiate;
                     n + (skin - n) * relax
                 }
                 TileLayer::Buried { depth_cells } => {
-                    // No solar / night air. Hold heat; ease toward geothermal.
+                    // No solar / sky radiation. Hold heat; ease toward geothermal.
                     let geo = self.geothermal_at_depth(depth_cells);
                     let relax = (cfg.geothermal_relax
                         / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale * 0.35))
@@ -584,10 +597,21 @@ impl Temperature {
     }
 }
 
-fn humidity_shade_factor(humidity: &Humidity, hx: i32, hy: i32, cfg: &TempConfig) -> f32 {
-    let mut peak = humidity.at_tile(hx, hy);
-    for i in 1..=4 {
-        peak = peak.max(humidity.at_tile(hx, hy + i));
+/// Peak vapour in the column above a surface tile.
+///
+/// That mass reflects incoming sun before it hits the ground, and
+/// blankets outgoing radiation. A lofted deck must count — scanning
+/// only the surface seat missed the cloud that actually shades.
+fn humidity_column_shade(humidity: &Humidity, hx: i32, hy: i32, cfg: &TempConfig) -> f32 {
+    let hy_top = humidity
+        .bounds
+        .map(|b| b.hy_max.min(hy + Humidity::VAPOR_COLUMN_TILES))
+        .unwrap_or(hy + Humidity::VAPOR_COLUMN_TILES);
+    let mut peak = 0.0f32;
+    let mut y = hy;
+    while y <= hy_top {
+        peak = peak.max(humidity.at_tile(hx, y));
+        y += 1;
     }
     (peak / cfg.hum_shade_ref.max(1.0)).clamp(0.0, 1.0)
 }
@@ -883,7 +907,7 @@ mod tests {
     }
 
     #[test]
-    fn wet_air_blankets_night_cooling() {
+    fn wet_air_blankets_radiation() {
         let (w_dry, mut dry, h_dry, sea) = grounded_scene();
         let (w_wet, mut wet, mut h_wet, _) = grounded_scene();
         if let Some(b) = h_wet.bounds {
@@ -906,9 +930,68 @@ mod tests {
         let wet_skin = mean_near_surface(&wet, sea);
         assert!(
             wet_skin > dry_skin + 0.25,
-            "humid night ground {:.1} should stay warmer than dry {:.1}",
+            "humid ground {:.1} should stay warmer than dry {:.1} under the same leak",
             wet_skin,
             dry_skin
+        );
+    }
+
+    #[test]
+    fn lofted_humidity_shades_the_ground() {
+        // A deck above the surface must cut the sun — not only vapour
+        // sitting on the skin tile.
+        let (w_clear, mut clear, h_clear, sea) = grounded_scene();
+        let (w_cloud, mut cloudy, mut h_cloud, _) = grounded_scene();
+        let tc = cloudy.tile_cols.max(1);
+        let surf_hy = (sea + tc / 2).div_euclid(tc);
+        if let Some(b) = h_cloud.bounds {
+            for hx in b.hx_min..=b.hx_max {
+                h_cloud
+                    .cells
+                    .insert((hx, surf_hy + 4), TempConfig::default().hum_shade_ref * 2.0);
+            }
+        }
+        for t in [&mut clear, &mut cloudy] {
+            t.config.night_cool_c = 0.0;
+            t.config.diffuse_alpha = 0.0;
+            t.config.day_amp_c = 0.0;
+        }
+        for _ in 0..8 {
+            clear.step(Some(&w_clear), &h_clear, 0, None);
+            cloudy.step(Some(&w_cloud), &h_cloud, 0, None);
+        }
+        let clear_skin = mean_near_surface(&clear, sea);
+        let cloud_skin = mean_near_surface(&cloudy, sea);
+        assert!(
+            clear_skin > cloud_skin + 0.3,
+            "lofted vapour must shade the ground (clear={clear_skin:.1} cloudy={cloud_skin:.1})"
+        );
+    }
+
+    #[test]
+    fn radiation_cools_the_ground_at_noon_when_the_sun_is_off() {
+        // Night is lack of sun, not a second pulse. The leak still
+        // runs at tick 0 if solar_heat_c is zero.
+        let (w, mut t, h, sea) = grounded_scene();
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.50;
+        t.config.diffuse_alpha = 0.0;
+        t.config.sky_relax = 0.0;
+        t.config.min_relax = 0.0;
+        t.config.day_amp_c = 0.0;
+        t.fill_initial(0);
+        for v in t.cells.values_mut() {
+            *v = 18.0;
+        }
+        t.rebuild_row_means();
+        let before = mean_near_surface(&t, sea);
+        for _ in 0..8 {
+            t.step(Some(&w), &h, 0, None);
+        }
+        let after = mean_near_surface(&t, sea);
+        assert!(
+            after < before - 0.8,
+            "ground must radiate at noon if the sun knob is off ({before:.1} → {after:.1})"
         );
     }
 
@@ -928,8 +1011,8 @@ mod tests {
         }
         assert!(
             (t.mean() - 18.0).abs() < 1.5,
-            "with sun/night off, air must stay near the climate baseline, \
-             not climb toward noon skin 18+10 (mean={:.1})",
+            "with sun/radiate off, air must stay near the climate baseline, \
+             not climb toward a retired noon skin 18+10 (mean={:.1})",
             t.mean()
         );
     }
@@ -1217,6 +1300,7 @@ mod tests {
             t.config.min_relax = 0.0;
             t.config.diffuse_alpha = 0.0;
             t.config.solar_heat_c = 0.5;
+            t.config.night_cool_c = 0.0;
         }
         let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y);
         for i in 0..6 {

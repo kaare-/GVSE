@@ -832,21 +832,20 @@ impl SimSettings {
                         ),
                     );
                     labeled_slider(ui, hash!(), "Base temp (C)", -20.0..40.0, &mut self.temp.base_temp_c);
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Ground day/night swing (C)",
-                        0.0..20.0,
-                        &mut self.temp.day_amp_c,
-                    );
                     labeled_slider(ui, hash!(), "Lapse (C per cell elev)", 0.0..0.4, &mut self.temp.lapse_c);
                     ui.label(
                         None,
-                        "Sun heats the ground; the ground heats the air. Night radiates from the ground.",
+                        "Night is the sun off. Tune sun strength and the ground's radiate rate. Humidity reflects sun (day cool) and blankets the leak.",
                     );
-                    labeled_slider(ui, hash!(), "Solar on ground / step", 0.0..1.5, &mut self.temp.solar_heat_c);
-                    labeled_slider(ui, hash!(), "Night radiate from ground / step", 0.0..1.5, &mut self.temp.night_cool_c);
-                    labeled_slider(ui, hash!(), "Cloud shade (thermal)", 0.0..1.0, &mut self.temp.cloud_shade);
+                    labeled_slider(ui, hash!(), "Sun on ground / step", 0.0..1.5, &mut self.temp.solar_heat_c);
+                    labeled_slider(ui, hash!(), "Radiate from ground / step", 0.0..1.5, &mut self.temp.night_cool_c);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Humidity reflects sun",
+                        0.0..1.0,
+                        &mut self.temp.cloud_shade,
+                    );
                     labeled_slider(
                         ui,
                         hash!(),
@@ -857,7 +856,7 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Humidity night blanket",
+                        "Humidity blanket (radiation)",
                         0.0..1.0,
                         &mut self.temp.hum_night_blanket,
                     );

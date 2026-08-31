@@ -157,10 +157,13 @@ haze. Two mechanics did that, and neither is "add a pump to sea+N":
    Unstable lapse (warm under cold, plus the per-row T anomaly) is what
    organises loft — same walk, no teleport. `cloud_alt_above_sea` stays
    on the struct for save compat only.
-The draft itself is ground-heated air. Solar and night radiation hit
-the surface; air only couples to that skin. Warm humid air under the
-colder lapse rises (`buoyant_rise_thermal`); surplus condenses aloft
-and falls. That is the pipe — not a deck slider.
+The draft itself is ground-heated air. The sun hits the ground; the
+ground always radiates. Night is the sun being off, not a second
+cool pulse, and there is no noon/midnight skin swing (`day_amp_c` is
+retired). Humidity in the column reflects incoming sun (daytime shade)
+and blankets the leak. Air only couples to that skin. Warm humid air
+under the colder lapse rises (`buoyant_rise_thermal`); surplus
+condenses aloft and falls. That is the pipe — not a deck slider.
 
 Keep the loft cheap: row means live on the period-20 thermal step
 (never `width × wet-rows` lookups per tick), rise runs every other
@@ -307,7 +310,7 @@ Not needed to fix constant rain any more — that is solved. Convection is now
 about **spatial** structure: fronts, and moisture organised by terrain and
 buoyancy rather than spread evenly. The remaining flatness is horizontal, not
 temporal. All the
-forcing exists — `day_amp_c`, `solar_heat_c`, `night_cool_c`, saturation mass
+forcing exists — `solar_heat_c`, `night_cool_c` (continuous radiate), saturation mass
 varying with temperature, a 1200-tick day — and it is swamped: measured **rain
 fraction day 80% vs night 76%**.
 
