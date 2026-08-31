@@ -7,16 +7,21 @@
 //! ```
 //!
 //! Matches `wk-voxel-app` frame order (rain → evap → humidity advect →
-//! clouds → condensation → karst → physics tick → erosion → humidity /
-//! temp cadence → phase → organisms). Physics sub-pass times come from
-//! the real [`tick_with_perf_profiled`] path (not a post-hoc mirror).
-//! Also prints a rayon on/off A/B on the demo world.
+//! clouds → condensation → karst → physics tick → snow drift →
+//! suspension → erosion → humidity / temp cadence → phase → organisms).
+//! Physics sub-pass times come from the real [`tick_with_perf_profiled`]
+//! path (not a post-hoc mirror). Also prints a rayon on/off A/B on the
+//! demo world.
+//!
+//! Snow drift and clay suspension live *outside* `tick_with_perf` in the
+//! app. A profile that skipped them was not measuring the frame.
 
 use std::time::{Duration, Instant};
 
 use wk_voxel::{
     apply_cold_avalanche, apply_condensation_rain_phased, apply_evaporation_into_humidity,
     apply_flow_erosion, apply_karst_dissolution, apply_phase, apply_rain_with_temp,
+    apply_snow_wind_drift,
     find_plant_slot, humidity_diffuse_due, set_parallel_enabled, stamp_world,
     temperature_step_due, tick_with_perf, tick_with_perf_profiled, Blueprint, ClimateConfig,
     CloudConfig, CloudStore, CondensationConfig, EvapConfig, Genome, GrainConfig, Humidity,
@@ -42,6 +47,8 @@ struct PassAccum {
     condensation: Duration,
     karst: Duration,
     physics_tick: Duration,
+    snow_drift: Duration,
+    suspension: Duration,
     erosion: Duration,
     humidity_diffuse: Duration,
     humidity_diffuse_calls: u64,
@@ -62,6 +69,8 @@ impl PassAccum {
             condensation: Duration::ZERO,
             karst: Duration::ZERO,
             physics_tick: Duration::ZERO,
+            snow_drift: Duration::ZERO,
+            suspension: Duration::ZERO,
             erosion: Duration::ZERO,
             humidity_diffuse: Duration::ZERO,
             humidity_diffuse_calls: 0,
@@ -81,6 +90,8 @@ impl PassAccum {
             + self.condensation
             + self.karst
             + self.physics_tick
+            + self.snow_drift
+            + self.suspension
             + self.erosion
             + self.humidity_diffuse
             + self.temperature
@@ -108,6 +119,9 @@ struct Scene {
     phase: PhaseConfig,
     climate: ClimateConfig,
     perf: PerfConfig,
+    /// Match the app's W toggle. Nightly soak leaves climatic rain off
+    /// and lets drizzle / evap cycle the water.
+    climatic_rain: bool,
 }
 
 fn demo_params() -> WorldgenParams {
@@ -189,6 +203,7 @@ fn stamp_scene(params: WorldgenParams) -> Scene {
         phase: PhaseConfig::default(),
         climate: ClimateConfig::default(),
         perf: PerfConfig::default(),
+        climatic_rain: true,
     }
 }
 
@@ -263,17 +278,24 @@ fn one_stack_tick(
         None => {
             // Match app: shell scans always parallel; CA follows PerfConfig.
             set_parallel_enabled(true);
-            apply_rain_with_temp(
-                &mut scene.world,
-                &scene.rain,
-                Some(&scene.temperature),
-                Some(&scene.phase),
-                Some(&mut scene.humidity),
-            );
+            if scene.climatic_rain {
+                apply_rain_with_temp(
+                    &mut scene.world,
+                    &scene.rain,
+                    Some(&scene.temperature),
+                    Some(&scene.phase),
+                    Some(&mut scene.humidity),
+                );
+            }
             apply_evaporation_into_humidity(&mut scene.world, &mut scene.humidity, &scene.evap);
             scene
                 .humidity
-                .advect(scene.wind.climate_vx, scene.wind.climate_vy);
+                .advect_with_surface(
+                    scene.wind.climate_vx,
+                    scene.wind.climate_vy,
+                    &scene.wind,
+                    &scene.world,
+                );
             scene.clouds.step_with_precip(
                 &mut scene.world,
                 &mut scene.humidity,
@@ -302,7 +324,9 @@ fn one_stack_tick(
                 None => tick_with_perf(&mut scene.world, &scene.perf),
             }
             set_parallel_enabled(true);
+            apply_snow_wind_drift(&mut scene.world, CLIMATE_WIND_VX, HUMIDITY_TILE_COLS);
             apply_flow_erosion(&mut scene.world, &scene.grain);
+            wk_voxel::sediment::apply_suspension(&mut scene.world);
             if humidity_diffuse_due(scene.world.tick) {
                 scene.humidity.diffuse(HUMIDITY_DIFFUSION_ALPHA);
             }
@@ -336,13 +360,15 @@ fn one_stack_tick(
         Some(a) => {
             set_parallel_enabled(true);
             let t0 = Instant::now();
-            apply_rain_with_temp(
-                &mut scene.world,
-                &scene.rain,
-                Some(&scene.temperature),
-                Some(&scene.phase),
-                Some(&mut scene.humidity),
-            );
+            if scene.climatic_rain {
+                apply_rain_with_temp(
+                    &mut scene.world,
+                    &scene.rain,
+                    Some(&scene.temperature),
+                    Some(&scene.phase),
+                    Some(&mut scene.humidity),
+                );
+            }
             a.rain += t0.elapsed();
 
             let t0 = Instant::now();
@@ -352,7 +378,12 @@ fn one_stack_tick(
             let t0 = Instant::now();
             scene
                 .humidity
-                .advect(scene.wind.climate_vx, scene.wind.climate_vy);
+                .advect_with_surface(
+                    scene.wind.climate_vx,
+                    scene.wind.climate_vy,
+                    &scene.wind,
+                    &scene.world,
+                );
             a.humidity_advect += t0.elapsed();
 
             let t0 = Instant::now();
@@ -396,8 +427,16 @@ fn one_stack_tick(
 
             set_parallel_enabled(true);
             let t0 = Instant::now();
+            apply_snow_wind_drift(&mut scene.world, CLIMATE_WIND_VX, HUMIDITY_TILE_COLS);
+            a.snow_drift += t0.elapsed();
+
+            let t0 = Instant::now();
             apply_flow_erosion(&mut scene.world, &scene.grain);
             a.erosion += t0.elapsed();
+
+            let t0 = Instant::now();
+            wk_voxel::sediment::apply_suspension(&mut scene.world);
+            a.suspension += t0.elapsed();
 
             if humidity_diffuse_due(scene.world.tick) {
                 let t0 = Instant::now();
@@ -473,8 +512,16 @@ fn print_pass_table(accum: &PassAccum, n: u64, wall: Duration) {
         ms_per(accum.physics_tick, n)
     );
     eprintln!(
+        "  snow drift           {:>8.3} ms/tick",
+        ms_per(accum.snow_drift, n)
+    );
+    eprintln!(
         "  flow erosion         {:>8.3} ms/tick",
         ms_per(accum.erosion, n)
+    );
+    eprintln!(
+        "  suspension           {:>8.3} ms/tick",
+        ms_per(accum.suspension, n)
     );
     eprintln!(
         "  humidity.diffuse     {:>8.3} ms/tick amortized  ({:.3} ms/call × {} calls)",
@@ -730,4 +777,144 @@ fn perf_profile_demo_and_stress() {
         stress_params(),
         wk_voxel::MAX_ATOMS,
     );
+}
+
+/// Does organism cost grow with soak age at a *constant* population?
+///
+/// Playtest FPS fell 33 → 3 over 121k ticks with 256 plants. Physics was ruled
+/// out — `soak_drift_probe` shows physics cost *falling* as a world settles, and
+/// suspension at 0.042 ms with a bounded map. Organisms are what that probe does
+/// not have.
+///
+/// Population size alone would not explain it: plants settled well under the old
+/// module caps, so nothing grew monstrous. Cost rising while `atoms` stays flat
+/// would mean **churn** — work per organism increasing over time — which is a bug
+/// rather than a consequence of lifting the caps.
+///
+/// ```text
+/// cargo test -p wk-voxel --release --test perf_profile -- --ignored --nocapture organism_cost_versus_soak_age
+/// ```
+#[test]
+#[ignore = "diagnostic; run with --release --ignored --nocapture"]
+fn organism_cost_versus_soak_age() {
+    const SEG: u64 = 1000;
+    const SEGS: usize = 14;
+
+    let mut scene = stamp_scene(demo_params());
+    seed_plants(&mut scene, 256);
+    for _ in 0..WARMUP_TICKS {
+        one_stack_tick(&mut scene, None, None);
+    }
+
+    println!(
+        "\n{:>8}  {:>10}  {:>11}  {:>7}  {:>9}",
+        "tick", "wall", "organisms", "atoms", "per atom"
+    );
+    for _ in 0..SEGS {
+        let mut accum = PassAccum::zero();
+        let mut phys = PhysicsTimings::default();
+        let wall = Instant::now();
+        for _ in 0..SEG {
+            one_stack_tick(&mut scene, Some(&mut accum), Some(&mut phys));
+        }
+        let wall = wall.elapsed();
+        let atoms = scene.organisms.len().max(1);
+        let org_ms = accum.organisms.as_secs_f32() * 1000.0 / SEG as f32;
+        println!(
+            "{:>8}  {:>8.3}ms  {:>9.3}ms  {:>7}  {:>7.4}ms",
+            scene.world.tick,
+            wall.as_secs_f32() * 1000.0 / SEG as f32,
+            org_ms,
+            atoms,
+            org_ms / atoms as f32,
+        );
+    }
+    println!(
+        "\n  Flat 'per atom' means cost tracks population (expected).\n  \
+         Rising 'per atom' means churn — work per organism growing with age."
+    );
+}
+
+/// Nightly soak shape: climatic rain off, drizzle + evap on, a full plant
+/// cap. Prints pass cost next to the maps and sticky flags that can only
+/// grow. A rising `snow` / `buoy` chunk count with a quiet scene is the
+/// occupancy leak; rising `mods` with a flat atom count is plant growth;
+/// rising `hum n` toward tile capacity is a filled atmosphere, not a leak.
+///
+/// ```text
+/// cargo test -p wk-voxel --release --test perf_profile -- --ignored --nocapture soak_age_inventory
+/// ```
+#[test]
+#[ignore = "diagnostic; run with --release --ignored --nocapture"]
+fn soak_age_inventory() {
+    const SEG: u64 = 400;
+    const SEGS: usize = 8;
+
+    let mut scene = stamp_scene(demo_params());
+    scene.climatic_rain = false;
+    seed_plants(&mut scene, 256);
+    for _ in 0..WARMUP_TICKS {
+        one_stack_tick(&mut scene, None, None);
+    }
+
+    println!(
+        "\n{:>7} {:>7} {:>7} {:>7} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>6} {:>5} {:>5} {:>5} {:>5}",
+        "tick", "wall", "phys", "grav", "flow", "seep", "conf", "body", "org",
+        "cond", "halo", "diss", "hum n", "buoy", "orgc", "pores", "mods"
+    );
+    for _ in 0..SEGS {
+        let mut accum = PassAccum::zero();
+        let mut phys = PhysicsTimings::default();
+        let wall = Instant::now();
+        for _ in 0..SEG {
+            one_stack_tick(&mut scene, Some(&mut accum), Some(&mut phys));
+        }
+        let wall = wall.elapsed();
+        let mut buoy_ch = 0usize;
+        let mut org_ch = 0usize;
+        let mut pore_ch = 0usize;
+        for c in scene.world.chunks.values() {
+            if c.has_buoyant {
+                buoy_ch += 1;
+            }
+            if c.has_organic {
+                org_ch += 1;
+            }
+            if c.has_wet_pores {
+                pore_ch += 1;
+            }
+        }
+        let halo = if phys.substeps_ran > 0 {
+            phys.active_area as f32 / phys.substeps_ran as f32
+        } else {
+            0.0
+        };
+        let mods: usize = scene.organisms.atoms.iter().map(|a| a.body.len()).sum();
+        let hum_cap = scene
+            .humidity
+            .bounds
+            .map(|b| b.tile_capacity())
+            .unwrap_or(0);
+        println!(
+            "{:>7} {:>6.2} {:>6.2} {:>6.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>5.2} {:>6.0} {:>5} {:>5}/{:<4} {:>5} {:>5} {:>5} {:>6}",
+            scene.world.tick,
+            wall.as_secs_f32() * 1000.0 / SEG as f32,
+            accum.physics_tick.as_secs_f32() * 1000.0 / SEG as f32,
+            phys.gravity.as_secs_f32() * 1000.0 / SEG as f32,
+            phys.water_flow.as_secs_f32() * 1000.0 / SEG as f32,
+            phys.seepage.as_secs_f32() * 1000.0 / SEG as f32,
+            phys.confined.as_secs_f32() * 1000.0 / SEG as f32,
+            phys.bodies.as_secs_f32() * 1000.0 / SEG as f32,
+            accum.organisms.as_secs_f32() * 1000.0 / SEG as f32,
+            accum.condensation.as_secs_f32() * 1000.0 / SEG as f32,
+            halo,
+            scene.world.dissolved.len(),
+            scene.humidity.cells.len(),
+            hum_cap,
+            buoy_ch,
+            org_ch,
+            pore_ch,
+            mods,
+        );
+    }
 }

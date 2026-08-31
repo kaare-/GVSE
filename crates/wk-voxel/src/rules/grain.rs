@@ -13,7 +13,7 @@ use wk_material::{HydroOverrides, MaterialId};
 use crate::active::{partition_checkerboard, plan_active, ActiveChunk};
 use crate::cell::{
     falls_through_empty_air, is_flow_erodible, is_grain, is_repose_grain,
-    water_capacity_with, Cell, CellFlags, Sat,
+    water_capacity_cell, Cell, CellFlags, Sat,
 };
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fungi::{move_mycelium_meta, swap_cells_preserving_mycelium, swap_mycelium_meta};
@@ -186,6 +186,179 @@ pub fn apply_grain_fall(world: &mut World) {
         apply_grain_fall_regions(world, &pass);
     }
 }
+
+/// Once-per-tick lateral step for **airborne** snow.
+///
+/// Grain fall only pulls straight down, and it runs many passes a tick.
+/// Baking wind into that step would let a deep settle blow flakes across
+/// the map. This pass is separate, runs once, and moves a flake at most
+/// one cell downwind.
+///
+/// `wind_vx` is tiles/tick (same units as [`crate::wind::Wind::climate_vx`]).
+/// `tile_cols` converts that to cells. Fall fires on about 15% of ticks
+/// (`SNOWFALL_STEP_ODDS`); default climate drift is 0.05, so the path is
+/// about **three down for each sideways**. The tile-scaled wind is
+/// multiplied by [`SNOWDRIFT_WIND_SCALE`] (0.05 × 4 × 0.25 = 0.05).
+///
+/// Ice is the control: it falls, it does not drift. Landed snowpack is
+/// repose's problem, not the wind's.
+pub fn apply_snow_wind_drift(world: &mut World, wind_vx: f32, tile_cols: i32) -> u32 {
+    let wind_on = wind_vx.is_finite() && wind_vx.abs() >= 1e-4;
+    // Prefer the snow flag so organic rafts and ice sheets are not
+    // scanned for flakes they never held. Legacy saves stamp the flag
+    // on the first pass that still has to walk `has_buoyant`.
+    let any_snow = world.chunks.values().any(|c| c.has_snow);
+    // Calm nights still have to drop empty sky chunks: a flake marks
+    // every column it falls through, and leaving `has_snow` set keeps
+    // those chunks in this scan forever.
+    if !any_snow && !wind_on {
+        return 0;
+    }
+    let dx = if wind_on {
+        if wind_vx >= 0.0 {
+            1
+        } else {
+            -1
+        }
+    } else {
+        0
+    };
+    let odds = if wind_on {
+        (wind_vx.abs() * tile_cols.max(1) as f32 * SNOWDRIFT_WIND_SCALE).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let seed = world.seed.0;
+    let tick_no = world.tick;
+
+    let mut candidates: Vec<(i32, i32)> = Vec::new();
+    let mut clear_snow: Vec<ChunkCoord> = Vec::new();
+    let coords = world
+        .chunks
+        .iter()
+        .filter(|(_, c)| if any_snow { c.has_snow } else { c.has_buoyant })
+        .map(|(&coord, _)| coord)
+        .collect::<Vec<_>>();
+    for coord in coords {
+        let x0 = coord.cx * CHUNK_CELLS_W as i32;
+        let y0 = coord.cy * CHUNK_CELLS_H as i32;
+        let Some(chunk) = world.chunks.get(&coord) else {
+            continue;
+        };
+        let mut saw_snow = false;
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                let cell = chunk.get(lx, ly);
+                if cell.material != MaterialId::Snow {
+                    continue;
+                }
+                saw_snow = true;
+                if !wind_on {
+                    continue;
+                }
+                let gx = x0 + lx as i32;
+                let gy = y0 + ly as i32;
+                // Same-chunk neighbour: skip the HashMap lookup for the
+                // common cases (landed pack, empty air under a flake).
+                if ly > 0 {
+                    let below = chunk.get(lx, ly - 1);
+                    if below.material != MaterialId::Air {
+                        continue;
+                    }
+                    if !below.sat.is_full() {
+                        candidates.push((gx, gy));
+                        continue;
+                    }
+                }
+                if snowflake_is_airborne(world, gx, gy) {
+                    candidates.push((gx, gy));
+                }
+            }
+        }
+        if saw_snow && !any_snow {
+            if let Some(chunk) = world.chunks.get_mut(&coord) {
+                chunk.has_snow = true;
+            }
+        } else if !saw_snow && any_snow {
+            clear_snow.push(coord);
+        }
+    }
+    for coord in clear_snow {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_snow = false;
+        }
+    }
+    if candidates.is_empty() {
+        return 0;
+    }
+    candidates.sort_unstable();
+
+    let mut claimed: std::collections::HashSet<(i32, i32)> =
+        std::collections::HashSet::new();
+    let mut planned: Vec<(i32, i32, i32)> = Vec::new();
+    for (gx, gy) in candidates {
+        let roll = super::hash_prob(
+            seed,
+            gx.wrapping_mul(73_856_093).wrapping_add(gy),
+            tick_no,
+            SNOWDRIFT_SALT,
+        );
+        if roll >= odds {
+            continue;
+        }
+        let nx = world.wrap_x(gx + dx);
+        if claimed.contains(&(nx, gy)) {
+            continue;
+        }
+        let Some(dest) = world.get_cell(nx, gy) else {
+            continue;
+        };
+        if dest.material != MaterialId::Air {
+            continue;
+        }
+        claimed.insert((nx, gy));
+        planned.push((gx, gy, nx));
+    }
+
+    let mut moved = 0u32;
+    for (gx, gy, nx) in planned {
+        let Some(flake) = world.get_cell(gx, gy) else {
+            continue;
+        };
+        let Some(dest) = world.get_cell(nx, gy) else {
+            continue;
+        };
+        if flake.material != MaterialId::Snow || dest.material != MaterialId::Air {
+            continue;
+        }
+        world.set_cell(nx, gy, flake);
+        world.set_cell(gx, gy, dest);
+        moved += 1;
+    }
+    moved
+}
+
+fn snowflake_is_airborne(world: &World, gx: i32, gy: i32) -> bool {
+    let Some(below) = world.get_cell(gx, gy - 1) else {
+        return false;
+    };
+    if below.material != MaterialId::Air {
+        return false;
+    }
+    // Empty / haze air is not a lake seat — skip the 512-cell grounding walk.
+    if !below.sat.is_full() {
+        return true;
+    }
+    !floats_on_air_seat_world(world, below, gx, gy - 1)
+}
+
+const SNOWDRIFT_SALT: u64 = 0x51DE_5417;
+/// How hard climate wind translates into a sideways step.
+///
+/// Fall is gated at [`SNOWFALL_STEP_ODDS`] (0.15 per tick). Playtest at
+/// the old `1.0` scale read as "blowing too well"; `0.25` on 4-cell tiles
+/// plus this fall rate makes default wind (~0.05) a 3:1 down:across stair.
+const SNOWDRIFT_WIND_SCALE: f32 = 0.25;
 
 /// Drop unsupported grains / litter through Air until seated or the
 /// pass budget is spent. Starts from the world's current dirty wake
@@ -791,6 +964,30 @@ pub fn settle_loose_grains_regions_ex(
 /// Grain fall restricted to a pre-planned active set.
 ///
 /// Returns how many Air↔grain swaps this pass performed.
+/// Odds a snowflake **stays put** on a given fall pass.
+///
+/// Grain fall takes one step per pass and runs several passes a tick, so an
+/// ungated flake covers the whole sky in a tick. Holding it most of the time
+/// spreads a single step across many passes: a gentle descent, and irregular
+/// enough to read as snow rather than as a falling block.
+///
+/// Deterministic per cell and pass, so replays match.
+fn snowflake_holds_position(seed: u64, tick: u64, gx: i32, gy: i32) -> bool {
+    let roll = super::hash_prob(
+        seed,
+        gx.wrapping_mul(73_856_093).wrapping_add(gy),
+        tick,
+        SNOWFALL_SALT,
+    );
+    roll >= SNOWFALL_STEP_ODDS
+}
+
+/// Chance a flake takes its step on any one pass. Low, because "gentle" is the
+/// whole point — a flake should be visible falling, not glimpsed. 0.15 with
+/// default climate drift (0.05) is three down for each sideways.
+const SNOWFALL_STEP_ODDS: f32 = 0.15;
+const SNOWFALL_SALT: u64 = 0x5F04_FA11;
+
 pub fn apply_grain_fall_regions(world: &mut World, active: &[ActiveChunk]) -> u32 {
     apply_grain_fall_regions_ex(world, active, true)
 }
@@ -805,6 +1002,8 @@ pub fn apply_grain_fall_regions_ex(
     // Parallel cell writes can't touch `World::mycelium_strains`; replay
     // share/lineage swaps after the pass so cream stays color-keyed.
     let share_swaps: Mutex<Vec<(i32, i32, i32, i32)>> = Mutex::new(Vec::new());
+    let seed = world.seed.0;
+    let tick_no = world.tick;
     for_each_region_parallel(world, active, |ptrs, wrap_width, ac| {
         for y in ac.rect.y0..=ac.rect.y1 {
             let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
@@ -825,6 +1024,22 @@ pub fn apply_grain_fall_regions_ex(
                 if is_grain(above.material) {
                     // Dense grains sink through any Air sat.
                 } else if falls_through_empty_air(above.material) {
+                    // A snowflake in open air descends *gently*.
+                    //
+                    // Grain fall moves a loose cell one step per pass and runs
+                    // several passes a tick, which is right for sand settling and
+                    // made snow appear in the sky and arrive on the ground in the
+                    // same breath. Rolling for it here spreads one step over many
+                    // passes, so a flake drifts down instead of dropping, and the
+                    // roll's irregularity is itself snow-like.
+                    //
+                    // Only while airborne: once it lands it is snowpack and behaves
+                    // as any other loose material, which is what lets drifts build.
+                    if above.material == MaterialId::Snow
+                        && snowflake_holds_position(seed, tick_no, gx, gy)
+                    {
+                        continue;
+                    }
                     // Snow / Ice / Organic: drop through empty Air, haze,
                     // and *suspended* full-sat blobs. Float only on
                     // grounded lake / puddle surfaces (unless waterlogged).
@@ -911,44 +1126,75 @@ const FLOAT_SOAK_RATE: u8 = 16;
 /// Max cells a submerged litter grain may rise in one tick (column teleport).
 const BUOYANT_RISE_MAX: i32 = 48;
 
-/// Chunks that may hold Organic / Snow / Ice (sticky [`Chunk::has_buoyant`]).
-fn buoyant_chunk_coords(world: &World) -> Vec<ChunkCoord> {
-    world
-        .chunks
-        .iter()
-        .filter(|(_, c)| c.has_buoyant)
-        .map(|(&coord, _)| coord)
-        .collect()
-}
-
-fn collect_buoyant_litter(world: &World) -> Vec<(i32, i32)> {
+fn collect_buoyant_litter(world: &mut World) -> Vec<(i32, i32)> {
     let mut litter = Vec::new();
     // Prefer buoyant sticky flag — sand-only shores used to scan every
-    // `has_loose` chunk for litter that was never there.
-    let coords = {
-        let buoyant = buoyant_chunk_coords(world);
-        if buoyant.is_empty() {
-            // Legacy worlds / snow before has_buoyant was sticky.
-            loose_chunk_coords(world)
-        } else {
-            buoyant
-        }
+    // `has_loose` chunk for litter that was never there. Also visit
+    // leftover `has_organic` (a falling leaf marks every sky chunk; after
+    // buoyant-clear those sit `has_organic && !has_buoyant`).
+    let any_buoyant = world.chunks.values().any(|c| c.has_buoyant);
+    let any_organic = world.chunks.values().any(|c| c.has_organic);
+    let coords = if any_buoyant || any_organic {
+        world
+            .chunks
+            .iter()
+            .filter(|(_, c)| c.has_buoyant || c.has_organic)
+            .map(|(&coord, _)| coord)
+            .collect()
+    } else if !world.buoyant_flags_ready {
+        // Legacy worlds / snow before has_buoyant was sticky.
+        loose_chunk_coords(world)
+    } else {
+        Vec::new()
     };
+    let mut clear = Vec::new();
+    let mut stamp = Vec::new();
+    let mut clear_organic = Vec::new();
     for coord in coords {
         let x0 = coord.cx * CHUNK_CELLS_W as i32;
         let y0 = coord.cy * CHUNK_CELLS_H as i32;
         let Some(chunk) = world.chunks.get(&coord) else {
             continue;
         };
+        let mut saw = false;
+        let mut saw_organic = false;
         for ly in 0..CHUNK_CELLS_H {
             for lx in 0..CHUNK_CELLS_W {
                 let cell = chunk.get(lx, ly);
+                if cell.material == MaterialId::Organic {
+                    saw_organic = true;
+                }
                 if falls_through_empty_air(cell.material) {
+                    saw = true;
                     litter.push((x0 + lx as i32, y0 + ly as i32));
                 }
             }
         }
+        if saw && !any_buoyant {
+            stamp.push(coord);
+        } else if !saw && any_buoyant {
+            clear.push(coord);
+        }
+        if !saw_organic && chunk.has_organic {
+            clear_organic.push(coord);
+        }
     }
+    for coord in stamp {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_buoyant = true;
+        }
+    }
+    for coord in clear {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_buoyant = false;
+        }
+    }
+    for coord in clear_organic {
+        if let Some(chunk) = world.chunks.get_mut(&coord) {
+            chunk.has_organic = false;
+        }
+    }
+    world.buoyant_flags_ready = true;
     litter
 }
 
@@ -1005,7 +1251,7 @@ fn soak_floating_litter_list(world: &mut World, litter: &[(i32, i32)], waterlog_
         if surface.material != MaterialId::Air || !surface.sat.is_full() {
             continue;
         }
-        let cap = water_capacity_with(raft.material, &world.hydro);
+        let cap = water_capacity_cell(raft, &world.hydro);
         if cap == 0 {
             continue;
         }
@@ -2267,13 +2513,22 @@ fn write_repose_swap(
         || air_has_standing_water_neighbor(ptrs, wrap_width, dest_x, dest_y)
         || air_has_standing_water_neighbor(ptrs, wrap_width, src_x, src_y);
     if is_grain(src.material) && submerged && dest.sat.0 < 200 {
-        let cap = water_capacity_with(src.material, hydro);
+        let cap = water_capacity_cell(src, hydro);
         let room = cap.saturating_sub(src.sat.0);
         let into_pore = dest.sat.0.min(room);
+        let leftover_free = dest.sat.0.saturating_sub(into_pore);
         let mut placed = src;
         placed.sat = Sat(src.sat.0.saturating_add(into_pore));
         if let Some(fill) =
-            steal_standing_water_neighbor(ptrs, wrap_width, src_x, src_y, dest_x, dest_y)
+            steal_standing_water_neighbor(
+                ptrs,
+                wrap_width,
+                src_x,
+                src_y,
+                dest_x,
+                dest_y,
+                leftover_free,
+            )
         {
             unsafe {
                 parallel::set_cell(ptrs, wrap_width, dest_x, dest_y, placed);
@@ -2299,6 +2554,8 @@ fn write_repose_swap(
 }
 
 /// Move standing water from an adjacent Air cell into a fill cell.
+/// `extra_sat` is free water left in the grain's destination after its
+/// pore fills; overflow stays in the donor instead of being deleted.
 /// Prefer an upward donor first so dry bubbles rise into open water
 /// instead of sliding sideways along a sand face (perpetual cycling).
 /// Then prefer fuller cells. Leaves the donor empty. Skips `dest`.
@@ -2309,6 +2566,7 @@ fn steal_standing_water_neighbor(
     src_y: i32,
     dest_x: i32,
     dest_y: i32,
+    extra_sat: u8,
 ) -> Option<Cell> {
     // Rank: upward first, then fuller sat, then closer to vertical.
     let mut chosen: Option<(i32, i32, u8)> = None;
@@ -2332,14 +2590,20 @@ fn steal_standing_water_neighbor(
         }
     }
     let (nx, ny, sat) = chosen?;
+    let total = sat as u16 + extra_sat as u16;
+    let fill_sat = total.min(u8::MAX as u16) as u8;
+    let donor_remainder = total.saturating_sub(u8::MAX as u16) as u8;
     unsafe {
-        parallel::set_cell(ptrs, wrap_width, nx, ny, Cell::air());
+        let mut donor = Cell::air();
+        donor.sat = Sat(donor_remainder);
+        parallel::set_cell(ptrs, wrap_width, nx, ny, donor);
     }
     Some(Cell {
         material: MaterialId::Air,
-        sat: Sat(sat),
+        sat: Sat(fill_sat),
         flags: CellFlags::empty(),
         _pad: 0,
+        pore: 128,
     })
 }
 
@@ -2874,6 +3138,7 @@ pub fn apply_flow_erosion_bound(
                 sat: leftover,
                 flags: CellFlags::empty(),
                 _pad: 0,
+                pore: cur.pore,
             },
         );
         applied = applied.wrapping_add(1);
@@ -2891,7 +3156,7 @@ fn absorb_free_water_into_grain(
     free: Sat,
     hydro: &HydroOverrides,
 ) -> (Cell, Sat) {
-    let cap = water_capacity_with(grain.material, hydro);
+    let cap = water_capacity_cell(grain, hydro);
     let room = cap.saturating_sub(grain.sat.0);
     let into_pore = free.0.min(room);
     let mut placed = grain;
@@ -2994,7 +3259,7 @@ fn maybe_queue_erosion(
 }
 
 /// Direction water wants to leave this cell, if any. `None` = still pool.
-fn flow_bias(world: &World, gx: i32, gy: i32, sat: Sat) -> Option<i32> {
+pub(crate) fn flow_bias(world: &World, gx: i32, gy: i32, sat: Sat) -> Option<i32> {
     let mut best_dx = 0i32;
     let mut best_score = 0.0f32;
     for dx in [-1_i32, 1] {

@@ -23,9 +23,11 @@ use wk_material::{MaterialId, MaterialRegistry, SAMPLE_WIDTH_M};
 
 use crate::active::ActiveChunk;
 use crate::cell::{
-    falls_through_empty_air, grain_max_stable_step, is_competent_rock, is_grain, water_capacity,
-    water_capacity_with, Cell, CellFlags, Sat,
+    falls_through_empty_air, grain_max_stable_step, is_competent_rock, is_grain,
+    water_capacity_cell, Cell, CellFlags, Sat,
 };
+#[cfg(test)]
+use crate::cell::water_capacity;
 use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::fungi::move_mycelium_meta;
 use crate::grid::World;
@@ -115,7 +117,7 @@ pub fn pore_wetness(cell: Cell) -> f32 {
 
 /// [`pore_wetness`] with an explicit hydrology override table.
 pub fn pore_wetness_with(cell: Cell, hydro: &wk_material::HydroOverrides) -> f32 {
-    let cap = water_capacity_with(cell.material, hydro);
+    let cap = water_capacity_cell(cell, hydro);
     if cap == 0 {
         return 0.0;
     }
@@ -131,7 +133,7 @@ pub fn effective_cohesion(material: MaterialId, wet: f32) -> f32 {
 /// F2a: wet grains with low `c_eff` lose one `max_step` of repose stability.
 /// Clay uses [`grain_repose_max_step`] instead (plasticity curve).
 pub fn wet_repose_loosens(material: MaterialId, wet: f32) -> bool {
-    if material == MaterialId::Clay {
+    if matches!(material, MaterialId::Clay | MaterialId::Bentonite) {
         return false;
     }
     if wet <= 0.0 {
@@ -146,7 +148,7 @@ pub fn wet_repose_loosens(material: MaterialId, wet: f32) -> bool {
 /// Clay: dry powder and near-saturated mud → 0 (sand-like); mid-wet
 /// plastic clay → [`CLAY_PLASTIC_MAX_STEP`] (holds shape).
 pub fn grain_repose_max_step(material: MaterialId, wet: f32) -> i32 {
-    if material == MaterialId::Clay {
+    if matches!(material, MaterialId::Clay | MaterialId::Bentonite) {
         return clay_plastic_max_step(wet);
     }
     let mut step = grain_max_stable_step(material);
@@ -336,6 +338,11 @@ pub fn roof_collapse_debris(material: MaterialId) -> MaterialId {
     match material {
         MaterialId::Stone => MaterialId::LooseRock,
         MaterialId::Limestone => MaterialId::LooseLimestone,
+        // Broken flowstone is carbonate rubble like any other.
+        MaterialId::Flowstone => MaterialId::LooseLimestone,
+        // A clastic rock breaks back into the sediment it was cemented from.
+        MaterialId::Sandstone => MaterialId::Sand,
+        MaterialId::Conglomerate => MaterialId::Gravel,
         MaterialId::Bedrock => MaterialId::LooseRock, // should not be selected (∞ span)
         other => other,
     }
@@ -477,7 +484,8 @@ fn collapse_one_ceiling(world: &mut World, gx: i32, gy: i32) -> bool {
     }
 
     let debris_mat = roof_collapse_debris(roof.material);
-    let cap = water_capacity_with(debris_mat, &world.hydro);
+    let debris_template = Cell { material: debris_mat, ..roof };
+    let cap = water_capacity_cell(debris_template, &world.hydro);
     let mut debris_sat = roof.sat.0.min(cap);
     let mut leftover = below.sat.0.saturating_add(roof.sat.0.saturating_sub(debris_sat));
     if cap > debris_sat {
@@ -496,6 +504,7 @@ fn collapse_one_ceiling(world: &mut World, gx: i32, gy: i32) -> bool {
         sat: Sat(leftover),
         flags: Default::default(),
         _pad: 0,
+        pore: roof.pore,
     };
     world.set_cell(gx, gy - 1, debris);
     world.set_cell(gx, gy, vacated);
@@ -715,7 +724,8 @@ fn shear_one_face(
         return false;
     }
     let debris_mat = shear_weaken_debris(cell.material);
-    let cap = water_capacity_with(debris_mat, &world.hydro);
+    let debris_template = Cell { material: debris_mat, ..cell };
+    let cap = water_capacity_cell(debris_template, &world.hydro);
     let debris = Cell {
         material: debris_mat,
         sat: Sat(cell.sat.0.min(cap)),
@@ -729,18 +739,22 @@ fn shear_one_face(
 fn is_compactable(material: MaterialId) -> bool {
     matches!(
         material,
-        MaterialId::Clay | MaterialId::Soil | MaterialId::Organic | MaterialId::Sand
+        MaterialId::Clay
+        | MaterialId::Bentonite
+        | MaterialId::Soil
+        | MaterialId::Organic
+        | MaterialId::Sand
     )
 }
 
 /// Sand only compacts when already quite wet; Clay/Organic always eligible.
-fn compactable_sat_ok(material: MaterialId, sat: u8) -> bool {
-    if sat < COMPACTION_MIN_SAT {
+fn compactable_sat_ok(cell: Cell, hydro: &wk_material::HydroOverrides) -> bool {
+    if cell.sat.0 < COMPACTION_MIN_SAT {
         return false;
     }
-    if material == MaterialId::Sand {
-        let cap = water_capacity(MaterialId::Sand);
-        return cap > 0 && (sat as f32 / cap as f32) >= 0.5;
+    if cell.material == MaterialId::Sand {
+        let cap = water_capacity_cell(cell, hydro);
+        return cap > 0 && (cell.sat.0 as f32 / cap as f32) >= 0.5;
     }
     true
 }
@@ -782,7 +796,7 @@ fn find_exude_target(world: &World, gx: i32, gy: i32) -> Option<(i32, i32)> {
         let Some(c) = world.get_cell(gx, ty) else {
             break;
         };
-        let cap = water_capacity(c.material);
+        let cap = water_capacity_cell(c, &world.hydro);
         if cap == 0 {
             // Impermeable solid blocks the path (Bedrock / Ice).
             if c.material != MaterialId::Air {
@@ -836,7 +850,7 @@ pub fn apply_compaction_regions(
                 if !is_compactable(cell.material) {
                     continue;
                 }
-                if !compactable_sat_ok(cell.material, cell.sat.0) {
+                if !compactable_sat_ok(cell, &world.hydro) {
                     continue;
                 }
                 if !compaction_load_ok(world, gx, gy, use_map, geotech) {
@@ -876,7 +890,7 @@ fn compact_one(
         return false;
     };
     if !is_compactable(src.material)
-        || !compactable_sat_ok(src.material, src.sat.0)
+        || !compactable_sat_ok(src, &world.hydro)
         || !compaction_load_ok(world, gx, gy, use_map, geotech)
     {
         return false;
@@ -887,7 +901,7 @@ fn compact_one(
     let Some(dst) = world.get_cell(tx, ty) else {
         return false;
     };
-    let cap = water_capacity_with(dst.material, &world.hydro);
+    let cap = water_capacity_cell(dst, &world.hydro);
     let free = cap.saturating_sub(dst.sat.0);
     if free == 0 {
         return false;
@@ -1045,12 +1059,14 @@ mod tests {
 
     #[test]
     fn stone_collapses_wide_karst_room() {
-        // Limestone limit is 10m → 40 cells; easier to fit in one chunk.
+        // Limestone's limit is 15m → 60 cells, which no longer leaves room for
+        // an over-wide room inside a single 64-cell chunk, so this spans two.
         let mut w = World::new(1);
         w.ensure_chunk(ChunkCoord::new(0, 0));
-        bed(&mut w, 0, 63);
+        w.ensure_chunk(ChunkCoord::new(1, 0));
+        bed(&mut w, 0, CHUNK_CELLS_W as i32 * 2 - 1);
         let limit = roof_span_limit_cells(MaterialId::Limestone);
-        assert!(limit > 0 && limit + 4 < CHUNK_CELLS_W as i32);
+        assert!(limit > 0 && limit + 4 < CHUNK_CELLS_W as i32 * 2);
         let span = limit + 2;
         let x0 = 2;
         let x1 = x0 + span - 1;

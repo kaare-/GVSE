@@ -11,8 +11,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::grid::World;
 use crate::humidity::TileBounds;
-use crate::worldgen::continental_surface_y;
+use crate::worldgen::{continental_surface_y, live_surface_y, LIVE_SURFACE_SEARCH};
 
 fn default_variance() -> f32 {
     0.55
@@ -125,20 +126,24 @@ impl Wind {
 
     /// Vertical wind: climate plus orographic lift when terrain rises
     /// downwind of this tile.
-    pub fn vy_at(&self, hx: i32, _hy: i32) -> f32 {
-        let lift = self.orographic_lift(hx);
+    ///
+    /// Pass the live [`World`] so lift follows erosion and deposition.
+    /// `None` falls back to the seed profile — tests and HUD that have no
+    /// grid yet.
+    pub fn vy_at(&self, world: Option<&World>, hx: i32, _hy: i32) -> f32 {
+        let lift = self.orographic_lift(world, hx);
         self.climate_vy + lift
     }
 
     /// Mean ascent (cells of surface gain) looking one tile downwind.
     /// Positive → air is forced up the mountain face.
-    pub fn orographic_lift(&self, hx: i32) -> f32 {
+    pub fn orographic_lift(&self, world: Option<&World>, hx: i32) -> f32 {
         let tc = self.tile_cols.max(1);
         let gx = hx * tc + tc / 2;
         let sign = if self.climate_vx >= 0.0 { 1 } else { -1 };
         let gx_dn = gx + sign * tc;
-        let s0 = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
-        let s1 = continental_surface_y(self.seed, gx_dn, self.sea_level_y, self.width_cols);
+        let s0 = self.surface_at(world, gx);
+        let s1 = self.surface_at(world, gx_dn);
         let ascent = (s1 - s0) as f32;
         if ascent <= 0.0 {
             return 0.0;
@@ -148,23 +153,31 @@ impl Wind {
     }
 
     /// True when the tile centre sits over tall land (rain-prone).
-    pub fn is_tall_terrain(&self, hx: i32, tall_above_sea: i32) -> bool {
+    pub fn is_tall_terrain(&self, world: Option<&World>, hx: i32, tall_above_sea: i32) -> bool {
         let tc = self.tile_cols.max(1);
         let gx = hx * tc + tc / 2;
-        let s = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
+        let s = self.surface_at(world, gx);
         s >= self.sea_level_y + tall_above_sea
     }
 
     /// Surface ascent into the wind (cells) at tile `hx`.
-    pub fn ascent_cells(&self, hx: i32) -> f32 {
+    pub fn ascent_cells(&self, world: Option<&World>, hx: i32) -> f32 {
         let tc = self.tile_cols.max(1);
         let gx = hx * tc + tc / 2;
         let sign = if self.climate_vx >= 0.0 { 1 } else { -1 };
         // Look *upwind*: rain as moist air climbs onto this tile.
         let gx_up = gx - sign * tc;
-        let s0 = continental_surface_y(self.seed, gx_up, self.sea_level_y, self.width_cols);
-        let s1 = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
+        let s0 = self.surface_at(world, gx_up);
+        let s1 = self.surface_at(world, gx);
         ((s1 - s0) as f32).max(0.0)
+    }
+
+    fn surface_at(&self, world: Option<&World>, gx: i32) -> i32 {
+        let hint = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
+        match world {
+            Some(w) => live_surface_y(w, gx, hint, LIVE_SURFACE_SEARCH),
+            None => hint,
+        }
     }
 }
 
@@ -188,11 +201,73 @@ mod tests {
         );
         let mut max_ascent = 0.0f32;
         for hx in 0..(p.width_cols / 4) {
-            max_ascent = max_ascent.max(wind.ascent_cells(hx));
+            max_ascent = max_ascent.max(wind.ascent_cells(None, hx));
         }
         assert!(
             max_ascent > 5.0,
             "expected some orographic ascent across the ring, got {max_ascent}"
+        );
+    }
+
+    #[test]
+    fn ascent_reads_the_live_hill_not_the_seed_profile() {
+        use crate::cell::Cell;
+        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+        use wk_material::MaterialId;
+
+        let p = WorldgenParams::default();
+        let wind = Wind::climate(
+            4,
+            0.12,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        let mut hx_peak = 0;
+        let mut best = 0.0f32;
+        for hx in 0..(p.width_cols / 4) {
+            let a = wind.ascent_cells(None, hx);
+            if a > best {
+                best = a;
+                hx_peak = hx;
+            }
+        }
+        assert!(best > 5.0, "need a seed-profile climb, got {best}");
+
+        let tc = 4;
+        let gx = hx_peak * tc + tc / 2;
+        let hint = crate::worldgen::continental_surface_y(
+            p.seed,
+            gx,
+            p.sea_level_y,
+            p.width_cols,
+        );
+        let mut w = crate::grid::World::new(p.seed);
+        for y in p.sea_level_y..=hint {
+            w.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(CHUNK_CELLS_W as i32),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+            w.set_cell(gx, y, Cell::solid(MaterialId::Stone));
+        }
+        let before = wind.ascent_cells(Some(&w), hx_peak);
+        assert!(
+            (before - best).abs() < 2.0,
+            "an untouched stacked column should agree with the seed profile ({best} vs {before})"
+        );
+
+        for y in (p.sea_level_y + 1)..=hint {
+            w.set_cell(gx, y, Cell::air());
+        }
+        w.set_cell(gx, p.sea_level_y, Cell::solid(MaterialId::Stone));
+        let after = wind.ascent_cells(Some(&w), hx_peak);
+        assert!(
+            after + 4.0 < before,
+            "flattening the live hill should cut ascent ({before} → {after}); \
+             the seed profile is still a climb of {best}"
         );
     }
 

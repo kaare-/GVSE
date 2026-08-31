@@ -8,11 +8,12 @@ use macroquad::prelude::*;
 use wk_material::MaterialId;
 use wk_voxel::{
     build_canopy_index_posed, carbon_ratio, celestial_moon_screen_pos_cfg,
-    celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, day_night_factor_cfg,
-    humidity_mean_norm, is_standing_water, precip_cover_fraction, resolve_organism_draw_cells,
-    shade_transmit_column, sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig,
-    CloudStore, Humidity, ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature,
-    Wind, World,
+    celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
+    day_night_factor_cfg, falls_through_empty_air, humidity_mean_norm, is_standing_water,
+    precip_cover_fraction, resolve_organism_draw_cells, shade_transmit_column,
+    sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, CloudStore, Humidity,
+    ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World,
+    CHUNK_CELLS_H, CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_SEARCH,
 };
 
 /// Active-layer parcel parallax (1 = locked to terrain; lower = farther).
@@ -147,6 +148,8 @@ impl RidgeSilhouette {
                 bedrock_floor_y,
                 sky_ceiling_y,
                 sea_level_y,
+                seed,
+                width_cols,
             ));
         }
         self.far = lowpass_wrap(&raw, 8);
@@ -163,20 +166,65 @@ fn column_surface_y(
     bedrock: i32,
     sky_ceiling: i32,
     sea_level: i32,
+    seed: u64,
+    width_cols: i32,
 ) -> i32 {
-    let mut y = sky_ceiling - 1;
-    while y >= bedrock {
-        if let Some(c) = world.get_cell(gx, y) {
-            if c.material != MaterialId::Air {
-                return y;
-            }
-            if !c.sat.is_empty() && (y <= sea_level || is_standing_water(world, gx, y)) {
-                return y;
-            }
-        }
-        y -= 1;
+    // Walk from the procedural profile, not from the sky ceiling.
+    // Snow is a solid, so a ceiling scan treats every falling flake as the
+    // crest — that is the needle-spike on the far/near plates. Humidity is
+    // a tile field and never lives in these cells; wet Air only counts when
+    // it is a lake or the sea.
+    let hint = continental_surface_y(seed, gx, sea_level, width_cols)
+        .clamp(bedrock, sky_ceiling.saturating_sub(1));
+    live_surface_y_ground(world, gx, hint, LIVE_SURFACE_SEARCH, sea_level)
+}
+
+fn ridge_ground_at(world: &World, gx: i32, y: i32, sea_level: i32) -> bool {
+    let Some(c) = world.get_cell(gx, y) else {
+        return false;
+    };
+    if falls_through_empty_air(c.material) {
+        return false;
     }
-    sea_level.max(bedrock)
+    if c.material != MaterialId::Air {
+        return true;
+    }
+    if c.sat.is_empty() {
+        return false;
+    }
+    y <= sea_level || is_standing_water(world, gx, y)
+}
+
+fn live_surface_y_ground(
+    world: &World,
+    gx: i32,
+    hint: i32,
+    search: i32,
+    sea_level: i32,
+) -> i32 {
+    let jx = world.wrap_x(gx);
+    let ground = |y: i32| ridge_ground_at(world, jx, y, sea_level);
+    if world.get_cell(jx, hint).is_none() {
+        return hint;
+    }
+    if ground(hint) {
+        let mut y = hint;
+        for _ in 0..search {
+            if !ground(y + 1) {
+                return y;
+            }
+            y += 1;
+        }
+        return y;
+    }
+    let mut y = hint;
+    for _ in 0..search {
+        y -= 1;
+        if ground(y) {
+            return y;
+        }
+    }
+    hint
 }
 
 fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
@@ -199,13 +247,138 @@ fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
     out
 }
 
+/// True when this cell is the falling drop (1-wide water / flake), not vapour.
+fn haze_cell_is_drop_cell(c: wk_voxel::Cell) -> bool {
+    if c.material == MaterialId::Air && c.sat.0 > GRAIN_REPOSE_HAZE_MAX {
+        return true;
+    }
+    falls_through_empty_air(c.material)
+}
+
+fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
+    match world.get_cell(gx, gy) {
+        Some(c) => haze_cell_is_drop_cell(c),
+        None => false,
+    }
+}
+
+/// Highest drop in each column. Haze below that cell is the open path.
+fn collect_drop_tops(world: &World) -> HashMap<i32, i32> {
+    let mut tops: HashMap<i32, i32> = HashMap::new();
+    let cw = CHUNK_CELLS_W as i32;
+    let ch = CHUNK_CELLS_H as i32;
+    for chunk in world.chunks.values() {
+        if !chunk.has_wet_air && !chunk.has_snow && !chunk.has_buoyant {
+            continue;
+        }
+        let ox = chunk.coord.cx * cw;
+        let oy = chunk.coord.cy * ch;
+        for ly in 0..CHUNK_CELLS_H {
+            for lx in 0..CHUNK_CELLS_W {
+                if !haze_cell_is_drop_cell(chunk.get(lx, ly)) {
+                    continue;
+                }
+                let gx = world.wrap_x(ox + lx as i32);
+                let gy = oy + ly as i32;
+                tops.entry(gx).and_modify(|y| *y = (*y).max(gy)).or_insert(gy);
+            }
+        }
+    }
+    tops
+}
+
+/// Inclusive bottom of the 4×4 column still painted. Everything at or
+/// under the drop is left open — the 1-wide path through the field.
+fn haze_column_y0(y0: i32, y1: i32, drop_y: Option<i32>) -> Option<i32> {
+    let y0 = match drop_y {
+        Some(d) => (d + 1).max(y0),
+        None => y0,
+    };
+    if y0 >= y1 {
+        None
+    } else {
+        Some(y0)
+    }
+}
+
+/// Occupied tiles plus their cardinal neighbours (wrapped).
+///
+/// An emptied nucleating tile must stay a seat so bilinear can paint
+/// the three sibling columns. Skipping it is the 4-wide hole. Neighbour
+/// keys go through [`Humidity::wrap_tile_x`] — raw `hx-1` was the ring
+/// seam.
+fn haze_paint_seats(humidity: &Humidity, sky_hy_min: i32) -> Vec<(i32, i32)> {
+    let mut seats = std::collections::HashSet::new();
+    for (&(hx, hy), &mass) in &humidity.cells {
+        if mass <= 0.0 || hy < sky_hy_min {
+            continue;
+        }
+        seats.insert((hx, hy));
+        for (dx, dy) in [(-1, 0), (1, 0), (0, -1), (0, 1)] {
+            let Some(nx) = humidity.wrap_tile_x(hx + dx) else {
+                continue;
+            };
+            let ny = hy + dy;
+            if ny < sky_hy_min {
+                continue;
+            }
+            if let Some(b) = humidity.bounds {
+                if !b.contains(nx, ny) {
+                    continue;
+                }
+            }
+            seats.insert((nx, ny));
+        }
+    }
+    let mut out: Vec<_> = seats.into_iter().collect();
+    out.sort_unstable();
+    out
+}
+
+/// Cells of one seat that still get haze after the shaft, with bilinear mass.
+///
+/// Shaft is the mask (1-wide). Resample is alpha only. Per-column floor
+/// so the clip does not step 4-wide at a tile edge (the 127/128 shelf).
+fn haze_resampled_cells(
+    humidity: &Humidity,
+    hx: i32,
+    hy: i32,
+    drop_tops: &HashMap<i32, i32>,
+    wrap_x: impl Fn(i32) -> i32,
+    mut floor_y: impl FnMut(i32) -> i32,
+) -> Vec<(i32, i32, f32)> {
+    let tc = humidity.tile_cols.max(1);
+    let base_gx = hx * tc;
+    let base_gy = hy * tc;
+    let y1 = base_gy + tc;
+    let mut out = Vec::new();
+    for col in 0..tc {
+        let wx = wrap_x(base_gx + col);
+        let y0 = (floor_y(wx) + 1).max(base_gy);
+        let Some(col_y0) = haze_column_y0(y0, y1, drop_tops.get(&wx).copied()) else {
+            continue;
+        };
+        for gy in col_y0..y1 {
+            let sampled = humidity.sample_bilinear(wx as f32 + 0.5, gy as f32 + 0.5);
+            out.push((wx, gy, sampled));
+        }
+    }
+    out
+}
+
 /// Soft white vapor haze alpha (legacy helper for tests / diagnostics).
 pub fn humidity_haze_alpha(mass: f32, max_mass: f32) -> u8 {
+    humidity_haze_alpha_cell(mass, max_mass, 0.12)
+}
+
+/// Per-cell wash. Soft floor — the 12% live-max cut ate neighbour
+/// columns around an emptied tile and turned rain into a 4-wide hole.
+fn humidity_haze_alpha_cell(mass: f32, max_mass: f32, floor: f32) -> u8 {
     if mass <= 0.0 {
         return 0;
     }
     let norm = (mass / max_mass.max(1.0)).clamp(0.0, 1.0);
-    if norm < 0.12 {
+    if norm < floor {
         return 0;
     }
     (18.0 + norm * 42.0) as u8
@@ -963,15 +1136,17 @@ fn draw_ridge_band(
     }
 }
 
-/// Humidity tile diagnostic (front of terrain) + sparse wind streaks.
+/// Humidity tile diagnostic (front of terrain).
 ///
-/// This is the `H` overlay — soft white vapour tiles clipped to ground.
+/// Occupied 4×4 seats plus a one-tile neighbour halo (wrapped). A drop
+/// masks that column from itself downward (1-wide). Cells that remain
+/// bilinear-sample the store so tile edges do not read as a clamp.
 /// Soft cloud banks are separate (`N` / [`draw_depth_cloud_layer`]).
+/// Wind streaks are a separate overlay ([`draw_wind_streaks`], `V`).
 pub fn draw_haze_and_wind(
     humidity: &Humidity,
     world: &World,
     wind: &Wind,
-    tick: u64,
     origin_x: f32,
     origin_y: f32,
     cell_px: f32,
@@ -982,56 +1157,66 @@ pub fn draw_haze_and_wind(
     sw: f32,
     sh: f32,
 ) {
-    if !humidity.cells.is_empty() && cell_px > 0.0 {
-        let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-        let max_mass = humidity
-            .cells
-            .values()
-            .copied()
-            .fold(0.0f32, f32::max)
-            .max(1.0);
-        let tc = humidity.tile_cols.max(1);
-        let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
+    if humidity.cells.is_empty() || cell_px <= 0.0 {
+        return;
+    }
+    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
+    let max_mass = humidity
+        .cells
+        .values()
+        .copied()
+        .fold(0.0f32, f32::max)
+        .max(1.0);
+    let tc = humidity.tile_cols.max(1);
+    let sky_hy_min = (sea_level_y + 4).div_euclid(tc);
+    let drop_tops = collect_drop_tops(world);
+    let seats = haze_paint_seats(humidity, sky_hy_min);
+    let mut floor_cache: HashMap<i32, i32> = HashMap::new();
 
-        for (&(hx, hy), &mass) in &humidity.cells {
-            if mass <= 0.0 || hy < sky_hy_min {
+    for (hx, hy) in seats {
+        for (wx, gy, sampled) in haze_resampled_cells(
+            humidity,
+            hx,
+            hy,
+            &drop_tops,
+            |x| world.wrap_x(x),
+            |wx| {
+                *floor_cache.entry(wx).or_insert_with(|| {
+                    cloud_floor_y(world, wind, wx as f32).round() as i32
+                })
+            },
+        ) {
+            let cell_alpha = humidity_haze_alpha_cell(sampled, max_mass, 0.02);
+            if cell_alpha == 0 {
                 continue;
             }
-            let alpha = humidity_haze_alpha(mass, max_mass);
-            if alpha == 0 {
-                continue;
-            }
-            let base_gx = hx * tc;
-            let base_gy = hy * tc;
-            for col in 0..tc {
-                let gx = base_gx + col;
-                let world_x = world.wrap_x(gx);
-                let floor_y = cloud_floor_y(world, wind, world_x as f32).round() as i32;
-                let y0 = (floor_y + 1).max(base_gy);
-                let y1 = base_gy + tc;
-                if y0 >= y1 {
+            for &x_copy in x_copies {
+                let sx = origin_x + (wx + x_copy * width_cols) as f32 * cell_px;
+                let top_sy = origin_y - (gy + 1 - bedrock_floor_y) as f32 * cell_px;
+                if sx + cell_px < 0.0
+                    || sx > sw
+                    || top_sy > sh
+                    || top_sy + cell_px < 0.0
+                {
                     continue;
                 }
-                for &x_copy in x_copies {
-                    let sx = origin_x + (gx + x_copy * width_cols) as f32 * cell_px;
-                    let top_sy = origin_y - (y1 - bedrock_floor_y) as f32 * cell_px;
-                    let bot_sy = origin_y - (y0 - bedrock_floor_y) as f32 * cell_px;
-                    let h = (bot_sy - top_sy).max(1.0);
-                    if sx + cell_px < 0.0 || sx > sw || top_sy > sh || top_sy + h < 0.0 {
-                        continue;
-                    }
-                    draw_rectangle(
-                        sx,
-                        top_sy,
-                        cell_px + 0.5,
-                        h,
-                        Color::from_rgba(255, 255, 255, alpha),
-                    );
-                }
+                draw_rectangle(
+                    sx,
+                    top_sy,
+                    cell_px + 0.5,
+                    cell_px + 0.5,
+                    Color::from_rgba(255, 255, 255, cell_alpha),
+                );
             }
         }
     }
+}
 
+/// Sparse screen-space wind strokes (`V` overlay).
+///
+/// Placeholder: 1-px hairlines that do not read speed or direction well.
+/// Kept off `H` so the humidity field stays clean. Needs a real visual.
+pub fn draw_wind_streaks(wind: &Wind, tick: u64, sw: f32, sh: f32) {
     let vx = wind.effective_vx(tick);
     if vx.abs() < 0.008 {
         return;
@@ -1260,18 +1445,29 @@ pub fn terrain_celestial_key_strength(
         return 0.0;
     }
     // Climb to the top of this solid/water stack.
+    //
+    // Stop one past the deepest bleed any material gets (`max_bleed` below is
+    // never more than 3): if the stack continues that far above, this cell is
+    // buried and the answer is 0 regardless of where the real top is. Buried
+    // cells are the overwhelming majority of a drawn frame, and this runs per
+    // cell per frame, so the old 10-cell climb plus surface/water probes was
+    // ~14 `get_cell` calls each to return 0.
+    const MAX_BLEED_ANY: i32 = 3;
     let mut top = y;
-    for _ in 0..10 {
+    for _ in 0..=MAX_BLEED_ANY {
         if is_shadow_receiver(world, x, top + 1) {
             top += 1;
         } else {
             break;
         }
     }
+    let depth = top - y;
+    if depth > MAX_BLEED_ANY {
+        return 0.0;
+    }
     if !is_exposed_surface_top(world, x, top) {
         return 0.0;
     }
-    let depth = top - y;
     let water = is_waterish(world, x, top) || is_waterish(world, x, y);
     let max_bleed = if water {
         if is_day {
@@ -1629,180 +1825,12 @@ pub fn draw_clouds(
     let lag_y = cam_y * (1.0 - CLOUD_PARALLAX) * 0.55;
     let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
 
-    for p in &clouds.parcels {
-        if !p.raining {
-            continue;
-        }
-        let wet = p.wetness_with(downpour_mass);
-        let r = p.radius() * cell_px;
-        let as_snow = snowing(p.fx, p.fy);
-        for &x_copy in x_copies {
-            let sx = origin_x + (p.fx + (x_copy * width_cols) as f32) * cell_px + lag_x;
-            let sy = origin_y - (p.fy - bedrock_floor_y as f32) * cell_px + lag_y;
-            if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
-                continue;
-            }
-            if as_snow {
-                draw_falling_snow(
-                    world,
-                    wind,
-                    sx,
-                    sy,
-                    r,
-                    p.fx + (x_copy * width_cols) as f32,
-                    p.radius(),
-                    origin_x,
-                    origin_y,
-                    bedrock_floor_y,
-                    wet,
-                    sw,
-                    sh,
-                    cell_px,
-                );
-            } else {
-                draw_falling_rain(
-                    world,
-                    wind,
-                    sx,
-                    sy,
-                    r,
-                    p.fx + (x_copy * width_cols) as f32,
-                    p.radius(),
-                    origin_x,
-                    origin_y,
-                    bedrock_floor_y,
-                    wet,
-                    sw,
-                    sh,
-                    cell_px,
-                );
-            }
-        }
-    }
+    // No precip streaks: rain is real water in the grid now, nucleated in the
+    // air and drawn by the terrain pass as it falls. The streaks existed because
+    // rain teleported to the ground and something had to stand in for the fall;
+    // drawing both would show every shower twice.
 }
 
-/// Mist → shower → downpour look from parcel wetness.
-fn precip_tier(wetness: f32) -> u8 {
-    if wetness < 0.28 {
-        0 // mist / condensation
-    } else if wetness < 0.62 {
-        1 // soft rain
-    } else {
-        2 // downpour
-    }
-}
-
-fn draw_falling_rain(
-    world: &World,
-    wind: &Wind,
-    sx: f32,
-    sy: f32,
-    r: f32,
-    parcel_fx: f32,
-    radius_cells: f32,
-    origin_x: f32,
-    origin_y: f32,
-    bedrock_floor_y: i32,
-    wetness: f32,
-    sw: f32,
-    sh: f32,
-    cell_px: f32,
-) {
-    let t = get_time() as f32;
-    let tier = precip_tier(wetness);
-    let top = sy + r * 0.30;
-    let left = (sx - r * 0.85).max(-12.0);
-    let right = (sx + r * 0.85).min(sw + 12.0);
-    let band = (right - left).max(1.0);
-    let (n_div, drop_h, fall_speed, alpha_base, width_px) = match tier {
-        0 => (14.0, cell_px * 0.55, 90.0, 55u8, 1.0f32),           // mist
-        1 => (9.0, cell_px * 1.1, 220.0, 90u8, 1.0),                // soft rain
-        _ => (5.5, cell_px * 1.8, 420.0, 130u8, cell_px.max(1.0)), // downpour
-    };
-    let n = ((band / n_div) * (0.55 + wetness)).ceil().clamp(6.0, 40.0) as usize;
-    for i in 0..n {
-        let seed = i as f32;
-        let x = left + (seed * 97.371) % band;
-        // Per-column ground clip (world-aligned, no camera lag).
-        let world_x = parcel_fx + ((x - sx) / cell_px);
-        let floor_y = cloud_floor_y(world, wind, world_x);
-        let ground_sy = origin_y - (floor_y - bedrock_floor_y as f32) * cell_px;
-        let bottom = ground_sy.min(sh - 2.0);
-        if bottom <= top + 2.0 {
-            continue;
-        }
-        let phase = (seed * 0.6180339) % 1.0;
-        let cycle = (bottom - top + drop_h).max(drop_h + 1.0);
-        let y = top + ((t * fall_speed + phase * cycle) % cycle) - drop_h;
-        if y + drop_h < top || y >= bottom {
-            continue;
-        }
-        let h = drop_h.min(bottom - y);
-        if h < 0.5 {
-            continue;
-        }
-        let alpha = alpha_base.saturating_add((wetness * 40.0) as u8);
-        let dx = ((x - origin_x) / cell_px).floor() * cell_px + origin_x;
-        draw_rectangle(
-            dx,
-            y,
-            width_px.min(cell_px),
-            h,
-            Color::from_rgba(195, 215, 240, alpha),
-        );
-    }
-    let _ = radius_cells;
-}
-
-fn draw_falling_snow(
-    world: &World,
-    wind: &Wind,
-    sx: f32,
-    sy: f32,
-    r: f32,
-    parcel_fx: f32,
-    radius_cells: f32,
-    origin_x: f32,
-    origin_y: f32,
-    bedrock_floor_y: i32,
-    wetness: f32,
-    sw: f32,
-    sh: f32,
-    cell_px: f32,
-) {
-    let t = get_time() as f32;
-    let top = sy + r * 0.30;
-    let left = (sx - r * 0.9).max(-12.0);
-    let right = (sx + r * 0.9).min(sw + 12.0);
-    let band = (right - left).max(1.0);
-    let flake = (cell_px * 0.65).max(1.0);
-    let n = ((band / 11.0) * (0.5 + wetness * 0.7))
-        .ceil()
-        .clamp(5.0, 28.0) as usize;
-    let fall_speed = 55.0 + wetness * 40.0;
-    for i in 0..n {
-        let seed = i as f32;
-        let drift = ((t * 18.0 + seed * 11.3).sin()) * 4.0;
-        let x = left + ((seed * 97.371) % band) + drift;
-        let world_x = parcel_fx + ((x - sx) / cell_px);
-        let floor_y = cloud_floor_y(world, wind, world_x);
-        let ground_sy = origin_y - (floor_y - bedrock_floor_y as f32) * cell_px;
-        let bottom = ground_sy.min(sh - 2.0);
-        if bottom <= top + 2.0 {
-            continue;
-        }
-        let phase = (seed * 0.6180339) % 1.0;
-        let cycle = (bottom - top + flake * 3.0).max(flake * 3.0 + 1.0);
-        let y = top + ((t * fall_speed + phase * cycle) % cycle) - flake;
-        if y + flake < top || y >= bottom {
-            continue;
-        }
-        let alpha = (100.0 + wetness * 50.0) as u8;
-        let dx = ((x - origin_x) / cell_px).floor() * cell_px + origin_x;
-        draw_rectangle(dx, y, flake, flake, Color::from_rgba(235, 242, 255, alpha));
-    }
-    let _ = radius_cells;
-}
 
 fn cloud_lobe_layout(shape_seed: u32, deform: f32) -> (f32, f32, Vec<(f32, f32, f32)>) {
     let d = deform.clamp(0.0, 1.0);
@@ -1946,10 +1974,86 @@ pub fn estimate_snow_bias(
 #[cfg(test)]
 mod tests {
     use super::{
-        gather_soft_cloud_srcs, humidity_haze_alpha, stamp_pixel_cloud_mask, CloudDepthLayer,
+        collect_drop_tops, gather_soft_cloud_srcs, haze_cell_is_drop, haze_column_y0,
+        haze_paint_seats, haze_resampled_cells, humidity_haze_alpha, stamp_pixel_cloud_mask,
+        CloudDepthLayer,
     };
     use std::collections::HashMap;
     use wk_voxel::{CloudStore, Humidity};
+
+    #[test]
+    fn airborne_snow_does_not_spike_the_ridge() {
+        // The old scan started at the sky ceiling and treated any non-Air
+        // as the crest. Snow is a solid, so a flake became a needle; the
+        // 30-tick cache then made the spike linger until the sky cleared.
+        use super::{column_surface_y, ridge_ground_at};
+        use wk_material::MaterialId;
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, CHUNK_CELLS_H, World};
+
+        let seed = 1u64;
+        let width = 64;
+        let sea = 8;
+        // Plains band (~0.30–0.40 of the ring). Abyss columns sit
+        // below y=0 and the clamp would hide the stone from the walk.
+        let gx = 22;
+        let hint = continental_surface_y(seed, gx, sea, width);
+        assert!(
+            hint > sea,
+            "test column should be land (hint={hint})"
+        );
+        let mut w = World::new(seed);
+        for y in [hint, hint + 30] {
+            w.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(64),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        w.set_cell(gx, hint, Cell::solid(MaterialId::Stone));
+        w.set_cell(gx, hint + 30, Cell::solid(MaterialId::Snow));
+        assert!(
+            !ridge_ground_at(&w, gx, hint + 30, sea),
+            "a flake in the sky is not ground"
+        );
+        let sky = hint + 64;
+        let y = column_surface_y(&w, gx, 0, sky, sea, seed, width);
+        assert_eq!(
+            y, hint,
+            "ridge crest must sit on the stone, not the flake (got {y})"
+        );
+    }
+
+    #[test]
+    fn wet_air_above_the_sea_is_not_a_ridge_crest() {
+        use super::column_surface_y;
+        use wk_material::MaterialId;
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, Sat, CHUNK_CELLS_H, World};
+
+        let seed = 1u64;
+        let width = 64;
+        let sea = 8;
+        let gx = 23;
+        let hint = continental_surface_y(seed, gx, sea, width);
+        assert!(
+            hint > sea,
+            "test column should be land (hint={hint})"
+        );
+        let mut w = World::new(seed);
+        w.ensure_chunk(ChunkCoord::new(
+            gx.div_euclid(64),
+            hint.div_euclid(CHUNK_CELLS_H as i32),
+        ));
+        w.ensure_chunk(ChunkCoord::new(
+            gx.div_euclid(64),
+            (hint + 24).div_euclid(CHUNK_CELLS_H as i32),
+        ));
+        w.set_cell(gx, hint, Cell::solid(MaterialId::Stone));
+        let mut haze = Cell::air();
+        haze.sat = Sat(200);
+        w.set_cell(gx, hint + 24, haze);
+        let sky = hint + 64;
+        let y = column_surface_y(&w, gx, 0, sky, sea, seed, width);
+        assert_eq!(y, hint, "mid-air wetness is not a mountain (got {y})");
+    }
 
     #[test]
     fn haze_ignores_thin_vapor_and_stays_soft() {
@@ -1957,6 +2061,105 @@ mod tests {
         assert_eq!(humidity_haze_alpha(5.0, 100.0), 0); // below 12% floor
         assert!(humidity_haze_alpha(50.0, 100.0) >= 18);
         assert!(humidity_haze_alpha(100.0, 100.0) <= 70);
+    }
+
+    #[test]
+    fn haze_carves_only_the_drop_cell() {
+        use wk_voxel::{Cell, ChunkCoord, Sat, GRAIN_REPOSE_HAZE_MAX};
+
+        let mut w = wk_voxel::World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(4, 10, Cell::air());
+        let mut drop = Cell::air();
+        drop.sat = Sat(GRAIN_REPOSE_HAZE_MAX.saturating_add(8));
+        w.set_cell(5, 10, drop);
+        w.set_cell(6, 10, Cell::air());
+        assert!(!haze_cell_is_drop(&w, 4, 10));
+        assert!(haze_cell_is_drop(&w, 5, 10), "the droplet is one cell");
+        assert!(!haze_cell_is_drop(&w, 6, 10));
+    }
+
+    #[test]
+    fn a_drop_opens_the_column_under_it() {
+        use wk_voxel::{Cell, ChunkCoord, Sat, GRAIN_REPOSE_HAZE_MAX};
+
+        let mut w = wk_voxel::World::new(1);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut drop = Cell::air();
+        drop.sat = Sat(GRAIN_REPOSE_HAZE_MAX.saturating_add(8));
+        w.set_cell(5, 20, drop);
+        let tops = collect_drop_tops(&w);
+        assert_eq!(tops.get(&5).copied(), Some(20));
+        assert_eq!(haze_column_y0(8, 24, Some(20)), Some(21));
+        assert_eq!(haze_column_y0(8, 20, Some(20)), None);
+        assert_eq!(haze_column_y0(8, 24, None), Some(8));
+        assert_eq!(
+            haze_column_y0(8, 24, Some(20)),
+            Some(21),
+            "blocks at and under the drop stay open"
+        );
+    }
+
+    #[test]
+    fn resample_keeps_a_one_wide_path_through_an_emptied_tile() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 32, 128);
+        h.cells.insert((1, 5), 400.0);
+        h.cells.insert((0, 4), 400.0);
+        h.cells.insert((0, 6), 400.0);
+        let seats = haze_paint_seats(&h, 0);
+        assert!(
+            seats.contains(&(0, 5)),
+            "emptied nucleating tile must stay a seat or rain is 4-wide"
+        );
+        assert!(
+            seats.iter().all(|&(hx, _)| hx >= 0),
+            "neighbour seats wrap; they must not use raw hx-1"
+        );
+
+        let mut drop_tops = HashMap::new();
+        drop_tops.insert(2, 21);
+        let painted: std::collections::HashSet<_> = seats
+            .iter()
+            .flat_map(|&(hx, hy)| {
+                haze_resampled_cells(&h, hx, hy, &drop_tops, |x| x, |_| 0)
+            })
+            .filter(|&(_, _, m)| m > 0.0)
+            .map(|(x, y, _)| (x, y))
+            .collect();
+
+        for gy in 16..=21 {
+            assert!(
+                !painted.contains(&(2, gy)),
+                "shaft must stay open under the drop (2,{gy})"
+            );
+        }
+        for gx in [0, 1, 3] {
+            assert!(
+                (20..24).any(|gy| painted.contains(&(gx, gy))),
+                "sibling column {gx} of the punched tile must still paint"
+            );
+        }
+        let open: Vec<i32> = (0..4)
+            .filter(|&gx| !(20..=21).any(|gy| painted.contains(&(gx, gy))))
+            .collect();
+        assert_eq!(
+            open,
+            vec![2],
+            "only the drop column stays open through the punched band ({open:?})"
+        );
+    }
+
+    #[test]
+    fn resample_wraps_neighbour_seats_at_the_ring() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 16, 64);
+        h.wrap_x = true;
+        h.cells.insert((0, 5), 400.0);
+        let seats = haze_paint_seats(&h, 0);
+        assert!(seats.contains(&(3, 5)), "left neighbour wraps to hx_max");
+        assert!(
+            !seats.iter().any(|&(hx, _)| hx < 0 || hx > 3),
+            "raw hx-1 at the ring was the bright seam"
+        );
     }
 
     #[test]

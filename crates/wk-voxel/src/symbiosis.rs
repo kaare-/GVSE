@@ -30,6 +30,8 @@
 use serde::{Deserialize, Serialize};
 
 use crate::blueprint::Genome;
+use crate::cell::water_capacity_cell;
+#[cfg(test)]
 use crate::cell::water_capacity;
 use crate::fungi::{
     add_mycelium_energy, ensure_mycelium_strain, lineage_for_strain_at, mycelium_energy_at,
@@ -291,7 +293,7 @@ fn cell_moist_frac(world: &World, gx: i32, gy: i32) -> f32 {
     if c.material == wk_material::MaterialId::Air {
         return 0.0;
     }
-    let cap = water_capacity(c.material);
+    let cap = water_capacity_cell(c, &world.hydro);
     if cap == 0 {
         return 0.0;
     }
@@ -806,7 +808,7 @@ fn give_pore_sat(world: &mut World, gx: i32, gy: i32, amount: u8) -> u8 {
     if c.material == wk_material::MaterialId::Air {
         return 0;
     }
-    let cap = water_capacity(c.material);
+    let cap = water_capacity_cell(c, &world.hydro);
     if cap == 0 || c.sat.0 >= cap {
         return 0;
     }
@@ -828,7 +830,7 @@ fn take_pore_sat(world: &mut World, gx: i32, gy: i32, amount: u8) -> u8 {
     if c.material == wk_material::MaterialId::Air || c.sat.0 == 0 {
         return 0;
     }
-    let cap = water_capacity(c.material);
+    let cap = water_capacity_cell(c, &world.hydro);
     if cap == 0 {
         return 0;
     }

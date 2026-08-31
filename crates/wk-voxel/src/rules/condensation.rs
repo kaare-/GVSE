@@ -39,6 +39,14 @@ pub struct CondensationConfig {
     pub max_events_per_tick: u32,
 }
 
+/// How far past saturation the rain response keeps climbing, as a multiple of
+/// the min-to-saturation span.
+///
+/// Bounded rather than open-ended so a very wet tile cannot pin
+/// `max_prob_per_tick` at its ceiling every tick, but wide enough that the
+/// diurnal swing in saturation mass stays visible in the response.
+const SUPERSATURATION_HEADROOM: f32 = 4.0;
+
 fn default_cond_max_events() -> u32 {
     48
 }
@@ -50,7 +58,10 @@ impl Default for CondensationConfig {
             min_mass_to_rain: 64.0,
             max_prob_per_tick: 0.4,
             full_mass: 512.0,
-            mass_per_droplet: 96.0,
+            // One full cell: a sub-cell budget is refused outright by
+            // `deposit_condensate_on_surface`, and a refused deposit drains no
+            // humidity, so small droplets quietly stall the water cycle.
+            mass_per_droplet: 255.0,
             seed_salt: 0xC10D_BA5E,
             max_events_per_tick: default_cond_max_events(),
         }
@@ -150,7 +161,7 @@ pub fn apply_condensation_rain_phased(
     for (hx, hy) in tiles {
         let mass = humidity.at_tile(hx, hy);
         let (mut prob_mult, mut mass_mult, mut min_mass) = match oro {
-            Some(o) => orographic_factors(o, hx, tile_cols, cfg.min_mass_to_rain),
+            Some(o) => orographic_factors(world, o, hx, tile_cols, cfg.min_mass_to_rain),
             None => (1.0, 1.0, cfg.min_mass_to_rain),
         };
         let mut full_mass = cfg.full_mass;
@@ -164,8 +175,20 @@ pub fn apply_condensation_rain_phased(
         if mass < min_mass {
             continue;
         }
-        // Linear scale from 0 at min_mass to max at thermal/orographic full.
-        let t = ((mass - min_mass) / (full_mass - min_mass)).clamp(0.0, 1.0);
+        // Linear from 0 at min_mass to 1 at thermal/orographic full — and it
+        // keeps climbing past that, up to [`SUPERSATURATION_HEADROOM`].
+        //
+        // Clamping at 1.0 was why the world rained constantly instead of having
+        // weather. `full_mass` is the saturation mass, which is what the
+        // day/night cycle and orographic lift actually move; once humidity sat
+        // above it the clamp pinned this term and neither could change the
+        // answer. Measured before: 6 degrees of diurnal swing moved the rain
+        // rate by four points (day 80%, night 76%), and hill condensation had
+        // effectively stopped. Headroom above saturation gives both somewhere
+        // to act, and makes a supersaturated tile rain harder — which is also
+        // what pulls the equilibrium back down.
+        let t = ((mass - min_mass) / (full_mass - min_mass))
+            .clamp(0.0, SUPERSATURATION_HEADROOM);
         let effective_prob = (cfg.max_prob_per_tick * t * prob_mult).clamp(0.0, 0.95);
         // Hash uses tile coord + tick + salt for per-tile determinism.
         let roll = hash_prob(
@@ -198,16 +221,40 @@ pub fn apply_condensation_rain_phased(
             continue;
         }
         let take_mass = take_mass.min(mass);
-        // Rain / frost lands on the ground / ocean under the tile centre.
         let centre_gx = hx * tile_cols + tile_cols / 2;
-        let mut landed = crate::phase::deposit_condensate_on_surface(
-            world,
-            centre_gx,
-            cfg.top_y,
-            take_mass,
-            temp,
-            phase,
-        );
+        // Nucleate **where the vapour is** and let gravity have it.
+        //
+        // This used to deposit on the ground under the tile, scanning up to 512
+        // cells down from the sky ceiling — rain that teleported rather than
+        // fell, which is why the falling drops had to be a cosmetic overlay
+        // drawn over an event that had already finished. A droplet now appears in
+        // the air cell that held the vapour and descends like any other water.
+        let centre_gy = hy * tile_cols + tile_cols / 2;
+        let air_t = temp.map(|t| t.at_tile(hx, hy));
+        let freezing = match (air_t, phase) {
+            (Some(t), Some(ph)) => t <= ph.freeze_point_c,
+            _ => false,
+        };
+        let mut landed = if freezing {
+            // Snowfall: nucleate in the air like rain, so it falls. Frost is the
+            // fallback — rime genuinely forms *on* surfaces, and a budget under a
+            // whole cell cannot pay for a snowflake.
+            let snowed = crate::phase::deposit_snow_in_air(world, centre_gx, centre_gy, take_mass);
+            if snowed > 0.0 {
+                snowed
+            } else {
+                crate::phase::deposit_condensate_on_surface(
+                    world,
+                    centre_gx,
+                    cfg.top_y,
+                    take_mass,
+                    temp,
+                    phase,
+                )
+            }
+        } else {
+            super::deposit_water_in_air(world, centre_gx, centre_gy, take_mass)
+        };
         // Cold frost needs a full cell (255). Small drizzle budgets refuse;
         // retry once from the tile so rime can still form without underpaying.
         if landed <= 0.0 && mass >= u8::MAX as f32 {
@@ -233,18 +280,19 @@ pub fn apply_condensation_rain_phased(
 }
 
 fn orographic_factors(
+    world: &crate::grid::World,
     oro: &OrographicConfig,
     hx: i32,
     tile_cols: i32,
     base_min_mass: f32,
 ) -> (f32, f32, f32) {
-    use crate::worldgen::continental_surface_y;
+    use crate::worldgen::live_surface_at;
     let tc = tile_cols.max(1);
     let gx = hx * tc + tc / 2;
     let sign = if oro.wind_sign >= 0 { 1 } else { -1 };
     let gx_up = gx - sign * tc;
-    let s_here = continental_surface_y(oro.seed, gx, oro.sea_level_y, oro.width_cols);
-    let s_up = continental_surface_y(oro.seed, gx_up, oro.sea_level_y, oro.width_cols);
+    let s_here = live_surface_at(world, oro.seed, gx, oro.sea_level_y, oro.width_cols);
+    let s_up = live_surface_at(world, oro.seed, gx_up, oro.sea_level_y, oro.width_cols);
     let ascent = (s_here - s_up) as f32;
     let tall = s_here >= oro.sea_level_y + oro.tall_above_sea;
     if !tall && ascent <= 2.0 {
@@ -290,4 +338,103 @@ fn thermal_rain_factors(
         mass_mult += 0.30 * d;
     }
     (prob_mult, mass_mult, min_mass, sat)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wk_material::MaterialId;
+
+    /// A rain budget smaller than one cell is *refused* by
+    /// `phase::deposit_condensate_on_surface`, and a refused deposit drains no
+    /// humidity at all — so small droplets do not make gentle drizzle, they
+    /// stall the water cycle and let the atmosphere fill up behind them.
+    ///
+    /// Measured on the demo world: 40.0 held equilibrium humidity at 666k where
+    /// 255.0 settles at 387k, and the bigger droplet is marginally *cheaper*
+    /// because fewer events are wasted.
+    /// Cold condensation must make snow that *falls*, not rime on the ground.
+    ///
+    /// Snow is the frozen counterpart of the phase-1 change that stopped rain
+    /// teleporting to the surface. Before this, cold precipitation only had the
+    /// frost path, so nothing ever descended through the air.
+    #[test]
+    fn cold_precipitation_nucleates_snow_in_the_air() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        // A whole cell's worth of budget, into empty air.
+        let paid = crate::phase::deposit_snow_in_air(&mut w, 4, 20, u8::MAX as f32);
+        assert_eq!(paid, u8::MAX as f32, "a full cell of budget buys one flake");
+        assert_eq!(
+            w.get_cell(4, 20).unwrap().material,
+            MaterialId::Snow,
+            "snow should appear in the air, not on the ground"
+        );
+    }
+
+    #[test]
+    fn a_partial_budget_buys_no_snowflake() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+
+        let mut w = World::new(5);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // A frozen cell's water is its *material*, not its sat, so a flake costs a
+        // whole cell. Part-paying would drift the ledger.
+        let paid = crate::phase::deposit_snow_in_air(&mut w, 4, 20, 200.0);
+        assert_eq!(paid, 0.0, "under a whole cell must be refused, not part-paid");
+        assert_ne!(w.get_cell(4, 20).unwrap().material, MaterialId::Snow);
+        let _ = Cell::air();
+    }
+
+    #[test]
+    fn snow_does_not_seed_into_wet_air() {
+        use crate::cell::{Cell, Sat};
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+
+        let mut w = World::new(6);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        let mut wet = Cell::air();
+        wet.sat = Sat(200);
+        w.set_cell(4, 20, wet);
+        let paid = crate::phase::deposit_snow_in_air(&mut w, 4, 20, u8::MAX as f32);
+        assert_eq!(
+            paid, 0.0,
+            "seeding into wet air would strand that water inside a cell that does \
+             not carry sat"
+        );
+        assert_eq!(w.get_cell(4, 20).unwrap().sat.0, 200, "its water is untouched");
+    }
+
+    #[test]
+    fn shipped_configs_use_whole_cell_droplets() {
+        let full = u8::MAX as f32;
+        for (name, cond) in [
+            ("default", CondensationConfig::default()),
+            (
+                "tab_defaults",
+                crate::sim_preset::SimPreset::tab_defaults().cond,
+            ),
+            (
+                "soak_survival",
+                crate::sim_preset::SimPreset::soak_survival().cond,
+            ),
+        ] {
+            assert!(
+                cond.mass_per_droplet >= full,
+                "{name}: mass_per_droplet {} is under one cell ({full}), so its \
+                 deposits are refused and drain no humidity",
+                cond.mass_per_droplet
+            );
+        }
+    }
 }

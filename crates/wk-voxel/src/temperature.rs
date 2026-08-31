@@ -23,7 +23,7 @@ use crate::cell::Cell;
 use crate::climate::{day_night_factor_cfg, ClimateConfig};
 use crate::grid::World;
 use crate::humidity::{Humidity, TileBounds};
-use crate::worldgen::continental_surface_y;
+use crate::worldgen::{continental_surface_y, live_surface_at, live_surface_y, LIVE_SURFACE_SEARCH};
 
 /// Cadence for temperature steps — same period as humidity diffuse,
 /// phase 0 so the two don't always land on the same tick.
@@ -242,7 +242,7 @@ impl Temperature {
         let tc = self.tile_cols.max(1);
         for hy in b.hy_min..=b.hy_max {
             for hx in b.hx_min..=b.hx_max {
-                let surf = self.column_surface_y_estimate(hx);
+                let surf = self.column_surface_y_estimate(None, hx);
                 let mid = hy * tc + tc / 2;
                 let depth = (surf - mid) as f32;
                 let t0 = if depth > tc as f32 {
@@ -265,29 +265,37 @@ impl Temperature {
         self.props_cache_age = 0;
     }
 
-    fn column_surface_y_estimate(&self, hx: i32) -> i32 {
+    fn column_surface_y_estimate(&self, world: Option<&World>, hx: i32) -> i32 {
         let tc = self.tile_cols.max(1);
         let gx = hx * tc + tc / 2;
-        continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols)
+        let hint = continental_surface_y(self.seed, gx, self.sea_level_y, self.width_cols);
+        match world {
+            Some(w) => live_surface_y(w, gx, hint, LIVE_SURFACE_SEARCH),
+            None => hint,
+        }
     }
 
-    fn land_factor(&self, hx: i32) -> f32 {
-        let s = self.column_surface_y_estimate(hx);
+    fn land_factor(&self, world: Option<&World>, hx: i32) -> f32 {
+        let s = self.column_surface_y_estimate(world, hx);
         let d = (s - self.sea_level_y) as f32;
         ((d + 2.0) / 4.0).clamp(0.0, 1.0)
     }
 
-    fn elev_cells(&self, hx: i32) -> f32 {
-        (self.column_surface_y_estimate(hx) - self.sea_level_y).max(0) as f32
+    fn elev_cells(&self, world: Option<&World>, hx: i32) -> f32 {
+        (self.column_surface_y_estimate(world, hx) - self.sea_level_y).max(0) as f32
     }
 
     /// Target skin temperature for air / surface coupling at `tick`.
     pub fn skin_temp(&self, hx: i32, hy: i32, tick: u64) -> f32 {
+        self.skin_temp_on(None, hx, hy, tick)
+    }
+
+    fn skin_temp_on(&self, world: Option<&World>, hx: i32, hy: i32, tick: u64) -> f32 {
         let _ = hy;
         let cfg = &self.config;
         let dn = day_night_factor_cfg(tick, &self.climate);
-        let land = self.land_factor(hx);
-        let elev = self.elev_cells(hx);
+        let land = self.land_factor(world, hx);
+        let elev = self.elev_cells(world, hx);
         let sea_land =
             cfg.sea_bias_c * (1.0 - land) + cfg.land_day_bump_c * land * dn.max(0.0);
         cfg.base_temp_c + sea_land - cfg.lapse_c * elev + cfg.day_amp_c * dn
@@ -329,7 +337,7 @@ impl Temperature {
                         * dn.max(0.0)
                         * (1.0 - cfg.cloud_shade * shade);
                     let cool = cfg.night_cool_c * (-dn).max(0.0);
-                    let skin = self.skin_temp(hx, hy, tick);
+                    let skin = self.skin_temp_on(world, hx, hy, tick);
                     let relax = cfg.sky_relax.clamp(cfg.min_relax, cfg.max_relax);
                     let n = t + solar - cool;
                     n + (skin - n) * relax
@@ -347,7 +355,7 @@ impl Temperature {
                         1.0
                     };
                     let cool = cfg.night_cool_c * (-dn).max(0.0) * cool_scale;
-                    let skin = self.skin_temp(hx, hy, tick);
+                    let skin = self.skin_temp_on(world, hx, hy, tick);
                     let relax = (cfg.sky_relax
                         / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale))
                         .clamp(cfg.min_relax, cfg.max_relax);
@@ -435,10 +443,9 @@ fn tile_thermal_props(
     };
     // Rock estimate at tile centre. Anchor the cheap band to both rock
     // and sea level so painted lakes/snow at sea still sit in-scan when
-    // continental_surface_y differs (unit fixtures + flat shelves).
+    // the live surface differs (unit fixtures + flat shelves).
     let gx_mid = world.wrap_x(hx * tc + tc / 2);
-    let rock_mid =
-        continental_surface_y(temp.seed, gx_mid, temp.sea_level_y, temp.width_cols);
+    let rock_mid = live_surface_at(world, temp.seed, gx_mid, temp.sea_level_y, temp.width_cols);
     let anchor_lo = rock_mid.min(temp.sea_level_y);
     let anchor_hi = rock_mid.max(temp.sea_level_y);
     // Margin covers tall packs / carved relief above the free surface.
@@ -474,7 +481,7 @@ fn tile_thermal_props(
     let mut n = 0.0;
     for lx in 0..tc {
         let gx = world.wrap_x(hx * tc + lx);
-        let rock = continental_surface_y(temp.seed, gx, temp.sea_level_y, temp.width_cols);
+        let rock = live_surface_at(world, temp.seed, gx, temp.sea_level_y, temp.width_cols);
         let col_lo = (rock.min(temp.sea_level_y) - 8).max(y_lo);
         let col_hi = (rock.max(temp.sea_level_y) + 64).min(y_hi);
         let (surf_y, cap, albedo, watery) =

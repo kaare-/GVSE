@@ -33,7 +33,7 @@ pub const PRESET_DIR: &str = "presets";
 /// File extension for Tab presets.
 pub const PRESET_EXT: &str = "json";
 /// Bump when the JSON shape changes incompatibly.
-pub const PRESET_SCHEMA_VERSION: u32 = 1;
+pub const PRESET_SCHEMA_VERSION: u32 = 2;
 
 /// Plant / fungus gene defaults (Tab → Plants), without full [`crate::Genome`].
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -96,28 +96,48 @@ pub struct SimPreset {
     pub max_roots: f32,
     pub max_stems: f32,
     pub max_photos: f32,
-    #[serde(default = "default_mat_perm")]
-    pub mat_perm: [f32; MATERIAL_COUNT],
-    #[serde(default = "default_mat_poro")]
-    pub mat_poro: [f32; MATERIAL_COUNT],
+    #[serde(default = "default_mat_perm_min")]
+    pub mat_perm_min: [f32; MATERIAL_COUNT],
+    #[serde(default = "default_mat_perm_max")]
+    pub mat_perm_max: [f32; MATERIAL_COUNT],
+    #[serde(default = "default_mat_poro_min")]
+    pub mat_poro_min: [f32; MATERIAL_COUNT],
+    #[serde(default = "default_mat_poro_max")]
+    pub mat_poro_max: [f32; MATERIAL_COUNT],
 }
 
 fn default_schema_version() -> u32 {
     PRESET_SCHEMA_VERSION
 }
 
-fn default_mat_perm() -> [f32; MATERIAL_COUNT] {
+fn default_mat_perm_min() -> [f32; MATERIAL_COUNT] {
     let mut out = [0.0f32; MATERIAL_COUNT];
     for id in MaterialId::ALL_SOLIDS {
-        out[id as usize] = MaterialRegistry::base_props(id).permeability as f32;
+        out[id as usize] = MaterialRegistry::hydrology(id).permeability.min as f32;
     }
     out
 }
 
-fn default_mat_poro() -> [f32; MATERIAL_COUNT] {
+fn default_mat_perm_max() -> [f32; MATERIAL_COUNT] {
     let mut out = [0.0f32; MATERIAL_COUNT];
     for id in MaterialId::ALL_SOLIDS {
-        out[id as usize] = MaterialRegistry::base_props(id).porosity as f32;
+        out[id as usize] = MaterialRegistry::hydrology(id).permeability.max as f32;
+    }
+    out
+}
+
+fn default_mat_poro_min() -> [f32; MATERIAL_COUNT] {
+    let mut out = [0.0f32; MATERIAL_COUNT];
+    for id in MaterialId::ALL_SOLIDS {
+        out[id as usize] = MaterialRegistry::hydrology(id).porosity.min as f32;
+    }
+    out
+}
+
+fn default_mat_poro_max() -> [f32; MATERIAL_COUNT] {
+    let mut out = [0.0f32; MATERIAL_COUNT];
+    for id in MaterialId::ALL_SOLIDS {
+        out[id as usize] = MaterialRegistry::hydrology(id).porosity.max as f32;
     }
     out
 }
@@ -134,7 +154,8 @@ impl SimPreset {
         let mut cond = CondensationConfig::default();
         cond.min_mass_to_rain = 140.0;
         cond.max_prob_per_tick = 0.10;
-        cond.mass_per_droplet = 40.0;
+        // One full cell — a sub-cell droplet is refused and drains nothing.
+        cond.mass_per_droplet = 255.0;
 
         let mut cloud = CloudConfig::default();
         cloud.coag_rate = 0.08;
@@ -188,8 +209,10 @@ impl SimPreset {
             max_roots: crate::MAX_ROOT_MODULES as f32,
             max_stems: crate::MAX_STEM_MODULES as f32,
             max_photos: crate::MAX_PHOTO_MODULES as f32,
-            mat_perm: default_mat_perm(),
-            mat_poro: default_mat_poro(),
+            mat_perm_min: default_mat_perm_min(),
+            mat_perm_max: default_mat_perm_max(),
+            mat_poro_min: default_mat_poro_min(),
+            mat_poro_max: default_mat_poro_max(),
         }
     }
 
@@ -199,8 +222,7 @@ impl SimPreset {
     /// is not a Tab knob — reload this for the Tab-side half of that setup.
     pub fn soak_survival() -> Self {
         let mut p = Self::tab_defaults();
-        p.notes = "1M soak survival (wetter clouds, easier spore bank, Tab-like evap)"
-            .into();
+        p.notes = "1M soak survival (wetter clouds, easier spore bank, Tab-like evap)".into();
         p.evap = EvapConfig {
             rate_per_tick: 1,
             dry_above_max: 200,
@@ -216,7 +238,9 @@ impl SimPreset {
         p.cloud.max_parcels = 40;
         p.cond.min_mass_to_rain = 72.0;
         p.cond.max_prob_per_tick = 0.25;
-        p.cond.mass_per_droplet = 72.0;
+        // One full cell: 72 was sub-cell, so most of this preset's rain events
+        // were refused and drained no humidity.
+        p.cond.mass_per_droplet = 255.0;
         p.spore_bank.germinate_odds = 3;
         p.spore_bank.max_age_ticks = 500_000;
         p.spore_bank.max_total = 640;
@@ -395,9 +419,10 @@ mod tests {
 
     #[test]
     fn shipped_soak_survival_matches_builtin() {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../presets/soak-survival.json");
-        let s = fs::read_to_string(&path)
-            .unwrap_or_else(|e| panic!("missing {}: {e}", path.display()));
+        let path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../presets/soak-survival.json");
+        let s =
+            fs::read_to_string(&path).unwrap_or_else(|e| panic!("missing {}: {e}", path.display()));
         let disk = SimPreset::from_json(&s).unwrap();
         assert_eq!(disk, SimPreset::soak_survival());
     }

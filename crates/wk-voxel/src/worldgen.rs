@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
-use crate::cell::Cell;
+use crate::cell::{falls_through_empty_air, Cell};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
@@ -104,11 +104,7 @@ fn hash_f32(seed: u64, x: i64, salt: u64) -> f32 {
 }
 
 fn hash_f32_2(seed: u64, x: i64, y: i64, salt: u64) -> f32 {
-    hash_f32(
-        seed,
-        x.wrapping_add(y.wrapping_mul(0x9E37_79B9)),
-        salt,
-    )
+    hash_f32(seed, x.wrapping_add(y.wrapping_mul(0x9E37_79B9)), salt)
 }
 
 /// GVSE-style macro continental profile on a **ring**.
@@ -195,7 +191,167 @@ pub fn continental_surface_y(seed: u64, world_x: i32, sea: i32, width_cols: i32)
 ///
 /// Palette reminder: Stone is cool mid-grey, Limestone is warm pale
 /// tan, Clay is brown, Gravel is sandy-tan, LooseRock is dark cobble.
-fn body_material(seed: u64, x: i32, y: i32, surface_y: i32, bedrock_top: i32, p: &WorldgenParams) -> MaterialId {
+/// Topmost solid cell in a column of the **live** world, found by walking from a
+/// hint.
+///
+/// [`continental_surface_y`] recomputes the *original* procedural profile from the
+/// seed, so erosion, collapse, karst dissolution and hand edits are invisible to
+/// it. Every weather consumer that asks where the ground is has been reading that
+/// stale value.
+///
+/// Walking from a hint rather than caching is deliberate. A maintained cache needs
+/// invalidation on every solidity change, and `set_cell` is hot enough that the
+/// extra read was worth avoiding; terrain also moves *locally*, so the procedural
+/// value stays a good hint indefinitely and the walk is a few cells. Same pattern
+/// `clouds::cloud_floor_y` already uses.
+///
+/// Returns the hint unchanged when the column is not loaded, so callers degrade to
+/// today's behaviour rather than to zero.
+pub fn live_surface_y(world: &World, gx: i32, hint: i32, search: i32) -> i32 {
+    let jx = world.wrap_x(gx);
+    let solid_at = |y: i32| {
+        matches!(world.get_cell(jx, y), Some(c) if c.material.is_solid())
+    };
+    if world.get_cell(jx, hint).is_none() {
+        return hint;
+    }
+    let raw = if solid_at(hint) {
+        // Ground has risen (deposition, landslide): climb to the top of the stack.
+        let mut y = hint;
+        for _ in 0..search {
+            if !solid_at(y + 1) {
+                break;
+            }
+            y += 1;
+        }
+        y
+    } else {
+        // Ground has fallen (erosion, dissolution): descend to the first solid.
+        let mut y = hint;
+        let mut found = None;
+        for _ in 0..search {
+            y -= 1;
+            if solid_at(y) {
+                found = Some(y);
+                break;
+            }
+        }
+        // Nothing found within the search window — keep the hint rather than inventing
+        // a surface far below, which would put weather underground.
+        found.unwrap_or(hint)
+    };
+    // Empty shafts and unloaded columns keep the hint. Peeling those
+    // would walk the search window of air and invent a surface.
+    if !solid_at(raw) {
+        return raw;
+    }
+    peel_airborne_loose(world, jx, raw, search)
+}
+
+/// Snow is a solid, so a walk that stops on the first solid treats a falling
+/// flake as the hill — the same needle the ridge plates used to draw. Seated
+/// pack stays: that *is* the surface weather should see.
+fn peel_airborne_loose(world: &World, gx: i32, start: i32, search: i32) -> i32 {
+    let mut y = start;
+    for _ in 0..search {
+        let Some(c) = world.get_cell(gx, y) else {
+            return y;
+        };
+        if c.material == MaterialId::Air || airborne_loose_at(world, gx, y, c) {
+            y -= 1;
+            continue;
+        }
+        return y;
+    }
+    y
+}
+
+/// Loose pack (snow / ice / organic) with empty or haze air under it.
+///
+/// Full-sat air is a lake seat — floating ice and rafts stay a surface.
+/// Anything else under a flake is sky, so the flake is not the hill.
+pub fn airborne_loose_at(world: &World, gx: i32, y: i32, cell: Cell) -> bool {
+    if !falls_through_empty_air(cell.material) {
+        return false;
+    }
+    match world.get_cell(gx, y - 1) {
+        Some(below) if below.material != MaterialId::Air => false,
+        Some(below) if below.sat.is_full() => false,
+        _ => true,
+    }
+}
+
+/// How far [`live_surface_y`] walks before giving up and trusting the hint.
+///
+/// Generous enough for real erosion and collapse, bounded so a pathological column
+/// cannot make a per-tile query expensive.
+pub const LIVE_SURFACE_SEARCH: i32 = 64;
+
+/// Live top-of-column: procedural profile as the hint, then walk the world.
+///
+/// This is what every weather consumer should call instead of
+/// [`continental_surface_y`]. An unloaded column degrades to the hint, so
+/// callers that used to read the seed profile keep working.
+#[inline]
+pub fn live_surface_at(world: &World, seed: u64, gx: i32, sea: i32, width_cols: i32) -> i32 {
+    let hint = continental_surface_y(seed, gx, sea, width_cols);
+    live_surface_y(world, gx, hint, LIVE_SURFACE_SEARCH)
+}
+
+/// Fraction of the world occupied by the overturned block.
+const TECTONIC_BLOCK_FRAC: f32 = 0.16;
+/// Width of the blend at each edge of the block, as a fraction of its own width.
+/// Without it the contact is a razor line, which reads as a rendering seam rather
+/// than as geology.
+const TECTONIC_EDGE_FRAC: f32 = 0.22;
+/// How far the block's bands tilt, in cells of depth per cell of x.
+const TECTONIC_DIP: f32 = 0.35;
+
+/// The depth the strata sequence is indexed by.
+///
+/// Normally just the depth below the surface, so bands lie parallel to it. Inside
+/// one seed-placed block the coordinate is **tilted and mirrored**, so the same
+/// sequence appears dipping and overturned — deep rock carried up against shallow
+/// beds, which is what a fault block or an overturned fold looks like in section.
+///
+/// A transform rather than new geology: every stratum rule, every material and
+/// every contact behaves exactly as it does elsewhere, so the block gets limestone
+/// bands, bentonite caps and clast sprinkles for free, just at the wrong angle and
+/// in the wrong order. That is also why it stays honest — nothing here can produce
+/// a material combination the rest of the world could not.
+///
+/// Blended in at the edges, so the contacts are transitional. A hard boundary
+/// looked like a seam in the renderer rather than a fault.
+fn tectonic_depth(seed: u64, x: i32, depth: f32, column_thickness: i32, p: &WorldgenParams) -> f32 {
+    let w = p.width_cols.max(1) as f32;
+    let block_w = (w * TECTONIC_BLOCK_FRAC).max(8.0);
+    // Placed by seed, but away from the wrap seam so the block is not cut in half.
+    let start = 0.10 * w + (hash_f32(seed, 0, 0x7EC7_0111) * 0.55 * w);
+    let local = x as f32 - start;
+    if local < 0.0 || local > block_w {
+        return depth;
+    }
+    let edge = (block_w * TECTONIC_EDGE_FRAC).max(1.0);
+    let blend = (local / edge).min((block_w - local) / edge).clamp(0.0, 1.0);
+    if blend <= 0.0 {
+        return depth;
+    }
+    let thickness = column_thickness.max(1) as f32;
+    // Mirrored: the sequence runs the other way through the stack.
+    let flipped = (thickness - depth).max(0.0);
+    // ...and dipping, so the bands are not merely upside down but at an angle.
+    let dipped = flipped + (local - block_w * 0.5) * TECTONIC_DIP;
+    depth + (dipped - depth) * blend
+}
+
+fn body_material(
+    seed: u64,
+    x: i32,
+    y: i32,
+    surface_y: i32,
+    bedrock_top: i32,
+    p: &WorldgenParams,
+) -> MaterialId {
     let depth = (surface_y - y) as f32; // 0 at sand interface, grows downward
     let above_bedrock = y - bedrock_top;
     let n = hash_f32_2(seed, x as i64, y as i64, 0x57A7_A);
@@ -203,17 +359,24 @@ fn body_material(seed: u64, x: i32, y: i32, surface_y: i32, bedrock_top: i32, p:
     // porous material forms connected bodies. Groundwater then prefers those
     // paths, and since wetter pores conduct faster that choice reinforces
     // itself. Two octaves — broad lenses plus smaller pockets.
-    let lens = 0.65 * lens_noise(seed, x, y, 24, 10, 0x1E_1501)
-        + 0.35 * lens_noise(seed, x, y, 9, 4, 0x1E_1502);
+    // Horizontally stretched: sampling y at a shorter wavelength than x makes the
+    // bodies long and flat, which is what a bed *is*. Isotropic noise gives round
+    // blobs, and blobs read as pockets rather than strata however large they are.
+    let lens = 0.65 * lens_noise(seed, x, y * 3, 40, 10, 0x1E_1501)
+        + 0.35 * lens_noise(seed, x, y * 2, 14, 4, 0x1E_1502);
     // Mild per-column warp so stratum contacts undulate a little.
     let warp = (hash_f32(seed, x as i64, 0x1A11_05) - 0.5) * 5.0;
-    let d = depth + warp;
+    let d = tectonic_depth(seed, x, depth + warp, surface_y - bedrock_top, p);
 
     let lime_enabled = p.limestone_in_shelf_and_coast;
     let karst = lime_enabled && is_karst_zone_x(x, p.width_cols);
     // Limestone bed: mid-stack stratum when enabled; thicker in karst
     // shelf bands. Toggle off → stone fills that depth instead.
-    let (lime_lo, lime_hi) = if karst { (5.0, 32.0) } else { (12.0, 22.0) };
+    // Thicker than it was (was 12..22 outside karst): playtest wanted more
+    // limestone, and a thin bed is also hydraulically uninteresting — the
+    // limestone/stone contact is where the best perching was observed, so a taller
+    // band gives more of it.
+    let (lime_lo, lime_hi) = if karst { (5.0, 38.0) } else { (10.0, 30.0) };
 
     // Basement rubble just above the bedrock barrier.
     if above_bedrock < 2 || (above_bedrock < 4 && n < 0.55) {
@@ -234,6 +397,22 @@ fn body_material(seed: u64, x: i32, y: i32, surface_y: i32, bedrock_top: i32, p:
             MaterialId::Stone
         };
     }
+    // Bentonite aquitard capping the limestone aquifer.
+    //
+    // A confined aquifer needs a seal, and clay is not one: at permeability 10
+    // against limestone's 140 it is only ~14× tighter, which still equalises
+    // over a geological cadence. Without a real cap there is no confined head,
+    // which is why a hand-dug well found no pressure.
+    //
+    // Deliberately *not* continuous. A perfect seal would also block recharge
+    // and the aquifer beneath would never fill; real confined aquifers take
+    // their water where the aquitard is absent. The gaps are those windows.
+    if lime_enabled {
+        let cap_lo = (lime_lo - 2.0f32).max(3.5);
+        if d >= cap_lo && d < lime_lo && lens >= 0.15 {
+            return MaterialId::Bentonite;
+        }
+    }
     // Clay bed.
     if d < 8.0 {
         return if lens < 0.75 {
@@ -252,15 +431,54 @@ fn body_material(seed: u64, x: i32, y: i32, surface_y: i32, bedrock_top: i32, p:
             MaterialId::Limestone
         };
     }
+    // A second carbonate band well below the first, so the deep stack is not one
+    // uniform stone mass. Real sections repeat: sequences of beds, not a single
+    // sandwich. Its contacts give another perching horizon far from the surface.
+    if lime_enabled && d >= lime_hi + 22.0 && d < lime_hi + 40.0 && lens > 0.30 {
+        return MaterialId::Limestone;
+    }
     // Deep stone cut by connected gravel / fractured stringers — the
     // preferential flow paths for groundwater.
     if lens < 0.14 {
-        MaterialId::Gravel
-    } else if lens < 0.24 {
-        MaterialId::LooseRock
-    } else {
-        MaterialId::Stone
+        return MaterialId::Gravel;
     }
+    if lens < 0.24 {
+        return MaterialId::LooseRock;
+    }
+    // Scattered clasts through the rock mass.
+    //
+    // The lens stringers above are large and coherent by design, so they read as
+    // beds rather than as the sprinkle of loose material a real rock mass carries.
+    // A second, much finer noise adds isolated pockets — small enough to stay
+    // inclusions rather than becoming a second set of beds, and they matter
+    // hydraulically as well as visually: an isolated permeable pocket is a
+    // retention site, which is the counterpart to the conduits.
+    let speck = lens_noise(seed, x, y, 5, 3, 0xA0_2E_2001);
+    if speck < 0.055 {
+        return MaterialId::Sand;
+    }
+    if speck < 0.10 {
+        return MaterialId::Gravel;
+    }
+    if speck < 0.145 {
+        return MaterialId::LooseRock;
+    }
+    // Conglomerate and flowstone as *native* rock, not only as cementation and
+    // precipitate products. Both occur geologically without a simulated history,
+    // and seeding them means a fresh world already shows the materials the water
+    // cycle can otherwise only make over a long soak.
+    if speck > 0.955 {
+        return MaterialId::Conglomerate;
+    }
+    // Flowstone lines fractures, so it follows the ridged vein locus rather than a
+    // blob — the same field the pore veins use, thresholded near its crest.
+    let vein = lens_noise(seed, x, y * 3, 24, 9, 0xA0_2E_1003);
+    // Rare. At 0.94 flowstone was everywhere, which both misrepresents it — it is
+    // a fracture lining, not a rock type — and, being pale, read as cavities.
+    if ridged(vein) > 0.988 {
+        return MaterialId::Flowstone;
+    }
+    MaterialId::Stone
 }
 
 #[cfg(test)]
@@ -278,9 +496,8 @@ mod lens_tests {
         let n = 400;
         for i in 0..n {
             let (x, y) = (i % 40, i / 40);
-            lens_delta += (lens_noise(seed, x, y, 24, 10, 7)
-                - lens_noise(seed, x + 1, y, 24, 10, 7))
-            .abs();
+            lens_delta +=
+                (lens_noise(seed, x, y, 24, 10, 7) - lens_noise(seed, x + 1, y, 24, 10, 7)).abs();
             white_delta += (hash_f32_2(seed, x as i64, y as i64, 7)
                 - hash_f32_2(seed, x as i64 + 1, y as i64, 7))
             .abs();
@@ -289,6 +506,340 @@ mod lens_tests {
             lens_delta * 4.0 < white_delta,
             "lens noise must be much smoother than white noise \
              (lens={lens_delta:.2} white={white_delta:.2})"
+        );
+    }
+
+    #[test]
+    fn the_live_surface_follows_erosion_and_deposition() {
+        // continental_surface_y recomputes the *original* profile, so every weather
+        // consumer that asks where the ground is has been reading a map from
+        // worldgen. This is the replacement they need.
+        let p = WorldgenParams::default();
+        let mut w = World::new(p.seed);
+        stamp_world(&mut w, &p);
+        let x = 300;
+        let hint = continental_surface_y(p.seed, x, p.sea_level_y, p.width_cols);
+        assert_eq!(
+            live_surface_y(&w, x, hint, LIVE_SURFACE_SEARCH),
+            hint,
+            "an untouched column should agree with the procedural profile"
+        );
+        assert_eq!(
+            live_surface_at(&w, p.seed, x, p.sea_level_y, p.width_cols),
+            hint,
+            "live_surface_at is the hint-then-walk helper weather uses"
+        );
+
+        // Erode the top eight cells away.
+        for dy in 0..8 {
+            w.set_cell(x, hint - dy, Cell::air());
+        }
+        assert_eq!(
+            live_surface_y(&w, x, hint, LIVE_SURFACE_SEARCH),
+            hint - 8,
+            "the surface should descend with erosion"
+        );
+
+        // Pile five cells back on top of the original level.
+        for dy in 1..=5 {
+            w.set_cell(x, hint + dy, Cell::solid(MaterialId::Sand));
+        }
+        // The hint is now buried, so this exercises the climbing branch.
+        assert_eq!(
+            live_surface_y(&w, x, hint + 1, LIVE_SURFACE_SEARCH),
+            hint + 5,
+            "the surface should rise with deposition"
+        );
+    }
+
+    #[test]
+    fn the_live_surface_keeps_the_hint_when_it_cannot_do_better() {
+        // Degrading to today's behaviour beats inventing a surface: an unloaded
+        // column must not report the bottom of the search window, which would put
+        // weather underground.
+        let p = WorldgenParams::default();
+        let w = World::new(p.seed); // nothing stamped
+        assert_eq!(live_surface_y(&w, 10, 50, LIVE_SURFACE_SEARCH), 50);
+
+        // A deep air shaft with no solid inside the window also keeps the hint.
+        let mut w2 = World::new(p.seed);
+        w2.ensure_chunk(crate::chunk::ChunkCoord::new(0, 0));
+        for y in 0..64 {
+            w2.set_cell(5, y, Cell::air());
+        }
+        assert_eq!(live_surface_y(&w2, 5, 60, 8), 60);
+    }
+
+    #[test]
+    fn airborne_snow_is_not_the_live_surface() {
+        // Weather used the same "first solid" walk as the old ridge scan.
+        // A flake in the sky became the hill: orographic dump, cloud floor
+        // and frost all sat on needles that were gone a few ticks later.
+        // The tests that landed the helper never put snow in the column,
+        // so they could not catch it.
+        let p = WorldgenParams::default();
+        let mut w = World::new(p.seed);
+        let x = 8;
+        let hint = 20;
+        w.ensure_chunk(crate::chunk::ChunkCoord::new(0, 0));
+        w.set_cell(x, hint, Cell::solid(MaterialId::Stone));
+        w.set_cell(x, hint + 30, Cell::solid(MaterialId::Snow));
+        assert_eq!(
+            live_surface_y(&w, x, hint, LIVE_SURFACE_SEARCH),
+            hint,
+            "a flake above the stone is not the hill"
+        );
+        // Walking *down* from a high hint is the dangerous branch: the
+        // first solid is the flake.
+        assert_eq!(
+            live_surface_y(&w, x, hint + 40, LIVE_SURFACE_SEARCH),
+            hint,
+            "descending onto a flake must keep walking to the stone"
+        );
+    }
+
+    #[test]
+    fn seated_snowpack_is_the_live_surface() {
+        let p = WorldgenParams::default();
+        let mut w = World::new(p.seed);
+        let x = 8;
+        let hint = 20;
+        w.ensure_chunk(crate::chunk::ChunkCoord::new(0, 0));
+        w.set_cell(x, hint, Cell::solid(MaterialId::Stone));
+        w.set_cell(x, hint + 1, Cell::solid(MaterialId::Snow));
+        w.set_cell(x, hint + 2, Cell::solid(MaterialId::Snow));
+        assert_eq!(
+            live_surface_y(&w, x, hint, LIVE_SURFACE_SEARCH),
+            hint + 2,
+            "landed pack is the surface weather should see"
+        );
+    }
+
+    #[test]
+    fn a_tectonic_block_overturns_the_strata() {
+        // Playtest asked for "a section where plate tectonics has flipped the
+        // stratas". Implemented as a coordinate transform, so every stratum rule,
+        // material and contact behaves as it does elsewhere — the block just gets
+        // them at the wrong angle and in the wrong order.
+        let p = WorldgenParams::default();
+        let thickness = 60;
+        // Find the block by scanning for columns whose structural depth departs
+        // from the plain depth.
+        let mut inside = Vec::new();
+        for x in 0..p.width_cols {
+            let d = tectonic_depth(p.seed, x, 20.0, thickness, &p);
+            if (d - 20.0).abs() > 1.0 {
+                inside.push(x);
+            }
+        }
+        assert!(
+            !inside.is_empty(),
+            "there should be an overturned block somewhere in the world"
+        );
+        let frac = inside.len() as f32 / p.width_cols as f32;
+        assert!(
+            frac < 0.35,
+            "the block is a section, not the world ({:.0}%)",
+            frac * 100.0
+        );
+
+        // Inside it, the sequence must actually differ at the same depth, or the
+        // transform is decoration.
+        let mid = inside[inside.len() / 2];
+        let outside = (0..p.width_cols)
+            .find(|x| (tectonic_depth(p.seed, *x, 20.0, thickness, &p) - 20.0).abs() < 0.01)
+            .expect("some column should be untransformed");
+        let surface_in = continental_surface_y(p.seed, mid, p.sea_level_y, p.width_cols);
+        let surface_out = continental_surface_y(p.seed, outside, p.sea_level_y, p.width_cols);
+        let bedrock_top = p.bedrock_floor_y + p.bedrock_thickness;
+        let mut differs = 0;
+        for d in 6..30 {
+            let a = body_material(p.seed, mid, surface_in - d, surface_in, bedrock_top, &p);
+            let b = body_material(p.seed, outside, surface_out - d, surface_out, bedrock_top, &p);
+            if a != b {
+                differs += 1;
+            }
+        }
+        assert!(
+            differs > 4,
+            "the overturned block should present a different sequence at the same \
+             depth (only {differs} of 24 depths differed)"
+        );
+    }
+
+    #[test]
+    fn the_tectonic_contact_is_gradual_not_a_seam() {
+        // A hard boundary read as a renderer seam rather than a fault.
+        let p = WorldgenParams::default();
+        let thickness = 60;
+        let ds: Vec<f32> = (0..p.width_cols)
+            .map(|x| tectonic_depth(p.seed, x, 20.0, thickness, &p))
+            .collect();
+        let worst = ds
+            .windows(2)
+            .map(|w| (w[1] - w[0]).abs())
+            .fold(0.0f32, f32::max);
+        assert!(
+            worst < 6.0,
+            "structural depth should change smoothly between columns, worst jump {worst}"
+        );
+    }
+
+    #[test]
+    fn a_groundwater_table_is_stamped_at_sea_level() {
+        // Soaking a dry world to a full table took a whole night to reach a state
+        // we already know the answer to: below the table, everything is saturated
+        // to capacity — that is what a water table *is*. The interesting behaviour
+        // is the vadose zone above it, so the soak should start there.
+        let p = WorldgenParams::default();
+        let mut w = World::new(p.seed);
+        stamp_world(&mut w, &p);
+
+        let mut below_full = 0u32;
+        let mut below_total = 0u32;
+        let mut above_wet = 0u32;
+        let mut above_total = 0u32;
+        for x in (0..p.width_cols).step_by(17) {
+            for y in (p.bedrock_floor_y + 4)..(p.sea_level_y + 30) {
+                let Some(c) = w.get_cell(x, y) else { continue };
+                if !c.material.is_solid() {
+                    continue;
+                }
+                let cap = crate::cell::water_capacity_cell(c, &w.hydro);
+                if cap == 0 {
+                    continue;
+                }
+                if y <= p.sea_level_y {
+                    below_total += 1;
+                    if c.sat.0 >= cap {
+                        below_full += 1;
+                    }
+                } else {
+                    above_total += 1;
+                    if c.sat.0 > 0 {
+                        above_wet += 1;
+                    }
+                }
+            }
+        }
+        assert!(below_total > 100 && above_total > 100, "fixture should span the table");
+        assert_eq!(
+            below_full, below_total,
+            "every porous cell below the table must start at capacity"
+        );
+        assert_eq!(
+            above_wet, 0,
+            "the vadose zone above the table must start dry — that is the part the \
+             soak is for"
+        );
+    }
+
+    #[test]
+    fn rock_carries_scattered_clasts_and_the_new_rock_types() {
+        // Playtest missed "the cake sprinkle of sand, loose rock and gravel
+        // throughout the rock formations", and asked for conglomerate and flowstone
+        // to exist in a fresh world rather than only as products of a long soak.
+        let p = WorldgenParams::default();
+        let mut counts = std::collections::HashMap::new();
+        for x in 0..600 {
+            let surface = continental_surface_y(p.seed, x, p.sea_level_y, p.width_cols);
+            for y in (p.bedrock_floor_y + 6)..(surface - 12).max(p.bedrock_floor_y + 7) {
+                let m = body_material(p.seed, x, y, surface, p.bedrock_floor_y + p.bedrock_thickness, &p);
+                *counts.entry(m).or_insert(0u32) += 1;
+            }
+        }
+        let total: u32 = counts.values().sum();
+        assert!(total > 1000, "fixture should sample a real rock mass");
+        for m in [
+            MaterialId::Sand,
+            MaterialId::Gravel,
+            MaterialId::LooseRock,
+            MaterialId::Conglomerate,
+            MaterialId::Flowstone,
+        ] {
+            let n = counts.get(&m).copied().unwrap_or(0);
+            assert!(n > 0, "{m:?} should appear in the rock mass");
+            // Inclusions, not beds: each stays a small minority so the rock is
+            // still rock.
+            assert!(
+                (n as f32 / total as f32) < 0.25,
+                "{m:?} is {:.1}% of the mass — that is a stratum, not a sprinkle",
+                100.0 * n as f32 / total as f32
+            );
+        }
+        // Stone must still dominate.
+        let stone = counts.get(&MaterialId::Stone).copied().unwrap_or(0);
+        assert!(
+            stone as f32 / total as f32 > 0.35,
+            "stone should still be the rock mass ({:.1}%)",
+            100.0 * stone as f32 / total as f32
+        );
+    }
+
+    #[test]
+    fn ridged_peaks_on_a_locus_not_at_the_extremes() {
+        // The property that turns blobs into veins: a ridged field is maximal
+        // where the underlying noise crosses its midpoint, and the level set of a
+        // continuous field is a *curve* — long, thin and connected. Ordinary noise
+        // peaks in patches, and a patch of permeable rock is a lens that water
+        // equalises through rather than a conduit it can deepen.
+        assert!((ridged(0.5) - 1.0).abs() < 1e-6, "crest at the midpoint");
+        assert!(ridged(0.0).abs() < 1e-6, "trough at the low extreme");
+        assert!(ridged(1.0).abs() < 1e-6, "trough at the high extreme");
+        // Symmetric about the crest.
+        assert!((ridged(0.3) - ridged(0.7)).abs() < 1e-6);
+    }
+
+    #[test]
+    fn the_pore_field_has_narrow_high_veins_not_broad_lenses() {
+        // High-pore cells should be a small minority (crests, not regions) while
+        // still being present. A broad ridge would just be another lens.
+        let seed = 99u64;
+        let mut high = 0u32;
+        let mut total = 0u32;
+        for y in 10..70 {
+            for x in 0..400 {
+                if pore_coordinate(seed, x, y, 100) >= 200 {
+                    high += 1;
+                }
+                total += 1;
+            }
+        }
+        let frac = high as f32 / total as f32;
+        assert!(
+            frac > 0.001,
+            "veins must actually exist (high-pore fraction {frac})"
+        );
+        assert!(
+            frac < 0.30,
+            "veins must be narrow, not most of the rock (high-pore fraction {frac})"
+        );
+    }
+
+    #[test]
+    fn pore_coordinate_is_coherent_and_not_material_noise() {
+        let seed = 12345u64;
+        let mut neighbour_delta = 0.0f32;
+        let mut broad_span = 0u8;
+        let mut min = u8::MAX;
+        let mut max = 0u8;
+        for y in 20..40 {
+            for x in 0..80 {
+                let a = pore_coordinate(seed, x, y, 100);
+                let b = pore_coordinate(seed, x + 1, y, 100);
+                neighbour_delta += (a as f32 - b as f32).abs();
+                min = min.min(a);
+                max = max.max(a);
+            }
+        }
+        broad_span = broad_span.max(max.saturating_sub(min));
+        assert!(
+            neighbour_delta / (20.0 * 80.0) < 12.0,
+            "neighbour pore values should vary smoothly"
+        );
+        assert!(
+            broad_span > 60,
+            "worldgen pore field needs useful variation"
         );
     }
 }
@@ -311,6 +862,46 @@ fn lens_noise(seed: u64, x: i32, y: i32, period_x: i32, period_y: i32, salt: u64
     let top = corner(x0, y0) + (corner(x0 + 1, y0) - corner(x0, y0)) * u;
     let bot = corner(x0, y0 + 1) + (corner(x0 + 1, y0 + 1) - corner(x0, y0 + 1)) * u;
     (top + (bot - top) * v).clamp(0.0, 1.0)
+}
+
+/// Stored position inside a material's hydrology ranges. Uses salts
+/// independent from material-choice lenses so one limestone body can
+/// contain a permeable core and tighter margins. Depth adds mild
+/// compaction without erasing the coherent pattern.
+/// Fold a 0..1 field so its maximum lies along a **locus** rather than at its
+/// extremes: `1 - |2n - 1|`.
+///
+/// This is what turns blobs into veins. Ordinary noise peaks in patches, and a
+/// patch of permeable rock is a lens, not a conduit — water spreads through it
+/// and equalises. Ridged noise peaks where the underlying field crosses its
+/// midpoint, and a level set of a continuous field is a *curve*: long, thin and
+/// connected. That is the shape a channel needs before flow can find and deepen
+/// it.
+fn ridged(n: f32) -> f32 {
+    1.0 - (2.0 * n - 1.0).abs()
+}
+
+fn pore_coordinate(seed: u64, x: i32, y: i32, surface_y: i32) -> u8 {
+    let broad = lens_noise(seed, x, y, 32, 14, 0xA0_2E_1001);
+    let fine = lens_noise(seed, x, y, 11, 6, 0xA0_2E_1002);
+    // Veins: narrow, connected, and following their own contour rather than
+    // sitting in a blob. Anisotropic on purpose — stretched along x by sampling
+    // y at a shorter wavelength — because bedded rock fractures along its
+    // bedding, so a conduit should run with the strata rather than across them.
+    let vein = ridged(lens_noise(seed, x, y * 3, 24, 9, 0xA0_2E_1003)).powi(3);
+    let depth = (surface_y - y).max(0) as f32;
+    let compaction = (depth / 180.0).min(0.20);
+    // Left coherent and roughly centred on purpose. The fracture weighting
+    // lives in `HydroRange::sample_fracture`, which treats the lower half of
+    // this domain as matrix and ramps only the upper half — so the *field*
+    // stays a readable lens pattern (and porosity stays centred on it) while
+    // permeability still ends up tight almost everywhere.
+    // Veins *add* to the lens field rather than replacing it, so the readable
+    // lens pattern survives and conduits sit on top of it as the fast paths.
+    // Cubed above, so only the ridge crest reaches high pore and the flanks stay
+    // matrix — a wide soft ridge would be another lens.
+    let base = 0.72 * broad + 0.28 * fine - compaction;
+    (((base + 0.55 * vein).clamp(0.0, 1.0) * 255.0).round()) as u8
 }
 
 /// Stamp the full ring continental profile into `world`.
@@ -344,7 +935,7 @@ pub fn stamp_world(world: &mut World, p: &WorldgenParams) {
         let stone_top = surface_y - p.sand_cap_thickness;
 
         for y in p.bedrock_floor_y..p.sky_ceiling_y {
-            let cell = if y < bedrock_top {
+            let mut cell = if y < bedrock_top {
                 Cell::solid(MaterialId::Bedrock)
             } else if y <= stone_top {
                 Cell::solid(body_material(p.seed, x, y, surface_y, bedrock_top, p))
@@ -355,6 +946,28 @@ pub fn stamp_world(world: &mut World, p: &WorldgenParams) {
             } else {
                 Cell::air()
             };
+            if cell.material.is_solid() {
+                cell.pore = pore_coordinate(p.seed, x, y, surface_y);
+                // Start with a groundwater table already in place.
+                //
+                // Below the table everything is saturated to capacity — that is
+                // what a water table *is* — and soaking there from dry took a
+                // whole night of simulation to reach a state we know the answer
+                // to. The interesting behaviour is the vadose zone *above* it:
+                // drainage capacity growing as apertures open, and conduits
+                // forming over long stretches of time. Starting dry spent the
+                // soak on the boring half.
+                //
+                // The table sits at sea level, which is where it belongs on a
+                // coastal world: hydrostatically continuous with the ocean, so it
+                // is a boundary condition rather than an arbitrary fill.
+                if y <= p.sea_level_y {
+                    cell.sat = crate::cell::Sat(crate::cell::water_capacity_cell(
+                        cell,
+                        &world.hydro,
+                    ));
+                }
+            }
             world.set_cell(x, y, cell);
         }
     }
@@ -384,7 +997,7 @@ mod tests {
 
     #[test]
     fn stamped_lake_bed_pores_wet_under_water() {
-        use crate::cell::water_capacity;
+        use crate::cell::water_capacity_cell;
         use crate::rules::tick;
         use wk_material::MaterialId;
 
@@ -427,7 +1040,7 @@ mod tests {
         // hanging boulder finishes its fall into the sea and shatters. What
         // matters here is that the lake bed is porous and saturates.
         let sand = w.get_cell(x, surf).unwrap();
-        let bed_cap = water_capacity(sand.material);
+        let bed_cap = water_capacity_cell(sand, &w.hydro);
         assert!(
             bed_cap > 0,
             "lake bed must stay porous, got {:?}",
@@ -445,8 +1058,12 @@ mod tests {
             "expected porous body under sand, got {:?}",
             under.material
         );
-        let cap = water_capacity(under.material);
-        assert!(cap > 0, "under-sand material should be porous: {:?}", under.material);
+        let cap = water_capacity_cell(under, &w.hydro);
+        assert!(
+            cap > 0,
+            "under-sand material should be porous: {:?}",
+            under.material
+        );
         assert_eq!(
             under.sat.0, cap,
             "porous {:?} under lake sand must reach capacity (sat={})",

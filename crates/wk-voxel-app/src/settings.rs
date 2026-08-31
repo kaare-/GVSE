@@ -6,12 +6,12 @@ use macroquad::prelude::*;
 use macroquad::ui::{hash, root_ui, widgets};
 use wk_material::{MaterialId, MaterialRegistry, MATERIAL_COUNT};
 use wk_voxel::{
-    list_all_presets, load_preset, save_preset, sanitize_preset_name, CarbonBudget, CarbonConfig,
-    ClimateConfig, CloudConfig, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig, FungiConfig, Genome,
-    GrainConfig, KarstConfig, OrographicConfig, PerfConfig, PhaseConfig, PlantGenePreset,
-    PlantGrowthCaps, RainConfig, SimPreset, SporeBankConfig, TempConfig, World, WorldgenParams,
-    CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES, MAX_STEM_MODULES,
-    PRESET_DIR,
+    list_all_presets, load_preset, sanitize_preset_name, save_preset, CarbonBudget, CarbonConfig,
+    ClimateConfig, CloudConfig, CompetentFallConfig, CondensationConfig, EvapConfig, FailureConfig,
+    FungiConfig, Genome, GrainConfig, KarstConfig, OrographicConfig, PerfConfig, PhaseConfig,
+    PlantGenePreset, PlantGrowthCaps, RainConfig, SimPreset, SporeBankConfig, TempConfig, World,
+    WorldgenParams, CHUNK_CELLS_W, MAX_ATOMS, MAX_CORPSES, MAX_PHOTO_MODULES, MAX_ROOT_MODULES,
+    MAX_STEM_MODULES, PRESET_DIR,
 };
 
 use crate::atmosphere::AtmosphereLookConfig;
@@ -119,6 +119,13 @@ pub struct SimSettings {
     pub atmosphere: AtmosphereLookConfig,
     /// 0 = landscape only, 1 = heatmap only (when U/T/M/G overlays are on).
     pub heatmap_blend: f32,
+    /// How dark a fully waterlogged cell renders (Tab → World → Look).
+    /// Measured against the cell's own capacity, quantized so merged terrain
+    /// runs survive.
+    pub wet_darken: f32,
+    /// Strength of the porous-rock stipple (0 = off). Only the upper pore
+    /// buckets are marked, which the fracture tail keeps rare.
+    pub pore_stipple: f32,
     pub temp: TempConfig,
     pub phase: PhaseConfig,
     pub grain: GrainConfig,
@@ -154,9 +161,11 @@ pub struct SimSettings {
     /// Natural variance 0..1 — wind force and direction wander around the mean.
     pub wind_variance: f32,
     pub humidity_diffusion_alpha: f32,
-    /// Scratch f32s for material sliders (synced → world hydro overrides).
-    pub mat_perm: [f32; MATERIAL_COUNT],
-    pub mat_poro: [f32; MATERIAL_COUNT],
+    /// Scratch f32s for material range sliders (synced → world hydro overrides).
+    pub mat_perm_min: [f32; MATERIAL_COUNT],
+    pub mat_perm_max: [f32; MATERIAL_COUNT],
+    pub mat_poro_min: [f32; MATERIAL_COUNT],
+    pub mat_poro_max: [f32; MATERIAL_COUNT],
     /// Plant / fungus gene defaults (Tab → Plants).
     pub plant_genes: PlantGeneSettings,
     /// Set by UI when user clicks "Apply genes to living plants".
@@ -197,18 +206,30 @@ impl SimSettings {
             top_y: params.sky_ceiling_y - 2,
             ..CondensationConfig::default()
         };
-        // Match previous demo drizzle defaults.
         cond.min_mass_to_rain = 140.0;
         cond.max_prob_per_tick = 0.10;
-        cond.mass_per_droplet = 40.0;
+        // One droplet delivers one full cell of water.
+        //
+        // A sub-cell budget is *refused* by
+        // `phase::deposit_condensate_on_surface` (frost needs a whole cell), and
+        // a refused deposit drains no humidity at all — so the old 40.0 drizzle
+        // spent most of its rain events achieving nothing and the atmosphere
+        // filled up behind them. Measured on the demo world, equilibrium
+        // humidity 666k -> 387k, and condensation got marginally *cheaper*
+        // (0.306 -> 0.283 ms/tick) because fewer events are wasted.
+        cond.mass_per_droplet = 255.0;
 
-        let mut mat_perm = [0.0f32; MATERIAL_COUNT];
-        let mut mat_poro = [0.0f32; MATERIAL_COUNT];
+        let mut mat_perm_min = [0.0f32; MATERIAL_COUNT];
+        let mut mat_perm_max = [0.0f32; MATERIAL_COUNT];
+        let mut mat_poro_min = [0.0f32; MATERIAL_COUNT];
+        let mut mat_poro_max = [0.0f32; MATERIAL_COUNT];
         for id in MaterialId::ALL_SOLIDS {
             let i = id as usize;
-            let base = MaterialRegistry::base_props(id);
-            mat_perm[i] = base.permeability as f32;
-            mat_poro[i] = base.porosity as f32;
+            let base = MaterialRegistry::hydrology(id);
+            mat_perm_min[i] = base.permeability.min as f32;
+            mat_perm_max[i] = base.permeability.max as f32;
+            mat_poro_min[i] = base.porosity.min as f32;
+            mat_poro_max[i] = base.porosity.max as f32;
         }
 
         Self {
@@ -243,6 +264,8 @@ impl SimSettings {
             climate: ClimateConfig::default(),
             atmosphere: AtmosphereLookConfig::default(),
             heatmap_blend: 0.55,
+            wet_darken: crate::palette::WET_DARKEN_DEFAULT,
+            pore_stipple: 0.35,
             temp: TempConfig::default(),
             phase: PhaseConfig::default(),
             grain: GrainConfig::default(),
@@ -272,8 +295,10 @@ impl SimSettings {
             wind_vx: 0.05,
             wind_variance: 0.55,
             humidity_diffusion_alpha: 0.15,
-            mat_perm,
-            mat_poro,
+            mat_perm_min,
+            mat_perm_max,
+            mat_poro_min,
+            mat_poro_max,
             plant_genes: PlantGeneSettings::default(),
             apply_genes_to_living: false,
             max_atoms: MAX_ATOMS as f32,
@@ -319,8 +344,10 @@ impl SimSettings {
             max_roots: self.max_roots,
             max_stems: self.max_stems,
             max_photos: self.max_photos,
-            mat_perm: self.mat_perm,
-            mat_poro: self.mat_poro,
+            mat_perm_min: self.mat_perm_min,
+            mat_perm_max: self.mat_perm_max,
+            mat_poro_min: self.mat_poro_min,
+            mat_poro_max: self.mat_poro_max,
         }
     }
 
@@ -375,8 +402,10 @@ impl SimSettings {
         self.max_roots = p.max_roots;
         self.max_stems = p.max_stems;
         self.max_photos = p.max_photos;
-        self.mat_perm = p.mat_perm;
-        self.mat_poro = p.mat_poro;
+        self.mat_perm_min = p.mat_perm_min;
+        self.mat_perm_max = p.mat_perm_max;
+        self.mat_poro_min = p.mat_poro_min;
+        self.mat_poro_max = p.mat_poro_max;
     }
 
     pub fn on_world_reseed(&mut self, params: &WorldgenParams) {
@@ -413,12 +442,16 @@ impl SimSettings {
         world.hydro.clear();
         for id in MaterialId::ALL_SOLIDS {
             let i = id as usize;
-            world
-                .hydro
-                .set_permeability(id, self.mat_perm[i].round() as u8);
-            world
-                .hydro
-                .set_porosity(id, self.mat_poro[i].round() as u8);
+            world.hydro.set_permeability_range(
+                id,
+                self.mat_perm_min[i].round() as u8,
+                self.mat_perm_max[i].round() as u8,
+            );
+            world.hydro.set_porosity_range(
+                id,
+                self.mat_poro_min[i].round() as u8,
+                self.mat_poro_max[i].round() as u8,
+            );
         }
     }
 
@@ -426,9 +459,11 @@ impl SimSettings {
         world.hydro.clear();
         for id in MaterialId::ALL_SOLIDS {
             let i = id as usize;
-            let base = MaterialRegistry::base_props(id);
-            self.mat_perm[i] = base.permeability as f32;
-            self.mat_poro[i] = base.porosity as f32;
+            let base = MaterialRegistry::hydrology(id);
+            self.mat_perm_min[i] = base.permeability.min as f32;
+            self.mat_perm_max[i] = base.permeability.max as f32;
+            self.mat_poro_min[i] = base.porosity.min as f32;
+            self.mat_poro_max[i] = base.porosity.max as f32;
         }
     }
 
@@ -1331,24 +1366,61 @@ impl SimSettings {
                 if self.page == SettingsPage::World {
                 ui.separator();
 
+                ui.tree_node(hash!(), "Ground look (wetness / porosity)", |ui| {
+                    ui.label(
+                        None,
+                        "Wet rock darkens (vs its own capacity, not /255).",
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Waterlogged darkening",
+                        0.0..0.9,
+                        &mut self.wet_darken,
+                    );
+                    ui.label(None, "Porous rock is stippled — only open cells.");
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Pore stipple strength (0 = off)",
+                        0.0..0.9,
+                        &mut self.pore_stipple,
+                    );
+                });
+                ui.separator();
+
                 ui.tree_node(hash!(), "Material permeability / porosity", |ui| {
-                    ui.label(None, "Affects seepage rate and water capacity.");
+                    ui.label(None, "Each cell samples inside these ranges; 0–0 is sealed.");
                     for id in MaterialId::ALL_SOLIDS {
                         let i = id as usize;
                         let name = material_short_name(id);
                         labeled_slider(
                             ui,
-                            hash!(name, "perm"),
-                            &format!("{name} permeability"),
+                            hash!(name, "perm_min"),
+                            &format!("{name} permeability min"),
                             0.0..255.0,
-                            &mut self.mat_perm[i],
+                            &mut self.mat_perm_min[i],
                         );
                         labeled_slider(
                             ui,
-                            hash!(name, "poro"),
-                            &format!("{name} porosity"),
+                            hash!(name, "perm_max"),
+                            &format!("{name} permeability max"),
                             0.0..255.0,
-                            &mut self.mat_poro[i],
+                            &mut self.mat_perm_max[i],
+                        );
+                        labeled_slider(
+                            ui,
+                            hash!(name, "poro_min"),
+                            &format!("{name} porosity min"),
+                            0.0..255.0,
+                            &mut self.mat_poro_min[i],
+                        );
+                        labeled_slider(
+                            ui,
+                            hash!(name, "poro_max"),
+                            &format!("{name} porosity max"),
+                            0.0..255.0,
+                            &mut self.mat_poro_max[i],
                         );
                     }
                     if ui.button(None, "Reset materials to defaults") {
@@ -1379,13 +1451,10 @@ impl SimSettings {
                         0.0..1.0,
                         &mut self.karst.pore_scale,
                     );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Stone scale (vs limestone, underground)",
-                        0.0..1.0,
-                        &mut self.karst.stone_scale,
-                    );
+                    // No "stone scale" slider: silicate stone no longer
+                    // dissolves at all (it fed the carbonate load that
+                    // precipitates as flowstone). It widens mechanically under
+                    // throughput instead, which this page does not control.
                 });
                 } // World (materials/karst)
                 if self.page == SettingsPage::Life {
@@ -1425,14 +1494,22 @@ impl SimSettings {
                 });
                 ui.separator();
 
-                ui.tree_node(hash!(), "Plant growth caps", |ui| {
+                ui.tree_node(hash!(), "Plant growth ceilings (safety)", |ui| {
                     ui.label(
                         None,
-                        "Per-plant tissue pixel ceilings (not entity pop).",
+                        "Size is meant to be capped by cost, not by these.",
                     );
                     ui.label(
                         None,
-                        "Raising these lets individuals grow denser; lowering only blocks new pixels.",
+                        "Upkeep rises per pixel while a self-shading canopy earns less,",
+                    );
+                    ui.label(
+                        None,
+                        "so plants settle at an energy-limited size on their own.",
+                    );
+                    ui.label(
+                        None,
+                        "These only stop a runaway. Lower them for the old tight look.",
                     );
                     labeled_slider(
                         ui,
@@ -1798,6 +1875,10 @@ fn material_short_name(id: MaterialId) -> &'static str {
         MaterialId::Organic => "Organic",
         MaterialId::LooseRock => "LooseRock",
         MaterialId::LooseLimestone => "LooseLimestone",
+        MaterialId::Flowstone => "Flowstone",
+        MaterialId::Bentonite => "Bentonite",
+        MaterialId::Sandstone => "Sandstone",
+        MaterialId::Conglomerate => "Conglomerate",
         MaterialId::Gravel => "Gravel",
         MaterialId::Limestone => "Limestone",
         _ => "?",

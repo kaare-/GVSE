@@ -17,7 +17,7 @@ mod water_flow;
 mod spill;
 mod seepage;
 mod competent_fall;
-mod grain;
+pub(crate) mod grain;
 mod rain;
 mod evap;
 mod condensation;
@@ -44,6 +44,7 @@ pub use competent_fall::{
 pub use grain::{
     apply_cold_avalanche, apply_cold_avalanche_bound, apply_flow_erosion, apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
+    apply_snow_wind_drift,
     apply_grain_repose_regions, settle_loose_grains, settle_loose_grains_regions,
     settle_loose_grains_regions_ex,
     collect_floating_organic_columns, collect_floating_organic_columns_near,
@@ -63,10 +64,11 @@ pub use grain::{
 };
 pub use gravity::{apply_gravity_fall, apply_gravity_fall_regions};
 pub use karst::{apply_karst_dissolution, KarstConfig};
-pub(crate) use rain::deposit_water_on_surface;
+pub(crate) use rain::{deposit_water_in_air, deposit_water_on_surface};
 pub use rain::{apply_rain, apply_rain_with_temp, is_standing_water, RainConfig};
 pub use seepage::{
-    apply_seepage, apply_seepage_regions, apply_seepage_seam_coupling, wake_lake_bed_pores,
+    apply_seepage, apply_seepage_contact_regions, apply_seepage_regions,
+    apply_seepage_seam_coupling, wake_lake_bed_pores,
     wake_pore_weep_into_air, wake_vertical_chunk_seam_pores,
 };
 pub use spill::{apply_lateral_spill, apply_lateral_spill_regions};

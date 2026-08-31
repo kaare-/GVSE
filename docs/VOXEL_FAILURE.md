@@ -395,6 +395,33 @@ Tab → Geotech (or Performance)
 Defaults: roof **on**, shear rock-face **off** until tuned, compaction
 **off**.
 
+## Settling: why a level slide needs hysteresis
+
+`try_slide` offers `(dx, -1)`, `(dx, 0)`, `(dx, -2)`. The level `(dx, 0)` step
+does no work against gravity, so a body can take it back the moment
+`downhill_roll_dir` reads the other way, and shuffle between two columns
+forever. Measured on a demo world aged 4800 ticks: 3.4 rolls/tick with nothing
+falling, shattering or floating, and roll edges showing the same cell moving
+both ways at equal frequency.
+
+The cost is not the moves. The topology loop repeats while *anything* moved, so
+one restless boulder bought six full component rebuilds a tick — 7.7 build
+calls and 7504 flood cells to service 66 woken cells, 12 ms/tick.
+
+The level step cannot simply be removed: a carved arch needs it to become
+unsupported, and a large disk needs it mid-tumble. Instead
+`World::competent_level_vacated` records the *direction* of each level slide
+per cell for `SLIDE_REBOUND_TICKS`, and a level step that reverses a remembered
+one is refused.
+
+Direction, not footprint overlap. Any body wider than two cells overlaps its
+own previous position on every step, so an overlap test also stops a body
+working steadily along a ledge — it froze the tumbling disk in place.
+
+The ledger is transient (`serde(skip)`) and pruned to the window. Losing it on
+load costs at most one extra shuffle. `rules::tests::a_settled_boulder_field_stops_moving`
+pins that a stamped world stops moving.
+
 ## Parallelism
 
 F1/F2 start serial compute-then-apply. When hot, scan via

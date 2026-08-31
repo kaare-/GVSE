@@ -26,6 +26,8 @@ pub mod geotech_map;
 pub mod grid;
 pub mod heatmap;
 pub mod humidity;
+pub mod mineral;
+pub mod sediment;
 pub mod organism;
 pub mod parallel;
 pub mod phase;
@@ -51,7 +53,8 @@ pub use audit::{
 pub use parallel::{parallel_enabled, set_parallel_enabled};
 pub use cell::{
     falls_through_empty_air, grain_max_stable_step, hosts_mycelium, is_flow_erodible, is_grain,
-    is_repose_grain, water_capacity, water_capacity_with, Cell, CellFlags, Sat,
+    is_repose_grain, permeability_cell, water_capacity, water_capacity_cell, water_capacity_with,
+    Cell, CellFlags, Sat,
 };
 pub use chunk::{
     material_is_loose, Chunk, ChunkCoord, Rect, CHUNK_CELLS_H, CHUNK_CELLS_W,
@@ -167,9 +170,11 @@ pub use rules::{
     apply_evaporation_into_humidity, apply_evaporation_into_humidity_climate, apply_flow_erosion,
     apply_flow_erosion_bound,
     apply_grain_fall, apply_grain_fall_regions, apply_grain_repose, apply_grain_repose_bound,
+    apply_snow_wind_drift,
     apply_grain_repose_regions, apply_gravity_fall, apply_gravity_fall_regions,
     apply_karst_dissolution, apply_lateral_spill, apply_rain, apply_rain_with_temp,
-    apply_seepage, apply_seepage_regions, apply_water_flow, apply_water_flow_regions,
+    apply_seepage, apply_seepage_contact_regions, apply_seepage_regions, apply_water_flow,
+    apply_water_flow_regions,
     collect_floating_organic_columns, collect_floating_organic_columns_near,
     floating_organic_column_at, drift_floating_organic, drift_floating_organic_cfg,
     drift_floating_organic_columns, drift_floating_organic_columns_cfg,
@@ -208,4 +213,8 @@ pub use sim_preset::{
     PRESET_EXT, PRESET_SCHEMA_VERSION,
 };
 pub use worldgen::is_karst_zone_x;
-pub use worldgen::{continental_surface_y, stamp_world, WorldgenParams};
+pub use worldgen::{
+    airborne_loose_at, continental_surface_y, live_surface_at, live_surface_y, stamp_world,
+    WorldgenParams,
+    LIVE_SURFACE_SEARCH,
+};

@@ -9,16 +9,16 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use wk_material::MaterialId;
 
 use crate::active::ActiveChunk;
-use crate::cell::{water_capacity_with, Cell, Sat};
-use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
+use crate::cell::{water_capacity_cell, water_capacity_with, Cell, Sat};
+use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 use crate::parallel::map_regions_parallel;
 
 use super::head::{
-    hydraulic_head, is_porous_solid_with, plan_same_y_pairwise_edge_in, same_y_cascade_pull_in,
-    seepage_rate_with, seepage_uptake_rate_with,
+    hydraulic_head, is_porous_cell, plan_same_y_pairwise_edge_in, same_y_cascade_pull_in,
+    seepage_rate_cell, seepage_uptake_rate_cell,
 };
-use super::plan::{regions_for_standalone, regions_wet_loaded};
+use super::plan::{regions_for_standalone, regions_wet_air_loaded};
 
 /// Priority water flow.
 ///
@@ -110,6 +110,17 @@ pub(crate) fn apply_confined_upward_regions(world: &mut World, active: &[ActiveC
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_confined_upward_xfers(world, active, &mut xfers);
     commit_air_sat_xfers(world, &mut xfers);
+    // Artesian discharge: water that just *rose* against gravity arrived under
+    // pressure and gives up part of its load as it depressurises. Without this
+    // a rising spring carries its mineral off to wherever it eventually dries,
+    // instead of building a mound at the outlet.
+    if !world.dissolved.is_empty() {
+        for &(from, to, amt) in xfers.iter() {
+            if amt > 0 && to.1 > from.1 {
+                crate::mineral::precipitate_artesian(world, to.0, to.1);
+            }
+        }
+    }
 }
 
 /// Periodic full-chunk confined-head wake (communicating vessels).
@@ -120,8 +131,10 @@ pub fn wake_confined_head(world: &mut World) {
     if world.tick % CONFINED_HEAD_WAKE_EVERY != 0 {
         return;
     }
-    // Wet-air sticky chunks only — dry sky/stone cannot host a pipe.
-    let regions = regions_wet_loaded(world);
+    // Standing water / pipe films only. Groundwater-only chunks cannot
+    // host a rising column; including them made the period-16 wake walk
+    // the whole wet bed after a drizzle soak.
+    let regions = regions_wet_air_loaded(world);
     apply_confined_upward_regions(world, &regions);
 }
 
@@ -154,6 +167,8 @@ fn commit_air_sat_xfers(
         }
     }
     xfers.sort_by(|a, b| a.0.cmp(&b.0).then(a.1.cmp(&b.1)));
+    let track_mineral = !world.dissolved.is_empty();
+    let track_sediment = !world.suspended.is_empty();
     for (from, to, amt) in xfers.iter().copied() {
         if amt <= 0 {
             continue;
@@ -170,7 +185,7 @@ fn commit_air_sat_xfers(
         let free = if dst.material == MaterialId::Air {
             u8::MAX as i32 - dst.sat.0 as i32
         } else {
-            let cap = water_capacity_with(dst.material, &world.hydro) as i32;
+            let cap = water_capacity_cell(dst, &world.hydro) as i32;
             if cap == 0 {
                 continue;
             }
@@ -196,6 +211,17 @@ fn commit_air_sat_xfers(
                 ..dst
             },
         );
+        // Surface water carries its dissolved mineral downstream, so a stream
+        // fed by a spring deposits where it finally dries rather than losing
+        // the load at the point it left the ground. Skip the maps entirely
+        // until something is actually in them — once karst starts they stay
+        // non-empty, so also skip sources that are not carrying.
+        if track_mineral && crate::mineral::dissolved_at(world, from.0, from.1) > 0 {
+            crate::mineral::carry_with_water(world, from, to, amt as u8, src.sat.0);
+        }
+        if track_sediment && crate::sediment::suspended_at(world, from.0, from.1) > 0 {
+            crate::sediment::carry_with_water(world, from, to, amt as u8, src.sat.0);
+        }
     }
 }
 
@@ -216,6 +242,31 @@ fn is_walled_column(world: &World, gx: i32, gy: i32) -> bool {
         Some(c) => c.material != MaterialId::Air,
     };
     wall(gx - 1) && wall(gx + 1)
+}
+
+/// True when an open side continues into a second Air cell.
+///
+/// A beach film is `land | film | lake | lake`. A 2-wide shaft is
+/// `wall | A | B | wall` — the open neighbour's far side is solid, so
+/// this stays false and the shaft can still rise.
+fn opens_into_wide_water(world: &World, gx: i32, gy: i32) -> bool {
+    for dx in [-1_i32, 1] {
+        let nx = world.wrap_x(gx + dx);
+        let Some(n) = world.get_cell(nx, gy) else {
+            continue;
+        };
+        if n.material != MaterialId::Air {
+            continue;
+        }
+        let far = world.wrap_x(nx + dx);
+        if matches!(
+            world.get_cell(far, gy),
+            Some(c) if c.material == MaterialId::Air
+        ) {
+            return true;
+        }
+    }
+    false
 }
 
 /// True when both horizontal neighbours are Air (open lake / ocean top).
@@ -241,6 +292,25 @@ fn allows_confined_rise(world: &World, gx: i32, gy: i32, donor_y: i32) -> bool {
         return true;
     }
     is_walled_column(world, gx, gy)
+}
+
+/// True when a cell is water-filled enough to transmit confined pressure.
+///
+/// Water-filled Air (a pipe or flooded void) **or fully saturated pore space**.
+/// Restricting this to Air is why a hand-dug well filled from the sides but
+/// never rose: an aquifer could not reach the shaft, because pressure refused to
+/// cross rock. A saturated pore is a continuous water path just like a flooded
+/// void — slower, but it conducts head.
+///
+/// Partially saturated rock does not qualify: there is air in the pores, so
+/// there is no continuous column to push through.
+#[inline]
+fn transmits_pressure(world: &World, cell: &Cell) -> bool {
+    if cell.material == MaterialId::Air {
+        return cell.sat.is_full();
+    }
+    let cap = water_capacity_cell(*cell, &world.hydro);
+    cap > 0 && cell.sat.0 >= cap
 }
 
 #[derive(Clone, Copy)]
@@ -283,7 +353,7 @@ fn climb_full_air_column(
         let Some(c) = world.get_cell(x, y) else {
             break;
         };
-        if c.material != MaterialId::Air || !c.sat.is_full() {
+        if !transmits_pressure(world, &c) {
             break;
         }
         if !visited.insert((x, y)) {
@@ -293,7 +363,7 @@ fn climb_full_air_column(
         for dx in [-1_i32, 1] {
             let nx = world.wrap_x(x + dx);
             if let Some(n) = world.get_cell(nx, y) {
-                if n.material == MaterialId::Air && n.sat.is_full() {
+                if transmits_pressure(world, &n) {
                     if !visited.contains(&(nx, y)) {
                         queue.push_back((nx, y));
                     }
@@ -337,7 +407,7 @@ fn pressure_body_from_full(
         return Some(body);
     }
     let seed = world.get_cell(seed_x, seed_y)?;
-    if seed.material != MaterialId::Air || !seed.sat.is_full() {
+    if !transmits_pressure(world, &seed) {
         return None;
     }
 
@@ -364,7 +434,7 @@ fn pressure_body_from_full(
         let Some(c) = world.get_cell(x, y) else {
             continue;
         };
-        if c.material != MaterialId::Air || !c.sat.is_full() {
+        if !transmits_pressure(world, &c) {
             continue;
         }
         // Climb this column for its free-surface head, then continue
@@ -381,7 +451,7 @@ fn pressure_body_from_full(
         );
         // Downward continuity (pipe floors / deeper basins).
         if let Some(below) = world.get_cell(x, y - 1) {
-            if below.material == MaterialId::Air && below.sat.is_full() {
+            if transmits_pressure(world, &below) {
                 if !visited.contains(&(x, y - 1)) {
                     queue.push_back((x, y - 1));
                 }
@@ -420,24 +490,40 @@ fn accumulate_confined_upward_xfers(
     let mut cache: HashMap<(i32, i32), PressureBody> = HashMap::new();
     let cap = water_capacity_with(MaterialId::Air, &world.hydro);
     let head_eps = 1.0 / (cap as f32);
+    let cw = CHUNK_CELLS_W as i32;
+    let ch = CHUNK_CELLS_H as i32;
 
     for ac in active {
+        let Some(chunk) = world.chunks.get(&ac.coord) else {
+            continue;
+        };
+        let below_chunk = world
+            .chunks
+            .get(&ChunkCoord::new(ac.coord.cx, ac.coord.cy - 1));
+        let base_gx = ac.coord.cx * cw;
+        let base_gy = ac.coord.cy * ch;
         for y in ac.rect.y0..=ac.rect.y1 {
-            let gy = ac.coord.cy * CHUNK_CELLS_H as i32 + y as i32;
+            let gy = base_gy + y as i32;
+            let ly = y as usize;
             for x in ac.rect.x0..=ac.rect.x1 {
-                let gx = world.wrap_x(ac.coord.cx * CHUNK_CELLS_W as i32 + x as i32);
-                let Some(dst) = world.get_cell(gx, gy) else {
-                    continue;
-                };
+                let dst = chunk.get(x as usize, ly);
                 if dst.material != MaterialId::Air || dst.sat.is_full() {
                     continue;
                 }
-                let Some(below) = world.get_cell(gx, gy - 1) else {
-                    continue;
+                let gx = world.wrap_x(base_gx + x as i32);
+                let below = if ly > 0 {
+                    chunk.get(x as usize, ly - 1)
+                } else {
+                    match below_chunk {
+                        Some(c) => c.get(x as usize, CHUNK_CELLS_H - 1),
+                        None => continue,
+                    }
                 };
-                // Rising column: must sit on a full wet-Air cell that
-                // can transmit confined pressure.
-                if below.material != MaterialId::Air || !below.sat.is_full() {
+                // Rising column: must sit on something that transmits
+                // confined pressure — a flooded void *or* saturated pore space.
+                // Requiring Air here meant a shaft bottomed on rock (every
+                // hand-dug well) could never be fed by the aquifer it reached.
+                if !transmits_pressure(world, &below) {
                     continue;
                 }
                 // Open ocean/lake tops: both lateral neighbours are Air and
@@ -445,8 +531,36 @@ fn accumulate_confined_upward_xfers(
                 // no-op (`allows_confined_rise`), but `pressure_body_from_full`
                 // still BFS-climbs the body — dominant cost on rainy shores.
                 // Keep shafts (any solid side) and buried/lid cells.
-                if is_air_free_surface(world, gx, gy) && open_air_both_sides(world, gx, gy) {
+                let free_surface = is_air_free_surface(world, gx, gy);
+                if free_surface && open_air_both_sides(world, gx, gy) {
                     continue;
+                }
+                // Drizzle / hillside film on wet ground: free-surface Air
+                // sitting on saturated pore, not cased into a shaft.
+                // `pressure_body_from_full` would BFS the aquifer (and a
+                // connected lake) for a rise that seepage already handles.
+                // A 1-wide well is walled; a 2-wide shaft sits on flooded
+                // Air, not on rock. An uncased hole is open ground.
+                if !is_walled_column(world, gx, gy) {
+                    if free_surface {
+                        // Hillside drizzle film on wet ground (uncased hole).
+                        if below.material != MaterialId::Air {
+                            continue;
+                        }
+                        // Beach / puddle that opens into wider water. Same-Y
+                        // equalise handles these; the BFS was the rainy-shore cost.
+                        if opens_into_wide_water(world, gx, gy) {
+                            continue;
+                        }
+                    } else if matches!(
+                        world.get_cell(gx, gy + 1),
+                        Some(c)
+                            if matches!(c.material, MaterialId::Ice | MaterialId::Snow)
+                    ) {
+                        // Frozen lake lid, not a cased pipe. A walled shaft
+                        // with an ice plug still rises.
+                        continue;
+                    }
                 }
                 let Some(body) =
                     pressure_body_from_full(world, gx, gy - 1, &mut cache)
@@ -935,18 +1049,13 @@ fn plan_porous_face_dividend(
         if side.material == MaterialId::Air || side.material == MaterialId::Organic {
             continue;
         }
-        let cap = water_capacity_with(side.material, &world.hydro) as i32;
+        let cap = water_capacity_cell(side, &world.hydro) as i32;
         if cap <= 0 {
             continue;
         }
 
         // 1) Wetting-front dividend — bone-dry sheds; wet faces drink.
-        let soak_rate = seepage_uptake_rate_with(
-            side.material,
-            &world.hydro,
-            side.sat.0,
-            cap as u8,
-        );
+        let soak_rate = seepage_uptake_rate_cell(side, &world.hydro, cap as u8);
         let free = (cap - side.sat.0 as i32).max(0);
         let soak = remaining.min(free).min(soak_rate);
         if soak > 0 {
@@ -1111,14 +1220,14 @@ fn plan_throughflow_from_cell(
         let Some(below1) = read(lx + dx, ly - 1, nx, gy - 1) else {
             continue;
         };
-        if !is_porous_solid_with(below1.material, hydro) {
+        if !is_porous_cell(below1, hydro) {
             continue;
         }
-        let cap1 = water_capacity_with(below1.material, hydro);
+        let cap1 = water_capacity_cell(below1, hydro);
         if below1.sat.0 < cap1 {
             continue; // gravity + seepage handle unsaturated
         }
-        let mut rate = seepage_rate_with(below1.material, hydro);
+        let mut rate = seepage_rate_cell(below1, hydro);
         // Prefer the shallowest exit so mid-cliff springs beat a deep toe.
         let mut best: Option<(i32, i32, i32)> = None; // depth, tx, ty
         let mut depth = 1i32;
@@ -1137,14 +1246,14 @@ fn plan_throughflow_from_cell(
                 }
                 break;
             }
-            if !is_porous_solid_with(nb.material, hydro) {
+            if !is_porous_cell(nb, hydro) {
                 break;
             }
-            let cap = water_capacity_with(nb.material, hydro);
+            let cap = water_capacity_cell(nb, hydro);
             if nb.sat.0 < cap {
                 break;
             }
-            rate = rate.min(seepage_rate_with(nb.material, hydro));
+            rate = rate.min(seepage_rate_cell(nb, hydro));
             for sdx in [-1_i32, 1] {
                 let sx = world.wrap_x(nx + sdx);
                 if sx == nx {

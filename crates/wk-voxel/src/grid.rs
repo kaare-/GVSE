@@ -106,6 +106,31 @@ pub struct World {
     /// Cleared when cream hits 0; migrates with grain/raft moves.
     #[serde(default)]
     pub mycelium_energy: HashMap<(i32, i32), u8>,
+    /// **Dissolved mineral load** carried by the water in a cell, in the same
+    /// units as the rock removed to create it (see [`crate::mineral`]).
+    ///
+    /// Karst used to delete rock outright; the load is the other half of that
+    /// transport loop — carbonate dissolves here, rides the water, and
+    /// precipitates where the water can no longer hold it (evaporating spring,
+    /// or a concentration ceiling), which is what builds tufa / flowstone.
+    ///
+    /// Sparse and saved: only cells whose water carries load appear, and losing
+    /// it on load would silently destroy mineral mass.
+    #[serde(default)]
+    pub dissolved: HashMap<(i32, i32), u16>,
+    /// Suspended fine sediment carried by moving water, in the same units as
+    /// [`Self::dissolved`] but a different species with different physics.
+    ///
+    /// Clay is not *dissolved*, it is entrained: held up by turbulence rather
+    /// than chemistry. So it drops when the water **slows**, not when the water
+    /// leaves, and it is filtered out by pore space instead of soaking into it.
+    /// Modelling it as dissolved load would cement mud in place instead of
+    /// letting it settle in slack water, which is the opposite of what makes a
+    /// delta.
+    ///
+    /// Sparse and saved: losing it on load would silently destroy sediment mass.
+    #[serde(default)]
+    pub suspended: HashMap<(i32, i32), u16>,
     /// Sparse actual symbiont exchange counters keyed by mycelium strain id.
     /// Same strain keeps one book across spatial split / reconnect.
     #[serde(default)]
@@ -143,9 +168,29 @@ pub struct World {
     /// than air" playtest report. Re-dirtying these is O(moves).
     #[serde(skip, default)]
     pub competent_moved_cells: Vec<(i32, i32)>,
+    /// Cells vacated by a **level** (non-descending) body slide, and the tick
+    /// it happened.
+    ///
+    /// A level slide does no work against gravity, so a body can take one back
+    /// as soon as the downhill test reads the other way, and shuffle between
+    /// two columns forever. Each of those moves kept the topology loop running
+    /// another pass, so a single restless boulder cost six full component
+    /// rebuilds a tick. Consulted by the slide rule to refuse a rebound.
+    /// Transient physics state — not saved, and losing it on load costs at
+    /// most one extra shuffle.
+    #[serde(skip, default)]
+    pub competent_level_vacated: FxHashMap<(i32, i32), (u64, i32)>,
     /// Invalidates the thread-local last-chunk pointer after clone / insert.
     #[serde(skip, default)]
     pub(crate) chunk_cache_id: ChunkCacheId,
+    /// True after a buoyant occupancy pass has run this session.
+    ///
+    /// Legacy saves predate [`Chunk::has_buoyant`]; the first collect
+    /// walks `has_loose` and stamps the flag. After that (and after a
+    /// total melt clears every buoyant chunk) we must not fall back to
+    /// scanning every sand chunk every tick.
+    #[serde(skip, default)]
+    pub(crate) buoyant_flags_ready: bool,
 }
 
 impl World {
@@ -162,13 +207,17 @@ impl World {
             mycelium_strains: HashMap::new(),
             next_mycelium_strain_id: 1,
             mycelium_energy: HashMap::new(),
+            dissolved: HashMap::new(),
+            suspended: HashMap::new(),
             sym_net_flow: HashMap::new(),
             mycelium_strain_lineage: HashMap::new(),
             competent_cell_moves: Vec::new(),
             competent_settled: FxHashMap::default(),
             competent_wake: Vec::new(),
             competent_moved_cells: Vec::new(),
+            competent_level_vacated: FxHashMap::default(),
             chunk_cache_id: ChunkCacheId::default(),
+            buoyant_flags_ready: false,
         }
     }
 
@@ -324,15 +373,31 @@ impl World {
     }
 
     /// Wake sleeping competent rock at and around a cell whose support changed.
+    ///
+    /// Only positions that actually hold competent rock are queued. A solidity
+    /// change with no rock beside it — a sand grain settling mid-dune, litter
+    /// landing on a beach — cannot destabilise a body, and grains move
+    /// constantly. Queueing those anyway kept the body pass scanning settled
+    /// terrain every tick: the wake list becomes a per-chunk bounding rect, so
+    /// two unrelated grain moves in one chunk inflated the seed scan to the
+    /// whole chunk (~18.6 k seed candidates/tick on a world where no rock was
+    /// moving at all).
     #[inline]
     pub fn competent_wake_around(&mut self, gx: i32, gy: i32) {
         for (dx, dy) in [(0, 0), (0, 1), (0, -1), (1, 0), (-1, 0)] {
             let wx = self.wrap_x(gx + dx);
             let wy = gy + dy;
+            let is_rock = self
+                .get_cell(wx, wy)
+                .is_some_and(|c| crate::cell::is_competent_rock(c.material));
+            if !is_rock {
+                continue;
+            }
             let (coord, lx, ly) = Self::split(wx, wy);
             if let Some(m) = self.competent_settled.get_mut(&coord) {
                 m.unset(lx, ly);
             }
+            crate::competent_probe::bump(&crate::competent_probe::wake_from_solidity);
             self.competent_wake.push((wx, wy));
         }
     }
