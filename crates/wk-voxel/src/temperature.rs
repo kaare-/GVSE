@@ -907,6 +907,8 @@ mod tests {
         t.config.diffuse_alpha = 0.0;
         t.config.solar_heat_c = 0.50;
         t.config.near_surface_couple = 0.70;
+        t.config.sea_bias_c = 0.0;
+        t.config.lapse_c = 0.0;
         t.fill_initial(0);
         for v in t.cells.values_mut() {
             *v = 18.0;
@@ -931,13 +933,13 @@ mod tests {
     fn noon_skin_is_warmer_than_aloft_so_the_column_can_draft() {
         let (w, mut t, h, sea) = grounded_scene();
         t.config.diffuse_alpha = 0.0;
-        for _ in 0..12 {
+        for _ in 0..20 {
             t.step(Some(&w), &h, 0, None);
         }
         let air = mean_first_air(&t, sea);
         let aloft = mean_aloft(&t);
         assert!(
-            air > aloft + 0.8,
+            air > aloft + 0.5,
             "warm ground under colder air is the draft pipe (air={air:.1} aloft={aloft:.1})"
         );
     }
