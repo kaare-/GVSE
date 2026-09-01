@@ -161,7 +161,7 @@ pub fn precipitate_thermal_surplus(
         let freezing = phase
             .map(|ph| ph.enable_snow_precip && air_t <= ph.freeze_point_c)
             .unwrap_or(false);
-        let landed = if freezing && take >= u8::MAX as f32 {
+        let landed = if freezing && take >= crate::phase::PRECIP_IN_AIR_MIN {
             let snowed = crate::phase::deposit_snow_in_air(world, gx, gy, take);
             if snowed > 0.0 {
                 snowed
@@ -297,20 +297,17 @@ pub fn apply_condensation_rain_phased(
         }
         let surplus = (mass - leftover).max(0.0);
         let raw = (cfg.mass_per_droplet * mass_mult).min(mass);
-        // A flake costs a whole cell. The cloudy remnant must not shave
-        // 255 down to 238 and refuse every cold event (no flake, no rain
-        // streak — only the surface frost fallback).
-        let snowing = match (temp, phase) {
-            (Some(th), Some(ph)) => {
-                ph.enable_snow_precip && th.at_tile(hx, hy) <= ph.freeze_point_c
-            }
-            _ => false,
-        };
-        let take_mass = if snowing && raw >= u8::MAX as f32 {
-            u8::MAX as f32
-        } else {
-            raw.min(surplus)
-        };
+        // Leftover sat used to shave a 140-mass tile down to ~23. Terrain
+        // and the H shaft hide Air sat ≤ 32, so that event was invisible.
+        let mut take_mass = raw.min(surplus);
+        // Play droplets are 255. Leftover sat must not shave them under
+        // the haze band (invisible rain, no shaft). Tiny frost budgets stay tiny.
+        if cfg.mass_per_droplet + 1e-3 >= crate::phase::PRECIP_IN_AIR_MIN
+            && take_mass + 1e-3 < crate::phase::PRECIP_IN_AIR_MIN
+            && mass >= crate::phase::PRECIP_IN_AIR_MIN
+        {
+            take_mass = crate::phase::PRECIP_IN_AIR_MIN;
+        }
         if take_mass <= 0.0 {
             continue;
         }
@@ -541,10 +538,10 @@ mod tests {
 
         let mut w = World::new(5);
         w.ensure_chunk(ChunkCoord::new(0, 0));
-        // A frozen cell's water is its *material*, not its sat, so a flake costs a
-        // whole cell. Part-paying would drift the ledger.
-        let paid = crate::phase::deposit_snow_in_air(&mut w, 4, 20, 200.0);
-        assert_eq!(paid, 0.0, "under a whole cell must be refused, not part-paid");
+        // Below the visible-drop floor. Cold air cannot hold 255, so the
+        // flake gate is 33, not a whole cell.
+        let paid = crate::phase::deposit_snow_in_air(&mut w, 4, 20, 16.0);
+        assert_eq!(paid, 0.0, "under PRECIP_IN_AIR_MIN must be refused");
         assert_ne!(w.get_cell(4, 20).unwrap().material, MaterialId::Snow);
         let _ = Cell::air();
     }

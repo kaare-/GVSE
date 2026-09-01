@@ -1000,7 +1000,7 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Min precip budget to snow (full cell)",
+                        "Min precip budget to snow",
                         1.0..255.0,
                         &mut self.phase.min_budget_to_snow,
                     );

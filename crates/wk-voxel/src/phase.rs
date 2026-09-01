@@ -36,6 +36,13 @@ use crate::rules::{deposit_water_on_surface, is_standing_water};
 use crate::temperature::Temperature;
 use crate::worldgen::live_surface_at;
 
+/// Humidity mass that buys an in-air flake or a visible rain drop.
+///
+/// Terrain and the H shaft ignore Air sat ≤ 32 (haze film). Cold air
+/// holds ~207 at 0 °C and ~35 at −20 °C, so a 255 flake can never form
+/// from the hold. 33 is one sat above the haze band.
+pub const PRECIP_IN_AIR_MIN: f32 = 33.0;
+
 /// Freeze / thaw knobs.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PhaseConfig {
@@ -55,10 +62,10 @@ pub struct PhaseConfig {
     pub max_slush_cells_per_column_per_tick: u8,
     /// Max unsupported Ice/Snow cells that may break **per column per tick**.
     pub max_break_cells_per_column_per_tick: u8,
-    /// Minimum precip budget (sat units) to place one Snow / frost Ice
-    /// cell. Must be a **full cell** (`255`): thaw / slush / break always
-    /// yield `Air+FULL`, so seating a solid from a 40–64 droplet minted
-    /// ~200 sat into the basin on melt. Shortfall → hold (`0`).
+    /// Minimum precip budget (humidity mass) to place one Snow / frost Ice
+    /// cell. Cold air only holds ~207 at 0 °C and ~35 at −20 °C, so a
+    /// full-cell 255 gate never snows. Default is one sat above the haze
+    /// band so a flake is visible and carves the H shaft.
     pub min_budget_to_snow: f32,
     /// Hard cap on Ice+Snow cells stacked in one column. Excess at the
     /// top is culled to empty Air (removed, not melted — melting would
@@ -119,7 +126,7 @@ impl Default for PhaseConfig {
             max_thaw_cells_per_column_per_tick: 1,
             max_slush_cells_per_column_per_tick: 1,
             max_break_cells_per_column_per_tick: 2,
-            min_budget_to_snow: 255.0,
+            min_budget_to_snow: PRECIP_IN_AIR_MIN,
             max_ice_cells_per_column: 12,
             snow_spread_radius: 6,
             snow_blanket_depth: 2,
@@ -374,8 +381,8 @@ pub fn deposit_precip_on_surface(
     if ground_t > phase.freeze_point_c {
         return deposit_water_on_surface(world, gx, start_y, budget);
     }
-    // Cold air + cold ground: solid snow pack only — full cell or hold.
-    let need = phase.min_budget_to_snow.max(u8::MAX as f32);
+    // Cold air + cold ground: solid snow pack only.
+    let need = phase.min_budget_to_snow.max(1.0);
     if budget < need {
         return 0.0;
     }
@@ -544,11 +551,9 @@ fn deposit_snow_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f
 /// `Snow` already falls through empty air and floats on water, so gravity takes it
 /// from here.
 ///
-/// Pays a **whole cell**, matching the frost convention: a frozen cell's water is
-/// its material rather than its `sat`, so 255 of humidity buys exactly one cell.
-/// Anything less is refused rather than part-paid, or the ledger drifts.
+/// Pays [`PRECIP_IN_AIR_MIN`], not a whole cell — cold air cannot hold 255.
 pub fn deposit_snow_in_air(world: &mut World, gx: i32, y: i32, budget: f32) -> f32 {
-    if budget < u8::MAX as f32 {
+    if budget < PRECIP_IN_AIR_MIN {
         return 0.0;
     }
     let jx = world.wrap_x(gx);
@@ -558,7 +563,7 @@ pub fn deposit_snow_in_air(world: &mut World, gx: i32, y: i32, budget: f32) -> f
         return 0.0;
     };
     world.set_cell(jx, air_y, snow_cell());
-    u8::MAX as f32
+    budget.min(u8::MAX as f32)
 }
 
 /// Walk a short column for empty Air. Stay buried / in wet film and refuse —

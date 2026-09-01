@@ -163,7 +163,7 @@ pub use humidity::{
 };
 pub use phase::{
     apply_freeze, apply_phase, deposit_condensate_on_surface, deposit_precip_on_surface,
-    ice_lid_thickness, precip_forms_snow_at_air, PhaseConfig,
+    ice_lid_thickness, precip_forms_snow_at_air, PhaseConfig, PRECIP_IN_AIR_MIN,
 };
 pub use rules::{
     apply_cold_avalanche, apply_cold_avalanche_bound, apply_condensation_rain,

@@ -5150,12 +5150,11 @@ fn condensation_frosts_thin_ice_not_snow_towers_when_cold() {
     for v in temp.cells.values_mut() {
         *v = -12.0;
     }
-    // Demo uses small drizzle droplets; frost still pays a full cell
-    // via the humidity-tile retry when mass ≥ 255.
+    // Budget under the in-air flake floor, so this stays frost, not snow.
     let cfg = CondensationConfig {
         top_y: 30,
         max_prob_per_tick: 1.0,
-        mass_per_droplet: 40.0,
+        mass_per_droplet: 16.0,
         ..CondensationConfig::default()
     };
     let phase = crate::phase::PhaseConfig::default();
