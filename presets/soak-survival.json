@@ -100,7 +100,7 @@
     "max_thaw_cells_per_column_per_tick": 1,
     "max_slush_cells_per_column_per_tick": 1,
     "max_break_cells_per_column_per_tick": 2,
-    "min_budget_to_snow": 255.0,
+    "min_budget_to_snow": 33.0,
     "max_ice_cells_per_column": 12,
     "snow_spread_radius": 6,
     "snow_blanket_depth": 2,
