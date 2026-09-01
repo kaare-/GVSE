@@ -795,10 +795,17 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Lapse (C per cell elev)", 0.0..0.4, &mut self.temp.lapse_c);
                     ui.label(
                         None,
-                        "Night is the sun off. Tune sun strength and the ground's radiate rate. Humidity reflects sun (day cool) and blankets the leak. Wet air holds more heat and a rising plume pulls it up.",
+                        "Night is the sun off. Land skins take the sun; lakes lag via heat capacity (not a darker leak). Humidity reflects sun and blankets the leak. Wet air holds more heat and a rising plume pulls it up.",
                     );
                     labeled_slider(ui, hash!(), "Sun on ground / step", 0.0..1.5, &mut self.temp.solar_heat_c);
                     labeled_slider(ui, hash!(), "Radiate from ground / step", 0.0..1.5, &mut self.temp.night_cool_c);
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Water radiate scale",
+                        0.1..1.2,
+                        &mut self.temp.water_night_cool_scale,
+                    );
                     labeled_slider(
                         ui,
                         hash!(),
@@ -848,6 +855,13 @@ impl SimSettings {
                         "Inertia scale",
                         0.0..4.0,
                         &mut self.temp.inertia_scale,
+                    );
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Sun ΔT / heat capacity",
+                        0.0..1.0,
+                        &mut self.temp.force_inertia,
                     );
                     labeled_slider(
                         ui,

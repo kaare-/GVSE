@@ -9,6 +9,8 @@
 //!   sun being off — there is no separate night-cool pulse and no
 //!   noon/midnight skin swing. Humidity in the column above reflects
 //!   incoming sun (daytime shade) and blankets outgoing radiation.
+//!   Sun/radiate ΔT is divided by heat capacity so a lake is a buffer,
+//!   not a sun magnet: dry sand/stone skins heat faster than deep water.
 //!   Rock / sand / lakes / snow keep inertia so a lake does not slam
 //!   from +20 °C to −10 °C in one night.
 //! - **Air** does **not** absorb solar or radiate to space. It sits on
@@ -80,8 +82,12 @@ pub struct TempConfig {
     pub max_relax: f32,
     /// Extra capacity per standing-water / ice cell in the surface stack.
     pub water_stack_cap: f32,
-    /// Radiative leak multiplier on surface water (<< rock/air).
+    /// Radiative leak multiplier on surface water. Near 1 = water
+    /// radiates like land; buffering is capacity, not a heat trap.
     pub water_night_cool_scale: f32,
+    /// How hard surface capacity damps sun/radiate ΔT (0 = raw °C).
+    #[serde(default = "default_force_inertia")]
+    pub force_inertia: f32,
     /// Deep-rock geothermal target at the surface interface (°C).
     pub geothermal_surface_c: f32,
     /// Extra °C per cell of depth below the free surface.
@@ -124,6 +130,12 @@ fn default_wind_mix() -> f32 {
 fn default_humid_heat_scale() -> f32 {
     1.0
 }
+fn default_force_inertia() -> f32 {
+    0.20
+}
+
+/// Deep water only counts this many extra cells toward skin capacity.
+const WATER_STACK_CAP_CELLS: f32 = 12.0;
 
 impl Default for TempConfig {
     fn default() -> Self {
@@ -133,7 +145,7 @@ impl Default for TempConfig {
             land_day_bump_c: 0.0,
             lapse_c: 0.08,
             day_amp_c: 0.0,
-            solar_heat_c: 0.40,
+            solar_heat_c: 0.55,
             night_cool_c: 0.30,
             cloud_shade: 0.55,
             hum_shade_ref: 80.0,
@@ -143,7 +155,8 @@ impl Default for TempConfig {
             min_relax: 0.003,
             max_relax: 0.28,
             water_stack_cap: 1.4,
-            water_night_cool_scale: 0.15,
+            water_night_cool_scale: 0.70,
+            force_inertia: default_force_inertia(),
             geothermal_surface_c: 10.0,
             geothermal_gradient_c_per_cell: 0.35,
             geothermal_relax: 0.018,
@@ -500,7 +513,15 @@ impl Temperature {
                     let relax = (cfg.sky_relax
                         / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale))
                         .clamp(cfg.min_relax, cfg.max_relax);
-                    let n = t + solar - radiate;
+                    // Capacity damps the °C kick. Without this, water's
+                    // low albedo + old 0.15 leak added raw heat every
+                    // step while sand could net-cool at noon.
+                    let force = solar - radiate;
+                    let damp = 1.0
+                        + props.capacity.max(0.05)
+                            * cfg.inertia_scale
+                            * cfg.force_inertia.clamp(0.0, 2.0);
+                    let n = t + force / damp.max(1.0);
                     n + (skin - n) * relax
                 }
                 TileLayer::Buried { depth_cells } => {
@@ -839,7 +860,9 @@ fn column_surface_thermal(
         cell.material
     };
     let props = MaterialRegistry::props(mat);
-    let stack = (water_like.saturating_sub(1) as f32).max(0.0);
+    let stack = (water_like.saturating_sub(1) as f32)
+        .max(0.0)
+        .min(WATER_STACK_CAP_CELLS);
     let cap = props.heat_capacity + stack * cfg.water_stack_cap;
     let watery = water_like > 0
         || matches!(mat, MaterialId::Water | MaterialId::Ice);
@@ -1107,6 +1130,7 @@ mod tests {
         t.config.night_cool_c = 0.0;
         t.config.diffuse_alpha = 0.0;
         t.config.solar_heat_c = 0.50;
+        t.config.force_inertia = 0.0;
         t.config.near_surface_couple = 0.70;
         t.config.sea_bias_c = 0.0;
         t.config.lapse_c = 0.0;
@@ -1271,6 +1295,58 @@ mod tests {
         assert!(
             pond_t > 5.0,
             "lake must hold heat through a short cold snap (got {pond_t:.1})"
+        );
+    }
+
+    #[test]
+    fn noon_sand_warms_faster_than_deep_water() {
+        // Defaults used to net-cool sand at noon while a dark, 0.15×-radiating
+        // ocean stacked raw °C. Land skins should lead; water lags via capacity.
+        let p = WorldgenParams::default();
+        let sea = p.sea_level_y;
+        let pond_x0: i32 = 4;
+        let dry_x0: i32 = 20;
+        let mut world = World::new(7);
+        fill_tile_surface(&mut world, pond_x0, sea, MaterialId::Water, 16);
+        fill_tile_surface(&mut world, dry_x0, sea, MaterialId::Sand, 0);
+        let mut t = Temperature::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+            p.seed,
+            p.width_cols,
+            sea,
+            false,
+        );
+        t.config.diffuse_alpha = 0.0;
+        t.config.sea_bias_c = 0.0;
+        t.config.lapse_c = 0.0;
+        t.fill_initial(0);
+        for v in t.cells.values_mut() {
+            *v = 12.0;
+        }
+        t.rebuild_row_means();
+        let h = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        for i in 0..10 {
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let pond_t = t.at_cell(pond_x0 + 1, sea + 8);
+        let dry_t = t.at_cell(dry_x0 + 1, sea + 1);
+        assert!(
+            dry_t > pond_t + 0.8,
+            "sand skin {dry_t:.1}C should heat faster than deep water {pond_t:.1}C at noon"
+        );
+        assert!(
+            dry_t > 12.0 + 0.4,
+            "dry sand must net-heat at noon (got {dry_t:.1})"
         );
     }
 
@@ -1450,6 +1526,7 @@ mod tests {
             t.config.min_relax = 0.0;
             t.config.diffuse_alpha = 0.0;
             t.config.solar_heat_c = 0.5;
+            t.config.force_inertia = 0.0;
             t.config.night_cool_c = 0.0;
         }
         let h = Humidity::with_world_bounds(4, 0, p.bedrock_floor_y, 32, p.sky_ceiling_y);

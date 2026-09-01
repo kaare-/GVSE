@@ -361,6 +361,7 @@ const SKY: &[(&str, LineKind)] = &[
     ("      when air and ground are both below freeze.", LineKind::Body),
     ("4. H  paints the vapour field. Wet tiles are the sky look.", LineKind::Body),
     ("      Shade and drizzle read that field. There is no N bank layer.", LineKind::Body),
+    ("      The sun hits the ground. Dry land skins heat faster; lakes lag.", LineKind::Body),
     ("", LineKind::Blank),
     ("W is optional", LineKind::Head),
     ("Climatic rain is an extra faucet from the sky ceiling. Default", LineKind::Body),

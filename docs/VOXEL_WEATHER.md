@@ -317,6 +317,12 @@ temperature steps every ~20 ticks, giving a time constant near **1370 ticks**. A
 never finishes warming before the sun sets. Day 3000 / night 3000 gives ~2.2 time
 constants per half and ~89%.
 
+Sun/radiate used to add raw °C. Water's low albedo plus a 0.15 leak made the
+ocean a sun magnet while dry sand could net-cool at noon. Forcing is now
+` (solar − radiate) / (1 + capacity × inertia × force_inertia) `, water radiates
+near land (`water_night_cool_scale` 0.70), and only 12 water cells add stack
+capacity. Lakes stay a buffer. Land skins lead the day.
+
 Convection proper — buoyancy from the ground-versus-air difference — is cheap on
 a tile field and is what would turn a steady rain rate into fronts.
 
