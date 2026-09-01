@@ -73,6 +73,11 @@ impl TileBounds {
 /// `SubsystemId::HumidityField` (`period: 20`, `phase: 3`).
 pub const HUMIDITY_DIFFUSE_PERIOD: u64 = 20;
 pub const HUMIDITY_DIFFUSE_PHASE: u64 = 3;
+/// Face-following wind can report `|vy|` near 1.0. Humidity treats `|v|`
+/// as the fraction of tile mass that leaves this tick, so an uncapped
+/// climb vacuums the air below `min_mass_to_rain` and C / surplus never
+/// drop. Overlay and slip keep the raw field; only this hop is damped.
+const HUMIDITY_VY_ADV_CAP: f32 = 0.10;
 
 /// True on ticks when humidity diffusion should run.
 pub fn humidity_diffuse_due(tick: u64) -> bool {
@@ -690,7 +695,15 @@ impl Humidity {
                 Some((wind, world, _)) => wind.vector_at(Some(world), hx, hy),
                 None => (climate_vx, climate_vy),
             };
-            let v = if horizontal { vx } else { vy };
+            // Slip / look-ahead / Jacobi can put |vy| ~0.2–1 on a face.
+            // Flux treats |v| as the fraction that leaves this tick —
+            // using that raw climb empties the sky and drizzle never
+            // reaches min_mass (no falling drops, haze still there).
+            let v = if horizontal {
+                vx
+            } else {
+                vy.clamp(-HUMIDITY_VY_ADV_CAP, HUMIDITY_VY_ADV_CAP)
+            };
             let step = v.clamp(-1.0, 1.0);
             if step.abs() < 1e-9 {
                 continue;
@@ -1031,6 +1044,68 @@ mod tests {
         assert!(
             (stay - 75.0).abs() < 1e-3 && (moved - 25.0).abs() < 1e-3,
             "0.25 flux should leave 75 / move 25 (stay={stay} moved={moved})"
+        );
+    }
+
+    #[test]
+    fn vertical_wind_does_not_vacuum_a_tile_in_one_hop() {
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 64);
+        h.wrap_x = true;
+        h.add(8, 8, 100.0);
+        let before = h.total_mass();
+        h.advect(0.0, 0.80);
+        assert!((h.total_mass() - before).abs() < 1e-4);
+        let stay = h.at_tile(2, 2);
+        let moved = h.at_tile(2, 3);
+        assert!(
+            stay >= 88.0,
+            "vy=0.80 must be capped so this tile keeps most of its mass, stay={stay}"
+        );
+        assert!(
+            moved > 0.0 && moved <= 12.0,
+            "capped climb should move a drizzle, not the whole cell, moved={moved}"
+        );
+    }
+
+    #[test]
+    fn local_vertical_field_is_capped_the_same_way() {
+        use crate::grid::World;
+        use crate::wind::Wind;
+        use crate::worldgen::WorldgenParams;
+
+        let p = WorldgenParams::default();
+        let mut wind = Wind::climate(
+            4,
+            0.20,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            p.bedrock_floor_y,
+            p.sky_ceiling_y,
+            true,
+        );
+        wind.config.terrain_drive = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.field_smooth = 0.0;
+        let world = World::new(p.seed);
+        let mut h = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        h.wrap_x = true;
+        let gy = p.sea_level_y + 24;
+        h.add(8, gy, 100.0);
+        let (hx, hy) = h.tile_of(8, gy);
+        wind.field.insert((hx, hy), (0.0, 0.80));
+        h.advect_with_surface(0.0, 0.0, &wind, &world);
+        let left = h.at_tile(hx, hy);
+        assert!(
+            left >= 70.0,
+            "surface-path vy=0.80 must not vacuum the tile (uncapped would leave ~20), left={left}"
         );
     }
 

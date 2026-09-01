@@ -134,8 +134,13 @@ The coupled weather stack is:
   next wall before the last tile. Slip runs last.
 - **Humidity** — donor-cell fractional flux through that heatmap, with a
   per-column free-air cache so buried seats lift over the crest without
-  scanning the hill once per tile. Convection stays `buoyant_rise_thermal`
-  (per-row T mean, never `Temperature::mean()` in the loop).
+  scanning the hill once per tile. Vertical flux clamps `|vy|` to 0.10
+  so face-following / Jacobi climb cannot empty a tile in one hop
+  (that vacuumed vapour below `min_mass_to_rain` and stopped C drops;
+  the V overlay still shows the raw field). Convection stays
+  `buoyant_rise_thermal` (per-row T mean, never `Temperature::mean()`
+  in the loop). Condensation that samples a solid tile centre walks
+  up to four cells for the first Air before refusing.
 - **Temperature** — still period 20. Night humidity blanket, wind mix,
   and near-surface air↔ground couple live *inside* that step. Do not
   run a full-field `advect_air_with_wind` every tick.
