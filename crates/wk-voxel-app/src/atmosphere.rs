@@ -193,6 +193,15 @@ fn live_surface_y_ground(
             }
             y += 1;
         }
+        // Same extra climb as `live_surface_y`: an F3 tower can rise
+        // farther than the local window.
+        let extra = LIVE_SURFACE_DESCENT_MAX.saturating_sub(search);
+        for _ in 0..extra {
+            if world.get_cell(jx, y + 1).is_none() || !ground(y + 1) {
+                return y;
+            }
+            y += 1;
+        }
         return y;
     }
     let mut y = hint;
@@ -1061,6 +1070,20 @@ fn wind_streak_on_lattice(hx: i32, hy: i32, stride: i32) -> bool {
     hx.rem_euclid(s) == 0 && hy.rem_euclid(s) == 0
 }
 
+fn wind_tile_center_is_solid(
+    world: Option<&World>,
+    tc: i32,
+    hx: i32,
+    hy: i32,
+) -> bool {
+    let Some(w) = world else {
+        return false;
+    };
+    let gx = w.wrap_x(hx * tc + tc / 2);
+    let gy = hy * tc + tc / 2;
+    matches!(w.get_cell(gx, gy), Some(c) if c.material.is_solid())
+}
+
 /// World-space wind strokes (`V` overlay) from the local heatmap.
 ///
 /// A coarse lattice of short arrows — not one stroke per rebuilt tile —
@@ -1093,6 +1116,9 @@ pub fn draw_wind_streaks(
             if !wind_streak_on_lattice(hx, hy, stride) {
                 continue;
             }
+            if wind_tile_center_is_solid(world, tc, hx, hy) {
+                continue;
+            }
             samples.push((hx, hy, vx, vy));
         }
     } else {
@@ -1110,7 +1136,9 @@ pub fn draw_wind_streaks(
             let mut hy = gy_lo.div_euclid(tc);
             let hy1 = gy_hi.div_euclid(tc);
             while hy <= hy1 {
-                if wind_streak_on_lattice(hx, hy, stride) {
+                if wind_streak_on_lattice(hx, hy, stride)
+                    && !wind_tile_center_is_solid(world, tc, hx, hy)
+                {
                     let (vx, vy) = wind.vector_at(world, hx, hy);
                     samples.push((hx, hy, vx, vy));
                 }
@@ -1788,6 +1816,37 @@ mod tests {
         assert_eq!(
             y, hint,
             "ridge crest must sit on the stone, not the flake (got {y})"
+        );
+    }
+
+    #[test]
+    fn built_tower_lifts_the_ridge_past_the_search_window() {
+        use super::column_surface_y;
+        use wk_material::MaterialId;
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, CHUNK_CELLS_H, World};
+
+        let seed = 1u64;
+        let width = 64;
+        let sea = 20;
+        let gx = 22;
+        let hint = continental_surface_y(seed, gx, sea, width);
+        let crest = hint + 120;
+        assert!(hint > 0, "need a loaded seed hint (hint={hint})");
+        let mut w = World::new(seed);
+        for y in [0, hint, crest] {
+            w.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(64),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        for y in 0..=crest {
+            w.set_cell(gx, y, Cell::solid(MaterialId::Stone));
+        }
+        let sky = crest + 40;
+        assert_eq!(
+            column_surface_y(&w, gx, 0, sky, sea, seed, width),
+            crest,
+            "ridge must climb an F3 tower past the 64-cell window (hint={hint})"
         );
     }
 

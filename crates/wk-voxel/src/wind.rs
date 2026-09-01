@@ -339,6 +339,12 @@ impl Wind {
         let mut next = FxHashMap::default();
         next.reserve(keys.len());
         for &(hx, hy) in keys.keys() {
+            // Tile-centre in rock is not a breeze. A capped live-surface
+            // climb used to seat the near-surface band inside an F3 tower
+            // (wind tunnel around y=250–260).
+            if tile_center_is_solid(world, tc, hx, hy) {
+                continue;
+            }
             let (mut vx, mut vy) =
                 self.compose_drivers(world, temp, hx, hy, tick, evx, evy, &cfg);
             vx = vx.clamp(-1.0, 1.0);
@@ -621,6 +627,15 @@ impl Wind {
     }
 }
 
+fn tile_center_is_solid(world: Option<&World>, tc: i32, hx: i32, hy: i32) -> bool {
+    let Some(w) = world else {
+        return false;
+    };
+    let gx = w.wrap_x(hx * tc + tc / 2);
+    let gy = hy * tc + tc / 2;
+    matches!(w.get_cell(gx, gy), Some(c) if c.material.is_solid())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -795,5 +810,37 @@ mod tests {
             "swirl should vary local vx (range={})",
             hi - lo
         );
+    }
+
+    #[test]
+    fn rebuild_field_does_not_seat_inside_a_tall_stone_tower() {
+        use crate::cell::Cell;
+        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H};
+        use wk_material::MaterialId;
+
+        let sea: i32 = 80;
+        let hint: i32 = 120;
+        let crest: i32 = 260;
+        let mut w = crate::grid::World::new(3);
+        for y in [0, hint, crest] {
+            w.ensure_chunk(ChunkCoord::new(
+                0,
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        for y in 0..=crest {
+            w.set_cell(2, y, Cell::solid(MaterialId::Stone));
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 64, sea, 0, 320, false);
+        wind.config.field_smooth = 0.0;
+        let occupied = vec![(0, crest.div_euclid(4))];
+        wind.rebuild_field(Some(&w), None, 40, &occupied, None);
+        let tunnel_hy = 256 / 4; // y=256–259, the screenshot band
+        assert!(
+            !wind.field.contains_key(&(0, tunnel_hy)),
+            "wind must not sit inside the tower at tile hy={tunnel_hy}"
+        );
+        let surf = crate::worldgen::live_surface_y(&w, 2, hint, crate::worldgen::LIVE_SURFACE_SEARCH);
+        assert_eq!(surf, crest, "live surface must reach the F3 crest");
     }
 }

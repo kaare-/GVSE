@@ -216,13 +216,25 @@ pub fn live_surface_y(world: &World, gx: i32, hint: i32, search: i32) -> i32 {
         return hint;
     }
     let raw = if solid_at(hint) {
-        // Ground has risen (deposition, landslide): climb to the top of the stack.
+        // Ground has risen (deposition, F3 tower): climb to the top.
+        // The short window used to stop at hint+64, so a stack built
+        // toward the sky left a fake crest and a wind tunnel through
+        // the extra rock (y≈250–260 on a 320 ceiling).
         let mut y = hint;
         for _ in 0..search {
             if !solid_at(y + 1) {
                 break;
             }
             y += 1;
+        }
+        if solid_at(y + 1) {
+            let extra = LIVE_SURFACE_DESCENT_MAX.saturating_sub(search);
+            for _ in 0..extra {
+                if !solid_at(y + 1) {
+                    break;
+                }
+                y += 1;
+            }
         }
         y
     } else {
@@ -314,8 +326,8 @@ pub fn airborne_loose_at(world: &World, gx: i32, y: i32, cell: Cell) -> bool {
 /// Generous enough for real collapse. A whole-hill F3 erase can drop the
 /// crest farther than this — [`LIVE_SURFACE_DESCENT_MAX`] covers that.
 pub const LIVE_SURFACE_SEARCH: i32 = 64;
-/// Extra downward walk when the hint cell is air and the short window
-/// found nothing. Sky ceiling is 320; a mountain wipe must reach the bed.
+/// Extra walk when the short window is not enough. Sky ceiling is 320:
+/// a mountain wipe must reach the bed, an F3 tower must reach the crest.
 pub const LIVE_SURFACE_DESCENT_MAX: i32 = 320;
 
 /// Live top-of-column: procedural profile as the hint, then walk the world.
@@ -648,6 +660,27 @@ mod lens_tests {
             live_surface_y(&w2, 5, 60, 8),
             60,
             "an empty created column keeps the seed — that is not a deleted hill"
+        );
+    }
+
+    #[test]
+    fn live_surface_follows_a_built_tower_past_the_search_window() {
+        // Seed crest + 64 used to be the climb cap. F3-stacking toward
+        // the sky left a fake surface and wind through the extra rock.
+        let mut w = World::new(1);
+        let x = 8;
+        let hint = 40;
+        let crest = 160;
+        for cy in 0..=3 {
+            w.ensure_chunk(crate::chunk::ChunkCoord::new(0, cy));
+        }
+        for y in 0..=crest {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+        assert_eq!(
+            live_surface_y(&w, x, hint, LIVE_SURFACE_SEARCH),
+            crest,
+            "a tower 120 cells above the hint must not stop at hint+64"
         );
     }
 
