@@ -62,7 +62,7 @@ pub struct PhaseConfig {
     pub max_break_cells_per_column_per_tick: u8,
     /// Minimum precip budget to place one Snow / frost Ice cell. A flake
     /// is a whole cell (`255`): thaw yields `Air+FULL`, so a cheaper seat
-    /// mints water. Shortfall → rain in air, not a flake.
+    /// mints water. Shortfall below freeze → hold, not liquid rain.
     pub min_budget_to_snow: f32,
     /// Hard cap on Ice+Snow cells stacked in one column. Excess at the
     /// top is culled to empty Air (removed, not melted — melting would

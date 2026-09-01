@@ -119,13 +119,47 @@ impl Default for OrographicConfig {
 /// Leftover tiles keep their vapour — this is a rate limit, not a clamp.
 const THERMAL_SURPLUS_MAX_HITS: usize = 128;
 
-/// Turn vapour the local air can no longer hold into water.
+/// One flake still costs a whole cell. Thaw is `Air+FULL`; a cheaper
+/// seat would mint the shortfall. Snow does not carry sat today.
+const FLAKE_MASS: f32 = 255.0;
+
+/// True when this air must not become liquid rain.
 ///
-/// Clausius–Clapeyron shrinks the hold when a tile cools. That surplus
-/// is rain (or a snowflake if the budget can pay for one). It is **not**
-/// deleted, and it does **not** wait for [`apply_condensation_rain_phased`]
-/// — that pass has its own min-mass / probability / event-cap gates, so
-/// a missed roll is not a license to drop the mass.
+/// Phase's freeze point wins when present; otherwise 0 °C. Below that
+/// the C lottery and the surplus pass may snow (if they can pay a flake)
+/// or hold — they never `deposit_water_in_air`.
+fn air_is_freezing(air_t: f32, phase: Option<&crate::phase::PhaseConfig>) -> bool {
+    let freeze = phase
+        .map(|ph| ph.freeze_point_c)
+        .unwrap_or(0.0);
+    air_t <= freeze
+}
+
+/// Seat a flake and drain the local humidity parcel. Returns mass landed
+/// (0 if the parcel cannot pay [`FLAKE_MASS`] or there is no empty air).
+fn try_snow_from_parcel(
+    world: &mut World,
+    humidity: &mut crate::humidity::Humidity,
+    gx: i32,
+    gy: i32,
+) -> f32 {
+    if humidity.peek_around(gx, gy) + 1e-3 < FLAKE_MASS {
+        return 0.0;
+    }
+    let snowed = crate::phase::deposit_snow_in_air(world, gx, gy, FLAKE_MASS);
+    if snowed <= 0.0 {
+        return 0.0;
+    }
+    humidity.take_around(gx, gy, snowed)
+}
+
+/// Turn vapour the local air can no longer hold into precip.
+///
+/// Clausius–Clapeyron shrinks the hold when a tile cools. Above freeze
+/// that surplus is rain. At or below freeze it is a snowflake paid from
+/// the local 3×3 humidity parcel, or a hold if the parcel cannot pay a
+/// whole cell. It is **not** deleted, and it does **not** become liquid
+/// rain below 0 °C.
 ///
 /// Only humidity that actually lands is drained. A refused deposit
 /// leaves the vapour where it is.
@@ -158,19 +192,15 @@ pub fn precipitate_thermal_surplus(
         let gx = hx * tile_cols + tile_cols / 2;
         let gy = hy * tile_cols + tile_cols / 2;
         let air_t = temp.at_tile(hx, hy);
-        let freezing = phase
-            .map(|ph| ph.enable_snow_precip && air_t <= ph.freeze_point_c)
-            .unwrap_or(false);
-        let landed = if freezing && take >= u8::MAX as f32 {
-            let snowed = crate::phase::deposit_snow_in_air(world, gx, gy, take);
-            if snowed > 0.0 {
-                snowed
-            } else {
-                super::deposit_water_in_air(world, gx, gy, take)
+        if air_is_freezing(air_t, phase) {
+            // Below freeze: snow from the parcel, or hold. Never liquid.
+            let snow_ok = phase.map(|ph| ph.enable_snow_precip).unwrap_or(true);
+            if snow_ok {
+                let _ = try_snow_from_parcel(world, humidity, gx, gy);
             }
-        } else {
-            super::deposit_water_in_air(world, gx, gy, take)
-        };
+            continue;
+        }
+        let landed = super::deposit_water_in_air(world, gx, gy, take);
         if landed <= 0.0 {
             continue;
         }
@@ -215,10 +245,9 @@ pub fn apply_condensation_rain_with_orographic(
 
 /// Condensation drizzle from leftover humidity.
 ///
-/// Warm air → liquid film. Cold air on cold ground → a **thin Ice glaze**
-/// (frost / rime), not `Snow` packs and never taller than
-/// [`crate::phase::PhaseConfig::frost_coat_depth`]. Cloud flakes still own
-/// real snow accumulation.
+/// Warm air over the T-hold → liquid rain. At or below freeze → a
+/// falling flake paid from the local humidity parcel, or a hold if
+/// that parcel cannot cover a whole cell. Never liquid rain below 0 °C.
 pub fn apply_condensation_rain_phased(
     world: &mut World,
     humidity: &mut crate::humidity::Humidity,
@@ -260,10 +289,12 @@ pub fn apply_condensation_rain_phased(
         let mut full_mass = cfg.full_mass;
         let mut leftover = 0.0f32;
         if let Some(th) = temp {
-            let (tp, tm, tmin, sat) = thermal_rain_factors(th, hx, hy, tile_cols, cfg);
+            let (tp, tm, tmin, sat) = thermal_rain_factors(th, hx, hy, tile_cols);
             prob_mult *= tp;
             mass_mult *= tm;
-            min_mass = min_mass.min(tmin);
+            // The T-hold is the gate. Orographic lift may raise the
+            // lottery, not punch through sat so a hill rains at 30 mass.
+            min_mass = tmin;
             full_mass = sat.max(min_mass + 1.0);
             leftover = (sat * CLOUD_REMNANT_SAT_FRAC).max(1.0);
         }
@@ -300,15 +331,28 @@ pub fn apply_condensation_rain_phased(
         // Leftover sat used to shave a 140-mass tile down to ~23. Terrain
         // and the H shaft hide Air sat ≤ 32, so that event was invisible.
         let mut take_mass = raw.min(surplus);
+        let air_t = temp.map(|t| t.at_tile(hx, hy));
+        let freezing = air_t.is_some_and(|t| air_is_freezing(t, phase));
         // Play droplets are 255. Leftover sat must not shave them under
-        // the haze band (invisible rain, no shaft). Tiny frost budgets stay tiny.
-        if cfg.mass_per_droplet + 1e-3 >= crate::phase::PRECIP_IN_AIR_MIN
+        // the haze band (invisible rain, no shaft). Snow is a whole cell
+        // gathered from the parcel — do not bump a cold leftover to 33
+        // and rain it.
+        if !freezing
+            && cfg.mass_per_droplet + 1e-3 >= crate::phase::PRECIP_IN_AIR_MIN
             && take_mass + 1e-3 < crate::phase::PRECIP_IN_AIR_MIN
             && mass >= crate::phase::PRECIP_IN_AIR_MIN
         {
             take_mass = crate::phase::PRECIP_IN_AIR_MIN;
         }
-        if take_mass <= 0.0 {
+        if freezing {
+            let snow_ok = phase.map(|ph| ph.enable_snow_precip).unwrap_or(true);
+            let gx = hx * tile_cols + tile_cols / 2;
+            let gy = hy * tile_cols + tile_cols / 2;
+            if !snow_ok || humidity.peek_around(gx, gy) + 1e-3 < FLAKE_MASS {
+                continue;
+            }
+            take_mass = FLAKE_MASS;
+        } else if take_mass <= 0.0 {
             continue;
         }
         hits.push((mass, hx, hy, take_mass));
@@ -341,26 +385,22 @@ pub fn apply_condensation_rain_phased(
         // the air cell that held the vapour and descends like any other water.
         let centre_gy = hy * tile_cols + tile_cols / 2;
         let air_t = temp.map(|t| t.at_tile(hx, hy));
-        let freezing = match (air_t, phase) {
-            (Some(t), Some(ph)) => ph.enable_snow_precip && t <= ph.freeze_point_c,
-            _ => false,
-        };
-        let mut landed = if freezing && take_mass >= u8::MAX as f32 {
-            // A flake costs a whole cell. Anything less is rain — the 33-mass
-            // floor turned every cold sky tile into snow and minted on thaw.
-            let snowed = crate::phase::deposit_snow_in_air(world, centre_gx, centre_gy, take_mass);
-            if snowed > 0.0 {
-                snowed
-            } else {
-                super::deposit_water_in_air(world, centre_gx, centre_gy, take_mass)
+        let freezing = air_t.is_some_and(|t| air_is_freezing(t, phase));
+        if freezing {
+            // Below freeze: snow from the parcel, or hold. Never liquid.
+            let snow_ok = phase.map(|ph| ph.enable_snow_precip).unwrap_or(true);
+            if snow_ok {
+                let _ = try_snow_from_parcel(world, humidity, centre_gx, centre_gy);
             }
-        } else if take_mass >= crate::phase::PRECIP_IN_AIR_MIN {
+            continue;
+        }
+        let mut landed = if take_mass >= crate::phase::PRECIP_IN_AIR_MIN {
             super::deposit_water_in_air(world, centre_gx, centre_gy, take_mass)
         } else {
             0.0
         };
-        // Cold frost needs a full cell (255). Small drizzle budgets refuse;
-        // retry once from the tile so rime can still form without underpaying.
+        // Warm frost is unused; this retry is for a refused in-air seat
+        // that still has a full cell on the tile (surface glaze).
         if landed <= 0.0 && mass >= u8::MAX as f32 {
             landed = crate::phase::deposit_condensate_on_surface(
                 world,
@@ -465,13 +505,14 @@ fn thermal_rain_factors(
     hx: i32,
     hy: i32,
     tile_cols: i32,
-    cfg: &CondensationConfig,
 ) -> (f32, f32, f32, f32) {
     let air = temp.at_tile(hx, hy);
-    let sat = crate::humidity::Humidity::saturation_mass_at_temp(air)
-        * (cfg.full_mass / crate::humidity::Humidity::MAX_MASS_PER_TILE).clamp(0.15, 1.0);
-    let sat = sat.max(1.0);
-    let min_mass = cfg.min_mass_to_rain * (sat / cfg.full_mass.max(1.0)).clamp(0.30, 1.35);
+    // The Clausius–Clapeyron hold is the rain gate. The old 0.30 clamp
+    // kept min_mass ≈ 19 even at −20 °C, so leftover vapour rained as
+    // liquid. Below freeze the apply path refuses water anyway; above
+    // freeze we only lottery when the tile is actually over sat.
+    let sat = crate::humidity::Humidity::saturation_mass_at_temp(air).max(1.0);
+    let min_mass = sat;
     let gx = hx * tile_cols + tile_cols / 2;
     let gy_below = hy * tile_cols - tile_cols;
     let below = temp.at_cell(gx, gy_below);
@@ -640,8 +681,10 @@ mod tests {
             w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
         }
         let mut h = Humidity::new(4);
-        // Aloft of the spared surface film (hy 0–1).
-        h.cells.insert((1, 8), 160.0);
+        // Aloft of the spared surface film (hy 0–1). Must sit over the
+        // 18 °C hold (~700) or the T-gate will not lottery.
+        let start = 900.0;
+        h.cells.insert((1, 8), start);
         let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
         for v in temp.cells.values_mut() {
             *v = 18.0;
@@ -658,17 +701,18 @@ mod tests {
         for _ in 0..8 {
             apply_condensation_rain_phased(&mut w, &mut h, &cfg, None, Some(&temp), None);
             w.tick = w.tick.wrapping_add(1);
-            if h.at_tile(1, 8) < 160.0 - 1.0 {
+            if h.at_tile(1, 8) < start - 1.0 {
                 break;
             }
         }
         let left = h.at_tile(1, 8);
+        let sat = Humidity::saturation_mass_at_temp(18.0);
         assert!(
-            left > 100.0,
-            "raining tile must keep a cloudy remnant, left {left}"
+            left > sat * 0.70,
+            "raining tile must keep a cloudy remnant, left {left} sat={sat:.0}"
         );
         assert!(
-            left < 160.0 - 1.0,
+            left < start - 1.0,
             "surplus above the remnant must still rain, left {left}"
         );
     }
@@ -710,7 +754,7 @@ mod tests {
     }
 
     #[test]
-    fn cold_air_surplus_becomes_water_not_a_delete() {
+    fn cold_air_surplus_becomes_snow_not_rain() {
         use crate::cell::Cell;
         use crate::chunk::ChunkCoord;
         use crate::grid::World;
@@ -746,20 +790,108 @@ mod tests {
         let hum_after = h.total_mass();
         let drained = hum_before - hum_after;
         assert!(
-            drained > 1.0,
-            "oversaturated cold air must shed vapour (left {})",
-            h.at_tile(1, 8)
+            (drained - FLAKE_MASS).abs() < 1.0,
+            "oversaturated cold air should pay one flake (drained={drained:.1})"
         );
+        let cell = w.get_cell(6, 34).expect("air seat");
+        assert_eq!(
+            cell.material,
+            MaterialId::Snow,
+            "below freeze surplus must snow, not rain (sat={})",
+            cell.sat.0
+        );
+        assert_eq!(cell.sat.0, 0, "a flake does not carry sat");
+    }
+
+    #[test]
+    fn below_freezing_leftover_does_not_rain() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::temperature::Temperature;
+
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 32i32..40 {
+            w.ensure_chunk(ChunkCoord::new(0, y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32)));
+        }
+        w.set_cell(6, 34, Cell::air());
+        let mut h = Humidity::new(4);
+        // Over the −20 °C hold (~35) but short of a flake, even with neighbours.
+        h.cells.insert((1, 8), 80.0);
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
+        for v in temp.cells.values_mut() {
+            *v = -20.0;
+        }
+        let cfg = CondensationConfig {
+            top_y: 32,
+            max_prob_per_tick: 1.0,
+            min_mass_to_rain: 64.0,
+            full_mass: 512.0,
+            mass_per_droplet: 255.0,
+            max_events_per_tick: 8,
+            ..CondensationConfig::default()
+        };
+        let phase = crate::phase::PhaseConfig::default();
+        apply_condensation_rain_phased(&mut w, &mut h, &cfg, None, Some(&temp), Some(&phase));
+        precipitate_thermal_surplus(&mut w, &mut h, &temp, Some(&phase));
         assert!(
-            h.at_tile(1, 8) + 1e-3 >= sat.min(hum_after),
-            "must not clamp below the hold (left {} sat={sat:.1})",
+            (h.at_tile(1, 8) - 80.0).abs() < 1e-3,
+            "underpaid cold leftover must hold, left {}",
             h.at_tile(1, 8)
         );
         let cell = w.get_cell(6, 34).expect("air seat");
+        assert_eq!(cell.material, MaterialId::Air);
+        assert_eq!(cell.sat.0, 0, "must not rain at −20 °C");
+    }
+
+    #[test]
+    fn snow_gathers_neighbour_tiles_for_a_full_flake() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::temperature::Temperature;
+
+        let mut w = World::new(4);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0i32..16 {
+            w.ensure_chunk(ChunkCoord::new(
+                x.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
+                0,
+            ));
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        for y in 32i32..40 {
+            w.ensure_chunk(ChunkCoord::new(0, y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32)));
+            w.ensure_chunk(ChunkCoord::new(1, y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32)));
+        }
+        w.set_cell(6, 34, Cell::air());
+        let mut h = Humidity::new(4);
+        // Centre tile is short of a flake; the neighbour covers it.
+        // Surplus walks heaviest-first, so put the shortfall on the
+        // tile we nucleate (1, 8) → world (6, 34).
+        h.cells.insert((1, 8), 200.0);
+        h.cells.insert((2, 8), 80.0);
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
+        for v in temp.cells.values_mut() {
+            *v = -12.0;
+        }
+        let phase = crate::phase::PhaseConfig::default();
+        precipitate_thermal_surplus(&mut w, &mut h, &temp, Some(&phase));
         assert!(
-            cell.material == MaterialId::Air && cell.sat.0 as f32 >= drained - 1.5,
-            "shed vapour must land as water (sat={} drained={drained:.1})",
-            cell.sat.0
+            (h.total_mass() - (280.0 - FLAKE_MASS)).abs() < 1.0,
+            "parcel should pay one flake, left {}",
+            h.total_mass()
+        );
+        assert_eq!(
+            w.get_cell(6, 34).map(|c| c.material),
+            Some(MaterialId::Snow),
+            "gathered neighbours must seat a flake on the nucleating tile"
         );
     }
 

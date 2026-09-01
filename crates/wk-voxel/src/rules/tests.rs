@@ -5136,9 +5136,9 @@ fn condensation_rains_when_tile_is_wet() {
 }
 
 #[test]
-fn condensation_frosts_thin_ice_not_snow_towers_when_cold() {
-    // Cold humidity drizzle may glaze rock with frost, but must not
-    // mint Snow stacks or grow ice pillars under clear sky.
+fn condensation_snows_a_flake_not_a_tower_when_cold() {
+    // Oversaturated cold air pays one flake from the parcel. It must not
+    // rain liquid or grow ice pillars under clear sky.
     let (mut w, mut h) = setup_cloud_world();
     w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
     h.add(1, 30, 2000.0);
@@ -5150,53 +5150,45 @@ fn condensation_frosts_thin_ice_not_snow_towers_when_cold() {
     for v in temp.cells.values_mut() {
         *v = -12.0;
     }
-    // Budget under the in-air flake floor, so this stays frost, not snow.
     let cfg = CondensationConfig {
         top_y: 30,
         max_prob_per_tick: 1.0,
-        mass_per_droplet: 16.0,
         ..CondensationConfig::default()
     };
     let phase = crate::phase::PhaseConfig::default();
-    for _ in 0..8 {
-        apply_condensation_rain_phased(
-            &mut w,
-            &mut h,
-            &cfg,
-            None,
-            Some(&temp),
-            Some(&phase),
-        );
-        w.tick = w.tick.wrapping_add(1);
-    }
-    for y in 1..16 {
-        assert_ne!(
-            w.get_cell(2, y).map(|c| c.material),
-            Some(MaterialId::Snow),
-            "condensation must not place snow at y={y}"
-        );
-    }
-    assert_eq!(
-        w.get_cell(2, 2).map(|c| c.material),
-        Some(MaterialId::Ice),
-        "cold condensate should leave a thin ice glaze on ground"
+    apply_condensation_rain_phased(
+        &mut w,
+        &mut h,
+        &cfg,
+        None,
+        Some(&temp),
+        Some(&phase),
     );
-    for y in 3..16 {
-        assert_ne!(
-            w.get_cell(2, y).map(|c| c.material),
-            Some(MaterialId::Ice),
-            "frost must stay a thin coat — no ice tower at y={y}"
-        );
-    }
+    let flake = (0..8).any(|x| {
+        (1..40).any(|y| {
+            w.get_cell(x, y)
+                .is_some_and(|c| c.material == MaterialId::Snow)
+        })
+    });
+    assert!(flake, "a full-cell cold tile must seat a falling flake");
+    let ice_stack: usize = (2..16)
+        .filter(|&y| {
+            w.get_cell(2, y)
+                .is_some_and(|c| c.material == MaterialId::Ice)
+        })
+        .count();
+    assert_eq!(ice_stack, 0, "cold precip must not grow an ice tower");
+    let water = (0..8).any(|x| {
+        (1..40).any(|y| {
+            w.get_cell(x, y)
+                .is_some_and(|c| c.material == MaterialId::Air && c.sat.0 > 0)
+        })
+    });
+    assert!(!water, "below freeze must not rain liquid");
     let drained = hum_before - h.total_mass();
-    // Lateral frost coat may seat several columns; each seat costs 255.
     assert!(
-        drained >= 255.0 - 1e-3,
-        "frost must drain at least one full cell (got {drained})"
-    );
-    assert!(
-        (drained / 255.0 - (drained / 255.0).round()).abs() < 1e-3,
-        "frost drains must be whole cells (got {drained})"
+        (drained - 255.0).abs() < 1.0,
+        "one flake costs one cell (got {drained})"
     );
 }
 
@@ -5716,16 +5708,19 @@ fn evap_pumps_faster_when_warm_and_windy() {
 
 #[test]
 fn condensation_rains_when_warm_vapor_hits_cold_air() {
-    let (mut cold_w, mut cold_h) = setup_cloud_world();
+    let (mut cool_w, mut cool_h) = setup_cloud_world();
     let (mut warm_w, mut warm_h) = setup_cloud_world();
-    cold_h.add(1, 30, 70.0);
-    warm_h.add(1, 30, 70.0);
-    let mut cold = uniform_temp_field(-8.0);
+    // 400 is over the +4 °C hold (~276) and under the +26 °C hold (~1140).
+    let mass = 400.0;
+    cool_h.add(1, 30, mass);
+    warm_h.add(1, 30, mass);
+    let mut cool = uniform_temp_field(4.0);
     let warm = uniform_temp_field(26.0);
     // Colder tile below the vapor — dew on a cold ridge / night skin.
-    for ((hx, hy), v) in cold.cells.iter_mut() {
+    // The vapor tile itself stays above freeze so this is still rain.
+    for ((hx, hy), v) in cool.cells.iter_mut() {
         if *hy < 7 {
-            *v = -14.0;
+            *v = 1.0;
         }
         let _ = hx;
     }
@@ -5734,22 +5729,30 @@ fn condensation_rains_when_warm_vapor_hits_cold_air() {
         max_prob_per_tick: 1.0,
         min_mass_to_rain: 64.0,
         full_mass: 512.0,
-        mass_per_droplet: 40.0,
+        mass_per_droplet: 255.0,
         max_events_per_tick: 8,
         ..CondensationConfig::default()
     };
-    apply_condensation_rain_phased(&mut cold_w, &mut cold_h, &cfg, None, Some(&cold), None);
+    apply_condensation_rain_phased(&mut cool_w, &mut cool_h, &cfg, None, Some(&cool), None);
     apply_condensation_rain_phased(&mut warm_w, &mut warm_h, &cfg, None, Some(&warm), None);
     assert!(
-        cold_h.total_mass() < 70.0,
-        "cold supersaturated air should rain (left {})",
-        cold_h.total_mass()
+        cool_h.total_mass() < mass - 1.0,
+        "just-over-sat cool air should rain (left {})",
+        cool_h.total_mass()
     );
     assert!(
-        (warm_h.total_mass() - 70.0).abs() < 1e-3,
-        "the same thin vapor must stay aloft in warm air (left {})",
+        (warm_h.total_mass() - mass).abs() < 1e-3,
+        "the same vapor must stay aloft in warmer air (left {})",
         warm_h.total_mass()
     );
+    let rained = (0..8).any(|x| {
+        (1..40).any(|y| {
+            cool_w
+                .get_cell(x, y)
+                .is_some_and(|c| c.material == MaterialId::Air && c.sat.0 > 0)
+        })
+    });
+    assert!(rained, "dew above freeze must land as liquid");
 }
 
 #[test]

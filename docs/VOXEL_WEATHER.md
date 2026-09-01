@@ -141,9 +141,11 @@ The coupled weather stack is:
   `buoyant_rise_thermal` (per-row T mean, never `Temperature::mean()`
   in the loop). Condensation that samples a solid tile centre walks
   up to four cells for the first Air (rain) or empty Air (snow)
-  before refusing. Rain pays 33 (visible drop + H shaft). A flake
-  still costs 255 — a cheaper seat mints on thaw, and the 33-mass
-  floor turned the cold sky into snow. Snow does not carve the shaft.
+  before refusing. Rain pays 33 (visible drop + H shaft) and only
+  lotteries when the tile is over the Clausius–Clapeyron hold
+  (`saturation_mass_at_temp`). Below freeze the C pass never deposits
+  water: it gathers neighbour humidity for a 255 flake, or holds.
+  Snow does not carve the shaft.
 - **Temperature** — still period 20. Night humidity blanket, wind mix,
   and near-surface air↔ground couple live *inside* that step. Do not
   run a full-field `advect_air_with_wind` every tick.
@@ -203,9 +205,12 @@ seats — do not pay a full-field scan for each of them.
 
    Cold air holding less vapour is a **separate** path
    (`precipitate_thermal_surplus`). Surplus above `saturation_mass_at_temp`
-   becomes water (or a snowflake) in that tile. It does not wait for the
-   drizzle lottery, and a refused deposit leaves the vapour — never a
-   clamp that deletes the mass.
+   becomes rain **only above freeze**. At or below 0 °C it is a snowflake
+   paid from the local 3×3 humidity parcel (a flake still costs 255 —
+   thaw is a full water cell; snow does not carry sat yet), or a hold if
+   the parcel cannot pay. It does not wait for the drizzle lottery, and
+   a refused deposit leaves the vapour — never a clamp that deletes the
+   mass, and never liquid rain at −20 °C.
 
 Do not add a sea-level humidity floor or a fixed "cloud row" teleport
 to get this look back. If the sky goes sheet-fog again, check those two

@@ -222,7 +222,8 @@ impl Humidity {
     /// [`Self::try_add`] capped at [`Self::saturation_mass_at_temp`].
     ///
     /// Refuses *new* mass the air cannot hold. Does **not** clamp
-    /// vapour already in the tile — that surplus is rain
+    /// vapour already in the tile — that surplus is rain above freeze,
+    /// or a gathered flake / hold below
     /// ([`crate::precipitate_thermal_surplus`]), not a delete.
     pub fn try_add_at_temp(&mut self, gx: i32, gy: i32, mass: f32, temp_c: f32) -> f32 {
         self.try_add_capped(gx, gy, mass, Self::saturation_mass_at_temp(temp_c))
@@ -286,6 +287,81 @@ impl Humidity {
             total += self.at_cell(gx, gy + dy);
         }
         total
+    }
+
+    /// Humidity on this tile plus the 8 Moore neighbours.
+    ///
+    /// Used by the snow lottery: a flake still costs a full water cell
+    /// (thaw is `Air+FULL`), so we gather from the local parcel instead
+    /// of raining leftover vapour as liquid below freeze.
+    pub fn peek_around(&self, gx: i32, gy: i32) -> f32 {
+        let (hx, hy) = self.tile_of(gx, gy);
+        self.peek_around_tile(hx, hy)
+    }
+
+    /// [`Self::peek_around`] in tile coordinates.
+    pub fn peek_around_tile(&self, hx: i32, hy: i32) -> f32 {
+        let mut total = 0.0;
+        for dy in -1..=1 {
+            for dx in -1..=1 {
+                let Some(nx) = self.wrap_hx(hx + dx) else {
+                    continue;
+                };
+                if !self.accepts(nx, hy + dy) {
+                    continue;
+                }
+                total += self.at_tile(nx, hy + dy);
+            }
+        }
+        total
+    }
+
+    /// Spend `mass` from this tile first, then the 8 Moore neighbours
+    /// (same stencil as [`Self::peek_around`]). Horizontal tiles are
+    /// fair here: the flake is paying a full cell, not a leftover drizzle.
+    pub fn take_around(&mut self, gx: i32, gy: i32, mass: f32) -> f32 {
+        let (hx, hy) = self.tile_of(gx, gy);
+        self.take_around_tile(hx, hy, mass)
+    }
+
+    /// [`Self::take_around`] in tile coordinates. Centre tile first.
+    pub fn take_around_tile(&mut self, hx: i32, hy: i32, mass: f32) -> f32 {
+        if mass <= 0.0 {
+            return 0.0;
+        }
+        let tc = self.tile_cols.max(1);
+        let cell_of = |tx: i32, ty: i32| (tx * tc + tc / 2, ty * tc + tc / 2);
+        let mut need = mass;
+        let mut got = 0.0;
+        // Centre first so a tile that can pay for itself does.
+        let order = [
+            (0, 0),
+            (-1, 0),
+            (1, 0),
+            (0, -1),
+            (0, 1),
+            (-1, -1),
+            (1, -1),
+            (-1, 1),
+            (1, 1),
+        ];
+        for (dx, dy) in order {
+            if need <= 1e-3 {
+                break;
+            }
+            let Some(nx) = self.wrap_hx(hx + dx) else {
+                continue;
+            };
+            let ny = hy + dy;
+            if !self.accepts(nx, ny) {
+                continue;
+            }
+            let (cx, cy) = cell_of(nx, ny);
+            let took = self.take(cx, cy, need);
+            got += took;
+            need -= took;
+        }
+        got
     }
 
     /// Humidity mass at world cell `(gx, gy)`. Missing tile → 0.
@@ -1320,6 +1396,42 @@ mod tests {
             "leaked pond vapour should stay at the waterline (L={} R={})",
             h.at_tile(left.0, pond.1),
             h.at_tile(right.0, pond.1)
+        );
+    }
+
+    #[test]
+    fn peek_around_sums_the_moore_neighbourhood() {
+        let mut h = Humidity::new(4);
+        h.add(2, 2, 10.0); // tile (0,0)
+        h.add(6, 2, 20.0); // tile (1,0)
+        h.add(2, 6, 40.0); // tile (0,1)
+        assert!(
+            (h.peek_around(2, 2) - 70.0).abs() < 1e-3,
+            "centre + two neighbours, got {}",
+            h.peek_around(2, 2)
+        );
+        assert!((h.peek_around_tile(0, 0) - 70.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn take_around_pays_from_neighbours_after_the_centre() {
+        let mut h = Humidity::new(4);
+        h.add(2, 2, 80.0);
+        h.add(6, 2, 200.0);
+        let got = h.take_around(2, 2, 255.0);
+        assert!(
+            (got - 255.0).abs() < 1e-3,
+            "parcel should pay a full flake, got {got}"
+        );
+        assert!(
+            h.at_tile(0, 0) < 1e-3,
+            "centre should empty first, left {}",
+            h.at_tile(0, 0)
+        );
+        assert!(
+            (h.at_tile(1, 0) - 25.0).abs() < 1e-3,
+            "neighbour should cover the shortfall, left {}",
+            h.at_tile(1, 0)
         );
     }
 
