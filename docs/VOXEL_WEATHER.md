@@ -129,7 +129,9 @@ The coupled weather stack is:
   ticks, only on wet seats + a 1-tile halo + a thin near-surface band.
   Misses in `vector_at` return the climate mean after the same
   surface-slip as the heatmap (no into-rock residual; a descent
-  turns along the skin).
+  turns along the skin). After blend, 6 Jacobi sweeps project
+  `∇·v` on that key set only (not the sky): a valley feels the
+  next wall before the last tile. Slip runs last.
 - **Humidity** — donor-cell fractional flux through that heatmap, with a
   per-column free-air cache so buried seats lift over the crest without
   scanning the hill once per tile. Convection stays `buoyant_rise_thermal`

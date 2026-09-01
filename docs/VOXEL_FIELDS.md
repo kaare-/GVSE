@@ -213,8 +213,11 @@ seats inside a hill hoist to the crest. The T overlay uses a fixed −40..36 °C
 yellow-green at 18 °C to red). Humidity hold follows
 Clausius–Clapeyron (Magnus): full tile at 40 °C, a few percent at
 0 °C, a trace at −100 °C. Cloud / haze floors follow the live
-column, not a global sea-level y. No pressure solver — defer cell
-wind until hydro + thermal are boring.
+column, not a global sea-level y. Coarse Jacobi on the **existing**
+wind heatmap (6 sweeps, occupied + halo + skin band) removes
+divergence into rock. That is not a cell-scale gas solver and it
+does not write humidity. Water-head is a separate slow overlay
+and is not coupled into wind yet.
 
 ## Architecture notes
 

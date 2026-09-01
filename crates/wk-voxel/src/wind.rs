@@ -15,8 +15,10 @@
 //! Near the live skin, vectors slide along the slope (no component
 //! into rock; a descent hits the ground and turns left/right). Next
 //! to a face, a breeze that would stab into the hill turns up or
-//! down the rock. Aloft, vertical residual stays capped. No pressure
-//! solver.
+//! down the rock. After the heatmap blend, a coarse Jacobi projection
+//! kills divergence into rock so a valley turns before the next peak.
+//! Slip is last so the solve cannot stab the ground. No cell-scale
+//! gas solver; water-head is not coupled into wind yet.
 
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +56,10 @@ fn default_field_smooth() -> f32 {
 /// the climate-stack FPS cliff; occupied + halo + a thin surface band
 /// every 4 ticks is enough for humidity flux / evap / thermal mix.
 pub const WIND_FIELD_PERIOD: u64 = 4;
+
+/// Jacobi sweeps on the existing heatmap only. Enough for a 2–3 tile
+/// valley to feel the next wall; not a sky-wide Poisson.
+const AIR_PROJECT_ITERS: u32 = 6;
 
 /// Tab → Climate wind drivers.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
@@ -336,8 +342,10 @@ impl Wind {
         for hx in unique_hx {
             let gx = hx * tc + tc / 2;
             self.cache_surface(world, gx);
-            self.cache_surface(world, gx + tc);
-            self.cache_surface(world, gx - tc);
+            for step in 1..=3 {
+                self.cache_surface(world, gx + step * tc);
+                self.cache_surface(world, gx - step * tc);
+            }
         }
 
         let mut next = FxHashMap::default();
@@ -374,8 +382,11 @@ impl Wind {
                 }
             }
         }
-        // Last: slide along the live skin. Blend / climate would otherwise
-        // leave arrows pointing into the hill or the ground.
+        // Coarse pressure on this key set only: flow into a face piles
+        // up, the lee sucks. Then slip so the solve cannot re-introduce
+        // an into-rock residual. Step 3 (water-head → near-surface wind)
+        // is not wired yet.
+        self.project_incompressible(world, bounds, &mut blended);
         for (&(hx, hy), v) in blended.iter_mut() {
             *v = self.deflect_along_surface(world, hx, hy, v.0, v.1);
         }
@@ -441,6 +452,165 @@ impl Wind {
         field
     }
 
+    fn wrap_tile_hx(&self, hx: i32, bounds: TileBounds) -> i32 {
+        if !self.wrap_x {
+            return hx;
+        }
+        let w = (bounds.hx_max - bounds.hx_min + 1).max(1);
+        bounds.hx_min + (hx - bounds.hx_min).rem_euclid(w)
+    }
+
+    /// Solid neighbour, world edge, or a live-skin wall on this face.
+    fn face_blocked(
+        &self,
+        world: Option<&World>,
+        bounds: TileBounds,
+        hx: i32,
+        hy: i32,
+        dx: i32,
+        dy: i32,
+    ) -> bool {
+        if dy != 0 {
+            let nhy = hy + dy;
+            if nhy < bounds.hy_min || nhy > bounds.hy_max {
+                return true;
+            }
+        }
+        if dx != 0 && !self.wrap_x {
+            let nx = hx + dx;
+            if nx < bounds.hx_min || nx > bounds.hx_max {
+                return true;
+            }
+        }
+        let nhx = self.wrap_tile_hx(hx + dx, bounds);
+        let nhy = hy + dy;
+        let tc = self.tile_cols.max(1);
+        if tile_center_is_solid(world, tc, nhx, nhy) {
+            return true;
+        }
+        if dx != 0 {
+            let (wall_l, wall_r) = self.neighbour_walls(world, hx, hy);
+            if dx > 0 && wall_r {
+                return true;
+            }
+            if dx < 0 && wall_l {
+                return true;
+            }
+        }
+        if dy < 0 {
+            let surf = self.surface_tile_hy(world, hx);
+            if hy <= surf {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn face_velocity(
+        &self,
+        world: Option<&World>,
+        bounds: TileBounds,
+        field: &FxHashMap<(i32, i32), (f32, f32)>,
+        hx: i32,
+        hy: i32,
+        dx: i32,
+        dy: i32,
+        here: f32,
+        horiz: bool,
+    ) -> f32 {
+        if self.face_blocked(world, bounds, hx, hy, dx, dy) {
+            return 0.0;
+        }
+        let nhx = self.wrap_tile_hx(hx + dx, bounds);
+        let nhy = hy + dy;
+        if let Some(&v) = field.get(&(nhx, nhy)) {
+            let n = if horiz { v.0 } else { v.1 };
+            return 0.5 * (here + n);
+        }
+        here
+    }
+
+    fn pressure_at(
+        &self,
+        world: Option<&World>,
+        bounds: TileBounds,
+        p: &FxHashMap<(i32, i32), f32>,
+        hx: i32,
+        hy: i32,
+        dx: i32,
+        dy: i32,
+        here: f32,
+    ) -> f32 {
+        if self.face_blocked(world, bounds, hx, hy, dx, dy) {
+            return here;
+        }
+        let nhx = self.wrap_tile_hx(hx + dx, bounds);
+        let nhy = hy + dy;
+        p.get(&(nhx, nhy)).copied().unwrap_or(0.0)
+    }
+
+    /// `∇²p = ∇·v` then `v -= ∇p` on the existing keys only.
+    fn project_incompressible(
+        &self,
+        world: Option<&World>,
+        bounds: TileBounds,
+        field: &mut FxHashMap<(i32, i32), (f32, f32)>,
+    ) {
+        if field.len() < 4 {
+            return;
+        }
+        let keys: Vec<(i32, i32)> = field.keys().copied().collect();
+        let mut divs: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+        divs.reserve(keys.len());
+        for &(hx, hy) in &keys {
+            let (vx, vy) = field[&(hx, hy)];
+            let ue = self.face_velocity(world, bounds, field, hx, hy, 1, 0, vx, true);
+            let uw = self.face_velocity(world, bounds, field, hx, hy, -1, 0, vx, true);
+            let vn = self.face_velocity(world, bounds, field, hx, hy, 0, 1, vy, false);
+            let vs = self.face_velocity(world, bounds, field, hx, hy, 0, -1, vy, false);
+            divs.insert((hx, hy), ue - uw + vn - vs);
+        }
+        let mut p: FxHashMap<(i32, i32), f32> = FxHashMap::default();
+        p.reserve(keys.len());
+        for &k in &keys {
+            p.insert(k, 0.0);
+        }
+        for _ in 0..AIR_PROJECT_ITERS {
+            let snap = p.clone();
+            for &(hx, hy) in &keys {
+                let mut sum = 0.0;
+                let mut n = 0.0;
+                for (dx, dy) in [(1, 0), (-1, 0), (0, 1), (0, -1)] {
+                    if self.face_blocked(world, bounds, hx, hy, dx, dy) {
+                        continue;
+                    }
+                    let nhx = self.wrap_tile_hx(hx + dx, bounds);
+                    let nhy = hy + dy;
+                    if let Some(&pn) = snap.get(&(nhx, nhy)) {
+                        sum += pn;
+                        n += 1.0;
+                    }
+                }
+                if n < 1.0 {
+                    continue;
+                }
+                let d = divs[&(hx, hy)];
+                p.insert((hx, hy), (sum - d) / n);
+            }
+        }
+        for &(hx, hy) in &keys {
+            let here = p[&(hx, hy)];
+            let pr = self.pressure_at(world, bounds, &p, hx, hy, 1, 0, here);
+            let pl = self.pressure_at(world, bounds, &p, hx, hy, -1, 0, here);
+            let pu = self.pressure_at(world, bounds, &p, hx, hy, 0, 1, here);
+            let pd = self.pressure_at(world, bounds, &p, hx, hy, 0, -1, here);
+            if let Some(v) = field.get_mut(&(hx, hy)) {
+                v.0 = (v.0 - 0.5 * (pr - pl)).clamp(-1.0, 1.0);
+                v.1 = (v.1 - 0.5 * (pu - pd)).clamp(-1.0, 1.0);
+            }
+        }
+    }
+
     fn compose_drivers(
         &self,
         world: Option<&World>,
@@ -486,7 +656,35 @@ impl Wind {
             let v_cap = (vx.abs() * 0.45 + 0.04).min(0.35);
             vy = vy.clamp(-v_cap, v_cap);
         }
+        // After the aloft cap: a wall 2–3 tiles downwind must still
+        // start a climb (the Jacobi step then spreads that).
+        let block = self.downwind_blockage(world, hx, hy, evx);
+        if block > 1e-4 {
+            vy += block;
+            vx *= 1.0 - (block * 0.4).min(0.35);
+        }
         (vx.clamp(-1.0, 1.0), vy.clamp(-1.0, 1.0))
+    }
+
+    /// How much of this sample is closed by land 1–3 tiles downwind.
+    /// 0 on open flats; up to ~0.22 against a real face.
+    fn downwind_blockage(&self, world: Option<&World>, hx: i32, hy: i32, evx: f32) -> f32 {
+        if evx.abs() < 1e-4 {
+            return 0.0;
+        }
+        let tc = self.tile_cols.max(1);
+        let y_mid = hy * tc + tc / 2;
+        let gx = hx * tc + tc / 2;
+        let sign = if evx >= 0.0 { 1 } else { -1 };
+        let mut ahead = i32::MIN;
+        for step in 1..=3 {
+            ahead = ahead.max(self.surface_at(world, gx + sign * step * tc));
+        }
+        let rise = (ahead - y_mid) as f32;
+        if rise <= tc as f32 {
+            return 0.0;
+        }
+        (rise / (8.0 * tc as f32)).clamp(0.0, 0.22)
     }
 
     /// Rise/run of the live skin across one tile on each side.
@@ -634,9 +832,11 @@ impl Wind {
         if let Some(&v) = self.field.get(&(hx, hy)) {
             return v;
         }
-        // Miss: climate mean, then slide along the live skin so a
-        // fallback arrow does not stab into the hill.
-        self.deflect_along_surface(world, hx, hy, self.climate_vx, self.climate_vy)
+        // Miss: climate mean + the same downwind climb / slip as the field.
+        let block = self.downwind_blockage(world, hx, hy, self.climate_vx);
+        let vx = self.climate_vx * (1.0 - (block * 0.4).min(0.35));
+        let vy = self.climate_vy + block;
+        self.deflect_along_surface(world, hx, hy, vx, vy)
     }
 
     pub fn flow_at(
@@ -1057,5 +1257,99 @@ mod tests {
             "next to a cliff the arrow must go up the face, not into it (vx={vx:.3} vy={vy:.3})"
         );
         assert!(vx > -0.02, "must not reverse into the valley (vx={vx:.3})");
+    }
+
+    #[test]
+    fn projection_leaves_a_flat_breeze_horizontal() {
+        use crate::cell::Cell;
+        use wk_material::MaterialId;
+
+        let sea: i32 = 16;
+        let mut w = crate::grid::World::new(3);
+        load_sky_so_live_surface_can_walk(&mut w, 32, 256);
+        for x in 0..32 {
+            for y in 0..=sea {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 32, sea, 0, 80, false);
+        wind.variance = 0.0;
+        wind.climate_vy = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.terrain_drive = 0.0;
+        wind.config.field_smooth = 0.0;
+        let occupied: Vec<(i32, i32)> = (1..7)
+            .flat_map(|hx| (6..10).map(move |hy| (hx, hy)))
+            .collect();
+        wind.rebuild_field(Some(&w), None, 8, &occupied, None);
+        let mut worst_tilt = 0.0f32;
+        for (&(hx, hy), &(_, vy)) in &wind.field {
+            if !(1..=6).contains(&hx) || !(6..=9).contains(&hy) {
+                continue;
+            }
+            worst_tilt = worst_tilt.max(vy.abs());
+        }
+        assert!(
+            worst_tilt < 0.04,
+            "open flat must not invent a climb (max |vy|={worst_tilt:.3})"
+        );
+    }
+
+    #[test]
+    fn projection_turns_a_valley_before_the_next_peak() {
+        use crate::cell::Cell;
+        use wk_material::MaterialId;
+
+        let floor: i32 = 16;
+        let crest: i32 = 64;
+        let mut w = crate::grid::World::new(3);
+        load_sky_so_live_surface_can_walk(&mut w, 40, 256);
+        for x in 0..40 {
+            let top = if (4..8).contains(&x) || (28..32).contains(&x) {
+                crest
+            } else {
+                floor
+            };
+            for y in 0..=top {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 40, floor, 0, 80, false);
+        wind.variance = 0.0;
+        wind.climate_vy = 0.0;
+        wind.config.swirl = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.terrain_drive = 0.0;
+        wind.config.field_smooth = 0.0;
+        // Dense seats in the gap so Jacobi can walk from mid-bowl to the wall.
+        let occupied: Vec<(i32, i32)> = (2..8)
+            .flat_map(|hx| (6..14).map(move |hy| (hx, hy)))
+            .collect();
+        wind.rebuild_field(Some(&w), None, 8, &occupied, None);
+        // hx=4 is the bowl centre (x=16–19), two tiles left of the right peak.
+        let mut mid_up = 0.0f32;
+        let mut mid_vx = 0.0f32;
+        let mut n = 0u32;
+        for (&(hx, hy), &(vx, vy)) in &wind.field {
+            if hx != 4 || hy < 7 || hy > 11 {
+                continue;
+            }
+            mid_up += vy;
+            mid_vx += vx;
+            n += 1;
+        }
+        assert!(n > 0, "expected field seats in the mid-valley");
+        let mid_up = mid_up / n as f32;
+        let mid_vx = mid_vx / n as f32;
+        assert!(
+            mid_up > 0.012,
+            "a +x breeze in a two-peak bowl must start climbing \
+             before the next face (mean vy={mid_up:.3})"
+        );
+        assert!(
+            mid_vx > 0.02,
+            "through-flow should remain, not reverse (mean vx={mid_vx:.3})"
+        );
     }
 }
