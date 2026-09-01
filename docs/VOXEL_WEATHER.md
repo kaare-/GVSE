@@ -348,8 +348,8 @@ a tile field and is what would turn a steady rain rate into fronts.
 Snow nucleates in the air (`phase::deposit_snow_in_air`) and now descends at a
 usable rate. A flake costs a whole cell: do not let the cloudy remnant shave
 that budget, and walk a few cells up from a solid tile centre (same as rain)
-so a slope still snows. Haze carves the same 1-wide shaft under a flake as
-under a rain drop. The bug was that grain fall takes one step per pass and runs several
+so a slope still snows. Rain carves the 1-wide H shaft; snow floats
+through the wash and does not. The bug was that grain fall takes one step per pass and runs several
 passes a tick — right for sand settling, and it made flakes appear in the sky and
 arrive on the ground in the same breath.
 
