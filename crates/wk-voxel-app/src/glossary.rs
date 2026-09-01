@@ -362,6 +362,7 @@ const SKY: &[(&str, LineKind)] = &[
     ("4. H  paints the vapour field. Wet tiles are the sky look.", LineKind::Body),
     ("      Shade and drizzle read that field. There is no N bank layer.", LineKind::Body),
     ("      The sun hits the ground. Dry land skins heat faster; lakes lag.", LineKind::Body),
+    ("      Lapse follows height. The sky over a hill is not a cold stamp.", LineKind::Body),
     ("", LineKind::Blank),
     ("W is optional", LineKind::Head),
     ("Climatic rain is an extra faucet from the sky ceiling. Default", LineKind::Body),

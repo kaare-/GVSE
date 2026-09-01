@@ -323,6 +323,11 @@ ocean a sun magnet while dry sand could net-cool at noon. Forcing is now
 near land (`water_night_cool_scale` 0.70), and only 12 water cells add stack
 capacity. Lakes stay a buffer. Land skins lead the day.
 
+Air lapse follows the tile's own height. The old column-skin climate stamped
+`base − lapse × crest` onto every air tile above a hill, which painted a cold
+cap over the mountain while the same height over the sea stayed mild. Ground
+skin still uses crest elevation (high land is colder). The sky does not.
+
 Convection proper — buoyancy from the ground-versus-air difference — is cheap on
 a tile field and is what would turn a steady rain rate into fronts.
 

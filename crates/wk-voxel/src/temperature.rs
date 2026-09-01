@@ -14,11 +14,12 @@
 //!   Rock / sand / lakes / snow keep inertia so a lake does not slam
 //!   from +20 °C to −10 °C in one night.
 //! - **Air** does **not** absorb solar or radiate to space. It sits on
-//!   the climate lapse and couples to the ground: warm skin loft, cold
-//!   skin inversion. That is the draft that carries humidity up to
-//!   condense. Wet air has more thermal mass (vapor Cp ~1.9× dry) so
-//!   it relaxes slower and a rising plume mixes that heat into the
-//!   tile above. No noon/midnight skin snap on the sky.
+//!   the climate lapse **at its own height** and couples to the ground:
+//!   warm skin loft, cold skin inversion. Lapse is not `−crest` stamped
+//!   onto the whole column (that made a cold cap above every hill).
+//!   Wet air has more thermal mass (vapor Cp ~1.9× dry) so it relaxes
+//!   slower and a rising plume mixes that heat into the tile above.
+//!   No noon/midnight skin snap on the sky.
 //! - **Buried** rock ignores solar / sky radiation; it relaxes toward a
 //!   geothermal profile and slowly leaks heat upward by diffusion.
 //!
@@ -350,7 +351,7 @@ impl Temperature {
                 let t0 = if depth > tc as f32 {
                     self.geothermal_at_depth(depth)
                 } else {
-                    self.climate_baseline(None, hx)
+                    self.climate_at_tile(None, hx, hy)
                 };
                 self.cells.insert((hx, hy), t0);
             }
@@ -389,8 +390,9 @@ impl Temperature {
         ((d + 2.0) / 4.0).clamp(0.0, 1.0)
     }
 
-    fn elev_cells(&self, world: Option<&World>, hx: i32) -> f32 {
-        (self.column_surface_y_estimate(world, hx) - self.sea_level_y).max(0) as f32
+    fn tile_mid_y(&self, hy: i32) -> i32 {
+        let tc = self.tile_cols.max(1);
+        hy * tc + tc / 2
     }
 
     /// Climate-mean skin for surface inertia (no noon/midnight swap).
@@ -399,22 +401,33 @@ impl Temperature {
     }
 
     fn skin_temp_on(&self, world: Option<&World>, hx: i32, hy: i32, tick: u64) -> f32 {
-        // `tick` / `hy` used to drive a `day_amp_c` noon/midnight skin.
-        // The diurnal is sun minus radiation now; this is just the
-        // elevation / sea-land climate the surface relaxes toward.
-        let _ = (hy, tick);
-        self.climate_baseline(world, hx)
+        // `tick` used to drive a `day_amp_c` noon/midnight skin.
+        // The diurnal is sun minus radiation now; the ground relaxes
+        // toward climate at the **crest**, not a sky-column stamp.
+        let _ = tick;
+        self.climate_at_height(world, hx, self.tile_mid_y(hy))
     }
 
     /// Elevation / sea-land climate with **no** day/night swap.
     ///
-    /// Air sits on this lapse and takes heat from the ground, not from
-    /// a noon/midnight skin (`day_amp_c` is retired).
-    fn climate_baseline(&self, world: Option<&World>, hx: i32) -> f32 {
+    /// Lapse follows the sample height. Stamping `−lapse × crest`
+    /// onto every air tile in the column was leftover column-skin
+    /// climate: a cold cap above every hill.
+    fn climate_at_height(&self, world: Option<&World>, hx: i32, y_cells: i32) -> f32 {
         let cfg = &self.config;
         let land = self.land_factor(world, hx);
-        let elev = self.elev_cells(world, hx);
+        let elev = (y_cells - self.sea_level_y).max(0) as f32;
         cfg.base_temp_c + cfg.sea_bias_c * (1.0 - land) - cfg.lapse_c * elev
+    }
+
+    fn climate_at_tile(&self, world: Option<&World>, hx: i32, hy: i32) -> f32 {
+        self.climate_at_height(world, hx, self.tile_mid_y(hy))
+    }
+
+    /// Ground-crest climate (mountain tops are colder). Not for air.
+    fn climate_baseline(&self, world: Option<&World>, hx: i32) -> f32 {
+        let surf = self.column_surface_y_estimate(world, hx);
+        self.climate_at_height(world, hx, surf)
     }
 
     /// One thermal step: layered forcing + inertia + diffusion.
@@ -473,7 +486,7 @@ impl Temperature {
                     // that lapse is the draft that lofts humidity.
                     // Cooking the column with solar (even a 25 % aloft
                     // leak) flattened the pipe and left the sky equalised.
-                    let climate = self.climate_baseline(world, hx);
+                    let climate = self.climate_at_tile(world, hx, hy);
                     let mut target = climate;
                     if height_above <= band && cfg.near_surface_couple > 0.0 {
                         let surf_hy = surf.div_euclid(tc);
@@ -509,7 +522,7 @@ impl Temperature {
                         * (1.0 - blanket)
                         * (1.0 + 0.45 * wind_k * (1.0 - blanket * 0.5));
                     let radiate = cfg.night_cool_c * cool_scale;
-                    let skin = self.skin_temp_on(world, hx, hy, tick);
+                    let skin = self.climate_baseline(world, hx);
                     let relax = (cfg.sky_relax
                         / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale))
                         .clamp(cfg.min_relax, cfg.max_relax);
@@ -1106,6 +1119,7 @@ mod tests {
         let (mut t, h) = demo_temp();
         t.config.solar_heat_c = 0.0;
         t.config.night_cool_c = 0.0;
+        t.config.lapse_c = 0.0;
         t.config.day_amp_c = 10.0;
         t.config.diffuse_alpha = 0.0;
         t.fill_initial(0);
@@ -1347,6 +1361,69 @@ mod tests {
         assert!(
             dry_t > 12.0 + 0.4,
             "dry sand must net-heat at noon (got {dry_t:.1})"
+        );
+    }
+
+    #[test]
+    fn air_above_a_hill_is_not_stamped_to_mountaintop_climate() {
+        // Residue: every air tile in a tall column relaxed toward
+        // `base − lapse × crest`, so the sky over a hill was a cold cap
+        // while the same height over the sea stayed mild.
+        let p = WorldgenParams::default();
+        let sea = p.sea_level_y;
+        let hill_x0: i32 = 4;
+        let low_x0: i32 = 24;
+        let hill_h = 48;
+        let mut world = World::new(7);
+        fill_tile_surface(&mut world, hill_x0, sea, MaterialId::Stone, 0);
+        fill_tile_surface(&mut world, low_x0, sea, MaterialId::Stone, 0);
+        for x in hill_x0..hill_x0 + 4 {
+            for y in (sea + 1)..=(sea + hill_h) {
+                world.ensure_chunk(ChunkCoord::new(
+                    x.div_euclid(crate::chunk::CHUNK_CELLS_W as i32),
+                    y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+                ));
+                world.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut t = Temperature::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+            p.seed,
+            p.width_cols,
+            sea,
+            false,
+        );
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.diffuse_alpha = 0.0;
+        t.config.near_surface_couple = 0.0;
+        t.config.sea_bias_c = 0.0;
+        t.fill_initial(0);
+        let h = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        for i in 0..12 {
+            t.step(Some(&world), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let sample_y = sea + hill_h + 16;
+        let hill_air = t.at_cell(hill_x0 + 1, sample_y);
+        let low_air = t.at_cell(low_x0 + 1, sample_y);
+        let old_stamp_gap = t.config.lapse_c * hill_h as f32;
+        assert!(
+            (hill_air - low_air).abs() < 1.5,
+            "same-height air over a hill {hill_air:.1}C must match low land {low_air:.1}C"
+        );
+        assert!(
+            old_stamp_gap > 2.5,
+            "fixture: a 48-cell hill must have been a >2.5C column stamp"
         );
     }
 
