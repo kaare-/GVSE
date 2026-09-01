@@ -42,6 +42,7 @@ pub mod displace;
 pub mod landscape_body;
 pub mod symbiosis;
 pub mod temperature;
+pub mod water_head;
 pub mod wind;
 pub mod worldgen;
 

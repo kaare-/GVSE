@@ -68,6 +68,7 @@ pub fn apply_water_flow_regions(world: &mut World, active: &[ActiveChunk]) {
     if active.is_empty() {
         return;
     }
+    world.refresh_water_head();
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_water_flow_xfers(world, active, &mut xfers, true);
     accumulate_confined_upward_xfers(world, active, &mut xfers);
@@ -84,6 +85,7 @@ pub(crate) fn apply_water_flow_regions_ex(
     if active.is_empty() {
         return;
     }
+    world.refresh_water_head();
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_water_flow_xfers(world, active, &mut xfers, include_throughflow);
     commit_air_sat_xfers(world, &mut xfers);
@@ -97,6 +99,7 @@ pub(crate) fn apply_throughflow_regions(world: &mut World, active: &[ActiveChunk
     if active.is_empty() {
         return;
     }
+    world.refresh_water_head();
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_throughflow_xfers(world, active, &mut xfers);
     commit_air_sat_xfers(world, &mut xfers);
@@ -107,6 +110,7 @@ pub(crate) fn apply_confined_upward_regions(world: &mut World, active: &[ActiveC
     if active.is_empty() {
         return;
     }
+    world.refresh_water_head();
     let mut xfers: Vec<((i32, i32), (i32, i32), i32)> = Vec::new();
     accumulate_confined_upward_xfers(world, active, &mut xfers);
     commit_air_sat_xfers(world, &mut xfers);
@@ -588,7 +592,10 @@ fn accumulate_confined_upward_xfers(
                 }
                 let free = cap as i32 - dst.sat.0 as i32;
                 let dh_sat = ((body.max_head - dst_head) * cap as f32).floor() as i32;
-                let amt = CONFINED_HEAD_RATE
+                let cap_rate = ((CONFINED_HEAD_RATE as f32)
+                    * world.water_head_rate_scale(gx, gy))
+                .round() as i32;
+                let amt = cap_rate
                     .min(free)
                     .min(donor.sat.0 as i32)
                     .min(dh_sat.max(1));
@@ -1228,6 +1235,7 @@ fn plan_throughflow_from_cell(
             continue; // gravity + seepage handle unsaturated
         }
         let mut rate = seepage_rate_cell(below1, hydro);
+        rate = ((rate as f32) * world.water_head_rate_scale(gx, gy)).round() as i32;
         // Prefer the shallowest exit so mid-cliff springs beat a deep toe.
         let mut best: Option<(i32, i32, i32)> = None; // depth, tx, ty
         let mut depth = 1i32;

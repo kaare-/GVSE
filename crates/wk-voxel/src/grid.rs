@@ -191,6 +191,11 @@ pub struct World {
     /// scanning every sand chunk every tick.
     #[serde(skip, default)]
     pub(crate) buoyant_flags_ready: bool,
+    /// Coarse regional water-table. Derived, not saved. Modulates
+    /// throughflow / confined rates only — never writes `sat`.
+    /// Step 3 (wind couple) is not wired.
+    #[serde(skip, default)]
+    pub water_head: crate::water_head::WaterHead,
 }
 
 impl World {
@@ -218,7 +223,22 @@ impl World {
             competent_level_vacated: FxHashMap::default(),
             chunk_cache_id: ChunkCacheId::default(),
             buoyant_flags_ready: false,
+            water_head: crate::water_head::WaterHead::default(),
         }
+    }
+
+    /// Rebuild the regional table if the period elapsed.
+    pub fn refresh_water_head(&mut self) {
+        let mut head = std::mem::take(&mut self.water_head);
+        head.maybe_refresh(self);
+        self.water_head = head;
+    }
+
+    /// Throughflow / confined rate multiplier. `1` when unknown or at
+    /// the table; up to `1.4` under a high nearby reservoir.
+    #[inline]
+    pub fn water_head_rate_scale(&self, gx: i32, gy: i32) -> f32 {
+        self.water_head.rate_scale(gx, gy)
     }
 
     /// True when this competent cell is asleep (evaluated, could not move).

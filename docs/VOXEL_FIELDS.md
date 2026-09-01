@@ -89,8 +89,11 @@ Possible uses without a second reservoir:
   cohesion for grain failure — still moving water via existing seepage
   / throughflow.
 
-- **Risk:** high if the field is allowed to invent water. Treat as
-  diagnostic + rate modulator only.
+- **Now (careful):** `WaterHead` on `World` (runtime only). Every
+  `WATER_HEAD_PERIOD` (24) ticks it samples every 4th column for the
+  top standing-water / ≥80% pore table, Darcy-smooths, and **boosts**
+  throughflow + confined-rise rates (1.0–1.4). It does not write `sat`
+  and does not change pore-pore seepage. Wind is not coupled yet.
 
 ### 5. Nutrient / litter plume
 
