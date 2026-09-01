@@ -203,7 +203,8 @@ fn live_surface_y_ground(
         }
     }
     // Same extra walk as `live_surface_y`: a wiped hill is farther than
-    // the local window. Do not keep the seed crest (ghost silhouette).
+    // the local window. Keep the seed only when the column is loaded air
+    // with no bed (an unstamped neighbor, not an F3 wipe).
     let extra = LIVE_SURFACE_DESCENT_MAX.saturating_sub(search);
     for _ in 0..extra {
         y -= 1;
@@ -217,7 +218,7 @@ fn live_surface_y_ground(
             return y;
         }
     }
-    0
+    hint
 }
 
 fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {

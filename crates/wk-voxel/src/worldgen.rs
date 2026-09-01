@@ -237,9 +237,9 @@ pub fn live_surface_y(world: &World, gx: i32, hint: i32, search: i32) -> i32 {
             }
         }
         // A deleted hill can drop the crest by more than `search` (mountains
-        // sit 80–150 cells above the bed). Giving up and keeping the
-        // procedural hint is what left a ghost mountain in the ridge / wind
-        // maps after F3 erase. Keep walking through loaded air.
+        // sit 80–150 cells above the bed). Giving up after 64 cells is what
+        // left a ghost mountain in the ridge / wind maps after F3 erase.
+        // Keep walking through loaded air for the remaining bed.
         if found.is_none() {
             let extra = LIVE_SURFACE_DESCENT_MAX.saturating_sub(search);
             for _ in 0..extra {
@@ -257,9 +257,10 @@ pub fn live_surface_y(world: &World, gx: i32, hint: i32, search: i32) -> i32 {
                 }
             }
         }
-        // Loaded air with no solid below: the column was erased, not an
-        // unloaded shaft. Do not report the seed crest.
-        found.unwrap_or(0)
+        // A created empty chunk (unstamped neighbor) is loaded air with no
+        // solid — not a deleted hill. Keep the seed so wind / climate on a
+        // one-column stamp still see the rest of the profile.
+        found.unwrap_or(hint)
     };
     // Empty shafts and unloaded columns keep the hint. Peeling those
     // would walk the search window of air and invent a surface.
@@ -635,14 +636,19 @@ mod lens_tests {
         let w = World::new(p.seed); // nothing stamped
         assert_eq!(live_surface_y(&w, 10, 50, LIVE_SURFACE_SEARCH), 50);
 
-        // A fully erased loaded column is not the seed crest — that was the
-        // ghost mountain after F3 wiped a hill. Report the bed, not y=60.
+        // A created empty column is an unstamped neighbor, not a deleted
+        // hill. Keep the seed. A real F3 wipe still has a bed the extra
+        // walk finds (see `live_surface_follows_a_deleted_hill`).
         let mut w2 = World::new(p.seed);
         w2.ensure_chunk(crate::chunk::ChunkCoord::new(0, 0));
         for y in 0..64 {
             w2.set_cell(5, y, Cell::air());
         }
-        assert_eq!(live_surface_y(&w2, 5, 60, 8), 0);
+        assert_eq!(
+            live_surface_y(&w2, 5, 60, 8),
+            60,
+            "an empty created column keeps the seed — that is not a deleted hill"
+        );
     }
 
     #[test]
