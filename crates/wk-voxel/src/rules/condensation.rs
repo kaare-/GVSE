@@ -161,7 +161,7 @@ pub fn precipitate_thermal_surplus(
         let freezing = phase
             .map(|ph| ph.enable_snow_precip && air_t <= ph.freeze_point_c)
             .unwrap_or(false);
-        let landed = if freezing && take >= crate::phase::PRECIP_IN_AIR_MIN {
+        let landed = if freezing && take >= u8::MAX as f32 {
             let snowed = crate::phase::deposit_snow_in_air(world, gx, gy, take);
             if snowed > 0.0 {
                 snowed
@@ -345,25 +345,19 @@ pub fn apply_condensation_rain_phased(
             (Some(t), Some(ph)) => ph.enable_snow_precip && t <= ph.freeze_point_c,
             _ => false,
         };
-        let mut landed = if freezing {
-            // Snowfall: nucleate in the air like rain, so it falls. Frost is the
-            // fallback — rime genuinely forms *on* surfaces, and a budget under a
-            // whole cell cannot pay for a snowflake.
+        let mut landed = if freezing && take_mass >= u8::MAX as f32 {
+            // A flake costs a whole cell. Anything less is rain — the 33-mass
+            // floor turned every cold sky tile into snow and minted on thaw.
             let snowed = crate::phase::deposit_snow_in_air(world, centre_gx, centre_gy, take_mass);
             if snowed > 0.0 {
                 snowed
             } else {
-                crate::phase::deposit_condensate_on_surface(
-                    world,
-                    centre_gx,
-                    cfg.top_y,
-                    take_mass,
-                    temp,
-                    phase,
-                )
+                super::deposit_water_in_air(world, centre_gx, centre_gy, take_mass)
             }
-        } else {
+        } else if take_mass >= crate::phase::PRECIP_IN_AIR_MIN {
             super::deposit_water_in_air(world, centre_gx, centre_gy, take_mass)
+        } else {
+            0.0
         };
         // Cold frost needs a full cell (255). Small drizzle budgets refuse;
         // retry once from the tile so rime can still form without underpaying.
@@ -538,10 +532,9 @@ mod tests {
 
         let mut w = World::new(5);
         w.ensure_chunk(ChunkCoord::new(0, 0));
-        // Below the visible-drop floor. Cold air cannot hold 255, so the
-        // flake gate is 33, not a whole cell.
-        let paid = crate::phase::deposit_snow_in_air(&mut w, 4, 20, 16.0);
-        assert_eq!(paid, 0.0, "under PRECIP_IN_AIR_MIN must be refused");
+        // A flake is a whole cell. Part-paying mints the rest on thaw.
+        let paid = crate::phase::deposit_snow_in_air(&mut w, 4, 20, 200.0);
+        assert_eq!(paid, 0.0, "under a whole cell must be refused, not part-paid");
         assert_ne!(w.get_cell(4, 20).unwrap().material, MaterialId::Snow);
         let _ = Cell::air();
     }
@@ -602,7 +595,7 @@ mod tests {
         let mut h = Humidity::new(4);
         // Aloft of the spared surface film. 255 is exactly one flake;
         // leftover sat used to shave this to ~238 and refuse.
-        h.cells.insert((1, 8), 255.0);
+        h.cells.insert((1, 8), 400.0);
         let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
         temp.config.base_temp_c = -12.0;
         for v in temp.cells.values_mut() {
@@ -627,8 +620,8 @@ mod tests {
         });
         assert!(flake, "a full-cell cold tile must seat a falling flake");
         assert!(
-            h.at_tile(1, 8) < 255.0 - 30.0,
-            "the flake must drain a visible budget, left {}",
+            h.at_tile(1, 8) <= 400.0 - 250.0,
+            "a paid flake drains a whole cell, left {}",
             h.at_tile(1, 8)
         );
     }

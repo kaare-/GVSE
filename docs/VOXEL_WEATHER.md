@@ -141,9 +141,9 @@ The coupled weather stack is:
   `buoyant_rise_thermal` (per-row T mean, never `Temperature::mean()`
   in the loop). Condensation that samples a solid tile centre walks
   up to four cells for the first Air (rain) or empty Air (snow)
-  before refusing. In-air precip pays 33 (one sat above the haze
-  band), not 255 — cold air only holds ~207 at 0 °C / ~35 at −20 °C,
-  and a leftover-shaved 23-sat drop was invisible (no rain, no shaft).
+  before refusing. Rain pays 33 (visible drop + H shaft). A flake
+  still costs 255 — a cheaper seat mints on thaw, and the 33-mass
+  floor turned the cold sky into snow. Snow does not carve the shaft.
 - **Temperature** — still period 20. Night humidity blanket, wind mix,
   and near-surface air↔ground couple live *inside* that step. Do not
   run a full-field `advect_air_with_wind` every tick.

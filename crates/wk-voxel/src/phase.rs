@@ -36,11 +36,9 @@ use crate::rules::{deposit_water_on_surface, is_standing_water};
 use crate::temperature::Temperature;
 use crate::worldgen::live_surface_at;
 
-/// Humidity mass that buys an in-air flake or a visible rain drop.
-///
-/// Terrain and the H shaft ignore Air sat ≤ 32 (haze film). Cold air
-/// holds ~207 at 0 °C and ~35 at −20 °C, so a 255 flake can never form
-/// from the hold. 33 is one sat above the haze band.
+/// Visible in-air **rain** drop. Terrain and the H shaft ignore Air sat
+/// ≤ 32 (haze film). Snow is a different seat — a whole cell — and must
+/// not use this floor or the sky turns to flakes and thaws mint water.
 pub const PRECIP_IN_AIR_MIN: f32 = 33.0;
 
 /// Freeze / thaw knobs.
@@ -62,10 +60,9 @@ pub struct PhaseConfig {
     pub max_slush_cells_per_column_per_tick: u8,
     /// Max unsupported Ice/Snow cells that may break **per column per tick**.
     pub max_break_cells_per_column_per_tick: u8,
-    /// Minimum precip budget (humidity mass) to place one Snow / frost Ice
-    /// cell. Cold air only holds ~207 at 0 °C and ~35 at −20 °C, so a
-    /// full-cell 255 gate never snows. Default is one sat above the haze
-    /// band so a flake is visible and carves the H shaft.
+    /// Minimum precip budget to place one Snow / frost Ice cell. A flake
+    /// is a whole cell (`255`): thaw yields `Air+FULL`, so a cheaper seat
+    /// mints water. Shortfall → rain in air, not a flake.
     pub min_budget_to_snow: f32,
     /// Hard cap on Ice+Snow cells stacked in one column. Excess at the
     /// top is culled to empty Air (removed, not melted — melting would
@@ -126,7 +123,7 @@ impl Default for PhaseConfig {
             max_thaw_cells_per_column_per_tick: 1,
             max_slush_cells_per_column_per_tick: 1,
             max_break_cells_per_column_per_tick: 2,
-            min_budget_to_snow: PRECIP_IN_AIR_MIN,
+            min_budget_to_snow: 255.0,
             max_ice_cells_per_column: 12,
             snow_spread_radius: 6,
             snow_blanket_depth: 2,
@@ -381,8 +378,8 @@ pub fn deposit_precip_on_surface(
     if ground_t > phase.freeze_point_c {
         return deposit_water_on_surface(world, gx, start_y, budget);
     }
-    // Cold air + cold ground: solid snow pack only.
-    let need = phase.min_budget_to_snow.max(1.0);
+    // Cold air + cold ground: solid snow pack only — full cell or hold.
+    let need = phase.min_budget_to_snow.max(u8::MAX as f32);
     if budget < need {
         return 0.0;
     }
@@ -551,9 +548,10 @@ fn deposit_snow_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f
 /// `Snow` already falls through empty air and floats on water, so gravity takes it
 /// from here.
 ///
-/// Pays [`PRECIP_IN_AIR_MIN`], not a whole cell — cold air cannot hold 255.
+/// Pays a **whole cell**. A cheaper flake thaws into `Air+FULL` and mints
+/// the shortfall. Cold drizzle that cannot pay becomes rain instead.
 pub fn deposit_snow_in_air(world: &mut World, gx: i32, y: i32, budget: f32) -> f32 {
-    if budget < PRECIP_IN_AIR_MIN {
+    if budget < u8::MAX as f32 {
         return 0.0;
     }
     let jx = world.wrap_x(gx);
@@ -563,7 +561,7 @@ pub fn deposit_snow_in_air(world: &mut World, gx: i32, y: i32, budget: f32) -> f
         return 0.0;
     };
     world.set_cell(jx, air_y, snow_cell());
-    budget.min(u8::MAX as f32)
+    u8::MAX as f32
 }
 
 /// Walk a short column for empty Air. Stay buried / in wet film and refuse —
@@ -1378,8 +1376,8 @@ mod tests {
         w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
         let temp = cold_temp(16, 16, -10.0);
         let cfg = PhaseConfig::default();
-        let landed = deposit_precip_on_surface(&mut w, 2, 10, 16.0, Some(&temp), Some(&cfg));
-        assert_eq!(landed, 0.0, "must hold — not seat under PRECIP_IN_AIR_MIN");
+        let landed = deposit_precip_on_surface(&mut w, 2, 10, 64.0, Some(&temp), Some(&cfg));
+        assert_eq!(landed, 0.0, "must hold — not seat underpaid Snow");
         assert_ne!(
             w.get_cell(2, 2).map(|c| c.material),
             Some(MaterialId::Snow)

@@ -250,12 +250,10 @@ fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
     out
 }
 
-/// True when this cell is the falling drop (1-wide water / flake), not vapour.
+/// True when this cell is falling **rain**. Snow floats through the wash
+/// and must not carve the 1-wide shaft.
 fn haze_cell_is_drop_cell(c: wk_voxel::Cell) -> bool {
-    if c.material == MaterialId::Air && c.sat.0 > GRAIN_REPOSE_HAZE_MAX {
-        return true;
-    }
-    falls_through_empty_air(c.material)
+    c.material == MaterialId::Air && c.sat.0 > GRAIN_REPOSE_HAZE_MAX
 }
 
 fn haze_cell_is_drop(world: &World, gx: i32, gy: i32) -> bool {
@@ -1951,18 +1949,16 @@ mod tests {
     }
 
     #[test]
-    fn haze_carves_a_snow_flake_the_same_way() {
+    fn haze_does_not_carve_under_snow() {
         use wk_voxel::{Cell, ChunkCoord};
 
         let mut w = wk_voxel::World::new(2);
         w.ensure_chunk(ChunkCoord::new(0, 0));
         w.set_cell(5, 20, Cell::solid(wk_material::MaterialId::Snow));
         let tops = collect_drop_tops(&w);
-        assert_eq!(tops.get(&5).copied(), Some(20));
-        assert_eq!(
-            haze_column_y0(8, 24, Some(20)),
-            Some(21),
-            "falling snow must open the same 1-wide shaft as rain"
+        assert!(
+            tops.get(&5).is_none(),
+            "snow floats through the wash — it must not open a rain shaft"
         );
     }
 
