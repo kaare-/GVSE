@@ -20,10 +20,12 @@
 //!   Wet air has more thermal mass (vapor Cp ~1.9× dry) so it relaxes
 //!   slower and a rising plume mixes that heat into the tile above.
 //!   No noon/midnight skin snap on the sky.
-//! - **Buried** rock ignores solar / sky radiation. Geothermal is a
-//!   function of world Y (depth below sea), the same in every column —
-//!   bedrock heats from below, a hill is not a painted hotspot because
-//!   its crest is high. Diffusion carries that heat upward.
+//! - **Buried** rock ignores solar / sky radiation. Overburden is
+//!   cells below the **live** surface (not the seed crest). F3-erasing
+//!   a hill drops that depth; the leftover core is not a stamp of the
+//!   mountain that is gone. Fill (no world yet) uses sea-datum so the
+//!   seed profile is not painted in. Bedrock still adds a uniform
+//!   bottom flux; diffusion carries heat upward.
 //!
 //! Cadence: [`TEMP_STEP_PERIOD`] = 20 — not every physics tick.
 
@@ -91,11 +93,9 @@ pub struct TempConfig {
     /// How hard surface capacity damps sun/radiate ΔT (0 = raw °C).
     #[serde(default = "default_force_inertia")]
     pub force_inertia: f32,
-    /// Deep-rock geothermal target at sea level (°C). Same in every
-    /// column — not “under this hill’s crest”.
+    /// Deep-rock geothermal target at the live surface (°C).
     pub geothermal_surface_c: f32,
-    /// Extra °C per cell of depth below sea level. Hills above sea do
-    /// not get extra heat from overburden.
+    /// Extra °C per cell of overburden below the live surface.
     pub geothermal_gradient_c_per_cell: f32,
     /// Relax rate of buried tiles toward the geothermal profile.
     pub geothermal_relax: f32,
@@ -331,21 +331,44 @@ impl Temperature {
         self.cells.values().sum::<f32>() / self.cells.len() as f32
     }
 
-    /// Cells below sea level. Same at every column — a tall crest does
-    /// not make the rock under it “deeper”.
+    /// Cells below sea level. Fill / no-world fallback — not a seed hill.
     pub fn geothermal_depth_at_y(&self, y_cells: i32) -> f32 {
         (self.sea_level_y - y_cells).max(0) as f32
     }
 
-    /// Geothermal target (°C) at `depth_cells` below sea level.
+    /// Overburden cells below the live skin. Seed crest is only a hint
+    /// for the walk; a deleted hill must drop this depth.
+    pub fn geothermal_overburden_cells(
+        &self,
+        world: Option<&World>,
+        hx: i32,
+        y_cells: i32,
+    ) -> f32 {
+        match world {
+            Some(_) => {
+                let surf = self.column_surface_y_estimate(world, hx);
+                (surf - y_cells).max(0) as f32
+            }
+            None => self.geothermal_depth_at_y(y_cells),
+        }
+    }
+
+    /// Geothermal target (°C) at `depth_cells` of overburden.
     pub fn geothermal_at_depth(&self, depth_cells: f32) -> f32 {
         let cfg = &self.config;
         cfg.geothermal_surface_c + cfg.geothermal_gradient_c_per_cell * depth_cells.max(0.0)
     }
 
-    /// Geothermal target at world Y. Uniform across the ring.
+    /// Geothermal target at world Y using the sea-datum fallback.
     pub fn geothermal_at_y(&self, y_cells: i32) -> f32 {
         self.geothermal_at_depth(self.geothermal_depth_at_y(y_cells))
+    }
+
+    /// Drop cached layer/capacity so the next step re-reads the world.
+    /// F3 paint must not keep a hill-core “Buried” stamp.
+    pub fn invalidate_props(&mut self) {
+        self.props_cache.clear();
+        self.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
     }
 
     /// Fill tiles: air/surface from the climate baseline; deep crust
@@ -553,9 +576,13 @@ impl Temperature {
                     n + (skin - n) * relax
                 }
                 TileLayer::Buried { .. } => {
-                    // No solar / sky radiation. Hold heat; ease toward
-                    // the sea-datum geothermal (bedrock below, not crest).
-                    let geo = self.geothermal_at_y(self.tile_mid_y(hy));
+                    // Overburden from the live surface, every step.
+                    // Cached depth would keep a deleted hill hot.
+                    let geo = self.geothermal_at_depth(self.geothermal_overburden_cells(
+                        world,
+                        hx,
+                        self.tile_mid_y(hy),
+                    ));
                     let relax = (cfg.geothermal_relax
                         / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale * 0.35))
                         .clamp(0.001, 0.08);
@@ -776,7 +803,7 @@ fn tile_thermal_props(
     }
     if tile_mid_y + tc < anchor_lo - BURIED_MARGIN {
         let bedrock = MaterialRegistry::props(MaterialId::Bedrock);
-        let depth = temp.geothermal_depth_at_y(tile_mid_y);
+        let depth = (rock_mid - tile_mid_y).max(0) as f32;
         return TileThermal {
             layer: TileLayer::Buried { depth_cells: depth },
             capacity: bedrock.heat_capacity * 1.25,
@@ -831,7 +858,7 @@ fn tile_thermal_props(
     }
     if tile_mid_y + tc < surf_y {
         let bedrock = MaterialRegistry::props(MaterialId::Bedrock);
-        let depth = temp.geothermal_depth_at_y(tile_mid_y);
+        let depth = (surf_y - tile_mid_y).max(0) as f32;
         return TileThermal {
             layer: TileLayer::Buried { depth_cells: depth },
             capacity: bedrock.heat_capacity * 1.25,
@@ -1631,10 +1658,11 @@ mod tests {
     }
 
     #[test]
-    fn buried_hill_does_not_relax_toward_an_overburden_hotspot() {
+    fn overburden_geothermal_follows_the_live_surface() {
         let sea: i32 = 80;
         let crest: i32 = 140;
-        let core_y: i32 = 110;
+        let bed: i32 = 40;
+        let probe_y: i32 = 20;
         let mut w = World::new(3);
         for y in 0..=crest {
             w.ensure_chunk(ChunkCoord::new(
@@ -1651,27 +1679,54 @@ mod tests {
         t.config.diffuse_alpha = 0.0;
         t.config.solar_heat_c = 0.0;
         t.config.night_cool_c = 0.0;
+        t.config.inertia_scale = 0.0;
         t.config.geothermal_relax = 0.20;
         t.fill_initial(0);
+        let hill_depth = t.geothermal_overburden_cells(Some(&w), 0, probe_y);
+        let hill_geo = t.geothermal_at_depth(hill_depth);
+        assert!(
+            (hill_depth - (crest - probe_y) as f32).abs() < 4.0,
+            "intact hill overburden must read the live crest (depth={hill_depth})"
+        );
         for v in t.cells.values_mut() {
             *v = 18.0;
         }
         t.rebuild_row_means();
-        t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        t.invalidate_props();
         let h = Humidity::with_world_bounds(4, 0, 0, 16, 160);
-        for i in 0..20 {
+        for i in 0..24 {
             t.step(Some(&w), &h, i * TEMP_STEP_PERIOD, None);
         }
-        let after = t.at_cell(2, core_y);
-        let sea_geo = t.geothermal_at_y(core_y);
-        let old_overburden = t.geothermal_at_depth((crest - core_y) as f32);
+        let with_hill = t.at_cell(2, probe_y);
         assert!(
-            after < 16.0,
-            "hill core must cool toward sea-datum {sea_geo:.1}, not climb (got {after:.1})"
+            with_hill > 22.0,
+            "live overburden under the hill should warm the core ({with_hill:.1}, target {hill_geo:.1})"
+        );
+
+        for x in 0..8 {
+            for y in (bed + 1)..=crest {
+                w.set_cell(x, y, Cell::air());
+            }
+        }
+        t.invalidate_props();
+        let cut_depth = t.geothermal_overburden_cells(Some(&w), 0, probe_y);
+        let cut_geo = t.geothermal_at_depth(cut_depth);
+        assert!(
+            cut_depth < hill_depth * 0.5,
+            "erasing the hill must drop live overburden ({cut_depth} vs {hill_depth})"
+        );
+        for i in 24..48 {
+            t.step(Some(&w), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let after_cut = t.at_cell(2, probe_y);
+        assert!(
+            after_cut + 2.0 < with_hill,
+            "core must follow the updated surface ({with_hill:.1} → {after_cut:.1}, target {cut_geo:.1})"
         );
         assert!(
-            (after - sea_geo).abs() < (after - old_overburden).abs(),
-            "closer to sea-datum {sea_geo:.1} than crest-depth {old_overburden:.1} (got {after:.1})"
+            (after_cut - cut_geo).abs() < (after_cut - hill_geo).abs(),
+            "closer to the new live overburden {cut_geo:.1} than the deleted crest {hill_geo:.1} \
+             (got {after_cut:.1})"
         );
     }
 

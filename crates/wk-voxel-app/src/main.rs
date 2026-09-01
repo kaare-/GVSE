@@ -866,6 +866,12 @@ async fn main() {
                     // Seed crest must not linger in the ridge plates after a
                     // hill wipe — `ensure` only resamples every 30 ticks.
                     ridges.invalidate();
+                    scene.temperature.invalidate_props();
+                    scene.geotech.refresh_around(
+                        &scene.world,
+                        gx,
+                        terrain.radius,
+                    );
                     inspect = Some((gx, gy));
                 }
             }

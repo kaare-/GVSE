@@ -873,14 +873,14 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Geothermal at sea (C)",
+                        "Geothermal at live surface (C)",
                         -5.0..25.0,
                         &mut self.temp.geothermal_surface_c,
                     );
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Geothermal gradient below sea",
+                        "Geothermal gradient (live overburden)",
                         0.0..1.0,
                         &mut self.temp.geothermal_gradient_c_per_cell,
                     );
