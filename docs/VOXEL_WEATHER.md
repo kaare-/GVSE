@@ -127,7 +127,9 @@ The coupled weather stack is:
 
 - **Wind heatmap** — `Wind::rebuild_field` every `WIND_FIELD_PERIOD` (4)
   ticks, only on wet seats + a 1-tile halo + a thin near-surface band.
-  Misses in `vector_at` return the climate mean (no live-surface walk).
+  Misses in `vector_at` return the climate mean after the same
+  surface-slip as the heatmap (no into-rock residual; a descent
+  turns along the skin).
 - **Humidity** — donor-cell fractional flux through that heatmap, with a
   per-column free-air cache so buried seats lift over the crest without
   scanning the hill once per tile. Convection stays `buoyant_rise_thermal`

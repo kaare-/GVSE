@@ -10,9 +10,13 @@
 //! 2. Optional per-tile `(vx, vy)` heatmap from terrain, thermal ∇T,
 //!    swirl, canopy drag — rebuilt on a cadence, **occupied tiles only**
 //!    (FPS: do not fill the whole sky every frame)
-//! 3. [`Self::vector_at`] reads the heatmap, else procedural [`Self::flow_at`]
+//! 3. [`Self::vector_at`] reads the heatmap, else climate + surface slip
 //!
-//! Vertical residual is capped. No pressure solver.
+//! Near the live skin, vectors slide along the slope (no component
+//! into rock; a descent hits the ground and turns left/right). Next
+//! to a face, a breeze that would stab into the hill turns up or
+//! down the rock. Aloft, vertical residual stays capped. No pressure
+//! solver.
 
 use serde::{Deserialize, Serialize};
 
@@ -370,6 +374,11 @@ impl Wind {
                 }
             }
         }
+        // Last: slide along the live skin. Blend / climate would otherwise
+        // leave arrows pointing into the hill or the ground.
+        for (&(hx, hy), v) in blended.iter_mut() {
+            *v = self.deflect_along_surface(world, hx, hy, v.0, v.1);
+        }
         self.field = blended;
     }
 
@@ -469,8 +478,99 @@ impl Wind {
             vx += sx * sw;
             vy += sy * sw * 0.4;
         }
-        let v_cap = (vx.abs() * 0.45 + 0.04).min(0.35);
-        vy = vy.clamp(-v_cap, v_cap);
+        // Aloft only. Near the skin, `deflect_along_surface` needs a
+        // real vy so a face can turn the breeze up or along the ground.
+        let surf_hy = self.surface_tile_hy(world, hx);
+        let above = (hy - surf_hy).max(0);
+        if above >= 3 {
+            let v_cap = (vx.abs() * 0.45 + 0.04).min(0.35);
+            vy = vy.clamp(-v_cap, v_cap);
+        }
+        (vx.clamp(-1.0, 1.0), vy.clamp(-1.0, 1.0))
+    }
+
+    /// Rise/run of the live skin across one tile on each side.
+    fn surface_slope(&self, world: Option<&World>, hx: i32) -> f32 {
+        let tc = self.tile_cols.max(1);
+        let gx = hx * tc + tc / 2;
+        let s0 = self.surface_at(world, gx - tc);
+        let s1 = self.surface_at(world, gx + tc);
+        ((s1 - s0) as f32 / (2.0 * tc as f32)).clamp(-8.0, 8.0)
+    }
+
+    /// Neighbour land that sticks up past this sample — a cliff / hill
+    /// face this arrow is about to fly into.
+    fn neighbour_walls(&self, world: Option<&World>, hx: i32, hy: i32) -> (bool, bool) {
+        let tc = self.tile_cols.max(1);
+        let y_mid = hy * tc + tc / 2;
+        let gx = hx * tc + tc / 2;
+        let sl = self.surface_at(world, gx - tc);
+        let sr = self.surface_at(world, gx + tc);
+        let rise = tc.max(1);
+        (sl > y_mid + rise, sr > y_mid + rise)
+    }
+
+    /// Slip along the ground and along a nearby face: no component into
+    /// rock. A descent hits the skin and turns along it; a breeze that
+    /// would stab into a hill turns up or down the face.
+    fn deflect_along_surface(
+        &self,
+        world: Option<&World>,
+        hx: i32,
+        hy: i32,
+        vx: f32,
+        vy: f32,
+    ) -> (f32, f32) {
+        let surf_hy = self.surface_tile_hy(world, hx);
+        let above = (hy - surf_hy) as f32;
+        let (wall_l, wall_r) = self.neighbour_walls(world, hx, hy);
+        if above > 4.0 && !wall_l && !wall_r {
+            return (vx, vy);
+        }
+        let m = self.surface_slope(world, hx);
+        let h = (1.0 + m * m).sqrt();
+        if h < 1e-6 {
+            return (vx, vy);
+        }
+        // Outward (into-air) normal of the local skin / face.
+        let nx = -m / h;
+        let ny = 1.0 / h;
+        let mut vx = vx;
+        let mut vy = vy;
+        let into = vx * nx + vy * ny;
+        if into < 0.0 {
+            vx -= into * nx;
+            vy -= into * ny;
+        }
+        // Own floor: follow fades out over a few tiles. A wall one
+        // tile away keeps follow high so mid-face arrows go up/down
+        // instead of remaining a flattened stub into the rock.
+        let ground_follow = (1.0 - above.max(0.0) / 3.0).clamp(0.0, 1.0);
+        let wall_follow = if wall_l || wall_r { 0.88 } else { 0.0 };
+        let follow = ground_follow.max(wall_follow);
+        if follow > 1e-4 {
+            let speed = vx.hypot(vy);
+            let tsign = if vx > 1e-5 {
+                1.0
+            } else if vx < -1e-5 {
+                -1.0
+            } else if m.abs() > 0.05 {
+                // Stalled on a face: go up the slope (over the hill).
+                if m >= 0.0 {
+                    1.0
+                } else {
+                    -1.0
+                }
+            } else {
+                0.0
+            };
+            if tsign != 0.0 && speed > 1e-5 {
+                let tx = tsign / h;
+                let ty = tsign * m / h;
+                vx = vx * (1.0 - follow) + tx * speed * follow;
+                vy = vy * (1.0 - follow) + ty * speed * follow;
+            }
+        }
         (vx.clamp(-1.0, 1.0), vy.clamp(-1.0, 1.0))
     }
 
@@ -532,11 +632,9 @@ impl Wind {
         if let Some(&v) = self.field.get(&(hx, hy)) {
             return v;
         }
-        // Miss: climate mean only. `flow_at` walks the live surface and
-        // was the humidity-advect FPS cliff when the field was empty or
-        // a new seat appeared between rebuilds.
-        let _ = (world, hx, hy);
-        (self.climate_vx, self.climate_vy)
+        // Miss: climate mean, then slide along the live skin so a
+        // fallback arrow does not stab into the hill.
+        self.deflect_along_surface(world, hx, hy, self.climate_vx, self.climate_vy)
     }
 
     pub fn flow_at(
@@ -842,5 +940,110 @@ mod tests {
         );
         let surf = crate::worldgen::live_surface_y(&w, 2, hint, crate::worldgen::LIVE_SURFACE_SEARCH);
         assert_eq!(surf, crest, "live surface must reach the F3 crest");
+    }
+
+    #[test]
+    fn descending_wind_turns_along_flat_ground() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use wk_material::MaterialId;
+
+        let sea: i32 = 16;
+        let mut w = crate::grid::World::new(3);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..32 {
+            for y in 0..=sea {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 32, sea, 0, 64, false);
+        wind.climate_vy = -0.10;
+        wind.field.clear();
+        let hy = (sea + 2).div_euclid(4);
+        let (vx, vy) = wind.vector_at(Some(&w), 2, hy);
+        assert!(vx > 0.05, "must keep a along-ground breeze (vx={vx:.3})");
+        assert!(
+            vy > -0.03,
+            "a descent onto flat ground must not keep stabbing down (vy={vy:.3})"
+        );
+    }
+
+    #[test]
+    fn wind_on_a_ramp_turns_upslope_not_into_the_rock() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use wk_material::MaterialId;
+
+        let mut w = crate::grid::World::new(3);
+        for cy in 0..=1 {
+            w.ensure_chunk(ChunkCoord::new(0, cy));
+        }
+        // Rise 2 cells per world-x so a 4-wide tile sees m ≈ 2.
+        for x in 0..32 {
+            let crest = 8 + x * 2;
+            for y in 0..=crest {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 32, 8, 0, 80, false);
+        wind.config.swirl = 0.0;
+        wind.config.thermal_drive = 0.0;
+        wind.config.terrain_drive = 0.0;
+        wind.config.field_smooth = 0.0;
+        let occupied: Vec<(i32, i32)> = (1..7).map(|hx| (hx, 8)).collect();
+        wind.rebuild_field(Some(&w), None, 10, &occupied, None);
+        let mut best_up = 0.0f32;
+        for (&(hx, hy), &(vx, vy)) in &wind.field {
+            if hx < 1 || hx > 6 {
+                continue;
+            }
+            let gx = hx * 4 + 2;
+            let surf = crate::worldgen::live_surface_y(&w, gx, 8 + gx * 2, 64);
+            if (hy * 4 + 2) > surf + 12 {
+                continue;
+            }
+            best_up = best_up.max(vy);
+            assert!(
+                vx >= -0.02,
+                "upslope should not reverse the climate breeze (hx={hx} vx={vx:.3})"
+            );
+        }
+        assert!(
+            best_up > 0.04,
+            "a +x breeze on a rising ramp must pick up a climb (best vy={best_up:.3})"
+        );
+    }
+
+    #[test]
+    fn wind_beside_a_cliff_turns_up_not_into_the_rock() {
+        use crate::cell::Cell;
+        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H};
+        use wk_material::MaterialId;
+
+        let floor: i32 = 16;
+        let crest: i32 = 56;
+        let mut w = crate::grid::World::new(3);
+        for cx in 0..=1 {
+            for cy in 0..=(crest.div_euclid(CHUNK_CELLS_H as i32)) {
+                w.ensure_chunk(ChunkCoord::new(cx, cy));
+            }
+        }
+        for x in 0..32 {
+            let top = if (20..24).contains(&x) { crest } else { floor };
+            for y in 0..=top {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut wind = Wind::climate(4, 0.12, 3, 32, floor, 0, 80, false);
+        wind.climate_vy = 0.0;
+        wind.field.clear();
+        // Mid-face, one tile left of the tower (hx=4 is x=16–19).
+        let hy = ((floor + crest) / 2).div_euclid(4);
+        let (vx, vy) = wind.vector_at(Some(&w), 4, hy);
+        assert!(
+            vy > vx.abs() + 0.02,
+            "next to a cliff the arrow must go up the face, not into it (vx={vx:.3} vy={vy:.3})"
+        );
+        assert!(vx > -0.02, "must not reverse into the valley (vx={vx:.3})");
     }
 }
