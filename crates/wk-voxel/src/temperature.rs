@@ -20,8 +20,10 @@
 //!   Wet air has more thermal mass (vapor Cp ~1.9× dry) so it relaxes
 //!   slower and a rising plume mixes that heat into the tile above.
 //!   No noon/midnight skin snap on the sky.
-//! - **Buried** rock ignores solar / sky radiation; it relaxes toward a
-//!   geothermal profile and slowly leaks heat upward by diffusion.
+//! - **Buried** rock ignores solar / sky radiation. Geothermal is a
+//!   function of world Y (depth below sea), the same in every column —
+//!   bedrock heats from below, a hill is not a painted hotspot because
+//!   its crest is high. Diffusion carries that heat upward.
 //!
 //! Cadence: [`TEMP_STEP_PERIOD`] = 20 — not every physics tick.
 
@@ -89,9 +91,11 @@ pub struct TempConfig {
     /// How hard surface capacity damps sun/radiate ΔT (0 = raw °C).
     #[serde(default = "default_force_inertia")]
     pub force_inertia: f32,
-    /// Deep-rock geothermal target at the surface interface (°C).
+    /// Deep-rock geothermal target at sea level (°C). Same in every
+    /// column — not “under this hill’s crest”.
     pub geothermal_surface_c: f32,
-    /// Extra °C per cell of depth below the free surface.
+    /// Extra °C per cell of depth below sea level. Hills above sea do
+    /// not get extra heat from overburden.
     pub geothermal_gradient_c_per_cell: f32,
     /// Relax rate of buried tiles toward the geothermal profile.
     pub geothermal_relax: f32,
@@ -327,13 +331,25 @@ impl Temperature {
         self.cells.values().sum::<f32>() / self.cells.len() as f32
     }
 
-    /// Geothermal target (°C) at `depth_cells` below the free surface.
+    /// Cells below sea level. Same at every column — a tall crest does
+    /// not make the rock under it “deeper”.
+    pub fn geothermal_depth_at_y(&self, y_cells: i32) -> f32 {
+        (self.sea_level_y - y_cells).max(0) as f32
+    }
+
+    /// Geothermal target (°C) at `depth_cells` below sea level.
     pub fn geothermal_at_depth(&self, depth_cells: f32) -> f32 {
         let cfg = &self.config;
         cfg.geothermal_surface_c + cfg.geothermal_gradient_c_per_cell * depth_cells.max(0.0)
     }
 
-    /// Fill tiles: air/surface from the climate baseline; buried from geothermal.
+    /// Geothermal target at world Y. Uniform across the ring.
+    pub fn geothermal_at_y(&self, y_cells: i32) -> f32 {
+        self.geothermal_at_depth(self.geothermal_depth_at_y(y_cells))
+    }
+
+    /// Fill tiles: air/surface from the climate baseline; deep crust
+    /// from the sea-datum geothermal (not the seed hill profile).
     pub fn fill_initial(&mut self, tick: u64) {
         let _ = tick;
         let Some(b) = self.bounds else {
@@ -345,9 +361,8 @@ impl Temperature {
         let tc = self.tile_cols.max(1);
         for hy in b.hy_min..=b.hy_max {
             for hx in b.hx_min..=b.hx_max {
-                let surf = self.column_surface_y_estimate(None, hx);
                 let mid = hy * tc + tc / 2;
-                let depth = (surf - mid) as f32;
+                let depth = self.geothermal_depth_at_y(mid);
                 let t0 = if depth > tc as f32 {
                     self.geothermal_at_depth(depth)
                 } else {
@@ -537,9 +552,10 @@ impl Temperature {
                     let n = t + force / damp.max(1.0);
                     n + (skin - n) * relax
                 }
-                TileLayer::Buried { depth_cells } => {
-                    // No solar / sky radiation. Hold heat; ease toward geothermal.
-                    let geo = self.geothermal_at_depth(depth_cells);
+                TileLayer::Buried { .. } => {
+                    // No solar / sky radiation. Hold heat; ease toward
+                    // the sea-datum geothermal (bedrock below, not crest).
+                    let geo = self.geothermal_at_y(self.tile_mid_y(hy));
                     let relax = (cfg.geothermal_relax
                         / (1.0 + props.capacity.max(0.05) * cfg.inertia_scale * 0.35))
                         .clamp(0.001, 0.08);
@@ -760,7 +776,7 @@ fn tile_thermal_props(
     }
     if tile_mid_y + tc < anchor_lo - BURIED_MARGIN {
         let bedrock = MaterialRegistry::props(MaterialId::Bedrock);
-        let depth = (rock_mid - tile_mid_y) as f32;
+        let depth = temp.geothermal_depth_at_y(tile_mid_y);
         return TileThermal {
             layer: TileLayer::Buried { depth_cells: depth },
             capacity: bedrock.heat_capacity * 1.25,
@@ -815,7 +831,7 @@ fn tile_thermal_props(
     }
     if tile_mid_y + tc < surf_y {
         let bedrock = MaterialRegistry::props(MaterialId::Bedrock);
-        let depth = (surf_y - tile_mid_y) as f32;
+        let depth = temp.geothermal_depth_at_y(tile_mid_y);
         return TileThermal {
             layer: TileLayer::Buried { depth_cells: depth },
             capacity: bedrock.heat_capacity * 1.25,
@@ -1538,6 +1554,124 @@ mod tests {
         assert!(
             h.at_tile(2, 5) > 0.0,
             "vapour still has to actually lift"
+        );
+    }
+
+    #[test]
+    fn geothermal_is_the_same_at_the_same_height() {
+        // Old fill used the seed crest as depth. A mountain column was
+        // stamped hotter than the same Y under the sea — a hotspot you
+        // could still see after F3-erasing the hill.
+        let p = WorldgenParams::default();
+        let mut t = Temperature::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+            p.seed,
+            p.width_cols,
+            p.sea_level_y,
+            true,
+        );
+        t.fill_initial(0);
+        let tc = t.tile_cols.max(1);
+        let mut hi_hx = 0;
+        let mut lo_hx = 0;
+        let mut hi = i32::MIN;
+        let mut lo = i32::MAX;
+        for hx in 0..(p.width_cols / tc) {
+            let gx = hx * tc + tc / 2;
+            let s = crate::worldgen::continental_surface_y(
+                p.seed,
+                gx,
+                p.sea_level_y,
+                p.width_cols,
+            );
+            if s > hi {
+                hi = s;
+                hi_hx = hx;
+            }
+            if s < lo {
+                lo = s;
+                lo_hx = hx;
+            }
+        }
+        assert!(
+            hi > lo + 16,
+            "need seed relief so a crest-depth stamp would disagree (hi={hi} lo={lo})"
+        );
+        let hy_deep = (p.sea_level_y / 2).div_euclid(tc);
+        let a = t.at_tile(hi_hx, hy_deep);
+        let b = t.at_tile(lo_hx, hy_deep);
+        assert!(
+            (a - b).abs() < 0.05,
+            "same world-Y must share geothermal, not follow the seed hill ({a:.2} vs {b:.2})"
+        );
+        assert!(
+            hi > p.sea_level_y + 24,
+            "need a seed hill above sea (crest={hi})"
+        );
+        // Just above sea under the mountain: old code treated this as
+        // tens of cells of overburden (the leftover hotspot).
+        let hy_core = (p.sea_level_y + tc).div_euclid(tc);
+        let painted = t.at_tile(hi_hx, hy_core);
+        let climate = t.climate_at_tile(None, hi_hx, hy_core);
+        let old_overburden = t.geothermal_at_depth((hi - t.tile_mid_y(hy_core)) as f32);
+        assert!(
+            (painted - climate).abs() < 3.0,
+            "hill core above sea is climate, not a painted hotspot \
+             ({painted:.1} vs climate {climate:.1})"
+        );
+        assert!(
+            painted < old_overburden - 4.0,
+            "must not stamp crest-depth geothermal into the hill \
+             ({painted:.1} vs old overburden {old_overburden:.1})"
+        );
+    }
+
+    #[test]
+    fn buried_hill_does_not_relax_toward_an_overburden_hotspot() {
+        let sea: i32 = 80;
+        let crest: i32 = 140;
+        let core_y: i32 = 110;
+        let mut w = World::new(3);
+        for y in 0..=crest {
+            w.ensure_chunk(ChunkCoord::new(
+                0,
+                y.div_euclid(crate::chunk::CHUNK_CELLS_H as i32),
+            ));
+        }
+        for x in 0..8 {
+            for y in 0..=crest {
+                w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+            }
+        }
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 16, 160, 1, 16, sea, false);
+        t.config.diffuse_alpha = 0.0;
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.geothermal_relax = 0.20;
+        t.fill_initial(0);
+        for v in t.cells.values_mut() {
+            *v = 18.0;
+        }
+        t.rebuild_row_means();
+        t.props_cache_age = TEMP_PROPS_REFRESH_STEPS;
+        let h = Humidity::with_world_bounds(4, 0, 0, 16, 160);
+        for i in 0..20 {
+            t.step(Some(&w), &h, i * TEMP_STEP_PERIOD, None);
+        }
+        let after = t.at_cell(2, core_y);
+        let sea_geo = t.geothermal_at_y(core_y);
+        let old_overburden = t.geothermal_at_depth((crest - core_y) as f32);
+        assert!(
+            after < 16.0,
+            "hill core must cool toward sea-datum {sea_geo:.1}, not climb (got {after:.1})"
+        );
+        assert!(
+            (after - sea_geo).abs() < (after - old_overburden).abs(),
+            "closer to sea-datum {sea_geo:.1} than crest-depth {old_overburden:.1} (got {after:.1})"
         );
     }
 
