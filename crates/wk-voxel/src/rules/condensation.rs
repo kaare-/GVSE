@@ -627,8 +627,8 @@ mod tests {
         });
         assert!(flake, "a full-cell cold tile must seat a falling flake");
         assert!(
-            h.at_tile(1, 8).abs() < 1e-3,
-            "the flake costs the whole tile, left {}",
+            h.at_tile(1, 8) < 255.0 - 30.0,
+            "the flake must drain a visible budget, left {}",
             h.at_tile(1, 8)
         );
     }

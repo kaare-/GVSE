@@ -1378,8 +1378,8 @@ mod tests {
         w.set_cell(2, 1, Cell::solid(MaterialId::Sand));
         let temp = cold_temp(16, 16, -10.0);
         let cfg = PhaseConfig::default();
-        let landed = deposit_precip_on_surface(&mut w, 2, 10, 64.0, Some(&temp), Some(&cfg));
-        assert_eq!(landed, 0.0, "must hold — not seat underpaid Snow");
+        let landed = deposit_precip_on_surface(&mut w, 2, 10, 16.0, Some(&temp), Some(&cfg));
+        assert_eq!(landed, 0.0, "must hold — not seat under PRECIP_IN_AIR_MIN");
         assert_ne!(
             w.get_cell(2, 2).map(|c| c.material),
             Some(MaterialId::Snow)
