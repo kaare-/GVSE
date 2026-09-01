@@ -1951,6 +1951,22 @@ mod tests {
     }
 
     #[test]
+    fn haze_carves_a_snow_flake_the_same_way() {
+        use wk_voxel::{Cell, ChunkCoord};
+
+        let mut w = wk_voxel::World::new(2);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(5, 20, Cell::solid(wk_material::MaterialId::Snow));
+        let tops = collect_drop_tops(&w);
+        assert_eq!(tops.get(&5).copied(), Some(20));
+        assert_eq!(
+            haze_column_y0(8, 24, Some(20)),
+            Some(21),
+            "falling snow must open the same 1-wide shaft as rain"
+        );
+    }
+
+    #[test]
     fn haze_carves_only_the_drop_cell() {
         use wk_voxel::{Cell, ChunkCoord, Sat, GRAIN_REPOSE_HAZE_MAX};
 

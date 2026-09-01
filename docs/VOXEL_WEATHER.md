@@ -140,7 +140,9 @@ The coupled weather stack is:
   the V overlay still shows the raw field). Convection stays
   `buoyant_rise_thermal` (per-row T mean, never `Temperature::mean()`
   in the loop). Condensation that samples a solid tile centre walks
-  up to four cells for the first Air before refusing.
+  up to four cells for the first Air (rain) or empty Air (snow)
+  before refusing. A full-cell cold tile still pays 255 for a flake
+  — the cloudy remnant must not shave that and leave only frost.
 - **Temperature** — still period 20. Night humidity blanket, wind mix,
   and near-surface air↔ground couple live *inside* that step. Do not
   run a full-field `advect_air_with_wind` every tick.
@@ -343,7 +345,10 @@ a tile field and is what would turn a steady rain rate into fronts.
 ## Snow falls gently (**landed**), wind drift (**landed**, carefully)
 
 Snow nucleates in the air (`phase::deposit_snow_in_air`) and now descends at a
-usable rate. The bug was that grain fall takes one step per pass and runs several
+usable rate. A flake costs a whole cell: do not let the cloudy remnant shave
+that budget, and walk a few cells up from a solid tile centre (same as rain)
+so a slope still snows. Haze carves the same 1-wide shaft under a flake as
+under a rain drop. The bug was that grain fall takes one step per pass and runs several
 passes a tick — right for sand settling, and it made flakes appear in the sky and
 arrive on the ground in the same breath.
 

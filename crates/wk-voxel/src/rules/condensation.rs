@@ -159,7 +159,7 @@ pub fn precipitate_thermal_surplus(
         let gy = hy * tile_cols + tile_cols / 2;
         let air_t = temp.at_tile(hx, hy);
         let freezing = phase
-            .map(|ph| air_t <= ph.freeze_point_c)
+            .map(|ph| ph.enable_snow_precip && air_t <= ph.freeze_point_c)
             .unwrap_or(false);
         let landed = if freezing && take >= u8::MAX as f32 {
             let snowed = crate::phase::deposit_snow_in_air(world, gx, gy, take);
@@ -296,7 +296,21 @@ pub fn apply_condensation_rain_phased(
             continue;
         }
         let surplus = (mass - leftover).max(0.0);
-        let take_mass = (cfg.mass_per_droplet * mass_mult).min(mass).min(surplus);
+        let raw = (cfg.mass_per_droplet * mass_mult).min(mass);
+        // A flake costs a whole cell. The cloudy remnant must not shave
+        // 255 down to 238 and refuse every cold event (no flake, no rain
+        // streak — only the surface frost fallback).
+        let snowing = match (temp, phase) {
+            (Some(th), Some(ph)) => {
+                ph.enable_snow_precip && th.at_tile(hx, hy) <= ph.freeze_point_c
+            }
+            _ => false,
+        };
+        let take_mass = if snowing && raw >= u8::MAX as f32 {
+            u8::MAX as f32
+        } else {
+            raw.min(surplus)
+        };
         if take_mass <= 0.0 {
             continue;
         }
@@ -331,7 +345,7 @@ pub fn apply_condensation_rain_phased(
         let centre_gy = hy * tile_cols + tile_cols / 2;
         let air_t = temp.map(|t| t.at_tile(hx, hy));
         let freezing = match (air_t, phase) {
-            (Some(t), Some(ph)) => t <= ph.freeze_point_c,
+            (Some(t), Some(ph)) => ph.enable_snow_precip && t <= ph.freeze_point_c,
             _ => false,
         };
         let mut landed = if freezing {
@@ -545,7 +559,9 @@ mod tests {
         w.ensure_chunk(ChunkCoord::new(0, 0));
         let mut wet = Cell::air();
         wet.sat = Sat(200);
-        w.set_cell(4, 20, wet);
+        for y in 20..=24 {
+            w.set_cell(4, y, wet);
+        }
         let paid = crate::phase::deposit_snow_in_air(&mut w, 4, 20, u8::MAX as f32);
         assert_eq!(
             paid, 0.0,
@@ -553,6 +569,71 @@ mod tests {
              not carry sat"
         );
         assert_eq!(w.get_cell(4, 20).unwrap().sat.0, 200, "its water is untouched");
+    }
+
+    #[test]
+    fn deposit_snow_in_air_lands_on_first_empty_air_above_solid() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+
+        let mut w = World::new(11);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        w.set_cell(16, 16, Cell::solid(MaterialId::Stone));
+        w.set_cell(16, 17, Cell::air());
+        assert_eq!(
+            crate::phase::deposit_snow_in_air(&mut w, 16, 16, u8::MAX as f32),
+            u8::MAX as f32
+        );
+        assert_eq!(w.get_cell(16, 16).unwrap().material, MaterialId::Stone);
+        assert_eq!(w.get_cell(16, 17).unwrap().material, MaterialId::Snow);
+    }
+
+    #[test]
+    fn cold_full_tile_nucleates_a_falling_flake() {
+        use crate::cell::Cell;
+        use crate::chunk::ChunkCoord;
+        use crate::grid::World;
+        use crate::humidity::Humidity;
+        use crate::temperature::Temperature;
+
+        let mut w = World::new(12);
+        w.ensure_chunk(ChunkCoord::new(0, 0));
+        for x in 0..8 {
+            w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        }
+        let mut h = Humidity::new(4);
+        // Aloft of the spared surface film. 255 is exactly one flake;
+        // leftover sat used to shave this to ~238 and refuse.
+        h.cells.insert((1, 8), 255.0);
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 64, 1, 64, 8, false);
+        temp.config.base_temp_c = -12.0;
+        for v in temp.cells.values_mut() {
+            *v = -12.0;
+        }
+        let cfg = CondensationConfig {
+            top_y: 32,
+            max_prob_per_tick: 1.0,
+            min_mass_to_rain: 64.0,
+            full_mass: 512.0,
+            mass_per_droplet: 255.0,
+            max_events_per_tick: 8,
+            ..CondensationConfig::default()
+        };
+        let phase = crate::phase::PhaseConfig::default();
+        apply_condensation_rain_phased(&mut w, &mut h, &cfg, None, Some(&temp), Some(&phase));
+        let flake = (0..8).any(|x| {
+            (1..40).any(|y| {
+                w.get_cell(x, y)
+                    .is_some_and(|c| c.material == MaterialId::Snow)
+            })
+        });
+        assert!(flake, "a full-cell cold tile must seat a falling flake");
+        assert!(
+            h.at_tile(1, 8).abs() < 1e-3,
+            "the flake costs the whole tile, left {}",
+            h.at_tile(1, 8)
+        );
     }
 
     #[test]

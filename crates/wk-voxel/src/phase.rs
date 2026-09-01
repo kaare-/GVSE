@@ -552,16 +552,28 @@ pub fn deposit_snow_in_air(world: &mut World, gx: i32, y: i32, budget: f32) -> f
         return 0.0;
     }
     let jx = world.wrap_x(gx);
-    let Some(cell) = world.get_cell(jx, y) else {
+    // Same walk as rain: after slip the humidity tile centre is often the
+    // last solid of a slope, or a wet film. A flake needs empty Air.
+    let Some(air_y) = first_empty_air_y_for_snow(world, jx, y) else {
         return 0.0;
     };
-    // Empty air only: seeding into a wet cell would strand its water inside a
-    // frozen cell that does not carry sat.
-    if cell.material != MaterialId::Air || !cell.sat.is_empty() {
-        return 0.0;
-    }
-    world.set_cell(jx, y, snow_cell());
+    world.set_cell(jx, air_y, snow_cell());
     u8::MAX as f32
+}
+
+/// Walk a short column for empty Air. Stay buried / in wet film and refuse —
+/// seeding into sat would strand that water inside Snow.
+fn first_empty_air_y_for_snow(world: &World, gx: i32, y: i32) -> Option<i32> {
+    for dy in 0..=4 {
+        let yy = y + dy;
+        if world
+            .get_cell(gx, yy)
+            .is_some_and(|c| c.material == MaterialId::Air && c.sat.is_empty())
+        {
+            return Some(yy);
+        }
+    }
+    None
 }
 
 fn deposit_ice_on_surface(world: &mut World, gx: i32, start_y: i32) -> Option<f32> {
