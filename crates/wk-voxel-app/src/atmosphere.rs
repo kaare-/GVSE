@@ -11,9 +11,10 @@ use wk_voxel::{
     celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
     day_night_factor_cfg, falls_through_empty_air, humidity_mean_norm, is_standing_water,
     precip_cover_fraction, resolve_organism_draw_cells, shade_transmit_column,
-    sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, Humidity,
-    ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World,
-    CHUNK_CELLS_H, CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_SEARCH,
+    sky_rgb_at_height_weather, airborne_loose_at, CanopyIndex, CarbonBudget, ClimateConfig,
+    Humidity, ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind,
+    World, CHUNK_CELLS_H, CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_DESCENT_MAX,
+    LIVE_SURFACE_SEARCH,
 };
 
 pub const FAR_RIDGE_PARALLAX: f32 = 0.12;
@@ -91,6 +92,15 @@ pub struct RidgeSilhouette {
 }
 
 impl RidgeSilhouette {
+    /// Drop the cached plates so the next `ensure` resamples live columns.
+    /// F3 erase must call this — otherwise the ghost hill stays for
+    /// [`RIDGE_REFRESH_TICKS`] and the walk used to keep the seed crest anyway.
+    pub fn invalidate(&mut self) {
+        self.far.clear();
+        self.near.clear();
+        self.last_tick = 0;
+    }
+
     pub fn ensure(
         &mut self,
         world: &World,
@@ -151,7 +161,7 @@ fn ridge_ground_at(world: &World, gx: i32, y: i32, sea_level: i32) -> bool {
     let Some(c) = world.get_cell(gx, y) else {
         return false;
     };
-    if falls_through_empty_air(c.material) {
+    if falls_through_empty_air(c.material) || airborne_loose_at(world, gx, y, c) {
         return false;
     }
     if c.material != MaterialId::Air {
@@ -192,7 +202,22 @@ fn live_surface_y_ground(
             return y;
         }
     }
-    hint
+    // Same extra walk as `live_surface_y`: a wiped hill is farther than
+    // the local window. Do not keep the seed crest (ghost silhouette).
+    let extra = LIVE_SURFACE_DESCENT_MAX.saturating_sub(search);
+    for _ in 0..extra {
+        y -= 1;
+        if y < 0 {
+            break;
+        }
+        if world.get_cell(jx, y).is_none() {
+            break;
+        }
+        if ground(y) {
+            return y;
+        }
+    }
+    0
 }
 
 fn lowpass_wrap(raw: &[i32], half_window: i32) -> Vec<i32> {
@@ -1762,6 +1787,45 @@ mod tests {
         assert_eq!(
             y, hint,
             "ridge crest must sit on the stone, not the flake (got {y})"
+        );
+    }
+
+    #[test]
+    fn erased_hill_drops_the_ridge_off_the_seed_crest() {
+        use super::column_surface_y;
+        use wk_material::MaterialId;
+        use wk_voxel::{continental_surface_y, Cell, ChunkCoord, CHUNK_CELLS_H, World};
+
+        let seed = 1u64;
+        let width = 64;
+        let sea = 20;
+        let gx = 22;
+        let hint = continental_surface_y(seed, gx, sea, width);
+        assert!(
+            hint > sea + 8,
+            "need a seed crest well above the leftover bed (hint={hint})"
+        );
+        let bed = (hint - 90).max(4);
+        let mut w = World::new(seed);
+        for y in [0, bed, hint] {
+            w.ensure_chunk(ChunkCoord::new(
+                gx.div_euclid(64),
+                y.div_euclid(CHUNK_CELLS_H as i32),
+            ));
+        }
+        w.set_cell(gx, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=bed {
+            w.set_cell(gx, y, Cell::solid(MaterialId::Sand));
+        }
+        for y in (bed + 1)..=hint {
+            w.set_cell(gx, y, Cell::air());
+        }
+        w.set_cell(gx, hint - 6, Cell::solid(MaterialId::LooseLimestone));
+        let sky = hint + 40;
+        assert_eq!(
+            column_surface_y(&w, gx, 0, sky, sea, seed, width),
+            bed,
+            "ridge must follow the erased hill, not the seed crest or a scrap"
         );
     }
 

@@ -19,7 +19,7 @@
 use serde::{Deserialize, Serialize};
 use wk_material::MaterialId;
 
-use crate::cell::{falls_through_empty_air, Cell};
+use crate::cell::{falls_through_empty_air, is_grain, Cell};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
@@ -236,9 +236,30 @@ pub fn live_surface_y(world: &World, gx: i32, hint: i32, search: i32) -> i32 {
                 break;
             }
         }
-        // Nothing found within the search window — keep the hint rather than inventing
-        // a surface far below, which would put weather underground.
-        found.unwrap_or(hint)
+        // A deleted hill can drop the crest by more than `search` (mountains
+        // sit 80–150 cells above the bed). Giving up and keeping the
+        // procedural hint is what left a ghost mountain in the ridge / wind
+        // maps after F3 erase. Keep walking through loaded air.
+        if found.is_none() {
+            let extra = LIVE_SURFACE_DESCENT_MAX.saturating_sub(search);
+            for _ in 0..extra {
+                y -= 1;
+                if y < 0 {
+                    break;
+                }
+                match world.get_cell(jx, y) {
+                    None => break,
+                    Some(c) if c.material.is_solid() => {
+                        found = Some(y);
+                        break;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        // Loaded air with no solid below: the column was erased, not an
+        // unloaded shaft. Do not report the seed crest.
+        found.unwrap_or(0)
     };
     // Empty shafts and unloaded columns keep the hint. Peeling those
     // would walk the search window of air and invent a surface.
@@ -253,17 +274,21 @@ pub fn live_surface_y(world: &World, gx: i32, hint: i32, search: i32) -> i32 {
 /// pack stays: that *is* the surface weather should see.
 fn peel_airborne_loose(world: &World, gx: i32, start: i32, search: i32) -> i32 {
     let mut y = start;
-    for _ in 0..search {
+    let max = search.max(LIVE_SURFACE_DESCENT_MAX);
+    for _ in 0..max {
         let Some(c) = world.get_cell(gx, y) else {
-            return y;
+            return y.max(0);
         };
         if c.material == MaterialId::Air || airborne_loose_at(world, gx, y, c) {
             y -= 1;
+            if y < 0 {
+                return 0;
+            }
             continue;
         }
         return y;
     }
-    y
+    y.max(0)
 }
 
 /// Loose pack (snow / ice / organic) with empty or haze air under it.
@@ -271,7 +296,9 @@ fn peel_airborne_loose(world: &World, gx: i32, start: i32, search: i32) -> i32 {
 /// Full-sat air is a lake seat — floating ice and rafts stay a surface.
 /// Anything else under a flake is sky, so the flake is not the hill.
 pub fn airborne_loose_at(world: &World, gx: i32, y: i32, cell: Cell) -> bool {
-    if !falls_through_empty_air(cell.material) {
+    // Snow / ice / organic, and leftover grains (loose limestone scraps
+    // after a hill erase) with empty air under them are not the hill.
+    if !falls_through_empty_air(cell.material) && !is_grain(cell.material) {
         return false;
     }
     match world.get_cell(gx, y - 1) {
@@ -281,11 +308,14 @@ pub fn airborne_loose_at(world: &World, gx: i32, y: i32, cell: Cell) -> bool {
     }
 }
 
-/// How far [`live_surface_y`] walks before giving up and trusting the hint.
+/// How far [`live_surface_y`] walks for local erosion / deposition.
 ///
-/// Generous enough for real erosion and collapse, bounded so a pathological column
-/// cannot make a per-tile query expensive.
+/// Generous enough for real collapse. A whole-hill F3 erase can drop the
+/// crest farther than this — [`LIVE_SURFACE_DESCENT_MAX`] covers that.
 pub const LIVE_SURFACE_SEARCH: i32 = 64;
+/// Extra downward walk when the hint cell is air and the short window
+/// found nothing. Sky ceiling is 320; a mountain wipe must reach the bed.
+pub const LIVE_SURFACE_DESCENT_MAX: i32 = 320;
 
 /// Live top-of-column: procedural profile as the hint, then walk the world.
 ///
@@ -605,13 +635,45 @@ mod lens_tests {
         let w = World::new(p.seed); // nothing stamped
         assert_eq!(live_surface_y(&w, 10, 50, LIVE_SURFACE_SEARCH), 50);
 
-        // A deep air shaft with no solid inside the window also keeps the hint.
+        // A fully erased loaded column is not the seed crest — that was the
+        // ghost mountain after F3 wiped a hill. Report the bed, not y=60.
         let mut w2 = World::new(p.seed);
         w2.ensure_chunk(crate::chunk::ChunkCoord::new(0, 0));
         for y in 0..64 {
             w2.set_cell(5, y, Cell::air());
         }
-        assert_eq!(live_surface_y(&w2, 5, 60, 8), 60);
+        assert_eq!(live_surface_y(&w2, 5, 60, 8), 0);
+    }
+
+    #[test]
+    fn live_surface_follows_a_deleted_hill_not_the_seed_crest() {
+        // Mountains sit well above the 64-cell local window. After the hill
+        // is erased, weather / ridges / wind must sit on the remaining bed.
+        let mut w = World::new(1);
+        let x = 8;
+        let bed = 20;
+        let crest = 120;
+        for cy in 0..=2 {
+            w.ensure_chunk(crate::chunk::ChunkCoord::new(0, cy));
+        }
+        w.set_cell(x, 0, Cell::solid(MaterialId::Bedrock));
+        for y in 1..=bed {
+            w.set_cell(x, y, Cell::solid(MaterialId::Sand));
+        }
+        for y in (bed + 1)..=crest {
+            w.set_cell(x, y, Cell::solid(MaterialId::Stone));
+        }
+        assert_eq!(live_surface_y(&w, x, crest, LIVE_SURFACE_SEARCH), crest);
+        for y in (bed + 1)..=crest {
+            w.set_cell(x, y, Cell::air());
+        }
+        // Leftover loose scrap at the old crest must not pin the surface.
+        w.set_cell(x, crest - 4, Cell::solid(MaterialId::LooseLimestone));
+        assert_eq!(
+            live_surface_y(&w, x, crest, LIVE_SURFACE_SEARCH),
+            bed,
+            "erased hill must drop the live surface to the remaining bed"
+        );
     }
 
     #[test]

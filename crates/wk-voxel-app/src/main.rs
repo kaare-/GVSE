@@ -863,6 +863,9 @@ async fn main() {
                     }
                     terrain.apply_at(&mut scene.world, gx, gy);
                     terrain.tool = prev_tool;
+                    // Seed crest must not linger in the ridge plates after a
+                    // hill wipe — `ensure` only resamples every 30 ticks.
+                    ridges.invalidate();
                     inspect = Some((gx, gy));
                 }
             }
