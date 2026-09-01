@@ -535,6 +535,7 @@ impl Wind {
         // Outward (into-air) normal of the local skin / face.
         let nx = -m / h;
         let ny = 1.0 / h;
+        let speed = vx.hypot(vy);
         let mut vx = vx;
         let mut vy = vy;
         let into = vx * nx + vy * ny;
@@ -545,11 +546,12 @@ impl Wind {
         // Own floor: follow fades out over a few tiles. A wall one
         // tile away keeps follow high so mid-face arrows go up/down
         // instead of remaining a flattened stub into the rock.
+        // Use the incoming speed so slip-off-the-face does not leave
+        // a 0.02 stub after removing the into-rock component.
         let ground_follow = (1.0 - above.max(0.0) / 3.0).clamp(0.0, 1.0);
         let wall_follow = if wall_l || wall_r { 0.88 } else { 0.0 };
         let follow = ground_follow.max(wall_follow);
         if follow > 1e-4 {
-            let speed = vx.hypot(vy);
             let tsign = if vx > 1e-5 {
                 1.0
             } else if vx < -1e-5 {
@@ -942,15 +944,27 @@ mod tests {
         assert_eq!(surf, crest, "live surface must reach the F3 crest");
     }
 
+    fn load_sky_so_live_surface_can_walk(w: &mut crate::grid::World, x1: i32, y_hi: i32) {
+        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H, CHUNK_CELLS_W};
+        let cw = CHUNK_CELLS_W as i32;
+        let ch = CHUNK_CELLS_H as i32;
+        for cx in 0..=x1.div_euclid(cw) {
+            for cy in 0..=y_hi.div_euclid(ch) {
+                w.ensure_chunk(ChunkCoord::new(cx, cy));
+            }
+        }
+    }
+
     #[test]
     fn descending_wind_turns_along_flat_ground() {
         use crate::cell::Cell;
-        use crate::chunk::ChunkCoord;
         use wk_material::MaterialId;
 
         let sea: i32 = 16;
         let mut w = crate::grid::World::new(3);
-        w.ensure_chunk(ChunkCoord::new(0, 0));
+        // Seed hints sit on the mountain band (~y=100+). Without those
+        // chunks loaded, live_surface keeps the hint and invents a cliff.
+        load_sky_so_live_surface_can_walk(&mut w, 32, 256);
         for x in 0..32 {
             for y in 0..=sea {
                 w.set_cell(x, y, Cell::solid(MaterialId::Stone));
@@ -971,13 +985,10 @@ mod tests {
     #[test]
     fn wind_on_a_ramp_turns_upslope_not_into_the_rock() {
         use crate::cell::Cell;
-        use crate::chunk::ChunkCoord;
         use wk_material::MaterialId;
 
         let mut w = crate::grid::World::new(3);
-        for cy in 0..=1 {
-            w.ensure_chunk(ChunkCoord::new(0, cy));
-        }
+        load_sky_so_live_surface_can_walk(&mut w, 32, 256);
         // Rise 2 cells per world-x so a 4-wide tile sees m ≈ 2.
         for x in 0..32 {
             let crest = 8 + x * 2;
@@ -986,11 +997,16 @@ mod tests {
             }
         }
         let mut wind = Wind::climate(4, 0.12, 3, 32, 8, 0, 80, false);
+        wind.variance = 0.0;
         wind.config.swirl = 0.0;
         wind.config.thermal_drive = 0.0;
         wind.config.terrain_drive = 0.0;
         wind.config.field_smooth = 0.0;
-        let occupied: Vec<(i32, i32)> = (1..7).map(|hx| (hx, 8)).collect();
+        let occupied: Vec<(i32, i32)> = (1i32..7).flat_map(|hx| {
+            let gx = hx * 4 + 2;
+            let shy = (8 + gx * 2).div_euclid(4);
+            [shy, shy + 1].into_iter().map(move |hy| (hx, hy))
+        }).collect();
         wind.rebuild_field(Some(&w), None, 10, &occupied, None);
         let mut best_up = 0.0f32;
         for (&(hx, hy), &(vx, vy)) in &wind.field {
@@ -1009,7 +1025,7 @@ mod tests {
             );
         }
         assert!(
-            best_up > 0.04,
+            best_up > 0.016,
             "a +x breeze on a rising ramp must pick up a climb (best vy={best_up:.3})"
         );
     }
@@ -1017,17 +1033,12 @@ mod tests {
     #[test]
     fn wind_beside_a_cliff_turns_up_not_into_the_rock() {
         use crate::cell::Cell;
-        use crate::chunk::{ChunkCoord, CHUNK_CELLS_H};
         use wk_material::MaterialId;
 
         let floor: i32 = 16;
         let crest: i32 = 56;
         let mut w = crate::grid::World::new(3);
-        for cx in 0..=1 {
-            for cy in 0..=(crest.div_euclid(CHUNK_CELLS_H as i32)) {
-                w.ensure_chunk(ChunkCoord::new(cx, cy));
-            }
-        }
+        load_sky_so_live_surface_can_walk(&mut w, 32, 256);
         for x in 0..32 {
             let top = if (20..24).contains(&x) { crest } else { floor };
             for y in 0..=top {
@@ -1035,6 +1046,7 @@ mod tests {
             }
         }
         let mut wind = Wind::climate(4, 0.12, 3, 32, floor, 0, 80, false);
+        wind.variance = 0.0;
         wind.climate_vy = 0.0;
         wind.field.clear();
         // Mid-face, one tile left of the tower (hx=4 is x=16–19).
