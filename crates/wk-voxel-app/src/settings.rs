@@ -253,11 +253,8 @@ impl SimSettings {
             },
             karst: KarstConfig::default(),
             cloud: {
-                // Slightly wetter sky defaults so lakes refill overnight
-                // without requiring Tab fiddling on every new world.
+                // Rise only — sea-deck / ridge knobs are unused leftovers.
                 let mut c = CloudConfig::default();
-                c.cloud_alt_above_sea = 48;
-                c.coag_min_above_sea = 22;
                 c.buoyant_rise = 0.14;
                 c
             },
@@ -483,7 +480,6 @@ impl SimSettings {
         let mut day_ticks = self.climate.day_ticks as f32;
         let mut night_ticks = self.climate.night_ticks as f32;
         let mut max_parcels = self.cloud.max_parcels as f32;
-        let mut coag_min_alt = self.cloud.coag_min_above_sea as f32;
         let mut tall_above = self.oro.tall_above_sea as f32;
         let mut cond_events = self.cond.max_events_per_tick as f32;
         let mut karst_period = self.karst.period_ticks as f32;
@@ -543,7 +539,7 @@ impl SimSettings {
                     None,
                     match self.page {
                         SettingsPage::World => "World — size, materials, karst",
-                        SettingsPage::Climate => "Climate — day/night, ice, wind, N clouds, C drizzle",
+                        SettingsPage::Climate => "Climate — day/night, ice, wind, optional N echo, C drizzle",
                         SettingsPage::Physics => "Physics — performance, geotech, grain",
                         SettingsPage::Life => {
                             "Life — creatures, plants, fungi compost, carbon, spore bank"
@@ -690,6 +686,7 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Sky look / atmosphere", |ui| {
                     ui.label(None, "Cosmetics only — tweak live, no regen needed.");
                     ui.label(None, "Sun/moon radii are screen pixels (finer than voxels).");
+                    ui.label(None, "Cloud depth / shade sliders apply when N banks are on.");
                     labeled_slider(ui, hash!(), "Sun radius (px)", 12.0..80.0, &mut self.atmosphere.sun_radius);
                     labeled_slider(
                         ui,
@@ -1346,23 +1343,11 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Clouds (N visual echo)", |ui| {
                     ui.label(
                         None,
-                        "N banks copy wet humidity tiles. They do not store or rain water.",
+                        "N banks copy wet humidity tiles (hotkey N, default off). They do not store or rain, and they do not sit on a sea-level deck. Vapour rise is Buoyant rise / tick.",
                     );
                     labeled_slider(ui, hash!(), "Max parcels", 1.0..64.0, &mut max_parcels);
                     labeled_slider(ui, hash!(), "Visual min humidity", 1.0..120.0, &mut self.cloud.coag_min_hum);
-                    labeled_slider(ui, hash!(), "N streak wetness scale", 40.0..500.0, &mut self.cloud.downpour_mass);
-                    ui.label(
-                        None,
-                        "Vapour rise is lapse-driven (Buoyant rise / tick). No deck height.",
-                    );
-                    labeled_slider(ui, hash!(), "N spawn min above ground", 4.0..120.0, &mut coag_min_alt);
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Ridge clearance",
-                        0.0..36.0,
-                        &mut self.cloud.ridge_clearance,
-                    );
+                    labeled_slider(ui, hash!(), "N bank wetness", 40.0..500.0, &mut self.cloud.downpour_mass);
                 });
                 ui.separator();
 
@@ -1390,8 +1375,8 @@ impl SimSettings {
                     labeled_slider(
                         ui,
                         hash!(),
-                        "Drizzle mass / drop",
-                        4.0..200.0,
+                        "Drizzle mass / drop (255=full cell)",
+                        4.0..255.0,
                         &mut self.cond.mass_per_droplet,
                     );
                     labeled_slider(
@@ -1411,6 +1396,10 @@ impl SimSettings {
                     labeled_slider(ui, hash!(), "Evap rate / pulse", 0.0..8.0, &mut evap_rate);
                     labeled_slider(ui, hash!(), "Evap period (ticks)", 1.0..30.0, &mut evap_period);
                     labeled_slider(ui, hash!(), "Evap dry-above max", 0.0..255.0, &mut dry_above);
+                    ui.label(
+                        None,
+                        "Oro boosts C drizzle on high / climbing land. It is not a humidity spawn floor.",
+                    );
                     labeled_slider(ui, hash!(), "Oro tall above sea", 4.0..60.0, &mut tall_above);
                     labeled_slider(
                         ui,
@@ -1899,10 +1888,9 @@ impl SimSettings {
         self.climate.day_ticks = day_ticks.round().clamp(30.0, 20_000.0) as u64;
         self.climate.night_ticks = night_ticks.round().clamp(30.0, 20_000.0) as u64;
         self.cloud.max_parcels = max_parcels.round().clamp(1.0, 96.0) as usize;
-        self.cloud.coag_min_above_sea = coag_min_alt.round().clamp(2.0, 160.0) as i32;
-        self.cloud.ridge_clearance = self.cloud.ridge_clearance.clamp(0.0, 48.0);
         self.oro.tall_above_sea = tall_above.round().clamp(2.0, 100.0) as i32;
         self.cond.max_events_per_tick = cond_events.round().clamp(0.0, 512.0) as u32;
+        self.cond.mass_per_droplet = self.cond.mass_per_droplet.clamp(4.0, 255.0);
         self.cond.full_mass = self.cond.full_mass.clamp(8.0, 4_000.0);
         self.karst.period_ticks = karst_period.round().clamp(1.0, 256.0) as u64;
         self.karst.pore_scale = self.karst.pore_scale.clamp(0.0, 1.0);

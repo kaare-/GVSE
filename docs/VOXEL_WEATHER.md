@@ -56,10 +56,10 @@ only columns under raining tiles activate.
 `CloudParcel::raining` is now only a HUD readout; nothing draws from it.
 
 **`nimbus` is the parcel *count*, not a rain count** — "how many N echo parcels
-are drawn (cap ~36)". It sits pinned at 36 because banding puts one parcel in
-each of 36 bands, so any moist sky fills them all. It is not a weather signal and
-was misread as one for several rounds. Use `hum` (total humidity mass) as the
-dial instead: it fell from 183k to 95k in playtest once rain started landing.
+are drawn (cap ~36)". N is **off by default**; the echo sits on wet humidity
+tiles (no sea-level spawn floor, no ridge deck). With N off the rebuild is
+skipped. It is not a weather signal. Use `hum` (total humidity mass) as the
+dial instead.
 
 ### Pinned: wind streak overlay needs a real visual
 

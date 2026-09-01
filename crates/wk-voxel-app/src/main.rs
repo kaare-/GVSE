@@ -14,14 +14,14 @@
 //! Hotkeys:
 //! - `Space` — pause / resume physics ticks
 //! - `R` — regenerate the world with a new seed
-//! - `W` — toggle background rain (climatic, always-on cloud row)
+//! - `W` — toggle climatic faucet (extra rain from the sky; default off)
 //! - `C` — toggle condensation rain (feedback from humidity heatmap)
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution (surface limestone + slow groundwater)
 //! - `O` — toggle Set A organisms (Atom step)
 //! - `H` — toggle humidity tile diagnostic (default on)
 //! - `V` — toggle wind streak overlay (local field arrows; default off)
-//! - `N` — toggle soft clouds at all depths (active parcels + far/mid/front echoes + precip)
+//! - `N` — toggle soft humidity-echo banks (default off; no water store, no rain)
 //! - `T` — toggle temperature heatmap overlay
 //! - `U` — toggle ground saturation heatmap (pores + free water)
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
@@ -218,10 +218,11 @@ async fn main() {
     let mut spore_fx = SporeFx::new();
     let mut paused = false;
     let mut organisms_on = true;
-    // Humidity diagnostic default on (`H`); soft clouds default on (`N`).
+    // Humidity diagnostic default on (`H`); soft N echo default off
+    // (press N). The echo is a picture of wet tiles, not a second sky.
     let mut humidity_overlay = true;
     let mut wind_streaks_overlay = false;
-    let mut clouds_on = true;
+    let mut clouds_on = false;
     let mut temp_overlay = false;
     let mut sat_overlay = false;
     let mut mycelium_overlay = false;
@@ -594,6 +595,7 @@ async fn main() {
                 .humidity
                 .advect_with_surface(wind_vx, wind_vy, &scene.wind, &scene.world);
             let tick_no = scene.world.tick;
+            scene.clouds.echo_on = clouds_on;
             scene.clouds.step_with_precip(
                 &mut scene.world,
                 &mut scene.humidity,

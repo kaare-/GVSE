@@ -61,8 +61,11 @@ pub struct CloudConfig {
     /// Unused by physics (save compat). Was the Tab “vapor rise deck”
     /// that parked every thermal at a fixed height above ground.
     pub cloud_alt_above_sea: i32,
+    /// Unused. N spawn uses the live column floor, not sea + N.
     pub coag_min_above_sea: i32,
+    /// Unused. Echoes clip with [`CLOUD_FLOOR_CLIP`], not a ridge hoist.
     pub ridge_clearance: f32,
+    /// Unused. Echoes drift at field scale (`climate_vx × tile`), not this leftover.
     pub parcel_wind_scale: f32,
     /// Fraction of each tile that convects one row up per tick.
     pub buoyant_rise: f32,
@@ -205,9 +208,25 @@ impl CloudParcel {
 }
 
 /// Bounded visual echo of wet humidity tiles.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CloudStore {
     pub parcels: Vec<CloudParcel>,
+    /// When false (N overlay off) skip the echo rebuild. Rise still runs.
+    #[serde(skip, default = "default_echo_on")]
+    pub echo_on: bool,
+}
+
+fn default_echo_on() -> bool {
+    true
+}
+
+impl Default for CloudStore {
+    fn default() -> Self {
+        Self {
+            parcels: Vec::new(),
+            echo_on: true,
+        }
+    }
 }
 
 impl CloudStore {
@@ -292,7 +311,18 @@ impl CloudStore {
                 .unwrap_or_else(|| sky_ceiling_y.div_euclid(humidity.tile_cols.max(1)));
             humidity.buoyant_rise_thermal(cfg.buoyant_rise, max_hy, temp.as_deref_mut());
         }
-        self.rebuild_visuals_from_humidity(humidity, world, wind, sea_level_y, cfg, temp.as_deref());
+        if self.echo_on {
+            self.rebuild_visuals_from_humidity(
+                humidity,
+                world,
+                wind,
+                sea_level_y,
+                cfg,
+                temp.as_deref(),
+            );
+        } else if !self.parcels.is_empty() {
+            self.parcels.clear();
+        }
     }
 
     /// Move blob mass back onto humidity tiles (old saves / leftover coag).
@@ -350,9 +380,10 @@ impl CloudStore {
 
         // --- advance what is already up there ---
         for p in &mut self.parcels {
-            // Drift downwind. This is what makes a deck move across the sky
-            // instead of re-materialising each tick.
-            p.fx += wind.climate_vx * CLOUD_DRIFT_SCALE;
+            // Drift with the climate wind at field scale (cells = tiles × tc).
+            // The old ×6 leftover ran ahead of humidity and parked banks
+            // where the air was no longer wet.
+            p.fx += wind.climate_vx * tc as f32;
             if p.fx < 0.0 {
                 p.fx += width as f32;
             } else if p.fx >= width as f32 {
@@ -366,12 +397,12 @@ impl CloudStore {
 
             let sat = sat_at(hx, hy);
             let floor = cloud_floor_y(world, wind, p.fx);
-            let target = condensation_level(local, sat, floor, sky_top_cell(wind) as f32);
-            p.cruise_fy += (target - p.cruise_fy) * CLOUD_LIFT_RELAX;
-            let lifted = p.cruise_fy.max(floor + cfg.ridge_clearance);
-            p.on_ridge = lifted > p.cruise_fy + 1.0;
+            // Sit on the humidity tile, not a condensation-level deck.
+            let tile_y = (hy * tc + tc / 2) as f32;
+            p.fy = tile_y.max(floor + CLOUD_FLOOR_CLIP);
+            p.cruise_fy = p.fy;
+            p.on_ridge = p.fy > tile_y + 1.0;
             p.deform = if p.on_ridge { 0.25 } else { 0.0 };
-            p.fy = lifted;
             p.raining = (p.vis_mass / sat).clamp(0.0, 1.5) / 1.5 >= 0.42;
         }
         // Dissipated: too thin to be a cloud any more.
@@ -391,7 +422,7 @@ impl CloudStore {
                     return None;
                 }
                 let min_hy = *floor_hy.entry(hx).or_insert_with(|| {
-                    local_sky_hy_min(world, wind, hx, tc, cfg.coag_min_above_sea)
+                    local_sky_hy_min(world, wind, hx, tc, 0)
                 });
                 if hy < min_hy {
                     return None;
@@ -424,20 +455,18 @@ impl CloudStore {
             occupied[band_of(cx as f32)] = true;
             let sat = sat_at(hx, hy);
             let floor = cloud_floor_y(world, wind, cx as f32);
-            let cruise = condensation_level(mass, sat, floor, sky_top_cell(wind) as f32);
-            let fy = cruise.max(floor + cfg.ridge_clearance);
-            // Spawn at the local mass rather than ramping from zero, so a single
-            // call still produces a usable deck.
+            let fy = (cy as f32).max(floor + CLOUD_FLOOR_CLIP);
+            // Spawn on the wet tile, not a condensation-level / sea deck.
             self.parcels.push(CloudParcel {
                 fx: cx as f32,
                 fy,
                 mass: 0.0,
                 raining: (mass / sat).clamp(0.0, 1.5) / 1.5 >= 0.42,
-                on_ridge: fy > cruise + 1.0,
+                on_ridge: false,
                 shape_seed: parcel_shape_seed(cx, cy),
-                cruise_fy: cruise,
+                cruise_fy: fy,
                 vis_mass: mass,
-                deform: if fy > cruise + 1.0 { 0.25 } else { 0.0 },
+                deform: 0.0,
             });
         }
     }
@@ -492,7 +521,7 @@ impl CloudStore {
                     return None;
                 }
                 let min_hy = *floor_hy.entry(hx).or_insert_with(|| {
-                    local_sky_hy_min(world, wind, hx, tc, cfg.coag_min_above_sea)
+                    local_sky_hy_min(world, wind, hx, tc, 0)
                 });
                 if hy < min_hy {
                     return None;
@@ -512,12 +541,12 @@ impl CloudStore {
                     .unwrap_or(Humidity::MAX_MASS_PER_TILE)
                     .max(1.0);
                 let cx = (hx * tc + tc / 2) as f32;
+                let cy = (hy * tc + tc / 2) as f32;
                 let floor = cloud_floor_y(world, wind, cx);
-                let cruise = condensation_level(mass, sat, floor, sky_top_cell(wind) as f32);
                 let density = (mass / sat).clamp(0.0, 1.5);
                 CloudSample {
                     fx: cx,
-                    fy: cruise.max(floor + cfg.ridge_clearance),
+                    fy: cy.max(floor + CLOUD_FLOOR_CLIP),
                     density,
                     raining: density / 1.5 >= 0.42,
                 }
@@ -528,10 +557,9 @@ impl CloudStore {
 
 /// Height at which rising air condenses, in world cells.
 ///
-/// Lifting condensation level from dewpoint depression, as a fraction of the
-/// **remaining column** (local floor → sky). Saturated air sits low; dry air
-/// can sit higher. There is no fixed cell-count deck — that Tab lever is
-/// what parked every thermal in one band.
+/// Unused by the live N echo (parcels sit on humidity tiles). Kept and
+/// tested so a later field-derived deck can use dewpoint height without
+/// a sea-level lock. Saturated air sits low; dry air can sit higher.
 fn condensation_level(mass: f32, sat: f32, floor_y: f32, sky_y: f32) -> f32 {
     let deficit = (1.0 - mass / sat.max(1.0)).clamp(0.0, 1.0);
     let room = (sky_y - floor_y).max(0.0);
@@ -645,12 +673,9 @@ fn sky_top_cell(wind: &Wind) -> i32 {
 /// column is still solid or wet so a player tower above
 /// `surface + 64` (the old hard cap — ~y 263 on inland hills) still
 /// bumps humidity and clouds instead of letting them pass through.
-/// Wind speed multiplier for cloud drift, in cells per tick.
-///
-/// Clouds ride the climate wind faster than the vapour field advects: a deck
-/// that moved at exactly the humidity's pace looked static, because the humidity
-/// under it moved with it.
-const CLOUD_DRIFT_SCALE: f32 = 6.0;
+/// How far above the live column floor an echo may sit (cells).
+/// Not a sea-level deck — just enough to not stamp into rock.
+const CLOUD_FLOOR_CLIP: f32 = 2.0;
 
 /// How fast a parcel's drawn size follows the humidity it is sitting in.
 ///
@@ -658,9 +683,6 @@ const CLOUD_DRIFT_SCALE: f32 = 6.0;
 /// of ticks instead of snapping to whatever the field says this frame, which is
 /// what made the old deck jitter.
 const CLOUD_MASS_RELAX: f32 = 0.04;
-
-/// How fast a parcel climbs or sinks toward its condensation level.
-const CLOUD_LIFT_RELAX: f32 = 0.02;
 
 /// Fraction of `coag_min_hum` a parcel may thin to before it dissipates.
 ///
@@ -1045,6 +1067,59 @@ mod tests {
     }
 
     #[test]
+    fn echo_off_clears_parcels_without_rebuild() {
+        let p = WorldgenParams::default();
+        let wind = wind_for(&p);
+        let mut h = Humidity::with_world_bounds(
+            4,
+            0,
+            p.bedrock_floor_y,
+            p.width_cols,
+            p.sky_ceiling_y,
+        );
+        h.wrap_x = true;
+        let sky_y = p.sea_level_y + 40;
+        for x in 40..56 {
+            h.add(x, sky_y, 80.0);
+        }
+        let mut world = World::new(p.seed);
+        let mut store = CloudStore {
+            echo_on: false,
+            parcels: vec![CloudParcel {
+                fx: 44.0,
+                fy: sky_y as f32,
+                mass: 0.0,
+                raining: false,
+                on_ridge: false,
+                shape_seed: 1,
+                cruise_fy: sky_y as f32,
+                vis_mass: 80.0,
+                deform: 0.0,
+            }],
+        };
+        let cfg = CloudConfig {
+            coag_min_hum: 10.0,
+            max_parcels: 8,
+            ..CloudConfig::default()
+        };
+        store.step_with_precip(
+            &mut world,
+            &mut h,
+            &wind,
+            p.sea_level_y,
+            p.sky_ceiling_y,
+            1,
+            &cfg,
+            None,
+            None,
+        );
+        assert!(
+            store.parcels.is_empty(),
+            "N off must skip humidity-echo rebuild"
+        );
+    }
+
+    #[test]
     fn ridge_rebuild_lifts_echo_above_surface() {
         let p = WorldgenParams::default();
         let wind = wind_for(&p);
@@ -1078,12 +1153,10 @@ mod tests {
         clouds.rebuild_visuals_from_humidity(&h, &world, &wind, p.sea_level_y, &cfg, None);
         assert!(!clouds.is_empty());
         let c = &clouds.parcels[0];
-        let min_clear = surface + cfg.ridge_clearance * 0.5;
         assert!(
-            c.fy > min_clear,
-            "cloud fy={} must sit above surface+clearance {}",
-            c.fy,
-            min_clear
+            c.fy >= surface && c.fy < surface + 12.0,
+            "echo must sit on the wet tile, not a ridge deck (fy={} surface={surface})",
+            c.fy
         );
     }
 
@@ -1144,7 +1217,7 @@ mod tests {
         humidity.wrap_x = true;
         let cfg = CloudConfig::default();
         // Wet band across the whole sky so a drifting parcel stays fed.
-        let hy = (sea + cfg.coag_min_above_sea + 8) / 4;
+        let hy = (sea + 8) / 4;
         for hx in 0..(width / 4) {
             humidity.cells.insert((hx, hy), cfg.coag_min_hum * 6.0);
         }
