@@ -53,13 +53,10 @@ The atmosphere holds 44% less water because rain now lands and drains it. The
 0.7 ms is falling rain's churn, and it is affordable because rain is **sparse** —
 only columns under raining tiles activate.
 
-`CloudParcel::raining` is now only a HUD readout; nothing draws from it.
-
-**`nimbus` is the parcel *count*, not a rain count** — "how many N echo parcels
-are drawn (cap ~36)". N is **off by default**; the echo sits on wet humidity
-tiles (no sea-level spawn floor, no ridge deck). With N off the rebuild is
-skipped. It is not a weather signal. Use `hum` (total humidity mass) as the
-dial instead.
+The N cartoon-bank overlay is **deleted**. `CloudStore` only dumps leftover
+save-file parcel mass into humidity and runs buoyant rise. Shade, sky cover,
+and the vapour look come from the humidity field (`H`). Use `hum` (total
+humidity mass) as the sky-water dial.
 
 ### Pinned: wind streak overlay needs a real visual
 
@@ -202,63 +199,31 @@ Do not add a sea-level humidity floor or a fixed "cloud row" teleport
 to get this look back. If the sky goes sheet-fog again, check those two
 gates first.
 
-## Decided: no cloud animation at all — render the vapour field
+## Landed: no cloud animation — humidity is the vapour look
 
-**Design call (playtest, 2026-08-26).** Drop cloud parcels entirely rather than
-replacing them with a derived deck, and tune the *vapour field's own rendering*
-instead. The glitchy look of water condensing out of the field was judged
-visually interesting on its own and expected to improve with convection.
+**Design call (playtest, 2026-08-26), deleted 2026-09-01.** Drop cloud parcels
+entirely rather than replacing them with a derived deck. Tune the *vapour
+field's own rendering* instead. The N overlay is gone and is not coming back.
 
 This is "a cloud is just an air block with saturation" taken to its conclusion:
 if the field is the cloud, there is no reason to derive an intermediate object
-from it. What goes:
+from it. What went:
 
-- `CloudStore`'s visual half — parcels, persistence, drift, lift, dissipation
+- `CloudStore`'s visual half — parcels, persistence, drift, dissipation
 - `draw_clouds` and the three `draw_depth_cloud_layer` call sites
-- quite possibly `deck_from_field` too (added just before this call — it derives a
-  banded deck, which is still an intermediate representation)
+- `deck_from_field`, `pick_spread_across_x`, `nimbus` / `echo` HUD tags
+- the `N` hotkey and Tab Clouds (N visual echo) tree
 
-What replaces it: draw humidity saturation directly as the sky's look, the way
-the `H` overlay already does but as the default presentation rather than a
-diagnostic.
+What stayed: leftover save-file parcel mass dumps into humidity; buoyant rise
+still lifts vapour; `cloud_floor_y` still clips the `H` haze against terrain
+(not damp air). Shade and sky cover read humidity (`cloud_sky_transmit`,
+`precip_cover_fraction`). `H` is the vapour look.
 
-Consequences worth knowing before starting:
+## Superseded plan: a derived deck instead of parcels
 
-- `pick_spread_across_x` and the banding exist to make a *parcel* selection
-  spatially stable. Rendering the field needs none of it — the field is already
-  spatially coherent everywhere. Banding can go with the parcels.
-- `CloudParcel::raining` and the `nimbus` HUD field lose their last purpose.
-- Cloud floor / ridge clearance (`cloud_floor_y`) exists to stop parcels sinking
-  into terrain. A field has no such problem, so that machinery may also go — which
-  would remove the function whose unbounded upward scan cost roughly two million
-  hashmap lookups per frame.
-
-## Superseded plan: clouds drawn from the field, parcels deleted
-
-"A cloud is just an air block with saturation" is a claim about where clouds
-*come from* — an observation about the field, not an object placed on top of it.
-That can be honoured at tile resolution without per-cell vapour, and it deletes
-the most code.
-
-Today `CloudStore` maintains parcels that must be placed, persisted, drifted,
-lifted and dissipated — five concerns, each of which has already been a bug. If
-the deck is derived from humidity saturation at draw time, all five stop existing:
-the field already has position, density and motion, because
-`Humidity::advect` moves it.
-
-Order of work:
-
-1. Expose the deck as a **derivation** of `(humidity, temperature)`: for each
-   band, saturation ratio → density, and condensation level → altitude
-   (`condensation_level`, already written and tested).
-2. Rewire the four app draw sites (`draw_depth_cloud_layer` ×3, `draw_clouds`) to
-   read that derivation instead of `CloudStore::parcels`.
-3. Delete parcel persistence, drift, dissipation, and `CloudStore`'s visual half.
-
-**Watch for:** the derivation must be *spatially stable* or the jitter of fix 5
-returns. Banding by world x (`pick_spread_across_x`) is what made it stable;
-without that, top-N selection by mass moves discontinuously. Keep a test that
-advecting the field moves the deck smoothly.
+Not taken. A humidity-derived deck would still have been a second
+representation. The landed call deletes the animation and draws the
+field (`H`) instead.
 
 ## It works (**playtest, full diurnal cycle**)
 
@@ -464,20 +429,18 @@ Do not re-walk these:
 - **Humidity + world water is conserved exactly.** Measured holding at
   3,869,370 across 3000 ticks. `audit::sat_totals` plus `Humidity::total_mass`
   is the harness; use it on any change here.
-- **Parcels must never hold real mass.** `mass` is always 0.0 and `vis_mass` is
-  the drawn size. `release_parcels_into_humidity` would otherwise pour a copy
-  back into the sky and mint vapour. That function also only releases parcels
-  that *do* hold mass — taking the whole list clears the deck every tick, which
-  silently made a first attempt at persistence a no-op.
+- **Parcels must never hold live mass.** `CloudStore` is save-compat only: the
+  next step dumps leftover parcel mass into humidity and clears the list. Do
+  not rebuild cartoon banks from the field.
 - A conservation test only checks what you point it at. `ground_sat_sum` reported
   conserved mass as lost once rain started nucleating in the air; it needed to be
   a whole-world sum.
 
 ## Probes
 
-- `tests/rain_probe.rs` — does it rain, and is it visible? Separates *water
-  delivered* from *parcels flagged raining*, reports cloud coverage against
-  eligible tiles, day/night rain fraction, and the dead ends above.
+- `tests/rain_probe.rs` — does humidity actually drain into ground water?
+  Reports tiles wanting rain, day/night rain fraction, and the dead ends above.
+  There is no parcel-animation half anymore.
 - `tests/perf_profile.rs` — frame budget, including the active-cell count that
   gates any per-cell atmospheric work. Includes snow drift and clay
   suspension (those live outside `tick_with_perf` in the app).

@@ -19,9 +19,8 @@
 //! - `E` — toggle evaporation (routes into the humidity heatmap)
 //! - `K` — toggle karst dissolution (surface limestone + slow groundwater)
 //! - `O` — toggle Set A organisms (Atom step)
-//! - `H` — toggle humidity tile diagnostic (default on)
+//! - `H` — toggle humidity vapour wash (default on)
 //! - `V` — toggle wind streak overlay (local field arrows; default off)
-//! - `N` — toggle soft humidity-echo banks (default off; no water store, no rain)
 //! - `T` — toggle temperature heatmap overlay
 //! - `U` — toggle ground saturation heatmap (pores + free water)
 //! - `M` — toggle mycelium strain overlay (bright per-network colors)
@@ -33,14 +32,14 @@
 //! - `F4` — creature list (living / dead roster; click row to inspect)
 //! - `F5` / `F9` — save / load simulation (`saves/*.gvsesim`)
 //! - `F6` — glossary / how-it-works (keys, water, sky, HUD words)
-//! - `Tab` — live settings (world size, materials, wind, clouds, …)
+//! - `Tab` — live settings (world size, materials, wind, humidity, …)
 //! - click — block / organism inspector (hidden while F1 HUD is off)
 //! - `Left` / `Right` — pan the camera horizontally (wraps on ring worlds)
 //! - `Up` / `Down` — pan vertically
 //! - `Esc` — close overlays, or quit confirm (save / discard / cancel)
 //!
 //! Sky follows the shared climate clock (pixel sun by day, pixel moon by night).
-//! Temperature tiles warm with sun, cool at night, and shade under pixel clouds.
+//! Temperature tiles warm with sun, cool at night, and shade under wet humidity.
 //! Atmosphere stack: `docs/SKY.md` / [`atmosphere`].
 
 mod atmosphere;
@@ -64,7 +63,7 @@ use wk_voxel::{
     celestial_moon_screen_pos_cfg,
     celestial_sun_screen_pos_cfg, collect_live_root_world_cells, day_night_factor_cfg,
     geotech_map_due, humidity_diffuse_due, is_daytime_cfg, plan_active,
-    pore_wetness_with, precip_forms_snow_at_air, sail_plants_on_wind_rafts_cfg,
+    pore_wetness_with, sail_plants_on_wind_rafts_cfg,
     set_parallel_enabled, step_carbon_budget, support_map_due, temperature_step_due, tick_with_life,
     WIND_FIELD_PERIOD,
     wake_competent_bodies_all, wake_unsupported_grains,
@@ -74,8 +73,7 @@ use wk_voxel::{
 
 use crate::atmosphere::{
     apply_celestial_key_rgb, apply_organism_celestial_key_rgb, draw_canopy_air_dim,
-    draw_celestials, draw_clouds, draw_depth_cloud_layer, draw_haze_and_wind, draw_wind_streaks,
-    CloudDepthLayer,
+    draw_celestials, draw_haze_and_wind, draw_wind_streaks,
     draw_ridge_silhouettes, draw_sky, estimate_snow_bias, is_organism_aboveground,
     organism_celestial_rim, sky_weather_for_scene, terrain_celestial_key_strength,
     toward_light_celestial, RidgeSilhouette,
@@ -218,11 +216,9 @@ async fn main() {
     let mut spore_fx = SporeFx::new();
     let mut paused = false;
     let mut organisms_on = true;
-    // Humidity diagnostic default on (`H`); soft N echo default off
-    // (press N). The echo is a picture of wet tiles, not a second sky.
+    // Humidity diagnostic default on (`H`).
     let mut humidity_overlay = true;
     let mut wind_streaks_overlay = false;
-    let mut clouds_on = false;
     let mut temp_overlay = false;
     let mut sat_overlay = false;
     let mut mycelium_overlay = false;
@@ -475,9 +471,6 @@ async fn main() {
             if is_key_pressed(KeyCode::V) {
                 wind_streaks_overlay = !wind_streaks_overlay;
             }
-            if is_key_pressed(KeyCode::N) {
-                clouds_on = !clouds_on;
-            }
             if is_key_pressed(KeyCode::T) {
                 temp_overlay = !temp_overlay;
             }
@@ -595,7 +588,6 @@ async fn main() {
                 .humidity
                 .advect_with_surface(wind_vx, wind_vy, &scene.wind, &scene.world);
             let tick_no = scene.world.tick;
-            scene.clouds.echo_on = clouds_on;
             scene.clouds.step_with_precip(
                 &mut scene.world,
                 &mut scene.humidity,
@@ -999,22 +991,18 @@ async fn main() {
         // Atmosphere: sky → far clouds → ridges → mid clouds → active clouds → terrain.
         let phase = &settings.phase;
         let temp = &scene.temperature;
-        let snow_bias = estimate_snow_bias(&scene.clouds, |fx, fy| {
-            let gx = scene.world.wrap_x(fx.round() as i32);
-            let air_y = fy.round() as i32;
-            precip_forms_snow_at_air(temp, gx, air_y, phase)
-        });
+        let snow_bias = estimate_snow_bias(
+            &scene.humidity,
+            temp,
+            phase.freeze_point_c,
+        );
         let sky_weather = sky_weather_for_scene(
             scene.world.tick,
             &settings.climate,
-            &scene.clouds,
             &scene.humidity,
             &scene.temperature,
             &scene.carbon,
             scene.params.width_cols,
-            scene.params.wrap_x,
-            scene.params.sea_level_y,
-            settings.cloud.downpour_mass,
             snow_bias,
         );
         draw_sky(
@@ -1073,31 +1061,6 @@ async fn main() {
             scene.params.width_cols,
         );
 
-        // Soft clouds (N): far echoes → ridges → mid echoes → active parcels + precip.
-        if clouds_on {
-            draw_depth_cloud_layer(
-                &scene.clouds,
-                &scene.humidity,
-                &scene.wind,
-                scene.world.tick,
-                CloudDepthLayer::Far,
-                &settings.atmosphere,
-                scene.params.seed,
-                scene.params.sea_level_y,
-                settings.cloud.downpour_mass,
-                cam_x,
-                cam_y,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.wrap_x,
-                scene.params.width_cols,
-                sw,
-                sh,
-            );
-        }
-
         // Ridges behind terrain. Skip whenever a sat/temp/myc/geotech
         // heatmap is on — mid/far fills stamp hard horizontal shelves
         // through even a moderate landscape blend (playtest y≈36 line).
@@ -1122,56 +1085,6 @@ async fn main() {
                 scene.params.width_cols,
                 sw,
                 sh,
-            );
-        }
-
-        if clouds_on {
-            draw_depth_cloud_layer(
-                &scene.clouds,
-                &scene.humidity,
-                &scene.wind,
-                scene.world.tick,
-                CloudDepthLayer::Mid,
-                &settings.atmosphere,
-                scene.params.seed,
-                scene.params.sea_level_y,
-                settings.cloud.downpour_mass,
-                cam_x,
-                cam_y,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.wrap_x,
-                scene.params.width_cols,
-                sw,
-                sh,
-            );
-            draw_clouds(
-                &scene.clouds,
-                &scene.humidity,
-                &scene.world,
-                &scene.wind,
-                scene.world.tick,
-                cam_x,
-                cam_y,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.sea_level_y,
-                scene.params.wrap_x,
-                scene.params.width_cols,
-                sw,
-                sh,
-                settings.cloud.downpour_mass,
-                &settings.atmosphere,
-                scene.params.seed,
-                |fx, fy| {
-                    let gx = scene.world.wrap_x(fx.round() as i32);
-                    let air_y = fy.round() as i32;
-                    precip_forms_snow_at_air(temp, gx, air_y, phase)
-                },
             );
         }
 
@@ -1336,20 +1249,19 @@ async fn main() {
             }
         }
 
-        // Day sun cast / under-canopy / cloud dim — after terrain, before front vapour.
+        // Day sun cast / under-canopy / vapour dim — after terrain.
         // Night moon cast is drawn after organisms so lee covers bodies.
         if organisms_on && sun_day {
             draw_canopy_air_dim(
                 &scene.world,
                 &scene.organisms,
-                &scene.clouds,
+                &scene.humidity,
                 scene.world.tick,
                 draw_wind_vx,
                 sun_local,
                 celestial_sx,
                 celestial_sy,
                 true,
-                settings.cloud.downpour_mass,
                 &settings.atmosphere,
                 origin_x,
                 origin_y,
@@ -1364,32 +1276,7 @@ async fn main() {
             );
         }
 
-        // Front soft cloud echoes (N) — ahead of land for scale; plants stay readable.
-        if clouds_on {
-            draw_depth_cloud_layer(
-                &scene.clouds,
-                &scene.humidity,
-                &scene.wind,
-                scene.world.tick,
-                CloudDepthLayer::Front,
-                &settings.atmosphere,
-                scene.params.seed,
-                scene.params.sea_level_y,
-                settings.cloud.downpour_mass,
-                cam_x,
-                cam_y,
-                origin_x,
-                origin_y,
-                cell_px,
-                scene.params.bedrock_floor_y,
-                scene.params.wrap_x,
-                scene.params.width_cols,
-                sw,
-                sh,
-            );
-        }
-
-        // Humidity tile diagnostic (H) — not clouds.
+        // Humidity tile diagnostic (H) — vapour field, not cartoon banks.
         if humidity_overlay {
             draw_haze_and_wind(
                 &scene.humidity,
@@ -1702,14 +1589,13 @@ async fn main() {
             draw_canopy_air_dim(
                 &scene.world,
                 &scene.organisms,
-                &scene.clouds,
+                &scene.humidity,
                 scene.world.tick,
                 draw_wind_vx,
                 sun_local,
                 celestial_sx,
                 celestial_sy,
                 false,
-                settings.cloud.downpour_mass,
                 &settings.atmosphere,
                 origin_x,
                 origin_y,
@@ -1797,7 +1683,7 @@ async fn main() {
                 "on/MINT"
             };
             let info = format!(
-                "fps={:.0}  tick={} {} T̄={:.1}C rain={} drizzle={} evap={} phase={} nimbus={} echo={:.0} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
+                "fps={:.0}  tick={} {} T̄={:.1}C rain={} drizzle={} evap={} phase={} hum={:.0} C={:.0}/{:.0} spores={} wind={:.2} land={} creatures={}/{} ({}) dead={} {}",
                 fps_smoothed(),
                 scene.world.tick,
                 tod,
@@ -1806,8 +1692,6 @@ async fn main() {
                 if settings.cond_rain_on { "on" } else { "off" },
                 if settings.evap_on { "on" } else { "off" },
                 if settings.phase.enabled { "on" } else { "off" },
-                scene.clouds.len(),
-                scene.clouds.visual_mass(),
                 scene.humidity.total_mass(),
                 scene.carbon.atmosphere,
                 scene.carbon.dissolved,
@@ -1825,7 +1709,7 @@ async fn main() {
             );
             draw_rectangle(0.0, sh - hud_h, sw, hud_h, Color::from_rgba(0, 0, 0, 200));
             draw_text(
-                "Tab|Space|R|W/C/E/K/O|I|N/T/U/H/V/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
+                "Tab|Space|R|W/C/E/K/O|I|T/U/H/V/M/G|F1 HUD|F2 creat|F3 terra|F4 list|F5/F9 save|F6 gloss|Esc quit",
                 8.0,
                 sh - INFO_H - 4.0,
                 14.0,

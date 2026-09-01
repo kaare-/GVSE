@@ -11,41 +11,15 @@ use wk_voxel::{
     celestial_sun_screen_pos_cfg, cloud_floor_y, cloud_sky_transmit, continental_surface_y,
     day_night_factor_cfg, falls_through_empty_air, humidity_mean_norm, is_standing_water,
     precip_cover_fraction, resolve_organism_draw_cells, shade_transmit_column,
-    sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, CloudStore, Humidity,
+    sky_rgb_at_height_weather, CanopyIndex, CarbonBudget, ClimateConfig, Humidity,
     ModuleId, OrganismStore, PosedModule, SkyWeatherParams, Temperature, Wind, World,
     CHUNK_CELLS_H, CHUNK_CELLS_W, GRAIN_REPOSE_HAZE_MAX, LIVE_SURFACE_SEARCH,
 };
 
-/// Active-layer parcel parallax (1 = locked to terrain; lower = farther).
-pub const CLOUD_PARALLAX: f32 = 0.78;
 pub const FAR_RIDGE_PARALLAX: f32 = 0.12;
 pub const NEAR_RIDGE_PARALLAX: f32 = 0.32;
-/// Soft cloud bank parallax for depth echoes (humidity-driven, not tile paint).
-pub const CLOUD_FAR_PARALLAX: f32 = 0.20;
-pub const CLOUD_MID_PARALLAX: f32 = 0.48;
-pub const CLOUD_FRONT_PARALLAX: f32 = 1.08;
 const RIDGE_REFRESH_TICKS: u64 = 30;
 const MILD_TEMP_C: f32 = 18.0;
-/// Depth pass for soft cloud banks (see `docs/SKY.md`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CloudDepthLayer {
-    Far,
-    Mid,
-    /// Visual humidity echo on the playfield.
-    Active,
-    Front,
-}
-
-/// One soft lobe bank to stamp (parcel echo or humidity-peak ghost).
-#[derive(Debug, Clone, Copy)]
-struct SoftCloudSrc {
-    fx: f32,
-    fy: f32,
-    wet: f32,
-    shape_seed: u32,
-    deform: f32,
-    radius_cells: f32,
-}
 
 /// Live-tunable sky / ridge / cloud cosmetics (Tab → Climate → Sky look).
 ///
@@ -72,17 +46,10 @@ pub struct AtmosphereLookConfig {
     pub ridge_crest_blend: f32,
     /// Extra far-plate mix into mid crest when far sits behind it (0..1).
     pub ridge_far_into_crest: f32,
-    /// 0 = grey banks, 1 = bright white cores.
-    pub cloud_whiteness: f32,
     /// Strength of sun-angled cast shadows from plants/creatures (0..1).
     pub cast_shadow_strength: f32,
-    /// Mild column dim under cloud cover (0..1).
+    /// Mild column dim under wet humidity (0..1).
     pub cloud_shade_strength: f32,
-    /// Humidity vapour layer strengths (0..1).
-    pub vapour_far: f32,
-    pub vapour_mid: f32,
-    pub vapour_active: f32,
-    pub vapour_front: f32,
     /// `H` overlay: bilinear per-cell sample (on) vs flat 4×4 tiles (off).
     pub haze_resample: bool,
     /// `H` overlay: seats / samples below this mass do not paint.
@@ -105,13 +72,8 @@ impl Default for AtmosphereLookConfig {
             ridge_feather_far: 5.0,
             ridge_crest_blend: 0.55,
             ridge_far_into_crest: 0.70,
-            cloud_whiteness: 0.62,
             cast_shadow_strength: 0.85,
             cloud_shade_strength: 0.35,
-            vapour_far: 0.55,
-            vapour_mid: 0.70,
-            vapour_active: 0.85,
-            vapour_front: 0.65,
             haze_resample: true,
             haze_min_mass: 0.0,
         }
@@ -402,197 +364,6 @@ fn humidity_haze_alpha_gated(mass: f32, max_mass: f32, min_mass: f32) -> u8 {
     humidity_haze_alpha_cell(mass, max_mass, 0.0)
 }
 
-fn cloud_layer_strength(look: &AtmosphereLookConfig, layer: CloudDepthLayer) -> f32 {
-    match layer {
-        CloudDepthLayer::Far => look.vapour_far,
-        CloudDepthLayer::Mid => look.vapour_mid,
-        CloudDepthLayer::Active => look.vapour_active,
-        CloudDepthLayer::Front => look.vapour_front,
-    }
-    .clamp(0.0, 1.0)
-}
-
-/// Gather soft lobe sources from the visual humidity echo.
-///
-/// Far / mid / front are parallax echoes of the same `CloudStore` — humidity
-/// already owns the water; we do not paint the humidity tile raster here.
-fn gather_soft_cloud_srcs(
-    clouds: &CloudStore,
-    _humidity: &Humidity,
-    layer: CloudDepthLayer,
-    _sea_level_y: i32,
-    _world_seed: u64,
-    downpour_mass: f32,
-) -> Vec<SoftCloudSrc> {
-    let (size_k, wet_k, y_bias, seed_xor, skip_mod, skip_lt) = match layer {
-        CloudDepthLayer::Far => (0.72, 0.55, 14.0, 0xA11Fu32, 5u32, 2u32),
-        CloudDepthLayer::Mid => (0.90, 0.75, 6.0, 0xB22E, 4, 1),
-        CloudDepthLayer::Active => (1.0, 1.0, 0.0, 0, 1, 0),
-        CloudDepthLayer::Front => (1.15, 0.65, -4.0, 0xC33D, 3, 1),
-    };
-    let mut out = Vec::with_capacity(clouds.parcels.len());
-
-    if layer == CloudDepthLayer::Active {
-        for p in &clouds.parcels {
-            out.push(SoftCloudSrc {
-                fx: p.fx,
-                fy: p.fy,
-                wet: p.wetness_with(downpour_mass),
-                shape_seed: p.shape_seed,
-                deform: p.deform,
-                radius_cells: p.radius(),
-            });
-        }
-        return out;
-    }
-
-    for p in &clouds.parcels {
-        let seed = p.shape_seed ^ seed_xor;
-        if skip_mod > 1 && (seed % skip_mod) < skip_lt {
-            continue;
-        }
-        let phase = (seed & 0xFFFF) as f32 / 65535.0;
-        out.push(SoftCloudSrc {
-            fx: p.fx + (phase - 0.5) * 28.0,
-            fy: p.fy + y_bias + (phase - 0.5) * 10.0,
-            wet: (p.wetness_with(downpour_mass) * wet_k).clamp(0.0, 1.0),
-            shape_seed: seed,
-            deform: (p.deform * 0.45).clamp(0.0, 1.0),
-            radius_cells: (p.radius() * size_k).clamp(5.0, 22.0),
-        });
-    }
-    out
-}
-
-fn paint_soft_cloud_mask(
-    mask: &HashMap<(i32, i32), f32>,
-    cell_px: f32,
-    look: &AtmosphereLookConfig,
-    alpha_scale: f32,
-) {
-    let alpha_scale = alpha_scale.clamp(0.0, 1.0);
-    if alpha_scale < 0.02 || mask.is_empty() {
-        return;
-    }
-    let white = look.cloud_whiteness.clamp(0.0, 1.0);
-    for (&(ix, iy), &wet) in mask {
-        let mut n = 0u8;
-        for (dx, dy) in [
-            (-1, 0),
-            (1, 0),
-            (0, -1),
-            (0, 1),
-            (-1, -1),
-            (1, -1),
-            (-1, 1),
-            (1, 1),
-        ] {
-            if mask.contains_key(&(ix + dx, iy + dy)) {
-                n += 1;
-            }
-        }
-        let edge = (n as f32 / 8.0).clamp(0.0, 1.0);
-        let base = 165.0 + white * 70.0;
-        let shade = (base - wet * (28.0 + white * 12.0)) as u8;
-        let alpha =
-            ((120.0 + wet * 70.0) * (0.22 + 0.78 * edge) * alpha_scale).min(210.0) as u8;
-        if alpha < 10 {
-            continue;
-        }
-        let lift = (4.0 + white * 10.0) as u8;
-        draw_rectangle(
-            ix as f32 * cell_px,
-            iy as f32 * cell_px,
-            cell_px,
-            cell_px,
-            Color::from_rgba(
-                shade.saturating_add(lift),
-                shade.saturating_add(lift.saturating_add(2)),
-                shade.saturating_add(lift.saturating_add(4)),
-                alpha,
-            ),
-        );
-    }
-}
-
-/// Soft lobe cloud banks for one depth layer (never paints the humidity tile raster).
-pub fn draw_depth_cloud_layer(
-    clouds: &CloudStore,
-    humidity: &Humidity,
-    wind: &Wind,
-    tick: u64,
-    layer: CloudDepthLayer,
-    look: &AtmosphereLookConfig,
-    world_seed: u64,
-    sea_level_y: i32,
-    downpour_mass: f32,
-    cam_x: f32,
-    cam_y: f32,
-    origin_x: f32,
-    origin_y: f32,
-    cell_px: f32,
-    bedrock_floor_y: i32,
-    wrap_x: bool,
-    width_cols: i32,
-    sw: f32,
-    sh: f32,
-) {
-    let strength = cloud_layer_strength(look, layer);
-    if strength <= 0.02 || cell_px <= 0.0 {
-        return;
-    }
-    let srcs = gather_soft_cloud_srcs(
-        clouds,
-        humidity,
-        layer,
-        sea_level_y,
-        world_seed,
-        downpour_mass,
-    );
-    if srcs.is_empty() {
-        return;
-    }
-    let (parallax, y_lag_scale, scroll_k) = match layer {
-        CloudDepthLayer::Far => (CLOUD_FAR_PARALLAX, 0.40, 0.0),
-        CloudDepthLayer::Mid => (CLOUD_MID_PARALLAX, 0.50, 0.0),
-        CloudDepthLayer::Active => (CLOUD_PARALLAX, 0.55, 0.0),
-        CloudDepthLayer::Front => (CLOUD_FRONT_PARALLAX, 0.20, 0.18),
-    };
-    let lag_x = cam_x * (1.0 - parallax);
-    let lag_y = cam_y * (1.0 - parallax) * y_lag_scale;
-    let scroll_x = if scroll_k > 0.0 {
-        let vx = wind.effective_vx(tick);
-        (get_time() as f32 * vx * cell_px * scroll_k).rem_euclid(sw + 80.0)
-    } else {
-        0.0
-    };
-    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-    let mut mask: HashMap<(i32, i32), f32> = HashMap::with_capacity(srcs.len() * 64);
-    for src in &srcs {
-        let r = src.radius_cells * cell_px;
-        for &x_copy in x_copies {
-            let sx = origin_x
-                + (src.fx + (x_copy * width_cols) as f32) * cell_px
-                + lag_x
-                + scroll_x;
-            let sy = origin_y - (src.fy - bedrock_floor_y as f32) * cell_px + lag_y;
-            if sx + r * 2.0 < 0.0 || sx - r * 2.0 > sw || sy + r < 0.0 || sy - r > sh {
-                continue;
-            }
-            stamp_pixel_cloud_mask(
-                &mut mask,
-                sx,
-                sy,
-                r,
-                src.wet,
-                src.shape_seed,
-                src.deform,
-                cell_px,
-            );
-        }
-    }
-    paint_soft_cloud_mask(&mask, cell_px, look, strength);
-}
 
 fn lerp_u8(a: u8, b: u8, t: f32) -> u8 {
     let t = t.clamp(0.0, 1.0);
@@ -661,19 +432,13 @@ fn ridge_palette(
 fn sample_sky_weather(
     _tick: u64,
     _climate: &ClimateConfig,
-    clouds: &CloudStore,
     humidity: &Humidity,
     temperature: &Temperature,
     carbon: &CarbonBudget,
     width_cols: i32,
-    wrap_x: bool,
-    sea_level_y: i32,
-    downpour_mass: f32,
     snow_bias: f32,
 ) -> SkyWeatherParams {
-    let wrap = if wrap_x { Some(width_cols) } else { None };
-    let precip_cover = precip_cover_fraction(clouds, 0, width_cols, wrap, downpour_mass);
-    let _ = sea_level_y;
+    let precip_cover = precip_cover_fraction(humidity, 0, width_cols);
     // Mean the tiles that actually hold vapour — not a global sea+4 cut
     // that pinned haze / sky tint to the lake line.
     let humidity_mean = humidity_mean_norm(humidity, i32::MIN);
@@ -1160,7 +925,6 @@ fn draw_ridge_band(
 /// Occupied 4×4 seats plus a one-tile neighbour halo (wrapped). A drop
 /// masks that column from itself downward (1-wide). Cells that remain
 /// bilinear-sample the store so tile edges do not read as a clamp.
-/// Soft cloud banks are separate (`N` / [`draw_depth_cloud_layer`]).
 /// Wind streaks are a separate overlay ([`draw_wind_streaks`], `V`).
 pub fn draw_haze_and_wind(
     humidity: &Humidity,
@@ -1379,14 +1143,13 @@ pub fn draw_wind_streaks(
 pub fn draw_canopy_air_dim(
     world: &World,
     organisms: &OrganismStore,
-    clouds: &CloudStore,
+    humidity: &Humidity,
     tick: u64,
     wind_vx: f32,
     celestial_local: f32,
     celestial_sx: f32,
     _celestial_sy: f32,
     is_day: bool,
-    downpour_mass: f32,
     look: &AtmosphereLookConfig,
     origin_x: f32,
     origin_y: f32,
@@ -1402,7 +1165,6 @@ pub fn draw_canopy_air_dim(
     let _ = (sw, sh); // frustum already applied by caller via y_min/y_max
     let posed = resolve_organism_draw_cells(world, &organisms.atoms, tick, wind_vx);
     let canopy = build_canopy_index_posed(&organisms.atoms, &posed);
-    let wrap = if wrap_x { Some(width_cols) } else { None };
     let cast_k = look.cast_shadow_strength.clamp(0.0, 1.0);
     let cloud_k = look.cloud_shade_strength.clamp(0.0, 1.0);
 
@@ -1433,18 +1195,19 @@ pub fn draw_canopy_air_dim(
         );
     }
 
-    // 3) Mild cloud dim on exposed surface (day + night).
-    if cloud_k > 0.02 && !clouds.is_empty() {
+    // 3) Mild vapour dim on exposed surface (day + night).
+    if cloud_k > 0.02 && !humidity.cells.is_empty() {
         for x in 0..width_cols {
-            let ct = cloud_sky_transmit(clouds, x, wrap, downpour_mass);
+            let Some(y) = top_shadow_receiver_y(world, x, y_min_vis, y_max_vis) else {
+                continue;
+            };
+            let ct = cloud_sky_transmit(humidity, x, y);
             let dim = ((1.0 - ct) * cloud_k * 0.50).clamp(0.0, 0.35);
             if dim < 0.04 {
                 continue;
             }
-            if let Some(y) = top_shadow_receiver_y(world, x, y_min_vis, y_max_vis) {
-                let e = shade.entry((x, y)).or_insert(0.0);
-                *e = (*e + dim).min(0.70);
-            }
+            let e = shade.entry((x, y)).or_insert(0.0);
+            *e = (*e + dim).min(0.70);
         }
     }
 
@@ -1906,218 +1669,60 @@ fn stamp_celestial_cast_shadows(
     }
 }
 
-/// Active-layer soft parcel banks + precip streaks (humidity echo in CloudStore).
-///
-/// Banks use lobe masks; precip streaks are world-aligned so they clip on ground.
-pub fn draw_clouds(
-    clouds: &CloudStore,
-    humidity: &Humidity,
-    world: &World,
-    wind: &Wind,
-    tick: u64,
-    cam_x: f32,
-    cam_y: f32,
-    origin_x: f32,
-    origin_y: f32,
-    cell_px: f32,
-    bedrock_floor_y: i32,
-    sea_level_y: i32,
-    wrap_x: bool,
-    width_cols: i32,
-    sw: f32,
-    sh: f32,
-    downpour_mass: f32,
-    look: &AtmosphereLookConfig,
-    world_seed: u64,
-    snowing: impl Fn(f32, f32) -> bool,
-) {
-    if cell_px <= 0.0 {
-        return;
-    }
-    draw_depth_cloud_layer(
-        clouds,
-        humidity,
-        wind,
-        tick,
-        CloudDepthLayer::Active,
-        look,
-        world_seed,
-        sea_level_y,
-        downpour_mass,
-        cam_x,
-        cam_y,
-        origin_x,
-        origin_y,
-        cell_px,
-        bedrock_floor_y,
-        wrap_x,
-        width_cols,
-        sw,
-        sh,
-    );
-
-    if clouds.is_empty() {
-        return;
-    }
-    let lag_x = cam_x * (1.0 - CLOUD_PARALLAX);
-    let lag_y = cam_y * (1.0 - CLOUD_PARALLAX) * 0.55;
-    let x_copies: &[i32] = if wrap_x { &[-1, 0, 1] } else { &[0] };
-
-    // No precip streaks: rain is real water in the grid now, nucleated in the
-    // air and drawn by the terrain pass as it falls. The streaks existed because
-    // rain teleported to the ground and something had to stand in for the fall;
-    // drawing both would show every shower twice.
-}
-
-
-fn cloud_lobe_layout(shape_seed: u32, deform: f32) -> (f32, f32, Vec<(f32, f32, f32)>) {
-    let d = deform.clamp(0.0, 1.0);
-    // Ridge scrape: wider, flatter.
-    let sx = 1.0 + d * 0.38;
-    let sy = 1.0 - d * 0.40;
-    let s = |n: u32| {
-        ((shape_seed
-            .wrapping_mul(0x9E37_79B9)
-            .wrapping_add(n.wrapping_mul(0x85EB_CA6B)))
-            >> 8) as f32
-            / 16_777_216.0
-    };
-    let jx = |n: u32| (s(n) - 0.5) * 0.28;
-    let jr = |n: u32| 0.88 + s(n.wrapping_add(31)) * 0.28;
-    let mut lobes: Vec<(f32, f32, f32)> = vec![
-        (0.0, 0.02, 0.95 * jr(1)),
-        (-0.72, 0.08, 0.70 * jr(2)),
-        (0.78, 0.06, 0.68 * jr(3)),
-        (-0.32 + jx(4) * 0.4, -0.42, 0.60 * jr(4)),
-        (0.28 + jx(5) * 0.4, -0.52, 0.66 * jr(5)),
-    ];
-    if shape_seed & 1 == 0 {
-        lobes.push((0.82, -0.22, 0.52 * jr(6)));
-    }
-    if shape_seed & 2 == 0 {
-        lobes.push((-0.88, -0.12, 0.48 * jr(7)));
-    }
-    if shape_seed % 5 < 3 {
-        lobes.push((jx(8) * 0.5, -0.68, 0.42 * jr(8)));
-    }
-    (sx, sy, lobes)
-}
-
-/// Stamp one parcel's lobe mask into the shared sky occupancy map.
-pub fn stamp_pixel_cloud_mask(
-    mask: &mut HashMap<(i32, i32), f32>,
-    cx: f32,
-    cy: f32,
-    r: f32,
-    wet: f32,
-    shape_seed: u32,
-    deform: f32,
-    cell_px: f32,
-) {
-    if r <= 0.0 || cell_px <= 0.0 {
-        return;
-    }
-    let (sx, sy, lobes) = cloud_lobe_layout(shape_seed, deform);
-    let jx1 = {
-        let s = ((shape_seed.wrapping_mul(0x9E37_79B9).wrapping_add(0x85EB_CA6B)) >> 8) as f32
-            / 16_777_216.0;
-        (s - 0.5) * 0.28
-    };
-    let half_w = r * sx * 1.35;
-    let half_h = r * sy * 1.15;
-    let min_x = ((cx - half_w) / cell_px).floor() as i32;
-    let max_x = ((cx + half_w) / cell_px).ceil() as i32;
-    let min_y = ((cy - half_h) / cell_px).floor() as i32;
-    let max_y = ((cy + half_h) / cell_px).ceil() as i32;
-    let inv_rx = 1.0 / (r * sx).max(1e-3);
-    let inv_ry = 1.0 / (r * sy).max(1e-3);
-
-    for iy in min_y..=max_y {
-        for ix in min_x..=max_x {
-            let px = (ix as f32 + 0.5) * cell_px;
-            let py = (iy as f32 + 0.5) * cell_px;
-            let nx = (px - cx) * inv_rx;
-            let ny = (py - cy) * inv_ry;
-            let mut inside = false;
-            for &(ox, oy, rr) in &lobes {
-                let dx = nx - (ox + jx1 * 0.05);
-                let dy = ny - oy;
-                if dx * dx + dy * dy <= rr * rr {
-                    inside = true;
-                    break;
-                }
-            }
-            if !inside {
-                continue;
-            }
-            mask.entry((ix, iy))
-                .and_modify(|w| *w = (*w).max(wet))
-                .or_insert(wet);
-        }
-    }
-}
 
 /// Build weather params + snow bias for the current scene view.
 pub fn sky_weather_for_scene(
     tick: u64,
     climate: &ClimateConfig,
-    clouds: &CloudStore,
     humidity: &Humidity,
     temperature: &Temperature,
     carbon: &CarbonBudget,
     width_cols: i32,
-    wrap_x: bool,
-    sea_level_y: i32,
-    downpour_mass: f32,
     snow_bias: f32,
 ) -> SkyWeatherParams {
     sample_sky_weather(
         tick,
         climate,
-        clouds,
         humidity,
         temperature,
         carbon,
         width_cols,
-        wrap_x,
-        sea_level_y,
-        downpour_mass,
         snow_bias,
     )
 }
 
-/// Helper: estimate snow bias from raining parcels (0..1).
+/// Snow bias from wet tiles that sit at or below freeze (0..1).
 pub fn estimate_snow_bias(
-    clouds: &CloudStore,
-    snowing: impl Fn(f32, f32) -> bool,
+    humidity: &Humidity,
+    temperature: &Temperature,
+    freeze_c: f32,
 ) -> f32 {
-    let mut raining = 0u32;
+    let mut wet = 0u32;
     let mut snow = 0u32;
-    for p in &clouds.parcels {
-        if !p.raining {
+    for (&(hx, hy), &mass) in &humidity.cells {
+        if mass <= 0.0 {
             continue;
         }
-        raining += 1;
-        if snowing(p.fx, p.fy) {
+        wet += 1;
+        if temperature.at_tile(hx, hy) <= freeze_c {
             snow += 1;
         }
     }
-    if raining == 0 {
+    if wet == 0 {
         0.0
     } else {
-        snow as f32 / raining as f32
+        snow as f32 / wet as f32
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        collect_drop_tops, gather_soft_cloud_srcs, haze_cell_is_drop, haze_column_y0,
-        haze_paint_seats, haze_resampled_cells, humidity_haze_alpha, humidity_haze_alpha_gated,
-        stamp_pixel_cloud_mask, CloudDepthLayer,
+        collect_drop_tops, haze_cell_is_drop, haze_column_y0, haze_paint_seats,
+        haze_resampled_cells, humidity_haze_alpha, humidity_haze_alpha_gated,
     };
     use std::collections::HashMap;
-    use wk_voxel::{CloudStore, Humidity};
+    use wk_voxel::Humidity;
 
     #[test]
     fn airborne_snow_does_not_spike_the_ridge() {
@@ -2365,45 +1970,5 @@ mod tests {
             !seats.iter().any(|&(hx, _)| hx < 0 || hx > 3),
             "raw hx-1 at the ring was the bright seam"
         );
-    }
-
-    #[test]
-    fn depth_echoes_come_from_active_parcels() {
-        let mut clouds = CloudStore::new();
-        clouds.parcels.push(wk_voxel::CloudParcel {
-            fx: 10.0,
-            fy: 40.0,
-            mass: 80.0,
-            raining: false,
-            on_ridge: false,
-            shape_seed: 7,
-            cruise_fy: 40.0,
-            vis_mass: 80.0,
-            deform: 0.0,
-        });
-        let hum = Humidity::new(4);
-        let active = gather_soft_cloud_srcs(&clouds, &hum, CloudDepthLayer::Active, 20, 1, 200.0);
-        let mid = gather_soft_cloud_srcs(&clouds, &hum, CloudDepthLayer::Mid, 20, 1, 200.0);
-        assert_eq!(active.len(), 1);
-        assert_eq!(mid.len(), 1, "mid should echo the active parcel");
-        assert!((active[0].fx - 10.0).abs() < 1e-3);
-        assert!((mid[0].fx - active[0].fx).abs() > 0.01 || (mid[0].fy - active[0].fy).abs() > 0.01);
-    }
-
-    #[test]
-    fn overlapping_parcels_union_into_one_mask() {
-        let cell = 3.0_f32;
-        let mut mask = HashMap::new();
-        stamp_pixel_cloud_mask(&mut mask, 100.0, 80.0, 36.0, 0.4, 1, 0.0, cell);
-        let alone = mask.len();
-        stamp_pixel_cloud_mask(&mut mask, 118.0, 82.0, 36.0, 0.9, 2, 0.0, cell);
-        assert!(alone > 20, "first parcel should stamp a real footprint");
-        assert!(
-            mask.len() < alone * 2,
-            "overlap must share cells (alone={alone} union={})",
-            mask.len()
-        );
-        let wet_max = mask.values().cloned().fold(0.0_f32, f32::max);
-        assert!((wet_max - 0.9).abs() < 1e-5);
     }
 }

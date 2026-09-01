@@ -94,7 +94,7 @@ checkerboard required):
 
 - Humidity diffuse / advect
 - Temperature step
-- Cloud precip seating (careful with parcel-list mutation)
+- Humidity rise / condensation seating (tile writes, no parcel list)
 
 See also [`VOXEL_FIELDS.md`](VOXEL_FIELDS.md).
 

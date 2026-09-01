@@ -333,8 +333,8 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   `sea_level + max_flood_above_sea`. Tab can reopen the legacy open
   faucet (`closed_loop` off) for experiments; prefer condensation (`C`)
   for weather. Atmosphere also has a soft per-tile cap
-  (`Humidity::MAX_MASS_PER_TILE`). Cloud parcels are a visual echo
-  only (`CloudConfig::max_parcels`) and are not a second water store.
+  (`Humidity::MAX_MASS_PER_TILE`). There is no cartoon cloud store.
+  `CloudStore` only returns leftover save-file parcel mass to humidity.
   Evap also refuses a near-saturated vapor column
   (`Humidity::column_near_saturated`) and stops entirely when
   `Humidity::atmosphere_overfull` — buoyant rise used to empty the
@@ -353,19 +353,18 @@ Pass order per column: **cull → break unsupported → water-on-ice/slush → t
   condensation unable to reach sea-level lakes — looking at the ground
   only made evaporation win faster (higher FPS), which felt like a
   viewport cull.
-- **Cloud / humidity floor:** `cloud_floor_y` clips haze, parcels, and
-  precip streaks to the occupied column top. It starts at the worldgen
-  surface ±64, then climbs while the column is still rock / ice / wet
-  so editor towers above that band (inland ~y 263) still bump the
-  field instead of letting it pass through the stone.
+- **Cloud / humidity floor:** `cloud_floor_y` clips the `H` haze to the
+  occupied column top. It starts at the worldgen surface ±64, then climbs
+  while the column is still rock / ice / wet so editor towers above that
+  band (inland ~y 263) still bump the field instead of letting it pass
+  through the stone. Damp air is not a floor.
 - **Physics-leaning weather (still coarse tiles):** evap rate scales
   with surface temperature, wind, and local humidity deficit (same
   wet-chunk scan). Vapor rises harder when the lapse is unstable
   (warm under cold). Condensation prefers cold / supersaturated tiles
-  and dew when a colder tile sits below. `N` rebuilds a small visual
-  echo from the wettest sky tiles; leftover parcel mass from old saves
-  returns to humidity. Event caps and the atmosphere budget stay in
-  place so this cannot refill the 7 FPS soak.
+  and dew when a colder tile sits below. Leftover parcel mass from old
+  saves returns to humidity. Event caps and the atmosphere budget stay
+  in place so this cannot refill the 7 FPS soak.
 - **Snow spread:** new flakes search ±`snow_spread_radius` columns and
   only seat where pack ≤ `snow_blanket_depth`. No slow spike growth past
   the blanket. Climatic rain uses a wider footprint when snowing.

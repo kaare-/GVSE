@@ -6,8 +6,8 @@
 //!
 //! Cell sat is summed from the grid (free Air vs pore). Humidity is the
 //! atmosphere store — include it via [`tracked_totals`] when auditing a
-//! full atmosphere step. Cloud parcels are a visual echo and are not
-//! counted. The default physics [`tick`](crate::tick) only moves cell sat,
+//! full atmosphere step. Cloud parcels are save-compat leftovers and are
+//! not counted. The default physics [`tick`](crate::tick) only moves cell sat,
 //! so the in-tick debug check compares [`SatTotals::cell_total`].
 
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -168,7 +168,7 @@ pub fn sediment_total(world: &World) -> i64 {
 pub fn tracked_totals(world: &World, humidity: &Humidity, _clouds: &CloudStore) -> SatTotals {
     let mut t = sat_totals(world);
     t.humidity = humidity.total_mass();
-    // Parcels are a visual echo of humidity — do not double-count.
+    // Leftover save-file parcels dump into humidity — do not double-count.
     t.clouds = 0.0;
     t
 }

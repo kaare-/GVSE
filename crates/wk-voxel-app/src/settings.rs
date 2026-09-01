@@ -479,7 +479,6 @@ impl SimSettings {
         let mut droplet = self.rain.droplet_sat as f32;
         let mut day_ticks = self.climate.day_ticks as f32;
         let mut night_ticks = self.climate.night_ticks as f32;
-        let mut max_parcels = self.cloud.max_parcels as f32;
         let mut tall_above = self.oro.tall_above_sea as f32;
         let mut cond_events = self.cond.max_events_per_tick as f32;
         let mut karst_period = self.karst.period_ticks as f32;
@@ -539,7 +538,7 @@ impl SimSettings {
                     None,
                     match self.page {
                         SettingsPage::World => "World — size, materials, karst",
-                        SettingsPage::Climate => "Climate — day/night, ice, wind, optional N echo, C drizzle",
+                        SettingsPage::Climate => "Climate — day/night, ice, wind, humidity haze, C drizzle",
                         SettingsPage::Physics => "Physics — performance, geotech, grain",
                         SettingsPage::Life => {
                             "Life — creatures, plants, fungi compost, carbon, spore bank"
@@ -686,7 +685,6 @@ impl SimSettings {
                 ui.tree_node(hash!(), "Sky look / atmosphere", |ui| {
                     ui.label(None, "Cosmetics only — tweak live, no regen needed.");
                     ui.label(None, "Sun/moon radii are screen pixels (finer than voxels).");
-                    ui.label(None, "Cloud depth / shade sliders apply when N banks are on.");
                     labeled_slider(ui, hash!(), "Sun radius (px)", 12.0..80.0, &mut self.atmosphere.sun_radius);
                     labeled_slider(
                         ui,
@@ -709,41 +707,6 @@ impl SimSettings {
                         "Moon bite radius (px)",
                         8.0..64.0,
                         &mut self.atmosphere.moon_bite_radius,
-                    );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Cloud whiteness",
-                        0.0..1.0,
-                        &mut self.atmosphere.cloud_whiteness,
-                    );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Cloud far (depth)",
-                        0.0..1.0,
-                        &mut self.atmosphere.vapour_far,
-                    );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Cloud mid (depth)",
-                        0.0..1.0,
-                        &mut self.atmosphere.vapour_mid,
-                    );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Cloud active",
-                        0.0..1.0,
-                        &mut self.atmosphere.vapour_active,
-                    );
-                    labeled_slider(
-                        ui,
-                        hash!(),
-                        "Cloud front (depth)",
-                        0.0..1.0,
-                        &mut self.atmosphere.vapour_front,
                     );
                     labeled_slider(
                         ui,
@@ -1340,17 +1303,6 @@ impl SimSettings {
                 });
                 ui.separator();
 
-                ui.tree_node(hash!(), "Clouds (N visual echo)", |ui| {
-                    ui.label(
-                        None,
-                        "N banks copy wet humidity tiles (hotkey N, default off). They do not store or rain, and they do not sit on a sea-level deck. Vapour rise is Buoyant rise / tick.",
-                    );
-                    labeled_slider(ui, hash!(), "Max parcels", 1.0..64.0, &mut max_parcels);
-                    labeled_slider(ui, hash!(), "Visual min humidity", 1.0..120.0, &mut self.cloud.coag_min_hum);
-                    labeled_slider(ui, hash!(), "N bank wetness", 40.0..500.0, &mut self.cloud.downpour_mass);
-                });
-                ui.separator();
-
                 ui.tree_node(hash!(), "Weather (C drizzle / E evap / W faucet)", |ui| {
                     ui.label(
                         None,
@@ -1887,7 +1839,6 @@ impl SimSettings {
         self.rain.droplet_sat = droplet.round().clamp(1.0, 255.0) as u8;
         self.climate.day_ticks = day_ticks.round().clamp(30.0, 20_000.0) as u64;
         self.climate.night_ticks = night_ticks.round().clamp(30.0, 20_000.0) as u64;
-        self.cloud.max_parcels = max_parcels.round().clamp(1.0, 96.0) as usize;
         self.oro.tall_above_sea = tall_above.round().clamp(2.0, 100.0) as i32;
         self.cond.max_events_per_tick = cond_events.round().clamp(0.0, 512.0) as u32;
         self.cond.mass_per_droplet = self.cond.mass_per_droplet.clamp(4.0, 255.0);
