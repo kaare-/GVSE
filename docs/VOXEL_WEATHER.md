@@ -340,10 +340,19 @@ ocean a sun magnet while dry sand could net-cool at noon. Forcing is now
 near land (`water_night_cool_scale` 0.70), and only 12 water cells add stack
 capacity. Lakes stay a buffer. Land skins lead the day.
 
-Air lapse follows the tile's own height. The old column-skin climate stamped
-`base − lapse × crest` onto every air tile above a hill, which painted a cold
-cap over the mountain while the same height over the sea stayed mild. Ground
-skin still uses crest elevation (high land is colder). The sky does not.
+Air lapse follows the tile's own height up to a **tropopause knee**
+(`tropopause_elev_cells`, default 920 above sea 80 → **y = 1000**). One cell
+is 0.25 m, so that weather column is only **~250 m** — coarse, but it keeps
+peaks and climatic zones in the lapse instead of flattening halfway up.
+Above the knee the profile is a weak stratospheric slope (default 0 —
+isothermal). Default sky is 1064 (1000 + one 64-cell lid). Tile fields are
+4×4, so height still costs CPU; drop the ceiling if a machine cannot hold
+it. The old column-skin climate stamped `base − lapse × crest` onto every
+air tile above a hill, which painted a cold cap over the mountain while the
+same height over the sea stayed mild. Ground skin still uses crest elevation
+(high land is colder). Buoyant rise stops at the knee so the lid stays dry.
+`0` tropopause restores the linear profile. The old `sea + cloud_alt` deck
+cap is still gone — that parked fog on ridges.
 
 Convection proper — buoyancy from the ground-versus-air difference — is cheap on
 a tile field and is what would turn a steady rain rate into fronts.

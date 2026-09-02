@@ -209,18 +209,25 @@ impl CloudStore {
     ) {
         let _ = (sea_level_y, phase, world, wind);
         self.release_parcels_into_humidity(humidity);
-        // Rise until the sky box, not `sea + cloud_alt`. That deck cap
-        // sat on mountain ridges (surface hy ≥ deck) and turned every
-        // thermal into a fog film. Unstable lapse already stops the lift.
+        // Rise to the tropopause (when the thermal field has a knee),
+        // not `sea + cloud_alt` and not the sky box. The old deck cap
+        // sat on mountain ridges and turned every thermal into a fog
+        // film. Linear lapse to a tall ceiling made a cold wet lid.
+        // Unstable lapse still organises the walk below the knee.
         //
         // Every other tick: the walk is the same, the loft rate is close
         // enough, and doing it every physics tick was an FPS sink once
         // vapour occupied more than a fog film.
         if tick % 2 == 0 {
-            let max_hy = humidity
+            let box_hy = humidity
                 .bounds
                 .map(|b| b.hy_max)
                 .unwrap_or_else(|| sky_ceiling_y.div_euclid(humidity.tile_cols.max(1)));
+            let max_hy = temp
+                .as_deref()
+                .and_then(|t| t.tropopause_max_hy(humidity.tile_cols))
+                .map(|hy| hy.min(box_hy))
+                .unwrap_or(box_hy);
             humidity.buoyant_rise_thermal(cfg.buoyant_rise, max_hy, temp.as_deref_mut());
         }
         self.parcels.clear();
@@ -350,6 +357,57 @@ mod tests {
             h.at_tile(1, 10)
         );
         assert!(clouds.is_empty(), "N banks must not come back");
+    }
+
+    #[test]
+    fn thermal_rise_stops_at_the_tropopause() {
+        let mut world = World::new(7);
+        world.ensure_chunk(ChunkCoord::new(0, 0));
+        for y in 0..=8 {
+            world.set_cell(6, y, Cell::solid(MaterialId::Stone));
+        }
+        let mut h = Humidity::with_world_bounds(4, 0, 0, 64, 256);
+        h.add(6, 10, 400.0);
+        let mut wind = Wind::climate(4, 0.0, 7, 64, 0, 0, 256, false);
+        wind.variance = 0.0;
+        let mut temp = Temperature::with_world_bounds(4, 0, 0, 64, 256, 7, 64, 0, false);
+        temp.config.tropopause_elev_cells = 40;
+        temp.config.lapse_c = 0.0;
+        let mut clouds = CloudStore::new();
+        let cfg = CloudConfig {
+            buoyant_rise: 0.40,
+            coag_min_hum: 20.0,
+            max_parcels: 4,
+            ..CloudConfig::default()
+        };
+        for tick in (2..80).step_by(2) {
+            clouds.step_with_precip(
+                &mut world,
+                &mut h,
+                &wind,
+                0,
+                256,
+                tick,
+                &cfg,
+                Some(&mut temp),
+                None,
+            );
+        }
+        let cap_hy = temp.tropopause_max_hy(h.tile_cols).expect("knee");
+        let above: f32 = h
+            .cells
+            .iter()
+            .filter(|((_, hy), _)| *hy > cap_hy)
+            .map(|(_, m)| *m)
+            .sum();
+        assert!(
+            above < 8.0,
+            "convection must stop at the tropopause (hy>{cap_hy} holds {above:.1})"
+        );
+        assert!(
+            h.at_tile(1, cap_hy) > 20.0,
+            "vapour should sit at the knee, not vanish"
+        );
     }
 
     #[test]

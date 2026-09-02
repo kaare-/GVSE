@@ -23,6 +23,13 @@ use crate::cell::{falls_through_empty_air, is_grain, Cell};
 use crate::chunk::{CHUNK_CELLS_H, CHUNK_CELLS_W};
 use crate::grid::World;
 
+/// Top of the weather column (troposphere). One cell is
+/// [`wk_material::SAMPLE_WIDTH_M`] (0.25 m), so 1000 cells ≈ 250 m —
+/// a toy atmosphere, and a real CPU bill (tile fields scale with height).
+pub const TROPOSPHERE_TOP_Y: i32 = 1000;
+/// Stratospheric lid stamped above [`TROPOSPHERE_TOP_Y`].
+pub const STRATOSPHERE_CELLS: i32 = CHUNK_CELLS_H as i32;
+
 /// Params driving one worldgen pass.
 ///
 /// Layout (world-x is horizontal, world-y is vertical; +y is up):
@@ -62,11 +69,10 @@ impl Default for WorldgenParams {
             // enough from the starting view that it reads as a world.
             width_cols: (CHUNK_CELLS_W as i32) * 16,
             bedrock_floor_y: 0,
-            // Higher sea + taller relief so the cross-section fills
-            // more of the view (less empty sky above the hills).
+            // Higher sea + taller relief; weather column to
+            // [`TROPOSPHERE_TOP_Y`], tropopause + a thin strat lid above.
             sea_level_y: 80,
-            // Headroom above mountain peaks for the rain cloud.
-            sky_ceiling_y: (CHUNK_CELLS_H as i32) * 5,
+            sky_ceiling_y: TROPOSPHERE_TOP_Y + STRATOSPHERE_CELLS,
             // Solid floor barrier — thick enough to read as "the
             // bottom of the world" in the demo.
             bedrock_thickness: 8,

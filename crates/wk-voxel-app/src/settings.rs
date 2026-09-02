@@ -427,7 +427,7 @@ impl SimSettings {
             sky_ceiling_y: self
                 .world_sky_ceiling
                 .round()
-                .clamp(32.0, 640.0)
+                .clamp(32.0, 1200.0)
                 .max(self.world_sea_level.round() + 16.0) as i32,
             ..*base
         }
@@ -659,8 +659,12 @@ impl SimSettings {
                         ui,
                         hash!(),
                         "Sky ceiling (y)",
-                        64.0..480.0,
+                        64.0..1200.0,
                         &mut self.world_sky_ceiling,
+                    );
+                    ui.label(
+                        None,
+                        "1000 cells ≈ 250 m (0.25 m/cell). Default is 1000 weather + 64 lid. Taller is more climate and more CPU — regenerate after moving this.",
                     );
                     if ui.button(None, "Regenerate world with size") {
                         self.request_regen = true;
@@ -793,9 +797,25 @@ impl SimSettings {
                     );
                     labeled_slider(ui, hash!(), "Base temp (C)", -20.0..40.0, &mut self.temp.base_temp_c);
                     labeled_slider(ui, hash!(), "Lapse (C per cell elev)", 0.0..0.4, &mut self.temp.lapse_c);
+                    let mut tropo = self.temp.tropopause_elev_cells as f32;
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Tropopause (cells above sea)",
+                        0.0..1100.0,
+                        &mut tropo,
+                    );
+                    self.temp.tropopause_elev_cells = tropo.round() as i32;
+                    labeled_slider(
+                        ui,
+                        hash!(),
+                        "Stratosphere lapse (C / cell)",
+                        0.0..0.08,
+                        &mut self.temp.strat_lapse_c,
+                    );
                     ui.label(
                         None,
-                        "Night is the sun off. Land skins take the sun; lakes lag via heat capacity (not a darker leak). Humidity reflects sun and blankets the leak. Wet air holds more heat and a rising plume pulls it up.",
+                        "Night is the sun off. Land skins take the sun; lakes lag via heat capacity (not a darker leak). Humidity reflects sun and blankets the leak. Wet air holds more heat and a rising plume pulls it up. Lapse runs through the 1000-cell weather column (~250 m); tropopause default is y=1000 (920 above sea 80). Sky above that is a thin isothermal lid. 0 tropopause = old linear profile.",
                     );
                     labeled_slider(ui, hash!(), "Sun on ground / step", 0.0..1.5, &mut self.temp.solar_heat_c);
                     labeled_slider(ui, hash!(), "Radiate from ground / step", 0.0..1.5, &mut self.temp.night_cool_c);

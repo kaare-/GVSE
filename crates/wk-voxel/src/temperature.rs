@@ -17,6 +17,9 @@
 //!   the climate lapse **at its own height** and couples to the ground:
 //!   warm skin loft, cold skin inversion. Lapse is not `−crest` stamped
 //!   onto the whole column (that made a cold cap above every hill).
+//!   Tropospheric lapse runs only up to [`TempConfig::tropopause_elev_cells`]
+//!   above sea; above that the profile is a weak stratospheric slope
+//!   so a taller sky box is extra air, not a colder wet lid.
 //!   Wet air has more thermal mass (vapor Cp ~1.9× dry) so it relaxes
 //!   slower and a rising plume mixes that heat into the tile above.
 //!   No noon/midnight skin snap on the sky.
@@ -65,6 +68,15 @@ pub struct TempConfig {
     /// saves still deserialize.
     pub land_day_bump_c: f32,
     pub lapse_c: f32,
+    /// Cells above sea where tropospheric lapse stops. `0` = no knee
+    /// (linear to the sky box, the old profile). Peaks stay in the
+    /// lapse so high land can freeze; free sky above does not keep
+    /// cooling just because the ceiling moved.
+    #[serde(default = "default_tropopause_elev_cells")]
+    pub tropopause_elev_cells: i32,
+    /// °C per cell above the tropopause. Default 0 — isothermal lid.
+    #[serde(default = "default_strat_lapse_c")]
+    pub strat_lapse_c: f32,
     /// **Retired.** Used to snap the surface toward a noon/midnight
     /// skin. The swing is now sun strength vs radiation rate. Kept so
     /// saves still deserialize; the stepper ignores it.
@@ -135,6 +147,24 @@ fn default_wind_mix() -> f32 {
 fn default_humid_heat_scale() -> f32 {
     1.0
 }
+/// Knee at [`crate::worldgen::TROPOSPHERE_TOP_Y`] when sea is 80
+/// (y=1000 ≈ 250 m). Peaks stay in the lapse; the lid sits above that.
+fn default_tropopause_elev_cells() -> i32 {
+    (crate::worldgen::TROPOSPHERE_TOP_Y - 80).max(1)
+}
+fn default_strat_lapse_c() -> f32 {
+    0.0
+}
+
+/// Tropospheric drop plus the weaker slope above the knee.
+/// `knee <= 0` is the old linear profile (no tropopause).
+fn lapse_drop(elev: f32, knee: f32, tropo_lapse: f32, strato_lapse: f32) -> f32 {
+    let e = elev.max(0.0);
+    if knee <= 0.0 {
+        return tropo_lapse * e;
+    }
+    tropo_lapse * e.min(knee) + strato_lapse * (e - knee).max(0.0)
+}
 fn default_force_inertia() -> f32 {
     0.20
 }
@@ -149,6 +179,8 @@ impl Default for TempConfig {
             sea_bias_c: -2.0,
             land_day_bump_c: 0.0,
             lapse_c: 0.08,
+            tropopause_elev_cells: default_tropopause_elev_cells(),
+            strat_lapse_c: default_strat_lapse_c(),
             day_amp_c: 0.0,
             solar_heat_c: 0.55,
             night_cool_c: 0.30,
@@ -446,16 +478,34 @@ impl Temperature {
         self.climate_at_height(world, hx, self.tile_mid_y(hy))
     }
 
+    /// Highest humidity-tile row still inside the troposphere, if a
+    /// knee is configured. Rise and the climate profile share this.
+    pub fn tropopause_max_hy(&self, tile_cols: i32) -> Option<i32> {
+        let elev = self.config.tropopause_elev_cells;
+        if elev <= 0 {
+            return None;
+        }
+        let y = self.sea_level_y.saturating_add(elev);
+        Some((y - 1).div_euclid(tile_cols.max(1)))
+    }
+
     /// Elevation / sea-land climate with **no** day/night swap.
     ///
-    /// Lapse follows the sample height. Stamping `−lapse × crest`
-    /// onto every air tile in the column was leftover column-skin
-    /// climate: a cold cap above every hill.
+    /// Lapse follows the sample height up to the tropopause, then the
+    /// weaker stratospheric slope. Stamping `−lapse × crest` onto every
+    /// air tile in the column was leftover column-skin climate: a cold
+    /// cap above every hill.
     fn climate_at_height(&self, world: Option<&World>, hx: i32, y_cells: i32) -> f32 {
         let cfg = &self.config;
         let land = self.land_factor(world, hx);
         let elev = (y_cells - self.sea_level_y).max(0) as f32;
-        cfg.base_temp_c + cfg.sea_bias_c * (1.0 - land) - cfg.lapse_c * elev
+        let drop = lapse_drop(
+            elev,
+            cfg.tropopause_elev_cells as f32,
+            cfg.lapse_c,
+            cfg.strat_lapse_c,
+        );
+        cfg.base_temp_c + cfg.sea_bias_c * (1.0 - land) - drop
     }
 
     fn climate_at_tile(&self, world: Option<&World>, hx: i32, hy: i32) -> f32 {
@@ -1805,6 +1855,36 @@ mod tests {
         assert!(
             tr > ts + 0.4,
             "bare rock {tr:.2} should warm faster than snow pack {ts:.2} under sun"
+        );
+    }
+
+    #[test]
+    fn tropopause_knee_stops_the_lapse_so_a_tall_sky_is_not_colder() {
+        let mut t = Temperature::with_world_bounds(4, 0, 0, 32, 400, 1, 32, 80, false);
+        t.config.base_temp_c = 18.0;
+        t.config.sea_bias_c = 0.0;
+        t.config.lapse_c = 0.08;
+        t.config.tropopause_elev_cells = 160;
+        t.config.strat_lapse_c = 0.0;
+        t.config.solar_heat_c = 0.0;
+        t.config.night_cool_c = 0.0;
+        t.config.diffuse_alpha = 0.0;
+        t.config.near_surface_couple = 0.0;
+        let mid_tropo = t.climate_at_height(None, 0, 80 + 80);
+        let at_knee = t.climate_at_height(None, 0, 80 + 160);
+        let above = t.climate_at_height(None, 0, 80 + 280);
+        let linear_lid = 18.0 - 0.08 * 280.0;
+        assert!(
+            (mid_tropo - (18.0 - 0.08 * 80.0)).abs() < 0.2,
+            "below the knee the lapse is still linear ({mid_tropo:.1})"
+        );
+        assert!(
+            (at_knee - above).abs() < 0.2,
+            "isothermal lid: knee {at_knee:.1} vs far sky {above:.1}"
+        );
+        assert!(
+            above > linear_lid + 8.0,
+            "tall sky must not keep the old linear drop (above={above:.1} linear={linear_lid:.1})"
         );
     }
 }

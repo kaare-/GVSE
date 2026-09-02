@@ -375,6 +375,7 @@ const SKY: &[(&str, LineKind)] = &[
     ("rain       W climatic faucet (HUD). off / on/closed / on/MINT", LineKind::Body),
     ("haze       H overlay of humidity tiles — the vapour look", LineKind::Body),
     ("deck       retired — vapour rise is lapse-driven, not a height lock", LineKind::Body),
+    ("tropopause knee at y=1000 (~250 m); loft stops; lid above", LineKind::Body),
 ];
 
 const GROUND: &[(&str, LineKind)] = &[
