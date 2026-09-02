@@ -63,11 +63,12 @@ pub(crate) fn regions_wet_loaded(world: &World) -> Vec<ActiveChunk> {
 
 /// Loaded chunks that can host a confined rise.
 ///
-/// Rain-film sky (`has_wet_air` only) and mid-ocean water with no solid
-/// are skipped — those cells already reject per-cell (`open_air_both_sides`
-/// / uncased hole) but walking every rainy 64×64 was the leftover
-/// period-16 cost. Bootstrap (no flags set yet) falls back to
-/// [`regions_wet_air_loaded`].
+/// Needs standing water next to rock. Rain-film sky, mid-ocean water with
+/// no solid, and groundwater-only crust (wet pores, no free surface) are
+/// skipped — those cells already reject per-cell, and walking them was
+/// the leftover period-16 cost. Bootstrap (no flags set yet) falls back
+/// to [`regions_wet_air_loaded`]. Once any flag is live, an empty match
+/// means "no shaft this tick", not "scan every wet-air chunk".
 pub(crate) fn regions_confined_loaded(world: &World) -> Vec<ActiveChunk> {
     let ready = world
         .chunks
@@ -79,12 +80,9 @@ pub(crate) fn regions_confined_loaded(world: &World) -> Vec<ActiveChunk> {
     let mut coords: Vec<ChunkCoord> = world
         .chunks
         .iter()
-        .filter(|(_, c)| c.has_solid && (c.has_standing_air || c.has_wet_pores))
+        .filter(|(_, c)| c.has_solid && c.has_standing_air)
         .map(|(&coord, _)| coord)
         .collect();
-    if coords.is_empty() && !world.chunks.is_empty() {
-        return regions_wet_air_loaded(world);
-    }
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
@@ -113,9 +111,6 @@ pub(crate) fn regions_lake_bed_loaded(world: &World) -> Vec<ActiveChunk> {
         .filter(|(_, c)| c.has_standing_air || c.has_wet_pores)
         .map(|(&coord, _)| coord)
         .collect();
-    if coords.is_empty() && !world.chunks.is_empty() {
-        return regions_wet_loaded(world);
-    }
     coords.sort_by(|a, b| a.cy.cmp(&b.cy).then(a.cx.cmp(&b.cx)));
     coords
         .into_iter()
@@ -231,6 +226,11 @@ mod tests {
         w.set_cell(66, 2, Cell::water());
         // cx=2: mid-ocean water, no solid — lake-bed only.
         w.set_cell(130, 2, Cell::water());
+        // cx=3: groundwater-only crust — lake-bed soak, not a confined shaft.
+        w.ensure_chunk(ChunkCoord::new(3, 0));
+        let mut pore = Cell::solid(MaterialId::Sand);
+        pore.sat = Sat(20);
+        w.set_cell(194, 1, pore);
 
         let confined: Vec<_> = regions_confined_loaded(&w)
             .into_iter()
@@ -242,6 +242,13 @@ mod tests {
             .into_iter()
             .map(|ac| ac.coord)
             .collect();
-        assert_eq!(lake, vec![ChunkCoord::new(1, 0), ChunkCoord::new(2, 0)]);
+        assert_eq!(
+            lake,
+            vec![
+                ChunkCoord::new(1, 0),
+                ChunkCoord::new(2, 0),
+                ChunkCoord::new(3, 0)
+            ]
+        );
     }
 }
