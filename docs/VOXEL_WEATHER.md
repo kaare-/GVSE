@@ -504,3 +504,9 @@ Do not re-walk these:
   **32.9 ms/tick**. Physics is 27.7 of that. Top three: confined wake
   7.7, seepage 7.4, rock bodies 6.3. Snow drift 0.001, suspension 0.09.
   The older 3 ms/tick figure is an *aged quiet* world, not this soak.
+
+  After the leftover-cost cut (this host, 40 warm + 200 measure, 0 plants):
+  short sky wall **35.2 ms/tick**, humidity.advect **3.4** + wind.rebuild **2.3**
+  (was ~6.8 miss-path walks with an empty field). Tall 1064 wall **28.3**,
+  humidity.advect **2.5** + rebuild **1.9**, seepage **5.5**, bodies apply
+  **6.8**. Dry-halo / empty-sky skips do not change the wet-crust apply.
