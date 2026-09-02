@@ -375,6 +375,11 @@ pass does not run" never arises.
 Gated on **airborne** snow only. Once a flake lands it is snowpack and behaves as
 any other loose material, which is what lets drifts build and repose.
 
+A flake that falls into air **above freeze** melts to `Air+FULL` rain the
+same tick (`thaw_airborne_snow`). The ordinary phase thaw only looks at a
+band above the ground and only on `period_ticks`, so a cold-lid shower
+used to ride the warm column as snow until it neared the surface.
+
 Ice is deliberately not gated and serves as the test control: if both slow down,
 the gate is catching the wrong material.
 
